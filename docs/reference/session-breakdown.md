@@ -159,7 +159,7 @@ export. Five blocks: `session`, `task_config`, `grading`, `versions` and
 | `tick_count`       | int     | Number of Coordinator ticks.                                                                  |
 | `image`            | string \| null | Container image fully-qualified, if configured.                                       |
 | `image_id`         | string \| null | The image reference without its registry path.                                        |
-| `recovery`         | object  | Crash / interruption / resume history: `recovered`, `crash_count`, `crash_timestamps`, `degraded_mode`, `resume_pending_revalidation`, `last_tick_exception`. |
+| `recovery`         | object  | Crash / interruption / resume history: `recovered`, `crash_count`, `crash_timestamps`, `degraded_mode`, `resume_pending_revalidation` (true while the optimization stack holds entries no validation has covered yet), `last_tick_exception`. |
 
 Why the run ended is an outcome rather than an identity, and lives on
 `outcome.stop_reason`.
@@ -169,7 +169,14 @@ GPU type, shape, precision, launch overrides, and the optimization objective
 (gain %, target throughput, baseline-relative, or time-only). Consumers should
 treat the `objective.kind` enum as the canonical optimisation goal. Its
 `architecture` sub-object is the structural model summary parsed from the
-model's own `config.json`, and is empty on non-transformers models.
+model's own `config.json`, and is empty on non-transformers models. Its
+`launch_env` keeps every operator-supplied variable name, but a credential's
+value (an API key, secret, password, passphrase, private or access key, auth,
+signature or header variable, or a name with a `TOKEN` segment) is written as
+`[REDACTED]`. Tuning knobs such as `MAX_NUM_BATCHED_TOKENS` or `*_PER_TOKEN`
+keep their values, with any recognizable credential inside a value masked.
+Replaying a session takes credentials from its own environment, never from the
+breakdown.
 
 `metadata.grading` — which axis this session was configured to grade on:
 `benchmark_mode` (`agentx` or `synthetic`), `objective`, and the `tput_guard`

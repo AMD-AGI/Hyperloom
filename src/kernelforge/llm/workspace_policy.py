@@ -31,6 +31,19 @@ PROTECTED_GLOBS = (
     "conftest.py",
 )
 
+# Untracked files the toolchain drops in a workspace on its own while a kernel runs. Only these named outputs are
+# ignored; any other new file a session leaves remains a safety violation.
+TOOL_OWNED_UNTRACKED_GLOBS = (
+    # rocprof runs below the git root, so cover root and nested directories.
+    ".rocprofv3/*",
+    "*/.rocprofv3/*",
+    "*_results.db",
+    # AITER may create JIT shards during a turn; its configured root always ends
+    # in ``aiter_cache``, regardless of the experiments directory.
+    "aiter_cache/*",
+    "*/aiter_cache/*",
+)
+
 PROTECTED_DIRS = frozenset(
     {
         "benchmark",

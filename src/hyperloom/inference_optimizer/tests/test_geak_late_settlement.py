@@ -21,8 +21,10 @@ def test_rejection_annotations_do_not_reopen_an_adjudicated_candidate(promotion)
     coord, result, _recorder = promotion
     result["final_throughput_tok_s"] = 150.0
     raw = deepcopy(result)
-    coord._record_geak_candidate(result)
-    coord._reject_geak_promotion(result, measured_tput=120.0, current_best_tput=110.0, reason="accuracy_drop")
+    coord.phase_kernel._record_geak_candidate(result)
+    coord.phase_kernel.reject_geak_promotion(
+        result, measured_tput=120.0, current_best_tput=110.0, reason="accuracy_drop"
+    )
     coord.shared_state.save(coord.session_dir)
     settled = SharedState.load_or_init(coord.session_dir).geak_result
     assert settled["kernel_event_id"] == kernel_event.kernel_event_id(0)

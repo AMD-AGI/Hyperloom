@@ -23,7 +23,7 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
 KERNEL_REQUEST_REF = "## 6. KERNEL-OPT REQUEST REFERENCE"
 IDEA_GENERATION = "### IDEA GENERATION"
 BASELINE_FINGERPRINT = "eight params fields"  # now in the reference doc, not in the prompt
-SPECIALIST_DIALS = "### One specialist, four dials"
+SPECIALIST_DIALS = "### One specialist, three dials"
 SPECIALIST_WATCH = "### Watching a running specialist"
 SPECIALIST_DOMAIN = "### Choosing specialist domain"
 WEB_SEARCH = "### Web search"
@@ -89,6 +89,29 @@ def _build(registry: dict, phase: str) -> str:
         phase=phase,
         rules_fragment_path=asset_system_prompts_dir() / "orchestration.md",
     )
+
+
+def test_cycle_strategy_is_rendered_in_place_of_the_default_arc(registry):
+    strategy = {
+        "focus": "moe_dispatch",
+        "score": 2.5,
+        "rationale": "not saturated in latest roofline snapshot",
+        "prior_cycles": [{"cycle": 1, "focus": "attention", "gain_delta": 1.2, "saturated_at_start": []}],
+    }
+    prompt = build_orchestration_prompt(
+        action_registry=registry,
+        enabled_actions=default_enabled_actions(no_kernel=False),
+        macro_cycle=2,
+        cycle_strategy=strategy,
+        phase="FRAMEWORK_AGENT",
+        rules_fragment_path=asset_system_prompts_dir() / "orchestration.md",
+    )
+
+    assert "focus=moe_dispatch" in prompt
+    assert "rationale: not saturated in latest roofline snapshot" in prompt
+    assert "previous cycles:" in prompt
+    assert "cycle=1 focus=attention" in prompt
+    assert "Default arc" not in prompt
 
 
 # Phase-scoped modules render only where the behaviour exists
@@ -189,6 +212,8 @@ def test_payload_contracts_render_in_every_phase(registry):
     for phase in _ps.PHASE_NAMES:
         text = _build(registry, phase)
         assert "GRID INPUT (REQUIRED)" in text
+        assert "reasoning, provenance" in text
+        assert "Every variant requires action-time reasoning" in text
         assert "EMIT: delegate{action_name='specialist'" in text
         assert "- **explore** —" in text
         assert "- **specialist** —" in text
@@ -292,26 +317,26 @@ def test_phase_argument_is_case_insensitive(registry):
 
 # Coordinator re-scopes the override at the phase seam
 def _machine_with_stub_coordinator(session_dir, *, user_supplied: bool = False):
-    """Build a MachinePhase over a minimal coordinator stub."""
-    from types import SimpleNamespace
-
+    """Build a MachinePhase over a real Coordinator with a controlled rebuild function."""
+    from hyperloom.orchestrator.collaborator import OrchestrationPrompt
     from hyperloom.orchestrator.phases.machine import MachinePhase
-    from hyperloom.orchestrator.state.shared_state import SharedState
 
-    state = SharedState(session_id="t", macro_cycle=3)
-    state.orchestration_memory = {"next_cycle_directive": "keep pushing MoE dispatch"}
+    from .conftest import make_coordinator
+
     rebuild_calls: list[dict] = []
 
     def _rebuild(**kwargs) -> str:
         rebuild_calls.append(kwargs)
         return f"PROMPT[phase={kwargs.get('phase')}]"
 
-    coord = SimpleNamespace(
-        shared_state=state,
-        session_dir=session_dir,
-        system_prompt_overrides={"orchestration": "ORIGINAL"},
-        _rebuild_orch_prompt=_rebuild,
-        _orch_prompt_is_user_supplied=user_supplied,
+    coord = make_coordinator(session_dir)
+    coord.shared_state.session_id = "t"
+    coord.shared_state.macro_cycle = 3
+    coord.shared_state.orchestration_memory = {"next_cycle_directive": "keep pushing MoE dispatch", "for_cycle": 2}
+    coord.orch_prompt = OrchestrationPrompt(
+        overrides={"orchestration": "ORIGINAL"},
+        is_user_supplied=user_supplied,
+        rebuild=_rebuild,
     )
     return MachinePhase(coord), coord, rebuild_calls
 
@@ -320,21 +345,19 @@ def test_phase_seam_rescopes_the_override_and_keeps_the_cycle_directive(tmp_path
     handler, coord, calls = _machine_with_stub_coordinator(tmp_path)
 
     assert handler._reseed_orch_prompt_for_phase("kernel_agent") is True
-    assert coord.system_prompt_overrides["orchestration"] == "PROMPT[phase=KERNEL_AGENT]"
-    assert calls == [
-        {
-            "macro_cycle": 3,
-            "cycle_directive": "keep pushing MoE dispatch",
-            "phase": "KERNEL_AGENT",
-        }
-    ]
+    assert coord.orch_prompt.overrides["orchestration"] == "PROMPT[phase=KERNEL_AGENT]"
+    assert len(calls) == 1
+    assert calls[0]["macro_cycle"] == 3
+    assert calls[0]["cycle_directive"] == "keep pushing MoE dispatch"
+    assert calls[0]["phase"] == "KERNEL_AGENT"
+    assert calls[0].get("cycle_strategy") is not None
 
 
 def test_phase_seam_never_clobbers_a_user_supplied_prompt(tmp_path):
     handler, coord, calls = _machine_with_stub_coordinator(tmp_path, user_supplied=True)
 
     assert handler._reseed_orch_prompt_for_phase("EXPLORE") is False
-    assert coord.system_prompt_overrides["orchestration"] == "ORIGINAL"
+    assert coord.orch_prompt.overrides["orchestration"] == "ORIGINAL"
     assert calls == []
 
 
@@ -342,7 +365,7 @@ def test_phase_seam_ignores_a_blank_phase(tmp_path):
     handler, coord, calls = _machine_with_stub_coordinator(tmp_path)
 
     assert handler._reseed_orch_prompt_for_phase("") is False
-    assert coord.system_prompt_overrides["orchestration"] == "ORIGINAL"
+    assert coord.orch_prompt.overrides["orchestration"] == "ORIGINAL"
     assert calls == []
 
 
@@ -352,13 +375,55 @@ def test_phase_seam_snapshots_the_scope_it_installed(tmp_path):
 
     assert handler._reseed_orch_prompt_for_phase("EXPLORE") is True
 
-    snapshot = tmp_path / "agents" / "orchestration" / "system_prompt.EXPLORE.snapshot.md"
+    snapshot = tmp_path / "agents" / "orchestration" / "system_prompt.c3.EXPLORE.snapshot.md"
     assert snapshot.read_text(encoding="utf-8") == "PROMPT[phase=EXPLORE]"
+
+
+@pytest.mark.asyncio
+async def test_the_reseeded_override_is_what_the_orchestration_turn_loads(tmp_path):
+    handler, coord, _calls = _machine_with_stub_coordinator(tmp_path)
+
+    assert handler._reseed_orch_prompt_for_phase("EXPLORE") is True
+
+    assert await coord.conversation.load_system_prompt("orchestration") == "PROMPT[phase=EXPLORE]"
+
+
+def test_cycle_strategy_rows_do_not_nest_the_prior_cycles(tmp_path):
+    """The prior rows are rendered into the prompt, never stored inside the next row."""
+    handler, coord, calls = _machine_with_stub_coordinator(tmp_path)
+    state = coord.shared_state
+    for cycle in range(1, 5):
+        state.macro_cycle = cycle
+        coord.phase_macro_cycle.record_cycle_strategy_for_current_cycle()
+        handler._reseed_orch_prompt_for_phase("EXPLORE")
+
+    assert [row["cycle"] for row in state.cycle_strategy_log] == [1, 2, 3, 4]
+    assert all("prior_cycles" not in row for row in state.cycle_strategy_log)
+    assert len(calls[-1]["cycle_strategy"]["prior_cycles"]) == 3
+
+
+@pytest.mark.parametrize(
+    ("macro_cycle", "target_reached_at"),
+    [(0, ""), (_ps.DEFAULT_MAX_MACRO_CYCLES - 1, ""), (0, "2026-01-01T00:00:00+00:00"), (0, " ")],
+    ids=["open", "last_cycle", "target_reached", "blank_target_reached"],
+)
+def test_reloop_line_and_transition_agree_at_the_cycle_limits(macro_cycle, target_reached_at):
+    s = _render_state(_ps.PHASE_SWEEP)
+    s.macro_cycle = macro_cycle
+    s.target_reached_at = target_reached_at
+    s.last_conc_sweep = {"status": "succeeded", "summary": {"successful_pairs": 1}}
+    transition = _ps.compute_next_phase(s)
+    loops_back = bool(transition) and transition[0] == _ps.PHASE_FRAMEWORK_AGENT
+
+    reloop, _ = _ps.cycle_reloop_decision(s)
+
+    assert reloop is loops_back
+    assert f"cycle_reloop_feasible={'true' if reloop else 'false'}" in _ps.phase_status_summary(s)
 
 
 def test_phase_seam_snapshot_never_overwrites_the_boot_file(tmp_path):
     """The unsuffixed file stays the boot scope so existing readers keep working."""
-    boot = tmp_path / "agents" / "orchestration" / "system_prompt.snapshot.md"
+    boot = tmp_path / "agents" / "orchestration" / "system_prompt.c3.snapshot.md"
     boot.parent.mkdir(parents=True, exist_ok=True)
     boot.write_text("BOOT", encoding="utf-8")
     handler, _coord, _calls = _machine_with_stub_coordinator(tmp_path)
@@ -375,26 +440,21 @@ def test_phase_seam_survives_an_unwritable_session_dir(tmp_path):
     handler, coord, _calls = _machine_with_stub_coordinator(tmp_path)
 
     assert handler._reseed_orch_prompt_for_phase("SWEEP") is True
-    assert coord.system_prompt_overrides["orchestration"] == "PROMPT[phase=SWEEP]"
-
-
-def test_reseed_for_phase_is_reachable_through_the_coordinator_delegation_map():
-    """The collaborator method must be routed, or the seam hook is a no-op."""
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
-
-    assert Coordinator._DELEGATED.get("_reseed_orch_prompt_for_phase") == "phase_machine"
-    assert "phase_machine" in Coordinator._COLLAB_MODULES
+    assert coord.orch_prompt.overrides["orchestration"] == "PROMPT[phase=SWEEP]"
 
 
 # Snapshot paths: one artefact per scope the model ran under
 def test_prompt_snapshot_path_is_phase_suffixed(tmp_path):
     from hyperloom.inference_optimizer.session.session_paths import agent_prompt_snapshot
 
-    assert agent_prompt_snapshot(tmp_path, "orchestration").name == "system_prompt.snapshot.md"
-    scoped = agent_prompt_snapshot(tmp_path, "orchestration", phase="explore")
-    assert scoped.name == "system_prompt.EXPLORE.snapshot.md"
+    assert agent_prompt_snapshot(tmp_path, "orchestration", macro_cycle=0).name == "system_prompt.c0.snapshot.md"
+    scoped = agent_prompt_snapshot(tmp_path, "orchestration", macro_cycle=0, phase="explore")
+    assert scoped.name == "system_prompt.c0.EXPLORE.snapshot.md"
     # A blank phase must not produce a stray dot in the stem.
-    assert agent_prompt_snapshot(tmp_path, "orchestration", phase="  ").name == "system_prompt.snapshot.md"
+    assert (
+        agent_prompt_snapshot(tmp_path, "orchestration", macro_cycle=0, phase="  ").name
+        == "system_prompt.c0.snapshot.md"
+    )
 
 
 def test_boot_snapshot_records_the_phase_it_was_scoped_to(tmp_path):
@@ -405,25 +465,26 @@ def test_boot_snapshot_records_the_phase_it_was_scoped_to(tmp_path):
         tmp_path,
         prompts={"orchestration": "BOOT PROMPT", "critic": "CRITIC"},
         orchestration_phase="PRELUDE",
+        macro_cycle=0,
     )
 
     agents = tmp_path / "agents"
-    assert (agents / "orchestration" / "system_prompt.snapshot.md").read_text(encoding="utf-8") == "BOOT PROMPT"
-    assert (agents / "orchestration" / "system_prompt.PRELUDE.snapshot.md").read_text(
+    assert (agents / "orchestration" / "system_prompt.c0.snapshot.md").read_text(encoding="utf-8") == "BOOT PROMPT"
+    assert (agents / "orchestration" / "system_prompt.c0.PRELUDE.snapshot.md").read_text(
         encoding="utf-8",
     ) == "BOOT PROMPT"
     # Critic is not phase-scoped at the system-prompt level.
-    assert not (agents / "critic" / "system_prompt.PRELUDE.snapshot.md").exists()
+    assert not (agents / "critic" / "system_prompt.c0.PRELUDE.snapshot.md").exists()
 
 
 def test_boot_snapshot_without_a_phase_keeps_the_legacy_layout(tmp_path):
     from hyperloom.inference_optimizer.cli.bootstrap import _snapshot_system_prompts
 
-    _snapshot_system_prompts(tmp_path, prompts={"orchestration": "BOOT"})
+    _snapshot_system_prompts(tmp_path, prompts={"orchestration": "BOOT"}, macro_cycle=0)
 
     orch = tmp_path / "agents" / "orchestration"
-    assert (orch / "system_prompt.snapshot.md").read_text(encoding="utf-8") == "BOOT"
-    assert list(orch.glob("system_prompt.*.snapshot.md")) == []
+    assert (orch / "system_prompt.c0.snapshot.md").read_text(encoding="utf-8") == "BOOT"
+    assert list(orch.glob("system_prompt.c0.*.snapshot.md")) == []
 
 
 # Critic: phase is structurally deliverable and injected one phase at a time
@@ -501,7 +562,7 @@ def test_reloop_is_a_projection_before_sweep():
 
 def test_reloop_feasibility_matches_the_transition_decision():
     s = _render_state(_ps.PHASE_SWEEP)
-    reloop, _ = _ps.should_reloop_to_explore(s)
+    reloop, _ = _ps._reloop_decision(_ps.workflow_predicate_inputs(s))
     expected = "true" if reloop else "false"
     assert f"cycle_reloop_feasible={expected}" in (_reloop_line(_ps.PHASE_SWEEP) or "")
 

@@ -85,6 +85,7 @@ from hyperloom.common.jsonio import read_json, read_jsonl
 from hyperloom.inference_optimizer.session.optimization_journal import (
     OUTCOME_KEEP,
     OUTCOME_NO_PROMOTE,
+    OUTCOME_RECORDED,
     OUTCOME_REVERT,
     OUTCOME_SKIP,
 )
@@ -218,10 +219,11 @@ def print_plan(plan: dict[str, Any]) -> None:
     rev = outcomes.count(OUTCOME_REVERT)
     nop = outcomes.count(OUTCOME_NO_PROMOTE)
     skipped = outcomes.count(OUTCOME_SKIP)
+    recorded = outcomes.count(OUTCOME_RECORDED)
     gainful = sum(1 for d in plan["decisions"] if (d.get("decision") or {}).get("gain_pct") is not None)
     print(
         f"  Scores: {len(plan['decisions'])} decisions "
-        f"(KEEP={keep} REVERT={rev} no_promote={nop} skipped={skipped}; gain_pct set={gainful})"
+        f"(KEEP={keep} REVERT={rev} no_promote={nop} skipped={skipped} recorded={recorded}; gain_pct set={gainful})"
     )
     recipe_rows = plan.get("recipe_audit") or []
     recipe_writes = sum(1 for r in recipe_rows if lfmap.recipe_audit_is_write(r))

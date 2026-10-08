@@ -14,7 +14,7 @@ that graded the finding would report every first-ever session as degraded.
 
 Reads are recorded one row each, and only inside T0's own lookup window: the
 recipe audit log also carries KB writes and the mid-session reads from
-``_kb_amend_recipe``, and neither belongs to the anchor's tally.
+``kb_amend_recipe``, and neither belongs to the anchor's tally.
 """
 
 from __future__ import annotations
@@ -106,7 +106,7 @@ def record_read(session_dir: Any, audit_event: Mapping[str, Any]) -> None:
     Called from the recipe audit hook, which sees writes as well as reads, and
     reads from every seam that consults the KB. Both are filtered here: a write
     is not a read, and a read served while no lookup is open belongs to whatever
-    else was asking, which keeps ``_kb_amend_recipe``'s mid-session traffic out
+    else was asking, which keeps ``kb_amend_recipe``'s mid-session traffic out
     of the anchor's tally. A falsy ``session_dir`` is a no-op.
     """
     active = _ACTIVE.get()

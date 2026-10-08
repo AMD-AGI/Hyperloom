@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from hyperloom.common.coerce import to_unix
+from hyperloom.common.env_safety import redact_secret_env_values
 from hyperloom.common.timeutil import iso_z
 
 from ..session_facts import architecture_block, grading_block, recovery_block, workload_signature
@@ -93,6 +94,8 @@ def record_metadata_identity(
         "framework_version": _text(manifest.get("framework_version")),
         "gpu_type": _text(manifest.get("gpu_type")),
         "tp": manifest.get("tp"),
+        "ep": manifest.get("ep"),
+        "compute_partition": dict(manifest.get("compute_partition") or {}),
         "conc": workload.get("conc"),
         "isl": workload.get("isl"),
         "osl": workload.get("osl"),
@@ -106,9 +109,14 @@ def record_metadata_identity(
     payload: dict[str, Any] = {"session": session, "task_config": task_config}
     workflow_flags = manifest.get("workflow_flags")
     if isinstance(workflow_flags, Mapping):
-        from ..workflow_contract import workflow_metadata
+        from ..workflow_contract import WORKFLOW_CONTRACT_V1, workflow_metadata
 
-        payload["workflow"] = workflow_metadata(workflow_flags)
+        version = str(manifest.get("workflow_contract_version") or WORKFLOW_CONTRACT_V1)
+        workflow = workflow_metadata(workflow_flags, version=version)
+        authored_digest = manifest.get("workflow_contract_digest")
+        if manifest.get("workflow_contract_version") and authored_digest != workflow["contract_digest"]:
+            raise ValueError("manifest workflow contract identity does not match the published contract")
+        payload["workflow"] = workflow
     _write(session_dir, payload, producer=producer)
 
 
@@ -180,12 +188,14 @@ def _launch_config(state: Any) -> dict[str, Any]:
         "framework_name": _text(getattr(state, "framework", "")),
         "gpu_type": _text(getattr(state, "gpu_type", "")),
         "tp": getattr(state, "tp", None),
+        "ep": getattr(state, "ep", None),
+        "compute_partition": dict(getattr(state, "compute_partition", None) or {}),
         "conc": getattr(state, "conc", None),
         "isl": getattr(state, "isl", None),
         "osl": getattr(state, "osl", None),
         "precision": _text(getattr(state, "precision", "")),
         "max_model_len": getattr(state, "max_model_len", None),
-        "launch_env": dict(getattr(state, "operator_extra_env", None) or {}),
+        "launch_env": redact_secret_env_values(getattr(state, "operator_extra_env", None)),
         "launch_server_args": _text(server_args),
     }
     # The singleton merges leaf-by-leaf with no notion of an empty value, so

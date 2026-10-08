@@ -156,9 +156,9 @@ def decode_emit_intent_input(raw_input: Any) -> tuple[dict[str, Any], str | None
     3. a JSON *string* envelope, as emitted by OpenAI-compatible / litellm
        style proxies, optionally with ``payload`` itself stringified.
 
-    Shape 3 previously could not reach this function: the caller replaced any
-    non-dict input with ``{}``, which decoded "successfully" to an empty
-    intent, so the orchestrator stalled with no error.
+    A caller that can see shape 3 hands it through unchanged: a non-dict input replaced
+    with ``{}`` would decode "successfully" to an empty intent and stall the
+    orchestrator with no error.
     """
     if isinstance(raw_input, str):
         try:

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Per-session optimization journal — structured JSON record of every KEEP / REVERT / no_promote / skipped decision."""
+"""Per-session optimization journal — structured JSON record of every settled action's decision."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import dataclasses
 import json
 import logging
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -29,22 +30,37 @@ OUTCOME_REVERT: str = "REVERT"
 OUTCOME_NO_PROMOTE: str = "no_promote"
 # A step that declined to run.
 OUTCOME_SKIP: str = "skipped"
+# A step with nothing to adopt (analysis, specialist, report): recorded, never a KEEP and never a dead end.
+OUTCOME_RECORDED: str = "recorded"
 
-# Task kinds whose result carries an authoritative per-status verdict the journal outcome must follow rather than the
-# coarse dispatcher ``promotable`` flag (a ``reverted`` patch is promotable yet was rolled back).
-_STATUS_DRIVEN_JOURNAL_KINDS: frozenset[str] = frozenset({"integrate_patch"})
 
-# Task kinds whose result can legitimately declare ``was_skipped``.
-_SKIPPABLE_JOURNAL_KINDS: frozenset[str] = frozenset({"conc_sweep"})
+class Verdict(str, Enum):
+    """What settling one action result did to the adopted configuration.
 
-# The only status meaning the change was adopted into current_best.
-_JOURNAL_KEEP_STATUSES: frozenset[str] = frozenset({"kept"})
+    Decided once, by the owner of the result, and read by every downstream
+    ledger: the journal, the phase-action settle row, KB lessons, the
+    intervention mix and framework progress.
+    """
 
-# Stamped on the result when the anchor gate refused an executor-granted KEEP.
-PROMOTION_REFUSED_KEY: str = "promotion_refused"
+    #: Changed current_best, the optimization stack or the baseline anchor.
+    ADOPTED = "adopted"
+    #: The executor ruled KEEP but the adoption rule refused it.
+    REFUSED = "refused"
+    #: Measured, and did not win.
+    REVERTED = "reverted"
+    #: Produced nothing that could be judged.
+    FAILED = "failed"
+    #: No adoption semantics.
+    RECORDED = "recorded"
 
-# Statuses meaning a real change was tested/applied then rolled back or rejected on measured grounds → REVERT.
-_JOURNAL_REVERT_STATUSES: frozenset[str] = frozenset({"reverted", "accuracy_unavailable_reject", "regression"})
+
+_JOURNAL_OUTCOME_BY_VERDICT: dict[Verdict, str] = {
+    Verdict.ADOPTED: OUTCOME_KEEP,
+    Verdict.REFUSED: OUTCOME_NO_PROMOTE,
+    Verdict.REVERTED: OUTCOME_REVERT,
+    Verdict.FAILED: OUTCOME_NO_PROMOTE,
+    Verdict.RECORDED: OUTCOME_RECORDED,
+}
 
 # Change-kind vocabulary for coarse dashboard grouping.
 KIND_BACKEND: str = "backend"  # --attention-backend, kv_cache_dtype, ...
@@ -71,8 +87,8 @@ def _optional_int(value: Any) -> int | None:
 def _measured_float(value: Any) -> float | None:
     """Coerce a measurement to float, or ``None`` when nothing was measured.
 
-    A non-positive throughput is the sentinel an unanchored run used to carry,
-    so it reads as absent rather than as a reading a consumer can divide by.
+    A non-positive throughput is the sentinel of an unanchored run, so it reads
+    as absent rather than as a reading a consumer can divide by.
     """
     try:
         measured = float(value)
@@ -83,7 +99,7 @@ def _measured_float(value: Any) -> float | None:
 
 @dataclass
 class JournalEntry:
-    """One KEEP / REVERT / no_promote / skipped decision (``None`` distinguishes "not measured" from "measured zero")."""
+    """One settled decision row (``None`` distinguishes "not measured" from "measured zero")."""
 
     phase: str
     iter: int
@@ -283,27 +299,11 @@ def _variant_args(variant: dict[str, Any]) -> str:
     return str(variant.get("extra_server_args") or "")
 
 
-def derive_journal_outcome(
-    task_kind: str,
-    result_dict: dict[str, Any] | None,
-    *,
-    promotable: bool,
-) -> str:
-    """Derive the journal ``outcome`` for a settled per-task result."""
-    result = result_dict or {}
-    kind = (task_kind or "").lower()
-    if kind in _SKIPPABLE_JOURNAL_KINDS and result.get("was_skipped"):
+def derive_journal_outcome(verdict: Verdict, result_dict: dict[str, Any]) -> str:
+    """Derive the journal ``outcome`` for a settled per-task result from its verdict."""
+    if verdict is Verdict.RECORDED and result_dict.get("was_skipped"):
         return OUTCOME_SKIP
-    if kind in _STATUS_DRIVEN_JOURNAL_KINDS:
-        status = str(result.get("status") or "").strip().lower()
-        if status in _JOURNAL_KEEP_STATUSES:
-            if result.get(PROMOTION_REFUSED_KEY):
-                return OUTCOME_NO_PROMOTE
-            return OUTCOME_KEEP
-        if status in _JOURNAL_REVERT_STATUSES:
-            return OUTCOME_REVERT
-        return OUTCOME_NO_PROMOTE
-    return OUTCOME_KEEP if promotable else OUTCOME_REVERT
+    return _JOURNAL_OUTCOME_BY_VERDICT[verdict]
 
 
 def classify_change_kind(task_kind: str, variant: dict[str, Any] | None = None) -> str:
@@ -401,9 +401,10 @@ __all__ = [
     "KIND_PROFILE",
     "OUTCOME_KEEP",
     "OUTCOME_NO_PROMOTE",
+    "OUTCOME_RECORDED",
     "OUTCOME_REVERT",
     "OUTCOME_SKIP",
-    "PROMOTION_REFUSED_KEY",
+    "Verdict",
     "classify_change_kind",
     "derive_journal_outcome",
     "summarize_change",

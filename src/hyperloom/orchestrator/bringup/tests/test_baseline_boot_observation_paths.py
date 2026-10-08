@@ -13,6 +13,7 @@ import pytest
 
 from hyperloom.common.bringup import LadderStage
 from hyperloom.orchestrator.actions.executors import baseline as bl
+from hyperloom.orchestrator.actions.executors import benchmark_result
 from hyperloom.orchestrator.bringup import load_boot_observation
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state.task_registry import Task
@@ -93,6 +94,28 @@ async def test_nonzero_exit_result_names_a_real_observation(slot, monkeypatch) -
     assert loaded.observation.terminal_frame.line == 88
     # Measured on the server child's own clock, not the wrapper's wall-clock.
     assert loaded.observation.server_elapsed_sec == 11.0
+
+
+@pytest.mark.asyncio
+async def test_observation_reads_the_log_magpie_wrote_in_its_run_workspace(slot, monkeypatch) -> None:
+    """Magpie writes the server log under its own ``benchmark_*`` workspace, not at ``$SERVER_LOG``."""
+    session, out = slot
+    monkeypatch.setattr(bl, "snapshot_workspaces", benchmark_result.snapshot_workspaces)
+    monkeypatch.setattr(bl, "select_run_workspace", benchmark_result.select_run_workspace)
+
+    def _run(cmd, **kwargs):
+        workspace = out / "benchmark_vllm_20261002_100816"
+        workspace.mkdir()
+        (workspace / "server.log").write_text(_BOOT_FAILURE, encoding="utf-8")
+        return types.SimpleNamespace(returncode=1, stdout="", stderr="magpie: benchmark failed")
+
+    monkeypatch.setattr(bl, "run_with_session_kill", _run)
+    result = await _round(session, out)
+
+    loaded = load_boot_observation(result["boot_observation_path"])
+    assert loaded.observation.evidence_ref == "server_log"
+    assert loaded.observation.stage_failed is LadderStage.WEIGHTS_LOADED
+    assert loaded.observation.terminal_frame.line == 88
 
 
 @pytest.mark.asyncio

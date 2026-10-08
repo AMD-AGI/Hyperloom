@@ -1,10 +1,7 @@
 """The build-attempt projection the recipe replays a build from.
 
-This projection used to live in the Session Breakdown's read side, which
-recorded the breakdown by re-reading state and disk. That side was retired
-when the breakdown moved to recording at author time (#1455), and the recipe
-is now its only consumer -- so it lives here, with the machinery that needs
-it, rather than in a module that no longer has a reason to hold it.
+The recipe is the projection's only consumer, so it lives here, with the
+machinery that needs it.
 """
 
 from __future__ import annotations

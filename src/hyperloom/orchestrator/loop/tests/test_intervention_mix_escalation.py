@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import Task
@@ -76,12 +77,13 @@ def test_reverted_integrate_patch_records_attempt_not_keep():
         idempotency_key="t-integrate-revert",
     )
 
-    coord._record_intervention_for_task(
+    coord.writeback.record_intervention_for_task(
         task,
         {
             "status": "reverted",
             "delta_pct": -1.0,
         },
+        Verdict.REVERTED,
     )
 
     summary = coord.shared_state.to_intervention_mix_summary()

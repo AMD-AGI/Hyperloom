@@ -8,10 +8,6 @@ from __future__ import annotations
 import os
 
 
-# Default partial-attempt cap for run_optimization; override via env in the integrate lane's retirement check (1
-# disables second chance).
-_DEFAULT_KERNEL_OPT_MAX_PARTIAL = 2
-
 # Backend ladder infra failures can be transient; require two failed ladders before retiring the kernel.
 _DEFAULT_KERNEL_OPT_MAX_FAILURES = 2
 

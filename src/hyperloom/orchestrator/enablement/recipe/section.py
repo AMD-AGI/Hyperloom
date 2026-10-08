@@ -260,8 +260,8 @@ def _collect_recipe(
 def _lane_dispatched(state: dict[str, Any]) -> bool:
     """Whether the lane ever opened a round, over both state generations.
 
-    A round no longer parks its task id in the enablement state, so the
-    post-rework evidence that one ran is the specialist it settled onto, the
+    A round does not park its task id in the enablement state, so the
+    evidence that one ran is the specialist it settled onto, the
     per-round records it kept, and the setup rows a round stamped its own id
     onto. ``inflight_task_id`` / ``attempts`` are read for a document written
     before the rework, not as the primary signal -- reading only those would
@@ -381,9 +381,9 @@ def _collect_landed_stack(out: dict[str, Any], state: dict[str, Any], *, session
     kept_patches_raw = _eg(state, "kept_patches")
     if isinstance(kept_patches_raw, list) and kept_patches_raw:
         # Same portability rule as ``kept_rounds`` below, and for the same
-        # reason: ``_rel`` falls back to ``str(path)``, so the ``or`` that used
-        # to stand here never fired and a patch outside the session travelled as
-        # an authoring-host absolute path. Left alone it would also put the same
+        # reason: ``_rel`` falls back to ``str(path)``, so ``_rel(p) or p`` would
+        # never fall through and a patch outside the session would travel as an
+        # authoring-host absolute path. It would also put the same
         # patch in the recipe twice under two different names -- one of them
         # naming a directory the consumer does not have.
         out["kept_patches"] = [_portable_patch_ref(str(p), session_dir) for p in kept_patches_raw]

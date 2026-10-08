@@ -108,7 +108,13 @@ It must, guarded by {flags}:
      the author's to put inside the entry point or at the framework call site. A
      setup line here is a piece of the fusion that will not exist in the served
      model, and it silently moves work out of the arm being measured,
-  4. build representative decode tensors from the shapes above,
+  4. build representative decode tensors from the shapes above. When the shapes
+     include ``o_groups`` / ``n_local_groups``, that value is G for wo_a /
+     group-quant paths — NEVER substitute ``gqa_groups`` or
+     ``num_attention_heads`` for G. Attention output is
+     ``[T, n_local_heads, head_dim]``; H and G are often unequal, so a fused
+     kernel that requires ``H == G`` is wrong for DeepSeek-V4 Pro. Read
+     ``group_axis_note`` in the shapes block when present,
   5. run the fused kernel vs the eager op, compute per-shape parity
      (snr_db = 10*log10(sum(ref^2)/sum((ref-fused)^2)); also max_abs_err),
   6. microbench eager vs fused in microseconds. Warm up EACH arm with at least
