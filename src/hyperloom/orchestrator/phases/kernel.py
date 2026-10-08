@@ -26,14 +26,14 @@ from . import geak_rebench as _geak_rebench
 from . import machine_state as _phase_state
 from hyperloom.common.env import env_bool, env_float, env_int
 from hyperloom.common.io import atomic_write_json
-from hyperloom.common.perf_metric import graded_axes_of
+from hyperloom.common.perf_metric import axis_of, graded_axes_of
 from hyperloom.orchestrator.lever import (
     LEVER_CONFIG,
     LEVER_KERNEL,
 )
 from hyperloom.inference_optimizer.breakdown.recorder import tool_versions
 from ..actions.executors._recipe_script import resolve_launch_server_script
-from ..actions.executors._workload_envs import geak_metric_axis
+from ..actions.executors._workload_envs import GEAK_METRIC_OUTPUT, geak_metric_axis
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
     ROUTE_FORGE,
     ROUTE_GEAK,
@@ -1545,12 +1545,8 @@ class KernelPhase(CoordinatorCollaborator):
         # to flush result.json), then SIGKILL, instead of orphaning run_e2e + its servers.
         term_grace = env_int("GEAK_TERM_GRACE_S", default=180)
 
-        # GEAK measures whatever axis Hyperloom grades on. An agentic replay is
-        # graded on total token throughput, so leaving this pinned to output aims
-        # GEAK's search at a number the session does not score -- on the AgentX
-        # corpus the two run ~140x apart, and a kernel that helps the decode-side
-        # output figure need not help the prefill-dominated total by the same
-        # margin. Synthetic runs resolve to "output" and are unaffected.
+        # GEAK must search and gate on the axis this session keeps candidates on: a kernel accepted on another
+        # axis need not move that one. geak_metric_axis owns the mapping and its rationale.
         _geak_e2e_metric, _ = geak_metric_axis(
             benchmark_mode=str(state.benchmark_mode or ""),
             grading=state.grading or None,
@@ -1853,7 +1849,15 @@ class KernelPhase(CoordinatorCollaborator):
         new_tput = float(result.get("final_throughput_tok_s") or 0.0)
         if new_tput <= 0:
             return True
-        base = float(self.shared_state.baseline_tput or 0.0)
+        # ``new_tput`` is read on whatever axis GEAK measured, so the reference must be too. The interactivity
+        # bases are spelled as this session's snapshot keys, so ``baseline_perf`` holds their reference directly;
+        # an axis it does not hold reads 0.0 and leaves the gain unset. A result with no basis predates the field
+        # and was measured on output.
+        basis = str(result.get("metric_basis") or GEAK_METRIC_OUTPUT[1])
+        if basis == GEAK_METRIC_OUTPUT[1]:
+            base = float(self.shared_state.baseline_tput or 0.0)
+        else:
+            base = axis_of(self.shared_state.baseline_perf, basis)
         # ``base`` is OUR measurement and ``new_tput`` is GEAK's, so this
         # percentage is defined only when both were measured on the same
         # workload. GEAK states that verdict in

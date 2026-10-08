@@ -3766,10 +3766,9 @@ async def _run_geak_gemm_tuning(
         "isl": isl,
         "osl": osl,
         "baseline_tput": float(baseline_tput or 0.0),
-        # Same axis Hyperloom grades this session on; ``baseline_tput`` above is
-        # read on that axis too, so a pinned "output" here would price every
-        # tuned GEMM against a reference measured differently. Synthetic runs
-        # resolve to "output" and are unaffected.
+        # The axis this session keeps candidates on, so GEAK's bench measures what
+        # KEEP is decided on. ``baseline_tput`` above is output throughput, which is
+        # that axis only on an output-graded session.
         "env": {"E2E_METRIC": _geak_e2e_metric},
     }
     if geak_config:

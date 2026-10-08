@@ -37,7 +37,10 @@ from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env import env_bool, env_flag, is_truthy
 from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.common.perf_metric import (
+    AGENTX_KEEP_P50_THRESHOLD_PCT,
     GRADED_INTVTY,
+    GRADED_INTVTY_P50,
+    INTVTY_OBJECTIVES,
     agentx_enabled as agentx_enabled,
     intvty_grading_enabled,
     agentx_active as _agentx_active,
@@ -279,12 +282,14 @@ def _agentx_default_corpus(model: str) -> str:
     return AGENTX_CORPUS_256K
 
 
-# GEAK's own names for the two throughput axes it can measure: ``E2E_METRIC``
-# selects one and ``bench_summary.json`` records the matching ``metric_basis``.
-# Spelled in GEAK's vocabulary, not Hyperloom's curve-row names, so the handoff
-# and GEAK's summary can be compared as strings on both sides.
+# GEAK's own names for the axes Hyperloom hands it: ``E2E_METRIC`` selects one
+# and ``bench_summary.json`` records the matching ``metric_basis``. Spelled in
+# GEAK's vocabulary, not Hyperloom's curve-row names, so the handoff and GEAK's
+# summary can be compared as strings on both sides. The interactivity token is
+# the full field name: in InferenceX's vocabulary a bare ``intvty`` is the
+# decode-only 1/ITL family, not this end-to-end one.
 GEAK_METRIC_OUTPUT = ("output", "aggregate_output_tok_s")
-GEAK_METRIC_TOTAL = ("total", "aggregate_total_token_tok_s")
+GEAK_METRIC_INTVTY = (GRADED_INTVTY_P50, GRADED_INTVTY_P50)
 
 
 def geak_metric_axis(
@@ -292,18 +297,21 @@ def geak_metric_axis(
     benchmark_mode: str = "",
     grading: Mapping[str, Any] | None = None,
 ) -> tuple[str, str]:
-    """GEAK's ``(E2E_METRIC, metric_basis)`` pair for this session's throughput axis.
+    """GEAK's ``(E2E_METRIC, metric_basis)`` pair for the axis this session keeps candidates on.
 
-    The handoff must name the token-throughput axis this session actually reads.
-    An agentic replay is guarded on total token throughput, so publishing the
-    output axis would aim GEAK's search at the ~0.7% of the token budget the
-    session never scores -- and a candidate GEAK measured on one axis cannot be
-    compared against a reference read on the other, which run ~140x apart.
+    GEAK accepts on the single axis it is handed, so that axis has to be the
+    objective. An interactivity-graded session keeps a candidate only on a gain
+    in the median ``e2e_norm_intvty_p50``, with the p90 tail and output
+    throughput as noise-band guards; searching either guard selects wins the
+    rebench reverts and passes over median wins. Total token throughput is in
+    neither: on a trace replay under a ~97% prefix cache it is ~99% input tokens
+    that were never computed, so a kernel win cannot surface on it. Every other
+    session is graded on output.
 
-    ``E2E_METRIC`` selects between output and total token throughput, so it
-    cannot name the interactivity axis AgentX is now graded on; total is the
-    throughput axis of that 2-D verdict, and the one a GEAK ratio stays
-    comparable against.
+    A GEAK build that cannot measure ``e2e_norm_intvty_p50`` refuses it, or, predating
+    that check, falls back to output and records that in ``metric_basis``;
+    ``sweep_via_geak`` rejects a replay recorded on any basis but the one
+    requested.
 
     Args:
         benchmark_mode: The session's persisted mode, when the caller holds one.
@@ -319,12 +327,37 @@ def geak_metric_axis(
     """
     objective = str((grading or {}).get("objective") or "").strip()
     if objective:
-        on_intvty = objective == GRADED_INTVTY
+        on_intvty = objective in INTVTY_OBJECTIVES
     else:
         on_intvty = intvty_grading_enabled(benchmark_mode=benchmark_mode)
     if on_intvty:
-        return GEAK_METRIC_TOTAL
+        return GEAK_METRIC_INTVTY
     return GEAK_METRIC_OUTPUT
+
+
+def geak_acceptance(metric_basis: str, noise_pct: float) -> dict[str, Any] | None:
+    """Hyperloom's KEEP rule on the axis it hands GEAK, so GEAK's verdict applies the same bar.
+
+    The rebench of a GEAK candidate keeps an interactivity-graded one only on a median gain of
+    at least ``AGENTX_KEEP_P50_THRESHOLD_PCT`` with the p90 tail and output throughput each
+    inside the noise band. Without the rule GEAK reports any gain past its own noise band as a
+    win, and the rebench reverts each one short of the threshold. Guards are named by GEAK
+    basis, like the objective; GEAK records the p90 tail under the curve-row name.
+
+    Args:
+        metric_basis: The ``metric_basis`` handed to GEAK (see :func:`geak_metric_axis`).
+        noise_pct: The session's noise band, the one its own verdict holds both guards to.
+
+    Returns:
+        The rule, or ``None`` for any other axis, which leaves GEAK's verdict as it was.
+    """
+    if metric_basis != GEAK_METRIC_INTVTY[1]:
+        return None
+    return {
+        "objective": metric_basis,
+        "min_gain_pct": AGENTX_KEEP_P50_THRESHOLD_PCT,
+        "guard_max_drop_pct": {GRADED_INTVTY: noise_pct, GEAK_METRIC_OUTPUT[1]: noise_pct},
+    }
 
 
 def cli_workload_defaults() -> tuple[int, int, int]:
@@ -402,6 +435,8 @@ def build_agentx_workload_spec(
         if isinstance(grading, Mapping) and isinstance(grading.get("noise_pct"), (int, float))
         else parse_intvty_noise_pct()
     )
+    acceptance = geak_acceptance(metric_basis, intvty_p90_veto_pct)
+    keep_rule = {"acceptance": acceptance} if acceptance else {}
     isl_osl_placeholder = {
         "isl": int(served_knob("ISL", default_isl)),
         "osl": int(served_knob("OSL", default_osl)),
@@ -420,6 +455,7 @@ def build_agentx_workload_spec(
             "concurrency": conc,
             "metric_basis": metric_basis,
             "intvty_p90_veto_pct": intvty_p90_veto_pct,
+            **keep_rule,
             "metric_window_s": 0.0,
             "flow": mlperf_flow(envs),
             "port": int(envs.get("PORT") or MLPERF_PORT),
@@ -458,6 +494,8 @@ def build_agentx_workload_spec(
         # one -- publish an axis the session never graded on.
         "metric_basis": metric_basis,
         "intvty_p90_veto_pct": intvty_p90_veto_pct,
+        # The rule this session's verdict keeps on, so GEAK's "ok" means the same thing.
+        **keep_rule,
         # Hyperloom's analyzer window is the canonical duration plus grace/drain.
         "metric_window_s": float(duration) + 40.0,
         "trajectory_start_ratio": [0.25, 0.75],
