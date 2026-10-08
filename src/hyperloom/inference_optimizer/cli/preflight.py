@@ -38,6 +38,7 @@ from hyperloom.common.llm_config import (
     deepseek_compat_env,
     has_anthropic_credential,
     provider_model_defaults,
+    with_synthesized_anthropic_keys,
 )
 from hyperloom.common.fs_utils import is_network_fs
 from hyperloom.common.llm_headers import expand_env_refs
@@ -165,11 +166,14 @@ def _expand_custom_header_env_refs() -> None:
 
     Child processes (specialists, the Critic, GEAK on Ray) forward these verbatim, and an agent CLI sends them
     verbatim, so an unexpanded ``${ANTHROPIC_API_KEY}`` reaches the gateway as literal text and is rejected.
+    References resolve against the same view ``claude_sdk_env_options`` uses, so a key it would fill in from the
+    other Anthropic credential is not erased here.
     """
+    source = with_synthesized_anthropic_keys(os.environ)
     for key in ("ANTHROPIC_CUSTOM_HEADERS", "OPENAI_CUSTOM_HEADERS"):
         raw = os.environ.get(key)
         if raw and "${" in raw:
-            os.environ[key] = expand_env_refs(raw)
+            os.environ[key] = expand_env_refs(raw, source)
 
 
 def _restore_provider_only_mode(provider_mode: str, snapshot: dict[str, str | None]) -> None:
