@@ -84,7 +84,6 @@ git() {{
   command git "$@"
 }}
 export REPO_ROOT={shlex.quote(str(tmp_path / "hyperloom"))}
-export KERNEL_AGENT_ROOT={shlex.quote(str(tmp_path / "kernel-agent"))}
 export USER_DATA_PATH={shlex.quote(str(tmp_path / "userdata"))}
 export HYPERLOOM_CACHE_DIR={shlex.quote(str(tmp_path / "cache"))}
 export MAGPIE_PYTHON="$(command -v python3)"

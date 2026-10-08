@@ -41,19 +41,6 @@ def _restore_recording_session_binding():
         session_binding._CURRENT_SESSION.reset(token)
 
 
-def _bootstrap_kernel_agent_env() -> None:
-    """Point HYPERLOOM_KERNEL_AGENT_ROOT at the in-repo kernel-agent checkout."""
-    if os.environ.get("HYPERLOOM_KERNEL_AGENT_ROOT"):
-        return
-    repo = Path(__file__).resolve().parents[4]
-    kernel_agent = repo / "src" / "hyperloom" / "agents" / "kernel"
-    if kernel_agent.is_dir():
-        os.environ["HYPERLOOM_KERNEL_AGENT_ROOT"] = str(kernel_agent)
-
-
-_bootstrap_kernel_agent_env()
-
-
 def enable_multi_node(monkeypatch, nodes: int = 2) -> None:
     """Put the executors in multi-node mode with a no-op per-round server restart."""
     from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as mnl

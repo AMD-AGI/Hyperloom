@@ -387,17 +387,9 @@ def _load_kernel_agent_env_fallback() -> dict[str, Any]:
         if user_data:
             candidate = str(Path(user_data).expanduser() / "runtime" / "kernel-agent.env.sh")
 
-    if os.environ.get("HYPERLOOM_KERNEL_AGENT_ROOT") and not candidate:
-        return {
-            "status": "already_present",
-            "skip_reason": None,
-            "detail": {"vars_loaded": 0, "env_file": None},
-        }
-
     if not candidate:
         print(
-            "Preflight: ERROR — neither $HYPERLOOM_KERNEL_AGENT_ROOT "
-            "nor $KERNEL_AGENT_ENV nor $USER_DATA_PATH is set. Cannot "
+            "Preflight: ERROR — neither $KERNEL_AGENT_ENV nor $USER_DATA_PATH is set. Cannot "
             "resolve kernel-agent.env.sh. Run "
             "src/hyperloom/inference_optimizer/assets/install.sh and export "
             "USER_DATA_PATH=/path/to/sessions first.",
@@ -412,10 +404,9 @@ def _load_kernel_agent_env_fallback() -> dict[str, Any]:
             f"(parent of <model>/<ts>/ per-session subdirs); runtime/ "
             f"is workspace-shared, not per-session. Either "
             f"(a) re-run src/hyperloom/inference_optimizer/assets/install.sh under "
-            f"USER_DATA_PATH={os.environ.get('USER_DATA_PATH', '?')}, "
-            f"(b) set $KERNEL_AGENT_ENV to point at an existing file, or "
-            f"(c) set $HYPERLOOM_KERNEL_AGENT_ROOT directly to skip this "
-            f"fallback entirely. Aborting now (was: silently warning and "
+            f"USER_DATA_PATH={os.environ.get('USER_DATA_PATH', '?')}, or "
+            f"(b) set $KERNEL_AGENT_ENV to point at an existing file. "
+            f"Aborting now (was: silently warning and "
             f"letting trace_analyze fail 10h in).",
             file=sys.stderr,
         )
@@ -440,22 +431,17 @@ def _load_kernel_agent_env_fallback() -> dict[str, Any]:
             f"Preflight: WARNING — ignoring unsupported kernel-agent env key {key} from {env_path}",
             file=sys.stderr,
         )
-    loaded = _load_missing_env_vars(file_vars)
-    corrected = _correct_kernel_agent_path_vars(file_vars, env_path)
-    if "HYPERLOOM_KERNEL_AGENT_ROOT" not in os.environ:
+    if not file_vars:
         print(
-            f"Preflight: ERROR — sourced {env_path} ({loaded} vars) but "
-            f"HYPERLOOM_KERNEL_AGENT_ROOT is still unset. The env file is "
-            f"malformed or stale. Re-run src/hyperloom/inference_optimizer/assets/"
-            f"install.sh to regenerate it.",
+            f"Preflight: ERROR — {env_path} sets no supported kernel-agent "
+            f"variables. The env file is malformed or stale. Re-run "
+            f"src/hyperloom/inference_optimizer/assets/install.sh to regenerate it.",
             file=sys.stderr,
         )
         sys.exit(2)
-    print(
-        f"Preflight: loaded {loaded} kernel-agent var(s) from "
-        f"{env_path} (env wins, HYPERLOOM_KERNEL_AGENT_ROOT="
-        f"{os.environ['HYPERLOOM_KERNEL_AGENT_ROOT']})"
-    )
+    loaded = _load_missing_env_vars(file_vars)
+    corrected = _correct_kernel_agent_path_vars(file_vars, env_path)
+    print(f"Preflight: loaded {loaded} kernel-agent var(s) from {env_path} (env wins)")
     return {
         "status": "applied" if loaded or corrected else "already_present",
         "skip_reason": None,

@@ -48,9 +48,7 @@ done
 # Removed envs: WORKSPACE_PATH / WORKSPACE_ROOT (collapsed into the
 # USER_DATA_PATH-rooted defaults). If your launcher exported these,
 # either rename to USER_DATA_PATH or simply drop them.
-KERNEL_AGENT_ROOT="${KERNEL_AGENT_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../../../.." && pwd)}"
-HYPERLOOM_KERNEL_AGENT_ROOT="${HYPERLOOM_KERNEL_AGENT_ROOT:-${KERNEL_AGENT_ROOT}}"
 # Capture whether USER_DATA_PATH was provided BEFORE applying the default so we
 # can warn loudly on the silent fallback. ${VAR:+1} is empty when VAR is unset
 # or empty, which is exactly the case the :- default below would absorb.
@@ -255,8 +253,7 @@ DOTENV="${REPO_ROOT}/.env"
 # silently overwrites what the caller resolved, and the run installs against one
 # workspace while writing its env file into another (#Hyperloom-2 / atom mixup).
 # Only non-empty pre-source values are restored, so the dotenv still fills gaps.
-_DOTENV_PROTECTED_VARS='REPO_ROOT KERNEL_AGENT_ROOT HYPERLOOM_KERNEL_AGENT_ROOT
-USER_DATA_PATH HYPERLOOM_RUNTIME_DIR KERNEL_AGENT_ENV HYPERLOOM_ROOT
+_DOTENV_PROTECTED_VARS='REPO_ROOT USER_DATA_PATH HYPERLOOM_RUNTIME_DIR KERNEL_AGENT_ENV HYPERLOOM_ROOT
 MAGPIE_PATH INFERENCEX_PATH TRACELENS_ROOT TRACELENS_INTERNAL_ROOT
 GEAK_ROOT GEAK_E2E_RUNNER PYTHONPATH'
 
@@ -1260,8 +1257,6 @@ write_env_file() {
     [ -n "${USER_DATA_PATH:-}" ] && echo "export USER_DATA_PATH='${USER_DATA_PATH}'"
     [ -n "${HYPERLOOM_RUNTIME_DIR:-}" ] && echo "export HYPERLOOM_RUNTIME_DIR='${HYPERLOOM_RUNTIME_DIR}'"
     [ -n "${KERNEL_AGENT_ENV:-}" ] && echo "export KERNEL_AGENT_ENV='${KERNEL_AGENT_ENV}'"
-    [ -n "${HYPERLOOM_KERNEL_AGENT_ROOT:-}" ] && echo "export HYPERLOOM_KERNEL_AGENT_ROOT='${HYPERLOOM_KERNEL_AGENT_ROOT}'"
-    [ -n "${KERNEL_AGENT_ROOT:-}" ] && echo "export KERNEL_AGENT_ROOT='${KERNEL_AGENT_ROOT}'"
     [ -n "${MAGPIE_PATH:-}" ] && echo "export MAGPIE_PATH='${MAGPIE_PATH}'"
     [ -n "${MAGPIE_PYTHON:-}" ] && echo "export MAGPIE_PYTHON='${MAGPIE_PYTHON}'"
     [ -n "${PYTHONPATH:-}" ] && echo "export PYTHONPATH='${PYTHONPATH}'"
@@ -1328,8 +1323,6 @@ write_env_file() {
   [ -n "${USER_DATA_PATH:-}" ] && upsert_dotenv_var USER_DATA_PATH "$USER_DATA_PATH"
   [ -n "${HYPERLOOM_RUNTIME_DIR:-}" ] && upsert_dotenv_var HYPERLOOM_RUNTIME_DIR "$HYPERLOOM_RUNTIME_DIR"
   [ -n "${KERNEL_AGENT_ENV:-}" ] && upsert_dotenv_var KERNEL_AGENT_ENV "$KERNEL_AGENT_ENV"
-  [ -n "${HYPERLOOM_KERNEL_AGENT_ROOT:-}" ] && upsert_dotenv_var HYPERLOOM_KERNEL_AGENT_ROOT "$HYPERLOOM_KERNEL_AGENT_ROOT"
-  [ -n "${KERNEL_AGENT_ROOT:-}" ] && upsert_dotenv_var KERNEL_AGENT_ROOT "$KERNEL_AGENT_ROOT"
   [ -n "${MAGPIE_PATH:-}" ] && upsert_dotenv_var MAGPIE_PATH "$MAGPIE_PATH"
   [ -n "${MAGPIE_PYTHON:-}" ] && upsert_dotenv_var MAGPIE_PYTHON "$MAGPIE_PYTHON"
   [ -n "${PYTHONPATH:-}" ] && upsert_dotenv_var PYTHONPATH "$PYTHONPATH"
@@ -1571,7 +1564,6 @@ EOF
 }
 
 report_status() {
-  log "root: ${KERNEL_AGENT_ROOT}"
   log "ray: $(python3 - <<'PY' 2>/dev/null || echo missing
 try:
     import ray
@@ -1610,8 +1602,7 @@ PY
 
 main() {
   if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
-    # KERNEL_AGENT_ROOT is now the source root (read-only checkout); tool
-    # outputs land under $USER_DATA_PATH/kernel-agent/runs/<session_id>/
+    # Tool outputs land under $USER_DATA_PATH/kernel-agent/runs/<session_id>/
     # (created lazily by the tools themselves). All we need here is the
     # writable runtime tree on $USER_DATA_PATH for the env file + source mirrors.
     mkdir -p "${HYPERLOOM_RUNTIME_DIR}" "${_open_source_root}"

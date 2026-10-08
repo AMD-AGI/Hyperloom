@@ -977,11 +977,9 @@ legacy fixed-delay capture is not aligned with the AIPerf phase signal.
 These are read by `os.environ` somewhere in the codebase but are
 internal-only — do not set them by hand:
 
-* `HYPERLOOM_KERNEL_AGENT_ROOT`: internal CLI-only handoff to the
-  kernel subprocess (Python constant `_KERNEL_AGENT_ROOT_ENV`).
 * `HYPERLOOM_HOST_PROBE`, `HYPERLOOM_HOST_PROBE_DEEP`,
   `HYPERLOOM_HOST_PROBE_DIR`, `HYPERLOOM_HOST_PROBE_ROOTS` (and the
-  `..._MAX_SITES` / `..._ARG_SAMPLES` caps): the same for the host-stall
+  `..._MAX_SITES` / `..._ARG_SAMPLES` caps): internal handoff to the host-stall
   evidence probe, armed by the profile leg that collects the evidence. The deep
   tier inflates host time by design, so setting it by hand distorts any trace
   collected alongside it.
