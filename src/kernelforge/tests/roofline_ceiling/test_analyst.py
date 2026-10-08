@@ -128,6 +128,16 @@ def test_the_role_document_hands_the_composition_to_the_analyst():
     assert "occupancy" in role.lower()
 
 
+def test_the_role_document_keeps_installs_out_of_the_measured_environment():
+    """A package changed under the kernel after the baseline skews every later measurement."""
+    role = load_role()
+
+    assert "python3 -m venv <tools_dir>/" in role
+    assert "Do not activate that environment" in role
+    assert "Never install" in role
+    assert "`pip install -r" not in role
+
+
 # --- the request ---------------------------------------------------------------
 
 
@@ -142,6 +152,7 @@ def test_the_request_names_the_machine_rather_than_supplying_its_roofs(tmp_path)
             case_params={"tokens": 1},
             evidence=_bundle(tmp_path),
             output_dir=str(tmp_path / "out"),
+            tools_dir=str(tmp_path / "tools"),
         )
     )
 
@@ -161,10 +172,12 @@ def test_the_request_spells_out_both_files_and_where_they_go(tmp_path):
             case_params={},
             evidence=_bundle(tmp_path),
             output_dir=str(tmp_path / "out"),
+            tools_dir=str(tmp_path / "tools"),
         )
     )
 
     assert request["output_dir"] == str(tmp_path / "out")
+    assert request["tools_dir"] == str(tmp_path / "tools")
     assert set(request["output_files"]) == {"performance_ceiling.json", "performance_ceiling_analysis.md"}
     assert "equal-weight" in request["output_files"]["performance_ceiling.json"]
 
@@ -179,6 +192,7 @@ def test_the_request_hands_over_the_evidence_it_collected(tmp_path):
             case_params={},
             evidence=_bundle(tmp_path),
             output_dir=str(tmp_path / "out"),
+            tools_dir=str(tmp_path / "tools"),
         )
     )
 
@@ -211,9 +225,11 @@ def test_the_session_writes_outside_the_workspace_so_the_guard_keeps_it(tmp_path
 
     _analyse(backend, tmp_path)
 
-    scratch = Path(backend.specs[0].additional_directories[0])
-    assert backend.specs[0].additional_directories == [str(scratch)]
+    scratch, tools = (Path(directory) for directory in backend.specs[0].additional_directories)
+    assert scratch != tools
     assert tmp_path not in scratch.parents
+    assert tmp_path not in tools.parents
+    assert json.loads(backend.specs[0].user_prompt)["tools_dir"] == str(tools)
 
 
 def test_the_kernel_under_optimization_stays_out_of_reach(tmp_path):
@@ -352,6 +368,14 @@ def test_the_hook_allows_the_scratch_directory_it_named(tmp_path):
     assert _deny_reason(backend.specs[0].hooks, "Write", f"{scratch}/roofs/roofline.csv") is None
 
 
+def test_the_hook_allows_the_tools_directory_it_named(tmp_path):
+    backend = _Backend(_GOOD)
+    _analyse(backend, tmp_path)
+
+    tools = backend.specs[0].additional_directories[1]
+    assert _deny_reason(backend.specs[0].hooks, "Write", f"{tools}/rocprof-compute/pyvenv.cfg") is None
+
+
 def test_the_hook_leaves_tools_that_do_not_write_alone(tmp_path):
     backend = _Backend(_GOOD)
     _analyse(backend, tmp_path)
@@ -386,6 +410,25 @@ def test_what_the_session_left_behind_is_kept_as_the_record(tmp_path):
     kept = tmp_path / "out" / "evidence" / "analyst" / "roofs" / "roofline.csv"
     assert kept.is_file()
     assert "HBMBw" in kept.read_text()
+
+
+def test_what_the_session_installed_is_deleted_rather_than_published(tmp_path):
+    """The profiler's environment is toolchain, not evidence of how the roofs were reached."""
+
+    class _Installs(_Backend):
+        async def run(self, spec, usage=None):
+            installed = Path(spec.additional_directories[1]) / "rocprof-compute" / "pyvenv.cfg"
+            installed.parent.mkdir(parents=True, exist_ok=True)
+            installed.write_text("home = /usr/bin\n", encoding="utf-8")
+            return await super().run(spec, usage)
+
+    backend = _Installs(_GOOD)
+
+    _analyse(backend, tmp_path)
+
+    tools = Path(backend.specs[0].additional_directories[1])
+    assert not tools.exists()
+    assert not list((tmp_path / "out").rglob("pyvenv.cfg"))
 
 
 def test_an_unreadable_file_is_handed_back_once_with_the_reason(tmp_path):

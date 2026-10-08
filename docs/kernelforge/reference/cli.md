@@ -434,10 +434,6 @@ cases of different dtypes stop being comparable and attainment reads too low to
 reach a target. That is the safe direction to fail in — a campaign runs longer
 than it needed to rather than stopping with the work half done.
 
-The analyst session therefore runs with a shell and may install what it needs.
-Every file in the workspace is snapshotted before it starts and restored after,
-so the kernel under optimization is out of reach.
-
 The scored case set comes from the driver's own `case_ms:` lines, not from a
 configuration file, and cases the driver tags `unscored` get no ceiling.
 
@@ -477,18 +473,27 @@ given.
 
 The session therefore runs with a shell and a writable sandbox, because
 reaching a profiler on an arbitrary image means installing packages and that is
-open-ended work code cannot enumerate. Two things bound it. A pre-tool hook
-refuses edits outside the analyst's output directory, a scratch directory
-outside the workspace whose contents are moved under `--output-dir` when the
-session ends. The workspace guard treats the workspace as read-only: a change to
-any tracked file, or to the measurement surface -- the kernel sources and
-driver, and the configuration, harnesses, references and tests -- even where it
-is ignored, is rolled back to what the session found and the session rejected,
+open-ended work code cannot enumerate. A pre-tool hook refuses edits outside
+the analyst's two directories, both outside the workspace: a scratch directory
+whose contents are moved under `--output-dir` when the session ends, and a
+tools directory that is deleted. The workspace guard treats the workspace as
+read-only: a change to any tracked file, or to the measurement surface -- the
+kernel sources and driver, and the configuration, harnesses, references and
+tests -- even where it is ignored, is rolled back to what the session found and the session rejected,
 through a shell or otherwise, so the campaign continues on the tree it had. So
 is any new file other than what running the kernel builds into ignored files
 and the profiler's own droppings. The guard snapshots only the protected files,
 so the campaign's JIT cache is neither read into memory nor counted against the
 session.
+
+What the analyst installs goes into a virtual environment in the tools
+directory, and rocprof-compute runs under that environment's interpreter while
+the profiled workload keeps the kernel's own. The role document forbids
+installing into the kernel's interpreter, the system Python or `/opt/rocm`: a
+package added or upgraded there after the baseline changes the environment
+every later measurement runs in, outlives the campaign, and is recorded
+nowhere. Only that instruction prevents it; the guard covers the workspace and
+nothing outside it.
 
 The session runs in the deployment's sandbox (`--agent-sandbox-mode`, or
 `FORGE_AGENT_SANDBOX_MODE`), like every other session, widened from `read-only`

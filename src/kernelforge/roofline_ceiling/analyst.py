@@ -31,9 +31,15 @@ the workspace would have its answer deleted on the way out.
 
 So the analyst writes into a scratch directory outside the workspace, and this
 module moves the two deliverables into place afterwards. The hook is the second
-line, refusing the editing tools anywhere but that scratch directory, which
-turns a wrong path into a message the analyst can act on rather than a rollback
-it never sees.
+line, refusing the editing tools anywhere but that scratch directory and the
+tools directory beside it, which turns a wrong path into a message the analyst
+can act on rather than a rollback it never sees.
+
+What the analyst installs goes into the tools directory, which is deleted
+rather than published. Installing into the kernel's interpreter would change
+the environment every measurement after the baseline runs in, and the guard
+covers only the workspace, so nothing would undo it. Keeping the profiler's
+dependencies out of the scratch directory also keeps them out of the record.
 """
 
 from __future__ import annotations
@@ -80,8 +86,8 @@ DEFAULT_ANALYST_TURNS = 120
 MAX_REPAIR_ROUNDS = 1
 
 #: Tools that put bytes on disk. A shell can too, which is why the workspace
-#: guard restores everything outside the writable set rather than this hook
-#: being the only line.
+#: guard rolls back a change to any tracked file or to the measurement surface
+#: rather than this hook being the only line.
 _WRITE_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
 
 
@@ -103,6 +109,7 @@ def build_request(
     case_params: Mapping[str, Any],
     evidence: EvidenceBundle,
     output_dir: str,
+    tools_dir: str,
 ) -> str:
     """Build the analyst's request payload.
 
@@ -120,6 +127,7 @@ def build_request(
             "the deliverable."
         ),
         "output_dir": output_dir,
+        "tools_dir": tools_dir,
         "output_files": {
             REPORT_FILENAME: (
                 "JSON with exactly two keys. 'cases': an object mapping every scored case id to "
@@ -322,6 +330,7 @@ async def run_ceiling_analysis(
     destination = Path(output_dir)
     system_prompt = load_role(project_root)
     scratch = Path(tempfile.mkdtemp(prefix="forge_ceiling_"))
+    tools = Path(tempfile.mkdtemp(prefix="forge_ceiling_tools_"))
     report_path = scratch / REPORT_FILENAME
     document_path = scratch / DOCUMENT_FILENAME
 
@@ -334,6 +343,7 @@ async def run_ceiling_analysis(
             case_params=case_params,
             evidence=evidence,
             output_dir=str(scratch),
+            tools_dir=str(tools),
         )
 
         last_problem = ""
@@ -346,7 +356,7 @@ async def run_ceiling_analysis(
                     workdir=workdir,
                     model=model,
                     timeout_sec=timeout_sec,
-                    writable_dirs=[str(scratch)],
+                    writable_dirs=[str(scratch), str(tools)],
                     protected_paths=[*kernel_files, driver_script],
                     turns=turns,
                 ),
@@ -377,6 +387,7 @@ async def run_ceiling_analysis(
         raise CeilingAnalysisError(f"no usable ceiling after {MAX_REPAIR_ROUNDS + 1} attempts: {last_problem}")
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
+        shutil.rmtree(tools, ignore_errors=True)
 
 
 __all__ = [

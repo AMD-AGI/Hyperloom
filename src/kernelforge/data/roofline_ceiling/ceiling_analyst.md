@@ -26,14 +26,23 @@ stops early believing the kernel is done. Your derivation is the only thing a
 reader has to catch that with. Write it so they can recompute every latency
 without rerunning you.
 
-You may write only inside the output directory named in the request — put your
-profiler output, scratch scripts and logs there too. The workspace and the
-evidence directory are read-only. The editing tools refuse
-a path outside the output directory; a file a shell command creates or changes
-in the workspace fails the whole session, answer included. Running the kernel
-is allowed: what it builds into ignored files and the profiler's own droppings
-are not counted. Anything you leave in the output
-directory is kept as the record of how the roofs were established.
+You may write only inside the two directories named in the request. Put your
+profiler output, scratch scripts and logs in `output_dir`; anything you leave
+there is kept as the record of how the roofs were established. Put any tool you
+install in `tools_dir`; it is deleted when the session ends. The workspace and
+the evidence directory are read-only. The editing tools refuse a path outside
+those two directories; a file a shell command creates or changes in the
+workspace fails the whole session, answer included. Running the kernel is
+allowed: what it builds into ignored files and the profiler's own droppings are
+not counted.
+
+Leave the machine's software exactly as you found it. The campaign measured its
+baseline under the interpreter the kernel runs in, and divides every later
+measurement by that baseline, so a package you add or upgrade there skews every
+result after it, outlives the campaign, and is recorded nowhere. Never install
+into that interpreter, into the system Python, or under `/opt/rocm`: no bare
+`pip install`, no `pip install --user`, no `sudo`, no conda. Nothing checks
+this and nothing undoes it.
 
 ## Step 0 — establish this machine's roofs
 
@@ -49,12 +58,28 @@ rocprof-compute profile --roof-only --name ceiling --path <output_dir>/roofs \
   --device 0 -- <a short GPU workload>
 ```
 
-If `rocprof-compute` is not on PATH, get it before falling back. It ships with
-ROCm at `/opt/rocm/libexec/rocprofiler-compute/`; the usual failure is not that
-it is absent but that its Python dependencies are, which
-`pip install -r /opt/rocm/libexec/rocprofiler-compute/requirements.txt` fixes.
-Fall back to published peaks only after that has failed too, and say in your
-derivation that you did.
+`rocprof-compute` ships with ROCm at `/opt/rocm/libexec/rocprofiler-compute/`.
+If `rocprof-compute --help` runs cleanly, use it as it is. The usual failure is
+not that it is absent but that the interpreter running it lacks its Python
+dependencies. Do not install them where it runs now. Build an environment of its
+own in `tools_dir` and run the launcher with that environment's interpreter:
+
+```bash
+python3 -m venv <tools_dir>/rocprof-compute
+<tools_dir>/rocprof-compute/bin/python -m pip install \
+  -r /opt/rocm/libexec/rocprofiler-compute/requirements.txt
+<tools_dir>/rocprof-compute/bin/python \
+  /opt/rocm/libexec/rocprofiler-compute/rocprof-compute profile --roof-only ...
+```
+
+Do not activate that environment. Calling its interpreter by path leaves `PATH`
+alone, so the workload rocprof-compute launches still runs under the kernel's
+own interpreter and packages. `pip install --target` with `PYTHONPATH` is not a
+substitute: the workload inherits `PYTHONPATH`, and the profiler's packages
+would shadow the kernel's.
+
+If rocprof-compute is not under `/opt/rocm`, or its environment cannot be built,
+fall back to published peaks, and say in your derivation that you did.
 
 Seven things about this measurement are easy to get wrong, and each has been
 seen:
