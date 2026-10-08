@@ -21,10 +21,6 @@ log = logging.getLogger(__name__)
 _UNGUARDED_EXPORT_RE = re.compile(r"^[^\S\n]*export\s+([A-Za-z_][A-Za-z0-9_]*)=(?!\"?\$\{?\1[:-])", re.MULTILINE)
 
 
-class RecipeLeverUnavailableError(ValueError):
-    """Raised when a lever or run mode cannot be expressed on the recipe that boots the server."""
-
-
 def resolve_launch_server_script(bench: Mapping[str, Any]) -> str:
     """Path of the script that boots the server, or ``""`` when unresolvable.
 
@@ -90,7 +86,6 @@ def launcher_overwritten_envs(bench: Mapping[str, Any]) -> frozenset[str]:
 
 
 __all__ = [
-    "RecipeLeverUnavailableError",
     "launcher_overwritten_envs",
     "resolve_launch_server_script",
 ]

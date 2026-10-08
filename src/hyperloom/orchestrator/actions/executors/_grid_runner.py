@@ -43,7 +43,7 @@ from ._benchmark_interpreter import (
     _resolve_probe_python as _resolve_probe_python,
 )
 from ._accuracy_gate import materialized_run_eval_disabled
-from ._recipe_script import RecipeLeverUnavailableError, launcher_overwritten_envs
+from ._recipe_script import launcher_overwritten_envs
 from ._subprocess_kill import (
     AGENTX_PREFLIGHT_ERROR_CLASS,
     AGENTX_PREFLIGHT_RETURNCODE,
@@ -1110,9 +1110,7 @@ async def run_grid(
                 base_unset_envs=base_unset_envs,
             )
         except Exception as exc:  # noqa: BLE001
-            build_error = (
-                "recipe_lever_unavailable" if isinstance(exc, RecipeLeverUnavailableError) else "yaml_build_error"
-            )
+            build_error = "yaml_build_error"
             log.warning(
                 "grid_runner: variant %d/%d name=%s aborted: %s: %r",
                 i + 1,
