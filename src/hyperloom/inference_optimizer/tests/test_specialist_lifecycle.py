@@ -213,27 +213,6 @@ async def test_record_specialist_result_idempotent_on_round_id(coord):
     assert state.specialist_rounds[0]["round_id"] == "round-7"
 
 
-# 3. _task_id_from_specialist_source helper
-def test_task_id_from_specialist_source_extracts_prefix():
-    assert (
-        SpecialistDispatchCollaborator._task_id_from_specialist_source(
-            "specialist:abc-123",
-        )
-        == "abc-123"
-    )
-
-
-def test_task_id_from_specialist_source_returns_empty_for_bad():
-    assert SpecialistDispatchCollaborator._task_id_from_specialist_source("orchestration") == ""
-    assert SpecialistDispatchCollaborator._task_id_from_specialist_source("") == ""
-    assert (
-        SpecialistDispatchCollaborator._task_id_from_specialist_source(
-            "unknown",
-        )
-        == ""
-    )
-
-
 # 4. build_specialist_round_entry — output shape
 @pytest.mark.asyncio
 async def test_build_specialist_round_entry_carries_full_payload(coord):

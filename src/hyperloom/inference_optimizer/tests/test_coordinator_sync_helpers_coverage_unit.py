@@ -215,19 +215,6 @@ def test_gap_layer_for_action(coord: Coordinator) -> None:
     assert coord.gap_refresh._gap_layer_for_action("anything-else") == ("framework", "serving_specialist")
 
 
-def test_task_id_from_specialist_source(coord: Coordinator) -> None:
-    from hyperloom.orchestrator.loop.coordinator import SPECIALIST_FROM_AGENT_PREFIX
-
-    assert coord.specialist_dispatch._task_id_from_specialist_source("") == ""
-    assert coord.specialist_dispatch._task_id_from_specialist_source("kernel_agent") == ""
-    assert (
-        coord.specialist_dispatch._task_id_from_specialist_source(
-            f"{SPECIALIST_FROM_AGENT_PREFIX}abc",
-        )
-        == "abc"
-    )
-
-
 def test_lanes_fit(coord: Coordinator) -> None:
     assert coord.dispatcher._lanes_fit(["gpu"], {"gpu": 0}, {"gpu": 1}) is True
     assert coord.dispatcher._lanes_fit(["gpu"], {"gpu": 1}, {"gpu": 1}) is False

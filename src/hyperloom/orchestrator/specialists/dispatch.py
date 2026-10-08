@@ -17,7 +17,6 @@ from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from ..collaborator import CoordinatorCollaborator
 from ..phases import machine_state as _phase_state
 from ..policy.gate import (
-    SPECIALIST_FROM_AGENT_PREFIX,
     PolicyDenied,
     validate_freeform_wave_task,
 )
@@ -270,9 +269,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             return
         if str(getattr(state, "phase", "") or "").strip().upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
             return
-        from hyperloom.inference_optimizer.experience_kb import integration_for
-
-        integration = integration_for(self._coord, self.session_dir)
+        integration = self._coord.experience_kb
         if integration is None:
             return
         evidence = await asyncio.to_thread(integration.read_for_specialist, state, params)
@@ -742,19 +739,3 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         if isinstance(specialist_notes, list) and specialist_notes:
             entry["notes"] = [str(n) for n in specialist_notes]
         return entry
-
-    @staticmethod
-    def _task_id_from_specialist_source(source: str) -> str:
-        """Extract the task_id from a ``specialist:<task_id>`` source ("" when prefix is absent).
-
-        Args:
-            source: The from-agent string to parse.
-
-        Returns:
-            The task id when the specialist prefix is present, else ``""``.
-        """
-        if not source:
-            return ""
-        if source.startswith(SPECIALIST_FROM_AGENT_PREFIX):
-            return source[len(SPECIALIST_FROM_AGENT_PREFIX) :]
-        return ""

@@ -47,10 +47,7 @@ from ..bus.storage.connection import SqliteConnection, resolve_journal_mode
 from hyperloom.inference_optimizer.protocol.intent import NoIntentEmitted
 from ..bus.message_bus import MessageBus
 from ..state.objective import Objective, TimeOnlyObjective
-from ..policy.gate import (
-    PolicyGate,
-    SPECIALIST_FROM_AGENT_PREFIX,
-)
+from ..policy.gate import PolicyGate
 from ..state.round_store import RoundStore
 from ..bus.gpu_pool import (
     SpecialistGpuPool,
@@ -1392,8 +1389,4 @@ class Coordinator:
 __all__ = [
     "Coordinator",
     "CoordinatorState",
-    "SharedState",
-    "effective_closing_grace_sec",
-    # Re-exported from policy.gate; referenced via ``coordinator.<name>`` in tests.
-    "SPECIALIST_FROM_AGENT_PREFIX",
 ]
