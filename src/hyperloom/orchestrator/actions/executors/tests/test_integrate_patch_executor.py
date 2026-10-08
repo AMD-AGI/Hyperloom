@@ -20,6 +20,7 @@ from hyperloom.orchestrator.tests._helpers import (
     patch_integrate_patch_roots,
 )
 
+from hyperloom.orchestrator.actions.executors._accuracy_gate import framework_run_eval_envs
 from hyperloom.orchestrator.actions.executors.integrate_patch import (
     IntegratePatchExecutor,
     _apply_patch_no_git,
@@ -87,6 +88,7 @@ def _stub_external_integrate_operations(monkeypatch):
     from hyperloom.agents.framework.sources import github
     from hyperloom.orchestrator.actions.executors import _multi_node_env, _ray_serving
     from hyperloom.orchestrator.actions.executors import integrate_patch as ip
+    from hyperloom.orchestrator.enablement.recipe import keep_probe
     from hyperloom.orchestrator.enablement.runtime import adapters
 
     def forbidden(*_args, **_kwargs):
@@ -107,7 +109,7 @@ def _stub_external_integrate_operations(monkeypatch):
             source_import_root=lambda root: root,
         ),
     )
-    monkeypatch.setattr(ip.IntegratePatchExecutor, "_probe_keep_environment", lambda *_args, **_kwargs: ({}, {}))
+    monkeypatch.setattr(keep_probe, "probe_keep_environment", lambda *_args, **_kwargs: ({}, {}))
 
 
 def _write_specialist_workspace(
@@ -154,37 +156,30 @@ def _make_ctx(task_id: str, params: dict[str, Any]) -> RunnerContext:
 
 
 def test_framework_run_eval_envs_forces_for_authored_with_baseline():
-    assert IntegratePatchExecutor._framework_run_eval_envs(
-        {"framework_agent_authoring": True, "accuracy_baseline": 0.8}
-    ) == {"RUN_EVAL": "true"}
-    assert IntegratePatchExecutor._framework_run_eval_envs(
-        {"framework_agent_candidate_id": "c1", "accuracy_baseline": 0.8}
-    ) == {"RUN_EVAL": "true"}
+    assert framework_run_eval_envs({"framework_agent_authoring": True, "accuracy_baseline": 0.8}) == {
+        "RUN_EVAL": "true"
+    }
+    assert framework_run_eval_envs({"framework_agent_candidate_id": "c1", "accuracy_baseline": 0.8}) == {
+        "RUN_EVAL": "true"
+    }
 
 
 def test_framework_run_eval_envs_no_force_without_baseline():
     # No baseline score -> nothing to gate against -> don't force eval.
-    assert IntegratePatchExecutor._framework_run_eval_envs({"framework_agent_authoring": True}) is None
-    assert (
-        IntegratePatchExecutor._framework_run_eval_envs({"framework_agent_authoring": True, "accuracy_baseline": 0.0})
-        is None
-    )
+    assert framework_run_eval_envs({"framework_agent_authoring": True}) is None
+    assert framework_run_eval_envs({"framework_agent_authoring": True, "accuracy_baseline": 0.0}) is None
 
 
 def test_framework_run_eval_envs_forces_only_for_eval_origin_enablement():
     # Eval-origin fails closed without a raw accuracy; boot-origin stays provisional.
-    assert IntegratePatchExecutor._framework_run_eval_envs({"enablement": True, "enablement_origin": "eval"}) == {
-        "RUN_EVAL": "true"
-    }
-    assert IntegratePatchExecutor._framework_run_eval_envs({"enablement": True, "enablement_origin": "launch"}) is None
-    assert IntegratePatchExecutor._framework_run_eval_envs({"enablement": True}) is None
+    assert framework_run_eval_envs({"enablement": True, "enablement_origin": "eval"}) == {"RUN_EVAL": "true"}
+    assert framework_run_eval_envs({"enablement": True, "enablement_origin": "launch"}) is None
+    assert framework_run_eval_envs({"enablement": True}) is None
 
 
 def test_framework_run_eval_envs_none_for_generic_explore():
-    assert (
-        IntegratePatchExecutor._framework_run_eval_envs({"specialist_task_id": "s1", "accuracy_baseline": 0.8}) is None
-    )
-    assert IntegratePatchExecutor._framework_run_eval_envs({}) is None
+    assert framework_run_eval_envs({"specialist_task_id": "s1", "accuracy_baseline": 0.8}) is None
+    assert framework_run_eval_envs({}) is None
 
 
 def test_resolve_patch_paths_prefers_explicit_param(tmp_path: Path):
@@ -1286,7 +1281,9 @@ async def test_a_value_error_inside_the_keep_capture_is_not_read_as_an_unreadabl
     def _defect(*_args, **_kwargs):
         raise ValueError("a defect in the capture, not an unreadable config")
 
-    monkeypatch.setattr(IntegratePatchExecutor, "_levers_without_readers", staticmethod(_defect))
+    from hyperloom.orchestrator.enablement.recipe import keep_records
+
+    monkeypatch.setattr(keep_records, "levers_without_readers", _defect)
 
     with pytest.raises(ValueError, match="a defect in the capture"):
         await _run_enablement_integrate(tmp_path, monkeypatch, booted=True)
