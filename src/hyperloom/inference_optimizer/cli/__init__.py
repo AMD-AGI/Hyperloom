@@ -221,7 +221,13 @@ def _restore_operator_supplied_paths_from_state(args: Any, state: SharedState) -
 
 
 def _require_custom_entrypoint(framework: str, gpu_type: str | None = None) -> None:
-    """Fail at launch when ``--framework custom`` cannot resolve its script."""
+    """Fail at launch when the selected runner cannot serve the framework."""
+    from ..gpu_types import _runner_framework_error
+
+    unsupported = _runner_framework_error(gpu_type or "", framework)
+    if unsupported:
+        print(f"ERROR: {unsupported}", file=sys.stderr)
+        sys.exit(2)
     if str(framework or "").strip().lower() != "custom":
         return
     from hyperloom.orchestrator.actions.executors._workload_envs import (
@@ -2107,8 +2113,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         if gpu_type and runner_gpu_type != gpu_type:
             print(
                 f"WARN: {gpu_type} uses {runner_gpu_type} as Magpie "
-                f"runner_type (same gfx942/CDNA3 arch; Magpie has no "
-                f"sglang_{gpu_type}.sh / vllm_{gpu_type}.sh yet)",
+                f"runner_type (architecture-family runner; Magpie has no "
+                f"per-SKU {framework}_{gpu_type}.sh)",
                 file=sys.stderr,
             )
         args.gpu_type = gpu_type or None

@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from hyperloom.common.env import env_float, env_int
+from hyperloom.common.gpu_identity import gfx_arch_for_gpu_type
 from hyperloom.common.visible_devices import (
     HIP_LEVEL_VARS,
     VISIBLE_DEVICE_VARS,
@@ -340,6 +341,18 @@ def _pin_renumbers_devices(pin: Mapping[str, Any] | None) -> bool:
         ``True`` for any ROCr-level pin, whatever its source.
     """
     return is_rocr_level(str((pin or {}).get("var") or ""))
+
+
+def _resolve_handoff_gpu_identity(gpu_type: str | None) -> dict[str, str]:
+    """GEAK's explicit product/ISA pin for the handoff.
+
+    Only the concrete R9700 carries one; other boards keep GEAK's own device
+    probe, and a bare architecture is never promoted to a product.
+    """
+    product = str(gpu_type or "").strip().lower()
+    if product != "r9700":
+        return {}
+    return {"expected_target": product, "expected_gfx": gfx_arch_for_gpu_type(product) or ""}
 
 
 def _resolve_handoff_gpu_ids_space(*, gpu_pin: Mapping[str, Any] | None) -> str:

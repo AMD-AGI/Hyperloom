@@ -809,6 +809,49 @@ def test_apply_runtime_overrides_pins_benchmark_script_after_gpu_pop():
     assert bench["runner_type"] == "mi300x"
 
 
+def test_apply_runtime_overrides_routes_r9700_vllm_to_gfx12():
+    bench = {"framework": "vllm", "envs": {}}
+    apply_runtime_benchmark_overrides(bench, gpu_type="r9700")
+    assert bench["runner_type"] == "gfx12"
+    assert bench["benchmark_script"] == "vllm_gfx12.sh"
+
+
+def _write_vllm_base_yaml(path: Path, *, agentx: bool = False) -> Path:
+    _write_baseline_yaml_overrides(path)
+    cfg = yaml.safe_load(path.read_text())
+    cfg["benchmark"]["framework"] = "vllm"
+    if agentx:
+        cfg["benchmark"]["benchmark_script"] = "aiperf_client.sh"
+    path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    return path
+
+
+def test_apply_runtime_overrides_routes_r9700_agentx_to_gfx12():
+    bench = {"framework": "vllm", "envs": {}}
+    apply_runtime_benchmark_overrides(
+        bench,
+        gpu_type="r9700",
+        agentx_mode=True,
+    )
+    assert bench["benchmark_script"] == "aiperf_client.sh"
+    assert bench["envs"]["FRAMEWORK"] == "vllm"
+    assert bench["runner_type"] == "gfx12"
+
+
+def test_build_variant_yaml_routes_r9700_agentx_to_gfx12(tmp_path):
+    base = _write_vllm_base_yaml(tmp_path / "base.yaml", agentx=True)
+    out = _build_variant_yaml(
+        base,
+        base_extra_args="",
+        variant=GridVariant("vA", ""),
+        output_subdir=tmp_path / "vA",
+        gpu_type="r9700",
+    )
+    bench = yaml.safe_load(out.read_text())["benchmark"]
+    assert bench["benchmark_script"] == "aiperf_client.sh"
+    assert bench["runner_type"] == "gfx12"
+
+
 def test_apply_runtime_overrides_yaml_tp_wins_over_env_on_resume(monkeypatch):
     """A stale ``state.tp`` re-exported as ``os.environ['TP']`` on resume must not downgrade a YAML-pinned TP."""
     monkeypatch.setenv("TP", "1")

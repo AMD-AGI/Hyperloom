@@ -216,6 +216,21 @@ def test_materialize_config_injects_runner_type(tmp_path):
     assert rendered["benchmark"]["runner_type"] == "mi355x"
 
 
+def test_r9700_baseline_and_profile_use_vllm_gfx12_runner(tmp_path, monkeypatch):
+    import yaml
+
+    monkeypatch.setenv("FRAMEWORK", "vllm")
+    for config_path in (_default_baseline_config(), _default_profile_config()):
+        out = _materialize_config_with_envs(
+            config_path,
+            tmp_path / config_path.stem,
+            gpu_type="r9700",
+        )
+        rendered = yaml.safe_load(out.read_text())["benchmark"]
+        assert rendered["runner_type"] == "gfx12"
+        assert rendered["benchmark_script"] == "vllm_gfx12.sh"
+
+
 def test_materialize_config_forces_generic_benchmark_script(tmp_path):
     """`gpu_type` pins `benchmark_script` to the generic `{framework}_{gpu_type}.sh` (Magpie priority 1)."""
     import yaml

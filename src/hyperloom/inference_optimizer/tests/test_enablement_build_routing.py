@@ -17,7 +17,10 @@ from hyperloom.orchestrator.actions.executors.targeted_build_executor import Tar
 from hyperloom.orchestrator.enablement.runtime.build_actions import TargetedBuildAction, BuildResult, FrameworkRuntime
 from hyperloom.orchestrator.loop.build_lifecycle import BuildLifecycleCollaborator
 from hyperloom.orchestrator.enablement.recipe.steps import select_linked_build
-from hyperloom.orchestrator.enablement.build import _repo_matches_targeted_build_component
+from hyperloom.orchestrator.enablement.build import (
+    _TARGETED_BUILD_UNVALIDATED_GPU_TYPES,
+    _repo_matches_targeted_build_component,
+)
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 from hyperloom.orchestrator.enablement.params import EnablementParams
 
@@ -76,7 +79,12 @@ def test_targeted_build_repo_match_rejects_wrong_component():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("gpu_type", "arch"), sorted((b, a) for b, (a, _cus) in AMD_GPU_DISPATCH_IDENTITIES.items()))
+@pytest.mark.parametrize(
+    ("gpu_type", "arch"),
+    sorted(
+        (b, a) for b, (a, _cus) in AMD_GPU_DISPATCH_IDENTITIES.items() if b not in _TARGETED_BUILD_UNVALIDATED_GPU_TYPES
+    ),
+)
 async def test_escalate_enqueues_for_compiled_gap(coord, monkeypatch, gpu_type, arch):
     """A build with no arch is refused at preflight, so every accepted board has to carry one."""
     coord.shared_state.gpu_type = gpu_type
@@ -109,6 +117,21 @@ async def test_escalate_skipped_for_pure_python_gap(coord, monkeypatch):
 
     queued = [t for t in await coord.tasks.queued() if t.kind == "targeted_build"]
     assert len(queued) == 0
+
+
+@pytest.mark.asyncio
+async def test_escalate_skipped_for_r9700(coord, monkeypatch):
+    coord.shared_state.gpu_type = "r9700"
+    coord.shared_state.framework = "vllm"
+
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+
+    monkeypatch.setattr(mne, "is_multi_node", lambda: False)
+
+    await coord.enablement_build.maybe_escalate_to_targeted_build(
+        "hipErrorNoBinaryForGpu: no kernel image is available"
+    )
+    assert len([t for t in await coord.tasks.queued() if t.kind == "targeted_build"]) == 0
 
 
 @pytest.mark.asyncio
@@ -231,6 +254,35 @@ async def test_specialist_requested_build_enqueued(coord, monkeypatch):
     assert action.ref == "PR:1234"
     assert action.gpu_arch == "gfx950"
     # Consume-once: the marker is cleared so the next tick does not re-enqueue.
+    assert coord.shared_state.enablement.last_specialist_task_id == ""
+
+
+@pytest.mark.asyncio
+async def test_specialist_requested_build_skipped_for_r9700(coord, monkeypatch):
+    coord.shared_state.framework = "vllm"
+    coord.shared_state.gpu_type = "r9700"
+
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+
+    monkeypatch.setattr(mne, "is_multi_node", lambda: False)
+
+    tid = "spec-r9700"
+    coord.shared_state.enablement.last_specialist_task_id = tid
+
+    await coord.enablement_build.maybe_enqueue_specialist_requested_build(
+        task_id=tid,
+        payload={
+            "needs_targeted_build": {
+                "component": "aiter",
+                "capability": "deepseek_v4_nsa",
+                "repo_url": "https://github.com/ROCm/aiter",
+                "ref": "PR:1234",
+            }
+        },
+    )
+
+    assert len([t for t in await coord.tasks.queued() if t.kind == "targeted_build"]) == 0
+    # The request is consumed so the next tick does not retry it.
     assert coord.shared_state.enablement.last_specialist_task_id == ""
 
 

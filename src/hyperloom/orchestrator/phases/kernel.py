@@ -62,6 +62,7 @@ from ..kernel.geak_config import (
 from ..actions.executors._gpu_pin import (
     coerce_tp,
     resolve_gpu_pin,
+    _resolve_handoff_gpu_identity,
     _resolve_handoff_gpu_ids,
     _resolve_handoff_gpu_ids_space,
     _resolve_handoff_tp,
@@ -1369,6 +1370,7 @@ class KernelPhase(CoordinatorCollaborator):
             # that instead writes ROCR itself needs to know which it holds.
             "gpu_ids_space": _gpu_ids_space,
         }
+        handoff.update(_resolve_handoff_gpu_identity(handoff["gpu_type"]))
         if gpu_pin:
             # ABSOLUTE ids + the var they came from, so a consumer that writes
             # ROCR_VISIBLE_DEVICES itself re-applies the same pin instead of

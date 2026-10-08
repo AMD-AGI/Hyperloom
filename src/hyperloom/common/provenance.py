@@ -322,6 +322,7 @@ def build_provenance(
     model_name = str(model_name) if model_name else None
 
     server_args = _server_args_list(args, env)
+    gpu_type = _arg_first(args, "gpu_type") or _env_first(env, "TARGET_GPU_TYPE", "GPU_TYPE")
 
     return {
         "_provenance_source": source,
@@ -336,8 +337,8 @@ def build_provenance(
         "stack_fingerprint": detect_stack_fingerprint(env, probe=probe),
         "image": detect_image(env, probe=probe),
         # hardware / parallelism / graph
-        "gpu_type": (_arg_first(args, "gpu_type") or _env_first(env, "GPU_TYPE")),
-        "gfx_arch": detect_gfx_arch(env, gpu_type=_arg_first(args, "gpu_type"), probe=probe),
+        "gpu_type": gpu_type,
+        "gfx_arch": detect_gfx_arch(env, gpu_type=gpu_type, probe=probe),
         "tp": _int_or_none(_arg_first(args, "tp") or _env_first(env, "TP")),
         "ep": _int_or_none(_arg_first(args, "ep") or _env_first(env, "EP")),
         "graph_mode": (_arg_first(args, "graph_mode") or detect_graph_mode(env)),
