@@ -13,7 +13,12 @@ from typing import Any
 
 import pytest
 
-from hyperloom.orchestrator.tests._helpers import git_commit_all, init_git_repo, patch_integrate_patch_roots
+from hyperloom.orchestrator.tests._helpers import (
+    git_commit_all,
+    init_git_repo,
+    integrate_extra,
+    patch_integrate_patch_roots,
+)
 
 from hyperloom.orchestrator.actions.executors.integrate_patch import (
     IntegratePatchExecutor,
@@ -27,6 +32,7 @@ from hyperloom.orchestrator.actions.executors.integrate_patch import (
 from hyperloom.common.bringup import LadderStage
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.rehearsal import boot_log_for
+from hyperloom.orchestrator.state.shared_state import EnablementRound
 from hyperloom.orchestrator.state.task_registry import Task
 
 
@@ -144,7 +150,7 @@ def _make_ctx(task_id: str, params: dict[str, Any]) -> RunnerContext:
         idempotency_key=task_id,
         requires_lanes=tuple(),
     )
-    return RunnerContext(task=task, lease=None, extra={})
+    return RunnerContext(task=task, lease=None, extra=integrate_extra(params))
 
 
 def test_framework_run_eval_envs_forces_for_authored_with_baseline():
@@ -532,6 +538,7 @@ async def test_same_executor_second_early_return_does_not_reuse_runtime(tmp_path
     monkeypatch.setattr(executor, "_bench_patch", forbidden)
     state = SimpleNamespace(
         current_best={},
+        enablement=EnablementRound(),
         get_specialist_patch_verdict=lambda _subject: "approve",
         save=lambda _path: saved.append(json.loads(json.dumps(state.pending_integrate))),
     )
@@ -1817,6 +1824,7 @@ async def test_setup_replay_runs_off_the_event_loop_thread(tmp_path: Path, monke
         task_id=ctx.task.task_id,
         specialist_task_id="t-spec-setup-thread",
         specialist_workspace=workspace,
+        shared_state=ctx.extra["shared_state"],
     )
 
     result = await executor._stage_apply(

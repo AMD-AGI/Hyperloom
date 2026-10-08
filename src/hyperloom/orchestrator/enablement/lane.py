@@ -30,7 +30,6 @@ from ..bringup import recorded_verdict, session_root
 from ..state.round_store import ADVANCED, BOOTED, FAILED, Round
 from ..state.task_registry import create_in_cursor, task_dispatch_origin
 from .recipe.section import recipe_for
-from .recipe.setup_ledger import mark_round_disposition
 
 if TYPE_CHECKING:
     from ..bringup import EnvVerdict
@@ -39,28 +38,6 @@ if TYPE_CHECKING:
 import logging as _logging
 
 log = _logging.getLogger(__name__)
-
-#: Identity and payload of the accepted stack, accumulated across the rounds
-#: that contributed to it: a round that contributes none leaves the standing
-#: records alone.
-_KEEP_STACK_FIELDS = ("roots", "patch_roots", "base_sha", "source_snapshots")
-
-#: Declared targets and observations of this KEEP replace the previous KEEP's
-#: records, including when a target set is empty or a probe could not run.
-_KEEP_OBSERVED_FIELDS = (
-    "accepted_stack_targets",
-    "patch_targets",
-    "launch_evidence",
-    "environment_closure",
-    "installed_versions_at_keep",
-)
-
-#: Observed fields whose value is meaningful beyond truthiness, so the
-#: truthy-or-empty coercion the others get would destroy them. ``None`` here
-#: says the observation could not be made, which the sufficiency rules read as
-#: a reason to refuse -- collapsing it into an empty mapping would read as a
-#: clean scan and certify exactly what the observation exists to withhold.
-_KEEP_TRISTATE_FIELDS = ("build_extensions_not_carried", "levers_without_readers")
 
 
 #: Shortest lease a renewal may stamp.
@@ -547,11 +524,7 @@ class EnablementLane(CoordinatorCollaborator):
         # by the FAILED settle below, which the pre-hoc ``consecutive_stalled``
         # cap reads off the durable ledger. Counting it in state again here
         # would double-charge it.
-        #
-        # Stamped on the executions this round actually performed, and only when
-        # the round has an id of its own: leaving a row ``unreported`` states
-        # that no lane observed it, which no sufficiency rule reads as verified.
-        _mark_setup_ledger(state, spec_tid, status or "unreported", accepted=status == "kept")
+        state.enablement.mark_setup_round(spec_tid, status or "unreported", accepted=status == "kept")
         # Set on every round so neither outlives the round it describes.
         state.enablement.last_grounding_drop_reason = [
             str(d) for d in (res.get("patches_dropped_by_grounding") or [])[:8]
@@ -650,98 +623,12 @@ class EnablementLane(CoordinatorCollaborator):
                 self._coord.record_exception(stage=stage, exc=exc)
 
 
-def _stack_patch_roots(state: Any, res: dict[str, Any]) -> None:
-    """Bind this round's patches to the tree they applied to, once.
-
-    An ADVANCED round never reaches the KEEP capture that writes the durable
-    ``patch_roots``, so a stack whose rounds used different trees would leave
-    every advanced patch to be re-bound to the FINAL round's framework root.
-    First writer wins, for the same reason the base sha's does: the round that
-    applied a patch is the one that knows which tree it applied to.
-    """
-    incoming = res.get("enablement_patch_roots")
-    if not isinstance(incoming, dict) or not incoming:
-        return
-    merged = dict(state.enablement.patch_roots or {})
-    for patch, root in incoming.items():
-        if str(patch) and str(root):
-            merged.setdefault(str(patch), str(root))
-    state.enablement.patch_roots = merged
-
-
-def _stack_setup_commands(state: Any, res: dict[str, Any]) -> None:
-    """Append this round's applied setup commands to the durable stack."""
-    cur = list(state.enablement.setup_commands or [])
-    for c in res.get("setup_commands_applied") or []:
-        sc = str(c)
-        if sc and sc not in cur:
-            cur.append(sc)
-    state.enablement.setup_commands = cur
-
-
-def _push_kept_round(state: Any, res: dict[str, Any], patches_this_round: list[str]) -> None:
-    """Append this round to kept_rounds and re-derive the flat projections.
-
-    Artifacts dedupe last-wins per target so a later round supersedes an
-    earlier fix to the same file. The round's ``task_id`` is stored with it
-    because the replay script sources each round's patches from the archive
-    directory that id names; a row without one contributes nothing to the
-    script, silently.
-    """
-    rounds = list(state.enablement.kept_rounds or [])
-    rounds.append(
-        {
-            "task_id": str(res.get("specialist_task_id") or ""),
-            "patches": list(patches_this_round),
-            "artifacts": [dict(a) for a in (res.get("artifacts_applied") or []) if isinstance(a, dict)],
-        }
-    )
-    state.enablement.kept_rounds = rounds
-
-    flat_patches: list[str] = []
-    artifact_by_target: dict[str, dict] = {}
-    for rnd in rounds:
-        for p in rnd.get("patches") or []:
-            if p not in flat_patches:
-                flat_patches.append(p)
-        for art in rnd.get("artifacts") or []:
-            target = str(art.get("target") or "")
-            if target:
-                artifact_by_target[target] = art
-    state.enablement.kept_patches = flat_patches
-    state.enablement.kept_artifacts = list(artifact_by_target.values())
-
-
-def _stack_keep_recipe_records(state: Any, res: dict[str, Any]) -> None:
-    """Persist the KEEP's per-root identity, payload and assertions."""
-    for field_name in _KEEP_STACK_FIELDS:
-        value = res.get(f"enablement_{field_name}")
-        if value:
-            setattr(state.enablement, field_name, value)
-    for field_name in _KEEP_OBSERVED_FIELDS:
-        setattr(state.enablement, field_name, res.get(f"enablement_{field_name}") or {})
-    for field_name in _KEEP_TRISTATE_FIELDS:
-        key = f"enablement_{field_name}"
-        if key in res:
-            setattr(state.enablement, field_name, res[key])
-    state.enablement.launch_argv_refused = bool(res.get("enablement_launch_argv_refused"))
-
-
-def _mark_setup_ledger(state: Any, round_task_id: str, disposition: str, *, accepted: bool) -> None:
-    """Record this round's outcome onto the executions it performed.
-
-    A round with no task id of its own claims no rows: leaving them
-    ``unreported`` states that no lane observed them, which no rule reads
-    as verified.
-    """
-    ledger = list(state.enablement.setup_executions or [])
-    if not ledger or not round_task_id:
-        return
-    state.enablement.setup_executions = mark_round_disposition(
-        ledger,
-        round_task_id=round_task_id,
-        disposition=disposition,
-        accepted=accepted,
+def _push_kept_round(state: Any, res: dict[str, Any]) -> None:
+    """Stack the round a rearm accepted, as the integrate result reports it."""
+    state.enablement.push_kept_round(
+        task_id=str(res.get("specialist_task_id") or ""),
+        patches=res.get("patches_applied", []),
+        artifacts=res.get("artifacts_applied", []),
     )
 
 
@@ -779,9 +666,9 @@ def _stack_kept_runtime(state: Any, res: dict[str, Any]) -> None:
 def _rearm_on_kept(state: Any, res: dict[str, Any]) -> None:
     """Record the accepted stack and terminate, or open the eval revalidation."""
     _reset_baseline_failure_backstop(state)
-    _stack_setup_commands(state, res)
+    state.enablement.stack_setup_commands(res.get("setup_commands_applied", []))
     _stack_kept_runtime(state, res)
-    _push_kept_round(state, res, [str(p) for p in (res.get("patches_applied") or []) if str(p)])
+    _push_kept_round(state, res)
     accepted_cfg = str(res.get("enablement_accepted_config_path") or "").strip()
     if accepted_cfg:
         state.enablement.accepted_config_path = accepted_cfg
@@ -791,7 +678,7 @@ def _rearm_on_kept(state: Any, res: dict[str, Any]) -> None:
         # every advanced round that fed into it.
         state.enablement.accepted_config = dict(effective)
         state.enablement.accepted_config_source = "kept_bench"
-    _stack_keep_recipe_records(state, res)
+    state.enablement.record_keep(res)
     # Hold succeeded until the revalidation baseline promotes so every KEEP is
     # validated against a real measurement, not the bench the patch round itself
     # ran. Unconditional since upstream stopped exempting the launch origin: a
@@ -805,9 +692,9 @@ def _rearm_on_kept(state: Any, res: dict[str, Any]) -> None:
 
 def _rearm_on_advanced(state: Any, res: dict[str, Any]) -> None:
     """Stack the progressing round and pivot the mandate to the new gap."""
-    _push_kept_round(state, res, [str(p) for p in (res.get("patches_applied") or []) if str(p)])
-    _stack_patch_roots(state, res)
-    _stack_setup_commands(state, res)
+    _push_kept_round(state, res)
+    state.enablement.record_patch_roots(res.get("enablement_patch_roots", {}))
+    state.enablement.stack_setup_commands(res.get("setup_commands_applied", []))
     _stack_kept_runtime(state, res)
     # Accumulated so a later kept round replays every advance, not just patches.
     adv_envs = res.get("extra_envs_applied") or {}

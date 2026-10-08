@@ -215,7 +215,9 @@ def test_keep_records_project_launch_evidence_before_returning_it(repo: Path, tm
         "actual_server_log_path": "/host/session/server.log",
     }
     out = executor._enablement_keep_records(
-        IntegrateAttempt(task_id=PROBE_TASK, base_sha_by_root={}, shared_state=SimpleNamespace(enablement=None)),
+        IntegrateAttempt(
+            task_id=PROBE_TASK, base_sha_by_root={}, shared_state=SimpleNamespace(enablement=EnablementRound())
+        ),
         params={},
         specialist_task_id=PROBE_TASK,
         framework_root=repo,
@@ -829,7 +831,7 @@ def test_a_round_spanning_two_roots_names_each_tree_on_its_own_terms(repo: Path,
     attempt = IntegrateAttempt(
         task_id=PROBE_TASK,
         base_sha_by_root={str(repo): _git_head_sha(repo), str(second): _git_head_sha(second)},
-        shared_state=SimpleNamespace(enablement=None),
+        shared_state=SimpleNamespace(enablement=EnablementRound()),
     )
     out = executor._enablement_keep_records(
         attempt,
@@ -894,10 +896,14 @@ def test_an_inherited_artifact_is_captured_by_the_keep_that_launched_it(repo: Pa
     assert (overlay / inherited_rel).read_text(encoding="utf-8") == "value = 7\n"
 
 
-def test_a_standalone_keep_without_shared_state_captures_its_own_targets(repo: Path, tmp_path: Path, monkeypatch):
+def test_a_first_keep_captures_its_own_targets(repo: Path, tmp_path: Path, monkeypatch):
     executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
     monkeypatch.setattr(executor, "_probe_keep_environment", lambda *_args, **_kwargs: ({}, {}))
-    attempt = IntegrateAttempt(task_id=PROBE_TASK, base_sha_by_root={str(repo): _git_head_sha(repo)})
+    attempt = IntegrateAttempt(
+        task_id=PROBE_TASK,
+        base_sha_by_root={str(repo): _git_head_sha(repo)},
+        shared_state=SimpleNamespace(enablement=EnablementRound()),
+    )
     result = executor._enablement_keep_records(
         attempt,
         params={},
@@ -909,7 +915,6 @@ def test_a_standalone_keep_without_shared_state_captures_its_own_targets(repo: P
         provision_result=None,
         bench_result={},
     )
-    assert attempt.shared_state is None
     assert list(result["enablement_accepted_stack_targets"].values()) == [{TARGET: "upsert"}]
 
 
@@ -922,7 +927,7 @@ def test_a_non_git_contributing_root_carries_no_base_commit(repo: Path, tmp_path
     attempt = IntegrateAttempt(
         task_id=PROBE_TASK,
         base_sha_by_root={str(repo): _git_head_sha(repo)},
-        shared_state=SimpleNamespace(enablement=None),
+        shared_state=SimpleNamespace(enablement=EnablementRound()),
     )
     out = executor._enablement_keep_records(
         attempt,
@@ -1153,12 +1158,9 @@ def test_a_recorded_root_for_a_patch_outside_the_stack_is_ignored(repo: Path, tm
     and a declared-target set for a tree no round wrote, and the capture is then
     judged against files that were never part of the stack.
     """
-    from hyperloom.orchestrator.actions.executors.integrate_patch import _accepted_patch_roots
-
     unrelated = tmp_path / "aiter"
     applied = tmp_path / "2.patch"
-    roots = _accepted_patch_roots(
-        EnablementRound(),
+    roots = EnablementRound().accepted_patch_roots(
         done_payload={
             "patch_roots": {
                 str(applied): str(repo),

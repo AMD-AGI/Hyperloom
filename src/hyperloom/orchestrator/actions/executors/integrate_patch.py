@@ -47,6 +47,7 @@ from ...specialists.patch_safety import (
     resolve_patch_apply_root,
 )
 from ...state.shared_state import (
+    EnablementRound,
     inject_stack_base_params,
     resolve_anchor_with_drift,
     resolve_graded_comparison,
@@ -196,11 +197,6 @@ def _enablement_gap(params: dict[str, Any]) -> CapabilityGap | None:
     return gap if gap.requires_code_acquisition else None
 
 
-def _kept_stack_action(attempt: IntegrateAttempt) -> dict[str, Any]:
-    """The stack action the last kept round promoted, or ``{}`` when none was kept."""
-    return getattr(getattr(attempt.shared_state, "enablement", None), "kept_stack_action", None) or {}
-
-
 def _first_ref_in_repo(refs: Iterable[Any], repo_url: str) -> str:
     """The best-ranked candidate ref that points at ``repo_url``.
 
@@ -238,13 +234,13 @@ def _established_enablement_config(params: dict[str, Any], shared_state: Any) ->
     executor, so the inheritance lives here rather than in each emitter.
 
     Optimization rounds inherit nothing -- the rule is the enablement lane's.
-    Returns ``("", {})`` when the round is not enablement, when no SharedState
-    reached the context, or when nothing has been established yet.
+    Returns ``("", {})`` when the round is not enablement or when nothing has
+    been established yet.
     """
     if not bool(params.get("enablement")):
         return "", {}
-    established = getattr(getattr(shared_state, "enablement", None), "accepted_config", None)
-    if not isinstance(established, dict) or not established:
+    established = shared_state.enablement.accepted_config
+    if not established:
         return "", {}
     args = str(established.get("extra_server_args") or "").strip()
     raw_envs = established.get("extra_envs")
@@ -422,17 +418,11 @@ def _note_pre_mutation_head(
     key = str(root or "")
     if not key:
         return
-    durable = _durable_base_sha_by_root(attempt) if enablement else {}
+    durable = attempt.shared_state.enablement.base_sha_by_root if enablement else {}
     if key not in heads:
-        heads[key] = str(durable.get(key) or "") or _git_head_sha(Path(key))
-    if enablement and heads.get(key) and not str(durable.get(key) or ""):
-        _persist_base_sha_for_root(attempt, key, str(heads[key]), session_dir=session_dir)
-
-
-def _durable_base_sha_by_root(attempt: IntegrateAttempt) -> dict[str, str]:
-    """The per-root base shas earlier rounds of this stack already recorded."""
-    raw = getattr(getattr(attempt.shared_state, "enablement", None), "base_sha_by_root", None)
-    return {str(k): str(v) for k, v in raw.items() if str(k) and str(v)} if isinstance(raw, Mapping) else {}
+        heads[key] = durable.get(key) or _git_head_sha(Path(key))
+    if enablement and heads[key]:
+        _persist_base_sha_for_root(attempt, key, heads[key], session_dir=session_dir)
 
 
 def _persist_base_sha_for_root(
@@ -447,15 +437,7 @@ def _persist_base_sha_for_root(
     exists to prevent.
     """
     shared_state = attempt.shared_state
-    enablement = getattr(shared_state, "enablement", None)
-    if enablement is None:
-        return
-    current = dict(getattr(enablement, "base_sha_by_root", None) or {})
-    if current.get(root):
-        return
-    current[root] = sha
-    enablement.base_sha_by_root = current
-    if session_dir is None:
+    if not shared_state.enablement.record_base_sha(root, sha) or session_dir is None:
         return
     try:
         shared_state.save(session_dir)
@@ -465,82 +447,9 @@ def _persist_base_sha_for_root(
         log.debug("integrate_patch: save after base-sha record failed", exc_info=True)
 
 
-def _accepted_patch_roots(
-    enablement: Any,
-    *,
-    done_payload: dict[str, Any] | None,
-    applied: list[Path],
-    framework_root: str,
-) -> dict[str, str]:
-    """Map every patch in the accepted stack to the tree it applies against.
-
-    The stack is cumulative and the recipe emits one patch step per entry in
-    ``kept_patches``, so an entry an earlier round bound has to keep its root
-    here: a step whose root resolves to no record is refused as
-    ``root_unidentified``, and one silently re-pointed at this round's root
-    would be captured against a tree that never held it.
-
-    The ``done_payload`` contribution is admitted only for patches that ARE in
-    the accepted stack, on the same rule :func:`_sole_patch_root` applies to the
-    selected set: a recorded entry for a patch this integration did not take
-    cannot attest anything about the stack. Admitting it would add a root record
-    and a set of declared targets for a tree nothing in the stack touched, and
-    the capture would then be judged against files no round wrote.
-    """
-    accepted = [str(p) for p in (*(getattr(enablement, "kept_patches", None) or []), *applied) if str(p)]
-    in_stack = set(accepted)
-    roots: dict[str, str] = {}
-    prior = getattr(enablement, "patch_roots", None)
-    if isinstance(prior, Mapping):
-        # The durable mapping is keyed by the stack's own paths by construction:
-        # it is this function's own output from an earlier round.
-        roots.update({str(k): str(v) for k, v in prior.items() if str(k) and str(v)})
-    roots.update(
-        {
-            str(k): str(v)
-            for k, v in ((done_payload or {}).get("patch_roots") or {}).items()
-            if str(k) and str(v) and str(k) in in_stack
-        }
-    )
-    # The same fallback the projection uses, so the captured set and the
-    # replayed set cannot disagree about which tree a patch belongs to.
-    for key in accepted:
-        if not roots.get(key) and framework_root:
-            roots[key] = framework_root
-    return roots
-
-
-def _inherited_base_sha_by_root(enablement: Any) -> dict[str, str]:
-    """Return the base sha an earlier accepted round already named, per root.
-
-    Each KEEP is committed, so this round's pre-mutation HEAD already contains
-    its predecessors: recording it would name a tree the recipe's own earlier
-    patch steps have already been applied to, and a replay would apply them
-    again on top of their own result. The first accepted round's reading is the
-    one that names the tree the whole stack applies to.
-    """
-    inherited: dict[str, str] = {}
-    # The roots records only exist from the first KEEP onward; the durable map
-    # is written by every round that mutates a tree, advanced ones included, so
-    # it is the one that survives an ADVANCED -> KEEP sequence.
-    raw = getattr(enablement, "base_sha_by_root", None)
-    if isinstance(raw, Mapping):
-        inherited.update({str(k): str(v) for k, v in raw.items() if str(k) and str(v)})
-    for record in getattr(enablement, "roots", None) or []:
-        if not isinstance(record, Mapping):
-            continue
-        path, sha = str(record.get("path") or ""), str(record.get("base_sha") or "")
-        if path and sha:
-            inherited.setdefault(path, sha)
-    return inherited
-
-
-def _append_setup_executions(shared_state: Any, setup_result: dict[str, Any], *, session_dir: Path) -> None:
-    """Append this round's execution rows to the durable, append-only ledger."""
-    if shared_state is None or not shared_state.enablement.append_setup_executions(
-        setup_result.get("executions") or []
-    ):
-        return
+def _append_setup_execution(shared_state: Any, row: dict[str, Any], *, session_dir: Path) -> None:
+    """Append one execution row to the durable, append-only ledger."""
+    shared_state.enablement.append_setup_execution(row)
     try:
         shared_state.save(session_dir)
     except OSError:
@@ -2222,7 +2131,7 @@ class IntegratePatchExecutor:
         from ...enablement.runtime.adapters import get_adapter
         from ...enablement.runtime.stack_actions import EnablementStackAction
 
-        kept = _kept_stack_action(attempt)
+        kept = attempt.shared_state.enablement.kept_stack_action
         if kept:
             action = EnablementStackAction.from_state(kept)
         else:
@@ -2352,8 +2261,7 @@ class IntegratePatchExecutor:
         repo_url = repo_url_for_framework(framework)
         if not repo_url:
             return None
-        enablement = getattr(attempt.shared_state, "enablement", None)
-        ref = _first_ref_in_repo(getattr(enablement, "candidate_refs", None) or (), repo_url)
+        ref = _first_ref_in_repo(attempt.shared_state.enablement.candidate_refs, repo_url)
         if not ref:
             return None
 
@@ -2444,10 +2352,8 @@ class IntegratePatchExecutor:
                     cwd=self.session_dir,
                     log_dir=runs_dir(self.session_dir, "integrate_patch", attempt.task_id),
                     round_task_id=specialist_task_id,
-                    seq_start=shared_state.enablement.last_execution_seq() if shared_state is not None else 0,
-                    on_execution=lambda row: _append_setup_executions(
-                        shared_state, {"executions": [row]}, session_dir=self.session_dir
-                    ),
+                    seq_start=shared_state.enablement.last_execution_seq(),
+                    on_execution=lambda row: _append_setup_execution(shared_state, row, session_dir=self.session_dir),
                 )
                 # Each row is already durable: it is appended by the callback
                 # above, inside the worker, as its command finishes. Several
@@ -2569,7 +2475,7 @@ class IntegratePatchExecutor:
         _setup_ran = bool(setup_result.get("applied"))
         # A runtime this round acquired changes what the next boot executes; a
         # re-provisioned kept one is the stack the last KEEP was already graded on.
-        acquired_runtime = bool(attempt.attempt_venv_root) and not _kept_stack_action(attempt)
+        acquired_runtime = bool(attempt.attempt_venv_root) and not attempt.shared_state.enablement.kept_stack_action
         if (
             not patch_paths
             and not proposal_extra_args
@@ -3256,8 +3162,7 @@ class IntegratePatchExecutor:
                 # against the tree it is bound to, so a mis-binding refuses
                 # the whole recipe -- for a legitimate multi-root stack a
                 # false refusal rather than a false pass.
-                "enablement_patch_roots": _accepted_patch_roots(
-                    getattr(attempt.shared_state, "enablement", None),
+                "enablement_patch_roots": attempt.shared_state.enablement.accepted_patch_roots(
                     done_payload=done_payload,
                     applied=applied,
                     framework_root=str(framework_root or ""),
@@ -3416,19 +3321,16 @@ class IntegratePatchExecutor:
         from ._patch_snapshot import overlay_inventory_without_base, replayed_stack_ops
 
         root = str(framework_root or "")
-        shared_state = attempt.shared_state
-        enablement = getattr(shared_state, "enablement", None)
-        patch_roots = _accepted_patch_roots(
-            enablement,
+        enablement = attempt.shared_state.enablement
+        patch_roots = enablement.accepted_patch_roots(
             done_payload=done_payload,
             applied=applied,
             framework_root=root,
         )
         # Read from the durable stack: the round lifecycle does not dispatch
         # the base set with the round.
-        inherited_artifacts = [a for a in (getattr(enablement, "kept_artifacts", None) or []) if isinstance(a, Mapping)]
         stack_artifacts = accepted_stack_artifacts(
-            inherited=inherited_artifacts,
+            inherited=enablement.kept_artifacts,
             applied=applied_artifacts,
         )
         contributions = collect_contributions(
@@ -3442,7 +3344,7 @@ class IntegratePatchExecutor:
         # root left with no sha either way keeps none, which the decision refuses
         # rather than answering with a HEAD that has moved since.
         captured: dict[str, str] = attempt.base_sha_by_root
-        inherited_sha = _inherited_base_sha_by_root(enablement)
+        inherited_sha = enablement.inherited_base_shas()
         base_sha_by_root = {r: inherited_sha.get(r, "") or captured.get(r, "") for r in git_roots}
         records = build_root_records(
             contributions=contributions,
@@ -3457,10 +3359,9 @@ class IntegratePatchExecutor:
         # Apply order, not dict order: ``patch_roots`` is keyed by patch path and
         # its iteration order follows how the mapping was assembled, while the
         # operation a later patch declares must override an earlier one's for the
-        # same file. ``kept_patches`` then this round's ``applied`` is the order
-        # the stack was built in and the order a consumer replays it in.
-        ordered_patches = [str(p) for p in (*(getattr(enablement, "kept_patches", None) or []), *applied) if str(p)]
-        # ``_accepted_patch_roots`` binds only patches that ARE in the accepted
+        # same file.
+        ordered_patches = enablement.accepted_stack(applied)
+        # ``EnablementRound.accepted_patch_roots`` binds only patches that ARE in the accepted
         # stack, so this normally adds nothing. It stays because the durable
         # mapping outlives the round that wrote it: an entry for a patch no
         # longer in ``kept_patches`` would otherwise contribute a root record
@@ -3573,12 +3474,12 @@ class IntegratePatchExecutor:
             "enablement_environment_closure": closure,
             "enablement_installed_versions_at_keep": assertions,
             "enablement_build_extensions_not_carried": self._build_extensions_not_carried(
-                getattr(attempt.shared_state, "enablement", None),
+                enablement,
                 framework_root,
                 specialist_task_id=specialist_task_id,
             ),
             "enablement_levers_without_readers": self._levers_without_readers(
-                getattr(attempt.shared_state, "enablement", None),
+                enablement,
                 framework_root,
                 framework=self._graded_framework(params, str(bench_result.get("materialized_config") or "")),
                 effective_config=bench_result.get("effective_config"),
@@ -3587,7 +3488,7 @@ class IntegratePatchExecutor:
 
     @staticmethod
     def _levers_without_readers(
-        enablement: Any,
+        enablement: EnablementRound,
         framework_root: Path | None,
         *,
         framework: str,
@@ -3626,9 +3527,8 @@ class IntegratePatchExecutor:
         # lever this round introduced -- the one the recipe will export -- is
         # not in shared state yet, and scanning only that would check every
         # round's levers except the decisive one.
-        accepted = getattr(enablement, "accepted_config", None) or {}
         merged: dict[str, Any] = {}
-        for source in (accepted, effective_config):
+        for source in (enablement.accepted_config, effective_config):
             if not isinstance(source, Mapping):
                 continue
             block = source.get("extra_envs")
@@ -3682,7 +3582,7 @@ class IntegratePatchExecutor:
 
     @staticmethod
     def _build_extensions_not_carried(
-        enablement: Any, framework_root: Path | None, *, specialist_task_id: str = ""
+        enablement: EnablementRound, framework_root: Path | None, *, specialist_task_id: str = ""
     ) -> list[str] | None:
         """Return the build's compiled extensions the framework root does not have.
 
@@ -3721,13 +3621,13 @@ class IntegratePatchExecutor:
             return []
         from ...enablement.recipe.projections import select_linked_build
 
-        rounds = list(getattr(enablement, "kept_rounds", None) or [])
+        rounds = list(enablement.kept_rounds)
         current = str(specialist_task_id or "").strip()
         if current and not any(str((r or {}).get("task_id") or "").strip() == current for r in rounds):
             rounds.append({"task_id": current})
         state = {
-            "build_manifest": list(getattr(enablement, "build_manifest", None) or []),
-            "last_specialist_task_id": str(getattr(enablement, "last_specialist_task_id", "") or ""),
+            "build_manifest": list(enablement.build_manifest),
+            "last_specialist_task_id": enablement.last_specialist_task_id,
             "kept_rounds": rounds,
         }
         _sentinel, row = select_linked_build(state)
@@ -3877,13 +3777,12 @@ class IntegratePatchExecutor:
             backend_name=backend,
             backend_interpreter=fallback,
         )
-        enablement = getattr(attempt.shared_state, "enablement", None)
         provision_versions = (
             None if provision_result is None else getattr(provision_result, "installed_versions", None) or {}
         )
         packages = keep_assertion_packages(
             provision_versions=provision_versions,
-            build_manifest=getattr(enablement, "build_manifest", None) or [],
+            build_manifest=attempt.shared_state.enablement.build_manifest,
             specialist_task_id=specialist_task_id,
         )
         return probe_environment_closure(interpreter, env=graded_env, packages=packages)
