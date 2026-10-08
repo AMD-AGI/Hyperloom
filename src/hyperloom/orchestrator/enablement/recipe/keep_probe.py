@@ -41,7 +41,8 @@ _PROBE_SCRIPT = (
     "    name=(dist.metadata['Name'] if dist.metadata else '') or ''\n"
     "    if name:\n"
     "        d[name]=dist.version or ''\n"
-    "print(json.dumps({'interpreter_tag': sys.version.split()[0], 'distributions': d}))\n"
+    "print(json.dumps({'interpreter_tag': sys.version.split()[0], 'interpreter': sys.executable, "
+    "'distributions': d}))\n"
 )
 
 
@@ -159,7 +160,11 @@ def probe_environment_closure(
     distributions = {str(k): str(v) for k, v in (payload.get("distributions") or {}).items()}
     if not distributions:
         return {}, {}
-    closure = {"interpreter_tag": str(payload.get("interpreter_tag") or ""), "distributions": distributions}
+    closure = {
+        "interpreter_tag": str(payload.get("interpreter_tag") or ""),
+        "interpreter": str(payload.get("interpreter") or ""),
+        "distributions": distributions,
+    }
     lowered = {name.lower().replace("-", "_"): version for name, version in distributions.items()}
     assertions = {
         pkg: lowered[pkg.lower().replace("-", "_")] for pkg in packages if pkg.lower().replace("-", "_") in lowered

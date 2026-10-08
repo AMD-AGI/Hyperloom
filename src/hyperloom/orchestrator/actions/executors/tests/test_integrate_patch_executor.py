@@ -2782,3 +2782,60 @@ async def test_a_scriptable_source_patch_over_the_latency_budget_is_reverted(
     if expected_status == "reverted":
         assert "latency_budget_exceeded" in result["reason"]
     assert (repo / "src.py").read_text().endswith(f"return {expected_return}\n")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prior_ledger", [[], [{"seq": 1, "round_task_id": "t-earlier"}]])
+async def test_the_closure_baseline_is_read_before_the_first_setup_command(tmp_path: Path, monkeypatch, prior_ledger):
+    """The setup script checks what changed against this reading, so it must predate every install."""
+    from types import SimpleNamespace
+
+    from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
+    from hyperloom.orchestrator.enablement.recipe import keep_probe
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    repo = tmp_path / "framework"
+    init_git_repo(repo)
+    _write_specialist_workspace(session_dir, "t-spec-base", patch_contents=[_BAD_PATCH])
+    events: list[str] = []
+
+    def _probe(*_args, **_kwargs):
+        events.append("probe")
+        return {"interpreter": "/usr/bin/python3", "distributions": {"transformers": "4.0"}}, {}
+
+    def _installed(commands, **_kwargs):
+        events.append("setup")
+        return {"applied": [cmd for cmd, _source in commands], "skipped": [], "failed": [], "executions": []}
+
+    monkeypatch.setattr(keep_probe, "probe_keep_environment", _probe)
+    monkeypatch.setattr(ip_mod, "run_setup_commands", _installed)
+    shared_state = SimpleNamespace(
+        enablement=EnablementRound(setup_executions=list(prior_ledger)),
+        save=lambda _dir: None,
+        get_specialist_patch_verdict=lambda _subject: "approve",
+    )
+    params = {
+        "specialist_task_id": "t-spec-base",
+        "framework_source_root": str(repo),
+        "enablement": True,
+        "enablement_setup_commands": ["pip install -U transformers"],
+    }
+    task = Task(
+        task_id="t-int-base",
+        kind="integrate_patch",
+        state="queued",
+        params=params,
+        idempotency_key="t-int-base",
+        requires_lanes=tuple(),
+    )
+    await IntegratePatchExecutor(session_dir=session_dir)(
+        RunnerContext(task=task, lease=None, extra={"shared_state": shared_state})
+    )
+
+    assert events[:2] == ["probe", "setup"]
+    baseline = shared_state.enablement.environment_closure_baseline
+    # A reading taken after an earlier round's install would name its versions as the start.
+    assert baseline == (
+        {} if prior_ledger else {"interpreter": "/usr/bin/python3", "distributions": {"transformers": "4.0"}}
+    )

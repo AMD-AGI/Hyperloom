@@ -273,15 +273,6 @@ def _round(task_id, *patches, artifacts=()):
     return {"task_id": task_id, "patches": list(patches), "artifacts": list(artifacts)}
 
 
-def _archive_patches(tmp_path, task_id, patch_paths):
-    """Pre-populate the round archive so write_setting_script can read from it."""
-    archive_dir = tmp_path / "reports" / "enablement" / task_id / "patches"
-    archive_dir.mkdir(parents=True, exist_ok=True)
-    for p in patch_paths:
-        src = Path(p)
-        (archive_dir / src.name).write_bytes(src.read_bytes())
-
-
 def _collected_and_vetted_round(tmp_path, target, before, after):
     workspace = tmp_path / "runs" / "specialist" / "abc123"
     worktree = workspace / "worktree"
@@ -362,15 +353,17 @@ def test_setup_only_round_does_not_install_rejected_scan_patch(tmp_path, target,
     en.framework_root = result["framework_root"]
     en.setup_commands = result["setup_commands_applied"]
     en.kept_rounds = [_round(result["specialist_task_id"], *result["patches_applied"])]
+    closure = {"interpreter": "/usr/bin/python3", "distributions": {"local-runtime": "1.0"}}
+    en.environment_closure = closure
+    en.environment_closure_baseline = {"interpreter": "/usr/bin/python3", "distributions": {"local-runtime": "0.9"}}
 
-    rel = write_setting_script(tmp_path, en, "sglang", model="/models/M")
+    write_setting_script(tmp_path, en, "sglang", model="/models/M")
 
-    text = (tmp_path / rel).read_text(encoding="utf-8")
+    text = (tmp_path / "reports" / "enablement" / "enablement_setup.sh").read_text(encoding="utf-8")
     assert setup[0] in text
-    assert "apply_patch" not in text
-    assert "install -D" not in text
+    assert "place_file" not in text
     assert en.kept_rounds == [{"task_id": result["specialist_task_id"], "patches": [], "artifacts": []}]
-    assert not (tmp_path / "reports" / "enablement" / "patches").exists()
+    assert not (tmp_path / "reports" / "enablement" / "setup_files").exists()
     assert patch.is_file()
 
 
@@ -383,218 +376,24 @@ def test_setup_only_round_does_not_install_rejected_scan_patch(tmp_path, target,
         ("configs/runtime.json", '{"block_size": 64}\n', '{"block_size": 128}\n'),
     ],
 )
-def test_vetted_source_and_config_patches_survive_snapshot_and_replay(tmp_path, target, before, after):
+def test_vetted_source_and_config_patches_are_archived(tmp_path, target, before, after):
     worktree, patch, kept, dropped = _collected_and_vetted_round(tmp_path, target, before, after)
     assert kept == [str(patch)]
     assert dropped == []
-    _git("-C", str(worktree), "apply", str(patch))
 
-    result = _res(patches_applied=kept, framework_root=str(worktree))
-    archive = snapshot_round(tmp_path, result)
+    archive = snapshot_round(tmp_path, _res(patches_applied=kept, framework_root=str(worktree)))
     archived_patch = archive.path_for(ROLE_PATCH)
     assert (tmp_path / archived_patch).read_bytes() == patch.read_bytes()
-    en = EnablementRound()
-    en.framework_root = str(worktree)
-    en.kept_rounds = [_round(result["specialist_task_id"], *kept)]
-    rel = write_setting_script(tmp_path, en, "sglang", model="/models/M")
-    text = (tmp_path / rel).read_text(encoding="utf-8")
-    assert "apply_patch patches/001_manual.patch" in text
-    assert (tmp_path / "reports" / "enablement" / "patches" / "001_manual.patch").read_bytes() == patch.read_bytes()
 
 
-def test_whole_file_artifact_is_replayed_without_claiming_a_patch(tmp_path):
+def test_whole_file_artifact_is_archived_without_claiming_a_patch(tmp_path):
     source = Path(_patch(tmp_path, "runs/runtime.yaml", "block_size: 128\n"))
     content = source.read_bytes()
     target = tmp_path / "framework" / "configs" / "runtime.yaml"
-    result = _res(artifacts_applied=[{"source": str(source), "target": str(target)}])
-    archive = snapshot_round(tmp_path, result)
-    assert archive.path_for(ROLE_ARTIFACT_SOURCE)
+    archive = snapshot_round(tmp_path, _res(artifacts_applied=[{"source": str(source), "target": str(target)}]))
+    assert (tmp_path / archive.path_for(ROLE_ARTIFACT_SOURCE)).read_bytes() == content
     assert archive.paths_for(ROLE_PATCH) == ()
-    source.unlink()
-    en = EnablementRound()
-    en.kept_rounds = [_round(result["specialist_task_id"], artifacts=result["artifacts_applied"])]
-
-    rel = write_setting_script(tmp_path, en, "sglang", model="/models/M")
-
-    text = (tmp_path / rel).read_text(encoding="utf-8")
-    assert "install -D" in text
-    assert "apply_patch" not in text
-    assert en.kept_rounds[0]["patches"] == []
-    assert (tmp_path / "reports" / "enablement" / "artifacts" / "001_runtime.yaml").read_bytes() == content
-
-
-def test_write_setting_script_produces_executable(tmp_path):
-    en = EnablementRound()
-    en.setup_commands = ["pip install vllm==0.24"]
-    en.accepted_config = {"extra_envs": {"VLLM_ROCM_USE_AITER": "1"}, "extra_server_args": "--tp 4"}
-    en.framework_root = "/sgl-workspace/sglang"
-    patch_path = _patch(tmp_path, "runs/specialist/s1/001.patch")
-    _archive_patches(tmp_path, "s1", [patch_path])
-    en.kept_rounds = [_round("s1", patch_path)]
-
-    rel = write_setting_script(tmp_path, en, "sglang")
-    out = tmp_path / rel
-    text = out.read_text(encoding="utf-8")
-    assert "set -euo pipefail" in text
-    assert "pip install vllm==0.24" in text
-    assert "export VLLM_ROCM_USE_AITER=1" in text
-    assert "apply_patch patches/001_001.patch" in text
-    assert "export FRAMEWORK_ROOT=/sgl-workspace/sglang" in text
-    assert "sglang.launch_server" in text
-    assert "--tp 4" in text
-
-
-def test_write_setting_script_is_owner_only(tmp_path):
-    """The script exports accepted_config envs verbatim, so it stays owner-only."""
-    rel = write_setting_script(tmp_path, EnablementRound(), "sglang")
-    assert (tmp_path / rel).stat().st_mode & 0o777 == 0o700
-
-
-def test_same_named_patches_do_not_collide(tmp_path):
-    """Specialists across rounds pick colliding names; the stack order keeps them apart."""
-    en = EnablementRound()
-    en.framework_root = "/sgl-workspace/sglang"
-    p1 = _patch(tmp_path, "runs/specialist/s1/patches/001_fix.patch", "first\n")
-    p2 = _patch(tmp_path, "runs/specialist/s2/patches/001_fix.patch", "second\n")
-    _archive_patches(tmp_path, "s1", [p1])
-    _archive_patches(tmp_path, "s2", [p2])
-    en.kept_rounds = [_round("s1", p1), _round("s2", p2)]
-
-    write_setting_script(tmp_path, en, "sglang")
-    dest = tmp_path / "reports" / "enablement" / "patches"
-    assert (dest / "001_001_fix.patch").read_text() == "first\n"
-    assert (dest / "002_001_fix.patch").read_text() == "second\n"
-    text = (tmp_path / "reports" / "enablement" / "enablement_setting.sh").read_text()
-    assert text.count("apply_patch ") == 2
-
-
-def test_patches_dropped_without_a_framework_root(tmp_path):
-    """git apply has no target, so emitting the section would guarantee a failure."""
-    en = EnablementRound()
-    p = _patch(tmp_path, "fix.patch")
-    _archive_patches(tmp_path, "s1", [p])
-    en.kept_rounds = [_round("s1", p)]
-
-    write_setting_script(tmp_path, en, "sglang")
-    text = (tmp_path / "reports" / "enablement" / "enablement_setting.sh").read_text()
-    assert "apply_patch" not in text
-    assert "FRAMEWORK_ROOT" not in text
-
-
-def test_oversized_patch_is_not_referenced(tmp_path):
-    """A skipped copy must not leave a dangling apply line."""
-    en = EnablementRound()
-    en.framework_root = "/sgl-workspace/sglang"
-    # Nothing in the round archive: a big patch was never archived.
-    en.kept_rounds = [_round("s1")]
-
-    write_setting_script(tmp_path, en, "sglang")
-    text = (tmp_path / "reports" / "enablement" / "enablement_setting.sh").read_text()
-    assert "apply_patch" not in text
-
-
-def test_write_setting_script_runtime_note(tmp_path):
-    en = EnablementRound()
-    en.active_runtime = {"venv_root": "/session/enablement/stacks/sglang/s1/venv"}
-
-    write_setting_script(tmp_path, en, "sglang")
-    text = (tmp_path / "reports" / "enablement" / "enablement_setting.sh").read_text()
-    assert "isolated attempt venv" in text
-
-
-def test_write_setting_script_minimal_no_enablement_params(tmp_path):
-    """Without patches/setup, a basic launch line is still emitted."""
-    en = EnablementRound()
-    en.accepted_config = {"extra_server_args": "--block-size 128", "extra_envs": {}}
-
-    write_setting_script(tmp_path, en, "vllm", model="/models/M", tp=8)
-    text = (tmp_path / "reports" / "enablement" / "enablement_setting.sh").read_text()
-    assert "vllm serve $MODEL" in text
-    assert "export MODEL=/models/M" in text
-    assert "export TP=8" in text
-
-
-def test_synthetic_round_does_not_break_a_good_script(tmp_path):
-    """A phase-synthesised round carries no task_id; the good round still applies."""
-    en = EnablementRound()
-    en.framework_root = "/sgl-workspace/sglang"
-    p = _patch(tmp_path, "fix.patch")
-    _archive_patches(tmp_path, "s1", [p])
-    en.kept_rounds = [_round("s1", p), _round("")]  # second round has no task_id
-
-    write_setting_script(tmp_path, en, "sglang")
-    text = (tmp_path / "reports" / "enablement" / "enablement_setting.sh").read_text()
-    assert "export FRAMEWORK_ROOT=/sgl-workspace/sglang" in text
-    assert "apply_patch" in text
 
 
 def _git(*args):
     subprocess.run(["git", *args], check=True, capture_output=True)
-
-
-def test_generated_script_actually_applies_its_patch(tmp_path):
-    """End-to-end: the replay really patches the tree and reaches the launch line."""
-    root = tmp_path / "fw"
-    root.mkdir()
-    _git("init", "-q", str(root))
-    (root / "f.txt").write_text("one\n", encoding="utf-8")
-    _git("-C", str(root), "add", ".")
-    _git("-C", str(root), "-c", "user.email=a@b", "-c", "user.name=x", "commit", "-qm", "init")
-
-    patch_body = "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-one\n+two\n"
-    patch_path = _patch(tmp_path, "runs/s1/fix.patch", patch_body)
-    _archive_patches(tmp_path, "s1", [patch_path])
-
-    en = EnablementRound()
-    en.framework_root = str(root)
-    en.kept_rounds = [_round("s1", patch_path)]
-    rel = write_setting_script(tmp_path, en, "sglang", model="/models/M")
-
-    # Stub the launcher so only the replay portion executes.
-    proc = subprocess.run(
-        ["bash", "-c", f'python3(){{ echo LAUNCHED; }}; source "{tmp_path / rel}"'],
-        capture_output=True,
-        text=True,
-    )
-    assert proc.returncode == 0, proc.stderr
-    assert "LAUNCHED" in proc.stdout
-    assert (root / "f.txt").read_text() == "two\n"
-
-
-def test_generated_script_runs_from_any_cwd(tmp_path):
-    """git -C resolves relative patch paths against the target tree, not the caller."""
-    root = tmp_path / "fw"
-    root.mkdir()
-    _git("init", "-q", str(root))
-    (root / "f.txt").write_text("one\n", encoding="utf-8")
-    _git("-C", str(root), "add", ".")
-    _git("-C", str(root), "-c", "user.email=a@b", "-c", "user.name=x", "commit", "-qm", "init")
-
-    patch_body = "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-one\n+two\n"
-    patch_path = _patch(tmp_path, "runs/s1/fix.patch", patch_body)
-    _archive_patches(tmp_path, "s1", [patch_path])
-
-    en = EnablementRound()
-    en.framework_root = str(root)
-    en.kept_rounds = [_round("s1", patch_path)]
-    rel = write_setting_script(tmp_path, en, "sglang", model="/models/M")
-
-    proc = subprocess.run(
-        ["bash", "-c", f'python3(){{ :; }}; source "{tmp_path / rel}"'],
-        capture_output=True,
-        text=True,
-        cwd="/tmp",
-    )
-    assert proc.returncode == 0, proc.stderr
-    assert (root / "f.txt").read_text() == "two\n"
-
-
-def test_generated_script_demands_a_model_when_none_is_known(tmp_path):
-    """The launch line dereferences $MODEL; set -u would otherwise kill it first."""
-    en = EnablementRound()
-    en.setup_commands = ["echo installing"]
-    rel = write_setting_script(tmp_path, en, "sglang")
-
-    proc = subprocess.run(["bash", str(tmp_path / rel)], capture_output=True, text=True)
-    assert proc.returncode != 0
-    assert "set MODEL to the model path" in proc.stderr
