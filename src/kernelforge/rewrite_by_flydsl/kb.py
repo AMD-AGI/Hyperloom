@@ -14,8 +14,8 @@ from typing import Any
 
 from kernelforge.config import Config
 from kernelforge.knowledge.kb_store import warmstart_policy
-from kernelforge.knowledge.kb_store.reader import sanitize_read_error
 from kernelforge.knowledge.kb_store.config import knowledge_config_from_runtime
+from kernelforge.knowledge.kb_store.errors import sanitize_read_error
 from kernelforge.knowledge.kb_store.identity.warmstart_rank import rank_fallback_identities
 from kernelforge.knowledge.kb_store.recipe import candidate_session_id
 from kernelforge.loop.validation import run_validation_pipeline

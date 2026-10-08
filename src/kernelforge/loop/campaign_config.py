@@ -17,7 +17,7 @@ from pathlib import Path
 
 from kernelforge.llm.git import git
 from kernelforge.kernel_backends.constants import KERNEL_BACKENDS
-from kernelforge.knowledge.kb_store.writer import (
+from kernelforge.knowledge.kb_store.identity.source_resolution import (
     infer_source_owner_framework,
     resolve_operation,
 )

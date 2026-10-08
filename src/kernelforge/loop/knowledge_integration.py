@@ -780,11 +780,11 @@ def _record_measured_speedup(
     rank: int,
 ) -> dict:
     """Write one measured speedup back onto the KB record it was read from."""
-    from kernelforge.knowledge.kb_store.reader import sanitize_read_error
-    from kernelforge.knowledge.kb_store.recipe import (
-        KernelRecipeKB,
+    from kernelforge.knowledge.kb_store.errors import (
         kb_store_secrets,
+        sanitize_read_error,
     )
+    from kernelforge.knowledge.kb_store.recipe import KernelRecipeKB
 
     solution_slug = str(sol.get("solution_slug") or "")
     canonical_id = str(sol.get("kernel_slug") or "")
@@ -1308,8 +1308,10 @@ def kb_warmstart(
     except WarmStartRestoreError:
         raise
     except Exception as e:  # noqa: BLE001 - warm-start must never break the run
-        from kernelforge.knowledge.kb_store.reader import sanitize_read_error
-        from kernelforge.knowledge.kb_store.recipe import kb_store_secrets
+        from kernelforge.knowledge.kb_store.errors import (
+            kb_store_secrets,
+            sanitize_read_error,
+        )
 
         error = sanitize_read_error(e, secrets=kb_store_secrets(config))
         print(f"  [kb] warm-start skipped ({error})", flush=True)

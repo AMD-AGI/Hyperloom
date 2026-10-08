@@ -15,7 +15,10 @@ from pathlib import Path
 from kernelforge.llm.git import git
 from kernelforge.config import Config
 from kernelforge.loop.knowledge_integration import git_checkout_branch
-from kernelforge.knowledge.kb_store.reader import sanitize_read_error
+from kernelforge.knowledge.kb_store.errors import (
+    kb_store_secrets,
+    sanitize_read_error,
+)
 from kernelforge.rewrite_by_flydsl import (
     driver_contract,
     flydsl_rewrite_driver_preparation,
@@ -23,7 +26,6 @@ from kernelforge.rewrite_by_flydsl import (
     report,
     seed,
 )
-from kernelforge.knowledge.kb_store.recipe import kb_store_secrets
 from kernelforge.rewrite_by_flydsl.applyback import generate_applyback_patch
 from kernelforge.rewrite_by_flydsl.attempt import (
     create_attempt_workspace,

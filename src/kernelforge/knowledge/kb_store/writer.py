@@ -16,10 +16,16 @@ from typing import Any
 
 from hyperloom.common.unified_diff import touched_paths
 
+from kernelforge.knowledge.kb_store.errors import (
+    kb_store_secrets,
+    sanitize_read_error,
+)
 from kernelforge.knowledge.kb_store.identity.implementation import (
-    canonical_owner_framework,
     hash_implementation_identity,
     implementation_signature,
+)
+from kernelforge.knowledge.kb_store.identity.source_resolution import (
+    find_defining_source,
 )
 
 log = logging.getLogger(__name__)
@@ -32,148 +38,7 @@ _MAX_DIGEST_CHARS = 8000
 _MAX_SOURCE_CHARS = 6000
 _LLM_TIMEOUT_SEC = 150
 
-# Frameworks whose kernels are detected from package-relative paths.
-_FRAMEWORKS = ("aiter", "sglang", "vllm")
-
-# Explicit "no framework" values for --framework: a standalone kernel file that belongs to no framework package.
-_NO_FRAMEWORK_SENTINELS = {"standalone", "none", "unknown"}
-
 _C_LIKE_LANGS = {"hip", "cuda", "cpp", "c"}
-
-
-# --------------------------------------------------------------------------- # slug / value normalization
-# --------------------------------------------------------------------------- #
-def resolve_operation(kernel_source: str, kernel_path: str, target_functions: list[str] | None = None) -> str:
-    """Return the operation identity (the entry function name, not the file name)."""
-
-    def _pick(names: list[str]) -> str | None:
-        preferred = [n for n in names if not n.lower().startswith(("launch", "main", "wrapper", "run_"))]
-        if preferred:
-            return preferred[0]
-        return names[0] if names else None
-
-    try:
-        from kernelforge.mcp_server.tools.pmc import derive_kernel_names
-
-        # Anchor source order is stable for the same file, so keep it (the first compute kernel is usually the primary
-        # one, helpers come later).
-        picked = _pick(derive_kernel_names(kernel_source or ""))
-        if picked:
-            return picked
-    except Exception as exc:  # noqa: BLE001 - best-effort; fall back below
-        log.debug("resolve_operation: derive_kernel_names failed: %r", exc)
-    # Fallback: order-independent (sorted, de-duplicated) so producer/consumer converge even when their
-    # target-function lists are ordered differently.
-    cand = sorted({fn.strip() for fn in (target_functions or []) if fn and fn.strip()})
-    picked = _pick(cand)
-    if picked:
-        return picked
-    return Path(kernel_path).stem
-
-
-def detect_backend_language(kernel_backend: str) -> str:
-    """Derive the implementation language exclusively from the selected kernel_backend."""
-    lang = str(kernel_backend or "").split("-", 1)[0].strip().lower()
-    return lang or _UNKNOWN
-
-
-def detect_framework(kernel_path: str, framework_override: str = "") -> str:
-    """Detect the owning framework."""
-    raw_fw = (framework_override or "").strip().lower()
-    fw = canonical_owner_framework(raw_fw)
-    if raw_fw:
-        if raw_fw in _NO_FRAMEWORK_SENTINELS:
-            return _UNKNOWN
-        return fw
-    parts = {canonical_owner_framework(p) for p in Path(kernel_path).parts}
-    for fwname in _FRAMEWORKS:
-        if fwname in parts:
-            return fwname
-    return _UNKNOWN
-
-
-def _read_text_safe(
-    path: str,
-    source_contents: dict[str, str] | None = None,
-) -> str:
-    if source_contents is not None:
-        candidates = (str(path), str(Path(path).resolve()))
-        for candidate in candidates:
-            if candidate in source_contents:
-                return source_contents[candidate]
-    try:
-        return Path(path).read_text(errors="replace")
-    except Exception:  # noqa: BLE001 - best-effort
-        return ""
-
-
-def find_defining_source(
-    op: str,
-    anchor_path: str,
-    anchor_source: str,
-    source_files: list[str] | None,
-    *,
-    source_contents: dict[str, str] | None = None,
-) -> str:
-    """Return the source text that DEFINES ``op`` (for signature/dtype parsing)."""
-    if not op:
-        return anchor_source or ""
-    def_re = re.compile(r"\bdef\s+" + re.escape(op) + r"\b")
-    glob_re = re.compile(r"__global__[^\n]*\b" + re.escape(op) + r"\b")
-    if def_re.search(anchor_source or "") or glob_re.search(anchor_source or ""):
-        return anchor_source or ""
-    for f in source_files or []:
-        txt = _read_text_safe(f, source_contents)
-        if txt and (def_re.search(txt) or glob_re.search(txt)):
-            return txt
-    return anchor_source or ""
-
-
-def find_defining_path(
-    op: str,
-    anchor_path: str,
-    anchor_source: str,
-    source_files: list[str] | None,
-    *,
-    source_contents: dict[str, str] | None = None,
-) -> str:
-    """Return the PATH of the file that DEFINES ``op`` (for framework detection)."""
-    if not op:
-        return anchor_path
-    def_re = re.compile(r"\bdef\s+" + re.escape(op) + r"\b")
-    glob_re = re.compile(r"__global__[^\n]*\b" + re.escape(op) + r"\b")
-    if def_re.search(anchor_source or "") or glob_re.search(anchor_source or ""):
-        return anchor_path
-    for f in source_files or []:
-        txt = _read_text_safe(f, source_contents)
-        if txt and (def_re.search(txt) or glob_re.search(txt)):
-            return f
-    return anchor_path
-
-
-def infer_source_owner_framework(
-    *,
-    kernel_path: str,
-    kernel_source: str,
-    target_functions: list[str] | None = None,
-    source_files: list[str] | None = None,
-    framework_override: str = "",
-    source_contents: dict[str, str] | None = None,
-    concrete_operation: str = "",
-) -> str:
-    """Resolve the canonical framework that owns the concrete operation."""
-    concrete_op = concrete_operation or resolve_operation(kernel_source, kernel_path, target_functions=target_functions)
-    defining_path = find_defining_path(
-        concrete_op,
-        kernel_path,
-        kernel_source,
-        source_files,
-        source_contents=source_contents,
-    )
-    return detect_framework(
-        defining_path,
-        framework_override=framework_override,
-    )
 
 
 # --------------------------------------------------------------------------- # deterministic signature -> input
@@ -528,11 +393,6 @@ def write_run_experience(
             usage=usage,
         )
     except Exception as exc:  # noqa: BLE001 - a KB write must never break the loop
-        # Imported here rather than at module scope: the reader imports this module for detect_framework, so a
-        # top-level import would close a cycle.
-        from kernelforge.knowledge.kb_store.reader import sanitize_read_error
-        from kernelforge.knowledge.kb_store.recipe import kb_store_secrets
-
         reason = sanitize_read_error(exc, secrets=kb_store_secrets(config))
         log.warning("experience write failed (skipped): %s", reason)
         return {"written": False, "reason": reason}

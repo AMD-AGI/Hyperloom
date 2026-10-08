@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from kernelforge.knowledge.kb_store.identity import source_resolution
 from kernelforge.knowledge.kb_store import writer as sink
 
 
@@ -11,22 +12,22 @@ def test_resolve_operation_prefers_compute_kernel(monkeypatch):
     import kernelforge.mcp_server.tools.pmc as pmc
 
     monkeypatch.setattr(pmc, "derive_kernel_names", lambda _src: ["launch_wrapper", "my_gemm"])
-    assert sink.resolve_operation("src", "/p/f.py") == "my_gemm"
+    assert source_resolution.resolve_operation("src", "/p/f.py") == "my_gemm"
 
 
 def test_resolve_operation_uses_first_when_all_launchers(monkeypatch):
     import kernelforge.mcp_server.tools.pmc as pmc
 
     monkeypatch.setattr(pmc, "derive_kernel_names", lambda _src: ["launch_a", "main"])
-    assert sink.resolve_operation("src", "/p/f.py") == "launch_a"
+    assert source_resolution.resolve_operation("src", "/p/f.py") == "launch_a"
 
 
 def test_resolve_operation_falls_back_to_target_then_stem(monkeypatch):
     import kernelforge.mcp_server.tools.pmc as pmc
 
     monkeypatch.setattr(pmc, "derive_kernel_names", lambda _src: [])
-    assert sink.resolve_operation("", "/p/f.py", target_functions=["", " op_x "]) == "op_x"
-    assert sink.resolve_operation("", "/p/my_file.py", target_functions=[]) == "my_file"
+    assert source_resolution.resolve_operation("", "/p/f.py", target_functions=["", " op_x "]) == "op_x"
+    assert source_resolution.resolve_operation("", "/p/my_file.py", target_functions=[]) == "my_file"
 
 
 def test_resolve_operation_fallback_is_order_independent(monkeypatch):
@@ -35,11 +36,11 @@ def test_resolve_operation_fallback_is_order_independent(monkeypatch):
     import kernelforge.mcp_server.tools.pmc as pmc
 
     monkeypatch.setattr(pmc, "derive_kernel_names", lambda _src: [])
-    a = sink.resolve_operation("", "/p/f.py", target_functions=["gemm_kernel", "epilogue_kernel"])
-    b = sink.resolve_operation("", "/p/f.py", target_functions=["epilogue_kernel", "gemm_kernel"])
+    a = source_resolution.resolve_operation("", "/p/f.py", target_functions=["gemm_kernel", "epilogue_kernel"])
+    b = source_resolution.resolve_operation("", "/p/f.py", target_functions=["epilogue_kernel", "gemm_kernel"])
     assert a == b
     # launchers/wrappers are de-prioritized even when they sort first
-    c = sink.resolve_operation("", "/p/f.py", target_functions=["launch_gemm", "gemm_kernel"])
+    c = source_resolution.resolve_operation("", "/p/f.py", target_functions=["launch_gemm", "gemm_kernel"])
     assert c == "gemm_kernel"
 
 
@@ -50,33 +51,33 @@ def test_resolve_operation_survives_derive_exception(monkeypatch):
         raise RuntimeError("derive failed")
 
     monkeypatch.setattr(pmc, "derive_kernel_names", boom)
-    assert sink.resolve_operation("", "/p/stem.py") == "stem"
+    assert source_resolution.resolve_operation("", "/p/stem.py") == "stem"
 
 
 # --------------------------------------------------------------------------- # detect_backend_language
 # --------------------------------------------------------------------------- #
 def test_detect_backend_language_kernel_backend_wins():
-    assert sink.detect_backend_language("flydsl") == "flydsl"
+    assert source_resolution.detect_backend_language("flydsl") == "flydsl"
 
 
 def test_detect_backend_language_requires_kernel_backend():
-    assert sink.detect_backend_language("") == "unknown"
+    assert source_resolution.detect_backend_language("") == "unknown"
 
 
 def test_detect_framework_standalone_is_unknown():
-    assert sink.detect_framework("/tmp/standalone/k.py") == "unknown"
+    assert source_resolution.detect_framework("/tmp/standalone/k.py") == "unknown"
 
 
 def test_detect_framework_from_path():
-    assert sink.detect_framework("/repo/aiter/csrc/k.hip") == "aiter"
-    assert sink.detect_framework("/x/sglang/y/k.py") == "sglang"
+    assert source_resolution.detect_framework("/repo/aiter/csrc/k.hip") == "aiter"
+    assert source_resolution.detect_framework("/x/sglang/y/k.py") == "sglang"
 
 
 def test_detect_framework_explicit_override_wins_over_path():
     # A flattened/scratch workspace can drop the 'vllm/' dir from the path; an explicit --framework must still yield
     # the right framework so the slug does not diverge between producer and consumer.
     assert (
-        sink.detect_framework(
+        source_resolution.detect_framework(
             "/tmp/scratch/k.py",
             framework_override="vllm",
         )
@@ -86,7 +87,7 @@ def test_detect_framework_explicit_override_wins_over_path():
 
 def test_detect_framework_canonicalizes_aiter_meta_owner():
     assert (
-        sink.detect_framework(
+        source_resolution.detect_framework(
             "/tmp/flattened/kernel.py",
             framework_override="aiter_meta",
         )
@@ -97,7 +98,7 @@ def test_detect_framework_canonicalizes_aiter_meta_owner():
 def test_detect_framework_standalone_sentinel_is_unknown():
     # Explicit 'standalone' == a framework-less file == undetected path.
     assert (
-        sink.detect_framework(
+        source_resolution.detect_framework(
             "/x/vllm/y/k.py",
             framework_override="standalone",
         )
@@ -108,30 +109,30 @@ def test_detect_framework_standalone_sentinel_is_unknown():
 # --------------------------------------------------------------------------- # find_defining_source
 # --------------------------------------------------------------------------- #
 def test_find_defining_source_empty_op_returns_anchor():
-    assert sink.find_defining_source("", "/a.py", "anchor body", None) == "anchor body"
+    assert source_resolution.find_defining_source("", "/a.py", "anchor body", None) == "anchor body"
 
 
 def test_find_defining_source_prefers_anchor_when_it_defines():
     anchor = "def my_op(x):\n    return x\n"
-    assert sink.find_defining_source("my_op", "/a.py", anchor, ["/other.py"]) == anchor
+    assert source_resolution.find_defining_source("my_op", "/a.py", anchor, ["/other.py"]) == anchor
 
 
 def test_find_defining_source_scans_other_files(tmp_path):
     other = tmp_path / "impl.py"
     other.write_text("def real_op(a, b):\n    return a\n")
-    got = sink.find_defining_source("real_op", "/a.py", "wrapper only", [str(other)])
+    got = source_resolution.find_defining_source("real_op", "/a.py", "wrapper only", [str(other)])
     assert "def real_op" in got
 
 
 def test_find_defining_source_falls_back_to_anchor(tmp_path):
     missing = tmp_path / "nope.py"
-    got = sink.find_defining_source("absent", "/a.py", "anchor", [str(missing)])
+    got = source_resolution.find_defining_source("absent", "/a.py", "anchor", [str(missing)])
     assert got == "anchor"
 
 
 def test_find_defining_source_matches_global_kernel():
     anchor = "__global__ void my_kernel(float* a) {}\n"
-    assert sink.find_defining_source("my_kernel", "/a.cu", anchor, None) == anchor
+    assert source_resolution.find_defining_source("my_kernel", "/a.cu", anchor, None) == anchor
 
 
 # --------------------------------------------------------------------------- # signature -> dtype parsing

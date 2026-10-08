@@ -12,8 +12,10 @@ from pathlib import Path
 from typing import Any
 
 from kernelforge.config import Config
-from kernelforge.knowledge.kb_store.reader import sanitize_read_error
-from kernelforge.knowledge.kb_store.config import knowledge_config_from_runtime
+from kernelforge.knowledge.kb_store.errors import (
+    kb_store_secrets,
+    sanitize_read_error,
+)
 from kernelforge.knowledge.kb_store.identity.kernel_recipe import (
     KernelRecipeIdentity,
     kernel_recipe_canonical_id,
@@ -59,12 +61,6 @@ class CandidateBundle(CandidateMetadata):
     bundle_dir: Path
     recipe_path: Path
     files_dir: Path
-
-
-def kb_store_secrets(config: Config) -> tuple[str, ...]:
-    """The credentials a store failure's text must never be allowed to keep."""
-    knowledge = knowledge_config_from_runtime(config)
-    return tuple(value for value in (knowledge.kb_store_token,) if value)
 
 
 def _named_files(files: Any) -> dict[str, Path]:

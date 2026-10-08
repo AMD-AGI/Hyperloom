@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from kernelforge.knowledge.kb_store.writer import (
+from kernelforge.knowledge.kb_store.identity.source_resolution import (
     detect_backend_language,
     infer_source_owner_framework,
     resolve_operation,

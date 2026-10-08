@@ -19,7 +19,7 @@ from kernelforge.durable_io import atomic_write_text, fsync_directory, fsync_tre
 from kernelforge.kernel_rewrite_controller.contracts import KernelRewriteTask
 from kernelforge.kernel_rewrite_controller.paths import ControllerLayout
 from kernelforge.kernel_rewrite_controller.task import parse_task_payload
-from kernelforge.knowledge.kb_store.writer import detect_framework
+from kernelforge.knowledge.kb_store.identity.source_resolution import detect_framework
 from kernelforge.knowledge.kb_store.identity.implementation import (
     canonical_framework_version,
     canonical_owner_framework,

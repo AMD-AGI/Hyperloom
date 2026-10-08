@@ -7,14 +7,14 @@ from __future__ import annotations
 
 import contextlib
 import logging
-import re
 import shutil
 import tempfile
 from pathlib import Path
 from typing import Any, Iterator, Protocol
 
-from kernelforge.knowledge.kb_store.writer import (
-    detect_framework as detect_framework,
+from kernelforge.knowledge.kb_store.errors import (
+    kb_store_secrets,
+    sanitize_read_error,
 )
 from kernelforge.knowledge.kb_store.identity.implementation import (
     canonical_editable_source_map,
@@ -27,34 +27,11 @@ _CANDIDATE_REL = "forge_experiments/kb_candidates"
 
 log = logging.getLogger(__name__)
 
-_MAX_READ_ERROR_LENGTH = 240
-_BEARER_SECRET_RE = re.compile(r"(?i)\bbearer\s+[^\s,;}\]]+")
-_NAMED_SECRET_RE = re.compile(
-    r"(?i)\b(token|password|secret|credential|authorization|api[_-]?key)"
-    r"(\s*[:=]\s*)[^\s,;}\]]+"
-)
-_URL_CREDENTIAL_RE = re.compile(r"(https?://)[^/@\s]+@", re.IGNORECASE)
-
 
 class _CandidateBundle(Protocol):
     """Materialized candidate fields consumed by the experience reader."""
 
     files_dir: Path
-
-
-def sanitize_read_error(exc: Exception, *, secrets: tuple[str, ...] = ()) -> str:
-    """Return a bounded exception summary with credential-like values redacted."""
-    message = f"{type(exc).__name__}: {exc}"
-    message = _BEARER_SECRET_RE.sub("Bearer [REDACTED]", message)
-    message = _NAMED_SECRET_RE.sub(
-        lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]",
-        message,
-    )
-    message = _URL_CREDENTIAL_RE.sub(r"\1[REDACTED]@", message)
-    for secret in secrets:
-        if secret:
-            message = message.replace(secret, "[REDACTED]")
-    return message[:_MAX_READ_ERROR_LENGTH]
 
 
 def _set_read_status(
@@ -154,8 +131,6 @@ def read_top_solutions(
             read_status=read_status,
         )
     except Exception as exc:  # noqa: BLE001 - warm-start read must never break a run
-        from kernelforge.knowledge.kb_store.recipe import kb_store_secrets
-
         error = sanitize_read_error(exc, secrets=kb_store_secrets(config))
         log.warning("experience top-k read failed (cold start): %s", error)
         _set_read_status(
