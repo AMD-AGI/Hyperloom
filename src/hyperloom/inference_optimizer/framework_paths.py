@@ -411,19 +411,6 @@ def _env_source_roots() -> tuple[str, ...]:
     return tuple(kept)
 
 
-def _discover_inferencex_root() -> tuple[str, ...]:
-    """Discover the InferenceX checkout named by ``$INFERENCEX_PATH``.
-
-    Its recipe scripts decide how the server boots, so under AgentX they are
-    what a patch has to reach -- but they are not a framework Python package,
-    so no other discovery path here names the tree holding them.
-
-    Returns:
-        tuple[str, ...]: The normalised checkout root, or empty when unset or absent.
-    """
-    return _env_named_root("INFERENCEX_PATH")
-
-
 def resolve_session_framework_root() -> str:
     """The one source tree this session was explicitly pointed at, or ``""``.
 
@@ -628,7 +615,6 @@ def resolve_known_source_prefixes() -> tuple[str, ...]:
         _discover_installed_framework_roots(),
         _discover_scriptable_repo_roots(),
         _discover_explicit_framework_root(),
-        _discover_inferencex_root(),
         _env_source_roots(),
         _DEFAULT_SOURCE_ROOTS,
         _STATIC_SOURCE_LAYOUTS,
@@ -655,7 +641,6 @@ def resolve_kernel_search_roots() -> tuple[str, ...]:
         _discover_installed_framework_roots(),
         _discover_scriptable_repo_roots(),
         _discover_explicit_framework_root(),
-        _discover_inferencex_root(),
         _env_source_roots(),
         _DEFAULT_SOURCE_ROOTS,
         resolve_flydsl_source_roots(),
