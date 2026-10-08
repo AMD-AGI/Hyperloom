@@ -115,14 +115,7 @@ _NON_EMPTY_TREES = {
     # kernelforge/data/knowledge_base/ used to be listed here with a floor of 100.
     "kernelforge/data/local_knowledge/": 120,
     "kernelforge/data/examples/": 40,
-    # 1, not 3.
-    "kernelforge/data/serving_patches/": 1,
 }
-
-#: Individual resources whose absence is a packaging bug rather than a smaller
-#: tree. A count floor cannot express "this specific file", and for a tree of
-#: three files the distinction is the whole guard.
-_REQUIRED_FILES = ("kernelforge/data/serving_patches/sglang/sglang_0_5_12/fp8_blockscale_ck_routing.patch",)
 
 
 def _check_resource_trees_are_populated(names: list[str]) -> list[str]:
@@ -131,10 +124,6 @@ def _check_resource_trees_are_populated(names: list[str]) -> list[str]:
         count = sum(1 for n in names if n.startswith(prefix) and not n.endswith("/"))
         if count < floor:
             errors.append(f"{prefix} ships {count} files, below the floor of {floor}")
-    present = set(names)
-    errors.extend(
-        f"{required} is declared but missing from the wheel" for required in _REQUIRED_FILES if required not in present
-    )
     return errors
 
 

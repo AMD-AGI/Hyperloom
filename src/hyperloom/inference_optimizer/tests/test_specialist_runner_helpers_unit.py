@@ -413,7 +413,7 @@ def test_maybe_setup_worktree_bases_on_the_framework_being_optimised(tmp_path, m
     """
     aiter = _checkout(tmp_path / "aiter", "aiter/__init__.py")
     worldplay = _checkout(tmp_path / "HY-WorldPlay", "hyvideo/__init__.py")
-    monkeypatch.setenv("WORLDPLAY_REPO_PATH", str(worldplay))
+    monkeypatch.setenv("CUSTOM_REPO_PATH", str(worldplay))
 
     cfg = sr.SpecialistSubprocessConfig(
         framework_source_roots=(str(aiter), str(worldplay)),
@@ -429,7 +429,7 @@ def test_maybe_setup_worktree_bases_on_the_framework_being_optimised(tmp_path, m
     ctx = SimpleNamespace(
         task=SimpleNamespace(
             task_id="t",
-            params={"framework": "worldplay", "domain": "framework_rewrite_specialist"},
+            params={"framework": "custom", "domain": "framework_rewrite_specialist"},
         )
     )
 
@@ -445,7 +445,7 @@ def test_maybe_setup_worktree_snapshots_a_framework_that_is_not_a_checkout(tmp_p
     package = tmp_path / "site-packages" / "worldplay"
     package.mkdir(parents=True)
     (package / "__init__.py").write_text("", encoding="utf-8")
-    monkeypatch.setenv("WORLDPLAY_REPO_PATH", str(package))
+    monkeypatch.setenv("CUSTOM_REPO_PATH", str(package))
 
     cfg = sr.SpecialistSubprocessConfig(framework_source_roots=(str(aiter),))
     r = _runner(backend_factory=None, subprocess_config=cfg, session_dir=tmp_path / "session")
@@ -456,7 +456,7 @@ def test_maybe_setup_worktree_snapshots_a_framework_that_is_not_a_checkout(tmp_p
         return worktree_path, ""
 
     monkeypatch.setattr(sr, "_setup_worktree", _fake_setup)
-    ctx = SimpleNamespace(task=SimpleNamespace(task_id="t", params={"framework": "worldplay"}))
+    ctx = SimpleNamespace(task=SimpleNamespace(task_id="t", params={"framework": "custom"}))
 
     _wt, source, err = r._maybe_setup_worktree(ctx, workspace=tmp_path)
 
@@ -468,14 +468,14 @@ def test_maybe_setup_worktree_snapshots_a_framework_that_is_not_a_checkout(tmp_p
 
 def test_maybe_setup_worktree_has_nothing_to_isolate_without_a_named_tree(tmp_path, monkeypatch):
     aiter = _checkout(tmp_path / "aiter", "aiter/__init__.py")
-    monkeypatch.setenv("WORLDPLAY_REPO_PATH", str(tmp_path / "absent"))
+    monkeypatch.setenv("CUSTOM_REPO_PATH", str(tmp_path / "absent"))
     monkeypatch.delenv("FRAMEWORK_REPO_PATH", raising=False)
     monkeypatch.setattr(sr, "resolve_framework_tree", lambda framework: "")
 
     cfg = sr.SpecialistSubprocessConfig(framework_source_roots=(str(aiter),))
     r = _runner(backend_factory=None, subprocess_config=cfg)
     ctx = SimpleNamespace(
-        task=SimpleNamespace(task_id="t", params={"framework": "worldplay", "domain": "framework_rewrite_specialist"})
+        task=SimpleNamespace(task_id="t", params={"framework": "custom", "domain": "framework_rewrite_specialist"})
     )
 
     wt, source, err = r._maybe_setup_worktree(ctx, workspace=tmp_path)

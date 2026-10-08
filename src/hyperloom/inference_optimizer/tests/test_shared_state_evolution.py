@@ -175,21 +175,21 @@ def test_v2_kernel_keep_populates_stable_task_and_pending_patch():
 
 # 4. --reset-state behavior
 def test_reset_state_backs_up_state_json(tmp_path):
-    """``--reset-state`` renames state.json so the next load starts blank."""
+    """``--reset-state`` backs up state.json so the next load starts blank, except for the session's framework."""
     import hyperloom.inference_optimizer.cli as optimizer_cli
 
     sd = tmp_path / "session"
     sd.mkdir()
     payload = dict(_FACT_LAYER_PAYLOAD)
     (sd / "state.json").write_text(json.dumps(payload))
-    optimizer_cli._reset_state_file(sd)
-    assert not (sd / "state.json").exists()
+    optimizer_cli._reset_state_file(sd, framework="vllm")
     backups = [p for p in sd.iterdir() if p.name.startswith("state.json.preReset.")]
     assert len(backups) == 1, "exactly one pre-reset backup expected"
     loaded = SharedState.load_or_init(sd)
     assert loaded.baseline_tput == 0.0
     assert loaded.session_id == ""
     assert loaded.schema_version == LATEST_STATE_SCHEMA_VERSION
+    assert loaded.framework == "vllm"
 
 
 def test_reset_state_is_safe_when_no_state_file(tmp_path):
@@ -197,7 +197,7 @@ def test_reset_state_is_safe_when_no_state_file(tmp_path):
 
     sd = tmp_path / "session"
     sd.mkdir()
-    optimizer_cli._reset_state_file(sd)
+    optimizer_cli._reset_state_file(sd, framework="vllm")
     assert not (sd / "state.json").exists()
 
 

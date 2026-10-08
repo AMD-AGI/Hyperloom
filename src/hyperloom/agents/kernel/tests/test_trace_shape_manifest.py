@@ -190,6 +190,22 @@ def test_discover_capture_shards_sglang_bs_shards(tmp_path):
     assert sorted(lbl for _, lbl, _ in out) == ["bs_16", "bs_32"]
 
 
+def test_discover_capture_shards_sglang_gc_variants(tmp_path):
+    """Dense/sparse and draft shards stay distinct; only TP ranks collapse."""
+    cap = tmp_path / "capture_traces"
+    cap.mkdir()
+    for rank in range(2):
+        for stem in (
+            "DecodeCudaGraphRunner_bs_16_dense",
+            "DecodeCudaGraphRunner_bs_16_sparse",
+            "DecodeCudaGraphRunner_bs_32",
+            "DraftDecodeCudaGraphRunner_bs_16",
+        ):
+            (cap / f"{stem}_rank{rank}.json.gz").write_bytes(b"x")
+    out = bta._discover_capture_shards(str(cap), "")
+    assert sorted(lbl for _, lbl, _ in out) == ["bs_16_dense", "bs_16_sparse", "bs_32", "draft_bs_16"]
+
+
 def test_signature_discriminates_variant():
     """Same math shape + same ordinal but different graph_variant -> distinct."""
     launch = _launch("gemm", op_name="aten::mm", shapes=[[16, 4096], [4096, 4096]], dtypes=["bf16"])

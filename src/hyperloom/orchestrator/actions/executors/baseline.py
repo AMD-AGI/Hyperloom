@@ -499,10 +499,11 @@ def _is_insufficient_gpu_memory(*texts: str) -> bool:
     return any(m in blob for m in _GPU_PREOCCUPIED_MARKERS)
 
 
-# Disable cuda-graph capture per framework: sglang uses --disable-cuda-graph, vllm uses --enforce-eager.
+# Disable cuda-graph capture per framework: sglang uses --disable-cuda-graph, vllm and atom use --enforce-eager.
 _DISABLE_CUDA_GRAPH_FLAGS = {
     "sglang": "--disable-cuda-graph",
     "vllm": "--enforce-eager",
+    "atom": "--enforce-eager",
 }
 
 
