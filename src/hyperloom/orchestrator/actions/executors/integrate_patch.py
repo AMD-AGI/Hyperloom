@@ -23,8 +23,6 @@ from collections.abc import Mapping
 from collections.abc import Iterable
 from typing import Any
 
-import yaml
-
 from hyperloom.common.coerce import to_str_list
 from hyperloom.inference_optimizer.session.session_paths import enablement_stacks_dir
 from hyperloom.common.env_safety import (
@@ -118,6 +116,7 @@ from ._grid_variant_filter import (
     resolve_skip_spec,
 )
 from ._recipe_script import RecipeLeverUnavailableError
+from ._server_argv import ConfigUnreadable
 from ._workload_envs import (
     FrameworkScriptMismatchError,
     default_baseline_config,
@@ -3369,7 +3368,7 @@ class IntegratePatchExecutor:
                     bench_result=bench_result,
                 )
             )
-        except (OSError, ValueError, subprocess.SubprocessError, yaml.YAMLError):
+        except (OSError, subprocess.SubprocessError, ConfigUnreadable):
             # Every field this fills is one the decision refuses the replay for
             # when absent, so a capture that cannot read the tree or the graded
             # config, spawn the probe, or see the durable stack leaves the
@@ -3667,21 +3666,16 @@ class IntegratePatchExecutor:
         The build records them in its ``result.json`` as the prefixes a runtime
         would import from; that is the build's own statement of where its output
         lives, so it is read rather than guessed at. A result that cannot be
-        read falls back to the candidate worktrees the layout puts them in --
-        still narrower than the attempt root, which also holds cloned
-        dependencies and any provisioned virtual environment.
+        read, or names no prefix, names no tree.
         """
         result = attempt_root / "result.json"
         try:
             payload = json.loads(result.read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            payload = {}
+            return []
         runtime = payload.get("runtime") if isinstance(payload, dict) else None
         prefixes = (runtime or {}).get("pythonpath_prefixes") if isinstance(runtime, dict) else None
-        trees = [Path(str(p)) for p in prefixes if str(p).strip()] if isinstance(prefixes, list) else []
-        if trees:
-            return trees
-        return sorted(d for d in attempt_root.glob("candidates/*/worktree") if d.is_dir())
+        return [Path(str(p)) for p in prefixes if str(p).strip()] if isinstance(prefixes, list) else []
 
     @staticmethod
     def _build_extensions_not_carried(
@@ -3716,10 +3710,10 @@ class IntegratePatchExecutor:
             The names left behind, ``[]`` only after at least one of the linked
             build's output trees was scanned and nothing was missing (or when no
             build is linked, there being nothing to carry), and ``None`` when a
-            build is linked whose outputs could not be read -- an absent tree, a
-            cleaned-up worktree, an unreadable file, or no framework root to
-            compare them against. None of those are evidence that anything was
-            carried.
+            build is linked whose outputs could not be read -- a result that
+            names no output tree, a named tree that is gone, an unreadable file,
+            or no framework root to compare them against. None of those are
+            evidence that anything was carried.
         """
         from ...enablement.recipe.projections import select_linked_build
 
@@ -3754,9 +3748,9 @@ class IntegratePatchExecutor:
                 if d.is_dir()
             ]
             if not package_roots:
-                # The build named output trees that are gone, or named none and
-                # the candidate worktrees have been cleaned up. Either way this
-                # scanned nothing, which is not the same as finding nothing.
+                # The build named no output tree, or named trees that are gone.
+                # Either way this scanned nothing, which is not the same as
+                # finding nothing.
                 return None
             built_files = sorted((package, built) for package in package_roots for built in package.rglob("*.so"))
         except OSError:

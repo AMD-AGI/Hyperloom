@@ -25,6 +25,7 @@ from hyperloom.orchestrator.actions.executors._patch_snapshot import (
     replayed_stack_ops,
 )
 from hyperloom.orchestrator.actions.executors._git import _git_head_sha
+from hyperloom.orchestrator.actions.executors._server_argv import ConfigUnreadable
 from hyperloom.orchestrator.actions.executors._integrate_attempt import IntegrateAttempt
 from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
 from hyperloom.orchestrator.enablement.lane import _rearm_on_kept
@@ -2292,6 +2293,7 @@ def _built_attempt(tmp_path: Path, *, package: str, files: dict[str, bytes]) -> 
     pkg = root / "candidates" / "00_pr" / "worktree" / package
     pkg.mkdir(parents=True)
     for name, blob in files.items():
+        (pkg / name).parent.mkdir(parents=True, exist_ok=True)
         (pkg / name).write_bytes(blob)
     other = root / "_repos" / "somedep" / "somedep"
     other.mkdir(parents=True)
@@ -2491,16 +2493,17 @@ def test_an_extension_in_a_subpackage_is_judged_at_its_own_path(tmp_path: Path):
     comparing by basename would have matched it against an unrelated file of the
     same name at the top.
     """
-    root_dir = tmp_path / "builds" / "bA" / "candidates" / "00_pr" / "worktree" / "vllm"
-    (root_dir / "attention").mkdir(parents=True)
-    (root_dir / "_C.abi3.so").write_bytes(b"carried")
-    (root_dir / "attention" / "_ops.cpython-312-x86_64-linux-gnu.so").write_bytes(b"nested, left behind")
+    attempt = _built_attempt(
+        tmp_path,
+        package="vllm",
+        files={"_C.abi3.so": b"carried", "attention/_ops.cpython-312-x86_64-linux-gnu.so": b"nested, left behind"},
+    )
     root = tmp_path / "site-packages" / "vllm"
     (root / "attention").mkdir(parents=True)
     (root / "_C.abi3.so").write_bytes(b"carried")
 
     missing = IntegratePatchExecutor._build_extensions_not_carried(
-        _linked(tmp_path / "builds" / "bA"), root, specialist_task_id=PROBE_TASK
+        _linked(attempt), root, specialist_task_id=PROBE_TASK
     )
 
     assert missing == [str(Path("attention") / "_ops.cpython-312-x86_64-linux-gnu.so")]
@@ -2508,15 +2511,13 @@ def test_an_extension_in_a_subpackage_is_judged_at_its_own_path(tmp_path: Path):
 
 def test_a_same_named_file_at_the_top_does_not_satisfy_a_nested_one(tmp_path: Path):
     """The comparison is by relative path, not by basename."""
-    root_dir = tmp_path / "builds" / "bA" / "candidates" / "00_pr" / "worktree" / "vllm"
-    (root_dir / "attention").mkdir(parents=True)
-    (root_dir / "attention" / "_ops.abi3.so").write_bytes(b"the nested one")
+    attempt = _built_attempt(tmp_path, package="vllm", files={"attention/_ops.abi3.so": b"the nested one"})
     root = tmp_path / "site-packages" / "vllm"
     root.mkdir(parents=True)
     (root / "_ops.abi3.so").write_bytes(b"the nested one")  # right bytes, wrong place
 
     missing = IntegratePatchExecutor._build_extensions_not_carried(
-        _linked(tmp_path / "builds" / "bA"), root, specialist_task_id=PROBE_TASK
+        _linked(attempt), root, specialist_task_id=PROBE_TASK
     )
 
     assert missing == [str(Path("attention") / "_ops.abi3.so")]
@@ -2757,13 +2758,13 @@ def test_no_levers_and_no_linked_build_stay_clean_without_a_tree():
 
 
 def test_an_unreadable_materialized_config_is_not_replaced_by_the_ambient_env(tmp_path: Path):
-    with pytest.raises(OSError):
+    with pytest.raises(ConfigUnreadable):
         IntegratePatchExecutor._graded_launch_env({}, str(tmp_path / "gone.yaml"))
 
 
 def test_an_unreadable_materialized_config_does_not_guess_the_framework(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("FRAMEWORK", "sglang")
-    with pytest.raises(OSError):
+    with pytest.raises(ConfigUnreadable):
         IntegratePatchExecutor._graded_framework({"framework": "sglang"}, str(tmp_path / "gone.yaml"))
 
 
