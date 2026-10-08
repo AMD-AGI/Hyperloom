@@ -12,7 +12,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from hyperloom.common.coerce import to_unix
 from hyperloom.common.env import forge_explicitly_enabled
@@ -32,7 +32,7 @@ from hyperloom.common.workload_defaults import (
     DEFAULT_EP,
     DEFAULT_PRECISION,
 )
-from ..session.paths import _SESSION_SKELETON, ENV_USER_DATA_PATH
+from ..session.paths import _SESSION_SKELETON
 from .model_gate import _load_model_arch, _load_model_config_tags
 from ..model_config_utils import summarize_model_config
 
@@ -207,11 +207,29 @@ def per_gpu_power_budget_resume_conflict(state: Any, requested: dict[str, float]
     )
 
 
+def power_budget_unmeasurable_error(*, total_w: float | None, per_gpu_w: dict[str, float] | None, nodes: int) -> str:
+    """Why a power budget could never be measured on this session, or ``""``; checked at launch and on resume.
+
+    Every round would be ``power_unmeasured``, so the run would spend a whole baseline only to stop as if it were over
+    budget.
+    """
+    if not (total_w and float(total_w) > 0) and not per_gpu_w:
+        return ""
+    if nodes >= 2:
+        return (
+            "--max-power-w / --max-per-gpu-power-w cannot be measured on a multi-node session: the GPU power sampler "
+            "reads only this host's cards"
+        )
+    from hyperloom.orchestrator.actions.executors._gpu_power import gpu_power_sampling_unavailable
+
+    reason = gpu_power_sampling_unavailable()
+    return f"--max-power-w / --max-per-gpu-power-w cannot be measured: {reason}" if reason else ""
+
+
 def per_gpu_power_budget_error(
     per_gpu_w: dict[str, float] | None,
     *,
     total_w: float | None,
-    nodes: int,
     available_gpus: set[int] | None,
 ) -> str:
     """Why the per-GPU power limits cannot be used, or ``""``; checked at launch, before anything runs.
@@ -221,11 +239,6 @@ def per_gpu_power_budget_error(
     """
     if not per_gpu_w:
         return ""
-    if nodes >= 2:
-        return (
-            "--max-per-gpu-power-w names GPUs by their local amd-smi index, which does not identify a card on a "
-            "multi-node session"
-        )
     listed = sorted(int(g) for g in per_gpu_w)
     if available_gpus is None:
         return "--max-per-gpu-power-w cannot be checked: no visible-device mask is set and amd-smi reported no GPUs"
@@ -300,195 +313,6 @@ def resolve_gpu_power_settings(
             + "; ".join(problems)
         )
     return record, ""
-
-
-#: A card holding more than this much VRAM before the session has started anything has someone else's model resident,
-#: and a cap is card-wide: setting it would change that tenant's run too.
-_FOREIGN_RESIDENT_VRAM_MB = 2048.0
-
-
-def gpu_power_ledger_dir() -> Path:
-    """Where per-card power-settings records live: the workspace-shared runtime directory, so every session on the
-    host that shares it sees the same records."""
-    configured = (os.environ.get("HYPERLOOM_RUNTIME_DIR") or "").strip()
-    root = Path(configured) if configured else Path(os.environ.get(ENV_USER_DATA_PATH) or ".") / "runtime"
-    return root / "gpu_power_settings"
-
-
-def apply_declared_gpu_power_settings(
-    *,
-    power_cap_w: float | None,
-    perf_level: str | None,
-    nodes: int,
-    owner: str,
-    ledger_dir: Path | None = None,
-    read: Any = None,
-    resident_vram: Any = None,
-    apply: Any = None,
-    restore: Any = None,
-    lease_factory: Any = None,
-) -> tuple[Any, dict[str, Any], str]:
-    """Set the declared cap / perf level on the session's cards; ``(restore_callback, applied_record, error)``.
-
-    Only reached with ``--apply-gpu-power-settings``. The originals are recorded under an exclusive per-card lease
-    before anything is set, and ``restore_callback`` puts them back and releases the lease; the caller registers it to
-    run at exit. When ``error`` is non-empty nothing was left changed and the launch must stop. The read-back check is
-    still :func:`resolve_gpu_power_settings`, run after this, so an applied value is verified the same way an
-    operator-set one is.
-    """
-    from hyperloom.common.gpu_power_settings import (
-        GpuPowerSettingsError,
-        PowerSettingsLease,
-        apply_gpu_power_settings,
-        normalize_perf_level,
-        read_gpu_power_settings,
-        read_resident_vram_mb,
-        restore_gpu_power_settings,
-        visible_gpu_indices,
-    )
-
-    read = read or read_gpu_power_settings
-    resident_vram = resident_vram or read_resident_vram_mb
-    apply = apply or apply_gpu_power_settings
-    restore = restore or restore_gpu_power_settings
-    lease_factory = lease_factory or PowerSettingsLease
-    level = normalize_perf_level(perf_level) if perf_level else ""
-    if power_cap_w is None and not level:
-        return None, {}, "--apply-gpu-power-settings needs --gpu-power-cap-w and/or --gpu-perf-level to apply"
-    if nodes >= 2:
-        return None, {}, "--apply-gpu-power-settings cannot set the cards of a multi-node session from this process"
-
-    try:
-        observed = read()
-        mask = visible_gpu_indices()
-        gpus = set(observed) if mask is None else set(observed) & mask
-        if not gpus:
-            return None, {}, "no GPU the session can use was reported by amd-smi"
-        lease = lease_factory(ledger_dir or gpu_power_ledger_dir(), gpus)
-    except GpuPowerSettingsError as exc:
-        return None, {}, f"cannot apply the declared GPU power settings: {exc}"
-
-    # Only what this session changes is recorded, so only that is put back: restoring a perf level nobody declared
-    # would reset a card left in MANUAL clocks for reasons this session knows nothing about.
-    touched = [key for key, value in (("power_cap_w", power_cap_w), ("perf_level", level)) if value]
-
-    def _originals_of(rows: Any) -> dict[int, dict[str, Any]]:
-        return {gpu: {key: rows[gpu].get(key) for key in touched} for gpu in sorted(gpus) if gpu in rows}
-
-    recovered: dict[int, dict[str, Any]] = {}
-    try:
-        orphans = lease.orphaned()
-        if orphans:
-            recovered = {gpu: dict(rec.get("original") or {}) for gpu, rec in orphans.items()}
-            problems = restore(recovered)
-            if problems:
-                lease.release()
-                return (
-                    None,
-                    {},
-                    (
-                        "a previous session left these cards at settings it applied and they could not be restored: "
-                        + "; ".join(problems)
-                    ),
-                )
-            lease.clear()
-            observed = read()
-        busy = sorted(gpu for gpu, used in resident_vram().items() if gpu in gpus and used > _FOREIGN_RESIDENT_VRAM_MB)
-        if busy:
-            lease.release()
-            return (
-                None,
-                {},
-                (
-                    f"GPU(s) {', '.join(map(str, busy))} already hold a resident model; a power cap is card-wide and would "
-                    "change that workload too. Free the cards or pin the session away from them"
-                ),
-            )
-        originals = _originals_of(observed)
-        # A value that cannot be read cannot be put back: restore would skip it, report success and clear the record,
-        # leaving the card at the applied setting with nothing left to recover it.
-        unreadable = sorted(
-            gpu
-            for gpu in gpus
-            if gpu not in originals
-            or any(
-                originals[gpu].get(key) is None
-                or isinstance(originals[gpu].get(key), bool)
-                or originals[gpu].get(key) == ""
-                for key in touched
-            )
-        )
-        if unreadable:
-            lease.release()
-            return (
-                None,
-                {},
-                (
-                    f"the current {' / '.join(k.replace('_w', '').replace('_', ' ') for k in touched)} of GPU(s) "
-                    f"{', '.join(map(str, unreadable))} could not be read, so it could not be restored after the session; "
-                    "nothing was applied"
-                ),
-            )
-        declared = {"power_cap_w": power_cap_w, "perf_level": level}
-        lease.record(originals, applied={key: declared[key] for key in touched}, owner=owner)
-    except GpuPowerSettingsError as exc:
-        lease.release()
-        return None, {}, f"cannot apply the declared GPU power settings: {exc}"
-
-    done = False
-
-    def _restore() -> list[str]:
-        nonlocal done
-        if done:
-            return []
-        done = True
-        problems = restore(originals)
-        if not problems:
-            lease.clear()
-        lease.release()
-        return problems
-
-    try:
-        apply(gpus, power_cap_w=power_cap_w, perf_level=level)
-    except GpuPowerSettingsError as exc:
-        leftover = _restore()
-        suffix = f" (restoring the originals also failed: {'; '.join(leftover)})" if leftover else ""
-        return None, {}, f"cannot apply the declared GPU power settings: {exc}{suffix}"
-
-    applied = {
-        "by": "hyperloom",
-        "gpus": sorted(gpus),
-        "originals": {str(gpu): row for gpu, row in originals.items()},
-    }
-    if recovered:
-        applied["recovered_from_orphan"] = sorted(recovered)
-    return _restore, applied, ""
-
-
-def orphaned_power_settings_warning(ledger_dir: Path | None = None) -> str:
-    """A warning when a dead session left one of this session's cards at a value it applied; ``""`` otherwise."""
-    from hyperloom.common.gpu_power_settings import orphaned_power_records, visible_gpu_indices
-
-    orphans = orphaned_power_records(ledger_dir or gpu_power_ledger_dir(), visible_gpu_indices())
-    if not orphans:
-        return ""
-
-    def _describe(values: Mapping[str, Any]) -> str:
-        cap, level = values.get("power_cap_w"), values.get("perf_level")
-        return ", ".join(
-            ([f"cap {cap:g} W"] if isinstance(cap, (int, float)) else []) + ([f"perf level {level}"] if level else [])
-        )
-
-    parts = [
-        f"GPU {gpu} at {_describe(record.get('applied') or {}) or '?'} from session {record.get('owner') or '?'}, "
-        f"originally {_describe(record.get('original') or {}) or '?'}"
-        for gpu, record in sorted(orphans.items())
-    ]
-    return (
-        "these cards were left at power settings a Hyperloom session applied and never restored: "
-        + "; ".join(parts)
-        + ". Pass --apply-gpu-power-settings to restore them at launch, or restore them with amd-smi set"
-    )
 
 
 def _build_agentx_corpus_shape_seed() -> dict[str, Any]:

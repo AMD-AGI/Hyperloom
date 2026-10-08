@@ -263,8 +263,10 @@ Two budgets bound a round's GPU power, for every framework:
 
 The session refuses to start (exit 2) if a listed GPU is not one it can use
 (its visible-device mask, or every card `amd-smi` reports when there is no
-mask), if the per-GPU limits add up to more than `--max-power-w`, or on a
-multi-node session, where a local index does not identify a card. Resuming with
+mask), or if the per-GPU limits add up to more than `--max-power-w`. Either
+budget is refused, at launch and on resume, when no round could be measured: on
+a multi-node session (the sampler reads only its own host's cards), with
+`HYPERLOOM_GPU_POWER_SAMPLING=0`, or without `amd-smi` on `PATH`. Resuming with
 different values is refused.
 
 Both ride the same verdict as `--max-latency-ms`: a candidate that would
@@ -276,7 +278,12 @@ over-budget change. If the baseline itself breaks a budget, or reported no
 power, the run stops with `baseline_over_power_budget`. The reading is the
 measured-phase per-GPU figure described above, carried as `gpu_power_by_gpu_w`;
 only Hyperloom's own sampler reads every serving card, so a round it did not
-sample counts as unmeasured. A GEAK replay boots its own server once per
+sample counts as unmeasured. So does a round in which a card that may be
+serving could not be read: one holding a model with no power reading, or one in
+scope (the visible-device mask, or every card `amd-smi` reported) whose VRAM was
+never read. Such cards are listed as `unread_gpus` in `gpu_power.json`, since a
+card missing from the readings would drop out of the total and escape its own
+limit. A GEAK replay boots its own server once per
 replica, so its phases are read from the server logs the replay writes, with
 the same markers, and each new log counts as a fresh boot.
 
@@ -286,32 +293,6 @@ is the rack's share, and a per-GPU limit covers a card with less headroom, such
 as one in a hotter slot. To tune
 for a lower hardware cap instead, set that cap with `amd-smi set` and assert it
 with `--gpu-power-cap-w`; no ceiling is needed.
-
-### Applying the power settings (opt-in)
-
-`--apply-gpu-power-settings` permits the session to set the declared
-`--gpu-power-cap-w` / `--gpu-perf-level` itself, once at launch, on the cards in
-its visible-device mask, and to keep them for the whole session. Without it the
-settings are only asserted. The same read-back check then verifies them, and
-the fingerprint records them as applied by Hyperloom along with the originals.
-It needs `amd-smi set` privileges and refuses rather than continuing
-unchecked when a set fails. It also refuses on multi-node, on a card that
-already holds more than 2 GB of VRAM before the session starts (someone else's
-resident model, which a card-wide cap would change too), and on a card whose
-current value cannot be read, since nothing could restore it.
-
-Only the settings that were declared are changed, and only those are put back.
-The originals are written to a per-card record under
-`$HYPERLOOM_RUNTIME_DIR/gpu_power_settings/` before anything is set, and the
-session holds an exclusive `flock` on that record until it exits. That lock
-keeps two sessions from setting the same card, and it survives container
-boundaries, where process IDs do not. The originals are restored at exit,
-including after a stop reason or an operator stop. A session killed outright
-leaves its record behind with the lock free. The next launch that passes the
-flag restores those cards before doing anything else. A launch without the
-flag warns that the cards were left changed and names their original values.
-On resume the flag must be passed again, since the settings were restored when
-the previous leg exited.
 
 ### Runnable gate (earned KEEP)
 

@@ -124,7 +124,7 @@ def _positive_ms_arg(value: str) -> float:
 
 
 def _positive_watts_arg(value: str) -> float:
-    """argparse type for a power in watts; an unusable value stops the launch rather than disabling the ceiling."""
+    """argparse type for a power in watts; an unusable value stops the launch rather than skipping the check."""
     try:
         parsed = float(str(value).strip())
     except (TypeError, ValueError) as exc:
@@ -149,17 +149,20 @@ class _PerGpuPowerAction(argparse.Action):
     """Collect ``--max-per-gpu-power-w GPU_ID W`` pairs into ``{gpu_id: watts}``; a bad or repeated id stops the launch."""
 
     def __call__(self, parser, namespace, values, option_string=None):
-        raw_id, raw_w = values
         try:
-            gpu = _non_negative_gpu_id_arg(raw_id)
-            watts = _positive_watts_arg(raw_w)
+            limits = self._with(dict(getattr(namespace, self.dest, None) or {}), *values)
         except argparse.ArgumentTypeError as exc:
-            return parser.error(f"{option_string}: {exc}")
-        limits = dict(getattr(namespace, self.dest, None) or {})
-        if str(gpu) in limits:
-            parser.error(f"{option_string}: GPU {gpu} is given more than once")
-        limits[str(gpu)] = watts
-        setattr(namespace, self.dest, limits)
+            parser.error(f"{option_string}: {exc}")
+        else:
+            setattr(namespace, self.dest, limits)
+
+    @staticmethod
+    def _with(limits: dict[str, float], raw_id: str, raw_w: str) -> dict[str, float]:
+        gpu = str(_non_negative_gpu_id_arg(raw_id))
+        if gpu in limits:
+            raise argparse.ArgumentTypeError(f"GPU {gpu} is given more than once")
+        limits[gpu] = _positive_watts_arg(raw_w)
+        return limits
 
 
 def _default_claude_model_env() -> str:
@@ -637,7 +640,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "Refuse any KEEP whose serving GPUs together draw more than N W, summed over their mean power across "
             "the measured round (e.g. 2800 for four cards budgeted at 700 W each). Off by default. A candidate "
             "whose round reported no per-GPU power is refused too, since an unmeasured constraint is not a "
-            "satisfied one."
+            "satisfied one, and the session refuses to start where GPU power cannot be sampled."
         ),
     )
     opt.add_argument(
@@ -649,8 +652,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Refuse any KEEP in which GPU_ID (the physical amd-smi index) draws more than W watts, as its mean "
             "power over the measured round. Repeat once per card; a serving card with no entry is bound only by "
-            "--max-power-w. The session refuses to start if a listed GPU is not one it can use, or if the "
-            "per-GPU limits add up to more than --max-power-w."
+            "--max-power-w. The session refuses to start if a listed GPU is not one it can use, if the "
+            "per-GPU limits add up to more than --max-power-w, or if GPU power cannot be sampled."
         ),
     )
     opt.add_argument(
@@ -658,10 +661,10 @@ def _build_parser() -> argparse.ArgumentParser:
         type=_positive_watts_arg,
         default=None,
         help=(
-            "Declare the power cap (W) the GPUs run at. By default an assertion: set it with "
-            "`amd-smi set --power-cap` before launch, and the session refuses to start if any card it uses is at a "
-            "different cap. With --apply-gpu-power-settings the session sets it itself. The observed cap is "
-            "recorded whether or not this flag is passed."
+            "Declare the power cap (W) the GPUs are already set to. An assertion, not a request: the optimizer "
+            "never changes power settings, which are privileged and card-wide. Set it with "
+            "`amd-smi set --power-cap` before launch; the session refuses to start if any card it uses is at a "
+            "different cap. The observed cap is recorded whether or not this flag is passed."
         ),
     )
     opt.add_argument(
@@ -670,21 +673,8 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="LEVEL",
         help=(
-            "Declare the DPM performance level the GPUs run at (e.g. auto, high, determinism). Asserted like "
-            "--gpu-power-cap-w, or set by the session with --apply-gpu-power-settings."
-        ),
-    )
-    opt.add_argument(
-        "--apply-gpu-power-settings",
-        action="store_true",
-        default=False,
-        help=(
-            "Permit the session to set --gpu-power-cap-w / --gpu-perf-level on the cards it uses (its "
-            "visible-device mask), once at launch and for the whole session; the optimizer never changes them "
-            "afterwards. Needs amd-smi set privileges. The originals are recorded before anything is set and "
-            "restored at exit; a session that dies without restoring is restored by the next launch that passes "
-            "this flag. Refuses on multi-node, and on a card that already holds someone else's resident model, "
-            "since a cap is card-wide. Must be passed again on resume."
+            "Declare the DPM performance level the GPUs are already set to (e.g. auto, high, determinism). "
+            "An assertion like --gpu-power-cap-w: set it with `amd-smi set --perf-level` before launch."
         ),
     )
     opt.add_argument(

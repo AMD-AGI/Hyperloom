@@ -89,6 +89,46 @@ def test_the_by_gpu_reading_names_each_serving_card_and_no_idle_one(tmp_path):
     assert by_gpu == {str(g): pytest.approx(800.0) for g in range(4)}
 
 
+def _summary_of(tmp_path, payload, *, gpus=None) -> dict:
+    query = _Replay(payload)
+    recorder = GpuPowerRecorder(
+        output_path=str(tmp_path / GPU_POWER_ARTIFACT_NAME), query=query, interval_sec=0.5, gpus=gpus
+    )
+    recorder._interval = 0.01
+    _run_measured(recorder, query, samples=3)
+    return recorder.close()
+
+
+def test_a_serving_card_with_no_power_reading_leaves_the_round_unmeasured(tmp_path):
+    """TP4 on cards 4-7 with card 7 at N/A power: the other three must not stand in for the total."""
+    rows = [_row(g, 500.0, 250_000) for g in (4, 5, 6)] + [_row(7, None, 250_000)]
+    out = _summary_of(tmp_path, rows, gpus={4, 5, 6, 7})
+    assert out["unread_gpus"] == [7]
+    assert out["avg_power_w"] is None
+    assert read_measured_gpu_power_by_gpu(tmp_path) == (True, None)
+
+
+def test_a_masked_card_missing_from_amd_smi_leaves_the_round_unmeasured(tmp_path):
+    out = _summary_of(tmp_path, [_row(g, 500.0, 250_000) for g in (4, 5, 6)], gpus={4, 5, 6, 7})
+    assert out["unread_gpus"] == [7]
+    assert read_measured_gpu_power_by_gpu(tmp_path) == (True, None)
+
+
+def test_a_card_whose_vram_cannot_be_read_cannot_be_ruled_out(tmp_path):
+    rows = [_row(g, 500.0, 250_000) for g in (4, 5, 6)] + [_row(7, 500.0, 250_000)]
+    rows[3]["mem_usage"] = "N/A"
+    out = _summary_of(tmp_path, rows, gpus={4, 5, 6, 7})
+    assert out["unread_gpus"] == [7]
+
+
+def test_an_idle_card_with_no_power_reading_does_not_block(tmp_path):
+    """An unpinned host: four cards serve, an idle one reports N/A power; the idle one holds no model."""
+    rows = [_row(g, 800.0, 250_000) for g in range(4)] + [_row(4, None, 284)]
+    out = _summary_of(tmp_path, rows)
+    assert out["unread_gpus"] == []
+    assert read_measured_gpu_power_by_gpu(tmp_path)[1] == {str(g): pytest.approx(800.0) for g in range(4)}
+
+
 def test_samples_nothing_outside_the_measured_phase(tmp_path):
     query = _Replay(_tp4_on_eight(800.0))
     recorder = GpuPowerRecorder(output_path=None, query=query, interval_sec=0.5)
