@@ -161,19 +161,32 @@ def _normalize_legacy_deepseek_env() -> dict[str, Any]:
     }
 
 
+#: What a custom header may reference. Every child inherits the expanded header, so expanding any other name would
+#: hand a child the value of a secret its environment allowlist strips, such as ``${GITHUB_TOKEN}``.
+_HEADER_REF_ALLOWLIST = frozenset({"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY"})
+
+
 def _expand_custom_header_env_refs() -> None:
-    """Resolve ``${VAR}`` references in the ``*_CUSTOM_HEADERS`` settings in place.
+    """Resolve the credential ``${VAR}`` references in the ``*_CUSTOM_HEADERS`` settings in place.
 
     Child processes (specialists, the Critic, GEAK on Ray) forward these verbatim, and an agent CLI sends them
     verbatim, so an unexpanded ``${ANTHROPIC_API_KEY}`` reaches the gateway as literal text and is rejected.
     References resolve against the same view ``claude_sdk_env_options`` uses, so a key it would fill in from the
-    other Anthropic credential is not erased here.
+    other Anthropic credential is not erased here. A reference outside ``_HEADER_REF_ALLOWLIST`` is left as
+    written, which is what children received before this expansion existed.
     """
     source = with_synthesized_anthropic_keys(os.environ)
     for key in ("ANTHROPIC_CUSTOM_HEADERS", "OPENAI_CUSTOM_HEADERS"):
         raw = os.environ.get(key)
-        if raw and "${" in raw:
-            os.environ[key] = expand_env_refs(raw, source)
+        if not raw or "${" not in raw:
+            continue
+        os.environ[key] = expand_env_refs(raw, source, only=_HEADER_REF_ALLOWLIST)
+        if "${" in os.environ[key]:
+            log.warning(
+                "%s references a variable outside %s; child processes receive that reference unexpanded",
+                key,
+                ", ".join(sorted(_HEADER_REF_ALLOWLIST)),
+            )
 
 
 def _restore_provider_only_mode(provider_mode: str, snapshot: dict[str, str | None]) -> None:

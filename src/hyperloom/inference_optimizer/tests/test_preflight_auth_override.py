@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import re
 import shutil
@@ -473,17 +474,34 @@ def test_custom_header_env_refs_are_expanded_for_child_processes(monkeypatch):
     """Children forward the headers verbatim, so the parent must not hand down a literal ``${VAR}``."""
     anthropic_key_var = "_".join(("ANTHROPIC", "API", "KEY"))
     monkeypatch.setenv(anthropic_key_var, "ak-gateway-token")
-    monkeypatch.setenv("GEAK_GATEWAY_USER", "gateway-user")
-    monkeypatch.setenv(
-        "ANTHROPIC_CUSTOM_HEADERS",
-        f"Ocp-Apim-Subscription-Key: ${{{anthropic_key_var}}}\nuser: ${{GEAK_GATEWAY_USER}}",
-    )
+    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", f"Ocp-Apim-Subscription-Key: ${{{anthropic_key_var}}}")
     monkeypatch.setenv("OPENAI_CUSTOM_HEADERS", "X-Tenant: acme")
 
     cli_preflight._expand_custom_header_env_refs()
 
-    assert os.environ["ANTHROPIC_CUSTOM_HEADERS"] == "Ocp-Apim-Subscription-Key: ak-gateway-token\nuser: gateway-user"
+    assert os.environ["ANTHROPIC_CUSTOM_HEADERS"] == "Ocp-Apim-Subscription-Key: ak-gateway-token"
     assert os.environ["OPENAI_CUSTOM_HEADERS"] == "X-Tenant: acme"
+
+
+def test_a_header_ref_outside_the_credentials_does_not_reach_children(monkeypatch, caplog):
+    """Expanding it would put a secret the child-env allowlist strips into a header every child inherits."""
+    anthropic_key_var = "_".join(("ANTHROPIC", "API", "KEY"))
+    other_secret_var = "_".join(("GITHUB", "TOKEN"))
+    monkeypatch.setenv(anthropic_key_var, "ak-gateway-token")
+    monkeypatch.setenv(other_secret_var, "not-for-children")
+    monkeypatch.setenv(
+        "ANTHROPIC_CUSTOM_HEADERS",
+        f"Ocp-Apim-Subscription-Key: ${{{anthropic_key_var}}}\nX-Leaked: ${{{other_secret_var}}}",
+    )
+
+    with caplog.at_level(logging.WARNING, logger="hyperloom.inference_optimizer.cli"):
+        cli_preflight._expand_custom_header_env_refs()
+
+    assert os.environ["ANTHROPIC_CUSTOM_HEADERS"] == (
+        f"Ocp-Apim-Subscription-Key: ak-gateway-token\nX-Leaked: ${{{other_secret_var}}}"
+    )
+    assert "not-for-children" not in caplog.text
+    assert "ANTHROPIC_CUSTOM_HEADERS references a variable outside" in caplog.text
 
 
 @pytest.mark.parametrize(
