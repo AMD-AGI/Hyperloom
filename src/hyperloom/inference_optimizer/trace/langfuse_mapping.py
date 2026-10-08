@@ -6,11 +6,18 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from hyperloom.common.env_safety import BENCHMARK_SECRET_ENV_NAMES, is_secret_shaped_env_name, redact_secret_values
+from hyperloom.common.env_safety import (
+    BENCHMARK_SECRET_ENV_NAMES,
+    SENSITIVE_ENV_NAME_MARKERS,
+    is_secret_shaped_env_name,
+    redact_secret_env_values,
+    redact_secret_values,
+)
 
 UNPHASED = "(unphased)"
 UNKNOWN_AGENT = "(unknown)"
@@ -24,25 +31,13 @@ LEVEL_ERROR = "ERROR"
 _STATUS_OK = "ok"
 
 # Env-var name fragments whose value is redacted before the environment snapshot is attached to session_start.
-_SENSITIVE_ENV_MARKERS: tuple[str, ...] = (
-    "SECRET",
-    "TOKEN",
-    "PASSWORD",
-    "PASSWD",
-    "PASSPHRASE",
-    "CREDENTIAL",
-    "PRIVATE_KEY",
-    "PRIVATEKEY",
-    "API_KEY",
-    "APIKEY",
-    "ACCESS_KEY",
-    "SECRET_KEY",
-    "AUTH",
-    "SIGNATURE",
-    "HEADERS",
-    "CUSTOM_HEADERS",
-)
+_SENSITIVE_ENV_MARKERS: tuple[str, ...] = SENSITIVE_ENV_NAME_MARKERS
 _REDACTED = "***redacted***"
+
+# Vars whose value is a JSON object of NAME -> value (the CLI serializes ``--extra-env`` pins into this one). Neither
+# the name markers nor the ``NAME=value`` text patterns see a credential inside the JSON, so each entry is masked by
+# name instead.
+_JSON_ENV_MAP_NAMES: frozenset[str] = frozenset({"INFERENCE_OPTIMIZER_EXTRA_ENV"})
 
 
 def correlation_seed(manifest: dict[str, Any], fallback: str) -> str:
@@ -181,6 +176,7 @@ def generation_metadata(
         "phase": phase,
         "tick": row.get("tick"),
         "turn": row.get("turn"),
+        "call_id": row.get("call_id"),
         "task_id": row.get("task_id"),
         "dyn_id": row.get("dyn_id"),
         "role": row.get("role"),
@@ -222,9 +218,22 @@ def redact_env(environ: Mapping[str, str]) -> dict[str, str]:
             or any(marker in upper for marker in _SENSITIVE_ENV_MARKERS)
         ):
             out[key] = _REDACTED
+        elif upper in _JSON_ENV_MAP_NAMES and value:
+            out[key] = _redact_json_env_map(value)
         else:
             out[key] = redact_secret_values(value) if value else value
     return out
+
+
+def _redact_json_env_map(value: str) -> str:
+    """Mask each credential in a JSON ``{NAME: value}`` env map; the whole value when it is not one."""
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return _REDACTED
+    if not isinstance(parsed, dict):
+        return _REDACTED
+    return json.dumps(redact_secret_env_values(parsed))
 
 
 def session_start_payload(

@@ -147,7 +147,6 @@ class _BundleBackend:
         (root / "manifest.json").write_text(
             json.dumps(
                 {
-                    "schema_version": 1,
                     "analysis_commit": payload["analysis_commit"],
                     "driver_digest": request["driver_digest"],
                     "source_digest": request["source_digest"],
@@ -265,7 +264,6 @@ class _StaticAnalysisBackend:
         (root / "manifest.json").write_text(
             json.dumps(
                 {
-                    "schema_version": 1,
                     "analysis_commit": payload["analysis_commit"],
                     "driver_digest": request["driver_digest"],
                     "source_digest": request["source_digest"],

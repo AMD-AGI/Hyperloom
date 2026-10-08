@@ -37,6 +37,7 @@ def _off(monkeypatch):
 
 def _on(monkeypatch):
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.delenv("HYPERLOOM_AGENTIC_BACKEND", raising=False)
 
 
 # --- budget profile -----------------------------------------------------------
@@ -139,9 +140,10 @@ def test_scriptable_guard_is_inert_without_agentx(monkeypatch):
 
 
 class _St:
-    def __init__(self, mode="", epoch=0):
+    def __init__(self, mode="", epoch=0, backend=""):
         self.benchmark_mode = mode
         self.agentx_epoch = epoch
+        self.agentx_backend = backend
 
 
 def test_resume_accepts_matching_agentx_state(monkeypatch):
@@ -160,6 +162,21 @@ def test_resume_rejects_mode_switch(monkeypatch):
     assert "benchmark_mode" in agentx_state_is_stale(_St("synthetic", 0))
     _off(monkeypatch)
     assert "benchmark_mode" in agentx_state_is_stale(_St("agentx", 1))
+
+
+def test_resume_rejects_a_backend_switch(monkeypatch):
+    """aiperf and mlperf sessions must not anchor each other, epoch unchanged."""
+    _on(monkeypatch)
+    assert agentx_state_is_stale(_St("agentx", AGENTX_MEASUREMENT_EPOCH, "aiperf")) == ""
+    monkeypatch.setenv("HYPERLOOM_AGENTIC_BACKEND", "mlperf")
+    reason = agentx_state_is_stale(_St("agentx", AGENTX_MEASUREMENT_EPOCH, "aiperf"))
+    assert "backend" in reason
+    assert agentx_state_is_stale(_St("agentx", AGENTX_MEASUREMENT_EPOCH, "mlperf")) == ""
+
+
+def test_resume_treats_a_missing_backend_as_aiperf(monkeypatch):
+    _on(monkeypatch)
+    assert agentx_state_is_stale(_St("agentx", AGENTX_MEASUREMENT_EPOCH, "")) == ""
 
 
 def test_resume_rejects_stale_agentx_epoch(monkeypatch):

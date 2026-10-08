@@ -9,8 +9,7 @@ decision framework, cycle directive, optional kernel-opt reference, rules).
 Deterministic for given inputs; the only IO is reading the rules fragment.
 
 Sections are scoped by the ``phase`` argument: a module whose behaviour the
-phase cannot reach is omitted, so the agent is never handed a payload contract
-PolicyGate would deny. A blank phase renders every module.
+phase cannot reach is omitted. A blank phase renders every module.
 """
 
 from __future__ import annotations
@@ -30,7 +29,6 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import (
     NO_KERNEL_AGENT_ENABLED_ACTIONS,
 )
 from hyperloom.common.perf_metric import graded_metric_key, is_agentx_mode
-from ..state.shared_state import SharedState
 from . import read_rules_fragment as _read_rules_fragment
 from .agentx_context import corpus_lines, grading_lines
 from .transport import TRANSPORTS, TRANSPORT_STRUCTURED_OUTPUT, TRANSPORT_TOOLS
@@ -122,6 +120,8 @@ def _section_session_context(
     framework_source_roots: tuple[str, ...] | None = None,
     benchmark_mode: str = "",
     agentx_corpus_shape: Mapping[str, Any] | None = None,
+    agentx_grading: Mapping[str, Any] | None = None,
+    agentx_backend: str = "",
     session_framework_tree: str = "",
 ) -> list[str]:
     """Build the SESSION CONTEXT section lines.
@@ -144,6 +144,9 @@ def _section_session_context(
             the AgentX workload and grading blocks when it names AgentX.
         agentx_corpus_shape (Mapping[str, Any] | None): The session's
             ``agentx_corpus_shape``, supplying the corpus numbers.
+        agentx_grading (Mapping[str, Any] | None): The session's recorded
+            ``grading``, naming the axis the grading block describes.
+        agentx_backend (str): The session's recorded ``agentx_backend``.
 
     Returns:
         list[str]: Markdown lines describing static session context and phase
@@ -169,7 +172,7 @@ def _section_session_context(
         f"- framework_source_roots: {roots_line}  (source roots to search)",
     ]
     if is_agentx_mode(benchmark_mode):
-        lines += ["", *corpus_lines(agentx_corpus_shape), "", *grading_lines()]
+        lines += ["", *corpus_lines(agentx_corpus_shape), "", *grading_lines(agentx_grading, agentx_backend)]
     lines += [
         "",
         "Per-tick dynamic context (Phase, Mission progress, Time budget,",
@@ -243,10 +246,10 @@ def _section_phase_semantics(
             "KERNEL_AGENT / SWEEP; the wall-clock deadline (closing phase) routes",
             "to CLOSE.",
             "You may also emit `escalate_strategy_change{next_action_hint=",
-            "'skip_to_kernel' | 'skip_to_sweep'}` directly when you judge the",
-            "current phase exhausted; the Coordinator validates the hint vocab",
-            "and routes the transition on the next tick. `skip_to_close` is not",
-            "in that set — see the exception below for when it applies.",
+            "'skip_to_kernel'}` in EXPLORE or FRAMEWORK_AGENT when you judge",
+            "the current phase exhausted; the Coordinator validates the hint",
+            "vocab and routes the transition on the next tick. `skip_to_close`",
+            "is not in that set — see the exception below for when it applies.",
             "`skip_to_close` is reserved, in EVERY phase, for genuine early",
             "abandonment (e.g. infra is dead and the sweep cannot run at all):",
             "it closes the run instead of advancing a phase. Running low on",
@@ -482,8 +485,9 @@ def _format_grid_injection_hint(name: str) -> str | None:
             "GRID INPUT (REQUIRED): emit "
             "`delegate{action_name='explore', params={grid: [{name, "
             "extra_args, extra_envs, remove_args?, unset_envs?, "
-            "args_mode?: 'append'|'replace', provenance, kb_evidence?, "
-            "pr_evidence?, source_evidence?}, ...], "
+            "args_mode?: 'append'|'replace', reasoning, provenance, kb_evidence?, "
+            "pr_evidence?, source_evidence?, experience_citations?: [{id, stance: "
+            "'adopt'|'adapt'|'avoid'|'contrast', claim}]}, ...], "
             "base_extra_args?, base_tput?, accuracy_baseline?, "
             "keep_threshold_pct?: <session-cycle default>}}`. "
             "Variants run serially; a KEEP is graded on its decision "
@@ -493,6 +497,8 @@ def _format_grid_injection_hint(name: str) -> str | None:
             "may be re-proposed. "
             "Use remove_args/unset_envs to ablate harmful base flags; "
             "args_mode='replace' to drop inherited server args. "
+            "Every variant requires action-time reasoning that names the "
+            "evidence, mechanism, expected effect, and validation gate. "
             "provenance values: 'llm_direct', 'default_grid', "
             "'specialist:<domain-or-tag>' (audit/advisory, not a gate). "
             "SIZE: target 4 variants, hard maximum 6. Variants run serially "
@@ -626,9 +632,9 @@ def _section_decision_framework(*, kernel_enabled: bool, phase: str = "", transp
             "      cross-session priors carry " + "*qualitative* hints (what worked / what failed last time).",
             "   d. **`=== Untested proposals (current cycle) ===`** — the",
             "      executable specialist proposals this cycle that no explore",
-            "      round has benched, ranked by gap severity and truncated to",
-            "      a count the block states. This is the grid's primary",
-            "      source; an entry marked ATOMIC goes in verbatim.",
+            "      round has benched, ranked by gap severity. The Coordinator",
+            "      benches this queue itself; your own grid adds only what it",
+            "      does not already hold.",
             "   e. **Ordering facts**: baseline runs before anything else",
             "      (invariant). ``analysis.md`` / ``last_profile_trace`` arrive",
             "      automatically from the Coordinator-owned analysis task at",
@@ -638,13 +644,12 @@ def _section_decision_framework(*, kernel_enabled: bool, phase: str = "", transp
             "   ``budget`` line carries ``remaining_sec`` against the phase's",
             "   ``pct`` share; as it falls, prefer lower-cost / known-good",
             "   actions (explore over kernel_opt).",
-            "   The Plateau advisory block is informational only for KERNEL. In",
-            "   OPTIMIZE it reports each arm separately: BOTH arms dry advances",
-            "   to KERNEL_AGENT (``reason=optimize_no_more_leverage``) at the",
-            "   next phase-compute, while one arm dry means work the other.",
-            "   When you judge the current phase exhausted,",
+            "   In OPTIMIZE the Plateau advisory reports each arm separately: BOTH arms",
+            "   dry advances to KERNEL_AGENT (``reason=optimize_no_more_leverage``) at",
+            "   the next phase-compute, while one arm dry means work the other.",
+            "   When you judge EXPLORE or FRAMEWORK_AGENT exhausted,",
             "   emit ``escalate_strategy_change{next_action_hint=",
-            "   'skip_to_kernel' | 'skip_to_sweep'}``. `skip_to_close` is not a",
+            "   'skip_to_kernel'}``. `skip_to_close` is not a",
             "   phase advance -- see PHASE CONTRACT before emitting it.",
             "",
             "If you cannot move forward, emit",
@@ -701,8 +706,7 @@ def _failure_recovery_lines(*, phase: str, transport: str = "") -> list[str]:
                 "* **RULE F1** (PRELUDE) — same baseline fingerprint twice failed →"
                 " change at least one of the eight fingerprint fields.",
                 "* **RULE F2** (PRELUDE) — `error_class='no_report'` + no"
-                " `rescued_from_leaked_path:*` → redirect RESULT_DIR or set"
-                " INFERENCE_OPTIMIZER_RESCUE_PATHS.",
+                " `rescued_from_leaked_path:*` → redirect RESULT_DIR.",
             ]
         )
     lines.extend(
@@ -748,11 +752,15 @@ def _idea_generation_lines() -> list[str]:
         "Variant identity is content-based (args+envs+remove_args+",
         "unset_envs+args_mode); only exact same-grid duplicates are collapsed.",
         "`extra_server_args` is framework-neutral (routed to EXTRA_SGLANG_ARGS",
-        "/ EXTRA_VLLM_ARGS / EXTRA_ATOM_ARGS by `--framework`).",
+        "/ EXTRA_VLLM_ARGS / EXTRA_ATOM_ARGS by `--framework`). On an agentic",
+        "recipe a flag replaces the recipe's own value and `remove_args` deletes",
+        "a recipe flag. Its draft (method, model, length) and simulated acceptance",
+        "are pinned; other `--speculative-config` keys such as `attention_backend`",
+        "merge into the recipe's own config.",
         "",
-        "Draw first from `=== Untested proposals (current cycle) ===`; the",
-        "five moves above are for topping the grid up to its target of 4",
-        "(hard maximum 6) once the queue is drained of anything worth running.",
+        "The Coordinator benches `=== Untested proposals (current cycle) ===`",
+        "itself; build your own grid from the five moves above to a target of 4",
+        "(hard maximum 6), leaving out anything that queue already holds.",
         "",
         "An explore round that produces zero new ideas is a bug — send an observation",
         "with body_md='idea-pipeline-empty' and explain which search directions are exhausted.",
@@ -767,15 +775,11 @@ The request kinds you may emit here are `trace_analyze`, `integrate`, and
 (phase allowed-set + gaps + KB priors), with no system-side priority ranking.
 Read the optimization lane's outcome before you act: a `state.gaps[]`
 `layer='kernel_agent'` gap names the target, `last_kernel_opt` carries the
-verdict (KEEP→integrate next; PARTIAL→the lane retries at most
-`_DEFAULT_KERNEL_OPT_MAX_PARTIAL` times then rejects; REVERT→rejected),
+verdict (KEEP→integrate next; REVERT→rejected),
 `rejected_kernel_ids` lists the ids already written off, and
 `last_action_failures` explains a request of your own that failed.
-A KERNEL_AGENT plateau signal (3 REVERTs across distinct kernels, or low
-recent KEEP gain) is rendered as advisory; KERNEL_AGENT → SWEEP advance is
-driven by the phase budget, an `escalate_strategy_change` hint, or a
-terminal stop_reason. Read the advisory and emit `skip_to_sweep` if
-you want to wind down sooner.
+KERNEL_AGENT → SWEEP advance is driven by the phase budget, idle-no-progress,
+agent settled with no pending kernel work, or a terminal stop_reason.
 
 ### `trace_analyze` — read-only candidate analysis
 
@@ -890,34 +894,24 @@ def _section_rules(rules_md: str, *, phase: str = "", transport: str = "") -> li
     body = _filter_rules_fragment(rules_md, phase=phase, transport=transport) or (
         "(orchestration.md rules fragment not found — Coordinator will still enforce PolicyGate hard rules at runtime.)"
     )
-    update_fields = [f"- `{name}`: `{expected.__name__}`" for name, expected in SharedState.AGENT_UPDATE_FIELDS.items()]
     return [
         "## 7. RULES & OUTPUT PROTOCOL",
         "",
         body,
-        "",
-        "### UPDATE_STATE",
-        "",
-        "`update_state.payload.changes` must be a non-empty object. Only these fields are agent-writable:",
-        *update_fields,
-        "A Coordinator-owned core field refuses the whole intent before anything is written. Every other",
-        "key -- a non-core field outside the list above, a wrong value type, an unknown name -- is dropped",
-        "on its own, and the rest of that same update still applies. The observation reports what was",
-        "written in `changes` and every dropped key in `rejected`; re-sending a key from `changes` would",
-        "repeat a write that already landed.",
     ]
 
 
-def _section_cycle_directive(*, macro_cycle: int = 0, cycle_directive: str = "") -> list[str]:
+def _section_cycle_directive(
+    *,
+    macro_cycle: int = 0,
+    cycle_directive: str = "",
+    cycle_strategy: Mapping[str, Any] | None = None,
+) -> list[str]:
     """Build the CYCLE DIRECTIVE section.
 
-    When ``cycle_directive`` is non-empty it carries an LLM-authored focus
-    mandate for this macro-cycle (see ``orchestration_memory.next_cycle_directive``).
-    Otherwise the standing breadth→depth arc is used as the default.
-
-    Args:
-        macro_cycle: Current macro-cycle counter; shown verbatim.
-        cycle_directive: Optional LLM-authored focus text for this cycle.
+    Renders the LLM-authored ``cycle_directive`` when present, the deterministic
+    ``cycle_strategy`` focus/history when provided, or the breadth→depth default
+    when neither is set.
 
     Returns:
         list[str]: Markdown lines for the section.
@@ -934,7 +928,7 @@ def _section_cycle_directive(*, macro_cycle: int = 0, cycle_directive: str = "")
     if cycle_directive and cycle_directive.strip():
         lines.append("Focus for this cycle (LLM-authored at prior cycle boundary):")
         lines.append(cycle_directive.strip())
-    else:
+    elif not cycle_strategy:
         lines.extend(
             [
                 "Default arc (no per-cycle directive yet):",
@@ -945,24 +939,59 @@ def _section_cycle_directive(*, macro_cycle: int = 0, cycle_directive: str = "")
                 "  work that needs a long measure→edit→measure loop.",
             ]
         )
+    if cycle_strategy:
+        focus = str(cycle_strategy.get("focus") or "").strip()
+        score = cycle_strategy.get("score")
+        rationale = str(cycle_strategy.get("rationale") or "").strip()
+        saturated = cycle_strategy.get("saturated_at_start") or []
+        prior_cycles: list[Any] = list(cycle_strategy.get("prior_cycles") or [])
+        lines.append("")
+        lines.append(f"Deterministic focus: focus={focus} score={score}")
+        if rationale:
+            lines.append(f"rationale: {rationale}")
+        if saturated:
+            lines.append(f"saturated_at_start={list(saturated)}")
+        if prior_cycles:
+            lines.append("previous cycles:")
+            for row in prior_cycles[-5:]:
+                lines.append(
+                    f"  - cycle={row.get('cycle')} focus={row.get('focus')} "
+                    f"gain_delta={row.get('gain_delta')} saturated={row.get('saturated_at_start') or []}"
+                )
+        lines.append("Advisory only: use this as a prior, not a dispatch gate.")
     return lines
 
 
 _WHEN_TAG_RE = re.compile(r"^<!--\s*when:\s*(?P<when>.+?)\s*-->$")
+# Reference docs surfaced only on AgentX runs. Gated here (keyed on the session's
+# benchmark_mode, i.e. HYPERLOOM_AGENTX) rather than by an orchestration.md rule,
+# so a synthetic run never lists a doc it should not act on.
+_AGENTX_ONLY_REFERENCES: frozenset[str] = frozenset({"speculative_decoding"})
 
 
-def _section_reference_index(*, references_dir: Path, phase: str = "") -> list[str]:
+def _section_reference_index(
+    *,
+    references_dir: Path,
+    phase: str = "",
+    benchmark_mode: str = "",
+) -> list[str]:
     """Build ``## 8.`` from the reference docs that apply to *phase*.
 
     Args:
         references_dir: Directory containing the reference markdown files.
         phase: Normalised current pipeline phase; ``""`` includes all entries.
+        benchmark_mode: The session's benchmark mode (i.e. HYPERLOOM_AGENTX);
+            docs in :data:`_AGENTX_ONLY_REFERENCES` are listed only when it names
+            the AgentX workload. ``""`` (unscoped) still lists every doc.
 
     Returns:
         Markdown lines, or ``[]`` when the directory is absent or empty.
     """
     if not references_dir.is_dir():
         return []
+    # Only filter AgentX-only docs when a concrete mode is set; unscoped renders all.
+    mode_set = bool(str(benchmark_mode or "").strip())
+    agentx = is_agentx_mode(benchmark_mode)
     entries: list[tuple[str, str]] = []
     for path in sorted(references_dir.glob("*.md")):
         when_text = ""
@@ -981,6 +1010,8 @@ def _section_reference_index(*, references_dir: Path, phase: str = "") -> list[s
                 continue
             break
         if file_phases and not _renders_in(phase, file_phases):
+            continue
+        if path.stem in _AGENTX_ONLY_REFERENCES and mode_set and not agentx:
             continue
         entries.append((path.stem, when_text or "see document"))
     if not entries:
@@ -1008,6 +1039,7 @@ def build_orchestration_prompt(
     max_minutes: int = 0,
     macro_cycle: int = 0,
     cycle_directive: str = "",
+    cycle_strategy: Mapping[str, Any] | None = None,
     phase: str = "",
     transport: str = TRANSPORT_TOOLS,
     rules_fragment_path: Path | None = None,
@@ -1016,6 +1048,8 @@ def build_orchestration_prompt(
     references_dir: Path | None = None,
     benchmark_mode: str = "",
     agentx_corpus_shape: Mapping[str, Any] | None = None,
+    agentx_grading: Mapping[str, Any] | None = None,
+    agentx_backend: str = "",
 ) -> str:
     """Compose the Orchestration system prompt (deterministic for given inputs).
 
@@ -1037,7 +1071,10 @@ def build_orchestration_prompt(
             section.
         cycle_directive: optional LLM-authored focus text for this cycle
             (from ``orchestration_memory.next_cycle_directive``); empty string
-            renders the standing breadth→depth default.
+            with no ``cycle_strategy`` renders the standing breadth→depth default.
+        cycle_strategy: optional dict from ``plan_cycle_focus`` with deterministic
+            focus, rationale, saturated directions, and prior-cycle history; rendered
+            in the CYCLE DIRECTIVE section after the LLM directive (if any).
         phase: current pipeline phase; omits the modules whose behaviour it
             cannot reach. Empty renders every module. The Coordinator rebuilds
             the prompt at each phase seam.
@@ -1095,6 +1132,8 @@ def build_orchestration_prompt(
             framework_source_roots=framework_source_roots,
             benchmark_mode=benchmark_mode,
             agentx_corpus_shape=agentx_corpus_shape,
+            agentx_grading=agentx_grading,
+            agentx_backend=agentx_backend,
             session_framework_tree=session_framework_tree,
         ),
         _section_pipeline_and_budget(actions, max_minutes=max_minutes),
@@ -1104,7 +1143,9 @@ def build_orchestration_prompt(
         ),
         _section_action_catalogue(actions),
         _section_decision_framework(kernel_enabled=kernel_enabled, phase=phase_norm, transport=transport),
-        _section_cycle_directive(macro_cycle=macro_cycle, cycle_directive=cycle_directive),
+        _section_cycle_directive(
+            macro_cycle=macro_cycle, cycle_directive=cycle_directive, cycle_strategy=cycle_strategy
+        ),
     ]
     if (
         kernel_enabled
@@ -1115,7 +1156,11 @@ def build_orchestration_prompt(
     # The reference index is an index of documents ``read_reference`` pulls;
     # without that tool it is a list the model cannot act on.
     if transport != TRANSPORT_STRUCTURED_OUTPUT:
-        ref_index = _section_reference_index(references_dir=references_dir, phase=phase_norm)
+        ref_index = _section_reference_index(
+            references_dir=references_dir,
+            phase=phase_norm,
+            benchmark_mode=benchmark_mode,
+        )
         if ref_index:
             sections.append(ref_index)
     sections.append(_section_rules(rules_md, phase=phase_norm, transport=transport))
