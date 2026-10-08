@@ -766,6 +766,7 @@ GEAK_TERMINAL_STATUSES = frozenset(
         "ok",
         "no_gain",
         "error",
+        "timeout",
         "failed",
         "skipped",
         "baseline_reproduction_failed",
