@@ -20,7 +20,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import Mapping
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from typing import Any
 
 from hyperloom.common.coerce import to_str_list
@@ -28,7 +28,6 @@ from hyperloom.inference_optimizer.session.session_paths import enablement_stack
 from hyperloom.common.env_safety import (
     filter_untrusted_env_mapping,
     is_allowed_variant_env_key,
-    redact_secret_values,
 )
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.timeutil import now_iso
@@ -63,7 +62,6 @@ from ...delivery import file_digest
 from ...delivery.ledger import append_record, load_prepared_records, load_records, mark_prepared, restore_records
 from ..stop_attribution import stopped_by_the_run_class
 from ...policy.gate import INTEGRATE_PATCH_PERMISSIVE_VERDICTS
-from ..cancel_channel import cancel_scope_listener, stop_was_asked_for
 from ._accuracy_gate import (
     DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
     accuracy_keep_block,
@@ -77,6 +75,7 @@ from ._accuracy_gate import (
 from ._apply_feedback import ApplyFeedback, build_apply_feedback
 from ._git import _git_head_sha, _run_git_cp
 from ._integrate_attempt import IntegrateAttempt
+from ._setup_replay import resolve_setup_commands, run_setup_commands, setup_report_fields
 from ._patch_source_pr import (
     DEFAULT_DIFF_FETCH_TIMEOUT_SEC,
     _candidate_slug,
@@ -90,7 +89,6 @@ from ._nogit_patch import (
 )
 from ...enablement.recipe.credentials import detect_credential_channels
 from ...enablement.recipe.projections import project_launch_evidence
-from ...enablement.recipe.setup_ledger import build_execution_row
 from ._patch_snapshot import _git_commit_kept, _patch_touched_paths
 from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
 from ._grid_runner import (
@@ -134,55 +132,6 @@ _HYPERLOOM_AUTO_STASH_MSG = "hyperloom-auto-stash: preserving user changes befor
 _HYPERLOOM_QUARANTINE_STASH_MSG = "hyperloom-quarantine: unresolved merge cleared before candidate run"
 
 
-# Enablement environment-setup replay: allowlist of install-only command shapes.
-# A specialist may run arbitrary Bash in its own sandboxed session, but the
-# durable *replay* performed here (before applying patches + booting) is limited
-# to package/tool installation so a recorded ``setup_commands`` list can never be
-# a vector for arbitrary side effects (rm, curl|bash, service restarts, etc.).
-# Matched against the command with leading `sudo `/env-assignments stripped.
-_SETUP_CMD_ALLOWLIST: tuple[str, ...] = (
-    r"pip3?\s+install\b",
-    r"(?:python3?|uv)\s+-m\s+pip\s+install\b",
-    r"uv\s+pip\s+install\b",
-    r"pip3?\s+uninstall\s+-y\b",
-    # Creating an isolated environment to install INTO. Without these the only
-    # spelling that survived the allowlist was installing into the system
-    # interpreter (``PIP_BREAK_SYSTEM_PACKAGES=1 pip install``), so the gate was
-    # steering repairs toward the less safe of the two options it had to choose
-    # between. Creating a venv directory is bounded; breaking the system's
-    # package manager is not.
-    r"uv\s+venv\b",
-    r"(?:python3?|uv)\s+-m\s+venv\b",
-    r"apt(?:-get)?\s+(?:install|update)\b",
-    r"npm\s+(?:install|i|ci)\b",
-    r"npm\s+install\s+-g\b",
-    r"pnpm\s+(?:install|add)\b",
-    r"yarn\s+(?:add|install)\b",
-    r"conda\s+install\b",
-    r"mamba\s+install\b",
-)
-#: Directory prefixes whose basename may stand in for the whole path when the
-#: allowlist is matched. Absolute and system-owned on purpose: the replay runs
-#: the ORIGINAL command string, so anything a specialist can write to -- a
-#: relative ``./pip``, a path under its own workspace -- must not be able to
-#: borrow an allowlisted name. ``/opt/venv`` is the canonical ROCm stack this
-#: repository installs into; the rest are the standard system bindirs.
-#: ``..`` is excluded from the segment class on purpose. With a plain
-#: ``[A-Za-z0-9._-]+`` the traversal form ``/usr/bin/../../tmp/x/pip install foo``
-#: matches, normalises to an allowlisted ``pip install foo``, and then
-#: ``_run_setup_commands`` executes the ORIGINAL string -- running /tmp/x/pip,
-#: which is exactly the workspace-owned binary the prefix list exists to keep out.
-_TRUSTED_BIN_PREFIX_RE = re.compile(
-    r"^(?:/opt/(?!\.\.?/)[A-Za-z0-9._-]+|/usr(?:/local)?|/bin|/sbin)"
-    r"(?:/(?!\.\.?(?:/|$))[A-Za-z0-9._-]+)*/"
-)
-
-#: Per-command clip in the rejection summary. Long enough to recognise the
-#: command, short enough that twelve of them cannot bury the round's own reason.
-_SKIPPED_CMD_CHARS = 160
-
-_SETUP_CMD_MAX = 12  # cap on distinct setup commands per integrate
-_SETUP_CMD_TIMEOUT_SEC = 1800  # 30 min per install command
 # Two-sided band, in percent of the pre-patch base, that a switch-off parity leg
 # must land inside. The rewrite workloads this gates measure with a run-to-run
 # spread well under 1%, so a band this wide clears noise by a comfortable margin
@@ -406,306 +355,7 @@ def _parse_framework_switches(
     return _switch_manifest.parse_manifest(raw, reserved_env=reserved)
 
 
-def _with_skipped_setup_reason(reason: str, setup_result: dict[str, Any]) -> str:
-    """Append the allowlist rejections to a round's ``reason``.
-
-    A rejected setup command was only ever a ``log.warning``. Downstream saw the
-    round's outcome with no link to the cause, so the same authoring attempt was
-    re-dispatched until the budget ran out -- each round proposing the same fix
-    and each round having it silently dropped. Naming the rejection in the reason
-    is what lets the next round (or an operator) see that the proposal was never
-    the problem.
-
-    Args:
-        reason: The round's existing reason text.
-        setup_result: The :func:`_run_setup_commands` result.
-
-    Returns:
-        ``reason`` unchanged when nothing was rejected, else ``reason`` with a
-        one-line summary of the rejected commands appended.
-    """
-    # ``_run_setup_commands`` already stores the sanitised form, so for every
-    # production caller this is a no-op. Applied again anyway: the lesson of the
-    # gap this closes is that a safety step placed at the call sites protects
-    # the call sites that exist, and the sanitiser is idempotent.
-    skipped = [_sanitize_setup_command(c) for c in (setup_result.get("skipped") or []) if str(c).strip()]
-    if not skipped:
-        return reason
-    listed = "; ".join(skipped[:_SETUP_CMD_MAX])
-    if len(skipped) > _SETUP_CMD_MAX:
-        listed += f"; (+{len(skipped) - _SETUP_CMD_MAX} more)"
-    note = f"{len(skipped)} setup command(s) were REJECTED by the install-only allowlist and never ran: {listed}"
-    return f"{reason} ({note})" if reason else note
-
-
-def _sanitize_setup_command(cmd: str) -> str:
-    """A rejected command in the form it is safe to store and hand back.
-
-    Rejected commands are LLM-written text. They reach the journal, the report
-    and the KB, and are read back into the next round's mandate, so a bearer
-    token or a credentialed URL in one would outlive the round that produced it.
-    Clipped as well, so a single rejected install naming a hundred packages
-    cannot crowd out the reason it is reported alongside.
-    """
-    text = redact_secret_values(str(cmd).strip())
-    return text if len(text) <= _SKIPPED_CMD_CHARS else text[:_SKIPPED_CMD_CHARS] + "..."
-
-
-def _is_allowlisted_setup_command(cmd: str) -> bool:
-    """True when ``cmd`` is an install-only command safe to replay.
-
-    Strips a leading ``sudo``, any ``KEY=VALUE`` env-assignment prefixes and the
-    executable's directory, then requires the remainder to start with a known
-    package/tool installer. Rejects anything with shell control operators that
-    could chain an arbitrary payload.
-    """
-    text = (cmd or "").strip()
-    if not text:
-        return False
-    # Reject command substitution / backticks / newlines outright — these can
-    # smuggle an arbitrary payload regardless of tokenization.
-    if re.search(r"[`\n]|\$\(", text):
-        return False
-    # Guard against genuine shell chaining/redirection while allowing pip/pkg
-    # version specifiers that legitimately contain ``>``/``<`` (e.g.
-    # ``transformers>=4.58``). Neutralise the safe, non-shell uses first, then
-    # reject any leftover metacharacter (the replay runs under ``shell=True``).
-    scrubbed = text
-    # Drop quoted segments (their contents cannot act as shell operators).
-    scrubbed = re.sub(r"'[^']*'", " ", scrubbed)
-    scrubbed = re.sub(r'"[^"]*"', " ", scrubbed)
-    # Drop an unquoted pip-style version comparison only when it is attached to
-    # the package token and the version starts with a digit (``pkg>=4.58``).
-    # Whitespace-prefixed operators and non-version targets remain visible to
-    # the metacharacter check below (``foo >evil``, ``2>evil``, ``foo <evil``).
-    scrubbed = re.sub(r"(?<=[0-9A-Za-z_.\]])(?:>=|<=|>|<)(?=\d)", " ", scrubbed)
-    # Any remaining shell chaining/redirection metacharacter => unsafe.
-    if re.search(r"[;&|<>]", scrubbed):
-        return False
-    # Strip a leading sudo and leading KEY=VALUE env assignments.
-    text = re.sub(r"^\s*sudo\s+", "", text)
-    text = re.sub(r"^(?:\s*[A-Za-z_][A-Za-z0-9_]*=[^\s]*\s+)+", "", text)
-    # Match on the executable's basename, but ONLY for an absolute path under a
-    # system prefix. The patterns below are anchored, so without any
-    # normalisation ``/opt/venv/bin/uv pip install X`` was REJECTED while
-    # ``uv pip install X`` -- the same operation -- was allowed. Measured: two
-    # sessions hit one missing dependency and got opposite outcomes, decided by
-    # nothing but how the specialist happened to spell the path.
-    #
-    # The allowlist is checked against this normalised text, but
-    # ``_run_setup_commands`` executes the ORIGINAL string under ``shell=True``.
-    # So a blanket basename strip would let any binary in: ``./pip install foo``
-    # normalises to an allowlisted ``pip install foo`` while running a script
-    # the specialist just wrote into its own workspace. Restricting the strip to
-    # absolute system prefixes keeps "which KIND of operation may replay" intact
-    # -- the property line 105 promises -- while still treating a venv's own
-    # interpreter as the interpreter it is.
-    text = _TRUSTED_BIN_PREFIX_RE.sub("", text, count=1)
-    return any(re.match(pat, text) for pat in _SETUP_CMD_ALLOWLIST)
-
-
 _now_iso = functools.partial(now_iso, "auto")
-
-
-def _resolve_setup_commands(
-    *,
-    params: dict[str, Any],
-    done_payload: dict[str, Any] | None,
-) -> list[str]:
-    """Resolve the ordered, deduped enablement setup commands to replay.
-
-    Sources (in order; deduped preserving first occurrence): base commands
-    stacked from prior rounds (``params['enablement_setup_commands']``) then the
-    current specialist's ``specialist_done.setup_commands``. Non-string / blank
-    entries are dropped; the list is capped at :data:`_SETUP_CMD_MAX`.
-
-    Args:
-        params: The integrate_patch task params.
-        done_payload: The specialist ``specialist_done`` payload (may be None).
-
-    Returns:
-        list[str]: Ordered unique candidate setup commands (pre-allowlist).
-    """
-    out: list[str] = []
-    seen: set[str] = set()
-    sources: list[Any] = []
-    base = params.get("enablement_setup_commands")
-    if isinstance(base, list):
-        sources.extend(base)
-    if isinstance(done_payload, dict):
-        dp = done_payload.get("setup_commands")
-        if isinstance(dp, list):
-            sources.extend(dp)
-    for c in sources:
-        s = str(c or "").strip()
-        if s and s not in seen:
-            seen.add(s)
-            out.append(s)
-        if len(out) >= _SETUP_CMD_MAX:
-            break
-    return out
-
-
-def _setup_command_sources(
-    *,
-    params: dict[str, Any],
-    done_payload: dict[str, Any] | None,
-) -> dict[str, str]:
-    """Map each candidate command to whether it was inherited or proposed here.
-
-    A command replayed from the durable base and one this round's specialist
-    proposed carry different replay meaning, and the resolved list dedups them
-    into one string.
-    """
-    inherited = {str(c or "").strip() for c in (params.get("enablement_setup_commands") or [])}
-    sources: dict[str, str] = {cmd: "inherited" for cmd in inherited if cmd}
-    proposed = (done_payload or {}).get("setup_commands") or []
-    for raw in proposed:
-        cmd = str(raw or "").strip()
-        if cmd and cmd not in sources:
-            sources[cmd] = "proposed"
-    return sources
-
-
-def _execute_setup_command(cmd: str, *, cwd: Path, env: dict[str, str], log_path: Path) -> bool:
-    """Run one allowlisted setup command, appending its output to the replay log.
-
-    Returns:
-        True when the command exited zero. A non-zero install is recorded but
-        does not hard-fail the integration -- the subsequent boot/gate is the
-        source of truth for runnability.
-    """
-    log.info("integrate_patch: enablement setup replay: %s", cmd)
-    try:
-        proc = subprocess.run(  # nosec B602 - allowlisted install-only shell command.
-            cmd,
-            shell=True,
-            cwd=str(cwd),
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=_SETUP_CMD_TIMEOUT_SEC,
-        )
-    except (subprocess.TimeoutExpired, OSError) as exc:
-        log.warning("integrate_patch: enablement setup errored (%s) for: %s", type(exc).__name__, cmd)
-        return False
-    try:
-        with open(log_path, "a", encoding="utf-8") as fh:
-            fh.write(f"$ {cmd}\n{proc.stdout}\n{proc.stderr}\n(rc={proc.returncode})\n\n")
-    except OSError:
-        # Logging is best-effort.
-        pass
-    if proc.returncode != 0:
-        log.warning("integrate_patch: enablement setup rc=%d for: %s", proc.returncode, cmd)
-    return proc.returncode == 0
-
-
-def _run_setup_commands(
-    commands: list[str],
-    *,
-    cwd: Path,
-    log_dir: Path,
-    sources: dict[str, str] | None = None,
-    round_task_id: str = "",
-    seq_start: int = 0,
-    on_execution: Callable[[dict[str, Any]], None] | None = None,
-) -> dict[str, Any]:
-    """Replay allowlisted enablement setup commands (installs) before boot.
-
-    Blocking (serial ``subprocess.run``, 1800s cap); call via ``asyncio.to_thread``.
-    Cancel is checked between commands; a command already in ``subprocess.run``
-    is not killed. Cancelling the await unwinds integrate and does not continue
-    to apply patches.
-
-    Runs each allowlisted command non-interactively with a per-command timeout,
-    appending combined output to ``<log_dir>/enablement_setup.log``. Commands
-    that fail the allowlist are skipped (never executed). A non-zero install is
-    recorded but does NOT hard-fail the integration — the subsequent boot/gate
-    is the source of truth for runnability.
-
-    Args:
-        commands: Candidate setup commands (already deduped / capped).
-        cwd: Working directory for the commands.
-        log_dir: Directory to write ``enablement_setup.log`` into.
-
-    Args (continued):
-        sources: ``{cmd: "inherited"|"proposed"}`` for the ledger rows.
-        round_task_id: The round the executions belong to.
-        seq_start: Highest ledger ``seq`` already durable, so occurrence
-            identity stays monotonic across rounds.
-
-    Returns:
-        dict[str, Any]: ``{"applied", "skipped", "failed", "executions"}`` where
-        ``applied`` are the allowlisted commands that ran (rc==0) and
-        ``executions`` is one ledger row per ATTEMPTED command.
-    """
-    applied: list[str] = []
-    skipped: list[str] = []
-    failed: list[str] = []
-    executions: list[dict[str, Any]] = []
-    if not commands:
-        return {"applied": applied, "skipped": skipped, "failed": failed, "executions": executions}
-    try:
-        log_dir.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        # Logging is best-effort.
-        pass
-    log_path = log_dir / "enablement_setup.log"
-    env = dict(os.environ)
-    env.setdefault("DEBIAN_FRONTEND", "noninteractive")
-    env.setdefault("PIP_DISABLE_PIP_VERSION_CHECK", "1")
-
-    def _record(cmd: str, index: int, outcome: str) -> None:
-        row = build_execution_row(
-            seq=int(seq_start) + len(executions) + 1,
-            round_task_id=round_task_id,
-            cmd_index=index,
-            cmd=cmd,
-            source=(sources or {}).get(str(cmd).strip(), "proposed"),
-            outcome=outcome,
-            env=env,
-        )
-        executions.append(row)
-        if on_execution is not None:
-            # Persisted HERE, not after the await returns. Cancelling the await
-            # unwinds the caller while this thread and its in-flight subprocess
-            # carry on, so a row handed back through the return value is lost
-            # for a command that actually ran -- and the ledger is what says a
-            # round installed into the shared venv at all.
-            on_execution(row)
-
-    with cancel_scope_listener():
-        for cmd_index, cmd in enumerate(commands):
-            # Checked between commands, as upstream does: a command already
-            # inside subprocess.run is not killed. Commands never reached are
-            # recorded nowhere -- the ledger states what ran, not what was planned.
-            if stop_was_asked_for():
-                log.info("integrate_patch: enablement setup replay stopped after cancel")
-                break
-            if not _is_allowlisted_setup_command(cmd):
-                # Sanitised HERE, not at the reporting sites. This list is copied
-                # verbatim into every result payload that carries
-                # ``setup_commands_skipped``, and a rejected command is LLM-written
-                # text that can hold a bearer token or a credentialed URL. Doing it
-                # at the four call sites protects those four; doing it at the source
-                # protects the fifth as well.
-                safe_cmd = _sanitize_setup_command(cmd)
-                skipped.append(safe_cmd)
-                # Also carried into the round's ``reason`` by
-                # _with_skipped_setup_reason: a warning alone left the caller with an
-                # outcome and no link to the cause, so the same proposal was
-                # re-authored and re-dropped until the budget ran out. The log is a
-                # disk-backed surface too, so it gets the sanitised form as well.
-                log.warning("integrate_patch: skipping non-allowlisted enablement setup command: %s", safe_cmd)
-                _record(cmd, cmd_index, "skipped")
-                continue
-            if _execute_setup_command(cmd, cwd=cwd, env=env, log_path=log_path):
-                applied.append(cmd)
-                _record(cmd, cmd_index, "applied")
-            else:
-                failed.append(cmd)
-                _record(cmd, cmd_index, "failed")
-    return {"applied": applied, "skipped": skipped, "failed": failed, "executions": executions}
 
 
 def _candidate_mutation_roots(*, params: dict[str, Any], done_payload: dict[str, Any] | None) -> list[str]:
@@ -885,20 +535,12 @@ def _inherited_base_sha_by_root(enablement: Any) -> dict[str, str]:
     return inherited
 
 
-def _durable_execution_seq(shared_state: Any) -> int:
-    """Return the highest ``seq`` already in the durable setup ledger."""
-    ledger = getattr(getattr(shared_state, "enablement", None), "setup_executions", None) or []
-    return max((int(row.get("seq") or 0) for row in ledger if isinstance(row, dict)), default=0)
-
-
 def _append_setup_executions(shared_state: Any, setup_result: dict[str, Any], *, session_dir: Path) -> None:
     """Append this round's execution rows to the durable, append-only ledger."""
-    rows = [row for row in (setup_result.get("executions") or []) if isinstance(row, dict)]
-    if shared_state is None or not rows:
+    if shared_state is None or not shared_state.enablement.append_setup_executions(
+        setup_result.get("executions") or []
+    ):
         return
-    ledger = list(getattr(shared_state.enablement, "setup_executions", None) or [])
-    ledger.extend(rows)
-    shared_state.enablement.setup_executions = ledger
     try:
         shared_state.save(session_dir)
     except OSError:
@@ -2794,16 +2436,15 @@ class IntegratePatchExecutor:
             _note_pre_mutation_head(attempt, candidate, enablement=is_enablement, session_dir=self.session_dir)
         setup_result: dict[str, Any] = {"applied": [], "skipped": [], "failed": [], "executions": []}
         if bool(params.get("enablement")):
-            setup_cmds = _resolve_setup_commands(params=params, done_payload=done_payload)
+            setup_cmds = resolve_setup_commands(params=params, done_payload=done_payload)
             if setup_cmds:
                 setup_result = await asyncio.to_thread(
-                    _run_setup_commands,
+                    run_setup_commands,
                     setup_cmds,
                     cwd=self.session_dir,
                     log_dir=runs_dir(self.session_dir, "integrate_patch", attempt.task_id),
-                    sources=_setup_command_sources(params=params, done_payload=done_payload),
                     round_task_id=specialist_task_id,
-                    seq_start=_durable_execution_seq(shared_state),
+                    seq_start=shared_state.enablement.last_execution_seq() if shared_state is not None else 0,
                     on_execution=lambda row: _append_setup_executions(
                         shared_state, {"executions": [row]}, session_dir=self.session_dir
                     ),
@@ -2953,9 +2594,7 @@ class IntegratePatchExecutor:
                 "patches_reverted": [],
                 "artifacts_applied": [],
                 "artifact_errors": artifact_resolve_errors,
-                "setup_commands_applied": list(setup_result.get("applied") or []),
-                "setup_commands_skipped": list(setup_result.get("skipped") or []),
-                "reason": _with_skipped_setup_reason(
+                **setup_report_fields(
                     "neither patches, config_changes, installable artifacts, nor "
                     "allowlisted setup commands were supplied / discoverable for "
                     "this specialist task",
@@ -3562,9 +3201,7 @@ class IntegratePatchExecutor:
                 # specialist's own setup commands were dropped on the way in,
                 # that is the likeliest reason -- and the one the next round
                 # needs, since re-authoring the same proposal cannot help.
-                "reason": _with_skipped_setup_reason(f"enablement not runnable: {run_reason}", setup_result),
-                "setup_commands_applied": list(setup_result.get("applied") or []),
-                "setup_commands_skipped": list(setup_result.get("skipped") or []),
+                **setup_report_fields(f"enablement not runnable: {run_reason}", setup_result),
                 "bench_result": bench_result,
                 "workspace": str(output_root),
                 **bringup_evidence,
@@ -3635,7 +3272,7 @@ class IntegratePatchExecutor:
                 "advanced": True,
                 "runnable": False,
                 "correctness_verified": False,
-                "reason": _with_skipped_setup_reason(
+                **setup_report_fields(
                     f"enablement progressed: {run_reason}; boot advanced "
                     f"to a new gap ({wall.name if wall is not None else 'no wall recorded'})",
                     setup_result,
@@ -3646,8 +3283,6 @@ class IntegratePatchExecutor:
                 # before half.
                 "enablement_observation_path": after_loaded.path,
                 **bringup_evidence,
-                "setup_commands_applied": list(setup_result.get("applied") or []),
-                "setup_commands_skipped": list(setup_result.get("skipped") or []),
                 "bench_result": bench_result,
                 "workspace": str(output_root),
                 **eval_provenance,
@@ -3678,9 +3313,7 @@ class IntegratePatchExecutor:
             "runnable": True,
             "correctness_verified": correctness_ok is True,
             "provisional": provisional,
-            "reason": _with_skipped_setup_reason(reason, setup_result),
-            "setup_commands_applied": list(setup_result.get("applied") or []),
-            "setup_commands_skipped": list(setup_result.get("skipped") or []),
+            **setup_report_fields(reason, setup_result),
             "bench_result": bench_result,
             "workspace": str(output_root),
             **bringup_evidence,
