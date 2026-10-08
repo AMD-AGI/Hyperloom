@@ -418,6 +418,42 @@ def test_per_step_counts_are_summed_and_the_running_total_is_ignored() -> None:
     assert "total_tokens" not in usage
 
 
+def test_the_context_peak_is_the_largest_single_step_request() -> None:
+    """Each step resends the whole context; summing steps overstates it, and inputTokens alone omits the cache."""
+    events = [
+        {"type": "assistant/message", "data": {"usage": {"inputTokens": 100, "cacheReadTokens": 900}}},
+        {"type": "assistant/message", "data": {"usage": {"inputTokens": 50, "cacheReadTokens": 1000}}},
+    ]
+    usage = usage_from_events(events)
+    assert usage["context_tokens_peak"] == 1050
+    assert usage["input_tokens"] == 150
+
+
+async def test_the_reported_context_peak_reaches_the_checkpoint_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    usage = {"input_tokens": 150, "cache_read_input_tokens": 1900, "context_tokens_peak": 1050}
+    _stub_turn(monkeypatch, DeepSeekSessionResult(text=_reply("send_message", {"topic": "x"}), usage=usage))
+    result = await _backend(tmp_path).run("status?")
+
+    assert result.metadata["context_tokens_peak"] == 1050
+
+
+async def test_an_open_trajectory_span_owns_the_call_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The token row and the trajectory row of one turn are joined on this id."""
+    from hyperloom.inference_optimizer.trace.trajectory_trace import trajectory_scope
+
+    _stub_turn(monkeypatch, DeepSeekSessionResult(text=_reply("send_message", {"topic": "x"})))
+    with trajectory_scope(call_id="span-call-1"):
+        result = await _backend(tmp_path).run("status?")
+
+    assert result.metadata["call_id"] == "span-call-1"
+
+
 def test_a_turn_reporting_no_usage_reports_no_fields() -> None:
     """Zeroed counts would be indistinguishable from a turn that really cost nothing."""
     assert usage_from_events([{"type": "tool/call", "data": {"name": "read"}}]) == {}

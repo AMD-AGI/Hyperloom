@@ -79,6 +79,7 @@ def usage_from_events(events: list[dict[str, Any]]) -> dict[str, int]:
         "cache_read_input_tokens": 0,
     }
     seen = False
+    peak = 0
     for event in events:
         if not isinstance(event, dict) or event.get("type") != "assistant/message":
             continue
@@ -87,6 +88,7 @@ def usage_from_events(events: list[dict[str, Any]]) -> dict[str, int]:
         if not isinstance(usage, dict):
             continue
         seen = True
+        step: dict[str, int] = {}
         for wire, name in _USAGE_WIRE_NAMES.items():
             value = usage.get(wire)
             if isinstance(value, bool):
@@ -95,7 +97,14 @@ def usage_from_events(events: list[dict[str, Any]]) -> dict[str, int]:
                 parsed = int(value)
                 if parsed >= 0:
                     totals[name] += parsed
-    return totals if seen else {}
+                    step[name] = parsed
+        # ``inputTokens`` excludes the cached prefix, and every step resends the whole context, so one step's
+        # uncached plus cached input is that request's context size; the largest of them is the turn's peak.
+        peak = max(peak, step.get("input_tokens", 0) + step.get("cache_read_input_tokens", 0))
+    if not seen:
+        return {}
+    totals["context_tokens_peak"] = peak
+    return totals
 
 
 def turn_end_failure(events: list[dict[str, Any]]) -> str:

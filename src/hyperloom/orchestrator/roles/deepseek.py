@@ -25,7 +25,8 @@ from hyperloom.inference_optimizer.protocol.intent import (
 )
 
 from ..prompts.transport import TRANSPORT_STRUCTURED_OUTPUT
-from ..trace.llm_trace import new_call_id
+from hyperloom.inference_optimizer.trace.llm_trace import new_call_id
+from hyperloom.inference_optimizer.trace.trajectory_trace import current_context
 from .base import (
     BackendError,
     BackendTurnResult,
@@ -256,16 +257,16 @@ class DeepSeekBackend:
         metadata: dict[str, Any] = {
             "model": self.model,
             "session_id": sdk_result.session_id,
-            # Pairs this turn's token row with its conversation row.
-            "call_id": new_call_id(),
+            # Pairs this turn's token row with its conversation row. A caller that opened an ``llm.call``
+            # trajectory span owns the id.
+            "call_id": current_context().call_id or new_call_id(),
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "cache_creation_input_tokens": 0,
             "cache_read_input_tokens": cache_read_tokens,
-            # The harness reports per-step counts that this sums per turn, so the
-            # input side already is this request's context size — the figure the
-            # checkpoint policy compares against the model's window.
-            "context_tokens_peak": input_tokens,
+            # The largest single request of the turn -- the figure the checkpoint
+            # policy compares against the model's window.
+            "context_tokens_peak": safe_int(usage.get("context_tokens_peak")),
             # Full conversation text for conversations.jsonl, handed up for the
             # caller to persist.
             "prompt": prompt,
