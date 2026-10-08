@@ -38,6 +38,7 @@ __all__ = [
     "GpuPowerRecorder",
     "ServerLogPhaseDriver",
     "build_gpu_power_recorder",
+    "gpu_power_sampling_unavailable",
     "parse_power_sample",
     "read_measured_gpu_power",
     "read_measured_gpu_power_by_gpu",
@@ -183,6 +184,19 @@ class GpuPowerRecorder:
                 if power is not None:
                     watts.setdefault(gpu, []).append(power)
         serving = sorted(gpu for gpu, frac in peak_vram.items() if frac >= _SERVING_VRAM_FRACTION and gpu in watts)
+        # A card that may be serving but cannot be read would drop out of the total and escape its own limit, so it
+        # leaves the whole round unmeasured: a card holding a model with no power reading, or a card in scope whose
+        # VRAM was never read (absent from amd-smi, or reported N/A), so it cannot be ruled out as serving.
+        in_scope = self._gpus if self._gpus is not None else {gpu for reading in samples for gpu in reading}
+        unread = (
+            sorted(
+                gpu
+                for gpu in in_scope
+                if gpu not in peak_vram or (peak_vram[gpu] >= _SERVING_VRAM_FRACTION and gpu not in watts)
+            )
+            if samples
+            else []
+        )
         per_gpu = {
             str(gpu): {
                 "avg_power_w": round(sum(watts[gpu]) / len(watts[gpu]), 2),
@@ -192,7 +206,11 @@ class GpuPowerRecorder:
             }
             for gpu in sorted(watts)
         }
-        avg = round(sum(per_gpu[str(g)]["avg_power_w"] for g in serving) / len(serving), 2) if serving else None
+        avg = (
+            round(sum(per_gpu[str(g)]["avg_power_w"] for g in serving) / len(serving), 2)
+            if serving and not unread
+            else None
+        )
         peak = max((per_gpu[str(g)]["max_power_w"] for g in serving), default=None)
         return {
             "schema_version": 1,
@@ -202,6 +220,7 @@ class GpuPowerRecorder:
             "interval_sec": self._interval,
             "samples": len(samples),
             "serving_gpus": serving,
+            "unread_gpus": unread,
             "avg_power_w": avg,
             "max_power_w": peak,
             "per_gpu": per_gpu,
@@ -301,11 +320,18 @@ class ServerLogPhaseDriver:
             log.debug("gpu_power: final replay log poll failed", exc_info=True)
 
 
+def gpu_power_sampling_unavailable() -> str:
+    """Why no round on this host can be sampled, or ``""``."""
+    if not env_flag(GPU_POWER_ENV, default=True):
+        return f"{GPU_POWER_ENV}=0 turns the GPU power sampler off"
+    if shutil.which("amd-smi") is None:
+        return "amd-smi is not on PATH, so the GPU power sampler has nothing to read"
+    return ""
+
+
 def build_gpu_power_recorder(server_log_path: str | None, env: dict[str, str] | None) -> GpuPowerRecorder | None:
     """The round's power recorder, or ``None`` when sampling is off or there is no ``amd-smi`` to sample with."""
-    if not server_log_path or not env_flag(GPU_POWER_ENV, default=True):
-        return None
-    if shutil.which("amd-smi") is None:
+    if not server_log_path or gpu_power_sampling_unavailable():
         return None
     try:
         from hyperloom.common.gpu_power_settings import visible_gpu_indices
@@ -356,13 +382,16 @@ def read_measured_gpu_power(
 def read_measured_gpu_power_by_gpu(
     workspace: Path | None, *, subprocess_started_unix: float | None = None
 ) -> tuple[bool, dict[str, float] | None]:
-    """``(found, {gpu_id: avg_power_w})`` for the round's serving cards; ``None`` when no serving card had a reading.
+    """``(found, {gpu_id: avg_power_w})`` for the round's serving cards; ``None`` when no serving card had a reading,
+    or when a card that may be serving could not be read (``unread_gpus``), since the budget cannot cover it.
 
     Keyed by the physical ``amd-smi`` index as a string, the same ids ``--max-per-gpu-power-w`` names.
     """
     payload = _read_round_artifact(workspace, subprocess_started_unix)
     if payload is None:
         return False, None
+    if payload.get("unread_gpus"):
+        return True, None
     per_gpu = payload.get("per_gpu") if isinstance(payload.get("per_gpu"), dict) else {}
     readings = {
         str(gpu): watts

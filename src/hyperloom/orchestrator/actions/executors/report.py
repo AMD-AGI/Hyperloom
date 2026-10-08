@@ -274,9 +274,10 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
         "The baseline's serving GPUs drew more than --max-power-w in total, or a card drew more than its "
         "--max-per-gpu-power-w limit, or the baseline round reported no per-GPU power, so "
         "the run stopped before optimizing. Every candidate is measured against that reference, so none could have "
-        "been promoted. If the round reported no power, read the round's gpu_power.json: an empty serving_gpus means "
-        "no card held a model during the measured phase, and query_errors means amd-smi could not be read (or "
-        "HYPERLOOM_GPU_POWER_SAMPLING=0 turned the sampler off); otherwise lower the cards' power cap (amd-smi set "
+        "been promoted. If the round reported no power, read the round's gpu_power.json: unread_gpus names cards "
+        "that may have been serving but could not be read, an empty serving_gpus means no card held a model during "
+        "the measured phase, and query_errors means amd-smi could not be read; otherwise lower the cards' power cap "
+        "(amd-smi set "
         "--power-cap) so the baseline fits, or relaunch with a ceiling the baseline can meet."
     ),
     "baseline_over_latency_budget": (

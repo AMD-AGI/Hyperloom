@@ -233,11 +233,11 @@ class TestCli:
 
 class TestPerGpuLaunchCheck:
     @staticmethod
-    def _error(per_gpu, *, total_w=2800.0, nodes=1, available_gpus=frozenset({4, 5, 6, 7})):
+    def _error(per_gpu, *, total_w=2800.0, available_gpus=frozenset({4, 5, 6, 7})):
         from hyperloom.inference_optimizer.cli.bootstrap import per_gpu_power_budget_error
 
         available = set(available_gpus) if available_gpus is not None else None
-        return per_gpu_power_budget_error(per_gpu, total_w=total_w, nodes=nodes, available_gpus=available)
+        return per_gpu_power_budget_error(per_gpu, total_w=total_w, available_gpus=available)
 
     def test_limits_inside_the_total_on_visible_cards_pass(self):
         assert self._error({"4": 700.0, "5": 700.0, "6": 700.0, "7": 700.0}) == ""
@@ -255,8 +255,46 @@ class TestPerGpuLaunchCheck:
     def test_an_unknown_gpu_set_refuses(self):
         assert "cannot be checked" in self._error({"4": 700.0}, available_gpus=None)
 
-    def test_a_multi_node_session_refuses(self):
-        assert "multi-node" in self._error({"4": 700.0}, nodes=2)
+
+class TestUnmeasurableBudget:
+    """A budget that no round could measure is refused up front instead of costing a baseline."""
+
+    @staticmethod
+    def _error(*, total_w=2800.0, per_gpu_w=None, nodes=1):
+        from hyperloom.inference_optimizer.cli.bootstrap import power_budget_unmeasurable_error
+
+        return power_budget_unmeasurable_error(total_w=total_w, per_gpu_w=per_gpu_w, nodes=nodes)
+
+    @pytest.fixture
+    def sampler_available(self, monkeypatch):
+        from hyperloom.orchestrator.actions.executors import _gpu_power
+
+        monkeypatch.delenv(_gpu_power.GPU_POWER_ENV, raising=False)
+        monkeypatch.setattr(_gpu_power.shutil, "which", lambda name: "/usr/bin/amd-smi")
+
+    def test_a_measurable_budget_passes(self, sampler_available):
+        assert self._error() == ""
+        assert self._error(total_w=None, per_gpu_w={"4": 700.0}) == ""
+
+    @pytest.mark.parametrize(("total_w", "per_gpu_w"), [(2800.0, None), (None, {"4": 700.0})])
+    def test_a_multi_node_session_refuses_either_budget(self, sampler_available, total_w, per_gpu_w):
+        assert "multi-node" in self._error(total_w=total_w, per_gpu_w=per_gpu_w, nodes=2)
+
+    def test_sampling_turned_off_refuses(self, sampler_available, monkeypatch):
+        monkeypatch.setenv("HYPERLOOM_GPU_POWER_SAMPLING", "0")
+        assert "HYPERLOOM_GPU_POWER_SAMPLING=0" in self._error()
+
+    def test_no_amd_smi_refuses(self, monkeypatch):
+        from hyperloom.orchestrator.actions.executors import _gpu_power
+
+        monkeypatch.delenv(_gpu_power.GPU_POWER_ENV, raising=False)
+        monkeypatch.setattr(_gpu_power.shutil, "which", lambda name: None)
+        assert "amd-smi is not on PATH" in self._error(total_w=None, per_gpu_w={"4": 700.0})
+
+    @pytest.mark.parametrize("off", [None, 0.0])
+    def test_no_budget_needs_no_sampler(self, monkeypatch, off):
+        monkeypatch.setenv("HYPERLOOM_GPU_POWER_SAMPLING", "0")
+        assert self._error(total_w=off, per_gpu_w={}, nodes=2) == ""
 
 
 def test_the_prompt_states_the_budget_and_the_cap():
