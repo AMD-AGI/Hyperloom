@@ -430,6 +430,38 @@ def test_no_pidfile_fail_loud_exit_3(tmp_path):
     assert not (res / "inferencex_result.json").exists()
 
 
+def test_agentic_recipe_result_lands_in_result_dir(tmp_path):
+    # Mimic InferenceX benchmark_lib.sh: the aggregate json goes to
+    # $AGENTIC_OUTPUT_DIR, or to the process cwd when that is unset. The client
+    # must export AGENTIC_OUTPUT_DIR=$RESULT_DIR before the recipe runs, or a
+    # completed replay is rejected with exit 3 ("wrote no pid").
+    bench, bind, res = _sandbox(tmp_path, make_builtin=False)
+    recipe = bench / "single_node" / "agentic" / "recipe.sh"
+    recipe.parent.mkdir(parents=True)
+    _write_exec(
+        recipe,
+        "#!/usr/bin/env bash\n"
+        "set -e\n"
+        'dest="${AGENTIC_OUTPUT_DIR:-$PWD}"\n'
+        'mkdir -p "$dest"\n'
+        'printf \'{"nested":true}\\n\' > "$dest/$RESULT_FILENAME.json"\n'
+        'printf "AGENTIC_OUTPUT_DIR=%s\\n" "${AGENTIC_OUTPUT_DIR:-UNSET}" > "$AGENTX_TEST_SERVER_MARKER"\n',
+    )
+    r = _run(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        AGENTX_SERVER_SCRIPT="single_node/agentic/recipe.sh",
+        AGENTX_TEST_SERVER_MARKER=str(tmp_path / "server.txt"),
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "agentic recipe ran its own replay" in r.stdout
+    assert (res / "inferencex_result.json").read_text() == '{"nested":true}\n'
+    assert (tmp_path / "server.txt").read_text() == f"AGENTIC_OUTPUT_DIR={res}\n"
+    assert not (res / "agentx_server.pid").exists()
+
+
 def test_aiperf_failure_not_mapped(tmp_path):
     bench, bind, res = _sandbox(tmp_path)
     r = _run(bench, bind, res, tmp_path, FAKE_RC="7")

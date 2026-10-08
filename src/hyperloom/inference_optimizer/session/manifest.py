@@ -206,6 +206,8 @@ def build_manifest(
     session_id: str | None = None,
 ) -> dict[str, Any]:
     """Assemble the session manifest dictionary (schema ``SCHEMA_VERSION``)."""
+    from ..breakdown.workflow_contract import CURRENT_WORKFLOW_CONTRACT_VERSION, workflow_contract_digest
+
     model_path = ""
     model_name = ""
     framework = os.environ.get("FRAMEWORK", "")
@@ -300,6 +302,8 @@ def build_manifest(
         "gpu_specialist_capacity": _gpu_specialist_capacity_from_args(args),
         # Workflow identity is stamped only on a fresh manifest. Resumed
         # pre-contract sessions therefore remain honestly legacy.
+        "workflow_contract_version": CURRENT_WORKFLOW_CONTRACT_VERSION,
+        "workflow_contract_digest": workflow_contract_digest(),
         "workflow_flags": {
             "kernel_enabled": not bool(getattr(args, "no_kernel", False)) if args is not None else True,
             "framework_agent_enabled": not bool(getattr(args, "no_framework_agent", False))

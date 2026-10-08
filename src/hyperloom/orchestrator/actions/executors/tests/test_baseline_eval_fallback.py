@@ -16,6 +16,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 
+from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.common.env import is_truthy
 from hyperloom.orchestrator.actions.executors.baseline import (
     BaselineExecutor,
@@ -28,21 +29,6 @@ _BASELINE_LOGGER = "hyperloom.orchestrator.actions.executors.baseline"
 def _isolate_leak_root(tmp_path_factory, monkeypatch):
     sandbox = tmp_path_factory.mktemp("isolated_leak_root")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(sandbox))
-
-
-class _StopRecorder:
-    """Minimal SharedState stub capturing ``set_stop_reason`` calls."""
-
-    def __init__(self, enablement_mode: str = "off") -> None:
-        self.stop_reason = ""
-        self.baseline_accuracy = 0.0
-        self.enablement_mode = enablement_mode
-        # Mirrors the SharedState default so ctx-backed runs keep the cold+hot pair.
-        self.baseline_double_run = True
-
-    def set_stop_reason(self, value, **_kwargs):
-        self.stop_reason = value
-        return value
 
 
 def _write_yaml(path: Path) -> None:
@@ -94,7 +80,7 @@ def _fake_workspace(slot: Path, *, tput: float = 1500.0) -> Path:
 
 def _make_ctx(params: dict, *, enablement_mode: str = "off") -> SimpleNamespace:
     task = SimpleNamespace(task_id="t-eval-1", params=params)
-    return SimpleNamespace(task=task, extra={"shared_state": _StopRecorder(enablement_mode)})
+    return SimpleNamespace(task=task, extra={"shared_state": SharedState(enablement_mode=enablement_mode)})
 
 
 def _run(coro):
@@ -631,7 +617,7 @@ def _stopped(
 ) -> str:
     """Run ``_maybe_stop_on_missing_baseline_accuracy`` and return the reason."""
     executor = BaselineExecutor()
-    rec = _StopRecorder()
+    rec = SharedState(enablement_mode="off")
     rec.eval_disabled = eval_disabled
     executor._maybe_stop_on_missing_baseline_accuracy(_stop_ctx(framework, rec, params), result)
     return rec.stop_reason
@@ -717,7 +703,7 @@ def test_no_stop_valid_accuracy():
 
 def test_no_stop_when_not_genuine_baseline():
     executor = BaselineExecutor()
-    rec = _StopRecorder()
+    rec = SharedState(enablement_mode="off")
     task = SimpleNamespace(task_id="t", kind="replay_warm_recipe", params={"framework": "sglang"})
     ctx = SimpleNamespace(task=task, extra={"shared_state": rec})
     executor._maybe_stop_on_missing_baseline_accuracy(ctx, {"status": "succeeded", "run_eval_disabled": False})
@@ -843,7 +829,7 @@ def test_salvage_sibling_attempt_accuracy_prevents_stop(tmp_path):
     deciding.mkdir(parents=True, exist_ok=True)
 
     executor = BaselineExecutor()
-    rec = _StopRecorder()
+    rec = SharedState(enablement_mode="off")
     result = {
         "status": "succeeded",
         "run_eval_disabled": False,
@@ -873,7 +859,7 @@ def test_an_unreachable_server_does_not_discard_a_salvaged_under_floor_accuracy(
     deciding.mkdir(parents=True, exist_ok=True)
 
     executor = BaselineExecutor()
-    rec = _StopRecorder("eval")
+    rec = SharedState(enablement_mode="eval")
     result = {
         "status": "failed",
         "run_eval_disabled": False,
@@ -913,7 +899,7 @@ def test_the_double_run_handoff_is_not_reported_as_a_recovery(tmp_path, caplog):
     deciding.mkdir(parents=True, exist_ok=True)
 
     executor = BaselineExecutor()
-    rec = _StopRecorder()
+    rec = SharedState(enablement_mode="off")
     result = {"status": "succeeded", "run_eval_disabled": False, "output_dir": str(deciding)}
     with caplog.at_level(logging.INFO, logger=_BASELINE_LOGGER):
         executor._maybe_stop_on_missing_baseline_accuracy(_stop_ctx("vllm", rec), result)
@@ -933,7 +919,7 @@ def test_an_unexpected_gap_is_still_reported_as_a_salvage(tmp_path, caplog):
     deciding.mkdir(parents=True, exist_ok=True)
 
     executor = BaselineExecutor()
-    rec = _StopRecorder()
+    rec = SharedState(enablement_mode="off")
     result = {"status": "succeeded", "run_eval_disabled": False, "output_dir": str(deciding)}
     with caplog.at_level(logging.INFO, logger=_BASELINE_LOGGER):
         executor._maybe_stop_on_missing_baseline_accuracy(_stop_ctx("vllm", rec), result)
@@ -1027,7 +1013,7 @@ def _route(monkeypatch, framework, result, *, nodes=None, tmp_path=None):
     if tmp_path is not None and "materialized_config" not in result:
         result["materialized_config"] = str(_write_minimal_route_yaml(tmp_path, framework))
     executor = BaselineExecutor()
-    rec = _StopRecorder("eval")
+    rec = SharedState(enablement_mode="eval")
     executor._maybe_stop_on_missing_baseline_accuracy(_stop_ctx(framework, rec), result)
     return rec.stop_reason
 
@@ -1116,7 +1102,7 @@ def test_eval_enablement_quality_ref_exempt_not_routed(monkeypatch):
     """Synthetic kernel-lane re-baselines are neither routed nor stopped."""
     result = {"status": "succeeded", "run_eval_disabled": True}
     executor = BaselineExecutor()
-    rec = _StopRecorder("eval")
+    rec = SharedState(enablement_mode="eval")
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
     executor._maybe_stop_on_missing_baseline_accuracy(_stop_ctx("sglang", rec, {"quality_ref_exempt": True}), result)
     assert rec.stop_reason == ""
@@ -1288,3 +1274,43 @@ def test_end_to_end_live_flag_blocks_launch_without_mocks(tmp_path):
 
     assert out is not None
     assert out["error_class"] == "eval_concurrency_flag_unpatchable"
+
+
+@pytest.mark.parametrize(
+    "inline",
+    [
+        pytest.param({"accuracy_score": 0.72, "accuracy_missing_turns": 1}, id="unscored-turn"),
+        pytest.param(
+            {"accuracy_score": 0.72, "accuracy_missing_turns": 0, "request_error_rate": 25.0}, id="error-rate"
+        ),
+        pytest.param({}, id="no-scores-json"),
+    ],
+)
+def test_an_mlperf_baseline_without_a_clean_inline_score_stops_the_session(tmp_path, monkeypatch, inline):
+    """Otherwise ``baseline_accuracy`` stays 0 and every later KEEP skips the accuracy gate."""
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("HYPERLOOM_AGENTIC_BACKEND", "mlperf")
+    base = tmp_path / "base.yaml"
+    _write_yaml(base)
+
+    def fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        ws = _fake_workspace(slot)
+        (ws / "inferencex_result.json").write_text(
+            json.dumps({"output_throughput": 1500.0, "request_error_rate": 0.0, "submission_valid": True, **inline}),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    executor = BaselineExecutor(magpie_python="/opt/venv/bin/python", default_config_path=base, session_dir=tmp_path)
+    state = SharedState(enablement_mode="off", benchmark_mode="agentx", agentx_backend="mlperf")
+    ctx = _make_baseline_ctx(
+        {"output_dir": str(tmp_path / "ws"), "timeout_sec": 10, "model_path": "/models/kimi-k3", "gpu_type": "mi355x"},
+        state,
+    )
+    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=fake_run):
+        _run(executor(ctx))
+
+    assert state.stop_reason == "baseline_accuracy_failed"

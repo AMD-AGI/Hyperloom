@@ -118,6 +118,20 @@ def test_write_forge_handoff_records_context_and_absolute_evidence_paths(tmp_pat
     assert not (handoff_dir / raw_trace.name).exists()
 
 
+def test_trace_evidence_resolution_filename_has_one_owner(tmp_path: Path) -> None:
+    """The handoff derives the artifact name from the single contract constant, not a literal."""
+    from hyperloom.common.kernel_source_contract import SOURCE_RESOLUTION_FILENAME
+    from hyperloom.orchestrator.kernel.forge_handoff import build_trace_evidence_md
+
+    candidates = tmp_path / "run" / "kernel_candidates.json"
+    candidates.parent.mkdir(parents=True)
+    candidates.write_text("{}\n", encoding="utf-8")
+    state = _state(last_trace_analyze={"candidates_path": str(candidates)})
+
+    evidence = build_trace_evidence_md(state)
+    assert str((candidates.parent / SOURCE_RESOLUTION_FILENAME)) in evidence
+
+
 def test_write_forge_handoff_survives_missing_trace_artifacts(tmp_path: Path) -> None:
     missing_candidates = tmp_path / "missing" / "kernel_candidates.json"
     state = _state(

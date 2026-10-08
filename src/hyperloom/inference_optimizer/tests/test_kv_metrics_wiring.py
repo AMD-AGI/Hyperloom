@@ -764,6 +764,12 @@ def test_aiperf_aggregate_json_timeslices_are_adopted(tmp_path):
     path.write_text(
         json.dumps(
             {
+                "summary": {
+                    "phase_time_ranges": {
+                        "warmup": {"start_ns": 1_000_000_000, "end_ns": 2_000_000_000},
+                        "profiling": {"start_ns": 3_000_000_000, "end_ns": 4_000_000_000},
+                    }
+                },
                 "metrics_phase": "profiling",
                 "warmup_metrics": {
                     "vllm:kv_cache_usage_perc": gauge,
@@ -776,6 +782,11 @@ def test_aiperf_aggregate_json_timeslices_are_adopted(tmp_path):
                             {
                                 "labels": {"engine": "0"},
                                 "timeslices": [
+                                    {
+                                        "start_ns": 1_000_000_000,
+                                        "end_ns": 2_000_000_000,
+                                        "avg": 0.99,
+                                    },
                                     {
                                         "start_ns": 3_000_000_000,
                                         "end_ns": 4_000_000_000,
@@ -791,6 +802,11 @@ def test_aiperf_aggregate_json_timeslices_are_adopted(tmp_path):
                             {
                                 "labels": {"engine": "0"},
                                 "timeslices": [
+                                    {
+                                        "start_ns": 1_000_000_000,
+                                        "end_ns": 2_000_000_000,
+                                        "total": 999,
+                                    },
                                     {
                                         "start_ns": 3_000_000_000,
                                         "end_ns": 4_000_000_000,

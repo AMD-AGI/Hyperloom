@@ -22,7 +22,7 @@ from typing import Any
 import pytest
 
 from hyperloom.inference_optimizer.breakdown.recorder import phase_event
-from hyperloom.inference_optimizer.breakdown.recorder.assembler import phase_event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.assembler import assemble_parts, phase_event_parts
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
@@ -71,6 +71,20 @@ def test_the_real_transition_opens_the_phase_it_entered(tmp_path):
     assert ext["entries"] == 1
     assert ext["open"] is True
     assert ext["segments"][0]["entered_reason"] == "session_start"
+    assert assemble_parts(tmp_path)["outcome"]["stage_reached_recorded"] == "prelude"
+
+
+def test_stage_fact_keeps_the_deepest_phase_after_a_reloop(tmp_path):
+    state = _state(tmp_path)
+    for phase in ("PRELUDE", "ENABLEMENT", "FRAMEWORK_AGENT", "KERNEL_AGENT", "SWEEP"):
+        machine_state.record_phase_transition(state, to_phase=phase, reason="phase_entered")
+    assert assemble_parts(tmp_path)["outcome"]["stage_reached_recorded"] == "conc_sweep"
+
+    machine_state.record_phase_transition(state, to_phase="FRAMEWORK_AGENT", reason="cycle_reloop")
+    assert assemble_parts(tmp_path)["outcome"]["stage_reached_recorded"] == "conc_sweep"
+
+    machine_state.record_phase_transition(state, to_phase="CLOSE", reason="time_exhausted")
+    assert assemble_parts(tmp_path)["outcome"]["stage_reached_recorded"] == "close"
 
 
 def test_the_real_transition_closes_the_phase_it_left(tmp_path):
@@ -178,14 +192,16 @@ class _Sub:
 
 def _dispatcher(tmp_path: Path, state: SharedState, sub: _Sub) -> Any:
     """A DispatcherCollaborator with only what ``run_task_registered`` touches."""
-    fake = types.SimpleNamespace(
-        shared_state=state,
-        sub=sub,
-        session_dir=tmp_path,
-        locks=None,
-        gpu_specialist_pool=None,
+    dispatcher = DispatcherCollaborator(
+        types.SimpleNamespace(
+            shared_state=state,
+            sub=sub,
+            session_dir=tmp_path,
+            locks=None,
+            gpu_specialist_pool=None,
+        )
     )
-    return DispatcherCollaborator(fake)
+    return dispatcher
 
 
 def _task(kind: str, task_id: str, state: SharedState) -> Any:

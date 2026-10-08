@@ -26,6 +26,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.close_out import (
     RESULT_WRITTEN,
     record_close_artifacts,
     record_close_opened,
+    record_close_safety_net,
     record_close_settled,
     record_baseline_progress,
     record_close_step,
@@ -135,6 +136,15 @@ def test_never_entered_close_has_no_section(sd: Path) -> None:
     assert _close(sd)["status"] == "failed"
 
 
+def test_safety_net_marks_only_a_close_that_never_started(sd: Path) -> None:
+    record_close_safety_net(sd)
+    assert (_close(sd)["source"], _close(sd)["status"]) == ("safety_net", "failed")
+
+    record_close_opened(sd)
+    record_close_safety_net(sd)
+    assert (_close(sd)["source"], _close(sd)["status"]) == ("normal_close", "running")
+
+
 def test_artifacts_are_recorded_not_probed(sd: Path) -> None:
     reports = sd / "reports"
     reports.mkdir()
@@ -202,11 +212,20 @@ def test_historical_close_findings_remain_readable() -> None:
 
 def test_step_row_carries_task_id_and_detail(sd: Path) -> None:
     record_close_opened(sd)
-    record_close_step(sd, step="report", status="failed", task_id="t-42", detail="task_state='failed'")
+    record_close_step(
+        sd,
+        step="report",
+        status="failed",
+        task_id="t-42",
+        detail="task_state='failed'",
+        optional=False,
+        error="task_state='failed'",
+    )
 
     row = _close(sd)["steps"][0]
     assert row["task_id"] == "t-42"
     assert row["detail"] == "task_state='failed'"
+    assert (row["optional"], row["error"]) == (False, "task_state='failed'")
     assert row["ts"]
 
 

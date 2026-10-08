@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field, fields
 from typing import Any
 
@@ -134,6 +135,20 @@ class EnablementRound:
     levers_without_readers: list = field(default_factory=list)
     # {interpreter_tag, distributions} of the accepted runtime.
     environment_closure: dict = field(default_factory=dict)
+
+    def last_execution_seq(self) -> int:
+        """Return the highest ``seq`` already in the durable setup ledger."""
+        return max(
+            (int(row.get("seq") or 0) for row in self.setup_executions or [] if isinstance(row, dict)), default=0
+        )
+
+    def append_setup_executions(self, rows: Iterable[Any]) -> bool:
+        """Append execution rows to the append-only ledger; return whether any were appended."""
+        new = [row for row in rows if isinstance(row, dict)]
+        if not new:
+            return False
+        self.setup_executions = [*(self.setup_executions or []), *new]
+        return True
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "EnablementRound":

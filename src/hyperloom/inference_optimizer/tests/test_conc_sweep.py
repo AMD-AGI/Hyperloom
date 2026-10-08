@@ -23,14 +23,15 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     GridVariant,
     VariantResult,
 )
+from hyperloom.orchestrator.kernel import conc_sweep as conc_sweep_module
 from hyperloom.orchestrator.kernel.conc_sweep import (
     DEFAULT_CONCS,
     DEFAULT_TOTAL_BUDGET_SEC,
+    _Arm,
     _build_arm_grid,
     _flush_conc_sweep_report,
-    _flush_partial_conc_sweep_report,
     _grading_of,
-    _has_optimization,
+    _optimized_arm,
     _order_concs_desc,
     _point_from_variant,
     conc_sweep_declined_to_run,
@@ -39,6 +40,7 @@ from hyperloom.orchestrator.kernel.conc_sweep import (
 from hyperloom.common.gain_math import conc_pair_comparison as _build_comparison
 from hyperloom.common.perf_metric import graded_metric_key
 from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.phases.kernel_stack import KernelStackPhase
 
 
 # Fixtures
@@ -84,37 +86,45 @@ def baseline_yaml(tmp_path: Path) -> Path:
     return p
 
 
-# _has_optimization
-def test_has_optimization_args_only():
+# _optimized_arm
+def test_optimized_arm_args_only():
     s = SharedState()
     s.current_best = {"extra_server_args": "--a 1", "extra_envs": {}}
-    has, args, envs = _has_optimization(s)
-    assert has is True
-    assert args == "--a 1"
-    assert envs == {}
+    arm = _optimized_arm(s)
+    assert arm is not None
+    assert arm.name == "optimized"
+    assert arm.args == "--a 1"
+    assert arm.envs == {}
 
 
-def test_has_optimization_envs_only():
+def test_optimized_arm_envs_only():
     s = SharedState()
     s.current_best = {"extra_server_args": "", "extra_envs": {"X": "1"}}
-    has, args, envs = _has_optimization(s)
-    assert has is True
-    assert args == ""
-    assert envs == {"X": "1"}
+    arm = _optimized_arm(s)
+    assert arm is not None
+    assert arm.args == ""
+    assert arm.envs == {"X": "1"}
 
 
-def test_has_optimization_both_empty():
+def test_optimized_arm_carries_overlay_and_controls():
+    s = SharedState()
+    s.current_best = {"extra_server_args": "", "remove_args": ["--foo"], "final_overlay": " /opt/overlay "}
+    arm = _optimized_arm(s)
+    assert arm is not None
+    assert arm.overlay == "/opt/overlay"
+    assert arm.controls == {"remove_args": ["--foo"]}
+
+
+def test_optimized_arm_both_empty():
     s = SharedState()
     s.current_best = {"extra_server_args": "", "extra_envs": {}}
-    has, _args, _envs = _has_optimization(s)
-    assert has is False
+    assert _optimized_arm(s) is None
 
 
-def test_has_optimization_missing_current_best():
+def test_optimized_arm_missing_current_best():
     s = SharedState()
     s.current_best = {}
-    has, _, _ = _has_optimization(s)
-    assert has is False
+    assert _optimized_arm(s) is None
 
 
 @pytest.mark.parametrize("persistent_server", [False, True])
@@ -820,23 +830,6 @@ def test_run_conc_sweep_does_not_touch_final_json(
     assert not final_json_path.exists()
 
 
-class TestTheAgentXLadderIsDefaultOn:
-    """The sweep is what an agentic session produces; it used to default off."""
-
-    def test_the_state_default_is_on(self):
-        assert SharedState().conc_sweep_enabled is True
-
-    def test_agentx_does_not_turn_it_off(self, monkeypatch: pytest.MonkeyPatch):
-        from argparse import Namespace
-
-        from hyperloom.inference_optimizer.cli import bootstrap as cb
-
-        monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-        args = Namespace(enable_conc_sweep=True)
-        assert bool(getattr(args, "enable_conc_sweep", True)) is True
-        assert not hasattr(cb, "_flag_explicitly_set")
-
-
 def test_the_engine_resolves_the_ladder_from_the_session_mode(monkeypatch: pytest.MonkeyPatch):
     """`concs=None` reaches the engine from the SDK and from a bare task alike."""
     from hyperloom.orchestrator.kernel.conc_sweep import default_concs_for_mode
@@ -1159,44 +1152,47 @@ def test_record_conc_sweep_writes_last_conc_sweep():
     assert s.last_conc_sweep_watermark == watermark
 
 
-def test_exit_normal_sweep_reads_the_ladder_as_the_sweep():
+def test_sweep_exits_based_on_ladder_status():
     """The concurrency ladder is the only sweep, so its status is the phase's."""
-    from hyperloom.orchestrator.phases.machine_state import exit_normal_sweep
+    from hyperloom.orchestrator.phases.machine_state import compute_next_phase
 
-    class _State:
-        last_conc_sweep = {}
-        phase = "SWEEP"
-        phase_started_ts = "2026-06-02T10:00:00+00:00"
-        max_minutes = 360
-        phase_budget_pct = {"SWEEP": 0.50}
+    def _State(last_conc_sweep=None):
+        return SharedState(
+            last_conc_sweep=last_conc_sweep or {},
+            phase="SWEEP",
+            phase_started_ts="2026-06-02T10:00:00+00:00",
+            max_minutes=360,
+            phase_budget_pct={"SWEEP": 0.50},
+        )
+
+    def _next(state):
+        # optimize_enabled=False blocks cycle_reloop so the sweep status drives the exit.
+        return compute_next_phase(state, optimize_enabled=False)
 
     # Nothing recorded => don't exit (budget remaining).
-    assert exit_normal_sweep(_State()) is None
+    assert _next(_State()) is None
 
-    _State.last_conc_sweep = {"status": "succeeded"}
-    result = exit_normal_sweep(_State())
+    result = _next(_State({"status": "succeeded"}))
     assert result is not None
-    reason, evidence = result
+    _target, reason, evidence = result
     assert reason == "sweep_done", reason
     assert evidence.get("sweep_status") == "succeeded"
 
     # Skipped also counts as "done" (the action reached a terminal decision).
     for terminal in ("partial", "completed", "skipped"):
-        _State.last_conc_sweep = {"status": terminal}
-        result = exit_normal_sweep(_State())
-        assert result is not None and result[0] == "sweep_done", terminal
+        result = _next(_State({"status": terminal}))
+        assert result is not None and result[1] == "sweep_done", terminal
 
-    _State.last_conc_sweep = {"status": "failed"}
-    result = exit_normal_sweep(_State())
+    result = _next(_State({"status": "failed"}))
     assert result is not None
-    reason, evidence = result
+    _target, reason, evidence = result
     assert reason == "sweep_failed"
     assert evidence.get("sweep_status") == "failed"
 
 
 def test_the_sweep_exit_evidence_separates_a_skip_from_a_spent_budget():
     """``was_skipped`` covers both outcomes, so the row must carry what tells them apart."""
-    from hyperloom.orchestrator.phases.machine_state import exit_normal_sweep
+    from hyperloom.orchestrator.phases.machine_state import compute_next_phase
 
     state = SharedState(
         phase="SWEEP",
@@ -1205,7 +1201,9 @@ def test_the_sweep_exit_evidence_separates_a_skip_from_a_spent_budget():
         phase_budget_pct={"SWEEP": 0.50},
     )
     state.record_conc_sweep({"status": "skipped", "was_skipped": True, "skip_reason": "no_optimization_to_compare"})
-    _, declined = exit_normal_sweep(state)
+    result = compute_next_phase(state)
+    assert result is not None
+    _, _, declined = result
     assert declined["sweep_was_skipped"] is True
     assert declined["sweep_skip_budget_exhausted"] is False
 
@@ -1218,7 +1216,9 @@ def test_the_sweep_exit_evidence_separates_a_skip_from_a_spent_budget():
             "summary": {"successful_pairs": 0},
         }
     )
-    spent_reason, spent = exit_normal_sweep(state)
+    result = compute_next_phase(state)
+    assert result is not None
+    _, spent_reason, spent = result
     assert spent_reason == "sweep_failed"
     assert spent["sweep_was_skipped"] is True
     assert spent["sweep_skip_budget_exhausted"] is True
@@ -1230,7 +1230,9 @@ def test_the_sweep_exit_evidence_separates_a_skip_from_a_spent_budget():
             "summary": {"successful_pairs": 0},
         }
     )
-    no_pair_reason, no_pair = exit_normal_sweep(state)
+    result = compute_next_phase(state)
+    assert result is not None
+    _, no_pair_reason, no_pair = result
     assert no_pair_reason == "sweep_failed"
     assert no_pair["sweep_status"] == "skipped"
 
@@ -1268,12 +1270,10 @@ def test_on_enter_sweep_drains_pending_keep_integrates(monkeypatch):
         {"kernel_id": "k002", "integration_id": "integration-2"},
     ]
     coord.shared_state.pending_kernel_integration_records = lambda: [pending_queue.pop(0)] if pending_queue else []
-    coord._record_integrate_keep = AsyncMock()
+    coord.writeback.record_integrate_keep = AsyncMock()
     coord.session_dir = Path("/tmp/sess")
 
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
-
-    asyncio.run(Coordinator._drain_pending_keep_integrates(coord))
+    asyncio.run(KernelStackPhase.drain_pending_keep_integrates(coord))
 
     assert fake_integrate.await_count == 2, fake_integrate.await_args_list
     assert coord.shared_state.save.call_count >= 2
@@ -1300,15 +1300,7 @@ def test_order_concs_desc_single():
 
 
 def test_build_arm_grid_single_arm_descending():
-    grid = _build_arm_grid(
-        "baseline",
-        [64, 32, 16],
-        isl=512,
-        osl=512,
-        num_prompts_factor=5,
-        arm_args="",
-        arm_envs={},
-    )
+    grid = _build_arm_grid(_Arm(name="baseline"), [64, 32, 16], isl=512, osl=512, num_prompts_factor=5)
     assert [v.name for v in grid] == ["baseline_conc64", "baseline_conc32", "baseline_conc16"]
     assert grid[0].extra_envs["CONC"] == "64"
     assert grid[0].extra_envs["RUN_EVAL"] == "false"
@@ -1316,13 +1308,11 @@ def test_build_arm_grid_single_arm_descending():
 
 def test_build_arm_grid_optimized_arm_carries_args():
     grid = _build_arm_grid(
-        "optimized",
+        _Arm(name="optimized", args="--my-flag", envs={"MY_ENV": "1"}),
         [4],
         isl=1024,
         osl=512,
         num_prompts_factor=3,
-        arm_args="--my-flag",
-        arm_envs={"MY_ENV": "1"},
     )
     assert len(grid) == 1
     assert grid[0].extra_server_args == "--my-flag"
@@ -1392,8 +1382,8 @@ def test_run_conc_sweep_single_server_concs_descending(
     assert base_concs == sorted(base_concs, reverse=True), f"expected descending, got {base_concs}"
 
 
-# ───────────────────────────────────────────────────────────────────────────── Change 5: _flush_conc_sweep_report /
-# _flush_partial_conc_sweep_report ─────────────────────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────────────────────── Change 5: _flush_conc_sweep_report
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 def test_flush_conc_sweep_report_writes_json_and_csv(session_dir: Path):
@@ -1698,39 +1688,103 @@ def test_flush_conc_sweep_report_is_atomic(session_dir: Path, monkeypatch: pytes
     _flush_conc_sweep_report(payload, session_dir)  # must not raise
 
 
-def test_flush_partial_conc_sweep_report_marks_in_progress(session_dir: Path):
-    """_flush_partial_conc_sweep_report writes status=in_progress."""
-    rdir = session_dir / "reports"
-    rdir.mkdir(parents=True, exist_ok=True)
-    json_path = rdir / "conc_sweep_summary.json"
-    csv_path = rdir / "conc_sweep_raw.csv"
-    state = _make_state()
-    result = _fake_variant(
-        "baseline_conc4", throughput=100.0, envs={"CONC": "4", "ISL": "512", "OSL": "512", "NUM_PROMPTS": "20"}
-    )
-    _flush_partial_conc_sweep_report(
-        results=[result],
-        state=state,
-        session_dir=session_dir,
-        json_path=json_path,
-        csv_path=csv_path,
-        concs=[4, 8],
-        isl=512,
-        osl=512,
-        opt_args="--x",
-        opt_envs={},
-        workspace=session_dir / "ws",
-        started_at=0.0,
-        total_budget_sec=9000,
-        has_budget=True,
-        budget_exhausted=False,
-        budget_skip_reason="",
-        budget_remaining_sec=None,
-        partial=True,
-    )
-    assert json_path.exists()
-    loaded = json.loads(json_path.read_text())
-    assert loaded["status"] == "in_progress"
+def _record_summary_writes(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Capture ``conc_sweep_summary.json`` as it stands on disk after every write."""
+    writes: list[dict[str, Any]] = []
+    real_flush = conc_sweep_module._flush_conc_sweep_report
+
+    def _flush(payload: dict[str, Any], session_dir: Path) -> Exception | None:
+        error = real_flush(payload, session_dir)
+        writes.append(json.loads(Path(payload["report_json_path"]).read_text()))
+        return error
+
+    monkeypatch.setattr(conc_sweep_module, "_flush_conc_sweep_report", _flush)
+    return writes
+
+
+_END_ONLY_FIELDS = {"roofline_ceiling", "was_skipped", "skip_reason"}
+
+
+def test_mid_sweep_summary_is_the_final_report_in_progress(
+    session_dir: Path, baseline_yaml: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Every write between rungs carries the final report's fields, for the rungs measured so far."""
+    writes = _record_summary_writes(monkeypatch)
+    state = _make_state(baseline_config_path=str(baseline_yaml))
+
+    async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
+        return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
+
+    with (
+        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
+        patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
+    ):
+        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16], total_budget_sec=9000))
+
+    *progress, final = writes
+    assert [write["status"] for write in progress] == ["in_progress"] * 4
+    assert final["status"] == "succeeded"
+    assert [[p["conc"] for p in write["optimized"]["points"]] for write in progress] == [
+        [16],
+        [4, 16],
+        [4, 16],
+        [4, 16],
+    ]
+    assert [[p["conc"] for p in write["baseline"]["points"]] for write in progress] == [[], [], [16], [4, 16]]
+    varying = {"status", "comparison", "summary", "elapsed_sec", "baseline", "optimized"}
+    for write in progress:
+        assert set(write) == set(final) - _END_ONLY_FIELDS
+        assert {k: v for k, v in write.items() if k not in varying} == {
+            k: v for k, v in final.items() if k not in varying | _END_ONLY_FIELDS
+        }
+    assert progress[-1]["comparison"] == final["comparison"]
+    assert final == json.loads(json.dumps(payload))
+
+
+def test_mid_sweep_summary_keeps_the_requested_conc_order(
+    session_dir: Path, baseline_yaml: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """``concs_requested`` is the caller's ladder in every write, not the order the sweep visits it in."""
+    writes = _record_summary_writes(monkeypatch)
+    state = _make_state(baseline_config_path=str(baseline_yaml))
+
+    async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
+        return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
+
+    with (
+        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
+        patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
+    ):
+        asyncio.run(run_conc_sweep(state, session_dir, concs=[1, 8, 4]))
+
+    assert len(writes) > 1
+    assert [write["concs_requested"] for write in writes] == [[1, 8, 4]] * len(writes)
+
+
+def test_mid_sweep_summary_writes_the_remaining_budget_as_the_final_report_does(
+    session_dir: Path, baseline_yaml: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Once the budget stops the sweep, every later write names the same remaining seconds."""
+    writes = _record_summary_writes(monkeypatch)
+    state = _make_state(baseline_config_path=str(baseline_yaml))
+
+    async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
+        stopped = _fake_variant(grid[0].name, throughput=None, status="skipped", envs=grid[0].extra_envs)
+        stopped.error_class = "budget_exhausted"
+        return [stopped]
+
+    with (
+        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
+        patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
+    ):
+        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16], total_budget_sec=9000))
+
+    *progress, final = writes
+    assert progress and all(write["budget_exhausted"] for write in progress)
+    assert final["budget_skip_reason"] == "insufficient_remaining_for_variant"
+    assert 0.0 < final["budget_remaining_sec"] <= 9000.0
+    assert [write["budget_remaining_sec"] for write in progress] == [final["budget_remaining_sec"]] * len(progress)
+    assert payload["budget_remaining_sec"] == final["budget_remaining_sec"]
 
 
 # ───────────────────────────────────────────────────────────────────────────── Change 3: plotting

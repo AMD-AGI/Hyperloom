@@ -26,9 +26,9 @@ from .credentials import (
 )
 from .steps import command_digest
 
-#: Clip for the sanitized form, mirroring the executor's own rejection clip so a
-#: single install naming a hundred packages cannot crowd out its neighbours.
-_CMD_SANITIZED_CHARS = 160
+#: Clip for every stored sanitized command, so a single install naming a hundred
+#: packages cannot crowd out its neighbours.
+CMD_SANITIZED_CHARS = 160
 
 OUTCOMES: tuple[str, ...] = ("applied", "failed", "skipped")
 
@@ -65,7 +65,7 @@ def build_execution_row(
         "seq": int(seq),
         "round_task_id": str(round_task_id or ""),
         "cmd_index": int(cmd_index),
-        "cmd_sanitized": sanitize_command_text(cmd, clip=_CMD_SANITIZED_CHARS),
+        "cmd_sanitized": sanitize_command_text(cmd, clip=CMD_SANITIZED_CHARS),
         "cmd_digest": command_digest(cmd),
         "source": str(source),
         "outcome": outcome,

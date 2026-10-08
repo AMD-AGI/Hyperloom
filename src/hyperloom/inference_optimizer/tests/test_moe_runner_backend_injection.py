@@ -21,6 +21,7 @@ import pytest
 import yaml
 
 from hyperloom.inference_optimizer import model_config_utils
+from hyperloom.inference_optimizer import gpu_types
 from hyperloom.inference_optimizer.cli import model_gate as cli_model_gate
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     _remove_moe_runner_backend_arg,
@@ -36,7 +37,7 @@ def _hermetic_env(monkeypatch):
     monkeypatch.delenv("GPU_TYPE", raising=False)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     # Pin autodetect OFF so non-AMD test cases never see real hardware.
-    monkeypatch.setattr(cli_model_gate, "_autodetect_gpu_type", lambda: None)
+    monkeypatch.setattr(gpu_types, "_autodetect_gpu_type", lambda: None)
     for key in (
         "CONC",
         "ISL",
