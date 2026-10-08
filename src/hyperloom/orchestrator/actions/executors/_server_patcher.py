@@ -324,16 +324,6 @@ def resolve_sglang_patch_set() -> str:
     return "graph-capture" if resolve_sglang_shape_mode() == "sitecustomize" else "roofline"
 
 
-def ensure_sglang_patched_for_ck_blockscale(
-    kernelforge_root: Path | str | None = None,
-) -> bool:
-    """Apply the KernelForge fp8 block-scale CK-routing patch to SGLang."""
-    plan = _discover_sglang_ck_plan(kernelforge_root)
-    if plan is None:
-        return False
-    return _ensure_patched(plan)
-
-
 def _gc_patch_deferred_to_pods() -> bool:
     """True on a multi-node controller, where the pod fan-out applies the patch."""
     try:
@@ -753,142 +743,6 @@ def _resolve_sglang_apply_root(sglang_module: Path) -> tuple[Path, int] | None:
         sglang_dir.name,
     )
     return None
-
-
-# CK fp8 block-scale routing markers added to ``fp8_utils.py`` by the KernelForge-owned patch; all three must be
-# present to count as patched.
-_SGLANG_CK_BLOCKSCALE_SENTINELS: tuple[str, ...] = (
-    "_fp8_blockscale_ck_max_m",
-    "SGLANG_FP8_BLOCKSCALE_CK_MAX_M",
-    "ck_gemm_a8w8_blockscale",
-)
-
-
-def _resolve_serving_patches_root(arg: Path | str | None) -> Path | None:
-    """Resolve KernelForge's ``serving_patches`` tree; fail-soft."""
-    if arg:
-        candidate = Path(arg) / "serving_patches"
-        if candidate.is_dir():
-            log.warning(
-                "_server_patcher: patching SGLang from an explicit serving_patches tree at %s, "
-                "not the one packaged with kernelforge",
-                candidate,
-            )
-            return candidate
-        # An override that does not resolve falls through to the packaged tree, which is the right fail-soft behaviour
-        # but the wrong silence: the caller asked for a specific tree and got a different one.
-        log.warning(
-            "_server_patcher: explicit KernelForge root %s has no serving_patches directory; "
-            "falling back to the packaged tree, so the requested patches are NOT the ones applied",
-            arg,
-        )
-
-    try:
-        from kernelforge.resources import default_project_root, packaged_data_root, resource_path
-
-        resolved = resource_path("serving_patches", default_project_root(), missing_ok=True)
-        packaged_root = packaged_data_root()
-    except ImportError:
-        return None
-    if not resolved.is_dir():
-        return None
-    if resolved.parent != packaged_root:
-        log.warning(
-            "_server_patcher: patching SGLang from %s (KERNELFORGE_PROJECT_ROOT override), "
-            "not the tree packaged with kernelforge at %s",
-            resolved,
-            packaged_root / "serving_patches",
-        )
-    return resolved
-
-
-def _discover_sglang_ck_plan(arg: Path | str | None) -> _PatchPlan | None:
-    """Build the SGLang fp8 block-scale CK-routing patch plan."""
-    serving_patches_root = _resolve_serving_patches_root(arg)
-    if serving_patches_root is None:
-        log.info(
-            "_server_patcher: no KernelForge serving_patches tree resolved from the packaged "
-            "kernelforge — skip SGLang fp8 block-scale CK patch "
-            "(SGLANG_FP8_BLOCKSCALE_CK_MAX_M will no-op on the unpatched tree)"
-        )
-        return None
-
-    try:
-        import sglang  # type: ignore
-    except Exception as e:  # noqa: BLE001 - any import failure → fail-soft
-        log.warning(
-            "_server_patcher: sglang not importable (%s); skip CK block-scale patch",
-            e,
-        )
-        return None
-
-    version = (getattr(sglang, "__version__", "") or "").strip()
-
-    # KernelForge layout: ``serving_patches/sglang/`` holds the per-version subdirs plus the SUPPORTED_VERSIONS
-    # manifest.
-    patches_root = serving_patches_root / "sglang"
-    if not patches_root.is_dir():
-        log.warning(
-            "_server_patcher: KernelForge SGLang patches root missing (%s); skip CK block-scale patch",
-            patches_root,
-        )
-        return None
-
-    patches_dir = _resolve_versioned_patches_dir(patches_root, version)
-    if patches_dir is None:
-        log.warning(
-            "_server_patcher: no KernelForge CK block-scale patch found under %s/%s/ for sglang %s; skip",
-            patches_root,
-            _versioned_patches_subdir_name(version) or "<unknown>",
-            version,
-        )
-        return None
-
-    # KernelForge ships the manifest at patches_root (one level above the per-version subdir), so consult patches_root
-    # for the version gate.
-    if not _version_accepted(version, patches_dir=patches_root):
-        log.warning(
-            "_server_patcher: SGLang %s not in supported version list "
-            "(consulted: $HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS, "
-            "$HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS, %s/SUPPORTED_VERSIONS, "
-            "then built-in minor allowlist %s); skip CK block-scale patch",
-            version,
-            patches_root,
-            _SGLANG_DEFAULT_ALLOWED_MINORS,
-        )
-        return None
-
-    patches = tuple(sorted(patches_dir.glob("*.patch")))
-    if not patches:
-        log.warning(
-            "_server_patcher: KernelForge CK block-scale patches directory empty; skip",
-        )
-        return None
-
-    sglang_module = Path(sglang.__file__).resolve()
-    apply_resolution = _resolve_sglang_apply_root(sglang_module)
-    if apply_resolution is None:
-        return None
-    apply_root, apply_strip = apply_resolution
-
-    # Sentinel: the patch edits ``sglang/srt/layers/quantization/fp8_utils.py`` in place (both layouts).
-    sentinel = sglang_module.parent / "srt" / "layers" / "quantization" / "fp8_utils.py"
-    if not sentinel.is_file():
-        log.warning(
-            "_server_patcher: SGLang install layout unexpected (no %s); skip CK block-scale patch",
-            sentinel,
-        )
-        return None
-
-    return _PatchPlan(
-        framework="sglang-ck",
-        version=version,
-        apply_root=apply_root,
-        patches=patches,
-        sentinel_file=sentinel,
-        sentinel_text=_SGLANG_CK_BLOCKSCALE_SENTINELS,
-        apply_strip=apply_strip,
-    )
 
 
 _SGLANG_GC_SENTINELS: tuple[str, ...] = (
@@ -1327,5 +1181,4 @@ def _git(git: str, args: Sequence[str], cwd: Path) -> bool:
 __all__ = [
     "ensure_vllm_patched_for_tracelens",
     "ensure_sglang_patched_for_tracelens",
-    "ensure_sglang_patched_for_ck_blockscale",
 ]

@@ -3,12 +3,12 @@
 
 """Runtime access to packaged KernelForge resources and writable state roots.
 
-KernelForge ships inside the Hyperloom distribution, so its knowledge base,
-examples and serving patches always live at ``kernelforge/data`` next to the
-code -- there is no "repository root" to fall back to. Everything under that
-tree is read-only: it may sit in a root-owned ``site-packages`` and is replaced
-wholesale on upgrade. Mutable state therefore goes to a separately resolved
-writable root, never back into the package.
+KernelForge ships inside the Hyperloom distribution, so its knowledge base and
+examples always live at ``kernelforge/data`` next to the code -- there is no
+"repository root" to fall back to. Everything under that tree is read-only: it
+may sit in a root-owned ``site-packages`` and is replaced wholesale on upgrade.
+Mutable state therefore goes to a separately resolved writable root, never back
+into the package.
 """
 
 from __future__ import annotations
