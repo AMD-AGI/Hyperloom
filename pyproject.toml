@@ -141,6 +141,8 @@ quantization-agent = "hyperloom.agents.quantization.cli:main"
 # Built-in kernel-opt agent. The orchestrator dispatches
 # ``python -m kernelforge.cli`` directly; this is for interactive use.
 kernelforge = "kernelforge.cli:main"
+hyperloom-kb-serve = "hyperloom_kb.http_service:main"
+hyperloom-kb-collect = "hyperloom_kb.collect.cli:main"
 
 [tool.setuptools]
 # setuptools defaults this to true for pyproject-based config, which makes
@@ -203,6 +205,10 @@ exclude = [
 ".cursor/skills/hyperloom-setup" = [
     "src/hyperloom/skills/hyperloom-setup/SKILL.md",
 ]
+# Deploys the global Experience KB that workspaces push to and pull from.
+".agents/skills/hyperloom-global-kb" = ["src/hyperloom/skills/hyperloom-global-kb/SKILL.md"]
+".claude/skills/hyperloom-global-kb" = ["src/hyperloom/skills/hyperloom-global-kb/SKILL.md"]
+".cursor/skills/hyperloom-global-kb" = ["src/hyperloom/skills/hyperloom-global-kb/SKILL.md"]
 # Demo run skills chained from /hyperloom-setup.
 ".agents/skills/hyperloom-qwen3-8b-3h" = ["examples/hyperloom-qwen3-8b-3h/SKILL.md"]
 ".claude/skills/hyperloom-qwen3-8b-3h" = ["examples/hyperloom-qwen3-8b-3h/SKILL.md"]
@@ -293,6 +299,11 @@ hyperloom = [
 kernelforge = [
     "data/**/*",
 ]
+hyperloom_kb = [
+    "py.typed",
+    "declarations/*.yaml",
+    "mappings/*.yaml",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -320,6 +331,7 @@ relative_files = true
 source = [
     "src/hyperloom",
     "src/kernelforge",
+    "src/hyperloom_kb",
     "OOB",  # optional component; not always present in a clone
 ]
 # Omitted: tests / package boilerplate, CLI drivers, subprocess wrappers, and

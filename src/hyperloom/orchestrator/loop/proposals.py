@@ -87,7 +87,7 @@ async def record_proposal(
         },
     )
     _record_phase_proposal(coord, pending)
-    _record_config_proposal(coord, pending)
+    record_config_proposal(coord, pending.proposal_msg_id, pending.action_name, pending.payload)
     return pending
 
 
@@ -116,18 +116,31 @@ def _record_phase_proposal(coord: "Coordinator", pending: PendingProposal) -> No
     )
 
 
-def _record_config_proposal(coord: "Coordinator", pending: PendingProposal) -> None:
-    """Record one config-arm grid on the framework event, as it is proposed.
+def record_config_proposal(
+    coord: "Coordinator",
+    proposal_id: str,
+    action_name: str,
+    payload: Mapping[str, Any],
+    *,
+    outcome: str = "submitted",
+) -> None:
+    """Record one config-arm grid on the framework event, as it is proposed or delegated.
 
     Recorded at proposal time rather than at approval, so a grid the Critic
     denies is still on record as a thing the phase pursued and dropped. One row
     per grid, not per variant: the measured attempts point back at the grid
     through their ``proposal_ref``.
     """
-    if pending.action_name != "explore" or not pending.proposal_msg_id:
+    if not proposal_id:
         return
     recorder = coord.phase_framework.timeline()
     if recorder is None:
+        return
+    kb_read_id = str(payload.get("kb_read_id") or "")
+    rendered_refs = payload.get("kb_rendered_refs") or []
+    if kb_read_id or rendered_refs:
+        recorder.record_proposal(proposal_id, kb_read_id=kb_read_id, rendered_refs=rendered_refs)
+    if action_name != "explore":
         return
     from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
         ARM_CONFIG,
@@ -136,7 +149,7 @@ def _record_config_proposal(coord: "Coordinator", pending: PendingProposal) -> N
         producer_for_provenance,
     )
 
-    params = pending.payload.get("params") or {}
+    params = payload.get("params") or {}
     grid = [row for row in (params.get("grid") or []) if isinstance(row, dict)]
     labels = {str(row.get("provenance") or "").strip() for row in grid}
     if len(labels) == 1:
@@ -148,14 +161,16 @@ def _record_config_proposal(coord: "Coordinator", pending: PendingProposal) -> N
         producer, producer_ref = PRODUCER_ORCHESTRATION, ""
     scopes = {str(row.get("scope") or "").strip() for row in grid if str(row.get("scope") or "").strip()}
     recorder.record_proposal(
-        pending.proposal_msg_id,
+        proposal_id,
         arm=ARM_CONFIG,
         producer=producer,
         producer_ref=producer_ref,
         lever_kind=LEVER_CONFIG,
         scope=scopes.pop() if len(scopes) == 1 else "",
+        kb_read_id=kb_read_id,
+        rendered_refs=rendered_refs,
     )
-    recorder.record_proposal_step(pending.proposal_msg_id, step=STEP_PROPOSED, outcome="submitted")
+    recorder.record_proposal_step(proposal_id, step=STEP_PROPOSED, outcome=outcome)
 
 
 def apply_critic_grid_filter(

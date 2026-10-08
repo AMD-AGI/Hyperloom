@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging as _logging
 import os
 from datetime import datetime, timezone
@@ -259,6 +260,39 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 "executive_summary": executive_summary,
                 "hot_kernels_top15": hot_kernels,
             }
+
+        await self._warm_experience_kb(params)
+
+    async def _warm_experience_kb(self, params: dict[str, Any]) -> None:
+        """Inject this dispatch's Experience KB block into a FRAMEWORK_AGENT specialist and record the injection."""
+        state = self.shared_state
+        if "kb_read_id" in params:
+            return
+        if str(getattr(state, "phase", "") or "").strip().upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
+            return
+        from hyperloom.inference_optimizer.experience_kb import integration_for
+
+        integration = integration_for(self._coord, self.session_dir)
+        if integration is None:
+            return
+        evidence = await asyncio.to_thread(integration.read_for_specialist, state, params)
+        # The exposure travels with everything this specialist authors, under the keys orchestration proposals use;
+        # a read that matched nothing is recorded too, so it stays distinguishable from no read at all.
+        if evidence.read_id:
+            params["kb_read_id"] = evidence.read_id
+            params["kb_rendered_refs"] = [dict(ref) for ref in evidence.rendered_refs]
+        if evidence.status != "completed" or not evidence.prompt_block:
+            return
+        params["experience_kb_block"] = evidence.prompt_block
+        state.record_experience_kb_injection(
+            consumer="specialist",
+            domain=str(params.get("domain") or ""),
+            gap_canonical_id=str(params.get("gap_canonical_id") or ""),
+            read_id=evidence.read_id,
+            experience_ids=[str(ref.get("id") or "") for ref in evidence.rendered_refs],
+            experiences=[dict(item) for item in evidence.experiences],
+            prompt_block=evidence.prompt_block,
+        )
 
     async def maybe_auto_retry_specialist(
         self,
@@ -680,6 +714,8 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             "framework_batch_id",
             "reauthor_attempt",
             "apply_retry_attempt",
+            "kb_read_id",
+            "kb_rendered_refs",
         ):
             value = done_payload.get(key)
             if value in (None, "", [], {}):

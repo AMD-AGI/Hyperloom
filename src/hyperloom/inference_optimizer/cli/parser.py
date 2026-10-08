@@ -123,6 +123,17 @@ def _positive_ms_arg(value: str) -> float:
     return parsed
 
 
+def _positive_watts_arg(value: str) -> float:
+    """argparse type for a power in watts; an unusable value stops the launch rather than skipping the check."""
+    try:
+        parsed = float(str(value).strip())
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(f"expected a positive number of watts, got {value!r}") from exc
+    if not isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError(f"expected a positive number of watts, got {value!r}")
+    return parsed
+
+
 def _default_claude_model_env() -> str:
     """Resolve the default Claude model from env."""
     explicit = (os.environ.get("CLAUDE_MODEL") or "").strip()
@@ -638,6 +649,27 @@ def _build_parser() -> argparse.ArgumentParser:
             "end-to-end latency exceeds N ms. Off by default. A candidate that "
             "reported no end-to-end latency is refused too, since an unmeasured "
             "constraint is not a satisfied one."
+        ),
+    )
+    opt.add_argument(
+        "--gpu-power-cap-w",
+        type=_positive_watts_arg,
+        default=None,
+        help=(
+            "Declare the power cap (W) the GPUs are already set to. An assertion, not a request: the optimizer "
+            "never changes power settings, which are privileged and card-wide. Set it with "
+            "`amd-smi set --power-cap` before launch; the session refuses to start if any card it uses is at a "
+            "different cap. The observed cap is recorded whether or not this flag is passed."
+        ),
+    )
+    opt.add_argument(
+        "--gpu-perf-level",
+        type=str,
+        default=None,
+        metavar="LEVEL",
+        help=(
+            "Declare the DPM performance level the GPUs are already set to (e.g. auto, high, determinism). "
+            "An assertion like --gpu-power-cap-w: set it with `amd-smi set --perf-level` before launch."
         ),
     )
     opt.add_argument(

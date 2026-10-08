@@ -87,6 +87,7 @@ PACKAGE_GLOBS: tuple[str, ...] = (
     "runs/**/kv_metrics.json",
     "runs/**/agentx_timeline.jsonl",
     "runs/**/gpu_metrics.json",
+    "runs/**/gpu_power.json",
     "reports/sbd_v6/timeline/*.json",
     "reports/sbd_v6/write_warnings.jsonl",
     "reports/trace/*.jsonl",
