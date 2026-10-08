@@ -469,6 +469,40 @@ def test_dotenv_fallback_loads_gateway_custom_headers(tmp_path, monkeypatch):
     assert parse_custom_headers(os.environ["OPENAI_CUSTOM_HEADERS"]) == {"X-Tenant": "acme"}
 
 
+def test_custom_header_env_refs_are_expanded_for_child_processes(monkeypatch):
+    """Children forward the headers verbatim, so the parent must not hand down a literal ``${VAR}``."""
+    anthropic_key_var = "_".join(("ANTHROPIC", "API", "KEY"))
+    monkeypatch.setenv(anthropic_key_var, "ak-gateway-token")
+    monkeypatch.setenv("GEAK_GATEWAY_USER", "gateway-user")
+    monkeypatch.setenv(
+        "ANTHROPIC_CUSTOM_HEADERS",
+        f"Ocp-Apim-Subscription-Key: ${{{anthropic_key_var}}}\nuser: ${{GEAK_GATEWAY_USER}}",
+    )
+    monkeypatch.setenv("OPENAI_CUSTOM_HEADERS", "X-Tenant: acme")
+
+    cli_preflight._expand_custom_header_env_refs()
+
+    assert os.environ["ANTHROPIC_CUSTOM_HEADERS"] == "Ocp-Apim-Subscription-Key: ak-gateway-token\nuser: gateway-user"
+    assert os.environ["OPENAI_CUSTOM_HEADERS"] == "X-Tenant: acme"
+
+
+def test_preflight_expands_header_refs_to_credentials_from_legacy_deepseek_env(
+    monkeypatch,
+    tmp_path,
+    clean_url_env,
+    stub_install_steps,
+):
+    """A header may reference a key that only the legacy ``DEEPSEEK_*`` normalization creates."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("_".join(("DEEPSEEK", "API", "KEY")), "ds-legacy-token")
+    anthropic_key_var = "_".join(("ANTHROPIC", "API", "KEY"))
+    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", f"Ocp-Apim-Subscription-Key: ${{{anthropic_key_var}}}")
+
+    cli_preflight._preflight()
+
+    assert cli.os.environ["ANTHROPIC_CUSTOM_HEADERS"] == "Ocp-Apim-Subscription-Key: ds-legacy-token"
+
+
 def test_preflight_does_not_export_a_derived_url_for_a_subscription_token(
     monkeypatch,
     tmp_path,

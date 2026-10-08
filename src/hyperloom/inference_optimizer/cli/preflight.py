@@ -40,6 +40,7 @@ from hyperloom.common.llm_config import (
     provider_model_defaults,
 )
 from hyperloom.common.fs_utils import is_network_fs
+from hyperloom.common.llm_headers import expand_env_refs
 from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.common.platform_probe import probe_cpu_platform
 from hyperloom.common.pr_monitor_urls import kb_store_url
@@ -157,6 +158,18 @@ def _normalize_legacy_deepseek_env() -> dict[str, Any]:
         "skip_reason": skip_reason,
         "detail": {"keys_set": changed},
     }
+
+
+def _expand_custom_header_env_refs() -> None:
+    """Resolve ``${VAR}`` references in the ``*_CUSTOM_HEADERS`` settings in place.
+
+    Child processes (specialists, the Critic, GEAK on Ray) forward these verbatim, and an agent CLI sends them
+    verbatim, so an unexpanded ``${ANTHROPIC_API_KEY}`` reaches the gateway as literal text and is rejected.
+    """
+    for key in ("ANTHROPIC_CUSTOM_HEADERS", "OPENAI_CUSTOM_HEADERS"):
+        raw = os.environ.get(key)
+        if raw and "${" in raw:
+            os.environ[key] = expand_env_refs(raw)
 
 
 def _restore_provider_only_mode(provider_mode: str, snapshot: dict[str, str | None]) -> None:
@@ -2156,6 +2169,8 @@ def _preflight(
         category="normalize",
         action=_normalize_legacy_deepseek_env,
     )
+    # After the legacy normalization, which can create the credentials a header references.
+    _expand_custom_header_env_refs()
 
     # Fail fast on missing credentials after the fallback loaders.
     _run_install_step(
