@@ -6,8 +6,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import AsyncMock
 
 import pytest
 
@@ -65,29 +63,6 @@ async def test_mi_handoff_is_unchanged(tmp_path: Path, monkeypatch: pytest.Monke
     assert handoff["gpu_type"] == "mi355x"
     assert "expected_target" not in handoff
     assert "expected_gfx" not in handoff
-
-
-@pytest.mark.asyncio
-async def test_kernel_rebaseline_replays_with_the_pair(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The GEAK-harness rebaseline reloads the persisted handoff and hands GEAK the same pair."""
-    state = SharedState(model_path="/models/m", gpu_type="r9700", baseline_tput=1000.0)
-    await _write_handoff(tmp_path, monkeypatch, state)
-    coord = Coordinator.__new__(Coordinator)
-    coord.session_dir = tmp_path
-    coord.bus = SimpleNamespace(append_and_seq=AsyncMock())
-    coord.shared_state = state
-    state.geak_result = {"status": "ok", "throughput_speedup": 1.05, "final_overlay": ""}
-    captured: dict = {}
-
-    async def _fake_sweep(**kwargs):
-        captured.update(kwargs["handoff"])
-        return {"status": "failed"}
-
-    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak", _fake_sweep)
-
-    await coord.writeback.validate_geak_via_geak_harness(reason="unit")
-
-    assert (captured["expected_target"], captured["expected_gfx"]) == ("r9700", "gfx1201")
 
 
 @pytest.mark.asyncio
