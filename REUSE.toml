@@ -29,19 +29,6 @@ precedence = "override"
 SPDX-FileCopyrightText = "FlyDSL Project Contributors"
 SPDX-License-Identifier = "Apache-2.0"
 
-# Source patches against SGLang. The added lines are AMD's; the diff context
-# and the file paths are SGLang's, which is Apache-2.0. The AMD share dominates
-# -- in the largest patch, 33 of 37 substantive lines -- so this is a dual
-# notice, not a claim that the patches are wholly derivative.
-[[annotations]]
-path = "src/kernelforge/data/serving_patches/sglang/**/*.patch"
-precedence = "override"
-SPDX-FileCopyrightText = [
-    "2026 Advanced Micro Devices, Inc.",
-    "SGLang Team and contributors",
-]
-SPDX-License-Identifier = "Apache-2.0 AND MIT"
-
 # Triton oracle for the mxfp8 grouped-GEMM rewrite example, extracted from
 # SGLang's ``kernels/ops/moe/mxfp8_moe_amd_gfx95.py``. The rewrite pipeline
 # treats it as read-only input; the FlyDSL port it produces is AMD's.

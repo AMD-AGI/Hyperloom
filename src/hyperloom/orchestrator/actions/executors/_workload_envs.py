@@ -79,7 +79,6 @@ from ._recipe_script import (
 )
 from ._server_argv import add_server_arg_unless_pinned, seal_server_argv
 from ._server_patcher import (
-    ensure_sglang_patched_for_ck_blockscale,
     ensure_sglang_patched_for_tracelens,
     ensure_vllm_patched_for_tracelens,
 )
@@ -2179,18 +2178,6 @@ def materialize_config_with_envs(
                 "to restore the gate. This warning fires once per process."
             )
             _RUN_EVAL_DISABLED_WARN_EMITTED = True
-    # KernelForge fp8 block-scale CK backend switch: SGLANG_FP8_BLOCKSCALE_CK_MAX_M
-    # only takes effect on a KernelForge-patched sglang fp8_utils.py. Ensure the
-    # patch, scoped to sglang + the env present. Fail-soft (a failed patch leaves
-    # the env a no-op). Honors the HYPERLOOM_ENABLE_PATCH kill switch.
-    _fw = str(bench.get("framework") or "").lower()
-    if _tracelens_patch_enabled() and "sglang" in _fw and "SGLANG_FP8_BLOCKSCALE_CK_MAX_M" in envs:
-        if not ensure_sglang_patched_for_ck_blockscale():
-            log.warning(
-                "CK fp8 block-scale patch could not be applied; "
-                "SGLANG_FP8_BLOCKSCALE_CK_MAX_M will no-op on the unpatched "
-                "sglang fp8_utils.py (serving run continues unaffected)."
-            )
     # FlyDSL folds only same-directory helpers into its JIT cache key, so a patched
     # helper one directory over is served from a stale binary. Naming the roots
     # folds their sources into the key. Only the run that applied such a patch has

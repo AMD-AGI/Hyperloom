@@ -3,12 +3,12 @@
 
 """Runtime access to packaged KernelForge resources and writable state roots.
 
-KernelForge ships inside the Hyperloom distribution, so its knowledge base,
-examples and serving patches always live at ``kernelforge/data`` next to the
-code -- there is no "repository root" to fall back to. Everything under that
-tree is read-only: it may sit in a root-owned ``site-packages`` and is replaced
-wholesale on upgrade. Mutable state therefore goes to a separately resolved
-writable root, never back into the package.
+KernelForge ships inside the Hyperloom distribution, so its knowledge base and
+examples always live at ``kernelforge/data`` next to the code -- there is no
+"repository root" to fall back to. Everything under that tree is read-only: it
+may sit in a root-owned ``site-packages`` and is replaced wholesale on upgrade.
+Mutable state therefore goes to a separately resolved writable root, never back
+into the package.
 """
 
 from __future__ import annotations
@@ -21,11 +21,6 @@ _DATA_ROOT = _PACKAGE_ROOT / "data"
 
 #: Directory name for mutable state under the writable root.
 _STATE_DIR_NAME = "kernelforge"
-
-
-def packaged_data_root() -> Path:
-    """Root of the read-only resource trees shipped inside the package."""
-    return _DATA_ROOT
 
 
 def resource_path(name: str, project_root: str | Path | None = None, *, missing_ok: bool = False) -> Path:
