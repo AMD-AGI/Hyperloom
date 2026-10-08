@@ -26,12 +26,13 @@ from hyperloom.common.launch_log_evidence import (
 )
 from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out, enablement_event
 from hyperloom.orchestrator.lever import (
+    FRAMEWORK_STACK_ACTION,
     LEVER_CONFIG,
     LEVER_ENABLEMENT,
-    LEVER_KERNEL,
     LEVER_SOURCE_PATCH,
     LEVER_UPSTREAM_PR,
     patch_lever_kind,
+    lever_kind_for_task,
     patch_owner_phase,
 )
 from ..knowledge.remote_recipe.sanitize import HOST_ORIGIN_KEY
@@ -180,32 +181,6 @@ def _remote_result_type(status: str, reason: str) -> str:
     return _close_out.RESULT_TRANSPORT_FAILED
 
 
-# Upstream-PR KEEPs are stacked under the ``framework`` attribution family
-# label rather than under their task kind, because that label is what
-# ``phase_breakdown`` and the action-family table publish.
-_FRAMEWORK_STACK_ACTION = "framework"
-
-#: Task kind -> the lever it moves, for winners whose params carried no stamp.
-#: ``integrate_patch`` is absent: it lands every lever, so its stamp is the only
-#: evidence and a missing one is a real gap rather than something to guess at.
-#: ``geak_e2e`` is absent for the same reason: it promotes on a proven kernel
-#: overlay OR on a config/env-only win, and only the promoting site knows which.
-#: It stamps ``lever_kind`` on the winner from the same overlay proof
-#: ``_geak_stack_entry_extra`` uses, so guessing ``kernel`` here would let the
-#: lever buckets contradict ``_geak_contribution`` for the very same row.
-_LEVER_BY_TASK_KIND = {
-    "explore": LEVER_CONFIG,
-    "conc_sweep": LEVER_CONFIG,
-    "gemm_tuning": LEVER_KERNEL,
-    "fusion": LEVER_KERNEL,
-    "integrate": LEVER_KERNEL,
-    # Reachable when a session recorded before the action was retired is
-    # resumed and its orphaned KEEPs are reconciled against the stack.
-    "framework_agent": LEVER_UPSTREAM_PR,
-    _FRAMEWORK_STACK_ACTION: LEVER_UPSTREAM_PR,
-}
-
-
 def _graded_source(measurement: Mapping[str, Any], output_tput: float) -> dict[str, Any]:
     """*measurement* with the caller's resolved output throughput stamped in.
 
@@ -316,25 +291,6 @@ def _is_patch_column_keep(task_params: Mapping[str, Any], result: Mapping[str, A
         return True
     phase = str(task_params.get("source_phase") or result.get("source_phase") or "").strip().upper()
     return phase in {"EXPLORE", "FRAMEWORK_AGENT"}
-
-
-def _lever_kind_for_lift(task_kind: str, bv: Any) -> str:
-    """Resolve the lever a winner moved.
-
-    Args:
-        task_kind: The action kind that produced the winner.
-        bv: The winning variant dict, read for a ``lever_kind`` stamp.
-
-    Returns:
-        One of :data:`LEVER_KINDS`, or ``""`` when nothing named a lever --
-        which the caller logs rather than papering over.
-    """
-    # The kind decides where it can only move one lever; ``integrate_patch``
-    # lands every lever, so there the producer's stamp is the only evidence.
-    by_kind = _LEVER_BY_TASK_KIND.get(str(task_kind or "").strip(), "")
-    if by_kind:
-        return by_kind
-    return patch_lever_kind(bv if isinstance(bv, dict) else None)
 
 
 class IntegrateRecoveryIncomplete(RuntimeError):
@@ -1235,7 +1191,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         try:
             journal = self.ensure_journal()
             # optimization_journal.py has no dedicated fusion bucket; a fusion KEEP is a kernel
-            # integration by the same lever (see _LEVER_BY_TASK_KIND), so it uses the same kind. The
+            # integration by the same lever (see lever_kind_for_task), so it uses the same kind. The
             # raw lift_kind still reaches the row through provenance below.
             kind = classify_change_kind("integrate")
             change = str(result.get("kernel_id") or lift_kind)
@@ -1243,7 +1199,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             journal.append_entry(
                 JournalEntry(
                     phase=self.journal_entry_phase(),
-                    lever_kind=_lever_kind_for_lift(lift_kind, result if isinstance(result, dict) else None),
+                    lever_kind=lever_kind_for_task(lift_kind, result if isinstance(result, dict) else None),
                     iter=int(self.shared_state.tick or 0),
                     kind=kind,
                     change=change,
@@ -2028,7 +1984,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         journal.append_entry(
             JournalEntry(
                 phase=self.journal_entry_phase(),
-                lever_kind=_lever_kind_for_lift(kind, result_dict if isinstance(result_dict, dict) else None),
+                lever_kind=lever_kind_for_task(kind, result_dict if isinstance(result_dict, dict) else None),
                 iter=int(self.shared_state.tick or 0),
                 kind=kind,
                 change=change,
@@ -2188,7 +2144,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         journal.append_entry(
             JournalEntry(
                 phase=self.journal_entry_phase(),
-                lever_kind=_lever_kind_for_lift(kind, variant_outcome if isinstance(variant_outcome, dict) else None),
+                lever_kind=lever_kind_for_task(kind, variant_outcome if isinstance(variant_outcome, dict) else None),
                 iter=int(self.shared_state.tick or 0),
                 kind=kind,
                 change=change,
@@ -3355,7 +3311,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 ).strip()
                 # The phase fallback above inherits whatever is live at
                 # writeback time, which is not what authored the winner.
-                lever_kind = _lever_kind_for_lift(task_kind, bv)
+                lever_kind = lever_kind_for_task(task_kind, bv)
                 if not lever_kind:
                     log.warning(
                         "lift: no lever_kind for a %s winner (variant=%s); the stack entry will report as unattributed",
@@ -6093,7 +6049,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 elif kind == "framework_agent":
                     # This kind stacks under the framework family label, keyed
                     # by the canonical candidate key, so reconcile on both.
-                    stack_action = _FRAMEWORK_STACK_ACTION
+                    stack_action = FRAMEWORK_STACK_ACTION
                     cand = res.get("candidate")
                     variant = candidate_key(cand if isinstance(cand, dict) else None)
                 elif kind == "explore":
