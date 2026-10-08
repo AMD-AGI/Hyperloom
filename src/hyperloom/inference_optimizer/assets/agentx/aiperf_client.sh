@@ -49,8 +49,6 @@
 #     default 900, clamped to AGENTX_TRACE_FLUSH_TIMEOUT_S. The first rank file
 #     landed at t+350s on that same GLM-5.3 capture),
 #   AGENTX_KEEP_SERVER, AGENTX_PROFILE_WINDOW_S,
-#   AGENTX_PROFILE_WARMUP_S (deprecated and ignored; phase-gated profiling
-#     replaced the fixed warmup delay),
 #   AGENTX_SERVER_SCRIPT (override builtin name), AIPERF_BIN.
 set -euo pipefail
 
@@ -613,9 +611,6 @@ if [ "${PROFILE:-0}" = "1" ]; then
       log "ERROR failed to write trace-capture status via ${PHASE_GATE}"
     fi
   }
-  if [ -n "${AGENTX_PROFILE_WARMUP_S:-}" ]; then
-    log "WARN AGENTX_PROFILE_WARMUP_S is ignored: profiling now starts from AIPerf's measured-phase signal"
-  fi
   # The progress API is brought up for every round further above; capture only
   # needs to know whether that succeeded, since it cannot gate a window without it.
   if [ ! -f "$PHASE_GATE" ]; then

@@ -1063,13 +1063,6 @@ def test_profile_phase_wait_has_bounded_fallback(tmp_path):
     assert argv[argv.index("--timeout-seconds") + 1] == "3618"
 
 
-def test_legacy_profile_warmup_delay_is_ignored(tmp_path):
-    bench, bind, res = _sandbox(tmp_path)
-    r = _run_profile(bench, bind, res, tmp_path, AGENTX_PROFILE_WARMUP_S="not-a-duration")
-    assert r.returncode == 0, r.stderr
-    assert "AGENTX_PROFILE_WARMUP_S is ignored" in (r.stdout + r.stderr)
-
-
 def test_phase_gate_failure_keeps_measurement_but_skips_capture(tmp_path):
     bench, bind, res = _sandbox(tmp_path)
     marker = tmp_path / "curl.txt"
