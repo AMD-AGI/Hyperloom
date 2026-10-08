@@ -316,8 +316,9 @@ asyncio_mode = "auto"
 testpaths = [
     "src/**/tests",
     "scripts/tests",
+    "tools/kbmine/tests",
 ]
-pythonpath = ["src", ".", "scripts"]
+pythonpath = ["src", ".", "scripts", "tools/kbmine"]
 markers = [
     "critic_agent_e2e: end-to-end tests that shell out to the real critic-agent runtime; skip with '-m \"not critic_agent_e2e\"' if critic-agent is not on disk.",
     "targeted_build_e2e: end-to-end tests that run a real AITER compile on a ROCm host; skip with '-m \"not targeted_build_e2e\"' in CI.",

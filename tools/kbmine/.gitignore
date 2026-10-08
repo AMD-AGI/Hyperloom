@@ -1,0 +1,6 @@
+# Never commit credentials or CA material, or fetched evidence.
+*.pem
+*token*
+*.secret
+pulse_rows*.json
+report*.json
