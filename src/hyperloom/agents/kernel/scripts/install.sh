@@ -22,13 +22,19 @@ export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:
 # $VIRTUAL_ENV; otherwise the system-bins prepend shadows the venv python3
 # with /usr/bin/python3, whose apt-managed packages (e.g. packaging) have no
 # RECORD file and break `pip install`/uninstall. Probe the activated venv
-# first, then the common ROCm image locations (/opt/venv, /venv).
-for _venv_bin in "${VIRTUAL_ENV:+${VIRTUAL_ENV}/bin}" /opt/venv/bin /venv/bin; do
-  if [ -n "${_venv_bin}" ] && [ -x "${_venv_bin}/python" ]; then
-    export PATH="${_venv_bin}:$PATH"
-    break
-  fi
-done
+# first, then the common ROCm image locations (/opt/venv, /venv, and
+# /opt/python on the ROCm 10 vLLM images). A PYTHON the parent installer
+# selected wins, so the bare python3 calls below install into its environment.
+if [ -n "${PYTHON:-}" ] && [ -x "$PYTHON" ]; then
+  export PATH="$(dirname -- "$PYTHON"):$PATH"
+else
+  for _venv_bin in "${VIRTUAL_ENV:+${VIRTUAL_ENV}/bin}" /opt/venv/bin /venv/bin /opt/python/bin; do
+    if [ -n "${_venv_bin}" ] && [ -x "${_venv_bin}/python" ]; then
+      export PATH="${_venv_bin}:$PATH"
+      break
+    fi
+  done
+fi
 
 # Default every writable artefact location under $USER_DATA_PATH so a single
 # session-dir move relocates Magpie / source mirrors / the
