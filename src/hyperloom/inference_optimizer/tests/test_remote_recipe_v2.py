@@ -1182,10 +1182,6 @@ def test_degraded_kb_skips_remote_close_writer(
         shared_state=SharedState(),
         recipe_kb=None,
         knowledge_plane=SimpleNamespace(kb_disabled=True),
-        _journal=type(
-            "_MockJournal", (), {"finalize": lambda self, **kw: None, "update_baseline": lambda self, *a: None}
-        )(),
-        ensure_journal=lambda: _Journal(),
     )
     from hyperloom.orchestrator.knowledge import remote_recipe
 
@@ -1196,7 +1192,9 @@ def test_degraded_kb_skips_remote_close_writer(
         classmethod(lambda cls: (_ for _ in ()).throw(AssertionError("degraded CLOSE constructed HyperloomRemoteKB"))),
     )
 
-    outcome = RecipeJournalCollaborator(coordinator).finalize_recipe_and_journal()
+    journal = RecipeJournalCollaborator(coordinator)
+    journal.ensure_journal = lambda: _Journal()
+    outcome = journal.finalize_recipe_and_journal()
     assert outcome == {
         "status": "skipped",
         "reason": "degraded_kb",
@@ -1219,11 +1217,6 @@ def test_local_close_ignores_ambient_kb_store(
         shared_state=SharedState(),
         recipe_kb=None,
         knowledge_plane=None,
-        _journal=type(
-            "_MockJournal", (), {"finalize": lambda self, **kw: None, "update_baseline": lambda self, *a: None}
-        )(),
-        ensure_journal=lambda: _Journal(),
-        workload_canonical_id=lambda: "inference:m:h:f:mt:a:v:p",
     )
     calls: list[tuple] = []
     from hyperloom.orchestrator.knowledge import remote_recipe
@@ -1236,7 +1229,10 @@ def test_local_close_ignores_ambient_kb_store(
         "from_env",
         classmethod(lambda cls: (_ for _ in ()).throw(AssertionError("local CLOSE constructed HyperloomRemoteKB"))),
     )
-    outcome = RecipeJournalCollaborator(coordinator).finalize_recipe_and_journal()
+    journal = RecipeJournalCollaborator(coordinator)
+    journal.ensure_journal = lambda: _Journal()
+    journal.workload_canonical_id = lambda: "inference:m:h:f:mt:a:v:p"
+    outcome = journal.finalize_recipe_and_journal()
     assert outcome == {
         "status": "skipped",
         "reason": "no_recipe_backend",
@@ -1265,9 +1261,6 @@ def test_remote_close_writes_new_kb_once_and_skips_legacy_finalize(
         session_dir=tmp_path,
         shared_state=SharedState(current_best={"tput": 10.0}),
         knowledge_plane=SimpleNamespace(recipe_kb=_LegacyRecipe()),
-        _journal=None,
-        ensure_journal=lambda: _Journal(),
-        proposals=SimpleNamespace(workload_canonical_id=lambda: "inference:m:h:f:mt:a:v:p"),
     )
     calls: list[tuple] = []
     from hyperloom.orchestrator.knowledge import remote_recipe
@@ -1292,7 +1285,10 @@ def test_remote_close_writes_new_kb_once_and_skips_legacy_finalize(
         "from_env",
         classmethod(lambda cls: _Facade()),
     )
-    outcome = RecipeJournalCollaborator(coordinator).finalize_recipe_and_journal()
+    journal = RecipeJournalCollaborator(coordinator)
+    journal.ensure_journal = lambda: _Journal()
+    journal.workload_canonical_id = lambda: "inference:m:h:f:mt:a:v:p"
+    outcome = journal.finalize_recipe_and_journal()
     assert outcome == {
         "status": "written",
         "reason": "",
@@ -1336,11 +1332,6 @@ def test_remote_close_transport_failure_is_nonfatal(
         shared_state=SharedState(),
         recipe_kb=None,
         knowledge_plane=None,
-        _journal=type(
-            "_MockJournal", (), {"finalize": lambda self, **kw: None, "update_baseline": lambda self, *a: None}
-        )(),
-        ensure_journal=lambda: _Journal(),
-        proposals=SimpleNamespace(workload_canonical_id=lambda: "inference:m:h:f:mt:a:v:p"),
     )
     from hyperloom.orchestrator.knowledge import remote_recipe
 
@@ -1352,7 +1343,10 @@ def test_remote_close_transport_failure_is_nonfatal(
         "from_env",
         classmethod(lambda cls: (_ for _ in ()).throw(OSError("transport down"))),
     )
-    outcome = RecipeJournalCollaborator(coordinator).finalize_recipe_and_journal()
+    journal = RecipeJournalCollaborator(coordinator)
+    journal.ensure_journal = lambda: _Journal()
+    journal.workload_canonical_id = lambda: "inference:m:h:f:mt:a:v:p"
+    outcome = journal.finalize_recipe_and_journal()
     assert outcome == {
         "status": "error",
         "reason": "OSError",
@@ -1391,9 +1385,6 @@ def test_remote_close_never_sends_an_unvalidated_working_recipe(tmp_path: Path, 
         shared_state=state,
         recipe_kb=None,
         knowledge_plane=None,
-        _journal=None,
-        ensure_journal=lambda: (_ for _ in ()).throw(AssertionError("journal must not be finalized")),
-        proposals=SimpleNamespace(workload_canonical_id=lambda: "inference:m:h:f:mt:a:v:p"),
     )
     monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
     monkeypatch.setenv("KB_STORE_URL", "https://kb.example")
@@ -1404,7 +1395,10 @@ def test_remote_close_never_sends_an_unvalidated_working_recipe(tmp_path: Path, 
         classmethod(lambda cls: (_ for _ in ()).throw(AssertionError("remote writer must not be reached"))),
     )
 
-    outcome = RecipeJournalCollaborator(coordinator).finalize_recipe_and_journal()
+    journal = RecipeJournalCollaborator(coordinator)
+    journal.ensure_journal = lambda: (_ for _ in ()).throw(AssertionError("journal must not be finalized"))
+    journal.workload_canonical_id = lambda: "inference:m:h:f:mt:a:v:p"
+    outcome = journal.finalize_recipe_and_journal()
 
     assert outcome["reason"] == "unvalidated_recipe_stack"
     assert outcome["result_type"] == "unvalidated_recipe"

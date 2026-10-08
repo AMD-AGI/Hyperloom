@@ -1660,7 +1660,7 @@ async def test_record_fact_per_task_writes_lesson(coord: Coordinator, monkeypatc
     coord.shared_state.model_name = "llama"
     coord.shared_state.gpu_type = "mi300x"
     amends: list[dict] = []
-    monkeypatch.setattr(coord.proposals, "kb_amend_recipe", lambda **k: amends.append(k))
+    monkeypatch.setattr(coord.recipe_journal, "kb_amend_recipe", lambda **k: amends.append(k))
     task = Task(task_id="fact-keep", kind="explore", state="succeeded", params={}, idempotency_key="fk")
     coord.recipe_journal._record_fact_per_task(
         task=task,
@@ -1678,7 +1678,7 @@ async def test_record_fact_per_task_writes_no_lesson_for_an_unadopted_gain(coord
 
     coord.knowledge_plane = KnowledgePlane(recipe_kb=object())
     amends: list[dict] = []
-    monkeypatch.setattr(coord.proposals, "kb_amend_recipe", lambda **k: amends.append(k))
+    monkeypatch.setattr(coord.recipe_journal, "kb_amend_recipe", lambda **k: amends.append(k))
     task = Task(task_id="fact-refused", kind="integrate_patch", state="succeeded", params={}, idempotency_key="fx")
     coord.recipe_journal._record_fact_per_task(
         task=task,
@@ -1695,7 +1695,7 @@ async def test_record_fact_per_task_writes_pitfall(coord: Coordinator, monkeypat
 
     coord.knowledge_plane = KnowledgePlane(recipe_kb=object())
     amends: list[dict] = []
-    monkeypatch.setattr(coord.proposals, "kb_amend_recipe", lambda **k: amends.append(k))
+    monkeypatch.setattr(coord.recipe_journal, "kb_amend_recipe", lambda **k: amends.append(k))
     monkeypatch.setattr(coord.recipe_journal, "_pitfall_severity_for", lambda rd: "high")
     task = Task(task_id="fact-revert", kind="integrate_patch", state="failed", params={}, idempotency_key="fr")
     coord.recipe_journal._record_fact_per_task(
@@ -1968,7 +1968,7 @@ async def test_recipe_kb_finalize_amends_recipe(coord: Coordinator, monkeypatch)
     coord.shared_state.cumulative_gain_validated = 12.0
     coord.shared_state.current_best = {"tput": 950.0}
     amends: list[dict] = []
-    monkeypatch.setattr(coord.proposals, "kb_amend_recipe", lambda **k: amends.append(k))
+    monkeypatch.setattr(coord.recipe_journal, "kb_amend_recipe", lambda **k: amends.append(k))
     coord.recipe_journal.finalize_recipe_and_journal()
     assert amends and "recipe_overrides" in amends[0]
 
@@ -2495,7 +2495,7 @@ async def test_recipe_kb_finalize_merges_existing_row(coord: Coordinator, monkey
     coord.shared_state.cumulative_gain_validated = 15.0
     coord.shared_state.current_best = {"tput": 999.0}
     amends: list[dict] = []
-    monkeypatch.setattr(coord.proposals, "kb_amend_recipe", lambda **k: amends.append(k))
+    monkeypatch.setattr(coord.recipe_journal, "kb_amend_recipe", lambda **k: amends.append(k))
     coord.recipe_journal.finalize_recipe_and_journal()
     assert amends
     overrides = amends[0]["recipe_overrides"]

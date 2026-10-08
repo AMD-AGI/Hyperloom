@@ -1560,7 +1560,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 },
             )
         await self._coord.gap_refresh.refresh_gaps(
-            reason="specialist_done", workload_id=self._coord.proposals.workload_canonical_id()
+            reason="specialist_done", workload_id=self._coord.recipe_journal.workload_canonical_id()
         )
         if bool((task.params or {}).get("enablement")) and isinstance(done_payload.get("needs_targeted_build"), dict):
             await self._coord.enablement_build.maybe_enqueue_specialist_requested_build(
@@ -2371,7 +2371,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             audit_extras["eval_probe"] = result["eval_probe"]
         # seed the gaps[] ledger from baseline.
         await self._coord.gap_refresh.refresh_gaps(
-            reason="baseline_done", workload_id=self._coord.proposals.workload_canonical_id()
+            reason="baseline_done", workload_id=self._coord.recipe_journal.workload_canonical_id()
         )
         if self.shared_state.baseline_tput > 0:
             await self.drain_queued_baselines(reason="baseline_established")

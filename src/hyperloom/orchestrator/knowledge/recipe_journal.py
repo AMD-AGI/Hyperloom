@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Collection, Mapping
 from hyperloom.common.coerce import to_float, to_int
 from hyperloom.common.io import append_jsonl
 from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out
+from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_framework_version
 from hyperloom.inference_optimizer.session.optimization_journal import (
     OUTCOME_KEEP,
     OUTCOME_REVERT,
@@ -23,6 +24,7 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
     derive_journal_outcome,
     summarize_change,
 )
+from hyperloom.orchestrator.knowledge.recipe_kb import recipe_canonical_id
 from hyperloom.orchestrator.lever import lever_kind_for_task
 
 from ..collaborator import CoordinatorCollaborator
@@ -279,6 +281,18 @@ def _record_config_attempts(
     recorder.settle_proposal(proposal_ref, disposition=DISPOSITION_ATTEMPTED)
 
 
+def _extra_server_args(payload: Mapping[str, Any]) -> str:
+    """Read canonical ``extra_server_args`` from a payload."""
+    value = payload.get("extra_server_args")
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (list, tuple)):
+        return " ".join(str(v).strip() for v in value if str(v).strip())
+    return str(value)
+
+
 class RecipeJournalCollaborator(CoordinatorCollaborator):
     """Records settled results into the optimization journal, the Recipe KB facts and the final Recipe."""
 
@@ -287,6 +301,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
     def __init__(self, coordinator: "Coordinator") -> None:
         super().__init__(coordinator)
         self._journal: Journal | None = None
+        self._local_recipe_cache: tuple[int, dict[str, Any]] | None = None
 
     def journal_integrate_keep(self, result: dict[str, Any], *, lift_kind: str, new_tput: float) -> None:
         """Mirror an adopted kernel-recipe-lane (forge-loop/fusion) KEEP as an ``optimization_journal`` row.
@@ -538,13 +553,13 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                 stack_depth=len(self.shared_state.optimization_stack or []),
                 measured_at=now_iso,
             )
-            live = self._coord.proposals.read_local_recipe_row()
-            recipe_overrides = self._coord.proposals.kb_best_config_overrides_for_keep(
+            live = self.read_local_recipe_row()
+            recipe_overrides = self.kb_best_config_overrides_for_keep(
                 live=live,
                 best_config_candidate=best_config_candidate,
                 throughput_after=throughput_after,
             )
-            self._coord.proposals.kb_amend_recipe(
+            self.kb_amend_recipe(
                 append_lesson={
                     "statement": statement,
                     "measured_impact": impact,
@@ -561,7 +576,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                 severity=severity,
                 kind="pitfall",
             )
-            self._coord.proposals.kb_amend_recipe(
+            self.kb_amend_recipe(
                 append_pitfall={
                     "description": description,
                     "severity": severity,
@@ -638,7 +653,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             change=change,
             gain_pct=gain_pct,
             throughput_after=throughput_after,
-            best_config_candidate=self._coord.proposals.extract_kept_best_config(
+            best_config_candidate=self.extract_kept_best_config(
                 task=task,
                 result_dict=result_dict,
             ),
@@ -804,7 +819,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             change=change,
             gain_pct=gain_pct,
             throughput_after=throughput_after,
-            best_config_candidate=self._coord.proposals.extract_kept_best_config(
+            best_config_candidate=self.extract_kept_best_config(
                 task=task,
                 variant_attrs=change_attrs,
             ),
@@ -1376,7 +1391,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             try:
                 from ..knowledge.remote_recipe import HyperloomRemoteKB
 
-                remote_cid = self._coord.proposals.workload_canonical_id()
+                remote_cid = self.workload_canonical_id()
                 remote_result = HyperloomRemoteKB.from_env().write(
                     remote_cid,
                     self.shared_state,
@@ -1466,7 +1481,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             merged_sessions: list[dict[str, Any]] = list(my_sessions)
             existing_row: dict[str, Any] = {}
             if self.recipe_kb is not None:
-                cid = self._coord.proposals.workload_canonical_id()
+                cid = self.workload_canonical_id()
                 # Read exactly the local store's authority row.
                 try:
                     existing_row = self.recipe_kb.get_authoritative_recipe(canonical_id=cid) or {}
@@ -1517,7 +1532,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             if has_validated_win and my_tput > live_tput:
                 overrides["best_config"] = attrs["best_config"]
                 overrides["best_throughput"] = my_tput
-            self._coord.proposals.kb_amend_recipe(
+            self.kb_amend_recipe(
                 recipe_overrides=overrides,
                 provenance_details={
                     "phase": "close_finalize",
@@ -1542,6 +1557,266 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                 "result_type": _close_out.RESULT_TRANSPORT_FAILED,
                 "error_class": type(exc).__name__,
             }
+
+    def _kb_hardware_slug(self) -> str:
+        """Topology-aware hardware dimension for the recipe ``canonical_id``."""
+        from hyperloom.orchestrator.actions.executors._multi_node_env import resolve_kb_topology
+        from hyperloom.inference_optimizer.recipe_snapshot_constants import kb_hardware_slug
+
+        ss = self.shared_state
+        return kb_hardware_slug(ss.gpu_type or "unknown_gpu", **resolve_kb_topology())
+
+    def workload_canonical_id(self) -> str:
+        """Return the workload's canonical seven-dimension Recipe identity."""
+        ss = self.shared_state
+        workload = ss.model_name or "unknown_model"
+        hw = self._kb_hardware_slug()
+        framework = str(ss.framework or "")
+        framework_version = str(ss.framework_version or "")
+        if not framework_version and framework:
+            framework_version = detect_framework_version(framework)
+        precision = str(ss.precision or "")
+        model_type = str(ss.model_type or "")
+        architectures = ss.model_architectures or []
+        from hyperloom.common.perf_metric import agentx_active
+
+        return recipe_canonical_id(
+            model=workload,
+            hardware=hw,
+            framework_name=framework,
+            framework_version=framework_version,
+            precision=precision,
+            model_type=model_type,
+            architectures=architectures,
+            scheme=("agentx" if agentx_active(benchmark_mode=ss.benchmark_mode) else "inference"),
+        )
+
+    def read_local_recipe_row(self) -> dict[str, Any]:
+        """Load the selected store's exact authority row for writes."""
+        if self.recipe_kb is None:
+            return {}
+        tick = int(self.shared_state.tick or 0)
+        cache = self._local_recipe_cache
+        if isinstance(cache, tuple) and len(cache) == 2 and cache[0] == tick:
+            return cache[1]
+        try:
+            row = (
+                self.recipe_kb.get_authoritative_recipe(
+                    canonical_id=self.workload_canonical_id(),
+                )
+                or {}
+            )
+        except Exception:  # noqa: BLE001 - the recipe store may be remote
+            row = {}
+        self._local_recipe_cache = (tick, row)
+        return row
+
+    @staticmethod
+    def extract_kept_best_config(
+        *,
+        task: "Task",
+        variant_attrs: dict[str, Any] | None = None,
+        result_dict: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Build a replayable ``best_config`` from a KEEP'd task or explore variant."""
+        params = task.params if isinstance(getattr(task, "params", None), dict) else {}
+        attrs = variant_attrs if isinstance(variant_attrs, dict) else {}
+
+        args = _extra_server_args(attrs)
+        if not args.strip():
+            args = _extra_server_args(params)
+        if not args.strip() and isinstance(result_dict, dict):
+            args = _extra_server_args(result_dict)
+
+        envs_raw = attrs.get("extra_envs") or params.get("extra_envs") or {}
+        if not envs_raw and isinstance(result_dict, dict):
+            envs_raw = result_dict.get("extra_envs") or {}
+        envs = {str(k): str(v) for k, v in envs_raw.items()} if isinstance(envs_raw, dict) else {}
+
+        if not args.strip() and not envs:
+            return {}
+
+        best_config: dict[str, Any] = {}
+        if args.strip():
+            best_config["extra_server_args"] = args.strip()
+        if envs:
+            best_config["extra_envs"] = envs
+        return best_config
+
+    @staticmethod
+    def kb_best_config_overrides_for_keep(
+        *,
+        live: Mapping[str, Any],
+        best_config_candidate: Mapping[str, Any],
+        throughput_after: float | None,
+    ) -> dict[str, Any]:
+        """Decide whether a KEEP amend should also stamp ``best_config`` on the recipe row."""
+        if not best_config_candidate:
+            return {}
+
+        live_bc = live.get("best_config") if isinstance(live.get("best_config"), Mapping) else {}
+        live_has_config = bool(
+            _extra_server_args(live_bc).strip()
+            or (isinstance(live_bc.get("extra_envs"), Mapping) and live_bc.get("extra_envs"))
+        )
+        try:
+            live_tput = float(live.get("best_throughput") or 0.0)
+        except (TypeError, ValueError):
+            live_tput = 0.0
+        try:
+            new_tput = float(throughput_after or 0.0)
+        except (TypeError, ValueError):
+            new_tput = 0.0
+
+        if not live_has_config or (new_tput > 0.0 and new_tput >= live_tput):
+            overrides: dict[str, Any] = {
+                "best_config": dict(best_config_candidate),
+            }
+            if new_tput > 0.0:
+                overrides["best_throughput"] = new_tput
+            return overrides
+        return {}
+
+    def kb_amend_recipe(
+        self,
+        *,
+        append_lesson: dict[str, Any] | None = None,
+        append_pitfall: dict[str, Any] | None = None,
+        recipe_overrides: dict[str, Any] | None = None,
+        provenance_details: dict[str, Any] | None = None,
+    ) -> None:
+        """Read-modify-write helper for the recipe-snapshot KB: load live row, append lesson/pitfall, merge recipe_overrides (unset fields preserved), write back. Best-effort; lesson/pitfall appended without dedup."""
+        config = getattr(self.knowledge_plane, "config", None)
+        if getattr(getattr(config, "mode", None), "value", None) == "remote" or self.recipe_kb is None:
+            return
+        from hyperloom.common.perf_metric import agentx_active
+
+        if agentx_active(benchmark_mode=self.shared_state.benchmark_mode):
+            return
+        cid = self.workload_canonical_id()
+
+        ss = self.shared_state
+        framework = str(ss.framework or "")
+        framework_version = str(ss.framework_version or "")
+        if not framework_version and framework:
+            framework_version = detect_framework_version(framework)
+        precision = str(ss.precision or "")
+
+        # Local mode reads the exact authority row before amending it.
+        try:
+            live = self.recipe_kb.get_authoritative_recipe(canonical_id=cid) or {}
+        except Exception as exc:  # noqa: BLE001
+            log.info(
+                "kb_amend_recipe: authority get_recipe failed (%s); proceeding with empty live",
+                exc,
+            )
+            live = {}
+
+        lessons = list(live.get("lessons") or [])
+        if append_lesson is not None:
+            lessons.append(append_lesson)
+        pitfalls = list(live.get("pitfalls") or [])
+        if append_pitfall is not None:
+            pitfalls.append(append_pitfall)
+
+        # Build put_recipe kwargs, preserving live fields the caller didn't override.
+        overrides = dict(recipe_overrides or {})
+        _reserved = {
+            "canonical_id",
+            "version",
+            "created_at",
+            "updated_at",
+            "model",
+            "hardware",
+            "framework",
+            "framework_name",
+            "framework_version",
+            "precision",
+            "best_config",
+            "best_throughput",
+            "what_worked",
+            "what_failed",
+            "remaining_gaps",
+            "pitfalls",
+            "lessons",
+            "last_profiled",
+            "stack_fingerprint",
+            "sessions",
+            "authority",
+            "confidence",
+            "evidence_refs",
+            "provenance",
+        }
+        prior_extras = {k: v for k, v in live.items() if k not in _reserved}
+        merged_extras = {**prior_extras, **(overrides.get("extras") or {})}
+        # Re-stamp config.json architecture-identity tags; skipped when unset.
+        _arch = ss.model_architectures or []
+        if isinstance(_arch, list):
+            _arch_list = [str(a).strip() for a in _arch if str(a or "").strip()]
+            if _arch_list:
+                merged_extras["architectures"] = _arch_list
+        _mtype = str(ss.model_type or "").strip()
+        if _mtype:
+            merged_extras["model_type"] = _mtype
+        put_kwargs: dict[str, Any] = {
+            "canonical_id": cid,
+            "model": ss.model_name or "unknown_model",
+            "hardware": self._kb_hardware_slug(),
+            "framework_name": framework,
+            "framework_version": framework_version,
+            "precision": precision,
+            "best_config": overrides.get("best_config")
+            if "best_config" in overrides
+            else dict(live.get("best_config") or {}),
+            "best_throughput": overrides.get("best_throughput")
+            if "best_throughput" in overrides
+            else float(live.get("best_throughput") or 0.0),
+            "what_worked": overrides.get("what_worked")
+            if "what_worked" in overrides
+            else list(live.get("what_worked") or []),
+            "what_failed": overrides.get("what_failed")
+            if "what_failed" in overrides
+            else list(live.get("what_failed") or []),
+            "remaining_gaps": overrides.get("remaining_gaps")
+            if "remaining_gaps" in overrides
+            else list(live.get("remaining_gaps") or []),
+            "pitfalls": pitfalls,
+            "lessons": lessons,
+            "last_profiled": overrides.get("last_profiled")
+            if "last_profiled" in overrides
+            else str(live.get("last_profiled") or ""),
+            "stack_fingerprint": overrides.get("stack_fingerprint")
+            if "stack_fingerprint" in overrides
+            else dict(live.get("stack_fingerprint") or {}),
+            "sessions": overrides.get("sessions") if "sessions" in overrides else list(live.get("sessions") or []),
+            "extras": merged_extras,
+            # Preserve audit fields across the amend (else put_recipe resets them to defaults).
+            "authority": overrides.get("authority")
+            if "authority" in overrides
+            else str(live.get("authority") or "EXPERIENTIAL"),
+            "confidence": overrides.get("confidence")
+            if "confidence" in overrides
+            else float(live.get("confidence") or 0.85),
+            "evidence_refs": overrides.get("evidence_refs")
+            if "evidence_refs" in overrides
+            else list(live.get("evidence_refs") or []),
+            "provenance": {
+                "source": "hyperloom-inference-optimizer",
+                "generator": "coordinator",
+                "generated_at": datetime.now(timezone.utc).isoformat(
+                    timespec="microseconds",
+                ),
+                "details": dict(provenance_details or {}),
+            },
+        }
+        try:
+            self.recipe_kb.put_recipe(**put_kwargs)
+            self._local_recipe_cache = None
+        except Exception:
+            log.exception(
+                "kb_amend_recipe: put_recipe failed for cid=%s",
+                cid,
+            )
 
 
 __all__ = ["RecipeJournalCollaborator"]
