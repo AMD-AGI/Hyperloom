@@ -146,6 +146,7 @@ def run_rewrite(
     permission_mode: str | None = None,
     supervisor_backend: str = "codex",
     profile_timeout_sec: int = 1800,
+    roofline_ceiling: bool = False,
     optimize_git_branch: str = "forge-rewrite-optimize",
     result_json: str | None = None,
     deadline_unix: float | None = None,
@@ -573,6 +574,7 @@ def run_rewrite(
             permission_mode=permission_mode,
             supervisor_backend=supervisor_backend,
             profile_timeout_sec=profile_timeout_sec,
+            roofline_ceiling=roofline_ceiling,
             deadline_unix=deadline_unix,
             stop_at_unix=search_stop_unix,
             # Anchor the loop on the source, so every score it reports -- each KEEP published below and the run's

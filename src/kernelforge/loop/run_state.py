@@ -217,6 +217,10 @@ class RunState:
     round_costs: RoundCostState = field(default_factory=RoundCostState)
     # Iterations worth re-reading in full (best + notable near-misses).
     pinned_iterations: list[int] = field(default_factory=list)
+    # The roofline ceiling this campaign estimated. A resume reads it back rather than estimating again: the stop
+    # rule divides by it, so a second estimate would move the target between segments of one campaign. Recorded here
+    # rather than inferred from the workspace, where a report may be left over from a run that was not this one.
+    ceiling_report_path: str = ""
     termination_reason: str = ""
 
     def to_dict(self) -> dict:
