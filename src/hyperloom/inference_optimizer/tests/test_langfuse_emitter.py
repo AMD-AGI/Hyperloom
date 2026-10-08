@@ -1103,7 +1103,7 @@ def test_flush_session_is_idempotent_no_duplicate_reemit(tmp_path, monkeypatch):
 
 
 def test_a_released_receipt_still_resumes_its_ext_shards(tmp_path, monkeypatch):
-    """v1.0.0 through v1.1.2 persist the ext cursors as ``ext_rows_sent``; a resumed leg must not re-push them."""
+    """v1.0.0 through v1.1.3 persist the ext cursors as ``ext_rows_sent``; a resumed leg must not re-push them."""
     _enable_env(monkeypatch)
     sd = _seed_trace_dir(tmp_path)
     ext_shard = sd / "reports" / "trace" / "ext" / "forge-1.jsonl"

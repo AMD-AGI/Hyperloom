@@ -851,8 +851,9 @@ Primary switch (default **off**) for live Langfuse trace push.
   recipe-KB audit, specialist intel, forge steps and GEMM tuning logs. A call
   sends only the rows past that count, advancing it one row at a time and
   stopping at the first row it could not send, so that row is retried by the
-  next call or the next leg. A receipt written by v1.0.0 through v1.1.2 carries
-  the ext shard counts as `ext_rows_sent`; it is still read. `decision_trace.jsonl` is rewritten ts-sorted on
+  next call or the next leg. A receipt written by v1.0.0 through v1.1.3 carries
+  the ext shard counts as `ext_rows_sent`, and a v1.1.3 receipt also carries the
+  trajectory shard counts as `trajectory_rows_sent`; both are still read. `decision_trace.jsonl` is rewritten ts-sorted on
   every export, so decision scores are tracked by the `decision_id` its writer
   stamps on each row instead (`decisions_sent`). Both record what was handed to
   the Langfuse SDK: its flush does not report a failed export, so a row lost in

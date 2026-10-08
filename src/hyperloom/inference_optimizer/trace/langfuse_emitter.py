@@ -23,6 +23,7 @@ from hyperloom.inference_optimizer.session.session_paths import (
     specialist_intel_path,
     trace_dir,
     trace_ext_dir,
+    trajectory_dir,
 )
 from . import langfuse_mapping as lfmap
 from . import trajectory_projection as trajmap
@@ -84,10 +85,14 @@ def _cursor_entries(persisted: Any) -> dict[str, int]:
 def _persisted_rows_sent(session_dir: Path, receipt: dict[str, Any]) -> dict[str, int]:
     """Return how many rows of each source log a previous process sent, keyed by its path under ``session_dir``.
 
-    Receipts written by v1.0.0 through v1.1.2 carry the ext cursors as ``ext_rows_sent``, keyed by shard name.
+    Receipts written by v1.0.0 through v1.1.3 carry the ext cursors as ``ext_rows_sent``, and v1.1.3 receipts carry
+    the trajectory cursors as ``trajectory_rows_sent``, both keyed by shard name.
     """
-    ext_prefix = trace_ext_dir(session_dir).relative_to(session_dir).as_posix()
-    cursors = {f"{ext_prefix}/{name}": rows for name, rows in _cursor_entries(receipt.get("ext_rows_sent")).items()}
+    cursors: dict[str, int] = {}
+    for released_key, shard_dir in (("ext_rows_sent", trace_ext_dir), ("trajectory_rows_sent", trajectory_dir)):
+        prefix = shard_dir(session_dir).relative_to(session_dir).as_posix()
+        for name, rows in _cursor_entries(receipt.get(released_key)).items():
+            cursors[f"{prefix}/{name}"] = rows
     cursors.update(_cursor_entries(receipt.get("rows_sent")))
     return cursors
 
