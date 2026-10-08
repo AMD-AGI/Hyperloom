@@ -318,14 +318,13 @@ def _default_config(kind: str):
 
 
 def _per_framework_tables() -> dict[str, dict]:
-    from hyperloom.orchestrator.actions.executors import _grid_variant_filter, baseline
+    from hyperloom.orchestrator.actions.executors import baseline
     from hyperloom.orchestrator.enablement.runtime import adapters
     from hyperloom.orchestrator.framework import adapter_parsers
 
     return {
         "_ADAPTERS": adapters._ADAPTERS,
         "_PARSER_SOURCES": adapter_parsers._PARSER_SOURCES,
-        "_HELP_PROBE_COMMANDS": _grid_variant_filter._HELP_PROBE_COMMANDS,
         "_DISABLE_CUDA_GRAPH_FLAGS": baseline._DISABLE_CUDA_GRAPH_FLAGS,
     }
 
