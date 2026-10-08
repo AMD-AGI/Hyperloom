@@ -24,7 +24,9 @@ import pytest
 
 PKG_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = Path(__file__).resolve().parents[4]
-ATOM_DOC = REPO_ROOT / "examples" / "hyperloom-qwen3-14b-fp8-12h-atom" / "SKILL.md"
+# ATOM is a framework option of the 12h demo; its procedure lives in that skill's "## ATOM" section.
+ATOM_DOC = REPO_ROOT / "examples" / "hyperloom-qwen3-14b-fp8-12h" / "SKILL.md"
+FORGE_DOC = REPO_ROOT / "examples" / "hyperloom-qwen3-14b-fp8-12h-forge" / "SKILL.md"
 SETUP_DOC = REPO_ROOT / "src" / "hyperloom" / "skills" / "hyperloom-setup" / "SKILL.md"
 
 # In-package docs ship in the wheel; examples/ only exists in a source checkout.
@@ -33,9 +35,8 @@ RECIPE_DOCS = (
     PKG_ROOT / "references" / "operations.md",
     REPO_ROOT / "examples" / "hyperloom-custom-advanced" / "SKILL.md",
     REPO_ROOT / "examples" / "hyperloom-qwen3-8b-3h" / "SKILL.md",
-    REPO_ROOT / "examples" / "hyperloom-qwen3-14b-fp8-12h" / "SKILL.md",
-    REPO_ROOT / "examples" / "hyperloom-qwen3-14b-fp8-12h-forge" / "SKILL.md",
     ATOM_DOC,
+    FORGE_DOC,
 )
 CREDENTIAL_ONLY_DOC = REPO_ROOT / "docs" / "how-to" / "optimize-custom-workload.md"
 
@@ -108,33 +109,63 @@ def _run_recipe(
     return dict(zip(observed, proc.stdout.splitlines()[-len(observed) :]))
 
 
-def _atom_section_blocks(heading: str) -> list[list[str]]:
+def _atom_section_text(heading: str) -> str:
+    """One ``### heading`` subsection of the 12h demo's ``## ATOM`` section."""
+    atom = re.search(r"^## ATOM\n(.*?)(?=^## |\Z)", ATOM_DOC.read_text(encoding="utf-8"), re.MULTILINE | re.DOTALL)
+    assert atom is not None, "missing ## ATOM section in the 12h demo"
     section = re.search(
         rf"^### {re.escape(heading)}\n" + r"(.*?)(?=^#{2,3} |\Z)",
-        ATOM_DOC.read_text(encoding="utf-8"),
+        atom.group(1),
         re.MULTILINE | re.DOTALL,
     )
     assert section is not None, f"missing ATOM section: {heading}"
-    return _bash_blocks(section.group(1))
+    return section.group(1)
+
+
+def _atom_section_blocks(heading: str) -> list[list[str]]:
+    return _bash_blocks(_atom_section_text(heading))
+
+
+def _atom_shell() -> str:
+    return "\n".join(_atom_section_blocks("ATOM execution shell")[0])
 
 
 def test_atom_run_mode_requires_user_choice() -> None:
-    text = ATOM_DOC.read_text(encoding="utf-8")
-    run_mode = " ".join(text.split("## Run Mode\n", 1)[1].split("### Execution shell", 1)[0].split())
+    run_mode = " ".join(_atom_section_text("ATOM run mode").split())
     assert "Run Mode Resolution" in run_mode
     assert "ask the user to choose" in run_mode
     assert "Do not default to either mode" in run_mode
-    assert "or an unset/empty mode" not in text
+    assert "or an unset/empty mode" not in ATOM_DOC.read_text(encoding="utf-8")
     readme = (REPO_ROOT / "examples" / "README.md").read_text(encoding="utf-8")
-    readme_entry = readme.split("- [`12h atom`]", 1)[1].split("- [`", 1)[0]
+    readme_entry = readme.split("- [`12h`]", 1)[1].split("- [`", 1)[0]
+    assert "ATOM" in readme_entry
     assert "Docker as the default" not in readme_entry
+
+
+def test_atom_has_no_separate_demo_skills() -> None:
+    """ATOM is a framework option of the 12h pair, not a separate pair of skills."""
+    assert not (REPO_ROOT / "examples" / "hyperloom-qwen3-14b-fp8-12h-atom").exists()
+    assert not (REPO_ROOT / "examples" / "hyperloom-qwen3-14b-fp8-12h-atom-forge").exists()
+    pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    assert "hyperloom-qwen3-14b-fp8-12h-atom" not in pyproject
+    setup = SETUP_DOC.read_text(encoding="utf-8")
+    assert "hyperloom-qwen3-14b-fp8-12h-atom" not in setup
+
+
+def test_atom_forge_demo_opts_into_forge_in_the_atom_shell() -> None:
+    """The forge demo reuses the 12h ATOM procedure and adds only the backend export."""
+    text = FORGE_DOC.read_text(encoding="utf-8")
+    atom = re.search(r"^## ATOM\n(.*?)(?=^## |\Z)", text, re.MULTILINE | re.DOTALL)
+    assert atom is not None, "missing ## ATOM section in the 12h forge demo"
+    assert "../hyperloom-qwen3-14b-fp8-12h/SKILL.md#atom" in atom.group(1)
+    assert "export KERNEL_OPT_BACKEND_ORDER=forge" in atom.group(1)
 
 
 @pytest.mark.parametrize("mode", ["baremetal", "docker"])
 def test_atom_first_launch_runs_in_selected_context(tmp_path: Path, mode: str) -> None:
     """Execute mode/selection/launch blocks up to the optimizer process boundary."""
-    mode_blocks = _atom_section_blocks("Baremetal" if mode == "baremetal" else "Docker container")
-    launch = "\n".join(_atom_section_blocks("First launch")[0])
+    mode_blocks = _atom_section_blocks("ATOM baremetal" if mode == "baremetal" else "ATOM Docker container")
+    launch = "\n".join(_atom_section_blocks("ATOM first launch")[0])
     workspace = tmp_path / "workspace with spaces"
     workspace.mkdir()
     data = workspace / "user data"
@@ -216,8 +247,8 @@ docker() {
     if mode == "docker":
         payload += '[ -z "${PYTHON:-}" ]\n[ -z "${VIRTUAL_ENV:-}" ]\n'
         payload += '[ -z "${INFERENCE_OPTIMIZER_FORCE_PYTHON:-}" ]\n[[ "$PATH" != /host-only/bin:* ]]\n'
-    payload += "\n".join(_atom_section_blocks("Execution shell")[0]) + "\n"
-    payload += "\n".join(_atom_section_blocks("Selected Python and Setup")[0]) + "\n"
+    payload += _atom_shell() + "\n"
+    payload += "\n".join(_atom_section_blocks("ATOM Python and setup")[0]) + "\n"
     for key, value in {"RUN_LOG": run_log, "LAUNCH_INFO_FILE": launch_info}.items():
         payload += f"export {key}={shlex.quote(value.as_posix())}\n"
     payload += launch + "\n: > launch-finished\n"
@@ -289,7 +320,7 @@ docker() {
 
 @pytest.mark.parametrize("missing", ["MODEL_PATH", "PYTHON", "RUN_LOG", "LAUNCH_INFO_FILE"])
 def test_atom_first_launch_requires_prepared_paths(tmp_path: Path, missing: str) -> None:
-    launch = "\n".join(_atom_section_blocks("First launch")[0])
+    launch = "\n".join(_atom_section_blocks("ATOM first launch")[0])
     exported = {
         "MODEL_PATH": (tmp_path / "model files").as_posix(),
         "PYTHON": "launch_probe",
@@ -306,9 +337,9 @@ def test_atom_first_launch_requires_prepared_paths(tmp_path: Path, missing: str)
 
 def test_atom_runtime_install_accepts_readonly_user_data_path(tmp_path: Path) -> None:
     """The install invocation exports the fixed platform path without assigning it."""
-    blocks = _bash_blocks(ATOM_DOC.read_text(encoding="utf-8"))
+    blocks = _atom_section_blocks("ATOM runtime install")
     install = "\n".join(next(b for b in blocks if 'bash "$INSTALL_SH"' in b))
-    fragment = _dotenv_loads(ATOM_DOC)[0] + "\nreadonly USER_DATA_PATH\nbash() { INSTALLER_REACHED=yes; }\n" + install
+    fragment = _atom_shell() + "\nreadonly USER_DATA_PATH\nbash() { INSTALLER_REACHED=yes; }\n" + install
     result = _run_recipe(
         fragment,
         tmp_path,
@@ -390,7 +421,7 @@ def test_atom_docker_recipe_passes_selected_python_to_setup(tmp_path: Path, doc:
     if selection in {"valid-pin", "invalid-pin"}:
         pin = python.as_posix() if selection == "valid-pin" else "/explicit-missing/python3"
         fragment += f"export PYTHON={shlex.quote(pin)} INFERENCE_OPTIMIZER_FORCE_PYTHON=0\n"
-    fragment += _dotenv_loads(ATOM_DOC)[0] + "\n"
+    fragment += _atom_shell() + "\n"
     if selection == "activate-after":
         fragment += activation
     blocks = _bash_blocks(doc.read_text(encoding="utf-8"))
@@ -443,7 +474,7 @@ def test_atom_recipe_preserves_backend_selection(
     tmp_path: Path, shell_backend: str | None, dotenv_backend: str | None, expected: str
 ) -> None:
     """The workload selection must not discard an explicit kernel backend choice."""
-    fragment = "\n".join(_atom_section_blocks("Execution shell")[0])
+    fragment = _atom_shell()
     exported = {"USER_DATA_PATH": tmp_path.as_posix(), "PYTHON": "/selected/bin/python3"}
     if shell_backend is not None:
         exported["KERNEL_OPT_BACKEND_ORDER"] = shell_backend
@@ -472,6 +503,7 @@ def test_atom_recipe_provides_direct_setup_commands(tmp_path: Path, doc: Path) -
         for block in blocks
         if any("hyperloom.inference_optimizer.setup" in line for line in block)
         and not any("docker" in line for line in block)
+        and any("--install-framework none" in line for line in block)
         and (doc == ATOM_DOC or any("--frameworks atom" in line for line in block))
     ]
     assert len(setup_blocks) == 2, "direct mode needs a check-only command and a separate approved setup command"
@@ -492,6 +524,33 @@ export PYTHON=python_probe
         assert "--user-data-path /selected/data" in args
         assert ("--check-only" in args) == (key == "CHECK_ARGS")
         assert ("--yes" in args) == (key == "INSTALL_ARGS")
+
+
+def test_atom_recipe_provides_an_approved_atom_install_command(tmp_path: Path) -> None:
+    """The baremetal install path must run with the selected Python and artifact root."""
+    blocks = _atom_section_blocks("ATOM Python and setup")
+    install_blocks = [
+        "\n".join(block)
+        for block in blocks
+        if any("hyperloom.inference_optimizer.setup" in line for line in block)
+        and any("--install-framework atom" in line for line in block)
+    ]
+    assert len(install_blocks) == 1
+    fragment = """
+setup_args=()
+python_probe() { setup_args+=("$*"); }
+export PYTHON=python_probe
+""" + install_blocks[0]
+    fragment += '\nINSTALL_ARGS="${setup_args[0]}"'
+    result = _run_recipe(fragment, tmp_path, {"USER_DATA_PATH": "/selected/data"}, observed=("INSTALL_ARGS",))
+
+    args = result["INSTALL_ARGS"]
+    assert "-m hyperloom.inference_optimizer.setup" in args
+    assert "--install-framework atom" in args
+    assert "--user-data-path /selected/data" in args
+    assert "--yes" in args
+    assert "--check-only" not in args
+    assert "docker" not in install_blocks[0]
 
 
 @pytest.mark.parametrize("doc", RECIPE_DOCS, ids=lambda p: p.parent.name + "/" + p.name)

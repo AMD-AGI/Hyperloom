@@ -14,7 +14,7 @@ import shlex
 import tempfile
 from pathlib import Path
 
-from ...loop.coordinator_helpers import format_exc_brief
+from hyperloom.common.timeutil import format_exc_brief
 from hyperloom.common.env import env_flag, env_int
 from hyperloom.inference_optimizer.multi_node._internal.env_safety import filter_forward_env
 from hyperloom.inference_optimizer.multi_node._internal.server_args_safety import (
@@ -375,7 +375,6 @@ async def restart_server_for_round(
         from ._server_patcher import resolve_sglang_shape_mode
         from ._workload_envs import _tracelens_patch_enabled
 
-        _tracelens_patch_enabled_fn = _tracelens_patch_enabled
         _sglang_shape_mode_val = resolve_sglang_shape_mode()
         if _sglang_shape_mode_val == "sitecustomize":
             # sitecustomize mode: shapes come from the no-patch tool; skip the patch fan-out.
@@ -383,7 +382,7 @@ async def restart_server_for_round(
                 "restart_server_for_round: SGLang shape mode=sitecustomize; "
                 "skipping TraceLens patch fan-out (shapes via kernel_shape_tool)."
             )
-        elif _tracelens_patch_enabled_fn() and (os.environ.get("TRACELENS_ROOT", "").strip()):
+        elif _tracelens_patch_enabled() and (os.environ.get("TRACELENS_ROOT", "").strip()):
             try:
                 from hyperloom.inference_optimizer.multi_node.cli import cmd_apply_tracelens_patch
 

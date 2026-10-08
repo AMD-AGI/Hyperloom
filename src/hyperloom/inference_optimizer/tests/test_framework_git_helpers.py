@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for framework git/subprocess helpers: rev-parse error+success branches, repo-id normalization, and same-repo gating."""
+"""Coverage for framework git/subprocess helpers: git error+success branches, repo-id normalization, and same-repo gating."""
 
 from __future__ import annotations
 
@@ -36,24 +36,6 @@ def _seq_runner(results: list[Any]):
 
     _run.calls = calls  # type: ignore[attr-defined]
     return _run
-
-
-def test_git_head_sha_success(monkeypatch) -> None:
-    monkeypatch.setattr(gitmod.subprocess, "run", _seq_runner([_CP(0, "deadbeef\n")]))
-    sha, err = fp._git_head_sha(Path("/repo"))
-    assert sha == "deadbeef" and err == ""
-
-
-def test_git_head_sha_spawn_failure(monkeypatch) -> None:
-    monkeypatch.setattr(gitmod.subprocess, "run", _seq_runner([FileNotFoundError("git")]))
-    sha, err = fp._git_head_sha(Path("/repo"))
-    assert sha is None and "spawn failed" in err
-
-
-def test_git_head_sha_nonzero(monkeypatch) -> None:
-    monkeypatch.setattr(gitmod.subprocess, "run", _seq_runner([_CP(1, "", "fatal: no head")]))
-    sha, err = fp._git_head_sha(Path("/repo"))
-    assert sha is None and err == "fatal: no head"
 
 
 def test_run_git_success(monkeypatch) -> None:

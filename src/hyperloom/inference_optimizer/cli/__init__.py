@@ -32,19 +32,24 @@ from .kb import (
 from .backends import (
     _build_backends,
     _build_proposal_scorer,
+    critic_review_target,
+    orchestration_runs_on_codex,
 )
 from .model_gate import (
-    _autodetect_gpu_type,
-    _gpu_runner_type,
     _load_model_max_position_embeddings,
     _finish_model_gate,
     _preflight_context_window,
     _preflight_model_config_compat,
     _preflight_unsupported_model_arch,
     _record_resumed_model_gate,
-    _resolve_gpu_type,
     _resolve_max_model_len,
     _start_model_gate,
+)
+from ..gpu_types import (
+    _autodetect_gpu_type,
+    _gpu_runner_type,
+    _resolve_amd_gpu_type,
+    _resolve_gpu_type,
 )
 from ..model_config_utils import (
     summarize_model_config,
@@ -58,6 +63,9 @@ from .bootstrap import (
     _seed_shared_state,
     _snapshot_system_prompts,
     agentx_state_is_stale,
+    latency_budget_resume_conflict,
+    resolve_gpu_power_settings,
+    latency_budget_scope_error,
     parse_operator_extra_env,
     resolve_model_display_name,
 )
@@ -91,6 +99,7 @@ from .. import framework_registry
 from ..session.manifest import load_manifest, write_manifest
 from ..protocol.action_surfaces import ACTION_CATALOGUE, ActionMetadata
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.collaborator import OrchestrationPrompt as _OrchestrationPrompt
 from hyperloom.inference_optimizer.framework_paths import resolve_framework_tree, resolve_kernel_search_roots
 from hyperloom.orchestrator.state.objective import AnyObjective, Objective, build_objective
 from hyperloom.orchestrator.state.shared_state import SharedState, timed_teardown_step
@@ -311,11 +320,14 @@ def _build_orchestration_prompt(
     no_framework_agent: bool = False,
     macro_cycle: int = 0,
     cycle_directive: str = "",
+    cycle_strategy: Mapping[str, Any] | None = None,
     phase: str = "",
     transport: str = TRANSPORT_TOOLS,
     action_registry: Mapping[str, ActionMetadata] | None = None,
     benchmark_mode: str = "",
     agentx_corpus_shape: Mapping[str, Any] | None = None,
+    agentx_grading: Mapping[str, Any] | None = None,
+    agentx_backend: str = "",
 ) -> str:
     """Compose the Orchestration system prompt from typed inputs (``--orch-prompt`` overrides)."""
     registry = action_registry or ACTION_CATALOGUE
@@ -332,10 +344,13 @@ def _build_orchestration_prompt(
         max_minutes=int(max_minutes),
         macro_cycle=int(macro_cycle),
         cycle_directive=cycle_directive,
+        cycle_strategy=cycle_strategy,
         phase=phase,
         transport=transport,
         benchmark_mode=benchmark_mode,
         agentx_corpus_shape=agentx_corpus_shape,
+        agentx_grading=agentx_grading,
+        agentx_backend=agentx_backend,
         rules_fragment_path=_orchestration_rules_fragment_path(),
         framework_source_roots=resolve_kernel_search_roots(),
         session_framework_tree=resolve_framework_tree(framework),
@@ -365,9 +380,7 @@ def _should_remote_probe_gpu(args: argparse.Namespace) -> bool:
 
 
 def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
-    """Validate atom-specific CLI knobs: the ``--nodes>=2`` fail-fast guard (IR-8) and a kernel-backend warning."""
-    from hyperloom.common.env import forge_explicitly_enabled
-
+    """Validate atom-specific CLI knobs: the ``--nodes>=2`` fail-fast guard (IR-8)."""
     auto_disabled: list[str] = []
     if int(getattr(args, "nodes", 1) or 1) >= 2:
         print(
@@ -382,33 +395,6 @@ def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
         "profile / roofline / TraceLens all wired for atom); "
         "--nodes>=2 guard active — see SKILL.md IR-8"
     )
-    # The kernel phase runs on atom, but GEAK -- the backend everything else
-    # defaults to -- does not produce kernel candidates there: its extraction step
-    # declines to guess a rewrite seam for a quantized, non-vLLM backend. Since the
-    # default phase split gives the kernel phase half the session, defaulting to
-    # GEAK on atom means defaulting to half a session of nothing. forge is the
-    # backend that works here, so on atom it is the default rather than an opt-in
-    # the operator has to know about.
-    #
-    # Only an unset value is filled in. An operator who named a backend keeps it:
-    # running GEAK on atom on purpose, to measure exactly this, stays possible.
-    if not getattr(args, "no_kernel", False):
-        if not os.environ.get("KERNEL_OPT_BACKEND_ORDER", "").strip():
-            os.environ["KERNEL_OPT_BACKEND_ORDER"] = "forge"
-            print(
-                "  framework=atom: KERNEL_OPT_BACKEND_ORDER defaulted to 'forge' "
-                "(on atom GEAK must resolve a live rewrite seam; forge needs none)"
-            )
-        elif not forge_explicitly_enabled():
-            print(
-                "  WARNING: framework=atom with KERNEL_OPT_BACKEND_ORDER="
-                f"{os.environ.get('KERNEL_OPT_BACKEND_ORDER', '')!r}, so the kernel "
-                "phase runs GEAK. On a quantized non-vLLM backend GEAK may not guess "
-                "a rewrite seam -- it has to resolve one from the live server, which "
-                "is unproven on atom. Unset it to get 'forge', or pass --no-kernel "
-                "to skip the phase.",
-                file=sys.stderr,
-            )
     return auto_disabled
 
 
@@ -766,7 +752,7 @@ def _resolve_models_for_run(
     if claude_follows_codex:
         # codex_model is about to become the orchestration model, so it needs the ladder whatever the critic backend
         # is.
-        _smoke_test_codex_model(args, resolved_urls, required=True)
+        _smoke_test_codex_model(args, resolved_urls)
         args.claude_model = args.codex_model
 
     # Hard-gate the Claude model (mutates args.claude_model on fallback; sys.exit(2) on failure).
@@ -774,24 +760,80 @@ def _resolve_models_for_run(
 
     if codex_follows_claude:
         args.codex_model = args.claude_model
-    elif not claude_follows_codex:
-        # Codex smoke probes the OpenAI side independently (split entrypoints).
-        _smoke_test_codex_model(args, resolved_urls)
+
+    _probe_critic_review_model(args, codex_follows_claude=codex_follows_claude)
+
+
+_CRITIC_PROBE_TIMEOUT_SEC = 60.0
+
+
+def _probe_critic_review_model(args: argparse.Namespace, *, codex_follows_claude: bool) -> None:
+    """Send the critic's model one real request before the session starts; exit rc=2 when it cannot answer.
+
+    A catalog listing only proves a gateway names a model, not that its upstream serves it, and the critic has no
+    fallback model: a review path that fails every call must stop the launch rather than run a session without a
+    critic.
+    """
+    if _resolve_critic_choice(args) != "agent":
+        return
+    try:
+        protocol, model = critic_review_target(
+            args.critic_protocol,
+            orchestration_on_codex=orchestration_runs_on_codex(codex_follows_claude=codex_follows_claude),
+            claude_model=args.claude_model,
+            codex_model=args.codex_model,
+        )
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(2)
+
+    messages = [{"role": "user", "content": "Reply with OK."}]
+    last_error: BaseException | None = None
+    for delay in (0.0, *_CATALOG_RETRY_DELAYS_SEC):
+        if delay:
+            time.sleep(delay)
+        try:
+            if protocol == "anthropic":
+                llm_config.anthropic_completion(
+                    model=model,
+                    messages=messages,
+                    max_tokens=16,
+                    timeout_s=_CRITIC_PROBE_TIMEOUT_SEC,
+                    component="critic",
+                    operation="preflight",
+                )
+            else:
+                llm_config.chat_completion(
+                    llm_config.get_openai_client(timeout=_CRITIC_PROBE_TIMEOUT_SEC),
+                    component="critic",
+                    operation="preflight",
+                    model=model,
+                    messages=messages,
+                    max_completion_tokens=16,
+                )
+        except Exception as exc:  # noqa: BLE001 — any failure means the review path is unusable
+            last_error = exc
+            continue
+        print(f"Preflight: critic model {model!r} answered over the {protocol} protocol")
+        return
+    print(
+        f"ERROR: critic model {model!r} did not answer over the {protocol} protocol: {last_error!r}\n"
+        f"  The critic reviews with the orchestration model unless --critic-protocol selects the other side "
+        f"(then CLAUDE_MODEL for anthropic, CODEX_MODEL for openai); there is no fallback model.\n"
+        f"  Fix that model or its credential, or pass --critic-mock to run without a critic. Refusing to start.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
 
 
 def _smoke_test_codex_model(
     args: argparse.Namespace,
     resolved_urls: tuple[str, str] | None,
-    *,
-    required: bool = False,
 ) -> None:
-    """WARN-only catalog check for ``--codex-model``; flags typos and steps down the ladder before Coordinator starts."""
-    if not required:
-        if _codex_model_should_follow_claude():
-            return
-        if args.critic_backend != "agent":
-            return
+    """WARN-only catalog check for ``--codex-model`` on an OpenAI-only launch, where it becomes the orchestration model.
 
+    Steps down the ladder before Coordinator starts.
+    """
     openai_url = os.environ.get("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "").strip()
     if not openai_url:
         openai_url = os.environ.get("OPENAI_BASE_URL", "").strip()
@@ -830,8 +872,7 @@ def _smoke_test_codex_model(
         f"({sorted(m for m in catalog_ids if m.startswith('gpt-'))}); "
         f"CodexBackend will fail at first turn. Pass --codex-model with a "
         f"value in the catalog (known-good ids, newest first: "
-        f"{list(_CODEX_FALLBACK_MODELS)}) or use --critic-mock to "
-        f"avoid the Codex path entirely."
+        f"{list(_CODEX_FALLBACK_MODELS)})."
     )
 
 
@@ -1029,8 +1070,7 @@ def _resume_can_disable_eval(baseline_accuracy: float) -> bool:
 def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
     """Map ``--*-pct`` CLI flags to a ``phase -> pct`` override dict.
 
-    ENABLEMENT has no flag: nothing enforces a cap for it, since
-    ``compute_next_phase`` does not consult ``phase_cap_exceeded`` there.
+    ENABLEMENT has no flag: nothing enforces a per-phase cap for it.
     """
     from hyperloom.orchestrator.phases.machine_state import (
         PHASE_CLOSE,
@@ -1048,7 +1088,7 @@ def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
         ("phase_budget_sweep_pct", PHASE_SWEEP),
         ("phase_budget_close_pct", PHASE_CLOSE),
     ):
-        val = getattr(args, cli_field, None)
+        val = getattr(args, cli_field)
         if val is not None:
             phase_budget_pct[phase_name] = float(val)
     return phase_budget_pct
@@ -1274,6 +1314,16 @@ def _export_partition_shape(
     return session_shape_summary(verdict.layout, streams, fanout_expected=fanout)
 
 
+def _publish_gpu_power_settings(record: Mapping[str, Any]) -> None:
+    """Expose the recorded power settings to the platform fingerprint, the way the partition shape is."""
+    from hyperloom.common.platform_probe import GPU_POWER_SETTINGS_ENV
+
+    if record:
+        os.environ[GPU_POWER_SETTINGS_ENV] = json.dumps(record, sort_keys=True)
+    else:
+        os.environ.pop(GPU_POWER_SETTINGS_ENV, None)
+
+
 def _restore_partition_shape_from_state(args: Any, state: SharedState) -> None:
     """Fill the partition flags from the archive when this resume omitted them."""
     archived = dict(getattr(state, "compute_partition", None) or {})
@@ -1356,6 +1406,10 @@ def _write_cli_terminal_artifacts(session_dir: Path, state: SharedState, stop_re
     """
     if stop_reason == SUPERVISOR_RESTART_REASON:
         return
+    if not state.close_sequence_done:
+        from ..breakdown.recorder.close_out import record_close_safety_net
+
+        record_close_safety_net(session_dir)
     try:
         from ..breakdown import write_minimal_final_json
 
@@ -1462,6 +1516,11 @@ def _persist_preflight_failure_artifacts(
                 record_write_warning(session_dir, component="preflight_failure.manifest", exc=write_exc)
 
         _persist_install_event(args, session_dir)
+        from ..breakdown.recorder.close_out import record_close_safety_net
+        from ..breakdown.recorder import record_stage_reached
+
+        record_close_safety_net(session_dir)
+        record_stage_reached(session_dir, "install")
         try:
             from ..breakdown import write_breakdown_json
 
@@ -1475,6 +1534,25 @@ def _persist_preflight_failure_artifacts(
         session_lock.release()
     print(f"Preflight failure artifacts: {session_dir}", file=sys.stderr)
     return session_dir
+
+
+def _start_experience_kb() -> None:
+    """Bring the workspace's Experience KB service to serving, then check its Experiences can be collected."""
+    from hyperloom_kb import ConfigurationError, LocalServiceError, RemoteClientError
+    from hyperloom_kb.collect import MappingError
+
+    from ..experience_collect import validate_config as validate_experience_collection
+    from ..experience_kb_service import ensure_service
+
+    # The run must not depend on the Experience KB: reads come back empty and writes are spooled or skipped.
+    try:
+        ensure_service()
+    except (LocalServiceError, RemoteClientError) as exc:
+        log.warning("Experience KB service is not serving (%s); Experience writes are spooled until it is", exc)
+    try:
+        validate_experience_collection()
+    except (ConfigurationError, MappingError, RemoteClientError) as exc:
+        log.warning("Experience KB cannot take this run's Experiences (%s); the run continues without them", exc)
 
 
 async def _run_optimize(args: argparse.Namespace) -> int:
@@ -1609,9 +1687,17 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         claude_follows_codex=claude_follows_codex,
         codex_follows_claude=codex_follows_claude,
     )
+    _start_experience_kb()
     # Before either session branch: these are read by the fresh-launch seeding AND by the resume path, so this is the
     # one place that covers both.
     _preflight_agentx_backend(args)
+    if not args.resume_from:
+        _scope_error = latency_budget_scope_error(
+            getattr(args, "framework", None) or os.environ.get("FRAMEWORK", ""), getattr(args, "max_latency_ms", None)
+        )
+        if _scope_error:
+            print(f"ERROR: {_scope_error}.", file=sys.stderr)
+            raise SystemExit(2)
     _apply_agentx_budget_profile(args)
     from hyperloom.orchestrator.actions.executors._subprocess_kill import resolve_benchmark_timeouts
 
@@ -1690,6 +1776,13 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             sys.exit(2)
+        _latency_conflict = latency_budget_scope_error(
+            state.framework, getattr(args, "max_latency_ms", None)
+        ) or latency_budget_resume_conflict(state, getattr(args, "max_latency_ms", None))
+        if _latency_conflict:
+            session_lock.release()
+            print(f"ERROR: cannot resume this session -- {_latency_conflict}.", file=sys.stderr)
+            sys.exit(2)
         prior_stop = state.stop_reason
         print(f"Resuming session: {session_dir}")
         print(f"  manifest.session_id    : {manifest.get('session_id')}")
@@ -1731,6 +1824,16 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             print(f"  re-exported GPU_TYPE  : {state.gpu_type}")
             if runner_gpu_type != state.gpu_type:
                 print(f"  Magpie runner GPU_TYPE: {runner_gpu_type}")
+        _emit_launch_info(
+            pid=os.getpid(),
+            session_dir=session_dir,
+            session_id=str(manifest.get("session_id") or ""),
+            run_log=os.environ.get("INFERENCE_OPTIMIZER_RUN_LOG", ""),
+            gpu_type=state.gpu_type or "",
+            framework=state.framework or "",
+            model=str(state.model_path or ""),
+            launch_info_file=getattr(args, "launch_info_file", None),
+        )
         # Resolve workload knobs with the resumed state as the fallback source (explicit --isl/--conc/... on this
         # resume still win), then project the resolved values into env so resume sees the same workload contract (not
         # YAML defaults).
@@ -1785,6 +1888,19 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # The partition shape is part of the measurement contract, so it resumes on the same restore / apply / persist
         # path as the paths above.
         _restore_partition_shape_from_state(args, state)
+        # The power settings resume on the same assert / record path: an omitted flag re-asserts the archived value.
+        _declared_power = dict((getattr(state, "gpu_power_settings", None) or {}).get("declared") or {})
+        gpu_power, _gpu_power_error = resolve_gpu_power_settings(
+            power_cap_w=getattr(args, "gpu_power_cap_w", None) or _declared_power.get("power_cap_w"),
+            perf_level=getattr(args, "gpu_perf_level", None) or _declared_power.get("perf_level"),
+            nodes=max(int(getattr(args, "nodes", 1) or 1), int(getattr(state, "nodes", 1) or 1)),
+        )
+        if _gpu_power_error:
+            session_lock.release()
+            print(f"ERROR: cannot resume this session -- {_gpu_power_error}.", file=sys.stderr)
+            sys.exit(2)
+        _publish_gpu_power_settings(gpu_power)
+        state.gpu_power_settings = gpu_power
         state.compute_partition = _export_partition_shape(
             declared_mode=getattr(args, "compute_partition_mode", None),
             streams_per_partition=getattr(args, "streams_per_partition", None),
@@ -1815,13 +1931,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # flags real defaults rather than None.
         if args.no_warm_replay:
             state.warm_replay_enabled = False
-        for _wr_attr, _wr_default in (
-            ("warm_replay_min_confidence", 0.7),
-            ("warm_replay_min_reproduce_pct", 0.8),
-        ):
-            _wr_value = getattr(args, _wr_attr)
-            if _wr_value != _wr_default:
-                setattr(state, _wr_attr, _wr_value)
+        _wr_value = getattr(args, "warm_replay_min_confidence", None)
+        if _wr_value is not None:
+            state.warm_replay_min_confidence = _wr_value
         # Honour persisted kernel_enabled on resume; CLI --no-kernel can still override.
         if not state.kernel_enabled:
             args.no_kernel = True
@@ -1896,7 +2008,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         _begin_resume_leg(state)
         extend_hours = float(args.extend_hours)
         if extend_hours > 0.0:
-            state.extend_budget_minutes(extend_hours * 60.0, reason="--extend-hours")
+            state.extend_budget_minutes(extend_hours * 60.0)
         state.save(session_dir)
         _record_resumed_model_gate(
             args,
@@ -1974,7 +2086,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             _apply_atom_auto_tighten(args)
 
         # Resolve real target GPU: probe > --gpu-type hint; probe wins to catch wrong-host typos that corrupt KB.
-        user_specified = (args.gpu_type or os.environ.get("GPU_TYPE", "")).strip().lower()
+        user_specified = _resolve_amd_gpu_type(args.gpu_type) or ""
         if _should_remote_probe_gpu(args):
             from ..multi_node._internal.gpu_probe import remote_autodetect_gpu_type
 
@@ -2113,11 +2225,21 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             model_path=str(args.model or os.environ.get("MODEL_PATH") or ""),
             precision=getattr(args, "precision", None),
         )
+        gpu_power, _gpu_power_error = resolve_gpu_power_settings(
+            power_cap_w=getattr(args, "gpu_power_cap_w", None),
+            perf_level=getattr(args, "gpu_perf_level", None),
+            nodes=nodes_resolved,
+        )
+        if _gpu_power_error:
+            print(f"ERROR: {_gpu_power_error}.", file=sys.stderr)
+            sys.exit(2)
+        _publish_gpu_power_settings(gpu_power)
         state = _seed_shared_state(
             session_dir,
             args,
             session_id=manifest["session_id"],
             compute_partition=compute_partition,
+            gpu_power_settings=gpu_power,
         )
         _start_model_gate(args, session_dir)
         # Unsupported-model preflight: reject multimodal/vision configs (runs after seed, before heavy bring-up).
@@ -2265,16 +2387,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         session_dir,
         backends=backends,
         model_class=(getattr(args, "model_class", None) or os.environ.get("MODEL_CLASS") or ""),
-        recipe_kb=recipe_kb_client,
         phase_budget_pct=phase_budget_pct or None,
         # KnowledgePlane facade (None when --degraded-pr).
         knowledge_plane=knowledge_plane,
         # Advisory multi-model specialist-proposal scorer, disabled by default (enable via --proposal-scoring).
         proposal_scorer=_build_proposal_scorer(args, session_dir),
-        # Warm-recipe replay controls.
-        warm_replay_enabled=state.warm_replay_enabled,
-        warm_replay_min_confidence=state.warm_replay_min_confidence,
-        warm_replay_min_reproduce_pct=state.warm_replay_min_reproduce_pct,
     )
     framework_for_prompt = os.environ.get("FRAMEWORK", "").strip().lower() or "sglang"
     max_minutes_for_prompt = int(round(float(args.max_hours) * 60))
@@ -2305,25 +2422,29 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             transport=_orch_transport,
             benchmark_mode=str(getattr(coordinator.shared_state, "benchmark_mode", "") or ""),
             agentx_corpus_shape=coordinator.shared_state.agentx_corpus_shape,
+            agentx_grading=coordinator.shared_state.grading,
+            agentx_backend=coordinator.shared_state.agentx_backend,
         ),
         "critic": args.critic_prompt or _load_critic_prompt(),
     }
-    coordinator.system_prompt_overrides = prompts
-    # Cache a pure rebuild closure so the macro-cycle boundary can re-focus the orchestration prompt without reaching
-    # back into argparse.
     import functools as _functools
 
-    coordinator._orch_prompt_is_user_supplied = bool(args.orch_prompt)
-    coordinator._rebuild_orch_prompt = _functools.partial(
-        _build_orchestration_prompt,
-        no_kernel=no_kernel,
-        no_framework_agent=no_framework_agent,
-        framework=framework_for_prompt,
-        objective=objective,
-        max_minutes=max_minutes_for_prompt,
-        transport=_orch_transport,
-        benchmark_mode=str(getattr(coordinator.shared_state, "benchmark_mode", "") or ""),
-        agentx_corpus_shape=coordinator.shared_state.agentx_corpus_shape,
+    coordinator.orch_prompt = _OrchestrationPrompt(
+        overrides=prompts,
+        is_user_supplied=bool(args.orch_prompt),
+        rebuild=_functools.partial(
+            _build_orchestration_prompt,
+            no_kernel=no_kernel,
+            no_framework_agent=no_framework_agent,
+            framework=framework_for_prompt,
+            objective=objective,
+            max_minutes=max_minutes_for_prompt,
+            transport=_orch_transport,
+            benchmark_mode=str(getattr(coordinator.shared_state, "benchmark_mode", "") or ""),
+            agentx_corpus_shape=coordinator.shared_state.agentx_corpus_shape,
+            agentx_grading=coordinator.shared_state.grading,
+            agentx_backend=coordinator.shared_state.agentx_backend,
+        ),
     )
     # Build specialist executor only when research_lane capacity > 0 (0 degrades to LLM-direct grid).
     specialist_capacity = int(getattr(args, "research_lane_capacity", 1) or 0)
@@ -2341,7 +2462,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         specialist_executor=specialist_executor,
     )
     # Persist effective system prompts for resume / drift inspection.
-    _snapshot_system_prompts(session_dir, prompts=prompts, orchestration_phase=_initial_phase)
+    _snapshot_system_prompts(
+        session_dir, prompts=prompts, orchestration_phase=_initial_phase, macro_cycle=_initial_macro_cycle
+    )
 
     def _backend_kind(role: str) -> str:
         backend = backends.get(role)

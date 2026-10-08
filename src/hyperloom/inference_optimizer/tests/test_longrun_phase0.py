@@ -322,9 +322,10 @@ async def test_coordinator_maintenance_reaps_leases_and_prunes(tmp_path, monkeyp
         for i in range(30):
             await c.bus.append_and_seq(Message.new("orchestration", "*", "observation", {"i": i}))
 
-        summary = await c._run_maintenance(tick=10)
+        summary = await c.maintenance.run(tick=10)
         assert summary is not None
         assert "gpu_leases_reaped" not in summary
+        assert "leases_reaped" in summary and "running_tasks_reclaimed" in summary
         assert "events_pruned" in summary and "tasks_pruned" in summary
         rows = await c.db.fetchall("SELECT COUNT(*) AS c FROM gpu_leases")
         assert int(rows[0]["c"]) == 1
@@ -390,6 +391,6 @@ async def test_claude_backend_retries_transient_then_succeeds():
     backend.call_timeout_s = 5.0
     backend.mcp_tool_name = EMIT_INTENT_TOOL_QUALIFIED
 
-    result = await backend.run("hi", allow_no_intent=True)
+    result = await backend.run("hi")
     assert state["n"] == 2  # one transient failure, one success
     assert len(result.intents) == 1

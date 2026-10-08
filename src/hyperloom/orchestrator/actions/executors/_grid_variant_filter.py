@@ -11,8 +11,6 @@ import logging
 import os
 import re
 import shlex
-import subprocess
-import time
 from pathlib import Path
 
 from hyperloom.common.env import is_truthy
@@ -232,87 +230,6 @@ def xdit_blacklist_reason(
     return None
 
 
-_HELP_TEXT_CACHE: dict[str, str] = {}
-
-# Framework -> monotonic deadline before which a failed probe is not retried.
-_HELP_PROBE_FAILED_UNTIL: dict[str, float] = {}
-_HELP_PROBE_RETRY_SEC: float = 300.0
-# Importing a serving framework to read its parser costs seconds (sglang: ~4s warm,
-# more on a cold pod). The result is cached per framework, so this is paid once.
-_HELP_PROBE_TIMEOUT_SEC: float = 30.0
-
-# Per-framework ``--help`` argv tails; resolve the interpreter at call time.
-_HELP_PROBE_COMMANDS: dict[str, tuple[str, ...]] = {
-    # Both build a parser and hand it to the framework's own registrar, the shape
-    # `atom` already used: neither exposes a ready-made parser at module scope.
-    "sglang": (
-        "-c",
-        "import argparse; from sglang.srt.server_args import ServerArgs; "
-        "p = argparse.ArgumentParser(); ServerArgs.add_cli_args(p); "
-        "p.print_help()",
-    ),
-    "vllm": (
-        "-c",
-        "from vllm.entrypoints.openai.cli_args import make_arg_parser; "
-        "from vllm.utils.argparse_utils import FlexibleArgumentParser; "
-        "make_arg_parser(FlexibleArgumentParser()).print_help()",
-    ),
-    # atom exposes EngineArgs.add_cli_args (mirrors vLLM).
-    "atom": (
-        "-c",
-        "import argparse; from atom.model_engine.arg_utils import EngineArgs; "
-        "p = argparse.ArgumentParser(); EngineArgs.add_cli_args(p); "
-        "p.print_help()",
-    ),
-}
-
-
-def _probe_server_help_text(framework: str) -> str:
-    """Best-effort fetch of ``<framework> --help`` text for flag validation."""
-    fw = (framework or "").strip().lower()
-    if fw in _HELP_TEXT_CACHE:
-        return _HELP_TEXT_CACHE[fw]
-    argv_tail = _HELP_PROBE_COMMANDS.get(fw)
-    if argv_tail is None:
-        return ""
-    expiry = _HELP_PROBE_FAILED_UNTIL.get(fw)
-    if expiry is not None and time.monotonic() < expiry:
-        return ""
-    from ._benchmark_interpreter import _resolve_probe_python
-
-    try:
-        interpreter = _resolve_probe_python(fw)
-        proc = subprocess.run(
-            [interpreter, *argv_tail],
-            capture_output=True,
-            text=True,
-            timeout=_HELP_PROBE_TIMEOUT_SEC,
-        )
-        # Only a clean exit is help text. stderr on a failed run is a traceback, and treating that as help makes every
-        # flag look absent, which drops the variants carrying them rather than sparing them.
-        out = (proc.stdout or "") + (proc.stderr or "") if proc.returncode == 0 else ""
-        reason = f"exit={proc.returncode}"
-        if proc.returncode != 0:
-            # Without the tail the log says only "exit=1", which cannot tell a
-            # missing framework from a probe command that no longer matches it.
-            tail = " ".join((proc.stderr or "").split())[-300:]
-            if tail:
-                reason = f"{reason}: {tail}"
-    except Exception as exc:  # noqa: BLE001 — best-effort, see docstring
-        out, reason = "", repr(exc)
-    if out:
-        _HELP_TEXT_CACHE[fw] = out
-        return out
-    if fw not in _HELP_PROBE_FAILED_UNTIL:
-        log.warning(
-            "compatibility probe for %s produced no help text (%s); flag-version drops are disabled for it",
-            fw,
-            reason,
-        )
-    _HELP_PROBE_FAILED_UNTIL[fw] = time.monotonic() + _HELP_PROBE_RETRY_SEC
-    return ""
-
-
 def _detect_model_class(model_path: str) -> tuple[bool, bool]:
     """Heuristic detect of (is_mla_model, is_moe_model) from model path."""
     p = model_path.lower()
@@ -446,8 +363,6 @@ def apply_compatibility_filter(
         is_mla, is_moe = True, True
 
     fw = framework.strip().lower()
-    help_text = _probe_server_help_text(fw)
-    help_available = bool(help_text)
 
     is_xdit = fw == "xdit"
     unsafe_unified_attn_stack = _matches_unsafe_unified_attn_stack(
@@ -496,10 +411,6 @@ def apply_compatibility_filter(
                     f"MODEL_PATH={model_path!r} not recognised as "
                     f"{required_class.upper()}-class"
                 )
-                break
-            # Framework flag-support predicate (only when help is readable).
-            if help_available and flag not in help_text:
-                skip_reason = f"{flag} not present in `{fw} --help` output; current {fw} version likely too old"
                 break
         if skip_reason:
             dropped.append(

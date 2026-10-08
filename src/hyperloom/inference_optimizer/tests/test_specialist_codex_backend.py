@@ -175,7 +175,7 @@ async def test_openai_only_deployment_runs_the_specialist_on_the_codex_cli(
     assert result.done_payload["summary"] == "fake codex specialist run"
     # Token spend, reply text and shell calls all have to survive the swap.
     assert result.usage == {
-        "input_tokens": 24099,
+        "input_tokens": 24099 - 11648,
         "output_tokens": 44,
         "cache_creation_input_tokens": None,
         "cache_read_input_tokens": 11648,
@@ -596,9 +596,9 @@ def codex_log(tmp_path: Path) -> Path:
 
 
 def test_parse_codex_usage_maps_onto_the_canonical_counters(codex_log: Path) -> None:
-    """Codex's counter names differ from Anthropic's and must be translated."""
+    """Codex's counter names differ from Anthropic's, and its input count includes the cached prefix."""
     assert pu.parse_codex_jsonl_usage(codex_log) == {
-        "input_tokens": 24099,
+        "input_tokens": 24099 - 11648,
         "output_tokens": 44,
         "cache_creation_input_tokens": None,
         "cache_read_input_tokens": 11648,
@@ -618,7 +618,7 @@ def test_parse_codex_usage_sums_across_turns(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     assert pu.parse_codex_jsonl_usage(log) == {
-        "input_tokens": 30,
+        "input_tokens": 30 - 7,
         "output_tokens": 10,
         "cache_creation_input_tokens": None,
         "cache_read_input_tokens": 7,
@@ -1432,6 +1432,8 @@ def test_anthropic_inprocess_keeps_claude_backend(
     backend_name, kwargs = runner.backend_factory(SimpleNamespace())
     assert backend_name == "claude"
     assert kwargs["model"] == "claude-selected-model"
+    # --specialist-per-turn-max-seconds bounds each in-process call, as it does for Codex.
+    assert kwargs["turn_timeout_s"] == 42.0
 
 
 @pytest.mark.asyncio

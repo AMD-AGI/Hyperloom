@@ -591,25 +591,33 @@ def _probe_isolated_vllm() -> tuple[str, Path] | None:
         if match.is_dir():
             site = match.parent
             break
-    if site is None:
-        return None
 
     version = ""
-    vllm_python = os.environ.get("VLLM_PYTHON", "").strip()
-    if vllm_python and Path(vllm_python).exists():
+    imported_root: Path | None = None
+    vllm_python = os.environ.get("VLLM_PYTHON", "").strip() or str(Path(venv_root) / "bin" / "python")
+    if Path(vllm_python).exists():
         try:
             proc = subprocess.run(
-                [vllm_python, "-c", "import vllm; print(vllm.__version__)"],
+                [vllm_python, "-c", "import vllm; print(vllm.__version__); print(vllm.__file__)"],
                 check=False,
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 timeout=30,
             )
-            if proc.returncode == 0:
-                version = proc.stdout.strip()
+            lines = proc.stdout.strip().splitlines()
+            if proc.returncode == 0 and len(lines) >= 2:
+                version = lines[-2].strip()
+                imported_root = Path(lines[-1].strip()).resolve().parent.parent
         except (OSError, subprocess.SubprocessError) as e:
             log.info("_server_patcher: VLLM_PYTHON version probe failed (%s)", e)
+
+    # A source build installs vLLM editable, so site-packages holds only an egg-link or .pth and the package lives
+    # in the checkout; only the venv's own interpreter can say where that is.
+    if site is None:
+        site = imported_root
+    if site is None:
+        return None
 
     if not version:
         for dist in sorted(site.glob("vllm-*.dist-info")):
@@ -790,28 +798,26 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
         log.warning("_server_patcher: SGLang patches directory empty; skip")
         return None
 
-    filtered_patches: list[Path] = list(patches)
-
     # Sentinel: the kernel_shape_profiler patch creates a new file at ``sglang/srt/utils/kernel_shape_profiler.py`` in
     # both layouts.
     sentinel = sglang_module.parent / "srt" / "utils" / "kernel_shape_profiler.py"
     sglang_pkg = sglang_module.parent
     # Also verify the annotation pipeline so a partial apply (main sentinel present but annotations missing) is still
     # detected: scheduler callback -> profiler_manager toggle -> io_struct request fields -> step-span aggregates.
-    written = _patch_target_paths(filtered_patches)
+    written = _patch_target_paths(patches)
     extra_sentinels: tuple[tuple[Path, tuple[str, ...]], ...] = tuple(
         (sglang_pkg.joinpath(*parts), markers)
         for parts, markers in _SGLANG_ANNOTATION_SENTINELS
         if _patch_set_writes(written, parts)
     )
     optional_patches = frozenset(
-        p.name for p in filtered_patches if any(m in p.name.lower() for m in _SGLANG_OPTIONAL_PATCH_MARKERS)
+        p.name for p in patches if any(m in p.name.lower() for m in _SGLANG_OPTIONAL_PATCH_MARKERS)
     )
     return _PatchPlan(
         framework="sglang",
         version=version,
         apply_root=apply_root,
-        patches=tuple(filtered_patches),
+        patches=patches,
         sentinel_file=sentinel,
         # Sentinel file alone is insufficient; extra_sentinels require the annotation pipeline.
         sentinel_text=("kernel_shape_profiler",),

@@ -117,6 +117,8 @@ class V6TaskConfig(TypedDict, total=False):
     framework_version: str
     gpu_type: str
     tp: int | None
+    ep: int | None
+    compute_partition: dict[str, Any]
     conc: int | None
     isl: int | None
     osl: int | None
@@ -142,9 +144,14 @@ class V6MetadataLangfuse(TypedDict, total=False):
 class V6GradedAxes(TypedDict, total=False):
     """The axes an AgentX measurement is ranked and reported on.
 
-    ``e2e_norm_intvty_p50`` is the objective. Its guards are the tail and ``output_throughput``, which is not a
-    member here -- the verdict reads it off the measurement, not off this block. ``output_tput_per_gpu`` is the
-    frontier's y axis and the latency percentiles are the detail view: reported, never graded.
+    ``e2e_norm_intvty_p50`` is the objective. Its guards are the tail and ``output_throughput``; the latter is not a
+    member because the chip count divides both sides of that ratio, so ``output_tput_per_gpu`` -- the frontier's y
+    axis, which is a member -- reproduces the guard exactly. The latency percentiles are the detail view: reported,
+    never graded. ``total_throughput`` is reported for continuity and enters no verdict.
+
+    ``duration_seconds`` and ``request_error_rate`` are the comparability inputs. A pair is graded only when both
+    replayed a window of the same length and the candidate dropped no more requests than its anchor, so a verdict
+    published without them cannot be re-derived from this record.
 
     Every axis is present on every measurement, ``None`` where nothing measured
     it: absent would be indistinguishable from an axis the framework failed to
@@ -161,6 +168,8 @@ class V6GradedAxes(TypedDict, total=False):
     ttft_p90_ms: float | None
     tpot_p50_ms: float | None
     tpot_p90_ms: float | None
+    duration_seconds: float | None
+    request_error_rate: float | None
 
 
 class V6GradingTputGuard(TypedDict, total=False):
@@ -192,6 +201,19 @@ class V6Grading(TypedDict, total=False):
     tput_guard: V6GradingTputGuard
 
 
+class V6WorkflowMetadata(TypedDict, total=False):
+    """Identity and frozen action surfaces for deterministic workflow replay."""
+
+    workflow_contract_version: str
+    contract_digest: str
+    run_flags: dict[str, Any]
+    phase_actions: dict[str, list[str]]
+    llm_proposable_actions: dict[str, list[str]]
+    coordinator_internal_actions: list[str]
+    coordinator_reserved_actions: dict[str, list[str]]
+    kernel_lane_task_kinds: list[str]
+
+
 class V6Metadata(TypedDict, total=False):
     """V6 task identity, configuration, versions, and trace entrypoint."""
 
@@ -201,6 +223,7 @@ class V6Metadata(TypedDict, total=False):
     task_config: V6TaskConfig
     grading: V6Grading
     langfuse: V6MetadataLangfuse
+    workflow: V6WorkflowMetadata
     warnings: list[str]
 
 
@@ -309,6 +332,10 @@ class V6TimelineEvent(TypedDict, total=False):
     type: str
     kind: str
     status: str
+    process_status: str
+    business_outcome: str | None
+    failure: dict[str, Any] | None
+    blocked_by: str | None
     start_time: str
     end_time: str
     id: str
@@ -350,7 +377,7 @@ class V6WarmStartReads(TypedDict, total=False):
     One row per read, recorded as the KB serves it, plus tallies over exactly
     those rows. Omitted when T0 made no read.
 
-    Only T0's own reads are here. ``_kb_amend_recipe`` consults the same store
+    Only T0's own reads are here. ``kb_amend_recipe`` consults the same store
     through the same audit hook in the middle of the session; those reads are
     real but they are not the anchor's, and this block would misreport the
     lookup if it counted them."""
@@ -499,9 +526,9 @@ class V6RooflineKernelTable(TypedDict, total=False):
 class V6RooflineEventSnapshot(TypedDict, total=False):
     """A roofline run's own quantitative conclusion, recorded on its event.
 
-    The event used to record only ``snapshot_id``, which made the conclusion
-    reachable solely by joining against a capped session-state history that
-    later runs evict entries from."""
+    Carried on the event rather than only as ``snapshot_id``, because a join
+    against the capped session-state history fails once later runs evict the
+    entry."""
 
     snapshot_id: int | None
     ts: str
@@ -1020,8 +1047,8 @@ class V6EnablementAttempt(TypedDict, total=False):
 
     The dispatch and the settlement are recorded onto the same row from
     different ticks, so a round the session was killed between the two is on
-    the timeline as a round that was dispatched and never ruled -- which the
-    counters it used to be folded into could not express at all.
+    the timeline as a round that was dispatched and never ruled -- which a
+    counter could not express at all.
 
     The gap a round faced and the gap it revealed are separate fields.
     ``launch_log_excerpt`` is what the round was pointed at;
@@ -1199,6 +1226,9 @@ class V6PhaseAction(TypedDict, total=False):
     phase: str
     macro_cycle: int
     tick: int
+    dispatch_class: Literal["llm", "coordinator", "inline"]
+    allowed: bool
+    denial_rule: str | None
     dispatched_at: str
     dispatched_unix: float | None
     status: str
@@ -1217,6 +1247,18 @@ class V6PhaseMarker(TypedDict, total=False):
     reason: str
     evidence: dict[str, Any]
     ts: str
+
+
+class V6PhaseDenial(TypedDict, total=False):
+    """One author-time PolicyGate refusal in the phase where it happened."""
+
+    actor: str
+    proposal_msg_id: str | None
+    action: str
+    phase: str
+    rule: str
+    hint: str
+    denied_at: str
 
 
 class V6PhaseProposalReview(TypedDict, total=False):
@@ -1301,6 +1343,7 @@ class V6PhaseExt(TypedDict, total=False):
     actions: dict[str, Any]
     markers: dict[str, Any]
     proposals: dict[str, Any]
+    denials: dict[str, Any]
 
 
 class V6StackAdoption(TypedDict, total=False):
@@ -1546,8 +1589,8 @@ class V6Close(TypedDict, total=False):
     ``status`` is recorded by the CLOSE sequencer, not derived from ``steps``.
     ``running`` means no verdict was ever recorded, so the process died partway
     through its own close-out; ``degraded`` means the sequence finished with at
-    least one step reporting a failure. The two used to be the same word, which
-    made a healthy session indistinguishable from a damaged one.
+    least one step reporting a failure. The two are separate words so a healthy
+    session stays distinguishable from a damaged one.
     """
 
     status: Literal["running", "succeeded", "failed", "degraded"]
@@ -1737,6 +1780,34 @@ class V6FrameworkLifecycleStep(TypedDict, total=False):
     reason: str
 
 
+class V6FrameworkRenderedRef(TypedDict, total=False):
+    """One Experience a KB read placed in the prompt that raised a proposal.
+
+    Exposure, not evidence of use: the read rendered it, which says nothing
+    about whether the model relied on it."""
+
+    id: str
+    purpose: str
+
+
+class V6FrameworkPatch(TypedDict, total=False):
+    """One session-local patch an authored attempt applied or reverted, verbatim."""
+
+    path: str
+    sha256: str
+    content: str
+
+
+class V6ExperienceCitation(TypedDict, total=False):
+    """An Experience the deciding agent was shown and says shaped this attempt.
+
+    ``stance`` is ``adopt``, ``adapt``, ``avoid``, or ``contrast``; ``claim`` is its reason, as it wrote it."""
+
+    id: str
+    stance: str
+    claim: str
+
+
 class V6FrameworkProposal(TypedDict, total=False):
     """One thing this entry pursued, whichever producer raised it.
 
@@ -1763,6 +1834,9 @@ class V6FrameworkProposal(TypedDict, total=False):
     route: str
     changed_files: list[str]
     confidence: float | None
+    reasoning: str
+    kb_read_id: str
+    rendered_refs: list[V6FrameworkRenderedRef]
     critic_review: V6FrameworkCriticReview
     terminal: V6FrameworkProposalTerminal
     lifecycle: list[V6FrameworkLifecycleStep]
@@ -1826,6 +1900,7 @@ class V6FrameworkAttemptFailure(TypedDict, total=False):
 
     error_class: str
     error_excerpt: str
+    attribution: str
 
 
 class V6FrameworkArtifacts(TypedDict, total=False):
@@ -1859,7 +1934,8 @@ class V6FrameworkAttempt(TypedDict, total=False):
     adoption ledger walks both arms with one reader. Which fields carry
     still follows the arm -- a variant has a ``fingerprint`` and a
     ``config_delta``, an authored patch has a ``patch_path`` and the files it
-    touched -- but the lifecycle and the verdict are the same shape for both.
+    touched, and an authored deliverable of server args or envs has those as
+    its ``config_delta`` -- but the lifecycle and the verdict are the same shape for both.
     ``blocked_by`` is projected at assembly as the first gate that did not
     pass."""
 
@@ -1885,6 +1961,11 @@ class V6FrameworkAttempt(TypedDict, total=False):
     patch_source: str
     patch_path: str
     patches_applied: list[str]
+    patches_reverted: list[str]
+    patch_material: list[V6FrameworkPatch]
+    reasoning: str
+    reasoning_origin: str
+    experience_citations: list[V6ExperienceCitation]
     target_files: list[str]
     accepted_kernels: list[str]
     measured_against: V6FrameworkStack
@@ -1940,7 +2021,6 @@ class V6KernelEntry(TypedDict, total=False):
     route: str
     route_reason: str
     resumed: bool
-    code_revision: str | None
     stack_depth_in: int | None
     budget_remaining_sec: float | None
     roofline_snapshot_id: int | None
@@ -2513,6 +2593,7 @@ class V6KernelExt(TypedDict, total=False):
     in_flight_stage: str | None
     duration_sec: float | None
     entry: V6KernelEntry
+    failure: dict[str, Any] | None
     attempts: list[V6KernelAttempt]
     rebench: list[V6KernelRebenchAttempt]
     integrate: list[V6KernelIntegrateRun]
@@ -2595,12 +2676,15 @@ __all__ = [
     "V6FrameworkGate",
     "V6FrameworkLifecycleStep",
     "V6FrameworkMeasurement",
+    "V6ExperienceCitation",
+    "V6FrameworkPatch",
     "V6FrameworkPlateauReading",
     "V6FrameworkPolicy",
     "V6FrameworkPolicyConfigArm",
     "V6FrameworkPolicySourceArm",
     "V6FrameworkProposal",
     "V6FrameworkProposalTerminal",
+    "V6FrameworkRenderedRef",
     "V6FrameworkRun",
     "V6FrameworkStack",
     "V6GeakCandidate",

@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from hyperloom.common.gpu_identity import gfx_arch_for_gpu_type
-from hyperloom.inference_optimizer.breakdown.agent_ownership import LEVER_ENABLEMENT
+from hyperloom.orchestrator.lever import LEVER_ENABLEMENT
 
 from ..collaborator import CoordinatorCollaborator
 from ..bringup import recorded_verdict, session_root
@@ -46,7 +46,7 @@ _ROUTING_FIELDS: tuple[str, ...] = ("routed", "probe_task_id")
 class EnablementBuild(CoordinatorCollaborator):
     """Escalates to a compiled build and routes the result back into the lane."""
 
-    async def _maybe_escalate_to_targeted_build(
+    async def maybe_escalate_to_targeted_build(
         self,
         launch_log: str,
         *,
@@ -168,7 +168,7 @@ class EnablementBuild(CoordinatorCollaborator):
                 build_budget_sec=0,
                 source_pr_url=source_pr_url,
             )
-            task_id = await self.enqueue_targeted_build(action)
+            task_id = await self._coord.build_lifecycle.enqueue_targeted_build(action)
             if task_id:
                 from hyperloom.common.bringup import failure_digest
 
@@ -186,7 +186,7 @@ class EnablementBuild(CoordinatorCollaborator):
         except Exception:
             log.debug("enablement: targeted-build escalation failed", exc_info=True)
 
-    async def _maybe_enqueue_specialist_requested_build(
+    async def maybe_enqueue_specialist_requested_build(
         self,
         *,
         task_id: str = "",
@@ -275,7 +275,7 @@ class EnablementBuild(CoordinatorCollaborator):
                 build_budget_sec=0,
                 source_pr_url=source_pr_url,
             )
-            build_task_id = await self.enqueue_targeted_build(action)
+            build_task_id = await self._coord.build_lifecycle.enqueue_targeted_build(action)
             if build_task_id:
                 _consume_marker()
                 log.info(
@@ -289,8 +289,8 @@ class EnablementBuild(CoordinatorCollaborator):
         except Exception:
             log.debug("enablement: specialist-requested build enqueue failed", exc_info=True)
 
-    async def _maybe_route_build_outcomes(self) -> None:
-        """Route terminal targeted_build rows to _maybe_rearm_enablement."""
+    async def maybe_route_build_outcomes(self) -> None:
+        """Route terminal targeted_build rows to maybe_rearm_enablement."""
         try:
             all_tasks = []
             for st in ("succeeded", "failed"):
@@ -338,14 +338,13 @@ class EnablementBuild(CoordinatorCollaborator):
         # (component,ref,gpu_arch,cmd) tuple has not been seen before (novel), reverted when it is a repeat.
         time_classes = frozenset({"timeout", "preflight_budget", "preflight_disk", "preflight_toolchain"})
         novelty_key: list[Any] | None = None
+        # A failed build booted nothing, so its rows carry no launch log to replace the recorded one.
         if fc in time_classes:
-            new_log = str(state.enablement.launch_log or "")
             res = {
                 "enablement": True,
                 "status": "advanced",
                 "advanced": True,
                 "patches_applied": [],
-                "enablement_launch_log": new_log,
             }
         else:
             from .runtime.build_actions import TargetedBuildAction as _TBA, build_novelty_key as _bnk
@@ -359,13 +358,11 @@ class EnablementBuild(CoordinatorCollaborator):
                 res = {"enablement": True, "status": "reverted"}
                 novelty_key = None
             else:
-                new_log = str(state.enablement.launch_log or "")
                 res = {
                     "enablement": True,
                     "status": "advanced",
                     "advanced": True,
                     "patches_applied": [],
-                    "enablement_launch_log": new_log,
                 }
                 novelty_key = _key
         log.info(
@@ -376,7 +373,7 @@ class EnablementBuild(CoordinatorCollaborator):
         )
         # Rearm, ledger append, and manifest ack must stay together: a failed
         # rearm leaves the build unrouted and the novelty ledger unchanged.
-        await self._maybe_rearm_enablement(res)
+        await self._coord.enablement_lane.maybe_rearm_enablement(res)
         if novelty_key is not None:
             ledger = list(state.enablement.build_novelty or [])
             ledger.append(novelty_key)
@@ -396,7 +393,7 @@ class EnablementBuild(CoordinatorCollaborator):
         # If the runtime can't be read, it can't be launched → reverted.
         if br is None or not br.ok or not br.runtime.to_runtime_override():
             log.info("ENABLEMENT: targeted_build artifact-unreadable task=%s", task_id)
-            await self._maybe_rearm_enablement(
+            await self._coord.enablement_lane.maybe_rearm_enablement(
                 {"enablement": True, "status": "reverted", "reason": "artifact_unreadable"}
             )
             self._note_build_routed(task_id)
@@ -432,12 +429,10 @@ class EnablementBuild(CoordinatorCollaborator):
     def _note_build_routed(self, build_task_id: str, **fields: Any) -> None:
         """Record that a build's outcome has been routed, and to what.
 
-        ``routed`` is stamped on both paths. The append path always carried it;
-        the merge path took only the caller's fields, so routing a build with
-        nothing to say about it left a row that named the build and no longer
-        said it had been routed. That was legible only because the reader
-        matched on the id alone -- which is what made an attempt row's id, had
-        it ever carried one, answer for a build nobody had routed.
+        ``routed`` is stamped on both the append and the merge path, so a build
+        routed with no fields of its own still says it was routed. A reader
+        matching on the id alone could not tell that row from an attempt row
+        that happens to carry the same id.
         """
         manifest = list(self.shared_state.enablement.build_manifest or [])
         for idx, entry in enumerate(manifest):
@@ -474,9 +469,8 @@ class EnablementBuild(CoordinatorCollaborator):
         Runs the built runtime through the enablement runnable gate without
         applying any patch.  The probe completes as an ordinary integrate_patch
         task whose enablement:True result is routed by the dispatcher through
-        _maybe_rearm_authored_lane → _maybe_rearm_enablement, producing a
-        genuine KEEP/advanced/reverted outcome.  The whole-machine GPU pool is
-        acquired via _framework_gpu_params.
+        _maybe_rearm_authored_lane → maybe_rearm_enablement, producing a
+        genuine KEEP/advanced/reverted outcome.
 
         The probe is what declares KEEP for a build, so it must not be opened
         into a session that cannot run it: the queue scan drops a queued row the
@@ -495,7 +489,7 @@ class EnablementBuild(CoordinatorCollaborator):
             The probe ``task_id`` and the generation it sits on; the id is empty
             when nothing was enqueued.
         """
-        denied = self._time_budget_denial_for_action("integrate_patch")
+        denied = self._coord.dispatcher.time_budget_denial_for_action("integrate_patch")
         if denied is not None:
             log.info(
                 "ENABLEMENT: build launch probe held for build=%s, not enqueued -- %s",
@@ -515,7 +509,6 @@ class EnablementBuild(CoordinatorCollaborator):
             # watched this failure persisted.
             "enablement_before_observation_path": state.enablement.launch_observation_path,
             "source": "coordinator_internal",
-            **self._framework_gpu_params(),
             **_enablement_carrier_params(state),
         }
         # Prefer the eval-origin probe config so the re-run keeps the original workload/eval contract; fall back to
@@ -525,10 +518,10 @@ class EnablementBuild(CoordinatorCollaborator):
             params["config_path"] = cfg
         # The probe boots a server and mutates the tree, so it takes the lanes its own kind declares rather than a
         # specialist's research lane.
-        lanes, ttl = self._registry_lanes_ttl("integrate_patch")
+        lanes, ttl = self._coord.dispatcher.registry_lanes_ttl("integrate_patch")
         if not lanes:
             raise RuntimeError("integrate_patch resolved to no lanes; the launch probe would run unserialised.")
-        probe_task, generation = await self._open_row_past_spent_generations(
+        probe_task, generation = await self._coord.enablement_revalidation.open_row_past_spent_generations(
             kind="integrate_patch",
             params=params,
             key_for=lambda gen: f"build_launch_probe:{build_task_id}:gen{gen}",

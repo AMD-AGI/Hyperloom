@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal
 
+from hyperloom.common.framework_arm import review_row_id
 from hyperloom.common.llm_config import (
     DEFAULT_CODEX_MODEL,
     LLMConfigError,
@@ -25,7 +26,7 @@ from hyperloom.common.llm_config import (
     build_http_timeout,
     get_async_openai_client,
 )
-from hyperloom.inference_optimizer.breakdown.agent_ownership import (
+from hyperloom.orchestrator.lever import (
     LEVER_CONFIG,
     LEVER_ENABLEMENT,
     LEVER_SOURCE_PATCH,
@@ -39,9 +40,12 @@ from hyperloom.inference_optimizer.protocol.intent import (
     validate_envelope,
 )
 from hyperloom.inference_optimizer.session.session_paths import allocate_turn_workdir, manifest_path
+from hyperloom.common.token_usage import uncached_input_tokens
+from hyperloom.inference_optimizer.trace._row_utils import coerce_optional_int
 from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
 from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, append_llm_call, new_call_id
 from hyperloom.inference_optimizer.trace.parse_usage import reasoning_output_tokens
+from hyperloom.inference_optimizer.trace.trajectory_trace import current_context
 from .base import BackendError, BackendTurnResult, LLMCallFailed, build_chat_messages, parse_call_timeout_env
 from ._runtime_bridge import RuntimeCall, RuntimeCaller, invoke_runtime_cli
 
@@ -224,12 +228,9 @@ def _review_subjects(judge_bundle: dict[str, Any]) -> dict[str, str]:
             continue
         msg_id = str(proposal.get("msg_id") or "")
         payload = proposal.get("payload") if isinstance(proposal.get("payload"), dict) else {}
-        params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
-        candidate = str(
-            payload.get("framework_agent_candidate_id") or params.get("framework_agent_candidate_id") or ""
-        ).strip()
-        if msg_id and candidate:
-            out[msg_id] = candidate
+        row_id = review_row_id(payload)
+        if msg_id and row_id:
+            out[msg_id] = row_id
     return out
 
 
@@ -282,11 +283,10 @@ _PHASE_ORIENTATION: dict[str, str] = {
 }
 
 
-#: Orientation by the lever a proposal moves. The phase used to carry this,
-#: which worked only while each phase held one lever: the FRAMEWORK entry told
-#: the Critic that flat gain was a legitimate KEEP, and merging the phases would
-#: have silently extended that to configuration search. The deterministic layer
-#: already routes on payload markers rather than phase; this matches it.
+#: Orientation by the lever a proposal moves, not by phase: one phase carries
+#: several levers, so a phase-keyed entry telling the Critic that flat gain is a
+#: legitimate KEEP would extend that to configuration search. The deterministic
+#: layer routes on payload markers rather than phase; this matches it.
 _LEVER_ORIENTATION: dict[str, str] = {
     LEVER_UPSTREAM_PR: (
         "This lands an upstream diff nobody here wrote. Judge whether it is "
@@ -601,7 +601,7 @@ class CriticAgentBackend:
             rc["action_verdict_policy"] = dict(self.action_verdict_policy)
 
         _inject_phase_constraints(judge_bundle, self._trace_phase or "")
-        # The lever says what a KEEP has to clear; the phase no longer can, now that one phase carries every lever.
+        # The lever says what a KEEP has to clear; the phase cannot, since one phase carries several levers.
         _proposals = judge_bundle.get("proposals") or []
         _first = _proposals[0] if isinstance(_proposals, list) and _proposals else None
         _inject_lever_orientation(judge_bundle, _first if isinstance(_first, dict) else None)
@@ -970,8 +970,8 @@ class CriticAgentBackend:
         )
         max_tokens = self._resolve_max_completion_tokens()
         # One id per review call, shared by its token row and its conversation row so the two halves pair on the call
-        # rather than on a ts second.
-        call_id = new_call_id()
+        # rather than on a ts second. A caller that opened an ``llm.call`` trajectory span owns the id.
+        call_id = current_context().call_id or new_call_id()
         text, finish = await self._run_reasoning_loop(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
@@ -1082,6 +1082,7 @@ class CriticAgentBackend:
             raise self._llm_call_failed(
                 f"Codex API call failed (critic-agent reasoning): {exc!r}",
                 latency_ms=int((time.perf_counter() - _t0) * 1000),
+                call_id=call_id,
             ) from exc
         latency_ms = int((time.perf_counter() - _t0) * 1000)
         self._accumulate_usage(usage_acc, result.usage)
@@ -1114,6 +1115,7 @@ class CriticAgentBackend:
             raise self._llm_call_failed(
                 f"Anthropic completion failed (critic-agent reasoning): {exc!r}",
                 latency_ms=int((time.perf_counter() - _t0) * 1000),
+                call_id=call_id,
             ) from exc
         latency_ms = int((time.perf_counter() - _t0) * 1000)
         usage_acc = {"input_tokens": 0, "output_tokens": 0}
@@ -1145,10 +1147,11 @@ class CriticAgentBackend:
         """Fold one OpenAI ``resp.usage`` into the running token accumulator."""
         if usage is None:
             return
-        try:
-            acc["input_tokens"] += int(getattr(usage, "prompt_tokens", 0) or 0)
-        except (TypeError, ValueError):
-            pass
+        cached = coerce_optional_int(getattr(getattr(usage, "prompt_tokens_details", None), "cached_tokens", None))
+        prompt = coerce_optional_int(getattr(usage, "prompt_tokens", None))
+        acc["input_tokens"] += uncached_input_tokens(prompt, cached) or 0
+        if cached is not None:
+            acc["cache_read_input_tokens"] = acc.get("cache_read_input_tokens", 0) + cached
         try:
             acc["output_tokens"] += int(getattr(usage, "completion_tokens", 0) or 0)
         except (TypeError, ValueError):
@@ -1210,10 +1213,11 @@ class CriticAgentBackend:
         message: str,
         *,
         latency_ms: int | None = None,
+        call_id: str | None = None,
     ) -> LLMCallFailed:
         """Record a failed review-model call and return the error to raise."""
         error = LLMCallFailed(message)
-        self._trace_llm_failure(error, latency_ms=latency_ms)
+        self._trace_llm_failure(error, latency_ms=latency_ms, call_id=call_id)
         return error
 
     def _trace_llm_failure(
@@ -1221,6 +1225,7 @@ class CriticAgentBackend:
         error: BaseException,
         *,
         latency_ms: int | None = None,
+        call_id: str | None = None,
     ) -> None:
         """Append one ``llm_calls.jsonl`` row for a call that never returned."""
         try:
@@ -1229,6 +1234,7 @@ class CriticAgentBackend:
                 component="critic",
                 role="critic",
                 error=error,
+                call_id=call_id,
                 model=self._review_model,
                 tick=self._trace_tick,
                 phase=self._trace_phase,

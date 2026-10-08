@@ -75,7 +75,7 @@ Keep the `$WORK` it prints. Read `diff.txt` and `body.txt` before going on.
 | `commits.txt` | commit subjects, oldest first; a late commit is where a description goes stale |
 | `base.txt` | merge-base sha — every "is this pre-existing" question is answered against it |
 | `ci.txt` | check runs at the current head: name, conclusion, url |
-| `comments.txt` | existing review and issue comments — do not repeat a point already made |
+| `comments.txt` | existing review and issue comments — do not repeat a point already made (Step 7) |
 | `testfiles.txt` | changed paths under a `tests/` directory |
 | `docfiles.txt` | changed docs, prompts and `.md`/`.rst` paths — empty beside a `src/` change is X3's shape |
 | `openprs.txt` | other open PRs touching the same files — conflicting in-flight work |
@@ -129,9 +129,9 @@ A docs-, CI- or test-only diff touches nothing under `src/`: write one
 
 Tiers come from [`references/tiers.md`](references/tiers.md): a table of the backbone files, and
 Q1–Q4 for anything not in it, including new files. Q1b is the one that bites — `Coordinator`
-resolves its 21 collaborators by string through a metaclass `__getattr__`, so a rename passes
-every import check, passes lint, passes collection, and fails only hours into a session when
-that phase is entered. Grep the string, not the symbol.
+holds 24 collaborators as explicit attributes, so a rename passes every import check, passes
+lint, passes collection, and fails only hours into a session when that phase is entered.
+Grep the class name, not just the symbol.
 
 ## Step 4 — Rule checklist
 
@@ -159,7 +159,7 @@ a diff that reads well hides its defects. One line per check into `$WORK/ai_diag
 "clean" alone is not an answer; a reason that names nothing in the diff is not one either.
 
 1. `wiring` — **both directions.** Every first-party import the diff adds resolves against the merge
-   base. Every name-resolved entry (`_COLLAB_MODULES`, `KERNEL_REQUEST_HANDLERS`,
+   base. Every name-resolved entry (`KERNEL_REQUEST_HANDLERS`,
    `ACTION_CATALOGUE`, action-surface names) has a module and class that exist. Then the inverse:
    an added identifier whose head-tree occurrence count is 1 is a writer with no reader; a removed
    caller whose helper survives is a reader with no writer. Both are blocking.
@@ -221,7 +221,9 @@ step.
 
 Attack in this order: is the line added by this PR or pre-existing context around an added line
 (compare against `base.txt`); does the symbol resolve somewhere the diff did not show; is the
-trigger reachable in a real configuration; is the point already made in `comments.txt`.
+trigger reachable in a real configuration; is the point already made in `comments.txt` by anything
+other than an earlier review-pr card. A finding on an earlier card is not "already made": re-verify
+it at the current head, keep it if it still holds, drop it if it was fixed.
 
 Then hand `card.md`, the diff and `base.txt` to a reader who has not seen your reasoning — a second
 agent or a person — with every finding false until defended. `$WORK/independent.txt` takes the same
@@ -302,19 +304,18 @@ itself a review defect.
 
 ## Publishing
 
-Post the conclusion to the PR as an English comment. No Chinese, no emoji, no signature.
+Post the conclusion to the PR in English. No Chinese, no emoji, no signature.
 
 ```bash
-# no blocking issues
-gh pr review <n> --approve --body "<conclusion>"
 # blocking issues
-gh pr comment <n> --body "<conclusion>"
+gh pr review <n> --request-changes --body "<conclusion>"
+# no blocking issues: first dismiss your own earlier CHANGES_REQUESTED review, then
+gh pr comment <n> --body "<conclusion>"$'\n\nLGTM'
 ```
 
-Approve and comment go together in one call when there is nothing blocking; do not ask first. With
-blocking issues, comment only — no approve, no request-changes. Never merge a PR. The no-blocking
-comment still carries the `Checked:` / `Ran:` line so the author sees the depth of the review
-rather than a bare LGTM; it has two parts and stops there.
+Never approve and never merge: both belong to the human reviewer the author brings in after LGTM.
+The clean comment still carries the `Checked:` / `Ran:` line so the author sees the depth of the
+review rather than a bare LGTM; it has two parts and the `LGTM` line, and stops there.
 
 ## Verifying a sub-agent's finding
 

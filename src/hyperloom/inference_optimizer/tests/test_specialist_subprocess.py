@@ -31,7 +31,6 @@ from hyperloom.orchestrator.specialists.subprocess_ import (
     SpecialistSubprocessConfig,
     SpecialistSubprocessDispatcher,
     _build_specialist_env,
-    _pick_worktree_base,
     _setup_worktree,
 )
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
@@ -57,6 +56,11 @@ def test_build_specialist_env_inherits_provider_secrets_by_default(monkeypatch):
     assert "KB_SERVICE_TOKEN" not in env
     assert "INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR" not in env
     assert "LD_PRELOAD" not in env
+
+
+def test_build_specialist_env_forwards_the_claude_config_dir(monkeypatch):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/tmp/claude-config")
+    assert _build_specialist_env()["CLAUDE_CONFIG_DIR"] == "/tmp/claude-config"
 
 
 def test_build_specialist_env_forwards_oauth_token_without_mirroring_it(monkeypatch):
@@ -208,6 +212,42 @@ cat > "$WORKSPACE/specialist_done.json" <<EOF
 EOF
 exit 0
 """
+    elif behavior == "done_with_stream_json":
+        # Zeroed per-message usage with the real counts only on the result row, as a GLM gateway streams it.
+        zeroed = {"input_tokens": 0, "output_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}
+        stream = [
+            {"type": "system", "subtype": "init", "model": "glm-5-3"},
+            {
+                "type": "assistant",
+                "message": {
+                    "id": "m1",
+                    "model": "glm-5-3",
+                    "usage": zeroed,
+                    "content": [{"type": "tool_use", "id": "tu1", "name": "Bash", "input": {"command": "ls"}}],
+                },
+            },
+            {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "tu1", "content": "ok"}]}},
+            {"type": "assistant", "message": {"id": "m2", "model": "glm-5-3", "usage": zeroed, "content": []}},
+            {
+                "type": "result",
+                "usage": {
+                    "input_tokens": 50632,
+                    "cache_read_input_tokens": 291392,
+                    "cache_creation_input_tokens": 0,
+                    "output_tokens": 7542,
+                },
+            },
+        ]
+        stream_lines = "\n".join(json.dumps(row) for row in stream)
+        body += f"""
+cat <<'EOF'
+{stream_lines}
+EOF
+cat > "$WORKSPACE/specialist_done.json" <<'EOF'
+{payload_json}
+EOF
+exit 0
+"""
     elif behavior == "crash":
         body += "exit 3\n"
     elif behavior == "partial_then_crash":
@@ -241,9 +281,11 @@ exit 0
 
 
 @pytest.fixture
-def fake_framework_repo(tmp_path: Path) -> Path:
+def fake_framework_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The checkout the session optimises, named the way a session names it."""
     repo = tmp_path / "framework"
     init_git_repo(repo)
+    monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(repo))
     return repo
 
 
@@ -256,6 +298,7 @@ def _make_runner_ctx(task_id: str = "t-spec-1") -> RunnerContext:
             "domain": "serving_specialist",
             "gap_canonical_id": "gap.test.example",
             "max_turns": 2,
+            "framework": "sglang",
         },
         idempotency_key=task_id,
         requires_lanes=tuple(),
@@ -293,22 +336,55 @@ def test_kb_mcp_tools_not_in_denylist():
     assert denylisted_kb_mcp == [], f"stale KB MCP entries in the denylist: {denylisted_kb_mcp}"
 
 
-def test_pick_worktree_base_picks_first_git_root(
+@pytest.mark.asyncio
+async def test_worktree_of_a_pip_installed_framework_is_its_snapshot_not_another_checkout(
     tmp_path: Path,
-    fake_framework_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ):
-    nonrepo = tmp_path / "not-a-repo"
-    nonrepo.mkdir()
-    base = _pick_worktree_base((str(nonrepo), str(fake_framework_repo)))
-    assert base is not None
-    assert base.samefile(fake_framework_repo)
+    """With no checkout of its own, the framework still hands its specialist its own code -- never InferenceX's."""
+    harness = tmp_path / "InferenceX"
+    init_git_repo(harness, seed_file="benchmark_lib.sh", seed_text="run\n")
+    package = tmp_path / "site-packages" / "vllm"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "envs.py").write_text("VLLM_USE_X = 0\n", encoding="utf-8")
+    monkeypatch.setenv("INFERENCEX_PATH", str(harness))
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    runner = SpecialistRunner(
+        subprocess_config=SpecialistSubprocessConfig(framework_source_roots=(str(harness), str(package))),
+        session_dir=session_dir,
+    )
+    ctx = _make_runner_ctx("t-spec-pip")
+    ctx.task.params["session_framework_tree"] = f"{package}/"
+    workspace = session_dir / "runs" / "specialist" / "t-spec-pip"
+    workspace.mkdir(parents=True)
+
+    worktree, source, err = runner._maybe_setup_worktree(ctx, workspace=workspace)
+
+    assert err == ""
+    assert source is not None and source.root == package and not source.checkout
+    assert worktree is not None and (worktree / "envs.py").read_text(encoding="utf-8") == "VLLM_USE_X = 0\n"
+    assert not (worktree / "benchmark_lib.sh").exists()
+    assert not (package / ".git").exists()
+    listed = subprocess.run(
+        ["git", "-C", str(harness), "worktree", "list"], capture_output=True, text=True, check=True
+    ).stdout
+    assert str(worktree) not in listed
 
 
-def test_pick_worktree_base_returns_none_when_no_repo(tmp_path: Path):
-    nonrepo = tmp_path / "not-a-repo"
-    nonrepo.mkdir()
-    base = _pick_worktree_base((str(nonrepo),))
-    assert base is None
+def test_an_integrate_in_flight_holds_the_snapshot(tmp_path: Path):
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    runner = SpecialistRunner(subprocess_config=SpecialistSubprocessConfig(), session_dir=session_dir)
+    assert runner._integrate_in_flight() is False
+
+    state = SharedState.load_or_init(session_dir)
+    state.pending_integrate = {"task_id": "t-integrate", "patches": []}
+    state.save(session_dir)
+    assert runner._integrate_in_flight() is True
 
 
 def test_setup_worktree_creates_branch_off_base(
@@ -366,6 +442,62 @@ async def test_subprocess_path_harvests_done_file(
     assert (workspace / "specialist_done.json").exists()
     assert (workspace / "process.log").exists()
     assert (workspace / "worktree").is_dir()
+
+
+@pytest.mark.asyncio
+async def test_subprocess_run_is_one_specialist_llm_call_on_the_trajectory(
+    tmp_path: Path,
+    fake_framework_repo: Path,
+):
+    """The subprocess books as a specialist llm.call carrying the result-row totals; its tools hang off that call."""
+    from hyperloom.inference_optimizer.session.session_paths import llm_calls_path
+    from hyperloom.inference_optimizer.trace import trajectory_trace as tt
+
+    fake_claude = _make_fake_claude(tmp_path / "bin", behavior="done_with_stream_json")
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    runner = SpecialistRunner(
+        subprocess_config=SpecialistSubprocessConfig(
+            claude_executable=str(fake_claude),
+            model="",
+            framework_source_roots=(str(fake_framework_repo),),
+            poll_interval_seconds=0.2,
+        ),
+        session_dir=session_dir,
+        default_max_turns=2,
+    )
+    with tt.trajectory_scope(
+        session_dir=session_dir,
+        component="coordinator",
+        task_id="t-spec-traj",
+        parent_span_id="t-spec-traj",
+    ):
+        result = await runner.run(_make_runner_ctx("t-spec-traj"))
+    assert result.status == "succeeded"
+
+    events = tt.load_events(session_dir)
+    calls = [e for e in events if e["event_type"] == tt.EVENT_LLM_CALL]
+    assert [e["status"] for e in calls] == [tt.STATUS_STARTED, tt.STATUS_COMPLETED]
+    call = calls[-1]
+    assert (call["component"], call["agent"], call["task_id"]) == ("specialist", "serving_specialist", "t-spec-traj")
+    assert call["parent_span_id"] == "t-spec-traj"
+    assert call["attributes"]["input_tokens"] == 50632
+    assert call["attributes"]["cache_read_input_tokens"] == 291392
+    assert call["attributes"]["output_tokens"] == 7542
+    assert call["attributes"]["model"] == "glm-5-3"
+
+    tools = [e for e in events if e["event_type"] == tt.EVENT_TOOL]
+    assert [t["attributes"]["name"] for t in tools] == ["Bash"]
+    assert (tools[0]["component"], tools[0]["agent"]) == ("specialist", "serving_specialist")
+    assert tools[0]["parent_span_id"] == call["span_id"]
+    assert tools[0]["call_id"] == call["call_id"]
+
+    rows = [json.loads(line) for line in llm_calls_path(session_dir).read_text(encoding="utf-8").splitlines() if line]
+    specialist_rows = [r for r in rows if r["component"] == "specialist"]
+    assert len(specialist_rows) == 1
+    assert specialist_rows[0]["call_id"] == call["call_id"]
+    assert specialist_rows[0]["input_tokens"] == 50632
+    assert specialist_rows[0]["output_tokens"] == 7542
 
 
 @pytest.mark.asyncio
@@ -1320,3 +1452,44 @@ def test_a_ray_actor_names_no_local_process_group_for_the_operator_log():
     assert actor is None
     # Nothing to report is also the answer when the cleanup never spawned a root.
     assert subprocess_._local_tree_pgid(None) is None
+
+
+async def _spawn_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, gpu_ids: tuple[int, ...]) -> dict[str, str]:
+    """The env a local specialist spawn is handed; the fake ``Popen`` refuses to start."""
+    captured: dict[str, str] = {}
+
+    def _popen(_cmd, *, env, **_kwargs):
+        captured.update(env)
+        raise OSError("spawn refused by test")
+
+    monkeypatch.setattr(subprocess_.subprocess, "Popen", _popen)
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3")
+    disp = SpecialistSubprocessDispatcher(config=SpecialistSubprocessConfig(poll_interval_seconds=0.01))
+    result = await disp.run(
+        task_id="t-env",
+        workspace=tmp_path / "ws",
+        worktree=None,
+        worktree_base=None,
+        system_prompt="sys",
+        user_prompt="usr",
+        disallowed_tools=frozenset(),
+        max_turns=1,
+        gpu_ids=gpu_ids,
+        deadline=Deadline.after(5.0),
+    )
+    assert "spawn refused by test" in (result.error or "")
+    return captured
+
+
+async def test_cpu_specialist_env_hides_all_gpus_and_uses_private_caches(tmp_path, monkeypatch):
+    env = await _spawn_env(tmp_path, monkeypatch, gpu_ids=())
+    assert all(env[var] == "" for var in GPU_MASK_ENV_NAMES)
+    cache_root = tmp_path / "ws" / ".cache"
+    for var in ("TRITON_CACHE_DIR", "TORCHINDUCTOR_CACHE_DIR", "AITER_JIT_DIR", "INFERENCE_OPTIMIZER_AITER_JIT_DIR"):
+        assert Path(env[var]).parent == cache_root
+
+
+async def test_gpu_specialist_env_keeps_its_cards_and_shared_caches(tmp_path, monkeypatch):
+    env = await _spawn_env(tmp_path, monkeypatch, gpu_ids=(0, 1))
+    assert env["HIP_VISIBLE_DEVICES"] == env["ROCR_VISIBLE_DEVICES"] == "0,1"
+    assert "TRITON_CACHE_DIR" not in env and "AITER_JIT_DIR" not in env

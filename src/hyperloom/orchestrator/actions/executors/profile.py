@@ -33,7 +33,7 @@ from ._inferencex_patcher import (
     ensure_benchmark_lib_eval_dest_patched,
     ensure_benchmark_serving_patched,
 )
-from .baseline import BaselineExecutor
+from .baseline import BenchmarkRunExecutor
 
 
 log = logging.getLogger(__name__)
@@ -138,13 +138,13 @@ def _instrumentation_preflight_row(bench: Any, patchers: Mapping[str, Any] | Non
     """State, before the run, whether the annotations the trace checks look for can land at all.
 
     When the TraceLens runtime patch is unavailable the env layer turns ``detailed_annotations`` and
-    ``shape_discovery`` off, which makes checks 3 and 5 certain to fail. That decision was previously read back one
-    line later and then discarded, so the post-hoc failures arrived without their cause. This only reports it --
-    the run proceeds exactly as before, because a trace without annotations is still a trace.
+    ``shape_discovery`` off, which makes checks 3 and 5 certain to fail. Recording that decision here gives the
+    post-hoc failures their cause. This only reports it -- the run proceeds unchanged, because a trace without
+    annotations is still a trace.
 
     ``patchers`` carries each patcher's own outcome. The env block records what the patch results *caused*, which
-    is not the same as which patcher ran and what it returned: a successful patch previously wrote nothing at all,
-    so "instrumentation was fine" and "nobody looked" were the same record.
+    is not the same as which patcher ran and what it returned: a successful patch records its outcome too, so
+    "instrumentation was fine" and "nobody looked" are different records.
     """
     envs = (bench or {}).get("envs") if isinstance(bench, dict) else None
     if not isinstance(envs, dict):
@@ -800,10 +800,8 @@ def _default_profile_config() -> Path:
     return asset_root() / "assets" / "configs" / name
 
 
-class ProfileExecutor(BaselineExecutor):
-    """Subclass that swaps the default config + extracts trace_dir."""
-
-    benchmark_watchdog = False
+class ProfileExecutor(BenchmarkRunExecutor):
+    """Benchmark round with the torch profiler on; extracts and certifies the trace_dir."""
 
     def __init__(
         self,
@@ -832,12 +830,8 @@ class ProfileExecutor(BaselineExecutor):
         # checks ship alongside the pre-run statement of whether their subject could have been produced.
         self._instrumentation_preflight: dict[str, Any] | None = None
 
-    def _resolve_sink(self, ctx) -> Any:
-        """Decline the baseline event a profile run must never open."""
-        return None
-
     def _resolve_default_config(self) -> Path:
-        """Override BaselineExecutor's resolver to pick the profile yaml."""
+        """Pick the profile yaml for $FRAMEWORK."""
         return _default_profile_config()
 
     def _resolve_mn_round_trace_root(self, ctx) -> str:
@@ -1129,7 +1123,7 @@ class ProfileExecutor(BaselineExecutor):
         if not (params.get("output_dir") or extra.get("workspace")):
             output_dir = self._resolve_workspace(ctx, "profile")
             output_dir.mkdir(parents=True, exist_ok=True)
-            # Stash so BaselineExecutor.__call__ picks it up via ctx.extra.
+            # Stash so the benchmark round picks it up via ctx.extra.
             if extra is None:
                 ctx.extra = {"workspace": str(output_dir)}
                 extra = ctx.extra
@@ -1167,7 +1161,7 @@ class ProfileExecutor(BaselineExecutor):
         )
 
         # Multi-node only: pre-restart the server with this round's profiler dir, marking
-        # ``ctx.extra['mn_round_restarted']`` so BaselineExecutor skips a second restart.
+        # ``ctx.extra['mn_round_restarted']`` so the benchmark round skips a second restart.
         round_trace_root = self._resolve_mn_round_trace_root(ctx)
         if round_trace_root and agentx_session:
             return {

@@ -5,12 +5,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging as _logging
 import os
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
-from hyperloom.common.env import env_flag, is_truthy
+from hyperloom.common.env import env_flag
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
 from ..collaborator import CoordinatorCollaborator
@@ -20,6 +21,7 @@ from ..policy.gate import (
     PolicyDenied,
     validate_freeform_wave_task,
 )
+from hyperloom.inference_optimizer.trace.trajectory_trace import EVENT_TASK_RETRY, record_event, trajectory_scope
 from .runner import SpecialistFailureType, specialist_patch_preflight_error
 
 if TYPE_CHECKING:
@@ -44,7 +46,7 @@ FORCE_STALLED_KEEP_ROUNDS: int = 12
 class SpecialistDispatchCollaborator(CoordinatorCollaborator):
     """Specialist dispatch: warmup, auto-retry, wave fan-out, stalled-domain forcing, and round-entry construction."""
 
-    async def _warm_specialist_params(self, params: dict[str, Any]) -> None:
+    async def warm_specialist_params(self, params: dict[str, Any]) -> None:
         """Fill specialist task params with KnowledgePlane data before enqueue (mutates in place); missing fields stay empty.
 
         Args:
@@ -134,6 +136,10 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             params.setdefault("benchmark_mode", str(state.benchmark_mode))
         if getattr(state, "agentx_corpus_shape", None):
             params.setdefault("agentx_corpus_shape", dict(state.agentx_corpus_shape))
+        if isinstance(getattr(state, "grading", None), dict) and state.grading:
+            params.setdefault("agentx_grading", dict(state.grading))
+        if getattr(state, "agentx_backend", ""):
+            params.setdefault("agentx_backend", str(state.agentx_backend))
 
         # Advisory model_arch profile via arch_notes carrier (prompt-context only).
         if "arch_notes" not in params:
@@ -161,7 +167,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 params["source_hint_directories"] = list(_dirs)
 
         if "target_gap_notes" not in params:
-            _gap_notes = self._target_gap_advisory_block()
+            _gap_notes = self._coord.conversation.target_gap_advisory_block()
             if _gap_notes:
                 params["target_gap_notes"] = _gap_notes
 
@@ -255,7 +261,40 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 "hot_kernels_top15": hot_kernels,
             }
 
-    async def _maybe_auto_retry_specialist(
+        await self._warm_experience_kb(params)
+
+    async def _warm_experience_kb(self, params: dict[str, Any]) -> None:
+        """Inject this dispatch's Experience KB block into a FRAMEWORK_AGENT specialist and record the injection."""
+        state = self.shared_state
+        if "kb_read_id" in params:
+            return
+        if str(getattr(state, "phase", "") or "").strip().upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
+            return
+        from hyperloom.inference_optimizer.experience_kb import integration_for
+
+        integration = integration_for(self._coord, self.session_dir)
+        if integration is None:
+            return
+        evidence = await asyncio.to_thread(integration.read_for_specialist, state, params)
+        # The exposure travels with everything this specialist authors, under the keys orchestration proposals use;
+        # a read that matched nothing is recorded too, so it stays distinguishable from no read at all.
+        if evidence.read_id:
+            params["kb_read_id"] = evidence.read_id
+            params["kb_rendered_refs"] = [dict(ref) for ref in evidence.rendered_refs]
+        if evidence.status != "completed" or not evidence.prompt_block:
+            return
+        params["experience_kb_block"] = evidence.prompt_block
+        state.record_experience_kb_injection(
+            consumer="specialist",
+            domain=str(params.get("domain") or ""),
+            gap_canonical_id=str(params.get("gap_canonical_id") or ""),
+            read_id=evidence.read_id,
+            experience_ids=[str(ref.get("id") or "") for ref in evidence.rendered_refs],
+            experiences=[dict(item) for item in evidence.experiences],
+            prompt_block=evidence.prompt_block,
+        )
+
+    async def maybe_auto_retry_specialist(
         self,
         task: "Task",
         result: "SubAgentResult",
@@ -319,23 +358,14 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         retry_params["_auto_retry_attempt"] = next_attempt
         retry_params["_auto_retry_reason"] = f"{ftype.value}: {error}"[:300]
 
-        # Mirror _handle_delegate lane/ttl resolution so the retry task holds the
+        # Mirror handle_delegate lane/ttl resolution so the retry task holds the
         # same pools as the original and cannot run concurrently with serving.
-        lanes, ttl = self._registry_lanes_ttl("specialist")
-        from .profile import resolve_specialist_profile, uses_whole_machine_gpu_lane
+        lanes, ttl = self._coord.dispatcher.registry_lanes_ttl("specialist")
+        from .profile import requires_gpu, specialist_lanes
 
-        if resolve_specialist_profile(retry_params).reserves_benchmark_lane:
-            lanes = list(dict.fromkeys((*lanes, "benchmark_lane")))
-        needs_gpu = is_truthy(retry_params.get("needs_gpu"))
-        if not needs_gpu and uses_whole_machine_gpu_lane(retry_params):
-            # bench specialist: ensure needs_gpu is set so gpu_research_lane is acquired.
-            needs_gpu = True
-        if needs_gpu:
-            lanes = list(dict.fromkeys((*lanes, "gpu_research_lane")))
-            ttl = self._gpu_lease_ttl_sec(
-                int(ttl or 0),
-                params=retry_params,
-            )
+        lanes = list(specialist_lanes(retry_params, list(lanes)))
+        if requires_gpu(retry_params):
+            ttl = self._coord.dispatcher.gpu_lease_ttl_sec(int(ttl or 0), params=retry_params)
 
         # Stable base key across attempts: strip any prior ``-autoretryN`` suffix.
         base_key = str(task.idempotency_key or task.task_id or "")
@@ -345,13 +375,15 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 base_key = head
         retry_key = f"{base_key}-autoretry{next_attempt}"
 
-        new_task, was_existing = await self.tasks.create_or_return_existing(
-            kind="specialist",
-            params=retry_params,
-            idempotency_key=retry_key,
-            requires_lanes=lanes,
-            lease_ttl_sec=ttl,
-        )
+        with trajectory_scope(parent_span_id=task.task_id):
+            new_task, was_existing = await self.tasks.create_or_return_existing(
+                kind="specialist",
+                params=retry_params,
+                idempotency_key=retry_key,
+                requires_lanes=lanes,
+                lease_ttl_sec=ttl,
+                dispatch_class="coordinator",
+            )
         if was_existing:
             # Retry slot already taken: let normal bookkeeping record this attempt.
             await self._record_specialist_retry_exhausted(
@@ -363,7 +395,20 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 detail="retry slot already taken",
             )
             return False
-        await self._record_observation(
+        record_event(
+            EVENT_TASK_RETRY,
+            task_id=task.task_id,
+            parent_span_id=task.task_id,
+            attributes={
+                "name": "specialist",
+                "retry_task_id": new_task.task_id,
+                "attempt": next_attempt,
+                "max_attempts": cap,
+                "failure_type": ftype.value,
+                "reason": error[:200],
+            },
+        )
+        await self._coord.writeback.record_observation(
             "coordinator",
             "observation",
             {
@@ -407,7 +452,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             detail: Why no further retry was scheduled.
         """
         params = task.params or {}
-        await self._record_observation(
+        await self._coord.writeback.record_observation(
             "coordinator",
             "observation",
             {
@@ -431,16 +476,16 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             detail,
         )
 
-    async def _fan_out_specialist_wave(
+    async def fan_out_specialist_wave(
         self,
         source: str,
         intent: Intent,
         params: dict[str, Any],
     ) -> None:
         """Fan a specialist delegate carrying ``params.tasks=[...]`` into N
-        standard free-form specialist dispatches (scope=freeform, lane=cpu,
-        mode=research defaults). Each fanned task is re-dispatched through the
-        normal ``_handle_delegate`` path. Per-task idempotency keys derive from
+        standard free-form specialist dispatches (scope=freeform, mode=research
+        defaults). Each fanned task is re-dispatched through the
+        normal ``handle_delegate`` path. Per-task idempotency keys derive from
         the wave key. Each entry must pass the same structural checks as
         :func:`validate_freeform_wave_task` (the PolicyGate runs these first).
 
@@ -464,7 +509,6 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             for carry in (
                 "mode",
                 "bench",
-                "lane",
                 "model",
                 "priority",
                 "timeout_minutes",
@@ -473,7 +517,6 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 if isinstance(task, dict) and carry in task:
                     sub_params[carry] = task[carry]
             sub_params.setdefault("mode", "research")
-            sub_params.setdefault("lane", "cpu")
             sub_payload = dict(intent.payload)
             sub_payload["params"] = sub_params
             if base_key:
@@ -484,25 +527,26 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             try:
                 self.policy.validate_intent(source, sub_intent)
             except PolicyDenied as denied:
-                await self._record_policy_denied(source, sub_intent, denied)
+                await self._coord.writeback.record_policy_denied(source, sub_intent, denied)
                 raise
             pending.append(sub_intent)
         for sub_intent in pending:
-            await self._handle_delegate(source, sub_intent)
+            await self._coord.router.handle_delegate(source, sub_intent)
 
-    async def _maybe_force_stalled_domain_specialist(self) -> None:
+    async def maybe_force_stalled_domain_specialist(self) -> None:
         """Force-dispatch a domain specialist for a domain untouched for too many
         config-arm rounds that still has an open gap in the gaps[] ledger.
 
         A real scheduling event (a domain delegate routed through PolicyGate +
         warmup + the GPU specialist pool). Idempotent per
-        ``(anchor, round, macro_cycle)`` and self-throttling (zeroes the
-        per-anchor counter on dispatch). At most one forced dispatch per tick.
+        ``(anchor, round, macro_cycle)``; a domain with a specialist already
+        queued or running is skipped, and the dispatcher zeroes the per-anchor
+        counter when the forced specialist spawns. At most one forced dispatch
+        per tick.
 
         Note:
             Side-effecting: may dispatch a domain specialist via
-            ``_handle_intent`` and mutate per-anchor throttle counters on
-            ``shared_state``. Returns nothing.
+            ``handle_intent``. Returns nothing.
         """
         state = self.shared_state
         if str(getattr(state, "phase", "") or "").upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
@@ -520,13 +564,18 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
 
         from .domains import domain_for_tag
 
+        busy_domains = {
+            str((t.params or {}).get("domain") or "")
+            for t in (*await self.tasks.queued(), *await self.tasks.running())
+            if t.kind == "specialist"
+        }
         round_id = int((state.explore_search or {}).get("cursor") or 0)
         for anchor in stalled:
             gap_cid = state.best_gap_for_anchor(anchor)
             if not gap_cid:
                 continue
             dom = domain_for_tag(anchor)
-            if dom is None:
+            if dom is None or dom.key in busy_domains:
                 continue
             params: dict[str, Any] = {
                 "domain": dom.key,
@@ -541,13 +590,13 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             is_source_patch = resolve_specialist_profile(params, domain=dom).mode == MODE_PATCH
             if is_source_patch and state.is_pruned(_SOURCE_PATCH_FAMILY):
                 continue
-            idempotency_key = f"forced-stalled-{anchor}-round{round_id}{self._cycle_idem_suffix()}"
+            idempotency_key = f"forced-stalled-{anchor}-round{round_id}{self._coord.dispatcher.cycle_idem_suffix()}"
             lookup = getattr(self.tasks, "find_by_idempotency_key", None)
             if callable(lookup):
                 existing = await lookup(idempotency_key)
                 if existing is not None:
                     continue
-            await self._warm_specialist_params(params)
+            await self.warm_specialist_params(params)
             if is_source_patch:
                 preflight_error = specialist_patch_preflight_error(
                     params,
@@ -581,9 +630,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                     "idempotency_key": idempotency_key,
                 },
             )
-            # Zero the counter up-front so a slow enqueue can't re-fire next tick.
-            state.note_specialist_dispatched(anchor)
-            await self._handle_intent("orchestration", intent)
+            await self._coord.router.handle_intent("orchestration", intent)
             try:
                 state.save(self.session_dir)
             except Exception:
@@ -601,7 +648,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             return None
         return None
 
-    def _build_specialist_round_entry(
+    def build_specialist_round_entry(
         self,
         *,
         task: "Task",
@@ -667,6 +714,8 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             "framework_batch_id",
             "reauthor_attempt",
             "apply_retry_attempt",
+            "kb_read_id",
+            "kb_rendered_refs",
         ):
             value = done_payload.get(key)
             if value in (None, "", [], {}):

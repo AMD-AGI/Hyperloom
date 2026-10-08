@@ -75,6 +75,9 @@ from hyperloom.inference_optimizer.trace.parse_usage import (
     parse_codex_jsonl_turn_usages,
     parse_codex_jsonl_usage,
 )
+from hyperloom.inference_optimizer.trace.context_events import record_stream_json_compactions
+from hyperloom.inference_optimizer.trace.request_events import record_stream_json_requests
+from hyperloom.inference_optimizer.trace.tool_events import record_stream_json_tools
 
 
 log = logging.getLogger(__name__)
@@ -130,6 +133,7 @@ _SPECIALIST_ENV_ALLOWLIST: frozenset[str] = frozenset(
         # the same session the parent does. Not a credential.
         "CLAW_SESSION_ID",
         "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CONFIG_DIR",
         "CLAUDE_MODEL",
         "CODEX_MODEL",
         "HOME",
@@ -644,49 +648,6 @@ def _declared_targets(done_payload: Mapping[str, Any] | None) -> tuple[str, ...]
 
 
 # Worktree management
-def _pick_worktree_base(
-    roots: tuple[str, ...],
-    *,
-    preferred: str = "",
-) -> Path | None:
-    """Return the checkout to branch the specialist's worktree off.
-
-    ``preferred`` wins whenever it is a checkout. It names the framework the
-    session is actually optimising, which ``roots`` cannot express: their order
-    records only how they were discovered. Selecting by position worked while
-    exactly one root happened to be a git checkout; when a pod started shipping
-    aiter as one it sorted first, so WorldPlay specialists were handed an aiter
-    worktree and the ``hyvideo/`` patches they wrote grounded against nothing.
-
-    Falls back to None when nothing qualifies — the runner then runs the
-    specialist without an isolated worktree.
-
-    Args:
-        roots: Candidate root paths to probe for a ``.git`` marker.
-        preferred: Checkout of the framework under optimisation, if any. Skipped
-            when it is absent or not a checkout, so a pip-installed framework
-            costs the specialist nothing.
-
-    Returns:
-        The chosen checkout root, or ``None`` when none qualify.
-    """
-
-    def _is_checkout(path: str) -> Path | None:
-        p = Path(path)
-        # ``.git`` may be a file (worktree) or a dir (repo).
-        return p if p.is_dir() and (p / ".git").exists() else None
-
-    if preferred:
-        chosen = _is_checkout(preferred)
-        if chosen is not None:
-            return chosen
-    for r in roots:
-        chosen = _is_checkout(r)
-        if chosen is not None:
-            return chosen
-    return None
-
-
 def _setup_worktree(
     base: Path,
     worktree_path: Path,
@@ -942,11 +903,10 @@ class SpecialistSubprocessDispatcher:
 
         apply_llm_stability_env(env)
         # The child spends against the gateway, so tag it or its spend lands
-        # under no component at all. The task is offered but no preset selects
-        # it: one tag per task would give the spend rollup as many buckets as
-        # there are tasks, which is the opposite of what it is read for. Reading
-        # spend per task needs a header of its own, not a value in this one.
-        inject_attribution_env(env, component="specialist", operation="run_agent", task_id=task_id)
+        # under no component at all. The task tag is what attributes the
+        # requests of a child that dies before its result row -- the only
+        # place such a child's token usage survives is the gateway's log.
+        inject_attribution_env(env, component="specialist", operation="run_agent", task=task_id)
 
         backend = ""
         try:
@@ -1009,9 +969,14 @@ class SpecialistSubprocessDispatcher:
             env["ROCR_VISIBLE_DEVICES"] = visible
             env["INFERENCE_OPTIMIZER_SPECIALIST_GPU_IDS"] = visible
         else:
-            # CPU specialists must not inherit serving GPU visibility.
+            # CPU specialists: hide all GPUs and use workspace-local compiler caches.
             for var in GPU_MASK_ENV_NAMES:
-                env.pop(var, None)
+                env[var] = ""
+            cache_root = workspace / ".cache"
+            env["TRITON_CACHE_DIR"] = str(cache_root / "triton")
+            env["TORCHINDUCTOR_CACHE_DIR"] = str(cache_root / "torchinductor")
+            env["AITER_JIT_DIR"] = str(cache_root / "aiter_jit")
+            env["INFERENCE_OPTIMIZER_AITER_JIT_DIR"] = str(cache_root / "aiter_jit")
 
         with cancel_scope_listener() as scope:
             log_fh: Any = None
@@ -1211,6 +1176,9 @@ class SpecialistSubprocessDispatcher:
             response = parse_claude_stream_json_response(process_log)
             tool_calls = parse_claude_stream_json_tool_calls(process_log)
             turn_usages = parse_claude_stream_json_turn_usages(process_log)
+            record_stream_json_requests(process_log)
+            record_stream_json_tools(process_log)
+            record_stream_json_compactions(process_log)
 
         return SpecialistSubprocessResult(
             done_payload=done_payload,
@@ -1729,8 +1697,9 @@ class SpecialistSubprocessDispatcher:
         Args:
             worktree: Per-task worktree, or None.
             workspace: Task workspace.
-            worktree_base: Checkout the worktree was branched off, which is the
-                apply root of anything harvested from it.
+            worktree_base: The tree the worktree stands for -- the checkout it
+                was branched off, or the directory it holds a snapshot of --
+                which is the apply root of anything harvested from it.
             worktree_base_commit: The commit recorded when the worktree was
                 created, so the harvest stays anchored to the pre-round state
                 even if the specialist committed.
@@ -1823,7 +1792,6 @@ __all__ = [
     "SpecialistSubprocessConfig",
     "SpecialistSubprocessDispatcher",
     "SpecialistSubprocessResult",
-    "_pick_worktree_base",
     "_setup_worktree",
     "resolve_codex_executable",
 ]

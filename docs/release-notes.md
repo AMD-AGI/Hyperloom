@@ -1,13 +1,13 @@
 ---
 myst:
   html_meta:
-    "description": "Hyperloom release notes: headline capabilities for version 1.1.2, a patch release that validates ROCm 10, makes ENABLEMENT its own phase, retires robustness supervision in favour of explicit resume and recovery, and supports ATOM end to end; plus the 1.1.1 and 1.1.0 releases."
+    "description": "Hyperloom release notes: headline capabilities for version 1.1.3, a patch release on top of 1.1.2; plus the 1.1.2 release, which validates ROCm 10, makes ENABLEMENT its own phase, retires robustness supervision in favour of explicit resume and recovery, and supports ATOM end to end, and the 1.1.1 and 1.1.0 releases."
     "keywords": "Hyperloom, release notes, LLM inference, AMD GPU, ROCm, agentic optimization, TraceLens, GEAK, KernelForge, Primus-Claw, bare metal, kernel optimization"
 ---
 
 # Hyperloom release notes
 
-The current packaged version is 1.1.2 (`pyproject.toml`). For the
+The current packaged version is 1.1.3 (`pyproject.toml`). For the
 per-change history since the initial snapshot, and for a detailed breakdown of
 all previous Hyperloom pre-release versions, see
 [Releases](https://github.com/AMD-AGI/Hyperloom/releases); this page
@@ -20,7 +20,95 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
-Nothing yet.
+### Removed
+
+- **`--target-summary`.** The flag advertised a free-text goal summary
+  "surfaced in prompts" and no prompt ever read it. The value — the operator's
+  string, or one composed from `--target-gain` / `--target-tput` /
+  `--target-roofline` and `--max-hours` when the flag was absent — only ever
+  landed in the `target_summary` key of the session state record, where the
+  orchestration role could also rewrite it to no effect. Launching with the
+  flag now fails with an unrecognised-argument error instead of accepting a
+  sentence that bought nothing, and `target_summary` is gone from the state
+  record: a reader parsing that key must drop it. The objective itself is
+  unchanged and still comes from the target flags.
+
+- **`--warm-replay-min-reproduce-pct`.** Its help named the bar that decided
+  `status=reproduced` against `status=drift`, and that was never what it did.
+  A warm replay is adopted when it clears the session's keep threshold against
+  the baseline and wins the lift to `current_best`; the flag's fraction of the
+  recipe's *historical* gain — a number measured on another pod — was advisory
+  only, annotating the settled outcome with `below_historical_reproduce_pct`
+  and `historical_reproduce_bar_pct` and rejecting nothing. Those two keys are
+  gone from `warm_replay_outcome` and from the SBD V6 `warm_replay` verdict
+  row; the reproduced/drift decision an operator sees is unchanged, and
+  `--no-warm-replay` and `--warm-replay-min-confidence` are untouched. The
+  flag's cost was a threshold operators could tune for hours without moving an
+  adoption.
+
+- **`--plateau-kernel-revert-streak` / `--plateau-kernel-keep-gain` /
+  `--plateau-kernel-lookback`.** The three thresholds tuned one advisory
+  paragraph in the orchestration prompt — "KERNEL_AGENT plateau detected:
+  REVERT streak or low recent KEEP gain" — and nothing else. KERNEL leaves when
+  its kernel work drains, when the rewrite controller settles the macro cycle,
+  when the agent has gone the idle window without progress, or on its phase
+  budget — never on that verdict, so the knobs changed what the model was told
+  and no exit. The paragraph and the computation behind
+  it go with the flags, and the plateau advisory now renders for OPTIMIZE only,
+  where its text reads the same predicate the exit rule does. The
+  `--plateau-explore-*` flags are untouched.
+
+### Changed
+
+- **A malformed environment value stops the run instead of being silently
+  replaced by the default.** `INFERENCE_OPTIMIZER_CYCLE_HOURS`,
+  `INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD`,
+  `INFERENCE_OPTIMIZER_REACTOR_TURN_TIMEOUT_SEC`,
+  `INFERENCE_OPTIMIZER_KERNEL_IDLE_MAX_TICKS`,
+  `INFERENCE_OPTIMIZER_KERNEL_IDLE_MIN_SECONDS`, `SWEEP_VARIANT_TIMEOUT_SEC`,
+  `HYPERLOOM_FUSION_KEEP_PCT`, `GEAK_E2E_TIMEOUT_S`, `GEAK_BUDGET_MARGIN_S`,
+  `GEAK_MIN_RUN_S` and `GEAK_TERM_GRACE_S` now raise `EnvValueError` naming the
+  variable and the value when they are set to something that is not a number.
+  A typo used to be swallowed: the run proceeded on the default, so a session
+  launched with `GEAK_MIN_RUN_S=600s` or `SWEEP_VARIANT_TIMEOUT_SEC=40m` spent
+  its hours under limits nobody had chosen, and the report gave no sign the
+  setting had been ignored. The two KERNEL idle variables are read at import,
+  so a bad value there fails the launch outright. Out-of-range is still not the
+  same as malformed: a non-positive or non-finite reactor turn timeout, and a
+  KERNEL idle tick count below `1` or an idle window at or below `0`, continue
+  to fall back to the default.
+
+## Hyperloom 1.1.3 release
+
+The [1.1.3 release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.1.3)
+is a patch release on top of 1.1.2. The per-change history is on the
+[Releases](https://github.com/AMD-AGI/Hyperloom/releases) page.
+
+### Added
+
+- **`--repo-scope` / `--no-repo-scope` for `forge-fuse`.** Give discovery and
+  authoring the whole framework repository instead of one resolved file.
+  Requires `--discover llm` or `--discover anchored`. Use when the fusion chain
+  is not in the arch-class model file and you do not want to name its location.
+
+- **`--fuse-kernel` for `forge-fuse`.** Name the GPU kernel a fusion is built
+  around (full trace spelling); neighbours are taken from the trace and
+  aggregated by op category. Implies `--discover anchored`. With `--dry-run`,
+  resolution writes `fusion_anchor.json` and stops with the new
+  `anchor_resolved` verdict. The manifest gains an `anchor` key (`null` when
+  unused).
+
+### Fixed
+
+- **Fusion discovery no longer proposes folding work into a tuned library GEMM's
+  epilogue.** Prefer the consumer's prologue so a dtype change does not knock a
+  tuned GEMM off its table (anchored discovery names that direction). This is a
+  discovery-time constraint, not a post-fusion gate.
+
+- **`forge-fuse` forwards a concrete agent provider to `forge-loop`.** Default
+  `--agent-backend auto` was passed through unchanged; `forge-loop` rejects
+  `auto`, so campaigns died after discovery. The resolved provider is now
+  forwarded.
 
 ## Hyperloom 1.1.2 release
 

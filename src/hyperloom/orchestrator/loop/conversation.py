@@ -4,9 +4,11 @@
 """Coordinator prompt composition: inbox rendering, per-tick phase/mission/advisory blocks, MCP context readers, and reactor conversation tracing."""
 
 from __future__ import annotations
+import asyncio
 import json
 import time
 from typing import Any
+from ..bus.gpu_pool import gpus_by_task_sync
 from ..phases import machine_state as _phase_state
 from ..policy.projection import resource_pools_summary
 from ..roles.base import BackendTurnResult
@@ -16,9 +18,11 @@ from ..state.failure_evidence import UNMEASURED_OUTCOMES, render_failure_line
 from hyperloom.common.prompt_safety import defang_prompt_structure as _defang_prompt_structure
 from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_inbox
 
-from .coordinator_helpers import _parse_iso_unix, serialize_verdict_advisory
+from hyperloom.common.timeutil import parse_iso_unix_or_zero
+from .verdicts import serialize_verdict_advisory
 from ..state.task_registry import Task
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
+from ..collaborator import CoordinatorCollaborator
 import logging as _logging
 
 log = _logging.getLogger(__name__)
@@ -184,16 +188,45 @@ def _format_inbox_event(m: "Message", *, max_variant_rows: int = 3) -> str:
     return f"{head} payload={payload}"
 
 
-class ConversationCollaborator:
-    """Extracted collaborator; delegates unknown attrs to its Coordinator."""
+class ConversationCollaborator(CoordinatorCollaborator):
+    """Manages conversation rounds: context tools, prompt injection, and round history."""
 
-    def __init__(self, coordinator) -> None:
-        self._coord = coordinator
+    async def _kb_prompt_block(self, untested_proposals: str) -> str:
+        """Read shared Experience evidence once per FRAMEWORK_AGENT orchestration tick."""
+        from hyperloom.inference_optimizer.experience_kb import integration_for
 
-    def __getattr__(self, name: str):
-        return getattr(object.__getattribute__(self, "_coord"), name)
+        integration = integration_for(self._coord, self.session_dir)
+        if integration is None:
+            return ""
+        evidence = await asyncio.to_thread(
+            integration.read_for_framework,
+            self.shared_state,
+            untested_proposals=untested_proposals,
+        )
+        self._coord._kb_last_read = evidence
+        if evidence.status != "completed" or not evidence.prompt_block:
+            return ""
+        block = "\n".join(
+            (
+                "=== Experience KB warm-start evidence ===",
+                ("INVARIANT: the original Recipe benchmark measurement remains the gain-accounting baseline."),
+                (
+                    "Historical configurations may seed proposals/current-best "
+                    "candidates only; never replace benchmark_baseline."
+                ),
+                evidence.prompt_block,
+            )
+        )
+        self.shared_state.record_experience_kb_injection(
+            consumer="orchestration",
+            read_id=evidence.read_id,
+            experience_ids=[str(ref.get("id") or "") for ref in evidence.rendered_refs],
+            experiences=[dict(item) for item in evidence.experiences],
+            prompt_block=block,
+        )
+        return block
 
-    def _attach_orchestration_context_tools(self) -> None:
+    def attach_orchestration_context_tools(self) -> None:
         """Bind a read-only ContextProvider to the orchestration backend (no-op without setter)."""
         backend = self.backends.get("orchestration")
         setter = getattr(backend, "set_context_provider", None)
@@ -208,7 +241,6 @@ class ConversationCollaborator:
                 analysis_reader=self._context_analysis_reader,
                 recent_outcomes_reader=self._context_recent_outcomes_reader,
                 running_tasks_reader=self._context_running_tasks_reader,
-                action_runner=self._coord.dispatcher._run_action_now_wait,
                 reference_reader=self._context_reference_reader,
             )
             setter(provider)
@@ -234,38 +266,22 @@ class ConversationCollaborator:
 
     def _context_inbox_reader(self, since_seq: int = 0) -> str:
         """Synchronous projection of the orchestration inbox tail (sync SQLite path)."""
-        try:
-            rows = self.bus.db.fetchall_sync(
-                "SELECT * FROM events WHERE seq > ? AND (to_agent = ? OR to_agent = '*') ORDER BY seq ASC",
-                (int(since_seq or 0), "orchestration"),
-            )
-        except Exception as exc:  # noqa: BLE001
-            return f"(inbox unavailable: {exc!r})"
-        if not rows:
+        msgs = self.bus.inbox_context_sync("orchestration", after_seq=int(since_seq or 0))
+        if not msgs:
             return "(no inbox events)"
 
-        msgs = [Message.from_row(r) for r in rows]
         lines = [_format_inbox_event(m) for m in msgs]
         return "\n".join(lines)
 
     def _context_recent_outcomes_reader(self, top_k: int = 8) -> str:
         """Synchronous projection of recent action outcomes."""
-        try:
-            k = max(1, min(int(top_k or 8), 50))
-        except (TypeError, ValueError):
-            k = 8
-        try:
-            rows = self.bus.db.fetchall_sync(
-                "SELECT * FROM events WHERE topic IN ('delegated_result', 'review_verdict') ORDER BY seq DESC LIMIT ?",
-                (k,),
-            )
-        except Exception as exc:  # noqa: BLE001
-            return f"(recent outcomes unavailable: {exc!r})"
-        if not rows:
+        k = max(1, min(top_k or 8, 50))
+        newest_first = self.bus.recent_outcomes_context_sync(limit=k)
+        if not newest_first:
             return "(no recent outcomes)"
-
         # Flip newest-first query to newest-last for chronological reading.
-        msgs = [Message.from_row(r) for r in rows][::-1]
+        msgs = newest_first[::-1]
+
         header = "=== Recent action outcomes (newest last) ==="
         body_lines: list[str] = []
         body_lines.extend(_format_inbox_event(m, max_variant_rows=_RECENT_OUTCOMES_VARIANT_ROWS) for m in msgs)
@@ -280,37 +296,21 @@ class ConversationCollaborator:
         return "\n".join([header] + rendered)
 
     def _context_running_tasks_reader(self) -> str:
-        """Synchronous projection of in-flight tasks with their held resources."""
-        try:
-            rows = self.bus.db.fetchall_sync(
-                "SELECT * FROM tasks WHERE state='running' ORDER BY updated_at ASC",
-                (),
-            )
-        except Exception as exc:  # noqa: BLE001
-            return f"(running tasks unavailable: {exc!r})"
-        if not rows:
-            return "(no tasks in flight)"
+        """Project in-flight tasks and their held resources from three reads, not one snapshot."""
+        tasks = self.tasks.running_context_sync()
+        backlog = self._queued_backlog_line()
+        if not tasks:
+            return "\n".join(line for line in ("(no tasks in flight)", backlog) if line)
 
-        lanes_by_task: dict[str, list[str]] = {}
-        # Soonest lane expiry: the first one to lapse is when reclaim starts.
-        expiry_by_task: dict[str, str] = {}
-        for r in self.bus.db.fetchall_sync("SELECT lane, task_id, expires_at FROM leases", ()):
-            tid = str(r["task_id"])
-            lanes_by_task.setdefault(tid, []).append(str(r["lane"]))
-            expires = str(r["expires_at"])
-            prev = expiry_by_task.get(tid)
-            if prev is None or expires < prev:
-                expiry_by_task[tid] = expires
-        gpus_by_task: dict[str, list[int]] = {}
-        for r in self.bus.db.fetchall_sync("SELECT gpu_id, task_id FROM gpu_leases", ()):
-            gpus_by_task.setdefault(str(r["task_id"]), []).append(int(r["gpu_id"]))
-
+        lanes_by_task = self.locks.lanes_by_task_sync()
+        gpus_by_task = gpus_by_task_sync(self.db)
         now_unix = time.time()
         lines = ["=== Tasks in flight ==="]
-        for row in rows:
-            task = Task.from_row(row)
+        for task in tasks:
+            lanes, expires_at = lanes_by_task.get(task.task_id, ([], ""))
+            gpus = gpus_by_task.get(task.task_id, [])
             params = task.params or {}
-            started = _parse_iso_unix(task.updated_at)
+            started = parse_iso_unix_or_zero(task.updated_at)
             running_sec = max(0.0, now_unix - started) if started > 0 else 0.0
             parts = [
                 f"  - task_id={task.task_id}",
@@ -326,22 +326,32 @@ class ConversationCollaborator:
             parts.append(f"idempotency_key={task.idempotency_key!r}")
             if task.lease_ttl_sec:
                 parts.append(f"lease_ttl_sec={task.lease_ttl_sec}")
-            expires_at = expiry_by_task.get(task.task_id, "")
             if expires_at:
-                exp_unix = _parse_iso_unix(expires_at)
+                exp_unix = parse_iso_unix_or_zero(expires_at)
                 if exp_unix > 0:
                     parts.append(f"lease_expires_in_sec={int(exp_unix - now_unix)}")
-            lanes = lanes_by_task.get(task.task_id)
             if lanes:
                 parts.append(f"lanes={sorted(lanes)}")
-            gpus = gpus_by_task.get(task.task_id)
             if gpus:
                 parts.append(f"gpu_ids={sorted(gpus)}")
             hb_age = self._task_heartbeat_age_sec(task, now_unix=now_unix)
             if hb_age is not None:
                 parts.append(f"heartbeat_age_sec={int(hb_age)}")
             lines.append(" ".join(parts))
+        if backlog:
+            lines.append(backlog)
         return "\n".join(lines)
+
+    def _queued_backlog_line(self) -> str:
+        """Benchmark-lane backlog: queued integrate_patch / explore tasks and untested proposals."""
+        counts = self.tasks.queued_kind_counts_sync()
+        counts["untested proposals"] = len(self.shared_state.untested_proposal_rows())
+        parts = [
+            f"{counts[kind]} {kind}"
+            for kind in ("integrate_patch", "explore", "untested proposals")
+            if counts.get(kind)
+        ]
+        return "queued backlog: " + ", ".join(parts) if parts else ""
 
     def _task_heartbeat_age_sec(self, task: "Task", *, now_unix: float) -> float | None:
         """Age of a specialist's freshest liveness file, mirroring the reaper."""
@@ -365,7 +375,7 @@ class ConversationCollaborator:
         if blob and blob.strip():
             return blob
         # Fallback: read the path recorded on last_trace_analyze.
-        lta = getattr(self.shared_state, "last_trace_analyze", {}) or {}
+        lta = self.shared_state.last_trace_analyze or {}
         path = str(lta.get("analysis_md_path") or "")
         if path:
             try:
@@ -376,7 +386,7 @@ class ConversationCollaborator:
                 return f"(analysis.md unreadable at {path}: {exc!r})"
         return "(no analysis.md snapshot yet)"
 
-    def _record_reactor_conversation(
+    def record_reactor_conversation(
         self,
         agent_name: str,
         result: BackendTurnResult,
@@ -402,34 +412,27 @@ class ConversationCollaborator:
         )
         append_conversation(session_dir=self.session_dir, record=record)
 
-    async def _compose_prompt(self, agent_name: str) -> str:
-        """Compose the orchestration prompt: SharedState summary + inbox tail (with canonical msg_id per inbox row)."""
+    async def compose_prompt(self, agent_name: str) -> str:
+        """Compose the prompt for *agent_name*: session context + inbox tail (with canonical msg_id per inbox row)."""
         sections: list[str] = []
 
         # SESSION_DIR contract — literal path for every agent.
         sections.append(f"SESSION_DIR={self.session_dir}")
 
         # Per-tick phase block for every agent, high in the prompt.
-        phase_block = _phase_state.phase_status_summary(
-            self.shared_state,
-            budget_pct=self._phase_budget_pct,
-        )
+        phase_block = _phase_state.phase_status_summary(self.shared_state)
         if phase_block:
             sections.append("=== Phase ===")
             sections.append(phase_block)
 
         if agent_name == "orchestration":
-            # Refresh before any section renders it.
-            obj = self._current_objective
-            self.shared_state.target_gap_pct = obj.gap_pct(self.shared_state) if obj is not None else 0.0
             sections.append("=== Mission progress ===")
             sections.append(self.shared_state.to_mission_summary())
-            cycle_strategy_block = self._cycle_strategy_block()
-            if cycle_strategy_block:
-                sections.append(cycle_strategy_block)
-            if self._run_deadline is not None and self._run_started_monotonic is not None:
-                remaining_min = max(0.0, self._run_deadline.remaining() / 60.0)
-                elapsed_min = (time.monotonic() - self._run_started_monotonic) / 60.0
+            deadline = self._coord.run_deadline
+            started = self._coord.run_started_monotonic
+            if deadline is not None and started is not None:
+                remaining_min = max(0.0, deadline.remaining() / 60.0)
+                elapsed_min = (time.monotonic() - started) / 60.0
                 budget_min = self.shared_state.max_minutes or 0
                 sections.append("=== Time budget ===")
                 sections.append(
@@ -439,13 +442,22 @@ class ConversationCollaborator:
                 )
                 if remaining_min <= 5.0 and not self.shared_state.closing_phase:
                     sections.append(
-                        "WARNING: < 5 min remaining. Prefer `report` next; new "
-                        "`explore` rounds (which bench every variant on the "
-                        "stack) will likely be cut by the deadline."
+                        "WARNING: < 5 min remaining. Avoid new `explore` rounds "
+                        "(which bench every variant on the stack) — they will "
+                        "likely be cut by the deadline. The Coordinator will "
+                        "auto-enqueue `report` when the session closes."
                     )
 
         sections.append("=== Shared session state ===")
         sections.append(self.shared_state.to_prompt_summary())
+        sections.append(f"target_gap_pct={self._coord.target_gap_pct():.2f}")
+        # Not wrapped, unlike the advisory blocks below: a latency budget changes
+        # what a KEEP means, so losing it silently would have the model route as
+        # if the session were unconstrained. Pure string assembly, no I/O.
+        latency_block = self.shared_state.to_latency_budget_summary()
+        if latency_block:
+            sections.append("=== Latency budget (constraint) ===")
+            sections.append(latency_block)
         sections.append("=== Resource pools ===")
         sections.append(resource_pools_summary(self.shared_state))
         if agent_name == "orchestration":
@@ -457,6 +469,9 @@ class ConversationCollaborator:
                 if untested_block:
                     sections.append("=== Untested proposals (current cycle) ===")
                     sections.append(untested_block)
+                kb_block = await self._kb_prompt_block(untested_block)
+                if kb_block:
+                    sections.append(kb_block)
 
         # Recipe KB T0 warm-start snapshot + structured gaps[] ledger.
         if agent_name == "orchestration":
@@ -471,7 +486,7 @@ class ConversationCollaborator:
             research_block = self._specialist_findings_block()
             if research_block:
                 sections.append(research_block)
-            gap_block = self._target_gap_advisory_block()
+            gap_block = self.target_gap_advisory_block()
             if gap_block:
                 sections.append("=== External target gap (advisory) ===")
                 sections.append(gap_block)
@@ -492,7 +507,7 @@ class ConversationCollaborator:
                 sections.append("=== Intervention mix (telemetry) ===")
                 sections.append(mix_block)
 
-            plateau_block = self._plateau_advisory_block()
+            plateau_block = self.plateau_advisory_block()
             if plateau_block:
                 sections.append("=== Plateau advisory ===")
                 sections.append(plateau_block)
@@ -530,8 +545,6 @@ class ConversationCollaborator:
                 sections.append("=== Discarded escalation hint (advisory) ===")
                 sections.append(discarded_escalate_block)
 
-        # NOTE: there is deliberately no "=== Specialist health ===" block.
-
         # 2. Inbox tail since this agent's last cursor.
         cursor = await self.cursors.load(agent_name)
         msgs = await self.bus.replay_for(agent_name, after_seq=cursor.last_processed_seq)
@@ -553,7 +566,7 @@ class ConversationCollaborator:
 
         return "\n".join(sections)
 
-    async def _advance_rendered_cursor(self, agent_name: str) -> None:
+    async def advance_rendered_cursor(self, agent_name: str) -> None:
         """Advance an agent's read cursor to the last message its prompt rendered."""
         entry = self._coord._rendered_cursor.get(agent_name)
         if entry is None:
@@ -563,7 +576,7 @@ class ConversationCollaborator:
 
     async def _augment_critic_inbox_with_pending(self, rendered: list["Message"]) -> list["Message"]:
         """Ensure every undecided proposal awaiting a Critic verdict is present."""
-        pending = [p for p in self.state.pending_proposals.values() if not getattr(p, "decided", False)]
+        pending = list(self.state.pending_proposals.values())
         if not pending:
             return rendered
         seen = {getattr(m, "msg_id", None) for m in rendered}
@@ -585,9 +598,9 @@ class ConversationCollaborator:
         merged.sort(key=lambda m: int(getattr(m, "seq", 0) or 0))
         return merged
 
-    async def _load_system_prompt(self, agent_name: str) -> str:
+    async def load_system_prompt(self, agent_name: str) -> str:
         """Load the system prompt for an agent, honoring overrides."""
-        override = getattr(self, "system_prompt_overrides", {}).get(agent_name)
+        override = self._coord.orch_prompt.get(agent_name)
         if override is not None:
             return override
         role = self.role_registry[agent_name]
@@ -599,13 +612,10 @@ class ConversationCollaborator:
             return f"(no system prompt for {agent_name})"
 
     # Advisory prompt blocks (folded in from the former AdvisoryCollaborator).
-    def _plateau_advisory_block(self) -> str:
+    def plateau_advisory_block(self) -> str:
         """Render the plateau-judgment advisory block for the current phase."""
         state = self.shared_state
-        phase = (getattr(state, "phase", "") or "").strip().upper()
-        overrides = getattr(state, "plateau_overrides", None) or {}
-        if not isinstance(overrides, dict):
-            overrides = {}
+        phase = (state.phase or "").strip().upper()
         lines: list[str] = []
         if phase == _phase_state.PHASE_FRAMEWORK_AGENT:
             # The advisory reads the same predicate the exit rule does, so the
@@ -615,15 +625,6 @@ class ConversationCollaborator:
             source_dry = bool(evidence.get("source_arm_plateaued"))
             config_ev = evidence
             source_ev = evidence
-            try:
-                self._record_advisory_plateau(
-                    config=(config_dry, config_ev),
-                    source=(source_dry, source_ev),
-                )
-            except AttributeError:
-                # A stand-in that borrowed this method without the recorder
-                # plumbing; the advisory itself does not depend on it.
-                pass
             if config_dry:
                 lines.append("OPTIMIZE config arm plateaued: low recent KEEP gain plus specialist empty streak.")
                 lines.append(
@@ -646,118 +647,23 @@ class ConversationCollaborator:
                 )
             if config_dry != source_dry:
                 lines.append("  Only one arm is dry: the other lever is still live, and the phase stays open.")
-        elif phase == _phase_state.PHASE_KERNEL_AGENT:
-            triggered, evidence = _phase_state.compute_plateau_kernel(
-                state,
-                lookback=int(
-                    overrides.get(
-                        "kernel_lookback",
-                        _phase_state.DEFAULT_PLATEAU_KERNEL_LOOKBACK,
-                    )
-                ),
-                revert_streak_threshold=int(
-                    overrides.get(
-                        "kernel_revert_streak",
-                        _phase_state.DEFAULT_PLATEAU_KERNEL_REVERT_STREAK,
-                    )
-                ),
-                keep_gain_threshold_pct=float(
-                    overrides.get(
-                        "kernel_keep_gain_pct",
-                        _phase_state.DEFAULT_PLATEAU_KERNEL_KEEP_GAIN_PCT,
-                    )
-                ),
-            )
-            if triggered:
-                lines.append("KERNEL_AGENT plateau detected: REVERT streak or low recent KEEP gain.")
-                lines.append(
-                    "  revert_streak="
-                    f"{evidence.get('revert_streak', 0)} "
-                    f"threshold={evidence.get('revert_streak_threshold', 0)} "
-                    f"recent_keep_gain_pct={evidence.get('recent_keep_gain_pct', 0.0)} "
-                    f"keep_gain_threshold_pct={evidence.get('keep_gain_threshold_pct', 0.0)}"
-                )
         if not lines:
             return ""
-        if phase == _phase_state.PHASE_FRAMEWORK_AGENT:
-            lines.append(
-                "Note: OPTIMIZE advances to KERNEL_AGENT only when BOTH arms are dry "
-                "(reason=optimize_no_more_leverage) -- a non-terminal lever switch, not "
-                "the end of the run. Either arm going quiet also flags the next "
-                "macro-cycle to steer off this bottleneck. You may request an earlier "
-                "advance with an escalate_strategy_change hint, or keep working the live "
-                "arm until the plateau / budget gate fires."
-            )
-        else:
-            lines.append(
-                "Phase advance is driven only by hard limits (phase budget, "
-                "terminal stop_reason) or explicit escalate_strategy_change "
-                "hints; this block is informational."
-            )
+        lines.append(
+            "Note: OPTIMIZE advances to KERNEL_AGENT only when BOTH arms are dry "
+            "(reason=optimize_no_more_leverage) -- a non-terminal lever switch, not "
+            "the end of the run. Either arm going quiet also flags the next "
+            "macro-cycle to steer off this bottleneck. You may request an earlier "
+            "advance with an escalate_strategy_change hint, or keep working the live "
+            "arm until the plateau / budget gate fires."
+        )
         return "\n".join(lines)
 
-    def _record_advisory_plateau(
-        self,
-        *,
-        config: tuple[bool, dict],
-        source: tuple[bool, dict],
-    ) -> None:
-        """Snapshot the plateau reading this advisory was composed from.
-
-        Recorded here rather than derived at export because the inputs are
-        counts over a history that keeps growing: a later re-derivation reads
-        winners and candidates that landed after the advisory fired, and
-        returns a number the agent never saw. Both arms are recorded whether or
-        not either fired -- "evaluated and did not trip" is the reading that
-        explains a phase staying open.
-
-        The recorder is reached through ``getattr`` because tests borrow this
-        method onto lightweight stand-ins that carry no phase-handler machinery.
-        """
-        getter = getattr(self, "_framework_timeline", None)
-        recorder = getter() if callable(getter) else None
-        if recorder is None:
-            return
-        from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
-            ARM_CONFIG,
-            ARM_SOURCE,
-            PLATEAU_PATH_ADVISORY,
-        )
-
-        config_dry, config_ev = config
-        source_dry, source_ev = source
-        recorder.record_plateau(
-            arm=ARM_CONFIG,
-            path=PLATEAU_PATH_ADVISORY,
-            triggered=config_dry,
-            inputs={
-                "recent_keep_gain_pct": config_ev.get("recent_keep_gain_pct"),
-                "empty_streak": config_ev.get("empty_streak"),
-                "winners_seen": config_ev.get("winners_seen"),
-                "specialist_rounds_seen": config_ev.get("specialist_rounds_seen"),
-            },
-            thresholds={
-                "keep_gain_threshold_pct": config_ev.get("keep_gain_threshold_pct"),
-                "empty_streak_threshold": config_ev.get("empty_streak_threshold"),
-                "lookback": config_ev.get("lookback"),
-            },
-        )
-        recorder.record_plateau(
-            arm=ARM_SOURCE,
-            path=PLATEAU_PATH_ADVISORY,
-            triggered=source_dry,
-            inputs={
-                "consecutive_no_keep": source_ev.get("source_consecutive_no_keep"),
-                "candidates_exhausted": source_ev.get("source_candidates_exhausted"),
-            },
-            thresholds={"no_keep_streak_threshold": source_ev.get("source_threshold")},
-        )
-
-    def _dominant_roofline_direction(self) -> tuple[str, float]:
+    def dominant_roofline_direction(self) -> tuple[str, float]:
         """Return ``(direction, pct)`` for the most-saturated roofline direction in the latest snapshot; ``("", 0.0)`` when no snapshot is available."""
         from hyperloom.inference_optimizer.roofline_snapshot import dominant_direction
 
-        snaps = getattr(self.shared_state, "roofline_snapshots", None) or []
+        snaps = self.shared_state.roofline_snapshots or []
         if not snaps or not isinstance(snaps[-1], dict):
             return "", 0.0
         return dominant_direction(snaps[-1])
@@ -765,23 +671,21 @@ class ConversationCollaborator:
     def _bottleneck_redirect_advisory_block(self) -> str:
         """Render the R3 cyclic bottleneck-redirect advisory (optimisation phase only)."""
         state = self.shared_state
-        if (getattr(state, "phase", "") or "").strip().upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
+        if (state.phase or "").strip().upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
             return ""
-        sat = getattr(state, "saturated_directions", {}) or {}
+        sat = state.saturated_directions or {}
         saturated = {
             str(k): v
             for k, v in (sat.items() if isinstance(sat, dict) else [])
             if isinstance(v, dict) and bool(v.get("saturated"))
         }
-        rows = [r for r in (getattr(state, "cycle_strategy_log", []) or []) if isinstance(r, dict)]
-        cycle = int(getattr(state, "macro_cycle", 0) or 0)
-        focus_row = next((r for r in reversed(rows) if int(r.get("cycle", -1) or -1) == cycle), {})
-        has_switch = bool(getattr(state, "pending_bottleneck_switch", False))
-        if not has_switch and not saturated and not focus_row:
+        cycle = int(state.macro_cycle or 0)
+        has_switch = bool(state.pending_bottleneck_switch)
+        if not has_switch and not saturated:
             return ""
-        prev = str(getattr(state, "last_cycle_bottleneck", "") or "")
+        prev = str(state.last_cycle_bottleneck or "")
         cur_top = state.current_top_bottleneck()
-        direction, pct = self._dominant_roofline_direction()
+        direction, pct = self.dominant_roofline_direction()
         lines: list[str] = []
         if has_switch:
             lines.append(
@@ -795,16 +699,11 @@ class ConversationCollaborator:
                     f"  saturated_domain={domain} direction={row.get('direction')} "
                     f"within={row.get('within_pct')}% threshold={row.get('threshold_pct')}%"
                 )
-        if focus_row:
-            lines.append(
-                f"  suggested_cycle_focus={focus_row.get('focus')} "
-                f"score={focus_row.get('score')} rationale={focus_row.get('rationale')}"
-            )
         if prev:
             lines.append(f"  plateaued_bottleneck={prev} (avoid re-targeting)")
         if cur_top:
             lines.append(f"  current_top_bottleneck={cur_top}")
-        shift = getattr(state, "bottleneck_shift", {}) or {}
+        shift = state.bottleneck_shift or {}
         if isinstance(shift, dict) and (shift.get("from") or shift.get("to")):
             lines.append(
                 f"  bottleneck_shift: {shift.get('from') or 'unknown'} → {shift.get('to') or 'unknown'} "
@@ -829,11 +728,11 @@ class ConversationCollaborator:
         """Render the decaying acceptance bar and prior measured gains as evidence."""
         state = self.shared_state
         keep = _phase_state.resolve_keep_threshold(state)
-        cycle = int(getattr(state, "macro_cycle", 0) or 0)
+        cycle = int(state.macro_cycle or 0)
         if cycle < 1:
             return ""
         stable = keep / 2.0
-        search = getattr(state, "explore_search", None) or {}
+        search = state.explore_search or {}
         entries: list[dict[str, Any]] = []
         if isinstance(search, dict):
             tested = search.get("tested") or {}
@@ -867,10 +766,10 @@ class ConversationCollaborator:
                 lines.append(f"  {name}: prior gain {g:+.2f}% < {keep:.2f}%")
         return "\n".join(lines)
 
-    def _target_gap_advisory_block(self) -> str:
+    def target_gap_advisory_block(self) -> str:
         """Build the advisory \"External target gap\" prompt block (current-best vs competitor target; never gates)."""
         state = self.shared_state
-        if not bool(getattr(state, "target_advisory_enabled", True)):
+        if not bool(state.target_advisory_enabled):
             return ""
         from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
 
@@ -883,7 +782,7 @@ class ConversationCollaborator:
     def _current_primary_gap(self) -> str | None:
         """Resolve latency/throughput; None when advisory is off or unavailable. Fail-soft."""
         state = self.shared_state
-        if not bool(getattr(state, "target_advisory_enabled", True)):
+        if not bool(state.target_advisory_enabled):
             return None
         try:
             from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
@@ -906,7 +805,7 @@ class ConversationCollaborator:
         """Collect proposal_set rows from the most recent specialist rounds (deduped by name; fail-soft)."""
         rounds = [
             r
-            for r in (getattr(self.shared_state, "specialist_rounds", []) or [])
+            for r in (self.shared_state.specialist_rounds or [])
             if isinstance(r, dict) and isinstance(r.get("proposal_set"), list)
         ]
         out: list[dict[str, Any]] = []
@@ -937,7 +836,7 @@ class ConversationCollaborator:
         hints = _research_hints.load_hints(self.session_dir)
         rounds = [
             row
-            for row in reversed(getattr(self.shared_state, "specialist_rounds", []) or [])
+            for row in reversed(self.shared_state.specialist_rounds or [])
             if isinstance(row, dict) and (row.get("new_findings") or row.get("residual_questions"))
         ]
         if not hints and not rounds:

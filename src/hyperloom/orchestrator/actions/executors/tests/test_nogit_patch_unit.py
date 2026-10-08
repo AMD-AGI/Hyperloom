@@ -5,18 +5,22 @@
 
 from __future__ import annotations
 
+import os
 import shutil
+import stat
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from hyperloom.orchestrator.actions.executors import _apply_feedback as af
 from hyperloom.orchestrator.actions.executors import _nogit_patch as ng
 from hyperloom.orchestrator.actions.executors import integrate_patch as ip
+from hyperloom.orchestrator.delivery import ledger
 
 
-# Public surface re-exported via integrate_patch (backward-compat guard)
+# Non-git helpers used by integrate_patch.
 
 
 def test_reexport_from_integrate_patch():
@@ -25,7 +29,6 @@ def test_reexport_from_integrate_patch():
     assert ip._is_within is ng._is_within
     assert ip._is_git_tree is ng._is_git_tree
     assert ip._apply_patch_no_git is ng._apply_patch_no_git
-    assert ip._revert_patches_no_git is ng._revert_patches_no_git
 
 
 def test_reexport_from_patch_snapshot():
@@ -105,7 +108,7 @@ def test_is_git_tree_false_on_timeout(monkeypatch):
     assert ng._is_git_tree(Path("/wherever")) is False
 
 
-# _apply_patch_no_git + _revert_patches_no_git — round-trip using real patch CLI
+# _apply_patch_no_git + ledger.restore_records — round-trip using real patch CLI
 
 SIMPLE_DIFF = """\
 --- a/target.py
@@ -116,25 +119,159 @@ SIMPLE_DIFF = """\
 """
 
 
-def test_apply_and_revert_roundtrip(tmp_path):
-    """Apply a one-liner patch then revert it via backup; file ends up unchanged."""
+def test_non_git_prepare_is_durable_before_a_partially_applied_patch_raises(tmp_path, monkeypatch):
     target = tmp_path / "target.py"
-    target.write_text("original\n", encoding="utf-8")
-
+    target.write_text("original\n")
     patch_file = tmp_path / "fix.patch"
-    patch_file.write_text(SIMPLE_DIFF, encoding="utf-8")
-
+    patch_file.write_text(SIMPLE_DIFF)
     backup_root = tmp_path / "backups"
 
-    ok, err, backups, *_ = ng._apply_patch_no_git(tmp_path, patch_file, backup_root)
-    if not ok:
-        pytest.skip(f"patch CLI unavailable or dry-run failed: {err}")
+    def interrupted(cmd, **kwargs):
+        if "--dry-run" in cmd:
+            return _CP()
+        assert len(ledger.load_prepared_records(backup_root)) == 1
+        target.write_text("partial\n")
+        raise RuntimeError("process lost before apply returned")
 
-    assert target.read_text() == "patched\n"
-    assert backups  # at least one backup record
-
-    ng._revert_patches_no_git(backups)
+    monkeypatch.setattr(ng.subprocess, "run", interrupted)
+    with pytest.raises(RuntimeError, match="process lost"):
+        ng._apply_patch_no_git(tmp_path, patch_file, backup_root)
+    rows = ledger.load_prepared_records(backup_root)
+    assert len(rows) == 1
+    assert ledger.load_records(backup_root) == rows
+    restored, errors = ledger.restore_records(rows)
+    assert errors == []
+    assert restored == [str(target)]
     assert target.read_text() == "original\n"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX read-only file permissions")
+def test_prepare_readonly_copy_preserves_target_and_backup_modes(tmp_path):
+    target = tmp_path / "target.py"
+    target.write_bytes(b"original\n")
+    target.chmod(0o444)
+    backup_root = tmp_path / "backups"
+    backup_root.mkdir()
+    backup = backup_root / "target.bak"
+    shutil.copy2(target, backup)
+    record = {
+        "target": str(target),
+        "existed": True,
+        "backup_path": str(backup),
+        "pre_image_sha256": ledger.file_digest(backup),
+        "revert_action": "restore",
+        "mode": 0o444,
+    }
+    assert ledger.append_record(backup_root, record)
+    assert stat.S_IMODE(target.stat().st_mode) == stat.S_IMODE(backup.stat().st_mode) == 0o444
+
+    assert ledger.mark_prepared(backup_root)
+
+    assert ledger.load_prepared_records(backup_root) == [record]
+    assert target.read_bytes() == backup.read_bytes() == b"original\n"
+    assert stat.S_IMODE(target.stat().st_mode) == stat.S_IMODE(backup.stat().st_mode) == 0o444
+
+
+@pytest.mark.parametrize("platform,expected_mode", [("posix", "rb"), ("nt", "rb+")])
+def test_prepare_uses_platform_fsync_access_mode(tmp_path, monkeypatch, platform, expected_mode):
+    backup_root = tmp_path / "backups"
+    backup_root.mkdir()
+    backup = backup_root / "target.bak"
+    backup.write_bytes(b"original\n")
+    assert ledger.append_record(backup_root, {"backup_path": str(backup)})
+    opened = []
+    synced = []
+    real_open = Path.open
+
+    def record_open(path, mode="r", *args, **kwargs):
+        if path == backup:
+            opened.append(mode)
+        return real_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", record_open)
+    monkeypatch.setattr(ledger, "os", SimpleNamespace(name=platform, fsync=synced.append))
+
+    assert ledger.mark_prepared(backup_root)
+    assert opened == [expected_mode]
+    assert len(synced) == 1
+    assert backup.read_bytes() == b"original\n"
+
+
+def test_non_git_prepare_failure_never_invokes_real_patch(tmp_path, monkeypatch):
+    target = tmp_path / "target.py"
+    target.write_text("original\n")
+    patch_file = tmp_path / "fix.patch"
+    patch_file.write_text(SIMPLE_DIFF)
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append(cmd)
+        assert "--dry-run" in cmd
+        return _CP()
+
+    monkeypatch.setattr(ng.subprocess, "run", run)
+    monkeypatch.setattr(ng, "mark_prepared", lambda *_args, **_kwargs: False)
+    ok, error, _records, _feedback = ng._apply_patch_no_git(tmp_path, patch_file, tmp_path / "backups")
+    assert not ok
+    assert "prepare" in error
+    assert len(calls) == 1
+    assert target.read_text() == "original\n"
+
+
+@pytest.mark.parametrize("prior_prepared", [False, True])
+@pytest.mark.parametrize("prepare_succeeds", [False, True])
+def test_already_applied_noop_requires_durable_prepare(tmp_path, monkeypatch, prior_prepared, prepare_succeeds):
+    target = tmp_path / "target.py"
+    target.write_text("patched\n", encoding="utf-8")
+    patch_file = tmp_path / "fix.patch"
+    patch_file.write_text(SIMPLE_DIFF, encoding="utf-8")
+    backup_root = tmp_path / "backups"
+    prior_records = []
+    if prior_prepared:
+        backup_root.mkdir()
+        backup = backup_root / "earlier.bak"
+        backup.write_text("original\n", encoding="utf-8")
+        prior_records.append(
+            {
+                "target": str(target),
+                "existed": True,
+                "backup_path": str(backup),
+                "pre_image_sha256": ledger.file_digest(backup),
+                "revert_action": "restore",
+            }
+        )
+        assert ledger.append_record(backup_root, prior_records[0])
+        assert ledger.mark_prepared(backup_root)
+    if not prepare_succeeds:
+        monkeypatch.setattr(ng, "mark_prepared", lambda _root: False)
+    calls = []
+
+    def dry_run(cmd, **kwargs):
+        calls.append(cmd)
+        assert "--dry-run" in cmd, "an already-applied patch must never mutate the target"
+        if "-R" in cmd:
+            assert "--fuzz=0" in cmd
+            return _CP()
+        return _CP(1, "", "previously applied patch")
+
+    monkeypatch.setattr(ng.subprocess, "run", dry_run)
+    ok, error, backups, feedback = ng._apply_patch_no_git(tmp_path, patch_file, backup_root)
+
+    assert ok is prepare_succeeds
+    assert target.read_text(encoding="utf-8") == "patched\n"
+    assert backups == []
+    assert len(calls) == len(ng._P_LEVELS) + 1
+    if prepare_succeeds:
+        assert error == ""
+        assert feedback is None
+        assert ledger.load_prepared_records(backup_root) == prior_records
+    else:
+        assert "prepare" in error
+        assert isinstance(feedback, af.ApplyFeedback)
+        assert feedback.stderr == error
+    if prior_prepared:
+        assert ledger.load_prepared_records(backup_root) == prior_records
+        assert backup.read_text(encoding="utf-8") == "original\n"
 
 
 def test_apply_patch_no_git_dry_run_failure(tmp_path, monkeypatch):
@@ -155,12 +292,6 @@ def test_apply_patch_no_git_dry_run_failure(tmp_path, monkeypatch):
     ok, err, backups, *_ = ng._apply_patch_no_git(tmp_path, patch_file, tmp_path / "bak")
     assert ok is False
     assert backups == []
-
-
-def test_revert_patches_no_git_missing_backup_is_noop(tmp_path):
-    """A revert record with no backup_path and no existing target is a no-op."""
-    records = [{"target": str(tmp_path / "ghost.py"), "existed": False, "backup_path": None}]
-    ng._revert_patches_no_git(records)  # must not raise
 
 
 # Backup name uniqueness across multiple patches sharing a backup_root
@@ -264,15 +395,6 @@ RENAME_DIFF = """\
 """
 
 
-def test_revert_action_delete_removes_new_file(tmp_path):
-    """A record with revert_action='delete' causes the target to be removed."""
-    target = tmp_path / "created.py"
-    target.write_text("content\n", encoding="utf-8")
-    records = [{"target": str(target), "existed": False, "backup_path": None, "revert_action": "delete"}]
-    ng._revert_patches_no_git(records)
-    assert not target.exists(), "revert_action='delete' must remove the target"
-
-
 def test_revert_action_restore_old_puts_back_source(tmp_path):
     """A record with revert_action='restore_old' restores the old file from backup."""
     old_file = tmp_path / "old_name.py"
@@ -286,9 +408,10 @@ def test_revert_action_restore_old_puts_back_source(tmp_path):
             "existed": True,
             "backup_path": str(bak),
             "revert_action": "restore_old",
+            "pre_image_sha256": ledger.file_digest(bak),
         }
     ]
-    ng._revert_patches_no_git(records)
+    ledger.restore_records(records)
     assert old_file.exists(), "revert_action='restore_old' must recreate the old file"
     assert old_file.read_text() == "original_content\n"
 
@@ -482,7 +605,7 @@ def test_apply_create_file_then_revert_deletes(tmp_path):
     delete_recs = [r for r in backups if r.get("revert_action") == "delete"]
     assert delete_recs, "create hunk must record a delete revert action"
 
-    ng._revert_patches_no_git(backups)
+    ledger.restore_records(backups)
     assert not created.exists(), "revert of a create hunk must delete the new file"
 
 
@@ -512,7 +635,7 @@ def test_apply_delete_file_backs_up_and_reverts(tmp_path):
     restore_recs = [r for r in backups if r.get("revert_action") == "restore"]
     assert restore_recs, "delete hunk must back up the existing file"
 
-    ng._revert_patches_no_git(backups)
+    ledger.restore_records(backups)
     assert doomed.exists(), "revert must restore the deleted file"
     assert doomed.read_text() == "goodbye\n"
 
@@ -682,28 +805,40 @@ def test_collect_rej_files_no_rej_returns_empty(tmp_path):
     assert ng._collect_rej_files(tmp_path, tmp_path / "some.patch") == ""
 
 
-# _revert_patches_no_git — error paths are swallowed
+# ledger.restore_records — a failed restore is reported, never raised
 
 
-def test_revert_restore_error_is_logged_not_raised(tmp_path, monkeypatch):
-    """A copy failure during restore is logged, never raised."""
+def test_revert_restore_error_is_reported_not_raised(tmp_path, monkeypatch):
+    """A copy failure during restore comes back as an error, never raised."""
     bak = tmp_path / "b.bak"
     bak.write_text("data\n", encoding="utf-8")
-    records = [{"target": str(tmp_path / "t.py"), "existed": True, "backup_path": str(bak), "revert_action": "restore"}]
+    records = [
+        {
+            "target": str(tmp_path / "t.py"),
+            "existed": True,
+            "backup_path": str(bak),
+            "revert_action": "restore",
+            "pre_image_sha256": ledger.file_digest(bak),
+        }
+    ]
 
     def _boom(*a, **k):
         raise OSError("perm denied")
 
-    monkeypatch.setattr(ng.shutil, "copy2", _boom)
-    ng._revert_patches_no_git(records)
+    monkeypatch.setattr(ledger.shutil, "copy2", _boom)
+    _, errors = ledger.restore_records(records)
+    assert errors
 
 
-def test_revert_delete_removes_existing(tmp_path):
-    """revert_action='delete' with an existing target removes it."""
+@pytest.mark.parametrize("present", [True, False], ids=["present", "absent"])
+def test_revert_delete_leaves_no_created_target(tmp_path, present):
+    """revert_action='delete' removes a created target, and one already gone is not an error."""
     t = tmp_path / "created.py"
-    t.write_text("x\n", encoding="utf-8")
+    if present:
+        t.write_text("x\n", encoding="utf-8")
     records = [{"target": str(t), "existed": False, "backup_path": None, "revert_action": "delete"}]
-    ng._revert_patches_no_git(records)
+    _, errors = ledger.restore_records(records)
+    assert errors == []
     assert not t.exists()
 
 
@@ -998,5 +1133,5 @@ def test_apply_no_git_tolerates_placeholder_index_header(tmp_path):
     assert ok is True, err
     assert "patched = True" in target.read_text()
 
-    ng._revert_patches_no_git(backups)
+    ledger.restore_records(backups)
     assert target.read_text() == original

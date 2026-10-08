@@ -5,42 +5,10 @@
 
 from __future__ import annotations
 
-import re
-import shlex
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping
-
-# Argv safety
-
-_UNSAFE_TOKENS: frozenset[str] = frozenset({";", "&&", "||", "|", ">", ">>", "<", "<<", "`"})
-_UNSAFE_CHARS_RE = re.compile(r"[;&|`$<>\r\n]")
-_SHELL_NAMES: frozenset[str] = frozenset({"bash", "dash", "sh", "zsh", "ksh"})
-
-
-def coerce_build_argv(cmd: list[str] | str | None) -> list[str]:
-    """Return a safe argv list; reject shell strings and control operators."""
-    if not cmd:
-        return []
-    if isinstance(cmd, str):
-        try:
-            argv = shlex.split(cmd)
-        except ValueError as exc:
-            raise ValueError(f"invalid build_command: {exc}") from exc
-    else:
-        argv = [str(p) for p in cmd]
-    if not argv:
-        return []
-    if any(p in _UNSAFE_TOKENS for p in argv) or any(_UNSAFE_CHARS_RE.search(p) for p in argv):
-        raise ValueError("build_command must be argv-like; shell control operators are not allowed")
-    if any("\n" in p or "\r" in p or "\x00" in p for p in argv):
-        raise ValueError("build_command contains invalid control characters")
-    exe = Path(argv[0]).name.lower()
-    if exe in _SHELL_NAMES and any(p in {"-c", "-lc"} for p in argv[1:]):
-        raise ValueError("build_command must not invoke a shell command string")
-    return argv
-
 
 # Injectable subprocess runner
 
@@ -255,7 +223,6 @@ __all__ = [
     "AbiMismatchError",
     "RunResult",
     "check_rocm_toolchain_alignment",
-    "coerce_build_argv",
     "probe_torch_abi",
     "run_argv",
     "sort_tags_desc",
