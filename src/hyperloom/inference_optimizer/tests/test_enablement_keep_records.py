@@ -2541,18 +2541,31 @@ def test_a_venv_copy_of_the_same_package_is_not_the_builds_output(tmp_path: Path
     assert missing == [], "only the build's own output tree is the recipe's to carry"
 
 
-def test_without_a_readable_result_the_candidate_worktrees_are_scanned(tmp_path: Path):
-    """Fallback stays narrower than the attempt root: still no venv, no deps."""
-    attempt = _built_attempt(tmp_path, package="vllm", files={"_moe_C.abi3.so": b"left behind"})
-    (attempt / "result.json").write_text("not json at all", encoding="utf-8")
+@pytest.mark.parametrize(
+    "result_text",
+    [None, "not json at all", "{}", '{"runtime": {"pythonpath_prefixes": []}}'],
+    ids=["absent", "corrupt", "no-runtime", "no-prefixes"],
+)
+def test_a_build_that_names_no_output_tree_is_unverified(tmp_path: Path, result_text: str | None):
+    """A candidate worktree is where a build may have written, not where it says it did.
+
+    Every extension the worktree holds matches the framework root here, so a
+    scan of it would certify the build as carried without the build ever
+    naming that tree as its output.
+    """
+    attempt = _built_attempt(tmp_path, package="vllm", files={"_C.abi3.so": b"same"})
+    if result_text is None:
+        (attempt / "result.json").unlink()
+    else:
+        (attempt / "result.json").write_text(result_text, encoding="utf-8")
     root = tmp_path / "site-packages" / "vllm"
     root.mkdir(parents=True)
+    (root / "_C.abi3.so").write_bytes(b"same")
 
-    missing = IntegratePatchExecutor._build_extensions_not_carried(
-        _linked(attempt), root, specialist_task_id=PROBE_TASK
+    assert (
+        IntegratePatchExecutor._build_extensions_not_carried(_linked(attempt), root, specialist_task_id=PROBE_TASK)
+        is None
     )
-
-    assert missing == ["_moe_C.abi3.so"]
 
 
 def test_a_named_output_tree_that_is_gone_is_unverified(tmp_path: Path):
@@ -2563,20 +2576,6 @@ def test_a_named_output_tree_that_is_gone_is_unverified(tmp_path: Path):
     """
     attempt = _built_attempt(tmp_path, package="vllm", files={"_C.abi3.so": b"carried"})
     shutil.rmtree(attempt / "candidates" / "00_pr" / "worktree")
-    root = tmp_path / "site-packages" / "vllm"
-    root.mkdir(parents=True)
-
-    assert (
-        IntegratePatchExecutor._build_extensions_not_carried(_linked(attempt), root, specialist_task_id=PROBE_TASK)
-        is None
-    )
-
-
-def test_an_empty_fallback_is_unverified(tmp_path: Path):
-    """No readable result and no candidate worktrees left to fall back to."""
-    attempt = _built_attempt(tmp_path, package="vllm", files={"_C.abi3.so": b"carried"})
-    (attempt / "result.json").write_text("not json at all", encoding="utf-8")
-    shutil.rmtree(attempt / "candidates")
     root = tmp_path / "site-packages" / "vllm"
     root.mkdir(parents=True)
 

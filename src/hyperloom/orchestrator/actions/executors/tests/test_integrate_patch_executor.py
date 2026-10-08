@@ -1256,6 +1256,36 @@ async def test_a_keep_whose_materialized_config_holds_an_invalid_value_records_n
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("document", ["", "- vllm\n"], ids=["empty", "list"])
+async def test_a_keep_whose_materialized_config_is_not_a_mapping_records_no_keep_evidence(
+    tmp_path: Path, monkeypatch, document: str
+):
+    """No launch read a config that holds no mapping, so it names no framework or env to probe under."""
+    config = tmp_path / "not_a_mapping.yaml"
+    config.write_text(document, encoding="utf-8")
+
+    result, _repo = await _run_enablement_integrate(
+        tmp_path, monkeypatch, booted=True, bench_materialized_config=str(config)
+    )
+
+    assert result["status"] == "kept"
+    assert [key for key in _KEEP_RECORD_KEYS if key in result] == []
+
+
+@pytest.mark.asyncio
+async def test_a_value_error_inside_the_keep_capture_is_not_read_as_an_unreadable_config(tmp_path: Path, monkeypatch):
+    """Only an unreadable config ends as "kept, no records"; a defect elsewhere in the capture raises."""
+
+    def _defect(*_args, **_kwargs):
+        raise ValueError("a defect in the capture, not an unreadable config")
+
+    monkeypatch.setattr(IntegratePatchExecutor, "_levers_without_readers", staticmethod(_defect))
+
+    with pytest.raises(ValueError, match="a defect in the capture"):
+        await _run_enablement_integrate(tmp_path, monkeypatch, booted=True)
+
+
+@pytest.mark.asyncio
 async def test_enablement_reverts_when_still_not_runnable(tmp_path: Path, monkeypatch):
     result, repo = await _run_enablement_integrate(tmp_path, monkeypatch, booted=False)
     assert result["status"] == "reverted"
