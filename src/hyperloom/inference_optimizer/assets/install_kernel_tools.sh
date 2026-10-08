@@ -1296,14 +1296,10 @@ write_env_file() {
     [ -n "${GEAK_E2E_RUNNER}" ] && echo "export GEAK_E2E_RUNNER='${GEAK_E2E_RUNNER}'"
     [ -n "${GEAK_ROOT}" ] && echo "export GEAK_ROOT='${GEAK_ROOT}'"
     [ -n "${GEAK_CLAUDE_MODEL_VAL}" ] && echo "export GEAK_CLAUDE_MODEL='${GEAK_CLAUDE_MODEL_VAL}'"
+    [ -n "${_claude_path_dir:-}" ] && echo "export PATH='${_claude_path_dir}':\"\$PATH\""
     # Pin the claude binary the GEAK SDK path uses (else claude_agent_sdk may
     # fall back to its older bundled CLI). run_e2e.py maps this to cli_path.
-    _geak_claude_bin=""
-    local _probe_home
-    _probe_home="$(_home_dir || true)"
-    for _c in "${_probe_home:+${_probe_home}/.local/bin/claude}" "/usr/local/bin/claude" "$(command -v claude 2>/dev/null || true)"; do
-      if [ -n "${_c}" ] && [ -x "${_c}" ]; then _geak_claude_bin="${_c}"; break; fi
-    done
+    _geak_claude_bin="$(command -v claude 2>/dev/null || true)"
     [ -n "${_geak_claude_bin}" ] && echo "export GEAK_CLAUDE_BIN='${_geak_claude_bin}'"
     # e2e optimizer budget mode (read by the inference_optimizer kernel request
     # handler to pick the backend budget default) + LLM connection for the runner.
@@ -1429,9 +1425,9 @@ ensure_geak() {
     # skips a second clone.
     if [ -f "${GEAK_ROOT}/pyproject.toml" ] || [ -f "${GEAK_ROOT}/setup.py" ]; then
       run env GEAK_HOME="${GEAK_ROOT}" python3 -m pip install ${_PIP_FLAGS} "${GEAK_ROOT}" || \
-        warn "GEAK pip install failed; Claude Code may be < 2.1.177"
+        warn "GEAK pip install failed"
     else
-      warn "GEAK package metadata missing at ${GEAK_ROOT}; skipping pip install (Claude Code may be < 2.1.177)"
+      warn "GEAK package metadata missing at ${GEAK_ROOT}; skipping pip install"
     fi
     run python3 -m pip install ${_PIP_FLAGS} claude-agent-sdk anyio || \
       warn "claude-agent-sdk install failed; run_e2e.py will fall back to the claude CLI"
@@ -1443,107 +1439,44 @@ ensure_geak() {
   fi
 }
 
-# Node/npm, the claude npm CLI and ~/.claude auth back every kernel backend --
-# GEAK drives the same CLI through GEAK_CLAUDE_BIN -- so the CLI is ensured
-# regardless of which backend KERNEL_OPT_BACKEND_ORDER selects. Only a Claude
-# runtime is additionally validated, since FORGE_AGENT_CLI may name another tool.
-ensure_forge_claude_cli() {
-  local _forge_cli_action _forge_check="$CHECK_ONLY"
-  while :; do
-    _forge_cli_action="$(python3 - "$_forge_check" "$DRY_RUN" <<'PY'
-import os
-import shutil
-import sys
-from pathlib import Path
-
-from hyperloom.common.env import env_str
-from kernelforge.agent_backends.claude import ClaudeBackend, resolve_claude_cli
-
-
-def claude_runtime():
-    """Return Forge's runtime when it executes Claude, else None.
-
-    An unnamed provider is not this installer's failure to report: the default
-    CLI is still ensured, and the backend raises when the session starts.
-    """
-    from kernelforge.config import Config
-
-    try:
-        runtime = Config.from_env().agent_runtime()
-    except ValueError:
-        return None
-    return runtime if runtime.provider == "claude" else None
-
-
-if sys.argv[2] == "1":
-    print("dry-run")
-else:
-    # FORGE_AGENT_CLI names whichever provider Forge runs, so only a Claude
-    # runtime is validated; every backend still gets the default CLI, which
-    # GEAK drives through GEAK_CLAUDE_BIN.
-    runtime = claude_runtime()
-    explicit = runtime.executable if runtime is not None else ""
-    selected = resolve_claude_cli(explicit)
-    missing = selected == "claude" and shutil.which(selected) is None and not Path(selected).exists()
-    install = sys.argv[1] == "0" and not explicit and (missing or env_str("HYPERLOOM_CLAUDE_CODE_VERSION"))
-    if not install and runtime is not None:
-        ClaudeBackend.validate_runtime(runtime)
-    print("install" if install else "ready")
-PY
-)" || {
-      # --check-only reports on the box; it must not fail the installer over it.
-      [ "$CHECK_ONLY" -eq 0 ] || { warn "claude CLI missing or unusable; the kernel backends will fail to drive it"; return 0; }
-      die "Forge Claude CLI validation failed"
-    }
-    case "$_forge_cli_action" in
-      dry-run) log "would ensure the Claude CLI and write ~/.claude/config.json"; return 0 ;;
-      ready) break ;;
-    esac
-    # Node.js 20 from NodeSource when npm is absent (claude CLI is an npm package).
-    if ! command -v npm >/dev/null 2>&1; then
-      if ! command -v apt-get >/dev/null 2>&1; then
-        warn "npm missing and apt-get unavailable; install Node.js 20 manually for the forge claude CLI"
-        return 0
-      fi
-      command -v curl >/dev/null 2>&1 || { apt-get update >/dev/null; apt-get -y install ca-certificates curl gnupg >/dev/null; }
-      log "installing Node.js 20 from NodeSource"
-      local ns_script="/tmp/nodesource_setup_20.x"
-      if curl -fsSL "https://deb.nodesource.com/setup_20.x" -o "$ns_script" \
-         && echo "2c4c6683a17b6f4128898a7b521e3c8bb725a99ffaf1b5e32ac97c6fa7d381be  ${ns_script}" | sha256sum -c - >/dev/null 2>&1 \
-         && bash "$ns_script" >/dev/null 2>&1; then
-        apt-get -y install nodejs >/dev/null || { warn "nodejs install failed; forge claude CLI unavailable"; return 0; }
-      else
-        warn "NodeSource setup failed; forge claude CLI unavailable"
-        return 0
-      fi
-    fi
-    if ! command -v npm >/dev/null 2>&1; then
-      warn "npm still missing; forge claude CLI unavailable"
-      return 0
-    fi
-    # A version pin reinstalls the default CLI, never an explicit FORGE_AGENT_CLI.
-    local _npm_prefix="/usr/local" _npm_home
-    if [ ! -w /usr/local/lib ]; then
-      _npm_home="$(_home_dir || true)"
-      if [ -z "$_npm_home" ]; then
-        warn "no writable npm prefix (/usr/local and HOME both unavailable); forge claude CLI unavailable"
-        return 0
-      fi
-      _npm_prefix="${_npm_home}/.local"
-      mkdir -p "${_npm_prefix}/lib" "${_npm_prefix}/bin"
-    fi
-    run npm config set prefix "${_npm_prefix}"
-    run npm install -g "@anthropic-ai/claude-code${HYPERLOOM_CLAUDE_CODE_VERSION:+@${HYPERLOOM_CLAUDE_CODE_VERSION}}"
-    export PATH="${_npm_prefix}/bin:$PATH"
-    _forge_check=1
-  done
-  [ "$CHECK_ONLY" -eq 0 ] || return 0
+# The claude CLI on PATH is the single copy every consumer runs: specialists
+# resolve it through GEAK_CLAUDE_BIN or PATH, GEAK is pointed at it through
+# GEAK_CLAUDE_BIN, and Forge resolves PATH before its fallback locations. It is
+# ensured before ensure_geak, so GEAK's bootstrap finds it and only steps in
+# when it is older than GEAK's minimum, installing into the same ~/.local/bin.
+# Claude Code's native installer places the CLI in ~/.local/bin, so that
+# directory goes first on PATH: a pinned install wins over an image's claude,
+# and an existing copy there is reused rather than downloaded again.
+ensure_claude_cli() {
+  local _claude_home _claude_bin_dir
+  _claude_home="$(_home_dir || true)"
+  if [ -n "$_claude_home" ]; then
+    _claude_bin_dir="${_claude_home}/.local/bin"
+    export PATH="${_claude_bin_dir}:${PATH}"
+    # write_env_file carries it to every shell that sources the runtime env.
+    _claude_path_dir="${_claude_bin_dir}"
+  fi
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    command -v claude >/dev/null 2>&1 || warn "claude CLI not on PATH; specialists and the kernel backends cannot run it"
+    return 0
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "would ensure the claude CLI on PATH and write ~/.claude/config.json"
+    return 0
+  fi
+  if [ -n "${HYPERLOOM_CLAUDE_CODE_VERSION:-}" ] || ! command -v claude >/dev/null 2>&1; then
+    [ -n "$_claude_home" ] || die "no home directory for uid $(id -u); the claude CLI installs under ~/.local/bin"
+    command -v curl >/dev/null 2>&1 || die "curl missing; the claude CLI cannot be installed"
+    local _claude_target="${HYPERLOOM_CLAUDE_CODE_VERSION:-latest}"
+    log "installing the claude CLI (${_claude_target}) into ${_claude_bin_dir}"
+    curl -fsSL --connect-timeout 20 https://claude.ai/install.sh | HOME="$_claude_home" bash -s -- "$_claude_target" \
+      || die "the claude CLI installer failed"
+  fi
+  command -v claude >/dev/null 2>&1 || die "claude CLI is not on PATH after the install"
   # ~/.claude authenticates the Claude Code CLI for Anthropic-compatible flows.
   # Its readers resolve Path.home(), so ~ must come from _home_dir here too.
   local _claude_key="${_ANTHROPIC_KEY_VAL:-}"
   if [ -n "$_claude_key" ]; then
-    local _claude_home
-    _claude_home="$(_home_dir || true)"
     if [ -z "$_claude_home" ]; then
       warn "no home directory for uid $(id -u) (HOME unset, no passwd entry); ~/.claude/config.json not written"
       return 0
@@ -1623,12 +1556,12 @@ main() {
   # do not touch source-mirrors, so they stay outside the lock.
   acquire_install_lock
   ensure_tracelens
+  ensure_claude_cli
 
   # The GEAK e2e whole-pipeline optimizer is always installed; whether it is
   # used at runtime is decided per-session via KERNEL_OPT_BACKEND_ORDER.
   ensure_geak
   _prune_dep_cache "TraceLens" "GEAK"
-  ensure_forge_claude_cli
   write_env_file
 
   report_status
