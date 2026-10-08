@@ -52,7 +52,6 @@ from ...state.shared_state import (
     resolve_graded_comparison,
 )
 from hyperloom.orchestrator.lever import LEVER_UPSTREAM_PR
-from hyperloom.common.env import is_truthy
 from hyperloom.common.failure_signature import CapabilityGap, FailureSignature
 from hyperloom.common.github_urls import repo_slug
 from hyperloom.common.gain_math import gain_pct
@@ -63,12 +62,12 @@ from ...delivery.ledger import append_record, load_prepared_records, load_record
 from ..stop_attribution import stopped_by_the_run_class
 from ...policy.gate import INTEGRATE_PATCH_PERMISSIVE_VERDICTS
 from ._accuracy_gate import (
-    DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
     accuracy_keep_block,
-    accuracy_meets_floor,
-    accuracy_passed,
-    classify_accuracy_failure,
+    enablement_correctness,
     eval_probe_summary,
+    framework_run_eval_envs,
+    grade_accuracy,
+    is_eval_origin,
     parse_eval_results,
     read_eval_probe,
 )
@@ -116,6 +115,7 @@ from ._grid_variant_filter import (
     resolve_skip_spec,
 )
 from ._recipe_script import RecipeLeverUnavailableError
+from ._server_argv import ConfigUnreadable
 from ._workload_envs import (
     FrameworkScriptMismatchError,
     default_baseline_config,
@@ -196,11 +196,6 @@ def _enablement_gap(params: dict[str, Any]) -> CapabilityGap | None:
     return gap if gap.requires_code_acquisition else None
 
 
-def _kept_stack_action(attempt: IntegrateAttempt) -> dict[str, Any]:
-    """The stack action the last kept round promoted, or ``{}`` when none was kept."""
-    return getattr(getattr(attempt.shared_state, "enablement", None), "kept_stack_action", None) or {}
-
-
 def _first_ref_in_repo(refs: Iterable[Any], repo_url: str) -> str:
     """The best-ranked candidate ref that points at ``repo_url``.
 
@@ -238,13 +233,13 @@ def _established_enablement_config(params: dict[str, Any], shared_state: Any) ->
     executor, so the inheritance lives here rather than in each emitter.
 
     Optimization rounds inherit nothing -- the rule is the enablement lane's.
-    Returns ``("", {})`` when the round is not enablement, when no SharedState
-    reached the context, or when nothing has been established yet.
+    Returns ``("", {})`` when the round is not enablement or when nothing has
+    been established yet.
     """
     if not bool(params.get("enablement")):
         return "", {}
-    established = getattr(getattr(shared_state, "enablement", None), "accepted_config", None)
-    if not isinstance(established, dict) or not established:
+    established = shared_state.enablement.accepted_config
+    if not established:
         return "", {}
     args = str(established.get("extra_server_args") or "").strip()
     raw_envs = established.get("extra_envs")
@@ -422,17 +417,11 @@ def _note_pre_mutation_head(
     key = str(root or "")
     if not key:
         return
-    durable = _durable_base_sha_by_root(attempt) if enablement else {}
+    durable = attempt.shared_state.enablement.base_sha_by_root if enablement else {}
     if key not in heads:
-        heads[key] = str(durable.get(key) or "") or _git_head_sha(Path(key))
-    if enablement and heads.get(key) and not str(durable.get(key) or ""):
-        _persist_base_sha_for_root(attempt, key, str(heads[key]), session_dir=session_dir)
-
-
-def _durable_base_sha_by_root(attempt: IntegrateAttempt) -> dict[str, str]:
-    """The per-root base shas earlier rounds of this stack already recorded."""
-    raw = getattr(getattr(attempt.shared_state, "enablement", None), "base_sha_by_root", None)
-    return {str(k): str(v) for k, v in raw.items() if str(k) and str(v)} if isinstance(raw, Mapping) else {}
+        heads[key] = durable.get(key) or _git_head_sha(Path(key))
+    if enablement and heads[key]:
+        _persist_base_sha_for_root(attempt, key, heads[key], session_dir=session_dir)
 
 
 def _persist_base_sha_for_root(
@@ -447,15 +436,7 @@ def _persist_base_sha_for_root(
     exists to prevent.
     """
     shared_state = attempt.shared_state
-    enablement = getattr(shared_state, "enablement", None)
-    if enablement is None:
-        return
-    current = dict(getattr(enablement, "base_sha_by_root", None) or {})
-    if current.get(root):
-        return
-    current[root] = sha
-    enablement.base_sha_by_root = current
-    if session_dir is None:
+    if not shared_state.enablement.record_base_sha(root, sha) or session_dir is None:
         return
     try:
         shared_state.save(session_dir)
@@ -465,82 +446,9 @@ def _persist_base_sha_for_root(
         log.debug("integrate_patch: save after base-sha record failed", exc_info=True)
 
 
-def _accepted_patch_roots(
-    enablement: Any,
-    *,
-    done_payload: dict[str, Any] | None,
-    applied: list[Path],
-    framework_root: str,
-) -> dict[str, str]:
-    """Map every patch in the accepted stack to the tree it applies against.
-
-    The stack is cumulative and the recipe emits one patch step per entry in
-    ``kept_patches``, so an entry an earlier round bound has to keep its root
-    here: a step whose root resolves to no record is refused as
-    ``root_unidentified``, and one silently re-pointed at this round's root
-    would be captured against a tree that never held it.
-
-    The ``done_payload`` contribution is admitted only for patches that ARE in
-    the accepted stack, on the same rule :func:`_sole_patch_root` applies to the
-    selected set: a recorded entry for a patch this integration did not take
-    cannot attest anything about the stack. Admitting it would add a root record
-    and a set of declared targets for a tree nothing in the stack touched, and
-    the capture would then be judged against files no round wrote.
-    """
-    accepted = [str(p) for p in (*(getattr(enablement, "kept_patches", None) or []), *applied) if str(p)]
-    in_stack = set(accepted)
-    roots: dict[str, str] = {}
-    prior = getattr(enablement, "patch_roots", None)
-    if isinstance(prior, Mapping):
-        # The durable mapping is keyed by the stack's own paths by construction:
-        # it is this function's own output from an earlier round.
-        roots.update({str(k): str(v) for k, v in prior.items() if str(k) and str(v)})
-    roots.update(
-        {
-            str(k): str(v)
-            for k, v in ((done_payload or {}).get("patch_roots") or {}).items()
-            if str(k) and str(v) and str(k) in in_stack
-        }
-    )
-    # The same fallback the projection uses, so the captured set and the
-    # replayed set cannot disagree about which tree a patch belongs to.
-    for key in accepted:
-        if not roots.get(key) and framework_root:
-            roots[key] = framework_root
-    return roots
-
-
-def _inherited_base_sha_by_root(enablement: Any) -> dict[str, str]:
-    """Return the base sha an earlier accepted round already named, per root.
-
-    Each KEEP is committed, so this round's pre-mutation HEAD already contains
-    its predecessors: recording it would name a tree the recipe's own earlier
-    patch steps have already been applied to, and a replay would apply them
-    again on top of their own result. The first accepted round's reading is the
-    one that names the tree the whole stack applies to.
-    """
-    inherited: dict[str, str] = {}
-    # The roots records only exist from the first KEEP onward; the durable map
-    # is written by every round that mutates a tree, advanced ones included, so
-    # it is the one that survives an ADVANCED -> KEEP sequence.
-    raw = getattr(enablement, "base_sha_by_root", None)
-    if isinstance(raw, Mapping):
-        inherited.update({str(k): str(v) for k, v in raw.items() if str(k) and str(v)})
-    for record in getattr(enablement, "roots", None) or []:
-        if not isinstance(record, Mapping):
-            continue
-        path, sha = str(record.get("path") or ""), str(record.get("base_sha") or "")
-        if path and sha:
-            inherited.setdefault(path, sha)
-    return inherited
-
-
-def _append_setup_executions(shared_state: Any, setup_result: dict[str, Any], *, session_dir: Path) -> None:
-    """Append this round's execution rows to the durable, append-only ledger."""
-    if shared_state is None or not shared_state.enablement.append_setup_executions(
-        setup_result.get("executions") or []
-    ):
-        return
+def _append_setup_execution(shared_state: Any, row: dict[str, Any], *, session_dir: Path) -> None:
+    """Append one execution row to the durable, append-only ledger."""
+    shared_state.enablement.append_setup_execution(row)
     try:
         shared_state.save(session_dir)
     except OSError:
@@ -719,7 +627,10 @@ def _resolve_framework_root(
     session_root = resolve_session_framework_root()
     if session_root and Path(session_root).is_dir():
         return Path(session_root)
-    tree = framework_apply_tree(resolve_framework_tree(os.environ.get("FRAMEWORK", "")))
+    framework = os.environ.get("FRAMEWORK", "")
+    if not framework:
+        return None
+    tree = framework_apply_tree(resolve_framework_tree(framework))
     return tree.root if tree is not None else None
 
 
@@ -766,11 +677,6 @@ def _derive_lane(params: dict[str, Any]) -> str:
     if params.get("framework_agent_authoring") or params.get("framework_agent_candidate_id"):
         return "perf_framework"
     return "perf_explore"
-
-
-def _is_eval_origin(params: dict[str, Any]) -> bool:
-    """Whether the enablement candidate came from the eval gate, not the boot gate."""
-    return str(params.get("enablement_origin") or "") == "eval"
 
 
 def _accuracy_delta_pct(measured: Any, baseline: Any) -> float | None:
@@ -2222,7 +2128,7 @@ class IntegratePatchExecutor:
         from ...enablement.runtime.adapters import get_adapter
         from ...enablement.runtime.stack_actions import EnablementStackAction
 
-        kept = _kept_stack_action(attempt)
+        kept = attempt.shared_state.enablement.kept_stack_action
         if kept:
             action = EnablementStackAction.from_state(kept)
         else:
@@ -2343,17 +2249,19 @@ class IntegratePatchExecutor:
         if gap is None:
             return None
 
-        from hyperloom.agents.framework.repo_map import repo_url_for_framework
+        from hyperloom.inference_optimizer import framework_registry
 
         from ...enablement.runtime.adapters import get_adapter
         from ...enablement.runtime.localization import build_localization_diff
 
+        refs = attempt.shared_state.enablement.candidate_refs
+        if not refs:
+            return None
         framework = str(getattr(attempt.shared_state, "framework", "") or "").strip().lower()
-        repo_url = repo_url_for_framework(framework)
+        repo_url = framework_registry.repo_url(framework)
         if not repo_url:
             return None
-        enablement = getattr(attempt.shared_state, "enablement", None)
-        ref = _first_ref_in_repo(getattr(enablement, "candidate_refs", None) or (), repo_url)
+        ref = _first_ref_in_repo(refs, repo_url)
         if not ref:
             return None
 
@@ -2444,10 +2352,8 @@ class IntegratePatchExecutor:
                     cwd=self.session_dir,
                     log_dir=runs_dir(self.session_dir, "integrate_patch", attempt.task_id),
                     round_task_id=specialist_task_id,
-                    seq_start=shared_state.enablement.last_execution_seq() if shared_state is not None else 0,
-                    on_execution=lambda row: _append_setup_executions(
-                        shared_state, {"executions": [row]}, session_dir=self.session_dir
-                    ),
+                    seq_start=shared_state.enablement.last_execution_seq(),
+                    on_execution=lambda row: _append_setup_execution(shared_state, row, session_dir=self.session_dir),
                 )
                 # Each row is already durable: it is appended by the callback
                 # above, inside the worker, as its command finishes. Several
@@ -2569,7 +2475,7 @@ class IntegratePatchExecutor:
         _setup_ran = bool(setup_result.get("applied"))
         # A runtime this round acquired changes what the next boot executes; a
         # re-provisioned kept one is the stack the last KEEP was already graded on.
-        acquired_runtime = bool(attempt.attempt_venv_root) and not _kept_stack_action(attempt)
+        acquired_runtime = bool(attempt.attempt_venv_root) and not attempt.shared_state.enablement.kept_stack_action
         if (
             not patch_paths
             and not proposal_extra_args
@@ -3040,55 +2946,6 @@ class IntegratePatchExecutor:
             verdict["dropped_env_overrides"] = attempt.dropped_env_overrides
         return verdict
 
-    @staticmethod
-    def _enablement_correctness(
-        params: dict[str, Any],
-        gate_evidence: dict[str, Any],
-    ) -> tuple[bool | None, dict[str, Any]]:
-        """Judge the candidate's accuracy against the floor its origin demands.
-
-        Returns:
-            ``(correctness_ok, eval_provenance)``. ``correctness_ok`` is ``None``
-            only for a boot-origin round with no score at all, which claimed
-            nothing about accuracy; every other absence fails closed.
-        """
-        enablement_accuracy = gate_evidence.get("enablement_accuracy")
-        param_floor = params.get("enablement_accuracy_floor")
-        floor = float(param_floor) if isinstance(param_floor, (int, float)) else DEFAULT_ENABLEMENT_ACCURACY_FLOOR
-        eval_origin = _is_eval_origin(params)
-        accuracy_kind = classify_accuracy_failure(enablement_accuracy, floor)
-        correctness_ok: bool | None
-        if enablement_accuracy is None:
-            # Truly absent: eval-origin fails closed; boot-origin stays provisional.
-            correctness_ok = False if eval_origin else None
-        else:
-            # Present but below floor / non-positive / non-finite is a refusal.
-            correctness_ok = accuracy_meets_floor(enablement_accuracy, floor)
-        # eval-origin only: a score with no task/metric did not come from a real
-        # eval, so it cannot clear the gate. This reads the candidate's OWN run
-        # (both keys are stamped beside the accuracy it is judging), unlike the
-        # contract fingerprint it replaces: RUN_EVAL is itself a hashed contract
-        # field, so an eval-less re-baseline could poison the stored digest and
-        # veto every later candidate without ever consulting its accuracy.
-        if (
-            eval_origin
-            and correctness_ok
-            and not (gate_evidence.get("enablement_accuracy_task") and gate_evidence.get("enablement_accuracy_metric"))
-        ):
-            correctness_ok = False
-            log.warning(
-                "integrate_patch: eval-origin accuracy %s carries no task/metric; reverting",
-                enablement_accuracy,
-            )
-        return correctness_ok, {
-            "enablement_origin": str(params.get("enablement_origin") or ""),
-            "enablement_observed_accuracy": enablement_accuracy,
-            "enablement_accuracy_floor": floor,
-            "accuracy_task": gate_evidence.get("enablement_accuracy_task") or "",
-            "accuracy_metric": gate_evidence.get("enablement_accuracy_metric") or "",
-            "enablement_eval_failure_kind": accuracy_kind or "",
-        }
-
     async def _gate_enablement(
         self,
         *,
@@ -3150,7 +3007,7 @@ class IntegratePatchExecutor:
 
         new_tput = bench_result.get("output_throughput")
 
-        correctness_ok, eval_provenance = self._enablement_correctness(params, gate_evidence)
+        correctness_ok, eval_provenance = enablement_correctness(params, gate_evidence)
 
         # Both halves of the gate are the persisted observations of the two
         # boots, read back by path; neither side re-classifies a log. A half
@@ -3256,8 +3113,7 @@ class IntegratePatchExecutor:
                 # against the tree it is bound to, so a mis-binding refuses
                 # the whole recipe -- for a legitimate multi-root stack a
                 # false refusal rather than a false pass.
-                "enablement_patch_roots": _accepted_patch_roots(
-                    getattr(attempt.shared_state, "enablement", None),
+                "enablement_patch_roots": attempt.shared_state.enablement.accepted_patch_roots(
                     done_payload=done_payload,
                     applied=applied,
                     framework_root=str(framework_root or ""),
@@ -3367,11 +3223,11 @@ class IntegratePatchExecutor:
                     bench_result=bench_result,
                 )
             )
-        except (OSError, subprocess.SubprocessError):
+        except (OSError, subprocess.SubprocessError, ConfigUnreadable):
             # Every field this fills is one the decision refuses the replay for
-            # when absent, so a capture that cannot read the tree, spawn the
-            # probe, or see the durable stack leaves the recipe insufficient
-            # rather than failing the round.
+            # when absent, so a capture that cannot read the tree or the graded
+            # config, spawn the probe, or see the durable stack leaves the
+            # recipe insufficient rather than failing the round.
             log.exception("integrate_patch: enablement KEEP record capture failed")
         return kept_result
 
@@ -3405,30 +3261,30 @@ class IntegratePatchExecutor:
         reason: ``base_sha`` has to keep naming the tree the first accepted round
         applied to, because this round's HEAD already contains its predecessors.
         """
+        from ...enablement.recipe.keep_probe import graded_framework, probe_keep_environment
         from ...enablement.recipe.keep_records import (
             accepted_stack_artifacts,
+            build_extensions_not_carried,
             build_root_records,
             capture_root_snapshots,
             collect_contributions,
             declared_targets,
+            levers_without_readers,
         )
         from hyperloom.inference_optimizer.framework_paths import resolve_session_framework_root
         from ._patch_snapshot import overlay_inventory_without_base, replayed_stack_ops
 
         root = str(framework_root or "")
-        shared_state = attempt.shared_state
-        enablement = getattr(shared_state, "enablement", None)
-        patch_roots = _accepted_patch_roots(
-            enablement,
+        enablement = attempt.shared_state.enablement
+        patch_roots = enablement.accepted_patch_roots(
             done_payload=done_payload,
             applied=applied,
             framework_root=root,
         )
         # Read from the durable stack: the round lifecycle does not dispatch
         # the base set with the round.
-        inherited_artifacts = [a for a in (getattr(enablement, "kept_artifacts", None) or []) if isinstance(a, Mapping)]
         stack_artifacts = accepted_stack_artifacts(
-            inherited=inherited_artifacts,
+            inherited=enablement.kept_artifacts,
             applied=applied_artifacts,
         )
         contributions = collect_contributions(
@@ -3442,7 +3298,7 @@ class IntegratePatchExecutor:
         # root left with no sha either way keeps none, which the decision refuses
         # rather than answering with a HEAD that has moved since.
         captured: dict[str, str] = attempt.base_sha_by_root
-        inherited_sha = _inherited_base_sha_by_root(enablement)
+        inherited_sha = enablement.inherited_base_shas()
         base_sha_by_root = {r: inherited_sha.get(r, "") or captured.get(r, "") for r in git_roots}
         records = build_root_records(
             contributions=contributions,
@@ -3457,10 +3313,9 @@ class IntegratePatchExecutor:
         # Apply order, not dict order: ``patch_roots`` is keyed by patch path and
         # its iteration order follows how the mapping was assembled, while the
         # operation a later patch declares must override an earlier one's for the
-        # same file. ``kept_patches`` then this round's ``applied`` is the order
-        # the stack was built in and the order a consumer replays it in.
-        ordered_patches = [str(p) for p in (*(getattr(enablement, "kept_patches", None) or []), *applied) if str(p)]
-        # ``_accepted_patch_roots`` binds only patches that ARE in the accepted
+        # same file.
+        ordered_patches = enablement.accepted_stack(applied)
+        # ``EnablementRound.accepted_patch_roots`` binds only patches that ARE in the accepted
         # stack, so this normally adds nothing. It stays because the durable
         # mapping outlives the round that wrote it: an entry for a patch no
         # longer in ``kept_patches`` would otherwise contribute a root record
@@ -3546,12 +3401,15 @@ class IntegratePatchExecutor:
             dest_root=self.session_dir / "optimization_stack" / "enablement",
             session_dir=self.session_dir,
         )
-        closure, assertions = self._probe_keep_environment(
-            attempt,
+        materialized_config = str(bench_result.get("materialized_config") or "")
+        framework = graded_framework(params, materialized_config)
+        closure, assertions = probe_keep_environment(
             params,
+            framework=framework,
+            build_manifest=enablement.build_manifest,
             specialist_task_id=specialist_task_id,
             provision_result=provision_result,
-            materialized_config=str(bench_result.get("materialized_config") or ""),
+            materialized_config=materialized_config,
         )
         launch_evidence, argv_refused = project_launch_evidence(bench_result.get("launch_evidence"))
         return {
@@ -3572,321 +3430,18 @@ class IntegratePatchExecutor:
             "enablement_launch_argv_refused": argv_refused,
             "enablement_environment_closure": closure,
             "enablement_installed_versions_at_keep": assertions,
-            "enablement_build_extensions_not_carried": self._build_extensions_not_carried(
-                getattr(attempt.shared_state, "enablement", None),
+            "enablement_build_extensions_not_carried": build_extensions_not_carried(
+                enablement,
                 framework_root,
                 specialist_task_id=specialist_task_id,
             ),
-            "enablement_levers_without_readers": self._levers_without_readers(
-                getattr(attempt.shared_state, "enablement", None),
+            "enablement_levers_without_readers": levers_without_readers(
+                enablement,
                 framework_root,
-                framework=self._graded_framework(params, str(bench_result.get("materialized_config") or "")),
+                framework=framework,
                 effective_config=bench_result.get("effective_config"),
             ),
         }
-
-    @staticmethod
-    def _levers_without_readers(
-        enablement: Any,
-        framework_root: Path | None,
-        *,
-        framework: str,
-        effective_config: Mapping[str, Any] | None = None,
-    ) -> list[str] | None:
-        """Return accepted env levers in the framework's namespace that nothing reads.
-
-        A lever is accepted because a round that set it advanced, not because
-        anything was shown to read it. A knob a specialist introduced in a patch
-        that was later superseded leaves its name behind in ``accepted_config``,
-        and the recipe then exports an env no code consults -- a replay sets it
-        and reproduces nothing, silently.
-
-        Only the framework's own namespace is judged. ``AMD_SERIALIZE_KERNEL``
-        is read by the HIP runtime and ``NCCL_*`` by the collective library;
-        their absence from the framework tree says nothing about them.
-
-        Every regular file the framework ships is searched, matched as bytes. A
-        lever is as likely to be read by a kernel through ``getenv`` or by a
-        launch script through shell expansion as by Python, and a reader can sit
-        in a file with no extension at all -- a ``Dockerfile``, a ``Makefile``.
-        A suffix list is not evidence of absence: skipping a file is what turns
-        a working lever into a refusal. A match inside a compiled artifact
-        counts too, which can only make this miss a dangling lever, never invent
-        one.
-
-        Returns:
-            The lever names with no reader, ``[]`` when a scan found none, and
-            ``None`` when the tree could not be read -- which is not evidence
-            that every lever has one.
-        """
-        if framework_root is None or not framework.strip():
-            return []
-        # This KEEP's own effective config first. The standing ``accepted_config``
-        # is not replaced with it until the lane re-arms on the result, so a
-        # lever this round introduced -- the one the recipe will export -- is
-        # not in shared state yet, and scanning only that would check every
-        # round's levers except the decisive one.
-        accepted = getattr(enablement, "accepted_config", None) or {}
-        merged: dict[str, Any] = {}
-        for source in (accepted, effective_config):
-            if not isinstance(source, Mapping):
-                continue
-            block = source.get("extra_envs")
-            if isinstance(block, Mapping):
-                merged.update({str(k): v for k, v in block.items()})
-        envs = merged
-        prefix = f"{framework.strip().upper()}_"
-        names = sorted({str(k).strip() for k in (envs or {}) if str(k).strip().startswith(prefix)})
-        if not names:
-            return []
-        if not framework_root.is_dir():
-            # An empty walk over a tree that is not there would report every
-            # lever as unread, which is a refusal built out of nothing.
-            return None
-        needles = {name: name.encode("ascii", "ignore") for name in names}
-        unread = set(names)
-        try:
-            for source in framework_root.rglob("*"):
-                if not unread:
-                    break
-                if not source.is_file():
-                    continue
-                blob = source.read_bytes()
-                unread -= {name for name in unread if needles[name] in blob}
-        except OSError:
-            return None
-        return sorted(unread)
-
-    @staticmethod
-    def _build_output_trees(attempt_root: Path) -> list[Path]:
-        """Return the trees a build names as its own output.
-
-        The build records them in its ``result.json`` as the prefixes a runtime
-        would import from; that is the build's own statement of where its output
-        lives, so it is read rather than guessed at. A result that cannot be
-        read falls back to the candidate worktrees the layout puts them in --
-        still narrower than the attempt root, which also holds cloned
-        dependencies and any provisioned virtual environment.
-        """
-        result = attempt_root / "result.json"
-        try:
-            payload = json.loads(result.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            payload = {}
-        runtime = payload.get("runtime") if isinstance(payload, dict) else None
-        prefixes = (runtime or {}).get("pythonpath_prefixes") if isinstance(runtime, dict) else None
-        trees = [Path(str(p)) for p in prefixes if str(p).strip()] if isinstance(prefixes, list) else []
-        if trees:
-            return trees
-        return sorted(d for d in attempt_root.glob("candidates/*/worktree") if d.is_dir())
-
-    @staticmethod
-    def _build_extensions_not_carried(
-        enablement: Any, framework_root: Path | None, *, specialist_task_id: str = ""
-    ) -> list[str] | None:
-        """Return the build's compiled extensions the framework root does not have.
-
-        A build does not install itself: its outputs reach the framework root
-        only as artifacts a specialist declared, one by one. Declare two of
-        three and the round still boots, benchmarks, and is kept -- the gap
-        surfaces hours later as an op the loaded extension does not export, on
-        whichever code path first needs it.
-
-        Only the extensions built *for this framework package* are judged, and
-        only inside the tree the build itself names as its output. An attempt
-        root also holds the other repositories a build cloned and, where one was
-        provisioned, a virtual environment with its own installed copy of this
-        same package -- comparing against those would refuse a recipe over files
-        the framework root was never meant to carry. Compared by
-        content, so an extension the base image already shipped under the same
-        name counts as not carried.
-
-        Every shared object anywhere in the package is considered, not only
-        ``.abi3.so`` directly beneath it: an extension built without the
-        stable-ABI tag carries an interpreter-specific suffix instead, and one
-        belonging to a subpackage sits below the package root. Each is compared
-        at its path relative to the package, so a nested module is matched
-        against the nested module rather than against a same-named file at the
-        top, and the name reported is that relative path.
-
-        Returns:
-            The names left behind, ``[]`` only after at least one of the linked
-            build's output trees was scanned and nothing was missing (or when no
-            build is linked, there being nothing to carry), and ``None`` when a
-            build is linked whose outputs could not be read -- an absent tree, a
-            cleaned-up worktree or an unreadable file. None of those are
-            evidence that anything was carried.
-        """
-        if framework_root is None:
-            return []
-        from ...enablement.recipe.projections import select_linked_build
-
-        rounds = list(getattr(enablement, "kept_rounds", None) or [])
-        current = str(specialist_task_id or "").strip()
-        if current and not any(str((r or {}).get("task_id") or "").strip() == current for r in rounds):
-            rounds.append({"task_id": current})
-        state = {
-            "build_manifest": list(getattr(enablement, "build_manifest", None) or []),
-            "last_specialist_task_id": str(getattr(enablement, "last_specialist_task_id", "") or ""),
-            "kept_rounds": rounds,
-        }
-        _sentinel, row = select_linked_build(state)
-        # Validated as text first: ``Path("")`` is ``Path(".")``, whose
-        # ``is_dir()`` is true, so an absent attempt root would otherwise scan
-        # the working directory and report whatever it found there.
-        attempt_root_text = str((row or {}).get("attempt_root") or "").strip()
-        if not attempt_root_text:
-            return []
-        attempt_root = Path(attempt_root_text)
-        if not attempt_root.is_dir():
-            return None
-        missing: list[str] = []
-        try:
-            package_roots = [
-                d
-                for d in (
-                    prefix / framework_root.name for prefix in IntegratePatchExecutor._build_output_trees(attempt_root)
-                )
-                if d.is_dir()
-            ]
-            if not package_roots:
-                # The build named output trees that are gone, or named none and
-                # the candidate worktrees have been cleaned up. Either way this
-                # scanned nothing, which is not the same as finding nothing.
-                return None
-            built_files = sorted((package, built) for package in package_roots for built in package.rglob("*.so"))
-        except OSError:
-            return None
-        for package, built in built_files:
-            relative = built.relative_to(package)
-            installed = framework_root / relative
-            try:
-                if not installed.is_file() or installed.read_bytes() != built.read_bytes():
-                    missing.append(str(relative))
-            except OSError:
-                return None
-        return missing
-
-    @staticmethod
-    def _graded_framework(params: dict[str, Any], materialized_config: str) -> str:
-        """Return the framework the graded launch served, config first.
-
-        The materialized config is what the launch read, so its own
-        ``benchmark.framework`` outranks the round's params and the ambient
-        ``$FRAMEWORK``; those remain the fallback for a round whose config could
-        not be read.
-        """
-        if materialized_config:
-            from ._server_argv import _benchmark_envs
-
-            try:
-                declared, _envs = _benchmark_envs(materialized_config)
-            except (OSError, ValueError):
-                declared = None
-            if declared:
-                return str(declared).strip().lower()
-        from hyperloom.inference_optimizer.framework_registry import DEFAULT_FRAMEWORK
-
-        return str(params.get("framework") or os.environ.get("FRAMEWORK") or DEFAULT_FRAMEWORK).strip().lower()
-
-    @staticmethod
-    def _graded_launch_env(override: Mapping[str, Any] | None, materialized_config: str) -> dict[str, str]:
-        """Return the environment the graded server was launched into.
-
-        The override is applied first and the config's ``benchmark.envs`` over
-        it, matching the order the launch itself composes them in.
-        """
-        from ...enablement.recipe.keep_probe import keep_probe_env
-
-        env = keep_probe_env(override)
-        if not materialized_config:
-            return env
-        from ._server_argv import config_launch_env
-
-        try:
-            return config_launch_env(materialized_config, env)
-        except (OSError, ValueError):
-            return env
-
-    def _probe_keep_environment(
-        self,
-        attempt: IntegrateAttempt,
-        params: dict[str, Any],
-        *,
-        specialist_task_id: str,
-        provision_result: Any,
-        materialized_config: str = "",
-    ) -> tuple[dict[str, Any], dict[str, str]]:
-        """Observe the closure and assertion set under the accepted runtime.
-
-        The runtime is the round's own provisioning result when it provisioned
-        one, else the override the round was dispatched with -- a KEEP reached
-        through a build's launch-only probe has no provisioning stage at all, so
-        keying on it would leave every accepted build permanently unobserved.
-        An enablement that patches the framework tree in place has neither, and
-        is graded under the *serving framework's* interpreter with no override
-        applied; the probe runs there too, because a closure observed only when
-        some runtime was provisioned is absent for exactly the topology whose
-        replay most needs it. The composed launch environment is what both the
-        interpreter resolution and the probe itself run under. That fallback is
-        ``_resolve_probe_python``, the
-        same resolver the accuracy probes use, and not the benchmark backend's
-        own interpreter -- on a split-venv host Magpie runs from one venv while
-        the server it launches runs from another, and recording Magpie's
-        distributions against that KEEP would be a confidently wrong closure,
-        which is worse than an absent one. The bypass backend is the one case
-        where the backend's interpreter is what launched the server, so it keeps
-        resolving through the backend.
-
-        Both the framework and the environment that fallback resolves against
-        come from the accepted round's own materialized config -- the same
-        artifact the launch read -- overlaid with the runtime override, because
-        a config's ``benchmark.envs`` can itself set ``PATH`` and decide which
-        executable the graded server was. Resolving against the ambient process
-        environment instead names whichever interpreter this coordinator happens
-        to see.
-        The packages named in the assertion set are sourced the same way, from
-        the build attempt this round's probe was opened for when no provisioning
-        stage ran; their versions are the probe's observation either way.
-        """
-        from ...enablement.recipe.keep_probe import (
-            keep_assertion_packages,
-            probe_environment_closure,
-            resolve_keep_interpreter,
-        )
-        from ._benchmark_interpreter import _resolve_probe_python
-        from .benchmark_backend import resolve_backend_name, resolve_benchmark_interpreter
-
-        override: dict[str, Any] = {}
-        if provision_result is not None and getattr(provision_result, "ok", False):
-            override = provision_result.runtime.to_runtime_override()
-        if not override:
-            raw = params.get("runtime_override")
-            override = dict(raw) if isinstance(raw, dict) else {}
-        graded_env = self._graded_launch_env(override, materialized_config)
-        backend = resolve_backend_name()
-        if backend == "bypass":
-            fallback = resolve_benchmark_interpreter()
-        else:
-            fallback = _resolve_probe_python(
-                self._graded_framework(params, materialized_config),
-                env=graded_env,
-            )
-        interpreter = resolve_keep_interpreter(
-            override,
-            backend_name=backend,
-            backend_interpreter=fallback,
-        )
-        enablement = getattr(attempt.shared_state, "enablement", None)
-        provision_versions = (
-            None if provision_result is None else getattr(provision_result, "installed_versions", None) or {}
-        )
-        packages = keep_assertion_packages(
-            provision_versions=provision_versions,
-            build_manifest=getattr(enablement, "build_manifest", None) or [],
-            specialist_task_id=specialist_task_id,
-        )
-        return probe_environment_closure(interpreter, env=graded_env, packages=packages)
 
     def _commit_accepted_work(
         self,
@@ -4978,7 +4533,7 @@ class IntegratePatchExecutor:
             model_path=resolved_model or None,
             gpu_type=resolved_gpu or None,
             benchmark_script=override_script,
-            extra_envs=self._framework_run_eval_envs(params),
+            extra_envs=framework_run_eval_envs(params),
             remove_args=params.get("base_remove_args"),
             unset_envs=params.get("base_unset_envs"),
             args_mode=str(params.get("base_args_mode") or "append"),
@@ -4994,7 +4549,7 @@ class IntegratePatchExecutor:
         variant_envs = dict(extra_envs_applied)
         # Eval-origin enablement needs a raw accuracy for its runnable gate, so
         # RUN_EVAL=true must survive any variant overlay.
-        if bool(params.get("enablement")) and _is_eval_origin(params):
+        if bool(params.get("enablement")) and is_eval_origin(params):
             variant_envs["RUN_EVAL"] = "true"
         variant = GridVariant(
             name=f"integrate-patch-{specialist_task_id[:8]}{variant_suffix}",
@@ -5080,7 +4635,7 @@ class IntegratePatchExecutor:
                     # Canonical name: the latency budget fails closed, so a lane that
                     # does not carry this refuses every KEEP it would ever have made.
                     "e2el_mean_ms": r.e2el_mean_ms,
-                    # Benchmark dir; ``_grade_accuracy`` locates accuracy artifacts here.
+                    # Benchmark dir; ``grade_accuracy`` locates accuracy artifacts here.
                     "workspace": r.workspace or "",
                     "error": r.error or "",
                     "error_class": r.error_class,
@@ -5130,7 +4685,7 @@ class IntegratePatchExecutor:
             str(Path(bench["workspace"]).parent) if bench.get("workspace") else ""
         )
         if bench.get("status") == "succeeded":
-            accuracy_pass = self._grade_accuracy(
+            accuracy_pass = grade_accuracy(
                 eval_search_root,
                 params.get("accuracy_baseline"),
                 framework=params.get("framework") or os.environ.get("FRAMEWORK") or None,
@@ -5208,76 +4763,6 @@ class IntegratePatchExecutor:
             output_dir=slot,
             attempt=open_bringup_attempt(slot),
         )
-
-    @staticmethod
-    def _framework_run_eval_envs(params: dict[str, Any]) -> dict[str, Any] | None:
-        """Force ``RUN_EVAL=true`` for framework-authored source patches.
-
-        Two independent triggers:
-
-        * **Eval-origin enablement**: force ``RUN_EVAL=true`` so ``_bench_patch``
-          can obtain a raw accuracy for the runnable gate, which fails closed
-          without one. A boot-origin candidate is only ever provisional on a
-          missing accuracy, so it inherits the session's contract instead.
-        * **Perf framework authoring**: force only when a comparable baseline
-          accuracy exists (``accuracy_baseline > 0``); otherwise leave the
-          candidate's ``RUN_EVAL`` to the materializer's default handling.
-
-        A plain configuration integrate_patch is untouched (returns ``None``).
-
-        Args:
-            params: The integrate_patch task params.
-
-        Returns:
-            ``{"RUN_EVAL": "false"}`` when the session disabled evals,
-            ``{"RUN_EVAL": "true"}`` for eval-origin enablement patches or for
-            framework-authored perf patches with a positive baseline accuracy
-            to compare against; else ``None``.
-        """
-        # The session's opt-out outranks every force-on below.
-        if is_truthy(params.get("disable_run_eval")):
-            return {"RUN_EVAL": "false"}
-        if bool(params.get("enablement")):
-            return {"RUN_EVAL": "true"} if _is_eval_origin(params) else None
-        fw_authored = bool(params.get("framework_agent_authoring") or params.get("framework_agent_candidate_id"))
-        try:
-            baseline = float(params.get("accuracy_baseline") or 0.0)
-        except (TypeError, ValueError):
-            baseline = 0.0
-        return {"RUN_EVAL": "true"} if (fw_authored and baseline > 0) else None
-
-    @staticmethod
-    def _grade_accuracy(
-        result_dir: str,
-        baseline_accuracy: Any,
-        framework: str | None = None,
-        benchmark_mode: str = "",
-    ) -> bool | None:
-        """Grade a bench's accuracy against the baseline.
-
-        With a recorded baseline the measured drop is enforced; without one
-        (or no eval result) the check is skipped (``None``) and warned loudly.
-        For scriptable frameworks (xDiT) ``parse_eval_results`` fails closed on
-        a missing quality gate instead of falling back to GSM8K.
-        """
-        # Accept numeric strings in addition to int/float; non-numeric / missing
-        # values fall back to 0.0 (skip).
-        try:
-            baseline_value = float(baseline_accuracy)
-        except (TypeError, ValueError):
-            baseline_value = 0.0
-        eval_results = parse_eval_results(result_dir, framework=framework, benchmark_mode=benchmark_mode)
-        new_accuracy = eval_results.get("accuracy")
-        if new_accuracy is not None and baseline_value > 0:
-            return accuracy_passed(baseline_value, float(new_accuracy))
-        if baseline_value <= 0:
-            log.warning(
-                "integrate_patch: no baseline accuracy; accuracy gate skipped "
-                "(throughput-only KEEP). Accuracy regressions will not be caught.",
-            )
-        else:
-            log.warning("integrate_patch: variant produced no accuracy result; gate skipped")
-        return None
 
 
 __all__ = [

@@ -23,7 +23,7 @@ from typing import Any, Callable
 
 from hyperloom.common.perf_metric import is_agentx_mode
 from hyperloom.common.prompt_safety import defang_prompt_structure
-from hyperloom.inference_optimizer.framework_paths import framework_import_name
+from hyperloom.inference_optimizer.framework_registry import python_package
 from .agentx_context import corpus_lines, grading_lines
 
 from ..specialists.domains import (
@@ -1162,13 +1162,16 @@ def _cpu_selfcheck_block(inp: SpecialistPromptInputs) -> list[str]:
     """Optional ``selfcheck`` helper for a patch specialist with a worktree and no GPU."""
     if inp.allocated_gpu_ids or inp.mode != MODE_PATCH or not inp.worktree_package_dir:
         return []
+    package = python_package(inp.framework)
+    if package is None:
+        return []
     return [
         "",
         "Optional helper: ``selfcheck`` installs your worktree's package into a private venv,",
         "imports it, byte-compiles the files you changed and runs any pytest targets you pass:",
         "    python -m hyperloom.orchestrator.specialists.selfcheck \\",
         f"        --worktree {inp.workspace_path} --package-dir {inp.worktree_package_dir} "
-        f"--package {framework_import_name(inp.framework)} [--pytest <target>]",
+        f"--package {package} [--pytest <target>]",
         "  It prints a JSON result. A framework with compiled extensions (e.g. vLLM) rebuilds",
         "  them on install, which can take well over your wall budget.",
     ]

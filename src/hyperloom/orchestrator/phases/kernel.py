@@ -3044,47 +3044,6 @@ class KernelPhase(CoordinatorCollaborator):
             log.warning("gemm E2E: merge failed (%s); rejecting candidate", exc)
             return None
 
-    def _ck_blockscale_switch_eligible(self, result: dict[str, Any]) -> bool:
-        """Whether the fp8 block-scale CK backend switch should be E2E-validated."""
-        if not isinstance(result, dict):
-            return False
-        from ..kernel.request_handlers import resolve_gemm_tuning_backend
-
-        backend = str(result.get("backend") or resolve_gemm_tuning_backend({})).strip().lower()
-        if backend != "forge":
-            return False
-        framework = str(self.shared_state.framework or "").strip().lower()
-        if framework != "sglang":
-            return False
-        if not self._ck_switch_precision_is_fp8(result):
-            return False
-
-        from hyperloom.inference_optimizer.gpu_types import _resolve_amd_gpu_type
-        from ..actions.executors._workload_envs import _GFX942_GPU_TYPES
-
-        gpu = _resolve_amd_gpu_type(self.shared_state.gpu_type or "")
-        if gpu not in _GFX942_GPU_TYPES:
-            return False
-
-        # Block-scale fp8 only, asserted positively via ``weight_block_size``.
-        from hyperloom.inference_optimizer.model_config_utils import _fp8_is_block_scale
-
-        model_path = str(self.shared_state.model_path or os.environ.get("MODEL_PATH", ""))
-        return _fp8_is_block_scale(model_path)
-
-    def _ck_switch_precision_is_fp8(self, result: dict[str, Any]) -> bool:
-        """Whether the workload runs fp8, resolved from any available signal."""
-        if str(self.shared_state.precision or "").strip().lower() == "fp8":
-            return True
-        if isinstance(result, dict) and str(result.get("precision") or "").strip().lower() == "fp8":
-            return True
-        from ..kernel.request_handlers import _resolve_forge_precision_and_quant
-
-        precision, _ = _resolve_forge_precision_and_quant(self.shared_state, {})
-        if str(precision or "").strip().lower() == "fp8":
-            return True
-        return False
-
     def _sync_profile_state_after_gemm_roofline(self, result: dict[str, Any]) -> None:
         """Merge a handler-owned Roofline fallback into the live Coordinator state."""
         shape_capture = result.get("shape_capture") if isinstance(result, dict) else None
@@ -3329,19 +3288,6 @@ class KernelPhase(CoordinatorCollaborator):
                     }
                 )
 
-        # Standalone fp8 block-scale CK backend switch: inject as its own candidate so the loop E2E-validates baseline
-        # Triton vs CK.
-        if self._ck_blockscale_switch_eligible(result):
-            if not any(c.get("env_var") == "SGLANG_FP8_BLOCKSCALE_CK_MAX_M" for c in candidates):
-                candidates.append(
-                    {
-                        "tuner": "ck_blockscale_backend_switch",
-                        "env_var": "SGLANG_FP8_BLOCKSCALE_CK_MAX_M",
-                        "env_value": "256",
-                        "envs": {"SGLANG_FP8_BLOCKSCALE_CK_MAX_M": "256"},
-                        "micro_speedup": 1.0,
-                    }
-                )
         return candidates
 
     async def _validate_gemm_tuning_e2e(self, result: dict[str, Any]) -> None:

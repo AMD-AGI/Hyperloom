@@ -70,6 +70,7 @@ from hyperloom.inference_optimizer.grid_server_args import (
 from hyperloom.inference_optimizer.grid_server_args import merge_server_args
 from hyperloom.inference_optimizer.grid_server_args import remove_server_args
 from hyperloom.inference_optimizer.grid_server_args import validate_server_args_shell_safe
+from hyperloom.inference_optimizer import framework_registry
 from ._recipe_script import (
     RecipeLeverUnavailableError,
     apply_recipe_levers,
@@ -78,7 +79,6 @@ from ._recipe_script import (
 )
 from ._server_argv import add_server_arg_unless_pinned, seal_server_argv
 from ._server_patcher import (
-    ensure_sglang_patched_for_ck_blockscale,
     ensure_sglang_patched_for_tracelens,
     ensure_vllm_patched_for_tracelens,
 )
@@ -1100,32 +1100,16 @@ def _coerce_workload_int_env(env_key: str, raw: str) -> int:
     return value
 
 
-# ``$FRAMEWORK`` (lowercased) -> shipped Magpie YAML, relative to
-# ``asset_root()``. Unknown / unset frameworks fall back to
-# ``_DEFAULT_BASELINE_CONFIG`` (sglang) so existing sglang-default tests keep
-# passing. Values are relative so ``asset_root()`` is still resolved at call
-# time (honoring the ``$INFERENCE_OPTIMIZER_ASSET_ROOT`` override).
-_BASELINE_CONFIG_BY_FRAMEWORK: dict[str, Path] = {
-    "atom": Path("assets/configs/baseline_atom.yaml"),
-    "vllm": Path("assets/configs/baseline_vllm.yaml"),
-    "xdit": Path("assets/configs/baseline_xdit.yaml"),
-    "custom": Path("assets/configs/baseline_custom.yaml"),
-}
-_DEFAULT_BASELINE_CONFIG = Path("assets/configs/baseline_sglang.yaml")
-
-
 def default_baseline_config() -> Path:
-    """Resolve the shipped Magpie YAML based on ``$FRAMEWORK`` env.
+    """Resolve the shipped Magpie YAML for ``$FRAMEWORK``, or for the default framework when it is unset.
 
-    Returns the sglang YAML when ``$FRAMEWORK`` is unset/unknown so existing
-    sglang-default tests keep passing.
+    Resolved at call time so ``$INFERENCE_OPTIMIZER_ASSET_ROOT`` is honoured.
 
     Returns:
         Path: The shipped Magpie YAML config path for the resolved framework.
     """
-    fw = os.environ.get("FRAMEWORK", "sglang").strip().lower()
-    rel = _BASELINE_CONFIG_BY_FRAMEWORK.get(fw, _DEFAULT_BASELINE_CONFIG)
-    return asset_root() / rel
+    fw = os.environ.get("FRAMEWORK") or framework_registry.DEFAULT_FRAMEWORK
+    return asset_root() / "assets" / "configs" / framework_registry.shipped_config_name("baseline", fw)
 
 
 _PROFILER_FLAG_RE = re.compile(r"--profiler-config\.(\w+)[=\s]+(\S+)")
@@ -2194,18 +2178,6 @@ def materialize_config_with_envs(
                 "to restore the gate. This warning fires once per process."
             )
             _RUN_EVAL_DISABLED_WARN_EMITTED = True
-    # KernelForge fp8 block-scale CK backend switch: SGLANG_FP8_BLOCKSCALE_CK_MAX_M
-    # only takes effect on a KernelForge-patched sglang fp8_utils.py. Ensure the
-    # patch, scoped to sglang + the env present. Fail-soft (a failed patch leaves
-    # the env a no-op). Honors the HYPERLOOM_ENABLE_PATCH kill switch.
-    _fw = str(bench.get("framework") or "").lower()
-    if _tracelens_patch_enabled() and "sglang" in _fw and "SGLANG_FP8_BLOCKSCALE_CK_MAX_M" in envs:
-        if not ensure_sglang_patched_for_ck_blockscale():
-            log.warning(
-                "CK fp8 block-scale patch could not be applied; "
-                "SGLANG_FP8_BLOCKSCALE_CK_MAX_M will no-op on the unpatched "
-                "sglang fp8_utils.py (serving run continues unaffected)."
-            )
     # FlyDSL folds only same-directory helpers into its JIT cache key, so a patched
     # helper one directory over is served from a stale binary. Naming the roots
     # folds their sources into the key. Only the run that applied such a patch has

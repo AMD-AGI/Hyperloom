@@ -14,6 +14,7 @@ import pytest
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.orchestrator.phases import machine_state as ps
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 from ._geak_helpers import stop_geak_before_launch
 
@@ -64,7 +65,10 @@ def session_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # KERNEL entry would otherwise launch a real GEAK runner or Controller process on its route.
     stop_geak_before_launch(monkeypatch)
     monkeypatch.setattr(controller_submit, "run_controller_subprocess", _no_controller_run)
-    return make_session_dir()
+    session_dir = make_session_dir()
+    # The CLI seeds a registered framework before the Coordinator ever loads the state.
+    SharedState(framework="sglang").save(session_dir)
+    return session_dir
 
 
 def _chain(state: Any) -> list[tuple[str, str, str]]:
