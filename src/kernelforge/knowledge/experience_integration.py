@@ -531,9 +531,6 @@ def _cleanup_old_reference_generations(root: Path, current: str) -> None:
             elif path.is_dir():
                 shutil.rmtree(path)
         fsync_directory(sets_root)
-    for legacy in root.glob("reference_*.md"):
-        legacy.unlink()
-    fsync_directory(root)
 
 
 def _persist_kb_references(

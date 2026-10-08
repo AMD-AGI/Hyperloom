@@ -289,7 +289,6 @@ def _write_pr_provenance(
         write_provenance(
             workspace_dir,
             {
-                "schema_version": 1,
                 "experiment_id": experiment_id,
                 "winning_iteration": winning_iteration,
                 "surfaced": list(surfaced),
@@ -2193,7 +2192,6 @@ def forge_loop(
             mean_case_speedup=mean_case_speedup,
         )
         checkpoint = {
-            "schema_version": 1,
             "state": "best_committed",
             "decision": "KEEP",
             "experiment_id": (caller_experiment_id or (experiment.experiment_id if experiment is not None else "")),
@@ -2372,13 +2370,12 @@ def _emit_rewrite_applyback_contract(ctx, _param, value):
 )
 @click.option(
     "--logical-op-name",
-    "--op-name",
     "op_name",
     required=True,
     help="Stable logical identity of the workload (a namespace or "
     "punctuation is allowed). KernelForge derives the FlyDSL factory "
     "symbol from it and reports the symbol in the result; never "
-    "re-derive it downstream. --op-name is a deprecated alias.",
+    "re-derive it downstream.",
 )
 @click.option("--workspace", "workspace_dir", required=True, help="Git workspace dir")
 @click.option("--experiments-dir", required=True, help="Where to write forge_experiments")
@@ -2526,12 +2523,6 @@ def forge_rewrite(
     """Rewrite a source kernel into FlyDSL and optimize it via forge-loop."""
     import os
     import re as _re
-
-    if "--op-name" in sys.argv:
-        click.echo(
-            "warning: --op-name is deprecated; use --logical-op-name.",
-            err=True,
-        )
 
     overrides = {}
     if gpu_target:

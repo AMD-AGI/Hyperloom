@@ -30,25 +30,6 @@ def compute_token_coverage(
     return sorted(set(tokens))
 
 
-def compute_dense_gemm_shapes(
-    hidden_size: int,
-    intermediate_size: int,
-    tokens: list[int],
-    tp: int = 1,
-) -> list[tuple[int, int, int]]:
-    """Compute (M, N, K) dense GEMM shapes from model config."""
-    n_inter = intermediate_size // tp
-    n_hidden = hidden_size  # hidden is not TP-split for output proj
-
-    shapes = set()
-    for m in tokens:
-        # gate_proj / up_proj
-        shapes.add((m, n_inter, hidden_size))
-        # down_proj
-        shapes.add((m, n_hidden, n_inter))
-    return sorted(shapes)
-
-
 def compute_vllm_moe_batch_sizes(
     conc: int = 0,
     explicit_tokens: list[int] | None = None,

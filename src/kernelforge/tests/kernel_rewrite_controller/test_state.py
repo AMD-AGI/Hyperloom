@@ -66,7 +66,6 @@ def test_task_state_rejects_unknown_schema_fields() -> None:
 
 def test_task_state_rejects_unknown_status() -> None:
     payload = {
-        "schema_version": 1,
         "status": "paused",
         "reason": "",
         "started_at": "",
