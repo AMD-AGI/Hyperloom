@@ -6,6 +6,7 @@ import json
 import socket
 import time
 import urllib.error
+from concurrent.futures import Future
 
 import pytest
 
@@ -278,15 +279,29 @@ def test_get_many_returns_when_the_budget_expires(monkeypatch):
 def test_get_many_keeps_results_a_slow_sibling_would_have_discarded(monkeypatch):
     """One slow request must not invalidate the answers already in hand."""
 
-    def handler(url):
-        if url.endswith("/1"):
-            time.sleep(5.0)
-        return _FakeResponse(json.dumps({"url": url}))
+    class _ControlledPool:
+        """Leave one request pending while completing its siblings deterministically."""
 
-    _install(monkeypatch, handler)
+        def __init__(self, *, max_workers):
+            self.pending: list[Future] = []
+
+        def submit(self, function, path, params):
+            future = Future()
+            if path.endswith("/1"):
+                self.pending.append(future)
+                return future
+            future.set_result(function(path, params))
+            return future
+
+        def shutdown(self, *, wait, cancel_futures):
+            for future in self.pending:
+                future.cancel()
+
+    _install(monkeypatch, lambda url: _FakeResponse(json.dumps({"url": url})))
+    monkeypatch.setattr(client_module, "ThreadPoolExecutor", _ControlledPool)
     client = PRMonitorClient("https://host/pr-monitor")
 
-    outcomes = client.get_many([(f"/repos/o/r/prs/{n}", None) for n in (1, 2, 3)], budget_sec=0.3)
+    outcomes = client.get_many([(f"/repos/o/r/prs/{n}", None) for n in (1, 2, 3)], budget_sec=0.01)
 
     assert isinstance(outcomes[0].error, PRTransportError)
     assert outcomes[1].payload["url"].endswith("/2")
