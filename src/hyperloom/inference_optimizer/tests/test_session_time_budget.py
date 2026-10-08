@@ -1243,7 +1243,7 @@ class TestThePumpStopsWorkItCannotWaitFor:
         promoted = AsyncMock()
         monkeypatch.setattr(coord.writeback, "is_promotable_result", lambda *_args: True)
         monkeypatch.setattr(coord.writeback, "promote_to_shared_state", promoted)
-        monkeypatch.setattr(coord.writeback, "fact_write_hook", AsyncMock())
+        monkeypatch.setattr(coord.recipe_journal, "fact_write_hook", AsyncMock())
 
         def work():
             entered.set()

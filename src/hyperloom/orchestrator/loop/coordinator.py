@@ -568,6 +568,13 @@ class Coordinator:
         return self._collaborator("_writeback", WritebackCollaborator)
 
     @property
+    def recipe_journal(self):
+        """Optimization journal, Recipe KB facts and the final Recipe."""
+        from ..knowledge.recipe_journal import RecipeJournalCollaborator
+
+        return self._collaborator("_recipe_journal", RecipeJournalCollaborator)
+
+    @property
     def maintenance(self):
         from .maintenance import MaintenanceCollaborator
 
@@ -695,7 +702,7 @@ class Coordinator:
             sid = (self.shared_state.recipe_kb_session_id or "").strip()
             if not sid:
                 return
-        self.writeback.ensure_recipe_finalized(source="t4_fallback")
+        self.recipe_journal.ensure_recipe_finalized(source="t4_fallback")
         try:
             self.shared_state.save(self.session_dir)
         except Exception:

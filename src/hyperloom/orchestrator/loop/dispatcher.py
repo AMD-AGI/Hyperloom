@@ -1200,7 +1200,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         # write. replay_warm_recipe is excluded (verification, not a fact).
         if task.kind != "replay_warm_recipe":
             try:
-                await self._coord.writeback.fact_write_hook(
+                await self._coord.recipe_journal.fact_write_hook(
                     task=task,
                     result=result,
                     verdict=verdict,

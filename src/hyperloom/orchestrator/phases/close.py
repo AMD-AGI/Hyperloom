@@ -347,7 +347,7 @@ class ClosePhase(CoordinatorCollaborator):
 
     async def _do_fact_finalize(self) -> None:
         """Recipe KB commit: publishes the terminal outcome before telemetry steps."""
-        outcome = self._coord.writeback.ensure_recipe_finalized(source="close") or {}
+        outcome = self._coord.recipe_journal.ensure_recipe_finalized(source="close") or {}
         kb_status = str(outcome.get("status") or "done")
         close_status = (
             "failed" if kb_status == "error" else "skipped" if kb_status in {"disabled", "skipped"} else "done"

@@ -58,7 +58,8 @@ from hyperloom.orchestrator.knowledge.remote_recipe.values import (
     build_publishable_recipe_config,
     has_replay_material,
 )
-from hyperloom.orchestrator.loop.writeback import WritebackCollaborator, _remote_result_type
+from hyperloom.orchestrator.knowledge.recipe_journal import RecipeJournalCollaborator, _remote_result_type
+from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out
 
@@ -1195,7 +1196,7 @@ def test_degraded_kb_skips_remote_close_writer(
         classmethod(lambda cls: (_ for _ in ()).throw(AssertionError("degraded CLOSE constructed HyperloomRemoteKB"))),
     )
 
-    outcome = WritebackCollaborator(coordinator).finalize_recipe_and_journal()
+    outcome = RecipeJournalCollaborator(coordinator).finalize_recipe_and_journal()
     assert outcome == {
         "status": "skipped",
         "reason": "degraded_kb",
@@ -1235,7 +1236,7 @@ def test_local_close_ignores_ambient_kb_store(
         "from_env",
         classmethod(lambda cls: (_ for _ in ()).throw(AssertionError("local CLOSE constructed HyperloomRemoteKB"))),
     )
-    outcome = WritebackCollaborator(coordinator).finalize_recipe_and_journal()
+    outcome = RecipeJournalCollaborator(coordinator).finalize_recipe_and_journal()
     assert outcome == {
         "status": "skipped",
         "reason": "no_recipe_backend",
@@ -1291,7 +1292,7 @@ def test_remote_close_writes_new_kb_once_and_skips_legacy_finalize(
         "from_env",
         classmethod(lambda cls: _Facade()),
     )
-    outcome = WritebackCollaborator(coordinator).finalize_recipe_and_journal()
+    outcome = RecipeJournalCollaborator(coordinator).finalize_recipe_and_journal()
     assert outcome == {
         "status": "written",
         "reason": "",
@@ -1351,7 +1352,7 @@ def test_remote_close_transport_failure_is_nonfatal(
         "from_env",
         classmethod(lambda cls: (_ for _ in ()).throw(OSError("transport down"))),
     )
-    outcome = WritebackCollaborator(coordinator).finalize_recipe_and_journal()
+    outcome = RecipeJournalCollaborator(coordinator).finalize_recipe_and_journal()
     assert outcome == {
         "status": "error",
         "reason": "OSError",
@@ -1403,7 +1404,7 @@ def test_remote_close_never_sends_an_unvalidated_working_recipe(tmp_path: Path, 
         classmethod(lambda cls: (_ for _ in ()).throw(AssertionError("remote writer must not be reached"))),
     )
 
-    outcome = WritebackCollaborator(coordinator).finalize_recipe_and_journal()
+    outcome = RecipeJournalCollaborator(coordinator).finalize_recipe_and_journal()
 
     assert outcome["reason"] == "unvalidated_recipe_stack"
     assert outcome["result_type"] == "unvalidated_recipe"
@@ -1411,7 +1412,7 @@ def test_remote_close_never_sends_an_unvalidated_working_recipe(tmp_path: Path, 
 
 def test_unvalidated_write_back_audit_omits_mismatched_metrics(tmp_path: Path, monkeypatch) -> None:
     captured: dict = {}
-    collaborator = WritebackCollaborator(
+    collaborator = RecipeJournalCollaborator(
         SimpleNamespace(
             shared_state=SimpleNamespace(
                 current_best={"tput": 2200.0},
@@ -1426,7 +1427,7 @@ def test_unvalidated_write_back_audit_omits_mismatched_metrics(tmp_path: Path, m
         )
     )
     monkeypatch.setattr(
-        "hyperloom.orchestrator.loop.writeback._close_out.record_write_back_settled",
+        "hyperloom.orchestrator.knowledge.recipe_journal._close_out.record_write_back_settled",
         lambda *args, **kwargs: captured.update(kwargs),
     )
 
@@ -3046,7 +3047,7 @@ def test_remote_read_is_wired_into_cli_t0_and_close_write_remains() -> None:
             fromlist=["_bootstrap_recipe_kb"],
         )._bootstrap_recipe_kb
     )
-    close_source = inspect.getsource(WritebackCollaborator.finalize_recipe_and_journal)
+    close_source = inspect.getsource(RecipeJournalCollaborator.finalize_recipe_and_journal)
     assert "RemoteWarmRecipeAdapter" in bootstrap_source
     assert "HyperloomRemoteKB.from_env().write" in close_source
     assert "write_final_remote_recipe" not in close_source

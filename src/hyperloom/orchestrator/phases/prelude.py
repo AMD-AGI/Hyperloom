@@ -2441,7 +2441,7 @@ class PreludePhase(CoordinatorCollaborator):
             )
             # Journal warm-replay as a synthetic KEEP; no KB lesson.
             try:
-                journal = self._coord.writeback.ensure_journal()
+                journal = self._coord.recipe_journal.ensure_journal()
                 journal.append_entry(
                     JournalEntry(
                         phase=(state.phase or "PRELUDE").upper() or "PRELUDE",

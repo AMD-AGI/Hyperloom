@@ -722,7 +722,7 @@ async def test_a_lift_refused_integrate_patch_is_not_journalled_keep(session_dir
 
     assert len(s.optimization_stack) == 1
     assert s.current_best["tput"] == 200.0
-    (entry,) = [e for e in coord.writeback.ensure_journal().entries if e.task_id == "t-refused"]
+    (entry,) = [e for e in coord.recipe_journal.ensure_journal().entries if e.task_id == "t-refused"]
     assert entry.outcome == OUTCOME_NO_PROMOTE
     assert [row["change_type"] for row in s.intervention_mix] == ["code_patch_attempt"]
     assert [row["decision"] for row in settled] == ["refused"]
@@ -744,14 +744,14 @@ async def test_a_step_without_adoption_semantics_is_never_journalled_keep(sessio
     task = _task(kind, task_id=f"t-{kind}")
 
     outcome = await coord.writeback.promote_to_shared_state(kind, dict(payload), task=task)
-    await coord.writeback.fact_write_hook(
+    await coord.recipe_journal.fact_write_hook(
         task=task,
         result=SubAgentResult(task.task_id, "succeeded", payload),
         verdict=outcome.verdict,
     )
 
     assert outcome.verdict is Verdict.RECORDED
-    (entry,) = [e for e in coord.writeback.ensure_journal().entries if e.task_id == task.task_id]
+    (entry,) = [e for e in coord.recipe_journal.ensure_journal().entries if e.task_id == task.task_id]
     assert entry.outcome == OUTCOME_RECORDED
 
 
@@ -781,7 +781,7 @@ async def test_forge_loop_integrate_keep_lands_a_journal_entry(session_dir):
     )
 
     assert s.optimization_stack[0]["action"] == "integrate"
-    journal = coord.writeback.ensure_journal()
+    journal = coord.recipe_journal.ensure_journal()
     matches = [e for e in journal.entries if e.task_id == "int-forge-1"]
     assert len(matches) == 1
     entry = matches[0]
@@ -812,7 +812,7 @@ async def test_fusion_integrate_keep_lands_a_journal_entry(session_dir):
     )
 
     assert s.optimization_stack[0]["action"] == "fusion"
-    journal = coord.writeback.ensure_journal()
+    journal = coord.recipe_journal.ensure_journal()
     matches = [e for e in journal.entries if e.task_id == "int-fusion-1"]
     assert len(matches) == 1
     assert matches[0].variant_name == "fuse-rmsnorm-silu"
@@ -2823,7 +2823,7 @@ async def test_a_config_attempt_is_ledgered_with_no_timeline_open(session_dir):
     coord = _coord(session_dir)
     assert coord.phase_framework.timeline() is None
 
-    await coord.writeback.fact_write_hook(
+    await coord.recipe_journal.fact_write_hook(
         task=_task("explore", task_id="ex-1"),
         result=SubAgentResult(
             task_id="ex-1",

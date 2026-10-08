@@ -222,12 +222,12 @@ def test_lanes_fit(coord: Coordinator) -> None:
 
 
 def test_pitfall_severity_for(coord: Coordinator) -> None:
-    assert coord.writeback._pitfall_severity_for(None) is None
-    assert coord.writeback._pitfall_severity_for({"error_class": "oom"}) is not None
-    assert coord.writeback._pitfall_severity_for({"status": "crash"}) is not None
-    assert coord.writeback._pitfall_severity_for({"gain_pct": -10.0}) is not None
-    assert coord.writeback._pitfall_severity_for({"gain_pct": 2.0}) is None
-    assert coord.writeback._pitfall_severity_for({"gain_pct": "bad"}) is None
+    assert coord.recipe_journal._pitfall_severity_for(None) is None
+    assert coord.recipe_journal._pitfall_severity_for({"error_class": "oom"}) is not None
+    assert coord.recipe_journal._pitfall_severity_for({"status": "crash"}) is not None
+    assert coord.recipe_journal._pitfall_severity_for({"gain_pct": -10.0}) is not None
+    assert coord.recipe_journal._pitfall_severity_for({"gain_pct": 2.0}) is None
+    assert coord.recipe_journal._pitfall_severity_for({"gain_pct": "bad"}) is None
 
 
 def test_is_promotable_result(coord: Coordinator) -> None:
@@ -250,16 +250,16 @@ def test_is_promotable_result_baseline_eval_failed(coord: Coordinator) -> None:
 # -- phase / id helpers ----------------------------------------------------
 def test_journal_entry_phase(coord: Coordinator) -> None:
     coord.shared_state.phase = ""
-    assert coord.writeback.journal_entry_phase() == "UNKNOWN"
+    assert coord.recipe_journal.journal_entry_phase() == "UNKNOWN"
     coord.shared_state.phase = "framework_agent"
-    assert coord.writeback.journal_entry_phase() == "FRAMEWORK_AGENT"
+    assert coord.recipe_journal.journal_entry_phase() == "FRAMEWORK_AGENT"
 
 
 def test_source_session_id_prefers_recipe_kb(coord: Coordinator) -> None:
     coord.shared_state.recipe_kb_session_id = "recipe-kb-99"
-    assert coord.writeback._source_session_id() == "recipe-kb-99"
+    assert coord.recipe_journal._source_session_id() == "recipe-kb-99"
     coord.shared_state.recipe_kb_session_id = ""
-    assert coord.writeback._source_session_id() == coord.session_dir.name
+    assert coord.recipe_journal._source_session_id() == coord.session_dir.name
 
 
 def test_kernel_enabled(coord: Coordinator) -> None:
@@ -509,7 +509,7 @@ def test_collect_workload_tags(coord: Coordinator, monkeypatch) -> None:
     ss.precision = "fp8"
     ss.tp = 8
     ss.conc = 64
-    tags = coord.writeback._collect_workload_tags()
+    tags = coord.recipe_journal._collect_workload_tags()
     assert tags["framework"] == "sglang"
     assert tags["model_class"] == "moe"
     assert tags["tp"] == 8
@@ -531,7 +531,7 @@ def test_build_kernel_optimizations_from_state(coord: Coordinator) -> None:
     ss.kernel_integrate_attempts = {
         "i1": {"kernel_id": "k1", "last_decision": "KEEP", "best_gain_pct": 5.0, "attempts": [{"new_tput": 210.0}]},
     }
-    out = coord.writeback._build_kernel_optimizations_from_state()
+    out = coord.recipe_journal._build_kernel_optimizations_from_state()
     assert len(out) == 1  # only the KEEP'd k1
     row = out[0]
     assert row["kernel_id"] == "k1"

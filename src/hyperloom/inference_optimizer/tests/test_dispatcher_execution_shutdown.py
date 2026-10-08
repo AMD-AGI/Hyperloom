@@ -41,7 +41,6 @@ def _dispatcher(tmp_path):
     state = SimpleNamespace(phase="PRELUDE", macro_cycle=0, tick=0, session_budget_usable_sec=lambda: None)
     writeback_ns = SimpleNamespace(
         promote_to_shared_state=AsyncMock(),
-        fact_write_hook=AsyncMock(),
         is_promotable_result=lambda *_args: True,
         handle_unpromotable_result=AsyncMock(),
         record_specialist_result=AsyncMock(),
@@ -61,6 +60,7 @@ def _dispatcher(tmp_path):
         reconciler=SimpleNamespace(last_report=ReconcileReport()),
         _BUDGET_GATED_DISPATCH_PHASES=frozenset(),
         writeback=writeback_ns,
+        recipe_journal=SimpleNamespace(fact_write_hook=AsyncMock()),
         specialist_dispatch=SimpleNamespace(maybe_auto_retry_specialist=AsyncMock(return_value=True)),
     )
     dispatcher = DispatcherCollaborator(coord)
@@ -419,7 +419,7 @@ def test_cleanup_unconfirmed_preserves_outcome_without_completion(tmp_path, clea
         assert completed.await_count == 0
         assert dispatcher.gpu_specialist_pool.release.await_count == 0
         assert dispatcher._coord.writeback.promote_to_shared_state.await_count == 0
-        assert dispatcher._coord.writeback.fact_write_hook.await_count == 0
+        assert dispatcher._coord.recipe_journal.fact_write_hook.await_count == 0
         assert await dispatcher.locks.lane_holders() == {"research_lane": 1}
         assert not await dispatcher.bus.tail(topic="delegated_result")
         await _close(dispatcher)
@@ -562,7 +562,7 @@ def test_confirmed_cancellation_records_once_without_promotion_or_retry(tmp_path
         assert dispatcher._coord.writeback.record_specialist_result.await_count == 1
         assert dispatcher._coord.phase_framework.on_specialist_settled.call_count == 1
         assert dispatcher._coord.writeback.promote_to_shared_state.await_count == 0
-        assert dispatcher._coord.writeback.fact_write_hook.await_count == 0
+        assert dispatcher._coord.recipe_journal.fact_write_hook.await_count == 0
         assert not dispatcher._executions and not dispatcher._inflight_actions
         assert not await dispatcher.locks.lane_holders()
 
