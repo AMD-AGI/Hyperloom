@@ -10,6 +10,8 @@ import logging
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from hyperloom.inference_optimizer.cli import executors as cli_executors
 from hyperloom.inference_optimizer.protocol.action_surfaces import KERNEL_AGENT_OWNED_ACTIONS
 from hyperloom.inference_optimizer.cli.executors import (
@@ -47,21 +49,24 @@ def test_build_specialist_executor_inprocess_when_no_claude(monkeypatch, tmp_pat
     assert callable(executor)
 
 
-def test_build_specialist_executor_subprocess_fallback_warns(monkeypatch, tmp_path, caplog):
-    """subprocess requested but no claude binary -> warns + falls back."""
+def test_build_specialist_executor_refuses_to_start_without_claude_on_path(monkeypatch, tmp_path):
+    """The in-process backend has no tools, so a missing CLI must stop the run rather than degrade it."""
     import shutil
 
     monkeypatch.setattr(shutil, "which", lambda _n: "")
     monkeypatch.delenv("GEAK_CLAUDE_BIN", raising=False)
     monkeypatch.delenv("HYPERLOOM_CLAUDE_CLI_PATH", raising=False)
-    with caplog.at_level(logging.WARNING, logger=cli_executors.log.name):
-        executor = _build_specialist_executor(
+    monkeypatch.setattr(
+        cli_executors,
+        "ClaudeBackend",
+        lambda **_kwargs: pytest.fail("a missing claude CLI must not fall back to the in-process backend"),
+    )
+    with pytest.raises(RuntimeError, match="none was found in"):
+        _build_specialist_executor(
             _spec_args("subprocess"),
             session_dir=tmp_path,
             knowledge_plane=None,
         )
-    assert callable(executor)
-    assert any("claude" in rec.message for rec in caplog.records)
 
 
 def test_build_specialist_executor_subprocess_uses_the_recorded_claude(monkeypatch, tmp_path, caplog):

@@ -77,8 +77,8 @@ def _build_specialist_executor(
         specialist and returns a result envelope dict.
 
     Raises:
-        RuntimeError: If subprocess dispatch selects Codex but no Codex runtime
-            is installed.
+        RuntimeError: If subprocess dispatch finds no runtime for the selected
+            agent CLI: no ``claude`` CLI, or no Codex runtime.
     """
     from hyperloom.orchestrator.specialists.mcp_config import write_specialist_mcp_config
     from hyperloom.orchestrator.specialists.runner import SpecialistRunner
@@ -114,19 +114,17 @@ def _build_specialist_executor(
                 "Falling back to the claude CLI here would fail to authenticate on every "
                 "specialist task."
             )
-        agent_bin = codex_bin
     else:
         claude_bin = resolve_claude_executable()
-        agent_bin = claude_bin
-    use_subprocess = dispatch_mode != "inprocess" and bool(agent_bin)
-    if dispatch_mode == "subprocess" and not agent_bin:
-        log.warning(
-            "specialist_dispatch_mode=subprocess requested but `%s` "
-            "binary not found on PATH; falling back to in-process backend",
-            agent_backend,
-        )
+        if dispatch_mode != "inprocess" and not claude_bin:
+            raise RuntimeError(
+                "specialists run on the claude CLI, but none was found in $HYPERLOOM_CLAUDE_CLI_PATH, "
+                "$GEAK_CLAUDE_BIN or on PATH. src/hyperloom/agents/kernel/scripts/install.sh puts it on "
+                "PATH. The in-process backend is no substitute: it gives a specialist no source roots, "
+                "no permission mode and no PR Monitor tools, so every task would come back empty."
+            )
 
-    if use_subprocess:
+    if dispatch_mode != "inprocess":
         # Operator --specialist-mcp-config wins; else auto-generate one from the
         # live KnowledgePlane so the subprocess has the PR Monitor MCP wired.
         mcp_config_path: str | None = str(getattr(args, "specialist_mcp_config", "") or "") or None
