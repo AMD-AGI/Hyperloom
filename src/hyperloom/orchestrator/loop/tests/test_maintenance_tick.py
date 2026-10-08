@@ -171,11 +171,21 @@ def _coordinator(session_dir: Path, **kw):
         gpu_specialist_pool=_Pool(),
         tasks=_Tasks(),
         db=object(),
-        _STATE_JSON_WARN_BYTES=kw.get("warn_bytes", 50 * 1024 * 1024),
-        _DISK_FREE_MIN_GB=kw.get("free_min_gb", 20.0),
-        _DISK_USED_MAX_FRAC=kw.get("used_max_frac", 0.85),
-        _DISK_RUNS_KEEP_PER_ACTION=kw.get("keep", 2),
     )
+
+
+def _maintenance(session_dir: Path, **kw) -> MaintenanceCollaborator:
+    """Build a MaintenanceCollaborator with optional constant overrides."""
+    c = MaintenanceCollaborator(_coordinator(session_dir))
+    if "keep" in kw:
+        c._DISK_RUNS_KEEP_PER_ACTION = kw["keep"]  # type: ignore[assignment]
+    if "warn_bytes" in kw:
+        c._STATE_JSON_WARN_BYTES = kw["warn_bytes"]  # type: ignore[assignment]
+    if "free_min_gb" in kw:
+        c._DISK_FREE_MIN_GB = kw["free_min_gb"]  # type: ignore[assignment]
+    if "used_max_frac" in kw:
+        c._DISK_USED_MAX_FRAC = kw["used_max_frac"]  # type: ignore[assignment]
+    return c
 
 
 def _fake_usage(monkeypatch: pytest.MonkeyPatch, *, free_gb: float, used_frac: float, raises=False):
@@ -192,7 +202,7 @@ def _fake_usage(monkeypatch: pytest.MonkeyPatch, *, free_gb: float, used_frac: f
 class TestTheDiskTrimOnlyFiresWhenItHasTo:
     def test_an_unreadable_partition_is_not_an_error(self, tmp_path, monkeypatch: pytest.MonkeyPatch):
         _fake_usage(monkeypatch, free_gb=0, used_frac=0, raises=True)
-        c = MaintenanceCollaborator(_coordinator(tmp_path))
+        c = _maintenance(tmp_path)
 
         assert c._maybe_prune_runs_for_disk() is None
 
@@ -201,7 +211,7 @@ class TestTheDiskTrimOnlyFiresWhenItHasTo:
         runs = tmp_path / "runs" / "explore"
         for i in range(5):
             (runs / f"task{i}").mkdir(parents=True)
-        c = MaintenanceCollaborator(_coordinator(tmp_path))
+        c = _maintenance(tmp_path, keep=2)
 
         got = c._maybe_prune_runs_for_disk()
 
@@ -219,7 +229,7 @@ class TestTheDiskTrimOnlyFiresWhenItHasTo:
 
             os.utime(d, (1_700_000_000 + i * 100, 1_700_000_000 + i * 100))
         (tmp_path / "runs" / "loose_file.txt").write_text("not an action dir", encoding="utf-8")
-        c = MaintenanceCollaborator(_coordinator(tmp_path, keep=2))
+        c = _maintenance(tmp_path, keep=2)
 
         got = c._maybe_prune_runs_for_disk()
 
@@ -231,7 +241,7 @@ class TestTheDiskTrimOnlyFiresWhenItHasTo:
         runs = tmp_path / "runs" / "explore"
         for i in range(4):
             (runs / f"task{i}").mkdir(parents=True)
-        c = MaintenanceCollaborator(_coordinator(tmp_path, keep=1))
+        c = _maintenance(tmp_path, keep=1)
 
         assert c._maybe_prune_runs_for_disk()["runs_pruned"] == 3
 
@@ -239,14 +249,14 @@ class TestTheDiskTrimOnlyFiresWhenItHasTo:
         _fake_usage(monkeypatch, free_gb=1.0, used_frac=0.99)
         runs = tmp_path / "runs" / "explore"
         (runs / "only_task").mkdir(parents=True)
-        c = MaintenanceCollaborator(_coordinator(tmp_path, keep=2))
+        c = _maintenance(tmp_path, keep=2)
 
         assert c._maybe_prune_runs_for_disk()["runs_pruned"] == 0
         assert (runs / "only_task").is_dir()
 
     def test_a_session_with_no_runs_tree_yet_reports_the_usage_only(self, tmp_path, monkeypatch: pytest.MonkeyPatch):
         _fake_usage(monkeypatch, free_gb=1.0, used_frac=0.99)
-        c = MaintenanceCollaborator(_coordinator(tmp_path))
+        c = _maintenance(tmp_path)
 
         got = c._maybe_prune_runs_for_disk()
 
@@ -262,7 +272,7 @@ class TestTheDiskTrimOnlyFiresWhenItHasTo:
         state_path = SharedState.state_path(tmp_path)
         state_path.parent.mkdir(parents=True, exist_ok=True)
         state_path.write_text("x" * 4096, encoding="utf-8")
-        c = MaintenanceCollaborator(_coordinator(tmp_path, warn_bytes=1024))
+        c = _maintenance(tmp_path, warn_bytes=1024)
 
         with caplog.at_level("WARNING"):
             c._maybe_prune_runs_for_disk()
@@ -285,7 +295,7 @@ class TestTheDiskTrimOnlyFiresWhenItHasTo:
         runs = tmp_path / "runs" / "explore"
         for i in range(3):
             (runs / f"task{i}").mkdir(parents=True)
-        c = MaintenanceCollaborator(_coordinator(tmp_path, keep=1))
+        c = _maintenance(tmp_path, keep=1)
 
         assert c._maybe_prune_runs_for_disk()["runs_pruned"] == 2
 
@@ -301,7 +311,7 @@ class TestTheDiskTrimOnlyFiresWhenItHasTo:
             raise OSError("read-only filesystem")
 
         monkeypatch.setattr(shutil, "rmtree", _refuse)
-        c = MaintenanceCollaborator(_coordinator(tmp_path, keep=1))
+        c = _maintenance(tmp_path, keep=1)
 
         with caplog.at_level("WARNING"):
             got = c._maybe_prune_runs_for_disk()
@@ -315,16 +325,10 @@ class TestTheTickItself:
     async def test_the_summary_carries_the_tick_and_the_disk_status(self, tmp_path, monkeypatch: pytest.MonkeyPatch):
         _patch_retention(monkeypatch)
         _fake_usage(monkeypatch, free_gb=500.0, used_frac=0.10)
-        c = MaintenanceCollaborator(_coordinator(tmp_path))
+        c = _maintenance(tmp_path)
 
-        got = await c._run_maintenance(tick=11)
+        got = await c.run(tick=11)
 
         assert got["tick"] == 11
         assert got["disk"]["free_gb"] == 500.0
         assert got["events_pruned"] == 5
-
-    def test_unknown_attributes_fall_through_to_the_coordinator(self, tmp_path):
-        coord = _coordinator(tmp_path)
-        coord.some_coordinator_only_thing = "reachable"
-
-        assert MaintenanceCollaborator(coord).some_coordinator_only_thing == "reachable"

@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -239,27 +238,8 @@ def test_prompt_summary_omits_block_when_empty():
     assert "model_arch" not in text
 
 
-# 5. Coordinator._warm_specialist_params -> arch_notes
-@dataclass
-class _ArchState:
-    """Minimal SharedState double for the warm-param path."""
-
-    model_arch: dict = field(default_factory=dict)
-    gpu_type: str = ""
-    framework: str = ""
-    tp: int = 0
-    precision: str = ""
-    conc: int = 0
-    isl: int = 0
-    osl: int = 0
-    max_model_len: int = 0
-    warm_start_recipe: dict[str, Any] = field(default_factory=dict)
-    warm_start_pitfalls: list[Any] = field(default_factory=list)
-    warm_start_lessons: list[Any] = field(default_factory=list)
-    stack_fingerprint_meta: dict[str, Any] = field(default_factory=dict)
-
-
-def _make_coord(tmp_path: Path, *, state: _ArchState) -> Coordinator:
+# 5. SpecialistDispatchCollaborator.warm_specialist_params -> arch_notes
+def _make_coord(tmp_path: Path, *, state: SharedState) -> Coordinator:
     c = Coordinator.__new__(Coordinator)
     c.session_dir = tmp_path
     c.shared_state = state
@@ -269,25 +249,25 @@ def _make_coord(tmp_path: Path, *, state: _ArchState) -> Coordinator:
 
 @pytest.mark.asyncio
 async def test_warm_populates_arch_notes_from_model_arch(tmp_path: Path):
-    coord = _make_coord(tmp_path, state=_ArchState(model_arch=dict(_VALID_ARCH)))
+    coord = _make_coord(tmp_path, state=SharedState(model_arch=dict(_VALID_ARCH)))
     params: dict[str, Any] = {"domain": "serving_specialist"}
-    await coord._warm_specialist_params(params)
+    await coord.specialist_dispatch.warm_specialist_params(params)
     assert "arch_notes" in params
     assert "attention=MLA" in params["arch_notes"]
 
 
 @pytest.mark.asyncio
 async def test_warm_omits_arch_notes_when_model_arch_empty(tmp_path: Path):
-    coord = _make_coord(tmp_path, state=_ArchState(model_arch={}))
+    coord = _make_coord(tmp_path, state=SharedState(model_arch={}))
     params: dict[str, Any] = {"domain": "serving_specialist"}
-    await coord._warm_specialist_params(params)
+    await coord.specialist_dispatch.warm_specialist_params(params)
     assert "arch_notes" not in params
 
 
 @pytest.mark.asyncio
 async def test_warm_respects_caller_supplied_arch_notes(tmp_path: Path):
     """``setdefault`` semantics: a caller-supplied value wins."""
-    coord = _make_coord(tmp_path, state=_ArchState(model_arch=dict(_VALID_ARCH)))
+    coord = _make_coord(tmp_path, state=SharedState(model_arch=dict(_VALID_ARCH)))
     params: dict[str, Any] = {"domain": "serving_specialist", "arch_notes": "PRESET"}
-    await coord._warm_specialist_params(params)
+    await coord.specialist_dispatch.warm_specialist_params(params)
     assert params["arch_notes"] == "PRESET"

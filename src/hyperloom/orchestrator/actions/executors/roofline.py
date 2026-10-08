@@ -70,6 +70,7 @@ _NON_RETRYABLE_PROFILE_ERRORS = frozenset(
     {
         "agentx_multi_node_profile_unsupported",
         "primary_rank_trace_missing",
+        "recipe_lever_unavailable",
     }
 )
 _NON_RETRYABLE_CAPTURE_REASONS = frozenset(
@@ -203,7 +204,7 @@ def _extract_steady_state_retry_mode(
 
 
 def _extract_trace_path(profile_result: dict[str, Any]) -> str:
-    """Pick the trace path like Coordinator's ``_promote_to_shared_state``: prefer ``main_trace_path``, else
+    """Pick the trace path like Coordinator's ``promote_to_shared_state``: prefer ``main_trace_path``, else
     ``trace_files[0]`` for legacy results.
     """
     if not isinstance(profile_result, dict):
@@ -1355,6 +1356,8 @@ class RooflineExecutor:
 
         parent_task = parent_ctx.task
         params = dict(parent_task.params or {})
+        # Accuracy is gated by baseline and explore; a profile run only needs the trace.
+        params["disable_run_eval"] = True
         if disable_cuda_graph:
             from .baseline import _with_cuda_graph_disabled
 

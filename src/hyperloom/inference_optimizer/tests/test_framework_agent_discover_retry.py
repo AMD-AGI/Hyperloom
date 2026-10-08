@@ -15,37 +15,27 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALO
 from hyperloom.orchestrator.phases import framework as _phase_framework
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.orchestrator.phases.framework import FrameworkPhase
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 
 _ACTION_REGISTRY = ACTION_CATALOGUE
 
 
-class _StateStub:
-    """SharedState minimal stub for discover retry tests."""
+class _StateStub(SharedState):
+    """SharedState that counts saves instead of writing them."""
 
     def __init__(self) -> None:
-        self.phase = "FRAMEWORK"
-        self.framework_agent_phase_done = False
-        self.framework_agent_discover_failures = 0
-        self.framework_agent_batches: list[dict[str, Any]] = []
-        self.framework_agent_phase_progress: list[dict[str, Any]] = []
-        self.phase_history: list[dict[str, Any]] = []
-        self.gaps: list[dict[str, Any]] = []
-        self.model = "test-model"
-        self.framework = "sglang"
-        self.gpu_type = "MI300X"
-        self.model_class = "dense"
-        self.precision = "fp8"
-        self.last_profile_kernel_breakdown = None
+        super().__init__(
+            phase="FRAMEWORK",
+            framework="sglang",
+            gpu_type="MI300X",
+            model_class="dense",
+            precision="fp8",
+        )
         self._saves = 0
 
     def save(self, _session_dir: Path) -> None:
         self._saves += 1
-
-    def append_phase_history_event(self, **kwargs: Any) -> dict[str, Any]:
-        from hyperloom.orchestrator.phases import machine_state as _ms
-
-        return _ms.append_phase_history_event(self, **kwargs)
 
 
 def _event_name(row: dict[str, Any]) -> str:
@@ -72,18 +62,26 @@ class _CoordinatorStub:
     _framework_candidate_key = staticmethod(FrameworkPhase._framework_candidate_key)
     _framework_processed_candidate_keys = FrameworkPhase._framework_processed_candidate_keys
     _stamp_framework_progress = FrameworkPhase._stamp_framework_progress
-    # Reverse-lookup called on every repo; here it resolves to the session framework, so nothing is tagged
-    # (same-framework path).
-    _registry_lanes_ttl = DispatcherCollaborator._registry_lanes_ttl
+    _framework_known_candidate_ids = FrameworkPhase._framework_known_candidate_ids
+    _framework_timeline_recorder = FrameworkPhase._framework_timeline_recorder
 
     def __init__(self, tmp_path: Path) -> None:
         self.session_dir = tmp_path
         self.shared_state = _StateStub()
         self.action_registry = _ACTION_REGISTRY
         self.framework_agent_discover_timeout_sec = 0.0
+        # Build a minimal _coord so methods that go through self._coord work.
+        outer_self = self
 
-    def _framework_known_candidate_ids(self) -> set[str]:
-        return FrameworkPhase._framework_known_candidate_ids(self)  # type: ignore[arg-type]
+        class _DispatcherStub:
+            @property
+            def action_registry(self):
+                return outer_self.action_registry
+
+            registry_lanes_ttl = DispatcherCollaborator.registry_lanes_ttl
+
+        dispatcher_stub = _DispatcherStub()
+        self._coord = type("_FakeCoord", (), {"dispatcher": dispatcher_stub, "shared_state": self.shared_state})()  # type: ignore[attr-defined]
 
 
 class _TasksStub:

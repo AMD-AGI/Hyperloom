@@ -14,14 +14,13 @@ from typing import Any, Mapping
 
 from hyperloom.orchestrator.lever import LEVER_CONFIG, patch_lever_kind
 
-from ..actions.executors._grid_base import is_kept
-
 
 def _record(
     state: Any,
     *,
     lever_kind: str,
     outcome: str,
+    adopted: bool,
     gain_pct: float | None,
     before_tput: float | None,
     after_tput: float | None,
@@ -37,14 +36,15 @@ def _record(
     """Append one row, stamped with the macro-cycle by ``record_attempt``.
 
     ``lever_kind`` through ``after_tput`` are what the dryness judgment reads;
-    the rest are the forensic record. Both levers write this one field set, so
+    ``adopted`` is the settlement verdict, not the executor's ``outcome``; the
+    rest are the forensic record. Both levers write this one field set, so
     a reader walks them without knowing which arm produced a row.
     """
     state.record_attempt(
         {
             "lever_kind": lever_kind,
             "outcome": outcome,
-            "adopted": is_kept(outcome),
+            "adopted": adopted,
             "gain_pct": gain_pct,
             "before_tput": before_tput,
             "after_tput": after_tput,
@@ -68,6 +68,7 @@ def record_config_attempt(
     fingerprint: str,
     variant_name: str,
     outcome: str,
+    adopted: bool,
     gain_pct: float | None,
     before_tput: float | None,
     after_tput: float | None,
@@ -79,6 +80,7 @@ def record_config_attempt(
         state,
         lever_kind=LEVER_CONFIG,
         outcome=outcome,
+        adopted=adopted,
         gain_pct=gain_pct,
         before_tput=before_tput,
         after_tput=after_tput,
@@ -97,6 +99,7 @@ def record_patch_attempt(
     task_id: str,
     specialist_task_id: str,
     outcome: str,
+    adopted: bool,
     gain_pct: float | None,
     before_tput: float | None,
     after_tput: float | None,
@@ -116,6 +119,7 @@ def record_patch_attempt(
         state,
         lever_kind=patch_lever_kind(evidence),
         outcome=outcome,
+        adopted=adopted,
         gain_pct=gain_pct,
         before_tput=before_tput,
         after_tput=after_tput,

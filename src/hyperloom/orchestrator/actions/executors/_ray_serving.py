@@ -487,8 +487,7 @@ class ServingLease:
             # Reported the way an ensure failure is, rather than raised: callers
             # such as run_grid move to the next variant on a non-zero rc, and
             # every one of those attempts must be refused too. Raising here would
-            # instead escape the variant loop, a wider blast radius than this
-            # change is entitled to.
+            # instead escape the variant loop.
             log.warning(
                 "ServingLease.run_session_kill: refusing a round on a lease quarantined by round %s; its GPUs "
                 "are still reserved by an actor that never answered",

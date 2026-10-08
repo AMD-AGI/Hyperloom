@@ -864,6 +864,33 @@ def test_vllm_source_load_probe_failure_returns_boot_failed(monkeypatch, tmp_pat
     assert "load probe" in result.failure_summary
 
 
+def test_vllm_source_probes_import_vllm_the_way_the_runtime_does(monkeypatch, tmp_path):
+    """The probes lead PYTHONPATH with the runtime's prefix, so a system-site vllm cannot shadow the build."""
+    wt = tmp_path / "wt"
+    (wt / "vllm").mkdir(parents=True)
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    _patch_isolation(monkeypatch, wt, venv)
+    monkeypatch.setenv("PYTHONPATH", "/site/fix")
+    probe_envs = []
+
+    def _run(argv, **kw):
+        if "import vllm" in " ".join(str(a) for a in argv):
+            probe_envs.append(kw["env"])
+        return _make_rocm_run()(argv, **kw)
+
+    result = run_vllm_source_build(
+        _vllm_action(),
+        str(tmp_path / "attempt"),
+        run=_run,
+        disk_preflight_fn=_noop_disk,
+    )
+    assert result.ok is True
+    assert len(probe_envs) == 2
+    expected = os.pathsep.join([*result.runtime.pythonpath_prefixes, "/site/fix"])
+    assert all(env["PYTHONPATH"] == expected for env in probe_envs)
+
+
 def test_vllm_source_pr_url_in_installed_versions(monkeypatch, tmp_path):
     wt = tmp_path / "wt"
     wt.mkdir()

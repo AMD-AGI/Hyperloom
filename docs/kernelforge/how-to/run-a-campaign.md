@@ -15,9 +15,12 @@ the measurement improves.
 
 - Hyperloom installed (`pip install -e ".[forge]"`; see
   {doc}`Quickstart </kernelforge/install/quickstart>`).
-- Claude credentials: a logged-in `claude` CLI for in-session mode, or
-  `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY` / a gateway's
-  `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` for headless runs.
+- Agent credentials, for Claude or Codex:
+  - Claude: a logged-in `claude` CLI for in-session mode, or
+    `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY` / a gateway's
+    `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` for headless runs.
+  - Codex: `OPENAI_BASE_URL` + `OPENAI_API_KEY`, selected with
+    `--agent-backend codex` or by configuring only the OpenAI side.
 - A ROCm environment with the target GPU (for example `gfx950`).
 - A git workspace holding the kernel and its driver.
 

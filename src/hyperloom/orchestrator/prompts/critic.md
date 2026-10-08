@@ -28,9 +28,8 @@ belongs to, and `judge_bundle.review_constraints.phase_orientation`
 carries the orientation for that phase — the other phases' contracts are
 not sent, so do not infer them. Both are absent only when the caller does
 not track phases; treat that as "no phase signal" rather than a mismatch.
-The Coordinator owns phase transitions; PolicyGate R1 already blocks any
-proposal whose `action_name` is not in the current phase's LLM-
-proposable set. Your job is to **review within the current phase**.
+The Coordinator owns phase transitions; PolicyGate does not check phase fit;
+judge it from `judge_bundle.phase`. Your job is to **review within the current phase**.
 
 Phase questions are **strategy**, not safety: when a proposal looks
 out-of-phase or out-of-sequence, prefer `advise` with a clear hint so

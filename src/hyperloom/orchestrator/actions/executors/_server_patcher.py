@@ -248,7 +248,9 @@ def ensure_vllm_patched_for_tracelens(
 def ensure_sglang_patched_for_tracelens(
     tracelens_root: Path | str | None = None,
 ) -> bool:
-    """SGLang counterpart of :func:`ensure_vllm_patched_for_tracelens`."""
+    """Apply the roofline set (< 0.5.18) or ``sglang_gc_patch`` (>= 0.5.18)."""
+    if resolve_sglang_shape_mode() == "sitecustomize":
+        return _ensure_sglang_gc_patched(tracelens_root)
     plan = _discover_sglang_plan(tracelens_root)
     if plan is None:
         return False
@@ -313,11 +315,54 @@ def resolve_sglang_shape_mode() -> str:
     return sglang_shape_mode(version)
 
 
+def resolve_sglang_patch_set() -> str:
+    """Patch set the multi-node pods must apply: ``graph-capture`` in sitecustomize mode, else ``roofline``.
+
+    Resolved on the controller and passed to every pod, which cannot see the
+    controller's env (override / version pin) and would otherwise decide alone.
+    """
+    return "graph-capture" if resolve_sglang_shape_mode() == "sitecustomize" else "roofline"
+
+
 def ensure_sglang_patched_for_ck_blockscale(
     kernelforge_root: Path | str | None = None,
 ) -> bool:
     """Apply the KernelForge fp8 block-scale CK-routing patch to SGLang."""
     plan = _discover_sglang_ck_plan(kernelforge_root)
+    if plan is None:
+        return False
+    return _ensure_patched(plan)
+
+
+def _gc_patch_deferred_to_pods() -> bool:
+    """True on a multi-node controller, where the pod fan-out applies the patch."""
+    try:
+        from ._multi_node_env import is_multi_node
+    except Exception:  # noqa: BLE001
+        return False
+    try:
+        return bool(is_multi_node())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _ensure_sglang_gc_patched(
+    tracelens_root: Path | str | None = None,
+) -> bool:
+    """Git-apply ``sglang_gc_patch`` onto the installed SGLang tree."""
+    version = _detect_installed_sglang_version()
+    if version is None:
+        if _gc_patch_deferred_to_pods():
+            log.info(
+                "_server_patcher: sglang not importable on this controller; graph-capture patch is applied on the pods"
+            )
+            return True
+        log.warning("_server_patcher: sglang not importable; skip graph-capture patch")
+        return False
+    vt = _version_tuple(version)
+    if vt is not None and vt < _SGLANG_SITECUSTOMIZE_MIN_VERSION:
+        return True
+    plan = _discover_sglang_gc_plan(tracelens_root, version)
     if plan is None:
         return False
     return _ensure_patched(plan)
@@ -346,6 +391,9 @@ class _PatchPlan:
     # Patch names that may fail ``git apply --check`` and be skipped instead of rolling back the whole atomic set
     # (e.g. eagle-draft patches whose context drifted across same-version different-commit sglang builds).
     optional_patches: frozenset[str] = frozenset()
+    # Whether a patch that fails ``git apply --check`` may fall back to ``patch --fuzz``. Off for sets whose hunks
+    # add unconditional calls into hot paths, where a partially-matching apply can break the server.
+    allow_fuzzy: bool = True
 
 
 #: Annotation-pipeline sentinels as ``(path under the sglang package, markers)``.
@@ -456,25 +504,33 @@ def _probe_isolated_vllm() -> tuple[str, Path] | None:
         if match.is_dir():
             site = match.parent
             break
-    if site is None:
-        return None
 
     version = ""
-    vllm_python = os.environ.get("VLLM_PYTHON", "").strip()
-    if vllm_python and Path(vllm_python).exists():
+    imported_root: Path | None = None
+    vllm_python = os.environ.get("VLLM_PYTHON", "").strip() or str(Path(venv_root) / "bin" / "python")
+    if Path(vllm_python).exists():
         try:
             proc = subprocess.run(
-                [vllm_python, "-c", "import vllm; print(vllm.__version__)"],
+                [vllm_python, "-c", "import vllm; print(vllm.__version__); print(vllm.__file__)"],
                 check=False,
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 timeout=30,
             )
-            if proc.returncode == 0:
-                version = proc.stdout.strip()
+            lines = proc.stdout.strip().splitlines()
+            if proc.returncode == 0 and len(lines) >= 2:
+                version = lines[-2].strip()
+                imported_root = Path(lines[-1].strip()).resolve().parent.parent
         except (OSError, subprocess.SubprocessError) as e:
             log.info("_server_patcher: VLLM_PYTHON version probe failed (%s)", e)
+
+    # A source build installs vLLM editable, so site-packages holds only an egg-link or .pth and the package lives
+    # in the checkout; only the venv's own interpreter can say where that is.
+    if site is None:
+        site = imported_root
+    if site is None:
+        return None
 
     if not version:
         for dist in sorted(site.glob("vllm-*.dist-info")):
@@ -655,28 +711,26 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
         log.warning("_server_patcher: SGLang patches directory empty; skip")
         return None
 
-    filtered_patches: list[Path] = list(patches)
-
     # Sentinel: the kernel_shape_profiler patch creates a new file at ``sglang/srt/utils/kernel_shape_profiler.py`` in
     # both layouts.
     sentinel = sglang_module.parent / "srt" / "utils" / "kernel_shape_profiler.py"
     sglang_pkg = sglang_module.parent
     # Also verify the annotation pipeline so a partial apply (main sentinel present but annotations missing) is still
     # detected: scheduler callback -> profiler_manager toggle -> io_struct request fields -> step-span aggregates.
-    written = _patch_target_paths(filtered_patches)
+    written = _patch_target_paths(patches)
     extra_sentinels: tuple[tuple[Path, tuple[str, ...]], ...] = tuple(
         (sglang_pkg.joinpath(*parts), markers)
         for parts, markers in _SGLANG_ANNOTATION_SENTINELS
         if _patch_set_writes(written, parts)
     )
     optional_patches = frozenset(
-        p.name for p in filtered_patches if any(m in p.name.lower() for m in _SGLANG_OPTIONAL_PATCH_MARKERS)
+        p.name for p in patches if any(m in p.name.lower() for m in _SGLANG_OPTIONAL_PATCH_MARKERS)
     )
     return _PatchPlan(
         framework="sglang",
         version=version,
         apply_root=apply_root,
-        patches=tuple(filtered_patches),
+        patches=patches,
         sentinel_file=sentinel,
         # Sentinel file alone is insufficient; extra_sentinels require the annotation pipeline.
         sentinel_text=("kernel_shape_profiler",),
@@ -837,6 +891,86 @@ def _discover_sglang_ck_plan(arg: Path | str | None) -> _PatchPlan | None:
     )
 
 
+_SGLANG_GC_SENTINELS: tuple[str, ...] = (
+    "_set_profile_trace_tag",
+    "_profile_runner_name",
+)
+
+
+def _discover_sglang_gc_plan(
+    arg: Path | str | None,
+    version: str,
+) -> _PatchPlan | None:
+    """Build the ``sglang_gc_patch`` plan for an exact ``sglang_<X_Y_Z>`` dir; strict ``git apply`` only.
+
+    No nearest-version fallback and no fuzzy apply: the patch adds an unconditional
+    ``_set_profile_trace_tag`` call to the capture loop, so a drifted apply could
+    break CUDA-graph capture, and newer releases may already carry the upstream fix.
+    """
+    tracelens_root = _resolve_tracelens_root(arg)
+    if tracelens_root is None:
+        log.warning(
+            "_server_patcher: TRACELENS_ROOT unset/missing — skip SGLang graph-capture "
+            "patch (per-batch-size CUDA-graph capture can IndexError on multi-variant models)"
+        )
+        return None
+
+    try:
+        import sglang  # type: ignore
+    except Exception as e:  # noqa: BLE001
+        log.warning("_server_patcher: sglang not importable (%s); skip graph-capture patch", e)
+        return None
+    if not getattr(sglang, "__file__", None):
+        log.warning("_server_patcher: sglang.__file__ is unset; skip graph-capture patch")
+        return None
+
+    patches_root = _patch_tree(tracelens_root, "sglang_gc_patch")
+    if not patches_root.is_dir():
+        log.warning(
+            "_server_patcher: SGLang graph-capture patches root missing (%s); skip",
+            patches_root,
+        )
+        return None
+
+    sglang_module = Path(sglang.__file__).resolve()
+    apply_resolution = _resolve_sglang_apply_root(sglang_module)
+    if apply_resolution is None:
+        return None
+    apply_root, apply_strip = apply_resolution
+
+    candidates = [patches_root / name for name in _versioned_patches_subdir_names(version, apply_root)]
+    patches_dir = next((d for d in candidates if d.is_dir() and any(d.glob("*.patch"))), None)
+    if patches_dir is None:
+        log.warning(
+            "_server_patcher: no sglang_gc_patch set for SGLang %s under %s (exact version dir required, "
+            "tried %s); skip — per-batch-size CUDA-graph capture can IndexError on multi-variant models",
+            version,
+            patches_root,
+            [d.name for d in candidates] or "<unparseable version>",
+        )
+        return None
+    patches = tuple(sorted(patches_dir.glob("*.patch")))
+
+    sentinel = sglang_module.parent / "srt" / "model_executor" / "runner" / "decode_cuda_graph_runner.py"
+    if not sentinel.is_file():
+        log.warning(
+            "_server_patcher: SGLang install layout unexpected (no %s); skip graph-capture patch",
+            sentinel,
+        )
+        return None
+
+    return _PatchPlan(
+        framework="sglang-gc",
+        version=version,
+        apply_root=apply_root,
+        patches=patches,
+        sentinel_file=sentinel,
+        sentinel_text=_SGLANG_GC_SENTINELS,
+        apply_strip=apply_strip,
+        allow_fuzzy=False,
+    )
+
+
 # Application core
 
 
@@ -880,7 +1014,8 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
             plan.framework,
         )
         return False
-    patch_bin = shutil.which("patch")  # may be ``None`` — fuzzy fallback then disabled
+    # ``None`` disables the fuzzy fallback (no ``patch`` binary, or a strict-only plan).
+    patch_bin = shutil.which("patch") if plan.allow_fuzzy else None
 
     # Per-patch precheck: each must pass ``git apply --check`` (strict) OR the fuzzy ``patch --fuzz=2 --dry-run``
     # fallback; if neither accepts a patch the whole set fail-softs.

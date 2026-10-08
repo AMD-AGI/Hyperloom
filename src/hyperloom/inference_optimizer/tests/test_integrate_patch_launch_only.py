@@ -125,8 +125,6 @@ async def test_launch_only_skips_critic_gate(tmp_path, monkeypatch):
     ("field", "value"),
     [
         ("patches", ["candidate.patch"]),
-        ("localization_candidate", {"kind": "pr_backport"}),
-        ("runtime_candidate", {"kind": "runtime_candidate"}),
         ("artifacts", [{"source": "x", "target": "y"}]),
         ("config_changes", {"EXTRA_VLLM_ARGS": "--unsafe"}),
         ("enablement_setup_commands", ["pip install package"]),

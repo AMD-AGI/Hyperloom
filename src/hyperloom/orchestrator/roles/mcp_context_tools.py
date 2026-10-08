@@ -6,7 +6,7 @@ import importlib
 import json
 import logging
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable
+from typing import Any, Callable
 
 log = logging.getLogger(__name__)
 
@@ -30,8 +30,6 @@ class ContextProvider:
     denial_reader: Callable[[int], str] | None = None
     recent_outcomes_reader: Callable[[int], str] | None = None
     running_tasks_reader: Callable[[], str] | None = None
-    # Whitelisted lane-light action runner; ``None`` => unavailable.
-    action_runner: Callable[[str, dict[str, Any]], Awaitable[str]] | None = None
     # On-demand reference documents directory; ``None`` => unavailable.
     reference_reader: Callable[[str], str] | None = None
 
@@ -101,21 +99,6 @@ class ContextProvider:
             return "(running tasks reader not wired)"
         return self._safe(self.running_tasks_reader, "running_tasks")
 
-    async def run_action_now(
-        self,
-        action_name: str = "",
-        params: dict[str, Any] | None = None,
-    ) -> str:
-        """Await a whitelisted lane-light action without occupying a worker."""
-        if self.action_runner is None:
-            return "(run_action_now not wired)"
-        try:
-            out = await self.action_runner(action_name, dict(params or {}))
-        except Exception as exc:
-            log.exception("context tool %s failed", "run_action_now")
-            return f"(context tool run_action_now unavailable: {exc!r})"
-        return out if isinstance(out, str) and out else "(run_action_now: empty)"
-
     def read_reference(self, name: str = "") -> str:
         """Return the full text of a named on-demand reference document."""
         if self.reference_reader is None:
@@ -168,15 +151,6 @@ _TOPK_SCHEMA: dict[str, Any] = {
 _SINCE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {"since_seq": {"type": "integer", "minimum": 0}},
-    "additionalProperties": False,
-}
-_RUN_ACTION_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "action_name": {"type": "string"},
-        "params": {"type": "object"},
-    },
-    "required": ["action_name"],
     "additionalProperties": False,
 }
 _REFERENCE_SCHEMA: dict[str, Any] = {
@@ -290,19 +264,6 @@ CONTEXT_TOOL_SPECS: tuple[tuple[str, str, dict[str, Any], str], ...] = (
         "running_tasks",
     ),
     (
-        "run_action_now",
-        "Run a CHEAP, lane-light action synchronously and get its result "
-        "back IN THIS TURN (closes the act->observe loop without waiting "
-        "for the next tick). Only a small whitelist of fast, non-GPU / "
-        "non-serving actions is eligible; anything heavy must still go "
-        "through emit_intent delegate (async). PolicyGate still gates the "
-        "run (phase / role / paths). Args: action_name (str), optional "
-        "params (object). For deep multi-step investigation, delegate to "
-        "a specialist sub-agent instead.",
-        _RUN_ACTION_SCHEMA,
-        "run_action_now",
-    ),
-    (
         "read_reference",
         "Return the full text of a named on-demand reference document "
         "listed in the ON-DEMAND REFERENCE INDEX section of this prompt. "
@@ -366,10 +327,6 @@ def _make_handler(
                 kwargs["top_k"] = int(args["top_k"])
             if "since_seq" in args:
                 kwargs["since_seq"] = int(args["since_seq"])
-            if "action_name" in args:
-                kwargs["action_name"] = str(args["action_name"])
-            if "params" in args and isinstance(args["params"], dict):
-                kwargs["params"] = args["params"]
             if "name" in args:
                 kwargs["name"] = str(args["name"])
             if "failure_id" in args:
@@ -377,10 +334,7 @@ def _make_handler(
             if "task_id" in args:
                 kwargs["task_id"] = str(args["task_id"])
         try:
-            if method_name == "run_action_now":
-                text = await method(**kwargs)
-            else:
-                text = method(**kwargs)
+            text = method(**kwargs)
         except Exception as exc:
             log.exception("context tool handler %s raised", method_name)
             return {
