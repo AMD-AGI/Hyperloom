@@ -865,9 +865,10 @@ async def test_coordinator_phase_idempotent_within_same_tick(
 # ENABLEMENT phase predicate tests
 
 
-def _enablement_state(phase, *, tput=0.0, streak=1, validation_pending=False):
+def _enablement_state(phase, *, tput=0.0, streak=1, validation_pending=False, auto_roofline_pending_task_id=""):
     """A state the enablement entry and exit branches read."""
     return SharedState(
+        auto_roofline_pending_task_id=auto_roofline_pending_task_id,
         phase=phase,
         stop_reason="",
         closing_phase=False,
@@ -913,6 +914,29 @@ def test_enablement_holds_while_work_is_in_flight():
     assert phase_state.compute_next_phase(state, enablement_enabled=True, enablement_in_flight=True) is None
     inputs = phase_state.workflow_predicate_inputs(state, enablement_enabled=True, enablement_in_flight=True)
     assert phase_state.replay_next_phase(inputs) is None
+
+
+def test_enablement_waits_for_the_initial_analysis_like_prelude_does():
+    """The first anchor of a session whose baseline failed is promoted here, and that enqueues the roofline."""
+    state = _enablement_state("ENABLEMENT", tput=1000.0, auto_roofline_pending_task_id="rl-1")
+    assert phase_state.compute_next_phase(state, enablement_enabled=True) is None
+    state.auto_roofline_pending_task_id = ""
+    out = phase_state.compute_next_phase(state, enablement_enabled=True)
+    assert out is not None and out[1] == "enablement_done"
+    assert phase_state.replay_next_phase(out[2]["predicate_inputs"]) == out
+
+
+def test_the_enablement_wait_stops_at_the_optimization_reserve():
+    """Unbounded in an unbounded session; bounded by the reserve once the session has a budget."""
+    state = _enablement_state("ENABLEMENT", tput=1000.0, auto_roofline_pending_task_id="rl-1")
+    # 180 min session reserves 5400 s for optimization; 5000 s usable leaves nothing to hold with.
+    state.max_minutes = 180
+    state.session_budget_usable_sec = lambda: 5_000.0
+    out = phase_state.compute_next_phase(state, enablement_enabled=True)
+    assert out is not None and out[1] == "enablement_done"
+    assert phase_state.replay_next_phase(out[2]["predicate_inputs"]) == out
+    state.session_budget_usable_sec = lambda: 6_000.0
+    assert phase_state.compute_next_phase(state, enablement_enabled=True) is None
 
 
 def test_enablement_holds_while_revalidation_is_pending():

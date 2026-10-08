@@ -1433,7 +1433,7 @@
         "initial_analysis_pending": {
           "type": "boolean"
         },
-        "prelude_affordable_sec": {
+        "analysis_affordable_sec": {
           "type": [
             "number",
             "null"
@@ -1478,6 +1478,15 @@
       "properties": {
         "tput": {
           "type": "number"
+        },
+        "initial_analysis_pending": {
+          "type": "boolean"
+        },
+        "analysis_affordable_sec": {
+          "type": [
+            "number",
+            "null"
+          ]
         }
       },
       "additionalProperties": false

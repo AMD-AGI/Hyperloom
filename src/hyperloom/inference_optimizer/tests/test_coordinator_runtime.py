@@ -2021,20 +2021,22 @@ async def test_handle_unpromotable_profile_clears_the_initial_analysis_gate(sess
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("ending", ["cancelled", "succeeded"])
-async def test_prelude_releases_the_initial_analysis_gate_when_its_task_ended_unbooked(session_dir, ending):
-    """A cancelled initial analysis, or one that ended before a restart booked it, must not hold PRELUDE.
+@pytest.mark.parametrize("phase", ["PRELUDE", "ENABLEMENT"])
+async def test_a_phase_releases_the_initial_analysis_gate_when_its_task_ended_unbooked(session_dir, ending, phase):
+    """A cancelled initial analysis, or one that ended before a restart booked it, must not hold the phase.
 
     Neither path reaches the writeback that clears the marker: the dispatcher returns early for a
     cancelled result, and a restart between the runner's terminal write and booking loses the outcome.
+    Both phases that hold for the marker have to release it.
     """
     from hyperloom.orchestrator.phases import machine_state as phase_state
 
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
     try:
-        task = await c.tasks.create(kind="roofline", params={}, idempotency_key=f"initial-{ending}")
+        task = await c.tasks.create(kind="roofline", params={}, idempotency_key=f"initial-{phase}-{ending}")
         await c.tasks.transition(task.task_id, "running")
-        c.shared_state.phase = "PRELUDE"
+        c.shared_state.phase = phase
         c.shared_state.baseline_tput = 1074.7
         c.shared_state.auto_roofline_pending_task_id = task.task_id
 
