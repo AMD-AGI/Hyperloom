@@ -34,6 +34,7 @@ kernelforge gemm-tune run --model-path <M> --framework sglang \
     --precision <p> --output-dir <D> [options]
 kernelforge kernel-rewrite-controller --handoff-dir <H> \
     --budget-minutes <m> --output-dir <D>
+kernelforge roofline-ceiling --workspace <W> [options]
 ```
 
 See {doc}`Experience store </kernelforge/reference/experience-store>` for the exact
@@ -100,7 +101,7 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 |:--|:--|:--|
 | `--max-hours <h>` | `1.0` | Runtime budget in hours; the loop is time-driven. Minimum `1.0`. A round is started only when what remains can finish it, so the run ends before the budget does. Above 2 hours this also enables Analysis profiling and, for single-lane rounds, Plan Critic review. |
 | `--deadline-unix <t>` | `0` | Absolute UNIX deadline shared by task preparation and optimization. |
-| `--session-timeout-sec <s>` | from `--max-hours` | Wall-clock budget for one implementer session. The claude backend cuts the session at this deadline and the session is told about it. |
+| `--session-timeout-sec <s>` | from `--max-hours` | Wall-clock budget for one implementer session. The claude backend cuts the session at this deadline and the session is told about it. Under `--roofline-ceiling on` it also bounds the ceiling analyst session. |
 | `--agent-timeout-sec <s>` | provider default | Timeout for one Agent session. |
 | `--profile-timeout-sec <s>` | `7200` | Ceiling for the single complete Analysis Agent session. Phase and case artifacts are persisted for resume when the deadline is reached. |
 
@@ -114,6 +115,8 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 | `--bench-repeat <n>` | `1` | How many times each bench repeats its measurement in-process, reporting the per-case median. Above 1 shrinks run-to-run spread and requires a driver that accepts `--repeat`; the flag is omitted entirely when this is 1. |
 | `--aiter-cache-max-gb <g>` | `4.0` | Per-attempt AITER cache soft limit in GiB. LRU pruning targets 75% of the limit; `0` disables in-run pruning. |
 | `--profiling` / `--no-profiling` | on | Allow Analysis hardware profiling and Implementer self-profiling guidance on long-horizon runs (>2 hours). Shorter runs keep Analysis static-only regardless. `--no-profiling` disables collection for every duration. |
+| `--roofline-ceiling <on\|off>` | `off` | Whether the campaign has a per-shape theoretical achievable latency to measure its attainment against. `off` skips it entirely, including any report already sitting in the workspace. `on` estimates one on a fresh campaign once the baseline has fixed the scored case set and its per-case times, which costs a profiler pass and an analyst session, typically tens of minutes; on `--resume` it reuses the ceiling this campaign already estimated, so the target stays fixed for the campaign, and estimates again only when that report can no longer be read or no longer covers every scored case. While the campaign has a ceiling, every iteration logs the incumbent's mean attainment against it; the planner, its specialists and plan critic, and the supervisor receive each case's attainment, the mean, the target and how to read them; and the implementer receives the same standing as a table. Without one, none of it is injected anywhere. Session-scoped: pass it on every `--resume` that should keep the ceiling. |
+| `--roofline-target <fraction>` | `0.0` (off) | Stop the campaign once mean per-case attainment reaches this fraction of the estimated ceiling, e.g. `0.86`. Attainment is `ceiling / measured` per case, averaged with equal weight across scored cases — the same aggregate a KEEP is scored by. The gate fires only when every scored case has a figure: a case whose ceiling sits below its measured latency, or that the ceiling never answered, is excluded from the mean, and a mean over a subset is not the objective it claims to report. Requires a ceiling, and refuses a value above `1.0`. A ceiling is an estimate whose arithmetic nothing checks, so this is off by default — and it never enters the KEEP decision, which stays a measurement against the incumbent. |
 
 ### Rounds and lanes
 
@@ -197,6 +200,7 @@ the same `__FORGE_RESULT__` contract as `forge-loop`.
 | `--deadline-unix <t>` | `0` | Absolute UNIX deadline for PORT, OPTIMIZE and apply-back finalization. |
 | `--max-port-attempts <n>` | `3` | Correctness-only port sessions before giving up. |
 | `--profile-timeout-sec <s>` | `3600` | OPTIMIZE: ceiling for the complete Analysis Agent workflow. |
+| `--roofline-ceiling <on\|off>` | `off` | OPTIMIZE: passed unchanged to the nested `forge-loop`, where it means what `forge-loop --roofline-ceiling` means. `on` estimates the kernel's per-shape theoretical achievable latency once the loop's baseline is measured and steers its planner by the attainment against it; the estimate's profiler pass and analyst session are paid out of the OPTIMIZE budget. |
 | `--snr-threshold <dB>` | `30.0` | Correctness gate for the ported kernel. |
 
 ### Apply-back
@@ -385,3 +389,123 @@ and `plan` then consume as their highest-priority shape source.
 | `<logs...>` | required | One or more serving logs to read. |
 | `--out <file>` | stdout summary only | Write `demand.json` here. |
 | `--verbose` / `-v` | off | Verbose logging. |
+
+## roofline-ceiling
+
+Estimates the **theoretical achievable latency** of one kernel, for each scored
+test shape, on the accelerator it runs on. The answer is an optimistic lower
+bound under hardware limits and legal algorithm constraints; it does not claim
+an implementation reaching it exists.
+
+The command is self-contained: it collects its own evidence, runs its own
+analyst session, publishes `performance_ceiling.json` plus
+`performance_ceiling_analysis.md`, and shares no state with a campaign. No
+campaign reads what it publishes. Run it when you want the ceiling before
+committing a campaign's budget to the kernel.
+
+A campaign that wants a ceiling estimates its own, with `forge-loop
+--roofline-ceiling on`. That path is the cheaper one: the ceiling is derived
+once the baseline has already fixed the scored case set and measured each case
+over repeated runs, so it needs no discovery pass of its own and its sanity
+reference is the campaign's median rather than a single run.
+
+This command reports no attainment ratio. It has no baseline to divide by
+except a single run of the benchmark; a campaign measures its own attainment
+against its own per-case medians, taken over repeated runs of the kernel it is
+currently keeping. See `--roofline-target` under `forge-loop`.
+
+The estimate is an agent's, composition included, because no table covers MoE
+routing, paged attention, fusion legality or occupancy derating for an arbitrary
+operator, and a fixed composition rule makes the analyst distort its model to
+fit the rule. Each published report carries the analyst's own derivation —
+formulas, figures used and assumptions — because nothing recomputes the
+latencies and that document is the only record of how they were reached.
+
+The hardware figures are the analyst's too. It measures them on the box during
+its session — `rocprof-compute --roof-only` for the peaks and bandwidths, a
+graph-timed probe for the dispatch floor — and records what it established, and
+how, in the derivation. Nothing is cached and no measured figure is written to
+a shipped artifact: the roofs belong to the run that measured them.
+
+Recalled peaks are the fallback when no profiler can be reached, and the
+derivation has to say so. No card sustains its datasheet, and the shortfall is
+not a fixed discount: it differs from one instruction path to the next, so
+cases of different dtypes stop being comparable and attainment reads too low to
+reach a target. That is the safe direction to fail in — a campaign runs longer
+than it needed to rather than stopping with the work half done.
+
+The scored case set comes from the driver's own `case_ms:` lines, not from a
+configuration file, and cases the driver tags `unscored` get no ceiling.
+
+| Option | Default | Meaning |
+|:--|:--|:--|
+| `--workspace <dir>` | required | Kernel workspace to analyse. |
+| `--kernel <file>` | config.yaml `source_file_path` | Source file the analyst models; repeatable. |
+| `--driver <file>` | `''` | Measurement driver, passed to the analyst as context. |
+| `--config <file>` | `<W>/config.yaml` | Task configuration supplying `performance_command` and `source_file_path`. |
+| `--performance-command <cmd>` | config.yaml `performance_command` | Shell command that runs the timed benchmark. |
+| `--output-dir <dir>` | `<W>/forge_experiments/roofline_ceiling` | Where the report, the document and the evidence are published. |
+| `--arch <gfx>` | detected | Target architecture, e.g. `gfx950`. Detected via `rocminfo` when omitted; a marketing name such as `MI355X` is accepted. |
+| `--agent-provider <name>` | auto-selected | Agent provider for the analyst session. |
+| `--agent-model <name>` | provider default | Analyst model. |
+| `--agent-timeout-sec <s>` | `3600` | Wall-clock budget for the analyst session. |
+| `--agent-sandbox-mode <mode>` | `FORGE_AGENT_SANDBOX_MODE` | Provider sandbox mode for the analyst session, as for every other session; `read-only` is widened to `workspace-write` so the analyst can write its answer. |
+| `--run-timeout-sec <s>` | `1800` | Wall-clock budget for each measurement subprocess. |
+
+Two files are published. `performance_ceiling.json` is the answer and nothing
+else: `cases`, mapping each scored case id to its ideal latency in
+milliseconds, and `mean_ideal_ms`, the equal-weight mean across them — equal
+weight because that is how the campaign scores the suite.
+
+`performance_ceiling_analysis.md` beside it carries the derivation: the roofs
+the analyst measured and how, the per-case arithmetic, what bounds each shape,
+and every assumption. Nothing recomputes the latencies and nothing checks their
+arithmetic, so that document is the whole of what a reader has when deciding
+whether to believe them.
+
+Both files are written by the analyst itself, and the framework checks two
+things: that the JSON can be read as an answer — a non-empty `cases` object of
+finite positive latencies — and that the derivation exists and is not empty.
+Either failure is handed back once with the reason. A ceiling still missing a
+readable answer or its derivation after that is not published, so the command
+fails and a campaign runs without a ceiling. A pair that passes is taken as
+given.
+
+The session therefore runs with a shell and a writable sandbox, because
+reaching a profiler on an arbitrary image means installing packages and that is
+open-ended work code cannot enumerate. A pre-tool hook refuses edits outside
+the analyst's two directories, both outside the workspace: a scratch directory
+whose contents are moved under `--output-dir` when the session ends, and a
+tools directory that is deleted. The workspace guard treats the workspace as
+read-only: a change to any tracked file, or to the measurement surface -- the
+kernel sources and driver, and the configuration, harnesses, references and
+tests -- even where it is ignored, is rolled back to what the session found and the session rejected,
+through a shell or otherwise, so the campaign continues on the tree it had. So
+is any new file other than what running the kernel builds into ignored files
+and the profiler's own droppings. The guard snapshots only the protected files,
+so the campaign's JIT cache is neither read into memory nor counted against the
+session.
+
+What the analyst installs goes into a virtual environment in the tools
+directory, and rocprof-compute runs under that environment's interpreter while
+the profiled workload keeps the kernel's own. The role document forbids
+installing into the kernel's interpreter, the system Python or `/opt/rocm`: a
+package added or upgraded there after the baseline changes the environment
+every later measurement runs in, outlives the campaign, and is recorded
+nowhere. Only that instruction prevents it; the guard covers the workspace and
+nothing outside it.
+
+The session runs in the deployment's sandbox (`--agent-sandbox-mode`, or
+`FORGE_AGENT_SANDBOX_MODE`), like every other session, widened from `read-only`
+to `workspace-write` because the analyst writes its answer. A sandbox that hides
+the GPU device nodes leaves the profiler without a device; the derivation then
+says its roofs were recalled, attainment reads low, and a target is slower to
+fire.
+
+The evidence runs -- the case-discovery run on the standalone command and the
+kernel trace -- each run in their own process group, and a run past
+`--run-timeout-sec` is killed with everything it started, so a driver under a
+profiler or a shell cannot outlive its budget and hold the device.
+
+The result dict (`ideal_ms` per case, `mean_ideal_ms`, `report_path`) is
+printed to stdout wrapped in `__FORGE_ROOFLINE_CEILING_RESULT__` sentinels.
