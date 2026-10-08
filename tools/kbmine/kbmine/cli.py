@@ -115,7 +115,13 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", help="Search match: model.")
     parser.add_argument("--precision", help="Search match: precision.")
     parser.add_argument("--canonical-id", action="append", default=[], help="Fetch this identity (repeatable).")
-    parser.add_argument("--max-identities", type=int, default=50)
+    parser.add_argument(
+        "--max-identities",
+        type=int,
+        default=50,
+        help="Read at most this many matching identities from the KB (default 50). The report's coverage and "
+        "limitations say when the store holds more.",
+    )
     for key, helptext in (
         ("tp", "tensor parallelism"),
         ("conc", "concurrency"),
@@ -252,15 +258,10 @@ def main(argv: list[str] | None = None) -> int:
             match["framework_name"] = args.framework_name
         if args.precision:
             match["precision"] = args.precision
-        hardware_in = [args.hardware] if args.hardware and not match else None
-        # Prefer exact match; hardware_in is for multi-board scans without a match dict.
-        if match:
-            hardware_in = None
         try:
             documents, errors = fetch_session_documents(
                 store,
                 match=match or None,
-                hardware_in=hardware_in,
                 max_identities=max(1, args.max_identities),
                 canonical_ids=list(args.canonical_id) or None,
                 counts=identity_counts,

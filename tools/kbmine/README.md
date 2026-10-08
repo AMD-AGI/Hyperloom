@@ -387,7 +387,8 @@ The estimator was first proposed inside the optimizer as
 [PR #1391](https://github.com/AMD-AGI/Hyperloom/pull/1391), which was closed
 because mining fleet evidence is not part of the Hyperloom workflow. This tool
 keeps that boundary: it lives under `tools/`, outside `src/`, and reads only.
-`kbmine/kb_store_client.py` is derived from the client vendored under
+`kbmine/kb_store_client.py` is a copy of the client vendored under
 `src/hyperloom/orchestrator/knowledge/remote_recipe/_vendor/`, with a
-`ca_bundle` parameter added so `--ca-bundle` reaches the KB; it is kept separate
+`ca_bundle` parameter added so `--ca-bundle` reaches the KB, and without the
+producer-side section helpers a read-only tool never calls. It is kept separate
 so the tool stays standard-library only and installable on its own.
