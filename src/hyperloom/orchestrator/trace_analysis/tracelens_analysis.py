@@ -29,34 +29,16 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.io import atomic_write_json
+from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer import framework_registry
-
-try:
-    from hyperloom.inference_optimizer.framework_paths import (
-        resolve_flydsl_source_roots as _resolve_flydsl_source_roots,
-    )
-except ImportError:
-    _resolve_flydsl_source_roots = None
-
-try:
-    from hyperloom.inference_optimizer.framework_paths import (
-        FRAMEWORK_SOURCE_PACKAGES as _FRAMEWORK_SOURCE_PACKAGES,
-    )
-    from hyperloom.inference_optimizer.framework_paths import (
-        resolve_kernel_search_roots as _resolve_kernel_search_roots,
-    )
-    from hyperloom.inference_optimizer.framework_paths import (
-        resolve_known_source_prefixes as _resolve_known_source_prefixes,
-    )
-except ImportError:
-    _FRAMEWORK_SOURCE_PACKAGES = None
-    _resolve_kernel_search_roots = None
-    _resolve_known_source_prefixes = None
-
-try:
-    from hyperloom.orchestrator.kernel.apply_kernel_patch import known_target_roots as _known_target_roots
-except ImportError:
-    _known_target_roots = None
+from hyperloom.inference_optimizer.framework_paths import (
+    FRAMEWORK_SOURCE_PACKAGES as _FRAMEWORK_SOURCE_PACKAGES,
+    resolve_flydsl_source_roots as _resolve_flydsl_source_roots,
+    resolve_kernel_search_roots as _resolve_kernel_search_roots,
+    resolve_known_source_prefixes as _resolve_known_source_prefixes,
+)
+from hyperloom.inference_optimizer.session.paths import workspace_root
 
 from ._task_group_contract import _strip_dispatch_decoration
 from ._task_group_contract import native_operation_key as _native_operation_key
@@ -80,13 +62,10 @@ from TraceLens.Agent.Analysis.post_processing import render_analysis_json
 
 from ._analysis_json import load_report_tasks
 from ._kernel_partition import build_kernel_candidates_document
-from ._io_utils import append_log, atomic_write_json, read_last_lines, utc_now
+from ._io_utils import append_log, read_last_lines
 from ._literal_utils import LITERAL_EVAL_ERRORS as _LITERAL_EVAL_ERRORS
 from ._literal_utils import safe_literal_eval as _safe_literal_eval
 from ._nccl_summary_candidates import extract_collective_candidates
-
-# Standalone-tool workspace-root resolver (cannot import hyperloom.inference_optimizer.session.paths; see _paths.py).
-from ._paths import workspace_root
 
 # Capture-vs-workload trace classification, shared across routes so a sidecar is
 # recognised identically whichever backend reads the profile.
@@ -117,55 +96,10 @@ from ._vendor_operator_playbooks import (
     resolve_kernel_anchor_path,
 )
 
-# Shared with the kernel-opt side; these tools also run as standalone scripts
-# outside an importable hyperloom, where the artifact is simply not written.
-try:
-    from hyperloom.common import kernel_source_contract as _KSC
-
-    # This script runs as a standalone subprocess against the *installed*
-    # hyperloom, which need not be the same tree as this file (cf.
-    # runtime/source-mirrors/). A contract module that predates the API used
-    # below would raise AttributeError at first use and abort the whole
-    # analysis rather than degrade. Treat an incompatible (too-old) module as
-    # absent so the ``_KSC is not None`` guards below fall back to an unwritten
-    # artifact instead of crashing.
-    if not all(
-        hasattr(_KSC, _name)
-        for _name in (
-            "SOURCE_RESOLUTION_FILENAME",
-            "make_entry",
-            "make_document",
-            "validate_document",
-            # getattr fallback below means a module missing these would silently pass; require both to catch stale installs.
-            "KNOWN_METHODS",
-            "METHOD_GATE_NON_PATCHABLE",
-        )
-    ):
-        _KSC = None  # type: ignore[assignment]
-except ImportError:  # pragma: no cover - standalone invocation
-    _KSC = None  # type: ignore[assignment]
-
-try:
-    from hyperloom.common.gpu_identity import gfx_arch_for_gpu_type
-except ImportError:  # pragma: no cover - standalone invocation
-    # Without the board table there is no arch to name, which is the same
-    # outcome this tool already produces for an unrecognised platform.
-    gfx_arch_for_gpu_type = lambda _gpu_type: None  # noqa: E731
-
-try:
-    from hyperloom.common.kernel_shape_contract import (
-        REVIEW_DERIVED_PROVENANCE as _REVIEW_DERIVED_PROVENANCE,
-    )
-except ImportError:  # pragma: no cover - standalone invocation
-    # This script also runs against an installed hyperloom that may predate the
-    # constant; the literal keeps the review's dims labelled either way.
-    _REVIEW_DERIVED_PROVENANCE = "review_derived"
+from hyperloom.common import kernel_source_contract as _KSC
+from hyperloom.common.gpu_identity import gfx_arch_for_gpu_type
 
 log = logging.getLogger(__name__)
-
-# hyperloom.common owns the artifact name; mirror it only when the standalone
-# script cannot import that module (in which case the artifact is not written).
-_SOURCE_RESOLUTION_NAME = _KSC.SOURCE_RESOLUTION_FILENAME if _KSC is not None else "kernel_source_resolution.json"
 
 
 # Candidate building keeps a broad pool; dispatch grouping owns the real budget gate.
@@ -853,7 +787,7 @@ def update_status(
         started_at (str): ISO-8601 start time used to compute duration.
         error (str | None): Error message recorded when the run failed.
     """
-    updated_at = utc_now()
+    updated_at = now_iso(timespec="auto")
     payload: dict[str, Any] = {
         "tool": "tracelens_analysis",
         "run_id": run_id,
@@ -885,7 +819,7 @@ def update_status(
             payload["duration_seconds"] = None
     if error:
         payload["error"] = error
-    atomic_write_json(status_path, payload)
+    atomic_write_json(status_path, payload, trailing_newline=True)
 
 
 def open_json(path: Path) -> dict[str, Any]:
@@ -1713,15 +1647,7 @@ def _framework_source_roots() -> tuple[str, ...]:
     Returns:
         The framework install roots, including lower-case variants.
     """
-    try:
-        if _resolve_known_source_prefixes is None:
-            raise ImportError
-        roots = _resolve_known_source_prefixes()
-    except ImportError:
-        if _known_target_roots is None:
-            roots = []
-        else:
-            roots = _known_target_roots()
+    roots = _resolve_known_source_prefixes()
     out: list[str] = []
     seen: set[str] = set()
     for root in roots:
@@ -1757,17 +1683,7 @@ def _flydsl_reusable_roots() -> tuple[str, ...]:
     Returns:
         The lower-cased FlyDSL checkout roots.
     """
-    if _resolve_flydsl_source_roots is not None:
-        return tuple(dict.fromkeys(r.lower() for r in _resolve_flydsl_source_roots()))
-    out: list[str] = []
-    for env_key in ("DSL2_ROOT", "FLYDSL_ROOT"):
-        val = (os.environ.get(env_key, "") or "").strip()
-        if val:
-            out.append((val.rstrip("/") + "/").lower())
-    for default in ("/opt/flydsl/", "/sgl-workspace/flydsl/"):
-        if default not in out:
-            out.append(default)
-    return tuple(out)
+    return tuple(dict.fromkeys(r.lower() for r in _resolve_flydsl_source_roots()))
 
 
 def _reusable_roots() -> tuple[str, ...]:
@@ -2017,31 +1933,6 @@ def is_vendor_dispatch_wrapper(name: str, source_file: str) -> bool:
     return any(sig in text for sig in _VENDOR_DISPATCH_SIGS)
 
 
-#: Packages whose trees hold rewritable kernel source. Located at runtime so a
-#: wheel install, an editable checkout and a serving image all resolve, rather
-#: than only the one layout a literal happens to name.
-#:
-#: Taken from the orchestrator's resolver whenever that package is importable,
-#: which is every path except standalone CLI use. A second literal here is what
-#: let the two disagree: this tool listed ``sgl_kernel`` while the resolver it
-#: defers to did not, so on a host with a standalone ``sgl_kernel`` wheel the
-#: package was named in the "looked for" message and never actually searched.
-#: The literal below is the standalone default only, and
-#: ``test_kernel_search_roots`` fails if it drifts from the authoritative tuple.
-_STANDALONE_KERNEL_SOURCE_PACKAGES: tuple[str, ...] = (
-    "aiter",
-    "aiter_meta",
-    "sglang",
-    "sgl_kernel",
-    "vllm",
-    "atom",
-    "xfuser",
-)
-
-_KERNEL_SOURCE_PACKAGES: tuple[str, ...] = (
-    _FRAMEWORK_SOURCE_PACKAGES if _FRAMEWORK_SOURCE_PACKAGES is not None else _STANDALONE_KERNEL_SOURCE_PACKAGES
-)
-
 #: Last-resort checkout layouts for a host where nothing above is importable.
 #: Kept small on purpose: a pinned path cannot follow a package across
 #: container images or Python versions, and a list of them going stale in
@@ -2087,9 +1978,8 @@ def kernel_search_roots() -> tuple[str, ...]:
     Prefers the orchestrator's centralised resolver so this tool agrees with
     PolicyGate and patch application on where framework source lives. Falls back
     to locating each known package itself, then to the pinned checkout layouts,
-    both when that package is not importable (standalone CLI use) and when it
-    imported but resolved nothing -- an empty answer from the resolver used to
-    end the search, which is the same silent outcome as having no roots at all.
+    when that resolver resolves nothing -- an empty answer from it used to end
+    the search, which is the same silent outcome as having no roots at all.
 
     Non-existent roots are dropped: grepping them returns nothing and is
     indistinguishable from a kernel that genuinely has no source here.
@@ -2104,19 +1994,17 @@ def kernel_search_roots() -> tuple[str, ...]:
         tuple[str, ...]: Existing roots without trailing separators,
             de-duplicated in discovery order.
     """
-    discovered: list[str] = []
-    if _resolve_kernel_search_roots is not None:
-        discovered.extend(_resolve_kernel_search_roots())
+    discovered: list[str] = list(_resolve_kernel_search_roots())
     # A chain, not an either/or. The centralised resolver is authoritative and
-    # goes first, but "it imported" is not "it found something": when it returns
-    # nothing, the alternative to probing here is a run that greps no directory
-    # at all and reports every hot kernel as non-routable. Its answer is kept
-    # whole when it has one, so this cannot widen the roots a normal host
-    # searches -- it only decides between local discovery and nothing.
+    # goes first, but it can return nothing: when it does, the alternative to
+    # probing here is a run that greps no directory at all and reports every hot
+    # kernel as non-routable. Its answer is kept whole when it has one, so this
+    # cannot widen the roots a normal host searches -- it only decides between
+    # local discovery and nothing.
     if not discovered:
         discovered.extend(
             location
-            for location in (_installed_package_dir(package) for package in _KERNEL_SOURCE_PACKAGES)
+            for location in (_installed_package_dir(package) for package in _FRAMEWORK_SOURCE_PACKAGES)
             if location
         )
         discovered.extend(_FALLBACK_SEARCH_ROOTS)
@@ -2133,7 +2021,7 @@ def kernel_search_roots() -> tuple[str, ...]:
             "no framework source root exists on this host (looked for %s); "
             "kernel source resolution will find nothing and every hot kernel "
             "will be reported as non-routable",
-            ", ".join(_KERNEL_SOURCE_PACKAGES),
+            ", ".join(_FRAMEWORK_SOURCE_PACKAGES),
         )
     return tuple(roots)
 
@@ -3714,7 +3602,7 @@ def _finalize_candidates(
         item["runtime_generated_kernel"] = is_runtime_generated_kernel(item["name"], item.get("source_file", ""))
         _stamp_candidate_metadata(item, op_cat_map)
     _apply_vendor_operator_playbook_grouping(top)
-    if source_resolution_out and _KSC is not None:
+    if source_resolution_out:
         write_source_resolution_artifact(
             top,
             source_resolution_out,
@@ -3787,9 +3675,9 @@ def _candidate_resolution_method(item: dict[str, Any]) -> str:
     an unrecognized value degrades to ``unresolved`` rather than failing the write.
     """
     stamped = str(item.get("source_resolution_method") or "").strip()
-    if stamped in getattr(_KSC, "KNOWN_METHODS", frozenset()):
+    if stamped in _KSC.KNOWN_METHODS:
         return stamped
-    return getattr(_KSC, "METHOD_UNRESOLVED", "unresolved")
+    return _KSC.METHOD_UNRESOLVED
 
 
 def build_source_resolution_entries(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -3853,7 +3741,7 @@ def write_source_resolution_artifact(
             )
             return None
         path = Path(out_path)
-        atomic_write_json(path, doc)
+        atomic_write_json(path, doc, trailing_newline=True)
         summary = _KSC.summarize_resolution(doc.get("entries") or [])
         line = f"source resolution: {summary['located']}/{summary['total']} kernel(s) located -> {path.name}"
         # A count alone cannot say whether the unlocated kernels were worth
@@ -4758,7 +4646,7 @@ def build_audit_summary(
             }
         )
     return {
-        "generated_at": utc_now(),
+        "generated_at": now_iso(timespec="auto"),
         "trace_input": trace_input,
         "framework": framework,
         "target_platform": target_platform,
@@ -4841,7 +4729,7 @@ def write_reports(
         "trace_input": str(Path(args.trace_input).resolve()),
         "trace_input_type": trace_input_type,
         "trace_files": [str(p) for p in trace_files],
-        "created_at": utc_now(),
+        "created_at": now_iso(timespec="auto"),
     }
     # Aggregate reusable candidates into source-function task groups.
     source_root_str = getattr(args, "source_root", None)
@@ -4858,8 +4746,8 @@ def write_reports(
         "source": "tracelens_analysis",
         "dry_run": args.dry_run,
     }
-    atomic_write_json(run_dir / "trace_input_manifest.json", manifest)
-    atomic_write_json(tracelens_dir / "tracelens_report.json", report)
+    atomic_write_json(run_dir / "trace_input_manifest.json", manifest, trailing_newline=True)
+    atomic_write_json(tracelens_dir / "tracelens_report.json", report, trailing_newline=True)
     kernel_candidates_path = run_dir / "kernel_candidates.json"
     # ``hot_kernels`` is always the full ranked set; the reusable dispatch subset
     # is exposed as ``routable_kernels`` and non-routable dicts as ``skipped_kernels``.
@@ -4873,6 +4761,7 @@ def write_reports(
             task_groups,
             is_routable=lambda c: c.get("reusable_native_kernel") is True,
         ),
+        trailing_newline=True,
     )
 
     # Per-run audit sidecar (tasks routed vs skipped w/ reason).
@@ -4885,7 +4774,7 @@ def write_reports(
         trace_health_warnings=trace_health_warnings,
     )
     summary_path = tracelens_dir / "summary.json"
-    atomic_write_json(summary_path, summary)
+    atomic_write_json(summary_path, summary, trailing_newline=True)
 
     missing_trace_report = existing_report_path is None or not existing_report_path.exists()
     trace_quality_blocked = any(
@@ -4924,7 +4813,7 @@ def write_reports(
         roofline_json_path=(str(Path(args.roofline_json).expanduser()) if getattr(args, "roofline_json", "") else ""),
         candidates=candidates,
     )
-    atomic_write_json(kernel_roofline_path, kernel_roofline_payload)
+    atomic_write_json(kernel_roofline_path, kernel_roofline_payload, trailing_newline=True)
 
     # Diffusion / scriptable workload-level roofline: aggregate the per-kernel
     # roofline into an end-to-end workload roofline. Best-effort sidecar; never
@@ -4987,7 +4876,7 @@ def write_reports(
                 except Exception as _exc:  # noqa: BLE001 — analytic ceiling is best-effort
                     _diff_report["analytic_ceiling_error"] = f"{type(_exc).__name__}: {_exc}"
             out = run_dir / "diffusion_roofline.json"
-            atomic_write_json(out, _diff_report)
+            atomic_write_json(out, _diff_report, trailing_newline=True)
             diffusion_roofline_path = str(out)
             print(
                 "[diffusion_roofline] "
@@ -5018,7 +4907,7 @@ def _default_workspace_path() -> str:
     """Resolve the default workspace root for ``--workspace-path``.
 
     Fallback order: ``$USER_DATA_PATH``, then legacy ``$WORKSPACE_PATH``, then
-    ``_paths.workspace_root()`` (which warns once when ``$USER_DATA_PATH`` is unset).
+    ``session.paths.workspace_root()`` (which warns once when ``$USER_DATA_PATH`` is unset).
 
     Returns:
         The resolved default workspace path.
@@ -5031,7 +4920,7 @@ def _default_workspace_path() -> str:
         return workspace
     # Neither env set: route through the shared helper so the one-shot
     # "USER_DATA_PATH unset" warning fires.
-    return workspace_root()
+    return str(workspace_root())
 
 
 def _trajectory_scope(args: argparse.Namespace) -> contextlib.AbstractContextManager[Any]:
@@ -5041,10 +4930,8 @@ def _trajectory_scope(args: argparse.Namespace) -> contextlib.AbstractContextMan
     """
     if not args.trajectory_session_dir:
         return contextlib.nullcontext()
-    try:
-        from hyperloom.inference_optimizer.trace.trajectory_trace import trajectory_scope
-    except ImportError:  # pragma: no cover - an installed hyperloom predating the ledger
-        return contextlib.nullcontext()
+    from hyperloom.inference_optimizer.trace.trajectory_trace import trajectory_scope
+
     return trajectory_scope(
         session_dir=Path(args.trajectory_session_dir),
         component="tracelens",
@@ -5280,7 +5167,7 @@ def main() -> int:
 
     session_id = args.session_id or uuid.uuid4().hex[:12]
     run_id = f"tl-{uuid.uuid4().hex[:8]}"
-    started_at = utc_now()
+    started_at = now_iso(timespec="auto")
     # Keep each TraceLens invocation's artifacts in its own run subdirectory.
     ts_compact = started_at.replace("-", "").replace(":", "").split(".")[0]
     if not ts_compact.endswith("Z"):
@@ -5351,10 +5238,10 @@ def main() -> int:
             {
                 "code": "no_framework_source_root",
                 "severity": "error",
-                "packages": list(_KERNEL_SOURCE_PACKAGES),
+                "packages": list(_FRAMEWORK_SOURCE_PACKAGES),
                 "message": (
                     "No framework source root exists on this host (looked for "
-                    f"{', '.join(_KERNEL_SOURCE_PACKAGES)}). Source resolution "
+                    f"{', '.join(_FRAMEWORK_SOURCE_PACKAGES)}). Source resolution "
                     "cannot grep anything, so every hot kernel will be reported "
                     "as non-routable and kernel-opt will have nothing to "
                     "dispatch. Install the framework in this interpreter's "
@@ -5728,7 +5615,7 @@ def main() -> int:
                 # file is rewritten by every later step, so a diagnostic
                 # parked there is gone by the time anyone reads the report.
                 pretrim_path = tracelens_dir / "pretrim.json"
-                atomic_write_json(pretrim_path, pretrim_summary)
+                atomic_write_json(pretrim_path, pretrim_summary, trailing_newline=True)
                 artifacts["tracelens_pretrim"] = str(pretrim_path)
                 # --find-steady-state writes the three *_steady_state_* chunks; --R feeds PD-ratio selection.
                 split_cmd = [
@@ -6168,7 +6055,7 @@ def main() -> int:
                             perf_report_csv_dir=(skill_result.output_dir / "perf_report_csvs"),
                             framework=args.framework or None,
                             log_path=log_path,
-                            source_resolution_out=(run_dir / _SOURCE_RESOLUTION_NAME),
+                            source_resolution_out=(run_dir / _KSC.SOURCE_RESOLUTION_FILENAME),
                             model_name=args.model_name,
                         )
                         append_log(
@@ -6242,18 +6129,17 @@ def main() -> int:
         if roofline_by_name:
             append_log(log_path, f"merged roofline results: {len(roofline_by_name)} kernels")
         merge_roofline_into_candidates(candidates, roofline_by_name)
-        source_resolution_path = run_dir / _SOURCE_RESOLUTION_NAME
-        if _KSC is not None:
-            if not source_resolution_path.is_file():
-                write_source_resolution_artifact(
-                    candidates,
-                    source_resolution_path,
-                    framework=args.framework or "",
-                    model_name=args.model_name or "",
-                    log_path=log_path,
-                )
-            if source_resolution_path.is_file():
-                artifacts["kernel_source_resolution"] = str(source_resolution_path)
+        source_resolution_path = run_dir / _KSC.SOURCE_RESOLUTION_FILENAME
+        if not source_resolution_path.is_file():
+            write_source_resolution_artifact(
+                candidates,
+                source_resolution_path,
+                framework=args.framework or "",
+                model_name=args.model_name or "",
+                log_path=log_path,
+            )
+        if source_resolution_path.is_file():
+            artifacts["kernel_source_resolution"] = str(source_resolution_path)
         artifacts.update(
             write_reports(
                 run_dir,
@@ -6308,10 +6194,11 @@ def main() -> int:
                 "session_id": session_id,
                 "last_tool": "tracelens_analysis",
                 "last_run_id": run_id,
-                "updated_at": utc_now(),
+                "updated_at": now_iso(timespec="auto"),
                 "model_name": args.model_name,
                 "framework": args.framework,
             },
+            trailing_newline=True,
         )
         update_status(
             status_path,

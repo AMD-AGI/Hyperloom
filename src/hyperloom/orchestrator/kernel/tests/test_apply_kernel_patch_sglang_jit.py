@@ -21,8 +21,7 @@ _EDITABLE_REINSTALL = ["/opt/venv/bin/python", "-m", "pip", "install", "-e", "py
 
 
 @pytest.fixture()
-def akp(monkeypatch) -> types.ModuleType:
-    monkeypatch.setattr(apply_kernel_patch, "_CACHED_KNOWN_TARGET_ROOTS", (_SGLANG_ROOT + "/",))
+def akp() -> types.ModuleType:
     return apply_kernel_patch
 
 

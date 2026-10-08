@@ -23,7 +23,8 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from hyperloom.common import aiter_jit_cache
-from hyperloom.orchestrator.trace_analysis._io_utils import source_text_looks_complete, utc_now
+from hyperloom.common.timeutil import now_iso
+from hyperloom.inference_optimizer.framework_paths import resolve_flydsl_source_roots
 
 log = logging.getLogger(__name__)
 
@@ -32,25 +33,6 @@ COMPILED_SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".cu", ".cuh", ".h", ".hpp", ".
 PYTHON_SOURCE_SUFFIXES = {".py"}
 COMPILED_ARTIFACT_SUFFIXES = {".so", ".co", ".hsaco"}
 TEXT_ARTIFACT_SUFFIXES = {".txt", ".md", ".markdown", ".log", ".patch", ".diff"}
-# Fallback when ``inference_optimizer`` is not on ``sys.path`` (standalone CLI).
-_FALLBACK_KNOWN_TARGET_ROOTS: tuple[str, ...] = (
-    "/sgl-workspace/aiter/",
-    "/sgl-workspace/sglang/",
-    "/sgl-workspace/vllm/",
-    "/opt/venv/lib/python3.10/site-packages/aiter/",
-    "/opt/venv/lib/python3.10/site-packages/sglang/",
-    "/opt/venv/lib/python3.10/site-packages/vllm/",
-    "/usr/local/lib/python3.12/dist-packages/aiter/",
-    "/usr/local/lib/python3.12/dist-packages/sglang/",
-    "/usr/local/lib/python3.12/dist-packages/vllm/",
-    "/usr/local/lib/python3.10/dist-packages/aiter/",
-    "/usr/local/lib/python3.10/dist-packages/sglang/",
-    "/usr/local/lib/python3.10/dist-packages/vllm/",
-)
-_FALLBACK_FLYDSL_ROOT_ENV_KEYS: tuple[str, ...] = ("DSL2_ROOT", "FLYDSL_ROOT")
-_FALLBACK_FLYDSL_ROOTS: tuple[str, ...] = ("/opt/flydsl/", "/sgl-workspace/flydsl/")
-
-_CACHED_KNOWN_TARGET_ROOTS: tuple[str, ...] | None = None
 
 _ALLOWED_KERNEL_DEPLOY_PACKAGES = frozenset({"aiter", "aiter_meta", "sglang", "vllm"})
 _EDITABLE_AITER_ROOT = Path("/sgl-workspace/aiter")
@@ -96,43 +78,6 @@ def _coerce_rebuild_command(rebuild_command: "list[str] | str | None") -> list[s
     if exe in _SHELL_COMMAND_NAMES and any(part in {"-c", "-lc"} for part in argv[1:]):
         raise ValueError("rebuild_command must not invoke a shell command string")
     return argv
-
-
-def known_target_roots() -> tuple[str, ...]:
-    """Advisory framework roots used to recognise a reusable patch target.
-
-    Resolves once and caches the result. Falls back to
-    :data:`_FALLBACK_KNOWN_TARGET_ROOTS` plus the FlyDSL roots when the
-    orchestrator package is not importable (standalone CLI use).
-
-    Returns:
-        tuple[str, ...]: Absolute path-prefix strings for the recognised
-            reusable framework source roots (aiter / sglang / vllm / flydsl).
-    """
-    global _CACHED_KNOWN_TARGET_ROOTS
-    if _CACHED_KNOWN_TARGET_ROOTS is not None:
-        return _CACHED_KNOWN_TARGET_ROOTS
-    try:
-        from hyperloom.inference_optimizer.framework_paths import (
-            resolve_known_source_prefixes,
-        )
-
-        _CACHED_KNOWN_TARGET_ROOTS = resolve_known_source_prefixes()
-    except ImportError:
-        _CACHED_KNOWN_TARGET_ROOTS = _FALLBACK_KNOWN_TARGET_ROOTS + _fallback_flydsl_roots()
-    return _CACHED_KNOWN_TARGET_ROOTS
-
-
-def _fallback_flydsl_roots() -> tuple[str, ...]:
-    """FlyDSL roots for the standalone CLI, mirroring the orchestrator's."""
-    out: list[str] = []
-    for key in _FALLBACK_FLYDSL_ROOT_ENV_KEYS:
-        raw = (os.environ.get(key, "") or "").strip()
-        if raw:
-            root = raw.rstrip("/") + "/"
-            out.extend((root, root.lower()))
-    out.extend(_FALLBACK_FLYDSL_ROOTS)
-    return tuple(dict.fromkeys(r for r in out if r))
 
 
 # Pod-local multi-node backup dir; overridable via $HYPERLOOM_MN_KERNEL_BACKUP_DIR.
@@ -396,8 +341,35 @@ def _copy_to_backup(path: Path, backup_dir: Path, group: str) -> dict[str, str]:
     return {"path": str(path), "backup_path": str(dst)}
 
 
-# Shared source-completeness heuristic (see _io_utils.source_text_looks_complete).
-_source_text_looks_complete = source_text_looks_complete
+def _source_text_looks_complete(text: str, suffix: str) -> bool:
+    """Heuristically decide whether ``text`` is a complete source file."""
+    stripped = text.strip()
+    if not stripped or "```" in stripped:
+        return False
+    if suffix == ".py":
+        try:
+            compile(stripped + "\n", "<optimized_kernel>", "exec")
+        except SyntaxError:
+            return False
+        return any(marker in stripped for marker in ("def ", "class ", "import ", "@triton.jit", "torch."))
+    if suffix in COMPILED_SOURCE_SUFFIXES:
+        return any(
+            marker in stripped
+            for marker in (
+                "#include",
+                "__global__",
+                "__device__",
+                "extern ",
+                "namespace ",
+                "template",
+                "void ",
+                "int ",
+                "float ",
+                "half",
+                "torch::",
+            )
+        )
+    return False
 
 
 def _validate_patch_source(patch: Path, target: Path) -> None:
@@ -904,12 +876,13 @@ def _flydsl_root_for(target_file: Path) -> Path | None:
     gates do, but returns the matching prefix of ``target_file`` rather than
     the matched root: the root list carries a lower-cased variant of every env
     root, and handing back a spelling that does not exist on disk would send
-    snapshot mode into a fabricated tree.
+    snapshot mode into a fabricated tree. An env root keeps any repeated
+    trailing slash, so each root is matched at its directory boundary.
     """
     raw = str(target_file).replace(os.sep, "/")
     norm = raw.lower()
-    for root in _fallback_flydsl_roots():
-        lowered = root.lower()
+    for root in resolve_flydsl_source_roots():
+        lowered = root.lower().rstrip("/") + "/"
         if norm.startswith(lowered):
             return Path(raw[: len(lowered)].rstrip("/"))
     return None
@@ -1233,7 +1206,7 @@ def _invalidate_aiter_cpp_itfs_cache(
         "build_dir": str(build_dir),
         "module_names": module_names,
         "scope": scope,
-        "invalidated_at": utc_now(),
+        "invalidated_at": now_iso(timespec="auto"),
         "invalidated_unix": time.time(),
     }
     if not build_dir.exists():
@@ -1969,7 +1942,7 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
         if mn_revert and mn_revert.get("status") != "ok":
             revert_issues.append({"kind": "multinode_revert", **mn_revert})
 
-    reverted_at = utc_now()
+    reverted_at = now_iso(timespec="auto")
     partial = bool(skipped_untrusted_backups or revert_issues)
     manifest["status"] = "reverted_partial" if partial else "reverted"
     manifest["reverted_at"] = reverted_at
@@ -2071,7 +2044,7 @@ def finalize_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
             )
 
     manifest["status"] = "finalized_partial" if issues else "finalized"
-    manifest["finalized_at"] = utc_now()
+    manifest["finalized_at"] = now_iso(timespec="auto")
     manifest["finalize_deleted"] = deleted
     if remote_result:
         manifest["multinode_finalize"] = remote_result
@@ -2250,7 +2223,7 @@ def apply_kernel_patch(
             "rebuild_modes": [strategy["rebuild_mode"]],
             "jit_build_dirs": ([strategy["jit_build_dir"]] if strategy.get("jit_build_dir") else []),
         },
-        "created_at": utc_now(),
+        "created_at": now_iso(timespec="auto"),
     }
     if producer_manifest:
         manifest["producer_manifest"] = str(Path(producer_manifest).resolve())
@@ -2430,7 +2403,7 @@ def apply_kernel_patch(
             }
 
     manifest["status"] = "applied"
-    manifest["applied_at"] = utc_now()
+    manifest["applied_at"] = now_iso(timespec="auto")
     manifest["rebuild"] = rebuild
     manifest["cache_clear"] = cache_clear
     if jit_build_backup.get("status") in {"ok", "clean", "remote", "skipped"}:
@@ -2588,7 +2561,7 @@ def _apply_kernel_patch_snapshot(
                 {str(strat["jit_build_dir"]) for strat in jit_strategies if strat.get("jit_build_dir")}
             ),
         },
-        "created_at": utc_now(),
+        "created_at": now_iso(timespec="auto"),
     }
     if producer_manifest:
         manifest["producer_manifest"] = str(Path(producer_manifest).resolve())
@@ -2832,7 +2805,7 @@ def _apply_kernel_patch_snapshot(
         rebuild = rebuild_records[-1] if rebuild_records else rebuild
 
     manifest["status"] = "applied"
-    manifest["applied_at"] = utc_now()
+    manifest["applied_at"] = now_iso(timespec="auto")
     manifest["rebuild"] = rebuild
     manifest["cache_clear"] = cache_clear
     if jit_build_backup.get("status") in {"ok", "clean", "remote", "skipped"}:

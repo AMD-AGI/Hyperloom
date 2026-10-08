@@ -62,23 +62,12 @@ class TestDiscoverKernelSearchRoots:
         tl.kernel_search_roots.cache_clear()
         assert tl.kernel_search_roots() == (str(first), str(second))
 
-    def test_falls_back_to_local_discovery_without_the_orchestrator(self, monkeypatch, tmp_path):
-        """Standalone CLI use must still find the installed frameworks."""
-        located = tmp_path / "aiter"
-        located.mkdir()
-        monkeypatch.setattr(tl, "_resolve_kernel_search_roots", None)
-        monkeypatch.setattr(tl, "_KERNEL_SOURCE_PACKAGES", ("aiter",))
-        monkeypatch.setattr(tl, "_FALLBACK_SEARCH_ROOTS", ())
-        monkeypatch.setattr(tl, "_installed_package_dir", lambda package: str(located) if package == "aiter" else "")
-        tl.kernel_search_roots.cache_clear()
-        assert tl.kernel_search_roots() == (str(located),)
-
     def test_pinned_layouts_are_a_last_resort_not_a_requirement(self, monkeypatch, tmp_path):
         """A pinned root is used only when it exists, never assumed."""
         checkout = tmp_path / "sgl-workspace" / "vllm"
         checkout.mkdir(parents=True)
-        monkeypatch.setattr(tl, "_resolve_kernel_search_roots", None)
-        monkeypatch.setattr(tl, "_KERNEL_SOURCE_PACKAGES", ())
+        monkeypatch.setattr(tl, "_resolve_kernel_search_roots", lambda: ())
+        monkeypatch.setattr(tl, "_FRAMEWORK_SOURCE_PACKAGES", ())
         monkeypatch.setattr(tl, "_FALLBACK_SEARCH_ROOTS", (str(checkout), "/sgl-workspace/gone"))
         tl.kernel_search_roots.cache_clear()
         assert tl.kernel_search_roots() == (str(checkout),)
@@ -88,7 +77,7 @@ class TestDiscoverKernelSearchRoots:
         located = tmp_path / "sgl_kernel"
         located.mkdir()
         monkeypatch.setattr(tl, "_resolve_kernel_search_roots", lambda: ())
-        monkeypatch.setattr(tl, "_KERNEL_SOURCE_PACKAGES", ("sgl_kernel",))
+        monkeypatch.setattr(tl, "_FRAMEWORK_SOURCE_PACKAGES", ("sgl_kernel",))
         monkeypatch.setattr(tl, "_FALLBACK_SEARCH_ROOTS", ())
         monkeypatch.setattr(
             tl,
@@ -105,7 +94,7 @@ class TestDiscoverKernelSearchRoots:
         local = tmp_path / "aiter"
         local.mkdir()
         monkeypatch.setattr(tl, "_resolve_kernel_search_roots", lambda: (str(central),))
-        monkeypatch.setattr(tl, "_KERNEL_SOURCE_PACKAGES", ("aiter",))
+        monkeypatch.setattr(tl, "_FRAMEWORK_SOURCE_PACKAGES", ("aiter",))
         monkeypatch.setattr(tl, "_FALLBACK_SEARCH_ROOTS", (str(local),))
         monkeypatch.setattr(tl, "_installed_package_dir", lambda _package: str(local))
         tl.kernel_search_roots.cache_clear()
@@ -156,18 +145,3 @@ class TestRefreshKernelSearchRoots:
     def teardown_method(self):
         tl.kernel_search_roots.cache_clear()
         tl._harness_search_bases.cache_clear()
-
-
-class TestThePackageListHasOneOwner:
-    """Two lists of kernel-source packages is one list that goes stale."""
-
-    def test_the_tool_defers_to_the_orchestrator_list(self):
-        from hyperloom.inference_optimizer.framework_paths import FRAMEWORK_SOURCE_PACKAGES
-
-        assert tl._KERNEL_SOURCE_PACKAGES == FRAMEWORK_SOURCE_PACKAGES
-
-    def test_the_standalone_default_does_not_drift_from_it(self):
-        """The literal is the standalone fallback, not a competing answer."""
-        from hyperloom.inference_optimizer.framework_paths import FRAMEWORK_SOURCE_PACKAGES
-
-        assert set(tl._STANDALONE_KERNEL_SOURCE_PACKAGES) == set(FRAMEWORK_SOURCE_PACKAGES)

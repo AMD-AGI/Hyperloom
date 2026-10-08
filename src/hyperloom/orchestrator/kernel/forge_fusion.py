@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from hyperloom.orchestrator.trace_analysis._io_utils import truthy
+from hyperloom.common.env import is_truthy
 
 RESULT_BEGIN = "FORGE_FUSION_RESULT_BEGIN"
 RESULT_END = "FORGE_FUSION_RESULT_END"
@@ -133,7 +133,7 @@ def _build_cmd(args: dict[str, Any]) -> list[str]:
     # Nominate one independent sibling patch per confirmed pattern by default (the multi-patch contract).
     if bool(args.get("fuse_all_confirmed", False)):
         cmd.append("--fuse-all-confirmed")
-    if truthy(args.get("verbose", False)):
+    if is_truthy(args.get("verbose", False)):
         cmd.append("--verbose")
     return cmd
 

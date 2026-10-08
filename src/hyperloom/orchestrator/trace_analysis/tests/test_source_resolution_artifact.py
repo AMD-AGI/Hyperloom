@@ -222,25 +222,3 @@ def test_collective_symbol_index_row_does_not_suppress_the_artifact(tmp_path):
     by_id = {e["kernel_id"]: e for e in doc["entries"]}
     assert by_id["k1"]["method"] == ksc.METHOD_SYMBOL_INDEX
     assert by_id["k1"]["source_file"] == "/csrc/custom_all_reduce.cuh"
-
-
-# --- degrade, don't abort, against an older installed contract module -------
-
-
-def test_candidate_method_falls_back_without_the_constants(monkeypatch):
-    """_candidate_resolution_method degrades to unresolved when the contract is absent."""
-    monkeypatch.setattr(tl, "_KSC", None)
-    assert tl._candidate_resolution_method({"source_file": "/repo/k.cu"}) == "unresolved"
-    assert tl._candidate_resolution_method({}) == "unresolved"
-
-
-def test_stamped_method_survives_a_missing_known_methods(monkeypatch):
-    """An unrecognized stamp degrades to unresolved rather than raising."""
-
-    class _OldContract:
-        # No KNOWN_METHODS set present.
-        METHOD_UNRESOLVED = "unresolved"
-
-    monkeypatch.setattr(tl, "_KSC", _OldContract())
-    item = {"source_resolution_method": "symbol_index", "source_file": "/repo/k.cu"}
-    assert tl._candidate_resolution_method(item) == "unresolved"

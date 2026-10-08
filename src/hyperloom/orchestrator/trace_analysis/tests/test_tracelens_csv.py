@@ -3986,12 +3986,12 @@ def test_default_workspace_path_falls_back_to_workspace_path(monkeypatch):
 
 
 def test_default_workspace_path_final_fallback_to_hyperloom_default(monkeypatch):
-    """No envs set → delegates to _paths, which adapts to the host."""
-    from hyperloom.orchestrator.trace_analysis import _paths
+    """No envs set → delegates to session.paths, which adapts to the host."""
+    from hyperloom.inference_optimizer.session import paths as session_paths
 
     monkeypatch.delenv("USER_DATA_PATH", raising=False)
     monkeypatch.delenv("WORKSPACE_PATH", raising=False)
-    assert tla._default_workspace_path() == _paths.default_workspace_root()
+    assert tla._default_workspace_path() == str(session_paths.default_workspace_root())
 
 
 def test_default_workspace_path_treats_empty_user_data_path_as_unset(monkeypatch):

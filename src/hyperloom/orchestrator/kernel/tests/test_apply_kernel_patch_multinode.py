@@ -13,8 +13,7 @@ from hyperloom.orchestrator.kernel import apply_kernel_patch
 
 
 @pytest.fixture()
-def akp(monkeypatch) -> types.ModuleType:
-    monkeypatch.setattr(apply_kernel_patch, "_CACHED_KNOWN_TARGET_ROOTS", None)
+def akp() -> types.ModuleType:
     return apply_kernel_patch
 
 

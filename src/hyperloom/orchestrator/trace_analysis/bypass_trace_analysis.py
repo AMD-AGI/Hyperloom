@@ -30,7 +30,9 @@ from . import _bypass_report as _report
 from . import _bypass_trace_reader as _reader
 from . import _trace_shape_manifest as _tsm
 
+from hyperloom.common.io import atomic_write_json
 from hyperloom.common.provenance import build_provenance as _shared_build_provenance
+from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer import framework_registry
 from ._idle_gate import (
     build_graph_under_recorded_warning,
@@ -38,7 +40,7 @@ from ._idle_gate import (
     resolve_idle_pct_threshold,
 )
 from ._denoise_steps import count_profiler_steps, resolve_perstep_divisor
-from ._io_utils import atomic_write_json, utc_now, write_text
+from ._io_utils import write_text
 
 
 AGGREGATION_SCOPE_FULL = "full_trace"
@@ -747,7 +749,7 @@ def main(argv: list[str] | None = None) -> int:
         candidates,
         framework=args.framework,
         target_platform=args.target_platform,
-        generated_at=utc_now(timespec="seconds"),
+        generated_at=now_iso(timespec="seconds"),
         trace_health_warnings=trace_health_warnings,
     )
     summary["estimated"] = estimated
@@ -769,7 +771,7 @@ def main(argv: list[str] | None = None) -> int:
             "analyzed_rank": analyzed_rank,
             "rank_count": rank_count,
             "event_total": analyze.get("event_total", 0),
-            "created_at": utc_now(timespec="seconds"),
+            "created_at": now_iso(timespec="seconds"),
         },
         ensure_ascii=False,
         sort_keys=False,
@@ -826,7 +828,7 @@ def main(argv: list[str] | None = None) -> int:
             diffusion_roofline_path = None
 
     # Variant-discriminating TraceShapeManifest (P0-A / WP-1).
-    shape_manifest = _maybe_build_shape_manifest(args, analyze, bypass_dir, generated_at=utc_now(timespec="seconds"))
+    shape_manifest = _maybe_build_shape_manifest(args, analyze, bypass_dir, generated_at=now_iso(timespec="seconds"))
 
     hot_kernels = candidates.get("hot_kernels", [])
     result: dict[str, Any] = {

@@ -665,37 +665,15 @@ def test_probe_framework_source_roots_includes_defaults(tmp_path, monkeypatch):
     assert str(ws) in out or (str(ws) + "/") in out
 
 
-# apply_kernel_patch known-target roots
+# apply_kernel_patch strategy detection
 @pytest.fixture
-def apply_tool(monkeypatch) -> types.ModuleType:
-    monkeypatch.setattr(apply_kernel_patch, "_CACHED_KNOWN_TARGET_ROOTS", None)
+def apply_tool() -> types.ModuleType:
     return apply_kernel_patch
 
 
-def test_known_target_roots_includes_dist_packages_vllm(
-    apply_tool,
-    monkeypatch,
-) -> None:
-    monkeypatch.setattr(
-        fp, "_discover_installed_framework_roots", lambda: ("/usr/local/lib/python3.12/dist-packages/vllm/",)
-    )
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS", raising=False)
-    apply_tool._CACHED_KNOWN_TARGET_ROOTS = None
-    roots = apply_tool.known_target_roots()
-    assert "/usr/local/lib/python3.12/dist-packages/vllm/" in roots
-
-
-def test_detect_strategy_accepts_dist_packages_vllm_py(
-    apply_tool,
-    monkeypatch,
-) -> None:
+def test_detect_strategy_accepts_dist_packages_vllm_py(apply_tool) -> None:
     target = Path(
         "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/parameter.py",
-    )
-    monkeypatch.setattr(
-        apply_tool,
-        "known_target_roots",
-        lambda: ("/usr/local/lib/python3.12/dist-packages/vllm/",),
     )
     strat = apply_tool._detect_strategy(target)
     assert strat["compiled"] is False
