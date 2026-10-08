@@ -437,3 +437,151 @@ def test_pulse_url_without_a_value_or_environment_refuses(monkeypatch, capsys) -
     monkeypatch.delenv("PULSE_URL", raising=False)
     assert estimate_main(["--pulse-url"]) == 2
     assert "PULSE_URL" in capsys.readouterr().err
+
+
+def _write_pool(tmp_path: Path, docs: list[dict]) -> Path:
+    path = tmp_path / "pool.json"
+    path.write_text(json.dumps(docs), encoding="utf-8")
+    return path
+
+
+def _run(argv: list[str], tmp_path: Path) -> dict:
+    out = tmp_path / "report.json"
+    assert estimate_main([*argv, "--output", str(out)]) == 0
+    return json.loads(out.read_text(encoding="utf-8"))
+
+
+def test_the_cli_warns_when_the_pool_mixes_shapes(tmp_path: Path) -> None:
+    pool = _write_pool(
+        tmp_path,
+        [
+            _shaped(cid=_MI355_SGLANG, gain=10.0, optimized=800.0, tp=8, conc=1),
+            _shaped(cid=_MI355_SGLANG, gain=242.0, optimized=900.0, tp=8, conc=64),
+            _shaped(cid=_MI355_SGLANG, gain=5.0, optimized=200.0, tp=1, conc=64),
+        ],
+    )
+    unscoped = _run(["--input", str(pool)], tmp_path)
+    assert any("pool mixes 3 workload shapes; pass tp/conc/isl/osl" in w for w in unscoped["pool_warnings"])
+
+    partly = _run(["--input", str(pool), "--tp", "8"], tmp_path)
+    assert partly["sessions_scored"] == 2
+    assert any("pool mixes 2 workload shapes; pass conc/isl/osl" in w for w in partly["pool_warnings"])
+
+    scoped = _run(["--input", str(pool), "--tp", "8", "--conc", "64"], tmp_path)
+    assert not any("workload shapes" in w for w in scoped["pool_warnings"])
+
+
+class _FakeStore:
+    """A store holding *total* identities with one session each."""
+
+    def __init__(self, total: int, *, report_total: bool = True) -> None:
+        self.total, self.report_total = total, report_total
+
+    def search_identities(self, *, scheme, match, hardware_in, offset, limit):
+        items = [{"canonical_id": f"{_MI355_SGLANG}-{i}"} for i in range(offset, min(offset + limit, self.total))]
+        return {"items": items, **({"total": self.total} if self.report_total else {})}
+
+    def get_rollup(self, cid):
+        return {"sessions": [f"{cid}-s"]}
+
+    def get_session(self, cid, sid):
+        return _shaped(cid=_MI355_SGLANG, gain=10.0, optimized=800.0, tp=8) | {"session_id": sid}
+
+
+@pytest.mark.parametrize(
+    ("total", "report_total", "expected"),
+    [
+        (82, True, "read 50 of the 82 identities matching the search (--max-identities 50)"),
+        (82, False, "stopped at --max-identities 50 and the store reported no total"),
+        (30, True, None),
+    ],
+    ids=["truncated", "truncated-without-total", "complete"],
+)
+def test_a_truncated_identity_search_is_reported(monkeypatch, tmp_path: Path, total, report_total, expected) -> None:
+    monkeypatch.setenv("KB_STORE_URL", "https://kb.invalid")
+    monkeypatch.setattr(estimate_no_run, "KBStoreClient", lambda *a, **k: _FakeStore(total, report_total=report_total))
+    report = _run(["--hardware", "mi355x"], tmp_path)
+    fetched = min(total, 50)
+    assert report["coverage"]["identities_fetched"] == fetched
+    assert report["coverage"]["identities_matched"] == (total if report_total else None)
+    assert report["sessions_scored"] == fetched
+    matching = [line for line in report["limitations"] if "identities" in line]
+    if expected is None:
+        assert matching == []
+    else:
+        assert len(matching) == 1 and expected in matching[0]
+
+
+def _pulse_row(**overrides) -> dict:
+    row = {
+        "session_id": "s1",
+        "model_name": "m",
+        "gpu_type": "mi355x",
+        "framework": "sglang",
+        "tp": 8,
+        "conc": 64,
+        "isl": 1024,
+        "osl": 1024,
+        "baseline_tok_per_s_per_gpu": 100.0,
+        "opt_tok_per_s_per_gpu": 150.0,
+        "roofline": {
+            "roofline_bound_kind": "memory",
+            "roofline_mem_ceiling_tok_per_sec": 300.0,
+            "roofline_cmp_ceiling_tok_per_sec": 500.0,
+        },
+    }
+    row.update(overrides)
+    return row
+
+
+def test_capture_is_the_share_of_the_roofline_gap_closed() -> None:
+    from kbmine.pulse import capture_pct, roofline_ceiling
+
+    assert roofline_ceiling(_pulse_row()) == (300.0, "memory")
+    assert capture_pct(_pulse_row()) == pytest.approx(25.0)
+    compute = _pulse_row(roofline={**_pulse_row()["roofline"], "roofline_bound_kind": "compute"})
+    assert roofline_ceiling(compute) == (500.0, "compute")
+    assert capture_pct(compute) == pytest.approx(12.5)
+
+
+def test_an_unlabelled_bound_takes_the_lower_ceiling() -> None:
+    from kbmine.pulse import roofline_ceiling
+
+    row = _pulse_row(roofline={"roofline_mem_ceiling_tok_per_sec": 300.0, "roofline_cmp_ceiling_tok_per_sec": 200.0})
+    assert roofline_ceiling(row) == (200.0, "inferred min")
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"roofline": None},
+        {"roofline": {"roofline_bound_kind": "memory"}},
+        {"baseline_tok_per_s_per_gpu": 300.0},
+        {"baseline_tok_per_s_per_gpu": 400.0},
+        {"opt_tok_per_s_per_gpu": None},
+    ],
+    ids=["no-snapshot", "no-ceiling", "zero-gap", "negative-gap", "no-optimized-arm"],
+)
+def test_an_unmeasurable_capture_is_none_not_zero(overrides) -> None:
+    from kbmine.pulse import capture_pct
+
+    assert capture_pct(_pulse_row(**overrides)) is None
+
+
+def test_a_pulse_row_scales_per_gpu_throughput_back_to_a_total() -> None:
+    from kbmine.pulse import LAYOUT_UNKNOWN, project_pulse_row
+
+    projected = project_pulse_row(_pulse_row())
+    assert projected["tput_per_gpu"] == 150.0
+    assert projected["optimized_throughput"] == pytest.approx(1200.0)
+    assert (projected["ceiling_tput_per_gpu"], projected["ceiling_kind"]) == (300.0, "memory")
+    assert projected["capture_pct"] == pytest.approx(25.0)
+    assert projected["parallelism_label"] == LAYOUT_UNKNOWN
+    assert project_pulse_row(_pulse_row(tp=None))["optimized_throughput"] == 150.0
+
+
+def test_an_agentx_scope_without_isl_or_osl_encodes() -> None:
+    from kbmine.kb_store_client import KBStoreClient
+
+    query = KBStoreClient._scope_query({"kernel_optimizer": "forge", "tp": 8, "conc": 1})
+    assert query.startswith("?") and "conc=1" in query and "isl" not in query

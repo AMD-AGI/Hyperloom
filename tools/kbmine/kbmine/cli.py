@@ -193,6 +193,22 @@ def _pulse_documents(args: argparse.Namespace) -> tuple[list[dict[str, Any]], li
     return kept, notes
 
 
+def _note_identity_coverage(report: dict[str, Any], counts: dict[str, Any], *, cap: int) -> None:
+    """Say how much of the store's match the report stands on; a truncated pool is the server's first N, not a sample."""
+    fetched, matched = counts.get("fetched", 0), counts.get("matched")
+    report["coverage"]["identities_fetched"] = fetched
+    report["coverage"]["identities_matched"] = matched
+    if matched is not None and matched > fetched:
+        report["limitations"].append(
+            f"read {fetched} of the {matched} identities matching the search (--max-identities {cap}); the rest are "
+            "not in this report, and the first ones in server order are not a random sample"
+        )
+    elif matched is None and fetched >= cap:
+        report["limitations"].append(
+            f"stopped at --max-identities {cap} and the store reported no total, so more matching identities may exist"
+        )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     if args.pulse_url is _FROM_ENV:
@@ -203,6 +219,7 @@ def main(argv: list[str] | None = None) -> int:
     errors: list[str] = []
     store_url = ""
     projector = None
+    identity_counts: dict[str, Any] = {}
     if args.input is not None:
         documents = _load_input(args.input)
     elif args.pulse_url:
@@ -246,6 +263,7 @@ def main(argv: list[str] | None = None) -> int:
                 hardware_in=hardware_in,
                 max_identities=max(1, args.max_identities),
                 canonical_ids=list(args.canonical_id) or None,
+                counts=identity_counts,
             )
         except KBStoreError as exc:
             print(f"KB fetch failed: {exc}", file=sys.stderr)
@@ -262,6 +280,8 @@ def main(argv: list[str] | None = None) -> int:
             "reason": "pulse session evidence carries no accepted server args; layout ranking needs the Recipe KB",
         }
         report["evidence_source"] = "pulse:/v1/session-breakdowns"
+    if identity_counts:
+        _note_identity_coverage(report, identity_counts, cap=max(1, args.max_identities))
     report["fetch_errors"] = errors
     report["kb_store_url"] = store_url
     text = json.dumps(report, indent=2, sort_keys=True)
