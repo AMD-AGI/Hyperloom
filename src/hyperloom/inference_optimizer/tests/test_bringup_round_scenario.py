@@ -443,9 +443,7 @@ async def _seed_failed_rounds(rounds: RoundStore, n: int) -> None:
         holder = f"holder-{i:03d}"
         now = float(i)
         await rounds.open(rid, holder_task_id=holder, lease_sec=3600.0, now_unix=now, request_id=rid)
-        await rounds.settle(
-            rid, holder_task_id=holder, fence=1, outcome=FAILED, now_unix=now + 1.0, request_id=f"settle-{rid}"
-        )
+        await rounds.settle(await rounds.get(rid), outcome=FAILED, now_unix=now + 1.0, request_id=f"settle-{rid}")
 
 
 @pytest.mark.asyncio
