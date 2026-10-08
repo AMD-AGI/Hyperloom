@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import os
+from math import isfinite
 from pathlib import Path
 from typing import NoReturn
 
@@ -103,6 +104,33 @@ def _positive_int_arg(value: str) -> int:
         raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}") from exc
     if parsed <= 0:
         raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}")
+    return parsed
+
+
+def _positive_ms_arg(value: str) -> float:
+    """argparse type for a millisecond ceiling.
+
+    The gate this feeds fails closed, so its switch must not fail open: an
+    unusable value has to stop the launch rather than resolve to "no budget" and
+    leave the operator believing an SLA is enforced.
+    """
+    try:
+        parsed = float(str(value).strip())
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(f"expected a positive number of milliseconds, got {value!r}") from exc
+    if not isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError(f"expected a positive number of milliseconds, got {value!r}")
+    return parsed
+
+
+def _positive_watts_arg(value: str) -> float:
+    """argparse type for a power in watts; an unusable value stops the launch rather than skipping the check."""
+    try:
+        parsed = float(str(value).strip())
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(f"expected a positive number of watts, got {value!r}") from exc
+    if not isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError(f"expected a positive number of watts, got {value!r}")
     return parsed
 
 
@@ -253,7 +281,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Inference framework to benchmark / optimize. Resolution order: "
         "--framework > sglang (default). Selection is "
         "session-wide; mixing frameworks in a single session is not "
-        "supported. NOTE: --framework atom is single-node-only "
+        "supported: --resume-from uses the framework the session was "
+        "created with, and refuses a --framework that differs. NOTE: --framework atom is single-node-only "
         "(``--nodes>=2`` fails fast); profile / roofline, "
         "kernel-agent, and framework-agent are all enabled on atom. "
         "The auto-tighten guard only enforces ``--nodes 1``. "
@@ -559,6 +588,41 @@ def _build_parser() -> argparse.ArgumentParser:
             "independently of --target-gain / --target-tput / --target-baseline-dir."
         ),
     )
+    # Outside the group as well, and for a stronger reason than --target-roofline: this is a constraint rather than
+    # an objective. It does not say when to stop, it says which winners are admissible, so it composes with whichever
+    # target is in use instead of competing with one.
+    opt.add_argument(
+        "--max-latency-ms",
+        type=_positive_ms_arg,
+        default=None,
+        help=(
+            "Scriptable frameworks (xdit, custom) only. Refuse any KEEP whose mean "
+            "end-to-end latency exceeds N ms. Off by default. A candidate that "
+            "reported no end-to-end latency is refused too, since an unmeasured "
+            "constraint is not a satisfied one."
+        ),
+    )
+    opt.add_argument(
+        "--gpu-power-cap-w",
+        type=_positive_watts_arg,
+        default=None,
+        help=(
+            "Declare the power cap (W) the GPUs are already set to. An assertion, not a request: the optimizer "
+            "never changes power settings, which are privileged and card-wide. Set it with "
+            "`amd-smi set --power-cap` before launch; the session refuses to start if any card it uses is at a "
+            "different cap. The observed cap is recorded whether or not this flag is passed."
+        ),
+    )
+    opt.add_argument(
+        "--gpu-perf-level",
+        type=str,
+        default=None,
+        metavar="LEVEL",
+        help=(
+            "Declare the DPM performance level the GPUs are already set to (e.g. auto, high, determinism). "
+            "An assertion like --gpu-power-cap-w: set it with `amd-smi set --perf-level` before launch."
+        ),
+    )
     opt.add_argument(
         "--resume-from",
         type=str,
@@ -603,7 +667,6 @@ def _build_parser() -> argparse.ArgumentParser:
             "is injected into prompts but drives no gating."
         ),
     )
-    opt.add_argument("--target-summary", type=str, default=None, help="Free-text goal summary surfaced in prompts")
     opt.add_argument(
         "--compare-against-gpu",
         type=str,
@@ -798,26 +861,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--warm-replay-min-confidence",
         dest="warm_replay_min_confidence",
         type=float,
-        default=0.7,
+        default=None,
         help="Minimum ``warm_start_recipe.confidence`` required to "
         "trigger the auto-replay. Default 0.7 means an ``exact`` "
         "seven-tuple hit (conf 1.0) and a server-returned ``relative`` "
         "match (conf 0.7) both fire, while a ``miss`` (conf 0.0) "
         "does not. Raise it above 0.7 to require an exact hit "
         "before spending a verify on the warm config.",
-    )
-    opt.add_argument(
-        "--warm-replay-min-reproduce-pct",
-        dest="warm_replay_min_reproduce_pct",
-        type=float,
-        default=0.8,
-        help="Minimum fraction of the recipe's recorded gain we need "
-        "to reproduce to count as ``status=reproduced`` and push "
-        "the warm config onto the optimization stack. Default "
-        "0.8 — a recipe claiming +25%% counts if we measure "
-        "+20%% or more. Below the threshold we record "
-        "``status=drift`` and continue with the regular optimisation "
-        "flow without inheriting the warm config.",
     )
     # PR Monitor REST + MCP are co-hosted by KB Store and derived from $KB_STORE_URL.
     opt.add_argument(
@@ -1016,17 +1066,18 @@ def _build_parser() -> argparse.ArgumentParser:
         "directions. Advisory only — never gates Objective or scoring. "
         "Default on; pass ``--no-target-advisory`` to disable.",
     )
-    # Post-optimization concurrency sweep (on by default): a baseline-vs-optimized Magpie grid across CONC values (see
-    # orchestrator/conc_sweep.py).
+    # Post-optimization concurrency sweep: a baseline-vs-optimized Magpie grid across CONC values (see
+    # orchestrator/conc_sweep.py). Defaults to None so bootstrap can pick by benchmark mode.
     opt.add_argument(
         "--enable-conc-sweep",
         dest="enable_conc_sweep",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=None,
         help="Run a post-optimization concurrency sweep (baseline vs "
         "current_best across CONC) and write "
         "reports/conc_sweep_summary.json + conc_sweep_raw.csv. "
-        "On by default; disable with --no-enable-conc-sweep.",
+        "On by default, off under AgentX (each rung is a 3600s window); "
+        "force either way with --enable-conc-sweep / --no-enable-conc-sweep.",
     )
     opt.add_argument(
         "--conc-sweep-concs",
@@ -1092,30 +1143,6 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Config-arm plateau: number of trailing rounds the gain sum is computed over. Default 5.",
     )
-    opt.add_argument(
-        "--plateau-kernel-revert-streak",
-        dest="plateau_kernel_revert_streak",
-        type=int,
-        default=None,
-        help="KERNEL plateau: consecutive REVERT / NEEDS_REVIEW integrate "
-        "attempts to count as plateau (one half of the OR). "
-        "Default 3.",
-    )
-    opt.add_argument(
-        "--plateau-kernel-keep-gain",
-        dest="plateau_kernel_keep_gain",
-        type=float,
-        default=None,
-        help="KERNEL plateau: max cumulative KEEP-gain (%%) across the "
-        "lookback window below which the OR fires. Default 0.5.",
-    )
-    opt.add_argument(
-        "--plateau-kernel-lookback",
-        dest="plateau_kernel_lookback",
-        type=int,
-        default=None,
-        help="KERNEL plateau: number of trailing integrate attempts the gain sum is computed over. Default 5.",
-    )
     # phase budget percentages: each phase claims a fraction of the wall-clock budget (caps; may exit earlier).
     opt.add_argument(
         "--max-minutes-prelude-pct",
@@ -1123,7 +1150,8 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="phase_budget_prelude_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for PRELUDE as a fraction of --max-hours. Default: 0.03.",
+        help="Wall-clock budget cap for PRELUDE as a fraction of --max-hours. Default: 0.03. "
+        "On --resume-from, any --*-pct flag resets every phase share to its default plus the given overrides; with none, the prior budget is kept.",
     )
     opt.add_argument(
         "--max-minutes-framework-pct",
@@ -1135,7 +1163,8 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="phase_budget_framework_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for the OPTIMIZE (FRAMEWORK_AGENT) phase. Default: 0.38.",
+        help="Wall-clock budget cap for the OPTIMIZE (FRAMEWORK_AGENT) phase. Default: 0.38. "
+        "On --resume-from, any --*-pct flag resets every phase share to its default plus the given overrides; with none, the prior budget is kept.",
     )
     opt.add_argument(
         "--max-minutes-kernel-pct",
@@ -1143,7 +1172,8 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="phase_budget_kernel_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for KERNEL_AGENT. Default: 0.47.",
+        help="Wall-clock budget cap for KERNEL_AGENT. Default: 0.47. "
+        "On --resume-from, any --*-pct flag resets every phase share to its default plus the given overrides; with none, the prior budget is kept.",
     )
     opt.add_argument(
         "--max-minutes-sweep-pct",
@@ -1151,7 +1181,8 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="phase_budget_sweep_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for SWEEP. Default: 0.05.",
+        help="Wall-clock budget cap for SWEEP. Default: 0.05. "
+        "On --resume-from, any --*-pct flag resets every phase share to its default plus the given overrides; with none, the prior budget is kept.",
     )
     opt.add_argument(
         "--max-minutes-close-pct",
@@ -1159,7 +1190,8 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="phase_budget_close_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for CLOSE. Default: 0.02.",
+        help="Wall-clock budget cap for CLOSE. Default: 0.02. "
+        "On --resume-from, any --*-pct flag resets every phase share to its default plus the given overrides; with none, the prior budget is kept.",
     )
 
     rec = sub.add_parser(

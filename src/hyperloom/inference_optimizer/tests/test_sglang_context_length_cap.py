@@ -386,7 +386,7 @@ def test_materialize_vllm_no_context_length(tmp_path):
 def _default_non_amd_gpu(monkeypatch: pytest.MonkeyPatch):
     """Default the dual-chunk backend resolver to the non-AMD path so the upstream ``dual_chunk_flash_attn`` assertions hold without real GPU hardware."""
     monkeypatch.setattr(
-        "hyperloom.inference_optimizer.cli.model_gate._autodetect_gpu_type",
+        "hyperloom.inference_optimizer.gpu_types._autodetect_gpu_type",
         lambda: None,
     )
     monkeypatch.delenv("GPU_TYPE", raising=False)
@@ -424,7 +424,7 @@ def test_dual_chunk_injects_via_nested_text_config(tmp_path):
 def test_dual_chunk_on_amd_returns_canonical_backend(tmp_path, monkeypatch):
     """AMD dual-chunk models are blocked by preflight; if inject still runs it should return the canonical backend (not triton which sglang rejects)."""
     monkeypatch.setattr(
-        "hyperloom.inference_optimizer.cli.model_gate._autodetect_gpu_type",
+        "hyperloom.inference_optimizer.gpu_types._autodetect_gpu_type",
         lambda: "mi300x",
     )
     model = _write_dual_chunk_model(tmp_path, dual_chunk=True)
@@ -448,7 +448,7 @@ def test_dual_chunk_uses_explicit_gpu_type_before_autodetect(tmp_path):
 def test_dual_chunk_backend_env_override(tmp_path, monkeypatch):
     """HYPERLOOM_DUAL_CHUNK_BACKEND wins over hardware detection."""
     monkeypatch.setattr(
-        "hyperloom.inference_optimizer.cli.model_gate._autodetect_gpu_type",
+        "hyperloom.inference_optimizer.gpu_types._autodetect_gpu_type",
         lambda: "mi300x",
     )
     monkeypatch.setenv("HYPERLOOM_DUAL_CHUNK_BACKEND", "flashinfer")

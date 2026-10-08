@@ -13,9 +13,8 @@ from hyperloom.orchestrator.phases.machine_state import (
     _lever_attempts,
     _trailing_no_keep,
 )
-from hyperloom.orchestrator.phases.framework import FrameworkPhase
 
-from .test_framework_agent_authoring import _Stub
+from .test_framework_agent_authoring import _stub
 
 
 def _task(cand: str) -> SimpleNamespace:
@@ -40,10 +39,9 @@ _GATE_ERROR = (
 def test_dispatch_failure_is_not_recorded_as_authored_empty(tmp_path: Path):
     """A run that failed before delivering must not claim the specialist authored nothing."""
 
-    stub = _Stub(tmp_path, authoring=True)
+    stub = _stub(tmp_path)
 
-    FrameworkPhase._record_framework_agent_authoring_empty_outcome(  # type: ignore[arg-type]
-        stub,
+    stub.phase_framework._record_framework_agent_authoring_empty_outcome(
         task=_task("local_explore:0"),
         done_payload={},
         run_error=_GATE_ERROR,
@@ -59,10 +57,9 @@ def test_dispatch_failure_is_not_recorded_as_authored_empty(tmp_path: Path):
 def test_genuine_empty_deliverable_is_still_authored_empty(tmp_path: Path):
     """A specialist that ran and found nothing keeps its existing status."""
 
-    stub = _Stub(tmp_path, authoring=True)
+    stub = _stub(tmp_path)
 
-    FrameworkPhase._record_framework_agent_authoring_empty_outcome(  # type: ignore[arg-type]
-        stub,
+    stub.phase_framework._record_framework_agent_authoring_empty_outcome(
         task=_task("local_explore:1"),
         done_payload={
             "patches_written": [],
@@ -78,10 +75,9 @@ def test_genuine_empty_deliverable_is_still_authored_empty(tmp_path: Path):
 def test_recovery_path_also_separates_a_failed_run(tmp_path: Path):
     """The bus-replay path sees the error on the envelope, not in the result."""
 
-    stub = _Stub(tmp_path, authoring=True)
+    stub = _stub(tmp_path)
 
-    FrameworkPhase._record_framework_agent_authoring_empty_outcome(  # type: ignore[arg-type]
-        stub,
+    stub.phase_framework._record_framework_agent_authoring_empty_outcome(
         task=_task("local_explore:2"),
         # What a replayed delegated_result carries: no specialist_done at all.
         done_payload={},
@@ -94,10 +90,9 @@ def test_recovery_path_also_separates_a_failed_run(tmp_path: Path):
 def test_dispatch_failure_leaves_no_attempt_for_the_plateau_to_count(tmp_path: Path):
     """The dispatch row settles on the progress ledger; the plateau reads attempts, and finds none."""
 
-    stub = _Stub(tmp_path, authoring=True)
+    stub = _stub(tmp_path)
 
-    FrameworkPhase._record_framework_agent_authoring_empty_outcome(  # type: ignore[arg-type]
-        stub,
+    stub.phase_framework._record_framework_agent_authoring_empty_outcome(
         task=_task("local_explore:3"),
         done_payload={},
         run_error=_GATE_ERROR,

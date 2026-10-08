@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+import dataclasses
+import json
+
 import pytest
 
 from hyperloom.common.failure_signature import (
@@ -263,21 +266,41 @@ def test_offending_file_prefers_frame_near_primary_hit() -> None:
     assert sig.offending_file == "/opt/vllm/loader.py"
 
 
+# --- wire round-trip -------------------------------------------------------
+
+
+def test_signature_survives_the_task_table() -> None:
+    """A classified verdict crosses task params intact, so no downstream reader re-classifies a log."""
+    sig = dataclasses.replace(
+        classify_failure(
+            'Traceback (most recent call last):\n  File "/opt/vllm/registry.py", line 3, in resolve\n'
+            "ValueError: Model architecture 'Glm5ForCausalLM' is not supported"
+        ),
+        secondary_kinds=(IMPORT_ERROR,),
+    )
+    assert FailureSignature.from_dict(json.loads(json.dumps(sig.to_dict()))) == sig
+
+
+def test_a_payload_without_a_verdict_is_rejected() -> None:
+    """An absent verdict is not an unknown one; rendering it as unknown is what the round was dispatched past."""
+    with pytest.raises(TypeError, match="'kind'"):
+        FailureSignature.from_dict({})
+
+
 # --- EnablementRequest -----------------------------------------------------
 
 
 def test_request_from_dict_minimal() -> None:
-    """Minimal payload parses and exposes a lazily-classified signature."""
+    """Minimal payload parses; the framework is normalized to lower case."""
     req = EnablementRequest.from_dict(
         {
             "framework": "SGLang",
             "model": "zai-org/GLM-5",
             "repo_url": "https://github.com/sgl-project/sglang.git",
-            "launch_log": "ValueError: Model architecture 'Glm5ForCausalLM' is not supported",
         }
     )
-    assert req.framework == "sglang"  # normalized lower
-    assert req.signature.kind == MISSING_MODEL_ARCH
+    assert req.framework == "sglang"
+    assert req.model == "zai-org/GLM-5"
 
 
 @pytest.mark.parametrize("missing", ["framework", "model", "repo_url"])

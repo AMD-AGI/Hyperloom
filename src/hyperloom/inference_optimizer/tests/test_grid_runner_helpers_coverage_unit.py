@@ -38,7 +38,6 @@ def test_validate_magpie_python_override_requires_python(tmp_path):
 # -- apply_compatibility_filter -------------------------------------------
 def test_compatibility_filter_drops_on_model_class(monkeypatch) -> None:
     monkeypatch.setattr(vf, "_detect_model_class", lambda mp: (False, False))
-    monkeypatch.setattr(vf, "_probe_server_help_text", lambda fw: "")
     grid = [_variant("mla", "--enable-flashinfer-mla"), _variant("plain", "")]
     kept, dropped = gr.apply_compatibility_filter(grid, framework="sglang", model_path="meta-llama-3-8b")
     assert [v.name for v in kept] == ["plain"]
@@ -47,17 +46,15 @@ def test_compatibility_filter_drops_on_model_class(monkeypatch) -> None:
     assert "MLA" in dropped[0]["reason"]
 
 
-def test_compatibility_filter_drops_on_missing_help_flag(monkeypatch) -> None:
+def test_compatibility_filter_keeps_a_flag_the_model_class_supports(monkeypatch) -> None:
+    # Whether the installed server accepts the flag is left to its own argparse at launch.
     monkeypatch.setattr(vf, "_detect_model_class", lambda mp: (True, True))
-    monkeypatch.setattr(vf, "_probe_server_help_text", lambda fw: "--some-other-flag")
     grid = [_variant("moe", "--enable-ep-moe")]
     kept, dropped = gr.apply_compatibility_filter(grid, framework="sglang", model_path="deepseek-moe")
-    assert kept == []
-    assert "too old" in dropped[0]["reason"]
+    assert [v.name for v in kept] == ["moe"] and dropped == []
 
 
-def test_compatibility_filter_no_model_path_assumes_compatible(monkeypatch) -> None:
-    monkeypatch.setattr(vf, "_probe_server_help_text", lambda fw: "--enable-ep-moe")
+def test_compatibility_filter_no_model_path_assumes_compatible() -> None:
     grid = [_variant("moe", "--enable-ep-moe")]
     kept, dropped = gr.apply_compatibility_filter(grid, framework="sglang", model_path="")
     assert [v.name for v in kept] == ["moe"] and dropped == []

@@ -8,7 +8,6 @@ from __future__ import annotations
 from copy import deepcopy
 
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -17,9 +16,9 @@ from hyperloom.orchestrator.phases import machine_state as phase_state
 from hyperloom.inference_optimizer.breakdown.stop_reasons import is_valid_stop_reason
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.policy.gate import (
-    CORE_STATE_FIELDS,
     PolicyGate,
 )
+from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 
@@ -117,27 +116,31 @@ def test_normalize_budget_pct_falls_back_to_defaults():
     assert "BOGUS" not in out
 
 
-def test_exit_normal_prelude_triggers_on_baseline_tput():
-    state = SimpleNamespace(baseline_tput=0.0)
-    assert phase_state.exit_normal_prelude(state) is None
+def test_prelude_exits_on_baseline_tput():
+    state = SharedState(baseline_tput=0.0, phase="PRELUDE", phase_budget_pct={}, phase_started_unix=0.0, max_minutes=0)
+    assert phase_state.compute_next_phase(state) is None
     state.baseline_tput = 1234.5
-    out = phase_state.exit_normal_prelude(state)
+    out = phase_state.compute_next_phase(state)
     assert out is not None
-    reason, evidence = out
+    _next_phase, reason, evidence = out
     assert reason == "prelude_done"
-    assert evidence["baseline_tput"] == 1234.5
+    assert evidence["predicate_inputs"]["baseline"]["tput"] == 1234.5
 
 
-def test_exit_normal_prelude_blocked_while_warm_replay_in_flight():
+def test_prelude_blocked_while_warm_replay_in_flight():
     """PRELUDE must not advance to FRAMEWORK until warm-replay settles."""
-    state = SimpleNamespace(
+    state = SharedState(
+        phase="PRELUDE",
+        phase_budget_pct={},
+        phase_started_unix=0.0,
+        max_minutes=0,
         baseline_tput=1234.5,
         warm_replay_outcome={"status": "in_flight", "replay_task_id": "abc"},
     )
-    assert phase_state.exit_normal_prelude(state) is None
+    assert phase_state.compute_next_phase(state) is None
     state.warm_replay_outcome = {"status": "failed"}
-    out = phase_state.exit_normal_prelude(state)
-    assert out is not None and out[0] == "prelude_done"
+    out = phase_state.compute_next_phase(state)
+    assert out is not None and out[1] == "prelude_done"
 
 
 def _prelude_state(
@@ -150,22 +153,24 @@ def _prelude_state(
     baseline_post_ready_runtime_sec: float = 0.0,
     baseline_warm_runtime_sec: float = 0.0,
     baseline_measure_round_dropped: bool = False,
-    baseline_double_run: bool = False,
-) -> SimpleNamespace:
+) -> SharedState:
     """A PRELUDE-phase state with an explicit clock, as the budget policy reads it."""
-    return SimpleNamespace(
+    state = SharedState(
         phase="PRELUDE",
         max_minutes=max_minutes,
         phase_elapsed_totals={"PRELUDE": spent_sec},
         phase_started_unix=0.0,
+        phase_budget_pct={},
         baseline_tput=baseline_tput,
         baseline_runtime_sec=baseline_runtime_sec,
         baseline_post_ready_runtime_sec=baseline_post_ready_runtime_sec,
         baseline_warm_runtime_sec=baseline_warm_runtime_sec,
         baseline_measure_round_dropped=baseline_measure_round_dropped,
-        baseline_double_run=baseline_double_run,
-        session_budget_usable_sec=lambda: usable_sec,
+        resumed_ts="",
+        pending_escalate_hint="",
     )
+    state.session_budget_usable_sec = lambda: usable_sec
+    return state
 
 
 def test_prelude_can_afford_an_arm_the_budget_still_covers():
@@ -226,15 +231,17 @@ def test_a_landed_baseline_outranks_the_exhausted_clock():
 def test_prelude_exit_states_whether_one_optimization_round_still_fits():
     """The plain statement neither field session ever got: preparation spent the run."""
     state = _prelude_state(baseline_tput=1074.7, baseline_runtime_sec=2705.7, usable_sec=2796.0)
-    out = phase_state.exit_normal_prelude(state)
+    out = phase_state.compute_next_phase(state)
     assert out is not None
-    evidence = out[1]
+    _next, reason, evidence = out
+    assert reason == "prelude_done"
     assert evidence["fits_one_optimization_round"] is True
     assert evidence["affordable_rounds"] == pytest.approx(1.03, abs=0.01)
 
     state.session_budget_usable_sec = lambda: 1200.0
-    evidence = phase_state.exit_normal_prelude(state)[1]
-    assert evidence["fits_one_optimization_round"] is False
+    out2 = phase_state.compute_next_phase(state)
+    assert out2 is not None
+    assert out2[2]["fits_one_optimization_round"] is False
 
 
 # The workload the cold-anchor cases below are priced against: a 900s cold round whose last 550s was the benchmark, so
@@ -244,7 +251,6 @@ _COLD_ANCHOR_WORKLOAD = {
     "baseline_runtime_sec": 900.0,
     "baseline_post_ready_runtime_sec": 550.0,
     "baseline_warm_runtime_sec": 400.0,
-    "baseline_double_run": True,
 }
 _RETRY_COST_SEC = 1300.0 + 750.0
 
@@ -259,10 +265,10 @@ class TestAColdAnchorIsNotAFinishedPrelude:
             usable_sec=_RETRY_COST_SEC + 60.0,
         )
 
-        assert phase_state.exit_normal_prelude(state) is None
+        assert phase_state.compute_next_phase(state) is None
 
         state.baseline_measure_round_dropped = False
-        assert phase_state.exit_normal_prelude(state)[0] == "prelude_done"
+        assert phase_state.compute_next_phase(state)[1] == "prelude_done"
 
     def test_a_session_that_cannot_afford_another_baseline_closes(self):
         """2050s buys a round and a variant to read against it; 1200s buys neither."""
@@ -290,7 +296,6 @@ class TestAColdAnchorIsNotAFinishedPrelude:
             usable_sec=_RETRY_COST_SEC + 60.0,
         )
 
-        assert phase_state.exit_cold_anchor_prelude(state) is None
         assert phase_state.compute_next_phase(state, kernel_enabled=True) is None
 
     def test_a_single_round_baseline_is_not_mistaken_for_a_dropped_one(self):
@@ -302,8 +307,8 @@ class TestAColdAnchorIsNotAFinishedPrelude:
             usable_sec=1200.0,
         )
 
-        assert phase_state.exit_cold_anchor_prelude(state) is None
-        assert phase_state.exit_normal_prelude(state)[0] == "prelude_done"
+        out = phase_state.compute_next_phase(state)
+        assert out is not None and out[1] == "prelude_done"
 
     def test_a_session_with_no_clock_is_not_closed_for_a_budget_it_does_not_have(self):
         """An unbounded run cannot fail an affordability test, so it retries."""
@@ -313,35 +318,41 @@ class TestAColdAnchorIsNotAFinishedPrelude:
             usable_sec=None,
         )
 
-        assert phase_state.exit_cold_anchor_prelude(state) is None
+        assert phase_state.compute_next_phase(state) is None
 
 
-def test_exit_terminal_prelude_after_three_baseline_failures():
-    state = SimpleNamespace(baseline_failure_streak=2)
-    assert phase_state.exit_terminal_prelude(state) is None
+def test_prelude_baseline_failed_after_three_failures():
+    state = SharedState(
+        phase="PRELUDE", phase_budget_pct={}, phase_started_unix=0.0, max_minutes=0, baseline_failure_streak=2
+    )
+    assert phase_state.compute_next_phase(state) is None
     state.baseline_failure_streak = 3
-    out = phase_state.exit_terminal_prelude(state)
-    assert out is not None and out[0] == "prelude_baseline_failed"
+    out = phase_state.compute_next_phase(state)
+    assert out is not None and out[1] == "prelude_baseline_failed"
 
 
-def test_exit_normal_optimize_uses_budget_exhaustion():
+def test_optimize_phase_budget_exhaustion_advances():
     # Elapsed exceeds the phase budget.
-    state = SimpleNamespace(
+    from hyperloom.orchestrator.phases.machine_state import normalize_budget_pct
+
+    state = SharedState(
         phase=phase_state.PHASE_FRAMEWORK_AGENT,
         phase_started_unix=1.0,
         max_minutes=10,  # 600s total; 60% explore budget = 360s
-        phase_budget_pct={},
+        phase_budget_pct=normalize_budget_pct(None),
         params_no_promote_streak=0,
         explore_search={},
         optimization_stack=[{"action": "explore"}],
-        _now_unix=lambda: 1_000_000.0,
+        resumed_ts="",
+        pending_escalate_hint="",
     )
-    out = phase_state.exit_normal_optimize(state)
-    assert out is not None and out[0] == "optimize_phase_budget_exhausted"
+    state._now_unix = lambda: 1_000_000.0
+    out = phase_state.compute_next_phase(state)
+    assert out is not None and out[1] == "optimize_phase_budget_exhausted"
 
 
 def test_compute_next_phase_no_kernel_skips_kernel_phase():
-    state = SimpleNamespace(
+    state = SharedState(
         phase=phase_state.PHASE_FRAMEWORK_AGENT,
         phase_started_unix=0.0,
         max_minutes=0,
@@ -362,9 +373,9 @@ def test_compute_next_phase_no_kernel_skips_kernel_phase():
     assert evidence.get("passed_through_reason") == "optimize_no_more_leverage"
 
 
-def test_exit_normal_optimize_skip_to_kernel_requires_a_tested_round():
+def test_skip_to_kernel_requires_a_tested_round():
     """A skip_to_kernel hint must not end EXPLORE with zero validated work."""
-    state = SimpleNamespace(
+    state = SharedState(
         phase=phase_state.PHASE_FRAMEWORK_AGENT,
         phase_started_unix=1_000_000.0,
         max_minutes=0,
@@ -374,14 +385,15 @@ def test_exit_normal_optimize_skip_to_kernel_requires_a_tested_round():
         specialist_rounds=[],
         macro_cycle=0,
         optimization_stack=[{"action": "explore"}],
-        _now_unix=lambda: 1_000_000.0,
+        resumed_ts="",
     )
-    out = phase_state.exit_normal_optimize(state)
+    state._now_unix = lambda: 1_000_000.0
+    out = phase_state.compute_next_phase(state)
     assert out is None
 
 
-def test_exit_normal_optimize_skip_to_kernel_fires_once_a_round_ran():
-    state = SimpleNamespace(
+def test_skip_to_kernel_fires_once_a_round_ran():
+    state = SharedState(
         phase=phase_state.PHASE_FRAMEWORK_AGENT,
         phase_started_unix=1_000_000.0,
         max_minutes=0,
@@ -391,17 +403,18 @@ def test_exit_normal_optimize_skip_to_kernel_fires_once_a_round_ran():
         specialist_rounds=[{"proposals_total": 1, "proposals_kept": 0}],
         macro_cycle=0,
         optimization_stack=[{"action": "explore"}],
-        _now_unix=lambda: 1_000_000.0,
+        resumed_ts="",
     )
-    out = phase_state.exit_normal_optimize(state)
+    state._now_unix = lambda: 1_000_000.0
+    out = phase_state.compute_next_phase(state)
     assert out is not None
-    reason, evidence = out
+    _next, reason, evidence = out
     assert reason == "optimize_no_more_leverage"
     assert evidence.get("hint") == "skip_to_kernel"
 
 
 def test_compute_next_phase_terminal_overrides_phase():
-    state = SimpleNamespace(
+    state = SharedState(
         phase=phase_state.PHASE_FRAMEWORK_AGENT,
         phase_started_unix=0.0,
         max_minutes=0,
@@ -420,7 +433,7 @@ def test_compute_next_phase_terminal_overrides_phase():
 class TestAMetTargetDoesNotOutrankTheGuards:
     """The forward jump to SWEEP runs after the terminal checks, never before."""
 
-    def _state(self, phase: str, **kw) -> SimpleNamespace:
+    def _state(self, phase: str, **kw) -> SharedState:
         base = dict(
             phase=phase,
             phase_started_unix=0.0,
@@ -432,9 +445,14 @@ class TestAMetTargetDoesNotOutrankTheGuards:
             params_no_promote_streak=0,
             explore_search={},
             optimization_stack=[],
+            resumed_ts="",
+            pending_escalate_hint="",
+            kernel_optimizer="geak",
+            geak_result={},
+            kernel_rewrite_controller_result={},
         )
         base.update(kw)
-        return SimpleNamespace(**base)
+        return SharedState(**base)
 
     def test_a_coordinator_stop_reason_still_wins(self):
         out = phase_state.compute_next_phase(
@@ -466,11 +484,10 @@ class TestAMetTargetDoesNotOutrankTheGuards:
 
 def test_a_met_target_renames_a_budget_limited_sweep_exit():
     """``sweep_budget_exhausted`` is outside STOP_REASON_VOCAB, so CLOSE would recover it as ``time_exhausted`` -- a met target reported as a timeout."""
-    state = SimpleNamespace(
+    state = SharedState(
         phase=phase_state.PHASE_SWEEP,
         phase_started_unix=1.0,
         max_minutes=60,
-        deadline_unix=2.0,
         phase_budget_pct={phase_state.PHASE_SWEEP: 0.0001},
         stop_reason="",
         closing_phase=False,
@@ -484,10 +501,8 @@ def test_a_met_target_renames_a_budget_limited_sweep_exit():
         cumulative_gain_validated=0.0,
         gain_at_cycle_start=0.0,
         no_gain_cycle_streak=0,
+        resumed_ts="",
     )
-    raw = phase_state.exit_normal_sweep(state)
-    assert raw is not None and raw[0] in ("sweep_budget_exhausted", "sweep_budget_cap")
-
     out = phase_state.compute_next_phase(state, kernel_enabled=True)
     assert out is not None
     assert out[0] == phase_state.PHASE_CLOSE and out[1] == "target_reached"
@@ -581,18 +596,6 @@ def test_langfuse_status_includes_explore_runtime_and_kb_hit():
     assert "session_elapsed_s" in summary
 
 
-def test_core_state_fields_includes_phase_fields():
-    for f in (
-        "phase",
-        "phase_started_ts",
-        "phase_started_unix",
-        "phase_history",
-        "phase_budget_pct",
-        "phase_elapsed_totals",
-    ):
-        assert f in CORE_STATE_FIELDS, f
-
-
 def _make_role_registry():
     from hyperloom.orchestrator.roles.agent_role import default_role_registry
 
@@ -660,10 +663,117 @@ def test_a_session_recorded_at_an_unknown_phase_refuses_to_resume(coordinator_wi
     c.shared_state.phase = "EXPLORE"
 
     with pytest.raises(RuntimeError) as excinfo:
-        c._ensure_phase_initialised()
+        c.phase_machine.ensure_phase_initialised(None)
 
     assert "EXPLORE" in str(excinfo.value)
     assert c.shared_state.phase == "EXPLORE"
+
+
+_NO_KERNEL_CYCLE_SEC = 600 * 60.0
+# Low enough that one extend hint stays under the bump cap after the KERNEL share is redistributed.
+_NO_KERNEL_CLI_BUDGET_PCT = {phase_state.PHASE_FRAMEWORK_AGENT: 0.2}
+
+
+@pytest.fixture
+def no_kernel_coordinator(session_dir):
+    """A real Coordinator on an unbounded ``--no-kernel`` session, so FRAMEWORK owns a flat share of the cycle."""
+    from hyperloom.orchestrator.roles import MockBackend, MockCriticBackend, ScriptedPlan
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
+
+    SharedState(
+        kernel_enabled=False,
+        max_minutes=0,
+        cycle_minutes=_NO_KERNEL_CYCLE_SEC / 60.0,
+        baseline_tput=100.0,
+    ).save(session_dir)
+    silent = ScriptedPlan(
+        turns=[],
+        default_intent=Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"}),
+    )
+    return Coordinator(
+        session_dir,
+        backends={"orchestration": MockBackend(silent, name="orch"), "critic": MockCriticBackend()},
+        phase_budget_pct=dict(_NO_KERNEL_CLI_BUDGET_PCT),
+    )
+
+
+def _enter_framework_for(c, elapsed_sec: float) -> None:
+    import time
+
+    phase_state.record_phase_transition(
+        c.shared_state,
+        to_phase=phase_state.PHASE_FRAMEWORK_AGENT,
+        reason="prelude_done",
+        evidence={},
+        ts_unix=time.time() - elapsed_sec,
+    )
+
+
+async def _phase_block(c) -> str:
+    prompt = await c.conversation.compose_prompt("orchestration")
+    return prompt.split("=== Phase ===", 1)[1]
+
+
+@pytest.mark.asyncio
+async def test_no_kernel_framework_share_is_the_same_for_machine_dispatch_and_prompt(no_kernel_coordinator):
+    c = no_kernel_coordinator
+    unredistributed = _NO_KERNEL_CLI_BUDGET_PCT[phase_state.PHASE_FRAMEWORK_AGENT]
+    share = phase_state.redistribute_budget_pct(
+        phase_state.normalize_budget_pct(_NO_KERNEL_CLI_BUDGET_PCT), kernel_enabled=False
+    )[phase_state.PHASE_FRAMEWORK_AGENT]
+    assert share > unredistributed
+    assert c.shared_state.phase_budget_pct[phase_state.PHASE_FRAMEWORK_AGENT] == pytest.approx(share)
+    try:
+        # Past the unredistributed share's allotment, well inside the redistributed one.
+        _enter_framework_for(c, _NO_KERNEL_CYCLE_SEC * (unredistributed + share) / 2)
+        assert c.dispatcher.dispatch_paused_for_phase_budget() is False
+        block = await _phase_block(c)
+        assert f"pct={share:.2f}" in block
+        assert "remaining_sec=0 " not in block
+        await c.phase_machine.advance_phase_if_needed()
+        assert c.shared_state.phase == phase_state.PHASE_FRAMEWORK_AGENT
+
+        _enter_framework_for(c, _NO_KERNEL_CYCLE_SEC * share + 60.0)
+        assert c.dispatcher.dispatch_paused_for_phase_budget() is True
+        assert "remaining_sec=0" in await _phase_block(c)
+        await c.phase_machine.advance_phase_if_needed()
+        framework_exit = c.shared_state.phase_history[-1]
+        assert framework_exit["from_phase"] == phase_state.PHASE_FRAMEWORK_AGENT
+        assert framework_exit["evidence"]["passed_through_reason"] == "optimize_phase_budget_exhausted"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_extend_explore_budget_moves_the_share_every_reader_uses(no_kernel_coordinator):
+    from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_EXTEND_EXPLORE_BUDGET
+
+    c = no_kernel_coordinator
+    share = c.shared_state.phase_budget_pct[phase_state.PHASE_FRAMEWORK_AGENT]
+    bumped = share + phase_state.ESCALATE_HINT_BUDGET_BUMP_DELTA
+    try:
+        _enter_framework_for(c, _NO_KERNEL_CYCLE_SEC * (share + bumped) / 2)
+        assert c.dispatcher.dispatch_paused_for_phase_budget() is True
+        assert "remaining_sec=0" in await _phase_block(c)
+
+        await c.router._handle_escalate_strategy_change(
+            "orchestration",
+            Intent(
+                type=IntentType.ESCALATE_STRATEGY_CHANGE,
+                payload={"summary": "s", "next_action_hint": ESCALATE_HINT_EXTEND_EXPLORE_BUDGET},
+            ),
+        )
+
+        assert c.shared_state.phase_budget_pct[phase_state.PHASE_FRAMEWORK_AGENT] == pytest.approx(bumped)
+        assert SharedState.load_or_init(c.session_dir).phase_budget_pct == c.shared_state.phase_budget_pct
+        assert c.dispatcher.dispatch_paused_for_phase_budget() is False
+        block = await _phase_block(c)
+        assert f"pct={bumped:.2f}" in block
+        assert "remaining_sec=0 " not in block
+        await c.phase_machine.advance_phase_if_needed()
+        assert c.shared_state.phase == phase_state.PHASE_FRAMEWORK_AGENT
+    finally:
+        await c.stop()
 
 
 @pytest.mark.asyncio
@@ -712,13 +822,18 @@ async def test_coordinator_phase_idempotent_within_same_tick(
 
 def _enablement_state(phase, *, tput=0.0, streak=1, validation_pending=False):
     """A state the enablement entry and exit branches read."""
-    return SimpleNamespace(
+    return SharedState(
         phase=phase,
         stop_reason="",
         closing_phase=False,
         baseline_tput=tput,
         baseline_failure_streak=streak,
-        enablement=SimpleNamespace(validation_pending=validation_pending),
+        enablement=EnablementRound(validation_pending=validation_pending),
+        phase_budget_pct={},
+        phase_started_unix=0.0,
+        max_minutes=0,
+        resumed_ts="",
+        pending_escalate_hint="",
     )
 
 

@@ -16,6 +16,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 
+from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.actions.executors._accuracy_gate import (
     accuracy_passed,
     parse_eval_results,
@@ -204,17 +205,6 @@ def _make_ctx(params: dict) -> SimpleNamespace:
     return SimpleNamespace(task=task, extra={})
 
 
-class _StopRecorder:
-    """Minimal SharedState stub capturing baseline stop requests."""
-
-    def __init__(self) -> None:
-        self.stop_reason = ""
-
-    def set_stop_reason(self, value, **_kwargs):
-        self.stop_reason = value
-        return value
-
-
 @pytest.fixture(autouse=True)
 def _isolate_leak_root(tmp_path_factory, monkeypatch):
     sandbox = tmp_path_factory.mktemp("isolated_leak_root")
@@ -313,7 +303,7 @@ def test_baseline_anchors_relative_result_dir_before_accuracy_parse(tmp_path):
         _write_lm_eval_output(result_root / "eval_processed")
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
-    shared_state = _StopRecorder()
+    shared_state = SharedState()
     executor = BaselineExecutor(
         magpie_python="/opt/venv/bin/python",
         default_config_path=base,
@@ -442,7 +432,7 @@ def test_agentx_baseline_grades_requests_with_run_eval_off(tmp_path, rate, expec
     config = yaml.safe_load(base.read_text(encoding="utf-8"))
     config["benchmark"]["envs"]["RUN_EVAL"] = False
     base.write_text(yaml.safe_dump(config), encoding="utf-8")
-    state = _StopRecorder()
+    state = SharedState()
     state.benchmark_mode = "agentx"
     state.enablement_mode = "eval"
     state.eval_disabled = False
@@ -477,7 +467,8 @@ def test_agentx_baseline_grades_requests_with_run_eval_off(tmp_path, rate, expec
     from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     coordinator = object.__new__(Coordinator)
-    assert coordinator._is_promotable_result("baseline", result) is (expected == 1.0)
+    coordinator.knowledge_plane = None
+    assert coordinator.writeback.is_promotable_result("baseline", result) is (expected == 1.0)
 
 
 def test_baseline_skips_accuracy_when_run_eval_disabled(tmp_path):

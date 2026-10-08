@@ -129,9 +129,9 @@ A docs-, CI- or test-only diff touches nothing under `src/`: write one
 
 Tiers come from [`references/tiers.md`](references/tiers.md): a table of the backbone files, and
 Q1–Q4 for anything not in it, including new files. Q1b is the one that bites — `Coordinator`
-resolves its 21 collaborators by string through a metaclass `__getattr__`, so a rename passes
-every import check, passes lint, passes collection, and fails only hours into a session when
-that phase is entered. Grep the string, not the symbol.
+holds 24 collaborators as explicit attributes, so a rename passes every import check, passes
+lint, passes collection, and fails only hours into a session when that phase is entered.
+Grep the class name, not just the symbol.
 
 ## Step 4 — Rule checklist
 
@@ -159,7 +159,7 @@ a diff that reads well hides its defects. One line per check into `$WORK/ai_diag
 "clean" alone is not an answer; a reason that names nothing in the diff is not one either.
 
 1. `wiring` — **both directions.** Every first-party import the diff adds resolves against the merge
-   base. Every name-resolved entry (`_COLLAB_MODULES`, `KERNEL_REQUEST_HANDLERS`,
+   base. Every name-resolved entry (`KERNEL_REQUEST_HANDLERS`,
    `ACTION_CATALOGUE`, action-surface names) has a module and class that exist. Then the inverse:
    an added identifier whose head-tree occurrence count is 1 is a writer with no reader; a removed
    caller whose helper survives is a reader with no writer. Both are blocking.

@@ -308,16 +308,39 @@ class _Tasks:
         return SimpleNamespace(task_id=f"t-{len(self.created)}", state="queued"), False
 
 
+class _GpuLanesStub:
+    def framework_authoring_lanes_ttl(self, _params, *, base_ttl_sec: int) -> tuple[list[str], int]:
+        return [], base_ttl_sec
+
+
+class _SpecialistDispatchStub:
+    async def warm_specialist_params(self, _params) -> None:
+        return None
+
+
 class _DispatchStub:
     """Drive ``_enqueue_framework_agent_local_explore_specialist`` in isolation."""
 
     def __init__(self, tmp_path: Path, framework: str, evidence: str = "") -> None:
         from hyperloom.orchestrator.phases.framework import FrameworkPhase
         from hyperloom.orchestrator.state.shared_state import SharedState
+        from types import SimpleNamespace
 
         self.session_dir = tmp_path
+        self._framework_timeline_recorder = None
         self.tasks = _Tasks()
         self.shared_state = SharedState(framework=framework, last_framework_rewrite_evidence=evidence)
+        # Build a minimal _coord stub so collaborator cross-calls resolve.
+        dispatcher_stub = SimpleNamespace(cycle_idem_suffix=lambda: "")
+        self._coord = SimpleNamespace(
+            shared_state=self.shared_state,
+            session_dir=tmp_path,
+            tasks=self.tasks,
+            knowledge_plane=None,
+            gpu_lanes=_GpuLanesStub(),
+            specialist_dispatch=_SpecialistDispatchStub(),
+            dispatcher=dispatcher_stub,
+        )
         for name in (
             "_authoring_specialist_domain",
             "_render_rewrite_evidence_for_prompt",
@@ -329,10 +352,6 @@ class _DispatchStub:
         # A staticmethod on the real class; binding it would pass ``self`` as the candidate row.
         self._framework_candidate_key = FrameworkPhase._framework_candidate_key
 
-    def _cycle_idem_suffix(self) -> str:
-        """Macro-cycle 0, as the Coordinator would report it."""
-        return ""
-
     def _render_framework_memory_for_prompt(self, _memory) -> str:
         """Suppress the working-memory block; not under test here."""
         return ""
@@ -340,18 +359,6 @@ class _DispatchStub:
     def _build_framework_working_memory(self) -> dict:
         """Suppress the working-memory block; not under test here."""
         return {}
-
-    def _framework_gpu_params(self) -> dict:
-        """Provide no GPU params; not under test here."""
-        return {}
-
-    def _framework_authoring_lanes_ttl(self, _params, *, base_ttl_sec: int) -> tuple[list[str], int]:
-        """Provide fixed lanes/TTL; lane accounting is not under test here."""
-        return [], base_ttl_sec
-
-    async def _warm_specialist_params(self, _params) -> None:
-        """Skip warm-start enrichment; not under test here."""
-        return None
 
 
 def _dispatch(tmp_path: Path, framework: str, evidence: str = "") -> dict[str, Any]:

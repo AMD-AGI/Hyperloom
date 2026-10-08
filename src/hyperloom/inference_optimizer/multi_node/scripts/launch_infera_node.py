@@ -464,14 +464,23 @@ def _ray_start(role: str, leader: str, env: dict[str, str]) -> None:
         ray_cmd = f"ray start --head --port {_RAY_GCS_PORT} --disable-usage-stats"
     else:
         ray_cmd = f"ray start --address={shlex.quote(leader)}:{_RAY_GCS_PORT} --disable-usage-stats"
-    cp = subprocess.run(
-        ["/bin/bash", "-lc", ray_cmd],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=180,
-    )
-    _log(f"ray start ({role}) rc={cp.returncode} {(cp.stderr or cp.stdout).strip()[:300]}")
+    # The daemons ``ray start`` leaves behind get their own session and no pipe of ours: in our process group they pin
+    # whatever tracks this launcher by group, and a pipe they inherit never reaches EOF for its reader.
+    with tempfile.TemporaryFile(mode="w+") as out, tempfile.TemporaryFile(mode="w+") as err:
+        cp = subprocess.run(
+            ["/bin/bash", "-lc", ray_cmd],
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=out,
+            stderr=err,
+            text=True,
+            timeout=180,
+            start_new_session=True,
+        )
+        out.seek(0)
+        err.seek(0)
+        stdout, stderr = out.read(), err.read()
+    _log(f"ray start ({role}) rc={cp.returncode} {(stderr or stdout).strip()[:300]}")
 
 
 def _wait_health(port: int, timeout_s: int, pid: int | None) -> bool:

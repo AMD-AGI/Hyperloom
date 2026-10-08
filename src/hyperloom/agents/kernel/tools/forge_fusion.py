@@ -129,6 +129,9 @@ def _build_cmd(args: dict[str, Any]) -> list[str]:
     _add_opt(cmd, args, "ab_osl", "--ab-osl")
     _add_opt(cmd, args, "framework_root", "--framework-root")
     _add_opt(cmd, args, "tp", "--tp")
+    # Attention is not always sharded by the serving --tp (DP-attention splits it),
+    # and forge-fuse stamps the harness group/head dims from this.
+    _add_opt(cmd, args, "attn_tp", "--attn-tp")
     _add_opt(cmd, args, "block_size", "--block-size")
     _add_opt(cmd, args, "max_model_len", "--max-model-len")
     # Nominate one independent sibling patch per confirmed pattern by default (the multi-patch contract).

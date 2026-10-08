@@ -111,11 +111,6 @@ def request_baseline_accuracy_stop(shared_state: Any, *, context: str, cause: st
     return True
 
 
-def require_framework_accuracy_default() -> bool:
-    """Default for the framework source-patch accuracy-KEEP gate."""
-    return env_flag("INFERENCE_OPTIMIZER_REQUIRE_FRAMEWORK_ACCURACY", default=True)
-
-
 def require_kernel_accuracy_default() -> bool:
     """Default for the kernel-patch accuracy-KEEP gate."""
     return env_flag("INFERENCE_OPTIMIZER_REQUIRE_KERNEL_ACCURACY", default=True)
@@ -325,9 +320,6 @@ def accuracy_keep_block(
     return False, "", True
 
 
-# There is deliberately no "high accuracy risk" predicate here any more.
-
-
 def parse_quality_gate(workspace: Path | str) -> dict[str, Any]:
     """Read a scriptable (server-less) quality gate from the bench report."""
     workspace = Path(workspace)
@@ -345,11 +337,9 @@ def parse_quality_gate(workspace: Path | str) -> dict[str, Any]:
     return {"quality_gate": qg, "source_file": str(latest)}
 
 
-def parse_agentx_error_rate(workspace: Path | str) -> float | None:
-    """Read ``request_error_rate`` from the newest ``inferencex_result.json``; None when no result reported one."""
-    # None rather than 0.0 so an export without the field is incomparable instead of a perfect score.
-    workspace = Path(workspace)
-    results = [Path(f) for f in glob.glob(str(workspace / "**" / "inferencex_result.json"), recursive=True)]
+def _latest_agentx_result(workspace: Path | str) -> dict[str, Any] | None:
+    """The newest ``inferencex_result.json`` under *workspace*, or None."""
+    results = [Path(f) for f in glob.glob(str(Path(workspace) / "**" / "inferencex_result.json"), recursive=True)]
     if not results:
         return None
     latest = max(results, key=lambda p: p.stat().st_mtime)
@@ -358,8 +348,25 @@ def parse_agentx_error_rate(workspace: Path | str) -> float | None:
     except (json.JSONDecodeError, OSError) as exc:
         log.warning("accuracy_gate: unreadable %s: %s", latest, exc)
         return None
-    rate = data.get("request_error_rate")
-    return float(rate) if isinstance(rate, (int, float)) else None
+    return data if isinstance(data, dict) else None
+
+
+def parse_agentx_error_rate(workspace: Path | str) -> float | None:
+    """Read ``request_error_rate`` from the newest ``inferencex_result.json``; None when no result reported one."""
+    # None rather than 0.0 so an export without the field is incomparable instead of a perfect score.
+    rate = (_latest_agentx_result(workspace) or {}).get("request_error_rate")
+    return float(rate) if isinstance(rate, (int, float)) and not isinstance(rate, bool) else None
+
+
+def _mlperf_inline_accuracy(result: dict[str, Any] | None) -> float | None:
+    """The harness's inline score when every turn was scored; None otherwise."""
+    result = result or {}
+    score = result.get("accuracy_score")
+    if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score):
+        return None
+    if result.get("accuracy_missing_turns") != 0:
+        return None
+    return float(score)
 
 
 def quality_gate_passed(
@@ -419,6 +426,20 @@ def parse_eval_results(
         rate = parse_agentx_error_rate(workspace)
         passed = rate is not None and rate <= AGENTX_ERROR_RATE_THRESHOLD_PCT
         log.info("accuracy_gate: agentx request_error_rate=%s passed=%s", rate, passed)
+        from hyperloom.common.agentx_workload import is_mlperf_backend
+
+        if is_mlperf_backend():
+            # The harness scores every smoke run inline, so each KEEP is gated on that score against the
+            # baseline's, the same way lm-eval accuracy is. Over the error-rate ceiling, an unscored turn or no
+            # scores.json is a drop outright: 0.0, not None, which a lane without a required gate reads as
+            # "no eval ran" and skips.
+            score = _mlperf_inline_accuracy(_latest_agentx_result(workspace)) if passed else None
+            return {
+                "accuracy": 0.0 if score is None else score,
+                "task": "mlperf_agentic_inline",
+                "metric": "score",
+                "error_rate": rate,
+            }
         return {
             "accuracy": 1.0 if passed else 0.0,
             "task": "agentx_error_rate",
@@ -544,6 +565,7 @@ def grade_accuracy(
     result_dir: str,
     baseline_accuracy: Any,
     framework: str | None = None,
+    benchmark_mode: str = "",
 ) -> bool | None:
     """Grade a bench's accuracy against the baseline.
 
@@ -558,7 +580,7 @@ def grade_accuracy(
         baseline_value = float(baseline_accuracy)
     except (TypeError, ValueError):
         baseline_value = 0.0
-    eval_results = parse_eval_results(result_dir, framework=framework)
+    eval_results = parse_eval_results(result_dir, framework=framework, benchmark_mode=benchmark_mode)
     new_accuracy = eval_results.get("accuracy")
     if new_accuracy is not None and baseline_value > 0:
         return accuracy_passed(baseline_value, float(new_accuracy))
@@ -703,7 +725,6 @@ __all__ = [
     "request_baseline_accuracy_stop",
     "resolve_enablement_mode",
     "resolve_served_context",
-    "require_framework_accuracy_default",
     "require_kernel_accuracy_default",
     "served_context_hosts_eval",
 ]

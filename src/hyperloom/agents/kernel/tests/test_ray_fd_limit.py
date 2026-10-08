@@ -352,6 +352,11 @@ def _install_failing_ray_start(monkeypatch, stdout: str, stderr: str):
 
     def _fake_run(cmd, **kwargs):
         if cmd[:2] == ["ray", "start"]:
+            # The output lands wherever the caller pointed ray start's stdout/stderr, as a real process's would.
+            sink = kwargs.get("stdout")
+            if hasattr(sink, "write"):
+                sink.write(stdout)
+                sink.write(stderr)
             return _FailedProc()
         return _Proc()
 

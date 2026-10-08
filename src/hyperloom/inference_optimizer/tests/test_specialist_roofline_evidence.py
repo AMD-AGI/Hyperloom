@@ -5,12 +5,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.specialists.domains import (
     get_domain,
@@ -22,28 +22,7 @@ from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
 )
 
 
-@dataclass
-class _BareState:
-    """Minimal SharedState double used by _warm_specialist_params."""
-
-    last_trace_analyze: dict[str, Any] = field(default_factory=dict)
-    gpu_type: str = ""
-    tp: int = 0
-    precision: str = ""
-    conc: int = 0
-    isl: int = 0
-    osl: int = 0
-    max_model_len: int = 0
-    warm_start_recipe: dict[str, Any] = field(default_factory=dict)
-    warm_start_pitfalls: list[dict[str, Any]] = field(default_factory=list)
-    warm_start_lessons: list[dict[str, Any]] = field(default_factory=list)
-    gaps: list[dict[str, Any]] = field(default_factory=list)
-
-    def find_gap(self, _cid: str):
-        return None
-
-
-def _make_coord(tmp_path: Path, *, state: _BareState) -> Coordinator:
+def _make_coord(tmp_path: Path, *, state: SharedState) -> Coordinator:
     c = Coordinator.__new__(Coordinator)
     c.session_dir = tmp_path
     c.shared_state = state
@@ -53,7 +32,7 @@ def _make_coord(tmp_path: Path, *, state: _BareState) -> Coordinator:
 
 @pytest.mark.asyncio
 async def test_warm_specialist_params_injects_roofline_evidence(tmp_path):
-    """``_warm_specialist_params`` mirrors ``last_trace_analyze`` into ``params['roofline_evidence']``."""
+    """``warm_specialist_params`` mirrors ``last_trace_analyze`` into ``params['roofline_evidence']``."""
     analysis_path = tmp_path / "analysis.md"
     analysis_path.write_text(
         "## Executive Summary\n"
@@ -66,7 +45,7 @@ async def test_warm_specialist_params_injects_roofline_evidence(tmp_path):
         encoding="utf-8",
     )
 
-    state = _BareState(
+    state = SharedState(
         last_trace_analyze={
             "analysis_md_text": "FULL ANALYSIS TEXT",
             "analysis_md_path": str(analysis_path),
@@ -95,7 +74,7 @@ async def test_warm_specialist_params_injects_roofline_evidence(tmp_path):
 
     coord = _make_coord(tmp_path, state=state)
     params: dict[str, Any] = {"domain": "kernel_switch_specialist"}
-    await coord._warm_specialist_params(params)
+    await coord.specialist_dispatch.warm_specialist_params(params)
 
     assert "roofline_evidence" in params
     ev = params["roofline_evidence"]
@@ -112,17 +91,17 @@ async def test_warm_specialist_params_injects_roofline_evidence(tmp_path):
 @pytest.mark.asyncio
 async def test_warm_specialist_params_noop_when_no_snapshot(tmp_path):
     """No ``last_trace_analyze`` → no ``roofline_evidence`` key."""
-    state = _BareState(last_trace_analyze={})
+    state = SharedState(last_trace_analyze={})
     coord = _make_coord(tmp_path, state=state)
     params: dict[str, Any] = {"domain": "serving_specialist"}
-    await coord._warm_specialist_params(params)
+    await coord.specialist_dispatch.warm_specialist_params(params)
     assert "roofline_evidence" not in params
 
 
 @pytest.mark.asyncio
 async def test_warm_specialist_params_noop_when_analysis_md_text_empty(tmp_path):
     """Empty ``analysis_md_text`` is treated as no-snapshot."""
-    state = _BareState(
+    state = SharedState(
         last_trace_analyze={
             "analysis_md_text": "",
             "analysis_md_path": "/dev/null",
@@ -130,14 +109,14 @@ async def test_warm_specialist_params_noop_when_analysis_md_text_empty(tmp_path)
     )
     coord = _make_coord(tmp_path, state=state)
     params: dict[str, Any] = {"domain": "kernel_switch_specialist"}
-    await coord._warm_specialist_params(params)
+    await coord.specialist_dispatch.warm_specialist_params(params)
     assert "roofline_evidence" not in params
 
 
 @pytest.mark.asyncio
 async def test_warm_specialist_params_packs_hot_kernels_without_analysis_md(tmp_path):
     """Hot kernels with no analysis.md still reach the specialist."""
-    state = _BareState(
+    state = SharedState(
         last_trace_analyze={
             "analysis_md_text": "",
             "analysis_md_path": "",
@@ -155,7 +134,7 @@ async def test_warm_specialist_params_packs_hot_kernels_without_analysis_md(tmp_
     )
     coord = _make_coord(tmp_path, state=state)
     params: dict[str, Any] = {"domain": "framework_rewrite_specialist"}
-    await coord._warm_specialist_params(params)
+    await coord.specialist_dispatch.warm_specialist_params(params)
 
     ev = params["roofline_evidence"]
     assert ev["roofline_snapshot_id"] == 4
@@ -168,7 +147,7 @@ async def test_warm_specialist_params_respects_existing_evidence(tmp_path):
     """A caller-supplied ``roofline_evidence`` is not overwritten (setdefault)."""
     analysis_path = tmp_path / "analysis.md"
     analysis_path.write_text("# stub\n", encoding="utf-8")
-    state = _BareState(
+    state = SharedState(
         last_trace_analyze={
             "analysis_md_text": "stub",
             "analysis_md_path": str(analysis_path),
@@ -181,7 +160,7 @@ async def test_warm_specialist_params_respects_existing_evidence(tmp_path):
         "domain": "comm_specialist",
         "roofline_evidence": {"sentinel": True},
     }
-    await coord._warm_specialist_params(params)
+    await coord.specialist_dispatch.warm_specialist_params(params)
     assert params["roofline_evidence"] == {"sentinel": True}
 
 
