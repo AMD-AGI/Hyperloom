@@ -18,10 +18,10 @@ from typing import Any
 
 import yaml
 
+from hyperloom.common.agentx_accounting import measured_request_errors
 from hyperloom.common.coerce import first_float, first_int, to_float, to_int
 from hyperloom.common.jsonio import read_json
 
-from ._agentx_accounting import measured_request_errors
 from ._gpu_metrics import gpu_metrics_from_report, write_gpu_metrics
 
 log = logging.getLogger(__name__)
