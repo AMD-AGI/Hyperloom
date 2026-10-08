@@ -23,6 +23,7 @@ the local filesystem (source-root probe + installed package version) unless
 
 from __future__ import annotations
 
+import importlib.metadata
 import re
 from dataclasses import dataclass, field
 from pathlib import PurePath
@@ -35,6 +36,7 @@ from hyperloom.inference_optimizer.framework_paths import (
     resolve_kernel_search_roots,
     summarise_framework_root_discovery,
 )
+from hyperloom.inference_optimizer.framework_registry import python_package
 
 
 # ---------------------------------------------------------------------------
@@ -209,12 +211,10 @@ _ROCM_HIP_ROOT_HINT = "the ROCm / HIP / aiter source tree (/opt/rocm, aiter)"
 
 
 def _resolve_package_version(package: str) -> str:
-    """Return the installed version of *package*, or empty string on failure."""
+    """Return the installed version of *package*, or empty string when it is not installed."""
     try:
-        import importlib.metadata as _m
-
-        return _m.version(package)
-    except Exception:  # noqa: BLE001
+        return importlib.metadata.version(package)
+    except importlib.metadata.PackageNotFoundError:
         return ""
 
 
@@ -228,9 +228,8 @@ def _resolve_actual_root_hints(framework: str) -> list[str]:
     if roots:
         hints: list[str] = list(roots)
         hints.append(f"(discovery summary: {summarise_framework_root_discovery(':'.join(roots))})")
-        pkg_map = {"sglang": "sglang", "vllm": "vllm", "xdit": "xfuser", "atom": "atom"}
-        pkg_name = pkg_map.get(framework, framework)
-        ver = _resolve_package_version(pkg_name)
+        pkg_name = python_package(framework)
+        ver = _resolve_package_version(pkg_name) if pkg_name else ""
         if ver:
             hints.append(f"({pkg_name} installed version: {ver})")
         # Always include the ROCm/HIP root hint (authoring sub-agent always

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import subprocess
@@ -112,6 +113,7 @@ def _install_cli_fakes(monkeypatch, tmp_path):
             gpu_target=overrides.get("gpu_target", "gfx942"),
             gpu_type=overrides.get("gpu_type", "mi355x"),
             agent_model=overrides.get("agent_model", "test-model"),
+            agent_sandbox_mode=overrides.get("agent_sandbox_mode", "bypass"),
         )
 
     class FakeTracker:
@@ -138,11 +140,12 @@ def _install_cli_fakes(monkeypatch, tmp_path):
             captured["checkpoints"][experiment_id] = checkpoint
 
     class FakeLoop:
-        def __init__(self, iter_config, tracker, config, resume=False):
+        def __init__(self, iter_config, tracker, config, resume=False, ceiling_estimator=None):
             self.ic = iter_config
             self.tracker = tracker
             self.config = config
             self.resume = resume
+            self.ceiling_estimator = ceiling_estimator
             self.best_wall_ms = 0.8
             self.experiment = SimpleNamespace(
                 experiment_id="segment-2" if resume else "segment-1",
@@ -346,6 +349,32 @@ def test_forge_loop_defaults_gpu_type(tmp_path, monkeypatch):
 
     assert result.exit_code == 0
     assert captured["config_overrides"][-1]["gpu_type"] == "mi355x"
+
+
+def test_the_ceiling_estimator_gets_the_resolved_session_budget_and_the_deployments_sandbox(tmp_path, monkeypatch):
+    """Without ``--session-timeout-sec`` the raw option is ``None``; the analyst must get seconds, in the sandbox."""
+    captured = _install_cli_fakes(monkeypatch, tmp_path)
+    result, _workspace = _invoke_forge_loop(tmp_path, ["--roofline-ceiling", "on", "--agent-sandbox-mode", "read-only"])
+    assert result.exit_code == 0, result.output
+
+    seen = {}
+
+    def fake_backend(provider, model, timeout_sec, *, sandbox_mode):
+        seen["backend_timeout_sec"] = timeout_sec
+        seen["sandbox_mode"] = sandbox_mode
+        return SimpleNamespace()
+
+    async def fake_estimate(backend, **kwargs):
+        seen["agent_timeout_sec"] = kwargs["agent_timeout_sec"]
+        return "outcome"
+
+    monkeypatch.setattr("kernelforge.roofline_ceiling.command.resolve_analyst_backend", fake_backend)
+    monkeypatch.setattr("kernelforge.roofline_ceiling.estimate.estimate_ceiling", fake_estimate)
+    estimator = captured["loops"][-1].ceiling_estimator
+    asyncio.run(estimator(case_ids=["a"], case_ms={"a": 1.0}))
+
+    expected = cli_module._forge_session_timeout_sec(1.0, None)
+    assert seen == {"backend_timeout_sec": expected, "agent_timeout_sec": expected, "sandbox_mode": "read-only"}
 
 
 def test_validated_warm_start_publishes_recovery_before_iteration(tmp_path):

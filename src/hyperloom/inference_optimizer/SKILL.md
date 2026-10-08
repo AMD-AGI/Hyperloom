@@ -1076,10 +1076,11 @@ Resolution order: `--framework` > `$FRAMEWORK` > `sglang` (default).
 
 What this controls:
 - Which Magpie YAML the executors default to —
-  `baseline_{sglang,vllm,atom}.yaml` and
-  `profile_{sglang,vllm,atom}.yaml`. The per-framework resolver
-  `_default_profile_config()` in `src/hyperloom/orchestrator/actions/executors/profile.py` picks
-  the right file from `$FRAMEWORK`.
+  `baseline_<framework>.yaml` and `profile_<framework>.yaml`, one pair
+  per framework registered in `framework_registry`
+  (`sglang`, `vllm`, `atom`, `xdit`, `custom`).
+  `framework_registry.shipped_config_name()` names the file for
+  `$FRAMEWORK`; an unregistered name is refused at launch and on resume.
 - Which framework-specific seed grid the `explore` action falls
   back to when no `params.grid` is supplied. atom is the only
   framework with a programmatic seed today
@@ -1103,7 +1104,7 @@ shell — set it when you resume a non-default session.
 atom's `--torch-profiler-dir`, and TraceLens consumes the resulting
 `*.pt.trace.json.gz` unchanged. atom source roots (`/app/ATOM/atom/`)
 are in the kernel search roots + `_REUSABLE_SOURCE_ROOTS`, and the repo
-URL `https://github.com/ROCm/ATOM.git` is in `hyperloom.agents.framework.repo_map`.
+URL `https://github.com/ROCm/ATOM.git` is atom's `FrameworkSpec.repo_url` in `framework_registry`.
 Unlike sglang/vllm, atom is the only framework with a programmatic
 cold-start seed grid (`_atom_default_grid`: `atom_level_{2,3}`,
 `atom_prefix_cache`, `atom_kv_fp8` on FP8, model-class-gated `atom_ep` /

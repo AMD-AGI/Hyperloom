@@ -268,7 +268,7 @@ def _patch(tmp_path, rel, body="diff --git a/f b/f\n"):
 def _round(task_id, *patches, artifacts=()):
     """One accepted enablement round for ``EnablementRound.kept_rounds``.
 
-    Mirrors the structure _push_kept_round writes in lane.py.
+    Mirrors the structure EnablementRound.push_kept_round writes.
     """
     return {"task_id": task_id, "patches": list(patches), "artifacts": list(artifacts)}
 
