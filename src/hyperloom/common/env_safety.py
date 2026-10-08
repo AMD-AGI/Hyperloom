@@ -17,6 +17,9 @@ _PYTHON_PACKAGE_ROOT_BASENAMES: frozenset[str] = frozenset({"site-packages", "di
 
 BLOCKED_UNTRUSTED_ENV_NAMES: frozenset[str] = frozenset(
     {
+        # Names a second variable for the agentic client to export, so it reaches a shell indirection the way the
+        # loader vars below do: whoever sets it chooses which variable gets written, not merely a value.
+        "AGENTX_KEEP_ALIVE_ENV",
         "BASH_ENV",
         "CDPATH",
         "ENV",

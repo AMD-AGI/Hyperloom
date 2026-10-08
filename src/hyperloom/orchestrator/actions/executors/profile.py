@@ -35,6 +35,7 @@ from hyperloom.common.agentx_mode import (
     native_agentx_session,
 )
 from hyperloom.inference_optimizer.session.paths import asset_root, mn_profile_trace_root
+from hyperloom.inference_optimizer import framework_registry
 from ._inferencex_patcher import (
     benchmark_serving_path_in,
     ensure_benchmark_lib_patched,
@@ -723,8 +724,6 @@ def _validate_trace_structure(
     }
 
 
-# sglang profile yaml, used by tests/fixtures; runtime selection goes through `_default_profile_config()`.
-PROFILE_DEFAULT_CONFIG = asset_root() / "assets" / "configs" / "profile_sglang.yaml"
 PROFILE_DEFAULT_TIMEOUT_SEC = 14400  # 4 h wall cap
 
 
@@ -807,21 +806,9 @@ def _candidate_trace_dirs(workspace: Path) -> list[Path]:
 
 
 def _default_profile_config() -> Path:
-    """Resolve default profile YAML from $FRAMEWORK (atom / vllm / sglang; unknown falls back to
-    ``profile_sglang.yaml``).
-    """
-    fw = os.environ.get("FRAMEWORK", "sglang").strip().lower()
-    if fw == "atom":
-        name = "profile_atom.yaml"
-    elif fw == "vllm":
-        name = "profile_vllm.yaml"
-    elif fw == "xdit":
-        name = "profile_xdit.yaml"
-    elif fw == "custom":
-        name = "profile_custom.yaml"
-    else:
-        name = "profile_sglang.yaml"
-    return asset_root() / "assets" / "configs" / name
+    """Resolve the shipped profile YAML for ``$FRAMEWORK``, or for the default framework when it is unset."""
+    fw = os.environ.get("FRAMEWORK") or framework_registry.DEFAULT_FRAMEWORK
+    return asset_root() / "assets" / "configs" / framework_registry.shipped_config_name("profile", fw)
 
 
 class ProfileExecutor(BenchmarkRunExecutor):
@@ -1994,7 +1981,6 @@ profile_executor = ProfileExecutor()
 
 
 __all__ = [
-    "PROFILE_DEFAULT_CONFIG",
     "PROFILE_DEFAULT_TIMEOUT_SEC",
     "ProfileExecutor",
     "profile_executor",

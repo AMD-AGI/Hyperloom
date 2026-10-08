@@ -180,7 +180,7 @@ exclude = [
     "testing",
     "testing.*",
     # kernelforge's shipped resource trees (knowledge_base / local_knowledge /
-    # examples / serving_patches). They contain .py files, so with implicit
+    # examples). They contain .py files, so with implicit
     # namespace discovery setuptools would otherwise hand them out as
     # importable top-level modules. They ship as package-data instead.
     "kernelforge.data",
@@ -475,7 +475,7 @@ extend-exclude = [
     "TraceLens-internal",
     "InferenceX",
     "src/hyperloom/orchestrator/knowledge/remote_recipe/_vendor/kb_store_client.py",
-    # Knowledge base / examples / serving patches, not source we own the style
+    # Knowledge base / examples, not source we own the style
     # of. The example drivers are .py and would otherwise be reformatted.
     "src/kernelforge/data",
     "src/kernelforge/knowledge/remote_exp/kb_store_client.py",

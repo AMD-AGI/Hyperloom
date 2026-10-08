@@ -13,6 +13,7 @@ import os
 import shutil
 import time
 from contextlib import ExitStack, suppress
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Sequence
@@ -221,13 +222,18 @@ def _extract_trace_path(profile_result: dict[str, Any]) -> str:
     return ""
 
 
-def _failed(
+def _fail(
+    recorder: Any,
     phase: str,
     error: str,
-    *,
     sub_result: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Construct the canonical failure result dict."""
+    """Close the timeline event as failed, then build the canonical failure result.
+
+    Every failure exit goes through this, so one added later cannot be the one that leaves the event dangling.
+    """
+    if recorder is not None:
+        recorder.finish_failed(phase=phase, message=error)
     out: dict[str, Any] = {
         "status": "failed",
         "error_class": f"{phase}_failed",
@@ -455,6 +461,430 @@ def _write_capture_failure_diagnosis(path: Path, payload: dict[str, Any]) -> str
     return str(path)
 
 
+async def _reported(label: str, start: Callable[[], Awaitable[Any]], **fields: Any) -> Any:
+    """Announce a roofline sub-step, then await it.
+
+    Every sub-step goes through this, so a call site added later cannot silently be the one that reports nothing.
+    """
+    await report_progress(unit="roofline_step", label=label, status="started", **fields)
+    return await start()
+
+
+@dataclass(frozen=True)
+class _ProfileOutcome:
+    """The profile attempt a roofline adopts: its result, trace, degraded-status warning and launch params."""
+
+    result: dict[str, Any]
+    trace_path: str
+    warning: dict[str, Any] | None
+    params: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _AnalysisOutcome:
+    """The trace analysis a roofline concludes from: the request it ran, its result and its run index."""
+
+    payload: dict[str, Any]
+    result: dict[str, Any]
+    run_index: int
+
+
+@dataclass(frozen=True)
+class _ProfileArm:
+    """The configuration every profile attempt of one action runs under.
+
+    Fixed for the whole action: roofline profiles the arm it was handed. Re-booting eager after a capture crash would
+    produce a trace of a configuration nobody asked to measure, and choosing a configuration is enablement's job.
+    ``HYPERLOOM_PROFILE_DISABLE_CUDA_GRAPH`` stays as an operator override, read once per action.
+    """
+
+    framework: str
+    env_disable_cuda_graph: str
+
+    @classmethod
+    def resolve(cls, framework: str) -> _ProfileArm:
+        """Read the operator override for an action profiling ``framework``."""
+        return cls(framework, os.environ.get("HYPERLOOM_PROFILE_DISABLE_CUDA_GRAPH", "").strip())
+
+    @property
+    def disable_cuda_graph(self) -> bool:
+        """bool: Whether the override turns graph capture off."""
+        return self.env_disable_cuda_graph.lower() in {"1", "true", "yes", "on"}
+
+
+@dataclass(frozen=True)
+class _Unusable:
+    """Why one profile attempt cannot be carried forward, and what the next attempt is recorded as."""
+
+    stage: str
+    error_class: str
+    message: str
+    next_reason: str
+    #: What the attempt returned, when it returned a dict.
+    result: dict[str, Any] | None = None
+    #: The text a cuda-graph capture failure or an occupied GPU is recognised in; empty where neither can apply.
+    evidence: dict[str, str] = field(default_factory=dict)
+    retryable: bool = True
+
+    @property
+    def failure(self) -> dict[str, str]:
+        """dict: The failure block of the attempt's run row."""
+        return {"stage": self.stage, "error_class": self.error_class, "message": self.message}
+
+
+#: What a profile that reported success can still hand back unusable, checked in order:
+#: (test on the result and its trace path, stage, error class, next attempt reason, message).
+_UNUSABLE_TRACES: tuple[tuple[Callable[[dict[str, Any], str], bool], str, str, str, str], ...] = (
+    (
+        lambda result, trace: not trace,
+        "profile_no_trace",
+        "no_trace",
+        PROFILE_ATTEMPT_AFTER_NO_TRACE,
+        "profile succeeded but no trace_path in result (missing both main_trace_path and trace_files[0])",
+    ),
+    (
+        lambda result, trace: result.get("profile_trace_selection_reason") == "capture_only_fallback",
+        "profile_capture_only",
+        "capture_only",
+        PROFILE_ATTEMPT_AFTER_CAPTURE_ONLY,
+        "profile produced only CUDA-graph capture sidecars under capture_traces/ (no annotated steady-state trace); "
+        "the steady-state splitter cannot use these — re-profile needed",
+    ),
+    (
+        lambda result, trace: bool((result.get("trace_health") or {}).get("zero_ops")),
+        "profile_zero_ops",
+        "zero_ops",
+        PROFILE_ATTEMPT_AFTER_ZERO_OPS,
+        "profile produced a metadata-only trace (PyTorch Profiler Op count == 0); the active capture window never "
+        "overlapped execution — re-profile needed",
+    ),
+)
+
+
+def _raised(exc: Exception) -> _Unusable:
+    """Classify a profile call that raised; only ``repr(exc)`` is there to recognise a capture failure in."""
+    message = f"profile_executor raised: {exc!r}"
+    return _Unusable(
+        "profile", type(exc).__name__, message, PROFILE_ATTEMPT_AFTER_EXCEPTION, evidence={"last_error": message}
+    )
+
+
+def _classify_profile(result: Any) -> _Unusable | None:
+    """Classify what one profile call returned; ``None`` when its trace can be analysed."""
+    if not isinstance(result, dict):
+        message = f"profile_executor returned non-dict: {type(result).__name__}"
+        return _Unusable("profile", "bad_return", message, PROFILE_ATTEMPT_AFTER_BAD_RETURN)
+    trace_path = _extract_trace_path(result)
+    if result.get("status") != "succeeded":
+        # A duplicate stop_profile failure can arrive after a trace was already flushed successfully.
+        if trace_path:
+            return None
+        error = str(result.get("error") or "profile sub-step failed")
+        capture_reason = str((result.get("trace_capture") or {}).get("reason") or "")
+        if (
+            result.get("error_class") in _NON_RETRYABLE_PROFILE_ERRORS
+            or capture_reason in _NON_RETRYABLE_CAPTURE_REASONS
+        ):
+            return _Unusable("profile", str(result.get("error_class") or ""), error, "", result, retryable=False)
+        evidence = {
+            "last_error": error,
+            "profile_error": _profile_err_text(result),
+            "server_log_tail": _profile_server_log_tail(result),
+        }
+        return _Unusable(
+            "profile", str(result.get("error_class") or ""), error, PROFILE_ATTEMPT_AFTER_FAILURE, result, evidence
+        )
+    for matches, stage, error_class, next_reason, message in _UNUSABLE_TRACES:
+        if matches(result, trace_path):
+            return _Unusable(stage, error_class, message, next_reason, result)
+    return None
+
+
+async def _end_profile_run(
+    recorder: Any,
+    run_index: int,
+    session_dir: Path,
+    arm: _ProfileArm,
+    *,
+    status: str,
+    result: dict[str, Any] | None,
+    failure: dict[str, Any] | None = None,
+) -> None:
+    """Row one profile attempt with the process and patch state it left behind."""
+    from .profile import profile_executor
+
+    if recorder is None:
+        return
+    recorder.end_profile_run(
+        run_index=run_index,
+        status=status,
+        disable_cuda_graph=arm.disable_cuda_graph,
+        profile_result=result,
+        failure=failure,
+        # Probed on every attempt, not only the failed ones: the run this is meant to catch is the one that reports
+        # success.
+        server_liveness=await asyncio.to_thread(_server_liveness_probe, session_dir, recorder.task_id),
+        # Drained per attempt, so every attempt carries which patchers ran and what they returned -- including the
+        # attempts that raised, where no result dict exists to carry it.
+        instrumentation=_drain_instrumentation(profile_executor),
+    )
+
+
+async def _adopt_profile(
+    recorder: Any,
+    run_index: int,
+    profile_ctx: RunnerContext,
+    session_dir: Path,
+    arm: _ProfileArm,
+    *,
+    attempt: int,
+    result: dict[str, Any],
+) -> _ProfileOutcome:
+    """Row the attempt whose trace the action carries forward, and adopt it."""
+    recovered = result.get("status") != "succeeded"
+    trace_path = _extract_trace_path(result)
+    warning = {key: result.get(key) for key in ("status", "error_class", "error")} if recovered else None
+    if recovered:
+        log.warning(
+            "roofline profile attempt %d/%d returned status=%r but produced trace=%s; continuing to trace_analyze",
+            attempt,
+            _PROFILE_MAX_ATTEMPTS,
+            result.get("status"),
+            trace_path,
+        )
+    elif attempt > 1:
+        log.info("roofline profile succeeded on attempt %d/%d", attempt, _PROFILE_MAX_ATTEMPTS)
+    params = dict(profile_ctx.task.params or {})
+    status = "recovered" if recovered else "succeeded"
+    await _end_profile_run(recorder, run_index, session_dir, arm, status=status, result=result)
+    if recorder is not None:
+        recorder.adopt_profile_run(run_index=run_index, profile_result=result, recovered=recovered, params=params)
+    return _ProfileOutcome(result=result, trace_path=trace_path, warning=warning, params=params)
+
+
+async def _fail_on_capture(
+    recorder: Any,
+    task: Any,
+    session_dir: Path,
+    arm: _ProfileArm,
+    unusable: _Unusable,
+    *,
+    attempt: int,
+    attempt_reason: str,
+) -> dict[str, Any] | None:
+    """Fail on a classified cuda-graph capture failure, leaving its evidence on disk; ``None`` when there is none.
+
+    Roofline does not retry these. The only retry that could change the outcome is one that changes the
+    configuration, and a measurement stage that edits its own configuration reports a number for an arm that was
+    never requested. The split between ``instrumentation`` (the profiler collided with capture, so the arm itself is
+    fine) and ``config`` (these server args cannot capture at all) decides who owns the fix, so it is recorded
+    rather than acted on here.
+    """
+    from .baseline import _classify_cuda_graph_capture_failure
+
+    # With capture already off, a marker in the log tail says nothing about this run -- the tail can span an earlier
+    # boot -- and "does not retry with graph capture disabled" would be nonsense to read on such a run.
+    sources = unusable.evidence
+    if arm.disable_cuda_graph or not sources:
+        return None
+    category, marker = _classify_cuda_graph_capture_failure(*sources.values())
+    if not category:
+        return None
+    task_id = str(getattr(task, "task_id", "") or "") or "unknown"
+    params = dict(task.params or {})
+    diagnosis = _write_capture_failure_diagnosis(
+        session_dir / "diagnostics" / f"roofline_cuda_graph_capture_{task_id}_attempt{attempt}.json",
+        {
+            "category": category,
+            "matched_marker": marker,
+            "attempt": attempt,
+            "max_attempts": _PROFILE_MAX_ATTEMPTS,
+            "attempt_reason": attempt_reason,
+            "task_id": task_id,
+            "recorded_at_iso": _now_iso(),
+            "config": {
+                "framework": arm.framework,
+                "disable_cuda_graph": arm.disable_cuda_graph,
+                "env_disable_cuda_graph": arm.env_disable_cuda_graph,
+                "extra_server_args": params.get("extra_server_args"),
+                "workload": {k: params.get(k) for k in _CAPTURE_DIAGNOSIS_WORKLOAD_KEYS if k in params},
+            },
+            "marker_hits": _marker_hit_context(sources, marker),
+            "sources": {k: v[-_CAPTURE_DIAGNOSIS_SOURCE_BYTES:] for k, v in sources.items() if v},
+            "trace_dir": await asyncio.to_thread(_trace_dir_inventory, unusable.result),
+        },
+    )
+    message = (
+        f"cuda-graph capture failed ({category}-rooted; marker={marker!r}) on profile attempt "
+        f"{attempt}/{_PROFILE_MAX_ATTEMPTS}; roofline profiles the configuration it was given and does "
+        f"not retry with graph capture disabled. Evidence: {diagnosis or '<unwritten>'}"
+    )
+    log.warning("roofline: %s", message)
+    return _fail(recorder, f"profile_cuda_graph_capture_{category}", message, unusable.result)
+
+
+async def _compute_bound_profile(
+    recorder: Any, session_dir: Path, arm: _ProfileArm, cb_ctx: RunnerContext
+) -> tuple[int, Any]:
+    """Run and row the compute-bound profile; return its run index and what the profiler returned.
+
+    Rowed before anything raises out of here: the fail-soft handler only narrates the outcome, and an attempt the
+    event never rows is an attempt ``attempt_count`` does not count.
+    """
+    from .profile import profile_executor
+
+    run_index = recorder.begin_profile_run(attempt_reason=PROFILE_ATTEMPT_COMPUTE_BOUND) if recorder is not None else 0
+    try:
+        cb_profile = await _reported("profile_compute_bound", lambda: profile_executor(cb_ctx))
+    except Exception as exc:
+        message = f"compute-bound re-profile raised: {exc!r}"
+        failure = {"stage": "profile", "error_class": type(exc).__name__, "message": message}
+        await _end_profile_run(recorder, run_index, session_dir, arm, status="failed", result=None, failure=failure)
+        raise
+    result = cb_profile if isinstance(cb_profile, dict) else None
+    if _extract_trace_path(cb_profile):
+        await _end_profile_run(recorder, run_index, session_dir, arm, status="succeeded", result=result)
+    else:
+        message = "compute-bound re-profile produced no trace path"
+        failure = {"stage": "profile_no_trace", "error_class": "no_trace", "message": message}
+        await _end_profile_run(recorder, run_index, session_dir, arm, status="failed", result=result, failure=failure)
+    return run_index, cb_profile
+
+
+async def _compute_bound_analysis(recorder: Any, session_dir: Path, payload: dict[str, Any]) -> _AnalysisOutcome | None:
+    """Run and row the compute-bound re-analysis; return it when it succeeded, else ``None``.
+
+    Rowed before anything raises out of here, for the same reason as the re-profile.
+    """
+    from .trace_analyze import trace_analyze_handler
+
+    run_index = (
+        recorder.begin_analysis_run(attempt_reason=ANALYSIS_ATTEMPT_COMPUTE_BOUND) if recorder is not None else 0
+    )
+    try:
+        result = await _reported(
+            "trace_analyze_compute_bound", lambda: trace_analyze_handler(payload, session_dir=session_dir)
+        )
+    except Exception as exc:
+        message = f"compute-bound re-analysis raised: {exc!r}"
+        failure = {"stage": "trace_analyze", "error_class": type(exc).__name__, "message": message}
+        _end_analysis_run(recorder, run_index, payload, status="failed", failure=failure)
+        raise
+    if isinstance(result, dict) and result.get("status") == "ok":
+        _end_analysis_run(recorder, run_index, payload, status="succeeded", result=result)
+        return _AnalysisOutcome(payload=payload, result=result, run_index=run_index)
+    if isinstance(result, dict):
+        message, row_result = str(result.get("error") or "compute-bound re-analysis failed"), result
+    else:
+        message, row_result = f"non-dict result: {type(result).__name__}", None
+    failure = {"stage": "trace_analyze", "error_class": "compute_bound_reanalyze", "message": message}
+    _end_analysis_run(recorder, run_index, payload, status="failed", result=row_result, failure=failure)
+    return None
+
+
+def _end_analysis_run(
+    recorder: Any,
+    run_index: int,
+    payload: dict[str, Any],
+    *,
+    status: str,
+    result: dict[str, Any] | None = None,
+    failure: dict[str, Any] | None = None,
+) -> None:
+    """Row one trace-analysis attempt against the request it ran."""
+    if recorder is not None:
+        recorder.end_analysis_run(
+            run_index=run_index,
+            status=status,
+            trace_input=str(payload["trace_input"]),
+            requested_steady_state_mode=str(payload.get("steady_state_mode") or ""),
+            ta_result=result,
+            failure=failure,
+        )
+
+
+async def _preflight(recorder: Any, session_dir: Path) -> None:
+    """Reap this session's orphaned servers, then record the conditions the action is about to profile under.
+
+    An explore variant boots its server with ``cleanup=false`` to keep it hot and tears it down in a ``finally`` --
+    which never runs if the driver process dies.
+    """
+    reaped = await _reap_session_orphans(session_dir)
+    if reaped:
+        log.warning("roofline: preflight reaped %d orphaned server pid(s) before profiling: %s", len(reaped), reaped)
+    if recorder is not None:
+        recorder.record_preflight(
+            await asyncio.to_thread(_preflight_probe, session_dir, recorder.task_id, reaped=reaped)
+        )
+
+
+def _analysis_payload(task_params: dict[str, Any], *, trace_path: str, framework: str) -> dict[str, Any]:
+    """Build the trace_analyze request for the adopted trace.
+
+    The arm is named explicitly so neither the snapshot's ceiling precision nor the recorded workload relies on a
+    transient current_best inference: PRELUDE measures the baseline arm, every other reason current_best. Each
+    roofline writes its own report so the PRELUDE baseline snapshot is never overwritten: prelude keeps the default
+    file, close_post_opt writes the "after" file, every other reason a rolling current one.
+    """
+    reason = str(task_params.get("reason") or "")
+    payload: dict[str, Any] = {"trace_input": str(trace_path), "framework": framework}
+    if task_params.get("workspace_path") not in (None, ""):
+        payload["workspace_path"] = task_params["workspace_path"]
+    payload["roofline_arm"] = "baseline" if reason == "prelude_initial" else "current_best"
+    output_name = {"prelude_initial": "", "close_post_opt": "kernel_roofline_opt.json"}.get(
+        reason, "kernel_roofline_current.json"
+    )
+    if output_name:
+        payload["roofline_output_name"] = output_name
+    return payload
+
+
+def _hot_kernels(ta_result: dict[str, Any]) -> list[Any]:
+    """The hot kernels an analysis surfaced."""
+    return ta_result.get("hot_kernels_top15") or ta_result.get("hot_kernels") or []
+
+
+def _flag_attribution_degraded(ta_result: dict[str, Any], profile_result: dict[str, Any]) -> bool:
+    """Warn on an ok analysis whose zero hot kernels are an attribution artifact; return whether it is one.
+
+    Zero hot kernels on a trace whose health says per-kernel attribution degraded means cuda-graph capture folded
+    per-kernel time into hipGraphLaunch wrappers.
+    """
+    trace_health = profile_result.get("trace_health") or {}
+    if _hot_kernels(ta_result) or not trace_health.get("per_kernel_attribution_degraded"):
+        return False
+    warning = {
+        "code": "cuda_graph_attribution_degraded",
+        "severity": "warning",
+        "message": (
+            "trace_analyze returned 0 hot kernels: the profile trace "
+            "has no execute_*/user_annotation events, so per-kernel "
+            "device time is folded into hipGraphLaunch wrappers under "
+            "cuda-graph capture (#431). Re-profile in eager mode "
+            "(append --enforce-eager to EXTRA_SGLANG_ARGS / "
+            "EXTRA_VLLM_ARGS) so per-step annotations fire, or enable "
+            "a capture-fold fallback over capture_traces/."
+        ),
+        "capture_traces_present": bool(trace_health.get("capture_traces_present")),
+    }
+    ta_result["trace_health_warnings"] = [*(ta_result.get("trace_health_warnings") or []), warning]
+    return True
+
+
+def _wants_compute_bound_reprofile(ta_result: dict[str, Any]) -> bool:
+    """Whether an analysis is the multi-node host-bound shape a compute-bound re-profile exists for.
+
+    A host-bound (high-idle) trace under PD-disagg + DP yields zero kernel candidates because the per-rank per-step
+    batch is tiny.
+    """
+    return (
+        not _hot_kernels(ta_result)
+        and is_multi_node()
+        and os.environ.get(_AUTO_COMPUTE_BOUND_ENV, "1").strip() != "0"
+        and _trace_is_high_idle(ta_result)
+    )
+
+
 class RooflineExecutor:
     """Production composite ActionRunner."""
 
@@ -522,968 +952,354 @@ class RooflineExecutor:
 
     async def _execute(self, ctx: RunnerContext, *, recorder: Any) -> dict[str, Any]:
         """Run the roofline action for the given context."""
-        # atom: the profile sub-step produces *.pt.trace.json.gz that TraceLens consumes unchanged.
-        from .trace_analyze import trace_analyze_handler
-        from .profile import profile_executor
-
-        # Every sub-step below goes through this, so a call site added later cannot silently be the one that reports
-        # nothing.
-        async def _reported(
-            label: str,
-            start: Callable[[], Awaitable[Any]],
-            **fields: Any,
-        ) -> Any:
-            """Announce a roofline sub-step, then await it."""
-            await report_progress(
-                unit="roofline_step",
-                label=label,
-                status="started",
-                **fields,
-            )
-            return await start()
-
         session_dir = self._resolve_session_dir(ctx)
-        # Time the composite so the END lifecycle event reports its duration.
-        _lc_t0 = time.monotonic()
-
-        # Emit a paired START so the auto-roofline path (which bypasses Coordinator._handle_request) does not show a
-        # lone END.
-        try:
-            record_lifecycle_event(
-                self.shared_state,
-                step="roofline",
-                status="START",
-                detail="auto-roofline: profile + TraceLens",
-            )
-            _sd0 = Path(session_dir)
-            if _sd0.name and _sd0.is_dir() and (_sd0 / "state.json").exists():
-                self.shared_state.save(_sd0)
-        except Exception:
-            log.debug("roofline: lifecycle START emit failed", exc_info=True)
-
-        # ---- Profile (with retry) -------------------------------------------- sglang's torch profiler on
-        # MI300X/ROCm is unstable, so retry up to _PROFILE_MAX_ATTEMPTS times; each profile_executor call manages its
-        # own server lifecycle so a fresh attempt starts clean.
-        profile_result: dict[str, Any] | None = None
-        trace_path = ""
-        last_error = ""
-        profile_warning: dict[str, Any] | None = None
-        successful_profile_params: dict[str, Any] = {}
-        # Track the last failure kind so the no-trace contract is preserved (profile_no_trace_failed) instead of
-        # collapsing into profile_failed.
-        last_phase = "profile"
-        # Fixed for the whole retry loop: roofline profiles the arm it was handed. Re-booting eager after a capture
-        # crash would produce a trace of a configuration nobody asked to measure, and choosing a configuration is
-        # enablement's job. The env var stays as an operator override and is read exactly once.
-        _env_disable_cuda_graph = os.environ.get("HYPERLOOM_PROFILE_DISABLE_CUDA_GRAPH", "").strip()
-        disable_cuda_graph = _env_disable_cuda_graph.lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
-        framework = self._resolve_framework(ctx)
-        from .baseline import (
-            _classify_cuda_graph_capture_failure,
-            _is_insufficient_gpu_memory,
-        )
-
-        _self_task_id = str(getattr(ctx.task, "task_id", "") or "")
-        # Every ``_failed`` return below goes through ``_fail`` so a failure exit added later cannot be the one that
-        # leaves the event dangling.
-        _task_params = ctx.task.params or {}
-        _reason = str(_task_params.get("reason") or "")
+        started = time.monotonic()
+        self._record_lifecycle(session_dir, status="START", detail="auto-roofline: profile + TraceLens")
+        arm = _ProfileArm.resolve(self._resolve_framework(ctx))
         if recorder is not None:
             recorder.begin(max_profile_attempts=_PROFILE_MAX_ATTEMPTS)
+        await _preflight(recorder, session_dir)
 
-        def _fail(
-            phase: str,
-            error: str,
-            *,
-            sub_result: dict[str, Any] | None = None,
-        ) -> dict[str, Any]:
-            """Close the timeline event, then build the failure result."""
-            if recorder is not None:
-                recorder.finish_failed(phase=phase, message=error)
-            return _failed(phase, error, sub_result=sub_result)
+        profiled = await self._profile_until_usable(ctx, recorder, arm)
+        if not isinstance(profiled, _ProfileOutcome):
+            return profiled
+        payload = _analysis_payload(ctx.task.params or {}, trace_path=profiled.trace_path, framework=arm.framework)
+        self._promote_profile(ctx, profiled, roofline_arm=payload["roofline_arm"])
 
-        async def _fail_capture(
-            *,
-            category: str,
-            marker: str,
-            attempt: int,
-            sources: dict[str, str],
-            profile_result: dict[str, Any] | None,
-        ) -> dict[str, Any]:
-            """Fail on a classified cuda-graph capture failure, leaving the evidence behind on disk.
+        analysis = await self._analyze(ctx, recorder, payload)
+        if not isinstance(analysis, _AnalysisOutcome):
+            return analysis
+        attribution_degraded = _flag_attribution_degraded(analysis.result, profiled.result)
+        if _wants_compute_bound_reprofile(analysis.result):
+            analysis = await self._compute_bound_reprofile(ctx, recorder, arm, analysis) or analysis
+        return self._conclude(
+            ctx, recorder, profiled, analysis, attribution_degraded=attribution_degraded, started=started
+        )
 
-            Roofline does not retry these. The only retry that could change the outcome is one that changes the
-            configuration, and a measurement stage that edits its own configuration reports a number for an arm
-            that was never requested. The split between ``instrumentation`` (the profiler collided with capture,
-            so the arm itself is fine) and ``config`` (these server args cannot capture at all) decides who owns
-            the fix, so it is recorded rather than acted on here.
-            """
-            task_id = _self_task_id or "unknown"
-            params = dict(ctx.task.params or {})
-            diagnosis = _write_capture_failure_diagnosis(
-                session_dir / "diagnostics" / f"roofline_cuda_graph_capture_{task_id}_attempt{attempt}.json",
-                {
-                    "category": category,
-                    "matched_marker": marker,
-                    "attempt": attempt,
-                    "max_attempts": _PROFILE_MAX_ATTEMPTS,
-                    "attempt_reason": profile_reason,
-                    "task_id": task_id,
-                    "recorded_at_iso": _now_iso(),
-                    "config": {
-                        "framework": framework,
-                        "disable_cuda_graph": disable_cuda_graph,
-                        "env_disable_cuda_graph": _env_disable_cuda_graph,
-                        "extra_server_args": params.get("extra_server_args"),
-                        "workload": {k: params.get(k) for k in _CAPTURE_DIAGNOSIS_WORKLOAD_KEYS if k in params},
-                    },
-                    "marker_hits": _marker_hit_context(sources, marker),
-                    "sources": {k: v[-_CAPTURE_DIAGNOSIS_SOURCE_BYTES:] for k, v in sources.items() if v},
-                    "trace_dir": await asyncio.to_thread(_trace_dir_inventory, profile_result),
-                },
-            )
-            message = (
-                f"cuda-graph capture failed ({category}-rooted; marker={marker!r}) on profile attempt "
-                f"{attempt}/{_PROFILE_MAX_ATTEMPTS}; roofline profiles the configuration it was given and does "
-                f"not retry with graph capture disabled. Evidence: {diagnosis or '<unwritten>'}"
-            )
-            log.warning("roofline: %s", message)
-            return _fail(f"profile_cuda_graph_capture_{category}", message, sub_result=profile_result)
+    async def _profile_until_usable(
+        self, ctx: RunnerContext, recorder: Any, arm: _ProfileArm
+    ) -> _ProfileOutcome | dict[str, Any]:
+        """Profile until one attempt yields a usable trace, or return the failure result.
 
-        # Profile attempt bookkeeping for the timeline event.
-        profile_run_count = 0
-        next_profile_reason = PROFILE_ATTEMPT_INITIAL
-        profile_reason = PROFILE_ATTEMPT_INITIAL
+        sglang's torch profiler on MI300X/ROCm is unstable, so retry up to ``_PROFILE_MAX_ATTEMPTS`` times; each
+        ``profile_executor`` call manages its own server lifecycle so a fresh attempt starts clean.
+        """
+        from .baseline import _is_insufficient_gpu_memory
+        from .profile import profile_executor
 
-        async def _note_profile_run(
-            *,
-            status: str,
-            result: dict[str, Any] | None,
-            failure: dict[str, Any] | None = None,
-        ) -> int:
-            """Append the in-flight profile attempt and return its run index."""
-            nonlocal profile_run_count
-            profile_run_count += 1
-            if recorder is not None:
-                recorder.record_profile_run(
-                    run_index=profile_run_count,
-                    attempt_reason=profile_reason,
-                    status=status,
-                    started_at=_attempt_started,
-                    duration_sec=round(time.monotonic() - _attempt_t0, 3),
-                    disable_cuda_graph=disable_cuda_graph,
-                    profile_result=result,
-                    failure=failure,
-                    # Probed here rather than only on the failure paths: the run this is meant to catch is the
-                    # one that reports success.
-                    server_liveness=await asyncio.to_thread(_server_liveness_probe, session_dir, _self_task_id),
-                    # Drained per attempt, so every attempt carries which patchers ran and what they returned --
-                    # including the attempts that raised, where no result dict exists to carry it. Resolved by
-                    # attribute because ``profile_executor`` is a module-level name that alternate wirings and
-                    # tests substitute, and a substitute owes nothing to this probe.
-                    instrumentation=_drain_instrumentation(profile_executor),
-                )
-            return profile_run_count
-
-        # Preflight: an explore variant boots its server with ``cleanup=false`` to keep it hot and tears it down in a
-        # ``finally`` — which never runs if the driver process dies.
-        _pre_reaped = await _reap_session_orphans(session_dir)
-        if _pre_reaped:
-            log.warning(
-                "roofline: preflight reaped %d orphaned server pid(s) before profiling: %s",
-                len(_pre_reaped),
-                _pre_reaped,
-            )
-        if recorder is not None:
-            recorder.record_preflight(
-                await asyncio.to_thread(_preflight_probe, session_dir, _self_task_id, reaped=_pre_reaped)
-            )
-
+        session_dir = self._resolve_session_dir(ctx)
+        reason = PROFILE_ATTEMPT_INITIAL
+        returned: Any = None
         for attempt in range(1, _PROFILE_MAX_ATTEMPTS + 1):
-            profile_reason = next_profile_reason
-            _attempt_started = _now_iso()
-            _attempt_t0 = time.monotonic()
+            run = recorder.begin_profile_run(attempt_reason=reason) if recorder is not None else 0
             profile_ctx = self._wrap_profile_ctx(
-                ctx,
-                disable_cuda_graph=disable_cuda_graph,
-                framework=framework,
+                ctx, disable_cuda_graph=arm.disable_cuda_graph, framework=arm.framework
             )
             try:
-                profile_result = await _reported(
-                    "profile",
-                    lambda: profile_executor(profile_ctx),
-                    index=attempt,
-                    total=_PROFILE_MAX_ATTEMPTS,
+                returned = await _reported(
+                    "profile", lambda: profile_executor(profile_ctx), index=attempt, total=_PROFILE_MAX_ATTEMPTS
                 )
             except Exception as exc:  # noqa: BLE001
-                last_phase = "profile"
-                last_error = f"profile_executor raised: {exc!r}"
-                log.warning(
-                    "roofline profile attempt %d/%d failed (exception): %s",
-                    attempt,
-                    _PROFILE_MAX_ATTEMPTS,
-                    last_error,
+                unusable = _raised(exc)
+            else:
+                unusable = _classify_profile(returned)
+            if unusable is None:
+                return await _adopt_profile(
+                    recorder, run, profile_ctx, session_dir, arm, attempt=attempt, result=returned
                 )
-                await _note_profile_run(
-                    status="failed",
-                    result=None,
-                    failure={"stage": last_phase, "error_class": type(exc).__name__, "message": last_error},
-                )
-                next_profile_reason = PROFILE_ATTEMPT_AFTER_EXCEPTION
-                # Only meaningful when capture was actually on. With the operator override set, a capture marker
-                # in the log tail says nothing about this run -- the tail can span an earlier boot -- so it is not
-                # evidence worth failing the action over, and the run row already carries the override.
-                _cg_category, _cg_marker = (
-                    ("", "") if disable_cuda_graph else _classify_cuda_graph_capture_failure(last_error)
-                )
-                if _cg_category:
-                    return await _fail_capture(
-                        category=_cg_category,
-                        marker=_cg_marker,
-                        attempt=attempt,
-                        sources={"last_error": last_error},
-                        profile_result=None,
-                    )
-                if attempt < _PROFILE_MAX_ATTEMPTS and _is_insufficient_gpu_memory(last_error):
-                    # Only ``repr(exc)`` is available on this branch — there is no result dict to pull ``err_text`` /
-                    # the server-log tail from.
-                    await _reclaim_gpus_for_retry(session_dir, attempt=attempt)
-                continue
-            if not isinstance(profile_result, dict):
-                last_phase = "profile"
-                last_error = f"profile_executor returned non-dict: {type(profile_result).__name__}"
-                log.warning(
-                    "roofline profile attempt %d/%d failed (bad return): %s",
-                    attempt,
-                    _PROFILE_MAX_ATTEMPTS,
-                    last_error,
-                )
-                await _note_profile_run(
-                    status="failed",
-                    result=None,
-                    failure={"stage": last_phase, "error_class": "bad_return", "message": last_error},
-                )
-                next_profile_reason = PROFILE_ATTEMPT_AFTER_BAD_RETURN
-                continue
-            trace_path = _extract_trace_path(profile_result)
-            if profile_result.get("status") != "succeeded":
-                if trace_path:
-                    # A duplicate stop_profile failure can arrive after a trace was already flushed successfully.
-                    profile_warning = {
-                        "status": profile_result.get("status"),
-                        "error_class": profile_result.get("error_class"),
-                        "error": profile_result.get("error"),
-                    }
-                    log.warning(
-                        "roofline profile attempt %d/%d returned status=%r "
-                        "but produced trace=%s; continuing to trace_analyze",
-                        attempt,
-                        _PROFILE_MAX_ATTEMPTS,
-                        profile_result.get("status"),
-                        trace_path,
-                    )
-                    successful_profile_params = dict(profile_ctx.task.params or {})
-                    _recovered_run = await _note_profile_run(status="recovered", result=profile_result)
-                    if recorder is not None:
-                        recorder.adopt_profile_run(
-                            run_index=_recovered_run,
-                            profile_result=profile_result,
-                            recovered=True,
-                            params=successful_profile_params,
-                        )
-                    break
-                last_phase = "profile"
-                last_error = str(profile_result.get("error") or "profile sub-step failed")
-                capture_reason = str((profile_result.get("trace_capture") or {}).get("reason") or "")
-                if (
-                    profile_result.get("error_class") in _NON_RETRYABLE_PROFILE_ERRORS
-                    or capture_reason in _NON_RETRYABLE_CAPTURE_REASONS
-                ):
-                    # Recorded before returning, so ``runs`` also describes the failure no retry can get past.
-                    await _note_profile_run(
-                        status="failed",
-                        result=profile_result,
-                        failure={
-                            "stage": last_phase,
-                            "error_class": str(profile_result.get("error_class") or ""),
-                            "message": last_error,
-                        },
-                    )
-                    return _fail("profile", last_error, sub_result=profile_result)
-                log.warning(
-                    "roofline profile attempt %d/%d failed: %s",
-                    attempt,
-                    _PROFILE_MAX_ATTEMPTS,
-                    last_error,
-                )
-                await _note_profile_run(
-                    status="failed",
-                    result=profile_result,
-                    failure={
-                        "stage": last_phase,
-                        "error_class": str(profile_result.get("error_class") or ""),
-                        "message": last_error,
-                    },
-                )
-                next_profile_reason = PROFILE_ATTEMPT_AFTER_FAILURE
-                _cg_sources = {
-                    "last_error": last_error,
-                    "profile_error": _profile_err_text(profile_result),
-                    "server_log_tail": _profile_server_log_tail(profile_result),
-                }
-                # Same reason as the exception path: with capture already off, a marker is not evidence about this
-                # run, and "does not retry with graph capture disabled" would be nonsense to read on such a run.
-                _cg_category, _cg_marker = (
-                    ("", "") if disable_cuda_graph else _classify_cuda_graph_capture_failure(*_cg_sources.values())
-                )
-                if _cg_category:
-                    return await _fail_capture(
-                        category=_cg_category,
-                        marker=_cg_marker,
-                        attempt=attempt,
-                        sources=_cg_sources,
-                        profile_result=profile_result,
-                    )
-                if attempt < _PROFILE_MAX_ATTEMPTS and _is_insufficient_gpu_memory(
-                    last_error,
-                    _cg_sources["profile_error"],
-                    _cg_sources["server_log_tail"],
-                ):
-                    await _reclaim_gpus_for_retry(session_dir, attempt=attempt)
-                continue
-            if not trace_path:
-                last_phase = "profile_no_trace"
-                last_error = (
-                    "profile succeeded but no trace_path in result (missing both main_trace_path and trace_files[0])"
-                )
-                log.warning(
-                    "roofline profile attempt %d/%d: no trace path",
-                    attempt,
-                    _PROFILE_MAX_ATTEMPTS,
-                )
-                await _note_profile_run(
-                    status="failed",
-                    result=profile_result,
-                    failure={"stage": last_phase, "error_class": "no_trace", "message": last_error},
-                )
-                next_profile_reason = PROFILE_ATTEMPT_AFTER_NO_TRACE
-                continue
-            # A capture-only profile yielded only CUDA-graph capture sidecars (no annotated steady-state trace).
-            if profile_result.get("profile_trace_selection_reason") == "capture_only_fallback":
-                last_phase = "profile_capture_only"
-                last_error = (
-                    "profile produced only CUDA-graph capture sidecars under "
-                    "capture_traces/ (no annotated steady-state trace); the "
-                    "steady-state splitter cannot use these — re-profile needed"
-                )
-                log.warning(
-                    "roofline profile attempt %d/%d: capture-only trace "
-                    "(%s); re-profiling (same graph-capture settings)",
-                    attempt,
-                    _PROFILE_MAX_ATTEMPTS,
-                    trace_path,
-                )
-                await _note_profile_run(
-                    status="failed",
-                    result=profile_result,
-                    failure={"stage": last_phase, "error_class": "capture_only", "message": last_error},
-                )
-                next_profile_reason = PROFILE_ATTEMPT_AFTER_CAPTURE_ONLY
-                continue
-            # Op count == 0: the torch-profiler active window captured no ops (metadata-only trace).
-            if bool((profile_result.get("trace_health") or {}).get("zero_ops")):
-                last_phase = "profile_zero_ops"
-                last_error = (
-                    "profile produced a metadata-only trace (PyTorch Profiler "
-                    "Op count == 0); the active capture window never overlapped "
-                    "execution — re-profile needed"
-                )
-                log.warning(
-                    "roofline profile attempt %d/%d: zero-ops trace (%s); re-profiling",
-                    attempt,
-                    _PROFILE_MAX_ATTEMPTS,
-                    trace_path,
-                )
-                await _note_profile_run(
-                    status="failed",
-                    result=profile_result,
-                    failure={"stage": last_phase, "error_class": "zero_ops", "message": last_error},
-                )
-                next_profile_reason = PROFILE_ATTEMPT_AFTER_ZERO_OPS
-                continue
-            # Success
-            if attempt > 1:
-                log.info(
-                    "roofline profile succeeded on attempt %d/%d",
-                    attempt,
-                    _PROFILE_MAX_ATTEMPTS,
-                )
-            successful_profile_params = dict(profile_ctx.task.params or {})
-            _succeeded_run = await _note_profile_run(status="succeeded", result=profile_result)
-            if recorder is not None:
-                recorder.adopt_profile_run(
-                    run_index=_succeeded_run,
-                    profile_result=profile_result,
-                    params=successful_profile_params,
-                )
-            break
-        else:
-            return _fail(
-                last_phase,
-                f"all {_PROFILE_MAX_ATTEMPTS} profile attempts failed; last: {last_error}",
-                sub_result=profile_result,
+            log.warning(
+                "roofline profile attempt %d/%d failed (%s): %s",
+                attempt,
+                _PROFILE_MAX_ATTEMPTS,
+                unusable.error_class,
+                unusable.message,
             )
+            await _end_profile_run(
+                recorder, run, session_dir, arm, status="failed", result=unusable.result, failure=unusable.failure
+            )
+            if not unusable.retryable:
+                return _fail(recorder, unusable.stage, unusable.message, unusable.result)
+            captured = await _fail_on_capture(
+                recorder, ctx.task, session_dir, arm, unusable, attempt=attempt, attempt_reason=reason
+            )
+            if captured is not None:
+                return captured
+            if attempt < _PROFILE_MAX_ATTEMPTS and _is_insufficient_gpu_memory(*unusable.evidence.values()):
+                await _reclaim_gpus_for_retry(session_dir, attempt=attempt)
+            reason = unusable.next_reason
+        message = f"all {_PROFILE_MAX_ATTEMPTS} profile attempts failed; last: {unusable.message}"
+        return _fail(recorder, unusable.stage, message, returned)
 
-        # Resolve the profiled arm explicitly so neither the snapshot's ceiling precision nor the recorded workload
-        # relies on a transient current_best inference: PRELUDE measures the baseline arm; all other reasons measure
-        # current_best.
-        roofline_arm = "baseline" if _reason == "prelude_initial" else "current_best"
-
-        # Inline-promote only the profile fields trace_analyze needs.
-        self.shared_state.last_profile_trace = str(trace_path)
-        self.shared_state.last_profile_status = "succeeded"
-        self.shared_state.record_profile_workload(
-            successful_profile_params or ctx.task.params or {},
-            arm=roofline_arm,
-        )
-        _backend = detect_kineto_backend(trace_path)
-        if _backend:
-            _fingerprint = dict(self.shared_state.stack_fingerprint_meta or {})
-            if _fingerprint.get("kineto_backend") != _backend:
-                _fingerprint["kineto_backend"] = _backend
-                self.shared_state.stack_fingerprint_meta = _fingerprint
-        if not self.shared_state.gpu_trace_unsupported_reason:
-            _unsupported = _gpu_trace_unsupported_reason(profile_result)
-            if _unsupported:
-                if _backend:
-                    _unsupported = f"{_unsupported} (Kineto backend: {_backend})"
-                self.shared_state.gpu_trace_unsupported_reason = _unsupported
-                log.error(
-                    "roofline: %s; automatic profile/roofline enqueues will be suppressed (stack=%s)",
-                    _unsupported,
-                    self.shared_state.stack_fingerprint_meta or "(unknown)",
-                )
-        # The host-side rewrite evidence is produced by the profile sub-step and is what the framework specialist is
-        # given instead of guessing landing points from source.
+    def _promote_profile(self, ctx: RunnerContext, profiled: _ProfileOutcome, *, roofline_arm: str) -> None:
+        """Promote the adopted profile onto shared state: its trace, workload, Kineto backend and rewrite evidence."""
         from ._framework_rewrite_evidence import promote_evidence_path
 
-        _evidence_path = promote_evidence_path(self.shared_state, profile_result)
-        if _evidence_path:
+        state = self.shared_state
+        state.last_profile_trace = str(profiled.trace_path)
+        state.last_profile_status = "succeeded"
+        state.record_profile_workload(profiled.params or ctx.task.params or {}, arm=roofline_arm)
+        backend = detect_kineto_backend(profiled.trace_path)
+        if backend:
+            fingerprint = dict(state.stack_fingerprint_meta or {})
+            if fingerprint.get("kineto_backend") != backend:
+                fingerprint["kineto_backend"] = backend
+                state.stack_fingerprint_meta = fingerprint
+        unsupported = "" if state.gpu_trace_unsupported_reason else _gpu_trace_unsupported_reason(profiled.result)
+        if unsupported:
+            if backend:
+                unsupported = f"{unsupported} (Kineto backend: {backend})"
+            state.gpu_trace_unsupported_reason = unsupported
+            log.error(
+                "roofline: %s; automatic profile/roofline enqueues will be suppressed (stack=%s)",
+                unsupported,
+                state.stack_fingerprint_meta or "(unknown)",
+            )
+        # The host-side rewrite evidence is what the framework specialist is given instead of guessing landing points
+        # from source.
+        evidence_path = promote_evidence_path(state, profiled.result)
+        if evidence_path:
             log.info(
                 "roofline: promoted host-side rewrite evidence (%s candidate(s)) -> %s",
-                profile_result.get("framework_rewrite_candidate_count"),
-                _evidence_path,
+                profiled.result.get("framework_rewrite_candidate_count"),
+                evidence_path,
             )
 
-        # ---- trace_analyze ------------------------------------------------- Route each roofline to its own report
-        # so the PRELUDE baseline snapshot is never overwritten: prelude keeps the default file, close_post_opt writes
-        # the "after" file, every other reason writes a rolling current one.
-        if _reason == "prelude_initial":
-            roofline_output_name = ""
-        elif _reason == "close_post_opt":
-            roofline_output_name = "kernel_roofline_opt.json"
-        else:
-            roofline_output_name = "kernel_roofline_current.json"
-        ta_payload: dict[str, Any] = {
-            "trace_input": str(trace_path),
-            "framework": framework,
-        }
-        workspace_path = _task_params.get("workspace_path")
-        if workspace_path not in (None, ""):
-            ta_payload["workspace_path"] = workspace_path
-        if roofline_arm:
-            ta_payload["roofline_arm"] = roofline_arm
-        if roofline_output_name:
-            ta_payload["roofline_output_name"] = roofline_output_name
+    async def _analyze(
+        self, ctx: RunnerContext, recorder: Any, payload: dict[str, Any]
+    ) -> _AnalysisOutcome | dict[str, Any]:
+        """Analyse the adopted trace, re-splitting it once when TraceLens names a usable steady-state mode (N26).
 
-        # The helper allocates the index it records under, so a run cannot be counted without a row behind it -- the
-        # compute-bound branch below can raise between "about to analyze" and "analyzed", and a separately incremented
-        # counter would then point ``effective_run_index`` at a row that does not exist.
-        analysis_run_count = 0
-        effective_analysis_run = 0
-
-        def _note_analysis_run(
-            *,
-            attempt_reason: str,
-            status: str,
-            started_at: str,
-            started_monotonic: float,
-            trace_input: str,
-            requested_mode: str = "",
-            result: dict[str, Any] | None = None,
-            failure: dict[str, Any] | None = None,
-        ) -> int:
-            """Append one trace-analysis attempt and return its run index."""
-            nonlocal analysis_run_count
-            analysis_run_count += 1
-            if recorder is not None:
-                recorder.record_analysis_run(
-                    run_index=analysis_run_count,
-                    attempt_reason=attempt_reason,
-                    status=status,
-                    started_at=started_at,
-                    duration_sec=round(time.monotonic() - started_monotonic, 3),
-                    trace_input=trace_input,
-                    requested_steady_state_mode=requested_mode,
-                    ta_result=result,
-                    failure=failure,
-                )
-            return analysis_run_count
-
-        _ta_started = _now_iso()
-        _ta_t0 = time.monotonic()
-        try:
-            ta_result = await _reported(
-                "trace_analyze",
-                lambda: trace_analyze_handler(ta_payload, session_dir=session_dir),
-            )
-        except Exception as exc:  # noqa: BLE001
-            # Clear the cache so the prompt shows no snapshot rather than advice tied to the previous trace.
+        Returns the analysis the action concludes from, or the failure result.
+        """
+        analysis = await self._trace_analyze_once(
+            ctx, recorder, payload, label="trace_analyze", attempt_reason=ANALYSIS_ATTEMPT_INITIAL
+        )
+        if isinstance(analysis, _AnalysisOutcome) and analysis.result.get("status") != "ok":
+            hint = _extract_steady_state_retry_mode(analysis.result)
+            if hint is not None:
+                analysis = await self._n26_retry(ctx, recorder, payload, *hint)
+        if not isinstance(analysis, _AnalysisOutcome):
+            return analysis
+        if analysis.result.get("status") != "ok":
             self.shared_state.last_trace_analyze = {}
-            _note_analysis_run(
-                attempt_reason=ANALYSIS_ATTEMPT_INITIAL,
-                status="failed",
-                started_at=_ta_started,
-                started_monotonic=_ta_t0,
-                trace_input=str(trace_path),
-                failure={
-                    "stage": "trace_analyze",
-                    "error_class": type(exc).__name__,
-                    "message": f"trace_analyze_handler raised: {exc!r}",
-                },
-            )
-            return _fail("trace_analyze", f"trace_analyze_handler raised: {exc!r}")
-        if not isinstance(ta_result, dict):
-            self.shared_state.last_trace_analyze = {}
-            _note_analysis_run(
-                attempt_reason=ANALYSIS_ATTEMPT_INITIAL,
-                status="failed",
-                started_at=_ta_started,
-                started_monotonic=_ta_t0,
-                trace_input=str(trace_path),
-                failure={
-                    "stage": "trace_analyze",
-                    "error_class": "bad_return",
-                    "message": f"trace_analyze_handler returned non-dict: {type(ta_result).__name__}",
-                },
-            )
-            return _fail(
-                "trace_analyze",
-                f"trace_analyze_handler returned non-dict: {type(ta_result).__name__}",
-            )
-        effective_analysis_run = _note_analysis_run(
-            attempt_reason=ANALYSIS_ATTEMPT_INITIAL,
-            status="succeeded" if ta_result.get("status") == "ok" else "failed",
-            started_at=_ta_started,
-            started_monotonic=_ta_t0,
-            trace_input=str(trace_path),
-            result=ta_result,
-            failure=(
-                None
-                if ta_result.get("status") == "ok"
-                else {
-                    "stage": "trace_analyze",
-                    "error_class": str(ta_result.get("error_class") or ""),
-                    "message": str(ta_result.get("error") or "trace_analyze sub-step failed"),
-                }
+            error = str(analysis.result.get("error") or "trace_analyze sub-step failed")
+            return _fail(recorder, "trace_analyze", error, analysis.result)
+        return analysis
+
+    async def _n26_retry(
+        self,
+        ctx: RunnerContext,
+        recorder: Any,
+        payload: dict[str, Any],
+        retry_mode: str,
+        source_warning: dict[str, Any],
+    ) -> _AnalysisOutcome | dict[str, Any]:
+        """Re-split the same trace with the mode the recovery warning names and analyse it once (no re-benchmark)."""
+        from_mode = source_warning.get("requested_mode") or "mixed"
+        busy_ratio = source_warning.get("busy_ratio")
+        threshold = source_warning.get("threshold")
+        warning_code = source_warning.get("code", "")
+        log.warning(
+            "roofline: N26 auto-retry — adjusting steady-state window "
+            "(mode %s -> %s%s); re-analyzing same trace without re-benchmarking. "
+            "This is a self-healing step, NOT a failure — monitoring should "
+            "expect a brief pause here.",
+            from_mode,
+            retry_mode,
+            (
+                f", busy_ratio={busy_ratio * 100:.2f}% < threshold={threshold * 100:.0f}%"
+                if busy_ratio is not None and threshold is not None
+                else (f", warning={warning_code}" if warning_code else "")
             ),
         )
-
-        # N26 auto-retry: on a recovery warning naming an alternate mode, re-split the SAME trace with that mode and
-        # re-issue trace_analyze ONCE (no re-benchmark).
-        retry_hint: "tuple[str, dict[str, Any]] | None" = None
-        if ta_result.get("status") != "ok":
-            retry_hint = _extract_steady_state_retry_mode(ta_result)
-        if retry_hint is not None:
-            retry_mode, source_warning = retry_hint
-            from_mode = source_warning.get("requested_mode") or "mixed"
-            busy_ratio = source_warning.get("busy_ratio")
-            threshold = source_warning.get("threshold")
-            warning_code = source_warning.get("code", "")
-            log.warning(
-                "roofline: N26 auto-retry — adjusting steady-state window "
-                "(mode %s -> %s%s); re-analyzing same trace without re-benchmarking. "
-                "This is a self-healing step, NOT a failure — monitoring should "
-                "expect a brief pause here.",
-                from_mode,
-                retry_mode,
-                (
-                    f", busy_ratio={busy_ratio * 100:.2f}% < threshold={threshold * 100:.0f}%"
-                    if busy_ratio is not None and threshold is not None
-                    else (f", warning={warning_code}" if warning_code else "")
-                ),
-            )
-            ta_payload_retry: dict[str, Any] = {
-                "trace_input": str(trace_path),
-                "framework": framework,
-                "steady_state_mode": retry_mode,
-                # Marker against retry loops.
-                "_n26_auto_retry": True,
-                "_n26_retry_from_mode": from_mode,
-            }
-            if "workspace_path" in ta_payload:
-                ta_payload_retry["workspace_path"] = ta_payload["workspace_path"]
-            if roofline_arm:
-                ta_payload_retry["roofline_arm"] = roofline_arm
-            if roofline_output_name:
-                ta_payload_retry["roofline_output_name"] = roofline_output_name
-            _retry_started = _now_iso()
-            _retry_t0 = time.monotonic()
-            try:
-                ta_result = await _reported(
-                    "trace_analyze_n26_retry",
-                    lambda: trace_analyze_handler(ta_payload_retry, session_dir=session_dir),
-                )
-            except Exception as exc:  # noqa: BLE001
-                self.shared_state.last_trace_analyze = {}
-                log.error(
-                    "roofline: N26 auto-retry FAILED (mode=%s): %r — "
-                    "this is a genuine trace_analyze failure after window adjustment.",
-                    retry_mode,
-                    exc,
-                )
-                _note_analysis_run(
-                    attempt_reason=ANALYSIS_ATTEMPT_N26_RETRY,
-                    status="failed",
-                    started_at=_retry_started,
-                    started_monotonic=_retry_t0,
-                    trace_input=str(trace_path),
-                    requested_mode=retry_mode,
-                    failure={
-                        "stage": "trace_analyze",
-                        "error_class": type(exc).__name__,
-                        "message": f"trace_analyze_handler raised on N26 auto-retry (mode={retry_mode}): {exc!r}",
-                    },
-                )
-                return _fail(
-                    "trace_analyze",
-                    (f"trace_analyze_handler raised on N26 auto-retry (mode={retry_mode}): {exc!r}"),
-                )
-            if not isinstance(ta_result, dict):
-                self.shared_state.last_trace_analyze = {}
-                log.error(
-                    "roofline: N26 auto-retry returned non-dict (mode=%s, type=%s) — "
-                    "genuine failure after window adjustment.",
-                    retry_mode,
-                    type(ta_result).__name__,
-                )
-                _note_analysis_run(
-                    attempt_reason=ANALYSIS_ATTEMPT_N26_RETRY,
-                    status="failed",
-                    started_at=_retry_started,
-                    started_monotonic=_retry_t0,
-                    trace_input=str(trace_path),
-                    requested_mode=retry_mode,
-                    failure={
-                        "stage": "trace_analyze",
-                        "error_class": "bad_return",
-                        "message": (
-                            f"trace_analyze_handler returned non-dict on N26 "
-                            f"auto-retry (mode={retry_mode}): {type(ta_result).__name__}"
-                        ),
-                    },
-                )
-                return _fail(
-                    "trace_analyze",
-                    (
-                        f"trace_analyze_handler returned non-dict on N26 "
-                        f"auto-retry (mode={retry_mode}): "
-                        f"{type(ta_result).__name__}"
-                    ),
-                )
-            retry_ok = ta_result.get("status") == "ok"
-            # The retry replaces ``ta_result`` outright, so it becomes the run the action concludes from whether or
-            # not it succeeded.
-            effective_analysis_run = _note_analysis_run(
-                attempt_reason=ANALYSIS_ATTEMPT_N26_RETRY,
-                status="succeeded" if retry_ok else "failed",
-                started_at=_retry_started,
-                started_monotonic=_retry_t0,
-                trace_input=str(trace_path),
-                requested_mode=retry_mode,
-                result=ta_result,
-                failure=(
-                    None
-                    if retry_ok
-                    else {
-                        "stage": "trace_analyze",
-                        "error_class": str(ta_result.get("error_class") or ""),
-                        "message": str(ta_result.get("error") or "trace_analyze sub-step failed"),
-                    }
-                ),
-            )
-            log.info(
+        # The two markers guard against retry loops.
+        retry_payload = {
+            **payload,
+            "steady_state_mode": retry_mode,
+            "_n26_auto_retry": True,
+            "_n26_retry_from_mode": from_mode,
+        }
+        analysis = await self._trace_analyze_once(
+            ctx,
+            recorder,
+            retry_payload,
+            label="trace_analyze_n26_retry",
+            attempt_reason=ANALYSIS_ATTEMPT_N26_RETRY,
+            context=f" on N26 auto-retry (mode={retry_mode})",
+        )
+        if isinstance(analysis, _AnalysisOutcome):
+            status = analysis.result.get("status")
+            log.log(
+                logging.INFO if status == "ok" else logging.ERROR,
                 "roofline: N26 auto-retry completed (mode %s -> %s, status=%s).",
                 from_mode,
                 retry_mode,
-                ta_result.get("status"),
+                status,
             )
-            if not retry_ok:
-                log.error(
-                    "roofline: N26 auto-retry status=%s — genuine failure "
-                    "after window adjustment (mode=%s); not a hang.",
-                    ta_result.get("status"),
-                    retry_mode,
-                )
-            # Stamp ``n26_auto_retry`` for the recorder / prompt (best-effort).
-            if isinstance(ta_result, dict):
-                ta_result.setdefault(
-                    "n26_auto_retry",
-                    {
-                        "applied": True,
-                        "from_mode": from_mode,
-                        "to_mode": retry_mode,
-                        "source_warning_code": warning_code,
-                    },
-                )
-
-        if ta_result.get("status") != "ok":
-            self.shared_state.last_trace_analyze = {}
-            return _fail(
-                "trace_analyze",
-                str(ta_result.get("error") or "trace_analyze sub-step failed"),
-                sub_result=ta_result,
+            analysis.result.setdefault(
+                "n26_auto_retry",
+                {"applied": True, "from_mode": from_mode, "to_mode": retry_mode, "source_warning_code": warning_code},
             )
+        return analysis
 
-        # status=ok but ZERO hot kernels means cuda-graph capture folded per-kernel time into hipGraphLaunch wrappers.
-        hot = ta_result.get("hot_kernels_top15") or ta_result.get("hot_kernels") or []
-        trace_health = profile_result.get("trace_health") or {}
-        attribution_degraded = bool(not hot and trace_health.get("per_kernel_attribution_degraded"))
-        if attribution_degraded:
-            warning = {
-                "code": "cuda_graph_attribution_degraded",
-                "severity": "warning",
-                "message": (
-                    "trace_analyze returned 0 hot kernels: the profile trace "
-                    "has no execute_*/user_annotation events, so per-kernel "
-                    "device time is folded into hipGraphLaunch wrappers under "
-                    "cuda-graph capture (#431). Re-profile in eager mode "
-                    "(append --enforce-eager to EXTRA_SGLANG_ARGS / "
-                    "EXTRA_VLLM_ARGS) so per-step annotations fire, or enable "
-                    "a capture-fold fallback over capture_traces/."
-                ),
-                "capture_traces_present": bool(trace_health.get("capture_traces_present")),
-            }
-            health = list(ta_result.get("trace_health_warnings") or [])
-            health.append(warning)
-            ta_result["trace_health_warnings"] = health
+    async def _trace_analyze_once(
+        self,
+        ctx: RunnerContext,
+        recorder: Any,
+        payload: dict[str, Any],
+        *,
+        label: str,
+        attempt_reason: str,
+        context: str = "",
+    ) -> _AnalysisOutcome | dict[str, Any]:
+        """Run and row one trace analysis; return it, or the failure result when the handler produced no result.
 
-        # Multi-node compute-bound auto re-profile: a host-bound (high-idle) trace under PD-disagg + DP yields zero
-        # kernel candidates because the per-rank per-step batch is tiny.
-        if (
-            not hot
-            and is_multi_node()
-            and os.environ.get(_AUTO_COMPUTE_BOUND_ENV, "1").strip() != "0"
-            and _trace_is_high_idle(ta_result)
-        ):
-            from ._multi_node_server_lifecycle import _COMPUTE_BOUND_PROFILE_ENV
+        ``context`` names the attempt in the failure message.
+        """
+        from .trace_analyze import trace_analyze_handler
 
-            log.info(
-                "roofline: host-bound trace (0 hot kernels + high GPU idle); "
-                "attempting one compute-bound re-profile (DP-attention stripped)"
-            )
-            _prev_cb = os.environ.get(_COMPUTE_BOUND_PROFILE_ENV)
-            os.environ[_COMPUTE_BOUND_PROFILE_ENV] = "1"
-            cb_adopted = False
-            cb_outcome = "re-profile produced no usable trace"
-            try:
-                cb_ctx = self._wrap_profile_ctx(
-                    ctx,
-                    disable_cuda_graph=disable_cuda_graph,
-                    framework=framework,
-                )
-                profile_reason = PROFILE_ATTEMPT_COMPUTE_BOUND
-                _attempt_started = _now_iso()
-                _attempt_t0 = time.monotonic()
-                try:
-                    cb_profile = await _reported(
-                        "profile_compute_bound",
-                        lambda: profile_executor(cb_ctx),
-                    )
-                except Exception as exc:
-                    # Recorded here rather than left to the fail-soft handler below: that one only narrates the
-                    # outcome, and an attempt the event never rows is an attempt ``attempt_count`` does not count.
-                    await _note_profile_run(
-                        status="failed",
-                        result=None,
-                        failure={
-                            "stage": "profile",
-                            "error_class": type(exc).__name__,
-                            "message": f"compute-bound re-profile raised: {exc!r}",
-                        },
-                    )
-                    raise
-                cb_trace = _extract_trace_path(cb_profile) if isinstance(cb_profile, dict) else ""
-                cb_profile_run = await _note_profile_run(
-                    status="succeeded" if cb_trace else "failed",
-                    result=cb_profile if isinstance(cb_profile, dict) else None,
-                    failure=(
-                        None
-                        if cb_trace
-                        else {
-                            "stage": "profile_no_trace",
-                            "error_class": "no_trace",
-                            "message": "compute-bound re-profile produced no trace path",
-                        }
-                    ),
-                )
-                if cb_trace:
-                    cb_payload: dict[str, Any] = {
-                        "trace_input": str(cb_trace),
-                        "framework": framework,
-                    }
-                    if roofline_arm:
-                        cb_payload["roofline_arm"] = roofline_arm
-                    if roofline_output_name:
-                        cb_payload["roofline_output_name"] = roofline_output_name
-                    _cb_started = _now_iso()
-                    _cb_t0 = time.monotonic()
-                    try:
-                        cb_ta = await _reported(
-                            "trace_analyze_compute_bound",
-                            lambda: trace_analyze_handler(cb_payload, session_dir=session_dir),
-                        )
-                    except Exception as exc:
-                        _note_analysis_run(
-                            attempt_reason=ANALYSIS_ATTEMPT_COMPUTE_BOUND,
-                            status="failed",
-                            started_at=_cb_started,
-                            started_monotonic=_cb_t0,
-                            trace_input=str(cb_trace),
-                            failure={
-                                "stage": "trace_analyze",
-                                "error_class": type(exc).__name__,
-                                "message": f"compute-bound re-analysis raised: {exc!r}",
-                            },
-                        )
-                        raise
-                    _cb_ok = isinstance(cb_ta, dict) and cb_ta.get("status") == "ok"
-                    cb_analysis_run = _note_analysis_run(
-                        attempt_reason=ANALYSIS_ATTEMPT_COMPUTE_BOUND,
-                        status="succeeded" if _cb_ok else "failed",
-                        started_at=_cb_started,
-                        started_monotonic=_cb_t0,
-                        trace_input=str(cb_trace),
-                        result=cb_ta if isinstance(cb_ta, dict) else None,
-                        failure=(
-                            None
-                            if _cb_ok
-                            else {
-                                "stage": "trace_analyze",
-                                "error_class": "compute_bound_reanalyze",
-                                "message": str((cb_ta or {}).get("error") or "compute-bound re-analysis failed")
-                                if isinstance(cb_ta, dict)
-                                else f"non-dict result: {type(cb_ta).__name__}",
-                            }
-                        ),
-                    )
-                    if isinstance(cb_ta, dict) and cb_ta.get("status") == "ok":
-                        cb_hot = cb_ta.get("hot_kernels_top15") or cb_ta.get("hot_kernels") or []
-                        if cb_hot:
-                            log.info(
-                                "roofline: compute-bound re-profile surfaced %d hot "
-                                "kernel(s); adopting it for candidate dispatch",
-                                len(cb_hot),
-                            )
-                            ta_result = cb_ta
-                            ta_payload = cb_payload
-                            hot = cb_hot
-                            trace_path = cb_trace
-                            successful_profile_params = dict(cb_ctx.task.params or {})
-                            self.shared_state.last_profile_trace = str(cb_trace)
-                            self.shared_state.record_profile_workload(
-                                successful_profile_params,
-                                arm=roofline_arm,
-                            )
-                            cb_adopted = True
-                            cb_outcome = f"adopted: surfaced {len(cb_hot)} hot kernel(s)"
-                            # Only on adoption: a re-profile that stayed host-bound leaves the original run as the one
-                            # the conclusion rests on.
-                            effective_analysis_run = cb_analysis_run
-                            if recorder is not None:
-                                recorder.adopt_profile_run(
-                                    run_index=cb_profile_run,
-                                    profile_result=cb_profile if isinstance(cb_profile, dict) else None,
-                                    params=successful_profile_params,
-                                )
-                        else:
-                            cb_outcome = "still host-bound: re-analysis surfaced no hot kernels"
-                            log.info(
-                                "roofline: compute-bound re-profile still host-bound "
-                                "/ no hot kernels; keeping original result"
-                            )
-            except Exception as exc:  # noqa: BLE001 — fail-soft
-                cb_outcome = f"re-profile raised: {exc!r}"
-                log.warning(
-                    "roofline: compute-bound re-profile failed (%s); keeping original",
-                    exc,
-                )
-            finally:
-                if recorder is not None:
-                    recorder.record_compute_bound_reprofile(
-                        attempted=True,
-                        adopted=cb_adopted,
-                        reason=cb_outcome,
-                    )
-                if _prev_cb is None:
-                    os.environ.pop(_COMPUTE_BOUND_PROFILE_ENV, None)
-                else:
-                    os.environ[_COMPUTE_BOUND_PROFILE_ENV] = _prev_cb
-
-        # Cache via the C1 recorder (bumps roofline_snapshot_id by one, writes analysis_md_text / analysis_md_path).
-        self.shared_state.record_trace_analyze(ta_payload, ta_result)
-        cached = self.shared_state.last_trace_analyze or {}
-
-        if recorder is not None:
-            recorder.adopt_analysis_run(
-                run_index=effective_analysis_run,
-                ta_result=ta_result,
-                trace_input=str(trace_path),
-            )
-
-        # The auto-roofline TraceLens run does NOT pass through Coordinator._handle_request, so emit its lifecycle
-        # event here.
+        session_dir = self._resolve_session_dir(ctx)
+        run_index = recorder.begin_analysis_run(attempt_reason=attempt_reason) if recorder is not None else 0
         try:
-            record_lifecycle_event(
-                self.shared_state,
-                step="roofline",
-                status="END",
-                artifacts={
-                    "trace_input": str(trace_path),
-                    "analysis_md_path": str(cached.get("analysis_md_path") or ""),
-                    "candidates_path": str(cached.get("candidates_path") or ""),
-                    "kernel_roofline_path": str(cached.get("kernel_roofline_path") or ""),
-                },
-                detail=f"hot_kernels={len(hot)}",
-                duration_s=time.monotonic() - _lc_t0,
-            )
-            sd = Path(session_dir)
-            if sd.name and sd.is_dir() and (sd / "state.json").exists():
-                self.shared_state.save(sd)
-        except Exception:
-            log.debug("roofline: lifecycle emit failed", exc_info=True)
+            result = await _reported(label, lambda: trace_analyze_handler(payload, session_dir=session_dir))
+        except Exception as exc:  # noqa: BLE001
+            error_class, message = type(exc).__name__, f"trace_analyze_handler raised{context}: {exc!r}"
+        else:
+            if isinstance(result, dict):
+                ok = result.get("status") == "ok"
+                failure = {
+                    "stage": "trace_analyze",
+                    "error_class": str(result.get("error_class") or ""),
+                    "message": str(result.get("error") or "trace_analyze sub-step failed"),
+                }
+                _end_analysis_run(
+                    recorder,
+                    run_index,
+                    payload,
+                    status="succeeded" if ok else "failed",
+                    result=result,
+                    failure=None if ok else failure,
+                )
+                return _AnalysisOutcome(payload=payload, result=result, run_index=run_index)
+            error_class = "bad_return"
+            message = f"trace_analyze_handler returned non-dict{context}: {type(result).__name__}"
+        # Clear the cache so the prompt shows no snapshot rather than advice tied to the previous trace.
+        self.shared_state.last_trace_analyze = {}
+        log.error("roofline: %s", message)
+        failure = {"stage": "trace_analyze", "error_class": error_class, "message": message}
+        _end_analysis_run(recorder, run_index, payload, status="failed", failure=failure)
+        return _fail(recorder, "trace_analyze", message)
 
+    async def _compute_bound_reprofile(
+        self, ctx: RunnerContext, recorder: Any, arm: _ProfileArm, analysis: _AnalysisOutcome
+    ) -> _AnalysisOutcome | None:
+        """Re-profile a host-bound trace once with DP attention stripped; return the analysis to adopt, or ``None``.
+
+        Fail-soft: whatever goes wrong, the original analysis stands.
+        """
+        from ._multi_node_server_lifecycle import _COMPUTE_BOUND_PROFILE_ENV
+
+        log.info(
+            "roofline: host-bound trace (0 hot kernels + high GPU idle); "
+            "attempting one compute-bound re-profile (DP-attention stripped)"
+        )
+        previous = os.environ.get(_COMPUTE_BOUND_PROFILE_ENV)
+        os.environ[_COMPUTE_BOUND_PROFILE_ENV] = "1"
+        adopted: _AnalysisOutcome | None = None
+        outcome = "re-profile produced no usable trace"
+        try:
+            adopted, outcome = await self._compute_bound_attempt(ctx, recorder, arm, analysis.payload)
+        except Exception as exc:  # noqa: BLE001 — fail-soft
+            outcome = f"re-profile raised: {exc!r}"
+            log.warning("roofline: compute-bound re-profile failed (%s); keeping original", exc)
+        finally:
+            if recorder is not None:
+                recorder.record_compute_bound_reprofile(attempted=True, adopted=adopted is not None, reason=outcome)
+            if previous is None:
+                os.environ.pop(_COMPUTE_BOUND_PROFILE_ENV, None)
+            else:
+                os.environ[_COMPUTE_BOUND_PROFILE_ENV] = previous
+        return adopted
+
+    async def _compute_bound_attempt(
+        self, ctx: RunnerContext, recorder: Any, arm: _ProfileArm, payload: dict[str, Any]
+    ) -> tuple[_AnalysisOutcome | None, str]:
+        """Profile and analyse once under the compute-bound override; return the analysis to adopt and why."""
+        session_dir = self._resolve_session_dir(ctx)
+        cb_ctx = self._wrap_profile_ctx(ctx, disable_cuda_graph=arm.disable_cuda_graph, framework=arm.framework)
+        profile_run, cb_profile = await _compute_bound_profile(recorder, session_dir, arm, cb_ctx)
+        cb_trace = _extract_trace_path(cb_profile)
+        if not cb_trace:
+            return None, "re-profile produced no usable trace"
+        cb_payload = {
+            "trace_input": cb_trace,
+            "framework": payload["framework"],
+            **{key: payload[key] for key in ("roofline_arm", "roofline_output_name") if key in payload},
+        }
+        analysis = await _compute_bound_analysis(recorder, session_dir, cb_payload)
+        if analysis is None:
+            return None, "re-profile produced no usable trace"
+        cb_hot = _hot_kernels(analysis.result)
+        if not cb_hot:
+            log.info("roofline: compute-bound re-profile still host-bound / no hot kernels; keeping original result")
+            return None, "still host-bound: re-analysis surfaced no hot kernels"
+        log.info(
+            "roofline: compute-bound re-profile surfaced %d hot kernel(s); adopting it for candidate dispatch",
+            len(cb_hot),
+        )
+        params = dict(cb_ctx.task.params or {})
+        self.shared_state.last_profile_trace = cb_trace
+        self.shared_state.record_profile_workload(params, arm=payload["roofline_arm"])
+        if recorder is not None:
+            recorder.adopt_profile_run(run_index=profile_run, profile_result=cb_profile, params=params)
+        return analysis, f"adopted: surfaced {len(cb_hot)} hot kernel(s)"
+
+    def _conclude(
+        self,
+        ctx: RunnerContext,
+        recorder: Any,
+        profiled: _ProfileOutcome,
+        analysis: _AnalysisOutcome,
+        *,
+        attribution_degraded: bool,
+        started: float,
+    ) -> dict[str, Any]:
+        """Cache the analysis the action concluded from, close the event as succeeded and build the result."""
+        trace_path = str(analysis.payload["trace_input"])
+        hot = _hot_kernels(analysis.result)
+        # Cache via the C1 recorder (bumps roofline_snapshot_id by one, writes analysis_md_text / analysis_md_path).
+        self.shared_state.record_trace_analyze(analysis.payload, analysis.result)
+        cached = self.shared_state.last_trace_analyze or {}
+        if recorder is not None:
+            recorder.adopt_analysis_run(run_index=analysis.run_index, ta_result=analysis.result, trace_input=trace_path)
+        self._record_lifecycle(
+            self._resolve_session_dir(ctx),
+            status="END",
+            artifacts={
+                "trace_input": trace_path,
+                "analysis_md_path": str(cached.get("analysis_md_path") or ""),
+                "candidates_path": str(cached.get("candidates_path") or ""),
+                "kernel_roofline_path": str(cached.get("kernel_roofline_path") or ""),
+            },
+            detail=f"hot_kernels={len(hot)}",
+            duration_s=time.monotonic() - started,
+        )
         result = {
             "status": "succeeded",
             "executed_at_iso": _now_iso(),
             "snapshot_id": cached.get("roofline_snapshot_id"),
-            "last_profile_trace": str(trace_path),
+            "last_profile_trace": trace_path,
             "steady_state_trace": cached.get("steady_state_trace", ""),
             "analysis_md_path": cached.get("analysis_md_path", ""),
             "kernel_roofline_path": cached.get("kernel_roofline_path", ""),
-            "profile_workspace": profile_result.get("workspace"),
+            "profile_workspace": profiled.result.get("workspace"),
             # True when trace_analyze produced 0 hot kernels because cuda-graph folding stripped per-kernel
             # attribution.
             "kernel_attribution_degraded": attribution_degraded,
         }
-        if profile_warning is not None:
+        if profiled.warning is not None:
             result["profile_recovered"] = True
-            result["profile_warning"] = profile_warning
+            result["profile_warning"] = profiled.warning
         if recorder is not None:
             snapshots = self.shared_state.roofline_snapshots
             recorder.finish_succeeded(
@@ -1491,14 +1307,24 @@ class RooflineExecutor:
                 hot_kernel_count=len(hot),
                 kernel_attribution_degraded=attribution_degraded,
                 cached=cached,
-                trace_path=str(trace_path),
-                # The snapshot this run just appended. Read here rather than in
-                # the recorder because the history is capped and later runs
-                # evict entries, so the numbers have to be taken while the run
-                # that produced them is still the latest.
+                trace_path=trace_path,
+                # The snapshot this run just appended. Read here rather than in the recorder because the history is
+                # capped and later runs evict entries, so the numbers have to be taken while this run is the latest.
                 snapshot=snapshots[-1] if isinstance(snapshots, list) and snapshots else None,
             )
         return result
+
+    def _record_lifecycle(self, session_dir: Path, **event: Any) -> None:
+        """Emit a roofline lifecycle event and persist state.
+
+        The auto-roofline path bypasses Coordinator._handle_request, so the action emits its own START / END pair.
+        """
+        try:
+            record_lifecycle_event(self.shared_state, step="roofline", **event)
+            if session_dir.name and session_dir.is_dir() and (session_dir / "state.json").exists():
+                self.shared_state.save(session_dir)
+        except Exception:
+            log.debug("roofline: lifecycle %s emit failed", event.get("status"), exc_info=True)
 
     # Helpers (instance methods so tests can subclass / monkeypatch)
     @staticmethod

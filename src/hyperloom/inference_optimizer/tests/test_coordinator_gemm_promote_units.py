@@ -13,7 +13,6 @@ from types import SimpleNamespace
 
 import pytest
 
-import hyperloom.inference_optimizer.model_config_utils as mcu_mod
 import hyperloom.orchestrator.kernel.request_handlers as krh_mod
 import hyperloom.orchestrator.phases.kernel as kernel_phase_mod
 from hyperloom.common.env import EnvValueError
@@ -1003,11 +1002,6 @@ class TestForgeGemmRuntimeConfigMerge:
     async def test_handles_no_candidates_without_rewriting_raw_result(self, tmp_path, monkeypatch):
         coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
         phase = KernelPhase(coord)
-        monkeypatch.setattr(
-            KernelPhase,
-            "_ck_blockscale_switch_eligible",
-            lambda self, result: False,
-        )
         result = {
             "backend": "forge",
             "precision": "bf16",
@@ -1138,152 +1132,6 @@ class TestBf16DenseFallbackIsInternalToForge:
             "_is_bf16_dense_gemm_fallback_attempt",
         ):
             assert not hasattr(coord, name), f"{name} should have been removed by Change 3"
-
-
-def _eligible_coord(tmp_path, monkeypatch, **overrides):
-    """Coordinator wired for a CK-switch-eligible forge workload."""
-    kwargs = dict(
-        baseline_tput=100.0,
-        framework="sglang",
-        precision="fp8",
-        gpu_type="mi300x",
-        model_path="/models/blockscale-fp8",
-    )
-    kwargs.update(overrides)
-    coord = _coord(tmp_path, **kwargs)
-    monkeypatch.setattr(mcu_mod, "_fp8_is_block_scale", lambda _p: True)
-    return coord
-
-
-class TestCkBlockscaleSwitchEligible:
-    """``_ck_blockscale_switch_eligible`` gates the CK backend switch to forge + sglang + fp8 + gfx942 + block-scale checkpoints."""
-
-    def test_eligible_for_forge_sglang_fp8_mi300x_blockscale(self, tmp_path, monkeypatch):
-        coord = _eligible_coord(tmp_path, monkeypatch)
-        assert coord.phase_kernel._ck_blockscale_switch_eligible({"backend": "forge"}) is True
-
-    def test_not_eligible_non_forge_backend(self, tmp_path, monkeypatch):
-        coord = _eligible_coord(tmp_path, monkeypatch)
-        assert coord.phase_kernel._ck_blockscale_switch_eligible({"backend": "geak"}) is False
-
-    def test_not_eligible_non_sglang(self, tmp_path, monkeypatch):
-        coord = _eligible_coord(tmp_path, monkeypatch, framework="vllm")
-        assert coord.phase_kernel._ck_blockscale_switch_eligible({"backend": "forge"}) is False
-
-    def test_not_eligible_non_fp8(self, tmp_path, monkeypatch):
-        # Non-fp8 session precision and no runtime fp8 signal -> not eligible.
-        coord = _eligible_coord(tmp_path, monkeypatch, precision="bf16")
-        monkeypatch.setattr(krh_mod, "_resolve_forge_precision_and_quant", lambda _s, _p: ("bf16", "auto"))
-        assert coord.phase_kernel._ck_blockscale_switch_eligible({"backend": "forge"}) is False
-
-    def test_not_eligible_non_gfx942_gpu(self, tmp_path, monkeypatch):
-        # mi355x is a known AMD type but NOT in _GFX942_GPU_TYPES.
-        coord = _eligible_coord(tmp_path, monkeypatch, gpu_type="mi355x")
-        assert coord.phase_kernel._ck_blockscale_switch_eligible({"backend": "forge"}) is False
-
-    def test_not_eligible_non_block_scale_fp8(self, tmp_path, monkeypatch):
-        # No weight_block_size, so the block-scale probe declines.
-        coord = _eligible_coord(tmp_path, monkeypatch)
-        monkeypatch.setattr(mcu_mod, "_fp8_is_block_scale", lambda _p: False)
-        assert coord.phase_kernel._ck_blockscale_switch_eligible({"backend": "forge"}) is False
-
-    def test_eligible_for_runtime_fp8_via_result_precision(self, tmp_path, monkeypatch):
-        # Session precision is bf16, but the forge result stamps runtime precision fp8.
-        coord = _eligible_coord(tmp_path, monkeypatch, precision="bf16")
-        monkeypatch.setattr(krh_mod, "_resolve_forge_precision_and_quant", lambda _s, _p: ("bf16", "auto"))
-        assert coord.phase_kernel._ck_blockscale_switch_eligible({"backend": "forge", "precision": "fp8"}) is True
-
-    def test_eligible_for_runtime_fp8_via_quantization_arg(self, tmp_path, monkeypatch):
-        # Runtime --quantization fp8 is resolved from server args.
-        coord = _eligible_coord(tmp_path, monkeypatch, precision="bf16")
-        monkeypatch.setattr(krh_mod, "_resolve_forge_precision_and_quant", lambda _s, _p: ("fp8", "auto"))
-        assert coord.phase_kernel._ck_blockscale_switch_eligible({"backend": "forge"}) is True
-
-    def test_not_eligible_per_token_fp8(self, tmp_path, monkeypatch):
-        # Per-channel/per-token fp8 carries no weight_block_size -> declined.
-        coord = _eligible_coord(tmp_path, monkeypatch)
-        monkeypatch.setattr(mcu_mod, "_fp8_is_block_scale", lambda _p: False)
-        assert coord.phase_kernel._ck_blockscale_switch_eligible({"backend": "forge"}) is False
-
-    def test_non_dict_result_is_not_eligible(self, tmp_path, monkeypatch):
-        coord = _eligible_coord(tmp_path, monkeypatch)
-        assert coord.phase_kernel._ck_blockscale_switch_eligible("nope") is False  # type: ignore[arg-type]
-
-
-class TestCkBlockscaleCandidateInjection:
-    """The fp8 block-scale CK switch enters as its own candidate to be measured."""
-
-    def _forge_result(self, **overrides):
-        result = {
-            "status": "ok",
-            "decision": "KEEP",
-            "best_speedup": 1.2,
-            "backend": "forge",
-            "extra_envs": {"AITER_CONFIG": "/cfg/tuned.json"},
-        }
-        result.update(overrides)
-        return result
-
-    def _ck_candidates(self, coord, result):
-        return [
-            c
-            for c in coord.phase_kernel._gemm_e2e_candidates(result)
-            if c["env_var"] == "SGLANG_FP8_BLOCKSCALE_CK_MAX_M"
-        ]
-
-    def test_injects_for_forge_eligible_keep(self, tmp_path, monkeypatch):
-        coord = _eligible_coord(tmp_path, monkeypatch)
-        cands = self._ck_candidates(coord, self._forge_result())
-        assert len(cands) == 1
-        assert cands[0]["envs"] == {"SGLANG_FP8_BLOCKSCALE_CK_MAX_M": "256"}
-        assert cands[0]["tuner"] == "ck_blockscale_backend_switch"
-
-    def test_does_not_inject_for_geak_backend(self, tmp_path, monkeypatch):
-        coord = _eligible_coord(tmp_path, monkeypatch)
-        result = {
-            "status": "ok",
-            "decision": "KEEP",
-            "best_speedup": 1.2,
-            "backend": "geak",
-            "tuned_file": "/tuned/gemm.csv",
-        }
-        assert self._ck_candidates(coord, result) == []
-        assert [c["tuner"] for c in coord.phase_kernel._gemm_e2e_candidates(result)] == ["a8w8_blockscale_tuned_gemm"]
-
-    def test_does_not_inject_for_bf16_precision(self, tmp_path, monkeypatch):
-        coord = _eligible_coord(tmp_path, monkeypatch, precision="bf16")
-        assert self._ck_candidates(coord, self._forge_result()) == []
-
-    def test_does_not_inject_for_non_sglang_framework(self, tmp_path, monkeypatch):
-        coord = _eligible_coord(tmp_path, monkeypatch, framework="vllm")
-        assert self._ck_candidates(coord, self._forge_result()) == []
-
-    def test_does_not_inject_for_non_gfx942_gpu(self, tmp_path, monkeypatch):
-        coord = _eligible_coord(tmp_path, monkeypatch, gpu_type="mi355x")
-        assert self._ck_candidates(coord, self._forge_result()) == []
-
-    def test_does_not_inject_for_non_block_scale_fp8(self, tmp_path, monkeypatch):
-        coord = _eligible_coord(tmp_path, monkeypatch)
-        monkeypatch.setattr(mcu_mod, "_fp8_is_block_scale", lambda _p: False)
-        assert self._ck_candidates(coord, self._forge_result()) == []
-
-    def test_does_not_double_inject_when_a_tuner_already_carries_the_switch(self, tmp_path, monkeypatch):
-        coord = _eligible_coord(tmp_path, monkeypatch)
-        result = self._forge_result(
-            tuners_run=[
-                {
-                    "tuner": "blockscale",
-                    "status": "ok",
-                    "candidate": True,
-                    "env_var": "SGLANG_FP8_BLOCKSCALE_CK_MAX_M",
-                    "env_value": "512",
-                    "best_micro_speedup": 1.4,
-                }
-            ]
-        )
-        cands = self._ck_candidates(coord, result)
-        assert len(cands) == 1
-        assert cands[0]["env_value"] == "512"
 
 
 class TestHandleGemmTuningResult:
@@ -1471,31 +1319,6 @@ class TestHandleGemmTuningResult:
 
         assert coord.shared_state.optimization_stack == []
         assert not coord.shared_state.gemm_tuning_attempts[0].get("tuned_file")
-
-    @pytest.mark.asyncio
-    async def test_forge_no_improvement_but_ck_eligible_routes_to_validator(self, tmp_path, monkeypatch):
-        # a8w8 tuner reported no_improvement but the CK block-scale switch is eligible → route to the E2E validator,
-        # not inline promote.
-        coord = _eligible_coord(tmp_path, monkeypatch)
-        called: dict[str, object] = {}
-
-        async def _fake_validate(result):
-            called["result"] = result
-
-        coord.phase_kernel._validate_gemm_tuning_e2e = _fake_validate  # type: ignore[assignment]
-
-        await coord.phase_kernel._handle_gemm_tuning_result(
-            {
-                "status": "complete",
-                "decision": "REVERT",
-                "micro_decision": "no_improvement",
-                "backend": "forge",
-                "requires_e2e_validation": False,
-            }
-        )
-
-        assert "result" in called
-        assert coord.shared_state.optimization_stack == []
 
     @pytest.mark.asyncio
     async def test_geak_promotes_on_the_measured_tput_not_the_micro_speedup(self, tmp_path, monkeypatch):
@@ -2449,72 +2272,6 @@ class TestValidateForgeGemmTuningE2E:
             "AITER_CONFIG_FMOE": str(fmoe_candidate),
             "AITER_DENSE": "/dense.json",
         }
-
-    @pytest.mark.asyncio
-    async def test_injects_synthetic_ck_candidate_when_eligible_no_table_candidates(self, tmp_path, monkeypatch):
-        # No table candidates, but CK switch is eligible: the synthetic CK candidate is injected, E2E-validated, and
-        # stacked under gemm_tuning.
-        coord = _eligible_coord(tmp_path, monkeypatch)
-        fake = _make_integrate([{"decision": "KEEP", "new_tput": 209.0, "gain_pct": 109.0}])
-        monkeypatch.setattr(krh_mod, "integrate_handler", fake)
-
-        result = {
-            "workspace": str(tmp_path),
-            "backend": "forge",
-            "recommended_env": {},
-            "extra_envs": {},
-            "tuners_run": [
-                {
-                    "status": "ok",
-                    "improved_shapes": 0,
-                    "tuner": "a8w8_blockscale",
-                    "env_var": "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE",
-                    "env_value": "/t.csv",
-                },
-            ],
-        }
-        await coord.phase_kernel._validate_gemm_tuning_e2e(result)
-
-        assert len(fake.calls) == 1
-        assert fake.calls[0]["extra_envs"] == {"SGLANG_FP8_BLOCKSCALE_CK_MAX_M": "256"}
-        assert fake.calls[0]["extra_server_args"] == ""
-
-        stack = coord.shared_state.optimization_stack
-        assert len(stack) == 1
-        assert stack[0]["action"] == "gemm_tuning"
-        assert stack[0]["variant_name"] == "forge_ck_blockscale_backend_switch"
-        assert stack[0]["extra_envs"]["SGLANG_FP8_BLOCKSCALE_CK_MAX_M"] == "256"
-        # Result rewritten to the E2E-validated KEEP outcome.
-        assert result["e2e_validated"] is True
-        assert result["decision"] == "KEEP"
-        assert result["recommended_env"] == {"SGLANG_FP8_BLOCKSCALE_CK_MAX_M": "256"}
-
-    @pytest.mark.asyncio
-    async def test_no_synthetic_ck_candidate_when_not_eligible(self, tmp_path, monkeypatch):
-        # Not eligible (vllm): no candidates → early return, integrate never called.
-        coord = _eligible_coord(tmp_path, monkeypatch, framework="vllm")
-        fake = _make_integrate([{"decision": "KEEP", "new_tput": 209.0, "gain_pct": 109.0}])
-        monkeypatch.setattr(krh_mod, "integrate_handler", fake)
-
-        result = {
-            "backend": "forge",
-            "recommended_env": {},
-            "extra_envs": {},
-            "requires_e2e_validation": True,
-            "tuners_run": [
-                {
-                    "status": "ok",
-                    "improved_shapes": 0,
-                    "tuner": "a8w8_blockscale",
-                    "env_var": "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE",
-                    "env_value": "/t.csv",
-                },
-            ],
-        }
-        await coord.phase_kernel._validate_gemm_tuning_e2e(result)
-
-        assert fake.calls == []
-        assert coord.shared_state.optimization_stack == []
 
     @pytest.mark.asyncio
     async def test_keep_only_when_tput_improves(self, tmp_path, monkeypatch):

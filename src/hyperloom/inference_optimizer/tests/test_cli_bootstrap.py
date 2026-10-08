@@ -147,6 +147,8 @@ def test_seed_shared_state_records_custom_workload_paths(
     assert state.bypass_scripts_dir == "/scripts"
     assert state.framework_repo_path == "/fw"
     assert state.benchmark_backend == "bypass"
+    # No KB has run yet: the framework on disk comes from the seed alone.
+    assert SharedState.load_or_init(tmp_path).framework == "custom"
 
 
 def _neutralize_seed_io(monkeypatch):

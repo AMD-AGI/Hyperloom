@@ -271,15 +271,6 @@ def test_visible_gpu_count_rocm_smi_error(monkeypatch):
     assert we._visible_gpu_count() == 0
 
 
-def test_default_baseline_config(monkeypatch):
-    monkeypatch.setenv("FRAMEWORK", "atom")
-    assert we.default_baseline_config().name == "baseline_atom.yaml"
-    monkeypatch.setenv("FRAMEWORK", "vllm")
-    assert we.default_baseline_config().name == "baseline_vllm.yaml"
-    monkeypatch.setenv("FRAMEWORK", "weird")
-    assert we.default_baseline_config().name == "baseline_sglang.yaml"
-
-
 def test_precision_and_gpu_type_no_framework_agent(monkeypatch, tmp_path):
     _clear_env(monkeypatch)
     monkeypatch.setenv("PRECISION", "fp8")
@@ -577,12 +568,11 @@ def test_agentx_diagnostic_profile_preserves_installed_framework(monkeypatch, tm
 
     monkeypatch.setattr(we, "ensure_sglang_patched_for_tracelens", reject_source_patch)
     monkeypatch.setattr(we, "ensure_vllm_patched_for_tracelens", reject_source_patch)
-    monkeypatch.setattr(we, "ensure_sglang_patched_for_ck_blockscale", reject_source_patch)
     src = _write(
         tmp_path / "profile.yaml",
         framework=framework,
         agentx="enable",
-        envs={"PROFILE": "1", "SGLANG_FP8_BLOCKSCALE_CK_MAX_M": "32"},
+        envs={"PROFILE": "1"},
         profiler={"torch_profiler": {"enabled": True}},
     )
 
