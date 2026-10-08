@@ -1988,7 +1988,7 @@ async def test_handle_intent_policy_denied(coord: Coordinator, monkeypatch) -> N
     async def _rec(source, intent, denied):
         recorded.append(denied)
 
-    monkeypatch.setattr(coord.writeback, "record_policy_denied", _rec)
+    monkeypatch.setattr(coord.router, "record_policy_denied", _rec)
     await coord.router.handle_intent("orchestration", _idle_intent())
     assert recorded
 
@@ -2371,7 +2371,7 @@ async def test_handle_delegate_sequence_denied(coord: Coordinator, monkeypatch) 
     async def _rec(source, intent, denied, action_name=None):
         recorded.append(denied)
 
-    monkeypatch.setattr(coord.writeback, "record_policy_denied", _rec)
+    monkeypatch.setattr(coord.router, "record_policy_denied", _rec)
     await coord.router.handle_delegate("orchestration", _delegate("explore", "d-seq"))
     assert recorded
 
@@ -2386,7 +2386,7 @@ async def test_handle_delegate_duplicate_running_denied(coord: Coordinator, monk
     async def _rec(source, intent, denied, action_name=None):
         recorded.append(denied)
 
-    monkeypatch.setattr(coord.writeback, "record_policy_denied", _rec)
+    monkeypatch.setattr(coord.router, "record_policy_denied", _rec)
     # Same key while the first task is still queued (non-terminal) -> denied.
     await coord.router.handle_delegate("orchestration", _delegate("explore", "d-same"))
     assert recorded

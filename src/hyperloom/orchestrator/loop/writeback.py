@@ -56,7 +56,6 @@ from ..bringup import ARGV_INVALID
 from ..framework.artifacts import candidate_key
 from ..state._shared_state.attempt_audit import _AUDIT_ACTIONS
 from ..state.shared_state import SharedState, resolve_graded_comparison, stack_base_params
-from hyperloom.inference_optimizer.protocol.intent import Intent
 from ..bus.message_bus import Message
 from hyperloom.inference_optimizer.grid_server_args import (
     dedupe_extra_server_args,
@@ -74,9 +73,6 @@ from ..kernel.geak_config import (
     geak_spec_name,
     _geak_sweep_measured_tput,
     _normalize_geak_overlay_dir,
-)
-from ..policy.gate import (
-    PolicyDenied,
 )
 from ..state.round_store import ABANDONED, BOOTED, FAILED
 from ..state.task_registry import Task
@@ -416,76 +412,6 @@ class WritebackCollaborator(CoordinatorCollaborator):
         if terminal or (now - self._lifecycle_last_save >= self._lifecycle_save_min_interval_s):
             self.shared_state.save(self.session_dir)
             self._lifecycle_last_save = now
-
-    async def record_policy_denied(
-        self,
-        source: str,
-        intent: Intent,
-        denied: PolicyDenied,
-        *,
-        action_name: str | None = None,
-    ) -> None:
-        """Record a PolicyGate denial.
-
-        Publishes a ``policy_denied`` observation and records the denial streak.
-        The streak is a fact for LLM self-correction only: there is no
-        auto-prune and no ``policy_loop`` stop triggered from it.
-
-        Args:
-            source (str): The agent whose intent was denied.
-            intent (Intent): The denied intent.
-            denied (PolicyDenied): The denial carrying rule / hint / reason.
-            action_name (str | None): Explicit action name override; falls back
-                to ``intent.payload['action_name']``.
-        """
-        # Surface every PolicyGate denial in the process log (not just the bus)
-        # so security rejections are observable in ops logs.
-        log.warning(
-            "PolicyGate denied intent: source=%s type=%s rule=%s reason=%s",
-            source,
-            intent.type.value,
-            denied.rule,
-            str(denied),
-        )
-        await self.bus.append_and_seq(
-            Message.new(
-                "coordinator",
-                source,
-                "observation",
-                {
-                    "kind": "policy_denied",
-                    "intent_type": intent.type.value,
-                    "rule": denied.rule,
-                    "hint": denied.hint,
-                    "reason": str(denied),
-                },
-            )
-        )
-        resolved_action = action_name or str((intent.payload or {}).get("action_name") or "")
-        # Streak counter is a fact for LLM self-correction only; the system does not auto-prune or stop on it.
-        self.shared_state.record_policy_denial(
-            action_name=resolved_action,
-            rule=str(denied.rule or ""),
-            hint=str(denied.hint or ""),
-            intent_type=intent.type.value,
-            tick=int(self.shared_state.tick or 0),
-            intent_payload=intent.payload,
-        )
-        from hyperloom.inference_optimizer.breakdown.recorder import phase_event
-
-        payload = intent.payload or {}
-        proposal_msg_id = (
-            payload.get("proposal_msg_id") or payload.get("target_proposal_msg_id") or payload.get("proposal_id")
-        )
-        phase_event.record_denial(
-            actor=source,
-            proposal_msg_id=str(proposal_msg_id) if proposal_msg_id else None,
-            action=resolved_action,
-            phase=str(self.shared_state.phase or ""),
-            macro_cycle=int(self.shared_state.macro_cycle or 0),
-            rule=str(denied.rule or ""),
-            hint=str(denied.hint or ""),
-        )
 
     @staticmethod
     def _keep_patch_sources(

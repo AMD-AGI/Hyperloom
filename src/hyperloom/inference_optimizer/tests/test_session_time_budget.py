@@ -354,7 +354,7 @@ class TestIntentPathsAreGated:
         async def _rec(source, intent, denied, action_name=None):
             recorded.append(denied)
 
-        monkeypatch.setattr(coord.writeback, "record_policy_denied", _rec)
+        monkeypatch.setattr(coord.router, "record_policy_denied", _rec)
         await coord.router.handle_delegate("orchestration", _delegate(_EXPENSIVE_ACTION, "d-budget"))
         assert [d.rule for d in recorded] == ["time_budget"]
         assert [t for t in await coord.tasks.queued() if t.kind == _EXPENSIVE_ACTION] == []
@@ -382,7 +382,7 @@ class TestIntentPathsAreGated:
         async def _rec(source, intent, denied, action_name=None):
             recorded.append(denied)
 
-        monkeypatch.setattr(coord.writeback, "record_policy_denied", _rec)
+        monkeypatch.setattr(coord.router, "record_policy_denied", _rec)
         intent = Intent(
             type=IntentType.PROPOSE_ACTION,
             payload={"action_name": _EXPENSIVE_ACTION, "predicted_gain_pct": 5.0},

@@ -427,7 +427,7 @@ class IntentRouter(CoordinatorCollaborator):
             self.policy.validate_intent(source, intent)
         except PolicyDenied as denied:
             record_event(EVENT_INTENT, attributes={**attributes, "admitted": False, "denied": str(denied)[:200]})
-            await self._coord.writeback.record_policy_denied(source, intent, denied)
+            await self.record_policy_denied(source, intent, denied)
             return
         intent_span_id = record_event(EVENT_INTENT, attributes={**attributes, "admitted": True})
         with trajectory_scope(parent_span_id=intent_span_id):
@@ -504,7 +504,7 @@ class IntentRouter(CoordinatorCollaborator):
             )
         denied = self._coord.dispatcher.admission_denial_for_action(action_name)
         if denied is not None:
-            await self._coord.writeback.record_policy_denied(source, intent, denied)
+            await self.record_policy_denied(source, intent, denied)
             return
         payload = dict(intent.payload)
         _stamp_kb_exposure(self, payload, source=source)
@@ -818,7 +818,7 @@ class IntentRouter(CoordinatorCollaborator):
             )
         denied = self._coord.dispatcher.admission_denial_for_action(action_name)
         if denied is not None:
-            await self._coord.writeback.record_policy_denied(
+            await self.record_policy_denied(
                 source,
                 intent,
                 denied,
@@ -934,7 +934,7 @@ class IntentRouter(CoordinatorCollaborator):
                     f"task {task.task_id} is still {task.state!r}; wait for the "
                     f"delegated_result event instead of re-emitting the same key."
                 )
-                await self._coord.writeback.record_policy_denied(
+                await self.record_policy_denied(
                     source,
                     intent,
                     PolicyDenied(
@@ -950,7 +950,7 @@ class IntentRouter(CoordinatorCollaborator):
                 f"task {task.task_id if task else '?'} terminated and could not "
                 f"allocate a fresh idempotency_key after 5 retries"
             )
-            await self._coord.writeback.record_policy_denied(
+            await self.record_policy_denied(
                 source,
                 intent,
                 PolicyDenied(
@@ -1054,7 +1054,7 @@ class IntentRouter(CoordinatorCollaborator):
         kind = intent.payload["kind"]
         denied = self._coord.dispatcher.sequence_denial_for_request(target_agent, kind)
         if denied is not None:
-            await self._coord.writeback.record_policy_denied(source, intent, denied)
+            await self.record_policy_denied(source, intent, denied)
             return
         # Always record the request on the bus for replay.
         request_msg = Message.new(
@@ -1475,4 +1475,74 @@ class IntentRouter(CoordinatorCollaborator):
                 "alert",
                 dict(intent.payload),
             )
+        )
+
+    async def record_policy_denied(
+        self,
+        source: str,
+        intent: Intent,
+        denied: PolicyDenied,
+        *,
+        action_name: str | None = None,
+    ) -> None:
+        """Record a PolicyGate denial.
+
+        Publishes a ``policy_denied`` observation and records the denial streak.
+        The streak is a fact for LLM self-correction only: there is no
+        auto-prune and no ``policy_loop`` stop triggered from it.
+
+        Args:
+            source (str): The agent whose intent was denied.
+            intent (Intent): The denied intent.
+            denied (PolicyDenied): The denial carrying rule / hint / reason.
+            action_name (str | None): Explicit action name override; falls back
+                to ``intent.payload['action_name']``.
+        """
+        # Surface every PolicyGate denial in the process log (not just the bus)
+        # so security rejections are observable in ops logs.
+        log.warning(
+            "PolicyGate denied intent: source=%s type=%s rule=%s reason=%s",
+            source,
+            intent.type.value,
+            denied.rule,
+            str(denied),
+        )
+        await self.bus.append_and_seq(
+            Message.new(
+                "coordinator",
+                source,
+                "observation",
+                {
+                    "kind": "policy_denied",
+                    "intent_type": intent.type.value,
+                    "rule": denied.rule,
+                    "hint": denied.hint,
+                    "reason": str(denied),
+                },
+            )
+        )
+        resolved_action = action_name or str((intent.payload or {}).get("action_name") or "")
+        # Streak counter is a fact for LLM self-correction only; the system does not auto-prune or stop on it.
+        self.shared_state.record_policy_denial(
+            action_name=resolved_action,
+            rule=str(denied.rule or ""),
+            hint=str(denied.hint or ""),
+            intent_type=intent.type.value,
+            tick=int(self.shared_state.tick or 0),
+            intent_payload=intent.payload,
+        )
+        from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+
+        payload = intent.payload or {}
+        proposal_msg_id = (
+            payload.get("proposal_msg_id") or payload.get("target_proposal_msg_id") or payload.get("proposal_id")
+        )
+        phase_event.record_denial(
+            actor=source,
+            proposal_msg_id=str(proposal_msg_id) if proposal_msg_id else None,
+            action=resolved_action,
+            phase=str(self.shared_state.phase or ""),
+            macro_cycle=int(self.shared_state.macro_cycle or 0),
+            rule=str(denied.rule or ""),
+            hint=str(denied.hint or ""),
         )
