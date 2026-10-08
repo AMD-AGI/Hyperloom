@@ -1321,6 +1321,7 @@ def _prelude_predicate_inputs(state: Any, *, now_unix: float) -> dict[str, Any]:
         "runtime_sec": _positive_number(state.baseline_runtime_sec),
         "post_ready_runtime_sec": _positive_number(state.baseline_post_ready_runtime_sec),
         "warm_runtime_sec": _positive_number(state.baseline_warm_runtime_sec),
+        "roofline_in_flight": bool((getattr(state, "auto_roofline_pending_task_id", None) or "").strip()),
     }
 
 
@@ -1822,6 +1823,13 @@ def replay_next_phase(
             and (_number(baseline.get("tput")) or 0.0) > 0.0
         )
         if normal:
+            # Hold the transition while the PRELUDE initial roofline/profile is still
+            # in-flight. Transitioning now would cancel the benchmark subprocess before
+            # it can write a trace, making profiling impossible. Writeback clears
+            # auto_roofline_pending_task_id when the task finishes (success or failure),
+            # so the hold releases naturally and cannot deadlock.
+            if bool(baseline.get("roofline_in_flight")):
+                return None
             target = _post_prelude_target(optimize_enabled=optimize_enabled, kernel_enabled=kernel_enabled)
             evidence = {"baseline_tput": float(baseline["tput"]), **_prelude_viability(baseline)}
             if target != PHASE_FRAMEWORK_AGENT:

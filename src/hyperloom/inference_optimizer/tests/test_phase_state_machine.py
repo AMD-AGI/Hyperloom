@@ -127,6 +127,22 @@ def test_prelude_exits_on_baseline_tput():
     assert evidence["predicate_inputs"]["baseline"]["tput"] == 1234.5
 
 
+def test_prelude_blocked_while_roofline_in_flight():
+    """PRELUDE must not advance while the initial roofline task is running."""
+    state = SharedState(
+        phase="PRELUDE",
+        phase_budget_pct={},
+        phase_started_unix=0.0,
+        max_minutes=0,
+        baseline_tput=1234.5,
+        auto_roofline_pending_task_id="task-123",
+    )
+    assert phase_state.compute_next_phase(state) is None
+    state.auto_roofline_pending_task_id = ""
+    out = phase_state.compute_next_phase(state)
+    assert out is not None and out[1] == "prelude_done"
+
+
 def test_prelude_blocked_while_warm_replay_in_flight():
     """PRELUDE must not advance to FRAMEWORK until warm-replay settles."""
     state = SharedState(
