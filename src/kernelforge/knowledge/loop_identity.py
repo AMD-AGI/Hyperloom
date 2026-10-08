@@ -38,6 +38,7 @@ def resolve_loop_identity(
     gpu_type: str,
     target_functions: list[str] | None = None,
     source_files: list[str] | None = None,
+    source_contents: dict[str, str] | None = None,
     framework: str = "",
     operator_name: str = "",
     producer: str = "",
@@ -60,6 +61,7 @@ def resolve_loop_identity(
         target_functions=target_functions,
         source_files=source_files,
         framework_override=framework,
+        source_contents=source_contents,
         concrete_operation=concrete_op,
     )
     identity = KernelRecipeIdentity(

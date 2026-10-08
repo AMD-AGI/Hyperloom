@@ -120,6 +120,7 @@ logic is unaffected, because the workspace never leaves the campaign branch.
 | --- | --- |
 | KEEP bar, sigma resolution, `best_case_times` | best version |
 | Publication, recovery checkpoint, `forge-result.json` | best version |
+| Experience KB record (patch, kernel and source files are read from the best commit, not the workspace) | best version |
 | Merge stacking and pinned near-misses (compared against the incumbent) | best version |
 | In-session gate pass threshold | best version |
 | Current per-case timings given to Orchestration, specialists and the Supervisor | starting version |

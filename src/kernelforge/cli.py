@@ -2154,6 +2154,7 @@ def forge_loop(
                 kernel_backend=kernel_backend,
                 gpu_target=config.gpu_target,
                 base_sha=base_sha,
+                commit=commit,
                 pristine_baseline_ms=kb_pristine_baseline_ms,
                 reused_speedup=kb_reused_speedup,
                 source_files=source_files_list,

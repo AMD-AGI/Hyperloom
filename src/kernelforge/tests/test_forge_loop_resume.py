@@ -1218,6 +1218,8 @@ def test_resume_reuses_persisted_framework_without_inference(
     assert result.exit_code == 0, result.output
     assert store.load().framework == "vllm"
     assert captured["kb_writes"][-1]["framework"] == "vllm"
+    # The end-of-run publication names the durable best, never the branch's latest commit.
+    assert captured["kb_writes"][-1]["commit"] == "best-commit"
 
 
 def test_keep_callback_snapshots_result_and_kb_before_iteration_callback(
@@ -1263,9 +1265,10 @@ def test_keep_callback_snapshots_result_and_kb_before_iteration_callback(
     assert snapshot["search_start_mean_case_speedup"] == 1.0
     assert not captured["kb_writes"]
     remote_callback = captured["run_kwargs"]["on_best_ready"]
-    remote_callback(SimpleNamespace(kept=True))
+    remote_callback(SimpleNamespace(kept=True, commit_hash="kept-commit"))
     assert captured["kb_writes"]
     assert captured["kb_writes"][-1]["llm_summary"] is False
+    assert captured["kb_writes"][-1]["commit"] == "kept-commit"
     checkpoint = captured["checkpoints"]["hyperloom"]
     assert checkpoint["best_commit"] == "best-commit"
     assert checkpoint["search_start_mean_case_speedup"] == 1.0
