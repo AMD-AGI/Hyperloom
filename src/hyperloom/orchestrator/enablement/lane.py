@@ -360,9 +360,7 @@ class EnablementLane(CoordinatorCollaborator):
         lease = max(_MIN_LEASE_SEC, float(round_row.expires_unix) - float(round_row.renewed_unix))
         now = time.time()
         await self.rounds.renew(
-            round_row.round_id,
-            holder_task_id=round_row.holder_task_id,
-            fence=round_row.fence,
+            round_row,
             lease_sec=lease,
             now_unix=now,
             request_id=f"renew:{round_row.round_id}:{round_row.fence}:{now:.0f}",
@@ -389,9 +387,7 @@ class EnablementLane(CoordinatorCollaborator):
         if lease <= 0:
             lease = max(_MIN_LEASE_SEC, float(round_row.expires_unix) - float(round_row.renewed_unix))
         moved = await self.rounds.handoff(
-            round_row.round_id,
-            holder_task_id=specialist,
-            fence=round_row.fence,
+            round_row,
             new_holder_task_id=task.task_id,
             lease_sec=lease,
             now_unix=time.time(),
@@ -417,9 +413,7 @@ class EnablementLane(CoordinatorCollaborator):
         if round_row is None:
             return
         await self.rounds.settle(
-            round_row.round_id,
-            holder_task_id=round_row.holder_task_id,
-            fence=round_row.fence,
+            round_row,
             outcome=outcome,
             now_unix=time.time(),
             request_id=f"settle:{round_row.round_id}:{round_row.fence}",
