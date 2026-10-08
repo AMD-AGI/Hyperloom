@@ -54,6 +54,7 @@ from hyperloom.inference_optimizer.session.paths import asset_root, make_session
 from hyperloom.orchestrator.bus.storage import SqliteConnection
 
 _PROFILE_SGLANG_CONFIG = asset_root() / "assets" / "configs" / "profile_sglang.yaml"
+_PROFILE_VLLM_CONFIG = asset_root() / "assets" / "configs" / "profile_vllm.yaml"
 
 
 # fixtures
@@ -215,7 +216,7 @@ def test_r9700_baseline_and_profile_use_vllm_gfx12_runner(tmp_path, monkeypatch)
     import yaml
 
     monkeypatch.setenv("FRAMEWORK", "vllm")
-    for config_path in (_default_baseline_config(), _default_profile_config()):
+    for config_path in (_default_baseline_config(), _PROFILE_VLLM_CONFIG):
         out = _materialize_config_with_envs(
             config_path,
             tmp_path / config_path.stem,
