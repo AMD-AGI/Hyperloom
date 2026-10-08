@@ -93,6 +93,32 @@ def test_only_unguarded_exports_count_as_overwritten(tmp_path):
     assert "PORT" not in overwritten
 
 
+def test_a_thin_shim_that_sources_a_body_with_extra_args_keeps_the_lever(tmp_path):
+    """xdit_mi300x.sh sources xdit_bench_common.sh which reads EXTRA_XDIT_ARGS."""
+    benchmarks = tmp_path / "InferenceX" / "benchmarks"
+    benchmarks.mkdir(parents=True)
+    (benchmarks / "benchmark_lib.sh").write_text("# stub\n", encoding="utf-8")
+    (benchmarks / "xdit_bench_common.sh").write_text(
+        'xdit --model "$M" ${EXTRA_XDIT_ARGS:-}\n', encoding="utf-8"
+    )
+    shim = (
+        'export RUNNER_TYPE="${RUNNER_TYPE:-mi300x}"\n'
+        'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n'
+        'source "${SCRIPT_DIR}/xdit_bench_common.sh"\n'
+    )
+    (benchmarks / "xdit_mi300x.sh").write_text(shim, encoding="utf-8")
+    bench = {
+        "benchmark_script": "xdit_mi300x.sh",
+        "framework": "xdit",
+        "inferencex_path": str(benchmarks.parent),
+        "envs": {},
+    }
+
+    reads_extra_args, _ = recipe_launch_contract(bench)
+
+    assert reads_extra_args is True
+
+
 def test_an_unresolvable_recipe_constrains_nothing(tmp_path):
     root = _checkout(tmp_path, "dsv41flash.sh", _AGENTIC_RECIPE)
 

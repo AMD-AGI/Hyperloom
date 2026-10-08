@@ -1489,7 +1489,7 @@ def materialize_config_with_envs(
 
         xdit_patched = ensure_xdit_patched_for_tracelens()
         if xdit_patched:
-            envs["EXTRA_XDIT_ARGS"] = "--profile_wait 1 --profile_capture_phase --with_stack"
+            envs["EXTRA_XDIT_ARGS"] = "--profile_wait 1 --profile_capture_phase --profile_with_stack"
         else:
             envs["EXTRA_XDIT_ARGS"] = "--profile_wait 1"
     profile_num_prompts: int | None = None

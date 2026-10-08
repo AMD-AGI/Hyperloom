@@ -89,26 +89,67 @@ def resolve_launch_server_script(bench: Mapping[str, Any]) -> str:
     return ""
 
 
+_SOURCE_RE = re.compile(r'^\s*(?:source|\.)\s+"?([^";\s]+)"?\s*$', re.MULTILINE)
+
+
+def _read_sourced_texts(script_path: Path) -> list[str]:
+    """Return the text of scripts that ``script_path`` sources (one level deep).
+
+    Only resolves sibling paths (same directory) because that is the only safe
+    assumption for scripts in an InferenceX checkout. Unknown or non-sibling
+    paths are silently skipped.
+    """
+    try:
+        text = script_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    sourced: list[str] = []
+    parent = script_path.parent
+    for m in _SOURCE_RE.finditer(text):
+        raw = m.group(1)
+        # Resolve simple variable-prefix patterns like ${SCRIPT_DIR}/name.sh
+        # by stripping any leading variable reference and keeping the filename.
+        name = Path(re.sub(r"^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/", "", raw)).name
+        if not name:
+            continue
+        candidate = parent / name
+        try:
+            sourced.append(candidate.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            pass
+    return sourced
+
+
 def recipe_launch_contract(bench: Mapping[str, Any]) -> tuple[bool, frozenset[str]]:
     """What the resolved server script accepts: ``(reads_extra_args, names_it_overwrites)``.
 
-    ``reads_extra_args`` is False only for a script that names neither the
-    framework's extra-args variable nor its positional arguments, which makes
-    every ``extra_server_args`` on that recipe a no-op the measurement cannot
-    distinguish from a proposal that simply did not help. Both answers default
-    to "imposes nothing" when the script cannot be read, so an unresolvable
-    recipe never drops a lever.
+    ``reads_extra_args`` is False only when neither the entrypoint script nor
+    any script it directly sources names the framework's extra-args variable or
+    forwards positional arguments. Thin shims that ``source`` a shared body
+    (e.g. ``xdit_mi300x.sh`` sourcing ``xdit_bench_common.sh``) are therefore
+    handled correctly. Both answers default to "imposes nothing" when the script
+    cannot be read, so an unresolvable recipe never drops a lever.
+
+    ``names_it_overwrites`` is derived from the entrypoint only: sourced scripts
+    run in the same shell scope but their unguarded exports are an implementation
+    detail of the shared body, not a contract the thin shim imposes on its caller.
     """
     path = resolve_launch_server_script(bench)
     if not path:
         return True, frozenset()
+    script_path = Path(path)
     try:
-        text = Path(path).read_text(encoding="utf-8", errors="replace")
+        text = script_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         log.warning("recipe: could not read the server script %s; assuming it constrains nothing", path)
         return True, frozenset()
     args_env = server_args_env_name(bench.get("framework"))
     reads_extra_args = args_env in text or bool(_POSITIONAL_ARGS_RE.search(text))
+    if not reads_extra_args:
+        for sourced_text in _read_sourced_texts(script_path):
+            if args_env in sourced_text or _POSITIONAL_ARGS_RE.search(sourced_text):
+                reads_extra_args = True
+                break
     return reads_extra_args, frozenset(m.group(1) for m in _UNGUARDED_EXPORT_RE.finditer(text))
 
 
