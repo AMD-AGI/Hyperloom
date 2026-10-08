@@ -124,6 +124,24 @@ def resolve_codex_executable(explicit: str = "") -> str:
     return str(bundled) if bundled.exists() else ""
 
 
+def resolve_claude_executable() -> str:
+    """Resolve the Claude CLI a specialist subprocess should spawn.
+
+    Order: ``$GEAK_CLAUDE_BIN`` (the operator pin, which the kernel-agent
+    installer also records), then ``claude`` on ``$PATH``. The installer may
+    place the CLI outside ``$PATH`` (``~/.local/bin``); without it the dispatcher
+    falls back to the in-process backend, which gives specialists no
+    ``--add-dir`` roots.
+
+    Returns:
+        The resolved executable path, or ``""`` when neither is executable.
+    """
+    pinned = os.environ.get("GEAK_CLAUDE_BIN", "").strip()
+    if pinned and os.path.isfile(pinned) and os.access(pinned, os.X_OK):
+        return pinned
+    return shutil.which("claude") or ""
+
+
 _SPECIALIST_ENV_ALLOWLIST: frozenset[str] = frozenset(
     {
         "ANTHROPIC_BASE_URL",
@@ -1793,5 +1811,6 @@ __all__ = [
     "SpecialistSubprocessDispatcher",
     "SpecialistSubprocessResult",
     "_setup_worktree",
+    "resolve_claude_executable",
     "resolve_codex_executable",
 ]

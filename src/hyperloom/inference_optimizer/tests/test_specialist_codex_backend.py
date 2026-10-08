@@ -483,6 +483,33 @@ def test_resolve_codex_executable_prefers_explicit_then_path(
     assert resolve_codex_executable() == str(on_path)
 
 
+def test_resolve_claude_executable_prefers_the_pin_then_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GEAK_CLAUDE_BIN wins over another ``claude`` on PATH; PATH is used when the pin is unset."""
+    pinned = _write_executable(tmp_path / "local" / "claude", "#!/usr/bin/env bash\nexit 0\n")
+    on_path = _write_executable(tmp_path / "bin" / "claude", "#!/usr/bin/env bash\nexit 0\n")
+    monkeypatch.setenv("PATH", str(on_path.parent))
+    monkeypatch.setenv("GEAK_CLAUDE_BIN", str(pinned))
+    assert sp.resolve_claude_executable() == str(pinned)
+
+    monkeypatch.delenv("GEAK_CLAUDE_BIN")
+    assert sp.resolve_claude_executable() == str(on_path)
+
+
+def test_resolve_claude_executable_reports_absence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A missing or non-executable record resolves to nothing rather than a name that cannot run."""
+    monkeypatch.setenv("PATH", "/nonexistent")
+    monkeypatch.delenv("GEAK_CLAUDE_BIN", raising=False)
+    assert sp.resolve_claude_executable() == ""
+
+    not_executable = tmp_path / "claude"
+    not_executable.write_text("", encoding="utf-8")
+    monkeypatch.setenv("GEAK_CLAUDE_BIN", str(not_executable))
+    assert sp.resolve_claude_executable() == ""
+
+
 def test_resolve_codex_executable_falls_back_to_the_sdk_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
