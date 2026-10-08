@@ -183,7 +183,7 @@ def test_a_later_commit_into_the_same_repo_also_lands(tmp_path, monkeypatch):
     assert _prepare(tmp_path, workspace, kernel, driver).ok is True
 
     (workspace / "warm.md").write_text("warm start\n", encoding="utf-8")
-    sha = experience_integration._git_commit_all(
+    sha = knowledge_integration._git_commit_all(
         str(workspace),
         "warm-start",
         allowed_paths={"warm.md"},
