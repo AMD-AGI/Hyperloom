@@ -26,6 +26,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
     make_kernel_recorder,
     record_integrate_verdict,
     record_trace_analyze_request,
+    reject_geak_attempts,
 )
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
@@ -48,7 +49,6 @@ def _forge_recorder():
         macro_cycle=3,
         route=ROUTE_FORGE,
         route_reason="kernel_opt_backend_order=forge",
-        code_revision="abc1234",
     )
     assert recorder is not None
     recorder.begin(
@@ -70,8 +70,10 @@ def _geak_recorder(*, macro_cycle: int = 1):
 
 def _phase_with_recorder(tmp_path: Path, recorder: Any) -> KernelPhase:
     phase = object.__new__(KernelPhase)
-    phase.session_dir = tmp_path
-    phase.shared_state = types.SimpleNamespace(macro_cycle=3)
+    phase._coord = types.SimpleNamespace(
+        session_dir=tmp_path,
+        shared_state=types.SimpleNamespace(macro_cycle=3),
+    )
     phase._kernel_timeline_recorder = recorder
     return phase
 
@@ -253,7 +255,9 @@ def test_an_adoption_states_the_basis_its_gain_was_measured_on(tmp_path):
 
 def test_the_integrate_gate_is_what_settles_a_forge_candidate(tmp_path):
     recorder = _forge_recorder()
-    recorder.record_kernel_rewrite(run_id="attempt-7", kernel_id="k001", status="success", micro_decision="keep")
+    recorder.record_kernel_rewrite(
+        run_id="attempt-7", kernel_id="k001", status="success", micro_decision="keep", integrate_ref="int-1"
+    )
     record_integrate_verdict(macro_cycle=3, integration_id="int-1", kernel_id="k001", decision="KEEP", gain_pct=6.0)
     recorder.finish(tput_after=1060.0)
 
@@ -291,7 +295,9 @@ def test_a_lane_that_declined_its_own_candidate_needs_no_gate(tmp_path):
 
 def test_a_reverted_kernel_is_rejected_by_the_gate_not_left_pending(tmp_path):
     recorder = _forge_recorder()
-    recorder.record_kernel_rewrite(run_id="attempt-7", kernel_id="k001", status="success", micro_decision="keep")
+    recorder.record_kernel_rewrite(
+        run_id="attempt-7", kernel_id="k001", status="success", micro_decision="keep", integrate_ref="int-1"
+    )
     record_integrate_verdict(macro_cycle=3, integration_id="int-1", kernel_id="k001", decision="REVERT")
     recorder.finish(tput_after=1000.0)
 
@@ -303,7 +309,9 @@ def test_a_reverted_kernel_is_rejected_by_the_gate_not_left_pending(tmp_path):
 
 def test_a_kernel_gated_twice_is_settled_by_the_verdict_that_stands(tmp_path):
     recorder = _forge_recorder()
-    recorder.record_kernel_rewrite(run_id="attempt-7", kernel_id="k001", status="success", micro_decision="keep")
+    recorder.record_kernel_rewrite(
+        run_id="attempt-7", kernel_id="k001", status="success", micro_decision="keep", integrate_ref="int-2"
+    )
     record_integrate_verdict(
         macro_cycle=3,
         integration_id="int-1",
@@ -357,6 +365,7 @@ def test_an_integrate_verdict_lands_after_the_visit_has_closed(tmp_path):
         kernel_id="k001",
         status="success",
         micro_decision="keep",
+        integrate_ref="int-1",
     )
     recorder.finish(tput_after=1000.0)
 
@@ -403,7 +412,7 @@ def test_an_integrate_verdict_lands_after_the_visit_has_closed(tmp_path):
             "gain_attributed": None,
         }
     ]
-    # And the same verdict reaches the row it ruled on, joined by kernel_id.
+    # The explicitly referenced verdict reaches the row it ruled on.
     assert ext["attempts"][0]["e2e"] == {
         "integrated": True,
         "e2e_gain_pct": 4.5,
@@ -414,9 +423,9 @@ def test_an_integrate_verdict_lands_after_the_visit_has_closed(tmp_path):
     }
 
 
-def test_the_standing_verdict_wins_and_the_best_gain_survives_a_later_fault(tmp_path):
+def test_a_later_unrelated_integration_cannot_rewrite_an_exact_attempt(tmp_path):
     recorder = _forge_recorder()
-    recorder.record_kernel_rewrite(run_id="attempt-7", kernel_id="k001", status="success")
+    recorder.record_kernel_rewrite(run_id="attempt-7", kernel_id="k001", status="success", integrate_ref="int-1")
     recorder.finish(tput_after=1000.0)
 
     record_integrate_verdict(
@@ -440,14 +449,23 @@ def test_the_standing_verdict_wins_and_the_best_gain_survives_a_later_fault(tmp_
     ext = _kernel_events(tmp_path)[0]["ext"]
     assert [row["integration_id"] for row in ext["integrate"]] == ["int-1", "int-2"]
     e2e = ext["attempts"][0]["e2e"]
-    assert e2e["decision"] == "REVERT"
-    assert e2e["integrated"] is False
+    assert e2e["decision"] == "KEEP"
+    assert e2e["integrated"] is True
     assert e2e["e2e_gain_pct"] == 6.0
 
 
 def test_a_kernel_that_was_never_gated_has_no_e2e_block(tmp_path):
     recorder = _forge_recorder()
     recorder.record_kernel_rewrite(run_id="attempt-7", kernel_id="k001", status="success")
+    recorder.finish(tput_after=1000.0)
+
+    assert _kernel_events(tmp_path)[0]["ext"]["attempts"][0]["e2e"] is None
+
+
+def test_same_kernel_name_without_integration_ref_does_not_claim_a_gate(tmp_path):
+    recorder = _forge_recorder()
+    recorder.record_kernel_rewrite(run_id="attempt-7", kernel_id="k001", status="success", micro_decision="keep")
+    record_integrate_verdict(macro_cycle=3, integration_id="int-1", kernel_id="k001", decision="REVERT")
     recorder.finish(tput_after=1000.0)
 
     assert _kernel_events(tmp_path)[0]["ext"]["attempts"][0]["e2e"] is None
@@ -653,6 +671,74 @@ def test_geak_attempts_carry_what_it_tried_not_only_what_it_kept(tmp_path):
     # A kernel GEAK never dispatched produced nothing to gate.
     assert rows["k002"]["outcome"] == "rejected"
     assert rows["k002"]["settled_by"] == "lane"
+
+
+@pytest.mark.parametrize(
+    "kernel_id",
+    [
+        "aiter:paged_attention_ragged (pa_ragged / paged_attention_ll4mi_QKV_mfma16)",
+        "https://example.org/kernels/7",
+        "backend:kernel%3Avariant",
+    ],
+)
+def test_geak_opaque_ids_survive_acceptance_rebench_integration_and_late_rejection(tmp_path, kernel_id):
+    recorder = _geak_recorder(macro_cycle=0)
+    journey = {
+        "discovery_runs": [{"source": "trace:1", "status": "success"}],
+        "kernels": [{"kernel_id": kernel_id, "e2e": {"decision": "KEEP", "integrated": True, "e2e_gain_pct": 4.0}}],
+    }
+    recorder.record_geak_attempts(journey)
+    recorder.record_geak_claim({}, specs=[{"kind": "env", "short_name": kernel_id, "e2e_delta_pct": 4.0}])
+    _geak_rebench(recorder, "geak:rebench:0", REBENCH_VALIDATED)
+    record_integrate_verdict(
+        macro_cycle=0,
+        integration_id=f"geak:{kernel_id}",
+        kernel_id=kernel_id,
+        decision="KEEP",
+        gain_pct=4.0,
+    )
+    recorder.finish(tput_after=950.0)
+
+    ext = _kernel_events(tmp_path)[0]["ext"]
+    assert ext["geak"]["discovery_runs"][0]["source"] == "trace:1"
+    assert len(ext["attempts"]) == 2
+    attempts = {row["source_kind"]: row for row in ext["attempts"]}
+    assert attempts[SOURCE_GEAK_AUTHORED_KERNEL]["kernel_id"] == kernel_id
+    assert attempts[SOURCE_GEAK_AUTHORED_KERNEL]["e2e"]["decision"] == "KEEP"
+    assert ext["geak"]["claim"]["env_selections"][0]["selection"] == kernel_id
+    assert attempts[SOURCE_GEAK_ENV_SELECTION]["name"] == kernel_id
+    assert attempts[SOURCE_GEAK_ENV_SELECTION]["outcome"] == "adopted"
+    assert attempts[SOURCE_GEAK_ENV_SELECTION]["rebench_ref"] == "geak:rebench:0"
+    assert ext["rebench"][0]["attempt_id"] == "geak:rebench:0"
+    assert kernel_event_parts()["kernel_integrate"][0]["integration_id"] == f"geak:{kernel_id}"
+
+    reject_geak_attempts(
+        event=recorder.event_id,
+        measured_tput=850.0,
+        current_best_tput=900.0,
+        provenance="orchestrator_rebench",
+        rejection_reason="no_promote",
+    )
+    recorder.record_geak_attempts(journey)
+    attempts = [
+        row
+        for row in _kernel_events(tmp_path)[0]["ext"]["attempts"]
+        if row["source_kind"] == SOURCE_GEAK_AUTHORED_KERNEL
+    ]
+    assert len(attempts) == 1
+    assert attempts[0]["kernel_id"] == kernel_id
+    assert attempts[0]["e2e"]["decision"] == "REVERT"
+    assert attempts[0]["e2e"]["rejection_reason"] == "no_promote"
+
+
+def test_name_only_discovered_kernels_keep_distinct_rank_fallback_ids():
+    recorder = _forge_recorder()
+    recorder.record_discovered_kernels(
+        {"roofline_snapshot_id": 4, "hot_kernels_top15": [{"name": "kernel_a"}, {"name": "kernel_b"}]}
+    )
+    rows = kernel_event_parts()["kernel_discovered"]
+    assert [row["name"] for row in rows] == ["kernel_a", "kernel_b"]
+    assert [row["rank"] for row in rows] == [0, 1]
 
 
 def test_an_attempt_carries_what_made_the_kernel_worth_trying(tmp_path):
@@ -1079,7 +1165,9 @@ def test_the_verdict_comes_from_the_gate_and_not_from_the_caller(tmp_path):
 
 
 def _forge_rewrite_with_gate(recorder, **verdict: Any) -> None:
-    recorder.record_kernel_rewrite(run_id="attempt-7", kernel_id="k001", status="success", micro_decision="keep")
+    recorder.record_kernel_rewrite(
+        run_id="attempt-7", kernel_id="k001", status="success", micro_decision="keep", integrate_ref="int-1"
+    )
     record_integrate_verdict(macro_cycle=3, integration_id="int-1", kernel_id="k001", **verdict)
 
 
@@ -1392,6 +1480,7 @@ def test_record_backend_versions_and_timeline_mirrors_each_attempt(tmp_path):
             },
             "proposal": {"decision": "KEEP"},
         },
+        recorder=recorder,
     )
     recorder.finish(tput_after=1000.0)
 

@@ -21,8 +21,10 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
     KIND_PARAM,
     OUTCOME_KEEP,
     OUTCOME_NO_PROMOTE,
+    OUTCOME_RECORDED,
     OUTCOME_REVERT,
     OUTCOME_SKIP,
+    Verdict,
     classify_change_kind,
     derive_journal_outcome,
     summarize_change,
@@ -397,94 +399,25 @@ def test_summarize_change_falls_back_to_task_kind():
 
 
 # derive_journal_outcome
-def test_derive_journal_outcome_integrate_patch_reverted_is_revert():
-    """A reverted integrate_patch is promotable (status != failed) but must journal as REVERT, not KEEP."""
-    out = derive_journal_outcome(
-        "integrate_patch",
-        {"status": "reverted", "delta_pct": -0.44},
-        promotable=True,
-    )
-    assert out == OUTCOME_REVERT
-
-
-def test_derive_journal_outcome_integrate_patch_kept_is_keep():
-    out = derive_journal_outcome(
-        "integrate_patch",
-        {"status": "kept", "delta_pct": 7.5},
-        promotable=True,
-    )
-    assert out == OUTCOME_KEEP
-
-
-def test_derive_journal_outcome_refused_promotion_is_no_promote():
-    """A KEEP the anchor gate declined to lift adopted nothing, so it is not a KEEP."""
-    from hyperloom.inference_optimizer.session.optimization_journal import PROMOTION_REFUSED_KEY
-
-    out = derive_journal_outcome(
-        "integrate_patch",
-        {"status": "kept", "delta_pct": 7.5, PROMOTION_REFUSED_KEY: True},
-        promotable=True,
-    )
-    assert out == OUTCOME_NO_PROMOTE
-
-
-def test_derive_journal_outcome_accuracy_unavailable_reject_is_revert():
-    out = derive_journal_outcome(
-        "integrate_patch",
-        {"status": "accuracy_unavailable_reject"},
-        promotable=True,
-    )
-    assert out == OUTCOME_REVERT
-
-
-def test_derive_journal_outcome_patch_failures_are_no_promote():
-    # A patch that never reached a KEEP/REVERT measurement is no_promote.
-    for status in (
-        "apply_failed",
-        "no_patch",
-        "no_patches",
-        "failed",
-        "applied_no_bench",
-        "rejected_by_critic",
-        "skipped",
-    ):
-        out = derive_journal_outcome("integrate_patch", {"status": status}, promotable=True)
-        assert out == OUTCOME_NO_PROMOTE, status
-
-
-def test_derive_journal_outcome_integrate_patch_follows_status():
-    """The patch kind reads the executor's verdict, not the promotable flag."""
-    assert derive_journal_outcome("integrate_patch", {"status": "kept"}, promotable=True) == OUTCOME_KEEP
-    assert derive_journal_outcome("integrate_patch", {"status": "reverted"}, promotable=True) == OUTCOME_REVERT
-    assert (
-        derive_journal_outcome("integrate_patch", {"status": "no_result_failed"}, promotable=False)
-        == OUTCOME_NO_PROMOTE
-    )
-
-
-def test_derive_journal_outcome_other_kinds_keep_binary_behaviour():
-    # Non-patch kinds use the promotable->KEEP / else->REVERT map.
-    assert derive_journal_outcome("baseline", {"status": "succeeded"}, promotable=True) == OUTCOME_KEEP
-    assert derive_journal_outcome("explore", {}, promotable=False) == OUTCOME_REVERT
-    assert derive_journal_outcome("profile", {"status": "reverted"}, promotable=True) == OUTCOME_KEEP
-
-
-def test_a_step_that_declined_to_run_is_neither_a_keep_nor_a_dead_end():
-    """A conc_sweep with nothing to compare succeeds without doing anything."""
-    out = derive_journal_outcome(
-        "conc_sweep",
-        {"status": "succeeded", "was_skipped": True, "skip_reason": "no_optimization_to_compare"},
-        promotable=True,
-    )
-    assert out == OUTCOME_SKIP
-
-
-def test_a_stray_was_skipped_cannot_demote_a_kept_patch():
-    """No integrate_patch producer sets the key; a future one must not silently rewrite the verdict."""
-    assert (
-        derive_journal_outcome("integrate_patch", {"status": "kept", "was_skipped": True}, promotable=True)
-        == OUTCOME_KEEP
-    )
+@pytest.mark.parametrize(
+    ("verdict", "result", "expected"),
+    [
+        (Verdict.ADOPTED, {}, OUTCOME_KEEP),
+        # Only a step with nothing to adopt can read as skipped.
+        (Verdict.ADOPTED, {"status": "kept", "was_skipped": True}, OUTCOME_KEEP),
+        (Verdict.REFUSED, {"status": "kept", "delta_pct": 7.5}, OUTCOME_NO_PROMOTE),
+        (Verdict.REVERTED, {"status": "reverted", "delta_pct": -0.44}, OUTCOME_REVERT),
+        (Verdict.FAILED, {"status": "apply_failed"}, OUTCOME_NO_PROMOTE),
+        (Verdict.RECORDED, {"status": "succeeded"}, OUTCOME_RECORDED),
+        (
+            Verdict.RECORDED,
+            {"status": "succeeded", "was_skipped": True, "skip_reason": "no_optimization_to_compare"},
+            OUTCOME_SKIP,
+        ),
+    ],
+)
+def test_the_journal_outcome_is_derived_from_the_verdict(verdict, result, expected):
+    assert derive_journal_outcome(verdict, result) == expected
 
 
 def test_operation_kind_for_maps_kind_and_action():

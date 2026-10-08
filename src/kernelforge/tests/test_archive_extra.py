@@ -249,7 +249,6 @@ def test_unusable_root_degrades_instead_of_raising(tmp_path):
 
 def _meta_payload(**overrides) -> dict:
     meta = {
-        "archive_format": 2,
         "complete": True,
         "iteration": 1,
         "decision": "KEEP",
@@ -267,8 +266,8 @@ def _meta_payload(**overrides) -> dict:
         [1, 2, 3],  # not a JSON object
         _meta_payload(files="kernel.py"),  # files must be a mapping
         _meta_payload(iteration=7),  # iteration must match dir
-        _meta_payload(archive_format="2"),  # format must be an int
-        _meta_payload(complete=False),  # format >= 2 needs marker
+        _meta_payload(complete=False),  # completion marker must be set
+        _meta_payload(complete="true"),  # completion marker must be the boolean
         {"iteration": 1, "decision": "KEEP", "kept": True},  # missing required keys
         _meta_payload(files={"kernel": "../escape.py"}),  # must stay inside the dir
         _meta_payload(files={"kernel": ""}),  # empty filename

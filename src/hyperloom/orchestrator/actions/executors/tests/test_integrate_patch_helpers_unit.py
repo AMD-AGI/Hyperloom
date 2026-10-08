@@ -171,12 +171,96 @@ def test_resolve_framework_root_explicit_missing_rejected():
     assert ip._resolve_framework_root("/no/such/dir") is None
 
 
-def test_resolve_framework_root_non_git_fallback(tmp_path, monkeypatch):
+def _commit_tree(checkout: Path, *files: str) -> None:
+    """Make ``checkout`` a git repository tracking ``files``."""
+    import subprocess
+
+    subprocess.run(["git", "init", "-q", str(checkout)], check=True)
+    for rel in files:
+        target = checkout / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(checkout), "add", "-A"], check=True)
+    subprocess.run(
+        ["git", "-C", str(checkout), "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base"],
+        check=True,
+    )
+
+
+def test_resolve_framework_root_non_git_framework_tree_is_its_own_root(tmp_path, monkeypatch):
     plain = tmp_path / "plain"
     plain.mkdir()
     monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(plain)])
     monkeypatch.setattr(ip, "resolve_session_framework_root", lambda: "")
+    monkeypatch.setattr(ip, "resolve_framework_tree", lambda framework: str(plain) if framework == "vllm" else "")
+    monkeypatch.setenv("FRAMEWORK", "vllm")
     assert ip._resolve_framework_root(None) == plain
+
+
+def test_resolve_framework_root_without_a_named_tree_takes_no_discovered_root(tmp_path, monkeypatch):
+    """A discovery order is not a name: with no tree named, no search root stands in for one."""
+    checkout = tmp_path / "InferenceX"
+    _commit_tree(checkout, "benchmarks/benchmark_lib.sh")
+    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(checkout)])
+    monkeypatch.setattr(ip, "resolve_session_framework_root", lambda: "")
+    monkeypatch.setattr(ip, "resolve_framework_tree", lambda framework: "")
+    monkeypatch.delenv("FRAMEWORK", raising=False)
+    assert ip._resolve_framework_root(None, patch_paths=[]) is None
+
+
+def test_resolve_framework_root_artifact_only_prefers_the_framework_checkout(tmp_path, monkeypatch):
+    """An artifact-only integrate must not land on the first git root discovered (the InferenceX checkout)."""
+    inferencex = tmp_path / "InferenceX"
+    _commit_tree(inferencex, "benchmarks/benchmark_lib.sh")
+    checkout = tmp_path / "sglang"
+    _commit_tree(checkout, "python/sglang/__init__.py")
+    package = checkout / "python" / "sglang"
+    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(inferencex), str(package)])
+    monkeypatch.setattr(ip, "resolve_session_framework_root", lambda: "")
+    monkeypatch.setattr(ip, "resolve_framework_tree", lambda framework: str(package) if framework == "sglang" else "")
+    monkeypatch.setenv("FRAMEWORK", "sglang")
+
+    assert ip._resolve_framework_root(None, patch_paths=[]) == checkout
+
+
+@pytest.mark.parametrize("image_has_source_checkout", [True, False])
+def test_resolve_framework_root_without_patches_takes_the_installed_package_itself(
+    tmp_path, monkeypatch, image_has_source_checkout
+):
+    """A pip-installed framework is edited where the server imports it, never in a checkout that happens to be first."""
+    inferencex = tmp_path / "InferenceX"
+    _commit_tree(inferencex, "benchmarks/benchmark_lib.sh")
+    site_packages = tmp_path / "site-packages" / "vllm"
+    site_packages.mkdir(parents=True)
+    (site_packages / "__init__.py").write_text("", encoding="utf-8")
+    roots = [inferencex]
+    if image_has_source_checkout:
+        source_checkout = tmp_path / "app" / "vllm"
+        _commit_tree(source_checkout, "vllm/__init__.py")
+        roots.append(source_checkout)
+    roots.append(site_packages)
+    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(r) for r in roots])
+    monkeypatch.setattr(ip, "resolve_session_framework_root", lambda: "")
+    monkeypatch.setattr(ip, "resolve_framework_tree", lambda framework: str(site_packages))
+    monkeypatch.setenv("FRAMEWORK", "vllm")
+    monkeypatch.setenv("INFERENCEX_PATH", str(inferencex))
+
+    assert ip._resolve_framework_root(None, patch_paths=[]) == site_packages
+
+
+def test_resolve_framework_root_ignores_a_repository_that_does_not_track_the_package(tmp_path, monkeypatch):
+    """A venv inside an unrelated repository sits under its ``.git`` without being part of it."""
+    project = tmp_path / "project"
+    _commit_tree(project, "README.md")
+    package = project / ".venv" / "lib" / "site-packages" / "vllm"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(package)])
+    monkeypatch.setattr(ip, "resolve_session_framework_root", lambda: "")
+    monkeypatch.setattr(ip, "resolve_framework_tree", lambda framework: str(package))
+    monkeypatch.setenv("FRAMEWORK", "vllm")
+
+    assert ip._resolve_framework_root(None, patch_paths=[]) == package
 
 
 def test_resolve_framework_root_none(monkeypatch):
@@ -575,6 +659,31 @@ def test_restore_uses_exact_attempt_git_base_or_refuses(tmp_path, monkeypatch, h
         assert result["failed"]
         assert result["reversed"] == []
     assert len(calls) == (1 if head == "base" else 0)
+
+
+def test_a_git_tree_that_lost_its_base_is_not_reported_as_restored(tmp_path):
+    """A git attempt takes no per-file backups, so without its HEAD nothing can undo it."""
+    from hyperloom.orchestrator.tests._helpers import init_git_repo
+
+    root = tmp_path / "framework"
+    init_git_repo(root, seed_file="cfg.txt", seed_text="ORIGINAL\n")
+    (root / "cfg.txt").write_text("PATCHED\n", encoding="utf-8")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    pending = {
+        "framework_source_root": str(root),
+        "workspace": str(workspace),
+        "patches": [str(workspace / "p.diff")],
+        "artifacts": [],
+        "recovery": {"version": 1, "phase": "ready", "root": str(workspace), "git_head": ""},
+    }
+
+    summary = ip.restore_pending_integrate(pending)
+
+    assert summary["failed"]
+    assert summary["reversed"] == []
+    assert pending["recovery"]["phase"] != "restored"
+    assert (root / "cfg.txt").read_text(encoding="utf-8") == "PATCHED\n"
 
 
 class _Verdict:

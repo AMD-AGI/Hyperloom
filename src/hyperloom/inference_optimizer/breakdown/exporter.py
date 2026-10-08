@@ -165,6 +165,7 @@ def build(session_dir: Path | str) -> dict[str, Any]:
             state=state,
             timeline=timeline,
             warnings=warnings,
+            recorded=assembled.get("outcome"),
         ),
         warnings,
         default={},
@@ -187,9 +188,7 @@ def build(session_dir: Path | str) -> dict[str, Any]:
     v6_critic = collectors.collect_v6_critic(assembled.get("critic"))
     v6_robustness = collectors.collect_v6_robustness(assembled.get("robustness"))
     # Snapshot last: every collector above feeds this one list, and this is the
-    # single place a collection failure surfaces. An export used to also carry
-    # a top-level copy taken partway through, which was a strict subset and so
-    # disagreed with this one about how the export had gone.
+    # single place a collection failure surfaces.
     if isinstance(metadata, dict):
         metadata["warnings"] = list(warnings)
 
@@ -297,6 +296,9 @@ def write_breakdown_json(
     payload = json.dumps(breakdown, indent=2, sort_keys=True, default=_json_default)
     atomic_write_text(target, payload)
     log.info("session_breakdown: wrote %s (%d bytes)", target, len(payload))
+    from ..experience_collect import collect_session
+
+    collect_session(sd, breakdown)
     return target
 
 
@@ -399,12 +401,17 @@ def patch_breakdown_close(session_dir: Path | str) -> bool:
         # Re-assembled rather than reused from the export: this pass runs after
         # the sequencer's last act, so the fragments now carry the verdict and
         # the artifact paths that did not exist when the breakdown was written.
-        fresh = collectors.collect_v6_close(
-            fresh_warnings,
-            recorded=_load_assembled(sd, fresh_warnings).get("close"),
-        )
+        assembled = _load_assembled(sd, fresh_warnings)
+        fresh = collectors.collect_v6_close(fresh_warnings, recorded=assembled.get("close"))
         changed = breakdown.get("close") != fresh
         breakdown["close"] = fresh
+        recorded_stage = (assembled.get("outcome") or {}).get("stage_reached_recorded")
+        outcome = breakdown.get("outcome")
+        if recorded_stage and isinstance(outcome, dict):
+            if outcome.get("stage_reached_recorded") != recorded_stage:
+                outcome["stage_reached_recorded"] = recorded_stage
+                outcome["stage_reached"] = recorded_stage
+                changed = True
 
         # This pass is the only one that ever sees the steps recorded *after* the breakdown was written —
         # ``artifact_package``, ``ndjson_drain``, ``done`` — so drift among them is reported here or nowhere.

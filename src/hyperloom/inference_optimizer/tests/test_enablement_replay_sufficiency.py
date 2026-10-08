@@ -903,6 +903,8 @@ def test_credential_classes_over_the_admitted_grammar():
         ("pip install -ihttps://user:token@host/simple foo", "index_url"),
         ("pip install -fhttps://user:token@host/links foo", "find_links"),
         ("conda install -chttps://user:token@host/channel foo", "channel"),
+        ("pip install -ihttps://user:token@host/simple?k=v foo", "index_url"),
+        ("conda install -chttps://user:token@host/channel?k=v foo", "channel"),
     ],
 )
 def test_compact_short_options_are_classified_and_sanitized(command, credential_class):
@@ -910,6 +912,25 @@ def test_compact_short_options_are_classified_and_sanitized(command, credential_
     assert row["credential_class"] == credential_class
     assert "user:token" not in row["cmd_sanitized"]
     assert "host" not in row["cmd_sanitized"]
+
+
+@pytest.mark.parametrize(
+    ("command", "sanitized"),
+    [
+        ("rm -rf /tmp/x", "rm -rf /tmp/x"),
+        (
+            "pip install -rrequirements.txt -c constraints.txt foo",
+            "pip install -rrequirements.txt -c constraints.txt foo",
+        ),
+        ("pip install -ihttps://user:token@host/simple foo", "pip install -i<index_url> foo"),
+        ("pip install -ihttps://user:token@host/simple?k=v foo", "pip install -i<index_url> foo"),
+        ("pip install -i=https://user:token@host/simple?k=v foo", "pip install -i=<index_url> foo"),
+        ("pip install --index-url=https://user:token@host/simple foo", "pip install --index-url=<index_url> foo"),
+        ("pip install --index-url https://user:token@host/simple foo", "pip install --index-url <index_url> foo"),
+    ],
+)
+def test_sanitizing_keeps_each_option_as_written(command, sanitized):
+    assert sanitize_command_text(command) == sanitized
 
 
 def test_an_inline_index_assignment_classifies_and_sanitizes_as_the_flag_does():

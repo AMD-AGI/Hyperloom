@@ -24,11 +24,9 @@ from hyperloom.orchestrator.actions.executors._patch_snapshot import (
     patch_declared_ops,
     replayed_stack_ops,
 )
+from hyperloom.orchestrator.actions.executors._git import _git_head_sha
 from hyperloom.orchestrator.actions.executors._integrate_attempt import IntegrateAttempt
-from hyperloom.orchestrator.actions.executors.integrate_patch import (
-    IntegratePatchExecutor,
-    _git_head_sha,
-)
+from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
 from hyperloom.orchestrator.enablement.lane import _rearm_on_kept
 from hyperloom.orchestrator.enablement.recipe.keep_records import (
     accepted_stack_artifacts,

@@ -3,10 +3,9 @@
 
 """Shared rendering for the AgentX graded axes.
 
-One copy, used by every section that shows a measured round, because the axes a verdict reads and the axes a report
-shows diverging is the failure this replaces: the ``perf`` block reached ``session_breakdown.json`` from the first
-V6 recorder, and no renderer ever surfaced it, so a session graded on median interactivity reported only the
-output-throughput figure it was no longer ranked on.
+One copy, used by every section that shows a measured round, so the axes a report shows are the axes a verdict
+reads: a session graded on median interactivity reports that axis, not only the output-throughput figure it is not
+ranked on.
 """
 
 from __future__ import annotations

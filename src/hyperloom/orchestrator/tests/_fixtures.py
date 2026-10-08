@@ -15,8 +15,13 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _isolate_session_layout_env(monkeypatch, tmp_path_factory):
-    """Drop the session-dir pin and point MULTI_NODE_STATE_FILE at a missing sentinel so tests run single-node."""
+    """Isolate a test from the host: no session-dir pin, single-node, and no live GPU power sampling.
+
+    Sampling follows ``amd-smi``, so on a GPU host every watchdog-driven test would otherwise query the real cards.
+    Tests of the sampler turn it back on themselves.
+    """
     monkeypatch.delenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", raising=False)
+    monkeypatch.setenv("HYPERLOOM_GPU_POWER_SAMPLING", "0")
     mn_state_sentinel = tmp_path_factory.mktemp("mn_state") / "missing_state.json"
     monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(mn_state_sentinel))
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)

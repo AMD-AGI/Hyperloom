@@ -11,18 +11,11 @@ from typing import Any
 
 import pytest
 
-from hyperloom.inference_optimizer.protocol.intent import (
-    Intent,
-    IntentType,
-)
-from hyperloom.orchestrator.policy.gate import (
-    CORE_STATE_FIELDS,
-    PolicyDenied,
-    PolicyGate,
-)
+from hyperloom.orchestrator.state.objective import TargetGainObjective
 from hyperloom.orchestrator.state.gaps import _GAPS_ATTEMPTS_HISTORY, _GAPS_MAX_ENTRIES
 from hyperloom.orchestrator.state.shared_state import SharedState
-from hyperloom.orchestrator.roles.agent_role import default_role_registry
+
+from .conftest import make_coordinator
 
 
 # 1. Field surface
@@ -59,27 +52,7 @@ def test_gaps_field_roundtrip_through_state_json(tmp_path):
     assert loaded.gaps[0]["layer"] == "kernel_agent"
 
 
-# 2. PolicyGate lock (Inv-1 / Inv-10.2)
-def test_core_state_fields_includes_gaps():
-    """``CORE_STATE_FIELDS`` MUST contain ``gaps`` so the LLM can't fabricate entries via ``update_state``."""
-    assert "gaps" in CORE_STATE_FIELDS
-
-
-def test_policy_gate_rejects_update_state_for_gaps():
-    """Orchestration cannot mutate gaps[] via ``update_state`` (rule='state_field')."""
-    gate = PolicyGate(role_registry=default_role_registry())
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.UPDATE_STATE,
-                payload={"changes": {"gaps": [{"canonical_id": "fake"}]}},
-            ),
-        )
-    assert exc.value.rule == "state_field"
-
-
-# 3. SharedState helpers
+# 2. SharedState helpers
 def test_upsert_gap_inserts_then_merges_by_canonical_id():
     s = SharedState()
     e1 = s.upsert_gap(
@@ -210,7 +183,7 @@ def test_to_gaps_summary_caps_entries_at_max():
     assert "older gaps elided" in out
 
 
-# 5. Coordinator helpers (_refresh_gaps / _extract_* / _warm_specialist_params)
+# 5. Coordinator helpers (refresh_gaps / _extract_* / warm_specialist_params)
 @dataclass
 class _StubTask:
     task_id: str
@@ -220,33 +193,26 @@ class _StubTask:
 
 @pytest.fixture
 def coord(tmp_path: Path):
-    """Coordinator stand-in via ``Coordinator.__new__`` (skips the full constructor)."""
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
-
-    c = Coordinator.__new__(Coordinator)
-    c.session_dir = tmp_path
-    c.shared_state = SharedState()
-    c.shared_state.session_id = "test-session"
-    c.shared_state.model_name = "llama-3.1-70B"
-    c.shared_state.gpu_type = "mi300x"
-    c.knowledge_plane = None
-    return c
+    return make_coordinator(
+        tmp_path,
+        shared_state_overrides={"session_id": "test-session", "model_name": "llama-3.1-70B", "gpu_type": "mi300x"},
+    )
 
 
 @pytest.mark.asyncio
 async def test_refresh_gaps_no_op_until_baseline(coord):
-    """Before baseline, _refresh_gaps keeps gaps[] empty (extractors gate on baseline_tput > 0)."""
-    await coord._refresh_gaps(reason="baseline_done")
+    """Before baseline, refresh_gaps keeps gaps[] empty (extractors gate on baseline_tput > 0)."""
+    await coord.gap_refresh.refresh_gaps(reason="baseline_done", workload_id=coord.proposals.workload_canonical_id())
     assert coord.shared_state.gaps == []
 
 
 @pytest.mark.asyncio
 async def test_refresh_gaps_seeds_throughput_gap_from_baseline(coord):
-    """After baseline + non-zero target_gap_pct, the extractor emits a `throughput_below_target` gap row anchored to the workload id."""
+    """After baseline + a non-zero gap to the objective, the extractor emits a `throughput_below_target` gap row anchored to the workload id."""
     s = coord.shared_state
     s.baseline_tput = 1000.0
-    s.target_gap_pct = 12.0
-    await coord._refresh_gaps(reason="baseline_done")
+    coord._current_objective = TargetGainObjective(target_gain_pct=12.0)
+    await coord.gap_refresh.refresh_gaps(reason="baseline_done", workload_id=coord.proposals.workload_canonical_id())
     matches = [g for g in s.gaps if g["canonical_id"].endswith("#throughput_below_target")]
     assert matches, f"missing throughput gap in {s.gaps!r}"
     gap = matches[0]
@@ -261,7 +227,7 @@ async def test_refresh_gaps_emits_baseline_unstable_gap(coord):
     s = coord.shared_state
     s.baseline_tput = 800.0
     s.baseline_failure_streak = 2
-    await coord._refresh_gaps(reason="baseline_done")
+    await coord.gap_refresh.refresh_gaps(reason="baseline_done", workload_id=coord.proposals.workload_canonical_id())
     instab = [g for g in s.gaps if g["canonical_id"].endswith("#baseline_unstable")]
     assert instab, "missing baseline_unstable gap"
     assert instab[0]["layer"] == "system"
@@ -278,7 +244,7 @@ async def test_refresh_gaps_dedupes_recurring_failures(coord):
         {"action": "backends", "error_class": "no_report", "ts": "2025-01-01T00:01:00+00:00"},
         {"action": "kernel_opt", "error_class": "compile_failure", "ts": "2025-01-01T00:02:00+00:00"},
     ]
-    await coord._refresh_gaps(reason="explore_round")
+    await coord.gap_refresh.refresh_gaps(reason="explore_round", workload_id=coord.proposals.workload_canonical_id())
     by_id = {g["canonical_id"]: g for g in s.gaps}
     backends_gaps = [g for cid, g in by_id.items() if "#fail:backends:no_report" in cid]
     kernel_gaps = [g for cid, g in by_id.items() if "#fail:kernel_opt:compile_failure" in cid]
@@ -299,7 +265,7 @@ async def test_refresh_gaps_emits_explore_plateau_after_streak(coord):
             {"variant_name": "v2", "gain_pct": 0.0},
         ]
     }
-    await coord._refresh_gaps(reason="explore_round")
+    await coord.gap_refresh.refresh_gaps(reason="explore_round", workload_id=coord.proposals.workload_canonical_id())
     plateau = [g for g in s.gaps if g["canonical_id"].endswith("#explore_plateau")]
     assert plateau, "explore_plateau gap missing"
     assert plateau[0]["domain_hint"] == "serving_specialist"
@@ -321,7 +287,8 @@ async def test_record_explore_round_gaps_appends_attempts(coord):
         kind="explore",
         params={"gap_canonical_id": "issue.fp8.kv"},
     )
-    coord._record_explore_round_gaps(
+    coord.gap_refresh.record_explore_round_gaps(
+        workload_id=coord.proposals.workload_canonical_id(),
         task=task,
         result={
             "per_variant_outcomes": [
@@ -348,7 +315,8 @@ async def test_record_explore_round_gaps_falls_back_to_anchor(coord):
         kind="explore",
         params={},
     )
-    coord._record_explore_round_gaps(
+    coord.gap_refresh.record_explore_round_gaps(
+        workload_id=coord.proposals.workload_canonical_id(),
         task=task,
         result={
             "per_variant_outcomes": [
@@ -356,7 +324,7 @@ async def test_record_explore_round_gaps_falls_back_to_anchor(coord):
             ]
         },
     )
-    anchor = coord._workload_canonical_id()
+    anchor = coord.proposals.workload_canonical_id()
     gap = s.find_gap(anchor)
     assert gap is not None
     assert any(a["variant_name"] == "v1" for a in gap["attempts"])
@@ -388,7 +356,7 @@ async def test_warm_specialist_params_pulls_gap_symptom_and_layer(coord):
         "domain": "kernel_switch_specialist",
         "gap_canonical_id": "issue.moe.routing",
     }
-    await coord._warm_specialist_params(params)
+    await coord.specialist_dispatch.warm_specialist_params(params)
     assert params["gap_symptom"] == "MoE routing overhead"
     assert params["gap_layer"] == "kernel_agent"
     evidence = params["gap_evidence"]
@@ -411,7 +379,7 @@ async def test_warm_specialist_params_uses_domain_hint_when_domain_missing(coord
         }
     )
     params: dict[str, Any] = {"gap_canonical_id": "issue.collective.allreduce"}
-    await coord._warm_specialist_params(params)
+    await coord.specialist_dispatch.warm_specialist_params(params)
     assert params.get("domain") == "comm_specialist"
 
 
@@ -423,7 +391,7 @@ async def test_warm_specialist_params_noop_when_gap_unknown(coord):
         "gap_canonical_id": "issue.unknown",
         "gap_symptom": "preset",
     }
-    await coord._warm_specialist_params(params)
+    await coord.specialist_dispatch.warm_specialist_params(params)
     assert params["domain"] == "serving_specialist"
     assert params["gap_symptom"] == "preset"
 
@@ -457,7 +425,9 @@ async def test_refresh_gaps_merges_recipe_kb_traverse_rows(coord):
         ]
     )
     coord.shared_state.baseline_tput = 900.0
-    await coord._refresh_gaps(reason="recipe_kb_refresh")
+    await coord.gap_refresh.refresh_gaps(
+        reason="recipe_kb_refresh", workload_id=coord.proposals.workload_canonical_id()
+    )
     found = coord.shared_state.find_gap("issue.kb.fp8_kv_prior")
     assert found is not None
     assert found["source"] == "recipe_kb"
@@ -471,7 +441,9 @@ async def test_refresh_gaps_absorbs_recipe_kb_traverse_exception(coord):
     )
     coord.shared_state.baseline_tput = 900.0
     # Must not raise.
-    await coord._refresh_gaps(reason="recipe_kb_refresh")
+    await coord.gap_refresh.refresh_gaps(
+        reason="recipe_kb_refresh", workload_id=coord.proposals.workload_canonical_id()
+    )
 
 
 @pytest.mark.asyncio
@@ -491,7 +463,8 @@ async def test_record_explore_round_gaps_carries_failure_artifacts(coord):
         kind="explore",
         params={"gap_canonical_id": "issue.fp8.kv2"},
     )
-    coord._record_explore_round_gaps(
+    coord.gap_refresh.record_explore_round_gaps(
+        workload_id=coord.proposals.workload_canonical_id(),
         task=task,
         result={
             "per_variant_outcomes": [

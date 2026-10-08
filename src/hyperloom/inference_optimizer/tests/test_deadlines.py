@@ -241,12 +241,11 @@ class TestTheBudgetSurvivesALegBoundary:
         state.charge_elapsed(now_unix=4_600.0)
         assert state.session_deadline(now=_at(4_600.0)).expired()  # type: ignore[union-attr]
 
-        state.extend_budget_minutes(30.0, reason="operator asked for more")
+        state.extend_budget_minutes(30.0)
 
         deadline = state.session_deadline(now=_at(4_600.0))
         assert deadline is not None and not deadline.expired()
-        assert state.budget_extensions[-1]["minutes"] == 30.0
-        assert state.budget_extensions[-1]["reason"] == "operator asked for more"
+        assert state.max_minutes == 90
 
     def test_an_extension_does_not_refund_elapsed_time(self):
         state = SharedState(session_id="s", max_minutes=60)

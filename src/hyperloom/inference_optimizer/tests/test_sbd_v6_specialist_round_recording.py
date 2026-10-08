@@ -154,6 +154,11 @@ class _Seam:
     def __init__(self, *, phase: str, framework_recorder: Any = None) -> None:
         self.shared_state = _StubState(phase)
         self.phase_framework = SimpleNamespace(timeline=lambda: framework_recorder)
+        # Provide _coord so collaborator cross-calls resolve.
+        self._coord = SimpleNamespace(
+            shared_state=self.shared_state,
+            phase_framework=self.phase_framework,
+        )
 
 
 def test_a_round_without_a_dispatch_row_is_not_charged_to_the_running_phase(tmp_path) -> None:
