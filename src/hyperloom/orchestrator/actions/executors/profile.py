@@ -862,37 +862,26 @@ class ProfileExecutor(BenchmarkRunExecutor):
         return str(scoped)
 
     def _inject_host_probe(self, config_path: Path, output_dir: Path) -> str:
-        """Arm the host-side evidence probe in the materialized profile config."""
+        """Put the profile start-up shim on the materialized config's ``PYTHONPATH`` and arm the host probe.
+
+        The shim always goes in, since it keeps GPU events in the traces of spawned engines; the
+        probe's environment only when the probe is enabled. Returns the probe's report directory,
+        or ``""`` when the probe is not armed.
+        """
         from . import _framework_rewrite_evidence as _evidence
 
-        if not _evidence.probe_enabled():
-            return ""
         asset_dir = _evidence.probe_asset_dir()
         if not asset_dir.is_dir():
             log.warning(
-                "profile_executor: host-probe assets missing at %s; host-side rewrite evidence disabled",
+                "profile_executor: start-up shim assets missing at %s; host-side rewrite evidence disabled",
                 asset_dir,
             )
             return ""
-        probe_dir = output_dir / _evidence.PROBE_SUBDIR
-        try:
-            probe_dir.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            log.warning("profile_executor: cannot create host-probe dir %s: %s", probe_dir, exc)
-            return ""
-
-        from hyperloom.inference_optimizer.framework_paths import resolve_kernel_search_roots
-
-        roots = list(resolve_kernel_search_roots())
-        probe_env = _evidence.build_probe_env(
-            probe_dir=probe_dir,
-            source_roots=roots,
-            deep=_evidence.deep_probe_enabled(),
-        )
+        probe_env = self._host_probe_env(output_dir) if _evidence.probe_enabled() else {}
         try:
             cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
         except (OSError, yaml.YAMLError) as exc:
-            log.warning("profile_executor: cannot read %s to arm the host probe: %s", config_path, exc)
+            log.warning("profile_executor: cannot read %s to arm the start-up shim: %s", config_path, exc)
             return ""
         bench = cfg.get("benchmark") if isinstance(cfg, dict) else None
         if not isinstance(bench, dict):
@@ -909,43 +898,35 @@ class ProfileExecutor(BenchmarkRunExecutor):
         try:
             config_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
         except OSError as exc:
-            log.warning("profile_executor: cannot write %s after arming the host probe: %s", config_path, exc)
+            log.warning("profile_executor: cannot write %s after arming the start-up shim: %s", config_path, exc)
+            return ""
+        if not probe_env:
             return ""
         log.info(
             "profile_executor: host-side rewrite evidence probe armed (deep=%s), reports -> %s",
             bool(probe_env.get("HYPERLOOM_HOST_PROBE_DEEP")),
-            probe_dir,
+            probe_env["HYPERLOOM_HOST_PROBE_DIR"],
         )
-        return str(probe_dir)
+        return probe_env["HYPERLOOM_HOST_PROBE_DIR"]
 
-    def _inject_trace_env_shim(self, config_path: Path) -> None:
-        """Put the trace-environment shim on the profile run's ``PYTHONPATH``, right after the host probe.
-
-        Python imports only the first ``sitecustomize``. The host-probe shim chains to the
-        first other one and this shim chains to the next one after it, so this position
-        keeps all three loading, including an overlay's ``sitecustomize`` that does not chain.
-        """
-        from hyperloom.inference_optimizer.session.paths import asset_root
-
+    def _host_probe_env(self, output_dir: Path) -> dict[str, str]:
+        """Return the environment that arms the host probe, or ``{}`` when its report directory cannot be made."""
         from . import _framework_rewrite_evidence as _evidence
 
-        asset_dir = asset_root() / "assets" / "profile_trace_env"
-        cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-        bench = cfg.get("benchmark") if isinstance(cfg, dict) else None
-        if not isinstance(bench, dict):
-            return
-        envs = bench.setdefault("envs", {})
-        if not isinstance(envs, dict):
-            return
-        current = str(envs.get("PYTHONPATH", "") or "").strip()
-        entry = str(asset_dir)
-        entries = [part for part in current.split(os.pathsep) if part]
-        if entry in entries:
-            return
-        probe = str(_evidence.probe_asset_dir())
-        entries.insert(entries.index(probe) + 1 if probe in entries else 0, entry)
-        envs["PYTHONPATH"] = os.pathsep.join(entries)
-        config_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+        probe_dir = output_dir / _evidence.PROBE_SUBDIR
+        try:
+            probe_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            log.warning("profile_executor: cannot create host-probe dir %s: %s", probe_dir, exc)
+            return {}
+
+        from hyperloom.inference_optimizer.framework_paths import resolve_kernel_search_roots
+
+        return _evidence.build_probe_env(
+            probe_dir=probe_dir,
+            source_roots=list(resolve_kernel_search_roots()),
+            deep=_evidence.deep_probe_enabled(),
+        )
 
     def _after_materialize_config(
         self,
@@ -960,10 +941,6 @@ class ProfileExecutor(BenchmarkRunExecutor):
             log.warning("profile_executor: host-probe injection failed: %s", exc, exc_info=True)
             self._host_probe_dir = ""
             self._host_probe_status = f"probe_injection_failed: {exc}"
-        try:
-            self._inject_trace_env_shim(config_path)
-        except (OSError, yaml.YAMLError) as exc:
-            log.warning("profile_executor: trace-env shim injection failed: %s", exc, exc_info=True)
         try:
             cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
         except Exception as exc:  # noqa: BLE001
