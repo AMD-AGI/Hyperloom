@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from hyperloom.inference_optimizer import framework_registry
 from hyperloom.inference_optimizer.framework_paths import (
     resolve_session_framework_root,
     resolved_within,
@@ -896,8 +897,9 @@ class PolicyGate:
                 ``params`` (tags, scope, gap_canonical_id, max_turns, ...).
 
         Raises:
-            PolicyDenied: when the role may not dispatch, params are malformed,
-                the gap id is missing, or max_turns exceeds the hard cap. Tag /
+            PolicyDenied: when the role may not dispatch, params are malformed
+                or name an unregistered framework, the gap id is missing, or
+                max_turns exceeds the hard cap. Tag /
                 scope incoherence is logged rather than denied.
         """
         if role.name not in SPECIALIST_DISPATCH_SOURCE_ALLOWLIST:
@@ -914,6 +916,7 @@ class PolicyGate:
                 rule="specialist_dispatch_source",
                 hint="pass params={tags, gap_canonical_id, ...} per §3.5 §6",
             )
+        _validate_specialist_framework(params)
 
         # scope='freeform' has no domain anchor: it skips the tag / gap
         # vocabulary checks and runs a lightweight mechanical sanity gate instead.
@@ -1506,6 +1509,29 @@ class PolicyGate:
                     f"only cancels the queued backlog."
                 ),
             )
+
+
+def _validate_specialist_framework(params: dict[str, Any]) -> None:
+    """Refuse a specialist dispatch whose ``params.framework`` the registry does not know.
+
+    The specialist resolves the source tree it patches from that name, and a
+    dispatch that omits it inherits the session's.
+
+    Args:
+        params: The specialist dispatch ``params``.
+
+    Raises:
+        PolicyDenied: When ``params.framework`` is present and not registered.
+    """
+    if "framework" in params and not framework_registry.is_supported(params["framework"]):
+        raise PolicyDenied(
+            f"delegate{{action='specialist'}}: params.framework={params['framework']!r} is not a registered framework",
+            rule="specialist_framework_unregistered",
+            hint=(
+                "Omit params.framework to dispatch against the session's framework, "
+                f"or pass one of {list(framework_registry.names())!r}."
+            ),
+        )
 
 
 def validate_specialist_max_turns_raw(

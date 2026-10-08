@@ -629,7 +629,10 @@ def _resolve_framework_root(
     session_root = resolve_session_framework_root()
     if session_root and Path(session_root).is_dir():
         return Path(session_root)
-    tree = framework_apply_tree(resolve_framework_tree(os.environ.get("FRAMEWORK", "")))
+    framework = os.environ.get("FRAMEWORK", "")
+    if not framework:
+        return None
+    tree = framework_apply_tree(resolve_framework_tree(framework))
     return tree.root if tree is not None else None
 
 
@@ -2253,16 +2256,19 @@ class IntegratePatchExecutor:
         if gap is None:
             return None
 
-        from hyperloom.agents.framework.repo_map import repo_url_for_framework
+        from hyperloom.inference_optimizer import framework_registry
 
         from ...enablement.runtime.adapters import get_adapter
         from ...enablement.runtime.localization import build_localization_diff
 
+        refs = attempt.shared_state.enablement.candidate_refs
+        if not refs:
+            return None
         framework = str(getattr(attempt.shared_state, "framework", "") or "").strip().lower()
-        repo_url = repo_url_for_framework(framework)
+        repo_url = framework_registry.repo_url(framework)
         if not repo_url:
             return None
-        ref = _first_ref_in_repo(attempt.shared_state.enablement.candidate_refs, repo_url)
+        ref = _first_ref_in_repo(refs, repo_url)
         if not ref:
             return None
 

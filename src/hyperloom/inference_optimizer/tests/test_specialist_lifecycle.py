@@ -429,7 +429,12 @@ def force_coord(tmp_path: Path, monkeypatch):
         queued=AsyncMock(return_value=[]),
         running=AsyncMock(return_value=[]),
     )
-    monkeypatch.setattr(SpecialistDispatchCollaborator, "warm_specialist_params", AsyncMock())
+    # The real warmup stamps the session's framework onto every dispatch.
+    monkeypatch.setattr(
+        SpecialistDispatchCollaborator,
+        "warm_specialist_params",
+        AsyncMock(side_effect=lambda params: params.setdefault("framework", "sglang")),
+    )
     c.router.handle_intent = AsyncMock()  # type: ignore[assignment]
     return c
 
