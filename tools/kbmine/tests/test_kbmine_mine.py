@@ -585,3 +585,14 @@ def test_an_agentx_scope_without_isl_or_osl_encodes() -> None:
 
     query = KBStoreClient._scope_query({"kernel_optimizer": "forge", "tp": 8, "conc": 1})
     assert query.startswith("?") and "conc=1" in query and "isl" not in query
+
+
+@pytest.mark.parametrize("n_ids", [49, 50, 60])
+def test_explicit_canonical_ids_are_never_reported_as_truncated(monkeypatch, tmp_path: Path, n_ids) -> None:
+    monkeypatch.setenv("KB_STORE_URL", "https://kb.invalid")
+    monkeypatch.setattr(estimate_no_run, "KBStoreClient", lambda *a, **k: _FakeStore(0, report_total=False))
+    ids = [arg for i in range(n_ids) for arg in ("--canonical-id", f"{_MI355_SGLANG}-{i}")]
+    report = _run(ids, tmp_path)
+    assert report["coverage"]["identities_fetched"] == n_ids
+    assert report["sessions_scored"] == n_ids
+    assert not [line for line in report["limitations"] if "identities" in line]

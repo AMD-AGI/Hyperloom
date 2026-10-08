@@ -799,14 +799,16 @@ def fetch_session_documents(
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Download per-session envelopes for matching identities.
 
-    When *counts* is given it receives ``fetched`` (identities read) and ``matched`` (identities the store holds for
-    the search, ``None`` when unreported or when explicit ids were given).
+    When *counts* is given it receives ``fetched`` (identities read), ``searched`` (``False`` when explicit ids were
+    given, so nothing could have been cut off) and ``matched`` (identities the store holds for the search, ``None`` when
+    unreported or not searched).
     """
     errors: list[str] = []
     counts = {} if counts is None else counts
     if canonical_ids:
         identities = [{"canonical_id": cid} for cid in canonical_ids]
         counts["matched"] = None
+        counts["searched"] = False
     else:
         identities = search_inference_identities(
             store,
@@ -815,6 +817,7 @@ def fetch_session_documents(
             max_identities=max_identities,
             counts=counts,
         )
+        counts["searched"] = True
     counts["fetched"] = len(identities)
     documents: list[dict[str, Any]] = []
     for item in identities:
