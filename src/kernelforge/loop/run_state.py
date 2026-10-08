@@ -33,8 +33,6 @@ from kernelforge.durable_io import atomic_write_text
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 21
-
 # How many trailing events the store keeps in memory to serve ``recent_events`` without re-reading ``events.jsonl``
 # each iteration (see LoopStateStore).
 _RECENT_CACHE = 64
@@ -187,7 +185,6 @@ def _validate_round_costs(costs: "RoundCostState") -> None:
 class RunState:
     """Small, resumable control checkpoint for one forge-loop campaign."""
 
-    schema_version: int = SCHEMA_VERSION
     campaign_id: str = ""
     session_index: int = 0
     session_status: str = ""
@@ -233,20 +230,21 @@ class RunState:
     round_costs: RoundCostState = field(default_factory=RoundCostState)
     # Iterations worth re-reading in full (best + notable near-misses).
     pinned_iterations: list[int] = field(default_factory=list)
+    # The roofline ceiling this campaign estimated. A resume reads it back rather than estimating again: the stop
+    # rule divides by it, so a second estimate would move the target between segments of one campaign. Recorded here
+    # rather than inferred from the workspace, where a report may be left over from a run that was not this one.
+    ceiling_report_path: str = ""
     termination_reason: str = ""
 
     def to_dict(self) -> dict:
-        """Serialize the current durable state schema."""
+        """Serialize the durable state."""
         return asdict(self)
 
     @classmethod
     def from_dict(cls, d: dict) -> "RunState":
-        """Rebuild a RunState from the exact current schema."""
+        """Rebuild a RunState from exactly the fields this code writes."""
         if not isinstance(d, dict):
             raise ValueError("run state must be a JSON object")
-        version = d.get("schema_version")
-        if version != SCHEMA_VERSION:
-            raise ValueError(f"unsupported run state schema: expected v{SCHEMA_VERSION}, got {version!r}")
         payload = dict(d)
 
         expected = set(cls.__dataclass_fields__)

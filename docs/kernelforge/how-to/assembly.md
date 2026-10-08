@@ -156,18 +156,17 @@ all-zero errors, are valid and are not used to infer shared execution.
 `forge_experiments/assembly_preparation/result.json` records source and roundtrip
 timings, source/launcher/assembly hashes, the binding manifest, and preparation
 commit, plus the numerical execution-probe evidence. Preparation failures restore
-the original files and Git state. Resume requires a schema-4 record and unchanged frozen inputs, including tracked reference
-helpers, compared with the preparation commit. Only the selected `.s` may change.
-Older preparation records lack the source-independence proof and are not migrated; start a fresh
-campaign from their selected source instead.
+the original files and Git state. Resume requires a record with exactly the
+fields the current code writes and unchanged frozen inputs, including tracked
+reference helpers, compared with the preparation commit. Only the selected `.s`
+may change.
 
 ## Numerical acceptance
 
 An assembly campaign requires `config.yaml` with both canonical commands and a
 `numerical_validation` contract. It is enforced on the source, the compiler
 roundtrip, and every candidate that would otherwise be kept. Missing contracts
-or measurements block acceptance. Older preparation records without this
-contract cannot resume; prepare a fresh campaign with the expanded driver.
+or measurements block acceptance.
 
 The protected task configuration specifies coverage and error limits before
 optimization. For an exact vector add, for example:

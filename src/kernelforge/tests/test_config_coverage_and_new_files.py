@@ -706,17 +706,17 @@ def test_floor_only_coverage_is_reported_as_such_to_the_planner():
     assert "config_coverage_floor_only" not in flags["decode-t64"]
 
 
-def test_unreadable_campaign_config_schema_names_what_it_accepts(tmp_path, monkeypatch):
+def test_campaign_config_missing_a_field_names_it(tmp_path, monkeypatch):
     monkeypatch.setenv("GPU_TARGET", "gfx950")
     workspace, kernel, driver = _git_workspace(tmp_path)
     resolve_campaign(**_base_args(workspace, kernel, driver))
 
     store = CampaignConfigStore(str(workspace))
     payload = store.load().to_dict()
-    payload["schema_version"] = 7
+    del payload["commit_new_paths"]
     store.path.write_text(json.dumps(payload, indent=2))
 
-    with pytest.raises(ValueError, match="unsupported campaign config schema 7; expected 8"):
+    with pytest.raises(ValueError, match="campaign config missing fields: commit_new_paths"):
         store.load()
 
 

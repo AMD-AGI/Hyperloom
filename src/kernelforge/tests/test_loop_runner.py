@@ -275,7 +275,7 @@ def test_pending_keep_publication_patch_is_cumulative(tmp_path, monkeypatch):
         kernel_source=kernel.read_text(),
     )
 
-    assert pending["schema_version"] == 3
+    assert set(pending) == runner_module.PENDING_KEEP_FIELDS
     assert pending["promotes_best"] is True
     assert pending["changed_files"] == ["kernel.py"]
     assert set(pending["publication_changed_files"]) == {"driver.py", "kernel.py"}
@@ -4427,9 +4427,11 @@ def test_keep_defers_incremental_analysis_until_next_request(
     class Bundle:
         def __init__(self, analysis_commit):
             self.analysis_commit = analysis_commit
-            self.root = workspace / "forge_experiments" / "analysis" / analysis_commit
+            commit_root = workspace / "forge_experiments" / "analysis" / analysis_commit
+            self.root = commit_root / "generation-001"
             self.root.mkdir(parents=True, exist_ok=True)
             (self.root / "manifest.json").write_text("{}")
+            (commit_root / "published.json").write_text(json.dumps({"generation_root": self.root.name}))
             self.outcome = SimpleNamespace(
                 checkpoint_level="published",
                 to_dict=lambda: {},
@@ -5177,15 +5179,6 @@ def test_resume_propagates_complete_ruling_to_planner_and_implementer(
     assert loop._supervisor_ruling == ruling
     assert captured["guidance"] == ruling
     assert ruling in captured["history"]
-
-
-def test_run_state_rejects_wrong_schema(tmp_path, monkeypatch):
-    _make_loop(tmp_path, monkeypatch, resume=True)
-    prior_schema = RunState().to_dict()
-    prior_schema["schema_version"] = 12
-
-    with pytest.raises(ValueError, match="unsupported run state schema"):
-        RunState.from_dict(prior_schema)
 
 
 def test_resume_requires_authoritative_task_fingerprint(

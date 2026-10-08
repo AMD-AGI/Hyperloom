@@ -23,7 +23,6 @@ from kernelforge.loop.run_state import (
     SESSION_COMPLETED,
     SESSION_INTERRUPTED,
     SESSION_PAUSED,
-    SCHEMA_VERSION,
     SESSION_RUNNING,
     _RECENT_RESULT_CACHE,
     BestRecord,
@@ -113,39 +112,35 @@ def test_load_corrupt_fails_closed(tmp_path):
         LoopStateStore(str(tmp_path)).load()
 
 
-def test_load_noncurrent_schema_fails_closed(tmp_path):
-    root = tmp_path / "forge_experiments"
-    root.mkdir(parents=True, exist_ok=True)
-    (root / "run_state.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "iteration": 7,
-                "phase": PHASE_EXPLOIT,
-                "best": {
-                    "iteration": 5,
-                    "wall_ms": 0.5,
-                    "commit_hash": "abc1234",
-                    "plan": "vectorize loads",
-                },
-            }
-        )
-    )
-
-    with pytest.raises(ValueError, match="unsupported run state schema"):
-        LoopStateStore(str(tmp_path)).load()
-
-
-def test_load_the_previous_schema_fails_closed(tmp_path):
-    """Checkpoints are not migrated; a workspace written by an older loop starts a fresh campaign."""
-    payload = RunState().to_dict()
-    payload["schema_version"] = SCHEMA_VERSION - 1
+def _write_run_state(tmp_path, payload: dict) -> LoopStateStore:
     root = tmp_path / "forge_experiments"
     root.mkdir(parents=True, exist_ok=True)
     (root / "run_state.json").write_text(json.dumps(payload))
+    return LoopStateStore(str(tmp_path))
 
-    with pytest.raises(ValueError, match=f"expected v{SCHEMA_VERSION}, got {SCHEMA_VERSION - 1}"):
-        LoopStateStore(str(tmp_path)).load()
+
+def test_load_checkpoint_missing_a_field_fails_closed(tmp_path):
+    payload = RunState().to_dict()
+    payload.pop("last_critic")
+
+    with pytest.raises(ValueError, match="run state missing fields: last_critic"):
+        _write_run_state(tmp_path, payload).load()
+
+
+def test_load_checkpoint_with_an_unknown_field_fails_closed(tmp_path):
+    payload = RunState().to_dict()
+    payload["schema_version"] = 20
+
+    with pytest.raises(ValueError, match="run state has unknown fields: schema_version"):
+        _write_run_state(tmp_path, payload).load()
+
+
+def test_load_checkpoint_missing_a_nested_field_fails_closed(tmp_path):
+    payload = RunState().to_dict()
+    payload["round_costs"].pop("campaign_sec")
+
+    with pytest.raises(ValueError, match="run state round_costs missing fields: campaign_sec"):
+        _write_run_state(tmp_path, payload).load()
 
 
 def test_a_keep_clears_both_stall_counters():

@@ -47,7 +47,7 @@ without a new best for the stall counters, the Supervisor trigger and the
 EXPLOIT/DIVERSIFY switch.
 
 `KEEP` and `ACCEPT` both commit before the run state is saved, so both are
-journaled in `pending_keep.json` (schema v3). The journal's `promotes_best`
+journaled in `pending_keep.json`. The journal's `promotes_best`
 field says whether resume must also restore the best record and finish the
 publication; an `ACCEPT` journal only restores the commit and the run state.
 
@@ -153,7 +153,7 @@ best version, the gate's block message states both scores.
 
 ## Configuration and resume
 
-`--search-policy` is stored in `campaign_config.json` (schema v8) and read
+`--search-policy` is stored in `campaign_config.json` and read
 back on `--resume`. A resume that omits the option uses the stored policy; a
 resume that names a different policy is refused.
 

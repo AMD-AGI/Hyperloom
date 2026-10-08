@@ -38,11 +38,11 @@ forge_experiments/
   best/
 ```
 
-`run_state.json` uses schema v21 and `campaign_config.json` uses schema v8. The
-loaders validate the current field set strictly and reject malformed,
-incomplete, unknown, or differently versioned files. The run-state loader also
-rejects a campaign wall-clock shorter than the planning charged to it, so the
-share cannot exceed 100 by way of a hand-edited or future-written checkpoint.
+The loader accepts exactly the field set the current code writes: a checkpoint
+with a missing or unknown field, top-level or nested, is rejected rather than
+filled in. The loader also rejects a campaign wall-clock shorter than the
+planning charged to it, so the share cannot exceed 100 by way of a hand-edited
+checkpoint.
 
 The state contains:
 
@@ -102,7 +102,8 @@ iteration event that was durably appended before the corresponding state save.
 
 Resume is fail-closed. It requires:
 
-- A valid current `campaign_config.json` and `run_state.json`.
+- A `campaign_config.json` and `run_state.json` written by the current code.
+  Files from a different field set are rejected, never migrated.
 - Matching task fingerprint, driver digest, Git branch, and a HEAD equal to the
   search policy's starting version, with the best commit as its ancestor or
   itself.
@@ -112,9 +113,9 @@ Resume is fail-closed. It requires:
 `pending_keep.json` is the crash journal for the narrow interval between
 canonical validation, Git commit, state publication, and archive publication of
 a `KEEP` or an `ACCEPT`. Resume reconciles this journal before admitting another
-Implementer session. The journal uses schema v3; its `promotes_best` field
-distinguishes a `KEEP`, whose best record and publication resume must also
-finish, from an `ACCEPT`.
+Implementer session. Its `promotes_best` field distinguishes a `KEEP`, whose
+best record and publication resume must also finish, from an `ACCEPT`. A
+journal whose key set differs from the one the current code writes is rejected.
 
 Every process-local resume creates a new experiment segment while retaining the
 campaign identity and cumulative state.
@@ -146,7 +147,7 @@ Each iteration runs:
 7. Canonical validation, benchmark, and KEEP/REVERT.
 
 `optimization_plan.md` is the Implementer's planning source of truth for that
-iteration. Handoff schema v3 records its path together with the canonical
+iteration. The iteration handoff records its path together with the canonical
 verdict, the latest Supervisor Ruling path, and audit pointers. Handoffs do not
 restore control state. When Critic review runs, `draft_plan.md` and
 `critic_review.md` are immutable audit artifacts for that planning cycle.

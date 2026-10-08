@@ -32,7 +32,6 @@ from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
 from kernelforge.loop.search_policy import DEFAULT_SEARCH_POLICY, SearchPolicy, parse_search_policy
 
 
-SCHEMA_VERSION = 8
 _GPU_TARGET_RE = re.compile(r"\bgfx[0-9a-f]+\b", re.IGNORECASE)
 _AMDGPU_ASSEMBLY_RE = re.compile(
     r"^\s*\.(?:amdgcn_target\s+[\"']?amdgcn-amd-amdhsa\b|amdhsa_kernel\b|amdgpu_hsa_kernel\b)",
@@ -48,7 +47,6 @@ _FALLBACK_KERNEL_BACKEND = "flydsl"
 class CampaignConfig:
     """Inputs that must remain stable across all sessions in a campaign."""
 
-    schema_version: int = SCHEMA_VERSION
     kernel_path: str = ""
     driver_path: str = ""
     driver_sha256: str = ""
@@ -86,48 +84,48 @@ class CampaignConfig:
 
     @classmethod
     def from_dict(cls, payload: dict) -> "CampaignConfig":
+        """Rebuild a campaign from exactly the fields this code writes."""
         if not isinstance(payload, dict):
             raise ValueError("campaign config must be a JSON object")
-        version = int(payload.get("schema_version", 0) or 0)
-        if version != SCHEMA_VERSION:
-            raise ValueError(f"unsupported campaign config schema {version}; expected {SCHEMA_VERSION}")
-        if "search_policy" not in payload:
-            raise ValueError("campaign config has no search policy")
-        unknown_fields = set(payload) - {item.name for item in fields(cls)}
+        expected_fields = {item.name for item in fields(cls)}
+        unknown_fields = set(payload) - expected_fields
         if unknown_fields:
             raise ValueError("unsupported campaign config fields: " + ", ".join(sorted(unknown_fields)))
+        missing_fields = expected_fields - set(payload)
+        if missing_fields:
+            raise ValueError("campaign config missing fields: " + ", ".join(sorted(missing_fields)))
         config = cls(
-            schema_version=SCHEMA_VERSION,
-            kernel_path=str(payload.get("kernel_path") or ""),
-            driver_path=str(payload.get("driver_path") or ""),
-            driver_sha256=str(payload.get("driver_sha256") or "").lower(),
-            source_files=[str(path) for path in (payload.get("source_files") or [])],
-            program_md_path=str(payload.get("program_md_path") or ""),
-            program_md_sha256=str(payload.get("program_md_sha256") or ""),
-            snr_threshold=float(payload.get("snr_threshold", DEFAULT_SNR_THRESHOLD_DB)),
-            gpu_target=str(payload.get("gpu_target") or ""),
-            gpu_type=str(payload["gpu_type"] if "gpu_type" in payload else "mi355x").strip().lower(),
-            kernel_backend=str(payload.get("kernel_backend") or ""),
-            task_type=str(payload.get("task_type") or ""),
-            target_functions=[str(name) for name in (payload.get("target_functions") or [])],
-            git_branch=str(payload.get("git_branch") or ""),
-            base_commit=str(payload.get("base_commit") or ""),
-            framework=str(payload.get("framework") or ""),
-            operator_name=str(payload.get("operator_name") or ""),
-            producer=str(payload.get("producer") or ""),
-            implementation_signature=str(payload.get("implementation_signature") or "").lower(),
-            implementation_identity=dict(payload.get("implementation_identity") or {}),
-            # to_dict() is asdict(), so these are always written; leaving them out of the reader made a resumed
-            # campaign silently fall back to one rank and single-shot benching -- measuring a different thing than the
-            # session it claims to continue.
-            nproc_per_node=max(1, int(payload.get("nproc_per_node") or 1)),
-            bench_repeat=max(1, int(payload.get("bench_repeat") or 1)),
+            kernel_path=str(payload["kernel_path"]),
+            driver_path=str(payload["driver_path"]),
+            driver_sha256=str(payload["driver_sha256"]).lower(),
+            source_files=[str(path) for path in payload["source_files"]],
+            program_md_path=str(payload["program_md_path"]),
+            program_md_sha256=str(payload["program_md_sha256"]),
+            snr_threshold=float(payload["snr_threshold"]),
+            gpu_target=str(payload["gpu_target"]),
+            gpu_type=str(payload["gpu_type"]).strip().lower(),
+            kernel_backend=str(payload["kernel_backend"]),
+            task_type=str(payload["task_type"]),
+            target_functions=[str(name) for name in payload["target_functions"]],
+            git_branch=str(payload["git_branch"]),
+            base_commit=str(payload["base_commit"]),
+            framework=str(payload["framework"]),
+            operator_name=str(payload["operator_name"]),
+            producer=str(payload["producer"]),
+            implementation_signature=str(payload["implementation_signature"]).lower(),
+            implementation_identity=dict(payload["implementation_identity"]),
+            nproc_per_node=int(payload["nproc_per_node"]),
+            bench_repeat=int(payload["bench_repeat"]),
             # Re-validated on read: this list decides which untracked files a KEEP commits and a REVERT deletes, so a
             # hand-edited pattern the loop would read differently than its author meant is refused here rather than
             # acted on later.
-            commit_new_paths=normalize_commit_new_paths(payload.get("commit_new_paths") or []),
+            commit_new_paths=normalize_commit_new_paths(payload["commit_new_paths"]),
             search_policy=parse_search_policy(payload["search_policy"]),
         )
+        if config.nproc_per_node < 1:
+            raise ValueError("campaign nproc_per_node must be positive")
+        if config.bench_repeat < 1:
+            raise ValueError("campaign bench_repeat must be positive")
         if config.program_md_path and not config.program_md_sha256:
             raise ValueError("campaign program context digest is missing")
         if config.program_md_sha256 and not config.program_md_path:
@@ -449,7 +447,7 @@ def create_campaign_config(
     commit_new_paths: list[str] | None = None,
     search_policy: SearchPolicy = DEFAULT_SEARCH_POLICY,
 ) -> CampaignConfig:
-    """Resolve and normalize all immutable inputs for a fresh/legacy campaign."""
+    """Resolve and normalize all immutable inputs for a fresh campaign."""
     workspace = Path(workspace_dir).resolve()
     kernel_path = _relative_file(workspace, kernel, "kernel")
     driver_path = _driver_reference(workspace, driver)
