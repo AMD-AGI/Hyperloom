@@ -34,12 +34,10 @@ from hyperloom.orchestrator.enablement.recipe.projections import (
 )
 from hyperloom.orchestrator.enablement.recipe.steps import command_digest
 from hyperloom.orchestrator.enablement.recipe.sufficiency import REASON_BLOCKS, _BUILTIN_REQUIRED_INPUTS
-from hyperloom.orchestrator.enablement.recipe.setup_ledger import (
-    build_execution_row,
-    mark_round_disposition,
-)
+from hyperloom.orchestrator.enablement.recipe.setup_ledger import build_execution_row
 from hyperloom.orchestrator.enablement.runtime import targeted_build
 from hyperloom.orchestrator.enablement.runtime.build_actions import TargetedBuildAction
+from hyperloom.orchestrator.state.shared_state import EnablementRound
 
 NO_FS = "/nonexistent-probe-root"
 
@@ -72,8 +70,14 @@ def _row(cmd="pip install foo", *, seq=1, outcome="applied", task="r1", env=None
     )
 
 
+def _marked(rows, *, round_task_id, disposition, accepted):
+    rnd = EnablementRound(setup_executions=list(rows))
+    rnd.mark_setup_round(round_task_id, disposition, accepted=accepted)
+    return rnd.setup_executions
+
+
 def _accepted(rows, task="r1"):
-    return mark_round_disposition(rows, round_task_id=task, disposition="kept", accepted=True)
+    return _marked(rows, round_task_id=task, disposition="kept", accepted=True)
 
 
 def test_an_outcome_outside_the_recorded_vocabulary_is_refused():
@@ -130,7 +134,7 @@ def test_a_later_keep_takes_presence_from_the_earlier_one():
     first = _accepted([_row(cmd, seq=1, task="t1")], task="t1")
     assert first[0]["present_at_final_launch"] is True
 
-    second = mark_round_disposition(
+    second = _marked(
         [*first, _row("pip install bar", seq=2, task="t2")],
         round_task_id="t2",
         disposition="kept",
@@ -144,7 +148,7 @@ def test_a_later_keep_takes_presence_from_the_earlier_one():
 def test_a_command_only_the_earlier_keep_ran_is_capped_out_of_the_final_one():
     """The stale flag used to answer for it, so truncation could never fire."""
     first = _accepted([_row("pip install foo", seq=1, task="t1")], task="t1")
-    rows = mark_round_disposition(
+    rows = _marked(
         [*first, _row("pip install bar", seq=2, task="t2")],
         round_task_id="t2",
         disposition="kept",
@@ -156,7 +160,7 @@ def test_a_command_only_the_earlier_keep_ran_is_capped_out_of_the_final_one():
 
 @pytest.mark.parametrize("disposition", ["apply_failed", "no_patches", "reverted"])
 def test_command_from_a_discarded_round_raises_effect_outside_verified_launch(disposition):
-    rows = mark_round_disposition(
+    rows = _marked(
         [_row("pip install stranded", seq=1, task="r1")],
         round_task_id="r1",
         disposition=disposition,
@@ -1685,7 +1689,7 @@ def test_build_inputs_reach_the_emitted_step_stripped_of_credential_material():
 def test_a_round_with_no_task_id_claims_no_ledger_rows():
     """Rows a lane never identified stay unreported, never silently accepted."""
     rows = [_row("pip install x", seq=1, task="r1")]
-    unchanged = mark_round_disposition(rows, round_task_id="", disposition="kept", accepted=True)
+    unchanged = _marked(rows, round_task_id="", disposition="kept", accepted=True)
     assert unchanged[0]["round_disposition"] == "unreported"
     assert unchanged[0]["present_at_final_launch"] is False
 
@@ -2219,31 +2223,10 @@ def test_a_session_that_never_recorded_the_check_names_nothing():
 
 
 def _persisted(result_value, *, present=True):
-    """Push a KEEP result through the lane's persistence and read it back."""
-    from types import SimpleNamespace
-
-    from hyperloom.orchestrator.enablement.lane import _stack_keep_recipe_records
-
-    enablement = SimpleNamespace(
-        build_extensions_not_carried=[],
-        launch_argv_refused=False,
-        **{
-            name: {}
-            for name in (
-                "accepted_stack_targets",
-                "patch_targets",
-                "launch_evidence",
-                "environment_closure",
-                "installed_versions_at_keep",
-                "roots",
-                "patch_roots",
-                "base_sha",
-                "source_snapshots",
-            )
-        },
-    )
+    """Push a KEEP result through the round's persistence and read it back."""
+    enablement = EnablementRound()
     res = {"enablement_build_extensions_not_carried": result_value} if present else {}
-    _stack_keep_recipe_records(SimpleNamespace(enablement=enablement), res)
+    enablement.record_keep(res)
     return enablement.build_extensions_not_carried
 
 
