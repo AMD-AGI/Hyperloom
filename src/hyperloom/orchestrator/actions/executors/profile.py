@@ -33,7 +33,6 @@ from ._inferencex_patcher import (
     ensure_benchmark_lib_eval_dest_patched,
     ensure_benchmark_serving_patched,
 )
-from ._xdit_patcher import verify_xdit_profiler_baked
 from .baseline import BenchmarkRunExecutor
 
 
@@ -965,11 +964,6 @@ class ProfileExecutor(BenchmarkRunExecutor):
         from hyperloom.inference_optimizer import framework_registry
 
         if framework_registry.is_scriptable(framework):
-            # The baked-profiler verifier is xDiT/xfuser-specific (it inspects xfuser's base_model.py).
-            if str(framework or "").strip().lower() == "xdit":
-                # Recorded but still non-fatal: a warning that nothing keeps is a warning nobody reads.
-                patchers["xdit_profiler_baked"] = verify_xdit_profiler_baked()
-                _note_instrumentation()
             return None
         inferencex_path = ""
         if isinstance(bench, dict):
