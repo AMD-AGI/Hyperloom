@@ -195,7 +195,7 @@ def _pulse_documents(args: argparse.Namespace) -> tuple[list[dict[str, Any]], li
         for row in rows
         if all(not want or str(row.get(key) or "").lower() == want.lower() for key, want in wanted.items())
     ]
-    notes = [f"pulse: fetched {len(rows)} rows, {len(kept)} matched the requested identity"]
+    notes = [f"pulse: fetched {len(rows)} rows, {len(kept)} matched the requested identity", *client.walk_notes]
     return kept, notes
 
 

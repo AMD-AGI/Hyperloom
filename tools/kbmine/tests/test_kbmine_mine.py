@@ -596,3 +596,56 @@ def test_explicit_canonical_ids_are_never_reported_as_truncated(monkeypatch, tmp
     assert report["coverage"]["identities_fetched"] == n_ids
     assert report["sessions_scored"] == n_ids
     assert not [line for line in report["limitations"] if "identities" in line]
+
+
+def _pulse_client(pages):
+    """A PulseClient whose GETs answer from *pages*, a function of (limit, offset), and count the requests."""
+    from kbmine.pulse import PulseClient
+
+    client = PulseClient("https://pulse.invalid", "t")
+    client.requests = 0
+
+    def fake_get(path, params=None):
+        client.requests += 1
+        assert client.requests < 50, "the walk must terminate"
+        return {"results": pages(params["limit"], params["offset"])}
+
+    client.get = fake_get
+    return client
+
+
+def _rows(start: int, stop: int) -> list[dict]:
+    return [{"session_id": f"s{i}"} for i in range(start, stop)]
+
+
+def test_the_pulse_walk_pages_to_a_short_page() -> None:
+    client = _pulse_client(lambda limit, offset: _rows(offset, min(offset + limit, 450)))
+    rows = list(client.session_breakdowns(max_rows=1000))
+    assert len(rows) == 450 and len({r["session_id"] for r in rows}) == 450
+    assert client.walk_notes == []
+
+
+def test_a_server_ignoring_offset_is_read_once_and_stops() -> None:
+    client = _pulse_client(lambda limit, offset: _rows(0, limit))
+    rows = list(client.session_breakdowns(max_rows=1000))
+    assert len(rows) == 200 and len({r["session_id"] for r in rows}) == 200
+    assert client.requests == 2
+    assert any("may be ignoring offset" in note for note in client.walk_notes)
+    assert any("skipped 200 row(s) repeating" in note for note in client.walk_notes)
+
+
+def test_a_page_of_non_objects_ends_the_walk() -> None:
+    client = _pulse_client(lambda limit, offset: ["x"] * limit)
+    assert list(client.session_breakdowns(max_rows=1000)) == []
+    assert client.requests == 1
+    assert any("not objects" in note for note in client.walk_notes)
+
+
+def test_the_pulse_walk_notes_reach_the_report(monkeypatch, tmp_path: Path) -> None:
+    from kbmine import pulse
+
+    monkeypatch.setattr(
+        pulse.PulseClient, "get", lambda self, path, params=None: {"results": _rows(0, params["limit"])}
+    )
+    report = _run(["--pulse-url", "https://pulse.invalid"], tmp_path)
+    assert any("may be ignoring offset" in note for note in report["fetch_errors"])
