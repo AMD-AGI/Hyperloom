@@ -169,6 +169,9 @@ _SHAPE_MANIFEST_OFF_VALUES = frozenset({"", "0", "false", "no", "off", "none", "
 #: and an anchored read falls through to the bare stem -- which differs per rank,
 #: so the label dedup below stops collapsing the ranks of one batch.
 _VARIANT_RE = re.compile(r"(bs_\d+)", re.IGNORECASE)
+#: Gc-patched SGLang names shards ``<runner>_bs_<n>[_dense|_sparse][_<lora>][_stream_<i>]_rank<r>``.
+#: Only the rank is redundant across TP; everything before it is variant identity.
+_SGLANG_TAG_RE = re.compile(r"(bs_\d+[^.]*?)_rank\d+", re.IGNORECASE)
 #: Which files carry an indexable per-variant shape. Deliberately NOT the shared
 #: ``_capture_shapes`` classifier: that one answers "is this a sidecar rather
 #: than a workload trace", which is a wider question than this one. A
@@ -250,9 +253,15 @@ def _discover_capture_shards(trace_input: str, capture_folder: str) -> list[tupl
                     label = f"bs_{bs}_{str(mode).lower()}" if mode else f"bs_{bs}"
                 else:
                     label = cand.stem
-            else:  # sglang bs_<batch>_rank<n>, with or without a runner prefix
-                m = _VARIANT_RE.search(name)
-                label = m.group(1).lower() if m else cand.stem
+            else:  # sglang [<runner>_]bs_<batch>[_<variant>...]_rank<n>
+                m = _SGLANG_TAG_RE.search(name) or _VARIANT_RE.search(name)
+                if m:
+                    label = m.group(1).lower()
+                    # Draft runners capture at the target's batch sizes; keep them apart.
+                    if name[: m.start()].lower().startswith("draft"):
+                        label = f"draft_{label}"
+                else:
+                    label = cand.stem
                 mode = None
             # TP>1 emits one capture shard per rank with the SAME variant label (bs_<batch>[_mode]); the ranks carry
             # identical shapes, so keep only the first (representative rank).
@@ -317,8 +326,9 @@ def _maybe_build_shape_manifest(
                 continue
             capture_variants.append((label, shard_an))
             capture_hashes[label] = _sha256_file(path)
+            bs_m = re.search(r"bs_(\d+)", label)
             variant_meta[label] = {
-                "batch_size": label.split("_")[1] if label.startswith("bs_") else None,
+                "batch_size": bs_m.group(1) if bs_m else None,
                 "mode": mode,
                 "file": path.name,
             }

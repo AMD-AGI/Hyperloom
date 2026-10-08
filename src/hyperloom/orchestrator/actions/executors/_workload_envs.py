@@ -1708,6 +1708,17 @@ def materialize_config_with_envs(
                     "analysis may be degraded.",
                     fw or "<unset>",
                 )
+        elif sglang_sitecustomize and _tracelens_patch_enabled():
+            # Shapes come from kernel_shape_tool, but the per-batch-size capture trace still needs
+            # sglang_gc_patch or it IndexErrors. Only profiling captures traces, so patch only here.
+            if not ensure_sglang_patched_for_tracelens():
+                log.warning(
+                    "SGLang graph-capture patch (sglang_gc_patch) not applied; profiling "
+                    "continues on the unpatched server, where per-batch-size CUDA-graph "
+                    "capture can IndexError on multi-variant models (DSA dense+sparse). "
+                    "It needs TRACELENS_ROOT with an exact "
+                    "examples/custom_workflows/inference_analysis/sglang_gc_patch/sglang_<X_Y_Z> dir."
+                )
         if is_atom:
             # ATOM has no delay/max-iteration window; extra prompts only grow
             # the HTTP-bracketed trace. Force NUM_PROMPTS=CONC.
