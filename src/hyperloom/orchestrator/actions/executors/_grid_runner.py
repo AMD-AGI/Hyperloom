@@ -43,12 +43,7 @@ from ._benchmark_interpreter import (
     _resolve_probe_python as _resolve_probe_python,
 )
 from ._accuracy_gate import materialized_run_eval_disabled
-from ._recipe_script import (
-    RecipeLeverUnavailableError,
-    apply_recipe_levers,
-    launcher_overwritten_envs,
-    recipe_owns_argv,
-)
+from ._recipe_script import RecipeLeverUnavailableError, launcher_overwritten_envs
 from ._subprocess_kill import (
     AGENTX_PREFLIGHT_ERROR_CLASS,
     AGENTX_PREFLIGHT_RETURNCODE,
@@ -423,12 +418,6 @@ def _build_variant_yaml(
         cfg = yaml.safe_load(f)
     bench = cfg.setdefault("benchmark", {})
     replacing = str(base_args_mode).strip().lower() == "replace"
-    # Read before the AgentX switch resets it to the session's recipe.
-    inherited_script = (
-        ""
-        if replacing or variant.args_mode == "replace"
-        else str((bench.get("envs") or {}).get("AGENTX_SERVER_SCRIPT") or "").strip()
-    )
     envs = apply_runtime_benchmark_overrides(
         bench,
         model_path=model_path,
@@ -539,24 +528,6 @@ def _build_variant_yaml(
             cleanup=bool(server_lifecycle.get("cleanup", True)),
             pid_dir=server_lifecycle["pid_dir"],
             port=int(server_lifecycle["port"]),
-        )
-
-    if recipe_owns_argv(bench):
-        env_levers: dict[str, str | None] = {
-            str(k): None for k in to_str_list(base_unset_envs) if k.strip().upper() not in BLOCKED_EXTERNAL_ENV_NAMES
-        }
-        env_levers.update({str(k): str(v) for k, v in (base_extra_envs or {}).items()})
-        env_levers.update(
-            {str(k): None for k in variant.unset_envs if str(k).strip().upper() not in BLOCKED_EXTERNAL_ENV_NAMES}
-        )
-        env_levers.update({str(k): str(v) for k, v in variant.extra_envs.items()})
-        # The recipe's argv is never dropped, so base removals apply even under replace.
-        envs["AGENTX_SERVER_SCRIPT"] = apply_recipe_levers(
-            bench,
-            inherited_script=inherited_script,
-            server_args=str(envs.get(extra_args_env, "")),
-            remove_args=list(dict.fromkeys(to_str_list(base_remove_args) + variant_remove)),
-            env_levers=env_levers,
         )
 
     # The final write to the argument env; nothing below may touch it.
