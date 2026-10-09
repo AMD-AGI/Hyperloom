@@ -17,7 +17,7 @@ from typing import Any, Mapping
 
 from hyperloom.inference_optimizer.grid_server_args import remove_server_args
 from hyperloom.orchestrator.actions.executors._proposal_identity import content_fingerprint
-from hyperloom.orchestrator.predictor.client import Prediction
+from hyperloom.orchestrator.predictor.client import Action, Prediction
 
 #: Attribution label on predictor rows, the explore variants made from them, and their attempts.
 PROVENANCE = "primatune"
@@ -27,6 +27,8 @@ QUEUE_DOMAIN = "primatune"
 QUEUE_PRIORITY = 1
 #: Rows one answer may queue: orchestration's grid ceiling.
 MAX_QUEUED = 6
+#: Characters of the service's rationale a row keeps.
+RATIONALE_CHARS = 600
 
 #: Env prefixes owned by the other serving stack; the service repairs flags, not envs.
 _FOREIGN_ENV_PREFIXES: dict[str, tuple[str, ...]] = {"vllm": ("SGLANG_",), "sglang": ("VLLM_",)}
@@ -97,6 +99,15 @@ def _votes(prediction: Prediction) -> dict[tuple[tuple, tuple, str], int]:
     return counts
 
 
+def _reason(action: Action, flags: Mapping[str, Any], envs: Mapping[str, str], votes: int, samples: Any) -> str:
+    """The vote share and the service's rationale; without a rationale, the knobs the row moves."""
+    if action.rationale:
+        share = f"{votes}/{samples}" if isinstance(samples, int) and samples > 0 else f"{votes} vote(s)"
+        return f"PrimaTune {share}: {action.rationale[:RATIONALE_CHARS]}"
+    knobs = sorted(flags) + sorted(f"env:{name}" for name in envs)
+    return "predictor: " + ", ".join(knobs[:4]) + (f" (+{len(knobs) - 4})" if len(knobs) > 4 else "")
+
+
 def _champion(state: Any) -> tuple[str, dict[str, str]]:
     best = state.current_best if isinstance(state.current_best, dict) else {}
     args = str(best.get("effective_extra_server_args") or best.get("extra_server_args") or "").strip()
@@ -120,12 +131,8 @@ def proposal_rows(prediction: Prediction, *, key: str, state: Any) -> list[dict[
         if not (flags or envs) or fingerprint in blocked:
             continue
         blocked.add(fingerprint)
-        knobs = sorted(flags) + sorted(f"env:{name}" for name in envs)
-        row.update(
-            provenance=PROVENANCE,
-            reason="predictor: " + ", ".join(knobs[:4]) + (f" (+{len(knobs) - 4})" if len(knobs) > 4 else ""),
-            votes=votes.get(_sample_key(action.server_args, action.envs, action.source_change), 0),
-        )
+        row_votes = votes.get(_sample_key(action.server_args, action.envs, action.source_change), 0)
+        row.update(provenance=PROVENANCE, reason=_reason(action, flags, envs, row_votes, samples), votes=row_votes)
         if isinstance(samples, int):
             row["samples"] = samples
         candidates.append((_family(flags, envs), row))

@@ -54,6 +54,9 @@ def render_model_arch_compact(arch: dict | None) -> str:
 # Width budget for artifact anchors; sized so a full uuid4 fid still fits ws=.
 _VARIANT_ANCHOR_MAX_CHARS = 100
 
+# Width budget for a predictor row's ``why=``: the vote share and the 600-character rationale a row keeps.
+_PREDICTOR_WHY_CHARS = 640
+
 # Numeric fields a ``trace_health_warnings[]`` entry may carry, as ``(key, label, suffix)`` in render order.
 _WARNING_EXTRA_FIELDS: tuple[tuple[str, str, str], ...] = (
     ("idle_pct", "idle", "%"),
@@ -419,7 +422,9 @@ class _RenderMixin:
             parts.append("-envs=" + ",".join(row["unset_envs"]))
         if row["args_mode"] == "replace":
             parts.append("mode=replace")
-        reason = row["reason"].replace("\n", " ").strip()[:80].rstrip()
+        # A specialist's findings reach orchestration in their own section; a predictor row's reason is all it sends.
+        limit = _PREDICTOR_WHY_CHARS if row["provenance"] == "primatune" else 80
+        reason = row["reason"].replace("\n", " ").strip()[:limit].rstrip()
         if reason:
             parts.append(f"why={reason}")
         return _flatten_for_prompt(" ".join(parts))
