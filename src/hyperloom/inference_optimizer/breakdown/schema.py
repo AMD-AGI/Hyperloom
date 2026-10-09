@@ -283,6 +283,11 @@ class V6OutcomeValidation(TypedDict, total=False):
     #: re-promoting the recipe, so ``current_best`` can be a later measurement.
     perf: V6GradedAxes
     attributed_gain_pct: float
+    #: ``attributed_gain_pct`` without adoptions kept for a non-gain reason;
+    #: ``None`` on a ledger recorded before the field existed.
+    attributed_gain_pct_excluding_fixes: float | None
+    #: Per ``keep_reason``: ``count``, ``total_gain_pct``, ``unmeasured``.
+    by_keep_reason: dict[str, Any]
     unattributed_gain_pct: float
     chain_total_gain_pct: float | None
     validated_total_gain_pct: float | None
@@ -1416,6 +1421,7 @@ class V6StackExt(TypedDict, total=False):
     adoptions: dict[str, Any]
     validations: dict[str, Any]
     attributed_gain_pct: float
+    attributed_gain_pct_excluding_fixes: float
     chain_total_gain_pct: float | None
     unattributed_gain_pct: float | None
     validated_total_gain_pct: float | None

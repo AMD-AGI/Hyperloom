@@ -128,6 +128,26 @@ def test_a_correctness_fix_adoption_names_its_keep_reason():
     ]
 
 
+def test_the_ledger_reports_gain_with_and_without_correctness_fixes():
+    _adopt(0, "integrate", 100.0, 110.0)
+    _adopt(1, "integrate", 110.0, 108.0, keep_reason="correctness_fix", attribution_eligible=False)
+    _adopt(2, "explore", 108.0, 120.0)
+
+    ext = _ext()
+    assert ext["adoptions"]["by_keep_reason"] == {
+        "correctness_fix": {"count": 1, "total_gain_pct": -2.0, "unmeasured": 0}
+    }
+    assert (ext["attributed_gain_pct"], ext["attributed_gain_pct_excluding_fixes"]) == (20.0, 22.0)
+
+
+def test_a_ledger_without_fixes_reports_one_caliber_twice():
+    _adopt(0, "explore", 100.0, 110.0)
+
+    ext = _ext()
+    assert ext["adoptions"]["by_keep_reason"] == {}
+    assert ext["attributed_gain_pct_excluding_fixes"] == ext["attributed_gain_pct"] == 10.0
+
+
 def test_local_gain_and_contribution_diverge_once_the_anchor_leaves_the_baseline():
     _adopt(0, "explore", 100.0, 200.0)
     _adopt(1, "explore", 200.0, 300.0)
@@ -336,6 +356,15 @@ def test_outcome_validation_reads_the_ledger_rather_than_a_legacy_projection(tmp
     assert by_source["warm_replay"] == {"total_gain_pct": 10.0, "keep_count": 1, "unmeasured_keep_count": 0}
     assert by_source["kernel"]["by_backend"]["geak"]["total_gain_pct"] == 20.0
     assert by_source["kernel"]["by_backend"]["forge"]["keep_count"] == 0
+
+
+def test_outcome_carries_both_gain_calibers(tmp_path):
+    _adopt(0, "integrate", 100.0, 110.0)
+    _adopt(1, "integrate", 110.0, 108.0, keep_reason="correctness_fix", attribution_eligible=False)
+
+    validation = _outcome(tmp_path)
+    assert (validation["attributed_gain_pct"], validation["attributed_gain_pct_excluding_fixes"]) == (8.0, 10.0)
+    assert validation["by_keep_reason"] == {"correctness_fix": {"count": 1, "total_gain_pct": -2.0, "unmeasured": 0}}
 
 
 def test_outcome_folds_explore_into_framework_agent(tmp_path):

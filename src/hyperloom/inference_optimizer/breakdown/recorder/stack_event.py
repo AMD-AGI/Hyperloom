@@ -390,6 +390,7 @@ def assemble_stack_ext(
     # Not a sum: asking two figures the same question is how the ledger checks
     # itself below.
     chain_total = _last_cumulative(adoptions)
+    by_keep_reason = _by_keep_reason(adoptions)
     settled = validations[-1] if validations else {}
     recorded_total = _float_or_none(settled.get("validated_gain_pct"))
     ext: dict[str, Any] = {
@@ -398,6 +399,7 @@ def assemble_stack_ext(
         "adoptions": {
             "count": len(adoptions),
             "by_source": _by_source(adoptions),
+            "by_keep_reason": by_keep_reason,
             "rows": adoptions,
         },
         "validations": {
@@ -411,6 +413,11 @@ def assemble_stack_ext(
             ),
         },
         "attributed_gain_pct": attributed,
+        # Adoptions kept for a reason other than a gain (a correctness fix) are
+        # not throughput wins, so this caliber leaves them out.
+        "attributed_gain_pct_excluding_fixes": round(
+            attributed - sum(float(b["total_gain_pct"]) for b in by_keep_reason.values()), 6
+        ),
         "chain_total_gain_pct": chain_total,
         # Throughput no adoption claims, the anchor having moved between two
         # measurements. An identity: the sum of the chain breaks below.
@@ -460,6 +467,23 @@ def _by_source(adoptions: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         else:
             slot["total_gain_pct"] = round(float(slot["total_gain_pct"]) + share, 6)
     buckets[SOURCE_KERNEL]["by_backend"] = backends
+    return buckets
+
+
+def _by_keep_reason(adoptions: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Sum the adoptions kept for a stated reason rather than a gain, per reason."""
+    buckets: dict[str, Any] = {}
+    for row in adoptions:
+        reason = str(row.get("keep_reason") or "")
+        if not reason:
+            continue
+        bucket = buckets.setdefault(reason, {"count": 0, "total_gain_pct": 0.0, "unmeasured": 0})
+        share = _float_or_none(row.get("contribution_pct"))
+        bucket["count"] += 1
+        if share is None:
+            bucket["unmeasured"] += 1
+        else:
+            bucket["total_gain_pct"] = round(float(bucket["total_gain_pct"]) + share, 6)
     return buckets
 
 
