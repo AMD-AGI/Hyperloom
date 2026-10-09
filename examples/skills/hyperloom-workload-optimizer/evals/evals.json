@@ -30,7 +30,7 @@
       ],
       "unexpected_behavior": [
         "Ask for workload parameters like model path, TP, ISL, OSL, or precision in the same turn as install-directory or run-mode setup",
-        "Launch hyperloom optimize before the environment is prepared and a launch plan is confirmed"
+        "Launch hyperloom.inference_optimizer.cli optimize before the environment is prepared and a launch plan is confirmed"
       ]
     },
     {
