@@ -847,6 +847,9 @@ class ExperienceHTTPService:
             for sequence, experience in records
             if self._listed(experience, include_excluded)
         ]
+        # Resolved before the transaction: a declaration not cached yet is read in a transaction of its own, which on
+        # SQLite would wait on this one's write lock.
+        declaration = None if schema_ref is None else self.declaration_for(schema_ref)
         with self._database.transaction() as connection:
             page: dict[str, JsonValue] = {
                 "items": items,
@@ -856,9 +859,9 @@ class ExperienceHTTPService:
                 "after_id": self._written_at(connection, after),
                 "next_cursor_id": self._written_at(connection, next_cursor),
             }
-            if schema_ref is not None:
-                page["declaration"] = self.declaration_for(schema_ref).to_dict()
-                page["state"] = self._state.hidden_digest(connection, schema_ref)
+            if declaration is not None:
+                page["declaration"] = declaration.to_dict()
+                page["state"] = self._state.hidden_digest(connection, declaration.schema_ref)
         return page
 
     def _schema_ref(self, schema_ref: str | None) -> str:

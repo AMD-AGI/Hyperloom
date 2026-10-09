@@ -47,8 +47,9 @@ from hyperloom_kb import (
     load_declaration,
 )
 from hyperloom_kb.config import PACKAGED_DECLARATION
+from hyperloom_kb import database as database_module
+from hyperloom_kb.database import Database, open_database
 from hyperloom_kb.http_service import code_digest
-from hyperloom_kb.database import Database
 from hyperloom_kb.tests.conftest import fresh_database
 
 NOW = datetime(2026, 9, 28, tzinfo=timezone.utc)
@@ -587,6 +588,27 @@ def test_list_pages_in_write_order_and_keeps_them_across_a_restart(tmp_path: Pat
     assert reopened == written
     assert health["experience_count"] == 5
     assert (bad_limit[0], bad_cursor[0]) == (400, 400)
+
+
+def test_a_restarted_sqlite_service_exports_a_schema_it_has_not_read_since_without_waiting_on_itself(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(database_module, "_SQLITE_BUSY_SECONDS", 1)
+    home = tmp_path / "home"
+    served = ExperienceDeclaration(
+        objectives=(ObjectiveDeclaration("latency@v1", "Minimize latency."),),
+        identity=(FieldDeclaration("model", "Model."),),
+    )
+    pulled = _declaration()
+    ExperienceHTTPService(HTTPServiceConfig(home, TOKEN), served, None, database=open_database(home)).write(
+        _experience(pulled), pulled
+    )
+    restarted = ExperienceHTTPService(HTTPServiceConfig(home, TOKEN), served, None, database=open_database(home))
+
+    page = restarted.export(schema_ref=pulled.schema_ref)
+
+    assert page["declaration"] == pulled.to_dict()
+    assert [item["experience"]["id"] for item in page["items"]] == [_experience(pulled).id]
 
 
 def test_invalid_requests_are_rejected(tmp_path: Path) -> None:
