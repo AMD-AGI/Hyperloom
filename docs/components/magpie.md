@@ -54,6 +54,9 @@ The pin includes [Magpie #117](https://github.com/AMD-AGI/Magpie/pull/117): SGLa
 profiling accepts runtimes without shape discovery and enables each shape-discovery
 option only when supported. Graph-mode captures still require graph profiling support
 and retain per-batch graph trace export.
+The installer and CLI apply native capability, commit, and execution-tree checks
+only to native AgentX sessions. Ordinary benchmarks retain the importability
+contract, including compatible custom packages and existing offline installations.
 With `benchmark.agentx: enable`, Magpie resolves the serving specification,
 owns server startup and cleanup, and runs the maintained InferenceX/AIPerf client.
 The integration validates the package, recipe/client sources, and effective
@@ -77,7 +80,9 @@ Native profiling derives a diagnostic run from the accepted candidate and uses
 Magpie's phase-gated, step-bounded torch profiler. Magpie owns the first-capture
 delay, repetition interval, count limit, and framework-specific controls.
 Hyperloom selects a complete capture from the manifest for kernel/roofline
-analysis. Diagnostic success never makes the run a publishable KEEP result.
+analysis. Successful standalone `profile` tasks also publish their trace to the
+Coordinator for analysis, without requiring benchmark-valid throughput.
+Diagnostic success never makes the run a publishable KEEP result.
 Detailed annotations require a compatible instrumented serving runtime; an
 ordinary GPU trace alone does not establish complete kernel shape metadata. See
 [Run an InferenceX AgentX workload](../how-to/optimize.md#run-an-inferencex-agentx-workload)

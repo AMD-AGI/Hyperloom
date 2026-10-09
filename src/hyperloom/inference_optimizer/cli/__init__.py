@@ -1211,24 +1211,9 @@ def _configure_benchmark_config(args: argparse.Namespace) -> bool:
     raw_envs = benchmark.get("envs")
     benchmark_envs = raw_envs if isinstance(raw_envs, Mapping) else {}
     if native:
-        native_replay_overrides = sorted(
-            str(name)
-            for name in benchmark_envs
-            if str(name).upper().startswith(("AIPERF_", "AGENTIC_"))
-            or str(name).upper()
-            in {
-                "AGENTX_DATASET",
-                "AGENTX_WARMUP_REQUESTS_PER_LANE",
-                "WEKA_LOADER_OVERRIDE",
-            }
-        )
-        if native_replay_overrides:
-            raise ValueError(
-                "native AgentX replay controls belong to benchmark.agentx and "
-                "the resolved InferenceX launcher; remove benchmark.envs "
-                + ", ".join(native_replay_overrides)
-                + f" from {path}"
-            )
+        from hyperloom.inference_optimizer.agentx.native import validate_native_replay_env
+
+        validate_native_replay_env(benchmark_envs, source=f"benchmark.envs in {path}")
     if native and not cli_model_supplied and not runtime_model_path:
         local_model_path = str(benchmark_envs.get("MODEL_PATH") or "").strip()
         if local_model_path:

@@ -313,12 +313,11 @@ def test_magpie_pinned_published_tree_hash_matches_independent_wheel_audit():
 
 
 def test_resolver_and_preflight_health_share_magpie_identity_guard():
-    from hyperloom.inference_optimizer.cli import preflight
+    from hyperloom.inference_optimizer.magpie_health import magpie_health_code
 
     guard = native_agentx._MAGPIE_SOURCE_IDENTITY_CODE
     assert native_agentx._RESOLVER_CODE.startswith(guard)
-    assert preflight._MAGPIE_NATIVE_AGENTX_HEALTH_CODE.startswith(guard)
-    assert preflight._magpie_health_code(native_agentx=True).startswith(guard)
+    assert magpie_health_code(native_agentx=True).startswith(guard)
 
 
 @pytest.mark.parametrize(
@@ -330,11 +329,10 @@ def test_generic_magpie_health_keeps_custom_refs_on_importability_contract(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """A generic Magpie ref must not be rejected by native-only provenance policy."""
-    from hyperloom.inference_optimizer.cli import preflight
+    from hyperloom.inference_optimizer.magpie_health import magpie_health_code
 
-    code = preflight._magpie_health_code(native_agentx=False)
+    code = magpie_health_code(native_agentx=False)
 
-    assert code == preflight._MAGPIE_GENERIC_HEALTH_CODE
     assert code.strip() == "import Magpie"
     assert "_validate_magpie_execution_tree" not in code
     assert "AgentXConfig" not in code

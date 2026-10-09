@@ -51,9 +51,7 @@ from hyperloom.common.provenance import (
     detect_gfx_arch,
 )
 from hyperloom.common.timeutil import now_iso
-from hyperloom.inference_optimizer.agentx.native import (
-    _MAGPIE_SOURCE_IDENTITY_CODE,
-)
+from hyperloom.inference_optimizer.magpie_health import magpie_health_code
 
 from .credentials import (
     _is_stale_proxy_url,
@@ -1815,43 +1813,6 @@ _INFERENCEX_REPO_DEFAULT = "https://github.com/SemiAnalysisAI/InferenceX.git"
 # MUST stay in lockstep with INFERENCEX_REF in assets/install.sh.
 _INFERENCEX_REF_DEFAULT = "408c015be4b22d14c69518643609669405507077"
 _MAGPIE_REF_DEFAULT = "d80eb4d3dad7fabe01ce81d049e2983adf2c86dd"
-_MAGPIE_GENERIC_HEALTH_CODE = "import Magpie\n"
-_MAGPIE_NATIVE_AGENTX_HEALTH_CODE = (
-    _MAGPIE_SOURCE_IDENTITY_CODE
-    + """
-import inspect
-import re
-import sys
-from pathlib import Path
-
-import Magpie
-from Magpie.modes.benchmark import AgentXConfig
-from Magpie.modes.benchmark.agentx import _expand_single_node_agentx_entries
-
-assert AgentXConfig.from_value("enable")
-assert "run-eval" in inspect.getsource(_expand_single_node_agentx_entries)
-expected = sys.argv[1].strip().lower()
-package_root = Path(Magpie.__file__).resolve().parent
-commit, _source_url = _resolve_magpie_source_identity(package_root)
-_validate_magpie_execution_tree(package_root, commit)
-if re.fullmatch(r"[0-9a-f]{7,40}", expected):
-    assert commit and (commit.startswith(expected) or expected.startswith(commit))
-"""
-)
-
-
-def _magpie_health_code(*, native_agentx: bool) -> str:
-    """Select the Magpie probe appropriate for the requested benchmark mode.
-
-    Generic Magpie intentionally retains the historical importability contract:
-    operators may install a compatible tag, branch, source drop, or alternate
-    commit through ``MAGPIE_REF``/``MAGPIE_PACKAGE_SPEC``. Native AgentX executes
-    a tightly coupled upstream recipe, so only that mode applies the immutable
-    commit, capability, and audited execution-tree checks.
-    """
-    if native_agentx:
-        return _MAGPIE_NATIVE_AGENTX_HEALTH_CODE
-    return _MAGPIE_GENERIC_HEALTH_CODE
 
 
 def _native_agentx_preflight_requested(
@@ -2354,6 +2315,16 @@ def _preflight(
     # After the legacy normalization, which can create the credentials a header references.
     _expand_custom_header_env_refs()
 
+    _native_agentx_preflight_active = _native_agentx_preflight_requested(args)
+    if _native_agentx_preflight_active:
+        from ..agentx.native import validate_native_replay_env
+
+        try:
+            validate_native_replay_env(os.environ, source="environment")
+        except ValueError as exc:
+            print(f"Preflight: ERROR — {exc}", file=sys.stderr)
+            raise SystemExit(2) from exc
+
     # Fail fast on missing credentials after the fallback loaders.
     _run_install_step(
         install_event,
@@ -2400,7 +2371,6 @@ def _preflight(
 
     benchmark_backend = _resolve_active_backend_name()
     _magpie_backend_active = benchmark_backend == "magpie"
-    _native_agentx_preflight_active = _native_agentx_preflight_requested(args)
     # Interpreter used for benchmark-runtime installs (Ray).
     benchmark_python = _resolve_benchmark_interpreter()
 
@@ -2561,7 +2531,7 @@ def _preflight(
             file=sys.stderr,
         )
         raise SystemExit(2)
-    magpie_health_code = _magpie_health_code(native_agentx=_native_agentx_preflight_active)
+    health_code = magpie_health_code(native_agentx=_native_agentx_preflight_active)
     try:
         if not _magpie_backend_active:
             print(f"Preflight: benchmark backend is {benchmark_backend!r}; skipping Magpie install/import")
@@ -2571,7 +2541,7 @@ def _preflight(
                 [
                     magpie_python,
                     "-c",
-                    magpie_health_code,
+                    health_code,
                     magpie_ref,
                 ],
                 capture_output=True,
@@ -2591,7 +2561,7 @@ def _preflight(
                 check=True,
             )
             health = subprocess.run(
-                [magpie_python, "-c", magpie_health_code, magpie_ref],
+                [magpie_python, "-c", health_code, magpie_ref],
                 capture_output=True,
             )
             if health.returncode != 0:
@@ -2612,7 +2582,7 @@ def _preflight(
                     check=True,
                 )
                 subprocess.run(
-                    [magpie_python, "-c", magpie_health_code, magpie_ref],
+                    [magpie_python, "-c", health_code, magpie_ref],
                     check=True,
                 )
             magpie_installed = True

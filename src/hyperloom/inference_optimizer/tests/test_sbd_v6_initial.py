@@ -710,6 +710,7 @@ def test_preflight_records_install_steps_in_execution_order(tmp_path, monkeypatc
     from hyperloom.inference_optimizer.session.sbd_v6 import pending_install_event
     from hyperloom.orchestrator.actions.executors import benchmark_backend
 
+    monkeypatch.setattr(os, "environ", os.environ.copy())
     inferencex = tmp_path / "InferenceX"
     inferencex.mkdir()
     monkeypatch.setenv("INFERENCEX_PATH", str(inferencex))

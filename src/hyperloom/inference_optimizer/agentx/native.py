@@ -648,6 +648,26 @@ def native_runtime_search_paths() -> dict[str, str]:
     return paths
 
 
+def validate_native_replay_env(env: Mapping[str, Any], *, source: str) -> None:
+    """Reject legacy replay settings that native AgentX cannot honour."""
+    overrides = sorted(
+        str(name)
+        for name, value in env.items()
+        if value is not None
+        and str(value).strip()
+        and (
+            str(name).upper().startswith(("AIPERF_", "AGENTIC_"))
+            or str(name).upper() in {"AGENTX_DATASET", "AGENTX_WARMUP_REQUESTS_PER_LANE", "WEKA_LOADER_OVERRIDE"}
+        )
+    )
+    if overrides:
+        raise ValueError(
+            f"Native AgentX does not support legacy replay controls in {source}: "
+            + ", ".join(overrides)
+            + ". Remove them; use benchmark.agentx and the resolved InferenceX recipe for replay settings."
+        )
+
+
 def scrub_native_agentx_ambient_env(env: MutableMapping[str, str]) -> None:
     """Remove generic replay controls and inherited Bash functions."""
     for name in tuple(env):

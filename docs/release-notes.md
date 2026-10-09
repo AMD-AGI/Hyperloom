@@ -115,8 +115,11 @@ is a patch release on top of 1.1.2. The per-change history is on the
   own Python environment, without upgrading the serving framework. Client tokenizer
   and trust settings are supported directly by the pinned scripts, preserving the
   audited package during compatibility checks. Install preserves the
-  audited package and launcher trees; preflight repairs Magpie files changed by an
-  earlier compatibility patch. Fixed-sequence `ISL`, `OSL`, and
+  audited package and launcher trees; native preflight repairs Magpie files changed by an
+  earlier compatibility patch. Generic installs retain the importability contract
+  for custom or already-installed packages. Native CLI preflight rejects non-empty
+  legacy `AIPERF_*`, `AGENTIC_*`, dataset and warmup-per-lane overrides in the
+  shell or source YAML, before installation or benchmarking. Fixed-sequence `ISL`, `OSL`, and
   `RANDOM_RANGE_RATIO` controls are removed by Magpie's AgentX configuration.
   A new
   `--benchmark-config <yaml>` option accepts the Magpie source config;
@@ -146,7 +149,9 @@ is a patch release on top of 1.1.2. The per-change history is on the
   identities remain distinct. Epoch-2 resumes retain their earlier restrictions.
   Epoch-4 profiling uses the accepted native candidate and Magpie's measured-phase
   torch profiler. It supports a first-capture delay, step count, repeated captures,
-  and automatic count reduction. Complete captures are consumed separately;
+  and automatic count reduction. Successful standalone `profile` tasks publish
+  their trace to the Coordinator without becoming valid performance measurements.
+  Complete captures are consumed separately;
   cancelled or failed captures remain failures. Detailed annotations require a
   compatible instrumented framework. Diagnostic results are never baseline or
   KEEP evidence. Saved epoch-3 sessions keep their upstream launcher contract.

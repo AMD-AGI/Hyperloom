@@ -174,3 +174,52 @@ def test_persisted_epoch_one_client_survives_load_and_subprocess_routing(tmp_pat
     env = {"HYPERLOOM_AGENTX": "1", "INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR": str(tmp_path)}
     assert not native_agentx_session(env=env)
     assert not managed_native_agentx_session(env=env)
+
+
+@pytest.mark.parametrize(
+    "mode", ["native-switch", "native-yaml", "native-resume", "legacy-resume", "synthetic", "mlperf"]
+)
+@pytest.mark.parametrize(
+    "name",
+    ["AIPERF_BIN", "AGENTIC_CONCURRENCY", "AGENTX_DATASET", "AGENTX_WARMUP_REQUESTS_PER_LANE", "WEKA_LOADER_OVERRIDE"],
+)
+def test_cli_preflight_rejects_legacy_replay_env_only_for_native_sessions(tmp_path, monkeypatch, capsys, mode, name):
+    from hyperloom.inference_optimizer.cli import preflight
+
+    class CredentialsReached(Exception):
+        pass
+
+    def credentials():
+        raise CredentialsReached
+
+    monkeypatch.setattr(preflight, "_pin_resumed_session_args", lambda args: None)
+    monkeypatch.setattr(preflight, "_load_dotenv_fallback", lambda: None)
+    monkeypatch.setattr(preflight, "_load_kernel_agent_env_fallback", lambda: None)
+    monkeypatch.setattr(preflight, "_derive_runtime_paths", lambda: None)
+    monkeypatch.setattr(preflight, "_validate_credentials", credentials)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1" if mode in {"native-switch", "legacy-resume", "mlperf"} else "0")
+    monkeypatch.setenv("HYPERLOOM_AGENTIC_BACKEND", "mlperf" if mode == "mlperf" else "aiperf")
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", "")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", "")
+    monkeypatch.setenv(name, "private-override-value")
+    args = argparse.Namespace(resume_from=None)
+    if mode == "native-yaml":
+        config = tmp_path / "native.yaml"
+        config.write_text("benchmark:\n  agentx: enable\n")
+        monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(config))
+    if mode.endswith("resume"):
+        (tmp_path / "state.json").write_text(
+            json.dumps({"benchmark_mode": "agentx", "agentx_epoch": 4 if mode == "native-resume" else 1})
+        )
+        args.resume_from = str(tmp_path)
+    if mode.startswith("native"):
+        with pytest.raises(SystemExit) as error:
+            preflight._preflight(args)
+        assert error.value.code == 2
+        message = capsys.readouterr().err
+        assert name in message and "environment" in message
+        assert "private-override-value" not in message
+    else:
+        with pytest.raises(CredentialsReached):
+            preflight._preflight(args)
+        assert os.environ[name] == "private-override-value"

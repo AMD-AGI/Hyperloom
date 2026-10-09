@@ -929,9 +929,13 @@ point through the same benchmark interpreter that will run Magpie. Native
 InferenceX owns the duration (3600 seconds in canonical mode, 1200 in fast
 mode) and configures a 393-trace dataset-entry cap. That value is a loader
 ceiling, not a guarantee that 393 traces, sessions, or requests survive
-availability and context-length filters. Native `AGENTX_DATASET` and
-`WEKA_LOADER_OVERRIDE` overrides are
-rejected. A pre-existing `HYPERLOOM_IMAGE` must exactly match the effective
+availability and context-length filters. Native launches reject non-empty
+`AIPERF_*`, `AGENTIC_*`, `AGENTX_DATASET`, `AGENTX_WARMUP_REQUESTS_PER_LANE`,
+and `WEKA_LOADER_OVERRIDE` in the shell or `benchmark.envs` during CLI preflight,
+before dependency installation or benchmarking. Remove those legacy overrides;
+configure replay through supported `benchmark.agentx` options and the resolved
+InferenceX recipe. Legacy sessions and the MLPerf backend retain their own controls.
+A pre-existing `HYPERLOOM_IMAGE` must exactly match the effective
 resolved image. In contrast,
 `AGENTX_DURATION` and `AGENTX_NUM_ENTRIES` still control legacy measurements
 and saved compatibility-profiler sessions. They do not change managed AgentX measurement

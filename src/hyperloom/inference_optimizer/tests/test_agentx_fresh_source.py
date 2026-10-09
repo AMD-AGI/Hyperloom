@@ -347,3 +347,21 @@ def test_conflicting_explicit_image_fails_before_recipe_resolution(monkeypatch, 
     monkeypatch.setenv("HYPERLOOM_IMAGE", "operator/different-image")
     with pytest.raises(ValueError, match="HYPERLOOM_IMAGE conflicts"):
         prepare_native_agentx_source(args)
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["AIPERF_BIN", "AGENTIC_CONCURRENCY", "AGENTX_DATASET", "AGENTX_WARMUP_REQUESTS_PER_LANE", "WEKA_LOADER_OVERRIDE"],
+)
+@pytest.mark.parametrize("value", ["private-value", 0, None, " "])
+def test_native_yaml_replay_controls_are_rejected_when_set(tmp_path, name, value):
+    source = tmp_path / "source.yaml"
+    source.write_text(yaml.safe_dump({"benchmark": {"agentx": "enable", "envs": {name: value}}}))
+    args = _args(benchmark_config=str(source))
+    if value is None or not str(value).strip():
+        assert cli._configure_benchmark_config(args)
+    else:
+        with pytest.raises(ValueError, match=name) as error:
+            cli._configure_benchmark_config(args)
+        assert "benchmark.envs" in str(error.value)
+        assert "private-value" not in str(error.value)

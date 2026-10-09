@@ -847,8 +847,9 @@ class WritebackCollaborator(CoordinatorCollaborator):
     def is_promotable_result(self, task_kind: str, result: dict[str, Any]) -> bool:
         """Decide whether a settled task result should be promoted.
 
-        Per-kind rules: baseline/profile require a valid measurement, sweep
-        requires ``status == "succeeded"``, ``replay_warm_recipe`` always routes
+        Per-kind rules: baseline requires a valid measurement, profile also accepts
+        a successful diagnostic capture, sweep requires ``status == "succeeded"``,
+        ``replay_warm_recipe`` always routes
         through promotion (it owns its own failure bookkeeping), and everything
         else is promotable unless ``status == "failed"``.
 
@@ -870,6 +871,8 @@ class WritebackCollaborator(CoordinatorCollaborator):
             measurement_status = result.get("measurement_status")
             if measurement_status is not None and str(measurement_status) != "succeeded":
                 return False
+            if result.get("diagnostic_only") is True:
+                return result.get("status") == "succeeded" and result.get("trace_input_ready") is True
             return is_valid_measurement(result)
         # replay_warm_recipe always routes through promote_warm_replay (owns its own failure bookkeeping).
         if task_kind == "replay_warm_recipe":

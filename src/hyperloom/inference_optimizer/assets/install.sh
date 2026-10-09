@@ -1512,15 +1512,12 @@ for spec in specs:
 # root after import.
 ensure_magpie() {
   log "ensuring Magpie package ${MAGPIE_PACKAGE_SPEC}"
-  # Reuse the runtime's PEP 610-aware identity resolver.  Running `git -C`
-  # directly below site-packages can otherwise walk up into the Hyperloom
-  # checkout and mistake Hyperloom's HEAD for the installed Magpie commit.
-  local capability_probe='import inspect,re,sys; from pathlib import Path; import Magpie; from Magpie.modes.benchmark import AgentXConfig; from Magpie.modes.benchmark.agentx import _expand_single_node_agentx_entries; from hyperloom.inference_optimizer.agentx.native import _MAGPIE_SOURCE_IDENTITY_CODE; scope={}; exec(_MAGPIE_SOURCE_IDENTITY_CODE,scope); assert AgentXConfig.from_value("enable"); assert "run-eval" in inspect.getsource(_expand_single_node_agentx_entries); expected=sys.argv[1].strip().lower(); package_root=Path(Magpie.__file__).resolve().parent; commit,_=scope["_resolve_magpie_source_identity"](package_root); scope["_validate_magpie_execution_tree"](package_root,commit) if commit in scope["_AUDITED_MAGPIE_EXECUTION_TREES"] else None; assert not re.fullmatch(r"[0-9a-f]{7,40}",expected) or (commit and (commit.startswith(expected) or expected.startswith(commit)))'
+  local health_probe='from hyperloom.common.agentx_mode import native_agentx_session; from hyperloom.inference_optimizer.magpie_health import magpie_health_code; exec(magpie_health_code(native_agentx=native_agentx_session()))'
   if [ "$CHECK_ONLY" -eq 1 ]; then
-    if "$PYTHON" -c "$capability_probe" "$MAGPIE_REF" >/dev/null 2>&1; then
-      log "Magpie native AgentX capability available"
+    if "$PYTHON" -c "$health_probe" "$MAGPIE_REF" >/dev/null 2>&1; then
+      log "Magpie package healthy"
     else
-      warn "Magpie native AgentX capability unavailable (check-only mode, skipping pip install)"
+      warn "Magpie package unavailable or incompatible (check-only mode, skipping pip install)"
     fi
     return 0
   fi
@@ -1529,15 +1526,15 @@ ensure_magpie() {
     return 0
   fi
   if [ "$DRY_RUN" -eq 0 ]; then
-    if "$PYTHON" -c "$capability_probe" "$MAGPIE_REF" >/dev/null 2>&1; then
-      log "Magpie native AgentX capability already available; skipping pip install"
+    if "$PYTHON" -c "$health_probe" "$MAGPIE_REF" >/dev/null 2>&1; then
+      log "Magpie package healthy; skipping pip install"
     else
       "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" "$MAGPIE_PACKAGE_SPEC"
-      if ! "$PYTHON" -c "$capability_probe" "$MAGPIE_REF" >/dev/null 2>&1; then
+      if ! "$PYTHON" -c "$health_probe" "$MAGPIE_REF" >/dev/null 2>&1; then
         # pip keeps an installed VCS commit even when its files were patched.
         # Reinstall only Magpie; the first install already resolved its deps.
         "$PYTHON" -m pip install --quiet --force-reinstall --no-deps "${PIP_EXTRA[@]}" "$MAGPIE_PACKAGE_SPEC"
-        "$PYTHON" -c "$capability_probe" "$MAGPIE_REF" >/dev/null
+        "$PYTHON" -c "$health_probe" "$MAGPIE_REF" >/dev/null
       fi
       log "Magpie installed OK from ${MAGPIE_PACKAGE_SPEC}"
     fi
