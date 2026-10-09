@@ -436,9 +436,6 @@ def _build_trace_analyze_cmd(
     ).strip()
     if precision:
         cmd += ["--precision", precision]
-    runtime_config = str(payload.get("runtime_config") or getattr(state, "baseline_config_path", "") or "").strip()
-    if runtime_config and not is_bypass:
-        cmd += ["--runtime-config", runtime_config]
 
     if scriptable:
         # --skip-split is TraceLens-only; the bypass backend has its own windowing.
@@ -648,9 +645,9 @@ async def trace_analyze_handler(
     if not analysis_mode and framework.lower() in {"vllm", "sglang"}:
         analysis_mode = "inference"
 
-    # Analysis route: default ``agent`` (TraceLens); ``bypass`` (TraceLens-free)
-    # is the explicit route via payload ``analysis_route`` /
-    # ``HYPERLOOM_TRACE_ANALYSIS_ROUTE``. Coerce to str.
+    # Analysis route: default ``agent`` (TraceLens SDK/LLM); ``bypass`` (no-LLM,
+    # but still imports TraceLens for source mapping) is the explicit route via
+    # payload ``analysis_route`` / ``HYPERLOOM_TRACE_ANALYSIS_ROUTE``. Coerce to str.
     # Only an absent or blank payload value defers to the env var. A non-blank
     # value is kept even when unrecognized, so it reaches the check below rather
     # than silently overriding the env with the ``agent`` default.
@@ -678,17 +675,15 @@ async def trace_analyze_handler(
         }
     analysis_route = explicit_route or "agent"
     is_bypass = analysis_route == "bypass"
-    # Resolve TraceLens root independently of inherited env, self-healing a
-    # vanished checkout before validation. Skipped on bypass.
-    tracelens_root: Path | None = None
-    if not is_bypass:
-        tracelens_root = _resolve_tracelens_root()
-        # Self-heal when the checkout is missing or incomplete (no .git).
-        if not (tracelens_root / ".git").exists():
-            _maybe_selfheal_tracelens_root(tracelens_root, log=log)
-        tl_err = _tracelens_root_error(tracelens_root)
-        if tl_err:
-            return {"status": "failed", "error_class": "tracelens_root_missing", "error": tl_err}
+    # Both routes need an importable checkout: bypass transitively imports
+    # TraceLens for source-path mapping.
+    tracelens_root = _resolve_tracelens_root()
+    # Self-heal when the checkout is missing or incomplete (no .git).
+    if not (tracelens_root / ".git").exists():
+        _maybe_selfheal_tracelens_root(tracelens_root, log=log)
+    tl_err = _tracelens_root_error(tracelens_root)
+    if tl_err:
+        return {"status": "failed", "error_class": "tracelens_root_missing", "error": tl_err}
 
     # Pass the session root so artefacts settle under ``<session_dir>/kernel-agent/runs/...``.
     workspace_path = payload.get("workspace_path") or str(session_dir)

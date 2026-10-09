@@ -273,6 +273,16 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
         "an improvement over a baseline that was never the baseline, so the run stopped with the figure kept and "
         "marked. Resume with more budget to measure a comparable baseline."
     ),
+    "baseline_over_latency_budget": (
+        "The baseline's own mean end-to-end latency exceeded --max-latency-ms, or the baseline reported no "
+        "end-to-end latency at all, so the run stopped before optimizing. The budget refuses any KEEP over the "
+        "ceiling or without a measured latency, and the reference the run is measured against already fails it — no "
+        "candidate built on it could have been promoted, so continuing would have spent the whole time budget "
+        "refusing every winner in turn. If the baseline reported no latency, make the workload's entrypoint write "
+        "e2el_mean_ms; otherwise either the ceiling is lower than this workload's floor on this hardware, or the "
+        "baseline configuration itself is the thing to fix. Relaunch with a ceiling the baseline can meet, or "
+        "without one, to see what the search finds."
+    ),
     # Recipe KB knowledge-plane bootstrap failures.
     "warm_replay_rollback_failed": (
         "Warm replay rollback could not restore every Recipe/Kernel mutation; "
@@ -868,7 +878,7 @@ def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
             f"(snapshot #{base_id}). PR #321 retired the legacy "
             "close-phase auto-roofline; refreshes are now driven by a "
             "10% gain watermark over `last_roofline_tput` (see "
-            "`Coordinator._maybe_enqueue_watermark_roofline`). The "
+            "`KernelPhase.maybe_enqueue_watermark_roofline`). The "
             "watermark did not cross during this session, so the "
             "PRELUDE bootstrap snapshot is the only datapoint available "
             "for the report._"
@@ -901,7 +911,7 @@ def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
         "Before/after comparison of TraceLens Executive Summaries. "
         "The baseline snapshot was captured at PRELUDE; the latest "
         "snapshot was captured after a +10% gain watermark refresh "
-        "(see `Coordinator._maybe_enqueue_watermark_roofline`)."
+        "(see `KernelPhase.maybe_enqueue_watermark_roofline`)."
     )
     lines.append("")
     # The ceiling is normally a session constant, but a runtime dtype / quantization change moves it — and then the

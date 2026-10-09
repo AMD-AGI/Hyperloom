@@ -8,6 +8,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -356,6 +357,33 @@ def test_probe_wraps_the_implicit_conversion_dunders(probe_module, tmp_path):
     }
     # And the aggregator has to call them what they are.
     assert all(api in evidence._HOST_SYNC_APIS for api in recorded)
+
+
+def test_probe_defers_torch_until_the_process_imports_it(tmp_path):
+    """Startup must leave torch unimported, and a ``find_spec`` lookup must not consume the deferred wrap.
+
+    vLLM on ROCm has to load libtorch symbols globally before ``import torch`` or torch.profiler loses every GPU
+    event, and it locates torch with ``find_spec`` first.
+    """
+    pytest.importorskip("torch")
+    script = (
+        "import importlib.util, sys\n"
+        "assert 'torch' not in sys.modules, 'probe imported torch at startup'\n"
+        "assert importlib.util.find_spec('torch') is not None\n"
+        "import torch\n"
+        "assert getattr(torch.cuda.synchronize, '_hl_host_probe', False)\n"
+        "assert getattr(torch.Tensor.item, '_hl_host_probe', False)\n"
+    )
+    env = dict(os.environ)
+    env.update(
+        {
+            "PYTHONPATH": str(evidence.probe_asset_dir()),
+            "HYPERLOOM_HOST_PROBE": "1",
+            "HYPERLOOM_HOST_PROBE_DIR": str(tmp_path),
+        }
+    )
+    result = subprocess.run([sys.executable, "-c", script], env=env, capture_output=True, text=True, timeout=300)
+    assert result.returncode == 0, result.stderr
 
 
 def test_aten_level_scalar_conversion_is_a_declared_blind_spot():
@@ -1359,7 +1387,7 @@ def test_probe_injection_is_idempotent(tmp_path, monkeypatch):
 
 
 def test_probe_injection_respects_the_off_switch(tmp_path, monkeypatch):
-    """With the probe switched off the config is left untouched."""
+    """With the probe switched off only the start-up shim goes in, without the probe's environment."""
     import yaml
 
     from hyperloom.orchestrator.actions.executors.profile import ProfileExecutor
@@ -1369,7 +1397,8 @@ def test_probe_injection_respects_the_off_switch(tmp_path, monkeypatch):
     _write_profile_config(config, {"TP": 8})
     assert ProfileExecutor()._inject_host_probe(config, tmp_path / "ws") == ""
     envs = yaml.safe_load(config.read_text(encoding="utf-8"))["benchmark"]["envs"]
-    assert envs == {"TP": 8}
+    assert envs == {"TP": 8, "PYTHONPATH": str(evidence.probe_asset_dir())}
+    assert not (tmp_path / "ws").exists()
 
 
 def test_evidence_collection_annotates_the_profile_result(tmp_path, monkeypatch):

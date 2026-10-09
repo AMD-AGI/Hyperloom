@@ -85,6 +85,19 @@ def test_data_files_sources_exist():
     assert not missing, f"data-files entries point at missing sources: {missing}"
 
 
+def test_the_experience_kb_runtime_ships_inside_this_distribution() -> None:
+    pyproject = _pyproject()
+    project = pyproject["project"]
+    assert project["dependencies"] == []
+    for name, requirements in project["optional-dependencies"].items():
+        assert not any(requirement.startswith("hyperloom-kb") for requirement in requirements), name
+    assert project["scripts"]["hyperloom-kb-serve"] == "hyperloom_kb.http_service:main"
+    assert project["scripts"]["hyperloom-kb-collect"] == "hyperloom_kb.collect.cli:main"
+    shipped = pyproject["tool"]["setuptools"]["package-data"]["hyperloom_kb"]
+    for resource in ("declarations/inference-recipe-v1.yaml", "mappings/hyperloom-sbd-v6.yaml"):
+        assert any(fnmatchcase(resource, pattern) for pattern in shipped), resource
+
+
 def _module_path(dotted: str) -> Path | None:
     base = _src() / dotted.replace(".", "/")
     for candidate in (base.with_suffix(".py"), base / "__init__.py"):

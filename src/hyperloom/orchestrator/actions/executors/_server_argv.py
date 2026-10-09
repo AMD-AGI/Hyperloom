@@ -18,7 +18,7 @@ from hyperloom.inference_optimizer.framework_registry import server_args_env_nam
 from hyperloom.inference_optimizer.grid_server_args import merge_server_args
 from hyperloom.inference_optimizer.grid_server_args import tokenize_server_args_preserving_json
 from hyperloom.inference_optimizer.grid_server_args import validate_server_args_shell_safe
-from ._recipe_script import RecipeLeverUnavailableError, recipe_launch_contract
+from ._recipe_script import apply_recipe_levers, recipe_owns_argv
 
 
 @dataclass(frozen=True)
@@ -89,43 +89,46 @@ def add_server_arg_unless_pinned(
 def seal_server_argv(
     envs: MutableMapping[str, Any],
     framework: str | None,
-    *,
-    bench: Mapping[str, Any] | None = None,
 ) -> ServerArgv:
     """Write the final server argument string into ``envs`` and return its argv.
 
     Args:
         envs: The benchmark env mapping being materialised.
         framework: The framework the config serves.
-        bench: The benchmark mapping naming the recipe these args are for.
-            Supplied by the two materialisers; a caller re-sealing a string the
-            recipe already accepted has nothing left to ask it.
 
     Returns:
         ServerArgv: The sealed argv.
 
     Raises:
         ValueError: When the composed string carries shell control syntax.
-        RecipeLeverUnavailableError: When the recipe's server script never
-            reads the argument env, so the sealed string cannot reach it.
     """
     env_name = server_args_env_name(framework)
     text = validate_server_args_shell_safe(str(envs.get(env_name) or ""))
     sealed = _sealed(framework, env_name, text)
-    if sealed.text and bench is not None and not recipe_launch_contract(bench)[0]:
-        raise RecipeLeverUnavailableError(
-            f"the server script this recipe boots never reads {env_name}, so {sealed.text!r} would not reach it"
-        )
     if sealed.text or env_name in envs:
         envs[env_name] = sealed.text
     return sealed
 
 
+class ConfigUnreadable(Exception):
+    """A materialised benchmark YAML that cannot be read as a config."""
+
+
 def _load_config(config_path: str | Path) -> dict[str, Any]:
-    """Read a materialised benchmark YAML, empty when it is not a mapping."""
-    with Path(config_path).open(encoding="utf-8") as handle:
-        cfg = yaml.safe_load(handle)
-    return cfg if isinstance(cfg, dict) else {}
+    """Read a materialised benchmark YAML.
+
+    Raises:
+        ConfigUnreadable: When the file cannot be opened, is not UTF-8, is not
+            YAML a safe loader can construct, or does not hold a mapping.
+    """
+    try:
+        with Path(config_path).open(encoding="utf-8") as handle:
+            cfg = yaml.safe_load(handle)
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        raise ConfigUnreadable(f"{config_path}: {exc}") from exc
+    if not isinstance(cfg, dict):
+        raise ConfigUnreadable(f"{config_path}: holds {type(cfg).__name__}, not a mapping")
+    return cfg
 
 
 def _benchmark_envs(config_path: str | Path) -> tuple[str | None, dict[str, Any]]:
@@ -145,6 +148,9 @@ def config_server_argv(config_path: str | Path) -> ServerArgv:
 
     Returns:
         ServerArgv: The argv carried by the config's benchmark envs.
+
+    Raises:
+        ConfigUnreadable: When the config cannot be read.
     """
     framework, envs = _benchmark_envs(config_path)
     env_name = server_args_env_name(framework)
@@ -160,6 +166,9 @@ def config_launch_env(config_path: str | Path, base: Mapping[str, str]) -> dict[
 
     Returns:
         dict[str, str]: ``base`` overlaid with the config's benchmark envs.
+
+    Raises:
+        ConfigUnreadable: When the config cannot be read.
     """
     _framework, envs = _benchmark_envs(config_path)
     merged = {str(key): str(value) for key, value in base.items()}
@@ -170,6 +179,9 @@ def config_launch_env(config_path: str | Path, base: Mapping[str, str]) -> dict[
 def reseal_config_argv(config_path: str | Path, text: str) -> ServerArgv:
     """Replace a materialised config's server argv, through the same seal.
 
+    On an agentic recipe the rendered copy is re-rendered without the flags the
+    replacement dropped, so the copy and the declared string stay one argv.
+
     Args:
         config_path: Path to the materialised YAML, rewritten in place.
         text: The replacement argument string.
@@ -178,13 +190,24 @@ def reseal_config_argv(config_path: str | Path, text: str) -> ServerArgv:
         ServerArgv: The re-sealed argv.
 
     Raises:
+        ConfigUnreadable: When the config cannot be read.
         ValueError: When the replacement carries shell control syntax.
     """
     path = Path(config_path)
+    previous = config_server_argv(path).argv
     cfg = _load_config(path)
     bench = cfg.setdefault("benchmark", {})
     envs = bench.setdefault("envs", {})
     envs[server_args_env_name(bench.get("framework"))] = text.strip()
+    if recipe_owns_argv(bench):
+        kept = set(text.split())
+        envs["AGENTX_SERVER_SCRIPT"] = apply_recipe_levers(
+            bench,
+            inherited_script=str(envs.get("AGENTX_SERVER_SCRIPT") or ""),
+            server_args=text,
+            remove_args=[token for token in previous if token.startswith("--") and token not in kept],
+            env_levers={},
+        )
     sealed = seal_server_argv(envs, bench.get("framework"))
     with path.open("w", encoding="utf-8") as handle:
         yaml.safe_dump(cfg, handle, sort_keys=False)
@@ -192,6 +215,7 @@ def reseal_config_argv(config_path: str | Path, text: str) -> ServerArgv:
 
 
 __all__ = [
+    "ConfigUnreadable",
     "ServerArgv",
     "add_server_arg_unless_pinned",
     "config_launch_env",

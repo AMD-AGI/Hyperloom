@@ -10,6 +10,7 @@ import os
 import subprocess
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -125,6 +126,40 @@ def seed_kernel_keep(
     return task_key
 
 
+def make_coordinator(session_dir: Path, *, shared_state_overrides: dict[str, Any] | None = None, **coord_kwargs: Any):
+    """Build a real Coordinator with idle mock backends and optional state overrides.
+
+    Returns a fully initialised :class:`~hyperloom.orchestrator.loop.coordinator.Coordinator`.
+    Callers that need to replace collaborator state (``tasks``, ``bus``, etc.) may do so
+    by assigning to the returned instance directly after construction.
+    """
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.roles.agent_role import default_role_registry
+    from hyperloom.orchestrator.roles.mock_backend import MockBackend, ScriptedPlan
+    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+
+    def _idle_plan() -> ScriptedPlan:
+        return ScriptedPlan(
+            turns=[],
+            default_intent=Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"}),
+        )
+
+    backends = coord_kwargs.pop("backends", None) or {
+        "orchestration": MockBackend(_idle_plan(), name="orchestration"),
+        "critic": MockBackend(_idle_plan(), name="critic"),
+    }
+    coord = Coordinator(
+        session_dir=session_dir,
+        backends=backends,
+        role_registry=coord_kwargs.pop("role_registry", None) or default_role_registry(),
+        **coord_kwargs,
+    )
+    if shared_state_overrides:
+        for k, v in shared_state_overrides.items():
+            setattr(coord.shared_state, k, v)
+    return coord
+
+
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
     """A fresh session dir under an isolated ``USER_DATA_PATH``, seeded with the ``no_target_gpu_configured`` target-analysis marker."""
@@ -189,42 +224,16 @@ def git_commit_all(path: Path, message: str) -> None:
     )
 
 
-class _BuildFakeCoordinator:
-    """Minimal coordinator surface for off-loop targeted-build tests."""
-
-    def __init__(self, session_dir: Path, db) -> None:
-        from hyperloom.orchestrator.bus.resource_lock import (
-            ResourceLockManager,
-            SqliteLeaseBackend,
-        )
-        from hyperloom.orchestrator.state.shared_state import SharedState
-        from hyperloom.orchestrator.state.task_registry import TaskRegistry
-
-        self.session_dir = session_dir
-        self.tasks = TaskRegistry(db)
-        self.locks = ResourceLockManager(SqliteLeaseBackend(db))
-        self.shared_state = SharedState()
-
-
 @pytest.fixture
 def build_coord(tmp_path):
-    """Fake coordinator backed by a temp DB for targeted-build lifecycle tests."""
-    from hyperloom.orchestrator.bus.storage import SqliteConnection
-    from hyperloom.orchestrator.bus.storage.schema import ensure_schema
-
-    db = SqliteConnection(tmp_path / "coordinator.db")
-    ensure_schema(db.raw)
-    fc = _BuildFakeCoordinator(tmp_path, db)
-    yield fc
-    db.close()
+    """Real Coordinator for targeted-build lifecycle tests."""
+    return make_coordinator(tmp_path)
 
 
 @pytest.fixture
 def build_lifecycle(build_coord):
-    """``BuildLifecycleCollaborator`` bound to the ``build_coord`` fixture."""
-    from hyperloom.orchestrator.loop.build_lifecycle import BuildLifecycleCollaborator
-
-    return BuildLifecycleCollaborator(build_coord)
+    """``BuildLifecycleCollaborator`` from the ``build_coord`` coordinator."""
+    return build_coord.build_lifecycle
 
 
 def patch_integrate_patch_roots(monkeypatch, tmp_path: Path) -> None:

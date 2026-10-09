@@ -36,7 +36,7 @@
               "const": "hyperloom.workflow_evaluation.v1"
             },
             "contract_digest": {
-              "const": "57298f78df7bbb347e07cca5adb6027f56e4e13aa6394de57c950b69dc3a1288"
+              "const": "a9312246f4da3618880a0ca032e7a5edd25802180d8d0b530aa7ba4c60476d5f"
             },
             "run_flags": {
               "type": "object",
@@ -684,6 +684,7 @@
             "baseline_accuracy_failed",
             "baseline_arg_error",
             "baseline_failed",
+            "baseline_over_latency_budget",
             "coordinator_exception",
             "custom",
             "emergency",
@@ -1346,8 +1347,7 @@
         "phase_spent_sec",
         "runtime_sec",
         "post_ready_runtime_sec",
-        "warm_runtime_sec",
-        "double_run"
+        "warm_runtime_sec"
       ],
       "properties": {
         "failure_streak": {
@@ -1362,6 +1362,15 @@
         },
         "tput": {
           "type": "number"
+        },
+        "initial_analysis_pending": {
+          "type": "boolean"
+        },
+        "analysis_affordable_sec": {
+          "type": [
+            "number",
+            "null"
+          ]
         },
         "session_usable_sec": {
           "type": [
@@ -1390,9 +1399,6 @@
             "number",
             "null"
           ]
-        },
-        "double_run": {
-          "type": "boolean"
         }
       },
       "additionalProperties": false
@@ -1405,6 +1411,15 @@
       "properties": {
         "tput": {
           "type": "number"
+        },
+        "initial_analysis_pending": {
+          "type": "boolean"
+        },
+        "analysis_affordable_sec": {
+          "type": [
+            "number",
+            "null"
+          ]
         }
       },
       "additionalProperties": false

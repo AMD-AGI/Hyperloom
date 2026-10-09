@@ -22,9 +22,9 @@ from hyperloom.orchestrator.bus.storage import SqliteConnection
 from hyperloom.orchestrator.bus.storage.schema import ensure_schema
 from hyperloom.orchestrator.enablement.build import EnablementBuild
 from hyperloom.orchestrator.enablement.lane import EnablementLane
+from hyperloom.orchestrator.enablement.params import EnablementParams
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
-from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 from hyperloom.orchestrator.phases.machine_state import PHASE_ENABLEMENT
 from hyperloom.orchestrator.policy.gate import PolicyGate
 from hyperloom.orchestrator.rehearsal import (
@@ -164,38 +164,48 @@ def _lane(session: Path, tasks: TaskRegistry, rounds: RoundStore, launch_log: st
         tasks=tasks,
         rounds=rounds,
         session_dir=str(session),
-        _run_deadline=None,
-        _warm_specialist_params=_noop,
-        _record_observation=_noop,
+        run_deadline=None,
+        warm_specialist_params=_noop,
+        record_observation=_noop,
         action_registry=ACTION_CATALOGUE,
         state=types.SimpleNamespace(pending_proposals={}),
         _read_enablement_source_context=lambda _sig: "",
         _derive_checkpoint_weight_facts=lambda _log: "",
-        _framework_gpu_params=lambda: {},
-        _framework_authoring_lanes_ttl=lambda _params, *, base_ttl_sec: (["research_lane"], base_ttl_sec),
-        _time_budget_denial_for_action=lambda _action: None,
+        framework_authoring_lanes_ttl=lambda _params, *, base_ttl_sec: (["research_lane"], base_ttl_sec),
+        time_budget_denial_for_action=lambda _action: None,
+        # Attributes exposed by CoordinatorCollaborator properties; set directly
+        # on the shim since property descriptors don't apply to SimpleNamespace.
+        knowledge_plane=None,
+        recipe_kb=None,
     )
     for owner, name in (
-        (Coordinator, "_build_enablement_specialist_params"),
-        (Coordinator, "_discover_enablement_candidate_refs"),
-        (Coordinator, "_registry_lanes_ttl"),
-        (Coordinator, "_maybe_record_enablement_human_review"),
-        (Coordinator, "_maybe_rearm_enablement"),
+        (EnablementParams, "build_enablement_specialist_params"),
+        (EnablementParams, "_discover_enablement_candidate_refs"),
+        (EnablementLane, "_maybe_record_enablement_human_review"),
+        (EnablementLane, "maybe_rearm_enablement"),
         (EnablementLane, "_maybe_enqueue_enablement_specialist"),
-        (EnablementLane, "_enablement_admitted"),
+        (EnablementLane, "enablement_admitted"),
         (EnablementLane, "_check_argv_terminal"),
         (EnablementLane, "_check_environment_terminal"),
         (EnablementLane, "_environment_verdict"),
-        (EnablementLane, "_enablement_in_flight"),
+        (EnablementLane, "enablement_in_flight"),
         (EnablementLane, "_round_has_live_work"),
         (EnablementLane, "_open_authoring_round"),
         (EnablementLane, "_renew_enablement_round"),
-        (EnablementLane, "_settle_enablement_round"),
-        (EnablementBuild, "_maybe_enqueue_specialist_requested_build"),
-        (EnablementBuild, "_maybe_escalate_to_targeted_build"),
-        (WritebackCollaborator, "_close_enablement_lane"),
+        (EnablementLane, "settle_enablement_round"),
+        (EnablementLane, "close_lane_event"),
+        (EnablementBuild, "maybe_enqueue_specialist_requested_build"),
+        (EnablementBuild, "maybe_escalate_to_targeted_build"),
     ):
         setattr(shim, name, types.MethodType(getattr(owner, name), shim))
+    # Collaborator access goes through self._coord, so route it back to the shim.
+    shim._coord = types.SimpleNamespace(
+        run_deadline=None,
+        enablement_params=shim,
+        enablement_build=shim,
+        specialist_dispatch=shim,
+        gpu_lanes=shim,
+    )
     return shim
 
 
@@ -385,7 +395,7 @@ async def _settle_failures(coordinator, session, slot, scenario_len: int) -> lis
     for index in range(scenario_len):
         result = await _bringup_attempt(session, slot, task_id=f"baseline-{index}")
         played.append(result)
-        await coordinator._handle_unpromotable_result(_baseline_task(f"baseline-{index}"), result)
+        await coordinator.writeback.handle_unpromotable_result(_baseline_task(f"baseline-{index}"), result)
         if coordinator.shared_state.stop_reason:
             break
     return played
@@ -414,10 +424,12 @@ async def test_a_baseline_that_keeps_failing_reaches_the_prelude_terminal(
 
     assert state.baseline_failure_streak == 3
     assert state.stop_reason == "baseline_failed"
-    assert machine_state.exit_terminal_prelude(state) == (
-        "prelude_baseline_failed",
-        {"baseline_failure_streak": 3},
-    )
+    out = machine_state.compute_next_phase(state)
+    assert out is not None
+    target, reason, evidence = out
+    assert (target, reason) == ("CLOSE", "baseline_failed")
+    assert evidence["terminal"] is True
+    assert evidence["predicate_inputs"]["baseline"]["failure_streak"] == 3
     # The fourth attempt was never played: the session stopped on the third.
     assert len(played) == 3
     assert launches.served == 3
@@ -431,9 +443,7 @@ async def _seed_failed_rounds(rounds: RoundStore, n: int) -> None:
         holder = f"holder-{i:03d}"
         now = float(i)
         await rounds.open(rid, holder_task_id=holder, lease_sec=3600.0, now_unix=now, request_id=rid)
-        await rounds.settle(
-            rid, holder_task_id=holder, fence=1, outcome=FAILED, now_unix=now + 1.0, request_id=f"settle-{rid}"
-        )
+        await rounds.settle(await rounds.get(rid), outcome=FAILED, now_unix=now + 1.0, request_id=f"settle-{rid}")
 
 
 @pytest.mark.asyncio
@@ -462,7 +472,7 @@ async def test_the_enablement_attempt_cap_stops_a_round_that_keeps_asking(
     assert not lane.shared_state.stop_reason
     # That round has to end before the next one can ask for the machine, and a
     # revert is how a round that repaired nothing ends.
-    await lane._maybe_rearm_enablement({"enablement": True, "status": "reverted"})
+    await lane.maybe_rearm_enablement({"enablement": True, "status": "reverted"})
     assert await rounds.held() is None
 
     # Now at the cap: the lane must stop.
@@ -497,7 +507,7 @@ async def test_an_advancing_round_does_not_exhaust_the_cap(
     assert not lane.shared_state.stop_reason
 
     # An advancing result settles the open round as ADVANCED, resetting the streak.
-    await lane._maybe_rearm_enablement(
+    await lane.maybe_rearm_enablement(
         {"enablement": True, "status": "advanced", "patches_applied": ["vllm/platforms/rocm.py"]}
     )
     assert await rounds.held() is None
@@ -531,7 +541,7 @@ async def test_a_round_settles_when_the_caller_has_no_reason_to_give(
     held = await rounds.held()
     assert held is not None
 
-    await lane._settle_enablement_round(FAILED, reason="")
+    await lane.settle_enablement_round(FAILED, reason="")
 
     assert await rounds.held() is None
     row = await rounds.get(held.round_id)

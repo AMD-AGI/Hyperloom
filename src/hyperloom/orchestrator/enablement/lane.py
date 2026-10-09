@@ -21,7 +21,7 @@ from hyperloom.inference_optimizer.grid_server_args import merge_server_args
 from ..bringup import ARGV_INVALID, ENV_FAULT, is_argv_invalid, is_env_fault, load_boot_observation, observation_summary
 from ..collaborator import CoordinatorCollaborator
 from hyperloom.inference_optimizer.breakdown.round_archive import ROLE_LAUNCH_CONFIG, RoundArchive
-from ..loop.coordinator_helpers import _dedupe_extra_server_args
+from hyperloom.inference_optimizer.grid_server_args import dedupe_extra_server_args
 from ..phases.machine_state import ENABLEMENT_MAX_ATTEMPTS as _ENABLEMENT_MAX_ATTEMPTS, PHASE_ENABLEMENT
 from ..loop.offload import offload
 from .params import ENABLEMENT_PARAMS_BUDGET_SEC
@@ -30,7 +30,6 @@ from ..bringup import recorded_verdict, session_root
 from ..state.round_store import ADVANCED, BOOTED, FAILED, Round
 from ..state.task_registry import create_in_cursor, task_dispatch_origin
 from .recipe.section import recipe_for
-from .recipe.setup_ledger import mark_round_disposition
 
 if TYPE_CHECKING:
     from ..bringup import EnvVerdict
@@ -40,28 +39,6 @@ import logging as _logging
 
 log = _logging.getLogger(__name__)
 
-#: Identity and payload of the accepted stack, accumulated across the rounds
-#: that contributed to it: a round that contributes none leaves the standing
-#: records alone.
-_KEEP_STACK_FIELDS = ("roots", "patch_roots", "base_sha", "source_snapshots")
-
-#: Declared targets and observations of this KEEP replace the previous KEEP's
-#: records, including when a target set is empty or a probe could not run.
-_KEEP_OBSERVED_FIELDS = (
-    "accepted_stack_targets",
-    "patch_targets",
-    "launch_evidence",
-    "environment_closure",
-    "installed_versions_at_keep",
-)
-
-#: Observed fields whose value is meaningful beyond truthiness, so the
-#: truthy-or-empty coercion the others get would destroy them. ``None`` here
-#: says the observation could not be made, which the sufficiency rules read as
-#: a reason to refuse -- collapsing it into an empty mapping would read as a
-#: clean scan and certify exactly what the observation exists to withhold.
-_KEEP_TRISTATE_FIELDS = ("build_extensions_not_carried", "levers_without_readers")
-
 
 #: Shortest lease a renewal may stamp.
 _MIN_LEASE_SEC = 300.0
@@ -70,7 +47,7 @@ _MIN_LEASE_SEC = 300.0
 class EnablementLane(CoordinatorCollaborator):
     """Owns one enablement round: admit, track in-flight, re-arm on outcome."""
 
-    def _enablement_admitted(self) -> bool:
+    def enablement_admitted(self) -> bool:
         """Whether this run and host admit the enablement lane at all."""
         from ..actions.executors._accuracy_gate import eval_enablement_allowed, launch_enablement_allowed
         from ..actions.executors._multi_node_env import is_multi_node
@@ -85,16 +62,20 @@ class EnablementLane(CoordinatorCollaborator):
     async def _maybe_enqueue_enablement_specialist(self) -> str:
         """Dispatch an enablement_specialist when a baseline cannot launch or its accuracy eval fails."""
         state = self.shared_state
-        if not self._enablement_admitted():
+        if not self.enablement_admitted():
             return ""
         if state.enablement.succeeded:
             return ""
         if state.enablement.validation_pending:
             return ""
-        if await self.rounds.held() is not None:
-            # Renews the open round's lease as a side effect; the reconciler,
-            # which runs ahead of this pump, ends a round nobody is working on.
-            await self._enablement_in_flight()
+        round_row = await self.rounds.held()
+        if round_row is not None:
+            # This pump is the lease's only heartbeat, so that asking whether the lane is in
+            # flight stays free of side effects for the terminal paths that only observe it.
+            # A round nobody is working on is left to expire; the reconciler, which runs
+            # ahead of this pump, is what ends it.
+            if await self._round_has_live_work(round_row.holder_task_id):
+                await self._renew_enablement_round(round_row)
             return ""
         # Each terminal below writes stop_reason, which routes the phase to CLOSE on the
         # next tick; returning keeps a new round from opening in the meantime.
@@ -109,7 +90,7 @@ class EnablementLane(CoordinatorCollaborator):
                 state.save(self.session_dir)
                 # The cap is the lane's own terminal, so the lane event closes
                 # here: no round follows it to close on the lane's behalf.
-                await self._close_enablement_lane(
+                await self.close_lane_event(
                     outcome=enablement_event.OUTCOME_STALLED,
                     reason="enablement_attempts_exhausted",
                 )
@@ -120,11 +101,11 @@ class EnablementLane(CoordinatorCollaborator):
                 )
             return ""
         launch_log = state.enablement.launch_log
-        deadline = self._run_deadline
+        deadline = self._coord.run_deadline
         # Reaches the network and stats a checkout on a network mount, so it
         # runs off the tick; discovery degrades to repos-only at the deadline.
         params = await offload(
-            lambda: self._build_enablement_specialist_params(launch_log, attempt=stalled),
+            lambda: self._coord.enablement_params.build_enablement_specialist_params(launch_log, attempt=stalled),
             deadline=Deadline.after(ENABLEMENT_PARAMS_BUDGET_SEC).tightened_to(deadline),
             label="enablement specialist params",
         )
@@ -138,13 +119,13 @@ class EnablementLane(CoordinatorCollaborator):
         # no-ops when a matching build is already queued or running, and neither
         # may block the authoring dispatch below, which is this method's point.
         try:
-            await self._maybe_enqueue_specialist_requested_build()
-            await self._maybe_escalate_to_targeted_build(launch_log, attempt=stalled)
+            await self._coord.enablement_build.maybe_enqueue_specialist_requested_build()
+            await self._coord.enablement_build.maybe_escalate_to_targeted_build(launch_log, attempt=stalled)
         except Exception:
             log.exception("enablement: build escalation failed")
-        await self._warm_specialist_params(params)
+        await self._coord.specialist_dispatch.warm_specialist_params(params)
         # This internal dispatch bypasses intent_router (adds gpu_research_lane + budget TTL).
-        lanes, ttl = self._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
+        lanes, ttl = self._coord.gpu_lanes.framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
         spec_tid = await self._open_authoring_round(
             params=params,
             lanes=lanes,
@@ -307,7 +288,7 @@ class EnablementLane(CoordinatorCollaborator):
             return ""
         return holder
 
-    async def _enablement_in_flight(self) -> bool:
+    async def enablement_in_flight(self) -> bool:
         """True while an open round still has work running under it.
 
         Returns:
@@ -316,10 +297,7 @@ class EnablementLane(CoordinatorCollaborator):
         round_row = await self.rounds.held()
         if round_row is None:
             return False
-        if not await self._round_has_live_work(round_row.holder_task_id):
-            return False
-        await self._renew_enablement_round(round_row)
-        return True
+        return await self._round_has_live_work(round_row.holder_task_id)
 
     async def _round_has_live_work(self, holder: str) -> bool:
         """Report whether anything is still running for the round ``holder`` holds.
@@ -341,7 +319,7 @@ class EnablementLane(CoordinatorCollaborator):
         # Undecided proposal keeps the round open; once ruled, approve lands the task matched below and reject rearms
         # directly, so it cannot defer forever.
         for p in self.state.pending_proposals.values():
-            if p.action_name != "integrate_patch" or p.decided:
+            if p.action_name != "integrate_patch":
                 continue
             if (p.payload.get("params") or {}).get("specialist_task_id") == holder:
                 return True
@@ -359,15 +337,13 @@ class EnablementLane(CoordinatorCollaborator):
         lease = max(_MIN_LEASE_SEC, float(round_row.expires_unix) - float(round_row.renewed_unix))
         now = time.time()
         await self.rounds.renew(
-            round_row.round_id,
-            holder_task_id=round_row.holder_task_id,
-            fence=round_row.fence,
+            round_row,
             lease_sec=lease,
             now_unix=now,
             request_id=f"renew:{round_row.round_id}:{round_row.fence}:{now:.0f}",
         )
 
-    async def _handoff_enablement_round(self, task: "Task") -> None:
+    async def handoff_enablement_round(self, task: "Task") -> None:
         """Move the open round onto the integrate that consumes its deliverable.
 
         Handoff is the only fence increment, so every task id that takes over an
@@ -388,9 +364,7 @@ class EnablementLane(CoordinatorCollaborator):
         if lease <= 0:
             lease = max(_MIN_LEASE_SEC, float(round_row.expires_unix) - float(round_row.renewed_unix))
         moved = await self.rounds.handoff(
-            round_row.round_id,
-            holder_task_id=specialist,
-            fence=round_row.fence,
+            round_row,
             new_holder_task_id=task.task_id,
             lease_sec=lease,
             now_unix=time.time(),
@@ -404,7 +378,7 @@ class EnablementLane(CoordinatorCollaborator):
                 moved.reason,
             )
 
-    async def _settle_enablement_round(self, outcome: str, *, reason: str = "") -> None:
+    async def settle_enablement_round(self, outcome: str, *, reason: str = "") -> None:
         """End the open round, if one is still open.
 
         Args:
@@ -416,13 +390,29 @@ class EnablementLane(CoordinatorCollaborator):
         if round_row is None:
             return
         await self.rounds.settle(
-            round_row.round_id,
-            holder_task_id=round_row.holder_task_id,
-            fence=round_row.fence,
+            round_row,
             outcome=outcome,
             now_unix=time.time(),
             request_id=f"settle:{round_row.round_id}:{round_row.fence}",
             evidence={"reason": reason} if reason else {},
+        )
+
+    async def close_lane_event(self, *, outcome: str, reason: str) -> None:
+        """Close the enablement lane's event on the terminal it just reached.
+
+        Args:
+            outcome: One of the ``enablement_event.OUTCOME_*`` constants.
+            reason: Why the lane ended, recorded on the event.
+        """
+        state = self.shared_state
+        lane = state.enablement
+        _finish_lane_event(
+            lane,
+            state,
+            outcome=outcome,
+            reason=reason,
+            session_dir=str(self.session_dir or ""),
+            stall_streak=await self.rounds.consecutive_stalled(),
         )
 
     async def _maybe_record_enablement_human_review(self, launch_log: str) -> None:
@@ -467,7 +457,7 @@ class EnablementLane(CoordinatorCollaborator):
             reason=("baseline launch failure did not match any actionable enablement signature; needs human triage"),
             signature=signature.to_dict(),
         )
-        await self._record_observation(
+        await self._coord.writeback.record_observation(
             "coordinator",
             "observation",
             {
@@ -491,7 +481,7 @@ class EnablementLane(CoordinatorCollaborator):
             signature.kind,
         )
 
-    async def _maybe_rearm_enablement(self, res: dict[str, Any] | None) -> None:
+    async def maybe_rearm_enablement(self, res: dict[str, Any] | None) -> None:
         """Re-arm, advance, or terminate the enablement retry loop.
 
         Called on every ``integrate_patch`` completion. An enablement patch has
@@ -527,12 +517,8 @@ class EnablementLane(CoordinatorCollaborator):
         # A round that bought no ground gets no branch of its own: it is charged
         # by the FAILED settle below, which the pre-hoc ``consecutive_stalled``
         # cap reads off the durable ledger. Counting it in state again here
-        # would double-charge it, and the field that used to hold it is gone.
-        #
-        # Stamped on the executions this round actually performed, and only when
-        # the round has an id of its own: leaving a row ``unreported`` states
-        # that no lane observed it, which no sufficiency rule reads as verified.
-        _mark_setup_ledger(state, spec_tid, status or "unreported", accepted=status == "kept")
+        # would double-charge it.
+        state.enablement.mark_setup_round(spec_tid, status or "unreported", accepted=status == "kept")
         # Set on every round so neither outlives the round it describes.
         state.enablement.last_grounding_drop_reason = [
             str(d) for d in (res.get("patches_dropped_by_grounding") or [])[:8]
@@ -582,7 +568,7 @@ class EnablementLane(CoordinatorCollaborator):
         # A rearm always ends the round; only a KEEP booted and was graded, and
         # an advance is the ledger's record that the cap must not charge it.
         is_advanced = status == "advanced" or bool(res.get("advanced"))
-        await self._settle_enablement_round(
+        await self.settle_enablement_round(
             BOOTED if status == "kept" else ADVANCED if is_advanced else FAILED,
             reason=status,
         )
@@ -608,125 +594,35 @@ class EnablementLane(CoordinatorCollaborator):
             f" stop_reason={stop_set}" if stop_set else "",
         )
 
-    async def _pump_enablement_safely(self, *, caller: str) -> None:
-        """ENABLEMENT phase pump — called every tick while in ENABLEMENT.
-
-        Args:
-            caller: Label identifying the caller ("tick" / "run"), for logs.
-        """
+    async def pump_enablement_safely(self) -> None:
+        """ENABLEMENT phase pump — called every tick while in ENABLEMENT."""
         if (self.shared_state.phase or "").strip().upper() != PHASE_ENABLEMENT:
             return
         # Independently, because a raise in one pump must not skip the rest: the
         # one that dispatches the next authoring round is the last of them.
         for pump in (
-            self._maybe_route_build_outcomes,
-            self._maybe_enqueue_enablement_baseline_revalidation,
+            self._coord.enablement_build.maybe_route_build_outcomes,
+            self._coord.enablement_revalidation.maybe_enqueue_enablement_baseline_revalidation,
             self._maybe_enqueue_enablement_specialist,
         ):
             try:
                 await pump()
             except Exception as exc:
-                log.exception("ENABLEMENT %s (%s) failed", pump.__name__, caller)
-                stage = f"enablement_pump:{pump.__name__}:{caller}"
+                log.exception("ENABLEMENT %s failed", pump.__name__)
+                stage = f"enablement_pump:{pump.__name__}"
                 # Named here rather than by the coordinator's generic handler:
                 # the lane's event is open for the whole session, so only the
                 # lane knows which exceptions are its own to answer for.
                 enablement_event.record_fault(stage=stage, exc=exc)
-                self._record_coordinator_exception(stage=stage, exc=exc)
+                self._coord.record_exception(stage=stage, exc=exc)
 
 
-def _stack_patch_roots(state: Any, res: dict[str, Any]) -> None:
-    """Bind this round's patches to the tree they applied to, once.
-
-    An ADVANCED round never reaches the KEEP capture that writes the durable
-    ``patch_roots``, so a stack whose rounds used different trees would leave
-    every advanced patch to be re-bound to the FINAL round's framework root.
-    First writer wins, for the same reason the base sha's does: the round that
-    applied a patch is the one that knows which tree it applied to.
-    """
-    incoming = res.get("enablement_patch_roots")
-    if not isinstance(incoming, dict) or not incoming:
-        return
-    merged = dict(state.enablement.patch_roots or {})
-    for patch, root in incoming.items():
-        if str(patch) and str(root):
-            merged.setdefault(str(patch), str(root))
-    state.enablement.patch_roots = merged
-
-
-def _stack_setup_commands(state: Any, res: dict[str, Any]) -> None:
-    """Append this round's applied setup commands to the durable stack."""
-    cur = list(state.enablement.setup_commands or [])
-    for c in res.get("setup_commands_applied") or []:
-        sc = str(c)
-        if sc and sc not in cur:
-            cur.append(sc)
-    state.enablement.setup_commands = cur
-
-
-def _push_kept_round(state: Any, res: dict[str, Any], patches_this_round: list[str]) -> None:
-    """Append this round to kept_rounds and re-derive the flat projections.
-
-    Artifacts dedupe last-wins per target so a later round supersedes an
-    earlier fix to the same file. The round's ``task_id`` is stored with it
-    because the replay script sources each round's patches from the archive
-    directory that id names; a row without one contributes nothing to the
-    script, silently.
-    """
-    rounds = list(state.enablement.kept_rounds or [])
-    rounds.append(
-        {
-            "task_id": str(res.get("specialist_task_id") or ""),
-            "patches": list(patches_this_round),
-            "artifacts": [dict(a) for a in (res.get("artifacts_applied") or []) if isinstance(a, dict)],
-        }
-    )
-    state.enablement.kept_rounds = rounds
-
-    flat_patches: list[str] = []
-    artifact_by_target: dict[str, dict] = {}
-    for rnd in rounds:
-        for p in rnd.get("patches") or []:
-            if p not in flat_patches:
-                flat_patches.append(p)
-        for art in rnd.get("artifacts") or []:
-            target = str(art.get("target") or "")
-            if target:
-                artifact_by_target[target] = art
-    state.enablement.kept_patches = flat_patches
-    state.enablement.kept_artifacts = list(artifact_by_target.values())
-
-
-def _stack_keep_recipe_records(state: Any, res: dict[str, Any]) -> None:
-    """Persist the KEEP's per-root identity, payload and assertions."""
-    for field_name in _KEEP_STACK_FIELDS:
-        value = res.get(f"enablement_{field_name}")
-        if value:
-            setattr(state.enablement, field_name, value)
-    for field_name in _KEEP_OBSERVED_FIELDS:
-        setattr(state.enablement, field_name, res.get(f"enablement_{field_name}") or {})
-    for field_name in _KEEP_TRISTATE_FIELDS:
-        key = f"enablement_{field_name}"
-        if key in res:
-            setattr(state.enablement, field_name, res[key])
-    state.enablement.launch_argv_refused = bool(res.get("enablement_launch_argv_refused"))
-
-
-def _mark_setup_ledger(state: Any, round_task_id: str, disposition: str, *, accepted: bool) -> None:
-    """Record this round's outcome onto the executions it performed.
-
-    A round with no task id of its own claims no rows: leaving them
-    ``unreported`` states that no lane observed them, which no rule reads
-    as verified.
-    """
-    ledger = list(state.enablement.setup_executions or [])
-    if not ledger or not round_task_id:
-        return
-    state.enablement.setup_executions = mark_round_disposition(
-        ledger,
-        round_task_id=round_task_id,
-        disposition=disposition,
-        accepted=accepted,
+def _push_kept_round(state: Any, res: dict[str, Any]) -> None:
+    """Stack the round a rearm accepted, as the integrate result reports it."""
+    state.enablement.push_kept_round(
+        task_id=str(res.get("specialist_task_id") or ""),
+        patches=res.get("patches_applied", []),
+        artifacts=res.get("artifacts_applied", []),
     )
 
 
@@ -764,9 +660,9 @@ def _stack_kept_runtime(state: Any, res: dict[str, Any]) -> None:
 def _rearm_on_kept(state: Any, res: dict[str, Any]) -> None:
     """Record the accepted stack and terminate, or open the eval revalidation."""
     _reset_baseline_failure_backstop(state)
-    _stack_setup_commands(state, res)
+    state.enablement.stack_setup_commands(res.get("setup_commands_applied", []))
     _stack_kept_runtime(state, res)
-    _push_kept_round(state, res, [str(p) for p in (res.get("patches_applied") or []) if str(p)])
+    _push_kept_round(state, res)
     accepted_cfg = str(res.get("enablement_accepted_config_path") or "").strip()
     if accepted_cfg:
         state.enablement.accepted_config_path = accepted_cfg
@@ -776,7 +672,7 @@ def _rearm_on_kept(state: Any, res: dict[str, Any]) -> None:
         # every advanced round that fed into it.
         state.enablement.accepted_config = dict(effective)
         state.enablement.accepted_config_source = "kept_bench"
-    _stack_keep_recipe_records(state, res)
+    state.enablement.record_keep(res)
     # Hold succeeded until the revalidation baseline promotes so every KEEP is
     # validated against a real measurement, not the bench the patch round itself
     # ran. Unconditional since upstream stopped exempting the launch origin: a
@@ -790,9 +686,9 @@ def _rearm_on_kept(state: Any, res: dict[str, Any]) -> None:
 
 def _rearm_on_advanced(state: Any, res: dict[str, Any]) -> None:
     """Stack the progressing round and pivot the mandate to the new gap."""
-    _push_kept_round(state, res, [str(p) for p in (res.get("patches_applied") or []) if str(p)])
-    _stack_patch_roots(state, res)
-    _stack_setup_commands(state, res)
+    _push_kept_round(state, res)
+    state.enablement.record_patch_roots(res.get("enablement_patch_roots", {}))
+    state.enablement.stack_setup_commands(res.get("setup_commands_applied", []))
     _stack_kept_runtime(state, res)
     # Accumulated so a later kept round replays every advance, not just patches.
     adv_envs = res.get("extra_envs_applied") or {}
@@ -803,7 +699,7 @@ def _rearm_on_advanced(state: Any, res: dict[str, Any]) -> None:
         merged.update({str(k): str(v) for k, v in adv_envs.items()})
         cfg["extra_envs"] = merged
         # Folded by flag keeping the last value, so this round overrides an earlier one.
-        cfg["extra_server_args"] = _dedupe_extra_server_args(
+        cfg["extra_server_args"] = dedupe_extra_server_args(
             merge_server_args(str(cfg.get("extra_server_args") or ""), adv_args)
         )
         cfg.setdefault("args_mode", "append")
@@ -818,6 +714,38 @@ def _rearm_on_advanced(state: Any, res: dict[str, Any]) -> None:
         # The wall this round advanced to: the next round's before half.
         state.enablement.launch_observation_path = str(res.get("enablement_observation_path") or "")
     _reset_baseline_failure_backstop(state)
+
+
+def _finish_lane_event(
+    lane: Any,
+    state: Any,
+    *,
+    outcome: str,
+    reason: str,
+    session_dir: str,
+    stall_streak: int,
+    setting_script: str = "",
+) -> None:
+    """Assemble and emit the terminal enablement_event.finish call."""
+    enablement_event.finish(
+        outcome=outcome,
+        reason=reason,
+        recipe=recipe_for(
+            lane,
+            session_dir=str(session_dir or ""),
+            mode=str(state.enablement_mode or ""),
+        ),
+        kept_patches=lane.kept_patches,
+        kept_artifacts=lane.kept_artifacts,
+        setup_commands=lane.setup_commands,
+        accepted_config=lane.accepted_config,
+        accepted_config_path=str(lane.accepted_config_path or ""),
+        setting_script=setting_script,
+        active_runtime=lane.active_runtime,
+        attempt_runtimes=lane.attempt_runtimes,
+        framework_root=str(lane.framework_root or ""),
+        stall_streak=stall_streak,
+    )
 
 
 def _round_task_id(state: Any, res: dict[str, Any]) -> str:
@@ -865,24 +793,12 @@ def _record_enablement_round(
         outcome, reason = enablement_event.OUTCOME_STALLED, stop_reason
     else:
         return
-    enablement_event.finish(
+    _finish_lane_event(
+        lane,
+        state,
         outcome=outcome,
         reason=reason,
-        kept_patches=lane.kept_patches,
-        kept_artifacts=lane.kept_artifacts,
-        setup_commands=lane.setup_commands,
-        accepted_config=lane.accepted_config,
-        accepted_config_path=str(lane.accepted_config_path or ""),
-        setting_script=setting_script,
-        active_runtime=lane.active_runtime,
-        attempt_runtimes=lane.attempt_runtimes,
-        framework_root=str(lane.framework_root or ""),
+        session_dir=str(session_dir or ""),
         stall_streak=int(stall_streak or 0),
-        # The replay contract is judged at the terminal, which is here: the
-        # accepted stack is complete only once the lane has closed on one.
-        recipe=recipe_for(
-            lane,
-            session_dir=str(session_dir or ""),
-            mode=str(getattr(state, "enablement_mode", "") or ""),
-        ),
+        setting_script=setting_script,
     )

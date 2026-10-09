@@ -48,6 +48,9 @@ def _mori_dispatch_candidate(**overrides) -> dict:
         "name": "mori::EpDispatchCombineOp::dispatch",
         "operation": "dispatch",
         "duration_us": 700.0,
+        # gpu_pct is now carried on the candidate by the analysis.json reader, not
+        # recomputed by _finalize_candidates; 700/1100 of the two-kernel window.
+        "gpu_pct": 63.636,
         "call_count": 10,
         "source_file": _MORI_SITE_PACKAGES_FILE,
         "source_type": "unknown",
@@ -64,6 +67,7 @@ def _mori_combine_candidate(**overrides) -> dict:
         "name": "mori::EpDispatchCombineOp::combine",
         "operation": "combine",
         "duration_us": 300.0,
+        "gpu_pct": 27.273,
         "call_count": 10,
         "source_file": _MORI_SITE_PACKAGES_FILE,
         "source_type": "unknown",
@@ -205,7 +209,7 @@ def test_finalize_candidates_stamps_vendor_playbook_and_sums_gpu_pct():
         },
     ]
     # total_dur = 700 + 300 + 100 = 1100 -> dispatch=63.636%, combine=27.273%.
-    out = tla._finalize_candidates(candidates, total_dur=1100.0)
+    out = tla._finalize_candidates(candidates)
     by_name = {item["name"]: item for item in out}
 
     dispatch = by_name["mori::EpDispatchCombineOp::dispatch"]
@@ -237,7 +241,7 @@ def test_finalize_candidates_fills_source_file_for_real_vendor_binary_shape():
         _mori_dispatch_candidate(source_file=""),
         _mori_combine_candidate(source_file=""),
     ]
-    out = tla._finalize_candidates(candidates, total_dur=1000.0)
+    out = tla._finalize_candidates(candidates)
     by_name = {item["name"]: item for item in out}
     dispatch = by_name["mori::EpDispatchCombineOp::dispatch"]
     combine = by_name["mori::EpDispatchCombineOp::combine"]
@@ -247,9 +251,6 @@ def test_finalize_candidates_fills_source_file_for_real_vendor_binary_shape():
         source_file = str(item.get("source_file") or "")
         assert source_file, "source_file must not be empty (would be skipped as missing_native_source)"
         assert source_file.endswith("mori_ep_config.py")
-        # The stand-in must look like a real path so it survives looks_like_source_path()/the non-empty CLI gate
-        # either way.
-        assert tla.looks_like_source_path(source_file)
 
 
 def test_playbook_anchor_overrides_a_same_word_grep_collision():
@@ -259,7 +260,7 @@ def test_playbook_anchor_overrides_a_same_word_grep_collision():
         _mori_dispatch_candidate(source_file=collision),
         _mori_combine_candidate(source_file=collision),
     ]
-    out = tla._finalize_candidates(candidates, total_dur=1000.0)
+    out = tla._finalize_candidates(candidates)
 
     for item in out:
         assert item["patch_strategy"] == "vendor_playbook"
@@ -273,7 +274,7 @@ def test_playbook_anchor_also_overrides_a_correct_grep_hit():
         _mori_dispatch_candidate(source_file=_MORI_SITE_PACKAGES_FILE),
         _mori_combine_candidate(source_file=_MORI_SITE_PACKAGES_FILE),
     ]
-    out = tla._finalize_candidates(candidates, total_dur=1000.0)
+    out = tla._finalize_candidates(candidates)
 
     for item in out:
         assert item["patch_strategy"] == "vendor_playbook"
@@ -285,7 +286,7 @@ def test_an_anchor_that_replaces_nothing_leaves_no_breadcrumb(monkeypatch):
     """Nothing displaced, nothing recorded."""
     monkeypatch.setattr(tla, "kernel_search_roots", lambda: ())
     candidates = [_mori_dispatch_candidate(source_file="")]
-    out = tla._finalize_candidates(candidates, total_dur=1000.0)
+    out = tla._finalize_candidates(candidates)
 
     assert str(out[0]["source_file"]).endswith("mori_ep_config.py")
     assert "source_file_superseded_by_playbook" not in out[0]

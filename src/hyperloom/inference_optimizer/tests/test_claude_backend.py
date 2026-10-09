@@ -23,7 +23,6 @@ from hyperloom.orchestrator.roles.base import BackendError, LLMCallFailed, Retry
 from hyperloom.inference_optimizer.protocol.intent import (
     IntentType,
     IntentValidationError,
-    NoIntentEmitted,
 )
 
 
@@ -295,6 +294,17 @@ def test_build_options_effort_defaults_by_role(monkeypatch):
     assert other._build_options(tools=[], max_turns=4, system_prompt="sp").kwargs["effort"] == "low"
 
 
+def test_build_options_runs_the_cli_the_subprocess_specialists_spawn(monkeypatch, tmp_path):
+    """The in-process backend hands the SDK the same CLI ``resolve_claude_executable`` gives subprocesses."""
+    recorded = tmp_path / "claude"
+    recorded.write_text("#!/bin/sh\n", encoding="utf-8")
+    recorded.chmod(0o755)
+    monkeypatch.delenv("HYPERLOOM_CLAUDE_CLI_PATH", raising=False)
+    monkeypatch.setenv("GEAK_CLAUDE_BIN", str(recorded))
+    backend = ClaudeBackend(model="m", sdk_query_factory=_make_query_factory([]), sdk_options_cls=FakeOptions)
+    assert backend._build_options(tools=[], max_turns=1, system_prompt=None).kwargs["cli_path"] == str(recorded)
+
+
 def test_build_options_effort_env_override_and_thinking_off(monkeypatch):
     _clear_effort_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CLAUDE_ORCHESTRATION_EFFORT", "high")
@@ -450,7 +460,7 @@ async def test_run_text_blocks_collected_into_raw_text():
 
 
 @pytest.mark.asyncio
-async def test_run_no_emit_intent_raises_no_intent_emitted():
+async def test_run_without_an_emit_intent_call_returns_no_intents():
     msg = FakeAssistantMessage(
         content=[
             TextBlock(text="just thinking, no tool call."),
@@ -462,8 +472,9 @@ async def test_run_no_emit_intent_raises_no_intent_emitted():
         sdk_options_cls=FakeOptions,
         enable_mcp_emit_intent=False,
     )
-    with pytest.raises(NoIntentEmitted):
-        await backend.run("p")
+    result = await backend.run("p")
+    assert result.intents == []
+    assert "just thinking" in result.raw_text
 
 
 @pytest.mark.asyncio
@@ -746,8 +757,7 @@ async def test_options_includes_system_prompt_and_max_turns():
         enable_mcp_emit_intent=False,
         max_turns_default=7,
     )
-    with pytest.raises(NoIntentEmitted):
-        await backend.run("the prompt", system_prompt="sys", tools=["Read"], max_turns=3)
+    await backend.run("the prompt", system_prompt="sys", tools=["Read"], max_turns=3)
     # max_turns is floored to _RAW_COMPLETION_MIN_MAX_TURNS (8) for every mode: Claude Code counts its own messages as
     # turns, so a literal max_turns=3 would trip before the model can emit an intent.
     assert captured["options_kwargs"]["max_turns"] == 8
@@ -784,8 +794,7 @@ async def test_options_includes_mcp_server_when_emit_intent_enabled():
     )
     assert backend.mcp_server_config is not None
     assert backend.mcp_tool_name == EMIT_INTENT_TOOL_QUALIFIED
-    with pytest.raises(NoIntentEmitted):
-        await backend.run("p", tools=["Read"])
+    await backend.run("p", tools=["Read"])
     kw = captured["options_kwargs"]
     assert "mcp_servers" in kw
     assert "inference_optimizer" in kw["mcp_servers"]

@@ -12,6 +12,7 @@ import sys as _sys
 import uuid
 
 from hyperloom.inference_optimizer.session.session_paths import enablement_builds_dir
+from ..collaborator import CoordinatorCollaborator
 
 from ..enablement.runtime.build_actions import TargetedBuildAction, build_novelty_key
 
@@ -28,14 +29,8 @@ def _novelty_idempotency_key(action: TargetedBuildAction) -> str:
     return f"targeted_build:{action.component}:{digest}"
 
 
-class BuildLifecycleCollaborator:
-    """Extracted collaborator; delegates unknown attrs to its Coordinator."""
-
-    def __init__(self, coordinator) -> None:
-        self._coord = coordinator
-
-    def __getattr__(self, name: str):
-        return getattr(object.__getattribute__(self, "_coord"), name)
+class BuildLifecycleCollaborator(CoordinatorCollaborator):
+    """Manages targeted build lifecycle: enqueue, track, and resolve build tasks."""
 
     async def enqueue_targeted_build(self, action: TargetedBuildAction) -> str:
         """Enqueue a ``targeted_build`` row (idempotent by novelty key)."""

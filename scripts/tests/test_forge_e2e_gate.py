@@ -9,6 +9,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import yaml
+
 
 _ROOT = Path(__file__).resolve().parents[2]
 _GATE_SCRIPT = _ROOT / ".github" / "scripts" / "forge_e2e_gate.py"
@@ -30,7 +32,7 @@ def test_vendored_forge_changes_trigger() -> None:
     for path in (
         "src/kernelforge/cli.py",
         "src/kernelforge/loop/runner.py",
-        "src/kernelforge/data/examples/triton-softmax-forge-loop/driver.py",
+        "src/kernelforge/examples/triton-softmax-forge-loop/driver.py",
         "pyproject.toml",
     ):
         assert gate.requires_forge_e2e([path]), path
@@ -101,54 +103,57 @@ def test_workflow_dispatches_the_kernelforge_smoke_contract() -> None:
     workflow = (_ROOT / ".github" / "workflows" / "forge-e2e.yml").read_text(encoding="utf-8")
     dispatcher = (_ROOT / ".github" / "scripts" / "forge-ci-e2e-dispatch.sh").read_text(encoding="utf-8")
 
-    assert 'kind:"kernelforge"' in dispatcher
-    assert "KERNELFORGE_SOURCE_REPO:$srcrepo" in dispatcher
-    assert "KERNELFORGE_SOURCE_SHA:$sha" in dispatcher
-    assert "KERNELFORGE_SOURCE_PULL_REF:$pullref" in dispatcher
-    assert 'KF_USE_GIT:"1"' in dispatcher
+    # Dispatron's CLI submits and polls. The PR commit reaches the run as its flags, and
+    # Dispatron's platform row -- not a workspace named here -- decides where it lands.
+    assert "dispatron-ci \\" in dispatcher
+    for flag in ("--kind kernelforge", '--sha "$HEAD_SHA"', '--source-repo "$SRC_REPO"', '--pull-ref "$PULL_REF"'):
+        assert flag in dispatcher, flag
     assert "STATUS_CONTEXT: ci-e2e/kernelforge" in workflow
-    assert "CI_E2E_WORKSPACE: ${{ vars.FORGE_E2E_WORKSPACE || 'control-plan-hyperloom-ci' }}" in workflow
+    assert "FORGE_E2E_WORKSPACE" not in workflow
     assert "secrets.KERNEL_OPT_WORKSPACE" not in workflow
+    assert "secrets.CI_E2E_API_BASE" not in workflow
     assert ".github/scripts/forge-ci-e2e-dispatch.sh" in workflow
     assert ".github/scripts/forge_e2e_report.py" in dispatcher
-    assert "__FORGE_RESULT__" in dispatcher
 
 
-def test_workflow_gates_all_pr_backed_retries_but_not_manual_runs() -> None:
+def test_workflow_path_gates_pr_runs_but_not_manual_runs() -> None:
     workflow = (_ROOT / ".github" / "workflows" / "forge-e2e.yml").read_text(encoding="utf-8")
 
     assert 'if [ "$run" = true ] && [ "$EVENT" != "workflow_dispatch" ]; then' in workflow
     assert "(.previous_filename // empty)" in workflow
     assert "files?per_page=100&page=$page" in workflow
-    assert '[.labels[].name] | index("skip-e2e-test")' in workflow
     assert "path_skipped=true" in workflow
     assert 'description="skipped: no Forge loop-related files changed"' in workflow
 
 
+def test_a_pr_runs_only_once_the_run_label_is_on() -> None:
+    """Adding the label starts a run; other PR events run only while it stays on. A
+    comment or a label being removed is not a way in."""
+    workflow = yaml.safe_load((_ROOT / ".github" / "workflows" / "forge-e2e.yml").read_text(encoding="utf-8"))
+    triggers = workflow[True]  # YAML 1.1 reads the bare key `on` as the boolean True.
+    resolve_condition = " ".join(workflow["jobs"]["resolve"]["if"].split())
+
+    assert set(triggers) == {"pull_request", "workflow_dispatch"}
+    assert "unlabeled" not in triggers["pull_request"]["types"]
+    assert "github.event.label.name == 'run-forge-e2e'" in resolve_condition
+    assert "contains(github.event.pull_request.labels.*.name, 'run-forge-e2e')" in resolve_condition
+
+
 def test_only_resolved_events_can_cancel_an_in_flight_forge_run() -> None:
     workflow = (_ROOT / ".github" / "workflows" / "forge-e2e.yml").read_text(encoding="utf-8")
-    workflow_header, jobs = workflow.split("jobs:", 1)
+    workflow_header, _ = workflow.split("jobs:", 1)
 
-    # Workflow-level concurrency is evaluated before resolve.if and could let an untrusted or malformed comment cancel
-    # an expensive GPU run.
+    # Workflow-level concurrency is joined by every event on the PR before resolve.if, so adding an unrelated label
+    # would cancel an expensive GPU run.
     assert "concurrency:" not in workflow_header
-    assert "github.event.comment.author_association == 'OWNER'" in jobs
-    assert "github.event.comment.author_association == 'MEMBER'" in jobs
-    assert "github.event.comment.author_association == 'COLLABORATOR'" in jobs
 
     group = "forge-e2e-${{ needs.resolve.outputs.pr_number || needs.resolve.outputs.head_sha || needs.resolve.outputs.head_ref || github.ref }}"
     assert workflow.count(group) == 2
     assert workflow.count("cancel-in-progress: true") == 2
-
-    # Adding the opt-out label must reach skipped-status so it can enter the same resolved concurrency group and
-    # cancel an already running workload.
-    labeled_clause = workflow.split("(github.event.action != 'labeled'", 1)[1].split(") &&", 1)[0]
-    assert "github.event.label.name == 'retest'" in labeled_clause
-    assert "github.event.label.name == 'skip-e2e-test'" in labeled_clause
 
 
 def test_legacy_template_entry_point_runs_the_vendored_example() -> None:
     wrapper = (_ROOT / "examples" / "triton-softmax-forge-loop" / "run_example.sh").read_text(encoding="utf-8")
 
     assert '"${ROOT}[forge,forge-profiling]"' in wrapper
-    assert "/src/kernelforge/data/examples/triton-softmax-forge-loop/run_example.sh" in wrapper
+    assert "/src/kernelforge/examples/triton-softmax-forge-loop/run_example.sh" in wrapper

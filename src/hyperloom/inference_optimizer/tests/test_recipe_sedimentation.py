@@ -27,13 +27,14 @@ def _make_coordinator(tmp_path: Path) -> Coordinator:
         "orchestration": MockBackend(idle),
         "critic": MockBackend(idle),
     }
+    from types import SimpleNamespace
+
     kb = RecipeKB(local=LocalRecipeStore(root=tmp_path / "kb"))
     return Coordinator(
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        recipe_kb=kb,
-        knowledge_plane=None,
+        knowledge_plane=SimpleNamespace(recipe_kb=kb),
     )
 
 
@@ -66,7 +67,7 @@ def test_collect_attempt_provenance_maps_keep_and_revert(tmp_path):
         },
     )
 
-    kept, kept_by_gap, reverted = coord._collect_attempt_provenance()
+    kept, kept_by_gap, reverted = coord.writeback._collect_attempt_provenance()
     assert kept == {"mtp_on": "https://pr/123"}
     assert kept_by_gap == {"gap.research_hint.0": "https://pr/123"}
     assert len(reverted) == 1
@@ -105,7 +106,7 @@ def test_provenance_resolves_by_gap_id_when_name_mismatches(tmp_path):
         },
     )
 
-    attrs = coord._build_recipe_attrs_from_state()
+    attrs = coord.writeback._build_recipe_attrs_from_state()
     row = next(x for x in attrs["what_worked"] if x["name"] == "k007")
     assert row["source"] == "https://pr/777"
 
@@ -141,7 +142,7 @@ def test_build_recipe_attrs_sediments_source_and_revert(tmp_path):
         },
     )
 
-    attrs = coord._build_recipe_attrs_from_state()
+    attrs = coord.writeback._build_recipe_attrs_from_state()
     ww = attrs["what_worked"]
     mtp = next(x for x in ww if x["name"] == "mtp_on")
     assert mtp["source"] == "https://pr/123"
@@ -173,7 +174,7 @@ def test_sediment_toggle_off_keeps_recipe_ephemeral(tmp_path):
         },
     )
 
-    attrs = coord._build_recipe_attrs_from_state()
+    attrs = coord.writeback._build_recipe_attrs_from_state()
     mtp = next(x for x in attrs["what_worked"] if x["name"] == "mtp_on")
     assert "source" not in mtp
 
@@ -191,7 +192,7 @@ def test_warm_recipe_proven_items(tmp_path):
             },
         },
     }
-    proven = coord._warm_recipe_proven_items()
+    proven = coord.phase_prelude.warm_recipe_proven_items()
     names = {p["name"] for p in proven}
     assert names == {"mtp_on", "fp8_kv"}
     mtp = next(p for p in proven if p["name"] == "mtp_on")
@@ -200,7 +201,7 @@ def test_warm_recipe_proven_items(tmp_path):
 
 def test_warm_recipe_proven_items_empty_without_recipe(tmp_path):
     coord = _make_coordinator(tmp_path)
-    assert coord._warm_recipe_proven_items() == []
+    assert coord.phase_prelude.warm_recipe_proven_items() == []
 
 
 def test_experience_rows_survive_the_kb_round_trip(tmp_path):
@@ -365,7 +366,7 @@ def test_proven_items_reach_the_scout_through_a_stored_recipe(tmp_path):
         "hw": "h",
         "recipe": store.get_recipe(canonical_id=cid) or {},
     }
-    proven = coord._warm_recipe_proven_items()
+    proven = coord.phase_prelude.warm_recipe_proven_items()
     assert {p["name"] for p in proven} == {"mtp_on", "fp8_kv"}
     assert next(p for p in proven if p["name"] == "mtp_on")["source"] == "https://pr/123"
 

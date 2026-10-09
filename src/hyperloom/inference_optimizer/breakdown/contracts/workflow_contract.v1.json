@@ -46,6 +46,7 @@
       "baseline_accuracy_failed",
       "baseline_arg_error",
       "baseline_failed",
+      "baseline_over_latency_budget",
       "coordinator_exception",
       "custom",
       "emergency",

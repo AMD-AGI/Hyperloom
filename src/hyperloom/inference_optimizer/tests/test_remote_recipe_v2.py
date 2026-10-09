@@ -59,6 +59,7 @@ from hyperloom.orchestrator.knowledge.remote_recipe.values import (
     has_replay_material,
 )
 from hyperloom.orchestrator.loop.writeback import WritebackCollaborator, _remote_result_type
+from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out
 
 _DOWNLOAD_BYTES = b"verified artifact"
@@ -1173,12 +1174,17 @@ def test_degraded_kb_skips_remote_close_writer(
         def finalize(self, **kwargs) -> None:
             pass
 
+    _ss = SharedState()
+    _ss.current_best = {"tput": 10.0}
     coordinator = SimpleNamespace(
-        shared_state=SimpleNamespace(current_best={"tput": 10.0}),
         session_dir=tmp_path,
+        shared_state=SharedState(),
         recipe_kb=None,
         knowledge_plane=SimpleNamespace(kb_disabled=True),
-        _ensure_journal=lambda: _Journal(),
+        _journal=type(
+            "_MockJournal", (), {"finalize": lambda self, **kw: None, "update_baseline": lambda self, *a: None}
+        )(),
+        ensure_journal=lambda: _Journal(),
     )
     from hyperloom.orchestrator.knowledge import remote_recipe
 
@@ -1206,13 +1212,17 @@ def test_local_close_ignores_ambient_kb_store(
         def finalize(self, **kwargs) -> None:
             pass
 
+    _ss = SharedState()
     coordinator = SimpleNamespace(
-        shared_state=SimpleNamespace(current_best={}),
         session_dir=tmp_path,
+        shared_state=SharedState(),
         recipe_kb=None,
         knowledge_plane=None,
-        _ensure_journal=lambda: _Journal(),
-        _workload_canonical_id=lambda: "inference:m:h:f:mt:a:v:p",
+        _journal=type(
+            "_MockJournal", (), {"finalize": lambda self, **kw: None, "update_baseline": lambda self, *a: None}
+        )(),
+        ensure_journal=lambda: _Journal(),
+        workload_canonical_id=lambda: "inference:m:h:f:mt:a:v:p",
     )
     calls: list[tuple] = []
     from hyperloom.orchestrator.knowledge import remote_recipe
@@ -1251,14 +1261,12 @@ def test_remote_close_writes_new_kb_once_and_skips_legacy_finalize(
             raise AssertionError("remote CLOSE wrote legacy RecipeKB")
 
     coordinator = SimpleNamespace(
-        shared_state=SimpleNamespace(
-            current_best={"tput": 10.0},
-        ),
         session_dir=tmp_path,
-        recipe_kb=_LegacyRecipe(),
-        knowledge_plane=None,
-        _ensure_journal=lambda: _Journal(),
-        _workload_canonical_id=lambda: "inference:m:h:f:mt:a:v:p",
+        shared_state=SharedState(current_best={"tput": 10.0}),
+        knowledge_plane=SimpleNamespace(recipe_kb=_LegacyRecipe()),
+        _journal=None,
+        ensure_journal=lambda: _Journal(),
+        proposals=SimpleNamespace(workload_canonical_id=lambda: "inference:m:h:f:mt:a:v:p"),
     )
     calls: list[tuple] = []
     from hyperloom.orchestrator.knowledge import remote_recipe
@@ -1323,12 +1331,15 @@ def test_remote_close_transport_failure_is_nonfatal(
             pass
 
     coordinator = SimpleNamespace(
-        shared_state=SimpleNamespace(current_best={"tput": 10.0}),
         session_dir=tmp_path,
+        shared_state=SharedState(),
         recipe_kb=None,
         knowledge_plane=None,
-        _ensure_journal=lambda: _Journal(),
-        _workload_canonical_id=lambda: "inference:m:h:f:mt:a:v:p",
+        _journal=type(
+            "_MockJournal", (), {"finalize": lambda self, **kw: None, "update_baseline": lambda self, *a: None}
+        )(),
+        ensure_journal=lambda: _Journal(),
+        proposals=SimpleNamespace(workload_canonical_id=lambda: "inference:m:h:f:mt:a:v:p"),
     )
     from hyperloom.orchestrator.knowledge import remote_recipe
 
@@ -1375,12 +1386,13 @@ def test_remote_close_never_sends_an_unvalidated_working_recipe(tmp_path: Path, 
         validated_recipe_generation=1,
     )
     coordinator = SimpleNamespace(
-        shared_state=state,
         session_dir=tmp_path,
+        shared_state=state,
         recipe_kb=None,
         knowledge_plane=None,
-        _ensure_journal=lambda: (_ for _ in ()).throw(AssertionError("journal must not be finalized")),
-        _workload_canonical_id=lambda: "inference:m:h:f:mt:a:v:p",
+        _journal=None,
+        ensure_journal=lambda: (_ for _ in ()).throw(AssertionError("journal must not be finalized")),
+        proposals=SimpleNamespace(workload_canonical_id=lambda: "inference:m:h:f:mt:a:v:p"),
     )
     monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
     monkeypatch.setenv("KB_STORE_URL", "https://kb.example")

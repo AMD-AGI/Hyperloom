@@ -389,11 +389,10 @@ def test_resume_freezes_reference_helpers_from_preparation(campaign, committed):
         asyncio.run(prepare.prepare_assembly(**options, resume=True))
 
 
-@pytest.mark.parametrize("old_schema", [2, 3])
-def test_resume_rejects_preparation_without_measured_execution_proof(campaign, old_schema):
+def test_resume_rejects_preparation_without_measured_execution_proof(campaign):
     root, options = campaign
     record = asyncio.run(prepare.prepare_assembly(**options))
-    record["schema_version"] = old_schema
+    del record["numerical_execution_probe_evidence"]
     (root / "forge_experiments/assembly_preparation/result.json").write_text(json.dumps(record))
     with pytest.raises(prepare.AssemblyPreparationError, match="prepare a fresh campaign"):
         asyncio.run(prepare.prepare_assembly(**options, resume=True))

@@ -80,12 +80,11 @@ def _build_specialist_executor(
         RuntimeError: If subprocess dispatch selects Codex but no Codex runtime
             is installed.
     """
-    import shutil
-
     from hyperloom.orchestrator.specialists.mcp_config import write_specialist_mcp_config
     from hyperloom.orchestrator.specialists.runner import SpecialistRunner
     from hyperloom.orchestrator.specialists.domains import DEFAULT_SPECIALIST_MAX_TURNS
     from hyperloom.common.llm_config import AGENT_BACKEND_CODEX, preferred_agent_backend
+    from hyperloom.orchestrator.roles.claude import resolve_claude_executable
     from hyperloom.orchestrator.specialists.subprocess_ import (
         SpecialistSubprocessConfig,
         resolve_codex_executable,
@@ -117,7 +116,7 @@ def _build_specialist_executor(
             )
         agent_bin = codex_bin
     else:
-        claude_bin = shutil.which("claude") or ""
+        claude_bin = resolve_claude_executable()
         agent_bin = claude_bin
     use_subprocess = dispatch_mode != "inprocess" and bool(agent_bin)
     if dispatch_mode == "subprocess" and not agent_bin:
@@ -188,6 +187,7 @@ def _build_specialist_executor(
                 model=selected_model,
                 max_turns_default=max_turns,
                 allowed_intents=SPECIALIST_INTENTS,
+                turn_timeout_s=per_turn_max_seconds,
                 # Same label the subprocess dispatch mode reports, so switching
                 # modes does not move this spend between components.
                 attribution_component="specialist",
@@ -288,7 +288,7 @@ def _register_executors(
     )
 
     # kernel_agent: the KERNEL_AGENT phase's whole pipeline, run under the task's lanes.
-    coordinator.sub.register_executor("kernel_agent", lambda ctx: coordinator._run_kernel_agent(ctx))
+    coordinator.sub.register_executor("kernel_agent", lambda ctx: coordinator.phase_kernel.run_agent(ctx))
 
     if log.isEnabledFor(logging.DEBUG):
         for required_kind in ("roofline", "profile"):

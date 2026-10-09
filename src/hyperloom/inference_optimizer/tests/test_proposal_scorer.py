@@ -339,8 +339,9 @@ def _coord(tmp_path: Path, scorer):
     c = Coordinator.__new__(Coordinator)
     c.session_dir = tmp_path
     c.shared_state = _StubSharedState()
-    c._proposal_scorer = scorer
-    c._record_observation = AsyncMock()  # type: ignore[method-assign]
+    c.writeback._proposal_scorer = scorer
+    c.knowledge_plane = None
+    c.writeback.record_observation = AsyncMock()  # type: ignore[method-assign]
     return c
 
 
@@ -366,7 +367,7 @@ async def test_coordinator_attaches_ensemble_scores(tmp_path):
     )
     c = _coord(tmp_path, scorer)
     task = _StubTask(task_id="t1", params={"gap_symptom": "cuda stalls"})
-    await c._record_specialist_result(
+    await c.writeback.record_specialist_result(
         task=task,
         done_payload=_done(),
         source=f"{SPECIALIST_FROM_AGENT_PREFIX}t1",
@@ -380,7 +381,7 @@ async def test_coordinator_attaches_ensemble_scores(tmp_path):
 async def test_coordinator_no_scorer_no_key(tmp_path):
     c = _coord(tmp_path, None)
     task = _StubTask(task_id="t1", params={})
-    await c._record_specialist_result(
+    await c.writeback.record_specialist_result(
         task=task,
         done_payload=_done(),
         source=f"{SPECIALIST_FROM_AGENT_PREFIX}t1",
@@ -395,7 +396,7 @@ async def test_coordinator_empty_proposals_not_scored(tmp_path):
     payload = _done()
     payload["proposal_set"] = []
     task = _StubTask(task_id="t1", params={})
-    await c._record_specialist_result(
+    await c.writeback.record_specialist_result(
         task=task,
         done_payload=payload,
         source=f"{SPECIALIST_FROM_AGENT_PREFIX}t1",
@@ -528,7 +529,7 @@ async def test_resume_idempotent_on_round_id(tmp_path):
         params={},
     )
     for _ in range(2):
-        await c._record_specialist_result(
+        await c.writeback.record_specialist_result(
             task=task,
             done_payload=_done(),
             source=f"{SPECIALIST_FROM_AGENT_PREFIX}t1",

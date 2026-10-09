@@ -43,7 +43,7 @@ _STACK_FINGERPRINT_ENVS: dict[str, tuple[str, ...]] = {
 #
 # Preflight already walks the candidate interpreters and locates the framework
 # under one of them, so it describes the runtime this session resolved. The
-# installer's ``$VLLM_VENV_ROOT`` is no longer read here directly: it is host
+# installer's ``$VLLM_VENV_ROOT`` is not read here directly: it is host
 # state that is only ever written, never cleared, so on its own it cannot say
 # whether the tree it names still holds the framework. It stays in play through
 # preflight, which leads with it and probes it -- and that is the right answer
