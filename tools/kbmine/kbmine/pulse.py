@@ -28,6 +28,7 @@ Two things Pulse does not carry, and one trap:
 
 from __future__ import annotations
 
+import http.client
 import json
 import math
 import ssl
@@ -57,7 +58,10 @@ class PulseClient:
         self.base_url = base_url.rstrip("/")
         self._token = token
         self._timeout = timeout
-        self._ctx = ssl.create_default_context(cafile=ca_bundle) if ca_bundle else None
+        try:
+            self._ctx = ssl.create_default_context(cafile=ca_bundle) if ca_bundle else None
+        except (OSError, ssl.SSLError) as exc:
+            raise PulseError(f"cannot load the CA bundle {ca_bundle!r}: {exc}") from exc
         #: Why the last :meth:`session_breakdowns` walk ended early or skipped rows; empty when it read cleanly.
         self.walk_notes: list[str] = []
 
@@ -71,12 +75,16 @@ class PulseClient:
             with urllib.request.urlopen(request, timeout=self._timeout, context=self._ctx) as response:
                 body = response.read().decode("utf-8", "replace")
         except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", "replace")[:200]
+            try:
+                body = exc.read().decode("utf-8", "replace")[:200]
+            except (OSError, http.client.HTTPException):
+                body = "<error body unreadable>"
             raise PulseError(f"GET {path} -> HTTP {exc.code}: {body}") from exc
         except urllib.error.URLError as exc:
             raise PulseError(f"GET {path} transport error: {exc.reason!r}") from exc
-        except OSError as exc:
-            # A timeout, reset or TLS failure while the response is read is not wrapped in URLError.
+        except (OSError, http.client.HTTPException) as exc:
+            # A timeout, reset, TLS failure or truncated body (IncompleteRead) while the response is read is not
+            # wrapped in URLError.
             raise PulseError(f"GET {path} transport error: {exc!r}") from exc
         try:
             return json.loads(body)

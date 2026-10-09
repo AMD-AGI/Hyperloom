@@ -117,7 +117,10 @@ class KBStoreClient:
         self._parallelism = max(1, parallelism)
         # The KB host is signed by an internal CA; leaving that to an ambient SSL_CERT_FILE makes a missing root look
         # like an auth failure. None keeps the stdlib defaults.
-        self._ctx = ssl.create_default_context(cafile=ca_bundle) if ca_bundle else None
+        try:
+            self._ctx = ssl.create_default_context(cafile=ca_bundle) if ca_bundle else None
+        except (OSError, ssl.SSLError) as exc:
+            raise KBStoreError(f"cannot load the CA bundle {ca_bundle!r}: {exc}") from exc
 
     @classmethod
     def from_env(cls) -> "KBStoreClient":

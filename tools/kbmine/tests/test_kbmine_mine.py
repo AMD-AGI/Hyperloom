@@ -748,3 +748,73 @@ def test_an_unreadable_input_file_exits_with_a_message(tmp_path: Path, content) 
     with pytest.raises(SystemExit) as exc:
         estimate_main(["--input", str(path)])
     assert "cannot read a session JSON file" in str(exc.value)
+
+
+@pytest.mark.parametrize("route", ["kb", "pulse"])
+@pytest.mark.parametrize("bundle", ["missing", "not-pem"])
+def test_an_unusable_ca_bundle_fails_with_one_line(tmp_path: Path, capsys, route, bundle) -> None:
+    path = tmp_path / "bundle.pem"
+    if bundle == "not-pem":
+        path.write_text("not a certificate\n", encoding="utf-8")
+    url_flag = ["--kb-store-url", "https://kb.invalid"] if route == "kb" else ["--pulse-url", "https://pulse.invalid"]
+    assert estimate_main([*url_flag, "--ca-bundle", str(path)]) in (1, 2)
+    err = capsys.readouterr().err
+    assert "cannot load the CA bundle" in err and "Traceback" not in err
+
+
+def test_a_truncated_pulse_body_is_a_pulse_error(monkeypatch, capsys) -> None:
+    import http.client
+    import urllib.request
+
+    from kbmine.pulse import PulseClient, PulseError
+
+    class _Truncated:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            raise http.client.IncompleteRead(b"{", 100)
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _Truncated())
+    with pytest.raises(PulseError, match="transport error"):
+        PulseClient("https://pulse.invalid", "t").get("/v1/session-breakdowns")
+    assert estimate_main(["--pulse-url", "https://pulse.invalid"]) == 1
+    assert "Pulse fetch failed" in capsys.readouterr().err
+
+
+def test_an_undecodable_token_file_exits_with_a_message(tmp_path: Path) -> None:
+    token_file = tmp_path / "token"
+    token_file.write_bytes(b"\xff\xfe\x00")
+    with pytest.raises(SystemExit) as exc:
+        estimate_main(["--kb-store-url", "https://kb.invalid", "--kb-store-token-file", str(token_file)])
+    assert "cannot read --kb-store-token-file" in str(exc.value)
+
+
+def test_an_unwritable_output_fails_with_one_line(tmp_path: Path, capsys) -> None:
+    pool = _write_pool(tmp_path, [_shaped(cid=_MI355_SGLANG, gain=10.0, optimized=800.0, tp=8)])
+    blocker = tmp_path / "file"
+    blocker.write_text("x", encoding="utf-8")
+    assert estimate_main(["--input", str(pool), "--output", str(blocker / "report.json")]) == 1
+    assert "cannot write --output" in capsys.readouterr().err
+
+
+def test_an_http_error_with_an_unreadable_body_is_still_a_pulse_error(monkeypatch) -> None:
+    import http.client
+    import urllib.error
+    import urllib.request
+
+    from kbmine.pulse import PulseClient, PulseError
+
+    class _BadBody(urllib.error.HTTPError):
+        def read(self, *args):
+            raise http.client.IncompleteRead(b"", 10)
+
+    def fail(*args, **kwargs):
+        raise _BadBody("https://pulse.invalid", 502, "Bad Gateway", {}, None)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fail)
+    with pytest.raises(PulseError, match="HTTP 502"):
+        PulseClient("https://pulse.invalid", "t").get("/v1/session-breakdowns")
