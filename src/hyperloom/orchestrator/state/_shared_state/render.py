@@ -344,30 +344,41 @@ class _RenderMixin:
             rows.append(f"  · (+{len(ordered) - max_entries} older gaps elided; see state.json `gaps[]`)")
         return "\n".join(rows)
 
+    def benched_fingerprints(self) -> set[str]:
+        """Content fingerprints of every variant an explore round has benched."""
+        from ...actions.executors._proposal_identity import content_fingerprint
+
+        return {
+            content_fingerprint(row)
+            for row in ((self.explore_search or {}).get("tested") or {}).values()
+            if isinstance(row, dict)
+        }
+
     def untested_proposal_rows(self) -> list[dict[str, Any]]:
-        """Executable proposals from this cycle that no explore round has benched, highest severity first."""
+        """Executable proposals from this cycle that no explore round has benched.
+
+        Ordered by round ``priority`` (predictor rounds set one, specialist rounds
+        do not), then gap severity, then most recent.
+        """
         from hyperloom.common.coerce import to_int
 
         from ...actions.executors._proposal_identity import content_fingerprint, is_executable, normalize_proposal
 
         cycle = to_int(self.macro_cycle, default=0)
-        benched = {
-            content_fingerprint(row)
-            for row in ((self.explore_search or {}).get("tested") or {}).values()
-            if isinstance(row, dict)
-        }
+        benched = self.benched_fingerprints()
         severity_of = {
             str(g.get("canonical_id") or ""): str(g.get("severity") or "").strip().lower()
             for g in (self.gaps or [])
             if isinstance(g, dict)
         }
-        ranked: list[tuple[int, int, dict[str, Any]]] = []
+        ranked: list[tuple[int, int, int, dict[str, Any]]] = []
         seen: set[str] = set()
         for order, entry in enumerate(self.specialist_rounds or []):
             if not isinstance(entry, dict) or to_int(entry.get("cycle"), default=0) != cycle:
                 continue
             domain = str(entry.get("domain") or "?").removesuffix("_specialist")
             severity = severity_of.get(str(entry.get("gap_canonical_id") or ""), "")
+            priority = to_int(entry.get("priority"), default=0)
             task_id = str(entry.get("task_id") or "")[:8]
             for index, proposal in enumerate(entry.get("proposal_set") or []):
                 if not isinstance(proposal, dict):
@@ -383,13 +394,14 @@ class _RenderMixin:
                 row["domain"] = domain
                 row["severity"] = severity
                 row["fingerprint"] = fingerprint
+                row["provenance"] = str(proposal.get("provenance") or f"specialist:{domain}")
                 # Already checked against the read this round's dispatch was shown, which travels with them.
                 row["experience_citations"] = list(proposal.get("experience_citations") or [])
                 row["kb_read_id"] = str(entry.get("kb_read_id") or "")
                 row["kb_rendered_refs"] = list(entry.get("kb_rendered_refs") or [])
-                ranked.append((GAP_SEVERITY_RANK.get(severity, 0), order, row))
-        ranked.sort(key=lambda r: (-r[0], -r[1]))
-        return [row for _, _, row in ranked]
+                ranked.append((priority, GAP_SEVERITY_RANK.get(severity, 0), order, row))
+        ranked.sort(key=lambda r: (-r[0], -r[1], -r[2]))
+        return [row for _, _, _, row in ranked]
 
     @staticmethod
     def _untested_proposal_line(row: dict[str, Any]) -> str:
