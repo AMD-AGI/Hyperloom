@@ -430,36 +430,16 @@ def test_no_pidfile_fail_loud_exit_3(tmp_path):
     assert not (res / "inferencex_result.json").exists()
 
 
-def test_agentic_recipe_result_lands_in_result_dir(tmp_path):
-    # Mimic InferenceX benchmark_lib.sh: the aggregate json goes to
-    # $AGENTIC_OUTPUT_DIR, or to the process cwd when that is unset. The client
-    # must export AGENTIC_OUTPUT_DIR=$RESULT_DIR before the recipe runs, or a
-    # completed replay is rejected with exit 3 ("wrote no pid").
+def test_agentic_recipe_is_refused_before_it_runs(tmp_path):
     bench, bind, res = _sandbox(tmp_path, make_builtin=False)
     recipe = bench / "single_node" / "agentic" / "recipe.sh"
     recipe.parent.mkdir(parents=True)
-    _write_exec(
-        recipe,
-        "#!/usr/bin/env bash\n"
-        "set -e\n"
-        'dest="${AGENTIC_OUTPUT_DIR:-$PWD}"\n'
-        'mkdir -p "$dest"\n'
-        'printf \'{"nested":true}\\n\' > "$dest/$RESULT_FILENAME.json"\n'
-        'printf "AGENTIC_OUTPUT_DIR=%s\\n" "${AGENTIC_OUTPUT_DIR:-UNSET}" > "$AGENTX_TEST_SERVER_MARKER"\n',
-    )
-    r = _run(
-        bench,
-        bind,
-        res,
-        tmp_path,
-        AGENTX_SERVER_SCRIPT="single_node/agentic/recipe.sh",
-        AGENTX_TEST_SERVER_MARKER=str(tmp_path / "server.txt"),
-    )
-    assert r.returncode == 0, r.stdout + r.stderr
-    assert "agentic recipe ran its own replay" in r.stdout
-    assert (res / "inferencex_result.json").read_text() == '{"nested":true}\n'
-    assert (tmp_path / "server.txt").read_text() == f"AGENTIC_OUTPUT_DIR={res}\n"
-    assert not (res / "agentx_server.pid").exists()
+    marker = tmp_path / "ran.txt"
+    _write_exec(recipe, f"#!/usr/bin/env bash\ntouch {marker}\n")
+    r = _run(bench, bind, res, tmp_path, AGENTX_SERVER_SCRIPT="single_node/agentic/recipe.sh")
+    assert r.returncode == 2
+    assert "is an agentic recipe" in r.stdout + r.stderr
+    assert not marker.exists()
 
 
 def test_aiperf_failure_not_mapped(tmp_path):
@@ -1081,13 +1061,6 @@ def test_profile_phase_wait_has_bounded_fallback(tmp_path):
     assert r.returncode == 0, r.stderr
     argv = json.loads(marker.read_text())
     assert argv[argv.index("--timeout-seconds") + 1] == "3618"
-
-
-def test_legacy_profile_warmup_delay_is_ignored(tmp_path):
-    bench, bind, res = _sandbox(tmp_path)
-    r = _run_profile(bench, bind, res, tmp_path, AGENTX_PROFILE_WARMUP_S="not-a-duration")
-    assert r.returncode == 0, r.stderr
-    assert "AGENTX_PROFILE_WARMUP_S is ignored" in (r.stdout + r.stderr)
 
 
 def test_phase_gate_failure_keeps_measurement_but_skips_capture(tmp_path):
