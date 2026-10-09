@@ -354,7 +354,6 @@ def test_workspace_labels_restores_and_exclusions_act_on_the_schema_its_runs_wri
 def test_skills_describe_the_service_by_the_commands_and_variables_it_reads() -> None:
     setup = (_PACKAGE / "skills/hyperloom-setup/SKILL.md").read_text(encoding="utf-8")
     optimizer = (_PACKAGE / "inference_optimizer/SKILL.md").read_text(encoding="utf-8")
-    global_kb = (_PACKAGE / "skills/hyperloom-global-kb/SKILL.md").read_text(encoding="utf-8")
 
     for name in ("HYPERLOOM_KB_URL", "HYPERLOOM_KB_TOKEN"):
         assert name in setup
@@ -368,7 +367,7 @@ def test_skills_describe_the_service_by_the_commands_and_variables_it_reads() ->
     assert "[kb]" not in setup
     assert "experience_kb_injections" in optimizer
     for name in (GLOBAL_URL_ENV, GLOBAL_TOKEN_ENV, experience_kb_service.AUTO_PUSH_ENV):
-        for text in (setup, optimizer, global_kb):
+        for text in (setup, optimizer):
             assert name in text
     for command in ("push", "pull"):
         assert f"hyperloom.inference_optimizer.experience_kb_service {command}" in setup
@@ -376,10 +375,9 @@ def test_skills_describe_the_service_by_the_commands_and_variables_it_reads() ->
     # Labels, restores, and exclusions are the hyperloom-kb skill's commands, run through the workspace entry point.
     assert "hyperloom.inference_optimizer.experience_kb_service labels" in setup
     assert "experience_kb_service restore <label_id>" in optimizer
-    for text in (setup, optimizer, global_kb):
+    for text in (setup, optimizer):
         assert "`hyperloom-kb` skill" in " ".join(text.split())
-    assert "python3 -m hyperloom_kb --host 0.0.0.0" in global_kb
-    for text in (setup, optimizer, global_kb):
+    for text in (setup, optimizer):
         assert "HYPERLOOM_FLEET_KB" not in text
         assert "HYPERLOOM_KB_ENABLE" not in text
         assert "HYPERLOOM_KB_DECL" not in text

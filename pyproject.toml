@@ -215,10 +215,6 @@ exclude = [
 ".cursor/skills/hyperloom-setup" = [
     "src/hyperloom/skills/hyperloom-setup/SKILL.md",
 ]
-# Deploys the global Experience KB that workspaces push to and pull from.
-".agents/skills/hyperloom-global-kb" = ["src/hyperloom/skills/hyperloom-global-kb/SKILL.md"]
-".claude/skills/hyperloom-global-kb" = ["src/hyperloom/skills/hyperloom-global-kb/SKILL.md"]
-".cursor/skills/hyperloom-global-kb" = ["src/hyperloom/skills/hyperloom-global-kb/SKILL.md"]
 # Operates any Experience KB service with the hyperloom-kb CLI: labels, restores, exclusions, sync.
 ".agents/skills/hyperloom-kb" = ["src/hyperloom_kb/skills/hyperloom-kb/SKILL.md"]
 ".claude/skills/hyperloom-kb" = ["src/hyperloom_kb/skills/hyperloom-kb/SKILL.md"]

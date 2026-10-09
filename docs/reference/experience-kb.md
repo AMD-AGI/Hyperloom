@@ -284,8 +284,7 @@ run does not push.
 
 ## Deploying a global KB
 
-The `hyperloom-global-kb` skill deploys one from a Hyperloom install and tells
-each workspace which keys to add. By hand, on the host:
+On the host:
 
 ```bash
 export HYPERLOOM_KB_TOKEN=...   # generate once and keep it
@@ -598,4 +597,6 @@ with its result, the KB that sent it, and its request id, in the database's
 **Log rotation and stopping.** A workspace's `service.log` past 8 MiB is kept
 as `service.log.1`, replacing the one kept before, when the next service
 starts. `SIGTERM` stops a service taking requests and lets those in flight
-finish for up to 25 seconds.
+finish for up to 25 seconds. It holds `service.lock` until it exits, so a
+service restarted by hand on the same home starts once the old process is
+gone, not once its port closes.
