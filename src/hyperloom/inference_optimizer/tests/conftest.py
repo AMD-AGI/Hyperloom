@@ -197,7 +197,7 @@ def make_fake_claude(
     behavior: str,
     payload: dict[str, Any] | None = None,
 ) -> Path:
-    """Write a fake ``claude`` executable simulating one of: done_only / done_with_patch / done_with_env / crash."""
+    """Write a fake ``claude`` executable simulating one of: done_only / done_with_patch / done_with_env / crash / no_done."""
     bin_dir.mkdir(parents=True, exist_ok=True)
     script_path = bin_dir / "claude"
     payload_json = json.dumps(
@@ -348,6 +348,8 @@ exit 0
 """
     elif behavior == "crash":
         body += "exit 3\n"
+    elif behavior == "no_done":
+        body += "exit 0\n"
     elif behavior == "partial_then_crash":
         # Write only the partial checkpoint, then die before the final done.json.
         body += f"""

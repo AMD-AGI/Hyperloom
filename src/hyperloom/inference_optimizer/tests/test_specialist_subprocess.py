@@ -118,22 +118,11 @@ def _make_runner_ctx(task_id: str = "t-spec-1") -> RunnerContext:
     return RunnerContext(task=task, lease=None, extra={})
 
 
-def test_runner_requires_exactly_one_dispatch_mode():
-    with pytest.raises(ValueError, match="exactly one"):
-        SpecialistRunner()
-    with pytest.raises(ValueError, match="mutually exclusive"):
-        SpecialistRunner(
-            backend_factory=lambda d: None,
-            subprocess_config=SpecialistSubprocessConfig(),
-        )
-
-
 def test_runner_accepts_subprocess_config_only():
     runner = SpecialistRunner(
         subprocess_config=SpecialistSubprocessConfig(),
     )
     assert runner.subprocess_dispatcher is not None
-    assert runner.backend_factory is None
 
 
 def test_denylist_blocks_dangerous_process_tools():

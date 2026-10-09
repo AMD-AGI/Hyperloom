@@ -291,7 +291,7 @@ FREEFORM_DOMAIN: SpecialistDomain = SpecialistDomain(
 # Default number of LLM turns a specialist may run.
 DEFAULT_SPECIALIST_MAX_TURNS: int = 1000
 
-# Hard cap; PolicyGate denies a dispatch above it because the in-process backend's turn loop has no wall-clock bound.
+# Hard cap; PolicyGate denies a dispatch that asks for more turns.
 SPECIALIST_MAX_TURNS_HARD_CAP: int = 1000
 
 
