@@ -119,8 +119,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "--max-identities",
         type=int,
         default=50,
-        help="Read at most this many matching identities from the KB (default 50). The report's coverage and "
-        "limitations say when the store holds more.",
+        help="Read at most this many matching identities from the KB (default 50; the search reads at most 1000 "
+        "per run). The report's coverage and limitations say when the store holds more.",
     )
     for key, helptext in (
         ("tp", "tensor parallelism"),
@@ -206,14 +206,18 @@ def _note_identity_coverage(report: dict[str, Any], counts: dict[str, Any], *, c
     report["coverage"]["identities_matched"] = matched
     if not counts.get("searched"):
         return
+    page_capped = bool(counts.get("page_capped"))
+    binding = (
+        f"the search's {counts.get('page_limit')}-identity page limit" if page_capped else f"--max-identities {cap}"
+    )
     if matched is not None and matched > fetched:
         report["limitations"].append(
-            f"read {fetched} of the {matched} identities matching the search (--max-identities {cap}); the rest are "
-            "not in this report, and the first ones in server order are not a random sample"
+            f"read {fetched} of the {matched} identities matching the search ({binding}); the rest are not in this "
+            "report, and the first ones in server order are not a random sample"
         )
-    elif matched is None and fetched >= cap:
+    elif matched is None and (page_capped or fetched >= cap):
         report["limitations"].append(
-            f"stopped at --max-identities {cap} and the store reported no total, so more matching identities may exist"
+            f"stopped at {binding} and the store reported no total, so more matching identities may exist"
         )
 
 

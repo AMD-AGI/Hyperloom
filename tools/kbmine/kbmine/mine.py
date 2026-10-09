@@ -756,12 +756,14 @@ def search_inference_identities(
     """Page ``POST /v1/kb/search`` for inference identities.
 
     When *counts* is given, ``counts["matched"]`` is set to the ``total`` the store reported for the search (``None``
-    when it reported none), so a caller can say how much of the match it did not read.
+    when it reported none), and ``counts["page_capped"]`` to whether the walk ended at the internal page limit
+    (``counts["page_limit"]`` identities) rather than at *max_identities* or the end of the results, so a caller can say
+    how much of the match it did not read and why.
     """
     items: list[dict[str, Any]] = []
     offset = 0
     if counts is not None:
-        counts["matched"] = None
+        counts.update(matched=None, page_capped=False, page_limit=_SEARCH_PAGE * _SEARCH_PAGE_CAP)
     for _ in range(_SEARCH_PAGE_CAP):
         if len(items) >= max_identities:
             break
@@ -785,6 +787,9 @@ def search_inference_identities(
         if len(page) < _SEARCH_PAGE:
             break
         offset += len(page)
+    else:
+        if counts is not None and len(items) < max_identities:
+            counts["page_capped"] = True
     return items
 
 
