@@ -18,9 +18,12 @@ Two things Pulse does not carry, and one trap:
   ``roofline_optimized_trend`` are rolling fleet aggregates attached to every
   row, not per-session values. Per-session capture must come from the nested
   ``roofline`` object plus the row's two arms.
-* Throughput is already per-GPU (``opt_tok_per_s_per_gpu``), whereas the KB
-  path stores a total and divides by tp. The projector multiplies back up so
-  one downstream division cannot silently halve a per-GPU figure.
+* Despite their names, the ``*_tok_per_s_per_gpu`` arms are server totals:
+  on tp>1 rows they equal the roofline snapshot's ``achieved_tok_per_sec``,
+  Hyperloom's server-wide output throughput, which is the cross-check. Capture
+  compares them with the snapshot's server-wide ceilings as they are, per-GPU
+  figures divide by tp, and a row whose own snapshot shows per-GPU arms is
+  scaled up (see ``_arm_scale``).
 """
 
 from __future__ import annotations
@@ -66,12 +69,17 @@ class PulseClient:
         request = urllib.request.Request(url, headers={"Authorization": f"Bearer {self._token}"})
         try:
             with urllib.request.urlopen(request, timeout=self._timeout, context=self._ctx) as response:
-                return json.loads(response.read().decode("utf-8"))
+                body = response.read().decode("utf-8", "replace")
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", "replace")[:200]
             raise PulseError(f"GET {path} -> HTTP {exc.code}: {body}") from exc
         except urllib.error.URLError as exc:
             raise PulseError(f"GET {path} transport error: {exc.reason!r}") from exc
+        try:
+            return json.loads(body)
+        except json.JSONDecodeError as exc:
+            # An SSO login page answers 200 with HTML, which is what a wrong base URL or a stale token usually hits.
+            raise PulseError(f"GET {path}: response was not JSON ({body[:80]!r})") from exc
 
     def summary(self, **filters: Any) -> dict[str, Any]:
         return self.get("/v1/session-breakdowns/summary", filters)
