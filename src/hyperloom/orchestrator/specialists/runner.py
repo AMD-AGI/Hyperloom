@@ -653,6 +653,7 @@ class SpecialistRunner:
                 experience_kb_block=str(params.get("experience_kb_block") or ""),
                 # Coordinator-populated roofline pre-fetch; empty when not warmed.
                 roofline_evidence=dict(params.get("roofline_evidence") or {}),
+                runtime_findings=str(params.get("runtime_findings") or ""),
                 sub_kind=str(params.get("sub_kind") or ""),
                 extra_focus_tags=_extra_focus_tags(params, domain),
                 warm_start_recipe=dict(params.get("warm_start_recipe") or {}),

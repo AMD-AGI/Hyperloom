@@ -895,6 +895,8 @@ class SpecialistPromptInputs:
     # Roofline / TraceLens evidence from ``SharedState.last_trace_analyze``;
     # empty dict renders a placeholder.
     roofline_evidence: dict[str, Any] = field(default_factory=dict)
+    # Rendered runtime findings of the current best's server log; empty omits the section.
+    runtime_findings: str = ""
 
     # Recipe summary from the T0 warm-start recipe search
     # (``recipe_kb_t0._cascade_warm_start_search``)
@@ -1665,6 +1667,22 @@ def _vendor_substitution_directive(hot_kernels: Any) -> list[str]:
         ]
     )
     return rows
+
+
+def _section_runtime_findings(inp: SpecialistPromptInputs) -> list[str]:
+    """Render the scanned runtime findings; omitted when none were injected."""
+    if not inp.runtime_findings:
+        return []
+    return [
+        "## 4c. RUNTIME FINDINGS (current best server.log, already scanned)",
+        "",
+        "Do not re-read the server log for these. A disabled or falling-back hot "
+        "path is restored first; do not optimize the fallback implementation.",
+        "",
+        "```text",
+        inp.runtime_findings,
+        "```",
+    ]
 
 
 def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
@@ -2517,6 +2535,7 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
             _section_kb_subgraph(inp),
             _section_roofline_evidence(inp),
             _section_experience_kb(inp),
+            _section_runtime_findings(inp),
             _section_recipe(inp),
             _section_lessons(inp),
             _section_pitfalls(inp),
