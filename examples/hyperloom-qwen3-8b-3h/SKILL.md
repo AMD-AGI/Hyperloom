@@ -40,7 +40,7 @@ In docker mode:
 - Pass `--install-framework none --yes` in the container (ROCm/framework comes from
   the image). Do **not** use `--skip-base-check` — let Phase 1 preflight validate
   the container environment.
-- Do not run `python -m hyperloom.inference_optimizer.cli optimize` on the host.
+- Do not run `python -m hyperloom optimize` on the host.
 
 ### Prior workload cleanup (required)
 
@@ -78,10 +78,10 @@ Then run the setup backend inside the container:
 
 ```bash
 docker exec -w "$REPO_ROOT" "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}" bash -lc \
-  'REPO_ROOT="$(pwd -P)"; PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework none --yes'
+  'REPO_ROOT="$(pwd -P)"; PYTHONPATH="$REPO_ROOT" python3 -m hyperloom setup -- --install-framework none --yes'
 ```
 
-After that, run all remaining commands for this demo inside the same container with `docker exec -w "$REPO_ROOT" ...`; do not run `python -m hyperloom.inference_optimizer.cli optimize` on the host in Docker mode.
+After that, run all remaining commands for this demo inside the same container with `docker exec -w "$REPO_ROOT" ...`; do not run `python -m hyperloom optimize` on the host in Docker mode.
 
 **Do not use `docker exec -d` to launch optimize.** Detached `docker exec`
 discards stdout and stderr, so an optimizer that dies on startup looks like
@@ -92,7 +92,7 @@ runs the Launch recipe in `@${HYPERLOOM_SKILL_PATH}`. Startup preflight loads
 to the bash tool with `run_in_background=true` and no `setsid`, `nohup`, or
 trailing `&`; otherwise the command inside the exec is
 `setsid nohup … > "$RUN_LOG" 2>&1 < /dev/null &` plus `--launch-info-file`.
-Confirm with `pgrep -af 'hyperloom.inference_optimizer.*optimize'`. If nothing
+Confirm with `pgrep -af 'hyperloom optimize'`. If nothing
 is alive or the launch-info JSON has no `.session_dir`, read the run log and
 fix that error; do not retry with a different backgrounding trick.
 
@@ -116,8 +116,8 @@ Required optimize CLI flags:
 - `--precision bf16`
 - `--target-gain 30`
 - `--max-hours 3`
-- `--max-minutes-framework-pct 0.50`
-- `--max-minutes-sweep-pct 0.01`
+- `--phase-budget-framework-pct 0.50`
+- `--phase-budget-sweep-pct 0.01`
 - `--no-kernel`
 - `--no-enable-conc-sweep`
 - `--no-enable-roofline`
@@ -224,8 +224,8 @@ and the stop reason. Never print API keys, tokens, or custom header values.
 2. Keep `PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"` in the launch shell so
    critic subprocesses can import `hyperloom.agents` after changing cwd.
 3. Run it detached the way the harness understands: if `$CLAW_SESSION_ID` is set and your bash tool takes a `run_in_background` parameter, hand the optimizer command to it with `run_in_background=true`, without shell-level detachment (`setsid`, `nohup`, or a trailing `&`); otherwise use `setsid nohup ... &`. See the Launch section of the packaged `hyperloom/inference_optimizer/SKILL.md` for why — a hand-detached run is invisible to Claw and its sandbox is reclaimed about fifteen minutes after the turn ends. In Docker mode that launch still runs inside one attached `docker exec … bash -lc`; never `docker exec -d`.
-4. Pass all required optimize CLI flags in the `python -m hyperloom.inference_optimizer.cli optimize` command. Do not rely on `.env` alone for `TP`, `CONC`, `ISL`, `OSL`, or `PRECISION`; CLI defaults can otherwise override the intended workload.
-5. Include `--max-minutes-framework-pct 0.50` and `--max-minutes-sweep-pct 0.01`
+4. Pass all required optimize CLI flags in the `python -m hyperloom optimize` command. Do not rely on `.env` alone for `TP`, `CONC`, `ISL`, `OSL`, or `PRECISION`; CLI defaults can otherwise override the intended workload.
+5. Include `--phase-budget-framework-pct 0.50` and `--phase-budget-sweep-pct 0.01`
    in the optimize command. These are the value *before* redistribution: with
    `--no-kernel`, KERNEL_AGENT is disabled and its freed share is added on top,
    so `0.50` becomes ~0.99 of wall clock for FRAMEWORK_AGENT. Raising `0.50`

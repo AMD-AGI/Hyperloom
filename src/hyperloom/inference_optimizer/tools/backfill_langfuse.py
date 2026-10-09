@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
@@ -51,14 +50,14 @@ Usage
 ::
 
     # Dry run: parse + print the plan, no SDK / no network needed.
-    python -m hyperloom.inference_optimizer.tools.backfill_langfuse \\
+    hyperloom session backfill \\
         --session-dir <SD> --dry-run
 
     # Real backfill (needs the langfuse SDK + env keys).
     export LANGFUSE_HOST=https://langfuse.<your-domain>
     export LANGFUSE_PUBLIC_KEY=pk-...
     export LANGFUSE_SECRET_KEY=sk-...
-    python -m hyperloom.inference_optimizer.tools.backfill_langfuse --session-dir <SD>
+    hyperloom session backfill --session-dir <SD>
 
 Notes
 -----
@@ -385,7 +384,7 @@ def ingest(plan: dict[str, Any]) -> int:
 def _build_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser."""
     p = argparse.ArgumentParser(
-        prog="backfill_langfuse",
+        prog="hyperloom session backfill",
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -414,7 +413,3 @@ def main(argv: list[str] | None = None) -> int:
         print_plan(plan)
         return 0
     return ingest(plan)
-
-
-if __name__ == "__main__":
-    sys.exit(main())

@@ -2284,7 +2284,6 @@ def test_parser_retired_deepseek_key_only_defaults_to_gateway_model(monkeypatch)
         "OPENAI_API_KEY",
         "CLAUDE_MODEL",
         "CODEX_MODEL",
-        "INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -2305,7 +2304,6 @@ def test_parser_standard_dual_protocol_config_defaults_to_gateway_model(monkeypa
         "DEEPSEEK_BASE_URL",
         "CLAUDE_MODEL",
         "CODEX_MODEL",
-        "INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -2392,20 +2390,6 @@ def test_parser_openai_only_empty_claude_model_uses_codex_model(monkeypatch):
     assert args.claude_model == "GPT-5.4"
     assert args.codex_model == "GPT-5.4"
     assert cli._claude_model_should_follow_codex() is True
-
-
-def test_parser_marker_forces_claude_model_to_follow_codex(monkeypatch):
-    """Launchers may pre-derive ANTHROPIC_BASE_URL while preserving OpenAI-only model semantics."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX", "1")
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://llm.example.invalid/Unified/v1")
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm.example.invalid/Unified")
-    monkeypatch.setenv("CODEX_MODEL", "GPT-5.5")
-    monkeypatch.delenv("CLAUDE_MODEL", raising=False)
-
-    args = _build_parser().parse_args(["optimize", "--model", "/m", "--framework", "vllm"])
-
-    assert args.claude_model == "GPT-5.5"
-    assert args.codex_model == "GPT-5.5"
 
 
 def test_validate_claude_model_openai_only_accepts_codex_model(monkeypatch):

@@ -202,7 +202,7 @@ with that Python, keep its executable first on ``PATH`` for Magpie's ``python3``
 launch, and use ``PYTHON`` with ``INFERENCE_OPTIMIZER_FORCE_PYTHON=1`` if pinning
 the interpreter. Keep any activated venv consistent; ``/opt/venv`` is not required.
 
-Run ``python -m hyperloom.inference_optimizer.setup --check-only --
+Run ``python -m hyperloom setup --check-only --
 --install-framework none --frameworks atom --require-frameworks`` with the
 selected interpreter first. Only after approval, repeat without ``--check-only``:
 ``none`` skips framework installation but can still write configuration and

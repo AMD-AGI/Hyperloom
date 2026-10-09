@@ -37,8 +37,8 @@ from kernelforge.fusion.command import (
     _resolve_agent_choice,
     _reset_fusion_source,
     _snapshot_fusion_source,
-    main,
 )
+from kernelforge.fusion.command import run as main
 from kernelforge.fusion.emit import export_artifacts
 from kernelforge.fusion.llm_failure import AUTH, LlmUnavailableError
 from kernelforge.fusion.locate import resolve_framework_source_file

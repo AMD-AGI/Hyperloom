@@ -117,7 +117,7 @@ Set with CLI flags, not env vars. Pre-set `ISL` / `OSL` / `CONC` / `PRECISION` /
   `--extend-hours`.
 - **Quantization:** `--quantize`, `--quantize-scheme`.
 
-Run `inference_optimizer optimize --help` for the exhaustive flag list.
+Run `hyperloom optimize --help` for the exhaustive flag list.
 
 ---
 
@@ -537,7 +537,7 @@ do not publish it unchanged in support bundles.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `HYPERLOOM_QUANTIZE_ENABLED` | Unset | Primary switch (`1` to enable) for the AMD Quark PTQ quantization prelude driven by `--quantize` / `--quantize-scheme`. |
-| `QUARK_ROOT` | Unset | AMD Quark checkout used by the quantization-agent. Set this explicitly when quantization is enabled. |
+| `QUARK_ROOT` | Unset | AMD Quark checkout used by the quantization agent. Set this explicitly when quantization is enabled. |
 
 ---
 

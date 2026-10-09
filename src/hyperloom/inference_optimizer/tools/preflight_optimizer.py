@@ -1,10 +1,9 @@
-#!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 """Launcher-side preflight for hyperloom.inference_optimizer.
 
 Usage:
-    python src/hyperloom/inference_optimizer/tools/preflight_optimizer.py MODEL_PATH
+    hyperloom check MODEL_PATH
 """
 
 from __future__ import annotations
@@ -30,7 +29,7 @@ from hyperloom.common import rocm_smi
 #: descent from the wrapper reaches them, which is teardown's job and not this
 #: scan's.
 STALE_PROCESS_PATTERNS = (
-    "hyperloom.inference_optimizer.cli",
+    "hyperloom optimize",
     "Magpie",
     "atom.entrypoints",
     "sglang.launch_server",
@@ -124,11 +123,11 @@ def _find_stale_processes() -> list[tuple[str, str]]:
     return matches
 
 
-def main() -> int:
+def run_checks(argv: list[str] | None = None) -> int:
     """Run launcher preflight checks and return a process exit code."""
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(prog="hyperloom check", description=__doc__)
     parser.add_argument("model_path", help="Model directory to optimize.")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     model_path = pathlib.Path(args.model_path)
     ok = True
@@ -170,5 +169,6 @@ def _exit(code: int) -> None:
     os._exit(code)
 
 
-if __name__ == "__main__":
-    _exit(main())
+def main(argv: list[str] | None = None) -> None:
+    """``hyperloom check``: run the checks and leave with their status."""
+    _exit(run_checks(argv))

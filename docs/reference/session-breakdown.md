@@ -596,7 +596,7 @@ The following example shows a complete `session_breakdown.json` for a finished G
 * **Offline and historical**: See
   [Hyperloom operator scripts](operator-scripts.md):
   ```bash
-  python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \
+  python -m hyperloom session breakdown \
       --session-dir /path/to/session \
       [--output /tmp/breakdown.json]
   ```

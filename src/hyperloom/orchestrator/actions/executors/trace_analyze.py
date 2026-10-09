@@ -390,7 +390,7 @@ def _build_trace_analyze_cmd(
     # Both tools share the CLI surface below except ``--tracelens-root``.
     tool_name = "bypass_trace_analysis.py" if is_bypass else "tracelens_analysis.py"
     cmd = [
-        "python3" if is_bypass else sys.executable,
+        sys.executable,
         str(_kernel_agent_tool_path(tool_name)),
         "--trace-input",
         str(trace_input),
