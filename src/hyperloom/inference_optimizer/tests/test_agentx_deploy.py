@@ -36,8 +36,10 @@ def test_deploy_copies_and_is_executable(tmp_path):
     assert (dst / "aiperf_phase_gate.py").exists()
     assert (dst / "agentx_mapping.py").read_bytes() == Path(mapping.__file__).read_bytes()
     assert os.access(dst / "aiperf_client.sh", os.X_OK)
+    assert (dst / "agentx_launch_capture.py").exists()
+    assert (dst / "_hyperloom_launch/serving_launch.py").exists()
     assert os.access(dst / "mlperf_agentic_client.sh", os.X_OK)
-    assert len(written) == 6
+    assert len(written) == 12
 
 
 def test_deploy_idempotent(tmp_path):

@@ -83,7 +83,8 @@ def test_resolve_runner_prefers_newest_pinned_geak_in_cache(tmp_path, monkeypatc
     assert psr._resolve_runner() == str(new_runner)
 
 
-def test_inner_timeout_is_reduced_by_flush_grace(tmp_path, monkeypatch):
+@pytest.mark.parametrize(("timeout_s", "inner_budget"), [(600, "420"), (18000, "17820")])
+def test_inner_timeout_is_reduced_by_flush_grace(tmp_path, monkeypatch, timeout_s, inner_budget):
     """run_e2e must receive GEAK_E2E_TIMEOUT_S = timeout_s - flush_grace."""
     runner = _write_fake_runner(
         tmp_path,
@@ -100,11 +101,12 @@ def test_inner_timeout_is_reduced_by_flush_grace(tmp_path, monkeypatch):
     )
     monkeypatch.setenv("GEAK_E2E_RUNNER", str(runner))
     monkeypatch.setenv("GEAK_FLUSH_GRACE_S", "180")
+    monkeypatch.setenv("GEAK_E2E_TIMEOUT_S", "7200")
 
-    out = psr.call_geak(_handoff(), tmp_path / "out", timeout_s=600)
+    out = psr.call_geak(_handoff(), tmp_path / "out", timeout_s=timeout_s)
 
     assert out["status"] == "ok"
-    assert out["inner_budget"] == "420"
+    assert out["inner_budget"] == inner_budget
     assert out["returncode"] == 0
 
 

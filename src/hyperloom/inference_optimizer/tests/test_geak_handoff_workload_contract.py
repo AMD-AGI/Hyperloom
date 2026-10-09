@@ -38,6 +38,7 @@ def _isolate_workload_env(monkeypatch: pytest.MonkeyPatch) -> None:
             "RANDOM_RANGE_RATIO",
             "SEED",
             "TP",
+            "BENCH_LAUNCHER",
             "MAX_MODEL_LEN",
             "GPU_MEMORY_UTILIZATION",
             "ROCR_VISIBLE_DEVICES",
@@ -184,6 +185,16 @@ async def test_agentx_handoff_keeps_supported_schema_and_frozen_launch_controls(
     assert spec["config"]["remove_args"] == ["--obsolete-flag"]
     assert spec["config"]["unset_envs"] == ["OBSOLETE_SETTING"]
     assert spec["config"]["args_mode"] == "replace"
+
+
+@pytest.mark.asyncio
+async def test_agentx_handoff_preserves_explicit_supported_recipe_launcher(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    coord = _coord(tmp_path)
+    monkeypatch.setenv("BENCH_LAUNCHER", "magpie")
+    handoff = await _handoff(coord, monkeypatch)
+    assert handoff["bench_launcher"] == "magpie"
 
 
 @pytest.mark.parametrize(

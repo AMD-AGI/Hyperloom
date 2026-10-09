@@ -274,6 +274,9 @@ def _materialize(tmp_path: Path, *, agentx: bool, **kwargs) -> dict:
 def test_an_agentic_recipe_gets_no_launcher_default_and_carries_the_lever(checkout, tmp_path):
     envs = _materialize(tmp_path, agentx=True, extra_server_args="--max-num-seqs 64")
 
+    capture_config = Path(envs["HYPERLOOM_LAUNCH_CONFIG_PATH"])
+    assert capture_config.is_absolute()
+    assert yaml.safe_load(capture_config.read_text())["benchmark"]["envs"] == envs
     assert envs["EXTRA_VLLM_ARGS"] == "--max-num-seqs 64"
     argv, _ = _run(checkout, envs["AGENTX_SERVER_SCRIPT"], tmp_path)
     assert argv[argv.index("--max-num-seqs") + 1] == "64"

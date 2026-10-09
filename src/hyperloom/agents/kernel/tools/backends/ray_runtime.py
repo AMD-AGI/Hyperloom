@@ -314,6 +314,10 @@ SAFE_ENV_KEYS = (
     "GEAK_CLAUDE_EFFORT",
     "GEAK_CLAUDE_MODEL",
     "GEAK_E2E_TIMEOUT_S",
+    "GEAK_AGENT_TIMEOUT_MS",
+    "GEAK_TIME_TAIL_CAP_S",
+    "GEAK_FINAL_RESERVE_S",
+    "GEAK_REBENCH_RESERVE_S",
     # Scoring/profiler/run knobs read by GEAK itself; stripped at the Ray boundary without this allowlist entry.
     "GEAK_SCORE_TARGET",
     "GEAK_SKIP_PROFILE",

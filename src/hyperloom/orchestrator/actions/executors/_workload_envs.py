@@ -2286,9 +2286,11 @@ def materialize_config_with_envs(
             remove_args=remove_list + to_str_list(reference_controls.get("remove_args")),
             env_levers=env_levers,
         )
+    materialized = output_dir / out_name
+    if str(bench.get("benchmark_script") or "") == "aiperf_client.sh":
+        envs["HYPERLOOM_LAUNCH_CONFIG_PATH"] = str(materialized.resolve())
     seal_server_argv(envs, bench.get("framework"))
     output_dir.mkdir(parents=True, exist_ok=True)
-    materialized = output_dir / out_name
     with materialized.open("w", encoding="utf-8") as f:
         yaml.safe_dump(cfg, f, sort_keys=False)
     return materialized
