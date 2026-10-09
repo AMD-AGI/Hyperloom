@@ -148,23 +148,43 @@ def _positive_int(value: Any) -> int | None:
     return resolved if resolved > 0 else None
 
 
-def roofline_ceiling(row: Mapping[str, Any]) -> tuple[float | None, str]:
-    """Per-GPU ceiling for a row, chosen by the session's own bound kind.
+def _arm_scale(row: Mapping[str, Any]) -> int:
+    """Factor that turns the row's ``*_tok_per_s_per_gpu`` arms into server totals.
 
-    Hyperloom computes the snapshot's ``roofline_*_ceiling_tok_per_sec`` over the whole server -- HBM bandwidth and
-    peak FLOPs times ``tp`` (``roofline_snapshot.py`` passes ``num_gpus=runtime.tp``) -- while Pulse's throughput arms
-    are per GPU, so the ceiling is divided by the row's ``tp`` before the two are compared. A row with no ``tp`` is
-    taken as one GPU.
+    Despite the names, Pulse carries those arms as server totals: on every tp>1 row checked, the roofline snapshot's
+    ``achieved_tok_per_sec`` (Hyperloom's server-wide output throughput) equals one of them, not ``tp`` times one. So
+    the factor is 1, unless a row's own snapshot shows its arms are per GPU (achieved within 2% of ``tp`` times an
+    arm), in which case it is ``tp``.
+    """
+    tp = _positive_int(row.get("tp")) or 1
+    roofline = row.get("roofline")
+    achieved = _finite(roofline.get("achieved_tok_per_sec")) if isinstance(roofline, Mapping) else None
+    if tp > 1 and achieved:
+        arms = [_finite(row.get(key)) for key in ("baseline_tok_per_s_per_gpu", "opt_tok_per_s_per_gpu")]
+        if not any(arm and abs(achieved / arm - 1) < 0.02 for arm in arms) and any(
+            arm and abs(achieved / (arm * tp) - 1) < 0.02 for arm in arms
+        ):
+            return tp
+    return 1
+
+
+def _server_arm(row: Mapping[str, Any], key: str) -> float | None:
+    value = _finite(row.get(key))
+    return value * _arm_scale(row) if value is not None else None
+
+
+def roofline_ceiling(row: Mapping[str, Any]) -> tuple[float | None, str]:
+    """Server-wide ceiling for a row, chosen by the session's own bound kind.
+
+    Hyperloom computes the snapshot's ``roofline_*_ceiling_tok_per_sec`` over the whole server (HBM bandwidth and
+    peak FLOPs times ``tp``), the same unit as its achieved throughput and as Pulse's arms (see :func:`_arm_scale`).
     """
     roofline = row.get("roofline")
     if not isinstance(roofline, Mapping):
         return None, "no roofline snapshot"
     bound = str(roofline.get("roofline_bound_kind") or "").lower()
-    gpus = _positive_int(row.get("tp")) or 1
     memory = _finite(roofline.get("roofline_mem_ceiling_tok_per_sec"))
     compute = _finite(roofline.get("roofline_cmp_ceiling_tok_per_sec"))
-    memory = memory / gpus if memory else memory
-    compute = compute / gpus if compute else compute
     if bound == "memory" and memory:
         return memory, "memory"
     if bound == "compute" and compute:
@@ -175,14 +195,14 @@ def roofline_ceiling(row: Mapping[str, Any]) -> tuple[float | None, str]:
 
 
 def capture_pct(row: Mapping[str, Any]) -> float | None:
-    """Fraction of the roofline gap this session actually closed, in percent.
+    """Fraction of the roofline gap this session actually closed, in percent, with every term a server total.
 
     ``None`` when unmeasured -- an unmeasured capture is not a zero capture,
     which is the bug that dragged the old forecast toward zero.
     """
     ceiling, _ = roofline_ceiling(row)
-    baseline = _finite(row.get("baseline_tok_per_s_per_gpu"))
-    optimized = _finite(row.get("opt_tok_per_s_per_gpu"))
+    baseline = _server_arm(row, "baseline_tok_per_s_per_gpu")
+    optimized = _server_arm(row, "opt_tok_per_s_per_gpu")
     if ceiling is None or baseline is None or optimized is None:
         return None
     gap = ceiling - baseline
@@ -193,8 +213,9 @@ def capture_pct(row: Mapping[str, Any]) -> float | None:
 
 def project_pulse_row(row: Mapping[str, Any]) -> dict[str, Any]:
     """Flatten one Pulse row into the shape the miner's aggregates expect."""
-    tp = _positive_int(row.get("tp"))
-    per_gpu = _finite(row.get("opt_tok_per_s_per_gpu"))
+    gpus = _positive_int(row.get("tp")) or 1
+    optimized = _server_arm(row, "opt_tok_per_s_per_gpu")
+    baseline = _server_arm(row, "baseline_tok_per_s_per_gpu")
     ceiling, ceiling_kind = roofline_ceiling(row)
     projected: dict[str, Any] = {
         "canonical_id": ":".join(
@@ -207,12 +228,11 @@ def project_pulse_row(row: Mapping[str, Any]) -> dict[str, Any]:
         "framework_version": str(row.get("framework_version") or ""),
         "precision": str(row.get("prec") or ""),
         "validated_e2e_gain": _finite(row.get("gain")),
-        # Per-GPU already; scale back to a total so the shared per-GPU
-        # division downstream lands on the same number Pulse reported.
-        "optimized_throughput": (per_gpu * tp) if (per_gpu is not None and tp) else per_gpu,
-        "tput_per_gpu": per_gpu,
-        "baseline_tput_per_gpu": _finite(row.get("baseline_tok_per_s_per_gpu")),
-        "ceiling_tput_per_gpu": ceiling,
+        # Server totals (see _arm_scale); per-GPU figures divide by tp.
+        "optimized_throughput": optimized,
+        "tput_per_gpu": optimized / gpus if optimized is not None else None,
+        "baseline_tput_per_gpu": baseline / gpus if baseline is not None else None,
+        "ceiling_tput_per_gpu": ceiling / gpus if ceiling is not None else None,
         "ceiling_kind": ceiling_kind,
         "capture_pct": capture_pct(row),
         "token_spend": _finite(row.get("token_spend")),
