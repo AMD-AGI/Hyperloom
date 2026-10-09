@@ -488,8 +488,8 @@ async def test_stack_validation_preserves_actual_measurement(
     verdict,
 ):
     """The real stack verdict and its writeback envelope share one E2E measurement."""
-    import hyperloom.orchestrator.actions.executors._kernel_agent_tool as kernel_agent_tool
     import hyperloom.orchestrator.actions.executors.baseline as baseline_mod
+    from hyperloom.orchestrator.kernel import apply_kernel_patch as akp
 
     agentx = grading_mode != "synthetic"
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1" if agentx else "0")
@@ -499,9 +499,7 @@ async def test_stack_validation_preserves_actual_measurement(
     monkeypatch.delenv("HYPERLOOM_ALLOW_UNVERIFIED_SUBMISSION", raising=False)
     monkeypatch.setenv("HYPERLOOM_PERF_NOISE_PCT", "5")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
-    monkeypatch.setattr(
-        kernel_agent_tool._load_apply_tool(), "_clear_python_kernel_caches", lambda target: {"status": "skipped"}
-    )
+    monkeypatch.setattr(akp, "_clear_python_kernel_caches", lambda target: {"status": "skipped"})
     c = _stack_validation_coordinator(tmp_path)
     c.shared_state.framework = "vllm"
     c.shared_state.benchmark_mode = "agentx" if agentx else "synthetic"
@@ -1884,9 +1882,9 @@ def _materialize_stack_sources(tmp_path: Path, stack: list[dict[str, Any]]) -> N
 
 def _stub_python_cache_clear(monkeypatch) -> None:
     """Keep the real apply away from this machine's Triton / inductor cache directories."""
-    from hyperloom.orchestrator.kernel import request_handlers as krh
+    from hyperloom.orchestrator.kernel import apply_kernel_patch as akp
 
-    monkeypatch.setattr(krh._load_apply_tool(), "_clear_python_kernel_caches", lambda target: {"status": "skipped"})
+    monkeypatch.setattr(akp, "_clear_python_kernel_caches", lambda target: {"status": "skipped"})
 
 
 def _stub_stack_benchmark(monkeypatch, *, new_tput: float) -> None:
@@ -1903,7 +1901,7 @@ def _stub_stack_benchmark(monkeypatch, *, new_tput: float) -> None:
 
 def _break_backup_restore(monkeypatch, *, target: Path) -> None:
     """Fail one member's backup->target copy; its apply (patch->target) still succeeds."""
-    from hyperloom.agents.kernel.tools import apply_kernel_patch as akp
+    from hyperloom.orchestrator.kernel import apply_kernel_patch as akp
 
     # apply_kernel_patch resolves both paths, so the discriminator has to as well.
     patched = target.with_name(f"{target.stem}_opt{target.suffix}").resolve()
@@ -2381,7 +2379,7 @@ def test_a_revert_that_already_completed_is_not_run_again(tmp_path: Path):
 
     An apply that reverted itself and is then unwound by the stack hits exactly that.
     """
-    from hyperloom.agents.kernel.tools.apply_kernel_patch import revert_kernel_patch
+    from hyperloom.orchestrator.kernel.apply_kernel_patch import revert_kernel_patch
 
     manifest = tmp_path / "manifest.json"
     manifest.write_text(

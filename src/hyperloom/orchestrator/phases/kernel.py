@@ -79,6 +79,8 @@ log = _logging.getLogger(__name__)
 # warning at geak promote.
 _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT: float = 3.0
 
+_GEAK_RUNNER_MODULE = "hyperloom.orchestrator.kernel.geak_runner"
+
 ROOFLINE_WATERMARK_RATIO: float = 1.10  # 10% step over last roofline
 
 # Consecutive roofline failures tolerated before the watermark stops re-arming.
@@ -1440,8 +1442,6 @@ class KernelPhase(CoordinatorCollaborator):
             recorder.enter_stage("geak_delegation")
             recorder.record_geak_handoff(handoff)
 
-        from ..actions.executors._kernel_agent_tool import _kernel_agent_tool_path
-
         def _read_geak_result(path: Path) -> dict[str, Any]:
             if not path.is_file():
                 return {}
@@ -1514,13 +1514,6 @@ class KernelPhase(CoordinatorCollaborator):
                 await self._revalidate_geak_candidate(reason="geak_e2e_win_recovered")
             return
 
-        try:
-            runner = _kernel_agent_tool_path("backends/geak_runner.py")
-        except Exception as exc:
-            log.exception("GEAK runner not resolvable; skipping KERNEL")
-            _finish_skip({"status": "error", "error_class": "runner_not_found", "error": repr(exc)})
-            return
-
         # Budget-aware timeouts: shrink to the remaining run deadline and always reserve the closing-grace window.
         runner_timeout, kill_timeout, budget_known = self._geak_timeouts()
         min_run = env_int("GEAK_MIN_RUN_S", default=600)
@@ -1548,7 +1541,8 @@ class KernelPhase(CoordinatorCollaborator):
 
         cmd = [
             sys.executable,
-            str(runner),
+            "-m",
+            _GEAK_RUNNER_MODULE,
             str(handoff_path),
             str(out_dir),
             "--timeout-s",

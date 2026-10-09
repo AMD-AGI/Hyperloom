@@ -5,19 +5,10 @@
 
 from __future__ import annotations
 
-import importlib.util
 from pathlib import Path
 
+from hyperloom.orchestrator.kernel import apply_kernel_patch
 from kernelforge.fusion.emit import _export_nongit, _unified_file_diff
-
-
-_APPLY_PATH = (
-    Path(__file__).resolve().parents[3] / "hyperloom" / "agents" / "kernel" / "tools" / "apply_kernel_patch.py"
-)
-_SPEC = importlib.util.spec_from_file_location("apply_kernel_patch_tool", _APPLY_PATH)
-assert _SPEC and _SPEC.loader
-apply_kernel_patch = importlib.util.module_from_spec(_SPEC)
-_SPEC.loader.exec_module(apply_kernel_patch)
 
 
 def test_unified_file_diff_marks_an_absent_base_as_a_creation():

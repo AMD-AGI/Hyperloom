@@ -17,8 +17,6 @@ from typing import Any
 
 from ._kernel_agent_tool import (
     HandlerResult,
-    _kernel_agent_root_error,
-    _kernel_agent_tool_path,
     _run_subprocess,
     _shape_tool_result,
 )
@@ -87,13 +85,13 @@ def _tracelens_root_error(root: Path) -> str | None:
     if not root.is_dir():
         return (
             f"TraceLens root not found: {root}; run "
-            "src/hyperloom/agents/kernel/scripts/install.sh "
+            "src/hyperloom/inference_optimizer/assets/install.sh "
             "or set TRACELENS_ROOT to an existing checkout"
         )
     if not (root / ".git").exists():
         return (
             f"TraceLens root incomplete (not a git checkout): {root}; "
-            "run src/hyperloom/agents/kernel/scripts/install.sh "
+            "run src/hyperloom/inference_optimizer/assets/install.sh "
             "or set TRACELENS_ROOT to a valid checkout"
         )
     return None
@@ -122,11 +120,7 @@ def _maybe_selfheal_tracelens_root(root: Path, *, log: Any = None) -> None:
     if not is_default:
         return  # explicit non-default override: never auto-clone
     try:
-        tool = _kernel_agent_tool_path("tracelens_analysis.py")
-        tools_dir = str(tool.parent)
-        if tools_dir not in sys.path:
-            sys.path.insert(0, tools_dir)
-        import tracelens_analysis as _tla  # type: ignore[import-not-found]
+        from hyperloom.orchestrator.trace_analysis import tracelens_analysis as _tla
 
         heal_log = getattr(log, "warning", None) or (lambda *_a, **_k: None)
         heal_log("trace_analyze: TraceLens root %s missing; attempting self-heal", root)
@@ -369,6 +363,10 @@ def _enrich_candidates_artifact(
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+_TRACELENS_ANALYSIS_MODULE = "hyperloom.orchestrator.trace_analysis.tracelens_analysis"
+_BYPASS_TRACE_ANALYSIS_MODULE = "hyperloom.orchestrator.trace_analysis.bypass_trace_analysis"
+
+
 def _build_trace_analyze_cmd(
     payload: dict,
     *,
@@ -388,10 +386,10 @@ def _build_trace_analyze_cmd(
     """Assemble the trace-analysis tool argv (TraceLens or bypass); returns
     ``(cmd, steady_state_mode)`` so the caller can record discovery provenance."""
     # Both tools share the CLI surface below except ``--tracelens-root``.
-    tool_name = "bypass_trace_analysis.py" if is_bypass else "tracelens_analysis.py"
     cmd = [
         sys.executable,
-        str(_kernel_agent_tool_path(tool_name)),
+        "-m",
+        _BYPASS_TRACE_ANALYSIS_MODULE if is_bypass else _TRACELENS_ANALYSIS_MODULE,
         "--trace-input",
         str(trace_input),
         "--session-id",
@@ -601,9 +599,6 @@ async def trace_analyze_handler(
     trace_input = payload.get("trace_input") or payload.get("trace_dir")
     if not trace_input:
         return {"status": "failed", "error": "missing 'trace_input' in payload"}
-    root_err = _kernel_agent_root_error()
-    if root_err:
-        return {"status": "failed", "error_class": "kernel_agent_root_missing", "error": root_err}
     # Backfill workload context from SharedState when Orchestration omits it.
     from ...state.shared_state import SharedState
 

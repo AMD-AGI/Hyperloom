@@ -17,7 +17,7 @@ log = logging.getLogger(__name__)
 
 DEFAULT_SESSION_DIR = Path("/workspace/hyperloom")
 ENV_USER_DATA_PATH = "USER_DATA_PATH"
-#: Mirrored verbatim in agents/kernel/tools/_paths.py and agents/framework/kb.py,
+#: Mirrored verbatim in orchestrator/trace_analysis/_paths.py and agents/framework/kb.py,
 #: which cannot import this module. Keep the three in step.
 POD_LOCAL_WORKSPACE = Path("/workspace")
 ENV_OVERRIDE_ASSET_ROOT = "INFERENCE_OPTIMIZER_ASSET_ROOT"

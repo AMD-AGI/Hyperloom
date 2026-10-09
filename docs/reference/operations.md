@@ -188,7 +188,7 @@ Operational checks:
 ```bash
 test -n "${OPENAI_API_KEY:-${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-}}}"
 test -n "${OPENAI_BASE_URL:-${ANTHROPIC_BASE_URL:-}}"
-bash "$REPO_ROOT/hyperloom/agents/kernel/scripts/install.sh" --check-only
+bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install_kernel_tools.sh" --check-only
 ```
 
 Child processes inherit the gateway settings prepared by preflight; keep
@@ -288,7 +288,7 @@ emitter never ran), use `hyperloom session backfill --session-dir "$SESSION_DIR"
 
 1. Confirm the pod has a current key and base URL (`OPENAI_API_KEY` /
    `OPENAI_BASE_URL`, or split Anthropic/OpenAI credentials).
-2. Re-run `bash "$REPO_ROOT/hyperloom/agents/kernel/scripts/install.sh" --check-only`
+2. Re-run `bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install_kernel_tools.sh" --check-only`
    and then without `--check-only` if it reports missing aliases.
 3. Inspect `~/.claude/config.json`; `customApiUrl` must point at the upstream
    gateway.

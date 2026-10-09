@@ -1,0 +1,689 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""Run KernelForge's kernel fusion as a Hyperloom kernel-agent tool."""
+
+from __future__ import annotations
+
+import argparse
+import ast
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+from hyperloom.orchestrator.trace_analysis._io_utils import truthy
+
+RESULT_BEGIN = "FORGE_FUSION_RESULT_BEGIN"
+RESULT_END = "FORGE_FUSION_RESULT_END"
+
+# The manifest verdict for "discovery never reached the model", added in manifest schema v2 alongside the ``error``
+# block.
+LLM_UNAVAILABLE_VERDICT = "llm_unavailable"
+
+# ``fusion_loop.termination_reason`` values for a run that died before the loop ran a single attempt.
+INFRA_ABORT_REASONS = frozenset({"harness_author_failed", "no_git_workspace"})
+DEFAULT_TIMEOUT_SEC = 7200
+_AGENT_BACKENDS = frozenset({"claude", "codex"})
+
+
+def _validated_agent_backend(value: Any) -> str:
+    """Return a canonical forge-fusion agent backend or raise."""
+    backend = str(value or "").strip().lower()
+    if backend not in _AGENT_BACKENDS:
+        raise ValueError(f"agent_backend={value!r} is invalid; choose one of: {', '.join(sorted(_AGENT_BACKENDS))}")
+    return backend
+
+
+def _validated_agent_sandbox_mode(value: Any) -> str:
+    """Delegate sandbox validation, including bypass opt-in, to Hyperloom."""
+    stated = str(value or "").strip()
+    if not stated:
+        raise ValueError("agent_sandbox_mode is required")
+
+    from hyperloom.common.codex_session import (
+        resolve_codex_sandbox_mode,
+    )
+
+    return resolve_codex_sandbox_mode(sandbox_mode=stated)
+
+
+def _inject_author_gateway_env(agent_backend: str) -> None:
+    """Prepare the selected author runtime without crossing provider shapes."""
+    if _validated_agent_backend(agent_backend) == "codex":
+        return
+
+    from hyperloom.common import llm_config
+
+    options = llm_config.claude_sdk_env_options(
+        env=os.environ,
+        component="forge",
+        operation="author_kernel",
+    )
+    resolved_env = options.get("env")
+    if isinstance(resolved_env, dict):
+        # Exactly the synthesizable subset: mirroring the subscription token into a key slot is what would disable it,
+        # so the registry decides which forms may be copied here rather than a list kept in step by hand.
+        for name in llm_config.ANTHROPIC_SYNTHESIZABLE_KEY_ENVS:
+            value = str(resolved_env.get(name) or "").strip()
+            if value:
+                os.environ.setdefault(name, value)
+    # The authoring child inherits this process's environment, not the resolved copy above, so the tag has to be
+    # merged in here or the run arrives at the gateway anonymous.
+    from hyperloom.common.llm_attribution import inject_env
+    from hyperloom.common.llm_stability_env import apply_llm_stability_env
+
+    inject_env(os.environ, component="forge", operation="author_kernel")
+    # claude's bypassPermissions refuses to start under root unless IS_SANDBOX=1.
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        os.environ.setdefault("IS_SANDBOX", "1")
+    apply_llm_stability_env(os.environ)
+
+
+def _load_input_json(path: str) -> dict[str, Any]:
+    if not path:
+        return {}
+    data = json.loads(Path(path).read_text(encoding="utf-8", errors="replace"))
+    if not isinstance(data, dict):
+        raise ValueError(f"--input-json must contain a JSON object: {path}")
+    return data
+
+
+def _add_opt(cmd: list[str], args: dict[str, Any], key: str, flag: str, *, required: bool = False) -> None:
+    val = args.get(key)
+    if val in (None, ""):
+        if required:
+            raise ValueError(f"{key} is required")
+        return
+    cmd.extend([flag, str(val)])
+
+
+def _build_cmd(args: dict[str, Any]) -> list[str]:
+    agent_backend = _validated_agent_backend(args.get("agent_backend"))
+    agent_sandbox_mode = _validated_agent_sandbox_mode(args.get("agent_sandbox_mode"))
+    cmd = [sys.executable, "-m", "kernelforge.cli", "forge-fuse"]
+    _add_opt(cmd, args, "trace_path", "--trace", required=True)
+    _add_opt(cmd, args, "model_path", "--model-path", required=True)
+    _add_opt(cmd, args, "framework", "--framework", required=True)
+    _add_opt(cmd, args, "output_dir", "--output-dir", required=True)
+    _add_opt(cmd, args, "discover_mode", "--discover")
+    cmd.extend(["--agent-backend", agent_backend])
+    _add_opt(cmd, args, "llm_model", "--model", required=True)
+    cmd.extend(["--agent-sandbox-mode", agent_sandbox_mode])
+    _add_opt(cmd, args, "max_turns", "--max-turns")
+    # Omitted by the caller when no lane ceiling was derived; forge-fuse reads both an absent flag and an explicit 0
+    # as "try every discovered recipe".
+    _add_opt(cmd, args, "max_recipes", "--max-recipes")
+    _add_opt(cmd, args, "gpu", "--gpu")
+    _add_opt(cmd, args, "decode_batch", "--decode-batch")
+    _add_opt(cmd, args, "ab_isl", "--ab-isl")
+    _add_opt(cmd, args, "ab_osl", "--ab-osl")
+    _add_opt(cmd, args, "framework_root", "--framework-root")
+    _add_opt(cmd, args, "tp", "--tp")
+    # Attention is not always sharded by the serving --tp (DP-attention splits it),
+    # and forge-fuse stamps the harness group/head dims from this.
+    _add_opt(cmd, args, "attn_tp", "--attn-tp")
+    _add_opt(cmd, args, "block_size", "--block-size")
+    _add_opt(cmd, args, "max_model_len", "--max-model-len")
+    # Nominate one independent sibling patch per confirmed pattern by default (the multi-patch contract).
+    if bool(args.get("fuse_all_confirmed", False)):
+        cmd.append("--fuse-all-confirmed")
+    if truthy(args.get("verbose", False)):
+        cmd.append("--verbose")
+    return cmd
+
+
+def _timeout_sec(args: dict[str, Any]) -> int:
+    """Resolve the forge-fusion subprocess wall-clock timeout."""
+    raw = args.get("timeout") or args.get("timeout_sec") or os.environ.get("FORGE_FUSION_TIMEOUT")
+    try:
+        return max(1, int(float(raw or DEFAULT_TIMEOUT_SEC)))
+    except (OverflowError, TypeError, ValueError):
+        return DEFAULT_TIMEOUT_SEC
+
+
+def _new_session_kwargs() -> dict[str, bool]:
+    """Popen kwargs that isolate the child into its own killable session."""
+    return {"start_new_session": True} if os.name == "posix" else {}
+
+
+def _terminate_process_tree(proc: subprocess.Popen, *, grace_seconds: float = 5.0) -> None:
+    """Best-effort teardown for the forge-fusion subprocess and descendants."""
+    if proc.poll() is not None:
+        return
+    if os.name == "posix":
+        try:
+            pgid = os.getpgid(proc.pid)
+            own_pgid = os.getpgid(0)
+        except OSError:
+            pgid = None
+            own_pgid = None
+        if pgid is not None and pgid != own_pgid:
+            try:
+                os.killpg(pgid, signal.SIGTERM)
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=grace_seconds)
+                return
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except OSError:
+                    pass
+                return
+    try:
+        proc.terminate()
+        proc.wait(timeout=grace_seconds)
+    except (OSError, subprocess.TimeoutExpired):
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
+def _run_with_tree_timeout(cmd: list[str], timeout_sec: int) -> subprocess.CompletedProcess:
+    """Run forge-fusion in a killable process group and reap it on timeout."""
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        **_new_session_kwargs(),
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout_sec)
+        return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+    except subprocess.TimeoutExpired:
+        _terminate_process_tree(proc)
+        try:
+            stdout, stderr = proc.communicate(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            stdout = ""
+            stderr = ""
+        raise subprocess.TimeoutExpired(cmd, timeout_sec, output=stdout, stderr=stderr)
+
+
+def _attempted(loop: dict[str, Any]) -> bool:
+    """Whether ``fusion_loop`` reports at least one completed attempt."""
+    try:
+        return int(loop.get("attempts") or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
+    """Map forge-fusion's ``fusion_manifest.json`` -> Hyperloom result contract."""
+    result: dict[str, Any] = {
+        "status": "failed",
+        "engine": "forge_fusion",
+        "micro_decision": "failed",
+        "decision": "REVERT",
+        "kept": False,
+        "kernel_speedup": None,
+        "env_flags": {},
+        "baseline_env_flags": {},
+        "artifact_files": [],
+        "patch": None,
+        "requires_e2e_validation": False,
+        "workspace": str(output_dir or ""),
+    }
+    manifest_path = Path(output_dir or ".") / "fusion_manifest.json"
+    if not manifest_path.is_file():
+        result["error"] = f"no fusion_manifest.json at {manifest_path} (forge-fusion rc={rc})"
+        return result
+    try:
+        m = json.loads(manifest_path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, json.JSONDecodeError) as exc:
+        result["error"] = f"fusion_manifest.json parse error: {exc!r}"
+        return result
+
+    loop = m.get("fusion_loop") or {}
+    compile_pass = m.get("compile_pass") or {}
+    # The nomination envelope: a list (possibly empty) on the multi-patch path, None on the combine / single-patch
+    # path.
+    patches = m.get("patches")
+    multi_patch = isinstance(patches, list)
+    # KernelForge runs the compile-pass shortcut INSTEAD of the authoring loop, so exactly one of these is populated.
+    kept = bool(patches) if multi_patch else bool(loop.get("kept") or compile_pass.get("kept"))
+
+    if str(m.get("verdict") or "").strip().lower() == LLM_UNAVAILABLE_VERDICT and not kept:
+        # forge-fusion never reached the model, so this run holds no opinion about the kernel.
+        detail = m.get("error") if isinstance(m.get("error"), dict) else {}
+        kind = str(detail.get("kind") or "unknown")
+        attempts = detail.get("attempts")
+        tried = f" after {attempts} attempt(s)" if attempts else ""
+        message = str(detail.get("message") or "no detail reported")
+        result.update(
+            {
+                "verdict": LLM_UNAVAILABLE_VERDICT,
+                "error_class": LLM_UNAVAILABLE_VERDICT,
+                "error": f"forge-fusion never reached the LLM ({kind}{tried}): {message}"[:1500],
+            }
+        )
+        return result
+
+    aborted = str(loop.get("termination_reason") or "").strip().lower()
+    if aborted in INFRA_ABORT_REASONS and not kept and not compile_pass and not _attempted(loop):
+        # The loop stopped on infrastructure, not on a judgement about the kernel: the harness-authoring turn failed,
+        # or there was no git workspace to author in.
+        located = str((m.get("fusion") or {}).get("env_flag") or "")
+        result.update(
+            {
+                "verdict": m.get("verdict"),
+                "error_class": aborted,
+                # Explicit rather than re-deriving the reason set on the consumer side: the orchestrator bounds how
+                # often it re-runs an abort, and a copied constant there would drift from the one above.
+                "infrastructure_abort": True,
+                "error": (
+                    f"forge-fusion aborted on infrastructure ({aborted}); "
+                    f"the loop reported no completed attempts and no result. "
+                    f"Recipe located by discovery: {located or 'unknown'}"
+                )[:1500],
+            }
+        )
+        return result
+
+    artifacts = m.get("artifacts") or {}
+    changed = [c.get("path") for c in (artifacts.get("changes") or []) if c.get("path")]
+    src_file = str((m.get("fusion") or {}).get("source_file") or "")
+    if multi_patch and patches:
+        # On the multi-patch path the producer mirrors the STRONGEST sibling into the singular ``artifacts`` slot, but
+        # ``fusion.source_file`` still names the top RECIPE -- which may be a compile-pass claim whose file differs
+        # from the strongest authored patch.
+        src_file = str(patches[0].get("target_file") or patches[0].get("source_file") or src_file)
+
+    if compile_pass:
+        # The win is a flipped default in the framework's own source, so the patch carries it and there is no runtime
+        # flag.
+        speedup = compile_pass.get("speedup")
+        result.update(
+            {
+                "compile_pass_flag": compile_pass.get("flag"),
+                "serving_speedup": speedup,
+            }
+        )
+    else:
+        speedup = (loop.get("best") or {}).get("kernel_speedup")
+        best_flags = str(loop.get("best_env_flag") or "").split()
+        result.update(
+            {
+                # Fused arm = all confirmed flags ON; baseline arm = same flags OFF.
+                "env_flags": {f: "1" for f in best_flags},
+                "baseline_env_flags": {f: "0" for f in best_flags},
+                "best_pattern": loop.get("best_pattern"),
+            }
+        )
+
+    # Integrate applies a fusion from a patch file, its root and a target, and returns without any of them, while
+    # ``ok`` satisfies the KERNEL-entry idempotency gate -- so reported as a success such a run is both dropped and
+    # never retried.
+    patch = artifacts.get("patch")
+    if kept:
+        for name, present in (
+            ("a patch", bool(patch)),
+            ("the patch file it named", bool(patch) and Path(str(patch)).is_file()),
+            ("a target file", bool(src_file)),
+            ("a patch root", bool(artifacts.get("repo_root"))),
+        ):
+            if not present:
+                # The failed/REVERT defaults above are the retryable shape.
+                result["error_class"] = "fusion_artifact_missing"
+                result["error"] = f"forge-fuse kept a fusion but exported no {name}"
+                return result
+
+    result.update(
+        {
+            "status": "ok" if kept else "complete",
+            "micro_decision": "candidate" if kept else "no_improvement",
+            "decision": "KEEP" if kept else "REVERT",
+            "kept": kept,
+            "kernel_speedup": speedup,
+            "artifact_files": changed,
+            "patch": patch,
+            # For integrate's patch-apply path.
+            "source_file": src_file,
+            # The root the patch was exported against, which may be a site-packages dir.
+            "kernel_repo": str(artifacts.get("repo_root") or ""),
+            "verdict": m.get("verdict"),
+            # KernelForge validated this on its own -- kernel parity plus a serving smoke for an authored fusion, a
+            # serving A/B for a claimed compile pass -- but integrate is what confirms the real e2e gain here.
+            "requires_e2e_validation": kept,
+        }
+    )
+
+    if multi_patch:
+        # Carry the sibling envelopes through untouched so the consumer can enqueue each independently.
+        result["patches"] = [dict(p) for p in patches]
+        nomination = m.get("nomination")
+        result["nomination"] = dict(nomination) if isinstance(nomination, dict) else None
+
+    return result
+
+
+_DIFF_TARGET_RE = re.compile(r"^diff --git a/(\S+) b/\S+", re.MULTILINE)
+#: ``driver_shim`` renders this as a module-level literal, so it reads back without importing.
+_DRIVER_ENV_FLAGS_RE = re.compile(r"^ENV_FLAGS\s*=\s*(.+)$", re.MULTILINE)
+
+#: Where a campaign's best manifest sits under the shadow repo it was built in.
+_SHADOW_EXPERIMENTS_MARKER = "/forge_experiments/"
+
+
+def _campaign_env_flag(root: Path, stem: str) -> str:
+    """Read back the env flags the campaign gated its fused path behind.
+
+    ``run_campaign`` splits ``recipe.env_flag`` on whitespace and renders the result into
+    ``driver_<stem>.py`` beside the loop result, so the driver is where a killed run still
+    says which flags turn the fusion on.
+    """
+    driver = root / f"driver_{stem}.py"
+    try:
+        source = driver.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    match = _DRIVER_ENV_FLAGS_RE.search(source)
+    if not match:
+        return ""
+    try:
+        flags = ast.literal_eval(match.group(1))
+    except (SyntaxError, ValueError):
+        return ""
+    if isinstance(flags, str):
+        flags = (flags,)
+    if not isinstance(flags, (tuple, list)):
+        return ""
+    return " ".join(str(flag).strip() for flag in flags if str(flag).strip())
+
+
+def _patch_target_file(patch_path: Path) -> str:
+    """Return the first path a unified diff touches, or empty when it names none."""
+    try:
+        head = patch_path.read_text(encoding="utf-8", errors="replace")[:4096]
+    except OSError:
+        return ""
+    match = _DIFF_TARGET_RE.search(head)
+    return match.group(1) if match else ""
+
+
+def _published_best_patch(best_manifest: Path) -> Path | None:
+    """Return the patch the shadow repo published for a campaign's best iteration."""
+    try:
+        manifest = json.loads(best_manifest.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(manifest, dict):
+        return None
+    rel = str(manifest.get("patch_path") or "")
+    if not rel:
+        return None
+    # ``patch_path`` is relative to the experiments root, which holds the ``best/`` the manifest sits in.
+    patch = best_manifest.parent.parent / rel
+    return patch if patch.is_file() else None
+
+
+def _campaign_patches_on_disk(root: Path) -> list[dict[str, Any]]:
+    """Collect the per-recipe keepers a killed run left proof of.
+
+    ``run_campaign`` writes ``forge_loop_<pattern_id>.json`` as each campaign returns and
+    publishes its winning iteration to the shadow repo's ``forge_experiments/best/``, while
+    ``on_keep`` exports ``fusion_<pattern_id>.patch`` only once the loop gates the keeper and
+    the aggregate ``fusion_manifest.json`` only once every campaign has returned. A run
+    killed at any of those points leaves proven work with nothing the aggregate can see.
+
+    Args:
+        root: The fusion output directory.
+
+    Returns:
+        Nomination rows for every campaign whose own loop result says it won, strongest
+        first.
+    """
+    rows: list[dict[str, Any]] = []
+    for loop_file in sorted(root.glob("forge_loop_*.json")):
+        stem = loop_file.name[len("forge_loop_") : -len(".json")]
+        try:
+            loop = json.loads(loop_file.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(loop, dict) or not loop.get("improved"):
+            continue
+        best_manifest = str(loop.get("best_manifest") or "")
+        patch_file = root / f"fusion_{stem}.patch"
+        if not patch_file.is_file():
+            published = _published_best_patch(Path(best_manifest)) if best_manifest else None
+            if published is None:
+                continue
+            patch_file = published
+        target_file = _patch_target_file(patch_file)
+        if not target_file:
+            continue
+        env_flag = _campaign_env_flag(root, stem)
+        if not env_flag:
+            # An authored fusion is env-gated, and the flag is the only way the fused path
+            # reaches the re-baseline server. Salvaging the patch without it queues a win to be
+            # measured on the eager path and REVERTed, which loses it one stage later instead.
+            sys.stderr.write(
+                f"forge_fusion: not salvaging {stem}: its driver names no env flag, and without one "
+                "the patch would be re-baselined un-gated and rejected\n"
+            )
+            continue
+        rows.append(
+            {
+                "kernel_name": stem,
+                "patch_path": str(patch_file),
+                "target_file": target_file,
+                "env_flag": env_flag,
+                "kernel_repo": best_manifest.split(_SHADOW_EXPERIMENTS_MARKER)[0]
+                if _SHADOW_EXPERIMENTS_MARKER in best_manifest
+                else "",
+                "micro_speedup": float(loop.get("total_speedup") or 0.0),
+                "kind": "fusion",
+            }
+        )
+    rows.sort(key=lambda row: row["micro_speedup"], reverse=True)
+    return rows
+
+
+def salvage_forge_fusion_from_workspace(output_dir: str) -> dict[str, Any] | None:
+    """Rebuild a KEEP result from pre-smoke checkpoint + patch after a kill."""
+    root = Path(output_dir or "")
+    if not root.is_dir():
+        return None
+    ckpt_path = root / "kernel_keep_checkpoint.json"
+    patch_path = root / "fusion.patch"
+    manifest_path = root / "fusion_manifest.json"
+    kept = False
+    speedup = None
+    env_flag = ""
+    source_file = ""
+    repo_root = ""
+    patch = None
+    siblings = None
+    if ckpt_path.is_file():
+        try:
+            ckpt = json.loads(ckpt_path.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, json.JSONDecodeError):
+            ckpt = {}
+        if isinstance(ckpt, dict) and ckpt.get("kept"):
+            kept = True
+            speedup = ckpt.get("kernel_speedup")
+            env_flag = str(ckpt.get("env_flag") or "")
+            source_file = str(ckpt.get("source_file") or "")
+            repo_root = str(ckpt.get("repo_root") or "")
+    if manifest_path.is_file():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, json.JSONDecodeError):
+            manifest = {}
+        if isinstance(manifest, dict):
+            loop = manifest.get("fusion_loop") or {}
+            compile_pass = manifest.get("compile_pass") or {}
+            if loop.get("kept") or compile_pass.get("kept"):
+                kept = True
+            speedup = speedup or (loop.get("best") or {}).get("kernel_speedup") or compile_pass.get("speedup")
+            env_flag = env_flag or str(loop.get("best_env_flag") or "")
+            source_file = source_file or str((manifest.get("fusion") or {}).get("source_file") or "")
+            artifacts = manifest.get("artifacts") or {}
+            if artifacts.get("patch"):
+                patch = artifacts.get("patch")
+            repo_root = repo_root or str(artifacts.get("repo_root") or "")
+            siblings = manifest.get("patches")
+    if patch_path.is_file():
+        patch = str(patch_path)
+    if not kept or not patch or not Path(str(patch)).is_file():
+        campaign = _campaign_patches_on_disk(root)
+        if not campaign:
+            return None
+        strongest = campaign[0]
+        siblings = campaign
+        patch = strongest["patch_path"]
+        speedup = strongest["micro_speedup"]
+        source_file = source_file or strongest["target_file"]
+        repo_root = repo_root or strongest["kernel_repo"]
+        # There is no checkpoint and no aggregate on this path, so the top-level flags are
+        # empty too; the strongest row read its own out of the campaign's driver.
+        env_flag = env_flag or strongest["env_flag"]
+    flags = [f for f in env_flag.split() if f]
+    result: dict[str, Any] = {
+        "status": "ok",
+        "engine": "forge_fusion",
+        "micro_decision": "candidate",
+        "decision": "KEEP",
+        "kept": True,
+        "kernel_speedup": speedup,
+        "env_flags": {f: "1" for f in flags},
+        "baseline_env_flags": {f: "0" for f in flags},
+        "artifact_files": [],
+        "patch": str(patch),
+        "source_file": source_file,
+        "kernel_repo": repo_root,
+        "requires_e2e_validation": True,
+        "salvaged": True,
+        "workspace": str(root),
+    }
+    if isinstance(siblings, list):
+        # The consumer reads the nomination contract, so every sibling the manifest recorded is carried through beside
+        # the singular slots.
+        result["patches"] = siblings
+    return result
+
+
+def _timeout_result(output_dir: str, timeout_sec: int, exc: subprocess.TimeoutExpired) -> dict[str, Any]:
+    """Shape a timed-out forge-fusion run; salvage a micro KEEP when present."""
+    salvaged = salvage_forge_fusion_from_workspace(output_dir)
+    cmd_repr = " ".join(str(c) for c in (getattr(exc, "cmd", None) or []))
+    timeout_error = f"TimeoutExpired after {timeout_sec}s: {cmd_repr[:1500]}"
+    if salvaged:
+        salvaged["error_class"] = "subprocess_timeout"
+        salvaged["error"] = timeout_error
+        return salvaged
+    return {
+        "status": "failed",
+        "engine": "forge_fusion",
+        "micro_decision": "failed",
+        "decision": "REVERT",
+        "kept": False,
+        "kernel_speedup": None,
+        "env_flags": {},
+        "baseline_env_flags": {},
+        "artifact_files": [],
+        "patch": None,
+        "requires_e2e_validation": False,
+        "workspace": str(output_dir or ""),
+        "error_class": "subprocess_timeout",
+        "error": timeout_error,
+    }
+
+
+def _as_text(data: Any) -> str:
+    if data is None:
+        return ""
+    if isinstance(data, bytes):
+        return data.decode("utf-8", errors="replace")
+    return str(data)
+
+
+def _relay_streams(stdout: Any, stderr: Any) -> None:
+    out = _as_text(stdout)
+    err = _as_text(stderr)
+    if out:
+        sys.stdout.write(out)
+    if err:
+        sys.stderr.write(err)
+
+
+def _emit(result: dict[str, Any], output_dir: str) -> None:
+    """Write result.json (disk fallback) + print the stdout sentinel."""
+    if output_dir:
+        try:
+            (Path(output_dir) / "result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+        except OSError:
+            pass
+    print(f"\n{RESULT_BEGIN}\n{json.dumps(result, sort_keys=True)}\n{RESULT_END}", flush=True)
+
+
+def _parse_args(argv: list[str]) -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Hyperloom wrapper for forge-fusion")
+    p.add_argument("--input-json", required=True)
+    return p.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    try:
+        args = _parse_args(list(argv or sys.argv[1:]))
+        payload = _load_input_json(args.input_json)
+        cmd = _build_cmd(payload)
+    except Exception as exc:  # noqa: BLE001 - structured wrapper failure
+        print(
+            json.dumps(
+                {
+                    "status": "failed",
+                    "engine": "forge_fusion",
+                    "micro_decision": "failed",
+                    "decision": "REVERT",
+                    "kept": False,
+                    "error_class": exc.__class__.__name__,
+                    "error": repr(exc),
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+        return 2
+
+    _inject_author_gateway_env(str(payload.get("agent_backend") or ""))
+    output_dir = str(payload.get("output_dir") or "")
+    # The output dir is keyed on the task, so a run that dies before writing new artifacts must not salvage the
+    # previous run's KEEP as its own.
+    output_root = Path(output_dir or ".")
+    for stale_name in (
+        "fusion_manifest.json",
+        "kernel_keep_checkpoint.json",
+        "fusion.patch",
+    ):
+        (output_root / stale_name).unlink(missing_ok=True)
+    for stale_glob in ("fusion_*.patch", "forge_loop_*.json"):
+        for stale in output_root.glob(stale_glob):
+            stale.unlink(missing_ok=True)
+    timeout_sec = _timeout_sec(payload)
+    try:
+        proc = _run_with_tree_timeout(cmd, timeout_sec)
+    except subprocess.TimeoutExpired as exc:
+        _relay_streams(getattr(exc, "stdout", None), getattr(exc, "stderr", None))
+        result = _timeout_result(output_dir, timeout_sec, exc)
+        _emit(result, output_dir)
+        return 124
+
+    _relay_streams(proc.stdout, proc.stderr)
+    result = _normalize_manifest(output_dir, proc.returncode)
+    _emit(result, output_dir)
+    # Mirror the subprocess exit: non-zero only when the subprocess itself failed.
+    return int(proc.returncode)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

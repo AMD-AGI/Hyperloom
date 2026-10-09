@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.agents.framework import kb
-from hyperloom.agents.kernel.tools import _paths as tool_paths
+from hyperloom.orchestrator.trace_analysis import _paths as tool_paths
 from hyperloom.inference_optimizer.session import paths as session_paths
 
 _RESOLVERS = (

@@ -22,6 +22,8 @@ from hyperloom.orchestrator.state._shared_state.enablement_round import Enableme
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 
+from ._geak_helpers import stop_geak_before_launch
+
 
 def _no_controller_run(**kwargs: Any) -> dict[str, Any]:
     return {"status": "no_opportunity", "patch_count": 0, "task_count": 0, "output_dir": str(kwargs["output_dir"])}
@@ -29,18 +31,10 @@ def _no_controller_run(**kwargs: Any) -> dict[str, Any]:
 
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
-    from hyperloom.orchestrator.actions.executors import _kernel_agent_tool
     from hyperloom.orchestrator.kernel import controller_submit
 
-    real_tool_path = _kernel_agent_tool._kernel_agent_tool_path
-
-    def _tool_path_without_geak_runner(tool_name: str) -> Path:
-        if tool_name == "backends/geak_runner.py":
-            raise FileNotFoundError(tool_name)
-        return real_tool_path(tool_name)
-
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    monkeypatch.setattr(_kernel_agent_tool, "_kernel_agent_tool_path", _tool_path_without_geak_runner)
+    stop_geak_before_launch(monkeypatch)
     monkeypatch.setattr(controller_submit, "run_controller_subprocess", _no_controller_run)
     return make_session_dir()
 
