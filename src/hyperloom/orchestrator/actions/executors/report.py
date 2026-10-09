@@ -24,6 +24,7 @@ from ...bus.message_bus import MessageBus
 from ...bus.storage.connection import SqliteConnection
 from hyperloom.inference_optimizer.breakdown.stop_reasons import (
     AGENTX_PREFLIGHT_STOP_REASON,
+    BACKEND_UNHEALTHY_STOP_REASON,
     PATCH_RECOVERY_INCOMPLETE_STOP_REASON,
 )
 from hyperloom.inference_optimizer.session.paths import db_path_for
@@ -335,6 +336,12 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
     # Host-level terminals: something outside the model ended the run.
     "supervisor_coordinator_died": "The out-of-band supervisor found the coordinator's process gone; this record was written by the supervisor because there was no coordinator left to write one.",
     "supervisor_tick_stalled": "The out-of-band supervisor found the coordinator's tick not advancing inside its stall window and asked the session to end.",
+    BACKEND_UNHEALTHY_STOP_REASON: (
+        "A reactor agent's LLM backend kept failing for an hour without one successful turn, so the run stopped "
+        "instead of spending the rest of its budget on a model it could not reach; the best validated result was "
+        "kept. The backend_error observations name the agent and carry the error each call returned. Repair the "
+        "backend (credentials, endpoint, quota, or a prompt the model rejects), then resume."
+    ),
 }
 
 
