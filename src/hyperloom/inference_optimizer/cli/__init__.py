@@ -192,6 +192,16 @@ def _apply_operator_supplied_paths(args: Any, framework: str) -> None:
         elif framework == "custom" and not already:
             fatal.append(f"{flag} is required for --framework custom (or export {env_name})")
 
+    if framework == "xdit":
+        xdit_name = str(getattr(args, "xdit_model_name", None) or "").strip()
+        if xdit_name:
+            os.environ["XDIT_MODEL_NAME"] = xdit_name
+        else:
+            fatal.append(
+                "--xdit-model-name is required for --framework xdit. "
+                "Pass the xDiT model registry name, e.g. 'FLUX.2-dev' or 'black-forest-labs/FLUX.2-dev'."
+            )
+
     if fatal:
         for line in fatal:
             print(f"ERROR: {line}", file=sys.stderr)
@@ -218,6 +228,10 @@ def _restore_operator_supplied_paths_from_state(args: Any, state: SharedState) -
         archived = str(getattr(state, "benchmark_backend", "") or "").strip()
         if archived:
             os.environ[BENCHMARK_BACKEND_ENV] = archived
+    if not str(getattr(args, "xdit_model_name", None) or "").strip():
+        archived = str(getattr(state, "xdit_model_name", "") or "").strip()
+        if archived:
+            os.environ["XDIT_MODEL_NAME"] = archived
 
 
 def _require_custom_entrypoint(framework: str, gpu_type: str | None = None) -> None:
@@ -266,6 +280,7 @@ def _persist_operator_supplied_paths(state: SharedState) -> None:
     state.framework_repo_path = os.environ.get("FRAMEWORK_REPO_PATH", "").strip()
     state.bypass_scripts_dir = os.environ.get("HYPERLOOM_BYPASS_SCRIPTS_DIR", "").strip()
     state.benchmark_backend = os.environ.get(BENCHMARK_BACKEND_ENV, "").strip().lower()
+    state.xdit_model_name = os.environ.get("XDIT_MODEL_NAME", "").strip()
 
 
 def _enforce_expected_framework(

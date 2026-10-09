@@ -733,6 +733,7 @@ and the operator's stated value is lost:
 | Framework | `--framework` | `sglang` (default) / `vllm` / `atom` / `xdit` / `custom` — atom is single-node-only; xdit is scriptable diffusion (`img/s`, no serving server); `custom` is an operator-supplied workload and **additionally requires `--framework-path` and `--benchmark-scripts-dir`** (see below) |
 | Custom source tree | `--framework-path` | **Required for `--framework custom`.** The workload's own checkout; patches are authored against it. |
 | Custom bench scripts | `--benchmark-scripts-dir` | **Required for `--framework custom`.** Holds the entrypoint, looked up as `custom_<gpu-type>.sh`. Every knob it reads must be forwarded as `--extra-env`; the throughput unit is whatever its report declares. |
+| xDiT model name | `--xdit-model-name` | **Required for `--framework xdit`.** The xDiT model registry name (e.g., `FLUX.2-dev` or `black-forest-labs/FLUX.2-dev`). xDiT uses this to select the correct diffusion pipeline class; unlike vLLM/SGLang, it cannot infer the pipeline from the model path alone. |
 | GPU type | `--gpu-type` | rocm-smi auto-detect when unset |
 | Model class | `--model-class` | categorical key for the deterministic consumers (atom seed grid, framework-agent gap search token, recipe key, prompt label); when unset, Coordinator boot infers and persists it from model metadata or model-path family keywords. For richer advisory model context see Step 1.5 (`model_arch.json`) |
 | Input seq length | `--isl` | Pass the prompt's ISL. Default `1024` when omitted. |

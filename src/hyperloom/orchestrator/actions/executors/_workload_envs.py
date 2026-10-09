@@ -2011,17 +2011,14 @@ def materialize_config_with_envs(
         for _name in _QUALITY_REF_WRITE_ENVS:
             envs[_name] = _ref_write
     # ── xDiT-only wiring ───────────────────────────────────────────────────
-    # These three are read by the xDiT runner and by nothing else, so they are
+    # These are read by the xDiT runner and by nothing else, so they are
     # keyed on the framework rather than on scriptability: an operator-supplied
     # ``custom`` workload must not have its baseline altered by settings it
     # never declared, least of all an attention backend.
     if str(bench.get("framework") or "").strip().lower() == "xdit":
-        # The xDiT runner resolves models via MODEL_REGISTRY keys, not
-        # filesystem paths. XDIT_MODEL_ARG selects the basename ("name",
-        # registry-correct) vs the full path ("path", which fails lookup). Force
-        # it onto benchmark.envs here so per-task overrides can't break model
-        # resolution. Default "name".
-        envs["XDIT_MODEL_ARG"] = os.environ.get("XDIT_MODEL_ARG", "").strip() or "name"
+        _xdit_model_name = os.environ.get("XDIT_MODEL_NAME", "").strip()
+        if _xdit_model_name:
+            envs["XDIT_MODEL_NAME"] = _xdit_model_name
         # If set, the baked hyperloom_local_aliases map each registered name to
         # a local snapshot dir rooted at $XDIT_MODEL_ROOT/<slug>. Leave unset in
         # public/default deployments so the operator chooses the model cache

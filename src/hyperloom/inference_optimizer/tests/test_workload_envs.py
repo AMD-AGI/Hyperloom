@@ -63,7 +63,6 @@ def _clear_env(monkeypatch):
         "XDIT_QUALITY_REF_WRITE",
         "HYPERLOOM_QUALITY_REF",
         "HYPERLOOM_QUALITY_REF_WRITE",
-        "XDIT_MODEL_ARG",
         "XDIT_MODEL_ROOT",
         "XDIT_ATTENTION_BACKEND",
     ):
@@ -641,7 +640,7 @@ def test_quality_ref_baseline_establishes(monkeypatch, tmp_path):
     assert bench["envs"]["XDIT_QUALITY_REF_WRITE"] == "/ref/q.png"
 
 
-_XDIT_ONLY_ENVS = ("XDIT_MODEL_ARG", "XDIT_MODEL_ROOT", "XDIT_ATTENTION_BACKEND")
+_XDIT_ONLY_ENVS = ("XDIT_MODEL_ROOT", "XDIT_ATTENTION_BACKEND")
 
 
 def test_custom_baseline_gets_no_xdit_only_envs(monkeypatch, tmp_path):
@@ -664,7 +663,6 @@ def test_xdit_baseline_still_gets_xdit_only_envs(monkeypatch, tmp_path):
     monkeypatch.setenv("XDIT_MODEL_ROOT", "/models")
     src = _write(tmp_path / "cfg.yaml", framework="xdit", envs={})
     bench = _materialize(src, tmp_path / "out", establish_quality_ref=True)
-    assert bench["envs"]["XDIT_MODEL_ARG"] == "name"
     assert bench["envs"]["XDIT_MODEL_ROOT"] == "/models"
     assert bench["envs"]["XDIT_ATTENTION_BACKEND"] == "aiter"
 

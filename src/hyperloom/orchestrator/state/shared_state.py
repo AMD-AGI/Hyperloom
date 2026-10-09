@@ -484,6 +484,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # Operator-supplied custom-workload paths.
     bypass_scripts_dir: str = ""
     framework_repo_path: str = ""
+    # xDiT model registry name (``--xdit-model-name``).
+    xdit_model_name: str = ""
     # ``HYPERLOOM_BENCHMARK_BACKEND`` at seed time (``bypass`` for custom).
     benchmark_backend: str = ""
     # The card's compute-partition shape this session was measured in, as observed at launch: mode, partition count,
