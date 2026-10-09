@@ -405,8 +405,6 @@ class KBWriter:
                 {"reason": "transport_error", "error": str(exc), "rejected": rejected},
             )
 
-    # add_contradiction
-    # internals
     def _upsert_with_dead_letter(
         self,
         payload: dict[str, Any],

@@ -45,8 +45,6 @@ authoritative.
   MAE-synthesized `raw_report` / `fact_sheet`. Recommended read order:
   prefer `session_breakdown.json` if present, fall back to legacy MAE
   output otherwise.
-- **`hyperloom-results-service`** — downstream automation may POST this
-  JSON when `HYPERLOOM_RESULTS_SERVICE_URL` is set.
 - **Offline / notebook analysis** — single file, easy to load, no DB
   needed.
 

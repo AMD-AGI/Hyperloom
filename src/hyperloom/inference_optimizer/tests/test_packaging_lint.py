@@ -123,6 +123,12 @@ def _defines_top_level(path: Path, name: str) -> bool:
     return False
 
 
+def test_legacy_optimizer_console_scripts_are_removed() -> None:
+    scripts = _pyproject()["project"]["scripts"]
+    assert "inference_optimizer" not in scripts
+    assert "quantization-agent" not in scripts
+
+
 def test_console_script_targets_resolve():
     broken: list[str] = []
     for script, target in _pyproject()["project"]["scripts"].items():

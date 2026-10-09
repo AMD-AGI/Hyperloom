@@ -3,11 +3,13 @@
 # SPDX-License-Identifier: MIT
 """Reject commands in agent-facing docs that name a module, subcommand or script that does not exist.
 
-SKILL.md files, agent action docs, orchestrator prompts and the optimizer references are read by LLM
-agents, which run the commands in them verbatim. A renamed module there fails only at runtime, inside
-an agent turn. Every ``<python> -m <module>`` must be a hyperloom/kernelforge module in the source
-tree with a ``__main__`` entry (``hyperloom`` itself with a known command) or an allowed external module, and every
-``src/<package>/...py`` script path must exist. Nothing is imported from the checked tree.
+SKILL.md files, agent action docs under ``src/hyperloom/**/actions/``, orchestrator prompts and the
+optimizer references are read by LLM agents, which run the commands in them verbatim. A renamed module
+there fails only at runtime, inside an agent turn. Every ``<python> -m <module>`` must be a
+hyperloom/kernelforge/hyperloom_kb module in the source tree with a ``__main__`` entry (``hyperloom``
+itself with a known command) or an allowed external/framework module prefix, and every
+``src/<package>/...py`` script path must exist. General ``docs/`` pages and ``*.sh`` comments are out
+of scope; see ``docs/reference/upgrade.md`` for launchers and second-tier entry points.
 
 Usage:
     python scripts/check_cli_references.py [REPO_ROOT]
@@ -28,7 +30,7 @@ from hyperloom import cli as hyperloom_cli  # noqa: E402
 
 _DOC_GLOBS = (
     "**/SKILL.md",
-    "src/hyperloom/agents/**/actions/*.md",
+    "src/hyperloom/**/actions/*.md",
     "src/hyperloom/orchestrator/prompts/**/*.md",
     "src/hyperloom/orchestrator/prompts/**/*.py",
     "src/hyperloom/inference_optimizer/references/**/*.md",

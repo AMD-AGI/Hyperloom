@@ -87,7 +87,28 @@ These flags are rejected with `unrecognized arguments`:
 
 A failed `--quantize` prelude now exits 4 instead of 3; exit 3 means only
 that another optimizer holds the session lock. Launchers that branch on the
-exit code should treat 4 as a non-retryable failure.
+exit code should treat 4 as a non-retryable failure. See also
+[operations.md](operations.md) for the full exit-code table.
+
+### Recommended: commands that stay outside `hyperloom.cli`
+
+`hyperloom <command>` covers setup, check, optimize, recover, quantize,
+multi-node, and `session {breakdown,report,backfill,events,state}`. These
+entry points are **intentionally separate** (same as before the unification,
+only the optimizer-family commands moved under `hyperloom`):
+
+| Entry | Typical use |
+|---|---|
+| `kernelforge` / `python -m kernelforge.cli` | KernelForge campaigns (orchestrator dispatches `-m kernelforge.cli`) |
+| `hyperloom-kb-serve`, `hyperloom-kb-collect`, `python -m hyperloom_kb` | Global Experience KB service and collect CLI |
+| `python -m hyperloom.inference_optimizer.experience_kb_service {init-env,ensure,push,pull}` | Per-workspace Experience KB sidecar (setup skill, optimizer SKILL) |
+| `python -m hyperloom.inference_optimizer.framework_deps` | Installer dependency probe (`install.sh`) |
+| `python -m hyperloom.agents.critic.runtime.cli {prepare-review,commit-review,replay-dead-letter}` | Critic backend subprocess (not operator-facing) |
+| Kernel agent tool modules (`tracelens_analysis`, `bypass_trace_analysis`, …) | Orchestrator subprocess scripts with their own `__main__` |
+| `multi_node/scripts/*.py` on remote pods | Payload scripts SSH'd by `hyperloom multi-node`, not local `-m` entry points |
+
+There is no `hyperloom kb` subcommand in 1.1.x; keep using
+`experience_kb_service` or the `hyperloom-kb-*` console scripts above.
 
 ---
 

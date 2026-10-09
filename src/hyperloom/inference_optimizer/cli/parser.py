@@ -203,8 +203,8 @@ def _build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         metavar="PROMPT",
-        help="Optional natural-language quantization request. When set, the "
-        "quantization-agent runs ONCE as a prelude before the "
+        help="Optional natural-language quantization request. When set, "
+        "`hyperloom quantize` runs ONCE as a prelude before the "
         "optimization loop: it drives AMD Quark PTQ from this prompt, "
         "then rewrites --model to the exported quantized model so the "
         "rest of the run optimizes the quantized model. Ignored on "
