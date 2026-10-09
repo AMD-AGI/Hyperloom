@@ -765,6 +765,14 @@ preflight_validate_credentials
 # steps with "Found no NVIDIA driver". Operators who really need a custom
 # interpreter can opt out with INFERENCE_OPTIMIZER_FORCE_PYTHON=1.
 #
+# HYPERLOOM_FRAMEWORK_VENV_PYTHON names a different canonical stack: a
+# host-managed venv bind-mounted into the container (see rocm-scripts'
+# hyperloom/workload/resolve_venv.py and the VENV/--venv mechanism it backs),
+# used when the operator needs a torch/ROCm build /opt/venv does not ship --
+# e.g. a newer nightly for gfx11 boards. An explicit operator choice, so it
+# is checked before /opt/venv rather than after: unlike a bare-image PYTHON,
+# nothing about it looks like an accident.
+#
 # bare-image bootstrap fallback: when nothing in the search order exists AND
 # apt-get is available (Debian/Ubuntu sandbox), try a best-effort
 # `apt-get install -y python3 python3-venv python3-pip` before giving up.
@@ -776,6 +784,14 @@ resolve_python() {
       return 0
     fi
     die "INFERENCE_OPTIMIZER_FORCE_PYTHON=1 requires an executable PYTHON; refusing interpreter fallback"
+    return 1
+  fi
+  if [ -n "${HYPERLOOM_FRAMEWORK_VENV_PYTHON:-}" ]; then
+    if [ -x "$HYPERLOOM_FRAMEWORK_VENV_PYTHON" ]; then
+      PYTHON="$HYPERLOOM_FRAMEWORK_VENV_PYTHON"
+      return 0
+    fi
+    die "HYPERLOOM_FRAMEWORK_VENV_PYTHON=${HYPERLOOM_FRAMEWORK_VENV_PYTHON} is not executable"
     return 1
   fi
   if [ -x "/opt/venv/bin/python" ]; then
