@@ -344,22 +344,24 @@ def test_correctness_fix_refusal_cases():
     )
 
 
-def test_only_listed_rules_can_justify_a_correctness_fix():
-    before = _report(
-        ("runtime.traceback", "correctness", "detected", "RuntimeError"),
-        ("feature_disabled", "perf_path", "detected", "fuse_rope_kvcache"),
-    )
-    resolved = _report(
-        ("runtime.traceback", "correctness", "not_detected", ""),
-        ("feature_disabled", "perf_path", "not_detected", ""),
-    )
+def test_fallback_rules_can_justify_a_correctness_fix():
+    rules = ("feature_disabled", "capability_disabled", "comm.custom_ar_disabled", "comm.multimem_allgather_disabled")
+    before = _report(*((rule, "perf_path", "detected", "x") for rule in rules))
+    resolved = _report(*((rule, "perf_path", "not_detected", "") for rule in rules))
 
-    assert correctness_fix_refusal(before, resolved, "runtime.traceback:RuntimeError") == (
-        "runtime.traceback cannot justify a correctness fix"
-    )
-    assert correctness_fix_refusal(before, resolved, "feature_disabled:fuse_rope_kvcache") == (
-        "feature_disabled cannot justify a correctness fix"
-    )
+    assert [correctness_fix_refusal(before, resolved, f"{rule}:x") for rule in rules] == ["", "", "", ""]
+
+
+def test_unlisted_rules_cannot_justify_a_correctness_fix():
+    rules = ("runtime.traceback", "aiter.tuned_miss", "engine_adjusted")
+    before = _report(*((rule, "correctness", "detected", "x") for rule in rules))
+    resolved = _report(*((rule, "correctness", "not_detected", "") for rule in rules))
+
+    assert [correctness_fix_refusal(before, resolved, f"{rule}:x") for rule in rules] == [
+        "runtime.traceback cannot justify a correctness fix",
+        "aiter.tuned_miss cannot justify a correctness fix",
+        "engine_adjusted cannot justify a correctness fix",
+    ]
 
 
 def test_persist_writes_slot_file(tmp_path):

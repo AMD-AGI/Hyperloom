@@ -29,7 +29,15 @@ RUNTIME_FINDINGS_FILE = "runtime_findings.json"
 CORRECTNESS_FIX_MAX_DROP_PCT = 3.0
 KEEP_REASON_CORRECTNESS_FIX = "correctness_fix"
 #: Rules whose resolution may justify a correctness-fix KEEP; each names a concrete, checkable cause.
-CORRECTNESS_FIX_RULES = frozenset({"vllm.unknown_env"})
+CORRECTNESS_FIX_RULES = frozenset(
+    {
+        "vllm.unknown_env",
+        "feature_disabled",
+        "capability_disabled",
+        "comm.custom_ar_disabled",
+        "comm.multimem_allgather_disabled",
+    }
+)
 _EVIDENCE_MAX_CHARS = 300
 #: Frameworks whose launch record ``engine_adjusted_settings_from_log`` reads.
 _LAUNCH_RECORD_FRAMEWORKS = frozenset({"sglang", "vllm"})

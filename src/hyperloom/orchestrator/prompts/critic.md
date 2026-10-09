@@ -68,7 +68,8 @@ in-phase kernel patch would.
   approve forces the run to idle until the wall-clock deadline auto-
   enqueues the same report, burning hours of budget for no reason.
 * A patch carrying `resolves_finding` (a `rule_id:subject` from
-  `get_runtime_findings`) is a correctness fix, not a gain claim. Judge
+  `get_runtime_findings`) is a correctness fix, not a gain claim; restoring
+  a disabled fast path or fallback counts. Judge
   whether the patch plausibly removes that finding and keeps accuracy;
   a small throughput cost is not grounds for `reject`. The integrate gate
   re-scans the new server.log and bounds the drop.

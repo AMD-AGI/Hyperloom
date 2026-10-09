@@ -16,6 +16,7 @@ from hyperloom.orchestrator.measurement.runtime_findings import persist_runtime_
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 ENV_LOG = "WARNING [envs.py:2128] Unknown vLLM environment variable detected: VLLM_FOO\n"
+DISABLED_LOG = "WARNING [compilation.py:1183] Disabling fuse_rope_kvcache.\n"
 TRACEBACK_LOG = 'Traceback (most recent call last):\n  File "x.py", line 1, in f\nRuntimeError: bad output\n'
 CLEAN_LOG = "server ready\n"
 FINDING = "vllm.unknown_env:VLLM_FOO"
@@ -34,7 +35,9 @@ def _state(tmp_path: Path) -> SharedState:
     return SharedState(
         baseline_tput=1000.0,
         current_best={"tput": 1000.0},
-        current_best_measurement={"launch_evidence_path": _slot(tmp_path, "before", ENV_LOG + TRACEBACK_LOG)},
+        current_best_measurement={
+            "launch_evidence_path": _slot(tmp_path, "before", ENV_LOG + DISABLED_LOG + TRACEBACK_LOG)
+        },
     )
 
 
@@ -94,13 +97,11 @@ async def test_fix_without_accuracy_is_accuracy_unavailable(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_perf_path_finding_cannot_claim_the_allowance(tmp_path):
-    out = await _gate(
-        tmp_path, after_log=CLEAN_LOG, tput=985.0, accuracy_pass=True, finding="feature_disabled:fuse_rope_kvcache"
-    )
+async def test_restoring_a_disabled_fast_path_keeps_a_small_drop(tmp_path):
+    finding = "feature_disabled:fuse_rope_kvcache"
+    out = await _gate(tmp_path, after_log=CLEAN_LOG, tput=985.0, accuracy_pass=True, finding=finding)
 
-    assert out["status"] == "reverted"
-    assert out["reason"].endswith("feature_disabled cannot justify a correctness fix")
+    assert (out["status"], out["keep_reason"], out["resolves_finding"]) == ("kept", "correctness_fix", finding)
 
 
 @pytest.mark.asyncio
