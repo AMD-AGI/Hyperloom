@@ -699,3 +699,24 @@ def test_kb_and_input_reports_say_the_gains_are_winners_only(tmp_path: Path, mon
     monkeypatch.setattr(pulse.PulseClient, "get", lambda self, path, params=None: {"results": []})
     from_pulse = _run(["--pulse-url", "https://pulse.invalid"], tmp_path)
     assert not any("conditional on a session having won" in line for line in from_pulse["limitations"])
+
+
+def test_a_non_json_pulse_response_is_a_pulse_error(monkeypatch, capsys) -> None:
+    """A 200 HTML page (an SSO login, say) fails like every other Pulse error, not with a traceback."""
+    import io
+    import urllib.request
+
+    from kbmine.pulse import PulseClient, PulseError
+
+    class _Page(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _Page(b"<html>Sign in</html>"))
+    with pytest.raises(PulseError, match="response was not JSON"):
+        PulseClient("https://pulse.invalid", "t").get("/v1/session-breakdowns")
+    assert estimate_main(["--pulse-url", "https://pulse.invalid"]) == 1
+    assert "Pulse fetch failed" in capsys.readouterr().err
