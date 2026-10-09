@@ -56,6 +56,12 @@ from hyperloom.common.failure_signature import CapabilityGap, FailureSignature
 from hyperloom.common.github_urls import repo_slug
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.perf_metric import VERDICT_KEEP
+from hyperloom.orchestrator.measurement.runtime_findings import (
+    CORRECTNESS_FIX_MAX_DROP_PCT,
+    KEEP_REASON_CORRECTNESS_FIX,
+    correctness_fix_refusal,
+    load_runtime_findings,
+)
 from ...bringup import load_boot_observation, observation_summary, verdict_of, write_boot_observation
 from ...delivery import file_digest
 from ...delivery.ledger import append_record, load_prepared_records, load_records, mark_prepared, restore_records
@@ -313,6 +319,16 @@ def _merge_established_server_args(inherited_args: str, round_args: str) -> str:
     return " ".join([*missing, round_args]).strip()
 
 
+def _done_field(done_payload: dict[str, Any] | None, key: str) -> Any:
+    """Read ``key`` from a specialist done payload, top level or nested under ``payload``."""
+    if not isinstance(done_payload, dict):
+        return None
+    if done_payload.get(key):
+        return done_payload[key]
+    inner = done_payload.get("payload")
+    return inner.get(key) if isinstance(inner, dict) else None
+
+
 def _parse_framework_switches(
     *,
     params: dict[str, Any],
@@ -332,13 +348,7 @@ def _parse_framework_switches(
         ``(switches, problems)`` from :func:`_switch_manifest.parse_manifest`;
         ``([], [])`` when no manifest was delivered.
     """
-    raw = params.get(_switch_manifest.MANIFEST_KEY)
-    if not raw and isinstance(done_payload, dict):
-        raw = done_payload.get(_switch_manifest.MANIFEST_KEY)
-        if not raw:
-            inner = done_payload.get("payload")
-            if isinstance(inner, dict):
-                raw = inner.get(_switch_manifest.MANIFEST_KEY)
+    raw = params.get(_switch_manifest.MANIFEST_KEY) or _done_field(done_payload, _switch_manifest.MANIFEST_KEY)
     if not raw:
         return [], []
     # Env the benchmark already defines is reserved: a "switch" colliding with it
@@ -1754,6 +1764,44 @@ def _stamp_framework_kb_provenance(
     )
     target.setdefault("fa_pr_url", pr_url)
     target.setdefault("framework", framework)
+
+
+_FIX_ACCURACY_UNAVAILABLE = "accuracy result unavailable"
+
+
+def _correctness_fix_refusals(
+    resolves_finding: str,
+    *,
+    shared_state: Any,
+    bench_result: dict[str, Any],
+    graded: Any,
+    delta_pct: float | None,
+    accuracy_pass: bool | None,
+) -> list[str]:
+    """Reasons a declared correctness fix may not KEEP below the throughput threshold; empty when it may."""
+    refusals: list[str] = []
+    finding_refusal = correctness_fix_refusal(
+        load_runtime_findings(getattr(shared_state, "current_best_measurement", None) or {}),
+        load_runtime_findings(bench_result),
+        resolves_finding,
+    )
+    if finding_refusal:
+        refusals.append(finding_refusal)
+    if not graded.comparable:
+        refusals.append(f"performance comparison unavailable: {graded.degrade_reason}")
+    elif graded.veto_reason:
+        refusals.append(graded.veto_reason)
+    elif delta_pct is None:
+        refusals.append("no measurable throughput")
+    elif delta_pct < -CORRECTNESS_FIX_MAX_DROP_PCT:
+        refusals.append(
+            f"throughput delta {delta_pct:+.2f}% exceeds the {CORRECTNESS_FIX_MAX_DROP_PCT:.1f}% correctness-fix allowance"
+        )
+    if accuracy_pass is None:
+        refusals.append(_FIX_ACCURACY_UNAVAILABLE)
+    elif accuracy_pass is not True:
+        refusals.append("accuracy eval failed")
+    return refusals
 
 
 def _enforce_critic_gate(
@@ -3618,6 +3666,22 @@ class IntegratePatchExecutor:
             and not graded.veto_reason
             and not acc_block
         )
+        resolves_finding = str(_done_field(done_payload, "resolves_finding") or "").strip()
+        fix_refusals: list[str] = []
+        correctness_fix = False
+        if not gate_pass and resolves_finding:
+            fix_delta_pct = gain_pct(graded.candidate, graded.reference) if graded.graded_on_intvty else delta_pct
+            fix_refusals = _correctness_fix_refusals(
+                resolves_finding,
+                shared_state=shared_state,
+                bench_result=bench_result,
+                graded=graded,
+                delta_pct=fix_delta_pct,
+                accuracy_pass=accuracy_pass,
+            )
+            if not fix_refusals:
+                gate_pass = correctness_fix = True
+                delta_pct = fix_delta_pct
         _ss_kb = extra.get("shared_state") or extra.get("state")
         acc_delta_pct = _accuracy_delta_pct(
             gate_evidence.get("accuracy"),
@@ -3752,12 +3816,16 @@ class IntegratePatchExecutor:
                 reasons.append(graded.veto_reason)
             if acc_block and acc_reason:
                 reasons.append(acc_reason)
+            if fix_refusals:
+                reasons.append(f"correctness fix {resolves_finding} refused: {'; '.join(fix_refusals)}")
             _probe_reason = eval_probe_summary(gate_evidence.get("eval_probe"))
             if _probe_reason:
                 reasons.append(_probe_reason)
             _tput_ok = delta_pct is not None and delta_pct >= keep_threshold_pct
             revert_status = (
-                "accuracy_unavailable_reject" if (acc_block and accuracy_pass is None and _tput_ok) else "reverted"
+                "accuracy_unavailable_reject"
+                if (acc_block and accuracy_pass is None and _tput_ok) or fix_refusals == [_FIX_ACCURACY_UNAVAILABLE]
+                else "reverted"
             )
             await self._maybe_write_framework_kb_record(
                 params=params,
@@ -3928,7 +3996,13 @@ class IntegratePatchExecutor:
             "base_tput": base_tput,
             "measured_against": measured_against,
             "keep_threshold_pct": keep_threshold_pct,
-            "reason": (f"throughput delta {delta_pct:+.2f}% >= {keep_threshold_pct:.2f}%"),
+            "reason": (
+                f"correctness fix {resolves_finding} verified at throughput delta {delta_pct:+.2f}%"
+                if correctness_fix
+                else f"throughput delta {delta_pct:+.2f}% >= {keep_threshold_pct:.2f}%"
+            ),
+            "keep_reason": KEEP_REASON_CORRECTNESS_FIX if correctness_fix else "",
+            "resolves_finding": resolves_finding if correctness_fix else "",
             "bench_result": bench_result,
             "workspace": str(output_root),
             "source_snapshot": source_snapshot_dir,

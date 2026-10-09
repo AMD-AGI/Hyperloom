@@ -25,6 +25,9 @@ NOT_DETECTED = "not_detected"
 UNKNOWN = "unknown"
 
 RUNTIME_FINDINGS_FILE = "runtime_findings.json"
+#: Largest throughput drop a verified correctness fix may cost and still KEEP.
+CORRECTNESS_FIX_MAX_DROP_PCT = 3.0
+KEEP_REASON_CORRECTNESS_FIX = "correctness_fix"
 _EVIDENCE_MAX_CHARS = 300
 #: Frameworks whose launch record ``engine_adjusted_settings_from_log`` reads.
 _LAUNCH_RECORD_FRAMEWORKS = frozenset({"sglang", "vllm"})
@@ -207,15 +210,52 @@ def persist_runtime_findings(report: dict[str, Any], *, slot: Path) -> str:
     return str(path)
 
 
+def _findings_path(measurement: Mapping[str, Any]) -> Path | None:
+    evidence_path = str(measurement.get("launch_evidence_path") or "")
+    return Path(evidence_path).parent / RUNTIME_FINDINGS_FILE if evidence_path else None
+
+
+def load_runtime_findings(measurement: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Load the findings stored beside a measurement's launch evidence; ``None`` when absent."""
+    path = _findings_path(measurement)
+    if path is None or not path.is_file():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def correctness_fix_refusal(before: dict[str, Any] | None, after: dict[str, Any] | None, finding_id: str) -> str:
+    """Why ``finding_id`` is not a correctness finding the candidate resolved; empty when it is."""
+    rule_id, separator, subject = finding_id.partition(":")
+    if not separator:
+        return f"resolves_finding {finding_id!r} is not rule_id:subject"
+    if before is None:
+        return "no runtime findings for the current best"
+    target = next(
+        (f for f in before["findings"] if (f["rule_id"], f["subject"], f["status"]) == (rule_id, subject, DETECTED)),
+        None,
+    )
+    if target is None:
+        return f"{finding_id} is not detected on the current best"
+    if target["category"] != CORRECTNESS:
+        return f"{finding_id} is {target['category']}, not correctness"
+    if after is None:
+        return "no runtime findings for the candidate run"
+    observed = [f for f in after["findings"] if f["rule_id"] == rule_id]
+    if not observed or any(f["status"] == UNKNOWN for f in observed):
+        return f"{rule_id} was not observable on the candidate run"
+    if any(f["subject"] == subject and f["status"] == DETECTED for f in observed):
+        return f"{finding_id} is still detected on the candidate run"
+    return ""
+
+
 def render_runtime_findings(measurement: Mapping[str, Any]) -> str:
     """Render the findings stored beside a measurement's launch evidence."""
-    evidence_path = str(measurement.get("launch_evidence_path") or "")
-    if not evidence_path:
+    path = _findings_path(measurement)
+    if path is None:
         return "(no measurement slot recorded for the current best)"
-    path = Path(evidence_path).parent / RUNTIME_FINDINGS_FILE
-    if not path.is_file():
+    report = load_runtime_findings(measurement)
+    if report is None:
         return f"(no runtime findings written at {path})"
-    report = json.loads(path.read_text(encoding="utf-8"))
     findings = report["findings"]
     lines = [f"runtime findings for {report['log_path'] or '(no server log)'} [{report['framework']}]"]
     lines.extend(

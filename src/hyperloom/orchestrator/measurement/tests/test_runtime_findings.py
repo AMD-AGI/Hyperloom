@@ -7,6 +7,7 @@ from pathlib import Path
 
 from hyperloom.orchestrator.actions.executors.baseline import _attach_baseline_launch_evidence
 from hyperloom.orchestrator.measurement.runtime_findings import (
+    correctness_fix_refusal,
     persist_runtime_findings,
     render_runtime_findings,
     scan_server_log,
@@ -181,6 +182,47 @@ def test_baseline_writes_runtime_findings(tmp_path):
     assert (
         out.splitlines()[1]
         == "- detected [correctness] vllm.unknown_env VLLM_FOO x1: Unknown vLLM environment variable detected: VLLM_FOO"
+    )
+
+
+def _report(*findings: tuple[str, str, str, str]) -> dict:
+    return {
+        "findings": [
+            {"rule_id": r, "category": c, "status": s, "subject": subj, "count": 1, "evidence": "", "reason": ""}
+            for r, c, s, subj in findings
+        ]
+    }
+
+
+def test_correctness_fix_refusal_cases():
+    before = _report(
+        ("runtime.traceback", "correctness", "detected", "RuntimeError"),
+        ("feature_disabled", "perf_path", "detected", "fuse_rope_kvcache"),
+    )
+    resolved = _report(("runtime.traceback", "correctness", "not_detected", ""))
+    other_error = _report(("runtime.traceback", "correctness", "detected", "ValueError"))
+    still = _report(("runtime.traceback", "correctness", "detected", "RuntimeError"))
+    blind = _report(("runtime.traceback", "correctness", "unknown", ""))
+
+    assert correctness_fix_refusal(before, resolved, "runtime.traceback:RuntimeError") == ""
+    assert correctness_fix_refusal(before, other_error, "runtime.traceback:RuntimeError") == ""
+    assert correctness_fix_refusal(before, still, "runtime.traceback:RuntimeError") == (
+        "runtime.traceback:RuntimeError is still detected on the candidate run"
+    )
+    assert correctness_fix_refusal(before, blind, "runtime.traceback:RuntimeError") == (
+        "runtime.traceback was not observable on the candidate run"
+    )
+    assert correctness_fix_refusal(before, resolved, "feature_disabled:fuse_rope_kvcache") == (
+        "feature_disabled:fuse_rope_kvcache is perf_path, not correctness"
+    )
+    assert correctness_fix_refusal(before, resolved, "runtime.traceback") == (
+        "resolves_finding 'runtime.traceback' is not rule_id:subject"
+    )
+    assert correctness_fix_refusal(None, resolved, "runtime.traceback:RuntimeError") == (
+        "no runtime findings for the current best"
+    )
+    assert correctness_fix_refusal(before, None, "runtime.traceback:RuntimeError") == (
+        "no runtime findings for the candidate run"
     )
 
 
