@@ -172,9 +172,8 @@ _now_iso = functools.partial(now_iso, "seconds")
 # warning's ``non_empty_modes``.
 _AUTO_RETRY_WARNING_CODES = frozenset(
     {
-        "steady_state_chunk_empty",
         "steady_state_chunk_missing",
-        # low-quality chunk; same recovery path via ``non_empty_modes``.
+        # low-quality or zero-GPU-events chunk; same recovery path via ``non_empty_modes``.
         "steady_state_chunk_low_quality",
     }
 )

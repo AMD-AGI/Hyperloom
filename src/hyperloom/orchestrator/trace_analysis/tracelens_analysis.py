@@ -4396,8 +4396,13 @@ def _collect_split_chunks(
     split_dir: "Path",
     steady_state_mode: str,
     analysis_trace_path: "Path",
+    health_warnings: "list[dict]",
 ) -> "tuple[Path, dict, dict]":
     """Collect splitter output chunks and select the requested mode.
+
+    Appends a structured warning dict to ``health_warnings`` before raising so
+    the retry consumer in the roofline executor can find it even when the
+    exception propagates past the caller.
 
     Returns ``(selected_chunk, split_meta, mode_to_chunks)``.
     """
@@ -4441,6 +4446,21 @@ def _collect_split_chunks(
     }
     chunk_label, selected_chunks = mode_to_chunks[steady_state_mode]
     if not selected_chunks:
+        available = [m for m, (_, ch) in mode_to_chunks.items() if ch]
+        warning = {
+            "code": "steady_state_chunk_missing",
+            "severity": "blocking",
+            "requested_mode": steady_state_mode,
+            "available_modes": available,
+            "remediation": (
+                "Re-issue roofline with env "
+                "INFERENCE_OPTIMIZER_STEADY_STATE_MODE set to one of "
+                f"{available} (or pass --steady-state-mode directly)."
+            ),
+            "trace_input": str(analysis_trace_path),
+            "split_dir": str(split_dir),
+        }
+        health_warnings.append(warning)
         raise RuntimeError(
             f"steady_state_chunk_missing: requested "
             f"--steady-state-mode={steady_state_mode} but "
@@ -4461,8 +4481,13 @@ def _validate_selected_chunk(
     selected_chunk: "Path",
     mode: str,
     mode_to_chunks: "dict[str, tuple[str, list[Path]]]",
+    health_warnings: "list[dict]",
 ) -> "list[dict]":
     """Run the low-quality busy-ratio gate on the selected chunk.
+
+    Appends a structured warning dict to ``health_warnings`` before raising so
+    the retry consumer in the roofline executor can find it even when the
+    exception propagates past the caller.
 
     Returns a list of health warning dicts (empty when the chunk passes).
     """
@@ -4473,6 +4498,7 @@ def _validate_selected_chunk(
         available_modes=mode_to_chunks,
     )
     if low_quality_warning is not None:
+        health_warnings.append(low_quality_warning)
         raise RuntimeError(
             f"steady_state_chunk_low_quality: requested "
             f"--steady-state-mode={mode} chunk "
@@ -4488,12 +4514,17 @@ def _run_trace_split(
     split_dir: "Path",
     tl_root: "Path",
     log_path: "Path",
+    health_warnings: "list[dict]",
 ) -> "tuple[Path, dict, list[dict]]":
     """Run the TraceLens splitter and return the selected chunk.
 
     Builds the splitter command, runs it, collects chunks, and validates
     the selected chunk. This is the complete splitting pipeline extracted
     from ``main()`` for testability.
+
+    ``health_warnings`` is mutated in place: structured warning dicts are
+    appended before any RuntimeError is raised so the caller's try/except
+    can include them in the result even on failure.
 
     Returns:
         ``(selected_chunk, split_meta, health_warnings)``
@@ -4527,6 +4558,7 @@ def _run_trace_split(
         split_dir,
         args.steady_state_mode,
         analysis_trace_path,
+        health_warnings,
     )
     split_meta.update(
         {
@@ -4542,6 +4574,7 @@ def _run_trace_split(
         selected_chunk,
         args.steady_state_mode,
         mode_to_chunks,
+        health_warnings,
     )
     return selected_chunk, split_meta, warnings
 
@@ -5184,6 +5217,7 @@ def main() -> int:
                     split_dir,
                     tl_root,
                     log_path,
+                    trace_health_warnings,
                 )
                 run_meta["split"].update(split_meta)
                 run_meta["selection"].update(
