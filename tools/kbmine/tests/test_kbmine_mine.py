@@ -649,3 +649,21 @@ def test_the_pulse_walk_notes_reach_the_report(monkeypatch, tmp_path: Path) -> N
     )
     report = _run(["--pulse-url", "https://pulse.invalid"], tmp_path)
     assert any("may be ignoring offset" in note for note in report["fetch_errors"])
+
+
+@pytest.mark.parametrize(
+    ("report_total", "expected"),
+    [
+        (True, "read 1000 of the 5000 identities matching the search (the search's 1000-identity page limit)"),
+        (False, "stopped at the search's 1000-identity page limit and the store reported no total"),
+    ],
+    ids=["with-total", "without-total"],
+)
+def test_the_search_page_limit_is_reported_as_the_cause(monkeypatch, tmp_path: Path, report_total, expected) -> None:
+    monkeypatch.setenv("KB_STORE_URL", "https://kb.invalid")
+    monkeypatch.setattr(estimate_no_run, "KBStoreClient", lambda *a, **k: _FakeStore(5000, report_total=report_total))
+    report = _run(["--hardware", "mi355x", "--max-identities", "2000"], tmp_path)
+    assert report["coverage"]["identities_fetched"] == 1000
+    matching = [line for line in report["limitations"] if "identities" in line or "identity" in line]
+    assert len(matching) == 1 and expected in matching[0]
+    assert "--max-identities" not in matching[0]
