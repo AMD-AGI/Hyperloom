@@ -212,6 +212,28 @@ def _record_geak_integration(entry: dict[str, Any], *, kernel_id: str, macro_cyc
     )
 
 
+def geak_absent_backends(eval_dir: str) -> dict[str, str]:
+    """``{backend: probe}`` for the backends GEAK's environment report lists as absent.
+
+    GEAK records them in ``<eval_dir>/env_report.json`` and deep in its final
+    report; they are provisioning gaps, and nothing else carries them to the
+    optimizer's log or reports.
+    """
+    if not eval_dir:
+        return {}
+    try:
+        report = json.loads((Path(eval_dir) / "env_report.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    absent = report.get("absent_backends") if isinstance(report, dict) else None
+    if not isinstance(absent, dict):
+        return {}
+    return {
+        str(name): str(entry.get("probe") or "") if isinstance(entry, dict) else str(entry or "")
+        for name, entry in absent.items()
+    }
+
+
 @dataclass(frozen=True)
 class KernelExitFacts:
     """What the phase machine's KERNEL exit reads from the task queue."""
@@ -1713,6 +1735,7 @@ class KernelPhase(CoordinatorCollaborator):
                     ),
                     "ref_tput": result.get("ref_tput"),
                     "orchestrator_best_tput_same_config": result.get("orchestrator_best_tput_same_config"),
+                    **({"absent_backends": result["absent_backends"]} if result.get("absent_backends") else {}),
                 },
                 record_delegation=False,
             )
@@ -2363,6 +2386,13 @@ class KernelPhase(CoordinatorCollaborator):
         kill_timeout_sec: int | None = None,
     ) -> None:
         """Record the delegated GEAK runner's terminal state."""
+        absent = geak_absent_backends(str(result.get("eval_dir") or handoff.get("eval_dir") or ""))
+        if absent:
+            result["absent_backends"] = absent
+            log.warning(
+                "GEAK could not use these backends (provisioning gaps, not measured no-wins): %s",
+                "; ".join(f"{name}: {probe}" for name, probe in absent.items()),
+            )
         recorder = self.timeline()
         if recorder is None:
             return

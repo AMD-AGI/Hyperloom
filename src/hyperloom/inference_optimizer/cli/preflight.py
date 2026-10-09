@@ -1641,6 +1641,27 @@ def _check_tracelens_root_exists() -> dict[str, Any]:
     sys.exit(2)
 
 
+_KERNEL_TUNING_CLIS: dict[str, str] = {
+    "hipblaslt-bench": "offline hipBLASLt GEMM solution tuning",
+    "ckProfiler": "the Composable Kernel GEMM/attention instance sweep",
+}
+
+
+def _check_kernel_tuning_clis() -> dict[str, Any]:
+    """WARN-only presence check for the GEMM tuning CLIs the kernel phase's backends call."""
+    missing = [name for name in _KERNEL_TUNING_CLIS if shutil.which(name) is None]
+    for name in missing:
+        print(
+            f"Preflight: WARNING — {name} not on PATH; {_KERNEL_TUNING_CLIS[name]} is unavailable to the kernel "
+            "phase. To use it, build it for this ROCm and put it on PATH."
+        )
+    return {
+        "status": "warned" if missing else "applied",
+        "skip_reason": None,
+        "detail": {"missing": missing},
+    }
+
+
 def _check_node_claude_cli() -> None:
     """WARN-only presence check for bundled agent CLIs (node/claude/codex)."""
     missing = [t for t in ("node", "claude", "codex") if shutil.which(t) is None]
@@ -2573,6 +2594,21 @@ def _preflight(
     # install.sh before a missing CLI surfaces mid-run.
     no_kernel = getattr(args, "no_kernel", False) if args else False
     enable_roofline = getattr(args, "enable_roofline", True) if args else True
+    if no_kernel:
+        _record_install_step(
+            install_event,
+            step_id="check_kernel_tuning_clis",
+            category="check",
+            status="skipped",
+            skip_reason="no_kernel",
+        )
+    else:
+        _run_install_step(
+            install_event,
+            step_id="check_kernel_tuning_clis",
+            category="check",
+            action=_check_kernel_tuning_clis,
+        )
     if _tracelens_required_at_preflight(no_kernel, enable_roofline):
         _run_install_step(
             install_event,

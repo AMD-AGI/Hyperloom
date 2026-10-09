@@ -164,6 +164,48 @@ async def test_geak_kernel_phase_does_not_reuse_already_promoted_result(
 
 
 @pytest.mark.asyncio
+async def test_a_baseline_reproduction_failure_keeps_the_absent_backends(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = tmp_path / "geak_runner.py"
+    runner.write_text(
+        "import json, pathlib, sys\n"
+        "out = pathlib.Path(sys.argv[2])\n"
+        "ev = out / 'eval'\n"
+        "ev.mkdir(parents=True, exist_ok=True)\n"
+        "(ev / 'env_report.json').write_text(json.dumps("
+        "{'absent_backends': {'ck': {'probe': 'which ckProfiler'}}}))\n"
+        "(out / 'result.json').write_text(json.dumps({'status': 'baseline_reproduction_failed', "
+        "'error': 'ref 90.0 != best 100.0', 'eval_dir': str(ev)}))\n",
+        encoding="utf-8",
+    )
+    coord = Coordinator.__new__(Coordinator)
+    coord.session_dir = tmp_path
+    coord.shared_state = SharedState(
+        baseline_tput=100.0,
+        current_best={"action": "baseline", "tput": 100.0},
+        model_path="/models/qwen",
+        gpu_type="mi300x",
+        isl=512,
+        osl=128,
+        conc=15,
+    )
+    coord._run_deadline = None
+    coord.phase_kernel._record_geak_kernel_journey = lambda _result: None
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
+        lambda _name: runner,
+    )
+
+    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
+
+    geak_result = coord.shared_state.geak_result
+    assert geak_result["status"] == "baseline_reproduction_failed"
+    assert geak_result["absent_backends"] == {"ck": "which ckProfiler"}
+
+
+@pytest.mark.asyncio
 async def test_geak_handoff_preserves_serving_fidelity_knobs_and_output_metric(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
