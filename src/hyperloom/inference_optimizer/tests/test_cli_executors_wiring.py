@@ -25,45 +25,25 @@ def test_recover_executor_is_not_registered() -> None:
     assert "recover" not in _REAL_EXECUTORS_FULL
 
 
-def _spec_args(dispatch_mode: str) -> argparse.Namespace:
+def _spec_args() -> argparse.Namespace:
     return argparse.Namespace(
         claude_model="claude-opus-4-6",
         specialist_model=None,
         specialist_max_turns=3,
-        specialist_per_turn_max_seconds=120.0,
-        specialist_dispatch_mode=dispatch_mode,
         specialist_mcp_config=None,
     )
 
 
-def test_build_specialist_executor_inprocess_when_no_claude(monkeypatch, tmp_path):
-    """dispatch_mode=inprocess builds the in-process backend runner."""
-    import shutil
-
-    monkeypatch.setattr(shutil, "which", lambda _n: "")
-    executor = _build_specialist_executor(
-        _spec_args("inprocess"),
-        session_dir=tmp_path,
-        knowledge_plane=None,
-    )
-    assert callable(executor)
-
-
-def test_build_specialist_executor_refuses_to_start_without_claude_on_path(monkeypatch, tmp_path):
-    """The in-process backend has no tools, so a missing CLI must stop the run rather than degrade it."""
+def test_build_specialist_executor_refuses_to_start_without_a_claude_cli(monkeypatch, tmp_path):
+    """Specialists only run as CLI subprocesses, so a missing CLI stops the run at startup."""
     import shutil
 
     monkeypatch.setattr(shutil, "which", lambda _n: "")
     monkeypatch.delenv("GEAK_CLAUDE_BIN", raising=False)
     monkeypatch.delenv("HYPERLOOM_CLAUDE_CLI_PATH", raising=False)
-    monkeypatch.setattr(
-        cli_executors,
-        "ClaudeBackend",
-        lambda **_kwargs: pytest.fail("a missing claude CLI must not fall back to the in-process backend"),
-    )
     with pytest.raises(RuntimeError, match="none was found in"):
         _build_specialist_executor(
-            _spec_args("subprocess"),
+            _spec_args(),
             session_dir=tmp_path,
             knowledge_plane=None,
         )
@@ -81,7 +61,7 @@ def test_build_specialist_executor_subprocess_uses_the_recorded_claude(monkeypat
     monkeypatch.setenv("GEAK_CLAUDE_BIN", str(recorded))
     with caplog.at_level(logging.WARNING, logger=cli_executors.log.name):
         executor = _build_specialist_executor(
-            _spec_args("subprocess"),
+            _spec_args(),
             session_dir=tmp_path,
             knowledge_plane=None,
         )
@@ -100,7 +80,7 @@ def test_build_specialist_executor_subprocess_with_knowledge_plane(monkeypatch, 
             return "http://pr-monitor.invalid/mcp"
 
     executor = _build_specialist_executor(
-        _spec_args("subprocess"),
+        _spec_args(),
         session_dir=tmp_path,
         knowledge_plane=_KP(),
     )
@@ -114,7 +94,7 @@ def test_build_specialist_executor_subprocess_kp_missing_methods(monkeypatch, tm
     monkeypatch.setattr(shutil, "which", lambda _n: "/usr/bin/claude")
 
     executor = _build_specialist_executor(
-        _spec_args("subprocess"),
+        _spec_args(),
         session_dir=tmp_path,
         knowledge_plane=object(),
     )
