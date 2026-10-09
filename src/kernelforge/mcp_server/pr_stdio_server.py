@@ -11,12 +11,12 @@ import json
 import os
 from typing import Any
 
-from kernelforge.knowledge.pr_monitor_client import (
+from kernelforge.knowledge.pr_knowledge.client import (
     PRContractError,
     PRMonitorClient,
 )
-from kernelforge.knowledge.pr_monitor_search import discover
-from kernelforge.knowledge.pr_query_context import PRQueryContext
+from kernelforge.knowledge.pr_knowledge.search import discover
+from kernelforge.knowledge.pr_knowledge.context import PRQueryContext
 from kernelforge.mcp_server import stdio_transport
 
 #: Re-exported so the two servers stay one import away from the shared wire

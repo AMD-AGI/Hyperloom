@@ -9,8 +9,8 @@ from dataclasses import replace
 
 import pytest
 
-from kernelforge.knowledge.kernel_identity import kernel_recipe_canonical_id
-from kernelforge.knowledge.loop_identity import resolve_loop_identity
+from kernelforge.knowledge.kb_store.identity.kernel_recipe import kernel_recipe_canonical_id
+from kernelforge.knowledge.kb_store.identity.run import resolve_loop_identity
 from kernelforge.loop.campaign_config import (
     CampaignConfig,
     CampaignConfigStore,

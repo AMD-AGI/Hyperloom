@@ -17,7 +17,7 @@ import click
 import pytest
 
 from kernelforge.cli import _load_external_baseline
-from kernelforge.knowledge import experience_integration as integration
+from kernelforge.loop import knowledge_integration as integration
 from kernelforge.loop.baseline_reference import (
     BASELINE_DRIFT_TOLERANCE,
     BaselineReferenceError,
