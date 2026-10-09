@@ -74,8 +74,8 @@ def resolve_credentials(args: argparse.Namespace) -> tuple[str, str]:
         path = Path(args.kb_store_token_file).expanduser()
         try:
             token = path.read_text(encoding="utf-8").strip()
-        except OSError as exc:
-            raise SystemExit(f"cannot read --kb-store-token-file {path}: {exc}")
+        except (OSError, ValueError) as exc:
+            raise SystemExit(f"cannot read --kb-store-token-file {path}: {exc}") from exc
     if not token:
         token = (os.environ.get("KB_STORE_TOKEN") or "").strip()
     return url, token
@@ -304,8 +304,12 @@ def main(argv: list[str] | None = None) -> int:
     report["kb_store_url"] = store_url
     text = json.dumps(report, indent=2, sort_keys=True)
     if args.output is not None:
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(text + "\n", encoding="utf-8")
+        try:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(text + "\n", encoding="utf-8")
+        except OSError as exc:
+            print(f"cannot write --output {args.output}: {exc}", file=sys.stderr)
+            return 1
     else:
         print(text)
     return 0
