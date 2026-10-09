@@ -79,6 +79,52 @@ def _stub_turn(
     return captured
 
 
+def _stub_turns(monkeypatch: pytest.MonkeyPatch, results: list[DeepSeekSessionResult]) -> list[str]:
+    """Replace the SDK session with one replying ``results`` in order; returns the prompts it was sent."""
+    prompts: list[str] = []
+    _stub_turn(monkeypatch, DeepSeekSessionResult(text=""))
+
+    async def _turn(session: DeepSeekSession, prompt: str, *, timeout_sec: float) -> DeepSeekSessionResult:
+        prompts.append(prompt)
+        return results[len(prompts) - 1]
+
+    monkeypatch.setattr(DeepSeekSession, "turn", _turn)
+    return prompts
+
+
+async def test_a_rejected_envelope_is_corrected_in_the_same_conversation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A schema-backed transport hands the validation error back to the model; this route must too."""
+    rejected = _reply("alert", {"severity": "info", "summary": "holding"})
+    corrected = _reply("alert", {"severity": "low", "summary": "holding"})
+    prompts = _stub_turns(
+        monkeypatch,
+        [DeepSeekSessionResult(text=rejected, session_id="s1"), DeepSeekSessionResult(text=corrected, session_id="s1")],
+    )
+
+    result = await _backend(tmp_path).run("status?")
+
+    assert [intent.type for intent in result.intents] == [IntentType.ALERT]
+    assert len(prompts) == 2
+    assert "severity must be one of" in prompts[1]
+
+
+async def test_a_correction_that_is_still_rejected_fails_the_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompts = _stub_turns(
+        monkeypatch,
+        [DeepSeekSessionResult(text="no envelope", session_id="s1"), DeepSeekSessionResult(text="still none")],
+    )
+
+    with pytest.raises(NoIntentEmitted, match="no JSON object"):
+        await _backend(tmp_path).run("status?")
+    assert len(prompts) == 2
+
+
 # The reply shapes a model can emit when nothing enforces a schema.
 
 

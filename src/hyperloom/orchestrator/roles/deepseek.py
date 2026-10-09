@@ -90,6 +90,8 @@ nothing around it:
 """.strip()
 
 
+_REJECTED_REPLY = "Your previous reply was rejected and none of its intents were applied: {error}. Reply again."
+
 #: Instructions the harness needs in order to read prompts written for Claude's
 #: tool names. The harness exposes equivalent capabilities under its own names,
 #: and an unrecognized literal name would otherwise read as a missing tool.
@@ -269,44 +271,30 @@ class DeepSeekBackend:
         else:
             turn_prompt = f"{prompt}\n\n{_ENVELOPE_REMINDER} {self._legal_intent_types()}"
 
-        async def _one_attempt() -> Any:
-            """Acquire the session and run one turn under the retry policy."""
-            session = await self._session_for(system_prompt)
-            return await session.turn(turn_prompt, timeout_sec=self.call_timeout_s)
-
-        def _note_retry(attempt: int, exc: BaseException, delay: float) -> None:
-            """Record a transient-failure retry warning into the call log."""
-            self.calls.append(
-                {"warn": f"deepseek SDK transient failure (attempt {attempt}): {exc!r}; retrying in {delay:.2f}s"}
-            )
-
-        try:
-            sdk_result = await retry_with_backoff(
-                _one_attempt,
-                policy=self.retry_policy,
-                retry_on=(DeepSeekSessionError,),
-                on_retry=_note_retry,
-            )
-        except DeepSeekSessionError as exc:
-            raise LLMCallFailed(f"DeepSeek Harness turn failed: {redact_secret_values(str(exc))}") from exc
-        if sdk_result.error:
-            raise LLMCallFailed("DeepSeek Harness turn failed: " + redact_secret_values(sdk_result.error))
-
+        sdk_result = await self._drive_turn(system_prompt, turn_prompt, prompt_chars=len(prompt))
         usage = dict(sdk_result.usage or {})
+        rejection: NoIntentEmitted | None = None
+        intents: list[Any] = []
+        if not allow_no_intent:
+            try:
+                intents = self._parse(sdk_result.text)
+            except NoIntentEmitted as exc:
+                rejection = exc
+        if rejection is not None:
+            # A schema-backed transport hands the validation error back to the model within the turn.
+            correction = (
+                f"{_REJECTED_REPLY.format(error=rejection)}\n\n{_ENVELOPE_REMINDER} {self._legal_intent_types()}"
+            )
+            sdk_result = await self._drive_turn(system_prompt, correction, prompt_chars=len(correction))
+            for key, value in (sdk_result.usage or {}).items():
+                if key == "context_tokens_peak":
+                    usage[key] = max(safe_int(usage.get(key)), safe_int(value))
+                else:
+                    usage[key] = safe_int(usage.get(key)) + safe_int(value)
+
         input_tokens = safe_int(usage.get("input_tokens"))
         output_tokens = safe_int(usage.get("output_tokens"))
         cache_read_tokens = safe_int(usage.get("cache_read_input_tokens"))
-        self.calls.append(
-            {
-                "model": self.model,
-                "prompt_chars": len(prompt),
-                "reply_chars": len(sdk_result.text),
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "cache_read_input_tokens": cache_read_tokens,
-                "session_id": sdk_result.session_id,
-            }
-        )
         metadata: dict[str, Any] = {
             "model": self.model,
             "session_id": sdk_result.session_id,
@@ -326,14 +314,54 @@ class DeepSeekBackend:
             "response": sdk_result.text,
         }
 
-        if allow_no_intent:
-            return BackendTurnResult(intents=[], raw_text=sdk_result.text, metadata=metadata)
-        envelope = decode_intent_envelope(sdk_result.text)
+        if rejection is not None:
+            intents = self._parse(sdk_result.text)
+        return BackendTurnResult(intents=intents, raw_text=sdk_result.text, metadata=metadata)
+
+    async def _drive_turn(self, system_prompt: str | None, turn_prompt: str, *, prompt_chars: int) -> Any:
+        """Run one harness turn under the transient-failure retry policy and log its usage."""
+
+        async def _one_attempt() -> Any:
+            session = await self._session_for(system_prompt)
+            return await session.turn(turn_prompt, timeout_sec=self.call_timeout_s)
+
+        def _note_retry(attempt: int, exc: BaseException, delay: float) -> None:
+            self.calls.append(
+                {"warn": f"deepseek SDK transient failure (attempt {attempt}): {exc!r}; retrying in {delay:.2f}s"}
+            )
+
         try:
-            intents = validate_envelope(envelope)
+            sdk_result = await retry_with_backoff(
+                _one_attempt,
+                policy=self.retry_policy,
+                retry_on=(DeepSeekSessionError,),
+                on_retry=_note_retry,
+            )
+        except DeepSeekSessionError as exc:
+            raise LLMCallFailed(f"DeepSeek Harness turn failed: {redact_secret_values(str(exc))}") from exc
+        if sdk_result.error:
+            raise LLMCallFailed("DeepSeek Harness turn failed: " + redact_secret_values(sdk_result.error))
+        usage = dict(sdk_result.usage or {})
+        self.calls.append(
+            {
+                "model": self.model,
+                "prompt_chars": prompt_chars,
+                "reply_chars": len(sdk_result.text),
+                "input_tokens": safe_int(usage.get("input_tokens")),
+                "output_tokens": safe_int(usage.get("output_tokens")),
+                "cache_read_input_tokens": safe_int(usage.get("cache_read_input_tokens")),
+                "session_id": sdk_result.session_id,
+            }
+        )
+        return sdk_result
+
+    @staticmethod
+    def _parse(text: str) -> list[Any]:
+        envelope = decode_intent_envelope(text)
+        try:
+            return validate_envelope(envelope)
         except IntentValidationError as exc:
             raise NoIntentEmitted(f"deepseek envelope invalid: {exc}") from exc
-        return BackendTurnResult(intents=intents, raw_text=sdk_result.text, metadata=metadata)
 
     def _legal_intent_types(self) -> str:
         """The one line that stands in for the schema enum this route lacks.
