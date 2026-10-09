@@ -52,7 +52,9 @@ _PER_TURN_CONTRACT_OVERRIDE = (
 # would otherwise drift back to prose.
 _ENVELOPE_REMINDER = (
     "Reply with exactly one JSON object matching the OUTPUT FORMAT block in your "
-    "instructions. No prose and no code fence around it."
+    "instructions. No prose and no code fence around it. Its shape is "
+    '{"intents": [{"intent_type": "<type>", "payload": "<JSON object as a string>"}]}; '
+    "each intent carries exactly the keys `intent_type` and `payload`."
 )
 
 #: Instructions the harness needs in order to read prompts written for Claude's
@@ -155,6 +157,9 @@ def decode_intent_envelope(text: str) -> dict[str, Any]:
     for index, item in enumerate(envelope["intents"]):
         if not isinstance(item, dict):
             raise NoIntentEmitted(f"deepseek intents[{index}] is not an object")
+        if "payload" not in item:
+            keys = ", ".join(sorted(str(key) for key in item))
+            raise NoIntentEmitted(f"deepseek intents[{index}] has no 'payload' key (keys: {keys})")
         payload = item.get("payload")
         if isinstance(payload, str):
             try:

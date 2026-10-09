@@ -234,6 +234,23 @@ async def test_every_turn_restates_the_envelope_contract(
     assert deepseek_module._ENVELOPE_REMINDER in captured["prompt"]
 
 
+async def test_every_turn_spells_out_the_intent_object_keys(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Compaction folds the first message away; a live run then wrote 'intent_payload' for 'payload' on every tick."""
+    captured = _stub_turn(monkeypatch, DeepSeekSessionResult(text=_reply("send_message", {"topic": "heartbeat"})))
+    await _backend(tmp_path).run("status?")
+
+    assert '{"intents": [{"intent_type": "<type>", "payload": "<JSON object as a string>"}]}' in captured["prompt"]
+
+
+def test_an_intent_without_a_payload_key_names_the_keys_it_carried() -> None:
+    envelope = json.dumps({"intents": [{"intent_type": "alert", "intent_payload": {"severity": "low"}}]})
+    with pytest.raises(NoIntentEmitted, match=r"no 'payload' key \(keys: intent_payload, intent_type\)"):
+        decode_intent_envelope(envelope)
+
+
 async def test_a_changed_system_prompt_reopens_the_conversation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
