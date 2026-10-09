@@ -123,6 +123,27 @@ async def test_votes_rank_rows_a_knob_family_takes_one_slot_and_six_is_the_cap(s
     assert rows[0]["reason"] == "predictor: --block-size"
 
 
+async def test_a_rationale_is_the_rows_reason_and_the_queue_shows_it_at_length(service):
+    long_reason = "Attention is 38% of GPU time and every one of its rows is memory-bound at single-digit efficiency."
+    specialist = {
+        "task_id": "s1",
+        "domain": "serving_specialist",
+        "cycle": 0,
+        "proposal_set": [{"name": "spec", "extra_args": "--enable-chunked-prefill", "reason": long_reason}],
+    }
+    rationale = ("So the change to make is to set --kv-cache-dtype fp8, which halves the bytes every decode step "
+                 "reads from the cache. The argument stands only if accuracy holds at fp8.")  # fmt: skip
+    state = _state(specialist_rounds=[specialist])
+    service.answer = _answer(Action(server_args={"--kv-cache-dtype": "fp8"}, rationale=rationale), votes={0: 4})
+    await _ask_and_file(pump_mod.PredictorPump(), state)
+
+    (row,) = _predictor_rounds(state)[0]["proposal_set"]
+    assert row["reason"] == f"PrimaTune 4/8: {rationale}"
+    predictor_line, specialist_line = state.to_untested_proposals_summary().splitlines()[-2:]
+    assert predictor_line.endswith(f"why=PrimaTune 4/8: {rationale}")
+    assert specialist_line.endswith(f"why={long_reason[:80].rstrip()}")
+
+
 async def test_benched_queued_and_on_stack_proposals_are_not_queued_again(service):
     queued = {"task_id": "s1", "domain": "serving_specialist", "cycle": 0,
               "proposal_set": [{"name": "q", "extra_args": "--enable-chunked-prefill"}]}  # fmt: skip

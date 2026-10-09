@@ -54,7 +54,7 @@ def test_posts_the_request_and_reads_every_action_best_first(service):
         200,
         _answer(
             actions=[
-                {"server_args": {"--kv-cache-dtype": "fp8"}, "envs": {}},
+                {"server_args": {"--kv-cache-dtype": "fp8"}, "envs": {}, "rationale": "fp8 KV\n  halves the reads."},
                 {"server_args": {}, "envs": {}},
                 {"source_change": "fuse the rmsnorm"},
             ],
@@ -66,6 +66,7 @@ def test_posts_the_request_and_reads_every_action_best_first(service):
     assert service["requests"] == [("/v1/predict", {"schema": "x"})]
     assert answer.parsed and answer.meta == {"samples": 8}
     assert [a.server_args for a in answer.config_actions] == [{"--kv-cache-dtype": "fp8"}]
+    assert answer.config_actions[0].rationale == "fp8 KV halves the reads."
     assert answer.source_change == "fuse the rmsnorm"
     assert len(answer.actions) == 2
 

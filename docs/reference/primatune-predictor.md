@@ -81,6 +81,13 @@ point. Each proposal becomes a queue row after four steps:
 4. Rows are ordered by how many of the service's samples proposed them. Each knob
    family takes one slot, and at most six rows are queued per answer.
 
+A row's `reason` is `PrimaTune <votes>/<samples>: <rationale>` when the service
+explains its proposal, and `predictor: <knobs>` when it does not; a row keeps
+600 characters of the rationale. The untested-proposal block shows a predictor
+row's reason whole, against 80 characters for a specialist row: a specialist's
+findings reach orchestration in their own section, while the reason is
+everything a predictor row says.
+
 The round carries `priority: 1`. Specialist rounds carry none, so predictor rows sit
 at the head of the untested-proposal queue, which the Coordinator benches from
 whenever no explore task is queued or running. They are graded like any other
@@ -158,7 +165,7 @@ A bound label of `unknown` is sent as absent, because the service renders labels
 |---|---|
 | `schema` | `primatune.predictor_response.*`; any other value is treated as no answer. |
 | `parsed` | `false` when the service declined to answer. |
-| `actions` | Every distinct proposal: `server_args` (flag to value, `true` for a bare flag), `envs`, `source_change`. A service that does not sample may send a single `action` instead. |
+| `actions` | Every distinct proposal: `server_args` (flag to value, `true` for a bare flag), `envs`, `source_change`, and optionally `rationale`, the proposal's mechanism and what it rests on. A service that does not sample may send a single `action` instead. |
 | `meta.candidates` | The raw samples. They are used only to count votes. |
 | `meta.samples`, `meta.prompt_chars` | Recorded on the queue round. |
 

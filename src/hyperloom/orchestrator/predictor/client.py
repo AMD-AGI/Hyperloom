@@ -34,6 +34,8 @@ class Action:
     server_args: dict[str, Any] = field(default_factory=dict)
     envs: dict[str, Any] = field(default_factory=dict)
     source_change: str = ""
+    #: The service's account of the mechanism and what it rests on; optional on the wire.
+    rationale: str = ""
 
     @property
     def has_config(self) -> bool:
@@ -71,6 +73,7 @@ def _action(value: Any) -> Action:
         server_args=_str_map(raw.get("server_args")),
         envs=_str_map(raw.get("envs")),
         source_change=str(raw.get("source_change") or "").strip(),
+        rationale=" ".join(str(raw.get("rationale") or "").split()),
     )
 
 
