@@ -101,8 +101,8 @@ only the optimizer-family commands moved under `hyperloom`):
 |---|---|
 | `kernelforge` / `python -m kernelforge.cli` | KernelForge campaigns (orchestrator dispatches `-m kernelforge.cli`) |
 | `hyperloom-kb-serve`, `hyperloom-kb-collect`, `python -m hyperloom_kb` | Experience KB service and collect CLI |
-| `hyperloom-kb` / `python -m hyperloom_kb.cli` | Operate any Experience KB service: health, push, pull, rebind, labels, restore, exclusions, list, export |
-| `python -m hyperloom.inference_optimizer.experience_kb_service {init-env,ensure,push,pull,...}` | Per-workspace Experience KB sidecar, with every `hyperloom-kb` command (setup skill, optimizer SKILL) |
+| `hyperloom-kb` / `python -m hyperloom_kb.cli` | Operate an Experience KB service: health, labels, restore, exclusions, list, export |
+| `python -m hyperloom.inference_optimizer.experience_kb_service {init-env,ensure,...}` | Per-workspace Experience KB sidecar, with every `hyperloom-kb` command (setup skill, optimizer SKILL) |
 | `python -m hyperloom.inference_optimizer.framework_deps` | Installer dependency probe (`install.sh`) |
 | `python -m hyperloom.agents.critic.runtime.cli {prepare-review,commit-review,replay-dead-letter}` | Critic backend subprocess (not operator-facing) |
 | Kernel agent tool modules (`tracelens_analysis`, `bypass_trace_analysis`, …) | Orchestrator subprocess scripts with their own `__main__` |

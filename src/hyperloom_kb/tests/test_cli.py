@@ -201,7 +201,11 @@ def test_the_skill_describes_every_command_by_how_it_is_run() -> None:
     commands = argparse.ArgumentParser().add_subparsers(dest="command")
     add_commands(commands)
 
-    assert [name for name in commands.choices if f"hyperloom-kb {name}" not in skill] == []
+    # The docs name a global KB only by its settings, so the skill leaves out the commands that need one.
+    needs_a_global_kb = {"push", "pull", "rebind"}
+    assert [
+        name for name in commands.choices if name not in needs_a_global_kb and f"hyperloom-kb {name}" not in skill
+    ] == []
     for text in ("HYPERLOOM_KB_URL", "HYPERLOOM_KB_TOKEN", "python3 -m hyperloom_kb.cli", "add_commands"):
         assert text in skill
 
