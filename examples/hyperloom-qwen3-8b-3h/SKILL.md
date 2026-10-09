@@ -52,8 +52,8 @@ skip the user-approval step (#1314).
 Suggested Docker images:
 
 - `vllm`: `docker.io/rocm/vllm:rocm10.0.0_ubuntu24.04_py3.14_pytorch_2.12.0_vllm_0.27.0`
-- `sglang` MI300X: `docker.io/lmsysorg/sglang-rocm:v0.5.20-rocm10-mi30x-20260920`
-- `sglang` MI355X: `docker.io/lmsysorg/sglang-rocm:v0.5.20-rocm10-mi35x-20260920`
+- `sglang` MI300X: `docker.io/lmsysorg/sglang-rocm:v0.5.21-rocm10-mi30x-20261008`
+- `sglang` MI355X: `docker.io/lmsysorg/sglang-rocm:v0.5.21-rocm10-mi35x-20261008`
 
 In Docker mode, start a long-running container on `HYPERLOOM_DOCKER_TARGET_HOST`
 (or the current host when it is unset) before running setup or optimize:
