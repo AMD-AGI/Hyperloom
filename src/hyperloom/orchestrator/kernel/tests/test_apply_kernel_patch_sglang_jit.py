@@ -6,23 +6,17 @@
 from __future__ import annotations
 
 import sys
-import types
 from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.kernel import apply_kernel_patch
+from hyperloom.orchestrator.kernel import apply_kernel_patch as akp
 
 _SGLANG_ROOT = "/sgl-workspace/sglang"
 _KDA_CUH = f"{_SGLANG_ROOT}/python/sglang/kernels/jit/csrc/attention/kda_packed_decode.cuh"
 _KDA_WRAPPER = f"{_SGLANG_ROOT}/python/sglang/kernels/ops/attention/kda_packed_decode.py"
 _AOT_CU = f"{_SGLANG_ROOT}/python/sglang/kernels/aot/csrc/elementwise/dsv4_norm_rope.cu"
 _EDITABLE_REINSTALL = ["/opt/venv/bin/python", "-m", "pip", "install", "-e", "python"]
-
-
-@pytest.fixture()
-def akp() -> types.ModuleType:
-    return apply_kernel_patch
 
 
 @pytest.mark.parametrize(
@@ -33,7 +27,7 @@ def akp() -> types.ModuleType:
         "python/sglang/kernels/jit/include/sgl_kernel/tensor.h",
     ),
 )
-def test_sglang_jit_source_never_reinstalls_sglang(akp, relative):
+def test_sglang_jit_source_never_reinstalls_sglang(relative):
     strategy = akp._detect_strategy(Path(_SGLANG_ROOT) / relative)
 
     assert strategy["compiled"] is True
@@ -51,7 +45,7 @@ def test_sglang_jit_source_never_reinstalls_sglang(akp, relative):
         "python/sglang/kernels/jit/utils/compile.py",
     ),
 )
-def test_sglang_python_target_stays_source_only(akp, relative):
+def test_sglang_python_target_stays_source_only(relative):
     strategy = akp._detect_strategy(Path(_SGLANG_ROOT) / relative)
 
     assert strategy["compiled"] is False
@@ -59,7 +53,7 @@ def test_sglang_python_target_stays_source_only(akp, relative):
     assert strategy["rebuild_command"] == []
 
 
-def test_sglang_aot_source_keeps_editable_reinstall(akp):
+def test_sglang_aot_source_keeps_editable_reinstall():
     target = Path(_SGLANG_ROOT) / "python/sglang/kernels/aot/csrc/elementwise/dsv4_norm_rope.cu"
 
     strategy = akp._detect_strategy(target)
@@ -68,7 +62,7 @@ def test_sglang_aot_source_keeps_editable_reinstall(akp):
     assert strategy["rebuild_command"] == _EDITABLE_REINSTALL
 
 
-def test_kda_patch_set_drives_no_editable_reinstall(akp):
+def test_kda_patch_set_drives_no_editable_reinstall():
     strategies = akp._multi_root_strategies([Path(_KDA_CUH), Path(_KDA_WRAPPER)])
 
     assert [strategy["rebuild_mode"] for strategy in strategies] == ["content_addressed_jit"]
@@ -76,7 +70,7 @@ def test_kda_patch_set_drives_no_editable_reinstall(akp):
 
 
 @pytest.mark.parametrize("jit_first", (True, False))
-def test_jit_and_aot_sources_keep_separate_strategies(akp, jit_first):
+def test_jit_and_aot_sources_keep_separate_strategies(jit_first):
     """One root now yields two rebuild modes, so dedup must not drop either."""
     paths = [Path(_KDA_CUH), Path(_AOT_CU)]
     if not jit_first:
@@ -90,7 +84,7 @@ def test_jit_and_aot_sources_keep_separate_strategies(akp, jit_first):
     ]
 
 
-def test_same_root_and_mode_still_rebuilds_once(akp):
+def test_same_root_and_mode_still_rebuilds_once():
     other_aot = Path(_SGLANG_ROOT) / "python/sglang/kernels/aot/csrc/attention/decode.cu"
 
     strategies = akp._multi_root_strategies([Path(_AOT_CU), other_aot])
@@ -98,7 +92,7 @@ def test_same_root_and_mode_still_rebuilds_once(akp):
     assert [strategy["rebuild_command"] for strategy in strategies] == [_EDITABLE_REINSTALL]
 
 
-def test_sglang_jit_rebuild_defers_to_runtime(akp, tmp_path, monkeypatch):
+def test_sglang_jit_rebuild_defers_to_runtime(tmp_path, monkeypatch):
     def _fail(command, cwd, timeout_sec):
         raise AssertionError(f"unexpected rebuild subprocess: {command}")
 
@@ -117,14 +111,14 @@ def test_sglang_jit_rebuild_defers_to_runtime(akp, tmp_path, monkeypatch):
     assert akp._rebuild_ok_to_proceed(result) is True
 
 
-def test_sglang_jit_needs_no_jit_cache_invalidation(akp):
+def test_sglang_jit_needs_no_jit_cache_invalidation():
     strategy = akp._detect_strategy(Path(_KDA_CUH))
     skipped = {"status": "skipped", "reason": "target is outside aiter csrc"}
 
     assert akp._runtime_jit_invalidation_error(strategy, skipped) == ""
 
 
-def test_sglang_jit_rebuild_runs_no_import_probe(akp):
+def test_sglang_jit_rebuild_runs_no_import_probe():
     strategy = akp._detect_strategy(Path(_KDA_CUH))
 
     assert strategy["import_probes"] == []
@@ -137,14 +131,14 @@ def test_sglang_jit_rebuild_runs_no_import_probe(akp):
         ("sgl-kernel/csrc/foo.cu", ["sgl_kernel"]),
     ),
 )
-def test_sglang_editable_rebuild_declares_import_probes(akp, relative, probes):
+def test_sglang_editable_rebuild_declares_import_probes(relative, probes):
     strategy = akp._detect_strategy(Path(_SGLANG_ROOT) / relative)
 
     assert strategy["rebuild_command"] != []
     assert strategy["import_probes"] == probes
 
 
-def test_rebuild_fails_when_reinstall_breaks_imports(akp, monkeypatch, tmp_path):
+def test_rebuild_fails_when_reinstall_breaks_imports(monkeypatch, tmp_path):
     monkeypatch.setattr(akp, "_run_rebuild", lambda command, cwd, timeout_sec: {"status": "ok", "returncode": 0})
     monkeypatch.setattr(
         akp,
@@ -169,7 +163,7 @@ def test_rebuild_fails_when_reinstall_breaks_imports(akp, monkeypatch, tmp_path)
     assert akp._rebuild_ok_to_proceed(result) is False
 
 
-def test_rebuild_ok_records_import_metadata(akp, monkeypatch, tmp_path):
+def test_rebuild_ok_records_import_metadata(monkeypatch, tmp_path):
     monkeypatch.setattr(akp, "_run_rebuild", lambda command, cwd, timeout_sec: {"status": "ok", "returncode": 0})
     strategy = akp._detect_strategy(Path(_SGLANG_ROOT) / "python/sglang/srt/layers/attention/foo.cu")
     captured = {}
@@ -195,7 +189,7 @@ def test_rebuild_ok_records_import_metadata(akp, monkeypatch, tmp_path):
     assert result["import_check"]["modules"]["sglang.srt.server_args"]["importable"] is True
 
 
-def test_import_probe_detects_missing_module(akp):
+def test_import_probe_detects_missing_module():
     result = akp._verify_rebuild_imports(
         ["json", "hyperloom_definitely_not_installed"],
         sys.executable,
@@ -208,14 +202,14 @@ def test_import_probe_detects_missing_module(akp):
     assert result["sys_path"]
 
 
-def test_import_probe_passes_for_importable_modules(akp):
+def test_import_probe_passes_for_importable_modules():
     result = akp._verify_rebuild_imports(["json", "importlib.util"], sys.executable, timeout_sec=120)
 
     assert result["status"] == "ok"
     assert result["modules"]["importlib.util"]["importable"] is True
 
 
-def test_import_probe_skips_non_interpreter_rebuild(akp):
+def test_import_probe_skips_non_interpreter_rebuild():
     result = akp._verify_rebuild_imports(["sglang"], "/usr/bin/make")
 
     assert result["status"] == "skipped"
