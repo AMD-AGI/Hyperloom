@@ -60,13 +60,14 @@ The following variables configure filesystem paths for Hyperloom's runtime depen
 | `REPO_ROOT`                               | No (recommended)     | `$(pwd)`                           | This Hyperloom checkout. Used to locate `.env`, skills, scripts. Falls back to the current working directory when unset.                                                                                                                     |
 | `INFERENCEX_PATH`                         | Conditional          | Auto-cloned by `install.sh`                                    | Path to the SemiAnalysisAI/InferenceX repo, used by baseline / target analysis. `install.sh` clones it when unset; only required if that auto-clone fails.                                                                                                                                          |
 | `TRACELENS_ROOT`                          | No (installer auto-clones) | `${HYPER`<br>`LOOM_CA`<br>`CHE_DIR:-`<br>`$REPO_ROOT`<br>`/.cache}/Tr`<br>`aceLens@<resolved-sha>` (auto-clone of `AMD-AGI/TraceLens` pinned to a fixed SHA) | `src/hyperloom/agents/kernel/scripts/install.sh` clones the public repo into the repo-local cache root when unset. Export it to opt into a pre-existing checkout you maintain — that is an explicit operator override and skips both the clone and the SHA pin. |
-| `GEAK_CLAUDE_BIN`                          | No (installer auto-resolves) | First of `$HOME/.local/bin/claude`, `/usr/local/bin/claude`, `$(command -v claude)`; written to `kernel-agent.env.sh` | Pins the Claude Code binary the GEAK SDK path uses, so `claude_agent_sdk` doesn't fall back to its older bundled CLI. Export to force a specific build. |
+| `GEAK_CLAUDE_BIN`                          | No (installer auto-resolves) | First of `$HOME/.local/bin/claude`, `/usr/local/bin/claude`, `$(command -v claude)`; written to `kernel-agent.env.sh` | Pins the Claude Code binary the GEAK SDK path uses, so `claude_agent_sdk` doesn't fall back to its older bundled CLI. Export to force a specific build. Hyperloom's own agents also run it when `HYPERLOOM_CLAUDE_CLI_PATH` is unset. |
+| `HYPERLOOM_`<br>`CLAUDE_CLI_PATH`         | No | Unset | The Claude Code binary Hyperloom's agents run: the in-process backend and subprocess specialists alike. When unset they run `GEAK_CLAUDE_BIN`, then `claude` on `PATH`; the in-process backend leaves the choice to `claude_agent_sdk` only when none is found. |
 | `USER_DATA_PATH`                          | No                   | `/workspace/hyperloom` if `/workspace` is writable, else `<cwd>/session` | Session directory root (logs, runs, mirrors, breakdown). Container images ship a writable `/workspace`; a bare-metal host that has neither falls back to the second form and the CLI logs which root it took.                                                |
 | `HYPERLOOM_`<br>`RUNTIME_DIR`             | No                   | `$USER_DATA_PATH/runtime` (installer)                               | Private writable runtime state. Codex SDK turns create a unique mode-`0700` `CODEX_HOME` here and remove it after the SDK client closes. When unset, Codex uses the first safe declared output root, then a run-local working directory; it never falls back to `/tmp` or a source checkout. If launch config points this parent at storage unsuitable for SQLite, set it to a private local directory instead — see [Codex SDK turns stall](troubleshooting.md#codex-sdk-turns-stall-or-tracelens-roofline-times-out). |
 | `INFERENCE_`<br>`OPTIMI`<br>`ZER_CU`<br>`RRENT_S`<br>`ESSION_DIR` | No (set by CLI) | Set at session boot | Absolute path to the active session directory. Written by the CLI when a session starts and inherited by every benchmark subprocess; session-path resolution prefers it over scanning `USER_DATA_PATH`. Do not set by hand. |
 | `HYPERLOOM_ROOT`                          | No                   | `$HYPER`<br>`LOOM_R`<br>`UNTIME_`<br>`DIR/sou`<br>`rce-mirrors`                            | Legacy source-mirror root kept for compatibility. Current open-source dependency checkouts default to the repo-local cache root (`${HYPER`<br>`LOOM_CA`<br>`CHE_DIR:-`<br>`$REPO_ROOT`<br>`/.cache}`), not this path. |
 | `HYPERLOOM`<br>`_CACHE_`<br>`DIR`                          | No                   | `$REPO_ROOT`<br>`/.cache`                      | Writable, repo-local base for auto-cloned open-source deps (TraceLens, Magpie, etc.), cloned per revision as `<name>@<sha>`. Not under `$TMPDIR` so a reaper cannot wipe it mid-run. |
-| `KERNELFORGE`<br>`_PROJECT_`<br>`ROOT`              | No                   | `$USER_DATA_PATH/kernelforge`, else `~/.cache/hyperloom/kernelforge` | Writable root for forge's own state and for resource-tree overrides. Holds the learned knowledge base (`knowledge_base/<backend>/learned/`), the tuning DB, postmortems and `forge_experiments/`. A subtree placed here also **overrides the copy packaged inside `kernelforge`** — a `serving_patches/` or `examples/` directory under this root wins over the shipped one, which is the supported way to try a patch or a task without editing site-packages. Must be writable: it deliberately never resolves to the installed package directory or to the cwd. **This is the replacement for the removed `FORGE_PATH`**, which nothing reads any more — a stale `FORGE_PATH` is still forwarded (the `FORGE_` prefix is on the dotenv allowlist) and then ignored. |
+| `KERNELFORGE`<br>`_PROJECT_`<br>`ROOT`              | No                   | `$USER_DATA_PATH/kernelforge`, else `~/.cache/hyperloom/kernelforge` | Writable root for forge's own state and for resource-tree overrides. Holds the learned knowledge base (`knowledge_base/<backend>/learned/`), the tuning DB, postmortems and `forge_experiments/`. An `examples/` directory placed here overrides the copy packaged inside `kernelforge`, which is the supported way to try a task without editing site-packages. Must be writable: it deliberately never resolves to the installed package directory or to the cwd. **This is the replacement for the removed `FORGE_PATH`**, which nothing reads any more — a stale `FORGE_PATH` is still forwarded (the `FORGE_` prefix is on the dotenv allowlist) and then ignored. |
 | `SKIP_FORGE`<br>`_PROFILING`               | No                   | Unset (the extra is installed) | Set to `1` to make `install.sh` skip `pip install -e "$REPO_ROOT[forge-profiling]"`. That extra is rocprof-compute's own dependency set (~20 wheels, including the exact `kaleido==0.2.1` / `astunparse==1.6.2` pins ROCm 7.2.x requires); without it forge's profiler degrades to the lightweight PMC path instead of System Speed-of-Light + roofline. Installed by default on purpose — the previous gate made this a silent skip on every pod. |
 | `ROCPC_VENV`                               | No                   | `/opt/rocprof-compute-venv` | Private venv that rocprof-compute's analyze mode runs in, created by `install.sh` from the tool's own `requirements.txt` so its exact pins cannot displace the serving image's numpy and pandas. `rocpc_profile.py` derives the same path. Without the venv, analyze degrades and profiling still collects. |
 | `MAGPIE_PATH`                              | No                   | Resolved from installed `Magpie` package unless explicitly set                               | Magpie package root for benchmark wrappers and patch inspection.                                                                                                                                            |
@@ -739,21 +740,32 @@ Primary switch (default **off**) for live Langfuse trace push.
   recovery tool only when live push did not run.
 * **`flush_session` is idempotent, and retries only what failed**: the
   session-end reconcile runs as named steps (leftover halves, `ext/` shards,
-  recipe-KB audit, specialist intel, forge steps, GEMM tuning, decision scores,
-  span close, final SDK flush). Each step runs at most once **per process**, so
-  a duplicated CLOSE step won't double-push; a step that raised is retried by
-  the next call. The receipt reports `flush_steps_done` (the steps that
-  succeeded, for this process) and `counts_final`, which is `true` only once
-  *every* step has completed — a `false` there means the push is still
-  incomplete, not that the session was short-lived. Across processes (a crash
-  plus a `--resume`, or two shutdown paths racing), the durable unit is finer
-  than a step: `ext_rows_sent` records how far each `ext/*.jsonl` shard was
-  drained so its rows are never re-pushed while later ones still are, and the
+  recipe-KB audit, specialist intel, forge steps, GEMM tuning, trajectory,
+  decision scores, span close, final SDK flush). Every call runs every step,
+  and each step sends only what is still owed, so a duplicated CLOSE step
+  won't double-push, a row that failed is retried by the next call, and a
+  later call (the shutdown flush after CLOSE) pushes whatever was recorded
+  since the earlier one. `counts_final` is `true` when the latest call
+  completed every step — a `false` there means the push is still incomplete,
+  not that the session was short-lived. Every leg of a resumed session
+  (a crash plus a `--resume`, or two shutdown paths racing) reports into the
+  same trace. `rows_sent` maps each
+  append-only log, by its path under the session directory, to how many of its
+  rows were sent: the `ext/*.jsonl` and `trajectory/*.jsonl` shards, the
+  recipe-KB audit, specialist intel, forge steps and GEMM tuning logs. A call
+  sends only the rows past that count, advancing it one row at a time and
+  stopping at the first row it could not send, so that row is retried by the
+  next call or the next leg. A receipt written by v1.0.0 through v1.1.3 carries
+  the ext shard counts as `ext_rows_sent`, and a v1.1.3 receipt also carries the
+  trajectory shard counts as `trajectory_rows_sent`; both are still read. `decision_trace.jsonl` is rewritten ts-sorted on
+  every export, so decision scores are tracked by the `decision_id` its writer
+  stamps on each row instead (`decisions_sent`). Both record what was handed to
+  the Langfuse SDK: its flush does not report a failed export, so a row lost in
+  export is not re-pushed. The `*_read` counters count only what the current leg
+  read past those cursors. The
   one-shot `session_start` / `session_breakdown` pushes are claimed through an
   exclusive marker file (`reports/trace/.session_start.claim`) rather than
-  through the receipt read. The audit backfills (recipe-KB, specialist intel,
-  forge steps, GEMM tuning, decision scores) are *not* cursor-tracked: a second
-  process that reaches CLOSE for the same session re-emits those spans. The receipt also carries `payload_sha256` over its own body; a
+  through the receipt read. The receipt also carries `payload_sha256` over its own body; a
   receipt whose hash does not match is ignored on read, so a torn file cannot
   suppress or replay the one-shot `session_start` / breakdown pushes.
 * **Package completeness**: `PACKAGE_MANIFEST` describes what was actually

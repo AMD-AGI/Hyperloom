@@ -10,7 +10,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from kernelforge.knowledge.experience_integration import git_checkout_branch
+from kernelforge.loop.knowledge_integration import git_checkout_branch
 from kernelforge.llm.git import ensure_commit_identity
 from kernelforge.loop.campaign_config import (
     CampaignConfig,

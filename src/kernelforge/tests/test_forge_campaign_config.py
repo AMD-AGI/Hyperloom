@@ -9,8 +9,8 @@ from dataclasses import replace
 
 import pytest
 
-from kernelforge.knowledge.kernel_identity import kernel_recipe_canonical_id
-from kernelforge.knowledge.loop_identity import resolve_loop_identity
+from kernelforge.knowledge.kb_store.identity.kernel_recipe import kernel_recipe_canonical_id
+from kernelforge.knowledge.kb_store.identity.run import resolve_loop_identity
 from kernelforge.loop.campaign_config import (
     CampaignConfig,
     CampaignConfigStore,
@@ -684,6 +684,11 @@ def test_detect_gpu_target_rejects_a_malformed_override(monkeypatch, configured)
     ("returncode", "stdout", "expected"),
     [
         (0, "  Name:  gfx942\n  Name: gfx942\n", "gfx942"),
+        (
+            0,
+            "  Name:  gfx1201\n  Name:  amdgcn-amd-amdhsa--gfx1201\n  Name:  amdgcn-amd-amdhsa--gfx12-generic\n",
+            "gfx1201",
+        ),
         (0, "Name: gfx942\nName: gfx90a\n", None),
         (0, "no amd device here\n", None),
         (1, "Name: gfx942\n", None),

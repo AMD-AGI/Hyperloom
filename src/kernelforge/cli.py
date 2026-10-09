@@ -21,8 +21,8 @@ import click
 from hyperloom.common.env import env_bool
 from kernelforge.llm.git import git
 from kernelforge.config import Config
-from kernelforge.knowledge.experience_store import KnowledgeConfig
-from kernelforge.knowledge.experience_integration import (
+from kernelforge.knowledge.kb_store.config import KnowledgeConfig
+from kernelforge.loop.knowledge_integration import (
     WarmStartRollbackError,
     kb_reference_program_md,
     kb_read_status,
@@ -46,7 +46,7 @@ from kernelforge.loop.search_policy import (
 
 if TYPE_CHECKING:
     # Imported lazily at runtime to keep CLI startup off the knowledge stack.
-    from kernelforge.knowledge.pr_monitor_refs import PRRefsResult
+    from kernelforge.knowledge.pr_knowledge.references import PRRefsResult
 
 
 MIN_MAX_HOURS = 1.0  # a run shorter than this can't complete a productive campaign
@@ -252,7 +252,7 @@ def _collect_pr_references(
     budget_sec: float,
 ) -> PRRefsResult | None:
     """Run position A, absorbing every recoverable failure into a warning."""
-    from kernelforge.knowledge.pr_monitor_refs import (
+    from kernelforge.knowledge.pr_knowledge.references import (
         PR_KB_RECOVERABLE,
         collect_references,
     )
@@ -286,7 +286,7 @@ def _write_pr_provenance(
     if not surfaced:
         return
 
-    from kernelforge.knowledge.pr_monitor_refs import (
+    from kernelforge.knowledge.pr_knowledge.references import (
         PR_KB_RECOVERABLE,
         write_provenance,
     )
@@ -1171,12 +1171,12 @@ def forge_loop(
     if return_after_read_kb and not kb_warmstart_enabled:
         raise click.UsageError("--return-after-read-kb cannot be used with --no-kb-warmstart")
     if producer:
-        from kernelforge.knowledge.kernel_identity import KERNEL_RECIPE_PRODUCERS
+        from kernelforge.knowledge.kb_store.identity.kernel_recipe import KERNEL_RECIPE_PRODUCERS
 
         if producer not in KERNEL_RECIPE_PRODUCERS:
             raise click.UsageError(f"--producer must be one of: {', '.join(sorted(KERNEL_RECIPE_PRODUCERS))}")
 
-    from kernelforge.knowledge.experience_integration import git_head
+    from kernelforge.loop.knowledge_integration import git_head
     from kernelforge.loop.campaign_config import (
         CampaignConfigStore,
         derive_campaign_implementation_contract,
@@ -1842,7 +1842,7 @@ def forge_loop(
     pr_task_context = ""
     pr_kb_repo = ""
     if _pr_kb_enabled(pr_kb):
-        from kernelforge.knowledge.pr_query_context import (
+        from kernelforge.knowledge.pr_knowledge.context import (
             REASON_LOCAL_FAILURE,
             REASON_SKIPPED_DEADLINE,
         )

@@ -1362,6 +1362,15 @@
         "tput": {
           "type": "number"
         },
+        "initial_analysis_pending": {
+          "type": "boolean"
+        },
+        "analysis_affordable_sec": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
         "session_usable_sec": {
           "type": [
             "number",
@@ -1401,6 +1410,15 @@
       "properties": {
         "tput": {
           "type": "number"
+        },
+        "initial_analysis_pending": {
+          "type": "boolean"
+        },
+        "analysis_affordable_sec": {
+          "type": [
+            "number",
+            "null"
+          ]
         }
       },
       "additionalProperties": false

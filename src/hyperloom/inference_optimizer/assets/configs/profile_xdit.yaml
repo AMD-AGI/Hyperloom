@@ -1,7 +1,7 @@
 # Magpie profile benchmark config for xDiT (diffusion, server-less).
 # Same contract as baseline_xdit.yaml but with torch_profiler enabled so the
 # loop can attribute time across GEMM (QKV/MLP), AllToAll (Ulysses), and
-# norm/activation. Resolved by `_default_profile_config()` when $FRAMEWORK=xdit.
+# norm/activation. Named by `framework_registry.shipped_config_name()` for $FRAMEWORK=xdit.
 #
 # Fallback-only fields (overridden at runtime): benchmark.model, runner_type.
 # benchmark_script is pinned to xdit_{runner_type}.sh at materialize time.

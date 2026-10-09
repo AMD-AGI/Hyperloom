@@ -4878,8 +4878,8 @@ class IterationLoop(AnalysisRuntimeMixin):
 
         # Persist only after the fresh-campaign guard has completed.
         if self.ic.pr_kb_snapshot:
-            from kernelforge.knowledge.pr_monitor_refs import commit_snapshot
-            from kernelforge.knowledge.pr_query_context import REASON_LOCAL_FAILURE
+            from kernelforge.knowledge.pr_knowledge.references import commit_snapshot
+            from kernelforge.knowledge.pr_knowledge.context import REASON_LOCAL_FAILURE
 
             try:
                 commit_snapshot(self.ic.workspace_dir, self.ic.pr_kb_snapshot)
