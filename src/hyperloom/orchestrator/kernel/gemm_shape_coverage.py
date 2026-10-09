@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 from hyperloom.common.env import is_truthy
 
@@ -190,6 +190,93 @@ def write_shapes_json(shapes: Iterable[Shape], destination: Path) -> str:
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     return str(destination)
+
+
+# TraceLens has spelled the tensor separator <br>, <br/> and <BR/> over time.
+_BR_SPLIT_RE = re.compile(r"<\s*br\s*/?\s*>", re.IGNORECASE)
+# Tolerate whitespace after the comma ("(1024, 5120)") and any leading token before the tuple.
+_TRACED_DIMS_RE = re.compile(r"\((\d+)\s*,\s*(\d+)\)")
+# TraceLens renders the dtype right after the dims: "(64,3072) fp8"; dots keep "torch.float8_e4m3fn" whole.
+_TRACED_DTYPE_RE = re.compile(r"\)\s*([A-Za-z][A-Za-z0-9_.]*)")
+
+
+def canonical_dtype(raw: str) -> str:
+    """Fold a precision name or traced dtype token onto one canonical family.
+
+    Both sides of the comparison spell the same dtype many ways: a tuning
+    precision arrives as ``fp8`` / ``mxfp4``, while TraceLens renders whatever
+    the framework reported -- ``fp8_e4m3``, ``e4m3fnuz``, ``fp4x2``, and
+    ``_TRACE_DTYPE_SUFFIX`` in this repo emits ``f16`` for float16. Matching the
+    raw strings drops shapes that do belong to the tuned precision, so both are
+    folded onto a family first.
+
+    Returns "" for anything unrecognised, which callers treat as "do not scope".
+    """
+    token = str(raw or "").strip().lower().removeprefix("torch.")
+    if not token:
+        return ""
+    if token.startswith(("fp4", "mxfp4", "float4")) or "e2m1" in token:
+        return "fp4"
+    if token.startswith(("fp8", "float8")) or token == "f8" or "e4m3" in token or "e5m2" in token:
+        return "fp8"
+    if token.startswith(("bf16", "bfloat16")) or token == "b16":
+        return "bf16"
+    if token.startswith(("fp16", "float16")) or token in {"f16", "half"}:
+        return "fp16"
+    return ""
+
+
+def _traced_mnk(a_text: str, b_text: str, wanted_dtype: str) -> Shape | None:
+    """Derive (M, N, K) from the A ``(M,K)`` and B tensor texts."""
+    if wanted_dtype:
+        found = _TRACED_DTYPE_RE.search(a_text)
+        if not found or canonical_dtype(found.group(1)) != wanted_dtype:
+            return None
+    m0 = _TRACED_DIMS_RE.search(a_text)
+    m1 = _TRACED_DIMS_RE.search(b_text)
+    if not m0 or not m1:
+        return None
+    M, K = int(m0.group(1)), int(m0.group(2))
+    b0, b1 = int(m1.group(1)), int(m1.group(2))
+    # B is stored either (N,K) or (K,N); pick the orientation whose
+    # contracted dim matches K, else keep the legacy first-dim reading.
+    N = b0 if b1 == K else (b1 if b0 == K else b0)
+    # ``N == 1`` is a matrix-vector head (e.g. a scalar projection), not a
+    # tunable GEMM tile; it would otherwise sort first on call count and
+    # burn a tuning slot.
+    return (M, N, K) if min(M, K) > 0 and N > 1 else None
+
+
+def traced_gemm_shapes(kernel: Mapping[str, Any], *, precision: str = "") -> list[tuple[Shape, int]]:
+    """Return ``(M, N, K)`` with its call count for one ``kernel_candidates.json`` GEMM row.
+
+    ``precision`` scopes the result to one traced dtype family; empty keeps every dtype.
+    """
+    if "gemm" not in str(kernel.get("name", "")).lower():
+        return []
+    input_shapes = kernel.get("input_shapes", [])
+    if not isinstance(input_shapes, list):
+        return []
+    wanted_dtype = canonical_dtype(precision)
+    entries = [e for e in input_shapes if isinstance(e, dict) and e.get("shape")]
+
+    # Legacy format: one entry carries every tensor, "<br>"-joined.
+    joined: list[tuple[Shape, int]] = []
+    matched_joined = False
+    for entry in entries:
+        parts = [p.strip() for p in _BR_SPLIT_RE.split(str(entry["shape"])) if p.strip()]
+        if len(parts) < 2:
+            continue
+        matched_joined = True
+        key = _traced_mnk(parts[0], parts[1], wanted_dtype)
+        if key is not None:
+            joined.append((key, int(entry.get("call_num") or 0)))
+    if matched_joined or len(entries) < 2:
+        return joined
+
+    # Current format: one entry per tensor, so A and B are the first two.
+    key = _traced_mnk(str(entries[0]["shape"]), str(entries[1]["shape"]), wanted_dtype)
+    return [] if key is None else [(key, max(int(e.get("call_num") or 0) for e in entries[:2]))]
 
 
 def parse_aiter_shape_lookups(log_text: str) -> tuple[set[Shape], set[Shape]]:
