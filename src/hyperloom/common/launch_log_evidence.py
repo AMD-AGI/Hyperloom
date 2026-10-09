@@ -12,7 +12,8 @@ import re
 import shlex
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from pathlib import Path
+from typing import Any, NamedTuple
 
 
 log = logging.getLogger(__name__)
@@ -30,6 +31,8 @@ _RUN_SPECIFIC_LAUNCH_FLAGS: frozenset[str] = frozenset(
         "--served-model-name",
         "--host",
         "--port",
+        # ATOM's HTTP port; its ``--port`` is the engine-internal one.
+        "--server-port",
         "--nccl-port",
         "--dist-init-addr",
         "--base-gpu-id",
@@ -83,6 +86,10 @@ def split_launch_flags(argv_tail: str) -> str:
         tokens = shlex.split(argv_tail)
     except ValueError:
         tokens = argv_tail.split()
+    return " ".join(_kept_launch_tokens(tokens))
+
+
+def _kept_launch_tokens(tokens: list[str]) -> list[str]:
     kept: list[str] = []
     index = 0
     while index < len(tokens):
@@ -105,7 +112,7 @@ def split_launch_flags(argv_tail: str) -> str:
             continue
         kept.append(token)
         index += 1
-    return " ".join(kept)
+    return kept
 
 
 def launch_flag_setting_name(flag: str, framework: str) -> str:
@@ -150,6 +157,94 @@ def launch_argv_from_log(path: str, framework: str) -> str:
     except OSError:
         return ""
     return ""
+
+
+#: InferenceX recipes record the exact server argv here (``write_command``).
+_RECIPE_SERVER_COMMAND_FILE = "server_command.txt"
+#: The recipe's ``set -x`` trace, captured beside its server log.
+_RECIPE_TRACE_FILE = "benchmark_stderr.log"
+_TRACE_EXPORT_RE = re.compile(r"^\++ export (.+)$")
+_TRACE_LAUNCH_RE = re.compile(r"^\++ write_command \S*" + re.escape(_RECIPE_SERVER_COMMAND_FILE) + r"\b")
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+class RecipeServerLaunch(NamedTuple):
+    """Server flags and environment a recipe recorded for its own launch."""
+
+    flags: str
+    env: dict[str, str]
+
+
+def recipe_server_launch(server_log_path: str) -> RecipeServerLaunch:
+    """Read the server launch an InferenceX recipe recorded beside its server log.
+
+    Agentic recipes build the server command inside the script, so neither the
+    recipe YAML nor an ATOM server log carries it; ``server_command.txt`` and the
+    script's ``export`` trace up to that command are the only record.
+    """
+    if not server_log_path:
+        return RecipeServerLaunch("", {})
+    run_dir = Path(server_log_path).parent
+    return RecipeServerLaunch(
+        _recipe_server_flags(run_dir / _RECIPE_SERVER_COMMAND_FILE),
+        _recipe_server_env(run_dir / _RECIPE_TRACE_FILE),
+    )
+
+
+def _recipe_server_flags(path: Path) -> str:
+    try:
+        tokens = shlex.split(path.read_text(encoding="utf-8", errors="ignore"))
+    except (OSError, ValueError):
+        return ""
+    start = next((index for index, token in enumerate(tokens) if token.startswith("--")), len(tokens))
+    kept = _kept_launch_tokens(tokens[start:])
+    # GEAK re-renders structured values shell-quoted and its native launchers
+    # expand the args unquoted, so a JSON or list value would reach the server
+    # with its quotes and fail to parse. Such flags stay with the recipe.
+    scalar: list[str] = []
+    skipped: list[str] = []
+    index = 0
+    while index < len(kept):
+        token = kept[index]
+        has_value = index + 1 < len(kept) and not kept[index + 1].startswith("-")
+        value = kept[index + 1] if has_value else token.partition("=")[2]
+        if value[:1] in ("[", "{"):
+            skipped.append(token.partition("=")[0])
+        else:
+            scalar.extend(kept[index : index + 2] if has_value else [token])
+        index += 2 if has_value else 1
+    if skipped:
+        log.info("recipe server launch: structured-value flags not forwarded: %s", " ".join(skipped))
+    return shlex.join(scalar)
+
+
+def _recipe_server_env(path: Path) -> dict[str, str]:
+    env: dict[str, str] = {}
+    try:
+        with open(path, encoding="utf-8", errors="ignore") as handle:
+            for line in handle:
+                if _TRACE_LAUNCH_RE.match(line):
+                    return env
+                match = _TRACE_EXPORT_RE.match(line.rstrip("\n"))
+                if not match:
+                    continue
+                try:
+                    words = shlex.split(match.group(1))
+                except ValueError:
+                    continue
+                for word in words:
+                    name, assigned, value = word.partition("=")
+                    if assigned and _ENV_NAME_RE.match(name) and _is_server_env(name):
+                        env[name] = value
+    except OSError:
+        return {}
+    # Without the launch marker there is no telling which exports the server saw.
+    return {}
+
+
+def _is_server_env(name: str) -> bool:
+    # Device masks are pinned per run by the consumer; AIPERF_* configure the client.
+    return not name.endswith("_VISIBLE_DEVICES") and not name.startswith("AIPERF_")
 
 
 #: Every spelling of the model operand the supported launchers emit. SGLang
