@@ -36,7 +36,7 @@
               "const": "hyperloom.workflow_evaluation.v2"
             },
             "contract_digest": {
-              "const": "ea9c89768054ea13bdcac266c8c98d405b445bbaa16a7e266479110be37f8f22"
+              "const": "ece338b2454c563d288fedb46481083d5e0cab980d64eb3414ab57d078d32aa8"
             },
             "run_flags": {
               "type": "object",
