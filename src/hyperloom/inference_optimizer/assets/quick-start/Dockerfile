@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.4
-FROM lmsysorg/sglang-rocm:v0.5.20-rocm10-mi30x-20260920
+FROM lmsysorg/sglang-rocm:v0.5.21-rocm10-mi30x-20261008
 
 
 #install AMD self-signed certificate

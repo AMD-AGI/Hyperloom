@@ -68,6 +68,7 @@ from .bootstrap import (
     resolve_gpu_power_settings,
     latency_budget_scope_error,
     parse_operator_extra_env,
+    resolve_framework_version,
     resolve_model_display_name,
 )
 from hyperloom.orchestrator.actions.executors._aiter_jit import clean_stale_aiter_locks
@@ -582,8 +583,6 @@ def _codex_model_should_follow_claude() -> bool:
 
 def _claude_model_should_follow_codex() -> bool:
     """True when the operator supplied only OpenAI-compatible config."""
-    if os.environ.get("INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX") == "1":
-        return True
     return llm_config.is_openai_only()
 
 
@@ -613,8 +612,12 @@ def _critic_agent_runtime_needed(critic_choice: str) -> bool:
 def _validate_and_resolve_claude_model(
     args: argparse.Namespace,
     resolved_urls: tuple[str, str] | None,
+    *,
+    claude_follows_codex: bool | None = None,
 ) -> set[str] | None:
     """Gate Claude model selection against the gateway catalog; mutates ``args.claude_model``."""
+    if claude_follows_codex is None:
+        claude_follows_codex = _claude_model_should_follow_codex()
     chosen = (args.claude_model or "").strip()
     # Custom orchestration models are enabled by default; the gateway catalog probe below is the sole gate.
     allow_custom = _custom_orch_model_allowed()
@@ -668,7 +671,7 @@ def _validate_and_resolve_claude_model(
         openai_key = os.environ.get("OPENAI_API_KEY", "")
         # The Claude catalog must come from the Anthropic side.
         candidates: list[tuple[str, str]] = []
-        if _claude_model_should_follow_codex():
+        if claude_follows_codex:
             if openai_url:
                 candidates.append((openai_url, openai_key))
             elif anthropic_url:
@@ -771,18 +774,22 @@ def _resolve_models_for_run(
         args.claude_model = args.codex_model
 
     # Hard-gate the Claude model (mutates args.claude_model on fallback; sys.exit(2) on failure).
-    _validate_and_resolve_claude_model(args, resolved_urls)
+    _validate_and_resolve_claude_model(args, resolved_urls, claude_follows_codex=claude_follows_codex)
 
     if codex_follows_claude:
         args.codex_model = args.claude_model
 
-    _probe_critic_review_model(args, codex_follows_claude=codex_follows_claude)
+    _probe_critic_review_model(
+        args, codex_follows_claude=codex_follows_claude, claude_follows_codex=claude_follows_codex
+    )
 
 
 _CRITIC_PROBE_TIMEOUT_SEC = 60.0
 
 
-def _probe_critic_review_model(args: argparse.Namespace, *, codex_follows_claude: bool) -> None:
+def _probe_critic_review_model(
+    args: argparse.Namespace, *, codex_follows_claude: bool, claude_follows_codex: bool = False
+) -> None:
     """Send the critic's model one real request before the session starts; exit rc=2 when it cannot answer.
 
     A catalog listing only proves a gateway names a model, not that its upstream serves it, and the critic has no
@@ -794,7 +801,9 @@ def _probe_critic_review_model(args: argparse.Namespace, *, codex_follows_claude
     try:
         protocol, model = critic_review_target(
             args.critic_protocol,
-            orchestration_on_codex=orchestration_runs_on_codex(codex_follows_claude=codex_follows_claude),
+            orchestration_on_codex=orchestration_runs_on_codex(
+                codex_follows_claude=codex_follows_claude, claude_follows_codex=claude_follows_codex
+            ),
             claude_model=args.claude_model,
             codex_model=args.codex_model,
         )
@@ -1956,10 +1965,8 @@ def _resolve_workload_knobs(
 def _export_workload_envs_for_optimize(
     args: argparse.Namespace,
     *,
-    nodes_resolved: int,
     tp_resolved: int,
     ep_resolved: int,
-    argv: list[str] | None = None,
 ) -> None:
     """Project resolved workload knobs (TP/CONC/EP) into env for downstream Magpie YAMLs."""
     os.environ["TP"] = str(max(1, int(tp_resolved or 1)))
@@ -2524,7 +2531,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     if not args.resume_from:
         _export_workload_envs_for_optimize(
             args,
-            nodes_resolved=nodes_resolved,
             tp_resolved=tp_resolved,
             ep_resolved=ep_resolved,
         )
@@ -2580,10 +2586,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
 
     claude_follows_codex = _claude_model_should_follow_codex()
     if claude_follows_codex:
-        os.environ["INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX"] = "1"
         args.claude_model = args.codex_model
-    else:
-        os.environ.pop("INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX", None)
 
     # Capture provider intent before _preflight() fills missing endpoints (preflight may populate OPENAI_BASE_URL from
     # ANTHROPIC_BASE_URL).
@@ -3018,19 +3021,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             args.max_hours = DEFAULT_MAX_HOURS
         for line in _resume_budget_lines(state, extend_hours=extend_hours):
             print(line)
-        # Re-bootstrap the recipe KB client (recreates client + reruns T0 warm-start); skipped when --degraded-kb.
-        recipe_kb_client = _bootstrap_recipe_kb(
-            args,
-            session_dir=session_dir,
-            manifest=manifest,
-            resume=True,
-        )
-        # KnowledgePlane owns Recipe KB even when PR Monitor is degraded.
-        knowledge_plane = _bootstrap_knowledge_plane(
-            args,
-            recipe_kb_client=recipe_kb_client,
-            session_dir=session_dir,
-        )
         # No resume backfill needed for roofline (roofline_snapshots restored by SharedState.from_dict).
     else:
         _resolve_workload_knobs(args)
@@ -3045,21 +3035,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         if getattr(args, "profile_osl", None) is not None:
             os.environ["PROFILE_OSL"] = str(args.profile_osl)
         os.environ["PRECISION"] = args.precision
-        # Mirror resolved framework_version into env (explicit > auto-detect > unset; see _resolve_framework_version).
-        _fw_version_for_env = (getattr(args, "framework_version", None) or "").strip() or (
-            os.environ.get("FRAMEWORK_VERSION", "") or ""
-        ).strip()
-        if not _fw_version_for_env:
-            from ..recipe_snapshot_constants import (
-                DEFAULT_FRAMEWORK_VERSION_SLUG,
-                detect_framework_version,
-            )
-
-            _detected = detect_framework_version(
-                (getattr(args, "framework", None) or "").strip() or os.environ.get("FRAMEWORK", "")
-            )
-            if _detected and _detected != DEFAULT_FRAMEWORK_VERSION_SLUG:
-                _fw_version_for_env = _detected
+        _fw_version_for_env = resolve_framework_version(args)
         if _fw_version_for_env:
             os.environ["FRAMEWORK_VERSION"] = _fw_version_for_env
         if _agentx_enabled():
@@ -3155,19 +3131,20 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         if _preflight_context_window(args, session_dir):
             sys.exit(2)
         _finish_model_gate(args, session_dir)
-        # Recipe KB T0 anchor (after seed for recipe_canonical_id, before Coordinator); skipped when --degraded-kb.
-        recipe_kb_client = _bootstrap_recipe_kb(
-            args,
-            session_dir=session_dir,
-            manifest=manifest,
-            resume=False,
-        )
-        # KnowledgePlane owns Recipe KB even when PR Monitor is degraded.
-        knowledge_plane = _bootstrap_knowledge_plane(
-            args,
-            recipe_kb_client=recipe_kb_client,
-            session_dir=session_dir,
-        )
+
+    # Recipe KB T0 anchor (after seed/restore for recipe_canonical_id, before Coordinator); skipped when --degraded-kb.
+    recipe_kb_client = _bootstrap_recipe_kb(
+        args,
+        session_dir=session_dir,
+        manifest=manifest,
+        resume=bool(args.resume_from),
+    )
+    # KnowledgePlane owns Recipe KB even when PR Monitor is degraded.
+    knowledge_plane = _bootstrap_knowledge_plane(
+        args,
+        recipe_kb_client=recipe_kb_client,
+        session_dir=session_dir,
+    )
 
     from ..multi_node.state_paths import bind_state_file_to_session
 
@@ -3273,6 +3250,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         critic_agent_root=critic_agent_root,
         critic_kb_mode=critic_kb_mode,
         codex_follows_claude=codex_follows_claude,
+        claude_follows_codex=claude_follows_codex,
         critic_protocol=args.critic_protocol,
     )
     # Expose active session_dir to in-process executors via the canonical pin env var; reinforced here for resume
@@ -3475,11 +3453,7 @@ def main(argv: list[str] | None = None) -> int:
             if v and Path(v).exists():
                 setattr(args, attr, Path(v).read_text(encoding="utf-8"))
         return asyncio.run(_run_optimize(args))
-    if args.command == "recover-session":
+    if args.command == "recover":
         return _run_recover_session(args)
     parser.print_help()
     return 2
-
-
-if __name__ == "__main__":
-    sys.exit(main())

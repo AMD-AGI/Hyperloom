@@ -287,7 +287,7 @@ Paste this prompt into the agent chat to resume an existing session:
 Resume the existing Hyperloom optimization session.
 
 Requirements:
-1. Launch `python -m hyperloom.inference_optimizer.cli optimize --resume-from "$SESSION_DIR"`; do not start a new session.
+1. Launch `python -m hyperloom optimize --resume-from "$SESSION_DIR"`; do not start a new session.
 2. Do not pass `--model`; read the model and workload from the saved manifest.
 3. Resolve `$SESSION_DIR` from the launch-info JSON or the `HYPERLOOM_LAUNCH` line, never from the newest timestamp dir.
 4. Before launching, verify `manifest.json` and `state.json` exist.

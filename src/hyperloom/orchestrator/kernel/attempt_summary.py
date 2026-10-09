@@ -12,7 +12,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from kernelforge.knowledge.implementation_identity import normalize_operator_name
+from kernelforge.knowledge.kb_store.identity.implementation import normalize_operator_name
 
 from hyperloom.common.coerce import to_float
 
@@ -739,6 +739,13 @@ def build_kernel_optimization_summary(
         overall_outcome = _overall_lane_outcome(lane_totals)
         if counts["attempted"] and lane_totals["source_level"]["attempted"] == 0:
             top_takeaways[0] = "No source-level kernel rewrites were attempted; other kernel lanes did run."
+    geak_result = getattr(state, "geak_result", None)
+    absent_backends = geak_result.get("absent_backends") if isinstance(geak_result, dict) else None
+    if isinstance(absent_backends, dict) and absent_backends:
+        top_takeaways.append(
+            f"GEAK ran without these backends (unavailable): {', '.join(sorted(absent_backends))}; "
+            "any no-win it reports did not try them."
+        )
 
     summary = {
         "schema_version": schema_version,

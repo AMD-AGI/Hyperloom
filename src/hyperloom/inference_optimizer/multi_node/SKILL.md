@@ -6,8 +6,7 @@ description: |
   a single pod provides (i.e. ``nodes >= 2``) — typical prompt signals are
   ``Nodes=N`` / ``N pods`` / ``TP=N`` larger than one pod's GPU count, or
   any model that cannot fit on one pod's GPUs. Drives a platform-provisioned
-  multi-node cluster through the ``hyperloom.inference_optimizer.multi_node``
-  Python CLI.
+  multi-node cluster through the ``hyperloom multi-node`` CLI.
 globs:
   - "**/multi_node/**"
   - "**/multi-node/**"
@@ -115,7 +114,7 @@ Example (infera PD-disaggregated):
 export HYPERLOOM_MN_EXT_SERVICE_URL=http://<frontend-host>:8000
 export HYPERLOOM_MN_EXT_PREFILL_IPS=<prefill-ip> HYPERLOOM_MN_EXT_DECODE_IPS=<decode-ip>
 export HYPERLOOM_MN_EXT_SSH_KEY=/path/to/id_ed25519
-inference_optimizer optimize --model <path> --nodes 2 \
+hyperloom optimize --model <path> --nodes 2 \
   --mn-backend infera --pd-mode disaggregated --tp 8 --ep 8 ...
 ```
 
@@ -124,18 +123,19 @@ Example (rayjob with per-round restart):
 ```bash
 export HYPERLOOM_MN_EXT_SERVICE_URL=http://<ray-serve-or-head-url>:<port>
 export HYPERLOOM_MN_EXT_HEAD_IP=<ray-head-svc-host>
-inference_optimizer optimize --model <path> --nodes 2 --mn-backend rayjob --tp 8 --ep 8 ...
+hyperloom optimize --model <path> --nodes 2 --mn-backend rayjob --tp 8 --ep 8 ...
 ```
 
 ## Subcommands
 
 ```bash
 # rayjob only — infera skips these two:
-python3 -m hyperloom.inference_optimizer.multi_node bootstrap [--print-logs]  # verify /opt/venv + write PATH env on head
-python3 -m hyperloom.inference_optimizer.multi_node verify                    # check `ray` on PATH on head
+python3 -m hyperloom multi-node bootstrap [--print-logs]  # verify /opt/venv + write PATH env on head
+python3 -m hyperloom multi-node verify                    # check `ray` on PATH on head
+python3 -m hyperloom multi-node finalize-patch [--print-logs]  # parse per-pod dashboard JSON after kernel patch; --print-logs dumps job logs when parse fails
 # both backends:
-python3 -m hyperloom.inference_optimizer.multi_node restart-server --framework <sglang|vllm> --model <path> --tp <N> [--ep <N>] [--extra-args "…"]
-python3 -m hyperloom.inference_optimizer.multi_node kill-inference
+python3 -m hyperloom multi-node restart-server --framework <sglang|vllm> --model <path> --tp <N> [--ep <N>] [--extra-args "…"]
+python3 -m hyperloom multi-node kill-inference
 ```
 
 Run `<subcommand> --help` for the full flag set. **Do not invent flags.** There

@@ -50,7 +50,7 @@ loop runs alongside the agentic kernel optimizer.
 
 ## Runtime contract
 
-The optimizer is launched through `python -m hyperloom.inference_optimizer.cli optimize`. A run
+The optimizer is launched through `python -m hyperloom optimize`. A run
 must be able to:
 
 - Create or resume a session directory,
@@ -448,7 +448,7 @@ turn never depends on what an earlier turn happened to remember.
 
 Critic is likewise reactive and stateless per tick. Runtime RCA and automatic
 supervision are not roles in this loop. Stopped sessions require an explicit
-operator `--resume-from` decision; `recover-session` only reconstructs artifacts
+operator `--resume-from` decision; `recover` only reconstructs artifacts
 offline.
 
 ## Feedback loops

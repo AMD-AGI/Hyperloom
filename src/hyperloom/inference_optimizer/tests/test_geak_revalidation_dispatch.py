@@ -18,6 +18,8 @@ from hyperloom.orchestrator.actions.executors._proposal_identity import effectiv
 from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_SKIP_TO_SWEEP
 
+from ._geak_helpers import forbid_geak_launch, stop_geak_before_launch
+
 
 @pytest.fixture
 def coordinator(tmp_path, monkeypatch):
@@ -792,7 +794,7 @@ def test_final_report_still_flags_awaiting_geak_revalidation() -> None:
 
 
 @pytest.mark.asyncio
-async def test_crash_recovery_tombstones_no_promote_result(coordinator, tmp_path) -> None:
+async def test_crash_recovery_tombstones_no_promote_result(coordinator, tmp_path, monkeypatch) -> None:
     """An adjudicated no_promote result must not be recovered and re-enqueued."""
     c = coordinator
     st = c.shared_state
@@ -810,15 +812,8 @@ async def test_crash_recovery_tombstones_no_promote_result(coordinator, tmp_path
     revalidations = _record_revalidations(c)
 
     c.phase_kernel._record_geak_kernel_journey = lambda _result: None
-    monkeypatch = pytest.MonkeyPatch()
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
-        lambda _name: (_ for _ in ()).throw(RuntimeError("runner should not run")),
-    )
-    try:
-        await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
-    finally:
-        monkeypatch.undo()
+    stop_geak_before_launch(monkeypatch)
+    await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     assert revalidations == []
 
@@ -858,7 +853,7 @@ def _assert_settled_candidate_survived(coordinator, tmp_path, revalidations: lis
     assert (tmp_path / "geak" / "result.json").is_file()
 
 
-def _stub_geak_runner_call(monkeypatch, tmp_path, outcome) -> list[str]:
+def _stub_geak_runner_call(monkeypatch, outcome) -> list[str]:
     """Replace only the GEAK runner's own thread call; every other one runs.
 
     ``asyncio.to_thread`` is shared, so the phase's bus and file work travels
@@ -867,10 +862,6 @@ def _stub_geak_runner_call(monkeypatch, tmp_path, outcome) -> list[str]:
     Returns the list the interceptions are recorded in, so a test can prove the
     phase reached the runner rather than returning at an earlier gate.
     """
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
-        lambda _name: tmp_path / "geak_runner.py",
-    )
     original_to_thread = asyncio.to_thread
     calls: list[str] = []
 
@@ -893,8 +884,7 @@ async def test_failed_runner_does_not_replay_the_settled_result(coordinator, tmp
     revalidations = _record_revalidations(c)
     calls = _stub_geak_runner_call(
         monkeypatch,
-        tmp_path,
-        lambda: subprocess.CompletedProcess(["geak_runner.py"], 1, "", "runner failed"),
+        lambda: subprocess.CompletedProcess(["geak_runner"], 1, "", "runner failed"),
     )
 
     await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
@@ -909,11 +899,11 @@ async def test_runner_timeout_does_not_replay_the_settled_result(coordinator, tm
     c = coordinator
 
     def _timed_out():
-        raise subprocess.TimeoutExpired(["geak_runner.py"], 1)
+        raise subprocess.TimeoutExpired(["geak_runner"], 1)
 
     _arm_settled_candidate(c, tmp_path)
     revalidations = _record_revalidations(c)
-    calls = _stub_geak_runner_call(monkeypatch, tmp_path, _timed_out)
+    calls = _stub_geak_runner_call(monkeypatch, _timed_out)
 
     await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
@@ -947,7 +937,7 @@ _SETTLED_GEAK_RESULT = {
     ids=["new_config", "same_config_new_evidence"],
 )
 @pytest.mark.asyncio
-async def test_crash_recovery_still_promotes_new_evidence(coordinator, tmp_path, fresh: dict) -> None:
+async def test_crash_recovery_still_promotes_new_evidence(coordinator, tmp_path, monkeypatch, fresh: dict) -> None:
     """A settled verdict tombstones its own candidate, not the next one.
 
     The crash window this recovery exists for is exactly the one where the
@@ -969,15 +959,8 @@ async def test_crash_recovery_still_promotes_new_evidence(coordinator, tmp_path,
     revalidations = _record_revalidations(c)
 
     c.phase_kernel._record_geak_kernel_journey = lambda _result: None
-    monkeypatch = pytest.MonkeyPatch()
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
-        lambda _name: (_ for _ in ()).throw(RuntimeError("runner should not run")),
-    )
-    try:
-        await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
-    finally:
-        monkeypatch.undo()
+    forbid_geak_launch(monkeypatch)
+    await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     assert revalidations == ["geak_e2e_win_recovered"]
     assert c.writeback.geak_rebench_params(reason="check")["grid"][0]["extra_args"] == fresh["accepted_config"]["flags"]
@@ -1272,7 +1255,7 @@ async def test_a_cancelled_revalidation_is_recorded_before_it_propagates(coordin
 
 
 @pytest.mark.asyncio
-async def test_crash_recovery_does_not_replay_a_refused_candidate(coordinator, tmp_path) -> None:
+async def test_crash_recovery_does_not_replay_a_refused_candidate(coordinator, tmp_path, monkeypatch) -> None:
     """A refusal the replay cannot change is a verdict, not a missed handback.
 
     Under AgentX the GEAK harness declines the canonical workload outright, so
@@ -1315,25 +1298,18 @@ async def test_crash_recovery_does_not_replay_a_refused_candidate(coordinator, t
     (geak_dir / "result.json").write_text(json.dumps(result), encoding="utf-8")
     c.phase_kernel._record_geak_kernel_journey = lambda _result: None
     revalidations = _record_revalidations(c)
+    stop_geak_before_launch(monkeypatch)
 
-    monkeypatch = pytest.MonkeyPatch()
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
-        lambda _name: (_ for _ in ()).throw(RuntimeError("geak runner unavailable")),
-    )
-    try:
-        # Twice: a failed GEAK run must not erase the verdict for the next entry.
-        await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
-        await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
-    finally:
-        monkeypatch.undo()
+    # Twice: a GEAK entry that ends without a run must not erase the verdict for the next entry.
+    await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
+    await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     assert revalidations == []
     assert st.geak_result["revalidation_error_class"] == "incomparable"
 
 
 @pytest.mark.asyncio
-async def test_crash_recovery_retries_a_transiently_failed_revalidation(coordinator, tmp_path) -> None:
+async def test_crash_recovery_retries_a_transiently_failed_revalidation(coordinator, tmp_path, monkeypatch) -> None:
     """A rebench that failed to run is a missing verdict, not a settled one."""
     c = coordinator
     st = c.shared_state
@@ -1356,16 +1332,9 @@ async def test_crash_recovery_retries_a_transiently_failed_revalidation(coordina
     }
     c.phase_kernel._record_geak_kernel_journey = lambda _result: None
     revalidations = _record_revalidations(c)
+    forbid_geak_launch(monkeypatch)
 
-    monkeypatch = pytest.MonkeyPatch()
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
-        lambda _name: (_ for _ in ()).throw(RuntimeError("runner should not run")),
-    )
-    try:
-        await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
-    finally:
-        monkeypatch.undo()
+    await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     assert revalidations == ["geak_e2e_win_recovered"]
     assert st.geak_pending["status"] == "awaiting_rebench"
@@ -1416,10 +1385,7 @@ async def test_native_agentx_refuses_geak_products_regardless_of_overlay_state(
     monkeypatch.setattr(c.writeback, "geak_rebench_params", dispatch)
     monkeypatch.setattr(c.writeback, "validate_geak_via_geak_harness", fallback)
     monkeypatch.setattr(c.phase_kernel, "_record_geak_kernel_journey", lambda _result: None)
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
-        lambda _name: (_ for _ in ()).throw(RuntimeError("runner unavailable")),
-    )
+    forbid_geak_launch(monkeypatch)
 
     await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
     assert dispatches == fallbacks == []

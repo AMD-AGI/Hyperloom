@@ -138,7 +138,7 @@ class RayExecutionBackend:
         """Ensure a Ray cluster is up and this process is connected."""
         if self._ensured:
             return
-        from hyperloom.agents.kernel.tools.backends.ray_runtime import (
+        from ._ray_runtime import (
             ensure_ray_cluster,
             quiet_ray_init,
         )

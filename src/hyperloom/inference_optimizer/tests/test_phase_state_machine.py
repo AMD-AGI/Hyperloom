@@ -22,6 +22,8 @@ from hyperloom.orchestrator.state._shared_state.enablement_round import Enableme
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 
+from ._geak_helpers import stop_geak_before_launch
+
 
 def _no_controller_run(**kwargs: Any) -> dict[str, Any]:
     return {"status": "no_opportunity", "patch_count": 0, "task_count": 0, "output_dir": str(kwargs["output_dir"])}
@@ -29,18 +31,10 @@ def _no_controller_run(**kwargs: Any) -> dict[str, Any]:
 
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
-    from hyperloom.orchestrator.actions.executors import _kernel_agent_tool
     from hyperloom.orchestrator.kernel import controller_submit
 
-    real_tool_path = _kernel_agent_tool._kernel_agent_tool_path
-
-    def _tool_path_without_geak_runner(tool_name: str) -> Path:
-        if tool_name == "backends/geak_runner.py":
-            raise FileNotFoundError(tool_name)
-        return real_tool_path(tool_name)
-
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    monkeypatch.setattr(_kernel_agent_tool, "_kernel_agent_tool_path", _tool_path_without_geak_runner)
+    stop_geak_before_launch(monkeypatch)
     monkeypatch.setattr(controller_submit, "run_controller_subprocess", _no_controller_run)
     return make_session_dir()
 
@@ -143,6 +137,22 @@ def test_prelude_blocked_while_warm_replay_in_flight():
     assert out is not None and out[1] == "prelude_done"
 
 
+def test_prelude_waits_for_the_initial_analysis():
+    """The transition barrier stops running actions, so leaving early kills the roofline the baseline enqueued."""
+    state = SharedState(
+        phase="PRELUDE",
+        phase_budget_pct={},
+        phase_started_unix=0.0,
+        max_minutes=0,
+        baseline_tput=1234.5,
+        auto_roofline_pending_task_id="rl-1",
+    )
+    assert phase_state.compute_next_phase(state) is None
+    state.auto_roofline_pending_task_id = ""
+    out = phase_state.compute_next_phase(state)
+    assert out is not None and out[1] == "prelude_done"
+
+
 def _prelude_state(
     *,
     max_minutes: int = 180,
@@ -153,9 +163,11 @@ def _prelude_state(
     baseline_post_ready_runtime_sec: float = 0.0,
     baseline_warm_runtime_sec: float = 0.0,
     baseline_measure_round_dropped: bool = False,
+    auto_roofline_pending_task_id: str = "",
 ) -> SharedState:
     """A PRELUDE-phase state with an explicit clock, as the budget policy reads it."""
     state = SharedState(
+        auto_roofline_pending_task_id=auto_roofline_pending_task_id,
         phase="PRELUDE",
         max_minutes=max_minutes,
         phase_elapsed_totals={"PRELUDE": spent_sec},
@@ -226,6 +238,33 @@ def test_a_landed_baseline_outranks_the_exhausted_clock():
     out = phase_state.compute_next_phase(state, kernel_enabled=True)
     assert out is not None
     assert out[1] == "prelude_done"
+
+
+def test_prelude_holds_while_the_initial_roofline_is_pending():
+    state = _prelude_state(usable_sec=10_000.0, baseline_tput=1074.7, auto_roofline_pending_task_id="rl-1")
+    assert phase_state.compute_next_phase(state, kernel_enabled=True) is None
+    state.auto_roofline_pending_task_id = ""
+    out = phase_state.compute_next_phase(state, kernel_enabled=True)
+    assert out is not None and out[1] == "prelude_done"
+    assert phase_state.replay_next_phase(out[2]["predicate_inputs"]) == out
+
+
+def test_a_spent_clock_does_not_wait_for_the_initial_roofline():
+    state = _prelude_state(
+        spent_sec=10_800.0, usable_sec=0.0, baseline_tput=1074.7, auto_roofline_pending_task_id="rl-1"
+    )
+    out = phase_state.compute_next_phase(state, kernel_enabled=True)
+    assert out is not None and out[1] == "prelude_done"
+
+
+def test_the_initial_roofline_wait_stops_at_the_optimization_reserve():
+    # 180 min session reserves 5400 s for optimization; 5000 s usable means PRELUDE's own allowance is spent.
+    state = _prelude_state(usable_sec=5_000.0, baseline_tput=1074.7, auto_roofline_pending_task_id="rl-1")
+    out = phase_state.compute_next_phase(state, kernel_enabled=True)
+    assert out is not None and out[1] == "prelude_done"
+    assert phase_state.replay_next_phase(out[2]["predicate_inputs"]) == out
+    state.session_budget_usable_sec = lambda: 6_000.0
+    assert phase_state.compute_next_phase(state, kernel_enabled=True) is None
 
 
 def test_prelude_exit_states_whether_one_optimization_round_still_fits():
@@ -820,9 +859,10 @@ async def test_coordinator_phase_idempotent_within_same_tick(
 # ENABLEMENT phase predicate tests
 
 
-def _enablement_state(phase, *, tput=0.0, streak=1, validation_pending=False):
+def _enablement_state(phase, *, tput=0.0, streak=1, validation_pending=False, auto_roofline_pending_task_id=""):
     """A state the enablement entry and exit branches read."""
     return SharedState(
+        auto_roofline_pending_task_id=auto_roofline_pending_task_id,
         phase=phase,
         stop_reason="",
         closing_phase=False,
@@ -868,6 +908,29 @@ def test_enablement_holds_while_work_is_in_flight():
     assert phase_state.compute_next_phase(state, enablement_enabled=True, enablement_in_flight=True) is None
     inputs = phase_state.workflow_predicate_inputs(state, enablement_enabled=True, enablement_in_flight=True)
     assert phase_state.replay_next_phase(inputs) is None
+
+
+def test_enablement_waits_for_the_initial_analysis_like_prelude_does():
+    """The first anchor of a session whose baseline failed is promoted here, and that enqueues the roofline."""
+    state = _enablement_state("ENABLEMENT", tput=1000.0, auto_roofline_pending_task_id="rl-1")
+    assert phase_state.compute_next_phase(state, enablement_enabled=True) is None
+    state.auto_roofline_pending_task_id = ""
+    out = phase_state.compute_next_phase(state, enablement_enabled=True)
+    assert out is not None and out[1] == "enablement_done"
+    assert phase_state.replay_next_phase(out[2]["predicate_inputs"]) == out
+
+
+def test_the_enablement_wait_stops_at_the_optimization_reserve():
+    """Unbounded in an unbounded session; bounded by the reserve once the session has a budget."""
+    state = _enablement_state("ENABLEMENT", tput=1000.0, auto_roofline_pending_task_id="rl-1")
+    # 180 min session reserves 5400 s for optimization; 5000 s usable leaves nothing to hold with.
+    state.max_minutes = 180
+    state.session_budget_usable_sec = lambda: 5_000.0
+    out = phase_state.compute_next_phase(state, enablement_enabled=True)
+    assert out is not None and out[1] == "enablement_done"
+    assert phase_state.replay_next_phase(out[2]["predicate_inputs"]) == out
+    state.session_budget_usable_sec = lambda: 6_000.0
+    assert phase_state.compute_next_phase(state, enablement_enabled=True) is None
 
 
 def test_enablement_holds_while_revalidation_is_pending():

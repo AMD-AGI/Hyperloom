@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from ..bus.gpu_pool import gpus_by_task_sync
 from ..phases import machine_state as _phase_state
 from ..policy.projection import resource_pools_summary
@@ -24,6 +24,10 @@ from ..state.task_registry import Task
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ..collaborator import CoordinatorCollaborator
 import logging as _logging
+
+if TYPE_CHECKING:
+    from hyperloom.inference_optimizer.experience_kb import ExperienceKBEvidence
+    from .coordinator import Coordinator
 
 log = _logging.getLogger(__name__)
 
@@ -48,6 +52,28 @@ _OUTCOME_TPUT_KEYS: tuple[str, ...] = (
 _OUTCOME_STATUS_KEYS: tuple[str, ...] = ("status", "verdict", "outcome", "runner_status")
 # Notes rendered per inbox line.
 _OUTCOME_NOTES_MAX: int = 3
+# Ceilings for the prompt sections that grow with the session; uncapped, a long run outgrows the context window.
+_FINDINGS_PROMPT_CHARS = 24_000
+_QUESTIONS_PROMPT_CHARS = 6_000
+_INBOX_PROMPT_CHARS = 40_000
+
+
+def _fit_to_budget(lines: list[str], budget_chars: int) -> list[str]:
+    """Return the leading ``lines`` that fit in ``budget_chars``.
+
+    The first line is always kept, clipped to the budget, so a backlog led by
+    one oversized entry still drains.
+    """
+    if not lines:
+        return []
+    kept = [lines[0][:budget_chars]]
+    used = len(kept[0])
+    for line in lines[1:]:
+        used += len(line) + 1
+        if used > budget_chars:
+            break
+        kept.append(line)
+    return kept
 
 
 def _first_present(d: dict[str, Any], keys: tuple[str, ...]) -> Any | None:
@@ -191,11 +217,16 @@ def _format_inbox_event(m: "Message", *, max_variant_rows: int = 3) -> str:
 class ConversationCollaborator(CoordinatorCollaborator):
     """Manages conversation rounds: context tools, prompt injection, and round history."""
 
+    def __init__(self, coordinator: "Coordinator") -> None:
+        super().__init__(coordinator)
+        # The Experience KB read rendered into the latest orchestration prompt; proposals emitted on that tick cite it.
+        self.kb_last_read: ExperienceKBEvidence | None = None
+        # Per-agent (seq, msg_id) of the last message its prompt rendered.
+        self._rendered_cursor: dict[str, tuple[int, str]] = {}
+
     async def _kb_prompt_block(self, untested_proposals: str) -> str:
         """Read shared Experience evidence once per FRAMEWORK_AGENT orchestration tick."""
-        from hyperloom.inference_optimizer.experience_kb import integration_for
-
-        integration = integration_for(self._coord, self.session_dir)
+        integration = self._coord.experience_kb
         if integration is None:
             return ""
         evidence = await asyncio.to_thread(
@@ -203,7 +234,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
             self.shared_state,
             untested_proposals=untested_proposals,
         )
-        self._coord._kb_last_read = evidence
+        self.kb_last_read = evidence
         if evidence.status != "completed" or not evidence.prompt_block:
             return ""
         block = "\n".join(
@@ -545,21 +576,31 @@ class ConversationCollaborator(CoordinatorCollaborator):
                 sections.append("=== Discarded escalation hint (advisory) ===")
                 sections.append(discarded_escalate_block)
 
-        # 2. Inbox tail since this agent's last cursor.
+        # NOTE: there is deliberately no "=== Specialist health ===" block.
+
+        # 2. Inbox tail since this agent's last cursor, oldest first; what the budget leaves out waits for the next turn.
         cursor = await self.cursors.load(agent_name)
-        msgs = await self.bus.replay_for(agent_name, after_seq=cursor.last_processed_seq)
-        rendered = list(msgs)
-        if msgs:
-            top = msgs[-1]
-            self._coord._rendered_cursor[agent_name] = (int(top.seq), str(top.msg_id))
-        if agent_name == "critic":
-            rendered = await self._augment_critic_inbox_with_pending(rendered)
-        if rendered:
+        unread = await self.bus.replay_for(agent_name, after_seq=cursor.last_processed_seq)
+        rendered = await self._augment_critic_inbox_with_pending(unread) if agent_name == "critic" else unread
+        # Only Orchestration acts on variant-level failures; the reviewers do not.
+        variant_rows = 3 if agent_name == "orchestration" else 0
+        inbox_lines = _fit_to_budget(
+            [f"  {_format_inbox_event(m, max_variant_rows=variant_rows)}" for m in rendered],
+            _INBOX_PROMPT_CHARS,
+        )
+        unread_ids = {m.msg_id for m in unread}
+        read = [m for m in rendered[: len(inbox_lines)] if m.msg_id in unread_ids]
+        last_seq = cursor.last_processed_seq
+        if read:
+            last_seq = int(read[-1].seq)
+            self._rendered_cursor[agent_name] = (last_seq, str(read[-1].msg_id))
+        if inbox_lines:
             sections.append(f"=== Inbox for {agent_name} (newest last) ===")
-            # Only Orchestration acts on variant-level failures; the reviewers do not.
-            variant_rows = 3 if agent_name == "orchestration" else 0
-            for m in rendered:
-                sections.append(f"  {_format_inbox_event(m, max_variant_rows=variant_rows)}")
+            sections.extend(inbox_lines)
+            if len(read) < len(unread):
+                sections.append(
+                    f"  (+{len(unread) - len(read)} newer messages after seq={last_seq} held for the next turn)"
+                )
         else:
             sections.append(f"=== Inbox for {agent_name} ===")
             sections.append("(no new messages)")
@@ -568,7 +609,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
 
     async def advance_rendered_cursor(self, agent_name: str) -> None:
         """Advance an agent's read cursor to the last message its prompt rendered."""
-        entry = self._coord._rendered_cursor.get(agent_name)
+        entry = self._rendered_cursor.get(agent_name)
         if entry is None:
             return
         seq, msg_id = entry
@@ -600,7 +641,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
 
     async def load_system_prompt(self, agent_name: str) -> str:
         """Load the system prompt for an agent, honoring overrides."""
-        override = self._coord.orch_prompt.get(agent_name)
+        override = self.orch_prompt.get(agent_name)
         if override is not None:
             return override
         role = self.role_registry[agent_name]
@@ -830,42 +871,41 @@ class ConversationCollaborator(CoordinatorCollaborator):
         Rows are ordered by recency rather than by the round's self-reported
         ``confidence``: that field is an audit record of what the specialist
         claimed, never an input to a decision here.
+
+        ``research_hints.json`` is not read: it holds the sourced subset of
+        these same findings. Each list keeps its newest entries within its
+        character ceiling and counts the rest.
         """
-        from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
-
-        hints = _research_hints.load_hints(self.session_dir)
-        rounds = [
-            row
-            for row in reversed(self.shared_state.specialist_rounds or [])
-            if isinstance(row, dict) and (row.get("new_findings") or row.get("residual_questions"))
-        ]
-        if not hints and not rounds:
-            return ""
-
-        lines = ["=== Specialist findings ==="]
-        if hints:
-            lines.append("Findings:")
-            for hint in hints:
-                lines.append(json.dumps(hint, sort_keys=True))
-
+        findings: list[str] = []
         questions: list[str] = []
         seen_questions: set[str] = set()
-        for row in rounds:
+        for row in reversed(self.shared_state.specialist_rounds or []):
+            if not isinstance(row, dict):
+                continue
             domain_label = str(row.get("domain") or "").strip()
-            findings = row.get("new_findings") or []
-            if findings:
-                lines.append(f"[{domain_label}] findings:")
-                for finding in findings:
-                    lines.append(json.dumps(finding, sort_keys=True) if isinstance(finding, dict) else str(finding))
+            for finding in row.get("new_findings") or []:
+                text = json.dumps(finding, sort_keys=True) if isinstance(finding, dict) else str(finding)
+                findings.append(f"- [{domain_label}] {text}")
             for question in row.get("residual_questions") or []:
                 text = str(question).strip()
                 if text and text not in seen_questions:
                     seen_questions.add(text)
-                    questions.append(f"[{domain_label}] {text}")
+                    questions.append(f"- [{domain_label}] {text}")
+        if not findings and not questions:
+            return ""
 
-        if questions:
-            lines.append("Residual questions:")
-            lines.extend(f"- {question}" for question in questions)
+        lines = ["=== Specialist findings ==="]
+        for title, items, budget_chars in (
+            ("Findings", findings, _FINDINGS_PROMPT_CHARS),
+            ("Residual questions", questions, _QUESTIONS_PROMPT_CHARS),
+        ):
+            if not items:
+                continue
+            shown = _fit_to_budget(items, budget_chars)
+            lines.append(f"{title}:")
+            lines.extend(shown)
+            if len(shown) < len(items):
+                lines.append(f"(+{len(items) - len(shown)} older omitted)")
         return "\n".join(lines)
 
     def _priors_match_advisory_block(self) -> str:

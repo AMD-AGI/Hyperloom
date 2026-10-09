@@ -9,7 +9,6 @@ delivery is:
 - The server permits exactly two Bash commands for Critic turns:
   `python -m hyperloom.agents.critic.runtime.cli prepare-review` and
   `python -m hyperloom.agents.critic.runtime.cli commit-review`.
-- For session lifecycle: `init-session` and `close-session`.
 
 ## Per-turn flow
 
@@ -52,7 +51,7 @@ default — you do not need to flip a flag when the KB service is down:
 2. While the breaker is open (`CRITIC_KB_BREAKER_COOLDOWN_SECONDS`):
    - `list_priors` returns `cache="kb_unreachable"` with empty priors and
      never makes another transport call.
-   - `write_verdict`, `write_kb_drafts`, and `add_contradiction` return
+   - `write_verdict` and `write_kb_drafts` return
      `WriteResult(status="disabled", reason="kb_unreachable")` so the
      review pipeline keeps emitting verdicts.
    - `prepare-review` reports `judge_bundle.kb_read_skipped_reason =
@@ -72,16 +71,11 @@ outages.
 Configure the chat server's Bash gate to allow exactly:
 
 ```text
-python3 -m hyperloom.agents.critic.runtime.cli init-session ...
 python3 -m hyperloom.agents.critic.runtime.cli prepare-review ...
 python3 -m hyperloom.agents.critic.runtime.cli commit-review ...
-python3 -m hyperloom.agents.critic.runtime.cli close-session ...
-python3 -m hyperloom.agents.critic.runtime.cli list-priors ...
-python3 -m hyperloom.agents.critic.runtime.cli replay-dead-letter ...
 ```
 
-Reject `write-verdict`, `write-kb-drafts`, `add-contradiction` outside
-trusted operators — they are exposed for tooling, not for direct LLM use.
+`replay-dead-letter` is an operator command (see the cron below), not for LLM use.
 
 ## Exit codes
 

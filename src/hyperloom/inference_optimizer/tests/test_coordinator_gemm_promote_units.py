@@ -1649,7 +1649,11 @@ class TestKernelE2EMeasurementPromotion:
         coord.shared_state.save(coord.session_dir)
         monkeypatch.setenv("FRAMEWORK", "sglang")
         monkeypatch.setattr(krh_mod, "_resolve_integrate_payload", unexpected)
-        monkeypatch.setattr(krh_mod, "_load_apply_tool", unexpected)
+        monkeypatch.setattr(
+            krh_mod,
+            "apply_kernel_patch",
+            SimpleNamespace(parse_patch_manifest=unexpected, verify_cpp_itfs_rebuilt=unexpected),
+        )
         monkeypatch.setattr(krh_mod, "_grade_integrate_accuracy", unexpected)
         monkeypatch.setattr(krh_mod, "_maybe_finalize_kernel_patch", unexpected)
         monkeypatch.setattr(krh_mod, "_sweep_integrate_aiter_locks", lambda **kwargs: {})

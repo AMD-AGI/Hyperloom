@@ -57,7 +57,7 @@ Hyperloom reads credentials from two places, in order:
 
 Shell environment variables always win over `.env`.
 Both the inference optimizer CLI dotenv loader and
-`src/hyperloom/agents/kernel/scripts/install.sh` honor this rule. Do *not*
+`src/hyperloom/inference_optimizer/assets/install_kernel_tools.sh` honor this rule. Do *not*
 manually `source .env` from chat — it inverts the precedence and can
 overwrite an exported key with a stale value from disk.
 
@@ -317,8 +317,8 @@ At preflight, the inference optimizer CLI:
 
 1. Confirm `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL` and the matching
    API key are set and current.
-2. Re-run preflight (any `python -m hyperloom.inference_optimizer.cli ...` command) or
-   `bash "$REPO_ROOT/hyperloom/agents/kernel/scripts/install.sh" --check-only`.
+2. Re-run preflight (any `python -m hyperloom optimize ...` command) or
+   `bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install_kernel_tools.sh" --check-only`.
 3. Inspect `~/.claude/config.json` — `customApiUrl` must point at the
    resolved Anthropic-side upstream gateway.
 

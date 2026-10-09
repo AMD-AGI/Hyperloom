@@ -64,6 +64,26 @@ AGENTX_MEASUREMENT_EPOCH = 4
 LEGACY_AGENTX_MEASUREMENT_EPOCH = 1
 
 
+def resolve_framework_version(args: argparse.Namespace) -> str:
+    """Resolve ``framework_version``: --framework-version > $FRAMEWORK_VERSION > auto-detect > ""."""
+    explicit = (getattr(args, "framework_version", None) or "").strip() or (
+        os.environ.get("FRAMEWORK_VERSION", "") or ""
+    ).strip()
+    if explicit:
+        return explicit
+    framework = (getattr(args, "framework", None) or "").strip() or (os.environ.get("FRAMEWORK", "") or "").strip()
+    if not framework:
+        return ""
+    from ..recipe_snapshot_constants import (
+        DEFAULT_FRAMEWORK_VERSION_SLUG,
+        detect_framework_version,
+    )
+
+    detected = detect_framework_version(framework)
+    # Treat the failure-slug as "no info".
+    return "" if detected == DEFAULT_FRAMEWORK_VERSION_SLUG else detected
+
+
 def seed_grading(framework: str, benchmark_mode: str) -> dict[str, Any]:
     """Resolve the grading axis and its noise band once, at seed, so they can be recorded.
 
@@ -324,27 +344,6 @@ def _seed_shared_state(
             return int(default)
         return resolved if resolved > 0 else int(default)
 
-    def _resolve_framework_version(args_in: Any) -> str:
-        """Resolve ``framework_version`` for the recipe-snapshot canonical id."""
-        explicit = (getattr(args_in, "framework_version", None) or "").strip() or (
-            os.environ.get("FRAMEWORK_VERSION", "") or ""
-        ).strip()
-        if explicit:
-            return explicit
-        framework = (getattr(args_in, "framework", None) or "").strip() or (
-            os.environ.get("FRAMEWORK", "") or ""
-        ).strip()
-        if not framework:
-            return ""
-        from ..recipe_snapshot_constants import (
-            DEFAULT_FRAMEWORK_VERSION_SLUG,
-            detect_framework_version,
-        )
-
-        detected = detect_framework_version(framework)
-        # Treat the failure-slug as "no info".
-        return "" if detected == DEFAULT_FRAMEWORK_VERSION_SLUG else detected
-
     # KB architecture tags from config.json; fresh-launch only.
     _cfg_tags = _load_model_config_tags(str(args.model))
 
@@ -419,7 +418,7 @@ def _seed_shared_state(
         tp=_int_arg("tp", DEFAULT_TP),
         ep=_int_arg("ep", DEFAULT_EP),
         precision=(str(getattr(args, "precision", None) or DEFAULT_PRECISION).strip()),
-        framework_version=_resolve_framework_version(args),
+        framework_version=resolve_framework_version(args),
         conc=_int_arg("conc", DEFAULT_CONC),
         isl=_int_arg("isl", DEFAULT_ISL),
         osl=_int_arg("osl", DEFAULT_OSL),

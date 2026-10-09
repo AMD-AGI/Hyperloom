@@ -115,7 +115,6 @@ from ._grid_variant_filter import (
     apply_user_skip_list,
     resolve_skip_spec,
 )
-from ._recipe_script import RecipeLeverUnavailableError
 from ._server_argv import ConfigUnreadable
 from ._workload_envs import (
     FrameworkScriptMismatchError,
@@ -2921,14 +2920,10 @@ class IntegratePatchExecutor:
                 variant_expected_sec=variant_expected_sec,
                 benchmark_mode=str(getattr(shared_state, "benchmark_mode", "") or ""),
             )
-        except (FrameworkScriptMismatchError, RecipeLeverUnavailableError) as exc:
+        except FrameworkScriptMismatchError as exc:
             return {
                 "status": "reverted",
-                "error_class": (
-                    "framework_script_mismatch"
-                    if isinstance(exc, FrameworkScriptMismatchError)
-                    else "recipe_lever_unavailable"
-                ),
+                "error_class": "framework_script_mismatch",
                 "error": str(exc),
                 "specialist_task_id": specialist_task_id,
                 "patches_applied": [],

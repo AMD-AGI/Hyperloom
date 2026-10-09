@@ -362,16 +362,12 @@ def _reads_off_reason(state: Any) -> str:
     return ""
 
 
-def integration_for(owner: Any, session_dir: str | Path) -> ExperienceKBIntegration | None:
-    """Return ``owner``'s one Experience service integration, bootstrapping it on first use."""
-    if hasattr(owner, "_kb_integration"):
-        return owner._kb_integration
-    if reason := _reads_off_reason(owner.shared_state):
+def integration_for(state: Any, session_dir: str | Path) -> ExperienceKBIntegration | None:
+    """Build the session's Experience service integration, or None when this run must not read Experiences."""
+    if reason := _reads_off_reason(state):
         log.info("Experience KB reads are off for this run: %s", reason)
-        owner._kb_integration = None
-    else:
-        owner._kb_integration = ExperienceKBIntegration.from_env(session_dir)
-    return owner._kb_integration
+        return None
+    return ExperienceKBIntegration.from_env(session_dir)
 
 
 __all__ = ["ExperienceKBEvidence", "ExperienceKBIntegration", "integration_for"]

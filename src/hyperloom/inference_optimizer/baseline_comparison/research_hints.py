@@ -482,7 +482,7 @@ def match_variants_to_priors(
     *,
     primary_gap: str | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """Annotate which variants align with proven priors (advisory; informs ordering only). Returns ``{name: {hints, latency_aligned}}`` for variants matching a hint or a dominant latency gap."""
+    """Annotate which variants align with proven priors (advisory; informs ordering only). Returns ``{name: {hints, latency_aligned}}`` for variants matching a hint or a dominant latency gap; ``hints`` lists the most shared content words first."""
     out: dict[str, dict[str, Any]] = {}
     latency_dominant = str(primary_gap or "").strip().lower() == "latency"
     hint_tokens: list[tuple[str, set[str]]] = []
@@ -509,10 +509,8 @@ def match_variants_to_priors(
         )
         text += " " + " ".join(str(t) for t in (variant.get("domain_tags") or []))
         vtoks = _tokens(text)
-        matched_hints: list[str] = []
-        for what, toks in hint_tokens:
-            if vtoks & toks:
-                matched_hints.append(what)
+        overlaps = [(len(vtoks & toks), what) for what, toks in hint_tokens]
+        matched_hints = [what for shared, what in sorted(overlaps, key=lambda pair: -pair[0]) if shared]
         latency_aligned = bool(latency_dominant and any(kw in vtoks for kw in _LATENCY_DIRECTION_KEYWORDS))
         if matched_hints or latency_aligned:
             out[name] = {
@@ -528,8 +526,12 @@ def priors_match_summary(
     *,
     primary_gap: str | None = None,
     max_rows: int = 12,
+    max_hints_per_row: int = 3,
 ) -> str:
-    """Render an advisory block flagging variants that match priors (empty when none; advisory ordering only)."""
+    """Render an advisory block flagging variants that match priors (empty when none; advisory ordering only).
+
+    A single shared word is a match, so a row would otherwise list most live hints.
+    """
     matches = match_variants_to_priors(
         variants,
         hints,
@@ -547,9 +549,12 @@ def priors_match_summary(
         tags: list[str] = []
         if info.get("latency_aligned"):
             tags.append("aligns-with-latency-gap")
-        for what in info.get("hints") or []:
+        hints = info.get("hints") or []
+        for what in hints[:max_hints_per_row]:
             short = what if len(what) <= 60 else what[:57] + "..."
             tags.append(f"hint:{short}")
+        if len(hints) > max_hints_per_row:
+            tags.append(f"+{len(hints) - max_hints_per_row} more")
         lines.append(f"- {name}: " + "; ".join(tags))
     return "\n".join(lines)
 

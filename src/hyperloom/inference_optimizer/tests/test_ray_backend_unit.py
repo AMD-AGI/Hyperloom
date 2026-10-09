@@ -1484,7 +1484,7 @@ def test_maybe_gpu_specialist_lease_multi_node_none(monkeypatch: pytest.MonkeyPa
 # ── P3: serving_slot custom resource (T6) ────────────────────────────────────
 def test_serving_slot_declared_in_ray_start_args():
     """ensure_ray_cluster's head declares the serving_slot custom resource."""
-    from hyperloom.agents.kernel.tools.backends import ray_runtime as rr
+    from hyperloom.orchestrator.actions.executors import _ray_runtime as rr
 
     args = rr._resources_start_args()
     assert args[0] == "--resources"
@@ -1809,10 +1809,10 @@ def test_serving_actor_run_blocking_timeout_sentinel(monkeypatch: pytest.MonkeyP
     actor.stop()
 
 
-# ── coverage: RayExecutionBackend.ensure (reuses kernel ray_runtime) ─────────
+# ── coverage: RayExecutionBackend.ensure (reuses _ray_runtime) ───────────────
 def test_backend_ensure_reuses_kernel_runtime(monkeypatch: pytest.MonkeyPatch):
     """ensure() calls ensure_ray_cluster + quiet_ray_init once, then is idempotent."""
-    from hyperloom.agents.kernel.tools.backends import ray_runtime as rr
+    from hyperloom.orchestrator.actions.executors import _ray_runtime as rr
 
     calls: dict = {"ensure": 0, "init": 0, "num_gpus": None}
 

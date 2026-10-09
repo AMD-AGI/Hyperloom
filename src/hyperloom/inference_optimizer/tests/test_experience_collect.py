@@ -258,7 +258,7 @@ def _record_framework_attempts(session_dir: Path, source_status: str = "kept") -
     import asyncio
 
     asyncio.run(
-        coord.writeback.fact_write_hook(
+        coord.recipe_journal.fact_write_hook(
             task=SimpleNamespace(task_id="t-exp-1", kind="explore", params={"proposal_msg_id": "p-config"}),
             result={
                 "round_id": "explore-001",
@@ -499,7 +499,7 @@ def test_an_auto_benched_specialist_proposal_publishes_its_reasoning_citations_a
     [task] = [task for task in asyncio.run(coord.tasks.queued()) if task.kind == "explore"]
     [variant] = _grid_variants_from_payload(task.params["grid"])
     asyncio.run(
-        coord.writeback.fact_write_hook(
+        coord.recipe_journal.fact_write_hook(
             task=task,
             result={
                 "round_id": "explore-auto-1",

@@ -393,11 +393,6 @@ class PreludePhase(CoordinatorCollaborator):
         targets = cls._parse_diff_targets(patch_path)
         return targets[0] if targets else ""
 
-    def _resolve_kernel_target_path(self, entry: dict[str, Any]) -> str:
-        """Locate the first Patch target under this Session's active root."""
-        targets = self._resolve_kernel_target_paths(entry)
-        return targets[0] if targets else ""
-
     def _resolve_kernel_target_paths(self, entry: dict[str, Any]) -> list[str]:
         """Resolve every declared Patch target under the Session active root."""
 
@@ -2467,7 +2462,7 @@ class PreludePhase(CoordinatorCollaborator):
             )
             # Journal warm-replay as a synthetic KEEP; no KB lesson.
             try:
-                journal = self._coord.writeback.ensure_journal()
+                journal = self._coord.recipe_journal.ensure_journal()
                 journal.append_entry(
                     JournalEntry(
                         phase=(state.phase or "PRELUDE").upper() or "PRELUDE",

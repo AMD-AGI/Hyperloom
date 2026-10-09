@@ -91,7 +91,7 @@ class SubAgentResult:
               failure ledgers never see it; the rule stays readable on the
               task row's terminal evidence.
             * ``"crash"`` / ``"oom"`` / ``"hang"`` / ``"detokenizer_stall"``:
-              exact-matched by :meth:`writeback._pitfall_severity_for` to
+              exact-matched by :meth:`recipe_journal._pitfall_severity_for` to
               classify a failure as crash-severity for the KB.
             * ``"no_executor"``: no runner registered for the task's
               ``kind`` — set directly on this dataclass so the gap ledger

@@ -6,11 +6,11 @@ A session is single-framework. Pick `sglang` (default), `vllm`, `atom`, `xdit`
 or `custom` via `--framework` or `$FRAMEWORK`:
 
 ```bash
-python3 -m hyperloom.inference_optimizer.cli optimize --framework vllm --model "$MODEL_PATH" --max-hours 2
-FRAMEWORK=vllm python3 -m hyperloom.inference_optimizer.cli optimize --model "$MODEL_PATH" --max-hours 2
-python3 -m hyperloom.inference_optimizer.cli optimize --framework atom --model "$MODEL_PATH" --max-hours 2  # IR-8 single-node only
-python3 -m hyperloom.inference_optimizer.cli optimize --framework xdit --model "$MODEL_PATH" --max-hours 2  # scriptable diffusion
-python3 -m hyperloom.inference_optimizer.cli optimize --framework custom --model "$MODEL_PATH" --max-hours 12  # your own scriptable workload
+python3 -m hyperloom optimize --framework vllm --model "$MODEL_PATH" --max-hours 2
+FRAMEWORK=vllm python3 -m hyperloom optimize --model "$MODEL_PATH" --max-hours 2
+python3 -m hyperloom optimize --framework atom --model "$MODEL_PATH" --max-hours 2  # IR-8 single-node only
+python3 -m hyperloom optimize --framework xdit --model "$MODEL_PATH" --max-hours 2  # scriptable diffusion
+python3 -m hyperloom optimize --framework custom --model "$MODEL_PATH" --max-hours 12  # your own scriptable workload
 ```
 
 Resolution order: `--framework` > `$FRAMEWORK` > `sglang` (default).
@@ -63,7 +63,7 @@ paths at launch replace everything the shipped frameworks hardcode:
 
 ```bash
 export HYPERLOOM_BENCHMARK_BACKEND=bypass
-python3 -m hyperloom.inference_optimizer.cli -v optimize \
+python3 -m hyperloom optimize -v \
   --framework custom \
   --framework-path /path/to/my-framework \
   --benchmark-scripts-dir /path/to/my-scripts \
@@ -176,8 +176,8 @@ optimizer auto-detects via `rocm-smi --showproductname` (falling back to
 `torch.cuda.get_device_properties(0).gcnArchName`).
 
 ```bash
-python3 -m hyperloom.inference_optimizer.cli optimize --gpu-type mi355x --model "$MODEL_PATH" --max-hours 2
-GPU_TYPE=mi300x python3 -m hyperloom.inference_optimizer.cli optimize --model "$MODEL_PATH" --max-hours 2
+python3 -m hyperloom optimize --gpu-type mi355x --model "$MODEL_PATH" --max-hours 2
+GPU_TYPE=mi300x python3 -m hyperloom optimize --model "$MODEL_PATH" --max-hours 2
 ```
 
 Accepted values: `mi300x`, `mi308x`, `mi325x`, `mi355x`. **`mi308x` and
