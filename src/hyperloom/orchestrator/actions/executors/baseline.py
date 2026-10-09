@@ -48,6 +48,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EV
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...loop.sub_agent_runner import RunnerContext
 from ...measurement.integrate_performance import assess_integrate_performance
+from ...measurement.runtime_findings import persist_runtime_findings, scan_server_log
 from hyperloom.inference_optimizer.trace.task_progress import heartbeat_while_output_flows, report_progress
 from ...phases import machine_state as _phase_state
 from ..stop_attribution import (
@@ -580,6 +581,7 @@ def _attach_baseline_launch_evidence(
     )
     result["launch_evidence"] = evidence
     result["launch_evidence_path"] = persist_launch_evidence(evidence, slot=output_dir)
+    persist_runtime_findings(scan_server_log(actual_log, evidence["framework"]), slot=output_dir)
 
 
 def _watchdog_server_log_path(output_dir: Path, framework: str) -> str | None:
@@ -3906,7 +3908,8 @@ class BenchmarkRunExecutor:
             "boot_observation_path": boot_observation_ref,
             "boot_observation_degraded": capture_meta.get("boot_observation_degraded", ""),
         }
-        _attach_baseline_launch_evidence(
+        await asyncio.to_thread(
+            _attach_baseline_launch_evidence,
             result,
             config_path=materialized_config_path,
             output_dir=output_dir,

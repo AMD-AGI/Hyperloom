@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Pattern
@@ -24,6 +24,7 @@ DETECTED = "detected"
 NOT_DETECTED = "not_detected"
 UNKNOWN = "unknown"
 
+RUNTIME_FINDINGS_FILE = "runtime_findings.json"
 _EVIDENCE_MAX_CHARS = 300
 #: Frameworks whose launch record ``engine_adjusted_settings_from_log`` reads.
 _LAUNCH_RECORD_FRAMEWORKS = frozenset({"sglang", "vllm"})
@@ -201,6 +202,29 @@ def scan_server_log(path: str | None, framework: str) -> dict[str, Any]:
 def persist_runtime_findings(report: dict[str, Any], *, slot: Path) -> str:
     """Write ``runtime_findings.json`` into the measurement slot."""
     slot.mkdir(parents=True, exist_ok=True)
-    path = slot / "runtime_findings.json"
+    path = slot / RUNTIME_FINDINGS_FILE
     path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
     return str(path)
+
+
+def render_runtime_findings(measurement: Mapping[str, Any]) -> str:
+    """Render the findings stored beside a measurement's launch evidence."""
+    evidence_path = str(measurement.get("launch_evidence_path") or "")
+    if not evidence_path:
+        return "(no measurement slot recorded for the current best)"
+    path = Path(evidence_path).parent / RUNTIME_FINDINGS_FILE
+    if not path.is_file():
+        return f"(no runtime findings written at {path})"
+    report = json.loads(path.read_text(encoding="utf-8"))
+    findings = report["findings"]
+    lines = [f"runtime findings for {report['log_path'] or '(no server log)'} [{report['framework']}]"]
+    lines.extend(
+        f"- detected [{f['category']}] {f['rule_id']} {f['subject']} x{f['count']}: {f['evidence']}"
+        for f in findings
+        if f["status"] == DETECTED
+    )
+    clear = [f["rule_id"] for f in findings if f["status"] == NOT_DETECTED]
+    if clear:
+        lines.append(f"- not_detected: {', '.join(clear)}")
+    lines.extend(f"- unknown: {f['rule_id']} ({f['reason']})" for f in findings if f["status"] == UNKNOWN)
+    return "\n".join(lines)
