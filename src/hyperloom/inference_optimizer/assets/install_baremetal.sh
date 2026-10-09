@@ -6,10 +6,10 @@
 #
 # Runs Hyperloom directly on a host that already provides the ROCm framework
 # base (ROCm runtime + a ROCm-built torch + a serving framework). For bare-metal
-# installs, the script can optionally install SGLang or vLLM ROCm framework layers.
+# installs, the script can optionally install SGLang, vLLM or ATOM ROCm framework layers.
 #
 # Phase 1  base preflight  — ROCm / GPU arch / ROCm torch / serving framework
-# Phase 2  framework       — optional bare-metal SGLang/vLLM install
+# Phase 2  framework       — optional bare-metal SGLang/vLLM/ATOM install
 # Phase 3  ROCm hotfix     — install ROCclr HIP runtime + roctracer profiler fix
 # Phase 4  credentials     — resolve Anthropic/DeepSeek LLM creds into .env
 # Phase 5  runtime env     — persist bare-metal runtime vars into .env
@@ -43,7 +43,7 @@ fi
 HYPERLOOM_SKILL_PATH="${HYPERLOOM_SKILL_PATH:-${REPO_ROOT}/src/hyperloom/inference_optimizer/SKILL.md}"
 
 HYPERLOOM_WHEEL_REPO="${HYPERLOOM_WHEEL_REPO:-AMD-AGI/Hyperloom}"
-HYPERLOOM_WHEEL_TAG="${HYPERLOOM_WHEEL_TAG:-v1.1.1}"
+HYPERLOOM_WHEEL_TAG="${HYPERLOOM_WHEEL_TAG:-v1.1.3}"
 ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR="${ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR:-/opt/rocm/lib}"
 ROCM_PROFILER_HOTFIX_ASSET="${ROCM_PROFILER_HOTFIX_ASSET:-rocm-profiler-hotfix-libs.tar.gz}"
 # Installed name must outrank the vendor library in ldconfig's ordering.
@@ -63,22 +63,22 @@ INSTALL_FRAMEWORK="none"
 _FRAMEWORK_ENV_WAS_SET="${FRAMEWORK_ENV+x}"
 FRAMEWORK_ENV="${FRAMEWORK_ENV:-shared}"
 SGLANG_REPO="${SGLANG_REPO:-https://github.com/sgl-project/sglang.git}"
-# Framework versions track docs/compatibility.rst (SGLang 0.5.20, ROCm 10 docker).
-# SGLANG_REF is the v0.5.20 release commit (peeled from the tag, not the tag
-# object) aligned with lmsysorg/sglang-rocm:v0.5.20-rocm10-* images. Through
+# Framework versions track docs/compatibility.rst (SGLang 0.5.21, ROCm 10 docker).
+# SGLANG_REF is the v0.5.21 release commit (peeled from the tag, not the tag
+# object) aligned with lmsysorg/sglang-rocm:v0.5.21-rocm10-* images. Through
 # 0.5.18 the HIP extra pinned compressed-tensors to 0.15.0, which caps torch
 # below 2.11 and so cannot resolve against a ROCm 10 stack at all; 0.5.19 moved
 # that dependency into runtime_common unpinned, which leaves the installer's
 # ROCm torch constraint as the version pip solves for.
-# vLLM installs 0.29.0+rocm723 from the wheels.vllm.ai pip index, matching the
-# vllm/vllm-openai-rocm:v0.29.0 Docker image. The rocm723 variant puts the
-# vLLM ROCm layer at 7.2.3, one patch level above the SGLang stack. AITER_REF
+# vLLM installs 0.29.0+rocm723 from the wheels.vllm.ai pip index. The rocm723
+# variant puts the vLLM ROCm layer at 7.2.3; the docker route instead uses the
+# ROCm 10.0 rocm/vllm image, so the two paths no longer share a patch level. AITER_REF
 # can pin ROCm/aiter to a released tag; when unset, the installer selects the
 # newest tag compatible with the already-installed ROCm torch/triton stack.
-SGLANG_REF="${SGLANG_REF:-94602c9c2b7cbdb8efd5c52802dac6a1c180089e}"
+SGLANG_REF="${SGLANG_REF:-e00930c5489053f26d86b179cee0d087f846acbb}"
 # The pin is a commit SHA (not the annotated tag object), so setuptools_scm and
 # shallow git fetch behave predictably. Declare the point release for source installs.
-SGLANG_PRETEND_VERSION="${SGLANG_PRETEND_VERSION:-0.5.20}"
+SGLANG_PRETEND_VERSION="${SGLANG_PRETEND_VERSION:-0.5.21}"
 _SGLANG_ROCM_PYPI_VERSION_WAS_SET="${SGLANG_ROCM_PYPI_VERSION+x}"
 _AITER_REF_WAS_SET="${AITER_REF+x}"
 # Left unset so the wheel target is derived from the ROCm stack that is
@@ -90,6 +90,17 @@ AITER_REF="${AITER_REF:-}"
 VLLM_VERSION="${VLLM_VERSION:-0.29.0}"
 VLLM_ROCM_VARIANT="${VLLM_ROCM_VARIANT:-rocm723}"
 VLLM_ROCM_INDEX="${VLLM_ROCM_INDEX:-https://wheels.vllm.ai/rocm/${VLLM_VERSION}/${VLLM_ROCM_VARIANT}}"
+VLLM_INSTALL_METHOD="${VLLM_INSTALL_METHOD:-auto}"
+VLLM_REPO="${VLLM_REPO:-https://github.com/vllm-project/vllm.git}"
+VLLM_SOURCE_REF="${VLLM_SOURCE_REF:-98dff2a81d747d1dba01a47f939f48c3526d4206}"
+# The source checkout is a depth-1 fetch of a commit SHA and carries no tags, so
+# setuptools_scm would otherwise stamp the build 0.1.dev1 instead of the release.
+VLLM_PRETEND_VERSION="${VLLM_PRETEND_VERSION:-${VLLM_VERSION}}"
+# ATOM publishes no release tags. ATOM_REF is the ATOM_COMMIT build argument of
+# rocm/atom-dev:v0.1.7-rc0, the only ATOM stack docs/compatibility.rst records.
+ATOM_REPO="${ATOM_REPO:-https://github.com/ROCm/ATOM.git}"
+ATOM_REF="${ATOM_REF:-fe1099b15ddc52e6873e1932935f722864cdeee0}"
+VLLM_ROOT="${VLLM_ROOT:-/opt/hyperloom/vllm}"
 # Index publishing the TheRock ROCm SDK wheels these images are built from;
 # rocm-sdk-devel is pulled from here to supply source-build headers.
 ROCM_SDK_INDEX_URL="${ROCM_SDK_INDEX_URL:-https://stable.repo.amd.com/rocm/whl-next}"
@@ -109,8 +120,8 @@ usage() {
 Usage: src/hyperloom/inference_optimizer/assets/install_baremetal.sh [options]
 
 Set up a bare-metal host with ROCm + ROCm torch for Hyperloom. Verifies the base,
-optionally installs SGLang/vLLM, resolves credentials, and writes the combined
-runtime env. Stops BEFORE launching.
+optionally installs SGLang/vLLM/ATOM, resolves credentials, and writes the
+combined runtime env. Stops BEFORE launching.
 
 Options:
   --user-data-path PATH  Writable artifact root (default: /workspace/hyperloom)
@@ -119,7 +130,7 @@ Options:
                          sglang,vllm,atom). Phase 1 passes when at least one
                          entry imports.
   --install-framework FW Install a missing bare-metal framework layer.
-                         Supported: none, sglang, vllm. Default: none.
+                         Supported: none, sglang, vllm, atom. Default: none.
   --framework-env MODE   Install target for framework packages: shared or
                          isolated. Default: shared, except vLLM which defaults
                          to isolated so it never replaces the shared ROCm
@@ -148,7 +159,8 @@ PYTHON, INFERENCE_OPTIMIZER_FORCE_PYTHON,
 SGLANG_REPO, SGLANG_REF, SGLANG_ROOT, SGLANG_ROCM_PYPI_VERSION,
 SGLANG_ROCM_EXTRA, SGLANG_BUILD_RUST_EXTS, AITER_REPO, AITER_REF, AITER_ROOT, ROCM_PATH, HIP_PATH,
 LD_LIBRARY_PATH, ROCM_SDK_INDEX_URL, VLLM_VERSION, VLLM_ROCM_VARIANT, VLLM_ROCM_INDEX,
-VLLM_VENV_ROOT, HYPERLOOM_WHEEL_REPO, HYPERLOOM_WHEEL_TAG.
+VLLM_INSTALL_METHOD, VLLM_REPO, VLLM_SOURCE_REF, VLLM_ROOT, VLLM_VENV_ROOT,
+ATOM_REPO, ATOM_REF, ATOM_ROOT, HYPERLOOM_WHEEL_REPO, HYPERLOOM_WHEEL_TAG.
 EOF
 }
 
@@ -162,8 +174,8 @@ while [ "$#" -gt 0 ]; do
       shift
       INSTALL_FRAMEWORK="${1:-}"
       case "$INSTALL_FRAMEWORK" in
-        none|sglang|vllm) ;;
-        *) echo "[install-baremetal] ERROR: --install-framework must be one of: none, sglang, vllm" >&2; exit 2 ;;
+        none|sglang|vllm|atom) ;;
+        *) echo "[install-baremetal] ERROR: --install-framework must be one of: none, sglang, vllm, atom" >&2; exit 2 ;;
       esac
       ;;
     --framework-env)
@@ -198,9 +210,9 @@ log() { echo "[install-baremetal] $*"; }
 warn() { echo "[install-baremetal WARN] $*" >&2; }
 die() { echo "[install-baremetal ERROR] $*" >&2; exit 1; }
 
-IMAGE_HINT="Provision the ROCm framework base first (SGLang: lmsysorg/sglang-rocm:v0.5.20-rocm10-mi30x|mi35x-*; \
+IMAGE_HINT="Provision the ROCm framework base first (SGLang: lmsysorg/sglang-rocm:v0.5.21-rocm10-mi30x|mi35x-*; \
 vLLM bare-metal: Ubuntu 24.04+ host with ROCm torch, or use docker mode with \
-vllm/vllm-openai-rocm:v0.29.0), then re-run."
+rocm/vllm:rocm10.0.0_ubuntu24.04_py3.14_pytorch_2.12.0_vllm_0.27.0), then re-run."
 
 is_interactive() { [ "$ASSUME_YES" -eq 0 ] && [ -t 0 ] && [ -t 1 ]; }
 
@@ -236,13 +248,28 @@ framework_probe_python() {
   fi
 }
 
+# ATOM registers vllm.platform_plugins, vllm.general_plugins and sglang.srt.plugins
+# entry points, and both engines load every registered plugin unless told
+# otherwise, so a vLLM or SGLang that can import ATOM serves through ATOM's
+# platform, model classes and loader patches. Die before `incoming` would put
+# ATOM and either engine into the interpreter `py`.
+refuse_atom_beside_vllm_or_sglang() {
+  local py="$1" incoming="$2" engines="" fw
+  for fw in sglang vllm; do
+    if [ "$incoming" = "$fw" ] || _py_has "$py" "$fw"; then engines="${engines:+${engines}, }${fw}"; fi
+  done
+  [ -n "$engines" ] || return 0
+  [ "$incoming" = atom ] || _py_has "$py" atom || return 0
+  die "ATOM cannot share ${py} with ${engines}: those engines load ATOM's plugins by default, which replace their platform, model classes and loader code. Install ATOM in a separate container, or in a Python that imports neither vLLM nor SGLang (pin it with PYTHON and INFERENCE_OPTIMIZER_FORCE_PYTHON=1)."
+}
+
 # Print the serving framework to record for downstream skills, or nothing when
 # none is importable. Walks $FRAMEWORKS in order — the same list Phase 1 probes
 # — so an engine that passes preflight is always the one written to .env.
 resolve_installed_framework() {
-  if [ "$INSTALL_FRAMEWORK" = "sglang" ] || [ "$INSTALL_FRAMEWORK" = "vllm" ]; then
-    printf '%s' "$INSTALL_FRAMEWORK"; return 0
-  fi
+  case "$INSTALL_FRAMEWORK" in
+    sglang|vllm|atom) printf '%s' "$INSTALL_FRAMEWORK"; return 0 ;;
+  esac
   local py fw probe_py _rif_arr
   py="$(resolve_python)" || return 0
   IFS=',' read -r -a _rif_arr <<< "$FRAMEWORKS"
@@ -502,7 +529,7 @@ base_preflight() {
 
   local py
   if ! py="$(resolve_python)"; then die "no usable Python found (set PYTHON or provide /opt/venv). ${IMAGE_HINT}"; fi
-  log "Python: ${py} ($(${py} --version 2>&1))"
+  log "Python: ${py} ($("${py}" --version 2>&1))"
 
   local torch_report tv thip
   torch_report="$("${py}" - <<'PY' 2>/dev/null || true
@@ -538,6 +565,27 @@ PY
     fw="$(echo "$fw" | tr -d '[:space:]')"; [ -z "$fw" ] && continue
     local probe_py; probe_py="$(framework_probe_python "$fw" "$py")"
     if _py_has "$probe_py" "$fw"; then
+      if [ "$fw" = "atom" ] && [ "$REQUIRE_FRAMEWORKS" -eq 1 ]; then
+        if ! "$probe_py" -B -c 'import atom'; then
+          warn "framework atom: import failed (required)"; rc=1; continue
+        fi
+        # Build the server's own parser instead of running --help: argparse
+        # renders help through %-formatting, so a release whose help text
+        # carries a literal % fails there while the engine itself runs.
+        if ! "$probe_py" -B -c 'import argparse
+try:
+    from atom.utils.arg_parser import FlexibleArgumentParser as parser_cls
+except ModuleNotFoundError as exc:
+    if exc.name not in ("atom.utils", "atom.utils.arg_parser"):
+        raise
+    parser_cls = argparse.ArgumentParser
+from atom.model_engine.arg_utils import EngineArgs
+parser = parser_cls()
+EngineArgs.add_cli_args(parser)
+parser.parse_args([])'; then
+          warn "framework atom: server argument parser failed (required)"; rc=1; continue
+        fi
+      fi
       if [ "$probe_py" != "$py" ]; then
         log "framework ${fw}: OK (isolated: ${probe_py})"
       else
@@ -757,6 +805,18 @@ install_aiter_ref_with_constraints() {
   check_torch_triton_alignment "$py" || return 1
 }
 
+# Both engines need AITER: SGLang routes GEMM through it, and kernelforge's
+# fusion validation runs vLLM with VLLM_ROCM_USE_AITER=1.
+ensure_aiter_for_python() {
+  local py="$1" aiter_root="$2"
+  if "$py" -c "import aiter" >/dev/null 2>&1; then
+    log "aiter already importable; skipping AITER source install"
+    return 0
+  fi
+  ensure_rocm_devel_headers "$py"
+  install_compatible_aiter "$py" "$aiter_root"
+}
+
 install_compatible_aiter() {
   local py="$1" aiter_root="$2" constraint_file ref tried=0
   constraint_file="$(mktemp)"
@@ -834,6 +894,7 @@ install_sglang_from_wheel() {
 install_sglang_framework() {
   local py deps_root aiter_root py_mm
   py="$(resolve_python)" || die "no usable Python found for SGLang install"
+  refuse_atom_beside_vllm_or_sglang "$py" sglang
   deps_root="$(framework_deps_root)"
   aiter_root="${AITER_ROOT:-${deps_root}/aiter}"
   py_mm="$("$py" - <<'PY'
@@ -921,18 +982,91 @@ PY
     log "sglang + sgl_kernel already importable; skipping amd-sglang install"
   fi
 
-  if ! "$py" -c "import aiter" >/dev/null 2>&1; then
-    ensure_rocm_devel_headers "$py"
-    install_compatible_aiter "$py" "$aiter_root"
-  else
-    log "aiter already importable; skipping AITER source install"
-  fi
+  ensure_aiter_for_python "$py" "$aiter_root"
 
   "$py" -c "import sglang" >/dev/null || die "sglang not importable after install"
   "$py" -c "import sgl_kernel" >/dev/null || die "sgl_kernel not importable after install"
   "$py" -c "import aiter" >/dev/null || die "aiter not importable after install"
   export SGLANG_USE_AITER="${SGLANG_USE_AITER:-1}"
   log "SGLang framework install complete (SGLANG_USE_AITER=${SGLANG_USE_AITER})"
+}
+
+# Editable, as in the rocm/atom-dev image, so framework-agent patches land in
+# the tree the server imports. The Rust atomesh build stays off (ATOM_MESH_BUILD
+# unset): the optimizer launches atom.entrypoints.openai_server, not atomesh.
+install_atom_from_source() {
+  local py="$1" deps_root="$2" atom_root constraint_file
+  atom_root="${ATOM_ROOT:-${deps_root}/atom}"
+
+  log "installing ATOM from source at ${atom_root} (ref=${ATOM_REF})"
+  if [ ! -d "${atom_root}/.git" ]; then
+    mkdir -p "$atom_root"
+    git init -q "$atom_root"
+    git -C "$atom_root" remote add origin "$ATOM_REPO"
+  fi
+  # Fetch the ref rather than `clone --branch`: ATOM_REF is a commit, which
+  # GitHub serves directly only as a full 40-char SHA.
+  git -C "$atom_root" fetch --depth 1 origin "$ATOM_REF"
+  git -C "$atom_root" checkout -q FETCH_HEAD
+
+  constraint_file="$(mktemp)"
+  write_rocm_torch_constraints "$py" "$constraint_file"
+  "$py" -m pip install --constraint "$constraint_file" -e "$atom_root" \
+    || { rm -f "$constraint_file"; die "ATOM ${ATOM_REF} install failed under the current torch/triton constraints"; }
+  rm -f "$constraint_file"
+}
+
+# ATOM runs its kernels through AITER, so AITER goes in first, selected the same
+# way as for SGLang: the newest tag compatible with the installed torch/triton.
+install_atom_framework() {
+  local py deps_root aiter_root
+  py="$(resolve_python)" || die "no usable Python found for ATOM install"
+  deps_root="$(framework_deps_root)"
+  aiter_root="${AITER_ROOT:-${deps_root}/aiter}"
+  refuse_atom_beside_vllm_or_sglang "$py" atom
+  if vllm_overlay_is_valid "$VLLM_VENV_ROOT"; then
+    refuse_atom_beside_vllm_or_sglang "${VLLM_VENV_ROOT}/bin/python" atom
+  fi
+
+  log "Phase 2: installing ATOM framework layer"
+  log "framework python: ${py}"
+  log "ATOM source: ${ATOM_REPO}@${ATOM_REF}"
+  log "AITER_ROOT=${aiter_root}"
+  if [ -n "$AITER_REF" ]; then
+    log "AITER_REF=${AITER_REF}"
+  else
+    log "AITER_REF=auto (newest tag compatible with installed torch/triton)"
+  fi
+
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    _py_has "$py" atom && log "atom import OK" \
+      || warn "atom missing (check-only; would install ${ATOM_REPO}@${ATOM_REF})"
+    _py_has "$py" aiter && log "aiter import OK" \
+      || warn "aiter missing (check-only; would install ${AITER_REF:-the newest compatible tag} from ${AITER_REPO})"
+    return 0
+  fi
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "would install AITER ${AITER_REF:-(newest compatible tag)} from ${AITER_REPO} at ${aiter_root} with current torch/triton constraints"
+    log "would clone ${ATOM_REPO}@${ATOM_REF} at ${ATOM_ROOT:-${deps_root}/atom} and install it editable with current torch/triton constraints"
+    return 0
+  fi
+
+  ensure_aiter_for_python "$py" "$aiter_root"
+  if _py_has "$py" atom; then
+    log "atom already importable; skipping ATOM source install"
+  else
+    install_atom_from_source "$py" "$deps_root"
+  fi
+
+  "$py" -c "import aiter" >/dev/null || die "aiter not importable after install"
+  "$py" -c "import atom" >/dev/null || die "atom not importable after install"
+  # Import the server module rather than run `--help`: ATOM's argparse help
+  # text carries unescaped "%" (e.g. at fe1099b15), so rendering help raises
+  # even though the server itself starts and serves.
+  "$py" -c "import atom.entrypoints.openai.api_server" >/dev/null \
+    || die "atom.entrypoints.openai.api_server not importable after install"
+  log "ATOM framework install complete"
 }
 
 # Verify that the installed vLLM package resolves to a ROCm runtime.
@@ -1045,9 +1179,257 @@ ensure_openmpi_runtime() {
   warn "could not install an OpenMPI runtime package (tried libopenmpi3t64, libopenmpi3); vLLM's torch import may fail on libmpi.so.40"
 }
 
+vllm_install_method_for_stack() {
+  local release="$1" hip="$2" detected=""
+  case "${release}:${hip}" in
+    10:7.15|10:7.15.*|10.*:7.15|10.*:7.15.*) detected=source ;;
+    7.2:7.2|7.2:7.2.*|7.2.*:7.2|7.2.*:7.2.*) detected=wheel ;;
+    :7.2|:7.2.*) detected=wheel ;;
+  esac
+  if [ -z "$detected" ]; then
+    echo "unsupported or conflicting ROCm stack (release=${release:-unknown}, torch HIP=${hip:-unknown})" >&2
+    return 1
+  fi
+  case "$VLLM_INSTALL_METHOD" in
+    auto) ;;
+    source|wheel)
+      if [ "$VLLM_INSTALL_METHOD" != "$detected" ]; then
+        echo "VLLM_INSTALL_METHOD=${VLLM_INSTALL_METHOD} conflicts with detected ${detected} route" >&2
+        return 1
+      fi
+      ;;
+    *) echo "VLLM_INSTALL_METHOD must be one of: auto, source, wheel" >&2; return 1 ;;
+  esac
+  printf '%s\n' "$detected"
+}
+
+detect_vllm_stack() {
+  local py="$1"
+  "$py" - <<'PY'
+import glob, os, re, sys
+from importlib import metadata
+
+releases = set()
+try:
+    value = metadata.version("rocm-sdk-core")
+    match = re.search(r"(\d+)(?:\.(\d+))?", value)
+    if match:
+        releases.add(match.group(1) + (f".{match.group(2)}" if match.group(2) else ""))
+except metadata.PackageNotFoundError:
+    pass
+for root in filter(None, (os.environ.get("ROCM_PATH"), os.environ.get("ROCM_HOME"))):
+    for path in glob.glob(os.path.join(root, ".info", "version*")):
+        try:
+            match = re.search(r"(\d+)(?:\.(\d+))?", open(path).read())
+            if match:
+                releases.add(match.group(1) + (f".{match.group(2)}" if match.group(2) else ""))
+        except OSError:
+            pass
+if len(releases) > 1:
+    print(f"conflicting ROCm release evidence: {sorted(releases)}", file=sys.stderr)
+    raise SystemExit(1)
+try:
+    import torch
+    hip = getattr(torch.version, "hip", None) or ""
+except Exception:
+    hip = ""
+print(f"{next(iter(releases), '')}|{hip}")
+PY
+}
+
+route_vllm_install_method() {
+  local stack release hip selected
+  stack="$(detect_vllm_stack "$1")" || die "failed to detect a consistent ROCm stack for vLLM"
+  release="${stack%%|*}"; hip="${stack#*|}"
+  selected="$(vllm_install_method_for_stack "$release" "$hip")" || die "cannot route vLLM install safely"
+  VLLM_INSTALL_METHOD="$selected"
+  export VLLM_INSTALL_METHOD
+  log "vLLM install route: ${selected} (release=${release:-none}, torch HIP=${hip:-unknown})"
+}
+
+check_vllm_source_python() {
+  "$1" - <<'PY' || die "vLLM source install requires Python >=3.10,<3.15"
+import sys
+raise SystemExit(0 if (3, 10) <= sys.version_info < (3, 15) else 1)
+PY
+}
+
+check_vllm_source_prereqs() {
+  local tool current required arch
+  for tool in git gcc g++ cmake ninja hipcc; do
+    command -v "$tool" >/dev/null 2>&1 || die "${tool} is required for vLLM source install"
+  done
+  for tool in gcc g++ cmake; do
+    required=11.3
+    [ "$tool" = cmake ] && required=3.26.1
+    current="$("$tool" --version | grep -oE '[0-9]+(\.[0-9]+)+' | head -1)"
+    _version_ge "$current" "$required" || die "${tool} >=${required} is required (found ${current:-unknown})"
+  done
+  arch="${PYTORCH_ROCM_ARCH:-$(detect_rocm_gfx_arch)}"
+  [ -n "$arch" ] || die "cannot detect a gfx architecture for vLLM source install"
+}
+
+vllm_overlay_is_valid() {
+  [ -x "$1/bin/python" ] &&
+    grep -Eqi '^[[:space:]]*include-system-site-packages[[:space:]]*=[[:space:]]*true' "$1/pyvenv.cfg"
+}
+
+inherit_vllm_base_site_packages() {
+  local base_py="$1" py="$2" base_site overlay_site amdsmi_site
+  base_site="$("$base_py" - <<'PY'
+from pathlib import Path
+import torch
+print(Path(torch.__file__).resolve().parent.parent)
+PY
+)" || die "cannot resolve the base ROCm torch site-packages"
+  overlay_site="$("$py" - <<'PY'
+import site
+print(site.getsitepackages()[0])
+PY
+)" || die "cannot resolve the vLLM overlay site-packages"
+  [ -d "$base_site" ] && [ -d "$overlay_site" ] ||
+    die "base or overlay site-packages directory is missing"
+  amdsmi_site="${base_site}/_rocm_sdk_core/share/amd_smi"
+  {
+    printf '%s\n' "$base_site"
+    [ ! -d "$amdsmi_site" ] || printf '%s\n' "$amdsmi_site"
+  } > "${overlay_site}/hyperloom-base-venv.pth"
+}
+
+vllm_checkout_state() {
+  local root="$1" origin head
+  [ -e "$root" ] || { echo new; return 0; }
+  [ -d "$root/.git" ] || die "vLLM source root is an existing non-git directory: ${root}"
+  origin="$(git -C "$root" remote get-url origin 2>/dev/null || true)"
+  [ "$origin" = "$VLLM_REPO" ] || die "vLLM checkout origin mismatch: ${origin:-missing}"
+  git -C "$root" diff --quiet && git -C "$root" diff --cached --quiet ||
+    die "vLLM checkout has dirty tracked or index changes: ${root}"
+  head="$(git -C "$root" rev-parse HEAD 2>/dev/null || true)"
+  [ "$head" = "$VLLM_SOURCE_REF" ] && echo exact || echo update
+}
+
+ensure_vllm_checkout() {
+  local root="$1" state
+  state="$(vllm_checkout_state "$root")" || return $?
+  [ "$state" = exact ] && { echo exact; return 0; }
+  check_vllm_source_prereqs
+  if [ "$state" = new ]; then
+    mkdir -p "$(dirname "$root")"
+    git init -q "$root"
+    git -C "$root" remote add origin "$VLLM_REPO"
+  fi
+  git -C "$root" fetch --quiet --depth 1 origin "$VLLM_SOURCE_REF" ||
+    die "failed to fetch vLLM source ref ${VLLM_SOURCE_REF}"
+  git -C "$root" checkout --quiet --detach FETCH_HEAD
+  [ "$(git -C "$root" rev-parse HEAD)" = "$VLLM_SOURCE_REF" ] ||
+    die "vLLM checkout did not reach ${VLLM_SOURCE_REF}"
+  echo updated
+}
+
+verify_vllm_source() {
+  local base_py="$1" py="$2" base_info
+  base_info="$("$base_py" - <<'PY'
+import os, torch
+print("|".join((os.path.realpath(torch.__file__), torch.__version__, torch.version.hip or "")))
+PY
+)" || return 1
+  "$py" - "$base_info" <<'PY' || return 1
+import os, sys, torch
+actual = "|".join((os.path.realpath(torch.__file__), torch.__version__, torch.version.hip or ""))
+if actual != sys.argv[1]:
+    raise SystemExit(f"overlay torch differs from host torch: {actual} != {sys.argv[1]}")
+import vllm._rocm_C  # noqa: F401
+from vllm.platforms import current_platform
+checker = getattr(current_platform, "is_rocm", None)
+if not ((callable(checker) and checker()) or "rocm" in repr(current_platform).lower()):
+    raise SystemExit("vLLM source overlay did not select ROCm")
+torch.empty(1, device="cuda")
+PY
+  "$py" -m pip check
+}
+
+install_vllm_from_source() {
+  local base_py="$1" py="${VLLM_VENV_ROOT}/bin/python" state arch constraint_file aiter_root
+  export VLLM_TARGET_DEVICE=rocm
+  [[ "$VLLM_SOURCE_REF" =~ ^[0-9a-fA-F]{40}$ ]] || die "VLLM_SOURCE_REF must be a full 40-character commit SHA"
+  check_vllm_source_python "$base_py"
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    if [ -x "$py" ] && "$py" -c "import vllm" >/dev/null 2>&1; then
+      verify_vllm_source "$base_py" "$py" || die "installed vLLM source overlay failed runtime verification"
+    else
+      warn "vLLM source overlay is not installed (check-only)"
+    fi
+    return 0
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    rocm_devel_headers_present "$base_py" ||
+      log "would ensure ROCm devel headers before the vLLM source build"
+    log "would prepare ${VLLM_ROOT} at ${VLLM_SOURCE_REF} and build into ${VLLM_VENV_ROOT}"
+    return 0
+  fi
+  if [ -e "$VLLM_VENV_ROOT" ] && ! vllm_overlay_is_valid "$VLLM_VENV_ROOT"; then
+    die "existing VLLM_VENV_ROOT is not a system-site-packages venv: ${VLLM_VENV_ROOT}"
+  fi
+  aiter_root="${AITER_ROOT:-$(framework_deps_root)/aiter}"
+  state="$(ensure_vllm_checkout "$VLLM_ROOT")" || return $?
+  if vllm_overlay_is_valid "$VLLM_VENV_ROOT"; then
+    inherit_vllm_base_site_packages "$base_py" "$py"
+  fi
+  if [ "$state" = exact ] && vllm_overlay_is_valid "$VLLM_VENV_ROOT" &&
+     verify_vllm_source "$base_py" "$py"; then
+    export VLLM_ROOT FRAMEWORK_REPO_PATH="$VLLM_ROOT"
+    ensure_aiter_for_python "$py" "$aiter_root"
+    link_vllm_into_shared_bin "$base_py" "$py"
+    log "reusing verified vLLM source overlay"
+    return 0
+  fi
+  [ "$state" != exact ] || check_vllm_source_prereqs
+  ensure_rocm_devel_headers "$base_py"
+  rocm_devel_headers_present "$base_py" || die "ROCm devel headers are required for vLLM source install"
+  arch="${PYTORCH_ROCM_ARCH:-$(detect_rocm_gfx_arch)}"
+  [ -n "$arch" ] || die "cannot detect a gfx architecture for vLLM source install"
+  if [ ! -e "$VLLM_VENV_ROOT" ]; then
+    "$base_py" -m venv --system-site-packages "$VLLM_VENV_ROOT"
+  fi
+  inherit_vllm_base_site_packages "$base_py" "$py"
+  [ -f "$VLLM_ROOT/requirements/rocm.txt" ] || die "vLLM requirements/rocm.txt is missing"
+  constraint_file="$(mktemp)"
+  write_rocm_torch_constraints "$base_py" "$constraint_file"
+  "$py" -m pip install --no-build-isolation --constraint "$constraint_file" \
+    --extra-index-url "$ROCM_SDK_INDEX_URL" \
+    -r "$VLLM_ROOT/requirements/rocm.txt" ||
+    { rm -f "$constraint_file"; die "failed to install vLLM ROCm source requirements"; }
+  # setup.py develop leaves the dist name unknown, and vcs-versioning only consults the
+  # per-distribution variable when it knows that name, so the generic one is the one that lands.
+  (cd "$VLLM_ROOT" && VLLM_TARGET_DEVICE=rocm PYTORCH_ROCM_ARCH="$arch" \
+    SETUPTOOLS_SCM_PRETEND_VERSION="$VLLM_PRETEND_VERSION" \
+    SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM="$VLLM_PRETEND_VERSION" \
+    PIP_CONSTRAINT="$constraint_file" "$py" setup.py develop --no-deps) ||
+    { rm -f "$constraint_file"; die "vLLM source build failed"; }
+  rm -f "$constraint_file"
+  verify_vllm_source "$base_py" "$py" || die "vLLM source install failed runtime verification"
+  export VLLM_ROOT FRAMEWORK_REPO_PATH="$VLLM_ROOT"
+  ensure_aiter_for_python "$py" "$aiter_root"
+  link_vllm_into_shared_bin "$base_py" "$py"
+  log "vLLM source install complete (${VLLM_ROOT})"
+}
+
 install_vllm_framework() {
   local py base_py py_mm constraint_file package_spec rocm_torch_ver
   base_py="$(resolve_python)" || die "no usable Python found for vLLM install"
+  route_vllm_install_method "$base_py" || return $?
+  # The source overlay imports the base site-packages; only the wheel venv is self-contained.
+  if [ "$FRAMEWORK_ENV" = shared ] || [ "$VLLM_INSTALL_METHOD" = source ]; then
+    refuse_atom_beside_vllm_or_sglang "$base_py" vllm
+  fi
+  if [ "$VLLM_INSTALL_METHOD" = source ]; then
+    if [ "$FRAMEWORK_ENV" != isolated ]; then
+      die "vLLM source install requires --framework-env isolated"
+      return 1
+    fi
+    install_vllm_from_source "$base_py"
+    return $?
+  fi
   if [ "$CHECK_ONLY" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
     ensure_openmpi_runtime
   fi
@@ -1146,7 +1528,7 @@ PY
       "$py" -m pip install --upgrade --extra-index-url "$VLLM_ROCM_INDEX" "torch==${rocm_torch_ver}" \
         || die "failed to install ROCm torch==${rocm_torch_ver} into ${VLLM_VENV_ROOT}"
     else
-      warn "could not resolve a ROCm torch version from ${VLLM_ROCM_INDEX}/torch/; vLLM install will rely on its own torch pin"
+      die "could not resolve a ROCm torch version from ${VLLM_ROCM_INDEX}/torch/"
     fi
     if ! "$py" -m pip install --upgrade \
       --extra-index-url "$VLLM_ROCM_INDEX" \
@@ -1186,6 +1568,7 @@ install_requested_framework() {
     none) log "Phase 2: framework install skipped (--install-framework none)" ;;
     sglang) install_sglang_framework ;;
     vllm) install_vllm_framework ;;
+    atom) install_atom_framework ;;
   esac
 }
 
@@ -2123,6 +2506,8 @@ resolve_credentials() {
     unset LLM_GATEWAY_KEY
     if [ "$DUAL_PROTOCOL_GATEWAY" -eq 0 ]; then
       unset OPENAI_API_KEY OPENAI_BASE_URL OPENAI_CUSTOM_HEADERS
+      # Clear the resolved copies too, so the codex acceptance below reads the scrubbed state and not a stale local.
+      dual_url=""; dual_secret=""
     fi
   fi
 
@@ -2161,11 +2546,19 @@ resolve_credentials() {
 
   { [ -n "$anthropic_url" ] || [ -n "$oauth_token" ]; } && has_url=1
   { [ -n "$anthropic_key" ] || [ -n "$anthropic_token" ] || [ -n "$oauth_token" ]; } && has_key=1
-  if [ "$has_url" -eq 0 ] || [ "$has_key" -eq 0 ]; then
+  # The codex backend drives the OpenAI side on its own, which ``llm_config.has_openai_side`` and the CLI's
+  # ``_provider_only_mode`` both already accept, so that pair is a complete credential here and not only a rider.
+  local has_openai_side=0
+  if [ -n "$dual_url" ] && [ -n "$dual_secret" ]; then
+    has_openai_side=1
+    export OPENAI_BASE_URL="$dual_url"
+    export OPENAI_API_KEY="$dual_secret"
+  fi
+  if { [ "$has_url" -eq 0 ] || [ "$has_key" -eq 0 ]; } && [ "$has_openai_side" -eq 0 ]; then
     if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
       warn "LLM credentials not fully resolved (continuing: --check-only / --dry-run)"
     else
-      die "no usable LLM endpoint: configure ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN, or a Claude subscription token (CLAUDE_CODE_OAUTH_TOKEN). A dual-protocol gateway such as DeepSeek also sets OPENAI_BASE_URL + OPENAI_API_KEY."
+      die "no usable LLM endpoint: for the claude backend configure ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN, or a Claude subscription token (CLAUDE_CODE_OAUTH_TOKEN); for the codex backend configure OPENAI_BASE_URL + OPENAI_API_KEY. A dual-protocol gateway serves both sides from one host and sets all four."
     fi
   fi
 
@@ -2197,7 +2590,7 @@ resolve_credentials() {
     else
       remove_dotenv_var CLAUDE_CODE_OAUTH_TOKEN
     fi
-    if [ "$DUAL_PROTOCOL_GATEWAY" -eq 1 ]; then
+    if [ "$DUAL_PROTOCOL_GATEWAY" -eq 1 ] || [ "$has_openai_side" -eq 1 ]; then
       [ -n "${OPENAI_BASE_URL:-}" ] && upsert_dotenv_var OPENAI_BASE_URL "$OPENAI_BASE_URL"
       [ -n "${OPENAI_API_KEY:-}" ] && upsert_dotenv_var OPENAI_API_KEY "$OPENAI_API_KEY"
       [ -n "${CLAUDE_MODEL:-}" ] && upsert_dotenv_var CLAUDE_MODEL "$CLAUDE_MODEL"
@@ -2224,6 +2617,25 @@ resolve_credentials() {
     remove_dotenv_var SAFE_API_KEY
     log "credentials written to ${DOTENV}"
   fi
+}
+
+# vLLM gates every aiter kernel behind VLLM_ROCM_USE_AITER and defaults it off,
+# unlike the SGLang images that ship SGLANG_USE_AITER pre-set.
+enable_vllm_aiter_when_available() {
+  local framework="$1" py
+  [ "$framework" = vllm ] || return 0
+  if [ "$FRAMEWORK_ENV" = "isolated" ] && [ -x "${VLLM_VENV_ROOT}/bin/python" ]; then
+    py="${VLLM_VENV_ROOT}/bin/python"
+  else
+    py="$(resolve_python 2>/dev/null)" || return 0
+  fi
+  # Turning the gate on without a matching aiter fails at serve time, so a
+  # missing module leaves vLLM on its built-in kernels instead.
+  if [ -z "$py" ] || ! "$py" -c "import aiter" >/dev/null 2>&1; then
+    warn "aiter is not importable for vLLM; leaving VLLM_ROCM_USE_AITER unset"
+    return 0
+  fi
+  upsert_dotenv_var VLLM_ROCM_USE_AITER "${VLLM_ROCM_USE_AITER:-1}"
 }
 
 # Persist bare-metal runtime env to .env (single source of truth). PATH-class
@@ -2257,10 +2669,16 @@ write_runtime_dotenv() {
   [ -n "${HYPERLOOM_WHEEL_TAG:-}" ] && upsert_dotenv_var HYPERLOOM_WHEEL_TAG "$HYPERLOOM_WHEEL_TAG"
   [ -n "${HYPERLOOM_SKILL_PATH:-}" ] && upsert_dotenv_var HYPERLOOM_SKILL_PATH "$HYPERLOOM_SKILL_PATH"
   [ -n "${SGLANG_USE_AITER:-}" ] && upsert_dotenv_var SGLANG_USE_AITER "$SGLANG_USE_AITER"
+  enable_vllm_aiter_when_available "$detected_framework"
   upsert_dotenv_var HYPERLOOM_FRAMEWORK_ENV "$FRAMEWORK_ENV"
   if [ "$FRAMEWORK_ENV" = "isolated" ] && [ "$INSTALL_FRAMEWORK" = "vllm" ]; then
     upsert_dotenv_var VLLM_VENV_ROOT "$VLLM_VENV_ROOT"
     upsert_dotenv_var VLLM_PYTHON "${VLLM_VENV_ROOT}/bin/python"
+    if [ "$VLLM_INSTALL_METHOD" = "source" ]; then
+      upsert_dotenv_var VLLM_ROOT "$VLLM_ROOT"
+      upsert_dotenv_var FRAMEWORK_REPO_PATH "$FRAMEWORK_REPO_PATH"
+      upsert_dotenv_var VLLM_TARGET_DEVICE "$VLLM_TARGET_DEVICE"
+    fi
   fi
   log "updated ${DOTENV} with bare-metal runtime env"
 }
@@ -2309,14 +2727,22 @@ main() {
     shared|isolated) ;;
     *) die "FRAMEWORK_ENV must be one of: shared, isolated" ;;
   esac
-  if [ "$FRAMEWORK_ENV" = "isolated" ] && [ "$INSTALL_FRAMEWORK" = "sglang" ]; then
+  if [ "$FRAMEWORK_ENV" = "isolated" ] && { [ "$INSTALL_FRAMEWORK" = "sglang" ] || [ "$INSTALL_FRAMEWORK" = "atom" ]; }; then
     die "--framework-env isolated is currently supported for vLLM only"
   fi
 
-  local user_data
-  # Precedence: --user-data-path > process env > .env > default. The .env value
-  # is honored so the setup skill's written USER_DATA_PATH is not silently lost.
-  user_data="${USER_DATA_PATH_ARG:-${USER_DATA_PATH:-$(read_dotenv_var USER_DATA_PATH)}}"
+  local user_data dotenv_user_data root_declaration readonly_root=0
+  # Precedence: --user-data-path > process env > .env > default. A readonly
+  # platform root must also agree with the selected CLI/dotenv workspace.
+  dotenv_user_data="$(read_dotenv_var USER_DATA_PATH)"
+  root_declaration="$(declare -p USER_DATA_PATH 2>/dev/null || true)"
+  if [[ "$root_declaration" =~ ^declare\ -[^[:space:]]*r[^[:space:]]*\  ]]; then
+    readonly_root=1
+    user_data="${USER_DATA_PATH_ARG:-${dotenv_user_data:-${USER_DATA_PATH:-}}}"
+    [ "${USER_DATA_PATH:-}" = "$user_data" ] || die "readonly USER_DATA_PATH conflicts with the selected workspace root"
+  else
+    user_data="${USER_DATA_PATH_ARG:-${USER_DATA_PATH:-$dotenv_user_data}}"
+  fi
 # Container images ship a writable /workspace; a bare-metal host off root has
 # neither it nor permission to create it, so the mkdir below would abort.
 _default_workspace_root() {
@@ -2327,11 +2753,14 @@ _default_workspace_root() {
   if [ -w "$_ws_probe" ]; then printf '%s' /workspace/hyperloom; else printf '%s' "$(pwd -P)/session"; fi
 }
   user_data="${user_data:-$(_default_workspace_root)}"
-  export USER_DATA_PATH="$user_data"
-  # Same precedence as USER_DATA_PATH above: the setup skill writes the backend
-  # into .env before this runs, so an unread .env would silently reset it to geak.
+  if [ "${USER_DATA_PATH:-}" != "$user_data" ]; then
+    [ "$readonly_root" -eq 0 ] || die "readonly USER_DATA_PATH conflicts with the selected workspace root"
+    USER_DATA_PATH="$user_data"
+  fi
+  export USER_DATA_PATH
+  # Preserve explicit choices with env > .env precedence; leave an omitted backend
+  # empty so the CLI can apply its framework-specific default at launch.
   export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-$(read_dotenv_var KERNEL_OPT_BACKEND_ORDER)}"
-  export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-geak}"
 
   if [ -n "$DEPS_ROOT_ARG" ]; then
     export HYPERLOOM_DEPS_ROOT="$DEPS_ROOT_ARG"

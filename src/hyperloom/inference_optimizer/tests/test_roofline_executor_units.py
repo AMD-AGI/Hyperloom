@@ -13,7 +13,7 @@ hermetic: profile / trace_analyze boundaries are stubbed, filesystem uses
 
 import os
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -88,7 +88,7 @@ def _patch_subs(profile_result, ta_result):
         "hyperloom.orchestrator.actions.executors.profile.profile_executor",
         new=fake_profile,
     ), patch(
-        "hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler",
+        "hyperloom.orchestrator.actions.executors.trace_analyze.trace_analyze_handler",
         new=fake_ta,
     )
 
@@ -308,6 +308,14 @@ def test_server_liveness_probe_is_empty_without_a_runs_dir(tmp_path):
     assert _server_liveness_probe(tmp_path, "t-rf-units") == {}
 
 
+def _recorded_action(session_dir: Path) -> dict:
+    from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
+
+    event = next(e for e in read_timeline_events(session_dir) if e.get("type") == "roofline")
+    (action,) = event["ext"]["actions"]
+    return action
+
+
 @pytest.mark.asyncio
 async def test_executor_records_preflight_and_liveness_on_every_attempt(tmp_path):
     """The probes are wired into the action, not just importable."""
@@ -324,53 +332,64 @@ async def test_executor_records_preflight_and_liveness_on_every_attempt(tmp_path
     async def fake_ta(payload, *, session_dir):
         return _ta_ok(md)
 
-    recorder = MagicMock()
     with (
-        patch("hyperloom.orchestrator.actions.executors.roofline.make_roofline_recorder", return_value=recorder),
         patch("hyperloom.orchestrator.actions.executors.profile.profile_executor", new=fake_profile),
-        patch("hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler", new=fake_ta),
+        patch("hyperloom.orchestrator.actions.executors.trace_analyze.trace_analyze_handler", new=fake_ta),
     ):
         await RooflineExecutor(shared_state=_state())(_ctx(tmp_path))
 
-    preflight = recorder.record_preflight.call_args.args[0]
-    assert preflight["stale_trace_count"] == 1
-    assert preflight["disk"]["free_bytes"] > 0
-    assert recorder.record_profile_run.call_args.kwargs["server_liveness"] is not None
+    action = _recorded_action(tmp_path)
+    assert action["preflight"]["stale_trace_count"] == 1
+    assert action["preflight"]["disk"]["free_bytes"] > 0
+    assert action["profile"]["runs"][0]["server_liveness"] == {"pidfiles": 0}
+
+
+class _DrainingProfiler:
+    """A profile executor substitute that keeps one instrumentation report per call."""
+
+    def __init__(self, results: list):
+        self.results = list(results)
+        self.calls = 0
+        self._report: dict | None = None
+
+    async def __call__(self, ctx):
+        self.calls += 1
+        self._report = {"check_id": "instrumentation_preflight", "call": self.calls}
+        out = self.results.pop(0)
+        if isinstance(out, BaseException):
+            raise out
+        return out
+
+    def drain_instrumentation_report(self):
+        report, self._report = self._report, None
+        return report
 
 
 @pytest.mark.asyncio
-async def test_a_non_retryable_profile_failure_still_rows_the_attempt(tmp_path):
-    """This branch used to return without recording, so the one failure nobody can retry left no attempt row."""
-
-    async def fake_profile(ctx):
-        return {
-            "status": "failed",
-            "error_class": "primary_rank_trace_missing",
-            "error": "no trace for the primary rank",
-        }
+async def test_instrumentation_is_drained_per_attempt(tmp_path):
+    """Each attempt carries its own report, including the attempt that raised and left no result dict."""
+    md = tmp_path / "analysis.md"
+    md.write_text("# Executive Summary\n", encoding="utf-8")
+    profiler = _DrainingProfiler([RuntimeError("boot"), _profile_success()])
 
     async def fake_ta(payload, *, session_dir):
-        raise AssertionError("trace_analyze must not run after a non-retryable profile failure")
+        return _ta_ok(md)
 
-    recorder = MagicMock()
     with (
-        patch("hyperloom.orchestrator.actions.executors.roofline.make_roofline_recorder", return_value=recorder),
-        patch("hyperloom.orchestrator.actions.executors.profile.profile_executor", new=fake_profile),
-        patch("hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler", new=fake_ta),
+        patch("hyperloom.orchestrator.actions.executors.profile.profile_executor", new=profiler),
+        patch("hyperloom.orchestrator.actions.executors.trace_analyze.trace_analyze_handler", new=fake_ta),
     ):
-        result = await RooflineExecutor(shared_state=_state())(_ctx(tmp_path))
+        await RooflineExecutor(shared_state=_state())(_ctx(tmp_path))
 
-    assert result["status"] == "failed"
-    recorder.record_profile_run.assert_called_once()
-    kwargs = recorder.record_profile_run.call_args.kwargs
-    assert kwargs["status"] == "failed"
-    assert kwargs["failure"]["error_class"] == "primary_rank_trace_missing"
-    # And it must not have retried past the attempt it could not recover from.
-    assert kwargs["run_index"] == 1
+    runs = _recorded_action(tmp_path)["profile"]["runs"]
+    assert [run["instrumentation"] for run in runs] == [
+        {"check_id": "instrumentation_preflight", "call": 1},
+        {"check_id": "instrumentation_preflight", "call": 2},
+    ]
 
 
 @pytest.mark.asyncio
-async def test_instrumentation_is_drained_per_attempt_even_when_absent(tmp_path):
+async def test_instrumentation_tolerates_a_profiler_without_a_report(tmp_path):
     """The executor is reached through a module-level name a substitute can occupy; the probe must tolerate that."""
     md = tmp_path / "analysis.md"
     md.write_text("# Executive Summary\n", encoding="utf-8")
@@ -381,15 +400,14 @@ async def test_instrumentation_is_drained_per_attempt_even_when_absent(tmp_path)
     async def fake_ta(payload, *, session_dir):
         return _ta_ok(md)
 
-    recorder = MagicMock()
     with (
-        patch("hyperloom.orchestrator.actions.executors.roofline.make_roofline_recorder", return_value=recorder),
         patch("hyperloom.orchestrator.actions.executors.profile.profile_executor", new=fake_profile),
-        patch("hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler", new=fake_ta),
+        patch("hyperloom.orchestrator.actions.executors.trace_analyze.trace_analyze_handler", new=fake_ta),
     ):
-        await RooflineExecutor(shared_state=_state())(_ctx(tmp_path))
+        result = await RooflineExecutor(shared_state=_state())(_ctx(tmp_path))
 
-    assert "instrumentation" in recorder.record_profile_run.call_args.kwargs
+    assert result["status"] == "succeeded"
+    assert _recorded_action(tmp_path)["profile"]["runs"][0]["instrumentation"] is None
 
 
 def test_drain_instrumentation_takes_the_report_once():
@@ -442,7 +460,7 @@ async def test_profile_exception_with_capture_signature_fails_without_escalating
             new=fake_profile,
         ),
         patch(
-            "hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler",
+            "hyperloom.orchestrator.actions.executors.trace_analyze.trace_analyze_handler",
             new=fake_ta,
         ),
     ):
@@ -478,7 +496,7 @@ async def test_close_post_opt_reason_uses_opt_output_name(tmp_path):
             new=fake_profile,
         ),
         patch(
-            "hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler",
+            "hyperloom.orchestrator.actions.executors.trace_analyze.trace_analyze_handler",
             new=fake_ta,
         ),
     ):
@@ -524,7 +542,7 @@ async def test_retry_returns_non_dict_fails_and_clears_cache(tmp_path):
             new=fake_profile,
         ),
         patch(
-            "hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler",
+            "hyperloom.orchestrator.actions.executors.trace_analyze.trace_analyze_handler",
             new=fake_ta,
         ),
     ):
@@ -570,14 +588,14 @@ async def test_lifecycle_saves_when_session_dir_has_state_json(tmp_path):
 
 # Lifecycle START defensive except
 @pytest.mark.asyncio
-async def test_lifecycle_start_emit_failure_is_swallowed(tmp_path):
+async def test_lifecycle_start_emit_failure_is_swallowed(tmp_path, monkeypatch):
     """record_lifecycle_event raising on the START emit must not abort the run."""
     state = _state()
     md = tmp_path / "analysis.md"
     md.write_text("# Executive Summary\n", encoding="utf-8")
 
     calls = {"n": 0}
-    real_evt = state.record_lifecycle_event
+    real_evt = rf.record_lifecycle_event
 
     def flaky_evt(*args, **kwargs):
         calls["n"] += 1
@@ -585,7 +603,7 @@ async def test_lifecycle_start_emit_failure_is_swallowed(tmp_path):
             raise RuntimeError("lifecycle START boom")
         return real_evt(*args, **kwargs)
 
-    state.record_lifecycle_event = flaky_evt  # type: ignore[assignment]
+    monkeypatch.setattr(rf, "record_lifecycle_event", flaky_evt)
 
     p1, p2 = _patch_subs(_profile_success("/tmp/t.gz"), _ta_ok(md))
     executor = RooflineExecutor(shared_state=state)
@@ -597,14 +615,14 @@ async def test_lifecycle_start_emit_failure_is_swallowed(tmp_path):
 
 # Lifecycle END defensive except
 @pytest.mark.asyncio
-async def test_lifecycle_end_emit_failure_is_swallowed(tmp_path):
+async def test_lifecycle_end_emit_failure_is_swallowed(tmp_path, monkeypatch):
     """record_lifecycle_event raising on the END emit must not fail the run."""
     state = _state()
     md = tmp_path / "analysis.md"
     md.write_text("# Executive Summary\n", encoding="utf-8")
 
     calls = {"n": 0}
-    real_evt = state.record_lifecycle_event
+    real_evt = rf.record_lifecycle_event
 
     def flaky_evt(*args, **kwargs):
         calls["n"] += 1
@@ -612,7 +630,7 @@ async def test_lifecycle_end_emit_failure_is_swallowed(tmp_path):
             raise RuntimeError("lifecycle END boom")
         return real_evt(*args, **kwargs)
 
-    state.record_lifecycle_event = flaky_evt  # type: ignore[assignment]
+    monkeypatch.setattr(rf, "record_lifecycle_event", flaky_evt)
 
     p1, p2 = _patch_subs(_profile_success("/tmp/t.gz"), _ta_ok(md))
     executor = RooflineExecutor(shared_state=state)

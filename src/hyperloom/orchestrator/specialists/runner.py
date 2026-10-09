@@ -29,17 +29,24 @@ from hyperloom.common.deadline import Deadline, seconds_until
 from hyperloom.common.env_safety import BENCHMARK_SECRET_ENV_NAMES, redact_secret_values
 from hyperloom.common.timeutil import now_iso
 
-from hyperloom.inference_optimizer.session.session_paths import runs_dir, specialist_intel_path
-from ..roles.base import BackendError, LLMCallFailed
-from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from ..trace.conversation_trace import ConversationRecord, append_conversation
-from ..trace.llm_trace import LLMCallRecord, append_llm_call
+from hyperloom.inference_optimizer.session.session_paths import fs_safe_id, runs_dir, specialist_intel_path
+from ..state.experience_citations import normalize_citations, shown_ids
+from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
+from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, append_llm_call, new_call_id
+from hyperloom.inference_optimizer.trace.trajectory_trace import (
+    EVENT_LLM_CALL,
+    STATUS_COMPLETED,
+    STATUS_FAILED,
+    llm_call_summary,
+    trajectory_span,
+)
 from .domains import (
     DEFAULT_SPECIALIST_MAX_TURNS,
     FREEFORM_DOMAIN,
     SPECIALIST_DOMAIN_KEYS,
     SpecialistDomain,
     domain_for_tag,
+    get_domain,
     normalize_dispatch_tags,
 )
 from .subprocess_ import (
@@ -47,12 +54,16 @@ from .subprocess_ import (
     SpecialistSubprocessConfig,
     SpecialistSubprocessDispatcher,
     SpecialistSubprocessResult,
-    _pick_worktree_base,
     _setup_worktree,
 )
 from . import patch_safety as _patch_safety
 from .profile import MODE_PATCH, SpecialistProfile, resolve_specialist_profile
-from ..framework.paths import resolve_framework_tree
+from .tree_snapshot import snapshot_tree
+from hyperloom.inference_optimizer.framework_paths import (
+    FrameworkTree,
+    framework_apply_tree,
+    resolve_framework_tree,
+)
 from ..loop.sub_agent_runner import RunnerContext
 from ..prompts.specialist_prompt_builder import (
     SpecialistPromptInputs,
@@ -61,6 +72,44 @@ from ..prompts.specialist_prompt_builder import (
 
 
 log = logging.getLogger(__name__)
+
+NO_GIT_FRAMEWORK_SOURCE_ROOT = "no_git_framework_source_root"
+
+
+def specialist_patch_preflight_error(params: dict[str, Any] | None, *, framework_repo_path: str = "") -> str:
+    """Return the deterministic source-root error for a patch specialist."""
+    task_params = params or {}
+    domain = get_domain(str(task_params.get("domain") or ""))
+    if resolve_specialist_profile(task_params, domain=domain).mode != MODE_PATCH:
+        return ""
+    source = _worktree_source(task_params, framework_repo_path=framework_repo_path)
+    return "" if source is not None else NO_GIT_FRAMEWORK_SOURCE_ROOT
+
+
+def _worktree_source(params: dict[str, Any], *, framework_repo_path: str = "") -> FrameworkTree | None:
+    """The tree the session optimises, which the preflight and the worktree must both read the same way."""
+    return framework_apply_tree(
+        str(params.get("session_framework_tree") or "").strip()
+        or resolve_framework_tree(str(params.get("framework") or ""))
+        or str(framework_repo_path or "").strip()
+    )
+
+
+def _subprocess_call_outcome(result: SpecialistSubprocessResult) -> tuple[str, dict[str, Any]]:
+    """The terminal status and attributes of a specialist subprocess's ``llm.call`` span."""
+    attributes: dict[str, Any] = {
+        **llm_call_summary(result.usage),
+        "exit_code": result.exit_code,
+        "timed_out": result.timed_out,
+    }
+    try:
+        attributes["latency_ms"] = int(float(result.elapsed_seconds) * 1000)
+    except (TypeError, ValueError):
+        pass
+    if result.error or result.timed_out:
+        attributes["error_message"] = (result.error or "timed out")[:500]
+        return STATUS_FAILED, attributes
+    return STATUS_COMPLETED, attributes
 
 
 def _ctx_deadline(ctx: RunnerContext) -> Deadline | None:
@@ -128,9 +177,6 @@ SPECIALIST_TOOL_DENYLIST: frozenset[str] = frozenset(
         "SlashCommand",
     }
 )
-
-
-_now_iso = now_iso
 
 
 _SECRET_ENV_NAMES: tuple[str, ...] = tuple(
@@ -440,48 +486,29 @@ def build_empty_specialist_done(
 class SpecialistRunner:
     """LLM-driven sub-agent runner for the merged ``specialist`` action.
 
-    Generic over the Backend protocol (MockBackend in tests, ClaudeBackend
-    in production).
+    Each task runs the selected agent CLI as a subprocess in its own workspace.
     """
 
     def __init__(
         self,
-        backend_factory=None,
         *,
-        subprocess_config: SpecialistSubprocessConfig | None = None,
+        subprocess_config: SpecialistSubprocessConfig,
         session_dir: Path | None = None,
         default_max_turns: int = DEFAULT_SPECIALIST_MAX_TURNS,
     ):
         """Create a runner.
 
-        Exactly one of ``backend_factory`` (in-process, tests) /
-        ``subprocess_config`` (subprocess, production) must be supplied.
-
         Args:
-            backend_factory: In-process backend factory (tests path).
-            subprocess_config: Subprocess spawn config (production path).
+            subprocess_config: Subprocess spawn config.
             session_dir: Session output directory.
             default_max_turns: Default per-task max turn budget.
-
-        Raises:
-            ValueError: If neither or both of ``backend_factory`` and
-                ``subprocess_config`` are supplied.
         """
-        if backend_factory is None and subprocess_config is None:
-            raise ValueError("SpecialistRunner: pass exactly one of backend_factory / subprocess_config")
-        if backend_factory is not None and subprocess_config is not None:
-            raise ValueError(
-                "SpecialistRunner: backend_factory and subprocess_config are mutually exclusive — pick one path"
-            )
-        self.backend_factory = backend_factory
         self.subprocess_config = subprocess_config
-        self.subprocess_dispatcher = (
-            SpecialistSubprocessDispatcher(subprocess_config) if subprocess_config is not None else None
-        )
+        self.subprocess_dispatcher = SpecialistSubprocessDispatcher(subprocess_config)
         self.session_dir = Path(session_dir) if session_dir else None
         self.default_max_turns = int(default_max_turns)
 
-    # Public entry point — dispatches to in-process or subprocess path
+    # Public entry point
     async def run(
         self,
         ctx: RunnerContext,
@@ -505,9 +532,7 @@ class SpecialistRunner:
         if prep.early_return is not None:
             return prep.early_return
 
-        if self.subprocess_dispatcher is not None:
-            return await self._run_via_subprocess(ctx, prep)
-        return await self._run_via_backend(ctx, prep)
+        return await self._run_via_subprocess(ctx, prep)
 
     # Setup phase (shared)
     async def _prepare(
@@ -579,7 +604,7 @@ class SpecialistRunner:
             notes.append(f"domain={domain.key!r} is outside the domain catalogue; using generic prompt template")
 
         # Worktree — created only under subprocess dispatch; surfaced via ``workspace_path``.
-        worktree, worktree_base, worktree_err = await asyncio.to_thread(
+        worktree, worktree_source, worktree_err = await asyncio.to_thread(
             self._maybe_setup_worktree,
             ctx,
             workspace=workspace,
@@ -587,6 +612,7 @@ class SpecialistRunner:
         )
         if worktree_err:
             notes.append(f"worktree_setup_failed:{worktree_err}")
+        worktree_base = worktree_source.root if worktree_source is not None else None
         workspace_for_prompt = worktree or workspace
 
         allocated_gpu_ids = tuple(int(g) for g in (ctx.extra.get("gpu_ids") or []))
@@ -601,6 +627,7 @@ class SpecialistRunner:
                 gap_layer=str(params.get("gap_layer") or ""),
                 gap_evidence=dict(params.get("gap_evidence") or {}),
                 kb_subgraph=dict(params.get("kb_subgraph") or {}),
+                experience_kb_block=str(params.get("experience_kb_block") or ""),
                 # Coordinator-populated roofline pre-fetch; empty when not warmed.
                 roofline_evidence=dict(params.get("roofline_evidence") or {}),
                 sub_kind=str(params.get("sub_kind") or ""),
@@ -612,7 +639,12 @@ class SpecialistRunner:
                 framework=str(params.get("framework") or ""),
                 session_framework_tree=str(params.get("session_framework_tree") or ""),
                 framework_source_roots=tuple(params.get("framework_source_roots") or ()),
-                worktree_base=str(worktree_base or ""),
+                worktree_base=str(worktree_base) if worktree is not None and worktree_base is not None else "",
+                worktree_package_dir=(
+                    str(worktree_source.tree.relative_to(worktree_source.root))
+                    if worktree is not None and worktree_source is not None
+                    else ""
+                ),
                 source_hint_directories=tuple(params.get("source_hint_directories") or ()),
                 model_info=dict(params.get("model_info") or {}),
                 static_recon_checklist=str(params.get("static_recon_checklist") or ""),
@@ -620,6 +652,7 @@ class SpecialistRunner:
                 enablement_candidate_refs=tuple(
                     str(r).strip() for r in (params.get("enablement_candidate_refs") or ()) if str(r).strip()
                 ),
+                enablement_failure_signature=dict(params.get("enablement_failure_signature") or {}),
                 enablement_accepted_config={
                     "extra_envs": dict(params.get("base_extra_envs") or {}),
                     "extra_server_args": str(params.get("base_extra_args") or "").strip(),
@@ -644,6 +677,8 @@ class SpecialistRunner:
                 # shape supplies their numbers.
                 benchmark_mode=str(params.get("benchmark_mode") or ""),
                 agentx_corpus_shape=dict(params.get("agentx_corpus_shape") or {}),
+                agentx_grading=dict(params.get("agentx_grading") or {}),
+                agentx_backend=str(params.get("agentx_backend") or ""),
                 # Runtime fingerprint to flag version-mismatched lessons.
                 framework_version=str(params.get("framework_version") or ""),
                 workspace_path=(str(workspace_for_prompt) if workspace_for_prompt else ""),
@@ -651,7 +686,6 @@ class SpecialistRunner:
                 scope=profile.scope,
                 mode=profile.mode,
                 bench=profile.bench,
-                lane=profile.lane,
                 task_description=task_description,
                 # Coordinator-injected note when this is a bounded auto-retry.
                 auto_retry_reason=str(params.get("_auto_retry_reason") or ""),
@@ -669,7 +703,6 @@ class SpecialistRunner:
                 task_kind=str(params.get("task_kind") or ""),
                 prior_attempts=[e for e in (params.get("prior_attempts") or []) if isinstance(e, dict)],
                 pr_lead=dict(params.get("pr_lead") or {}),
-                exit_channel=("B" if self.subprocess_config is not None else "A"),
             )
 
         system_prompt, user_prompt = build_specialist_prompts(prompt_inputs)
@@ -696,22 +729,19 @@ class SpecialistRunner:
 
     @staticmethod
     def _ctx_tick_phase(ctx: "RunnerContext | None") -> tuple[int | None, str | None]:
-        """Best-effort (tick, phase) from the live SharedState on ``ctx.extra``.
+        """(tick, phase) from the live SharedState on ``ctx.extra``.
 
         Returns ``(None, None)`` when unavailable.
         """
-        try:
-            ss = (ctx.extra if ctx is not None else {}).get("shared_state")
-            if ss is None:
-                return None, None
-            tick = ss.tick
-            phase = ss.phase
-            return (
-                int(tick) if tick is not None else None,
-                (str(phase) or None) if phase else None,
-            )
-        except Exception:  # noqa: BLE001 — telemetry must never break the run
+        ss = (ctx.extra if ctx is not None else {}).get("shared_state")
+        if ss is None:
             return None, None
+        tick = ss.tick
+        phase = ss.phase
+        return (
+            int(tick) if tick is not None else None,
+            (str(phase) or None) if phase else None,
+        )
 
     def _trace_specialist_llm_call(
         self,
@@ -723,7 +753,7 @@ class SpecialistRunner:
         tick: int | None = None,
         phase: str | None = None,
     ) -> None:
-        """Append one ``llm_calls.jsonl`` row for an in-process specialist turn.
+        """Append one ``llm_calls.jsonl`` row for a specialist turn.
 
         No-op when ``self.session_dir`` is unset or the backend reported no
         token counters. ``latency_ms`` is the measured wall-clock of the turn or
@@ -763,55 +793,9 @@ class SpecialistRunner:
                 phase=phase,
             )
             append_llm_call(session_dir=self.session_dir, record=record)
-        except Exception:  # noqa: BLE001 — trace must never break the run
+        except Exception:
             log.debug(
                 "full-trace: specialist llm_call append failed for task_id=%s turn=%s",
-                task_id,
-                turn,
-                exc_info=True,
-            )
-
-    def _trace_specialist_llm_failure(
-        self,
-        *,
-        task_id: str,
-        turn: int,
-        error: BaseException,
-        latency_ms: int | None = None,
-        tick: int | None = None,
-        phase: str | None = None,
-    ) -> None:
-        """Append one ``status="error"`` row for a specialist turn that never returned.
-
-        The turn loop swallows a failed ``backend.run`` and breaks, so nothing
-        propagates to the Coordinator; without a row written here the failed
-        turn is invisible to the ledger and to Langfuse.
-
-        Args:
-            task_id: The specialist task id.
-            turn: The turn index that failed.
-            error: The exception that ended the turn.
-            latency_ms: Time spent before failing, when measured.
-            tick: Timeline tick for this turn, when known.
-            phase: Optimization phase for this turn, when known.
-        """
-        if self.session_dir is None:
-            return
-        try:
-            record = LLMCallRecord.for_failure(
-                session_id=self.session_dir.name,
-                component="specialist",
-                task_id=task_id,
-                turn=turn,
-                error=error,
-                latency_ms=latency_ms,
-                tick=tick,
-                phase=phase,
-            )
-            append_llm_call(session_dir=self.session_dir, record=record)
-        except Exception:  # noqa: BLE001 — trace must never break the run
-            log.debug(
-                "full-trace: specialist llm_call failure append failed for task_id=%s turn=%s",
                 task_id,
                 turn,
                 exc_info=True,
@@ -835,7 +819,7 @@ class SpecialistRunner:
         try:
             path = specialist_intel_path(self.session_dir)
             path.parent.mkdir(parents=True, exist_ok=True)
-            ts = _now_iso()
+            ts = now_iso()
             with path.open("a", encoding="utf-8") as f:
                 for call in tool_calls:
                     if not isinstance(call, dict):
@@ -850,7 +834,7 @@ class SpecialistRunner:
                         "query": _redact_transcript_value(call.get("query")),
                     }
                     f.write(json.dumps(row, sort_keys=True) + "\n")
-        except Exception:  # noqa: BLE001 — trace must never break the run
+        except Exception:
             log.debug(
                 "full-trace: specialist intel append failed for task_id=%s turn=%s",
                 task_id,
@@ -867,8 +851,8 @@ class SpecialistRunner:
         tick: int | None = None,
         phase: str | None = None,
     ) -> None:
-        """Append one ``conversations.jsonl`` row for an in-process specialist
-        turn. Persists the full (redacted) prompt + completion. No-op without a
+        """Append one ``conversations.jsonl`` row for a specialist turn.
+        Persists the full (redacted) prompt + completion. No-op without a
         session dir.
 
         Args:
@@ -878,223 +862,27 @@ class SpecialistRunner:
         """
         if self.session_dir is None:
             return
-        try:
-            md = metadata or {}
-            prompt = md.get("prompt")
-            response = md.get("response")
-            if not prompt and not response:
-                return
-            record = ConversationRecord(
-                session_id=self.session_dir.name,
-                component="specialist",
-                # Same metadata dict as the token row for this turn, so both
-                # halves carry the backend's call_id when it stamped one.
-                call_id=md.get("call_id"),
-                task_id=task_id,
-                turn=turn,
-                tick=tick,
-                phase=phase,
-                model=md.get("model"),
-                prompt=prompt or "",
-                response=response or "",
-            )
-            append_conversation(session_dir=self.session_dir, record=record)
-        except Exception:  # noqa: BLE001 — trace must never break the run
-            log.debug(
-                "full-trace: specialist conversation append failed for task_id=%s turn=%s",
-                task_id,
-                turn,
-                exc_info=True,
-            )
-
-    # In-process Backend path (test path)
-    async def _run_via_backend(
-        self,
-        ctx: RunnerContext,
-        prep: "_PreparedRun",
-    ) -> SpecialistRunResult:
-        """Drive ``Backend.run`` one turn at a time until a specialist_done
-        intent shows up.
-
-        Args:
-            ctx: The runner context for this specialist task.
-            prep: The prepared-run state (domain, gap, workspace, prompts).
-
-        Returns:
-            The :class:`SpecialistRunResult` for the task.
-        """
-        assert self.backend_factory is not None  # narrowed by run()
-        domain = prep.domain
-        gap = prep.gap
-        workspace = prep.workspace
-        max_turns = prep.max_turns
-        notes = list(prep.notes)
-
-        try:
-            backend = self.backend_factory(domain)
-        except Exception as exc:  # noqa: BLE001 — backend init failure
-            done = build_empty_specialist_done(
-                gap_canonical_id=gap,
-                domain=domain.key,
-                reason=f"backend_init_failed: {exc!r}",
-            )
-            self._write_specialist_done(workspace, done)
-            return SpecialistRunResult(
-                task_id=ctx.task.task_id,
-                domain=domain.key,
-                gap_canonical_id=gap,
-                status="empty_synthesised",
-                specialist_done=done,
-                turns_used=0,
-                workspace=str(workspace) if workspace else "",
-                error=f"backend_init_failed:{exc!r}",
-                notes=notes + ["backend_init_failed"],
-            )
-
-        # Combined prompt so backends ignoring ``system_prompt`` still see it inline.
-        combined_prompt = prep.system_prompt + "\n---\n" + prep.user_prompt
-
-        specialist_done_intent: Intent | None = None
-        tool_violations: list[str] = []
-        turns_used = 0
-        backend_error: str = ""
-
-        for turn_idx in range(1, max_turns + 1):
-            turns_used = turn_idx
-            try:
-                self._write_heartbeat(
-                    workspace,
-                    turn=turn_idx,
-                    max_turns=max_turns,
-                    status="running",
-                )
-                _t0 = time.perf_counter()
-                turn_result = await backend.run(
-                    prompt=prep.user_prompt if turn_idx == 1 else combined_prompt,
-                    system_prompt=prep.system_prompt,
-                    disallowed_tools=list(SPECIALIST_TOOL_DENYLIST),
-                    max_turns=1,
-                )
-                _turn_latency_ms = int((time.perf_counter() - _t0) * 1000)
-            except BackendError as exc:
-                backend_error = f"backend_error:{exc!r}"
-                self._append_transcript(
-                    workspace,
-                    turn_idx,
-                    {
-                        "type": "backend_error",
-                        "error": str(exc),
-                    },
-                )
-                if isinstance(exc, LLMCallFailed):
-                    _tick, _phase = self._ctx_tick_phase(ctx)
-                    self._trace_specialist_llm_failure(
-                        task_id=ctx.task.task_id,
-                        turn=turn_idx,
-                        error=exc,
-                        latency_ms=int((time.perf_counter() - _t0) * 1000),
-                        tick=_tick,
-                        phase=_phase,
-                    )
-                break
-            except Exception as exc:  # noqa: BLE001 — defensive
-                backend_error = f"backend_unexpected:{exc!r}"
-                self._append_transcript(
-                    workspace,
-                    turn_idx,
-                    {
-                        "type": "backend_unexpected",
-                        "error": repr(exc),
-                    },
-                )
-                break
-
-            self._append_transcript(
-                workspace,
-                turn_idx,
-                {
-                    "type": "turn",
-                    "intents": [{"intent_type": i.type.value, "payload": i.payload} for i in turn_result.intents],
-                    "raw_text_preview": _safe_redact(turn_result.raw_text[:1024]),
-                    "metadata": dict(turn_result.metadata),
-                },
-            )
-            # Mirror the turn's token spend onto the unified LLM-call ledger.
-            _tick, _phase = self._ctx_tick_phase(ctx)
-            self._trace_specialist_llm_call(
-                task_id=ctx.task.task_id,
-                turn=turn_idx,
-                metadata=turn_result.metadata,
-                latency_ms=_turn_latency_ms,
-                tick=_tick,
-                phase=_phase,
-            )
-            self._record_specialist_conversation(
-                task_id=ctx.task.task_id,
-                turn=turn_idx,
-                metadata=turn_result.metadata,
-                tick=_tick,
-                phase=_phase,
-            )
-
-            # Tool-violation check (defense in depth).
-            for intent in turn_result.intents:
-                if intent.type == IntentType.SPECIALIST_DONE:
-                    specialist_done_intent = intent
-                elif intent.type in (
-                    IntentType.SEND_MESSAGE,
-                    IntentType.ALERT,
-                ):
-                    continue
-                else:
-                    tool_violations.append(intent.type.value)
-
-            # Rewrite the partial after every turn so a deadline kill leaves
-            # the best-so-far result on disk.
-            if specialist_done_intent is not None:
-                self._write_specialist_done_partial(
-                    workspace,
-                    dict(specialist_done_intent.payload or {}),
-                )
-            else:
-                self._write_specialist_done_partial(
-                    workspace,
-                    {
-                        **build_empty_specialist_done(
-                            gap_canonical_id=gap,
-                            domain=domain.key,
-                            reason="in_progress",
-                        ),
-                        "turns_used": turns_used,
-                    },
-                )
-
-            if specialist_done_intent is not None:
-                break
-
-        # Final heartbeat
-        self._write_heartbeat(
-            workspace,
-            turn=turns_used,
-            max_turns=max_turns,
-            status="finished",
+        md = metadata or {}
+        prompt = md.get("prompt")
+        response = md.get("response")
+        if not prompt and not response:
+            return
+        record = ConversationRecord(
+            session_id=self.session_dir.name,
+            component="specialist",
+            # Same metadata dict as the token row for this turn, so both
+            # halves carry the backend's call_id when it stamped one.
+            call_id=md.get("call_id"),
+            task_id=task_id,
+            turn=turn,
+            tick=tick,
+            phase=phase,
+            model=md.get("model"),
+            prompt=prompt or "",
+            response=response or "",
         )
+        append_conversation(session_dir=self.session_dir, record=record)
 
-        return await asyncio.to_thread(
-            self._finalize,
-            ctx=ctx,
-            prep=prep,
-            specialist_done_payload=(
-                dict(specialist_done_intent.payload or {}) if specialist_done_intent is not None else None
-            ),
-            turns_used=turns_used,
-            tool_violations=tool_violations,
-            backend_error=backend_error,
-            extra_notes=notes,
-            patches_written=[],
-        )
-
-    # Subprocess path (production)
     async def _run_via_subprocess(
         self,
         ctx: RunnerContext,
@@ -1110,8 +898,8 @@ class SpecialistRunner:
         Returns:
             SpecialistRunResult: The finalized run outcome.
         """
-        assert self.subprocess_dispatcher is not None  # narrowed by run()
         domain = prep.domain
+        assert domain is not None  # set by a prep that did not short-circuit
         gap = prep.gap
         workspace = prep.workspace
         notes = list(prep.notes)
@@ -1141,24 +929,36 @@ class SpecialistRunner:
             status="subprocess_starting",
         )
         deadline = _ctx_deadline(ctx)
-        # Ray-managed GPU execution: when the dispatcher acquired a
-        # GpuSpecialistLease, run the whole subprocess inside its num_gpus actor
-        # so any GPU command lands within Ray's assigned devices. ``None`` keeps
-        # the local path (``gpu_ids`` pinned into *_VISIBLE_DEVICES).
-        sub_result: SpecialistSubprocessResult = await self.subprocess_dispatcher.run(
-            task_id=ctx.task.task_id,
-            workspace=workspace,
-            worktree=prep.worktree,
-            worktree_base=prep.worktree_base,
-            system_prompt=prep.system_prompt,
-            user_prompt=prep.user_prompt,
-            disallowed_tools=SPECIALIST_TOOL_DENYLIST,
-            max_turns=prep.max_turns,
-            gpu_ids=tuple(ctx.extra.get("gpu_ids") or ()),
-            deadline=deadline,
-            gpu_lease=ctx.extra.get("gpu_specialist_lease"),
-            progress_cb=ctx.extra.get("specialist_progress_cb"),
-        )
+        call_id = new_call_id()
+        # The subprocess's tool and compaction events are parsed inside this span, so they inherit the specialist's
+        # component/agent and hang off its llm.call rather than the coordinator's session scope.
+        with trajectory_span(
+            EVENT_LLM_CALL,
+            call_id=call_id,
+            component="specialist",
+            agent=domain.key,
+            attributes={"name": domain.key},
+        ) as call_span:
+            # Ray-managed GPU execution: when the dispatcher acquired a
+            # GpuSpecialistLease, run the whole subprocess inside its num_gpus actor
+            # so any GPU command lands within Ray's assigned devices. ``None`` keeps
+            # the local path (``gpu_ids`` pinned into *_VISIBLE_DEVICES).
+            sub_result: SpecialistSubprocessResult = await self.subprocess_dispatcher.run(
+                task_id=ctx.task.task_id,
+                workspace=workspace,
+                worktree=prep.worktree,
+                worktree_base=prep.worktree_base,
+                system_prompt=prep.system_prompt,
+                user_prompt=prep.user_prompt,
+                disallowed_tools=SPECIALIST_TOOL_DENYLIST,
+                max_turns=prep.max_turns,
+                gpu_ids=tuple(ctx.extra.get("gpu_ids") or ()),
+                deadline=deadline,
+                gpu_lease=ctx.extra.get("gpu_specialist_lease"),
+                progress_cb=ctx.extra.get("specialist_progress_cb"),
+            )
+            call_status, call_attributes = _subprocess_call_outcome(sub_result)
+            call_span.finish(call_status, **call_attributes)
         self._append_transcript(
             workspace,
             1,
@@ -1188,7 +988,7 @@ class SpecialistRunner:
         if len(turn_usages) > 1:
             last_idx = len(turn_usages) - 1
             for i, tu in enumerate(turn_usages):
-                md = dict(tu)
+                md: dict[str, Any] = {**tu, "call_id": call_id}
                 if sub_result.usage and sub_result.usage.get("model"):
                     md.setdefault("model", sub_result.usage.get("model"))
                 self._trace_specialist_llm_call(
@@ -1203,7 +1003,7 @@ class SpecialistRunner:
             self._trace_specialist_llm_call(
                 task_id=ctx.task.task_id,
                 turn=1,
-                metadata=sub_result.usage,
+                metadata={**sub_result.usage, "call_id": call_id} if sub_result.usage else None,
                 latency_ms=_sub_latency_ms,
                 tick=_tick,
                 phase=_phase,
@@ -1305,9 +1105,7 @@ class SpecialistRunner:
         gpu_ids = [int(g) for g in (ctx.extra.get("gpu_ids") or [])]
 
         if specialist_done_payload is None:
-            reason = backend_error or (
-                "max_turns_exhausted" if turns_used >= prep.max_turns else "no_specialist_done_emitted"
-            )
+            reason = backend_error or "no_specialist_done_emitted"
             done_payload = build_empty_specialist_done(
                 gap_canonical_id=gap,
                 domain=domain.key,
@@ -1402,6 +1200,13 @@ class SpecialistRunner:
         for _proposal in done_payload.get("proposal_set") or []:
             if isinstance(_proposal, dict):
                 _proposal.setdefault("scope", prep.profile.scope)
+        # A specialist may cite only the Experiences its dispatch read showed it.
+        shown = shown_ids((ctx.task.params or {}).get("kb_rendered_refs"))
+        for _proposal in done_payload.get("proposal_set") or []:
+            if isinstance(_proposal, dict) and "experience_citations" in _proposal:
+                _proposal["experience_citations"] = normalize_citations(_proposal["experience_citations"], shown)
+        if "experience_citations" in done_payload:
+            done_payload["experience_citations"] = normalize_citations(done_payload["experience_citations"], shown)
 
         # Universal patch-safety gate: drop non-diff/escaping patches, git-ground
         # the rest, and scan for smuggled claims. Grounding is per set, not per
@@ -1409,7 +1214,7 @@ class SpecialistRunner:
         collected_roots = dict(patch_roots or {})
         base_checkout = prep.worktree_base or prep.worktree
         candidate_roots = _sibling_checkouts(
-            tuple(self.subprocess_config.framework_source_roots) if self.subprocess_config else (),
+            tuple(self.subprocess_config.framework_source_roots),
             base_checkout,
         )
         explicit_root = _grounding_explicit_root(
@@ -1481,10 +1286,14 @@ class SpecialistRunner:
         *,
         workspace: Path | None,
         profile: SpecialistProfile | None = None,
-    ) -> tuple[Path | None, Path | None, str]:
+    ) -> tuple[Path | None, FrameworkTree | None, str]:
         """Provision a per-task git worktree when in subprocess mode.
 
         Blocking (``git worktree add``, 60s); call via ``asyncio.to_thread``.
+
+        A tree no checkout tracks, such as a pip-installed package, is branched
+        off a session-owned snapshot of it instead, so the specialist still edits
+        the code the server runs.
 
         Best-effort: the specialist still dispatches without isolation and the
         reason lands in ``notes``.
@@ -1495,26 +1304,51 @@ class SpecialistRunner:
             profile: Resolved dispatch profile; non-patch mode skips worktree.
 
         Returns:
-            A ``(worktree_dir, worktree_base, error)`` tuple; ``worktree_dir``
-            is ``None`` in in-process mode or on git failure.
+            A ``(worktree_dir, source, error)`` tuple; ``worktree_dir`` is
+            ``None`` without a workspace or on git failure, and ``source`` is
+            the tree the worktree stands for.
         """
-        if self.subprocess_config is None or workspace is None:
+        if workspace is None:
             return None, None, ""
         if profile is not None:
             if profile.mode != MODE_PATCH:
                 return None, None, ""
-        base = _pick_worktree_base(
-            self.subprocess_config.framework_source_roots,
-            preferred=resolve_framework_tree(str((ctx.task.params or {}).get("framework") or "")),
-        )
-        if base is None:
-            return None, None, "no_git_framework_source_root"
+        preflight_error = specialist_patch_preflight_error(ctx.task.params)
+        if preflight_error:
+            return None, None, preflight_error
+        source = _worktree_source(ctx.task.params or {})
+        if source is None:
+            return None, None, ""
+        base = source.root
+        if not source.checkout:
+            if self.session_dir is None:
+                return None, source, f"{source.tree} has no checkout and no session dir to snapshot it into"
+            repo = self.session_dir / "tree_snapshots" / f"{fs_safe_id(str(source.tree))}.git"
+            snapshot, err = snapshot_tree(source.tree, repo, refresh=not self._integrate_in_flight())
+            if snapshot is None:
+                return None, source, err
+            base = snapshot
         worktree_path = workspace / "worktree"
         branch = f"specialist-{ctx.task.task_id}"
         wt, err = _setup_worktree(base, worktree_path, branch)
         if wt is None:
-            return None, base, err
-        return wt, base, ""
+            return None, source, err
+        return wt, source, ""
+
+    def _integrate_in_flight(self) -> bool:
+        """Whether an integrate has mutated the framework tree without deciding on it yet."""
+        from ..state.shared_state import SharedState
+
+        if self.session_dir is None:
+            return False
+        try:
+            return bool(SharedState.load_or_init(self.session_dir).pending_integrate)
+        except Exception:
+            # An unreadable state cannot vouch for the tree.
+            log.warning(
+                "specialist worktree: cannot read pending_integrate; not refreshing the snapshot", exc_info=True
+            )
+            return True
 
     # Workspace file protocol
     def _resolve_workspace(self, ctx: RunnerContext) -> Path | None:
@@ -1586,20 +1420,6 @@ class SpecialistRunner:
         """
         return (workspace / "specialist_done.json") if workspace else None
 
-    def _partial_done_path(self, workspace: Path | None) -> Path | None:
-        """Return the ``specialist_done.partial.json`` path in the workspace.
-
-        Incremental checkpoint target, distinct from the final
-        ``specialist_done.json`` so the subprocess reaper is never tripped early.
-
-        Args:
-            workspace (Path | None): The per-task workspace directory.
-
-        Returns:
-            Path | None: The partial path, or ``None`` when no workspace.
-        """
-        return (workspace / "specialist_done.partial.json") if workspace else None
-
     def _write_prompt(
         self,
         workspace: Path | None,
@@ -1643,7 +1463,7 @@ class SpecialistRunner:
         line = json.dumps(
             {
                 "turn": turn,
-                "ts": _now_iso(),
+                "ts": now_iso(),
                 **safe_entry,
             },
             sort_keys=True,
@@ -1675,7 +1495,7 @@ class SpecialistRunner:
         if path is None:
             return
         payload = {
-            "ts": _now_iso(),
+            "ts": now_iso(),
             "ts_unix": time.time(),
             "turn": turn,
             "max_turns": max_turns,
@@ -1700,34 +1520,11 @@ class SpecialistRunner:
         path = self._done_path(workspace)
         if path is None:
             return
-        _common_io.atomic_write_json(path, {"ts": _now_iso(), **payload}, make_parents=False)
-
-    def _write_specialist_done_partial(
-        self,
-        workspace: Path | None,
-        payload: dict[str, Any],
-    ) -> None:
-        """Atomically (re)write the incremental checkpoint partial.
-
-        Mirrors :meth:`_write_specialist_done` but targets
-        ``specialist_done.partial.json`` so the final-file reaper exit signal is
-        not tripped. No-ops when no workspace is configured.
-
-        Args:
-            workspace (Path | None): The per-task workspace directory.
-            payload (dict[str, Any]): The best-so-far ``specialist_done`` payload.
-        """
-        path = self._partial_done_path(workspace)
-        if path is None:
-            return
-        _common_io.atomic_write_json(
-            path,
-            {"ts": _now_iso(), "_recovered_from_partial": True, **payload},
-            make_parents=False,
-        )
+        _common_io.atomic_write_json(path, {"ts": now_iso(), **payload}, make_parents=False)
 
 
 __all__ = [
+    "NO_GIT_FRAMEWORK_SOURCE_ROOT",
     "RETRYABLE_SPECIALIST_FAILURES",
     "SPECIALIST_TOOL_DENYLIST",
     "SpecialistFailureType",
@@ -1736,4 +1533,5 @@ __all__ = [
     "SpecialistSubprocessConfig",
     "build_empty_specialist_done",
     "classify_specialist_failure",
+    "specialist_patch_preflight_error",
 ]

@@ -806,19 +806,29 @@ async def test_the_executor_reads_the_counters_off_the_session(tmp_path: Path) -
     assert request["total_failures_before"] == 4
 
 
-def test_a_profile_run_opens_no_baseline_event(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_a_profile_run_opens_no_baseline_event(tmp_path: Path) -> None:
     from hyperloom.orchestrator.actions.executors.profile import ProfileExecutor
 
-    executor = object.__new__(ProfileExecutor)
-    executor.shared_state = SimpleNamespace(phase="PRELUDE", macro_cycle=0)
+    executor = ProfileExecutor(magpie_python="python", session_dir=tmp_path)
+    recorders: list[Any] = []
+
+    async def _run_once(_ctx, *, recorder=None, run_index=0, **_kwargs):
+        recorders.append(recorder)
+        return _measured()
+
+    executor._run_once = _run_once  # type: ignore[method-assign]
     ctx = SimpleNamespace(
         task=SimpleNamespace(task_id="rf-1-profile", kind="profile", params={"reason": "roofline"}),
         lease=None,
-        extra={"session_dir": str(tmp_path)},
+        extra={
+            "session_dir": str(tmp_path),
+            "shared_state": SimpleNamespace(phase="PRELUDE", macro_cycle=0, framework="sglang"),
+        },
     )
+    await executor(ctx)
 
-    assert executor._resolve_sink(ctx) is None
-    assert make_baseline_recorder(executor._resolve_sink(ctx), task_id="rf-1-profile") is None
+    assert recorders == [None]
     assert _events(tmp_path) == []
 
 

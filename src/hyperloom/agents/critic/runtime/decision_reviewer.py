@@ -9,7 +9,9 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
+from hyperloom.common.framework_arm import is_upstream_pr_prescreen
 from hyperloom.common.timeutil import now_iso
+from hyperloom.inference_optimizer.protocol.intent import ALLOWED_VERDICTS
 
 
 from .errors import (
@@ -20,7 +22,6 @@ from .errors import (
 )
 from .inbox_parser import parse_inbox_prompt
 from .intent_envelope import (
-    ALLOWED_VERDICTS,
     Intent,
     build_advice_intent,
     build_envelope,
@@ -48,7 +49,7 @@ from .session_memory import SessionMemory
 ACTION_CLASS_PATCH_LANDING = "patch_landing"
 ACTION_CLASS_EVIDENCE_PRODUCER = "evidence_producer"
 ACTION_CLASS_FRAMEWORK_OP = "framework_op"
-# Pre-boot enablement patches (framework-agent authoring / enablement=True): a patch-landing action whose sole purpose
+# Pre-boot enablement patches (enablement=True): a patch-landing action whose sole purpose
 # is *runnability* (make the model boot at all), not throughput.
 ACTION_CLASS_ENABLEMENT_LANDING = "enablement_landing"
 
@@ -108,15 +109,6 @@ _APPROVE_REQUIRES_BY_CLASS: dict[str, tuple[str, ...]] = {
 }
 
 
-def _is_upstream_pr_prescreen(payload: dict[str, Any] | None) -> bool:
-    """Whether this proposal only decides *whether to spend a bench* on a PR."""
-    if not isinstance(payload, dict):
-        return False
-    if payload.get("patches") or (payload.get("params") or {}).get("patches"):
-        return False
-    return bool(payload.get("framework_agent_candidate_id"))
-
-
 def _is_enablement_patch(payload: dict[str, Any] | None) -> bool:
     """Whether a patch-landing proposal is a pre-boot enablement patch."""
     if not isinstance(payload, dict):
@@ -124,7 +116,7 @@ def _is_enablement_patch(payload: dict[str, Any] | None) -> bool:
     params = payload.get("params")
     if not isinstance(params, dict):
         return False
-    return bool(params.get("enablement")) or bool(params.get("framework_agent_authoring"))
+    return bool(params.get("enablement"))
 
 
 def classify_proposal_action(action_name: str | None, payload: dict[str, Any] | None = None) -> str:
@@ -135,7 +127,7 @@ def classify_proposal_action(action_name: str | None, payload: dict[str, Any] | 
     if not name:
         return ACTION_CLASS_EVIDENCE_PRODUCER
     if name in _PATCH_LANDING_ACTIONS:
-        if _is_upstream_pr_prescreen(payload):
+        if is_upstream_pr_prescreen(name, payload):
             return ACTION_CLASS_FRAMEWORK_OP
         if _is_enablement_patch(payload):
             return ACTION_CLASS_ENABLEMENT_LANDING
@@ -238,53 +230,6 @@ class DecisionReviewer:
                 kb_client = InMemoryKBClient()
             kb_writer = KBWriter(kb_client, session_memory=self.session_memory)
         self.kb_writer = kb_writer
-
-    # Phase 0: init / close session
-    def init_session(self, raw_request: dict[str, Any]) -> dict[str, Any]:
-        """Initialise a session by merging its first context payload."""
-        req = parse_request(raw_request)
-        merge = self.session_memory.merge_context(req.session_id, req.context)
-        return {
-            "session_id": req.session_id,
-            "merged_context": merge.merged,
-            "missing_context": merge.missing_keys,
-        }
-
-    def close_session(
-        self,
-        raw_request: dict[str, Any],
-        kb_draft: dict[str, Any] | None = None,
-    ) -> CommitOutcome:
-        """Close a session, optionally flushing KB drafts to the KB."""
-        req = parse_request(raw_request)
-        outcome = CommitOutcome(
-            kind="session_close",
-            session_id=req.session_id,
-            decision_id=req.decision_id,
-        )
-        if kb_draft:
-            drafts = list(kb_draft.get("kb_drafts") or [])
-            ctx = WriteContext(
-                session_id=req.session_id,
-                review_id=req.decision_id,
-                source_type="critic_kb_draft",
-                topic=None,
-            )
-            session_ctx = self.session_memory.load_context(req.session_id)
-            res = self.kb_writer.write_kb_drafts(
-                kb_drafts=drafts,
-                packet_context=req.context,
-                session_context=session_ctx,
-                ctx=ctx,
-            )
-            outcome.kb_writes.append(
-                {
-                    "trigger": "session_close",
-                    "result": res.to_dict(),
-                    "items": len(drafts),
-                }
-            )
-        return outcome
 
     # Phase 1: prepare-review
     def prepare_review(self, raw_request: dict[str, Any]) -> JudgeBundle:

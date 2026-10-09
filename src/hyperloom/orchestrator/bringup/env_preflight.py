@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hyperloom.common.bringup import BootObservation, Excerpt, LadderStage, redact
+from hyperloom.inference_optimizer.breakdown.stop_reasons import ENV_FAULT
 from hyperloom.orchestrator.bringup.argv_preflight import (
     INTERPRETER_UNPROVEN,
     OK,
@@ -28,10 +29,6 @@ from hyperloom.orchestrator.bringup.argv_preflight import (
 
 #: Names this module's observations in downstream artifacts.
 PRODUCER = "preflight.environment"
-
-#: The marker an environment-fault observation carries, and the name of the
-#: terminal it produces.
-ENV_FAULT = "environment_fault"
 
 #: The stream name recorded on the excerpt, so a reader can tell a preflight
 #: record from a server log.
@@ -76,9 +73,6 @@ _IMPORT_TIMEOUT_SEC = 60.0
 
 #: Seconds a connect to the serving port may take before it counts as free.
 _PORT_CONNECT_TIMEOUT_SEC = 1.0
-
-#: Weight file suffixes, most preferred first. A checkpoint that ships two
-#: formats ships the same tensors twice, so only the first one present counts.
 
 # The verdict is the exception's class and its ``name`` attribute, never its
 # message: two interpreters phrase the same missing extension differently.
@@ -310,6 +304,7 @@ def env_fault_observation(verdict: EnvVerdict, *, session_dir: Path | None = Non
         stage_reached=stage,
         stage_failed=stage,
         matched_marker=verdict.fault,
+        failure_text=excerpt.text,
         excerpt=excerpt,
         evidence_ref=STREAM,
         env_fault=verdict.fault,

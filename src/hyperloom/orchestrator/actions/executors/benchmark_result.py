@@ -18,7 +18,7 @@ from typing import Any
 from hyperloom.common.coerce import first_float, first_int, to_float, to_int
 from hyperloom.common.jsonio import read_json
 
-from ._gpu_metrics import write_gpu_metrics
+from ._gpu_metrics import gpu_metrics_from_report, write_gpu_metrics
 
 log = logging.getLogger(__name__)
 
@@ -259,7 +259,7 @@ def harvest_leaked_artifacts(
     # benchmark_report.json (no-op single-node).
     try:
         harvest_mn_gpu_metrics(destination, subprocess_started_unix=subprocess_started_unix)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - telemetry harvest must not fail the run
         log.warning("benchmark_result.harvest: MN GPU-metrics harvest failed: %s", exc)
     # Whatever wrote the round's ``gpu_monitor`` block -- Magpie on one node, the harvest above on several -- normalise
     # it into an artifact of its own now, while the round's own workspace is the subject. Aggregating it per session
@@ -516,8 +516,18 @@ def _merge_raw_result(
         measurement["input_throughput"] = to_float(raw.get("input_throughput"))
     if measurement.get("tpot_p90_ms") is None:
         measurement["tpot_p90_ms"] = to_float(raw.get("p90_tpot_ms"))
+    if measurement.get("ttft_p50_ms") is None:
+        measurement["ttft_p50_ms"] = to_float(raw.get("median_ttft_ms"))
+    if measurement.get("ttft_p90_ms") is None:
+        measurement["ttft_p90_ms"] = to_float(raw.get("p90_ttft_ms"))
+    if measurement.get("tpot_p50_ms") is None:
+        measurement["tpot_p50_ms"] = to_float(raw.get("median_tpot_ms"))
     if measurement.get("e2e_norm_intvty_p90") is None:
         measurement["e2e_norm_intvty_p90"] = to_float(raw.get("e2e_norm_intvty_p90"))
+    if measurement.get("e2e_norm_intvty_p50") is None:
+        measurement["e2e_norm_intvty_p50"] = to_float(raw.get("e2e_norm_intvty_p50"))
+    if measurement.get("request_error_rate") is None:
+        measurement["request_error_rate"] = to_float(raw.get("request_error_rate"))
     if measurement.get("e2el_mean_ms") is None:
         measurement["e2el_mean_ms"] = first_float(
             raw.get("mean_e2el_ms"),
@@ -593,6 +603,22 @@ def _tag_latency_origins(
             origins[field] = label
 
 
+def _round_gpu_power_w(
+    report: dict[str, Any], workspace: Path | None, subprocess_started_unix: float | None
+) -> float | None:
+    """Per-GPU mean power over the round's measured phase.
+
+    Hyperloom's own ``gpu_power.json`` wins whenever this round wrote one, including one with no reading: that round
+    was sampled and measured nothing, and substituting the report's figure would replace "unmeasured" with a number
+    from a different window. The report's ``gpu_monitor`` block -- one card, whole-process window on a single node --
+    is the fallback for rounds no recorder ran on.
+    """
+    from ._gpu_power import read_measured_gpu_power
+
+    found, watts = read_measured_gpu_power(workspace, subprocess_started_unix=subprocess_started_unix)
+    return watts if found else gpu_metrics_from_report(report).get("avg_power_w")
+
+
 def extract_benchmark_measurement(
     report: dict[str, Any] | None,
     *,
@@ -654,6 +680,7 @@ def extract_benchmark_measurement(
         "tpot_mean_ms": to_float(tpot.get("mean_ms")),
         "e2el_mean_ms": to_float(e2el.get("mean_ms")),
         "e2el_p99_ms": to_float(e2el.get("p99_ms")),
+        "gpu_power_avg_w": _round_gpu_power_w(report, workspace, subprocess_started_unix),
         "raw_result_path": None,
         "nonfatal_warnings": [],
     }
@@ -926,6 +953,15 @@ def estimate_killed_variant_throughput(
     return None
 
 
+def double_run_requested(params: dict | None) -> bool:
+    """Whether baseline double-run is enabled; defaults to True when not in params."""
+    from hyperloom.common.env import is_truthy
+
+    if params and "baseline_double_run" in params:
+        return is_truthy(params["baseline_double_run"])
+    return True
+
+
 __all__ = [
     "LATENCY_DERIVED",
     "LATENCY_FROM_RAW",
@@ -937,6 +973,7 @@ __all__ = [
     "estimate_output_throughput_from_server_log",
     "extract_benchmark_measurement",
     "harvest_leaked_artifacts",
+    "double_run_requested",
     "is_valid_measurement",
     "served_complete_protocol",
     "_materialize_rescue_into_workspace",

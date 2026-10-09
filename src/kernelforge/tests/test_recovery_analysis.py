@@ -12,7 +12,6 @@ from kernelforge.loop import runner as runner_module
 from kernelforge.loop.run_state import LoopStateStore, RunState, make_event
 from kernelforge.loop.runner import IterationResult
 from kernelforge.orchestrator.analysis import (
-    ANALYSIS_SCHEMA_VERSION,
     AnalysisAgentService,
     AnalysisBundleError,
     _case_directory,
@@ -101,7 +100,7 @@ def test_failed_analysis_attempt_does_not_advance_published_commit(tmp_path):
     service = _service(tmp_path, _BundleBackend())
 
     class FailingPublishService(AnalysisAgentService):
-        def _publish_generation(self, staging_root, commit_root):  # noqa: ANN001
+        def _publish_generation(self, staging_root, commit_root):
             raise OSError("simulated publish failure")
 
     failing = FailingPublishService(
@@ -174,19 +173,18 @@ async def test_malformed_analysis_checkpoint_is_rejected(tmp_path) -> None:
     (generation_root / "request.json").write_text(
         json.dumps(
             {
-                "schema_version": ANALYSIS_SCHEMA_VERSION,
                 "analysis_commit": context.analysis_commit,
                 "analysis_profiling_enabled": True,
                 "cases": [{"case_id": "case-a", "directory": "case-a", "latency_ms": 1.0}],
             }
         )
     )
-    (generation_root / "workflow.json").write_text('{"schema_version": 1, "session": {}}')
+    (generation_root / "workflow.json").write_text('{"session": {}}')
     (generation_root / "published.json").write_text(json.dumps({"generation_root": "generation-001"}))
     (commit_root / "published.json").write_text(json.dumps({"generation_root": "generation-001"}))
 
     service = _service(tmp_path, _BundleBackend(), profiling_enabled=True)
-    with pytest.raises(AnalysisBundleError, match="workflow schema_version is invalid"):
+    with pytest.raises(AnalysisBundleError, match="workflow commit is invalid"):
         await service.ensure_bundle(
             context,
             kernel_file=str(kernel),

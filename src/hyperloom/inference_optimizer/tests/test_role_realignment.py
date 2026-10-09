@@ -13,7 +13,7 @@ import pytest
 
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.orchestrator.phases.machine_state import PHASE_NAMES
-from hyperloom.orchestrator.loop.coordinator_helpers import _parse_iso_unix
+from hyperloom.common.timeutil import parse_iso_unix_or_zero
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.prompts.prompt_builder import (
@@ -144,34 +144,39 @@ def test_shared_state_phase_status_summary_renders_compact_block():
     # both start at 1_000_000.
     s.start_ts = datetime.fromtimestamp(1_000_000.0, tz=timezone.utc).isoformat()
     phase = _ps.PHASE_FRAMEWORK_AGENT
-    s.record_phase_transition(
+    _ps.record_phase_transition(
+        s,
         to_phase=phase,
         reason="prelude_done",
         evidence={"baseline_tput": 100},
         ts="2026-05-19T00:00:00+00:00",
         ts_unix=1_000_000.0,
     )
-    out = s.to_phase_status_summary(budget_pct={phase: 0.5}, now_unix=1_000_120.0)
+    s.phase_budget_pct = {phase: 0.5}
+    out = _ps.phase_status_summary(s, now_unix=1_000_120.0)
     assert f"phase     : {phase}" in out
     assert "entered" in out
     assert "elapsed_sec=120" in out
     # Wiring: the rendered remaining must match the budget helper it delegates to.
-    expected_rem = int(_ps.phase_budget_remaining_seconds(s, budget_pct={phase: 0.5}, now_unix=1_000_120.0))
+    expected_rem = int(_ps.phase_budget_remaining_seconds(s, now_unix=1_000_120.0))
     assert f"remaining_sec={expected_rem}" in out
     # The merged phase's allowlist carries both arms' levers.
     assert "explore" in out and "integrate_patch" in out and "specialist" in out
 
 
 def test_shared_state_phase_status_summary_no_max_minutes_marks_unlimited():
+    from hyperloom.orchestrator.phases import machine_state as _ps
+
     s = SharedState(max_minutes=0)
-    s.record_phase_transition(
+    _ps.record_phase_transition(
+        s,
         to_phase="FRAMEWORK_AGENT",
         reason="prelude_done",
         evidence={},
         ts="2026-05-19T00:00:00+00:00",
         ts_unix=1.0,
     )
-    out = s.to_phase_status_summary(now_unix=10.0)
+    out = _ps.phase_status_summary(s, now_unix=10.0)
     assert "unlimited run" in out.lower()
 
 
@@ -328,7 +333,7 @@ async def test_compose_prompt_emits_phase_block_for_every_role(
     c = coordinator_with_mocks
     try:
         for role in ("orchestration", "critic"):
-            prompt = await c._compose_prompt(role)
+            prompt = await c.conversation.compose_prompt(role)
             assert "=== Phase ===" in prompt, f"{role}: phase block missing"
             assert "phase     : PRELUDE" in prompt, f"{role}: phase value missing"
             assert "allowed" in prompt, f"{role}: allowed-actions line missing"
@@ -353,7 +358,7 @@ async def test_compose_prompt_orchestration_renders_warm_start_when_set(
             },
         }
         c.shared_state.save(session_dir)
-        prompt = await c._compose_prompt("orchestration")
+        prompt = await c.conversation.compose_prompt("orchestration")
         assert "=== Warm start (Recipe KB T0) ===" in prompt
         assert "tier=exact" in prompt
         assert "best_throughput=2100" in prompt
@@ -367,7 +372,7 @@ async def test_compose_prompt_orchestration_omits_warm_start_when_empty(
 ):
     c = coordinator_with_mocks
     try:
-        prompt = await c._compose_prompt("orchestration")
+        prompt = await c.conversation.compose_prompt("orchestration")
         assert "=== Warm start" not in prompt
     finally:
         await c.stop()
@@ -382,7 +387,7 @@ async def test_compose_prompt_omits_specialist_health_block(
     """The periodic specialist block is intentionally gone (see conversation.py)."""
     c = coordinator_with_mocks
     try:
-        prompt = await c._compose_prompt(agent_name)
+        prompt = await c.conversation.compose_prompt(agent_name)
         assert "Specialist health" not in prompt
         assert "stale" not in prompt.lower()
     finally:
@@ -436,7 +441,7 @@ async def test_running_tasks_reader_reports_held_resources(coordinator_with_mock
             )
         c.bus.db.raw.commit()
 
-        out = c._context_running_tasks_reader()
+        out = c.conversation._context_running_tasks_reader()
         assert "lanes=['gpu_research_lane', 'research_lane']" in out
         assert "gpu_ids=[1, 3]" in out
         # Soonest expiry wins: reclaim starts at the FIRST lane to lapse, so reporting the latest would overstate the
@@ -468,12 +473,12 @@ async def test_running_tasks_reader_reports_heartbeat_age(
         )
         await c.tasks.transition(task.task_id, "running")
         # No workspace yet: the field is omitted rather than reported as zero.
-        assert "heartbeat_age_sec=" not in c._context_running_tasks_reader()
+        assert "heartbeat_age_sec=" not in c.conversation._context_running_tasks_reader()
 
         ws = runs_dir(c.session_dir, "specialist", task.task_id)
         ws.mkdir(parents=True, exist_ok=True)
         (ws / "process.log").write_text("benchmarking\n", encoding="utf-8")
-        out = c._context_running_tasks_reader()
+        out = c.conversation._context_running_tasks_reader()
         assert "heartbeat_age_sec=" in out
     finally:
         await c.stop()
@@ -500,27 +505,10 @@ async def test_running_tasks_reader_skips_heartbeat_for_non_specialist(
         ws.mkdir(parents=True, exist_ok=True)
         (ws / "heartbeat.json").write_text("{}", encoding="utf-8")
 
-        out = c._context_running_tasks_reader()
+        out = c.conversation._context_running_tasks_reader()
         assert task.task_id in out
         assert "kind='explore'" in out
         assert "heartbeat_age_sec=" not in out
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_running_tasks_reader_survives_db_failure(coordinator_with_mocks):
-    """A read failure degrades to a message, never an exception."""
-    c = coordinator_with_mocks
-    try:
-
-        def _boom(*_a, **_k):
-            raise RuntimeError("db gone")
-
-        c.bus.db.fetchall_sync = _boom
-        out = c._context_running_tasks_reader()
-        assert "running tasks unavailable" in out
-        assert "db gone" in out
     finally:
         await c.stop()
 
@@ -530,7 +518,7 @@ async def test_running_tasks_reader_reports_in_flight_task(coordinator_with_mock
     """A running task is visible with its elapsed time and idempotency key."""
     c = coordinator_with_mocks
     try:
-        assert "no tasks in flight" in c._context_running_tasks_reader()
+        assert "no tasks in flight" in c.conversation._context_running_tasks_reader()
         task = await c.tasks.create(
             kind="specialist",
             params={"domain": "serving_specialist", "gap_canonical_id": "gap.x"},
@@ -538,7 +526,7 @@ async def test_running_tasks_reader_reports_in_flight_task(coordinator_with_mock
             lease_ttl_sec=1800,
         )
         await c.tasks.transition(task.task_id, "running")
-        out = c._context_running_tasks_reader()
+        out = c.conversation._context_running_tasks_reader()
         assert "=== Tasks in flight ===" in out
         assert task.task_id in out
         assert "kind='specialist'" in out
@@ -576,7 +564,7 @@ async def test_extend_lease_grows_ttl_and_lane_rows(coordinator_with_mocks):
         assert lease is not None
         before = await c.tasks.get(task.task_id)
 
-        await c._handle_intent(
+        await c.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.EXTEND_LEASE,
@@ -592,9 +580,9 @@ async def test_extend_lease_grows_ttl_and_lane_rows(coordinator_with_mocks):
         assert [r["lane"] for r in rows] == ["research_lane"]
         # The lane must expire at the REMAINING budget (cumulative TTL minus the elapsed run time), not at now + the
         # full cumulative TTL.
-        expires_in = _parse_iso_unix(str(rows[0]["expires_at"])) - time.time()
+        expires_in = parse_iso_unix_or_zero(str(rows[0]["expires_at"])) - time.time()
         assert expires_in <= 2400
-        started = _parse_iso_unix(updated.updated_at)
+        started = parse_iso_unix_or_zero(updated.updated_at)
         remaining_budget = 2400 - (time.time() - started)
         assert abs(expires_in - remaining_budget) < 5
     finally:
@@ -630,7 +618,7 @@ async def test_extend_lease_does_not_regrant_elapsed_time(coordinator_with_mocks
             (started_iso, task.task_id),
         )
 
-        await c._handle_intent(
+        await c.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.EXTEND_LEASE,
@@ -639,7 +627,7 @@ async def test_extend_lease_does_not_regrant_elapsed_time(coordinator_with_mocks
         )
 
         rows = await c.db.fetchall("SELECT expires_at FROM leases WHERE task_id=?", (task.task_id,))
-        expires_in = _parse_iso_unix(str(rows[0]["expires_at"])) - time.time()
+        expires_in = parse_iso_unix_or_zero(str(rows[0]["expires_at"])) - time.time()
         # 1800 + 600 cumulative, 1000 already spent -> ~1400s left, not 2400.
         assert 1300 < expires_in < 1450
     finally:
@@ -681,7 +669,7 @@ async def test_extend_lease_late_grant_keeps_new_increment_for_lanes_and_gpus(co
         started_iso = datetime.fromtimestamp(time.time() - 3000, tz=timezone.utc).isoformat()
         await c.db.execute("UPDATE tasks SET updated_at=? WHERE task_id=?", (started_iso, task.task_id))
 
-        await c._handle_intent(
+        await c.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.EXTEND_LEASE,
@@ -692,7 +680,7 @@ async def test_extend_lease_late_grant_keeps_new_increment_for_lanes_and_gpus(co
         lane_rows = await c.db.fetchall("SELECT expires_at FROM leases WHERE task_id=?", (task.task_id,))
         gpu_rows = await c.db.fetchall("SELECT expires_at FROM gpu_leases WHERE task_id=?", (task.task_id,))
         for row in [*lane_rows, *gpu_rows]:
-            expires_in = _parse_iso_unix(str(row["expires_at"])) - time.time()
+            expires_in = parse_iso_unix_or_zero(str(row["expires_at"])) - time.time()
             assert 550 < expires_in < 650
     finally:
         await c.stop()
@@ -720,15 +708,15 @@ async def test_extend_lease_reports_degraded_when_gpu_refresh_fails(coordinator_
         c.gpu_specialist_pool.extend = _boom  # type: ignore[method-assign]
 
         recorded: list[dict] = []
-        original = c._record_observation
+        original = c.bus.record_observation
 
         async def _capture(agent, topic, payload):
             recorded.append(dict(payload))
             return await original(agent, topic, payload)
 
-        c._record_observation = _capture  # type: ignore[method-assign]
+        c.bus.record_observation = _capture  # type: ignore[method-assign]
 
-        await c._handle_intent(
+        await c.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.EXTEND_LEASE,
@@ -762,7 +750,7 @@ async def test_extend_lease_grants_live_subprocess_extension(coordinator_with_mo
         await c.tasks.transition(task.task_id, "running")
         _sub.clear_wall_budget_extension(task.task_id)
 
-        await c._handle_intent(
+        await c.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.EXTEND_LEASE,
@@ -772,7 +760,7 @@ async def test_extend_lease_grants_live_subprocess_extension(coordinator_with_mo
         assert _sub.wall_budget_extension(task.task_id) == 600.0
 
         # Repeated extensions accumulate on the live deadline.
-        await c._handle_intent(
+        await c.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.EXTEND_LEASE,
@@ -807,15 +795,15 @@ async def test_extend_lease_survives_wall_budget_grant_failure(coordinator_with_
         original = _sub.grant_wall_budget_extension
         _sub.grant_wall_budget_extension = _boom  # type: ignore[assignment]
         recorded: list[dict] = []
-        original_record = c._record_observation
+        original_record = c.bus.record_observation
 
         async def _capture(agent, topic, payload):
             recorded.append(dict(payload))
             return await original_record(agent, topic, payload)
 
-        c._record_observation = _capture  # type: ignore[method-assign]
+        c.bus.record_observation = _capture  # type: ignore[method-assign]
         try:
-            await c._handle_intent(
+            await c.router.handle_intent(
                 "orchestration",
                 Intent(
                     type=IntentType.EXTEND_LEASE,
@@ -869,7 +857,7 @@ async def test_extend_lease_survives_unreadable_running_age(coordinator_with_moc
 
         c.tasks.get = _get  # type: ignore[method-assign]
 
-        await c._handle_intent(
+        await c.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.EXTEND_LEASE,
@@ -881,7 +869,7 @@ async def test_extend_lease_survives_unreadable_running_age(coordinator_with_moc
         # Lane still moved — falling back to the full TTL is the safe direction (a lease that outlives the task beats
         # one reaped mid-run).
         rows = await c.db.fetchall("SELECT expires_at FROM leases WHERE task_id=?", (task.task_id,))
-        assert _parse_iso_unix(str(rows[0]["expires_at"])) > time.time()
+        assert parse_iso_unix_or_zero(str(rows[0]["expires_at"])) > time.time()
         updated = await c.tasks.get(task.task_id)
         assert updated.lease_ttl_sec == 2400
     finally:
@@ -901,7 +889,7 @@ async def test_extend_lease_rejects_non_running_task(coordinator_with_mocks):
             idempotency_key="k-extend-2",
             lease_ttl_sec=1800,
         )
-        await c._handle_intent(
+        await c.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.EXTEND_LEASE,
@@ -924,7 +912,7 @@ async def test_send_message_to_specialist_writes_inbox(coordinator_with_mocks):
 
     c = coordinator_with_mocks
     try:
-        await c._handle_intent(
+        await c.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.SEND_MESSAGE,
@@ -958,7 +946,7 @@ async def test_send_message_to_specialist_prefers_worktree_inbox(coordinator_wit
         workspace = runs_dir(c.session_dir, "specialist", "task-wt")
         (workspace / "worktree").mkdir(parents=True, exist_ok=True)
 
-        await c._handle_intent(
+        await c.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.SEND_MESSAGE,
@@ -1007,7 +995,7 @@ async def test_extend_lease_also_pushes_gpu_rows(coordinator_with_mocks):
             ),
         )
 
-        await c._handle_intent(
+        await c.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.EXTEND_LEASE,

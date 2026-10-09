@@ -22,6 +22,7 @@ from hyperloom.orchestrator.scoring.proposal_scorer import (
     _prepare_scoring_proposals,
 )
 from hyperloom.orchestrator.policy.gate import SPECIALIST_FROM_AGENT_PREFIX
+from hyperloom.inference_optimizer.tests.test_specialist_lifecycle import _StubSharedState
 from hyperloom.inference_optimizer.session.session_paths import (
     conversations_path,
     llm_calls_path,
@@ -332,36 +333,15 @@ class _StubTask:
     params: dict[str, Any] = field(default_factory=dict)
 
 
-class _StubSharedState:
-    def __init__(self):
-        self.specialist_rounds: list[dict[str, Any]] = []
-        self.last_specialist: dict[str, Any] = {}
-        self.saved: int = 0
-
-    def record_specialist_round(self, entry: dict[str, Any]) -> None:
-        round_id = str(entry.get("round_id") or "").strip()
-        if round_id:
-            for i, prev in enumerate(self.specialist_rounds):
-                if str(prev.get("round_id") or "") == round_id:
-                    self.specialist_rounds[i] = dict(entry)
-                    return
-        self.specialist_rounds.append(dict(entry))
-
-    def update_last_specialist(self, snapshot) -> None:
-        self.last_specialist = dict(snapshot)
-
-    def save(self, _sd) -> None:
-        self.saved += 1
-
-
 def _coord(tmp_path: Path, scorer):
     from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     c = Coordinator.__new__(Coordinator)
     c.session_dir = tmp_path
     c.shared_state = _StubSharedState()
-    c._proposal_scorer = scorer
-    c._record_observation = AsyncMock()  # type: ignore[method-assign]
+    c.specialist_dispatch._proposal_scorer = scorer
+    c.knowledge_plane = None
+    c.bus = SimpleNamespace(record_observation=AsyncMock())
     return c
 
 
@@ -387,7 +367,7 @@ async def test_coordinator_attaches_ensemble_scores(tmp_path):
     )
     c = _coord(tmp_path, scorer)
     task = _StubTask(task_id="t1", params={"gap_symptom": "cuda stalls"})
-    await c._record_specialist_result(
+    await c.specialist_dispatch.record_specialist_result(
         task=task,
         done_payload=_done(),
         source=f"{SPECIALIST_FROM_AGENT_PREFIX}t1",
@@ -401,28 +381,11 @@ async def test_coordinator_attaches_ensemble_scores(tmp_path):
 async def test_coordinator_no_scorer_no_key(tmp_path):
     c = _coord(tmp_path, None)
     task = _StubTask(task_id="t1", params={})
-    await c._record_specialist_result(
+    await c.specialist_dispatch.record_specialist_result(
         task=task,
         done_payload=_done(),
         source=f"{SPECIALIST_FROM_AGENT_PREFIX}t1",
     )
-    assert "ensemble_scores" not in c.shared_state.specialist_rounds[0]
-
-
-@pytest.mark.asyncio
-async def test_coordinator_scorer_exception_still_records(tmp_path):
-    class _BoomScorer:
-        async def score(self, **_kw):
-            raise RuntimeError("scorer blew up")
-
-    c = _coord(tmp_path, _BoomScorer())
-    task = _StubTask(task_id="t1", params={})
-    await c._record_specialist_result(
-        task=task,
-        done_payload=_done(),
-        source=f"{SPECIALIST_FROM_AGENT_PREFIX}t1",
-    )
-    assert len(c.shared_state.specialist_rounds) == 1
     assert "ensemble_scores" not in c.shared_state.specialist_rounds[0]
 
 
@@ -433,7 +396,7 @@ async def test_coordinator_empty_proposals_not_scored(tmp_path):
     payload = _done()
     payload["proposal_set"] = []
     task = _StubTask(task_id="t1", params={})
-    await c._record_specialist_result(
+    await c.specialist_dispatch.record_specialist_result(
         task=task,
         done_payload=payload,
         source=f"{SPECIALIST_FROM_AGENT_PREFIX}t1",
@@ -566,7 +529,7 @@ async def test_resume_idempotent_on_round_id(tmp_path):
         params={},
     )
     for _ in range(2):
-        await c._record_specialist_result(
+        await c.specialist_dispatch.record_specialist_result(
             task=task,
             done_payload=_done(),
             source=f"{SPECIALIST_FROM_AGENT_PREFIX}t1",

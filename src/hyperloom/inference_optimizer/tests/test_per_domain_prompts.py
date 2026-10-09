@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import pytest
 
+from hyperloom.common.failure_signature import classify_failure
 from hyperloom.orchestrator.specialists.domains import (
     SPECIALIST_DOMAIN_KEYS,
     SPECIALIST_DOMAINS,
@@ -17,6 +18,11 @@ from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
     SpecialistPromptInputs,
     build_specialist_prompts,
 )
+
+# Every enablement round is dispatched on a classified verdict.
+_DISPATCHED = classify_failure(
+    "ValueError: Model architectures ['DeepseekV4ForCausalLM'] are not supported for now."
+).to_dict()
 
 
 def _build(domain_key: str) -> str:
@@ -29,7 +35,9 @@ def _build(domain_key: str) -> str:
         gap_canonical_id=f"gap.{domain_key}.example",
         gap_symptom="example symptom",
         gap_layer=domain.layer,
+        framework="sglang",
         workspace_path=f"/tmp/test/{domain_key}",
+        enablement_failure_signature=_DISPATCHED,
     )
     system, user = build_specialist_prompts(inp)
     return system + "\n" + user
@@ -200,7 +208,9 @@ def _build_split(domain_key: str) -> tuple[str, str]:
         warm_start_lessons=[{"attrs": {"statement": "prior keep lesson"}}],
         warm_start_pitfalls=[{"attrs": {"description": "prior revert pitfall"}}],
         kb_subgraph={"nodes": ["x"]},
+        framework="sglang",
         workspace_path=f"/tmp/test/{domain_key}",
+        enablement_failure_signature=_DISPATCHED,
     )
     return build_specialist_prompts(inp)
 
@@ -252,6 +262,7 @@ def test_enablement_mandate_carries_the_dispatch_evidence():
         framework="vllm",
         enablement_source_context=weights,
         enablement_candidate_refs=("ROCm/vllm#123", "vllm-project/vllm#456"),
+        enablement_failure_signature=_DISPATCHED,
     )
     _system, user = build_specialist_prompts(inp)
     assert "SOURCE CONTEXT" in user
@@ -259,6 +270,31 @@ def test_enablement_mandate_carries_the_dispatch_evidence():
     assert "CANDIDATE BRIDGING" in user
     assert "ROCm/vllm#123" in user
     assert "vllm-project/vllm#456" in user
+
+
+def test_enablement_mandate_renders_the_dispatched_signature():
+    """The verdict the round was dispatched on reaches the prompt verbatim; the builder never re-classifies a log to recover it."""
+    domain = get_domain("enablement_specialist")
+    assert domain is not None
+    signature = classify_failure(
+        'Traceback (most recent call last):\n  File "/opt/vllm/vllm/model_executor/models/registry.py", line 7, in resolve\n'
+        "ValueError: Model architectures ['GlmForCausalLM'] are not supported for now."
+    )
+    inp = SpecialistPromptInputs(
+        task_id="task-enablement-signature",
+        domain=domain,
+        max_turns=4,
+        gap_canonical_id="gap.enablement.missing_arch",
+        gap_symptom="boot failed",
+        gap_layer=domain.layer,
+        gap_evidence={"model": "zai-org/GLM-5"},
+        framework="vllm",
+        enablement_failure_signature=signature.to_dict(),
+    )
+    _system, user = build_specialist_prompts(inp)
+    assert "FAILURE CLASS: missing_model_arch" in user
+    assert "/opt/vllm/vllm/model_executor/models/registry.py" in user
+    assert "GlmForCausalLM" in user
 
 
 def test_enablement_mandate_omits_evidence_headers_when_not_supplied():
@@ -370,15 +406,8 @@ def test_static_recon_existing_markers_unaffected_by_shared_expert_change():
 
 # 3. SpecialistRunner no longer marks any domain as "generic template"
 @pytest.mark.asyncio
-async def test_runner_does_not_log_generic_template_for_any_domain(tmp_path):
+async def test_runner_does_not_log_generic_template_for_any_domain(tmp_path, monkeypatch):
     """When the active set covers a domain, the runner must NOT add a generic-template note."""
-    from hyperloom.orchestrator.roles.mock_backend import (
-        MockBackend,
-        MockTurn,
-        ScriptedPlan,
-    )
-    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-    from hyperloom.orchestrator.specialists.runner import SpecialistRunner
     from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
     from hyperloom.orchestrator.state.task_registry import Task
 
@@ -392,22 +421,14 @@ async def test_runner_does_not_log_generic_template_for_any_domain(tmp_path):
         "new_findings": [],
         "residual_questions": [],
     }
-    plan = ScriptedPlan(
-        turns=[
-            MockTurn(intents=[Intent(type=IntentType.SPECIALIST_DONE, payload=done)]),
-        ]
-    )
-    runner = SpecialistRunner(
-        backend_factory=lambda d: MockBackend(plan, name="mock"),
-        session_dir=tmp_path,
-        default_max_turns=2,
-    )
+    runner = _cli_runner(tmp_path, monkeypatch, behavior="done_only", payload=done)
     task = Task(
         task_id="t-kernel",
         kind="specialist",
         state="queued",
         params={
             "domain": "kernel_switch_specialist",
+            "framework": "sglang",
             "gap_canonical_id": "gap.x",
             "max_turns": 2,
         },
@@ -430,11 +451,6 @@ from typing import Any
 
 import pytest
 
-from hyperloom.orchestrator.roles.mock_backend import (
-    MockBackend,
-    MockTurn,
-    ScriptedPlan,
-)
 from hyperloom.inference_optimizer.protocol.intent import (
     Intent,
     IntentType,
@@ -460,6 +476,7 @@ from hyperloom.orchestrator.specialists.domains import (
 from hyperloom.orchestrator.specialists.runner import (
     SPECIALIST_TOOL_DENYLIST,
     SpecialistRunner,
+    SpecialistSubprocessConfig,
     build_empty_specialist_done,
 )
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
@@ -467,6 +484,8 @@ from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
     SpecialistPromptInputs,
     build_specialist_prompts,
 )
+
+from .conftest import init_git_repo, make_fake_claude
 
 
 # Test fixtures
@@ -740,33 +759,36 @@ def test_pr_monitor_section_lists_all_granted_tools():
 
 
 # 7. SpecialistRunner — happy path + failure synth
+def _cli_runner(tmp_path, monkeypatch, *, behavior: str, payload: dict[str, Any] | None = None) -> SpecialistRunner:
+    """A runner whose specialist is a fake ``claude`` CLI over a git framework checkout."""
+    repo = tmp_path / "framework"
+    init_git_repo(repo)
+    monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(repo))
+    return SpecialistRunner(
+        subprocess_config=SpecialistSubprocessConfig(
+            claude_executable=str(make_fake_claude(tmp_path / "bin", behavior=behavior, payload=payload)),
+            framework_source_roots=(str(repo),),
+            poll_interval_seconds=0.2,
+        ),
+        session_dir=tmp_path / "session",
+    )
+
+
 @pytest.mark.asyncio
-async def test_specialist_runner_happy_path(tmp_path):
-    """MockBackend emits a valid specialist_done; runner persists files."""
+async def test_specialist_runner_happy_path(tmp_path, monkeypatch):
+    """The CLI writes a valid specialist_done; runner persists files."""
     done_payload = _valid_done_payload(
         proposals=[
             {"name": "max_seqs_512", "extra_args": "--max-num-seqs 512"},
             {"name": "kv_fp8", "extra_args": "--kv-cache-dtype fp8"},
         ],
     )
-    plan = ScriptedPlan(
-        turns=[
-            MockTurn(
-                intents=[
-                    Intent(type=IntentType.SPECIALIST_DONE, payload=done_payload),
-                ]
-            )
-        ]
-    )
-
-    runner = SpecialistRunner(
-        backend_factory=lambda domain: MockBackend(plan, name=domain.key),
-        session_dir=tmp_path,
-    )
+    runner = _cli_runner(tmp_path, monkeypatch, behavior="done_only", payload=done_payload)
     task = _StubTask(
         task_id="task-xyz",
         params={
             "domain": "serving_specialist",
+            "framework": "sglang",
             "gap_canonical_id": "gap.scheduler",
             "max_turns": 4,
         },
@@ -780,37 +802,27 @@ async def test_specialist_runner_happy_path(tmp_path):
     assert len(result.specialist_done["proposal_set"]) == 2
     assert result.turns_used == 1
 
-    workspace = tmp_path / "runs" / "specialist" / "task-xyz"
+    workspace = tmp_path / "session" / "runs" / "specialist" / "task-xyz"
     assert (workspace / "prompt.md").exists()
     assert (workspace / "transcript.jsonl").exists()
     assert (workspace / "heartbeat.json").exists()
     assert (workspace / "specialist_done.json").exists()
-    prompt_text = (workspace / "prompt.md").read_text(encoding="utf-8")
-    assert "## 1. IDENTITY & AUTONOMY" in prompt_text
+    # The identity section reaches the CLI as its system prompt.
+    system_text = (workspace / "system_prompt.md").read_text(encoding="utf-8")
+    assert "## 1. IDENTITY & AUTONOMY" in system_text
     transcript_text = (workspace / "transcript.jsonl").read_text(encoding="utf-8")
-    assert "specialist_done" in transcript_text
+    assert "subprocess_result" in transcript_text
 
 
 @pytest.mark.asyncio
-async def test_specialist_runner_synthesises_empty_done_on_max_turns(tmp_path):
-    """When the backend never emits specialist_done, the runner caps at max_turns and synthesises an empty done."""
-    # Plan keeps emitting heartbeats; never produces a done.
-    heartbeat_intent = Intent(
-        type=IntentType.SEND_MESSAGE,
-        payload={"topic": "heartbeat", "body_md": "still working"},
-    )
-    plan = ScriptedPlan(
-        turns=[MockTurn(intents=[heartbeat_intent])],
-        loop_last=True,
-    )
-    runner = SpecialistRunner(
-        backend_factory=lambda domain: MockBackend(plan),
-        session_dir=tmp_path,
-    )
+async def test_specialist_runner_synthesises_empty_done_when_the_cli_writes_none(tmp_path, monkeypatch):
+    """A CLI that exits cleanly without a specialist_done gets an empty done synthesised for it."""
+    runner = _cli_runner(tmp_path, monkeypatch, behavior="no_done")
     task = _StubTask(
         task_id="task-stale",
         params={
             "domain": "serving_specialist",
+            "framework": "sglang",
             "gap_canonical_id": "gap.x",
             "max_turns": 2,
         },
@@ -820,46 +832,14 @@ async def test_specialist_runner_synthesises_empty_done_on_max_turns(tmp_path):
 
     assert result.status == "empty_synthesised"
     assert result.specialist_done["proposal_set"] == []
-    assert result.specialist_done["proposal_set"] == []
     assert result.specialist_done["domain"] == "serving_specialist"
-    assert "max_turns_exhausted" in result.specialist_done.get("reason", "")
-    assert result.turns_used == 2  # max_turns reached
-
-
-@pytest.mark.asyncio
-async def test_specialist_runner_backend_error_synthesises_empty_done(tmp_path):
-    from hyperloom.orchestrator.roles.base import BackendError
-
-    plan = ScriptedPlan(
-        turns=[
-            MockTurn(raise_error=BackendError("rate limited")),
-        ]
-    )
-    runner = SpecialistRunner(
-        backend_factory=lambda domain: MockBackend(plan),
-        session_dir=tmp_path,
-    )
-    task = _StubTask(
-        task_id="task-err",
-        params={
-            "domain": "serving_specialist",
-            "gap_canonical_id": "gap.x",
-            "max_turns": 2,
-        },
-    )
-    ctx = RunnerContext(task=task, lease=None, extra={})
-    result = await runner.run(ctx)
-
-    assert result.status == "stale"
-    assert result.specialist_done["proposal_set"] == []
-    assert "rate limited" in result.error
+    assert result.specialist_done["reason"] == "no_specialist_done_emitted"
 
 
 @pytest.mark.asyncio
 async def test_specialist_runner_unknown_domain_synthesises_empty(tmp_path):
-    plan = ScriptedPlan(turns=[])
     runner = SpecialistRunner(
-        backend_factory=lambda domain: MockBackend(plan),
+        subprocess_config=SpecialistSubprocessConfig(),
         session_dir=tmp_path,
     )
     task = _StubTask(
@@ -901,9 +881,7 @@ def test_build_empty_specialist_done_shape():
 def test_shared_state_specialist_rounds_default_empty():
     s = SharedState()
     assert s.specialist_rounds == []
-    assert s.last_specialist == {}
     assert s.research_lane_capacity == 1
-    assert s.rounds_since_last_specialist == {}
     assert s.rounds_since_last_keep == {}
 
 
@@ -1002,31 +980,6 @@ def test_record_specialist_round_dedup_by_round_id():
     assert len(s.specialist_rounds) == 2
     by_round = {r["round_id"]: r for r in s.specialist_rounds}
     assert by_round["explore-001"]["proposals_total"] == 5
-
-
-def test_update_last_specialist_snapshot():
-    s = SharedState()
-    s.update_last_specialist(
-        {
-            "task_id": "task-001",
-            "domain": "serving_specialist",
-            "status": "succeeded",
-        }
-    )
-    assert s.last_specialist["task_id"] == "task-001"
-    # Non-dict inputs are ignored.
-    s.update_last_specialist("garbage")  # type: ignore[arg-type]
-    assert s.last_specialist["task_id"] == "task-001"
-
-
-def test_research_lane_capacity_is_core_state_field():
-    """LLM cannot raise research_lane_capacity mid-flight."""
-    from hyperloom.orchestrator.policy.gate import CORE_STATE_FIELDS
-
-    assert "research_lane_capacity" in CORE_STATE_FIELDS
-    assert "gpu_specialist_capacity" in CORE_STATE_FIELDS
-    assert "specialist_rounds" in CORE_STATE_FIELDS
-    assert "last_specialist" in CORE_STATE_FIELDS
 
 
 # --------------------------------------------------------------------------- # Read-only specialists never receive
@@ -1195,6 +1148,7 @@ def test_enablement_ladder_rendered_exactly_once():
         framework="vllm",
         # notes is empty (no stacked patches, no build failure)
         notes="",
+        enablement_failure_signature=classify_failure("vllm cannot launch ModelFoo: unknown").to_dict(),
     )
     _, user = build_specialist_prompts(inp)
     count = user.count("ENABLEMENT METHODOLOGY")

@@ -16,10 +16,10 @@ from typing import Any, Mapping
 
 import yaml
 
-from hyperloom.agents.kernel.tools._capture_shapes import (
+from hyperloom.orchestrator.trace_analysis._capture_shapes import (
     is_capture_fragment as _shared_is_capture_fragment,
 )
-from hyperloom.agents.kernel.tools._trace_rank import (
+from hyperloom.orchestrator.trace_analysis._trace_rank import (
     select_primary_trace,
     trace_rank as _trace_rank,
 )
@@ -27,6 +27,7 @@ from hyperloom.common.io import atomic_write_json, safe_mtime
 from hyperloom.common.profile_args import sanitize_profile_server_args as _sanitize_profile_server_args
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.paths import asset_root, mn_profile_trace_root
+from hyperloom.inference_optimizer import framework_registry
 from ._inferencex_patcher import (
     benchmark_serving_path_in,
     ensure_benchmark_lib_patched,
@@ -34,7 +35,7 @@ from ._inferencex_patcher import (
     ensure_benchmark_serving_patched,
 )
 from ._xdit_patcher import verify_xdit_profiler_baked
-from .baseline import BaselineExecutor
+from .baseline import BenchmarkRunExecutor
 
 
 log = logging.getLogger(__name__)
@@ -139,13 +140,13 @@ def _instrumentation_preflight_row(bench: Any, patchers: Mapping[str, Any] | Non
     """State, before the run, whether the annotations the trace checks look for can land at all.
 
     When the TraceLens runtime patch is unavailable the env layer turns ``detailed_annotations`` and
-    ``shape_discovery`` off, which makes checks 3 and 5 certain to fail. That decision was previously read back one
-    line later and then discarded, so the post-hoc failures arrived without their cause. This only reports it --
-    the run proceeds exactly as before, because a trace without annotations is still a trace.
+    ``shape_discovery`` off, which makes checks 3 and 5 certain to fail. Recording that decision here gives the
+    post-hoc failures their cause. This only reports it -- the run proceeds unchanged, because a trace without
+    annotations is still a trace.
 
     ``patchers`` carries each patcher's own outcome. The env block records what the patch results *caused*, which
-    is not the same as which patcher ran and what it returned: a successful patch previously wrote nothing at all,
-    so "instrumentation was fine" and "nobody looked" were the same record.
+    is not the same as which patcher ran and what it returned: a successful patch records its outcome too, so
+    "instrumentation was fine" and "nobody looked" are different records.
     """
     envs = (bench or {}).get("envs") if isinstance(bench, dict) else None
     if not isinstance(envs, dict):
@@ -329,15 +330,7 @@ def _write_trace_certificate(trace_dir: Path, validate: dict[str, Any]) -> str:
 
 def _certify_trace_dir(trace_dir: Path, framework: str) -> dict[str, Any]:
     """Run the capture-time self-certification probe over a profile trace."""
-    import sys
-
-    from hyperloom.agents.kernel.tools import _capture_shapes
-
-    tools_dir = str(Path(_capture_shapes.__file__).resolve().parent)
-    if tools_dir not in sys.path:
-        sys.path.insert(0, tools_dir)
-
-    from hyperloom.agents.kernel.tools import trace_selfcert
+    from hyperloom.orchestrator.trace_analysis import trace_selfcert
 
     # The workload parameters shape the split forecast, and reading them from the benchmark config keeps the
     # certificate independent of any analysis having run -- the point of certifying at capture time.
@@ -700,8 +693,6 @@ def _validate_trace_structure(
     }
 
 
-# sglang profile yaml, used by tests/fixtures; runtime selection goes through `_default_profile_config()`.
-PROFILE_DEFAULT_CONFIG = asset_root() / "assets" / "configs" / "profile_sglang.yaml"
 PROFILE_DEFAULT_TIMEOUT_SEC = 14400  # 4 h wall cap
 
 
@@ -784,27 +775,13 @@ def _candidate_trace_dirs(workspace: Path) -> list[Path]:
 
 
 def _default_profile_config() -> Path:
-    """Resolve default profile YAML from $FRAMEWORK (atom / vllm / sglang; unknown falls back to
-    ``profile_sglang.yaml``).
-    """
-    fw = os.environ.get("FRAMEWORK", "sglang").strip().lower()
-    if fw == "atom":
-        name = "profile_atom.yaml"
-    elif fw == "vllm":
-        name = "profile_vllm.yaml"
-    elif fw == "xdit":
-        name = "profile_xdit.yaml"
-    elif fw == "custom":
-        name = "profile_custom.yaml"
-    else:
-        name = "profile_sglang.yaml"
-    return asset_root() / "assets" / "configs" / name
+    """Resolve the shipped profile YAML for ``$FRAMEWORK``, or for the default framework when it is unset."""
+    fw = os.environ.get("FRAMEWORK") or framework_registry.DEFAULT_FRAMEWORK
+    return asset_root() / "assets" / "configs" / framework_registry.shipped_config_name("profile", fw)
 
 
-class ProfileExecutor(BaselineExecutor):
-    """Subclass that swaps the default config + extracts trace_dir."""
-
-    benchmark_watchdog = False
+class ProfileExecutor(BenchmarkRunExecutor):
+    """Benchmark round with the torch profiler on; extracts and certifies the trace_dir."""
 
     def __init__(
         self,
@@ -833,12 +810,8 @@ class ProfileExecutor(BaselineExecutor):
         # checks ship alongside the pre-run statement of whether their subject could have been produced.
         self._instrumentation_preflight: dict[str, Any] | None = None
 
-    def _resolve_sink(self, ctx) -> Any:
-        """Decline the baseline event a profile run must never open."""
-        return None
-
     def _resolve_default_config(self) -> Path:
-        """Override BaselineExecutor's resolver to pick the profile yaml."""
+        """Pick the profile yaml for $FRAMEWORK."""
         return _default_profile_config()
 
     def _resolve_mn_round_trace_root(self, ctx) -> str:
@@ -868,40 +841,26 @@ class ProfileExecutor(BaselineExecutor):
         return str(scoped)
 
     def _inject_host_probe(self, config_path: Path, output_dir: Path) -> str:
-        """Arm the host-side evidence probe in the materialized profile config."""
+        """Put the profile start-up shim on the materialized config's ``PYTHONPATH`` and arm the host probe.
+
+        The shim always goes in, since it keeps GPU events in the traces of spawned engines; the
+        probe's environment only when the probe is enabled. Returns the probe's report directory,
+        or ``""`` when the probe is not armed.
+        """
         from . import _framework_rewrite_evidence as _evidence
 
-        if not _evidence.probe_enabled():
-            return ""
         asset_dir = _evidence.probe_asset_dir()
         if not asset_dir.is_dir():
             log.warning(
-                "profile_executor: host-probe assets missing at %s; host-side rewrite evidence disabled",
+                "profile_executor: start-up shim assets missing at %s; host-side rewrite evidence disabled",
                 asset_dir,
             )
             return ""
-        probe_dir = output_dir / _evidence.PROBE_SUBDIR
-        try:
-            probe_dir.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            log.warning("profile_executor: cannot create host-probe dir %s: %s", probe_dir, exc)
-            return ""
-
-        from hyperloom.orchestrator.framework.paths import resolve_kernel_search_roots
-
-        try:
-            roots = list(resolve_kernel_search_roots())
-        except Exception:  # noqa: BLE001 - attribution is advisory
-            roots = []
-        probe_env = _evidence.build_probe_env(
-            probe_dir=probe_dir,
-            source_roots=roots,
-            deep=_evidence.deep_probe_enabled(),
-        )
+        probe_env = self._host_probe_env(output_dir) if _evidence.probe_enabled() else {}
         try:
             cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
         except (OSError, yaml.YAMLError) as exc:
-            log.warning("profile_executor: cannot read %s to arm the host probe: %s", config_path, exc)
+            log.warning("profile_executor: cannot read %s to arm the start-up shim: %s", config_path, exc)
             return ""
         bench = cfg.get("benchmark") if isinstance(cfg, dict) else None
         if not isinstance(bench, dict):
@@ -918,14 +877,35 @@ class ProfileExecutor(BaselineExecutor):
         try:
             config_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
         except OSError as exc:
-            log.warning("profile_executor: cannot write %s after arming the host probe: %s", config_path, exc)
+            log.warning("profile_executor: cannot write %s after arming the start-up shim: %s", config_path, exc)
+            return ""
+        if not probe_env:
             return ""
         log.info(
             "profile_executor: host-side rewrite evidence probe armed (deep=%s), reports -> %s",
             bool(probe_env.get("HYPERLOOM_HOST_PROBE_DEEP")),
-            probe_dir,
+            probe_env["HYPERLOOM_HOST_PROBE_DIR"],
         )
-        return str(probe_dir)
+        return probe_env["HYPERLOOM_HOST_PROBE_DIR"]
+
+    def _host_probe_env(self, output_dir: Path) -> dict[str, str]:
+        """Return the environment that arms the host probe, or ``{}`` when its report directory cannot be made."""
+        from . import _framework_rewrite_evidence as _evidence
+
+        probe_dir = output_dir / _evidence.PROBE_SUBDIR
+        try:
+            probe_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            log.warning("profile_executor: cannot create host-probe dir %s: %s", probe_dir, exc)
+            return {}
+
+        from hyperloom.inference_optimizer.framework_paths import resolve_kernel_search_roots
+
+        return _evidence.build_probe_env(
+            probe_dir=probe_dir,
+            source_roots=list(resolve_kernel_search_roots()),
+            deep=_evidence.deep_probe_enabled(),
+        )
 
     def _after_materialize_config(
         self,
@@ -936,7 +916,7 @@ class ProfileExecutor(BaselineExecutor):
         try:
             self._host_probe_dir = self._inject_host_probe(config_path, output_dir)
             self._host_probe_status = ""
-        except Exception as exc:  # noqa: BLE001 - evidence collection is never fatal
+        except Exception as exc:
             log.warning("profile_executor: host-probe injection failed: %s", exc, exc_info=True)
             self._host_probe_dir = ""
             self._host_probe_status = f"probe_injection_failed: {exc}"
@@ -1063,7 +1043,7 @@ class ProfileExecutor(BaselineExecutor):
         try:
             out_path = Path(probe_dir).parent / _evidence.EVIDENCE_FILENAME
             document = _evidence.aggregate_probe_dir(probe_dir, out_path)
-        except Exception as exc:  # noqa: BLE001 - aggregation is best-effort
+        except Exception as exc:
             log.warning(
                 "profile_executor: rewrite-evidence aggregation failed for %s: %s",
                 probe_dir,
@@ -1138,7 +1118,7 @@ class ProfileExecutor(BaselineExecutor):
         if not (params.get("output_dir") or extra.get("workspace")):
             output_dir = self._resolve_workspace(ctx, "profile")
             output_dir.mkdir(parents=True, exist_ok=True)
-            # Stash so BaselineExecutor.__call__ picks it up via ctx.extra.
+            # Stash so the benchmark round picks it up via ctx.extra.
             if extra is None:
                 ctx.extra = {"workspace": str(output_dir)}
                 extra = ctx.extra
@@ -1176,7 +1156,7 @@ class ProfileExecutor(BaselineExecutor):
         )
 
         # Multi-node only: pre-restart the server with this round's profiler dir, marking
-        # ``ctx.extra['mn_round_restarted']`` so BaselineExecutor skips a second restart.
+        # ``ctx.extra['mn_round_restarted']`` so the benchmark round skips a second restart.
         round_trace_root = self._resolve_mn_round_trace_root(ctx)
         if round_trace_root and agentx_session:
             return {
@@ -1604,7 +1584,6 @@ profile_executor = ProfileExecutor()
 
 
 __all__ = [
-    "PROFILE_DEFAULT_CONFIG",
     "PROFILE_DEFAULT_TIMEOUT_SEC",
     "ProfileExecutor",
     "profile_executor",

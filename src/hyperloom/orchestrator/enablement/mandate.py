@@ -23,14 +23,20 @@ the local filesystem (source-root probe + installed package version) unless
 
 from __future__ import annotations
 
+import importlib.metadata
 import re
 from dataclasses import dataclass, field
+from pathlib import PurePath
 from typing import Sequence
 
 from hyperloom.common.failure_signature import EnablementRequest, FailureSignature
 from hyperloom.agents.framework.keywords import extract_keywords, score_title_with_anti_signal
-from hyperloom.agents.framework.repo_map import bridge_repo_urls
-from ..framework.paths import resolve_kernel_search_roots, summarise_framework_root_discovery
+from hyperloom.agents.framework.repo_map import bridge_repo_urls, upstream_repo_urls
+from hyperloom.inference_optimizer.framework_paths import (
+    resolve_kernel_search_roots,
+    summarise_framework_root_discovery,
+)
+from hyperloom.inference_optimizer.framework_registry import python_package
 
 
 # ---------------------------------------------------------------------------
@@ -119,25 +125,27 @@ def build_search_plan(
 ) -> EnablementSearchPlan:
     """Build the repo set + ranking keywords for an enablement failure.
 
-    Includes the framework repo plus the bridge repos (ROCm / HIP / aiter) for
-    the signature's ``bridge_layer``.
+    Includes the framework repo, its upstream when the framework repo is a fork,
+    and the bridge repos (ROCm / HIP / aiter) for the signature's ``bridge_layer``.
 
     Args:
         signature: The classified failure.
         framework_repo_url: Canonical serving-framework repo URL.
-        model: Model id/path — mined for extra keyword signal.
+        model: Model id/path — its name is mined for extra keyword signal.
 
     Returns:
-        EnablementSearchPlan: The deduped repo list and ranking keywords.
+        EnablementSearchPlan: The deduped repo list and ranking keywords,
+            most discriminating first.
     """
     repos: list[str] = []
     if framework_repo_url.strip():
         repos.append(framework_repo_url.strip())
+    repos.extend(upstream_repo_urls(framework_repo_url))
     repos.extend(bridge_repo_urls(signature.bridge_layer))
 
     keywords: list[str] = []
-    keywords.extend(extract_keywords(model))
     keywords.extend(_symbol_tokens(signature.offending_symbol))
+    keywords.extend(extract_keywords(PurePath(model).name))
     keywords.extend(_KIND_SEED_KEYWORDS.get(signature.kind, ()))
 
     return EnablementSearchPlan(
@@ -203,12 +211,10 @@ _ROCM_HIP_ROOT_HINT = "the ROCm / HIP / aiter source tree (/opt/rocm, aiter)"
 
 
 def _resolve_package_version(package: str) -> str:
-    """Return the installed version of *package*, or empty string on failure."""
+    """Return the installed version of *package*, or empty string when it is not installed."""
     try:
-        import importlib.metadata as _m
-
-        return _m.version(package)
-    except Exception:  # noqa: BLE001
+        return importlib.metadata.version(package)
+    except importlib.metadata.PackageNotFoundError:
         return ""
 
 
@@ -222,9 +228,8 @@ def _resolve_actual_root_hints(framework: str) -> list[str]:
     if roots:
         hints: list[str] = list(roots)
         hints.append(f"(discovery summary: {summarise_framework_root_discovery(':'.join(roots))})")
-        pkg_map = {"sglang": "sglang", "vllm": "vllm", "xdit": "xfuser", "atom": "atom"}
-        pkg_name = pkg_map.get(framework, framework)
-        ver = _resolve_package_version(pkg_name)
+        pkg_name = python_package(framework)
+        ver = _resolve_package_version(pkg_name) if pkg_name else ""
         if ver:
             hints.append(f"({pkg_name} installed version: {ver})")
         # Always include the ROCm/HIP root hint (authoring sub-agent always
@@ -309,34 +314,12 @@ ENABLEMENT_PROGRESS_GUIDANCE: tuple[str, ...] = (
 )
 
 
-# Loader-path and other blocked environment names: the benchmark env layer
-# drops them, and a round that needs one asks for that exact name/value pair.
-ENABLEMENT_ENV_GRANT_GUIDANCE: tuple[str, ...] = (
-    "A small set of environment names is BLOCKED from your ordinary `extra_envs` "
-    "layer because setting one redirects what the server process loads or makes "
-    "it execute a script before its own entrypoint. `PYTHONPATH` and "
-    "`LD_LIBRARY_PATH` are blocked but GRANTABLE; `LD_PRELOAD`, `LD_AUDIT`, "
-    "`PATH`, `PYTHONSTARTUP`, `PYTHONHOME`, `BASH_ENV` and their kin are never "
-    "granted at all — find another fix.",
-    "To ask for one, add an `env_grant_requests` array to your final "
-    '`specialist_done`, each entry `{"name": ..., "value": ..., '
-    '"reason": ...}`. The grant covers that exact NAME AND VALUE pair for '
-    "THIS round only: a different value is not covered, and the next round starts "
-    "with no grant.",
-    "Ask for the narrowest value that works — for a loader search path, the ONE "
-    "directory that has to be searched, not a rebuilt whole path. It is "
-    "PREPENDED to what the launch config already carries, so the framework's own "
-    "search order survives; a value that tries to replace the path will still "
-    "only be prepended.",
-)
-
-
 # Targeted-build request contract. A pure source patch (a unified diff against
 # the installed tree) cannot deliver a *compiled* component (a new AITER
 # FP4/MLA/NSA op, sgl-kernel) or a from-source framework build (a newer vLLM
-# that natively implements a brand-new architecture). Historically the
-# specialist had no way to ask for one — it could only author a patch or return
-# empty — so genuinely-new architectures dead-ended at the arch-registry alias.
+# that natively implements a brand-new architecture). Without a way to ask for
+# one, the specialist can only author a patch or return empty, and a
+# genuinely-new architecture dead-ends at the arch-registry alias.
 # This contract lets the specialist REQUEST an off-loop targeted build; the
 # Coordinator enqueues it on the isolated, ROCm-safe build lane (isolated venv +
 # pinned ROCm torch constraints), gated by the runnable-decision probe.
@@ -471,10 +454,6 @@ def build_enablement_ladder_book(signature: FailureSignature | None = None) -> s
     for g in ENABLEMENT_PROGRESS_GUIDANCE:
         lines.append(f"  - {g}")
     lines.append("")
-    lines.append("BLOCKED ENVIRONMENT NAMES (ask for a grant; a loader path is prepended, never replaced):")
-    for g in ENABLEMENT_ENV_GRANT_GUIDANCE:
-        lines.append(f"  - {g}")
-    lines.append("")
     lines.append("TARGETED BUILD (request a compiled / from-source component when a patch cannot deliver it):")
     for g in ENABLEMENT_BUILD_REQUEST_GUIDANCE:
         lines.append(f"  - {g}")
@@ -570,8 +549,8 @@ def _render_task_description(
 
 def build_mandate(
     req: EnablementRequest,
+    signature: FailureSignature,
     *,
-    signature: FailureSignature | None = None,
     candidate_refs: Sequence[str] = (),
     source_context: str = "",
     source_root_hints: Sequence[str] | None = None,
@@ -580,7 +559,8 @@ def build_mandate(
 
     Args:
         req: The enablement request.
-        signature: Pre-computed signature; defaults to ``req.signature``.
+        signature: The verdict the round was dispatched on. The caller owns it;
+            the mandate never re-derives a signature from prompt text.
         candidate_refs: Ranked bridging refs to suggest (best first).
         source_context: Optional source snippet near the offending site to
             ground the authoring sub-agent (best-effort; empty omits it).
@@ -591,17 +571,16 @@ def build_mandate(
         EnablementMandate: The authoring contract, ready to hand to the
         specialist runner.
     """
-    sig = signature if signature is not None else req.signature
     if source_root_hints is not None:
         hints: list[str] = list(source_root_hints) or [_FRAMEWORK_ROOT_HINT, _ROCM_HIP_ROOT_HINT]
     else:
         hints = _resolve_actual_root_hints(req.framework)
     refs = tuple(r for r in candidate_refs if r)
-    task = _render_task_description(req, sig, refs, hints, source_context)
+    task = _render_task_description(req, signature, refs, hints, source_context)
     return EnablementMandate(
         framework=req.framework,
         model=req.model,
-        signature=sig,
+        signature=signature,
         source_root_hints=tuple(hints),
         candidate_refs=refs,
         task_description=task,
@@ -610,7 +589,6 @@ def build_mandate(
 
 __all__ = [
     "ENABLEMENT_BUILD_REQUEST_GUIDANCE",
-    "ENABLEMENT_ENV_GRANT_GUIDANCE",
     "ENABLEMENT_HEURISTICS",
     "ENABLEMENT_INTENT_TERMS",
     "ENABLEMENT_PATCH_INVARIANTS",

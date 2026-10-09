@@ -9,12 +9,15 @@ import os
 import subprocess
 import sys
 
+import pytest
 import yaml
 
+from hyperloom.common.env import EnvValueError
 from hyperloom.orchestrator.actions.executors import _workload_envs as we
 
 _AGENTX_ENV_KEYS = (
     "HYPERLOOM_AGENTX",
+    "HYPERLOOM_AGENTIC_BACKEND",
     "AGENTX_DATASET",
     "AGENTX_MAX_CTX",
     "AGENTX_NUM_ENTRIES",
@@ -25,6 +28,11 @@ _AGENTX_ENV_KEYS = (
     "WEKA_LOADER_OVERRIDE",
     "RUN_EVAL",
     "MODEL_PATH",
+    "PORT",
+    "MLPERF_AGENTIC_FLOW",
+    "AGENTIC_NUM_TRAJECTORIES",
+    "AGENTIC_DATASET_PATH",
+    "MLPERF_TOKENIZER_DIR",
 )
 
 
@@ -160,13 +168,23 @@ def test_switch_off_does_not_leak_weka_loader_override(tmp_path, monkeypatch):
     assert "WEKA_LOADER_OVERRIDE" not in (bench.get("envs") or {})
 
 
-# ── A3: defensive parsing ────────────────────────────────────────────────────
-def test_switch_unrecognized_value_is_off_no_raise(tmp_path, monkeypatch):
+# ── A3: parsing ──────────────────────────────────────────────────────────────
+@pytest.mark.parametrize("raw", ["0", "false", "no", "off", ""])
+def test_switch_off_tokens_keep_the_synthetic_script(tmp_path, monkeypatch, raw):
     _clear_env(monkeypatch)
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "ture")  # typo -> OFF, must not raise
+    monkeypatch.setenv("HYPERLOOM_AGENTX", raw)
     src = _write(tmp_path / "base.yaml")
     bench = _materialize(src, tmp_path / "out", gpu_type="mi300x", model_path="/m")
     assert bench["benchmark_script"] == "vllm_mi300x.sh"
+
+
+def test_an_unreadable_switch_does_not_materialize_the_synthetic_workload(tmp_path, monkeypatch):
+    """A typo used to read as OFF here, benchmarking the run the operator did not ask for."""
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "ture")
+    src = _write(tmp_path / "base.yaml")
+    with pytest.raises(EnvValueError, match="HYPERLOOM_AGENTX"):
+        _materialize(src, tmp_path / "out", gpu_type="mi300x", model_path="/m")
 
 
 def test_switch_only_serving_frameworks(tmp_path, monkeypatch):
@@ -281,3 +299,40 @@ def test_switch_on_injects_framework_for_delegation(tmp_path, monkeypatch):
         bench = _materialize(src, tmp_path / f"out_{fw}", gpu_type="mi300x", model_path="/m")
         assert bench["benchmark_script"] == "aiperf_client.sh"
         assert bench["envs"]["FRAMEWORK"] == fw
+
+
+def test_switch_on_mlperf_backend_pins_client_and_port(tmp_path, monkeypatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("HYPERLOOM_AGENTIC_BACKEND", "mlperf")
+    monkeypatch.setenv("CONC", "16")
+    src = _write(tmp_path / "base.yaml", framework="sglang")
+    bench = _materialize(src, tmp_path / "out", gpu_type="mi355x", model_path="/m")
+    assert bench["benchmark_script"] == "mlperf_agentic_client.sh"
+    spec = bench.get("workload_spec") or {}
+    assert spec.get("client") == "mlperf"
+    assert spec.get("corpus") == "agentic_combined_v6"
+    assert spec.get("num_entries") == 150
+    assert spec.get("flow") == "smoke_test"
+    assert bench["envs"]["PORT"] == "30000"
+    assert bench["envs"]["HYPERLOOM_AGENTIC_BACKEND"] == "mlperf"
+    assert bench["envs"]["AGENTIC_CONCURRENCY"] == "16"
+    assert bench["envs"]["MLPERF_AGENTIC_MODEL"] == "kimi-k3"
+    # Settled here once; the client requires them rather than defaulting its own.
+    assert bench["envs"]["MLPERF_AGENTIC_FLOW"] == "smoke_test"
+    assert bench["envs"]["AGENTIC_NUM_TRAJECTORIES"] == "150"
+    assert "--served-model-name kimi-k3" in bench["envs"]["EXTRA_SGLANG_ARGS"]
+
+
+def test_mlperf_concurrency_follows_the_round_not_the_baseline(tmp_path, monkeypatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("HYPERLOOM_AGENTIC_BACKEND", "mlperf")
+    monkeypatch.setenv("AGENTIC_CONCURRENCY", "16")
+    src = _write(
+        tmp_path / "base.yaml",
+        framework="sglang",
+        envs={"CONC": 4, "AGENTIC_CONCURRENCY": "16"},
+    )
+    bench = _materialize(src, tmp_path / "out", gpu_type="mi355x", model_path="/models/kimi-k3")
+    assert bench["envs"]["AGENTIC_CONCURRENCY"] == "4"

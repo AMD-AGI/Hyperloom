@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
@@ -25,9 +24,9 @@ import sys
 from collections import Counter
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     """Count and print coordinator event topics for a session."""
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(prog="hyperloom session events", description=__doc__)
     parser.add_argument(
         "session_dir",
         nargs="?",
@@ -51,7 +50,7 @@ def main() -> int:
         default=500,
         help="Window size for the most-recent events (default: 500).",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if args.session_dir is not None:
         session_dir = pathlib.Path(args.session_dir)
@@ -77,7 +76,7 @@ def main() -> int:
         for fa, ta, topic, payload in con.execute(query, params):
             try:
                 p = json.loads(payload)
-            except Exception:
+            except ValueError:
                 continue
             if topic == "proposal":
                 counts[f"proposal:{p.get('action_name')}"] += 1
@@ -90,7 +89,3 @@ def main() -> int:
 
     print(json.dumps(dict(counts), indent=2, sort_keys=True))
     return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

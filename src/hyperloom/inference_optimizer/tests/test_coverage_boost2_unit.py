@@ -13,10 +13,9 @@ import json
 def test_coerce_bool_and_infer_scope() -> None:
     from hyperloom.orchestrator.specialists import profile as sp
 
-    assert sp._coerce_bool("off", default=True) is False
-    assert sp._coerce_bool("yes", default=False) is True
-    assert sp._coerce_bool(None, default=True) is True
-    assert sp._coerce_bool("???", default=True) is True
+    assert sp.resolve_specialist_profile({"mode": "patch", "bench": "yes"}).bench is True
+    assert sp.resolve_specialist_profile({"mode": "patch", "bench": "off"}).bench is False
+    assert sp.resolve_specialist_profile({"mode": "patch", "bench": "???"}).bench is sp.DEFAULT_BENCH
 
     # Bare dispatch with no anchors -> freeform scope.
     profile = sp.resolve_specialist_profile({})
@@ -26,8 +25,9 @@ def test_coerce_bool_and_infer_scope() -> None:
 def test_uses_whole_machine_gpu_lane() -> None:
     from hyperloom.orchestrator.specialists import profile as sp
 
-    # Framework-authoring specialists always take the whole-machine lane.
-    assert sp.uses_whole_machine_gpu_lane({"framework_agent_authoring": True}) is True
+    # Enablement specialists take the whole-machine lane; FRAMEWORK authoring is CPU.
+    assert sp.uses_whole_machine_gpu_lane({"enablement": True}) is True
+    assert sp.uses_whole_machine_gpu_lane({"framework_agent_authoring": True}) is False
 
     # Bench-capable (mode=patch & bench=true) specialists take it too.
     assert sp.uses_whole_machine_gpu_lane({"scope": "freeform", "mode": "patch", "bench": True}) is True
@@ -64,19 +64,19 @@ def test_parse_quality_gate_paths(tmp_path) -> None:
     assert res3["quality_gate"] == {"passed": True}
 
 
-# --------------------------------------------------------------------------- # orchestrator.trace.trace_env.env_flag
+# --------------------------------------------------------------------------- # inference_optimizer.trace.trace_env.env_flag
 # # --------------------------------------------------------------------------- #
 def test_env_flag_tokens(monkeypatch) -> None:
-    from hyperloom.orchestrator.trace import trace_env
+    from hyperloom.common import env as common_env
 
     monkeypatch.setenv("HL_TEST_FLAG", "on")
-    assert trace_env.env_flag("HL_TEST_FLAG") is True
+    assert common_env.env_flag("HL_TEST_FLAG") is True
     monkeypatch.setenv("HL_TEST_FLAG", "off")
-    assert trace_env.env_flag("HL_TEST_FLAG") is False
+    assert common_env.env_flag("HL_TEST_FLAG") is False
     monkeypatch.setenv("HL_TEST_FLAG", "maybe")  # unrecognized -> default
-    assert trace_env.env_flag("HL_TEST_FLAG", default=True) is True
+    assert common_env.env_flag("HL_TEST_FLAG", default=True) is True
     monkeypatch.delenv("HL_TEST_FLAG", raising=False)
-    assert trace_env.env_flag("HL_TEST_FLAG", default=False) is False
+    assert common_env.env_flag("HL_TEST_FLAG", default=False) is False
 
 
 # --------------------------------------------------------------------------- #

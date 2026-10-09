@@ -13,16 +13,10 @@ from typing import Any
 
 import pytest
 
-from hyperloom.orchestrator.roles.mock_backend import (
-    MockBackend,
-    MockTurn,
-    ScriptedPlan,
-)
-from hyperloom.inference_optimizer.protocol.intent import (
-    Intent,
-    IntentType,
-)
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
+from hyperloom.orchestrator.state.shared_state import SharedState
+
+from .conftest import use_fake_specialist_cli
 
 
 @dataclass
@@ -48,32 +42,28 @@ def _build_args(**overrides) -> argparse.Namespace:
         claude_model="claude-3-5-sonnet-latest",
         specialist_model=None,
         specialist_max_turns=4,
-        specialist_per_turn_max_seconds=300.0,
         research_lane_capacity=1,
-        # in-process ClaudeBackend path so mocks work end-to-end.
-        specialist_dispatch_mode="inprocess",
         specialist_mcp_config=None,
     )
     base.update(overrides)
     return argparse.Namespace(**base)
 
 
-def test_build_specialist_executor_returns_callable(tmp_path: Path):
+def test_build_specialist_executor_returns_callable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """The cli factory must produce a callable executor."""
     from hyperloom.inference_optimizer.cli.executors import _build_specialist_executor
 
-    plane = _FakeKnowledgePlane()
-    args = _build_args()
+    use_fake_specialist_cli(tmp_path, monkeypatch, behavior="done_only")
     executor = _build_specialist_executor(
-        args,
+        _build_args(),
         session_dir=tmp_path,
-        knowledge_plane=plane,
+        knowledge_plane=_FakeKnowledgePlane(),
     )
     assert callable(executor), "specialist executor must be a callable"
 
 
 @pytest.mark.asyncio
-async def test_register_executors_registers_specialist_kind(tmp_path: Path):
+async def test_register_executors_registers_specialist_kind(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """``_register_executors`` populates the ``specialist`` registry entry when capacity > 0."""
     from hyperloom.inference_optimizer.cli.executors import (
         _build_specialist_executor,
@@ -92,13 +82,12 @@ async def test_register_executors_registers_specialist_kind(tmp_path: Path):
         sub = _StubSub()
         shared_state = object()  # RooflineExecutor refuses None; any truthy ref works.
 
+    use_fake_specialist_cli(tmp_path, monkeypatch, behavior="done_only")
     coord = _StubCoord()
-    args = _build_args(research_lane_capacity=1)
-    plane = _FakeKnowledgePlane()
     spec_exec = _build_specialist_executor(
-        args,
+        _build_args(research_lane_capacity=1),
         session_dir=tmp_path,
-        knowledge_plane=plane,
+        knowledge_plane=_FakeKnowledgePlane(),
     )
     _register_executors(
         coord,
@@ -139,30 +128,25 @@ async def test_register_executors_omits_specialist_when_capacity_zero(
     assert "specialist" not in coord.sub.registry
 
 
-# 3. Coordinator._warm_specialist_params populates task params
+# 3. SpecialistDispatchCollaborator.warm_specialist_params populates task params
 @pytest.mark.asyncio
 async def test_warm_specialist_params_fills_pr_monitor_available(tmp_path: Path):
     """Warmup populates pr_monitor_available and warm-start fields."""
     from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     coord = Coordinator.__new__(Coordinator)
+    coord.session_dir = tmp_path
     coord.knowledge_plane = _FakeKnowledgePlane()
 
-    @dataclass
-    class _State:
-        warm_start_recipe: dict = None
-        warm_start_pitfalls: list = None
-        warm_start_lessons: list = None
-        gpu_type: str = "MI300X"
-
-    state = _State(
+    state = SharedState(
+        gpu_type="MI300X",
         warm_start_recipe={"backend": "sglang", "tp": 8},
         warm_start_pitfalls=["avoid --max-num-seqs 1024 on MoE"],
     )
     coord.shared_state = state
 
     params: dict = {"domain": "serving_specialist"}
-    await coord._warm_specialist_params(params)
+    await coord.specialist_dispatch.warm_specialist_params(params)
 
     assert params["pr_monitor_available"] is True
     assert params["warm_start_recipe"]["backend"] == "sglang"
@@ -176,25 +160,19 @@ async def test_warm_specialist_params_graceful_when_plane_is_none(tmp_path: Path
     from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     coord = Coordinator.__new__(Coordinator)
+    coord.session_dir = tmp_path
     coord.knowledge_plane = None
 
-    @dataclass
-    class _State:
-        warm_start_recipe: dict = None
-        warm_start_pitfalls: list = None
-        warm_start_lessons: list = None
-        gpu_type: str = ""
-
-    coord.shared_state = _State()
+    coord.shared_state = SharedState()
 
     params: dict = {"domain": "serving_specialist"}
-    await coord._warm_specialist_params(params)
+    await coord.specialist_dispatch.warm_specialist_params(params)
     assert params["pr_monitor_available"] is False
 
 
 # 4. End-to-end: SubAgentRunner dispatches a specialist via the adapter
 @pytest.mark.asyncio
-async def test_specialist_adapter_run_returns_dict_via_runner(tmp_path: Path):
+async def test_specialist_adapter_run_returns_dict_via_runner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """The cli adapter returns a dict carrying runner_status + specialist_done + on-disk artefacts."""
     from hyperloom.inference_optimizer.cli.executors import _build_specialist_executor
 
@@ -219,44 +197,26 @@ async def test_specialist_adapter_run_returns_dict_via_runner(tmp_path: Path):
         "new_findings": [],
         "residual_questions": [],
     }
-    plan = ScriptedPlan(
-        turns=[
-            MockTurn(
-                intents=[
-                    Intent(type=IntentType.SPECIALIST_DONE, payload=done_payload),
-                ]
-            )
-        ]
+    use_fake_specialist_cli(tmp_path, monkeypatch, behavior="done_only", payload=done_payload)
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    executor = _build_specialist_executor(
+        _build_args(),
+        session_dir=session_dir,
+        knowledge_plane=_FakeKnowledgePlane(),
     )
 
-    # Monkey-patch ClaudeBackend so the cli factory doesn't reach the real SDK.
-    import hyperloom.inference_optimizer.cli.executors as cli_mod
-
-    real_claude_cls = cli_mod.ClaudeBackend
-    cli_mod.ClaudeBackend = lambda **_kw: MockBackend(
-        plan,
-        name="specialist-mock",
+    task = _StubTask(
+        task_id="task-int-1",
+        params={
+            "domain": "serving_specialist",
+            "framework": "sglang",
+            "gap_canonical_id": "gap.scheduler.moe",
+            "max_turns": 4,
+        },
     )
-    try:
-        args = _build_args()
-        executor = _build_specialist_executor(
-            args,
-            session_dir=tmp_path,
-            knowledge_plane=_FakeKnowledgePlane(),
-        )
-
-        task = _StubTask(
-            task_id="task-int-1",
-            params={
-                "domain": "serving_specialist",
-                "gap_canonical_id": "gap.scheduler.moe",
-                "max_turns": 4,
-            },
-        )
-        ctx = RunnerContext(task=task, lease=None, extra={})
-        result_dict = await executor(ctx)
-    finally:
-        cli_mod.ClaudeBackend = real_claude_cls
+    ctx = RunnerContext(task=task, lease=None, extra={})
+    result_dict = await executor(ctx)
 
     # Adapter contract — must be a dict (SubAgentRunner writes it to the bus).
     assert isinstance(result_dict, dict)
@@ -271,7 +231,7 @@ async def test_specialist_adapter_run_returns_dict_via_runner(tmp_path: Path):
     assert sd["proposal_set"][0]["variant_name"] == "moe_expert_parallel"
 
     # On-disk artefacts (a transcript per specialist is required).
-    workspace = tmp_path / "runs" / "specialist" / "task-int-1"
+    workspace = session_dir / "runs" / "specialist" / "task-int-1"
     assert (workspace / "prompt.md").exists()
     assert (workspace / "specialist_done.json").exists()
     assert (workspace / "transcript.jsonl").exists()
@@ -289,51 +249,37 @@ async def test_specialist_adapter_run_returns_dict_via_runner(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_specialist_adapter_synthesises_empty_done_on_runner_failure(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """When the runner exhausts max_turns without a specialist_done, the adapter synthesises a well-formed empty dict."""
+    """When the specialist CLI dies without a specialist_done, the adapter synthesises a well-formed empty dict."""
     from hyperloom.inference_optimizer.cli.executors import _build_specialist_executor
 
-    # Backend keeps emitting heartbeats; never produces a done.
-    heartbeat = Intent(
-        type=IntentType.SEND_MESSAGE,
-        payload={"topic": "heartbeat", "body_md": "still working"},
+    use_fake_specialist_cli(tmp_path, monkeypatch, behavior="crash")
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    executor = _build_specialist_executor(
+        _build_args(specialist_max_turns=2),
+        session_dir=session_dir,
+        knowledge_plane=_FakeKnowledgePlane(),
     )
-    plan = ScriptedPlan(
-        turns=[MockTurn(intents=[heartbeat])],
-        loop_last=True,
+    task = _StubTask(
+        task_id="task-stale-1",
+        params={
+            "domain": "serving_specialist",
+            "framework": "sglang",
+            "gap_canonical_id": "gap.x",
+            "max_turns": 2,
+        },
     )
+    ctx = RunnerContext(task=task, lease=None, extra={})
+    result_dict = await executor(ctx)
 
-    import hyperloom.inference_optimizer.cli.executors as cli_mod
-
-    real_claude_cls = cli_mod.ClaudeBackend
-    cli_mod.ClaudeBackend = lambda **_kw: MockBackend(plan, name="spec-stale")
-    try:
-        args = _build_args(specialist_max_turns=2)
-        executor = _build_specialist_executor(
-            args,
-            session_dir=tmp_path,
-            knowledge_plane=_FakeKnowledgePlane(),
-        )
-        task = _StubTask(
-            task_id="task-stale-1",
-            params={
-                "domain": "serving_specialist",
-                "gap_canonical_id": "gap.x",
-                "max_turns": 2,
-            },
-        )
-        ctx = RunnerContext(task=task, lease=None, extra={})
-        result_dict = await executor(ctx)
-    finally:
-        cli_mod.ClaudeBackend = real_claude_cls
-
-    assert result_dict["runner_status"] == "empty_synthesised"
+    # A CLI that exits non-zero is a backend error, so the run is stale rather than merely empty.
+    assert result_dict["runner_status"] == "stale"
     sd = result_dict["specialist_done"]
     assert sd["proposal_set"] == []
-    assert sd["proposal_set"] == []
-    # Transcript + done file still on disk (some specialist_done is always written).
-    workspace = tmp_path / "runs" / "specialist" / "task-stale-1"
+    # Some specialist_done is always written, even for a crashed CLI.
+    workspace = session_dir / "runs" / "specialist" / "task-stale-1"
     assert (workspace / "specialist_done.json").exists()
 
 
@@ -352,15 +298,12 @@ def test_cli_specialist_flags_present():
             "2",
             "--specialist-max-turns",
             "5",
-            "--specialist-per-turn-max-seconds",
-            "120",
             "--specialist-model",
             "claude-3-haiku-20240307",
         ]
     )
     assert args.research_lane_capacity == 2
     assert args.specialist_max_turns == 5
-    assert args.specialist_per_turn_max_seconds == 120.0
     assert args.specialist_model == "claude-3-haiku-20240307"
 
 
@@ -387,8 +330,5 @@ def test_cli_specialist_flags_have_safe_defaults(monkeypatch):
     assert args.specialist_max_turns == DEFAULT_SPECIALIST_MAX_TURNS
     # Turn cap is effectively unbounded; the real stop is the wall-clock budget.
     assert args.specialist_max_turns == 1000
-    assert args.specialist_per_turn_max_seconds == 600.0
     # Specialist model defaults to None → cli falls back to --claude-model.
     assert args.specialist_model is None
-    # Subprocess dispatch is the production default.
-    assert args.specialist_dispatch_mode == "subprocess"

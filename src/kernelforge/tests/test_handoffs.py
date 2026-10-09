@@ -71,7 +71,7 @@ def test_handoff_allows_direct_implementer_without_plan():
 
 def test_handoff_store_rejects_noncurrent_shape(tmp_path):
     store = HandoffStore(str(tmp_path))
-    store.path(1).write_text('{"schema_version": 1, "complete": true, "iteration": 1}')
+    store.path(1).write_text('{"complete": true, "iteration": 1}')
 
-    with pytest.raises(ValueError, match="unsupported handoff schema"):
+    with pytest.raises(ValueError, match="handoff missing fields"):
         store.read(1)

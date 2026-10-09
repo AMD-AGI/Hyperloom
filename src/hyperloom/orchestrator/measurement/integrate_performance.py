@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from hyperloom.common.gain_math import gain_pct_or_zero, incremental_gain_pct
-from hyperloom.common.perf_metric import VERDICT_KEEP, VERDICT_REVERT, GradedComparison
+from hyperloom.common.perf_metric import VERDICT_KEEP, GradedComparison, graded_axes_of, latency_veto_reason
 from ..state.shared_state import resolve_graded_comparison
 
 
@@ -34,8 +34,8 @@ def assess_integrate_performance(
 ) -> IntegratePerformance:
     """Apply native KEEP thresholds on the shared grader's selected measurement axis."""
     # The threshold goes into the chokepoint rather than being re-applied here: on the interactivity axis the
-    # chokepoint raises it to the AgentX floor and pairs it with the throughput guard, and a lane that graded the
-    # gain itself would promote points the 2-D rule only RECORDED.
+    # chokepoint holds the median to its own bar and pairs it with the tail and output guards, and a lane that
+    # graded the gain itself would promote points those guards reject.
     graded = resolve_graded_comparison(state, measurement, keep_threshold_pct=keep_threshold_pct)
     new_tput = float(measurement.get("output_throughput") or 0.0)
     gain_pct = (
@@ -64,19 +64,21 @@ def assess_integrate_performance(
         # Fail closed: the axis the session asked for did not apply, so the output figure is a diagnostic, not a
         # verdict, and promoting or discarding a native integration on it is a call for a human.
         decision = "NEEDS_REVIEW"
+    elif graded.veto_reason:
+        decision = "REVERT"
     elif graded.graded_on_intvty:
-        # RECORDED is a different point on the frontier, not a dominated one: it neither promotes nor reverts.
-        decision = (
-            "KEEP"
-            if graded.verdict == VERDICT_KEEP
-            else ("REVERT" if graded.verdict == VERDICT_REVERT else "NEEDS_REVIEW")
-        )
+        decision = "KEEP" if graded.verdict == VERDICT_KEEP else "REVERT"
     else:
         decision = (
             "KEEP"
             if gain_pct > keep_threshold_pct or stack_positive_keep
             else ("REVERT" if gain_pct < -keep_threshold_pct else "NEEDS_REVIEW")
         )
+    # The grader computes the veto only for its own KEEP, and a stacked layer can KEEP here below that bar.
+    if decision == "KEEP" and latency_veto_reason(
+        measurement.get("e2el_mean_ms"), float(getattr(state, "latency_budget_ms", 0.0) or 0.0)
+    ):
+        decision = "REVERT"
     return IntegratePerformance(
         graded=graded,
         gain_pct=gain_pct,
@@ -84,3 +86,26 @@ def assess_integrate_performance(
         stack_positive_keep=stack_positive_keep,
         decision=decision,
     )
+
+
+def integrate_measurement_fields(measurement: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep performance axes and launch evidence on the same E2E measurement."""
+    return {
+        **graded_axes_of(measurement),
+        **{
+            key: measurement[key]
+            for key in (
+                "ttft_mean_ms",
+                "e2el_mean_ms",
+                "tpot_mean_ms",
+                "workspace",
+                "raw_result_path",
+                "report_path",
+                "materialized_config",
+                "launch_evidence",
+                "launch_evidence_path",
+                "server_log_path",
+            )
+            if key in measurement
+        },
+    }

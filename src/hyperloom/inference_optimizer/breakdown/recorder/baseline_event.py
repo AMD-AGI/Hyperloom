@@ -13,6 +13,7 @@ from typing import Any
 from .event_fields import (
     as_dict as _as_dict,
     as_list as _as_list,
+    bool_or_none as _bool_or_none,
     clip as _clip,
     failure_row as _failure_row,
     float_or_none as _float_or_none,
@@ -183,41 +184,27 @@ def _event_header(parts: Mapping[str, list[dict[str, Any]]], *, event: str) -> d
 
 
 def _republish_closed_event(event: str) -> None:
-    """Re-assemble a closed event so a fragment written after it is published.
-
-    The export reads the durable timeline rather than re-assembling it, so a
-    row landing after the close is in the spool but not in the event; updating
-    the same storage sequence puts it there. An event with an action still
-    running is left alone, since publishing here would show a running
-    measurement as finished.
-
-    Never raises: the row this re-publishes is already in the spool, so a
-    re-assembly that cannot read it costs the caller nothing it can act on.
-    """
-    from ...session.sbd_v6 import timeline_sequence
+    """Re-assemble a closed event so a fragment written after it is published."""
     from .assembler import baseline_event_parts
-    from .recorder_warnings import RECORDING_ERRORS, note_failure
+    from .construct import republish_closed_event
+    from .event_rows import rows_for_event
 
-    try:
-        parts = baseline_event_parts(event)
-        header = _event_header(parts, event=event)
+    def _end_time(parts: Mapping[str, list[dict[str, Any]]], header: dict[str, Any]) -> str:
         action_rows = rows_for_event(parts.get(SECTION_ACTION) or [], event)
         ends = [str(row.get("end_time") or "") for row in action_rows]
         if not ends or not all(ends):
-            return
-        ext, derived = assemble_baseline_ext(parts, event=event)
-        finish_event(
-            event_type=EVENT_TYPE,
-            event=event,
-            sequence=timeline_sequence(header),
-            status=derived,
-            ext=ext,
-            kind=EVENT_KIND,
-            start_time=str(header.get("start_time") or ""),
-            end_time=max(ends),
-        )
-    except RECORDING_ERRORS as exc:
-        note_failure(section=SECTION_EVENT, error=exc, detail=f"re-publishing closed event {event}")
+            return ""
+        return max(ends)
+
+    republish_closed_event(
+        event,
+        section=SECTION_EVENT,
+        event_type=EVENT_TYPE,
+        kind=EVENT_KIND,
+        load_parts=lambda: baseline_event_parts(event),
+        assemble=assemble_baseline_ext,
+        end_time=_end_time,
+    )
 
 
 def _warnings(result: Mapping[str, Any]) -> dict[str, Any]:
@@ -255,6 +242,11 @@ def _measurement(result: Mapping[str, Any], framework: str) -> dict[str, Any]:
         # because this block is already where ``outcome.baseline`` comes from, and a second source for one baseline
         # is a second answer to the same question.
         "perf": _graded_axes(result),
+        # Upstream's own verdict on whether the round is a submittable measurement at all, and why not when it is
+        # not. Tri-state: a framework that never answered is not the same fact as one that answered no, and a
+        # reader weighing a graded axis needs to know the round it came from was admissible.
+        "submission_valid": _bool_or_none(result.get("submission_valid")),
+        "submission_invalid_reasons": [str(reason) for reason in (result.get("submission_invalid_reasons") or [])],
         "accuracy": _float_or_none(result.get("accuracy")),
         "accuracy_task": str(result.get("accuracy_task") or ""),
         "accuracy_metric": str(result.get("accuracy_metric") or ""),
@@ -912,32 +904,24 @@ def make_baseline_recorder(
     total_failures_before: Any = None,
     owns_event: bool = True,
 ) -> BaselineEventRecorder | None:
-    """Build a recorder, or ``None`` when one cannot be constructed.
+    """Build a recorder, or ``None`` when ``sink`` is absent.
 
-    Baseline behavior must not depend on the recorder existing, so construction
-    failures degrade to "no event" rather than propagating -- as does an absent
-    sink, which is what a caller with no session bound has.
+    An unbound caller has no sink. Construction itself is not swallowed:
+    spool failures are parked by :class:`Recorder` / :class:`EventSink`.
     """
     if sink is None:
         return None
-    try:
-        recorder = BaselineEventRecorder(
-            sink,
-            task_id=task_id,
-            task_kind=task_kind,
-            reason=reason,
-            framework=framework,
-            establishes_quality_ref=establishes_quality_ref,
-            params=params,
-            failure_streak_before=failure_streak_before,
-            total_failures_before=total_failures_before,
-            owns_event=owns_event,
-        )
-    except Exception:  # noqa: BLE001 — observability cannot change baseline behavior
-        log.warning(
-            "baseline timeline: recorder construction failed; this measurement's facts will be missing from the event",
-            exc_info=True,
-        )
-        return None
+    recorder = BaselineEventRecorder(
+        sink,
+        task_id=task_id,
+        task_kind=task_kind,
+        reason=reason,
+        framework=framework,
+        establishes_quality_ref=establishes_quality_ref,
+        params=params,
+        failure_streak_before=failure_streak_before,
+        total_failures_before=total_failures_before,
+        owns_event=owns_event,
+    )
     recorder.begin()
     return recorder

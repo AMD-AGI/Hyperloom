@@ -88,7 +88,7 @@ def _amd_smi_json(args: Sequence[str], timeout_s: float = _READ_TIMEOUT_S) -> ob
     """Run a read-only ``amd-smi`` subcommand with ``--json`` and parse it."""
     cmd = ["amd-smi", *args, "--json"]
     try:
-        proc = subprocess.run(  # noqa: S603 — fixed argv, no shell
+        proc = subprocess.run(
             cmd,
             capture_output=True,
             text=True,

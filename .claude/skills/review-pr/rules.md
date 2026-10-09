@@ -6,10 +6,12 @@ index below to pick the rules the diff at hand can actually break, then read onl
 Every rule here was clustered from real review history on this repository. `Seen in` cites the
 PR the rule was learned from.
 
-Severity is `blocking` only when leaving the code unchanged means the current behaviour is wrong,
-or when something that had to move in the same PR did not (title, description, docstring).
-Everything else is `advisory` and is reported only if the reviewer was asked for more than
-blocking issues.
+Severity is `blocking` under one of the three kinds SKILL.md's output contract names: the current
+behaviour is wrong, something that had to move in the same PR did not (title, description,
+docstring), or the diff breaks a rule `AGENTS.md` states outright. Everything else is `advisory`:
+it is adjudicated in `verdicts.txt` like any other rule and then **not published**, because a
+review that ships it has stopped being two parts. An advisory `FIRE` is a note for the reviewer
+answering a later question from the author, not a line on the card.
 
 Rules that duplicate a static gate (ruff, pylint, bandit, CodeQL, gitleaks, REUSE) or that restate
 [`AGENTS.md`](../../../AGENTS.md) are deliberately absent. See
@@ -30,7 +32,8 @@ the rules listed. Rows overlap; a rule listed twice is read once.
 | adds or changes a knob or a pin: CLI flag, env var, config key, default value, a pinned external version, ref or sha, an install script, `docs/compatibility.rst`, or the argv or extra-args list one is assembled into | C3 C4 S6 T4 X5 X7 D8 D9 |
 | removes a flag, env var, enum member, test, fallback/legacy/bypass route or whole file, or tightens a comparison (`<` returns as `==`, a new `all(...)`) | C3 T2 X4 D3 |
 | fixes one site of an operation that has siblings (executors, per-framework patchers, sync and async twins), or moves, copies or consolidates code | C2 T4 D1 D2 D4 |
-| adds a second implementation of an operation the repo already owns (patch deploy, revert, snapshot, cleanup, revalidation), or a `pre_applied`/`skip_*`/already-done branch that short-circuits one | D1 D2 |
+| adds a second implementation of an operation the repo already owns (patch deploy, revert, snapshot, cleanup, revalidation), or a `pre_applied`/`skip_*`/already-done branch that short-circuits one | D1 D2 D10 |
+| defines, outside the module that owns the concern, a constant, precedence list, parser or client constructor the owner exports: an LLM model, SDK client, API key, base URL or header read outside `llm_config.py`, a backend registered outside `agent_backends/registry.py` | D5 D10 |
 | touches persisted or shared state: `SCHEMA_VERSION`, `from_dict`, `CREATE TABLE`, a `record_*`/`read_*`/`seal_*` pair, `.save()`, a spec, manifest or recipe, a context manager, recovery or resume | X6 R4 P4 P5 |
 | touches a prompt, `SKILL.md`, `docs/**`, `*.md` or `*.rst` | X3 X5 |
 | adds error handling or a default: `except`, `contextlib.suppress`, `ignore_errors=True`, `.get(k, 0)`, `or {}`, an early `isinstance` guard, a noop or degraded implementation | S1 S2 S3 S4 S5 S7 |
@@ -473,7 +476,7 @@ returns in <unit> -- gate is <N>x too <strict|loose>`
 
 ### D1 -- Route through the canonical path instead of adding or hardening a parallel one
 
-**Severity:** advisory
+**Severity:** blocking
 **Fires when:** the diff adds a function that performs an operation the repo already owns
 (patch deploy, revert, snapshot, cleanup, revalidation), or adds guards, digests, signatures
 or protocol reconstruction to a branch that runs in parallel with the default executor.
@@ -481,9 +484,10 @@ or protocol reconstruction to a branch that runs in parallel with the default ex
 semantics, and the newer, weaker one becomes the one the real path uses. A fix that hardens
 a special path is answering the wrong question: the case belongs on the default path, with
 the path-specific dispatch flags dropped, unless the general path provably cannot serve it.
-This escalates to blocking when the two implementations already disagree on a semantic a
-caller depends on. `.github/copilot-instructions.md` states the duplication and
-pipeline-bypass principle; this rule is the concrete check.
+`AGENTS.md` *Clean design* ("a second copy of a behaviour is a bug you will later fix once
+and miss elsewhere") is the bullet a finding cites, and the finding must name the existing
+owner module -- without that name it is taste and goes. `.github/copilot-instructions.md`
+states the duplication and pipeline-bypass principle; this rule is the concrete check.
 **Seen in:** PR #703 -- a direct `git apply` flow for combined E2E created a second patch
 deployment semantics alongside the byte-exact atomic snapshot deploy already in the tree.
 **Not a finding when:** the existing helper cannot serve the case for a reason the diff or
@@ -674,6 +678,36 @@ or in the body, and the ordering is shown.
 argv builders exist and whether any were touched.
 **Report as:** `D9: <flag> injected via <list> loses to <backend>'s own copy in
 <build function> -- <what breaks>` / `D9: the strip pattern misses <shape>`
+
+### D10 -- A concern belongs in the module that owns it, not beside its caller
+
+**Severity:** blocking
+**Fires when:** the diff adds or edits, outside the module that owns the concern, a constant,
+precedence list, parser or client constructor that the owner already exports: LLM model, SDK
+client, API key, base URL or header resolution anywhere but `src/hyperloom/common/llm_config.py`;
+backend registration outside `agent_backends/registry.py`; tier, path or schema constants beside
+the code that reads them. The shape is an `os.environ` read, a hardcoded tuple of names, or a
+second `def` whose body matches an exported one.
+**The rule:** a second home for a concern means two answers to the same question, and the one
+the reader is looking at is not necessarily the one that runs. Import from the owner. If the
+owner cannot serve the case, the fix is to extend the owner, not to keep a copy near the caller
+-- and if there is genuinely no owner yet, the PR says which module becomes one. `AGENTS.md`
+*Clean design* ("one boundary rule per concern, owned by one module ... duplicated state or a
+duplicated decision is the same problem") is the bullet a finding cites.
+**Seen in:** PR #1338 -- vendoring KernelForge brought
+`src/kernelforge/llm/gateway.py:29 _ANTHROPIC_KEY_ENVS` alongside the byte-identical
+`llm_config.py:63 ANTHROPIC_SYNTHESIZABLE_KEY_ENVS`, and a second `parse_custom_headers` at
+`gateway.py:81` beside the exported one at `llm_config.py:382`, while four `kernelforge` modules
+already import from `llm_config` -- so no layering barrier explained the copy.
+**Not a finding when:** the owner's export cannot reach the caller without a dependency cycle or
+a layering inversion, and the diff or the body says which; the two look alike but answer to
+different contracts (`AGENTS.md` *Simplify by removing a mechanism* names this case); or the
+value is a test fixture deliberately pinned so the test fails when the owner moves.
+**Evidence:** `$WORK/diff.txt` for the added definition; the owner module in the head tree for
+the export that already serves it; a grep proving the caller's package already imports the owner,
+which is what removes the layering excuse.
+**Report as:** `D10: <file>:<line> defines <name>, already owned and exported by <owner>:<line>
+-- import it, or state the barrier that prevents it`
 
 ## V -- Review method and PR hygiene
 

@@ -14,6 +14,8 @@ import yaml
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.state.shared_state import SharedState
 
+from ._geak_helpers import stop_geak_before_launch
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("value", ["two words", '{"key": "a b", "eq": "a=b"}', "user's config", r"a\b", "", "plain"])
@@ -27,17 +29,11 @@ async def test_handoff_preserves_environment_values(
         model_path="/models/example",
         current_best={"extra_envs": expected, "optimization_stack": []},
     )
-    coord.phase_kernel._record_geak_kernel_journey = lambda _result: None
+    coord._record_geak_kernel_journey = lambda _result: None
     monkeypatch.setenv("FRAMEWORK", "sglang")
 
-    def stop_after_handoff(_name: str) -> Path:
-        raise RuntimeError("stop after handoff write")
-
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
-        stop_after_handoff,
-    )
-    await coord._run_geak_kernel_phase(from_phase="KERNEL")
+    stop_geak_before_launch(monkeypatch)
+    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
     assert handoff["baseline_env_spec"]["config"]["extra_envs"] == expected
@@ -71,19 +67,13 @@ def capture_handoff(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             last_baseline={"extras": {"materialized_config": str(recipe)}},
             current_best={**current, "measurement": {"resolved_server_launch_flags": observed_flags}},
         )
-        coord.phase_kernel._record_geak_kernel_journey = lambda _result: None
+        coord._record_geak_kernel_journey = lambda _result: None
         monkeypatch.setenv("FRAMEWORK", framework)
         monkeypatch.delenv("MAX_MODEL_LEN", raising=False)
         monkeypatch.delenv("GPU_MEMORY_UTILIZATION", raising=False)
 
-        def stop_after_handoff(_name: str) -> Path:
-            raise RuntimeError("stop after handoff write")
-
-        monkeypatch.setattr(
-            "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
-            stop_after_handoff,
-        )
-        await coord._run_geak_kernel_phase(from_phase="KERNEL")
+        stop_geak_before_launch(monkeypatch)
+        await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
         return json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
 
     return capture
@@ -133,8 +123,8 @@ async def test_handoff_transports_current_best_launch_controls(
 @pytest.mark.parametrize(
     ("current", "observed_flags", "expected_max_len", "expected_mem"),
     [
-        ({"extra_server_args": "", "args_mode": "replace"}, "", 0, 0.0),
-        ({"remove_args": ["--max-model-len", "--gpu-memory-utilization"]}, "", 0, 0.0),
+        ({"extra_server_args": "", "args_mode": "replace"}, "", None, None),
+        ({"remove_args": ["--max-model-len", "--gpu-memory-utilization"]}, "", None, None),
         (
             {"extra_server_args": "--max-model-len 4096 --gpu-memory-utilization 0.7", "args_mode": "replace"},
             "",
@@ -161,5 +151,9 @@ async def test_handoff_serving_fidelity_respects_current_best_launch_controls(
         observed_flags=observed_flags,
     )
 
-    assert handoff["max_model_len"] == expected_max_len
-    assert handoff["mem_fraction"] == pytest.approx(expected_mem)
+    if expected_max_len is None:
+        assert "max_model_len" not in handoff
+        assert "mem_fraction" not in handoff
+    else:
+        assert handoff["max_model_len"] == expected_max_len
+        assert handoff["mem_fraction"] == pytest.approx(expected_mem)

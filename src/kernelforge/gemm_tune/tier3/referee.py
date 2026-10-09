@@ -28,6 +28,10 @@ REPEATS = 9
 MIN_SPEEDUP = 1.01
 
 
+class CaptureFailed(RuntimeError):
+    """The work could not be captured into a CUDA/HIP graph, so replay cannot time it."""
+
+
 @dataclass(frozen=True)
 class PairedTiming:
     """One baseline-versus-candidate comparison, with why it is trustworthy."""
@@ -60,6 +64,8 @@ class Judgement:
     best_timing: PairedTiming | None = None
     timings: list[tuple[dict[str, Any], PairedTiming]] = field(default_factory=list)
     rejected_incorrect: int = 0
+    #: Why the shape produced no comparison at all; empty when it was judged.
+    reason: str = ""
 
     @property
     def improved(self) -> bool:
@@ -74,6 +80,7 @@ class Judgement:
             "improved": self.improved,
             "rejected_incorrect": self.rejected_incorrect,
             "candidates_timed": len(self.timings),
+            "reason": self.reason,
         }
 
 

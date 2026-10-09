@@ -5,26 +5,51 @@
 
 from __future__ import annotations
 
-import os
 import time
 from datetime import datetime
 from pathlib import PurePosixPath
 from typing import Any
 
+from hyperloom.common.env import env_bool
 from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_prompt
-
-
-def _shared_state_module():
-    """Import parent shared_state lazily to avoid a module-level cycle."""
-    from .. import shared_state
-
-    return shared_state
-
+from .attempt_audit import _AUDIT_ACTIONS
+from .phase_state import GAP_SEVERITY_RANK
 
 # Failure rows rendered into the prompt, and per-row excerpt budget.
 _FAILURES_RENDERED = 10
 _FAILURE_EXCERPT_CHARS = 600
+
+# Ordered (key, label) projection for advisory ``model_arch``; empty/None keys dropped.
+_MODEL_ARCH_STRUCTURED_FIELDS: tuple[tuple[str, str], ...] = (
+    ("decoder_type", "decoder"),
+    ("attention", "attention"),
+    ("layer_mix", "layers"),
+    ("kv_cache_per_token", "kv/token"),
+    ("active_params", "params"),
+    ("num_experts", "experts"),
+    ("experts_per_tok", "experts/tok"),
+    ("mtp", "mtp"),
+    ("swa_window", "swa_window"),
+    ("norm", "norm"),
+)
+
+
+def render_model_arch_compact(arch: dict | None) -> str:
+    """Render the advisory ``model_arch`` profile as a single compact line (``\"\"`` when empty/not a dict)."""
+    if not isinstance(arch, dict) or not arch:
+        return ""
+    parts: list[str] = []
+    for key, label in _MODEL_ARCH_STRUCTURED_FIELDS:
+        val = arch.get(key)
+        if val is None or val == "":
+            continue
+        parts.append(f"{label}={val}")
+    notes = str(arch.get("notes") or "").strip()
+    if notes:
+        parts.append(f"notes={notes}")
+    return "; ".join(parts)
+
 
 # Width budget for artifact anchors; sized so a full uuid4 fid still fits ws=.
 _VARIANT_ANCHOR_MAX_CHARS = 100
@@ -49,10 +74,26 @@ def _as_float(value: Any) -> float:
 
 class _RenderMixin:
     def to_policy_denial_summary(self, *, top_k: int = 6) -> str:
-        """Forwarding shim — implementation in :mod:`.policy`."""
-        from ...policy import gate as _m
+        """Render the most recent PolicyGate denials for prompt injection.
 
-        return _m.to_policy_denial_summary(self, top_k=top_k)
+        Args:
+            top_k (int): Maximum number of newest denial rows to render.
+
+        Returns:
+            str: A ``=== Recent policy denials ===`` block, or ``""`` when
+                no denials have been recorded.
+        """
+        if not self.policy_denial_history:
+            return ""
+        rows = list(self.policy_denial_history)[-top_k:]
+        lines = [f"=== Recent policy denials (newest last, total={len(self.policy_denial_history)}) ==="]
+        for r in rows:
+            lines.append(
+                f"  tick={r.get('tick')} action={r.get('action_name')!r} "
+                f"rule={r.get('rule')!r} streak={r.get('streak')} "
+                f"hint={str(r.get('hint') or '')[:140]!r}"
+            )
+        return "\n".join(lines)
 
     def to_intervention_mix_summary(self) -> str:
         """Render the intervention ledger as a one-line counts summary (``\"\"`` when empty)."""
@@ -96,11 +137,6 @@ class _RenderMixin:
             if unvalidated
             else ""
         )
-        resume_revalidation_tag = (
-            " ⚠ resume_pending_revalidation=true — recheck current stack before trusting validated gain"
-            if bool(getattr(self, "resume_pending_revalidation", False))
-            else ""
-        )
         geak_pending_status = (
             str(self.geak_pending.get("status") or "") if isinstance(getattr(self, "geak_pending", None), dict) else ""
         )
@@ -131,7 +167,7 @@ class _RenderMixin:
             f"gain      : validated={self.cumulative_gain_validated:.2f}%{validated_age}",
             f"stack     : {len(self.optimization_stack)} entries "
             f"(validated_at_len={self.cumulative_gain_validated_stack_len})"
-            f"{unvalidated_tag}{resume_revalidation_tag}{geak_pending_tag}",
+            f"{unvalidated_tag}{geak_pending_tag}",
         ]
         # Surface reusable hot kernels still owing a kernel_opt attempt.
         untried_hot = self.untried_hot_reusable_kernels()
@@ -158,96 +194,15 @@ class _RenderMixin:
             f"variant={self.current_best.get('variant_name', '?')}"
         )
 
-    def to_phase_status_summary(
-        self,
-        *,
-        budget_pct: dict[str, float] | None = None,
-        now_unix: float | None = None,
-    ) -> str:
-        """Render the per-tick ``=== Phase ===`` block (≤7 lines). The mid-chain phases add a ``cycle_reloop`` line showing whether another macro-cycle is still affordable."""
-        from ...phases.machine_state import (
-            PHASE_ENABLEMENT,
-            PHASE_FRAMEWORK_AGENT,
-            PHASE_KERNEL_AGENT,
-            PHASE_SWEEP,
-            allowed_actions_for,
-            normalize_budget_pct,
-            phase_budget_remaining_seconds,
-            phase_cumulative_seconds,
-            phase_elapsed_seconds,
-            session_remaining_seconds,
-            should_reloop_to_explore,
+    def to_latency_budget_summary(self) -> str:
+        """One line stating the latency budget; empty when unset. Refusals surface in the existing ledgers."""
+        budget = float(getattr(self, "latency_budget_ms", 0.0))
+        if budget <= 0:
+            return ""
+        return (
+            f"{budget:g} ms mean end-to-end: a KEEP over it, or with no latency reported, is refused "
+            "(reason latency_budget_exceeded / latency_unmeasured in explore_search and the journal)"
         )
-
-        phase = (self.phase or "").strip().upper() or "UNSET"
-        elapsed = int(phase_elapsed_seconds(self, now_unix=now_unix))
-        # ``remaining`` paces this entry; the absolute cap reads ``cumulative``.
-        cumulative = int(phase_cumulative_seconds(self, now_unix=now_unix))
-        budget = normalize_budget_pct(budget_pct or self.phase_budget_pct)
-        budget_pct_for_phase = budget.get(phase, 0.0)
-        remaining = phase_budget_remaining_seconds(
-            self,
-            budget_pct=budget,
-            now_unix=now_unix,
-        )
-        budget_line: str
-        if remaining is None:
-            budget_line = f"budget    : pct={budget_pct_for_phase:.2f} (unlimited run; no per-phase cap)"
-        else:
-            budget_line = (
-                f"budget    : pct={budget_pct_for_phase:.2f} elapsed_sec={elapsed} "
-                f"cumulative_sec={cumulative} remaining_sec={int(remaining)}"
-            )
-        actions_in_phase = allowed_actions_for(phase)
-        allowed_line = f"allowed   : {', '.join(actions_in_phase) if actions_in_phase else '(none)'}"
-        lines = [
-            f"phase     : {phase}",
-            f"cycle     : {int(getattr(self, 'macro_cycle', 0) or 0)}",
-            f"entered   : {self.phase_started_ts or '(unset)'}",
-            budget_line,
-            allowed_line,
-        ]
-        # Whether deferring work to a later cycle is still a real option.
-        if phase in (PHASE_ENABLEMENT, PHASE_FRAMEWORK_AGENT, PHASE_KERNEL_AGENT, PHASE_SWEEP):
-            reloop, evidence = should_reloop_to_explore(self, now_unix=now_unix)
-            feasible = reloop and self.framework_agent_phase_enabled
-            reloop_line = f"reloop    : cycle_reloop_feasible={'true' if feasible else 'false'}"
-            threshold = evidence.get("min_remaining_sec_effective")
-            if threshold is not None:
-                reloop_line += f" threshold_sec={int(threshold)}"
-            session_remaining = session_remaining_seconds(self, now_unix=now_unix)
-            if session_remaining is not None:
-                reloop_line += f" session_remaining_sec={int(session_remaining)}"
-            blocked = evidence.get("reloop_blocked")
-            if blocked:
-                reloop_line += f" blocked={blocked}"
-            if phase != PHASE_SWEEP:
-                reloop_line += " (projected)"
-            lines.append(reloop_line)
-        return "\n".join(lines)
-
-    def to_resource_pools_summary(self) -> str:
-        """Render the GPU pool / lane capacity block."""
-        from ...bus.storage.schema import DEFAULT_LANE_CAPACITIES
-        from ...policy.projection import (
-            effective_gpu_specialist_pool_size,
-            gpu_specialist_ceiling,
-            serving_tp_for_policy,
-            whole_machine_pool_size,
-        )
-
-        lines = [
-            f"serving_tp={serving_tp_for_policy(self)}",
-            f"gpu_specialist_capacity={gpu_specialist_ceiling(self)}",
-            f"serving_disjoint_gpu_pool={effective_gpu_specialist_pool_size(self)}"
-            "  (non-bench needs_gpu specialists admit against this)",
-            f"whole_machine_gpu_pool={whole_machine_pool_size()}"
-            "  (bench / framework-authoring specialists admit against this)",
-            f"research_lane_capacity={max(0, int(self.research_lane_capacity or 0))}  (concurrent specialists)",
-            f"gpu_research_lane_capacity={DEFAULT_LANE_CAPACITIES['gpu_research_lane']}"
-            "  (mutually exclusive with serving / benchmark / profile)",
-        ]
-        return "\n".join(lines)
 
     def to_warm_start_summary(self, *, max_lines: int = 12) -> str:
         """Render the ``=== Warm start ===`` prompt section from the T0 warm-start context.
@@ -389,23 +344,15 @@ class _RenderMixin:
             rows.append(f"  · (+{len(ordered) - max_entries} older gaps elided; see state.json `gaps[]`)")
         return "\n".join(rows)
 
-    def _untested_proposal_rows(self) -> list[dict[str, Any]]:
-        """Executable proposals from this cycle that no explore round has benched."""
+    def untested_proposal_rows(self) -> list[dict[str, Any]]:
+        """Executable proposals from this cycle that no explore round has benched, highest severity first."""
         from hyperloom.common.coerce import to_int
 
-        from ...actions.executors._proposal_identity import (
-            controls_of,
-            effective_fingerprint,
-            is_executable,
-            normalize_proposal,
-        )
-
-        def content_fingerprint(fields: dict[str, Any]) -> str:
-            return effective_fingerprint(fields["extra_args"], fields["extra_envs"], controls=controls_of(fields))
+        from ...actions.executors._proposal_identity import content_fingerprint, is_executable, normalize_proposal
 
         cycle = to_int(self.macro_cycle, default=0)
         benched = {
-            content_fingerprint(normalize_proposal(row))
+            content_fingerprint(row)
             for row in ((self.explore_search or {}).get("tested") or {}).values()
             if isinstance(row, dict)
         }
@@ -414,8 +361,6 @@ class _RenderMixin:
             for g in (self.gaps or [])
             if isinstance(g, dict)
         }
-        rank = {"high": 3, "medium": 2, "low": 1}
-
         ranked: list[tuple[int, int, dict[str, Any]]] = []
         seen: set[str] = set()
         for order, entry in enumerate(self.specialist_rounds or []):
@@ -437,7 +382,12 @@ class _RenderMixin:
                 row["name"] = row["name"] or f"{domain or 'specialist'}-{task_id}-{index}"
                 row["domain"] = domain
                 row["severity"] = severity
-                ranked.append((rank.get(severity, 0), order, row))
+                row["fingerprint"] = fingerprint
+                # Already checked against the read this round's dispatch was shown, which travels with them.
+                row["experience_citations"] = list(proposal.get("experience_citations") or [])
+                row["kb_read_id"] = str(entry.get("kb_read_id") or "")
+                row["kb_rendered_refs"] = list(entry.get("kb_rendered_refs") or [])
+                ranked.append((GAP_SEVERITY_RANK.get(severity, 0), order, row))
         ranked.sort(key=lambda r: (-r[0], -r[1]))
         return [row for _, _, row in ranked]
 
@@ -464,13 +414,13 @@ class _RenderMixin:
 
     def to_untested_proposals_summary(self, *, max_entries: int = 12) -> str:
         """Render the specialist proposals still waiting for a benchmark slot."""
-        rows = self._untested_proposal_rows()
+        rows = self.untested_proposal_rows()
         if not rows:
             return ""
         out = [
             "Executable specialist proposals from this cycle that no explore round has benched.",
-            "Ranked by gap severity, then most recent. Compose the next `explore` grid from these;",
-            "dispatch an ATOMIC entry verbatim as one variant — never split or re-derive its flags.",
+            "Ranked by gap severity, then most recent. The Coordinator benches the head of this",
+            "queue whenever no explore is queued or running; dispatch `explore` only for variants not listed here.",
             "",
         ]
         out.extend(self._untested_proposal_line(row) for row in rows[:max_entries])
@@ -582,20 +532,19 @@ class _RenderMixin:
             f"model={self.model_name or '(unset)'}  class={self.model_class or '(unset)'}",
         ]
         # Advisory architecture profile; prompt-context only. Omitted when no profile.
-        _arch_line = _shared_state_module().render_model_arch_compact(self.model_arch)
+        _arch_line = render_model_arch_compact(self.model_arch)
         if _arch_line:
             lines.append(f"model_arch(advisory; subordinate to TraceLens analysis_md)={_arch_line}")
         lines += [
             f"baseline_tput={self.baseline_tput}  baseline_acc={self.baseline_accuracy}",
             f"baseline_failure_streak={self.baseline_failure_streak}",
-            f"current_best={self.current_best or '(none)'}",
+            f"current_best={self._format_current_best()}",
             f"optimization_stack={self._format_optimization_stack()}",
             (
                 f"cumulative_gain_validated={self.cumulative_gain_validated}% "
                 f"(stack_len_at_validation={self.cumulative_gain_validated_stack_len}, "
                 f"ts={self.cumulative_gain_validated_ts or '(never)'})"
             ),
-            f"current_action={self.current_action or '(idle)'}",
             f"crash_count={self.crash_count}",
             f"pruned_families={self.pruned_families or '(none)'}",
             f"last_profile_trace={self.last_profile_trace or '(none)'}",
@@ -622,7 +571,7 @@ class _RenderMixin:
             f"last_action_failures={self._format_last_action_failures()}",
             f"agent_last_active={self._format_agent_last_active()}",
             f"gain_gated_action_count={int(self.gain_gated_action_count or 0)}",
-            f"tick={int(self.tick or 0)}  target_gap_pct={float(self.target_gap_pct or 0.0):.2f}",
+            f"tick={int(self.tick or 0)}",
             f"macro_cycle={int(self.macro_cycle or 0)}",
             f"stop_reason={self.stop_reason or '(none)'}",
             f"closing_phase={self.closing_phase}  "
@@ -667,7 +616,7 @@ class _RenderMixin:
     def _format_attempts_history(self) -> str:
         """One-line summary across the audit actions (``baseline:total(s<succ>,f<fail>) ...``)."""
         parts: list[str] = []
-        for action in sorted(_shared_state_module()._AUDIT_ACTIONS):
+        for action in sorted(_AUDIT_ACTIONS):
             attempts_attr = f"{action}_attempts"
             history = getattr(self, attempts_attr, None) or []
             if not history:
@@ -808,6 +757,16 @@ class _RenderMixin:
             out.append(f"      {str(fp)[:16]} {outcome:7s} {_RenderMixin._format_variant_line(entry)}")
         return "\n".join(out)
 
+    def _format_current_best(self) -> str:
+        """Render ``current_best`` without its ``optimization_stack`` and ``measurement``.
+
+        The stack, which grows with every stacked KEEP, has its own line; the
+        measurement is launch evidence (paths, identity hashes) no decision reads.
+        """
+        if not self.current_best:
+            return "(none)"
+        return str({k: v for k, v in self.current_best.items() if k not in ("optimization_stack", "measurement")})
+
     def _format_optimization_stack(self) -> str:
         """Render the optimization stack as ``action:variant`` parts."""
         if not self.optimization_stack:
@@ -851,10 +810,7 @@ class _RenderMixin:
             gain_str = "?"
         # By default point at the show_analysis_md tool; set INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE=1 to inline
         # the verbatim md.
-        if os.getenv(
-            "INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE",
-            "0",
-        ).strip().lower() not in ("1", "true", "on", "yes"):
+        if not env_bool("INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE"):
             return (
                 f"(TraceLens snapshot #{snap}, gain at snapshot = {gain_str}% — "
                 "full report not inlined; see profiler_digest above or call the "
@@ -869,7 +825,7 @@ class _RenderMixin:
 
     def _format_profiler_digest(self) -> str:
         """Compact bottleneck-focused profiler block; ``(none)`` until a snapshot lands."""
-        from ...kernel.roofline_snapshot import build_profiler_digest
+        from hyperloom.inference_optimizer.roofline_snapshot import build_profiler_digest
 
         digest = build_profiler_digest(
             self.roofline_snapshots,

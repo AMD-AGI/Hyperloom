@@ -1,20 +1,20 @@
 ---
 myst:
     html_meta:
-        "description": "Step-by-step guide to running a Hyperloom optimization. Covers launching from Claude Code, monitoring, resuming, and reading output artifacts."
-        "keywords": "Hyperloom, optimization, how-to, LLM inference, AMD GPU, ROCm, Claude Code, GEAK, TraceLens, session, throughput"
+        "description": "Step-by-step guide to running a Hyperloom optimization. Covers launching from Claude Code or Codex, monitoring, resuming, and reading output artifacts."
+        "keywords": "Hyperloom, optimization, how-to, LLM inference, AMD GPU, ROCm, Claude Code, Codex, GEAK, TraceLens, session, throughput"
 ---
 # Run a Hyperloom optimization
 
 This topic assumes you have already completed installation. If you haven't, follow the [Hyperloom installation instructions](../install/install.md) then return here to launch your first run.
 
-## Launch from Claude Code
+## Launch from Claude Code or Codex
 
-Open the Hyperloom workspace in Claude Code, then paste the following prompt into
-the Claude Code Chat, filling in your workload details:
+Open the Hyperloom workspace in Claude Code or Codex, then paste the following
+prompt into the agent chat, filling in your workload details:
 
 ```{note}
-The prompt includes `install.sh`. This is intentional: Claude Code runs in its own
+The prompt includes `install.sh`. This is intentional: the agent runs in its own
 shell process, which does not inherit the environment you sourced during
 installation. The agent must re-source the env files and re-run `install.sh` in
 its own context before launching the optimizer. Because `install.sh` is
@@ -45,7 +45,7 @@ Before launch, run exactly:
 export REPO_ROOT="$(pwd -P)"
 export USER_DATA_PATH='/path/to/hyperloom-run'
 bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install.sh"
-source "$USER_DATA_PATH/runtime/kernel-agent.env.sh"
+# The optimizer preflight loads the generated runtime environment in process.
 
 Requirements:
 1. Report the session ID, log path, PID, and initial health check result.
@@ -55,7 +55,7 @@ Requirements:
 | Field | Meaning | How to choose |
 |-------|---------|---------------|
 | `TP` | Tensor-parallel size — number of GPUs the model is sharded across | Must match the number of GPUs in your server node (for example, `8` for a single 8-GPU MI300X node) |
-| `CONC` | Concurrent requests — baseline benchmark concurrency (`--conc`, default `64`) | Set to your target concurrency. The SWEEP phase separately measures a ladder around it: `256,128,64,32,16,8,4,2` for a synthetic workload, `1,4,8,10,14,20,28` under `HYPERLOOM_AGENTX`. Override with `--conc-sweep-concs`. |
+| `CONC` | Concurrent requests — baseline benchmark concurrency (`--conc`, default `64`) | Set to your target concurrency. The SWEEP phase separately measures a ladder around it: `256,128,64,32,16,8,4,2` for a synthetic workload, `1,4,8,10,14,20,28` under `HYPERLOOM_AGENTX`, where it runs only with `--enable-conc-sweep`. Override the ladder with `--conc-sweep-concs`. |
 | `ISL` | Input sequence length — tokens in each request's prompt | Match your production workload; `1024` is a common starting point |
 | `OSL` | Output sequence length — tokens generated per response | Match your production workload; `1024` is a common starting point |
 
@@ -85,7 +85,7 @@ for the independent benchmark and session limits.
 
 ## Resume an interrupted session
 
-Paste this prompt into the Claude Code chat to resume an existing session:
+Paste this prompt into the agent chat to resume an existing session:
 
 ```text
 @hyperloom/inference_optimizer/SKILL.md
@@ -93,7 +93,7 @@ Paste this prompt into the Claude Code chat to resume an existing session:
 Resume the existing Hyperloom optimization session.
 
 Requirements:
-1. Launch `python -m hyperloom.inference_optimizer.cli optimize --resume-from "$SESSION_DIR"`; do not start a new session.
+1. Launch `python -m hyperloom optimize --resume-from "$SESSION_DIR"`; do not start a new session.
 2. Do not pass `--model`; read the model and workload from the saved manifest.
 3. Resolve `$SESSION_DIR` from the launch-info JSON or the `HYPERLOOM_LAUNCH` line, never from the newest timestamp dir.
 4. Before launching, verify `manifest.json` and `state.json` exist.

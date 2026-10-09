@@ -23,7 +23,8 @@ from hyperloom.inference_optimizer.protocol.intent import (
     validate_envelope,
 )
 from ..prompts.transport import TRANSPORT_STRUCTURED_OUTPUT
-from ..trace.llm_trace import new_call_id
+from hyperloom.inference_optimizer.trace.llm_trace import new_call_id
+from hyperloom.inference_optimizer.trace.trajectory_trace import current_context
 from hyperloom.common.llm_config import DEFAULT_CODEX_MODEL
 from .base import (
     BackendError,
@@ -38,12 +39,6 @@ from .mcp_emit_intent import (
     build_intent_envelope_schema,
     constraints_sentence,
     payload_contract,
-)
-
-# Prepended to a turn that runs without the enforced schema.
-_PER_TURN_SCHEMA_OVERRIDE = (
-    "THIS TURN ONLY: ignore the OUTPUT FORMAT block in your instructions. "
-    "Do not emit an intent envelope. Reply exactly as the message below asks."
 )
 
 
@@ -88,10 +83,6 @@ def decode_intent_envelope(text: str) -> dict[str, Any]:
         ) from exc
     if not isinstance(envelope, dict) or not isinstance(envelope.get("intents"), list):
         raise NoIntentEmitted("codex reply is valid JSON but carries no 'intents' list")
-    # An empty list satisfies validate_envelope, so without this the tick is recorded as a success that did nothing
-    # and the backend's error streak is reset.
-    if not envelope["intents"]:
-        raise NoIntentEmitted("codex reply carried an empty 'intents' list")
     decoded: list[Any] = []
     for index, item in enumerate(envelope["intents"]):
         if not isinstance(item, dict):
@@ -166,20 +157,15 @@ class CodexBackend:
         system_prompt: str | None = None,
         tools: list[str] | None = None,
         max_turns: int = 1,
-        allow_no_intent: bool = False,
     ) -> BackendTurnResult:
         """Run one Codex Agent SDK turn and parse its enforced intent envelope."""
-        output_schema = None if allow_no_intent else build_intent_envelope_schema(self.allowed_intents)
-        # Dropping the schema is not enough on its own: the thread's developer instructions carry the OUTPUT FORMAT
-        # block for the life of the thread and cannot be scoped out for one turn, so a checkpoint turn asking for a
-        # different JSON shape would be answered with an intent envelope.
-        turn_prompt = f"{_PER_TURN_SCHEMA_OVERRIDE}\n\n{prompt}" if allow_no_intent else prompt
+        output_schema = build_intent_envelope_schema(self.allowed_intents)
 
         async def _one_attempt() -> Any:
             """Acquire the session and run one turn under the retry policy."""
             session = await self._session_for(system_prompt)
             return await session.turn(
-                turn_prompt,
+                prompt,
                 timeout_sec=self.call_timeout_s,
                 output_schema=output_schema,
             )
@@ -222,16 +208,17 @@ class CodexBackend:
         metadata: dict[str, Any] = {
             "model": self.model,
             "thread_id": sdk_result.thread_id,
-            # Pairs this turn's token row with its conversation row.
-            "call_id": new_call_id(),
+            # Pairs this turn's token row with its conversation row. A caller that opened an ``llm.call`` trajectory
+            # span owns the id.
+            "call_id": current_context().call_id or new_call_id(),
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "cache_creation_input_tokens": 0,
             "cache_read_input_tokens": cache_read_tokens,
             "reasoning_output_tokens": reasoning_tokens,
-            # Codex reports per-turn counts, so the input side already is this request's context size — the figure the
-            # checkpoint policy compares against the model's window.
-            "context_tokens_peak": input_tokens,
+            # Codex reports per-turn counts, so the input side (uncached + cached) is this request's context size — the
+            # figure the checkpoint policy compares against the model's window.
+            "context_tokens_peak": input_tokens + cache_read_tokens,
             # Stated by Codex per turn, and better than any table this side keeps: the compaction trigger is a
             # fraction of it.
             "model_context_window": safe_int(usage.get("model_context_window")),
@@ -240,8 +227,6 @@ class CodexBackend:
             "response": sdk_result.text,
         }
 
-        if allow_no_intent:
-            return BackendTurnResult(intents=[], raw_text=sdk_result.text, metadata=metadata)
         envelope = decode_intent_envelope(sdk_result.text)
         try:
             intents = validate_envelope(envelope)

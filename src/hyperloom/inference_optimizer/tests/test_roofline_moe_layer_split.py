@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.kernel import roofline_ceiling as rc
+from hyperloom.inference_optimizer import roofline_ceiling as rc
 
 
 def _split(cfg: dict, layers: int, experts: int) -> tuple[int, int]:
@@ -82,6 +82,7 @@ def _flash_meta(**over) -> rc.ModelMeta:
         num_kv_heads=8,
         head_dim=128,
         weight_dtype_bytes=2.0,
+        expert_weight_dtype_bytes=2.0,
         num_experts=288,
         experts_per_tok=8,
         hidden_size=4096,
@@ -154,6 +155,7 @@ class TestThePerfModelUsesTheSplit:
             num_kv_heads=8,
             head_dim=128,
             weight_dtype_bytes=2.0,
+            expert_weight_dtype_bytes=2.0,
             hidden_size=4096,
             intermediate_size=11008,
             vocab_size=32000,

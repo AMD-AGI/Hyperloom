@@ -6,14 +6,20 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
+import re
+import shutil
 import subprocess
 import sys
+from pathlib import Path
 from typing import Any
 
 import pytest
 
-from hyperloom.common.llm_config import deepseek_compat_env, parse_custom_headers
+from hyperloom.common.env import EnvValueError
+from hyperloom.common.llm_config import deepseek_compat_env
+from hyperloom.common.llm_headers import parse_custom_headers
 from hyperloom.inference_optimizer import cli
 from hyperloom.inference_optimizer.cli import credentials as cli_credentials
 from hyperloom.inference_optimizer.cli import preflight as cli_preflight
@@ -23,6 +29,7 @@ from hyperloom.inference_optimizer.cli.parser import _build_parser
 @pytest.fixture
 def stub_install_steps(monkeypatch, tmp_path):
     """Stub out heavyweight install steps so _preflight() is fast."""
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.setattr(cli_preflight, "_load_dotenv_fallback", lambda: None)
     # Stub the kernel-agent env fallback (it hard-fails when missing).
     monkeypatch.setattr(cli_preflight, "_load_kernel_agent_env_fallback", lambda: None)
@@ -39,23 +46,26 @@ def stub_install_steps(monkeypatch, tmp_path):
 
     monkeypatch.setattr(cli_preflight.shutil, "which", _fake_which)
 
-    class _FakeCompleted:
-        def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = ""):
-            self.returncode = returncode
-            self.stdout = stdout
-            self.stderr = stderr
-
     def _fake_run(cmd, *args, **kwargs):
-        return _FakeCompleted(returncode=0)
+        stdout = "Claude Code test\n" if cmd[1:] == ["--version"] else ""
+        text_mode = bool(
+            kwargs.get("text") or kwargs.get("universal_newlines") or kwargs.get("encoding") or kwargs.get("errors")
+        )
+        return subprocess.CompletedProcess(cmd, 0, stdout if text_mode else stdout.encode(), "" if text_mode else b"")
 
     monkeypatch.setattr(cli_preflight.subprocess, "run", _fake_run)
     return None
 
 
 @pytest.fixture(autouse=True)
-def _restore_environ():
-    """Roll back direct ``os.environ`` writes after every test in this module."""
+def _restore_environ(tmp_path):
+    """Roll back direct ``os.environ`` writes after every test in this module.
+
+    ``Path.home()`` reads ``USERPROFILE`` before ``HOME`` on Windows, so the
+    credential writers reach the real home directory unless both are redirected.
+    """
     snapshot = dict(os.environ)
+    os.environ["USERPROFILE"] = str(tmp_path)
     try:
         yield
     finally:
@@ -90,6 +100,281 @@ def clean_url_env(monkeypatch):
     finally:
         os.environ.clear()
         os.environ.update(snapshot)
+
+
+_RUNTIME_PYTHON_KEYS = ("PYTHON", "VIRTUAL_ENV", "INFERENCE_OPTIMIZER_FORCE_PYTHON")
+
+
+@pytest.mark.parametrize("loader", ["dotenv", "kernel"])
+@pytest.mark.parametrize(
+    "shell_mode,file_mode",
+    [(None, "docker"), ("", "docker"), ("docker", "baremetal"), (None, "baremetal"), ("baremetal", "docker")],
+)
+@pytest.mark.parametrize("pin", [None, "", "/explicit/missing"])
+def test_env_loaders_respect_explicit_mode_and_python_pins(monkeypatch, tmp_path, loader, shell_mode, file_mode, pin):
+    marker = tmp_path / ".dockerenv"
+    marker.touch()
+    monkeypatch.setattr(cli_preflight, "_CONTAINER_MARKER_FILES", (str(marker),))
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    monkeypatch.delenv("HYPERLOOM_RUN_MODE", raising=False)
+    if shell_mode is not None:
+        monkeypatch.setenv("HYPERLOOM_RUN_MODE", shell_mode)
+    for key in _RUNTIME_PYTHON_KEYS:
+        monkeypatch.delenv(key, raising=False)
+        if pin is not None:
+            monkeypatch.setenv(key, pin)
+    env_file = tmp_path / (".env" if loader == "dotenv" else "kernel-agent.env.sh")
+    env_file.write_text(
+        "PYTHON=/file/python\nVIRTUAL_ENV=/file/venv\nINFERENCE_OPTIMIZER_FORCE_PYTHON=1\n"
+        f"HYPERLOOM_RUN_MODE={file_mode}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("KERNEL_AGENT_ENV", str(env_file))
+
+    if loader == "dotenv":
+        cli_preflight._load_dotenv_fallback()
+    else:
+        cli_preflight._load_kernel_agent_env_fallback()
+
+    expected_mode = shell_mode or file_mode
+    assert os.environ["HYPERLOOM_RUN_MODE"] == expected_mode
+    expected_file = ("/file/python", "/file/venv", "1")
+    for key, value in zip(_RUNTIME_PYTHON_KEYS, expected_file):
+        if pin is not None:
+            assert os.environ[key] == pin
+        elif expected_mode == "docker":
+            assert key not in os.environ
+        else:
+            assert os.environ[key] == value
+
+
+@pytest.mark.parametrize("valid_override", [False, True])
+def test_runtime_loader_fills_missing_values_and_corrects_only_invalid_paths(monkeypatch, tmp_path, valid_override):
+    installed = tmp_path / "TraceLens installed"
+    installed.mkdir()
+    override = tmp_path / "TraceLens override"
+    if valid_override:
+        override.mkdir()
+    runtime = tmp_path / "runtime.env.sh"
+    runtime.write_text(
+        f"TRACELENS_ROOT='{installed}'\n"
+        "MAGPIE_PATH=/installed/Magpie\n"
+        "KERNEL_AGENT_LOG_LEVEL=INFO\n"
+        "PYTHONPATH=/untrusted/raw/path\nPATH=/untrusted/raw/bin\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("KERNEL_AGENT_ENV", str(runtime))
+    monkeypatch.delenv("MAGPIE_PATH", raising=False)
+    monkeypatch.setenv("TRACELENS_ROOT", str(override))
+    monkeypatch.setenv("KERNEL_AGENT_LOG_LEVEL", "DEBUG")
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    path_before = os.environ.get("PATH")
+
+    cli_preflight._load_kernel_agent_env_fallback()
+
+    assert os.environ["MAGPIE_PATH"] == "/installed/Magpie"
+    assert os.environ["KERNEL_AGENT_LOG_LEVEL"] == "DEBUG"
+    assert os.environ["TRACELENS_ROOT"] == str(override if valid_override else installed)
+    assert "PYTHONPATH" not in os.environ
+    assert os.environ.get("PATH") == path_before
+    child = subprocess.run(
+        [sys.executable, "-c", "import os; print(os.environ['MAGPIE_PATH']); print(os.environ['TRACELENS_ROOT'])"],
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert child.returncode == 0, child.stderr
+    assert child.stdout.splitlines() == ["/installed/Magpie", str(override if valid_override else installed)]
+
+
+def test_runtime_loader_rejects_a_missing_env_file(monkeypatch, tmp_path):
+    monkeypatch.setenv("KERNEL_AGENT_ENV", str(tmp_path / "missing.env.sh"))
+
+    with pytest.raises(SystemExit) as failure:
+        cli_preflight._load_kernel_agent_env_fallback()
+
+    assert failure.value.code == 2
+
+
+@pytest.fixture
+def credential_emitter():
+    """Read the production emitter without running the installer or sourcing its output."""
+    script = Path(cli_preflight.__file__).resolve().parents[1] / "assets" / "install_kernel_tools.sh"
+    source = script.read_text(encoding="utf-8")
+    match = re.search(r"^  _emit_credential_fallback\(\) \{\n.*?^  \}", source, re.MULTILINE | re.DOTALL)
+    assert match, "production credential emitter not found"
+    bash = shutil.which("bash")
+    assert bash, "the production shell emitter requires bash"
+
+    def emit(name, value):
+        result = subprocess.run(
+            [
+                bash,
+                "--noprofile",
+                "--norc",
+                "-c",
+                match.group(0) + '\n_emit_credential_fallback "$1" "$2"',
+                "emitter",
+                name,
+                value,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            env={key: val for key, val in os.environ.items() if key not in ("BASH_ENV", "ENV")},
+        )
+        assert result.returncode == 0, result.stderr
+        return result.stdout
+
+    return emit
+
+
+def _source_harmless_headers(path, key):
+    """Compare the retired shell route only on test-generated non-executable header values."""
+    result = subprocess.run(
+        [
+            shutil.which("bash"),
+            "--noprofile",
+            "--norc",
+            "-c",
+            '. "$1"; printf "%s" "${!2}"',
+            "headers",
+            path.as_posix(),
+            key,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        env={name: value for name, value in os.environ.items() if name not in ("BASH_ENV", "ENV", key)},
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout
+
+
+@pytest.mark.parametrize("key", ["ANTHROPIC_CUSTOM_HEADERS", "OPENAI_CUSTOM_HEADERS"])
+@pytest.mark.parametrize("operator_value", [None, "", "X-Tenant: operator\nOcp-Apim-Subscription-Key: rotated-test"])
+def test_runtime_multiline_headers_from_real_emitter_survive_loading(
+    monkeypatch, tmp_path, credential_emitter, key, operator_value
+):
+    headers = "X-Tenant: acme\nOcp-Apim-Subscription-Key: test-value"
+    runtime = tmp_path / "kernel-agent.env.sh"
+    runtime.write_text(credential_emitter(key, headers), encoding="utf-8")
+    assert _source_harmless_headers(runtime, key) == headers
+    monkeypatch.setenv("KERNEL_AGENT_ENV", str(runtime))
+    monkeypatch.delenv(key, raising=False)
+    if operator_value is not None:
+        monkeypatch.setenv(key, operator_value)
+
+    cli_preflight._load_kernel_agent_env_fallback()
+
+    expected = headers if operator_value is None else operator_value
+    assert os.environ[key] == expected
+    assert parse_custom_headers(os.environ[key]) == parse_custom_headers(expected)
+    if operator_value is None:
+        assert parse_custom_headers(os.environ[key])["Ocp-Apim-Subscription-Key"] == "test-value"
+
+
+@pytest.mark.parametrize("loader", ["dotenv", "kernel"])
+@pytest.mark.parametrize("key", ["ANTHROPIC_CUSTOM_HEADERS", "OPENAI_CUSTOM_HEADERS"])
+@pytest.mark.parametrize("quote", ["'", '"'])
+def test_env_loaders_preserve_quoted_multiline_headers(monkeypatch, tmp_path, loader, key, quote):
+    headers = "X-Tenant: acme\nOcp-Apim-Subscription-Key: test-value"
+    path = tmp_path / (".env" if loader == "dotenv" else "kernel-agent.env.sh")
+    path.write_text(
+        f"{key}={quote}{headers}{quote}\n{key}='X-Tenant: duplicate'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    monkeypatch.setenv("KERNEL_AGENT_ENV", str(path))
+    monkeypatch.delenv(key, raising=False)
+
+    if loader == "dotenv":
+        cli_preflight._load_dotenv_fallback()
+    else:
+        cli_preflight._load_kernel_agent_env_fallback()
+
+    assert os.environ[key] == headers
+    assert parse_custom_headers(os.environ[key]) == {
+        "X-Tenant": "acme",
+        "Ocp-Apim-Subscription-Key": "test-value",
+    }
+
+
+@pytest.mark.parametrize("loader", ["dotenv", "kernel"])
+def test_env_loaders_decode_escaped_json_quotes_without_executing_substitutions(monkeypatch, tmp_path, loader):
+    payload = tmp_path / "must-not-run"
+    headers = '{"X-Tenant":"acme", "X-Path":"C:\\\\test", "Ocp-Apim-Subscription-Key":"test-value"}'
+    escaped = headers.replace("\\", "\\\\").replace('"', '\\"')
+    path = tmp_path / (".env" if loader == "dotenv" else "kernel-agent.env.sh")
+    path.write_text(f'ANTHROPIC_CUSTOM_HEADERS="{escaped}"\n', encoding="utf-8")
+    assert _source_harmless_headers(path, "ANTHROPIC_CUSTOM_HEADERS") == headers
+    path.write_text(
+        f'ANTHROPIC_CUSTOM_HEADERS="{escaped}"\n'
+        f'OPENAI_CUSTOM_HEADERS="X-Literal: $(touch {payload.as_posix()}) ${{UNCHANGED_REF}} `touch ignored`\n'
+        'HYPERLOOM_RUN_MODE=docker"\n'
+        "HYPERLOOM_RUN_MODE=baremetal\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    monkeypatch.setenv("KERNEL_AGENT_ENV", str(path))
+    for key in ("ANTHROPIC_CUSTOM_HEADERS", "OPENAI_CUSTOM_HEADERS", "HYPERLOOM_RUN_MODE"):
+        monkeypatch.delenv(key, raising=False)
+
+    def no_command(*args, **kwargs):
+        raise AssertionError("an environment file must only be read as data")
+
+    monkeypatch.setattr(cli_preflight.subprocess, "run", no_command)
+    if loader == "dotenv":
+        cli_preflight._load_dotenv_fallback()
+    else:
+        cli_preflight._load_kernel_agent_env_fallback()
+
+    assert os.environ["ANTHROPIC_CUSTOM_HEADERS"] == headers
+    assert parse_custom_headers(os.environ["ANTHROPIC_CUSTOM_HEADERS"])["Ocp-Apim-Subscription-Key"] == "test-value"
+    assert "${UNCHANGED_REF}" in os.environ["OPENAI_CUSTOM_HEADERS"]
+    assert "$(touch " in os.environ["OPENAI_CUSTOM_HEADERS"]
+    assert "`touch ignored`" in os.environ["OPENAI_CUSTOM_HEADERS"]
+    assert os.environ["HYPERLOOM_RUN_MODE"] == "baremetal"
+    assert not payload.exists()
+
+
+@pytest.mark.parametrize("loader", ["dotenv", "kernel"])
+def test_env_loaders_reject_unclosed_quoted_values_without_partial_exports(monkeypatch, tmp_path, loader):
+    path = tmp_path / (".env" if loader == "dotenv" else "kernel-agent.env.sh")
+    path.write_text(
+        'ANTHROPIC_CUSTOM_HEADERS="X-Tenant: acme\n'
+        "Ocp-Apim-Subscription-Key: test-value\nHYPERLOOM_RUN_MODE=baremetal\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    monkeypatch.setenv("KERNEL_AGENT_ENV", str(path))
+    monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
+    monkeypatch.delenv("HYPERLOOM_RUN_MODE", raising=False)
+
+    with pytest.raises(ValueError, match="ANTHROPIC_CUSTOM_HEADERS"):
+        if loader == "dotenv":
+            cli_preflight._load_dotenv_fallback()
+        else:
+            cli_preflight._load_kernel_agent_env_fallback()
+
+    assert "ANTHROPIC_CUSTOM_HEADERS" not in os.environ
+    assert "HYPERLOOM_RUN_MODE" not in os.environ
+
+
+def test_parse_env_assignments_keeps_internal_but_not_external_whitespace():
+    assert cli_preflight._parse_env_assignments('OPENAI_CUSTOM_HEADERS="X-Name:  a  "  \n') == {
+        "OPENAI_CUSTOM_HEADERS": "X-Name:  a  "
+    }
+    assert cli_preflight._parse_env_assignments("OPENAI_CUSTOM_HEADERS=X-Name:  a b\n") == {
+        "OPENAI_CUSTOM_HEADERS": "X-Name:  a b"
+    }
+
+
+def test_parse_env_assignments_preserves_first_assignment_and_single_quote_escapes():
+    text = "export OPENAI_CUSTOM_HEADERS='X-Name: it'\\''s literal\\value'\n"
+    text += "OPENAI_CUSTOM_HEADERS=duplicate\n"
+
+    assert cli_preflight._parse_env_assignments(text) == {"OPENAI_CUSTOM_HEADERS": "X-Name: it's literal\\value"}
 
 
 def test_dotenv_fallback_ignores_arbitrary_cwd_dotenv(tmp_path, monkeypatch):
@@ -165,6 +450,77 @@ def test_dotenv_fallback_loads_gateway_custom_headers(tmp_path, monkeypatch):
         "Ocp-Apim-Subscription-Key": "ak-gateway-token"
     }
     assert parse_custom_headers(os.environ["OPENAI_CUSTOM_HEADERS"]) == {"X-Tenant": "acme"}
+
+
+def test_custom_header_env_refs_are_expanded_for_child_processes(monkeypatch):
+    """Children forward the headers verbatim, so the parent must not hand down a literal ``${VAR}``."""
+    anthropic_key_var = "_".join(("ANTHROPIC", "API", "KEY"))
+    monkeypatch.setenv(anthropic_key_var, "ak-gateway-token")
+    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", f"Ocp-Apim-Subscription-Key: ${{{anthropic_key_var}}}")
+    monkeypatch.setenv("OPENAI_CUSTOM_HEADERS", "X-Tenant: acme")
+
+    cli_preflight._expand_custom_header_env_refs()
+
+    assert os.environ["ANTHROPIC_CUSTOM_HEADERS"] == "Ocp-Apim-Subscription-Key: ak-gateway-token"
+    assert os.environ["OPENAI_CUSTOM_HEADERS"] == "X-Tenant: acme"
+
+
+def test_a_header_ref_outside_the_credentials_does_not_reach_children(monkeypatch, caplog):
+    """Expanding it would put a secret the child-env allowlist strips into a header every child inherits."""
+    anthropic_key_var = "_".join(("ANTHROPIC", "API", "KEY"))
+    other_secret_var = "_".join(("GITHUB", "TOKEN"))
+    monkeypatch.setenv(anthropic_key_var, "ak-gateway-token")
+    monkeypatch.setenv(other_secret_var, "not-for-children")
+    monkeypatch.setenv(
+        "ANTHROPIC_CUSTOM_HEADERS",
+        f"Ocp-Apim-Subscription-Key: ${{{anthropic_key_var}}}\nX-Leaked: ${{{other_secret_var}}}",
+    )
+
+    with caplog.at_level(logging.WARNING, logger="hyperloom.inference_optimizer.cli"):
+        cli_preflight._expand_custom_header_env_refs()
+
+    assert os.environ["ANTHROPIC_CUSTOM_HEADERS"] == (
+        f"Ocp-Apim-Subscription-Key: ak-gateway-token\nX-Leaked: ${{{other_secret_var}}}"
+    )
+    assert "not-for-children" not in caplog.text
+    assert "ANTHROPIC_CUSTOM_HEADERS references a variable outside" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("set_var", "referenced_var"),
+    [
+        ("_".join(("ANTHROPIC", "AUTH", "TOKEN")), "_".join(("ANTHROPIC", "API", "KEY"))),
+        ("_".join(("ANTHROPIC", "API", "KEY")), "_".join(("ANTHROPIC", "AUTH", "TOKEN"))),
+    ],
+)
+def test_custom_header_ref_to_the_other_anthropic_credential_is_filled_in(monkeypatch, set_var, referenced_var):
+    """The SDK path fills the missing Anthropic key from the other one before expanding; preflight must agree."""
+    for var in (set_var, referenced_var):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv(set_var, "gw-token")
+    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", f"Ocp-Apim-Subscription-Key: ${{{referenced_var}}}")
+
+    cli_preflight._expand_custom_header_env_refs()
+
+    assert os.environ["ANTHROPIC_CUSTOM_HEADERS"] == "Ocp-Apim-Subscription-Key: gw-token"
+    assert referenced_var not in os.environ
+
+
+def test_preflight_expands_header_refs_to_credentials_from_legacy_deepseek_env(
+    monkeypatch,
+    tmp_path,
+    clean_url_env,
+    stub_install_steps,
+):
+    """A header may reference a key that only the legacy ``DEEPSEEK_*`` normalization creates."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("_".join(("DEEPSEEK", "API", "KEY")), "ds-legacy-token")
+    anthropic_key_var = "_".join(("ANTHROPIC", "API", "KEY"))
+    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", f"Ocp-Apim-Subscription-Key: ${{{anthropic_key_var}}}")
+
+    cli_preflight._preflight()
+
+    assert cli.os.environ["ANTHROPIC_CUSTOM_HEADERS"] == "Ocp-Apim-Subscription-Key: ds-legacy-token"
 
 
 def test_preflight_does_not_export_a_derived_url_for_a_subscription_token(
@@ -1062,6 +1418,20 @@ def test_validate_claude_model_deepseek_allowed_by_default(monkeypatch, capsys):
     assert "confirmed in gateway catalog" in capsys.readouterr().out
 
 
+def test_an_unreadable_custom_model_switch_is_not_read_as_permission(monkeypatch):
+    """A gate on which model orchestrates the run must not be opened by a token nobody can read."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "ture")
+    with pytest.raises(EnvValueError, match="INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL"):
+        cli._custom_orch_model_allowed()
+
+
+def test_a_blank_custom_model_switch_denies_like_every_other_blank_boolean(monkeypatch):
+    """Blank is a false token in the module's vocabulary, so this variable reads it the way the other booleans do."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "  ")
+
+    assert cli._custom_orch_model_allowed() is False
+
+
 def test_validate_claude_model_custom_explicitly_disabled_still_hard_gates(monkeypatch, capsys):
     """Explicit opt-out disable: custom model is rejected by the static gate."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "0")
@@ -1662,23 +2032,6 @@ def test_smoke_test_codex_model_probes_openai_side(monkeypatch, capsys):
     assert seen["base_url"] == "https://api.openai.com/v1"
 
 
-def test_smoke_test_codex_model_skipped_when_unused(monkeypatch, capsys):
-    """--critic-mock → no probe / no warn (Codex is only needed for the critic-agent path)."""
-    args = _make_args(
-        codex_model="gpt-totally-fake",
-        critic_mock=True,
-    )
-
-    def _no_probe(**kw):
-        raise AssertionError("probe should not run when Codex is unused")
-
-    monkeypatch.setattr(cli, "_probe_llm_catalog", _no_probe)
-    cli._smoke_test_codex_model(args, ("https://anthropic", "https://openai/v1"))
-    out = capsys.readouterr().out
-    assert "WARNING" not in out
-    assert "gpt-totally-fake" not in out
-
-
 def test_smoke_test_codex_model_confirms_when_present(monkeypatch, capsys):
     monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: {"claude-opus-4-7", "gpt-5.4"})
     args = _make_args(codex_model="gpt-5.4", critic_mock=False)
@@ -1777,24 +2130,94 @@ def test_smoke_test_codex_model_warns_on_probe_failure(monkeypatch, capsys):
     assert "unreachable" in out
 
 
-def test_smoke_test_codex_model_skips_for_anthropic_only_fallback(monkeypatch, capsys):
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
-    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+def _record_critic_probes(monkeypatch, *, fail: bool = False) -> list[tuple[str, str]]:
+    """Stub both review transports and return the ``(protocol, model)`` each probe sent."""
+    sent: list[tuple[str, str]] = []
 
-    def _no_probe(**kw):
-        raise AssertionError("Anthropic-only fallback does not use CodexBackend")
+    def _anthropic(**kw):
+        sent.append(("anthropic", kw["model"]))
+        if fail:
+            raise RuntimeError("AuthenticationError")
 
-    monkeypatch.setattr(cli, "_probe_llm_catalog", _no_probe)
-    args = _make_args(codex_model="claude-sonnet-4-5-20250929", critic_mock=False)
-    cli._smoke_test_codex_model(args, ("https://api.anthropic.com", ""))
+    def _chat(client, **kw):
+        sent.append(("openai", kw["model"]))
+        if fail:
+            raise RuntimeError("AuthenticationError")
 
-    assert capsys.readouterr().out == ""
+    monkeypatch.setattr(cli.llm_config, "anthropic_completion", _anthropic)
+    monkeypatch.setattr(cli.llm_config, "chat_completion", _chat)
+    monkeypatch.setattr(cli.llm_config, "get_openai_client", lambda **kw: object())
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    return sent
+
+
+def test_critic_reviews_with_the_orchestration_model_by_default(monkeypatch, capsys):
+    """A launch that sets CODEX_MODEL still reviews with the Claude-side model orchestration runs on."""
+    sent = _record_critic_probes(monkeypatch)
+    monkeypatch.setattr(cli, "orchestration_runs_on_codex", lambda **kw: False)
+    args = _make_args(claude_model="glm-5-3", codex_model="gpt-5.4", critic_mock=False, critic_protocol="auto")
+
+    cli._probe_critic_review_model(args, codex_follows_claude=False)
+
+    assert sent == [("anthropic", "glm-5-3")]
+    assert "critic model 'glm-5-3' answered" in capsys.readouterr().out
+
+
+def test_critic_follows_an_orchestration_that_runs_on_codex(monkeypatch):
+    sent = _record_critic_probes(monkeypatch)
+    monkeypatch.setattr(cli, "orchestration_runs_on_codex", lambda **kw: True)
+    args = _make_args(claude_model="gpt-5.5", codex_model="gpt-5.5", critic_mock=False, critic_protocol="auto")
+
+    cli._probe_critic_review_model(args, codex_follows_claude=False)
+
+    assert sent == [("openai", "gpt-5.5")]
+
+
+def test_an_explicit_critic_protocol_reviews_with_that_sides_model(monkeypatch):
+    sent = _record_critic_probes(monkeypatch)
+    monkeypatch.setattr(cli, "orchestration_runs_on_codex", lambda **kw: False)
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://gw.example/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    args = _make_args(claude_model="glm-5-3", codex_model="gpt-5.6-sol", critic_mock=False, critic_protocol="openai")
+
+    cli._probe_critic_review_model(args, codex_follows_claude=False)
+
+    assert sent == [("openai", "gpt-5.6-sol")]
+
+
+def test_a_critic_model_that_cannot_answer_stops_the_launch_without_a_fallback(monkeypatch, capsys):
+    sent = _record_critic_probes(monkeypatch, fail=True)
+    monkeypatch.setattr(cli, "orchestration_runs_on_codex", lambda **kw: False)
+    args = _make_args(claude_model="glm-5-3", codex_model="gpt-5.4", critic_mock=False, critic_protocol="auto")
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli._probe_critic_review_model(args, codex_follows_claude=False)
+
+    assert exc_info.value.code == 2
+    # Transient errors get the catalog retries, but every attempt asks the one configured model.
+    assert set(sent) == {("anthropic", "glm-5-3")}
+    assert len(sent) == 1 + len(cli._CATALOG_RETRY_DELAYS_SEC)
+    assert args.claude_model == "glm-5-3"
+    assert args.codex_model == "gpt-5.4"
+    err = capsys.readouterr().err
+    assert "no fallback model" in err
+    assert "Refusing to start" in err
+
+
+def test_a_mock_critic_sends_no_probe(monkeypatch):
+    sent = _record_critic_probes(monkeypatch)
+    args = _make_args(critic_mock=True, critic_protocol="auto")
+
+    cli._probe_critic_review_model(args, codex_follows_claude=False)
+
+    assert sent == []
 
 
 def test_parser_anthropic_only_empty_codex_model_uses_claude_model(monkeypatch):
     """With only Anthropic configured, an empty CODEX_MODEL follows CLAUDE_MODEL."""
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm.example.invalid/anthropic")
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("CLAUDE_MODEL", "claude-opus-4-6")
     monkeypatch.setenv("CODEX_MODEL", "")
 
@@ -1811,7 +2234,11 @@ def test_parser_dual_protocol_gateway_empty_codex_model_uses_gateway_model(monke
     monkeypatch.delenv("DEEPSEEK_BASE_URL", raising=False)
     monkeypatch.delenv("DEEPSEEK_MODEL", raising=False)
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("CLAUDE_MODEL", "deepseek-v4-pro")
     monkeypatch.setenv("CODEX_MODEL", "")
 
@@ -1832,10 +2259,13 @@ def test_parser_retired_deepseek_key_only_defaults_to_gateway_model(monkeypatch)
         "DEEPSEEK_BASE_URL",
         "DEEPSEEK_MODEL",
         "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN",
         "OPENAI_BASE_URL",
+        "OPENAI_API_KEY",
         "CLAUDE_MODEL",
         "CODEX_MODEL",
-        "INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -1856,7 +2286,6 @@ def test_parser_standard_dual_protocol_config_defaults_to_gateway_model(monkeypa
         "DEEPSEEK_BASE_URL",
         "CLAUDE_MODEL",
         "CODEX_MODEL",
-        "INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -1885,6 +2314,7 @@ def test_parser_anthropic_only_generated_codex_default_uses_claude_model(monkeyp
     """Generated setup env defaults must not force GPT on an Anthropic-only run."""
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm.example.invalid/anthropic")
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("CLAUDE_MODEL", "claude-opus-4-6")
     monkeypatch.setenv("CODEX_MODEL", "gpt-5.4")
 
@@ -1930,6 +2360,9 @@ def test_preflight_does_not_clear_cached_anthropic_only_codex_follow(
 def test_parser_openai_only_empty_claude_model_uses_codex_model(monkeypatch):
     """With only OpenAI configured, an empty CLAUDE_MODEL follows CODEX_MODEL."""
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
     monkeypatch.setenv("OPENAI_BASE_URL", "https://llm.example.invalid/Unified/v1")
     monkeypatch.setenv("CODEX_MODEL", "GPT-5.4")
     monkeypatch.delenv("CLAUDE_MODEL", raising=False)
@@ -1941,23 +2374,12 @@ def test_parser_openai_only_empty_claude_model_uses_codex_model(monkeypatch):
     assert cli._claude_model_should_follow_codex() is True
 
 
-def test_parser_marker_forces_claude_model_to_follow_codex(monkeypatch):
-    """Launchers may pre-derive ANTHROPIC_BASE_URL while preserving OpenAI-only model semantics."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX", "1")
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://llm.example.invalid/Unified/v1")
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm.example.invalid/Unified")
-    monkeypatch.setenv("CODEX_MODEL", "GPT-5.5")
-    monkeypatch.delenv("CLAUDE_MODEL", raising=False)
-
-    args = _build_parser().parse_args(["optimize", "--model", "/m", "--framework", "vllm"])
-
-    assert args.claude_model == "GPT-5.5"
-    assert args.codex_model == "GPT-5.5"
-
-
 def test_validate_claude_model_openai_only_accepts_codex_model(monkeypatch):
     """OpenAI-only runs validate the followed orchestration model against the OpenAI catalog."""
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
     monkeypatch.setenv("OPENAI_BASE_URL", "https://llm.example.invalid/Unified/v1")
     monkeypatch.setenv("_".join(("OPENAI", "API", "KEY")), "openai-token")
     monkeypatch.setenv("CODEX_MODEL", "GPT-5.4")
@@ -2301,3 +2723,18 @@ def test_expected_framework_guard_unset_is_noop(monkeypatch):
     # No env pins -> guard is a no-op.
     cli._enforce_expected_framework("sglang")
     cli._enforce_expected_framework("anything")
+
+
+def test_session_framework_blank_resolves_to_the_default():
+    assert cli._registered_framework_or_exit("", hint="h") == "sglang"
+    assert cli._registered_framework_or_exit(" VLLM ", hint="h") == "vllm"
+
+
+def test_session_framework_unregistered_exits(capsys):
+    """Fresh launch and resume both pass through here, so no unregistered name reaches $FRAMEWORK."""
+    with pytest.raises(SystemExit) as exc:
+        cli._registered_framework_or_exit("tensorrt", hint="it comes from the resumed session")
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "'tensorrt'" in err
+    assert "it comes from the resumed session" in err

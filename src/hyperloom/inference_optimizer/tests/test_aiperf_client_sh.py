@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.inference_optimizer.agentx.deploy import agentx_asset_dir
+from hyperloom.inference_optimizer.agentx.deploy import agentx_asset_dir, deploy_agentx_assets
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="bash-driven; POSIX only")
 
@@ -222,12 +222,10 @@ def _sandbox(tmp_path, *, write_pid=True, make_builtin=True):
     bench = tmp_path / "benchmarks"
     bind = tmp_path / "bin"
     res = tmp_path / "res"
-    bench.mkdir()
     bind.mkdir()
     res.mkdir()
-    shutil.copy2(agentx_asset_dir() / "aiperf_client.sh", bench / "aiperf_client.sh")
-    shutil.copy2(agentx_asset_dir() / "map_aiperf.py", bench / "map_aiperf.py")
-    shutil.copy2(agentx_asset_dir() / "aiperf_phase_gate.py", bench / "real_phase_gate.py")
+    deploy_agentx_assets(bench)
+    (bench / "aiperf_phase_gate.py").rename(bench / "real_phase_gate.py")
     (bench / "aiperf_phase_gate.py").write_text(_FAKE_PHASE_GATE, encoding="utf-8")
     if make_builtin:
         _write_exec(bench / "vllm_mi300x.sh", _fake_builtin(write_pid))
@@ -430,6 +428,18 @@ def test_no_pidfile_fail_loud_exit_3(tmp_path):
     r = _run(bench, bind, res, tmp_path)
     assert r.returncode == 3
     assert not (res / "inferencex_result.json").exists()
+
+
+def test_agentic_recipe_is_refused_before_it_runs(tmp_path):
+    bench, bind, res = _sandbox(tmp_path, make_builtin=False)
+    recipe = bench / "single_node" / "agentic" / "recipe.sh"
+    recipe.parent.mkdir(parents=True)
+    marker = tmp_path / "ran.txt"
+    _write_exec(recipe, f"#!/usr/bin/env bash\ntouch {marker}\n")
+    r = _run(bench, bind, res, tmp_path, AGENTX_SERVER_SCRIPT="single_node/agentic/recipe.sh")
+    assert r.returncode == 2
+    assert "is an agentic recipe" in r.stdout + r.stderr
+    assert not marker.exists()
 
 
 def test_aiperf_failure_not_mapped(tmp_path):
@@ -1051,13 +1061,6 @@ def test_profile_phase_wait_has_bounded_fallback(tmp_path):
     assert r.returncode == 0, r.stderr
     argv = json.loads(marker.read_text())
     assert argv[argv.index("--timeout-seconds") + 1] == "3618"
-
-
-def test_legacy_profile_warmup_delay_is_ignored(tmp_path):
-    bench, bind, res = _sandbox(tmp_path)
-    r = _run_profile(bench, bind, res, tmp_path, AGENTX_PROFILE_WARMUP_S="not-a-duration")
-    assert r.returncode == 0, r.stderr
-    assert "AGENTX_PROFILE_WARMUP_S is ignored" in (r.stdout + r.stderr)
 
 
 def test_phase_gate_failure_keeps_measurement_but_skips_capture(tmp_path):

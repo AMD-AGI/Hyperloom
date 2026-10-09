@@ -14,13 +14,12 @@ from hyperloom.orchestrator.actions.executors.roofline import (
     RooflineExecutor,
 )
 from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
-from hyperloom.orchestrator.loop.coordinator import (
-    Coordinator,
-    _lifecycle_paths,
-)
+from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.intent_router import _lifecycle_paths
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state.task_registry import Task
+from hyperloom.orchestrator.phases.machine import Transition
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.inference_optimizer.session.session_paths import reports_dir
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
@@ -85,7 +84,7 @@ def test_lifecycle_paths_handles_non_dict():
 async def test_emit_lifecycle_records_and_persists(session_dir):
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
-        c._emit_lifecycle(
+        c.writeback.emit_lifecycle(
             step="report",
             status="END",
             artifacts={"md_path": "/x/final.md", "json_path": "/x/final.json"},
@@ -122,14 +121,15 @@ async def test_emit_lifecycle_debounces_nonterminal_but_flushes_terminal(
             autospec=True,
         ) as mock_save:
             # First START flushes.
-            c._emit_lifecycle(step="trace_analyze", status="START")
+            c.writeback.emit_lifecycle(step="trace_analyze", status="START")
             saves_after_first = mock_save.call_count
+            assert saves_after_first == 1
             # Subsequent STARTs inside the window are debounced.
-            c._emit_lifecycle(step="trace_analyze", status="START")
-            c._emit_lifecycle(step="kernel_optimization", status="START")
+            c.writeback.emit_lifecycle(step="trace_analyze", status="START")
+            c.writeback.emit_lifecycle(step="kernel_optimization", status="START")
             assert mock_save.call_count == saves_after_first
             # A terminal END always flushes regardless of the window.
-            c._emit_lifecycle(
+            c.writeback.emit_lifecycle(
                 step="trace_analyze",
                 status="END",
                 artifacts={"trace_report_path": "/x/analysis.md"},
@@ -173,7 +173,7 @@ async def test_handle_request_emits_start_and_end(session_dir, monkeypatch, tmp_
                 "params": {"trace_input": "/tmp/trace-A.json.gz"},
             },
         )
-        await c._handle_intent("orchestration", intent)
+        await c.router.handle_intent("orchestration", intent)
 
         ta_events = [e for e in c.shared_state.lifecycle if e["step"] == "trace_analyze"]
         assert len(ta_events) == 2, f"expected START + END, got {ta_events}"
@@ -232,7 +232,7 @@ async def test_handle_request_end_surfaces_tracelens_report_paths(
                 "params": {"trace_input": "/tmp/trace-B.json.gz"},
             },
         )
-        await c._handle_intent("orchestration", intent)
+        await c.router.handle_intent("orchestration", intent)
 
         end = [e for e in c.shared_state.lifecycle if e["step"] == "trace_analyze" and e["status"] == "END"][-1]
         for key, val in report_fields.items():
@@ -264,7 +264,7 @@ async def test_handle_request_failed_handler_emits_error(session_dir, monkeypatc
                 "params": {"trace_input": "/tmp/t.json.gz"},
             },
         )
-        await c._handle_intent("orchestration", intent)
+        await c.router.handle_intent("orchestration", intent)
 
         ta_events = [e for e in c.shared_state.lifecycle if e["step"] == "trace_analyze"]
         assert [e["status"] for e in ta_events] == ["START", "ERROR"]
@@ -302,7 +302,7 @@ async def test_roofline_executor_emits_lifecycle_end(tmp_path):
         new=fake_profile,
     )
     p2 = patch(
-        "hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler",
+        "hyperloom.orchestrator.actions.executors.trace_analyze.trace_analyze_handler",
         new=fake_ta,
     )
     executor = RooflineExecutor(shared_state=state)
@@ -330,8 +330,8 @@ async def test_handle_request_cache_hit_emits_lone_end(session_dir, monkeypatch)
     try:
         cached = {"status": "ok", "candidates_path": "/tmp/cached_kc.json"}
         monkeypatch.setattr(
-            c,
-            "_cached_kernel_request",
+            c.phase_kernel,
+            "cached_kernel_request",
             lambda kind, payload: cached,
         )
 
@@ -343,7 +343,7 @@ async def test_handle_request_cache_hit_emits_lone_end(session_dir, monkeypatch)
                 "params": {"trace_input": "/tmp/trace.json.gz"},
             },
         )
-        await c._handle_intent("orchestration", intent)
+        await c.router.handle_intent("orchestration", intent)
 
         ta = [e for e in c.shared_state.lifecycle if e["step"] == "trace_analyze"]
         # A cache hit never runs the handler: exactly one END, no START.
@@ -366,12 +366,12 @@ async def test_handle_request_rejected_integrate_emits_lone_end(
         # the emit.
         monkeypatch.setattr(
             c.dispatcher,
-            "_sequence_denial_for_request",
+            "sequence_denial_for_request",
             lambda target, kind: None,
         )
         monkeypatch.setattr(
-            c,
-            "_cached_kernel_request",
+            c.phase_kernel,
+            "cached_kernel_request",
             lambda kind, payload: None,
         )
         rejection = {
@@ -390,7 +390,7 @@ async def test_handle_request_rejected_integrate_emits_lone_end(
             type=IntentType.REQUEST,
             payload={"target_agent": "kernel_agent", "kind": "integrate", "params": {"patch_path": "/tmp/p.patch"}},
         )
-        await c._handle_intent("orchestration", intent)
+        await c.router.handle_intent("orchestration", intent)
 
         ig = [e for e in c.shared_state.lifecycle if e["step"] == "integrate"]
         assert [e["status"] for e in ig] == ["END"], f"want lone END, got {ig}"
@@ -421,7 +421,7 @@ async def test_advance_phase_emits_enter_marker(session_dir, monkeypatch):
 
         monkeypatch.setattr(c.phase_machine, "_on_phase_entered", _noop)
 
-        await c._advance_phase_if_needed()
+        await c.phase_machine.advance_phase_if_needed()
 
         enter = [e for e in c.shared_state.lifecycle if e["status"] == "ENTER"]
         assert len(enter) == 1, f"want one ENTER, got {c.shared_state.lifecycle}"
@@ -487,12 +487,14 @@ async def test_on_enter_close_emits_report_end(session_dir, monkeypatch):
         )
         monkeypatch.setattr(c.sub, "run_task", fake_run_task)
         monkeypatch.setattr(
-            c.writeback,
+            c.recipe_journal,
             "finalize_recipe_and_journal",
             lambda: None,
         )
 
-        await c._on_enter_close(from_phase="SWEEP")
+        await c.phase_close.on_enter_close(
+            Transition(from_phase="SWEEP", to_phase="CLOSE", reason="stop", evidence={}, loopback=False)
+        )
 
         rpt = [e for e in c.shared_state.lifecycle if e["step"] == "report"]
         statuses = [e["status"] for e in rpt]
@@ -558,12 +560,14 @@ async def test_on_enter_close_emits_report_error_for_failed_task(
         )
         monkeypatch.setattr(c.sub, "run_task", fake_run_task)
         monkeypatch.setattr(
-            c.writeback,
+            c.recipe_journal,
             "finalize_recipe_and_journal",
             lambda: None,
         )
 
-        await c._on_enter_close(from_phase="SWEEP")
+        await c.phase_close.on_enter_close(
+            Transition(from_phase="SWEEP", to_phase="CLOSE", reason="stop", evidence={}, loopback=False)
+        )
 
         rpt = [e for e in c.shared_state.lifecycle if e["step"] == "report"]
         assert [e["status"] for e in rpt] == ["START", "ERROR"]
@@ -606,9 +610,14 @@ async def test_on_enter_close_emits_report_error_for_exception(
             state = "succeeded"
 
         # run_task_registered forwards the lease and per-task extras.
+        class _Failed:
+            state = "failed"
+
+        # sub.run_task catches executor exceptions and returns state="failed";
+        # simulating that here exercises the same lifecycle error path.
         async def fake_run_task(task, **_kwargs):
             if task.kind == "report":
-                raise RuntimeError("report boom")
+                return _Failed()
             return _Succeeded()
 
         monkeypatch.setattr(
@@ -623,15 +632,17 @@ async def test_on_enter_close_emits_report_error_for_exception(
         )
         monkeypatch.setattr(c.sub, "run_task", fake_run_task)
         monkeypatch.setattr(
-            c.writeback,
+            c.recipe_journal,
             "finalize_recipe_and_journal",
             lambda: None,
         )
 
-        await c._on_enter_close(from_phase="SWEEP")
+        await c.phase_close.on_enter_close(
+            Transition(from_phase="SWEEP", to_phase="CLOSE", reason="stop", evidence={}, loopback=False)
+        )
 
         rpt = [e for e in c.shared_state.lifecycle if e["step"] == "report"]
         assert [e["status"] for e in rpt] == ["START", "ERROR"]
-        assert "report boom" in rpt[-1]["detail"]
+        assert "task_state" in rpt[-1]["detail"]
     finally:
         await c.stop()

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import os
+from math import isfinite
 from pathlib import Path
 from typing import NoReturn
 
@@ -106,13 +107,38 @@ def _positive_int_arg(value: str) -> int:
     return parsed
 
 
+def _positive_ms_arg(value: str) -> float:
+    """argparse type for a millisecond ceiling.
+
+    The gate this feeds fails closed, so its switch must not fail open: an
+    unusable value has to stop the launch rather than resolve to "no budget" and
+    leave the operator believing an SLA is enforced.
+    """
+    try:
+        parsed = float(str(value).strip())
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(f"expected a positive number of milliseconds, got {value!r}") from exc
+    if not isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError(f"expected a positive number of milliseconds, got {value!r}")
+    return parsed
+
+
+def _positive_watts_arg(value: str) -> float:
+    """argparse type for a power in watts; an unusable value stops the launch rather than skipping the check."""
+    try:
+        parsed = float(str(value).strip())
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(f"expected a positive number of watts, got {value!r}") from exc
+    if not isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError(f"expected a positive number of watts, got {value!r}")
+    return parsed
+
+
 def _default_claude_model_env() -> str:
     """Resolve the default Claude model from env."""
     explicit = (os.environ.get("CLAUDE_MODEL") or "").strip()
     if explicit:
         return explicit
-    if os.environ.get("INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX") == "1":
-        return (os.environ.get("CODEX_MODEL") or "").strip() or DEFAULT_CODEX_MODEL
     gateway_model = provider_model_defaults().get("CLAUDE_MODEL", "")
     if gateway_model:
         return gateway_model
@@ -143,7 +169,7 @@ def _default_research_lane_capacity() -> int:
 
 def _default_gpu_specialist_capacity() -> int:
     """Default ``--gpu-specialist-capacity`` to the whole visible machine."""
-    from hyperloom.orchestrator.policy.gate import detect_gpu_count
+    from hyperloom.common.visible_devices import detect_gpu_count
 
     return detect_gpu_count()
 
@@ -155,13 +181,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     p = RedactingArgumentParser(
-        prog="inference_optimizer",
+        prog="hyperloom",
         description="Inference Optimizer — multi-agent inference optimization (SGLang/vLLM/Atom/xDiT)",
     )
-    p.add_argument("--verbose", "-v", action="count", default=0, help="Verbose logging (-v INFO, -vv DEBUG)")
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--verbose", "-v", action="count", default=0, help="Verbose logging (-v INFO, -vv DEBUG)")
     sub = p.add_subparsers(dest="command", required=True)
 
-    opt = sub.add_parser("optimize", help="Drive a multi-agent optimization run on a model")
+    opt = sub.add_parser("optimize", parents=[common], help="Drive a multi-agent optimization run on a model")
     opt.add_argument(
         "--model",
         "-m",
@@ -176,8 +203,8 @@ def _build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         metavar="PROMPT",
-        help="Optional natural-language quantization request. When set, the "
-        "quantization-agent runs ONCE as a prelude before the "
+        help="Optional natural-language quantization request. When set, "
+        "`hyperloom quantize` runs ONCE as a prelude before the "
         "optimization loop: it drives AMD Quark PTQ from this prompt, "
         "then rewrites --model to the exported quantized model so the "
         "rest of the run optimizes the quantized model. Ignored on "
@@ -253,7 +280,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Inference framework to benchmark / optimize. Resolution order: "
         "--framework > sglang (default). Selection is "
         "session-wide; mixing frameworks in a single session is not "
-        "supported. NOTE: --framework atom is single-node-only "
+        "supported: --resume-from uses the framework the session was "
+        "created with, and refuses a --framework that differs. NOTE: --framework atom is single-node-only "
         "(``--nodes>=2`` fails fast); profile / roofline, "
         "kernel-agent, and framework-agent are all enabled on atom. "
         "The auto-tighten guard only enforces ``--nodes 1``. "
@@ -559,6 +587,41 @@ def _build_parser() -> argparse.ArgumentParser:
             "independently of --target-gain / --target-tput / --target-baseline-dir."
         ),
     )
+    # Outside the group as well, and for a stronger reason than --target-roofline: this is a constraint rather than
+    # an objective. It does not say when to stop, it says which winners are admissible, so it composes with whichever
+    # target is in use instead of competing with one.
+    opt.add_argument(
+        "--max-latency-ms",
+        type=_positive_ms_arg,
+        default=None,
+        help=(
+            "Scriptable frameworks (xdit, custom) only. Refuse any KEEP whose mean "
+            "end-to-end latency exceeds N ms. Off by default. A candidate that "
+            "reported no end-to-end latency is refused too, since an unmeasured "
+            "constraint is not a satisfied one."
+        ),
+    )
+    opt.add_argument(
+        "--gpu-power-cap-w",
+        type=_positive_watts_arg,
+        default=None,
+        help=(
+            "Declare the power cap (W) the GPUs are already set to. An assertion, not a request: the optimizer "
+            "never changes power settings, which are privileged and card-wide. Set it with "
+            "`amd-smi set --power-cap` before launch; the session refuses to start if any card it uses is at a "
+            "different cap. The observed cap is recorded whether or not this flag is passed."
+        ),
+    )
+    opt.add_argument(
+        "--gpu-perf-level",
+        type=str,
+        default=None,
+        metavar="LEVEL",
+        help=(
+            "Declare the DPM performance level the GPUs are already set to (e.g. auto, high, determinism). "
+            "An assertion like --gpu-power-cap-w: set it with `amd-smi set --perf-level` before launch."
+        ),
+    )
     opt.add_argument(
         "--resume-from",
         type=str,
@@ -603,7 +666,6 @@ def _build_parser() -> argparse.ArgumentParser:
             "is injected into prompts but drives no gating."
         ),
     )
-    opt.add_argument("--target-summary", type=str, default=None, help="Free-text goal summary surfaced in prompts")
     opt.add_argument(
         "--compare-against-gpu",
         type=str,
@@ -642,11 +704,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-allow-mm-text-fallback to fail-fast on text-coercible "
         "models too. Default: enabled.",
     )
-    # Retired with the kernel LLM role; accepted as no-ops so a launcher or operator template that still passes them
-    # does not exit 2.
-    for _retired in ("--kernel-codex", "--kernel-claude"):
-        opt.add_argument(_retired, action="store_true", default=False, help=argparse.SUPPRESS)
-    opt.add_argument("--kernel-prompt", type=str, default=None, help=argparse.SUPPRESS)
     opt.add_argument(
         "--no-kernel",
         action="store_true",
@@ -743,8 +800,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Protocol for the Critic's review inference. 'openai' uses the "
         "OpenAI SDK; 'anthropic' uses the Messages API, or the Claude CLI when a "
         "CLAUDE_CODE_OAUTH_TOKEN subscription is the only credential. "
-        "'auto' (default) derives it from the configured credentials; an "
-        "explicit value fails at startup when that side has no credential. "
+        "'auto' (default) reviews with the orchestration model over the protocol "
+        "orchestration runs on; an explicit value reviews with that side's model "
+        "(CLAUDE_MODEL or CODEX_MODEL) and fails at startup when that side has no "
+        "credential. Preflight sends the review model one request and refuses to "
+        "start when it does not answer; there is no fallback model. "
         "Ignored (with a warning) under --critic-mock, which runs no review "
         "inference.",
     )
@@ -795,26 +855,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--warm-replay-min-confidence",
         dest="warm_replay_min_confidence",
         type=float,
-        default=0.7,
+        default=None,
         help="Minimum ``warm_start_recipe.confidence`` required to "
         "trigger the auto-replay. Default 0.7 means an ``exact`` "
         "seven-tuple hit (conf 1.0) and a server-returned ``relative`` "
         "match (conf 0.7) both fire, while a ``miss`` (conf 0.0) "
         "does not. Raise it above 0.7 to require an exact hit "
         "before spending a verify on the warm config.",
-    )
-    opt.add_argument(
-        "--warm-replay-min-reproduce-pct",
-        dest="warm_replay_min_reproduce_pct",
-        type=float,
-        default=0.8,
-        help="Minimum fraction of the recipe's recorded gain we need "
-        "to reproduce to count as ``status=reproduced`` and push "
-        "the warm config onto the optimization stack. Default "
-        "0.8 — a recipe claiming +25%% counts if we measure "
-        "+20%% or more. Below the threshold we record "
-        "``status=drift`` and continue with the regular optimisation "
-        "flow without inheriting the warm config.",
     )
     # PR Monitor REST + MCP are co-hosted by KB Store and derived from $KB_STORE_URL.
     opt.add_argument(
@@ -910,27 +957,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "specialist_done (Inv-5.3).",
     )
     opt.add_argument(
-        "--specialist-per-turn-max-seconds",
-        dest="specialist_per_turn_max_seconds",
-        type=float,
-        default=600.0,
-        help="Per-LLM-call timeout for an in-process specialist backend "
-        "(default 600s). It bounds one call, never the task: the task is "
-        "bounded by the absolute deadline the dispatcher hands down.",
-    )
-    # specialist dispatch shape
-    opt.add_argument(
-        "--specialist-dispatch-mode",
-        dest="specialist_dispatch_mode",
-        type=str,
-        choices=("subprocess", "inprocess"),
-        default="subprocess",
-        help="Specialist execution shape. 'subprocess' (default) spawns "
-        "a fresh selected-provider agent CLI per task. 'inprocess' uses "
-        "the matching Claude or Codex Agent SDK backend in the orchestrator "
-        "process.",
-    )
-    opt.add_argument(
         "--specialist-mcp-config",
         dest="specialist_mcp_config",
         type=str,
@@ -1013,17 +1039,18 @@ def _build_parser() -> argparse.ArgumentParser:
         "directions. Advisory only — never gates Objective or scoring. "
         "Default on; pass ``--no-target-advisory`` to disable.",
     )
-    # Post-optimization concurrency sweep (on by default): a baseline-vs-optimized Magpie grid across CONC values (see
-    # orchestrator/conc_sweep.py).
+    # Post-optimization concurrency sweep: a baseline-vs-optimized Magpie grid across CONC values (see
+    # orchestrator/conc_sweep.py). Defaults to None so bootstrap can pick by benchmark mode.
     opt.add_argument(
         "--enable-conc-sweep",
         dest="enable_conc_sweep",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=None,
         help="Run a post-optimization concurrency sweep (baseline vs "
         "current_best across CONC) and write "
         "reports/conc_sweep_summary.json + conc_sweep_raw.csv. "
-        "On by default; disable with --no-enable-conc-sweep.",
+        "On by default, off under AgentX (each rung is a 3600s window); "
+        "force either way with --enable-conc-sweep / --no-enable-conc-sweep.",
     )
     opt.add_argument(
         "--conc-sweep-concs",
@@ -1089,78 +1116,52 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Config-arm plateau: number of trailing rounds the gain sum is computed over. Default 5.",
     )
-    opt.add_argument(
-        "--plateau-kernel-revert-streak",
-        dest="plateau_kernel_revert_streak",
-        type=int,
-        default=None,
-        help="KERNEL plateau: consecutive REVERT / NEEDS_REVIEW integrate "
-        "attempts to count as plateau (one half of the OR). "
-        "Default 3.",
-    )
-    opt.add_argument(
-        "--plateau-kernel-keep-gain",
-        dest="plateau_kernel_keep_gain",
-        type=float,
-        default=None,
-        help="KERNEL plateau: max cumulative KEEP-gain (%%) across the "
-        "lookback window below which the OR fires. Default 0.5.",
-    )
-    opt.add_argument(
-        "--plateau-kernel-lookback",
-        dest="plateau_kernel_lookback",
-        type=int,
-        default=None,
-        help="KERNEL plateau: number of trailing integrate attempts the gain sum is computed over. Default 5.",
-    )
     # phase budget percentages: each phase claims a fraction of the wall-clock budget (caps; may exit earlier).
     opt.add_argument(
-        "--max-minutes-prelude-pct",
         "--phase-budget-prelude-pct",
         dest="phase_budget_prelude_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for PRELUDE as a fraction of --max-hours. Default: 0.03.",
+        help="Wall-clock budget cap for PRELUDE as a fraction of --max-hours. Default: 0.03. "
+        "On --resume-from, any --*-pct flag resets every phase share to its default plus the given overrides; with none, the prior budget is kept.",
     )
     opt.add_argument(
-        "--max-minutes-framework-pct",
         "--phase-budget-framework-pct",
-        # The EXPLORE spellings land on the same option: configuration search and source landing are two arms of one
-        # phase with one budget, so a separate share for either would be a number nothing reads.
-        "--max-minutes-explore-pct",
-        "--phase-budget-explore-pct",
         dest="phase_budget_framework_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for the OPTIMIZE (FRAMEWORK_AGENT) phase. Default: 0.38.",
+        help="Wall-clock budget cap for the OPTIMIZE (FRAMEWORK_AGENT) phase, which covers both configuration search "
+        "and source landing. Default: 0.38. "
+        "On --resume-from, any --*-pct flag resets every phase share to its default plus the given overrides; with none, the prior budget is kept.",
     )
     opt.add_argument(
-        "--max-minutes-kernel-pct",
         "--phase-budget-kernel-pct",
         dest="phase_budget_kernel_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for KERNEL_AGENT. Default: 0.47.",
+        help="Wall-clock budget cap for KERNEL_AGENT. Default: 0.47. "
+        "On --resume-from, any --*-pct flag resets every phase share to its default plus the given overrides; with none, the prior budget is kept.",
     )
     opt.add_argument(
-        "--max-minutes-sweep-pct",
         "--phase-budget-sweep-pct",
         dest="phase_budget_sweep_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for SWEEP. Default: 0.05.",
+        help="Wall-clock budget cap for SWEEP. Default: 0.05. "
+        "On --resume-from, any --*-pct flag resets every phase share to its default plus the given overrides; with none, the prior budget is kept.",
     )
     opt.add_argument(
-        "--max-minutes-close-pct",
         "--phase-budget-close-pct",
         dest="phase_budget_close_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for CLOSE. Default: 0.02.",
+        help="Wall-clock budget cap for CLOSE. Default: 0.02. "
+        "On --resume-from, any --*-pct flag resets every phase share to its default plus the given overrides; with none, the prior budget is kept.",
     )
 
     rec = sub.add_parser(
-        "recover-session",
+        "recover",
+        parents=[common],
         help="Rebuild + push the session_breakdown for a session that exited "
         "abnormally (crash / SIGKILL) so its breakdown lands on Langfuse.",
     )
@@ -1174,14 +1175,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help="Re-run even when the session already looks complete (close_sequence_done / breakdown already recorded).",
-    )
-    rec.add_argument(
-        "--backfill-trace",
-        action="store_true",
-        help="Also replay reports/trace/llm_calls.jsonl as Langfuse "
-        "generations. Use ONLY when the live emitter never ran for this "
-        "session (e.g. it was disabled during the run); otherwise it "
-        "duplicates generations already pushed live.",
     )
     rec.add_argument(
         "--confirm-stopped",
@@ -1202,7 +1195,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--confirmation-reason",
         metavar="TEXT",
         help="Required audit reason for --confirm-stopped. Both options must be provided together "
-        "and cannot be combined with --force or --backfill-trace.",
+        "and cannot be combined with --force.",
     )
 
     return p

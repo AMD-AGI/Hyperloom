@@ -8,15 +8,61 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from hyperloom.common.timeutil import now_iso
 
 log = logging.getLogger(__name__)
 
+# Long-run bounded-growth caps for append-only telemetry ledgers (tail-trim).
+_INTERVENTION_MIX_CAP = 500
+_SPECIALIST_ROUNDS_CAP = 200
+_SEEN_PR_IDS_CAP = 2000
+_WINNERS_HISTORY_CAP = 200
+# Negative ledger (explore_search["tested"]); oldest insertion-order keys evicted first.
+_EXPLORE_TESTED_CAP = 5000
 
-def _shared_state_module():
-    """Import parent shared_state lazily to avoid a module-level cycle."""
-    from .. import shared_state
 
-    return shared_state
+def _cap_tested_ledger(tested: dict[str, Any]) -> dict[str, Any]:
+    """Bound the explore_search negative ledger for multi-day runs."""
+    if not isinstance(tested, dict) or len(tested) <= _EXPLORE_TESTED_CAP:
+        return tested if isinstance(tested, dict) else {}
+    keys = list(tested.keys())[-_EXPLORE_TESTED_CAP:]
+    return {k: tested[k] for k in keys}
+
+
+def _stamp_cycle_on_tested(
+    tested: dict[str, Any],
+    cycle: int,
+    bottleneck: str = "",
+) -> dict[str, Any]:
+    """Bucket negative-ledger entries by macro-cycle + bottleneck (R3)."""
+    if not isinstance(tested, dict):
+        return {}
+    bn = (bottleneck or "").strip()
+    for v in tested.values():
+        if isinstance(v, dict):
+            if "cycle" not in v:
+                v["cycle"] = int(cycle)
+            if bn and "bottleneck" not in v:
+                v["bottleneck"] = bn
+    return tested
+
+
+def _stamp_cycle_on_rejected(
+    rejected: list[Any],
+    cycle: int,
+    bottleneck: str = "",
+) -> list[Any]:
+    """Bucket rejected entries by macro-cycle + bottleneck (R3)."""
+    if not isinstance(rejected, list):
+        return []
+    bn = (bottleneck or "").strip()
+    for v in rejected:
+        if isinstance(v, dict):
+            if "cycle" not in v:
+                v["cycle"] = int(cycle)
+            if bn and "bottleneck" not in v:
+                v["bottleneck"] = bn
+    return rejected
 
 
 def _merge_rejected(prior: Any, update: Any) -> list[dict[str, Any]]:
@@ -29,6 +75,16 @@ def _merge_rejected(prior: Any, update: Any) -> list[dict[str, Any]]:
         if fingerprint:
             merged[fingerprint] = entry
     return list(merged.values())
+
+
+# Gap ``severity`` by urgency; an unknown severity ranks below ``low``.
+GAP_SEVERITY_RANK: dict[str, int] = {"high": 3, "medium": 2, "low": 1}
+
+
+def gap_actionability_key(gap: dict[str, Any]) -> tuple[int, int, str]:
+    """Sort key putting the highest-severity, then least-attempted, then oldest gap first."""
+    severity = GAP_SEVERITY_RANK.get(str(gap.get("severity") or "").lower(), 0)
+    return (-severity, len(gap.get("attempts") or []), str(gap.get("first_seen_ts") or ""))
 
 
 class _PhaseStateMixin:
@@ -55,7 +111,7 @@ class _PhaseStateMixin:
 
     def _trim_specialist_rounds(self) -> None:
         """Bound the specialist-round ledger for multi-day runs (keep most recent)."""
-        cap = _shared_state_module()._SPECIALIST_ROUNDS_CAP
+        cap = _SPECIALIST_ROUNDS_CAP
         if len(self.specialist_rounds) > cap:
             self.specialist_rounds = self.specialist_rounds[-cap:]
 
@@ -64,7 +120,7 @@ class _PhaseStateMixin:
         row = dict(attempt)
         row.setdefault("cycle", int(self.macro_cycle or 0))
         self.attempts.append(row)
-        cap = _shared_state_module()._SPECIALIST_ROUNDS_CAP
+        cap = _SPECIALIST_ROUNDS_CAP
         if len(self.attempts) > cap:
             self.attempts = self.attempts[-cap:]
 
@@ -126,7 +182,6 @@ class _PhaseStateMixin:
         target = self._anchor_for(anchor)
         if not target:
             return ""
-        severity_rank = {"high": 3, "medium": 2, "low": 1}
         matches: list[tuple[tuple[int, int, str], str]] = []
         for g in self.gaps:
             if not isinstance(g, dict):
@@ -136,10 +191,7 @@ class _PhaseStateMixin:
                 continue
             if self._anchor_for(str(g.get("domain_hint") or "")) != target:
                 continue
-            sev = severity_rank.get(str(g.get("severity") or "").lower(), 0)
-            attempts = len(g.get("attempts") or [])
-            first_seen = str(g.get("first_seen_ts") or "")
-            matches.append(((-sev, attempts, first_seen), cid))
+            matches.append((gap_actionability_key(g), cid))
         if not matches:
             return ""
         matches.sort(key=lambda m: m[0])
@@ -160,10 +212,10 @@ class _PhaseStateMixin:
             "action": str(action or ""),
             "task_id": str(task_id or ""),
             "delta_pct": delta_pct,
-            "ts": _shared_state_module()._now_iso(),
+            "ts": now_iso(),
         }
         self.intervention_mix.append(entry)
-        cap = _shared_state_module()._INTERVENTION_MIX_CAP
+        cap = _INTERVENTION_MIX_CAP
         if len(self.intervention_mix) > cap:
             self.intervention_mix = self.intervention_mix[-cap:]
         if ct == "config":
@@ -187,7 +239,7 @@ class _PhaseStateMixin:
             seen.add(pid)
             self.research_scout_seen_pr_ids.append(pid)
             added += 1
-        cap = _shared_state_module()._SEEN_PR_IDS_CAP
+        cap = _SEEN_PR_IDS_CAP
         if len(self.research_scout_seen_pr_ids) > cap:
             # FIFO eviction of oldest-seen ids.
             self.research_scout_seen_pr_ids = self.research_scout_seen_pr_ids[-cap:]
@@ -203,11 +255,30 @@ class _PhaseStateMixin:
         self.framework_agent_phase_done = False
         self.framework_agent_discover_failures = 0
         self.framework_agent_empty_discoveries = 0
-        self.specialist_domain_empty_streak = {}
         self.rounds_since_last_specialist = {}
         self.rounds_since_last_keep = {}
         self.last_conc_sweep = {}
         self.discard_pending_escalate_hint()
+
+    def open_macro_cycle(self, *, no_gain_cycle_streak: int | None = None) -> int:
+        """Finish the current macro-cycle's strategy row, start the next cycle, and reset its per-cycle state.
+
+        Returns:
+            int: The new ``macro_cycle``.
+        """
+        finished = self.macro_cycle
+        gain_delta = round(self.cumulative_gain_validated - self.gain_at_cycle_start, 6)
+        rows = [r for r in self.cycle_strategy_log if isinstance(r, dict)]
+        for row in rows:
+            if row.get("cycle") == finished and row.get("gain_delta") is None:
+                row["gain_delta"] = gain_delta
+        self.cycle_strategy_log = rows[-50:]
+        self.macro_cycle = finished + 1
+        if no_gain_cycle_streak is not None:
+            self.no_gain_cycle_streak = no_gain_cycle_streak
+        self.gain_at_cycle_start = self.cumulative_gain_validated
+        self.reset_per_cycle_plateau_state()
+        return self.macro_cycle
 
     def note_explore_outcome(self, *, promoted: bool) -> None:
         """Update the plateau proxy after one explore task (KEEP resets, no-promote increments)."""
@@ -241,11 +312,6 @@ class _PhaseStateMixin:
             return ""
         return self.specialist_patch_verdicts.get(sid, "") or ""
 
-    def update_last_specialist(self, snapshot: dict[str, Any]) -> None:
-        """Snapshot the most recent specialist task (parity with last_*)."""
-        if isinstance(snapshot, dict):
-            self.last_specialist = dict(snapshot)
-
     def apply_explore_search_update(self, update: dict[str, Any]) -> None:
         """Merge an ExploreExecutor search update into persistent state; :meth:`record_explore_accepted` is the single writer for the ``accepted`` bucket."""
         if not isinstance(update, dict):
@@ -255,18 +321,17 @@ class _PhaseStateMixin:
         merged["schema_version"] = int(update.get("schema_version") or 1)
         cur_cycle = int(getattr(self, "macro_cycle", 0) or 0)
         cur_bottleneck = self.current_top_bottleneck()
-        ss = _shared_state_module()
         # The executor reports the round it just benched; accumulating it over the
         # durable ledger is this layer's job, and a re-measured fingerprint replaces
         # its earlier row because that is what a fresh measurement means.
-        merged["tested"] = ss._cap_tested_ledger(
-            ss._stamp_cycle_on_tested(
+        merged["tested"] = _cap_tested_ledger(
+            _stamp_cycle_on_tested(
                 {**(prior.get("tested") or {}), **(update.get("tested") or {})},
                 cur_cycle,
                 cur_bottleneck,
             )
         )
-        merged["rejected"] = ss._stamp_cycle_on_rejected(
+        merged["rejected"] = _stamp_cycle_on_rejected(
             _merge_rejected(prior.get("rejected"), update.get("rejected")),
             cur_cycle,
             cur_bottleneck,
@@ -301,7 +366,7 @@ class _PhaseStateMixin:
             row.setdefault("cycle", cur_cycle)
             known.add(key)
             wh.append(row)
-        merged["winners_history"] = wh[-ss._WINNERS_HISTORY_CAP :]
+        merged["winners_history"] = wh[-_WINNERS_HISTORY_CAP:]
         merged["domains_round_summary"] = list(
             update.get("domains_round_summary") or prior.get("domains_round_summary") or []
         )
@@ -315,7 +380,7 @@ class _PhaseStateMixin:
         """Append one promoted variant to ``explore_search.accepted``; dedupes by ``fingerprint`` and removes any matching ``rejected`` entry."""
         if not isinstance(variant, dict) or not variant:
             return
-        from ...actions.executors._canonical_fingerprint import canonical_fingerprint
+        from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
 
         args = str(variant.get("candidate_extra_server_args") or variant.get("extra_server_args") or "")
         envs = dict(variant.get("extra_envs") or {})
@@ -360,7 +425,7 @@ class _PhaseStateMixin:
             "accuracy": variant.get("accuracy"),
             "stack_index": variant.get("stack_index"),
             "accepted_at_round": str(variant.get("accepted_at_round") or ""),
-            "ts": str(variant.get("ts") or _shared_state_module()._now_iso()),
+            "ts": str(variant.get("ts") or now_iso()),
             "provenance": str(variant.get("provenance") or "llm_direct"),
             # Attribute the win to the macro-cycle it landed in.
             "cycle": int(getattr(self, "macro_cycle", 0) or 0),
@@ -395,7 +460,7 @@ class _PhaseStateMixin:
                 "cycle": entry["cycle"],
             }
         )
-        search["winners_history"] = wh[-_shared_state_module()._WINNERS_HISTORY_CAP :]
+        search["winners_history"] = wh[-_WINNERS_HISTORY_CAP:]
         self.explore_search = search
 
     def record_authored_framework_levers(
@@ -411,7 +476,7 @@ class _PhaseStateMixin:
             return False
         rows = list(getattr(self, "authored_framework_levers", None) or [])
         by_switch = {str(r.get("switch") or ""): i for i, r in enumerate(rows) if isinstance(r, dict)}
-        now = _shared_state_module()._now_iso()
+        now = now_iso()
         changed = False
         for entry in switches:
             if not isinstance(entry, dict):

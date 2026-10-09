@@ -21,6 +21,7 @@ from kernelforge.agent_backends import (
 )
 from kernelforge.agent_backends.session_resume import run_session_with_api_resume
 from kernelforge.config import Config, resolve_agent_model
+from kernelforge.llm.workspace_policy import TOOL_OWNED_UNTRACKED_GLOBS
 from kernelforge.mcp_server.pr_stdio_server import TOOL_NAMES as PR_TOOL_NAMES
 from kernelforge.loop.scoring import (
     DEFAULT_SNR_THRESHOLD_DB,
@@ -38,19 +39,6 @@ _REPO_EXTRA_PROTECTED_GLOBS = [
     "*_ref.py",
     "*_reference.py",
     "conftest.py",
-]
-
-# Ignore only named tool outputs; undeclared files remain safety violations.
-# Exported so tests exercise the exact list used by agent sessions.
-TOOL_OWNED_UNTRACKED_GLOBS = [
-    # rocprof runs below the git root, so cover root and nested directories.
-    ".rocprofv3/*",
-    "*/.rocprofv3/*",
-    "*_results.db",
-    # AITER may create JIT shards during a turn; its configured root always ends
-    # in ``aiter_cache``, regardless of the experiments directory.
-    "aiter_cache/*",
-    "*/aiter_cache/*",
 ]
 
 # task_type values that mean "a full source tree, not a self-contained snippet".
@@ -184,10 +172,8 @@ def make_agent_fn(
         )
 
     # The backend prompts name the STEPS (build, run the driver, profile) but not the mechanism, because only this
-    # loop knows it: this agent has Bash and the driver documented above, and no build/test/bench/pmc tools. They used
-    # to name those four as tools and this framing spent a sentence translating them back into shell -- prompt tokens
-    # paid, every session, to correct the prompt sitting directly beneath them. The backend prompts name the mechanism
-    # now, so only the framing that is actually about this loop is left.
+    # loop knows it: this agent has Bash and the driver documented above, and no build/test/bench/pmc tools. So this
+    # framing covers only what is specific to this loop.
     kernel_backend_section = ""
     if kernel_backend_context:
         # Profiling off means the loop hands the session no profiler, so this framing must not promise one. (The loaded
@@ -212,6 +198,20 @@ def make_agent_fn(
         "explicit --commit-new-path allowlist. Run "
         "one-off checks inline; if a temporary file is unavoidable, place it "
         "under forge_experiments/ and remove it before ending the turn."
+    )
+
+    # The counterpart to the rule above: that one keeps the workspace clean, this one keeps the artifact clean. Both
+    # are stated here rather than in a knowledge card because a card is read on demand and this holds every iteration.
+    deliverable_hygiene_rule = (
+        "What you submit is a finished operator, not a scratchpad: when you end "
+        "the turn it carries no `print` and reads no `os.environ` of its own. A "
+        "sweep knob or a probe print may live in the kernel while you search; "
+        "before ending the turn, replace each knob with the constant it selected, "
+        "delete each probe, and re-run the driver on the file you submit. A knob "
+        "left behind is indistinguishable, to everyone downstream, from live "
+        "configuration. The one exception is an option a library you call "
+        "exposes no other way: set that, and say in a comment why there is no "
+        "API for it."
     )
 
     # Stable across every iteration of a loop — placed in system_prompt so the underlying CLI's prompt cache reuses it
@@ -304,7 +304,8 @@ explain your rationale in one sentence.
    harness — it is in the workspace — and cite the lines that say so. An
    assumption about what the harness does is not a reason.
 5. {workspace_hygiene_rule}
-6. As your last output, output one line starting with `PLAN:` — a SHORT headline
+6. {deliverable_hygiene_rule}
+7. As your last output, output one line starting with `PLAN:` — a SHORT headline
    (≤ ~12 words, one clause, plain prose, NO code/syntax) naming the optimization
    now in the file that will be committed and benchmarked, e.g. "vectorize global
    loads to 128-bit". Name only what you KEPT, not abandoned attempts or bug-fix
@@ -409,6 +410,7 @@ judge your kernel. It is yours to READ and to RUN; it is NOT yours to change.
   benchmark, read the harness — it is in the workspace — and cite the lines that
   say so. An assumption about what the harness does is not a reason.
 - {workspace_hygiene_rule}
+- {deliverable_hygiene_rule}
 - As your VERY LAST output, after all edits/fixes are done and the kernel is in
   its final state, output one line starting with `PLAN:` — a SHORT headline
   (≤ ~12 words, one clause, plain prose, NO code/syntax) naming the optimization

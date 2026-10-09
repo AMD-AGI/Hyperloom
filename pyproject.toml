@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hyperloom-inference_optimizer"
-version = "1.1.1"
+version = "1.1.3"
 description = "Inference Optimizer — two-role (Orchestration/Critic) autonomous LLM inference optimization runtime for AMD GPU platforms. Kernel optimization is handled by programmatic Python handlers."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -92,6 +92,7 @@ test = [
     "hyperloom-inference_optimizer[ci]",
     "pytest>=8.0",
     "pytest-asyncio>=1.0",
+    "jsonschema>=4.18",
     # Property-based tests over the bring-up ladder.
     "hypothesis>=6.0",
     "respx>=0.21",
@@ -134,16 +135,12 @@ dev = [
 ]
 
 [project.scripts]
-inference_optimizer = "hyperloom.inference_optimizer.cli:main"
-hyperloom = "hyperloom.inference_optimizer.setup:main"
-# Console scripts for interactive / manual use; the orchestrator invokes the
-# ``python -m hyperloom.agents.*`` module paths directly instead.
-framework-agent = "hyperloom.agents.framework.runtime.cli:main"
-fa = "hyperloom.agents.framework.runtime.cli:main"
-quantization-agent = "hyperloom.agents.quantization.cli:main"
+hyperloom = "hyperloom.cli:main"
 # Built-in kernel-opt agent. The orchestrator dispatches
 # ``python -m kernelforge.cli`` directly; this is for interactive use.
 kernelforge = "kernelforge.cli:main"
+hyperloom-kb-serve = "hyperloom_kb.http_service:main"
+hyperloom-kb-collect = "hyperloom_kb.collect.cli:main"
 
 [tool.setuptools]
 # setuptools defaults this to true for pyproject-based config, which makes
@@ -180,12 +177,13 @@ exclude = [
     "*.testing.*",
     "testing",
     "testing.*",
-    # kernelforge's shipped resource trees (knowledge_base / local_knowledge /
-    # examples / serving_patches). They contain .py files, so with implicit
-    # namespace discovery setuptools would otherwise hand them out as
-    # importable top-level modules. They ship as package-data instead.
-    "kernelforge.data",
-    "kernelforge.data.*",
+    # KernelForge's examples and local-wiki resources contain .py reference
+    # files. Keep those resource trees out of implicit namespace discovery;
+    # they ship only through the package-data declarations below.
+    "kernelforge.examples",
+    "kernelforge.examples.*",
+    "kernelforge.knowledge.local_wiki.resources",
+    "kernelforge.knowledge.local_wiki.resources.*",
     # Scripted launch/specialist backends and a virtual clock: scaffolding a
     # test drives, not a runtime component. Nothing in the shipped tree imports
     # it, and the production launch boundary it substitutes
@@ -206,6 +204,10 @@ exclude = [
 ".cursor/skills/hyperloom-setup" = [
     "src/hyperloom/skills/hyperloom-setup/SKILL.md",
 ]
+# Deploys the global Experience KB that workspaces push to and pull from.
+".agents/skills/hyperloom-global-kb" = ["src/hyperloom/skills/hyperloom-global-kb/SKILL.md"]
+".claude/skills/hyperloom-global-kb" = ["src/hyperloom/skills/hyperloom-global-kb/SKILL.md"]
+".cursor/skills/hyperloom-global-kb" = ["src/hyperloom/skills/hyperloom-global-kb/SKILL.md"]
 # Demo run skills chained from /hyperloom-setup.
 ".agents/skills/hyperloom-qwen3-8b-3h" = ["examples/hyperloom-qwen3-8b-3h/SKILL.md"]
 ".claude/skills/hyperloom-qwen3-8b-3h" = ["examples/hyperloom-qwen3-8b-3h/SKILL.md"]
@@ -216,9 +218,6 @@ exclude = [
 ".agents/skills/hyperloom-qwen3-14b-fp8-12h-forge" = ["examples/hyperloom-qwen3-14b-fp8-12h-forge/SKILL.md"]
 ".claude/skills/hyperloom-qwen3-14b-fp8-12h-forge" = ["examples/hyperloom-qwen3-14b-fp8-12h-forge/SKILL.md"]
 ".cursor/skills/hyperloom-qwen3-14b-fp8-12h-forge" = ["examples/hyperloom-qwen3-14b-fp8-12h-forge/SKILL.md"]
-".agents/skills/hyperloom-qwen3-14b-fp8-12h-atom" = ["examples/hyperloom-qwen3-14b-fp8-12h-atom/SKILL.md"]
-".claude/skills/hyperloom-qwen3-14b-fp8-12h-atom" = ["examples/hyperloom-qwen3-14b-fp8-12h-atom/SKILL.md"]
-".cursor/skills/hyperloom-qwen3-14b-fp8-12h-atom" = ["examples/hyperloom-qwen3-14b-fp8-12h-atom/SKILL.md"]
 ".agents/skills/hyperloom-custom-advanced" = ["examples/hyperloom-custom-advanced/SKILL.md"]
 ".claude/skills/hyperloom-custom-advanced" = ["examples/hyperloom-custom-advanced/SKILL.md"]
 ".cursor/skills/hyperloom-custom-advanced" = ["examples/hyperloom-custom-advanced/SKILL.md"]
@@ -259,24 +258,13 @@ hyperloom = [
     "actions/*.md",
     "references/*.md",
 ]
-"hyperloom.agents.framework" = [
-    "SKILL.md",
-    "README.md",
-    "examples/*.json",
-    "examples/*.py",
-]
 "hyperloom.agents.quantization" = [
     "SKILL.md",
     "README.md",
 ]
-# No top-level SKILL.md: kernel work is dispatched programmatically, so the
-# former agent skill file was replaced by docs/reference/kernel-execution-path.md.
-"hyperloom.agents.kernel" = [
-    "scripts/*.sh",
-]
-# Vendor-operator-playbook registry (see tools/_vendor_operator_playbooks.py):
+# Vendor-operator-playbook registry (see trace_analysis/_vendor_operator_playbooks.py):
 # read at runtime by classify_patchability(), so it must ship.
-"hyperloom.agents.kernel.tools" = [
+"hyperloom.orchestrator.trace_analysis" = [
     "vendor_operator_playbooks.json",
 ]
 # ``agentx/deploy.py`` copies these into InferenceX ``benchmarks/`` at runtime
@@ -287,6 +275,7 @@ hyperloom = [
 # Breakdown skill assets; the only SKILL.md under src/ that did not ship.
 "hyperloom.inference_optimizer.breakdown" = [
     "*.md",
+    "contracts/*.json",
 ]
 "hyperloom.inference_optimizer.multi_node" = [
     "SKILL.md",
@@ -294,15 +283,22 @@ hyperloom = [
 "hyperloom.inference_optimizer.multi_node.scripts" = [
     "*.sh",
 ]
-# kernelforge's read-only resource trees. Upstream KernelForge shipped these
-# from the repository root via hatchling ``force-include``; setuptools has no
-# equivalent, so they physically live under ``src/kernelforge/data`` and are
-# resolved through ``kernelforge.resources.resource_path``. The glob is
-# deliberately type-agnostic: the trees hold .md, .json, .py, .patch, .csv and
-# more, and a missed extension only breaks wheel installs (every dev and CI
-# path uses ``pip install -e``).
+# KernelForge's read-only resources live with their owning features and are
+# resolved through ``kernelforge.resources.resource_path``. The globs are
+# deliberately type-agnostic because the trees hold several asset types.
 kernelforge = [
-    "data/**/*",
+    "examples/**/*",
+]
+"kernelforge.knowledge.local_wiki" = [
+    "resources/**/*",
+]
+"kernelforge.roofline_ceiling" = [
+    "resources/**/*",
+]
+hyperloom_kb = [
+    "py.typed",
+    "declarations/*.yaml",
+    "mappings/*.yaml",
 ]
 
 [tool.pytest.ini_options]
@@ -317,7 +313,7 @@ testpaths = [
     "src/**/tests",
     "scripts/tests",
 ]
-pythonpath = ["src", "."]
+pythonpath = ["src", ".", "scripts"]
 markers = [
     "critic_agent_e2e: end-to-end tests that shell out to the real critic-agent runtime; skip with '-m \"not critic_agent_e2e\"' if critic-agent is not on disk.",
     "targeted_build_e2e: end-to-end tests that run a real AITER compile on a ROCm host; skip with '-m \"not targeted_build_e2e\"' in CI.",
@@ -331,6 +327,7 @@ relative_files = true
 source = [
     "src/hyperloom",
     "src/kernelforge",
+    "src/hyperloom_kb",
     "OOB",  # optional component; not always present in a clone
 ]
 # Omitted: tests / package boilerplate, CLI drivers, subprocess wrappers, and
@@ -360,13 +357,13 @@ omit = [
     "src/hyperloom/orchestrator/actions/executors/_multi_node_env.py",
     # Breakdown LLM HTTP client.
     "src/hyperloom/inference_optimizer/breakdown/reporters/llm_client.py",
-    # Stand-alone kernel-agent CLI tools.
-    "src/hyperloom/agents/kernel/tools/kernel_optimization.py",
-    "src/hyperloom/agents/kernel/tools/tracelens_analysis.py",
-    "src/hyperloom/agents/kernel/tools/tracelens_skill_runner.py",
-    "src/hyperloom/agents/kernel/tools/apply_kernel_patch.py",
-    # Kernel-agent tool backends (subprocess submit).
-    "src/hyperloom/agents/kernel/tools/backends/*",
+    # Kernel tools that need real traces or a live framework install.
+    "src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py",
+    "src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py",
+    "src/hyperloom/orchestrator/kernel/apply_kernel_patch.py",
+    # GEAK runner and Ray cluster lifecycle (subprocess submit).
+    "src/hyperloom/orchestrator/kernel/geak_runner.py",
+    "src/hyperloom/orchestrator/actions/executors/_ray_runtime.py",
     # quantization_agent CLI driver (argparse entrypoint).
     "src/hyperloom/agents/quantization/cli.py",
     # OOB server-side runtime (CLI, HTTP server, scheduler, auth proxy, agent
@@ -391,11 +388,11 @@ omit = [
     "src/hyperloom/orchestrator/actions/executors/baseline.py",
     # --- kernelforge (ported verbatim from KernelForge's own omit list) ---
     "*/test_*.py",
-    # Shipped resource trees: knowledge-base sample drivers and reference
-    # kernels, not library code.
-    "src/kernelforge/data/*",
+    # Shipped sample drivers, reference kernels, and local-wiki assets.
+    "src/kernelforge/examples/*",
+    "src/kernelforge/knowledge/local_wiki/resources/*",
     # Byte-identical upstream KB Store SDK; validated by checksum contract tests.
-    "src/kernelforge/knowledge/remote_exp/kb_store_client.py",
+    "src/kernelforge/knowledge/kb_store/remote_client.py",
     # CLI entry points (argument plumbing; exercised via the CLIs themselves).
     "src/kernelforge/cli.py",
     "src/kernelforge/gemm_tune/cli.py",
@@ -408,7 +405,7 @@ omit = [
     # Claude Agent SDK transport (spawns the agent CLI, network).
     "src/kernelforge/orchestrator/agent.py",
     # Filesystem index walker over the curated knowledge tree.
-    "src/kernelforge/knowledge/local_index.py",
+    "src/kernelforge/knowledge/local_wiki/index.py",
     # gemm-tune hardware tuners (drive vendor GEMM libraries on-device).
     "src/kernelforge/gemm_tune/tuners/sglang_dense_bf16.py",
     "src/kernelforge/gemm_tune/tuners/vllm_moe_triton.py",
@@ -456,9 +453,16 @@ relax_fail_under_repo_var = "COVERAGE_RELAX_FAIL_UNDER"
 # nearly all hits are test assertions and runtime invariants.
 [tool.bandit]
 skips = ["B101"]
-# ``src/kernelforge/data`` holds shipped knowledge-base sample kernels and
-# reference drivers -- third-party illustrative code, not Hyperloom's own.
-exclude_dirs = ["*/tests/*", "*/test/*", "build", ".venv", "src/kernelforge/data"]
+# Shipped knowledge-base sample kernels and reference drivers are third-party
+# illustrative code, not Hyperloom's own.
+exclude_dirs = [
+    "*/tests/*",
+    "*/test/*",
+    "build",
+    ".venv",
+    "src/kernelforge/examples",
+    "src/kernelforge/knowledge/local_wiki/resources",
+]
 
 # Pylint: minimal defaults for local runs; CI passes ``--errors-only``.
 [tool.pylint.main]
@@ -475,14 +479,15 @@ extend-exclude = [
     "TraceLens-internal",
     "InferenceX",
     "src/hyperloom/orchestrator/knowledge/remote_recipe/_vendor/kb_store_client.py",
-    # Knowledge base / examples / serving patches, not source we own the style
-    # of. The example drivers are .py and would otherwise be reformatted.
-    "src/kernelforge/data",
-    "src/kernelforge/knowledge/remote_exp/kb_store_client.py",
+    # Local-wiki resources and example drivers are not source whose style this
+    # repository owns.
+    "src/kernelforge/examples",
+    "src/kernelforge/knowledge/local_wiki/resources",
+    "src/kernelforge/knowledge/kb_store/remote_client.py",
 ]
 
 [tool.ruff.lint]
-select = ["E", "F", "W"]
+select = ["E", "F", "W", "BLE", "RUF100"]
 # E501 is owned by ``ruff format``; E741 would only cause churn-only renames in
 # math / parsing helpers where single-letter locals are idiomatic.
 ignore = ["E501", "E741"]
@@ -510,7 +515,7 @@ ignore = ["E501", "E741"]
 "src/hyperloom/inference_optimizer/multi_node/cli.py" = ["E402"]
 "src/hyperloom/inference_optimizer/multi_node/commands/infera.py" = ["E402"]
 "src/hyperloom/orchestrator/specialists/runner.py" = ["E402"]
-"src/hyperloom/orchestrator/kernel/roofline_ceiling.py" = ["E402"]
+"src/hyperloom/inference_optimizer/roofline_ceiling.py" = ["E402"]
 "src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py" = ["E402"]
 "src/hyperloom/agents/critic/runtime/decision_reviewer.py" = ["E402"]
 # The import sits under the comment block explaining why the attribute name is

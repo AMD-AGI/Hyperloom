@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Shared non-git patch apply / revert primitives."""
+"""Shared non-git patch apply primitives."""
 
 from __future__ import annotations
 
@@ -11,10 +11,11 @@ import shutil
 import subprocess
 
 from hyperloom.common.git_safety import safe_directory_args
+from hyperloom.common.unified_diff import strip_path_components
 from pathlib import Path
 from typing import Any
 
-from ...delivery.ledger import append_record, merge_records
+from ...delivery.ledger import append_record, mark_prepared
 from ...delivery import file_digest as _file_digest
 from ...specialists.patch_safety import patch_file_targets
 
@@ -58,14 +59,6 @@ def _sanitize_git_index_lines(patch_text: str) -> tuple[str, int]:
     if not dropped:
         return patch_text, 0
     return "".join(kept), dropped
-
-
-def _strip_path_prefix(path: str, level: int) -> str:
-    """Drop ``level`` leading path components (mimics ``git apply -p<level>``)."""
-    if level <= 0:
-        return path
-    parts = path.split("/")
-    return "/".join(parts[level:]) if len(parts) > level else parts[-1]
 
 
 def _is_within(child: Path, root: Path) -> bool:
@@ -232,6 +225,14 @@ def _apply_patch_no_git(
         # (the patch that really made those edits owns the backups needed for a
         # correct revert).
         if _reverse_applies_cleanly(framework_root, patch_input):
+            if not mark_prepared(backup_root):
+                err_msg = "backup prepare record could not be persisted"
+                return (
+                    False,
+                    err_msg,
+                    [],
+                    ApplyFeedback(patch=str(patch_path), channel="nogit", tried_levels=tried_levels, stderr=err_msg),
+                )
             log.info(
                 "nogit patch: %s is already fully applied (clean reverse dry-run); treating as a no-op",
                 patch_path.name,
@@ -239,10 +240,7 @@ def _apply_patch_no_git(
             return True, "", [], None
         combined_stderr = "\n".join(dry_run_stderrs)
         err_msg = f"patch --dry-run failed at all strip levels for {patch_path.name}"
-        try:
-            source_ctx = read_patch_source_context(patch_text, framework_root, radius=50)
-        except Exception:  # noqa: BLE001
-            source_ctx = ""
+        source_ctx = read_patch_source_context(patch_text, framework_root, radius=50)
         feedback = ApplyFeedback(
             patch=str(patch_path),
             channel="nogit",
@@ -273,7 +271,7 @@ def _apply_patch_no_git(
 
     def _resolve_target(raw: str) -> tuple[Path | None, Path | None, str]:
         """Resolve a raw diff-header path to (rel, abs, error)."""
-        rel = Path(_strip_path_prefix(raw, detected_level))  # type: ignore[arg-type]
+        rel = Path(strip_path_components(raw, detected_level))  # type: ignore[arg-type]
         if rel.is_absolute() or ".." in rel.parts:
             return None, None, f"patch target escapes framework root: {raw}"
         abs_path = (framework_root_resolved / rel).resolve()
@@ -431,9 +429,10 @@ def _apply_patch_no_git(
             if err:
                 return _fail(err, backups)
 
+    if not mark_prepared(backup_root):
+        return _fail("backup prepare record could not be persisted", backups)
+
     # Apply for real.
-    rej_dir = backup_root / "rej"
-    rej_dir.mkdir(parents=True, exist_ok=True)
     try:
         cp2 = subprocess.run(
             ["patch", f"-p{detected_level}", "--reject-file=-", "-i", str(patch_input)],
@@ -457,11 +456,7 @@ def _apply_patch_no_git(
         # Collect any .rej files left next to the target files.
         rejected_hunks = _collect_rej_files(framework_root, patch_path)
         apply_stderr = cp2.stderr.strip() or cp2.stdout.strip()
-        source_ctx = ""
-        try:
-            source_ctx = read_patch_source_context(patch_text, framework_root, radius=50)
-        except Exception:  # noqa: BLE001
-            pass
+        source_ctx = read_patch_source_context(patch_text, framework_root, radius=50)
         feedback = ApplyFeedback(
             patch=str(patch_path),
             channel="nogit",
@@ -491,63 +486,9 @@ def _collect_rej_files(framework_root: Path, patch_path: Path) -> str:
             except OSError:
                 # Best-effort scan: skip unreadable/racing .rej files.
                 continue
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.debug("_collect_rej_files: scan failed for %s", patch_path, exc_info=True)
     return "\n\n".join(parts)
-
-
-def _revert_patches_no_git(
-    backups: list[dict[str, Any]],
-    *,
-    backup_root: Path | None = None,
-) -> tuple[bool, list[str]]:
-    """Restore or remove files recorded in ``backups`` (reverse of :func:`_apply_patch_no_git`).
-
-    Iterates in reverse so multi-file patches unwind in the correct order.
-    Dispatches on the ``revert_action`` field when present; falls back to the
-    legacy heuristic (``backup_path`` present → restore, absent → delete) for
-    records produced by older code. Every path is re-read after the restore, so
-    a partial restore is reported rather than mistaken for success.
-
-    Args:
-        backups: The per-file backup records the caller still holds.
-        backup_root: The apply's backup directory. When given, the persisted
-            ledger under it is merged in first, so a mutation whose record
-            never reached the caller is still reverted.
-
-    Returns:
-        A ``(ok, errors)`` tuple; ``ok`` is ``True`` only when every record
-        restored and verified, and ``errors`` carries one entry per failure.
-    """
-    records = merge_records(backups, backup_root) if backup_root is not None else list(backups)
-    errors: list[str] = []
-    for record in reversed(records):
-        target = Path(record["target"])
-        bak = record.get("backup_path")
-        action = record.get("revert_action")
-        mode = record.get("mode")
-        try:
-            if action in ("restore", "restore_old") or (action is None and bak):
-                # Modified / deleted / rename-source file: restore from backup.
-                if bak:
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(bak, target)
-                    if mode is not None:
-                        target.chmod(mode)
-                    if not target.is_file():
-                        errors.append(f"restore: {target} missing after copy")
-                    elif target.read_bytes() != Path(bak).read_bytes():
-                        errors.append(f"restore: {target} content mismatch after copy")
-            elif action == "delete" or (action is None and not bak):
-                # New / rename-destination file: remove it.
-                if target.exists():
-                    target.unlink()
-                if target.exists() or target.is_symlink():
-                    errors.append(f"delete: {target} still exists after unlink")
-        except OSError as exc:
-            errors.append(f"{target}: {exc}")
-            log.warning("nogit revert failed for %s: %s", target, exc)
-    return not errors, errors
 
 
 __all__ = [
@@ -557,7 +498,5 @@ __all__ = [
     "_collect_rej_files",
     "_is_git_tree",
     "_is_within",
-    "_revert_patches_no_git",
     "_sanitize_git_index_lines",
-    "_strip_path_prefix",
 ]

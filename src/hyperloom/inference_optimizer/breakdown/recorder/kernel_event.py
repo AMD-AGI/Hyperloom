@@ -51,7 +51,6 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Mapping
-from contextvars import ContextVar, Token
 from typing import Any
 
 from .assembler import EVENT_SECTIONS, event_parts
@@ -130,8 +129,6 @@ ROW_GEAK_DISCOVERY = "geak_discovery"
 ROW_GEAK_ACCEPTANCE = "geak_acceptance"
 ROW_DISCOVERED = "discovered"
 ROW_INTEGRATE = "integrate"
-
-_ACTIVE: ContextVar["KernelEventRecorder | None"] = ContextVar("kernel_event_active", default=None)
 
 ROUTE_GEAK = "geak"
 ROUTE_FORGE = "forge"
@@ -239,7 +236,6 @@ __all__ = [
     "VERDICT_IMPROVED",
     "VERDICT_NO_IMPROVEMENT",
     "KernelEventRecorder",
-    "active_kernel_recorder",
     "assemble_kernel_ext",
     "kernel_event_id",
     "make_kernel_recorder",
@@ -248,11 +244,6 @@ __all__ = [
     "reject_geak_attempts",
     "record_trace_analyze_request",
 ]
-
-
-def active_kernel_recorder() -> "KernelEventRecorder | None":
-    """Return the KERNEL visit recorder currently open in this context, if any."""
-    return _ACTIVE.get()
 
 
 def kernel_event_id(macro_cycle: Any) -> str:
@@ -642,44 +633,18 @@ def record_trace_analyze_request(
 
 
 def _republish_closed_event(event: str) -> None:
-    """Re-assemble a closed event so a fragment written after it is published.
+    """Re-assemble a closed event so a fragment written after it is published."""
+    from .construct import republish_closed_event
 
-    The export reads the durable timeline rather than re-assembling it, so a
-    closed event's published ``ext`` is whatever the close assembled. A row
-    that lands afterwards is in the spool but not in the event, and would stay
-    that way. Re-assembling and updating the same storage sequence is what
-    puts it there -- the same write the close makes, made again.
-
-    An event still running is left alone: its own close will assemble the row
-    along with everything else, and publishing a half-finished event here
-    would show it closed.
-
-    Never raises: the row this re-publishes is already in the spool, so a
-    re-assembly that cannot read it costs the caller nothing it can act on.
-    """
-    from ...session.sbd_v6 import timeline_sequence
-    from .recorder_warnings import RECORDING_ERRORS, note_failure
-
-    try:
-        parts = event_parts(EVENT_SECTIONS, event=event)
-        rows = rows_for_event(parts.get(SECTION_EVENT) or [], event)
-        header = rows[0] if rows else {}
-        end_time = _text(header.get("end_time"))
-        if not end_time:
-            return
-        ext, derived = assemble_kernel_ext(parts, event=event)
-        finish_event(
-            event_type=EVENT_TYPE,
-            event=event,
-            sequence=timeline_sequence(header),
-            status=derived,
-            ext=ext,
-            kind=EVENT_KIND,
-            start_time=_text(header.get("start_time")) or "",
-            end_time=end_time,
-        )
-    except RECORDING_ERRORS as exc:
-        note_failure(section=SECTION_EVENT, error=exc, detail=f"re-publishing closed event {event}")
+    republish_closed_event(
+        event,
+        section=SECTION_EVENT,
+        event_type=EVENT_TYPE,
+        kind=EVENT_KIND,
+        load_parts=lambda: event_parts(EVENT_SECTIONS, event=event),
+        assemble=assemble_kernel_ext,
+        end_time=lambda _parts, header: _text(header.get("end_time")),
+    )
 
 
 def _integrate_e2e(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -1155,7 +1120,6 @@ class KernelEventRecorder:
         route: str = "",
         route_reason: str = "",
         resumed: bool = False,
-        code_revision: str = "",
     ):
         """Bind a recorder to the event of one KERNEL entry."""
         self._event_id = kernel_event_id(macro_cycle)
@@ -1166,7 +1130,6 @@ class KernelEventRecorder:
         self._sequence: int | None = None
         self._closed = False
         self._faulted = False
-        self._active_token: Token | None = None
         self._route = str(route or "")
         self._stage = "entry"
         self._sink.record(
@@ -1179,7 +1142,6 @@ class KernelEventRecorder:
                     "route": self._route,
                     "route_reason": str(route_reason or ""),
                     "resumed": bool(resumed),
-                    "code_revision": _text(code_revision),
                 },
             },
         )
@@ -1231,14 +1193,6 @@ class KernelEventRecorder:
             start_time=self._start_time,
             ext={"route": self._route, "in_flight_stage": self._stage},
         )
-        self._active_token = _ACTIVE.set(self)
-
-    def _clear_active(self) -> None:
-        """Drop this recorder from the attribution window."""
-        token = self._active_token
-        if token is not None:
-            _ACTIVE.reset(token)
-            self._active_token = None
 
     def record_discovered_kernels(
         self,
@@ -1324,9 +1278,8 @@ class KernelEventRecorder:
         ``roofline`` task by default, which analyses the trace it just captured,
         so the phase's own request is skipped as cached. A non-empty section
         therefore marks the case where the analysis behind a rewrite has no
-        roofline event of its own -- previously that request bumped the snapshot
-        counter and replaced the cache with nothing on the timeline to explain
-        the increment.
+        roofline event of its own; it is what explains that request's snapshot
+        counter bump and cache replacement on the timeline.
 
         ``reusable_native_kernel_ids`` is recorded because it is the only legal
         source of a ``kernel_id``: the hot-kernel ranking includes vendor
@@ -1817,7 +1770,6 @@ class KernelEventRecorder:
             )
         except RECORDING_ERRORS as exc:
             note_failure(section=SECTION_EVENT, error=exc, detail=f"closing kernel event {self._event_id}")
-        self._clear_active()
 
     def record_fault(
         self,
@@ -2203,11 +2155,7 @@ def assemble_kernel_ext(
     acceptances = group_rows(acceptance_rows, "acceptance_kind")
     geak_ref, conflicting = _geak_settlement(geak_ledger)
 
-    # The gate rules on a queued integration. A rewrite and the patch gated for
-    # it share a kernel id, which is the only thing the two sides have in
-    # common; a fusion or a GEMM table produces no kernel of its own and is
-    # findable only by the integration id its lane recorded.
-    integrate_by_kernel = group_rows(integrate_rows, "kernel_id")
+    # Only an authored integration reference can link a lane to an E2E gate.
     integrate_by_id = group_rows(integrate_rows, "integration_id")
     attempts = [_lane_attempt(row) for row in lane_rows]
     attempts.extend(_geak_attempt(row) for row in geak_kernel_rows)
@@ -2216,8 +2164,6 @@ def assemble_kernel_ext(
             continue
         if row["integrate_ref"]:
             row["e2e"] = _integrate_e2e(integrate_by_id.get(row["integrate_ref"], []))
-        elif row["kernel_id"]:
-            row["e2e"] = _integrate_e2e(integrate_by_kernel.get(row["kernel_id"], []))
     attempts.extend(_merge_acceptances(attempts, acceptances, geak_ref=geak_ref))
     # A row whose producer stated no start time sorts after the ones that did,
     # rather than ahead of them where an empty string would put it.
@@ -2315,6 +2261,7 @@ def assemble_kernel_ext(
         "macro_cycle": _int_or_none(header.get("macro_cycle")) or 0,
         "in_flight_stage": _text(header.get("in_flight_stage")),
         "entry": _as_dict(header.get("entry")),
+        "failure": failure or None,
         # Every candidate either route produced, in one shape. The two routes
         # run different machinery and state their results under different
         # names; normalizing here is what lets one reader replay the visit
@@ -2366,40 +2313,19 @@ def make_kernel_recorder(
     route: str = "",
     route_reason: str = "",
     resumed: bool = False,
-    code_revision: str = "",
 ) -> KernelEventRecorder | None:
-    """Build a recorder, or ``None`` when one cannot be constructed.
+    """Build a recorder, or ``None`` when no session is bound.
 
-    KERNEL behavior must not depend on the recorder existing, so construction
-    failures degrade to "no event" rather than propagating. An unbound session
-    declines too: writing the timeline into whatever the working directory
-    happens to be is worse than not recording.
-
-    Returns:
-        KernelEventRecorder | None: The recorder, or ``None`` when it could not
-            be built.
+    An unbound session declines rather than writing the timeline into an
+    arbitrary directory. Construction itself is not swallowed.
     """
-    from ...session.session_binding import session_is_bound
+    from .construct import decline_unbound
 
-    try:
-        if not session_is_bound():
-            log.warning(
-                "kernel timeline: no session bound; this phase entry's whole event will be "
-                "missing from the breakdown. The coordinator binds at startup, so this means "
-                "either that never happened or the entry ran outside the session's context"
-            )
-            return None
-        return KernelEventRecorder(
-            macro_cycle=macro_cycle,
-            route=route,
-            route_reason=route_reason,
-            resumed=resumed,
-            code_revision=code_revision,
-        )
-    except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
-        log.warning(
-            "kernel timeline: recorder construction failed; this phase entry's whole event "
-            "will be missing from the breakdown",
-            exc_info=True,
-        )
+    if decline_unbound("kernel"):
         return None
+    return KernelEventRecorder(
+        macro_cycle=macro_cycle,
+        route=route,
+        route_reason=route_reason,
+        resumed=resumed,
+    )

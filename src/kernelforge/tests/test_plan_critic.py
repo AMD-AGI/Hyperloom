@@ -210,7 +210,7 @@ async def test_critic_infers_revision_and_records_missing_verdict(
         RuntimeError("provider crashed"),
     ],
 )
-async def test_critic_failure_accepts_draft_fail_open(
+async def test_critic_failure_records_no_verdict_and_still_publishes(
     tmp_path,
     result,
     caplog,
@@ -235,15 +235,21 @@ async def test_critic_failure_accepts_draft_fail_open(
             coverage={},
         )
 
-    assert outcome.verdict == "ACCEPT"
+    # An outage is not a judgement: reading this round as an ACCEPT is what told the next round, and anyone reading
+    # the artifact afterwards, that a review the critic never delivered had passed the plan.
+    assert outcome.verdict == "NOT_REVIEWED"
     assert outcome.fail_open is True
+    assert outcome.requires_revision is False
     assert outcome.error
     assert outcome.verdict_source == "error"
     assert outcome.duration_sec >= 0
     assert outcome.to_dict()["status"] == "CRITIC_ERROR"
+    assert outcome.to_dict()["verdict"] == "NOT_REVIEWED"
     artifact = outcome.render_artifact()
     assert artifact.startswith("STATUS: CRITIC_ERROR")
+    assert "VERDICT: NOT_REVIEWED" in artifact
     assert "VERDICT: ACCEPT" not in artifact
+    # The draft still runs: this round loses its review, not its plan.
     assert "plan critic failed open to the draft" in caplog.text
 
 
@@ -484,6 +490,14 @@ def test_one_lane_is_dropped_for_one_reason():
                 LaneDrop(lane_id=2, reason="its ground is unsupported"),
             ),
         )
+
+
+def test_an_outage_and_a_judgement_are_never_recorded_together():
+    """``NOT_REVIEWED`` is the whole of what a failed review leaves behind, and the only thing it leaves behind."""
+    with pytest.raises(ValueError, match="must be recorded together"):
+        PlanCriticOutcome(verdict="ACCEPT", error="backend timed out", verdict_source="error")
+    with pytest.raises(ValueError, match="must be recorded together"):
+        PlanCriticOutcome(verdict="NOT_REVIEWED")
 
 
 def test_a_review_with_an_empty_block_asks_for_no_narrowing():

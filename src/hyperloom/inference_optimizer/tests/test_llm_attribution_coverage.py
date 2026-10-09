@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.trace.llm_trace import VALID_COMPONENTS
+from hyperloom.inference_optimizer.trace.llm_trace import VALID_COMPONENTS
 
 #: Entry points that only tag a call when the caller names a component, so an
 #: untagged call site is spend the gateway cannot attribute to anything.
@@ -34,10 +34,6 @@ _TAGGED_ENTRY_POINTS = frozenset(
         "stream_chat_completion_text",
     }
 )
-
-#: Backends that carry their label on a dataclass field instead of passing it at
-#: the call site, so the call-site scan below cannot see it.
-_COMPONENT_FIELD = "attribution_component"
 
 #: Every first-party package, not just ``hyperloom``: the forge loop spends from
 #: ``kernelforge``, so scoping the scan to one package would exempt the tree
@@ -116,31 +112,3 @@ def test_component_labels_come_from_the_closed_vocabulary() -> None:
                 offenders.append(f"{relative}:{node.lineno}: {name}(component={keyword.value.value!r})")
     assert not offenders, "LLM call sites naming an unknown component:\n" + "\n".join(offenders)
     assert checked >= 14, f"only {checked} literal components found; the scan is no longer finding them"
-
-
-def _iter_component_field_labels() -> Iterator[tuple[Path, int, str]]:
-    """Yield every literal value production code gives ``attribution_component``."""
-    for relative, tree in _iter_production_trees():
-        for node in ast.walk(tree):
-            if isinstance(node, ast.AnnAssign):
-                named = getattr(node.target, "id", "") == _COMPONENT_FIELD
-            elif isinstance(node, ast.keyword):
-                named = node.arg == _COMPONENT_FIELD
-            else:
-                continue
-            if named and isinstance(node.value, ast.Constant):
-                yield relative, node.lineno, node.value.value
-
-
-def test_backend_component_fields_come_from_the_closed_vocabulary() -> None:
-    """A label carried on a field is as binding as one passed at the call site."""
-    offenders: list[str] = []
-    checked = 0
-    for relative, lineno, value in _iter_component_field_labels():
-        checked += 1
-        if value not in VALID_COMPONENTS:
-            offenders.append(f"{relative}:{lineno}: {_COMPONENT_FIELD}={value!r}")
-    assert not offenders, f"{_COMPONENT_FIELD} set to an unknown component:\n" + "\n".join(offenders)
-    # The default plus at least one role that overrides it; fewer means the field was renamed and this guard is
-    # watching nothing.
-    assert checked >= 2, f"only {checked} {_COMPONENT_FIELD} literals found; the scan is no longer finding them"

@@ -1,17 +1,17 @@
-#!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Backfill one hyperloom session's trace JSONL into Langfuse (offline).
 
 Sibling of the *live* emitter
-(:mod:`hyperloom.orchestrator.trace.langfuse_emitter`): the live
+(:mod:`hyperloom.inference_optimizer.trace.langfuse_emitter`): the live
 path mirrors calls into Langfuse while a run is in flight, this CLI replays
 one finished session's ``reports/trace/`` after the fact. Both share the same
-projection (:mod:`hyperloom.orchestrator.trace.langfuse_mapping`), so the spans
+projection (:mod:`hyperloom.inference_optimizer.trace.langfuse_mapping`), so the spans
 this CLI does emit are shaped like the live ones. Not replayed here: ext token
-shards (``reports/trace/ext/*.jsonl``), specialist-intel, forge-step and
-GEMM-tuning spans, which only the live emitter's ``flush_session`` backfills.
+shards (``reports/trace/ext/*.jsonl``), specialist-intel, forge-step,
+GEMM-tuning and trajectory (``reports/trace/trajectory/*.jsonl``) spans, which
+only the live emitter's ``flush_session`` backfills.
 
 Mapping (trace -> phase span -> agent span -> generation)::
 
@@ -50,14 +50,14 @@ Usage
 ::
 
     # Dry run: parse + print the plan, no SDK / no network needed.
-    python -m hyperloom.inference_optimizer.tools.backfill_langfuse \\
+    hyperloom session backfill \\
         --session-dir <SD> --dry-run
 
     # Real backfill (needs the langfuse SDK + env keys).
     export LANGFUSE_HOST=https://langfuse.<your-domain>
     export LANGFUSE_PUBLIC_KEY=pk-...
     export LANGFUSE_SECRET_KEY=sk-...
-    python -m hyperloom.inference_optimizer.tools.backfill_langfuse --session-dir <SD>
+    hyperloom session backfill --session-dir <SD>
 
 Notes
 -----
@@ -81,14 +81,15 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.jsonio import read_json, read_jsonl
-from hyperloom.orchestrator.state.optimization_journal import (
+from hyperloom.inference_optimizer.session.optimization_journal import (
     OUTCOME_KEEP,
     OUTCOME_NO_PROMOTE,
+    OUTCOME_RECORDED,
     OUTCOME_REVERT,
     OUTCOME_SKIP,
 )
-from hyperloom.orchestrator.trace import langfuse_mapping as lfmap
-from hyperloom.orchestrator.trace.langfuse_emitter import (
+from hyperloom.inference_optimizer.trace import langfuse_mapping as lfmap
+from hyperloom.inference_optimizer.trace.langfuse_emitter import (
     _end_obs,
     _set_trace_attrs,
     _start_obs,
@@ -217,10 +218,11 @@ def print_plan(plan: dict[str, Any]) -> None:
     rev = outcomes.count(OUTCOME_REVERT)
     nop = outcomes.count(OUTCOME_NO_PROMOTE)
     skipped = outcomes.count(OUTCOME_SKIP)
+    recorded = outcomes.count(OUTCOME_RECORDED)
     gainful = sum(1 for d in plan["decisions"] if (d.get("decision") or {}).get("gain_pct") is not None)
     print(
         f"  Scores: {len(plan['decisions'])} decisions "
-        f"(KEEP={keep} REVERT={rev} no_promote={nop} skipped={skipped}; gain_pct set={gainful})"
+        f"(KEEP={keep} REVERT={rev} no_promote={nop} skipped={skipped} recorded={recorded}; gain_pct set={gainful})"
     )
     recipe_rows = plan.get("recipe_audit") or []
     recipe_writes = sum(1 for r in recipe_rows if lfmap.recipe_audit_is_write(r))
@@ -369,7 +371,7 @@ def ingest(plan: dict[str, Any]) -> int:
                         comment=score.get("comment") or "",
                         metadata=meta,
                     )
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.exception("create_score failed for decision %d", i)
 
     _end_obs(root, last_end)
@@ -382,7 +384,7 @@ def ingest(plan: dict[str, Any]) -> int:
 def _build_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser."""
     p = argparse.ArgumentParser(
-        prog="backfill_langfuse",
+        prog="hyperloom session backfill",
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -411,7 +413,3 @@ def main(argv: list[str] | None = None) -> int:
         print_plan(plan)
         return 0
     return ingest(plan)
-
-
-if __name__ == "__main__":
-    sys.exit(main())

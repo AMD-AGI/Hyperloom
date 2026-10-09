@@ -18,7 +18,9 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common import llm_config
-from hyperloom.common.llm_config import CLAUDE_OAUTH_TOKEN_ENV, parse_custom_headers
+from hyperloom.common.env import env_bool
+from hyperloom.common.llm_config import CLAUDE_OAUTH_TOKEN_ENV
+from hyperloom.common.llm_headers import parse_custom_headers
 from .executors import (
     _build_specialist_executor,
     _register_executors,
@@ -30,19 +32,24 @@ from .kb import (
 from .backends import (
     _build_backends,
     _build_proposal_scorer,
+    critic_review_target,
+    orchestration_runs_on_codex,
 )
 from .model_gate import (
-    _autodetect_gpu_type,
-    _gpu_runner_type,
     _load_model_max_position_embeddings,
     _finish_model_gate,
     _preflight_context_window,
     _preflight_model_config_compat,
     _preflight_unsupported_model_arch,
     _record_resumed_model_gate,
-    _resolve_gpu_type,
     _resolve_max_model_len,
     _start_model_gate,
+)
+from ..gpu_types import (
+    _autodetect_gpu_type,
+    _gpu_runner_type,
+    _resolve_amd_gpu_type,
+    _resolve_gpu_type,
 )
 from ..model_config_utils import (
     summarize_model_config,
@@ -56,7 +63,11 @@ from .bootstrap import (
     _seed_shared_state,
     _snapshot_system_prompts,
     agentx_state_is_stale,
+    latency_budget_resume_conflict,
+    resolve_gpu_power_settings,
+    latency_budget_scope_error,
     parse_operator_extra_env,
+    resolve_framework_version,
     resolve_model_display_name,
 )
 from hyperloom.orchestrator.actions.executors._aiter_jit import clean_stale_aiter_locks
@@ -89,7 +100,8 @@ from .. import framework_registry
 from ..session.manifest import load_manifest, write_manifest
 from ..protocol.action_surfaces import ACTION_CATALOGUE, ActionMetadata
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.framework.paths import resolve_framework_tree, resolve_kernel_search_roots
+from hyperloom.orchestrator.collaborator import OrchestrationPrompt as _OrchestrationPrompt
+from hyperloom.inference_optimizer.framework_paths import resolve_framework_tree, resolve_kernel_search_roots
 from hyperloom.orchestrator.state.objective import AnyObjective, Objective, build_objective
 from hyperloom.orchestrator.state.shared_state import SharedState, timed_teardown_step
 from hyperloom.orchestrator.prompts.prompt_builder import (
@@ -261,6 +273,18 @@ def _persist_operator_supplied_paths(state: SharedState) -> None:
     state.benchmark_backend = os.environ.get(BENCHMARK_BACKEND_ENV, "").strip().lower()
 
 
+def _registered_framework_or_exit(requested: str, *, hint: str) -> str:
+    """Return ``requested`` normalised, or the default when blank; exit 2 when it names no registered framework."""
+    framework = requested.strip().lower() or framework_registry.DEFAULT_FRAMEWORK
+    if not framework_registry.is_supported(framework):
+        print(
+            f"ERROR: framework must be one of {', '.join(framework_registry.names())} (got {framework!r}); {hint}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    return framework
+
+
 def _enforce_expected_framework(
     framework: str,
     *,
@@ -313,11 +337,14 @@ def _build_orchestration_prompt(
     no_framework_agent: bool = False,
     macro_cycle: int = 0,
     cycle_directive: str = "",
+    cycle_strategy: Mapping[str, Any] | None = None,
     phase: str = "",
     transport: str = TRANSPORT_TOOLS,
     action_registry: Mapping[str, ActionMetadata] | None = None,
     benchmark_mode: str = "",
     agentx_corpus_shape: Mapping[str, Any] | None = None,
+    agentx_grading: Mapping[str, Any] | None = None,
+    agentx_backend: str = "",
 ) -> str:
     """Compose the Orchestration system prompt from typed inputs (``--orch-prompt`` overrides)."""
     registry = action_registry or ACTION_CATALOGUE
@@ -334,10 +361,13 @@ def _build_orchestration_prompt(
         max_minutes=int(max_minutes),
         macro_cycle=int(macro_cycle),
         cycle_directive=cycle_directive,
+        cycle_strategy=cycle_strategy,
         phase=phase,
         transport=transport,
         benchmark_mode=benchmark_mode,
         agentx_corpus_shape=agentx_corpus_shape,
+        agentx_grading=agentx_grading,
+        agentx_backend=agentx_backend,
         rules_fragment_path=_orchestration_rules_fragment_path(),
         framework_source_roots=resolve_kernel_search_roots(),
         session_framework_tree=resolve_framework_tree(framework),
@@ -367,9 +397,7 @@ def _should_remote_probe_gpu(args: argparse.Namespace) -> bool:
 
 
 def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
-    """Validate atom-specific CLI knobs: the ``--nodes>=2`` fail-fast guard (IR-8) and a kernel-backend warning."""
-    from hyperloom.common.env import forge_explicitly_enabled
-
+    """Validate atom-specific CLI knobs: the ``--nodes>=2`` fail-fast guard (IR-8)."""
     auto_disabled: list[str] = []
     if int(getattr(args, "nodes", 1) or 1) >= 2:
         print(
@@ -384,33 +412,6 @@ def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
         "profile / roofline / TraceLens all wired for atom); "
         "--nodes>=2 guard active — see SKILL.md IR-8"
     )
-    # The kernel phase runs on atom, but GEAK -- the backend everything else
-    # defaults to -- does not produce kernel candidates there: its extraction step
-    # declines to guess a rewrite seam for a quantized, non-vLLM backend. Since the
-    # default phase split gives the kernel phase half the session, defaulting to
-    # GEAK on atom means defaulting to half a session of nothing. forge is the
-    # backend that works here, so on atom it is the default rather than an opt-in
-    # the operator has to know about.
-    #
-    # Only an unset value is filled in. An operator who named a backend keeps it:
-    # running GEAK on atom on purpose, to measure exactly this, stays possible.
-    if not getattr(args, "no_kernel", False):
-        if not os.environ.get("KERNEL_OPT_BACKEND_ORDER", "").strip():
-            os.environ["KERNEL_OPT_BACKEND_ORDER"] = "forge"
-            print(
-                "  framework=atom: KERNEL_OPT_BACKEND_ORDER defaulted to 'forge' "
-                "(on atom GEAK must resolve a live rewrite seam; forge needs none)"
-            )
-        elif not forge_explicitly_enabled():
-            print(
-                "  WARNING: framework=atom with KERNEL_OPT_BACKEND_ORDER="
-                f"{os.environ.get('KERNEL_OPT_BACKEND_ORDER', '')!r}, so the kernel "
-                "phase runs GEAK. On a quantized non-vLLM backend GEAK may not guess "
-                "a rewrite seam -- it has to resolve one from the live server, which "
-                "is unproven on atom. Unset it to get 'forge', or pass --no-kernel "
-                "to skip the phase.",
-                file=sys.stderr,
-            )
     return auto_disabled
 
 
@@ -583,8 +584,6 @@ def _codex_model_should_follow_claude() -> bool:
 
 def _claude_model_should_follow_codex() -> bool:
     """True when the operator supplied only OpenAI-compatible config."""
-    if os.environ.get("INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX") == "1":
-        return True
     return llm_config.is_openai_only()
 
 
@@ -602,17 +601,8 @@ def _catalog_probe_has_no_credential() -> bool:
 
 
 def _custom_orch_model_allowed() -> bool:
-    """Whether orchestration may use a model outside the AMD Claude allowlist."""
-    raw = os.environ.get("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL")
-    if raw is None or not raw.strip():
-        return True
-    return raw.strip().lower() not in {"0", "false", "no", "off"}
-
-
-def _custom_orch_model_explicitly_disabled() -> bool:
-    """Whether the operator explicitly requested strict AMD model allowlisting."""
-    raw = os.environ.get("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL")
-    return raw is not None and raw.strip().lower() in {"0", "false", "no", "off"}
+    """Whether orchestration may use a model outside the AMD Claude allowlist; only an explicit false-token denies."""
+    return env_bool("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", True)
 
 
 def _critic_agent_runtime_needed(critic_choice: str) -> bool:
@@ -623,13 +613,15 @@ def _critic_agent_runtime_needed(critic_choice: str) -> bool:
 def _validate_and_resolve_claude_model(
     args: argparse.Namespace,
     resolved_urls: tuple[str, str] | None,
+    *,
+    claude_follows_codex: bool | None = None,
 ) -> set[str] | None:
     """Gate Claude model selection against the gateway catalog; mutates ``args.claude_model``."""
+    if claude_follows_codex is None:
+        claude_follows_codex = _claude_model_should_follow_codex()
     chosen = (args.claude_model or "").strip()
     # Custom orchestration models are enabled by default; the gateway catalog probe below is the sole gate.
     allow_custom = _custom_orch_model_allowed()
-    if not _custom_orch_model_explicitly_disabled():
-        allow_custom = allow_custom or _claude_model_should_follow_codex()
     if not allow_custom and chosen not in _CLAUDE_ALLOWED_MODELS:
         print(
             f"ERROR: --claude-model={chosen!r} is not allowed. "
@@ -680,7 +672,7 @@ def _validate_and_resolve_claude_model(
         openai_key = os.environ.get("OPENAI_API_KEY", "")
         # The Claude catalog must come from the Anthropic side.
         candidates: list[tuple[str, str]] = []
-        if _claude_model_should_follow_codex():
+        if claude_follows_codex:
             if openai_url:
                 candidates.append((openai_url, openai_key))
             elif anthropic_url:
@@ -779,32 +771,94 @@ def _resolve_models_for_run(
     if claude_follows_codex:
         # codex_model is about to become the orchestration model, so it needs the ladder whatever the critic backend
         # is.
-        _smoke_test_codex_model(args, resolved_urls, required=True)
+        _smoke_test_codex_model(args, resolved_urls)
         args.claude_model = args.codex_model
 
     # Hard-gate the Claude model (mutates args.claude_model on fallback; sys.exit(2) on failure).
-    _validate_and_resolve_claude_model(args, resolved_urls)
+    _validate_and_resolve_claude_model(args, resolved_urls, claude_follows_codex=claude_follows_codex)
 
     if codex_follows_claude:
         args.codex_model = args.claude_model
-    elif not claude_follows_codex:
-        # Codex smoke probes the OpenAI side independently (split entrypoints).
-        _smoke_test_codex_model(args, resolved_urls)
+
+    _probe_critic_review_model(
+        args, codex_follows_claude=codex_follows_claude, claude_follows_codex=claude_follows_codex
+    )
+
+
+_CRITIC_PROBE_TIMEOUT_SEC = 60.0
+
+
+def _probe_critic_review_model(
+    args: argparse.Namespace, *, codex_follows_claude: bool, claude_follows_codex: bool = False
+) -> None:
+    """Send the critic's model one real request before the session starts; exit rc=2 when it cannot answer.
+
+    A catalog listing only proves a gateway names a model, not that its upstream serves it, and the critic has no
+    fallback model: a review path that fails every call must stop the launch rather than run a session without a
+    critic.
+    """
+    if _resolve_critic_choice(args) != "agent":
+        return
+    try:
+        protocol, model = critic_review_target(
+            args.critic_protocol,
+            orchestration_on_codex=orchestration_runs_on_codex(
+                codex_follows_claude=codex_follows_claude, claude_follows_codex=claude_follows_codex
+            ),
+            claude_model=args.claude_model,
+            codex_model=args.codex_model,
+        )
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(2)
+
+    messages = [{"role": "user", "content": "Reply with OK."}]
+    last_error: BaseException | None = None
+    for delay in (0.0, *_CATALOG_RETRY_DELAYS_SEC):
+        if delay:
+            time.sleep(delay)
+        try:
+            if protocol == "anthropic":
+                llm_config.anthropic_completion(
+                    model=model,
+                    messages=messages,
+                    max_tokens=16,
+                    timeout_s=_CRITIC_PROBE_TIMEOUT_SEC,
+                    component="critic",
+                    operation="preflight",
+                )
+            else:
+                llm_config.chat_completion(
+                    llm_config.get_openai_client(timeout=_CRITIC_PROBE_TIMEOUT_SEC),
+                    component="critic",
+                    operation="preflight",
+                    model=model,
+                    messages=messages,
+                    max_completion_tokens=16,
+                )
+        except Exception as exc:  # noqa: BLE001 — any failure means the review path is unusable
+            last_error = exc
+            continue
+        print(f"Preflight: critic model {model!r} answered over the {protocol} protocol")
+        return
+    print(
+        f"ERROR: critic model {model!r} did not answer over the {protocol} protocol: {last_error!r}\n"
+        f"  The critic reviews with the orchestration model unless --critic-protocol selects the other side "
+        f"(then CLAUDE_MODEL for anthropic, CODEX_MODEL for openai); there is no fallback model.\n"
+        f"  Fix that model or its credential, or pass --critic-mock to run without a critic. Refusing to start.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
 
 
 def _smoke_test_codex_model(
     args: argparse.Namespace,
     resolved_urls: tuple[str, str] | None,
-    *,
-    required: bool = False,
 ) -> None:
-    """WARN-only catalog check for ``--codex-model``; flags typos and steps down the ladder before Coordinator starts."""
-    if not required:
-        if _codex_model_should_follow_claude():
-            return
-        if args.critic_backend != "agent":
-            return
+    """WARN-only catalog check for ``--codex-model`` on an OpenAI-only launch, where it becomes the orchestration model.
 
+    Steps down the ladder before Coordinator starts.
+    """
     openai_url = os.environ.get("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "").strip()
     if not openai_url:
         openai_url = os.environ.get("OPENAI_BASE_URL", "").strip()
@@ -843,8 +897,7 @@ def _smoke_test_codex_model(
         f"({sorted(m for m in catalog_ids if m.startswith('gpt-'))}); "
         f"CodexBackend will fail at first turn. Pass --codex-model with a "
         f"value in the catalog (known-good ids, newest first: "
-        f"{list(_CODEX_FALLBACK_MODELS)}) or use --critic-mock to "
-        f"avoid the Codex path entirely."
+        f"{list(_CODEX_FALLBACK_MODELS)})."
     )
 
 
@@ -890,8 +943,12 @@ def _resolve_critic_choice(args: argparse.Namespace) -> str:
     return chosen
 
 
-def _reset_state_file(session_dir: Path) -> None:
-    """Back up ``state.json`` to ``state.json.preReset.<unix_ts>`` and start fresh (Recipe KB untouched)."""
+def _reset_state_file(session_dir: Path, *, framework: str) -> None:
+    """Back up ``state.json`` to ``state.json.preReset.<unix_ts>`` and start fresh (Recipe KB untouched).
+
+    The fresh state keeps ``framework``: the session is single-framework, and
+    nothing after this point re-derives it.
+    """
     state_path = session_dir / "state.json"
     if not state_path.exists():
         return
@@ -911,11 +968,13 @@ def _reset_state_file(session_dir: Path) -> None:
             exc,
         )
         return
+    SharedState(framework=framework).save(session_dir)
     import logging as _logging
 
     _logging.getLogger(__name__).info(
-        "--reset-state: backed up state.json to %s; session starts blank.",
+        "--reset-state: backed up state.json to %s; session starts blank except for framework=%s.",
         backup_path.name,
+        framework,
     )
 
 
@@ -1042,8 +1101,7 @@ def _resume_can_disable_eval(baseline_accuracy: float) -> bool:
 def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
     """Map ``--*-pct`` CLI flags to a ``phase -> pct`` override dict.
 
-    ENABLEMENT has no flag: nothing enforces a cap for it, since
-    ``compute_next_phase`` does not consult ``phase_cap_exceeded`` there.
+    ENABLEMENT has no flag: nothing enforces a per-phase cap for it.
     """
     from hyperloom.orchestrator.phases.machine_state import (
         PHASE_CLOSE,
@@ -1061,7 +1119,7 @@ def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
         ("phase_budget_sweep_pct", PHASE_SWEEP),
         ("phase_budget_close_pct", PHASE_CLOSE),
     ):
-        val = getattr(args, cli_field, None)
+        val = getattr(args, cli_field)
         if val is not None:
             phase_budget_pct[phase_name] = float(val)
     return phase_budget_pct
@@ -1139,10 +1197,8 @@ def _resolve_workload_knobs(
 def _export_workload_envs_for_optimize(
     args: argparse.Namespace,
     *,
-    nodes_resolved: int,
     tp_resolved: int,
     ep_resolved: int,
-    argv: list[str] | None = None,
 ) -> None:
     """Project resolved workload knobs (TP/CONC/EP) into env for downstream Magpie YAMLs."""
     os.environ["TP"] = str(max(1, int(tp_resolved or 1)))
@@ -1287,6 +1343,16 @@ def _export_partition_shape(
     return session_shape_summary(verdict.layout, streams, fanout_expected=fanout)
 
 
+def _publish_gpu_power_settings(record: Mapping[str, Any]) -> None:
+    """Expose the recorded power settings to the platform fingerprint, the way the partition shape is."""
+    from hyperloom.common.platform_probe import GPU_POWER_SETTINGS_ENV
+
+    if record:
+        os.environ[GPU_POWER_SETTINGS_ENV] = json.dumps(record, sort_keys=True)
+    else:
+        os.environ.pop(GPU_POWER_SETTINGS_ENV, None)
+
+
 def _restore_partition_shape_from_state(args: Any, state: SharedState) -> None:
     """Fill the partition flags from the archive when this resume omitted them."""
     archived = dict(getattr(state, "compute_partition", None) or {})
@@ -1349,16 +1415,16 @@ def _restore_budget_and_objective(args: Any, state: SharedState, manifest: Mappi
     return lines
 
 
-def _exit_code_for_stop_reason(stop_reason: str | None) -> int:
+def _exit_code_for_stop_reason(stop_reason: str | None, baseline_tput: float) -> int:
     """Map a terminal ``stop_reason`` to a process exit code (0 success, 1 failure).
 
-    Reads the same set the breakdown grades outcomes against. A second copy here
-    would decide CI's verdict on a vocabulary that had drifted from the one the
-    report was written from.
+    Reads the same classifier the breakdown grades outcomes against. A second
+    copy here would decide CI's verdict on a vocabulary that had drifted from
+    the one the report was written from.
     """
-    from hyperloom.inference_optimizer.breakdown.stop_reasons import SUCCESS_STOP_REASONS
+    from hyperloom.inference_optimizer.breakdown.stop_reasons import outcome_status
 
-    return 0 if (stop_reason or "") in SUCCESS_STOP_REASONS else 1
+    return 0 if outcome_status(str(stop_reason or ""), baseline_tput) == "completed" else 1
 
 
 def _write_cli_terminal_artifacts(session_dir: Path, state: SharedState, stop_reason: str | None) -> None:
@@ -1369,13 +1435,17 @@ def _write_cli_terminal_artifacts(session_dir: Path, state: SharedState, stop_re
     """
     if stop_reason == SUPERVISOR_RESTART_REASON:
         return
+    if not state.close_sequence_done:
+        from ..breakdown.recorder.close_out import record_close_safety_net
+
+        record_close_safety_net(session_dir)
     try:
         from ..breakdown import write_minimal_final_json
 
         with timed_teardown_step(state, "final_json"):
             final_json = write_minimal_final_json(session_dir)
         print(f"Final summary     : {final_json}")
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.exception("crash-safe final.json write failed (non-fatal)")
     if state.close_sequence_done:
         print("Session breakdown : (already written by CLOSE phase sequencer; skipping cli.finally safety-net write)")
@@ -1386,7 +1456,7 @@ def _write_cli_terminal_artifacts(session_dir: Path, state: SharedState, stop_re
             with timed_teardown_step(state, "session_breakdown"):
                 breakdown_path = write_breakdown_json(session_dir)
             print(f"Session breakdown : {breakdown_path}")
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("session_breakdown finalize failed (non-fatal)")
         try:
             from ..breakdown import write_minimal_final_report
@@ -1394,10 +1464,10 @@ def _write_cli_terminal_artifacts(session_dir: Path, state: SharedState, stop_re
             with timed_teardown_step(state, "final_md"):
                 final_md = write_minimal_final_report(session_dir)
             print(f"Final report      : {final_md}")
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("emergency final report write failed (non-fatal)")
     try:
-        from hyperloom.orchestrator.trace.langfuse_emitter import flush_session, record_session_breakdown
+        from hyperloom.inference_optimizer.trace.langfuse_emitter import flush_session, record_session_breakdown
 
         with timed_teardown_step(state, "langfuse"):
             flush_session(session_dir)
@@ -1405,7 +1475,7 @@ def _write_cli_terminal_artifacts(session_dir: Path, state: SharedState, stop_re
 
             patch_breakdown_langfuse(session_dir)
             record_session_breakdown(session_dir)
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.debug("langfuse flush_session failed", exc_info=True)
     # Safety net for paths that leave close_sequence_done False and never run
     # the sequencer; ordered after langfuse so the package carries its patch.
@@ -1416,7 +1486,7 @@ def _write_cli_terminal_artifacts(session_dir: Path, state: SharedState, stop_re
             pkg_path = package_session_artifacts(session_dir, session_id=str(getattr(state, "session_id", "") or ""))
         if pkg_path is not None:
             print(f"Artifact package  : {pkg_path}")
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.exception("session artifact package failed (non-fatal)")
 
 
@@ -1449,14 +1519,14 @@ def _persist_preflight_failure_artifacts(
             args,
             failed_attempt=bool(str(getattr(args, "resume_from", "") or "").strip()),
         )
-    except Exception:  # noqa: BLE001 — never replace the original preflight failure
+    except Exception:
         log.warning("failed to create a session for SBD V6 preflight failure", exc_info=True)
         return None
 
     session_lock = SessionLock(session_dir)
     try:
         session_lock.acquire()
-    except Exception:  # noqa: BLE001 — never replace the original preflight failure
+    except Exception:
         session_lock.release()
         log.warning("failed to lock SBD V6 preflight failure session", exc_info=True)
         return None
@@ -1468,18 +1538,23 @@ def _persist_preflight_failure_artifacts(
                 if not getattr(manifest_args, "model", None):
                     manifest_args.model = os.environ.get("MODEL_PATH", "")
                 write_manifest(session_dir, args=manifest_args)
-            except Exception as write_exc:  # noqa: BLE001 — the install event can still stand alone
+            except Exception as write_exc:
                 log.warning("failed to write manifest for SBD V6 preflight failure", exc_info=True)
                 from ..session.sbd_v6 import record_write_warning
 
                 record_write_warning(session_dir, component="preflight_failure.manifest", exc=write_exc)
 
         _persist_install_event(args, session_dir)
+        from ..breakdown.recorder.close_out import record_close_safety_net
+        from ..breakdown.recorder import record_stage_reached
+
+        record_close_safety_net(session_dir)
+        record_stage_reached(session_dir, "install")
         try:
             from ..breakdown import write_breakdown_json
 
             write_breakdown_json(session_dir)
-        except Exception as write_exc:  # noqa: BLE001 — never replace the original preflight failure
+        except Exception as write_exc:
             log.warning("failed to write SBD V6 preflight failure breakdown", exc_info=True)
             from ..session.sbd_v6 import record_write_warning
 
@@ -1488,6 +1563,25 @@ def _persist_preflight_failure_artifacts(
         session_lock.release()
     print(f"Preflight failure artifacts: {session_dir}", file=sys.stderr)
     return session_dir
+
+
+def _start_experience_kb() -> None:
+    """Bring the workspace's Experience KB service to serving, then check its Experiences can be collected."""
+    from hyperloom_kb import ConfigurationError, LocalServiceError, RemoteClientError
+    from hyperloom_kb.collect import MappingError
+
+    from ..experience_collect import validate_config as validate_experience_collection
+    from ..experience_kb_service import ensure_service
+
+    # The run must not depend on the Experience KB: reads come back empty and writes are spooled or skipped.
+    try:
+        ensure_service()
+    except (LocalServiceError, RemoteClientError) as exc:
+        log.warning("Experience KB service is not serving (%s); Experience writes are spooled until it is", exc)
+    try:
+        validate_experience_collection()
+    except (ConfigurationError, MappingError, RemoteClientError) as exc:
+        log.warning("Experience KB cannot take this run's Experiences (%s); the run continues without them", exc)
 
 
 async def _run_optimize(args: argparse.Namespace) -> int:
@@ -1543,7 +1637,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     if not args.resume_from:
         _export_workload_envs_for_optimize(
             args,
-            nodes_resolved=nodes_resolved,
             tp_resolved=tp_resolved,
             ep_resolved=ep_resolved,
         )
@@ -1599,20 +1692,17 @@ async def _run_optimize(args: argparse.Namespace) -> int:
 
     claude_follows_codex = _claude_model_should_follow_codex()
     if claude_follows_codex:
-        os.environ["INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX"] = "1"
         args.claude_model = args.codex_model
-    else:
-        os.environ.pop("INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX", None)
 
     # Capture provider intent before _preflight() fills missing endpoints (preflight may populate OPENAI_BASE_URL from
     # ANTHROPIC_BASE_URL).
     codex_follows_claude = _codex_model_should_follow_claude()
     try:
         resolved_urls = _preflight(args)
-    except Exception as exc:  # noqa: BLE001 — only unexpected defects create diagnostic sessions
+    except Exception as exc:
         try:
             _persist_preflight_failure_artifacts(args, exc)
-        except Exception:  # noqa: BLE001 — preserve the original failure exactly
+        except Exception:
             log.warning("failed to preserve SBD V6 preflight failure", exc_info=True)
         raise
 
@@ -1622,9 +1712,17 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         claude_follows_codex=claude_follows_codex,
         codex_follows_claude=codex_follows_claude,
     )
+    _start_experience_kb()
     # Before either session branch: these are read by the fresh-launch seeding AND by the resume path, so this is the
     # one place that covers both.
     _preflight_agentx_backend(args)
+    if not args.resume_from:
+        _scope_error = latency_budget_scope_error(
+            getattr(args, "framework", None) or os.environ.get("FRAMEWORK", ""), getattr(args, "max_latency_ms", None)
+        )
+        if _scope_error:
+            print(f"ERROR: {_scope_error}.", file=sys.stderr)
+            raise SystemExit(2)
     _apply_agentx_budget_profile(args)
     from hyperloom.orchestrator.actions.executors._subprocess_kill import resolve_benchmark_timeouts
 
@@ -1703,6 +1801,13 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             sys.exit(2)
+        _latency_conflict = latency_budget_scope_error(
+            state.framework, getattr(args, "max_latency_ms", None)
+        ) or latency_budget_resume_conflict(state, getattr(args, "max_latency_ms", None))
+        if _latency_conflict:
+            session_lock.release()
+            print(f"ERROR: cannot resume this session -- {_latency_conflict}.", file=sys.stderr)
+            sys.exit(2)
         prior_stop = state.stop_reason
         print(f"Resuming session: {session_dir}")
         print(f"  manifest.session_id    : {manifest.get('session_id')}")
@@ -1727,16 +1832,19 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 if state.model_info:
                     state.save(session_dir)
                     print("  backfilled model_info (from config.json)")
-        if state.framework:
-            _enforce_expected_framework(state.framework)
-            os.environ["FRAMEWORK"] = state.framework
-            print(f"  re-exported FRAMEWORK : {state.framework}")
-            # KERNEL_OPT_BACKEND_ORDER lives in the process environment, not in the session, so
-            # it is gone in this new process. Without re-applying the default, a resumed atom
-            # session runs GEAK while the persisted state still reads 'forge' -- and silently,
-            # because the warning for an operator-named backend lives in the same function.
-            if state.framework == "atom":
-                _apply_atom_auto_tighten(args)
+        state.framework = _registered_framework_or_exit(
+            state.framework or os.environ.get("FRAMEWORK", ""),
+            hint="it comes from the resumed session, or from $FRAMEWORK when the session recorded none",
+        )
+        _enforce_expected_framework(state.framework)
+        os.environ["FRAMEWORK"] = state.framework
+        print(f"  re-exported FRAMEWORK : {state.framework}")
+        # KERNEL_OPT_BACKEND_ORDER lives in the process environment, not in the session, so
+        # it is gone in this new process. Without re-applying the default, a resumed atom
+        # session runs GEAK while the persisted state still reads 'forge' -- and silently,
+        # because the warning for an operator-named backend lives in the same function.
+        if state.framework == "atom":
+            _apply_atom_auto_tighten(args)
         if state.gpu_type:
             runner_gpu_type = _gpu_runner_type(state.gpu_type)
             os.environ["TARGET_GPU_TYPE"] = state.gpu_type
@@ -1744,6 +1852,16 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             print(f"  re-exported GPU_TYPE  : {state.gpu_type}")
             if runner_gpu_type != state.gpu_type:
                 print(f"  Magpie runner GPU_TYPE: {runner_gpu_type}")
+        _emit_launch_info(
+            pid=os.getpid(),
+            session_dir=session_dir,
+            session_id=str(manifest.get("session_id") or ""),
+            run_log=os.environ.get("INFERENCE_OPTIMIZER_RUN_LOG", ""),
+            gpu_type=state.gpu_type or "",
+            framework=state.framework or "",
+            model=str(state.model_path or ""),
+            launch_info_file=getattr(args, "launch_info_file", None),
+        )
         # Resolve workload knobs with the resumed state as the fallback source (explicit --isl/--conc/... on this
         # resume still win), then project the resolved values into env so resume sees the same workload contract (not
         # YAML defaults).
@@ -1798,6 +1916,19 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # The partition shape is part of the measurement contract, so it resumes on the same restore / apply / persist
         # path as the paths above.
         _restore_partition_shape_from_state(args, state)
+        # The power settings resume on the same assert / record path: an omitted flag re-asserts the archived value.
+        _declared_power = dict((getattr(state, "gpu_power_settings", None) or {}).get("declared") or {})
+        gpu_power, _gpu_power_error = resolve_gpu_power_settings(
+            power_cap_w=getattr(args, "gpu_power_cap_w", None) or _declared_power.get("power_cap_w"),
+            perf_level=getattr(args, "gpu_perf_level", None) or _declared_power.get("perf_level"),
+            nodes=max(int(getattr(args, "nodes", 1) or 1), int(getattr(state, "nodes", 1) or 1)),
+        )
+        if _gpu_power_error:
+            session_lock.release()
+            print(f"ERROR: cannot resume this session -- {_gpu_power_error}.", file=sys.stderr)
+            sys.exit(2)
+        _publish_gpu_power_settings(gpu_power)
+        state.gpu_power_settings = gpu_power
         state.compute_partition = _export_partition_shape(
             declared_mode=getattr(args, "compute_partition_mode", None),
             streams_per_partition=getattr(args, "streams_per_partition", None),
@@ -1828,13 +1959,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # flags real defaults rather than None.
         if args.no_warm_replay:
             state.warm_replay_enabled = False
-        for _wr_attr, _wr_default in (
-            ("warm_replay_min_confidence", 0.7),
-            ("warm_replay_min_reproduce_pct", 0.8),
-        ):
-            _wr_value = getattr(args, _wr_attr)
-            if _wr_value != _wr_default:
-                setattr(state, _wr_attr, _wr_value)
+        _wr_value = getattr(args, "warm_replay_min_confidence", None)
+        if _wr_value is not None:
+            state.warm_replay_min_confidence = _wr_value
         # Honour persisted kernel_enabled on resume; CLI --no-kernel can still override.
         if not state.kernel_enabled:
             args.no_kernel = True
@@ -1909,7 +2036,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         _begin_resume_leg(state)
         extend_hours = float(args.extend_hours)
         if extend_hours > 0.0:
-            state.extend_budget_minutes(extend_hours * 60.0, reason="--extend-hours")
+            state.extend_budget_minutes(extend_hours * 60.0)
         state.save(session_dir)
         _record_resumed_model_gate(
             args,
@@ -1929,19 +2056,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             args.max_hours = DEFAULT_MAX_HOURS
         for line in _resume_budget_lines(state, extend_hours=extend_hours):
             print(line)
-        # Re-bootstrap the recipe KB client (recreates client + reruns T0 warm-start); skipped when --degraded-kb.
-        recipe_kb_client = _bootstrap_recipe_kb(
-            args,
-            session_dir=session_dir,
-            manifest=manifest,
-            resume=True,
-        )
-        # KnowledgePlane owns Recipe KB even when PR Monitor is degraded.
-        knowledge_plane = _bootstrap_knowledge_plane(
-            args,
-            recipe_kb_client=recipe_kb_client,
-            session_dir=session_dir,
-        )
         # No resume backfill needed for roofline (roofline_snapshots restored by SharedState.from_dict).
     else:
         # Resolve model path: --model > $MODEL_PATH; fail fast rather than silently use the YAML hardcoded model.
@@ -1965,18 +2079,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         await _run_quantization_prelude(args)
 
         # Resolve framework: --framework > $FRAMEWORK > "sglang" (session-wide; no framework mixing).
-        framework = (
-            args.framework or os.environ.get("FRAMEWORK", "")
-        ).strip().lower() or framework_registry.DEFAULT_FRAMEWORK
-        if not framework_registry.is_supported(framework):
-            print(
-                f"ERROR: --framework must be one of "
-                f"{', '.join(framework_registry.names())} "
-                f"(got {framework!r}); set $FRAMEWORK accordingly or pass "
-                "--framework",
-                file=sys.stderr,
-            )
-            sys.exit(2)
+        framework = _registered_framework_or_exit(
+            args.framework or os.environ.get("FRAMEWORK", ""),
+            hint="set $FRAMEWORK accordingly or pass --framework",
+        )
         _enforce_expected_framework(framework)
         os.environ["FRAMEWORK"] = framework
         print(f"Framework       : {framework}")
@@ -1987,7 +2093,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             _apply_atom_auto_tighten(args)
 
         # Resolve real target GPU: probe > --gpu-type hint; probe wins to catch wrong-host typos that corrupt KB.
-        user_specified = (args.gpu_type or os.environ.get("GPU_TYPE", "")).strip().lower()
+        user_specified = _resolve_amd_gpu_type(args.gpu_type) or ""
         if _should_remote_probe_gpu(args):
             from ..multi_node._internal.gpu_probe import remote_autodetect_gpu_type
 
@@ -2043,21 +2149,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         if getattr(args, "profile_osl", None) is not None:
             os.environ["PROFILE_OSL"] = str(args.profile_osl)
         os.environ["PRECISION"] = args.precision
-        # Mirror resolved framework_version into env (explicit > auto-detect > unset; see _resolve_framework_version).
-        _fw_version_for_env = (getattr(args, "framework_version", None) or "").strip() or (
-            os.environ.get("FRAMEWORK_VERSION", "") or ""
-        ).strip()
-        if not _fw_version_for_env:
-            from ..recipe_snapshot_constants import (
-                DEFAULT_FRAMEWORK_VERSION_SLUG,
-                detect_framework_version,
-            )
-
-            _detected = detect_framework_version(
-                (getattr(args, "framework", None) or "").strip() or os.environ.get("FRAMEWORK", "")
-            )
-            if _detected and _detected != DEFAULT_FRAMEWORK_VERSION_SLUG:
-                _fw_version_for_env = _detected
+        _fw_version_for_env = resolve_framework_version(args)
         if _fw_version_for_env:
             os.environ["FRAMEWORK_VERSION"] = _fw_version_for_env
         if _agentx_enabled():
@@ -2093,10 +2185,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         _persist_install_event(args, session_dir)
         # One-shot Langfuse startup marker so a run killed before a breakdown still leaves a correlatable trace.
         try:
-            from hyperloom.orchestrator.trace.langfuse_emitter import record_session_start
+            from hyperloom.inference_optimizer.trace.langfuse_emitter import record_session_start
 
             record_session_start(session_dir)
-        except Exception:  # noqa: BLE001 — startup marker must never break launch
+        except Exception:
             log.debug("langfuse record_session_start failed (non-fatal)", exc_info=True)
         print(f"Session dir     : {session_dir}")
         print(f"Session id      : {manifest['session_id']}  (manifest label only)")
@@ -2126,11 +2218,21 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             model_path=str(args.model or os.environ.get("MODEL_PATH") or ""),
             precision=getattr(args, "precision", None),
         )
+        gpu_power, _gpu_power_error = resolve_gpu_power_settings(
+            power_cap_w=getattr(args, "gpu_power_cap_w", None),
+            perf_level=getattr(args, "gpu_perf_level", None),
+            nodes=nodes_resolved,
+        )
+        if _gpu_power_error:
+            print(f"ERROR: {_gpu_power_error}.", file=sys.stderr)
+            sys.exit(2)
+        _publish_gpu_power_settings(gpu_power)
         state = _seed_shared_state(
             session_dir,
             args,
             session_id=manifest["session_id"],
             compute_partition=compute_partition,
+            gpu_power_settings=gpu_power,
         )
         _start_model_gate(args, session_dir)
         # Unsupported-model preflight: reject multimodal/vision configs (runs after seed, before heavy bring-up).
@@ -2143,19 +2245,20 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         if _preflight_context_window(args, session_dir):
             sys.exit(2)
         _finish_model_gate(args, session_dir)
-        # Recipe KB T0 anchor (after seed for recipe_canonical_id, before Coordinator); skipped when --degraded-kb.
-        recipe_kb_client = _bootstrap_recipe_kb(
-            args,
-            session_dir=session_dir,
-            manifest=manifest,
-            resume=False,
-        )
-        # KnowledgePlane owns Recipe KB even when PR Monitor is degraded.
-        knowledge_plane = _bootstrap_knowledge_plane(
-            args,
-            recipe_kb_client=recipe_kb_client,
-            session_dir=session_dir,
-        )
+
+    # Recipe KB T0 anchor (after seed/restore for recipe_canonical_id, before Coordinator); skipped when --degraded-kb.
+    recipe_kb_client = _bootstrap_recipe_kb(
+        args,
+        session_dir=session_dir,
+        manifest=manifest,
+        resume=bool(args.resume_from),
+    )
+    # KnowledgePlane owns Recipe KB even when PR Monitor is degraded.
+    knowledge_plane = _bootstrap_knowledge_plane(
+        args,
+        recipe_kb_client=recipe_kb_client,
+        session_dir=session_dir,
+    )
 
     from ..multi_node.state_paths import bind_state_file_to_session
 
@@ -2261,6 +2364,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         critic_agent_root=critic_agent_root,
         critic_kb_mode=critic_kb_mode,
         codex_follows_claude=codex_follows_claude,
+        claude_follows_codex=claude_follows_codex,
         critic_protocol=args.critic_protocol,
     )
     # Expose active session_dir to in-process executors via the canonical pin env var; reinforced here for resume
@@ -2270,7 +2374,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     os.environ["INFERENCE_OPTIMIZER_STRICT_PATHS"] = "1"
     # --reset-state backs up state.json and starts blank, before Coordinator is constructed.
     if getattr(args, "reset_state", False):
-        _reset_state_file(session_dir)
+        _reset_state_file(session_dir, framework=state.framework)
     # Build phase budget pct dict from CLI flags; absent values fall back to Coordinator library defaults.
     phase_budget_pct = _build_phase_budget_pct(args)
 
@@ -2278,16 +2382,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         session_dir,
         backends=backends,
         model_class=(getattr(args, "model_class", None) or os.environ.get("MODEL_CLASS") or ""),
-        recipe_kb=recipe_kb_client,
         phase_budget_pct=phase_budget_pct or None,
         # KnowledgePlane facade (None when --degraded-pr).
         knowledge_plane=knowledge_plane,
         # Advisory multi-model specialist-proposal scorer, disabled by default (enable via --proposal-scoring).
         proposal_scorer=_build_proposal_scorer(args, session_dir),
-        # Warm-recipe replay controls.
-        warm_replay_enabled=state.warm_replay_enabled,
-        warm_replay_min_confidence=state.warm_replay_min_confidence,
-        warm_replay_min_reproduce_pct=state.warm_replay_min_reproduce_pct,
     )
     framework_for_prompt = os.environ.get("FRAMEWORK", "").strip().lower() or "sglang"
     max_minutes_for_prompt = int(round(float(args.max_hours) * 60))
@@ -2318,25 +2417,29 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             transport=_orch_transport,
             benchmark_mode=str(getattr(coordinator.shared_state, "benchmark_mode", "") or ""),
             agentx_corpus_shape=coordinator.shared_state.agentx_corpus_shape,
+            agentx_grading=coordinator.shared_state.grading,
+            agentx_backend=coordinator.shared_state.agentx_backend,
         ),
         "critic": args.critic_prompt or _load_critic_prompt(),
     }
-    coordinator.system_prompt_overrides = prompts
-    # Cache a pure rebuild closure so the macro-cycle boundary can re-focus the orchestration prompt without reaching
-    # back into argparse.
     import functools as _functools
 
-    coordinator._orch_prompt_is_user_supplied = bool(args.orch_prompt)
-    coordinator._rebuild_orch_prompt = _functools.partial(
-        _build_orchestration_prompt,
-        no_kernel=no_kernel,
-        no_framework_agent=no_framework_agent,
-        framework=framework_for_prompt,
-        objective=objective,
-        max_minutes=max_minutes_for_prompt,
-        transport=_orch_transport,
-        benchmark_mode=str(getattr(coordinator.shared_state, "benchmark_mode", "") or ""),
-        agentx_corpus_shape=coordinator.shared_state.agentx_corpus_shape,
+    coordinator.orch_prompt = _OrchestrationPrompt(
+        overrides=prompts,
+        is_user_supplied=bool(args.orch_prompt),
+        rebuild=_functools.partial(
+            _build_orchestration_prompt,
+            no_kernel=no_kernel,
+            no_framework_agent=no_framework_agent,
+            framework=framework_for_prompt,
+            objective=objective,
+            max_minutes=max_minutes_for_prompt,
+            transport=_orch_transport,
+            benchmark_mode=str(getattr(coordinator.shared_state, "benchmark_mode", "") or ""),
+            agentx_corpus_shape=coordinator.shared_state.agentx_corpus_shape,
+            agentx_grading=coordinator.shared_state.grading,
+            agentx_backend=coordinator.shared_state.agentx_backend,
+        ),
     )
     # Build specialist executor only when research_lane capacity > 0 (0 degrades to LLM-direct grid).
     specialist_capacity = int(getattr(args, "research_lane_capacity", 1) or 0)
@@ -2354,7 +2457,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         specialist_executor=specialist_executor,
     )
     # Persist effective system prompts for resume / drift inspection.
-    _snapshot_system_prompts(session_dir, prompts=prompts, orchestration_phase=_initial_phase)
+    _snapshot_system_prompts(
+        session_dir, prompts=prompts, orchestration_phase=_initial_phase, macro_cycle=_initial_macro_cycle
+    )
 
     def _backend_kind(role: str) -> str:
         backend = backends.get(role)
@@ -2421,14 +2526,14 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         _write_cli_terminal_artifacts(session_dir, state, effective_stop_reason)
         try:
             state.save(session_dir)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("failed to persist teardown timings (non-fatal)")
 
     _reconcile_crash_count(coordinator.shared_state, session_dir)
     # NOTE: conc_sweep is now a SWEEP-phase action auto-enqueued by the Coordinator, not a post-hook here.
 
     _print_final_summary(coordinator.shared_state, stop_reason, session_dir)
-    return _exit_code_for_stop_reason(stop_reason)
+    return _exit_code_for_stop_reason(stop_reason, coordinator.shared_state.baseline_tput)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2462,11 +2567,7 @@ def main(argv: list[str] | None = None) -> int:
             if v and Path(v).exists():
                 setattr(args, attr, Path(v).read_text(encoding="utf-8"))
         return asyncio.run(_run_optimize(args))
-    if args.command == "recover-session":
+    if args.command == "recover":
         return _run_recover_session(args)
     parser.print_help()
     return 2
-
-
-if __name__ == "__main__":
-    sys.exit(main())

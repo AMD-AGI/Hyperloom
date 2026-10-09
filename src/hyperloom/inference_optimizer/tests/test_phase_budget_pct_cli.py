@@ -14,9 +14,13 @@ from hyperloom.orchestrator.phases.machine_state import (
     DEFAULT_PHASE_BUDGET_PCT,
     PHASE_FRAMEWORK_AGENT,
     PHASE_KERNEL_AGENT,
+    PHASE_PRELUDE,
     normalize_budget_pct,
     redistribute_budget_pct,
 )
+from hyperloom.orchestrator.state.shared_state import SharedState
+
+from .conftest import make_coordinator
 
 
 def _parse_optimize(argv: list[str]) -> object:
@@ -24,13 +28,9 @@ def _parse_optimize(argv: list[str]) -> object:
     return parser.parse_args(["optimize", "--model", "/tmp/m", *argv])
 
 
-@pytest.mark.parametrize(
-    "flag",
-    ["--max-minutes-kernel-pct", "--phase-budget-kernel-pct"],
-)
-def test_kernel_pct_override_reaches_kernel_agent(flag: str) -> None:
-    """Both flag spellings must survive normalize_budget_pct as KERNEL_AGENT."""
-    args = _parse_optimize([flag, "0.78"])
+def test_kernel_pct_override_reaches_kernel_agent() -> None:
+    """The override must survive normalize_budget_pct as KERNEL_AGENT."""
+    args = _parse_optimize(["--phase-budget-kernel-pct", "0.78"])
     raw = cli._build_phase_budget_pct(args)
     assert raw.get(PHASE_KERNEL_AGENT) == pytest.approx(0.78)
 
@@ -48,13 +48,9 @@ def test_kernel_pct_key_is_canonical_phase_name() -> None:
     assert PHASE_KERNEL_AGENT in raw
 
 
-@pytest.mark.parametrize(
-    "flag",
-    ["--max-minutes-framework-pct", "--phase-budget-framework-pct"],
-)
-def test_framework_pct_override_reaches_framework_agent(flag: str) -> None:
-    """FRAMEWORK_AGENT is a budgeted phase, so both flag spellings must parse and survive normalize_budget_pct as FRAMEWORK_AGENT."""
-    args = _parse_optimize([flag, "0.42"])
+def test_framework_pct_override_reaches_framework_agent() -> None:
+    """FRAMEWORK_AGENT is a budgeted phase, so the override must survive normalize_budget_pct as FRAMEWORK_AGENT."""
+    args = _parse_optimize(["--phase-budget-framework-pct", "0.42"])
     raw = cli._build_phase_budget_pct(args)
     assert raw.get(PHASE_FRAMEWORK_AGENT) == pytest.approx(0.42)
 
@@ -73,7 +69,7 @@ def test_framework_pct_key_is_canonical_phase_name() -> None:
 
 
 def test_all_phase_budget_pct_spellings_parse() -> None:
-    """Every phase accepts both the legacy and the phase-budget spelling."""
+    """Every phase accepts its phase-budget flag."""
     argv = [
         "--phase-budget-prelude-pct",
         "0.05",
@@ -105,9 +101,9 @@ def test_qwen3_8b_3h_no_kernel_budget_shape() -> None:
         [
             "--max-hours",
             "3",
-            "--max-minutes-framework-pct",
+            "--phase-budget-framework-pct",
             "0.50",
-            "--max-minutes-sweep-pct",
+            "--phase-budget-sweep-pct",
             "0.01",
             "--no-kernel",
             "--no-enable-conc-sweep",
@@ -141,7 +137,7 @@ def test_qwen3_8b_3h_no_kernel_budget_shape() -> None:
 def test_redistribute_caps_absorber_at_full_wall_clock() -> None:
     """An override that over-absorbs is capped, not silently defaulted.
 
-    ``--max-minutes-framework-pct 0.90`` plus the share freed by ``--no-kernel``
+    ``--phase-budget-framework-pct 0.90`` plus the share freed by ``--no-kernel``
     sums past ``1.0``. Before the cap that value failed
     :func:`normalize_budget_pct`'s range check downstream and reverted to the
     FRAMEWORK_AGENT default — handing the caller *less* budget than the smaller
@@ -151,9 +147,9 @@ def test_redistribute_caps_absorber_at_full_wall_clock() -> None:
         [
             "--max-hours",
             "3",
-            "--max-minutes-framework-pct",
+            "--phase-budget-framework-pct",
             "0.90",
-            "--max-minutes-sweep-pct",
+            "--phase-budget-sweep-pct",
             "0.01",
             "--no-kernel",
         ]
@@ -201,3 +197,46 @@ def test_redistribute_all_enabled_is_noop_and_idempotent() -> None:
     assert once == base
     twice = redistribute_budget_pct(once, kernel_enabled=True, optimize_enabled=True)
     assert twice == once
+
+
+# ---------------------------------------------------------------------------
+# Resume budget semantics
+# ---------------------------------------------------------------------------
+
+
+def _persisted_session(session_dir, **fields) -> None:
+    SharedState(**fields).save(session_dir)
+
+
+def test_fresh_session_budget_args_override_state(tmp_path) -> None:
+    """Fresh session: explicit budget args reach state after renormalise + redistribute."""
+    coord = make_coordinator(tmp_path, phase_budget_pct={PHASE_KERNEL_AGENT: 0.55})
+
+    budget = coord.shared_state.phase_budget_pct
+    assert budget[PHASE_KERNEL_AGENT] == pytest.approx(0.55)
+    # And defaults survive for other phases.
+    assert PHASE_FRAMEWORK_AGENT in budget
+
+
+def test_resume_without_explicit_budget_args_preserves_state(tmp_path) -> None:
+    """Resume without explicit args: state budget (including LLM-added bumps) is unchanged."""
+    # A session that already has a saved budget with an LLM-added bump above the default.
+    bumped = {**DEFAULT_PHASE_BUDGET_PCT, PHASE_KERNEL_AGENT: 0.65}
+    _persisted_session(tmp_path, phase_budget_pct=bumped, phase=PHASE_PRELUDE)
+
+    # No explicit budget args (None means "operator said nothing").
+    coord = make_coordinator(tmp_path)
+
+    assert coord.shared_state.phase_budget_pct[PHASE_KERNEL_AGENT] == pytest.approx(0.65)
+
+
+def test_resume_with_explicit_budget_args_overwrites_state(tmp_path) -> None:
+    """Resume with explicit args: state budget is overwritten by the CLI values."""
+    bumped = {**DEFAULT_PHASE_BUDGET_PCT, PHASE_KERNEL_AGENT: 0.65}
+    _persisted_session(tmp_path, phase_budget_pct=bumped, phase=PHASE_PRELUDE)
+
+    # Operator explicitly passes a new kernel share.
+    coord = make_coordinator(tmp_path, phase_budget_pct={PHASE_KERNEL_AGENT: 0.30})
+
+    # The CLI value wins; the LLM bump is gone.
+    assert coord.shared_state.phase_budget_pct[PHASE_KERNEL_AGENT] == pytest.approx(0.30)

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,9 @@ import pytest
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.orchestrator.phases import machine_state as ps
+from hyperloom.orchestrator.state.shared_state import SharedState
+
+from ._geak_helpers import stop_geak_before_launch
 
 
 def _coordinator(session_dir: Path):
@@ -31,19 +35,40 @@ def _coordinator(session_dir: Path):
             payload={"topic": "heartbeat", "body_md": "ok"},
         ),
     )
-    return Coordinator(
+    coord = Coordinator(
         session_dir,
         backends={
             "orchestration": MockBackend(silent, name="orch"),
             "critic": MockCriticBackend(),
         },
     )
+    coord.sub.register_executor("kernel_agent", coord.phase_kernel.run_agent)
+    return coord
+
+
+async def _settle_unjoined_actions(coord: Any) -> None:
+    """Let the actions the pump dispatched without joining run to completion."""
+    handles = [entry.atask for entry in coord.dispatcher._inflight_actions.values()]
+    if handles:
+        await asyncio.gather(*handles)
+
+
+def _no_controller_run(**kwargs: Any) -> dict[str, Any]:
+    return {"status": "no_opportunity", "patch_count": 0, "task_count": 0, "output_dir": str(kwargs["output_dir"])}
 
 
 @pytest.fixture
 def session_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    from hyperloom.orchestrator.kernel import controller_submit
+
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    return make_session_dir()
+    # KERNEL entry would otherwise launch a real GEAK runner or Controller process on its route.
+    stop_geak_before_launch(monkeypatch)
+    monkeypatch.setattr(controller_submit, "run_controller_subprocess", _no_controller_run)
+    session_dir = make_session_dir()
+    # The CLI seeds a registered framework before the Coordinator ever loads the state.
+    SharedState(framework="sglang").save(session_dir)
+    return session_dir
 
 
 def _chain(state: Any) -> list[tuple[str, str, str]]:
@@ -77,9 +102,26 @@ async def test_a_baseline_carries_the_run_into_the_optimisation_phase_with_work(
 
 
 @pytest.mark.asyncio
-async def test_both_arms_dry_walks_the_rest_of_the_chain(session_dir: Path):
-    """With nothing left to try, the run reaches CLOSE through every phase."""
+@pytest.mark.parametrize(
+    ("backend_order", "result_field", "result_key", "expected"),
+    [
+        ("", "geak_result", "error_class", "insufficient_budget"),
+        ("forge", "kernel_rewrite_controller_result", "status", "no_opportunity"),
+    ],
+    ids=["geak", "forge"],
+)
+async def test_both_arms_dry_walks_the_rest_of_the_chain(
+    session_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend_order: str,
+    result_field: str,
+    result_key: str,
+    expected: str,
+):
+    """With nothing left to try, the run reaches CLOSE through every phase, on either kernel route."""
     from hyperloom.orchestrator.state.attempt_ledger import record_config_attempt
+
+    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", backend_order)
 
     coord = _coordinator(session_dir)
     try:
@@ -98,6 +140,7 @@ async def test_both_arms_dry_walks_the_rest_of_the_chain(session_dir: Path):
                 fingerprint=f"fp-{i}",
                 variant_name=f"variant-{i}",
                 outcome="REVERT",
+                adopted=False,
                 gain_pct=0.01,
                 before_tput=1500.0,
                 after_tput=1500.15,
@@ -108,8 +151,11 @@ async def test_both_arms_dry_walks_the_rest_of_the_chain(session_dir: Path):
 
         for tick in range(1, 12):
             await coord.tick(tick)
+            # The kernel_agent task is not joined by the pump and holds the phase until it returns.
+            await _settle_unjoined_actions(coord)
 
         assert state.phase == ps.PHASE_CLOSE
+        assert getattr(state, result_field)[result_key] == expected
         visited = [to_phase for _, to_phase, _ in _chain(state)]
         assert visited[:2] == [ps.PHASE_PRELUDE, ps.PHASE_FRAMEWORK_AGENT]
         assert visited[-3:] == [ps.PHASE_KERNEL_AGENT, ps.PHASE_SWEEP, ps.PHASE_CLOSE]

@@ -12,6 +12,7 @@ routes, and that the merge lands on the dispatch rather than appending a row.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -25,7 +26,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
 )
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
-from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
+from hyperloom.orchestrator.specialists.dispatch import SpecialistDispatchCollaborator
 
 
 @pytest.fixture(autouse=True)
@@ -93,7 +94,7 @@ def test_an_empty_round_says_so_rather_than_going_missing(tmp_path) -> None:
     assert row["residual_questions"] == ["is the tokenizer the bound?"]
 
 
-def test_a_round_settled_outside_the_dispatcher_still_gets_a_row(tmp_path) -> None:
+def test_a_round_without_dispatch_evidence_does_not_get_a_guessed_row(tmp_path) -> None:
     phase_event.record_specialist_round(
         task_id="t-3",
         phase="PLATEAU",
@@ -103,10 +104,8 @@ def test_a_round_settled_outside_the_dispatcher_still_gets_a_row(tmp_path) -> No
     )
 
     actions = _actions("PLATEAU", 1)
-    assert actions["count"] == 1
-    (row,) = actions["rows"]
-    assert row["task_id"] == "t-3"
-    assert row["summary"] == "trajectory review"
+    assert actions["count"] == 0
+    assert actions["rows"] == []
 
 
 def test_re_recording_the_same_round_does_not_duplicate_it(tmp_path) -> None:
@@ -148,25 +147,30 @@ class _StubState:
 
 
 class _Seam:
-    """The writeback method under test, with only what it reads on it."""
+    """The specialist-dispatch method under test, with only what it reads on it."""
 
-    _record_specialist_round_product = WritebackCollaborator._record_specialist_round_product
+    _record_specialist_round_product = SpecialistDispatchCollaborator._record_specialist_round_product
 
     def __init__(self, *, phase: str, framework_recorder: Any = None) -> None:
         self.shared_state = _StubState(phase)
-        self._framework_timeline_recorder = framework_recorder
+        self.phase_framework = SimpleNamespace(timeline=lambda: framework_recorder)
+        # Provide _coord so collaborator cross-calls resolve.
+        self._coord = SimpleNamespace(
+            shared_state=self.shared_state,
+            phase_framework=self.phase_framework,
+        )
 
 
-def test_a_round_that_names_no_phase_is_charged_to_the_running_one(tmp_path) -> None:
+def test_a_round_without_a_dispatch_row_is_not_charged_to_the_running_phase(tmp_path) -> None:
     seam = _Seam(phase="KERNEL_AGENT")
     seam._record_specialist_round_product(
         task=_StubTask("t-6"),
         round_entry={"round_id": "r-6", "domain": "gemm", "proposals_total": 1},
     )
 
-    (row,) = _actions("KERNEL_AGENT")["rows"]
-    assert row["task_id"] == "t-6"
-    assert row["domain"] == "gemm"
+    actions = _actions("KERNEL_AGENT")
+    assert actions["count"] == 0
+    assert actions["rows"] == []
 
 
 def test_a_framework_round_is_not_also_written_to_the_phase(tmp_path) -> None:

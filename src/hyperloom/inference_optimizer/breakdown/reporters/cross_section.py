@@ -89,8 +89,7 @@ def _gain_attribution_lines(
             )
         ]
         # Every contribution is measured against the session baseline, so the
-        # split is the ledger's own arithmetic rather than one of several
-        # attribution methods the section used to have to name.
+        # split is the ledger's own arithmetic, labelled ``stack_ledger``.
         return lines, "stack_ledger"
 
     final = as_dict(outcome_of(breakdown).get("final"))
@@ -185,6 +184,12 @@ def _data_quality_flags(
 
     for note in validation_of(breakdown).get("notes") or []:
         _push(f"[attribution] {note}")
+    metadata = breakdown.get("metadata")
+    if isinstance(metadata, dict):
+        for warning in metadata.get("warnings") or []:
+            text = str(warning).strip()
+            if text:
+                _push(f"[export] {text}")
     return flags
 
 

@@ -15,9 +15,9 @@ import yaml
 
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 
-from ._grid_server_args import merge_server_args
-from ._grid_server_args import tokenize_server_args_preserving_json
-from ._grid_server_args import validate_server_args_shell_safe
+from hyperloom.inference_optimizer.grid_server_args import merge_server_args
+from hyperloom.inference_optimizer.grid_server_args import tokenize_server_args_preserving_json
+from hyperloom.inference_optimizer.grid_server_args import validate_server_args_shell_safe
 
 
 @dataclass(frozen=True)
@@ -85,7 +85,10 @@ def add_server_arg_unless_pinned(
     return True
 
 
-def seal_server_argv(envs: MutableMapping[str, Any], framework: str | None) -> ServerArgv:
+def seal_server_argv(
+    envs: MutableMapping[str, Any],
+    framework: str | None,
+) -> ServerArgv:
     """Write the final server argument string into ``envs`` and return its argv.
 
     Args:
@@ -106,11 +109,25 @@ def seal_server_argv(envs: MutableMapping[str, Any], framework: str | None) -> S
     return sealed
 
 
+class ConfigUnreadable(Exception):
+    """A materialised benchmark YAML that cannot be read as a config."""
+
+
 def _load_config(config_path: str | Path) -> dict[str, Any]:
-    """Read a materialised benchmark YAML, empty when it is not a mapping."""
-    with Path(config_path).open(encoding="utf-8") as handle:
-        cfg = yaml.safe_load(handle)
-    return cfg if isinstance(cfg, dict) else {}
+    """Read a materialised benchmark YAML.
+
+    Raises:
+        ConfigUnreadable: When the file cannot be opened, is not UTF-8, is not
+            YAML a safe loader can construct, or does not hold a mapping.
+    """
+    try:
+        with Path(config_path).open(encoding="utf-8") as handle:
+            cfg = yaml.safe_load(handle)
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        raise ConfigUnreadable(f"{config_path}: {exc}") from exc
+    if not isinstance(cfg, dict):
+        raise ConfigUnreadable(f"{config_path}: holds {type(cfg).__name__}, not a mapping")
+    return cfg
 
 
 def _benchmark_envs(config_path: str | Path) -> tuple[str | None, dict[str, Any]]:
@@ -130,6 +147,9 @@ def config_server_argv(config_path: str | Path) -> ServerArgv:
 
     Returns:
         ServerArgv: The argv carried by the config's benchmark envs.
+
+    Raises:
+        ConfigUnreadable: When the config cannot be read.
     """
     framework, envs = _benchmark_envs(config_path)
     env_name = server_args_env_name(framework)
@@ -145,6 +165,9 @@ def config_launch_env(config_path: str | Path, base: Mapping[str, str]) -> dict[
 
     Returns:
         dict[str, str]: ``base`` overlaid with the config's benchmark envs.
+
+    Raises:
+        ConfigUnreadable: When the config cannot be read.
     """
     _framework, envs = _benchmark_envs(config_path)
     merged = {str(key): str(value) for key, value in base.items()}
@@ -163,6 +186,7 @@ def reseal_config_argv(config_path: str | Path, text: str) -> ServerArgv:
         ServerArgv: The re-sealed argv.
 
     Raises:
+        ConfigUnreadable: When the config cannot be read.
         ValueError: When the replacement carries shell control syntax.
     """
     path = Path(config_path)
@@ -177,6 +201,7 @@ def reseal_config_argv(config_path: str | Path, text: str) -> ServerArgv:
 
 
 __all__ = [
+    "ConfigUnreadable",
     "ServerArgv",
     "add_server_arg_unless_pinned",
     "config_launch_env",

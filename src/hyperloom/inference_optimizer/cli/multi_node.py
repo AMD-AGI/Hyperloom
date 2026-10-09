@@ -73,9 +73,9 @@ def _prepare_multi_node_state(args: argparse.Namespace) -> None:
             file=sys.stderr,
         )
         sys.exit(2)
-    # The mirror image, and the one that used to pass. --mn-backend defaults to rayjob, so an infera-shaped hand-off
-    # whose operator forgot the flag was rewritten to rayjob here and reported server_control=yes -- SSH control is
-    # real, it is simply not the control this backend uses.
+    # The mirror image. --mn-backend defaults to rayjob, so an infera-shaped hand-off whose operator forgot the flag
+    # arrives here as rayjob and would report server_control=yes -- SSH control is real, it is simply not the control
+    # this backend uses.
     if ext_state["backend"] == "rayjob" and not ext_state.get("head_pod_ip"):
         if external_has_ssh_control():
             print(
@@ -211,7 +211,8 @@ def _replay_kernel_patches_for_multi_node(args: argparse.Namespace) -> None:
         cmd = [
             sys.executable,
             "-m",
-            "hyperloom.inference_optimizer.multi_node",
+            "hyperloom",
+            "multi-node",
             "apply-patch",
             "--patch-file",
             str(patch_path),

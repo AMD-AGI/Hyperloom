@@ -2,7 +2,7 @@
 
 [![Tests](https://github.com/AMD-AGI/Hyperloom/actions/workflows/tests-coverage.yml/badge.svg)](https://github.com/AMD-AGI/Hyperloom/actions/workflows/tests-coverage.yml)
 [![Lint](https://github.com/AMD-AGI/Hyperloom/actions/workflows/lint.yml/badge.svg)](https://github.com/AMD-AGI/Hyperloom/actions/workflows/lint.yml)
-[![Version](https://img.shields.io/badge/version-1.1.1-blue)](https://github.com/AMD-AGI/Hyperloom/blob/main/pyproject.toml)
+[![Version](https://img.shields.io/badge/version-1.1.3-blue)](https://github.com/AMD-AGI/Hyperloom/blob/main/pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](https://github.com/AMD-AGI/Hyperloom/blob/main/LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://github.com/AMD-AGI/Hyperloom/blob/main/pyproject.toml)
 
@@ -104,7 +104,7 @@ the knowledge base are described further in
 | Framework | SGLang, vLLM, xDiT |
 | Kernel language | HIP, Triton, FlyDSL |
 | Kernel backends | GEAK, KernelForge |
-| LLM backend | Claude |
+| LLM backend | Claude, Codex |
 
 ## Get started
 
@@ -115,7 +115,7 @@ the knowledge base are described further in
 | Understand the algorithm | [Optimization loop](https://github.com/AMD-AGI/Hyperloom/blob/main/docs/conceptual/optimization-loop.md) |
 
 ```bash
-python -m hyperloom.inference_optimizer.cli optimize
+python -m hyperloom optimize
 ```
 
 ## Documentation
@@ -145,8 +145,8 @@ feedback through the
 - Runtime package: `src/hyperloom/`
 - Contributor & AI authoring contract: [`AGENTS.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/AGENTS.md)
 - Main agent instructions: [`src/hyperloom/inference_optimizer/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/SKILL.md)
-- CLI entry point: `python -m hyperloom.inference_optimizer.cli optimize`
-- Operator tools: `python -m hyperloom.inference_optimizer.tools.*`
+- CLI entry point: `hyperloom <command>` (or `python -m hyperloom <command>`)
+- Operator tools: `python -m hyperloom session <breakdown|report|backfill|events|state>`
 - Compute-partition sweep: `python3 scripts/partition_mode_sweep.py` — sets each
   AMD partition mode (`SPX`/`DPX`/`QPX`/`CPX`) on one card in turn, runs the same
   benchmark on every partition that mode creates, sums the throughput and restores
@@ -188,7 +188,7 @@ the terms of the MIT license, provided the copyright notice and the
 permission notice are retained in all copies or substantial portions of
 the software.
 
-Third-party tools and agents (Cursor, Visual Studio, and Claude Code)
+Third-party tools and agents (Cursor, Visual Studio, Claude Code, and Codex)
 that Hyperloom invokes are governed by their own separate license terms
 and are NOT covered by the MIT license above — see the "Third-Party
 Tools and Agents" section in [`LICENSE`](https://github.com/AMD-AGI/Hyperloom/blob/main/LICENSE). You are responsible

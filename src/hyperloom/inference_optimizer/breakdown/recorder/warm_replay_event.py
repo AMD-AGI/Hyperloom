@@ -69,9 +69,7 @@ APPLY_PATCH = "patch"
 
 # The gates the arc can end on, in the order the settling applies them.
 # Constants because assembly selects on them, so a consumer reading "which gate
-# ended this" must not match on wording. The historical reproduce bar is not
-# among them: it never rejects, so a gate row for it would make ``blocked_by``
-# name the reason a successful arc ended. It lives in the verdict block.
+# ended this" must not match on wording.
 GATE_TPUT_VALID = "tput_valid"
 GATE_QUALITY = "quality"
 GATE_ACCURACY = "accuracy"
@@ -171,8 +169,6 @@ def _verdict(settled: Mapping[str, Any]) -> dict[str, Any]:
         "reason": str(settled.get("reason") or ""),
         "error_class": str(settled.get("error_class") or ""),
         "keep_threshold_pct": _float_or_none(settled.get("keep_threshold_pct")),
-        "below_historical_reproduce_pct": bool(settled.get("below_historical_reproduce_pct")),
-        "historical_reproduce_bar_pct": _float_or_none(settled.get("historical_reproduce_bar_pct")),
         "settled_at": str(settled.get("settled_at") or ""),
     }
 
@@ -196,7 +192,6 @@ class WarmReplayEventRecorder:
         donor: Mapping[str, Any] | None = None,
         expected_gain_pct: Any = None,
         confidence: Any = None,
-        min_reproduce_pct: Any = None,
         session_baseline_tput: Any = None,
         kernel_count: Any = None,
         recipe_suppressed: Any = None,
@@ -230,7 +225,6 @@ class WarmReplayEventRecorder:
             "donor": _as_dict(donor) or None,
             "expected_gain_pct": _float_or_none(expected_gain_pct),
             "confidence": _float_or_none(confidence),
-            "min_reproduce_pct": _float_or_none(min_reproduce_pct),
             "session_baseline_tput": _float_or_none(session_baseline_tput),
             "kernel_count": None if kernel_count is None else int(kernel_count),
             "recipe_suppressed": None if recipe_suppressed is None else bool(recipe_suppressed),
@@ -592,50 +586,33 @@ def make_warm_replay_recorder(
     donor: Mapping[str, Any] | None = None,
     expected_gain_pct: Any = None,
     confidence: Any = None,
-    min_reproduce_pct: Any = None,
     session_baseline_tput: Any = None,
     kernel_count: Any = None,
     recipe_suppressed: Any = None,
     open_event_on_timeline: bool = True,
 ) -> WarmReplayEventRecorder | None:
-    """Build a recorder, or ``None`` when one cannot be constructed.
+    """Build a recorder, or ``None`` when no session is bound.
 
-    Replay behavior must not depend on the recorder existing, so construction
-    failures degrade to "no event", and an unbound session declines too. A
-    false ``open_event_on_timeline`` rebinds to an event a previous tick
+    A false ``open_event_on_timeline`` rebinds to an event a previous tick
     opened, which is how the promote seam records onto the enqueue seam's arc.
     """
-    from ...session.session_binding import session_is_bound
+    from .construct import decline_unbound
 
-    try:
-        if not session_is_bound():
-            log.warning(
-                "warm replay timeline: no session bound; this replay's whole event will be "
-                "missing from the breakdown. The coordinator binds at startup, so this means "
-                "either that never happened or the replay ran outside the session's context"
-            )
-            return None
-        recorder = WarmReplayEventRecorder(
-            make_sink(warm_replay_event_id(phase, macro_cycle), producer=PRODUCER),
-            task_id=task_id,
-            tier=tier,
-            config_source=config_source,
-            config_donor_tier=config_donor_tier,
-            donor=donor,
-            expected_gain_pct=expected_gain_pct,
-            confidence=confidence,
-            min_reproduce_pct=min_reproduce_pct,
-            session_baseline_tput=session_baseline_tput,
-            kernel_count=kernel_count,
-            recipe_suppressed=recipe_suppressed,
-        )
-    except Exception:  # noqa: BLE001 — observability cannot change replay behavior
-        log.warning(
-            "warm replay timeline: recorder construction failed; this replay's whole event "
-            "will be missing from the breakdown",
-            exc_info=True,
-        )
+    if decline_unbound("warm replay"):
         return None
+    recorder = WarmReplayEventRecorder(
+        make_sink(warm_replay_event_id(phase, macro_cycle), producer=PRODUCER),
+        task_id=task_id,
+        tier=tier,
+        config_source=config_source,
+        config_donor_tier=config_donor_tier,
+        donor=donor,
+        expected_gain_pct=expected_gain_pct,
+        confidence=confidence,
+        session_baseline_tput=session_baseline_tput,
+        kernel_count=kernel_count,
+        recipe_suppressed=recipe_suppressed,
+    )
     if open_event_on_timeline:
         recorder.begin()
     return recorder

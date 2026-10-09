@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -22,7 +23,6 @@ from hyperloom.orchestrator.roles.base import BackendError, LLMCallFailed, Retry
 from hyperloom.inference_optimizer.protocol.intent import (
     IntentType,
     IntentValidationError,
-    NoIntentEmitted,
 )
 
 
@@ -32,7 +32,7 @@ class FakeToolUseBlock:
     input: dict[str, Any]
 
     @classmethod
-    def __init_subclass__(cls, **kwargs):  # noqa: D401
+    def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
 
 
@@ -294,6 +294,17 @@ def test_build_options_effort_defaults_by_role(monkeypatch):
     assert other._build_options(tools=[], max_turns=4, system_prompt="sp").kwargs["effort"] == "low"
 
 
+def test_build_options_runs_the_cli_the_subprocess_specialists_spawn(monkeypatch, tmp_path):
+    """The in-process backend hands the SDK the same CLI ``resolve_claude_executable`` gives subprocesses."""
+    recorded = tmp_path / "claude"
+    recorded.write_text("#!/bin/sh\n", encoding="utf-8")
+    recorded.chmod(0o755)
+    monkeypatch.delenv("HYPERLOOM_CLAUDE_CLI_PATH", raising=False)
+    monkeypatch.setenv("GEAK_CLAUDE_BIN", str(recorded))
+    backend = ClaudeBackend(model="m", sdk_query_factory=_make_query_factory([]), sdk_options_cls=FakeOptions)
+    assert backend._build_options(tools=[], max_turns=1, system_prompt=None).kwargs["cli_path"] == str(recorded)
+
+
 def test_build_options_effort_env_override_and_thinking_off(monkeypatch):
     _clear_effort_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CLAUDE_ORCHESTRATION_EFFORT", "high")
@@ -449,7 +460,7 @@ async def test_run_text_blocks_collected_into_raw_text():
 
 
 @pytest.mark.asyncio
-async def test_run_no_emit_intent_raises_no_intent_emitted():
+async def test_run_without_an_emit_intent_call_returns_no_intents():
     msg = FakeAssistantMessage(
         content=[
             TextBlock(text="just thinking, no tool call."),
@@ -461,8 +472,9 @@ async def test_run_no_emit_intent_raises_no_intent_emitted():
         sdk_options_cls=FakeOptions,
         enable_mcp_emit_intent=False,
     )
-    with pytest.raises(NoIntentEmitted):
-        await backend.run("p")
+    result = await backend.run("p")
+    assert result.intents == []
+    assert "just thinking" in result.raw_text
 
 
 @pytest.mark.asyncio
@@ -525,6 +537,72 @@ async def test_unparsed_tool_wrapper_retries_dedupe_to_one_intent(tool_name):
     assert len(res.intents) == 2
     assert [intent.payload["topic"] for intent in res.intents] == ["heartbeat", "status"]
     assert backend.get_turn_diagnostic()["deduped_fallback_intents"] == 1
+
+
+@pytest.mark.parametrize("tool_name", [EMIT_INTENT_TOOL_QUALIFIED, EMIT_INTENT_TOOL_NAME])
+@pytest.mark.asyncio
+async def test_string_wrapped_fallback_retries_dedupe_to_one_intent(tool_name):
+    """A string-wrapped fallback dedupes exactly like the dict-wrapped one.
+
+    Behind an OpenAI-compatible / litellm proxy the wrapper arrives inside a
+    JSON *string*. Without wrapper detection accepting that shape, two
+    identical retries would each yield an intent and the duplicate action
+    would be dispatched twice.
+    """
+    raw = '{"intent_type": "send_message", "payload": {"topic": "heartbeat", "body_md": "ok"}}'
+    wrapped = json.dumps({"__unparsedToolInput": {"raw": raw, "len": len(raw)}})
+    other_raw = '{"intent_type": "send_message", "payload": {"topic": "status", "body_md": "next"}}'
+    other = json.dumps({"__unparsedToolInput": {"raw": other_raw, "len": len(other_raw)}})
+    msg = FakeAssistantMessage(
+        content=[
+            ToolUseBlock(name=tool_name, input=wrapped),
+            ToolUseBlock(name=tool_name, input=wrapped),
+            ToolUseBlock(name=tool_name, input=other),
+        ]
+    )
+    backend = ClaudeBackend(
+        sdk_query_factory=_make_query_factory([msg]),
+        sdk_options_cls=FakeOptions,
+        enable_mcp_emit_intent=False,
+        capture_turn_diagnostics=True,
+    )
+    res = await backend.run("p")
+    assert res.metadata["tool_blocks"] == 3
+    assert len(res.intents) == 2
+    assert [intent.payload["topic"] for intent in res.intents] == ["heartbeat", "status"]
+    assert backend.get_turn_diagnostic()["deduped_fallback_intents"] == 1
+
+
+@pytest.mark.parametrize("tool_name", [EMIT_INTENT_TOOL_QUALIFIED, EMIT_INTENT_TOOL_NAME])
+@pytest.mark.asyncio
+async def test_empty_string_tool_input_reports_decode_error(tool_name):
+    """An empty-string input reports a decode error, not a missing intent_type.
+
+    ``input or {}`` used to swallow ``""`` into ``{}``, which decoded cleanly
+    and surfaced later as ``intent_type None not in allowed set`` — pointing a
+    reader at the model rather than at the undecodable envelope.
+    """
+    msg = FakeAssistantMessage(
+        content=[
+            ToolUseBlock(name=tool_name, input=""),
+            ToolUseBlock(
+                name=tool_name,
+                input={"intent_type": "send_message", "payload": {"topic": "heartbeat"}},
+            ),
+        ]
+    )
+    backend = ClaudeBackend(
+        sdk_query_factory=_make_query_factory([msg]),
+        sdk_options_cls=FakeOptions,
+        enable_mcp_emit_intent=False,
+        capture_turn_diagnostics=True,
+    )
+    res = await backend.run("p")
+    # The empty-string block is dropped; the rest of the turn is unaffected.
+    assert res.metadata["tool_blocks"] == 2
+    assert len(res.intents) == 1
+    parse_errors = backend.get_turn_diagnostic()["parse_errors"]
+    assert parse_errors == ["emit_intent tool input string is not valid JSON"]
 
 
 @pytest.mark.parametrize("tool_name", [EMIT_INTENT_TOOL_QUALIFIED, EMIT_INTENT_TOOL_NAME])
@@ -679,8 +757,7 @@ async def test_options_includes_system_prompt_and_max_turns():
         enable_mcp_emit_intent=False,
         max_turns_default=7,
     )
-    with pytest.raises(NoIntentEmitted):
-        await backend.run("the prompt", system_prompt="sys", tools=["Read"], max_turns=3)
+    await backend.run("the prompt", system_prompt="sys", tools=["Read"], max_turns=3)
     # max_turns is floored to _RAW_COMPLETION_MIN_MAX_TURNS (8) for every mode: Claude Code counts its own messages as
     # turns, so a literal max_turns=3 would trip before the model can emit an intent.
     assert captured["options_kwargs"]["max_turns"] == 8
@@ -717,8 +794,7 @@ async def test_options_includes_mcp_server_when_emit_intent_enabled():
     )
     assert backend.mcp_server_config is not None
     assert backend.mcp_tool_name == EMIT_INTENT_TOOL_QUALIFIED
-    with pytest.raises(NoIntentEmitted):
-        await backend.run("p", tools=["Read"])
+    await backend.run("p", tools=["Read"])
     kw = captured["options_kwargs"]
     assert "mcp_servers" in kw
     assert "inference_optimizer" in kw["mcp_servers"]

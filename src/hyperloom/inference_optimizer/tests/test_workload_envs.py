@@ -204,17 +204,6 @@ def test_visible_gpu_count_rocm_smi_error(monkeypatch):
     assert we._visible_gpu_count() == 0
 
 
-def test_default_baseline_config(monkeypatch):
-    monkeypatch.setenv("FRAMEWORK", "atom")
-    assert we.default_baseline_config().name == "baseline_atom.yaml"
-    monkeypatch.setenv("FRAMEWORK", "vllm")
-    assert we.default_baseline_config().name == "baseline_vllm.yaml"
-    monkeypatch.setenv("FRAMEWORK", "custom")
-    assert we.default_baseline_config().name == "baseline_custom.yaml"
-    monkeypatch.setenv("FRAMEWORK", "weird")
-    assert we.default_baseline_config().name == "baseline_sglang.yaml"
-
-
 def test_precision_and_gpu_type_no_framework_agent(monkeypatch, tmp_path):
     _clear_env(monkeypatch)
     monkeypatch.setenv("PRECISION", "fp8")
@@ -775,16 +764,6 @@ def test_agentx_active_true_from_persisted_state_without_env_var(monkeypatch):
     # session's persisted mode.
     _clear_env(monkeypatch)
     assert we.agentx_active(SimpleNamespace(benchmark_mode="agentx")) is True
-
-
-def test_agentx_kb_blocked_matches_agentx_active(monkeypatch):
-    # agentx_kb_blocked delegates to agentx_active; both signals still work.
-    _clear_env(monkeypatch)
-    assert we.agentx_kb_blocked() is False
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    assert we.agentx_kb_blocked() is True
-    _clear_env(monkeypatch)
-    assert we.agentx_kb_blocked(SimpleNamespace(benchmark_mode="agentx")) is True
 
 
 # Scriptable baseline sampling cost (measurement contract values)

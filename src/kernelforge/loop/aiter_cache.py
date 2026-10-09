@@ -85,7 +85,6 @@ def configure_aiter_cache_isolation(
     _atomic_write_json(
         owner_file,
         {
-            "schema_version": 1,
             "owner_pid": owner_pid,
             "created_unix": time.time(),
             "aiter_root_dir": str(aiter_root_dir),
@@ -147,8 +146,10 @@ def _source_digest(source_files: list[str]) -> str:
         digest.update(b"\0")
         try:
             digest.update(path.read_bytes())
-        except OSError:
-            digest.update(b"<unreadable>")
+        except FileNotFoundError:
+            # Absence is a state of its own; a source that is present but unreadable is not, and letting it stand in
+            # for its own bytes would key every later edit of it to the shard already holding the stale .so.
+            digest.update(b"<absent>")
         digest.update(b"\0")
     return digest.hexdigest()[:24]
 
@@ -293,7 +294,6 @@ def activate_aiter_cache_for_sources(
     _atomic_write_json(
         owner_file,
         {
-            "schema_version": 1,
             "owner_pid": owner_pid,
             "created_unix": existing_owner.get("created_unix", now),
             "last_used_unix": now,

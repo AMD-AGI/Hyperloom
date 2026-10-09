@@ -9,7 +9,6 @@ import logging
 import os
 import re
 import threading
-import warnings
 from dataclasses import dataclass, replace
 from importlib import metadata
 from typing import Callable, Mapping
@@ -29,7 +28,6 @@ log = logging.getLogger(__name__)
 # published contract third-party providers register against, and renaming it would drop every existing plugin without
 # a word -- a plugin that fails to load is recorded as one log line, not raised.
 PROVIDER_ENTRY_POINT_GROUP = "kernelforge.agent_providers"
-LEGACY_PROVIDER_ENTRY_POINT_GROUP = "kernel_agents.agent_providers"
 _PROVIDER_NAME = re.compile(r"^[a-z][a-z0-9_-]*$")
 
 
@@ -109,24 +107,7 @@ def discover_agent_providers(*, force: bool = False) -> None:
             return
         _plugins_loaded = True
         try:
-            discovered = metadata.entry_points()
-
-            def _select(group: str):
-                if hasattr(discovered, "select"):
-                    return list(discovered.select(group=group))
-                return list(discovered.get(group, []))
-
-            entries = _select(PROVIDER_ENTRY_POINT_GROUP)
-            legacy = [e for e in _select(LEGACY_PROVIDER_ENTRY_POINT_GROUP) if e.name not in {x.name for x in entries}]
-            if legacy:
-                warnings.warn(
-                    f"Agent provider entry-point group {LEGACY_PROVIDER_ENTRY_POINT_GROUP!r} is deprecated; "
-                    f"republish under {PROVIDER_ENTRY_POINT_GROUP!r}. Loading "
-                    + ", ".join(sorted(e.name for e in legacy)),
-                    DeprecationWarning,
-                    stacklevel=2,
-                )
-                entries = entries + legacy
+            entries = list(metadata.entry_points().select(group=PROVIDER_ENTRY_POINT_GROUP))
         except Exception as exc:  # noqa: BLE001 - plugin discovery is optional
             _plugin_errors["<discovery>"] = f"{type(exc).__name__}: {exc}"
             return

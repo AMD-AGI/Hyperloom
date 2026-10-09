@@ -34,6 +34,8 @@ from typing import Any, Mapping, NamedTuple
 import yaml
 
 from hyperloom.common.coerce import to_str_list
+from hyperloom.common.env import env_bool, env_flag, is_truthy
+from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.common.perf_metric import (
     GRADED_INTVTY,
     agentx_enabled as agentx_enabled,
@@ -53,12 +55,11 @@ from hyperloom.common.workload_defaults import (
     DEFAULT_OSL,
 )
 from hyperloom.inference_optimizer.session.paths import asset_root
-from hyperloom.orchestrator.framework.paths import ENV_FLYDSL_EXTRA_SOURCE_DIRS
-from hyperloom.orchestrator.framework.paths import GENERIC_FRAMEWORK_ROOT_ENV
-from hyperloom.orchestrator.framework.paths import flydsl_extra_source_dirs
-from ._accuracy_gate import _RUN_EVAL_FALSE_VALUES
+from hyperloom.inference_optimizer.framework_paths import ENV_FLYDSL_EXTRA_SOURCE_DIRS
+from hyperloom.inference_optimizer.framework_paths import GENERIC_FRAMEWORK_ROOT_ENV
+from hyperloom.inference_optimizer.framework_paths import flydsl_extra_source_dirs
 from ._benchmark_interpreter import _resolve_probe_python
-from ._grid_server_args import (
+from hyperloom.inference_optimizer.grid_server_args import (
     compact_json_server_args,
     dedup_vllm_server_args,
     inject_sglang_attention_backend,
@@ -66,12 +67,13 @@ from ._grid_server_args import (
     inject_sglang_watchdog_timeout,
     server_args_env_name,
 )
-from ._grid_server_args import merge_server_args
-from ._grid_server_args import remove_server_args
-from ._grid_server_args import validate_server_args_shell_safe
+from hyperloom.inference_optimizer.grid_server_args import merge_server_args
+from hyperloom.inference_optimizer.grid_server_args import remove_server_args
+from hyperloom.inference_optimizer.grid_server_args import validate_server_args_shell_safe
+from hyperloom.inference_optimizer import framework_registry
+from ._recipe_script import launcher_overwritten_envs
 from ._server_argv import add_server_arg_unless_pinned, seal_server_argv
 from ._server_patcher import (
-    ensure_sglang_patched_for_ck_blockscale,
     ensure_sglang_patched_for_tracelens,
     ensure_vllm_patched_for_tracelens,
 )
@@ -84,9 +86,10 @@ from hyperloom.inference_optimizer.model_config_utils import (
 
 log = logging.getLogger(__name__)
 
-# gfx942 / CDNA3 dies (MI300X, MI308X, MI325X) that ship the aiter CK
-# gemm_a8w8_bpreshuffle kernel. MI355X is gfx950 and excluded.
-_GFX942_GPU_TYPES = frozenset({"mi300x", "mi308x", "mi325x"})
+# The aiter CK gemm_a8w8_bpreshuffle kernel ships for gfx942 / CDNA3 only; gfx950
+# has no such kernel. The gate is the arch, so the board list is read off the
+# identity table rather than typed out beside it.
+_GFX942_GPU_TYPES = frozenset(board for board, (arch, _cus) in AMD_GPU_DISPATCH_IDENTITIES.items() if arch == "gfx942")
 
 
 # Value is optional so a bare, value-less flag (an operator typo, or a flag
@@ -242,17 +245,6 @@ def agentx_env_for_conc(conc: int | None = None) -> "Mapping[str, str]":
     return {**os.environ, "CONC": str(conc)}
 
 
-def agentx_kb_blocked(shared_state: Any = None) -> bool:
-    """Whether an AgentX session must skip its Recipe KB exchange, in either direction."""
-    # The recipe canonical id is a seven-tuple of model / hardware / framework / precision identity: no workload, no
-    # mode. Row workload tags come from ``SharedState.isl``/``osl``, the inert 1024/1024 placeholders under AgentX, so
-    # a write would overwrite a synthetic ``best_throughput`` on a bare numeric comparison and tag the row as a
-    # 1024/1024 synthetic run. Reads are blocked for the mirror-image reason: a recipe validated on that synthetic
-    # shape clears the donor shape gate and would warm-start an AgentX session onto the wrong regime. The store is
-    # machine-global and ``--reset-state`` does not clear it, so the damage outlives its session.
-    return agentx_active(shared_state)
-
-
 # The 1M-context families that replay the unfiltered corpus; everything else
 # gets the 256k-capped variant. Mirrors ``aiperf_client.sh::_default_loader``,
 # which is the side that actually selects the corpus at runtime -- this one only
@@ -349,10 +341,10 @@ def build_agentx_workload_spec(
     env: Mapping[str, str] | None = None,
     grading: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Describe the AgentX trace-replay workload for downstream consumers.
+    """Describe the AgentX workload for downstream consumers.
 
     Written into the materialized recipe and forwarded in the GEAK handoff so
-    GEAK can select the aiperf client and refuse to treat the CLI's synthetic
+    GEAK can select the AgentX client and refuse to treat the CLI's synthetic
     ``isl``/``osl`` placeholders as the served load. Omitted entirely on non-AgentX
     runs, so the fixed-ISL/OSL path stays byte-identical.
 
@@ -367,6 +359,14 @@ def build_agentx_workload_spec(
         env: The resolved process environment, carrying this round's ``CONC``
             (see :func:`agentx_env_for_conc`). Defaults to ``os.environ``.
     """
+    from hyperloom.common.agentx_workload import (
+        MLPERF_CORPUS,
+        MLPERF_PORT,
+        is_mlperf_backend,
+        mlperf_flow,
+        mlperf_trajectories,
+    )
+
     proc_env: Mapping[str, str] = os.environ if env is None else env
 
     def client_knob(key: str, default: Any) -> str:
@@ -390,6 +390,38 @@ def build_agentx_workload_spec(
         return str(proc_env.get(key) or envs.get(key) or default)
 
     default_isl, default_osl, default_conc = cli_workload_defaults()
+    conc = int(served_knob("CONC", default_conc))
+    metric_basis = geak_metric_axis(benchmark_mode="agentx", grading=grading)[1]
+    intvty_p90_veto_pct = (
+        float(grading["noise_pct"])
+        if isinstance(grading, Mapping) and isinstance(grading.get("noise_pct"), (int, float))
+        else parse_intvty_noise_pct()
+    )
+    isl_osl_placeholder = {
+        "isl": int(served_knob("ISL", default_isl)),
+        "osl": int(served_knob("OSL", default_osl)),
+        "note": "CLI defaults only; agentic replay ignores fixed ISL/OSL",
+    }
+    if is_mlperf_backend(proc_env) or is_mlperf_backend(envs):
+        return {
+            "kind": "agentx_mlperf_agentic",
+            "client": "mlperf",
+            "scenario": "mlperf-agentic-v6",
+            "corpus": MLPERF_CORPUS,
+            "canonical_corpus": MLPERF_CORPUS,
+            "num_entries": mlperf_trajectories(envs),
+            "duration_s": 0,
+            "geak_loop_duration_s": 0,
+            "concurrency": conc,
+            "metric_basis": metric_basis,
+            "intvty_p90_veto_pct": intvty_p90_veto_pct,
+            "metric_window_s": 0.0,
+            "flow": mlperf_flow(envs),
+            "port": int(envs.get("PORT") or MLPERF_PORT),
+            "failed_request_threshold": float(client_knob("AGENTX_FAILED_REQUEST_THRESHOLD", 0.10)),
+            "isl_osl_placeholder": isl_osl_placeholder,
+        }
+
     model = str(model_path or bench.get("model") or envs.get("MODEL") or proc_env.get("MODEL_PATH", "")).strip()
     canon = client_knob("AGENTX_CANONICAL_DATASET", _agentx_default_corpus(model)).strip()
     corpus = str(
@@ -401,7 +433,6 @@ def build_agentx_workload_spec(
     ).strip()
     duration = int(client_knob("AGENTX_DURATION", 3600))
     num_entries = int(client_knob("AGENTX_NUM_ENTRIES", 393))
-    conc = int(served_knob("CONC", default_conc))
     return {
         "kind": "agentx_trace_replay",
         "client": "aiperf",
@@ -420,12 +451,8 @@ def build_agentx_workload_spec(
         # HYPERLOOM_PERF_METRIC at seed, so honouring the override again here
         # would let a subprocess that lost the variable -- or gained a different
         # one -- publish an axis the session never graded on.
-        "metric_basis": geak_metric_axis(benchmark_mode="agentx", grading=grading)[1],
-        "intvty_p90_veto_pct": (
-            float(grading["noise_pct"])
-            if isinstance(grading, Mapping) and isinstance(grading.get("noise_pct"), (int, float))
-            else parse_intvty_noise_pct()
-        ),
+        "metric_basis": metric_basis,
+        "intvty_p90_veto_pct": intvty_p90_veto_pct,
         # Hyperloom's analyzer window is the canonical duration plus grace/drain.
         "metric_window_s": float(duration) + 40.0,
         "trajectory_start_ratio": [0.25, 0.75],
@@ -435,12 +462,24 @@ def build_agentx_workload_spec(
         # bounded by the scaled number, so the handoff must publish that one.
         "warmup_grace_period_s": int(client_knob("AGENTX_WARMUP_GRACE_PERIOD", 1800)),
         "failed_request_threshold": float(client_knob("AGENTX_FAILED_REQUEST_THRESHOLD", 0.10)),
-        "isl_osl_placeholder": {
-            "isl": int(served_knob("ISL", default_isl)),
-            "osl": int(served_knob("OSL", default_osl)),
-            "note": "CLI defaults only; trace replay ignores fixed ISL/OSL",
-        },
+        "isl_osl_placeholder": isl_osl_placeholder,
     }
+
+
+def pin_mlperf_round_concurrency(envs: dict[str, Any]) -> None:
+    """Make ``AGENTIC_CONCURRENCY`` follow this round's ``CONC``.
+
+    The client used to prefer ``AGENTIC_CONCURRENCY``, and the baseline YAML
+    carries it. A conc-sweep rung that only changes ``CONC`` would then be
+    recorded at one concurrency and measured at another.
+    """
+    from hyperloom.common.agentx_workload import is_mlperf_backend
+
+    if not is_mlperf_backend(envs):
+        return
+    conc = envs.get("CONC")
+    if conc not in (None, ""):
+        envs["AGENTIC_CONCURRENCY"] = str(conc)
 
 
 def apply_agentx_switch(
@@ -472,10 +511,20 @@ def apply_agentx_switch(
     if not framework or framework_registry.is_scriptable(framework):
         return
     envs = bench.setdefault("envs", {})
-    bench["benchmark_script"] = "aiperf_client.sh"
+    from hyperloom.common.agentx_workload import (
+        BACKEND_ENV,
+        MLPERF_PORT,
+        MLPERF_SERVED_MODEL,
+        agentx_client_script,
+        is_mlperf_backend,
+        mlperf_flow,
+        mlperf_trajectories,
+    )
+
     from ._agentx_timeouts import agentx_warmup_grace_sec
 
     _agentx_env = agentx_env_for_conc(conc)
+    bench["benchmark_script"] = agentx_client_script(_agentx_env)
     envs["RUN_EVAL"] = "false"
     envs["MODEL"] = str(model_path or bench.get("model") or os.environ.get("MODEL_PATH", "")).strip()
     envs["FRAMEWORK"] = framework
@@ -487,6 +536,32 @@ def apply_agentx_switch(
     for key, value in os.environ.items():
         if key.startswith("AGENTX_") or key in ("AIPERF_BIN", "WEKA_LOADER_OVERRIDE"):
             envs[key] = value
+        if is_mlperf_backend(_agentx_env) and (key.startswith(("MLPERF_", "AGENTIC_")) or key == BACKEND_ENV):
+            envs[key] = value
+    if is_mlperf_backend(_agentx_env):
+        envs[BACKEND_ENV] = "mlperf"
+        # The harness dials a fixed port and model name. Pinning both here is the
+        # one place they are enforced, so a recipe PORT cannot leave the server
+        # and the client on different sockets.
+        envs["PORT"] = str(MLPERF_PORT)
+        envs["MLPERF_AGENTIC_MODEL"] = MLPERF_SERVED_MODEL
+        # Settled once here; the client and the published spec read these back.
+        envs["MLPERF_AGENTIC_FLOW"] = mlperf_flow(envs)
+        envs["AGENTIC_NUM_TRAJECTORIES"] = str(mlperf_trajectories(envs))
+        envs.setdefault("MLPERF_ENDPOINTS_DIR", os.environ.get("MLPERF_ENDPOINTS_DIR") or "/opt/mlperf-endpoints")
+        envs.setdefault("MLPERF_AGENTIC_HARDWARE", os.environ.get("MLPERF_AGENTIC_HARDWARE") or "mi355x")
+        # The round's CONC is what the measurement is recorded under. A baseline
+        # YAML that already carries AGENTIC_CONCURRENCY must not freeze it.
+        envs["CONC"] = str(conc or envs.get("CONC") or os.environ.get("CONC") or 16)
+        pin_mlperf_round_concurrency(envs)
+        from ._server_argv import add_server_arg_unless_pinned
+
+        add_server_arg_unless_pinned(
+            envs,
+            framework,
+            f"--served-model-name {MLPERF_SERVED_MODEL}",
+            pinned_by=("served-model-name", "served_model_name"),
+        )
     # Preserve the client's own warmup bound; it does not enlarge the benchmark cap.
     _grace = agentx_warmup_grace_sec(_agentx_env)
     _raw_grace = (os.environ.get("AGENTX_WARMUP_GRACE_PERIOD") or "").strip()
@@ -531,8 +606,10 @@ def prepare_agentx_runtime(
             try:
                 materialized = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
                 benchmark = materialized.get("benchmark") if isinstance(materialized, dict) else {}
-                active = (
-                    isinstance(benchmark, dict) and str(benchmark.get("benchmark_script") or "") == "aiperf_client.sh"
+                from hyperloom.common.agentx_workload import is_agentx_client_script
+
+                active = isinstance(benchmark, dict) and is_agentx_client_script(
+                    str(benchmark.get("benchmark_script") or "")
                 )
             except (OSError, ValueError, TypeError):
                 active = False
@@ -665,6 +742,23 @@ def _resolve_framework_repo_path(
         if value:
             return value
     return ""
+
+
+def _apply_vllm_source_runtime(bench: dict[str, Any], envs: dict[str, Any]) -> None:
+    """Route a prepared image checkout into the vLLM server launch."""
+    if str(bench.get("framework") or "").strip().lower() != "vllm":
+        return
+    if os.environ.get("HYPERLOOM_VLLM_IMAGE_SOURCE", "").strip() != "1":
+        return
+    repo_path = _resolve_framework_repo_path(envs, framework="vllm")
+    if not repo_path:
+        return
+    for name in ("FRAMEWORK_REPO_PATH", "VLLM_REPO_PATH", "VLLM_DIR"):
+        envs[name] = repo_path
+        os.environ[name] = repo_path
+    existing = str(envs.get("PYTHONPATH") or os.environ.get("PYTHONPATH") or "")
+    entries = [repo_path, *(part for part in existing.split(os.pathsep) if part)]
+    envs["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(entries))
 
 
 def _custom_script_path(runner_type: str) -> str:
@@ -937,7 +1031,7 @@ def _visible_gpu_count() -> int:
         count = int(torch.cuda.device_count() or 0)
         if count > 0:
             return count
-    except Exception:
+    except (ImportError, RuntimeError):
         pass
     if shutil.which("rocm-smi"):
         try:
@@ -1001,36 +1095,19 @@ def _coerce_workload_int_env(env_key: str, raw: str) -> int:
     return value
 
 
-# ``$FRAMEWORK`` (lowercased) -> shipped Magpie YAML, relative to
-# ``asset_root()``. Unknown / unset frameworks fall back to
-# ``_DEFAULT_BASELINE_CONFIG`` (sglang) so existing sglang-default tests keep
-# passing. Values are relative so ``asset_root()`` is still resolved at call
-# time (honoring the ``$INFERENCE_OPTIMIZER_ASSET_ROOT`` override).
-_BASELINE_CONFIG_BY_FRAMEWORK: dict[str, Path] = {
-    "atom": Path("assets/configs/baseline_atom.yaml"),
-    "vllm": Path("assets/configs/baseline_vllm.yaml"),
-    "xdit": Path("assets/configs/baseline_xdit.yaml"),
-    "custom": Path("assets/configs/baseline_custom.yaml"),
-}
-_DEFAULT_BASELINE_CONFIG = Path("assets/configs/baseline_sglang.yaml")
-
-
 def default_baseline_config() -> Path:
-    """Resolve the shipped Magpie YAML based on ``$FRAMEWORK`` env.
+    """Resolve the shipped Magpie YAML for ``$FRAMEWORK``, or for the default framework when it is unset.
 
-    Returns the sglang YAML when ``$FRAMEWORK`` is unset/unknown so existing
-    sglang-default tests keep passing.
+    Resolved at call time so ``$INFERENCE_OPTIMIZER_ASSET_ROOT`` is honoured.
 
     Returns:
         Path: The shipped Magpie YAML config path for the resolved framework.
     """
-    fw = os.environ.get("FRAMEWORK", "sglang").strip().lower()
-    rel = _BASELINE_CONFIG_BY_FRAMEWORK.get(fw, _DEFAULT_BASELINE_CONFIG)
-    return asset_root() / rel
+    fw = os.environ.get("FRAMEWORK") or framework_registry.DEFAULT_FRAMEWORK
+    return asset_root() / "assets" / "configs" / framework_registry.shipped_config_name("baseline", fw)
 
 
 _PROFILER_FLAG_RE = re.compile(r"--profiler-config\.(\w+)[=\s]+(\S+)")
-_TRUTHY_FLAG_VALUES = frozenset({"1", "on", "true", "yes"})
 
 
 def _profiler_flag_value(server_args: str, name: str) -> str | None:
@@ -1057,7 +1134,9 @@ def _profiler_bound_holds(name: str, value: str | None, *, cap: int) -> bool:
     limit", and a frontend profiler left on tracks no iterations and captures the
     entire ``start_profile``..``stop_profile`` range. A guard that accepted those
     would report success while the run stayed unbounded, which is worse than not
-    guarding -- the warning would send the next investigation the wrong way.
+    guarding -- the warning would send the next investigation the wrong way. The
+    summary table is the same kind of flag: only an explicit false keeps vLLM from
+    building it after the trace is written.
 
     Every other flag only decides what the trace contains or where it lands, so its
     presence is the whole contract.
@@ -1071,7 +1150,9 @@ def _profiler_bound_holds(name: str, value: str | None, *, cap: int) -> bool:
             return False
         return 0 < iterations <= cap
     if name == "ignore_frontend":
-        return value.strip().lower() in _TRUTHY_FLAG_VALUES
+        return is_truthy(value)
+    if name == "torch_profiler_dump_cuda_time_total":
+        return not is_truthy(value)
     return True
 
 
@@ -1124,11 +1205,10 @@ def _finalize_framework_server_args(
         bench.get("model"),
         gpu_type=gpu_type or bench.get("runner_type"),
     )
-    # 4. MoE runner backend: no longer forced. sglang's own
-    #    ``--moe-runner-backend auto`` (the default) correctly follows
-    #    SGLANG_USE_AITER without crashing on current sglang/ROCm images, so
-    #    Hyperloom leaves the choice to sglang. A baseline retry can still ask
-    #    to strip an inherited/pinned flag that crashed the server.
+    # 4. MoE runner backend: left to sglang, whose ``--moe-runner-backend auto``
+    #    (the default) follows SGLANG_USE_AITER on current sglang/ROCm images.
+    #    A baseline retry can still ask to strip an inherited/pinned flag that
+    #    crashed the server.
     if drop_moe_runner_backend and framework_env == "EXTRA_SGLANG_ARGS":
         resolved_server_args = _remove_moe_runner_backend_arg(resolved_server_args)
     resolved_server_args = inject_vllm_expert_parallel(
@@ -1576,9 +1656,8 @@ def materialize_config_with_envs(
         is_sglang = "sglang" in fw
         sglang_sitecustomize = is_sglang and resolve_sglang_shape_mode() == "sitecustomize"
         patch_attempted = _tracelens_patch_enabled() and not is_atom and not sglang_sitecustomize
-        # Written in every branch, not only the failing one. "No status" used to mean both "patched fine" and
-        # "never tried because the image already carries it", and those two call for different reactions when a
-        # trace later turns up without annotations.
+        # Written in every branch, not only the failing one: "patched fine" and "never tried because the image
+        # already carries it" call for different reactions when a trace later turns up without annotations.
         envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "not_attempted"
         if patch_attempted:
             if "vllm" in fw:
@@ -1594,6 +1673,17 @@ def materialize_config_with_envs(
                     "analysis may be degraded.",
                     fw or "<unset>",
                 )
+        elif sglang_sitecustomize and _tracelens_patch_enabled():
+            # Shapes come from kernel_shape_tool, but the per-batch-size capture trace still needs
+            # sglang_gc_patch or it IndexErrors. Only profiling captures traces, so patch only here.
+            if not ensure_sglang_patched_for_tracelens():
+                log.warning(
+                    "SGLang graph-capture patch (sglang_gc_patch) not applied; profiling "
+                    "continues on the unpatched server, where per-batch-size CUDA-graph "
+                    "capture can IndexError on multi-variant models (DSA dense+sparse). "
+                    "It needs TRACELENS_ROOT with an exact "
+                    "examples/custom_workflows/inference_analysis/sglang_gc_patch/sglang_<X_Y_Z> dir."
+                )
         if is_atom:
             # ATOM has no delay/max-iteration window; extra prompts only grow
             # the HTTP-bracketed trace. Force NUM_PROMPTS=CONC.
@@ -1607,25 +1697,25 @@ def materialize_config_with_envs(
             ]
             # ``profiler`` and ``torch_profiler_dir`` are normally set by
             # Magpie's launcher script, not by this layer -- but that script
-            # appends its own flags *after* EXTRA_VLLM_ARGS in the real
+            # appends its own flags *before* EXTRA_VLLM_ARGS in the real
             # ``vllm serve`` invocation, so the argv preflight probe (which
             # only sees EXTRA_VLLM_ARGS) checks capture_torch_profiler/
             # delay_iterations/max_iterations against a ProfilerConfig that
             # never saw ``profiler=torch`` or a trace dir. vLLM's validator
             # requires both whenever those bounds are present, so the probe
-            # fails an argv that will be valid once Magpie's flags are
             # appended, and this layer's profiler bounds get treated as
-            # invalid and dropped instead of launched. Asserting placeholders
-            # here keeps the probed fragment self-consistent; the actual
-            # ``torch_profiler_dir`` Magpie computes from ``$WORKSPACE_DIR``
-            # overrides this one at real launch time via vLLM's dotted-flag
-            # last-wins merge, so the value here only has to be a valid
-            # absolute path, not the directory the trace ends up under. An
-            # operator-set flag is left untouched either way.
+            # invalid and dropped instead of launched. Assert ``profiler=torch``
+            # here so the probed fragment is self-consistent; do not append a
+            # ``torch_profiler_dir`` here. On the real ``vllm serve`` line Magpie's
+            # launcher emits ``<workspace>/torch_trace`` *before* ``EXTRA_VLLM_ARGS``;
+            # vLLM's last-wins merge would let a second ``torch_profiler_dir`` in
+            # ``EXTRA_VLLM_ARGS`` override Magpie and send traces to the task root.
+            # With no dir in ``EXTRA_VLLM_ARGS``, steady-state traces stay under
+            # ``<workspace>/torch_trace``. ``baseline.py`` / ``bypass_engine`` use
+            # probe-only dirs on other paths; an operator-set flag in the YAML is
+            # left untouched.
             if _profiler_flag_value(existing_vllm_args, "profiler") is None:
                 profiler_flags.append(("profiler", "--profiler-config.profiler torch"))
-            if _profiler_flag_value(existing_vllm_args, "torch_profiler_dir") is None:
-                profiler_flags.append(("torch_profiler_dir", f"--profiler-config.torch_profiler_dir {output_dir}"))
             if tracelens_patch_ok:
                 profiler_flags.append(("capture_torch_profiler", "--profiler-config.capture_torch_profiler True"))
                 profiler_flags.append(("detailed_trace_annotation", "--profiler-config.detailed_trace_annotation True"))
@@ -1635,6 +1725,11 @@ def materialize_config_with_envs(
             # flag, but a replacing candidate wipes the YAML value too, so it
             # belongs in the set the re-assertion can restore.
             profiler_flags.append(("ignore_frontend", "--profiler-config.ignore_frontend True"))
+            # vLLM's stop path builds a key_averages() summary table in Python on every rank. Nothing here reads
+            # it, and on a long-prompt eager trace it blocks the engine and grows each worker by hundreds of GiB.
+            profiler_flags.append(
+                ("torch_profiler_dump_cuda_time_total", "--profiler-config.torch_profiler_dump_cuda_time_total False")
+            )
             pending_vllm_profiler_flags = profiler_flags
             pending_vllm_profiler_cap = max_iters
             # Injected unconditionally so the computed cap WINS over anything the YAML
@@ -1666,19 +1761,13 @@ def materialize_config_with_envs(
             extra_body["num_steps"] = max_iters
             # shape_discovery balloons an eager+with_stack trace; allow disabling
             # it via env for eager profiles.
-            _shape_disc = os.environ.get(
-                "HYPERLOOM_PROFILE_SHAPE_DISCOVERY",
-                "1",
-            ).strip().lower() not in {"0", "false", "no", "off"}
+            _shape_disc = env_flag("HYPERLOOM_PROFILE_SHAPE_DISCOVERY", default=True)
             # Gemma2 + shape-discovery crashes CUDA-graph capture, so disable
             # shape-discovery for Gemma2. Escape hatch
             # HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE=1 only skips the Gemma2
             # gate; it does NOT override a global
             # HYPERLOOM_PROFILE_SHAPE_DISCOVERY=0.
-            _force_shape_disc = os.environ.get(
-                "HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE",
-                "0",
-            ).strip().lower() in {"1", "true", "yes", "on"}
+            _force_shape_disc = env_bool("HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE")
             if _shape_disc and not _force_shape_disc:
                 _model = str(bench.get("model") or "")
                 if _model_is_gemma2(_model):
@@ -1770,7 +1859,7 @@ def materialize_config_with_envs(
         envs.pop(name, None)
     if ref_args or reference_controls.get("remove_args") or reference_controls.get("args_mode") == "replace":
         _ref_fw_env = server_args_env_name(bench.get("framework"))
-        from ._grid_server_args import compose_server_args
+        from hyperloom.inference_optimizer.grid_server_args import compose_server_args
 
         envs[_ref_fw_env] = compose_server_args(
             base_extra_args=ref_args,
@@ -1787,6 +1876,7 @@ def materialize_config_with_envs(
 
         overlay = validate_overlay_pythonpath(reference_controls["overlay_pythonpath"])
         envs["PYTHONPATH"] = overlay + (f":{envs['PYTHONPATH']}" if envs.get("PYTHONPATH") else "")
+    recipe_overwritten = launcher_overwritten_envs(bench)
     if server_args:
         # Merge into (not overwrite) the framework env so the profile path's
         # graph-capture flags aren't dropped.
@@ -1801,17 +1891,19 @@ def materialize_config_with_envs(
                 # than relying on duplicate last-wins flags.
                 existing = _remove_moe_runner_backend_arg(existing)
             envs[framework_env] = merge_server_args(existing, server_args)
-    # Magpie forwards only ``benchmark.envs``. ``--extra-env`` used to land
-    # there only for ``custom``, so vLLM Ray workers never saw MTP pins.
+    # Magpie forwards only ``benchmark.envs``, so ``--extra-env`` lands there for
+    # every framework: vLLM Ray workers see MTP pins only this way.
     combined_extra: dict[str, Any] = dict(_operator_extra_env())
     if extra_envs:
         combined_extra.update(extra_envs)
     safe_extra_envs, dropped_extra_envs = filter_untrusted_env_mapping(
         combined_extra,
-        allow_predicate=is_allowed_variant_env_key,
+        # A name the recipe re-exports unconditionally cannot be overridden
+        # here; carrying it into the YAML publishes a value the run never used.
+        allow_predicate=lambda key: is_allowed_variant_env_key(key) and key not in recipe_overwritten,
     )
     for _dk in dropped_extra_envs:
-        log.warning("Dropping unsafe extra_envs key %s before benchmark materialization", _dk)
+        log.warning("Dropping extra_envs key %s before benchmark materialization", _dk)
     for key, value in safe_extra_envs.items():
         envs[str(key)] = str(value)
     # ── aiter tuned-config lookup logging ────────────────────────────────────
@@ -2057,7 +2149,7 @@ def materialize_config_with_envs(
             _eval_tok_env = ""
     if _eval_tok_env and "MAGPIE_EVAL_TOKENIZED_REQUESTS" not in envs:
         envs["MAGPIE_EVAL_TOKENIZED_REQUESTS"] = _eval_tok_env
-    if str(envs.get("RUN_EVAL", "")).strip().lower() in _RUN_EVAL_FALSE_VALUES:
+    if not is_truthy(envs.get("RUN_EVAL", ""), default=True):
         global _RUN_EVAL_DISABLED_WARN_EMITTED
         if not _RUN_EVAL_DISABLED_WARN_EMITTED:
             log.warning(
@@ -2066,18 +2158,6 @@ def materialize_config_with_envs(
                 "to restore the gate. This warning fires once per process."
             )
             _RUN_EVAL_DISABLED_WARN_EMITTED = True
-    # KernelForge fp8 block-scale CK backend switch: SGLANG_FP8_BLOCKSCALE_CK_MAX_M
-    # only takes effect on a KernelForge-patched sglang fp8_utils.py. Ensure the
-    # patch, scoped to sglang + the env present. Fail-soft (a failed patch leaves
-    # the env a no-op). Honors the HYPERLOOM_ENABLE_PATCH kill switch.
-    _fw = str(bench.get("framework") or "").lower()
-    if _tracelens_patch_enabled() and "sglang" in _fw and "SGLANG_FP8_BLOCKSCALE_CK_MAX_M" in envs:
-        if not ensure_sglang_patched_for_ck_blockscale():
-            log.warning(
-                "CK fp8 block-scale patch could not be applied; "
-                "SGLANG_FP8_BLOCKSCALE_CK_MAX_M will no-op on the unpatched "
-                "sglang fp8_utils.py (serving run continues unaffected)."
-            )
     # FlyDSL folds only same-directory helpers into its JIT cache key, so a patched
     # helper one directory over is served from a stale binary. Naming the roots
     # folds their sources into the key. Only the run that applied such a patch has
@@ -2159,6 +2239,7 @@ def materialize_config_with_envs(
             extra = str(envs.get("EXTRA_ATOM_ARGS", "")).strip()
             if "--mark-trace" not in extra:
                 envs["EXTRA_ATOM_ARGS"] = f"{extra} --mark-trace".strip()
+    _apply_vllm_source_runtime(bench, envs)
     # The rendered YAML is persisted, so credentials must not reach it.
     filtered_envs, dropped_credentials = filter_untrusted_env_mapping(
         envs,

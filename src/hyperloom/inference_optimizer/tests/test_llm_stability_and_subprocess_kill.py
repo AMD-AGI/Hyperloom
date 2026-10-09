@@ -16,12 +16,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.orchestrator.roles._llm_stability_env import (
+from hyperloom.common.llm_stability_env import (
     DEFAULT_API_TIMEOUT_MS,
     apply_llm_stability_env,
 )
-from hyperloom.orchestrator.kernel.request_handlers import _run_subprocess, _tool_label
-from hyperloom.orchestrator.trace.task_progress import progress_scope
+from hyperloom.orchestrator.actions.executors._kernel_agent_tool import _run_subprocess, _tool_label
+from hyperloom.inference_optimizer.trace.task_progress import progress_scope
 
 from .conftest import chatty_child
 
@@ -188,9 +188,10 @@ async def test_a_kernel_tool_keeps_reporting_while_its_child_works(monkeypatch, 
     assert progress_cadence.widest_silence() <= 150.0
 
 
-def test_a_tool_is_named_after_the_script_it_runs():
+def test_a_tool_is_named_after_the_module_it_runs():
     """``kernel_tool:tracelens_analysis`` is what an operator has to recognize."""
-    assert _tool_label(["python3", "/opt/tools/tracelens_analysis.py", "--x"]) == "tracelens_analysis"
+    cmd = [sys.executable, "-m", "hyperloom.orchestrator.trace_analysis.tracelens_analysis", "--x"]
+    assert _tool_label(cmd) == "tracelens_analysis"
     assert _tool_label(["ls", "-l"]) == "ls"
     assert _tool_label([]) == "subprocess"
 

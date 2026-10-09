@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import subprocess
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -38,19 +40,6 @@ def _restore_recording_session_binding():
         yield
     finally:
         session_binding._CURRENT_SESSION.reset(token)
-
-
-def _bootstrap_kernel_agent_env() -> None:
-    """Point HYPERLOOM_KERNEL_AGENT_ROOT at the in-repo kernel-agent checkout."""
-    if os.environ.get("HYPERLOOM_KERNEL_AGENT_ROOT"):
-        return
-    repo = Path(__file__).resolve().parents[4]
-    kernel_agent = repo / "src" / "hyperloom" / "agents" / "kernel"
-    if kernel_agent.is_dir():
-        os.environ["HYPERLOOM_KERNEL_AGENT_ROOT"] = str(kernel_agent)
-
-
-_bootstrap_kernel_agent_env()
 
 
 def enable_multi_node(monkeypatch, nodes: int = 2) -> None:
@@ -125,6 +114,40 @@ def seed_kernel_keep(
     return task_key
 
 
+def make_coordinator(session_dir: Path, *, shared_state_overrides: dict[str, Any] | None = None, **coord_kwargs: Any):
+    """Build a real Coordinator with idle mock backends and optional state overrides.
+
+    Returns a fully initialised :class:`~hyperloom.orchestrator.loop.coordinator.Coordinator`.
+    Callers that need to replace collaborator state (``tasks``, ``bus``, etc.) may do so
+    by assigning to the returned instance directly after construction.
+    """
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.roles.agent_role import default_role_registry
+    from hyperloom.orchestrator.roles.mock_backend import MockBackend, ScriptedPlan
+    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+
+    def _idle_plan() -> ScriptedPlan:
+        return ScriptedPlan(
+            turns=[],
+            default_intent=Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"}),
+        )
+
+    backends = coord_kwargs.pop("backends", None) or {
+        "orchestration": MockBackend(_idle_plan(), name="orchestration"),
+        "critic": MockBackend(_idle_plan(), name="critic"),
+    }
+    coord = Coordinator(
+        session_dir=session_dir,
+        backends=backends,
+        role_registry=coord_kwargs.pop("role_registry", None) or default_role_registry(),
+        **coord_kwargs,
+    )
+    if shared_state_overrides:
+        for k, v in shared_state_overrides.items():
+            setattr(coord.shared_state, k, v)
+    return coord
+
+
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
     """A fresh session dir under an isolated ``USER_DATA_PATH``, seeded with the ``no_target_gpu_configured`` target-analysis marker."""
@@ -168,6 +191,210 @@ def init_git_repo(
     )
 
 
+def make_fake_claude(
+    bin_dir: Path,
+    *,
+    behavior: str,
+    payload: dict[str, Any] | None = None,
+) -> Path:
+    """Write a fake ``claude`` executable simulating one of: done_only / done_with_patch / done_with_env / crash / no_done."""
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    script_path = bin_dir / "claude"
+    payload_json = json.dumps(
+        payload
+        or {
+            "gap_canonical_id": "gap.test.example",
+            "domain": "serving_specialist",
+            "proposal_set": [
+                {
+                    "name": "fake_variant",
+                    "extra_args": "--fake",
+                    "extra_envs": {},
+                    "reason": "fake",
+                }
+            ],
+            "patches_written": [],
+            "summary": "fake claude subprocess output",
+            "confidence": 0.5,
+        }
+    )
+    body = """#!/usr/bin/env bash
+set -e
+# Parse --add-dir paths (first is worktree, second is workspace).
+ADD_DIRS=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --add-dir) ADD_DIRS+=("$2"); shift 2 ;;
+    *) shift ;;
+  esac
+done
+WORKTREE="${ADD_DIRS[0]:-}"
+WORKSPACE="${ADD_DIRS[1]:-}"
+if [[ -n "$WORKTREE" && -f "$WORKTREE/prompt.md" ]]; then
+  WORKSPACE="$WORKTREE"
+fi
+"""
+    if behavior == "done_only":
+        body += f"""
+cat > "$WORKSPACE/specialist_done.json" <<'EOF'
+{payload_json}
+EOF
+exit 0
+"""
+    elif behavior == "done_with_patch":
+        patch_payload = json.dumps(
+            {
+                **(payload or {}),
+                "gap_canonical_id": "gap.test.example",
+                "domain": "serving_specialist",
+                "proposal_set": [
+                    {
+                        "name": "patched_variant",
+                        "extra_args": "",
+                        "extra_envs": {},
+                        "reason": "see patch",
+                    }
+                ],
+                "patches_written": ["patches/001_test.patch"],
+                "summary": "fake patch-authoring specialist",
+                "confidence": 0.7,
+            }
+        )
+        body += f"""
+mkdir -p "$WORKTREE/patches"
+cat > "$WORKTREE/patches/001_test.patch" <<'EOF'
+diff --git a/dummy.txt b/dummy.txt
+new file mode 100644
+--- /dev/null
++++ b/dummy.txt
+@@ -0,0 +1 @@
++pr-a2 patch
+EOF
+cat > "$WORKSPACE/specialist_done.json" <<'EOF'
+{patch_payload}
+EOF
+exit 0
+"""
+    elif behavior == "done_with_env":
+        body += """
+cat > "$WORKSPACE/specialist_done.json" <<EOF
+{
+  "gap_canonical_id": "gap.test.example",
+  "domain": "serving_specialist",
+  "proposal_set": [],
+  "patches_written": [],
+  "summary": "env echo",
+  "confidence": 0.0,
+  "hip_visible": "$HIP_VISIBLE_DEVICES",
+  "cuda_visible": "$CUDA_VISIBLE_DEVICES",
+  "rocr_visible": "$ROCR_VISIBLE_DEVICES"
+}
+EOF
+exit 0
+"""
+    elif behavior == "done_with_llm_env":
+        # Echo the LLM-transport stability env for the dispatcher assertion.
+        body += """
+cat > "$WORKSPACE/specialist_done.json" <<EOF
+{
+  "gap_canonical_id": "gap.test.example",
+  "domain": "serving_specialist",
+  "proposal_set": [],
+  "patches_written": [],
+  "summary": "llm env echo",
+  "confidence": 0.0,
+  "api_timeout_ms": "$API_TIMEOUT_MS",
+  "disable_autoupdater": "$DISABLE_AUTOUPDATER",
+  "disable_nonessential": "$CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
+}
+EOF
+exit 0
+"""
+    elif behavior == "done_with_stream_json":
+        # Zeroed per-message usage with the real counts only on the result row, as a GLM gateway streams it.
+        zeroed = {"input_tokens": 0, "output_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}
+        stream = [
+            {"type": "system", "subtype": "init", "model": "glm-5-3"},
+            {
+                "type": "assistant",
+                "message": {
+                    "id": "m1",
+                    "model": "glm-5-3",
+                    "usage": zeroed,
+                    "content": [{"type": "tool_use", "id": "tu1", "name": "Bash", "input": {"command": "ls"}}],
+                },
+            },
+            {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "tu1", "content": "ok"}]}},
+            {"type": "assistant", "message": {"id": "m2", "model": "glm-5-3", "usage": zeroed, "content": []}},
+            {
+                "type": "result",
+                "usage": {
+                    "input_tokens": 50632,
+                    "cache_read_input_tokens": 291392,
+                    "cache_creation_input_tokens": 0,
+                    "output_tokens": 7542,
+                },
+            },
+        ]
+        stream_lines = "\n".join(json.dumps(row) for row in stream)
+        body += f"""
+cat <<'EOF'
+{stream_lines}
+EOF
+cat > "$WORKSPACE/specialist_done.json" <<'EOF'
+{payload_json}
+EOF
+exit 0
+"""
+    elif behavior == "crash":
+        body += "exit 3\n"
+    elif behavior == "no_done":
+        body += "exit 0\n"
+    elif behavior == "partial_then_crash":
+        # Write only the partial checkpoint, then die before the final done.json.
+        body += f"""
+cat > "$WORKSPACE/specialist_done.partial.json" <<'EOF'
+{payload_json}
+EOF
+exit 3
+"""
+    elif behavior == "partial_then_done":
+        # Checkpoint first, wait for the reaper to see it, then exit normally.
+        body += f"""
+cat > "$WORKSPACE/specialist_done.partial.json" <<'EOF'
+{payload_json}
+EOF
+sleep 1
+cat > "$WORKSPACE/specialist_done.json" <<'EOF'
+{payload_json}
+EOF
+exit 0
+"""
+    elif behavior == "hang":
+        # Sleep past any wall budget without writing done.json.
+        body += "sleep 600\n"
+    else:
+        raise ValueError(f"unknown behavior {behavior!r}")
+    script_path.write_text(body, encoding="utf-8")
+    script_path.chmod(script_path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    return script_path
+
+
+def use_fake_specialist_cli(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, behavior: str, payload: dict[str, Any] | None = None
+) -> Path:
+    """Point the executor at a fake ``claude`` CLI and a git framework checkout under ``tmp_path``."""
+    import hyperloom.inference_optimizer.cli.executors as cli_mod
+
+    repo = tmp_path / "framework"
+    init_git_repo(repo)
+    monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(repo))
+    monkeypatch.setattr(cli_mod, "resolve_kernel_search_roots", lambda: (str(repo),))
+    fake = make_fake_claude(tmp_path / "bin", behavior=behavior, payload=payload)
+    monkeypatch.setenv("HYPERLOOM_CLAUDE_CLI_PATH", str(fake))
+    return fake
+
+
 def git_commit_all(path: Path, message: str) -> None:
     """Stage everything under ``path`` and commit with a fixed non-interactive identity."""
     env = os.environ.copy()
@@ -189,48 +416,22 @@ def git_commit_all(path: Path, message: str) -> None:
     )
 
 
-class _BuildFakeCoordinator:
-    """Minimal coordinator surface for off-loop targeted-build tests."""
-
-    def __init__(self, session_dir: Path, db) -> None:
-        from hyperloom.orchestrator.bus.resource_lock import (
-            ResourceLockManager,
-            SqliteLeaseBackend,
-        )
-        from hyperloom.orchestrator.state.shared_state import SharedState
-        from hyperloom.orchestrator.state.task_registry import TaskRegistry
-
-        self.session_dir = session_dir
-        self.tasks = TaskRegistry(db)
-        self.locks = ResourceLockManager(SqliteLeaseBackend(db))
-        self.shared_state = SharedState()
-
-
 @pytest.fixture
 def build_coord(tmp_path):
-    """Fake coordinator backed by a temp DB for targeted-build lifecycle tests."""
-    from hyperloom.orchestrator.bus.storage import SqliteConnection
-    from hyperloom.orchestrator.bus.storage.schema import ensure_schema
-
-    db = SqliteConnection(tmp_path / "coordinator.db")
-    ensure_schema(db.raw)
-    fc = _BuildFakeCoordinator(tmp_path, db)
-    yield fc
-    db.close()
+    """Real Coordinator for targeted-build lifecycle tests."""
+    return make_coordinator(tmp_path)
 
 
 @pytest.fixture
 def build_lifecycle(build_coord):
-    """``BuildLifecycleCollaborator`` bound to the ``build_coord`` fixture."""
-    from hyperloom.orchestrator.loop.build_lifecycle import BuildLifecycleCollaborator
-
-    return BuildLifecycleCollaborator(build_coord)
+    """``BuildLifecycleCollaborator`` from the ``build_coord`` coordinator."""
+    return build_coord.build_lifecycle
 
 
 def patch_integrate_patch_roots(monkeypatch, tmp_path: Path) -> None:
     """Register common tmp_path framework repos as integrate_patch search roots."""
     from hyperloom.orchestrator.actions.executors import integrate_patch as ip
-    from hyperloom.orchestrator.framework import paths as fp
+    from hyperloom.inference_optimizer import framework_paths as fp
 
     real = fp.resolve_kernel_search_roots
 
@@ -313,7 +514,7 @@ class ProgressCadence:
 @pytest.fixture
 def progress_cadence(monkeypatch) -> "ProgressCadence":
     """A :class:`ProgressCadence` with the heartbeat tick on the same timescale."""
-    from hyperloom.orchestrator.trace import task_progress
+    from hyperloom.inference_optimizer.trace import task_progress
 
     monkeypatch.setattr(
         task_progress,
@@ -371,7 +572,7 @@ class _RayDoubleActorHandle:
 class RayDouble:
     """A ``ray`` module stand-in that runs actor methods in real threads."""
 
-    class exceptions:  # noqa: N801 — mirrors the ray.exceptions namespace
+    class exceptions:
         class RayActorError(Exception):
             pass
 

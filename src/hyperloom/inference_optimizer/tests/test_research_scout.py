@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.inference_optimizer.session import session_paths
-from hyperloom.orchestrator.knowledge import research_hints
+from hyperloom.inference_optimizer.baseline_comparison import research_hints
 from hyperloom.orchestrator.specialists import domains as sd
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.prompts import (
@@ -149,11 +149,10 @@ async def test_internal_research_scout_task_is_readonly(tmp_path: Path):
         session_dir=tmp_path,
         backends=backends,
         role_registry=default_role_registry(),
-        recipe_kb=None,
         knowledge_plane=None,
     )
 
-    task = await coord._enqueue_internal_research_scout_task(
+    task = await coord.phase_internal._enqueue_internal_research_scout_task(
         reason="test",
         round_id=0,
     )
@@ -170,11 +169,11 @@ async def test_internal_research_scout_task_is_readonly(tmp_path: Path):
         tmp_path,
         [{"what": "enable aiter", "source": "https://example.test/aiter"}],
     )
-    coord._seed_gaps_from_research_hints()
+    coord.gap_refresh.seed_gaps_from_research_hints()
     first_id = next(row["canonical_id"] for row in coord.shared_state.gaps if row.get("symptom") == "enable aiter")
     research_hints.append_hints(
         tmp_path,
         [{"what": "use hipblaslt", "source": "https://example.test/hipblaslt"}],
     )
-    coord._seed_gaps_from_research_hints()
+    coord.gap_refresh.seed_gaps_from_research_hints()
     assert any(row.get("canonical_id") == first_id for row in coord.shared_state.gaps)

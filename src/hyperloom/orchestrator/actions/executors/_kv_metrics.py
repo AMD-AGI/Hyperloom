@@ -51,6 +51,7 @@ import os
 import re
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -74,6 +75,7 @@ __all__ = [
     "find_server_metrics_export",
     "parse_prometheus_text",
     "read_aiperf_server_metrics",
+    "resolve_metrics_url",
     "resolve_metrics_port",
     "sample_from_families",
 ]
@@ -146,8 +148,8 @@ _VLLM_USAGE = ("vllm:kv_cache_usage_perc", "vllm:gpu_cache_usage_perc")
 # The only workable preemption count: vLLM's log line for it is dead code (``log()`` resets the counter before reading
 # it), so this has no log fallback.
 _VLLM_PREEMPT_TOTAL = "vllm:num_preemptions_total"
-_VLLM_PREFIX_QUERIES = "vllm:prefix_cache_queries"
-_VLLM_PREFIX_HITS = "vllm:prefix_cache_hits"
+_VLLM_PREFIX_QUERIES = "vllm:prefix_cache_queries_total"
+_VLLM_PREFIX_HITS = "vllm:prefix_cache_hits_total"
 
 # Deliberately not read: ``sglang:cache_hit_rate``. Observed reading 0.0 on a server whose ``cached_tokens_total`` had
 # already reached 4.6M, so it is not a cumulative rate -- whether it is instantaneous or windowed is unresolved, and a
@@ -204,8 +206,8 @@ def _split_labels(raw: str) -> dict[str, str]:
 
 #: aiperf's own export of the engine's ``/metrics``, written into the round's artifact dir.
 _SERVER_METRICS_RELPATHS = (
-    "aiperf_artifacts/server_metrics_export.jsonl",
-    "*/aiperf_artifacts/server_metrics_export.jsonl",
+    "aiperf_artifacts/server_metrics_export.json",
+    "*/aiperf_artifacts/server_metrics_export.json",
 )
 
 #: aiperf's ``CreditPhase`` values, mapped onto ours. It has no notion of the accuracy eval or of boot, which is why the
@@ -249,96 +251,137 @@ def families_from_aiperf_record(metrics: Any) -> ParsedFamilies:
     return families
 
 
-def find_server_metrics_export(workspace: Any) -> Path | None:
-    """Locate aiperf's server-metrics export under a round's directory."""
+def _server_metrics_exports(workspace: Any) -> list[Path]:
+    """Locate aiperf server-metrics exports in preference order."""
+    found: list[Path] = []
     try:
         root = Path(workspace)
         for pattern in _SERVER_METRICS_RELPATHS:
             for candidate in sorted(root.glob(pattern)):
-                if candidate.is_file():
-                    return candidate
+                if candidate.is_file() and candidate not in found:
+                    found.append(candidate)
     except OSError:
-        return None
-    return None
+        return []
+    return found
+
+
+def find_server_metrics_export(workspace: Any) -> Path | None:
+    """Locate the preferred aiperf server-metrics export."""
+    exports = _server_metrics_exports(workspace)
+    return exports[0] if exports else None
+
+
+def _read_aiperf_aggregate_json(path: Path) -> list[tuple[KvSample, dict[str, Any], str | None]]:
+    """Rebuild scrape-like samples from AIPerf 0.12 aggregate JSON timeslices."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        log.debug("kv_metrics: could not read %s (%s)", path, exc)
+        return []
+    if not isinstance(payload, dict):
+        return []
+
+    phase_ranges = (
+        ((payload.get("summary") or {}).get("phase_time_ranges") or {})
+        if isinstance(payload.get("summary"), dict)
+        else {}
+    )
+
+    def bounds(name: str) -> tuple[int, int]:
+        value = phase_ranges.get(name)
+        if not isinstance(value, dict):
+            return 0, 0
+        return int(_number(value.get("start_ns")) or 0), int(_number(value.get("end_ns")) or 0)
+
+    blocks: list[tuple[str, Any, tuple[int, int]]] = []
+    warmup = payload.get("warmup_metrics")
+    if isinstance(warmup, dict):
+        blocks.append(("warmup", warmup, bounds("warmup")))
+    measured = payload.get("metrics")
+    if isinstance(measured, dict):
+        metrics_phase = str(payload.get("metrics_phase") or "").lower()
+        phase = _CREDIT_PHASE_NAMES.get(metrics_phase, "measured")
+        blocks.append((phase, measured, bounds(metrics_phase)))
+
+    cumulative: dict[tuple[str, str], float] = {}
+    rows: list[tuple[int, int, str, str, dict[str, str], float]] = []
+    for phase, metrics, (phase_start, phase_end) in blocks:
+        for name, metric in metrics.items():
+            if not isinstance(metric, dict):
+                continue
+            metric_type = str(metric.get("type") or "").lower()
+            for series in metric.get("series") or []:
+                if not isinstance(series, dict):
+                    continue
+                labels = series.get("labels")
+                label_map = {str(k): str(v) for k, v in labels.items()} if isinstance(labels, dict) else {}
+                series_key = (str(name), canonical_label_key(label_map))
+                running = cumulative.get(series_key, 0.0)
+                timeslices = [
+                    item
+                    for item in (series.get("timeslices") or [])
+                    if isinstance(item, dict)
+                    and (not phase_start or int(_number(item.get("end_ns")) or 0) > phase_start)
+                    and (not phase_end or int(_number(item.get("start_ns")) or 0) < phase_end)
+                ]
+                if metric_type == "counter" and timeslices:
+                    start = int(_number(timeslices[0].get("start_ns")) or 0)
+                    if start > 0:
+                        # AIPerf stores per-timeslice increments. Emit the
+                        # opening cumulative snapshot so phase deltas include
+                        # the first interval instead of starting after it.
+                        rows.append((start, start, phase, str(name), label_map, running))
+                for timeslice in timeslices:
+                    start = int(_number(timeslice.get("start_ns")) or 0)
+                    end = int(_number(timeslice.get("end_ns")) or 0)
+                    if end <= 0:
+                        continue
+                    if metric_type == "counter":
+                        delta = _number(timeslice.get("total"))
+                        if delta is None:
+                            continue
+                        running += delta
+                        value = running
+                    else:
+                        value = _number(timeslice.get("avg"))
+                        if value is None:
+                            continue
+                    rows.append((start, end, phase, str(name), label_map, value))
+                cumulative[series_key] = running
+
+    grouped: dict[tuple[int, int, str], ParsedFamilies] = {}
+    for start, end, phase, name, labels, value in rows:
+        grouped.setdefault((start, end, phase), {}).setdefault(name, []).append((labels, value))
+
+    out: list[tuple[KvSample, dict[str, Any], str | None]] = []
+    for (start, end, phase), families in sorted(grouped.items()):
+        families = families_from_aiperf_record(
+            {
+                name: [{"labels": labels, "value": value} for labels, value in samples]
+                for name, samples in families.items()
+            }
+        )
+        ts = end / 1e9
+        sample = sample_from_families(families, ts=ts, mono=ts)
+        if not sample.has_readings():
+            continue
+        out.append(
+            (
+                sample,
+                {
+                    "scrape_start_unix": start / 1e9,
+                    "scrape_end_unix": end / 1e9,
+                    "scrape_sec": round(max(0, end - start) / 1e9, 4),
+                },
+                phase,
+            )
+        )
+    return out
 
 
 def read_aiperf_server_metrics(path: Path) -> list[tuple[KvSample, dict[str, Any], str | None]]:
-    """Read aiperf's scrape records as ``(sample, timing, phase)``, oldest first.
-
-    Every field the live path measures for itself is already on the record: ``timestamp_ns`` for the reading,
-    ``request_sent_ns`` and ``endpoint_latency_ns`` for the round trip, and ``benchmark_phase`` for the phase. That last
-    one is why this source is preferred where it exists -- aiperf stamps the phase at collection time, from the process
-    that owns the transition, so there is no lag between the boundary and the label and nothing to re-attribute.
-    """
-    out: list[tuple[KvSample, dict[str, Any], str | None]] = []
-    try:
-        with path.open(encoding="utf-8") as handle:
-            for line in handle:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = json.loads(line)
-                except ValueError:
-                    continue
-                if not isinstance(record, dict):
-                    continue
-                stamp = _number(record.get("timestamp_ns"))
-                if stamp is None or stamp <= 0:
-                    continue
-                families = families_from_aiperf_record(record.get("metrics"))
-                if not families:
-                    continue
-                ts = stamp / 1e9
-                sample = sample_from_families(families, ts=ts, mono=ts)
-                if not sample.has_readings():
-                    continue
-                started = _number(record.get("request_sent_ns"))
-                latency = _number(record.get("endpoint_latency_ns")) or 0.0
-                start_unix = started / 1e9 if started and started > 0 else ts
-                out.append(
-                    (
-                        sample,
-                        {
-                            # Widened to the enclosing millisecond for the same reason the live path does it: these
-                            # bound the interval workload records are joined against.
-                            "scrape_start_unix": math.floor(start_unix * 1000) / 1000,
-                            "scrape_end_unix": math.ceil((start_unix + latency / 1e9) * 1000) / 1000,
-                            "scrape_sec": round(latency / 1e9, 4),
-                        },
-                        # Unstamped means aiperf took it before any phase began -- its baseline capture, of an idle
-                        # pool. That is boot, and naming it here keeps one value per meaning downstream.
-                        _CREDIT_PHASE_NAMES.get(str(record.get("benchmark_phase") or "").lower(), "boot"),
-                    )
-                )
-    except OSError as exc:
-        log.debug("kv_metrics: could not read %s (%s)", path, exc)
-        return []
-    out.sort(key=lambda item: item[0].ts)
-    return _demote_premature_measured(out)
-
-
-def _demote_premature_measured(
-    records: list[tuple[KvSample, dict[str, Any], str | None]],
-) -> list[tuple[KvSample, dict[str, Any], str | None]]:
-    """Re-file a measured-stamped record that arrives before warmup as boot.
-
-    The phases are ordered: profiling follows warmup. Observed on every AgentX round so far, aiperf stamps one record
-    ``profiling`` a couple of seconds *before* the first warmup record -- its phase context leaking during setup, not a
-    measurement of the profiling phase. Left alone it lands in ``measured``, which is the only phase allowed into a
-    comparison, and the gap-free bracketing then runs that window from the stray record to the first warmup reading and
-    credits warmup's opening seconds to it. On one round that was the whole of the measured prefix-cache delta.
-
-    Only demoted when warmup records exist and the stray precedes them; a run configured without a warmup has its
-    profiling records first legitimately, and those are left alone.
-    """
-    first_warmup = next((s.ts for s, _t, p in records if p == "warmup"), None)
-    if first_warmup is None:
-        return records
-    return [
-        (s, t, "boot" if p == "measured" and s.ts < first_warmup else p)  # type: ignore[misc]
-        for s, t, p in records
-    ]
+    """Read AIPerf aggregate JSON as ``(sample, timing, phase)`` rows."""
+    return _read_aiperf_aggregate_json(path)
 
 
 def parse_prometheus_text(text: str) -> ParsedFamilies:
@@ -487,9 +530,18 @@ class KvSample:
                 self.active_pool_usage,
                 self.physical_pool_usage,
                 self.used_tokens,
+                self.evictable_tokens,
+                self.available_tokens,
+                self.capacity_tokens,
                 self.capacity_gb,
             )
-        ) or bool(self.retract_total or self.preempt_total)
+        ) or bool(
+            self.retract_total
+            or self.preempt_total
+            or self.prefix_cache_queries
+            or self.prefix_cache_hits
+            or self.cached_tokens_total
+        )
 
 
 def _detect_engine(families: ParsedFamilies) -> str:
@@ -633,8 +685,8 @@ def port_from_server_log(workspace: Any) -> int | None:
                 for line in head.splitlines():
                     # Matched on what the line is about rather than on its exact wording. The observed builds say
                     # "Starting vLLM server on http://0.0.0.0:8000"; older ones and SGLang say "Uvicorn running on".
-                    # Enumerating the phrasings is how this collector got its original bug, so the test is the
-                    # combination -- a line announcing the server, carrying a URL with a port.
+                    # A list of phrasings misses the next build's wording, so the test is the combination -- a
+                    # line announcing the server, carrying a URL with a port.
                     if not _SERVER_BIND_HINT.search(line):
                         continue
                     match = _SERVER_BIND_URL.search(line)
@@ -680,23 +732,62 @@ def port_from_workspace(workspace: Any) -> int | None:
     return None
 
 
+def port_from_server_command(workspace: Any) -> int | None:
+    """Read ``--port`` from the command that launched the serving process.
+
+    AgentX vLLM rounds do not pin ``benchmark.envs.PORT`` and the Rust frontend
+    does not emit the Python API server's bind banner.  The materialized command
+    is therefore the only durable authority for those rounds.
+    """
+    try:
+        root = Path(workspace)
+        for pattern in ("vllm_command.txt", "*/vllm_command.txt"):
+            for candidate in sorted(root.glob(pattern)):
+                text = candidate.read_text(encoding="utf-8", errors="ignore")
+                match = re.search(r"(?:^|\s)--port(?:=|\s+)(\d+)(?:\s|$)", text)
+                if match:
+                    port = _port_value(match.group(1))
+                    if port is not None:
+                        return port
+    except OSError:
+        return None
+    return None
+
+
 def resolve_metrics_port(config_envs: dict[str, Any] | None = None, workspace: Any = None) -> int:
     """Resolve the port the engine serves ``/metrics`` on.
 
-    The server binds whatever ``benchmark.envs.PORT`` the materialized YAML pins -- an ephemeral port assigned per
-    session, not a constant. The YAML is therefore the authority; the caller's env and the ambient env are fallbacks for
-    paths that never materialize one, and the default is a last resort that is only ever right by coincidence.
+    A ``PORT`` in the caller's env is an operator pin and wins. Then the round's own evidence: its materialized
+    ``benchmark.envs.PORT`` (an ephemeral port assigned per session, never exported into the subprocess env), the port
+    the server logged at bind, and the ``--port`` of the command that launched it. Only then a ``PORT`` in the ambient
+    env, and the default last, which is only ever right by coincidence.
     """
-    for source in (config_envs or {}, os.environ):
-        port = _port_value(source.get("PORT"))
-        if port is not None:
-            return port
+    port = _port_value((config_envs or {}).get("PORT"))
+    if port is not None:
+        return port
     if workspace is not None:
-        for probe in (port_from_workspace, port_from_server_log):
+        for probe in (port_from_workspace, port_from_server_log, port_from_server_command):
             port = probe(workspace)
             if port is not None:
                 return port
+    port = _port_value(os.environ.get("PORT"))
+    if port is not None:
+        return port
     return DEFAULT_METRICS_PORT
+
+
+def resolve_metrics_url(config_envs: dict[str, Any] | None = None) -> str | None:
+    """Resolve a remote serving endpoint to its Prometheus metrics URL."""
+    raw = str((config_envs or {}).get("BENCHMARK_BASE_URL") or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(raw)
+    except ValueError:
+        return None
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "/metrics", "", ""))
 
 
 class KvMetricsPoller:
@@ -728,6 +819,7 @@ class KvMetricsPoller:
         """
         self._explicit_port = int(port) if port else None
         self._config_envs = dict(config_envs or {})
+        self._remote_url = resolve_metrics_url(self._config_envs)
         self._host = host
         self._port_workspace = workspace
         self._port: int | None = None
@@ -748,6 +840,8 @@ class KvMetricsPoller:
     @property
     def url(self) -> str:
         """Endpoint this poller scrapes."""
+        if self._explicit_port is None and self._remote_url is not None:
+            return self._remote_url
         return f"http://{self._host}:{self.port}/metrics"
 
     @property
@@ -1074,7 +1168,7 @@ class KvMetricsRecorder:
         start_unix = time.time()
         try:
             sample = self._poller.sample()
-        except Exception:  # noqa: BLE001 - collection must never fail a round
+        except Exception:
             log.debug("kv_metrics: sample failed", exc_info=True)
             return None
         end_mono = time.monotonic()
@@ -1109,7 +1203,7 @@ class KvMetricsRecorder:
             return None
         try:
             phases = self._progress.poll()
-        except Exception:  # noqa: BLE001 - collection must never fail a round
+        except Exception:
             log.debug("kv_metrics: progress poll failed", exc_info=True)
             return None
         if not phases:
@@ -1247,11 +1341,14 @@ class KvMetricsRecorder:
         if self._workspace is None:
             return None
         try:
-            export = find_server_metrics_export(self._workspace)
+            export = None
+            records = []
+            for candidate in _server_metrics_exports(self._workspace):
+                records = read_aiperf_server_metrics(candidate)
+                if records:
+                    export = candidate
+                    break
             if export is None:
-                return None
-            records = read_aiperf_server_metrics(export)
-            if not records:
                 return None
             # Kept by time, not by phase label. aiperf covers one contiguous window -- it starts after the server is up
             # and exits before the accuracy eval -- so a live row outside that span is a reading nothing else took,
@@ -1285,7 +1382,7 @@ class KvMetricsRecorder:
             # at its first periodic sample and the increment in between would be credited to neither.
             self._rebuild_counter_windows()
             return str(export)
-        except Exception:  # noqa: BLE001 - a better source that cannot be read is not a reason to fail a round
+        except Exception:
             log.debug("kv_metrics: aiperf server metrics unavailable", exc_info=True)
             return None
 
@@ -1422,7 +1519,7 @@ class KvMetricsRecorder:
             summary["path"] = path.name if write_timeline(path, events) else None
             summary["source"] = str(export)
             return summary
-        except Exception:  # noqa: BLE001 - a timeline must never fail a round
+        except Exception:
             log.debug("kv_metrics: workload timeline unavailable", exc_info=True)
             return None
 
@@ -1505,7 +1602,7 @@ class KvMetricsRecorder:
             from hyperloom.common.io import atomic_write_json
 
             atomic_write_json(Path(self._output_path), payload)
-        except Exception:  # noqa: BLE001 - an unwritten artifact must not fail a round
+        except Exception:
             # Warning, not debug. Not failing the round is the requirement; being quiet about it is not. A round that
             # collected samples and then dropped them on the floor looks identical afterwards to one that never
             # collected any, and nobody goes looking for a file they were never told was missing.

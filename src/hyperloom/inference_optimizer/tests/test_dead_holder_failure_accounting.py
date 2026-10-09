@@ -84,7 +84,7 @@ async def test_pump_counts_lease_reaped_baseline_as_failure(session_dir):
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
         task = await _running_task_with_dead_lease(c, key="k-dead-1")
-        await c._pump_dispatcher_once()
+        await c.dispatcher.pump_dispatcher_once()
         assert (await c.tasks.get(task.task_id)).state == "failed"
         assert c.shared_state.baseline_failure_streak == 1
         assert c.shared_state.baseline_total_failures == 1
@@ -106,8 +106,8 @@ async def test_pump_accounts_for_the_reconcilers_confirmed_deaths(session_dir):
         task = await _running_task_with_dead_lease(c, key="reconciler-death")
         report = await c.reconciler.run(time.time())
         assert report.failed_tasks == [task.task_id]
-        await c._pump_dispatcher_once()
-        await c._pump_dispatcher_once()
+        await c.dispatcher.pump_dispatcher_once()
+        await c.dispatcher.pump_dispatcher_once()
         assert c.shared_state.baseline_total_failures == 1
     finally:
         await c.stop()
@@ -121,7 +121,7 @@ async def test_three_lease_reaped_baselines_trip_the_streak_stop(session_dir):
     try:
         for i in range(3):
             await _running_task_with_dead_lease(c, key=f"k-dead-streak-{i}")
-            await c._pump_dispatcher_once()
+            await c.dispatcher.pump_dispatcher_once()
         assert c.shared_state.baseline_failure_streak == 3
         assert c.shared_state.stop_reason == "baseline_failed"
     finally:
@@ -133,8 +133,8 @@ async def test_accounting_is_idempotent_per_task(session_dir):
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
         task = await _running_task_with_dead_lease(c, key="k-dead-once")
-        await c._pump_dispatcher_once()
-        await c._account_dead_holder_failures([task.task_id], reason="dead_holder_pump")
+        await c.dispatcher.pump_dispatcher_once()
+        await c.dispatcher._account_dead_holder_failures([task.task_id], reason="dead_holder_pump")
         assert c.shared_state.baseline_failure_streak == 1
         assert len(c.shared_state.last_action_failures) == 1
     finally:
@@ -147,21 +147,20 @@ class _ReapStub:
     def __init__(self) -> None:
         self.unpromotable: list[str] = []
         self.gpu_specialist_pool = SimpleNamespace(release=self._noop_async)
-        self.bus = SimpleNamespace(append_and_seq=self._noop_async)
+        self.bus = SimpleNamespace(append_and_seq=self._noop_async, record_observation=self._noop_async)
+        self.shared_state = SimpleNamespace(phase="PRELUDE", macro_cycle=0)
+        _outer = self
+        self.writeback = SimpleNamespace(
+            handle_unpromotable_result=lambda task, result: _outer._handle_unpromotable_result(task, result)
+        )
 
     async def _noop_async(self, *_args: Any, **_kwargs: Any) -> None:
         return None
 
-    def _is_promotable_result(self, *_args: Any, **_kwargs: Any) -> bool:
-        return False
-
     async def _handle_unpromotable_result(self, task: Any, _result: Any) -> None:
         self.unpromotable.append(task.task_id)
 
-    async def _fact_write_hook(self, **_kwargs: Any) -> None:
-        return None
-
-    def _record_coordinator_exception(self, **_kwargs: Any) -> None:
+    def record_exception(self, **_kwargs: Any) -> None:
         return None
 
 
@@ -172,9 +171,9 @@ async def test_reap_skips_failure_accounting_already_charged():
     task = SimpleNamespace(task_id="t-dead", kind="baseline", params={})
     result = SubAgentResult(task_id=task.task_id, state="failed", result={"status": "failed"})
 
-    await disp._reap_dispatched_task(task, result, None)
+    await disp.reap_dispatched_task(task, result)
     assert stub.unpromotable == ["t-dead"]
 
     disp._dead_holder_accounted.add(task.task_id)
-    await disp._reap_dispatched_task(task, result, None)
+    await disp.reap_dispatched_task(task, result)
     assert stub.unpromotable == ["t-dead"]

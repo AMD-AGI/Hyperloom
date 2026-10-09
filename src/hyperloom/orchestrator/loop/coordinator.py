@@ -6,28 +6,22 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import math
 import os
 import time
 import traceback
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
-from typing import AbstractSet, Any, Awaitable, Callable
+from typing import TYPE_CHECKING, AbstractSet, Any, Awaitable, Callable
 
-from hyperloom.orchestrator.actions.executors._grid_server_args import (
-    tokenize_server_args_preserving_json,
-)
+from hyperloom.common.env import env_float, env_int
 from hyperloom.common.timeutil import now_iso
 from hyperloom.orchestrator.knowledge.config import KnowledgeConfig, KnowledgeStoreMode
 from hyperloom.orchestrator.knowledge.recipe_kb import RecipeKB
-
-# Recipe snapshot severity tags (schema has no fixed enum).
-_SEVERITY_CRASH: str = "crash"
-_SEVERITY_REGRESS: str = "regress"
-
-# Bounded transient-failure auto-retry for specialist dispatches (infra-only).
-SPECIALIST_AUTO_RETRY_MAX: int = 2
 
 # Periodic in-process maintenance/reaper cadence (lease reaping + DB retention), in wall-clock seconds.
 MAINTENANCE_INTERVAL_SEC: int = 1800
@@ -36,18 +30,13 @@ MAINTENANCE_INTERVAL_SEC: int = 1800
 DEFAULT_CYCLE_HOURS: float = 24.0
 # Trailing window for the crash-rate emergency stop, in seconds.
 _CRASH_EMERGENCY_WINDOW_SEC: float = 24.0 * 3600.0
-# Combined baseline-failure backstop: fast-fail after this many TOTAL baseline failures.
-_BASELINE_MAX_TOTAL_FAILURES: int = 3
-# Unified authored-lane max attempts (apply-failure retries + Critic reauthor).
-_AUTHORED_LANE_MAX_ATTEMPTS: int = 3
-# Default min TRANSFER confidence a warm-replay champion must clear to be enqueued.
-_DEFAULT_WARM_REPLAY_MIN_CONFIDENCE: float = 0.7
-# Default resume-drift floor (%): a re-measured current_best below this fraction of its recorded tput is flagged as
-# drift.
-_DEFAULT_RESUME_DRIFT_FLOOR_PCT: float = 95.0
+# Retry delay for an agent whose LLM backend keeps failing, doubling from the base to the ceiling, in seconds. Ints, so
+# the doubling cannot overflow a float however long a streak runs.
+_BACKEND_RETRY_BASE_SEC: int = 2
+_BACKEND_RETRY_MAX_SEC: int = 300
+# How long one agent's backend may fail without a successful turn before the session stops, in seconds.
+_BACKEND_UNHEALTHY_STOP_SEC: float = 3600.0
 from ..phases import machine_state as _phase_state
-from ..state.failure_evidence import UNMEASURED_OUTCOMES, render_failure_line
-from ..state.optimization_journal import Journal
 from hyperloom.inference_optimizer.session.paths import db_path_for
 from hyperloom.inference_optimizer.session.session_binding import bind_session
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE, ActionMetadata
@@ -56,12 +45,9 @@ from ..roles.base import Backend, BackendError, BackendTurnResult, LLMCallFailed
 from ..bus.cursor_store import CursorStore
 from ..bus.storage.connection import SqliteConnection, resolve_journal_mode
 from hyperloom.inference_optimizer.protocol.intent import NoIntentEmitted
-from ..bus.message_bus import Message, MessageBus
+from ..bus.message_bus import MessageBus
 from ..state.objective import Objective, TimeOnlyObjective
-from ..policy.gate import (
-    PolicyGate,
-    SPECIALIST_FROM_AGENT_PREFIX,  # noqa: F401 - re-exported for callers/tests
-)
+from ..policy.gate import PolicyGate
 from ..state.round_store import RoundStore
 from ..bus.gpu_pool import (
     SpecialistGpuPool,
@@ -76,381 +62,150 @@ from ..state.shared_state import SharedState, effective_closing_grace_sec, timed
 from .signals import SignalDrain
 from .intent_router import IntentRouter
 from .sub_agent_runner import SubAgentRunner
-from ..state.task_registry import TaskRegistry
-from ..trace.llm_trace import LLMCallRecord, append_llm_call
-from hyperloom.common.deadline import Deadline
-from hyperloom.common.prompt_safety import defang_prompt_structure as _defang_prompt_structure
-from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_inbox
-from ..trace.orchestration_trace import (
+from ..state.task_registry import TaskRegistry, task_dispatch_origin
+from ..collaborator import OrchestrationPrompt
+from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, append_llm_call, new_call_id
+from hyperloom.inference_optimizer.trace.context_events import PromptSnapshotTracker, record_prompt_snapshot
+from hyperloom.inference_optimizer.trace.trajectory_trace import (
+    EVENT_LLM_CALL,
+    EVENT_PROPOSAL,
+    EVENT_SESSION,
+    STATUS_CANCELLED,
+    TERMINAL_STATUSES,
+    llm_call_summary,
+    load_events,
+    record_event,
+    trajectory_scope,
+    trajectory_span,
+)
+from hyperloom.common.deadline import Deadline, seconds_until
+from hyperloom.inference_optimizer.trace.orchestration_trace import (
     write_mcp_setup_once,
 )
-from .coordinator_helpers import (
-    _infer_model_class_from_config,
-    format_exc_brief,
-    resolve_reactor_turn_timeout_sec,
-    serialize_verdict_advisory,
-)
+from hyperloom.common.timeutil import format_exc_brief
+from hyperloom.inference_optimizer.model_config_utils import resolve_local_model_dir
 
 
 log = logging.getLogger(__name__)
 
-
-def _extract_enablement_launch_log(result_payload: dict[str, Any] | None) -> str:
-    """Extract launch/traceback text from a failed baseline result payload."""
-    if not isinstance(result_payload, dict):
-        return ""
-    parts: list[str] = []
-    for key in ("error", "stderr", "log_tail", "log_excerpt", "traceback", "reason"):
-        val = result_payload.get(key)
-        if isinstance(val, str) and val.strip():
-            parts.append(val.strip())
-        elif isinstance(val, (list, tuple)):
-            joined = "\n".join(str(x) for x in val if str(x).strip())
-            if joined.strip():
-                parts.append(joined.strip())
-    return "\n".join(parts).strip()
+REACTOR_TURN_TIMEOUT_ENV = "INFERENCE_OPTIMIZER_REACTOR_TURN_TIMEOUT_SEC"
+DEFAULT_REACTOR_TURN_TIMEOUT_SEC = 1800.0
 
 
-def _resolvable_artifacts_from_done(
-    done_payload: dict[str, Any] | None,
-    resolve_bases: list[Path],
-) -> list[dict[str, Any]]:
-    """Return ``artifacts_written`` entries whose ``source`` file exists on disk."""
-    if not isinstance(done_payload, dict):
-        return []
-    arts = done_payload.get("artifacts_written")
-    if not isinstance(arts, list):
-        return []
-    out: list[dict[str, Any]] = []
-    # Sandbox bases are invariant across entries — resolve once.
-    bases_resolved = [base.resolve() for base in resolve_bases]
-    for entry in arts:
-        if not isinstance(entry, dict):
-            continue
-        src = str(entry.get("source") or "").strip()
-        tgt = str(entry.get("target") or "").strip()
-        if not src or not tgt:
-            continue
-        raw = Path(src)
-        # An absolute ``source`` is checked as-is; a relative one is resolved under each base.
-        cands = [raw] if raw.is_absolute() else [base / raw for base in resolve_bases]
-        for cand in cands:
-            resolved = cand.resolve()
-            if not resolved.is_file():
-                continue
-            contained = False
-            for base in bases_resolved:
+def resolve_reactor_turn_timeout_sec() -> float:
+    """Resolve the reactor turn's total wall-clock timeout."""
+    value = env_float(REACTOR_TURN_TIMEOUT_ENV, default=DEFAULT_REACTOR_TURN_TIMEOUT_SEC)
+    if value > 0.0 and math.isfinite(value):
+        return value
+    log.warning(
+        "%s=%.1f is not a positive finite number; using default %.1fs",
+        REACTOR_TURN_TIMEOUT_ENV,
+        value,
+        DEFAULT_REACTOR_TURN_TIMEOUT_SEC,
+    )
+    return DEFAULT_REACTOR_TURN_TIMEOUT_SEC
+
+
+def _infer_model_class_from_config(model_path: str) -> str:
+    """Infer a deterministic model_class from local model metadata."""
+    raw_path = (model_path or "").strip()
+    payload: dict[str, Any] = {}
+    if raw_path:
+        # ``model_path`` may be an HF repo id; resolve to the local weights dir so the config-based classification
+        # works (the raw string still feeds the keyword fallback below).
+        _resolved = resolve_local_model_dir(raw_path)
+        cfg = (_resolved / "config.json") if _resolved is not None else Path(raw_path) / "config.json"
+        try:
+            if cfg.is_file():
+                data = json.loads(cfg.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    payload = data
+        except (OSError, ValueError):
+            log.debug("model_class inference: failed to read %s", cfg, exc_info=True)
+
+    # A multimodal checkpoint keeps the language model one level down, so the expert counts and the LM architecture
+    # live there rather than at the top. Read both, outer first: a VL wrapper would otherwise classify as dense.
+    payloads: list[dict[str, Any]] = [payload]
+    for nested_key in ("text_config", "llm_config", "language_config"):
+        nested = payload.get(nested_key)
+        if isinstance(nested, dict):
+            payloads.append(nested)
+
+    text_parts: list[str] = [raw_path.lower()]
+    for scope in payloads:
+        arch = scope.get("architectures")
+        if isinstance(arch, list):
+            text_parts.extend(str(x).lower() for x in arch if x)
+        elif arch:
+            text_parts.append(str(arch).lower())
+        for key in ("model_type", "attention_type", "attn_type"):
+            if scope.get(key):
+                text_parts.append(str(scope[key]).lower())
+    text = " ".join(text_parts)
+
+    def _positive_int(*keys: str) -> bool:
+        for scope in payloads:
+            for key in keys:
+                val = scope.get(key)
+                if isinstance(val, bool):
+                    continue
                 try:
-                    resolved.relative_to(base)
-                except ValueError:
+                    if val is not None and int(val) > 0:
+                        return True
+                except (TypeError, ValueError):
                     continue
-                contained = True
-                break
-            if contained:
-                out.append(entry)
-                break
-    return out
+        return False
 
-
-def _framework_config_levers_from_done(
-    done_payload: dict[str, Any] | None,
-    *,
-    levers_ride_with_patches: bool = False,
-) -> dict[str, Any]:
-    """Extract a config-lever set from a FRAMEWORK specialist deliverable.
-
-    Args:
-        done_payload: The specialist's ``specialist_done`` payload.
-        levers_ride_with_patches: Whether a lever delivered alongside a patch
-            belongs to the patch's round. True for ENABLEMENT, where the pair is
-            jointly what makes the model boot; False while optimizing, where a
-            patch is its own outcome and a lever is judged on its own.
-    """
-    if not isinstance(done_payload, dict):
-        return {}
-    proposals = done_payload.get("proposal_set") or []
-    if not isinstance(proposals, list):
-        return {}
-    # A patch deliverable otherwise takes precedence: a lever that merely
-    # *accompanies* a patch is not a config-only outcome. ``atomic`` remains the
-    # specialist's own way to say the two are inseparable, but it cannot be the
-    # only way -- it is a model-authored boolean, and the same specialist has
-    # emitted ``atomic: false`` on a lever whose own reason read "required to
-    # boot at all once the patch lands". Enablement therefore decides this from
-    # the lane it is running, not from the deliverable's self-description.
-    patches = done_payload.get("patches_written") or []
-    if isinstance(patches, list) and patches and not levers_ride_with_patches:
-        proposals = [e for e in proposals if isinstance(e, dict) and e.get("atomic") is True]
-        if not proposals:
-            return {}
-    for entry in proposals:
-        if not isinstance(entry, dict):
-            continue
-        extra_envs: dict[str, str] = {}
-        envs = entry.get("extra_envs")
-        if isinstance(envs, dict):
-            for k, v in envs.items():
-                key = str(k).strip()
-                if key:
-                    extra_envs[key] = str(v)
-        args = entry.get("extra_args")
-        extra_server_args = ""
-        if isinstance(args, str) and args.strip():
-            parsed_args = tokenize_server_args_preserving_json(args)
-            if parsed_args is None:
-                log.warning(
-                    "FRAMEWORK config lever %r has server args unsupported by "
-                    "Magpie's unquoted argv transport; dropping the args%s",
-                    entry.get("name"),
-                    " while preserving its environment overrides" if extra_envs else "",
-                )
-                if not extra_envs:
-                    continue
-            else:
-                extra_server_args = parsed_args[0]
-        elif isinstance(args, (list, tuple)):
-            arg_tokens = [str(a) for a in args if str(a).strip()]
-            if any(any(ch.isspace() for ch in token) for token in arg_tokens):
-                log.warning(
-                    "FRAMEWORK config lever %r has a whitespace-bearing argv token; dropping the args%s",
-                    entry.get("name"),
-                    " while preserving its environment overrides" if extra_envs else "",
-                )
-                if not extra_envs:
-                    continue
-            else:
-                parsed_args = tokenize_server_args_preserving_json(" ".join(arg_tokens))
-                if parsed_args is None:
-                    log.warning(
-                        "FRAMEWORK config lever %r has unparseable server args; dropping the args%s",
-                        entry.get("name"),
-                        " while preserving its environment overrides" if extra_envs else "",
-                    )
-                    if not extra_envs:
-                        continue
-                else:
-                    extra_server_args = parsed_args[0]
-        if extra_server_args or extra_envs:
-            return {
-                "extra_server_args": extra_server_args,
-                "extra_envs": extra_envs,
-            }
-    return {}
-
-
-# Hard-trigger thresholds: optimisation rounds a domain may go without a specialist dispatch / a KEEP before the
-# Coordinator force-dispatches one.
-FORCE_STALLED_SPECIALIST_ROUNDS: int = 8
-FORCE_STALLED_KEEP_ROUNDS: int = 12
-
-
-# Result keys surfaced in delegated_result inbox line; first match wins per group.
-_OUTCOME_GAIN_KEYS: tuple[str, ...] = (
-    "validated_gain_pct",
-    "gain_pct",
-    "predicted_gain_pct",
-    "delta_pct",
-)
-_OUTCOME_TPUT_KEYS: tuple[str, ...] = (
-    "tokens_per_s",
-    "tput",
-    "throughput",
-    "tput_tok_s",
-)
-_OUTCOME_STATUS_KEYS: tuple[str, ...] = ("status", "verdict", "outcome", "runner_status")
-# Notes rendered per inbox line.
-_OUTCOME_NOTES_MAX: int = 3
-
-
-def _first_present(d: dict[str, Any], keys: tuple[str, ...]) -> Any | None:
-    """Return ``d[k]`` for the first ``k`` in ``keys`` present + non-None."""
-    if not isinstance(d, dict):
-        return None
-    for k in keys:
-        v = d.get(k)
-        if v is not None:
-            return v
-    return None
-
-
-def _defang_alert_payload(value: Any) -> Any:
-    """Recursively defang string leaves of an alert payload (keys untouched)."""
-    if isinstance(value, str):
-        return _defang_prompt_structure(value)
-    if isinstance(value, dict):
-        return {k: _defang_alert_payload(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_defang_alert_payload(v) for v in value]
-    return value
-
-
-def _format_inbox_event(m: "Message", *, max_variant_rows: int = 3) -> str:
-    """Render one inbox ``Message`` as a compact, high-signal line."""
-    topic = (m.topic or "").strip()
-    payload = m.payload if isinstance(m.payload, dict) else {}
-    # Canonical inbox header ordering that downstream parsers anchor on.
-    if getattr(m, "msg_id", None):
-        head = f"seq={m.seq} msg_id={m.msg_id} from={m.from_agent} topic={topic}"
-    else:
-        head = f"seq={m.seq} from={m.from_agent} topic={topic}"
-
-    if topic == "delegated_result":
-        kind = payload.get("kind")
-        state = payload.get("state")
-        error = payload.get("error")
-        result = payload.get("result")
-        parts = [head, f"kind={kind!r}", f"state={state!r}"]
-        notes: list[Any] = []
-        if isinstance(result, dict):
-            status = _first_present(result, _OUTCOME_STATUS_KEYS)
-            gain = _first_present(result, _OUTCOME_GAIN_KEYS)
-            tput = _first_present(result, _OUTCOME_TPUT_KEYS)
-            kept = result.get("kept")
-            if status is not None:
-                parts.append(f"status={status!r}")
-            if kept is not None:
-                parts.append(f"kept={kept!r}")
-            if gain is not None:
-                parts.append(f"gain={gain}")
-            if tput is not None:
-                parts.append(f"tput={tput}")
-            # Executors that never raise report the failure inside the result envelope, leaving the top-level error
-            # None.
-            if not error:
-                error = result.get("error")
-            raw_notes = result.get("notes")
-            if isinstance(raw_notes, list):
-                # patch_safety_numeric is the Critic's artifact; it is not a lever here.
-                notes = [n for n in raw_notes if n and not str(n).startswith("patch_safety_numeric:")][
-                    :_OUTCOME_NOTES_MAX
-                ]
-            done = result.get("specialist_done") if kind == "specialist" else None
-            if isinstance(done, dict):
-                summary = str(done.get("summary") or "").strip()
-                if summary:
-                    parts.append(f"summary={summary[:400]!r}")
-                if done.get("confidence") is not None:
-                    parts.append(f"confidence={done['confidence']}")
-                for label, key in (("findings", "new_findings"), ("questions", "residual_questions")):
-                    items = done.get(key)
-                    if isinstance(items, list) and items:
-                        parts.append(f"{label}={len(items)}")
-        if error:
-            parts.append(f"error={str(error)[:200]!r}")
-        if notes:
-            shown = "; ".join(str(n) for n in notes)
-            parts.append(f"notes={shown[:300]!r}")
-        header_line = " ".join(parts)
-        if max_variant_rows <= 0 or not isinstance(result, dict):
-            return header_line
-        pvos = result.get("per_variant_outcomes")
-        if not isinstance(pvos, list):
-            return header_line
-        failures = [
-            v for v in pvos if isinstance(v, dict) and str(v.get("outcome") or "").upper() in UNMEASURED_OUTCOMES
-        ]
-        if not failures:
-            return header_line
-        lines = [header_line]
-        for vo in failures[:max_variant_rows]:
-            row = dict(vo)
-            row["error_excerpt"] = _flatten_for_inbox(vo.get("error_excerpt") or vo.get("reason") or "")
-            lines.append("  failure: " + render_failure_line(row, excerpt_chars=120))
-        elided = len(failures) - max_variant_rows
-        if elided > 0:
-            lines.append(f"  (+{elided} more failures; pull get_variant_failures)")
-        return "\n".join(lines)
-
-    if topic in ("policy_denial", "denial") or (topic == "observation" and payload.get("kind") == "policy_denial"):
-        return (
-            f"{head} action={payload.get('action_name')!r} "
-            f"rule={payload.get('rule')!r} "
-            f"hint={str(payload.get('hint') or '')[:140]!r}"
+    is_moe = _positive_int(
+        "num_experts",
+        "n_routed_experts",
+        "num_local_experts",
+        "moe_num_experts",
+    ) or any(
+        k in text
+        for k in (
+            "moe",
+            "mixtral",
+            "deepseek-v2",
+            "deepseek-v3",
+            "deepseek-r1",
+            "kimi",
+            "glm-5",
+            "glm5",
         )
-
-    if topic == "review_verdict":
-        parts = [
-            f"{head} target={payload.get('target_proposal_msg_id')!r} "
-            f"verdict={payload.get('verdict')!r} "
-            f"reasoning={str(payload.get('reasoning') or '')[:140]!r}"
-        ]
-        advisory = serialize_verdict_advisory(payload)
-        required_evidence = advisory.get("required_evidence")
-        if required_evidence:
-            shown = "; ".join(str(item) for item in required_evidence[:3])
-            parts.append(f"required_evidence[{len(required_evidence)}]={shown[:140]!r}")
-        risks = advisory.get("risks")
-        if risks:
-            parts.append(f"risks={len(risks)}")
-        advice_text = advisory.get("advice_text")
-        if advice_text:
-            parts.append(f"advice={advice_text[:140]!r}")
-        return " ".join(parts)
-
-    if topic == "observation":
-        kind = payload.get("kind")
-        if kind is not None:
-            return f"{head} kind={kind!r} payload={payload}"
-
-    if topic == "alert":
-        # Alert payloads can embed attacker-influenceable server.log excerpts; defang string leaves so a log line
-        # can't inject prompt structure.
-        return f"{head} payload={_defang_alert_payload(payload)}"
-
-    return f"{head} payload={payload}"
+    )
+    is_mla = any(
+        k in text
+        for k in (
+            "mla",
+            "multi-head latent",
+            "deepseek",
+            "kimi",
+            "glm-5",
+            "glm5",
+        )
+    )
+    is_nsa = any(
+        k in text
+        for k in (
+            "nsa",
+            "native sparse attention",
+            "glm-5",
+            "glm5",
+        )
+    )
+    if is_moe and is_mla and is_nsa:
+        return "moe_mla_nsa"
+    if is_moe and is_mla:
+        return "moe_mla"
+    if is_moe:
+        return "moe_swa"
+    return "dense"
 
 
-@dataclass
-class PendingProposal:
-    """A propose_action intent waiting for Critic Review."""
-
-    proposal_msg_id: str
-    from_agent: str
-    action_name: str
-    predicted_gain_pct: float
-    payload: dict[str, Any]
-    decided: bool = False
-    verdict: str | None = None  # approve / reject / redirect / advise / needs_review
-
-
-# Path-like keys surfaced from a kernel handler payload/result so operators can see where a step's artifacts went.
-_LIFECYCLE_PATH_KEYS: tuple[str, ...] = (
-    "trace_input",
-    "trace_dir",
-    "candidates_path",
-    "analysis_md_path",
-    "kernel_candidates",
-    "best_artifact_path",
-    "patch_path",
-    "target_file",
-    "workspace",
-    "workspace_path",
-    "out_dir",
-    "output_dir",
-    "run_dir",
-    "report_path",
-    "json_path",
-    "md_path",
-    "tracelens_agent_report",
-    # TraceLens analysis outputs surfaced by trace_analyze_handler.
-    "trace_report_path",
-    "analysis_report_path",
-    "tracelens_summary_path",
-    "kernel_roofline_path",
-    "cli_log_path",
-)
-
-
-def _lifecycle_paths(payload: Any) -> dict[str, str]:
-    """Extract present, non-empty path-like fields from a kernel handler payload or result dict."""
-    if not isinstance(payload, dict):
-        return {}
-    out: dict[str, str] = {}
-    for key in _LIFECYCLE_PATH_KEYS:
-        val = payload.get(key)
-        if isinstance(val, str) and val.strip():
-            out[key] = val
-    return out
+if TYPE_CHECKING:
+    from hyperloom.inference_optimizer.experience_kb import ExperienceKBIntegration
+    from .proposals import PendingProposal
 
 
 @dataclass
@@ -460,51 +215,8 @@ class CoordinatorState:
     pending_proposals: dict[str, PendingProposal] = field(default_factory=dict)
 
 
-class _CoordinatorMeta(type):
-    """Class-level delegation for extracted collaborator methods."""
-
-    def __getattr__(cls, name):  # noqa: N805 - metaclass first arg is the class
-        prop = cls._DELEGATED.get(name)
-        if prop is not None:
-            import importlib
-
-            mod, clsname = cls._COLLAB_MODULES[prop]
-            module = importlib.import_module(f"hyperloom.orchestrator.{mod}")
-            return getattr(getattr(module, clsname), name)
-        raise AttributeError(f"type object {cls.__name__!r} has no attribute {name!r}")
-
-
-class Coordinator(metaclass=_CoordinatorMeta):
+class Coordinator:
     """The single Coordinator instance per session."""
-
-    # property name -> (module, collaborator class) for class-level delegation.
-    _COLLAB_MODULES = {
-        # Phase handlers in call-chain order.
-        "phase_machine": ("phases.machine", "MachinePhase"),
-        "phase_prelude": ("phases.prelude", "PreludePhase"),
-        "phase_sweep": ("phases.sweep", "SweepPhase"),
-        "phase_close": ("phases.close", "ClosePhase"),
-        "phase_internal": ("phases.internal", "InternalTasksPhase"),
-        "phase_kernel_stack": ("phases.kernel_stack", "KernelStackPhase"),
-        "phase_kernel": ("phases.kernel", "KernelPhase"),
-        "phase_macro_cycle": ("phases.macro_cycle", "MacroCycleCollaborator"),
-        "cycle_memory": ("loop.cycle_memory", "CycleMemoryCollaborator"),
-        "specialist_dispatch": ("specialists.dispatch", "SpecialistDispatchCollaborator"),
-        "gap_refresh": ("state.gaps", "GapRefreshCollaborator"),
-        "phase_framework": ("phases.framework", "FrameworkPhase"),
-        "gpu_lanes": ("gpu_lanes", "GpuLanes"),
-        "enablement_params": ("enablement.params", "EnablementParams"),
-        "enablement_lane": ("enablement.lane", "EnablementLane"),
-        "enablement_build": ("enablement.build", "EnablementBuild"),
-        "enablement_revalidation": ("enablement.revalidation", "EnablementRevalidation"),
-        "router": ("loop.intent_router", "IntentRouter"),
-        "maintenance": ("loop.maintenance", "MaintenanceCollaborator"),
-        "build_lifecycle": ("loop.build_lifecycle", "BuildLifecycleCollaborator"),
-        "writeback": ("loop.writeback", "WritebackCollaborator"),
-        "dispatcher": ("loop.dispatcher", "DispatcherCollaborator"),
-        "proposals": ("loop.proposals", "ProposalsCollaborator"),
-        "conversation": ("loop.conversation", "ConversationCollaborator"),
-    }
 
     def __init__(
         self,
@@ -515,13 +227,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
         sub_agent_runner: SubAgentRunner | None = None,
         bus_class: type[MessageBus] = MessageBus,
         model_class: str | None = None,
-        recipe_kb: RecipeKB | None = None,
         phase_budget_pct: dict[str, float] | None = None,
         knowledge_plane: Any = None,
         proposal_scorer: Any = None,
-        warm_replay_enabled: bool = True,
-        warm_replay_min_confidence: float = 0.7,
-        warm_replay_min_reproduce_pct: float = 0.8,
     ):
         """Construct the per-session Coordinator and wire persistence, policy, and agents."""
         self.session_dir = Path(session_dir)
@@ -529,21 +237,15 @@ class Coordinator(metaclass=_CoordinatorMeta):
         # path.
         bind_session(self.session_dir)
         self.role_registry = role_registry or default_role_registry()
-        # KnowledgePlane owns RecipeKB.
-        plane_recipe_kb = getattr(knowledge_plane, "recipe_kb", None)
-        self.recipe_kb: RecipeKB | None = plane_recipe_kb if plane_recipe_kb is not None else recipe_kb
-        # Per-session optimization journal; lazy-instantiated on first use.
-        self._journal: Journal | None = None
-        # Warm-recipe replay controls (PRELUDE auto-apply of KB best_config).
-        self._warm_replay_enabled: bool = bool(warm_replay_enabled)
-        self._warm_replay_min_confidence: float = float(warm_replay_min_confidence)
-        self._warm_replay_min_reproduce_pct: float = float(warm_replay_min_reproduce_pct)
+        # Orchestration prompt overrides, rebuild closure, and snapshot writes.
+        self.orch_prompt = OrchestrationPrompt(overrides={})
         # KnowledgePlane facade; pre-warms PR feed + advisory context.
         self.knowledge_plane: Any = knowledge_plane
-        # ProposalScorer facade (advisory only).
-        self._proposal_scorer: Any = proposal_scorer
-        # Phase budget percentages, normalised once at construction.
-        self._phase_budget_pct: dict[str, float] = _phase_state.normalize_budget_pct(phase_budget_pct)
+        from ..specialists.dispatch import SpecialistDispatchCollaborator
+
+        self._collaborator(
+            "_specialist_dispatch", partial(SpecialistDispatchCollaborator, proposal_scorer=proposal_scorer)
+        )
         self._model_class_override: str = (model_class or "").strip()
 
         # Validate every reactor has a backend wired.
@@ -562,7 +264,10 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
         self.bus = bus_class(self.db)
         self.locks = ResourceLockManager(SqliteLeaseBackend(self.db))
-        self.tasks = TaskRegistry(self.db)
+        self.tasks = TaskRegistry(
+            self.db,
+            dispatch_origin_provider=lambda: task_dispatch_origin(self.shared_state),
+        )
         self.cursors = CursorStore(self.db)
         self.sub = sub_agent_runner or SubAgentRunner(
             self.locks,
@@ -572,10 +277,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
         # Persistent session state (state.json) — load existing for resume.
         self.shared_state = SharedState.load_or_init(self.session_dir)
-        # Lifecycle save debounce: terminal events flush immediately; bursty non-terminal markers coalesce within a
-        # short window.
-        self._lifecycle_last_save: float = 0.0
-        self._lifecycle_save_min_interval_s: float = 2.0
         # Thread live SharedState into the runner so executors get it via ctx.extra.
         self.sub.shared_state = self.shared_state
         # Serving-disjoint invariant: the live serving process holds the first ``serving_tp`` cards, carved off the
@@ -583,18 +284,15 @@ class Coordinator(metaclass=_CoordinatorMeta):
         self.gpu_specialist_pool = SpecialistGpuPool(
             self.db,
             gpu_ids=resolve_gpu_specialist_devices(
-                int(getattr(self.shared_state, "gpu_specialist_capacity", 0) or 0),
-                serving_tp=self._resolve_serving_tp(),
+                int(self.shared_state.gpu_specialist_capacity or 0),
+                serving_tp=self.dispatcher.resolve_serving_tp(),
             ),
         )
-        # Framework-authoring pool over the whole node.
+        # Whole-node pool for enablement and bench specialists.
         self.framework_gpu_pool = SpecialistGpuPool(
             self.db,
             gpu_ids=resolve_whole_machine_devices(),
         )
-        # Dispatcher re-scan poll cadence: re-scan the queue while awaiting in-flight tasks so a queued GPU task
-        # starts the moment its lane frees.
-        self._dispatcher_poll_sec = 10.0
         # Sync research_lane capacity into lane_capacity so acquire_many honours the cap.
         try:
             from ..bus.storage.schema import set_lane_capacity as _set_lane_capacity
@@ -602,7 +300,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
             cap = int(self.shared_state.research_lane_capacity or 0)
             if cap >= 0:
                 _set_lane_capacity(self.db.raw, "research_lane", cap)
-        except Exception:  # noqa: BLE001 — non-fatal; default seed wins
+        except Exception:
             log.exception("failed to sync research_lane_capacity to leases DB")
         # gpu_research_lane stays capacity-1 (strictly serial GPU specialists);
         # the GPU pool partitions physical cards within that one lease.
@@ -618,9 +316,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
         )
         self.sub.policy = self.policy
         # Attach read-only context-pull MCP tools to Orchestration backend.
-        self._attach_orchestration_context_tools()
+        self.conversation.attach_orchestration_context_tools()
         # Resume detection must run before any boot-time state.json write.
-        self._resumed_from = self._detect_resume_state()
+        self.writeback.detect_resume_state()
         # Reap serving processes orphaned by a prior monitor-process crash (e.g. a raylet death that took the
         # optimizer down mid-benchmark), scoped strictly to this session's own pidfiles.
         self._reap_orphaned_servers_best_effort(phase="boot")
@@ -641,69 +339,27 @@ class Coordinator(metaclass=_CoordinatorMeta):
         self._last_maintenance_ts: float = time.monotonic()
 
         # Pin a per-macro-cycle budget window so per-phase budget fractions apply per cycle.
-        if float(getattr(self.shared_state, "cycle_minutes", 0) or 0) <= 0:
-            try:
-                _cycle_hours = float(
-                    os.environ.get(
-                        "INFERENCE_OPTIMIZER_CYCLE_HOURS",
-                        str(DEFAULT_CYCLE_HOURS),
-                    )
-                )
-            except ValueError:
-                _cycle_hours = DEFAULT_CYCLE_HOURS
+        if float(self.shared_state.cycle_minutes or 0) <= 0:
+            _cycle_hours = env_float("INFERENCE_OPTIMIZER_CYCLE_HOURS", default=DEFAULT_CYCLE_HOURS)
             self.shared_state.cycle_minutes = max(1.0, _cycle_hours * 60.0)
 
-        # Medium-intensity soft restart at each macro-cycle boundary.
-        self._cycle_soft_restart: bool = os.environ.get(
-            "INFERENCE_OPTIMIZER_DISABLE_CYCLE_SOFT_RESTART",
-            "",
-        ).strip().lower() not in {"1", "true", "yes", "on"}
-        # The soft restart's inference-server deep-clean kills lingering server processes; separately gated, defaults
-        # ON within the soft restart.
-        self._cycle_restart_servers: bool = os.environ.get(
-            "INFERENCE_OPTIMIZER_DISABLE_CYCLE_SERVER_RESTART",
-            "",
-        ).strip().lower() not in {"1", "true", "yes", "on"}
-
-        # Per-agent (seq, msg_id) of the last message its prompt rendered.
-        self._rendered_cursor: dict[str, tuple[int, str]] = {}
+        self._prompt_snapshots = PromptSnapshotTracker()
 
         # Per-agent BackendError streak; crossing threshold records one backend_unhealthy, then re-arms.
         self._backend_error_streak: dict[str, int] = {name: 0 for name in self.role_registry}
         self._backend_error_alarm_armed: dict[str, bool] = {name: True for name in self.role_registry}
-        try:
-            self._backend_error_streak_threshold: int = max(
-                1,
-                int(
-                    os.environ.get(
-                        "INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD",
-                        "5",
-                    )
-                ),
-            )
-        except ValueError:
-            self._backend_error_streak_threshold = 5
+        # Monotonic time each failing agent's streak began, and before which the tick loop does not call it again.
+        self._backend_error_since: dict[str, float] = {}
+        self._backend_retry_at: dict[str, float] = {}
+        self._backend_error_streak_threshold: int = max(
+            1,
+            env_int("INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD", default=5),
+        )
 
         # Stable tick order from the live role_registry.
         _CANONICAL_ORDER = ("orchestration", "critic")
         self._tick_roles: tuple[str, ...] = tuple(r for r in _CANONICAL_ORDER if r in self.role_registry)
 
-        # Inline fast-action execution: run cheap lane-light action in-turn. Default ON.
-        _inline_raw = (
-            os.environ.get(
-                "INFERENCE_OPTIMIZER_INLINE_FAST_ACTIONS",
-                "",
-            )
-            .strip()
-            .lower()
-        )
-        self._inline_fast_actions_enabled: bool = _inline_raw not in {
-            "0",
-            "false",
-            "no",
-            "off",
-        }
-        self._coordinator_loop: asyncio.AbstractEventLoop | None = None
         # Wall-clock budget tracking for per-tick Time-budget prompt injection.
         self._run_deadline: Deadline | None = None
         self._run_started_monotonic: float | None = None
@@ -711,352 +367,51 @@ class Coordinator(metaclass=_CoordinatorMeta):
         # work is not skipped just because the session deadline has passed.
         self._closing_deadline: Deadline | None = None
         self._signals: SignalDrain | None = None
-        # Latest objective wired by run(); refreshes target_gap_pct each tick. None outside a run.
+        # Latest objective wired by run(); None outside a run.
         self._current_objective: Objective | None = None
 
         # Initialise phase machine (fresh session enters PRELUDE). Idempotent.
-        self._ensure_phase_initialised()
+        self.phase_machine.ensure_phase_initialised(phase_budget_pct)
         # Recipe KB T0 defensive fallback for direct SDK/test callers; best-effort.
-        self._ensure_recipe_kb_t0_anchored()
+        self.phase_machine.ensure_recipe_kb_t0_anchored()
+
+    @property
+    def recipe_kb(self) -> RecipeKB | None:
+        """RecipeKB owned by the knowledge plane."""
+        plane = self.knowledge_plane
+        return plane.recipe_kb if plane is not None else None
+
+    @property
+    def experience_kb(self) -> ExperienceKBIntegration | None:
+        """The session's one Experience service integration, built on first use; None when reads are off."""
+        if "_experience_kb" not in self.__dict__:
+            from hyperloom.inference_optimizer.experience_kb import integration_for
+
+            self.__dict__["_experience_kb"] = integration_for(self.shared_state, self.session_dir)
+        return self.__dict__["_experience_kb"]
+
+    @property
+    def run_deadline(self) -> Deadline | None:
+        """Wall-clock deadline of the current run leg; None outside a run."""
+        return self._run_deadline
+
+    @property
+    def run_started_monotonic(self) -> float | None:
+        """Monotonic start of the current run leg; None outside a run."""
+        return self._run_started_monotonic
+
+    def target_gap_pct(self) -> float:
+        """Percent improvement still needed to reach the run objective; 0.0 outside a run."""
+        objective = self._current_objective
+        return objective.gap_pct(self.shared_state) if objective is not None else 0.0
 
     @property
     def router(self) -> IntentRouter:
         """Intent routing collaborator (extracted from this class)."""
-        r = self.__dict__.get("_router")
-        if r is None:
-            r = IntentRouter(self)
-            self.__dict__["_router"] = r
-        return r
-
-    # Methods extracted into collaborator objects are delegated back by name here (symmetric to each collaborator's
-    # ``__getattr__`` back to this coordinator).
-    _DELEGATED = {
-        # router
-        "_handle_intent": "router",
-        "_handle_propose_action": "router",
-        "_handle_review_verdict": "router",
-        "_handle_single_verdict": "router",
-        "_handle_delegate": "router",
-        "_handle_request": "router",
-        "_handle_extend_lease": "router",
-        "_deliver_specialist_inbox": "router",
-        "_handle_prune_branch": "router",
-        "_handle_escalate_strategy_change": "router",
-        "_handle_send_message": "router",
-        "_handle_alert": "router",
-        "_handle_update_state": "router",
-        # recorder (folded into writeback)
-        "_aggregate_research_evidence": "writeback",
-        "_harvest_specialist_findings": "writeback",
-        "_record_specialist_result": "writeback",
-        "_drain_queued_baselines": "writeback",
-        # Phase handlers, grouped in the same call-chain order as _COLLAB_MODULES/the @property block above: machine
-        # -> prelude -> sweep -> close -> internal -> kernel_stack -> kernel -> explore -> framework (framework last:
-        # largest cluster).
-        "_ensure_phase_initialised": "phase_machine",
-        "_ensure_recipe_kb_t0_anchored": "phase_machine",
-        "_kernel_enabled": "phase_machine",
-        "_optimize_enabled": "phase_machine",
-        "_advance_phase_if_needed": "phase_machine",
-        "_on_phase_entered": "phase_machine",
-        "_reseed_orch_prompt_for_phase": "phase_machine",
-        "_record_phase_entry_evidence": "phase_machine",
-        "_internal_analysis_kind": "phase_prelude",
-        "_measured_analysis_cost_sec": "phase_prelude",
-        "_record_prelude_arm_dropped": "phase_prelude",
-        "_warm_recipe_proven_items": "phase_prelude",
-        "_inject_warm_recipe_history_into_ledger": "phase_prelude",
-        "_maybe_enqueue_warm_replay": "phase_prelude",
-        "_promote_warm_replay": "phase_prelude",
-        "_maybe_enqueue_prelude_initial_analysis_after_baseline": "phase_prelude",
-        "_enqueue_internal_analysis_task": "phase_prelude",
-        "_on_enter_sweep": "phase_sweep",
-        "_enqueue_internal_conc_sweep_task": "phase_sweep",
-        "_record_session_budget_conc_sweep_skip": "phase_sweep",
-        "_record_terminal_conc_sweep_skip": "phase_sweep",
-        "_derive_close_stop_reason": "phase_close",
-        "_session_integrated_kernel_patch": "phase_close",
-        "_maybe_run_close_post_opt_roofline": "phase_close",
-        "_drain_geak_rebench_for_close": "phase_close",
-        "_on_enter_close": "phase_close",
-        "_enqueue_runnable_internal_task": "phase_close",
-        "_enqueue_internal_report_task": "phase_close",
-        "_enqueue_internal_session_breakdown_task": "phase_close",
-        "_run_close_task": "phase_close",
-        "_record_close_step": "phase_close",
-        "_enter_closing_phase": "phase_close",
-        "_closing_report_terminal": "phase_close",
-        "ensure_close_sequence": "phase_close",
-        "_enqueue_internal_research_scout_task": "phase_internal",
-        "_maybe_enqueue_prelude_research_scout": "phase_internal",
-        "_maybe_enqueue_explore_research_scout": "phase_internal",
-        "_enqueue_internal_static_recon_task": "phase_internal",
-        "_maybe_enqueue_prelude_static_recon": "phase_internal",
-        "_maybe_enqueue_trajectory_reviewer": "phase_internal",
-        "_consume_static_recon": "phase_internal",
-        "_drain_pending_keep_integrates": "phase_kernel_stack",
-        "_positive_needs_review_integrates": "phase_kernel_stack",
-        "_stack_resolved_kernel_ids": "phase_kernel_stack",
-        "_mark_stack_validation_entries_resolved": "phase_kernel_stack",
-        "_stack_component_identities": "phase_kernel_stack",
-        "_mark_stack_validation_in_progress": "phase_kernel_stack",
-        "_clear_stack_validation_in_progress": "phase_kernel_stack",
-        "_clear_pending_stack_validation_checkpoints": "phase_kernel_stack",
-        "_recover_interrupted_stack_validation": "phase_kernel_stack",
-        "_stack_entries_for_validation": "phase_kernel_stack",
-        "_finalize_stack_validation_outcome": "phase_kernel_stack",
-        "_maybe_validate_positive_needs_review_stack": "phase_kernel_stack",
-        "_run_kernel_stack_validation_e2e": "phase_kernel_stack",
-        "_auto_enqueue_pending_integrations": "phase_kernel_stack",
-        "_maybe_reprofile_for_kernel": "phase_kernel",
-        "_geak_enabled": "phase_kernel",
-        "_on_enter_kernel": "phase_kernel",
-        "_open_kernel_timeline": "phase_kernel",
-        "_close_kernel_timeline": "phase_kernel",
-        "_kernel_timeline": "phase_kernel",
-        "_resolve_bench_protocol": "phase_kernel",
-        "_geak_timeouts": "phase_kernel",
-        "_run_geak_kernel_phase": "phase_kernel",
-        "_geak_win_already_recorded": "phase_kernel",
-        "_parse_geak_accepted_config": "phase_kernel",
-        "_record_geak_candidate": "phase_kernel",
-        "_promote_geak_from_candidate": "phase_kernel",
-        "_reject_geak_promotion": "phase_kernel",
-        "_record_geak_kernel_journey": "phase_kernel",
-        "_ck_blockscale_switch_eligible": "phase_kernel",
-        "_ck_switch_precision_is_fp8": "phase_kernel",
-        "_handle_gemm_tuning_result": "phase_kernel",
-        "_sync_profile_state_after_gemm_roofline": "phase_kernel",
-        "_journal_gemm_tuning_keep": "phase_kernel",
-        "_replace_latest_gemm_tuning_attempt": "phase_kernel",
-        "_gemm_e2e_candidates": "phase_kernel",
-        "_validate_gemm_tuning_e2e": "phase_kernel",
-        "_current_tput_from_validated_gain": "phase_kernel",
-        "_last_measured_roofline_tput": "phase_kernel",
-        "_needs_roofline_for_watermark": "phase_kernel",
-        "_maybe_enqueue_watermark_roofline": "phase_kernel",
-        "_cached_kernel_request": "phase_kernel",
-        "_negative_ledger_domain_counts": "phase_macro_cycle",
-        "_plan_cycle_focus": "phase_macro_cycle",
-        "_record_cycle_strategy_for_current_cycle": "phase_macro_cycle",
-        "_cycle_strategy_block": "phase_macro_cycle",
-        "_apply_macro_cycle_reloop": "phase_macro_cycle",
-        "_run_cycle_soft_restart": "phase_macro_cycle",
-        "_restart_inference_servers": "phase_macro_cycle",
-        "_on_cycle_start_reprofile": "phase_macro_cycle",
-        "_capture_cycle_memory": "cycle_memory",
-        "_cycle_directive_fallback": "cycle_memory",
-        "_reseed_orch_prompt_for_cycle": "cycle_memory",
-        "_maybe_force_stalled_domain_specialist": "specialist_dispatch",
-        "_fan_out_specialist_wave": "specialist_dispatch",
-        "_maybe_auto_retry_specialist": "specialist_dispatch",
-        "_record_specialist_retry_exhausted": "specialist_dispatch",
-        "_warm_specialist_params": "specialist_dispatch",
-        "_build_specialist_round_entry": "specialist_dispatch",
-        "_task_id_from_specialist_source": "specialist_dispatch",
-        "_refresh_gaps": "gap_refresh",
-        "_extract_gaps_from_baseline": "gap_refresh",
-        "_extract_gaps_from_attempts": "gap_refresh",
-        "_framework_authoring_domain": "gap_refresh",
-        "_gap_layer_for_action": "gap_refresh",
-        "_seed_gaps_from_research_hints": "gap_refresh",
-        "_record_explore_round_gaps": "phase_framework",
-        "_record_explore_variant_failures": "phase_framework",
-        "_maybe_materialize_mn_explore": "phase_framework",
-        "_maybe_autosubmit_specialist_patches": "phase_framework",
-        "_maybe_autosubmit_framework_config": "phase_framework",
-        "_config_lever_known_bad": "phase_framework",
-        "_on_enter_framework": "phase_framework",
-        "_open_framework_timeline": "phase_framework",
-        "_close_framework_timeline": "phase_framework",
-        "_framework_timeline": "phase_framework",
-        "_framework_policy_fields": "phase_framework",
-        "_pump_framework_agent_phase": "phase_framework",
-        "_framework_agent_authoring_inflight": "phase_framework",
-        "_enqueue_framework_agent_authoring_specialist": "phase_framework",
-        "_coerce_needs_gpu": "gpu_lanes",
-        "_framework_gpu_params": "gpu_lanes",
-        "_framework_authoring_lanes_ttl": "gpu_lanes",
-        "_build_enablement_specialist_params": "enablement_params",
-        "_read_enablement_source_context": "enablement_params",
-        "_derive_checkpoint_weight_facts": "enablement_params",
-        "_discover_enablement_candidate_refs": "enablement_params",
-        "_enablement_admitted": "enablement_lane",
-        "_maybe_enqueue_enablement_specialist": "enablement_lane",
-        "_maybe_record_enablement_human_review": "enablement_lane",
-        "_enablement_in_flight": "enablement_lane",
-        "_round_has_live_work": "enablement_lane",
-        "_open_authoring_round": "enablement_lane",
-        "_renew_enablement_round": "enablement_lane",
-        "_handoff_enablement_round": "enablement_lane",
-        "_settle_enablement_round": "enablement_lane",
-        "_maybe_rearm_enablement": "enablement_lane",
-        "_maybe_escalate_to_targeted_build": "enablement_build",
-        "_maybe_enqueue_specialist_requested_build": "enablement_build",
-        "_maybe_route_build_outcomes": "enablement_build",
-        "_route_succeeded_build": "enablement_build",
-        "_route_failed_build": "enablement_build",
-        "_build_routing_record": "enablement_build",
-        "_note_build_routed": "enablement_build",
-        "_build_probe_was_cancelled": "enablement_build",
-        "_enqueue_build_launch_probe": "enablement_build",
-        "_maybe_rearm_authored_lane": "phase_framework",
-        "_enqueue_author_specialist": "phase_framework",
-        "_drain_apply_fail_retry_pending": "phase_framework",
-        "_framework_candidate_key": "phase_framework",
-        "_framework_processed_candidate_keys": "phase_framework",
-        "_unprocessed_framework_agent_candidates": "phase_framework",
-        "_select_next_framework_agent_candidate": "phase_framework",
-        "_framework_known_candidate_ids": "phase_framework",
-        "_framework_tried_refs": "phase_framework",
-        "_build_framework_working_memory": "phase_framework",
-        "_framework_agent_discover_repo_urls": "phase_framework",
-        "_record_framework_agent_phase_done": "phase_framework",
-        "_enqueue_framework_agent_task": "phase_framework",
-        "_collect_framework_agent_candidate_priors": "phase_framework",
-        "_submit_framework_agent_candidate_for_review": "phase_framework",
-        "_materialize_framework_agent_candidate": "phase_framework",
-        "_stamp_framework_progress": "phase_framework",
-        "_record_framework_agent_critic_denied": "phase_framework",
-        "_maybe_reauthor_from_critic_feedback": "phase_framework",
-        "_pump_framework_agent_phase_safely": "phase_framework",
-        "_pump_enablement_safely": "enablement_lane",
-        "_maybe_enqueue_enablement_baseline_revalidation": "enablement_revalidation",
-        "_open_revalidation_row": "enablement_revalidation",
-        "_open_round_past_spent_generations": "enablement_revalidation",
-        "_open_row_past_spent_generations": "enablement_revalidation",
-        "_record_framework_agent_authored_outcome": "phase_framework",
-        "_recover_framework_agent_authoring_outcome": "phase_framework",
-        "_record_framework_agent_authoring_empty_outcome": "phase_framework",
-        "_record_framework_agent_dispatch_failure": "phase_framework",
-        "_maybe_enqueue_candidate_discovery": "phase_framework",
-        "_candidate_discovery_inflight": "phase_framework",
-        "_ingest_candidate_discovery": "phase_framework",
-        "_candidates_from_discovery_proposals": "phase_framework",
-        "_attach_orchestration_context_tools": "conversation",
-        "_context_inbox_reader": "conversation",
-        "_context_recent_outcomes_reader": "conversation",
-        "_context_running_tasks_reader": "conversation",
-        "_task_heartbeat_age_sec": "conversation",
-        "_context_analysis_reader": "conversation",
-        "_record_reactor_conversation": "conversation",
-        "_compose_prompt": "conversation",
-        "_load_system_prompt": "conversation",
-        "_inline_action_whitelist": "dispatcher",
-        "_run_action_now_sync": "dispatcher",
-        "_run_action_now": "dispatcher",
-        "_plateau_advisory_block": "conversation",
-        "_dominant_roofline_direction": "conversation",
-        "_bottleneck_redirect_advisory_block": "conversation",
-        "_acceptance_threshold_advisory_block": "conversation",
-        "_target_gap_advisory_block": "conversation",
-        "_current_primary_gap": "conversation",
-        "_recent_proposed_variants": "conversation",
-        "_priors_match_advisory_block": "conversation",
-        "_discarded_escalate_hint_advisory_block": "conversation",
-        "_workload_canonical_id": "proposals",
-        "_read_local_recipe_row": "proposals",
-        "_extract_kept_best_config": "proposals",
-        "_kb_best_config_overrides_for_keep": "proposals",
-        "_kb_amend_recipe": "proposals",
-        "_inject_explore_runtime_params": "proposals",
-        "_materialize_approved_proposal": "proposals",
-        "_record_proposal_task_map": "proposals",
-        "_registry_lanes_ttl": "dispatcher",
-        "_cycle_idem_suffix": "dispatcher",
-        "_advance_rendered_cursor": "conversation",
-        "_dispatch_paused_for_phase_budget": "dispatcher",
-        "_pump_dispatcher_once": "dispatcher",
-        "_spawn_fitting_queued": "dispatcher",
-        "run_task_registered": "dispatcher",
-        "_specialist_wall_budget_sec": "dispatcher",
-        "_specialist_deadline": "dispatcher",
-        "_specialist_progress_publisher": "dispatcher",
-        "_resolve_serving_tp": "dispatcher",
-        "_gpu_lease_ttl_sec": "dispatcher",
-        "_reap_dispatched_task": "dispatcher",
-        "_account_dead_holder_failures": "dispatcher",
-        "_lanes_fit": "dispatcher",
-        "_phase_denial_for_action": "dispatcher",
-        "_sequence_denial_for_action": "dispatcher",
-        "_time_budget_denial_for_action": "dispatcher",
-        "_admission_denial_for_action": "dispatcher",
-        "_sequence_denial_for_request": "dispatcher",
-        "_skip_gemm_tuning": "dispatcher",
-        "_gemm_tuning_required_before_kernel_opt": "dispatcher",
-        "_emit_lifecycle": "writeback",
-        "_record_policy_denied": "writeback",
-        "_record_observation": "writeback",
-        "_record_integrate_keep": "writeback",
-        "_is_promotable_result": "writeback",
-        "_record_intervention_for_task": "writeback",
-        "_handle_unpromotable_result": "writeback",
-        "_source_session_id": "writeback",
-        "_fact_write_hook": "writeback",
-        "_ensure_journal": "writeback",
-        "_pitfall_severity_for": "writeback",
-        "_journal_entry_phase": "writeback",
-        "_record_fact_per_task": "writeback",
-        "_build_statement": "writeback",
-        "_build_measured_impact": "writeback",
-        "_record_fact_per_variant": "writeback",
-        "_collect_workload_tags": "writeback",
-        "_build_kernel_optimizations_from_state": "writeback",
-        "_collect_attempt_provenance": "writeback",
-        "_build_recipe_attrs_from_state": "writeback",
-        "ensure_recipe_finalized": "writeback",
-        "finalize_recipe_and_journal": "writeback",
-        "_lift_to_current_best": "writeback",
-        "_update_cumulative_gain_validated": "writeback",
-        "_promote_to_shared_state": "writeback",
-        "_should_run_prelude_bootstrap": "writeback",
-        "_detect_resume_state": "writeback",
-        "replay_for_resume": "writeback",
-        "_current_best_launch_config": "writeback",
-        "build_env_spec": "writeback",
-        "_resume_consistency_pass": "writeback",
-        "_resume_reenter_kernel_if_needed": "writeback",
-        "_replay_keep_from_result": "writeback",
-        "_resume_rollback_pending_integrate": "writeback",
-        "_resume_recover_pending_integrate": "writeback",
-        "_resume_recover_orphaned_keeps": "writeback",
-        "_enqueue_internal_stack_rebench": "writeback",
-        "_validate_geak_via_geak_harness": "writeback",
-        "resumed_from": "writeback",
-        "_replay_resume_if_needed": "writeback",
-        "_run_maintenance": "maintenance",
-        "_maybe_prune_runs_for_disk": "maintenance",
-        "enqueue_targeted_build": "build_lifecycle",
-    }
-
-    def __getattr__(self, name: str):
-        # Only fires for genuinely-missing attributes (not shadowed instance attrs / real methods).
-        owner = Coordinator._DELEGATED.get(name)
-        if owner is not None:
-            target = getattr(self, owner)
-            try:
-                # Do not invoke the collaborator's fallback ``__getattr__`` here: a stale _DELEGATED entry would
-                # otherwise bounce back to this Coordinator and recurse until RecursionError.
-                return object.__getattribute__(target, name)
-            except AttributeError as exc:
-                raise AttributeError(
-                    f"{type(self).__name__!r} delegates {name!r} to {owner!r}, but that collaborator does not define it"
-                ) from exc
-        raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
-
-    def _inline_action_whitelist(self) -> frozenset[str]:
-        return self.dispatcher._inline_action_whitelist()
-
-    def _run_action_now_sync(self, action_name: str, params: dict[str, Any] | None = None) -> str:
-        return self.dispatcher._run_action_now_sync(action_name, params)
-
-    async def _run_action_now(self, action_name: str, params: dict[str, Any] | None = None) -> str:
-        return await self.dispatcher._run_action_now(action_name, params)
+        return self._collaborator("_router", IntentRouter)
 
     def _collaborator(self, attr: str, factory):
-        """Lazily build + cache a collaborator object (like ``router``/``writeback``); works for
-        ``Coordinator.__new__`` test doubles too (uses ``__dict__``).
-        """
+        """Lazily build + cache a collaborator object; works for ``Coordinator.__new__`` test doubles too (uses ``__dict__``)."""
         obj = self.__dict__.get(attr)
         if obj is None:
             obj = factory(self)
@@ -1111,12 +466,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         from ..phases.macro_cycle import MacroCycleCollaborator
 
         return self._collaborator("_phase_macro_cycle", MacroCycleCollaborator)
-
-    @property
-    def cycle_memory(self):
-        from ..loop.cycle_memory import CycleMemoryCollaborator
-
-        return self._collaborator("_cycle_memory", CycleMemoryCollaborator)
 
     @property
     def specialist_dispatch(self):
@@ -1221,6 +570,13 @@ class Coordinator(metaclass=_CoordinatorMeta):
         return self._collaborator("_writeback", WritebackCollaborator)
 
     @property
+    def recipe_journal(self):
+        """Optimization journal, Recipe KB facts and the final Recipe."""
+        from ..knowledge.recipe_journal import RecipeJournalCollaborator
+
+        return self._collaborator("_recipe_journal", RecipeJournalCollaborator)
+
+    @property
     def maintenance(self):
         from .maintenance import MaintenanceCollaborator
 
@@ -1231,14 +587,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         from .build_lifecycle import BuildLifecycleCollaborator
 
         return self._collaborator("_build_lifecycle", BuildLifecycleCollaborator)
-
-    def _kb_hardware_slug(self) -> str:
-        """Topology-aware hardware dimension for the recipe ``canonical_id``."""
-        from hyperloom.orchestrator.actions.executors._multi_node_env import resolve_kb_topology
-        from hyperloom.inference_optimizer.recipe_snapshot_constants import kb_hardware_slug
-
-        ss = self.shared_state
-        return kb_hardware_slug(ss.gpu_type or "unknown_gpu", **resolve_kb_topology())
 
     def _reap_orphaned_servers_best_effort(self, *, phase: str) -> None:
         """Reap leftover single-node serving processes via this session's pidfiles.
@@ -1264,7 +612,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                     phase,
                     reaped,
                 )
-        except Exception:  # noqa: BLE001 - cleanup must never be fatal
+        except Exception:
             log.exception("coordinator: orphan server reaper failed at %s (ignored)", phase)
 
     def _pin_source_trees(self) -> None:
@@ -1278,23 +626,8 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
         write_trees(resolve_trees(), session_dir=self.session_dir)
 
-    # Advisory disk guard: when the session partition runs low, LRU-trim the
-    # bulkiest churn (per-task runs/ workspaces); durable state is never touched.
-    _DISK_FREE_MIN_GB: float = 20.0
-    _DISK_USED_MAX_FRAC: float = 0.85
-    _DISK_RUNS_KEEP_PER_ACTION: int = 50
-    _STATE_JSON_WARN_BYTES: int = 50 * 1024 * 1024
-
     # Action catalogue mapping action_name -> metadata.
     action_registry: Mapping[str, ActionMetadata] = ACTION_CATALOGUE
-
-    # Inline fast-action execution; deny report/session_breakdown (CLOSE artifacts).
-    _INLINE_ACTION_DENY: frozenset[str] = frozenset(
-        {
-            "report",
-            "session_breakdown",
-        }
-    )
 
     # Lifecycle
     async def stop(self) -> None:
@@ -1302,7 +635,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         self._stop.set()
         try:
             await self.dispatcher.cancel_inflight_actions(reason="coordinator_stop")
-        except Exception:  # noqa: BLE001 — teardown proceeds even if cancellation misbehaves
+        except Exception:
             log.exception("Coordinator.stop: cancelling in-flight actions raised")
         for t in self._tasks_running:
             if not t.done():
@@ -1313,7 +646,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
             except asyncio.CancelledError:
                 # Expected: we just cancelled these tasks.
                 pass
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.exception("reactor task raised on shutdown")
         await self.dispatcher.close_db_after_executions()
 
@@ -1362,107 +695,99 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
     async def _recipe_kb_t4_hook(self) -> None:
         """Finalize or retry on graceful teardown/Ctrl-C."""
-        if bool(getattr(getattr(self, "knowledge_plane", None), "kb_disabled", False)):
+        if bool(getattr(self.knowledge_plane, "kb_disabled", False)):
             return
-        finalize_status = str(getattr(self.shared_state, "recipe_finalize_status", "") or "")
-        if getattr(self.shared_state, "close_sequence_done", False) and finalize_status in {
-            "written",
-            "skipped",
-            "disabled",
-        }:
-            return
-        try:
-            config = getattr(getattr(self, "knowledge_plane", None), "config", None) or KnowledgeConfig.from_env()
-            if config.mode is KnowledgeStoreMode.LOCAL:
-                if self.recipe_kb is None:
-                    return
-                sid = (self.shared_state.recipe_kb_session_id or "").strip()
-                if not sid:
-                    return
-            self.ensure_recipe_finalized(source="t4_fallback")
-        except Exception:  # noqa: BLE001 — defensive
-            log.exception("recipe KB T4 fact_finalize fallback failed")
+        config = getattr(self.knowledge_plane, "config", None) or KnowledgeConfig.from_env()
+        if config.mode is KnowledgeStoreMode.LOCAL:
+            if self.recipe_kb is None:
+                return
+            sid = (self.shared_state.recipe_kb_session_id or "").strip()
+            if not sid:
+                return
+        self.recipe_journal.ensure_recipe_finalized(source="t4_fallback")
         try:
             self.shared_state.save(self.session_dir)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("recipe KB T4 SharedState.save failed")
 
-    # Statuses that mean the candidate was ADOPTED; everything else is a negative signal for the ranker.
-    _FRAMEWORK_KEEP_STATUSES: frozenset[str] = frozenset({"kept"})
-
-    # Max tried-candidate rows fed into the ranker/discovery working memory.
-    _FRAMEWORK_TRIED_MEMORY_CAP: int = 12
-
-    _CRITIC_PRIORS_OUTCOME_TAIL: int = 5
-
-    # Auto-roofline — PRELUDE bootstrap + 10% watermark refresh.
-    _ROOFLINE_WATERMARK_RATIO: float = 1.10  # 10% step over last roofline
-    # Relative-change floor for the pre-GEAK reprofile: any change above this re-runs profile+TraceLens (effectively
-    # "any change", absorbing float noise).
-    _REPROFILE_CHANGE_TOL: float = 1e-5
-
-    # Max re-author rounds per candidate on a needs_review verdict.
-    _MAX_REAUTHOR_ATTEMPTS: int = _AUTHORED_LANE_MAX_ATTEMPTS
-
-    # Backstop: max Critic-review submissions for a single candidate before the pump force-stamps
-    # ``repeated_review_abort`` and stops re-selecting it.
-    _MAX_REPEATED_REVIEW_SUBMISSIONS: int = 3
-
-    # CLOSE step 0 post-opt roofline hard cap; on timeout the optimized snapshot is skipped so report/breakdown always
-    # run.
-    CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC: float = 600.0
-
-    # optimization_stack actions warranting a post-opt roofline; pure param-search (explore) is excluded.
-    _POST_OPT_ROOFLINE_ACTIONS = frozenset({"integrate", "integrate_patch", "gemm_tuning", "geak_e2e"})
-
     async def tick(self, n: int = 1) -> None:
-        """Run exactly ``n`` reactor passes for every agent; dispatcher pumps at pass end, lazy resume replay on tick 1."""
-        await self._replay_resume_if_needed()
+        """Run ``n`` ticks of the run() loop body without its deadline or teardown."""
+        await self.writeback.replay_resume_if_needed()
         for _ in range(n):
-            # The tick's first act; see
-            # :mod:`hyperloom.orchestrator.bringup.reconcile`.
-            await self.reconciler.run(time.time())
-            self.shared_state.increment_tick()
-            # A phase-entry hook may have finished by setting a pending phase hint (for example current GEAK returning
-            # no_gain -> skip_to_sweep).
-            await self._await_within_session_bound(
-                self._advance_phase_if_needed,
+            await self._tick_once()
+
+    async def _tick_once(self) -> bool:
+        """Run one tick of the loop body; returns whether the session is in its closing phase."""
+        # Repair before anything is admitted: a round nobody will settle, a task row with no process, a review nobody
+        # answered. Ungated, because a stuck round closes every gate this could sit behind.
+        await self.reconciler.run(time.time())
+        # Bump the persistent tick counter — drives phase/plateau math.
+        self.shared_state.increment_tick()
+        try:
+            # A phase-entry hook may have finished early (for example a GEAK no_gain run exits KERNEL immediately).
+            await self.await_within_session_bound(
+                self.phase_machine.advance_phase_if_needed,
                 stage="advance_phase_pre_reactor",
             )
-            if str(getattr(self.shared_state, "pending_escalate_hint", "") or "").strip():
-                await self._await_within_session_bound(
-                    self._advance_phase_if_needed,
+            if self.shared_state.pending_escalate_hint.strip():
+                await self.await_within_session_bound(
+                    self.phase_machine.advance_phase_if_needed,
                     stage="advance_phase_hint",
                 )
+        except Exception as exc:
+            log.exception("phase advance before reactors failed")
+            self.record_exception(stage="advance_phase_pre_reactor", exc=exc)
+        in_closing = bool(self.shared_state.closing_phase)
+        # One reactor + dispatcher pass; during closing skip LLM passes.
+        if not in_closing:
             for name in self._tick_roles:
-                await self._await_within_session_bound(
-                    lambda n=name: self._reactor_pass(n),
+                if self.stop_requested():
+                    break
+                if time.monotonic() < self._backend_retry_at.get(name, 0.0):
+                    continue
+                await self.await_within_session_bound(
+                    lambda n=name: self.reactor_pass(n),
                     stage=f"reactor:{name}",
                 )
-            await self._pump_dispatcher_once()
-            # FRAMEWORK_AGENT phase pump: enqueue next candidate / fetch next batch.
-            await self._pump_framework_agent_phase_safely(caller="tick")
+        if not self.stop_requested():
+            await self.dispatcher.pump_dispatcher_once()
+        if not in_closing:
+            phase = (self.shared_state.phase or "").strip().upper()
+            if not self.phase_machine.pump_table:
+                self.phase_machine.build_dispatch_tables()
+            pump = self.phase_machine.pump_table.get(phase)
+            if pump is not None:
+                await pump()
             # Phase-independent enablement pump: repair a non-runnable combo.
-            await self._pump_enablement_safely(caller="tick")
-            # phase machine advance at tick boundary.
-            await self._await_within_session_bound(
-                self._advance_phase_if_needed,
+            await self.enablement_lane.pump_enablement_safely()
+        # phase machine advance; runs even in_closing so CLOSE is recorded.
+        try:
+            await self.await_within_session_bound(
+                self.phase_machine.advance_phase_if_needed,
                 stage="advance_phase",
             )
+        except Exception as exc:
+            log.exception("phase advance failed")
+            self.record_exception(stage="advance_phase", exc=exc)
+        # Periodic reaper + DB retention; time-gated.
+        now = time.monotonic()
+        if now - self._last_maintenance_ts >= MAINTENANCE_INTERVAL_SEC:
+            await self.maintenance.run(tick=self.shared_state.tick)
+            self._last_maintenance_ts = now
+        return in_closing
 
-    def _record_coordinator_exception(
+    def record_exception(
         self,
         *,
         stage: str,
         exc: BaseException,
-        tick: int | None = None,
         agent: str = "",
     ) -> None:
         """Record a Coordinator-side exception without killing the session."""
         self._fault_open_phase_event(stage=stage, exc=exc)
         try:
             self.shared_state.record_tick_exception(
-                tick=int(tick if tick is not None else self.shared_state.tick or 0),
+                tick=int(self.shared_state.tick or 0),
                 stage=stage,
                 agent=agent,
                 exc_type=type(exc).__name__,
@@ -1471,7 +796,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
             )
             self.shared_state.increment_crash_count()
             self.shared_state.save(self.session_dir)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("failed to persist Coordinator exception metadata")
 
     def _fault_open_phase_event(self, *, stage: str, exc: BaseException) -> None:
@@ -1490,22 +815,29 @@ class Coordinator(metaclass=_CoordinatorMeta):
         open for every exception and is the thing that raised for almost none
         of them. Its own pump records what it is responsible for.
         """
-        from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import active_kernel_recorder
-
-        for recorder in (active_kernel_recorder(), self._framework_timeline()):
+        for recorder in (self.phase_kernel.timeline(), self.phase_framework.timeline()):
             if recorder is None:
                 continue
             recorder.record_fault(stage=stage, exc=exc)
 
     def _seconds_until_session_bound(self) -> float | None:
         """Seconds left on the active run or closing bound; ``None`` if unbounded."""
-        if bool(getattr(self.shared_state, "closing_phase", False)):
+        if bool(self.shared_state.closing_phase):
             bound = self._closing_deadline
         else:
             bound = self._run_deadline
         if bound is None:
             return None
         return bound.remaining()
+
+    def _backend_retry_wait_sec(self) -> float:
+        """Seconds until the first reactor agent is due while every one is backing off, capped at the session bound."""
+        now = time.monotonic()
+        wait = min((self._backend_retry_at.get(name, 0.0) - now for name in self._tick_roles), default=0.0)
+        bound = self._seconds_until_session_bound()
+        if bound is not None:
+            wait = min(wait, bound)
+        return max(0.0, wait)
 
     def _stage_timeout_sec(self, stage: str) -> float | None:
         """Return the total wall-clock ceiling for an inline reactor turn."""
@@ -1514,7 +846,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
             return None
         return self.reactor_turn_timeout_sec
 
-    def _stop_requested(self) -> bool:
+    def stop_requested(self) -> bool:
         """Whether an operator has asked this run to stop.
 
         Reads both the asyncio event and the drain's threading event, so the
@@ -1545,7 +877,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         """Authoritative in-process stop classification."""
         return self._stop_classification
 
-    async def _await_within_session_bound(
+    async def await_within_session_bound(
         self,
         factory: Callable[[], Awaitable[Any]],
         *,
@@ -1576,7 +908,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 timeout,
             )
             if stage_timeout is not None and timeout == stage_timeout:
-                self._record_coordinator_exception(stage=stage, exc=exc, agent=stage.removeprefix("reactor:"))
+                self.record_exception(stage=stage, exc=exc, agent=stage.removeprefix("reactor:"))
 
     # Long-run interface
     async def run(
@@ -1591,16 +923,90 @@ class Coordinator(metaclass=_CoordinatorMeta):
         crash_emergency_threshold: int = 25,
         closing_grace_sec: float | None = None,
     ) -> str:
-        """Run reactor + dispatcher until a stop condition fires (priority order): signal, a stop_reason the phase machine recorded (a met target closes through SWEEP as one), time_exhausted (via closing phase), emergency, custom, max_ticks. Sets + saves + returns shared_state.stop_reason."""
-        objective = objective or TimeOnlyObjective()
-        # Stash so _compose_prompt can update target_gap_pct.
-        self._current_objective = objective
-        # Capture the live loop for the inline fast-action context tool.
-        try:
-            self._coordinator_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            self._coordinator_loop = None
+        """Run reactor + dispatcher until a stop condition fires (priority order): signal, a stop_reason the phase machine recorded (a met target closes through SWEEP as one), time_exhausted (via closing phase), emergency, custom, max_ticks. Sets + saves + returns shared_state.stop_reason.
 
+        The whole run is one ``session`` trajectory span, and every trajectory event recorded beneath it inherits this
+        session dir and the live phase / tick.
+        """
+        with (
+            trajectory_scope(
+                session_dir=self.session_dir,
+                component="coordinator",
+                phase_tick_source=self._trajectory_phase_tick,
+            ),
+            trajectory_span(EVENT_SESSION, attributes={"name": self.session_dir.name}) as span,
+        ):
+            stop_reason = await self._run_ticks(
+                objective=objective,
+                max_minutes=max_minutes,
+                tick_interval_sec=tick_interval_sec,
+                max_ticks=max_ticks,
+                stop_when=stop_when,
+                install_signal_handlers=install_signal_handlers,
+                crash_emergency_threshold=crash_emergency_threshold,
+                closing_grace_sec=closing_grace_sec,
+            )
+            self._close_undecided_proposals(stop_reason)
+            span.finish(stop_reason=stop_reason)
+            return stop_reason
+
+    def _close_undecided_proposals(self, stop_reason: str) -> None:
+        """Close the trajectory span of every proposal the session ends without a verdict on.
+
+        A supervisor restart ends a leg, not the session: the next leg's replay restores these proposals. A resumed
+        session may end again over proposals an earlier leg already closed, so those are skipped.
+        """
+        from hyperloom.inference_optimizer.breakdown.stop_reasons import SUPERVISOR_RESTART_REASON
+
+        if stop_reason == SUPERVISOR_RESTART_REASON:
+            return
+        # A decided proposal is popped from the registry, so everything still pending is undecided.
+        undecided = list(self.state.pending_proposals.values())
+        if not undecided:
+            return
+        try:
+            closed = {
+                row.get("span_id")
+                for row in load_events(self.session_dir)
+                if row.get("event_type") == EVENT_PROPOSAL and row.get("status") in TERMINAL_STATUSES
+            }
+            for pending in undecided:
+                if pending.proposal_msg_id in closed:
+                    continue
+                record_event(
+                    EVENT_PROPOSAL,
+                    status=STATUS_CANCELLED,
+                    span_id=pending.proposal_msg_id,
+                    attributes={
+                        "name": pending.action_name,
+                        "action_name": pending.action_name,
+                        "from_agent": pending.from_agent,
+                        "reason": "session_ended_undecided",
+                        "stop_reason": stop_reason,
+                    },
+                )
+        except Exception:  # the trace must never mask the stop reason the session is closing on
+            log.warning("trajectory: closing undecided proposals failed", exc_info=True)
+
+    def _trajectory_phase_tick(self) -> tuple[str | None, int | None]:
+        """Live ``(phase, tick)`` for trajectory events recorded inside :meth:`run`."""
+        return (self.shared_state.phase or None), int(self.shared_state.tick or 0)
+
+    async def _run_ticks(
+        self,
+        *,
+        objective: Objective | None,
+        max_minutes: float | None,
+        tick_interval_sec: float,
+        max_ticks: int | None,
+        stop_when: Callable[["Coordinator"], Awaitable[bool] | bool] | None,
+        install_signal_handlers: bool,
+        crash_emergency_threshold: int,
+        closing_grace_sec: float | None,
+    ) -> str:
+        """Tick loop and shutdown sequence behind :meth:`run`."""
+        objective = objective or TimeOnlyObjective()
+        self._current_objective = objective
         # A dedicated thread reading the interpreter's wakeup pipe, not a loop
         # callback: a TERM has to be recorded while the loop is busy.
         if install_signal_handlers:
@@ -1610,7 +1016,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
             )
             log.info("Coordinator.run: stop-signal drain armed=%s", self._signals.armed)
 
-        await self._replay_resume_if_needed()
+        await self.writeback.replay_resume_if_needed()
         grace_sec, deadline, max_minutes_value = self._bind_session_deadline(
             max_minutes=max_minutes,
             closing_grace_sec=closing_grace_sec,
@@ -1625,81 +1031,16 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 tick_n += 1
                 in_closing = bool(self.shared_state.closing_phase)
                 try:
-                    # Repair before anything is admitted: a round nobody will
-                    # settle, a task row with no process, a review nobody
-                    # answered. Ungated, because a stuck round closes every gate
-                    # this could sit behind.
-                    await self.reconciler.run(time.time())
-                    # Bump the persistent tick counter — drives phase/plateau math.
-                    self.shared_state.increment_tick()
-                    try:
-                        await self._await_within_session_bound(
-                            self._advance_phase_if_needed,
-                            stage="advance_phase_pre_reactor",
-                        )
-                        if str(getattr(self.shared_state, "pending_escalate_hint", "") or "").strip():
-                            await self._await_within_session_bound(
-                                self._advance_phase_if_needed,
-                                stage="advance_phase_hint",
-                            )
-                    except Exception as exc:  # noqa: BLE001
-                        log.exception("phase advance before reactors (run) failed")
-                        self._record_coordinator_exception(
-                            stage="advance_phase_pre_reactor",
-                            exc=exc,
-                            tick=tick_n,
-                        )
-                    in_closing = self.shared_state.closing_phase
-                    # One reactor + dispatcher pass; during closing skip LLM passes.
-                    if not in_closing:
-                        for name in self._tick_roles:
-                            if self._stop_requested():
-                                break
-                            await self._await_within_session_bound(
-                                lambda n=name: self._reactor_pass(n),
-                                stage=f"reactor:{name}",
-                            )
-                    if not self._stop_requested():
-                        await self._pump_dispatcher_once()
-                    # FRAMEWORK_AGENT phase pump: see ``tick()`` for rationale.
-                    if not in_closing:
-                        await self._pump_framework_agent_phase_safely(caller="run")
-                        # Phase-independent enablement pump.
-                        await self._pump_enablement_safely(caller="run")
-                    # phase machine advance; runs even in_closing so CLOSE is recorded.
-                    try:
-                        await self._await_within_session_bound(
-                            self._advance_phase_if_needed,
-                            stage="advance_phase",
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        log.exception("phase advance (run) failed")
-                        self._record_coordinator_exception(
-                            stage="advance_phase",
-                            exc=exc,
-                            tick=tick_n,
-                        )
-                    # Periodic reaper + DB retention; time-gated.
-                    try:
-                        now = time.monotonic()
-                        if now - self._last_maintenance_ts >= MAINTENANCE_INTERVAL_SEC:
-                            await self._run_maintenance(tick=tick_n)
-                            self._last_maintenance_ts = now
-                    except Exception:  # noqa: BLE001
-                        log.exception("maintenance tick raised")
+                    in_closing = await self._tick_once()
                 except (asyncio.CancelledError, KeyboardInterrupt):
                     raise
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     last_tick_exc = exc
-                    log.exception("Coordinator.run: tick %d body raised", tick_n)
-                    self._record_coordinator_exception(
-                        stage="tick_body",
-                        exc=exc,
-                        tick=tick_n,
-                    )
+                    log.exception("Coordinator.run: tick %d body raised", self.shared_state.tick)
+                    self.record_exception(stage="tick_body", exc=exc)
 
                 # check stop conditions
-                if self._stop_requested():
+                if self.stop_requested():
                     stop_reason = self._signal_stop_reason()
                     break
                 if self.shared_state.stop_reason and not in_closing:
@@ -1712,13 +1053,13 @@ class Coordinator(metaclass=_CoordinatorMeta):
                     if grace_sec <= 0:
                         stop_reason = "time_exhausted"
                         break
-                    closing_deadline = await self._enter_closing_phase(
+                    closing_deadline = await self.phase_close.enter_closing_phase(
                         grace_sec=grace_sec,
                     )
                     self._closing_deadline = closing_deadline
                     continue
                 if in_closing:
-                    report_terminal = await self._closing_report_terminal()
+                    report_terminal = await self.phase_close.closing_report_terminal()
                     grace_blown = closing_deadline is not None and closing_deadline.expired()
                     if report_terminal or grace_blown:
                         if grace_blown and not report_terminal:
@@ -1729,6 +1070,11 @@ class Coordinator(metaclass=_CoordinatorMeta):
                             )
                         stop_reason = "time_exhausted"
                         break
+                    # No reactor turn paces the closing ticks, so wait on the running work instead.
+                    poll_sec = self.dispatcher.poll_sec
+                    await self.dispatcher.wait_for_running_work(
+                        timeout=min(poll_sec, seconds_until(closing_deadline, unbounded_cap=poll_sec))
+                    )
                 if (
                     self.shared_state.recent_crash_count(
                         window_sec=_CRASH_EMERGENCY_WINDOW_SEC,
@@ -1749,9 +1095,10 @@ class Coordinator(metaclass=_CoordinatorMeta):
                         break
 
                 # Brief wait between ticks to avoid CPU spin while staying signal-responsive; 0.0 keeps tests fast.
-                if tick_interval_sec > 0:
+                wait_sec = tick_interval_sec if in_closing else max(tick_interval_sec, self._backend_retry_wait_sec())
+                if wait_sec > 0:
                     try:
-                        await asyncio.wait_for(self._stop.wait(), timeout=tick_interval_sec)
+                        await asyncio.wait_for(self._stop.wait(), timeout=wait_sec)
                         stop_reason = self._signal_stop_reason()
                         break
                     except asyncio.TimeoutError:
@@ -1774,8 +1121,8 @@ class Coordinator(metaclass=_CoordinatorMeta):
             )
             self.shared_state.save(self.session_dir)
             try:
-                await self.ensure_close_sequence(reason=self.shared_state.stop_reason)
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                await self.phase_close.ensure_close_sequence(reason=self.shared_state.stop_reason)
+            except (asyncio.CancelledError, Exception):
                 log.exception("Coordinator: terminal close sequence did not finish")
             await self._recipe_kb_t4_hook()
             log.info(
@@ -1804,45 +1151,64 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 continue
             try:
                 await closer()
-            except Exception:  # noqa: BLE001 — teardown must not mask the stop reason
+            except Exception:
                 log.exception("Coordinator: closing the %s backend failed", name)
 
     # Reactor
-    async def _reactor_pass(self, agent_name: str) -> None:
-        """Run one reactor turn for ``agent_name`` and route its intents."""
+    async def reactor_pass(self, agent_name: str, *, request: str = "") -> BackendTurnResult | None:
+        """Run one reactor turn for ``agent_name``, route its intents, and return the turn's result.
+
+        ``request`` is appended to the composed prompt; a turn that carries one may legitimately reply without
+        intents. The turn is scoped as that agent on the trajectory.
+        """
+        with trajectory_scope(component=agent_name, agent=agent_name):
+            return await self._reactor_turn(agent_name, request=request)
+
+    async def _reactor_turn(self, agent_name: str, *, request: str = "") -> BackendTurnResult | None:
+        """Body of :meth:`reactor_pass`."""
         backend = self.backends[agent_name]
-        sys_prompt = await self._load_system_prompt(agent_name)
-        prompt = await self._compose_prompt(agent_name)
+        sys_prompt = await self.conversation.load_system_prompt(agent_name)
+        prompt = await self.conversation.compose_prompt(agent_name)
+        if request:
+            prompt = f"{prompt}\n\n{request}"
         tools = self.policy.allowed_tools_for_agent(agent_name)
         # Stamp timeline keys onto backends that self-write their trace row.
         _set_trace_ctx = getattr(backend, "set_trace_context", None)
         backend_self_traces = callable(_set_trace_ctx)
         if backend_self_traces:
-            try:
-                _set_trace_ctx(
-                    tick=int(self.shared_state.tick or 0),
-                    phase=(self.shared_state.phase or "") or None,
-                    macro_cycle=int(self.shared_state.macro_cycle or 0),
-                )
-            except Exception:  # noqa: BLE001
-                pass
+            _set_trace_ctx(
+                tick=int(self.shared_state.tick or 0),
+                phase=(self.shared_state.phase or "") or None,
+                macro_cycle=int(self.shared_state.macro_cycle or 0),
+            )
         # max_turns=0 → backend default.
         _t0 = time.perf_counter()
+        call_id = new_call_id()
         try:
-            result: BackendTurnResult = await backend.run(
-                prompt=prompt,
-                system_prompt=sys_prompt,
-                tools=tools,
-                max_turns=0,
-            )
+            with trajectory_span(
+                EVENT_LLM_CALL,
+                call_id=call_id,
+                attributes={"name": agent_name, "model": getattr(backend, "model", None)},
+            ) as call_span:
+                record_prompt_snapshot(
+                    self._prompt_snapshots.observe(agent_name, prompt=prompt, system_prompt=sys_prompt, tools=tools)
+                )
+                result: BackendTurnResult = await backend.run(
+                    prompt=prompt,
+                    system_prompt=sys_prompt,
+                    tools=tools,
+                    max_turns=0,
+                )
+                call_span.finish(**llm_call_summary(result.metadata))
         except BackendError as exc:
             if isinstance(exc, LLMCallFailed) and not backend_self_traces:
                 self._trace_reactor_llm_failure(
                     agent_name,
                     exc,
                     latency_ms=int((time.perf_counter() - _t0) * 1000),
+                    call_id=call_id,
                 )
-            await self._record_observation(
+            await self.bus.record_observation(
                 "coordinator",
                 "observation",
                 {"kind": "backend_error", "agent": agent_name, "error": repr(exc)},
@@ -1851,22 +1217,22 @@ class Coordinator(metaclass=_CoordinatorMeta):
             return
         except NoIntentEmitted as exc:
             # No parseable intents; surface as observation so the next tick self-corrects.
-            await self._record_observation(
+            await self.bus.record_observation(
                 "coordinator",
                 "observation",
                 {"kind": "no_intent_emitted", "agent": agent_name, "error": str(exc)[:500]},
             )
-            await self._advance_rendered_cursor(agent_name)
+            await self.conversation.advance_rendered_cursor(agent_name)
             return
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             # Catch-all so one agent's bad turn never stops the loop.
             log.exception("reactor pass for %s raised", agent_name)
-            await self._record_observation(
+            await self.bus.record_observation(
                 "coordinator",
                 "observation",
                 {"kind": "reactor_exception", "agent": agent_name, "error": format_exc_brief(exc, limit=500)},
             )
-            self._record_coordinator_exception(
+            self.record_exception(
                 stage="reactor_pass",
                 agent=agent_name,
                 exc=exc,
@@ -1878,15 +1244,29 @@ class Coordinator(metaclass=_CoordinatorMeta):
         if self._backend_error_streak.get(agent_name):
             self._backend_error_streak[agent_name] = 0
             self._backend_error_alarm_armed[agent_name] = True
+            self._backend_error_since.pop(agent_name, None)
+            self._backend_retry_at.pop(agent_name, None)
         # Record this reactor turn's token spend on the unified ledger.
         latency_ms = int((time.perf_counter() - _t0) * 1000)
         self._trace_reactor_llm_call(agent_name, result, latency_ms=latency_ms)
         # Full-trace: persist the redacted prompt+response for this turn.
-        self._record_reactor_conversation(agent_name, result)
-        for intent in result.intents:
-            await self._handle_intent(agent_name, intent)
-        await self._advance_rendered_cursor(agent_name)
+        self.conversation.record_reactor_conversation(agent_name, result)
+        with trajectory_scope(call_id=call_id, parent_span_id=call_span.span_id):
+            for intent in result.intents:
+                await self.router.handle_intent(agent_name, intent)
+        if not result.intents and not request:
+            await self.bus.record_observation(
+                "coordinator",
+                "observation",
+                {"kind": "no_intent_emitted", "agent": agent_name, "error": "the turn emitted no intents"},
+            )
+        await self.conversation.advance_rendered_cursor(agent_name)
+        if agent_name == "orchestration":
+            state = self.shared_state
+            state.last_discarded_escalate_hint = ""
+            state.last_discarded_escalate_hint_ts = ""
         self.shared_state.agent_last_active[agent_name] = time.time()
+        return result
 
     def _trace_mcp_setup(self, *, agent_name: str, backend: Backend) -> None:
         """Persist orchestration MCP setup once per session."""
@@ -1898,7 +1278,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 setup = setup_getter()
                 if isinstance(setup, dict):
                     write_mcp_setup_once(session_dir=self.session_dir, setup=setup)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.debug("orchestration mcp setup trace failed", exc_info=True)
 
     def _trace_reactor_llm_call(
@@ -1932,7 +1312,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 latency_ms=latency_ms,
             )
             append_llm_call(session_dir=self.session_dir, record=record)
-        except Exception:  # noqa: BLE001 — trace must never break the loop
+        except Exception:
             log.debug(
                 "full-trace: reactor llm_call append failed for %s",
                 agent_name,
@@ -1945,6 +1325,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         error: LLMCallFailed,
         *,
         latency_ms: int | None = None,
+        call_id: str | None = None,
     ) -> None:
         """Append one ``status=\"error\"`` ``llm_calls.jsonl`` row for a failed turn."""
         try:
@@ -1953,12 +1334,14 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 component=agent_name,
                 role=agent_name,
                 error=error,
+                call_id=call_id,
+                model=getattr(self.backends.get(agent_name), "model", None),
                 tick=int(self.shared_state.tick or 0),
                 phase=(self.shared_state.phase or "") or None,
                 latency_ms=latency_ms,
             )
             append_llm_call(session_dir=self.session_dir, record=record)
-        except Exception:  # noqa: BLE001 — trace must never break the loop
+        except Exception:
             log.debug(
                 "full-trace: reactor llm_call failure append failed for %s",
                 agent_name,
@@ -1970,13 +1353,29 @@ class Coordinator(metaclass=_CoordinatorMeta):
         agent_name: str,
         exc: BackendError,
     ) -> None:
-        """Increment the per-agent ``BackendError`` streak; emit one backend_unhealthy event on crossing the threshold (re-arms only after a successful turn)."""
+        """Extend the per-agent ``BackendError`` streak and back the agent off.
+
+        A streak that has lasted ``_BACKEND_UNHEALTHY_STOP_SEC`` stops the session unless something else already has.
+        Crossing the threshold emits one backend_unhealthy event, which re-arms only after a successful turn.
+        """
+        from hyperloom.inference_optimizer.breakdown.stop_reasons import BACKEND_UNHEALTHY_STOP_REASON
+
+        now = time.monotonic()
         new_value = self._backend_error_streak.get(agent_name, 0) + 1
         self._backend_error_streak[agent_name] = new_value
+        failing_sec = now - self._backend_error_since.setdefault(agent_name, now)
+        self._backend_retry_at[agent_name] = now + min(
+            _BACKEND_RETRY_MAX_SEC, _BACKEND_RETRY_BASE_SEC * 2 ** (new_value - 1)
+        )
+        if failing_sec >= _BACKEND_UNHEALTHY_STOP_SEC and not self.shared_state.stop_reason:
+            log.error(
+                "Coordinator: the %s backend has failed for %.0fs without a successful turn", agent_name, failing_sec
+            )
+            self.shared_state.set_stop_reason(BACKEND_UNHEALTHY_STOP_REASON)
         threshold = self._backend_error_streak_threshold
         if new_value >= threshold and self._backend_error_alarm_armed.get(agent_name, True):
             self._backend_error_alarm_armed[agent_name] = False
-            await self._record_observation(
+            await self.bus.record_observation(
                 "coordinator",
                 "observation",
                 {
@@ -1995,24 +1394,8 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 },
             )
 
-    # Multi-node only: cap on specialist proposal_set entries auto-materialised into a single explore grid per round.
-    _MN_AUTO_EXPLORE_GRID_CAP = 6
-
-    # Phases whose long, serially-drained GPU grids must not starve the per-phase cyclic budget exit.
-    _BUDGET_GATED_DISPATCH_PHASES: frozenset[str] = frozenset({"FRAMEWORK_AGENT", "KERNEL_AGENT"})
-
-    # Fact-write surface — journal + direct KB lesson/pitfall/recipe writes.
-    PITFALL_REGRESS_THRESHOLD_PCT: float = -5.0  # gain_pct ≤ this → pitfall
-
 
 __all__ = [
     "Coordinator",
     "CoordinatorState",
-    "PendingProposal",
-    "SharedState",
-    # Re-exported from coordinator_helpers / state.shared_state for callers/tests.
-    "_infer_model_class_from_config",
-    "effective_closing_grace_sec",
-    # Re-exported from policy.gate; referenced via ``coordinator.<name>`` in tests.
-    "SPECIALIST_FROM_AGENT_PREFIX",
 ]

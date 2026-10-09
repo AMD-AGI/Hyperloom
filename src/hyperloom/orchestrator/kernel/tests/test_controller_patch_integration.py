@@ -213,7 +213,7 @@ async def _integrate(
         patches_root=patches_root,
         session_dir=session_dir,
         shared_state=shared_state,
-        record_keep=coordinator.writeback._record_integrate_keep,
+        record_keep=coordinator.writeback.record_integrate_keep,
         validator=validator,
     )
 
@@ -1207,7 +1207,7 @@ async def test_controller_entry_uses_session_writeback_for_every_mode(tmp_path, 
     await phase._run_kernel_rewrite_controller(tmp_path / "handoff", tmp_path / "output")
 
     assert len(callbacks) == 1
-    assert callbacks[0].__func__ is WritebackCollaborator._record_integrate_keep
+    assert callbacks[0].__func__ is WritebackCollaborator.record_integrate_keep
     assert callbacks[0].__self__.shared_state is coordinator.shared_state
 
 
@@ -1271,7 +1271,7 @@ async def test_synthetic_controller_keep_updates_state_and_stack_ledger(tmp_path
             patches_root=patches,
             session_dir=session_dir,
             shared_state=state,
-            record_keep=coordinator.writeback._record_integrate_keep,
+            record_keep=coordinator.writeback.record_integrate_keep,
             validator=_validate,
         )
         ledger, _status = stack_event.assemble_stack_ext(
@@ -1330,6 +1330,9 @@ async def test_a_keep_carries_the_axes_of_the_measurement_it_was_graded_on(
                 "input_throughput": 1200.0,
                 "total_throughput": 1320.0,
                 "e2e_norm_intvty_p90": 40.0,
+                "e2e_norm_intvty_p50": 40.0,
+                "duration_seconds": 900.0,
+                "request_error_rate": 0.0,
                 "ttft_mean_ms": 55.0,
             },
         }
@@ -1346,6 +1349,9 @@ async def test_a_keep_carries_the_axes_of_the_measurement_it_was_graded_on(
         "input_throughput": 900.0,
         "total_throughput": 1000.0,
         "e2e_norm_intvty_p90": 30.0,
+        "e2e_norm_intvty_p50": 30.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
         "ttft_mean_ms": 90.0,
     }
 
@@ -1402,6 +1408,9 @@ async def test_an_agentx_keep_validates_its_gain_on_the_axis_it_was_graded_on(
                 "input_throughput": 1200.0,
                 "total_throughput": 1320.0,
                 "e2e_norm_intvty_p90": 42.0,
+                "e2e_norm_intvty_p50": 42.0,
+                "duration_seconds": 900.0,
+                "request_error_rate": 0.0,
             },
         }
 
@@ -1415,6 +1424,9 @@ async def test_an_agentx_keep_validates_its_gain_on_the_axis_it_was_graded_on(
         "input_throughput": 900.0,
         "total_throughput": 1000.0,
         "e2e_norm_intvty_p90": 30.0,
+        "e2e_norm_intvty_p50": 30.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
     }
     state.current_best = {
         "action": "baseline",
@@ -1423,6 +1435,9 @@ async def test_an_agentx_keep_validates_its_gain_on_the_axis_it_was_graded_on(
         "input_throughput": 900.0,
         "total_throughput": 1000.0,
         "e2e_norm_intvty_p90": 30.0,
+        "e2e_norm_intvty_p50": 30.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
     }
 
     summary = await _integrate(
@@ -1476,6 +1491,9 @@ async def test_a_keep_measured_below_the_anchor_does_not_lower_current_best(
                 "input_throughput": 1200.0,
                 "total_throughput": 1320.0,
                 "e2e_norm_intvty_p90": 30.0,
+                "e2e_norm_intvty_p50": 30.0,
+                "duration_seconds": 900.0,
+                "request_error_rate": 0.0,
             },
         }
 
@@ -1491,6 +1509,9 @@ async def test_a_keep_measured_below_the_anchor_does_not_lower_current_best(
         "input_throughput": 1300.0,
         "total_throughput": 1450.0,
         "e2e_norm_intvty_p90": 40.0,
+        "e2e_norm_intvty_p50": 40.0,
+        "duration_seconds": 900.0,
+        "request_error_rate": 0.0,
     }
 
     summary = await _integrate(

@@ -7,15 +7,25 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
 from hyperloom.common.timeutil import now_iso
 from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
+from hyperloom.orchestrator.state.task_states import TERMINAL_STATES, TRANSITIONS
+from hyperloom.inference_optimizer.trace.trajectory_trace import (
+    EVENT_TASK,
+    STATUS_CANCELLED,
+    STATUS_COMPLETED,
+    STATUS_FAILED,
+    STATUS_QUEUED,
+    STATUS_STARTED,
+    record_event,
+    scalar_attributes,
+)
 
-SpareQueuedFn = Callable[[str, str, dict[str, Any]], bool]
 
 TASK_STATES = (
     "queued",
@@ -25,22 +35,21 @@ TASK_STATES = (
     "cancelled",
 )
 
-_TRANSITIONS: dict[str, frozenset[str]] = {
-    "queued": frozenset({"running", "cancelled"}),
-    "running": frozenset({"succeeded", "failed", "cancelled"}),
-    "failed": frozenset(),
-    "succeeded": frozenset(),
-    "cancelled": frozenset(),
-}
+# Re-exported: the state machine moved to ``task_states`` so ``bus`` can read it
+# without importing this module back. Existing callers keep their import site.
+_TRANSITIONS = TRANSITIONS
 
-TERMINAL_STATES = frozenset(state for state, outgoing in _TRANSITIONS.items() if not outgoing)
+_TRAJECTORY_STATUS: dict[str, str] = {
+    "queued": STATUS_QUEUED,
+    "running": STATUS_STARTED,
+    "succeeded": STATUS_COMPLETED,
+    "failed": STATUS_FAILED,
+    "cancelled": STATUS_CANCELLED,
+}
 
 # Progress notes a task's ``history`` retains, oldest dropped first.
 _MAX_PROGRESS_NOTES = 120
-
-
-# microseconds + ``+00:00`` (canonical helper; kept importable for callers).
-_now_iso = now_iso
+_DISPATCH_CLASSES = frozenset({"llm", "coordinator", "inline"})
 
 
 @dataclass
@@ -56,8 +65,8 @@ class Task:
     side_effects: list[str] = field(default_factory=list)
     lease_ttl_sec: int = 0
     history: list[dict] = field(default_factory=list)
-    created_at: str = field(default_factory=_now_iso)
-    updated_at: str = field(default_factory=_now_iso)
+    created_at: str = field(default_factory=now_iso)
+    updated_at: str = field(default_factory=now_iso)
 
     @classmethod
     def from_row(cls, row) -> "Task":
@@ -77,6 +86,82 @@ class Task:
         )
 
 
+def _validate_dispatch_class(dispatch_class: str | None) -> None:
+    if dispatch_class is not None and dispatch_class not in _DISPATCH_CLASSES:
+        raise ValueError(f"unknown dispatch_class: {dispatch_class!r}")
+
+
+def task_dispatch_record(task: Task) -> dict[str, Any] | None:
+    """Return complete author-time dispatch evidence; legacy tasks have none."""
+    for entry in getattr(task, "history", ()) or ():
+        if not isinstance(entry, dict) or "dispatch_class" not in entry:
+            continue
+        value = str(entry.get("dispatch_class") or "")
+        _validate_dispatch_class(value)
+        phase = str(entry.get("phase") or "").strip().upper()
+        if not phase or "macro_cycle" not in entry or "tick" not in entry:
+            return None
+        return {
+            "dispatch_class": value,
+            "allowed": bool(entry.get("allowed")),
+            "denial_rule": str(entry.get("denial_rule") or "") or None,
+            "phase": phase,
+            "macro_cycle": int(entry["macro_cycle"]),
+            "tick": int(entry["tick"]),
+        }
+    return None
+
+
+def task_dispatch_evidence(task: Task) -> tuple[str, bool, str | None] | None:
+    """Return persisted dispatch admission evidence; legacy tasks have none."""
+    for entry in getattr(task, "history", ()) or ():
+        if not isinstance(entry, dict) or "dispatch_class" not in entry:
+            continue
+        value = str(entry.get("dispatch_class") or "")
+        _validate_dispatch_class(value)
+        return value, bool(entry.get("allowed")), str(entry.get("denial_rule") or "") or None
+    return None
+
+
+def task_dispatch_origin(state: Any) -> dict[str, Any]:
+    """Freeze the phase coordinates that own a task when its row is created."""
+    return {
+        "phase": str(getattr(state, "phase", "") or "").strip().upper(),
+        "macro_cycle": int(getattr(state, "macro_cycle", 0) or 0),
+        "tick": int(getattr(state, "tick", 0) or 0),
+    }
+
+
+def _validated_dispatch_origin(origin: Mapping[str, Any] | None) -> dict[str, Any]:
+    if origin is None:
+        raise ValueError("dispatch_origin is required when dispatch_class is set")
+    phase = str(origin.get("phase") or "").strip().upper()
+    macro_cycle = int(origin.get("macro_cycle", 0) or 0)
+    tick = int(origin.get("tick", 0) or 0)
+    if not phase:
+        raise ValueError("dispatch_origin.phase is required")
+    if macro_cycle < 0 or tick < 0:
+        raise ValueError("dispatch_origin macro_cycle and tick must be non-negative")
+    return {"phase": phase, "macro_cycle": macro_cycle, "tick": tick}
+
+
+def task_dispatch_class(task: Task) -> str | None:
+    """Return explicit dispatch provenance, never a guess for legacy rows."""
+    evidence = task_dispatch_evidence(task)
+    return evidence[0] if evidence is not None else None
+
+
+def _validate_dispatch_reuse(task: Task, requested: str | None) -> None:
+    _validate_dispatch_class(requested)
+    if requested is None:
+        return
+    existing = task_dispatch_class(task)
+    if existing is None:
+        return
+    if existing != requested:
+        raise ValueError(f"idempotent task dispatch_class mismatch: existing={existing!r}, requested={requested!r}")
+
+
 class IllegalTransition(RuntimeError):
     """Raised when a requested task state transition is not allowed."""
 
@@ -93,6 +178,26 @@ class TerminalTaskReuse(RuntimeError):
     """An idempotency key already names a task in a terminal state."""
 
 
+def _record_task_state(
+    task_id: str,
+    kind: str,
+    state: str,
+    *,
+    evidence: dict[str, Any] | None = None,
+    **attributes: Any,
+) -> None:
+    """Put one task state change on the trajectory; ``queued`` is parented to the scope that created the task."""
+    context: dict[str, Any] = {} if state == "queued" else {"parent_span_id": None}
+    record_event(
+        EVENT_TASK,
+        status=_TRAJECTORY_STATUS[state],
+        span_id=task_id,
+        task_id=task_id,
+        attributes={**scalar_attributes(evidence), **attributes, "name": kind, "kind": kind},
+        **context,
+    )
+
+
 def _insert_queued_task(
     cur: Any,
     *,
@@ -103,6 +208,8 @@ def _insert_queued_task(
     side_effects: list[str] | None,
     lease_ttl_sec: int,
     task_id: str | None,
+    dispatch_class: str | None,
+    dispatch_origin: Mapping[str, Any] | None,
 ) -> Task:
     """INSERT one ``queued`` row on ``cur`` and return the task it holds.
 
@@ -110,7 +217,19 @@ def _insert_queued_task(
     an in-memory task never describes a row that was written differently.
     ``cur`` belongs to the caller's write transaction.
     """
-    now = _now_iso()
+    now = now_iso()
+    _validate_dispatch_class(dispatch_class)
+    initial_history: list[dict[str, Any]] = []
+    if dispatch_class:
+        initial_history.append(
+            {
+                "dispatch_class": dispatch_class,
+                "allowed": True,
+                "denial_rule": None,
+                **_validated_dispatch_origin(dispatch_origin),
+                "ts": now,
+            }
+        )
     task = Task(
         task_id=task_id or uuid.uuid4().hex,
         kind=kind,
@@ -120,7 +239,7 @@ def _insert_queued_task(
         requires_lanes=[] if requires_lanes is None else list(requires_lanes),
         side_effects=[] if side_effects is None else list(side_effects),
         lease_ttl_sec=lease_ttl_sec,
-        history=[],
+        history=initial_history,
         created_at=now,
         updated_at=now,
     )
@@ -138,10 +257,18 @@ def _insert_queued_task(
             json.dumps(task.requires_lanes),
             json.dumps(task.side_effects),
             task.lease_ttl_sec,
-            "[]",
+            json.dumps(task.history),
             task.created_at,
             task.updated_at,
         ),
+    )
+    # A rolled-back insert leaves an open row that never closes, and open rows never project.
+    _record_task_state(
+        task.task_id,
+        task.kind,
+        "queued",
+        requires_lanes=task.requires_lanes,
+        **({"dispatch_class": dispatch_class} if dispatch_class else {}),
     )
     return task
 
@@ -156,6 +283,8 @@ def create_in_cursor(
     side_effects: list[str] | None = None,
     lease_ttl_sec: int = 0,
     task_id: str | None = None,
+    dispatch_class: str | None = None,
+    dispatch_origin: Mapping[str, Any] | None = None,
 ) -> tuple[Task, bool]:
     """Create (or adopt) a task row on a cursor the caller already owns.
 
@@ -179,10 +308,12 @@ def create_in_cursor(
         TerminalTaskReuse: When the key already names a task in a terminal
             state.
     """
+    _validate_dispatch_class(dispatch_class)
     cur.execute("SELECT * FROM tasks WHERE idempotency_key=?", (idempotency_key,))
     existing = cur.fetchone()
     if existing is not None:
         task = Task.from_row(existing)
+        _validate_dispatch_reuse(task, dispatch_class)
         if task.state in TERMINAL_STATES:
             raise TerminalTaskReuse(f"idempotency key {idempotency_key!r} already names a {task.state} task")
         return task, True
@@ -197,6 +328,8 @@ def create_in_cursor(
             side_effects=side_effects,
             lease_ttl_sec=lease_ttl_sec,
             task_id=task_id,
+            dispatch_class=dispatch_class,
+            dispatch_origin=dispatch_origin,
         ),
         False,
     )
@@ -224,9 +357,21 @@ def _drop_oldest_progress_notes(history: list[Any], keep: int) -> list[Any]:
 class TaskRegistry:
     """State machine + persistence layer for delegated tasks."""
 
-    def __init__(self, db: SqliteConnection):
-        """Initialise the registry."""
+    def __init__(
+        self,
+        db: SqliteConnection,
+        *,
+        dispatch_origin_provider: Callable[[], Mapping[str, Any]] | None = None,
+    ):
+        """Initialise the registry.
+
+        A registry without an origin provider retains the legacy task shape
+        unless a caller supplies ``dispatch_origin`` explicitly. Production
+        coordinators install the provider so every fresh dispatched task gets
+        complete author-time evidence.
+        """
         self.db = db
+        self._dispatch_origin_provider = dispatch_origin_provider
 
     async def create_or_return_existing(
         self,
@@ -238,12 +383,22 @@ class TaskRegistry:
         side_effects: list[str] | None = None,
         lease_ttl_sec: int = 0,
         task_id: str | None = None,
+        dispatch_class: str | None = None,
+        dispatch_origin: Mapping[str, Any] | None = None,
     ) -> tuple[Task, bool]:
         """Insert a new task row OR return the existing one keyed by idempotency_key. Returns ``(task, was_existing)``."""
+        _validate_dispatch_class(dispatch_class)
         existing = await self.db.fetchone("SELECT * FROM tasks WHERE idempotency_key=?", (idempotency_key,))
         if existing is not None:
-            return Task.from_row(existing), True
+            task = Task.from_row(existing)
+            _validate_dispatch_reuse(task, dispatch_class)
+            return task, True
 
+        if dispatch_class is not None and dispatch_origin is None:
+            if self._dispatch_origin_provider is None:
+                dispatch_class = None
+            else:
+                dispatch_origin = self._dispatch_origin_provider()
         async with self.db.transaction() as cur:
             task = _insert_queued_task(
                 cur,
@@ -254,6 +409,8 @@ class TaskRegistry:
                 side_effects=side_effects,
                 lease_ttl_sec=lease_ttl_sec,
                 task_id=task_id,
+                dispatch_class=dispatch_class,
+                dispatch_origin=dispatch_origin,
             )
         return task, False
 
@@ -267,6 +424,8 @@ class TaskRegistry:
         side_effects: list[str] | None = None,
         lease_ttl_sec: int = 0,
         task_id: str | None = None,
+        dispatch_class: str | None = None,
+        dispatch_origin: Mapping[str, Any] | None = None,
     ) -> Task:
         """Thin wrapper around :meth:`create_or_return_existing` for callers that don't need ``was_existing``."""
         task, _was_existing = await self.create_or_return_existing(
@@ -277,6 +436,8 @@ class TaskRegistry:
             side_effects=side_effects,
             lease_ttl_sec=lease_ttl_sec,
             task_id=task_id,
+            dispatch_class=dispatch_class,
+            dispatch_origin=dispatch_origin,
         )
         return task
 
@@ -305,7 +466,7 @@ class TaskRegistry:
             allowed = _TRANSITIONS.get(current_state, frozenset())
             if new_state not in allowed:
                 raise IllegalTransition(f"cannot transition {task_id!r} from {current_state!r} to {new_state!r}")
-            now = _now_iso()
+            now = now_iso()
             history = json.loads(row["history"])
             history.append(
                 {
@@ -319,6 +480,7 @@ class TaskRegistry:
                 "UPDATE tasks SET state=?, history=?, updated_at=? WHERE task_id=?",
                 (new_state, json.dumps(history), now, task_id),
             )
+        _record_task_state(task_id, row["kind"], new_state, evidence=evidence)
         return await self.get(task_id)
 
     async def record_evidence(self, task_id: str, evidence: dict[str, Any]) -> None:
@@ -344,12 +506,34 @@ class TaskRegistry:
             if row is None:
                 return
             history = json.loads(row["history"])
-            history.append({"progress": note or {}, "ts": _now_iso()})
+            history.append({"progress": note or {}, "ts": now_iso()})
             history = _drop_oldest_progress_notes(history, _MAX_PROGRESS_NOTES)
             cur.execute(
                 "UPDATE tasks SET history=? WHERE task_id=?",
                 (json.dumps(history), task_id),
             )
+
+    async def append_completion_evidence(self, task_id: str, evidence: dict[str, Any] | None = None) -> None:
+        """Append durable completion evidence without changing state or updated_at.
+
+        This is not progress and must survive progress-history pruning. A
+        repeated completion appends again; a missing row remains an error.
+        """
+        async with self.db.transaction() as cur:
+            cur.execute("SELECT history FROM tasks WHERE task_id=?", (task_id,))
+            history = json.loads(cur.fetchone()["history"])
+            history.append({"ts": now_iso(), "evidence": evidence or {}})
+            cur.execute("UPDATE tasks SET history=? WHERE task_id=?", (json.dumps(history), task_id))
+
+    async def exists_with_key_prefix(self, kind: str, key_prefix: str, *, states: tuple[str, ...]) -> bool:
+        """Return whether a task of ``kind`` in one of ``states`` has this key prefix."""
+        placeholders = ",".join("?" for _ in states)
+        row = await self.db.fetchone(
+            "SELECT 1 FROM tasks WHERE kind=? AND substr(idempotency_key, 1, ?)=? "
+            f"AND state IN ({placeholders}) LIMIT 1",  # nosec B608 - generated placeholders only.
+            (kind, len(key_prefix), key_prefix, *states),
+        )
+        return row is not None
 
     async def find_by_idempotency_key(self, idempotency_key: str) -> Task | None:
         """Return the task registered under ``idempotency_key``, or None."""
@@ -368,6 +552,22 @@ class TaskRegistry:
         """Return all running tasks ordered least-recently-updated-first."""
         rows = await self.db.fetchall("SELECT * FROM tasks WHERE state='running' ORDER BY updated_at ASC")
         return [Task.from_row(r) for r in rows]
+
+    def running_context_sync(self) -> list[Task]:
+        """Read running tasks least-recently-updated-first off the sync path."""
+        rows = self.db.fetchall_sync(
+            "SELECT * FROM tasks WHERE state='running' ORDER BY updated_at ASC",
+            (),
+        )
+        return [Task.from_row(row) for row in rows]
+
+    def queued_kind_counts_sync(self) -> dict[str, int]:
+        """Return {kind: count} for queued tasks, synchronously."""
+        rows = self.db.fetchall_sync(
+            "SELECT kind, COUNT(*) AS n FROM tasks WHERE state='queued' GROUP BY kind",
+            (),
+        )
+        return {str(row["kind"]): int(row["n"]) for row in rows}
 
     async def extend_lease(self, task_id: str, extra_sec: int) -> int:
         """Grow a running task's ``lease_ttl_sec`` by ``extra_sec``."""
@@ -399,16 +599,17 @@ class TaskRegistry:
     ) -> list[str]:
         """Fail running tasks whose lease-holder process is provably dead."""
         reclaimed: list[str] = []
+        reclaimed_rows: list[tuple[str, str, int]] = []
         async with self.db.transaction() as cur:
             cur.execute(
-                "SELECT t.task_id, t.history, l.pid, l.owner_scope "
+                "SELECT t.task_id, t.kind, t.history, l.pid, l.owner_scope "
                 "FROM tasks t JOIN leases l ON l.task_id = t.task_id "
                 "WHERE t.state='running' AND l.pid > 0"
             )
             holders: dict[str, list] = {}
             for row in cur.fetchall():
                 holders.setdefault(row["task_id"], []).append(row)
-            now_iso = _now_iso()
+            ts_now = now_iso()
             for task_id, rows in holders.items():
                 if not all(SqliteLeaseBackend.holder_is_dead(row) for row in rows):
                     continue
@@ -419,15 +620,18 @@ class TaskRegistry:
                     {
                         "from": "running",
                         "to": "failed",
-                        "ts": now_iso,
+                        "ts": ts_now,
                         "evidence": {"reason": reason, "dead_pid": pid},
                     }
                 )
                 cur.execute(
                     "UPDATE tasks SET state='failed', history=?, updated_at=? WHERE task_id=?",
-                    (json.dumps(history), now_iso, task_id),
+                    (json.dumps(history), ts_now, task_id),
                 )
                 reclaimed.append(task_id)
+                reclaimed_rows.append((task_id, rows[0]["kind"], pid))
+        for task_id, kind, pid in reclaimed_rows:
+            _record_task_state(task_id, kind, "failed", reason=reason, dead_pid=pid)
         return reclaimed
 
     async def cancel_family(
@@ -442,15 +646,16 @@ class TaskRegistry:
             return []
         spared = {str(t or "").strip() for t in exclude_task_ids if str(t or "").strip()}
         cancelled: list[str] = []
+        kinds: dict[str, str] = {}
         async with self.db.transaction() as cur:
             placeholders = ",".join("?" * len(family_kinds))
             cur.execute(
-                f"SELECT task_id, history FROM tasks WHERE state='queued' AND kind IN ({placeholders})",  # nosec B608 - generated placeholders only.
+                f"SELECT task_id, kind, history FROM tasks WHERE state='queued' AND kind IN ({placeholders})",  # nosec B608 - generated placeholders only.
                 family_kinds,
             )
-            rows = [(r["task_id"], r["history"]) for r in cur.fetchall()]
-            now = _now_iso()
-            for task_id, history_json in rows:
+            rows = [(r["task_id"], r["kind"], r["history"]) for r in cur.fetchall()]
+            now = now_iso()
+            for task_id, kind, history_json in rows:
                 if str(task_id or "").strip() in spared:
                     continue
                 history = json.loads(history_json)
@@ -467,36 +672,27 @@ class TaskRegistry:
                     (json.dumps(history), now, task_id),
                 )
                 cancelled.append(task_id)
+                kinds[task_id] = kind
+        for task_id in cancelled:
+            _record_task_state(task_id, kinds[task_id], "cancelled", reason=reason)
         return cancelled
 
-    async def cancel_queued_not_allowed(
+    async def cancel_queued(
         self,
         *,
         allowed_kinds: set[str] | frozenset[str],
         reason: str,
-        spare_queued: SpareQueuedFn | None = None,
     ) -> list[str]:
-        """Bulk-cancel queued tasks whose kind is not allowed at a phase boundary."""
+        """Bulk-cancel queued tasks whose kind is not in ``allowed_kinds``."""
         allowed = {str(kind or "").strip() for kind in allowed_kinds if str(kind or "").strip()}
         cancelled: list[str] = []
+        kinds: dict[str, str] = {}
         async with self.db.transaction() as cur:
-            cur.execute("SELECT task_id, kind, params, history FROM tasks WHERE state='queued'")
-            rows = [(r["task_id"], r["kind"], r["params"], r["history"]) for r in cur.fetchall()]
-            now = _now_iso()
-            for task_id, kind, params_json, history_json in rows:
+            cur.execute("SELECT task_id, kind, history FROM tasks WHERE state='queued'")
+            rows = [(r["task_id"], r["kind"], r["history"]) for r in cur.fetchall()]
+            now = now_iso()
+            for task_id, kind, history_json in rows:
                 if str(kind or "").strip() in allowed:
-                    continue
-                try:
-                    params = json.loads(params_json) if params_json else {}
-                except json.JSONDecodeError:
-                    params = {}
-                if not isinstance(params, dict):
-                    params = {}
-                if spare_queued is not None and spare_queued(
-                    str(task_id or "").strip(),
-                    str(kind or "").strip(),
-                    params,
-                ):
                     continue
                 history = json.loads(history_json)
                 history.append(
@@ -512,6 +708,9 @@ class TaskRegistry:
                     (json.dumps(history), now, task_id),
                 )
                 cancelled.append(task_id)
+                kinds[task_id] = kind
+        for task_id in cancelled:
+            _record_task_state(task_id, kinds[task_id], "cancelled", reason=reason)
         return cancelled
 
 

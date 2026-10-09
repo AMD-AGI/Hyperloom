@@ -22,7 +22,9 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from hyperloom.common.llm_attribution import inject_env as inject_attribution_env
-from hyperloom.common.llm_config import LLMConfigError, parse_custom_headers, resolve_openai_client_config
+from hyperloom.common.llm_config import LLMConfigError, resolve_openai_client_config
+from hyperloom.common.llm_headers import parse_custom_headers
+from hyperloom.common.token_usage import uncached_input_tokens
 
 # Name Codex records the gateway under in its own TOML config.
 CODEX_PROVIDER_NAME = "hyperloom"
@@ -610,10 +612,11 @@ def normalize_codex_usage(usage: Any) -> dict[str, int]:
         breakdown = breakdown.model_dump()
     if not isinstance(breakdown, dict):
         return {}
+    cached = _usage_int(breakdown, "cached_input_tokens")
     normalized = {
-        "input_tokens": _usage_int(breakdown, "input_tokens"),
+        "input_tokens": uncached_input_tokens(_usage_int(breakdown, "input_tokens"), cached),
         "output_tokens": _usage_int(breakdown, "output_tokens"),
-        "cache_read_input_tokens": _usage_int(breakdown, "cached_input_tokens"),
+        "cache_read_input_tokens": cached,
         "reasoning_output_tokens": _usage_int(breakdown, "reasoning_output_tokens"),
     }
     window_source = usage if isinstance(usage, dict) else getattr(usage, "__dict__", {}) or {}
@@ -829,9 +832,9 @@ class CodexSession:
             if not completed:
                 # Teardown of an already-failed turn: the timeout below is the reported failure, so interrupt errors
                 # add no signal.
-                with contextlib.suppress(Exception):
+                with contextlib.suppress(Exception):  # broad-suppress: SDK teardown
                     await asyncio.wait_for(turn_handle.interrupt(), timeout=_INTERRUPT_TIMEOUT_SEC)
-                with contextlib.suppress(Exception):
+                with contextlib.suppress(Exception):  # broad-suppress: SDK teardown
                     await asyncio.wait_for(asyncio.shield(turn_task), timeout=_INTERRUPT_TIMEOUT_SEC)
                 raise CodexSessionTimeoutError(f"Codex turn timed out after {timeout_sec:g}s")
             sdk_result = turn_task.result()

@@ -19,19 +19,18 @@
 #       upstream, so no benchmarker.py rewrite is applied here.
 #   3. InferenceX checkout: clone from upstream pinned to INFERENCEX_REF
 #      (a commit SHA), sets INFERENCEX_PATH for runtime
-#   4. Delegates to src/hyperloom/agents/kernel/scripts/install.sh for ray, ray-head
+#   4. Delegates to the sibling install_kernel_tools.sh for ray, ray-head
 #      bring-up, TraceLens, GEAK and LLM gateway env setup.
-#      kernel-agent itself is the canonical owner of those — we just
+#      That installer is the canonical owner of those — we just
 #      chain to it so users have a single entry point.
 #
-# kernel-agent's install.sh owns Ray + ray start, TraceLens, GEAK and
-# LLM gateway env. inference_optimizer's install.sh owns Magpie /
-# InferenceX / the inference_optimizer Python package itself. The two
-# are composable: kernel-agent works standalone; inference_optimizer
-# drags kernel-agent in via this script.
+# install_kernel_tools.sh owns Ray + ray start, TraceLens, GEAK and
+# LLM gateway env. This script owns Magpie / InferenceX / the
+# inference_optimizer Python package itself. The two are composable:
+# install_kernel_tools.sh works standalone; this script chains to it.
 #
 # Open-source deps (InferenceX / TraceLens) are cloned here or by the
-# chained kernel-agent installer.
+# chained install_kernel_tools.sh.
 
 set -euo pipefail
 
@@ -45,8 +44,9 @@ export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:
 # $VIRTUAL_ENV; otherwise the system-bins prepend shadows the venv python3
 # with /usr/bin/python3, whose apt-managed packages (e.g. packaging) have no
 # RECORD file and break `pip install`/uninstall. Probe the activated venv
-# first, then the common ROCm image locations (/opt/venv, /venv).
-for _venv_bin in "${VIRTUAL_ENV:+${VIRTUAL_ENV}/bin}" /opt/venv/bin /venv/bin; do
+# first, then the common ROCm image locations (/opt/venv, /venv, and
+# /opt/python on the ROCm 10 vLLM images).
+for _venv_bin in "${VIRTUAL_ENV:+${VIRTUAL_ENV}/bin}" /opt/venv/bin /venv/bin /opt/python/bin; do
   if [ -n "${_venv_bin}" ] && [ -x "${_venv_bin}/python" ]; then
     export PATH="${_venv_bin}:$PATH"
     break
@@ -76,44 +76,14 @@ resolve_repo_root() {
 }
 
 REPO_ROOT="$(resolve_repo_root)"
-DOTENV_LOADED_COUNT=0
-
-# Which file, if any, supplies configuration. Default is the source checkout's
-# .env, as before.
-#
-# HYPERLOOM_ENV_FILE lets a caller own its own configuration:
-#   unset        $REPO_ROOT/.env (previous behaviour)
-#   <path>       that file instead
-#   "" | none    no file; the caller's exported environment is the configuration
-#
-# Needed because the checkout is shared across runs while USER_DATA_PATH,
-# HYPERLOOM_RUNTIME_DIR and the *_ROOT paths are per-run. When a checkout .env
-# is authoritative, scrub_stale_workspace_env_for_setup_dotenv unsets those
-# before the no-clobber load, so a caller that exported a fresh USER_DATA_PATH
-# silently gets the previous run's. A caller with no way to opt out had to
-# mutate or mask the shared checkout to launch safely.
-resolve_env_file() {
-  if [ -z "${HYPERLOOM_ENV_FILE+x}" ]; then
-    printf '%s\n' "$REPO_ROOT/.env"
-    return 0
-  fi
-  case "$HYPERLOOM_ENV_FILE" in
-    ""|none|NONE) printf '%s\n' "" ;;
-    *) printf '%s\n' "$HYPERLOOM_ENV_FILE" ;;
-  esac
-}
-
-HYPERLOOM_RESOLVED_ENV_FILE="$(resolve_env_file)"
-
-setup_dotenv_is_authoritative() {
-  [ -n "$HYPERLOOM_RESOLVED_ENV_FILE" ] || return 1
-  [ -f "$HYPERLOOM_RESOLVED_ENV_FILE" ] || return 1
-  grep -q '^HYPERLOOM_RUN_MODE=' "$HYPERLOOM_RESOLVED_ENV_FILE" 2>/dev/null
-}
+# shellcheck source=runtime_env.sh
+. "${_script_dir}/runtime_env.sh"
 
 scrub_stale_workspace_env_for_setup_dotenv() {
   setup_dotenv_is_authoritative || return 0
-  unset USER_DATA_PATH
+  if ! runtime_env_var_is_readonly USER_DATA_PATH; then
+    unset USER_DATA_PATH
+  fi
   unset HYPERLOOM_RUNTIME_DIR
   unset KERNEL_AGENT_ENV
   unset HYPERLOOM_ROOT
@@ -122,38 +92,6 @@ scrub_stale_workspace_env_for_setup_dotenv() {
   unset FRAMEWORK_AGENT_ROOT
   unset HYPERLOOM_SKILL_PATH
   unset PYTHONPATH
-}
-
-load_dotenv_no_clobber() {
-  DOTENV_LOADED_COUNT=0
-  [ -n "$HYPERLOOM_RESOLVED_ENV_FILE" ] || return 0
-  [ -f "$HYPERLOOM_RESOLVED_ENV_FILE" ] || return 0
-  local loaded=0
-  local raw key value
-  while IFS= read -r raw || [ -n "$raw" ]; do
-    raw="${raw#"${raw%%[![:space:]]*}"}"
-    raw="${raw%"${raw##*[![:space:]]}"}"
-    [ -z "$raw" ] && continue
-    case "$raw" in \#*) continue ;; esac
-    case "$raw" in export\ *) raw="${raw#export }" ;; esac
-    case "$raw" in *=*) ;; *) continue ;; esac
-    key="${raw%%=*}"
-    value="${raw#*=}"
-    key="${key%"${key##*[![:space:]]}"}"
-    value="${value#"${value%%[![:space:]]*}"}"
-    value="${value%"${value##*[![:space:]]}"}"
-    case "$value" in
-      \"*\") value="${value#\"}"; value="${value%\"}" ;;
-      \'*\') value="${value#\'}"; value="${value%\'}" ;;
-    esac
-    [ -z "$key" ] && continue
-    if [ -z "${!key:-}" ]; then
-      export "$key=$value"
-      loaded=$((loaded + 1))
-    fi
-  done < "$HYPERLOOM_RESOLVED_ENV_FILE"
-  DOTENV_LOADED_COUNT="$loaded"
-  return 0
 }
 
 # Load .env before deriving USER_DATA_PATH / HYPERLOOM_RUNTIME_DIR so a
@@ -174,35 +112,36 @@ _default_workspace_root() {
   while [ ! -e "$_ws_probe" ] && [ "$_ws_probe" != / ]; do _ws_probe=$(dirname "$_ws_probe"); done
   if [ -w "$_ws_probe" ]; then printf '%s' /workspace/hyperloom; else printf '%s' "$(pwd -P)/session"; fi
 }
-USER_DATA_PATH="${USER_DATA_PATH:-$(_default_workspace_root)}"
+if [ -z "${USER_DATA_PATH:-}" ]; then
+  if runtime_env_var_is_readonly USER_DATA_PATH; then
+    printf '%s\n' '[install ERROR] readonly USER_DATA_PATH is empty; cannot select a workspace root' >&2
+    exit 1
+  fi
+  USER_DATA_PATH="$(_default_workspace_root)"
+fi
 if [ -z "${_user_data_was_set}" ]; then
   echo "[install WARN] USER_DATA_PATH not set; defaulting to ${USER_DATA_PATH}. Set USER_DATA_PATH to persist artifacts under your data root." >&2
 fi
 HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH}/runtime}"
 KERNEL_AGENT_ENV="${KERNEL_AGENT_ENV:-${HYPERLOOM_RUNTIME_DIR}/kernel-agent.env.sh}"
+VLLM_IMAGE_SOURCE_ROOT="/app/vllm"
+VLLM_IMAGE_SOURCE_COMMIT="f46a9dfe2c5f57bebbd29556cbbb25eabd874226"
+VLLM_IMAGE_REPO="${VLLM_IMAGE_REPO:-https://github.com/vllm-project/vllm.git}"
+VLLM_IMAGE_SOURCE_ACTIVE=0
 # Legacy variable kept for compatibility; open-source checkouts use _open_source_root.
 HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
 # Writable, repo-local base for auto-cloned deps: $HYPERLOOM_CACHE_DIR else
 # $REPO_ROOT/.cache, cloned per revision (<name>@<sha>). Not /tmp (a reaper can
 # wipe it mid-run, leaving TRACELENS_ROOT dangling — #722).
 _open_source_root="${HYPERLOOM_CACHE_DIR:-${REPO_ROOT}/.cache}"
-# tree-reform.MD P2.5: kernel-agent/framework-agent live under the hyperloom
-# package tree in both source and pip-installed layouts. A missing pyproject at
-# REPO_ROOT means setup is running from a pip --target workspace rather than a
-# source checkout, so the editable self-install step below is skipped.
+# The kernel tools ship inside the hyperloom package tree.
+# A missing pyproject at REPO_ROOT means setup is running from a pip --target
+# workspace rather than a source checkout, so the editable self-install step below is skipped.
 _hyperloom_pkg_root="$(cd "${_script_dir}/../.." && pwd)"
 HYPERLOOM_PACKAGED_INSTALL=0
-if [ ! -f "${REPO_ROOT}/pyproject.toml" ] && [ -d "${_hyperloom_pkg_root}/agents/kernel" ]; then
+if [ ! -f "${REPO_ROOT}/pyproject.toml" ] && [ -d "${_hyperloom_pkg_root}/orchestrator/trace_analysis" ]; then
   HYPERLOOM_PACKAGED_INSTALL=1
 fi
-KERNEL_AGENT_ROOT="${KERNEL_AGENT_ROOT:-${_hyperloom_pkg_root}/agents/kernel}"
-FRAMEWORK_AGENT_ROOT="${FRAMEWORK_AGENT_ROOT:-${_hyperloom_pkg_root}/agents/framework}"
-# tree-reform.MD P2.5: framework-agent was promoted from a sibling
-# ``framework-agent/`` checkout into the in-tree ``hyperloom`` src-layout
-# namespace (``src/hyperloom/agents/framework``); it no longer has its own
-# installer/venv, so FRAMEWORK_AGENT_ROOT now just points at that in-tree
-# package (still overridable) and the old chain_framework_agent() delegation
-# below is a no-op.
 # Resolve a git ref to a commit SHA: 7-40 hex passes through; branch/tag via
 # ls-remote (falls back to the raw ref). The SHA keys the per-revision cache.
 _resolve_ref_sha() {
@@ -315,11 +254,9 @@ Installs:
     environment / .env (opt-in live trace push; skipped otherwise)
   - Magpie (pip-installed from MAGPIE_PACKAGE_SPEC)
   - Clones InferenceX pinned to INFERENCEX_REF and exports INFERENCEX_PATH
-  - Chains to src/hyperloom/agents/kernel/scripts/install.sh for Ray + ray-head start,
+  - Chains to install_kernel_tools.sh (next to this script) for Ray + ray-head start,
     TraceLens, GEAK, and LLM gateway env.
-  - The `fa` CLI is provided by this same editable install; framework-agent
-    lives in src/hyperloom/agents/framework/ and has no separate
-    installer/venv to chain to.
+  - src/hyperloom/agents/framework/ is part of this editable install (PR discovery, isolation helpers).
 
 Options:
   --check-only           Verify only, do not install
@@ -333,7 +270,7 @@ Options:
   -h, --help             Show this help
 
 Env overrides:
-  REPO_ROOT, KERNEL_AGENT_ROOT, FRAMEWORK_AGENT_ROOT, MAGPIE_REPO,
+  REPO_ROOT, MAGPIE_REPO,
   MAGPIE_REF (commit SHA / tag / branch the Magpie package is pinned to;
     default is a commit that already copies benchmark scripts atomically),
   MAGPIE_PACKAGE_SPEC, MAGPIE_PATH, INFERENCEX_REPO,
@@ -389,7 +326,7 @@ run() {
 }
 
 # Clone a dependency pinned to $ref into $dir, mirroring the GEAK pin in
-# src/hyperloom/agents/kernel/scripts/install.sh. `git clone --branch` only accepts
+# install_kernel_tools.sh. `git clone --branch` only accepts
 # tags/branches, not raw SHAs, so a 7-40 hex char ref triggers a shallow
 # fetch-checkout dance instead (GitHub serves shallow SHA fetches via
 # uploadpack.allowReachableSHA1InWant=true). DRY_RUN / CHECK_ONLY are honoured
@@ -410,6 +347,210 @@ git_fetch_pinned() {
     run git clone --depth 1 --branch "$ref" "$repo" "$dir" || return 1
   fi
   return 0
+}
+
+probe_vllm_image_wheel() {
+  "$PYTHON" - <<'PY'
+import re
+from importlib import metadata
+from pathlib import Path
+
+try:
+    dist = metadata.distribution("vllm")
+except metadata.PackageNotFoundError:
+    raise SystemExit(1)
+version = dist.version.lower()
+match = re.search(r"(?:^|[.+])g([0-9a-f]{7,40})(?=$|[.+])", version)
+if match is None:
+    raise SystemExit(2)
+print(f"{version}\t{match.group(1)}\t{Path(dist.locate_file('vllm')).resolve()}")
+PY
+}
+
+prepare_vllm_image_git_tree() {
+  local root="$1" origin="" head="" parent="" subject="" baseline_ref="" upstream_ref=""
+  local index_tmp git_dir tree baseline commit_date
+  [[ "$VLLM_IMAGE_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] ||
+    { die "VLLM image source commit must be a full SHA"; return 1; }
+  if git -C "$root" rev-parse --git-dir >/dev/null 2>&1; then
+    head="$(git -C "$root" rev-parse --verify HEAD 2>/dev/null || true)"
+    if [ -n "$head" ] &&
+       { ! git -C "$root" diff --quiet --ignore-submodules=all ||
+         ! git -C "$root" diff --cached --quiet --ignore-submodules=all; }; then
+      die "vLLM image source has tracked or staged user changes: ${root}"; return 1
+    fi
+  else
+    [ ! -e "$root/.git" ] ||
+      { die "vLLM image source has invalid Git metadata: ${root}"; return 1; }
+    git init -q "$root" || { die "failed to initialize Git metadata in ${root}"; return 1; }
+  fi
+  origin="$(git -C "$root" remote get-url origin 2>/dev/null || true)"
+  if [ -z "$origin" ]; then
+    git -C "$root" remote add origin "$VLLM_IMAGE_REPO" ||
+      { die "failed to add vLLM image source remote"; return 1; }
+  elif [ "$origin" != "$VLLM_IMAGE_REPO" ]; then
+    die "vLLM image source origin mismatch: ${origin}"; return 1
+  fi
+  if [ -n "$head" ]; then
+    parent="$(git -C "$root" rev-parse "${head}^" 2>/dev/null || true)"
+    subject="$(git -C "$root" show -s --format=%s "$head" 2>/dev/null || true)"
+    baseline_ref="$(git -C "$root" rev-parse refs/hyperloom/image-baseline 2>/dev/null || true)"
+    upstream_ref="$(git -C "$root" rev-parse refs/hyperloom/upstream 2>/dev/null || true)"
+    if [ "$parent" != "$VLLM_IMAGE_SOURCE_COMMIT" ] ||
+       [ "$subject" != "Hyperloom prebuilt vLLM image baseline" ] ||
+       [ "$baseline_ref" != "$head" ] ||
+       [ "$upstream_ref" != "$VLLM_IMAGE_SOURCE_COMMIT" ]; then
+      die "vLLM image source HEAD is not the managed synthetic baseline: ${root}"; return 1
+    fi
+    export VLLM_IMAGE_UPSTREAM_SHA="$VLLM_IMAGE_SOURCE_COMMIT"
+    export VLLM_IMAGE_BASELINE_SHA="$head"
+    return 0
+  fi
+  git -C "$root" fetch --quiet origin "$VLLM_IMAGE_SOURCE_COMMIT" ||
+    { die "failed to fetch vLLM image source commit ${VLLM_IMAGE_SOURCE_COMMIT}"; return 1; }
+  index_tmp="$(mktemp)"
+  if ! GIT_INDEX_FILE="$index_tmp" git -C "$root" read-tree "$VLLM_IMAGE_SOURCE_COMMIT" ||
+     ! GIT_INDEX_FILE="$index_tmp" git -C "$root" add -u -- .; then
+    rm -f "$index_tmp"; die "failed to capture vLLM image tracked deltas"; return 1
+  fi
+  tree="$(GIT_INDEX_FILE="$index_tmp" git -C "$root" write-tree)" ||
+    { rm -f "$index_tmp"; die "failed to write vLLM image baseline tree"; return 1; }
+  commit_date="$(git -C "$root" show -s --format=%cI "$VLLM_IMAGE_SOURCE_COMMIT")"
+  baseline="$(
+    printf '%s\n' "Hyperloom prebuilt vLLM image baseline" |
+      GIT_AUTHOR_NAME=Hyperloom GIT_AUTHOR_EMAIL=hyperloom@amd.com GIT_AUTHOR_DATE="$commit_date" \
+      GIT_COMMITTER_NAME=Hyperloom GIT_COMMITTER_EMAIL=hyperloom@amd.com GIT_COMMITTER_DATE="$commit_date" \
+      git -C "$root" commit-tree "$tree" -p "$VLLM_IMAGE_SOURCE_COMMIT"
+  )" || { rm -f "$index_tmp"; die "failed to commit vLLM image baseline tree"; return 1; }
+  git_dir="$(git -C "$root" rev-parse --absolute-git-dir)"
+  mv "$index_tmp" "$git_dir/index"
+  git -C "$root" update-ref refs/hyperloom/upstream "$VLLM_IMAGE_SOURCE_COMMIT" &&
+    git -C "$root" update-ref refs/hyperloom/image-baseline "$baseline" &&
+    git -C "$root" update-ref --no-deref HEAD "$baseline" ||
+    { die "failed to pin vLLM image source HEAD"; return 1; }
+  git -C "$root" diff-index --quiet "$baseline" -- ||
+    { die "vLLM image source verification changed after pinning"; return 1; }
+  export VLLM_IMAGE_UPSTREAM_SHA="$VLLM_IMAGE_SOURCE_COMMIT"
+  export VLLM_IMAGE_BASELINE_SHA="$baseline"
+}
+
+copy_missing_vllm_wheel_artifacts() {
+  local root="$1" wheel_package="$2"
+  "$PYTHON" - "$root" "$wheel_package" <<'PY'
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+root, wheel = map(Path, sys.argv[1:])
+source = root / "vllm"
+tracked = set(subprocess.check_output(["git", "-C", str(root), "ls-files"], text=True).splitlines())
+overlay = []
+for path in wheel.rglob("*"):
+    rel = path.relative_to(wheel)
+    native = path.name.endswith((".so", ".pyd", ".dll", ".dylib")) or ".so." in path.name
+    if path.name != "_version.py" and not native:
+        continue
+    destination = source / rel
+    relative = Path("vllm") / rel
+    if os.path.lexists(destination):
+        if relative.as_posix() not in tracked:
+            overlay.append(relative)
+        continue
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink():
+        destination.symlink_to(os.readlink(path))
+    elif path.is_file():
+        shutil.copy2(path, destination)
+    else:
+        continue
+    overlay.append(relative)
+
+info = root / ".git" / "info"
+info.mkdir(parents=True, exist_ok=True)
+exclude = info / "exclude"
+existing = set(exclude.read_text(encoding="utf-8").splitlines()) if exclude.exists() else set()
+entries = [f"/{path.as_posix()}" for path in overlay]
+if entries:
+    with exclude.open("a", encoding="utf-8") as stream:
+        for entry in entries:
+            if entry not in existing:
+                stream.write(entry + "\n")
+    (info / "hyperloom-wheel-overlay").write_text("".join(f"{path.as_posix()}\n" for path in overlay), encoding="utf-8")
+print(len(overlay))
+PY
+}
+
+verify_vllm_image_source_import() {
+  local root="$1" wheel_package="$2"
+  PYTHONPATH="${root}${PYTHONPATH:+:${PYTHONPATH}}" "$PYTHON" - "$root" "$wheel_package" <<'PY'
+import importlib
+import sys
+from pathlib import Path
+
+root, wheel = map(Path, sys.argv[1:])
+import vllm
+
+loaded = Path(vllm.__file__).resolve()
+expected = (root / "vllm").resolve()
+if expected not in loaded.parents:
+    raise SystemExit(f"vLLM loaded from {loaded}, expected {expected}")
+modules = [name for name in ("_C", "_rocm_C") if (wheel / f"{name}.so").exists() or list(wheel.glob(f"{name}*.so"))]
+if not modules:
+    raise SystemExit("wheel exposes neither vllm._C nor vllm._rocm_C")
+for name in modules:
+    importlib.import_module(f"vllm.{name}")
+PY
+}
+
+activate_vllm_image_source() {
+  local info runtime_version runtime_commit wheel_package
+  [ -d "$VLLM_IMAGE_SOURCE_ROOT/vllm" ] || return 0
+  if ! info="$(probe_vllm_image_wheel 2>/dev/null)"; then
+    log "vLLM image source skipped: installed wheel has no commit-qualified version"
+    return 0
+  fi
+  IFS=$'\t' read -r runtime_version runtime_commit wheel_package <<<"$info"
+  case "$VLLM_IMAGE_SOURCE_COMMIT" in
+    "$runtime_commit"*) ;;
+    *) log "vLLM image source skipped: runtime ${runtime_version} is not ${VLLM_IMAGE_SOURCE_COMMIT}"; return 0 ;;
+  esac
+  if [ "${DRY_RUN:-0}" -eq 1 ] || [ "${CHECK_ONLY:-0}" -eq 1 ]; then
+    log "would activate ${VLLM_IMAGE_SOURCE_ROOT} for runtime ${runtime_version}"
+    return 0
+  fi
+  prepare_vllm_image_git_tree "$VLLM_IMAGE_SOURCE_ROOT" || return 1
+  copy_missing_vllm_wheel_artifacts "$VLLM_IMAGE_SOURCE_ROOT" "$wheel_package" >/dev/null ||
+    { die "failed to overlay vLLM wheel artifacts"; return 1; }
+  verify_vllm_image_source_import "$VLLM_IMAGE_SOURCE_ROOT" "$wheel_package" ||
+    { die "vLLM image source import verification failed"; return 1; }
+  export FRAMEWORK_REPO_PATH="$VLLM_IMAGE_SOURCE_ROOT"
+  export VLLM_REPO_PATH="$VLLM_IMAGE_SOURCE_ROOT"
+  export VLLM_DIR="$VLLM_IMAGE_SOURCE_ROOT"
+  export HYPERLOOM_VLLM_IMAGE_SOURCE=1
+  VLLM_IMAGE_SOURCE_ACTIVE=1
+  log "activated exact vLLM image source at ${VLLM_IMAGE_SOURCE_ROOT}"
+}
+
+persist_vllm_image_source_env() {
+  [ "$VLLM_IMAGE_SOURCE_ACTIVE" -eq 1 ] || return 0
+  local pair name value
+  for pair in \
+    "FRAMEWORK_REPO_PATH=${VLLM_IMAGE_SOURCE_ROOT}" \
+    "VLLM_REPO_PATH=${VLLM_IMAGE_SOURCE_ROOT}" \
+    "VLLM_DIR=${VLLM_IMAGE_SOURCE_ROOT}" \
+    "HYPERLOOM_VLLM_IMAGE_SOURCE=1" \
+    "VLLM_IMAGE_UPSTREAM_SHA=${VLLM_IMAGE_UPSTREAM_SHA}" \
+    "VLLM_IMAGE_BASELINE_SHA=${VLLM_IMAGE_BASELINE_SHA}"; do
+    name="${pair%%=*}"
+    value="${pair#*=}"
+    if grep -q "^export ${name}=" "$KERNEL_AGENT_ENV" 2>/dev/null; then
+      sed -i "s|^export ${name}=.*|export ${name}='${value}'|" "$KERNEL_AGENT_ENV"
+    else
+      printf "export %s='%s'\n" "$name" "$value" >> "$KERNEL_AGENT_ENV"
+    fi
+  done
 }
 
 # Serialize concurrent installs that share one open-source checkout root
@@ -446,7 +587,7 @@ acquire_install_lock() {
   fi
 }
 
-# Preflight credential validation. Mirrors src/hyperloom/agents/kernel/scripts/install.sh:
+# Preflight credential validation. Mirrors install_kernel_tools.sh:
 # a usable setup needs at least one self-consistent provider side. A
 # dual-protocol gateway such as DeepSeek configures both sides on one host.
 #
@@ -458,7 +599,7 @@ acquire_install_lock() {
 preflight_load_dotenv() {
   load_dotenv_no_clobber
   if [ "${DOTENV_LOADED_COUNT:-0}" -gt 0 ]; then
-    log "loaded ${DOTENV_LOADED_COUNT} missing var(s) from $REPO_ROOT/.env (env wins)"
+    log "loaded ${DOTENV_LOADED_COUNT} missing var(s) from $RUNTIME_ENV_FILE (env wins)"
   fi
 }
 
@@ -574,7 +715,7 @@ preflight_validate_credentials() {
   fi
   missing+=("a self-consistent provider side: ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY, or OPENAI_BASE_URL + OPENAI_API_KEY")
   local env_file_status
-  if [ -f "$REPO_ROOT/.env" ]; then
+  if [ -n "$RUNTIME_ENV_FILE" ] && [ -f "$RUNTIME_ENV_FILE" ]; then
     env_file_status="present"
   else
     env_file_status="not found"
@@ -591,7 +732,7 @@ preflight_validate_credentials() {
 
 Tried loading from:
   - shell environment
-  - \$REPO_ROOT/.env  (${env_file_status}: ${REPO_ROOT}/.env)
+  - \$RUNTIME_ENV_FILE  (${env_file_status}: ${RUNTIME_ENV_FILE:-none})
 
 Fix one of:
   1. Anthropic:
@@ -630,7 +771,14 @@ preflight_validate_credentials
 # Gated by apt-get present, not --check-only / --dry-run, and
 # INFERENCE_OPTIMIZER_SKIP_APT_BOOTSTRAP unset.
 resolve_python() {
-  if [ -x "/opt/venv/bin/python" ] && [ "${INFERENCE_OPTIMIZER_FORCE_PYTHON:-0}" != "1" ]; then
+  if [ "${INFERENCE_OPTIMIZER_FORCE_PYTHON:-0}" = "1" ]; then
+    if [ -n "${PYTHON:-}" ] && [ -f "$PYTHON" ] && [ -x "$PYTHON" ]; then
+      return 0
+    fi
+    die "INFERENCE_OPTIMIZER_FORCE_PYTHON=1 requires an executable PYTHON; refusing interpreter fallback"
+    return 1
+  fi
+  if [ -x "/opt/venv/bin/python" ]; then
     if [ -n "${PYTHON:-}" ] && [ "${PYTHON}" != "/opt/venv/bin/python" ]; then
       log "preferring /opt/venv/bin/python over PYTHON=${PYTHON} (canonical ROCm stack)"
       log "  set INFERENCE_OPTIMIZER_FORCE_PYTHON=1 to honor PYTHON verbatim"
@@ -674,7 +822,7 @@ resolve_python() {
 resolve_python
 log "PYTHON=${PYTHON}"
 # Export PYTHON + prepend its bin dir so the chained kernel-agent installer's
-# bare `python3 -m pip ...` calls (src/hyperloom/agents/kernel/scripts/install.sh) land in
+# bare `python3 -m pip ...` calls (install_kernel_tools.sh) land in
 # the same interpreter. Otherwise PATH-only resolution can split the
 # installation across two different pythons.
 export PYTHON
@@ -700,11 +848,37 @@ ensure_torch_compatible_with_gpu() {
   if ! command -v rocm-smi >/dev/null 2>&1; then
     return 0
   fi
-  if ! rocm-smi --showid >/dev/null 2>&1; then
+  # Both probes below touch the GPU, so both hang forever on a wedged driver --
+  # and this gate runs before the session directory exists, so a hang here leaves
+  # no state.json, no breakdown and nothing for the caller to time out on: the
+  # workload just holds its nodes until the scheduler's wall clock kills it
+  # (observed: 14h on 8xMI355X, job 174683, only `PYTHON=` in the log).
+  #
+  # A timeout is fatal rather than a skip. It is the strongest "this node's GPU
+  # is wedged" signal install.sh gets, and the default path below this gate keeps
+  # touching the driver with no time-box of its own -- `import lpips` in
+  # ensure_scriptable_quality_deps, _torch_hip_version, and kernel-agent's
+  # ensure_ray_started, which calls torch.cuda.device_count() and so initialises
+  # the HIP runtime. Falling through would only move the same hang a minute or
+  # two later and point the next reader at Ray. Dying here releases the
+  # allocation and names the cause; SKIP_TORCH_GATE covers a node that is merely
+  # slow, the same way it already covers this gate's other verdicts.
+  local smi_rc=0
+  timeout 60 rocm-smi --showid >/dev/null 2>&1 || smi_rc=$?
+  if [ "$smi_rc" -eq 124 ]; then
+    warn "rocm-smi --showid did not answer within 60s -- the GPU driver on this node looks wedged"
+    if [ "${INFERENCE_OPTIMIZER_SKIP_TORCH_GATE:-0}" != "1" ]; then
+      die "refusing to install on a node whose GPU probe hangs (INFERENCE_OPTIMIZER_SKIP_TORCH_GATE=1 to continue anyway)"
+    fi
+    warn "INFERENCE_OPTIMIZER_SKIP_TORCH_GATE=1 set; continuing despite the hanging GPU probe"
     return 0
   fi
+  [ "$smi_rc" -eq 0 ] || return 0
+  # `local` stays on its own line: folding it into the assignment would mask the
+  # command's exit status behind `local`'s own.
   local probe
-  probe="$("$PYTHON" - <<'PY' 2>/dev/null || true
+  local probe_rc=0
+  probe="$(timeout 180 "$PYTHON" - <<'PY' 2>/dev/null
 import json, sys
 out = {"rc": 0}
 try:
@@ -717,7 +891,15 @@ except Exception as exc:
     out["error"] = type(exc).__name__ + ": " + str(exc)[:200]
 print(json.dumps(out))
 PY
-)"
+)" || probe_rc=$?
+  if [ "$probe_rc" -eq 124 ]; then
+    warn "import torch did not finish within 180s (PYTHON=${PYTHON}) -- a wedged GPU driver or a stalled shared mount"
+    if [ "${INFERENCE_OPTIMIZER_SKIP_TORCH_GATE:-0}" != "1" ]; then
+      die "refusing to install: the torch probe hangs on this node (INFERENCE_OPTIMIZER_SKIP_TORCH_GATE=1 to continue anyway)"
+    fi
+    warn "INFERENCE_OPTIMIZER_SKIP_TORCH_GATE=1 set; continuing despite the hanging torch probe"
+    return 0
+  fi
   if [ -z "$probe" ]; then
     warn "torch probe produced no output (PYTHON=${PYTHON})"
     return 0
@@ -763,13 +945,11 @@ log "USER_DATA_PATH=${USER_DATA_PATH}"
 log "HYPERLOOM_RUNTIME_DIR=${HYPERLOOM_RUNTIME_DIR}"
 log "HYPERLOOM_ROOT=${HYPERLOOM_ROOT}"
 log "open_source_root=${_open_source_root}"
-log "KERNEL_AGENT_ROOT=${KERNEL_AGENT_ROOT}"
 log "KERNEL_AGENT_ENV=${KERNEL_AGENT_ENV}"
 log "MAGPIE_PATH=${MAGPIE_PATH}"
 log "INFERENCEX_REPO=${INFERENCEX_REPO}"
 log "INFERENCEX_DEFAULT_DIR=${INFERENCEX_DEFAULT_DIR}"
 export USER_DATA_PATH HYPERLOOM_RUNTIME_DIR KERNEL_AGENT_ENV
-export HYPERLOOM_KERNEL_AGENT_ROOT="${HYPERLOOM_KERNEL_AGENT_ROOT:-${KERNEL_AGENT_ROOT}}"
 # Pre-create the writable runtime root so ensure_magpie / chain_kernel_agent
 # never race on missing parents (Magpie's pip install -e writes egg-info
 # under MAGPIE_PATH; kernel-agent install.sh writes kernel-agent.env.sh into
@@ -1943,15 +2123,14 @@ chain_kernel_agent() {
     log "skipping kernel-agent installer (--skip-kernel-agent)"
     return 0
   fi
-  local script="${KERNEL_AGENT_ROOT}/scripts/install.sh"
+  local script="${_script_dir}/install_kernel_tools.sh"
   if [ ! -f "$script" ]; then
     warn "kernel-agent installer not found at $script"
     return 0
   fi
   log "delegating ray + TraceLens + GEAK + LLM gateway env to ${script}"
-  export REPO_ROOT KERNEL_AGENT_ROOT MAGPIE_PATH HYPERLOOM_ROOT
+  export REPO_ROOT MAGPIE_PATH HYPERLOOM_ROOT
   export USER_DATA_PATH HYPERLOOM_RUNTIME_DIR KERNEL_AGENT_ENV
-  export HYPERLOOM_KERNEL_AGENT_ROOT="${HYPERLOOM_KERNEL_AGENT_ROOT:-${KERNEL_AGENT_ROOT}}"
   [ -n "${INFERENCEX_PATH:-}" ] && export INFERENCEX_PATH
   # Forward the optional internal extension path when provided; unset =>
   # kernel-agent installer stays open-source-only (no separate toggle).
@@ -2060,8 +2239,10 @@ if [ "$HYPERLOOM_BENCHMARK_BACKEND_LC" != "bypass" ]; then
 fi
 ensure_bench_serving_deps
 ensure_scriptable_quality_deps
+activate_vllm_image_source
 ensure_framework_deps
 chain_kernel_agent
+persist_vllm_image_source_env
 # rocprof-compute + pandas<3 pin runs LAST — strictly AFTER every pip-installing
 # step (chain_kernel_agent included; nothing below installs packages). This makes
 # the pandas<3 pin the final word (no later `pip install` can re-pull pandas>=3)
@@ -2069,10 +2250,6 @@ chain_kernel_agent
 # Unconditional (not gated on the backend): the default-geak install a later
 # forge session inherits still gets rocprof-compute + pandas<3.
 ensure_rocprof_compute
-# tree-reform.MD P2.5: framework-agent was promoted into
-# src/hyperloom/agents/framework/ (single hyperloom distribution), so the
-# `fa` CLI is already installed by ensure_inference_optimizer() above; no
-# more separate chain_framework_agent() delegation to a standalone installer.
 
 _write_specialist_secret_env_opt_in() {
   if [ "$DRY_RUN" -eq 1 ] || [ "$CHECK_ONLY" -eq 1 ]; then
@@ -2095,7 +2272,7 @@ _probe_framework_source_roots() {
   log "probing framework source roots for INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS"
   local roots
   roots="$("$PYTHON" - <<'PY'
-from hyperloom.orchestrator.framework.paths import probe_framework_source_roots_for_env
+from hyperloom.inference_optimizer.framework_paths import probe_framework_source_roots_for_env
 print(probe_framework_source_roots_for_env())
 PY
 )"
@@ -2109,7 +2286,7 @@ PY
   local roots_summary
   roots_summary="$(ROOTS_INPUT="$roots" "$PYTHON" - <<'PY'
 import os
-from hyperloom.orchestrator.framework.paths import summarise_framework_root_discovery
+from hyperloom.inference_optimizer.framework_paths import summarise_framework_root_discovery
 print(summarise_framework_root_discovery(os.environ.get("ROOTS_INPUT", "")))
 PY
 )"
@@ -2138,17 +2315,7 @@ _probe_framework_source_roots
 _prune_dep_cache "InferenceX" "Magpie"
 log "install complete"
 log "kernel-agent env file written: ${KERNEL_AGENT_ENV}"
-log "  HYPERLOOM_KERNEL_AGENT_ROOT=${HYPERLOOM_KERNEL_AGENT_ROOT}"
 log ""
-log "next steps — pick ONE:"
-log "  (a) source ${KERNEL_AGENT_ENV}, then run hyperloom.inference_optimizer.cli"
-log "  (b) just launch hyperloom.inference_optimizer.cli — preflight will auto-source"
-log "      \$KERNEL_AGENT_ENV (or \$USER_DATA_PATH/runtime/kernel-agent.env.sh)"
-log "      via _load_kernel_agent_env_fallback() if HYPERLOOM_KERNEL_AGENT_ROOT"
-log "      is unset."
-log ""
-log "If you skip BOTH and HYPERLOOM_KERNEL_AGENT_ROOT stays unset, the"
-log "roofline composite action's trace_analyze sub-step will fail with"
-log "  'HYPERLOOM_KERNEL_AGENT_ROOT is not set'"
-log "and the whole optimisation loop stalls (PolicyGate blocks every"
-log "downstream action on a missing TraceLens snapshot)."
+log "next step: launch python3 -m hyperloom optimize. Its preflight loads"
+log "  \$KERNEL_AGENT_ENV (or \$USER_DATA_PATH/runtime/kernel-agent.env.sh)"
+log "  and stops before the optimisation loop if that file is missing or stale."

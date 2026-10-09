@@ -43,9 +43,9 @@ configured upstream gateway.
 2. Re-run preflight (idempotent — rewrites `~/.claude/config.json`
    `customApiUrl` and `primaryApiKey` and re-derives all alias keys):
    ```bash
-   bash "$REPO_ROOT/hyperloom/agents/kernel/scripts/install.sh" --check-only
+   bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install_kernel_tools.sh" --check-only
    # If check-only reports issues, re-run without --check-only:
-   bash "$REPO_ROOT/hyperloom/agents/kernel/scripts/install.sh"
+   bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install_kernel_tools.sh"
    ```
 3. Inspect `~/.claude/config.json` — `customApiUrl` must point at the
    upstream gateway (for example, `https://<your-gateway-host>/api/v1/llm-proxy/v1`).
@@ -60,22 +60,22 @@ See [Hyperloom authentication and credentials](authentication.md) for credential
 credentials. `tr '\0' '\n' < /proc/<pid>/environ | grep ANTHROPIC_API_KEY` on the
 running optimizer shows the previous key.
 
-**Cause**: `install.sh` snapshots the resolved credentials into
-`$USER_DATA_PATH/runtime/kernel-agent.env.sh`, and every launch sources `.env`
-first and that file second. The snapshot is a fallback, so the rotated value
-wins — but only if it is in the environment when the file is sourced. Sourcing
-the file in a shell that never loaded the new `.env` still yields the old key.
+**Cause**: `install.sh` snapshots credentials into
+`$USER_DATA_PATH/runtime/kernel-agent.env.sh`. Optimizer preflight loads the
+workspace settings before this fallback, preserving caller exports. An old key
+still exported by the launching shell therefore wins over a rotated `.env` value.
 
 **Fix**:
 
-1. Source `.env` before `kernel-agent.env.sh`, which is the documented launch
-   order:
+1. Reconcile any stale credential export, then use the shared workspace loader:
    ```bash
-   set -a; . "$REPO_ROOT/.env"; set +a
-   . "$USER_DATA_PATH/runtime/kernel-agent.env.sh"
+   INSTALL_SH="$REPO_ROOT/hyperloom/inference_optimizer/assets/install.sh"
+   [ -f "$INSTALL_SH" ] || INSTALL_SH="$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"
+   . "${INSTALL_SH%/*}/runtime_env.sh"
+   load_dotenv_no_clobber
    ```
-   The file prints `ANTHROPIC_API_KEY differs from the install-time snapshot` on
-   a mismatch; that line means the rotated value is the one in effect.
+   Do not print credential values. Let optimizer preflight load the runtime
+   snapshot; do not source it over the current launch environment.
 2. To refresh the snapshot itself, re-run the installer:
    ```bash
    bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install.sh"
@@ -197,8 +197,8 @@ docker run --ulimit nofile=1048576 ...   # minimum: --ulimit nofile=65536
 
 The runtime also runs an fd-limit preflight that raises this process's
 *soft* limit (up to the hard cap) before every `ray start`
-(`hyperloom/agents/kernel/scripts/install.sh` `ensure_fd_limit_for_ray` and
-`hyperloom/agents/kernel/tools/backends/ray_runtime.py` `ensure_fd_limit`), so a
+(`hyperloom/inference_optimizer/assets/install_kernel_tools.sh` `ensure_fd_limit_for_ray` and
+`hyperloom/orchestrator/actions/executors/_ray_runtime.py` `ensure_fd_limit`), so a
 high hard cap is enough; you do not need to set the soft limit yourself.
 Override the target with `RAY_MIN_NOFILE` if needed. If the preflight
 warns that the **hard** cap is below the target, the container was not
@@ -251,12 +251,83 @@ hiccup and the installer continued.
 **Fix**:
 
 ```bash
-bash "$REPO_ROOT/hyperloom/agents/kernel/scripts/install.sh" --check-only
+bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install_kernel_tools.sh" --check-only
 # If --check-only reports missing packages, re-run without --check-only:
-bash "$REPO_ROOT/hyperloom/agents/kernel/scripts/install.sh"
+bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install_kernel_tools.sh"
 ```
 
 The installer is idempotent and re-installs only what's missing.
+
+---
+
+## Codex SDK turns stall or TraceLens roofline times out
+
+**Symptom**: On code paths that use the shared Codex SDK session helper
+(TraceLens roofline via `run_codex_turn`, orchestrator Codex turns), one or
+more of:
+
+* A Codex stage hits its phase budget with no declared output (for example,
+  no `analysis.md`).
+* Individual turns take minutes even when the upstream LLM responds in seconds.
+* Codex internal logs report `pool timed out while waiting for an open
+  connection` or `state db update_thread_metadata failed`.
+
+**Cause**: Hyperloom picks exactly one parent directory for each SDK turn via
+`_codex_home_parent` in `codex_session.py`:
+
+1. `HYPERLOOM_RUNTIME_DIR` when set (must be outside a source checkout and
+   creatable, or the turn raises `CodexSessionUnavailableError`).
+2. Otherwise the first safe declared **writable root** for that turn.
+3. Otherwise the run working directory.
+
+Each turn then creates a mode-`0700` `.hyperloom-codex-home-*` directory under
+that parent; Codex stores SQLite (WAL) state there. When the SDK client closes,
+`_cleanup_codex_home` removes that directory — it is not left behind for a
+post-stage listing.
+
+Installers often **export** `HYPERLOOM_RUNTIME_DIR=$USER_DATA_PATH/runtime`, but
+that is launch configuration, not a separate placement rule inside
+`_codex_home_parent`. If that path (or an unset-runtime writable root) sits on
+storage that does not support the file locking SQLite needs, concurrent writers
+from the main agent and spawned sub-agents can block for minutes on the critical
+path.
+
+**Scope**: This entry covers SDK turns that go through `_codex_home_parent` only.
+It does **not** cover Forge-fusion / GEAK Codex (KernelForge uses its own home
+under `~/.cache/kernelforge/codex_home`) or subprocess **specialist** Codex
+tasks (`CODEX_HOME=<task-workspace>/.codex`, which also ignores
+`HYPERLOOM_RUNTIME_DIR`). Treat stalls on those paths as separate placement
+issues.
+
+**Fix**: Before launch, set `HYPERLOOM_RUNTIME_DIR` to a private directory
+outside any source checkout, on storage suitable for SQLite (typically
+node-local fast disk). Session artifacts can stay under `USER_DATA_PATH` on a
+shared mount:
+
+```bash
+export USER_DATA_PATH=/path/on/shared/storage/hyperloom-sessions
+export HYPERLOOM_RUNTIME_DIR=/var/lib/hyperloom/runtime
+mkdir -p "$HYPERLOOM_RUNTIME_DIR"
+chmod 700 "$HYPERLOOM_RUNTIME_DIR"
+```
+
+Use a per-job subdirectory when several runs can share one node (for example,
+`/var/lib/hyperloom/runtime-$SLURM_JOB_ID`).
+
+**Verify**:
+
+1. Before and during the run, confirm the configured parent is on suitable
+   storage:
+   ```bash
+   df -T "$HYPERLOOM_RUNTIME_DIR"
+   ```
+2. While a turn is still open (before the SDK client closes), pool-timeout
+   warnings in Codex `logs_*.sqlite` under the active `.hyperloom-codex-home-*`
+   directory indicate the parent is still unsuitable. After close, rely on the
+   stage finishing within budget rather than inspecting removed directories.
+
+See [Environment variables](environment-variables.md) for
+`HYPERLOOM_RUNTIME_DIR` and Codex `CODEX_HOME` lifecycle.
 
 ---
 
@@ -275,7 +346,7 @@ training-mode CLI is being looked for (no longer accepted as of v0.4).
    open-source checkout root, pins it to a fixed SHA, runs `pip install -e`,
    and smokes the CLI):
    ```bash
-   bash "$REPO_ROOT/hyperloom/agents/kernel/scripts/install.sh"
+   bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install_kernel_tools.sh"
    ```
 2. If `install.sh` succeeds but the CLI still isn't on PATH, install
    manually. By default use the installer-managed clone; only point
@@ -315,7 +386,7 @@ that path is missing or reaped.
    default is re-resolved to the cache root, then reinstall:
    ```bash
    unset TRACELENS_ROOT   # remove any hard-coded old path from env or .env first
-   bash "$REPO_ROOT/hyperloom/agents/kernel/scripts/install.sh"
+   bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install_kernel_tools.sh"
    ```
    The installer rewrites `kernel-agent.env.sh` with the
    `${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/TraceLens@<sha>` default and
@@ -325,7 +396,7 @@ that path is missing or reaped.
    ```bash
    export HYPERLOOM_CACHE_DIR="$USER_DATA_PATH/.hyperloom-cache"
    unset TRACELENS_ROOT
-   bash "$REPO_ROOT/hyperloom/agents/kernel/scripts/install.sh"
+   bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install_kernel_tools.sh"
    ```
 3. **Keep an operator checkout** only if you deliberately maintain one —
    set `TRACELENS_ROOT` to that path. It is adopted as-is (no clone, no
@@ -336,7 +407,7 @@ that path is missing or reaped.
 
 ## Resume fails: "manifest.json not found"
 
-**Symptom.** `python -m hyperloom.inference_optimizer.cli optimize --resume-from` exits with
+**Symptom.** `python -m hyperloom optimize --resume-from` exits with
 `manifest.json not found under <dir>` or `state.json missing`.
 
 **Cause**: `USER_DATA_PATH` points at a different directory than the
@@ -354,7 +425,7 @@ original session, or the session never reached the point of writing
    ```
 2. Pass the actual session directory:
    ```bash
-   python3 -m hyperloom.inference_optimizer.cli optimize --resume-from "$SESSION_DIR"
+   python3 -m hyperloom optimize --resume-from "$SESSION_DIR"
    ```
 3. If `manifest.json` truly never existed, resume is not possible —
    restart with a fresh `--model …` launch.
@@ -407,7 +478,7 @@ action no longer derives this automatically.
 **Fix**: Add the flag at launch:
 
 ```bash
-python3 -m hyperloom.inference_optimizer.cli optimize ... --compare-against-gpu B200
+python3 -m hyperloom optimize ... --compare-against-gpu B200
 ```
 
 The marker is informational, not a failure — the optimisation still
@@ -448,13 +519,13 @@ Three commands give you a fast situation report:
 SD="${INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR:-$SESSION_DIR}"
 
 # 1. Are events landing?
-python -m hyperloom.inference_optimizer.tools.event_counts "$SD"
+python -m hyperloom session events "$SD"
 
 # 2. What was the last action's outcome?
 jq '.optimization_stack | last' "$SD/state.json"
 
 # 3. What phase, lifecycle events, and stop reason are persisted?
-python -m hyperloom.inference_optimizer.tools.read_optimizer_state "$SD"
+python -m hyperloom session state "$SD"
 ```
 
 See [Hyperloom operator scripts](operator-scripts.md) for the full set of

@@ -15,7 +15,7 @@ from typing import Any
 from hyperloom.common.coerce import to_int
 
 # Single source of truth for --model (path OR HF repo id) -> local dir.
-from hyperloom.common.model_paths import resolve_local_model_dir  # noqa: F401
+from hyperloom.common.model_paths import resolve_local_model_dir
 
 
 _MAXPOS_CONFIG_KEYS = (
@@ -147,6 +147,52 @@ def _model_moe_runner_requires_aiter(model_path: str) -> bool:
         if any(_is_quark_mx_fp4_entry(entry) for entry in entries):
             return True
     return False
+
+
+def _model_is_moe(model_path: str) -> bool:
+    """Best-effort detect a Mixture-of-Experts model from config.json."""
+    data = _load_model_config_dict(model_path)
+    if data is None:
+        return False
+    candidates = [data]
+    nested = data.get("text_config")
+    if isinstance(nested, dict):
+        candidates.append(nested)
+    expert_keys = ("num_experts", "num_local_experts", "n_routed_experts")
+    for cfg in candidates:
+        for key in expert_keys:
+            val = cfg.get(key)
+            if isinstance(val, bool):
+                continue
+            if isinstance(val, int) and val > 1:
+                return True
+        if cfg.get("moe_intermediate_size"):
+            return True
+        if "moe" in str(cfg.get("model_type") or "").lower():
+            return True
+        if any("moe" in arch.lower() for arch in _config_architectures(cfg)):
+            return True
+    return False
+
+
+def model_supports_aiter_ck_fused_moe(model_path: str, tp: int) -> bool:
+    """Whether aiter's CK fused-MoE can serve this checkpoint at this TP."""
+    if not _model_is_moe(model_path):
+        return True
+    data = _load_model_config_dict(model_path)
+    if data is None:
+        return True
+    candidates = [data]
+    nested = data.get("text_config")
+    if isinstance(nested, dict):
+        candidates.append(nested)
+    for cfg in candidates:
+        size = cfg.get("moe_intermediate_size")
+        if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
+            continue
+        shards = max(1, int(tp or 1))
+        return (size // shards) % 128 == 0
+    return True
 
 
 def _model_declared_quant_method(model_path: str) -> str:
@@ -301,20 +347,6 @@ def _fp8_is_per_channel_per_token(model_path: str) -> bool:
         return False
     # Only confirmed per-channel weights benefit; undeterminable -> decline.
     return _fp8_weight_scale_is_per_channel(model_path) is True
-
-
-def _fp8_is_block_scale(model_path: str) -> bool:
-    """True when a serialized FP8 checkpoint uses block-scale quantization."""
-    data = _load_model_config_dict(model_path)
-    if not isinstance(data, dict):
-        return False
-    qc = data.get("quantization_config")
-    if not isinstance(qc, dict):
-        return False
-    if str(qc.get("quant_method") or "").strip().lower() != _FP8_QUANT_METHOD:
-        return False
-    # Require a non-empty weight_block_size.
-    return bool(qc.get("weight_block_size"))
 
 
 _MLA_KEYS = ("kv_lora_rank", "qk_rope_head_dim", "qk_nope_head_dim", "q_lora_rank")

@@ -1,13 +1,6 @@
-"""Path A feedback-fidelity tests (A1 inbox formatter / A2 get_recent_outcomes / A3 run_action_now inline)."""
+"""Path A feedback-fidelity tests (A1 inbox formatter / A2 get_recent_outcomes)."""
 
 from __future__ import annotations
-
-import asyncio
-import hashlib
-import json
-from concurrent.futures import CancelledError as FuturesCancelledError
-from dataclasses import asdict
-from unittest.mock import AsyncMock
 
 import pytest
 
@@ -17,13 +10,9 @@ from hyperloom.orchestrator.roles.mcp_context_tools import (
     CONTEXT_TOOL_SPECS,
     ContextProvider,
 )
-from hyperloom.orchestrator.loop.coordinator import (
-    Coordinator,
-    _first_present,
-    _format_inbox_event,
-)
+from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.conversation import _first_present, _format_inbox_event
 from hyperloom.orchestrator.bus.message_bus import Message
-from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext, SubAgentResult
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 
 
@@ -122,10 +111,9 @@ def session_dir(tmp_path, monkeypatch):
 # A2 — get_recent_outcomes tool + reader
 def test_get_recent_outcomes_tool_is_registered():
     assert "get_recent_outcomes" in CONTEXT_TOOL_NAMES
-    assert "run_action_now" in CONTEXT_TOOL_NAMES
+    assert "run_action_now" not in CONTEXT_TOOL_NAMES
     spec_methods = {spec[0]: spec[3] for spec in CONTEXT_TOOL_SPECS}
     assert spec_methods["get_recent_outcomes"] == "recent_outcomes"
-    assert spec_methods["run_action_now"] == "run_action_now"
 
 
 def test_context_provider_recent_outcomes_not_wired_message():
@@ -167,7 +155,7 @@ async def test_recent_outcomes_reader_projects_delegated_results(session_dir):
                 {"note": "ignored_obs"},
             )
         )
-        out = c._context_recent_outcomes_reader(top_k=5)
+        out = c.conversation._context_recent_outcomes_reader(top_k=5)
         assert "Recent action outcomes" in out
         assert "kind='explore'" in out
         assert "gain=4.0" in out
@@ -181,254 +169,9 @@ async def test_recent_outcomes_reader_projects_delegated_results(session_dir):
 async def test_recent_outcomes_reader_empty(session_dir):
     c = _silent_coordinator(session_dir)
     try:
-        assert "no recent outcomes" in c._context_recent_outcomes_reader()
+        assert "no recent outcomes" in c.conversation._context_recent_outcomes_reader()
     finally:
         await c.stop()
-
-
-# A3 — run_action_now inline fast-action
-@pytest.mark.asyncio
-async def test_inline_whitelist_picks_lane_light_registered_actions(session_dir):
-    c = _silent_coordinator(session_dir)
-    try:
-
-        async def _stub(ctx: RunnerContext) -> dict:
-            return {"status": "ok"}
-
-        # Register an executor so target_analysis qualifies for the whitelist.
-        c.sub.register_executor("target_analysis", _stub)
-        wl = c._inline_action_whitelist()
-        assert "target_analysis" in wl
-        # Heavy, lane-holding actions never qualify.
-        assert "explore" not in wl
-        assert "kernel_opt" not in wl
-        # Deny-listed kinds are excluded even if lane-light.
-        assert "report" not in wl
-        assert "session_breakdown" not in wl
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_run_action_now_sync_disabled_by_flag(session_dir, monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_INLINE_FAST_ACTIONS", "0")
-    c = _silent_coordinator(session_dir)
-    try:
-        out = c._run_action_now_sync("target_analysis", {})
-        assert "disabled" in out
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_run_action_now_sync_rejects_non_whitelisted(session_dir):
-    c = _silent_coordinator(session_dir)
-    try:
-        out = c._run_action_now_sync("explore", {})
-        assert "not inline-eligible" in out
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_run_action_now_happy_path_emits_delegated_result(
-    session_dir,
-    monkeypatch,
-):
-    c = _silent_coordinator(session_dir)
-    try:
-        ran = {"calls": 0}
-
-        async def _stub(ctx: RunnerContext) -> dict:
-            ran["calls"] += 1
-            return {"status": "ok", "gain_pct": 1.5}
-
-        c.sub.register_executor("inline_probe", _stub)
-        # Stub the whitelist + PolicyGate to focus on inline mechanics.
-        monkeypatch.setattr(
-            c.dispatcher,
-            "_inline_action_whitelist",
-            lambda: frozenset({"inline_probe"}),
-        )
-        monkeypatch.setattr(c.policy, "validate_intent", lambda *a, **k: None)
-        monkeypatch.setattr(
-            c.dispatcher,
-            "_sequence_denial_for_action",
-            lambda *a, **k: None,
-        )
-
-        out = await c._run_action_now("inline_probe", {"p": 1})
-        repeated = await c._run_action_now("inline_probe", {"p": 1})
-        assert repeated.split(" topic=", 1)[-1] == out.split(" topic=", 1)[-1]
-        assert ran["calls"] == 1
-        assert not c.dispatcher._executions and not c.dispatcher._inflight_actions
-        assert "inline run complete" in out
-        assert "state='succeeded'" in out
-        assert "gain=1.5" in out
-
-        events = await c.bus.tail(topic="delegated_result")
-        assert len(events) == 1
-        last = events[-1]
-        assert last.payload.get("inline") is True
-        assert last.payload.get("kind") == "inline_probe"
-        assert last.payload.get("state") == "succeeded"
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("state", ["queued", "running", "succeeded", "failed", "cancelled"])
-@pytest.mark.parametrize("has_payload", [False, True])
-async def test_inline_existing_task_reuses_terminal_without_execution(session_dir, monkeypatch, state, has_payload):
-    c = _silent_coordinator(session_dir)
-    try:
-        params = {"query": "same"}
-        monkeypatch.setattr(c.dispatcher, "_inline_action_denial", AsyncMock(return_value=None))
-        monkeypatch.setattr(c.dispatcher, "_registry_lanes_ttl", lambda _kind: ([], 60))
-        execute = AsyncMock(return_value={"status": "ok", "gain_pct": 1.5})
-        c.sub.register_executor("inline_probe", execute)
-        fingerprint = hashlib.sha1(json.dumps(params, sort_keys=True).encode(), usedforsecurity=False).hexdigest()[:10]
-        task = await c.tasks.create(
-            kind="inline_probe",
-            params=params,
-            idempotency_key=f"inline:orchestration:inline_probe:t{int(c.shared_state.tick or 0)}:{fingerprint}",
-        )
-        stored_result = SubAgentResult(task.task_id, state, {"status": "ok", "gain_pct": 7.5})
-        if state != "queued":
-            await c.tasks.transition(task.task_id, "running")
-        if state not in ("queued", "running"):
-            evidence = {"outcome": asdict(stored_result), "cleanup_confirmed": True} if has_payload else {}
-            await c.tasks.transition(task.task_id, state, evidence=evidence)
-        out = await c._run_action_now("inline_probe", params)
-        assert execute.await_count == int(state == "queued")
-        assert not c.dispatcher._executions and not c.dispatcher._inflight_actions
-        assert not await c.locks.lane_holders()
-        events = await c.bus.tail(topic="delegated_result")
-        assert len(events) == int(state == "queued")
-        if state == "running":
-            assert "already 'running'" in out
-        elif state != "queued":
-            assert state in out
-            if has_payload:
-                assert "gain=7.5" in out
-            else:
-                assert "no stored result payload" in out
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("error", [None, ValueError("executor failed"), FuturesCancelledError("stop")])
-async def test_inline_repeated_outcome_does_not_rerun(session_dir, monkeypatch, error):
-    c = _silent_coordinator(session_dir)
-    try:
-        monkeypatch.setattr(c.dispatcher, "_inline_action_denial", AsyncMock(return_value=None))
-        monkeypatch.setattr(c.dispatcher, "_registry_lanes_ttl", lambda _kind: ([], 60))
-        execute = AsyncMock(side_effect=error, return_value={"status": "ok", "gain_pct": 1.5})
-        c.sub.register_executor("inline_probe", execute)
-        first = await c._run_action_now("inline_probe", {})
-        second = await c._run_action_now("inline_probe", {})
-        assert second.split(" topic=", 1)[-1] == first.split(" topic=", 1)[-1]
-        assert execute.await_count == 1
-        assert len(await c.bus.tail(topic="delegated_result")) == 1
-        assert not c.dispatcher._executions and not c.dispatcher._inflight_actions
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_inline_unconfirmed_terminal_is_diagnostic_only(session_dir, monkeypatch):
-    c = _silent_coordinator(session_dir)
-    try:
-        monkeypatch.setattr(c.dispatcher, "_inline_action_denial", AsyncMock(return_value=None))
-        monkeypatch.setattr(c.dispatcher, "_registry_lanes_ttl", lambda _kind: ([], 60))
-        task = await c.tasks.create(
-            kind="inline_probe", params={}, idempotency_key="inline:orchestration:inline_probe:t0:bf21a9e8fb"
-        )
-        await c.tasks.transition(task.task_id, "running")
-        result = SubAgentResult(task.task_id, "succeeded", {"status": "ok", "decision": "KEEP"})
-        await c.tasks.transition(
-            task.task_id, "succeeded", evidence={"outcome": asdict(result), "cleanup_confirmed": False}
-        )
-        execute = AsyncMock()
-        c.sub.register_executor("inline_probe", execute)
-        out = await c._run_action_now("inline_probe", {})
-        assert "cleanup unconfirmed" in out
-        assert "diagnostic only" in out
-        assert execute.await_count == 0
-        assert not await c.bus.tail(topic="delegated_result")
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_run_action_now_calls_sequence_denial_with_single_arg(
-    session_dir,
-    monkeypatch,
-):
-    """``_run_action_now`` must call ``_sequence_denial_for_action`` with only ``action_name``; this drives the real 1-arg signature."""
-    c = _silent_coordinator(session_dir)
-    try:
-
-        async def _stub(ctx: RunnerContext) -> dict:
-            return {"status": "ok", "gain_pct": 0.0}
-
-        c.sub.register_executor("inline_probe", _stub)
-        monkeypatch.setattr(
-            c.dispatcher,
-            "_inline_action_whitelist",
-            lambda: frozenset({"inline_probe"}),
-        )
-        monkeypatch.setattr(c.policy, "validate_intent", lambda *a, **k: None)
-        # Leave _sequence_denial_for_action unstubbed to exercise its real signature.
-        c.shared_state.baseline_tput = 100.0
-
-        out = await c._run_action_now("inline_probe", {"p": 1})
-        assert "inline run complete" in out
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_run_action_now_sync_bridges_to_coordinator_loop(
-    session_dir,
-    monkeypatch,
-):
-    """The sync bridge marshals the coroutine onto the captured coordinator loop and returns its rendered result."""
-    c = _silent_coordinator(session_dir)
-    try:
-
-        async def _stub(ctx: RunnerContext) -> dict:
-            return {"status": "ok"}
-
-        c.sub.register_executor("inline_probe", _stub)
-        monkeypatch.setattr(
-            c.dispatcher,
-            "_inline_action_whitelist",
-            lambda: frozenset({"inline_probe"}),
-        )
-        monkeypatch.setattr(c.policy, "validate_intent", lambda *a, **k: None)
-        monkeypatch.setattr(
-            c.dispatcher,
-            "_sequence_denial_for_action",
-            lambda *a, **k: None,
-        )
-        # Capture the running loop the way Coordinator.run() does.
-        c._coordinator_loop = asyncio.get_running_loop()
-
-        # Run the blocking sync bridge in a worker thread so it can wait on this loop.
-        out = await asyncio.to_thread(
-            c._run_action_now_sync,
-            "inline_probe",
-            {},
-        )
-        assert "inline run complete" in out
-        assert "state='succeeded'" in out
-    finally:
-        await c.stop()
-
-
-# Stage 2 additions — inbox flatten/defang, agent routing, artifact refs
 
 
 def _failed_pvo_result(n_failures: int = 2):
@@ -626,7 +369,7 @@ async def test_compose_prompt_orchestration_receives_failure_rows(session_dir):
                 },
             )
         )
-        prompt = await c._compose_prompt("orchestration")
+        prompt = await c.conversation.compose_prompt("orchestration")
         assert "failure:" in prompt
     finally:
         await c.stop()
@@ -660,7 +403,7 @@ async def test_compose_prompt_critic_does_not_receive_failure_rows(session_dir):
                 },
             )
         )
-        prompt = await c._compose_prompt("critic")
+        prompt = await c.conversation.compose_prompt("critic")
         assert "failure:" not in prompt
     finally:
         await c.stop()
@@ -699,7 +442,7 @@ def test_format_variant_line_ws_and_log_appear_with_real_task_id():
 
 
 def test_killed_overtime_enters_failures_and_mints_gap():
-    """_record_explore_variant_failures writes to failures[] and last_action_failures; _extract_gaps_from_attempts then
+    """record_explore_variant_failures writes to failures[] and last_action_failures; _extract_gaps_from_attempts then
     produces a #fail:explore:killed_overtime gap.
     """
     from dataclasses import dataclass, field as dc_field
@@ -735,7 +478,7 @@ def test_killed_overtime_enters_failures_and_mints_gap():
             }
         ],
     }
-    c._record_explore_variant_failures(task=task, result=result)
+    c.gap_refresh.record_explore_variant_failures(task=task, result=result)
 
     # 1. Failure evidence was recorded.
     assert len(c.shared_state.failures) == 1
@@ -749,7 +492,7 @@ def test_killed_overtime_enters_failures_and_mints_gap():
     assert laf["error_class"] == "killed_overtime"
 
     # 3. _extract_gaps_from_attempts mints a gap with the expected canonical_id.
-    gaps = c._extract_gaps_from_attempts()
+    gaps = c.gap_refresh._extract_gaps_from_attempts(c.recipe_journal.workload_canonical_id())
     cids = [g["canonical_id"] for g in gaps]
     assert any("killed_overtime" in cid for cid in cids), f"Expected a killed_overtime gap, got: {cids}"
 
@@ -788,14 +531,10 @@ def test_short_session_reloop_boundary(monkeypatch, benchmark_timeout, expected_
         monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", benchmark_timeout)
     monkeypatch.delenv("INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC", raising=False)
     remaining_sec = expected_floor + remaining_offset
-    reloop, ev = ps.should_reloop_to_explore(
-        st,
-        now_unix=start_unix + 7200 - remaining_sec,
-        min_remaining_sec=7200,
-    )
+    target, _reason, ev = ps.compute_next_phase(st, now_unix=start_unix + 7200 - remaining_sec)
 
     assert ev["min_remaining_sec_effective"] == expected_floor
-    assert reloop is (remaining_offset >= 0), ev
+    assert (target == ps.PHASE_FRAMEWORK_AGENT) is (remaining_offset >= 0), ev
     if remaining_offset < 0:
         assert ev["reloop_blocked"] == "insufficient_remaining"
         assert ev["session_remaining_seconds"] == remaining_sec

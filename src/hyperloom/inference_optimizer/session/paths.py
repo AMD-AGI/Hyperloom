@@ -17,8 +17,6 @@ log = logging.getLogger(__name__)
 
 DEFAULT_SESSION_DIR = Path("/workspace/hyperloom")
 ENV_USER_DATA_PATH = "USER_DATA_PATH"
-#: Mirrored verbatim in agents/kernel/tools/_paths.py and agents/framework/kb.py,
-#: which cannot import this module. Keep the three in step.
 POD_LOCAL_WORKSPACE = Path("/workspace")
 ENV_OVERRIDE_ASSET_ROOT = "INFERENCE_OPTIMIZER_ASSET_ROOT"
 ENV_CURRENT_SESSION_DIR = "INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR"
@@ -165,9 +163,7 @@ def asset_system_prompts_dir() -> Path:
     """Return the directory of shipped agent system prompts."""
     if os.environ.get(ENV_OVERRIDE_ASSET_ROOT):
         return asset_root() / "orchestrator" / "prompts"
-    import hyperloom.orchestrator.prompts as _prompts_pkg
-
-    return Path(_prompts_pkg.__file__).resolve().parent
+    return PACKAGE_ROOT.parent / "orchestrator" / "prompts"
 
 
 def asset_prompt_references_dir() -> Path:

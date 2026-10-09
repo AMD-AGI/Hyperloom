@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""``hyperloom.inference_optimizer.multi_node`` — single-entry sandbox CLI driving one handed-over cluster."""
+"""``hyperloom multi-node`` — single-entry sandbox CLI driving one handed-over cluster."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ import base64
 import json
 import os
 import shlex
-import sys
 import tempfile
 import time
 from collections.abc import Callable
@@ -376,8 +375,8 @@ def install_geak_on_pods_best_effort() -> int:
 # Subcommand: bootstrap
 def cmd_bootstrap(args: argparse.Namespace) -> int:
     """Run the BYOI bootstrap script inside the RayJob via Ray Dashboard REST."""
-    # Only head_pod_ip: the Ray Dashboard client addresses the head pod directly, and rayjob_id no longer has a writer
-    # now that the platform owns creation -- requiring it rejected every handed-over cluster.
+    # Only head_pod_ip: the Ray Dashboard client addresses the head pod directly, and a cluster the platform
+    # handed over carries no rayjob_id.
     state = _require_state("head_pod_ip")
 
     if args.script:
@@ -481,24 +480,39 @@ def _read_pod_script(name: str) -> str:
     return p.read_text(encoding="utf-8")
 
 
-def _strip_pod_script_header(body: str) -> str:
-    """Drop shebang and ``from __future__ import annotations`` from a pod script."""
-    lines = body.splitlines()
-    if lines and lines[0].startswith("#!"):
-        lines = lines[1:]
-    lines = [ln for ln in lines if ln.strip() != "from __future__ import annotations"]
-    return "\n".join(lines).strip()
+def _read_jit_cache_core() -> str:
+    """Read the same stdlib-only cache owner used by local patch transactions."""
+    return (Path(__file__).resolve().parents[2] / "common" / "aiter_jit_cache.py").read_text(encoding="utf-8")
 
 
-def _read_bundled_pod_python_script(
-    main: str,
-    *,
-    deps: tuple[str, ...] = ("patch_path_safety.py",),
-) -> str:
-    """Read a pod Python script with stdlib-only dependencies inlined."""
-    chunks = [_strip_pod_script_header(_read_pod_script(dep)) for dep in deps]
-    main_body = _strip_pod_script_header(_read_pod_script(main))
-    return "from __future__ import annotations\n\n" + "\n\n".join(chunks) + "\n\n" + main_body + "\n"
+_KERNEL_NODE_OPS_DEPS = (
+    Path(__file__).resolve().parents[2] / "common" / "aiter_jit_cache.py",
+    _SCRIPTS_DIR / "patch_path_safety.py",
+)
+_LAUNCHER_DEPS = (
+    Path(__file__).parent / "_internal" / "server_args_safety.py",
+    _SCRIPTS_DIR / "sglang_shape_gate.py",
+)
+
+
+def _read_bundled_pod_python_script(main: str, deps: tuple[Path, ...] = _KERNEL_NODE_OPS_DEPS) -> str:
+    """Bundle a pod script with its dependencies registered under their own module names.
+
+    Pods receive one file, so each dependency is registered in ``sys.modules``
+    before the script runs and keeps importing it by name, on the driver and on
+    any Ray worker that deserializes a function closing over it.
+    """
+    chunks = ["import sys, types\n"]
+    for dep in deps:
+        source = dep.read_text(encoding="utf-8")
+        chunks.append(
+            f"_dependency = types.ModuleType({dep.stem!r})\n"
+            f"_dependency.__file__ = {dep.name!r}\n"
+            f"sys.modules[{dep.stem!r}] = _dependency\n"
+            f"exec(compile({source!r}, _dependency.__file__, 'exec'), _dependency.__dict__)\n"
+        )
+    chunks.append(f"exec(compile({_read_pod_script(main)!r}, {main!r}, 'exec'), globals())\n")
+    return "".join(chunks)
 
 
 def _build_restart_entrypoint(
@@ -645,7 +659,7 @@ def _build_multinode_launch_entrypoint(
     log_dir: str,
 ) -> str:
     """Compose the head-pod entrypoint that spawns one rank per node via heredoc-embedded launch_multinode.py."""
-    py = _read_pod_script("launch_multinode.py")
+    py = _read_bundled_pod_python_script("launch_multinode.py", _LAUNCHER_DEPS)
     wait_flag = "--no-wait-health" if args.no_wait_health else ""
     try:
         extra_args = prepare_shell_safe_extra_args(
@@ -745,6 +759,21 @@ def _build_multinode_router_entrypoint(
     )
 
 
+def _kernel_patch_pod_files() -> str:
+    """Ship the kernel patch driver and its fixed sibling imports to Ray pods."""
+    return (
+        'cat > "$WORK_DIR/aiter_jit_cache.py" '
+        "<<'__MN_JIT_CACHE_EOF__'\n"
+        f"{_read_jit_cache_core()}__MN_JIT_CACHE_EOF__\n"
+        'cat > "$WORK_DIR/patch_path_safety.py" '
+        "<<'__MN_PPATH_EOF__'\n"
+        f"{_read_pod_script('patch_path_safety.py')}__MN_PPATH_EOF__\n"
+        'cat > "$WORK_DIR/kernel_patch_multinode.py" '
+        "<<'__MN_KPATCH_PY_EOF__'\n"
+        f"{_read_pod_script('kernel_patch_multinode.py')}__MN_KPATCH_PY_EOF__\n"
+    )
+
+
 def _build_multinode_apply_patch_entrypoint(
     target_path: str,
     patch_b64: str,
@@ -754,16 +783,9 @@ def _build_multinode_apply_patch_entrypoint(
     jit_build_dir: str = "",
 ) -> str:
     """Compose the head-pod entrypoint that fans out a kernel patch to every pod via heredoc-embedded kernel_patch_multinode.py."""
-    pps = _read_pod_script("patch_path_safety.py")
-    py = _read_pod_script("kernel_patch_multinode.py")
     return (
         f"{_MN_ENTRYPOINT_PREAMBLE}"
-        f'cat > "$WORK_DIR/patch_path_safety.py" '
-        f"<<'__MN_PPATH_EOF__'\n"
-        f"{pps}__MN_PPATH_EOF__\n"
-        f'cat > "$WORK_DIR/kernel_patch_multinode.py" '
-        f"<<'__MN_KPATCH_PY_EOF__'\n"
-        f"{py}__MN_KPATCH_PY_EOF__\n"
+        f"{_kernel_patch_pod_files()}"
         f'python3 "$WORK_DIR/kernel_patch_multinode.py" apply '
         f"--target-path {shlex.quote(str(target_path))} "
         f"--patch-b64 {shlex.quote(str(patch_b64))} "
@@ -781,16 +803,9 @@ def _build_multinode_revert_patch_entrypoint(
     records_json: str = "",
 ) -> str:
     """Compose the head-pod entrypoint that fans out a revert via heredoc-embedded kernel_patch_multinode.py (``backup_map_json`` from the matching apply)."""
-    pps = _read_pod_script("patch_path_safety.py")
-    py = _read_pod_script("kernel_patch_multinode.py")
     return (
         f"{_MN_ENTRYPOINT_PREAMBLE}"
-        f'cat > "$WORK_DIR/patch_path_safety.py" '
-        f"<<'__MN_PPATH_EOF__'\n"
-        f"{pps}__MN_PPATH_EOF__\n"
-        f'cat > "$WORK_DIR/kernel_patch_multinode.py" '
-        f"<<'__MN_KPATCH_PY_EOF__'\n"
-        f"{py}__MN_KPATCH_PY_EOF__\n"
+        f"{_kernel_patch_pod_files()}"
         f'python3 "$WORK_DIR/kernel_patch_multinode.py" revert '
         f"--target-path {shlex.quote(str(target_path))} "
         f"--records-json {shlex.quote(str(records_json))} "
@@ -804,16 +819,9 @@ def _build_multinode_finalize_patch_entrypoint(
     timeout_sec: int,
 ) -> str:
     """Compose the head-pod entrypoint that finalizes accepted backups."""
-    pps = _read_pod_script("patch_path_safety.py")
-    py = _read_pod_script("kernel_patch_multinode.py")
     return (
         f"{_MN_ENTRYPOINT_PREAMBLE}"
-        f'cat > "$WORK_DIR/patch_path_safety.py" '
-        f"<<'__MN_PPATH_EOF__'\n"
-        f"{pps}__MN_PPATH_EOF__\n"
-        f'cat > "$WORK_DIR/kernel_patch_multinode.py" '
-        f"<<'__MN_KPATCH_PY_EOF__'\n"
-        f"{py}__MN_KPATCH_PY_EOF__\n"
+        f"{_kernel_patch_pod_files()}"
         f'python3 "$WORK_DIR/kernel_patch_multinode.py" finalize '
         f"--records-json {shlex.quote(str(records_json))} "
         f"--timeout-sec {int(timeout_sec)}"
@@ -823,12 +831,15 @@ def _build_multinode_finalize_patch_entrypoint(
 def _build_multinode_apply_tracelens_patch_entrypoint(
     tracelens_root: str,
     sglang_version_pin: str,
+    patch_set: str = "",
 ) -> str:
     """Compose the head-pod entrypoint fanning out the TraceLens patch set via heredoc-embedded apply_tracelens_patch_multinode.py."""
     py = _read_pod_script("apply_tracelens_patch_multinode.py")
-    pin_arg = ""
+    extra_args = ""
     if sglang_version_pin:
-        pin_arg = f" --sglang-version-pin {shlex.quote(str(sglang_version_pin))}"
+        extra_args += f" --sglang-version-pin {shlex.quote(str(sglang_version_pin))}"
+    if patch_set:
+        extra_args += f" --patch-set {shlex.quote(str(patch_set))}"
     return (
         f"{_MN_ENTRYPOINT_PREAMBLE}"
         f'cat > "$WORK_DIR/apply_tracelens_patch_multinode.py" '
@@ -836,7 +847,7 @@ def _build_multinode_apply_tracelens_patch_entrypoint(
         f"{py}__MN_TLPATCH_PY_EOF__\n"
         f'python3 "$WORK_DIR/apply_tracelens_patch_multinode.py" '
         f"--tracelens-root {shlex.quote(str(tracelens_root))}"
-        f"{pin_arg}"
+        f"{extra_args}"
     )
 
 
@@ -900,21 +911,44 @@ def _extract_pod_json(logs: str) -> dict | None:
     return None
 
 
-def _forward_runtime_env() -> dict[str, Any] | None:
-    """Build the Ray runtime_env carrying per-round env overrides to every rank."""
-    raw = os.environ.get("HYPERLOOM_MN_EXTRA_FWD_ENV", "").strip()
-    if not raw:
-        return None
-    try:
-        parsed = json.loads(raw)
-    except (ValueError, TypeError):
-        warn("HYPERLOOM_MN_EXTRA_FWD_ENV is not valid JSON; skipping per-variant env forwarding")
-        return None
-    if not isinstance(parsed, dict):
-        warn("HYPERLOOM_MN_EXTRA_FWD_ENV is not a JSON object; skipping per-variant env forwarding")
-        return None
+def per_round_forward_overrides() -> dict[str, Any]:
+    """Parse the per-round env control vars into ``{"set": {...}, "unset": [...]}``.
 
-    env_vars = filter_forward_env({str(k): str(v) for k, v in parsed.items()}, warn_on_drop=True)
+    Both multi-node backends launch from these, so they are parsed once here rather than
+    once per backend. What each backend then does with them differs: the RayJob path
+    filters the set through :func:`filter_forward_env`, while the Infera SSH path forwards
+    it verbatim.
+    """
+    raw = os.environ.get("HYPERLOOM_MN_EXTRA_FWD_ENV", "").strip()
+    overrides: dict[str, str] = {}
+    if raw:
+        try:
+            parsed = json.loads(raw)
+        except (ValueError, TypeError):
+            warn("HYPERLOOM_MN_EXTRA_FWD_ENV is not valid JSON; skipping per-variant env forwarding")
+            parsed = None
+        if isinstance(parsed, dict):
+            overrides = {str(k): str(v) for k, v in parsed.items()}
+        elif parsed is not None:
+            warn("HYPERLOOM_MN_EXTRA_FWD_ENV is not a JSON object; skipping per-variant env forwarding")
+
+    raw_unset = os.environ.get("HYPERLOOM_MN_UNSET_FWD_ENV", "").strip()
+    unset: list[str] = []
+    if raw_unset:
+        try:
+            parsed_unset = json.loads(raw_unset)
+        except (ValueError, TypeError):
+            warn("HYPERLOOM_MN_UNSET_FWD_ENV is not valid JSON; skipping per-variant env unsets")
+            parsed_unset = None
+        if isinstance(parsed_unset, list):
+            unset = sorted({str(k).strip() for k in parsed_unset if str(k).strip()})
+
+    return {"set": overrides, "unset": unset}
+
+
+def _forward_runtime_env(overrides: dict[str, Any]) -> dict[str, Any] | None:
+    """Build the Ray runtime_env carrying per-round env overrides to every rank."""
+    env_vars = filter_forward_env(dict(overrides.get("set") or {}), warn_on_drop=True)
     if not env_vars:
         return None
     info(f"forwarding per-round env to all ranks: {sorted(env_vars)}")
@@ -1090,7 +1124,7 @@ def cmd_finalize_patch(args: argparse.Namespace) -> int:
         args.records_json,
         args.timeout_sec,
     )
-    rc, parsed, _logs = _submit_and_collect_pod_json(
+    rc, parsed, logs = _submit_and_collect_pod_json(
         state,
         entrypoint,
         label="finalize-patch",
@@ -1098,6 +1132,9 @@ def cmd_finalize_patch(args: argparse.Namespace) -> int:
         poll_timeout=_poll_timeout_from_args(args),
     )
     if parsed is None:
+        err("finalize-patch: could not parse per-pod JSON from dashboard logs")
+        if args.print_logs:
+            print(logs)
         return EXIT_TRANSIENT
     print(json.dumps(parsed, indent=2, sort_keys=True))
     return rc
@@ -1124,11 +1161,16 @@ def cmd_apply_tracelens_patch(args: argparse.Namespace) -> int:
         )
         return EXIT_CONFIG_ERROR
 
-    info(f"apply-tracelens-patch: tracelens_root={tracelens_root!r} version_pin={args.sglang_version_pin!r}")
+    patch_set = getattr(args, "patch_set", None) or ""
+    info(
+        f"apply-tracelens-patch: tracelens_root={tracelens_root!r} version_pin={args.sglang_version_pin!r} "
+        f"patch_set={patch_set or 'pod-gated'!r}"
+    )
 
     entrypoint = _build_multinode_apply_tracelens_patch_entrypoint(
         tracelens_root,
         args.sglang_version_pin or "",
+        patch_set,
     )
     rc, parsed, logs = _submit_and_collect_pod_json(
         state,
@@ -1200,8 +1242,17 @@ def _resume_probe_timeout_s() -> int:
         return _DEFAULT_RESUME_PROBE_TIMEOUT_S
 
 
-def _rayjob_topology_fingerprint(args: argparse.Namespace, nnodes: int) -> dict[str, Any]:
-    """Every field that changes what the RayJob launcher spawns, as one record."""
+def _rayjob_topology_fingerprint(
+    args: argparse.Namespace,
+    nnodes: int,
+    forward_env: dict[str, str],
+) -> dict[str, Any]:
+    """Every field that changes what the RayJob launcher spawns, as one record.
+
+    ``forward_env`` is the runtime_env the launch submission carries, so the servers run
+    with it: a round that changes only these would otherwise resume the prior cluster and
+    benchmark the previous environment while reporting the new one.
+    """
     pd_mode = (getattr(args, "pd_mode", "") or "aggregated").lower()
     fingerprint: dict[str, Any] = {
         "framework": str(args.framework),
@@ -1211,6 +1262,7 @@ def _rayjob_topology_fingerprint(args: argparse.Namespace, nnodes: int) -> dict[
         "nnodes": int(nnodes),
         "pd_mode": pd_mode,
         "extra_args": _normalize_extra_args(getattr(args, "extra_args", "")),
+        "forward_env": dict(sorted(forward_env.items())),
     }
     if pd_mode == "disaggregated":
         # Only meaningful under PD; leaving them out when aggregated keeps a stale value from an earlier PD run out of
@@ -1241,6 +1293,21 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
     except ServerArgsRejected as exc:
         err(str(exc))
         return EXIT_CONFIG_ERROR
+    if (getattr(args, "pd_mode", "") or "").lower() == "disaggregated":
+        # launch_multinode.py has no per-role EP or server args; only the infera launcher does.
+        per_role = [
+            flag
+            for flag, value in (
+                ("--pd-prefill-ep", getattr(args, "pd_prefill_ep", 0)),
+                ("--pd-decode-ep", getattr(args, "pd_decode_ep", 0)),
+                ("--pd-prefill-extra-args", getattr(args, "pd_prefill_extra_args", "")),
+                ("--pd-decode-extra-args", getattr(args, "pd_decode_extra_args", "")),
+            )
+            if value
+        ]
+        if per_role:
+            err(f"restart-server: {', '.join(per_role)} are supported on the infera backend only, not rayjob")
+            return EXIT_CONFIG_ERROR
     state = _require_state("head_pod_ip")
     nnodes = int(state.get("nodes") or 1)
 
@@ -1270,7 +1337,10 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
         prev_sub = str(state.get("last_restart_submission_id") or "").strip()
         # The whole topology record must match. extra_args is normalized on both sides so whitespace alone does not
         # miss the fast path, and it is part of the record because it carries every variant flag.
-        topology = _rayjob_topology_fingerprint(args, nnodes)
+        # Collected once: the same runtime_env decides both whether the prior launch can be resumed and what the
+        # launch below actually sends.
+        runtime_env = _forward_runtime_env(per_round_forward_overrides())
+        topology = _rayjob_topology_fingerprint(args, nnodes, dict((runtime_env or {}).get("env_vars") or {}))
         prev_match = bool(prev_sub) and state.get("last_restart_topology") == topology
         if resume_enabled and prev_match:
             _prev_status = ""
@@ -1320,7 +1390,7 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
         with _ray_dashboard_client(state) as ray:
             # Launch new servers (skipped when resuming a RUNNING launch).
             if not launch_sub:
-                launch_sub = ray.submit_job(launch_ep, runtime_env=_forward_runtime_env())
+                launch_sub = ray.submit_job(launch_ep, runtime_env=runtime_env)
                 info(f"launch submission_id={launch_sub} (driver waits for actors, then returns; servers detached)")
 
             # Early checkpoint: persist the launch identity + config before the (potentially long) _short_poll, so a
@@ -1592,7 +1662,7 @@ def _add_common_poll_flags(p: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     """Build the top-level argparse parser with every subcommand."""
     p = argparse.ArgumentParser(
-        prog="python3 -m hyperloom.inference_optimizer.multi_node",
+        prog="hyperloom multi-node",
         description=(
             "Drive the multi-node cluster the platform provisioned and handed over "
             "via HYPERLOOM_MN_EXT_*. State persists in $MULTI_NODE_STATE_FILE."
@@ -1798,6 +1868,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp.add_argument("--records-json", required=True)
     sp.add_argument("--timeout-sec", type=int, default=60)
+    sp.add_argument("--print-logs", action="store_true", help="dump full dashboard job_logs on parse failure")
     _add_common_poll_flags(sp)
     sp.set_defaults(func=cmd_finalize_patch)
 
@@ -1822,6 +1893,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--sglang-version-pin",
         default=None,
         help=("advisory pin (e.g. '0.5.11'); logged on mismatch with the sglang installed in the pod. Optional."),
+    )
+    sp.add_argument(
+        "--patch-set",
+        choices=("roofline", "graph-capture"),
+        default=None,
+        help=(
+            "patch set every pod applies (the controller's resolved SGLang shape mode). "
+            "Optional; when omitted each pod gates on its own SGLang version."
+        ),
     )
     sp.add_argument("--print-logs", action="store_true", help="dump full dashboard job_logs on parse failure")
     _add_common_poll_flags(sp)
@@ -1909,7 +1989,3 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:  # noqa: BLE001
         err(f"{type(exc).__name__}: {exc}")
         return EXIT_TRANSIENT
-
-
-if __name__ == "__main__":
-    sys.exit(main())

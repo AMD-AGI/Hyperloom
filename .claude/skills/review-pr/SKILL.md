@@ -19,12 +19,20 @@ observation is to relabel it, it fails the bar and goes.
 
 The bar is one question: **if this is not changed, is the current behaviour wrong?**
 
-Blocking means one of two things, and the repo treats them as equal:
+Blocking means one of three things, and the repo treats them as equal:
 
 | Kind | What counts |
 |---|---|
 | Wrong behaviour | correctness, crash, data or precision error, compatibility break, security, performance regression |
 | Desync | an operator-observable change the PR description never states; PR title or description does not match the diff at the current head |
+| Contract violation | the diff breaks a rule `AGENTS.md` states outright, and the finding names both the bullet it breaks and the module in this repo that already owns the concern |
+
+The third kind is the narrow one. "This could be simpler", "I would have put it elsewhere" and
+"consider extracting a helper" are reviewer taste and are deleted like anything else. What
+survives is the case where the repo has already decided — a detour around a path that exists, or
+a concern implemented outside the module that owns it — and the decision is written down where
+both sides can read it. A finding that cannot name the bullet and the owner is taste wearing a
+citation, and it goes.
 
 If there are no blocking issues, say so explicitly. Do not manufacture small ones to fill space.
 
@@ -67,7 +75,7 @@ Keep the `$WORK` it prints. Read `diff.txt` and `body.txt` before going on.
 | `commits.txt` | commit subjects, oldest first; a late commit is where a description goes stale |
 | `base.txt` | merge-base sha — every "is this pre-existing" question is answered against it |
 | `ci.txt` | check runs at the current head: name, conclusion, url |
-| `comments.txt` | existing review and issue comments — do not repeat a point already made |
+| `comments.txt` | existing review and issue comments — do not repeat a point already made (Step 7) |
 | `testfiles.txt` | changed paths under a `tests/` directory |
 | `docfiles.txt` | changed docs, prompts and `.md`/`.rst` paths — empty beside a `src/` change is X3's shape |
 | `openprs.txt` | other open PRs touching the same files — conflicting in-flight work |
@@ -76,7 +84,7 @@ Keep the `$WORK` it prints. Read `diff.txt` and `body.txt` before going on.
 
 Open the index at the top of [`rules.md`](rules.md) and take every row whose trigger matches
 `files.txt` and a skim of `diff.txt`. Write the union of their rule ids into `$WORK/rules.txt`, one
-per line, then read only those bodies. **Never read `rules.md` whole** — it holds 52 rules across 9
+per line, then read only those bodies. **Never read `rules.md` whole** — it holds 53 rules across 9
 families, and a reviewer told to attend to all of them attends to none. Match rows generously: a row
 you are unsure about is taken, never dropped. V1-V6 and X2 are on every list.
 
@@ -121,9 +129,9 @@ A docs-, CI- or test-only diff touches nothing under `src/`: write one
 
 Tiers come from [`references/tiers.md`](references/tiers.md): a table of the backbone files, and
 Q1–Q4 for anything not in it, including new files. Q1b is the one that bites — `Coordinator`
-resolves its 21 collaborators by string through a metaclass `__getattr__`, so a rename passes
-every import check, passes lint, passes collection, and fails only hours into a session when
-that phase is entered. Grep the string, not the symbol.
+holds 24 collaborators as explicit attributes, so a rename passes every import check, passes
+lint, passes collection, and fails only hours into a session when that phase is entered.
+Grep the class name, not just the symbol.
 
 ## Step 4 — Rule checklist
 
@@ -151,7 +159,7 @@ a diff that reads well hides its defects. One line per check into `$WORK/ai_diag
 "clean" alone is not an answer; a reason that names nothing in the diff is not one either.
 
 1. `wiring` — **both directions.** Every first-party import the diff adds resolves against the merge
-   base. Every name-resolved entry (`_COLLAB_MODULES`, `KERNEL_REQUEST_HANDLERS`,
+   base. Every name-resolved entry (`KERNEL_REQUEST_HANDLERS`,
    `ACTION_CATALOGUE`, action-surface names) has a module and class that exist. Then the inverse:
    an added identifier whose head-tree occurrence count is 1 is a writer with no reader; a removed
    caller whose helper survives is a reader with no writer. Both are blocking.
@@ -174,16 +182,24 @@ a diff that reads well hides its defects. One line per check into `$WORK/ai_diag
    handle is not stored, an `await`-less blocking call inside `async def`, a subprocess with no
    timeout and no kill path.
 
-## Step 6 — Free-form pass, then the blind-spot line
+## Step 6 — Free-form pass, then the build-it-again and blind-spot lines
 
 Read the diff as someone who knows this system. Does the approach belong at this layer? Any
 correctness risk the rules missed — a phase entered twice, a resume landing on a state shape the
 new code cannot read, a destructive sweep scoped by pattern rather than by what this run owns, a
 number compared against one another measurement system produced?
 
-Then answer this in full, appended to `$WORK/answers.txt` as a `BLIND:` line: **"Is there any
-correctness risk, resource hazard, or behavioural edge case in this diff that none of Steps 1-5
-caught?"** A bare "no" is not an answer — say what you looked for and did not find. Anything found
+Then two questions, both answered in full rather than assented to.
+
+Append a `BUILD:` line to `$WORK/answers.txt`: **"If none of this code existed, what would you
+build — and does every mechanism this diff adds need to exist?"** Name what you would build, then
+say which of the diff's parts it does not contain. A part that survives that comparison only
+because it is already written is the answer this question exists to catch. Anything found here is
+a `Contract violation` candidate and carries the `AGENTS.md` bullet and the owner module with it,
+or it is taste and stops here.
+
+Append a `BLIND:` line: **"Is there any correctness risk, resource hazard, or behavioural edge
+case in this diff that none of Steps 1-5 caught?"** A bare "no" is not an answer — say what you looked for and did not find. Anything found
 after this point goes on the card marked `-- late finding` rather than back into a finished
 artifact, so that the order the review ran in stays legible.
 
@@ -205,7 +221,9 @@ step.
 
 Attack in this order: is the line added by this PR or pre-existing context around an added line
 (compare against `base.txt`); does the symbol resolve somewhere the diff did not show; is the
-trigger reachable in a real configuration; is the point already made in `comments.txt`.
+trigger reachable in a real configuration; is the point already made in `comments.txt` by anything
+other than an earlier review-pr card. A finding on an earlier card is not "already made": re-verify
+it at the current head, keep it if it still holds, drop it if it was fixed.
 
 Then hand `card.md`, the diff and `base.txt` to a reader who has not seen your reasoning — a second
 agent or a person — with every finding false until defended. `$WORK/independent.txt` takes the same
@@ -286,19 +304,18 @@ itself a review defect.
 
 ## Publishing
 
-Post the conclusion to the PR as an English comment. No Chinese, no emoji, no signature.
+Post the conclusion to the PR in English. No Chinese, no emoji, no signature.
 
 ```bash
-# no blocking issues
-gh pr review <n> --approve --body "<conclusion>"
 # blocking issues
-gh pr comment <n> --body "<conclusion>"
+gh pr review <n> --request-changes --body "<conclusion>"
+# no blocking issues: first dismiss your own earlier CHANGES_REQUESTED review, then
+gh pr comment <n> --body "<conclusion>"$'\n\nLGTM'
 ```
 
-Approve and comment go together in one call when there is nothing blocking; do not ask first. With
-blocking issues, comment only — no approve, no request-changes. Never merge a PR. The no-blocking
-comment still carries the `Checked:` / `Ran:` line so the author sees the depth of the review
-rather than a bare LGTM; it has two parts and stops there.
+Never approve and never merge: both belong to the human reviewer the author brings in after LGTM.
+The clean comment still carries the `Checked:` / `Ran:` line so the author sees the depth of the
+review rather than a bare LGTM; it has two parts and the `LGTM` line, and stops there.
 
 ## Verifying a sub-agent's finding
 

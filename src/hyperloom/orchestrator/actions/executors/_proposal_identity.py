@@ -5,15 +5,17 @@
 
 from __future__ import annotations
 
+import shlex
 from typing import Any, Mapping
 
 from hyperloom.common.coerce import to_str_list
 
-from ._canonical_fingerprint import canonical_fingerprint
+from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
 
 
 __all__ = [
     "coerce_args",
+    "content_fingerprint",
     "controls_of",
     "effective_fingerprint",
     "is_executable",
@@ -22,9 +24,23 @@ __all__ = [
 
 
 def coerce_args(value: Any) -> str:
-    """Coerce a payload ``extra_args`` / ``extra_server_args`` value to a shell-arg string."""
+    """Coerce a payload ``extra_args`` / ``extra_server_args`` value to a shell-arg string.
+
+    A mapping is read as flag -> value: ``True`` (or an empty value) is a bare
+    flag and ``False`` drops it.
+    """
     if isinstance(value, (list, tuple)):
         return " ".join(str(v).strip() for v in value if str(v).strip())
+    if isinstance(value, Mapping):
+        parts: list[str] = []
+        for flag, flag_value in value.items():
+            name = str(flag).strip()
+            if not name or flag_value is False:
+                continue
+            parts.append(name)
+            if flag_value is not True and str(flag_value if flag_value is not None else "").strip():
+                parts.append(shlex.quote(str(flag_value).strip()))
+        return " ".join(parts)
     return str(value or "").strip()
 
 
@@ -91,3 +107,9 @@ def effective_fingerprint(
     if _args_mode_of(base_args_mode) == "replace":
         identity["args_mode"] = "replace"
     return canonical_fingerprint(extra_args, extra_envs, **identity)
+
+
+def content_fingerprint(proposal: Mapping[str, Any]) -> str:
+    """Fingerprint the change a ``proposal_set`` entry or grid row asks for, independent of its name and stack."""
+    fields = normalize_proposal(proposal)
+    return effective_fingerprint(fields["extra_args"], fields["extra_envs"], controls=controls_of(fields))

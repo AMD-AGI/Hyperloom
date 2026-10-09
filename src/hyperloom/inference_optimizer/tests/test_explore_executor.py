@@ -17,10 +17,11 @@ import yaml
 from hyperloom.orchestrator.actions.executors import (
     ExploreExecutor,
 )
-from hyperloom.orchestrator.actions.executors._canonical_fingerprint import (
+from hyperloom.inference_optimizer.canonical_fingerprint import (
     canonical_fingerprint,
 )
 from hyperloom.orchestrator.actions.executors._grid_runner import (
+    GridVariant,
     apply_compatibility_filter,
 )
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
@@ -31,14 +32,15 @@ from hyperloom.orchestrator.actions.stop_attribution import (
     ORCHESTRATOR_CANCELLED_CLASS,
     SESSION_TIME_EXHAUSTED_CLASS,
 )
-from hyperloom.orchestrator.actions.executors._accuracy_gate import (
-    _RUN_EVAL_FALSE_VALUES as _RUN_EVAL_FALSE,
-)
+from hyperloom.orchestrator.actions.executors._launch_evidence import build_launch_evidence
 from hyperloom.orchestrator.actions.executors.explore import (
     _atom_default_grid,
     _default_grid_for_framework,
+    filter_baseline_noop_variants,
+    observed_launch_from_state,
 )
 from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.common.env import is_truthy
 from hyperloom.orchestrator.bus.resource_lock import (
     ResourceLockManager,
     SqliteLeaseBackend,
@@ -46,6 +48,10 @@ from hyperloom.orchestrator.bus.resource_lock import (
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
 from hyperloom.orchestrator.bus.storage import SqliteConnection
+
+
+def _eval_off(value: object) -> bool:
+    return not is_truthy(value, default=True)
 
 
 @pytest.fixture(autouse=True)
@@ -148,6 +154,225 @@ def test_canonical_fingerprint_distinguishes_envs():
         {"VLLM_ROCM_USE_AITER": "1"},
     )
     assert fp_args != fp_args_envs
+
+
+_CANDIDATE = "candidate"
+# Names a flag the observed stack already holds at this value, so the argv half
+# of the gate matches and the verdict turns on env alone.
+_RESTATES_ARGV = "--max-running-requests 512"
+# A knob a stack genuinely varies: the recipe reads it as
+# ``${HICACHE_IO_BACKEND:-direct}``, so both values below are reachable.
+_TUNED_ENV = "HICACHE_IO_BACKEND"
+# The recipe's own env. The stack stamps it whether or not a variant names it,
+# so it rides identically on both sides and the verdict turns on the delta.
+_RECIPE_ENV = {"KV_OFFLOADING": "1"}
+# The argv the base config carries before any variant overlays it.
+_BASE_ARGS_ENV = {"EXTRA_SGLANG_ARGS": "--mem-fraction-static 0.9"}
+
+
+def _stack_env(**changes: str) -> dict[str, str]:
+    """The env the stack stamped: the recipe's, plus its own tuning."""
+    return {**_RECIPE_ENV, **changes}
+
+
+def _stack_config(**changes: object) -> dict[str, object]:
+    """What the running engine resolved, typed as SGLang reports it."""
+    return {"mem_fraction_static": 0.9, "max_running_requests": 512, **changes}
+
+
+def _noop_filter_kwargs(tmp_path: Path, **overrides: object) -> dict:
+    base_yaml = tmp_path / "base.yaml"
+    base_yaml.write_text(
+        yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": {**_RECIPE_ENV, **_BASE_ARGS_ENV}}}),
+        encoding="utf-8",
+    )
+    kwargs = {
+        "framework": "sglang",
+        "base_yaml_path": base_yaml,
+        "base_extra_args": "",
+        "base_extra_envs": {},
+        "base_remove_args": [],
+        "base_unset_envs": [],
+        "base_args_mode": "append",
+        "model_path": None,
+        "gpu_type": None,
+        "benchmark_script": None,
+        "observed_server_config": _stack_config(),
+        "observed_server_env": _stack_env(),
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
+def _variant(args: str = _RESTATES_ARGV, **fields: object) -> GridVariant:
+    return GridVariant(_CANDIDATE, extra_server_args=args, **fields)
+
+
+# Each case is (id, variant, filter overrides). The verdict is the whole
+# expectation: does the launch this variant would produce already match the
+# stack the server is running?
+
+# Everything the variant changes already holds in the running server, so the
+# measurement would re-run the stack.
+_ALREADY_THE_STACK = (
+    (
+        "same_argv_and_env",
+        _variant(extra_envs={_TUNED_ENV: "kernel"}),
+        {"observed_server_env": _stack_env(HICACHE_IO_BACKEND="kernel")},
+    ),
+    (
+        # 3600 and 3600.0 are one value; the engine reports the float.
+        "a_value_the_engine_reports_as_a_float",
+        _variant("--watchdog-timeout 3600"),
+        {"observed_server_config": _stack_config(watchdog_timeout=3600.0)},
+    ),
+)
+
+# The variant changes something the stack does not hold, or the stack is not
+# known to hold it: either way the variant runs.
+_MUST_RUN = (
+    ("different_argv_value", _variant("--max-running-requests 128"), {}),
+    (
+        "different_env_value",
+        _variant(extra_envs={_TUNED_ENV: "direct"}),
+        {"observed_server_env": _stack_env(HICACHE_IO_BACKEND="kernel")},
+    ),
+    (
+        # chaojhou 1: parallelism is compared, not stripped.
+        "different_parallelism_value",
+        _variant("--dp-size 4"),
+        {"observed_server_config": _stack_config(dp_size=8)},
+    ),
+    (
+        # chaojhou 2: a list-valued flag is never judged against the merged config.
+        "multi_value_flag_is_not_comparable",
+        _variant("--cuda-graph-bs 1 2 4 8"),
+        {"observed_server_config": _stack_config(cuda_graph_bs=[1, 2, 4, 8, 16])},
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("variant", "overrides"),
+    [case[1:] for case in _ALREADY_THE_STACK],
+    ids=[case[0] for case in _ALREADY_THE_STACK],
+)
+def test_variant_that_is_already_the_stack_is_dropped(tmp_path, variant, overrides):
+    """The server is already running this launch, so measuring it buys nothing."""
+    kept, dropped = filter_baseline_noop_variants([variant], **_noop_filter_kwargs(tmp_path, **overrides))
+    assert kept == []
+    assert [name for name, _ in dropped] == [_CANDIDATE]
+    assert "baseline noop" in dropped[0][1]
+
+
+@pytest.mark.parametrize(
+    ("variant", "overrides"),
+    [case[1:] for case in _MUST_RUN],
+    ids=[case[0] for case in _MUST_RUN],
+)
+def test_variant_that_is_not_known_to_be_the_stack_is_kept(tmp_path, variant, overrides):
+    """Keep on a real difference, and keep on a guess: only a proven match may drop."""
+    kept, dropped = filter_baseline_noop_variants([variant], **_noop_filter_kwargs(tmp_path, **overrides))
+    assert [gv.name for gv in kept] == [_CANDIDATE]
+    assert dropped == []
+
+
+def test_a_removal_is_never_a_restatement_of_the_stack(tmp_path):
+    """chaojhou 3: the materialized config cannot show a subtraction, so it must not read as a noop.
+
+    ``unset_envs`` also pops the process env at run time, which the probe's
+    YAML never sees; ``remove_args`` leaves no trace in the merged argv.
+    """
+    grid = [
+        GridVariant("removes-an-arg", remove_args=["--enable-dp-attention"]),
+        GridVariant("unsets-an-env", unset_envs=["HIP_FORCE_DEV_KERNARG"]),
+    ]
+    kept, dropped = filter_baseline_noop_variants(grid, **_noop_filter_kwargs(tmp_path))
+    assert [gv.name for gv in kept] == ["removes-an-arg", "unsets-an-env"]
+    assert dropped == []
+
+
+def test_the_engines_own_record_is_what_makes_the_filter_fire(tmp_path):
+    """End to end on the only launch account SGLang gives: the resolved settings it logs.
+
+    No argv is echoed anywhere, so ``observed_server_launch_flags`` stays empty
+    and every earlier form of this gate filtered nothing.
+    """
+    config = tmp_path / "stack.yaml"
+    config.write_text(
+        yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": {**_RECIPE_ENV, **_BASE_ARGS_ENV}}}),
+        encoding="utf-8",
+    )
+    log = tmp_path / "server.log"
+    log.write_text(
+        "[2026-09-21 21:14:33] Attention backend not explicitly specified.\n"
+        "[2026-09-21 21:14:34] server_args="
+        f"{ {'mem_fraction_static': 0.9, 'max_running_requests': 512, 'dp_size': 8}!r}\n",
+        encoding="utf-8",
+    )
+    evidence = build_launch_evidence(config_path=config, actual_server_log=str(log), framework="sglang", slot=tmp_path)
+    assert evidence["observed_server_launch_flags"] == ""
+    assert evidence["observed_server_config"]["max_running_requests"] == 512
+    # The env is stamped from the recipe; the argv key holds the launch command, not an env value.
+    assert evidence["observed_server_env"] == _RECIPE_ENV
+
+    # chaojhou 4: last_baseline is an attempt entry that never carries launch_evidence,
+    # so a stack with no current best is unknown rather than read from it.
+    no_current_best = SimpleNamespace(current_best_measurement={}, last_baseline={"launch_evidence": evidence})
+    assert observed_launch_from_state(no_current_best) == ({}, {})
+
+    state = SimpleNamespace(current_best_measurement={"launch_evidence": evidence})
+    observed_config, observed_env = observed_launch_from_state(state)
+    kwargs = _noop_filter_kwargs(tmp_path, observed_server_config=observed_config, observed_server_env=observed_env)
+
+    _, dropped = filter_baseline_noop_variants([_variant(_RESTATES_ARGV)], **kwargs)
+    assert [name for name, _ in dropped] == [_CANDIDATE]
+
+    # A different value runs, and so does a setting the engine never reported:
+    # absence from the record is unknown, not equal.
+    for args in ("--max-running-requests 128", "--stream-interval 20"):
+        kept, none_dropped = filter_baseline_noop_variants([_variant(args)], **kwargs)
+        assert [gv.name for gv in kept] == [_CANDIDATE], args
+        assert none_dropped == []
+
+
+def test_a_setting_the_engine_rewrote_is_not_already_in_effect(tmp_path):
+    """DP attention divides chunked_prefill_size, so the resolved 8192 is not what ``--chunked-prefill-size 8192`` passes.
+
+    Taken from a real SGLang log: 65536 was requested and 8192 resolved under
+    dp_size=8. Passing 8192 would launch with 1024, a real change. The engine's
+    own report covers it, and so does the DP-attention rule for a log that never
+    carried the report.
+    """
+    config = tmp_path / "stack.yaml"
+    config.write_text(
+        yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": {**_RECIPE_ENV, **_BASE_ARGS_ENV}}}),
+        encoding="utf-8",
+    )
+    log = tmp_path / "server.log"
+    record = {"enable_dp_attention": True, "dp_size": 8, "chunked_prefill_size": 8192, "max_running_requests": 512}
+    log.write_text(
+        "[2026-09-18 19:11:48] DP attention is enabled. chunked prefill size is adjusted from 65536 to 8192.\n"
+        f"[2026-09-18 19:11:50] server_args={record!r}\n",
+        encoding="utf-8",
+    )
+    evidence = build_launch_evidence(config_path=config, actual_server_log=str(log), framework="sglang", slot=tmp_path)
+    assert evidence["engine_adjusted_settings"] == {"chunked_prefill_size": {"requested": "65536", "resolved": "8192"}}
+
+    for engine_report in (evidence["engine_adjusted_settings"], {}):
+        stack = {**evidence, "engine_adjusted_settings": engine_report}
+        observed_config, observed_env = observed_launch_from_state(
+            SimpleNamespace(current_best_measurement={"launch_evidence": stack})
+        )
+        kwargs = _noop_filter_kwargs(tmp_path, observed_server_config=observed_config, observed_server_env=observed_env)
+
+        kept, dropped = filter_baseline_noop_variants([_variant("--chunked-prefill-size 8192")], **kwargs)
+        assert [gv.name for gv in kept] == [_CANDIDATE]
+        assert dropped == []
+
+        # Only the rewritten settings are unknown: a plain restatement still drops.
+        _, dropped = filter_baseline_noop_variants([_variant(_RESTATES_ARGV)], **kwargs)
+        assert [name for name, _ in dropped] == [_CANDIDATE]
 
 
 def test_record_explore_accepted_dedup_by_fingerprint():
@@ -353,7 +578,13 @@ async def test_actual_explore_axis_rejection_cannot_be_revived_by_geak_fallback(
     state = coord.shared_state
     state.framework = "sglang"
     state.benchmark_mode = "agentx"
-    state.baseline_perf = {"total_throughput": 1000.0, "e2e_norm_intvty_p90": 100.0}
+    state.baseline_perf = {
+        "total_throughput": 1000.0,
+        "e2e_norm_intvty_p90": 100.0,
+        "e2e_norm_intvty_p50": 100.0,
+        "duration_seconds": 25.0,
+        "request_error_rate": 0.0,
+    }
     state.current_best.update(state.baseline_perf)
     state.geak_result = _ok_result(final=150.0)
     sub.shared_state = state
@@ -367,31 +598,40 @@ async def test_actual_explore_axis_rejection_cannot_be_revived_by_geak_fallback(
             "output_dir": str(tmp_path / "axis-rejection"),
             "base_tput": 110.0,
             "grid": [{"name": "candidate", "extra_args": "--test-flag"}],
-            "source": "resume_stack_revalidate",
+            "source": "stack_revalidate",
             "geak_fallback": True,
             "expected_cfg_hash": fingerprint,
         },
         idempotency_key="geak-axis-rejection",
     )
     state.geak_pending = {"status": "awaiting_rebench", "revalidation_task_id": task.task_id}
-    state.resume_pending_revalidation = True
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
 
     def fake_measure(cmd, *args, **kwargs):
         slot = Path(cmd[cmd.index("--output-dir") + 1])
-        _fake_workspace(slot, tput=132.0, perf_axes={"total_token_throughput": 900.0, "e2e_norm_intvty_p90": 50.0})
+        _fake_workspace(
+            slot,
+            tput=132.0,
+            perf_axes={
+                "total_token_throughput": 900.0,
+                "e2e_norm_intvty_p90": 50.0,
+                "e2e_norm_intvty_p50": 50.0,
+                "duration_seconds": 25.0,
+                "request_error_rate": 0.0,
+            },
+        )
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
     async def must_not_replay(**kwargs):
         pytest.fail("native rejection must settle the candidate before any favorable fallback can run")
 
-    coord._validate_geak_via_geak_harness = must_not_replay
+    coord.writeback.validate_geak_via_geak_harness = must_not_replay
     with patch("hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill", side_effect=fake_measure):
         produced = (await sub.run_task(task)).result
     rejection = produced["per_variant_outcomes"][0]
-    assert rejection["reason"].startswith("both_axes_regressed")
+    assert rejection["reason"].startswith("median_or_guard_failed")
     assert any(gate["gate"] == "graded_axes" and gate["passed"] is False for gate in rejection["gates"])
-    await coord._promote_to_shared_state("explore", produced, task=task)
+    await coord.writeback.promote_to_shared_state("explore", produced, task=task)
     assert state.current_best["tput"] == 110.0
     assert state.geak_result["revalidation_status"] == "no_promote"
     assert state.geak_result["revalidation_error"] == rejection["reason"]
@@ -416,6 +656,9 @@ async def test_explore_missing_axes_fails_closed(
         "output_throughput": 200.0,
         "total_token_throughput": 20000.0,
         "e2e_norm_intvty_p90": 300.0,
+        "e2e_norm_intvty_p50": 300.0,
+        "duration_seconds": 25.0,
+        "request_error_rate": 0.0,
     }
     base_tput = state.baseline_tput
     if missing_from == "current_best":
@@ -424,12 +667,18 @@ async def test_explore_missing_axes_fails_closed(
             "tput": 250.0,
             "total_token_throughput": 25000.0,
             "e2e_norm_intvty_p90": 300.0,
+            "e2e_norm_intvty_p50": 300.0,
+            "duration_seconds": 25.0,
+            "request_error_rate": 0.0,
         }
         base_tput = 250.0
     candidate_axes = {
         "input_throughput": 20000.0,
         "total_token_throughput": 40000.0,
         "e2e_norm_intvty_p90": 300.0,
+        "e2e_norm_intvty_p50": 300.0,
+        "duration_seconds": 25.0,
+        "request_error_rate": 0.0,
     }
     incomplete = {
         "candidate": candidate_axes,
@@ -437,7 +686,9 @@ async def test_explore_missing_axes_fails_closed(
         "baseline": state.baseline_perf,
     }[missing_from]
     missing_keys = (
-        ("input_throughput", "total_token_throughput") if missing_axis == "total" else ("e2e_norm_intvty_p90",)
+        ("input_throughput", "total_token_throughput")
+        if missing_axis == "total"
+        else ("e2e_norm_intvty_p90", "e2e_norm_intvty_p50")
     )
     for key in missing_keys:
         incomplete.pop(key, None)
@@ -491,7 +742,7 @@ async def test_explore_missing_axes_fails_closed(
 @pytest.mark.parametrize("incomplete_output", [170.0, 20000.0])
 @pytest.mark.parametrize(
     "next_intvty,next_total,intvty_outcome",
-    [(363.0, 23000.0, "KEEP"), (313.0, 20000.0, "REVERT"), (335.0, 22000.0, "RECORDED")],
+    [(363.0, 23000.0, "KEEP"), (313.0, 20000.0, "REVERT"), (335.0, 22000.0, "REVERT")],
 )
 async def test_explore_missing_axes_preserves_running_grading_anchor(
     sub_agent_runner, tmp_path, monkeypatch, missing_axis, incomplete_output, next_intvty, next_total, intvty_outcome
@@ -507,6 +758,9 @@ async def test_explore_missing_axes_preserves_running_grading_anchor(
         "output_throughput": 200.0,
         "total_token_throughput": 20000.0,
         "e2e_norm_intvty_p90": 300.0,
+        "e2e_norm_intvty_p50": 300.0,
+        "duration_seconds": 25.0,
+        "request_error_rate": 0.0,
     }
     sub.shared_state = state
     base = tmp_path / "base.yaml"
@@ -519,18 +773,23 @@ async def test_explore_missing_axes_preserves_running_grading_anchor(
         config = yaml.safe_load(Path(cmd[cmd.index("--benchmark-config") + 1]).read_text())
         observed_args[name] = config["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"]
         output, total, intvty = {
-            "v00_v_good": (180.0, 22000.0, 330.0),
+            "v00_v_good": (210.0, 22000.0, 330.0),
             "v01_v_incomplete": (incomplete_output, 40000.0, 360.0),
-            "v02_v_next": (160.0, next_total, next_intvty),
+            "v02_v_next": (220.0, next_total, next_intvty),
         }[name]
         axes = {
             "input_throughput": total - output,
             "total_token_throughput": total,
             "e2e_norm_intvty_p90": intvty,
+            "e2e_norm_intvty_p50": intvty,
+            "duration_seconds": 25.0,
+            "request_error_rate": 0.0,
         }
         if name == "v01_v_incomplete":
             for key in (
-                ("input_throughput", "total_token_throughput") if missing_axis == "total" else ("e2e_norm_intvty_p90",)
+                ("input_throughput", "total_token_throughput")
+                if missing_axis == "total"
+                else ("e2e_norm_intvty_p90", "e2e_norm_intvty_p50")
             ):
                 axes.pop(key)
         _fake_workspace(slot, tput=output, perf_axes=axes)
@@ -562,15 +821,15 @@ async def test_explore_missing_axes_preserves_running_grading_anchor(
     assert out["status"] == "succeeded"
     assert len(tested) == 3
     assert tested["v_good"]["outcome"] == "KEEP"
-    assert tested["v_good"]["graded_objective"] == "e2e_norm_intvty_p90"
+    assert tested["v_good"]["graded_objective"] == "e2e_norm_intvty_p50"
     assert tested["v_good"]["gain_pct"] == pytest.approx(10.0)
-    assert tested["v_good"]["tput"] == 180.0
+    assert tested["v_good"]["tput"] == 210.0
     assert tested["v_incomplete"]["status"] == "succeeded"
     assert tested["v_incomplete"]["outcome"] == "FAILED"
     assert tested["v_incomplete"]["graded_objective"] == "output_throughput"
-    assert tested["v_incomplete"]["base_tput"] == 180.0
-    assert tested["v_next"]["base_tput"] == 180.0
-    assert tested["v_next"]["graded_objective"] == "e2e_norm_intvty_p90"
+    assert tested["v_incomplete"]["base_tput"] == 210.0
+    assert tested["v_next"]["base_tput"] == 210.0
+    assert tested["v_next"]["graded_objective"] == "e2e_norm_intvty_p50"
     if intvty_outcome == "REVERT":
         assert tested["v_next"]["gain_pct"] is None
     else:
@@ -582,7 +841,7 @@ async def test_explore_missing_axes_preserves_running_grading_anchor(
     expected_winners = ["v_good"] + (["v_next"] if intvty_outcome == "KEEP" else [])
     assert [row["name"] for row in out["winners"]] == expected_winners
     assert [row["variant_name"] for row in out["explore_search_update"]["winners_history"]] == expected_winners
-    assert out["running_base_tput"] == (160.0 if intvty_outcome == "KEEP" else 180.0)
+    assert out["running_base_tput"] == (220.0 if intvty_outcome == "KEEP" else 210.0)
 
 
 @pytest.mark.asyncio
@@ -957,6 +1216,9 @@ async def test_per_variant_rows_carry_the_verdicts_and_the_stack(
                     "name": "v_keep",
                     "extra_args": "--keep-flag",
                     "extra_envs": {},
+                    "remove_args": ["--old-flag"],
+                    "unset_envs": ["OLD_ENV"],
+                    "args_mode": "replace",
                     "provenance": "llm_direct",
                 }
             ],
@@ -981,6 +1243,9 @@ async def test_per_variant_rows_carry_the_verdicts_and_the_stack(
     # than reported as having passed.
     assert [g["gate"] for g in row["gates"]] == ["keep_threshold"]
     assert row["validation_basis"] == "keep_verdict_unscored"
+    assert row["variant"]["remove_args"] == ["--old-flag"]
+    assert row["variant"]["unset_envs"] == ["OLD_ENV"]
+    assert row["variant"]["args_mode"] == "replace"
     # The stack it launched on: the anchor plus a base config still empty,
     # since nothing has KEPT before it.
     assert row["measured_against"]["throughput"] == 800.0
@@ -1052,7 +1317,7 @@ async def test_explore_executor_prefers_current_best_over_baseline_for_recovery(
     ("source", "expected_base_tput", "expected_outcome", "has_winner"),
     [
         (None, 2358.80, "REVERT", False),
-        ("resume_stack_revalidate", 2192.52, "KEEP", True),
+        ("stack_revalidate", 2192.52, "KEEP", True),
     ],
 )
 async def test_explore_executor_supersedes_stale_params_base_tput(
@@ -1366,8 +1631,8 @@ async def test_explore_decision_round_skips_eval_warmup_keeps_it(
 
     warmup = [ev for slot, ev in seen if "warmup_round" in slot]
     decision = [ev for slot, ev in seen if "warmup_round" not in slot]
-    assert warmup and warmup[0] not in _RUN_EVAL_FALSE
-    assert decision and all(ev in _RUN_EVAL_FALSE for ev in decision)
+    assert warmup and not _eval_off(warmup[0])
+    assert decision and all(_eval_off(ev) for ev in decision)
 
 
 @pytest.mark.asyncio
@@ -1420,9 +1685,9 @@ async def test_explore_no_eval_disables_magpie_warmup_and_decision(
         await sub.run_task(task)
 
     assert seen
-    assert all(ev in _RUN_EVAL_FALSE for _slot, ev in seen)
+    assert all(_eval_off(ev) for _slot, ev in seen)
     base_yaml = yaml.safe_load((output_dir / "explore_base.with_envs.yaml").read_text())
-    assert str(base_yaml["benchmark"]["envs"].get("RUN_EVAL", "")).strip().lower() in _RUN_EVAL_FALSE
+    assert _eval_off(base_yaml["benchmark"]["envs"].get("RUN_EVAL", ""))
 
 
 @pytest.mark.asyncio
@@ -1474,7 +1739,7 @@ async def test_explore_cold_decision_keeps_eval(
 
     assert not [slot for slot, _ in seen if "warmup_round" in slot]
     decision = [ev for _slot, ev in seen]
-    assert decision and all(ev not in _RUN_EVAL_FALSE for ev in decision)
+    assert decision and not any(_eval_off(ev) for ev in decision)
 
 
 @pytest.mark.asyncio
@@ -1486,7 +1751,6 @@ async def test_explore_decision_stays_cold_when_the_session_skips_the_double_run
     sub, tr, _ = sub_agent_runner
     state = SharedState()
     state.baseline_tput = 800.0
-    state.baseline_double_run = False
     sub.shared_state = state
 
     base = tmp_path / "base.yaml"
@@ -1506,6 +1770,7 @@ async def test_explore_decision_stays_cold_when_the_session_skips_the_double_run
             "config_path": str(base),
             "output_dir": str(tmp_path / "explore-singleround"),
             "base_tput": 800.0,
+            "baseline_double_run": False,
             "grid": [{"name": "v", "extra_args": "--flag", "extra_envs": {}, "provenance": "llm_direct"}],
         },
         idempotency_key="ex-no-double-run",
@@ -1552,6 +1817,7 @@ async def test_explore_executor_warm_decision_warmup_failure_marks_failed(
                     "name": "warmfail",
                     "extra_args": "--warmfail-flag",
                     "extra_envs": {},
+                    "reasoning": "Test whether this launch flag enables the scheduler fast path.",
                     "provenance": "llm_direct",
                 }
             ],
@@ -1577,6 +1843,8 @@ async def test_explore_executor_warm_decision_warmup_failure_marks_failed(
     pvo = [v for v in out["per_variant_outcomes"] if v["outcome"] == "FAILED"]
     assert pvo, "expected FAILED entry in per_variant_outcomes"
     assert pvo[0]["stage"] == "warmup"
+    assert pvo[0]["failure_attribution"] == "harness"
+    assert pvo[0]["variant"]["reasoning_origin"] == "action_payload.reasoning"
     assert "failure_id" in pvo[0]
     assert pvo[0]["failure_id"].startswith("fail.")
 
@@ -2197,19 +2465,192 @@ async def test_explore_executor_sglang_empty_grid_still_fails_with_empty_grid(
     assert res.result["error_class"] == "empty_grid"
 
 
-def test_atom_default_grid_survives_compatibility_filter_without_help_probe(
-    monkeypatch,
+@pytest.mark.asyncio
+async def test_explore_rejects_unsafe_aiter_unified_attn_before_benchmark(
+    sub_agent_runner,
+    tmp_path,
 ):
-    """When the atom help-text probe is unavailable, ``apply_compatibility_filter`` drops no seed variant."""
-    # The filter resolves this name in its own module, so patching the re-export on _grid_runner would leave the real
-    # ten-second probe running.
-    from hyperloom.orchestrator.actions.executors import _grid_variant_filter
+    sub, tr, _ = sub_agent_runner
+    model = tmp_path / "Qwen3-14B-FP8"
+    model.mkdir()
+    (model / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["Qwen3ForCausalLM"],
+                "model_type": "qwen3",
+                "torch_dtype": "bfloat16",
+                "head_dim": 128,
+                "num_attention_heads": 40,
+                "num_key_value_heads": 8,
+                "quantization_config": {"quant_method": "fp8"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    base = tmp_path / "base_sglang.yaml"
+    _write_baseline_yaml(base)
+    config = yaml.safe_load(base.read_text(encoding="utf-8"))
+    config["benchmark"]["model"] = str(model)
+    config["benchmark"]["precision"] = "fp8"
+    config["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"] = "--page-size 1 --kv-cache-dtype auto"
+    base.write_text(yaml.safe_dump(config), encoding="utf-8")
 
-    monkeypatch.setattr(_grid_variant_filter, "_probe_server_help_text", lambda fw: "")
+    state = SharedState()
+    state.model_path = str(model)
+    state.model_name = "Qwen3-14B-FP8"
+    state.model_type = "qwen3"
+    state.gpu_type = "mi355x"
+    state.stack_fingerprint_meta = {
+        "sglang": "0.5.20.dev20260920+gc610c40399",
+        "aiter": "4ad99832823dde2315b361cbd3b54b1c5c12acd5",
+        "rocm": "10.0.0",
+    }
+    sub.shared_state = state
 
+    output_dir = tmp_path / "explore-unified-attn-filter"
+    benchmarked: list[str] = []
+
+    def _fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        benchmarked.append(slot.relative_to(output_dir).as_posix())
+        _fake_workspace(slot, tput=800.0)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(output_dir),
+            "base_tput": 800.0,
+            "baseline_double_run": False,
+            "grid": [
+                {
+                    "name": "unified",
+                    "extra_envs": {
+                        "SGLANG_USE_AITER": "1",
+                        "SGLANG_USE_AITER_UNIFIED_ATTN": "1",
+                    },
+                },
+                {
+                    "name": "unified_combo",
+                    "extra_args": "--chunked-prefill-size 32768",
+                    "extra_envs": {
+                        "SGLANG_USE_AITER": "1",
+                        "SGLANG_USE_AITER_UNIFIED_ATTN": "1",
+                        "SGLANG_USE_AITER_FP8_PER_TOKEN": "1",
+                    },
+                },
+                {"name": "master", "extra_envs": {"SGLANG_USE_AITER": "1"}},
+                {
+                    "name": "per_token",
+                    "extra_envs": {
+                        "SGLANG_USE_AITER": "1",
+                        "SGLANG_USE_AITER_FP8_PER_TOKEN": "1",
+                    },
+                },
+                {
+                    "name": "unified_page16",
+                    "extra_args": "--page-size 16",
+                    "extra_envs": {
+                        "SGLANG_USE_AITER": "1",
+                        "SGLANG_USE_AITER_UNIFIED_ATTN": "1",
+                    },
+                },
+            ],
+        },
+        idempotency_key="ex-unified-attn-filter",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        result = await sub.run_task(task)
+
+    assert benchmarked == [
+        "v00_master/variant_00_master",
+        "v01_per_token/variant_00_per_token",
+        "v02_unified_page16/variant_00_unified_page16",
+    ]
+    assert result.result["skipped_dup"] == [
+        {
+            "name": "unified",
+            "reason": "compatibility_filter",
+            "detail": "SGLANG_USE_AITER_UNIFIED_ATTN=1 is unsafe on the exact ROCm 10 Qwen3-14B-FP8 stack",
+        },
+        {
+            "name": "unified_combo",
+            "reason": "compatibility_filter",
+            "detail": "SGLANG_USE_AITER_UNIFIED_ATTN=1 is unsafe on the exact ROCm 10 Qwen3-14B-FP8 stack",
+        },
+    ]
+    other_stack = dict(state.stack_fingerprint_meta)
+    other_stack["aiter"] = "newer-aiter"
+    other_variant = GridVariant(
+        "other_stack_unified",
+        extra_envs={"SGLANG_USE_AITER_UNIFIED_ATTN": "1"},
+    )
+    kept, dropped = apply_compatibility_filter(
+        [other_variant],
+        framework="sglang",
+        model_path=str(model),
+        gpu_type="mi355x",
+        stack_fingerprint=other_stack,
+        base_server_args="--page-size 1 --kv-cache-dtype auto",
+    )
+    assert ([variant.name for variant in kept], dropped) == (["other_stack_unified"], [])
+
+
+def test_unified_attn_filter_matches_aiter_dist_version_short_sha(tmp_path):
+    """The aiter fingerprint degrades to a git-describe dist version when ``AITER_COMMIT`` is unset; the same source
+    tree must still be recognised, otherwise the filter fails open and the unsafe lever reaches the benchmark.
+    """
+    model = tmp_path / "Qwen3-14B-FP8"
+    model.mkdir()
+    (model / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["Qwen3ForCausalLM"],
+                "model_type": "qwen3",
+                "torch_dtype": "bfloat16",
+                "head_dim": 128,
+                "num_attention_heads": 40,
+                "num_key_value_heads": 8,
+                "quantization_config": {"quant_method": "fp8"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    kept, dropped = apply_compatibility_filter(
+        [GridVariant("unified", extra_envs={"SGLANG_USE_AITER_UNIFIED_ATTN": "1"})],
+        framework="sglang",
+        model_path=str(model),
+        gpu_type="mi355x",
+        stack_fingerprint={
+            "sglang": "0.5.20.dev20260920+gc610c40399",
+            # The dist version install_baremetal.sh falls back to; embeds the short sha of the pinned commit.
+            "aiter": "0.1.21.dev48+g4ad998328.d20260920",
+            "rocm": "10.0.0",
+        },
+        base_server_args="--page-size 1 --kv-cache-dtype auto",
+    )
+    assert ([variant.name for variant in kept], dropped) == (
+        [],
+        [
+            {
+                "name": "unified",
+                "source": "compatibility_filter",
+                "reason": "SGLANG_USE_AITER_UNIFIED_ATTN=1 is unsafe on the exact ROCm 10 Qwen3-14B-FP8 stack",
+            }
+        ],
+    )
+
+
+def test_atom_default_grid_survives_compatibility_filter():
+    """``apply_compatibility_filter`` drops no atom seed variant."""
     grid = _atom_default_grid(model_class="moe_mla", conc=64)
     kept, dropped = apply_compatibility_filter(grid, framework="atom", model_path="")
-    assert kept == grid, f"compatibility filter dropped seed variants when help-text probe is empty; dropped={dropped}"
+    assert kept == grid, f"compatibility filter dropped seed variants; dropped={dropped}"
 
 
 def test_grid_variants_from_payload_coerces_list_extra_args():
@@ -2251,6 +2692,39 @@ def test_grid_variants_from_payload_carries_removal_controls():
     assert variant.unset_envs == ["SGLANG_ENABLE_FOO"]
     assert variant.args_mode == "replace"
     assert variant.extra_server_args == "--max-num-seqs 256"
+
+
+def test_grid_variants_preserve_authored_reason_as_experience_reasoning():
+    from hyperloom.orchestrator.actions.executors.explore import (
+        _grid_variants_from_payload,
+    )
+
+    variant = _grid_variants_from_payload(
+        [
+            {
+                "name": "chunked",
+                "extra_args": "--max-num-batched-tokens 8192",
+                "reason": "A larger chunk should reduce scheduler dispatch overhead.",
+                "provenance": "specialist:scheduler",
+            }
+        ]
+    )[0]
+
+    assert variant.note == "A larger chunk should reduce scheduler dispatch overhead."
+    assert variant.reasoning_origin == "action_payload.reason"
+
+
+def test_grid_variants_do_not_treat_provenance_as_reasoning():
+    from hyperloom.orchestrator.actions.executors.explore import (
+        _grid_variants_from_payload,
+    )
+
+    variant = _grid_variants_from_payload(
+        [{"name": "unexplained", "extra_args": "--foo", "provenance": "specialist:scheduler"}]
+    )[0]
+
+    assert variant.note == ""
+    assert variant.reasoning_origin == ""
 
 
 def test_on_disk_stderr_tail_reads_benchmark_stderr_log(tmp_path):
@@ -2344,64 +2818,216 @@ async def test_explore_executor_historical_failed_and_accepted_rerun(sub_agent_r
     assert tested[fp_failed]["outcome"] in ("KEEP", "REVERT", "FAILED", "KILLED_OVERTIME")
 
 
-# ───────────────────────────────────────────────────────────────────────────── Post-run orphan reap
-# (AMD-AGI/Hyperloom#1354) ─────────────────────────────────────────────────────────────────────────────
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "budget_ms,expected_outcome,expected_reason",
+    [
+        (250.0, "REVERT", "latency_budget_exceeded"),
+        (5000.0, "KEEP", ""),
+        (0.0, "KEEP", ""),
+    ],
+)
+async def test_explore_refuses_an_over_budget_winner_in_the_round_that_measured_it(
+    sub_agent_runner, tmp_path, monkeypatch, budget_ms, expected_outcome, expected_reason
+):
+    """``--max-latency-ms`` rides the verdict explore's ladder already reads.
 
-
-def _missing_config_ctx(tmp_path: Path) -> SimpleNamespace:
-    """A ctx that makes __call__ take its earliest ``return`` (missing_config), exercising the wrapper without needing
-    to drive a full benchmark round.
+    The variant gains throughput either way; only the SLA separates the cases.
+    Refusing here rather than at promotion keeps an over-budget variant from
+    being folded onto the stack and becoming the anchor the rest of the batch is
+    graded against, and gives the ledger a latency reason for the REVERT.
     """
-    return SimpleNamespace(
-        task=SimpleNamespace(
-            task_id="t-explore-reap",
-            params={"config_path": str(tmp_path / "does_not_exist.yaml")},
-        ),
-        extra={},
+    _force_cold_decision(monkeypatch)
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState(framework="sglang")
+    state.baseline_tput = 200.0
+    state.latency_budget_ms = budget_ms
+    sub.shared_state = state
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+
+    def _fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        # The harness workspace reports e2el mean 2500 ms, well over the 250 ms budget.
+        _fake_workspace(slot, tput=20000.0)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / f"explore-latency-{budget_ms:g}"),
+            "base_tput": 200.0,
+            "grid": [{"name": "v_slow_but_fast", "extra_args": "--split 8"}],
+            "variant_timeout_sec": 10,
+        },
+        idempotency_key=f"ex-latency-{budget_ms:g}",
     )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    out = res.result
+    tested = out["explore_search_update"]["tested"][canonical_fingerprint("--split 8", {})]
+    assert tested["status"] == "succeeded"
+    assert tested["outcome"] == expected_outcome
+    if expected_outcome == "REVERT":
+        # Not "gain_below_threshold": the variant gained 100x. Naming the wrong
+        # gate would send the search looking for throughput it already has.
+        assert out["losers"][0]["reason"] == expected_reason
+        assert out["winners"] == []
+        gates = {g["gate"]: g for g in tested["gates"]}
+        assert "latency_budget" in gates
+        assert gates["latency_budget"]["passed"] is False
+    else:
+        assert [w["name"] for w in out["winners"]] == ["v_slow_but_fast"]
 
 
 @pytest.mark.asyncio
-async def test_explore_call_reaps_stale_servers_even_on_early_return(tmp_path, monkeypatch):
-    """__call__ must reap any lingering server after _run_explore returns, even on its earliest failure path
-    (missing_config) -- not just after a full benchmark round.
+async def test_an_explore_winner_inside_the_budget_is_promoted_by_writeback(sub_agent_runner, tmp_path, monkeypatch):
+    """Explore's own result, not a winner shaped for the gate, must survive promotion.
+
+    Promotion re-checks the budget against the winner row explore returns. A row
+    without ``e2el_mean_ms`` reads as unmeasured there, so a variant that passed
+    explore's in-round check would be refused and explore could never move
+    ``current_best``.
     """
-    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
-    executor = ExploreExecutor(session_dir=tmp_path)
-    ctx = _missing_config_ctx(tmp_path)
+    from hyperloom.orchestrator.loop import writeback as wb
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
 
-    kill_calls = {"n": 0}
+    _force_cold_decision(monkeypatch)
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState(framework="sglang", model_path="/models/m", gpu_type="mi355x")
+    state.baseline_tput = 200.0
+    state.latency_budget_ms = 5000.0
+    sub.shared_state = state
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
 
-    def fake_kill():
-        kill_calls["n"] += 1
+    def _fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        # The harness workspace reports e2el mean 2500 ms, inside the 5000 ms budget.
+        _fake_workspace(slot, tput=20000.0)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "explore-latency-promote"),
+            "base_tput": 200.0,
+            "grid": [{"name": "v_in_budget", "extra_args": "--split 8"}],
+            "variant_timeout_sec": 10,
+        },
+        idempotency_key="ex-latency-promote",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
-        "hyperloom.orchestrator.actions.executors.explore._kill_stale_servers",
-        side_effect=fake_kill,
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
     ):
-        result = await executor(ctx)
+        res = await sub.run_task(task)
 
-    assert result["status"] == "failed"
-    assert result["error_class"] == "missing_config"
-    assert kill_calls["n"] == 1
+    out = res.result
+    assert [w["name"] for w in out["winners"]] == ["v_in_budget"]
+    assert out["winners"][0]["e2el_mean_ms"] == 2500.0
+
+    coord = Coordinator.__new__(Coordinator)
+    coord.session_dir = tmp_path
+    coord.shared_state = state
+    await coord.writeback._promote_explore(out, None, wb._PromoteOutcome(verdict=wb.Verdict.RECORDED))
+
+    assert state.current_best["variant_name"] == "v_in_budget"
+
+
+async def _mlperf_round(
+    sub_agent_runner, tmp_path, monkeypatch, *, candidate: dict, name: str
+) -> tuple[dict, SharedState]:
+    """Run one explore variant on the MLPerf backend against a smoke baseline."""
+    _force_cold_decision(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("HYPERLOOM_AGENTIC_BACKEND", "mlperf")
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState(framework="sglang", benchmark_mode="agentx", agentx_backend="mlperf")
+    state.baseline_tput = 200.0
+    state.baseline_accuracy = 0.72
+    sub.shared_state = state
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+
+    def _fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        _fake_workspace(slot, tput=candidate["output_throughput"], perf_axes=candidate)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / f"explore-{name}"),
+            "base_tput": 200.0,
+            "grid": [{"name": name, "extra_args": f"--{name}"}],
+        },
+        idempotency_key=f"ex-{name}",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        out = (await sub.run_task(task)).result
+    return out["explore_search_update"]["tested"][canonical_fingerprint(f"--{name}", {})], state
+
+
+def _mlperf_smoke(**over) -> dict:
+    """A mapped smoke round: 150 trajectories, baseline-level accuracy, no failures."""
+    return {
+        "output_throughput": 220.0,
+        "duration": 3500.0,
+        "request_error_rate": 0.0,
+        "submission_valid": True,
+        "accuracy_score": 0.72,
+        "accuracy_missing_turns": 0,
+        **over,
+    }
 
 
 @pytest.mark.asyncio
-async def test_explore_call_skips_reap_under_pytest(tmp_path):
-    """Direct guard: the reap must NOT fire while ``PYTEST_CURRENT_TEST`` is set (pytest always sets it for a running test), mirroring the guard on the per-launch preclean in ``_grid_runner.py``."""
-    executor = ExploreExecutor(session_dir=tmp_path)
-    ctx = _missing_config_ctx(tmp_path)
+async def test_explore_mlperf_keeps_an_output_throughput_gain(sub_agent_runner, tmp_path, monkeypatch):
+    """+10% output throughput at the baseline's accuracy is a KEEP, graded on output throughput."""
+    tested, _ = await _mlperf_round(sub_agent_runner, tmp_path, monkeypatch, candidate=_mlperf_smoke(), name="faster")
+    assert tested["outcome"] == "KEEP"
+    assert tested["graded_objective"] == "output_throughput"
+    assert tested["gain_pct"] == pytest.approx(10.0)
 
-    kill_calls = {"n": 0}
 
-    def fake_kill():
-        kill_calls["n"] += 1
+@pytest.mark.asyncio
+async def test_explore_mlperf_reverts_an_accuracy_regression(sub_agent_runner, tmp_path, monkeypatch):
+    """The throughput gain is real; the inline accuracy drop against the smoke baseline decides."""
+    tested, _ = await _mlperf_round(
+        sub_agent_runner, tmp_path, monkeypatch, candidate=_mlperf_smoke(accuracy_score=0.60), name="lossy"
+    )
+    assert tested["outcome"] == "REVERT"
+    gates = {gate["gate"]: gate for gate in tested["gates"]}
+    assert gates["accuracy"]["passed"] is False
+    assert gates["accuracy"]["observed"] == pytest.approx(0.60)
+    assert gates["accuracy"]["threshold"] == pytest.approx(0.72)
 
-    with patch(
-        "hyperloom.orchestrator.actions.executors.explore._kill_stale_servers",
-        side_effect=fake_kill,
-    ):
-        result = await executor(ctx)
 
-    assert result["status"] == "failed"
-    assert kill_calls["n"] == 0, "must be a no-op while PYTEST_CURRENT_TEST is set"
+@pytest.mark.asyncio
+async def test_explore_mlperf_reverts_when_turns_went_unscored(sub_agent_runner, tmp_path, monkeypatch):
+    tested, _ = await _mlperf_round(
+        sub_agent_runner, tmp_path, monkeypatch, candidate=_mlperf_smoke(accuracy_missing_turns=3), name="unscored"
+    )
+    assert tested["outcome"] == "REVERT"
+    accuracy = {gate["gate"]: gate for gate in tested["gates"]}["accuracy"]
+    assert accuracy["reason"] == "accuracy_drop"
+    assert accuracy["observed"] == 0.0, "an unscored turn scores the run 0.0 rather than skipping the gate"

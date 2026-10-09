@@ -12,10 +12,8 @@ from typing import Any
 from hyperloom.common.coerce import to_int
 
 
-# Mirrors the emit-time frozensets in agents/critic/runtime/intent_envelope.py;
-# duplicated because ``protocol`` may not import ``agents``.
 _ALERT_SEVERITIES: frozenset[str] = frozenset({"low", "medium", "high"})
-_ALLOWED_VERDICTS: frozenset[str] = frozenset({"approve", "reject", "redirect", "advise", "needs_review"})
+ALLOWED_VERDICTS: frozenset[str] = frozenset({"approve", "reject", "redirect", "advise", "needs_review"})
 
 
 # ---------------------------------------------------------------------------
@@ -25,7 +23,6 @@ class IntentType(str, Enum):
     SEND_MESSAGE = "send_message"
     DELEGATE = "delegate"
     PROPOSE_ACTION = "propose_action"
-    UPDATE_STATE = "update_state"
     ALERT = "alert"
     # Agent-to-agent request; the handler answers inline on the ``response`` topic.
     REQUEST = "request"
@@ -51,7 +48,6 @@ _PAYLOAD_REQUIRED: dict[IntentType, tuple[str, ...]] = {
     IntentType.SEND_MESSAGE: ("topic",),
     IntentType.DELEGATE: ("action_name",),
     IntentType.PROPOSE_ACTION: ("action_name", "predicted_gain_pct"),
-    IntentType.UPDATE_STATE: ("changes",),
     IntentType.ALERT: ("severity", "summary"),
     IntentType.REQUEST: ("target_agent", "kind"),
     # verdict/verdict_map mutual exclusion enforced by _validate_review_verdict_payload.
@@ -159,10 +155,9 @@ def _validate_review_verdict_payload(
         )
     if has_single:
         v = payload["verdict"]
-        if not isinstance(v, str) or v not in _ALLOWED_VERDICTS:
+        if not isinstance(v, str) or v not in ALLOWED_VERDICTS:
             raise IntentValidationError(
-                f"intents[{index}] (type=review_verdict).verdict must be one of "
-                f"{sorted(_ALLOWED_VERDICTS)!r}, got {v!r}"
+                f"intents[{index}] (type=review_verdict).verdict must be one of {sorted(ALLOWED_VERDICTS)!r}, got {v!r}"
             )
     if has_map:
         vm = payload["verdict_map"]
@@ -187,14 +182,15 @@ def _validate_review_verdict_payload(
                     f"intents[{index}] (type=review_verdict).verdict_map[{vname!r}] missing required 'verdict' key"
                 )
             ev = entry["verdict"]
-            if not isinstance(ev, str) or ev not in _ALLOWED_VERDICTS:
+            if not isinstance(ev, str) or ev not in ALLOWED_VERDICTS:
                 raise IntentValidationError(
                     f"intents[{index}] (type=review_verdict).verdict_map[{vname!r}].verdict "
-                    f"must be one of {sorted(_ALLOWED_VERDICTS)!r}, got {ev!r}"
+                    f"must be one of {sorted(ALLOWED_VERDICTS)!r}, got {ev!r}"
                 )
 
 
 __all__ = [
+    "ALLOWED_VERDICTS",
     "Intent",
     "IntentType",
     "IntentValidationError",

@@ -10,14 +10,16 @@ import json
 import logging
 import os
 import re
-import subprocess
-import time
+import shlex
+from pathlib import Path
 
 from hyperloom.common.env import is_truthy
+from hyperloom.common.gpu_identity import is_gfx_arch
 
 from ._grid_base import (
     GridVariant,
 )
+from hyperloom.inference_optimizer.grid_server_args import compose_server_args
 
 log = logging.getLogger(__name__)
 
@@ -228,87 +230,6 @@ def xdit_blacklist_reason(
     return None
 
 
-_HELP_TEXT_CACHE: dict[str, str] = {}
-
-# Framework -> monotonic deadline before which a failed probe is not retried.
-_HELP_PROBE_FAILED_UNTIL: dict[str, float] = {}
-_HELP_PROBE_RETRY_SEC: float = 300.0
-# Importing a serving framework to read its parser costs seconds (sglang: ~4s warm,
-# more on a cold pod). The result is cached per framework, so this is paid once.
-_HELP_PROBE_TIMEOUT_SEC: float = 30.0
-
-# Per-framework ``--help`` argv tails; resolve the interpreter at call time.
-_HELP_PROBE_COMMANDS: dict[str, tuple[str, ...]] = {
-    # Both build a parser and hand it to the framework's own registrar, the shape
-    # `atom` already used: neither exposes a ready-made parser at module scope.
-    "sglang": (
-        "-c",
-        "import argparse; from sglang.srt.server_args import ServerArgs; "
-        "p = argparse.ArgumentParser(); ServerArgs.add_cli_args(p); "
-        "p.print_help()",
-    ),
-    "vllm": (
-        "-c",
-        "from vllm.entrypoints.openai.cli_args import make_arg_parser; "
-        "from vllm.utils.argparse_utils import FlexibleArgumentParser; "
-        "make_arg_parser(FlexibleArgumentParser()).print_help()",
-    ),
-    # atom exposes EngineArgs.add_cli_args (mirrors vLLM).
-    "atom": (
-        "-c",
-        "import argparse; from atom.model_engine.arg_utils import EngineArgs; "
-        "p = argparse.ArgumentParser(); EngineArgs.add_cli_args(p); "
-        "p.print_help()",
-    ),
-}
-
-
-def _probe_server_help_text(framework: str) -> str:
-    """Best-effort fetch of ``<framework> --help`` text for flag validation."""
-    fw = (framework or "").strip().lower()
-    if fw in _HELP_TEXT_CACHE:
-        return _HELP_TEXT_CACHE[fw]
-    argv_tail = _HELP_PROBE_COMMANDS.get(fw)
-    if argv_tail is None:
-        return ""
-    expiry = _HELP_PROBE_FAILED_UNTIL.get(fw)
-    if expiry is not None and time.monotonic() < expiry:
-        return ""
-    from ._benchmark_interpreter import _resolve_probe_python
-
-    try:
-        interpreter = _resolve_probe_python(fw)
-        proc = subprocess.run(
-            [interpreter, *argv_tail],
-            capture_output=True,
-            text=True,
-            timeout=_HELP_PROBE_TIMEOUT_SEC,
-        )
-        # Only a clean exit is help text. stderr on a failed run is a traceback, and treating that as help makes every
-        # flag look absent, which drops the variants carrying them rather than sparing them.
-        out = (proc.stdout or "") + (proc.stderr or "") if proc.returncode == 0 else ""
-        reason = f"exit={proc.returncode}"
-        if proc.returncode != 0:
-            # Without the tail the log says only "exit=1", which cannot tell a
-            # missing framework from a probe command that no longer matches it.
-            tail = " ".join((proc.stderr or "").split())[-300:]
-            if tail:
-                reason = f"{reason}: {tail}"
-    except Exception as exc:  # noqa: BLE001 — best-effort, see docstring
-        out, reason = "", repr(exc)
-    if out:
-        _HELP_TEXT_CACHE[fw] = out
-        return out
-    if fw not in _HELP_PROBE_FAILED_UNTIL:
-        log.warning(
-            "compatibility probe for %s produced no help text (%s); flag-version drops are disabled for it",
-            fw,
-            reason,
-        )
-    _HELP_PROBE_FAILED_UNTIL[fw] = time.monotonic() + _HELP_PROBE_RETRY_SEC
-    return ""
-
-
 def _detect_model_class(model_path: str) -> tuple[bool, bool]:
     """Heuristic detect of (is_mla_model, is_moe_model) from model path."""
     p = model_path.lower()
@@ -329,11 +250,110 @@ def _detect_model_class(model_path: str) -> tuple[bool, bool]:
     return is_mla, is_moe
 
 
+_UNSAFE_UNIFIED_ATTN_STACK = {
+    "sglang": "0.5.20.dev20260920+gc610c40399",
+    "aiter": "4ad99832823dde2315b361cbd3b54b1c5c12acd5",
+    "rocm": "10.0.0",
+}
+_UNSAFE_UNIFIED_ATTN_REASON = "SGLANG_USE_AITER_UNIFIED_ATTN=1 is unsafe on the exact ROCm 10 Qwen3-14B-FP8 stack"
+_FULL_SHA_RE = re.compile(r"[0-9a-f]{40}")
+_DIST_VERSION_SHA_RE = re.compile(r"\+g([0-9a-f]{7,})")
+
+
+def _fingerprint_component_matches(actual: str, expected: str) -> bool:
+    """Match one stack-fingerprint component against a pinned commit, accepting the git-describe dist version a
+    package reports when no explicit commit env var was exported.
+    """
+    if actual == expected:
+        return True
+    if not _FULL_SHA_RE.fullmatch(expected):
+        return False
+    found = _DIST_VERSION_SHA_RE.search(actual)
+    return found is not None and expected.startswith(found.group(1))
+
+
+def _matches_unsafe_unified_attn_stack(
+    *,
+    framework: str,
+    model_path: str,
+    gpu_type: str,
+    stack_fingerprint: dict | None,
+) -> bool:
+    if framework.strip().lower() != "sglang" or not is_gfx_arch(gpu_type, "gfx950"):
+        return False
+    stack = stack_fingerprint if isinstance(stack_fingerprint, dict) else {}
+    if any(
+        not _fingerprint_component_matches(str(stack.get(key) or ""), value)
+        for key, value in _UNSAFE_UNIFIED_ATTN_STACK.items()
+    ):
+        return False
+    model_dir = Path(model_path)
+    if "14b" not in model_dir.name.lower() or "fp8" not in model_dir.name.lower():
+        return False
+    try:
+        config = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return False
+    if not isinstance(config, dict):
+        return False
+    quant = config.get("quantization_config") or {}
+    if not isinstance(quant, dict):
+        return False
+    return (
+        config.get("architectures") == ["Qwen3ForCausalLM"]
+        and str(config.get("model_type") or "").lower() == "qwen3"
+        and str(config.get("torch_dtype") or "").lower() in {"bf16", "bfloat16"}
+        and config.get("head_dim") == 128
+        and config.get("num_attention_heads") == 40
+        and config.get("num_key_value_heads") == 8
+        and str(quant.get("quant_method") or "").lower() == "fp8"
+    )
+
+
+def _last_server_arg(args: str, flags: tuple[str, ...], default: str) -> str:
+    try:
+        tokens = shlex.split(args)
+    except ValueError:
+        return ""
+    value = default
+    for idx, token in enumerate(tokens):
+        for flag in flags:
+            if token == flag and idx + 1 < len(tokens):
+                value = tokens[idx + 1]
+            elif token.startswith(f"{flag}="):
+                value = token.split("=", 1)[1]
+    return value
+
+
+def _unsafe_unified_attn_reason(variant: GridVariant, *, base_server_args: str) -> str | None:
+    envs = getattr(variant, "extra_envs", None) or {}
+    if not is_truthy(envs.get("SGLANG_USE_AITER_UNIFIED_ATTN"), default=False):
+        return None
+    effective_args = compose_server_args(
+        base_extra_args=base_server_args,
+        variant_extra_args=variant.extra_server_args,
+        remove_args=variant.remove_args,
+        args_mode=variant.args_mode,
+    )
+    page_size = _last_server_arg(effective_args, ("--page-size", "--page_size"), "1")
+    kv_dtype = _last_server_arg(
+        effective_args,
+        ("--kv-cache-dtype", "--kv_cache_dtype"),
+        "auto",
+    ).lower()
+    if page_size == "1" and kv_dtype in {"auto", "bf16", "bfloat16"}:
+        return _UNSAFE_UNIFIED_ATTN_REASON
+    return None
+
+
 def apply_compatibility_filter(
     grid: list["GridVariant"],
     *,
     framework: str,
     model_path: str,
+    gpu_type: str = "",
+    stack_fingerprint: dict | None = None,
+    base_server_args: str = "",
 ) -> tuple[list["GridVariant"], list[dict]]:
     """Skip variants known to be incompatible with current model/framework."""
     if model_path:
@@ -343,16 +363,31 @@ def apply_compatibility_filter(
         is_mla, is_moe = True, True
 
     fw = framework.strip().lower()
-    help_text = _probe_server_help_text(fw)
-    help_available = bool(help_text)
 
     is_xdit = fw == "xdit"
+    unsafe_unified_attn_stack = _matches_unsafe_unified_attn_stack(
+        framework=fw,
+        model_path=model_path,
+        gpu_type=gpu_type,
+        stack_fingerprint=stack_fingerprint,
+    )
 
     kept: list[GridVariant] = []
     dropped: list[dict] = []
     for v in grid:
         args = v.extra_server_args or ""
         skip_reason: str | None = None
+        if unsafe_unified_attn_stack:
+            skip_reason = _unsafe_unified_attn_reason(v, base_server_args=base_server_args)
+        if skip_reason:
+            dropped.append(
+                {
+                    "name": v.name,
+                    "source": "compatibility_filter",
+                    "reason": skip_reason,
+                }
+            )
+            continue
         # xDiT do-not-set blacklist (env-keyed; precision lock + known crashes).
         if is_xdit:
             skip_reason = xdit_blacklist_reason(getattr(v, "extra_envs", None))
@@ -376,10 +411,6 @@ def apply_compatibility_filter(
                     f"MODEL_PATH={model_path!r} not recognised as "
                     f"{required_class.upper()}-class"
                 )
-                break
-            # Framework flag-support predicate (only when help is readable).
-            if help_available and flag not in help_text:
-                skip_reason = f"{flag} not present in `{fw} --help` output; current {fw} version likely too old"
                 break
         if skip_reason:
             dropped.append(

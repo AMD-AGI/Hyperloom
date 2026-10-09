@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Model / GPU gate for the CLI: GPU-type resolution, arch / config loading, unsupported-model detection, and the
+"""Model / GPU gate for the CLI: arch / config loading, unsupported-model detection, and the
 pre-flight gates that run before a session is born.
 """
 
@@ -18,9 +18,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .. import framework_registry
 from .. import gpu_types as _gpu_types
 from ...common.timeutil import now_iso
-from ..model_config_utils import (  # noqa: F401 - re-exported for callers/tests
+from ..model_config_utils import (
     GEMMA2_ARCHITECTURES as _GEMMA2_ARCHITECTURES,
     _MAXPOS_CONFIG_KEYS,
     _MX_FP4_GROUP_SIZE,
@@ -53,30 +54,6 @@ __all__ = [
 ]
 
 log = logging.getLogger(__name__)
-
-# GPU-type resolution.
-_AMD_GPU_TYPES = _gpu_types._AMD_GPU_TYPES
-_GFX_TO_RUNNER = _gpu_types._GFX_TO_RUNNER
-_gpu_runner_type = _gpu_types._gpu_runner_type
-_resolve_gpu_type = _gpu_types._resolve_gpu_type
-
-
-def _autodetect_gpu_type() -> str | None:
-    """Return mi300x|mi308x|mi325x|mi355x or None if undetectable (rocm-smi then torch gcnArchName, best-effort)."""
-    return _gpu_types._autodetect_gpu_type()
-
-
-def _resolve_amd_gpu_type(explicit: str | None = None) -> str | None:
-    """Resolve the current AMD GPU type, or None when not on AMD/unknown."""
-    explicit_norm = str(explicit or "").strip().lower()
-    if explicit_norm:
-        return explicit_norm if explicit_norm in _AMD_GPU_TYPES else None
-    env_norm = os.environ.get("GPU_TYPE", "").strip().lower()
-    if env_norm:
-        return env_norm if env_norm in _AMD_GPU_TYPES else None
-    detected = (_autodetect_gpu_type() or "").strip().lower()
-    return detected if detected in _AMD_GPU_TYPES else None
-
 
 _SUPPORTED_ARCH_MARKERS = (
     "ForCausalLM",
@@ -497,52 +474,6 @@ def _detect_unsupported_model(model_path: str) -> dict | None:
         "signal": "config.json has neither architectures nor model_type",
         "verdict": _VERDICT_VISION_ONLY,
     }
-
-
-def _model_is_moe(model_path: str) -> bool:
-    """Best-effort detect a Mixture-of-Experts model from config.json."""
-    data = _load_model_config_dict(model_path)
-    if data is None:
-        return False
-    candidates = [data]
-    nested = data.get("text_config")
-    if isinstance(nested, dict):
-        candidates.append(nested)
-    expert_keys = ("num_experts", "num_local_experts", "n_routed_experts")
-    for cfg in candidates:
-        for key in expert_keys:
-            val = cfg.get(key)
-            if isinstance(val, bool):
-                continue
-            if isinstance(val, int) and val > 1:
-                return True
-        if cfg.get("moe_intermediate_size"):
-            return True
-        if "moe" in str(cfg.get("model_type") or "").lower():
-            return True
-        if any("moe" in arch.lower() for arch in _config_architectures(cfg)):
-            return True
-    return False
-
-
-def model_supports_aiter_ck_fused_moe(model_path: str, tp: int) -> bool:
-    """Whether aiter's CK fused-MoE can serve this checkpoint at this TP."""
-    if not _model_is_moe(model_path):
-        return True
-    data = _load_model_config_dict(model_path)
-    if data is None:
-        return True
-    candidates = [data]
-    nested = data.get("text_config")
-    if isinstance(nested, dict):
-        candidates.append(nested)
-    for cfg in candidates:
-        size = cfg.get("moe_intermediate_size")
-        if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
-            continue
-        shards = max(1, int(tp or 1))
-        return (size // shards) % 128 == 0
-    return True
 
 
 def _detect_amd_unsupported_quant(model_path: str) -> str | None:
@@ -987,16 +918,6 @@ def _detect_llama_sentencepiece_metadata_gap(model_path: str, data: dict) -> str
     )
 
 
-def _framework_is_scriptable(framework: str | None) -> bool:
-    """True when ``framework`` is a scriptable diffusion runtime (e.g. xDiT)."""
-    try:
-        from .. import framework_registry as _fr
-
-        return _fr.is_scriptable(framework)
-    except Exception:  # noqa: BLE001 — registry import must never block the gate
-        return str(framework or "").strip().lower() == "xdit"
-
-
 def _detect_amd_unsupported_architecture(data: dict) -> str | None:
     """Return a reason when the architecture has no AMD/ROCm runtime path."""
     model_type = str(data.get("model_type") or "").strip().lower()
@@ -1179,7 +1100,7 @@ def _detect_incompatible_model_config(
     """Detect a statically-knowable model-config incompatibility."""
     if not model_path:
         return None
-    is_scriptable_fw = _framework_is_scriptable(framework)
+    is_scriptable_fw = framework_registry.is_scriptable(framework)
     # Step 1: diffusers pipeline gate (before the config-absent short-circuit).
     if not is_scriptable_fw:
         pipeline_reason = _detect_diffusers_pipeline_model(model_path)
@@ -1197,7 +1118,7 @@ def _detect_incompatible_model_config(
             f"at config load."
         )
     # Steps 3-15: run the ordered registry, first non-None reason wins.
-    is_amd = bool(_resolve_amd_gpu_type(gpu_type))
+    is_amd = bool(_gpu_types._resolve_amd_gpu_type(gpu_type))
     for spec in _COMPAT_DETECTORS:
         if spec.amd_only and not is_amd:
             continue
@@ -1301,7 +1222,7 @@ def _write_model_gate_event(session_dir: Path, event: dict[str, Any]) -> bool:
 
     try:
         write_timeline_event_at(session_dir, event)
-    except Exception as exc:  # noqa: BLE001 — observability must never change gate behavior
+    except Exception as exc:
         log.warning("failed to persist SBD V6 model-gate event", exc_info=True)
         if not record_write_warning(session_dir, component="model_gate.event", exc=exc):
             log.debug("failed to persist SBD V6 model-gate write warning", exc_info=True)
@@ -1383,7 +1304,7 @@ def _record_model_gate_check(
             skip_reason=str(ext.get("skip_reason") or "") or None,
         )
         _write_model_gate_event(session_dir, event)
-    except Exception as exc:  # noqa: BLE001 — V6 observability must never change gate behavior
+    except Exception as exc:
         log.warning("failed to record SBD V6 model-gate check", exc_info=True)
         _record_model_gate_warning(session_dir, component="model_gate.check", exc=exc)
 
@@ -1394,7 +1315,7 @@ def _start_model_gate(args: argparse.Namespace, session_dir: Path) -> None:
         event = _new_model_gate_event(args)
         setattr(args, _MODEL_GATE_EVENT_ATTR, event)
         _write_model_gate_event(session_dir, event)
-    except Exception as exc:  # noqa: BLE001 — V6 observability must never change launch behavior
+    except Exception as exc:
         log.warning("failed to initialize SBD V6 model-gate event", exc_info=True)
         _record_model_gate_warning(session_dir, component="model_gate.start", exc=exc)
 
@@ -1410,7 +1331,7 @@ def _finish_model_gate(args: argparse.Namespace, session_dir: Path) -> None:
         )
         event["end_time"] = now_iso(timespec="seconds")
         _write_model_gate_event(session_dir, event)
-    except Exception as exc:  # noqa: BLE001 — V6 observability must never change launch behavior
+    except Exception as exc:
         log.warning("failed to finalize SBD V6 model-gate event", exc_info=True)
         _record_model_gate_warning(session_dir, component="model_gate.finish", exc=exc)
 
@@ -1444,7 +1365,7 @@ def _record_resumed_model_gate(
         ]
         setattr(args, _MODEL_GATE_EVENT_ATTR, event)
         _write_model_gate_event(session_dir, event)
-    except Exception as exc:  # noqa: BLE001 — V6 observability must never change resume behavior
+    except Exception as exc:
         log.warning("failed to record resumed SBD V6 model-gate event", exc_info=True)
         _record_model_gate_warning(session_dir, component="model_gate.resume", exc=exc)
 
@@ -1492,7 +1413,7 @@ def _emit_breakdown_to_langfuse(session_dir: Path) -> None:
     """Best-effort: push the just-written ``session_breakdown.json`` to Langfuse."""
     try:
         from ..breakdown import patch_breakdown_langfuse
-        from hyperloom.orchestrator.trace.langfuse_emitter import (
+        from hyperloom.inference_optimizer.trace.langfuse_emitter import (
             flush_session,
             record_session_breakdown,
         )
@@ -1503,6 +1424,30 @@ def _emit_breakdown_to_langfuse(session_dir: Path) -> None:
     except Exception as exc:  # noqa: BLE001 — best-effort; never mask the reason
         print(
             f"WARNING: failed to emit session_breakdown to Langfuse on fail-fast: {exc!r}",
+            file=sys.stderr,
+        )
+
+
+def _persist_gate_stop_report(session_dir: Path, *, stop_reason: str, reason: str, warning_label: str) -> None:
+    """Persist the gate stop reason to state.json and the final session report files."""
+    try:
+        from hyperloom.orchestrator.state.shared_state import SharedState
+        from hyperloom.orchestrator.actions.executors.report import write_stop_report
+
+        state = SharedState.load_or_init(session_dir)
+        # Validated writer keeps the vocab-closed invariant Inv-8.3.
+        state.set_stop_reason(stop_reason)
+        from ..breakdown.recorder.close_out import record_close_safety_net
+        from ..breakdown.recorder import record_stage_reached
+
+        record_close_safety_net(session_dir)
+        record_stage_reached(session_dir, "model_gate")
+        state.closing_phase = True
+        state.save(session_dir)
+        write_stop_report(session_dir, state, stop_detail=reason)
+    except Exception as exc:  # noqa: BLE001 — don't mask the reason on a writer bug
+        print(
+            f"WARNING: failed to persist {warning_label} stop report: {exc!r}",
             file=sys.stderr,
         )
 
@@ -1589,33 +1534,12 @@ def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bo
         f"admission stricter, not looser)."
     )
     # Persist the stop reason for CI and session diagnostics.
-    try:
-        from hyperloom.orchestrator.state.shared_state import SharedState
-        from hyperloom.orchestrator.actions.executors.report import (
-            _build_summary_dict,
-            _format_md,
-        )
-        from ..session.session_paths import reports_dir
-
-        state = SharedState.load_or_init(session_dir)
-        # Validated writer keeps the vocab-closed invariant Inv-8.3.
-        state.set_stop_reason("model_context_window_too_small")
-        state.closing_phase = True
-        state.save(session_dir)
-        summary = _build_summary_dict(state, {}, [], external_baseline=None)
-        summary["stop_detail"] = reason
-        rdir = reports_dir(session_dir)
-        rdir.mkdir(parents=True, exist_ok=True)
-        (rdir / "final.json").write_text(
-            json.dumps(summary, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
-        (rdir / "final.md").write_text(_format_md(summary), encoding="utf-8")
-    except Exception as exc:  # noqa: BLE001 — don't mask the reason on a writer bug
-        print(
-            f"WARNING: failed to persist context-window stop report: {exc!r}",
-            file=sys.stderr,
-        )
+    _persist_gate_stop_report(
+        session_dir,
+        stop_reason="model_context_window_too_small",
+        reason=reason,
+        warning_label="context-window",
+    )
     _record_model_gate_check(
         args,
         session_dir,
@@ -1692,32 +1616,12 @@ def _preflight_model_config_compat(
         f"before the heavy server bring-up. Upgrade the framework/transformers "
         f"to a version that supports this model, or skip it on this hardware."
     )
-    try:
-        from hyperloom.orchestrator.state.shared_state import SharedState
-        from hyperloom.orchestrator.actions.executors.report import (
-            _build_summary_dict,
-            _format_md,
-        )
-        from ..session.session_paths import reports_dir
-
-        state = SharedState.load_or_init(session_dir)
-        state.set_stop_reason("model_config_incompatible")
-        state.closing_phase = True
-        state.save(session_dir)
-        summary = _build_summary_dict(state, {}, [], external_baseline=None)
-        summary["stop_detail"] = reason
-        rdir = reports_dir(session_dir)
-        rdir.mkdir(parents=True, exist_ok=True)
-        (rdir / "final.json").write_text(
-            json.dumps(summary, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
-        (rdir / "final.md").write_text(_format_md(summary), encoding="utf-8")
-    except Exception as exc:  # noqa: BLE001 — don't mask the reason on a writer bug
-        print(
-            f"WARNING: failed to persist model-config stop report: {exc!r}",
-            file=sys.stderr,
-        )
+    _persist_gate_stop_report(
+        session_dir,
+        stop_reason="model_config_incompatible",
+        reason=reason,
+        warning_label="model-config",
+    )
     model_dir = resolve_local_model_dir(model) or Path(model)
     config_path = model_dir / "config.json"
     _record_model_gate_check(
@@ -1758,14 +1662,7 @@ def _preflight_unsupported_model_arch(
 ) -> bool:
     """Gate multimodal/vision models before expensive bring-up."""
     # Scriptable diffusion frameworks (xDiT) are server-less image workloads, not decoder-only causal LMs.
-    framework = getattr(args, "framework", "") or ""
-    try:
-        from . import framework_registry as _fr
-
-        is_scriptable = _fr.is_scriptable(framework)
-    except Exception:  # noqa: BLE001 — registry import must never block the gate
-        is_scriptable = str(framework).strip().lower() == "xdit"
-    if is_scriptable:
+    if framework_registry.is_scriptable(getattr(args, "framework", "")):
         _record_model_gate_check(
             args,
             session_dir,
@@ -1884,33 +1781,12 @@ def _preflight_unsupported_model_arch(
         f"text-generation checkpoint instead."
     )
     # Persist the stop reason for CI and session diagnostics.
-    try:
-        from hyperloom.orchestrator.state.shared_state import SharedState
-        from hyperloom.orchestrator.actions.executors.report import (
-            _build_summary_dict,
-            _format_md,
-        )
-        from ..session.session_paths import reports_dir
-
-        state = SharedState.load_or_init(session_dir)
-        # Validated writer keeps the vocab-closed invariant Inv-8.3.
-        state.set_stop_reason("unsupported_model_arch")
-        state.closing_phase = True
-        state.save(session_dir)
-        summary = _build_summary_dict(state, {}, [], external_baseline=None)
-        summary["stop_detail"] = reason
-        rdir = reports_dir(session_dir)
-        rdir.mkdir(parents=True, exist_ok=True)
-        (rdir / "final.json").write_text(
-            json.dumps(summary, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
-        (rdir / "final.md").write_text(_format_md(summary), encoding="utf-8")
-    except Exception as exc:  # noqa: BLE001 — don't mask the reason on a writer bug
-        print(
-            f"WARNING: failed to persist unsupported-model stop report: {exc!r}",
-            file=sys.stderr,
-        )
+    _persist_gate_stop_report(
+        session_dir,
+        stop_reason="unsupported_model_arch",
+        reason=reason,
+        warning_label="unsupported-model",
+    )
     _record_model_gate_check(
         args,
         session_dir,

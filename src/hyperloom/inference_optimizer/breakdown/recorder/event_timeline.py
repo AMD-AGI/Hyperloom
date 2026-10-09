@@ -13,6 +13,7 @@ from typing import Any, NamedTuple
 from .event_ids import parse_event_id
 from .event_rows import EVENT_ID_FIELD
 from .event_sink import EventSink
+from .recorder_warnings import RECORDING_ERRORS
 
 __all__ = [
     "EVENT_STATUS_INTERRUPTED",
@@ -76,6 +77,8 @@ def build_envelope(
     ext: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the envelope every event type shares."""
+    from ..workflow_contract import event_semantics
+
     parse_event_id(event)
     envelope: dict[str, Any] = {
         "type": str(event_type),
@@ -89,6 +92,7 @@ def build_envelope(
     if end_time:
         envelope["end_time"] = str(end_time)
     envelope["ext"] = dict(ext or {})
+    envelope.update(event_semantics(event_type, status, envelope["ext"]))
     return envelope
 
 
@@ -119,7 +123,7 @@ def open_event(
     )
     try:
         write_timeline_event(envelope)
-    except Exception as exc:  # noqa: BLE001 — observability cannot change phase behavior
+    except RECORDING_ERRORS as exc:
         log.debug("timeline: failed to open %s event %s", event_type, event, exc_info=True)
         _park(record_write_warning, component=f"timeline.{event_type}.open", exc=exc)
         return None
@@ -130,6 +134,12 @@ def open_event(
     if start_time:
         payload["start_time"] = str(start_time)
     sink.record(event_section, payload)
+    from .outcome_stage import EVENT_STAGES, record_stage_reached
+
+    if event_type in EVENT_STAGES:
+        from ...session.session_binding import bound_session
+
+        record_stage_reached(bound_session(), event_type)
     return sequence
 
 
@@ -160,7 +170,7 @@ def finish_event(
         set_timeline_sequence(envelope, sequence)
     try:
         return write_timeline_event(envelope)
-    except Exception as exc:  # noqa: BLE001 — observability cannot change phase behavior
+    except RECORDING_ERRORS as exc:
         log.debug("timeline: failed to close %s event %s", event_type, event, exc_info=True)
         _park(record_write_warning, component=f"timeline.{event_type}.finish", exc=exc)
         return None
@@ -237,7 +247,7 @@ def _park(record_warning: Any, *, component: str, exc: BaseException) -> None:
         return
     try:
         record_warning(session, component=component, exc=exc)
-    except Exception:  # noqa: BLE001 — the warning sidecar is itself best-effort
+    except RECORDING_ERRORS:
         # The sidecar is what makes the parked failures above visible in the export, so losing it is the point at
         # which the original failure would otherwise go unreported entirely.
         log.warning(

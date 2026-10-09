@@ -472,6 +472,12 @@ class RooflineEventRecorder:
         self._sequence: int | None = None
         self._closed = False
         self._substep = SUBSTEP_PROFILE
+        # Per section, one (attempt_reason, start_time, start_monotonic) per attempt begun; an attempt's run index
+        # is its position here, so an index can only name an attempt that began.
+        self._run_starts: dict[str, list[tuple[str, str, float]]] = {
+            SECTION_PROFILE_RUN: [],
+            SECTION_ANALYSIS_RUN: [],
+        }
         params = _as_dict(params)
         # ``arm`` names the configuration the run measured, which only a roofline dispatch does.
         kind = str(task_kind or "")
@@ -535,28 +541,55 @@ class RooflineEventRecorder:
     def record_preflight(self, payload: Mapping[str, Any]) -> None:
         """Record the conditions the action found before it profiled anything.
 
-        These were previously log lines or nothing at all. They are facts about the starting state -- leftover
+        They are facts about the starting state -- leftover
         servers, free disk, trace files already sitting in this task's own output directory -- and they change
         how a later reader should read the result, so the event has to carry them whether or not the run
         succeeded.
         """
         self._record_action({"preflight": dict(payload)})
 
-    def record_profile_run(
+    def _begin_run(self, section: str, attempt_reason: str) -> int:
+        """Allocate the next run index in ``section`` and hold the attempt's start until it ends."""
+        starts = self._run_starts[section]
+        starts.append((str(attempt_reason), _now_iso(), time.monotonic()))
+        return len(starts)
+
+    def _end_run(self, section: str, row_type: str, run_index: int, status: str, fields: Mapping[str, Any]) -> None:
+        """Write the row of an attempt that began, timed from its begin."""
+        attempt_reason, started_at, started_monotonic = self._run_starts[section][run_index - 1]
+        self._sink.record(
+            section,
+            {
+                "task_id": self._task_id,
+                "run_index": run_index,
+                "effective": False,
+                "attempt_reason": attempt_reason,
+                "status": str(status),
+                "start_time": started_at,
+                "end_time": _now_iso(),
+                "duration_sec": round(time.monotonic() - started_monotonic, 3),
+                **fields,
+            },
+            row_type=row_type,
+            natural_ids=(self._action_id, str(run_index)),
+        )
+
+    def begin_profile_run(self, *, attempt_reason: str) -> int:
+        """Start one profile attempt and return its run index; its row is written when it ends."""
+        return self._begin_run(SECTION_PROFILE_RUN, attempt_reason)
+
+    def end_profile_run(
         self,
         *,
         run_index: int,
-        attempt_reason: str,
         status: str,
-        started_at: str,
-        duration_sec: float | None,
         disable_cuda_graph: bool,
         profile_result: dict[str, Any] | None = None,
         failure: dict[str, Any] | None = None,
         server_liveness: Mapping[str, Any] | None = None,
         instrumentation: Mapping[str, Any] | None = None,
     ) -> None:
-        """Record one profile attempt.
+        """Record how one profile attempt ended.
 
         ``server_liveness`` is the post-attempt process-level probe. A run whose trace exported completely and
         whose engine then died is indistinguishable from a clean run by the result dict alone, so the row carries
@@ -566,30 +599,22 @@ class RooflineEventRecorder:
         row rather than folded into ``validate`` because ``validate`` only exists once a trace was produced and
         certified, and the attempts that never got that far are exactly the ones whose patch state is in question.
         """
-        result = _as_dict(profile_result)
-        self._sink.record(
+        self._end_run(
             SECTION_PROFILE_RUN,
+            ROW_PROFILE_RUN,
+            run_index,
+            status,
             {
-                "task_id": self._task_id,
-                "run_index": int(run_index),
-                "effective": False,
-                "attempt_reason": str(attempt_reason),
-                "status": str(status),
-                "start_time": str(started_at or ""),
-                "end_time": _now_iso(),
-                "duration_sec": duration_sec,
                 "disable_cuda_graph": bool(disable_cuda_graph),
                 "failure": failure,
                 "server_liveness": dict(server_liveness) if server_liveness else None,
                 "instrumentation": dict(instrumentation) if instrumentation else None,
-                "validate": _summarize_validate(result),
+                "validate": _summarize_validate(_as_dict(profile_result)),
             },
-            row_type=ROW_PROFILE_RUN,
-            natural_ids=(self._action_id, str(int(run_index))),
         )
-        # An action-level rollup of the per-run flag. Roofline no longer falls back to eager on a capture failure,
+        # An action-level rollup of the per-run flag. Roofline does not fall back to eager on a capture failure,
         # so this only latches when the arm or the operator override asked for graph capture to be off -- which
-        # still matters downstream, because kernel shapes differ between eager and captured execution.
+        # matters downstream, because kernel shapes differ between eager and captured execution.
         if disable_cuda_graph:
             self._record_action({"graph_capture_disabled": True})
 
@@ -628,33 +653,29 @@ class RooflineEventRecorder:
             }
         )
 
-    def record_analysis_run(
+    def begin_analysis_run(self, *, attempt_reason: str) -> int:
+        """Start one trace-analysis attempt and return its run index; its row is written when it ends."""
+        return self._begin_run(SECTION_ANALYSIS_RUN, attempt_reason)
+
+    def end_analysis_run(
         self,
         *,
         run_index: int,
-        attempt_reason: str,
         status: str,
-        started_at: str,
-        duration_sec: float | None,
         trace_input: str,
         requested_steady_state_mode: str = "",
         ta_result: dict[str, Any] | None = None,
         failure: dict[str, Any] | None = None,
     ) -> None:
-        """Record one trace-analysis attempt."""
+        """Record how one trace-analysis attempt ended."""
         result = _as_dict(ta_result)
         meta = _as_dict(result.get("analysis_meta"))
-        self._sink.record(
+        self._end_run(
             SECTION_ANALYSIS_RUN,
+            ROW_ANALYSIS_RUN,
+            run_index,
+            status,
             {
-                "task_id": self._task_id,
-                "run_index": int(run_index),
-                "effective": False,
-                "attempt_reason": str(attempt_reason),
-                "status": str(status),
-                "start_time": str(started_at or ""),
-                "end_time": _now_iso(),
-                "duration_sec": duration_sec,
                 "route": str(meta.get("route") or ""),
                 "tool": str(meta.get("tool") or ""),
                 "requested_steady_state_mode": str(requested_steady_state_mode or meta.get("steady_state_mode") or ""),
@@ -664,8 +685,6 @@ class RooflineEventRecorder:
                 ),
                 "failure": failure,
             },
-            row_type=ROW_ANALYSIS_RUN,
-            natural_ids=(self._action_id, str(int(run_index))),
         )
 
     def adopt_analysis_run(
@@ -960,22 +979,15 @@ def make_roofline_recorder(
     params: dict[str, Any] | None = None,
     owns_event: bool = True,
 ) -> RooflineEventRecorder | None:
-    """Build a recorder, or ``None`` when one cannot be constructed."""
+    """Build a recorder, or ``None`` when ``sink`` is absent."""
     if sink is None:
         return None
-    try:
-        return RooflineEventRecorder(
-            sink,
-            task_id=task_id,
-            task_kind=task_kind,
-            reason=reason,
-            framework=framework,
-            params=params,
-            owns_event=owns_event,
-        )
-    except Exception:  # noqa: BLE001 — observability cannot change roofline behavior
-        log.warning(
-            "roofline timeline: recorder construction failed; this action's facts will be missing from the event",
-            exc_info=True,
-        )
-        return None
+    return RooflineEventRecorder(
+        sink,
+        task_id=task_id,
+        task_kind=task_kind,
+        reason=reason,
+        framework=framework,
+        params=params,
+        owns_event=owns_event,
+    )

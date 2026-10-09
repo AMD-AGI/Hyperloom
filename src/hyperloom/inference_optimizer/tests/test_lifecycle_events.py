@@ -9,8 +9,8 @@ from hyperloom.orchestrator.phases.machine_state import (
     PHASE_KERNEL_AGENT,
     lifecycle_label,
     make_lifecycle_event,
+    record_lifecycle_event,
 )
-from hyperloom.orchestrator.policy.gate import CORE_STATE_FIELDS
 from hyperloom.orchestrator.state.shared_state import (
     _LIFECYCLE_CAP,
     SharedState,
@@ -80,7 +80,8 @@ def test_make_lifecycle_event_omits_duration_when_none():
 def test_record_lifecycle_event_appends_and_defaults_phase():
     s = SharedState(session_id="abc")
     s.phase = PHASE_KERNEL_AGENT
-    row = s.record_lifecycle_event(
+    row = record_lifecycle_event(
+        s,
         step="run_optimization",
         status="START",
         artifacts={"workspace": "/tmp/ws"},
@@ -98,7 +99,8 @@ def test_record_lifecycle_event_appends_and_defaults_phase():
 def test_record_lifecycle_event_explicit_phase_and_label_override():
     s = SharedState(session_id="abc")
     s.phase = PHASE_KERNEL_AGENT
-    row = s.record_lifecycle_event(
+    row = record_lifecycle_event(
+        s,
         step="custom",
         status="END",
         phase="EXPLORE",
@@ -114,7 +116,7 @@ def test_record_lifecycle_event_monotonic_seq_and_cap():
     s = SharedState(session_id="abc")
     total = _LIFECYCLE_CAP + 25
     for i in range(total):
-        s.record_lifecycle_event(step="trace_analyze", status="END", detail=f"#{i}")
+        record_lifecycle_event(s, step="trace_analyze", status="END", detail=f"#{i}")
     # Cap is enforced ...
     assert len(s.lifecycle) == _LIFECYCLE_CAP
     # ... but seq stays monotonic across the trim.
@@ -127,7 +129,8 @@ def test_record_lifecycle_event_monotonic_seq_and_cap():
 def test_lifecycle_persists_round_trip(tmp_path):
     s = SharedState(session_id="abc")
     s.phase = PHASE_KERNEL_AGENT
-    s.record_lifecycle_event(
+    record_lifecycle_event(
+        s,
         step="trace_analyze",
         status="END",
         artifacts={"candidates": "/tmp/kc.json"},
@@ -142,8 +145,3 @@ def test_lifecycle_persists_round_trip(tmp_path):
     assert ev["label"] == "TraceLens"
     assert ev["artifacts"] == {"candidates": "/tmp/kc.json"}
     assert ev["duration_s"] == 42.0
-
-
-def test_lifecycle_is_core_state_field():
-    # An LLM update_state intent must not be able to forge lifecycle events.
-    assert "lifecycle" in CORE_STATE_FIELDS

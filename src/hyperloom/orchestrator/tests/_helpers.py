@@ -73,7 +73,7 @@ def git_commit_all(path: Path, message: str) -> None:
 def patch_integrate_patch_roots(monkeypatch: Any, tmp_path: Path) -> None:
     """Register common tmp_path framework repos as integrate_patch search roots."""
     from hyperloom.orchestrator.actions.executors import integrate_patch as ip
-    from hyperloom.orchestrator.framework import paths as fp
+    from hyperloom.inference_optimizer import framework_paths as fp
 
     real = fp.resolve_kernel_search_roots
 
@@ -89,6 +89,21 @@ def patch_integrate_patch_roots(monkeypatch: Any, tmp_path: Path) -> None:
         return tuple(merged)
 
     monkeypatch.setattr(ip, "resolve_kernel_search_roots", _merged)
+
+
+def integrate_extra(params: dict[str, Any]) -> dict[str, Any]:
+    """The ``ctx.extra`` an integrate_patch task gets from the coordinator, for ``params``.
+
+    An enablement round reads its stack from the SharedState the coordinator
+    always threads in, and passes the Critic gate on a recorded approval.
+    """
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    if not params.get("enablement"):
+        return {}
+    state = SharedState()
+    state.record_specialist_patch_verdict(str(params.get("specialist_task_id") or ""), "approve")
+    return {"shared_state": state}
 
 
 def variant_result(**overrides: Any) -> Any:

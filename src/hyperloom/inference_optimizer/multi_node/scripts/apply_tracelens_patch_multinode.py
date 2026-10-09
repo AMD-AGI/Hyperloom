@@ -5,7 +5,10 @@
 """Multi-node TraceLens SGLang patch fan-out.
 
 Fans out one NodeAffinity-pinned actor per alive pod to apply the
-TraceLens roofline patches where SGLang lives. Each actor resolves the
+TraceLens patches where SGLang lives: the roofline set or
+``sglang_gc_patch``, as chosen by the controller's ``--patch-set`` (when
+omitted, roofline below 0.5.18 and ``sglang_gc_patch`` from 0.5.18 on,
+gated on each pod's own SGLang). Each actor resolves the
 sglang version + apply root, skips if the sentinel markers are already
 present (idempotent), ``git apply --check``s then applies every
 ``$TRACELENS_ROOT/.../sglang_<X_Y_Z>/*.patch`` (rolling back on mid-set
@@ -49,6 +52,22 @@ _PATCH_TREE_REL = (
     "inference_analysis",
     "sglang_roofline_patches",
 )
+_SGLANG_GC_MIN_VERSION: tuple[int, ...] = (0, 5, 18)
+_GC_PATCH_TREE_REL = (
+    "examples",
+    "custom_workflows",
+    "inference_analysis",
+    "sglang_gc_patch",
+)
+_GC_SENTINEL_RELPATH = "python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py"
+_GC_SENTINEL_MARKERS: tuple[str, ...] = (
+    "_set_profile_trace_tag",
+    "_profile_runner_name",
+)
+# ``--patch-set`` values; the controller resolves its shape mode once and passes one of these.
+_PATCH_SET_ROOFLINE = "roofline"
+_PATCH_SET_GRAPH_CAPTURE = "graph-capture"
+_PATCH_SETS: tuple[str, ...] = (_PATCH_SET_ROOFLINE, _PATCH_SET_GRAPH_CAPTURE)
 
 # Per ``git apply`` timeout.
 _GIT_TIMEOUT_SEC = 30
@@ -71,6 +90,53 @@ def _versioned_patches_subdir_name(version: str) -> str | None:
     if not parts or not all(p.isdigit() for p in parts):
         return None
     return "sglang_" + "_".join(parts)
+
+
+def _numeric_version_prefix(version: str) -> tuple[int, ...] | None:
+    """Leading numeric components of a version (``0.5.21.dev1`` -> ``(0, 5, 21)``)."""
+    text = (version or "").strip()
+    if not text:
+        return None
+    head = text.split("-", 1)[0].split("+", 1)[0]
+    numeric: list[int] = []
+    for part in head.split("."):
+        if part.isdigit():
+            numeric.append(int(part))
+        else:
+            break
+    return tuple(numeric) if len(numeric) >= 2 else None
+
+
+def _uses_gc_patch(version: str) -> bool:
+    """Fallback when no ``--patch-set`` is given: mirror the SGLang shape gate from the pod's own env and version."""
+    override = os.environ.get("HYPERLOOM_SGLANG_SHAPE_MODE", "auto").strip().lower()
+    if override in {"patch", "patched"}:
+        return False
+    if override == "sitecustomize":
+        return True
+    running = _numeric_version_prefix(version)
+    return running is not None and running >= _SGLANG_GC_MIN_VERSION
+
+
+def _resolve_gc_patches_dir(patches_root: Path, version: str) -> Path | None:
+    """Exact ``sglang_<X_Y_Z>`` dir (``_sgldev`` first for dev builds), else ``None``.
+
+    No nearest-version fallback: the patch adds an unconditional call to the
+    capture loop, and a newer release may already carry the upstream fix.
+    """
+    running = _numeric_version_prefix(version)
+    if running is None or not patches_root.is_dir():
+        return None
+    base = "sglang_" + "_".join(str(part) for part in running)
+    names = [base]
+    text = version or ""
+    if ".dev" in text or "+g" in text:
+        names = [f"{base}_sgldev", base]
+    for name in names:
+        candidate = patches_root / name
+        if candidate.is_dir() and any(candidate.glob("*.patch")):
+            return candidate
+    return None
 
 
 def _resolve_sglang_install(sglang_module_path: Path) -> tuple[Path, int] | None:
@@ -115,7 +181,7 @@ def _all_markers_present(path: Path, markers: tuple[str, ...]) -> bool:
 def _safe_directory_args(args: tuple[str, ...], cwd: Path) -> list[str]:
     """Prepend a ``safe.directory`` exception for the checkout at ``cwd``."""
     try:
-        from hyperloom.common.git_safety import safe_directory_args  # noqa: PLC0415 - standalone import-light
+        from hyperloom.common.git_safety import safe_directory_args
     except ImportError:
         return list(args)
     return safe_directory_args(list(args), cwd=cwd)
@@ -123,7 +189,7 @@ def _safe_directory_args(args: tuple[str, ...], cwd: Path) -> list[str]:
 
 def _run_git(args: tuple[str, ...], cwd: Path) -> tuple[int, str, str]:
     """Run ``git <args>``; return ``(rc, stdout, stderr)`` (never raises on non-zero exit)."""
-    proc = subprocess.run(  # noqa: S603
+    proc = subprocess.run(
         ["git", *_safe_directory_args(args, cwd)],
         cwd=str(cwd),
         capture_output=True,
@@ -139,8 +205,12 @@ def _apply_on_pod(
     tracelens_root: str,
     tracelens_internal_root: str,
     sglang_version_pin: str | None,
+    patch_set: str | None = None,
 ) -> dict[str, Any]:
-    """Apply (or verify) the TraceLens SGLang patch set on this pod; never raises (failures become ``status=failed``)."""
+    """Apply (or verify) the TraceLens SGLang patch set on this pod; never raises (failures become ``status=failed``).
+
+    ``patch_set`` is the controller's choice and wins over the pod-side gate.
+    """
     host = socket.gethostname()
     started = time.time()
     result: dict[str, Any] = {
@@ -154,7 +224,7 @@ def _apply_on_pod(
     }
     try:
         try:
-            import sglang  # type: ignore  # noqa: I001 - runtime probe
+            import sglang  # type: ignore
         except Exception as e:  # noqa: BLE001
             result["status"] = "failed"
             result["error"] = f"sglang not importable: {e}"
@@ -214,33 +284,50 @@ def _apply_on_pod(
             )
             return result
         apply_root, strip = layout
+        if patch_set:
+            graph_capture = patch_set == _PATCH_SET_GRAPH_CAPTURE
+        else:
+            graph_capture = _uses_gc_patch(version)
+        result["patch_set"] = _PATCH_SET_GRAPH_CAPTURE if graph_capture else _PATCH_SET_ROOFLINE
+        sentinel_rel = _GC_SENTINEL_RELPATH if graph_capture else _SENTINEL_RELPATH
+        sentinel_markers = _GC_SENTINEL_MARKERS if graph_capture else _SENTINEL_MARKERS
         # strip=1: apply_root is the repo root; strip=3: the wheel sglang/ dir.
         if strip == 1:
-            sentinel_path = apply_root / _SENTINEL_RELPATH
+            sentinel_path = apply_root / sentinel_rel
             extra_sentinel = apply_root / _EXTRA_SENTINEL_RELPATH
         else:
-            sentinel_path = apply_root / Path(*Path(_SENTINEL_RELPATH).parts[2:])
+            sentinel_path = apply_root / Path(*Path(sentinel_rel).parts[2:])
             extra_sentinel = apply_root / Path(*Path(_EXTRA_SENTINEL_RELPATH).parts[2:])
 
-        if _all_markers_present(sentinel_path, _SENTINEL_MARKERS) and _all_markers_present(
-            extra_sentinel, _EXTRA_SENTINEL_MARKERS
-        ):
+        extra_ok = graph_capture or _all_markers_present(extra_sentinel, _EXTRA_SENTINEL_MARKERS)
+        if _all_markers_present(sentinel_path, sentinel_markers) and extra_ok:
             result["status"] = "skipped"
             result["patches_skipped_already_present"] = True
             return result
 
-        subdir = _versioned_patches_subdir_name(version)
-        if subdir is None:
-            result["status"] = "failed"
-            result["error"] = f"cannot derive per-version patches subdir from version {version!r}"
-            return result
-        patches_dir = Path(tracelens_root, *_PATCH_TREE_REL, subdir)
-        if not patches_dir.is_dir():
-            result["status"] = "failed"
-            result["error"] = (
-                f"TraceLens patches dir missing: {patches_dir} (upgrade TraceLens to Hyperloom_integration_v0.3.1+)"
-            )
-            return result
+        if graph_capture:
+            patches_dir = _resolve_gc_patches_dir(Path(tracelens_root, *_GC_PATCH_TREE_REL), version)
+            if patches_dir is None:
+                # Not an error: releases without a TraceLens gc set run unpatched.
+                result["status"] = "skipped"
+                result["skip_reason"] = (
+                    f"no sglang_gc_patch set for SGLang {version!r} under {Path(tracelens_root, *_GC_PATCH_TREE_REL)}"
+                )
+                _log(f"{result['skip_reason']}; continuing unpatched")
+                return result
+        else:
+            subdir = _versioned_patches_subdir_name(version)
+            if subdir is None:
+                result["status"] = "failed"
+                result["error"] = f"cannot derive per-version patches subdir from version {version!r}"
+                return result
+            patches_dir = Path(tracelens_root, *_PATCH_TREE_REL, subdir)
+            if not patches_dir.is_dir():
+                result["status"] = "failed"
+                result["error"] = (
+                    f"TraceLens patches dir missing: {patches_dir} (upgrade TraceLens to Hyperloom_integration_v0.3.1+)"
+                )
+                return result
         patches = tuple(sorted(patches_dir.glob("*.patch")))
         if not patches:
             result["status"] = "failed"
@@ -295,6 +382,7 @@ def _fanout_to_all_nodes(
     tracelens_root: str,
     tracelens_internal_root: str,
     sglang_version_pin: str | None,
+    patch_set: str | None = None,
 ) -> list[dict[str, Any]]:
     """Spawn one actor per alive node; collect all summaries."""
     import ray
@@ -321,6 +409,7 @@ def _fanout_to_all_nodes(
                 tracelens_root=tracelens_root,
                 tracelens_internal_root=tracelens_internal_root,
                 sglang_version_pin=sglang_version_pin,
+                patch_set=patch_set,
             )
         )
     results = ray.get(actors)
@@ -345,6 +434,12 @@ def main() -> int:
         "--sglang-version-pin",
         default=os.environ.get("HYPERLOOM_SGLANG_VERSION_PIN", "") or None,
         help="optional advisory pin (e.g. '0.5.11'); logged on mismatch",
+    )
+    parser.add_argument(
+        "--patch-set",
+        choices=_PATCH_SETS,
+        default=None,
+        help="patch set resolved by the controller; when omitted each pod gates on its own SGLang version",
     )
     parser.add_argument(
         "--local",
@@ -387,6 +482,7 @@ def main() -> int:
             tracelens_root=args.tracelens_root,
             tracelens_internal_root=args.tracelens_internal_root,
             sglang_version_pin=args.sglang_version_pin or None,
+            patch_set=args.patch_set,
         )
         overall = r.get("status") if r.get("status") in ("applied", "skipped") else "failed"
         print(json.dumps({"status": overall, "per_pod": [r]}, indent=2, sort_keys=True))
@@ -397,6 +493,7 @@ def main() -> int:
             tracelens_root=args.tracelens_root,
             tracelens_internal_root=args.tracelens_internal_root,
             sglang_version_pin=args.sglang_version_pin or None,
+            patch_set=args.patch_set,
         )
     except Exception as e:  # noqa: BLE001
         print(

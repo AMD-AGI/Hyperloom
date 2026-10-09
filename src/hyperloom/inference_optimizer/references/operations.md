@@ -11,14 +11,24 @@ Credentials must already be in the shell environment: `OPENAI_API_KEY` and
 `INFERENCEX_PATH`, `TRACELENS_ROOT`, `TRACELENS_INTERNAL_ROOT`.
 
 ```bash
-export REPO_ROOT="$(pwd)"
-bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"
-. "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
+set -e
+export REPO_ROOT="$(pwd -P)"
+INSTALL_SH="${REPO_ROOT}/hyperloom/inference_optimizer/assets/install.sh"
+if [ ! -f "$INSTALL_SH" ]; then
+  INSTALL_SH="${REPO_ROOT}/src/hyperloom/inference_optimizer/assets/install.sh"
+fi
+. "${INSTALL_SH%/*}/runtime_env.sh"
+load_dotenv_no_clobber
+export USER_DATA_PATH
+bash "$INSTALL_SH"
 ```
 
-`install.sh` is the only full install entrypoint. Source the generated
-`kernel-agent.env.sh`; do not derive auth aliases, GEAK paths, or InferenceX
-paths by hand. Do not manually repair `$USER_DATA_PATH/runtime/` or
+`install.sh` is the only full install entrypoint. CLI preflight reads the generated
+`kernel-agent.env.sh` in-process; do not source it in the launch shell or derive
+auth aliases, GEAK paths, or InferenceX paths by hand. `runtime_env.sh` only fills
+missing or empty shell values from workspace `.env`, without executing its contents.
+In Docker mode, it excludes dotenv-provided Python/venv pins but preserves explicit
+shell selections. Do not manually repair `$USER_DATA_PATH/runtime/` or
 `${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/`.
 
 Optionally write `<session_dir>/model_arch.json` if the architecture is known.
@@ -28,7 +38,7 @@ It is advisory only; skip rather than guessing. Do not write the file at the
 ## Launch Flags
 
 ```bash
-python3 -m hyperloom.inference_optimizer.cli optimize \
+python3 -m hyperloom optimize \
   --model "$MODEL_PATH" \
   --framework vllm \
   --gpu-type MI300X \
@@ -51,25 +61,23 @@ python3 -m hyperloom.inference_optimizer.cli optimize \
 After IR-2, smoke-test the CLI in the same shell:
 
 ```bash
-export HYPERLOOM_KERNEL_AGENT_ROOT="$REPO_ROOT/src/hyperloom/agents/kernel"
-export KERNEL_AGENT_ROOT="$HYPERLOOM_KERNEL_AGENT_ROOT"
 export WORKSPACE_PATH="${WORKSPACE_PATH:-/workspace}"
 export PYTHON="${PYTHON:-$(command -v python3)}"
 export PATH="$(dirname "$PYTHON"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
-"$PYTHON" -m hyperloom.inference_optimizer.cli --help
+"$PYTHON" -m hyperloom optimize --help
 ```
 
 Then run the outer launcher preflight (IR-1):
 
 ```bash
-"$PYTHON" "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/preflight_optimizer.py" "$MODEL_PATH" \
+"$PYTHON" -m hyperloom check "$MODEL_PATH" \
   || { echo "preflight failed — aborting launch"; exit 1; }
 ```
 
 A non-zero exit indicates GPU occupancy above the allowed threshold, a stale
 serving process, or an unreadable GPU state. Do not continue to
-`python -m hyperloom.inference_optimizer.cli optimize` in any of these cases.
+`python -m hyperloom optimize` in any of these cases.
 
 Do not manually pip-install SDKs, start Ray, or
 `curl /v1/models` unless debugging a failed preflight. `_preflight()` and
@@ -88,14 +96,17 @@ sessions on different pods share `$USER_DATA_PATH` via WekaFS; a single file
 causes MODEL_PATH race conditions where sessions launch the wrong model.
 
 ```bash
+set -e
 cd "$REPO_ROOT"
-# .env fills gaps only: re-exporting the non-empty pre-source snapshot keeps every
-# value the caller exported. Wider than install.sh, which guards a fixed list.
-_dotenv_prev="$(export -p | grep -v -e '=""$' -e "=''\$")"
-if [ -f "$REPO_ROOT/.env" ]; then set -a; . "$REPO_ROOT/.env"; set +a; fi
-eval "$_dotenv_prev"
-unset _dotenv_prev
-. "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
+INSTALL_SH="${REPO_ROOT}/hyperloom/inference_optimizer/assets/install.sh"
+if [ ! -f "$INSTALL_SH" ]; then
+  INSTALL_SH="${REPO_ROOT}/src/hyperloom/inference_optimizer/assets/install.sh"
+fi
+. "${INSTALL_SH%/*}/runtime_env.sh"
+load_dotenv_no_clobber
+export USER_DATA_PATH
+# Resolve the launch interpreter in this shell; preflight loads generated runtime state.
+export PYTHON="${PYTHON:-$(command -v python3)}"
 export PATH="$(dirname "$PYTHON"):/usr/local/bin:$PATH"
 export RUN_TAG="$(basename "$MODEL_PATH")-$(date +%Y%m%d_%H%M%S)"
 export RUN_DIR="${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs"
@@ -114,7 +125,7 @@ export RUN_ENV="$RUN_DIR/run_env_${CLAW_SESSION_ID:-$(hostname)}.sh"
 printf 'export RUN_TAG=%q RUN_DIR=%q RUN_LOG=%q PID_FILE=%q LAUNCH_INFO_FILE=%q\n' \
   "$RUN_TAG" "$RUN_DIR" "$RUN_LOG" "$PID_FILE" "$LAUNCH_INFO_FILE" > "$RUN_ENV"
 
-python3 -m hyperloom.inference_optimizer.cli --verbose optimize \
+python3 -m hyperloom optimize --verbose \
   --model "$MODEL_PATH" \
   --framework "${FRAMEWORK:-sglang}" \
   --target-gain "${TARGET_GAIN:-10}" \
@@ -167,7 +178,7 @@ if [ -z "$REAL_PID" ]; then
   # the pattern matches all of them and nothing in it ties a hit to this run.
   # Accept it only when unambiguous; never `head -1` a multi-hit list, which
   # silently adopts another session's pid and reports the wrong process.
-  MATCHES="$(pgrep -f 'hyperloom.inference_optimizer.cli .*optimize' || true)"
+  MATCHES="$(pgrep -f 'hyperloom optimize' || true)"
   N_MATCHES="$(printf '%s\n' "$MATCHES" | grep -c . || true)"
   if [ "$N_MATCHES" = "1" ]; then
     REAL_PID="$MATCHES"
@@ -233,9 +244,9 @@ RUN_ENV="${RUN_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs/run_e
 read_json() { python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get(sys.argv[2],''))" "$1" "$2" 2>/dev/null; }
 export SESSION_DIR="$(read_json "$LAUNCH_INFO_FILE" session_dir)"
 test -n "$SESSION_DIR"
-"$PYTHON" "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/read_optimizer_state.py" "$SESSION_DIR"
-python3 "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/event_counts.py" "$SESSION_DIR"
+"$PYTHON" -m hyperloom session state "$SESSION_DIR"
+python3 -m hyperloom session events "$SESSION_DIR"
 ```
 
-Surface lifecycle lines from `read_optimizer_state.py` in chat verbatim. For
+Surface lifecycle lines from `hyperloom session state` in chat verbatim. For
 `stop_reason` meanings, read `troubleshooting.md`.

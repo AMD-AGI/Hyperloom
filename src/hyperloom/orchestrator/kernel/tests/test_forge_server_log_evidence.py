@@ -219,14 +219,7 @@ class TestTheWrapperForwardsTheNewInputs:
         ],
     )
     def test_a_populated_field_reaches_the_forge_cli(self, key, flag):
-        import importlib.util
-
-        spec = importlib.util.spec_from_file_location(
-            "_fgt",
-            Path(rh.__file__).parents[2] / "agents" / "kernel" / "tools" / "forge_gemm_tuning.py",
-        )
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
+        from hyperloom.orchestrator.kernel import forge_gemm_tuning as mod
 
         base = {
             "model_path": "/m",
@@ -259,15 +252,14 @@ class TestTokensAreDerivedBeforeTheMoeCsvIsBuilt:
             seen["tokens"] = tokens
             raise _StopHere
 
-        from hyperloom.common import model_paths
+        from hyperloom.common import model_paths, visible_devices
         from hyperloom.inference_optimizer import model_config_utils
-        from hyperloom.orchestrator.policy import gate
 
         monkeypatch.setattr(rh, "_forge_gemm_tune_available", lambda: True)
         monkeypatch.setattr(rh, "_resolve_forge_precision_and_quant", lambda *_a, **_k: ("bf16", ""))
         monkeypatch.setattr(model_paths, "resolve_serving_model_path", lambda p: str(p))
         monkeypatch.setattr(model_config_utils, "resolve_local_model_dir", lambda _p: model_dir)
-        monkeypatch.setattr(gate, "detect_gpu_count", lambda: 8)
+        monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 8)
         monkeypatch.setattr(rh, "_resolve_forge_shapes", lambda *_a, **_k: "")
         monkeypatch.setattr(rh, "_resolve_forge_untuned_csv", lambda *_a, **_k: "")
         monkeypatch.setattr(rh, "_write_fmoe_untuned_csv_from_log", _writer)
@@ -296,15 +288,14 @@ class TestTokensAreDerivedBeforeTheMoeCsvIsBuilt:
             seen["tokens"] = tokens
             raise _StopHere
 
-        from hyperloom.common import model_paths
+        from hyperloom.common import model_paths, visible_devices
         from hyperloom.inference_optimizer import model_config_utils
-        from hyperloom.orchestrator.policy import gate
 
         monkeypatch.setattr(rh, "_forge_gemm_tune_available", lambda: True)
         monkeypatch.setattr(rh, "_resolve_forge_precision_and_quant", lambda *_a, **_k: ("bf16", ""))
         monkeypatch.setattr(model_paths, "resolve_serving_model_path", lambda p: str(p))
         monkeypatch.setattr(model_config_utils, "resolve_local_model_dir", lambda _p: model_dir)
-        monkeypatch.setattr(gate, "detect_gpu_count", lambda: 8)
+        monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 8)
         monkeypatch.setattr(rh, "_resolve_forge_shapes", lambda *_a, **_k: "")
         monkeypatch.setattr(rh, "_resolve_forge_untuned_csv", lambda *_a, **_k: "")
         monkeypatch.setattr(rh, "_write_fmoe_untuned_csv_from_log", _writer)

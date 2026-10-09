@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common.env import EnvValueError, env_bool
 from hyperloom.inference_optimizer.cli import parser as cli_parser
 from hyperloom.inference_optimizer.cli import bootstrap as cli_bootstrap
 from hyperloom.inference_optimizer.cli import quantization as cli_quantization
@@ -233,18 +234,18 @@ def test_adapter_partial_with_model_returns_dir(tmp_path, monkeypatch):
     assert out == str(tmp_path / "q")
 
 
-def test_adapter_partial_without_model_exits_3(tmp_path, monkeypatch):
+def test_adapter_partial_without_model_exits_4(tmp_path, monkeypatch):
     _patch_quantize(monkeypatch, _fake_result("partial", None, final="must_validate_skipped"))
     with pytest.raises(SystemExit) as ei:
         asyncio.run(qrh.run_quantization_prelude_async(prompt="fp8", source_model="/m", workspace=tmp_path))
-    assert ei.value.code == 3
+    assert ei.value.code == 4
 
 
-def test_adapter_failed_exits_3(tmp_path, monkeypatch):
+def test_adapter_failed_exits_4(tmp_path, monkeypatch):
     _patch_quantize(monkeypatch, _fake_result("failed", None, final="exec_model_load_failed"))
     with pytest.raises(SystemExit) as ei:
         asyncio.run(qrh.run_quantization_prelude_async(prompt="fp8", source_model="/m", workspace=tmp_path))
-    assert ei.value.code == 3
+    assert ei.value.code == 4
 
 
 # Group C — cli prelude hook
@@ -453,12 +454,19 @@ def test_prelude_env_gate_skips_when_unset(monkeypatch):
     assert str(args.model) == "/models/src"
 
 
-def test_quantization_enabled_via_env_helper(monkeypatch):
+def test_quantize_switch_token_vocabulary(monkeypatch):
     for v in ("1", "true", "TRUE", "yes", "on", "On", " 1 "):
         monkeypatch.setenv("HYPERLOOM_QUANTIZE_ENABLED", v)
-        assert cli_quantization._quantization_enabled_via_env() is True
-    for v in ("0", "false", "no", "off", "", "bogus"):
+        assert env_bool("HYPERLOOM_QUANTIZE_ENABLED") is True
+    for v in ("0", "false", "no", "off", ""):
         monkeypatch.setenv("HYPERLOOM_QUANTIZE_ENABLED", v)
-        assert cli_quantization._quantization_enabled_via_env() is False
+        assert env_bool("HYPERLOOM_QUANTIZE_ENABLED") is False
     monkeypatch.delenv("HYPERLOOM_QUANTIZE_ENABLED", raising=False)
-    assert cli_quantization._quantization_enabled_via_env() is False
+    assert env_bool("HYPERLOOM_QUANTIZE_ENABLED") is False
+
+
+def test_an_unreadable_quantize_switch_is_not_silently_off(monkeypatch):
+    """Publishing an unquantized model as quantized is worse than refusing to start."""
+    monkeypatch.setenv("HYPERLOOM_QUANTIZE_ENABLED", "bogus")
+    with pytest.raises(EnvValueError, match="HYPERLOOM_QUANTIZE_ENABLED"):
+        env_bool("HYPERLOOM_QUANTIZE_ENABLED")

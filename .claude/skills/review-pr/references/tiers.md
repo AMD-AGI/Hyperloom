@@ -6,8 +6,8 @@ a failure surfaces, not by file size or churn.
 | Tier | File | Blast radius / failure mode |
 |---|---|---|
 | 1 | `inference_optimizer/cli/__init__.py` | Eagerly imports Coordinator, executors, `_workload_envs`, `ACTION_CATALOGUE`. Any ImportError in that chain kills the run before a session dir exists |
-| 1 | `orchestrator/loop/coordinator.py` | Holds `_COLLAB_MODULES`, the name map for 21 collaborators. A bad entry is an `AttributeError` hours in, not at import |
-| 1 | `orchestrator/state/shared_state.py` | Sole writer of `state.json`, enforces `CORE_STATE_FIELDS`. A dropped field silently changes what every phase reads, and what `--resume-from` can interpret |
+| 1 | `orchestrator/loop/coordinator.py` | Coordinator wires 23 collaborator properties. A missing property or wrong factory is an `AttributeError` hours in, not at import |
+| 1 | `orchestrator/state/shared_state.py` | Sole writer of `state.json` and the only owner of its field set. A dropped field silently changes what every phase reads, and what `--resume-from` can interpret |
 | 1 | `orchestrator/loop/writeback.py` | The one path turning a measurement into KEEP/REVERT + KB record. A win recorded as a regression, or nothing persisted and no error |
 | 1 | `orchestrator/phases/machine_state.py` | Phase identifiers, ordering, budget redistribution, exit scan. Stall in a phase forever, or wrong budget math for all phases at once |
 | 1 | `orchestrator/loop/dispatcher.py` | In-flight table, deadlines, cancellation. Actions never retire, GPU lanes never free, subprocesses leak past session end |
@@ -22,7 +22,7 @@ a failure surfaces, not by file size or churn.
 | 2 | `protocol/intent.py` | Severity/verdict frozensets deliberately duplicated from `agents/critic/runtime/intent_envelope.py`. Change one copy and the emitter produces intents the transport rejects |
 | 2 | `common/llm_config.py`, `common/perf_metric.py` | Gateway env resolution and client construction for every role; `graded_axes_of` is what the phase handlers and writeback grade against |
 | 2 | `breakdown/schema.py` | Typed shape of the persisted `session_breakdown.json`. Zero import fan-in, so nothing catches writer/reader drift |
-| 2 | `orchestrator/framework/paths.py` | Three non-interchangeable resolvers. Patches land in the wrong tree, or the session optimizes a tree it is not measuring |
+| 2 | `inference_optimizer/framework_paths.py` | Three non-interchangeable resolvers. Patches land in the wrong tree, or the session optimizes a tree it is not measuring |
 | 2 | `kernelforge/cli.py`, `kernelforge/config.py` | Dispatched as `python -m kernelforge.cli` — a subprocess contract |
 | 3 | everything else | one phase handler, one executor helper, one agent tool, one KB view |
 
@@ -31,14 +31,14 @@ a failure surfaces, not by file size or churn.
 Applies to new files too.
 
 ```
-Q1 — If this file raises at import time, does `inference_optimizer optimize`
+Q1 — If this file raises at import time, does `hyperloom optimize`
      still reach the point of creating a session directory?
      (cli/__init__.py imports Coordinator, executors, _workload_envs,
      ACTION_CATALOGUE at module level — so most of orchestrator/ is in
      that chain.)                                     → NO  → Tier 1
 
 Q1b — Is it reached not by import but by NAME at runtime — an entry in
-     Coordinator._COLLAB_MODULES, KERNEL_REQUEST_HANDLERS, or the
+     a coordinator collaborator property, KERNEL_REQUEST_HANDLERS, or the
      action catalogue? Name-resolved wiring fails mid-session, not at
      startup, so it is Tier 1 even though nothing imports it.
                                                       → YES → Tier 1
@@ -66,6 +66,6 @@ Otherwise → Tier 3 (one phase handler, one executor helper, one agent
 tool, one KB view).
 ```
 
-Q1b is the one that bites here. `Coordinator` resolves its 21 collaborators by string through a
-metaclass `__getattr__`, so a rename passes every import check, passes lint, passes collection, and
-fails only hours into a session when that phase is entered. Grep the string, not the symbol.
+Q1b is the one that bites here. `Coordinator` exposes 23 collaborator properties. A renamed
+collaborator class or wrong factory argument fails hours into a session when that phase is entered.
+Grep the class name, not just the symbol.

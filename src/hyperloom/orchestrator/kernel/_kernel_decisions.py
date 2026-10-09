@@ -11,7 +11,10 @@ import logging
 import os
 from typing import Any
 
-from hyperloom.common.env import env_bool
+from kernelforge.knowledge.kb_store.identity.implementation import normalize_operator_name
+from kernelforge.knowledge.kb_store.identity.kernel_recipe import KERNEL_RECIPE_PRODUCERS
+
+from hyperloom.common.env import env_flag
 
 from .patch_landing import (
     DEFAULT_PATCH_BUDGET,
@@ -21,17 +24,15 @@ from .patch_landing import (
     patch_budget,
     record_source_path,
 )
+from hyperloom.common.timeutil import now_iso as _now_iso
 from ..state.kernel_decision_settings import (
     _DEFAULT_ATTEMPTS_HISTORY,
     _DEFAULT_HOT_KERNEL_GATE_TOP_N,
     _MAX_INTEGRATE_FAULT_ATTEMPTS,
-    _now_iso,
     effective_hot_kernel_gpu_pct,
     effective_hot_kernel_min_gpu_pct,
     resolve_hot_kernel_min_gpu_pct,
 )
-from ..trace.trace_env import env_flag
-
 
 log = logging.getLogger(__name__)
 
@@ -52,7 +53,7 @@ _HONEST_E2E_UMBRELLA_ENV = "HL_HONEST_E2E"
 
 def _honest_flag(specific_env: str) -> bool:
     """Resolve a per-fix honest-E2E flag against the umbrella flag."""
-    return env_flag(specific_env, default=env_bool(_HONEST_E2E_UMBRELLA_ENV, True))
+    return env_flag(specific_env, default=env_flag(_HONEST_E2E_UMBRELLA_ENV, default=True))
 
 
 def _stable_kernel_task_key(
@@ -111,9 +112,8 @@ def _queue_kernel_keep(
 ) -> dict[str, Any] | None:
     """Persist one KEEP patch snapshot without coupling it to an ordinal slot."""
     if entry.get("vendor_playbook_deploy_blocked"):
-        # A vendor-playbook KEEP has no deployable artifact -- see Refusing to queue it here means
-        # _auto_enqueue_pending_integrations() never dispatches an integrate for it; integrate_handler() still checks
-        # this flag independently for an LLM-initiated request that names the kernel_id directly.
+        # A vendor-playbook KEEP has no deployable artifact -- refusing to queue it here means
+        # integrate_handler() only runs for an LLM-initiated request that names the kernel_id directly.
         return None
     decision = str(entry.get("last_decision") or "").upper()
     try:
@@ -392,8 +392,8 @@ def pending_kernel_integration_records(state) -> list[dict[str, Any]]:
                 source_file=source_file,
                 task_group_aliases=task_group_aliases,
             )
-            # Match only on a real patch_path: an attempted entry with a blank patch_path used to match {"",
-            # artifact_path}, so one empty-path attempt dropped the whole sibling family from the pending list.
+            # Match only on a real patch_path: an attempted entry with a blank patch_path would match {"",
+            # artifact_path}, and one empty-path attempt would drop the whole sibling family from the pending list.
             and (not artifact_path or str(attempted.get("patch_path") or "") == artifact_path)
             for attempted in attempted_entries
         ):
@@ -705,6 +705,43 @@ def _source_files_in_optimization_stack(state) -> set[str]:
     return sources
 
 
+def _canonical_kernel_recipe_operator(kernel_id: str) -> str:
+    """The ``kernel_name`` dimension out of a ``kernel:<producer>:<kernel_name>:...`` id, or ``\"\"`` when ``kernel_id`` is not that scheme.
+
+    forge-loop / flydsl / fusion land their integrations under this six-dimension recipe id (see
+    ``kernelforge.knowledge.kb_store.identity.kernel_recipe``), not the roofline trace's synthetic ``kNNN`` id. The ``kernel_name``
+    dimension is already ``normalize_operator_name``-clean at write time, so it is returned as-is.
+    """
+    parts = str(kernel_id or "").split(":")
+    if len(parts) != 7 or parts[0] != "kernel" or parts[1] not in KERNEL_RECIPE_PRODUCERS:
+        return ""
+    return parts[2]
+
+
+def _forge_loop_entries_by_operator_in_optimization_stack(state) -> dict[str, dict[str, Any]]:
+    """Map normalized operator name -> its integrating optimization_stack entry (forge-loop/flydsl/fusion).
+
+    These lanes key their ``optimization_stack`` entries by the long-form recipe id
+    (``kernel:forge-loop:<operator>:<framework>:<framework_version>:<backend>:<gpu>``), which never equals a roofline
+    trace's synthetic ``kNNN`` kernel_id even though both name the same kernel. Comparing on the operator name — run
+    through the same ``normalize_operator_name`` the recipe id was built with — is the one identity the two sides
+    share.
+    """
+    entries: dict[str, dict[str, Any]] = {}
+    for e in state.optimization_stack or []:
+        if not isinstance(e, dict) or e.get("action") not in INTEGRATING_STACK_ACTIONS:
+            continue
+        operator = _canonical_kernel_recipe_operator(str(e.get("kernel_id") or ""))
+        if operator:
+            entries[normalize_operator_name(operator)] = e
+    return entries
+
+
+def _forge_loop_operators_in_optimization_stack(state) -> set[str]:
+    """Normalized operator names an integrating kernel-recipe lane has already landed; see the sibling ``_entries`` function."""
+    return set(_forge_loop_entries_by_operator_in_optimization_stack(state))
+
+
 def _record_matches_task(
     record: dict[str, Any],
     *,
@@ -850,7 +887,7 @@ def untried_hot_reusable_kernels(
     min_gpu_pct: float | None = None,
     top_n: int | None = None,
 ) -> list[str]:
-    """Hot kernels still owing a ``kernel_opt`` attempt (reusable, gpu_pct >= min_gpu_pct, untouched); capped to top_n by gpu_pct, one kernel_id per task_group."""
+    """Hot kernels still owing a ``kernel_opt`` attempt (reusable, gpu_pct >= min_gpu_pct, untouched); capped to top_n by TraceLens rank, one kernel_id per task_group."""
     info = state.last_trace_analyze or {}
     hot = info.get("hot_kernels_top15") or info.get("hot_kernels") or []
     task_groups = info.get("task_groups") or []
@@ -892,12 +929,14 @@ def untried_hot_reusable_kernels(
         for entry in (state.optimization_stack or [])
         if isinstance(entry, dict) and entry.get("action") in INTEGRATING_STACK_ACTIONS
     ]
+    integrated_operators = _forge_loop_operators_in_optimization_stack(state)
     rejected = set(state.rejected_kernel_ids or [])
     _ensure_kernel_task_state(state)
     attempts = state.kernel_opt_task_attempts or {}
 
-    # Sort by gpu_pct desc so dedup picks the strongest member of each task_group.
-    rows: list[tuple[float, str, str, list[str], str, tuple[str, str, float]]] = []
+    # TraceLens' order: task priority, then member impact. Rows it never ranked (bypass route, injected collectives)
+    # follow in emitted order under their own top_n, so they cannot fall behind TraceLens' cap.
+    rows: list[tuple[tuple[bool, int, float], str, str, list[str], str, tuple[str, str, float]]] = []
     for k in hot:
         if not isinstance(k, dict):
             continue
@@ -924,10 +963,12 @@ def untried_hot_reusable_kernels(
         group_key = group_info[1] if group_info else ""
         # Identity of the underlying kernel, independent of the synthetic per-row kernel_id.
         identity = (src, str(k.get("name") or k.get("operation") or ""), gpu_pct)
-        rows.append((gpu_pct, kid, src, members, group_key, identity))
-    rows.sort(key=lambda x: x[0], reverse=True)
+        rank = int(k.get("tracelens_pitem_rank") or 0)
+        order = (rank <= 0, rank, -float(k.get("impact_score") or 0.0))
+        rows.append((order, kid, src, members, group_key, identity))
+    rows.sort(key=lambda x: x[0])
 
-    ranked: list[tuple[float, str, str, list[str], str, tuple[str, str, float]]] = []
+    ranked: list[tuple[tuple[bool, int, float], str, str, list[str], str, tuple[str, str, float]]] = []
     seen_groups: set[str | tuple[str, ...]] = set()
     seen_identities: set[tuple[str, str, float]] = set()
     for row in rows:
@@ -944,7 +985,7 @@ def untried_hot_reusable_kernels(
             seen_identities.add(identity)
         seen_groups.add(dedup_key)
         ranked.append(row)
-    ranked = ranked[:top_n]
+    ranked = [r for r in ranked if not r[0][0]][:top_n] + [r for r in ranked if r[0][0]][:top_n]
 
     untried: list[str] = []
 
@@ -994,7 +1035,7 @@ def untried_hot_reusable_kernels(
         recorded_source = str(attempt.get("last_source_file") or "")
         return not source or not recorded_source or source == recorded_source
 
-    for _pct, kid, src, members, group_key, _identity in ranked:
+    for _order, kid, src, members, group_key, _identity in ranked:
         if members and all(
             _member_is_rejected(member) and _matches_current_task(member, group_key, src) for member in members
         ):
@@ -1012,6 +1053,11 @@ def untried_hot_reusable_kernels(
         ):
             continue
         if src and src in integrated_sources:
+            continue
+        # A kernel-recipe lane (forge-loop/flydsl/fusion) landed under its own long-form recipe id, which never
+        # equals this row's synthetic kNNN id or its trace source_file -- see _forge_loop_operators_in_optimization_stack.
+        row_name = str(_identity[1] or "")
+        if row_name and normalize_operator_name(row_name) in integrated_operators:
             continue
         stable_attempt = next(
             (

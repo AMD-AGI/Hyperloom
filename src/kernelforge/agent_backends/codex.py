@@ -123,13 +123,12 @@ def resolve_codex_reasoning_effort(explicit: str = "") -> str:
 
     ``max`` is a level of the shared vocabulary that this protocol cannot be
     told by name, so it arrives here as ``xhigh`` -- the deepest the gateway
-    has. The projection is shared rather than local to this backend: when it
-    lived here only, the same ``max`` reaching Hyperloom's own chat.completions
-    was a 400.
+    has. The projection is shared rather than local to this backend, so the
+    same ``max`` reaching Hyperloom's own chat.completions is projected too.
 
-    Anything off the ladder is refused loudly. An unrecognized effort used to
-    travel into the run and come back a 400 mid-campaign, hours after it
-    started with a typo nobody had a reason to look at.
+    Anything off the ladder is refused loudly, before the run starts: an
+    unrecognized effort would otherwise travel into the run and come back a 400
+    mid-campaign, hours after a typo nobody had a reason to look at.
     """
     effort = gateway_reasoning_effort(explicit or DEFAULT_REASONING_EFFORT)
     if not effort:
@@ -663,7 +662,7 @@ class CodexBackend:
             """Run the blocking SDK turn in a bounded daemon thread."""
             try:
                 outcome["result"] = turn.run()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - SDK turn runs in a worker thread
                 outcome["error"] = exc
             finally:
                 completed.set()
@@ -692,7 +691,7 @@ class CodexBackend:
                 )
                 worker.start()
                 if not completed.wait(timeout_sec):
-                    with contextlib.suppress(Exception):
+                    with contextlib.suppress(Exception):  # broad-suppress: interrupt must not shadow the timeout
                         turn.interrupt()
                     raise CodexUnavailableError(f"Codex gateway precheck timed out after {timeout_sec}s")
                 if "error" in outcome:
@@ -764,19 +763,19 @@ class CodexBackend:
                             timeout=spec.timeout_sec,
                         )
                     except asyncio.CancelledError:
-                        with contextlib.suppress(Exception):
+                        with contextlib.suppress(Exception):  # broad-suppress: SDK teardown
                             await asyncio.wait_for(
                                 turn_handle.interrupt(),
                                 timeout=5,
                             )
                         raise
                     if not completed:
-                        with contextlib.suppress(Exception):
+                        with contextlib.suppress(Exception):  # broad-suppress: SDK teardown
                             await asyncio.wait_for(
                                 turn_handle.interrupt(),
                                 timeout=5,
                             )
-                        with contextlib.suppress(Exception):
+                        with contextlib.suppress(Exception):  # broad-suppress: SDK teardown
                             await asyncio.wait_for(
                                 asyncio.shield(turn_task),
                                 timeout=5,
@@ -803,7 +802,7 @@ class CodexBackend:
         finally:
             if turn_task is not None and not turn_task.done():
                 turn_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
+                with contextlib.suppress(asyncio.CancelledError, Exception):  # broad-suppress: reaping a cancelled task
                     _ = await turn_task
 
         result = _normalize_sdk_result(sdk_result, thread_id)
@@ -819,7 +818,7 @@ class CodexBackend:
         except Exception:
             # verify() restores the baseline itself before raising a rejection, so this second call only covers the
             # paths that fail before it gets there.
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(Exception):  # broad-suppress: rollback must not shadow the verify error
                 guard.rollback()
             raise
         result.file_changes = actual_changes

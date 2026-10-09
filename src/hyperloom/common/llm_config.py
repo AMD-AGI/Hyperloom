@@ -5,10 +5,8 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import os
-import re
 import sys
 from dataclasses import dataclass
 from typing import Iterable, Mapping, Sequence
@@ -19,7 +17,15 @@ from hyperloom.common.env import is_truthy
 from hyperloom.common.llm_attribution import call_headers as _attribution_headers
 from hyperloom.common.llm_attribution import gateway_selected as _gateway_selected
 from hyperloom.common.llm_attribution import inject_env as _inject_attribution_env
+from hyperloom.common.llm_headers import expand_env_refs, parse_custom_headers
+from hyperloom.common.llm_request_hooks import (
+    PROTOCOL_ANTHROPIC_MESSAGES,
+    PROTOCOL_OPENAI_CHAT,
+    RequestObservation,
+    observed_request,
+)
 from hyperloom.common.reasoning_effort import gateway_reasoning_effort
+from hyperloom.common.token_usage import uncached_input_tokens
 
 log = logging.getLogger(__name__)
 
@@ -99,6 +105,20 @@ def anthropic_synthesizable_key(env: Mapping[str, str] | None = None) -> str:
         ANTHROPIC_SYNTHESIZABLE_KEY_ENVS,
         env if env is not None else os.environ,
     )
+
+
+def with_synthesized_anthropic_keys(env: Mapping[str, str]) -> dict[str, str]:
+    """Copy of *env* whose missing Anthropic API key or auth token is filled from the other one.
+
+    Only the synthesizable subset: an OAuth token copied into either API-key var would drop the CLI out of
+    subscription mode and 401 the run.
+    """
+    source = dict(env)
+    fallback_key = anthropic_synthesizable_key(source)
+    if fallback_key:
+        source.setdefault("ANTHROPIC_API_KEY", fallback_key)
+        source.setdefault("ANTHROPIC_AUTH_TOKEN", fallback_key)
+    return source
 
 
 CLAUDE_GATEWAY_SIGNAL_KEYS: tuple[str, ...] = (
@@ -263,7 +283,6 @@ DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 # The Anthropic Messages API version, defined once for the whole repository.
 DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
 _ANTHROPIC_MESSAGES_PATH = "/v1/messages"
-_ENV_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
 def _is_dual_protocol_host(url: str | None) -> bool:
@@ -368,41 +387,6 @@ def resolve_forge_llm_model(
     if backend == AGENT_BACKEND_CODEX:
         return str(source.get("CODEX_MODEL") or "").strip() or DEFAULT_CODEX_MODEL
     return str(source.get("CLAUDE_MODEL") or "").strip() or DEFAULT_CLAUDE_MODEL
-
-
-def _expand_env_refs(raw: str, env: Mapping[str, str] | None = None) -> str:
-    source = env if env is not None else os.environ
-
-    def repl(match: re.Match[str]) -> str:
-        return str(source.get(match.group(1), ""))
-
-    return _ENV_REF_RE.sub(repl, raw)
-
-
-def parse_custom_headers(raw: str | None, *, env: Mapping[str, str] | None = None) -> dict[str, str]:
-    """Parse custom LLM headers from env."""
-    if not raw:
-        return {}
-    expanded = _expand_env_refs(raw, env)
-    text = expanded.strip()
-    if not text:
-        return {}
-    if text.startswith(("{", "[")):
-        try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError:
-            parsed = None
-        if parsed is not None:
-            if isinstance(parsed, dict):
-                return {str(k).strip(): str(v).strip() for k, v in parsed.items() if str(k).strip()}
-            return {}
-
-    headers: dict[str, str] = {}
-    for line in expanded.splitlines():
-        name, sep, value = line.partition(":")
-        if sep and name.strip():
-            headers[name.strip()] = value.strip()
-    return headers
 
 
 def derive_openai_base_url(anthropic_base_url: str | None) -> str | None:
@@ -642,15 +626,10 @@ def claude_sdk_env_options(
     if not any((source.get(key) or "").strip() for key in CLAUDE_GATEWAY_SIGNAL_KEYS):
         return {}
 
-    # Anthropic-side credentials only, and only the synthesizable subset: an OAuth token copied into either API-key
-    # var would drop the CLI out of subscription mode and 401 the run.
-    fallback_key = anthropic_synthesizable_key(source)
-    if fallback_key:
-        source.setdefault("ANTHROPIC_API_KEY", fallback_key)
-        source.setdefault("ANTHROPIC_AUTH_TOKEN", fallback_key)
+    source = with_synthesized_anthropic_keys(source)
     # Claude/Anthropic side reads only ANTHROPIC_CUSTOM_HEADERS.
     if source.get("ANTHROPIC_CUSTOM_HEADERS"):
-        source["ANTHROPIC_CUSTOM_HEADERS"] = _expand_env_refs(source["ANTHROPIC_CUSTOM_HEADERS"], source)
+        source["ANTHROPIC_CUSTOM_HEADERS"] = expand_env_refs(source["ANTHROPIC_CUSTOM_HEADERS"], source)
     # Disable the advisor-tool beta header by default since strict gateways reject it.
     source.setdefault("CLAUDE_CODE_DISABLE_ADVISOR_TOOL", "1")
     if model:
@@ -741,6 +720,18 @@ def _tag_request(params: dict[str, object], component: str, operation: str = "")
     return params
 
 
+def _observe_chat(observation: RequestObservation, resp: object) -> ChatCompletionResult:
+    """Fold one chat-completions response onto ``observation``, then flatten it."""
+    result = _chat_completion_result(resp)
+    observation.update(
+        response_id=_sdk_field(resp, "id"),
+        model=_sdk_field(resp, "model"),
+        stop_reason=result.finish_reason,
+        usage=_openai_usage_counts(result.usage),
+    )
+    return result
+
+
 def chat_completion(
     client: object,
     *,
@@ -749,7 +740,11 @@ def chat_completion(
     **params: object,
 ) -> ChatCompletionResult:
     """Non-streaming chat completion; returns text, finish reason and usage."""
-    return _chat_completion_result(client.chat.completions.create(**_tag_request(params, component, operation)))  # type: ignore[union-attr]
+    with observed_request(
+        protocol=PROTOCOL_OPENAI_CHAT, component=component, operation=operation, model=params.get("model")
+    ) as observation:
+        resp = client.chat.completions.create(**_tag_request(params, component, operation))  # type: ignore[union-attr]
+        return _observe_chat(observation, resp)
 
 
 async def achat_completion(
@@ -760,7 +755,11 @@ async def achat_completion(
     **params: object,
 ) -> ChatCompletionResult:
     """Async non-streaming chat completion; returns text, finish reason and usage."""
-    return _chat_completion_result(await client.chat.completions.create(**_tag_request(params, component, operation)))  # type: ignore[union-attr]
+    with observed_request(
+        protocol=PROTOCOL_OPENAI_CHAT, component=component, operation=operation, model=params.get("model")
+    ) as observation:
+        resp = await client.chat.completions.create(**_tag_request(params, component, operation))  # type: ignore[union-attr]
+        return _observe_chat(observation, resp)
 
 
 def _sdk_field(obj: object, key: str) -> object:
@@ -775,6 +774,30 @@ def _sdk_token_count(usage: object, key: str) -> int:
     raw = _sdk_field(usage, key)
     parsed = _to_int(raw, default=0)
     return max(0, parsed)  # type: ignore[type-var]
+
+
+def _openai_usage_counts(usage: object) -> dict[str, int]:
+    """An OpenAI ``usage`` as Hyperloom's four counters; ``prompt_tokens`` already includes both cache shares."""
+    if usage is None:
+        return {}
+    cached = _sdk_token_count(_sdk_field(usage, "prompt_tokens_details") or {}, "cached_tokens")
+    created = _sdk_token_count(usage, "cache_creation_input_tokens")
+    return {
+        "input_tokens": uncached_input_tokens(_sdk_token_count(usage, "prompt_tokens"), cached + created),
+        "output_tokens": _sdk_token_count(usage, "completion_tokens"),
+        "cache_read_input_tokens": cached,
+        "cache_creation_input_tokens": created,
+    }
+
+
+def _anthropic_usage_counts(usage: object) -> dict[str, int]:
+    """An Anthropic ``usage``, whose ``input_tokens`` is already the uncached share."""
+    if usage is None:
+        return {}
+    return {
+        key: _sdk_token_count(usage, key)
+        for key in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+    }
 
 
 @dataclass(frozen=True)
@@ -842,8 +865,8 @@ def _attribution_tag_kwargs(component: str, operation: str = "") -> dict[str, ob
     return {"headers": headers} if headers else {}
 
 
-def _anthropic_message_result(resp: object) -> AnthropicMessageResult:
-    """Check one Messages response for failure, then flatten it."""
+def _anthropic_message_body(resp: object) -> dict[str, object]:
+    """Check one Messages response for failure and return its JSON object."""
     status = int(getattr(resp, "status_code", 200) or 200)
     if status >= 400:
         detail = str(getattr(resp, "text", ""))[:200]
@@ -854,12 +877,33 @@ def _anthropic_message_result(resp: object) -> AnthropicMessageResult:
         raise RuntimeError(f"anthropic messages returned a non-JSON body: {exc!r}") from exc
     if not isinstance(body, dict):
         raise RuntimeError(f"anthropic messages returned a non-object JSON body: {type(body).__name__}")
-    payload = body
+    return body
+
+
+def _anthropic_body_result(body: Mapping[str, object]) -> AnthropicMessageResult:
     return AnthropicMessageResult(
-        text=_anthropic_text_from_content(payload.get("content")),
-        stop_reason=payload.get("stop_reason"),
-        usage=payload.get("usage"),
+        text=_anthropic_text_from_content(body.get("content")),
+        stop_reason=body.get("stop_reason"),  # type: ignore[arg-type]
+        usage=body.get("usage"),
     )
+
+
+def _anthropic_message_result(resp: object) -> AnthropicMessageResult:
+    """Check one Messages response for failure, then flatten it."""
+    return _anthropic_body_result(_anthropic_message_body(resp))
+
+
+def _observe_anthropic(observation: RequestObservation, resp: object) -> AnthropicMessageResult:
+    """Fold one Messages response onto ``observation``, then flatten it."""
+    body = _anthropic_message_body(resp)
+    result = _anthropic_body_result(body)
+    observation.update(
+        response_id=body.get("id"),
+        model=body.get("model"),
+        stop_reason=result.stop_reason,
+        usage=_anthropic_usage_counts(result.usage),
+    )
+    return result
 
 
 def anthropic_messages(
@@ -871,7 +915,11 @@ def anthropic_messages(
 ) -> AnthropicMessageResult:
     """POST one Anthropic Messages request; returns text, stop_reason and usage."""
     tag = _attribution_tag_kwargs(component, operation)
-    return _anthropic_message_result(client.post(_ANTHROPIC_MESSAGES_PATH, json=params, **tag))  # type: ignore[union-attr]
+    with observed_request(
+        protocol=PROTOCOL_ANTHROPIC_MESSAGES, component=component, operation=operation, model=params.get("model")
+    ) as observation:
+        resp = client.post(_ANTHROPIC_MESSAGES_PATH, json=params, **tag)  # type: ignore[union-attr]
+        return _observe_anthropic(observation, resp)
 
 
 async def aanthropic_messages(
@@ -883,8 +931,11 @@ async def aanthropic_messages(
 ) -> AnthropicMessageResult:
     """Async twin of :func:`anthropic_messages`; see it for the full contract."""
     tag = _attribution_tag_kwargs(component, operation)
-    resp = await client.post(_ANTHROPIC_MESSAGES_PATH, json=params, **tag)  # type: ignore[union-attr]
-    return _anthropic_message_result(resp)
+    with observed_request(
+        protocol=PROTOCOL_ANTHROPIC_MESSAGES, component=component, operation=operation, model=params.get("model")
+    ) as observation:
+        resp = await client.post(_ANTHROPIC_MESSAGES_PATH, json=params, **tag)  # type: ignore[union-attr]
+        return _observe_anthropic(observation, resp)
 
 
 # Single-shot Anthropic transports. "http" is the Messages API; "sdk" drives the Claude CLI, the only channel that
@@ -1056,14 +1107,23 @@ def stream_chat_completion_text(
     params["stream_options"] = {"include_usage": True}
     parts: list[str] = []
     usage_obj: object | None = None
-    stream = client.chat.completions.create(**_tag_request(params, component, operation))  # type: ignore[union-attr]
-    for chunk in stream:
-        if getattr(chunk, "usage", None) is not None:
-            usage_obj = chunk.usage
-        if chunk.choices:
-            delta = chunk.choices[0].delta
-            if delta is not None and delta.content:
-                parts.append(delta.content)
+    with observed_request(
+        protocol=PROTOCOL_OPENAI_CHAT,
+        component=component,
+        operation=operation,
+        model=params.get("model"),
+        streamed=True,
+    ) as observation:
+        stream = client.chat.completions.create(**_tag_request(params, component, operation))  # type: ignore[union-attr]
+        for chunk in stream:
+            _observe_stream_chunk(observation, chunk)
+            if getattr(chunk, "usage", None) is not None:
+                usage_obj = chunk.usage
+            if chunk.choices:
+                delta = chunk.choices[0].delta
+                if delta is not None and delta.content:
+                    parts.append(delta.content)
+        observation.update(usage=_openai_usage_counts(usage_obj))
     return "".join(parts), usage_obj
 
 
@@ -1079,15 +1139,38 @@ async def astream_chat_completion_text(
     params["stream_options"] = {"include_usage": True}
     parts: list[str] = []
     usage_obj: object | None = None
-    stream = await client.chat.completions.create(**_tag_request(params, component, operation))  # type: ignore[union-attr]
-    async for chunk in stream:
-        if getattr(chunk, "usage", None) is not None:
-            usage_obj = chunk.usage
-        if chunk.choices:
-            delta = chunk.choices[0].delta
-            if delta is not None and delta.content:
-                parts.append(delta.content)
+    with observed_request(
+        protocol=PROTOCOL_OPENAI_CHAT,
+        component=component,
+        operation=operation,
+        model=params.get("model"),
+        streamed=True,
+    ) as observation:
+        stream = await client.chat.completions.create(**_tag_request(params, component, operation))  # type: ignore[union-attr]
+        async for chunk in stream:
+            _observe_stream_chunk(observation, chunk)
+            if getattr(chunk, "usage", None) is not None:
+                usage_obj = chunk.usage
+            if chunk.choices:
+                delta = chunk.choices[0].delta
+                if delta is not None and delta.content:
+                    parts.append(delta.content)
+        observation.update(usage=_openai_usage_counts(usage_obj))
     return "".join(parts), usage_obj
+
+
+def _observe_stream_chunk(observation: RequestObservation, chunk: object) -> None:
+    """Fold one streamed chunk's id, model, first content token and finish reason onto ``observation``."""
+    choices = _sdk_field(chunk, "choices") or []
+    choice = choices[0] if isinstance(choices, list) and choices else None
+    delta = _sdk_field(choice, "delta") if choice is not None else None
+    if delta is not None and _sdk_field(delta, "content"):
+        observation.mark_first_token()
+    observation.update(
+        response_id=_sdk_field(chunk, "id"),
+        model=_sdk_field(chunk, "model"),
+        stop_reason=_sdk_field(choice, "finish_reason") if choice is not None else None,
+    )
 
 
 __all__ = [
@@ -1143,10 +1226,10 @@ __all__ = [
     "is_openai_only",
     "openai_agent_credentialed",
     "openai_client_kwargs",
-    "parse_custom_headers",
     "preferred_agent_backend",
     "provider_model_defaults",
     "resolve_forge_llm_model",
     "resolve_openai_client_config",
     "stream_chat_completion_text",
+    "with_synthesized_anthropic_keys",
 ]

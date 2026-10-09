@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -16,7 +15,9 @@ from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePa
 from hyperloom.orchestrator.bringup import observe_bringup, write_boot_observation
 from hyperloom.orchestrator.rehearsal import boot_log_for
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
+from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import Task
+from hyperloom.orchestrator.tests._helpers import integrate_extra
 
 
 def _make_ctx(task_id: str, params: dict[str, Any], extra: dict | None = None) -> RunnerContext:
@@ -28,7 +29,7 @@ def _make_ctx(task_id: str, params: dict[str, Any], extra: dict | None = None) -
         idempotency_key=task_id,
         requires_lanes=tuple(),
     )
-    return RunnerContext(task=task, lease=None, extra=extra or {})
+    return RunnerContext(task=task, lease=None, extra=integrate_extra(params) if extra is None else extra)
 
 
 def _runtime_override() -> dict[str, Any]:
@@ -90,7 +91,7 @@ async def test_launch_only_skips_missing_specialist_task_id(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_launch_only_skips_critic_gate(tmp_path):
+async def test_launch_only_skips_critic_gate(tmp_path, monkeypatch):
     """Critic verdict is not consulted in launch-only mode."""
     session = tmp_path / "s"
     session.mkdir()
@@ -98,9 +99,8 @@ async def test_launch_only_skips_critic_gate(tmp_path):
     ex = IntegratePatchExecutor(session_dir=session)
     params = _params_base(session)
 
-    class _RejectAll:
-        def get_specialist_patch_verdict(self, tid):
-            return "reject"
+    monkeypatch.setenv("HYPERLOOM_LANGFUSE_ENABLE", "0")
+    state = SharedState.load_or_init(session)
 
     bench_result = {
         "output_throughput": 50.0,
@@ -110,10 +110,15 @@ async def test_launch_only_skips_critic_gate(tmp_path):
     }
     gate_evidence = {"enablement_accuracy": None, "timed_out": False}
 
-    with patch.object(ex, "_bench_patch", new=AsyncMock(return_value=(bench_result, gate_evidence))):
-        res = await ex(_make_ctx("probe-2", params, extra={"shared_state": _RejectAll()}))
+    with (
+        patch.object(ex, "_bench_patch", new=AsyncMock(return_value=(bench_result, gate_evidence))),
+        patch.object(state, "get_specialist_patch_verdict", return_value="reject") as critic,
+    ):
+        res = await ex(_make_ctx("probe-2", params, extra={"shared_state": state}))
 
+    critic.assert_not_called()
     assert res["status"] == "kept"
+    assert (session / "state.json").is_file()
 
 
 @pytest.mark.asyncio
@@ -121,8 +126,6 @@ async def test_launch_only_skips_critic_gate(tmp_path):
     ("field", "value"),
     [
         ("patches", ["candidate.patch"]),
-        ("localization_candidate", {"kind": "pr_backport"}),
-        ("runtime_candidate", {"kind": "runtime_candidate"}),
         ("artifacts", [{"source": "x", "target": "y"}]),
         ("config_changes", {"EXTRA_VLLM_ARGS": "--unsafe"}),
         ("enablement_setup_commands", ["pip install package"]),
@@ -370,14 +373,12 @@ async def test_launch_only_runtime_override_passed_to_bench(tmp_path):
 # executor every path crosses.
 
 
-class _Established:
-    """A SharedState stub carrying only what the inheritance reads."""
-
-    def __init__(self, cfg: dict[str, Any]) -> None:
-        self.enablement = SimpleNamespace(accepted_config=dict(cfg))
-
-    def get_specialist_patch_verdict(self, tid):  # never consulted on this lane
-        return "approve"
+def _established_state(session: Path, cfg: dict[str, Any]) -> SharedState:
+    """Persist established enablement config on the state the executor owns."""
+    state = SharedState.load_or_init(session)
+    state.enablement.accepted_config = dict(cfg)
+    state.save(session)
+    return state
 
 
 async def _capture_launch(ex, params, ctx_extra):
@@ -410,12 +411,13 @@ async def test_launch_probe_inherits_the_flag_earlier_rounds_established(tmp_pat
     params = _params_base(session)
     params["_obs_path"] = _booted_observation(session)
 
-    state = _Established(
+    state = _established_state(
+        session,
         {
             "extra_server_args": "--kv-cache-dtype fp8",
             "extra_envs": {"VLLM_ROCM_USE_AITER": "1"},
             "args_mode": "append",
-        }
+        },
     )
     res, captured = await _capture_launch(ex, params, {"shared_state": state})
 
@@ -427,8 +429,7 @@ async def test_launch_probe_inherits_the_flag_earlier_rounds_established(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_launch_probe_with_no_state_inherits_nothing(tmp_path):
-    """The defensive read: a context carrying no SharedState must not abort the round."""
+async def test_launch_probe_with_nothing_established_inherits_nothing(tmp_path):
     session = tmp_path / "s"
     session.mkdir()
     _write_minimal_config(session / "bench.yaml")
@@ -436,7 +437,7 @@ async def test_launch_probe_with_no_state_inherits_nothing(tmp_path):
     params = _params_base(session)
     params["_obs_path"] = _booted_observation(session)
 
-    _res, captured = await _capture_launch(ex, params, {})
+    _res, captured = await _capture_launch(ex, params, {"shared_state": SharedState()})
     assert captured["extra_server_args_applied"] == ""
     assert captured["extra_envs_applied"] == {}
 
@@ -452,7 +453,7 @@ async def test_an_optimization_probe_inherits_nothing(tmp_path):
     params["_obs_path"] = _booted_observation(session)
     params["enablement"] = False
 
-    state = _Established({"extra_server_args": "--kv-cache-dtype fp8"})
+    state = _established_state(session, {"extra_server_args": "--kv-cache-dtype fp8"})
     _res, captured = await _capture_launch(ex, params, {"shared_state": state})
     assert captured["extra_server_args_applied"] == ""
 
@@ -476,7 +477,7 @@ async def test_an_unparseable_round_arg_still_keeps_the_inherited_flag(tmp_path)
     # unparseable because the value carries whitespace.
     params["extra_server_args"] = '--tool-call-parser "my parser"'
 
-    state = _Established({"extra_server_args": "--kv-cache-dtype fp8"})
+    state = _established_state(session, {"extra_server_args": "--kv-cache-dtype fp8"})
     _res, captured = await _capture_launch(ex, params, {"shared_state": state})
 
     args = captured["extra_server_args_applied"]
@@ -496,7 +497,7 @@ async def test_an_unparseable_round_arg_that_restates_the_flag_does_not_double_i
     params["_obs_path"] = _booted_observation(session)
     params["extra_server_args"] = '--kv-cache-dtype fp8 --tool-call-parser "my parser"'
 
-    state = _Established({"extra_server_args": "--kv-cache-dtype fp8"})
+    state = _established_state(session, {"extra_server_args": "--kv-cache-dtype fp8"})
     _res, captured = await _capture_launch(ex, params, {"shared_state": state})
 
     args = captured["extra_server_args_applied"]
@@ -516,7 +517,7 @@ async def test_a_longer_flag_sharing_a_prefix_does_not_satisfy_the_inherited_one
     # starts with the inherited one.
     params["extra_server_args"] = '--kv-cache-dtype-override auto --tool-call-parser "my parser"'
 
-    state = _Established({"extra_server_args": "--kv-cache-dtype fp8"})
+    state = _established_state(session, {"extra_server_args": "--kv-cache-dtype fp8"})
     _res, captured = await _capture_launch(ex, params, {"shared_state": state})
 
     args = captured["extra_server_args_applied"]
@@ -535,7 +536,7 @@ async def test_the_inherited_name_inside_a_quoted_value_is_not_an_option(tmp_pat
     params["_obs_path"] = _booted_observation(session)
     params["extra_server_args"] = '--tool-call-parser "uses --kv-cache-dtype internally"'
 
-    state = _Established({"extra_server_args": "--kv-cache-dtype fp8"})
+    state = _established_state(session, {"extra_server_args": "--kv-cache-dtype fp8"})
     _res, captured = await _capture_launch(ex, params, {"shared_state": state})
 
     args = captured["extra_server_args_applied"]
@@ -558,7 +559,7 @@ async def test_an_inherited_quoted_value_survives_the_fallback_intact(tmp_path):
     # Unparseable, and it does NOT restate the inherited option.
     params["extra_server_args"] = '--reasoning-parser "some parser"'
 
-    state = _Established({"extra_server_args": '--tool-call-parser "my parser" --kv-cache-dtype fp8'})
+    state = _established_state(session, {"extra_server_args": '--tool-call-parser "my parser" --kv-cache-dtype fp8'})
     _res, captured = await _capture_launch(ex, params, {"shared_state": state})
 
     args = captured["extra_server_args_applied"]

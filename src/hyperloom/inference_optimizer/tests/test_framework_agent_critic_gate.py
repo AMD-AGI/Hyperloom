@@ -13,7 +13,8 @@ from hyperloom.orchestrator.roles import (
     MockBackend,
     ScriptedPlan,
 )
-from hyperloom.orchestrator.loop.coordinator import Coordinator, PendingProposal
+from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.proposals import PendingProposal
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
 
@@ -58,7 +59,7 @@ def _pending(payload: dict) -> PendingProposal:
 # -- submit -----------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_submit_registers_pending_proposal(coord: Coordinator) -> None:
-    await coord._submit_framework_agent_candidate_for_review(
+    await coord.phase_framework._submit_framework_agent_candidate_for_review(
         dict(_CANDIDATE),
         audit={"recommended_next_step": "direct_framework"},
         audit_step="direct_framework",
@@ -74,8 +75,12 @@ async def test_submit_registers_pending_proposal(coord: Coordinator) -> None:
 
 @pytest.mark.asyncio
 async def test_submit_is_idempotent_per_candidate(coord: Coordinator) -> None:
-    await coord._submit_framework_agent_candidate_for_review(dict(_CANDIDATE), audit_step="direct_framework")
-    await coord._submit_framework_agent_candidate_for_review(dict(_CANDIDATE), audit_step="direct_framework")
+    await coord.phase_framework._submit_framework_agent_candidate_for_review(
+        dict(_CANDIDATE), audit_step="direct_framework"
+    )
+    await coord.phase_framework._submit_framework_agent_candidate_for_review(
+        dict(_CANDIDATE), audit_step="direct_framework"
+    )
     pendings = [p for p in coord.state.pending_proposals.values() if p.action_name == "integrate_patch"]
     assert len(pendings) == 1
 
@@ -89,8 +94,7 @@ async def test_materialize_direct_route_enqueues_raw_only(coord: Coordinator, mo
     monkeypatch.setattr(
         coord.phase_framework, "_enqueue_framework_agent_authoring_specialist", lambda c, audit=None: _append(author, c)
     )
-    coord.shared_state.framework_agent_authoring_enabled = True
-    await coord._materialize_framework_agent_candidate(
+    await coord.phase_framework.materialize_candidate(
         _pending({"candidate": dict(_CANDIDATE), "audit_step": "direct_framework", "batch_id": "b"})
     )
     assert len(raw) == 1
@@ -105,30 +109,11 @@ async def test_materialize_author_route_enqueues_specialist_only(coord: Coordina
     monkeypatch.setattr(
         coord.phase_framework, "_enqueue_framework_agent_authoring_specialist", lambda c, audit=None: _append(author, c)
     )
-    coord.shared_state.framework_agent_authoring_enabled = True
-    await coord._materialize_framework_agent_candidate(
+    await coord.phase_framework.materialize_candidate(
         _pending({"candidate": dict(_CANDIDATE), "audit_step": "author_via_specialist", "batch_id": "b"})
     )
     assert raw == []
     assert len(author) == 1
-
-
-@pytest.mark.asyncio
-async def test_materialize_author_route_falls_back_to_raw_when_authoring_disabled(
-    coord: Coordinator, monkeypatch
-) -> None:
-    raw: list = []
-    author: list = []
-    monkeypatch.setattr(coord.phase_framework, "_enqueue_framework_agent_task", lambda c: _append(raw, c))
-    monkeypatch.setattr(
-        coord.phase_framework, "_enqueue_framework_agent_authoring_specialist", lambda c, audit=None: _append(author, c)
-    )
-    coord.shared_state.framework_agent_authoring_enabled = False
-    await coord._materialize_framework_agent_candidate(
-        _pending({"candidate": dict(_CANDIDATE), "audit_step": "author_via_specialist", "batch_id": "b"})
-    )
-    assert len(raw) == 1
-    assert author == []
 
 
 @pytest.mark.asyncio
@@ -139,8 +124,7 @@ async def test_materialize_unknown_route_runs_both_tracks(coord: Coordinator, mo
     monkeypatch.setattr(
         coord.phase_framework, "_enqueue_framework_agent_authoring_specialist", lambda c, audit=None: _append(author, c)
     )
-    coord.shared_state.framework_agent_authoring_enabled = True
-    await coord._materialize_framework_agent_candidate(
+    await coord.phase_framework.materialize_candidate(
         _pending({"candidate": dict(_CANDIDATE), "audit_step": "", "batch_id": "b"})
     )
     assert len(raw) == 1
@@ -174,7 +158,7 @@ async def test_approve_verdict_materializes(coord: Coordinator, monkeypatch) -> 
         }
     )
     coord.state.pending_proposals[pending.proposal_msg_id] = pending
-    await coord._handle_single_verdict(source="critic", pending=pending, verdict="approve", reasoning="ok")
+    await coord.router._handle_single_verdict(source="critic", pending=pending, verdict="approve", reasoning="ok")
     assert len(raw) == 1
     # The dispatched task carries no specialist task id, so the verdict has to be filed under the candidate for the
     # executor and PolicyGate to find it.
@@ -185,7 +169,7 @@ async def test_approve_verdict_materializes(coord: Coordinator, monkeypatch) -> 
 async def test_reject_verdict_records_critic_denied(coord: Coordinator) -> None:
     pending = _pending({"framework_agent_candidate_id": _CANDIDATE["candidate_id"], "batch_id": "batch-1"})
     coord.state.pending_proposals[pending.proposal_msg_id] = pending
-    await coord._handle_single_verdict(
+    await coord.router._handle_single_verdict(
         source="critic", pending=pending, verdict="reject", reasoning="out of scope for this gap"
     )
     prog = coord.shared_state.framework_agent_phase_progress

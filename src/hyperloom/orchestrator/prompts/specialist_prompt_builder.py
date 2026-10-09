@@ -23,6 +23,7 @@ from typing import Any, Callable
 
 from hyperloom.common.perf_metric import is_agentx_mode
 from hyperloom.common.prompt_safety import defang_prompt_structure
+from hyperloom.inference_optimizer.framework_registry import python_package
 from .agentx_context import corpus_lines, grading_lines
 
 from ..specialists.domains import (
@@ -75,12 +76,6 @@ _TASK_KIND_BRIEFS: dict[str, str] = {
     "explore_apply_retry": (
         "A previous patch failed to apply against the live source tree."
         " Study the apply errors in the notes, produce a corrected patch."
-    ),
-    "framework_config_generation": (
-        "Propose a GRID of runtime config variants (server flags and/or env vars)"
-        " that may raise throughput WITHOUT changing source. Return a"
-        " ``proposal_set`` — each entry with ``name``, ``extra_args`` or"
-        " ``extra_envs``, and a one-line ``reason``. You do not benchmark."
     ),
 }
 
@@ -602,31 +597,27 @@ def _focus_static_recon_specialist(
     model_info_line = ""
     shared_expert_advisory: list[str] = []
     if inp.model_info:
-        try:
-            attn = str(inp.model_info.get("attention_type") or "").strip()
-            is_moe = bool(inp.model_info.get("is_moe"))
-            quant = str(inp.model_info.get("quantization") or "").strip()
-            has_shared = bool(inp.model_info.get("has_shared_expert"))
-            num_shared = inp.model_info.get("num_shared_experts")
-            features = f"attention={attn or '?'} moe={is_moe}"
-            if has_shared:
-                n_str = str(int(num_shared)) if num_shared is not None else "?"
-                features += f" shared_expert=True n_shared={n_str}"
-            features += f" quant={quant or '?'}."
-            model_info_line = f"Model features: {features}"
-            if has_shared:
-                shared_expert_advisory = [
-                    "**Shared-expert fusion advisory**: this model has always-on shared "
-                    + "experts. Confirm whether the shared expert still runs as a separate "
-                    + "dense MLP per layer. If yes, investigate folding it into the routed "
-                    + "grouped-GEMM path as an always-selected extra expert slot (code-path "
-                    + "bridge, not just an env flag). Known caveat: expert parallelism (EP) "
-                    + "is unsupported until the expert-map behaviour is explicitly handled.",
-                    "",
-                ]
-        except Exception:  # noqa: BLE001 — advisory rendering only
-            model_info_line = ""
-            shared_expert_advisory = []
+        attn = str(inp.model_info.get("attention_type") or "").strip()
+        is_moe = bool(inp.model_info.get("is_moe"))
+        quant = str(inp.model_info.get("quantization") or "").strip()
+        has_shared = bool(inp.model_info.get("has_shared_expert"))
+        num_shared = inp.model_info.get("num_shared_experts")
+        features = f"attention={attn or '?'} moe={is_moe}"
+        if has_shared:
+            n_str = str(int(num_shared)) if num_shared is not None else "?"
+            features += f" shared_expert=True n_shared={n_str}"
+        features += f" quant={quant or '?'}."
+        model_info_line = f"Model features: {features}"
+        if has_shared:
+            shared_expert_advisory = [
+                "**Shared-expert fusion advisory**: this model has always-on shared "
+                + "experts. Confirm whether the shared expert still runs as a separate "
+                + "dense MLP per layer. If yes, investigate folding it into the routed "
+                + "grouped-GEMM path as an always-selected extra expert slot (code-path "
+                + "bridge, not just an env flag). Known caveat: expert parallelism (EP) "
+                + "is unsupported until the expert-map behaviour is explicitly handled.",
+                "",
+            ]
     return [
         "You are the **static-recon specialist** — a read-only reconnaissance",
         "agent. You do NOT benchmark, apply patches, build a worktree, or",
@@ -896,6 +887,8 @@ class SpecialistPromptInputs:
     # session actually replayed.
     benchmark_mode: str = ""
     agentx_corpus_shape: dict[str, Any] = field(default_factory=dict)
+    agentx_grading: dict[str, Any] = field(default_factory=dict)
+    agentx_backend: str = ""
 
     # Gap statement
     gap_canonical_id: str = ""
@@ -905,6 +898,8 @@ class SpecialistPromptInputs:
 
     # Optional structured KB context. Empty in the RecipeKB-first path.
     kb_subgraph: dict[str, Any] = field(default_factory=dict)
+    # Experience service ``prompt_block`` read for this dispatch; empty when no Experience was rendered.
+    experience_kb_block: str = ""
 
     # Roofline / TraceLens evidence from ``SharedState.last_trace_analyze``;
     # empty dict renders a placeholder.
@@ -924,12 +919,15 @@ class SpecialistPromptInputs:
     # Extra knowledge-domain tags; each contributes a focus block to Section 1.
     extra_focus_tags: tuple[str, ...] = ()
 
-    # Local source navigation hint. ``worktree_base`` is empty when the
-    # framework is pip-installed rather than a checkout.
+    # Local source navigation hint. ``worktree_base`` is the tree the worktree
+    # stands for -- the checkout it was cut from, or the installed tree it holds
+    # a snapshot of -- and is empty when the specialist has no worktree.
     session_framework_tree: str = ""
     framework_source_roots: tuple[str, ...] = ()
     worktree_base: str = ""
     source_hint_directories: tuple[str, ...] = ()
+    # Framework package directory relative to the worktree; empty without a worktree.
+    worktree_package_dir: str = ""
 
     # Structured model architecture features mirrored from SharedState.model_info;
     # machine-parseable companion to ``arch_notes``. Empty dict => not warmed.
@@ -938,10 +936,13 @@ class SpecialistPromptInputs:
     # the static_recon_specialist dispatch.
     static_recon_checklist: str = ""
 
-    # Enablement dispatch evidence, folded into the §1b mandate. Both are empty
-    # for every non-enablement domain, and the mandate degrades gracefully.
+    # Enablement dispatch evidence, folded into the §1b mandate. Empty for
+    # every non-enablement domain; the mandate omits whichever is empty.
     enablement_source_context: str = ""
     enablement_candidate_refs: tuple[str, ...] = ()
+    # The serialized FailureSignature the round was dispatched on; required for
+    # the enablement domain, empty for every other.
+    enablement_failure_signature: dict[str, Any] = field(default_factory=dict)
     # Env / server-arg layers prior advanced rounds accepted; the bench for this
     # round launches with them, so the mandate has to name them.
     enablement_accepted_config: dict[str, Any] = field(default_factory=dict)
@@ -957,7 +958,6 @@ class SpecialistPromptInputs:
     scope: str = "domain"
     mode: str = MODE_PATCH
     bench: bool = False
-    lane: str = "gpu"
     # Free-form task description (only populated when scope == 'freeform').
     task_description: str = ""
 
@@ -982,8 +982,6 @@ class SpecialistPromptInputs:
     task_kind: str = ""
     prior_attempts: list[dict[str, Any]] = field(default_factory=list)
     pr_lead: dict[str, Any] = field(default_factory=dict)
-    # "A" = emit_intent, "B" = file write, "" = render both (render-script path).
-    exit_channel: str = ""
 
 
 # Section 1 — Identity & autonomy
@@ -1082,6 +1080,7 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         body.extend(_freeform_block(inp))
     if inp.allocated_gpu_ids:
         body.extend(_gpu_autonomy_block(inp))
+    body.extend(_cpu_selfcheck_block(inp))
     if inp.auto_retry_reason.strip():
         body.extend(_auto_retry_note_block(inp))
     return body
@@ -1163,6 +1162,25 @@ def _gpu_autonomy_block(inp: SpecialistPromptInputs) -> list[str]:
         "  It prints a JSON result with ``output_throughput``. It is OPTIONAL "
         + "— you may instead write your own bench/autotune script. Throughput "
         + "does NOT have to come from rebench.",
+    ]
+
+
+def _cpu_selfcheck_block(inp: SpecialistPromptInputs) -> list[str]:
+    """Optional ``selfcheck`` helper for a patch specialist with a worktree and no GPU."""
+    if inp.allocated_gpu_ids or inp.mode != MODE_PATCH or not inp.worktree_package_dir:
+        return []
+    package = python_package(inp.framework)
+    if package is None:
+        return []
+    return [
+        "",
+        "Optional helper: ``selfcheck`` installs your worktree's package into a private venv,",
+        "imports it, byte-compiles the files you changed and runs any pytest targets you pass:",
+        "    python -m hyperloom.orchestrator.specialists.selfcheck \\",
+        f"        --worktree {inp.workspace_path} --package-dir {inp.worktree_package_dir} "
+        f"--package {package} [--pytest <target>]",
+        "  It prints a JSON result. A framework with compiled extensions (e.g. vLLM) rebuilds",
+        "  them on install, which can take well over your wall budget.",
     ]
 
 
@@ -1372,7 +1390,7 @@ def _section_hardware(inp: SpecialistPromptInputs) -> list[str]:
     if _is_agentx(inp):
         # The corpus fixes the request shape, so ISL/OSL carry no information.
         workload_rows += corpus_lines(inp.agentx_corpus_shape)
-        workload_rows += grading_lines()
+        workload_rows += grading_lines(inp.agentx_grading, inp.agentx_backend)
     else:
         if inp.isl > 0:
             workload_rows.append(f"- ISL (input seq len): {inp.isl}")
@@ -1478,6 +1496,7 @@ def _is_cold_start(inp: SpecialistPromptInputs) -> bool:
     """
     return (
         not inp.kb_subgraph
+        and not inp.experience_kb_block
         and not inp.warm_start_recipe
         and not inp.warm_start_lessons
         and not inp.warm_start_pitfalls
@@ -1561,6 +1580,32 @@ def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
     rows.append(json.dumps(inp.kb_subgraph, sort_keys=True, separators=(",", ":")))
     rows.append("```")
     return rows
+
+
+def _section_experience_kb(inp: SpecialistPromptInputs) -> list[str]:
+    """Render the Experience KB section; omitted when this dispatch rendered no Experience.
+
+    Args:
+        inp: Assembled prompt inputs for the current dispatch.
+
+    Returns:
+        Prompt lines carrying the Experience service block, or ``[]``.
+    """
+    if not inp.experience_kb_block:
+        return []
+    return [
+        "## 4b. EXPERIENCE KB (measured outcomes from earlier sessions)",
+        "",
+        "Compare each Experience's identity and baseline configuration with Sections 2 and 3 "
+        + "before relying on it. When one shaped a proposal, cite it in that proposal's "
+        + "``experience_citations``, or for a patch you wrote in the payload's top-level "
+        + "``experience_citations``: ``{id, stance, claim}`` with ``stance`` one of ``adopt`` "
+        + "(you did its change), ``adapt`` (you did it modified), ``avoid`` (you left it out "
+        + "because of its outcome), or ``contrast`` (you chose a different change designed "
+        + "against it), and ``claim`` one sentence on why. Only ids shown below are kept.",
+        "",
+        inp.experience_kb_block,
+    ]
 
 
 def _vendor_substitution_candidates(hot_kernels: Any) -> list[dict[str, Any]]:
@@ -1985,15 +2030,17 @@ def _source_root_row(root: str, *, worktree_base: str) -> str:
 
     Args:
         root (str): The source root to render.
-        worktree_base (str): The checkout the specialist's worktree was cut
-            from, when there is one.
+        worktree_base (str): The tree the specialist's worktree stands for,
+            when there is one.
 
     Returns:
         str: A markdown list row for the root.
     """
     base = (worktree_base or "").rstrip("/")
-    if base and root.rstrip("/") == base:
-        return f"- {root} — git checkout; your worktree was cut from it"
+    if base and Path(root.rstrip("/")).is_relative_to(base):
+        if (Path(base) / ".git").exists():
+            return f"- {root} — git checkout; your worktree was cut from it"
+        return f"- {root} — installed package; your worktree holds a git snapshot of it, so edit its files there"
     if (Path(root) / ".git").is_dir():
         return f"- {root} — git checkout"
     return f"- {root} — installed package, no git tree: re-author upstream diffs against it, never apply them"
@@ -2083,27 +2130,13 @@ def _section_source_hint(inp: SpecialistPromptInputs) -> list[str]:
 def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
     """Render Section 8 (output protocol) of the specialist prompt."""
     workspace = inp.workspace_path or "<workspace>"
-    channel = (inp.exit_channel or "").upper().strip()
     authors_patches = _authors_patches(inp)
 
-    exit_lines: list[str] = []
-    if channel == "A" or channel == "":
-        exit_lines.extend(
-            [
-                "**Exit — ``emit_intent`` tool:** call ``emit_intent`` exactly once",
-                "with intent type ``specialist_done`` and the payload schema below.",
-            ]
-        )
-    if channel == "B" or channel == "":
-        if channel == "":
-            exit_lines.append("")
-        exit_lines.extend(
-            [
-                "**Exit — file write (subprocess runtime):** write the same payload to",
-                f"``{workspace}/specialist_done.json`` as your **absolute last action**.",
-                "The dispatcher polls for that file as the exit signal; stop after writing.",
-            ]
-        )
+    exit_lines = [
+        "**Exit — file write:** write the ``specialist_done`` payload (schema below) to",
+        f"``{workspace}/specialist_done.json`` as your **absolute last action**.",
+        "The dispatcher polls for that file as the exit signal; stop after writing.",
+    ]
 
     if authors_patches:
         patch_fields = [
@@ -2189,9 +2222,10 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
                             "kb_evidence": [],
                             "pr_evidence": [],
                             "source_evidence": [],
+                            "experience_citations": [],
                         }
                     ],
-                    **({"patches_written": []} if authors_patches else {}),
+                    **({"patches_written": [], "experience_citations": []} if authors_patches else {}),
                     "summary": "≤ 500 char overview of what you tried this round",
                     "confidence": 0.6,
                     "new_findings": [],
@@ -2329,10 +2363,10 @@ def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
 def _section_enablement_playbook(inp: SpecialistPromptInputs) -> list[str]:
     """Render the per-task enablement mandate + ladder book into the user prompt.
 
-    Classifies the failure carried in ``gap_symptom`` / ``gap_evidence`` and
-    renders the mandate's ``task_description`` (which embeds the ladder book) from
-    ``framework_agent.enablement_ops.build_mandate``. Kept in the user prompt so
-    the cached system prompt stays task-independent.
+    Renders the mandate's ``task_description`` (which embeds the ladder book)
+    from the verdict the dispatch was decided on, carried verbatim in
+    ``enablement_failure_signature``. Kept in the user prompt so the cached
+    system prompt stays task-independent.
 
     The dispatch's own evidence — source lines near the offending site (plus the
     checkpoint weight inventory on a weight-init failure) and the ranked bridging
@@ -2346,7 +2380,7 @@ def _section_enablement_playbook(inp: SpecialistPromptInputs) -> list[str]:
     Returns:
         list[str]: The enablement-playbook section lines.
     """
-    from hyperloom.common.failure_signature import EnablementRequest
+    from hyperloom.common.failure_signature import EnablementRequest, FailureSignature
     from hyperloom.orchestrator.enablement.mandate import build_mandate
 
     model = str((inp.gap_evidence or {}).get("model") or "").strip()
@@ -2354,11 +2388,11 @@ def _section_enablement_playbook(inp: SpecialistPromptInputs) -> list[str]:
         framework=(inp.framework or "").strip().lower(),
         model=model or "(target model)",
         repo_url="",
-        launch_log=inp.gap_symptom or "",
         gpu_type=(inp.gpu_type or "").strip().lower(),
     )
     mandate = build_mandate(
         req,
+        FailureSignature.from_dict(inp.enablement_failure_signature),
         candidate_refs=inp.enablement_candidate_refs,
         source_context=inp.enablement_source_context,
     )
@@ -2398,14 +2432,11 @@ def _section_pd_disaggregation(inp: SpecialistPromptInputs) -> list[str]:
         list[str]: The PD-disaggregation section lines, or ``[]`` when not
         disaggregated.
     """
-    try:
-        from hyperloom.orchestrator.actions.executors._multi_node_env import (
-            pd_topology_from_state,
-        )
+    from hyperloom.orchestrator.actions.executors._multi_node_env import (
+        pd_topology_from_state,
+    )
 
-        pd = pd_topology_from_state()
-    except Exception:
-        return []
+    pd = pd_topology_from_state()
     if not pd:
         return []
     tb = pd.get("transfer_backend") or "the KV transfer backend"
@@ -2483,6 +2514,7 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
             _section_gap(inp),
             _section_kb_subgraph(inp),
             _section_roofline_evidence(inp),
+            _section_experience_kb(inp),
             _section_recipe(inp),
             _section_lessons(inp),
             _section_pitfalls(inp),

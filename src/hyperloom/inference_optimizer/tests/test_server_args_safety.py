@@ -122,7 +122,7 @@ def test_prepare_shell_safe_extra_args_rejects_denied():
 
 # --- _unwrap_shell_quotes eq-sign form regression ---
 
-from hyperloom.orchestrator.actions.executors._grid_server_args import (
+from hyperloom.inference_optimizer.grid_server_args import (
     _split_args_preserving_json,
     _unwrap_shell_quotes,
 )

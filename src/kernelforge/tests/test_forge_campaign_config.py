@@ -9,8 +9,8 @@ from dataclasses import replace
 
 import pytest
 
-from kernelforge.knowledge.kernel_identity import kernel_recipe_canonical_id
-from kernelforge.knowledge.loop_identity import resolve_loop_identity
+from kernelforge.knowledge.kb_store.identity.kernel_recipe import kernel_recipe_canonical_id
+from kernelforge.knowledge.kb_store.identity.run import resolve_loop_identity
 from kernelforge.loop.campaign_config import (
     CampaignConfig,
     CampaignConfigStore,
@@ -328,12 +328,12 @@ def test_store_rejects_replacing_immutable_campaign_config(tmp_path, monkeypatch
         store.save(replace(config, snr_threshold=40.0))
 
 
-def test_store_rejects_future_schema(tmp_path):
+def test_store_rejects_an_incomplete_config(tmp_path):
     root = tmp_path / "forge_experiments"
     root.mkdir()
-    (root / "campaign_config.json").write_text(json.dumps({"schema_version": 999}))
+    (root / "campaign_config.json").write_text(json.dumps({"kernel_path": "kernel.py"}))
 
-    with pytest.raises(ValueError, match="schema"):
+    with pytest.raises(ValueError, match="campaign config missing fields"):
         CampaignConfigStore(str(tmp_path)).load()
 
 
@@ -354,26 +354,6 @@ def test_store_rejects_unknown_campaign_fields(tmp_path, monkeypatch):
     store.path.write_text(json.dumps(payload))
 
     with pytest.raises(ValueError, match="unsupported campaign config fields"):
-        store.load()
-
-
-def test_store_rejects_non_authoritative_schema_two(tmp_path, monkeypatch):
-    workspace, kernel, _helper, driver = _git_workspace(tmp_path)
-    monkeypatch.setenv("GPU_TARGET", "gfx950")
-    config = create_campaign_config(
-        workspace_dir=str(workspace),
-        kernel=str(kernel),
-        driver=str(driver),
-        source_files=[],
-        program_md_file=None,
-    )
-    store = CampaignConfigStore(str(workspace))
-    store.root.mkdir()
-    payload = config.to_dict()
-    payload["schema_version"] = 2
-    store.path.write_text(json.dumps(payload))
-
-    with pytest.raises(ValueError, match="unsupported campaign config schema"):
         store.load()
 
 
@@ -538,7 +518,7 @@ def test_from_dict_rejects_incoherent_campaign_snapshot(
 
 def test_from_dict_requires_a_json_object():
     with pytest.raises(ValueError, match="must be a JSON object"):
-        CampaignConfig.from_dict([{"schema_version": 6}])
+        CampaignConfig.from_dict([{}])
 
 
 def test_from_dict_rejects_the_retired_pre_rename_key(tmp_path, monkeypatch):
@@ -561,11 +541,13 @@ def test_from_dict_round_trips_measurement_semantics(tmp_path, monkeypatch):
 
     assert (restored.nproc_per_node, restored.bench_repeat) == (4, 25)
     assert CampaignConfig.from_dict(restored.to_dict()) == restored
-    # Absent/zero values clamp up to one rank and one shot, never to zero.
     payload["nproc_per_node"] = 0
-    del payload["bench_repeat"]
-    clamped = CampaignConfig.from_dict(payload)
-    assert (clamped.nproc_per_node, clamped.bench_repeat) == (1, 1)
+    with pytest.raises(ValueError, match="nproc_per_node must be positive"):
+        CampaignConfig.from_dict(payload)
+    payload["nproc_per_node"] = 1
+    payload["bench_repeat"] = 0
+    with pytest.raises(ValueError, match="bench_repeat must be positive"):
+        CampaignConfig.from_dict(payload)
 
 
 @pytest.mark.parametrize(
@@ -685,6 +667,11 @@ def test_detect_gpu_target_rejects_a_malformed_override(monkeypatch, configured)
     ("returncode", "stdout", "expected"),
     [
         (0, "  Name:  gfx942\n  Name: gfx942\n", "gfx942"),
+        (
+            0,
+            "  Name:  gfx1201\n  Name:  amdgcn-amd-amdhsa--gfx1201\n  Name:  amdgcn-amd-amdhsa--gfx12-generic\n",
+            "gfx1201",
+        ),
         (0, "Name: gfx942\nName: gfx90a\n", None),
         (0, "no amd device here\n", None),
         (1, "Name: gfx942\n", None),
@@ -888,6 +875,30 @@ def test_implementation_contract_is_rederived_from_the_pristine_lineage(
         framework=config.framework,
     )
     assert drifted != signature
+
+
+def test_an_unreachable_base_commit_is_not_signed_as_pristine(tmp_path, monkeypatch):
+    """A lineage the workspace cannot reach must fail, not quietly become the working tree."""
+    workspace, kernel, _helper, driver = _git_workspace(tmp_path)
+    monkeypatch.setenv("GPU_TARGET", "gfx950")
+    monkeypatch.setenv("FORGE_KERNEL_BACKEND", "triton")
+    config = create_campaign_config(
+        workspace_dir=str(workspace),
+        kernel=str(kernel),
+        driver=str(driver),
+        source_files=[],
+        program_md_file=None,
+    )
+    kernel.write_text("import triton\n\n@triton.jit\ndef rewritten_kernel(x):\n    return x\n")
+
+    with pytest.raises(ValueError, match="pristine base commit"):
+        derive_campaign_implementation_contract(
+            workspace_dir=str(workspace),
+            kernel_path=config.kernel_path,
+            source_files=config.source_files,
+            framework=config.framework,
+            base_commit="0" * 40,
+        )
 
 
 def test_pending_campaign_head_accepts_only_its_own_lineage(tmp_path, monkeypatch):

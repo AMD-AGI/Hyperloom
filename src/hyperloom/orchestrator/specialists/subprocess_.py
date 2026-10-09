@@ -6,8 +6,7 @@
 Per-task git worktree under ``runs/specialist/<task_id>/worktree/``, an agent
 CLI subprocess scoped via ``--add-dir``, and a ``specialist_done.json``
 (+ ``worktree/patches/``) exit signal harvested into the final
-:class:`SpecialistRunResult`. The explicit in-process dispatch mode is wired
-separately by the CLI to the matching provider's Agent SDK backend.
+:class:`SpecialistRunResult`.
 
 Two agent CLIs can drive that contract, and the deployment's credential shape
 picks one (:func:`hyperloom.common.llm_config.preferred_agent_backend`):
@@ -45,7 +44,7 @@ from hyperloom.common.codex_session import (
     resolve_codex_sandbox_mode,
 )
 from hyperloom.common.deadline import Deadline
-from hyperloom.common.env import is_truthy
+from hyperloom.common.env import env_bool
 from hyperloom.common.llm_attribution import inject_env as inject_attribution_env
 from hyperloom.common.llm_config import (
     AGENT_BACKEND_CLAUDE,
@@ -64,7 +63,7 @@ from hyperloom.common.proctree import collect_tree, kill_tree
 from ..actions.cancel_channel import cancel_scope_listener, current_cancel_scope
 from ..bringup.trees import head_commit
 from ..loop.sub_agent_runner import ExecutionCleanupUnconfirmed
-from ..trace.parse_usage import (
+from hyperloom.inference_optimizer.trace.parse_usage import (
     parse_claude_stream_json_response,
     parse_claude_stream_json_tool_calls,
     parse_claude_stream_json_turn_usages,
@@ -75,6 +74,9 @@ from ..trace.parse_usage import (
     parse_codex_jsonl_turn_usages,
     parse_codex_jsonl_usage,
 )
+from hyperloom.inference_optimizer.trace.context_events import record_stream_json_compactions
+from hyperloom.inference_optimizer.trace.request_events import record_stream_json_requests
+from hyperloom.inference_optimizer.trace.tool_events import record_stream_json_tools
 
 
 log = logging.getLogger(__name__)
@@ -423,8 +425,7 @@ def _write_private_codex_config(
 
 def _build_specialist_env() -> dict[str, str]:
     """Build a minimal env for Bash-enabled specialist subprocesses."""
-    inherit_setting = os.environ.get("HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV")
-    inherit_secrets = True if inherit_setting is None else is_truthy(inherit_setting)
+    inherit_secrets = env_bool("HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV", True)
     allowed = set(_SPECIALIST_ENV_ALLOWLIST)
     if inherit_secrets:
         allowed.update(_SPECIALIST_SECRET_ENV_ALLOWLIST)
@@ -647,49 +648,6 @@ def _declared_targets(done_payload: Mapping[str, Any] | None) -> tuple[str, ...]
 
 
 # Worktree management
-def _pick_worktree_base(
-    roots: tuple[str, ...],
-    *,
-    preferred: str = "",
-) -> Path | None:
-    """Return the checkout to branch the specialist's worktree off.
-
-    ``preferred`` wins whenever it is a checkout. It names the framework the
-    session is actually optimising, which ``roots`` cannot express: their order
-    records only how they were discovered. Selecting by position worked while
-    exactly one root happened to be a git checkout; when a pod started shipping
-    aiter as one it sorted first, so WorldPlay specialists were handed an aiter
-    worktree and the ``hyvideo/`` patches they wrote grounded against nothing.
-
-    Falls back to None when nothing qualifies — the runner then runs the
-    specialist without an isolated worktree.
-
-    Args:
-        roots: Candidate root paths to probe for a ``.git`` marker.
-        preferred: Checkout of the framework under optimisation, if any. Skipped
-            when it is absent or not a checkout, so a pip-installed framework
-            costs the specialist nothing.
-
-    Returns:
-        The chosen checkout root, or ``None`` when none qualify.
-    """
-
-    def _is_checkout(path: str) -> Path | None:
-        p = Path(path)
-        # ``.git`` may be a file (worktree) or a dir (repo).
-        return p if p.is_dir() and (p / ".git").exists() else None
-
-    if preferred:
-        chosen = _is_checkout(preferred)
-        if chosen is not None:
-            return chosen
-    for r in roots:
-        chosen = _is_checkout(r)
-        if chosen is not None:
-            return chosen
-    return None
-
-
 def _setup_worktree(
     base: Path,
     worktree_path: Path,
@@ -776,7 +734,7 @@ class _RayLeaseProcess:
         latches :data:`_RAY_ACTOR_DIED_RC` so the reap loop treats it as a
         real failure immediately rather than looping until the wall-clock cap.
         """
-        from hyperloom.orchestrator.actions.executors._ray_serving import (  # noqa: PLC0415
+        from hyperloom.orchestrator.actions.executors._ray_serving import (
             _RAY_ACTOR_DIED_RC,
         )
 
@@ -796,6 +754,39 @@ class _RayLeaseProcess:
         # close() destroys the actor, so retain its exit status while it is observable.
         self.returncode = self._lease.exit_code()
         return confirmed or self._lease.close() is True
+
+
+def _local_tree_pgid(proc: Any) -> int | None:
+    """The process group to name in an operator's log for this specialist, or None.
+
+    Nothing probes this number. A served process is setsid'd by design, so it
+    leaves the group its spawn created, and every attempt to decide from such an
+    identity whether a lane was free was refuted in review. What the number is
+    still worth is a starting point for the human who has to clear a retained
+    lane by hand.
+
+    A local specialist is spawned with ``start_new_session=True``, so its root
+    pid is also the id of the group and session it leads, and that number keeps
+    naming the group once the root itself has exited.
+
+    A group id means something only inside the PID namespace that issued it, and
+    a Ray actor's ids come from whichever node Ray placed the actor on. Printing
+    one of those would point the operator at a process on a different host, so
+    an actor names nothing here.
+
+    Args:
+        proc: The specialist's process handle, which may be absent when the
+            cleanup that failed never spawned one.
+
+    Returns:
+        int | None: A local process group to record for an operator's benefit,
+        or None when there is none to name. Either way the lane is retained:
+        nothing reclaims it from this number.
+    """
+    if proc is None or isinstance(proc, _RayLeaseProcess):
+        return None
+    pid = getattr(proc, "pid", None)
+    return pid if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 else None
 
 
 # Dispatcher
@@ -908,15 +899,14 @@ class SpecialistSubprocessDispatcher:
         env = _build_specialist_env()
         # Bound the spawned CLI's request transport so a stalled gateway stream
         # raises client-side instead of hanging forever.
-        from ..roles._llm_stability_env import apply_llm_stability_env
+        from hyperloom.common.llm_stability_env import apply_llm_stability_env
 
         apply_llm_stability_env(env)
         # The child spends against the gateway, so tag it or its spend lands
-        # under no component at all. The task is offered but no preset selects
-        # it: one tag per task would give the spend rollup as many buckets as
-        # there are tasks, which is the opposite of what it is read for. Reading
-        # spend per task needs a header of its own, not a value in this one.
-        inject_attribution_env(env, component="specialist", operation="run_agent", task_id=task_id)
+        # under no component at all. The task tag is what attributes the
+        # requests of a child that dies before its result row -- the only
+        # place such a child's token usage survives is the gateway's log.
+        inject_attribution_env(env, component="specialist", operation="run_agent", task=task_id)
 
         backend = ""
         try:
@@ -979,9 +969,14 @@ class SpecialistSubprocessDispatcher:
             env["ROCR_VISIBLE_DEVICES"] = visible
             env["INFERENCE_OPTIMIZER_SPECIALIST_GPU_IDS"] = visible
         else:
-            # CPU specialists must not inherit serving GPU visibility.
+            # CPU specialists: hide all GPUs and use workspace-local compiler caches.
             for var in GPU_MASK_ENV_NAMES:
-                env.pop(var, None)
+                env[var] = ""
+            cache_root = workspace / ".cache"
+            env["TRITON_CACHE_DIR"] = str(cache_root / "triton")
+            env["TORCHINDUCTOR_CACHE_DIR"] = str(cache_root / "torchinductor")
+            env["AITER_JIT_DIR"] = str(cache_root / "aiter_jit")
+            env["INFERENCE_OPTIMIZER_AITER_JIT_DIR"] = str(cache_root / "aiter_jit")
 
         with cancel_scope_listener() as scope:
             log_fh: Any = None
@@ -1114,9 +1109,13 @@ class SpecialistSubprocessDispatcher:
                     else:
                         confirmed = self._kill(proc) if proc is not None else True
                 except (OSError, subprocess.SubprocessError) as exc:
-                    raise ExecutionCleanupUnconfirmed(f"task={task_id}: specialist cleanup failed: {exc}") from exc
+                    raise ExecutionCleanupUnconfirmed(
+                        f"task={task_id}: specialist cleanup failed: {exc}", tree_pgid=_local_tree_pgid(proc)
+                    ) from exc
                 if confirmed is not True:
-                    raise ExecutionCleanupUnconfirmed(f"task={task_id}: specialist cleanup unconfirmed")
+                    raise ExecutionCleanupUnconfirmed(
+                        f"task={task_id}: specialist cleanup unconfirmed", tree_pgid=_local_tree_pgid(proc)
+                    )
                 raise
             finally:
                 if log_fh is not None:
@@ -1177,6 +1176,9 @@ class SpecialistSubprocessDispatcher:
             response = parse_claude_stream_json_response(process_log)
             tool_calls = parse_claude_stream_json_tool_calls(process_log)
             turn_usages = parse_claude_stream_json_turn_usages(process_log)
+            record_stream_json_requests(process_log)
+            record_stream_json_tools(process_log)
+            record_stream_json_compactions(process_log)
 
         return SpecialistSubprocessResult(
             done_payload=done_payload,
@@ -1436,7 +1438,7 @@ class SpecialistSubprocessDispatcher:
             newest = max(newest, mtime)
             try:
                 await progress_cb(payload, elapsed)
-            except Exception:  # noqa: BLE001 — never let telemetry kill a run
+            except Exception:
                 log.exception("specialist progress callback raised")
             break
         return newest
@@ -1587,17 +1589,24 @@ class SpecialistSubprocessDispatcher:
         if isinstance(proc, _RayLeaseProcess):
             if proc.reap():
                 return True
+            # No ``tree_pgid``: see :func:`_local_tree_pgid`.
             raise ExecutionCleanupUnconfirmed(f"specialist pid={proc.pid}: actor cleanup unconfirmed")
         if proc.poll() is not None:
             # A re-parented descendant can outlive its root and old process group.
-            raise ExecutionCleanupUnconfirmed(f"specialist pid={proc.pid}: exited root has no verifiable tree")
+            raise ExecutionCleanupUnconfirmed(
+                f"specialist pid={proc.pid}: exited root has no verifiable tree", tree_pgid=proc.pid
+            )
         try:
             tree = collect_tree([proc.pid])
             if not any(pid == proc.pid for pid, _ in tree.members) or not kill_tree(tree):
-                raise ExecutionCleanupUnconfirmed(f"specialist pid={proc.pid}: tree cleanup unconfirmed")
+                raise ExecutionCleanupUnconfirmed(
+                    f"specialist pid={proc.pid}: tree cleanup unconfirmed", tree_pgid=proc.pid
+                )
             proc.wait(timeout=1.0)
         except (OSError, subprocess.TimeoutExpired) as exc:
-            raise ExecutionCleanupUnconfirmed(f"specialist pid={proc.pid}: tree cleanup failed: {exc}") from exc
+            raise ExecutionCleanupUnconfirmed(
+                f"specialist pid={proc.pid}: tree cleanup failed: {exc}", tree_pgid=proc.pid
+            ) from exc
         return True
 
     @staticmethod
@@ -1688,8 +1697,9 @@ class SpecialistSubprocessDispatcher:
         Args:
             worktree: Per-task worktree, or None.
             workspace: Task workspace.
-            worktree_base: Checkout the worktree was branched off, which is the
-                apply root of anything harvested from it.
+            worktree_base: The tree the worktree stands for -- the checkout it
+                was branched off, or the directory it holds a snapshot of --
+                which is the apply root of anything harvested from it.
             worktree_base_commit: The commit recorded when the worktree was
                 created, so the harvest stays anchored to the pre-round state
                 even if the specialist committed.
@@ -1782,7 +1792,6 @@ __all__ = [
     "SpecialistSubprocessConfig",
     "SpecialistSubprocessDispatcher",
     "SpecialistSubprocessResult",
-    "_pick_worktree_base",
     "_setup_worktree",
     "resolve_codex_executable",
 ]

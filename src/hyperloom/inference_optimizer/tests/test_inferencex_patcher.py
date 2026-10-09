@@ -200,7 +200,7 @@ def test_concurrent_patchers_converge_to_single_patch(fake_inferencex):
 
 
 # benchmark_serving.py PROFILE_EXTRA_BODY consumer patch.
-from hyperloom.orchestrator.actions.executors._inferencex_patcher import (  # noqa: E402
+from hyperloom.orchestrator.actions.executors._inferencex_patcher import (
     ensure_benchmark_serving_patched,
 )
 
@@ -315,7 +315,7 @@ def test_benchmark_serving_patched_line_is_executable_python(
     import os
 
     os.environ.pop("PROFILE_EXTRA_BODY", None)
-    result = eval(expr, {"__builtins__": __builtins__})  # noqa: PGH001
+    result = eval(expr, {"__builtins__": __builtins__})
     assert result == {
         "num_steps": 1,
         "merge_profiles": True,
@@ -323,7 +323,7 @@ def test_benchmark_serving_patched_line_is_executable_python(
     }, f"unexpected default extra_body: {result!r}"
     os.environ["PROFILE_EXTRA_BODY"] = '{"num_steps": 10, "shape_discovery": true, "detailed_annotations": true}'
     try:
-        result_env = eval(expr, {"__builtins__": __builtins__})  # noqa: PGH001
+        result_env = eval(expr, {"__builtins__": __builtins__})
         assert result_env == {
             "num_steps": 10,
             "shape_discovery": True,

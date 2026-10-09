@@ -12,8 +12,8 @@ from pathlib import Path
 from kernelforge.llm.git import git
 from kernelforge.durable_io import atomic_write_text
 from kernelforge.loop.reporting import (
-    MANIFEST_SCHEMA_VERSION,
     BestResultPublisher,
+    is_best_manifest,
 )
 from kernelforge.loop.scoring import warm_start_improvement_flags
 
@@ -21,6 +21,22 @@ from kernelforge.loop.scoring import warm_start_improvement_flags
 def atomic_write_json(path: str | Path, payload: dict) -> None:
     """Durably publish one JSON snapshot via temp-file replacement."""
     atomic_write_text(path, json.dumps(payload))
+
+
+def load_published_best(workspace_dir: str) -> dict | None:
+    """Return the published best result, or ``None`` when the campaign has no authoritative one.
+
+    ``best_result.json`` is the commit point: every consumer of a campaign's outcome reads it
+    through here so that one verdict on what counts as published governs them all.
+    """
+    path = Path(workspace_dir) / "forge_experiments" / "best_result.json"
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    if not is_best_manifest(payload) or payload.get("correctness_passed") is not True:
+        return None
+    return payload
 
 
 def _validated_warm_start_result(
@@ -32,18 +48,8 @@ def _validated_warm_start_result(
     mean_case_speedup: float,
 ) -> dict | None:
     """Return the published warm-start commit point when it is authoritative."""
-    path = Path(workspace_dir) / "forge_experiments" / "best_result.json"
-    try:
-        payload = json.loads(path.read_text())
-    except Exception:
-        return None
-    if (
-        not isinstance(payload, dict)
-        or payload.get("schema_version") != MANIFEST_SCHEMA_VERSION
-        or payload.get("correctness_passed") is not True
-        or payload.get("commit_hash") != commit_hash
-        or int(payload.get("iteration", -1)) != 0
-    ):
+    payload = load_published_best(workspace_dir)
+    if payload is None or payload.get("commit_hash") != commit_hash or int(payload.get("iteration", -1)) != 0:
         return None
     try:
         published_baseline = float(payload.get("baseline_wall_ms"))
@@ -177,7 +183,6 @@ def publish_warm_start_recovery(
         mean_case_speedup=float(mean_case_speedup),
     )
     checkpoint = {
-        "schema_version": 1,
         "state": "best_committed",
         "decision": "WARM_START",
         "experiment_id": external_id,
@@ -223,7 +228,7 @@ def publish_warm_start_recovery(
     if caller_experiment_id:
         try:
             tracker.set_checkpoint(caller_experiment_id, checkpoint)
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - collected into persistence_errors
             persistence_errors.append(f"checkpoint: {error}")
     if persistence_errors:
         result["persistence_degraded"] = True
@@ -231,7 +236,7 @@ def publish_warm_start_recovery(
     if result_json:
         try:
             atomic_write_json(result_json, result)
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - collected into persistence_errors
             persistence_errors.append(f"result-json: {error}")
     if persistence_errors:
         result["persistence_degraded"] = True

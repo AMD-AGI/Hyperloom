@@ -5,10 +5,15 @@
 
 from __future__ import annotations
 import logging as _logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from hyperloom.inference_optimizer.framework_registry import is_scriptable
 from ..state.task_registry import Task
-from .base import PhaseHandler
+from ..state.orchestration_memory import CYCLE_DIRECTIVE_REQUEST, build_cycle_memory
+from ..collaborator import CoordinatorCollaborator
+from . import machine_state as _phase_state
+
+if TYPE_CHECKING:
+    from .machine import Transition
 
 log = _logging.getLogger(__name__)
 
@@ -27,24 +32,62 @@ def _conc_sweep_lease_ttl_sec(clamped_budget: int | None) -> int:
     return int(clamped_budget) + _CONC_SWEEP_LEASE_GRACE_SEC
 
 
-class SweepPhase(PhaseHandler):
-    """Extracted phase handler; delegates unknown attrs to its Coordinator."""
+class SweepPhase(CoordinatorCollaborator):
+    """SWEEP phase handler: drives concurrency sweep and roofline analysis."""
 
-    async def _on_enter_sweep(self, *, from_phase: str) -> None:
-        """Auto-enqueue the ``conc_sweep`` task on SWEEP entry."""
+    async def pump(self) -> None:
+        """Ask Orchestration, once per macro-cycle, how the next cycle should open."""
         state = self.shared_state
+        if (
+            "orchestration" not in self.backends
+            or self.orch_prompt.is_user_supplied
+            or state.orchestration_memory.get("for_cycle") == state.macro_cycle
+        ):
+            return
+        feasible, _ = _phase_state.cycle_reloop_decision(state)
+        if not feasible:
+            return
+        replies: list[Any] = []
+
+        async def _directive_turn() -> None:
+            replies.append(await self._coord.reactor_pass("orchestration", request=CYCLE_DIRECTIVE_REQUEST))
+
+        await self._coord.await_within_session_bound(_directive_turn, stage="reactor:orchestration")
+        state.orchestration_memory = build_cycle_memory(replies[0] if replies else None, cycle=state.macro_cycle)
+        log.info(
+            "cycle %d handoff: directive=%r parse_error=%r",
+            state.macro_cycle,
+            state.orchestration_memory["next_cycle_directive"][:80],
+            state.orchestration_memory["parse_error"],
+        )
+
+    async def on_enter_sweep(self, tr: "Transition") -> None:
+        """Start the ``conc_sweep``, and hand the cycle off at once when SWEEP settles on entry."""
+        await self._start_conc_sweep(tr)
+        # A settled SWEEP is left on the next advance, before this phase's pump runs again.
+        if self.shared_state.last_conc_sweep.get("status"):
+            await self.pump()
+
+    async def _start_conc_sweep(self, tr: "Transition") -> None:
+        """Auto-enqueue the ``conc_sweep`` task on SWEEP entry."""
+        from_phase = tr.from_phase
+        state = self.shared_state
+        # A stack attempt an earlier entry or leg left behind may still have its
+        # members on the tree, so settle it before the drain below applies
+        # anything on top; the recovery halts the session if it cannot.
+        await self._coord.phase_kernel_stack.recover_interrupted_stack_validation()
         # Drain pending KEEP integrates so sweep measures full current_best.
-        if getattr(state, "has_keep_pending_integrate", False):
-            await self._drain_pending_keep_integrates()
+        if state.has_keep_pending_integrate:
+            await self._coord.phase_kernel_stack.drain_pending_keep_integrates()
         # Validate the stack for positive NEEDS_REVIEW kernels.
-        await self._maybe_validate_positive_needs_review_stack()
+        await self._coord.phase_kernel_stack.maybe_validate_positive_needs_review_stack()
         if is_scriptable(getattr(state, "framework", "")):
             self._record_terminal_conc_sweep_skip(
                 skip_reason="non_serving_workload",
                 auto_conc_sweep_skipped="non_serving_workload",
             )
             return
-        if not getattr(state, "conc_sweep_enabled", False):
+        if not state.conc_sweep_enabled:
             log.info(
                 "SWEEP entry (from=%s): conc_sweep disabled; recording terminal skip.",
                 from_phase or "<unknown>",
@@ -54,10 +97,10 @@ class SweepPhase(PhaseHandler):
                 auto_conc_sweep_skipped="disabled",
             )
             return
-        prev_conc = getattr(state, "last_conc_sweep_watermark", None)
+        prev_conc = state.last_conc_sweep_watermark
         prev_conc = prev_conc if isinstance(prev_conc, dict) else {}
         prev_validated = prev_conc.get("cumulative_gain_validated_at_record")
-        cur_validated = float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0)
+        cur_validated = float(state.cumulative_gain_validated or 0.0)
         if prev_conc and isinstance(prev_validated, (int, float)) and cur_validated <= float(prev_validated) + 1e-6:
             log.info(
                 "SWEEP entry (from=%s): skipping auto-conc-sweep — no validated gain since last "
@@ -72,26 +115,27 @@ class SweepPhase(PhaseHandler):
                 auto_conc_sweep_skipped_validated_gain=cur_validated,
             )
             return
-        denied = self._time_budget_denial_for_action("conc_sweep")
+        denied = self._coord.dispatcher.time_budget_denial_for_action("conc_sweep")
         if denied is not None:
             log.info(
                 "SWEEP entry (from=%s): conc_sweep cannot fit the session budget (%s); recording terminal skip.",
                 from_phase or "<unknown>",
                 denied,
             )
-            self._record_session_budget_conc_sweep_skip(denied=denied)
+            self.record_session_budget_conc_sweep_skip(denied=denied)
             return
         try:
             task = await self._enqueue_internal_conc_sweep_task(
                 reason="phase_entry",
             )
-        except Exception as exc:  # noqa: BLE001 — a failed enqueue must still close the phase
+        except Exception as exc:
             log.exception(
                 "SWEEP entry hook: failed to enqueue auto-conc-sweep: %r",
                 exc,
             )
-            self._record_terminal_conc_sweep_skip(
-                skip_reason="enqueue_failed",
+            self._record_terminal_conc_sweep(
+                "failed",
+                "enqueue_failed",
                 auto_conc_sweep_error=repr(exc)[:240],
             )
             return
@@ -105,7 +149,7 @@ class SweepPhase(PhaseHandler):
             task.params.get("concs"),
             task.params.get("total_budget_sec"),
         )
-        self._record_phase_entry_evidence(
+        self._coord.phase_machine.record_phase_entry_evidence(
             auto_conc_sweep_enqueued=True,
             auto_conc_sweep_task_id=task.task_id,
             # Verbatim: None records "the workload picks", which is not the same statement as an empty ladder.
@@ -119,12 +163,11 @@ class SweepPhase(PhaseHandler):
     ) -> Task | None:
         """Build + enqueue a Coordinator-internal ``conc_sweep`` task."""
         state = self.shared_state
-        configured_budget = int(state.conc_sweep_total_budget_sec or 0)
+        configured_budget = int(state.conc_sweep_total_budget_sec)
         # Clamp total_budget_sec to the remaining session wall-clock budget so a long conc_sweep cannot outlive
         # --max-hours.
         _CLOSE_RESERVE_SEC = 120
-        _rem_fn = getattr(state, "remaining_minutes", None)
-        session_rem = _rem_fn() if callable(_rem_fn) else None
+        session_rem = state.remaining_minutes()
         clamped_budget: int | None
         if session_rem is not None:
             session_rem_sec = int(max(0.0, session_rem * 60.0) - _CLOSE_RESERVE_SEC)
@@ -134,7 +177,7 @@ class SweepPhase(PhaseHandler):
                     session_rem_sec,
                     _CLOSE_RESERVE_SEC,
                 )
-                self._record_session_budget_conc_sweep_skip(
+                self.record_session_budget_conc_sweep_skip(
                     denied=f"remaining_after_close_reserve={session_rem_sec}s",
                 )
                 return None
@@ -149,11 +192,14 @@ class SweepPhase(PhaseHandler):
             "concs": list(state.conc_sweep_concs) if state.conc_sweep_concs else None,
             "total_budget_sec": clamped_budget,
         }
+        lanes, _ = self._coord.dispatcher.registry_lanes_ttl("conc_sweep")
         task, was_existing = await self.tasks.create_or_return_existing(
             kind="conc_sweep",
             params=params,
-            idempotency_key=f"internal-conc_sweep-{reason}{self._cycle_idem_suffix()}",
+            requires_lanes=lanes,
+            idempotency_key=f"internal-conc_sweep-{reason}{self._coord.dispatcher.cycle_idem_suffix()}",
             lease_ttl_sec=_conc_sweep_lease_ttl_sec(clamped_budget),
+            dispatch_class="coordinator",
         )
         if was_existing:
             log.info(
@@ -171,13 +217,14 @@ class SweepPhase(PhaseHandler):
             )
         return task
 
-    def _record_session_budget_conc_sweep_skip(self, *, denied: object) -> None:
+    def record_session_budget_conc_sweep_skip(self, *, denied: object) -> None:
         """Stamp last_conc_sweep skipped when the session clock refused conc_sweep."""
-        last = getattr(self.shared_state, "last_conc_sweep", None) or {}
+        last = self.shared_state.last_conc_sweep or {}
         if str(last.get("status") or "").strip():
             return
-        self._record_terminal_conc_sweep_skip(
-            skip_reason="session_time_budget",
+        self._record_terminal_conc_sweep(
+            "skipped",
+            "session_time_budget",
             auto_conc_sweep_skipped="session_time_budget",
             auto_conc_sweep_denied=str(denied),
         )
@@ -189,12 +236,18 @@ class SweepPhase(PhaseHandler):
         **evidence: Any,
     ) -> None:
         """Record an auto-conc-sweep skip as terminal so SWEEP can close cleanly."""
-        self._record_phase_entry_evidence(**evidence)
-        self.shared_state.record_conc_sweep(
-            {
-                "status": "skipped",
-                "skip_reason": skip_reason,
-                "was_skipped": True,
-            }
-        )
+        self._record_terminal_conc_sweep("skipped", skip_reason, **evidence)
+
+    def _record_terminal_conc_sweep(
+        self,
+        status: str,
+        reason: str,
+        **evidence: Any,
+    ) -> None:
+        """Record a terminal conc-sweep outcome and persist state."""
+        self._coord.phase_machine.record_phase_entry_evidence(**evidence)
+        record: dict[str, Any] = {"status": status, "skip_reason": reason}
+        if status == "skipped":
+            record["was_skipped"] = True
+        self.shared_state.record_conc_sweep(record)
         self.shared_state.save(self.session_dir)

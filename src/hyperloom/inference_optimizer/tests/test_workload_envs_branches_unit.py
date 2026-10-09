@@ -15,7 +15,7 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.actions.executors import _workload_envs as we
-from hyperloom.orchestrator.actions.executors._grid_server_args import validate_server_args_shell_safe
+from hyperloom.inference_optimizer.grid_server_args import validate_server_args_shell_safe
 
 
 def _clear_env(monkeypatch):
@@ -238,15 +238,6 @@ def test_visible_gpu_count_rocm_smi_error(monkeypatch):
 
     monkeypatch.setattr(we.subprocess, "run", _raise)
     assert we._visible_gpu_count() == 0
-
-
-def test_default_baseline_config(monkeypatch):
-    monkeypatch.setenv("FRAMEWORK", "atom")
-    assert we.default_baseline_config().name == "baseline_atom.yaml"
-    monkeypatch.setenv("FRAMEWORK", "vllm")
-    assert we.default_baseline_config().name == "baseline_vllm.yaml"
-    monkeypatch.setenv("FRAMEWORK", "weird")
-    assert we.default_baseline_config().name == "baseline_sglang.yaml"
 
 
 def test_precision_and_gpu_type_no_framework_agent(monkeypatch, tmp_path):

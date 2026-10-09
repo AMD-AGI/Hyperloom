@@ -22,10 +22,15 @@ import logging
 
 from hyperloom.inference_optimizer.session.session_paths import _RUNS_ACTIONS, runs_dir
 from ..actions.cancel_channel import current_cancel_scope
-from ..bus.resource_lock import Lease, ResourceLockManager
+from ..bus.resource_lock import (
+    CLEANUP_CONFIRMED_KEY,
+    CLEANUP_TREE_PGID_KEY,
+    Lease,
+    ResourceLockManager,
+)
 from ..policy.gate import PolicyDenied
 from ..state.task_registry import IllegalTransition, Task, TaskRegistry
-from ..trace.task_progress import ProgressReporter, progress_scope
+from hyperloom.inference_optimizer.trace.task_progress import ProgressReporter, progress_scope
 
 if TYPE_CHECKING:
     from ..policy.gate import PolicyGate
@@ -82,20 +87,15 @@ class SubAgentResult:
               ``"policy_path_outside_session_dir"``): a
               ``PolicyDenied`` dispatch rejection, keyed on
               :attr:`PolicyDenied.rule <..policy.gate.PolicyDenied.rule>`.
-              Falls through any exact-match bucket below by design — a
-              policy denial isn't a runtime crash/oom/hang, so
-              :meth:`writeback._pitfall_severity_for` correctly excludes it
-              from ``SEVERITY_CRASH``. Still lands in the gap ledger as its
-              own ``(action, error_class)`` key
-              (:meth:`explore._extract_gaps_from_attempts`), which is enough
-              to group repeat denials without a dedicated bucket.
+              The task never ran, so the result is ``cancelled`` and the
+              failure ledgers never see it; the rule stays readable on the
+              task row's terminal evidence.
             * ``"crash"`` / ``"oom"`` / ``"hang"`` / ``"detokenizer_stall"``:
-              exact-matched by :meth:`writeback._pitfall_severity_for` to
+              exact-matched by :meth:`recipe_journal._pitfall_severity_for` to
               classify a failure as crash-severity for the KB.
             * ``"no_executor"``: no runner registered for the task's
-              ``kind`` — set directly on this dataclass, same site as
-              ``policy_{rule}``, so this exit no longer collapses into
-              ``"unknown_error"`` either.
+              ``kind`` — set directly on this dataclass so the gap ledger
+              does not bucket it as ``"unknown_error"``.
             * The raised exception's ``__class__.__name__`` (e.g.
               ``"TimeoutError"``): an executor raised instead of returning a
               result. Same reasoning — a real class beats the generic
@@ -113,11 +113,33 @@ class SubAgentResult:
 
 
 class ExecutionCleanupUnconfirmed(RuntimeError):
-    """Physical cleanup did not acknowledge release of an execution's resources."""
+    """Physical cleanup did not acknowledge release of an execution's resources.
+    Recorded on the terminal row as a LEAD FOR AN OPERATOR, not as something a
+    reaper acts on. Nothing probes it: a served process is setsid'd by design,
+    so it leaves the group its spawn created, and three attempts to prove a lane
+    free from identities like this one were refuted in review. What it is still
+    good for is telling a human where to start looking when a lane is reported
+    held -- see :func:`~hyperloom.orchestrator.bus.resource_lock._report_unverifiable`,
+    which prints it with exactly that caveat.
 
-    def __init__(self, message: str, *, result: SubAgentResult | None = None) -> None:
+    Attributes:
+        result: The executor's own outcome, for the terminal row.
+        tree_pgid: Process group whose teardown went unconfirmed, or None when
+            the raise site has no local group to name -- a cleanup that failed
+            before any process existed, or a Ray actor whose ids belong to
+            another node.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        result: SubAgentResult | None = None,
+        tree_pgid: int | None = None,
+    ) -> None:
         super().__init__(message)
         self.result = result
+        self.tree_pgid = tree_pgid
 
 
 class SubAgentRunner:
@@ -219,7 +241,7 @@ class SubAgentRunner:
             await self.tasks.transition(task_id, new_state, evidence=evidence or {})
         except IllegalTransition:
             # An outcome is durable evidence, not a prunable progress heartbeat.
-            await self.tasks.record_evidence(task_id, evidence or {})
+            await self.tasks.append_completion_evidence(task_id, evidence)
             log.warning(
                 "sub_agent_runner: task_id=%s already terminal before "
                 "transition→%s (context=%s); keeping the executor result",
@@ -258,7 +280,6 @@ class SubAgentRunner:
         runner = self.executor_registry.get(task.kind)
         lease: Lease | None = prebound_lease
         outcome: SubAgentResult | None = None
-        terminal_state: str | None = None
         evidence: dict[str, Any] = {}
         context = "executor_success"
         try:
@@ -280,13 +301,12 @@ class SubAgentRunner:
                         task_id=task.task_id,
                     )
                 except PolicyDenied as denied:
-                    terminal_state = "cancelled"
                     context = "dispatch_policy_denied"
                     evidence = {"reason": "policy_denied", "rule": denied.rule, "error": str(denied)}
                     rule = denied.rule or "denied"
                     outcome = SubAgentResult(
                         task_id=task.task_id,
-                        state="failed",
+                        state="cancelled",
                         result={},
                         error=str(denied),
                         error_class=f"policy_{rule}",
@@ -319,17 +339,7 @@ class SubAgentRunner:
             # Workspace prep is inside the terminal-writing block: an ENOSPC
             # there is a task that failed, not a task still running.
             try:
-                workspace = self._pre_mkdir_workspace(task)
-                extra: dict = {}
-                if workspace is not None:
-                    extra["workspace"] = str(workspace)
-                if self.session_dir is not None:
-                    extra["session_dir"] = str(self.session_dir)
-                if self.shared_state is not None:
-                    extra["shared_state"] = self.shared_state
-                if extra_context:
-                    extra.update(dict(extra_context))
-                ctx = RunnerContext(task=task, lease=lease, extra=extra)
+                ctx = self._context_for(task, lease=lease, extra_context=extra_context)
                 with progress_scope(self._progress_reporter(task.task_id)):
                     result_payload = await runner(ctx)
             except asyncio.CancelledError:
@@ -387,20 +397,30 @@ class SubAgentRunner:
                     if cleanup_confirmed and on_cleanup_confirmed is not None:
                         on_cleanup_confirmed()
                     if outcome is not None:
-                        evidence.update(outcome=asdict(outcome), cleanup_confirmed=cleanup_confirmed)
+                        evidence.update({"outcome": asdict(outcome), CLEANUP_CONFIRMED_KEY: cleanup_confirmed})
                         if not cleanup_confirmed:
                             evidence["cleanup_error"] = (
                                 repr(cleanup_error) if cleanup_error else "physical cleanup unconfirmed"
                             )
+                            # The lane this path deliberately retains is not
+                            # taken back by anything: no reaper inspects this
+                            # number, because a served process setsid's out of
+                            # the group it names. It is recorded so the operator
+                            # who has to clear that lane by hand has somewhere
+                            # to start -- as a number, rather than left to be
+                            # dug back out of the repr above.
+                            pgid = getattr(cleanup_error, "tree_pgid", None)
+                            if isinstance(pgid, int) and not isinstance(pgid, bool) and pgid > 0:
+                                evidence[CLEANUP_TREE_PGID_KEY] = pgid
                         if cleanup_confirmed:
                             await self._write_terminal(
                                 task.task_id,
-                                terminal_state or outcome.state,
+                                outcome.state,
                                 evidence=evidence,
                                 context=context,
                             )
                         else:
-                            await self.tasks.record_evidence(task.task_id, evidence)
+                            await self.tasks.append_completion_evidence(task.task_id, evidence)
                     if isinstance(cleanup_error, asyncio.CancelledError):
                         scope = current_cancel_scope()
                         if scope is not None:
@@ -414,6 +434,37 @@ class SubAgentRunner:
                         raise ExecutionCleanupUnconfirmed(
                             f"task={task.task_id}: physical cleanup unconfirmed", result=outcome
                         ) from cleanup_error
+
+    def _context_for(self, task: Task, *, lease: Lease | None, extra_context: dict | None) -> RunnerContext:
+        """Build the executor context: workspace, session dir, live state, then the caller's extras."""
+        workspace = self._pre_mkdir_workspace(task)
+        extra: dict = {}
+        if workspace is not None:
+            extra["workspace"] = str(workspace)
+        if self.session_dir is not None:
+            extra["session_dir"] = str(self.session_dir)
+        if self.shared_state is not None:
+            extra["shared_state"] = self.shared_state
+        if extra_context:
+            extra.update(dict(extra_context))
+        return RunnerContext(task=task, lease=lease, extra=extra)
+
+    async def execute_covered(self, task: Task) -> dict:
+        """Run ``task``'s executor as a step of the task running this call.
+
+        The caller's lease, cancel scope and progress sink cover the step.
+        ``task`` is never written to the registry: a queued row would be visible
+        to the pump in the await gaps, and a lane claim of its own would
+        conflict with the lanes the caller already holds.
+
+        Args:
+            task: An unpersisted task naming the executor and its params.
+
+        Returns:
+            The executor's result payload.
+        """
+        ctx = self._context_for(task, lease=None, extra_context=None)
+        return await self.executor_registry[task.kind](ctx)
 
     def _progress_reporter(self, task_id: str) -> ProgressReporter:
         """Build the ambient progress sink for one task's executor.

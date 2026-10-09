@@ -6,11 +6,10 @@
 from __future__ import annotations
 
 import logging
-import os
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.env import env_str
+from hyperloom.common.env import env_int, env_str
 from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import (
     analyze,
     clear_competitor_target,
@@ -20,23 +19,6 @@ from ...loop.sub_agent_runner import RunnerContext
 
 
 log = logging.getLogger(__name__)
-
-
-def _env_int(name: str, default: int = 0) -> int:
-    """Read an integer environment variable with a fallback default."""
-    raw = os.environ.get(name, "").strip()
-    if not raw:
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        log.warning(
-            "target_analysis_executor: env %s=%r is not an integer; falling back to %d",
-            name,
-            raw,
-            default,
-        )
-        return default
 
 
 class TargetAnalysisExecutor:
@@ -116,8 +98,8 @@ class TargetAnalysisExecutor:
         compare_against_gpu = str(params.get("compare_against_gpu") or self.compare_against_gpu or "").strip()
         framework = str(params.get("framework") or getattr(state, "framework", "") or env_str("FRAMEWORK"))
         precision = str(params.get("precision") or env_str("PRECISION") or getattr(state, "precision", ""))
-        isl = int(params.get("isl") or _env_int("ISL", 0))
-        osl = int(params.get("osl") or _env_int("OSL", 0))
+        isl = int(params.get("isl") or env_int("ISL", 0))
+        osl = int(params.get("osl") or env_int("OSL", 0))
 
         try:
             summary = analyze(
@@ -130,7 +112,7 @@ class TargetAnalysisExecutor:
                 osl=osl,
                 benchmark_mode=benchmark_mode,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.exception("target_analysis_executor: analyze() raised: %s", exc)
             clear_competitor_target(session_dir)
             return {

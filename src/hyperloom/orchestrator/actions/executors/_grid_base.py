@@ -12,31 +12,8 @@ from typing import Any
 
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
-from hyperloom.common.perf_metric import VERDICT_KEEP
-from ._canonical_fingerprint import canonical_fingerprint
 
 log = logging.getLogger(__name__)
-
-
-# Content-based variant fingerprint (cross-action dedup ledger key).
-def variant_fingerprint(
-    extra_server_args: str | None,
-    extra_envs: dict[str, Any] | None,
-    *,
-    remove_args: list[str] | tuple[str, ...] | set[str] | str | None = None,
-    unset_envs: list[str] | tuple[str, ...] | set[str] | str | None = None,
-    args_mode: str = "append",
-    runtime_override: dict[str, Any] | None = None,
-) -> str:
-    """Stable content fingerprint for a (extra_server_args, extra_envs) pair."""
-    return canonical_fingerprint(
-        extra_server_args,
-        extra_envs,
-        remove_args=remove_args,
-        unset_envs=unset_envs,
-        args_mode=args_mode,
-        runtime_override=runtime_override,
-    )
 
 
 # Per-variant KEEP threshold (gain-pct + accuracy gate); the grid noise floor.
@@ -47,16 +24,6 @@ DEFAULT_KEEP_THRESHOLD_PCT = 1.0
 TS_FAILED = "FAILED"
 TS_KILLED_OVERTIME = "KILLED_OVERTIME"
 TS_SKIPPED_DEDUP = "SKIPPED_DEDUP"
-
-
-def is_kept(outcome: str) -> bool:
-    """True when *outcome* is an adoption.
-
-    The graded executors spell it ``VERDICT_KEEP``; ``integrate_patch`` spells
-    it ``"kept"``. Both derive ``adopted`` from here so the two spellings cannot
-    disagree about what counts.
-    """
-    return outcome in (VERDICT_KEEP, "kept")
 
 
 @dataclass
@@ -99,18 +66,6 @@ class GridVariant:
         # Optional runtime override; injected into materialized YAML benchmark.envs by _build_variant_yaml so the
         # server subprocess resolves the attempt runtime.
         self.runtime_override: dict[str, str] = {}
-
-    @property
-    def fingerprint(self) -> str:
-        """Content fingerprint used as dedup-ledger key. See module doc."""
-        return variant_fingerprint(
-            self.extra_server_args,
-            self.extra_envs,
-            remove_args=self.remove_args,
-            unset_envs=self.unset_envs,
-            args_mode=self.args_mode,
-            runtime_override=getattr(self, "runtime_override", None) or None,
-        )
 
 
 def coerce_extra_envs(value: Any) -> dict[str, str]:
@@ -172,6 +127,8 @@ class VariantResult:
     input_throughput: float | None = None
     tpot_p90_ms: float | None = None
     intvty_p90: float | None = None
+    intvty_p50: float | None = None
+    request_error_rate: float | None = None
     workspace: str | None = None
     report_path: str | None = None
     raw_result_path: str | None = None
@@ -193,18 +150,12 @@ class VariantResult:
     launch_evidence: dict[str, Any] = field(default_factory=dict)
     launch_evidence_path: str | None = None
 
-    @property
-    def fingerprint(self) -> str:
-        """Same fingerprint scheme as :class:`GridVariant`."""
-        return canonical_fingerprint(self.extra_server_args, self.extra_envs)
-
     def to_dict(self) -> dict[str, Any]:
         """Serialize this result to a plain JSON-friendly dict."""
         return {
             "name": self.name,
             "extra_server_args": self.extra_server_args,
             "extra_envs": self.extra_envs,
-            "fingerprint": self.fingerprint,
             "status": self.status,
             "output_throughput": self.output_throughput,
             "request_throughput": self.request_throughput,
@@ -217,6 +168,8 @@ class VariantResult:
             "input_throughput": self.input_throughput,
             "tpot_p90_ms": self.tpot_p90_ms,
             "e2e_norm_intvty_p90": self.intvty_p90,
+            "e2e_norm_intvty_p50": self.intvty_p50,
+            "request_error_rate": self.request_error_rate,
             "workspace": self.workspace,
             "report_path": self.report_path,
             "raw_result_path": self.raw_result_path,

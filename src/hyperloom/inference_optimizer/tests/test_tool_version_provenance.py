@@ -63,6 +63,7 @@ def test_versions_map_composed_at_top_level(tmp_path: Path) -> None:
                 {"attempt_id": "a1", "backend": "geak", "status": "completed"},
             ],
         },
+        recorder=None,
     )
     out = assemble_parts(tmp_path)
     versions = out["metadata"]["versions"]["tools"]
@@ -87,6 +88,7 @@ def test_forge_backend_mints_versions_entry(tmp_path: Path) -> None:
                 },
             ],
         },
+        recorder=None,
     )
     out = assemble_parts(tmp_path)
     versions = out["metadata"]["versions"]["tools"]
@@ -103,6 +105,7 @@ def test_a_result_with_no_attempts_still_credits_the_backend_it_names(tmp_path: 
     instrument.record_backend_versions_and_timeline(
         tmp_path,
         {"kernel_id": "k1", "backend": "geak", "status": "failed", "attempts": []},
+        recorder=None,
     )
     out = assemble_parts(tmp_path)
     assert out["metadata"]["versions"]["tools"]["geak"]["tool"] == "geak"
@@ -113,6 +116,7 @@ def test_a_pre_dispatch_gating_failure_invents_no_build(tmp_path: Path) -> None:
     instrument.record_backend_versions_and_timeline(
         tmp_path,
         {"kernel_id": "k1", "status": "failed", "attempts": []},
+        recorder=None,
     )
     out = assemble_parts(tmp_path)
     assert not (out.get("metadata") or {}).get("versions")
@@ -179,3 +183,6 @@ def test_tool_version_probe_cmd_and_dist() -> None:
     # dist strategy resolves an installed package and rejects a bogus name.
     assert tool_versions._dist_version(("pytest",))
     assert tool_versions._dist_version(("definitely-not-a-real-dist-xyz",)) == ""
+    # A missing binary is an environmental miss, not a recorder defect.
+    assert tool_versions._run_first_line(["definitely-not-a-hyperloom-binary"]) == ""
+    assert tool_versions._probe_tool_version(("cmd", ("definitely-not-a-hyperloom-binary",)), "") == ""

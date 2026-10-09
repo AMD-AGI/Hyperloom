@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -36,9 +37,6 @@ def _silent_backends() -> dict[str, object]:
 def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-    # Pin the kernel-agent root so request handlers resolve from disk.
-    kernel_agent_root = Path(__file__).resolve().parents[4] / "src" / "hyperloom" / "agents" / "kernel"
-    monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(kernel_agent_root))
     # Stub the interpreter resolver to avoid a real Magpie import probe.
     monkeypatch.setenv("MAGPIE_PYTHON", "/usr/bin/python3")
     from hyperloom.orchestrator.actions.executors import _benchmark_interpreter
@@ -74,7 +72,7 @@ async def test_trace_analyze_does_not_record_kernel_opt(
             type=IntentType.REQUEST,
             payload={"target_agent": "kernel_agent", "kind": "trace_analyze", "params": {"trace_input": "/tmp/t.json"}},
         )
-        await c._handle_intent("orchestration", intent)
+        await c.router.handle_intent("orchestration", intent)
         assert c.shared_state.last_kernel_opt == {}
     finally:
         await c.stop()
@@ -137,7 +135,7 @@ async def test_run_optimization_no_longer_gated_on_fp8_gemm_tuning(session_dir):
             "candidates_path": "/tmp/candidates.json",
         }
 
-        assert c._sequence_denial_for_request("kernel_agent", "run_optimization") is None
+        assert c.dispatcher.sequence_denial_for_request("kernel_agent", "run_optimization") is None
     finally:
         await c.stop()
 
@@ -190,7 +188,7 @@ async def test_kernel_entry_auto_runs_gemm_tuning_for_fp8_sglang(
             lambda _self, _env_var, env_value: env_value,
         )
 
-        await c._on_enter_kernel(from_phase="FRAMEWORK_AGENT")
+        await c.phase_kernel.run_agent(SimpleNamespace(task=SimpleNamespace(params={"from_phase": "FRAMEWORK_AGENT"})))
 
         assert calls
         assert c.shared_state.gemm_tuning_attempts
@@ -199,7 +197,7 @@ async def test_kernel_entry_auto_runs_gemm_tuning_for_fp8_sglang(
         assert c.shared_state.current_best["tput"] == 900.0
         assert c.shared_state.cumulative_gain_validated == pytest.approx(12.5)
         assert c.shared_state.optimization_stack[-1]["action"] == "gemm_tuning"
-        assert c._gemm_tuning_required_before_kernel_opt() is False
+        assert c.phase_kernel._gemm_tuning_required_before_kernel_opt() is False
     finally:
         await c.stop()
 

@@ -48,7 +48,8 @@ def _kernel_state() -> SharedState:
 
 
 def _enter(state: SharedState, phase: str, at_unix: float) -> None:
-    state.record_phase_transition(
+    ps.record_phase_transition(
+        state,
         to_phase=phase,
         reason="phase_entered",
         evidence={},
@@ -93,7 +94,9 @@ def test_three_entries_under_per_entry_cap_exceed_the_cumulative_cap():
     _enter(state, ps.PHASE_KERNEL_AGENT, now)
     assert ps.phase_cap_seconds(state) == KERNEL_CAP_SEC
     assert ps.phase_elapsed_seconds(state, now_unix=now) == 0.0
-    assert ps.phase_cap_exceeded(state, now_unix=now) is True
+    assert ps.phase_cap_seconds(state) is not None and ps.phase_cumulative_seconds(
+        state, now_unix=now
+    ) >= ps.phase_cap_seconds(state)
 
 
 def test_per_entry_elapsed_keeps_its_meaning():
@@ -139,8 +142,10 @@ def test_the_absolute_cap_stops_a_phase_that_outspent_its_share():
     _enter(state, ps.PHASE_KERNEL_AGENT, now)
 
     assert ps.phase_cumulative_seconds(state, now_unix=now) > KERNEL_CAP_SEC
-    assert ps.phase_cap_exceeded(state, now_unix=now) is True
-    assert ps.exit_normal_kernel(state, now_unix=now) is not None
+    assert ps.phase_cap_seconds(state) is not None and ps.phase_cumulative_seconds(
+        state, now_unix=now
+    ) >= ps.phase_cap_seconds(state)
+    assert ps.compute_next_phase(state, now_unix=now) is not None
 
 
 def test_a_macro_cycle_reentry_gets_budget_while_the_session_has_time_left():
@@ -167,9 +172,11 @@ def test_a_macro_cycle_reentry_gets_budget_while_the_session_has_time_left():
     _enter(state, ps.PHASE_FRAMEWORK_AGENT, now)
 
     assert ps.session_remaining_seconds(state, now_unix=now) > 7 * 3600.0
-    assert ps.phase_cap_exceeded(state, now_unix=now) is False
+    assert ps.phase_cap_seconds(state) is None or ps.phase_cumulative_seconds(
+        state, now_unix=now
+    ) < ps.phase_cap_seconds(state)
     assert ps.phase_budget_remaining_seconds(state, now_unix=now) > 6 * 3600.0
-    assert ps.exit_normal_optimize(state, now_unix=now) is None
+    assert ps.compute_next_phase(state, now_unix=now) is None
 
 
 def test_totals_accumulate_for_every_phase_not_just_explore():
@@ -184,9 +191,6 @@ def test_totals_accumulate_for_every_phase_not_just_explore():
         ps.PHASE_KERNEL_AGENT: 150.0,
         ps.PHASE_SWEEP: 50.0,
     }
-    # EXPLORE's dedicated accumulator still agrees; it is kept because it carries a tri-state "unknown" for legacy
-    # resumes that the budget totals deliberately do not have.
-    assert state.explore_elapsed_accum_s == 100.0
 
 
 def test_fresh_state_has_no_banked_totals():
@@ -209,7 +213,9 @@ def test_resume_without_totals_rebuilds_them_from_phase_history():
     # The trailing (still-active) segment is excluded: phase_cumulative_seconds adds the live segment itself.
     assert resumed.phase_elapsed_totals[ps.PHASE_KERNEL_AGENT] == pytest.approx(3 * ENTRY_SEC)
     assert resumed.phase_elapsed_totals[ps.PHASE_SWEEP] == pytest.approx(3 * GAP_SEC)
-    assert ps.phase_cap_exceeded(resumed, now_unix=now) is True
+    assert ps.phase_cap_seconds(resumed) is not None and ps.phase_cumulative_seconds(
+        resumed, now_unix=now
+    ) >= ps.phase_cap_seconds(resumed)
 
 
 def test_history_rebuild_excludes_the_active_segment():
@@ -244,12 +250,15 @@ def test_history_rebuild_skips_unusable_rows():
 
 def _resumed_prelude_state() -> SharedState:
     """A session still in PRELUDE whose previous leg stopped 3 days ago."""
+    import hyperloom.orchestrator.phases.machine_state as ps
+
     state = SharedState()
     state.max_minutes = RESUMED_SESSION_MINUTES
     state.phase = ps.PHASE_PRELUDE
     state.phase_started_unix = T0
     state.phase_started_ts = T0_ISO
     state.resumed_ts = _iso(RESUME_UNIX)
+    state.phase_budget_pct = ps.normalize_budget_pct(None)
     return state
 
 
@@ -269,7 +278,9 @@ def test_a_resumed_phase_is_not_capped_by_time_the_process_was_down():
     now = RESUME_UNIX + NEW_LEG_SEC
 
     assert ps.phase_cap_seconds(state) == pytest.approx(RESUMED_SESSION_MINUTES * 60.0 * 0.4)
-    assert ps.phase_cap_exceeded(state, now_unix=now) is False
+    assert ps.phase_cap_seconds(state) is None or ps.phase_cumulative_seconds(
+        state, now_unix=now
+    ) < ps.phase_cap_seconds(state)
 
 
 def test_the_charge_back_base_of_a_resumed_phase_stays_inside_the_session():
@@ -319,20 +330,22 @@ def test_a_later_phase_entry_supersedes_the_resume_boundary():
 def test_budget_exit_evidence_reports_the_time_it_judged_on():
     """A cap decided on cumulative time must not be evidenced by one entry's clock."""
     state = _kernel_state()
+    # Kernel work stays pending so the budget guard, not the settled-kernel exit, decides.
+    state.pending_kernel_integrations = {
+        "i1": {"kernel_id": "k1", "status": "pending", "source_file": "a.py", "task_key": "t1"},
+    }
     # Two entries already banked, a third under way: no single entry is over the cap, the total is.
     state.phase_elapsed_totals = {ps.PHASE_KERNEL_AGENT: 2 * ENTRY_SEC}
     state.phase = ps.PHASE_KERNEL_AGENT
     state.phase_started_unix = T0
     state.phase_started_ts = T0_ISO
-    now = T0 + ENTRY_SEC
 
-    result = ps.exit_normal_kernel(state, now_unix=now)
+    out = ps.compute_next_phase(state, now_unix=T0 + ENTRY_SEC)
 
-    assert result is not None
-    reason, evidence = result
-    assert reason in {"kernel_budget_cap", "kernel_phase_budget_exhausted"}
+    assert out is not None
+    target, reason, evidence = out
+    assert (target, reason) == (ps.PHASE_SWEEP, "kernel_budget_cap")
     assert evidence["entry_elapsed_seconds"] == pytest.approx(ENTRY_SEC)
     assert evidence["cumulative_elapsed_seconds"] == pytest.approx(3 * ENTRY_SEC)
-    # The number that justifies the exit is the one over the cap.
     assert evidence["cumulative_elapsed_seconds"] > KERNEL_CAP_SEC
     assert evidence["entry_elapsed_seconds"] < KERNEL_CAP_SEC

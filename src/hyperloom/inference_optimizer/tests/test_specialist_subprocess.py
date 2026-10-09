@@ -8,7 +8,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import stat
 import subprocess
 import time
 from pathlib import Path
@@ -18,7 +17,7 @@ import pytest
 
 from hyperloom.common.deadline import Deadline
 
-from .conftest import init_git_repo
+from .conftest import init_git_repo, make_fake_claude
 
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 
@@ -31,7 +30,6 @@ from hyperloom.orchestrator.specialists.subprocess_ import (
     SpecialistSubprocessConfig,
     SpecialistSubprocessDispatcher,
     _build_specialist_env,
-    _pick_worktree_base,
     _setup_worktree,
 )
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
@@ -57,6 +55,11 @@ def test_build_specialist_env_inherits_provider_secrets_by_default(monkeypatch):
     assert "KB_SERVICE_TOKEN" not in env
     assert "INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR" not in env
     assert "LD_PRELOAD" not in env
+
+
+def test_build_specialist_env_forwards_the_claude_config_dir(monkeypatch):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/tmp/claude-config")
+    assert _build_specialist_env()["CLAUDE_CONFIG_DIR"] == "/tmp/claude-config"
 
 
 def test_build_specialist_env_forwards_oauth_token_without_mirroring_it(monkeypatch):
@@ -89,161 +92,12 @@ def test_build_specialist_env_secret_inheritance_can_be_disabled(monkeypatch):
     assert "GITHUB_TOKEN" not in env
 
 
-def _make_fake_claude(
-    bin_dir: Path,
-    *,
-    behavior: str,
-    payload: dict[str, Any] | None = None,
-) -> Path:
-    """Write a fake ``claude`` executable simulating one of: done_only / done_with_patch / done_with_env / crash."""
-    bin_dir.mkdir(parents=True, exist_ok=True)
-    script_path = bin_dir / "claude"
-    payload_json = json.dumps(
-        payload
-        or {
-            "gap_canonical_id": "gap.test.example",
-            "domain": "serving_specialist",
-            "proposal_set": [
-                {
-                    "name": "fake_variant",
-                    "extra_args": "--fake",
-                    "extra_envs": {},
-                    "reason": "fake",
-                }
-            ],
-            "patches_written": [],
-            "summary": "fake claude subprocess output",
-            "confidence": 0.5,
-        }
-    )
-    body = """#!/usr/bin/env bash
-set -e
-# Parse --add-dir paths (first is worktree, second is workspace).
-ADD_DIRS=()
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --add-dir) ADD_DIRS+=("$2"); shift 2 ;;
-    *) shift ;;
-  esac
-done
-WORKTREE="${ADD_DIRS[0]:-}"
-WORKSPACE="${ADD_DIRS[1]:-}"
-if [[ -n "$WORKTREE" && -f "$WORKTREE/prompt.md" ]]; then
-  WORKSPACE="$WORKTREE"
-fi
-"""
-    if behavior == "done_only":
-        body += f"""
-cat > "$WORKSPACE/specialist_done.json" <<'EOF'
-{payload_json}
-EOF
-exit 0
-"""
-    elif behavior == "done_with_patch":
-        patch_payload = json.dumps(
-            {
-                **(payload or {}),
-                "gap_canonical_id": "gap.test.example",
-                "domain": "serving_specialist",
-                "proposal_set": [
-                    {
-                        "name": "patched_variant",
-                        "extra_args": "",
-                        "extra_envs": {},
-                        "reason": "see patch",
-                    }
-                ],
-                "patches_written": ["patches/001_test.patch"],
-                "summary": "fake patch-authoring specialist",
-                "confidence": 0.7,
-            }
-        )
-        body += f"""
-mkdir -p "$WORKTREE/patches"
-cat > "$WORKTREE/patches/001_test.patch" <<'EOF'
-diff --git a/dummy.txt b/dummy.txt
-new file mode 100644
---- /dev/null
-+++ b/dummy.txt
-@@ -0,0 +1 @@
-+pr-a2 patch
-EOF
-cat > "$WORKSPACE/specialist_done.json" <<'EOF'
-{patch_payload}
-EOF
-exit 0
-"""
-    elif behavior == "done_with_env":
-        body += """
-cat > "$WORKSPACE/specialist_done.json" <<EOF
-{
-  "gap_canonical_id": "gap.test.example",
-  "domain": "serving_specialist",
-  "proposal_set": [],
-  "patches_written": [],
-  "summary": "env echo",
-  "confidence": 0.0,
-  "hip_visible": "$HIP_VISIBLE_DEVICES",
-  "cuda_visible": "$CUDA_VISIBLE_DEVICES",
-  "rocr_visible": "$ROCR_VISIBLE_DEVICES"
-}
-EOF
-exit 0
-"""
-    elif behavior == "done_with_llm_env":
-        # Echo the LLM-transport stability env for the dispatcher assertion.
-        body += """
-cat > "$WORKSPACE/specialist_done.json" <<EOF
-{
-  "gap_canonical_id": "gap.test.example",
-  "domain": "serving_specialist",
-  "proposal_set": [],
-  "patches_written": [],
-  "summary": "llm env echo",
-  "confidence": 0.0,
-  "api_timeout_ms": "$API_TIMEOUT_MS",
-  "disable_autoupdater": "$DISABLE_AUTOUPDATER",
-  "disable_nonessential": "$CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
-}
-EOF
-exit 0
-"""
-    elif behavior == "crash":
-        body += "exit 3\n"
-    elif behavior == "partial_then_crash":
-        # Write only the partial checkpoint, then die before the final done.json.
-        body += f"""
-cat > "$WORKSPACE/specialist_done.partial.json" <<'EOF'
-{payload_json}
-EOF
-exit 3
-"""
-    elif behavior == "partial_then_done":
-        # Checkpoint first, wait for the reaper to see it, then exit normally.
-        body += f"""
-cat > "$WORKSPACE/specialist_done.partial.json" <<'EOF'
-{payload_json}
-EOF
-sleep 1
-cat > "$WORKSPACE/specialist_done.json" <<'EOF'
-{payload_json}
-EOF
-exit 0
-"""
-    elif behavior == "hang":
-        # Sleep past any wall budget without writing done.json.
-        body += "sleep 600\n"
-    else:
-        raise ValueError(f"unknown behavior {behavior!r}")
-    script_path.write_text(body, encoding="utf-8")
-    script_path.chmod(script_path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-    return script_path
-
-
 @pytest.fixture
-def fake_framework_repo(tmp_path: Path) -> Path:
+def fake_framework_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The checkout the session optimises, named the way a session names it."""
     repo = tmp_path / "framework"
     init_git_repo(repo)
+    monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(repo))
     return repo
 
 
@@ -254,6 +108,7 @@ def _make_runner_ctx(task_id: str = "t-spec-1") -> RunnerContext:
         state="queued",
         params={
             "domain": "serving_specialist",
+            "framework": "sglang",
             "gap_canonical_id": "gap.test.example",
             "max_turns": 2,
         },
@@ -263,22 +118,11 @@ def _make_runner_ctx(task_id: str = "t-spec-1") -> RunnerContext:
     return RunnerContext(task=task, lease=None, extra={})
 
 
-def test_runner_requires_exactly_one_dispatch_mode():
-    with pytest.raises(ValueError, match="exactly one"):
-        SpecialistRunner()
-    with pytest.raises(ValueError, match="mutually exclusive"):
-        SpecialistRunner(
-            backend_factory=lambda d: None,
-            subprocess_config=SpecialistSubprocessConfig(),
-        )
-
-
 def test_runner_accepts_subprocess_config_only():
     runner = SpecialistRunner(
         subprocess_config=SpecialistSubprocessConfig(),
     )
     assert runner.subprocess_dispatcher is not None
-    assert runner.backend_factory is None
 
 
 def test_denylist_blocks_dangerous_process_tools():
@@ -293,22 +137,55 @@ def test_kb_mcp_tools_not_in_denylist():
     assert denylisted_kb_mcp == [], f"stale KB MCP entries in the denylist: {denylisted_kb_mcp}"
 
 
-def test_pick_worktree_base_picks_first_git_root(
+@pytest.mark.asyncio
+async def test_worktree_of_a_pip_installed_framework_is_its_snapshot_not_another_checkout(
     tmp_path: Path,
-    fake_framework_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ):
-    nonrepo = tmp_path / "not-a-repo"
-    nonrepo.mkdir()
-    base = _pick_worktree_base((str(nonrepo), str(fake_framework_repo)))
-    assert base is not None
-    assert base.samefile(fake_framework_repo)
+    """With no checkout of its own, the framework still hands its specialist its own code -- never InferenceX's."""
+    harness = tmp_path / "InferenceX"
+    init_git_repo(harness, seed_file="benchmark_lib.sh", seed_text="run\n")
+    package = tmp_path / "site-packages" / "vllm"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "envs.py").write_text("VLLM_USE_X = 0\n", encoding="utf-8")
+    monkeypatch.setenv("INFERENCEX_PATH", str(harness))
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    runner = SpecialistRunner(
+        subprocess_config=SpecialistSubprocessConfig(framework_source_roots=(str(harness), str(package))),
+        session_dir=session_dir,
+    )
+    ctx = _make_runner_ctx("t-spec-pip")
+    ctx.task.params["session_framework_tree"] = f"{package}/"
+    workspace = session_dir / "runs" / "specialist" / "t-spec-pip"
+    workspace.mkdir(parents=True)
+
+    worktree, source, err = runner._maybe_setup_worktree(ctx, workspace=workspace)
+
+    assert err == ""
+    assert source is not None and source.root == package and not source.checkout
+    assert worktree is not None and (worktree / "envs.py").read_text(encoding="utf-8") == "VLLM_USE_X = 0\n"
+    assert not (worktree / "benchmark_lib.sh").exists()
+    assert not (package / ".git").exists()
+    listed = subprocess.run(
+        ["git", "-C", str(harness), "worktree", "list"], capture_output=True, text=True, check=True
+    ).stdout
+    assert str(worktree) not in listed
 
 
-def test_pick_worktree_base_returns_none_when_no_repo(tmp_path: Path):
-    nonrepo = tmp_path / "not-a-repo"
-    nonrepo.mkdir()
-    base = _pick_worktree_base((str(nonrepo),))
-    assert base is None
+def test_an_integrate_in_flight_holds_the_snapshot(tmp_path: Path):
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    runner = SpecialistRunner(subprocess_config=SpecialistSubprocessConfig(), session_dir=session_dir)
+    assert runner._integrate_in_flight() is False
+
+    state = SharedState.load_or_init(session_dir)
+    state.pending_integrate = {"task_id": "t-integrate", "patches": []}
+    state.save(session_dir)
+    assert runner._integrate_in_flight() is True
 
 
 def test_setup_worktree_creates_branch_off_base(
@@ -340,7 +217,7 @@ async def test_subprocess_path_harvests_done_file(
 ):
     """The fake ``claude`` writes specialist_done.json; the runner reads it and returns status=succeeded."""
     bin_dir = tmp_path / "bin"
-    fake_claude = _make_fake_claude(bin_dir, behavior="done_only")
+    fake_claude = make_fake_claude(bin_dir, behavior="done_only")
     session_dir = tmp_path / "session"
     session_dir.mkdir()
 
@@ -369,6 +246,62 @@ async def test_subprocess_path_harvests_done_file(
 
 
 @pytest.mark.asyncio
+async def test_subprocess_run_is_one_specialist_llm_call_on_the_trajectory(
+    tmp_path: Path,
+    fake_framework_repo: Path,
+):
+    """The subprocess books as a specialist llm.call carrying the result-row totals; its tools hang off that call."""
+    from hyperloom.inference_optimizer.session.session_paths import llm_calls_path
+    from hyperloom.inference_optimizer.trace import trajectory_trace as tt
+
+    fake_claude = make_fake_claude(tmp_path / "bin", behavior="done_with_stream_json")
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    runner = SpecialistRunner(
+        subprocess_config=SpecialistSubprocessConfig(
+            claude_executable=str(fake_claude),
+            model="",
+            framework_source_roots=(str(fake_framework_repo),),
+            poll_interval_seconds=0.2,
+        ),
+        session_dir=session_dir,
+        default_max_turns=2,
+    )
+    with tt.trajectory_scope(
+        session_dir=session_dir,
+        component="coordinator",
+        task_id="t-spec-traj",
+        parent_span_id="t-spec-traj",
+    ):
+        result = await runner.run(_make_runner_ctx("t-spec-traj"))
+    assert result.status == "succeeded"
+
+    events = tt.load_events(session_dir)
+    calls = [e for e in events if e["event_type"] == tt.EVENT_LLM_CALL]
+    assert [e["status"] for e in calls] == [tt.STATUS_STARTED, tt.STATUS_COMPLETED]
+    call = calls[-1]
+    assert (call["component"], call["agent"], call["task_id"]) == ("specialist", "serving_specialist", "t-spec-traj")
+    assert call["parent_span_id"] == "t-spec-traj"
+    assert call["attributes"]["input_tokens"] == 50632
+    assert call["attributes"]["cache_read_input_tokens"] == 291392
+    assert call["attributes"]["output_tokens"] == 7542
+    assert call["attributes"]["model"] == "glm-5-3"
+
+    tools = [e for e in events if e["event_type"] == tt.EVENT_TOOL]
+    assert [t["attributes"]["name"] for t in tools] == ["Bash"]
+    assert (tools[0]["component"], tools[0]["agent"]) == ("specialist", "serving_specialist")
+    assert tools[0]["parent_span_id"] == call["span_id"]
+    assert tools[0]["call_id"] == call["call_id"]
+
+    rows = [json.loads(line) for line in llm_calls_path(session_dir).read_text(encoding="utf-8").splitlines() if line]
+    specialist_rows = [r for r in rows if r["component"] == "specialist"]
+    assert len(specialist_rows) == 1
+    assert specialist_rows[0]["call_id"] == call["call_id"]
+    assert specialist_rows[0]["input_tokens"] == 50632
+    assert specialist_rows[0]["output_tokens"] == 7542
+
+
+@pytest.mark.asyncio
 async def test_local_specialist_spawn_uses_file_stdin(
     tmp_path: Path,
     fake_framework_repo: Path,
@@ -376,7 +309,7 @@ async def test_local_specialist_spawn_uses_file_stdin(
 ):
     """The local specialist path feeds the user prompt via stdin."""
     bin_dir = tmp_path / "bin"
-    fake_claude = _make_fake_claude(bin_dir, behavior="done_only")
+    fake_claude = make_fake_claude(bin_dir, behavior="done_only")
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     seen_stdin: list[Any] = []
@@ -412,7 +345,7 @@ async def test_subprocess_path_injects_allocated_gpu_env(
     fake_framework_repo: Path,
 ):
     bin_dir = tmp_path / "bin"
-    fake_claude = _make_fake_claude(bin_dir, behavior="done_with_env")
+    fake_claude = make_fake_claude(bin_dir, behavior="done_with_env")
     session_dir = tmp_path / "session"
     session_dir.mkdir()
 
@@ -455,7 +388,7 @@ async def test_subprocess_path_injects_llm_stability_env(
         monkeypatch.delenv(var, raising=False)
 
     bin_dir = tmp_path / "bin"
-    fake_claude = _make_fake_claude(bin_dir, behavior="done_with_llm_env")
+    fake_claude = make_fake_claude(bin_dir, behavior="done_with_llm_env")
     session_dir = tmp_path / "session"
     session_dir.mkdir()
 
@@ -486,7 +419,7 @@ async def test_readonly_research_scout_skips_worktree(
     fake_framework_repo: Path,
 ):
     bin_dir = tmp_path / "bin"
-    fake_claude = _make_fake_claude(bin_dir, behavior="done_only")
+    fake_claude = make_fake_claude(bin_dir, behavior="done_only")
     session_dir = tmp_path / "session"
     session_dir.mkdir()
 
@@ -525,7 +458,7 @@ async def test_subprocess_path_collects_patches(
 ):
     """A done file + worktree patch threads the patch path into specialist_done['patches_written']."""
     bin_dir = tmp_path / "bin"
-    fake_claude = _make_fake_claude(bin_dir, behavior="done_with_patch")
+    fake_claude = make_fake_claude(bin_dir, behavior="done_with_patch")
     session_dir = tmp_path / "session"
     session_dir.mkdir()
 
@@ -559,7 +492,7 @@ async def test_subprocess_crash_falls_back_to_empty_synthesised(
 ):
     """A crash with no done.json synthesises an empty specialist_done and a stale-like status."""
     bin_dir = tmp_path / "bin"
-    fake_claude = _make_fake_claude(bin_dir, behavior="crash")
+    fake_claude = make_fake_claude(bin_dir, behavior="crash")
     session_dir = tmp_path / "session"
     session_dir.mkdir()
 
@@ -589,7 +522,7 @@ async def test_subprocess_path_isolates_writes_to_worktree(
 ):
     """Worktree patches must NOT appear in the base repo's working tree until ``integrate_patch`` applies them."""
     bin_dir = tmp_path / "bin"
-    fake_claude = _make_fake_claude(bin_dir, behavior="done_with_patch")
+    fake_claude = make_fake_claude(bin_dir, behavior="done_with_patch")
     session_dir = tmp_path / "session"
     session_dir.mkdir()
 
@@ -622,7 +555,7 @@ async def test_subprocess_recovers_partial_when_no_final(
 ):
     """A specialist that wrote only the partial (then died before the final done.json) surfaces the partial as a non-empty result."""
     bin_dir = tmp_path / "bin"
-    fake_claude = _make_fake_claude(bin_dir, behavior="partial_then_crash")
+    fake_claude = make_fake_claude(bin_dir, behavior="partial_then_crash")
     session_dir = tmp_path / "session"
     session_dir.mkdir()
 
@@ -655,7 +588,7 @@ async def test_the_dispatch_deadline_kills_a_hung_specialist(
 ):
     """A small Coordinator-injected ``wall_budget_sec`` must kill a hung specialist well before the legacy ``max_turns × per_turn`` ceiling (here 2 × 15 = 30s)."""
     bin_dir = tmp_path / "bin"
-    fake_claude = _make_fake_claude(bin_dir, behavior="hang")
+    fake_claude = make_fake_claude(bin_dir, behavior="hang")
     session_dir = tmp_path / "session"
     session_dir.mkdir()
 
@@ -1178,7 +1111,7 @@ async def test_partial_checkpoint_published_while_alive(
 ):
     """A checkpoint written mid-run reaches the progress callback before exit."""
     bin_dir = tmp_path / "bin"
-    fake_claude = _make_fake_claude(bin_dir, behavior="partial_then_done")
+    fake_claude = make_fake_claude(bin_dir, behavior="partial_then_done")
     session_dir = tmp_path / "session"
     session_dir.mkdir()
 
@@ -1301,3 +1234,63 @@ def test_collect_patches_no_worktree_falls_back_to_disk_scan(tmp_path: Path):
     patches, roots = SpecialistSubprocessDispatcher._collect_patches(None, ws)
     assert len(patches) == 1
     assert roots == {}
+
+
+def test_a_ray_actor_names_no_local_process_group_for_the_operator_log():
+    """An actor's ids come from the node Ray placed it on, so they mean nothing here.
+
+    Nothing reclaims a lane from this number -- no reaper probes it -- but it is
+    printed to the operator who has to clear one by hand, so a number that names
+    a process on a different host would send them to the wrong machine. None is
+    the honest answer for an actor; a local specialist leads its own group and
+    can say so.
+    """
+    local = subprocess_._local_tree_pgid(type("_P", (), {"pid": 4242})())
+    actor = subprocess_._local_tree_pgid(subprocess_._RayLeaseProcess(object(), 4242))
+
+    # A local specialist leads its own group, so its root pid IS the group id.
+    assert local == 4242
+    assert actor is None
+    # Nothing to report is also the answer when the cleanup never spawned a root.
+    assert subprocess_._local_tree_pgid(None) is None
+
+
+async def _spawn_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, gpu_ids: tuple[int, ...]) -> dict[str, str]:
+    """The env a local specialist spawn is handed; the fake ``Popen`` refuses to start."""
+    captured: dict[str, str] = {}
+
+    def _popen(_cmd, *, env, **_kwargs):
+        captured.update(env)
+        raise OSError("spawn refused by test")
+
+    monkeypatch.setattr(subprocess_.subprocess, "Popen", _popen)
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3")
+    disp = SpecialistSubprocessDispatcher(config=SpecialistSubprocessConfig(poll_interval_seconds=0.01))
+    result = await disp.run(
+        task_id="t-env",
+        workspace=tmp_path / "ws",
+        worktree=None,
+        worktree_base=None,
+        system_prompt="sys",
+        user_prompt="usr",
+        disallowed_tools=frozenset(),
+        max_turns=1,
+        gpu_ids=gpu_ids,
+        deadline=Deadline.after(5.0),
+    )
+    assert "spawn refused by test" in (result.error or "")
+    return captured
+
+
+async def test_cpu_specialist_env_hides_all_gpus_and_uses_private_caches(tmp_path, monkeypatch):
+    env = await _spawn_env(tmp_path, monkeypatch, gpu_ids=())
+    assert all(env[var] == "" for var in GPU_MASK_ENV_NAMES)
+    cache_root = tmp_path / "ws" / ".cache"
+    for var in ("TRITON_CACHE_DIR", "TORCHINDUCTOR_CACHE_DIR", "AITER_JIT_DIR", "INFERENCE_OPTIMIZER_AITER_JIT_DIR"):
+        assert Path(env[var]).parent == cache_root
+
+
+async def test_gpu_specialist_env_keeps_its_cards_and_shared_caches(tmp_path, monkeypatch):
+    env = await _spawn_env(tmp_path, monkeypatch, gpu_ids=(0, 1))
+    assert env["HIP_VISIBLE_DEVICES"] == env["ROCR_VISIBLE_DEVICES"] == "0,1"
+    assert "TRITON_CACHE_DIR" not in env and "AITER_JIT_DIR" not in env

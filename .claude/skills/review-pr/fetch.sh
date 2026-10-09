@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Step 1 of the review-pr skill: collect the PR evidence every later step reads.
 #
-# usage: fetch.sh <PR-NUMBER> [WORK_DIR]
+# usage: fetch.sh <PR-NUMBER> [WORK_DIR [EXPECTED_HEAD [EXPECTED_BASE_TIP]]]
 # Writes the artifacts listed in SKILL.md into WORK_DIR and prints WORK_DIR last.
 # Anything that cannot be collected exits non-zero with the reason: reviewing on
 # partial evidence produces a confident review of a diff nobody read.
@@ -13,11 +13,16 @@ die() {
   exit 1
 }
 
-[ "$#" -ge 1 ] && [ "$#" -le 2 ] || die "usage: fetch.sh <PR-NUMBER> [WORK_DIR]"
-case "$1" in '' | *[!0-9]*) die "usage: fetch.sh <PR-NUMBER> [WORK_DIR]" ;; esac
+[ "$#" -ge 1 ] && [ "$#" -le 4 ] \
+  || die "usage: fetch.sh <PR-NUMBER> [WORK_DIR [EXPECTED_HEAD [EXPECTED_BASE_TIP]]]"
+case "$1" in
+  '' | *[!0-9]*) die "usage: fetch.sh <PR-NUMBER> [WORK_DIR [EXPECTED_HEAD [EXPECTED_BASE_TIP]]]" ;;
+esac
 
 PR="$1"
 WORK="${2:-/tmp/hl-review-$PR}"
+EXPECTED_HEAD="${3:-}"
+EXPECTED_BASE_TIP="${4:-}"
 command -v gh >/dev/null 2>&1 || die "gh (GitHub CLI) is required"
 
 REPO="${HL_REPO:-$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)}"
@@ -30,28 +35,40 @@ mkdir -p "$WORK"
 # recently, and the conflict check in SKILL.md Step 8 then never fires on a conflicting PR.
 for attempt in 1 2 3 4 5; do
   gh pr view "$PR" --repo "$REPO" \
-    --json number,title,author,state,headRefOid,baseRefName,url,mergeable \
-    --template '{{printf "number: %v\ntitle: %v\nauthor: %v\nstate: %v\nhead: %v\nbase_ref: %v\nurl: %v\nmergeable: %v\n" .number .title .author.login .state .headRefOid .baseRefName .url .mergeable}}' \
+    --json number,title,author,state,headRefOid,baseRefName,baseRefOid,url,mergeable \
+    --template '{{printf "number: %v\ntitle: %v\nauthor: %v\nstate: %v\nhead: %v\nbase_ref: %v\nbase_tip: %v\nurl: %v\nmergeable: %v\n" .number .title .author.login .state .headRefOid .baseRefName .baseRefOid .url .mergeable}}' \
     > "$WORK/meta.txt" || die "gh pr view failed for #$PR"
   grep -q '^mergeable: UNKNOWN$' "$WORK/meta.txt" || break
-  [ "$attempt" = 5 ] && die "GitHub did not settle mergeability for #$PR; rerun rather than review the conflict axis blind"
+  # A merged or closed PR has no mergeability to compute and stays UNKNOWN for good; only an
+  # open one is expected to settle. Re-reviewing a merged PR is a supported case, so it must
+  # not be the thing that aborts the fetch.
+  grep -q '^state: OPEN$' "$WORK/meta.txt" || break
+  [ "$attempt" = 5 ] && die "GitHub did not settle mergeability for open #$PR; rerun rather than review the conflict axis blind"
   sleep 3
 done
 
 sed -n 's/^title: //p' "$WORK/meta.txt" > "$WORK/title.txt"
 HEAD_SHA=$(sed -n 's/^head: //p' "$WORK/meta.txt")
-BASE_REF=$(sed -n 's/^base_ref: //p' "$WORK/meta.txt")
-[ -n "$HEAD_SHA" ] && [ -n "$BASE_REF" ] || die "PR metadata carries no head sha or base ref"
+BASE_TIP=$(sed -n 's/^base_tip: //p' "$WORK/meta.txt")
+[ -n "$HEAD_SHA" ] && [ -n "$BASE_TIP" ] || die "PR metadata carries no head sha or base sha"
+[ -z "$EXPECTED_HEAD" ] || [ "$HEAD_SHA" = "$EXPECTED_HEAD" ] \
+  || die "head mismatch: expected $EXPECTED_HEAD, got $HEAD_SHA"
+[ -z "$EXPECTED_BASE_TIP" ] || [ "$BASE_TIP" = "$EXPECTED_BASE_TIP" ] \
+  || die "base tip mismatch: expected $EXPECTED_BASE_TIP, got $BASE_TIP"
 
 gh pr view "$PR" --repo "$REPO" --json body --jq '.body // ""' > "$WORK/body.txt"
 
 # The merge base, never the base-branch tip. A diff taken against the tip attributes
 # every commit main gained since the branch point to this PR, which is how a
 # pre-existing behaviour gets reported as a regression (rule V1).
-BASE_SHA=$(gh api "repos/$REPO/compare/$BASE_REF...$HEAD_SHA" --jq '.merge_base_commit.sha')
+#
+# Resolved from the base sha the PR recorded, not from the base branch name: once the PR is
+# merged, the branch contains its commits, so the merge base against the branch is the head
+# itself and the diff comes back empty. Re-reviewing a merged PR is a supported case.
+BASE_SHA=$(gh api "repos/$REPO/compare/$BASE_TIP...$HEAD_SHA" --jq '.merge_base_commit.sha')
 case "$BASE_SHA" in
   [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
-  *) die "no merge base for $BASE_REF...$HEAD_SHA" ;;
+  *) die "no merge base for $BASE_TIP...$HEAD_SHA" ;;
 esac
 printf '%s\n' "$BASE_SHA" > "$WORK/base.txt"
 
@@ -60,8 +77,10 @@ printf '%s\n' "$BASE_SHA" > "$WORK/base.txt"
 # date, so a silent stop would hide exactly the commit the rule is about. Say what was dropped
 # and name the head commit, which is the newest by definition.
 gh api "repos/$REPO/compare/$BASE_SHA...$HEAD_SHA" \
-  --jq '.commits[].commit.message | split("\n")[0]' > "$WORK/commits.txt"
-TOTAL_COMMITS=$(gh api "repos/$REPO/compare/$BASE_SHA...$HEAD_SHA" --jq '.total_commits')
+  --jq '.total_commits, (.commits[].commit.message | split("\n")[0])' > "$WORK/.commits.raw"
+TOTAL_COMMITS=$(head -1 "$WORK/.commits.raw")
+tail -n +2 "$WORK/.commits.raw" > "$WORK/commits.txt"
+rm -f "$WORK/.commits.raw"
 LISTED_COMMITS=$(wc -l < "$WORK/commits.txt" | tr -d ' ')
 if [ "$LISTED_COMMITS" -lt "$TOTAL_COMMITS" ]; then
   printf '# TRUNCATED: %s of %s commits listed, oldest first. Head commit: %s\n' \
@@ -118,14 +137,31 @@ gh api --paginate "repos/$REPO/commits/$HEAD_SHA/check-runs" \
 gh api --paginate "repos/$REPO/commits/$HEAD_SHA/status" \
   --jq '.statuses[] | [.context, .state, (.target_url // "")] | @tsv' >> "$WORK/ci.txt"
 
-{
-  gh api --paginate "repos/$REPO/pulls/$PR/reviews" \
-    --jq '.[] | select((.body // "") != "") | "[REVIEW \(.user.login) \(.state)]\n\(.body)\n"'
-  gh api --paginate "repos/$REPO/pulls/$PR/comments" \
-    --jq '.[] | "[INLINE \(.user.login)] \(.path):\(.line // .original_line // 0)\n\(.body)\n"'
-  gh api --paginate "repos/$REPO/issues/$PR/comments" \
-    --jq '.[] | "[COMMENT \(.user.login)]\n\(.body)\n"'
-} > "$WORK/comments.txt"
+# Only the author, users with write access and this bot reach comments.txt, so an outside comment
+# cannot steer the review.
+raw=$(mktemp -d)
+trap 'rm -rf "$raw"' EXIT
+gh api --paginate --slurp "repos/$REPO/pulls/$PR/reviews" | jq -s '[.[][][]]' > "$raw/reviews.json"
+gh api --paginate --slurp "repos/$REPO/pulls/$PR/comments" | jq -s '[.[][][]]' > "$raw/inline.json"
+gh api --paginate --slurp "repos/$REPO/issues/$PR/comments" | jq -s '[.[][][]]' > "$raw/issue.json"
+
+PR_AUTHOR=$(sed -n 's/^author: //p' "$WORK/meta.txt")
+jq -r '.[].user.login' "$raw"/{reviews,inline,issue}.json | sort -u | while IFS= read -r login; do
+  if [ "$login" = "$PR_AUTHOR" ] || [ "$login" = 'github-actions[bot]' ]; then
+    echo "$login"
+    continue
+  fi
+  case "$(gh api "repos/$REPO/collaborators/$login/permission" --jq .permission 2>/dev/null || true)" in
+    admin | write) echo "$login" ;;
+  esac
+done | jq -Rsc 'split("\n") | map(select(length > 0))' > "$raw/trusted.json"
+
+jq -nr --slurpfile t "$raw/trusted.json" '
+  def trusted: select(.user.login | IN($t[0][]));
+  (input[] | trusted | select((.body // "") != "") | "[REVIEW \(.user.login) \(.state)]\n\(.body)\n"),
+  (input[] | trusted | "[INLINE \(.user.login)] \(.path):\(.line // .original_line // 0)\n\(.body)\n"),
+  (input[] | trusted | "[COMMENT \(.user.login)]\n\(.body)\n")' \
+  "$raw"/{reviews,inline,issue}.json > "$WORK/comments.txt"
 
 # Other open PRs whose changed paths intersect this one's (rule V4). One query: gh
 # returns each open PR's file list, and the intersection is computed locally rather

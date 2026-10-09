@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import io
 import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -21,10 +23,12 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from hyperloom.common import provenance
+from hyperloom.common.env import is_truthy
 from hyperloom.common.env_safety import (
     filter_untrusted_env_mapping,
     is_allowed_dotenv_key,
     is_allowed_kernel_agent_env_key,
+    is_python_package_root,
 )
 from hyperloom.common.llm_config import (
     CLAUDE_OAUTH_TOKEN_ENV,
@@ -34,8 +38,10 @@ from hyperloom.common.llm_config import (
     deepseek_compat_env,
     has_anthropic_credential,
     provider_model_defaults,
+    with_synthesized_anthropic_keys,
 )
 from hyperloom.common.fs_utils import is_network_fs
+from hyperloom.common.llm_headers import expand_env_refs
 from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.common.platform_probe import probe_cpu_platform
 from hyperloom.common.pr_monitor_urls import kb_store_url
@@ -68,7 +74,7 @@ _PROVIDER_FALLBACK_KEYS: tuple[str, ...] = (
     "OPENAI_CUSTOM_HEADERS",
     "GEAK_BASE_URL",
     "LLM_API_BASE",
-    # Legacy: not consumed anymore, still stripped if present.
+    # Legacy: nothing reads these, but they are stripped if present.
     "LLM_GATEWAY_KEY",
     "SAFE_API_KEY",
     # A retired DeepSeek config normalizes to BOTH protocol sides, so it is stripped in either single-provider mode:
@@ -170,6 +176,34 @@ def _normalize_legacy_deepseek_env() -> dict[str, Any]:
     }
 
 
+#: What a custom header may reference. Every child inherits the expanded header, so expanding any other name would
+#: hand a child the value of a secret its environment allowlist strips, such as ``${GITHUB_TOKEN}``.
+_HEADER_REF_ALLOWLIST = frozenset({"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY"})
+
+
+def _expand_custom_header_env_refs() -> None:
+    """Resolve the credential ``${VAR}`` references in the ``*_CUSTOM_HEADERS`` settings in place.
+
+    Child processes (specialists, the Critic, GEAK on Ray) forward these verbatim, and an agent CLI sends them
+    verbatim, so an unexpanded ``${ANTHROPIC_API_KEY}`` reaches the gateway as literal text and is rejected.
+    References resolve against the same view ``claude_sdk_env_options`` uses, so a key it would fill in from the
+    other Anthropic credential is not erased here. A reference outside ``_HEADER_REF_ALLOWLIST`` is left as
+    written, which is what children received before this expansion existed.
+    """
+    source = with_synthesized_anthropic_keys(os.environ)
+    for key in ("ANTHROPIC_CUSTOM_HEADERS", "OPENAI_CUSTOM_HEADERS"):
+        raw = os.environ.get(key)
+        if not raw or "${" not in raw:
+            continue
+        os.environ[key] = expand_env_refs(raw, source, only=_HEADER_REF_ALLOWLIST)
+        if "${" in os.environ[key]:
+            log.warning(
+                "%s references a variable outside %s; child processes receive that reference unexpanded",
+                key,
+                ", ".join(sorted(_HEADER_REF_ALLOWLIST)),
+            )
+
+
 def _restore_provider_only_mode(provider_mode: str, snapshot: dict[str, str | None]) -> None:
     """Undo cross-provider credentials injected by the installer env file."""
     if provider_mode == "anthropic":
@@ -203,6 +237,24 @@ def _is_placeholder_tracelens_path(value: str) -> bool:
     return False
 
 
+_HOST_PYTHON_ENV_KEYS = frozenset({"PYTHON", "VIRTUAL_ENV", "INFERENCE_OPTIMIZER_FORCE_PYTHON"})
+
+
+def _load_missing_env_vars(file_vars: dict[str, str]) -> int:
+    """Fill gaps without importing host Python choices into an explicit Docker run."""
+    mode = (os.environ.get("HYPERLOOM_RUN_MODE") or file_vars.get("HYPERLOOM_RUN_MODE", "")).strip().lower()
+    loaded = 0
+    if mode and not os.environ.get("HYPERLOOM_RUN_MODE"):
+        os.environ["HYPERLOOM_RUN_MODE"] = mode
+        loaded += 1
+    for key, value in file_vars.items():
+        if key in os.environ or (mode == "docker" and key in _HOST_PYTHON_ENV_KEYS):
+            continue
+        os.environ[key] = value
+        loaded += 1
+    return loaded
+
+
 def _load_dotenv_fallback() -> dict[str, Any]:
     """Source missing vars from ``$REPO_ROOT/.env``; env always wins (no-clobber)."""
     env_file = _resolve_dotenv_file()
@@ -212,36 +264,17 @@ def _load_dotenv_fallback() -> dict[str, Any]:
             "skip_reason": "dotenv_missing",
             "detail": {"vars_loaded": 0, "source": None},
         }
-    parsed: dict[str, str] = {}
-    loaded = 0
-    for raw in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("export "):
-            line = line[len("export ") :].lstrip()
-        if "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        key = key.strip()
-        if not key:
-            continue
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
-            value = value[1:-1]
-        if key in ("TRACELENS_ROOT", "TRACELENS_INTERNAL_ROOT") and _is_placeholder_tracelens_path(value):
-            continue
-        parsed[key] = value
+    parsed = _parse_env_assignments(env_file.read_text(encoding="utf-8", errors="replace"))
+    for key in ("TRACELENS_ROOT", "TRACELENS_INTERNAL_ROOT"):
+        if key in parsed and _is_placeholder_tracelens_path(parsed[key]):
+            del parsed[key]
     safe_vars, dropped_vars = filter_untrusted_env_mapping(
         parsed,
-        allow_predicate=is_allowed_dotenv_key,
+        allow_predicate=lambda key: key == "PYTHON" or is_allowed_dotenv_key(key),
     )
     for key in dropped_vars:
         print(f"Preflight: WARNING — ignoring unsupported .env key {key} from {env_file}", file=sys.stderr)
-    for key, value in safe_vars.items():
-        if key not in os.environ:
-            os.environ[key] = value
-            loaded += 1
+    loaded = _load_missing_env_vars(safe_vars)
     if loaded:
         print(f"Preflight: loaded {loaded} missing var(s) from {env_file} (env wins)")
     return {
@@ -310,8 +343,18 @@ def _derive_runtime_paths() -> None:
     for lib_dir in reversed(_rocm_sdk_wheel_lib_dirs()):
         _prepend_path("LD_LIBRARY_PATH", lib_dir)
     vllm_root = os.environ.get("VLLM_VENV_ROOT", "")
-    if vllm_root:
+    if os.environ.get("FRAMEWORK", "").strip().lower() == "vllm" and vllm_root:
         _prepend_path("PATH", str(Path(vllm_root) / "bin"))
+
+    # Reconstruct the installer's import roots instead of accepting raw PATH/PYTHONPATH assignments from files.
+    magpie = os.environ.get("MAGPIE_PATH", "")
+    if magpie and not is_python_package_root(Path(magpie).as_posix()):
+        _prepend_path("PYTHONPATH", magpie)
+    package_parent = Path(__file__).resolve().parents[2].parent
+    root = Path(os.environ.get("REPO_ROOT") or package_parent)
+    for candidate in (root / "src", root):
+        if (candidate / "hyperloom").is_dir() and not is_python_package_root(candidate.as_posix()):
+            _prepend_path("PYTHONPATH", str(candidate))
 
 
 _KERNEL_AGENT_PATH_VARS: tuple[str, ...] = ("TRACELENS_ROOT",)
@@ -320,23 +363,42 @@ _SHELL_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _parse_env_assignments(text: str) -> dict[str, str]:
-    """Parse ``[export] KEY=VALUE`` shell assignments into a dict (first wins)."""
+    """Read assignments as data (first wins), decoding quoted values without expansion."""
     out: dict[str, str] = {}
-    for raw in text.splitlines():
+    stream = io.StringIO(text)
+    while True:
+        start = stream.tell()
+        raw = stream.readline()
+        if not raw:
+            break
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
         if line.startswith("export "):
             line = line[len("export ") :].lstrip()
-        if "=" not in line:
-            continue
-        key, _, value = line.partition("=")
+        key, separator, value = line.partition("=")
         key = key.strip()
-        if not _SHELL_NAME_RE.match(key):
+        if not separator:
+            continue
+        if not _SHELL_NAME_RE.fullmatch(key):
+            if not any(char.isspace() for char in key):
+                out.setdefault(key, value.strip())  # The allowlist reports invalid assignment names.
             continue
         value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
-            value = value[1:-1]
+        if value.startswith(("'", '"')):
+            value_start = raw.index("=") + 1
+            while value_start < len(raw) and raw[value_start] in " \t":
+                value_start += 1
+            stream.seek(start + value_start)
+            lexer = shlex.shlex(stream, posix=True)
+            lexer.whitespace_split = True
+            lexer.commenters = ""
+            try:
+                value = lexer.get_token()
+                if stream.tell() and text[stream.tell() - 1] != "\n":
+                    stream.readline()
+            except ValueError as exc:
+                raise ValueError(f"Invalid quoted environment assignment for {key}: {exc}") from exc
         out.setdefault(key, value)
     return out
 
@@ -370,53 +432,9 @@ def _load_kernel_agent_env_fallback() -> dict[str, Any]:
         if user_data:
             candidate = str(Path(user_data).expanduser() / "runtime" / "kernel-agent.env.sh")
 
-    if os.environ.get("HYPERLOOM_KERNEL_AGENT_ROOT"):
-        # Root is set: no bootstrap, but still correct invalid path vars from the env file when resolvable.
-        if not candidate:
-            return {
-                "status": "already_present",
-                "skip_reason": None,
-                "detail": {"vars_loaded": 0, "env_file": None},
-            }
-        env_path = Path(candidate)
-        if not env_path.is_file():
-            return {
-                "status": "already_present",
-                "skip_reason": None,
-                "detail": {"vars_loaded": 0, "env_file": str(env_path)},
-            }
-        try:
-            text = env_path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            return {
-                "status": "already_present",
-                "skip_reason": None,
-                "detail": {"vars_loaded": 0, "env_file": str(env_path)},
-            }
-        file_vars, dropped_file_vars = filter_untrusted_env_mapping(
-            _parse_env_assignments(text),
-            allow_predicate=is_allowed_kernel_agent_env_key,
-        )
-        for key in dropped_file_vars:
-            print(
-                f"Preflight: WARNING — ignoring unsupported kernel-agent env key {key} from {env_path}",
-                file=sys.stderr,
-            )
-        corrected = _correct_kernel_agent_path_vars(file_vars, env_path)
-        return {
-            "status": "applied" if corrected else "already_present",
-            "skip_reason": None,
-            "detail": {
-                "vars_loaded": 0,
-                "env_file": str(env_path),
-                "corrected_keys": corrected,
-            },
-        }
-
     if not candidate:
         print(
-            "Preflight: ERROR — neither $HYPERLOOM_KERNEL_AGENT_ROOT "
-            "nor $KERNEL_AGENT_ENV nor $USER_DATA_PATH is set. Cannot "
+            "Preflight: ERROR — neither $KERNEL_AGENT_ENV nor $USER_DATA_PATH is set. Cannot "
             "resolve kernel-agent.env.sh. Run "
             "src/hyperloom/inference_optimizer/assets/install.sh and export "
             "USER_DATA_PATH=/path/to/sessions first.",
@@ -431,10 +449,9 @@ def _load_kernel_agent_env_fallback() -> dict[str, Any]:
             f"(parent of <model>/<ts>/ per-session subdirs); runtime/ "
             f"is workspace-shared, not per-session. Either "
             f"(a) re-run src/hyperloom/inference_optimizer/assets/install.sh under "
-            f"USER_DATA_PATH={os.environ.get('USER_DATA_PATH', '?')}, "
-            f"(b) set $KERNEL_AGENT_ENV to point at an existing file, or "
-            f"(c) set $HYPERLOOM_KERNEL_AGENT_ROOT directly to skip this "
-            f"fallback entirely. Aborting now (was: silently warning and "
+            f"USER_DATA_PATH={os.environ.get('USER_DATA_PATH', '?')}, or "
+            f"(b) set $KERNEL_AGENT_ENV to point at an existing file. "
+            f"Aborting now (was: silently warning and "
             f"letting trace_analyze fail 10h in).",
             file=sys.stderr,
         )
@@ -450,33 +467,26 @@ def _load_kernel_agent_env_fallback() -> dict[str, Any]:
     parsed_file_vars = _parse_env_assignments(text)
     file_vars, dropped_file_vars = filter_untrusted_env_mapping(
         parsed_file_vars,
-        allow_predicate=is_allowed_kernel_agent_env_key,
+        allow_predicate=lambda key: (
+            key in _HOST_PYTHON_ENV_KEYS or key == "HYPERLOOM_RUN_MODE" or is_allowed_kernel_agent_env_key(key)
+        ),
     )
     for key in dropped_file_vars:
         print(
             f"Preflight: WARNING — ignoring unsupported kernel-agent env key {key} from {env_path}",
             file=sys.stderr,
         )
-    loaded = 0
-    for key, value in file_vars.items():
-        if key not in os.environ:
-            os.environ[key] = value
-            loaded += 1
-    corrected = _correct_kernel_agent_path_vars(file_vars, env_path)
-    if "HYPERLOOM_KERNEL_AGENT_ROOT" not in os.environ:
+    if not file_vars:
         print(
-            f"Preflight: ERROR — sourced {env_path} ({loaded} vars) but "
-            f"HYPERLOOM_KERNEL_AGENT_ROOT is still unset. The env file is "
-            f"malformed or stale. Re-run src/hyperloom/inference_optimizer/assets/"
-            f"install.sh to regenerate it.",
+            f"Preflight: ERROR — {env_path} sets no supported kernel-agent "
+            f"variables. The env file is malformed or stale. Re-run "
+            f"src/hyperloom/inference_optimizer/assets/install.sh to regenerate it.",
             file=sys.stderr,
         )
         sys.exit(2)
-    print(
-        f"Preflight: loaded {loaded} kernel-agent var(s) from "
-        f"{env_path} (env wins, HYPERLOOM_KERNEL_AGENT_ROOT="
-        f"{os.environ['HYPERLOOM_KERNEL_AGENT_ROOT']})"
-    )
+    loaded = _load_missing_env_vars(file_vars)
+    corrected = _correct_kernel_agent_path_vars(file_vars, env_path)
+    print(f"Preflight: loaded {loaded} kernel-agent var(s) from {env_path} (env wins)")
     return {
         "status": "applied" if loaded or corrected else "already_present",
         "skip_reason": None,
@@ -532,14 +542,10 @@ def _ensure_python_sdks(python_exe: str, pip_extra: list[str]) -> dict[str, Any]
 # (cp314 postdates it) must be allowed to keep the newer release the
 # kernel-agent installer resolved for them.
 _RAY_MIN_VERSION = "2.44.1"
-# Only 2.44.1's CLI fails to import with click >= 8.3.0, so the ceiling applies
-# to that release alone; forcing it onto newer Ray downgrades a working click.
+# Only 2.44.1's CLI requires the default Click ceiling. Explicit Ray/Click
+# overrides retain the installer's requested ceiling on other releases too.
 _RAY_CLICK_PINNED_VERSION = "2.44.1"
 _RAY_CLI_CLICK_MAX_VERSION = "8.3.0"
-_RAY_INSTALL_SPEC = f"ray[default]=={_RAY_MIN_VERSION}"
-_RAY_FALLBACK_INSTALL_SPEC = f"ray[default]>={_RAY_MIN_VERSION}"
-_CLICK_INSTALL_SPEC = f"click<{_RAY_CLI_CLICK_MAX_VERSION}"
-_RAY_INSTALL_SPECS = (_RAY_INSTALL_SPEC, _CLICK_INSTALL_SPEC)
 
 
 _RAY_SMOKE_TEMPLATE = r"""
@@ -550,7 +556,8 @@ import sys
 RAY_MIN_VERSION = "__RAY_MIN_VERSION__"
 RAY_CLICK_PINNED_VERSION = "__RAY_CLICK_PINNED_VERSION__"
 RAY_CLI_CLICK_MAX_VERSION = "__RAY_CLI_CLICK_MAX_VERSION__"
-RAY_CLI_CLICK_MAX_VERSION_TUPLE = __RAY_CLI_CLICK_MAX_VERSION_TUPLE__
+ray_version = sys.argv[1] if len(sys.argv) > 1 else ""
+click_override = sys.argv[2] if len(sys.argv) > 2 else ""
 
 def _version_tuple(version: str) -> tuple[int, int, int]:
     parts = [int(p) for p in re.findall(r"\d+", version)[:3]]
@@ -563,20 +570,25 @@ except Exception as exc:
     print(f"ray import failed: {type(exc).__name__}: {exc}", file=sys.stderr)
     raise SystemExit(1)
 
-if _version_tuple(ray.__version__) < _version_tuple(RAY_MIN_VERSION):
+if ray_version:
+    if ray.__version__ != ray_version:
+        print(f"ray version mismatch: {ray.__version__} != {ray_version}", file=sys.stderr)
+        raise SystemExit(1)
+elif _version_tuple(ray.__version__) < _version_tuple(RAY_MIN_VERSION):
     print(f"ray too old: {ray.__version__} < {RAY_MIN_VERSION}", file=sys.stderr)
     raise SystemExit(1)
 
-if ray.__version__ == RAY_CLICK_PINNED_VERSION:
+if ray_version or click_override or ray.__version__ == RAY_CLICK_PINNED_VERSION:
+    click_max_version = click_override or RAY_CLI_CLICK_MAX_VERSION
     try:
         click_version = md.version("click")
     except md.PackageNotFoundError:
         print("click is not installed", file=sys.stderr)
         raise SystemExit(1)
 
-    if _version_tuple(click_version) >= RAY_CLI_CLICK_MAX_VERSION_TUPLE:
+    if _version_tuple(click_version) >= _version_tuple(click_max_version):
         print(
-            f"click version incompatible with Ray CLI: {click_version} >= {RAY_CLI_CLICK_MAX_VERSION}",
+            f"click version incompatible with Ray CLI: {click_version} >= {click_max_version}",
             file=sys.stderr,
         )
         raise SystemExit(1)
@@ -591,17 +603,10 @@ print(ray.__version__)
 """
 
 
-def _version_tuple(version: str) -> tuple[int, int, int]:
-    parts = [int(p) for p in re.findall(r"\d+", version)[:3]]
-    parts.extend([0] * (3 - len(parts)))
-    return tuple(parts[:3])
-
-
 _RAY_SMOKE = (
     _RAY_SMOKE_TEMPLATE.replace("__RAY_MIN_VERSION__", _RAY_MIN_VERSION)
     .replace("__RAY_CLICK_PINNED_VERSION__", _RAY_CLICK_PINNED_VERSION)
     .replace("__RAY_CLI_CLICK_MAX_VERSION__", _RAY_CLI_CLICK_MAX_VERSION)
-    .replace("__RAY_CLI_CLICK_MAX_VERSION_TUPLE__", repr(_version_tuple(_RAY_CLI_CLICK_MAX_VERSION)))
 )
 
 
@@ -618,9 +623,9 @@ def _ray_probe_env() -> dict[str, str]:
     return env
 
 
-def _ray_smoke(python_exe: str) -> subprocess.CompletedProcess:
+def _ray_smoke(python_exe: str, ray_version: str = "", click_max_version: str = "") -> subprocess.CompletedProcess:
     return subprocess.run(
-        [python_exe, "-c", _RAY_SMOKE],
+        [python_exe, "-c", _RAY_SMOKE, ray_version, click_max_version],
         capture_output=True,
         text=True,
         env=_ray_probe_env(),
@@ -629,7 +634,11 @@ def _ray_smoke(python_exe: str) -> subprocess.CompletedProcess:
 
 def _ensure_ray(python_exe: str, pip_extra: list[str]) -> dict[str, Any]:
     """Probe-then-install Ray using the interpreter that will import it."""
-    check = _ray_smoke(python_exe)
+    ray_version = os.environ.get("RAY_VERSION") or ""
+    click_override = os.environ.get("RAY_CLI_CLICK_MAX_VERSION") or ""
+    ray_spec = f"ray[default]=={ray_version or _RAY_MIN_VERSION}"
+    click_spec = f"click<{click_override or _RAY_CLI_CLICK_MAX_VERSION}"
+    check = _ray_smoke(python_exe, ray_version, click_override)
     if check.returncode == 0:
         print("Preflight: ray OK")
         return {
@@ -637,26 +646,22 @@ def _ensure_ray(python_exe: str, pip_extra: list[str]) -> dict[str, Any]:
             "skip_reason": None,
             "target": "ray",
             "interpreter": python_exe,
-            "spec": _RAY_INSTALL_SPEC,
-            "version_after": (check.stdout or "").strip() or _RAY_MIN_VERSION,
+            "spec": ray_spec,
+            "version_after": (check.stdout or "").strip() or ray_version or _RAY_MIN_VERSION,
             "message": None,
         }
     reason = (check.stderr or check.stdout or "unknown Ray smoke failure").strip().splitlines()[-1]
-    print(f"Preflight: ray/click invalid ({reason}), installing {_RAY_INSTALL_SPEC} + {_CLICK_INSTALL_SPEC} ...")
-    specs: tuple[str, ...] = _RAY_INSTALL_SPECS
+    print(f"Preflight: ray/click invalid ({reason}), installing {ray_spec} + {click_spec} ...")
+    specs: tuple[str, ...] = (ray_spec, click_spec)
     install = subprocess.run(
         [python_exe, "-m", "pip", "install", "--quiet", *pip_extra, *specs],
         capture_output=True,
         text=True,
     )
-    if install.returncode != 0:
-        # The pinned release has no distribution for this interpreter; take one
-        # that resolves and drop the click ceiling, which only guards 2.44.1.
-        specs = (_RAY_FALLBACK_INSTALL_SPEC,)
-        print(
-            f"Preflight: {_RAY_INSTALL_SPEC} does not resolve for {python_exe}; "
-            f"retrying with {_RAY_FALLBACK_INSTALL_SPEC}"
-        )
+    if install.returncode != 0 and not ray_version:
+        # Preserve an explicit Click ceiling; the default only guards 2.44.1.
+        specs = (f"ray[default]>={_RAY_MIN_VERSION}",) + ((click_spec,) if click_override else ())
+        print(f"Preflight: {ray_spec} does not resolve for {python_exe}; retrying with {' '.join(specs)}")
         install = subprocess.run(
             [python_exe, "-m", "pip", "install", "--quiet", *pip_extra, *specs],
             capture_output=True,
@@ -665,11 +670,11 @@ def _ensure_ray(python_exe: str, pip_extra: list[str]) -> dict[str, Any]:
     if install.returncode != 0:
         detail = (install.stderr or install.stdout or "no pip output").strip()
         raise RuntimeError(f"Ray install failed for {' '.join(specs)}: {detail}")
-    check = _ray_smoke(python_exe)
+    check = _ray_smoke(python_exe, ray_version, click_override)
     if check.returncode != 0:
         reason = (check.stderr or check.stdout or "unknown Ray smoke failure").strip()
         raise RuntimeError(f"Ray install completed but smoke test still failed: {reason}")
-    version_after = (check.stdout or "").strip() or _RAY_MIN_VERSION
+    version_after = (check.stdout or "").strip() or ray_version or _RAY_MIN_VERSION
     print(f"Preflight: ray installed OK ({version_after})")
     return {
         "status": "applied",
@@ -780,16 +785,13 @@ SKIP_FRAMEWORK_CHECK_ENV = "HYPERLOOM_SKIP_FRAMEWORK_CHECK"
 
 #: Frameworks ``install_baremetal.sh --install-framework`` accepts; it exits 2 on
 #: anything else. A test asserts this stays equal to the installer's own list.
-_SETUP_INSTALLABLE_FRAMEWORKS = frozenset({"sglang", "vllm"})
+_SETUP_INSTALLABLE_FRAMEWORKS = frozenset({"sglang", "vllm", "atom"})
 
 
 def _setup_install_command(framework: str) -> str:
     """The documented setup invocation for ``framework``, verbatim in shape."""
     extra = " --framework-env isolated" if framework == "vllm" else ""
-    return (
-        'PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- '
-        f"--install-framework {framework}{extra} --yes"
-    )
+    return f'PYTHONPATH="$REPO_ROOT" python3 -m hyperloom setup -- --install-framework {framework}{extra} --yes'
 
 
 # Rootfs markers the runtimes drop: Docker writes the first, podman the second.
@@ -826,6 +828,10 @@ def _in_container() -> bool:
 
 def _framework_probe_interpreters(framework: str, benchmark_python: str) -> list[str]:
     """Interpreters that may hold the serving package, deduped in probe order."""
+    if framework == "atom":
+        # Magpie launches ATOM with python3 from PATH, not its benchmark client interpreter.
+        python = shutil.which("python3")
+        return [python] if python else []
     candidates: list[str] = []
     venv_root = os.environ.get("VLLM_VENV_ROOT", "").strip()
     venv_python = str(Path(venv_root) / "bin" / "python") if venv_root else ""
@@ -894,9 +900,25 @@ def _probe_rocm_build(framework: str, python_exe: str) -> _Probe:
     # rc 1 means only "definitely not ROCm", so nothing else may produce it -- Python exits 1 on any uncaught
     # exception, and find_spec found the package without importing it, so "spec present but import explodes" is a
     # normal path, not a corner.
-    probe = [
-        "import sys",
-        "def verdict():",
+    probe = ["import sys", "def verdict():"]
+    if framework == "atom":
+        selected_python = os.environ.get("PYTHON", sys.executable)
+        probe += [
+            "    import os, subprocess",
+            "    from pathlib import Path",
+            f"    selected = {selected_python!r}",
+            "    try:",
+            "        prefix = subprocess.check_output([selected, '-c', 'import sys; print(sys.prefix)'],",
+            "                                         text=True, stderr=subprocess.PIPE, timeout=20).strip()",
+            "    except (OSError, subprocess.SubprocessError) as exc:",
+            "        raise RuntimeError(f'Cannot execute selected PYTHON={selected!r}: {exc}') from exc",
+            "    if Path(prefix).resolve() != Path(sys.prefix).resolve():",
+            "        raise RuntimeError(f'python3 prefix {sys.prefix} differs from selected PYTHON prefix {prefix}')",
+            "    venv = os.environ.get('VIRTUAL_ENV')",
+            "    if venv and Path(venv).resolve() != Path(sys.prefix).resolve():",
+            "        raise RuntimeError(f'VIRTUAL_ENV={venv} differs from python3 prefix {sys.prefix}')",
+        ]
+    probe += [
         "    import torch",
         "    if not getattr(torch.version, 'hip', None):",
         "        return 1",
@@ -911,6 +933,8 @@ def _probe_rocm_build(framework: str, python_exe: str) -> _Probe:
             "    return 0 if ok else 1",
         ]
     else:
+        if framework == "atom":
+            probe.append("    import atom")
         probe.append("    return 0")
     probe += [
         "try:",
@@ -1020,6 +1044,21 @@ def _check_serving_framework(args, benchmark_python: str) -> dict[str, Any]:
 
     interpreters = _framework_probe_interpreters(framework, benchmark_python)
     found, probe = _resolve_framework_build(framework, interpreters)
+    if framework == "atom" and (not found or probe.verdict is not True):
+        remedy = (
+            "Select the existing ATOM Python and put its bin directory first on PATH, or install ATOM into it:\n"
+            f"    {_setup_install_command(framework)}"
+            if not found
+            else "Select an ATOM Python whose torch is a ROCm build and put its bin directory first on PATH."
+        )
+        print(
+            f"Preflight: ERROR — atom runtime check failed in python3 ({found or ', '.join(interpreters) or 'not on PATH'}). "
+            "ATOM must import with a ROCm torch build (torch.version.hip) in the selected Python environment."
+            f"{_probe_detail_block(probe.detail)}\n"
+            f"{remedy}",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
     # Publish the interpreter this scan resolved to, so consumers that would otherwise re-derive it from
     # installer-written host state read the probed answer instead.
     if found and probe.verdict is not False:
@@ -1126,9 +1165,6 @@ def _check_serving_framework(args, benchmark_python: str) -> dict[str, Any]:
     raise SystemExit(2)
 
 
-# RUN_EVAL values that disable the accuracy gate (mirrors _workload_envs).
-_RUN_EVAL_FALSE_VALUES = frozenset({"false", "0", "no", "off", ""})
-
 # Probed one subprocess each: the base package and the [api] extra can arrive from different places (image vs pip),
 # and only the truly absent one is installed.
 _LM_EVAL_DEPS = ("lm_eval", "tenacity")
@@ -1152,9 +1188,17 @@ def _probe_missing_lm_eval_deps(python_exe: str) -> list[str] | None:
     return missing
 
 
-# The harness the single-node path ends up on: InferenceX's benchmark_lib.sh force-reinstalls this commit over
-# whatever pip resolved.
-_LM_EVAL_PINNED_REF = "b315ef3b05176acc9732bb7fdec116abe1ecc476"
+# Pin consulted on multi-node preflight only: ``_ensure_lm_eval_dep`` skips single-node
+# installs (``single_node_runtime_install``) because InferenceX's ``benchmark_lib.sh``
+# reinstalls its own hardcoded pre-#3293 ref before every accuracy round there. This
+# constant therefore does *not* decide which harness a single-node round runs; the guard
+# appended to ``lm_eval_sitecustomize.py`` in ``_inferencex_patcher.py`` does.
+#
+# v0.4.13 (``ddd6722``). The previous pin matched InferenceX's reinstall ref
+# (2025-12-02, ``b315ef3``): its failure handler logs bare ``outputs``, so a refused
+# connection raises ``UnboundLocalError`` over the real error
+# (EleutherAI/lm-evaluation-harness#3293, fixed upstream 2026-02-24).
+_LM_EVAL_PINNED_REF = "ddd67220430a2470529f25fd5c05a576ca1057a0"
 _LM_EVAL_REPO = "github.com/EleutherAI/lm-evaluation-harness"
 # git first, then the archive, because the sandbox may not ship a git binary.
 _LM_EVAL_PINNED_SPECS = (
@@ -1205,19 +1249,117 @@ def _install_pinned_lm_eval(python_exe: str, pip_extra: list[str]) -> None:
         print(f"Preflight: WARNING — pinned lm_eval via {source} failed; falling back")
 
 
+def _resumed_session_state(args: argparse.Namespace | None) -> dict[str, Any] | None:
+    """The persisted ``state.json`` of the session ``--resume-from`` names, or ``None``.
+
+    Preflight runs before the resume block loads the session, so anything preflight decides from a session-pinned
+    setting has to read it here. ``None`` (no session named, or no readable state) leaves the decision to the flags;
+    the resume block reports a missing or unreadable state itself.
+    """
+    raw = str(getattr(args, "resume_from", "") or "").strip()
+    if not raw:
+        return None
+    try:
+        state = json.loads((Path(raw).expanduser() / "state.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return state if isinstance(state, dict) else None
+
+
 def _resolved_eval_disabled(args: argparse.Namespace) -> bool:
     """Effective ``--no-eval`` for this launch, flag or persisted."""
     if bool(getattr(args, "no_eval", False)):
         return True
+    state = _resumed_session_state(args)
+    return bool(state and state.get("eval_disabled"))
+
+
+def _supported_framework_names() -> tuple[str, ...]:
+    """The framework names ``--framework`` accepts (the framework registry)."""
+    from hyperloom.inference_optimizer import framework_registry
+
+    return tuple(framework_registry.names())
+
+
+def _refuse_resume_without_state(args: argparse.Namespace) -> None:
+    """Refuse, before any install step, a resume of a session whose first launch never wrote ``state.json``.
+
+    The resume block refuses such a session ("Coordinator never wrote SharedState"), but it runs after preflight, which
+    would otherwise check the default framework and fail on that instead of on the real reason. The framework the
+    session was created with is read from ``manifest.json`` only to name it in the refusal, and only if it is a
+    registered framework name (the manifest lives on shared storage too). A missing session directory or manifest is
+    left to the resume block, which reports those itself.
+    """
     raw = str(getattr(args, "resume_from", "") or "").strip()
     if not raw:
-        return False
-    resumed = Path(raw).expanduser()
+        return
+    session_dir = Path(raw).expanduser()
+    if not (session_dir / "manifest.json").is_file() or (session_dir / "state.json").exists():
+        return
     try:
-        state = json.loads((resumed / "state.json").read_text(encoding="utf-8"))
+        manifest = json.loads((session_dir / "manifest.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return False
-    return bool(state.get("eval_disabled"))
+        manifest = None
+    raw_framework = manifest.get("framework") if isinstance(manifest, dict) else None
+    framework = raw_framework.strip().lower() if isinstance(raw_framework, str) else ""
+    supported = _supported_framework_names()
+    if framework in supported:
+        hint = f"Start a fresh session with --framework {framework} instead."
+    elif raw_framework not in (None, ""):
+        hint = (
+            f"Its manifest.json records --framework {raw_framework!r}, which is not a supported framework "
+            f"({', '.join(supported)}). Start a fresh session instead."
+        )
+    else:
+        hint = "Start a fresh session instead."
+    print(
+        f"ERROR: cannot resume this session -- {session_dir}/state.json missing (manifest exists but Coordinator "
+        f"never wrote SharedState; the first launch stopped before the session had any state to resume). {hint}",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
+
+def _pin_resumed_session_args(args: argparse.Namespace | None) -> None:
+    """Apply the resumed session's pinned settings to ``args`` before any preflight check reads them.
+
+    A session's framework is fixed at creation, and the resume block re-exports the persisted one; without this, a
+    resume that does not re-pass ``--framework`` would have preflight install and probe the default framework instead
+    of the session's. An explicit ``--framework`` that differs from the persisted one is refused: the resume would
+    otherwise check one framework and run another. A kernel phase disabled at creation stays disabled, as the resume
+    block also enforces, so the TraceLens requirement is judged on the same setting the run uses.
+    """
+    if args is None:
+        return
+    state = _resumed_session_state(args)
+    if not state:
+        _refuse_resume_without_state(args)
+        return
+    raw_persisted = state.get("framework")
+    persisted = raw_persisted.strip().lower() if isinstance(raw_persisted, str) else ""
+    if raw_persisted not in (None, "") and persisted not in _supported_framework_names():
+        # state.json lives on shared storage; the framework name later becomes a manifest path that preflight
+        # pip-installs from, so only a registered framework name may be pinned.
+        print(
+            f"ERROR: cannot resume this session -- its state.json records --framework {raw_persisted!r}, which is "
+            f"not a supported framework ({', '.join(_supported_framework_names())}). The session state is invalid; "
+            "start a fresh session.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    if persisted:
+        requested = str(getattr(args, "framework", None) or "").strip().lower()
+        if requested and requested != persisted:
+            print(
+                f"ERROR: cannot resume this session -- it was created with --framework {persisted} and this resume "
+                f"passes --framework {requested}; a session's framework cannot change. Drop --framework (or pass "
+                f"--framework {persisted}) to resume it, or start a fresh session for {requested}.",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+        args.framework = persisted
+    if state.get("kernel_enabled") is False:
+        args.no_kernel = True
 
 
 def _ensure_lm_eval_dep(
@@ -1246,7 +1388,7 @@ def _ensure_lm_eval_dep(
             "message": "accuracy evaluation is disabled",
         }
     run_eval = os.environ.get("RUN_EVAL")
-    if run_eval is not None and run_eval.strip().lower() in _RUN_EVAL_FALSE_VALUES:
+    if not is_truthy(run_eval, default=True):
         return {
             "status": "skipped",
             "skip_reason": "eval_disabled",
@@ -1494,14 +1636,14 @@ def _check_tracelens_cli() -> dict[str, Any]:
     print(
         f"ERROR: TraceLens CLI(s) not on PATH: {missing}. The pod-local "
         f"/opt/venv/bin/TraceLens_* console_scripts are installed by "
-        f"src/hyperloom/agents/kernel/scripts/install.sh (chained from "
+        f"src/hyperloom/inference_optimizer/assets/install_kernel_tools.sh (chained from "
         f"src/hyperloom/inference_optimizer/assets/install.sh) and do NOT persist "
         f"across pod restarts. SKILL IR-2 requires running install.sh "
         f"before every launch (carve-out applies only to --resume-from in "
         f"the same shell that earlier ran install.sh). Re-run:\n"
         f"  bash $REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh\n"
         f"  . {session_dir}/runtime/kernel-agent.env.sh\n"
-        f"then retry `python -m hyperloom.inference_optimizer.cli optimize`. Refusing to start.",
+        f"then retry `python -m hyperloom optimize`. Refusing to start.",
         file=sys.stderr,
     )
     raise SystemExit(2)
@@ -1527,6 +1669,27 @@ def _check_tracelens_root_exists() -> dict[str, Any]:
     sys.exit(2)
 
 
+_KERNEL_TUNING_CLIS: dict[str, str] = {
+    "hipblaslt-bench": "offline hipBLASLt GEMM solution tuning",
+    "ckProfiler": "the Composable Kernel GEMM/attention instance sweep",
+}
+
+
+def _check_kernel_tuning_clis() -> dict[str, Any]:
+    """WARN-only presence check for the GEMM tuning CLIs the kernel phase's backends call."""
+    missing = [name for name in _KERNEL_TUNING_CLIS if shutil.which(name) is None]
+    for name in missing:
+        print(
+            f"Preflight: WARNING — {name} not on PATH; {_KERNEL_TUNING_CLIS[name]} is unavailable to the kernel "
+            "phase. To use it, build it for this ROCm and put it on PATH."
+        )
+    return {
+        "status": "warned" if missing else "applied",
+        "skip_reason": None,
+        "detail": {"missing": missing},
+    }
+
+
 def _check_node_claude_cli() -> None:
     """WARN-only presence check for bundled agent CLIs (node/claude/codex)."""
     missing = [t for t in ("node", "claude", "codex") if shutil.which(t) is None]
@@ -1534,7 +1697,7 @@ def _check_node_claude_cli() -> None:
         print(
             f"Preflight: WARNING — CLI(s) not on PATH: {missing}. "
             f"ClaudeBackend / CodexBackend may fall back to direct HTTP. "
-            f"Run src/hyperloom/agents/kernel/scripts/install.sh to bring them in."
+            f"Run src/hyperloom/inference_optimizer/assets/install.sh to bring them in."
         )
 
 
@@ -1837,7 +2000,7 @@ def _begin_install_event(args: argparse.Namespace | None) -> dict[str, Any]:
         from ..session.sbd_v6 import set_pending_install_event
 
         set_pending_install_event(args, event)
-    except Exception:  # noqa: BLE001 — V6 observability must never change preflight behavior
+    except Exception:
         log.warning("failed to initialize SBD V6 install event", exc_info=True)
     return event
 
@@ -1907,7 +2070,7 @@ def _mark_pending_install_event_failed(
                 exc=exc,
             )
         return event
-    except Exception:  # noqa: BLE001 — never replace the original preflight failure
+    except Exception:
         log.warning("failed to finalize SBD V6 install failure", exc_info=True)
         return None
 
@@ -1926,26 +2089,23 @@ def _run_install_step(
     except BaseException as exc:
         try:
             _fail_install_step(event, step_id=step_id, category=category, exc=exc)
-        except Exception:  # noqa: BLE001 — preserve the original preflight exception
+        except Exception:
             log.warning("failed to record SBD V6 install-step failure", exc_info=True)
         raise
-    try:
-        outcome = dict(result) if isinstance(result, dict) else {}
-        status = str(outcome.pop("status", success_status) or success_status)
-        skip_reason = outcome.pop("skip_reason", None)
-        message = outcome.pop("message", None)
-        fields = {**success_fields, **outcome}
-        _record_install_step(
-            event,
-            step_id=step_id,
-            category=category,
-            status=status,
-            skip_reason=skip_reason,
-            message=message,
-            **fields,
-        )
-    except Exception:  # noqa: BLE001 — V6 observability must never change preflight behavior
-        log.warning("failed to record SBD V6 install step", exc_info=True)
+    outcome = dict(result) if isinstance(result, dict) else {}
+    status = str(outcome.pop("status", success_status) or success_status)
+    skip_reason = outcome.pop("skip_reason", None)
+    message = outcome.pop("message", None)
+    fields = {**success_fields, **outcome}
+    _record_install_step(
+        event,
+        step_id=step_id,
+        category=category,
+        status=status,
+        skip_reason=skip_reason,
+        message=message,
+        **fields,
+    )
     return result
 
 
@@ -2001,7 +2161,7 @@ def _persist_install_event(args: argparse.Namespace | None, session_dir: Path) -
 
     try:
         path = persist_pending_install_event(args, session_dir)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.warning("failed to persist SBD V6 install event", exc_info=True)
         if not record_write_warning(session_dir, component="install.event", exc=exc):
             log.debug("failed to persist SBD V6 install-event write warning", exc_info=True)
@@ -2017,6 +2177,7 @@ def _preflight(
     args: argparse.Namespace | None = None,
 ) -> tuple[str, str] | None:
     """Auto-install missing runtime deps and export auth aliases."""
+    _pin_resumed_session_args(args)
     install_event = _begin_install_event(args)
     _run_install_step(
         install_event,
@@ -2034,6 +2195,8 @@ def _preflight(
         category="normalize",
         action=_load_kernel_agent_env_fallback,
     )
+    if framework_arg := getattr(args, "framework", None):
+        os.environ["FRAMEWORK"] = framework_arg.strip().lower()
     _derive_runtime_paths()
     _restore_provider_only_mode(provider_mode, provider_snapshot)
     _run_install_step(
@@ -2042,6 +2205,8 @@ def _preflight(
         category="normalize",
         action=_normalize_legacy_deepseek_env,
     )
+    # After the legacy normalization, which can create the credentials a header references.
+    _expand_custom_header_env_refs()
 
     # Fail fast on missing credentials after the fallback loaders.
     _run_install_step(
@@ -2329,7 +2494,7 @@ def _preflight(
                     "writable checkout instead."
                 )
             elif (Path(candidate) / "benchmarks" / "benchmark_lib.sh").is_file():
-                # Complete but at the wrong revision: the case that used to be accepted silently.
+                # Complete but at the wrong revision: refused, never accepted silently.
                 print(
                     f"Preflight: ignoring InferenceX at {candidate}: it is at "
                     f"{_inferencex_head_sha(candidate)[:12] or 'an unreadable ref'}, "
@@ -2414,8 +2579,8 @@ def _preflight(
     )
 
     # --- Magpie/InferenceX eval-concurrency compatibility ------------------- Preflight installs Magpie and clones
-    # InferenceX itself (above), entirely outside install.sh -- and install.sh is the ONLY place that used to apply
-    # the Magpie script patches.
+    # InferenceX itself (above), entirely outside install.sh, so the Magpie script patches install.sh applies are
+    # applied here as well.
     try:
         if _magpie_backend_active:
             # Trust patch first, mirroring install.sh: the eval-concurrency strip removes the very `run_eval ...
@@ -2459,6 +2624,21 @@ def _preflight(
     # install.sh before a missing CLI surfaces mid-run.
     no_kernel = getattr(args, "no_kernel", False) if args else False
     enable_roofline = getattr(args, "enable_roofline", True) if args else True
+    if no_kernel:
+        _record_install_step(
+            install_event,
+            step_id="check_kernel_tuning_clis",
+            category="check",
+            status="skipped",
+            skip_reason="no_kernel",
+        )
+    else:
+        _run_install_step(
+            install_event,
+            step_id="check_kernel_tuning_clis",
+            category="check",
+            action=_check_kernel_tuning_clis,
+        )
     if _tracelens_required_at_preflight(no_kernel, enable_roofline):
         _run_install_step(
             install_event,
@@ -2538,7 +2718,7 @@ def _preflight(
             inferencex_path=inferencex_path,
             resolved_urls=resolved_urls,
         )
-    except Exception:  # noqa: BLE001 — V6 observability must never change preflight behavior
+    except Exception:
         log.warning("failed to finalize SBD V6 install event", exc_info=True)
 
     return resolved_urls

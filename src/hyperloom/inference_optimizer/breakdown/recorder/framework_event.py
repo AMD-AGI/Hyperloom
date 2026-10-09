@@ -395,6 +395,8 @@ class FrameworkEventRecorder:
             "source_ref",
             "repo",
             "title",
+            "reasoning",
+            "kb_read_id",
             "verdict",
             "route",
         ):
@@ -402,6 +404,21 @@ class FrameworkEventRecorder:
                 row[name] = str(fields.get(name) or "")
         if "changed_files" in fields:
             row["changed_files"] = [str(path) for path in (fields.get("changed_files") or []) if str(path or "")]
+        if "rendered_refs" in fields:
+            rendered_refs: list[dict[str, str]] = []
+            for item in fields.get("rendered_refs") or []:
+                if not isinstance(item, Mapping):
+                    continue
+                experience_id = str(item.get("id") or "").strip()
+                if not experience_id:
+                    continue
+                rendered_refs.append(
+                    {
+                        "id": experience_id,
+                        "purpose": str(item.get("purpose") or "").strip(),
+                    }
+                )
+            row["rendered_refs"] = rendered_refs
         if "confidence" in fields:
             row["confidence"] = _float_or_none(fields.get("confidence"))
         self._sink.record(SECTION_PROPOSAL, row, row_type=ROW_PROPOSAL, natural_ids=_key(key))
@@ -601,15 +618,32 @@ class FrameworkEventRecorder:
             "route",
             "patch_source",
             "patch_path",
+            "reasoning",
+            "reasoning_origin",
         ):
             if name in fields:
                 row[name] = str(fields.get(name) or "")
         for name in ("adopted", "attribution_eligible"):
             if name in fields:
                 row[name] = None if fields.get(name) is None else bool(fields.get(name))
-        for name in ("accepted_kernels", "target_files", "patches_applied"):
+        for name in (
+            "accepted_kernels",
+            "target_files",
+            "patches_applied",
+            "patches_reverted",
+        ):
             if name in fields:
                 row[name] = [str(item) for item in (fields.get(name) or []) if str(item or "")]
+        if "experience_citations" in fields:
+            row["experience_citations"] = [
+                {
+                    "id": str(item.get("id") or ""),
+                    "stance": str(item.get("stance") or ""),
+                    "claim": str(item.get("claim") or ""),
+                }
+                for item in (fields.get("experience_citations") or [])
+                if isinstance(item, Mapping) and str(item.get("id") or "")
+            ]
         if "ts" not in fields:
             row["ts"] = _now()
         else:
@@ -642,11 +676,22 @@ class FrameworkEventRecorder:
                 "value": _float_or_none(accuracy.get("value")),
                 "passed": None if accuracy.get("passed") is None else bool(accuracy.get("passed")),
             }
+        if "patch_material" in fields:
+            row["patch_material"] = [
+                {
+                    "path": str(patch.get("path") or ""),
+                    "sha256": str(patch.get("sha256") or ""),
+                    "content": str(patch.get("content") or ""),
+                }
+                for patch in (fields.get("patch_material") or [])
+                if isinstance(patch, Mapping)
+            ]
         if "failure" in fields:
             failure = _as_dict(fields.get("failure"))
             row["failure"] = {
                 "error_class": str(failure.get("error_class") or ""),
                 "error_excerpt": str(failure.get("error_excerpt") or ""),
+                "attribution": str(failure.get("attribution") or ""),
             }
         if "artifacts" in fields:
             artifacts = _as_dict(fields.get("artifacts"))
@@ -989,30 +1034,14 @@ def record_review_evidence(
 
 
 def make_framework_recorder(*, macro_cycle: Any = 0) -> FrameworkEventRecorder | None:
-    """Build a recorder already opened on the timeline, or ``None``. Phase
-    behavior must not depend on the recorder existing, so construction failures
-    degrade to "no event", and an unbound session declines rather than writing
-    the timeline into an arbitrary directory."""
-    from ...session.session_binding import session_is_bound
+    """Build a recorder already opened on the timeline, or ``None`` when unbound."""
+    from .construct import decline_unbound
 
-    try:
-        if not session_is_bound():
-            log.warning(
-                "framework timeline: no session bound; this phase entry's whole event will be "
-                "missing from the breakdown. The coordinator binds at startup, so this means "
-                "either that never happened or the entry ran outside the session's context"
-            )
-            return None
-        recorder = FrameworkEventRecorder(
-            make_sink(framework_event_id(macro_cycle), producer=PRODUCER),
-            macro_cycle=int(macro_cycle or 0),
-        )
-    except Exception:  # noqa: BLE001 — observability cannot change phase behavior
-        log.warning(
-            "framework timeline: recorder construction failed; this phase entry's whole event "
-            "will be missing from the breakdown",
-            exc_info=True,
-        )
+    if decline_unbound("framework"):
         return None
+    recorder = FrameworkEventRecorder(
+        make_sink(framework_event_id(macro_cycle), producer=PRODUCER),
+        macro_cycle=int(macro_cycle or 0),
+    )
     recorder.begin()
     return recorder

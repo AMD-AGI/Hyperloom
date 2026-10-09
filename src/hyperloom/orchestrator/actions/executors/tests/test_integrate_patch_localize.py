@@ -9,29 +9,47 @@ import types
 
 import pytest
 
+from hyperloom.common.failure_signature import classify_failure
 from hyperloom.orchestrator.actions.executors import integrate_patch as ip
-from hyperloom.orchestrator.enablement.runtime.stack_actions import EnablementStackAction
+from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
+
+_ARCH_LOG = "ValueError: Model architectures ['DeepseekV4ForCausalLM'] are not supported for now."
 
 
-def _ctx(task_id: str = "t-1"):
-    task = types.SimpleNamespace(task_id=task_id, params={})
-    return types.SimpleNamespace(task=task, extra={})
+def _params(**extra) -> dict:
+    """Params for an enablement round dispatched on an architecture-miss verdict."""
+    return {
+        "enablement": True,
+        "enablement_failure_signature": classify_failure(_ARCH_LOG).to_dict(),
+        **extra,
+    }
+
+
+def _attempt(task_id: str = "t-1", *, candidate_refs: tuple[str, ...] = ("PR:1234",)):
+    """An attempt whose shared state carries the round the executor derives from."""
+    attempt = ip.IntegrateAttempt(task_id=task_id)
+    attempt.shared_state = types.SimpleNamespace(
+        framework="vllm",
+        gpu_type="mi355x",
+        enablement=EnablementRound(candidate_refs=list(candidate_refs)),
+    )
+    return attempt
+
+
+@pytest.fixture(autouse=True)
+def _stub_external_operations(monkeypatch):
+    from hyperloom.agents.framework.sources import github
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("localization fetches must be stubbed by the test")
+
+    monkeypatch.setattr(github, "pr_patches", forbidden)
+    monkeypatch.setattr(github, "fetch_raw_file", forbidden)
 
 
 @pytest.fixture()
 def _executor(tmp_path):
     return ip.IntegratePatchExecutor(session_dir=tmp_path / "session")
-
-
-def _pr_candidate(framework: str = "vllm") -> dict:
-    return EnablementStackAction(
-        kind="pr_backport",
-        framework=framework,
-        gap_id="gap.enablement.missing_model_arch",
-        capability="deepseek_v4",
-        repo_url="https://github.com/ROCm/vllm.git",
-        pr_number=1234,
-    ).to_state()
 
 
 _PY_DIFF = (
@@ -48,21 +66,46 @@ _CUDA_DIFF = "diff --git a/csrc/attn.cu b/csrc/attn.cu\n--- a/csrc/attn.cu\n+++ 
 # ---------------------------------------------------------------------------
 
 
-async def test_no_candidate_is_noop(_executor):
-    ctx = _ctx()
-    out = await _executor._stage_localize_source(ctx, {}, "t-1")
-    assert out is None
-    assert ctx._ip_localization_patches == []
+@pytest.mark.parametrize(
+    "params",
+    [
+        pytest.param({}, id="not_an_enablement_round"),
+        pytest.param({"enablement": True}, id="no_dispatched_verdict"),
+        pytest.param(_params(enablement_launch_only=True), id="launch_only_bench"),
+    ],
+)
+async def test_rounds_that_acquire_nothing_are_a_noop(_executor, params):
+    """Only an enablement round dispatched on a code-acquirable verdict localizes."""
+    attempt = _attempt()
+    assert await _executor._stage_localize_source(attempt, params, "t-1") is None
+    assert attempt.localization_patches == []
 
 
-async def test_multi_node_skips(_executor, monkeypatch):
-    import hyperloom.orchestrator.actions.executors._multi_node_env as mn
+async def test_without_a_bridging_candidate_nothing_is_fetched(_executor):
+    """A round whose discovery found no upstream ref has nothing to backport."""
+    attempt = _attempt(candidate_refs=())
+    assert await _executor._stage_localize_source(attempt, _params(), "t-1") is None
+    assert attempt.localization_patches == []
 
-    monkeypatch.setattr(mn, "is_multi_node", lambda: True)
-    ctx = _ctx()
-    out = await _executor._stage_localize_source(ctx, {"localization_candidate": _pr_candidate()}, "t-1")
-    assert out is None
-    assert ctx._ip_localization_patches == []
+
+async def test_a_bridge_repo_candidate_is_not_localized(_executor):
+    """A diff cut from aiter does not apply to the framework tree."""
+    attempt = _attempt(candidate_refs=("https://github.com/ROCm/aiter/pull/99",))
+    assert await _executor._stage_localize_source(attempt, _params(), "t-1") is None
+    assert attempt.localization_patches == []
+
+
+async def test_the_framework_ref_is_preferred_over_a_higher_ranked_bridge_ref(_executor, monkeypatch):
+    """Discovery ranks both repos into one list; only the framework's own is applicable."""
+    import hyperloom.agents.framework.sources.github as gh
+
+    fetched: list[tuple[str, int]] = []
+    monkeypatch.setattr(gh, "pr_patches", lambda slug, num: (fetched.append((slug, num)), _PY_DIFF)[1])
+    attempt = _attempt(
+        candidate_refs=("https://github.com/ROCm/aiter/pull/99", "https://github.com/ROCm/vllm/pull/1234")
+    )
+    assert await _executor._stage_localize_source(attempt, _params(), "t-1") is None
+    assert fetched == [("ROCm/vllm", 1234)]
 
 
 # ---------------------------------------------------------------------------
@@ -73,15 +116,46 @@ async def test_multi_node_skips(_executor, monkeypatch):
 async def test_python_only_writes_patch(_executor, monkeypatch):
     import hyperloom.agents.framework.sources.github as gh
 
-    monkeypatch.setattr(gh, "pr_patches", lambda slug, num: _PY_DIFF)
-    ctx = _ctx()
-    out = await _executor._stage_localize_source(ctx, {"localization_candidate": _pr_candidate()}, "t-1")
+    fetched: list[tuple[str, int]] = []
+
+    def _pr_patches(slug, num):
+        fetched.append((slug, num))
+        return _PY_DIFF
+
+    monkeypatch.setattr(gh, "pr_patches", _pr_patches)
+    attempt = _attempt(candidate_refs=("PR:1234",))
+    out = await _executor._stage_localize_source(attempt, _params(), "t-1")
     assert out is None, out
-    assert len(ctx._ip_localization_patches) == 1
-    patch = ctx._ip_localization_patches[0]
+    # The ref discovery recorded on the round is the PR that gets backported.
+    assert fetched == [("ROCm/vllm", 1234)]
+    assert len(attempt.localization_patches) == 1
+    patch = attempt.localization_patches[0]
     assert patch.exists()
     assert "deepseek_v4.py" in patch.read_text()
-    assert ctx._ip_localization_touched == ["vllm/model/deepseek_v4.py"]
+    assert attempt.localization_touched == ["vllm/model/deepseek_v4.py"]
+
+
+async def test_localizing_does_not_displace_the_runtime_action(_executor, monkeypatch):
+    """The KEEP re-provisions from the runtime action; a backport is not something to provision."""
+    import hyperloom.agents.framework.sources.github as gh
+    from hyperloom.orchestrator.enablement.runtime.stack_actions import EnablementStackAction
+
+    monkeypatch.setattr(gh, "pr_patches", lambda slug, num: _PY_DIFF)
+    runtime_action = EnablementStackAction(
+        kind="runtime_candidate",
+        framework="vllm",
+        gap_id="gap.enablement.missing_model_arch",
+        capability="deepseek_v4",
+        acquisition_method="wheel",
+        index_url="https://rocm.repo/whl",
+    )
+    attempt = _attempt()
+    attempt.stack_action = runtime_action
+
+    assert await _executor._stage_localize_source(attempt, _params(), "t-1") is None
+    assert attempt.stack_action is runtime_action
+    assert attempt.localization_action is not None
+    assert attempt.localization_action.kind == "pr_backport"
 
 
 # ---------------------------------------------------------------------------
@@ -93,20 +167,20 @@ async def test_compiled_closure_defers_rung5(_executor, monkeypatch):
     import hyperloom.agents.framework.sources.github as gh
 
     monkeypatch.setattr(gh, "pr_patches", lambda slug, num: _CUDA_DIFF)
-    ctx = _ctx()
-    out = await _executor._stage_localize_source(ctx, {"localization_candidate": _pr_candidate()}, "t-1")
+    attempt = _attempt()
+    out = await _executor._stage_localize_source(attempt, _params(), "t-1")
     assert out is not None
     assert out["status"] == "reverted"
     assert out["error_class"] == "localization_rung5_deferred"
-    assert ctx._ip_localization_patches == []
+    assert attempt.localization_patches == []
 
 
 async def test_fetch_failure_reverts(_executor, monkeypatch):
     import hyperloom.agents.framework.sources.github as gh
 
     monkeypatch.setattr(gh, "pr_patches", lambda slug, num: "")
-    ctx = _ctx()
-    out = await _executor._stage_localize_source(ctx, {"localization_candidate": _pr_candidate()}, "t-1")
+    attempt = _attempt()
+    out = await _executor._stage_localize_source(attempt, _params(), "t-1")
     assert out is not None
     assert out["status"] == "reverted"
     assert out["error_class"] == "localization_fetch_failed"

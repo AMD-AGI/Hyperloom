@@ -12,10 +12,21 @@ only for the advanced workload choices that differ from the fixed demo presets.
 
 ## Setup Configuration
 
-Load `.env` from the current Hyperloom workspace before launching. Treat it as
-the source of truth for setup-owned values such as `HYPERLOOM_RUN_MODE`,
-`HYPERLOOM_DOCKER_TARGET_HOST`, `FRAMEWORK`, `USER_DATA_PATH`, and LLM provider
-settings. Do not ask the user to re-enter setup values that are already present.
+In the current Hyperloom workspace, load `.env` through the shared loader.
+Existing non-empty exports take precedence; do not ask the user to re-enter
+setup values that are already present. Repeat this preamble in each new execution
+shell, including inside Docker, before setup or runtime installation:
+
+```bash
+set -e
+export REPO_ROOT="$(pwd -P)"
+INSTALL_SH="${REPO_ROOT}/hyperloom/inference_optimizer/assets/install.sh"
+if [ ! -f "$INSTALL_SH" ]; then
+  INSTALL_SH="${REPO_ROOT}/src/hyperloom/inference_optimizer/assets/install.sh"
+fi
+. "${INSTALL_SH%/*}/runtime_env.sh"
+load_dotenv_no_clobber
+```
 
 When `HYPERLOOM_RUN_MODE=baremetal` or it is unset, run this demo directly in
 the current environment.
@@ -33,7 +44,7 @@ In docker mode:
 - Always run setup **inside the container** after `docker run`.
 - Pass `--install-framework none --yes` in the container because ROCm and the
   framework must come from the image. Do **not** use `--skip-base-check`.
-- Do not run `python -m hyperloom.inference_optimizer.cli optimize` on the host.
+- Do not run `python -m hyperloom optimize` on the host.
 
 ### Prior workload cleanup (required)
 
@@ -44,9 +55,9 @@ skip the user-approval step (#1314).
 
 Suggested Docker images:
 
-- `vllm`: `docker.io/vllm/vllm-openai-rocm:v0.29.0`
-- `sglang` MI300X: `docker.io/lmsysorg/sglang-rocm:v0.5.20-rocm10-mi30x-20260920`
-- `sglang` MI355X: `docker.io/lmsysorg/sglang-rocm:v0.5.20-rocm10-mi35x-20260920`
+- `vllm`: `docker.io/rocm/vllm:rocm10.0.0_ubuntu24.04_py3.14_pytorch_2.12.0_vllm_0.27.0`
+- `sglang` MI300X: `docker.io/lmsysorg/sglang-rocm:v0.5.21-rocm10-mi30x-20261008`
+- `sglang` MI355X: `docker.io/lmsysorg/sglang-rocm:v0.5.21-rocm10-mi35x-20261008`
 
 In Docker mode, start a long-running container on `HYPERLOOM_DOCKER_TARGET_HOST`
 (or the current host when it is unset) before running setup or optimize:
@@ -75,12 +86,12 @@ Then run the setup backend inside the container:
 
 ```bash
 docker exec -w "$REPO_ROOT" "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}" bash -lc \
-  'REPO_ROOT="$(pwd -P)"; PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework none --yes'
+  'REPO_ROOT="$(pwd -P)"; PYTHONPATH="$REPO_ROOT" python3 -m hyperloom setup -- --install-framework none --yes'
 ```
 
 After that, run all remaining commands for this demo inside the same container
 with `docker exec -w "$REPO_ROOT" ...`; do not run
-`python -m hyperloom.inference_optimizer.cli optimize` on the host in Docker
+`python -m hyperloom optimize` on the host in Docker
 mode. When the demo is finished, ask the user whether to stop the container. If
 they say yes, run:
 
@@ -133,7 +144,6 @@ resolved values in the launch plan before starting the optimizer.
 - `MODEL_CLASS`: unset, so Hyperloom infers it from model metadata.
 - `GPU_TYPE`: unset, so Hyperloom auto-detects the target GPU.
 - `FRAMEWORK_VERSION`: unset, so Hyperloom auto-detects it when possible.
-- `TARGET_SUMMARY`: unset.
 - `COMPARE_AGAINST_GPU`: unset.
 - `SKIP_VARIANTS`: empty.
 - `SERVER_ARGS`: empty.
@@ -168,7 +178,7 @@ Collect these optional advanced values:
   `0 < pct <= 1`; leave a value unset to use the optimizer default.
 - Routing and baseline options: `--skip-variants`, `--server-args`,
   `--reference-script`, `--model-class`, `--gpu-type`, `--framework-version`,
-  `--target-summary`, `--compare-against-gpu`.
+  `--compare-against-gpu`.
 - Concurrency sweep: `--conc-sweep-concs` and `--conc-sweep-total-budget-sec`
   (the total budget across the sweep).
 - Benchmark limits: `INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC` (default `7800`
@@ -250,28 +260,19 @@ step must happen before launching.
 For Docker mode, run this inside the container. For bare-metal mode, run it on
 the host:
 
+Use the [setup preamble](#setup-configuration) in this shell first, then run:
+
 ```bash
-export REPO_ROOT="$(pwd -P)"
-# .env fills gaps only: re-exporting the non-empty pre-source snapshot keeps every
-# value the caller exported. Wider than install.sh, which guards a fixed list.
-_dotenv_prev="$(export -p | grep -v -e '=""$' -e "=''\$")"
-set -a; . "${REPO_ROOT}/.env"; set +a
-eval "$_dotenv_prev"
-unset _dotenv_prev
-export USER_DATA_PATH="${USER_DATA_PATH:?USER_DATA_PATH missing}"
+load_dotenv_no_clobber
+: "${USER_DATA_PATH:?USER_DATA_PATH missing}"
+export USER_DATA_PATH
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 ulimit -Sn 65536 || true
-INSTALL_SH="${REPO_ROOT}/hyperloom/inference_optimizer/assets/install.sh"
-if [ ! -f "$INSTALL_SH" ]; then
-  INSTALL_SH="${REPO_ROOT}/src/hyperloom/inference_optimizer/assets/install.sh"
-fi
 bash "$INSTALL_SH"
-. "$USER_DATA_PATH/runtime/kernel-agent.env.sh"
-export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 ```
 
-If `hyperloom/inference_optimizer/assets/install.sh` is not present (source
-checkout layout), use `src/hyperloom/inference_optimizer/assets/install.sh`.
+The optimizer's startup preflight loads `kernel-agent.env.sh` in process;
+do not source the generated file in the launch shell.
 
 ## Launch Command Template
 
@@ -331,18 +332,17 @@ OPT_FLAGS=(
 [ -n "${MODEL_CLASS:-}" ] && OPT_FLAGS+=(--model-class "$MODEL_CLASS")
 [ -n "${GPU_TYPE:-}" ] && OPT_FLAGS+=(--gpu-type "$GPU_TYPE")
 [ -n "${FRAMEWORK_VERSION:-}" ] && OPT_FLAGS+=(--framework-version "$FRAMEWORK_VERSION")
-[ -n "${TARGET_SUMMARY:-}" ] && OPT_FLAGS+=(--target-summary "$TARGET_SUMMARY")
 [ -n "${COMPARE_AGAINST_GPU:-}" ] && OPT_FLAGS+=(--compare-against-gpu "$COMPARE_AGAINST_GPU")
 [ -n "${SKIP_VARIANTS:-}" ] && OPT_FLAGS+=(--skip-variants "$SKIP_VARIANTS")
 [ -n "${SERVER_ARGS:-}" ] && OPT_FLAGS+=(--server-args "$SERVER_ARGS")
 [ -n "${REFERENCE_SCRIPT:-}" ] && OPT_FLAGS+=(--reference-script "$REFERENCE_SCRIPT")
 [ -n "${CONC_SWEEP_CONCS:-}" ] && OPT_FLAGS+=(--conc-sweep-concs "$CONC_SWEEP_CONCS")
 [ -n "${CONC_SWEEP_TOTAL_BUDGET_SEC:-}" ] && OPT_FLAGS+=(--conc-sweep-total-budget-sec "$CONC_SWEEP_TOTAL_BUDGET_SEC")
-[ -n "${PHASE_BUDGET_PRELUDE_PCT:-}" ] && OPT_FLAGS+=(--max-minutes-prelude-pct "$PHASE_BUDGET_PRELUDE_PCT")
-[ -n "${PHASE_BUDGET_FRAMEWORK_PCT:-}" ] && OPT_FLAGS+=(--max-minutes-framework-pct "$PHASE_BUDGET_FRAMEWORK_PCT")
-[ -n "${PHASE_BUDGET_KERNEL_PCT:-}" ] && OPT_FLAGS+=(--max-minutes-kernel-pct "$PHASE_BUDGET_KERNEL_PCT")
-[ -n "${PHASE_BUDGET_SWEEP_PCT:-}" ] && OPT_FLAGS+=(--max-minutes-sweep-pct "$PHASE_BUDGET_SWEEP_PCT")
-[ -n "${PHASE_BUDGET_CLOSE_PCT:-}" ] && OPT_FLAGS+=(--max-minutes-close-pct "$PHASE_BUDGET_CLOSE_PCT")
+[ -n "${PHASE_BUDGET_PRELUDE_PCT:-}" ] && OPT_FLAGS+=(--phase-budget-prelude-pct "$PHASE_BUDGET_PRELUDE_PCT")
+[ -n "${PHASE_BUDGET_FRAMEWORK_PCT:-}" ] && OPT_FLAGS+=(--phase-budget-framework-pct "$PHASE_BUDGET_FRAMEWORK_PCT")
+[ -n "${PHASE_BUDGET_KERNEL_PCT:-}" ] && OPT_FLAGS+=(--phase-budget-kernel-pct "$PHASE_BUDGET_KERNEL_PCT")
+[ -n "${PHASE_BUDGET_SWEEP_PCT:-}" ] && OPT_FLAGS+=(--phase-budget-sweep-pct "$PHASE_BUDGET_SWEEP_PCT")
+[ -n "${PHASE_BUDGET_CLOSE_PCT:-}" ] && OPT_FLAGS+=(--phase-budget-close-pct "$PHASE_BUDGET_CLOSE_PCT")
 [ "${NO_KERNEL:-0}" = "1" ] && OPT_FLAGS+=(--no-kernel)
 [ "${NO_FRAMEWORK_AGENT:-0}" = "1" ] && OPT_FLAGS+=(--no-framework-agent)
 [ "${NO_FRAMEWORK_LOCAL_EXPLORE:-0}" = "1" ] && OPT_FLAGS+=(--no-framework-local-explore)
@@ -353,7 +353,7 @@ OPT_FLAGS=(
 # `setsid nohup` and append ` &` elsewhere. Either way $PID_FILE is reconciled
 # from the launch-info JSON in the health-check block below -- the tool returns
 # a shell_id, and $! is the setsid wrapper.
-python3 -m hyperloom.inference_optimizer.cli --verbose optimize \
+python3 -m hyperloom optimize --verbose \
   "${OPT_FLAGS[@]}" \
   > "$RUN_LOG" 2>&1 < /dev/null
 ```
@@ -376,7 +376,7 @@ if [ -z "$REAL_PID" ]; then
   # pattern matches every optimizer running here and nothing ties a hit to this
   # run. Take it only when unambiguous rather than `head -1`-ing a list, which
   # would adopt another session's pid.
-  MATCHES="$(pgrep -f 'hyperloom.inference_optimizer.cli .*optimize' || true)"
+  MATCHES="$(pgrep -f 'hyperloom optimize' || true)"
   N_MATCHES="$(printf '%s\n' "$MATCHES" | grep -c . || true)"
   if [ "$N_MATCHES" = "1" ]; then
     REAL_PID="$MATCHES"
@@ -410,13 +410,12 @@ test -f "$SESSION_DIR/state.json" && echo "state_exists=true"
 
 If adding quantization, critic, or research-lane flags, append only
 real flags accepted by
-`python3 -m hyperloom.inference_optimizer.cli optimize --help`; do not invent
+`python3 -m hyperloom optimize --help`; do not invent
 aliases.
 
-Append subcommand flags to `OPT_FLAGS` only. Global flags are defined on the
-top-level parser and must come *before* the `optimize` subcommand — `--verbose`
-is the one used above. Placing a global flag after `optimize` fails the run with
-`error: unrecognized arguments`.
+Append subcommand flags to `OPT_FLAGS` only. Common flags such as `--verbose`
+(the one used above) go *after* the `optimize` subcommand; `hyperloom` accepts
+no flags before the command name and exits with its usage message.
 
 ## User-visible Progress
 
@@ -460,14 +459,14 @@ and the stop reason. Never print API keys, tokens, or custom header values.
 
 ## Launch Requirements
 
-1. Run the pre-launch runtime install above and source
-   `$USER_DATA_PATH/runtime/kernel-agent.env.sh` before launching.
+1. Run the pre-launch runtime install above; startup preflight loads the generated
+   runtime environment in process.
 2. Keep `PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"` in the launch shell so
    critic subprocesses can import `hyperloom.agents` after
    changing cwd.
 3. Run it detached the way the harness understands: if `$CLAW_SESSION_ID` is set and your bash tool takes a `run_in_background` parameter, hand the command to it with `run_in_background=true`; otherwise use `setsid nohup ... &`. See the Launch section of the packaged `hyperloom/inference_optimizer/SKILL.md` for why — a hand-detached run is invisible to Claw and its sandbox is reclaimed about fifteen minutes after the turn ends.
 4. Pass all required workload flags in the
-   `python -m hyperloom.inference_optimizer.cli optimize` command. Do not rely
+   `python -m hyperloom optimize` command. Do not rely
    on `.env` alone for `TP`, `CONC`, `ISL`, `OSL`, or `PRECISION`.
 5. Report the session ID, log path, PID, and initial health check result.
 6. Inspect persisted state on requested status checks; report when work stops.

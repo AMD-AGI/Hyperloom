@@ -35,8 +35,6 @@ class TestFrameworkRegistry:
         assert fr.throughput_unit("vllm") == "tok/s"
 
     def test_registry_capability_fields(self):
-        assert fr.FRAMEWORKS["xdit"].supports_server_reuse is False
-        assert fr.FRAMEWORKS["sglang"].supports_server_reuse is True
         assert fr.FRAMEWORKS["xdit"].repo_url == "https://github.com/xdit-project/xDiT.git"
 
     def test_unknown_falls_back_to_default(self):
@@ -252,43 +250,122 @@ class TestScriptableMeasurement:
         assert m["valid_measurement"] is True
 
 
-class TestConfigResolvers:
-    def test_baseline_config_xdit(self, monkeypatch):
-        from hyperloom.orchestrator.actions.executors import _workload_envs as we
-
-        monkeypatch.setenv("FRAMEWORK", "xdit")
-        assert we.default_baseline_config().name == "baseline_xdit.yaml"
-
-    def test_profile_config_xdit(self, monkeypatch):
-        from hyperloom.orchestrator.actions.executors import profile as pf
-
-        monkeypatch.setenv("FRAMEWORK", "xdit")
-        assert pf._default_profile_config().name == "profile_xdit.yaml"
-
-
 class TestExploreGrid:
-    def test_xdit_grid_non_empty_and_safe(self):
-        grid = ex._default_grid_for_framework("xdit", model_class="dit", conc=1)
-        assert grid, "xdit cold-start grid must be non-empty"
+    @pytest.mark.parametrize(
+        "framework,model_class,hints",
+        [
+            ("xdit", "dit", {}),
+            ("xdit", "moe_mla", {}),
+            ("xdit", "dit", {"conc": 32}),
+            ("xdit", "dit", {"isl": 2048}),
+            ("xdit", "dit", {"osl": 256}),
+            (" XDiT ", "", {"conc": 1, "isl": 2048, "osl": 256}),
+        ],
+    )
+    def test_xdit_grid_content_order_and_safety(self, framework, model_class, hints):
+        expected = [
+            ("xdit_buffer_ops", {"AMDGCN_USE_BUFFER_OPS": "1"}),
+            ("xdit_compile_reduce_overhead", {"XDIT_USE_TORCH_COMPILE": "1"}),
+            ("xdit_no_compile", {"XDIT_USE_TORCH_COMPILE": "0"}),
+            ("xdit_attn_aiter", {"XDIT_ATTENTION_BACKEND": "aiter"}),
+        ]
+        grid = ex._default_grid_for_framework(framework, model_class=model_class, **hints)
+        assert [(v.name, v.extra_envs) for v in grid] == expected
         for v in grid:
-            assert v.name.startswith("xdit_")
+            assert v.extra_server_args == ""
+            assert v.note == v.provenance == "default_grid"
+            assert v.remove_args == v.unset_envs == []
+            assert v.args_mode == "append"
             assert gr.xdit_blacklist_reason(v.extra_envs) is None
 
+    @pytest.mark.parametrize("framework", ["sglang", "vllm", "custom", "unknown", ""])
+    def test_other_frameworks_have_no_default_grid(self, framework):
+        assert ex._default_grid_for_framework(framework, model_class="moe_mla", conc=32, isl=2048, osl=256) == []
 
-class TestRegistryRepoUrlConsistency:
-    """Guard against repo_url drift between framework_registry and repo_map."""
+    @pytest.mark.parametrize(
+        "model_class,conc,model_variants",
+        [
+            ("dense", 0, []),
+            ("moe_fp8", 32, [("atom_kv_fp8", "--kv_cache_dtype fp8"), ("atom_ep", "--enable-expert-parallel")]),
+            (
+                "moe_mla",
+                32,
+                [
+                    ("atom_ep", "--enable-expert-parallel"),
+                    ("atom_dp_attn", "--enable-dp-attention"),
+                    ("atom_mtp_3", "--method mtp --num-speculative-tokens 3"),
+                    ("atom_mtp_1", "--method mtp --num-speculative-tokens 1"),
+                ],
+            ),
+        ],
+    )
+    def test_atom_grid_keeps_model_and_concurrency_variants(self, model_class, conc, model_variants):
+        expected = [("atom_level_2", "--level 2"), ("atom_prefix_cache", "--enable_prefix_caching"), *model_variants]
+        if conc:
+            expected.append(("atom_cudagraph_bracket", "--cudagraph-capture-sizes [1,2,4,8,16,32]"))
+        grid = ex._default_grid_for_framework(" ATOM ", model_class=model_class, conc=conc, isl=2048, osl=256)
+        assert [(v.name, v.extra_server_args) for v in grid] == expected
+        for v in grid:
+            assert v.extra_envs == {}
+            assert v.note == v.provenance == "default_grid"
 
-    def test_registry_urls_match_repo_map(self):
-        try:
-            from hyperloom.agents.framework.repo_map import _FRAMEWORK_TO_REPO_URL
-        except ImportError:
-            pytest.skip("hyperloom.agents.framework not installed")
-        for name, spec in fr.FRAMEWORKS.items():
-            if spec.repo_url is not None:
-                assert spec.repo_url == _FRAMEWORK_TO_REPO_URL.get(name, ""), (
-                    f"repo_url mismatch for {name}: "
-                    f"registry={spec.repo_url!r} vs repo_map={_FRAMEWORK_TO_REPO_URL.get(name)!r}"
-                )
+
+def _default_config(kind: str):
+    from hyperloom.orchestrator.actions.executors import _workload_envs as we
+    from hyperloom.orchestrator.actions.executors import profile as pf
+
+    return {"baseline": we.default_baseline_config, "profile": pf._default_profile_config}[kind]()
+
+
+def _per_framework_tables() -> dict[str, dict]:
+    from hyperloom.orchestrator.actions.executors import baseline
+    from hyperloom.orchestrator.enablement.runtime import adapters
+    from hyperloom.orchestrator.framework import adapter_parsers
+
+    return {
+        "_ADAPTERS": adapters._ADAPTERS,
+        "_PARSER_SOURCES": adapter_parsers._PARSER_SOURCES,
+        "_DISABLE_CUDA_GRAPH_FLAGS": baseline._DISABLE_CUDA_GRAPH_FLAGS,
+    }
+
+
+class TestRegistryOwnsPerFrameworkAssets:
+    """What the registry derives for a framework must exist for every framework it registers."""
+
+    @pytest.mark.parametrize("kind", ["baseline", "profile"])
+    @pytest.mark.parametrize("framework", list(fr.FRAMEWORKS))
+    def test_every_registered_framework_resolves_its_shipped_config(self, monkeypatch, kind, framework):
+        monkeypatch.setenv("FRAMEWORK", framework)
+        config = _default_config(kind)
+        assert config.name == f"{kind}_{framework}.yaml"
+        assert config.is_file()
+
+    @pytest.mark.parametrize("kind", ["baseline", "profile"])
+    def test_unset_framework_resolves_the_default_config(self, monkeypatch, kind):
+        monkeypatch.delenv("FRAMEWORK", raising=False)
+        assert _default_config(kind).name == f"{kind}_{fr.DEFAULT_FRAMEWORK}.yaml"
+
+    @pytest.mark.parametrize("kind", ["baseline", "profile"])
+    def test_unregistered_framework_has_no_config(self, monkeypatch, kind):
+        monkeypatch.setenv("FRAMEWORK", "tensorrt")
+        with pytest.raises(KeyError):
+            _default_config(kind)
+
+    @pytest.mark.parametrize(
+        "lookup",
+        [fr.python_package, fr.source_root, fr.repo_url, lambda name: fr.shipped_config_name("baseline", name)],
+    )
+    def test_registry_lookups_reject_an_unregistered_name(self, lookup):
+        with pytest.raises(KeyError):
+            lookup("tensorrt")
+
+    @pytest.mark.parametrize("table", sorted(_per_framework_tables()))
+    def test_per_framework_tables_cover_every_serving_framework(self, table):
+        """Tables the registry cannot hold still have to name every serving framework, and only registered ones."""
+        keys = set(_per_framework_tables()[table])
+        serving = {name for name, spec in fr.FRAMEWORKS.items() if spec.kind == fr.SERVING}
+        assert serving - keys == set()
+        assert keys - set(fr.FRAMEWORKS) == set()
 
 
 class TestLifecycleScriptableSkip:
@@ -337,20 +414,20 @@ class TestRooflineSnapshotUnits:
     """The roofline snapshot table renders the achieved primary metric in the framework-correct unit (serving tok/s vs scriptable per-image ms)."""
 
     def test_fmt_tput_serving_tok_s(self):
-        from hyperloom.orchestrator.kernel import roofline_snapshot as rs
+        from hyperloom.inference_optimizer import roofline_snapshot as rs
 
         assert rs._fmt_tput(123.0, "vllm") == "123.0 tok/s"
         assert rs._fmt_tput(None, "vllm") == "—"
 
     def test_fmt_tput_scriptable_renders_latency_ms(self):
-        from hyperloom.orchestrator.kernel import roofline_snapshot as rs
+        from hyperloom.inference_optimizer import roofline_snapshot as rs
 
         out = rs._fmt_tput(0.15528, "xdit")
         assert out == "6440.0 ms"
         assert "tok/s" not in out
 
     def test_build_snapshot_carries_framework(self):
-        from hyperloom.orchestrator.kernel import roofline_snapshot as rs
+        from hyperloom.inference_optimizer import roofline_snapshot as rs
 
         snap = rs.build_roofline_snapshot(
             snapshot_id=1, ts="t", analysis_md_path="", achieved_tok_per_sec=0.155, framework="xdit"
@@ -358,7 +435,7 @@ class TestRooflineSnapshotUnits:
         assert snap["framework"] == "xdit"
 
     def test_metrics_table_scriptable_achieved_is_ms(self):
-        from hyperloom.orchestrator.kernel import roofline_snapshot as rs
+        from hyperloom.inference_optimizer import roofline_snapshot as rs
 
         snap = rs.build_roofline_snapshot(
             snapshot_id=1, ts="t", analysis_md_path="", achieved_tok_per_sec=0.15528, framework="xdit"
@@ -370,7 +447,7 @@ class TestRooflineSnapshotUnits:
 
     def test_snapshot_carries_latency_siblings_and_within(self):
         """e2e_mean_ms / roofline_ideal_ms are stored at the tok/s level and drive a unit-agnostic within/gap when no decode ceiling applies."""
-        from hyperloom.orchestrator.kernel import roofline_snapshot as rs
+        from hyperloom.inference_optimizer import roofline_snapshot as rs
 
         snap = rs.build_roofline_snapshot(
             snapshot_id=1,
@@ -390,7 +467,7 @@ class TestRooflineSnapshotUnits:
 
     def test_metrics_table_scriptable_shows_compute_ceiling(self):
         """The compact table surfaces the ms compute-roofline floor + within%."""
-        from hyperloom.orchestrator.kernel import roofline_snapshot as rs
+        from hyperloom.inference_optimizer import roofline_snapshot as rs
 
         snap = rs.build_roofline_snapshot(
             snapshot_id=1,
@@ -410,7 +487,7 @@ class TestRooflineSnapshotUnits:
 
     def test_serving_snapshot_latency_siblings_are_none(self):
         """Serving snapshots keep tok/s within/gap and leave ms siblings unset."""
-        from hyperloom.orchestrator.kernel import roofline_snapshot as rs
+        from hyperloom.inference_optimizer import roofline_snapshot as rs
 
         snap = rs.build_roofline_snapshot(
             snapshot_id=1,
@@ -484,26 +561,16 @@ class TestHyperloomArchSpec:
     """TraceLens arch spec derived from hyperloom's HW_SPECS_ACHIEVABLE."""
 
     def _tab(self):
-        import sys
-        from pathlib import Path
-
-        tool_dir = Path(__file__).resolve().parents[4] / "src" / "hyperloom" / "agents" / "kernel" / "tools"
-        if str(tool_dir) not in sys.path:
-            sys.path.insert(0, str(tool_dir))
-        import tracelens_arch_benchmark as tab  # noqa: WPS433
+        from hyperloom.orchestrator.trace_analysis import tracelens_arch_benchmark as tab
 
         return tab
 
-    def test_build_spec_mi355x(self):
+    def test_build_spec_mi355x_falls_back_to_vendor(self):
         tab = self._tab()
         spec = tab.build_hyperloom_arch_spec("mi355x")
         assert spec is not None
         assert spec["mem_bw_gbps"] == pytest.approx(8000.0)
-        maf = spec["max_achievable_tflops"]
-        assert maf["matrix_bf16"] == pytest.approx(1686.0)
-        assert maf["matrix_fp8"] == pytest.approx(3567.0)
-        assert maf["matrix_fp4"] == pytest.approx(5663.0)
-        assert all(v > 0 for v in maf.values())
+        assert spec["max_achievable_tflops"]["matrix_bf16"] == pytest.approx(2516.6)
 
     def test_build_spec_case_insensitive_and_named(self):
         tab = self._tab()
@@ -517,11 +584,11 @@ class TestHyperloomArchSpec:
 
     def test_write_spec_roundtrip(self, tmp_path):
         tab = self._tab()
-        out = tab.write_hyperloom_arch_spec(tmp_path, "mi355x", lambda _m: None)
+        out = tab.write_hyperloom_arch_spec(tmp_path, "MI300X", lambda _m: None)
         assert out is not None and out.is_file()
 
         data = json.loads(out.read_text())
-        assert data["max_achievable_tflops"]["matrix_bf16"] == pytest.approx(1686.0)
+        assert data["max_achievable_tflops"]["matrix_bf16"] == pytest.approx(708.0)
 
 
 class TestValidateTraceStructureScriptable:

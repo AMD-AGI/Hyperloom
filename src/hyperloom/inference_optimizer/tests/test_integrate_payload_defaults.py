@@ -637,7 +637,6 @@ async def test_bare_kernel_id_with_inherited_controls_still_resolves_and_applies
     artifact = tmp_path / "optimized.py"
     target.write_text("def kernel():\n    return 'original'\n", encoding="utf-8")
     artifact.write_text("def kernel():\n    return 'optimized'\n", encoding="utf-8")
-    monkeypatch.setattr(krh._load_apply_tool(), "known_target_roots", lambda: [str(tmp_path)])
     state = _seed_state(session_dir, baseline_tput=1000.0, baseline_config_path="/tmp/base.yaml")
     state.current_best = {
         "action": "integrate",

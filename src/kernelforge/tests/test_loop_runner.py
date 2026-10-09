@@ -150,7 +150,7 @@ def _make_loop(
     loop = IterationLoop(
         config,
         tracker,
-        config=object(),
+        config=SimpleNamespace(gpu_target="gfx942"),
         resume=resume,
     )
     monkeypatch.setattr(
@@ -274,7 +274,7 @@ def test_pending_keep_publication_patch_is_cumulative(tmp_path, monkeypatch):
         kernel_source=kernel.read_text(),
     )
 
-    assert pending["schema_version"] == 2
+    assert set(pending) == runner_module.PENDING_KEEP_FIELDS
     assert pending["changed_files"] == ["kernel.py"]
     assert set(pending["publication_changed_files"]) == {"driver.py", "kernel.py"}
     assert "prior kept optimization" in pending["publication_patch"]
@@ -2400,6 +2400,18 @@ def _faster_bench(candidate_ms=1.0 / 1.05):
     }
 
 
+def _git_workspace(path: Path) -> Path:
+    """The loop commits every iteration and diffs against HEAD, so a workspace is a repo that has one."""
+    subprocess.run(["git", "init", "-q"], cwd=path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "base"],
+        cwd=path,
+        check=True,
+        capture_output=True,
+    )
+    return path
+
+
 def _canonical_workspace(tmp_path, command: str) -> Path:
     # A task config shaped the way the arena's evaluator reads one. Only the
     # assembly backend asks the engine to run it; for every other backend its
@@ -2430,7 +2442,7 @@ async def test_a_non_assembly_keep_rests_on_the_driver_not_on_the_task_config(
     """
     if ships_a_config:
         _canonical_workspace(tmp_path, "raise AssertionError('the engine must not run this')")
-    loop, _benchmark_calls = _measurement_loop(monkeypatch, _faster_bench(), workspace_dir=tmp_path)
+    loop, _benchmark_calls = _measurement_loop(monkeypatch, _faster_bench(), workspace_dir=_git_workspace(tmp_path))
 
     result = await loop.run_one_iteration(1)
 
@@ -2446,7 +2458,7 @@ async def test_assembly_keep_requires_fresh_source_relative_numerics(tmp_path, m
 
     if kind != "missing":
         _task(tmp_path, evidence(candidate_repeat_db=27 if kind == "unstable" else 45))
-    loop, _ = _measurement_loop(monkeypatch, _faster_bench(), workspace_dir=tmp_path)
+    loop, _ = _measurement_loop(monkeypatch, _faster_bench(), workspace_dir=_git_workspace(tmp_path))
     loop.ic.kernel_backend = "assembly"
     loop.ic.pristine_baseline_wall_ms = 1.0
 
@@ -2473,7 +2485,7 @@ async def test_snr_pass_with_failing_assembly_acceptance_is_reverted(tmp_path, m
 
     _task(tmp_path, evidence())
     tmp_path.joinpath("driver.py").write_text("raise AssertionError('normalized max err 0.02468 too high')\n")
-    loop, _benchmark_calls = _measurement_loop(monkeypatch, _faster_bench(), workspace_dir=tmp_path)
+    loop, _benchmark_calls = _measurement_loop(monkeypatch, _faster_bench(), workspace_dir=_git_workspace(tmp_path))
     loop.ic.kernel_backend = "assembly"
     loop.ic.pristine_baseline_wall_ms = 1.0
 
@@ -2489,7 +2501,7 @@ async def test_snr_pass_with_failing_assembly_acceptance_is_reverted(tmp_path, m
 @pytest.mark.asyncio
 async def test_assembly_acceptance_is_skipped_for_a_candidate_that_is_not_faster(tmp_path, monkeypatch):
     """The suite is the expensive check; a slower candidate is reverted anyway."""
-    workspace = _canonical_workspace(tmp_path, "raise AssertionError('this must never run')")
+    workspace = _git_workspace(_canonical_workspace(tmp_path, "raise AssertionError('this must never run')"))
     loop, _benchmark_calls = _measurement_loop(monkeypatch, _faster_bench(candidate_ms=2.0), workspace_dir=workspace)
     loop.ic.kernel_backend = "assembly"
     loop.ic.pristine_baseline_wall_ms = 1.0
@@ -4164,6 +4176,56 @@ def test_orchestration_persists_critic_draft_review_and_final_paths(
     }
 
 
+def test_a_round_the_critic_could_not_review_is_carried_as_unreviewed(
+    tmp_path,
+    monkeypatch,
+):
+    """The next round is told the review never happened, not that it passed."""
+    loop, workspace = _make_loop(tmp_path, monkeypatch)
+    head = loop._git("rev-parse", "HEAD").splitlines()[0]
+    loop.run_state = RunState(head_commit=head)
+    loop.config = SimpleNamespace(
+        experiments_dir=workspace / "forge_experiments",
+        gpu_target="gfx942",
+    )
+    critic = PlanCriticOutcome(
+        verdict="NOT_REVIEWED",
+        error="TimeoutError: plan critic exceeded 600s",
+        verdict_source="error",
+    )
+    result = SimpleNamespace(
+        optimization_plans=("# Draft plan\nVectorize global loads.",),
+        optimization_plan_draft="# Draft plan\nVectorize global loads.",
+        optimization_plan_executable=True,
+        dispatch_plan=None,
+        specialist_outcomes=(),
+        structured_output_diagnostics={"plan_critic": critic.to_dict()},
+        plan_critic=critic,
+        plan_revised=False,
+    )
+
+    class OrchestrationService:
+        async def run(self, _context, **_kwargs):
+            return result
+
+    plan_path, error = asyncio.run(
+        loop._run_orchestration(
+            iteration=1,
+            orchestration_service=OrchestrationService(),
+        )
+    )
+    root = workspace / "forge_experiments" / "orchestration" / "iter_001"
+
+    assert error == ""
+    assert plan_path is not None
+    # The plan still publishes -- an outage costs this round its review, not its round.
+    assert plan_path.read_text().startswith("# Draft plan")
+    assert loop._last_critic_verdict == "NOT_REVIEWED"
+    assert (root / "critic_review.md").read_text().startswith("STATUS: CRITIC_ERROR")
+    # No review exists to resume, so a later process inherits no ruling at all.
+    assert loop.run_state.last_critic.verdict == ""
+
+
 def test_framework_fallback_plan_does_not_complete_diversify_cycle(
     tmp_path,
     monkeypatch,
@@ -4350,9 +4412,11 @@ def test_keep_defers_incremental_analysis_until_next_request(
     class Bundle:
         def __init__(self, analysis_commit):
             self.analysis_commit = analysis_commit
-            self.root = workspace / "forge_experiments" / "analysis" / analysis_commit
+            commit_root = workspace / "forge_experiments" / "analysis" / analysis_commit
+            self.root = commit_root / "generation-001"
             self.root.mkdir(parents=True, exist_ok=True)
             (self.root / "manifest.json").write_text("{}")
+            (commit_root / "published.json").write_text(json.dumps({"generation_root": self.root.name}))
             self.outcome = SimpleNamespace(
                 checkpoint_level="published",
                 to_dict=lambda: {},
@@ -4372,6 +4436,9 @@ def test_keep_defers_incremental_analysis_until_next_request(
             analysis_calls.append(context.analysis_commit)
             incrementals.append(incremental)
             return Bundle(context.analysis_commit)
+
+        def apply_checkpoint(self, context):
+            return context
 
     async def editing_agent(kernel_path, _history, session_sink):
         session_sink["plan"] = "keep one candidate"
@@ -5097,15 +5164,6 @@ def test_resume_propagates_complete_ruling_to_planner_and_implementer(
     assert loop._supervisor_ruling == ruling
     assert captured["guidance"] == ruling
     assert ruling in captured["history"]
-
-
-def test_run_state_rejects_wrong_schema(tmp_path, monkeypatch):
-    _make_loop(tmp_path, monkeypatch, resume=True)
-    prior_schema = RunState().to_dict()
-    prior_schema["schema_version"] = 12
-
-    with pytest.raises(ValueError, match="unsupported run state schema"):
-        RunState.from_dict(prior_schema)
 
 
 def test_resume_requires_authoritative_task_fingerprint(
@@ -6318,7 +6376,7 @@ def test_a_snapshot_write_failure_records_degradation_and_continues(
         raise OSError("disk full")
 
     monkeypatch.setattr(
-        "kernelforge.knowledge.pr_monitor_refs.commit_snapshot",
+        "kernelforge.knowledge.pr_knowledge.references.commit_snapshot",
         fail_snapshot,
     )
 

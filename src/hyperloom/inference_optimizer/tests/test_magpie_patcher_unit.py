@@ -42,6 +42,35 @@ def _make_magpie(root: Path, *, sglang: str | None = _SGLANG_LEGACY) -> Path:
 
 
 # ---- path resolution ------------------------------------------------------
+_SGLANG_REL = ("Magpie", "scripts", "benchmark", "sglang_mi300x.sh")
+
+
+def test_resolve_component_path_none(monkeypatch):
+    monkeypatch.delenv("MAGPIE_PATH", raising=False)
+    assert mp._resolve_component_path(None, "MAGPIE_PATH", *_SGLANG_REL) is None
+
+
+def test_resolve_component_path_explicit_dir_and_env(monkeypatch, tmp_path):
+    _make_magpie(tmp_path)
+    assert mp._resolve_component_path(tmp_path, "MAGPIE_PATH", *_SGLANG_REL) == tmp_path.joinpath(*_SGLANG_REL)
+    monkeypatch.setenv("MAGPIE_PATH", str(tmp_path))
+    p = mp._resolve_component_path(None, "MAGPIE_PATH", *_SGLANG_REL)
+    assert p is not None and p.name == "sglang_mi300x.sh"
+
+
+def test_resolve_component_path_missing_file(tmp_path):
+    assert mp._resolve_component_path(tmp_path, "MAGPIE_PATH", *_SGLANG_REL) is None
+
+
+def test_resolve_component_path_dir_check(monkeypatch, tmp_path):
+    _make_inferencex(tmp_path)
+    assert mp._resolve_component_path(tmp_path, "INFERENCEX_PATH", "benchmarks", check="dir") == tmp_path / "benchmarks"
+    assert mp._resolve_component_path(tmp_path, "INFERENCEX_PATH", "benchmarks") is None
+    monkeypatch.setenv("INFERENCEX_PATH", str(tmp_path))
+    assert mp._resolve_component_path(None, "INFERENCEX_PATH", "benchmarks", check="dir") == tmp_path / "benchmarks"
+    assert mp._resolve_component_path(tmp_path / "nope", "INFERENCEX_PATH", "benchmarks", check="dir") is None
+
+
 def test_resolve_sglang(monkeypatch, tmp_path):
     _make_magpie(tmp_path)
     assert mp._resolve_sglang_mi300x_script_path(tmp_path) is not None
@@ -122,14 +151,7 @@ def test_apply_remote_trust_read_error(tmp_path):
 def test_apply_remote_trust_write_error(tmp_path, monkeypatch):
     f = tmp_path / "s.sh"
     f.write_text(_SGLANG_LEGACY, encoding="utf-8")
-    monkeypatch.setattr(mp.tempfile, "mkstemp", lambda *a, **k: (_ for _ in ()).throw(OSError("x")))
-    assert mp._apply_remote_trust_patch_atomic(f) is False
-
-
-def test_apply_remote_trust_fdopen_write_error(tmp_path, monkeypatch):
-    f = tmp_path / "s.sh"
-    f.write_text(_SGLANG_LEGACY, encoding="utf-8")
-    monkeypatch.setattr(mp.os, "replace", lambda *a, **k: (_ for _ in ()).throw(OSError("ro")))
+    monkeypatch.setattr(mp._common_io.os, "replace", lambda *a, **k: (_ for _ in ()).throw(OSError("ro")))
     assert mp._apply_remote_trust_patch_atomic(f) is False
 
 
@@ -270,16 +292,6 @@ def _make_inferencex(
     if benchmark_lib is not None:
         (bench / "benchmark_lib.sh").write_text(benchmark_lib, encoding="utf-8")
     return root
-
-
-def test_resolve_inferencex_benchmarks_dir(monkeypatch, tmp_path):
-    _make_inferencex(tmp_path)
-    assert mp._resolve_inferencex_benchmarks_dir(tmp_path) == tmp_path / "benchmarks"
-    monkeypatch.setenv("INFERENCEX_PATH", str(tmp_path))
-    assert mp._resolve_inferencex_benchmarks_dir(None) == tmp_path / "benchmarks"
-    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
-    assert mp._resolve_inferencex_benchmarks_dir(None) is None
-    assert mp._resolve_inferencex_benchmarks_dir(tmp_path / "nope") is None
 
 
 def test_resolve_inferencex_benchmark_lib(tmp_path):

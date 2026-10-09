@@ -164,7 +164,7 @@ def test_gate_measurement_defaults_are_legacy():
 
 def test_warmstart_baseline_uses_the_same_repeat_as_the_loop(tmp_path):
     """A single-shot baseline vs repeat-and-median candidates is a free win."""
-    from kernelforge.knowledge import experience_integration as ei
+    from kernelforge.loop import knowledge_integration as ei
 
     drv = tmp_path / "drv.py"
     drv.write_text(_ARGV_DRIVER)
@@ -175,7 +175,7 @@ def test_warmstart_baseline_uses_the_same_repeat_as_the_loop(tmp_path):
 
 def test_warmstart_baseline_defaults_to_single_shot(tmp_path):
     """Unchanged for tasks that don't configure repeats."""
-    from kernelforge.knowledge import experience_integration as ei
+    from kernelforge.loop import knowledge_integration as ei
 
     drv = tmp_path / "drv.py"
     drv.write_text(_ARGV_DRIVER)
@@ -311,7 +311,7 @@ def test_cli_can_actually_call_kb_warmstart():
     import re
 
     from kernelforge import cli
-    from kernelforge.knowledge.experience_integration import kb_warmstart
+    from kernelforge.loop.knowledge_integration import kb_warmstart
 
     accepted = set(inspect.signature(kb_warmstart).parameters)
     src = inspect.getsource(cli.forge_loop.callback)

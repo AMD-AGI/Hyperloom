@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""CLI entry — ``optimize`` subcommand wiring Claude+Codex backends, executors, objective, and Coordinator.run()."""
+"""Pre-launch LLM credential, endpoint, and agent-runtime validation for the ``optimize`` CLI."""
 
 from __future__ import annotations
 

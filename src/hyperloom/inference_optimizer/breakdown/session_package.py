@@ -19,6 +19,9 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Iterable
 
+from hyperloom.common.env import env_flag
+from hyperloom.common.env_safety import redact_secret_env_values
+
 from ..session.paths import is_path_within
 from ..session.session_paths import BRINGUP_SEGMENT, ENABLEMENT_SEGMENT
 
@@ -87,6 +90,7 @@ PACKAGE_GLOBS: tuple[str, ...] = (
     "runs/**/kv_metrics.json",
     "runs/**/agentx_timeline.jsonl",
     "runs/**/gpu_metrics.json",
+    "runs/**/gpu_power.json",
     "reports/sbd_v6/timeline/*.json",
     "reports/sbd_v6/write_warnings.jsonl",
     "reports/trace/*.jsonl",
@@ -133,8 +137,34 @@ def _dest_root() -> Path:
 
 def _loose_enabled() -> bool:
     """Whether to also drop loose (unzipped) copies. Defaults to True."""
-    raw = (os.environ.get(ENV_PACKAGE_LOOSE) or "").strip().lower()
-    return raw not in {"0", "false", "no", "off"}
+    return env_flag(ENV_PACKAGE_LOOSE, default=True)
+
+
+# ``state.json`` keeps the operator's ``--extra-env`` values in plaintext because ``--resume`` re-exports them from
+# there, so the session dir copy cannot be masked; the copy that leaves the session can.
+_STATE_JSON_REL = "state.json"
+_STATE_ENV_FIELDS: tuple[str, ...] = ("operator_extra_env",)
+
+
+def _exported_state_bytes(path: Path) -> bytes:
+    """``state.json`` as it may leave the session: every operator env pin's credential masked.
+
+    Raises ``OSError`` when the file cannot be read or is not a JSON object, so the caller records it as not written
+    rather than shipping values it could not inspect.
+    """
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError as exc:
+        raise OSError(f"{path.name} is not valid JSON") from exc
+    if not isinstance(state, dict):
+        raise OSError(f"{path.name} is not a JSON object")
+    for field in _STATE_ENV_FIELDS:
+        env = state.get(field)
+        if isinstance(env, dict):
+            state[field] = redact_secret_env_values(env)
+        elif env:
+            state[field] = "[REDACTED]"
+    return json.dumps(state, indent=2).encode("utf-8")
 
 
 def _copy_loose_tree(
@@ -149,7 +179,12 @@ def _copy_loose_tree(
         dst = loose_dir / rel
         try:
             dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dst)
+            if rel == _STATE_JSON_REL:
+                data = _exported_state_bytes(src)
+                dst.write_bytes(data)
+                sz = len(data)
+            else:
+                shutil.copy2(src, dst)
             copied.append((rel, sz))
         except OSError:
             failed.append(rel)
@@ -481,14 +516,13 @@ def deliverable(session_dir: Path | str, expected: Iterable[tuple[str, str]]) ->
     it.
 
     Judged against what this session would actually ship, by running the same
-    selection and the same caps the packer runs. Each payload used to be judged
-    alone, against the per-file ceiling only, on the argument that charging it
-    for unrelated files sorted ahead of it would refuse a recipe over content it
-    does not name. But the budget is spent in selection order and those files do
-    consume it: a payload the cap drops is a payload the consumer will not have,
-    and reporting it deliverable is how a ``sufficient`` recipe came to ship
-    with its own evidence missing. A refusal here is not over content the recipe
-    does not name -- it is over bytes it names and will not get.
+    selection and the same caps the packer runs, not against the per-file
+    ceiling alone. The budget is spent in selection order and unrelated files
+    sorted ahead of a payload do consume it: a payload the cap drops is a
+    payload the consumer will not have, and reporting it deliverable would ship
+    a ``sufficient`` recipe with its own evidence missing. A refusal here is not
+    over content the recipe does not name -- it is over bytes it names and will
+    not get.
     """
     try:
         sd = Path(session_dir).resolve()
@@ -561,7 +595,12 @@ def package_session_artifacts(
                 write_failures: list[str] = []
                 for p, rel, sz in selected:
                     try:
-                        zf.write(p, arcname=rel)
+                        if rel == _STATE_JSON_REL:
+                            data = _exported_state_bytes(p)
+                            zf.writestr(rel, data)
+                            sz = len(data)
+                        else:
+                            zf.write(p, arcname=rel)
                         written.append((rel, sz))
                     except OSError:
                         write_failures.append(rel)
@@ -618,10 +657,10 @@ def package_session_artifacts(
                     len(copied),
                     root,
                 )
-            except Exception:  # noqa: BLE001 — loose copy must not mask the zip
+            except Exception:
                 log.exception("session package: loose copy failed (non-fatal)")
 
         return target
-    except Exception:  # noqa: BLE001 — never let packaging mask stop_reason
+    except Exception:
         log.exception("session package failed (non-fatal)")
         return None

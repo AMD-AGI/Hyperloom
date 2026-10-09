@@ -33,7 +33,7 @@ failures from the GEAK child process are forwarded to the Hyperloom log.
 Hyperloom uses GEAK as the **whole-pipeline e2e delegate** when
 `KERNEL_OPT_BACKEND_ORDER=geak` (the bare-metal default). In this mode the
 orchestrator hands the optimization workload to
-`src/hyperloom/agents/kernel/tools/backends/geak_runner.py`, which resolves the
+`src/hyperloom/orchestrator/kernel/geak_runner.py`, which resolves the
 GEAK checkout and launches GEAK's e2e runner (`interface/run_e2e.py`) with the
 generated session context.
 

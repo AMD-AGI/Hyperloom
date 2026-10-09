@@ -13,16 +13,56 @@ import tempfile
 import time
 from pathlib import Path
 
+from hyperloom.common.unified_diff import touched_paths
+
 from kernelforge.llm.git import git
 from kernelforge.loop.scoring import aggregate_regression_detail
-from kernelforge.durable_io import atomic_write_text, fsync_directory
-
-# v2 adds `aggregate_regression` and derives `total_improved` from it, so a v1 manifest is missing a field this
-# publisher always writes.
-MANIFEST_SCHEMA_VERSION = 2
+from kernelforge.durable_io import atomic_write_text, fsync_directory, fsync_tree
 
 # What every published best version must contain.
 BEST_BUNDLE_FILES = ("forge.patch", "validation.txt", "benchmark.json")
+
+# The exact key set ``BestResultPublisher.publish`` writes; ``round_budget`` is added only when the campaign has one.
+BEST_MANIFEST_FIELDS = frozenset(
+    {
+        "campaign_id",
+        "session_index",
+        "experiment_id",
+        "iteration",
+        "commit_hash",
+        "plan",
+        "baseline_wall_ms",
+        "pristine_baseline_ms",
+        "search_start_ms",
+        "best_wall_ms",
+        "mean_case_speedup",
+        "search_start_mean_case_speedup",
+        "speedup",
+        "total_speedup",
+        "incremental_speedup",
+        "aggregate_regression",
+        "total_improved",
+        "incremental_improved",
+        "improved_during_search",
+        "correctness_passed",
+        "snr_db",
+        "changed_files",
+        "artifact_dir",
+        "patch_path",
+        "validation_path",
+        "benchmark_path",
+        "published_at",
+    }
+)
+_OPTIONAL_BEST_MANIFEST_FIELDS = frozenset({"round_budget"})
+
+
+def is_best_manifest(payload: object) -> bool:
+    """Whether ``payload`` has exactly the shape this publisher writes."""
+    if not isinstance(payload, dict):
+        return False
+    keys = set(payload)
+    return BEST_MANIFEST_FIELDS <= keys <= BEST_MANIFEST_FIELDS | _OPTIONAL_BEST_MANIFEST_FIELDS
 
 
 def _round_budget_lines(summary: object) -> list[str]:
@@ -69,19 +109,6 @@ class BestResultPublisher:
             file.write(text)
             file.flush()
             os.fsync(file.fileno())
-
-    @classmethod
-    def _fsync_tree(cls, root: Path) -> None:
-        """fsync every file and directory under ``root`` (bottom of the bundle must be durable before the top-level rename makes it visible)."""
-        for dirpath, _dirnames, filenames in os.walk(root):
-            for name in filenames:
-                file_path = Path(dirpath) / name
-                fd = os.open(str(file_path), os.O_RDONLY)
-                try:
-                    os.fsync(fd)
-                finally:
-                    os.close(fd)
-            fsync_directory(Path(dirpath))
 
     def _copy_changed_files(
         self,
@@ -309,7 +336,6 @@ class BestResultPublisher:
             mean_case_speedup=resolved_mean_case_speedup,
         )
         expected = {
-            "schema_version": MANIFEST_SCHEMA_VERSION,
             "campaign_id": campaign_id,
             "session_index": session_index,
             "experiment_id": experiment_id,
@@ -415,7 +441,7 @@ class BestResultPublisher:
                 )
                 # Make the whole bundle durable before it becomes visible, then fsync the parent so the rename itself
                 # survives a crash (mirrors archive.record's fsync discipline).
-                self._fsync_tree(temporary)
+                fsync_tree(temporary)
                 os.replace(temporary, version_dir)
                 fsync_directory(self.best_root)
             finally:
@@ -427,14 +453,7 @@ class BestResultPublisher:
             current_iteration = int(current.get("iteration", 0) or 0)
             if current_iteration > iteration:
                 raise ValueError(f"best manifest is ahead of iteration {iteration}: {current_iteration}")
-            # Only manifests written under the same schema are comparable: an older one differs by construction, so
-            # comparing it would report a conflict on every republish across an upgrade and leave the stale manifest
-            # -- and the verdict it was written with -- published.
-            if (
-                current_iteration == iteration
-                and int(current.get("schema_version", 0) or 0) == MANIFEST_SCHEMA_VERSION
-                and not self._same_publication(current, manifest)
-            ):
+            if current_iteration == iteration and not self._same_publication(current, manifest):
                 raise ValueError(f"best manifest conflicts with iteration {iteration}")
         if round_budget:
             manifest = {**manifest, "round_budget": dict(round_budget)}
@@ -469,7 +488,7 @@ class BestResultPublisher:
             manifest = self._load_json(self.manifest_path, label="best manifest")
         except ValueError:
             return False
-        if int(manifest.get("schema_version", 0) or 0) != MANIFEST_SCHEMA_VERSION:
+        if not is_best_manifest(manifest):
             return False
         # iteration 0 is a legitimate best (a warm-started baseline), so it must not be read through an "or -1"
         # default that a falsy 0 would trip.
@@ -492,14 +511,7 @@ class BestResultPublisher:
         explicit = metadata.get("changed_files") or []
         if explicit:
             return [str(path) for path in explicit]
-        changed: list[str] = []
-        for line in str(metadata.get("change_diff") or "").splitlines():
-            if not line.startswith("diff --git a/"):
-                continue
-            parts = line.split()
-            if len(parts) >= 4 and parts[2].startswith("a/"):
-                changed.append(parts[2][2:])
-        return changed
+        return touched_paths(str(metadata.get("change_diff") or ""))
 
     def publish_history(
         self,

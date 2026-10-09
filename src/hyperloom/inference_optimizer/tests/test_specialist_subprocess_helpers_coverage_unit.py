@@ -16,7 +16,6 @@ from hyperloom.orchestrator.specialists import subprocess_ as ss
 from hyperloom.orchestrator.specialists.subprocess_ import (
     SpecialistSubprocessConfig,
     SpecialistSubprocessDispatcher,
-    _pick_worktree_base,
     _setup_worktree,
 )
 
@@ -26,56 +25,6 @@ class _CP:
         self.returncode = returncode
         self.stdout = stdout
         self.stderr = stderr
-
-
-# -- _pick_worktree_base ---------------------------------------------------
-def test_pick_worktree_base_none(tmp_path: Path) -> None:
-    # directory without .git yields None
-    (tmp_path / "plain").mkdir()
-    assert _pick_worktree_base((str(tmp_path / "plain"), str(tmp_path / "absent"))) is None
-
-
-def test_pick_worktree_base_finds_git(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    (repo / ".git").mkdir()
-    assert _pick_worktree_base(("/nonexistent", str(repo))) == repo
-
-
-def test_pick_worktree_base_prefers_the_framework_under_optimisation(tmp_path: Path) -> None:
-    """The session's own framework wins over whatever trusted root sorts first."""
-    other = tmp_path / "aiter"
-    other.mkdir()
-    (other / ".git").mkdir()
-    framework = tmp_path / "HY-WorldPlay"
-    framework.mkdir()
-    (framework / ".git").mkdir()
-
-    picked = _pick_worktree_base((str(other), str(framework)), preferred=str(framework))
-
-    assert picked == framework
-
-
-def test_pick_worktree_base_ignores_a_preferred_root_that_is_not_a_checkout(
-    tmp_path: Path,
-) -> None:
-    """A framework that is pip-installed rather than checked out must not disable isolation; the allowlist order still supplies a usable base."""
-    other = tmp_path / "aiter"
-    other.mkdir()
-    (other / ".git").mkdir()
-
-    picked = _pick_worktree_base((str(other),), preferred=str(tmp_path / "absent"))
-
-    assert picked == other
-
-
-def test_pick_worktree_base_without_a_preference_is_unchanged(tmp_path: Path) -> None:
-    """Domains with no framework checkout of their own keep the old behaviour."""
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    (repo / ".git").mkdir()
-
-    assert _pick_worktree_base(("/nonexistent", str(repo)), preferred="") == repo
 
 
 # -- _setup_worktree -------------------------------------------------------

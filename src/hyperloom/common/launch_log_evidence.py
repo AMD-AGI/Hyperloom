@@ -10,6 +10,8 @@ import hashlib
 import logging
 import re
 import shlex
+from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -58,6 +60,16 @@ _PROFILING_LAUNCH_FLAGS: frozenset[str] = frozenset(
     }
 )
 
+#: Spellings of one knob, folded to the name SGLang reports: it accepts
+#: ``--tensor-parallel-size`` but reports ``tp_size``.
+_SGLANG_FLAG_ALIASES: dict[str, str] = {
+    "--tp": "--tp-size",
+    "--tensor-parallel-size": "--tp-size",
+    "--dp": "--dp-size",
+    "--data-parallel-size": "--dp-size",
+    "--pipeline-parallel-size": "--pp-size",
+}
+
 #: Per-backend marker for the start of a captured launch argv.
 _LAUNCH_ARGV_MARKERS: dict[str, str] = {
     "sglang": "launch_server",
@@ -94,6 +106,17 @@ def split_launch_flags(argv_tail: str) -> str:
         kept.append(token)
         index += 1
     return " ".join(kept)
+
+
+def launch_flag_setting_name(flag: str, framework: str) -> str:
+    """The setting key a launch flag sets under ``framework``.
+
+    Under SGLang ``--dp`` and ``--dp-size`` both set ``dp_size``; an engine with
+    no record folds nothing, which is the spelling the flag already carries.
+    """
+    spec = _LAUNCH_RECORDS.get(str(framework or "").strip().lower())
+    aliases = spec.flag_aliases if spec else {}
+    return aliases.get(flag, flag).lstrip("-").replace("-", "_")
 
 
 def launch_argv_from_log(path: str, framework: str) -> str:
@@ -237,10 +260,11 @@ def observed_model_binding_from_log(path: str, framework: str) -> dict[str, Any]
     return {}
 
 
-_SGLANG_SERVER_ARGS_LOG_RE = re.compile(r"\bserver_args\s*=\s*ServerArgs\s*\(")
-_SGLANG_SERVER_ARGS_MAX_CHARS = 512 * 1024
-_SGLANG_SERVER_ARGS_MAX_LINES = 2048
-_SGLANG_SERVER_ARGS_MAX_FIELDS = 2048
+_SGLANG_SERVER_ARGS_LOG_RE = re.compile(r"\bserver_args\s*=\s*(?:ServerArgs\s*\(|\{)")
+#: Shared scan caps: a launch record is read from the head of a log, bounded.
+_SERVER_ARGS_MAX_CHARS = 512 * 1024
+_SERVER_ARGS_MAX_LINES = 2048
+_SERVER_ARGS_MAX_FIELDS = 2048
 _SGLANG_OBSERVED_IDENTITY_FIELDS = frozenset(
     {
         "model_path",
@@ -272,7 +296,8 @@ _SGLANG_OBSERVED_IDENTITY_FIELDS = frozenset(
 _VLLM_NON_DEFAULT_ARGS_RE = re.compile(r"non[-_]default args:\s*\{", re.IGNORECASE)
 
 #: The vLLM spellings of the settings the decision compares. Names differ from
-#: SGLang's, so the two identity readers cannot share one table.
+#: SGLang's for the same knob, so the allowlist is per engine even though the
+#: reader is not.
 _VLLM_OBSERVED_IDENTITY_FIELDS: frozenset[str] = frozenset(
     {
         "model",
@@ -298,6 +323,48 @@ _VLLM_OBSERVED_IDENTITY_FIELDS: frozenset[str] = frozenset(
     }
 )
 
+#: vLLM's flag names are the keys it reports, so nothing needs folding.
+_VLLM_FLAG_ALIASES: dict[str, str] = {}
+
+
+@dataclass(frozen=True)
+class _LaunchRecord:
+    """Where one engine records the settings it resolved, and how it names them.
+
+    Supporting an engine is a row here: nothing about reading a record is
+    engine-specific except this data. An engine that records nothing -- atom,
+    xdit, a custom workload -- has no row, so the readers return nothing and the
+    launch is simply unobserved.
+    """
+
+    #: Header the record follows. Matched outside quoted runs only.
+    marker: re.Pattern[str]
+    #: Keys the identity read keeps; the config read keeps the whole record.
+    identity_fields: frozenset[str]
+    #: Launch-flag spellings folded to the names this engine reports.
+    flag_aliases: Mapping[str, str]
+    #: Whether an unreadable value in an allowlisted field voids the record.
+    #: SGLang's is all literals, so one that is not means the record is not the
+    #: one we think; vLLM routinely prints object reprs, where skipping the key
+    #: is the only way to read the rest.
+    identity_rejects_unreadable_values: bool
+
+
+_LAUNCH_RECORDS: dict[str, _LaunchRecord] = {
+    "sglang": _LaunchRecord(
+        marker=_SGLANG_SERVER_ARGS_LOG_RE,
+        identity_fields=_SGLANG_OBSERVED_IDENTITY_FIELDS,
+        flag_aliases=_SGLANG_FLAG_ALIASES,
+        identity_rejects_unreadable_values=True,
+    ),
+    "vllm": _LaunchRecord(
+        marker=_VLLM_NON_DEFAULT_ARGS_RE,
+        identity_fields=_VLLM_OBSERVED_IDENTITY_FIELDS,
+        flag_aliases=_VLLM_FLAG_ALIASES,
+        identity_rejects_unreadable_values=False,
+    ),
+}
+
 
 def _is_inside_string_literal(text: str, index: int) -> bool:
     """Whether ``text[index]`` sits inside a quoted run earlier on the line.
@@ -322,115 +389,39 @@ def _is_inside_string_literal(text: str, index: int) -> bool:
     return bool(quote)
 
 
-def _vllm_record_marker_at(text: str) -> bool:
-    """Whether ``text`` carries the marker OUTSIDE any quoted run."""
-    return any(not _is_inside_string_literal(text, m.start()) for m in _VLLM_NON_DEFAULT_ARGS_RE.finditer(text))
+def _balanced_record_payload(text: str, marker: re.Pattern[str]) -> str:
+    """Return the balanced expression belonging to a real launch record.
 
-
-def _vllm_record_payload(text: str) -> str:
-    """The balanced ``{...}`` belonging to a real vLLM launch record.
-
-    Anchored at the brace the MARKER matched, not at the first brace on the
+    Anchored at the delimiter the MARKER matched, not at the first one on the
     line: a line may carry an unrelated dict before the record
-    (``context={...} non-default args: {...}``), and starting at the first
-    brace reads the unrelated one and silently ignores the actual record.
+    (``context={...} non-default args: {...}``), and starting at the first brace
+    reads the unrelated one and silently ignores the actual record.
 
-    Braces inside string literals are not structure -- a model path may legally
-    contain ``}`` -- so quoting is tracked while balancing, exactly as the
-    SGLang ``ServerArgs`` extractor does.
+    A quoted marker is skipped. A log line may QUOTE the marker while carrying
+    no launch record at all -- ``WARNING ignored user text: "server_args={...}"``
+    is attacker- or user-supplied text echoed into the log -- and treating that
+    as an observed launch hands the decision an identity the server never ran
+    with. Braces inside string literals are likewise not structure: a model path
+    may legally contain ``}``, so quoting is tracked while balancing.
+
+    An ``(`` opener is returned as an inert ``_ServerArgs(...)`` call, which
+    parses as keywords; SGLang prints that form, vLLM never does.
     """
-    for match in _VLLM_NON_DEFAULT_ARGS_RE.finditer(text):
+    for match in marker.finditer(text):
         if _is_inside_string_literal(text, match.start()):
             continue
-        start = match.end() - 1
-        depth = 0
-        quote = ""
-        escaped = False
-        for index in range(start, len(text)):
-            char = text[index]
-            if quote:
-                if escaped:
-                    escaped = False
-                elif char == "\\":
-                    escaped = True
-                elif char == quote:
-                    quote = ""
-                continue
-            if char in "'\"":
-                quote = char
-            elif char == "{":
-                depth += 1
-            elif char == "}":
-                depth -= 1
-                if depth == 0:
-                    return text[start : index + 1]
+        payload = _balance_from(text, match.end() - 1)
+        if payload:
+            return payload
         # Unbalanced so far: the record continues on the next line.
         return ""
     return ""
 
 
-def observed_vllm_server_identity_from_log(path: str) -> dict[str, Any]:
-    """Parse vLLM's ``non-default args: {...}`` record into an identity.
-
-    The dict's values are not all literals -- vLLM prints object reprs such as
-    ``CompilationConfig(...)`` inside it -- so it is walked key by key and a key
-    whose value is not a literal is skipped rather than failing the whole parse.
-    A single ``literal_eval`` of the dict raises on the first such value and
-    yields nothing, which is what makes the whole record look unreadable.
-    """
-    chunks: list[str] = []
-    remaining = _SGLANG_SERVER_ARGS_MAX_CHARS
-    parsed = ""
-    try:
-        with open(path, encoding="utf-8", errors="replace") as handle:
-            for _ in range(_SGLANG_SERVER_ARGS_MAX_LINES):
-                line = handle.readline()
-                if not line:
-                    break
-                if len(line) > remaining:
-                    line = line[:remaining]
-                remaining -= len(line)
-                if chunks or _vllm_record_marker_at(line):
-                    chunks.append(line)
-                    parsed = _vllm_record_payload("".join(chunks))
-                    if parsed:
-                        break
-                if remaining <= 0:
-                    break
-    except OSError:
-        return {}
-    content = parsed or _vllm_record_payload("".join(chunks))
-    if not content or len(content) > _SGLANG_SERVER_ARGS_MAX_CHARS:
-        return {}
-    values: dict[str, Any] = {}
-    try:
-        node = ast.parse(content, mode="eval").body
-        if not isinstance(node, ast.Dict):
-            return {}
-        for key_node, value_node in zip(node.keys, node.values):
-            if not isinstance(key_node, ast.Constant) or not isinstance(key_node.value, str):
-                continue
-            key = key_node.value
-            if key not in _VLLM_OBSERVED_IDENTITY_FIELDS:
-                continue
-            try:
-                values[key] = _safe_server_args_value(value_node)
-            except (ValueError, TypeError):
-                # A non-literal value (an object repr) is skipped; the rest of
-                # the record is still the observed truth.
-                continue
-    except (SyntaxError, ValueError, TypeError):
-        return {}
-    return {key: values[key] for key in sorted(values)}
-
-
-def _extract_balanced_server_args(text: str) -> str:
-    """Return the balanced ``ServerArgs(...)`` argument text."""
-    match = _SGLANG_SERVER_ARGS_LOG_RE.search(text)
-    if match is None:
-        return ""
-    start = match.end() - 1
-    depth = 0
+def _balance_from(text: str, start: int) -> str:
+    """The balanced delimited run beginning at ``text[start]``, or empty when incomplete."""
+    closing: list[str] = []
+    delimiters = {"(": ")", "[": "]", "{": "}"}
     quote = ""
     escaped = False
     for index, char in enumerate(text[start:], start):
@@ -444,12 +435,14 @@ def _extract_balanced_server_args(text: str) -> str:
             continue
         if char in ("'", '"'):
             quote = char
-        elif char == "(":
-            depth += 1
-        elif char == ")":
-            depth -= 1
-            if depth == 0:
-                return text[start + 1 : index]
+        elif char in delimiters:
+            closing.append(delimiters[char])
+        elif char in ")]}":
+            if not closing or char != closing.pop():
+                return ""
+            if not closing:
+                expression = text[start : index + 1]
+                return f"_ServerArgs{expression}" if text[start] == "(" else expression
     return ""
 
 
@@ -479,25 +472,119 @@ def _bounded_server_args_value(value: Any, *, depth: int = 0) -> Any:
     raise ValueError("ServerArgs value is not JSON-safe")
 
 
+def observed_server_identity_from_log(path: str, framework: str) -> dict[str, Any]:
+    """Parse the allowlisted identity from ``framework``'s launch record."""
+    spec = _LAUNCH_RECORDS.get(str(framework or "").strip().lower())
+    if spec is None:
+        return {}
+    return _server_args_from_log(path, spec, keep=spec.identity_fields)
+
+
+def observed_server_config_from_log(path: str, framework: str) -> dict[str, Any]:
+    """Parse every setting in ``framework``'s launch record.
+
+    The whole record :func:`observed_server_identity_from_log` allowlists, which
+    for an engine that echoes no argv is the only account of what it ran.
+
+    How complete that account is differs by engine, and the difference matters
+    to a caller weighing a setting the record does not mention. SGLang's
+    ``server_args`` is its entire resolved configuration, so an absent setting
+    is genuinely unknown. vLLM records only what differs from its defaults, so a
+    setting left at its default is absent rather than reported -- a restatement
+    of a default value reads as unknown, not as already active. An engine with
+    no record at all yields nothing, leaving the launch unobserved rather than
+    misread.
+    """
+    spec = _LAUNCH_RECORDS.get(str(framework or "").strip().lower())
+    if spec is None:
+        return {}
+    return _server_args_from_log(path, spec, keep=None)
+
+
+#: ``chunked prefill size is adjusted from 65536 to 8192``: an engine saying it
+#: rewrote a setting after parsing it.
+_ENGINE_ADJUSTED_RE = re.compile(
+    r"(?P<name>[A-Za-z][A-Za-z0-9_ -]*?)\s+(?:is|was)\s+adjusted\s+from\s+(?P<old>\S+)\s+to\s+(?P<new>[^\s,;]+)",
+    re.IGNORECASE,
+)
+_ENGINE_ADJUSTED_MAX = 64
+
+#: Setting-name prefixes SGLang derives from other settings once DP attention is
+#: on: it divides ``chunked_prefill_size`` by the attention-DP size and re-clamps
+#: the CUDA-graph batch sizes to it. The resolved value is then not the value a
+#: flag would pass, so "the record equals my flag" proves nothing for these.
+_SGLANG_DERIVED_UNDER_DP_ATTENTION = ("chunked_prefill_size", "cuda_graph_max_bs", "cuda_graph_bs")
+
+
+def engine_adjusted_settings_from_log(path: str, framework: str) -> dict[str, dict[str, str]]:
+    """Settings the engine says it rewrote, as ``{name: {"requested": old, "resolved": new}}``.
+
+    Read from lines such as ``chunked prefill size is adjusted from 65536 to
+    8192``. The launch record holds only the resolved value, so without this a
+    caller cannot tell an input from the engine's rewrite of it. An engine with
+    no launch record yields nothing, like the other readers.
+    """
+    if _LAUNCH_RECORDS.get(str(framework or "").strip().lower()) is None:
+        return {}
+    adjusted: dict[str, dict[str, str]] = {}
+    remaining = _SERVER_ARGS_MAX_CHARS
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            for _ in range(_SERVER_ARGS_MAX_LINES):
+                line = handle.readline(remaining)
+                if not line:
+                    break
+                remaining -= len(line)
+                match = _ENGINE_ADJUSTED_RE.search(line)
+                if match is not None and len(adjusted) < _ENGINE_ADJUSTED_MAX:
+                    name = re.sub(r"[\s-]+", "_", match.group("name").strip().lower())
+                    adjusted[name] = {"requested": match.group("old"), "resolved": match.group("new").rstrip(".")}
+                if remaining <= 0:
+                    break
+    except OSError:
+        return {}
+    return adjusted
+
+
+def settings_the_engine_rewrote(config: Mapping[str, Any], adjusted: Mapping[str, Any] | None = None) -> frozenset[str]:
+    """Names in ``config`` whose resolved value is not the value a launch flag would pass.
+
+    The engine's own report (``adjusted``) is authoritative. The DP-attention
+    rule backs it for logs that predate the report or never carried it.
+    """
+    names = {str(name) for name in (adjusted or {})}
+    if config.get("enable_dp_attention") is True:
+        names.update(key for key in config if str(key).startswith(_SGLANG_DERIVED_UNDER_DP_ATTENTION))
+    return frozenset(names)
+
+
 def observed_sglang_server_identity_from_log(path: str) -> dict[str, Any]:
-    """Parse a capped archived SGLang ``server_args=ServerArgs(...)`` record."""
+    """Parse allowlisted identity from a capped SGLang ``server_args`` record."""
+    return observed_server_identity_from_log(path, "sglang")
+
+
+def observed_vllm_server_identity_from_log(path: str) -> dict[str, Any]:
+    """Parse allowlisted identity from vLLM's ``non-default args: {...}`` record."""
+    return observed_server_identity_from_log(path, "vllm")
+
+
+def _server_args_from_log(path: str, spec: _LaunchRecord, *, keep: frozenset[str] | None) -> dict[str, Any]:
+    """Parse a capped launch record, limited to ``keep`` when given."""
     chunks: list[str] = []
-    remaining = _SGLANG_SERVER_ARGS_MAX_CHARS
+    remaining = _SERVER_ARGS_MAX_CHARS
     scanned_lines = 0
     parsed = ""
     try:
         with open(path, encoding="utf-8", errors="replace") as handle:
-            for _ in range(_SGLANG_SERVER_ARGS_MAX_LINES):
-                line = handle.readline()
+            for _ in range(_SERVER_ARGS_MAX_LINES):
+                line = handle.readline(remaining)
                 if not line:
                     break
                 scanned_lines += 1
-                if len(line) > remaining:
-                    line = line[:remaining]
                 remaining -= len(line)
-                if chunks or _SGLANG_SERVER_ARGS_LOG_RE.search(line):
+                if chunks or spec.marker.search(line):
                     chunks.append(line)
-                    parsed = _extract_balanced_server_args("".join(chunks))
+                    parsed = _balanced_record_payload("".join(chunks), spec.marker)
                     if parsed:
                         break
                 if remaining <= 0:
@@ -505,27 +592,49 @@ def observed_sglang_server_identity_from_log(path: str) -> dict[str, Any]:
     except OSError:
         return {}
     text = "".join(chunks)
-    content = parsed or _extract_balanced_server_args(text)
-    if not content or len(content) > _SGLANG_SERVER_ARGS_MAX_CHARS:
-        if scanned_lines >= _SGLANG_SERVER_ARGS_MAX_LINES or remaining <= 0:
+    content = parsed or _balanced_record_payload(text, spec.marker)
+    if not content or len(content) > _SERVER_ARGS_MAX_CHARS:
+        if scanned_lines >= _SERVER_ARGS_MAX_LINES or remaining <= 0:
             log.debug(
-                "sglang observed identity unavailable after scanning bounded log %s (lines=%d chars_remaining=%d)",
+                "launch record unavailable after scanning bounded log %s (lines=%d chars_remaining=%d)",
                 path,
                 scanned_lines,
                 remaining,
             )
         return {}
     try:
-        call = ast.parse(f"_ServerArgs({content})", mode="eval").body
-        if not isinstance(call, ast.Call) or len(call.keywords) > _SGLANG_SERVER_ARGS_MAX_FIELDS:
+        record = ast.parse(content, mode="eval").body
+        fields: list[tuple[str, ast.expr]] = []
+        if isinstance(record, ast.Dict):
+            if len(record.keys) > _SERVER_ARGS_MAX_FIELDS:
+                return {}
+            for key, value in zip(record.keys, record.values):
+                if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
+                    return {}
+                fields.append((key.value, value))
+        elif isinstance(record, ast.Call):
+            if len(record.keywords) > _SERVER_ARGS_MAX_FIELDS:
+                return {}
+            for keyword in record.keywords:
+                if keyword.arg is None:
+                    return {}
+                fields.append((keyword.arg, keyword.value))
+        else:
             return {}
         values: dict[str, Any] = {}
-        for keyword in call.keywords:
-            if keyword.arg is None:
-                return {}
-            if keyword.arg not in _SGLANG_OBSERVED_IDENTITY_FIELDS:
+        for name, value in fields:
+            if keep is not None and name not in keep:
                 continue
-            values[keyword.arg] = _safe_server_args_value(keyword.value)
-    except (SyntaxError, ValueError, TypeError):
+            try:
+                values[name] = _safe_server_args_value(value)
+            except (ValueError, TypeError):
+                # An object repr among 500 settings is not worth losing the rest
+                # of the record over, so the config read skips the key. An
+                # allowlisted one is only voided where the engine's record is
+                # meant to be all literals.
+                if keep is not None and spec.identity_rejects_unreadable_values:
+                    raise
+                continue
+    except (SyntaxError, ValueError, TypeError, RecursionError):
         return {}
     return {key: values[key] for key in sorted(values)}

@@ -21,7 +21,6 @@ import yaml
 
 from hyperloom.orchestrator.actions.executors import _grid_runner
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
-from hyperloom.orchestrator.actions.executors import _grid_variant_filter
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
@@ -324,12 +323,19 @@ class TestVariantResultToDict:
         encoded = result.to_dict()
         expected = asdict(result)
         expected["e2e_norm_intvty_p90"] = expected.pop("intvty_p90")
-        assert encoded == {**expected, "fingerprint": result.fingerprint}
+        expected["e2e_norm_intvty_p50"] = expected.pop("intvty_p50")
+        assert encoded == expected
 
     def test_preserves_unmeasured_axes(self):
         result = VariantResult(name="legacy", extra_server_args="", extra_envs={}, status="failed")
         encoded = result.to_dict()
-        for key in ("input_throughput", "total_token_throughput", "e2e_norm_intvty_p90", "tpot_p90_ms"):
+        for key in (
+            "input_throughput",
+            "total_token_throughput",
+            "e2e_norm_intvty_p90",
+            "e2e_norm_intvty_p50",
+            "tpot_p90_ms",
+        ):
             assert key in encoded
             assert encoded[key] is None
 
@@ -484,7 +490,6 @@ class TestCoerceExtraEnvs:
             "SGLANG_USE_AITER": "1",
             "VLLM_ROCM_USE_AITER_MHA": "0",
         }
-        assert isinstance(v.fingerprint, str) and len(v.fingerprint) > 0
 
     def test_drops_hijacking_envs_but_keeps_workload_pins(self):
         v = GridVariant(
@@ -1210,9 +1215,6 @@ async def test_grid_removals_reach_actual_child_environment(tmp_path, monkeypatc
     assert all(row == [expected_args, expected_env] for row in observed)
 
 
-# Framework-aware help-text probe (atom + multi-framework cache)
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("with_overlay", [False, True])
 async def test_exported_reference_controls_reimport_requires_static_settings(tmp_path, monkeypatch, with_overlay):
@@ -1245,7 +1247,7 @@ async def test_exported_reference_controls_reimport_requires_static_settings(tmp
             _resolve_reference_recipe(SimpleNamespace(reference_script=str(session / "current_setting.sh")))
         assert exc.value.code == 2
         return
-    args, envs, model, source, controls = _resolve_reference_recipe(
+    args, envs, model, controls = _resolve_reference_recipe(
         SimpleNamespace(reference_script=str(session / "current_setting.sh"))
     )
     assert "PYTHONPATH" not in envs
@@ -1255,7 +1257,6 @@ async def test_exported_reference_controls_reimport_requires_static_settings(tmp
         reference_server_args=args,
         reference_envs=envs,
         reference_model=model,
-        reference_source=source,
         reference_launch_controls=controls,
     )
     imported.save(session)
@@ -1309,209 +1310,6 @@ async def test_exported_reference_controls_reimport_requires_static_settings(tmp
         assert child["SGLANG_REMOVE_ME"] is None
         assert child["SGLANG_REASSIGN"] == "accepted"
         assert child["OVERLAY_OBSERVED"] is None
-
-
-@pytest.fixture(autouse=False)
-def _reset_help_cache():
-    """Clear the framework-keyed help-text caches before/after each test."""
-    _grid_runner._HELP_TEXT_CACHE.clear()
-    _grid_variant_filter._HELP_PROBE_FAILED_UNTIL.clear()
-    yield
-    _grid_runner._HELP_TEXT_CACHE.clear()
-    _grid_variant_filter._HELP_PROBE_FAILED_UNTIL.clear()
-
-
-def test_probe_server_help_text_atom_returns_help_when_importable(
-    _reset_help_cache,
-    monkeypatch,
-):
-    """The atom probe returns the mocked help verbatim and caches it for the second call."""
-    call_count = {"n": 0}
-    synthetic_help = "usage: atom-engine [-h] [--tensor-parallel-size INT] [--torch-profiler-dir DIR] ..."
-
-    def fake_run(cmd, *args, **kwargs):
-        call_count["n"] += 1
-        return subprocess.CompletedProcess(cmd, 0, synthetic_help, "")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    out = _grid_runner._probe_server_help_text("atom")
-    assert "--tensor-parallel-size" in out
-    assert "--torch-profiler-dir" in out
-    # Second call must hit the cache, not the subprocess.
-    out2 = _grid_runner._probe_server_help_text("atom")
-    assert out2 == out
-    assert call_count["n"] == 1, (
-        f"_probe_server_help_text must cache atom's result; subprocess called {call_count['n']} times"
-    )
-
-
-def test_probe_server_help_text_atom_returns_empty_on_failure(
-    _reset_help_cache,
-    monkeypatch,
-):
-    """A failure surfaces as ``\"\"`` and is held off rather than re-paid at once."""
-    raised = {"n": 0}
-
-    def fake_run(*args, **kwargs):
-        raised["n"] += 1
-        raise RuntimeError("subprocess refused to run")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    assert _grid_runner._probe_server_help_text("atom") == ""
-    assert _grid_runner._probe_server_help_text("atom") == ""
-    assert raised["n"] == 1
-
-    # The hold-off is bounded, so a framework that recovers is picked back up.
-    _grid_variant_filter._HELP_PROBE_FAILED_UNTIL["atom"] = 0.0
-    assert _grid_runner._probe_server_help_text("atom") == ""
-    assert raised["n"] == 2
-
-
-def test_probe_server_help_text_ignores_a_failed_runs_stderr(
-    _reset_help_cache,
-    monkeypatch,
-):
-    """A traceback is not help text."""
-    monkeypatch.setattr(
-        subprocess,
-        "run",
-        lambda cmd, *a, **kw: subprocess.CompletedProcess(cmd, 1, "", "Traceback ... ImportError"),
-    )
-    assert _grid_runner._probe_server_help_text("atom") == ""
-
-
-def test_probe_server_help_text_cache_keyed_by_framework(
-    _reset_help_cache,
-    monkeypatch,
-):
-    """Cache slots must be per-framework so sglang's help text doesn't leak into the vllm/atom slot."""
-    payload_map = {
-        "sglang": "USAGE_SGLANG --enable-flashinfer-mla",
-        "atom": "USAGE_ATOM --torch-profiler-dir",
-    }
-
-    def fake_run(cmd, *args, **kwargs):
-        # Identify the framework from the inline source code in cmd[-1].
-        src = cmd[-1] if cmd else ""
-        if "sglang.srt.server_args" in src:
-            payload = payload_map["sglang"]
-        elif "atom.model_engine" in src:
-            payload = payload_map["atom"]
-        else:
-            payload = ""
-        return subprocess.CompletedProcess(cmd, 0, payload, "")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    sgl = _grid_runner._probe_server_help_text("sglang")
-    atom = _grid_runner._probe_server_help_text("atom")
-    assert "--enable-flashinfer-mla" in sgl
-    assert "--torch-profiler-dir" in atom
-    # No cross-contamination — atom slot did NOT inherit sglang's text.
-    assert "--enable-flashinfer-mla" not in atom
-    assert "--torch-profiler-dir" not in sgl
-
-
-def test_probe_server_help_text_supports_all_three_frameworks(
-    _reset_help_cache,
-    monkeypatch,
-):
-    """Cross-cutting guard: every first-class framework has a registered probe command and returns a ``str``."""
-    monkeypatch.setattr(
-        subprocess,
-        "run",
-        lambda cmd, *a, **kw: subprocess.CompletedProcess(
-            cmd,
-            0,
-            f"help for {cmd[-1]!r}",
-            "",
-        ),
-    )
-    for fw in ("sglang", "vllm", "atom"):
-        out = _grid_runner._probe_server_help_text(fw)
-        assert isinstance(out, str)
-        assert out, f"_probe_server_help_text({fw!r}) returned an empty string; command registration likely missing"
-
-
-@pytest.mark.parametrize("framework", sorted(_grid_variant_filter._HELP_PROBE_COMMANDS))
-def test_probe_command_runs_against_the_installed_framework(framework: str) -> None:
-    """The inline snippet must execute against the framework it names.
-
-    Every other probe test stubs ``subprocess.run``, so the snippet itself is
-    never run and a stale symbol stays green. Skips where the framework is absent.
-    """
-    pytest.importorskip(framework)
-    argv_tail = _grid_variant_filter._HELP_PROBE_COMMANDS[framework]
-    proc = subprocess.run(
-        [sys.executable, *argv_tail],
-        capture_output=True,
-        text=True,
-        timeout=180,
-    )
-    assert proc.returncode == 0, f"{framework} probe exited {proc.returncode}: {proc.stderr[-500:]}"
-    assert "--" in proc.stdout, f"{framework} probe produced no flags"
-
-
-def test_probe_server_help_text_unknown_framework_returns_empty(
-    _reset_help_cache,
-):
-    """Unregistered framework names short-circuit to ``""`` without invoking subprocess."""
-    assert _grid_runner._probe_server_help_text("tensorrt") == ""
-    assert _grid_runner._probe_server_help_text("") == ""
-
-
-def test_probe_server_help_text_sglang(
-    _reset_help_cache,
-    monkeypatch,
-):
-    """The framework-keyed probe handles sglang and populates the sglang cache."""
-    monkeypatch.setattr(
-        subprocess,
-        "run",
-        lambda cmd, *a, **kw: subprocess.CompletedProcess(
-            cmd,
-            0,
-            "USAGE_SGLANG_LEGACY",
-            "",
-        ),
-    )
-    out = _grid_runner._probe_server_help_text("sglang")
-    assert "USAGE_SGLANG_LEGACY" in out
-    assert "USAGE_SGLANG_LEGACY" in _grid_runner._HELP_TEXT_CACHE.get("sglang", "")
-
-
-def test_apply_compatibility_filter_uses_atom_help_when_framework_atom(
-    _reset_help_cache,
-    monkeypatch,
-):
-    """When ``$FRAMEWORK=atom`` the compatibility filter validates variant flags against atom --help, dropping a sglang-only flag with a reason mentioning ``atom --help``."""
-    monkeypatch.setenv("FRAMEWORK", "atom")
-    # MoE keyword so the model-class predicate doesn't drop the variant first.
-    monkeypatch.setenv("MODEL_PATH", "/path/models/DeepSeek-R1-0528")
-
-    # Pre-populate the cache so the predicate reads from it without mocking subprocess.
-    _grid_runner._HELP_TEXT_CACHE["atom"] = "usage: atom-engine [--tensor-parallel-size INT] [--enable-deepep-moe]"
-
-    # One variant's flag IS in the atom help (kept); one references a sglang-only flag (dropped).
-    kept_variant = GridVariant(
-        name="atom_compatible",
-        extra_server_args="--enable-deepep-moe",
-    )
-    dropped_variant = GridVariant(
-        name="sglang_only",
-        extra_server_args="--enable-flashinfer-mla",
-    )
-    kept, dropped = _grid_runner.apply_compatibility_filter(
-        [kept_variant, dropped_variant],
-        framework="atom",
-        model_path="",
-    )
-    assert [v.name for v in kept] == ["atom_compatible"]
-    assert len(dropped) == 1
-    assert dropped[0]["name"] == "sglang_only"
-    assert "atom --help" in dropped[0]["reason"], (
-        f"reason must mention `atom --help` so log readers can tell "
-        f"which framework rejected the variant: {dropped[0]['reason']!r}"
-    )
 
 
 # Section: dedup_vllm_server_args  — vLLM/atom single-value flag collapse
@@ -2724,7 +2522,7 @@ class TestServerArgTokenizerOnTheSyntheticPath:
 
 def test_the_json_tripwire_sees_damage_from_the_removal_pass(caplog):
     """The window must cover ``remove_server_args``, which is what it is about."""
-    from hyperloom.orchestrator.actions.executors import _grid_server_args as gsa
+    from hyperloom.inference_optimizer import grid_server_args as gsa
 
     real = gsa.remove_server_args
 

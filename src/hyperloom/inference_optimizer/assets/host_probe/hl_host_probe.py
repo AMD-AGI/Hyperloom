@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import atexit
+import importlib.abc
+import importlib.util
 import json
 import os
 import sys
@@ -98,6 +100,41 @@ def _write_json_report(out_dir: str, name: str, payload: dict) -> str:
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2, sort_keys=True)
     return path
+
+
+class _TorchImportHook(importlib.abc.MetaPathFinder):
+    """Run a callback on the ``torch`` module right after the process first imports it.
+
+    The hook stays registered until the module actually executes: frameworks resolve torch with
+    ``importlib.util.find_spec`` before importing it, and that lookup alone must not consume the hook.
+    """
+
+    def __init__(self, on_import) -> None:
+        self._on_import = on_import
+        self._resolving = False
+
+    def find_spec(self, fullname, path, target=None):
+        """Chain the real loader for ``torch`` so the callback runs once its module has executed."""
+        if fullname != "torch" or self._resolving:
+            return None
+        self._resolving = True
+        try:
+            spec = importlib.util.find_spec(fullname)
+        finally:
+            self._resolving = False
+        if spec is None or spec.loader is None:
+            return spec
+        exec_module = spec.loader.exec_module
+        hook = self
+
+        def exec_then_hook(module) -> None:
+            exec_module(module)
+            if hook in sys.meta_path:
+                sys.meta_path.remove(hook)
+                hook._on_import(module)
+
+        spec.loader.exec_module = exec_then_hook
+        return spec
 
 
 class _SiteStats:
@@ -362,7 +399,7 @@ class HostProbe:
             return
         probe = self
 
-        def wrapper(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        def wrapper(*args, **kwargs):
             started = time.perf_counter()
             try:
                 return original(*args, **kwargs)
@@ -405,8 +442,8 @@ class HostProbe:
             if getattr(original, "_hl_host_probe", False):
                 continue
 
-            def make(original=original, api=api):  # noqa: ANN001, ANN202
-                def wrapper(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+            def make(original=original, api=api):
+                def wrapper(self, *args, **kwargs):
                     if self.is_cuda:
                         return original(self, *args, **kwargs)
                     started = time.perf_counter()
@@ -435,13 +472,20 @@ class HostProbe:
             self._patched.append((tensor_type, attr, original))
 
     def _install_tier1(self) -> None:
-        """Wrap the host-stall and transfer entry points, if torch is present."""
-        try:
-            import torch
-        except Exception:  # noqa: BLE001 - a torch-less process has nothing to probe
-            self._notes.append("torch unavailable; tier 1 inert")
-            return
+        """Wrap the host-stall and transfer entry points once the process imports torch.
 
+        The probe must not import torch itself: it runs from ``sitecustomize``, and a framework may need to prepare
+        the process before torch loads (vLLM on ROCm promotes libtorch symbols so rocprofiler-sdk can register
+        kineto; importing torch first leaves torch.profiler with CPU-only traces).
+        """
+        torch = sys.modules.get("torch")
+        if torch is not None:
+            self._wrap_torch(torch)
+        else:
+            sys.meta_path.insert(0, _TorchImportHook(self._wrap_torch))
+
+    def _wrap_torch(self, torch: object) -> None:
+        """Wrap the tier-1 entry points on an imported ``torch`` module."""
         dist = getattr(torch, "distributed", None)
         if dist is not None:
             # Object collectives pickle through the host, so each one is a host round-trip; tensor collectives are
@@ -477,7 +521,7 @@ class HostProbe:
 
     # -- tier 2 -----------------------------------------------------------
 
-    def _profile_hook(self, frame, event: str, _arg) -> None:  # noqa: ANN001
+    def _profile_hook(self, frame, event: str, _arg) -> None:
         """``sys.setprofile`` callback counting framework calls and arg repeats."""
         if event != "call" and event != "return":
             return
@@ -513,7 +557,7 @@ class HostProbe:
         except Exception:  # noqa: BLE001 - a profile hook must never raise
             return
 
-    def _sample_args(self, frame, stats: _CallStats) -> None:  # noqa: ANN001
+    def _sample_args(self, frame, stats: _CallStats) -> None:
         """Fingerprint one call's positional arguments into ``stats``."""
         code = frame.f_code
         argcount = int(getattr(code, "co_argcount", 0) or 0)

@@ -95,7 +95,6 @@ async def run_specialist_rebench(
             benchmark_script=benchmark_script or None,
             magpie_python=magpie_python or None,
             server_lifecycle=server_lifecycle,
-            preclean_before_run=False,
         )
     except Exception as exc:  # noqa: BLE001 — surface as a structured failure
         return {
@@ -124,6 +123,8 @@ async def run_specialist_rebench(
         # ``itl_ms`` for the collectors.
         "ttft_ms": rb.ttft_mean_ms,
         "itl_ms": rb.tpot_mean_ms,
+        # Canonical name: the latency budget fails closed, so a lane that does not carry this refuses every KEEP.
+        "e2el_mean_ms": rb.e2el_mean_ms,
         "workspace": str(getattr(rb, "workspace", "") or ""),
         "port": resolved_port,
         "gpu_ids": gpu_ids,

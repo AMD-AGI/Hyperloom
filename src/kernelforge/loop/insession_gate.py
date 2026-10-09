@@ -19,13 +19,12 @@ import sys
 from typing import Any
 
 from kernelforge.llm.workspace_policy import (
-    PROTECTED_DIRS,
     PROTECTED_GLOBS,
     is_protected_path,
     protected_path_inventory,
 )
 from kernelforge.llm.git import git
-from kernelforge.loop.jit_rebuild import force_jit_rebuild_for_changes
+from kernelforge.loop.jit_rebuild import JitRebuildUnavailable, force_jit_rebuild_for_changes
 from kernelforge.loop.scoring import (
     KEEP_MEASUREMENT_COUNT,
     keep_score,
@@ -42,9 +41,6 @@ from kernelforge.mcp_server.tools.bench import (
 
 # Files the agent must NOT modify: the test harness / driver that MEASURES the kernel.
 _DEFAULT_PROTECTED_GLOBS = list(PROTECTED_GLOBS)
-
-# Directories that belong to the benchmark harness rather than the kernel implementation.
-_DEFAULT_PROTECTED_DIRS = set(PROTECTED_DIRS)
 
 # Tools that modify files on disk (subject to the protected-file deny + counted as edits when they target the kernel).
 _EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
@@ -436,7 +432,9 @@ class InSessionGate:
         # best; a real win. "block_budget_exhausted" — max_blocks blocked stops spent; hand off to the outer loop to
         # re-validate + keep/revert. "harness_tampered" — harness block cap hit on unrestored protected changes; the
         # outer loop force-REVERTs it. "validation_timeout" — full-suite correctness timed out; the outer loop
-        # performs the one authoritative retry. "gate_error" — the gate itself raised; fail OPEN.
+        # performs the one authoritative retry. "jit_rebuild_unavailable" — the workspace could not assert a rebuild
+        # of the edited sources, so nothing was measured in-session; the candidate is untouched and the outer loop
+        # measures it itself. "gate_error" — the gate itself raised; fail OPEN.
         self.end_reason = ""
         # Real failure signals seen this session (block reasons: compile errors, "correct but not faster", …).
         self.findings: list[str] = []
@@ -551,7 +549,7 @@ class InSessionGate:
                 p = Path(candidate).resolve()
                 if p.exists():
                     return p.parent if p.is_file() else p
-            except Exception:
+            except OSError:
                 continue
         return None
 
@@ -564,19 +562,6 @@ class InSessionGate:
             exact_paths=self.protected_abs,
             extra_globs=self.protected_globs,
         )
-
-    def _is_protected_dir_path(self, fp: str) -> bool:
-        """Back-compatible directory-only protected-path probe."""
-
-        if not fp:
-            return False
-        path = Path(fp)
-        if self.workspace_root and path.is_absolute():
-            try:
-                path = path.resolve().relative_to(self.workspace_root)
-            except ValueError:
-                path = path.resolve()
-        return any(part.lower() in _DEFAULT_PROTECTED_DIRS for part in path.parts[:-1])
 
     def _iter_snapshot_paths(self) -> list[Path]:
         root = self.workspace_root
@@ -919,10 +904,6 @@ class InSessionGate:
                 return f"inline write may modify protected file '{mentioned}'"
         return ""
 
-    def _bash_may_modify_protected(self, command: str) -> bool:
-        """Back-compat boolean wrapper around :meth:`_bash_deny_reason`."""
-        return bool(self._bash_deny_reason(command))
-
     def _bash_bypass_reason(self, command: str) -> str:
         """WHY a Bash command reaches the driver around its wrapper, or \"\"."""
         driver_base = os.path.basename(self.driver_script)
@@ -1086,11 +1067,23 @@ class InSessionGate:
 
             # ── 2) SELF-CORRECTION: canonical correctness + benchmark ───────── Ensure the canonical check compiles
             # the kernel the agent has on disk RIGHT NOW: the SDK hook may run in a subprocess that did not inherit
-            # the loop's AITER_REBUILD, so (re)assert it here (aiter HIP; no-op otherwise).
-            force_jit_rebuild_for_changes(
-                self.workspace_root or Path.cwd(),
-                [self.kernel_abs, *self.target_abs],
-            )
+            # the loop's AITER_REBUILD, so (re)assert it here. Its measurement is the one the outer loop reuses, so
+            # a shard chosen from a stale source list would decide keep/revert on the previous iteration's binary.
+            try:
+                force_jit_rebuild_for_changes(
+                    self.workspace_root or Path.cwd(),
+                    [self.kernel_abs, *self.target_abs],
+                )
+            except JitRebuildUnavailable as error:
+                # The workspace, not the agent: the candidate on disk is intact, and outer canonical validation
+                # asserts the rebuild itself before measuring. Blocking here would only spend turns on a failure no
+                # edit can clear.
+                self.end_reason = "jit_rebuild_unavailable"
+                self.findings.append(f"In-session validation skipped; workspace unavailable: {error}")
+                self._log(
+                    f"ALLOW (rebuild unavailable: {error}; outer loop measures this candidate) edit={self.edit_count}"
+                )
+                return self._allow()
 
             # 2a) Correctness — canonical driver, same call the pipeline uses.
             corr = await test_correctness(

@@ -20,10 +20,12 @@ import tempfile
 import textwrap
 import time
 import traceback
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
+
+from hyperloom.common.unified_diff import touched_paths
 
 from kernelforge.agent_backends.session_resume import EXHAUSTED_END_REASON
 from kernelforge.llm.process_reaping import processes_under
@@ -164,10 +166,53 @@ LONG_HORIZON_OUTCOME_WINDOW = max(
 # Where a campaign writes its own output inside the workspace.
 LOOP_ARTIFACT_ROOT = "forge_experiments"
 
+# The exact key set ``_build_pending_keep`` writes to ``pending_keep.json``; recovery refuses any other shape.
+PENDING_KEEP_FIELDS = frozenset(
+    {
+        "campaign_id",
+        "session_index",
+        "experiment_id",
+        "base_head",
+        "iteration",
+        "wall_ms",
+        "mean_case_speedup",
+        "snr_db",
+        "vgpr",
+        "plan",
+        "rationale",
+        "validation_text",
+        "benchmark",
+        "changed_files",
+        "patch",
+        "patch_sha256",
+        "publication_base_commit",
+        "publication_changed_files",
+        "publication_patch",
+        "kernel_source",
+        "kernel_file",
+        "shape",
+        "baseline_wall_ms",
+        "pristine_baseline_wall_ms",
+        "best_wall_ms_before",
+        "best_mean_case_speedup_before",
+        "session_end_reason",
+        "turns",
+        "search_control",
+        "commit_message",
+        "commit_subject",
+        "task_fingerprint",
+        "git_branch",
+    }
+)
+
 # How far a KEEP has to improve a case's measured time before that case counts as one the KEEP's configuration was
 # chosen for.
 CONFIG_COVERAGE_MIN_MOVE_RATIO = 0.01
 CONFIG_COVERAGE_DISPERSION_MULTIPLE = 1.0
+
+# Distinguishes "the ceiling report has not been looked for yet" from "it was looked for and is not there", so a
+# missing or corrupt report is read from disk once per campaign rather than once per iteration.
+_CEILING_UNLOADED = object()
 
 
 def _measurement_case_times(
@@ -250,10 +295,9 @@ def _bench_failure_detail(bench_result: dict) -> str:
 def _build_failure_tail(stdout: bytes, stderr: bytes, limit: int) -> str:
     """The tail of a failed build, taken from whichever stream carried it.
 
-    Only stderr used to be read. ninja prints the compiler's own output on
-    stdout, so a ninja failure was reported to the agent as ``BUILD FAILED:``
-    and nothing else -- the one line that would have told it what to fix went
-    to the stream nobody looked at. Both streams are read now.
+    Both streams are read. ninja prints the compiler's own output on stdout, so
+    reading stderr alone reports a ninja failure to the agent as
+    ``BUILD FAILED:`` and nothing else.
     """
     combined = b"\n".join(part.strip() for part in (stdout or b"", stderr or b"") if part.strip())
     text = combined.decode("utf-8", errors="replace").strip()
@@ -466,6 +510,10 @@ class IterationConfig:
     # How large a per-case improvement has to be, relative to the case's own time, before a KEEP counts as having been
     # configured for that case.
     config_coverage_min_move_ratio: float = CONFIG_COVERAGE_MIN_MOVE_RATIO
+    # Mean per-case attainment (``ceiling / measured``, equal-weight across scored cases) at which the campaign has
+    # nothing left worth buying and stops. Zero disables the gate, which is the default: a ceiling is an estimate
+    # with no framework-side check on its arithmetic, so stopping on one is something an operator opts into.
+    roofline_target: float = 0.0
 
     def __post_init__(self) -> None:
         # Validated here rather than at the CLI boundary alone, so a pattern can never reach the commit/delete sites
@@ -565,8 +613,17 @@ class IterationLoop(AnalysisRuntimeMixin):
         tracker: ExperimentTracker,
         config: Config | None = None,
         resume: bool = False,
+        ceiling_estimator: Callable[..., Awaitable[Any]] | None = None,
     ):
         self.ic = iter_config
+        # Produces a ceiling report for this kernel, given the case set and per-case latencies the baseline
+        # established; ``None`` unless the operator turned the roofline ceiling on. Injected rather than built here so
+        # the loop needs no view of the agent-backend registry: the analyst is a different role, and resolving it is
+        # the caller's job.
+        self._ceiling_estimator = ceiling_estimator
+        # Where this campaign's ceiling was published, once it has one: set by ``_establish_ceiling``, never by the
+        # caller. It decides when to stop, never which candidate is better: see ``_is_roofline_target_met``.
+        self._ceiling_report_path = ""
         # Declared here so persistence works before the methods that populate them have run.
         self._best_case_times: dict[str, float] = {}
         # Pairs this process selected and could not stage.
@@ -676,7 +733,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                     self.experiment.experiment_id,
                     self.llm_usage,
                 )
-        except Exception:  # noqa: BLE001 - accounting must never break the loop
+        except Exception:
             log.debug("failed to checkpoint LLM usage", exc_info=True)
 
     def _git(self, *args: str) -> str:
@@ -786,7 +843,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             pending = json.loads(path.read_text())
         except Exception as error:
             raise ValueError(f"invalid pending KEEP metadata: {path}") from error
-        if not isinstance(pending, dict) or pending.get("schema_version") != 2:
+        if not isinstance(pending, dict) or set(pending) != PENDING_KEEP_FIELDS:
             raise ValueError(f"invalid pending KEEP metadata: {path}")
         return pending
 
@@ -837,7 +894,6 @@ class IterationLoop(AnalysisRuntimeMixin):
         publication_patch, publication_changed_files = self._candidate_changes(publication_base)
         commit_message = f"iter-{result.iteration}: {rationale[:72]}"
         return {
-            "schema_version": 2,
             "campaign_id": self.run_state.campaign_id,
             "session_index": self.run_state.session_index,
             "experiment_id": (self.experiment.experiment_id if self.experiment else ""),
@@ -934,8 +990,7 @@ class IterationLoop(AnalysisRuntimeMixin):
         if hashlib.sha256(committed_patch.encode()).hexdigest() != expected_hash:
             raise ValueError("pending KEEP committed patch mismatch")
         subject = self._git("show", "-s", "--format=%s", current_head)
-        expected_subject = pending.get("commit_subject") or str(pending.get("commit_message") or "").splitlines()[0]
-        if subject != expected_subject:
+        if subject != pending["commit_subject"]:
             raise ValueError("pending KEEP commit message mismatch")
         return "committed"
 
@@ -956,10 +1011,7 @@ class IterationLoop(AnalysisRuntimeMixin):
         if state.session_status == SESSION_COMPLETED:
             raise ValueError("completed campaign cannot be resumed")
         if state.best.commit_hash and state.best.mean_case_speedup is None:
-            raise ValueError(
-                "resume state predates mean-case-speedup scoring; start a fresh "
-                "campaign so pristine per-case timings can be captured"
-            )
+            raise ValueError("resume state has a best commit without its mean case speedup; start a fresh campaign")
         if not state.baseline_case_times:
             raise ValueError(
                 "resume state has no pristine per-case timings; start a fresh "
@@ -1253,7 +1305,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             if not p.is_absolute():
                 p = Path(self.ic.workspace_dir) / p
             return p.read_text()
-        except Exception as e:
+        except OSError as e:
             log.debug("could not read source file %s: %s", path, e)
             return ""
 
@@ -1318,7 +1370,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             return ""
         try:
             return git("diff", f"{commit_hash}~1", commit_hash, cwd=self.ic.workspace_dir).stdout
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - git wrapper does not export its error type here
             log.debug("could not diff commit %s: %s", commit_hash, e)
             return ""
 
@@ -1364,14 +1416,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             return ""
         import re as _re
 
-        files: list[str] = []
-        for ln in diff.splitlines():
-            if ln.startswith("diff --git "):
-                parts = ln.split()
-                if len(parts) >= 4:
-                    name = parts[3][2:] if parts[3].startswith("b/") else parts[3]
-                    files.append(name)
-        stat_lines = [f"{name} | changed" for name in files[:4]]
+        stat_lines = [f"{name} | changed" for name in touched_paths(diff)[:4]]
         signal = _re.compile(
             r"BLOCK_|VEC_|WARP|WAVE|tile|fastmath|const_expr|num_stage|num_warp|"
             r"occupancy|def |return |Vec\(|\.to\(|=|if ",
@@ -1488,17 +1533,16 @@ class IterationLoop(AnalysisRuntimeMixin):
                 validation_text=validation_text,
                 benchmark=benchmark,
                 changed_files=(
-                    list((pending or {}).get("publication_changed_files") or (pending or {}).get("changed_files") or [])
+                    list((pending or {}).get("publication_changed_files") or [])
                     or self._publication_changed_files(result.commit_hash)
                 ),
                 patch=(
-                    str((pending or {}).get("publication_patch") or (pending or {}).get("patch") or "")
-                    or self._publication_patch(result.commit_hash)
+                    str((pending or {}).get("publication_patch") or "") or self._publication_patch(result.commit_hash)
                 ),
                 round_budget=self._round_budget_summary(),
             )
             return True
-        except Exception as error:  # noqa: BLE001 - keep commit remains authoritative
+        except Exception as error:
             first_failure = not self.persistence_degraded
             self.persistence_degraded = True
             self.persistence_errors.append(f"publish best iteration {result.iteration}: {error}")
@@ -1909,10 +1953,7 @@ class IterationLoop(AnalysisRuntimeMixin):
         index = self.archive.load_index()
         metas = []
         for row in index:
-            try:
-                meta = self.archive.load_meta(int(row.get("iter") or 0))
-            except Exception:  # noqa: BLE001 - a damaged record is not a candidate
-                continue
+            meta = self.archive.load_meta(int(row.get("iter") or 0))
             if meta:
                 metas.append(meta)
         return select_merge_pair(
@@ -1945,10 +1986,7 @@ class IterationLoop(AnalysisRuntimeMixin):
         if self._working_tree_diff().strip():
             return "", self.TREE_ALREADY_DIRTY_OBSTACLE
         for candidate in pair:
-            try:
-                patch = self.archive.read_candidate_file(candidate.iteration, "change.diff")
-            except Exception:  # noqa: BLE001 - an unreadable diff is not stackable
-                patch = ""
+            patch = self.archive.read_candidate_file(candidate.iteration, "change.diff")
             if not str(patch or "").strip():
                 # Reported apart from a conflict because the two ask for opposite responses.
                 self._git_discard_worktree()
@@ -2198,7 +2236,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 result.commit_hash,
                 result=result,
             )
-        except Exception as error:  # noqa: BLE001 - derived view is rebuildable
+        except Exception as error:
             self.persistence_degraded = True
             self.persistence_errors.append(f"rebuild candidate archive iteration {result.iteration}: {error}")
             self.persistence_errors = self.persistence_errors[-10:]
@@ -2326,7 +2364,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 events=events,
                 candidate_metadata=metadata,
             )
-        except Exception as error:  # noqa: BLE001 - structured history remains durable
+        except Exception as error:
             self.persistence_degraded = True
             self.persistence_errors.append(f"publish optimization history: {error}")
             self.persistence_errors = self.persistence_errors[-10:]
@@ -2401,7 +2439,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 )
             )
             self.state_store.save(self.run_state)
-        except Exception:  # noqa: BLE001 - best-effort
+        except Exception:
             log.debug("run_state: round cost record failed", exc_info=True)
 
     def _round_budget_summary(self) -> dict:
@@ -2454,17 +2492,14 @@ class IterationLoop(AnalysisRuntimeMixin):
             print(f"  [budget] round narrowed to {decision.lanes} lane(s): {decision.summary()}")
         else:
             self._refuse_round(iteration, decision.summary())
-        try:
-            self.state_store.append_event(
-                make_event(
-                    "round_admission",
-                    iteration,
-                    admitted=decision.admitted,
-                    **event_fields,
-                )
+        self.state_store.append_event(
+            make_event(
+                "round_admission",
+                iteration,
+                admitted=decision.admitted,
+                **event_fields,
             )
-        except Exception:  # noqa: BLE001 - best-effort
-            log.debug("run_state: round admission append failed", exc_info=True)
+        )
         return decision.lanes if decision.admitted else None
 
     def _admit_dispatch(self, iteration: int) -> bool:
@@ -2473,23 +2508,20 @@ class IterationLoop(AnalysisRuntimeMixin):
             remaining_sec=self._time_remaining(),
             measurement_sec=self._measurement_estimate_sec(),
         )
-        try:
-            self.state_store.append_event(
-                make_event(
-                    "round_dispatch",
-                    iteration,
-                    admitted=decision.admitted,
-                    remaining_sec=round(decision.remaining_sec, 3),
-                    required_sec=round(decision.required_sec, 3),
-                    session_sec=round(decision.session_sec, 3),
-                    measurement_sec=round(decision.measurement_sec, 3),
-                    # Recorded because it is the one case where the parts do not add up to the requirement: this
-                    # campaign estimated less than the external-timeout floor and was held at it.
-                    floored=decision.floored,
-                )
+        self.state_store.append_event(
+            make_event(
+                "round_dispatch",
+                iteration,
+                admitted=decision.admitted,
+                remaining_sec=round(decision.remaining_sec, 3),
+                required_sec=round(decision.required_sec, 3),
+                session_sec=round(decision.session_sec, 3),
+                measurement_sec=round(decision.measurement_sec, 3),
+                # Recorded because it is the one case where the parts do not add up to the requirement: this
+                # campaign estimated less than the external-timeout floor and was held at it.
+                floored=decision.floored,
             )
-        except Exception:  # noqa: BLE001 - best-effort
-            log.debug("run_state: round dispatch append failed", exc_info=True)
+        )
         if decision.admitted:
             return True
         self._refuse_round(iteration, decision.summary())
@@ -2510,6 +2542,99 @@ class IterationLoop(AnalysisRuntimeMixin):
         if self.ic.target_wall_ms is None or self.best_wall_ms is None:
             return False
         return self.best_wall_ms <= self.ic.target_wall_ms
+
+    async def _establish_ceiling(self) -> None:
+        """Estimate this kernel's per-shape ceiling once per campaign, before its first round.
+
+        Runs only when the caller supplied an estimator, which is to say the
+        operator turned the roofline ceiling on. A fresh campaign estimates. A
+        resumed one reads back the ceiling its run state records, and estimates
+        only when that report can no longer be used. The estimate costs a
+        profiler pass and an analyst session, and it must not change for the
+        life of the campaign: the ceiling is a property of the operator and the
+        box, not of the current implementation, and the stop rule divides by it,
+        so a second estimate would move the target between segments.
+
+        The case set and per-case latencies come from the baseline measured just
+        above, which is both a better clock than a single run and one driver run
+        the estimator no longer has to pay for.
+
+        An estimate that ends in one of ``ESTIMATE_ERRORS`` is reported and
+        dropped. Without a ceiling the campaign simply has no attainment target
+        and runs to its time budget, which is what every campaign did before
+        this existed. Any other exception is a bug in how the estimator was
+        wired, and raises rather than passing for that degraded path.
+        """
+        if self._ceiling_estimator is None:
+            return
+        scored = self._scored_case_ids()
+        if not scored:
+            return
+        if self.resume and self._adopt_recorded_ceiling(scored):
+            return
+        from kernelforge.roofline_ceiling.estimate import ESTIMATE_ERRORS
+
+        anchor = self._best_case_times or self._baseline_case_times
+        case_ms = {case_id: anchor[case_id] for case_id in scored}
+        print("Estimating the roofline ceiling for this kernel...")
+        try:
+            outcome = await self._ceiling_estimator(case_ids=scored, case_ms=case_ms)
+        except ESTIMATE_ERRORS as exc:
+            log.warning("roofline ceiling unavailable: %s", exc, exc_info=True)
+            print(f"  [roofline] no ceiling for this campaign: {str(exc) or type(exc).__name__}")
+            return
+
+        self._ceiling_report_path = str(outcome.report_path)
+        self._ceiling_report = outcome.report
+        self._record_ceiling()
+        for note in outcome.notes:
+            print(f"  [roofline] {note}")
+        standing = self._roofline_attainment()
+        if standing is not None and standing.usable:
+            print(
+                f"  [roofline] ceiling published ({outcome.source}); attainment "
+                f"{standing.mean * 100:.1f}% of estimate across {len(standing.cases)} case(s)"
+            )
+        else:
+            print(f"  [roofline] ceiling published ({outcome.source}); no attainment figure yet")
+        for case_id, reason in sorted((standing.excluded if standing else {}).items()):
+            print(f"  [roofline] {case_id}: {reason}")
+
+    def _adopt_recorded_ceiling(self, scored: list[str]) -> bool:
+        """Take back the ceiling this campaign estimated in an earlier session.
+
+        Returns whether one was adopted. A recorded report that can no longer be
+        read, or that has no figure for a scored case, is reported and estimated
+        again: the alternative is a campaign with no target for the rest of its
+        run, and the gate would refuse to rule on a partial one anyway.
+        """
+        path = str(self.run_state.ceiling_report_path or "").strip()
+        if not path:
+            return False
+        self._ceiling_report_path = path
+        self._ceiling_report = _CEILING_UNLOADED
+        report = self._ceiling()
+        if report is None:
+            reason = "cannot be read back"
+        else:
+            missing = sorted(set(scored) - set(report.ideal_ms()))
+            reason = f"has no figure for {', '.join(missing)}" if missing else ""
+        if reason:
+            self._ceiling_report_path = ""
+            self._ceiling_report = _CEILING_UNLOADED
+            print(f"  [roofline] the ceiling this campaign published at {path} {reason}, so estimating again")
+            return False
+        print(f"  [roofline] resumed with the ceiling this campaign published: {path}")
+        return True
+
+    def _record_ceiling(self) -> None:
+        """Checkpoint where this campaign's ceiling was published, for a resume to read back.
+
+        ``LoopStateStore.save`` records its own write failures as degraded
+        persistence rather than raising, so there is nothing to catch here.
+        """
+        self.run_state.ceiling_report_path = self._ceiling_report_path
+        self.state_store.save(self.run_state)
 
     async def _measure_baseline(self) -> float | None:
         """Bench the pristine kernel before any agent edit — the speedup anchor."""
@@ -2592,7 +2717,7 @@ class IterationLoop(AnalysisRuntimeMixin):
         try:
             self.run_state.baseline_case_times = dict(case_times)
             self.state_store.save(self.run_state)
-        except Exception:  # noqa: BLE001 - persistence is best-effort
+        except Exception:
             self.persistence_degraded = True
             self.persistence_errors.append("persist pristine baseline case timings")
             self.persistence_errors = self.persistence_errors[-10:]
@@ -2610,7 +2735,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             if self.search_start_mean_case_speedup is not None:
                 self.run_state.search_start_mean_case_speedup = self.search_start_mean_case_speedup
             self.state_store.save(self.run_state)
-        except Exception:  # noqa: BLE001 - persistence is best-effort
+        except Exception:
             self.persistence_degraded = True
             self.persistence_errors.append("persist scoring state")
             self.persistence_errors = self.persistence_errors[-10:]
@@ -2930,6 +3055,170 @@ class IterationLoop(AnalysisRuntimeMixin):
             ),
         )
 
+    def _with_ceiling_standing(self, context):
+        """Attach the roofline standing to a planning context, when a ceiling is published.
+
+        This is where the ceiling steers the campaign: the planner decides which
+        cases the round's effort goes to, so it is the one that has to see which
+        still have headroom, and the supervisor reviewing a stall has to see
+        whether the kernel is near its ceiling or far from it. Each case carries
+        its own figure; the context carries the mean, the target and how to
+        read both. The implementer's copy, from ``_render_ceiling_advisory``,
+        arrives after the round's cases are chosen. Like the rest of the
+        planning evidence it is guidance for the next round and never enters a
+        KEEP.
+        """
+        report = self._ceiling()
+        standing = self._roofline_attainment()
+        if report is None or standing is None:
+            return context
+        from kernelforge.orchestrator.contracts import CampaignRoofline, CaseRoofline
+
+        ceilings = report.ideal_ms()
+        scored = {entry.case_id: entry for entry in standing.cases}
+        incumbent = self._best_case_times or self._baseline_case_times
+
+        def roofline(case_id: str) -> CaseRoofline | None:
+            if case_id not in ceilings:
+                return None
+            entry = scored.get(case_id)
+            if entry is not None:
+                return CaseRoofline(
+                    ceiling_ms=entry.t_ideal_ms,
+                    incumbent_ms=entry.t_current_ms,
+                    attainment=entry.attainment,
+                )
+            measured = incumbent.get(case_id)
+            return CaseRoofline(
+                ceiling_ms=ceilings[case_id],
+                incumbent_ms=measured if measured and measured > 0 else None,
+                excluded=standing.excluded.get(case_id, ""),
+            )
+
+        scored_ids = self._scored_case_ids()
+        target = float(self.ic.roofline_target or 0.0)
+        return replace(
+            context,
+            cases=tuple(replace(case, roofline=roofline(case.case_id)) for case in context.cases),
+            roofline=CampaignRoofline(
+                scored_cases=len(scored_ids),
+                covered_cases=len(set(scored_ids) & set(scored)),
+                mean_attainment=standing.mean,
+                target=target if target > 0 else None,
+            ),
+        )
+
+    def _ceiling(self) -> Any | None:
+        """The published ceiling report for this kernel, or ``None``.
+
+        Loaded on demand rather than in ``__init__`` so a ceiling published
+        part-way through a campaign is picked up at the next iteration, and a
+        missing or corrupt one costs a log line rather than the run.
+        """
+        path = self._ceiling_report_path.strip()
+        if not path:
+            return None
+        cached = getattr(self, "_ceiling_report", _CEILING_UNLOADED)
+        if cached is _CEILING_UNLOADED:
+            try:
+                from kernelforge.roofline_ceiling.report import read_report
+
+                cached = read_report(path)
+            except (OSError, ValueError) as exc:
+                log.warning("ceiling unavailable from %s: %s", path, exc)
+                cached = None
+            self._ceiling_report = cached
+        return cached
+
+    def _roofline_attainment(self) -> Any | None:
+        """Score the published ceiling against the incumbent's own per-case times.
+
+        The divisor is the incumbent, not the pristine anchor: attainment has to
+        move as the campaign improves the kernel, and the anchor by definition
+        does not move at all.
+        """
+        report = self._ceiling()
+        if report is None:
+            return None
+        from kernelforge.roofline_ceiling.attainment import measure_attainment
+
+        return measure_attainment(
+            report,
+            self._best_case_times or self._baseline_case_times,
+            unscored_cases=self._unscored_cases,
+        )
+
+    def _is_roofline_target_met(self) -> bool:
+        """Whether mean attainment has reached the target the operator asked for.
+
+        Two things have to hold, and the second is not a second opinion -- it is
+        what makes the first a number at all.
+
+        The mean must cover every scored case. A case excluded from the mean is
+        excluded from the objective the mean claims to report, so dropping the
+        three shapes furthest from their ceilings leaves the four easiest
+        averaging comfortably above target. The commonest exclusion is a ceiling
+        that sits below the latency already measured, which is the work model
+        contradicting itself -- exactly the estimate that must not be allowed to
+        end a campaign.
+
+        Nothing here touches KEEP. Whether one candidate beats another stays a
+        measurement against the incumbent; this decides only whether to buy
+        another round.
+        """
+        target = float(self.ic.roofline_target or 0.0)
+        if target <= 0:
+            return False
+        standing = self._roofline_attainment()
+        if standing is None or not standing.usable:
+            return False
+        if not standing.covers(self._scored_case_ids()):
+            for case_id, reason in sorted(standing.excluded.items()):
+                print(f"  [roofline] {case_id} has no attainment figure, so the target cannot be ruled on: {reason}")
+            return False
+        return standing.mean >= target
+
+    def _render_roofline_progress(self) -> str:
+        """One log line with the incumbent's mean attainment, or ``""`` when the campaign has no ceiling.
+
+        A mean taken over fewer cases than the suite scores says so, because
+        that mean is not the objective and must not read as if it were.
+        """
+        standing = self._roofline_attainment()
+        if standing is None:
+            return ""
+        if not standing.usable:
+            return "  [roofline] attainment: no scored case has a usable ceiling"
+        scored = self._scored_case_ids()
+        covered = {entry.case_id for entry in standing.cases} & set(scored)
+        coverage = "" if standing.covers(scored) else f" over {len(covered)} of {len(scored)} scored cases"
+        target = float(self.ic.roofline_target or 0.0)
+        suffix = f" (target {target * 100:.0f}%)" if target > 0 else ""
+        return f"  [roofline] attainment {standing.mean * 100:.1f}% of the estimated ceiling{coverage}{suffix}"
+
+    def _render_ceiling_advisory(self) -> str:
+        """Render the roofline standing for the implementer, when a ceiling is published.
+
+        The planner has already chosen the round's cases from the same standing,
+        carried as case evidence by ``_with_ceiling_standing``; this is the
+        implementer's view of it, so the session working a case knows how far
+        that case sits from its ceiling. Guidance, not a verdict: because the
+        ceiling is fixed for the campaign, pointing the agent at attainment and
+        pointing it at latency ask for the same thing, so this block adds a
+        direction without adding an incentive.
+        """
+        report = self._ceiling()
+        if report is None:
+            return ""
+        from kernelforge.roofline_ceiling.report import render_for_prompt
+
+        return render_for_prompt(
+            report,
+            self._best_case_times or self._baseline_case_times,
+            target=float(self.ic.roofline_target or 0.0),
+            unscored_cases=sorted(self._unscored_cases),
+        )
+
     def _render_case_config_coverage(self) -> str:
         """Render the configuration-coverage ledger for the Implementer."""
         coverage = self._case_config_coverage()
@@ -3045,7 +3334,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                     )
                 )
             self.state_store.save(self.run_state)
-        except Exception:  # noqa: BLE001 - best-effort; never break the loop
+        except Exception:
             log.debug("run_state: seed/hydrate failed", exc_info=True)
 
     def _validate_pre_published_warm_start(
@@ -3311,7 +3600,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 ):
                     raise RuntimeError(f"iteration {result.iteration} checkpoint was not durable")
             return True
-        except Exception as error:  # noqa: BLE001 - best-effort unless required
+        except Exception as error:
             if require_durable:
                 raise RuntimeError(f"failed to finalize iteration {result.iteration} checkpoint") from error
             log.debug("run_state: iteration reduce/save failed", exc_info=True)
@@ -3426,7 +3715,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 ),
             )
             return self.handoff_store.write(handoff)
-        except Exception as error:  # noqa: BLE001 - handoff is best-effort
+        except Exception as error:
             self.persistence_degraded = True
             self.persistence_errors.append(f"persist handoff iteration {iteration}: {error}")
             self.persistence_errors = self.persistence_errors[-10:]
@@ -3539,7 +3828,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                     print(
                         f"  [lesson] no summary ({outcome.reason}) — falling back to machine-observed session progress"
                     )
-            except Exception as error:  # noqa: BLE001 - never break the loop
+            except Exception as error:
                 summary_failure = f"{type(error).__name__}: {str(error)[:200]}"
                 log.debug("lessons: summarizer step failed", exc_info=True)
                 print(f"  [lesson] summarizer step failed ({type(error).__name__}: {error}) — falling back")
@@ -3549,21 +3838,18 @@ class IterationLoop(AnalysisRuntimeMixin):
         if not has_narrative:
             # No session could describe what was explored, but the gate's block reasons are a real record of what the
             # agent ran into.
-            try:
-                fallback = build_fallback_document(
-                    diff_summary=diff_summary,
-                    findings=session_sink.get("findings", ""),
-                    end_reason=result.session_end_reason,
-                    summary_failure=summary_failure,
-                    turns=result.turns,
-                    plan=session_sink.get("plan", ""),
-                    progress_log=session_sink.get("progress_log"),
-                )
-                if fallback and store.write(iteration, fallback) is not None:
-                    has_narrative = True
-                    print(f"  [lesson] machine-recorded iter {iteration} from gate findings: {len(fallback)} chars")
-            except Exception:  # noqa: BLE001 - best-effort
-                log.debug("lessons: fallback document failed", exc_info=True)
+            fallback = build_fallback_document(
+                diff_summary=diff_summary,
+                findings=session_sink.get("findings", ""),
+                end_reason=result.session_end_reason,
+                summary_failure=summary_failure,
+                turns=result.turns,
+                plan=session_sink.get("plan", ""),
+                progress_log=session_sink.get("progress_log"),
+            )
+            if fallback and store.write(iteration, fallback) is not None:
+                has_narrative = True
+                print(f"  [lesson] machine-recorded iter {iteration} from gate findings: {len(fallback)} chars")
 
         try:
             scope = self._lesson_scope(
@@ -3606,26 +3892,23 @@ class IterationLoop(AnalysisRuntimeMixin):
                     f"  [lesson] scope not recorded for iter {iteration}: "
                     f"the document renders unscoped and closes nothing"
                 )
-        except Exception:  # noqa: BLE001 - best-effort
+        except Exception:
             log.debug("lessons: scope append failed", exc_info=True)
 
-        try:
-            store.append_outcome(
-                iteration,
-                format_outcome_line(
-                    decision=decision,
-                    wall_ms=result.wall_ms,
-                    best_wall_ms=self.best_wall_ms,
-                    mean_case_speedup=result.mean_case_speedup,
-                    best_mean_case_speedup=self.best_mean_case_speedup,
-                    snr_db=result.snr_db,
-                    end_reason=result.session_end_reason,
-                    turns=result.turns if not has_narrative else None,
-                    summary_failure=(summary_failure if not has_narrative else ""),
-                ),
-            )
-        except Exception:  # noqa: BLE001 - best-effort
-            log.debug("lessons: outcome append failed", exc_info=True)
+        store.append_outcome(
+            iteration,
+            format_outcome_line(
+                decision=decision,
+                wall_ms=result.wall_ms,
+                best_wall_ms=self.best_wall_ms,
+                mean_case_speedup=result.mean_case_speedup,
+                best_mean_case_speedup=self.best_mean_case_speedup,
+                snr_db=result.snr_db,
+                end_reason=result.session_end_reason,
+                turns=result.turns if not has_narrative else None,
+                summary_failure=(summary_failure if not has_narrative else ""),
+            ),
+        )
 
     async def run_one_iteration(
         self,
@@ -3760,13 +4043,10 @@ class IterationLoop(AnalysisRuntimeMixin):
 
         # Step 5: Register check (optional — requires build artifacts)
         vgpr = None
-        try:
-            reg_result = await check_registers(build_dir=self.ic.build_dir)
-            vgpr = reg_result.get("vgpr") if reg_result.get("success") else None
-            if vgpr:
-                print(f"  [registers] VGPR={vgpr}")
-        except Exception:
-            log.debug("optional register check failed", exc_info=True)
+        reg_result = await check_registers(build_dir=self.ic.build_dir)
+        vgpr = reg_result.get("vgpr") if reg_result.get("success") else None
+        if vgpr:
+            print(f"  [registers] VGPR={vgpr}")
 
         # Step 6: the mean of the independent pristine-relative scores must clear the current best by the candidate's
         # own measurement noise.
@@ -3885,7 +4165,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 )
             )
             self.state_store.save(self.run_state)
-        except Exception:  # noqa: BLE001 - policy remains available in memory
+        except Exception:
             log.debug("search policy persistence failed", exc_info=True)
         # A window that has not filled yet is the ordinary state of a young campaign.
         fault = window_gain.unavailable
@@ -3922,10 +4202,12 @@ class IterationLoop(AnalysisRuntimeMixin):
         lanes: int = 1,
     ) -> tuple[Path | None, str]:
         """Run planning and durably publish every lane's plan for the round."""
-        context = self._with_case_config_coverage(
-            self._active_analysis_context
-            if self._active_analysis_context is not None
-            else self._build_orchestration_context()
+        context = self._with_ceiling_standing(
+            self._with_case_config_coverage(
+                self._active_analysis_context
+                if self._active_analysis_context is not None
+                else self._build_orchestration_context()
+            )
         )
         try:
             result = await orchestration_service.run(
@@ -3979,7 +4261,7 @@ class IterationLoop(AnalysisRuntimeMixin):
     def _record_critic_ruling(self, iteration: int, critic) -> None:
         """Put this round's verdict where the next process can still find it."""
         ruling = CriticRuling()
-        if critic is not None and not critic.error:
+        if critic is not None and not critic.fail_open:
             ruling = CriticRuling(
                 verdict=critic.verdict,
                 review_path=str((self._orchestration_root(iteration) / "critic_review.md").resolve()),
@@ -4350,11 +4632,7 @@ class IterationLoop(AnalysisRuntimeMixin):
 
         # Per-iteration lesson documents.
         self.lessons = LessonStore(self.ic.workspace_dir)
-        try:
-            self.handoff_store = HandoffStore(self.ic.workspace_dir)
-        except Exception:
-            self.handoff_store = None
-            log.debug("handoff store initialization failed", exc_info=True)
+        self.handoff_store = HandoffStore(self.ic.workspace_dir)
 
         # Full-fidelity candidate archive: persists each iteration's WHOLE solution (kernel snapshot + diff + full
         # profile + measurements + decision) so a later iteration can read back any prior attempt's real code.
@@ -4487,8 +4765,8 @@ class IterationLoop(AnalysisRuntimeMixin):
 
         # Persist only after the fresh-campaign guard has completed.
         if self.ic.pr_kb_snapshot:
-            from kernelforge.knowledge.pr_monitor_refs import commit_snapshot
-            from kernelforge.knowledge.pr_query_context import REASON_LOCAL_FAILURE
+            from kernelforge.knowledge.pr_knowledge.references import commit_snapshot
+            from kernelforge.knowledge.pr_knowledge.context import REASON_LOCAL_FAILURE
 
             try:
                 commit_snapshot(self.ic.workspace_dir, self.ic.pr_kb_snapshot)
@@ -4634,6 +4912,10 @@ class IterationLoop(AnalysisRuntimeMixin):
                 "anchor was accepted under the widened bound"
             )
 
+        # Once the anchor is settled and verified, so the estimate is handed the case set the objective scores and
+        # latencies from the campaign's own clock.
+        await self._establish_ceiling()
+
         # A crash immediately after a verified commit can leave the KEEP's archive unfinished.
         await self._finish_recovered_pending_keep()
 
@@ -4656,16 +4938,27 @@ class IterationLoop(AnalysisRuntimeMixin):
             # the implementer (prompt history).
             digest = ""
             if getattr(self, "archive", None) is not None:
-                try:
-                    digest = self.archive.render_digest()
-                except Exception as e:
-                    log.debug("could not render lineage digest: %s", e)
-                    digest = ""
+                digest = self.archive.render_digest()
 
             # Check terminal conditions
             if self._is_gate_met():
                 self.termination_reason = "gate_met"
                 print(f"\nGATE MET at iteration {iteration}: raw wall target reached at {self.best_wall_ms:.6f} ms")
+                break
+            if self._is_roofline_target_met():
+                self.termination_reason = "roofline_target_met"
+                standing = self._roofline_attainment()
+                print(
+                    f"\nROOFLINE TARGET MET at iteration {iteration}: mean attainment "
+                    f"{standing.mean * 100:.1f}% of the estimated ceiling, at or above the "
+                    f"{float(self.ic.roofline_target) * 100:.0f}% target. The ceiling is an estimate: if this "
+                    "looks early, the derivation in performance_ceiling_analysis.md is where it would be wrong."
+                )
+                for entry in sorted(standing.cases, key=lambda c: c.attainment):
+                    print(
+                        f"  [roofline] {entry.case_id}: {entry.attainment * 100:.1f}% "
+                        f"({entry.t_current_ms:.6g} ms vs ceiling {entry.t_ideal_ms:.6g} ms)"
+                    )
                 break
             if self.run_state.orchestration_circuit_state == ORCHESTRATION_CIRCUIT_OPEN:
                 self.termination_reason = "orchestration_failed"
@@ -4727,14 +5020,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                     print(f"\n[supervisor] intervening at iteration {iteration}: {supervisor_reason}")
                     memo = ""
                     try:
-                        try:
-                            evidence_context = self._build_supervisor_evidence_context(iteration)
-                        except Exception:
-                            evidence_context = ""
-                            log.debug(
-                                "could not build supervisor evidence",
-                                exc_info=True,
-                            )
+                        evidence_context = self._build_supervisor_evidence_context(iteration)
                         # A new review attempt supersedes the prior stall episode's ruling even when the backend
                         # returns empty.
                         self._expire_supervisor_ruling()
@@ -4758,7 +5044,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                             iteration=iteration,
                             evidence_context=evidence_context,
                         )
-                    except Exception as e:
+                    except Exception as e:  # noqa: BLE001 - supervisor memo is optional
                         print(f"  [supervisor] failed ({e}); continuing without a memo")
                     finally:
                         self._checkpoint_llm_usage()
@@ -4791,7 +5077,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                                     ),
                                 )
                             )
-                        except Exception:  # noqa: BLE001 - best-effort
+                        except Exception:
                             log.debug("run_state: supervisor event append failed", exc_info=True)
                     else:
                         print("  [supervisor] no new ruling returned; continuing without an active ruling")
@@ -4804,7 +5090,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                                 stall_threshold=self.ic.supervise_after,
                             )
                             self.state_store.save(self.run_state)
-                        except Exception:  # noqa: BLE001 - best-effort
+                        except Exception:
                             log.debug(
                                 "run_state: supervisor reset/save failed",
                                 exc_info=True,
@@ -4819,6 +5105,9 @@ class IterationLoop(AnalysisRuntimeMixin):
                 if self.best_mean_case_speedup is not None
                 else f"--- Iteration {iteration} ---"
             )
+            roofline_progress = self._render_roofline_progress()
+            if roofline_progress:
+                print(roofline_progress)
 
             # Re-scope the ownership boundary to this iteration: untracked files already here are the operator's or an
             # earlier round's, and this iteration's REVERT must not delete them.
@@ -4828,18 +5117,15 @@ class IterationLoop(AnalysisRuntimeMixin):
 
             # Durable per-iteration marker (facts only; detail lives in files).
             self.run_state.iteration = iteration
-            try:
-                self.state_store.append_event(
-                    make_event(
-                        "iteration_started",
-                        iteration,
-                        best_before_ms=self.best_wall_ms,
-                        best_before_mean_case_speedup=self.best_mean_case_speedup,
-                        phase=self.run_state.phase,
-                    )
+            self.state_store.append_event(
+                make_event(
+                    "iteration_started",
+                    iteration,
+                    best_before_ms=self.best_wall_ms,
+                    best_before_mean_case_speedup=self.best_mean_case_speedup,
+                    phase=self.run_state.phase,
                 )
-            except Exception:  # noqa: BLE001 - best-effort
-                log.debug("run_state: iteration_started append failed", exc_info=True)
+            )
 
             # Agent proposes modification
             session_sink: dict = {}
@@ -5020,13 +5306,10 @@ class IterationLoop(AnalysisRuntimeMixin):
                 # holding every past one.
                 lessons_txt = ""
                 if getattr(self, "lessons", None) is not None:
-                    try:
-                        lessons_txt = self.lessons.render_for_prompt(
-                            current_cases=self._scored_case_ids(),
-                            kernel_source=self._kernel_source_for_scope(),
-                        )
-                    except Exception:  # noqa: BLE001 - best-effort
-                        log.debug("lessons: prompt render failed", exc_info=True)
+                    lessons_txt = self.lessons.render_for_prompt(
+                        current_cases=self._scored_case_ids(),
+                        kernel_source=self._kernel_source_for_scope(),
+                    )
 
                 ledger_txt = ""
                 if self.ledger:
@@ -5061,6 +5344,10 @@ class IterationLoop(AnalysisRuntimeMixin):
                 if coverage_block:
                     history = f"{coverage_block}\n\n{history}"
                     print(f"  [agent] injected per-case configuration coverage: {len(coverage_block)} chars")
+                ceiling_block = self._render_ceiling_advisory()
+                if ceiling_block:
+                    history = f"{ceiling_block}\n\n{history}"
+                    print(f"  [agent] injected roofline attainment standing: {len(ceiling_block)} chars")
                 new_file_block = self._render_uncommittable_new_paths()
                 if new_file_block:
                     history = f"{new_file_block}\n\n{history}"
@@ -5128,7 +5415,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                         **extra_kwargs,
                     )
                     print(f"  [agent] Rationale: {rationale[:200]}")
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 - agent backend failure is not enumerable
                     agent_error = e
                     print(f"  [agent] ERROR: {e}")
                     rationale = f"agent session ended with error after edits: {e}"
@@ -5342,7 +5629,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                         plan=session_sink.get("plan", ""),
                         **run_kwargs,
                     )
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001
                     # Turn the crash into a FAILED result (crashed=True) and let it flow through the same
                     # verdict/ledger/archive path.
                     print(f"  [CRASH] iteration {iteration} crashed during run: {e}")
@@ -5406,7 +5693,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                             )
                             self._persist_pending_keep(pending_keep)
                             commit_hash = self._git_commit(str(pending_keep["commit_message"]))
-                        except Exception as e:
+                        except Exception as e:  # noqa: BLE001 - a KEEP that cannot be built is not a KEEP
                             result.kept = False
                             result.validation_passed = False
                             result.crashed = True
@@ -5466,20 +5753,17 @@ class IterationLoop(AnalysisRuntimeMixin):
                 on_best_ready(result)
 
             if self.experiment:
-                try:
-                    self.tracker.log_iteration(
-                        self.experiment.experiment_id,
-                        config={"iteration": iteration, "kept": result.kept},
-                        snr_db=result.snr_db,
-                        wall_ms=result.wall_ms,
-                        mean_case_speedup=result.mean_case_speedup,
-                        pmc_diagnosis=result.pmc_diagnosis,
-                        vgpr=result.vgpr,
-                        decision="KEEP" if result.kept else "REVERT",
-                        notes=session_sink.get("plan", ""),
-                    )
-                except Exception:
-                    log.debug("failed to log iteration to experiment tracker", exc_info=True)
+                self.tracker.log_iteration(
+                    self.experiment.experiment_id,
+                    config={"iteration": iteration, "kept": result.kept},
+                    snr_db=result.snr_db,
+                    wall_ms=result.wall_ms,
+                    mean_case_speedup=result.mean_case_speedup,
+                    pmc_diagnosis=result.pmc_diagnosis,
+                    vgpr=result.vgpr,
+                    decision="KEEP" if result.kept else "REVERT",
+                    notes=session_sink.get("plan", ""),
+                )
 
             self.results.append(result)
 
@@ -5523,36 +5807,29 @@ class IterationLoop(AnalysisRuntimeMixin):
 
             # Record this iteration into the cross-iteration experience ledger.
             if getattr(self, "ledger", None) is not None and (commit_hash or attempt_diff):
-                try:
-                    if not result.validation_passed:
-                        last = ""
-                        if result.validation_summary:
-                            lines = [l for l in result.validation_summary.splitlines() if l.strip()]
-                            last = lines[-1][:120] if lines else ""
-                        outcome = f"CRASH: {last}" if result.crashed else f"REVERT (validation failed): {last}"
-                    elif result.kept:
-                        outcome = f"KEPT — new best mean case speedup={result.mean_case_speedup:.6f}x"
-                    else:
-                        best_txt = (
-                            f"{self.best_mean_case_speedup:.6f}x" if self.best_mean_case_speedup is not None else "?"
-                        )
-                        speedup_txt = (
-                            f"{result.mean_case_speedup:.6f}x" if result.mean_case_speedup is not None else "?"
-                        )
-                        outcome = f"REVERT (correct but not faster): mean case speedup={speedup_txt} vs best={best_txt}"
-                    error_text = (
-                        session_sink.get("findings", "")
-                        or getattr(result, "error_output", "")
-                        or (result.validation_summary if not result.validation_passed else "")
-                    )
-                    self.ledger.record_iteration(
-                        iteration=iteration,
-                        outcome=outcome,
-                        diff_summary=iteration_diff_summary,
-                        error_text=error_text,
-                    )
-                except Exception:
-                    log.debug("postmortem logging failed", exc_info=True)
+                if not result.validation_passed:
+                    last = ""
+                    if result.validation_summary:
+                        lines = [l for l in result.validation_summary.splitlines() if l.strip()]
+                        last = lines[-1][:120] if lines else ""
+                    outcome = f"CRASH: {last}" if result.crashed else f"REVERT (validation failed): {last}"
+                elif result.kept:
+                    outcome = f"KEPT — new best mean case speedup={result.mean_case_speedup:.6f}x"
+                else:
+                    best_txt = f"{self.best_mean_case_speedup:.6f}x" if self.best_mean_case_speedup is not None else "?"
+                    speedup_txt = f"{result.mean_case_speedup:.6f}x" if result.mean_case_speedup is not None else "?"
+                    outcome = f"REVERT (correct but not faster): mean case speedup={speedup_txt} vs best={best_txt}"
+                error_text = (
+                    session_sink.get("findings", "")
+                    or getattr(result, "error_output", "")
+                    or (result.validation_summary if not result.validation_passed else "")
+                )
+                self.ledger.record_iteration(
+                    iteration=iteration,
+                    outcome=outcome,
+                    diff_summary=iteration_diff_summary,
+                    error_text=error_text,
+                )
 
             # Archive the full solution and measurements as a derived view.
             archived_path = None
@@ -5593,7 +5870,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                     )
                     if keep_checkpoint_finalized and archived_path is None:
                         raise RuntimeError("candidate archive returned no published path")
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001
                     if keep_checkpoint_finalized:
                         self.persistence_degraded = True
                         self.persistence_errors.append(f"archive derived KEEP view iteration {iteration}: {e}")
@@ -5649,7 +5926,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 )
             )
             self.state_store.save(self.run_state)
-        except Exception:  # noqa: BLE001 - best-effort
+        except Exception:
             log.debug("run_state: terminal save failed", exc_info=True)
         self.persistence_degraded = self.persistence_degraded or self.state_store.degraded
         self.persistence_errors = (self.persistence_errors + self.state_store.persistence_errors)[-10:]
@@ -5659,10 +5936,7 @@ class IterationLoop(AnalysisRuntimeMixin):
         self._checkpoint_llm_usage()
 
         if self.experiment:
-            try:
-                self.tracker.mark_complete(self.experiment.experiment_id)
-            except Exception:
-                log.debug("failed to mark experiment complete", exc_info=True)
+            self.tracker.mark_complete(self.experiment.experiment_id)
 
         # Final report
         total_time = time.time() - self.start_time
@@ -5746,15 +6020,11 @@ def _long_horizon_header(
 ) -> str:
     """The compact long-horizon header for the Implementer prompt, or \"\"."""
     outcomes = store.recent_results(LONG_HORIZON_OUTCOME_WINDOW)
-    try:
-        return render_long_horizon_header(
-            state,
-            outcomes,
-            include_handoffs=bool(handoff_store and handoff_store.latest()),
-        )
-    except Exception:  # noqa: BLE001 - best-effort
-        log.debug("run_state: prompt view render failed", exc_info=True)
-        return ""
+    return render_long_horizon_header(
+        state,
+        outcomes,
+        include_handoffs=bool(handoff_store and handoff_store.latest()),
+    )
 
 
 def _compact_history_entry(r: IterationResult) -> str:

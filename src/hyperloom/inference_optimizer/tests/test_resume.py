@@ -35,7 +35,7 @@ def _backends_full() -> dict[str, object]:
 async def test_fresh_session_is_not_resume(session_dir):
     c = Coordinator(session_dir, backends=_backends_full())
     try:
-        info = c.resumed_from
+        info = c.writeback.resumed_from
         assert info["is_resume"] is False
         assert info["event_count"] == 0
         assert info["state_json_present"] is False
@@ -49,8 +49,8 @@ async def test_existing_state_json_triggers_resume(session_dir):
     SharedState(session_id="resumed").save(session_dir)
     c = Coordinator(session_dir, backends=_backends_full())
     try:
-        assert c.resumed_from["is_resume"] is True
-        assert c.resumed_from["state_json_present"] is True
+        assert c.writeback.resumed_from["is_resume"] is True
+        assert c.writeback.resumed_from["state_json_present"] is True
     finally:
         await c.stop()
 
@@ -148,8 +148,8 @@ async def test_existing_events_triggers_resume(session_dir):
         await c1.stop()
     c2 = Coordinator(session_dir, backends=_backends_full())
     try:
-        assert c2.resumed_from["is_resume"] is True
-        assert c2.resumed_from["event_count"] >= 1
+        assert c2.writeback.resumed_from["is_resume"] is True
+        assert c2.writeback.resumed_from["event_count"] >= 1
     finally:
         await c2.stop()
 
@@ -181,7 +181,7 @@ async def test_replay_rebuilds_undecided_proposals(session_dir):
 
     c2 = Coordinator(session_dir, backends=_backends_full())
     try:
-        stats = await c2.replay_for_resume()
+        stats = await c2.writeback.replay_for_resume()
         assert stats["pending_restored"] == 1
         assert original_id in c2.state.pending_proposals
         restored = c2.state.pending_proposals[original_id]
@@ -209,13 +209,14 @@ async def test_replay_skips_approved_proposals(session_dir):
     c1 = Coordinator(session_dir, backends=backends)
     try:
         await c1.tick(2)
-        assert any(p.verdict == "approve" for p in c1.state.pending_proposals.values())
+        verdicts = await c1.bus.tail(topic="review_verdict", n=100)
+        assert any(v.payload.get("verdict") == "approve" for v in verdicts)
     finally:
         await c1.stop()
 
     c2 = Coordinator(session_dir, backends=_backends_full())
     try:
-        stats = await c2.replay_for_resume()
+        stats = await c2.writeback.replay_for_resume()
         assert stats["pending_restored"] == 0
         assert c2.state.pending_proposals == {}
     finally:
@@ -244,7 +245,7 @@ async def test_replay_skips_rejected_proposals(session_dir):
     try:
         await c1.tick(1)
         proposal_id = next(iter(c1.state.pending_proposals.keys()))
-        await c1._handle_intent(
+        await c1.router.handle_intent(
             "critic",
             Intent(
                 type=IntentType.REVIEW_VERDICT,
@@ -261,7 +262,7 @@ async def test_replay_skips_rejected_proposals(session_dir):
 
     c2 = Coordinator(session_dir, backends=_backends_full())
     try:
-        stats = await c2.replay_for_resume()
+        stats = await c2.writeback.replay_for_resume()
         assert stats["pending_restored"] == 0
         assert stats["verdicts_seen"] >= 1
     finally:
@@ -287,7 +288,7 @@ async def test_replay_mixed_pending_and_decided(session_dir):
         c1.shared_state.save(session_dir)
         proposal_ids = []
         for action in ("baseline", "profile", "explore"):
-            await c1._handle_intent(
+            await c1.router.handle_intent(
                 "orchestration",
                 Intent(
                     type=IntentType.PROPOSE_ACTION,
@@ -301,14 +302,14 @@ async def test_replay_mixed_pending_and_decided(session_dir):
                 # this on completion.
                 c1.shared_state.baseline_tput = 100.0
 
-        await c1._handle_intent(
+        await c1.router.handle_intent(
             "critic",
             Intent(
                 type=IntentType.REVIEW_VERDICT,
                 payload={"target_proposal_msg_id": proposal_ids[0], "verdict": "approve", "reasoning": "ok"},
             ),
         )
-        await c1._handle_intent(
+        await c1.router.handle_intent(
             "critic",
             Intent(
                 type=IntentType.REVIEW_VERDICT,
@@ -325,7 +326,7 @@ async def test_replay_mixed_pending_and_decided(session_dir):
 
     c2 = Coordinator(session_dir, backends=_backends_full())
     try:
-        stats = await c2.replay_for_resume()
+        stats = await c2.writeback.replay_for_resume()
         assert stats["pending_restored"] == 1
         restored = next(iter(c2.state.pending_proposals.values()))
         assert restored.action_name == "explore"
@@ -342,14 +343,14 @@ async def test_resume_preserves_pruned_and_restores_pending(session_dir):
     }
     c1 = Coordinator(session_dir, backends=backends)
     try:
-        await c1._handle_intent(
+        await c1.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.PRUNE_BRANCH,
                 payload={"family": "deep_kernel", "reason": "x"},
             ),
         )
-        await c1._handle_intent(
+        await c1.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.PROPOSE_ACTION,
@@ -361,7 +362,7 @@ async def test_resume_preserves_pruned_and_restores_pending(session_dir):
 
     c2 = Coordinator(session_dir, backends=_backends_full())
     try:
-        await c2.replay_for_resume()
+        await c2.writeback.replay_for_resume()
         assert c2.shared_state.is_pruned("deep_kernel")
         assert len(c2.state.pending_proposals) == 1
     finally:
@@ -378,7 +379,7 @@ async def test_tick_lazily_runs_replay_on_resume(session_dir):
     }
     c1 = Coordinator(session_dir, backends=backends)
     try:
-        await c1._handle_intent(
+        await c1.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.PROPOSE_ACTION,
@@ -388,11 +389,16 @@ async def test_tick_lazily_runs_replay_on_resume(session_dir):
     finally:
         await c1.stop()
 
-    c2 = Coordinator(session_dir, backends=_backends_full())
+    # Use a silent critic so the restored proposal is not auto-approved during tick.
+    silent_backends = {
+        "orchestration": MockBackend(silent, name="o2"),
+        "critic": MockBackend(silent, name="c2"),
+    }
+    c2 = Coordinator(session_dir, backends=silent_backends)
     try:
-        assert c2.resumed_from["rebuilt"] is False
+        assert c2.writeback.resumed_from["rebuilt"] is False
         await c2.tick(1)
-        assert c2.resumed_from["rebuilt"] is True
+        assert c2.writeback.resumed_from["rebuilt"] is True
         assert len(c2.state.pending_proposals) == 1
     finally:
         await c2.stop()
@@ -463,18 +469,10 @@ class TestN24KernelAgentEnvHardFail:
     @pytest.fixture(autouse=True)
     def _isolate_env(self, monkeypatch):
         for var in (
-            "HYPERLOOM_KERNEL_AGENT_ROOT",
             "KERNEL_AGENT_ENV",
             "USER_DATA_PATH",
         ):
             monkeypatch.delenv(var, raising=False)
-
-    def test_noop_when_root_already_set(self, monkeypatch, capsys):
-        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", "/opt/kernel-agent")
-        cli_preflight._load_kernel_agent_env_fallback()
-        out = capsys.readouterr()
-        assert out.out == ""
-        assert out.err == ""
 
     def test_aborts_when_no_user_data_path(self, monkeypatch, capsys):
         with pytest.raises(SystemExit) as excinfo:
@@ -494,40 +492,40 @@ class TestN24KernelAgentEnvHardFail:
         assert "install.sh" in err
         assert str(tmp_path) in err
 
-    def test_aborts_when_env_file_does_not_define_root(
+    @pytest.mark.parametrize(
+        "contents",
+        ["# stale file\n", "# stale file\nexport SOMETHING_ELSE=1\n"],
+        ids=["comments-only", "only-unsupported"],
+    )
+    def test_aborts_when_env_file_sets_no_supported_vars(
         self,
         tmp_path,
         monkeypatch,
         capsys,
+        contents,
     ):
         runtime = tmp_path / "runtime"
         runtime.mkdir()
-        (runtime / "kernel-agent.env.sh").write_text(
-            "# stale file\nexport SOMETHING_ELSE=1\n",
-            encoding="utf-8",
-        )
+        (runtime / "kernel-agent.env.sh").write_text(contents, encoding="utf-8")
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
         with pytest.raises(SystemExit) as excinfo:
             cli_preflight._load_kernel_agent_env_fallback()
         assert excinfo.value.code == 2
         err = capsys.readouterr().err
-        assert "HYPERLOOM_KERNEL_AGENT_ROOT" in err
-        assert "stale" in err or "malformed" in err
+        assert "malformed or stale" in err
+        assert "install.sh" in err
 
     def test_sources_vars_on_success(self, tmp_path, monkeypatch, capsys):
         runtime = tmp_path / "runtime"
         runtime.mkdir()
         (runtime / "kernel-agent.env.sh").write_text(
-            "# valid env file\n"
-            "export HYPERLOOM_KERNEL_AGENT_ROOT=/opt/kernel-agent\n"
-            "export KERNEL_AGENT_LOG_LEVEL=INFO\n",
+            "# valid env file\nexport KERNEL_AGENT_LOG_LEVEL=INFO\n",
             encoding="utf-8",
         )
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
         cli_preflight._load_kernel_agent_env_fallback()
         import os as _os
 
-        assert _os.environ["HYPERLOOM_KERNEL_AGENT_ROOT"] == "/opt/kernel-agent"
         assert _os.environ["KERNEL_AGENT_LOG_LEVEL"] == "INFO"
         out = capsys.readouterr().out
         assert "loaded" in out
@@ -537,7 +535,7 @@ class TestN24KernelAgentEnvHardFail:
         runtime = tmp_path / "runtime"
         runtime.mkdir()
         (runtime / "kernel-agent.env.sh").write_text(
-            "export HYPERLOOM_KERNEL_AGENT_ROOT=/from/file\nexport KERNEL_AGENT_LOG_LEVEL=INFO\n",
+            "export KERNEL_AGENT_LOG_LEVEL=INFO\n",
             encoding="utf-8",
         )
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
@@ -545,7 +543,6 @@ class TestN24KernelAgentEnvHardFail:
         cli_preflight._load_kernel_agent_env_fallback()
         import os as _os
 
-        assert _os.environ["HYPERLOOM_KERNEL_AGENT_ROOT"] == "/from/file"
         assert _os.environ["KERNEL_AGENT_LOG_LEVEL"] == "DEBUG"
 
     def test_credential_fallback_block_parses_without_warnings(
@@ -558,7 +555,6 @@ class TestN24KernelAgentEnvHardFail:
         runtime = tmp_path / "runtime"
         runtime.mkdir()
         (runtime / "kernel-agent.env.sh").write_text(
-            "export HYPERLOOM_KERNEL_AGENT_ROOT=/opt/kernel-agent\n"
             'if [ -n "${ANTHROPIC_API_KEY:-}" ]; then\n'
             "  [ \"${ANTHROPIC_API_KEY}\" = 'ak-install-time' ] || \\\n"
             "    echo '[kernel-agent] ANTHROPIC_API_KEY differs' >&2\n"
@@ -589,15 +585,14 @@ class TestN24KernelAgentEnvHardFail:
     ):
         custom = tmp_path / "custom-loc.sh"
         custom.write_text(
-            "export HYPERLOOM_KERNEL_AGENT_ROOT=/from/custom\n",
+            "export KERNEL_AGENT_LOG_LEVEL=INFO\n",
             encoding="utf-8",
         )
         monkeypatch.setenv("KERNEL_AGENT_ENV", str(custom))
         monkeypatch.setenv("USER_DATA_PATH", "/nonexistent/should-not-be-used")
-        cli_preflight._load_kernel_agent_env_fallback()
-        import os as _os
+        outcome = cli_preflight._load_kernel_agent_env_fallback()
 
-        assert _os.environ["HYPERLOOM_KERNEL_AGENT_ROOT"] == "/from/custom"
+        assert outcome["detail"]["env_file"] == str(custom)
 
 
 # A stale/placeholder TRACELENS_ROOT is corrected from the installer-written env file; template placeholders are
@@ -605,37 +600,44 @@ class TestN24KernelAgentEnvHardFail:
 class TestTracelensRootEnvCorrection:
     @pytest.fixture(autouse=True)
     def _isolate_env(self, monkeypatch):
+        import os
+
+        snapshot = dict(os.environ)
         for var in (
-            "HYPERLOOM_KERNEL_AGENT_ROOT",
             "KERNEL_AGENT_ENV",
             "USER_DATA_PATH",
             "TRACELENS_ROOT",
             "MAGPIE_PATH",
         ):
             monkeypatch.delenv(var, raising=False)
+        try:
+            yield
+        finally:
+            os.environ.clear()
+            os.environ.update(snapshot)
 
     def _write_env_file(self, tmp_path, tracelens_dir):
         runtime = tmp_path / "runtime"
         runtime.mkdir(exist_ok=True)
         (runtime / "kernel-agent.env.sh").write_text(
-            f"export HYPERLOOM_KERNEL_AGENT_ROOT=/opt/kernel-agent\nexport TRACELENS_ROOT='{tracelens_dir}'\n",
+            f"export TRACELENS_ROOT='{tracelens_dir}'\n",
             encoding="utf-8",
         )
 
     def test_corrects_invalid_inherited_root_from_env_file(self, tmp_path, monkeypatch, capsys):
-        """Root set + inherited TRACELENS_ROOT points nowhere → corrected from file."""
+        """An inherited TRACELENS_ROOT that points nowhere is corrected from the file."""
         good = tmp_path / "deps" / "TraceLens"
         good.mkdir(parents=True)
         self._write_env_file(tmp_path, good)
-        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", "/opt/kernel-agent")
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
         monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path / "ghost" / "TraceLens"))
 
-        cli_preflight._load_kernel_agent_env_fallback()
+        outcome = cli_preflight._load_kernel_agent_env_fallback()
 
         import os as _os
 
         assert _os.environ["TRACELENS_ROOT"] == str(good)
+        assert outcome["detail"]["corrected_keys"] == ["TRACELENS_ROOT"]
         assert "TRACELENS_ROOT" in capsys.readouterr().err
 
     def test_keeps_valid_inherited_root(self, tmp_path, monkeypatch):
@@ -645,34 +647,74 @@ class TestTracelensRootEnvCorrection:
         inherited = tmp_path / "inherited" / "TraceLens"
         inherited.mkdir(parents=True)
         self._write_env_file(tmp_path, file_dir)
-        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", "/opt/kernel-agent")
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
         monkeypatch.setenv("TRACELENS_ROOT", str(inherited))
 
-        cli_preflight._load_kernel_agent_env_fallback()
+        outcome = cli_preflight._load_kernel_agent_env_fallback()
 
         import os as _os
 
         assert _os.environ["TRACELENS_ROOT"] == str(inherited)
+        assert outcome["detail"]["corrected_keys"] == []
 
-    def test_magpie_path_is_not_corrected(self, tmp_path, monkeypatch):
-        """MAGPIE_PATH is out of scope: a merely-existing non-checkout dir in the env file must NOT be promoted to an explicit MAGPIE_PATH override."""
+    @pytest.mark.parametrize("override_kind", ["missing", "non-checkout", "empty"])
+    def test_magpie_path_is_not_corrected(self, tmp_path, monkeypatch, override_kind):
+        """TraceLens correction must not replace an explicit Magpie value, even an invalid one."""
         runtime = tmp_path / "runtime"
         runtime.mkdir()
-        magpie_dir = tmp_path / "not-a-magpie-checkout"
-        magpie_dir.mkdir()
+        magpie_dir = tmp_path / "installed-magpie"
+        (magpie_dir / "Magpie").mkdir(parents=True)
+        (magpie_dir / "Magpie" / "__init__.py").write_text("", encoding="utf-8")
+        override = tmp_path / "not-a-magpie-checkout"
+        if override_kind == "non-checkout":
+            override.mkdir()
+        selected = "" if override_kind == "empty" else str(override)
         (runtime / "kernel-agent.env.sh").write_text(
-            f"export HYPERLOOM_KERNEL_AGENT_ROOT=/opt/kernel-agent\nexport MAGPIE_PATH='{magpie_dir}'\n",
+            f"export MAGPIE_PATH='{magpie_dir}'\n",
             encoding="utf-8",
         )
-        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", "/opt/kernel-agent")
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+        monkeypatch.setenv("MAGPIE_PATH", selected)
 
-        cli_preflight._load_kernel_agent_env_fallback()
+        outcome = cli_preflight._load_kernel_agent_env_fallback()
 
         import os as _os
 
-        assert _os.environ.get("MAGPIE_PATH") is None
+        assert _os.environ["MAGPIE_PATH"] == selected
+        assert "MAGPIE_PATH" not in outcome["detail"]["corrected_keys"]
+
+    def test_runtime_magpie_gapfill_reaches_child_imports(self, tmp_path, monkeypatch):
+        """The runtime file's Magpie import root reaches child processes."""
+        import os
+        import subprocess
+        import sys
+
+        runtime = tmp_path / "runtime"
+        runtime.mkdir()
+        magpie_dir = tmp_path / "runtime Magpie"
+        (magpie_dir / "Magpie").mkdir(parents=True)
+        (magpie_dir / "Magpie" / "__init__.py").write_text("RUNTIME_MARKER = 'installer-checkout'\n", encoding="utf-8")
+        (runtime / "kernel-agent.env.sh").write_text(
+            f"export MAGPIE_PATH='{magpie_dir}'\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+        monkeypatch.setenv("PYTHONPATH", "")
+
+        outcome = cli_preflight._load_kernel_agent_env_fallback()
+        cli_preflight._derive_runtime_paths()
+
+        assert os.environ["MAGPIE_PATH"] == str(magpie_dir)
+        assert "MAGPIE_PATH" not in outcome["detail"]["corrected_keys"]
+        child = subprocess.run(
+            [sys.executable, "-c", "import Magpie; print(Magpie.RUNTIME_MARKER)"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        assert child.returncode == 0, child.stderr
+        assert child.stdout.strip() == "installer-checkout"
 
     def test_placeholder_path_to_your_is_unset(self):
         assert cli_preflight._is_placeholder_tracelens_path("/path/to/your/TraceLens") is True

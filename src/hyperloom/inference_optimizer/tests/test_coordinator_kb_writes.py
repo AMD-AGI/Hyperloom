@@ -5,8 +5,10 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.roles.mock_backend import (
     MockBackend,
@@ -37,13 +39,13 @@ def _make_coordinator(tmp_path: Path) -> Coordinator:
         "orchestration": MockBackend(idle),
         "critic": MockBackend(idle),
     }
+
     kb = RecipeKB(local=LocalRecipeStore(root=tmp_path / "kb"))
     coord = Coordinator(
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        recipe_kb=kb,
-        knowledge_plane=None,
+        knowledge_plane=KnowledgePlane(recipe_kb=kb),
     )
     ss = coord.shared_state
     ss.model_name = _MODEL
@@ -65,17 +67,17 @@ def _expected_cid() -> str:
 
 
 def test_workload_canonical_id_defined_and_consistent(tmp_path: Path) -> None:
-    """``_workload_canonical_id`` exists and agrees with ``recipe_canonical_id``."""
+    """``workload_canonical_id`` exists and agrees with ``recipe_canonical_id``."""
     coord = _make_coordinator(tmp_path)
-    assert hasattr(coord, "_workload_canonical_id")
-    assert coord._workload_canonical_id() == _expected_cid()
-    assert coord._workload_canonical_id() == _expected_cid()
+    assert hasattr(coord.recipe_journal, "workload_canonical_id")
+    assert coord.recipe_journal.workload_canonical_id() == _expected_cid()
+    assert coord.recipe_journal.workload_canonical_id() == _expected_cid()
 
 
 def test_kb_amend_recipe_persists_lesson(tmp_path: Path) -> None:
     """Appending a lesson lands in the local KB."""
     coord = _make_coordinator(tmp_path)
-    coord._kb_amend_recipe(
+    coord.recipe_journal.kb_amend_recipe(
         append_lesson={"statement": "raise tp to 8", "measured_impact": "+12%"},
     )
     row = coord.recipe_kb.get_recipe(canonical_id=_expected_cid())
@@ -86,7 +88,7 @@ def test_kb_amend_recipe_persists_lesson(tmp_path: Path) -> None:
 
 def test_kb_amend_recipe_persists_pitfall(tmp_path: Path) -> None:
     coord = _make_coordinator(tmp_path)
-    coord._kb_amend_recipe(
+    coord.recipe_journal.kb_amend_recipe(
         append_pitfall={"description": "ep=8 OOMs on 30B"},
     )
     row = coord.recipe_kb.get_recipe(canonical_id=_expected_cid())
@@ -104,7 +106,7 @@ def test_kb_amend_recipe_is_noop_in_remote_mode(tmp_path: Path) -> None:
         def __getattr__(self, name: str):
             raise AssertionError(f"remote amend accessed RecipeKB: {name}")
 
-    coord.recipe_kb = _ForbiddenRecipeKB()
+    coord.knowledge_plane = KnowledgePlane(recipe_kb=_ForbiddenRecipeKB())
     coord.knowledge_plane = SimpleNamespace(
         config=KnowledgeConfig.from_env(
             {
@@ -114,7 +116,7 @@ def test_kb_amend_recipe_is_noop_in_remote_mode(tmp_path: Path) -> None:
             }
         )
     )
-    coord._kb_amend_recipe(append_lesson={"statement": "must not write", "measured_impact": ""})
+    coord.recipe_journal.kb_amend_recipe(append_lesson={"statement": "must not write", "measured_impact": ""})
 
 
 def test_record_fact_per_variant_stamps_best_config_on_keep(tmp_path: Path) -> None:
@@ -127,7 +129,7 @@ def test_record_fact_per_variant_stamps_best_config_on_keep(tmp_path: Path) -> N
         task_id="t-keep-bc",
         params={},
     )
-    coord._record_fact_per_variant(
+    coord.recipe_journal._record_fact_per_variant(
         task=task,
         source_session_id="sess-1",
         variant_outcome={
@@ -136,6 +138,7 @@ def test_record_fact_per_variant_stamps_best_config_on_keep(tmp_path: Path) -> N
             "variant": {"extra_server_args": "--disable-radix-cache"},
             "metrics": {"gain_pct": 0.66, "output_throughput": 6700.0},
         },
+        adopted=True,
     )
     row = coord.recipe_kb.get_recipe(canonical_id=_expected_cid())
     assert row is not None
@@ -143,6 +146,28 @@ def test_record_fact_per_variant_stamps_best_config_on_keep(tmp_path: Path) -> N
     assert bc.get("extra_server_args") == "--disable-radix-cache"
     assert float(row.get("best_throughput") or 0.0) == 6700.0
     assert any("disable-radix-cache" in str(l.get("statement") or "") for l in (row.get("lessons") or []))
+
+
+def test_record_fact_per_variant_writes_no_lesson_for_an_unadopted_keep(tmp_path: Path) -> None:
+    """An executor KEEP whose lift did not land is not a lesson or a best_config."""
+    from types import SimpleNamespace
+
+    coord = _make_coordinator(tmp_path)
+    task = SimpleNamespace(kind="explore", task_id="t-keep-refused", params={})
+    coord.recipe_journal._record_fact_per_variant(
+        task=task,
+        source_session_id="sess-1",
+        variant_outcome={
+            "outcome": "KEEP",
+            "variant_name": "disable_radix",
+            "variant": {"extra_server_args": "--disable-radix-cache"},
+            "metrics": {"gain_pct": 0.66, "output_throughput": 6700.0},
+        },
+        adopted=False,
+    )
+    row = coord.recipe_kb.get_recipe(canonical_id=_expected_cid()) or {}
+    assert not (row.get("lessons") or [])
+    assert not (row.get("best_config") or {})
 
 
 def test_record_fact_per_variant_does_not_clobber_better_best_config(
@@ -164,7 +189,7 @@ def test_record_fact_per_variant_does_not_clobber_better_best_config(
         best_throughput=7000.0,
     )
     task = SimpleNamespace(kind="explore", task_id="t-weaker", params={})
-    coord._record_fact_per_variant(
+    coord.recipe_journal._record_fact_per_variant(
         task=task,
         source_session_id="sess-1",
         variant_outcome={
@@ -173,6 +198,7 @@ def test_record_fact_per_variant_does_not_clobber_better_best_config(
             "variant": {"extra_server_args": "--disable-radix-cache"},
             "metrics": {"gain_pct": 0.1, "output_throughput": 6600.0},
         },
+        adopted=True,
     )
     row = coord.recipe_kb.get_recipe(canonical_id=cid)
     bc = row.get("best_config") or {}
@@ -185,10 +211,10 @@ def test_kb_amend_recipe_stamps_architecture_tags(tmp_path: Path) -> None:
     coord = _make_coordinator(tmp_path)
     coord.shared_state.model_architectures = ["LlamaForCausalLM"]
     coord.shared_state.model_type = "llama"
-    coord._kb_amend_recipe(
+    coord.recipe_journal.kb_amend_recipe(
         append_lesson={"statement": "raise tp to 8", "measured_impact": "+12%"},
     )
-    row = coord.recipe_kb.get_recipe(canonical_id=coord._workload_canonical_id())
+    row = coord.recipe_kb.get_recipe(canonical_id=coord.recipe_journal.workload_canonical_id())
     assert row is not None
     assert row.get("architectures") == ["LlamaForCausalLM"]
     assert row.get("model_type") == "llama"
@@ -197,7 +223,7 @@ def test_kb_amend_recipe_stamps_architecture_tags(tmp_path: Path) -> None:
 def test_kb_amend_recipe_skips_empty_architecture_tags(tmp_path: Path) -> None:
     """With no config.json tags the amend must NOT stamp empty ``architectures`` / ``model_type`` keys."""
     coord = _make_coordinator(tmp_path)
-    coord._kb_amend_recipe(
+    coord.recipe_journal.kb_amend_recipe(
         append_lesson={"statement": "raise tp to 8", "measured_impact": "+12%"},
     )
     row = coord.recipe_kb.get_recipe(canonical_id=_expected_cid())
@@ -212,7 +238,7 @@ def test_sdk_fallback_t0_anchors_into_self_recipe_kb(tmp_path: Path) -> None:
     # Clear the markers and re-anchor the canonical Recipe identity.
     coord.shared_state.warm_start_ts = ""
     coord.shared_state.recipe_kb_session_id = ""
-    coord._ensure_recipe_kb_t0_anchored()
+    coord.phase_machine.ensure_recipe_kb_t0_anchored()
     row = coord.recipe_kb.get_recipe(canonical_id=_expected_cid())
     assert row is not None, "SDK-fallback T0 did not anchor into self.recipe_kb"
 
@@ -267,7 +293,7 @@ def test_local_store_preserves_session_provenance(tmp_path: Path) -> None:
     assert s["stack_len"] == 3
 
 
-# _kb_amend_recipe reads the LOCAL row and preserves T0-stamped extras + audit fields; appends accumulate instead of
+# kb_amend_recipe reads the LOCAL row and preserves T0-stamped extras + audit fields; appends accumulate instead of
 # clobbering.
 def test_amend_preserves_t0_extras_and_audit(tmp_path: Path) -> None:
     coord = _make_coordinator(tmp_path)
@@ -283,7 +309,7 @@ def test_amend_preserves_t0_extras_and_audit(tmp_path: Path) -> None:
         authority="AUTHORITATIVE",
         confidence=0.99,
     )
-    coord._kb_amend_recipe(
+    coord.recipe_journal.kb_amend_recipe(
         append_lesson={"statement": "x", "measured_impact": "+1%"},
     )
     row = coord.recipe_kb.get_recipe(canonical_id=cid)
@@ -297,8 +323,8 @@ def test_amend_appends_lessons_cumulatively(tmp_path: Path) -> None:
     """Local read-modify-write accumulates, not overwrites."""
     coord = _make_coordinator(tmp_path)
     cid = _expected_cid()
-    coord._kb_amend_recipe(append_lesson={"statement": "first", "measured_impact": "+1%"})
-    coord._kb_amend_recipe(append_lesson={"statement": "second", "measured_impact": "+2%"})
+    coord.recipe_journal.kb_amend_recipe(append_lesson={"statement": "first", "measured_impact": "+1%"})
+    coord.recipe_journal.kb_amend_recipe(append_lesson={"statement": "second", "measured_impact": "+2%"})
     row = coord.recipe_kb.get_recipe(canonical_id=cid)
     assert [l["statement"] for l in row["lessons"]] == ["first", "second"]
 
@@ -320,7 +346,7 @@ def test_close_does_not_clobber_better_best_config(tmp_path: Path) -> None:
         stack_fingerprint={"vllm_version": "0.6.0"},
     )
     coord.shared_state.current_best = {}
-    coord.finalize_recipe_and_journal()
+    coord.recipe_journal.finalize_recipe_and_journal()
     row = coord.recipe_kb.get_recipe(canonical_id=cid)
     assert row["best_throughput"] == 1000.0, "empty CLOSE clobbered a better config"
     assert row["best_config"].get("name") == "good"
@@ -356,7 +382,7 @@ def test_build_recipe_attrs_surfaces_kept_kernel(tmp_path: Path) -> None:
     """``_build_recipe_attrs_from_state`` emits a ``kernel_optimizations`` entry carrying micro_speedup + E2E outcome."""
     coord = _make_coordinator(tmp_path)
     _seed_kept_kernel(coord)
-    attrs = coord._build_recipe_attrs_from_state()
+    attrs = coord.recipe_journal._build_recipe_attrs_from_state()
     kopts = attrs.get("kernel_optimizations") or []
     assert kopts, "KEEP'd kernel k006 missing from recipe attrs"
     k = next((x for x in kopts if x.get("kernel_id") == "k006"), None)
@@ -374,7 +400,7 @@ def test_close_finalize_persists_kept_kernel_to_kb(tmp_path: Path) -> None:
     """After CLOSE finalize, recipe.json carries the KEEP'd kernel under ``kernel_optimizations``."""
     coord = _make_coordinator(tmp_path)
     _seed_kept_kernel(coord)
-    coord.finalize_recipe_and_journal()
+    coord.recipe_journal.finalize_recipe_and_journal()
     row = coord.recipe_kb.get_recipe(canonical_id=_expected_cid())
     assert row is not None
     kopts = row.get("kernel_optimizations") or []
@@ -410,7 +436,7 @@ def test_close_does_not_clobber_with_bare_baseline_higher_tput(
     ss.current_best = {"action": "baseline", "name": "baseline", "tput": 2813.5}
     ss.optimization_stack = []
     ss.cumulative_gain_validated = 0.0
-    coord.finalize_recipe_and_journal()
+    coord.recipe_journal.finalize_recipe_and_journal()
     row = coord.recipe_kb.get_recipe(canonical_id=cid)
     assert row["best_throughput"] == 2532.0, "bare-baseline CLOSE clobbered a validated best_throughput"
     assert row["best_config"].get("extra_server_args") == ("--schedule-policy lpm --page-size 16"), (
@@ -438,7 +464,7 @@ def test_best_config_reads_stack_args_from_canonical_server_key(
         }
     ]
     ss.cumulative_gain_validated = 10.0
-    attrs = coord._build_recipe_attrs_from_state()
+    attrs = coord.recipe_journal._build_recipe_attrs_from_state()
     assert attrs["best_config"]["extra_server_args"] == ("--page-size 32 --schedule-policy lpm"), (
         "stack-layer launch args must be read from the canonical "
         "extra_server_args key; got "
@@ -474,10 +500,74 @@ def test_close_overwrites_best_when_validated_win(tmp_path: Path) -> None:
         }
     ]
     ss.cumulative_gain_validated = 10.0
-    coord.finalize_recipe_and_journal()
+    ss.cumulative_gain_validated_stack_len = 1
+    coord.recipe_journal.finalize_recipe_and_journal()
     row = coord.recipe_kb.get_recipe(canonical_id=cid)
     assert row["best_throughput"] == 2200.0
     assert "--page-size 32" in row["best_config"].get("extra_server_args", "")
+
+
+def _stack_one_keep(state) -> None:
+    state.current_best = {"name": "page32", "extra_server_args": "--page-size 32", "tput": 2200.0}
+    state.optimization_stack = [{"action": "explore", "variant_name": "page32", "extra_server_args": "--page-size 32"}]
+    state.cumulative_gain_validated = 10.0
+
+
+def test_close_skips_a_stack_that_grew_after_validation(tmp_path: Path) -> None:
+    coord = _make_coordinator(tmp_path)
+    _stack_one_keep(coord.shared_state)
+
+    def _must_not_finalize_journal():
+        raise AssertionError("an unvalidated working recipe reached journal finalization")
+
+    coord.recipe_journal.ensure_journal = _must_not_finalize_journal
+
+    outcome = coord.recipe_journal.finalize_recipe_and_journal()
+
+    assert outcome == {
+        "status": "skipped",
+        "reason": "unvalidated_recipe_stack",
+        "backend": "none",
+        "result_type": "unvalidated_recipe",
+    }
+    assert coord.recipe_kb.get_recipe(canonical_id=_expected_cid()) is None
+
+
+def test_close_skips_a_same_length_lift_the_watermark_cannot_see(tmp_path: Path) -> None:
+    coord = _make_coordinator(tmp_path)
+    state = coord.shared_state
+    _stack_one_keep(state)
+    state.cumulative_gain_validated_stack_len = 1
+    state.working_recipe_generation = 2
+    state.validated_recipe_generation = 1
+
+    outcome = coord.recipe_journal.finalize_recipe_and_journal()
+
+    assert outcome["reason"] == "unvalidated_recipe_stack"
+    assert coord.recipe_kb.get_recipe(canonical_id=_expected_cid()) is None
+
+
+def test_lift_then_validation_leaves_the_recipe_publishable(tmp_path: Path) -> None:
+    coord = _make_coordinator(tmp_path)
+    state = coord.shared_state
+    state.baseline_tput = 1000.0
+    state.current_best = {"action": "baseline", "tput": 1000.0, "extra_server_args": "", "extra_envs": {}}
+
+    assert coord.writeback.lift_to_current_best(
+        "explore",
+        1100.0,
+        {"name": "page16", "extra_server_args": "--page-size 16", "candidate_extra_server_args": "--page-size 16"},
+    )
+    assert (state.working_recipe_generation, state.validated_recipe_generation) == (1, 0)
+    assert state.optimization_stack_has_unvalidated_keeps()
+
+    assert coord.writeback.validate(1100.0, {"output_throughput": 1100.0})
+    assert state.validated_recipe_generation == state.working_recipe_generation == 1
+
+    outcome = coord.recipe_journal.finalize_recipe_and_journal()
+
+    assert outcome["result_type"] == "written"
+    assert coord.recipe_kb.get_recipe(canonical_id=_expected_cid())["best_throughput"] == 1100.0
 
 
 # kernel_optimizations[].e2e_decision must carry the integrate verdict, not only the micro-layer decision.
@@ -502,7 +592,7 @@ def test_kernel_e2e_decision_reflects_integrate_revert(tmp_path: Path) -> None:
             ],
         },
     }
-    attrs = coord._build_recipe_attrs_from_state()
+    attrs = coord.recipe_journal._build_recipe_attrs_from_state()
     kopts = attrs.get("kernel_optimizations") or []
     k = next((x for x in kopts if x.get("kernel_id") == "k007"), None)
     assert k is not None, f"k007 missing from {kopts}"
@@ -527,7 +617,7 @@ def test_kernel_e2e_decision_micro_only_when_not_integrated(
         },
     }
     ss.kernel_integrate_attempts = {}
-    attrs = coord._build_recipe_attrs_from_state()
+    attrs = coord.recipe_journal._build_recipe_attrs_from_state()
     kopts = attrs.get("kernel_optimizations") or []
     k = next((x for x in kopts if x.get("kernel_id") == "k009"), None)
     assert k is not None
@@ -554,7 +644,7 @@ def test_session_entry_carries_throughput_date_and_actions(
     ]
     ss.cumulative_gain_validated = 7.5
     ss.cumulative_gain_validated_stack_len = 2
-    attrs = coord._build_recipe_attrs_from_state()
+    attrs = coord.recipe_journal._build_recipe_attrs_from_state()
     sessions = attrs.get("sessions") or []
     assert sessions, "no session entry emitted"
     s = sessions[0]
@@ -573,7 +663,7 @@ def test_pitfall_description_uses_variant_name_not_bare_kind(
 
     coord = _make_coordinator(tmp_path)
     task = SimpleNamespace(kind="explore", task_id="t-1")
-    coord._record_fact_per_variant(
+    coord.recipe_journal._record_fact_per_variant(
         task=task,
         source_session_id="sess-1",
         variant_outcome={
@@ -582,6 +672,7 @@ def test_pitfall_description_uses_variant_name_not_bare_kind(
             "variant": {},
             "metrics": {"gain_pct": -10.0},
         },
+        adopted=False,
     )
     row = coord.recipe_kb.get_recipe(canonical_id=_expected_cid())
     descs = [p.get("description") for p in (row.get("pitfalls") or [])]
@@ -600,15 +691,17 @@ def test_kb_amend_recipe_is_noop_under_agentx(tmp_path: Path, monkeypatch) -> No
         def __getattr__(self, name: str):
             raise AssertionError(f"AgentX amend reached the recipe KB: {name}")
 
-    coord.recipe_kb = _ForbiddenRecipeKB()
-    coord._kb_amend_recipe(append_lesson={"statement": "must not reach the KB", "measured_impact": "+9%"})
+    coord.knowledge_plane = KnowledgePlane(recipe_kb=_ForbiddenRecipeKB())
+    coord.recipe_journal.kb_amend_recipe(append_lesson={"statement": "must not reach the KB", "measured_impact": "+9%"})
 
 
 def test_kb_amend_recipe_still_writes_without_agentx(tmp_path: Path, monkeypatch) -> None:
     """The gate must not cost the synthetic path its knowledge."""
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
     coord = _make_coordinator(tmp_path)
-    coord._kb_amend_recipe(append_lesson={"statement": "synthetic still recorded", "measured_impact": "+1%"})
+    coord.recipe_journal.kb_amend_recipe(
+        append_lesson={"statement": "synthetic still recorded", "measured_impact": "+1%"}
+    )
 
     row = coord.recipe_kb.get_recipe(canonical_id=_expected_cid())
     assert row is not None, "the AgentX gate must not silence the synthetic path"
@@ -617,7 +710,7 @@ def test_kb_amend_recipe_still_writes_without_agentx(tmp_path: Path, monkeypatch
 
 
 def test_finalize_recipe_is_skipped_under_agentx(tmp_path, monkeypatch) -> None:
-    """The sink the _kb_amend_recipe gate cannot reach."""
+    """The sink the kb_amend_recipe gate cannot reach."""
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     coord = _make_coordinator(tmp_path)
 
@@ -628,13 +721,13 @@ def test_finalize_recipe_is_skipped_under_agentx(tmp_path, monkeypatch) -> None:
         "hyperloom.orchestrator.knowledge.remote_recipe.HyperloomRemoteKB.from_env",
         _must_not_run,
     )
-    out = coord.finalize_recipe_and_journal(source="close")
+    out = coord.recipe_journal.finalize_recipe_and_journal(source="close")
     assert out["status"] == "skipped"
-    assert out["reason"] == "agentx"
+    assert out["reason"] == "agentx_local_store_unsupported"
 
 
-def test_finalize_recipe_is_skipped_under_agentx_in_remote_mode(tmp_path, monkeypatch) -> None:
-    """The REMOTE sink specifically -- the one _kb_amend_recipe cannot reach."""
+def test_finalize_recipe_reaches_agentx_remote_kb(tmp_path, monkeypatch) -> None:
+    """AgentX is isolated by its scheme and may now use the remote KB."""
     from types import SimpleNamespace
 
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
@@ -650,18 +743,117 @@ def test_finalize_recipe_is_skipped_under_agentx_in_remote_mode(tmp_path, monkey
         kb_disabled=False,
     )
 
-    def _must_not_run(*_a, **_k):
-        raise AssertionError("AgentX finalize reached the REMOTE Recipe sink")
+    calls = []
+
+    class _Remote:
+        def write(self, canonical_id, state, *, session_id):
+            calls.append((canonical_id, state, session_id))
+            return SimpleNamespace(
+                status="written",
+                reason="",
+                canonical_id=canonical_id,
+                session_id=session_id,
+                primary_metric="interactivity_gain_pct",
+                primary_value=20.0,
+            )
 
     monkeypatch.setattr(
         "hyperloom.orchestrator.knowledge.remote_recipe.HyperloomRemoteKB.from_env",
-        _must_not_run,
+        lambda: _Remote(),
     )
-    out = coord.finalize_recipe_and_journal(source="close")
+    out = coord.recipe_journal.finalize_recipe_and_journal(source="close")
+    assert out["status"] == "written"
+    assert calls and calls[0][0].startswith("agentx:")
+    from hyperloom.inference_optimizer.session.session_paths import (
+        recipe_snapshot_audit_jsonl,
+    )
+
+    audit = json.loads(recipe_snapshot_audit_jsonl(coord.session_dir).read_text(encoding="utf-8"))
+    assert audit["result"]["primary_metric"] == "interactivity_gain_pct"
+    assert audit["result"]["primary_value"] == 20.0
+    assert "best_throughput" not in audit["result"]
+
+
+def test_agentx_remote_kb_never_receives_a_gain_measured_for_an_older_recipe(tmp_path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    coord = _make_coordinator(tmp_path)
+    coord.knowledge_plane = SimpleNamespace(
+        config=KnowledgeConfig.from_env(
+            {
+                "KNOWLEDGE_STORE_MODE": "remote",
+                "KB_STORE_URL": "https://kb.test",
+                "KB_STORE_TOKEN": "token",
+            }
+        ),
+        kb_disabled=False,
+    )
+    state = coord.shared_state
+    state.current_best = {"name": "a+b", "extra_server_args": "--page-size 32", "tput": 120.0}
+    state.optimization_stack = [
+        {"action": "explore", "variant_name": "a"},
+        {"action": "explore", "variant_name": "b"},
+    ]
+    state.cumulative_gain_validated = 20.0
+    state.cumulative_gain_validated_stack_len = 1
+
+    def _must_not_write():
+        raise AssertionError("an unvalidated AgentX stack reached the remote KB")
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.knowledge.remote_recipe.HyperloomRemoteKB.from_env",
+        _must_not_write,
+    )
+
+    out = coord.recipe_journal.finalize_recipe_and_journal(source="close")
+
+    assert out["reason"] == "unvalidated_recipe_stack"
+    assert out["result_type"] == "unvalidated_recipe"
+
+
+def test_agentx_remote_skip_audit_does_not_invent_throughput_metric(tmp_path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    coord = _make_coordinator(tmp_path)
+    coord.knowledge_plane = SimpleNamespace(
+        config=KnowledgeConfig.from_env(
+            {
+                "KNOWLEDGE_STORE_MODE": "remote",
+                "KB_STORE_URL": "https://kb.test",
+                "KB_STORE_TOKEN": "token",
+            }
+        ),
+        kb_disabled=False,
+    )
+
+    class _Remote:
+        def write(self, canonical_id, state, *, session_id):
+            return SimpleNamespace(
+                status="skipped",
+                reason="no_new_keep_or_pure_warm_replay",
+                canonical_id=canonical_id,
+                session_id=session_id,
+                primary_metric="",
+                primary_value=0.0,
+            )
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.knowledge.remote_recipe.HyperloomRemoteKB.from_env",
+        lambda: _Remote(),
+    )
+    out = coord.recipe_journal.finalize_recipe_and_journal(source="close")
     assert out["status"] == "skipped"
-    assert out["reason"] == "agentx"
-    # Not "disabled": telemetry must stay able to tell an AgentX skip from a KB that was actually down.
-    assert out["backend"] != "disabled"
+
+    from hyperloom.inference_optimizer.session.session_paths import (
+        recipe_snapshot_audit_jsonl,
+    )
+
+    audit = json.loads(recipe_snapshot_audit_jsonl(coord.session_dir).read_text(encoding="utf-8"))
+    assert "primary_metric" not in audit["result"]
+    assert "primary_value" not in audit["result"]
+    assert "best_throughput" not in audit["result"]
 
 
 def test_finalize_gate_honours_persisted_mode_without_the_env_var(tmp_path, monkeypatch) -> None:
@@ -669,15 +861,15 @@ def test_finalize_gate_honours_persisted_mode_without_the_env_var(tmp_path, monk
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
     coord = _make_coordinator(tmp_path)
     coord.shared_state.benchmark_mode = "agentx"
-    out = coord.finalize_recipe_and_journal(source="close")
-    assert out["reason"] == "agentx"
+    out = coord.recipe_journal.finalize_recipe_and_journal(source="close")
+    assert out["reason"] == "agentx_local_store_unsupported"
 
 
 def test_finalize_recipe_still_runs_without_agentx(tmp_path, monkeypatch) -> None:
     """The gate must not cost the synthetic path its finalize."""
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
     coord = _make_coordinator(tmp_path)
-    out = coord.finalize_recipe_and_journal(source="close")
+    out = coord.recipe_journal.finalize_recipe_and_journal(source="close")
     assert out.get("reason") != "agentx"
 
 
@@ -689,6 +881,8 @@ def test_t0_anchor_does_not_write_under_agentx(tmp_path, monkeypatch) -> None:
     coord = _make_coordinator(tmp_path)
 
     class _ForbiddenKB:
+        mode = "local"
+
         def __getattr__(self, name: str):
             raise AssertionError(f"AgentX T0 anchor reached the recipe KB: {name}")
 
