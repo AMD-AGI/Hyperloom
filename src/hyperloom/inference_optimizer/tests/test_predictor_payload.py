@@ -12,15 +12,16 @@ from pathlib import Path
 
 from hyperloom.orchestrator.predictor import evidence
 from hyperloom.orchestrator.predictor.payload import build_request as _build_request
+from hyperloom.orchestrator.predictor.sidecars import load_sidecars
 from hyperloom.orchestrator.predictor.source_sites import load_source_sites
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.trace_analysis import _analysis_md
 
 
 def build_request(state: SharedState, *, session_id: str) -> dict:
-    """The body the pump sends: source sites loaded from the session's own analysis run."""
-    trace = state.last_trace_analyze if isinstance(state.last_trace_analyze, dict) else {}
-    return _build_request(state, session_id=session_id, sites=load_source_sites(trace.get("analysis_md_path")))
+    """The body the pump sends: source sites and sidecars loaded from the session's own analysis run."""
+    path = (state.last_trace_analyze if isinstance(state.last_trace_analyze, dict) else {}).get("analysis_md_path")
+    return _build_request(state, session_id=session_id, sites=load_source_sites(path), sidecars=load_sidecars(path))
 
 
 _P_HEADER = _analysis_md.P_ITEM_COLUMNS + "\n|---|---|---|---|---|---|---|---|---|---|---|"
@@ -154,6 +155,89 @@ def test_a_source_artifact_of_another_major_is_ignored(tmp_path):
     (tmp_path / "kernel_source_resolution.json").write_text(json.dumps({"schema_version": "2.0.0", "entries": []}))
     mm = build_request(state, session_id="")["evidence"]["hot_kernels"][0]
     assert (mm["source_file"], mm["source_line"]) == ("tuned_gemm.py", None)
+
+
+AGENTIC_REPORT = """# Qwen3 (LLM) - MI355X Standalone Analysis
+<!-- report-begin kind=report_mode mode=agentic -->
+<!-- report-end -->
+
+## Executive Summary
+
+| Metric | Value |
+|--------|-------|
+| Total Time | 340.93 ms |
+| Compute % | 97.28% |
+| Idle % | 0.51% |
+| Exposed Communication % | 0.92% |
+| Top Bottleneck Category | InferenceAttention (39.55%) |
+
+### \U0001f534 P1: Prefix-prefill forward kernel runs far below the memory roofline
+"""
+
+ANALYSIS_JSON = {
+    "report_info": {"mode": "agentic"},
+    "executive_summary": {
+        "metrics": {"total_time_ms": 340.93, "compute_pct": 97.28, "idle_pct": 0.51, "exposed_communication_pct": 0.92}
+    },
+}
+
+SUMMARY_TASKS = [
+    {"kernel_id": "k1", "name": "aten::mm", "kernel_category": "GEMM", "gpu_pct": 40.1, "call_count": 1440,
+     "duration_us": 1200.5},
+    {"kernel_id": "k2", "name": "flash_attn", "kernel_category": "InferenceAttention", "gpu_pct": 25.0,
+     "call_count": 64, "duration_us": 800.0},
+    {"kernel_id": "k3", "name": "rms_norm", "kernel_category": "LayerNorm", "gpu_pct": 4.0, "call_count": 72,
+     "duration_us": 50.0},
+    {"kernel_id": "k4", "name": "aten::addmm", "kernel_category": "GEMM", "gpu_pct": 10.0, "call_count": 200,
+     "duration_us": 300.0},
+]  # fmt: skip
+
+
+def _write_sidecars(report_dir: Path) -> None:
+    (report_dir / "analysis.json").write_text(json.dumps(ANALYSIS_JSON))
+    (report_dir / "summary.json").write_text(json.dumps({"tasks": SUMMARY_TASKS}))
+
+
+def test_a_tracelens_route_report_takes_window_operators_and_counts_from_the_sidecars(tmp_path):
+    state = _state(tmp_path)
+    report_path = Path(state.last_trace_analyze["analysis_md_path"])
+    report_path.write_text(AGENTIC_REPORT)
+    state.last_trace_analyze["analysis_md_text"] = AGENTIC_REPORT
+    _write_sidecars(report_path.parent)
+
+    ev = build_request(state, session_id="s1")["evidence"]
+
+    assert ev["window"] == {"total_gpu_time_ms": 340.93, "gpu_busy_pct": 99.49, "gpu_idle_pct": 0.51,
+                            "exposed_comm_pct": 0.92}  # fmt: skip
+    assert ev["operators"] == {
+        "top_bottleneck_category": "GEMM",
+        "attribution_pct": None,
+        "category_pct": {"GEMM": 50.1, "SDPA": 25.0, "Normalization": 4.0},
+        "top3_cumulative_pct": 79.1,
+    }
+    mm, attn = ev["hot_kernels"]
+    assert (mm["call_count"], mm["time_us"], mm["args"]) == (1440, 1200.5, None)
+    assert (attn["call_count"], attn["time_us"]) == (64, 800.0)
+
+
+def test_a_report_in_the_bypass_layout_wins_over_the_sidecars(tmp_path):
+    state = _state(tmp_path)
+    _write_sidecars(Path(state.last_trace_analyze["analysis_md_path"]).parent)
+
+    ev = build_request(state, session_id="s1")["evidence"]
+
+    assert ev["window"]["total_gpu_time_ms"] == 263.98
+    assert ev["operators"]["category_pct"] == {"gemm": 50.1, "attention": 25.0}
+
+
+def test_missing_or_malformed_sidecars_add_nothing(tmp_path):
+    report_dir = tmp_path / "tracelens"
+    report_dir.mkdir()
+    assert load_sidecars(report_dir / "analysis.md") == {}
+    (report_dir / "analysis.json").write_text("{not json")
+    (report_dir / "summary.json").write_text(json.dumps({"tasks": {"k1": {}}}))
+    assert load_sidecars(report_dir / "analysis.md") == {}
+    assert load_sidecars(None) == {}
 
 
 def test_no_profile_sends_only_the_flag():

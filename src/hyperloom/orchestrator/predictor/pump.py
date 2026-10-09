@@ -34,6 +34,7 @@ from hyperloom.orchestrator.predictor.client import Prediction, predict
 from hyperloom.orchestrator.predictor.mandate import patch_mandate
 from hyperloom.orchestrator.predictor.payload import build_request
 from hyperloom.orchestrator.predictor.rows import QUEUE_DOMAIN, QUEUE_PRIORITY, proposal_rows
+from hyperloom.orchestrator.predictor.sidecars import load_sidecars
 from hyperloom.orchestrator.predictor.source_sites import load_source_sites
 
 log = logging.getLogger(__name__)
@@ -114,8 +115,10 @@ class PredictorPump:
         # Before anything can raise: a request that fails is not retried at the same decision point.
         _note_asked(state, self._key)
         trace = state.last_trace_analyze if isinstance(state.last_trace_analyze, dict) else {}
-        sites = await asyncio.to_thread(load_source_sites, trace.get("analysis_md_path"))
-        request = build_request(state, session_id=str(state.session_id or ""), sites=sites)
+        report_path = trace.get("analysis_md_path")
+        sites = await asyncio.to_thread(load_source_sites, report_path)
+        sidecars = await asyncio.to_thread(load_sidecars, report_path)
+        request = build_request(state, session_id=str(state.session_id or ""), sites=sites, sidecars=sidecars)
         self._inflight = asyncio.create_task(
             asyncio.to_thread(predict, request, endpoint=conf.endpoint, timeout_sec=conf.timeout_sec)
         )

@@ -138,11 +138,16 @@ The evidence blocks come from these sources:
   counts.
 - **`window`** (total GPU time, busy, idle, and exposed communication) and
   **`operators`** (the per-category GPU-time split, the top bottleneck, and the
-  attribution coverage), both parsed from the TraceLens `analysis.md`.
+  attribution coverage). They are parsed from `analysis.md` when it has the
+  layout the bypass route renders. Otherwise, as on the TraceLens route, where a
+  model writes the report, the window comes from TraceLens's `analysis.json` and
+  the split from the `summary.json` beside it, with busy taken as everything but
+  idle, as the bypass report counts it.
 - **`hot_kernels`**: up to eight rows of `hot_kernels_top15`. Each row adds the
-  operand `args`, the `call_count` and `time_us` from the report's P-item tables,
-  and the `source_file`, `source_line` and `source_function` that TraceLens
-  resolved in `kernel_source_resolution.json`.
+  operand `args`, the `call_count` and `time_us` from the report's P-item tables
+  (the count and time from `summary.json` when the report has none), and the
+  `source_file`, `source_line` and `source_function` that TraceLens resolved in
+  `kernel_source_resolution.json`.
 
 A bound label of `unknown` is sent as absent, because the service renders labels as
 `<label>-bound`.

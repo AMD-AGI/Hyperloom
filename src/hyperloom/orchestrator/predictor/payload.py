@@ -91,7 +91,9 @@ def _roofline(snapshot: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def _hot_kernels(trace: dict[str, Any], sites: Mapping[str, dict[str, Any]]) -> list[dict[str, Any]] | None:
+def _hot_kernels(
+    trace: dict[str, Any], sites: Mapping[str, dict[str, Any]], kernels: Mapping[str, dict[str, Any]]
+) -> list[dict[str, Any]] | None:
     """Top hot kernels with the operand args, call count and source location the summary rows lack."""
     rows = trace.get("hot_kernels_top15")
     if not isinstance(rows, list) or not rows:
@@ -104,6 +106,7 @@ def _hot_kernels(trace: dict[str, Any], sites: Mapping[str, dict[str, Any]]) -> 
             continue
         keys = (str(row.get("kernel_id") or "").strip(), str(row.get("name") or "").strip())
         site = next((sites[key] for key in keys if key and key in sites), {})
+        stats = next((kernels[key] for key in keys if key and key in kernels), {})
         p_item = p_items.get(keys[1]) or {}
         kernel = {key: row.get(key) for key in _KERNEL_KEYS}
         kernel.update(
@@ -111,15 +114,19 @@ def _hot_kernels(trace: dict[str, Any], sites: Mapping[str, dict[str, Any]]) -> 
             source_file=site.get("source_file", row.get("source_file")),
             source_line=site.get("source_line", row.get("source_line")),
             source_function=site.get("source_function", row.get("source_function")),
-            time_us=p_item.get("time_us"),
+            time_us=_first(p_item.get("time_us"), stats.get("time_us")),
             args=p_item.get("args"),
-            call_count=p_item.get("call_count"),
+            call_count=_first(p_item.get("call_count"), stats.get("call_count")),
         )
         out.append(kernel)
     return out or None
 
 
-def _evidence(state: Any, sites: Mapping[str, dict[str, Any]]) -> dict[str, Any]:
+def _first(*values: Any) -> Any:
+    return next((value for value in values if value is not None), None)
+
+
+def _evidence(state: Any, sites: Mapping[str, dict[str, Any]], sidecars: Mapping[str, Any]) -> dict[str, Any]:
     trace = state.last_trace_analyze if isinstance(state.last_trace_analyze, dict) else {}
     # Hot kernels alone count: a trace whose quality gate withheld analysis.md still names where device time went.
     if not (trace.get("analysis_md_text") or trace.get("hot_kernels_top15")):
@@ -131,9 +138,10 @@ def _evidence(state: Any, sites: Mapping[str, dict[str, Any]]) -> dict[str, Any]
         "profile_available": True,
         "profile_age_sec": _profile_age_sec(trace),
         "roofline": _roofline(snapshot),
-        "window": evidence.parse_window(report) if report else None,
-        "operators": evidence.parse_operators(report) if report else None,
-        "hot_kernels": _hot_kernels(trace, sites),
+        # The bypass layout parses into what the predictor was trained on; the TraceLens route's report does not.
+        "window": _first(evidence.parse_window(report) if report else None, sidecars.get("window")),
+        "operators": _first(evidence.parse_operators(report) if report else None, sidecars.get("operators")),
+        "hot_kernels": _hot_kernels(trace, sites, sidecars.get("kernels") or {}),
     }
     return {key: value for key, value in block.items() if value is not None}
 
@@ -155,11 +163,18 @@ def _stack(state: Any) -> list[dict[str, Any]]:
     return out
 
 
-def build_request(state: Any, *, session_id: str, sites: Mapping[str, dict[str, Any]]) -> dict[str, Any]:
+def build_request(
+    state: Any,
+    *,
+    session_id: str,
+    sites: Mapping[str, dict[str, Any]],
+    sidecars: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Build the request body for the current decision point.
 
-    ``sites`` is :func:`~hyperloom.orchestrator.predictor.source_sites.load_source_sites` for the
-    session's analysis run, read by the caller off the event loop.
+    ``sites`` and ``sidecars`` are :func:`~hyperloom.orchestrator.predictor.source_sites.load_source_sites`
+    and :func:`~hyperloom.orchestrator.predictor.sidecars.load_sidecars` for the session's analysis
+    run, read by the caller off the event loop.
     """
     info = state.model_info if isinstance(state.model_info, dict) else {}
     history = state.phase_history if isinstance(state.phase_history, list) else []
@@ -199,5 +214,5 @@ def build_request(state: Any, *, session_id: str, sites: Mapping[str, dict[str, 
             "keep_threshold_pct": resolve_keep_threshold(state),
             "optimization_stack": _stack(state),
         },
-        "evidence": _evidence(state, sites),
+        "evidence": _evidence(state, sites, sidecars or {}),
     }
