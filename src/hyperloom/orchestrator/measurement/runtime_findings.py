@@ -28,6 +28,8 @@ RUNTIME_FINDINGS_FILE = "runtime_findings.json"
 #: Largest throughput drop a verified correctness fix may cost and still KEEP.
 CORRECTNESS_FIX_MAX_DROP_PCT = 3.0
 KEEP_REASON_CORRECTNESS_FIX = "correctness_fix"
+#: Rules whose resolution may justify a correctness-fix KEEP; each names a concrete, checkable cause.
+CORRECTNESS_FIX_RULES = frozenset({"vllm.unknown_env"})
 _EVIDENCE_MAX_CHARS = 300
 #: Frameworks whose launch record ``engine_adjusted_settings_from_log`` reads.
 _LAUNCH_RECORD_FRAMEWORKS = frozenset({"sglang", "vllm"})
@@ -241,20 +243,16 @@ def load_runtime_findings(measurement: Mapping[str, Any]) -> dict[str, Any] | No
 
 
 def correctness_fix_refusal(before: dict[str, Any] | None, after: dict[str, Any] | None, finding_id: str) -> str:
-    """Why ``finding_id`` is not a correctness finding the candidate resolved; empty when it is."""
+    """Why ``finding_id`` is not a listed finding the candidate resolved; empty when it is."""
     rule_id, separator, subject = finding_id.partition(":")
     if not separator:
         return f"resolves_finding {finding_id!r} is not rule_id:subject"
+    if rule_id not in CORRECTNESS_FIX_RULES:
+        return f"{rule_id} cannot justify a correctness fix"
     if before is None:
         return "no runtime findings for the current best"
-    target = next(
-        (f for f in before["findings"] if (f["rule_id"], f["subject"], f["status"]) == (rule_id, subject, DETECTED)),
-        None,
-    )
-    if target is None:
+    if not any((f["rule_id"], f["subject"], f["status"]) == (rule_id, subject, DETECTED) for f in before["findings"]):
         return f"{finding_id} is not detected on the current best"
-    if target["category"] != CORRECTNESS:
-        return f"{finding_id} is {target['category']}, not correctness"
     if after is None:
         return "no runtime findings for the candidate run"
     observed = [f for f in after["findings"] if f["rule_id"] == rule_id]

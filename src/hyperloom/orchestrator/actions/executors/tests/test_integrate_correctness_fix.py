@@ -15,16 +15,18 @@ from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.measurement.runtime_findings import persist_runtime_findings, scan_server_log
 from hyperloom.orchestrator.state.shared_state import SharedState
 
+ENV_LOG = "WARNING [envs.py:2128] Unknown vLLM environment variable detected: VLLM_FOO\n"
 TRACEBACK_LOG = 'Traceback (most recent call last):\n  File "x.py", line 1, in f\nRuntimeError: bad output\n'
 CLEAN_LOG = "server ready\n"
-FINDING = "runtime.traceback:RuntimeError"
+FINDING = "vllm.unknown_env:VLLM_FOO"
 
 
 def _slot(tmp_path: Path, name: str, log_text: str) -> str:
     slot = tmp_path / name
     slot.mkdir()
     (slot / "server.log").write_text(log_text, encoding="utf-8")
-    persist_runtime_findings(scan_server_log(str(slot / "server.log"), "sglang"), slot=slot)
+    report = scan_server_log(str(slot / "server.log"), "vllm", declared_env=("VLLM_FOO",))
+    persist_runtime_findings(report, slot=slot)
     return str(slot / "launch_evidence.json")
 
 
@@ -32,7 +34,7 @@ def _state(tmp_path: Path) -> SharedState:
     return SharedState(
         baseline_tput=1000.0,
         current_best={"tput": 1000.0},
-        current_best_measurement={"launch_evidence_path": _slot(tmp_path, "before", TRACEBACK_LOG)},
+        current_best_measurement={"launch_evidence_path": _slot(tmp_path, "before", ENV_LOG + TRACEBACK_LOG)},
     )
 
 
@@ -64,7 +66,7 @@ async def test_verified_fix_keeps_a_small_drop(tmp_path):
 
 @pytest.mark.asyncio
 async def test_fix_still_detected_reverts_with_reason(tmp_path):
-    out = await _gate(tmp_path, after_log=TRACEBACK_LOG, tput=985.0, accuracy_pass=True)
+    out = await _gate(tmp_path, after_log=ENV_LOG, tput=985.0, accuracy_pass=True)
 
     assert out["status"] == "reverted"
     assert out["reason"] == (
@@ -98,7 +100,17 @@ async def test_perf_path_finding_cannot_claim_the_allowance(tmp_path):
     )
 
     assert out["status"] == "reverted"
-    assert out["reason"].endswith("feature_disabled:fuse_rope_kvcache is not detected on the current best")
+    assert out["reason"].endswith("feature_disabled cannot justify a correctness fix")
+
+
+@pytest.mark.asyncio
+async def test_traceback_finding_cannot_claim_the_allowance(tmp_path):
+    out = await _gate(
+        tmp_path, after_log=CLEAN_LOG, tput=985.0, accuracy_pass=True, finding="runtime.traceback:RuntimeError"
+    )
+
+    assert out["status"] == "reverted"
+    assert out["reason"].endswith("runtime.traceback cannot justify a correctness fix")
 
 
 def _coord(tmp_path: Path) -> Coordinator:

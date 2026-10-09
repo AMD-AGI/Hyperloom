@@ -25,7 +25,7 @@ from hyperloom.common.perf_metric import is_agentx_mode
 from hyperloom.common.prompt_safety import defang_prompt_structure
 from hyperloom.inference_optimizer.framework_registry import python_package
 from .agentx_context import corpus_lines, grading_lines
-from ..measurement.runtime_findings import CORRECTNESS_FIX_MAX_DROP_PCT
+from ..measurement.runtime_findings import CORRECTNESS_FIX_MAX_DROP_PCT, CORRECTNESS_FIX_RULES
 
 from ..specialists.domains import (
     DEFAULT_SPECIALIST_MAX_TURNS,
@@ -2182,8 +2182,8 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
             "  tuned artifact is a FULL result — keep ``proposal_set`` non-empty or",
             "  list the artifact in ``artifacts_written``.",
             "- ``resolves_finding`` (optional string ``rule_id:subject``): set it only",
-            "  when the patch fixes a ``[correctness]`` entry from section 4c, copied",
-            "  verbatim. The gate then verifies the entry is gone from the new log and",
+            f"  when the patch fixes a ``{'`` / ``'.join(sorted(CORRECTNESS_FIX_RULES))}`` entry from section 4c,",
+            "  copied verbatim. The gate then verifies the entry is gone from the new log and",
             f"  accuracy passes, and may KEEP a throughput drop of up to {CORRECTNESS_FIX_MAX_DROP_PCT:.0f}%.",
         ]
         no_output = "  AND no ``patches_written``/``artifacts_written``; in that case"

@@ -284,34 +284,48 @@ def _report(*findings: tuple[str, str, str, str]) -> dict:
 
 
 def test_correctness_fix_refusal_cases():
+    env = "vllm.unknown_env"
+    before = _report(
+        (env, "correctness", "detected", "VLLM_FOO"),
+        ("runtime.traceback", "correctness", "detected", "RuntimeError"),
+        ("feature_disabled", "perf_path", "detected", "fuse_rope_kvcache"),
+    )
+    resolved = _report((env, "correctness", "not_detected", ""))
+    other_env = _report((env, "correctness", "detected", "VLLM_BAR"))
+    still = _report((env, "correctness", "detected", "VLLM_FOO"))
+    blind = _report((env, "correctness", "unknown", ""))
+
+    assert correctness_fix_refusal(before, resolved, f"{env}:VLLM_FOO") == ""
+    assert correctness_fix_refusal(before, other_env, f"{env}:VLLM_FOO") == ""
+    assert correctness_fix_refusal(before, still, f"{env}:VLLM_FOO") == (
+        f"{env}:VLLM_FOO is still detected on the candidate run"
+    )
+    assert correctness_fix_refusal(before, blind, f"{env}:VLLM_FOO") == (
+        f"{env} was not observable on the candidate run"
+    )
+    assert correctness_fix_refusal(before, resolved, f"{env}") == f"resolves_finding {env!r} is not rule_id:subject"
+    assert correctness_fix_refusal(None, resolved, f"{env}:VLLM_FOO") == "no runtime findings for the current best"
+    assert correctness_fix_refusal(before, None, f"{env}:VLLM_FOO") == "no runtime findings for the candidate run"
+    assert correctness_fix_refusal(before, resolved, f"{env}:VLLM_ABSENT") == (
+        f"{env}:VLLM_ABSENT is not detected on the current best"
+    )
+
+
+def test_only_listed_rules_can_justify_a_correctness_fix():
     before = _report(
         ("runtime.traceback", "correctness", "detected", "RuntimeError"),
         ("feature_disabled", "perf_path", "detected", "fuse_rope_kvcache"),
     )
-    resolved = _report(("runtime.traceback", "correctness", "not_detected", ""))
-    other_error = _report(("runtime.traceback", "correctness", "detected", "ValueError"))
-    still = _report(("runtime.traceback", "correctness", "detected", "RuntimeError"))
-    blind = _report(("runtime.traceback", "correctness", "unknown", ""))
-
-    assert correctness_fix_refusal(before, resolved, "runtime.traceback:RuntimeError") == ""
-    assert correctness_fix_refusal(before, other_error, "runtime.traceback:RuntimeError") == ""
-    assert correctness_fix_refusal(before, still, "runtime.traceback:RuntimeError") == (
-        "runtime.traceback:RuntimeError is still detected on the candidate run"
+    resolved = _report(
+        ("runtime.traceback", "correctness", "not_detected", ""),
+        ("feature_disabled", "perf_path", "not_detected", ""),
     )
-    assert correctness_fix_refusal(before, blind, "runtime.traceback:RuntimeError") == (
-        "runtime.traceback was not observable on the candidate run"
+
+    assert correctness_fix_refusal(before, resolved, "runtime.traceback:RuntimeError") == (
+        "runtime.traceback cannot justify a correctness fix"
     )
     assert correctness_fix_refusal(before, resolved, "feature_disabled:fuse_rope_kvcache") == (
-        "feature_disabled:fuse_rope_kvcache is perf_path, not correctness"
-    )
-    assert correctness_fix_refusal(before, resolved, "runtime.traceback") == (
-        "resolves_finding 'runtime.traceback' is not rule_id:subject"
-    )
-    assert correctness_fix_refusal(None, resolved, "runtime.traceback:RuntimeError") == (
-        "no runtime findings for the current best"
-    )
-    assert correctness_fix_refusal(before, None, "runtime.traceback:RuntimeError") == (
-        "no runtime findings for the candidate run"
+        "feature_disabled cannot justify a correctness fix"
     )
 
 
