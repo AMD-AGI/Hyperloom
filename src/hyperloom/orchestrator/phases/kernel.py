@@ -3165,7 +3165,7 @@ class KernelPhase(CoordinatorCollaborator):
     ) -> None:
         """Mirror an adopted GEMM-tuning stack entry as an optimization_journal KEEP row."""
         try:
-            journal = self._coord.writeback.ensure_journal()
+            journal = self._coord.recipe_journal.ensure_journal()
             variant_name = str(entry.get("variant_name") or "gemm_tuning")
             backend = str(entry.get("backend") or "").strip().lower()
             try:
@@ -3181,7 +3181,7 @@ class KernelPhase(CoordinatorCollaborator):
                 metrics["tuned_file"] = str(entry.get("tuned_file"))
             journal.append_entry(
                 JournalEntry(
-                    phase=self._coord.writeback.journal_entry_phase(),
+                    phase=self._coord.recipe_journal.journal_entry_phase(),
                     iter=int(self.shared_state.tick or 0),
                     kind=KIND_GEMM_TUNING,
                     change=variant_name,

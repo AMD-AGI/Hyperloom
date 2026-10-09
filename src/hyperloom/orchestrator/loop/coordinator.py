@@ -47,10 +47,7 @@ from ..bus.storage.connection import SqliteConnection, resolve_journal_mode
 from hyperloom.inference_optimizer.protocol.intent import NoIntentEmitted
 from ..bus.message_bus import MessageBus
 from ..state.objective import Objective, TimeOnlyObjective
-from ..policy.gate import (
-    PolicyGate,
-    SPECIALIST_FROM_AGENT_PREFIX,
-)
+from ..policy.gate import PolicyGate
 from ..state.round_store import RoundStore
 from ..bus.gpu_pool import (
     SpecialistGpuPool,
@@ -207,6 +204,7 @@ def _infer_model_class_from_config(model_path: str) -> str:
 
 
 if TYPE_CHECKING:
+    from hyperloom.inference_optimizer.experience_kb import ExperienceKBIntegration
     from .proposals import PendingProposal
 
 
@@ -243,9 +241,11 @@ class Coordinator:
         self.orch_prompt = OrchestrationPrompt(overrides={})
         # KnowledgePlane facade; pre-warms PR feed + advisory context.
         self.knowledge_plane: Any = knowledge_plane
-        from .writeback import WritebackCollaborator
+        from ..specialists.dispatch import SpecialistDispatchCollaborator
 
-        self._collaborator("_writeback", partial(WritebackCollaborator, proposal_scorer=proposal_scorer))
+        self._collaborator(
+            "_specialist_dispatch", partial(SpecialistDispatchCollaborator, proposal_scorer=proposal_scorer)
+        )
         self._model_class_override: str = (model_class or "").strip()
 
         # Validate every reactor has a backend wired.
@@ -343,8 +343,6 @@ class Coordinator:
             _cycle_hours = env_float("INFERENCE_OPTIMIZER_CYCLE_HOURS", default=DEFAULT_CYCLE_HOURS)
             self.shared_state.cycle_minutes = max(1.0, _cycle_hours * 60.0)
 
-        # Per-agent (seq, msg_id) of the last message its prompt rendered.
-        self._rendered_cursor: dict[str, tuple[int, str]] = {}
         self._prompt_snapshots = PromptSnapshotTracker()
 
         # Per-agent BackendError streak; crossing threshold records one backend_unhealthy, then re-arms.
@@ -382,6 +380,15 @@ class Coordinator:
         """RecipeKB owned by the knowledge plane."""
         plane = self.knowledge_plane
         return plane.recipe_kb if plane is not None else None
+
+    @property
+    def experience_kb(self) -> ExperienceKBIntegration | None:
+        """The session's one Experience service integration, built on first use; None when reads are off."""
+        if "_experience_kb" not in self.__dict__:
+            from hyperloom.inference_optimizer.experience_kb import integration_for
+
+            self.__dict__["_experience_kb"] = integration_for(self.shared_state, self.session_dir)
+        return self.__dict__["_experience_kb"]
 
     @property
     def run_deadline(self) -> Deadline | None:
@@ -563,6 +570,13 @@ class Coordinator:
         return self._collaborator("_writeback", WritebackCollaborator)
 
     @property
+    def recipe_journal(self):
+        """Optimization journal, Recipe KB facts and the final Recipe."""
+        from ..knowledge.recipe_journal import RecipeJournalCollaborator
+
+        return self._collaborator("_recipe_journal", RecipeJournalCollaborator)
+
+    @property
     def maintenance(self):
         from .maintenance import MaintenanceCollaborator
 
@@ -690,7 +704,7 @@ class Coordinator:
             sid = (self.shared_state.recipe_kb_session_id or "").strip()
             if not sid:
                 return
-        self.writeback.ensure_recipe_finalized(source="t4_fallback")
+        self.recipe_journal.ensure_recipe_finalized(source="t4_fallback")
         try:
             self.shared_state.save(self.session_dir)
         except Exception:
@@ -1194,7 +1208,7 @@ class Coordinator:
                     latency_ms=int((time.perf_counter() - _t0) * 1000),
                     call_id=call_id,
                 )
-            await self.writeback.record_observation(
+            await self.bus.record_observation(
                 "coordinator",
                 "observation",
                 {"kind": "backend_error", "agent": agent_name, "error": repr(exc)},
@@ -1203,7 +1217,7 @@ class Coordinator:
             return
         except NoIntentEmitted as exc:
             # No parseable intents; surface as observation so the next tick self-corrects.
-            await self.writeback.record_observation(
+            await self.bus.record_observation(
                 "coordinator",
                 "observation",
                 {"kind": "no_intent_emitted", "agent": agent_name, "error": str(exc)[:500]},
@@ -1213,7 +1227,7 @@ class Coordinator:
         except Exception as exc:
             # Catch-all so one agent's bad turn never stops the loop.
             log.exception("reactor pass for %s raised", agent_name)
-            await self.writeback.record_observation(
+            await self.bus.record_observation(
                 "coordinator",
                 "observation",
                 {"kind": "reactor_exception", "agent": agent_name, "error": format_exc_brief(exc, limit=500)},
@@ -1241,7 +1255,7 @@ class Coordinator:
             for intent in result.intents:
                 await self.router.handle_intent(agent_name, intent)
         if not result.intents and not request:
-            await self.writeback.record_observation(
+            await self.bus.record_observation(
                 "coordinator",
                 "observation",
                 {"kind": "no_intent_emitted", "agent": agent_name, "error": "the turn emitted no intents"},
@@ -1361,7 +1375,7 @@ class Coordinator:
         threshold = self._backend_error_streak_threshold
         if new_value >= threshold and self._backend_error_alarm_armed.get(agent_name, True):
             self._backend_error_alarm_armed[agent_name] = False
-            await self.writeback.record_observation(
+            await self.bus.record_observation(
                 "coordinator",
                 "observation",
                 {
@@ -1384,8 +1398,4 @@ class Coordinator:
 __all__ = [
     "Coordinator",
     "CoordinatorState",
-    "SharedState",
-    "effective_closing_grace_sec",
-    # Re-exported from policy.gate; referenced via ``coordinator.<name>`` in tests.
-    "SPECIALIST_FROM_AGENT_PREFIX",
 ]
