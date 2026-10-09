@@ -41,6 +41,14 @@ web = [
     "markdownify>=0.11",
     "cachetools>=5.3",
 ]
+# The Experience KB service on a PostgreSQL server (``HYPERLOOM_KB_DATABASE_URL``), as a global KB runs; a workspace's
+# service keeps its database in SQLite and needs none of this. The connection pool checks each connection it hands
+# out, which needs psycopg-pool 3.2.
+kb-service = [
+    "PyYAML>=6.0",
+    "psycopg[binary]>=3.2,<4",
+    "psycopg-pool>=3.2,<4",
+]
 # Full runtime dependency set installed by the packaged install.sh.
 runtime = [
     "PyYAML>=6.0",
@@ -90,6 +98,8 @@ forge-profiling = [
 test = [
     "hyperloom-inference_optimizer[runtime]",
     "hyperloom-inference_optimizer[ci]",
+    # The Experience KB tests run on PostgreSQL too when HYPERLOOM_KB_TEST_DATABASE_URL names a server.
+    "hyperloom-inference_optimizer[kb-service]",
     "pytest>=8.0",
     "pytest-asyncio>=1.0",
     "jsonschema>=4.18",
@@ -139,6 +149,7 @@ hyperloom = "hyperloom.cli:main"
 # Built-in kernel-opt agent. The orchestrator dispatches
 # ``python -m kernelforge.cli`` directly; this is for interactive use.
 kernelforge = "kernelforge.cli:main"
+hyperloom-kb = "hyperloom_kb.cli:main"
 hyperloom-kb-serve = "hyperloom_kb.http_service:main"
 hyperloom-kb-collect = "hyperloom_kb.collect.cli:main"
 
@@ -204,10 +215,10 @@ exclude = [
 ".cursor/skills/hyperloom-setup" = [
     "src/hyperloom/skills/hyperloom-setup/SKILL.md",
 ]
-# Deploys the global Experience KB that workspaces push to and pull from.
-".agents/skills/hyperloom-global-kb" = ["src/hyperloom/skills/hyperloom-global-kb/SKILL.md"]
-".claude/skills/hyperloom-global-kb" = ["src/hyperloom/skills/hyperloom-global-kb/SKILL.md"]
-".cursor/skills/hyperloom-global-kb" = ["src/hyperloom/skills/hyperloom-global-kb/SKILL.md"]
+# Operates any Experience KB service with the hyperloom-kb CLI: labels, restores, exclusions, sync.
+".agents/skills/hyperloom-kb" = ["src/hyperloom_kb/skills/hyperloom-kb/SKILL.md"]
+".claude/skills/hyperloom-kb" = ["src/hyperloom_kb/skills/hyperloom-kb/SKILL.md"]
+".cursor/skills/hyperloom-kb" = ["src/hyperloom_kb/skills/hyperloom-kb/SKILL.md"]
 # Demo run skills chained from /hyperloom-setup.
 ".agents/skills/hyperloom-qwen3-8b-3h" = ["examples/hyperloom-qwen3-8b-3h/SKILL.md"]
 ".claude/skills/hyperloom-qwen3-8b-3h" = ["examples/hyperloom-qwen3-8b-3h/SKILL.md"]

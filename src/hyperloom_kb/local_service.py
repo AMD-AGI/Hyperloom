@@ -18,11 +18,13 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from hyperloom_kb.config import PACKAGED_DECLARATION, load_declaration
-from hyperloom_kb.http_service import ServiceSettings
+from hyperloom_kb.http_service import SERVICE_LOCK, ServiceSettings, code_digest
 from hyperloom_kb.remote import RemoteClient, RemoteClientError, RemoteConfig, is_loopback
 from hyperloom_kb.schema import JsonValue
 
 LOG_NAME = "service.log"
+# A log past this size is kept as ``service.log.1`` when the next service starts, replacing the one kept before.
+LOG_ROTATE_BYTES = 8 * 1024 * 1024
 DEFAULT_START_TIMEOUT_SECONDS = 60.0
 _POLL_SECONDS = 0.2
 
@@ -74,7 +76,10 @@ def _spawn(host: str, port: int, home: Path, token: str, env: Mapping[str, str])
     ]
     try:
         home.mkdir(parents=True, exist_ok=True)
-        with (home / LOG_NAME).open("ab") as log:
+        log_path = home / LOG_NAME
+        if log_path.is_file() and log_path.stat().st_size > LOG_ROTATE_BYTES:
+            os.replace(log_path, log_path.with_name(f"{LOG_NAME}.1"))
+        with log_path.open("ab") as log:
             return subprocess.Popen(
                 command,
                 stdin=subprocess.DEVNULL,
@@ -131,6 +136,8 @@ def _stale(health: Mapping[str, JsonValue], env: Mapping[str, str]) -> str:
         return f"it serves {health.get('schema_ref')!r} but this client writes {expected}"
     if health.get("config_digest") != ServiceSettings.from_env(env).digest():
         return "it was started with other settings"
+    if health.get("code_digest") != code_digest():
+        return "it runs other Experience KB code than this client"
     return ""
 
 
@@ -145,7 +152,20 @@ def _require_home(health: Mapping[str, JsonValue], home: Path, host: str, port: 
         )
 
 
-def _stop(health: Mapping[str, JsonValue], host: str, port: int, timeout_seconds: float) -> None:
+def _home_released(home: Path) -> bool:
+    """Whether no service holds ``home``, whose lock its holder keeps until it has stopped serving."""
+
+    import fcntl
+
+    with (home / SERVICE_LOCK).open("a", encoding="utf-8") as lock:
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+    return True
+
+
+def _stop(health: Mapping[str, JsonValue], host: str, port: int, home: Path, timeout_seconds: float) -> None:
     pid = health.get("pid")
     # A service in this very process (an embedded server) is never ours to signal.
     if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0 or pid == os.getpid():
@@ -156,9 +176,10 @@ def _stop(health: Mapping[str, JsonValue], host: str, port: int, timeout_seconds
     except PermissionError as exc:
         raise LocalServiceError(f"cannot stop the Experience service process {pid} on {host}:{port}") from exc
     deadline = time.monotonic() + timeout_seconds
-    while _listening(host, port):
+    # A stopping service closes its port before it drains; one started in between would find the home held and exit.
+    while _listening(host, port) or not _home_released(home):
         if time.monotonic() >= deadline:
-            raise LocalServiceError(f"the Experience service process {pid} still listens on {host}:{port}")
+            raise LocalServiceError(f"the Experience service process {pid} still serves {home} on {host}:{port}")
         time.sleep(_POLL_SECONDS)
 
 
@@ -189,7 +210,7 @@ def ensure_local_service(
             return LocalService(health)
         if not restart:
             return LocalService(health, stale=reason)
-        _stop(health, host, port, timeout_seconds)
+        _stop(health, host, port, home, timeout_seconds)
         restarted = True
     process = _spawn(host, port, home, config.token, launch_env)
     _wait_until_listening(process, host, port, home / LOG_NAME, timeout_seconds)
@@ -203,6 +224,7 @@ def ensure_local_service(
 __all__ = [
     "DEFAULT_START_TIMEOUT_SECONDS",
     "LOG_NAME",
+    "LOG_ROTATE_BYTES",
     "LocalService",
     "LocalServiceError",
     "ensure_local_service",

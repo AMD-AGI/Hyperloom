@@ -16,20 +16,22 @@ from hyperloom_kb.collect.expressions import (
     is_present,
     truth,
 )
-from hyperloom_kb.collect.mapping import CollectMapping, UnitStep, load_mapping
-from hyperloom_kb.collect.sensitive import find_sensitive
+from hyperloom_kb.collect.mapping import DECLARED_CATEGORIES, CollectMapping, UnitStep, load_mapping
+from hyperloom_kb.collect.sensitive import FREE_TEXT_FIELDS, find_sensitive, find_sensitive_in_file
 from hyperloom_kb.config import ConfigurationError
+from hyperloom_kb.files import file_ref
 from hyperloom_kb.identity import derive_experience_id
-from hyperloom_kb.remote import RemoteWriteResult
+from hyperloom_kb.remote import RemoteWriteResult, SessionValue
 from hyperloom_kb.runtime import experience_kb_from_env
 from hyperloom_kb.schema import (
-    Change,
-    ConstraintResult,
     Experience,
     ExperienceStatus,
-    JsonScalar,
+    FieldDeclaration,
+    FieldKind,
+    FieldRole,
+    FieldValue,
+    FileRef,
     JsonValue,
-    Outcome,
     Provenance,
     RenderedRef,
     SchemaValidationError,
@@ -65,17 +67,22 @@ class CollectionTarget(Protocol):
         *,
         run_id: str,
         seq: int,
-        identity: dict[str, JsonScalar],
         objective: str,
-        baseline_identity: dict[str, JsonScalar],
-        baseline_value: float,
         provenance: Provenance,
-        preconditions: tuple[str, ...] = (),
+        identity: Mapping[str, FieldValue] | None = None,
+        baseline: Mapping[str, SessionValue] | None = None,
         parent_id: str = "",
         supersedes: str = "",
         created_at: datetime | None = None,
     ) -> Any:
         """Open the Experience session for ``run_id``/``seq``, through which its decision and outcome are recorded."""
+
+
+@dataclass(frozen=True)
+class _Projected:
+    experience: Experience
+    #: Where each file the record names is read from, by its sha256.
+    files: dict[str, Path]
 
 
 @dataclass(frozen=True)
@@ -195,16 +202,6 @@ def _integer(value: Any, name: str) -> int:
     return value
 
 
-def _number(value: Any, name: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise EvaluationError(f"{name} must be a number")
-    return float(value)
-
-
-def _optional_number(value: Any, name: str) -> float | None:
-    return None if value is None else _number(value, name)
-
-
 def _time(value: Any, name: str) -> datetime:
     text = _text(value, name)
     if text.endswith("Z"):
@@ -232,7 +229,42 @@ def _items(value: Any, name: str) -> list[Any]:
     return value
 
 
-def _project(mapping: CollectMapping, scope: Mapping[str, Any]) -> Experience:
+def _local_file(value: Any, base: Path, files: dict[str, Path], name: str) -> FileRef:
+    path = Path(_text(value, name)).expanduser()
+    path = path if path.is_absolute() else base / path
+    if not path.is_file():
+        raise EvaluationError(f"{name} names {path}, which is not a file")
+    ref = file_ref(path)
+    files[ref.sha256] = path
+    return ref
+
+
+def _field_value(field: FieldDeclaration, value: Any, base: Path, files: dict[str, Path], name: str) -> FieldValue:
+    """One category field as the record holds it: a file field's local path becomes the ``FileRef`` of its file."""
+
+    if field.many:
+        items = _items(value, name)
+        if field.kind is FieldKind.FILE:
+            return tuple(_local_file(item, base, files, f"{name}[]") for item in items)
+        return tuple(items)
+    if field.kind is FieldKind.FILE:
+        return _local_file(value, base, files, name)
+    return value  # type: ignore[no-any-return]
+
+
+def _category(
+    mapping: CollectMapping, category: str, scope: Mapping[str, Any], base: Path, files: dict[str, Path]
+) -> dict[str, FieldValue]:
+    values: dict[str, FieldValue] = {}
+    for field in mapping.declaration.fields(category):
+        expression = mapping.experience.get(f"{category}.{field.name}")
+        value = None if expression is None else expression.evaluate(scope)
+        if is_present(value):
+            values[field.name] = _field_value(field, value, base, files, f"{category}.{field.name}")
+    return values
+
+
+def _project(mapping: CollectMapping, scope: Mapping[str, Any], base: Path) -> _Projected:
     fields = mapping.experience
 
     def value(name: str) -> Any:
@@ -245,33 +277,23 @@ def _project(mapping: CollectMapping, scope: Mapping[str, Any]) -> Experience:
     completed_at = _time(value("completed_at"), "completed_at")
     created_raw = value("created_at")
     created_at = _time(created_raw, "created_at") if is_present(created_raw) else completed_at
-    change = Change(
-        identity=_object(value("change.identity"), "change.identity"),
-        summary=_text(value("change.summary"), "change.summary"),
-        kind=_text(value("change.kind"), "change.kind", required=False),
-        content=_text(value("change.content"), "change.content", required=False),
-        resource_refs=tuple(
-            _text(item, "change.resource_refs[]")
-            for item in _items(value("change.resource_refs"), "change.resource_refs")
-        ),
-    )
-    outcome = Outcome(
-        decision=_text(value("outcome.decision"), "outcome.decision"),
-        value=_optional_number(value("outcome.value"), "outcome.value"),
-        constraints=tuple(
-            ConstraintResult.from_dict(item) for item in _items(value("outcome.constraints"), "outcome.constraints")
-        ),
-        error_class=_text(value("outcome.error_class"), "outcome.error_class", required=False),
-    )
+    files: dict[str, Path] = {}
+
+    def category(name: str) -> dict[str, FieldValue]:
+        return _category(mapping, name, scope, base, files)
+
     experience = Experience(
         id=derive_experience_id(producer.name, run_id, seq),
         run_id=run_id,
         seq=seq,
         created_at=created_at,
-        identity=_object(value("identity"), "identity"),
+        identity={key: item for key, item in _object(value("identity"), "identity").items() if item is not None},
         objective=_text(value("objective"), "objective"),
-        baseline_identity=_object(value("baseline_identity"), "baseline_identity"),
-        baseline_value=_number(value("baseline_value"), "baseline_value"),
+        baseline=category("baseline"),
+        rationale=category("rationale"),
+        change=category("change"),
+        outcome=category("outcome"),
+        reflection=category("reflection"),
         provenance=Provenance(
             producer=producer.name,
             producer_version=producer.version,
@@ -286,25 +308,41 @@ def _project(mapping: CollectMapping, scope: Mapping[str, Any]) -> Experience:
         completed_at=completed_at,
         parent_id=_text(value("parent_id"), "parent_id", required=False),
         supersedes=_text(value("supersedes"), "supersedes", required=False),
-        preconditions=tuple(_text(item, "preconditions[]") for item in _items(value("preconditions"), "preconditions")),
-        reasoning=_text(value("reasoning"), "reasoning"),
-        change=change,
         rendered_refs=tuple(RenderedRef.from_dict(item) for item in _items(value("rendered_refs"), "rendered_refs")),
-        outcome=outcome,
-        reflection=_text(value("reflection"), "reflection"),
+        notes={
+            str(label): _text(text, f"notes.{label}")
+            for label, text in _object(value("notes"), "notes").items()
+            if is_present(text)
+        },
     )
     mapping.declaration.validate(experience)
-    return experience
+    return _Projected(experience, files)
 
 
-def _screen(experience: Experience) -> None:
-    payload = experience.to_dict()
-    finding = find_sensitive(payload)
+def _screen(mapping: CollectMapping, projected: _Projected) -> None:
+    summary = mapping.declaration.role_field("change", FieldRole.SUMMARY)
+    free_text = FREE_TEXT_FIELDS | ({f"change.{summary.name}"} if summary is not None else set())
+    experience = projected.experience
+    declared = {
+        f"{category}.{field.name}"
+        for category in ("identity", *DECLARED_CATEGORIES)
+        for field in mapping.declaration.fields(category)
+    }
+    finding = find_sensitive(experience.to_dict(), free_text=free_text, declared=declared)
     if finding:
         raise _Skip(f"sensitive content in {finding}")
+    for category in DECLARED_CATEGORIES:
+        for name, value in getattr(experience, category).items():
+            path = f"{category}.{name}"
+            prose = any(path == item or path.startswith(f"{item}.") for item in free_text)
+            for ref in value if isinstance(value, tuple) else (value,):
+                if isinstance(ref, FileRef):
+                    finding = find_sensitive_in_file(projected.files[ref.sha256], free_text=prose)
+                    if finding:
+                        raise _Skip(f"sensitive content in {path} file {ref.name}, {finding}")
 
 
-def _prepare(mapping: CollectMapping, unit: dict[str, Any]) -> Experience:
+def _prepare(mapping: CollectMapping, unit: dict[str, Any], base: Path) -> _Projected:
     scope = dict(unit)
     for name, lookup in mapping.lookups:
         matches = lookup.evaluate(scope)
@@ -314,23 +352,32 @@ def _prepare(mapping: CollectMapping, unit: dict[str, Any]) -> Experience:
     for rule in mapping.require:
         if not truth(rule.condition.evaluate(scope)):
             raise _Skip(rule.reason)
-    experience = _project(mapping, scope)
-    _screen(experience)
-    return experience
+    projected = _project(mapping, scope, base)
+    _screen(mapping, projected)
+    return projected
 
 
-def _publish(target: CollectionTarget, experience: Experience) -> str:
-    if experience.change is None or experience.outcome is None:
-        raise ValueError("only a complete projected Experience can be published")
+def _with_paths(values: Mapping[str, FieldValue], files: Mapping[str, Path]) -> dict[str, SessionValue]:
+    """``values`` as a session takes them: each ``FileRef`` as the local file it was made from."""
+
+    def one(value: str | FileRef) -> str | FileRef | Path:
+        return files[value.sha256] if isinstance(value, FileRef) else value
+
+    return {
+        name: tuple(one(item) for item in value) if isinstance(value, tuple) else one(value)  # type: ignore[arg-type]
+        for name, value in values.items()
+    }
+
+
+def _publish(target: CollectionTarget, projected: _Projected) -> str:
+    experience, files = projected.experience, projected.files
     session = target.begin(
         run_id=experience.run_id,
         seq=experience.seq,
-        identity=dict(experience.identity),
         objective=experience.objective,
-        baseline_identity=dict(experience.baseline_identity),
-        baseline_value=experience.baseline_value,
         provenance=experience.provenance,
-        preconditions=experience.preconditions,
+        identity=dict(experience.identity),
+        baseline=_with_paths(experience.baseline, files),
         parent_id=experience.parent_id,
         supersedes=experience.supersedes,
         created_at=experience.created_at,
@@ -342,18 +389,19 @@ def _publish(target: CollectionTarget, experience: Experience) -> str:
         if record != experience:
             raise ExperienceConflictError("a different complete Experience already has this id")
         return "unchanged"
-    if record.change is None:
+    if not record.change:
         session.decide(
-            reasoning=experience.reasoning,
-            change=experience.change,
+            change=_with_paths(experience.change, files),
+            rationale=_with_paths(experience.rationale, files),
             rendered_refs=experience.rendered_refs,
         )
-    elif record.change != experience.change or record.reasoning != experience.reasoning:
+    elif record.change != experience.change or record.rationale != experience.rationale:
         raise ExperienceConflictError("an in-progress Experience holds a different decision")
     session.complete(
-        outcome=experience.outcome,
-        reflection=experience.reflection,
+        outcome=_with_paths(experience.outcome, files),
+        reflection=_with_paths(experience.reflection, files),
         completed_at=experience.completed_at,
+        notes=experience.notes,
     )
     result = session.publish()
     if result is None:
@@ -394,14 +442,16 @@ def collect(
     Without ``kb`` the target comes from :func:`experience_kb_from_env` and
     writes the mapping's own declaration; an unconfigured environment returns a
     disabled report and writes nothing. A dry run projects and validates without
-    touching any KB.
+    touching any KB. A file field's relative path is read from the document's
+    directory, or from the working directory for a document given in memory.
     """
 
     compiled = mapping if isinstance(mapping, CollectMapping) else load_mapping(mapping)
     if isinstance(document, Mapping):
-        source, document_ref = document, "<memory>"
+        source, document_ref, base = document, "<memory>", Path.cwd()
     else:
         source, document_ref = load_document(document), str(document)
+        base = Path(document).expanduser().resolve().parent
     schema_ref = compiled.declaration.schema_ref
 
     target: CollectionTarget | None = None
@@ -433,7 +483,7 @@ def collect(
             skipped.append(SkippedUnit(unit_id, blocked))
             continue
         try:
-            experience = _prepare(compiled, unit)
+            projected = _prepare(compiled, unit, base)
         except _Skip as skip:
             skipped.append(SkippedUnit(unit_id, skip.reason))
             continue
@@ -443,11 +493,12 @@ def collect(
         except SchemaValidationError as exc:
             skipped.append(SkippedUnit(unit_id, f"schema validation failed: {exc}"))
             continue
+        experience = projected.experience
         if target is None:
             collected.append(CollectedExperience(unit_id, experience.id, "dry_run", experience))
             continue
         try:
-            status = _publish(target, experience)
+            status = _publish(target, projected)
         except (LookupError, OSError, RuntimeError, ValueError) as exc:
             errors.append(FailedUnit(unit_id, f"{type(exc).__name__}: {exc}"))
             continue

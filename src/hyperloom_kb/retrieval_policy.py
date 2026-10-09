@@ -11,6 +11,7 @@ import math
 import re
 import time
 from collections.abc import Mapping
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from enum import Enum
@@ -25,7 +26,16 @@ from hyperloom_kb.retrieval import (
     LocalRetrievalService,
     RetrievalResult,
 )
-from hyperloom_kb.schema import Experience, JsonScalar, JsonValue
+from hyperloom_kb.schema import (
+    Experience,
+    ExperienceDeclaration,
+    FieldRole,
+    FieldValue,
+    FileRef,
+    JsonScalar,
+    JsonValue,
+    default_search_weight,
+)
 from hyperloom_kb.storage import ExperienceStore
 
 RETRIEVAL_POLICY_VERSION = 1
@@ -527,8 +537,9 @@ class LexicalFuzzyProvider:
     capability = RetrievalCapability.FUZZY
     provider_ref = LEXICAL_FUZZY_PROVIDER_REF
 
-    def __init__(self, experiences: ExperienceStore) -> None:
+    def __init__(self, experiences: ExperienceStore, declaration: ExperienceDeclaration) -> None:
         self._experiences = experiences
+        self._declaration = declaration
 
     def recall(
         self,
@@ -541,47 +552,35 @@ class LexicalFuzzyProvider:
         query_tokens = _tokens(query)
         if not query_tokens:
             return ()
-        documents: list[tuple[str, dict[str, set[str]], str]] = []
+        documents: list[tuple[str, _SearchDocument]] = []
         document_frequency: dict[str, int] = {}
-        visible_count = 0
         for experience_id in view.visible_experience_ids:
             stored = self._experiences.get_experience(experience_id)
             if stored is None or stored.content_hash != view.experience_hashes[experience_id]:
                 continue
-            fields = _search_fields(stored.experience)
-            summary = _normalized_text(stored.experience.change.summary) if stored.experience.change is not None else ""
-            documents.append((experience_id, fields, summary))
-            visible_count += 1
-            all_tokens = set().union(*fields.values())
-            for token in all_tokens:
+            document = _search_document(self._declaration, stored.experience)
+            documents.append((experience_id, document))
+            for token in set().union(*(tokens for _, tokens in document.fields)):
                 document_frequency[token] = document_frequency.get(token, 0) + 1
+        visible_count = len(documents)
 
         query_weight = sum(_idf(token, visible_count, document_frequency) for token in query_tokens)
         hits: list[CandidateHit] = []
-        field_weights = {
-            "summary": 4.0,
-            "identity": 3.0,
-            "reasoning": 1.5,
-            "outcome": 0.5,
-        }
-        max_field_weight = max(field_weights.values())
-        for experience_id, fields, summary in documents:
+        max_field_weight = max((weight for _, document in documents for weight, _ in document.fields), default=1.0)
+        for experience_id, document in documents:
             matched: list[str] = []
             weighted_match = 0.0
             for token in query_tokens:
                 token_field_weight = max(
-                    (weight for field, weight in field_weights.items() if token in fields[field]),
+                    (weight for weight, tokens in document.fields if token in tokens),
                     default=0.0,
                 )
                 if token_field_weight:
                     matched.append(token)
                     weighted_match += _idf(token, visible_count, document_frequency) * token_field_weight
             coverage = weighted_match / (query_weight * max_field_weight) if query_weight else 0.0
-            summary_similarity = SequenceMatcher(None, query, summary).ratio()
-            identity_compatibility = _identity_compatibility(
-                query_tokens,
-                fields["identity"],
-            )
+            summary_similarity = SequenceMatcher(None, query, document.summary).ratio()
+            identity_compatibility = _identity_compatibility(query_tokens, document.identity)
             score = (0.9 * coverage + 0.1 * summary_similarity) * identity_compatibility
             if score <= 0:
                 continue
@@ -647,34 +646,59 @@ def _tokens(value: str) -> set[str]:
     return tokens
 
 
-def _search_fields(experience: Experience) -> dict[str, set[str]]:
-    outcome = experience.outcome
-    change = experience.change
-    return {
-        "identity": _tokens(_normalized_text(" ".join(str(value) for value in experience.identity.values()))),
-        "summary": _tokens(
-            _normalized_text(
-                " ".join(
-                    (
-                        change.summary if change else "",
-                        change.kind if change else "",
-                    )
-                )
-            )
-        ),
-        "reasoning": _tokens(_normalized_text(experience.reasoning)),
-        "outcome": _tokens(
-            _normalized_text(
-                " ".join(
-                    (
-                        experience.objective,
-                        outcome.decision if outcome else "",
-                        outcome.error_class if outcome else "",
-                    )
-                )
-            )
-        ),
-    }
+#: Notes and the objective belong to the KB rather than to a declaration, so their weights are the KB's.
+_NOTES_WEIGHT = 1.5
+_OBJECTIVE_WEIGHT = 0.5
+
+
+@dataclass(frozen=True)
+class _SearchDocument:
+    #: Each searched field's weight and tokens.
+    fields: tuple[tuple[float, frozenset[str]], ...]
+    #: The identity's tokens, which a query's model size or hardware must not contradict.
+    identity: frozenset[str]
+    #: The change summary a query is compared with.
+    summary: str
+
+
+def _text_of(value: FieldValue) -> str:
+    if isinstance(value, tuple):
+        return " ".join(_text_of(item) for item in value)
+    return "" if isinstance(value, FileRef) else str(value)
+
+
+def _field_tokens(value: FieldValue) -> frozenset[str]:
+    return frozenset(_tokens(_normalized_text(_text_of(value))))
+
+
+def _search_document(declaration: ExperienceDeclaration, experience: Experience) -> _SearchDocument:
+    fields: list[tuple[float, frozenset[str]]] = []
+    for category, item, weight in declaration.search_fields():
+        if category == "identity":
+            continue
+        value = getattr(experience, category).get(item.name)
+        if value is not None:
+            fields.append((weight, _field_tokens(value)))
+    # Identity keys no field declares are searched at the identity's weight too.
+    for name, value in experience.identity.items():
+        declared = declaration.field("identity", name)
+        weight = declared.search_weight("identity") if declared is not None else default_search_weight("identity")
+        if weight:
+            fields.append((weight, _field_tokens(value)))
+    if experience.notes:
+        fields.append(
+            (_NOTES_WEIGHT, _field_tokens(tuple(f"{label} {text}" for label, text in experience.notes.items())))
+        )
+    objective = declaration.objective(experience.objective)
+    described = f"{experience.objective} {objective.description if objective is not None else ''}"
+    fields.append((_OBJECTIVE_WEIGHT, _field_tokens(described)))
+    summary_field = declaration.role_field("change", FieldRole.SUMMARY)
+    summary = experience.change.get(summary_field.name, "") if summary_field is not None else ""
+    return _SearchDocument(
+        fields=tuple(fields),
+        identity=frozenset().union(*(_field_tokens(value) for value in experience.identity.values())),
+        summary=_normalized_text(_text_of(summary)),
+    )
 
 
 def _idf(token: str, count: int, frequencies: dict[str, int]) -> float:
@@ -686,8 +710,8 @@ _GPU_RE = re.compile(r"^mi[0-9]+x$")
 
 
 def _identity_compatibility(
-    query_tokens: set[str],
-    identity_tokens: set[str],
+    query_tokens: AbstractSet[str],
+    identity_tokens: AbstractSet[str],
 ) -> float:
     """Penalize explicit model-size or hardware contradictions."""
     for pattern in (_MODEL_SIZE_RE, _GPU_RE):

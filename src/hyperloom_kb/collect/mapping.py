@@ -5,6 +5,11 @@ that each become one Experience, and one expression per Experience field.
 Names are bound in declaration order -- ``doc``, then each unit step, then
 lookups, then ``let`` values -- and every expression may read only the names
 bound before it.
+
+``identity`` is one expression that evaluates to the whole identity. Each other
+category is a mapping from the fields its declaration names to one expression
+each; a file field's expression evaluates to the path of a local file, relative
+to the source document.
 """
 
 from __future__ import annotations
@@ -26,7 +31,7 @@ from hyperloom_kb.collect.expressions import (
 from hyperloom_kb.config import ConfigurationError, load_declaration
 from hyperloom_kb.schema import ExperienceDeclaration
 
-MAPPING_FORMAT = "hyperloom-kb.collect.v1"
+MAPPING_FORMAT = "hyperloom-kb.collect.v2"
 _PACKAGE_ROOT = Path(__file__).resolve().parent.parent
 _PACKAGED_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -57,31 +62,16 @@ _EXPERIENCE_FIELDS: dict[str, bool | dict[str, bool]] = {
     "seq": True,
     "created_at": False,
     "completed_at": True,
-    "identity": True,
+    "identity": False,
     "objective": True,
-    "baseline_value": True,
-    "baseline_identity": True,
-    "preconditions": False,
     "provenance": {"source_ref": False, "extra": False},
-    "reasoning": True,
-    "change": {
-        "identity": True,
-        "summary": True,
-        "kind": False,
-        "content": False,
-        "resource_refs": False,
-    },
     "rendered_refs": False,
-    "outcome": {
-        "decision": True,
-        "value": False,
-        "constraints": False,
-        "error_class": False,
-    },
-    "reflection": True,
+    "notes": False,
     "parent_id": False,
     "supersedes": False,
 }
+#: The categories whose fields a mapping maps one by one, as the declaration names them.
+DECLARED_CATEGORIES = ("baseline", "rationale", "change", "outcome", "reflection")
 
 
 @dataclass(frozen=True)
@@ -120,6 +110,7 @@ class CollectMapping:
     lookups: tuple[tuple[str, Each], ...]
     lets: tuple[tuple[str, Expression], ...]
     require: tuple[Rule, ...]
+    #: One expression per record field; a category field is keyed ``category.field``.
     experience: dict[str, Expression]
 
 
@@ -204,10 +195,21 @@ def _rules(value: Any, where: str, key: str, names: frozenset[str]) -> tuple[Rul
     return tuple(rules)
 
 
-def _experience(value: Any, names: frozenset[str]) -> dict[str, Expression]:
+def _experience(value: Any, names: frozenset[str], declaration: ExperienceDeclaration) -> dict[str, Expression]:
     data = _mapping(value, "experience")
-    _reject_unknown(data, set(_EXPERIENCE_FIELDS), "experience")
+    _reject_unknown(data, {*_EXPERIENCE_FIELDS, *DECLARED_CATEGORIES}, "experience")
     compiled: dict[str, Expression] = {}
+    for category in DECLARED_CATEGORIES:
+        section = _mapping(data.get(category) or {}, f"experience.{category}")
+        declared = {item.name: item for item in declaration.fields(category)}
+        _reject_unknown(section, set(declared), f"experience.{category}")
+        for name, field in declared.items():
+            if name in section:
+                compiled[f"{category}.{name}"] = compile_expression(
+                    section[name], names, f"experience.{category}.{name}"
+                )
+            elif field.required:
+                raise MappingError(f"experience.{category}.{name} is required by the declaration")
     for name, spec in _EXPERIENCE_FIELDS.items():
         if isinstance(spec, dict):
             if name not in data:
@@ -308,7 +310,7 @@ def compile_mapping(
         lookups=tuple(lookups),
         lets=tuple(lets),
         require=_rules(data.get("require"), "require", "check", names),
-        experience=_experience(data.get("experience"), names),
+        experience=_experience(data.get("experience"), names, declaration),
     )
 
 
@@ -329,6 +331,7 @@ def load_mapping(reference: str | Path) -> CollectMapping:
 
 
 __all__ = [
+    "DECLARED_CATEGORIES",
     "MAPPING_FORMAT",
     "CollectMapping",
     "Producer",

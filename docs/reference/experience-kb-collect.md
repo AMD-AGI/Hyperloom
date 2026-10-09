@@ -41,7 +41,7 @@ mapping is reviewed against a recorded log.
 ## Mapping
 
 ```yaml
-format: hyperloom-kb.collect.v1
+format: hyperloom-kb.collect.v2
 declaration: inference-recipe-v1     # packaged declaration name, or a path relative to this file
 producer: {name: my-producer, version: "1", snapshot_version: my-log.v1}
 
@@ -72,27 +72,42 @@ experience:
   seq: {hash48: [$event.id, $attempt.attempt_id]}
   created_at: $event.start_time       # optional; defaults to completed_at
   completed_at: $attempt.ts
-  identity: {compact: {object: {model: $doc.metadata.model, gpu: $doc.metadata.gpu}}}
   objective: e2e_throughput@v1
-  baseline_value: $attempt.before
-  baseline_identity: {object: {baseline_fingerprint: {sha256: $attempt.baseline}}}
-  preconditions: ["baseline={$attempt.before}"]              # optional
-  provenance: {source_ref: "log:{$attempt.attempt_id}", extra: {object: {}}}   # optional
-  reasoning: $attempt.reasoning
-  change:
-    identity: {object: {change_family: config_variant, change_fingerprint: {sha256: $attempt.delta}}}
-    summary: $attempt.name
-    kind: config_variant                                     # optional
-    content: {canonical_json: $attempt.delta}                # optional
-    resource_refs: []                                        # optional
+  identity: {compact: {object: {model: $doc.metadata.model, gpu: $doc.metadata.gpu}}}   # one expression
+  provenance: {source_ref: "log:{$attempt.attempt_id}", extra: {object: {}}}           # optional
   rendered_refs: []                                          # optional: [{id, purpose}]
+  notes: {object: {interconnect: $attempt.link_report}}      # optional; a note without text is left out
+  baseline:                                                  # each category: one expression per declared field
+    baseline_fingerprint: {sha256: $attempt.baseline}
+    value: $attempt.before
+  rationale:
+    preconditions: ["baseline={$attempt.before}"]
+    reasoning: $attempt.reasoning
+  change:
+    change_family: config_variant
+    change_fingerprint: {sha256: $attempt.delta}
+    summary: $attempt.name
+    content: {canonical_json: $attempt.delta}
   outcome:
     decision: $decision
-    value: $attempt.after                                    # optional
-    constraints: []                                          # optional: [{name, passed, value}]
-    error_class: ""                                          # optional
-  reflection: "Recorded outcome: {$attempt.after}"
+    value: $attempt.after
+  reflection:
+    text: "Recorded outcome: {$attempt.after}"
 ```
+
+`identity` is one expression that evaluates to the whole identity map, since an
+identity may carry keys no field declares. Each of `baseline`, `rationale`,
+`change`, `outcome`, and `reflection` maps the fields its declaration names to
+one expression each: a key the declaration does not name, or a `required` field
+left unmapped, fails when the mapping loads. A field whose expression evaluates
+to `null`, `""`, `[]`, or `{}` is left out of the record.
+
+A `file` field's expression evaluates to the path of a local file, or a list
+of paths for a `many` field; a relative path is read from the source document's
+directory, or from the working directory for a document passed in memory. The
+record names the file by its `FileRef`, and publishing sends the file to the
+service with the record (see [Files](experience-kb.md#files)). A unit whose
+file does not exist is skipped with `mapping evaluation failed: ...`.
 
 Names are bound in order -- `doc`, each unit step, each lookup, each `let` --
 and an expression may read only names bound before it. Every problem with the
@@ -143,11 +158,15 @@ A mapping cannot turn these off:
   explicit `kb=` target must write that same declaration; a mismatch raises
   `ConfigurationError` before anything is written.
 - Credential-shaped content skips the unit: private keys, bearer/API/GitHub/AWS
-  tokens, JWTs, presigned URLs, and -- outside free-text fields -- credential
+  tokens, JWTs, presigned URLs, and -- outside prose fields -- credential
   assignments, credential CLI flags, and credential-shaped keys (a name containing
   `TOKEN`, `SECRET`, `PASSWORD`, `API_KEY`, or `CREDENTIAL`, with `TOKENIZER`
-  exempt). `reasoning`, `reflection`, `change.summary`, and `alternatives` get
-  only the token formats, so prose is not mistaken for an assignment.
+  exempt). The prose fields, `rationale.reasoning`, `rationale.alternatives`,
+  every `reflection` field, `notes`, and the change field with the `summary`
+  role, get only the token formats, so prose is not mistaken for an assignment;
+  `rationale.preconditions` is checked in full, since it may restate the
+  configuration measured against. Every text file a record names is screened
+  line by line the same way; a binary file is not.
 - The Experience id is derived from producer, `run_id`, and `seq`, so collecting
   the same document again is idempotent: an Experience that already exists
   unchanged reports `unchanged`, and a different one under the same id is an error.
@@ -181,7 +200,8 @@ Maps Hyperloom `session_breakdown.json` (SBD V6) to the packaged
 - `kb_read_id`/`rendered_refs` from the proposal;
 - source-arm patches from `attempts[].patch_material: [{path, sha256, content}]`,
   ordered as `patch_path`, `patches_applied`, `patches_reverted` without
-  duplicates.
+  duplicates, into the text field `change.content`; an attempt whose change
+  content is over 32 KiB is skipped with `schema validation failed`.
 
 AgentX sessions are skipped until their Experience identity is supported, and a
 session whose `metadata.grading.objective` is not `output_throughput` is

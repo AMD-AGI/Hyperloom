@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -197,9 +198,17 @@ class InMemoryExperienceStore:
 
 
 def _fsync_directory(path: Path) -> None:
+    # Flushing a directory makes a rename into it durable where a file system can flush one. Windows cannot open a
+    # directory as a file, and some network and FUSE file systems refuse to flush one; the renamed file is flushed
+    # already, so there the write stands without it.
+    if os.name != "posix":
+        return
     descriptor = os.open(path, os.O_RDONLY)
     try:
         os.fsync(descriptor)
+    except OSError as exc:
+        if exc.errno not in (errno.EINVAL, errno.ENOTSUP):
+            raise
     finally:
         os.close(descriptor)
 

@@ -36,6 +36,8 @@ declared in `breakdown/schema.py` (`V6FrameworkAttempt`, `V6FrameworkProposal`).
   `patches_applied`, `patches_reverted`, whatever their size. A patch outside
   the session, not UTF-8, or carrying a credential is left out, and an attempt
   with no recorded patch is not published unless it changed configuration.
+  The published Experience carries the change inline as text, so an attempt
+  whose change content exceeds 32 KiB is recorded but not published.
 - **Configuration from a specialist.** A source attempt records the server args
   and environment variables its specialist delivered as its `config_delta`.
   One that delivered no patch is published as a `config_variant` Experience;
@@ -70,7 +72,9 @@ a single one fed the grid. Proposal citations do not yet reach an attempt from
 an upstream PR candidate. The
 Experience carries its citations in `provenance.extra.experience_citations`;
 how often a cited Experience worked out is not stored on any record but
-derived by the KB that holds both.
+derived by the KB that holds both. Citations, `kb_read_id`, and
+`rendered_refs` are record metadata: they are stored and synced with the
+Experience but never rendered into a prompt.
 
 ## Publication
 
@@ -102,9 +106,9 @@ KEEP/REVERT decisions answer another objective.
 ## Configuration
 
 Publications go to the workspace's local Experience KB service, which every
-optimize launch starts when it is not serving; its configuration, the global KB
-it can push to and pull from, and its HTTP API are in
-[Experience KB service](reference/experience-kb.md).
+optimize launch starts when it is not serving; while it cannot start,
+publications wait in the workspace's spool. Its configuration and its HTTP
+API are in [Experience KB service](reference/experience-kb.md).
 
 Publication is disabled only when `HYPERLOOM_KB_URL` is unset. An optimize
 launch warns and continues when the packaged mapping cannot load.

@@ -558,25 +558,19 @@ The service keeps every schema written to it, so a workspace whose declaration
 changed keeps its older Experiences; a run's reads search only the schema that
 run writes.
 
-A global Experience KB, named by `HYPERLOOM_GLOBAL_KB_URL` and
-`HYPERLOOM_GLOBAL_KB_TOKEN` in `.env`, is shared through the local service;
-runs never read or write it directly. When the user asks to share or fetch
-Experiences, run in the optimizer's environment, with `.env` loaded:
+When the user asks to label the workspace's KB, roll it back, or exclude or
+include an Experience, run the `hyperloom-kb` skill's commands through
+`python -m hyperloom.inference_optimizer.experience_kb_service`, in the
+optimizer's environment with `.env` loaded, such as
+`experience_kb_service restore <label_id>`: they print JSON and default to this
+workspace's schema, and they use the service as it runs, never restarting it
+under a running session.
 
-```bash
-python -m hyperloom.inference_optimizer.experience_kb_service push   # this workspace's Experiences not pushed yet
-python -m hyperloom.inference_optimizer.experience_kb_service pull   # the global KB's Experiences of this workspace's schemas
-```
-
-Report the one summary line each prints (global URL; `created`, `unchanged`,
-`skipped`, `rejected`) and never the token. A push resumes where an earlier one
-stopped and never sends back what was pulled. Push and pull use the service as
-it runs and never restart it under a running session; when they warn that its
-settings differ, `experience_kb_service ensure` or the next launch applies them. With `HYPERLOOM_KB_AUTO_PUSH=1`,
-every run pushes after its Experiences are written locally; a failed automatic
-push is only a warning, and the next push sends what it missed. An unusable
-switch value or a missing global KB is a launch warning, and that run does not
-push.
+A global Experience KB is optional, set by `HYPERLOOM_GLOBAL_KB_URL` and
+`HYPERLOOM_GLOBAL_KB_TOKEN` in `.env`; unset, runs use only the local KB. With
+them set, `python -m hyperloom.inference_optimizer.experience_kb_service push`
+and `python -m hyperloom.inference_optimizer.experience_kb_service pull` sync
+with it, and `HYPERLOOM_KB_AUTO_PUSH=1` pushes after every run.
 
 During FRAMEWORK_AGENT the service is read at two points and the returned block
 is injected into the prompt:
@@ -606,12 +600,13 @@ injected Experience set changes:
 `consumer` is `orchestration` or `specialist`; `domain` and `gap_canonical_id`
 identify the specialist dispatch and are empty for orchestration.
 `prompt_block` is the injected text; each Experience appears in it under an
-`Experience <id>` heading with its complete record. A free-text field over
-2 KiB, typically a source patch in `change.content`, appears as
-`<external content sha256:...>` and is written whole under
-`<session>/experience_kb/contents/`, each patch also as its own file; the block
-ends with those paths. Records are injected whole while they fit 40,000
-characters; the rest of a read is left out, never cut. The injected agents
+`Experience <id>` heading with every knowledge field of its record, never its
+metadata: its provenance, including the citations and read that shaped it, and
+its `rendered_refs` stay in the record. A text field, such as the complete
+change in `change.content`, appears inline and whole; a file field appears as
+its name, size, and the local path to read it from. Records are injected whole
+within 40,000 characters; one that does not fit is left out, never cut, and the
+ones after it that fit are still injected. The injected agents
 cite the Experiences that shaped a proposal in its `experience_citations`,
 which reach the measured Experience's `provenance.extra`. `experiences` holds one
 summary per injected Experience, in `experience_ids` order: `experience_id`,

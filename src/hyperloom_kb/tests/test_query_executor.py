@@ -3,24 +3,24 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
 from hyperloom_kb import (
     LEXICAL_FUZZY_PROVIDER_REF,
-    Change,
     Experience,
     ExperienceDeclaration,
     ExperienceService,
     ExperienceStatus,
     FieldDeclaration,
+    FieldKind,
+    FieldRole,
     InMemoryExperienceStore,
     InMemoryQueryViewStore,
     InMemorySchemaRegistry,
     LexicalFuzzyProvider,
     LocalRetrievalService,
     ObjectiveDeclaration,
-    ObjectiveDirection,
-    Outcome,
     PlannerProvenance,
     Provenance,
     QueryExecutor,
@@ -39,20 +39,24 @@ FROZEN = PlannerProvenance("frozen-case", "none", "none", "frozen-input")
 
 def _declaration() -> ExperienceDeclaration:
     return ExperienceDeclaration(
+        objectives=(ObjectiveDeclaration("throughput@v1", "Maximize throughput."),),
         identity=(
             FieldDeclaration("model", "Model."),
             FieldDeclaration("gpu", "GPU."),
         ),
-        baseline_identity=(FieldDeclaration("config", "Baseline."),),
-        change_identity=(FieldDeclaration("knob", "Knob."),),
-        objectives=(
-            ObjectiveDeclaration(
-                "throughput@v1",
-                ObjectiveDirection.HIGHER_IS_BETTER,
-                "Throughput.",
-            ),
+        baseline=(
+            FieldDeclaration("config", "Baseline.", group=True),
+            FieldDeclaration("value", "Baseline throughput.", kind=FieldKind.NUMBER, role=FieldRole.MEASUREMENT),
         ),
-        decisions=("keep", "revert"),
+        change=(
+            FieldDeclaration("knob", "Knob.", group=True),
+            FieldDeclaration("summary", "What changed.", role=FieldRole.SUMMARY, search=4),
+        ),
+        outcome=(
+            FieldDeclaration("decision", "Decision.", role=FieldRole.DECISION, values=("keep", "revert")),
+            FieldDeclaration("value", "Throughput.", kind=FieldKind.NUMBER, role=FieldRole.MEASUREMENT),
+        ),
+        reflection=(FieldDeclaration("text", "Reflection.", kind=FieldKind.TEXT),),
     )
 
 
@@ -72,15 +76,14 @@ def _experience(
         completed_at=NOW,
         identity={"model": model, "gpu": "mi300x"},
         objective="throughput@v1",
-        baseline_identity={"config": "default"},
-        baseline_value=100.0,
+        baseline={"config": "default", "value": 100.0},
         provenance=Provenance("executor-test", "1"),
         schema_ref=schema.schema_ref,
         status=ExperienceStatus.COMPLETE,
-        reasoning=reasoning,
-        change=Change({"knob": knob}, f"Change {knob}.", kind="config"),
-        outcome=Outcome("keep", 110.0),
-        reflection="Measured result.",
+        rationale={"reasoning": reasoning},
+        change={"knob": knob, "summary": f"Change {knob}."},
+        outcome={"decision": "keep", "value": 110.0},
+        reflection={"text": "Measured result."},
     )
 
 
@@ -107,7 +110,7 @@ def _stack():
     )
     for item in (target, distractor):
         service.submit_complete(item)
-    fuzzy = LexicalFuzzyProvider(experiences)
+    fuzzy = LexicalFuzzyProvider(experiences, schema)
     view = QueryViewMaintainer(schemas, experiences, views).rebuild(
         schema.schema_ref,
         fuzzy_ready=True,
@@ -205,14 +208,17 @@ def test_group_key_policy_controls_executor_order() -> None:
 
 
 def test_renderer_exposes_conditions_baseline_outcome_and_repeat_support() -> None:
-    schema, view, executor, _, _ = _stack()
+    schema, view, executor, target, _ = _stack()
     result = executor.execute(
         _plan(schema.schema_ref, model_weight=1.0),
         _configuration(schema.schema_ref),
         view=view,
     )
 
-    assert "Conditions:" in result.rendered.text
-    assert "Baseline:" in result.rendered.text
-    assert "Outcome: decision=keep, value=110.0" in result.rendered.text
-    assert "Annotations: members=" in result.rendered.text
+    section = result.rendered.text.split(f"Experience {target.id}\n", 1)[1]
+    annotations, record = section.split("Repeat Group Annotations:\n", 1)[1].split("\nRecord:\n", 1)
+    rendered, _ = json.JSONDecoder().raw_decode(record)
+    assert json.loads(annotations)["member_count"] == 1
+    assert rendered["identity"] == target.identity
+    assert rendered["baseline"] == {"config": "default", "value": 100.0}
+    assert rendered["outcome"] == {"decision": "keep", "value": 110.0}

@@ -3,29 +3,29 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
 from hyperloom_kb import (
-    Alternative,
+    METADATA_FIELDS,
     CandidateHit,
     CapabilityState,
     CapabilityUnavailable,
-    Change,
-    ConstraintResult,
     Experience,
     ExperienceDeclaration,
     ExperienceService,
     ExperienceStatus,
     FieldDeclaration,
+    FieldKind,
+    FieldRole,
+    FileRef,
     InMemoryExperienceStore,
     InMemoryQueryViewStore,
     InMemorySchemaRegistry,
     LeaseExpired,
     LocalRetrievalService,
     ObjectiveDeclaration,
-    ObjectiveDirection,
-    Outcome,
     Provenance,
     QueryView,
     QueryViewBuilder,
@@ -37,24 +37,28 @@ from hyperloom_kb import (
 from hyperloom_kb.retrieval import render_complete_experience
 
 NOW = datetime(2026, 9, 17, tzinfo=timezone.utc)
+TRACE = FileRef("traces/decode.json", "b" * 64, 4096)
 
 
 def declaration() -> ExperienceDeclaration:
     return ExperienceDeclaration(
+        objectives=(ObjectiveDeclaration("throughput@v1", "Maximize throughput."),),
         identity=(
             FieldDeclaration("model", "Model."),
             FieldDeclaration("gpu", "GPU."),
         ),
-        baseline_identity=(FieldDeclaration("config", "Baseline configuration."),),
-        change_identity=(FieldDeclaration("knob", "Changed knob."),),
-        objectives=(
-            ObjectiveDeclaration(
-                "throughput@v1",
-                ObjectiveDirection.HIGHER_IS_BETTER,
-                "Throughput.",
-            ),
+        baseline=(FieldDeclaration("config", "Baseline configuration.", group=True),),
+        change=(
+            FieldDeclaration("knob", "Changed knob.", group=True),
+            FieldDeclaration("summary", "What changed.", role=FieldRole.SUMMARY),
+            FieldDeclaration("content", "The change.", kind=FieldKind.TEXT),
         ),
-        decisions=("keep", "revert"),
+        outcome=(
+            FieldDeclaration("decision", "Decision.", role=FieldRole.DECISION, values=("keep", "revert")),
+            FieldDeclaration("value", "Throughput.", kind=FieldKind.NUMBER, role=FieldRole.MEASUREMENT),
+            FieldDeclaration("traces", "Profiles taken.", kind=FieldKind.FILE, many=True),
+        ),
+        reflection=(FieldDeclaration("text", "Reflection.", kind=FieldKind.TEXT),),
     )
 
 
@@ -67,15 +71,14 @@ def experience(schema: ExperienceDeclaration, run_id: str, knob: str) -> Experie
         completed_at=NOW,
         identity={"model": "qwen3", "gpu": "mi355x"},
         objective="throughput@v1",
-        baseline_identity={"config": "default"},
-        baseline_value=100.0,
+        baseline={"config": "default"},
         provenance=Provenance("test", "1"),
         schema_ref=schema.schema_ref,
         status=ExperienceStatus.COMPLETE,
-        reasoning=f"Test {knob} against the measured bottleneck.",
-        change=Change({"knob": knob}, f"Change {knob}."),
-        outcome=Outcome("keep", 110.0),
-        reflection="Throughput improved.",
+        rationale={"reasoning": f"Test {knob} against the measured bottleneck."},
+        change={"knob": knob, "summary": f"Change {knob}."},
+        outcome={"decision": "keep", "value": 110.0},
+        reflection={"text": "Throughput improved."},
     )
 
 
@@ -120,8 +123,8 @@ def test_exact_filter_organize_and_explicit_render() -> None:
     exact = read.exact(
         {
             "identity.model": "qwen3",
-            "baseline_identity.config": "default",
-            "change.identity.knob": "page_size",
+            "baseline.config": "default",
+            "change.knob": "page_size",
         },
         view=ref,
         lease_id=lease.lease_id,
@@ -258,9 +261,11 @@ def test_a_render_budget_keeps_whole_records_and_names_only_those_it_shows() -> 
     both = (first.id, other.id)
     full = read.render(both, view=ref, lease_id=lease.lease_id, budget_chars=None)
     first_only = read.render((first.id,), view=ref, lease_id=lease.lease_id, budget_chars=None)
+    other_only = read.render((other.id,), view=ref, lease_id=lease.lease_id, budget_chars=None)
+    smallest = min(len(first_only.text), len(other_only.text))
 
     fits_one = read.render(both, view=ref, lease_id=lease.lease_id, budget_chars=len(full.text) - 1)
-    fits_none = read.render(both, view=ref, lease_id=lease.lease_id, budget_chars=len(first_only.text) - 1)
+    fits_none = read.render(both, view=ref, lease_id=lease.lease_id, budget_chars=smallest - 1)
     fits_all = read.render(both, view=ref, lease_id=lease.lease_id, budget_chars=len(full.text))
 
     assert (fits_one.text, [item.id for item in fits_one.rendered_refs], fits_one.truncated) == (
@@ -272,7 +277,23 @@ def test_a_render_budget_keeps_whole_records_and_names_only_those_it_shows() -> 
     assert (fits_all.text, fits_all.truncated) == (full.text, False)
 
 
-def test_complete_renderer_without_budget_keeps_every_field() -> None:
+def test_a_record_too_large_for_the_budget_does_not_keep_out_the_records_after_it() -> None:
+    schema, experiences, views, ref, first, _, other = setup()
+    read = LocalRetrievalService(experiences, views)
+    lease = read.acquire_view(schema.schema_ref)
+    alone = {
+        experience.id: read.render((experience.id,), view=ref, lease_id=lease.lease_id, budget_chars=None).text
+        for experience in (first, other)
+    }
+    large, small = sorted(alone, key=lambda experience_id: len(alone[experience_id]), reverse=True)
+    assert len(alone[large]) > len(alone[small])
+
+    shown = read.render((large, small), view=ref, lease_id=lease.lease_id, budget_chars=len(alone[small]))
+
+    assert (shown.text, [item.id for item in shown.rendered_refs], shown.truncated) == (alone[small], [small], True)
+
+
+def test_complete_renderer_without_budget_keeps_every_knowledge_field_and_no_metadata() -> None:
     schema = declaration()
     experiences = InMemoryExperienceStore()
     views = InMemoryQueryViewStore()
@@ -282,20 +303,12 @@ def test_complete_renderer_without_budget_keeps_every_field() -> None:
     long_reasoning = "Measured decode stalls point at page size. " * 400
     record = replace(
         experience(schema, "run-long", "page_size"),
-        reasoning=long_reasoning,
-        preconditions=("measured_baseline_tput=100.0",),
-        alternatives=(Alternative("chunk", "Chunking was already exhausted."),),
-        change=Change(
-            {"knob": "page_size"},
-            "Change page_size.",
-            kind="config",
-            content="--page-size 32\n--max-num-seqs 256",
-        ),
-        outcome=Outcome(
-            "keep",
-            110.0,
-            constraints=(ConstraintResult("accuracy", True, 0.99),),
-        ),
+        rationale={
+            "preconditions": ("measured_baseline_tput=100.0",),
+            "reasoning": long_reasoning,
+            "alternatives": ("Chunking was already exhausted.",),
+        },
+        change={"knob": "page_size", "summary": "Change page_size.", "content": "--page-size 32\n--max-num-seqs 256"},
     )
     service.submit_complete(record)
     ref = QueryViewMaintainer(schemas, experiences, views).rebuild(schema.schema_ref)
@@ -306,10 +319,31 @@ def test_complete_renderer_without_budget_keeps_every_field() -> None:
 
     assert rendered.truncated is False
     assert rendered.text.startswith(f"Experience {record.id}\n")
-    record_json = rendered.text.split("\nRecord:\n", 1)[1]
-    assert json.loads(record_json) == record.to_dict()
+    record_json = json.loads(rendered.text.split("\nRecord:\n", 1)[1])
+    assert record_json == record.knowledge()
+    assert not METADATA_FIELDS & set(record_json)
     annotations_json = rendered.text.split("Repeat Group Annotations:\n", 1)[1].split("\nRecord:\n", 1)[0]
     assert json.loads(annotations_json)["decision_counts"] == {"keep": 1}
+
+
+def test_a_file_renders_as_its_name_size_and_where_it_is_read_never_its_content() -> None:
+    schema = declaration()
+    record = replace(
+        experience(schema, "run-file", "page_size"), outcome={"decision": "keep", "value": 110.0, "traces": (TRACE,)}
+    )
+    store = InMemoryExperienceStore()
+    store.insert_complete(record)
+    view = QueryViewBuilder().build(schema, store.list_experiences(schema.schema_ref))
+
+    located = render_complete_experience(record, view, file_path=lambda ref: Path("/kb/files") / ref.sha256)
+    unlocated = render_complete_experience(record, view)
+
+    assert json.loads(located.split("\nRecord:\n", 1)[1])["outcome"]["traces"] == [
+        {"file": "traces/decode.json", "bytes": 4096, "path": f"/kb/files/{TRACE.sha256}"}
+    ]
+    assert json.loads(unlocated.split("\nRecord:\n", 1)[1])["outcome"]["traces"] == [
+        {"file": "traces/decode.json", "bytes": 4096, "sha256": TRACE.sha256}
+    ]
 
 
 def test_restricted_view_limits_recall_but_keeps_full_group_annotations() -> None:
@@ -321,7 +355,7 @@ def test_restricted_view_limits_recall_but_keeps_full_group_annotations() -> Non
     kept = experience(schema, "run-1", "page_size")
     reverted = replace(
         experience(schema, "run-2", "page_size"),
-        outcome=Outcome("revert", 95.0),
+        outcome={"decision": "revert", "value": 95.0},
     )
     for item in (kept, reverted):
         service.submit_complete(item)

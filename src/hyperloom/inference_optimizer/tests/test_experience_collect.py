@@ -17,6 +17,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from hyperloom_kb.tests.database_fixtures import new_database, postgres_conninfo  # noqa: F401
 
 import hyperloom_kb.collect as kb_collect
 from hyperloom.inference_optimizer import experience_collect, experience_kb_service
@@ -110,8 +111,8 @@ def _unexpected_collect(*_args: Any, **_kwargs: Any) -> Any:
     raise AssertionError("an unconfigured Experience KB must not be contacted")
 
 
-def _configured_kb(monkeypatch, *, collect: Any) -> SimpleNamespace:
-    target = SimpleNamespace(schema_ref=experience_collect.mapping_schema_ref())
+def _configured_kb(monkeypatch, *, collect: Any, schema_ref: str | None = None) -> SimpleNamespace:
+    target = SimpleNamespace(schema_ref=schema_ref or experience_kb_service.mapping_schema_ref())
     monkeypatch.setattr(experience_collect, "collect", collect)
     monkeypatch.setattr(experience_collect, "experience_kb_from_env", lambda **_kwargs: target)
     monkeypatch.setenv("HYPERLOOM_KB_URL", "http://kb.invalid")
@@ -411,12 +412,14 @@ def _stop_workspace_service() -> None:
 
 
 def test_an_auto_pushed_run_reaches_another_workspace_that_pulls(
-    monkeypatch, session_dir: Path, tmp_path: Path
+    monkeypatch, session_dir: Path, tmp_path: Path, new_database
 ) -> None:
     for key in ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
         monkeypatch.delenv(key, raising=False)
     declaration = load_declaration(PACKAGED_DECLARATION)
-    global_kb = ExperienceHTTPService(HTTPServiceConfig(tmp_path / "global", "global-token"), declaration, None)
+    global_kb = ExperienceHTTPService(
+        HTTPServiceConfig(tmp_path / "global", "global-token"), declaration, None, database=new_database()
+    )
     server = create_http_server(global_kb, "127.0.0.1", 0)
     thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05})
     thread.start()
@@ -436,10 +439,10 @@ def test_an_auto_pushed_run_reaches_another_workspace_that_pulls(
 
         _workspace(monkeypatch, tmp_path / "second")
         try:
-            assert experience_kb_service.main(["pull"]) == 0
             config = RemoteConfig.from_env()
             assert config is not None
-            pulled = {str(item["experience_id"]) for item in RemoteClient(config).list_experiences().items}
+            pulled = experience_kb_service.sync_with_global("pull")
+            readable = RemoteClient(config).health()["experience_count"]
         finally:
             _stop_workspace_service()
     finally:
@@ -448,27 +451,29 @@ def test_an_auto_pushed_run_reaches_another_workspace_that_pulls(
         thread.join(timeout=5)
 
     assert written and shared == written
-    assert pulled == written
+    # The second workspace reads what the first pushed; it lists only what it wrote itself.
+    assert pulled["created"] == len(written)
+    assert readable == len(written)
 
 
 def test_recorded_framework_attempts_satisfy_the_packaged_mapping(session_dir: Path) -> None:
     breakdown = _breakdown(session_dir)
 
-    report = kb_collect.collect(experience_collect.MAPPING, breakdown, dry_run=True).to_dict()
+    report = kb_collect.collect(experience_kb_service.MAPPING, breakdown, dry_run=True).to_dict()
 
     assert report["skipped"] == []
     experiences = {row["unit_id"]: row["experience"] for row in report["collected"]}
     source = experiences["t-int-1"]
-    assert source["change"]["kind"] == "source_patch"
-    assert source["change"]["resource_refs"] == ["artifacts/source.patch"]
+    assert source["change"]["change_family"] == "source_patch"
+    assert json.loads(source["change"]["content"])["patches"][0]["path"] == "artifacts/source.patch"
     assert "optimized = True" in source["change"]["content"]
-    assert source["reasoning"] == "Profiling shows redundant attention setup on every request."
+    assert source["rationale"]["reasoning"] == "Profiling shows redundant attention setup on every request."
     assert source["rendered_refs"] == [_AUTHORING_REF]
     assert source["provenance"]["extra"]["kb_read_id"] == "read-authoring"
     config = experiences["t-exp-1:explore-001:fp1"]
-    assert config["change"]["kind"] == "config_variant"
+    assert config["change"]["change_family"] == "config_variant"
     assert config["outcome"]["decision"] == "revert"
-    assert '"extra_server_args":"--already-kept 1"' in config["preconditions"][2]
+    assert '"extra_server_args":"--already-kept 1"' in config["rationale"]["preconditions"][2]
 
 
 def test_an_auto_benched_specialist_proposal_publishes_its_reasoning_citations_and_read(session_dir: Path) -> None:
@@ -522,12 +527,12 @@ def test_an_auto_benched_specialist_proposal_publishes_its_reasoning_citations_a
     coord.phase_framework.close_framework_timeline(_tr("optimize_no_more_leverage"))
     timeline = [event for event in read_timeline_events(session_dir) if event.get("type") == "framework_agent"]
 
-    report = kb_collect.collect(experience_collect.MAPPING, _document(timeline), dry_run=True).to_dict()
+    report = kb_collect.collect(experience_kb_service.MAPPING, _document(timeline), dry_run=True).to_dict()
 
     assert report["skipped"] == []
     [row] = report["collected"]
     experience = row["experience"]
-    assert experience["reasoning"] == reasoning.strip()
+    assert experience["rationale"]["reasoning"] == reasoning.strip()
     assert experience["rendered_refs"] == [shown]
     assert experience["provenance"]["extra"]["experience_citations"] == [citation]
     assert experience["provenance"]["extra"]["kb_read_id"] == "read-specialist"
@@ -598,15 +603,15 @@ def test_a_specialists_config_only_deliverable_is_published_as_a_config_experien
     coord.phase_framework.close_framework_timeline(_tr("optimize_no_more_leverage"))
     timeline = [event for event in read_timeline_events(session_dir) if event.get("type") == "framework_agent"]
 
-    report = kb_collect.collect(experience_collect.MAPPING, _document(timeline), dry_run=True).to_dict()
+    report = kb_collect.collect(experience_kb_service.MAPPING, _document(timeline), dry_run=True).to_dict()
 
     assert report["skipped"] == []
     [row] = report["collected"]
     experience = row["experience"]
-    assert experience["change"]["kind"] == "config_variant"
+    assert experience["change"]["change_family"] == "config_variant"
     assert json.loads(experience["change"]["content"])["extra_server_args"] == "--enable-fused-moe"
     assert json.loads(experience["change"]["content"])["extra_envs"] == {"VLLM_FUSED_MOE": "1"}
     assert experience["outcome"]["decision"] == "keep"
-    assert experience["reasoning"] == discovery_reasoning
+    assert experience["rationale"]["reasoning"] == discovery_reasoning
     assert experience["provenance"]["extra"]["arm"] == "source"
     assert experience["provenance"]["extra"]["kb_read_id"] == "read-authoring"

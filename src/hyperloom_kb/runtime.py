@@ -16,15 +16,9 @@ from hyperloom_kb.remote import (
     RemoteClientError,
     RemoteConfig,
     RemoteExperienceKB,
+    SessionValue,
 )
-from hyperloom_kb.schema import (
-    Alternative,
-    Change,
-    ExperienceDeclaration,
-    JsonValue,
-    Outcome,
-    RenderedRef,
-)
+from hyperloom_kb.schema import ExperienceDeclaration, JsonValue, RenderedRef
 
 log = logging.getLogger(__name__)
 
@@ -39,9 +33,8 @@ class NoOpExperienceSession:
     def decide(
         self,
         *,
-        reasoning: str,
-        change: Change,
-        alternatives: tuple[Alternative, ...] = (),
+        change: Mapping[str, SessionValue],
+        rationale: Mapping[str, SessionValue] | None = None,
         rendered_refs: tuple[RenderedRef, ...] = (),
     ) -> None:
         return None
@@ -49,9 +42,10 @@ class NoOpExperienceSession:
     def complete(
         self,
         *,
-        outcome: Outcome,
-        reflection: str,
+        outcome: Mapping[str, SessionValue],
+        reflection: Mapping[str, SessionValue] | None = None,
         completed_at: datetime | None = None,
+        notes: Mapping[str, str] | None = None,
     ) -> None:
         return None
 

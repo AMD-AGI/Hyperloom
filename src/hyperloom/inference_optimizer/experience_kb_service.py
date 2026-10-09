@@ -30,6 +30,8 @@ from hyperloom_kb import (
     global_config_from_env,
     is_loopback,
 )
+from hyperloom_kb.cli import add_commands, run_command
+from hyperloom_kb.collect import load_mapping
 from hyperloom_kb.schema import JsonValue
 
 log = logging.getLogger(__name__)
@@ -41,9 +43,18 @@ LOCAL_PORTS = range(20_000, 30_000)
 # batch to the global KB inside one request.
 REQUEST_TIMEOUT_SECONDS = 30.0
 SERVICE_DIR = "experience-kb"
+# The packaged mapping a session's Experiences are collected through; its declaration is the schema this workspace
+# writes, reads, and syncs.
+MAPPING = "hyperloom-sbd-v6"
 AUTO_PUSH_ENV = "HYPERLOOM_KB_AUTO_PUSH"
 _PLACEHOLDER = "<PLEASE_FILL_IN>"
 _PLANNER_MODEL_KEYS = ("LOCAL_KB_PLANNER_MODEL", "CLAUDE_MODEL", "ANTHROPIC_MODEL")
+
+
+def mapping_schema_ref() -> str:
+    """Return the declaration the packaged mapping produces, proving the mapping loads."""
+
+    return load_mapping(MAPPING).declaration.schema_ref
 
 
 def service_home() -> Path:
@@ -122,25 +133,31 @@ def ensure_service(*, restart: bool = True) -> LocalService | None:
     return ensure_local_service(config, service_home(), env=env, restart=restart)
 
 
-def sync_with_global(direction: str) -> dict[str, JsonValue]:
-    """``push`` or ``pull`` through the workspace's local service as it runs; a run it may be serving is never stopped."""
+def _workspace_client(command: str) -> RemoteClient:
+    """The workspace's local service as it runs, started when nothing serves it; a run it may serve is never stopped."""
 
-    if global_config_from_env(os.environ) is None:
-        raise SyncUnavailable(f"{GLOBAL_URL_ENV} is not configured")
     config = RemoteConfig.from_env(spool_root=spool_root())
     if config is None or not is_loopback(config.base_url):
-        raise SyncUnavailable("HYPERLOOM_KB_URL does not name a local Experience KB service")
+        raise LocalServiceError("HYPERLOOM_KB_URL does not name a local Experience KB service")
     service = ensure_service(restart=False)
     if service is not None and service.stale:
         log.warning(
             "The Experience KB service runs with other settings than this environment's (%s); %s uses it as it "
             "runs, and the next optimize launch or `ensure` applies them",
             service.stale,
-            direction,
+            command,
         )
-    client = RemoteClient(config)
+    return RemoteClient(config)
+
+
+def sync_with_global(direction: str) -> dict[str, JsonValue]:
+    """``push`` or ``pull`` through the workspace's local service as it runs; a run it may be serving is never stopped."""
+
+    if global_config_from_env(os.environ) is None:
+        raise SyncUnavailable(f"{GLOBAL_URL_ENV} is not configured")
+    client = _workspace_client(direction)
     if direction == "pull":
-        return client.pull()
+        return client.pull(mapping_schema_ref())
     # Writes spooled while the service was down belong to this workspace too; deliver them before pushing.
     client.flush_spool()
     return client.push()
@@ -176,9 +193,13 @@ def auto_push() -> None:
 
 
 def _summary(direction: str, report: dict[str, JsonValue]) -> str:
-    counts = ", ".join(f"{report[key]} {key}" for key in ("created", "unchanged", "skipped"))
+    keys = ("created", "unchanged", "skipped", *(("held_back",) if direction == "push" else ()))
+    counts = ", ".join(f"{report[key]} {key}" for key in keys)
     rejected = report["rejected"] if isinstance(report["rejected"], list) else []
     line = f"Experience KB {direction} with {report['global_url']}: {counts}, {len(rejected)} rejected"
+    saved = report.get("saved")
+    if isinstance(saved, dict):
+        line += f"; the state before it is saved as label {saved['label_id']} ({saved['name']})"
     return line if report["status"] == "completed" else f"{line}; stopped: {report.get('error', '')}"
 
 
@@ -189,13 +210,25 @@ def main(argv: list[str] | None = None) -> int:
     init.add_argument("--env-file", type=Path, default=Path(".env"))
     commands.add_parser("ensure", help="Start the local service unless it already serves, then check its health.")
     commands.add_parser("push", help="Send the Experiences written here and not yet pushed to the global KB.")
-    commands.add_parser("pull", help="Store the global KB's Experiences of this declaration that are not held here.")
+    commands.add_parser(
+        "pull",
+        help="Bring this workspace's schema to everything the global KB holds of it; an unlabelled state is labelled "
+        "first, so the pull can be undone.",
+    )
+    add_commands(commands, schema_ref=mapping_schema_ref())
     args = parser.parse_args(argv)
 
     if args.command == "init-env":
         for key, status in init_env(args.env_file).items():
             print(f"{key}: {status}")
         return 0
+    if hasattr(args, "run"):
+        try:
+            client = _workspace_client(args.command)
+        except (LocalServiceError, RemoteClientError) as exc:
+            print(f"Experience KB {args.command} failed: {exc}", file=sys.stderr)
+            return 1
+        return run_command(client, args)
     if args.command in ("push", "pull"):
         try:
             report = sync_with_global(args.command)
@@ -215,7 +248,7 @@ def main(argv: list[str] | None = None) -> int:
     if service is None:
         print("HYPERLOOM_KB_URL does not name a local Experience KB service", file=sys.stderr)
         return 1
-    state = "started" if service.process is not None else "already running"
+    state = "restarted" if service.restarted else "started" if service.process is not None else "already running"
     print(
         f"Experience KB service {state} at {os.environ['HYPERLOOM_KB_URL']}: "
         f"{service.health.get('experience_count', 0)} Experiences under {service_home()}"
@@ -226,12 +259,14 @@ def main(argv: list[str] | None = None) -> int:
 __all__ = [
     "AUTO_PUSH_ENV",
     "LOCAL_PORTS",
+    "MAPPING",
     "SERVICE_DIR",
     "auto_push",
     "ensure_service",
     "init_env",
     "local_url",
     "main",
+    "mapping_schema_ref",
     "service_home",
     "spool_root",
     "check_auto_push",

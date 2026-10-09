@@ -1,4 +1,4 @@
-"""Credential detection enforced on every collected Experience.
+"""Credential detection enforced on every collected Experience and the files it names.
 
 A mapping cannot switch these checks off: an Experience that carries a
 credential-shaped value is skipped rather than published. Free-text fields get
@@ -9,7 +9,8 @@ would otherwise trip the assignment rules written for configuration text.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
+from pathlib import Path
 
 from hyperloom_kb.schema import JsonValue
 
@@ -62,14 +63,9 @@ _EMBEDDED_KEY = re.compile(r"\"([A-Za-z_][A-Za-z0-9_.-]*)\"\s*:")
 _SECRET_NAME_FRAGMENTS = ("APIKEY", "API_KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
 _SECRET_NAME_EXEMPTIONS = ("TOKENIZER",)
 
-FREE_TEXT_FIELDS = frozenset(
-    {
-        "reasoning",
-        "reflection",
-        "change.summary",
-        "alternatives",
-    }
-)
+#: The fields that hold prose by definition: the reasoning and the alternatives weighed, how the outcome reads, and
+#: labelled notes. Preconditions are not prose: they may restate the configuration measured against.
+FREE_TEXT_FIELDS = frozenset({"rationale.reasoning", "rationale.alternatives", "reflection", "notes"})
 
 
 def is_secret_shaped_name(name: str) -> bool:
@@ -96,31 +92,55 @@ def _text_finding(text: str, *, free_text: bool) -> str | None:
     return None
 
 
-def _is_free_text(path: str) -> bool:
-    return any(path == name or path.startswith(f"{name}[") for name in FREE_TEXT_FIELDS)
+def _is_free_text(path: str, free_text: Collection[str]) -> bool:
+    return any(path == name or path.startswith((f"{name}[", f"{name}.")) for name in free_text)
 
 
-def find_sensitive(value: JsonValue, path: str = "") -> str | None:
-    """Return ``"<field path>: <finding>"`` for the first credential-shaped content."""
+def find_sensitive(
+    value: JsonValue,
+    path: str = "",
+    *,
+    free_text: Collection[str] = FREE_TEXT_FIELDS,
+    declared: Collection[str] = (),
+) -> str | None:
+    """Return ``"<field path>: <finding>"`` for the first credential-shaped content.
+
+    A string at or below a path in ``free_text`` is screened as prose. A key at a path in ``declared`` is a field a
+    declaration names, not data, so only its value is screened.
+    """
 
     if isinstance(value, str):
-        finding = _text_finding(value, free_text=_is_free_text(path))
+        finding = _text_finding(value, free_text=_is_free_text(path, free_text))
         return f"{path or '<root>'}: {finding}" if finding else None
     if isinstance(value, Mapping):
         for key, item in value.items():
             child = f"{path}.{key}" if path else str(key)
-            if is_secret_shaped_name(str(key)):
+            if child not in declared and is_secret_shaped_name(str(key)):
                 return f"{child}: credential-shaped key"
-            finding = find_sensitive(item, child)
+            finding = find_sensitive(item, child, free_text=free_text, declared=declared)
             if finding:
                 return finding
         return None
     if isinstance(value, list):
         for index, item in enumerate(value):
-            finding = find_sensitive(item, f"{path}[{index}]")
+            finding = find_sensitive(item, f"{path}[{index}]", free_text=free_text, declared=declared)
             if finding:
                 return finding
     return None
 
 
-__all__ = ["FREE_TEXT_FIELDS", "find_sensitive", "is_secret_shaped_name"]
+def find_sensitive_in_file(path: Path, *, free_text: bool) -> str | None:
+    """The first credential-shaped content of the text file at ``path``, line by line; a binary file has none."""
+
+    try:
+        with path.open(encoding="utf-8") as stream:
+            for number, line in enumerate(stream, start=1):
+                finding = _text_finding(line, free_text=free_text)
+                if finding:
+                    return f"line {number}: {finding}"
+    except UnicodeDecodeError:
+        return None
+    return None
+
+
+__all__ = ["FREE_TEXT_FIELDS", "find_sensitive", "find_sensitive_in_file", "is_secret_shaped_name"]
