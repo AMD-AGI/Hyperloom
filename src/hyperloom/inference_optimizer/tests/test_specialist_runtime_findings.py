@@ -43,7 +43,7 @@ async def test_warm_specialist_params_injects_current_best_findings(tmp_path):
     log = tmp_path / "server.log"
     log.write_text("Unknown vLLM environment variable detected: VLLM_FOO\n", encoding="utf-8")
     slot = tmp_path / "slot"
-    persist_runtime_findings(scan_server_log(str(log), "vllm"), slot=slot)
+    persist_runtime_findings(scan_server_log(str(log), "vllm", declared_env=("VLLM_FOO",)), slot=slot)
     state = SharedState(current_best_measurement={"launch_evidence_path": str(slot / "launch_evidence.json")})
     params: dict[str, Any] = {"domain": "serving_specialist"}
 

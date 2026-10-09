@@ -179,9 +179,13 @@ def test_grid_evidence_writes_runtime_findings_next_to_launch_evidence(tmp_path:
     output_root = tmp_path / "runs"
     slot = output_root / "variant_00_v"
     slot.mkdir(parents=True)
-    (slot / "config.yaml").write_text(yaml.safe_dump({"benchmark": {"framework": "vllm"}}), encoding="utf-8")
+    (slot / "config.yaml").write_text(
+        yaml.safe_dump({"benchmark": {"framework": "vllm", "envs": {"VLLM_FOO": "1"}}}), encoding="utf-8"
+    )
     (slot / "server.log").write_text(
-        "WARNING [interface.py:1461] Unknown vLLM environment variable detected: VLLM_FOO\n", encoding="utf-8"
+        "WARNING [interface.py:1461] Unknown vLLM environment variable detected: VLLM_FOO\n"
+        "WARNING [interface.py:1461] Unknown vLLM environment variable detected: VLLM_PYTHON\n",
+        encoding="utf-8",
     )
     result = _grid_runner.VariantResult(name="v", extra_server_args="", extra_envs={}, status="succeeded")
 

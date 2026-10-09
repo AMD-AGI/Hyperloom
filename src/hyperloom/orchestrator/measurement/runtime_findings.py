@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Pattern
@@ -51,6 +51,8 @@ class _LineRule:
     patterns: tuple[Pattern[str], ...]
     subject: Callable[[re.Match[str]], str]
     frameworks: frozenset[str] | None = None
+    #: Report only subjects the measurement declared in its server env.
+    declared_only: bool = False
 
 
 def _first_group_or_match(match: re.Match[str]) -> str:
@@ -64,6 +66,7 @@ _LINE_RULES: tuple[_LineRule, ...] = (
         patterns=(re.compile(r"Unknown vLLM environment variable detected: (\S+)"),),
         subject=_first_group_or_match,
         frameworks=frozenset({"vllm"}),
+        declared_only=True,
     ),
     _LineRule(
         rule_id="feature_disabled",
@@ -147,7 +150,7 @@ def _status_finding(rule_id: str, status: str, reason: str) -> dict[str, Any]:
     }
 
 
-def _scan_lines(path: str, framework: str, hits: _Hits) -> None:
+def _scan_lines(path: str, framework: str, declared_env: Collection[str], hits: _Hits) -> None:
     line_rules = _line_rules(framework)
     missed_shapes: set[tuple[int, int, int]] = set()
     first_miss_line = ""
@@ -158,7 +161,9 @@ def _scan_lines(path: str, framework: str, hits: _Hits) -> None:
                 for pattern in rule.patterns:
                     match = pattern.search(line)
                     if match is not None:
-                        hits.add(rule.rule_id, rule.subject(match), line)
+                        subject = rule.subject(match)
+                        if not rule.declared_only or subject in declared_env:
+                            hits.add(rule.rule_id, subject, line)
                         break
             if _AITER_MISS_MARKER in line:
                 shapes, _ = parse_aiter_shape_lookups(line)
@@ -183,8 +188,11 @@ def _scan_lines(path: str, framework: str, hits: _Hits) -> None:
         hits.add(AITER_TUNED_MISS, "aiter_tuned_config", first_miss_line, count=len(missed_shapes))
 
 
-def scan_server_log(path: str | None, framework: str) -> dict[str, Any]:
-    """Scan one measured server log; every applicable rule gets one status."""
+def scan_server_log(path: str | None, framework: str, *, declared_env: Collection[str] = ()) -> dict[str, Any]:
+    """Scan one measured server log; every applicable rule gets one status.
+
+    ``declared_env`` names the server env the measurement requested; only those can be unknown env findings.
+    """
     framework = str(framework or "").strip().lower()
     rules = _applicable_rules(framework)
     report: dict[str, Any] = {
@@ -199,7 +207,7 @@ def scan_server_log(path: str | None, framework: str) -> dict[str, Any]:
     hits = _Hits()
     try:
         report["log_mtime"] = Path(path).stat().st_mtime
-        _scan_lines(path, framework, hits)
+        _scan_lines(path, framework, declared_env, hits)
     except OSError as exc:
         reason = f"unreadable: {type(exc).__name__}"
         report["findings"] = [_status_finding(rule_id, UNKNOWN, reason) for rule_id in rules]

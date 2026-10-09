@@ -581,7 +581,8 @@ def _attach_baseline_launch_evidence(
     )
     result["launch_evidence"] = evidence
     result["launch_evidence_path"] = persist_launch_evidence(evidence, slot=output_dir)
-    persist_runtime_findings(scan_server_log(actual_log, evidence["framework"]), slot=output_dir)
+    report = scan_server_log(actual_log, evidence["framework"], declared_env=evidence["requested_server_env"])
+    persist_runtime_findings(report, slot=output_dir)
 
 
 def _watchdog_server_log_path(output_dir: Path, framework: str) -> str | None:

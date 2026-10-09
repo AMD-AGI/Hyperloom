@@ -2151,7 +2151,8 @@ def _attach_grid_launch_evidence(
         )
         result.launch_evidence = evidence
         result.launch_evidence_path = persist_launch_evidence(evidence, slot=slot)
-        persist_runtime_findings(scan_server_log(actual_log, evidence["framework"]), slot=slot)
+        report = scan_server_log(actual_log, evidence["framework"], declared_env=evidence["requested_server_env"])
+        persist_runtime_findings(report, slot=slot)
 
 
 def _safe(name: str) -> str:

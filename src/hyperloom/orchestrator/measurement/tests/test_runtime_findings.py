@@ -44,7 +44,7 @@ VLLM_LOG = (
 
 
 def test_vllm_log_reports_each_rule_once_per_subject(tmp_path):
-    report = scan_server_log(_write(tmp_path, VLLM_LOG), "vllm")
+    report = scan_server_log(_write(tmp_path, VLLM_LOG), "vllm", declared_env=("VLLM_MOE_N_SPLIT_SCHEDULE",))
 
     assert _detected(report) == [
         ("aiter.tuned_miss", "aiter_tuned_config", 2),
@@ -56,6 +56,24 @@ def test_vllm_log_reports_each_rule_once_per_subject(tmp_path):
         "engine_adjusted": "not_detected",
         "runtime.traceback": "not_detected",
     }
+
+
+def test_unknown_env_reports_only_declared_names(tmp_path):
+    log = "".join(
+        f"(APIServer pid=11) WARNING 09-22 14:58:51 [envs.py:1734] Unknown vLLM environment variable detected: {name}\n"
+        for name in ("VLLM_PYTHON", "VLLM_VENV_ROOT", "VLLM_ATTENTION_BACKEND")
+    )
+    report = scan_server_log(_write(tmp_path, log), "vllm", declared_env={"VLLM_ATTENTION_BACKEND", "TP"})
+
+    assert _detected(report) == [("vllm.unknown_env", "VLLM_ATTENTION_BACKEND", 1)]
+
+
+def test_unknown_env_without_declared_names_is_not_detected(tmp_path):
+    log = "Unknown vLLM environment variable detected: VLLM_PYTHON\n"
+    report = scan_server_log(_write(tmp_path, log), "vllm")
+
+    assert _detected(report) == []
+    assert _statuses(report)["vllm.unknown_env"] == "not_detected"
 
 
 def test_traceback_subject_is_exception_class_behind_process_prefix(tmp_path):
@@ -193,7 +211,7 @@ def test_evidence_is_flattened_and_defanged(tmp_path):
 def test_render_lists_detected_then_clear_then_unknown(tmp_path):
     log = _write(tmp_path, VLLM_LOG)
     slot = tmp_path / "slot"
-    persist_runtime_findings(scan_server_log(log, "vllm"), slot=slot)
+    persist_runtime_findings(scan_server_log(log, "vllm", declared_env=("VLLM_MOE_N_SPLIT_SCHEDULE",)), slot=slot)
 
     out = render_runtime_findings({"launch_evidence_path": str(slot / "launch_evidence.json")})
 
@@ -234,8 +252,14 @@ def test_render_lists_unknown_reason(tmp_path):
 
 
 def test_baseline_writes_runtime_findings(tmp_path):
-    (tmp_path / "config.yaml").write_text("benchmark:\n  framework: vllm\n", encoding="utf-8")
-    (tmp_path / "server.log").write_text("Unknown vLLM environment variable detected: VLLM_FOO\n", encoding="utf-8")
+    (tmp_path / "config.yaml").write_text(
+        "benchmark:\n  framework: vllm\n  envs:\n    VLLM_FOO: '1'\n", encoding="utf-8"
+    )
+    (tmp_path / "server.log").write_text(
+        "Unknown vLLM environment variable detected: VLLM_FOO\n"
+        "Unknown vLLM environment variable detected: VLLM_PYTHON\n",
+        encoding="utf-8",
+    )
     result: dict = {}
 
     _attach_baseline_launch_evidence(
@@ -243,10 +267,10 @@ def test_baseline_writes_runtime_findings(tmp_path):
     )
 
     out = render_runtime_findings(result)
-    assert (
-        out.splitlines()[1]
-        == "- detected [correctness] vllm.unknown_env VLLM_FOO x1: Unknown vLLM environment variable detected: VLLM_FOO"
-    )
+    assert out.splitlines()[1:] == [
+        "- detected [correctness] vllm.unknown_env VLLM_FOO x1: Unknown vLLM environment variable detected: VLLM_FOO",
+        "- not_detected: feature_disabled, capability_disabled, engine_adjusted, aiter.tuned_miss, runtime.traceback",
+    ]
 
 
 def _report(*findings: tuple[str, str, str, str]) -> dict:
