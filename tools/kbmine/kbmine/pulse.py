@@ -32,6 +32,7 @@ import http.client
 import json
 import math
 import ssl
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -39,11 +40,25 @@ from collections.abc import Iterator, Mapping
 from typing import Any
 
 LAYOUT_UNKNOWN = "layout_unknown"
-_PAGE = 200
+#: Rows per page. Measured against the live service: 200- and 100-row responses were cut short every time, 50-row
+#: ones 7 times in 20, 25-row ones 0 times in 20.
+_PAGE = 25
+#: Attempts per request when the transport fails (a truncated, reset or timed-out response). An HTTP status or a
+#: non-JSON body is answered the same way on retry, so it is not retried.
+_TRANSPORT_ATTEMPTS = 3
+_RETRY_BACKOFF_SEC = 1.0
 
 
 class PulseError(RuntimeError):
     """A Pulse request failed."""
+
+
+class _TransportError(Exception):
+    """A request that failed in transport and may succeed if repeated."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail
 
 
 class PulseClient:
@@ -64,6 +79,9 @@ class PulseClient:
             raise PulseError(f"cannot load the CA bundle {ca_bundle!r}: {exc}") from exc
         #: Why the last :meth:`session_breakdowns` walk ended early or skipped rows; empty when it read cleanly.
         self.walk_notes: list[str] = []
+        #: Requests repeated after a transport failure since the last walk began.
+        self.transport_retries = 0
+        self._sleep = time.sleep
 
     def get(self, path: str, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
         url = self.base_url + path
@@ -71,9 +89,26 @@ class PulseClient:
         if query:
             url += "?" + urllib.parse.urlencode(query)
         request = urllib.request.Request(url, headers={"Authorization": f"Bearer {self._token}"})
+        for attempt in range(1, _TRANSPORT_ATTEMPTS + 1):
+            try:
+                body = self._read(request, path)
+                break
+            except _TransportError as exc:
+                if attempt == _TRANSPORT_ATTEMPTS:
+                    raise PulseError(f"GET {path} transport error after {attempt} attempts: {exc.detail}") from exc
+                self.transport_retries += 1
+                self._sleep(_RETRY_BACKOFF_SEC * attempt)
+        try:
+            return json.loads(body)
+        except json.JSONDecodeError as exc:
+            # An SSO login page answers 200 with HTML, which is what a wrong base URL or a stale token usually hits.
+            raise PulseError(f"GET {path}: response was not JSON ({body[:80]!r})") from exc
+
+    def _read(self, request: urllib.request.Request, path: str) -> str:
+        """One request's body; a transport failure is a :class:`_TransportError`, an HTTP status a PulseError."""
         try:
             with urllib.request.urlopen(request, timeout=self._timeout, context=self._ctx) as response:
-                body = response.read().decode("utf-8", "replace")
+                return response.read().decode("utf-8", "replace")
         except urllib.error.HTTPError as exc:
             try:
                 body = exc.read().decode("utf-8", "replace")[:200]
@@ -81,16 +116,11 @@ class PulseClient:
                 body = "<error body unreadable>"
             raise PulseError(f"GET {path} -> HTTP {exc.code}: {body}") from exc
         except urllib.error.URLError as exc:
-            raise PulseError(f"GET {path} transport error: {exc.reason!r}") from exc
+            raise _TransportError(repr(exc.reason)) from exc
         except (OSError, http.client.HTTPException) as exc:
             # A timeout, reset, TLS failure or truncated body (IncompleteRead) while the response is read is not
             # wrapped in URLError.
-            raise PulseError(f"GET {path} transport error: {exc!r}") from exc
-        try:
-            return json.loads(body)
-        except json.JSONDecodeError as exc:
-            # An SSO login page answers 200 with HTML, which is what a wrong base URL or a stale token usually hits.
-            raise PulseError(f"GET {path}: response was not JSON ({body[:80]!r})") from exc
+            raise _TransportError(repr(exc)) from exc
 
     def summary(self, **filters: Any) -> dict[str, Any]:
         return self.get("/v1/session-breakdowns/summary", filters)
@@ -106,6 +136,7 @@ class PulseClient:
         stopped early or what it skipped.
         """
         self.walk_notes = []
+        self.transport_retries = 0
         offset = 0
         seen = 0
         session_ids: set[str] = set()
@@ -141,6 +172,10 @@ class PulseClient:
             offset += len(rows)
             if len(rows) < requested:
                 break
+        if self.transport_retries:
+            self.walk_notes.append(
+                f"pulse: {self.transport_retries} request(s) repeated after a truncated, reset or timed-out response"
+            )
         if repeated:
             self.walk_notes.append(f"pulse: skipped {repeated} row(s) repeating a session already read")
         if malformed:

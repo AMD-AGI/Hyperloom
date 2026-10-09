@@ -369,6 +369,12 @@ Each of these was measured against the live services, not inferred:
 
 ## Known limits
 
+* Pulse, or something in front of it, intermittently cuts large responses
+  short: when measured, 200- and 100-row pages were truncated every time, 50-row
+  pages 7 times in 20, and 25-row pages never. The reader therefore pages 25 rows
+  at a time and retries a truncated, reset or timed-out response up to 3 times;
+  retries are noted in `fetch_errors`, and a page that still fails ends the run
+  with a one-line `Pulse fetch failed`.
 * Pulse returns rows in insertion order, so a truncated crawl is not a random
   sample — a 6000-row pull came back 98% one CI cohort. Per-identity priors
   need server-side filtering or a full crawl.
