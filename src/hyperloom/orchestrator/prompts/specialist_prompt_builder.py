@@ -1719,6 +1719,7 @@ def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
             ("Compute %", "compute_pct"),
             ("Idle %", "idle_pct"),
             ("Exposed Comm %", "comm_pct"),
+            ("Exposed memcpy %", "memcpy_pct"),
             ("Top bottleneck", "top_bottleneck"),
         ):
             val = summary.get(key)

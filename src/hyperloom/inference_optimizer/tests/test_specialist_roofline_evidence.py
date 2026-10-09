@@ -182,6 +182,7 @@ def test_section_renders_executive_summary_and_hot_kernels():
                 "compute_pct": 30.0,
                 "idle_pct": 15.0,
                 "comm_pct": 40.0,
+                "memcpy_pct": 9.2,
                 "top_bottleneck": "MoE_fused",
             },
             "hot_kernels_top15": [
@@ -200,6 +201,7 @@ def test_section_renders_executive_summary_and_hot_kernels():
     assert "## 4a. ROOFLINE EVIDENCE" in text
     assert "snapshot #7" in text
     assert "Compute %" in text and "30.0%" in text
+    assert "- Exposed memcpy %: 9.2%" in section
     assert "MoE_fused" in text
     assert "k1" in text and "8.40%" in text
     assert "/sd/.../analysis.md" in text
