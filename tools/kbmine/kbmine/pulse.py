@@ -89,20 +89,25 @@ class PulseClient:
         if query:
             url += "?" + urllib.parse.urlencode(query)
         request = urllib.request.Request(url, headers={"Authorization": f"Bearer {self._token}"})
-        for attempt in range(1, _TRANSPORT_ATTEMPTS + 1):
-            try:
-                body = self._read(request, path)
-                break
-            except _TransportError as exc:
-                if attempt == _TRANSPORT_ATTEMPTS:
-                    raise PulseError(f"GET {path} transport error after {attempt} attempts: {exc.detail}") from exc
-                self.transport_retries += 1
-                self._sleep(_RETRY_BACKOFF_SEC * attempt)
+        body = self._read_with_retries(request, path)
         try:
             return json.loads(body)
         except json.JSONDecodeError as exc:
             # An SSO login page answers 200 with HTML, which is what a wrong base URL or a stale token usually hits.
             raise PulseError(f"GET {path}: response was not JSON ({body[:80]!r})") from exc
+
+    def _read_with_retries(self, request: urllib.request.Request, path: str) -> str:
+        """The response body, repeating a transport failure up to ``_TRANSPORT_ATTEMPTS`` times in all."""
+        attempt = 1
+        while True:
+            try:
+                return self._read(request, path)
+            except _TransportError as exc:
+                if attempt >= _TRANSPORT_ATTEMPTS:
+                    raise PulseError(f"GET {path} transport error after {attempt} attempts: {exc.detail}") from exc
+                self.transport_retries += 1
+                self._sleep(_RETRY_BACKOFF_SEC * attempt)
+                attempt += 1
 
     def _read(self, request: urllib.request.Request, path: str) -> str:
         """One request's body; a transport failure is a :class:`_TransportError`, an HTTP status a PulseError."""
