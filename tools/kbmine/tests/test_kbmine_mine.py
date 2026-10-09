@@ -720,3 +720,31 @@ def test_a_non_json_pulse_response_is_a_pulse_error(monkeypatch, capsys) -> None
         PulseClient("https://pulse.invalid", "t").get("/v1/session-breakdowns")
     assert estimate_main(["--pulse-url", "https://pulse.invalid"]) == 1
     assert "Pulse fetch failed" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "error", [TimeoutError("read timed out"), ConnectionResetError("reset")], ids=["timeout", "reset"]
+)
+def test_a_pulse_read_failure_is_a_pulse_error(monkeypatch, capsys, error) -> None:
+    import urllib.request
+
+    from kbmine.pulse import PulseClient, PulseError
+
+    def fail(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(urllib.request, "urlopen", fail)
+    with pytest.raises(PulseError, match="transport error"):
+        PulseClient("https://pulse.invalid", "t").get("/v1/session-breakdowns")
+    assert estimate_main(["--pulse-url", "https://pulse.invalid"]) == 1
+    assert "Pulse fetch failed" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("content", [None, "{not json"], ids=["missing", "invalid-json"])
+def test_an_unreadable_input_file_exits_with_a_message(tmp_path: Path, content) -> None:
+    path = tmp_path / "pool.json"
+    if content is not None:
+        path.write_text(content, encoding="utf-8")
+    with pytest.raises(SystemExit) as exc:
+        estimate_main(["--input", str(path)])
+    assert "cannot read a session JSON file" in str(exc.value)

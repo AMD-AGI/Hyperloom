@@ -75,6 +75,9 @@ class PulseClient:
             raise PulseError(f"GET {path} -> HTTP {exc.code}: {body}") from exc
         except urllib.error.URLError as exc:
             raise PulseError(f"GET {path} transport error: {exc.reason!r}") from exc
+        except OSError as exc:
+            # A timeout, reset or TLS failure while the response is read is not wrapped in URLError.
+            raise PulseError(f"GET {path} transport error: {exc!r}") from exc
         try:
             return json.loads(body)
         except json.JSONDecodeError as exc:
