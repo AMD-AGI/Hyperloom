@@ -2494,11 +2494,11 @@ class TestServerArgTokenizerOnTheSyntheticPath:
         args = "--tensor-parallel-size 8 --gpu-memory-utilization 0.9 --max-num-seqs 512"
         assert _grid_runner.compose_server_args(base_extra_args=args) == args
 
-    def test_the_denylisted_flag_is_still_dropped(self, monkeypatch):
+    def test_the_harness_flag_reaches_the_launch(self, monkeypatch):
+        """The baseline keeps the operator's flags, so a variant must launch with them too."""
         self._off(monkeypatch)
         out = _grid_runner.compose_server_args(base_extra_args="--no-enable-prefix-caching --max-num-seqs 512")
-        assert "--no-enable-prefix-caching" not in out
-        assert "--max-num-seqs 512" in out
+        assert out == "--no-enable-prefix-caching --max-num-seqs 512"
 
     def test_quoted_operands_do_not_keep_their_wrappers(self, monkeypatch):
         """Magpie expands EXTRA_*_ARGS unquoted, so a wrapper reaches argv literally."""
@@ -2528,7 +2528,8 @@ def test_the_json_tripwire_sees_damage_from_the_removal_pass(caplog):
 
     def _lossy(server_args, remove_args):
         out = real(server_args, remove_args)
-        return out.replace('{"mode":3}', "{mode:3}")
+        # A wildcard is damage normalization cannot repair, unlike a bareword key.
+        return out.replace('{"mode":3}', '{"ignore":[*.mlp.gate]}')
 
     args = '--compilation-config {"mode":3} --max-num-seqs 512'
     with patch.object(gsa, "remove_server_args", side_effect=_lossy):

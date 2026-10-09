@@ -394,25 +394,33 @@ def test_compose_server_args_replace_still_applies_remove_args() -> None:
     assert out == "--also-bad 2 --keep 4"
 
 
-def test_compose_server_args_strips_denylisted_harness_flag_from_every_layer() -> None:
+def test_compose_server_args_launches_with_the_harness_flags_the_baseline_ran_with() -> None:
     out = gr.compose_server_args(
         inherited_args="--no-enable-prefix-caching --block-size 128",
         base_extra_args="--no-enable-prefix-caching",
         variant_extra_args="--kv-cache-dtype fp8 --no-enable-prefix-caching",
     )
-    assert "--no-enable-prefix-caching" not in out
+    assert "--no-enable-prefix-caching" in out
     assert "--block-size 128" in out
     assert "--kv-cache-dtype fp8" in out
 
 
-def test_compose_server_args_strips_denylisted_flag_in_replace_mode() -> None:
+def test_compose_server_args_keeps_the_harness_flag_in_replace_mode() -> None:
     out = gr.compose_server_args(
         inherited_args="--ignored",
         base_extra_args="--no-enable-prefix-caching --max-num-seqs 256",
         variant_extra_args="--kv-cache-dtype fp8",
         args_mode="replace",
     )
-    assert out == "--max-num-seqs 256 --kv-cache-dtype fp8"
+    assert out == "--no-enable-prefix-caching --max-num-seqs 256 --kv-cache-dtype fp8"
+
+
+def test_launch_keeps_what_the_persisted_recipe_strips() -> None:
+    from hyperloom.inference_optimizer.grid_server_args import strip_benchmark_harness_flags
+
+    launched = gr.compose_server_args(base_extra_args="--no-enable-prefix-caching --max-num-seqs 256")
+    assert "--no-enable-prefix-caching" in launched
+    assert strip_benchmark_harness_flags(launched) == "--max-num-seqs 256"
 
 
 def test_remove_server_args_accepts_multi_flag_string() -> None:

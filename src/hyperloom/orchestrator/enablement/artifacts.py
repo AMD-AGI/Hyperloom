@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from hyperloom.common.io import atomic_write_text
+from hyperloom.inference_optimizer.grid_server_args import strip_benchmark_harness_flags
 from hyperloom.inference_optimizer.session.session_paths import (
     enablement_dir,
     enablement_round_dir,
@@ -339,7 +340,8 @@ def write_setting_script(
 
     accepted_cfg = dict(enablement.accepted_config or {})
     extra_envs = {str(k): str(v) for k, v in (accepted_cfg.get("extra_envs") or {}).items()}
-    extra_server_args = str(accepted_cfg.get("extra_server_args") or "").strip()
+    # The accepted config can carry a harness flag the measurement ran with; an exported recipe must not.
+    extra_server_args = strip_benchmark_harness_flags(str(accepted_cfg.get("extra_server_args") or "").strip())
 
     active = enablement.active_runtime or {}
     runtime_path = str(active.get("venv_root") or "").strip() if isinstance(active, dict) else ""
