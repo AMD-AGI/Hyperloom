@@ -1218,6 +1218,26 @@ def _export_operator_launch_shape(
         os.environ.pop("INFERENCE_OPTIMIZER_EXTRA_ENV", None)
 
 
+def _export_predictor_settings(args: argparse.Namespace) -> None:
+    """Project ``--primatune-endpoint`` / ``--primatune-mode`` into the env the predictor reads.
+
+    An absent flag leaves the variable alone, so a value exported in the shell
+    still applies. Nothing is persisted: a ``--resume-from`` relaunch needs the
+    flags again unless the shell carries the variables.
+    """
+    from hyperloom.orchestrator.predictor import config as predictor_config
+
+    endpoint = str(getattr(args, "primatune_endpoint", "") or "").strip()
+    if endpoint:
+        os.environ[predictor_config.ENV_ENDPOINT] = endpoint
+    mode = str(getattr(args, "primatune_mode", "") or "").strip()
+    if mode:
+        os.environ[predictor_config.ENV_MODE] = mode
+    conf = predictor_config.load()
+    if conf.enabled:
+        print(f"  predictor          : {conf.mode} at {conf.endpoint}")
+
+
 def _partition_fanout_supported(framework: str | None) -> tuple[bool, str]:
     """Whether this framework's runner can place work per partition."""
     name = str(framework or "").strip().lower()
@@ -1627,6 +1647,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         server_args=str(getattr(args, "server_args", "") or "").strip(),
         extra_env=parse_operator_extra_env(args),
     )
+    _export_predictor_settings(args)
     # The partition shape is deliberately NOT exported here.
 
     # Project resolved workload knobs into env for the fresh-launch path only.
