@@ -263,6 +263,13 @@ Common keys:
 - `HYPERLOOM_RUN_MODE` (`baremetal` or `docker`, the resolved run mode for this session)
 - `HYPERLOOM_DOCKER_TARGET_HOST` (only when `HYPERLOOM_RUN_MODE=docker`; the host
   where the demo skill should run Docker)
+- `HYPERLOOM_FRAMEWORK_VENV_PYTHON` is a separate, advanced override this setup
+  skill does not ask about or write: a host-managed venv's interpreter, bind-
+  mounted into the Docker container, supplying a torch/ROCm build `/opt/venv`
+  doesn't ship instead of requiring one baked into the image. See rocm-scripts'
+  isolation tooling (`VENV`/`--venv`) for the reference implementation that
+  resolves and mounts one, and `docs/reference/environment-variables.md` for
+  the resolution precedence.
 - `HYPERLOOM_SKILL_PATH` — absolute path to the optimizer skill
   (`<workspace>/hyperloom/inference_optimizer/SKILL.md` for a wheel install,
   `<workspace>/src/hyperloom/inference_optimizer/SKILL.md` for a source checkout).

@@ -833,6 +833,12 @@ def _framework_probe_interpreters(framework: str, benchmark_python: str) -> list
         python = shutil.which("python3")
         return [python] if python else []
     candidates: list[str] = []
+    # Explicit operator choice (a host venv bind-mounted into the container,
+    # see install.sh's resolve_python()) wins regardless of framework -- same
+    # reasoning as install.sh checking it ahead of /opt/venv.
+    venv_override = os.environ.get("HYPERLOOM_FRAMEWORK_VENV_PYTHON", "").strip()
+    if venv_override and os.access(venv_override, os.X_OK):
+        candidates.append(venv_override)
     venv_root = os.environ.get("VLLM_VENV_ROOT", "").strip()
     venv_python = str(Path(venv_root) / "bin" / "python") if venv_root else ""
     if framework == "vllm" and venv_python and os.access(venv_python, os.X_OK):
