@@ -524,11 +524,12 @@ def _pulse_row(**overrides) -> dict:
         "osl": 1024,
         "baseline_tok_per_s_per_gpu": 100.0,
         "opt_tok_per_s_per_gpu": 150.0,
-        # Server totals over tp=8, as Hyperloom's snapshot computes them: 300 and 500 tok/s per GPU.
+        # Server totals, like the arms above: Pulse's *_per_gpu arms equal the snapshot's achieved throughput.
         "roofline": {
             "roofline_bound_kind": "memory",
-            "roofline_mem_ceiling_tok_per_sec": 2400.0,
-            "roofline_cmp_ceiling_tok_per_sec": 4000.0,
+            "roofline_mem_ceiling_tok_per_sec": 300.0,
+            "roofline_cmp_ceiling_tok_per_sec": 500.0,
+            "achieved_tok_per_sec": 150.0,
         },
     }
     row.update(overrides)
@@ -548,7 +549,7 @@ def test_capture_is_the_share_of_the_roofline_gap_closed() -> None:
 def test_an_unlabelled_bound_takes_the_lower_ceiling() -> None:
     from kbmine.pulse import roofline_ceiling
 
-    row = _pulse_row(roofline={"roofline_mem_ceiling_tok_per_sec": 2400.0, "roofline_cmp_ceiling_tok_per_sec": 1600.0})
+    row = _pulse_row(roofline={"roofline_mem_ceiling_tok_per_sec": 300.0, "roofline_cmp_ceiling_tok_per_sec": 200.0})
     assert roofline_ceiling(row) == (200.0, "inferred min")
 
 
@@ -573,12 +574,13 @@ def test_a_pulse_row_scales_per_gpu_throughput_back_to_a_total() -> None:
     from kbmine.pulse import LAYOUT_UNKNOWN, project_pulse_row
 
     projected = project_pulse_row(_pulse_row())
-    assert projected["tput_per_gpu"] == 150.0
-    assert projected["optimized_throughput"] == pytest.approx(1200.0)
-    assert (projected["ceiling_tput_per_gpu"], projected["ceiling_kind"]) == (300.0, "memory")
+    assert projected["optimized_throughput"] == 150.0, "the arm is already the server total"
+    assert projected["tput_per_gpu"] == pytest.approx(150.0 / 8)
+    assert projected["baseline_tput_per_gpu"] == pytest.approx(100.0 / 8)
+    assert (projected["ceiling_tput_per_gpu"], projected["ceiling_kind"]) == (pytest.approx(300.0 / 8), "memory")
     assert projected["capture_pct"] == pytest.approx(25.0)
     assert projected["parallelism_label"] == LAYOUT_UNKNOWN
-    assert project_pulse_row(_pulse_row(tp=None))["optimized_throughput"] == 150.0
+    assert project_pulse_row(_pulse_row(tp=None))["tput_per_gpu"] == 150.0
 
 
 def test_an_agentx_scope_without_isl_or_osl_encodes() -> None:
@@ -670,18 +672,21 @@ def test_the_search_page_limit_is_reported_as_the_cause(monkeypatch, tmp_path: P
     assert "--max-identities" not in matching[0]
 
 
-def test_the_server_ceiling_is_divided_by_tp_before_capture() -> None:
-    """A tp8 session: per-GPU baseline 100, optimized 150, server ceiling 2400 (300 per GPU) closes 25% of its gap."""
-    from kbmine.pulse import capture_pct, roofline_ceiling
+def test_capture_compares_server_totals_as_pulse_carries_them() -> None:
+    """A tp8 row as Pulse carries it: arms equal the snapshot's achieved total, ceilings are server-wide."""
+    from kbmine.pulse import capture_pct
 
     assert capture_pct(_pulse_row()) == pytest.approx(25.0)
-    single = _pulse_row(tp=1, roofline={"roofline_bound_kind": "memory", "roofline_mem_ceiling_tok_per_sec": 300.0})
-    assert roofline_ceiling(single) == (300.0, "memory")
-    assert capture_pct(single) == pytest.approx(25.0)
-    untagged = _pulse_row(
-        tp=None, roofline={"roofline_bound_kind": "memory", "roofline_mem_ceiling_tok_per_sec": 300.0}
-    )
-    assert roofline_ceiling(untagged) == (300.0, "memory")
+    assert capture_pct(_pulse_row(tp=1)) == pytest.approx(25.0), "tp1 reads the same"
+
+
+def test_a_row_whose_snapshot_shows_per_gpu_arms_is_scaled_up() -> None:
+    """If achieved is tp times an arm, the arms are per GPU: 12.5 and 18.75 per GPU are 100 and 150 in total."""
+    from kbmine.pulse import capture_pct, project_pulse_row
+
+    row = _pulse_row(baseline_tok_per_s_per_gpu=12.5, opt_tok_per_s_per_gpu=18.75)
+    assert capture_pct(row) == pytest.approx(25.0)
+    assert project_pulse_row(row)["optimized_throughput"] == pytest.approx(150.0)
 
 
 def test_kb_and_input_reports_say_the_gains_are_winners_only(tmp_path: Path, monkeypatch) -> None:

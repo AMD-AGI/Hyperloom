@@ -298,10 +298,9 @@ python -m kbmine.cli --input prior_sessions.json --tp 8 --isl 1024 --osl 256
   `historical` whenever the pool spans shapes.
 * `capture` — p50/p90 of the fraction of each session's roofline gap that was
   actually closed. Populated only from Pulse; on the KB path it is reported as
-  unmeasured, because an unmeasured capture is not a zero capture. The
-  snapshot's ceilings are whole-server figures (computed over `tp` GPUs), so
-  they are divided by the row's `tp` before being compared with Pulse's per-GPU
-  throughput.
+  unmeasured, because an unmeasured capture is not a zero capture. Every
+  term is a server total: the snapshot's ceilings are computed over `tp` GPUs,
+  and Pulse's throughput arms are server totals too (see the gotcha below).
 * `sharding_whatif` — accepted layouts ranked per replay scope, with the vLLM
   and SGLang spellings of tp/dp/ep/pp normalized. KB path only.
 * `recipe_knobs` — every accepted flag and env var, not just the sharding
@@ -352,9 +351,14 @@ Each of these was measured against the live services, not inferred:
    per-session value: 38 distinct values across 50 rows, counts in the
    hundreds, a max above 100%, and a trend spanning days. Per-session capture
    must come from the nested `roofline` object plus the row's two arms.
-2. **Pulse throughput is already per-GPU** (`opt_tok_per_s_per_gpu`) while the
-   KB stores a total and divides by tp. The projector scales back up so one
-   downstream division cannot silently shrink a per-GPU figure by tp.
+2. **Pulse's `*_tok_per_s_per_gpu` columns are server totals**, despite the
+   names. On every tp>1 row checked (23 of 6000), the roofline snapshot's
+   `achieved_tok_per_sec`, which is Hyperloom's server-wide output throughput,
+   equals one of the two arms, not `tp` times one; tp1 rows cannot tell the
+   difference. The projector therefore treats the arms as totals, compares them
+   with the snapshot's server-wide ceilings as they are, and divides by `tp` for
+   per-GPU figures. A row whose snapshot shows per-GPU arms (achieved equal to
+   `tp` times an arm) is scaled up instead.
 3. **Pulse rows carry no accepted server args**, so a layout cannot be read out
    of one. Rows are marked `layout_unknown`; calling an unknown layout
    `framework-default` would invent evidence.
