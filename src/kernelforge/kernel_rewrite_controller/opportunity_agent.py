@@ -389,7 +389,9 @@ Apply these non-negotiable opportunity rules:
     executive summary before ranking. When the findings show a hot operator's
     fast path disabled, falling back, or missing its tuned config, do not
     publish a rewrite of the fallback implementation; skip it, because the fix
-    is restoring the dispatch or configuration. When Idle or Exposed Comm
+    is restoring the dispatch or configuration. The Hot GEMMs Missing Tuned
+    Config section names the exact kernel_ids whose traced shapes missed their
+    tuned config; those rows are such operators. When Idle or Exposed Comm
     exceeds Compute, the workload is host- or communication-bound: publish a
     compute kernel only when its measured share still justifies it, and state
     that bound in its evidence.

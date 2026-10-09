@@ -74,13 +74,13 @@ _LINE_RULES: tuple[_LineRule, ...] = (
 )
 
 _ENGINE_ADJUSTED = "engine_adjusted"
-_AITER_TUNED_MISS = "aiter.tuned_miss"
+AITER_TUNED_MISS = "aiter.tuned_miss"
 _RUNTIME_TRACEBACK = "runtime.traceback"
 
 _CATEGORIES: dict[str, str] = {
     **{rule.rule_id: rule.category for rule in _LINE_RULES},
     _ENGINE_ADJUSTED: PERF_PATH,
-    _AITER_TUNED_MISS: PERF_PATH,
+    AITER_TUNED_MISS: PERF_PATH,
     _RUNTIME_TRACEBACK: CORRECTNESS,
 }
 
@@ -93,7 +93,7 @@ def _applicable_rules(framework: str) -> list[str]:
     rules = [rule.rule_id for rule in _line_rules(framework)]
     if framework in _LAUNCH_RECORD_FRAMEWORKS:
         rules.append(_ENGINE_ADJUSTED)
-    return [*rules, _AITER_TUNED_MISS, _RUNTIME_TRACEBACK]
+    return [*rules, AITER_TUNED_MISS, _RUNTIME_TRACEBACK]
 
 
 def _evidence(line: str) -> str:
@@ -171,7 +171,7 @@ def _scan_lines(path: str, framework: str, hits: _Hits) -> None:
     if traceback_line:
         hits.add(_RUNTIME_TRACEBACK, "", traceback_line)
     if missed_shapes:
-        hits.add(_AITER_TUNED_MISS, "aiter_tuned_config", first_miss_line, count=len(missed_shapes))
+        hits.add(AITER_TUNED_MISS, "aiter_tuned_config", first_miss_line, count=len(missed_shapes))
 
 
 def scan_server_log(path: str | None, framework: str) -> dict[str, Any]:

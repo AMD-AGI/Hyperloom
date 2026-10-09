@@ -143,7 +143,7 @@ def test_trace_evidence_ends_with_current_best_runtime_findings(tmp_path: Path) 
 
     evidence = build_trace_evidence_md(state)
 
-    assert evidence.split("## Runtime Findings\n\n", 1)[1] == (
+    assert _section(evidence, "Runtime Findings") == (
         "```text\n"
         f"runtime findings for {log} [sglang]\n"
         "- detected [perf_path] feature_disabled fuse_rope_kvcache x1: WARNING Disabling fuse_rope_kvcache.\n"
@@ -157,7 +157,74 @@ def test_trace_evidence_runtime_findings_not_available_without_current_best() ->
 
     evidence = build_trace_evidence_md(_state(current_best_measurement={}))
 
-    assert evidence.split("## Runtime Findings\n\n", 1)[1] == "```text\nnot available\n```\n"
+    assert _section(evidence, "Runtime Findings") == "```text\nnot available\n```\n"
+    assert _section(evidence, "Hot GEMMs Missing Tuned Config") == "```text\nnot available\n```\n"
+
+
+def _section(evidence: str, title: str) -> str:
+    """The body of one ``## title`` section, up to the next section."""
+    return evidence.split(f"## {title}\n\n", 1)[1].split("\n## ", 1)[0].rstrip("\n") + "\n"
+
+
+_MISS_LOG = "[aiter] shape is M:64, N:3072, K:7168, not found tuned config in /tmp/a8w8.csv, will use default config!\n"
+
+
+def _gemm_row(kernel_id: str, name: str, a: str, b: str) -> dict:
+    return {
+        "kernel_id": kernel_id,
+        "name": name,
+        "gpu_pct": 12.5,
+        "input_shapes": [{"shape": a, "call_num": 10}, {"shape": b, "call_num": 10}],
+    }
+
+
+def _tuned_miss_state(tmp_path: Path, log_text: str | None) -> _State:
+    import json
+
+    from hyperloom.orchestrator.measurement.runtime_findings import persist_runtime_findings, scan_server_log
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    log = None
+    if log_text is not None:
+        log = tmp_path / "server.log"
+        log.write_text(log_text, encoding="utf-8")
+    persist_runtime_findings(scan_server_log(str(log) if log else None, "sglang"), slot=tmp_path / "slot")
+    candidates = tmp_path / "kernel_candidates.json"
+    rows = [
+        _gemm_row("k1", "gemm_a8w8_blockscale", "(64,7168) fp8", "(3072,7168) fp8"),
+        _gemm_row("k2", "gemm_a8w8_blockscale", "(128,7168) fp8", "(3072,7168) fp8"),
+        _gemm_row("k3", "fused_moe_kernel", "(64,7168) fp8", "(3072,7168) fp8"),
+    ]
+    candidates.write_text(json.dumps({"hot_kernels": rows}), encoding="utf-8")
+    return _state(
+        last_trace_analyze={"candidates_path": str(candidates)},
+        current_best_measurement={"launch_evidence_path": str(tmp_path / "slot" / "launch_evidence.json")},
+    )
+
+
+def test_trace_evidence_names_hot_gemms_whose_shapes_missed_tuned_config(tmp_path: Path) -> None:
+    from hyperloom.orchestrator.kernel.forge_handoff import build_trace_evidence_md
+
+    evidence = build_trace_evidence_md(_tuned_miss_state(tmp_path, _MISS_LOG))
+
+    assert _section(evidence, "Hot GEMMs Missing Tuned Config") == (
+        "```text\n"
+        "- k1 gemm_a8w8_blockscale gpu_pct=12.5: M=64 N=3072 K=7168\n"
+        "Rows not listed: unknown; a tuned-config hit is only logged under AITER_LOG_TUNED_CONFIG.\n"
+        "```\n"
+    )
+
+
+def test_trace_evidence_tuned_miss_states_without_a_join(tmp_path: Path) -> None:
+    from hyperloom.orchestrator.kernel.forge_handoff import build_trace_evidence_md
+
+    clean = build_trace_evidence_md(_tuned_miss_state(tmp_path / "clean", "server ready\n"))
+    blind = build_trace_evidence_md(_tuned_miss_state(tmp_path / "blind", None))
+
+    assert _section(clean, "Hot GEMMs Missing Tuned Config") == (
+        "```text\nnone: the current-best server log reports no tuned-config miss\n```\n"
+    )
+    assert _section(blind, "Hot GEMMs Missing Tuned Config") == "```text\nunknown: no_server_log\n```\n"
 
 
 def test_opportunity_rules_defer_fallback_paths_and_name_the_bound() -> None:
@@ -167,6 +234,7 @@ def test_opportunity_rules_defer_fallback_paths_and_name_the_bound() -> None:
 
     assert "12. Read the Runtime Findings section of trace-evidence.md" in prompt
     assert "do not\n    publish a rewrite of the fallback implementation" in prompt
+    assert "The Hot GEMMs Missing Tuned\n    Config section names the exact kernel_ids" in prompt
 
 
 def test_write_forge_handoff_survives_missing_trace_artifacts(tmp_path: Path) -> None:

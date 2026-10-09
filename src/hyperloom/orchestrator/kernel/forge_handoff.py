@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -14,7 +15,12 @@ from hyperloom.common.io import atomic_write_text
 from hyperloom.common.kernel_source_contract import SOURCE_RESOLUTION_FILENAME
 from hyperloom.inference_optimizer.session.session_paths import forge_handoff_dir
 from hyperloom.orchestrator.kernel.campaign_baseline import campaign_repositories
-from hyperloom.orchestrator.measurement.runtime_findings import render_runtime_findings
+from hyperloom.orchestrator.kernel.gemm_shape_coverage import parse_aiter_shape_lookups, traced_gemm_shapes
+from hyperloom.orchestrator.measurement.runtime_findings import (
+    AITER_TUNED_MISS,
+    load_runtime_findings,
+    render_runtime_findings,
+)
 
 WORKLOAD_FILENAME = "workload.md"
 SERVING_CONTEXT_FILENAME = "serving-context.md"
@@ -206,7 +212,35 @@ def build_trace_evidence_md(state: Any) -> str:
     lines.extend(["", "## Runtime Findings", ""])
     measurement = getattr(state, "current_best_measurement", None)
     lines.extend(["```text", render_runtime_findings(measurement) if measurement else "not available", "```"])
+    lines.extend(["", "## Hot GEMMs Missing Tuned Config", ""])
+    lines.extend(["```text", *_tuned_miss_lines(candidates_path, measurement), "```"])
     return "\n".join(lines) + "\n"
+
+
+def _tuned_miss_lines(candidates_path: str, measurement: Mapping[str, Any] | None) -> list[str]:
+    """Name the candidate GEMM rows whose traced shapes the current-best server log reported as untuned."""
+    findings = load_runtime_findings(measurement) if measurement else None
+    entry = next((f for f in (findings or {}).get("findings", []) if f["rule_id"] == AITER_TUNED_MISS), None)
+    if entry is None or not candidates_path or not Path(candidates_path).is_file():
+        return ["not available"]
+    if entry["status"] == "unknown":
+        return [f"unknown: {entry['reason']}"]
+    if entry["status"] == "not_detected":
+        return ["none: the current-best server log reports no tuned-config miss"]
+    missed, _hit = parse_aiter_shape_lookups(Path(findings["log_path"]).read_text(encoding="utf-8", errors="replace"))
+    rows = json.loads(Path(candidates_path).read_text(encoding="utf-8")).get("hot_kernels", [])
+    lines = []
+    for row in rows:
+        shapes = sorted({shape for shape, _calls in traced_gemm_shapes(row) if shape in missed})
+        if shapes:
+            dims = ", ".join(f"M={m} N={n} K={k}" for m, n, k in shapes)
+            lines.append(
+                f"- {_display(row.get('kernel_id'))} {_display(row.get('name'))} gpu_pct={row.get('gpu_pct')}: {dims}"
+            )
+    if not lines:
+        lines.append(f"- no hot GEMM shape matches the {len(missed)} missed shape(s)")
+    lines.append("Rows not listed: unknown; a tuned-config hit is only logged under AITER_LOG_TUNED_CONFIG.")
+    return lines
 
 
 def write_forge_handoff(
