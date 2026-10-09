@@ -53,7 +53,10 @@ from .pulse import PulseClient, PulseError, project_pulse_row
 
 
 def _load_input(path: Path) -> list[dict[str, Any]]:
-    raw = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"{path}: cannot read a session JSON file: {exc}") from exc
     if isinstance(raw, list):
         return [item for item in raw if isinstance(item, dict)]
     if isinstance(raw, dict) and isinstance(raw.get("sessions"), list):
