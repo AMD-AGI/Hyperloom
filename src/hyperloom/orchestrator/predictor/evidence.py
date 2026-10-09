@@ -1,13 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Evidence blocks read out of the TraceLens ``analysis.md`` report.
+"""Evidence blocks read out of the bypass route's ``analysis.md`` report.
 
-The window timings, the per-category operator split and the per-kernel operand
-args and call counts exist only in the rendered report, which the session holds
-as ``last_trace_analyze["analysis_md_text"]``. Each block is returned complete or
-not at all: the predictor renders an absent block as a missing paragraph, and was
-never trained on a half-filled one.
+That report, held as ``last_trace_analyze["analysis_md_text"]``, is the only
+place the per-kernel operand args appear. The TraceLens route's report has
+another layout and parses to nothing here; its window and operator split come
+from :mod:`~hyperloom.orchestrator.predictor.sidecars`. Each block is returned
+complete or not at all: the predictor renders an absent block as a missing
+paragraph, and was never trained on a half-filled one.
 
 The headings come from the report's renderer,
 ``hyperloom.orchestrator.trace_analysis._analysis_md``. Summary rows are matched
