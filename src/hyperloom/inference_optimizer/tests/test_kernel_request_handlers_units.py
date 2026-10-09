@@ -4629,7 +4629,8 @@ class TestBuildTraceAnalyzeCmd:
             "MI300X",
             "--analysis-mode",
             "inference",
-            # splitter hints: payload override wins over workload metadata.
+            # LLM inference flag + splitter hints: payload override wins over workload metadata.
+            "--split-llm-inference",
             "--split-conc",
             "64",
             "--split-osl",
