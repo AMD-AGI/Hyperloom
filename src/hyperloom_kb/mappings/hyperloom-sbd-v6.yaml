@@ -3,7 +3,7 @@
 # One Experience per timeline[type=framework_agent].ext.attempts[] row. Source-arm attempts
 # carry their patches in attempts[].patch_material: [{path, sha256, content}], ordered as
 # patch_path, patches_applied, patches_reverted with duplicate paths removed.
-# attempts[].log_files is a list of local file paths, recorded as outcome.raw_logs. A directory path is not a file.
+# attempts[].log_files is a list of local file paths, recorded as the top-level raw_logs. A directory path is not a file.
 format: hyperloom-kb.collect.v2
 description: Hyperloom SBD V6 Framework attempts
 declaration: inference-recipe-v1
@@ -309,6 +309,6 @@ experience:
       if: {eq: [$decision, failed]}
       then: {token: {first: [$attempt.failure.error_class, {lower: $outcome_code}]}}
       else: ""
-    raw_logs: $attempt.log_files
+  raw_logs: $attempt.log_files
   reflection:
     text: "Recorded outcome: {$outcome_facts}"

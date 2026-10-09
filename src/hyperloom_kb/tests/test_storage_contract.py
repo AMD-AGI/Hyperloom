@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+from hyperloom_kb.tests.logs import LOG
 from hyperloom_kb import (
     CompleteExperienceRequired,
     Experience,
@@ -75,6 +76,7 @@ def complete_experience(
         change={"knob": "page_size", "summary": "Use page size 64."},
         outcome={"decision": "keep", "value": 1.1},
         reflection={"text": "Throughput improved."},
+        raw_logs=(LOG,),
     )
 
 

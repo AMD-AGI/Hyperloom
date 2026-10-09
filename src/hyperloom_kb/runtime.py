@@ -46,6 +46,7 @@ class NoOpExperienceSession:
         reflection: Mapping[str, SessionValue] | None = None,
         completed_at: datetime | None = None,
         notes: Mapping[str, str] | None = None,
+        raw_logs: tuple[SessionValue, ...] | list[SessionValue] | None = None,
     ) -> None:
         return None
 

@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from hyperloom_kb.tests.logs import LOG
 from hyperloom_kb import (
     LEXICAL_FUZZY_PROVIDER_REF,
     Experience,
@@ -83,6 +84,7 @@ def _experience(
         change={"knob": knob, "summary": f"Change {knob}.", **({"content": content} if content else {})},
         outcome={"decision": "keep"},
         reflection={"text": "The measured result improved."},
+        raw_logs=(LOG,),
     )
 
 

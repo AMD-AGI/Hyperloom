@@ -249,6 +249,25 @@ def _notes(value: Any, name: str) -> dict[str, str]:
     return notes
 
 
+def _raw_logs(value: Any, name: str) -> tuple[FileRef, ...]:
+    """The raw logs of one Experience: a list of files, empty only while the record is in progress."""
+
+    if value is None:
+        return ()
+    if not isinstance(value, (list, tuple)):
+        raise SchemaValidationError(f"{name} must be a list")
+    refs: list[FileRef] = []
+    for index, item in enumerate(value):
+        where = f"{name}[{index}]"
+        if isinstance(item, FileRef):
+            refs.append(item)
+        elif isinstance(item, dict):
+            refs.append(FileRef.from_dict(item))
+        else:
+            raise SchemaValidationError(f"{where} must be a file")
+    return tuple(refs)
+
+
 @dataclass(frozen=True)
 class FileRef:
     """A file an Experience carries: its name in the record, and the content the KB stores under its digest."""
@@ -774,8 +793,9 @@ class Provenance:
 
 
 #: Top-level record fields that say what was learned: the conditions and objective, the baseline, why the action
-#: was chosen, what changed, what came of it, how it reads, and notes outside the schema. A read shows these.
-KNOWLEDGE_FIELDS = frozenset({"objective", *CATEGORIES, "notes"})
+#: was chosen, what changed, what came of it, how it reads, the raw logs that produced it, and notes outside the
+#: schema. A read shows these.
+KNOWLEDGE_FIELDS = frozenset({"objective", *CATEGORIES, "raw_logs", "notes"})
 #: Top-level record fields that keep the record: its identity, lifecycle, lineage, and how it came to be,
 #: including the reads that shaped its decision. They stay in the record and never reach a prompt.
 METADATA_FIELDS = frozenset(
@@ -814,6 +834,7 @@ class Experience:
     change: dict[str, FieldValue] = field(default_factory=dict)
     outcome: dict[str, FieldValue] = field(default_factory=dict)
     reflection: dict[str, FieldValue] = field(default_factory=dict)
+    raw_logs: tuple[FileRef, ...] = ()
     notes: dict[str, str] = field(default_factory=dict)
     schema_version: int = CURRENT_SCHEMA_VERSION
     status: ExperienceStatus = ExperienceStatus.IN_PROGRESS
@@ -844,6 +865,7 @@ class Experience:
         for category in CATEGORIES:
             values = _field_values(getattr(self, category), category, scalars_only=category == IDENTITY)
             object.__setattr__(self, category, values)
+        object.__setattr__(self, "raw_logs", _raw_logs(self.raw_logs, "experience.raw_logs"))
         object.__setattr__(self, "notes", _notes(self.notes, "experience.notes"))
         object.__setattr__(self, "rendered_refs", tuple(self.rendered_refs))
         if not all(isinstance(item, RenderedRef) for item in self.rendered_refs):
@@ -860,6 +882,8 @@ class Experience:
         completed_at = _aware_datetime(self.completed_at, "experience.completed_at")
         if completed_at < self.created_at:
             raise SchemaValidationError("completed_at cannot be before created_at")
+        if not self.raw_logs:
+            raise SchemaValidationError("a complete Experience requires raw_logs")
         object.__setattr__(self, "completed_at", completed_at)
 
     def files(self) -> tuple[FileRef, ...]:
@@ -870,6 +894,8 @@ class Experience:
             for value in getattr(self, category).values():
                 for ref in _files(value):
                     found.setdefault(ref.sha256, ref)
+        for ref in self.raw_logs:
+            found.setdefault(ref.sha256, ref)
         return tuple(found.values())
 
     def to_dict(self) -> dict[str, JsonValue]:
@@ -887,6 +913,7 @@ class Experience:
             "supersedes": self.supersedes,
             "objective": self.objective,
             "rendered_refs": [item.to_dict() for item in self.rendered_refs],
+            "raw_logs": [_encode(ref) for ref in self.raw_logs],
             "notes": dict(self.notes),
             "provenance": self.provenance.to_dict(),
         }
@@ -929,6 +956,7 @@ class Experience:
             rendered_refs=tuple(
                 RenderedRef.from_dict(item) for item in _list(data.get("rendered_refs", []), "experience.rendered_refs")
             ),
+            raw_logs=_raw_logs(data.get("raw_logs", ()), "experience.raw_logs"),
             notes=data.get("notes", {}),
             **{category: data.get(category, {}) for category in CATEGORIES},
         )

@@ -66,11 +66,11 @@ _SECRET_NAME_FRAGMENTS = ("APIKEY", "API_KEY", "TOKEN", "SECRET", "PASSWORD", "C
 _SECRET_NAME_EXEMPTIONS = ("TOKENIZER",)
 
 #: The fields screened as prose: the reasoning and the alternatives weighed, how the outcome reads, labelled notes,
-#: and the raw logs that produced the Experience. A raw log is not prose, but it is full of benchmark key names, so
-#: it gets the same token-format screen. Preconditions are not prose: they may restate the configuration measured
-#: against.
+#: and the top-level raw logs that produced the Experience. A raw log is not prose, but it is full of benchmark key
+#: names, so it gets the same token-format screen. Preconditions are not prose: they may restate the configuration
+#: measured against.
 FREE_TEXT_FIELDS = frozenset(
-    {"rationale.reasoning", "rationale.alternatives", "reflection", "notes", "outcome.raw_logs"}
+    {"rationale.reasoning", "rationale.alternatives", "reflection", "notes", "raw_logs"}
 )
 
 

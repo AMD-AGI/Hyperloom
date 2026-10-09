@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom_kb.tests.logs import LOG
 from hyperloom_kb import (
     METADATA_FIELDS,
     CandidateHit,
@@ -79,6 +80,7 @@ def experience(schema: ExperienceDeclaration, run_id: str, knob: str) -> Experie
         change={"knob": knob, "summary": f"Change {knob}."},
         outcome={"decision": "keep", "value": 110.0},
         reflection={"text": "Throughput improved."},
+        raw_logs=(LOG,),
     )
 
 
@@ -320,7 +322,11 @@ def test_complete_renderer_without_budget_keeps_every_knowledge_field_and_no_met
     assert rendered.truncated is False
     assert rendered.text.startswith(f"Experience {record.id}\n")
     record_json = json.loads(rendered.text.split("\nRecord:\n", 1)[1])
-    assert record_json == record.knowledge()
+    expected = record.knowledge()
+    expected["raw_logs"] = [
+        {"file": ref.name, "bytes": ref.bytes, "sha256": ref.sha256} for ref in record.raw_logs
+    ]
+    assert record_json == expected
     assert not METADATA_FIELDS & set(record_json)
     annotations_json = rendered.text.split("Repeat Group Annotations:\n", 1)[1].split("\nRecord:\n", 1)[0]
     assert json.loads(annotations_json)["decision_counts"] == {"keep": 1}
@@ -338,11 +344,19 @@ def test_a_file_renders_as_its_name_size_and_where_it_is_read_never_its_content(
     located = render_complete_experience(record, view, file_path=lambda ref: Path("/kb/files") / ref.sha256)
     unlocated = render_complete_experience(record, view)
 
-    assert json.loads(located.split("\nRecord:\n", 1)[1])["outcome"]["traces"] == [
+    located_record = json.loads(located.split("\nRecord:\n", 1)[1])
+    unlocated_record = json.loads(unlocated.split("\nRecord:\n", 1)[1])
+    assert located_record["outcome"]["traces"] == [
         {"file": "traces/decode.json", "bytes": 4096, "path": f"/kb/files/{TRACE.sha256}"}
     ]
-    assert json.loads(unlocated.split("\nRecord:\n", 1)[1])["outcome"]["traces"] == [
+    assert unlocated_record["outcome"]["traces"] == [
         {"file": "traces/decode.json", "bytes": 4096, "sha256": TRACE.sha256}
+    ]
+    assert located_record["raw_logs"] == [
+        {"file": LOG.name, "bytes": LOG.bytes, "path": f"/kb/files/{LOG.sha256}"}
+    ]
+    assert unlocated_record["raw_logs"] == [
+        {"file": LOG.name, "bytes": LOG.bytes, "sha256": LOG.sha256}
     ]
 
 

@@ -93,7 +93,7 @@ Every top-level key is either knowledge or metadata, fixed by
 
 | Kind | Keys | In a prompt |
 |---|---|---|
-| Knowledge: what was learned | `objective`, `identity`, `baseline`, `rationale`, `change`, `outcome`, `reflection`, `notes` | yes |
+| Knowledge: what was learned | `objective`, `identity`, `baseline`, `rationale`, `change`, `outcome`, `reflection`, `raw_logs`, `notes` | yes |
 | Metadata: what keeps the record | `kind`, `id`, `schema_ref`, `schema_version`, `status`, `created_at`, `completed_at`, `run_id`, `seq`, `parent_id`, `supersedes`, `rendered_refs`, `provenance` | no |
 
 - `kind` is `experience`; `schema_version` is `2`.
@@ -130,6 +130,17 @@ labels and text. They are not declared, so they leave `schema_ref` unchanged,
 and they take no part in Repeat Group keys or exact lookup. Credential
 screening treats them as prose.
 
+## Raw logs
+
+`raw_logs` is the list of files that produced the Experience. It is not declared
+in a category, so it leaves `schema_ref` unchanged, and it takes no part in
+Repeat Group keys, exact lookup, or fuzzy matching. A complete record must name
+at least one file; an in-progress record may omit the list. Each item is a
+`FileRef`. A read renders its name, size, and the local path of its bytes.
+Credential screening treats those files as prose: token formats only, so a
+benchmark key such as `max_completion_tokens` is kept, while a bearer token or
+an `sk-` key inside a log is not.
+
 ## Declaration
 
 A declaration has `schema_version: 2`, one or more `objectives`, and a field
@@ -153,7 +164,7 @@ service's default read schema:
 | baseline | `baseline_fingerprint` (group): the SHA-256 of the exact measured-against configuration; `value` (measurement): the baseline throughput. |
 | rationale | The KB defaults; the mapping writes `preconditions` and `reasoning`. |
 | change | `change_family` (group, search 4): `config_variant` or `source_patch`; `change_fingerprint` (group): the SHA-256 of the normalized configuration or the patch bytes; `summary` (summary, search 4); `content` (text): the configuration delta, or the source reference, target files, and patches, as canonical JSON. |
-| outcome | `decision` (decision, search 0.5): `keep`, `revert`, or `failed`; `value` (measurement); `constraints` (text, many): each gate as `name: passed=…, observed=…`; `error_class` (search 0.5); `raw_logs` (file, many, required): the raw log files that produced the Experience. |
+| outcome | `decision` (decision, search 0.5): `keep`, `revert`, or `failed`; `value` (measurement); `constraints` (text, many): each gate as `name: passed=…, observed=…`; `error_class` (search 0.5). |
 | reflection | `text` (text). |
 
 Hyperloom keeps its change inline: a configuration delta or patch it measured
@@ -211,6 +222,7 @@ prior id. It is a new fact, not a mutation of the old fact.
   },
   "outcome": {"decision": "keep", "value": 2610.5, "accuracy_passed": true},
   "reflection": {"text": "Throughput improved without violating accuracy."},
+  "raw_logs": [{"name": "inputs.json", "sha256": "ab12…", "bytes": 1024}],
   "notes": {},
   "rendered_refs": [{"id": "exp-100", "purpose": "starting_point"}],
   "provenance": {

@@ -218,8 +218,8 @@ def test_config_attempt_projects_a_complete_experience() -> None:
         "decision": "revert",
         "value": 4745.71,
         "constraints": ["keep_threshold: passed=false, observed=-0.144"],
-        "raw_logs": [_file_record(_ATTEMPT_LOG)],
     }
+    assert experience["raw_logs"] == [_file_record(_ATTEMPT_LOG)]
     assert experience["reflection"]["text"].startswith('Recorded outcome: {"after_tput":4745.71,')
     assert experience["provenance"]["extra"]["kb_read_id"] == "kb-read-1"
     assert experience["provenance"]["source_ref"] == "session:run-mistral-1:attempt:revert-1"
@@ -319,12 +319,9 @@ def test_candidate_caused_failure_becomes_a_failed_experience() -> None:
         failure={"error_class": "capability_unsupported", "attribution": "candidate_caused"},
         gates=[],
     )
-    outcome = _collected(_dry(_sbd(attempt)))["failed"]["outcome"]
-    assert outcome == {
-        "decision": "failed",
-        "error_class": "capability_unsupported",
-        "raw_logs": [_file_record(_ATTEMPT_LOG)],
-    }
+    experience = _collected(_dry(_sbd(attempt)))["failed"]
+    assert experience["outcome"] == {"decision": "failed", "error_class": "capability_unsupported"}
+    assert experience["raw_logs"] == [_file_record(_ATTEMPT_LOG)]
 
 
 def test_accuracy_is_added_only_when_no_gate_ruled_on_it() -> None:
@@ -504,7 +501,8 @@ def _mapping_document(**overrides: Any) -> dict[str, Any]:
                 "summary": "summary",
                 "content": "--flag",
             },
-            "outcome": {"decision": "keep", "value": 2, "raw_logs": "$item.log_files"},
+            "outcome": {"decision": "keep", "value": 2},
+            "raw_logs": "$item.log_files",
             "reflection": {"text": "reflection"},
         },
     }
@@ -603,6 +601,7 @@ def _file_mapping(tmp_path: Path) -> Any:
                 "objective": "throughput@v1",
                 "change": {"summary": "Apply {$item.name}.", "patch": "$item.patch"},
                 "outcome": {"decision": "keep"},
+                "raw_logs": ["$item.patch"],
             },
         }
     )
@@ -676,13 +675,13 @@ def test_raw_log_prose_keeps_a_benchmark_setting_and_skips_a_credential(tmp_path
 
     collected = _collected(report)
     assert set(collected) == {"kept"}
-    assert collected["kept"]["outcome"]["raw_logs"] == [_file_record(benchmark), _file_record(other)]
+    assert collected["kept"]["raw_logs"] == [_file_record(benchmark), _file_record(other)]
     skipped = _skipped(report)
-    assert skipped["bearer"] == "sensitive content in outcome.raw_logs file bearer.log, line 1: bearer token"
-    assert skipped["api-key"] == "sensitive content in outcome.raw_logs file key.log, line 1: api key"
-    assert skipped["directory"].startswith("mapping evaluation failed: outcome.raw_logs[] names")
+    assert skipped["bearer"] == "sensitive content in raw_logs file bearer.log, line 1: bearer token"
+    assert skipped["api-key"] == "sensitive content in raw_logs file key.log, line 1: api key"
+    assert skipped["directory"].startswith("mapping evaluation failed: raw_logs[] names")
     assert "which is not a file" in skipped["directory"]
-    assert directory.name not in {item["name"] for item in collected["kept"]["outcome"]["raw_logs"]}
+    assert directory.name not in {item["name"] for item in collected["kept"]["raw_logs"]}
 
 
 def test_a_declared_field_named_like_a_credential_is_screened_by_its_value_not_its_name(tmp_path: Path) -> None:
@@ -712,6 +711,7 @@ def test_a_declared_field_named_like_a_credential_is_screened_by_its_value_not_i
                 "objective": "throughput@v1",
                 "change": {"summary": "Apply {$item.name}."},
                 "outcome": {"decision": "keep", "output_tokens_per_s": "$item.rate"},
+                "raw_logs": [str(_ATTEMPT_LOG)],
             },
         }
     )

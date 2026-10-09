@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import json
+
+from hyperloom_kb.tests.logs import LOG
 from datetime import datetime, timezone
 
 from hyperloom_kb import (
@@ -84,6 +86,7 @@ def _experience(
         change={"knob": knob, "summary": f"Change {knob}."},
         outcome={"decision": "keep", "value": 110.0},
         reflection={"text": "Measured result."},
+        raw_logs=(LOG,),
     )
 
 

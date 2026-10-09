@@ -27,6 +27,7 @@ from hyperloom_kb import (
     UnsupportedSchemaVersion,
     derive_experience_id,
 )
+from hyperloom_kb.tests.logs import LOG
 
 NOW = datetime(2026, 9, 4, 20, 0, tzinfo=timezone.utc)
 PATCH = FileRef("patches/kv.diff", "a" * 64, 812)
@@ -117,6 +118,7 @@ def complete_experience() -> Experience:
         rendered_refs=(RenderedRef("exp-100", "starting_point"),),
         outcome={"decision": "keep", "value": 2610.5, "accuracy_passed": True},
         reflection={"text": "The change improved throughput without violating accuracy."},
+        raw_logs=(LOG,),
         notes={"interconnect": "XGMI links saturate during the all-reduce."},
     )
 
@@ -130,7 +132,7 @@ def test_complete_experience_round_trips_as_json() -> None:
     assert restored == original
     assert restored.to_dict()["created_at"] == "2026-09-04T20:00:00Z"
     assert restored.change["patches"] == (PATCH,)
-    assert restored.files() == (PATCH,)
+    assert restored.files() == (PATCH, LOG)
     declaration().validate(restored)
 
 
@@ -331,6 +333,8 @@ def test_completion_fields_follow_the_status() -> None:
         replace(started, status=ExperienceStatus.COMPLETE)
     with pytest.raises(SchemaValidationError, match="cannot be before created_at"):
         replace(started, status=ExperienceStatus.COMPLETE, completed_at=NOW - timedelta(seconds=1))
+    with pytest.raises(SchemaValidationError, match="requires raw_logs"):
+        replace(started, status=ExperienceStatus.COMPLETE, completed_at=NOW)
 
 
 def test_file_refs_name_a_relative_path_and_a_sha256() -> None:

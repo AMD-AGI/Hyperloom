@@ -17,7 +17,7 @@ import urllib.error
 import uuid
 import urllib.parse
 import urllib.request
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from http import HTTPStatus
@@ -710,14 +710,18 @@ class RemoteExperienceSession:
         reflection: Mapping[str, SessionValue] | None = None,
         completed_at: datetime | None = None,
         notes: Mapping[str, str] | None = None,
+        raw_logs: Sequence[str | FileRef | Path] | None = None,
     ) -> Experience:
-        """Finish the record; ``notes`` are labelled texts no schema declares, searched and shown to agents."""
+        """Finish the record. ``raw_logs`` are the local files that produced it. ``notes`` are labelled texts no
+        schema declares, searched and shown to agents.
+        """
 
         self._experience = replace(
             self._experience,
             status=ExperienceStatus.COMPLETE,
             outcome=_attached(outcome, self._files),
             reflection=_attached(reflection, self._files),
+            raw_logs=_attached({"raw_logs": list(raw_logs or ())}, self._files)["raw_logs"],  # type: ignore[arg-type]
             completed_at=completed_at or datetime.now(timezone.utc),
             notes=dict(notes or {}),
         )

@@ -91,7 +91,7 @@ experience:
   outcome:
     decision: $decision
     value: $attempt.after
-    raw_logs: $attempt.log_files          # list of file paths; a directory is not a file
+  raw_logs: $attempt.log_files            # required list of file paths; a directory is not a file
   reflection:
     text: "Recorded outcome: {$attempt.after}"
 ```
@@ -101,7 +101,8 @@ identity may carry keys no field declares. Each of `baseline`, `rationale`,
 `change`, `outcome`, and `reflection` maps the fields its declaration names to
 one expression each: a key the declaration does not name, or a `required` field
 left unmapped, fails when the mapping loads. A field whose expression evaluates
-to `null`, `""`, `[]`, or `{}` is left out of the record.
+to `null`, `""`, `[]`, or `{}` is left out of the record. `raw_logs` is required
+on every mapping, as a list of local file paths; a directory path is not a file.
 
 A `file` field's expression evaluates to the path of a local file, or a list
 of paths for a `many` field; a relative path is read from the source document's
@@ -163,7 +164,7 @@ A mapping cannot turn these off:
   assignments, credential CLI flags, and credential-shaped keys (a name containing
   `TOKEN`, `SECRET`, `PASSWORD`, `API_KEY`, or `CREDENTIAL`, with `TOKENIZER`
   exempt). The prose fields, `rationale.reasoning`, `rationale.alternatives`,
-  every `reflection` field, `notes`, `outcome.raw_logs`, and the change field
+  every `reflection` field, `notes`, `raw_logs`, and the change field
   with the `summary` role, get only the token formats, so prose and raw logs are
   not mistaken for an assignment;
   `rationale.preconditions` is checked in full, since it may restate the
@@ -204,7 +205,7 @@ Maps Hyperloom `session_breakdown.json` (SBD V6) to the packaged
   ordered as `patch_path`, `patches_applied`, `patches_reverted` without
   duplicates, into the text field `change.content`; an attempt whose change
   content is over 32 KiB is skipped with `schema validation failed`;
-- `attempts[].log_files`, a list of local file paths, into `outcome.raw_logs`.
+- `attempts[].log_files`, a list of local file paths, into the top-level `raw_logs`.
   A path that is not a file, including a directory, skips the attempt. The
   field is required, so an attempt that names no log file is skipped too.
 

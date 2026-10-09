@@ -17,6 +17,8 @@ from typing import Any
 
 import pytest
 
+from hyperloom_kb.tests.logs import LOG
+
 from hyperloom_kb import (
     Experience,
     ExperienceDeclaration,
@@ -71,6 +73,7 @@ def _experience(seq: int, run_id: str = "cli-run") -> Experience:
         change={"knob": f"knob_{seq}", "summary": f"Set knob {seq}."},
         outcome={"decision": "keep", "value": 110.0 + seq},
         reflection={"text": "Measured."},
+        raw_logs=(LOG,),
     )
 
 

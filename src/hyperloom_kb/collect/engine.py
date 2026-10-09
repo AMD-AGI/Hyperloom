@@ -229,6 +229,14 @@ def _items(value: Any, name: str) -> list[Any]:
     return value
 
 
+def _raw_log_refs(value: Any, base: Path, files: dict[str, Path]) -> tuple[FileRef, ...]:
+    """Local paths named by ``raw_logs``, each one a file. An empty value is left out."""
+
+    if not is_present(value):
+        return ()
+    return tuple(_local_file(item, base, files, "raw_logs[]") for item in _items(value, "raw_logs"))
+
+
 def _local_file(value: Any, base: Path, files: dict[str, Path], name: str) -> FileRef:
     path = Path(_text(value, name)).expanduser()
     path = path if path.is_absolute() else base / path
@@ -314,6 +322,7 @@ def _project(mapping: CollectMapping, scope: Mapping[str, Any], base: Path) -> _
             for label, text in _object(value("notes"), "notes").items()
             if is_present(text)
         },
+        raw_logs=_raw_log_refs(value("raw_logs"), base, files),
     )
     mapping.declaration.validate(experience)
     return _Projected(experience, files)
@@ -340,6 +349,10 @@ def _screen(mapping: CollectMapping, projected: _Projected) -> None:
                     finding = find_sensitive_in_file(projected.files[ref.sha256], free_text=prose)
                     if finding:
                         raise _Skip(f"sensitive content in {path} file {ref.name}, {finding}")
+    for ref in experience.raw_logs:
+        finding = find_sensitive_in_file(projected.files[ref.sha256], free_text=True)
+        if finding:
+            raise _Skip(f"sensitive content in raw_logs file {ref.name}, {finding}")
 
 
 def _prepare(mapping: CollectMapping, unit: dict[str, Any], base: Path) -> _Projected:
@@ -402,6 +415,7 @@ def _publish(target: CollectionTarget, projected: _Projected) -> str:
         reflection=_with_paths(experience.reflection, files),
         completed_at=experience.completed_at,
         notes=experience.notes,
+        raw_logs=tuple(files[ref.sha256] for ref in experience.raw_logs),
     )
     result = session.publish()
     if result is None:
