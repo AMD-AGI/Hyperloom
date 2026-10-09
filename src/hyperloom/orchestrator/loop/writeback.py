@@ -1726,6 +1726,10 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 result_payload.get("phase"),
                 result_payload.get("error_class"),
             )
+        elif task.kind == "profile" and self.shared_state.auto_roofline_pending_task_id == task.task_id:
+            # With enable_roofline off the initial analysis is a profile; leaving its id set would hold PRELUDE.
+            self.shared_state.auto_roofline_pending_task_id = ""
+            any_changed = True
         if any_changed:
             self.shared_state.save(self.session_dir)
         if baseline_event_payload is not None:

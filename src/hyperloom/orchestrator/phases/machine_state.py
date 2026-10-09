@@ -1317,6 +1317,8 @@ def _prelude_predicate_inputs(state: Any, *, now_unix: float) -> dict[str, Any]:
         "warm_replay_status": warm_status,
         "measure_round_dropped": bool(state.baseline_measure_round_dropped),
         "tput": _number(state.baseline_tput) or 0.0,
+        "initial_analysis_pending": bool((state.auto_roofline_pending_task_id or "").strip()),
+        "analysis_affordable_sec": prelude_affordable_seconds(state)[0],
         "session_usable_sec": session_usable_seconds(state),
         "phase_spent_sec": phase_cumulative_seconds(state, phase=PHASE_PRELUDE, now_unix=now_unix),
         "runtime_sec": _positive_number(state.baseline_runtime_sec),
@@ -1436,7 +1438,11 @@ def workflow_predicate_inputs(
         inputs["baseline"] = _prelude_predicate_inputs(state, now_unix=frozen_now)
     elif current == PHASE_ENABLEMENT:
         enablement = state.enablement
-        inputs["baseline"] = {"tput": _number(state.baseline_tput) or 0.0}
+        inputs["baseline"] = {
+            "tput": _number(state.baseline_tput) or 0.0,
+            "initial_analysis_pending": bool((state.auto_roofline_pending_task_id or "").strip()),
+            "analysis_affordable_sec": prelude_affordable_seconds(state)[0],
+        }
         inputs["pending_work"] = {
             "validation_pending": bool(enablement.validation_pending),
             "enablement_in_flight": bool(enablement_in_flight),
@@ -1739,6 +1745,18 @@ def _skip_to_close_reason(
     return reason, evidence
 
 
+def _holds_for_initial_analysis(baseline: dict[str, Any]) -> bool:
+    """Whether the phase must stay open for an initial roofline it enqueued but has not booked yet.
+
+    The transition barrier stops every running action, so leaving now would kill that analysis.
+    The hold is bounded by the optimization reserve, which it must never eat into.
+    """
+    if not bool(baseline.get("initial_analysis_pending")):
+        return False
+    affordable = _number(baseline.get("analysis_affordable_sec"))
+    return affordable is None or affordable > 0.0
+
+
 def replay_next_phase(
     inputs: dict[str, Any],
     *,
@@ -1822,6 +1840,8 @@ def replay_next_phase(
             and not bool(baseline.get("measure_round_dropped"))
             and (_number(baseline.get("tput")) or 0.0) > 0.0
         )
+        if normal and _holds_for_initial_analysis(baseline):
+            return None
         if normal:
             target = _post_prelude_target(optimize_enabled=optimize_enabled, kernel_enabled=kernel_enabled)
             evidence = {"baseline_tput": float(baseline["tput"]), **_prelude_viability(baseline)}
@@ -1850,6 +1870,10 @@ def replay_next_phase(
             and not bool(pending.get("validation_pending"))
             and not bool(pending.get("enablement_in_flight"))
         ):
+            if _holds_for_initial_analysis(baseline):
+                # A session whose first baseline failed promotes its first anchor here, and that is what
+                # enqueues the initial roofline, so this exit faces the same race PRELUDE does.
+                return None
             target = _post_prelude_target(optimize_enabled=optimize_enabled, kernel_enabled=kernel_enabled)
             evidence = {"baseline_tput": float(baseline["tput"])}
             if target != PHASE_FRAMEWORK_AGENT:
