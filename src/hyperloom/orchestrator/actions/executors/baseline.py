@@ -98,6 +98,7 @@ from ._agentx_timeouts import (
 )
 from ._recipe_script import RecipeLeverUnavailableError
 from ._workload_envs import (
+    VLLM_SOURCE_ROOT_ENVS,
     _client_tokenizer_mode,
     _remove_moe_runner_backend_arg,
     FrameworkScriptMismatchError,
@@ -581,7 +582,8 @@ def _attach_baseline_launch_evidence(
     )
     result["launch_evidence"] = evidence
     result["launch_evidence_path"] = persist_launch_evidence(evidence, slot=output_dir)
-    report = scan_server_log(actual_log, evidence["framework"], declared_env=evidence["requested_server_env"])
+    declared_env = evidence["requested_server_env"].keys() - set(VLLM_SOURCE_ROOT_ENVS)
+    report = scan_server_log(actual_log, evidence["framework"], declared_env=declared_env)
     persist_runtime_findings(report, slot=output_dir)
 
 

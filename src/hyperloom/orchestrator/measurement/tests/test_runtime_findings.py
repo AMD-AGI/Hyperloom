@@ -253,11 +253,12 @@ def test_render_lists_unknown_reason(tmp_path):
 
 def test_baseline_writes_runtime_findings(tmp_path):
     (tmp_path / "config.yaml").write_text(
-        "benchmark:\n  framework: vllm\n  envs:\n    VLLM_FOO: '1'\n", encoding="utf-8"
+        "benchmark:\n  framework: vllm\n  envs:\n    VLLM_FOO: '1'\n    VLLM_DIR: /opt/vllm\n", encoding="utf-8"
     )
     (tmp_path / "server.log").write_text(
         "Unknown vLLM environment variable detected: VLLM_FOO\n"
-        "Unknown vLLM environment variable detected: VLLM_PYTHON\n",
+        "Unknown vLLM environment variable detected: VLLM_PYTHON\n"
+        "Unknown vLLM environment variable detected: VLLM_DIR\n",
         encoding="utf-8",
     )
     result: dict = {}

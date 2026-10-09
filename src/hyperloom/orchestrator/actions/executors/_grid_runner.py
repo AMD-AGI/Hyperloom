@@ -2126,6 +2126,8 @@ def _attach_grid_launch_evidence(
     caller_reused_ready_server: bool,
 ) -> None:
     """Persist declared and observed launch evidence for each grid result."""
+    from ._workload_envs import VLLM_SOURCE_ROOT_ENVS
+
     for idx, result in enumerate(results):
         if idx >= len(grid):
             break
@@ -2151,7 +2153,8 @@ def _attach_grid_launch_evidence(
         )
         result.launch_evidence = evidence
         result.launch_evidence_path = persist_launch_evidence(evidence, slot=slot)
-        report = scan_server_log(actual_log, evidence["framework"], declared_env=evidence["requested_server_env"])
+        declared_env = evidence["requested_server_env"].keys() - set(VLLM_SOURCE_ROOT_ENVS)
+        report = scan_server_log(actual_log, evidence["framework"], declared_env=declared_env)
         persist_runtime_findings(report, slot=slot)
 
 
