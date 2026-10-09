@@ -129,6 +129,24 @@ async def test_an_envelope_wrapped_in_prose_is_still_read(
     assert [intent.type for intent in result.intents] == [IntentType.REQUEST]
 
 
+def test_braces_in_the_prose_before_the_envelope_do_not_hide_it() -> None:
+    """A live run lost most intents: prose like `delegate:{action_name}` was taken for the envelope."""
+    envelope = _reply("alert", {"severity": "high", "summary": "explore lane stalled"})
+    text = (
+        "The contract says delegate:{action_name} and propose_action:{action_name,predicted_gain_pct}; "
+        "an escalation is warranted.\n\n" + envelope
+    )
+    decoded = decode_intent_envelope(text)
+    assert decoded["intents"][0]["intent_type"] == "alert"
+
+
+def test_a_json_object_in_the_prose_that_is_not_an_envelope_is_skipped() -> None:
+    """Quoting a payload shape in the reasoning must not stand in for the reply."""
+    text = 'An example payload is {"topic": "observation"}.\n' + _reply("send_message", {"topic": "heartbeat"})
+    decoded = decode_intent_envelope(text)
+    assert decoded["intents"][0]["payload"] == {"topic": "heartbeat"}
+
+
 def test_an_unserialized_payload_object_is_accepted() -> None:
     """The contract asks for a serialized payload; an inlined object still decodes."""
     envelope = decode_intent_envelope(json.dumps({"intents": [{"intent_type": "request", "payload": {"a": 1}}]}))

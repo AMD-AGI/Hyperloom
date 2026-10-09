@@ -82,17 +82,8 @@ def _strip_code_fence(text: str) -> str:
     return (body[:closing] if closing != -1 else body).strip()
 
 
-def _extract_json_object(text: str) -> str:
-    """Return the first balanced ``{...}`` run in ``text``, else ``""``.
-
-    The harness enforces no output schema, so a reply can arrive wrapped in
-    prose that a plain :func:`json.loads` would reject outright. Scanning for a
-    balanced object recovers the envelope from that instead of discarding a turn
-    whose content was fine.
-    """
-    start = text.find("{")
-    if start == -1:
-        return ""
+def _balanced_object_at(text: str, start: int) -> str:
+    """Return the balanced ``{...}`` run that opens at ``start``, else ``""``."""
     depth = 0
     in_string = False
     escaped = False
@@ -117,19 +108,43 @@ def _extract_json_object(text: str) -> str:
     return ""
 
 
+def _json_objects(text: str) -> list[Any]:
+    """Every balanced ``{...}`` run in ``text`` that decodes as JSON, in order.
+
+    The harness enforces no output schema, so a reply arrives as reasoning prose
+    followed by the envelope, and the prose itself quotes the contract
+    (``delegate:{action_name}``) and sample payloads. Taking the first balanced
+    run handed those fragments to the decoder and dropped the envelope behind
+    them, so every decodable run is collected and the caller picks the envelope.
+    """
+    found: list[Any] = []
+    start = text.find("{")
+    while start != -1:
+        run = _balanced_object_at(text, start)
+        if run:
+            try:
+                found.append(json.loads(run))
+            except ValueError:
+                pass
+            else:
+                start = text.find("{", start + len(run))
+                continue
+        start = text.find("{", start + 1)
+    return found
+
+
 def decode_intent_envelope(text: str) -> dict[str, Any]:
     """Decode a harness reply into a :func:`validate_envelope` input."""
     candidate = _strip_code_fence(text or "")
     try:
         envelope = json.loads(candidate)
     except (TypeError, ValueError):
-        recovered = _extract_json_object(candidate)
-        if not recovered:
+        objects = _json_objects(candidate)
+        if not objects:
             raise NoIntentEmitted(f"deepseek reply carried no JSON object (chars={len(text or '')})") from None
-        try:
-            envelope = json.loads(recovered)
-        except ValueError as exc:
-            raise NoIntentEmitted(f"deepseek reply held no decodable JSON object: {exc}") from exc
+        # The contract puts the envelope last, after any reasoning that quotes a payload shape.
+        envelopes = [obj for obj in objects if isinstance(obj, dict) and isinstance(obj.get("intents"), list)]
+        envelope = envelopes[-1] if envelopes else objects[-1]
     if not isinstance(envelope, dict) or not isinstance(envelope.get("intents"), list):
         raise NoIntentEmitted("deepseek reply is valid JSON but carries no 'intents' list")
     # An empty list satisfies validate_envelope, so without this the tick is
