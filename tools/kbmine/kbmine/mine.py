@@ -247,14 +247,21 @@ def parallelism_label(knobs: Mapping[str, str]) -> str:
 
 def workload_family(row: Mapping[str, Any]) -> str:
     """Everything a TP comparison must hold fixed, e.g.
-    ``qwen3-32b/bf16/conc64/isl8192/osl1024``.
+    ``qwen3-32b/bf16/mi355x/sglang/conc64/isl8192/osl1024``.
 
     TP is only comparable inside one family. Two confounds otherwise dominate
     and both were observed in live data: ISL changes arithmetic intensity, and
     model size dictates the TP that fits at all, so a 0.6B at TP1 against a
-    70B at TP8 reads as catastrophic scaling when nothing scaled.
+    70B at TP8 reads as catastrophic scaling when nothing scaled. The board and
+    the framework are held fixed too: a TP8 median spanning two boards divided
+    by a TP1 figure from one of them is not a scaling ratio.
     """
-    parts = [row.get("model") or "model?", row.get("precision") or "precision?"]
+    parts = [
+        row.get("model") or "model?",
+        row.get("precision") or "precision?",
+        row.get("hardware") or "hardware?",
+        row.get("framework_name") or "framework?",
+    ]
     for key in _SHAPE_KEYS:
         if key == "tp":
             continue
@@ -320,7 +327,7 @@ def _family_whatif(rows: list[Mapping[str, Any]], target_tp: int | None) -> dict
 
 
 def replay_scope_key(row: Mapping[str, Any]) -> str:
-    """Everything a sharding comparison must hold fixed, GPU count included.
+    """Everything a sharding comparison must hold fixed, board and GPU count included.
 
     Comparing layouts only makes sense at a fixed world size: ``tp=1 dp=2`` on
     two GPUs against ``tp=2`` on two GPUs is a real choice, while the same
@@ -330,6 +337,7 @@ def replay_scope_key(row: Mapping[str, Any]) -> str:
         (
             str(row.get("model") or "model?"),
             str(row.get("precision") or "precision?"),
+            str(row.get("hardware") or "hardware?"),
             str(row.get("framework_name") or "framework?"),
             shape_key(row),
         )
@@ -650,7 +658,10 @@ def estimate_from_sessions(
     # Only accepted layouts are published, so an absent arm is untried or
     # unpublished rather than beaten. Said once here so a reader does not have
     # to infer it from the winners_only flag alone.
-    limitations.append("only winning layouts are published, so an absent layout is untried or unpublished, not worse")
+    if projector is project_session:
+        limitations.append(
+            "only winning layouts are published, so an absent layout is untried or unpublished, not worse"
+        )
 
     model_mix = sorted({row["model"] for row in rows if row.get("model")})
     hardware_mix = sorted({row["hardware"] for row in rows if row.get("hardware")})

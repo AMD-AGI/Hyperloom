@@ -110,7 +110,7 @@ def test_sharding_whatif_ranks_layouts_at_fixed_world_size() -> None:
     report = sharding_whatif(rows)
     assert report["sessions_with_parallelism_config"] == 1
     assert report["knobs_seen"] == {"dp_attention": 1, "ep": 1}
-    scope = "llama/bf16/sglang/tp8/conc64/isl1024/osl256"
+    scope = "llama/bf16/mi355x/sglang/tp8/conc64/isl1024/osl256"
     entry = report["scopes_with_alternatives"][scope]
     assert entry["ranked_by_p50_gain"][0] == "dp_attention=on ep=4"
     assert entry["best"]["p50_validated_e2e_gain_pct"] == 23.0
@@ -194,7 +194,7 @@ def test_parallelism_whatif_measures_retention_and_projects_target() -> None:
     report = parallelism_whatif(rows, target_tp=4)
     assert report["observed_tp"] == [2, 8]
     assert report["replayable_across_tp"] is False
-    family = report["families"]["llama/bf16/conc64/isl1024/osl256"]
+    family = report["families"]["llama/bf16/mi355x/sglang/conc64/isl1024/osl256"]
     # per-GPU falls 100 -> 75 tok/s across the 4x TP step
     assert family["measured_scaling"]["per_gpu_retention"] == pytest.approx(0.75)
     projection = family["projection"]
@@ -202,7 +202,9 @@ def test_parallelism_whatif_measures_retention_and_projects_target() -> None:
     assert projection["ideal_flat_per_gpu"] == pytest.approx(400.0)
     assert projection["efficiency_adjusted"] == pytest.approx(300.0)
 
-    observed = parallelism_whatif(rows, target_tp=8)["families"]["llama/bf16/conc64/isl1024/osl256"]["projection"]
+    observed = parallelism_whatif(rows, target_tp=8)["families"]["llama/bf16/mi355x/sglang/conc64/isl1024/osl256"][
+        "projection"
+    ]
     assert observed["source"] == "observed"
     assert observed["p50_optimized_throughput"] == 600.0
 
@@ -219,8 +221,8 @@ def test_whatif_does_not_compare_tp_across_different_models() -> None:
     ]
     report = parallelism_whatif(rows, target_tp=4)
     assert set(report["families"]) == {
-        "qwen3-0.6b/bf16/conc64/isl1024/osl256",
-        "llama-70b/bf16/conc64/isl1024/osl256",
+        "qwen3-0.6b/bf16/mi355x/sglang/conc64/isl1024/osl256",
+        "llama-70b/bf16/mi355x/sglang/conc64/isl1024/osl256",
     }
     for family in report["families"].values():
         assert "measured_scaling" not in family
@@ -233,7 +235,10 @@ def test_whatif_does_not_compare_tp_across_different_isl() -> None:
         project_session(_shaped(cid=_MI355_SGLANG, gain=14.0, optimized=1200.0, tp=8, isl=8192)),
     ]
     report = parallelism_whatif(rows, target_tp=4)
-    assert set(report["families"]) == {"llama/bf16/conc64/isl1024/osl256", "llama/bf16/conc64/isl8192/osl256"}
+    assert set(report["families"]) == {
+        "llama/bf16/mi355x/sglang/conc64/isl1024/osl256",
+        "llama/bf16/mi355x/sglang/conc64/isl8192/osl256",
+    }
     for family in report["families"].values():
         assert "measured_scaling" not in family
         assert family["projection"]["source"] == "scaled"
@@ -250,7 +255,7 @@ def test_whatif_reaches_the_cli(tmp_path: Path) -> None:
     out = tmp_path / "report.json"
     assert estimate_main(["--input", str(src), "--target-tp", "4", "--output", str(out)]) == 0
     report = json.loads(out.read_text(encoding="utf-8"))
-    family = report["parallelism_whatif"]["families"]["llama/bf16/conc64/isl1024/osl256"]
+    family = report["parallelism_whatif"]["families"]["llama/bf16/mi355x/sglang/conc64/isl1024/osl256"]
     assert family["projection"]["target_tp"] == 4
 
 
@@ -905,3 +910,31 @@ def test_the_report_names_the_service_it_read(monkeypatch, tmp_path: Path) -> No
     pool = _write_pool(tmp_path, [_shaped(cid=_MI355_SGLANG, gain=10.0, optimized=800.0, tp=8)])
     offline = _run(["--input", str(pool)], tmp_path)
     assert offline["kb_store_url"] == "" and "pulse_url" not in offline
+
+
+def test_layouts_and_tp_scaling_are_never_compared_across_boards(tmp_path: Path) -> None:
+    """A tp=8 win on MI300X and a dp=8 win on MI355X are two boards, not two layouts."""
+    mi300 = "inference:llama:mi300x:sglang:llama:llamaforcausallm:0.5.17:bf16"
+    pool = _write_pool(
+        tmp_path,
+        [
+            _sharded(cid=mi300, gain=5.0, optimized=800.0, tp=8, args="--tp 8"),
+            _sharded(cid=_MI355_SGLANG, gain=40.0, optimized=1200.0, tp=8, args="--dp 8 --enable-dp-attention"),
+            _sharded(cid=_MI355_SGLANG, gain=20.0, optimized=200.0, tp=1, args="--tp 1"),
+        ],
+    )
+    report = _run(["--input", str(pool), "--target-tp", "8"], tmp_path)
+    for scope in report["sharding_whatif"].get("scopes", {}):
+        assert ("mi300x" in scope) != ("mi355x" in scope), f"a scope spans boards: {scope}"
+    families = report["parallelism_whatif"]["families"]
+    assert all(("mi300x" in key) != ("mi355x" in key) for key in families)
+    mi300_family = next(value for key, value in families.items() if "mi300x" in key)
+    assert "measured_scaling" not in mi300_family, "an MI300X TP8 figure must not be scaled against an MI355X TP1 one"
+
+
+def test_the_layout_limitation_is_not_on_a_pulse_report(monkeypatch, tmp_path: Path) -> None:
+    from kbmine import pulse
+
+    monkeypatch.setattr(pulse.PulseClient, "get", lambda self, path, params=None: {"results": []})
+    report = _run(["--pulse-url", "https://pulse.invalid"], tmp_path)
+    assert not any("winning layouts" in line for line in report["limitations"])

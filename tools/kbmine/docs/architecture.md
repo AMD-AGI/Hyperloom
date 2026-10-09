@@ -103,7 +103,7 @@ flowchart TD
 
     PICK -->|"input"| OFF["load a JSON list<br/>or a sessions array"]
 
-    PICK -->|"pulse-url"| P1["page /v1/session-breakdowns<br/>limit 200, offset walks"]
+    PICK -->|"pulse-url"| P1["page /v1/session-breakdowns<br/>limit 25, offset walks,<br/>retry truncated responses"]
     P1 --> P2["filter identity client-side<br/>server-side prec is ignored,<br/>gpu_type under-matches"]
     P2 --> P3["project_pulse_row per row<br/>pick ceiling by bound kind,<br/>capture = closed / total gap (server totals),<br/>per-GPU = total / tp"]
 
@@ -187,8 +187,8 @@ are grouped along two different axes depending on the question:
 | grouping | holds fixed | answers |
 | --- | --- | --- |
 | `shape_key` | tp, conc, isl, osl | what gain to expect at this scope |
-| `replay_scope_key` | model, precision, framework, **and** the full shape | which layout wins inside a fixed GPU count |
-| `workload_family` | model, precision, conc, isl, osl — TP left free | how throughput scales with TP |
+| `replay_scope_key` | model, precision, board, framework, **and** the full shape | which layout wins inside a fixed GPU count |
+| `workload_family` | model, precision, board, framework, conc, isl, osl — TP left free | how throughput scales with TP |
 
 The last two differ by exactly one dimension, and that difference is the
 point. Layouts must be compared at a *fixed* GPU count, since `tp=1 dp=2` on
