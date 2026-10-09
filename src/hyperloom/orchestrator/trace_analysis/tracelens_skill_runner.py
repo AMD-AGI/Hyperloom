@@ -699,6 +699,7 @@ async def _run_tracelens_skill_deepseek(
             allowed_tools=DEFAULT_ALLOWED_TOOLS,
             log=log,
             done=report_path.exists,
+            timeout_sec=timeout_sec,
             continuation_prompt=(
                 f"{report_path} has not been written yet, so the workflow is not finished. A tool call "
                 "written out as text in a reply is not executed. Continue from the step you stopped at, "

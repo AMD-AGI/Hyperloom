@@ -21,6 +21,7 @@ class _FakeSession:
 
     def __init__(self, *, effects: list[Any], **_kwargs: Any) -> None:
         self.prompts: list[str] = []
+        self.turn_timeouts: list[float] = []
         self.effects = effects
         self.request_timeout_sec = 60.0
         _FakeSession.instances.append(self)
@@ -30,6 +31,7 @@ class _FakeSession:
 
     async def turn(self, prompt: str, *, timeout_sec: float) -> DeepSeekSessionResult:
         self.prompts.append(prompt)
+        self.turn_timeouts.append(timeout_sec)
         effect = self.effects[len(self.prompts) - 1] if len(self.prompts) <= len(self.effects) else None
         if effect is not None:
             effect()
@@ -90,3 +92,52 @@ async def test_a_session_that_finished_is_not_continued(tmp_path: Path, monkeypa
     await _drive(tmp_path, report)
 
     assert len(_FakeSession.instances[0].prompts) == 1
+
+
+async def test_the_caller_budget_bounds_every_turn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A TraceLens budget of a few minutes must not leave a turn running for the harness default of two hours."""
+    report = tmp_path / "analysis.md"
+    _install(monkeypatch, [])
+
+    await _drive(tmp_path, report, max_continuations=1, timeout_sec=30.0)
+
+    timeouts = _FakeSession.instances[0].turn_timeouts
+    assert len(timeouts) == 2
+    assert all(0.0 < t <= 30.0 for t in timeouts)
+
+
+async def test_a_spent_budget_stops_the_continuations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    report = tmp_path / "analysis.md"
+    clock = iter([0.0, 0.0, 31.0, 31.0])
+    monkeypatch.setattr(agent_sdk_runner, "monotonic", lambda: next(clock))
+    _install(monkeypatch, [])
+
+    result = await _drive(tmp_path, report, max_continuations=3, timeout_sec=30.0)
+
+    assert len(_FakeSession.instances[0].prompts) == 1
+    assert "budget" in result.error
+
+
+async def test_tracelens_forwards_its_budget_to_the_harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from hyperloom.agents.kernel.tools import tracelens_skill_runner
+
+    seen: dict[str, Any] = {}
+
+    async def _fake_drive(**kwargs: Any) -> agent_sdk_runner.AgentSdkTurnResult:
+        seen.update(kwargs)
+        (tmp_path / "analysis.md").write_text("done")
+        return agent_sdk_runner.AgentSdkTurnResult(text="", error="", chunks=[])
+
+    monkeypatch.setattr(agent_sdk_runner, "drive_agent_session", _fake_drive)
+
+    await tracelens_skill_runner._run_tracelens_skill_deepseek(
+        prompt="p",
+        output_dir=tmp_path,
+        prefix_path=tmp_path / "prefix",
+        tracelens_root=tmp_path,
+        model="deepseek-v4-flash",
+        timeout_sec=600.0,
+        log=None,
+    )
+
+    assert seen["timeout_sec"] == 600.0

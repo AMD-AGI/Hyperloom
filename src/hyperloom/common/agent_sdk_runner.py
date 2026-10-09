@@ -9,6 +9,7 @@ import asyncio
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 from hyperloom.common import llm_config
@@ -61,6 +62,7 @@ async def drive_agent_session(
     done: Callable[[], bool] | None = None,
     continuation_prompt: str = "",
     max_continuations: int = 3,
+    timeout_sec: float | None = None,
 ) -> AgentSdkTurnResult:
     """Run one harness session and return the accumulated assistant text.
 
@@ -69,6 +71,8 @@ async def drive_agent_session(
     writes one out as text -- so a session that stopped before ``done()`` holds
     is continued with ``continuation_prompt``, at most ``max_continuations``
     times. Claude's own loop runs to its turn cap and takes no continuation.
+    ``timeout_sec`` is the wall-clock budget of the whole DeepSeek session,
+    continuations included.
     """
     resolved = (backend or llm_config.resolve_agent_backend()).strip().lower()
     if resolved == llm_config.AGENT_BACKEND_DEEPSEEK:
@@ -83,6 +87,7 @@ async def drive_agent_session(
             done=done,
             continuation_prompt=continuation_prompt,
             max_continuations=max_continuations,
+            timeout_sec=timeout_sec,
         )
     return await _drive_claude(
         prompt=prompt,
@@ -152,8 +157,10 @@ async def _drive_deepseek(
     done: Callable[[], bool] | None = None,
     continuation_prompt: str = "",
     max_continuations: int = 0,
+    timeout_sec: float | None = None,
 ) -> AgentSdkTurnResult:
     writable = bool(allowed_tools)
+    deadline = monotonic() + timeout_sec if timeout_sec else None
     instructions = "\n\n".join(part for part in (_RUNTIME_MAPPING.strip(), system_prompt.strip()) if part)
     session = DeepSeekSession(
         cwd=cwd,
@@ -172,7 +179,16 @@ async def _drive_deepseek(
         for continuation in range(max_continuations + 1):
             if continuation and log:
                 log(f"[deepseek-harness] continuing: the owed artifact is not written (continuation {continuation})")
-            result = await session.turn(turn_prompt, timeout_sec=session.request_timeout_sec)
+            turn_timeout = session.request_timeout_sec
+            if deadline is not None:
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    error = f"the {timeout_sec:.0f}s session budget ran out before the owed artifact was written"
+                    if log:
+                        log(f"[deepseek-harness] WARNING: {error}")
+                    break
+                turn_timeout = min(turn_timeout, remaining)
+            result = await session.turn(turn_prompt, timeout_sec=turn_timeout)
             text = result.text or ""
             if text:
                 chunks.append(text)
