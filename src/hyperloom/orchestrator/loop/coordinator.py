@@ -30,6 +30,12 @@ MAINTENANCE_INTERVAL_SEC: int = 1800
 DEFAULT_CYCLE_HOURS: float = 24.0
 # Trailing window for the crash-rate emergency stop, in seconds.
 _CRASH_EMERGENCY_WINDOW_SEC: float = 24.0 * 3600.0
+# Retry delay for an agent whose LLM backend keeps failing, doubling from the base to the ceiling, in seconds. Ints, so
+# the doubling cannot overflow a float however long a streak runs.
+_BACKEND_RETRY_BASE_SEC: int = 2
+_BACKEND_RETRY_MAX_SEC: int = 300
+# How long one agent's backend may fail without a successful turn before the session stops, in seconds.
+_BACKEND_UNHEALTHY_STOP_SEC: float = 3600.0
 from ..phases import machine_state as _phase_state
 from hyperloom.inference_optimizer.session.paths import db_path_for
 from hyperloom.inference_optimizer.session.session_binding import bind_session
@@ -344,6 +350,9 @@ class Coordinator:
         # Per-agent BackendError streak; crossing threshold records one backend_unhealthy, then re-arms.
         self._backend_error_streak: dict[str, int] = {name: 0 for name in self.role_registry}
         self._backend_error_alarm_armed: dict[str, bool] = {name: True for name in self.role_registry}
+        # Monotonic time each failing agent's streak began, and before which the tick loop does not call it again.
+        self._backend_error_since: dict[str, float] = {}
+        self._backend_retry_at: dict[str, float] = {}
         self._backend_error_streak_threshold: int = max(
             1,
             env_int("INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD", default=5),
@@ -720,6 +729,8 @@ class Coordinator:
             for name in self._tick_roles:
                 if self.stop_requested():
                     break
+                if time.monotonic() < self._backend_retry_at.get(name, 0.0):
+                    continue
                 await self.await_within_session_bound(
                     lambda n=name: self.reactor_pass(n),
                     stage=f"reactor:{name}",
@@ -804,6 +815,15 @@ class Coordinator:
         if bound is None:
             return None
         return bound.remaining()
+
+    def _backend_retry_wait_sec(self) -> float:
+        """Seconds until the first reactor agent is due while every one is backing off, capped at the session bound."""
+        now = time.monotonic()
+        wait = min((self._backend_retry_at.get(name, 0.0) - now for name in self._tick_roles), default=0.0)
+        bound = self._seconds_until_session_bound()
+        if bound is not None:
+            wait = min(wait, bound)
+        return max(0.0, wait)
 
     def _stage_timeout_sec(self, stage: str) -> float | None:
         """Return the total wall-clock ceiling for an inline reactor turn."""
@@ -1061,9 +1081,10 @@ class Coordinator:
                         break
 
                 # Brief wait between ticks to avoid CPU spin while staying signal-responsive; 0.0 keeps tests fast.
-                if tick_interval_sec > 0:
+                wait_sec = tick_interval_sec if in_closing else max(tick_interval_sec, self._backend_retry_wait_sec())
+                if wait_sec > 0:
                     try:
-                        await asyncio.wait_for(self._stop.wait(), timeout=tick_interval_sec)
+                        await asyncio.wait_for(self._stop.wait(), timeout=wait_sec)
                         stop_reason = self._signal_stop_reason()
                         break
                     except asyncio.TimeoutError:
@@ -1209,6 +1230,8 @@ class Coordinator:
         if self._backend_error_streak.get(agent_name):
             self._backend_error_streak[agent_name] = 0
             self._backend_error_alarm_armed[agent_name] = True
+            self._backend_error_since.pop(agent_name, None)
+            self._backend_retry_at.pop(agent_name, None)
         # Record this reactor turn's token spend on the unified ledger.
         latency_ms = int((time.perf_counter() - _t0) * 1000)
         self._trace_reactor_llm_call(agent_name, result, latency_ms=latency_ms)
@@ -1316,9 +1339,25 @@ class Coordinator:
         agent_name: str,
         exc: BackendError,
     ) -> None:
-        """Increment the per-agent ``BackendError`` streak; emit one backend_unhealthy event on crossing the threshold (re-arms only after a successful turn)."""
+        """Extend the per-agent ``BackendError`` streak and back the agent off.
+
+        A streak that has lasted ``_BACKEND_UNHEALTHY_STOP_SEC`` stops the session unless something else already has.
+        Crossing the threshold emits one backend_unhealthy event, which re-arms only after a successful turn.
+        """
+        from hyperloom.inference_optimizer.breakdown.stop_reasons import BACKEND_UNHEALTHY_STOP_REASON
+
+        now = time.monotonic()
         new_value = self._backend_error_streak.get(agent_name, 0) + 1
         self._backend_error_streak[agent_name] = new_value
+        failing_sec = now - self._backend_error_since.setdefault(agent_name, now)
+        self._backend_retry_at[agent_name] = now + min(
+            _BACKEND_RETRY_MAX_SEC, _BACKEND_RETRY_BASE_SEC * 2 ** (new_value - 1)
+        )
+        if failing_sec >= _BACKEND_UNHEALTHY_STOP_SEC and not self.shared_state.stop_reason:
+            log.error(
+                "Coordinator: the %s backend has failed for %.0fs without a successful turn", agent_name, failing_sec
+            )
+            self.shared_state.set_stop_reason(BACKEND_UNHEALTHY_STOP_REASON)
         threshold = self._backend_error_streak_threshold
         if new_value >= threshold and self._backend_error_alarm_armed.get(agent_name, True):
             self._backend_error_alarm_armed[agent_name] = False

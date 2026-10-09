@@ -27,7 +27,7 @@ LAUNCHERS = (
 # Retired with the kernel LLM role.
 RETIRED = ("--kernel-codex", "--kernel-claude", "--kernel-prompt", "HL_KERNEL_BACKEND")
 
-_CLI_MODULE = "hyperloom.inference_optimizer.cli"
+_CLI_MODULE = "-m hyperloom optimize"
 _FLAG_RE = re.compile(r"--[a-z][a-z0-9-]*")
 # Tokens that may follow a flag without being its value.
 _SHELL_OPERATORS = frozenset({">", ">>", "<", "|", "&", "&&", "||", ";", "2>&1"})
@@ -116,21 +116,8 @@ def test_retired_kernel_backend_flags_are_gone_from_every_launcher() -> None:
             assert retired not in text, f"{launcher.name} still references retired {retired}"
 
 
-def test_retired_kernel_flags_parse_as_no_ops() -> None:
-    """The shims exist so an out-of-tree caller does not exit 2."""
-    args = _build_parser().parse_args(
-        [
-            "optimize",
-            "--model",
-            "/models/m",
-            "--framework",
-            "sglang",
-            "--gpu-type",
-            "mi355x",
-            "--kernel-codex",
-            "--kernel-claude",
-            "--kernel-prompt",
-            "/tmp/kernel_prompt.md",
-        ]
-    )
-    assert args.kernel_prompt == "/tmp/kernel_prompt.md"
+@pytest.mark.parametrize("retired", [["--kernel-codex"], ["--kernel-claude"], ["--kernel-prompt", "/tmp/p.md"]])
+def test_retired_kernel_flags_are_rejected(retired: list[str]) -> None:
+    with pytest.raises(SystemExit) as exc:
+        _build_parser().parse_args(["optimize", "--model", "/models/m", *retired])
+    assert exc.value.code == 2

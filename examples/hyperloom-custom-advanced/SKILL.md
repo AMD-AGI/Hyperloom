@@ -44,7 +44,7 @@ In docker mode:
 - Always run setup **inside the container** after `docker run`.
 - Pass `--install-framework none --yes` in the container because ROCm and the
   framework must come from the image. Do **not** use `--skip-base-check`.
-- Do not run `python -m hyperloom.inference_optimizer.cli optimize` on the host.
+- Do not run `python -m hyperloom optimize` on the host.
 
 ### Prior workload cleanup (required)
 
@@ -86,12 +86,12 @@ Then run the setup backend inside the container:
 
 ```bash
 docker exec -w "$REPO_ROOT" "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}" bash -lc \
-  'REPO_ROOT="$(pwd -P)"; PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework none --yes'
+  'REPO_ROOT="$(pwd -P)"; PYTHONPATH="$REPO_ROOT" python3 -m hyperloom setup -- --install-framework none --yes'
 ```
 
 After that, run all remaining commands for this demo inside the same container
 with `docker exec -w "$REPO_ROOT" ...`; do not run
-`python -m hyperloom.inference_optimizer.cli optimize` on the host in Docker
+`python -m hyperloom optimize` on the host in Docker
 mode. When the demo is finished, ask the user whether to stop the container. If
 they say yes, run:
 
@@ -338,11 +338,11 @@ OPT_FLAGS=(
 [ -n "${REFERENCE_SCRIPT:-}" ] && OPT_FLAGS+=(--reference-script "$REFERENCE_SCRIPT")
 [ -n "${CONC_SWEEP_CONCS:-}" ] && OPT_FLAGS+=(--conc-sweep-concs "$CONC_SWEEP_CONCS")
 [ -n "${CONC_SWEEP_TOTAL_BUDGET_SEC:-}" ] && OPT_FLAGS+=(--conc-sweep-total-budget-sec "$CONC_SWEEP_TOTAL_BUDGET_SEC")
-[ -n "${PHASE_BUDGET_PRELUDE_PCT:-}" ] && OPT_FLAGS+=(--max-minutes-prelude-pct "$PHASE_BUDGET_PRELUDE_PCT")
-[ -n "${PHASE_BUDGET_FRAMEWORK_PCT:-}" ] && OPT_FLAGS+=(--max-minutes-framework-pct "$PHASE_BUDGET_FRAMEWORK_PCT")
-[ -n "${PHASE_BUDGET_KERNEL_PCT:-}" ] && OPT_FLAGS+=(--max-minutes-kernel-pct "$PHASE_BUDGET_KERNEL_PCT")
-[ -n "${PHASE_BUDGET_SWEEP_PCT:-}" ] && OPT_FLAGS+=(--max-minutes-sweep-pct "$PHASE_BUDGET_SWEEP_PCT")
-[ -n "${PHASE_BUDGET_CLOSE_PCT:-}" ] && OPT_FLAGS+=(--max-minutes-close-pct "$PHASE_BUDGET_CLOSE_PCT")
+[ -n "${PHASE_BUDGET_PRELUDE_PCT:-}" ] && OPT_FLAGS+=(--phase-budget-prelude-pct "$PHASE_BUDGET_PRELUDE_PCT")
+[ -n "${PHASE_BUDGET_FRAMEWORK_PCT:-}" ] && OPT_FLAGS+=(--phase-budget-framework-pct "$PHASE_BUDGET_FRAMEWORK_PCT")
+[ -n "${PHASE_BUDGET_KERNEL_PCT:-}" ] && OPT_FLAGS+=(--phase-budget-kernel-pct "$PHASE_BUDGET_KERNEL_PCT")
+[ -n "${PHASE_BUDGET_SWEEP_PCT:-}" ] && OPT_FLAGS+=(--phase-budget-sweep-pct "$PHASE_BUDGET_SWEEP_PCT")
+[ -n "${PHASE_BUDGET_CLOSE_PCT:-}" ] && OPT_FLAGS+=(--phase-budget-close-pct "$PHASE_BUDGET_CLOSE_PCT")
 [ "${NO_KERNEL:-0}" = "1" ] && OPT_FLAGS+=(--no-kernel)
 [ "${NO_FRAMEWORK_AGENT:-0}" = "1" ] && OPT_FLAGS+=(--no-framework-agent)
 [ "${NO_FRAMEWORK_LOCAL_EXPLORE:-0}" = "1" ] && OPT_FLAGS+=(--no-framework-local-explore)
@@ -353,7 +353,7 @@ OPT_FLAGS=(
 # `setsid nohup` and append ` &` elsewhere. Either way $PID_FILE is reconciled
 # from the launch-info JSON in the health-check block below -- the tool returns
 # a shell_id, and $! is the setsid wrapper.
-python3 -m hyperloom.inference_optimizer.cli --verbose optimize \
+python3 -m hyperloom optimize --verbose \
   "${OPT_FLAGS[@]}" \
   > "$RUN_LOG" 2>&1 < /dev/null
 ```
@@ -376,7 +376,7 @@ if [ -z "$REAL_PID" ]; then
   # pattern matches every optimizer running here and nothing ties a hit to this
   # run. Take it only when unambiguous rather than `head -1`-ing a list, which
   # would adopt another session's pid.
-  MATCHES="$(pgrep -f 'hyperloom.inference_optimizer.cli .*optimize' || true)"
+  MATCHES="$(pgrep -f 'hyperloom optimize' || true)"
   N_MATCHES="$(printf '%s\n' "$MATCHES" | grep -c . || true)"
   if [ "$N_MATCHES" = "1" ]; then
     REAL_PID="$MATCHES"
@@ -410,13 +410,12 @@ test -f "$SESSION_DIR/state.json" && echo "state_exists=true"
 
 If adding quantization, critic, or research-lane flags, append only
 real flags accepted by
-`python3 -m hyperloom.inference_optimizer.cli optimize --help`; do not invent
+`python3 -m hyperloom optimize --help`; do not invent
 aliases.
 
-Append subcommand flags to `OPT_FLAGS` only. Global flags are defined on the
-top-level parser and must come *before* the `optimize` subcommand — `--verbose`
-is the one used above. Placing a global flag after `optimize` fails the run with
-`error: unrecognized arguments`.
+Append subcommand flags to `OPT_FLAGS` only. Common flags such as `--verbose`
+(the one used above) go *after* the `optimize` subcommand; `hyperloom` accepts
+no flags before the command name and exits with its usage message.
 
 ## User-visible Progress
 
@@ -467,7 +466,7 @@ and the stop reason. Never print API keys, tokens, or custom header values.
    changing cwd.
 3. Run it detached the way the harness understands: if `$CLAW_SESSION_ID` is set and your bash tool takes a `run_in_background` parameter, hand the command to it with `run_in_background=true`; otherwise use `setsid nohup ... &`. See the Launch section of the packaged `hyperloom/inference_optimizer/SKILL.md` for why — a hand-detached run is invisible to Claw and its sandbox is reclaimed about fifteen minutes after the turn ends.
 4. Pass all required workload flags in the
-   `python -m hyperloom.inference_optimizer.cli optimize` command. Do not rely
+   `python -m hyperloom optimize` command. Do not rely
    on `.env` alone for `TP`, `CONC`, `ISL`, `OSL`, or `PRECISION`.
 5. Report the session ID, log path, PID, and initial health check result.
 6. Inspect persisted state on requested status checks; report when work stops.

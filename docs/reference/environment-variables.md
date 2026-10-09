@@ -117,7 +117,7 @@ Set with CLI flags, not env vars. Pre-set `ISL` / `OSL` / `CONC` / `PRECISION` /
   `--extend-hours`.
 - **Quantization:** `--quantize`, `--quantize-scheme`.
 
-Run `inference_optimizer optimize --help` for the exhaustive flag list.
+Run `hyperloom optimize --help` for the exhaustive flag list.
 
 ---
 
@@ -537,7 +537,7 @@ do not publish it unchanged in support bundles.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `HYPERLOOM_QUANTIZE_ENABLED` | Unset | Primary switch (`1` to enable) for the AMD Quark PTQ quantization prelude driven by `--quantize` / `--quantize-scheme`. |
-| `QUARK_ROOT` | Unset | AMD Quark checkout used by the quantization-agent. Set this explicitly when quantization is enabled. |
+| `QUARK_ROOT` | Unset | AMD Quark checkout used by the quantization agent. Set this explicitly when quantization is enabled. |
 
 ---
 
@@ -959,9 +959,8 @@ defaults to `trajectories × 26 s × 2 + 1800 s` (26 s per trajectory measured o
 8×MI355X at concurrency 16, doubled for a cold first round, plus boot), and never
 below the stock 7800 s: about 9600 s for smoke and 33,700 s for `full`.
 
-AgentX profiling starts when AIPerf reports its measured phase. The legacy
-`AGENTX_PROFILE_WARMUP_S` delay is ignored. `AGENTX_PROFILE_WINDOW_S` controls
-the capture window and defaults to 20 seconds; phase waiting is bounded by the
+AgentX profiling starts when AIPerf reports its measured phase.
+`AGENTX_PROFILE_WINDOW_S` controls the capture window and defaults to 20 seconds; phase waiting is bounded by the
 materialized benchmark timeout. Capture lifecycle status is
 written to a per-invocation `capture-status.json`; the adjacent
 `trace-manifest.json` records the selected primary and per-rank traces.

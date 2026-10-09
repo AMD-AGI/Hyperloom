@@ -103,6 +103,19 @@ def test_format_optimization_stack():
     assert "explore:v1" in parts
 
 
+def test_prompt_summary_renders_current_best_without_stack_or_measurement():
+    st = SharedState()
+    st.current_best = {
+        "variant_name": "k23",
+        "tput": 2049.9,
+        "optimization_stack": [{"action": "explore", "variant_name": "stacked"}],
+        "measurement": {"launch_evidence_path": "/runs/launch_evidence.json"},
+    }
+    line = next(ln for ln in st.to_prompt_summary().splitlines() if ln.startswith("current_best="))
+    assert "k23" in line and "2049.9" in line
+    assert "stacked" not in line and "launch_evidence" not in line
+
+
 def test_format_last_trace_analyze():
     st = SharedState()
     assert st._format_trace_analyze_blob(st.last_trace_analyze) == "(none)"

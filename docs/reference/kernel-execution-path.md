@@ -146,7 +146,7 @@ The seven rules from the retired `kernel_agent.md` live in executable Python:
 | IR-3 integration is mandatory after every KEEP | `phases/kernel_stack.py::KernelStackPhase.drain_pending_keep_integrates` (called by `intent_router.py`) |
 | IR-4 kill stale servers before restart | `_multi_node_server_lifecycle.py::restart_server_for_round` |
 | IR-5 safe process management | `orchestrator/actions/executors/_subprocess_kill.py` |
-| IR-6 use apply_kernel_patch.py --target-file | `actions/executors/_kernel_agent_tool.py::_maybe_apply_kernel_patch` → `orchestrator/kernel/apply_kernel_patch.py::apply_kernel_patch` |
+| IR-6 apply patches through `apply_kernel_patch()` | `actions/executors/_kernel_agent_tool.py::_maybe_apply_kernel_patch` → `orchestrator/kernel/apply_kernel_patch.py::apply_kernel_patch` |
 | IR-7 never modify GEAK config | GEAK invocation wrappers in `request_handlers.py` / `geak_runner.py` |
 
 ## Backend selection
@@ -298,10 +298,10 @@ transparently.
 When `--nodes >= 2`, the optimization sandbox has no GPU. Handlers adapt:
 
 - **Applying patches**: `apply_kernel_patch.py` detects multi-node and fans the
-  patch to every pod using `python3 -m hyperloom.inference_optimizer.multi_node apply-patch`.
+  patch to every pod using `python3 -m hyperloom multi-node apply-patch`.
   Revert uses `manifest.multinode.host_backup_map` to hit the same pods.
 - **Compiling/benchmarking**: Forge/GEAK backends use
-  `python3 -m hyperloom.inference_optimizer.multi_node kernel-bench` instead of
+  `python3 -m hyperloom multi-node kernel-bench` instead of
   local `hipcc`.
 - **Integration**: `integrate_handler` forces a full server restart after a
   successful apply so the re-baseline measures the patched modules.

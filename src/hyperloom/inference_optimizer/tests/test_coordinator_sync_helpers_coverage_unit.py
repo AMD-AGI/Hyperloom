@@ -447,6 +447,32 @@ def test_specialist_findings_are_ordered_newest_first(coord: Coordinator) -> Non
     assert block.index("newer finding") < block.index("older finding")
 
 
+def test_specialist_findings_render_a_harvested_finding_once(coord: Coordinator) -> None:
+    """Harvesting copies a round's sourced findings into research hints; the block still shows each once."""
+    from hyperloom.inference_optimizer.baseline_comparison import research_hints
+
+    finding = {"what": "ngram spec decode stacks with expert parallel", "source": "measured r41"}
+    coord.shared_state.specialist_rounds = [_round("serving_specialist", finding, 0.8)]
+    research_hints.append_hints(coord.session_dir, [finding])
+
+    assert _findings(coord).count("ngram spec decode stacks with expert parallel") == 1
+
+
+def test_specialist_findings_keep_the_newest_within_their_budget(coord: Coordinator, monkeypatch) -> None:
+    from hyperloom.orchestrator.loop import conversation
+
+    monkeypatch.setattr(conversation, "_FINDINGS_PROMPT_CHARS", 200)
+    coord.shared_state.specialist_rounds = [
+        _round("serving_specialist", f"finding-{i:02d} " + "x" * 40, 0.5) for i in range(10)
+    ]
+
+    block = _findings(coord)
+
+    assert "finding-09" in block
+    assert "finding-00" not in block
+    assert "older omitted)" in block
+
+
 def test_specialist_findings_skip_rows_carrying_neither_findings_nor_questions(coord: Coordinator) -> None:
     coord.shared_state.specialist_rounds = [
         {"domain": "serving_specialist", "new_findings": [], "residual_questions": []},

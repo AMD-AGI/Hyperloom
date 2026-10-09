@@ -19,7 +19,7 @@ from kernelforge.fusion.command import (
     _needs_discard,
     _snapshot_fusion_source,
 )
-from kernelforge.fusion.command import main as cli_main
+from kernelforge.fusion.command import run as cli_main
 from kernelforge.fusion.loop import LoopResult
 from kernelforge.fusion.models import ValidationResult
 

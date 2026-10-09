@@ -45,8 +45,6 @@ authoritative.
   MAE-synthesized `raw_report` / `fact_sheet`. Recommended read order:
   prefer `session_breakdown.json` if present, fall back to legacy MAE
   output otherwise.
-- **`hyperloom-results-service`** — downstream automation may POST this
-  JSON when `HYPERLOOM_RESULTS_SERVICE_URL` is set.
 - **Offline / notebook analysis** — single file, easy to load, no DB
   needed.
 
@@ -88,18 +86,18 @@ breakdown = build("/workspace/hyperloom")
 out_path = write_breakdown_json("/workspace/hyperloom")
 ```
 
-### CLI / offline (`hyperloom.inference_optimizer.tools.dump_session_breakdown`)
+### CLI / offline (`hyperloom session breakdown`)
 
 ```bash
 # Live session in this sandbox
-python -m hyperloom.inference_optimizer.tools.dump_session_breakdown
+python -m hyperloom session breakdown
 
 # Historical session on a shared filesystem
-python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \
+python -m hyperloom session breakdown \
     --session-dir /shared/hyperloom-sessions/<user>/<sid>
 
 # Override output path (e.g. write to a staging area)
-python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \
+python -m hyperloom session breakdown \
     --session-dir <SD> --output /tmp/breakdown.json
 ```
 
@@ -108,7 +106,7 @@ python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \
 ```bash
 for d in /shared/hyperloom-sessions/*/*; do
     [ -d "$d" ] || continue
-    python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \
+    python -m hyperloom session breakdown \
         --session-dir "$d" > /dev/null
 done
 ```

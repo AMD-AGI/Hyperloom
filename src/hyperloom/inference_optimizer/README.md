@@ -37,7 +37,7 @@ Use the module entry point; it works both for normal installs and
 `pip install --target` layouts where console scripts are not on `PATH`:
 
 ```bash
-python3 -m hyperloom.inference_optimizer.cli optimize \
+python3 -m hyperloom optimize \
     --model /path/to/model \
     --framework sglang \
     --gpu-type mi300x \
@@ -51,11 +51,11 @@ take it from the launch-info JSON or the `HYPERLOOM_LAUNCH` line the CLI
 printed at launch):
 
 ```bash
-python3 -m hyperloom.inference_optimizer.cli optimize \
+python3 -m hyperloom optimize \
     --resume-from "$SESSION_DIR"
 ```
 
-See `python -m hyperloom.inference_optimizer.cli optimize --help` for the full flag set and
+See `python -m hyperloom optimize --help` for the full flag set and
 [SKILL.md](SKILL.md) for the prompt-driven launch workflow used inside
 Cursor and Claw.
 
@@ -65,7 +65,7 @@ Cursor and Claw.
 src/hyperloom/inference_optimizer/
 ├── SKILL.md                    # Agent instructions (Cursor / Claw entry point)
 ├── references/                 # SKILL reference chapters (benchmark/cache/critic/…)
-├── cli/                        # `python -m hyperloom.inference_optimizer.cli optimize` entry point
+├── cli/                        # `python -m hyperloom optimize` entry point
 │   ├── __init__.py             # main()/_run_optimize()
 │   ├── parser.py               # _build_parser()
 │   ├── backends/bootstrap/executors/kb/model_gate/preflight.py
