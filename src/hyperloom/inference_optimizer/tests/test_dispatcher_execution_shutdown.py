@@ -27,8 +27,11 @@ from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, Sqlite
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.loop import dispatcher as dispatcher_module
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
+from hyperloom.orchestrator.bringup.reconcile import ReconcileReport
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
+
+from ._dispatch_helpers import pump_until_settled
 
 
 def _dispatcher(tmp_path):
@@ -36,6 +39,16 @@ def _dispatcher(tmp_path):
     locks = ResourceLockManager(SqliteLeaseBackend(db))
     tasks = TaskRegistry(db)
     state = SimpleNamespace(phase="PRELUDE", macro_cycle=0, tick=0, session_budget_usable_sec=lambda: None)
+    writeback_ns = SimpleNamespace(
+        promote_to_shared_state=AsyncMock(),
+        fact_write_hook=AsyncMock(),
+        is_promotable_result=lambda *_args: True,
+        handle_unpromotable_result=AsyncMock(),
+        record_specialist_result=AsyncMock(),
+        record_intervention_for_task=lambda *_args: None,
+        record_observation=AsyncMock(),
+    )
+    stop = asyncio.Event()
     coord = SimpleNamespace(
         db=db,
         locks=locks,
@@ -43,12 +56,12 @@ def _dispatcher(tmp_path):
         shared_state=state,
         bus=MessageBus(db),
         sub=SubAgentRunner(locks, tasks),
-        _stop=asyncio.Event(),
-        _dispatcher_poll_sec=0.01,
+        _stop=stop,
+        stop_requested=stop.is_set,
+        reconciler=SimpleNamespace(last_report=ReconcileReport()),
         _BUDGET_GATED_DISPATCH_PHASES=frozenset(),
-        _promote_to_shared_state=AsyncMock(),
-        _fact_write_hook=AsyncMock(),
-        _is_promotable_result=lambda *_args: True,
+        writeback=writeback_ns,
+        specialist_dispatch=SimpleNamespace(maybe_auto_retry_specialist=AsyncMock(return_value=True)),
     )
     dispatcher = DispatcherCollaborator(coord)
     dispatcher._cancel_queued_task_over_budget = AsyncMock(return_value=False)
@@ -65,7 +78,6 @@ async def _close(dispatcher):
 def test_asyncio_run_shutdown_waits_for_execution_and_completion(tmp_path, monkeypatch):
     """The loop exits immediately after shutdown, not after a test-only worker join."""
     dispatcher = _dispatcher(tmp_path)
-    monkeypatch.setattr(dispatcher_module, "_CANCEL_NOTICE_SEC", 0)
     entered = threading.Event()
     stop_worker = threading.Event()
     worker_done = threading.Event()
@@ -93,11 +105,8 @@ def test_asyncio_run_shutdown_waits_for_execution_and_completion(tmp_path, monke
         task = await dispatcher.tasks.create(
             kind="shutdown_test", params={}, idempotency_key="shutdown", requires_lanes=["research_lane"]
         )
-        pump = asyncio.create_task(dispatcher._pump_dispatcher_once())
+        await dispatcher.pump_dispatcher_once()
         assert await asyncio.to_thread(entered.wait, 5)
-        pump.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await pump
         # Release from outside the event loop as shutdown begins. No await after close.
         stop_worker.set()
         await _close(dispatcher)
@@ -112,45 +121,10 @@ def test_asyncio_run_shutdown_waits_for_execution_and_completion(tmp_path, monke
             rows = db.execute("SELECT payload FROM events WHERE topic='delegated_result'").fetchall()
         assert len(rows) == 1
         assert json.loads(rows[0][0])["task_id"] == task_id
-        assert dispatcher._promote_to_shared_state.await_count == 1
+        assert dispatcher._coord.writeback.promote_to_shared_state.await_count == 1
     finally:
         stop_worker.set()
         real_close()
-
-
-def test_cancelled_pump_late_success_is_reaped_once(tmp_path, monkeypatch):
-    dispatcher = _dispatcher(tmp_path)
-    monkeypatch.setattr(dispatcher_module, "_CANCEL_NOTICE_SEC", 0)
-
-    async def run():
-        entered = asyncio.Event()
-        finish = asyncio.Event()
-
-        async def execute(_ctx):
-            entered.set()
-            await finish.wait()
-            return {"status": "ok"}
-
-        dispatcher.sub.register_executor("shutdown_test", execute)
-        await dispatcher.tasks.create(kind="shutdown_test", params={}, idempotency_key="late-success")
-        pump = asyncio.create_task(dispatcher._pump_dispatcher_once())
-        await asyncio.wait_for(entered.wait(), 5)
-        pump.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await pump
-        executions = tuple(dispatcher._executions)
-        finish.set()
-        await asyncio.gather(*executions)
-        await dispatcher._pump_dispatcher_once()
-        events = await dispatcher.db.fetchall("SELECT payload FROM events WHERE topic='delegated_result'")
-        assert len(events) == 1
-        assert dispatcher._promote_to_shared_state.await_count == 1
-        await _close(dispatcher)
-
-    try:
-        asyncio.run(run())
-    finally:
-        dispatcher.db.close()
 
 
 def test_shutdown_requests_scope_and_keeps_unconfirmed_database_open(tmp_path, monkeypatch):
@@ -199,11 +173,11 @@ def test_normal_pump_completion_is_not_reaped_twice(tmp_path, monkeypatch):
     async def run():
         dispatcher.sub.register_executor("shutdown_test", AsyncMock(return_value={"status": "ok"}))
         await dispatcher.tasks.create(kind="shutdown_test", params={}, idempotency_key="normal-completion")
-        await dispatcher._pump_dispatcher_once()
-        await dispatcher._pump_dispatcher_once()
+        await pump_until_settled(dispatcher)
+        await dispatcher.pump_dispatcher_once()
         events = await dispatcher.db.fetchall("SELECT payload FROM events WHERE topic='delegated_result'")
         assert len(events) == 1
-        assert dispatcher._promote_to_shared_state.await_count == 1
+        assert dispatcher._coord.writeback.promote_to_shared_state.await_count == 1
         assert not dispatcher._executions
         await _close(dispatcher)
 
@@ -359,7 +333,7 @@ def test_forced_specialist_actor_kill_releases_capacity_and_lane(tmp_path, monke
     )
     monkeypatch.setitem(sys.modules, "ray", fake_ray)
     dispatcher = _dispatcher(tmp_path)
-    dispatcher.gpu_specialist_pool = SimpleNamespace(release=AsyncMock())
+    dispatcher._coord.gpu_specialist_pool = SimpleNamespace(release=AsyncMock())
     actor = SimpleNamespace(stop=SimpleNamespace(remote=lambda: False))
     specialist_lease = ray_serving.GpuSpecialistLease(num_gpus=1)
     specialist_lease._actor = actor
@@ -400,7 +374,7 @@ def test_cleanup_unconfirmed_preserves_outcome_without_completion(tmp_path, clea
     dispatcher = _dispatcher(tmp_path)
     payload = {"status": "ok", "decision": "KEEP", "nested": {"answer": [42]}}
     completed = AsyncMock()
-    dispatcher.gpu_specialist_pool = SimpleNamespace(release=AsyncMock())
+    dispatcher._coord.gpu_specialist_pool = SimpleNamespace(release=AsyncMock())
 
     async def execute(_ctx):
         if outcome == "failed":
@@ -444,8 +418,8 @@ def test_cleanup_unconfirmed_preserves_outcome_without_completion(tmp_path, clea
         assert evidence["cleanup_error"]
         assert completed.await_count == 0
         assert dispatcher.gpu_specialist_pool.release.await_count == 0
-        assert dispatcher._promote_to_shared_state.await_count == 0
-        assert dispatcher._fact_write_hook.await_count == 0
+        assert dispatcher._coord.writeback.promote_to_shared_state.await_count == 0
+        assert dispatcher._coord.writeback.fact_write_hook.await_count == 0
         assert await dispatcher.locks.lane_holders() == {"research_lane": 1}
         assert not await dispatcher.bus.tail(topic="delegated_result")
         await _close(dispatcher)
@@ -570,9 +544,8 @@ def test_confirmed_cleanup_unregisters_even_when_completion_raises(tmp_path, out
 
 def test_confirmed_cancellation_records_once_without_promotion_or_retry(tmp_path):
     dispatcher = _dispatcher(tmp_path)
-    dispatcher._maybe_auto_retry_specialist = AsyncMock(return_value=True)
-    dispatcher._record_specialist_result = AsyncMock()
-    dispatcher._handle_unpromotable_result = AsyncMock()
+    dispatcher._coord.writeback.record_specialist_result = AsyncMock()
+    dispatcher._coord.writeback.handle_unpromotable_result = AsyncMock()
     dispatcher._coord.phase_framework = SimpleNamespace(on_specialist_settled=Mock())
 
     async def run():
@@ -580,18 +553,16 @@ def test_confirmed_cancellation_records_once_without_promotion_or_retry(tmp_path
         task = await dispatcher.tasks.create(
             kind="specialist", params={}, idempotency_key="cancelled", requires_lanes=["research_lane"]
         )
-        result = await dispatcher.run_task_registered(
-            task, on_complete=partial(dispatcher._reap_dispatched_task, task, gpu_lease=None)
-        )
+        result = await dispatcher.run_task_registered(task, on_complete=partial(dispatcher.reap_dispatched_task, task))
         assert result.state == "cancelled"
         assert (await dispatcher.tasks.get(task.task_id)).state == "cancelled"
         events = await dispatcher.bus.tail(topic="delegated_result")
         assert len(events) == 1 and events[0].payload["state"] == "cancelled"
-        assert dispatcher._maybe_auto_retry_specialist.await_count == 0
-        assert dispatcher._record_specialist_result.await_count == 1
+        assert dispatcher._coord.specialist_dispatch.maybe_auto_retry_specialist.await_count == 0
+        assert dispatcher._coord.writeback.record_specialist_result.await_count == 1
         assert dispatcher._coord.phase_framework.on_specialist_settled.call_count == 1
-        assert dispatcher._promote_to_shared_state.await_count == 0
-        assert dispatcher._fact_write_hook.await_count == 0
+        assert dispatcher._coord.writeback.promote_to_shared_state.await_count == 0
+        assert dispatcher._coord.writeback.fact_write_hook.await_count == 0
         assert not dispatcher._executions and not dispatcher._inflight_actions
         assert not await dispatcher.locks.lane_holders()
 
@@ -859,12 +830,9 @@ def test_specialist_budget_uses_shared_benchmark_timeout(tmp_path, monkeypatch):
     dispatcher = _dispatcher(tmp_path)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "9000")
     try:
-        assert dispatcher._specialist_wall_budget_sec(needs_gpu=False) == 600
+        assert dispatcher._specialist_wall_budget_sec(params={"mode": "research"}) == 600
         assert (
-            dispatcher._specialist_wall_budget_sec(
-                needs_gpu=True, params={"scope": "domain", "mode": "patch", "bench": True}
-            )
-            == 9600
+            dispatcher._specialist_wall_budget_sec(params={"scope": "domain", "mode": "patch", "bench": True}) == 9600
         )
     finally:
         dispatcher.db.close()

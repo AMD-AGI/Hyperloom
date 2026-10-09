@@ -73,6 +73,7 @@ from .close_out import (
     record_roofline_progress,
 )
 from .event_ids import EVENT_ID_SEPARATOR, EventId, event_id, fragment_key, parse_event_id
+from .outcome_stage import record_stage_reached
 from .event_rows import (
     EVENT_ID_FIELD,
     SCOPE_FIELDS,
@@ -173,6 +174,7 @@ __all__ = [
     "record_close_settled",
     "record_close_step",
     "record_roofline_progress",
+    "record_stage_reached",
     "record_metadata_identity",
     "record_metadata_langfuse",
     "record_backend_versions_and_timeline",

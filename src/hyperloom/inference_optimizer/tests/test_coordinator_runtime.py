@@ -26,10 +26,7 @@ from hyperloom.orchestrator.roles import (
     ScriptedPlan,
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.loop.coordinator_helpers import (
-    _BASELINE_FINGERPRINT_KEYS,
-    _baseline_params_fingerprint,
-)
+from hyperloom.orchestrator.loop.writeback import _BASELINE_FINGERPRINT_KEYS, WritebackCollaborator
 from hyperloom.orchestrator.loop.proposals import ProposalsCollaborator
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.state.objective import TargetGainObjective
@@ -49,6 +46,7 @@ from hyperloom.orchestrator.bus.resource_lock import (
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.inference_optimizer.session.session_paths import target_baseline_json
 from hyperloom.orchestrator.bus.storage import SqliteConnection
+from ._dispatch_helpers import pump_until_settled
 
 
 async def _immediately(payload: dict) -> dict:
@@ -107,7 +105,7 @@ async def test_sighup_takes_the_same_priority_as_other_stop_signals(session_dir)
         nonlocal finalize_calls
         finalize_calls += 1
 
-    c.ensure_close_sequence = _close
+    c.phase_close.ensure_close_sequence = _close
     c._recipe_kb_t4_hook = _finalize
     try:
         reason = await c.run(max_ticks=1, tick_interval_sec=0.0)
@@ -142,7 +140,7 @@ async def test_the_final_signal_snapshot_makes_a_late_sigterm_terminal(session_d
         nonlocal close_calls
         close_calls += 1
 
-    c.ensure_close_sequence = _close
+    c.phase_close.ensure_close_sequence = _close
     c._recipe_kb_t4_hook = _noop_finalize
     try:
         reason = await c.run(max_ticks=1, tick_interval_sec=0.0)
@@ -183,7 +181,7 @@ async def test_stop_signals_follow_the_normal_terminal_path(session_dir, stop_si
 
     if cancelled:
         monkeypatch.setattr(c.reconciler, "run", _cancel_tick)
-    c.ensure_close_sequence = _close
+    c.phase_close.ensure_close_sequence = _close
     c._recipe_kb_t4_hook = _finalize
     try:
         if cancelled:
@@ -367,6 +365,36 @@ async def test_coordinator_starts_with_silent_backends(session_dir):
         # 3 agents × 2 ticks × 1 idle message = 6 send_message events
         msgs = await c.bus.tail(n=20, topic="observation")
         assert len(msgs) == 4
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_tick_while_closing_runs_no_reactor_turn(session_dir):
+    backends = {name: _AlwaysFailingBackend(name) for name in ("orchestration", "critic")}
+    c = Coordinator(session_dir, backends=backends)
+    try:
+        c.shared_state.closing_phase = True
+        await c.tick(1)
+        assert [b.calls for b in backends.values()] == [0, 0]
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_phase_advance_that_raises_is_recorded_at_the_session_tick(session_dir, monkeypatch):
+    c = Coordinator(session_dir, backends=_build_backends({}))
+
+    async def _raise() -> None:
+        raise RuntimeError("advance broke")
+
+    monkeypatch.setattr(c.phase_machine, "advance_phase_if_needed", _raise)
+    try:
+        # A resumed session carries its tick forward; the record uses that clock, not a per-run count.
+        c.shared_state.tick = 41
+        await c.tick(1)
+        recorded = c.shared_state.last_tick_exception
+        assert (recorded["stage"], recorded["tick"], recorded["message"]) == ("advance_phase", 42, "advance broke")
     finally:
         await c.stop()
 
@@ -648,7 +676,6 @@ async def test_coordinator_propose_action_creates_pending(session_dir):
         assert len(c.state.pending_proposals) == 1
         prop = next(iter(c.state.pending_proposals.values()))
         assert prop.action_name == "baseline"
-        assert prop.decided is False
     finally:
         await c.stop()
 
@@ -678,10 +705,10 @@ async def test_coordinator_review_verdict_approve_creates_task(session_dir):
                 "reasoning": "matches kb-1",
             },
         )
-        await c._handle_intent("critic", verdict)
+        await c.router.handle_intent("critic", verdict)
 
-        approved = c.state.pending_proposals[proposal_id]
-        assert approved.decided and approved.verdict == "approve"
+        # Decided proposals are removed from pending_proposals on verdict.
+        # Verify via the decision bus event instead.
         decisions = await c.bus.tail(topic="decision")
         assert any(m.payload.get("kind") == "approved_proposal" for m in decisions)
     finally:
@@ -702,7 +729,7 @@ async def test_coordinator_review_verdict_reject_no_task(session_dir):
     try:
         await c.tick(1)
         proposal_id = next(iter(c.state.pending_proposals.keys()))
-        await c._handle_intent(
+        await c.router.handle_intent(
             "critic",
             Intent(
                 type=IntentType.REVIEW_VERDICT,
@@ -738,6 +765,7 @@ async def test_coordinator_delegate_task_run_via_dispatcher(session_dir):
     c.sub.register_executor("baseline", lambda ctx: _async_return({"tput": 1840}))
     try:
         await c.tick(1)
+        await pump_until_settled(c.dispatcher)
         dones = await c.bus.tail(topic="delegated_result")
         assert any(m.payload.get("state") == "succeeded" for m in dones)
     finally:
@@ -917,7 +945,7 @@ async def test_orchestration_prompt_has_no_execution_checklist(session_dir):
         c.shared_state.last_profile_trace = ""
         c.shared_state.save(session_dir)
 
-        prompt = await c._compose_prompt("orchestration")
+        prompt = await c.conversation.compose_prompt("orchestration")
 
         assert "Execution checklist" not in prompt
     finally:
@@ -933,7 +961,7 @@ async def test_coordinator_prune_branch_cancels_family_and_records_advisory(sess
         a = await c.tasks.create(kind="baseline", params={}, idempotency_key="ka")
         b = await c.tasks.create(kind="baseline", params={}, idempotency_key="kb")
 
-        await c._handle_intent(
+        await c.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.PRUNE_BRANCH,
@@ -948,7 +976,7 @@ async def test_coordinator_prune_branch_cancels_family_and_records_advisory(sess
         assert "baseline" in c.shared_state.pruned_families
 
         # Future propose_action carries an advisory but is not dropped.
-        await c._handle_intent(
+        await c.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.PROPOSE_ACTION,
@@ -970,7 +998,7 @@ async def test_coordinator_prune_branch_queued_scope_drains_without_retiring(ses
         a = await c.tasks.create(kind="baseline", params={}, idempotency_key="qa")
         b = await c.tasks.create(kind="baseline", params={"tag": "x"}, idempotency_key="qb")
 
-        await c._handle_intent(
+        await c.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.PRUNE_BRANCH,
@@ -1042,7 +1070,7 @@ async def test_promote_baseline_records_success_attempt(session_dir):
             "materialized_config": "/tmp/baseline.with_envs.yaml",
             "workspace": "/runs/baseline/t-base-1",
         }
-        await c._promote_to_shared_state("baseline", result, task=task)
+        await c.writeback.promote_to_shared_state("baseline", result, task=task)
         last = c.shared_state.last_baseline
         assert last
         assert last["status"] == "succeeded"
@@ -1060,7 +1088,7 @@ async def test_promote_baseline_keeps_higher_anchor(session_dir):
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
     try:
-        await c._promote_to_shared_state(
+        await c.writeback.promote_to_shared_state(
             "baseline",
             {
                 "output_throughput": 1500.0,
@@ -1070,7 +1098,7 @@ async def test_promote_baseline_keeps_higher_anchor(session_dir):
             },
             task=_mk_task("baseline", "t-anchor-hi"),
         )
-        await c._promote_to_shared_state(
+        await c.writeback.promote_to_shared_state(
             "baseline",
             {
                 "output_throughput": 1400.0,
@@ -1098,7 +1126,7 @@ def test_inject_explore_runtime_params_includes_baseline_accuracy():
         shared_state = SharedState(baseline_accuracy=0.81)
 
     params: dict[str, Any] = {}
-    ProposalsCollaborator(DummyCoordinator())._inject_explore_runtime_params(params)
+    ProposalsCollaborator(DummyCoordinator()).inject_explore_runtime_params(params)
     assert params["accuracy_baseline"] == pytest.approx(0.81)
 
 
@@ -1107,7 +1135,7 @@ async def test_promote_baseline_accepts_higher_rebaseline(session_dir):
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
     try:
-        await c._promote_to_shared_state(
+        await c.writeback.promote_to_shared_state(
             "baseline",
             {
                 "output_throughput": 1400.0,
@@ -1116,7 +1144,7 @@ async def test_promote_baseline_accepts_higher_rebaseline(session_dir):
             },
             task=_mk_task("baseline", "t-anchor-lo"),
         )
-        await c._promote_to_shared_state(
+        await c.writeback.promote_to_shared_state(
             "baseline",
             {
                 "output_throughput": 1500.0,
@@ -1141,7 +1169,7 @@ async def test_promote_baseline_leaves_current_best_when_stack_non_empty(session
         c.shared_state.baseline_tput = 1400.0
         c.shared_state.optimization_stack = [{"action": "replay_warm_recipe", "tput": 7500.0}]
         c.shared_state.current_best = {"action": "warm_replay", "tput": 7500.0}
-        await c._promote_to_shared_state(
+        await c.writeback.promote_to_shared_state(
             "baseline",
             {"output_throughput": 1500.0, "materialized_config": "/tmp/re.with_envs.yaml"},
             task=_mk_task("baseline", "t-anchor-stack"),
@@ -1168,7 +1196,7 @@ async def test_promote_baseline_revalidation_reanchors_below_prior(session_dir):
             params={"reason": "enablement_eval_revalidation"},
             idempotency_key="idem-t-reval-1",
         )
-        await c._promote_to_shared_state(
+        await c.writeback.promote_to_shared_state(
             "baseline",
             {"output_throughput": 1200.0, "accuracy": 0.72},
             task=task,
@@ -1192,7 +1220,7 @@ async def test_promote_profile_records_success_attempt(session_dir):
             "output_throughput": 1234.5,
             "workspace": "/runs/profile/t-prof-1",
         }
-        await c._promote_to_shared_state("profile", result, task=task)
+        await c.writeback.promote_to_shared_state("profile", result, task=task)
         last = c.shared_state.last_profile
         assert last["status"] == "succeeded"
         assert last["decision"] == "promoted"
@@ -1230,7 +1258,7 @@ async def test_promote_explore_records_success_attempt(session_dir):
             "base_tput": 800.0,
             "round_id": "round-1",
         }
-        await c._promote_to_shared_state("explore", result, task=task)
+        await c.writeback.promote_to_shared_state("explore", result, task=task)
         last = c.shared_state.last_explore
         assert last["status"] == "succeeded"
         assert last["decision"] == "promoted"
@@ -1268,7 +1296,7 @@ async def test_promote_explore_updates_validated_gain(session_dir):
             "best_gain_pct": 10.0,
             "round_id": "round-rebench",
         }
-        await c._promote_to_shared_state("explore", result, task=task)
+        await c.writeback.promote_to_shared_state("explore", result, task=task)
         assert c.shared_state.cumulative_gain_validated == pytest.approx(10.0)
         assert c.shared_state.cumulative_gain_validated_stack_len == len(c.shared_state.optimization_stack)
     finally:
@@ -1305,7 +1333,7 @@ async def test_promote_explore_multi_winner_watermark_stays_in_sync(session_dir)
             "best_gain_pct": 10.0,
             "round_id": "round-multi",
         }
-        await c._promote_to_shared_state("explore", result, task=task)
+        await c.writeback.promote_to_shared_state("explore", result, task=task)
         s = c.shared_state
         assert len(s.optimization_stack) == 2
         assert s.cumulative_gain_validated_stack_len == len(s.optimization_stack)
@@ -1327,7 +1355,7 @@ async def test_handle_unpromotable_baseline_records_failure(session_dir):
             "workspace": "/runs/baseline/t-fail-1/benchmark_sglang_xyz",
             "reported_success": False,
         }
-        await c._handle_unpromotable_result(task, result)
+        await c.writeback.handle_unpromotable_result(task, result)
         assert len(c.shared_state.baseline_attempts) == 1
         attempt = c.shared_state.baseline_attempts[-1]
         assert attempt["status"] == "failed"
@@ -1353,7 +1381,7 @@ async def test_handle_unpromotable_baseline_third_failure_sets_stop_reason(
     c.shared_state.enablement_mode = "off"
     try:
         for i in range(3):
-            await c._handle_unpromotable_result(
+            await c.writeback.handle_unpromotable_result(
                 _mk_task("baseline", f"t-{i}"),
                 {"status": "failed", "error_class": "no_report", "error": "missing"},
             )
@@ -1372,7 +1400,7 @@ async def test_baseline_rounds_the_run_stopped_do_not_charge_the_failure_streak(
     _mute_action_scoring(c)
     try:
         for i in range(3):
-            await c._handle_unpromotable_result(
+            await c.writeback.handle_unpromotable_result(
                 _mk_task("baseline", f"t-stopped-{error_class}-{i}"),
                 {
                     "status": "failed",
@@ -1395,11 +1423,11 @@ async def test_a_stopped_baseline_round_does_not_clear_a_real_failure_streak(ses
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
     try:
-        await c._handle_unpromotable_result(
+        await c.writeback.handle_unpromotable_result(
             _mk_task("baseline", "t-real"),
             {"status": "failed", "error_class": "no_report", "error": "missing"},
         )
-        await c._handle_unpromotable_result(
+        await c.writeback.handle_unpromotable_result(
             _mk_task("baseline", "t-stopped"),
             {"status": "failed", "error_class": "session_time_exhausted", "error": "reaped"},
         )
@@ -1431,7 +1459,7 @@ async def test_handle_unpromotable_baseline_eval_pending_suppresses_stop_single_
     try:
         c.shared_state.enablement_mode = "eval"
         for i in range(3):
-            await c._handle_unpromotable_result(_mk_task("baseline", f"t-ev-{i}"), _eval_failed_result())
+            await c.writeback.handle_unpromotable_result(_mk_task("baseline", f"t-ev-{i}"), _eval_failed_result())
         assert c.shared_state.baseline_failure_streak == 3
         assert c.shared_state.stop_reason in ("", None)
         assert c.shared_state.enablement.origin == "eval"
@@ -1453,7 +1481,7 @@ async def test_handle_unpromotable_baseline_eval_pending_multi_node_still_stops(
     try:
         c.shared_state.enablement_mode = "eval"
         for i in range(3):
-            await c._handle_unpromotable_result(_mk_task("baseline", f"t-mn-{i}"), _eval_failed_result())
+            await c.writeback.handle_unpromotable_result(_mk_task("baseline", f"t-mn-{i}"), _eval_failed_result())
         assert c.shared_state.stop_reason == "baseline_failed"
     finally:
         await c.stop()
@@ -1467,7 +1495,7 @@ async def test_handle_unpromotable_baseline_eval_fails_fast_without_eval_lane(se
     try:
         c.shared_state.enablement_mode = "off"
         for i in range(3):
-            await c._handle_unpromotable_result(_mk_task("baseline", f"t-noev-{i}"), _eval_failed_result())
+            await c.writeback.handle_unpromotable_result(_mk_task("baseline", f"t-noev-{i}"), _eval_failed_result())
         assert c.shared_state.stop_reason == "baseline_failed"
     finally:
         await c.stop()
@@ -1483,7 +1511,7 @@ async def test_handle_unpromotable_baseline_fails_fast_when_enablement_off(sessi
         # budget open.
         c.shared_state.enablement_mode = "off"
         for i in range(3):
-            await c._handle_unpromotable_result(
+            await c.writeback.handle_unpromotable_result(
                 _mk_task("baseline", f"t-off-{i}"),
                 {"status": "failed", "error_class": "server_init_dead"},
             )
@@ -1502,7 +1530,7 @@ async def test_promote_baseline_revalidation_finalizes_when_accuracy_meets_floor
         c.shared_state.enablement.accuracy_floor = 0.3
         # Set tracked task_id so the gate recognizes this as the revalidation task.
         c.shared_state.enablement.revalidation_task_id = "t-reval-ok"
-        await c._promote_to_shared_state(
+        await c.writeback.promote_to_shared_state(
             "baseline",
             {"output_throughput": 1000.0, "completed_requests": 10, "accuracy": 0.42},
             task=_mk_task("baseline", "t-reval-ok"),
@@ -1525,7 +1553,7 @@ async def test_promote_baseline_revalidation_promotes_without_accuracy_when_eval
         c.shared_state.enablement.validation_pending = True
         c.shared_state.enablement.accuracy_floor = 0.3
         c.shared_state.enablement.revalidation_task_id = "t-reval-noeval"
-        await c._promote_to_shared_state(
+        await c.writeback.promote_to_shared_state(
             "baseline",
             {"output_throughput": 900.0, "completed_requests": 8},
             task=_mk_task("baseline", "t-reval-noeval"),
@@ -1547,7 +1575,7 @@ async def test_promote_baseline_unrelated_baseline_does_not_consume_pending(sess
         c.shared_state.enablement.validation_pending = True
         c.shared_state.enablement.accuracy_floor = 0.3
         c.shared_state.enablement.revalidation_task_id = "t-reval-tracked"
-        await c._promote_to_shared_state(
+        await c.writeback.promote_to_shared_state(
             "baseline",
             {"output_throughput": 1000.0, "completed_requests": 10, "accuracy": 0.42},
             task=_mk_task("baseline", "t-unrelated"),
@@ -1569,7 +1597,7 @@ async def test_persist_eval_failure_clears_pending(session_dir, monkeypatch):
     try:
         c.shared_state.enablement.validation_pending = True
         c.shared_state.enablement.revalidation_task_id = "t-reval-fail"
-        await c._handle_unpromotable_result(_mk_task("baseline", "t-reval-fail"), _eval_failed_result())
+        await c.writeback.handle_unpromotable_result(_mk_task("baseline", "t-reval-fail"), _eval_failed_result())
         assert c.shared_state.enablement.validation_pending is False
     finally:
         await c.stop()
@@ -1607,7 +1635,7 @@ async def test_eval_less_baseline_does_not_downgrade_measured_trigger(session_di
         st.enablement.probe_config_path = "/runs/baseline/measured.yaml"
         st.enablement.eval_contract_fingerprint = "measured-fp"
 
-        await c._handle_unpromotable_result(_mk_task("baseline", "t-noeval"), _eval_unavailable_result())
+        await c.writeback.handle_unpromotable_result(_mk_task("baseline", "t-noeval"), _eval_unavailable_result())
 
         # The measured characterization survives...
         assert st.enablement.baseline_eval_kind == "accuracy_below_floor"
@@ -1640,7 +1668,7 @@ async def test_measured_trigger_overwrites_earlier_unavailable(session_dir, monk
         measured["accuracy_task"] = "gsm8k"
         measured["baseline_eval_evidence"] = "measured: accuracy=0.0 task=gsm8k"
 
-        await c._handle_unpromotable_result(_mk_task("baseline", "t-measured"), measured)
+        await c.writeback.handle_unpromotable_result(_mk_task("baseline", "t-measured"), measured)
 
         assert st.enablement.baseline_eval_kind == "accuracy_below_floor"
         assert st.enablement.observed_task == "gsm8k"
@@ -1660,7 +1688,7 @@ async def test_revalidation_boot_failure_clears_pending_and_rearmes(session_dir,
         c.shared_state.enablement.revalidation_task_id = "t-reval-boot"
         c.shared_state.enablement.eval_contract_fingerprint = "frozen-fp"
         c.shared_state.enablement.accuracy_floor = 0.5
-        await c._handle_unpromotable_result(
+        await c.writeback.handle_unpromotable_result(
             _mk_task("baseline", "t-reval-boot"),
             {"status": "failed", "error_class": "oom"},
         )
@@ -1684,7 +1712,7 @@ async def test_a_reaped_revalidation_leaves_the_window_open_for_a_resume(session
         st.enablement.validation_pending = True
         st.enablement.revalidation_task_id = "t-reval-open"
         st.enablement.revalidation_generation = 2
-        await c._handle_unpromotable_result(
+        await c.writeback.handle_unpromotable_result(
             _mk_task("baseline", "t-reval-open"),
             {"status": "failed", "error_class": "session_time_exhausted", "error": "reaped"},
         )
@@ -1720,7 +1748,7 @@ async def test_a_revalidation_the_budget_cannot_fit_is_not_enqueued(session_dir,
         st.max_minutes = 60
         st.elapsed_minutes = lambda **_kw: 60.0  # type: ignore[method-assign]
 
-        assert await c._maybe_enqueue_enablement_baseline_revalidation() == ""
+        assert await c.enablement_revalidation.maybe_enqueue_enablement_baseline_revalidation() == ""
 
         # The window survives the stop: same generation, still pending, and no row for the key a resume with budget
         # left will need.
@@ -1743,7 +1771,7 @@ async def test_a_revalidation_key_spent_on_a_cancelled_row_opens_the_next_one(se
         st.enablement.revalidation_generation = 3
         spent = await _cancelled_revalidation_row(c, gen=3)
 
-        tid = await c._maybe_enqueue_enablement_baseline_revalidation()
+        tid = await c.enablement_revalidation.maybe_enqueue_enablement_baseline_revalidation()
 
         assert tid and tid != spent.task_id, "the window resolved to the cancelled row"
         assert st.enablement.revalidation_generation == 4
@@ -1784,7 +1812,7 @@ async def test_handle_unpromotable_records_for_non_baseline_kinds(session_dir):
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
     try:
-        await c._handle_unpromotable_result(
+        await c.writeback.handle_unpromotable_result(
             _mk_task("explore", "t-ex-fail"),
             {"status": "failed", "error_class": "subprocess_nonzero", "error": "rc=1\nstderr blob"},
         )
@@ -1807,7 +1835,7 @@ async def test_handle_unpromotable_kernel_action_records_global_only(
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
     try:
-        await c._handle_unpromotable_result(
+        await c.writeback.handle_unpromotable_result(
             _mk_task("kernel_opt", "t-ko-fail"),
             {"status": "failed", "error_class": "timeout", "error": "wall-clock exceeded"},
         )
@@ -1830,7 +1858,7 @@ async def test_handle_unpromotable_baseline_capture_failure_arms_eager_fallback(
     _mute_action_scoring(c)
     try:
         assert c.shared_state.baseline_eager_fallback is False
-        await c._handle_unpromotable_result(
+        await c.writeback.handle_unpromotable_result(
             _mk_task("baseline", "t-cg-1"),
             {
                 "status": "failed",
@@ -1840,7 +1868,7 @@ async def test_handle_unpromotable_baseline_capture_failure_arms_eager_fallback(
         )
         assert c.shared_state.baseline_eager_fallback is True
         # One-shot: a second capture failure must not re-arm (already set).
-        await c._handle_unpromotable_result(
+        await c.writeback.handle_unpromotable_result(
             _mk_task("baseline", "t-cg-2"),
             {
                 "status": "failed",
@@ -1866,7 +1894,7 @@ async def test_baseline_eager_fallback_consume_updates_coordinator_live_state(
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
     try:
-        await c._handle_unpromotable_result(
+        await c.writeback.handle_unpromotable_result(
             _mk_task("baseline", "t-cg-arm"),
             {
                 "status": "failed",
@@ -1899,7 +1927,7 @@ async def test_handle_unpromotable_capture_failure_no_arm_when_baseline_promoted
     _mute_action_scoring(c)
     try:
         c.shared_state.baseline_tput = 1234.0
-        await c._handle_unpromotable_result(
+        await c.writeback.handle_unpromotable_result(
             _mk_task("baseline", "t-cg-resume"),
             {
                 "status": "failed",
@@ -1936,7 +1964,7 @@ async def test_handle_unpromotable_roofline_increments_failure_streak(
         import logging
 
         with caplog.at_level(logging.WARNING, logger="hyperloom.orchestrator.loop.coordinator"):
-            await c._handle_unpromotable_result(
+            await c.writeback.handle_unpromotable_result(
                 _mk_task("roofline", task_id),
                 result,
             )
@@ -1964,6 +1992,66 @@ async def test_handle_unpromotable_roofline_increments_failure_streak(
 
 
 @pytest.mark.asyncio
+async def test_handle_unpromotable_profile_clears_the_initial_analysis_gate(session_dir):
+    """With enable_roofline off the initial analysis is a profile; a failed one must release PRELUDE."""
+    from hyperloom.orchestrator.phases import machine_state as phase_state
+
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        c.shared_state.phase = "PRELUDE"
+        c.shared_state.baseline_tput = 1074.7
+        c.shared_state.auto_roofline_pending_task_id = "t-profile-initial"
+        await c.writeback.handle_unpromotable_result(
+            _mk_task("profile", "t-profile-initial"),
+            {"status": "failed", "measurement_status": "failed", "error_class": "no_trace_files"},
+        )
+        assert c.shared_state.auto_roofline_pending_task_id == ""
+        assert phase_state.compute_next_phase(c.shared_state, kernel_enabled=True) is not None
+
+        c.shared_state.auto_roofline_pending_task_id = "t-other"
+        await c.writeback.handle_unpromotable_result(
+            _mk_task("profile", "t-unrelated-profile"),
+            {"status": "failed", "measurement_status": "failed", "error_class": "no_trace_files"},
+        )
+        assert c.shared_state.auto_roofline_pending_task_id == "t-other"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["cancelled", "succeeded"])
+@pytest.mark.parametrize("phase", ["PRELUDE", "ENABLEMENT"])
+async def test_a_phase_releases_the_initial_analysis_gate_when_its_task_ended_unbooked(session_dir, ending, phase):
+    """A cancelled initial analysis, or one that ended before a restart booked it, must not hold the phase.
+
+    Neither path reaches the writeback that clears the marker: the dispatcher returns early for a
+    cancelled result, and a restart between the runner's terminal write and booking loses the outcome.
+    Both phases that hold for the marker have to release it.
+    """
+    from hyperloom.orchestrator.phases import machine_state as phase_state
+
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        task = await c.tasks.create(kind="roofline", params={}, idempotency_key=f"initial-{phase}-{ending}")
+        await c.tasks.transition(task.task_id, "running")
+        c.shared_state.phase = phase
+        c.shared_state.baseline_tput = 1074.7
+        c.shared_state.auto_roofline_pending_task_id = task.task_id
+
+        await c.phase_machine.advance_phase_if_needed()
+        assert c.shared_state.auto_roofline_pending_task_id == task.task_id
+
+        await c.tasks.transition(task.task_id, ending)
+        assert phase_state.compute_next_phase(c.shared_state, kernel_enabled=True) is None
+        await c.phase_machine.advance_phase_if_needed()
+        assert c.shared_state.auto_roofline_pending_task_id == ""
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
 async def test_failed_initial_roofline_rearms_watermark_from_baseline(
     session_dir,
 ):
@@ -1977,7 +2065,7 @@ async def test_failed_initial_roofline_rearms_watermark_from_baseline(
         c.shared_state.roofline_failure_streak = 1
         c.shared_state.auto_roofline_pending_task_id = ""
 
-        assert c._needs_roofline_for_watermark() is True
+        assert c.phase_kernel._needs_roofline_for_watermark() is True
     finally:
         await c.stop()
 
@@ -1996,7 +2084,7 @@ async def test_unattempted_initial_roofline_does_not_watermark_rearm(
         c.shared_state.roofline_failure_streak = 0
         c.shared_state.auto_roofline_pending_task_id = ""
 
-        assert c._needs_roofline_for_watermark() is False
+        assert c.phase_kernel._needs_roofline_for_watermark() is False
     finally:
         await c.stop()
 
@@ -2027,20 +2115,20 @@ def test_fingerprint_keys_covers_recovery_surface():
 
 
 def test_fingerprint_normalizes_extra_envs_order():
-    fp1 = _baseline_params_fingerprint({"extra_envs": {"A": "1", "B": "2"}})
-    fp2 = _baseline_params_fingerprint({"extra_envs": {"B": "2", "A": "1"}})
+    fp1 = WritebackCollaborator.baseline_params_fingerprint({"extra_envs": {"A": "1", "B": "2"}})
+    fp2 = WritebackCollaborator.baseline_params_fingerprint({"extra_envs": {"B": "2", "A": "1"}})
     assert fp1 == fp2
     assert fp1["extra_envs"] == [["A", "1"], ["B", "2"]]
 
 
 def test_fingerprint_missing_keys_become_none_or_empty():
-    fp = _baseline_params_fingerprint({"benchmark_script": "sglang_mi300x.sh"})
+    fp = WritebackCollaborator.baseline_params_fingerprint({"benchmark_script": "sglang_mi300x.sh"})
     assert fp["benchmark_script"] == "sglang_mi300x.sh"
     assert fp["result_dir"] is None
     assert fp["extra_server_args"] is None
     assert fp["extra_envs"] == []
     assert fp["model_path"] is None
-    fp_with_empty = _baseline_params_fingerprint(
+    fp_with_empty = WritebackCollaborator.baseline_params_fingerprint(
         {
             "benchmark_script": "sglang_mi300x.sh",
             "extra_envs": {},
@@ -2050,7 +2138,7 @@ def test_fingerprint_missing_keys_become_none_or_empty():
 
 
 def test_fingerprint_stringifies_scalar_values():
-    fp = _baseline_params_fingerprint(
+    fp = WritebackCollaborator.baseline_params_fingerprint(
         {
             "benchmark_script": "sglang_mi300x.sh",
             "model_path": "/path/models/DeepSeek-R1",
@@ -2061,10 +2149,10 @@ def test_fingerprint_stringifies_scalar_values():
 
 
 def test_fingerprint_different_overrides_produce_different_fingerprints():
-    a = _baseline_params_fingerprint({"benchmark_script": "sglang_mi300x.sh"})
-    b = _baseline_params_fingerprint({"benchmark_script": "dsr1_fp8_mi300x.sh"})
-    c = _baseline_params_fingerprint({"result_dir": "/workspace"})
-    d = _baseline_params_fingerprint({"extra_server_args": "--mem-fraction-static 0.9"})
+    a = WritebackCollaborator.baseline_params_fingerprint({"benchmark_script": "sglang_mi300x.sh"})
+    b = WritebackCollaborator.baseline_params_fingerprint({"benchmark_script": "dsr1_fp8_mi300x.sh"})
+    c = WritebackCollaborator.baseline_params_fingerprint({"result_dir": "/workspace"})
+    d = WritebackCollaborator.baseline_params_fingerprint({"extra_server_args": "--mem-fraction-static 0.9"})
     encoded = {json.dumps(x, sort_keys=True) for x in (a, b, c, d)}
     assert len(encoded) == 4
 
@@ -2086,7 +2174,7 @@ async def test_promote_baseline_records_fingerprint(session_dir):
             "materialized_config": "/tmp/baseline.with_envs.yaml",
             "workspace": "/runs/baseline/t-fp-1",
         }
-        await c._promote_to_shared_state("baseline", result, task=task)
+        await c.writeback.promote_to_shared_state("baseline", result, task=task)
         last = c.shared_state.last_baseline
         assert last["status"] == "succeeded"
         fp = last["extras"]["fingerprint"]
@@ -2112,7 +2200,7 @@ async def test_handle_unpromotable_baseline_records_fingerprint(session_dir):
             "error_class": "no_report",
             "error": "benchmark_report.json missing",
         }
-        await c._handle_unpromotable_result(task, result)
+        await c.writeback.handle_unpromotable_result(task, result)
         attempt = c.shared_state.baseline_attempts[-1]
         assert attempt["status"] == "failed"
         fp = attempt["extras"]["fingerprint"]
@@ -2133,7 +2221,7 @@ async def test_handle_unpromotable_non_baseline_omits_fingerprint(session_dir):
             params={"benchmark_script": "sglang_mi300x.sh"},
             idempotency_key="idem-ex",
         )
-        await c._handle_unpromotable_result(task, {"status": "failed"})
+        await c.writeback.handle_unpromotable_result(task, {"status": "failed"})
         attempt = c.shared_state.explore_attempts[-1]
         assert attempt["status"] == "failed"
         assert "fingerprint" not in attempt["extras"]
@@ -2369,7 +2457,7 @@ async def test_report_success_does_not_stop_run(session_dir):
             params={"session_dir": str(session_dir)},
             idempotency_key="k-report-1",
         )
-        await c._pump_dispatcher_once()
+        await pump_until_settled(c.dispatcher)
         after = await c.tasks.get(task.task_id)
         assert after.state == "succeeded"
         assert not (c.shared_state.stop_reason or "").strip()
@@ -2391,7 +2479,7 @@ async def test_report_success_does_not_overwrite_prior_stop_reason(session_dir):
             params={"session_dir": str(session_dir)},
             idempotency_key="k-report-pre-set",
         )
-        await c._pump_dispatcher_once()
+        await pump_until_settled(c.dispatcher)
         after = await c.tasks.get(task.task_id)
         assert after.state == "succeeded"
         assert c.shared_state.stop_reason == "target_reached"
@@ -2412,7 +2500,7 @@ async def test_run_preserves_prior_stop_reason_when_loop_exits_without_new_reaso
     async def _boom():
         raise RuntimeError("tick exploded mid-run")
 
-    c.phase_machine._advance_phase_if_needed = _boom  # type: ignore[assignment]
+    c.phase_machine.advance_phase_if_needed = _boom  # type: ignore[assignment]
 
     try:
         reason = await c.run(max_ticks=5)
@@ -2456,6 +2544,7 @@ async def test_dispatch_audit_logs_task_without_executor(session_dir, caplog):
     try:
         with caplog.at_level(logging.WARNING, logger="hyperloom.orchestrator.loop.dispatcher"):
             await c.tick(1)
+        await pump_until_settled(c.dispatcher)
         assert any("dispatch audit" in r.getMessage() and "long_running" in r.getMessage() for r in caplog.records)
         assert await c.tasks.by_state("failed")
     finally:
@@ -2504,10 +2593,12 @@ async def test_a_met_target_waits_for_the_ladder_it_routed_to(session_dir):
 
     c.phase_sweep._enqueue_internal_conc_sweep_task = _ladder_stays_queued  # type: ignore[method-assign]
     try:
-        await c.run(objective=TargetGainObjective(target_gain_pct=10.0), max_ticks=6)
+        reason = await c.run(objective=TargetGainObjective(target_gain_pct=10.0), max_ticks=6)
+        assert reason == "max_ticks"
         assert c.shared_state.target_reached_at
         assert c.shared_state.last_conc_sweep == {}
-        assert (c.shared_state.phase or "").upper() == "SWEEP"
+        terminal = c.shared_state.phase_history[-1]
+        assert (terminal["from_phase"], terminal["to_phase"], terminal["reason"]) == ("SWEEP", "CLOSE", "max_ticks")
     finally:
         await c.stop()
 

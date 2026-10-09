@@ -996,11 +996,11 @@ def run(
     ) -> tuple[dict[str, Any], Path]:
         """Write the run's manifest, as complete as the run has so far got.
 
-        The aggregate is the only thing that points at a keeper, and it used to land once
-        every campaign had returned -- so a run killed in between reported REVERT while
-        proven, already-smoked patches sat in the workspace. Called from ``on_keep`` too,
-        it is never missing, only partial, and the end-of-run call overwrites it with the
-        real loop / compile-pass / error fields before any exit.
+        The aggregate is the only thing that points at a keeper, so it cannot wait for every
+        campaign to return: a run killed in between would report REVERT while proven,
+        already-smoked patches sat in the workspace. Called from ``on_keep`` too, it is never
+        missing, only partial, and the end-of-run call overwrites it with the real loop /
+        compile-pass / error fields before any exit.
         """
         manifest = build_manifest(
             framework=framework,
@@ -1339,11 +1339,10 @@ def _publish_partial_nomination(
 ) -> None:
     """Record the keepers proved so far, so a kill after this one does not lose them.
 
-    ``fusion_manifest.json`` is the only artifact that points at a keeper, and it used to
-    land once every campaign had returned. A wrapper killed in between reported REVERT with
-    ``patch=null`` while smoked, already-published patches sat in the output dir -- session
-    20260916T050331Z-94ee8477 lost a 5.011x fusion that way, 44 minutes after the loop had
-    proved it at 57dB SNR.
+    ``fusion_manifest.json`` is the only artifact that points at a keeper, so it is written
+    after each keeper rather than once every campaign has returned. A wrapper killed in
+    between would otherwise report REVERT with ``patch=null`` while smoked, already-published
+    patches sat in the output dir.
 
     Args:
         publish: The run's manifest writer, or None on the paths that have no manifest.

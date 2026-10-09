@@ -355,6 +355,11 @@ def record_dispatch(
         row_type="action",
         natural_ids=str(task_id),
     )
+    if opened is not None and recorded is not None and action == "profile":
+        from ...session.session_binding import bound_session
+        from .outcome_stage import record_stage_reached
+
+        record_stage_reached(bound_session(), "profile")
     return opened is not None and recorded is not None
 
 

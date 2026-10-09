@@ -1,6 +1,6 @@
 ---
 name: hyperloom-qwen3-14b-fp8-12h-forge
-description: Run a 12-hour Hyperloom Qwen3-14B-FP8 optimization session with the per-kernel KernelForge backend instead of GEAK. Use when the user wants the medium-length Hyperloom demo and has asked for the forge kernel backend.
+description: Run a 12-hour Hyperloom Qwen3-14B-FP8 optimization session on SGLang, vLLM or ATOM with the per-kernel KernelForge backend instead of GEAK. Use when the user wants the medium-length Hyperloom demo and has asked for the forge kernel backend.
 ---
 
 # Hyperloom Qwen3-14B-FP8 12h Run (Forge Kernel Backend)
@@ -10,7 +10,8 @@ Load `.env` with the preamble below and resolve `HYPERLOOM_SKILL_PATH`. Read and
 This is the [`hyperloom-qwen3-14b-fp8-12h`](../hyperloom-qwen3-14b-fp8-12h/SKILL.md)
 demo with **one** difference: the KERNEL_AGENT phase runs the per-kernel
 KernelForge backend instead of GEAK. The workload, budget, and phase split are
-identical on purpose, so the two runs stay directly comparable.
+identical on purpose, so the two runs stay directly comparable. SGLang and vLLM
+follow the sections below; for ATOM (`FRAMEWORK=atom`) follow [ATOM](#atom).
 
 ## Execution Shell
 
@@ -286,3 +287,23 @@ and the stop reason. Never print API keys, tokens, or custom header values.
 8. Inspect persisted state on requested status checks; report when work stops.
 9. After diagnosing an unexpected crash and obtaining explicit resume approval, only run `optimize --resume-from "$SESSION_DIR"` against the same session dir, with `KERNEL_OPT_BACKEND_ORDER=forge` still set. After the first launch, never start a new `optimize`; that creates a new `<UTC_ts>` session and is forbidden.
 10. If `stop_reason` in the current session `state.json` is final, stop and exit.
+
+## ATOM
+
+For `FRAMEWORK=atom`, run the
+[ATOM section of the 12h demo](../hyperloom-qwen3-14b-fp8-12h/SKILL.md#atom)
+(run mode, execution shell, Docker or baremetal entry, setup, runtime install,
+first launch, resume and status checks) in place of the generic steps above, with
+one addition: right after the ATOM execution-shell preamble, in every shell that
+runs the runtime installer or `optimize` (inside the container in Docker mode),
+select this demo's backend:
+
+```bash
+export KERNEL_OPT_BACKEND_ORDER=forge
+```
+
+That section's Docker entry already forwards `KERNEL_OPT_BACKEND_ORDER` into the
+container. Everything in [Kernel Backend](#kernel-backend) about the exact
+`forge` opt-in and `FORGE_*` knobs applies. After launch, expect `atom` and
+`forge` in `state.json`; a recorded `geak` means the export did not reach the
+launching shell, so report the mismatch without silently replacing the session.

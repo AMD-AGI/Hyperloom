@@ -68,6 +68,7 @@ class _StubPrelude:
             warm_kernel_kb_attempted=False,
             warm_kernel_kb_plan=[],
             warm_replay_outcome={},
+            warm_replay_pending={},
             save=lambda *_a, **_k: None,
         )
         self._reader = reader

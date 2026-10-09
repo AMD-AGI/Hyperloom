@@ -83,13 +83,14 @@ unbounded runs use the fixed per-cycle budget window.
 Whether another cycle is feasible is surfaced as `cycle_reloop_feasible` in
 the ``=== Phase ===`` block for the five middle phases.
 
-`machine_state.PHASE_ALLOWED_ACTIONS` and `PolicyGate` enforce which
-actions can run in each phase. Coordinator-owned actions such as
-analysis refreshes and close sequencing might be enqueued internally even
-when the LLM is not allowed to propose them.
+`machine_state.PHASE_ALLOWED_ACTIONS` is a cross-phase transition survival
+filter, not the set the LLM can propose. The LLM-proposable set is
+`allowed_actions_for(phase)`. Coordinator-owned actions such as analysis
+refreshes and close sequencing may be enqueued internally even when the LLM
+is not allowed to propose them.
 
 Every phase transition is a GPU barrier: the Coordinator stops every running
-action and drops queued work the next phase does not allow, and commits the
+action and drops queued work the next phase does not support, and commits the
 transition only once no task is left running. Each phase therefore starts on
 quiet GPUs, and its entry hook runs on the transition itself.
 
@@ -165,18 +166,22 @@ authoring specialist's prompt. The rungs, in increasing complexity:
 1. **Rung 1 — serve-flag / config wire-up.** The architecture is supported and
    only a serve flag / env / tokenizer-mode / trivial registration alias is
    missing. No new code or dependencies.
-2. **Rung 2 — in-tree source patch.** A unified diff against the installed
-   source tree: register the arch, a small forward/config/tokenizer bridge, or
-   backport a merged PR. Pure Python, no compile.
+2. **Rung 2 — in-tree source patch.** A unified diff against the source tree
+   the server imports: register the arch, a small forward/config/tokenizer
+   bridge, or backport a merged PR. Pure Python, no compile.
 3. **Rung 3 — attempt-scoped runtime.** Acquire a runtime (a published
    wheel, an editable checkout at a ref, or a local source tree) into an
    isolated per-attempt venv. That venv is activated only through the
    per-variant YAML benchmark envs; the Coordinator never mutates its own
-   process environment to point at an attempt runtime.
+   process environment to point at an attempt runtime. While one is active,
+   the source tree the server imports is that runtime's own — the editable
+   checkout, or the venv's site-packages — so Rung 2 and Rung 4 patches land
+   there. A kept runtime is re-provisioned for every later round, whatever
+   that round's failure.
 4. **Rung 4 — source localization.** Localize a merged-PR or vendored
-   closure into the source tree. A change that touches compiled or
-   build-backend files cannot be satisfied by a plain source edit, so it
-   defers to Rung 5.
+   closure into the source tree the server imports. A change that touches
+   compiled or build-backend files cannot be satisfied by a plain source
+   edit, so it defers to Rung 5.
 5. **Rung 5 — off-loop compiled build.** Perform a compiled-component build
    (AITER kernels, sgl-kernel, or vLLM-from-source). Builds run *off* the
    coordinator tick loop on a dedicated single-slot build lane: each build
@@ -185,6 +190,65 @@ authoring specialist's prompt. The rungs, in increasing complexity:
    Rung 5 can be disabled with the `HYPERLOOM_ENABLEMENT_DISABLE_TARGETED_BUILD`
    environment variable (see
    [Targeted builds (Rung 5)](../reference/environment-variables.md#targeted-builds-rung-5)).
+
+### Latency budget (constraint on KEEP)
+
+`--max-latency-ms` sets a ceiling on mean end-to-end latency, for **scriptable
+workloads only** (`xdit`, `custom`); the CLI refuses it for a serving framework.
+A scriptable workload grades on output throughput alone, and it is the only
+kind compute partitioning places work for, so it is where a throughput-only
+gate can buy throughput with per-request latency. An AgentX serving session
+already refuses that trade on interactivity.
+
+It is a constraint rather than an objective: it does not decide when the run
+stops, only which winners are admissible, so it composes with whichever
+`--target-*` is in use. It rides the same verdict the gain gates decide — a
+candidate that would otherwise KEEP and breaks the ceiling is a REVERT, with a
+`veto_reason` (`latency_budget_exceeded` or `latency_unmeasured`). A candidate
+that did not gain carries no veto, so the ledger names the gate that refused
+it. Every KEEP decision a scriptable session reaches reads that verdict —
+explore, a framework source patch, and a kernel integration — so a lane
+reverts its own over-budget change rather than leaving it on disk.
+
+The constraint exists because a throughput-only comparison does not merely
+tolerate a latency-for-throughput trade, it selects for the worst one on
+offer: facing a lever that raises aggregate throughput *by* making each stream
+slower, the largest regression is where the most throughput is.
+
+It fails closed. A candidate that reported no end-to-end latency is refused,
+since a constraint nobody measured is not one anybody satisfied — which is why
+every lane copies `e2el_mean_ms` onto the dict it promotes. It fails closed at
+the boundary too: if the baseline itself exceeds the ceiling, or reported no
+end-to-end latency, the run stops with `baseline_over_latency_budget` rather
+than spending its whole budget refusing every candidate to learn what was
+knowable at launch. Off by default, leaving KEEP behaviour unchanged when
+unset.
+
+### GPU power: measured and asserted
+
+Each round's GPU power is sampled by Hyperloom itself, with read-only
+`amd-smi metric --power --mem-usage` every 2 s, only while the round is in its
+measured phase (from server ready, and from AIPerf's measured-phase line under
+AgentX, until the client exits or the eval starts). It is averaged over the
+serving cards: those in the visible-device mask that held at least 10% of VRAM
+during that phase, so a TP4 round on an unpinned eight-card host is averaged
+over its four cards. The result is the round's `gpu_power.json`, carried as
+`gpu_power_avg_w` on the measurement. A round that was sampled but had no
+serving card or no power reading stays unmeasured. The benchmark report's
+`gpu_monitor` block (`gpu_metrics.json`) is only the fallback for rounds no
+sampler ran on: on one node it reads a single card over the whole process
+lifetime, boot and idle tail included.
+
+The optimizer never changes power settings. The power cap and DPM performance
+level decide how much of the card's throughput is available at what power, so
+they are part of the measurement contract, and setting them is privileged and
+card-wide. Set them with `amd-smi set --power-cap` / `--perf-level` before
+launch; `--gpu-power-cap-w` and `--gpu-perf-level` then assert them, the way
+`--compute-partition-mode` asserts a partition mode: the session refuses to
+start (and to resume) if a card it uses is at a different value. The observed
+cap and perf level are recorded in the platform fingerprint whether or not
+they are asserted. Neither can be checked on a multi-node session, so asserting
+one there refuses.
 
 ### Runnable gate (earned KEEP)
 
@@ -260,8 +324,8 @@ look very different from Orchestration's side:
   `kernel_agent` task, which holds `server_lifecycle`, `workspace_mutation` and
   `benchmark_lane` for the whole pipeline. Under GEAK it runs a single
   whole-pipeline GEAK e2e run, which then sets the
-  `skip_to_sweep` escalate hint. When the run produces no win, `exit_normal_kernel`
-  honours the hint immediately and the phase closes without Orchestration ever
+  `kernel_no_more_leverage` exit. When the run produces no win, the phase machine
+  exits immediately and the phase closes without Orchestration ever
   taking a turn in it.
 - **On a GEAK win**, the same `kernel_agent` task re-measures the candidate on
   the orchestrator's own harness under the lanes it already holds, and writes
@@ -275,13 +339,15 @@ look very different from Orchestration's side:
 See [Kernel optimization execution path](../reference/kernel-execution-path.md) for the
 entry-hook branch order.
 
-The phase allowlist (`machine_state.PHASE_ALLOWED_ACTIONS[KERNEL_AGENT]`)
-admits these actions:
+The LLM-proposable actions for KERNEL_AGENT phase (`allowed_actions_for(KERNEL_AGENT)`)
+are:
 
 - `integrate`
 - `roofline`
 - `profile`
-- `kernel_agent` (Coordinator-internal; the phase's whole pipeline as one task)
+
+`kernel_agent` is Coordinator-internal; PolicyGate rejects it with
+`rule="coordinator_managed_action"` if an LLM proposes it.
 
 Within the kernel-agent request channel, the handler dispatches request kinds
 such as `trace_analyze` and `integrate`
@@ -299,7 +365,10 @@ concurrency ladder, one arm each, and produces the throughput-vs-
 interactivity curve. The ladder is sized for the workload: powers of two
 down from 256 for a synthetic run, `1,4,8,10,14,20,28` for an agentic one,
 where a request carries orders of magnitude more prompt and the same card
-saturates far lower. Override either with `--conc-sweep-concs`.
+saturates far lower. Override either with `--conc-sweep-concs`. Under
+AgentX the sweep is off unless `--enable-conc-sweep` is passed, since each
+rung is a 3600 s window and the session grades at a fixed CONC; SWEEP then
+records a disabled skip.
 
 Results update `last_conc_sweep` and feed the final report and breakdown.
 The phase exits on `sweep_done` (or `sweep_failed`).
@@ -324,28 +393,27 @@ unconditional full state projection (mission, `SharedState`, gaps,
 warm-start, scores, and the inbox events since the last turn), so the
 turn never depends on what an earlier turn happened to remember.
 
-- **Working memory**: At each macro-cycle boundary the Coordinator asks
-  the agent for a one-turn handoff summary and persists it to
-  `state.json` (`orchestration_memory`). Later projections paste it back,
-  and it feeds `next_cycle_directive`; when the agent produces nothing
-  usable, a deterministic fallback directive is derived from state.
+- **Cycle directive**: While SWEEP is open and another macro-cycle is
+  still feasible, the Coordinator appends one handoff request to an ordinary
+  Orchestration turn. The reply, plain text and no intent required, is stored
+  as `orchestration_memory` (`next_cycle_directive`, `for_cycle`,
+  `parse_error`) and reseeds the next cycle's system prompt once FRAMEWORK is
+  entered; a turn that produced nothing usable leaves the directive empty.
 - **Context tools**: A read-only MCP surface lets the agent pull what the
   projection leaves out — finished outcomes (`get_recent_outcomes`),
   in-flight work (`get_running_tasks`), failure packets (`get_failure` /
   `get_variant_failures`), reference docs (`read_reference`), the raw
   `analysis.md` (`show_analysis_md`), denial history (`why_denied`) — plus
-  `run_action_now` for a whitelist of cheap synchronous actions.
   Transports without MCP tools get the projection only.
 - **Resume**: On resume the projection is rebuilt from
   `orchestration_memory` plus the authoritative `SharedState` facts —
   not by replaying a non-deterministic transcript.
 - **Write path**: All write actions flow through `emit_intent` → the
   Coordinator's intent handler, so Critic review, the accuracy gate,
-  and PolicyGate's invariants (path sandbox,
-  resource leases, phase ordering, data dependencies, single-writer
-  rules) apply to every turn. Repetition is checked against state — the
-  tested-variant ledger and the action-failure log — not against agent
-  recall.
+  and PolicyGate's invariants (path sandbox, resource leases,
+  data dependencies, single-writer rules) apply to every turn.
+  Repetition is checked against state — the tested-variant ledger and
+  the action-failure log — not against agent recall.
 
 Critic is likewise reactive and stateless per tick. Runtime RCA and automatic
 supervision are not roles in this loop. Stopped sessions require an explicit
@@ -360,8 +428,10 @@ The loop adapts through facts, not through retired score tables:
   action attempts, kernel attempts, framework-agent progress, and warnings.
 - `RecipeKB` records durable lessons and pitfalls for future sessions.
 - Critic verdicts gate risky patches and framework candidates.
-- PolicyGate blocks retired actions, wrong-phase actions, unsafe paths,
-  and invalid envelopes before they mutate runtime state.
+- PolicyGate blocks unsafe paths, invalid envelopes, and actions whose
+  structural requirements are not met before they mutate runtime state.
+  Phase fit is guided by the prompt and enforced at the phase transition
+  by dropping incompatible queued tasks.
 
 ## What is retired
 

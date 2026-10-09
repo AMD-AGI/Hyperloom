@@ -16,7 +16,10 @@ class FrameworkSpec:
     kind: str
     extra_args_env: str
     repo_url: str | None
-    supports_server_reuse: bool
+    # The importable package the framework installs as; ``None`` when it ships none.
+    python_package: str | None
+    # The image's default checkout of the framework's source; ``None`` when it has none.
+    source_root: str | None
     throughput_unit: str
     has_denoiser_config: bool = False
 
@@ -32,7 +35,8 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
         kind=SERVING,
         extra_args_env="EXTRA_SGLANG_ARGS",
         repo_url="https://github.com/sgl-project/sglang.git",
-        supports_server_reuse=True,
+        python_package="sglang",
+        source_root="/sgl-workspace/sglang/",
         throughput_unit="tok/s",
     ),
     "vllm": FrameworkSpec(
@@ -40,7 +44,8 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
         kind=SERVING,
         extra_args_env="EXTRA_VLLM_ARGS",
         repo_url="https://github.com/ROCm/vllm.git",
-        supports_server_reuse=True,
+        python_package="vllm",
+        source_root="/sgl-workspace/vllm/",
         throughput_unit="tok/s",
     ),
     "atom": FrameworkSpec(
@@ -48,7 +53,8 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
         kind=SERVING,
         extra_args_env="EXTRA_ATOM_ARGS",
         repo_url="https://github.com/ROCm/ATOM.git",
-        supports_server_reuse=False,
+        python_package="atom",
+        source_root="/app/ATOM/atom/",
         throughput_unit="tok/s",
     ),
     "xdit": FrameworkSpec(
@@ -56,7 +62,8 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
         kind=SCRIPTABLE,
         extra_args_env="EXTRA_XDIT_ARGS",
         repo_url="https://github.com/xdit-project/xDiT.git",
-        supports_server_reuse=False,
+        python_package="xfuser",
+        source_root="/app/xDiT/",
         throughput_unit="img/s",
         # A diffusers pipeline: transformer/ + vae/ configs are on disk.
         has_denoiser_config=True,
@@ -67,7 +74,8 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
         kind=SCRIPTABLE,
         extra_args_env="EXTRA_CUSTOM_ARGS",
         repo_url=None,
-        supports_server_reuse=False,
+        python_package=None,
+        source_root=None,
         throughput_unit="unit/s",
     ),
 }
@@ -99,6 +107,31 @@ def is_scriptable(framework: str | None) -> bool:
 def has_denoiser_config(framework: str | None) -> bool:
     """Return whether ``framework``'s model can be read as a diffusers denoiser."""
     return _spec_or_default(framework).has_denoiser_config
+
+
+def _registered_spec(framework: str) -> FrameworkSpec:
+    """Return the spec for ``framework``; raises ``KeyError`` when it is not registered."""
+    return FRAMEWORKS[framework.strip().lower()]
+
+
+def python_package(framework: str) -> str | None:
+    """Return the package ``framework`` imports as, or ``None`` when it ships none."""
+    return _registered_spec(framework).python_package
+
+
+def source_root(framework: str) -> str | None:
+    """Return the image's default checkout of ``framework``, or ``None`` when it has none."""
+    return _registered_spec(framework).source_root
+
+
+def repo_url(framework: str) -> str:
+    """Return ``framework``'s upstream repo URL, or ``""`` when it has none."""
+    return _registered_spec(framework).repo_url or ""
+
+
+def shipped_config_name(kind: str, framework: str) -> str:
+    """Return the shipped ``<kind>_<framework>.yaml`` asset name."""
+    return f"{kind}_{_registered_spec(framework).name}.yaml"
 
 
 def extra_args_env(framework: str | None) -> str:

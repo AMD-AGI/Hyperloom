@@ -82,14 +82,14 @@ def test_count_graph_replays_reads_replay_file(monkeypatch, tmp_path):
     assert "stdout-tail" in tail and "stderr-tail" in tail
 
 
-def test_count_graph_replays_accepts_legacy_integer_shard(monkeypatch, tmp_path):
-    """A legacy single-process integer shard remains readable."""
+def test_count_graph_replays_refuses_a_shard_that_is_not_an_object(monkeypatch, tmp_path):
     proc = _FakeProc()
     _patch_spawn(monkeypatch, proc)
     _patch_probe_shards(monkeypatch, tmp_path, ["17"])
 
-    replays, _ = _run(task_preparer._count_graph_replays("driver.py", 1, 1, timeout_sec=5))
-    assert replays == 17
+    replays, detail = _run(task_preparer._count_graph_replays("driver.py", 1, 1, timeout_sec=5))
+    assert replays == task_preparer.PROBE_FAILED
+    assert "invalid graph probe shard payload" in detail
 
 
 def test_count_graph_replays_uses_minimum_complete_rank_count(

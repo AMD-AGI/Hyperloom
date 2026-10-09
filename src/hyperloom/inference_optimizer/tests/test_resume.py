@@ -35,7 +35,7 @@ def _backends_full() -> dict[str, object]:
 async def test_fresh_session_is_not_resume(session_dir):
     c = Coordinator(session_dir, backends=_backends_full())
     try:
-        info = c.resumed_from
+        info = c.writeback.resumed_from
         assert info["is_resume"] is False
         assert info["event_count"] == 0
         assert info["state_json_present"] is False
@@ -49,8 +49,8 @@ async def test_existing_state_json_triggers_resume(session_dir):
     SharedState(session_id="resumed").save(session_dir)
     c = Coordinator(session_dir, backends=_backends_full())
     try:
-        assert c.resumed_from["is_resume"] is True
-        assert c.resumed_from["state_json_present"] is True
+        assert c.writeback.resumed_from["is_resume"] is True
+        assert c.writeback.resumed_from["state_json_present"] is True
     finally:
         await c.stop()
 
@@ -148,8 +148,8 @@ async def test_existing_events_triggers_resume(session_dir):
         await c1.stop()
     c2 = Coordinator(session_dir, backends=_backends_full())
     try:
-        assert c2.resumed_from["is_resume"] is True
-        assert c2.resumed_from["event_count"] >= 1
+        assert c2.writeback.resumed_from["is_resume"] is True
+        assert c2.writeback.resumed_from["event_count"] >= 1
     finally:
         await c2.stop()
 
@@ -181,7 +181,7 @@ async def test_replay_rebuilds_undecided_proposals(session_dir):
 
     c2 = Coordinator(session_dir, backends=_backends_full())
     try:
-        stats = await c2.replay_for_resume()
+        stats = await c2.writeback.replay_for_resume()
         assert stats["pending_restored"] == 1
         assert original_id in c2.state.pending_proposals
         restored = c2.state.pending_proposals[original_id]
@@ -209,13 +209,14 @@ async def test_replay_skips_approved_proposals(session_dir):
     c1 = Coordinator(session_dir, backends=backends)
     try:
         await c1.tick(2)
-        assert any(p.verdict == "approve" for p in c1.state.pending_proposals.values())
+        verdicts = await c1.bus.tail(topic="review_verdict", n=100)
+        assert any(v.payload.get("verdict") == "approve" for v in verdicts)
     finally:
         await c1.stop()
 
     c2 = Coordinator(session_dir, backends=_backends_full())
     try:
-        stats = await c2.replay_for_resume()
+        stats = await c2.writeback.replay_for_resume()
         assert stats["pending_restored"] == 0
         assert c2.state.pending_proposals == {}
     finally:
@@ -244,7 +245,7 @@ async def test_replay_skips_rejected_proposals(session_dir):
     try:
         await c1.tick(1)
         proposal_id = next(iter(c1.state.pending_proposals.keys()))
-        await c1._handle_intent(
+        await c1.router.handle_intent(
             "critic",
             Intent(
                 type=IntentType.REVIEW_VERDICT,
@@ -261,7 +262,7 @@ async def test_replay_skips_rejected_proposals(session_dir):
 
     c2 = Coordinator(session_dir, backends=_backends_full())
     try:
-        stats = await c2.replay_for_resume()
+        stats = await c2.writeback.replay_for_resume()
         assert stats["pending_restored"] == 0
         assert stats["verdicts_seen"] >= 1
     finally:
@@ -287,7 +288,7 @@ async def test_replay_mixed_pending_and_decided(session_dir):
         c1.shared_state.save(session_dir)
         proposal_ids = []
         for action in ("baseline", "profile", "explore"):
-            await c1._handle_intent(
+            await c1.router.handle_intent(
                 "orchestration",
                 Intent(
                     type=IntentType.PROPOSE_ACTION,
@@ -301,14 +302,14 @@ async def test_replay_mixed_pending_and_decided(session_dir):
                 # this on completion.
                 c1.shared_state.baseline_tput = 100.0
 
-        await c1._handle_intent(
+        await c1.router.handle_intent(
             "critic",
             Intent(
                 type=IntentType.REVIEW_VERDICT,
                 payload={"target_proposal_msg_id": proposal_ids[0], "verdict": "approve", "reasoning": "ok"},
             ),
         )
-        await c1._handle_intent(
+        await c1.router.handle_intent(
             "critic",
             Intent(
                 type=IntentType.REVIEW_VERDICT,
@@ -325,7 +326,7 @@ async def test_replay_mixed_pending_and_decided(session_dir):
 
     c2 = Coordinator(session_dir, backends=_backends_full())
     try:
-        stats = await c2.replay_for_resume()
+        stats = await c2.writeback.replay_for_resume()
         assert stats["pending_restored"] == 1
         restored = next(iter(c2.state.pending_proposals.values()))
         assert restored.action_name == "explore"
@@ -342,14 +343,14 @@ async def test_resume_preserves_pruned_and_restores_pending(session_dir):
     }
     c1 = Coordinator(session_dir, backends=backends)
     try:
-        await c1._handle_intent(
+        await c1.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.PRUNE_BRANCH,
                 payload={"family": "deep_kernel", "reason": "x"},
             ),
         )
-        await c1._handle_intent(
+        await c1.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.PROPOSE_ACTION,
@@ -361,7 +362,7 @@ async def test_resume_preserves_pruned_and_restores_pending(session_dir):
 
     c2 = Coordinator(session_dir, backends=_backends_full())
     try:
-        await c2.replay_for_resume()
+        await c2.writeback.replay_for_resume()
         assert c2.shared_state.is_pruned("deep_kernel")
         assert len(c2.state.pending_proposals) == 1
     finally:
@@ -378,7 +379,7 @@ async def test_tick_lazily_runs_replay_on_resume(session_dir):
     }
     c1 = Coordinator(session_dir, backends=backends)
     try:
-        await c1._handle_intent(
+        await c1.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.PROPOSE_ACTION,
@@ -388,11 +389,16 @@ async def test_tick_lazily_runs_replay_on_resume(session_dir):
     finally:
         await c1.stop()
 
-    c2 = Coordinator(session_dir, backends=_backends_full())
+    # Use a silent critic so the restored proposal is not auto-approved during tick.
+    silent_backends = {
+        "orchestration": MockBackend(silent, name="o2"),
+        "critic": MockBackend(silent, name="c2"),
+    }
+    c2 = Coordinator(session_dir, backends=silent_backends)
     try:
-        assert c2.resumed_from["rebuilt"] is False
+        assert c2.writeback.resumed_from["rebuilt"] is False
         await c2.tick(1)
-        assert c2.resumed_from["rebuilt"] is True
+        assert c2.writeback.resumed_from["rebuilt"] is True
         assert len(c2.state.pending_proposals) == 1
     finally:
         await c2.stop()

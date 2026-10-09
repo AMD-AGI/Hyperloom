@@ -341,9 +341,7 @@ async def test_current_handoff_to_unstarted_holder_remains_resumable(tmp_path):
         await tasks.transition("first", "running")
         await tasks.transition("first", "succeeded", evidence={"reason": "completed"})
         handed_off = await rounds.handoff(
-            "round-1",
-            holder_task_id="first",
-            fence=opened.fence,
+            await rounds.get("round-1"),
             new_holder_task_id="next",
             lease_sec=1,
             now_unix=2,

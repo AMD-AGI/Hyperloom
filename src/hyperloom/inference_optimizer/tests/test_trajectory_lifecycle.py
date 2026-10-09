@@ -111,12 +111,14 @@ async def test_an_approved_proposal_links_call_intent_proposal_and_task(session_
         with tt.trajectory_scope(session_dir=session_dir, component="coordinator"):
             await c.tick(1)
             proposal_id = next(iter(c.state.pending_proposals))
+            # The verdict pops the proposal from the registry, so hold the row the task id lands on.
+            pending = c.state.pending_proposals[proposal_id]
             verdict = Intent(
                 type=IntentType.REVIEW_VERDICT,
                 payload={"target_proposal_msg_id": proposal_id, "verdict": "approve", "reasoning": "ok"},
             )
-            await c._handle_intent("critic", verdict)
-        task_id = c.state.pending_proposals[proposal_id].task_id
+            await c.router.handle_intent("critic", verdict)
+        task_id = pending.task_id
     finally:
         await c.stop()
 
@@ -160,7 +162,7 @@ async def test_a_rejected_proposal_closes_cancelled_without_a_task(session_dir):
                 type=IntentType.REVIEW_VERDICT,
                 payload={"target_proposal_msg_id": proposal_id, "verdict": "reject", "reasoning": "no"},
             )
-            await c._handle_intent("critic", verdict)
+            await c.router.handle_intent("critic", verdict)
     finally:
         await c.stop()
 
@@ -251,7 +253,7 @@ async def test_an_auto_retry_hangs_off_the_failed_task(session_dir, monkeypatch)
     c = Coordinator(session_dir, backends=_backends(ScriptedPlan(turns=[], default_intent=_heartbeat())))
     try:
         with tt.trajectory_scope(session_dir=session_dir, component="coordinator"):
-            assert await c._maybe_auto_retry_specialist(failed, result) is True
+            assert await c.specialist_dispatch.maybe_auto_retry_specialist(failed, result) is True
     finally:
         await c.stop()
 
@@ -267,7 +269,7 @@ async def test_a_denied_intent_is_recorded_as_not_admitted(session_dir):
     c = Coordinator(session_dir, backends=_backends(ScriptedPlan(turns=[], default_intent=_heartbeat())))
     try:
         with tt.trajectory_scope(session_dir=session_dir, component="coordinator"):
-            await c._handle_intent("nobody", _propose("baseline"))
+            await c.router.handle_intent("nobody", _propose("baseline"))
     finally:
         await c.stop()
 

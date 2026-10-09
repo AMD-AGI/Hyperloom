@@ -6,13 +6,59 @@
 from __future__ import annotations
 
 from hyperloom.orchestrator.state.failure_evidence import (
+    FAILURE_ATTRIBUTION_CANDIDATE,
+    FAILURE_ATTRIBUTION_ENVIRONMENT,
+    FAILURE_ATTRIBUTION_HARNESS,
+    FAILURE_ATTRIBUTION_UNKNOWN,
     FAILURE_STAGE_DECISION,
     FAILURE_STAGE_WARMUP,
+    classify_failure_attribution,
     failure_from_variant_outcome,
     make_failure_id,
     render_failure_line,
     tail_excerpt,
 )
+
+
+class TestClassifyFailureAttribution:
+    def test_known_invalid_measurement_is_harness_failure(self):
+        assert (
+            classify_failure_attribution(error_class="magpie_nonzero_invalid_measurement")
+            == FAILURE_ATTRIBUTION_HARNESS
+        )
+
+    def test_explicit_candidate_class_is_publishable(self):
+        assert classify_failure_attribution(error_class="capability_unsupported") == FAILURE_ATTRIBUTION_CANDIDATE
+
+    def test_candidate_specific_cli_error_is_publishable(self):
+        assert (
+            classify_failure_attribution(
+                error_class="server_init_dead",
+                error_excerpt="error: unrecognized argument --unsupported-fast-path",
+            )
+            == FAILURE_ATTRIBUTION_CANDIDATE
+        )
+
+    def test_environment_evidence_overrides_generic_failure_class(self):
+        assert (
+            classify_failure_attribution(
+                error_class="server_init_dead",
+                error_excerpt="memory reservation failed because a concurrent GPU holder remained",
+            )
+            == FAILURE_ATTRIBUTION_ENVIRONMENT
+        )
+
+    def test_ambiguous_failure_remains_unknown(self):
+        assert classify_failure_attribution(error_class="server_init_dead") == FAILURE_ATTRIBUTION_UNKNOWN
+
+    def test_valid_explicit_attribution_wins(self):
+        assert (
+            classify_failure_attribution(
+                error_class="magpie_timeout",
+                explicit=FAILURE_ATTRIBUTION_CANDIDATE,
+            )
+            == FAILURE_ATTRIBUTION_CANDIDATE
+        )
 
 
 class TestTailExcerpt:
@@ -101,6 +147,7 @@ class TestFailureFromVariantOutcome:
             "stage",
             "outcome",
             "error_class",
+            "attribution",
             "error_excerpt",
             "reason",
             "server_log_path",
@@ -108,6 +155,7 @@ class TestFailureFromVariantOutcome:
             "variant",
         ):
             assert key in fe, f"missing key: {key}"
+        assert fe["attribution"] == FAILURE_ATTRIBUTION_UNKNOWN
 
     def test_stage_defaults_to_decision_when_absent(self):
         vo = self._make_vo()
@@ -123,12 +171,14 @@ class TestRenderFailureLine:
             "variant_name": "fp8_kv",
             "stage": FAILURE_STAGE_WARMUP,
             "error_class": "server_init_dead",
+            "attribution": FAILURE_ATTRIBUTION_CANDIDATE,
             "error_excerpt": "AssertionError: batch == 1",
         }
         line = render_failure_line(fe)
         assert "fail.t1.abc" in line
         assert "fp8_kv" in line
         assert "server_init_dead" in line
+        assert "candidate_caused" in line
 
     def test_falls_back_to_reason_when_no_excerpt(self):
         fe = {

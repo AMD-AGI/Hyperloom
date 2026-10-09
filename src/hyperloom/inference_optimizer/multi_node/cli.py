@@ -375,8 +375,8 @@ def install_geak_on_pods_best_effort() -> int:
 # Subcommand: bootstrap
 def cmd_bootstrap(args: argparse.Namespace) -> int:
     """Run the BYOI bootstrap script inside the RayJob via Ray Dashboard REST."""
-    # Only head_pod_ip: the Ray Dashboard client addresses the head pod directly, and rayjob_id no longer has a writer
-    # now that the platform owns creation -- requiring it rejected every handed-over cluster.
+    # Only head_pod_ip: the Ray Dashboard client addresses the head pod directly, and a cluster the platform
+    # handed over carries no rayjob_id.
     state = _require_state("head_pod_ip")
 
     if args.script:
@@ -831,12 +831,15 @@ def _build_multinode_finalize_patch_entrypoint(
 def _build_multinode_apply_tracelens_patch_entrypoint(
     tracelens_root: str,
     sglang_version_pin: str,
+    patch_set: str = "",
 ) -> str:
     """Compose the head-pod entrypoint fanning out the TraceLens patch set via heredoc-embedded apply_tracelens_patch_multinode.py."""
     py = _read_pod_script("apply_tracelens_patch_multinode.py")
-    pin_arg = ""
+    extra_args = ""
     if sglang_version_pin:
-        pin_arg = f" --sglang-version-pin {shlex.quote(str(sglang_version_pin))}"
+        extra_args += f" --sglang-version-pin {shlex.quote(str(sglang_version_pin))}"
+    if patch_set:
+        extra_args += f" --patch-set {shlex.quote(str(patch_set))}"
     return (
         f"{_MN_ENTRYPOINT_PREAMBLE}"
         f'cat > "$WORK_DIR/apply_tracelens_patch_multinode.py" '
@@ -844,7 +847,7 @@ def _build_multinode_apply_tracelens_patch_entrypoint(
         f"{py}__MN_TLPATCH_PY_EOF__\n"
         f'python3 "$WORK_DIR/apply_tracelens_patch_multinode.py" '
         f"--tracelens-root {shlex.quote(str(tracelens_root))}"
-        f"{pin_arg}"
+        f"{extra_args}"
     )
 
 
@@ -1158,11 +1161,16 @@ def cmd_apply_tracelens_patch(args: argparse.Namespace) -> int:
         )
         return EXIT_CONFIG_ERROR
 
-    info(f"apply-tracelens-patch: tracelens_root={tracelens_root!r} version_pin={args.sglang_version_pin!r}")
+    patch_set = getattr(args, "patch_set", None) or ""
+    info(
+        f"apply-tracelens-patch: tracelens_root={tracelens_root!r} version_pin={args.sglang_version_pin!r} "
+        f"patch_set={patch_set or 'pod-gated'!r}"
+    )
 
     entrypoint = _build_multinode_apply_tracelens_patch_entrypoint(
         tracelens_root,
         args.sglang_version_pin or "",
+        patch_set,
     )
     rc, parsed, logs = _submit_and_collect_pod_json(
         state,
@@ -1885,6 +1893,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--sglang-version-pin",
         default=None,
         help=("advisory pin (e.g. '0.5.11'); logged on mismatch with the sglang installed in the pod. Optional."),
+    )
+    sp.add_argument(
+        "--patch-set",
+        choices=("roofline", "graph-capture"),
+        default=None,
+        help=(
+            "patch set every pod applies (the controller's resolved SGLang shape mode). "
+            "Optional; when omitted each pod gates on its own SGLang version."
+        ),
     )
     sp.add_argument("--print-logs", action="store_true", help="dump full dashboard job_logs on parse failure")
     _add_common_poll_flags(sp)

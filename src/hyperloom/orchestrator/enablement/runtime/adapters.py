@@ -105,19 +105,24 @@ def verify_vllm_rocm(python_path: str, *, run: RunFn = _default_run) -> bool:
     return getattr(cp, "returncode", 1) == 0
 
 
+def _stdout(argv: list[str], *, run: RunFn) -> str:
+    """Return ``argv``'s stripped stdout, or ``""`` when it cannot run or exits non-zero."""
+    try:
+        cp = run(argv, dict(os.environ), None)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if getattr(cp, "returncode", 1) != 0:
+        return ""
+    return (getattr(cp, "stdout", "") or "").strip()
+
+
 def _resolved_clone_ref(checkout: str, *, run: RunFn = _default_run) -> str:
     """Return the commit a shallow clone landed on, or ``""``.
 
     The provisioner clones a branch or tag verbatim, so the action's own ``ref``
     names different bytes tomorrow; this is the identity it lacks.
     """
-    try:
-        cp = run(["git", "-C", str(checkout), "rev-parse", "HEAD"], dict(os.environ), None)
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    if getattr(cp, "returncode", 1) != 0:
-        return ""
-    return (getattr(cp, "stdout", "") or "").strip()
+    return _stdout(["git", "-C", str(checkout), "rev-parse", "HEAD"], run=run)
 
 
 def _resolved_packages(python_path: str, names: list[str], *, run: RunFn = _default_run) -> dict[str, dict[str, str]]:
@@ -132,7 +137,7 @@ def _resolved_packages(python_path: str, names: list[str], *, run: RunFn = _defa
         return {}
     # Source for the attempt interpreter, not this one: a name it cannot resolve
     # is skipped and a ``RECORD`` it cannot read yields the empty digest, while
-    # anything else fails the probe and is caught by the exit-status check below.
+    # anything else fails the probe's exit status and yields no packages.
     probe = (
         "import hashlib,json,re,sys\n"
         "import importlib.metadata as m\n"
@@ -162,32 +167,25 @@ def _resolved_packages(python_path: str, names: list[str], *, run: RunFn = _defa
         "print(json.dumps(out))\n"
     )
     try:
-        cp = run([python_path, "-c", probe, *names], dict(os.environ), None)
-    except (OSError, subprocess.SubprocessError):
-        return {}
-    if getattr(cp, "returncode", 1) != 0:
-        return {}
-    try:
-        parsed = json.loads((getattr(cp, "stdout", "") or "").strip() or "{}")
+        parsed = json.loads(_stdout([python_path, "-c", probe, *names], run=run) or "{}")
     except ValueError:
         return {}
     return {str(k): {str(kk): str(vv) for kk, vv in v.items()} for k, v in parsed.items()}
 
 
+def _site_packages(python_path: str, *, run: RunFn = _default_run) -> str:
+    """Return the directory ``python_path`` installs distributions into, or ``""``.
+
+    The attempt venv inherits the host's system site-packages, so a wheel
+    installed into it occupies this tree alone -- which is therefore the only
+    tree a patch against that wheel's sources can land in.
+    """
+    return _stdout([python_path, "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"], run=run)
+
+
 def _installed_version(python_path: str, package: str, *, run: RunFn = _default_run) -> str:
     """Return the installed version of ``package`` in ``python_path``, or ""."""
-    argv = [
-        python_path,
-        "-c",
-        f"import importlib.metadata as m; print(m.version({package!r}))",
-    ]
-    try:
-        cp = run(argv, dict(os.environ), None)
-    except Exception:  # noqa: BLE001
-        return ""
-    if getattr(cp, "returncode", 1) != 0:
-        return ""
-    return (getattr(cp, "stdout", "") or "").strip()
+    return _stdout([python_path, "-c", f"import importlib.metadata as m; print(m.version({package!r}))"], run=run)
 
 
 # Adapters
@@ -208,8 +206,6 @@ class BaseAdapter:
         self,
         gap: CapabilityGap,
         *,
-        framework: str,
-        model: str,
         gpu_type: str = "",
     ) -> EnablementStackAction | None:
         """Build a candidate stack action, or None when unsupported/no-evidence."""
@@ -254,10 +250,6 @@ class BaseAdapter:
             repo_url=repo_url,
             pr_number=pr_number,
         )
-
-    def editable_refresh_argv(self, venv_python: str, checkout: str) -> list[str] | None:
-        """Return the argv that re-installs an editable checkout, or None."""
-        return None
 
     def source_import_root(self, framework_root: str) -> str:
         """Return the import root relative to a source snapshot's ``files/`` dir."""
@@ -320,12 +312,6 @@ class _VenvProvisionMixin(BaseAdapter):
         argv += list(specs)
         return self._run(argv, dict(os.environ), None)
 
-    def editable_refresh_argv(self, venv_python: str, checkout: str) -> list[str] | None:
-        """Re-install the editable checkout so localized Python changes take effect."""
-        if not venv_python or not checkout:
-            return None
-        return [str(venv_python), "-m", "pip", "install", "-e", str(checkout), "--no-deps"]
-
 
 class VllmRocmAdapter(_VenvProvisionMixin):
     """vLLM ROCm adapter: wheel install from a host-allowlisted ROCm index only."""
@@ -336,8 +322,6 @@ class VllmRocmAdapter(_VenvProvisionMixin):
         self,
         gap: CapabilityGap,
         *,
-        framework: str,
-        model: str,
         gpu_type: str = "",
     ) -> EnablementStackAction | None:
         """Build a vLLM ROCm wheel candidate; None when no ROCm index is configured."""
@@ -393,6 +377,9 @@ class VllmRocmAdapter(_VenvProvisionMixin):
             return ProvisionResult(ok=False, log_path=log_path, error="attempt torch is not a ROCm build")
         if not verify_vllm_rocm(str(python_path), run=self._run):
             return ProvisionResult(ok=False, log_path=log_path, error="vLLM did not report a ROCm platform")
+        source_root = _site_packages(str(python_path), run=self._run)
+        if not source_root:
+            return ProvisionResult(ok=False, log_path=log_path, error="attempt interpreter reports no site-packages")
 
         versions = {
             "vllm": _installed_version(str(python_path), "vllm", run=self._run),
@@ -405,6 +392,7 @@ class VllmRocmAdapter(_VenvProvisionMixin):
             venv_root=str(attempt_dir / "venv"),
             server_args=action.server_args,
             envs=dict(action.envs),
+            source_root=source_root,
         )
         return ProvisionResult(
             ok=True,
@@ -442,8 +430,6 @@ class SglangAdapter(_VenvProvisionMixin):
         self,
         gap: CapabilityGap,
         *,
-        framework: str,
-        model: str,
         gpu_type: str = "",
     ) -> EnablementStackAction | None:
         """Prefer an editable source ref (origin-allowlisted); else a wheel index."""
@@ -496,6 +482,7 @@ class SglangAdapter(_VenvProvisionMixin):
             return ProvisionResult(ok=False, log_path=log_path, error=f"venv setup failed: {exc!r}")
 
         pythonpath_prefix = ""
+        source_root = ""
         resolved_ref = ""
         resolved_packages: dict[str, dict[str, str]] = {}
         if action.acquisition_method == "editable_ref":
@@ -513,9 +500,13 @@ class SglangAdapter(_VenvProvisionMixin):
                 )
             cp = self._pip_install(python_path, [], editable=str(checkout / "python"))
             pythonpath_prefix = str(checkout / "python")
+            # The editable install imports straight out of the clone, and its
+            # diffs are cut against the repo root that holds ``python/sglang``.
+            source_root = str(checkout)
             resolved_ref = _resolved_clone_ref(str(checkout), run=self._run)
         elif action.acquisition_method == "wheel":
             cp = self._pip_install(python_path, list(action.packages) or ["sglang"], index_url=action.index_url)
+            source_root = _site_packages(str(python_path), run=self._run)
             resolved_packages = _resolved_packages(str(python_path), list(action.packages) or ["sglang"], run=self._run)
         else:
             return ProvisionResult(ok=False, log_path=log_path, error=f"unsupported method {action.acquisition_method}")
@@ -526,6 +517,8 @@ class SglangAdapter(_VenvProvisionMixin):
             )
         if not verify_torch_is_rocm(str(python_path), run=self._run):
             return ProvisionResult(ok=False, log_path=log_path, error="attempt torch is not a ROCm build")
+        if not source_root:
+            return ProvisionResult(ok=False, log_path=log_path, error="attempt interpreter reports no site-packages")
 
         versions = {"sglang": _installed_version(str(python_path), "sglang", run=self._run)}
         runtime = FrameworkRuntime(
@@ -535,6 +528,7 @@ class SglangAdapter(_VenvProvisionMixin):
             pythonpath_prefix=pythonpath_prefix,
             server_args=action.server_args,
             envs=dict(action.envs),
+            source_root=source_root,
         )
         return ProvisionResult(
             ok=True,
@@ -552,7 +546,7 @@ class AtomAdapter(BaseAdapter):
     framework = "atom"
 
     def supports(self, gap: CapabilityGap) -> bool:
-        """Localize any code gap; the backport is applied via no-git, with no editable refresh."""
+        """Localize any code gap; the backport is applied via no-git."""
         return True
 
 

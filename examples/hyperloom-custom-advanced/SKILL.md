@@ -144,7 +144,6 @@ resolved values in the launch plan before starting the optimizer.
 - `MODEL_CLASS`: unset, so Hyperloom infers it from model metadata.
 - `GPU_TYPE`: unset, so Hyperloom auto-detects the target GPU.
 - `FRAMEWORK_VERSION`: unset, so Hyperloom auto-detects it when possible.
-- `TARGET_SUMMARY`: unset.
 - `COMPARE_AGAINST_GPU`: unset.
 - `SKIP_VARIANTS`: empty.
 - `SERVER_ARGS`: empty.
@@ -179,7 +178,7 @@ Collect these optional advanced values:
   `0 < pct <= 1`; leave a value unset to use the optimizer default.
 - Routing and baseline options: `--skip-variants`, `--server-args`,
   `--reference-script`, `--model-class`, `--gpu-type`, `--framework-version`,
-  `--target-summary`, `--compare-against-gpu`.
+  `--compare-against-gpu`.
 - Concurrency sweep: `--conc-sweep-concs` and `--conc-sweep-total-budget-sec`
   (the total budget across the sweep).
 - Benchmark limits: `INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC` (default `7800`
@@ -333,7 +332,6 @@ OPT_FLAGS=(
 [ -n "${MODEL_CLASS:-}" ] && OPT_FLAGS+=(--model-class "$MODEL_CLASS")
 [ -n "${GPU_TYPE:-}" ] && OPT_FLAGS+=(--gpu-type "$GPU_TYPE")
 [ -n "${FRAMEWORK_VERSION:-}" ] && OPT_FLAGS+=(--framework-version "$FRAMEWORK_VERSION")
-[ -n "${TARGET_SUMMARY:-}" ] && OPT_FLAGS+=(--target-summary "$TARGET_SUMMARY")
 [ -n "${COMPARE_AGAINST_GPU:-}" ] && OPT_FLAGS+=(--compare-against-gpu "$COMPARE_AGAINST_GPU")
 [ -n "${SKIP_VARIANTS:-}" ] && OPT_FLAGS+=(--skip-variants "$SKIP_VARIANTS")
 [ -n "${SERVER_ARGS:-}" ] && OPT_FLAGS+=(--server-args "$SERVER_ARGS")

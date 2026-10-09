@@ -109,10 +109,10 @@ class Recipe:
     def edit_files(self) -> list[str]:
         """Every framework file this fusion edits, the call site first.
 
-        Downstream stages (snapshot, index, export, wiring check, cleanup) each used
-        to derive their own file set from ``source_file`` alone. They read this
-        instead so a multi-file fusion cannot be half-tracked by one of them and
-        fully tracked by another.
+        Downstream stages (snapshot, index, export, wiring check, cleanup) read
+        this rather than deriving their own file set from ``source_file``, so a
+        multi-file fusion cannot be half-tracked by one of them and fully tracked
+        by another.
         """
         files = [self.source_file] if self.source_file else []
         for path in self.extra_files:

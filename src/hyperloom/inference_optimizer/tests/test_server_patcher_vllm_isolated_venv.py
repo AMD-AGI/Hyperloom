@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from hyperloom.orchestrator.actions.executors import _server_patcher as sp
@@ -54,6 +55,30 @@ def test_isolated_venv_missing_returns_none(tmp_path: Path, monkeypatch):
     monkeypatch.delenv("VLLM_PYTHON", raising=False)
 
     assert sp._discover_vllm_plan(_make_tracelens_root(tmp_path)) is None
+
+
+def test_isolated_venv_editable_source_install_discovers_plan(tmp_path: Path, monkeypatch):
+    """A source build installs vLLM editable: site-packages holds only an egg-link and the package lives in the checkout."""
+    tracelens_root = _make_tracelens_root(tmp_path)
+    venv_root = tmp_path / "vllm-venv"
+    site = venv_root / "lib" / "python3.12" / "site-packages"
+    site.mkdir(parents=True)
+    checkout = tmp_path / "vllm-src"
+    vllm_pkg = checkout / "vllm"
+    (vllm_pkg / "config").mkdir(parents=True)
+    (vllm_pkg / "__init__.py").write_text('__version__ = "0.21.0"\n', encoding="utf-8")
+    (vllm_pkg / "config" / "profiler.py").write_text("# profiler\n", encoding="utf-8")
+    (site / "vllm.egg-link").write_text(f"{checkout}\n.\n", encoding="utf-8")
+    monkeypatch.setenv("VLLM_VENV_ROOT", str(venv_root))
+    monkeypatch.setenv("VLLM_PYTHON", sys.executable)
+    monkeypatch.setenv("PYTHONPATH", str(checkout))
+
+    plan = sp._discover_vllm_plan(tracelens_root)
+
+    assert plan is not None
+    assert plan.version == "0.21.0"
+    assert plan.apply_root == checkout.resolve()
+    assert plan.sentinel_file == plan.apply_root / "vllm" / "config" / "profiler.py"
 
 
 def test_isolated_venv_no_profiler_sentinel_returns_none(tmp_path: Path, monkeypatch):

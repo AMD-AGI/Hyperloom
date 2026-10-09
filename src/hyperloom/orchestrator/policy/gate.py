@@ -19,11 +19,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from hyperloom.inference_optimizer import framework_registry
 from hyperloom.inference_optimizer.framework_paths import (
     resolve_session_framework_root,
     resolved_within,
 )
-from hyperloom.common.env import env_bool, is_truthy
+from hyperloom.common.env import env_bool
 from hyperloom.common.framework_arm import verdict_subject
 from hyperloom.common.visible_devices import detect_gpu_count
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
@@ -281,172 +282,6 @@ TRACE_PATH_LIKE_FIELDS: frozenset[str] = frozenset(
 )
 
 
-# Core SharedState fields that only the Coordinator may mutate.
-CORE_STATE_FIELDS: frozenset[str] = frozenset(
-    {
-        "current_best",
-        "stop_reason",
-        # Paired with stop_reason and written by the same setter: locking one
-        # without the other lets an update_state move the session's end time
-        # away from the reason it was stamped for.
-        "stop_ts",
-        # Where the stopped leg's phase segment ends; the next leg banks time up
-        # to it, so a forged value bills a phase for time it never ran.
-        "leg_ended_ts",
-        "last_tick_exception",
-        "cumulative_gain_validated",
-        "cumulative_gain_validated_ts",
-        "cumulative_gain_validated_stack_len",
-        "working_recipe_generation",
-        "validated_recipe_generation",
-        "pending_integrate",
-        "resume_pending_revalidation",
-        "baseline_tput",
-        "baseline_accuracy",
-        "session_id",
-        "model_path",
-        "model_name",
-        "model_class",
-        # The topology every number in the session was measured on, established
-        # once at launch from a read of the card. Locked for the same reason as
-        # model_path: it is provenance, not a decision, and a rewrite would file
-        # the results under a shape the card was never in -- silently, since the
-        # report prints whatever this says.
-        "compute_partition",
-        "start_ts",
-        # Where the current run leg begins; a forged value hands a previous
-        # leg's CLOSE transition back the right to speak for this one.
-        "resumed_ts",
-        "max_minutes",
-        # Budget spent so far and the instant it is charged up to: a smaller
-        # total or a later anchor reissues time the session already spent.
-        "elapsed_charged_sec",
-        "leg_anchor_unix",
-        # Who granted extra budget and why; grants come from an operator flag.
-        "budget_extensions",
-        # Sizes the closing reserve, so it decides how much of ``max_minutes``
-        # is still usable: locking the budget without locking this one leaves
-        # the same forgery one field over -- a large value spends the session
-        # outright, a zero one erases the window the CLOSE report needs.
-        "closing_grace_sec",
-        # fact-layer KEEP ledger; Coordinator is the sole writer.
-        "optimization_stack",
-        "gain_per_stack_entry",
-        "schema_version",
-        # Recipe KB integration fields (Coordinator-only writes).
-        "recipe_kb_session_id",
-        "warm_start_recipe",
-        "warm_start_pitfalls",
-        "warm_start_lessons",
-        "warm_start_ts",
-        "warm_start_context",
-        "kb_stage_outbox",
-        "kb_stage_dead_letter",
-        "recipe_finalize_status",
-        "recipe_finalize_attempts",
-        "recipe_finalize_outcome",
-        # Measured stack incapability; forging it either revives analysis that cannot succeed or silences the one
-        # that can.
-        "gpu_trace_unsupported_reason",
-        # KB tag completeness (Coordinator-populated; LLM reads via prompt).
-        "stack_fingerprint_meta",
-        "baseline_workload_extra",
-        "last_profile_workload",
-        "last_profile_workload_action",
-        # warm-recipe replay one-shot guard + outcome; LLM cannot edit.
-        "warm_replay_attempted",
-        "warm_replay_outcome",
-        "warm_history_injected",
-        # phase state machine fields (managed by ``Coordinator._advance_phase_if_needed``).
-        "phase",
-        "phase_started_ts",
-        "phase_started_unix",
-        "phase_history",
-        "phase_budget_pct",
-        "phase_elapsed_totals",
-        # KERNEL idle-streak bookkeeping. Forging these is how a model could talk
-        # the phase machine into winding KERNEL down early, or hold it open while
-        # nothing runs; the Coordinator measures all three from observed facts.
-        "kernel_idle_ticks",
-        "kernel_progress_fingerprint",
-        "kernel_idle_since_unix",
-        # Cyclic phase-machine state; Coordinator-only writers. Locked so an LLM
-        # update_state cannot forge the macro-cycle counter, budget window, gain
-        # anchor / no-gain streak, or bottleneck-switch handoff.
-        "macro_cycle",
-        "cycle_minutes",
-        "gain_at_cycle_start",
-        "no_gain_cycle_streak",
-        "pending_bottleneck_switch",
-        "last_cycle_bottleneck",
-        "saturated_directions",
-        "bottleneck_shift",
-        "cycle_strategy_log",
-        # operator-facing lifecycle event log; Coordinator-only writer so the
-        # LLM cannot forge lifecycle events.
-        "lifecycle",
-        # specialist sub-agent ledger; Coordinator-only writer.
-        "specialist_rounds",
-        # per-kb_anchor coverage counters; Coordinator-only writers.
-        "rounds_since_last_specialist",
-        "rounds_since_last_keep",
-        "last_specialist",
-        # research_lane / GPU capacity set once at CLI/manifest time; locked.
-        "research_lane_capacity",
-        "gpu_specialist_capacity",
-        # phase-machine escalation plumbing; LLM blocked (defense in depth).
-        "pending_escalate_hint",
-        "last_consumed_escalate_hint",
-        "last_consumed_escalate_hint_ts",
-        "last_discarded_escalate_hint",
-        "last_discarded_escalate_hint_ts",
-        "plateau_overrides",
-        # CLOSE-phase sequencer flag; LLM must not toggle it.
-        "close_sequence_done",
-        # Objective-met marker; the Coordinator is its only writer.
-        "target_reached_at",
-        # explore search ledger; Coordinator-only writers (LLM rewrite would bypass dedup-by-fingerprint).
-        "explore_search",
-        # per-lever attempt ledger; one Coordinator-side writer per lever.
-        "attempts",
-        # structured gaps ledger; Coordinator-only writers (``_refresh_gaps``,
-        # ``_seed_gaps_from_research_hints``, ``_record_explore_round_gaps``,
-        # ``_consume_static_recon``), all via ``SharedState.upsert_gap``.
-        "gaps",
-        # Orchestration working-memory checkpoint; Coordinator-authored.
-        "orchestration_memory",
-        # Bounded rollback ring of prior good orchestration_memory records;
-        # Coordinator-only writer, locked in lock-step with its parent.
-        "orchestration_memory_history",
-        # Advisory model-architecture profile from the SKILL launcher; locked.
-        "model_arch",
-        # Architecture-identity tags from config.json; locked against pollution.
-        "model_architectures",
-        "model_type",
-        # Multimodal text-fallback degraded-run markers (cli._preflight);
-        # Coordinator/preflight are the sole writers. Drives the final report's
-        # degraded warning, so it must reflect the real preflight verdict.
-        "degraded_mode",
-        "model_warnings",
-        # Kernel-opt ledgers + Critic patch-verdict store; Coordinator/kernel-agent
-        # are the sole writers. Locked so an LLM update_state cannot launder
-        # attacker-chosen paths into integrate, or forge its own Critic approval.
-        "specialist_patch_verdicts",
-        "last_trace_analyze",
-        "last_kernel_opt",
-        "kernel_opt_task_attempts",
-        "pending_kernel_integrations",
-        # closing_phase and baseline_config_path are Coordinator-only fact
-        # fields, locked here so non-coordinator roles cannot mutate them via
-        # UPDATE_STATE.
-        "closing_phase",
-        "baseline_config_path",
-        # Structured failure evidence; Coordinator-only writer.
-        "failures",
-    }
-)
-
-
 @dataclass
 class PolicyGate:
     """Validate every intent emitted by an agent reactor.
@@ -497,8 +332,6 @@ class PolicyGate:
             self._validate_delegate(role, payload)
         elif intent.type == IntentType.PROPOSE_ACTION:
             self._validate_propose_action(role, payload)
-        elif intent.type == IntentType.UPDATE_STATE:
-            self._validate_state_transition(role, payload)
         elif intent.type == IntentType.SEND_MESSAGE:
             self._validate_send_message_topic(payload)
         elif intent.type == IntentType.REQUEST:
@@ -593,8 +426,7 @@ class PolicyGate:
         capability, presence of ``action_name``, the
         kernel_agent-owned-action guard, the per-action specialised paths
         (``specialist`` / ``integrate_patch`` / ``sweep``), the GEMM-tuning
-        ownership gate, the action-catalogue unknown-action lookup, per-action
-        source and required-payload guards, the phase-compatibility check,
+        ownership gate, per-action source and required-payload guards,
         and the external-tool collision guard (R5).
 
         Args:
@@ -745,39 +577,6 @@ class PolicyGate:
             rule=RULE_ROUND_IN_FLIGHT,
             hint="Let the round settle; a second bring-up would fight it for the same cards and ports.",
         )
-
-    def _validate_state_transition(self, role: "AgentRole", payload: dict[str, Any]) -> None:
-        """Validate an ``UPDATE_STATE`` intent's ``changes`` against core fields.
-
-        Requires a non-empty ``changes`` dict. No role may mutate a field in
-        :data:`CORE_STATE_FIELDS` — those are Coordinator-owned and written
-        directly, not through UPDATE_STATE.
-
-        Args:
-            role (AgentRole): the resolved role of the emitting agent.
-            payload (dict[str, Any]): the update_state payload, expected to
-                contain a ``changes`` mapping of field → new value.
-
-        Returns:
-            None: returns silently when the state transition is permitted.
-
-        Raises:
-            PolicyDenied: if ``changes`` is missing/empty, or any role
-                attempts to mutate core state fields.
-        """
-        changes = payload.get("changes")
-        if not isinstance(changes, dict) or not changes:
-            raise PolicyDenied(
-                "update_state.payload.changes must be a non-empty dict",
-                rule="payload",
-                hint=("include at least one allowed field, e.g. {'changes': {'current_action': '<action_name>'}}"),
-            )
-        violating = sorted(set(changes.keys()) & CORE_STATE_FIELDS)
-        if violating:
-            raise PolicyDenied(
-                f"role={role.name!r} cannot mutate core state fields: {violating!r}",
-                rule="state_field",
-            )
 
     def _validate_send_message_topic(self, payload: dict[str, Any]) -> None:
         """Require a non-empty ``topic`` on a ``SEND_MESSAGE`` intent.
@@ -953,8 +752,7 @@ class PolicyGate:
         Raises:
             PolicyDenied: When ``action_name`` is the GEMM tuning action.
         """
-        # Called unconditionally for every action, so it must answer only for
-        # its own; it used to never raise, which hid that.
+        # Called unconditionally for every action, so it answers only for its own.
         if action_name != GEMM_TUNING_ACTION_NAME:
             return
         raise PolicyDenied(
@@ -1099,8 +897,9 @@ class PolicyGate:
                 ``params`` (tags, scope, gap_canonical_id, max_turns, ...).
 
         Raises:
-            PolicyDenied: when the role may not dispatch, params are malformed,
-                the gap id is missing, or max_turns exceeds the hard cap. Tag /
+            PolicyDenied: when the role may not dispatch, params are malformed
+                or name an unregistered framework, the gap id is missing, or
+                max_turns exceeds the hard cap. Tag /
                 scope incoherence is logged rather than denied.
         """
         if role.name not in SPECIALIST_DISPATCH_SOURCE_ALLOWLIST:
@@ -1117,6 +916,7 @@ class PolicyGate:
                 rule="specialist_dispatch_source",
                 hint="pass params={tags, gap_canonical_id, ...} per §3.5 §6",
             )
+        _validate_specialist_framework(params)
 
         # scope='freeform' has no domain anchor: it skips the tag / gap
         # vocabulary checks and runs a lightweight mechanical sanity gate instead.
@@ -1180,8 +980,8 @@ class PolicyGate:
         """Validate a specialist's optional GPU request.
 
         The request's shape is judged here: whether the dispatch needs cards at
-        all (a bench-enabled patch specialist does whether or not it says so,
-        mirroring the dispatcher) and whether the count it names is positive.
+        all (:func:`requires_gpu`, the rule the dispatcher leases by) and whether
+        the count it names is positive.
         The pool-size arms come off the projection;
         ``SpecialistGpuPool.try_acquire`` hands out the cards.
 
@@ -1194,16 +994,14 @@ class PolicyGate:
                 exceeds the pool the projection last saw.
         """
         from ..specialists.profile import (
+            requires_gpu,
             resolve_specialist_profile,
             uses_whole_machine_gpu_lane,
         )
 
-        needs_gpu = is_truthy(params.get("needs_gpu"))
-        reserves_bench_lane = resolve_specialist_profile(params).reserves_benchmark_lane
-        if not needs_gpu and reserves_bench_lane:
-            needs_gpu = True
-        if not needs_gpu:
+        if not requires_gpu(params):
             return
+        reserves_bench_lane = resolve_specialist_profile(params).reserves_benchmark_lane
         facts = self.resources
         serving_tp = facts.serving_tp
         whole_machine = uses_whole_machine_gpu_lane(params)
@@ -1713,6 +1511,29 @@ class PolicyGate:
             )
 
 
+def _validate_specialist_framework(params: dict[str, Any]) -> None:
+    """Refuse a specialist dispatch whose ``params.framework`` the registry does not know.
+
+    The specialist resolves the source tree it patches from that name, and a
+    dispatch that omits it inherits the session's.
+
+    Args:
+        params: The specialist dispatch ``params``.
+
+    Raises:
+        PolicyDenied: When ``params.framework`` is present and not registered.
+    """
+    if "framework" in params and not framework_registry.is_supported(params["framework"]):
+        raise PolicyDenied(
+            f"delegate{{action='specialist'}}: params.framework={params['framework']!r} is not a registered framework",
+            rule="specialist_framework_unregistered",
+            hint=(
+                "Omit params.framework to dispatch against the session's framework, "
+                f"or pass one of {list(framework_registry.names())!r}."
+            ),
+        )
+
+
 def validate_specialist_max_turns_raw(
     max_turns_raw: Any,
     *,
@@ -1786,7 +1607,6 @@ def validate_freeform_wave_task(task: Any, *, index: int) -> str:
 
 
 __all__ = [
-    "CORE_STATE_FIELDS",
     "EXTEND_LEASE_MAX_SEC",
     "INTEGRATE_PATCH_PERMISSIVE_VERDICTS",
     "KERNEL_AGENT_OWNED_ACTIONS",

@@ -738,7 +738,9 @@ class WorkspaceGuard:
         else:
             unstaged, staged, untracked = self._current_changes()
         tracked_changes = list(dict.fromkeys([*unstaged, *staged]))
-        protected_changes = [path for path in tracked_changes if self._is_protected(path)]
+        protected_changes = [
+            path for path in tracked_changes if not self.spec.allow_tracked_changes or self._is_protected(path)
+        ]
         protected_untracked = [path for path in untracked if self._is_protected(path)]
         current_protected = self._ignored_protected_paths()
         changed_snapshots = [

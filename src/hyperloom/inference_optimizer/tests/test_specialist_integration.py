@@ -23,6 +23,7 @@ from hyperloom.inference_optimizer.protocol.intent import (
     IntentType,
 )
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 
 @dataclass
@@ -139,7 +140,7 @@ async def test_register_executors_omits_specialist_when_capacity_zero(
     assert "specialist" not in coord.sub.registry
 
 
-# 3. Coordinator._warm_specialist_params populates task params
+# 3. SpecialistDispatchCollaborator.warm_specialist_params populates task params
 @pytest.mark.asyncio
 async def test_warm_specialist_params_fills_pr_monitor_available(tmp_path: Path):
     """Warmup populates pr_monitor_available and warm-start fields."""
@@ -149,21 +150,15 @@ async def test_warm_specialist_params_fills_pr_monitor_available(tmp_path: Path)
     coord.session_dir = tmp_path
     coord.knowledge_plane = _FakeKnowledgePlane()
 
-    @dataclass
-    class _State:
-        warm_start_recipe: dict = None
-        warm_start_pitfalls: list = None
-        warm_start_lessons: list = None
-        gpu_type: str = "MI300X"
-
-    state = _State(
+    state = SharedState(
+        gpu_type="MI300X",
         warm_start_recipe={"backend": "sglang", "tp": 8},
         warm_start_pitfalls=["avoid --max-num-seqs 1024 on MoE"],
     )
     coord.shared_state = state
 
     params: dict = {"domain": "serving_specialist"}
-    await coord._warm_specialist_params(params)
+    await coord.specialist_dispatch.warm_specialist_params(params)
 
     assert params["pr_monitor_available"] is True
     assert params["warm_start_recipe"]["backend"] == "sglang"
@@ -180,17 +175,10 @@ async def test_warm_specialist_params_graceful_when_plane_is_none(tmp_path: Path
     coord.session_dir = tmp_path
     coord.knowledge_plane = None
 
-    @dataclass
-    class _State:
-        warm_start_recipe: dict = None
-        warm_start_pitfalls: list = None
-        warm_start_lessons: list = None
-        gpu_type: str = ""
-
-    coord.shared_state = _State()
+    coord.shared_state = SharedState()
 
     params: dict = {"domain": "serving_specialist"}
-    await coord._warm_specialist_params(params)
+    await coord.specialist_dispatch.warm_specialist_params(params)
     assert params["pr_monitor_available"] is False
 
 

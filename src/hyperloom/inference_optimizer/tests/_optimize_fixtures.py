@@ -5,14 +5,10 @@
 
 from __future__ import annotations
 
-import importlib
-import inspect
 from typing import Any
 
 from hyperloom.orchestrator.actions.executors._grid_base import VariantResult
 from hyperloom.orchestrator.state.shared_state import SharedState
-
-_MISSING = object()
 
 
 def variant_result(**overrides: Any) -> VariantResult:
@@ -64,52 +60,3 @@ def optimize_state(
     for key, value in overrides.items():
         setattr(state, key, value)
     return state
-
-
-class FakeCoordinator:
-    """Answers the Coordinator's state surface; resolves the rest for real."""
-
-    def __init__(self, session_dir: Any, **state: Any) -> None:
-        from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
-
-        self.session_dir = session_dir
-        # The real catalogue: a stubbed one can only ever agree with the test.
-        self.action_registry = ACTION_CATALOGUE
-        for key, value in state.items():
-            setattr(self, key, value)
-
-    def __getattr__(self, name: str) -> Any:
-        from hyperloom.orchestrator.loop.coordinator import Coordinator
-
-        owner = Coordinator._DELEGATED.get(name)
-        if owner is None:
-            # A class constant or a method still defined on Coordinator itself.
-            attr = inspect.getattr_static(Coordinator, name, _MISSING)
-            if attr is not _MISSING:
-                get = getattr(attr, "__get__", None)
-                return get(self, type(self)) if get is not None else attr
-            # A collaborator-internal helper: reachable only from inside its own class in production, so it has no
-            # delegation entry.
-            owner = self._sole_owner(name)
-        # The Coordinator property, so a method reached by name and one reached through ``phase_*`` share one instance.
-        return getattr(getattr(self, owner), name)
-
-    @staticmethod
-    def _sole_owner(name: str) -> str:
-        """The one collaborator defining ``name``, or an explanation of why not."""
-        from hyperloom.orchestrator.loop.coordinator import Coordinator
-
-        owners = []
-        for prop, (module_path, cls_name) in Coordinator._COLLAB_MODULES.items():
-            cls = getattr(importlib.import_module(f"hyperloom.orchestrator.{module_path}"), cls_name)
-            if name in vars(cls):
-                owners.append(prop)
-        if len(owners) == 1:
-            return owners[0]
-        if owners:
-            raise AttributeError(f"{name!r} is defined by more than one collaborator: {owners}")
-        raise AttributeError(
-            f"{name!r} is neither state this fake was given, nor an attribute of "
-            f"Coordinator, nor defined by any collaborator -- the test is reaching "
-            f"for something that no longer exists."
-        )

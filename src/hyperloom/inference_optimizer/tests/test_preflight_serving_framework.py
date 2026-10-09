@@ -569,8 +569,7 @@ def test_in_container_prefers_container_when_no_signal_is_readable(monkeypatch):
 _SETUP_INSTALLER = "inference_optimizer/assets/install_baremetal.sh"
 
 
-def test_atom_missing_build_is_blocked_without_an_install_remedy(monkeypatch, capsys):
-    """ATOM must be usable in its existing environment, not installed by setup."""
+def test_atom_missing_build_is_blocked_with_the_setup_install_remedy(monkeypatch, capsys):
     _probe_result(monkeypatch, importable=False)
     monkeypatch.setattr(preflight.shutil, "which", lambda _name: sys.executable)
 
@@ -580,7 +579,7 @@ def test_atom_missing_build_is_blocked_without_an_install_remedy(monkeypatch, ca
     assert failure.value.code == 2
     output = capsys.readouterr()
     assert "atom" in output.err.lower()
-    assert "--install-framework atom" not in output.out + output.err
+    assert preflight._setup_install_command("atom") in output.err
 
 
 @pytest.fixture

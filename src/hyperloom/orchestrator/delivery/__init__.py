@@ -20,7 +20,7 @@ from hyperloom.orchestrator.delivery.deliverable import (
     Deliverable,
     parse_deliverable,
 )
-from hyperloom.orchestrator.delivery.ledger import file_digest, load_records
+from hyperloom.orchestrator.delivery.ledger import file_digest
 
 __all__ = [
     "ROLE_LAUNCH_CONFIG",
@@ -34,6 +34,5 @@ __all__ = [
     "Deliverable",
     "RoundArchive",
     "file_digest",
-    "load_records",
     "parse_deliverable",
 ]

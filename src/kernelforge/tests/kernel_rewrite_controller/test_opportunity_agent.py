@@ -29,7 +29,7 @@ from kernelforge.kernel_rewrite_controller.opportunity_agent import (
     run_opportunity_analysis,
 )
 from kernelforge.kernel_rewrite_controller.task_publisher import REJECTION_FILENAME
-from kernelforge.knowledge.kernel_identity import (
+from kernelforge.knowledge.kb_store.identity.kernel_recipe import (
     KernelRecipeIdentity,
     kernel_recipe_canonical_id,
 )
