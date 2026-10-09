@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import argparse
 import hashlib
 import json
 import logging
@@ -130,7 +129,8 @@ def _dispatch_multinode_apply(
     cmd = [
         sys.executable,
         "-m",
-        "hyperloom.inference_optimizer.multi_node",
+        "hyperloom",
+        "multi-node",
         "apply-patch",
         "--patch-file",
         str(patch_path),
@@ -192,7 +192,8 @@ def _dispatch_multinode_revert(
     cmd = [
         sys.executable,
         "-m",
-        "hyperloom.inference_optimizer.multi_node",
+        "hyperloom",
+        "multi-node",
         "revert-patch",
         "--target-path",
         str(target_path),
@@ -235,7 +236,8 @@ def _dispatch_multinode_finalize(
     cmd = [
         sys.executable,
         "-m",
-        "hyperloom.inference_optimizer.multi_node",
+        "hyperloom",
+        "multi-node",
         "finalize-patch",
         "--records-json",
         json.dumps(records_by_host, sort_keys=True),
@@ -2829,52 +2831,3 @@ def _apply_kernel_patch_snapshot(
     if multinode_info:
         result["multinode"] = multinode_info
     return result
-
-
-def main() -> int:
-    """Run the apply/revert CLI and print the JSON result.
-
-    Parses ``apply`` / ``revert`` subcommands, dispatches to
-    :func:`apply_kernel_patch` or :func:`revert_kernel_patch`, and prints the
-    result document.
-
-    Returns:
-        int: ``0`` when the result status is ``"ok"``, otherwise ``1``.
-    """
-    parser = argparse.ArgumentParser(description="Apply or revert a kernel patch")
-    sub = parser.add_subparsers(dest="command", required=True)
-    apply_p = sub.add_parser("apply")
-    apply_p.add_argument("--patch-path", required=True)
-    apply_p.add_argument("--target-file", required=True)
-    apply_p.add_argument("--backup-root", required=True)
-    apply_p.add_argument("--kernel-id", default="")
-    apply_p.add_argument("--artifact-path", action="append", default=[])
-    apply_p.add_argument("--rebuild-command", default="")
-    apply_p.add_argument("--rebuild-timeout-sec", type=int, default=1800)
-    apply_p.add_argument("--skip-rebuild", action="store_true")
-    apply_p.add_argument("--dry-run", action="store_true")
-
-    revert_p = sub.add_parser("revert")
-    revert_p.add_argument("--manifest-path", required=True)
-
-    args = parser.parse_args()
-    if args.command == "revert":
-        result = revert_kernel_patch(args.manifest_path)
-    else:
-        result = apply_kernel_patch(
-            patch_path=args.patch_path,
-            target_file=args.target_file,
-            backup_root=args.backup_root,
-            kernel_id=args.kernel_id,
-            artifact_paths=args.artifact_path,
-            rebuild_command=args.rebuild_command or None,
-            rebuild_timeout_sec=args.rebuild_timeout_sec,
-            skip_rebuild=args.skip_rebuild,
-            dry_run=args.dry_run,
-        )
-    print(json.dumps(result, indent=2, sort_keys=True))
-    return 0 if result.get("status") == "ok" else 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

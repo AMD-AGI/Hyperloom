@@ -136,7 +136,7 @@ The pinned workload skill at
 [`docs/how-to/multi-node/hyperloom-remote-mn-qwen3-30b/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/docs/how-to/multi-node/hyperloom-remote-mn-qwen3-30b/SKILL.md)
 contains two ready-to-run blocks — **Workload A (infera + PD)** and **Workload B
 (rayjob)** — each a `FLAGS` list and an `Environment` block. The agent runs
-`inference_optimizer optimize` with those blocks and monitors `state.json` until a
+`hyperloom optimize` with those blocks and monitors `state.json` until a
 terminal `stop_reason`.
 
 ### `optimize` flags
@@ -155,9 +155,10 @@ The following flags are used in multi-node workload skill blocks.
 | `--gpu-type`, `--precision` | Target GPU (for example `mi325x`) and dtype (`bf16`). Flags are authoritative; env vars are not |
 | `--framework` | `sglang` |
 | `--target-gain`, `--max-hours` | Optimization goal and time budget |
-| `--pd-mode disaggregated` | Enable PD disaggregation (infera only) |
-| `--pd-prefill-nodes`, `--pd-prefill-tp`, `--pd-prefill-ep`, `--pd-prefill-extra-args` | Prefill topology (infera PD) |
-| `--pd-decode-nodes`, `--pd-decode-tp`, `--pd-decode-ep`, `--pd-decode-extra-args` | Decode topology (infera PD) |
+| `--pd-mode disaggregated` | Enable PD disaggregation (infera and rayjob) |
+| `--pd-prefill-nodes`, `--pd-prefill-tp` | Prefill topology |
+| `--pd-decode-nodes`, `--pd-decode-tp` | Decode topology |
+| `--pd-prefill-ep`, `--pd-prefill-extra-args`, `--pd-decode-ep`, `--pd-decode-extra-args` | Per-role EP and server args (infera only; rayjob rejects them) |
 | `--pd-transfer-backend` | KV transfer plane for PD. Use `mooncake`; `nixl` can produce 0 output tokens |
 | `--server-args "..."` | Extra sglang args applied on every server restart |
 | `--no-framework-agent` | Skip the framework-tuning agent phase |
@@ -188,7 +189,7 @@ The following example shows an infera + PD disaggregated launch after the
 platform has handed a cluster over:
 
 ```bash
-inference_optimizer optimize \
+hyperloom optimize \
   --model ${NFS_SHARED_ROOT}/models/Qwen3-30B-A3B \
   --nodes 2 --mn-backend infera \
   --pd-mode disaggregated \
@@ -198,8 +199,8 @@ inference_optimizer optimize \
 ```
 
 For rayjob, replace `--mn-backend infera` with `--mn-backend rayjob` and omit
-the `--pd-*` flags. The platform supplies `HYPERLOOM_MN_EXT_HEAD_IP` instead of
-the SSH and IP variables.
+the per-role `--pd-*-ep` / `--pd-*-extra-args` flags. The platform supplies
+`HYPERLOOM_MN_EXT_HEAD_IP` instead of the SSH and IP variables.
 
 ## Troubleshooting
 
@@ -310,7 +311,7 @@ failed before writing `manifest.json`.
 find "$USER_DATA_PATH" -name manifest.json
 
 # Resume with the exact session directory
-python3 -m hyperloom.inference_optimizer.cli optimize \
+python3 -m hyperloom optimize \
   --resume-from /path/to/session
 ```
 

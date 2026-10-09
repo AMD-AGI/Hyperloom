@@ -407,7 +407,7 @@ that path is missing or reaped.
 
 ## Resume fails: "manifest.json not found"
 
-**Symptom.** `python -m hyperloom.inference_optimizer.cli optimize --resume-from` exits with
+**Symptom.** `python -m hyperloom optimize --resume-from` exits with
 `manifest.json not found under <dir>` or `state.json missing`.
 
 **Cause**: `USER_DATA_PATH` points at a different directory than the
@@ -425,7 +425,7 @@ original session, or the session never reached the point of writing
    ```
 2. Pass the actual session directory:
    ```bash
-   python3 -m hyperloom.inference_optimizer.cli optimize --resume-from "$SESSION_DIR"
+   python3 -m hyperloom optimize --resume-from "$SESSION_DIR"
    ```
 3. If `manifest.json` truly never existed, resume is not possible —
    restart with a fresh `--model …` launch.
@@ -478,7 +478,7 @@ action no longer derives this automatically.
 **Fix**: Add the flag at launch:
 
 ```bash
-python3 -m hyperloom.inference_optimizer.cli optimize ... --compare-against-gpu B200
+python3 -m hyperloom optimize ... --compare-against-gpu B200
 ```
 
 The marker is informational, not a failure — the optimisation still
@@ -519,13 +519,13 @@ Three commands give you a fast situation report:
 SD="${INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR:-$SESSION_DIR}"
 
 # 1. Are events landing?
-python -m hyperloom.inference_optimizer.tools.event_counts "$SD"
+python -m hyperloom session events "$SD"
 
 # 2. What was the last action's outcome?
 jq '.optimization_stack | last' "$SD/state.json"
 
 # 3. What phase, lifecycle events, and stop reason are persisted?
-python -m hyperloom.inference_optimizer.tools.read_optimizer_state "$SD"
+python -m hyperloom session state "$SD"
 ```
 
 See [Hyperloom operator scripts](operator-scripts.md) for the full set of

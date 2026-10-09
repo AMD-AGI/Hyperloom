@@ -1741,3 +1741,71 @@ def test_ray_patch_siblings_reach_isolated_actor_through_runtime_env(tmp_path, a
     assert f"ACTOR_EXECUTED _{action}_remote" in log
     assert result["status"] == "ok"
     _assert_isolated_patch_result(action, result["per_node"][0], record, target, jit)
+
+
+_PER_ROLE_PD = {
+    "pd_prefill_ep": ("--pd-prefill-ep", 8),
+    "pd_decode_ep": ("--pd-decode-ep", 8),
+    "pd_prefill_extra_args": ("--pd-prefill-extra-args", "--chunked-prefill-size 8192"),
+    "pd_decode_extra_args": ("--pd-decode-extra-args", "--cuda-graph-max-bs 256"),
+}
+
+
+class _ReachedCluster(Exception):
+    pass
+
+
+def _rayjob_restart_ns(pd_mode: str, **per_role: object) -> argparse.Namespace:
+    ns = argparse.Namespace(
+        extra_args="", pd_mode=pd_mode, **{field: type(v)() for field, (_, v) in _PER_ROLE_PD.items()}
+    )
+    for field, value in per_role.items():
+        setattr(ns, field, value)
+    return ns
+
+
+def _stub_rayjob_state(monkeypatch, mn_cli) -> None:
+    monkeypatch.setattr(mn_cli, "_load_state", lambda: {"backend": "rayjob"})
+
+    def reached(*_a, **_k):
+        raise _ReachedCluster
+
+    monkeypatch.setattr(mn_cli, "_require_state", reached)
+
+
+@pytest.mark.parametrize("field", sorted(_PER_ROLE_PD))
+def test_rayjob_restart_rejects_per_role_pd_flag(monkeypatch, capsys, field):
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    _stub_rayjob_state(monkeypatch, mn_cli)
+    flag, value = _PER_ROLE_PD[field]
+    rc = mn_cli.cmd_restart_server(_rayjob_restart_ns("disaggregated", **{field: value}))
+    assert rc == mn_cli.EXIT_CONFIG_ERROR
+    assert flag in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "ns",
+    [
+        _rayjob_restart_ns("disaggregated"),
+        _rayjob_restart_ns("aggregated", pd_prefill_ep=8, pd_decode_extra_args="--x 1"),
+    ],
+)
+def test_rayjob_restart_without_per_role_pd_reaches_the_cluster(monkeypatch, ns):
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    _stub_rayjob_state(monkeypatch, mn_cli)
+    with pytest.raises(_ReachedCluster):
+        mn_cli.cmd_restart_server(ns)
+
+
+def test_finalize_patch_prints_logs_when_pod_json_is_unparseable(monkeypatch, capsys):
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    monkeypatch.setattr(mn_cli, "_load_state", lambda: {"backend": "rayjob", "head_pod_ip": "10.0.0.1"})
+    monkeypatch.setattr(mn_cli, "_submit_and_collect_pod_json", lambda *a, **k: (0, None, "pod traceback"))
+    args = mn_cli.build_parser().parse_args(["finalize-patch", "--records-json", '{"k": {}}', "--print-logs"])
+    assert mn_cli.cmd_finalize_patch(args) == mn_cli.EXIT_TRANSIENT
+    captured = capsys.readouterr()
+    assert captured.out == "pod traceback\n"
+    assert "finalize-patch: could not parse per-pod JSON from dashboard logs" in captured.err

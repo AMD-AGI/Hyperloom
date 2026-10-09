@@ -48,7 +48,7 @@ In docker mode:
 - Pass `--install-framework none --yes` in the container (ROCm/framework comes from
   the image). Do **not** use `--skip-base-check` — let Phase 1 preflight validate
   the container environment.
-- Do not run `python -m hyperloom.inference_optimizer.cli optimize` on the host.
+- Do not run `python -m hyperloom optimize` on the host.
 
 ### Prior workload cleanup (required)
 
@@ -87,10 +87,10 @@ Then run the setup backend inside the container:
 
 ```bash
 docker exec -w "$REPO_ROOT" "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}" bash -lc \
-  'REPO_ROOT="$(pwd -P)"; PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework none --yes'
+  'REPO_ROOT="$(pwd -P)"; PYTHONPATH="$REPO_ROOT" python3 -m hyperloom setup -- --install-framework none --yes'
 ```
 
-After that, run all remaining commands for this demo inside the same container with `docker exec -w "$REPO_ROOT" ...`; do not run `python -m hyperloom.inference_optimizer.cli optimize` on the host in Docker mode.
+After that, run all remaining commands for this demo inside the same container with `docker exec -w "$REPO_ROOT" ...`; do not run `python -m hyperloom optimize` on the host in Docker mode.
 
 **Do not use `docker exec -d` to launch optimize.** Detached `docker exec`
 discards stdout and stderr, so an optimizer that dies on startup looks like
@@ -101,7 +101,7 @@ runs the Launch recipe in `@${HYPERLOOM_SKILL_PATH}`. Startup preflight loads
 to the bash tool with `run_in_background=true` and no `setsid`, `nohup`, or
 trailing `&`; otherwise the command inside the exec is
 `setsid nohup … > "$RUN_LOG" 2>&1 < /dev/null &` plus `--launch-info-file`.
-Confirm with `pgrep -af 'hyperloom.inference_optimizer.*optimize'`. If nothing
+Confirm with `pgrep -af 'hyperloom optimize'`. If nothing
 is alive or the launch-info JSON has no `.session_dir`, read the run log and
 fix that error; do not retry with a different backgrounding trick.
 
@@ -125,8 +125,8 @@ Required optimize CLI flags:
 - `--precision fp8`
 - `--target-gain 50`
 - `--max-hours 12`
-- `--max-minutes-framework-pct 0.43`
-- `--max-minutes-kernel-pct 0.42`
+- `--phase-budget-framework-pct 0.43`
+- `--phase-budget-kernel-pct 0.42`
 
 Before launch, read the repository-root `.env` file if it exists and load the needed environment variables from it, such as LLM API keys/base URLs, `FRAMEWORK`, and `HF_TOKEN`. Do not copy secret values into the prompt, terminal output, reports, or logs. Do not modify `USER_DATA_PATH`.
 
@@ -230,8 +230,8 @@ and the stop reason. Never print API keys, tokens, or custom header values.
 2. Keep `PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"` in the launch shell so
    critic subprocesses can import `hyperloom.agents` after changing cwd.
 3. Run it detached the way the harness understands: if `$CLAW_SESSION_ID` is set and your bash tool takes a `run_in_background` parameter, hand the optimizer command to it with `run_in_background=true`, without shell-level detachment (`setsid`, `nohup`, or a trailing `&`); otherwise use `setsid nohup ... &`. See the Launch section of the packaged `hyperloom/inference_optimizer/SKILL.md` for why — a hand-detached run is invisible to Claw and its sandbox is reclaimed about fifteen minutes after the turn ends. In Docker mode that launch still runs inside one attached `docker exec … bash -lc`; never `docker exec -d`.
-4. Pass all required optimize CLI flags in the `python -m hyperloom.inference_optimizer.cli optimize` command. Do not rely on `.env` alone for `TP`, `CONC`, `ISL`, `OSL`, or `PRECISION`; CLI defaults can otherwise override the intended workload.
-5. Include `--max-minutes-framework-pct 0.43` and `--max-minutes-kernel-pct 0.42`
+4. Pass all required optimize CLI flags in the `python -m hyperloom optimize` command. Do not rely on `.env` alone for `TP`, `CONC`, `ISL`, `OSL`, or `PRECISION`; CLI defaults can otherwise override the intended workload.
+5. Include `--phase-budget-framework-pct 0.43` and `--phase-budget-kernel-pct 0.42`
    in the optimize command. Do **not** pass `--no-framework-agent` or `--no-kernel` —
    this demo runs the full OPTIMIZE phase (FRAMEWORK_AGENT + KERNEL_AGENT).
 6. Report the session ID, log path, PID, and initial health check result.
@@ -383,7 +383,7 @@ Setup checks the selected Python, ROCm torch and ATOM import/server readiness.
 Run its read-only check even when setup previously completed:
 
 ```bash
-"$PYTHON" -m hyperloom.inference_optimizer.setup --check-only -- \
+"$PYTHON" -m hyperloom setup --check-only -- \
   --install-framework none --frameworks atom --require-frameworks \
   --user-data-path "${USER_DATA_PATH:?USER_DATA_PATH missing}"
 ```
@@ -392,7 +392,7 @@ Reuse successful setup in this environment. Only if setup is needed, explain its
 changes and obtain approval before running:
 
 ```bash
-"$PYTHON" -m hyperloom.inference_optimizer.setup -- \
+"$PYTHON" -m hyperloom setup -- \
   --install-framework none --frameworks atom --require-frameworks \
   --user-data-path "${USER_DATA_PATH:?USER_DATA_PATH missing}" --yes
 ```
@@ -406,7 +406,7 @@ separate container for ATOM rather than removing the other engine. Do not do
 this in Docker mode, where ATOM comes from the image:
 
 ```bash
-"$PYTHON" -m hyperloom.inference_optimizer.setup -- \
+"$PYTHON" -m hyperloom setup -- \
   --install-framework atom \
   --user-data-path "${USER_DATA_PATH:?USER_DATA_PATH missing}" --yes
 ```
@@ -461,13 +461,13 @@ Do not replace workload flags with environment-only settings or add
 set -e
 : "${PYTHON:?PYTHON missing}" "${MODEL_PATH:?MODEL_PATH missing}"
 : "${RUN_LOG:?RUN_LOG missing}" "${LAUNCH_INFO_FILE:?LAUNCH_INFO_FILE missing}"
-"$PYTHON" -m hyperloom.inference_optimizer.cli --verbose optimize \
+"$PYTHON" -m hyperloom optimize --verbose \
   --model "$MODEL_PATH" \
   --framework atom \
   --tp 1 --conc 64 --isl 1024 --osl 1024 \
   --precision fp8 \
   --target-gain 50 --max-hours 12 \
-  --max-minutes-framework-pct 0.43 --max-minutes-kernel-pct 0.42 \
+  --phase-budget-framework-pct 0.43 --phase-budget-kernel-pct 0.42 \
   --launch-info-file "$LAUNCH_INFO_FILE" \
   > "$RUN_LOG" 2>&1 < /dev/null
 ```

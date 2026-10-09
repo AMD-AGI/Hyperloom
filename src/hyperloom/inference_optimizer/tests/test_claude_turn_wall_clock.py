@@ -318,6 +318,7 @@ def _heartbeat() -> Intent:
 @pytest.mark.parametrize("mode", ["retrying", "busy"])
 async def test_the_tick_loop_keeps_ticking_past_a_hung_orchestration_turn(mode: str, session_dir, monkeypatch):
     monkeypatch.setattr(claude_mod, "_TURN_CLEANUP_GRACE_SEC", 5.0)
+    monkeypatch.setattr("hyperloom.orchestrator.loop.coordinator._BACKEND_RETRY_BASE_SEC", 0)
     sdk = _StallingSdk(mode)
     orchestration = _backend(sdk, turn_timeout_s=0.3)
     critic = MockBackend(ScriptedPlan(turns=[], default_intent=_heartbeat()), name="critic")

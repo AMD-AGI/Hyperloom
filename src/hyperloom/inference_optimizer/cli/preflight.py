@@ -776,10 +776,7 @@ _SETUP_INSTALLABLE_FRAMEWORKS = frozenset({"sglang", "vllm", "atom"})
 def _setup_install_command(framework: str) -> str:
     """The documented setup invocation for ``framework``, verbatim in shape."""
     extra = " --framework-env isolated" if framework == "vllm" else ""
-    return (
-        'PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- '
-        f"--install-framework {framework}{extra} --yes"
-    )
+    return f'PYTHONPATH="$REPO_ROOT" python3 -m hyperloom setup -- --install-framework {framework}{extra} --yes'
 
 
 # Rootfs markers the runtimes drop: Docker writes the first, podman the second.
@@ -1631,7 +1628,7 @@ def _check_tracelens_cli() -> dict[str, Any]:
         f"the same shell that earlier ran install.sh). Re-run:\n"
         f"  bash $REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh\n"
         f"  . {session_dir}/runtime/kernel-agent.env.sh\n"
-        f"then retry `python -m hyperloom.inference_optimizer.cli optimize`. Refusing to start.",
+        f"then retry `python -m hyperloom optimize`. Refusing to start.",
         file=sys.stderr,
     )
     raise SystemExit(2)
