@@ -242,7 +242,20 @@ async def test_every_turn_spells_out_the_intent_object_keys(
     captured = _stub_turn(monkeypatch, DeepSeekSessionResult(text=_reply("send_message", {"topic": "heartbeat"})))
     await _backend(tmp_path).run("status?")
 
-    assert '{"intents": [{"intent_type": "<type>", "payload": "<JSON object as a string>"}]}' in captured["prompt"]
+    assert '{"intents": [{"intent_type": "<type>", "payload": {<JSON object>}}]}' in captured["prompt"]
+
+
+async def test_the_payload_is_asked_for_as_an_inline_object(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No schema forces a string here; a live run broke the escaping of a serialized payload on 1 tick in 5."""
+    captured = _stub_turn(monkeypatch, DeepSeekSessionResult(text=_reply("send_message", {"topic": "heartbeat"})))
+    await _backend(tmp_path).run("status?")
+
+    assert "Do not serialize it into a string" in captured["instructions"]
+    assert "serialized JSON object" not in captured["instructions"]
+    assert "not a string" in captured["prompt"]
 
 
 def test_an_intent_without_a_payload_key_names_the_keys_it_carried() -> None:

@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from hyperloom.common.deepseek_session import (
     DeepSeekSession,
@@ -37,9 +37,7 @@ from .base import (
     safe_int,
 )
 
-# Shared with the Codex route: both speak the same structured-output contract,
-# and a role's intent set renders to the same text whichever one carries it.
-from .codex import build_output_instructions
+from .mcp_emit_intent import constraints_sentence, payload_contract
 
 # Prepended to a turn that runs without the envelope contract.
 _PER_TURN_CONTRACT_OVERRIDE = (
@@ -53,9 +51,44 @@ _PER_TURN_CONTRACT_OVERRIDE = (
 _ENVELOPE_REMINDER = (
     "Reply with exactly one JSON object matching the OUTPUT FORMAT block in your "
     "instructions. No prose and no code fence around it. Its shape is "
-    '{"intents": [{"intent_type": "<type>", "payload": "<JSON object as a string>"}]}; '
-    "each intent carries exactly the keys `intent_type` and `payload`."
+    '{"intents": [{"intent_type": "<type>", "payload": {<JSON object>}}]}; '
+    "each intent carries exactly the keys `intent_type` and `payload`, and "
+    "`payload` is an inline JSON object, not a string."
 )
+
+
+def build_output_instructions(allowed_intents: Iterable[IntentType]) -> str:
+    """Render the reply contract for one role's intent set.
+
+    The Codex contract serializes ``payload`` into a string because its
+    enforced schema cannot express a free-form object. Nothing enforces a
+    schema here, so the payload is written inline rather than hand-escaped.
+    """
+    contract = payload_contract(allowed_intents)
+    constraints = constraints_sentence(allowed_intents)
+    constraints_line = f"\n-{constraints}" if constraints else ""
+    always_emit_line = (
+        "- ALWAYS emit at least one intent."
+        if IntentType.SEND_MESSAGE in set(allowed_intents)
+        else "- ALWAYS emit exactly one intent."
+    )
+    return f"""
+==== OUTPUT FORMAT (REQUIRED) ====
+Your final message MUST be exactly one JSON object -- no prose, no code fences,
+nothing around it:
+
+{{"intents": [{{"intent_type": "...", "payload": {{...}}}}]}}
+
+- `payload` is a JSON object written inline. Do not serialize it into a string.
+- Required keys per intent_type: {contract}.{constraints_line}
+- Emit several intents by adding entries to `intents`.
+- Put only NEW information in payload bodies; do not restate context already
+  in SharedState, your inbox, or analysis.md. Keep length proportional to
+  substance.
+{always_emit_line}
+==== END OUTPUT FORMAT ====
+""".strip()
+
 
 #: Instructions the harness needs in order to read prompts written for Claude's
 #: tool names. The harness exposes equivalent capabilities under its own names,
