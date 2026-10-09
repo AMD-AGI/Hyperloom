@@ -29,6 +29,10 @@ def _skill(root: Path, body: str) -> None:
 
 
 def test_resolvable_references_pass(root: Path) -> None:
+    (root / "src" / "hyperloom_kb").mkdir(parents=True)
+    (root / "src" / "hyperloom_kb" / "__main__.py").write_text(
+        'if __name__ == "__main__":\n    main()\n', encoding="utf-8"
+    )
     _skill(
         root,
         "python3 -m hyperloom optimize --model m\n"
@@ -36,6 +40,8 @@ def test_resolvable_references_pass(root: Path) -> None:
         '"$PYTHON" -m hyperloom check "$MODEL_PATH"\n'
         "python -m hyperloom.agents.critic.runtime.cli prepare-review --request r\n"
         '"$PYTHON" -m pip install x\n'
+        "python3 -m hyperloom_kb --host 0.0.0.0 --port 8787\n"
+        "python3 -m atom.entrypoints.openai_server --help\n"
         'python3 "$REPO_ROOT/src/hyperloom/tool.py" x\n'
         "run `python -m hyperloom <command>` for help\n"
         'git commit -m "msg"\n',

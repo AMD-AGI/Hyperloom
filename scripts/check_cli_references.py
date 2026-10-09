@@ -38,6 +38,9 @@ _MODULE_RE = re.compile(r"(?:python[\d.]*|PYTHON\w*\}?)\"?\s+-m\s+([\w.]+)(?:\s+
 _SCRIPT_RE = re.compile(r"\bsrc/((?:hyperloom|kernelforge)/[\w/.-]+\.py)\b")
 _MAIN_GUARD_RE = re.compile(r"^if __name__ == ['\"]__main__['\"]:", re.MULTILINE)
 _EXTERNAL_MODULES = frozenset({"pip"})
+# Framework entrypoints installed outside the Hyperloom tree (e.g. ATOM in setup).
+_EXTERNAL_MODULE_PREFIXES = ("atom.entrypoints.",)
+_RUNNABLE_TOP_LEVEL = frozenset({"hyperloom", "kernelforge", "hyperloom_kb"})
 _SKIPPED_TOP_DIRS = frozenset({".git", ".venv", "build", "node_modules"})
 
 
@@ -56,9 +59,15 @@ def _module_runnable(root: Path, module: str) -> bool:
     return source.is_file() and _MAIN_GUARD_RE.search(source.read_text(encoding="utf-8", errors="replace")) is not None
 
 
+def _external_module_ok(module: str) -> bool:
+    if module in _EXTERNAL_MODULES:
+        return True
+    return any(module.startswith(prefix) for prefix in _EXTERNAL_MODULE_PREFIXES)
+
+
 def _check_module(root: Path, module: str, first: str | None, second: str | None) -> str | None:
-    if module.split(".")[0] not in ("hyperloom", "kernelforge"):
-        return None if module in _EXTERNAL_MODULES else f"module {module} is not a hyperloom/kernelforge module"
+    if module.split(".")[0] not in _RUNNABLE_TOP_LEVEL:
+        return None if _external_module_ok(module) else f"module {module} is not a hyperloom/kernelforge module"
     if module != "hyperloom":
         return None if _module_runnable(root, module) else f"module {module} is not runnable with -m"
     if first is None or first in hyperloom_cli._COMMANDS:
