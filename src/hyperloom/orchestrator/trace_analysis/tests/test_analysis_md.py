@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from hyperloom.orchestrator.trace_analysis import _analysis_md as am
 from hyperloom.orchestrator.trace_analysis import _bypass_report as br
-from test_bypass_report import _KERNELS, _analyze
+from .test_bypass_report import _KERNELS, _analyze
 
 
 def _sample_kwargs():
