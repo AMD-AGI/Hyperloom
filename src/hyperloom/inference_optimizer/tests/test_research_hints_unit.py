@@ -268,6 +268,15 @@ def test_priors_match_summary_rows():
     assert "v1" in out
 
 
+def test_priors_match_summary_lists_the_closest_hints_per_variant():
+    hints = [{"what": f"vllm tweak {i}"} for i in range(10)] + [{"what": "vllm cudagraph decode capture"}]
+    variants = [{"name": "v1", "description": "vllm cudagraph decode capture sizes"}]
+    out = rh.priors_match_summary(variants, hints)
+    assert out.count("hint:") == 3
+    assert "hint:vllm cudagraph decode capture" in out
+    assert "+8 more" in out
+
+
 def test_summarise_for_prompt(tmp_path):
     rh.append_hints(
         tmp_path,

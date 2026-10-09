@@ -139,7 +139,6 @@ def test_grid_runner_emits_expected_error_class_labels():
     src = inspect.getsource(_grid_runner)
     expected = {
         "yaml_build_error",
-        "recipe_lever_unavailable",
         "mn_server_restart_failed",
         "magpie_timeout",
         "no_benchmark_workspace",

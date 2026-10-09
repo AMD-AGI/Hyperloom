@@ -28,7 +28,7 @@ import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
 
-from hyperloom.agents.kernel.tools._capture_shapes import (
+from hyperloom.orchestrator.trace_analysis._capture_shapes import (
     is_capture_fragment as _shared_is_capture_fragment,
 )
 from hyperloom.common import codex_session, llm_config
@@ -38,9 +38,6 @@ from hyperloom.common.gpu_identity import is_gfx_arch
 from hyperloom.common.io import append_jsonl
 from ..actions.executors._kernel_agent_tool import (
     HandlerResult,
-    _kernel_agent_root_error,
-    _kernel_agent_tool_path,
-    _load_apply_tool,
     _maybe_apply_kernel_patch,
     _maybe_finalize_kernel_patch,
     _maybe_revert_kernel_patch,
@@ -49,6 +46,7 @@ from ..actions.executors._kernel_agent_tool import (
 )
 from ..actions.executors.trace_analyze import trace_analyze_handler
 from ..actions.stop_attribution import stopped_by_the_run_class
+from . import apply_kernel_patch
 from .lane_budget import (
     LANE_FUSION,
     LANE_GEMM,
@@ -273,7 +271,7 @@ def _preapplied_snapshot_payload(payload: dict) -> dict:
     repo_root = Path(str(payload.get("repo") or payload.get("kernel_repo") or ""))
     if not repo_root.is_dir():
         raise RuntimeError(f"pre-applied patch needs its repo root, got {repo_root!s:.200}")
-    descriptors = _load_apply_tool().parse_patch_manifest(patch_path.read_text(encoding="utf-8", errors="replace"))
+    descriptors = apply_kernel_patch.parse_patch_manifest(patch_path.read_text(encoding="utf-8", errors="replace"))
     snapshot = patch_path.parent / "preapplied_snapshot"
     for descriptor in descriptors:
         if descriptor.get("op") != "write":
@@ -2944,18 +2942,10 @@ async def _capture_vllm_tunableop_shapes(
     else:
         capture_unset_envs = [str(key) for key in inherited_unset]
     if not profile_mode:
-        capture_unset_envs.extend(
-            [
-                "HL_TUNABLEOP_MODE",
-                "HL_TUNABLEOP_FILE",
-                "HL_TUNABLEOP_VERBOSE",
-                "PYTORCH_TUNABLEOP_ENABLED",
-                "PYTORCH_TUNABLEOP_TUNING",
-                "PYTORCH_TUNABLEOP_RECORD_UNTUNED",
-                "PYTORCH_TUNABLEOP_UNTUNED_FILENAME",
-                "PYTORCH_TUNABLEOP_FILENAME",
-            ]
-        )
+        # unset_envs is applied after extra_envs, so any PYTORCH_TUNABLEOP_* name left here (hard-coded or
+        # inherited from the payload or current best) strips the recording and the capture records nothing.
+        capture_unset_envs = [name for name in capture_unset_envs if not name.startswith("PYTORCH_TUNABLEOP_")]
+        capture_unset_envs.extend(["HL_TUNABLEOP_MODE", "HL_TUNABLEOP_FILE", "HL_TUNABLEOP_VERBOSE"])
     inherited_remove = payload.get("remove_args", current_best.get("remove_args")) or []
     if isinstance(inherited_remove, str):
         capture_remove_args = [inherited_remove]
@@ -3101,6 +3091,9 @@ async def _capture_vllm_tunableop_shapes(
         "shape_capture_workspace": str(capture_dir),
         "shape_count": row_count,
     }
+
+
+_FORGE_GEMM_TUNING_MODULE = "hyperloom.orchestrator.kernel.forge_gemm_tuning"
 
 
 async def _run_forge_gemm_tuning(
@@ -3450,7 +3443,8 @@ async def _run_forge_gemm_tuning(
     input_json.write_text(json.dumps(input_payload, indent=2, sort_keys=True), encoding="utf-8")
     cmd = [
         sys.executable,
-        str(_kernel_agent_tool_path("forge_gemm_tuning.py")),
+        "-m",
+        _FORGE_GEMM_TUNING_MODULE,
         "--input-json",
         str(input_json),
     ]
@@ -3693,6 +3687,9 @@ def _persist_forge_gemm_csv_durably(extra_envs: dict, *, model_path: str, sessio
     return updated, snap_dir
 
 
+_GEMM_TUNING_MODULE = "hyperloom.orchestrator.kernel.gemm_tuning"
+
+
 async def _run_geak_gemm_tuning(
     payload: dict,
     *,
@@ -3708,9 +3705,6 @@ async def _run_geak_gemm_tuning(
     state = SharedState.load_or_init(session_dir)
     precision = _normalize_precision(payload.get("precision") or state.precision)
     framework = str(payload.get("framework") or state.framework or "sglang").strip().lower()
-    root_err = _kernel_agent_root_error()
-    if root_err:
-        return {"status": "failed", "error_class": "kernel_agent_root_missing", "error": root_err}
 
     workspace = _gemm_tuning_workspace(payload, session_dir=session_dir)
     workspace.mkdir(parents=True, exist_ok=True)
@@ -3798,8 +3792,9 @@ async def _run_geak_gemm_tuning(
     cmd = [
         "env",
         f"E2E_METRIC={_geak_e2e_metric}",
-        "python3",
-        str(_kernel_agent_tool_path("gemm_tuning.py")),
+        sys.executable,
+        "-m",
+        _GEMM_TUNING_MODULE,
         "--input-json",
         str(input_json),
     ]
@@ -4027,11 +4022,14 @@ def _resolve_forge_fusion_sandbox_mode(
     )
 
 
+_FORGE_FUSION_MODULE = "hyperloom.orchestrator.kernel.forge_fusion"
+
+
 async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResult:
     """Autonomous kernel fusion via the forge-fusion CLI.
 
     Builds an input-json with one provider-compatible agent backend, model, and
-    validated sandbox policy, shells out to the ``forge_fusion.py`` wrapper, and
+    validated sandbox policy, shells out to the ``forge_fusion`` wrapper module, and
     parses the result sentinel. A KEPT fusion carries a source patch + env flags
     and ``requires_e2e_validation`` so the integrate gate confirms the
     end-to-end gain. Reuses the PRELUDE decode trace (no re-profiling).
@@ -4165,7 +4163,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
     input_json = workspace / "forge_fusion_input.json"
     input_json.write_text(json.dumps(input_payload, indent=2, sort_keys=True), encoding="utf-8")
 
-    cmd = ["python3", str(_kernel_agent_tool_path("forge_fusion.py")), "--input-json", str(input_json)]
+    cmd = [sys.executable, "-m", _FORGE_FUSION_MODULE, "--input-json", str(input_json)]
 
     wrapper_timeout = _forge_fusion_wrapper_timeout_sec(timeout)
     try:
@@ -4174,9 +4172,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
         if result is None:
             result = _shape_tool_result(rc, stdout, stderr)
     except subprocess.TimeoutExpired as exc:
-        from hyperloom.agents.kernel.tools.forge_fusion import (
-            salvage_forge_fusion_from_workspace,
-        )
+        from .forge_fusion import salvage_forge_fusion_from_workspace
 
         cmd_repr = " ".join(str(c) for c in (getattr(exc, "cmd", None) or cmd))
         timeout_error = f"TimeoutExpired after {wrapper_timeout}s: {cmd_repr[:1500]}"
@@ -5094,7 +5090,7 @@ async def integrate_handler(
     # cpp_itfs path, so this gate is a strict no-op there.
     rebuild_check: HandlerResult = {"verified": True, "status": "skipped"}
     if force_aiter_rebuild and not is_multi_node():
-        rebuild_check = _load_apply_tool().verify_cpp_itfs_rebuilt(cpp_itfs_backup)
+        rebuild_check = apply_kernel_patch.verify_cpp_itfs_rebuilt(cpp_itfs_backup)
         if not rebuild_check.get("verified", True):
             revert_result = _maybe_revert_kernel_patch(apply_result)
             return {

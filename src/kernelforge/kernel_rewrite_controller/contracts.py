@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any
 
-from kernelforge.knowledge.kernel_identity import KernelRecipeIdentity
+from kernelforge.knowledge.kb_store.identity.kernel_recipe import KernelRecipeIdentity
 
 TASK_FILENAME = "task.json"
 DRIVER_FILENAME = "driver.py"

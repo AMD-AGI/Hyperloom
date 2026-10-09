@@ -381,7 +381,7 @@ The following example shows a complete `session_breakdown.json` for a finished G
       "schema_version": "hyperloom.session_breakdown.v6.0",
       "hyperloom": "a1b2c3d",
       "framework": "sglang",
-      "framework_version": "0.5.20",
+      "framework_version": "0.5.21",
       "tools": {
         "geak": { "tool": "geak", "root_dir": "/opt/geak", "commit": "9f8e7d6", "version": "0.4.2" }
       }
@@ -401,8 +401,8 @@ The following example shows a complete `session_breakdown.json` for a finished G
       "session_dir": "/workspace/hyperloom/GLM-5-FP8/20260517T113000Z",
       "user_data_path": "/workspace",
       "tick_count": 89,
-      "image": "lmsysorg/sglang-rocm:v0.5.20-rocm10-mi30x-20260920",
-      "image_id": "sglang-rocm:v0.5.20-rocm10-mi30x-20260920",
+      "image": "lmsysorg/sglang-rocm:v0.5.21-rocm10-mi30x-20261008",
+      "image_id": "sglang-rocm:v0.5.21-rocm10-mi30x-20261008",
       "recovery": {
         "recovered": false,
         "crash_count": 0,
@@ -414,7 +414,7 @@ The following example shows a complete `session_breakdown.json` for a finished G
     },
     "task_config": {
       "framework_name": "sglang",
-      "framework_version": "0.5.20",
+      "framework_version": "0.5.21",
       "model_name": "GLM-5-FP8",
       "model_path": "/models/GLM-5-FP8",
       "gpu_type": "mi355x",
@@ -596,7 +596,7 @@ The following example shows a complete `session_breakdown.json` for a finished G
 * **Offline and historical**: See
   [Hyperloom operator scripts](operator-scripts.md):
   ```bash
-  python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \
+  python -m hyperloom session breakdown \
       --session-dir /path/to/session \
       [--output /tmp/breakdown.json]
   ```

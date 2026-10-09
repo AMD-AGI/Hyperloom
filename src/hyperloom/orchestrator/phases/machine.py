@@ -205,6 +205,11 @@ class MachinePhase(CoordinatorCollaborator):
         kernel_facts = await self._coord.phase_kernel.exit_facts()
         optimize_enabled = self.optimize_enabled()
         in_enablement = str(state.phase or "").upper() == _phase_state.PHASE_ENABLEMENT
+        if str(state.phase or "").upper() == _phase_state.PHASE_PRELUDE or in_enablement:
+            # Both phases hold their exit for this marker. A cancelled analysis, or one that ended before a
+            # restart booked it, never reaches the writeback that clears it, so the hold would run to its
+            # allowance.
+            await self._coord.phase_kernel.release_finished_roofline_gate()
         enablement_in_flight = in_enablement and await self._coord.enablement_lane.enablement_in_flight()
         next_phase = _phase_state.compute_next_phase(
             state,
@@ -238,7 +243,7 @@ class MachinePhase(CoordinatorCollaborator):
                 len(cancelled),
                 len(stopped),
             )
-            await self._coord.writeback.record_observation(
+            await self.bus.record_observation(
                 "coordinator",
                 "observation",
                 {
@@ -422,7 +427,7 @@ class MachinePhase(CoordinatorCollaborator):
     def _reseed_orch_prompt_for_phase(self, to_phase: str) -> bool:
         """Re-scope the orchestration system prompt to the phase being entered."""
         phase = (to_phase or "").strip().upper()
-        orch_prompt = self._coord.orch_prompt
+        orch_prompt = self.orch_prompt
         if not phase or orch_prompt.is_user_supplied:
             return False
         rebuild = orch_prompt.rebuild

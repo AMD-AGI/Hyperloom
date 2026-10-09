@@ -29,7 +29,6 @@ from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePa
 from hyperloom.orchestrator.actions.executors.targeted_build_executor import TargetedBuildExecutor
 from hyperloom.orchestrator.actions.executors.profile import profile_executor
 from hyperloom.orchestrator.actions.executors.roofline import make_roofline_executor
-from hyperloom.orchestrator.roles import ClaudeBackend
 from hyperloom.inference_optimizer.framework_paths import resolve_kernel_search_roots
 
 if TYPE_CHECKING:  # pragma: no cover - type-only import to avoid a runtime cycle
@@ -62,13 +61,12 @@ def _build_specialist_executor(
     knowledge_plane: Any,
 ) -> "Callable[[Any], Awaitable[dict]]":
     """Build the specialist executor adapter (async fn(ctx) -> dict wrapping a
-    SpecialistRunner). Production uses the subprocess dispatcher, spawning the
-    agent CLI the deployment's credentials can drive (``claude`` on the Anthropic
-    side, ``codex`` on the OpenAI side) in a per-task worktree.
-    Explicit in-process dispatch uses the matching agent SDK backend.
+    SpecialistRunner). Each task spawns the agent CLI the deployment's
+    credentials can drive (``claude`` on the Anthropic side, ``codex`` on the
+    OpenAI side) in a per-task worktree.
 
     Args:
-        args: Parsed CLI arguments (specialist model, turns, dispatch mode).
+        args: Parsed CLI arguments (specialist model and turns).
         session_dir: The current session directory.
         knowledge_plane: The live KnowledgePlane used to wire MCP config.
 
@@ -77,23 +75,20 @@ def _build_specialist_executor(
         specialist and returns a result envelope dict.
 
     Raises:
-        RuntimeError: If subprocess dispatch selects Codex but no Codex runtime
-            is installed.
+        RuntimeError: If no runtime is found for the selected agent CLI: no
+            ``claude`` CLI, or no Codex runtime.
     """
-    import shutil
-
     from hyperloom.orchestrator.specialists.mcp_config import write_specialist_mcp_config
     from hyperloom.orchestrator.specialists.runner import SpecialistRunner
     from hyperloom.orchestrator.specialists.domains import DEFAULT_SPECIALIST_MAX_TURNS
     from hyperloom.common.llm_config import AGENT_BACKEND_CODEX, preferred_agent_backend
+    from hyperloom.orchestrator.roles.claude import resolve_claude_executable
     from hyperloom.orchestrator.specialists.subprocess_ import (
         SpecialistSubprocessConfig,
         resolve_codex_executable,
     )
 
     max_turns = int(getattr(args, "specialist_max_turns", DEFAULT_SPECIALIST_MAX_TURNS) or DEFAULT_SPECIALIST_MAX_TURNS)
-    per_turn_max_seconds = float(getattr(args, "specialist_per_turn_max_seconds", 600.0) or 600.0)
-    dispatch_mode = str(getattr(args, "specialist_dispatch_mode", "subprocess") or "subprocess").strip().lower()
 
     framework_source_roots = tuple(resolve_kernel_search_roots())
     # Resolve the agent CLI once here so the backend, its executable and its
@@ -107,7 +102,7 @@ def _build_specialist_executor(
     claude_bin = ""
     if agent_backend == AGENT_BACKEND_CODEX:
         codex_bin = resolve_codex_executable()
-        if dispatch_mode != "inprocess" and not codex_bin:
+        if not codex_bin:
             raise RuntimeError(
                 "this deployment configures only the OpenAI side, so specialists must run on "
                 "the codex CLI, but no codex runtime was found. Install `codex` on PATH or "
@@ -115,91 +110,46 @@ def _build_specialist_executor(
                 "Falling back to the claude CLI here would fail to authenticate on every "
                 "specialist task."
             )
-        agent_bin = codex_bin
     else:
-        claude_bin = shutil.which("claude") or ""
-        agent_bin = claude_bin
-    use_subprocess = dispatch_mode != "inprocess" and bool(agent_bin)
-    if dispatch_mode == "subprocess" and not agent_bin:
-        log.warning(
-            "specialist_dispatch_mode=subprocess requested but `%s` "
-            "binary not found on PATH; falling back to in-process backend",
-            agent_backend,
-        )
-
-    if use_subprocess:
-        # Operator --specialist-mcp-config wins; else auto-generate one from the
-        # live KnowledgePlane so the subprocess has the PR Monitor MCP wired.
-        mcp_config_path: str | None = str(getattr(args, "specialist_mcp_config", "") or "") or None
-        if mcp_config_path is None and knowledge_plane is not None:
-            try:
-                pr_mcp_url = knowledge_plane.specialist_mcp_url()
-            except AttributeError:
-                pr_mcp_url = ""
-            generated = write_specialist_mcp_config(
-                session_dir=session_dir,
-                pr_monitor_mcp_url=pr_mcp_url,
-            )
-            if generated is not None:
-                mcp_config_path = str(generated)
-        # This setting controls the Claude runtime only. Codex containment is
-        # resolved independently through the canonical sandbox policy.
-        specialist_permission_mode = os.environ.get("HYPERLOOM_SPECIALIST_PERMISSION_MODE", "").strip()
-        sub_config_kwargs: dict[str, Any] = {
-            "agent_backend": agent_backend,
-            "claude_executable": claude_bin or "claude",
-            "codex_executable": codex_bin,
-            "model": selected_model,
-            "framework_source_roots": framework_source_roots,
-            "mcp_config_path": mcp_config_path,
-        }
-        if specialist_permission_mode:
-            sub_config_kwargs["permission_mode"] = specialist_permission_mode
-        sub_config = SpecialistSubprocessConfig(**sub_config_kwargs)
-        runner = SpecialistRunner(
-            subprocess_config=sub_config,
-            session_dir=session_dir,
-            default_max_turns=max_turns,
-        )
-    else:
-
-        def _backend_factory(domain: Any) -> Any:
-            """Build the selected in-process agent SDK backend.
-
-            Args:
-                domain: The specialist domain requesting a backend.
-
-            Returns:
-                A configured Claude or Codex Agent SDK backend.
-            """
-            if agent_backend == AGENT_BACKEND_CODEX:
-                from hyperloom.orchestrator.roles.codex_agent import CodexAgentBackend
-
-                runtime_root = session_dir / "runtime" / "codex-specialist"
-                return CodexAgentBackend(
-                    model=selected_model,
-                    cwd=runtime_root,
-                    writable_roots=(runtime_root,),
-                    call_timeout_s=per_turn_max_seconds,
-                )
-            from hyperloom.orchestrator.roles.agent_role import SPECIALIST_INTENTS
-
-            return ClaudeBackend(
-                model=selected_model,
-                max_turns_default=max_turns,
-                allowed_intents=SPECIALIST_INTENTS,
-                turn_timeout_s=per_turn_max_seconds,
-                # Same label the subprocess dispatch mode reports, so switching
-                # modes does not move this spend between components.
-                attribution_component="specialist",
-                attribution_operation="run_agent",
+        claude_bin = resolve_claude_executable()
+        if not claude_bin:
+            raise RuntimeError(
+                "specialists run on the claude CLI, but none was found in $HYPERLOOM_CLAUDE_CLI_PATH, "
+                "$GEAK_CLAUDE_BIN or on PATH. src/hyperloom/inference_optimizer/assets/install_kernel_tools.sh puts it on PATH."
             )
 
-        runner = SpecialistRunner(
-            backend_factory=_backend_factory,
+    # Operator --specialist-mcp-config wins; else auto-generate one from the
+    # live KnowledgePlane so the subprocess has the PR Monitor MCP wired.
+    mcp_config_path: str | None = str(getattr(args, "specialist_mcp_config", "") or "") or None
+    if mcp_config_path is None and knowledge_plane is not None:
+        try:
+            pr_mcp_url = knowledge_plane.specialist_mcp_url()
+        except AttributeError:
+            pr_mcp_url = ""
+        generated = write_specialist_mcp_config(
             session_dir=session_dir,
-            default_max_turns=max_turns,
+            pr_monitor_mcp_url=pr_mcp_url,
         )
+        if generated is not None:
+            mcp_config_path = str(generated)
+    # This setting controls the Claude runtime only. Codex containment is
+    # resolved independently through the canonical sandbox policy.
+    specialist_permission_mode = os.environ.get("HYPERLOOM_SPECIALIST_PERMISSION_MODE", "").strip()
+    sub_config_kwargs: dict[str, Any] = {
+        "agent_backend": agent_backend,
+        "claude_executable": claude_bin or "claude",
+        "codex_executable": codex_bin,
+        "model": selected_model,
+        "framework_source_roots": framework_source_roots,
+        "mcp_config_path": mcp_config_path,
+    }
+    if specialist_permission_mode:
+        sub_config_kwargs["permission_mode"] = specialist_permission_mode
+    runner = SpecialistRunner(
+        subprocess_config=SpecialistSubprocessConfig(**sub_config_kwargs),
+        session_dir=session_dir,
+        default_max_turns=max_turns,
+    )
 
     async def _executor(ctx: Any) -> dict:
         """Adapter SubAgentRunner.run_task -> SpecialistRunner.run. Always

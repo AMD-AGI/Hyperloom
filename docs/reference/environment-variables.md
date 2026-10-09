@@ -59,8 +59,9 @@ The following variables configure filesystem paths for Hyperloom's runtime depen
 |-------------------------------------------|----------------------|--------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `REPO_ROOT`                               | No (recommended)     | `$(pwd)`                           | This Hyperloom checkout. Used to locate `.env`, skills, scripts. Falls back to the current working directory when unset.                                                                                                                     |
 | `INFERENCEX_PATH`                         | Conditional          | Auto-cloned by `install.sh`                                    | Path to the SemiAnalysisAI/InferenceX repo, used by baseline / target analysis. `install.sh` clones it when unset; only required if that auto-clone fails.                                                                                                                                          |
-| `TRACELENS_ROOT`                          | No (installer auto-clones) | `${HYPER`<br>`LOOM_CA`<br>`CHE_DIR:-`<br>`$REPO_ROOT`<br>`/.cache}/Tr`<br>`aceLens@<resolved-sha>` (auto-clone of `AMD-AGI/TraceLens` pinned to a fixed SHA) | `src/hyperloom/agents/kernel/scripts/install.sh` clones the public repo into the repo-local cache root when unset. Export it to opt into a pre-existing checkout you maintain — that is an explicit operator override and skips both the clone and the SHA pin. |
-| `GEAK_CLAUDE_BIN`                          | No (installer auto-resolves) | First of `$HOME/.local/bin/claude`, `/usr/local/bin/claude`, `$(command -v claude)`; written to `kernel-agent.env.sh` | Pins the Claude Code binary the GEAK SDK path uses, so `claude_agent_sdk` doesn't fall back to its older bundled CLI. Export to force a specific build. |
+| `TRACELENS_ROOT`                          | No (installer auto-clones) | `${HYPER`<br>`LOOM_CA`<br>`CHE_DIR:-`<br>`$REPO_ROOT`<br>`/.cache}/Tr`<br>`aceLens@<resolved-sha>` (auto-clone of `AMD-AGI/TraceLens` pinned to a fixed SHA) | `src/hyperloom/inference_optimizer/assets/install_kernel_tools.sh` clones the public repo into the repo-local cache root when unset. Export it to opt into a pre-existing checkout you maintain — that is an explicit operator override and skips both the clone and the SHA pin. |
+| `GEAK_CLAUDE_BIN`                          | No (installer auto-resolves) | `$(command -v claude)` after the installer has put the Claude Code CLI on `PATH`; written to `kernel-agent.env.sh` | Pins the Claude Code binary the GEAK SDK path uses to the same CLI the specialists run, so `claude_agent_sdk` doesn't fall back to its older bundled CLI. Hyperloom's own agents also run it when `HYPERLOOM_CLAUDE_CLI_PATH` is unset. |
+| `HYPERLOOM_`<br>`CLAUDE_CLI_PATH`         | No | Unset | The Claude Code binary Hyperloom's agents run: the in-process backend and subprocess specialists alike. When unset they run `GEAK_CLAUDE_BIN`, then `claude` on `PATH`; the in-process backend leaves the choice to `claude_agent_sdk` only when none is found. |
 | `USER_DATA_PATH`                          | No                   | `/workspace/hyperloom` if `/workspace` is writable, else `<cwd>/session` | Session directory root (logs, runs, mirrors, breakdown). Container images ship a writable `/workspace`; a bare-metal host that has neither falls back to the second form and the CLI logs which root it took.                                                |
 | `HYPERLOOM_`<br>`RUNTIME_DIR`             | No                   | `$USER_DATA_PATH/runtime` (installer)                               | Private writable runtime state. Codex SDK turns create a unique mode-`0700` `CODEX_HOME` here and remove it after the SDK client closes. When unset, Codex uses the first safe declared output root, then a run-local working directory; it never falls back to `/tmp` or a source checkout. If launch config points this parent at storage unsuitable for SQLite, set it to a private local directory instead — see [Codex SDK turns stall](troubleshooting.md#codex-sdk-turns-stall-or-tracelens-roofline-times-out). |
 | `INFERENCE_`<br>`OPTIMI`<br>`ZER_CU`<br>`RRENT_S`<br>`ESSION_DIR` | No (set by CLI) | Set at session boot | Absolute path to the active session directory. Written by the CLI when a session starts and inherited by every benchmark subprocess; session-path resolution prefers it over scanning `USER_DATA_PATH`. Do not set by hand. |
@@ -116,7 +117,7 @@ Set with CLI flags, not env vars. Pre-set `ISL` / `OSL` / `CONC` / `PRECISION` /
   `--extend-hours`.
 - **Quantization:** `--quantize`, `--quantize-scheme`.
 
-Run `inference_optimizer optimize --help` for the exhaustive flag list.
+Run `hyperloom optimize --help` for the exhaustive flag list.
 
 ---
 
@@ -536,7 +537,7 @@ do not publish it unchanged in support bundles.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `HYPERLOOM_QUANTIZE_ENABLED` | Unset | Primary switch (`1` to enable) for the AMD Quark PTQ quantization prelude driven by `--quantize` / `--quantize-scheme`. |
-| `QUARK_ROOT` | Unset | AMD Quark checkout used by the quantization-agent. Set this explicitly when quantization is enabled. |
+| `QUARK_ROOT` | Unset | AMD Quark checkout used by the quantization agent. Set this explicitly when quantization is enabled. |
 
 ---
 
@@ -595,7 +596,7 @@ from these benchmark limits and retain their existing contracts.
 | Variable | Default | Description |
 |---|---|---|
 | `INFERENCE_OPTIMIZER_REACTOR_TURN_TIMEOUT_SEC` | `1800` | Total wall-clock limit for each reactor stage, including backend startup, streamed output, retries, backoff, and cleanup. This is independent of backend `*_CALL_TIMEOUT_SEC` settings: for streamed Claude turns those settings bound idle time between SDK messages, and activity resets that idle timer. Reaching this total limit cancels the stage and records a crash; a shorter remaining session bound still ends the stage without recording a crash. A malformed value raises `EnvValueError`; a non-positive or non-finite value falls back to the default. |
-| `INFERENCE_OPTIMIZER_CLAUDE_TURN_TIMEOUT_SEC` | `1500` | Total wall-clock limit for one Claude Agent SDK call made by the orchestration backend (reactor turns, including the SWEEP cycle-directive handoff), covering every retry and the backoff between them; tearing the CLI down afterwards adds at most 30 s. Unlike the idle bound of `INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC`, the CLI's own API-retry messages do not extend it. Past it the call is cancelled, the CLI and every process it started are killed, and the turn fails as a backend error the loop retries on its next tick. In-process Claude specialists use `--specialist-per-turn-max-seconds` instead. |
+| `INFERENCE_OPTIMIZER_CLAUDE_TURN_TIMEOUT_SEC` | `1500` | Total wall-clock limit for one Claude Agent SDK call made by the orchestration backend (reactor turns, including the SWEEP cycle-directive handoff), covering every retry and the backoff between them; tearing the CLI down afterwards adds at most 30 s. Unlike the idle bound of `INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC`, the CLI's own API-retry messages do not extend it. Past it the call is cancelled, the CLI and every process it started are killed, and the turn fails as a backend error the loop retries on its next tick. |
 
 ## TraceLens analysis budgets
 
@@ -958,9 +959,8 @@ defaults to `trajectories × 26 s × 2 + 1800 s` (26 s per trajectory measured o
 8×MI355X at concurrency 16, doubled for a cold first round, plus boot), and never
 below the stock 7800 s: about 9600 s for smoke and 33,700 s for `full`.
 
-AgentX profiling starts when AIPerf reports its measured phase. The legacy
-`AGENTX_PROFILE_WARMUP_S` delay is ignored. `AGENTX_PROFILE_WINDOW_S` controls
-the capture window and defaults to 20 seconds; phase waiting is bounded by the
+AgentX profiling starts when AIPerf reports its measured phase.
+`AGENTX_PROFILE_WINDOW_S` controls the capture window and defaults to 20 seconds; phase waiting is bounded by the
 materialized benchmark timeout. Capture lifecycle status is
 written to a per-invocation `capture-status.json`; the adjacent
 `trace-manifest.json` records the selected primary and per-rank traces.
@@ -988,11 +988,9 @@ legacy fixed-delay capture is not aligned with the AIPerf phase signal.
 These are read by `os.environ` somewhere in the codebase but are
 internal-only — do not set them by hand:
 
-* `HYPERLOOM_KERNEL_AGENT_ROOT`: internal CLI-only handoff to the
-  kernel subprocess (Python constant `_KERNEL_AGENT_ROOT_ENV`).
 * `HYPERLOOM_HOST_PROBE`, `HYPERLOOM_HOST_PROBE_DEEP`,
   `HYPERLOOM_HOST_PROBE_DIR`, `HYPERLOOM_HOST_PROBE_ROOTS` (and the
-  `..._MAX_SITES` / `..._ARG_SAMPLES` caps): the same for the host-stall
+  `..._MAX_SITES` / `..._ARG_SAMPLES` caps): internal handoff to the host-stall
   evidence probe, armed by the profile leg that collects the evidence. The deep
   tier inflates host time by design, so setting it by hand distorts any trace
   collected alongside it.

@@ -147,7 +147,7 @@ class _ReapStub:
     def __init__(self) -> None:
         self.unpromotable: list[str] = []
         self.gpu_specialist_pool = SimpleNamespace(release=self._noop_async)
-        self.bus = SimpleNamespace(append_and_seq=self._noop_async)
+        self.bus = SimpleNamespace(append_and_seq=self._noop_async, record_observation=self._noop_async)
         self.shared_state = SimpleNamespace(phase="PRELUDE", macro_cycle=0)
         _outer = self
         self.writeback = SimpleNamespace(

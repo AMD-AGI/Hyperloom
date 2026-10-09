@@ -39,7 +39,7 @@ class SweepPhase(CoordinatorCollaborator):
         state = self.shared_state
         if (
             "orchestration" not in self.backends
-            or self._coord.orch_prompt.is_user_supplied
+            or self.orch_prompt.is_user_supplied
             or state.orchestration_memory.get("for_cycle") == state.macro_cycle
         ):
             return

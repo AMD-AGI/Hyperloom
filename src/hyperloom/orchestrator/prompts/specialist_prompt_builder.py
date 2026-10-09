@@ -973,8 +973,6 @@ class SpecialistPromptInputs:
     task_kind: str = ""
     prior_attempts: list[dict[str, Any]] = field(default_factory=list)
     pr_lead: dict[str, Any] = field(default_factory=dict)
-    # "A" = emit_intent, "B" = file write, "" = render both (render-script path).
-    exit_channel: str = ""
 
 
 # Section 1 — Identity & autonomy
@@ -2118,27 +2116,13 @@ def _section_source_hint(inp: SpecialistPromptInputs) -> list[str]:
 def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
     """Render Section 8 (output protocol) of the specialist prompt."""
     workspace = inp.workspace_path or "<workspace>"
-    channel = (inp.exit_channel or "").upper().strip()
     authors_patches = _authors_patches(inp)
 
-    exit_lines: list[str] = []
-    if channel == "A" or channel == "":
-        exit_lines.extend(
-            [
-                "**Exit — ``emit_intent`` tool:** call ``emit_intent`` exactly once",
-                "with intent type ``specialist_done`` and the payload schema below.",
-            ]
-        )
-    if channel == "B" or channel == "":
-        if channel == "":
-            exit_lines.append("")
-        exit_lines.extend(
-            [
-                "**Exit — file write (subprocess runtime):** write the same payload to",
-                f"``{workspace}/specialist_done.json`` as your **absolute last action**.",
-                "The dispatcher polls for that file as the exit signal; stop after writing.",
-            ]
-        )
+    exit_lines = [
+        "**Exit — file write:** write the ``specialist_done`` payload (schema below) to",
+        f"``{workspace}/specialist_done.json`` as your **absolute last action**.",
+        "The dispatcher polls for that file as the exit signal; stop after writing.",
+    ]
 
     if authors_patches:
         patch_fields = [

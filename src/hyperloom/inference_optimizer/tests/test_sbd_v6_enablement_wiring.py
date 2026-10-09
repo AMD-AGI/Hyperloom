@@ -172,7 +172,7 @@ def _lane(session_dir: Path, **overrides: Any):
         session_dir=str(session_dir),
         run_deadline=None,
         warm_specialist_params=_noop,
-        record_observation=_noop,
+        bus=types.SimpleNamespace(record_observation=_noop),
         maybe_enqueue_specialist_requested_build=_noop,
         maybe_escalate_to_targeted_build=_noop,
         _read_enablement_source_context=lambda _sig: "",
@@ -238,9 +238,6 @@ def _lane(session_dir: Path, **overrides: Any):
         ),
         gpu_lanes=types.SimpleNamespace(
             framework_authoring_lanes_ttl=lambda *a, **k: fake.framework_authoring_lanes_ttl(*a, **k),
-        ),
-        writeback=types.SimpleNamespace(
-            record_observation=lambda *a, **k: fake.record_observation(*a, **k),
         ),
         dispatcher=types.SimpleNamespace(
             time_budget_denial_for_action=lambda a: fake.time_budget_denial_for_action(a),

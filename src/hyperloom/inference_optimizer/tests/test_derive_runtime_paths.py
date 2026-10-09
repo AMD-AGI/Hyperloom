@@ -49,8 +49,9 @@ def test_preflight_derives_paths_from_the_actual_framework_argument(
     monkeypatch, tmp_path, framework, environment_framework
 ):
     monkeypatch.setenv("REPO_ROOT", str(tmp_path))
-    monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(tmp_path / "kernel"))
-    monkeypatch.delenv("KERNEL_AGENT_ENV", raising=False)
+    kernel_env = tmp_path / "kernel-agent.env.sh"
+    kernel_env.write_text("KERNEL_AGENT_LOG_LEVEL=INFO\n", encoding="utf-8")
+    monkeypatch.setenv("KERNEL_AGENT_ENV", str(kernel_env))
     monkeypatch.delenv("USER_DATA_PATH", raising=False)
     monkeypatch.delenv("FRAMEWORK", raising=False)
     if environment_framework is not None:
@@ -114,8 +115,7 @@ def test_preflight_runtime_file_reaches_children_without_shell_source(monkeypatc
     (magpie / "runtime_child_probe.py").write_text("VALUE = 'runtime-child'\n", encoding="utf-8")
     runtime = tmp_path / "kernel-agent.env.sh"
     runtime.write_text(
-        f"HYPERLOOM_KERNEL_AGENT_ROOT=/installed/kernel\nMAGPIE_PATH='{magpie}'\n"
-        "PYTHON=/host/python\nVIRTUAL_ENV=/host/venv\nINFERENCE_OPTIMIZER_FORCE_PYTHON=1\n",
+        f"MAGPIE_PATH='{magpie}'\nPYTHON=/host/python\nVIRTUAL_ENV=/host/venv\nINFERENCE_OPTIMIZER_FORCE_PYTHON=1\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("REPO_ROOT", str(repo))
@@ -124,7 +124,7 @@ def test_preflight_runtime_file_reaches_children_without_shell_source(monkeypatc
     monkeypatch.setenv("PYTHON", sys.executable)
     monkeypatch.setenv("VIRTUAL_ENV", "")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_FORCE_PYTHON", "1")
-    for key in ("HYPERLOOM_KERNEL_AGENT_ROOT", "MAGPIE_PATH", "PYTHONPATH"):
+    for key in ("MAGPIE_PATH", "PYTHONPATH"):
         monkeypatch.delenv(key, raising=False)
 
     class ReachedCredentials(Exception):

@@ -3,12 +3,10 @@
 
 """Runtime access to packaged KernelForge resources and writable state roots.
 
-KernelForge ships inside the Hyperloom distribution, so its knowledge base and
-examples always live at ``kernelforge/data`` next to the code -- there is no
-"repository root" to fall back to. Everything under that tree is read-only: it
-may sit in a root-owned ``site-packages`` and is replaced wholesale on upgrade.
-Mutable state therefore goes to a separately resolved writable root, never back
-into the package.
+Each read-only resource tree lives with the feature that owns it. Installed
+resources may sit in a root-owned ``site-packages`` and are replaced wholesale
+on upgrade. Mutable state therefore goes to a separately resolved writable
+root, never back into the package.
 """
 
 from __future__ import annotations
@@ -17,10 +15,22 @@ import os
 from pathlib import Path
 
 _PACKAGE_ROOT = Path(__file__).resolve().parent
-_DATA_ROOT = _PACKAGE_ROOT / "data"
+
+_PACKAGED_ROOTS = {
+    "examples": _PACKAGE_ROOT / "examples",
+    "local_knowledge": _PACKAGE_ROOT / "knowledge" / "local_wiki" / "resources",
+    "roofline_ceiling": _PACKAGE_ROOT / "roofline_ceiling" / "resources",
+}
 
 #: Directory name for mutable state under the writable root.
 _STATE_DIR_NAME = "kernelforge"
+
+
+def _packaged_resource(name: str) -> Path:
+    """Resolve a stable logical resource name to its owning package."""
+    head, separator, tail = str(name).partition("/")
+    root = _PACKAGED_ROOTS.get(head, _PACKAGE_ROOT / head)
+    return root / tail if separator else root
 
 
 def resource_path(name: str, project_root: str | Path | None = None, *, missing_ok: bool = False) -> Path:
@@ -40,7 +50,7 @@ def resource_path(name: str, project_root: str | Path | None = None, *, missing_
     candidates: list[Path] = []
     if project_root is not None:
         candidates.append(Path(project_root) / name)
-    candidates.append(_DATA_ROOT / name)
+    candidates.append(_packaged_resource(name))
 
     for candidate in candidates:
         if candidate.exists():
@@ -56,7 +66,7 @@ def default_project_root() -> Path:
 
     Must never be ``site-packages`` (read-only, wiped on upgrade) nor the process
     working directory (scatters state wherever the caller happened to be). The
-    precedence mirrors ``knowledge.experience_store.KnowledgeConfig.from_env``:
+    precedence mirrors ``knowledge.kb_store.config.KnowledgeConfig.from_env``:
 
     ``$KERNELFORGE_PROJECT_ROOT`` -> ``$USER_DATA_PATH/kernelforge`` ->
     ``~/.cache/hyperloom/kernelforge``

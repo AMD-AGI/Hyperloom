@@ -18,7 +18,6 @@ from hyperloom.inference_optimizer.framework_registry import server_args_env_nam
 from hyperloom.inference_optimizer.grid_server_args import merge_server_args
 from hyperloom.inference_optimizer.grid_server_args import tokenize_server_args_preserving_json
 from hyperloom.inference_optimizer.grid_server_args import validate_server_args_shell_safe
-from ._recipe_script import apply_recipe_levers, recipe_owns_argv
 
 
 @dataclass(frozen=True)
@@ -179,9 +178,6 @@ def config_launch_env(config_path: str | Path, base: Mapping[str, str]) -> dict[
 def reseal_config_argv(config_path: str | Path, text: str) -> ServerArgv:
     """Replace a materialised config's server argv, through the same seal.
 
-    On an agentic recipe the rendered copy is re-rendered without the flags the
-    replacement dropped, so the copy and the declared string stay one argv.
-
     Args:
         config_path: Path to the materialised YAML, rewritten in place.
         text: The replacement argument string.
@@ -194,20 +190,10 @@ def reseal_config_argv(config_path: str | Path, text: str) -> ServerArgv:
         ValueError: When the replacement carries shell control syntax.
     """
     path = Path(config_path)
-    previous = config_server_argv(path).argv
     cfg = _load_config(path)
     bench = cfg.setdefault("benchmark", {})
     envs = bench.setdefault("envs", {})
     envs[server_args_env_name(bench.get("framework"))] = text.strip()
-    if recipe_owns_argv(bench):
-        kept = set(text.split())
-        envs["AGENTX_SERVER_SCRIPT"] = apply_recipe_levers(
-            bench,
-            inherited_script=str(envs.get("AGENTX_SERVER_SCRIPT") or ""),
-            server_args=text,
-            remove_args=[token for token in previous if token.startswith("--") and token not in kept],
-            env_levers={},
-        )
     sealed = seal_server_argv(envs, bench.get("framework"))
     with path.open("w", encoding="utf-8") as handle:
         yaml.safe_dump(cfg, handle, sort_keys=False)

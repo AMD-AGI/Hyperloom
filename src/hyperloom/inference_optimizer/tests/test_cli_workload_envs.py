@@ -159,13 +159,7 @@ def test_single_node_explicit_tp_overrides_stale_env(monkeypatch):
     """`optimize --tp N` must reach YAML materialization on single-node."""
     monkeypatch.setenv("TP", "8")
 
-    _export_workload_envs_for_optimize(
-        _ns(conc=64),
-        nodes_resolved=1,
-        tp_resolved=4,
-        ep_resolved=1,
-        argv=["optimize", "--tp", "4"],
-    )
+    _export_workload_envs_for_optimize(_ns(conc=64), tp_resolved=4, ep_resolved=1)
 
     assert os.environ["TP"] == "4"
 
@@ -177,35 +171,11 @@ def test_single_node_exports_resolved_workload_envs(monkeypatch):
     for key in ("TP", "CONC", "EP"):
         monkeypatch.delenv(key, raising=False)
 
-    _export_workload_envs_for_optimize(
-        _ns(conc=64),
-        nodes_resolved=1,
-        tp_resolved=1,
-        ep_resolved=1,
-        argv=["optimize", "--model", "/m"],
-    )
+    _export_workload_envs_for_optimize(_ns(conc=64), tp_resolved=1, ep_resolved=1)
 
     assert os.environ["TP"] == "1"
     assert os.environ["CONC"] == "64"
     assert os.environ["EP"] == "1"
-
-
-def test_multi_node_always_exports_workload_envs(monkeypatch):
-    """Multi-node child workers still receive resolved workload values."""
-    for key in ("TP", "CONC", "EP"):
-        monkeypatch.delenv(key, raising=False)
-
-    _export_workload_envs_for_optimize(
-        _ns(conc=32),
-        nodes_resolved=2,
-        tp_resolved=8,
-        ep_resolved=2,
-        argv=["optimize", "--nodes", "2"],
-    )
-
-    assert os.environ["TP"] == "8"
-    assert os.environ["CONC"] == "32"
-    assert os.environ["EP"] == "2"
 
 
 def test_operator_server_args_env_routes_to_vllm_args(tmp_path, monkeypatch):

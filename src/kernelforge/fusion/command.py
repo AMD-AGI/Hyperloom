@@ -679,8 +679,7 @@ def _verdict_override(
     "llm_model",
     default=None,
     help="Agent model. Explicit value wins; otherwise uses provider-specific "
-    "$CODEX_MODEL/$CLAUDE_MODEL, then the registered provider default. "
-    "``--model`` is accepted as an alias (Hyperloom forge-fuse spelling).",
+    "$CODEX_MODEL/$CLAUDE_MODEL, then the registered provider default.",
 )
 @click.option("--max-turns", default=100, type=int, help="Max authoring turns.")
 @click.option(
@@ -2581,12 +2580,3 @@ def _framework_repo_root(source_file: str, framework_root: str) -> str:
             return _package_root(source_file) or toplevel or framework_root or ""
     # Not a git work tree at all (plain pip install).
     return _package_root(source_file) or framework_root or ""
-
-
-# The command is registered on the kernelforge CLI as `forge-fuse`; this alias keeps `python -m
-# kernelforge.fusion.command` working for direct debugging.
-main = run
-
-
-if __name__ == "__main__":
-    main()
