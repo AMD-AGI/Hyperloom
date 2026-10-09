@@ -78,6 +78,7 @@ from ._inferencex_patcher import (
     eval_probe_targets_exist,
 )
 from ._launch_evidence import build_launch_evidence, persist_launch_evidence
+from ...measurement.runtime_findings import persist_runtime_findings, scan_server_log
 from ._server_argv import seal_server_argv
 
 # Re-exported from sibling modules to keep the module namespace intact.
@@ -2052,7 +2053,8 @@ async def run_grid(
             results[-1].output_throughput or 0.0,
         )
         await _report_finished_variant(i)
-    _attach_grid_launch_evidence(
+    await asyncio.to_thread(
+        _attach_grid_launch_evidence,
         results,
         grid=grid,
         output_root=output_root,
@@ -2149,6 +2151,7 @@ def _attach_grid_launch_evidence(
         )
         result.launch_evidence = evidence
         result.launch_evidence_path = persist_launch_evidence(evidence, slot=slot)
+        persist_runtime_findings(scan_server_log(actual_log, evidence["framework"]), slot=slot)
 
 
 def _safe(name: str) -> str:

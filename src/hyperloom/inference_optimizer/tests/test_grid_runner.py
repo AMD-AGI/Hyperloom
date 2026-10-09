@@ -172,6 +172,31 @@ def test_grid_evidence_skips_prelaunch_failure(tmp_path: Path) -> None:
 
     assert result.launch_evidence == {}
     assert not (output_root / "variant_00_unsupported" / "launch_evidence.json").exists()
+    assert not (output_root / "variant_00_unsupported" / "runtime_findings.json").exists()
+
+
+def test_grid_evidence_writes_runtime_findings_next_to_launch_evidence(tmp_path: Path) -> None:
+    output_root = tmp_path / "runs"
+    slot = output_root / "variant_00_v"
+    slot.mkdir(parents=True)
+    (slot / "config.yaml").write_text(yaml.safe_dump({"benchmark": {"framework": "vllm"}}), encoding="utf-8")
+    (slot / "server.log").write_text(
+        "WARNING [interface.py:1461] Unknown vLLM environment variable detected: VLLM_FOO\n", encoding="utf-8"
+    )
+    result = _grid_runner.VariantResult(name="v", extra_server_args="", extra_envs={}, status="succeeded")
+
+    _grid_runner._attach_grid_launch_evidence(
+        [result],
+        grid=[_grid_runner.GridVariant("v")],
+        output_root=output_root,
+        caller_reused_ready_server=False,
+    )
+
+    report = json.loads((slot / "runtime_findings.json").read_text(encoding="utf-8"))
+    assert report["log_path"] == str(slot / "server.log")
+    assert [(f["rule_id"], f["subject"]) for f in report["findings"] if f["status"] == "detected"] == [
+        ("vllm.unknown_env", "VLLM_FOO")
+    ]
 
 
 def test_variant_result_carries_error_class_field():
