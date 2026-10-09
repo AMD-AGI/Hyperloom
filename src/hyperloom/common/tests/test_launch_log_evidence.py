@@ -225,3 +225,44 @@ def test_log_line_scan_is_capped(tmp_path: Path, lines: int) -> None:
 
 def test_missing_log_is_unavailable(tmp_path: Path) -> None:
     assert evidence.observed_sglang_server_identity_from_log(str(tmp_path / "missing.log")) == {}
+
+
+def test_the_config_read_keeps_the_settings_identity_discards(tmp_path: Path) -> None:
+    """The filter needs the tuned knobs, which the identity allowlist drops.
+
+    Both engines, one record each. A value that is not a literal (an object
+    repr, which vLLM prints routinely) costs its own key and not the record.
+    """
+    cases = {
+        "sglang": (
+            "[2026-09-17 00:00:00] server_args={record}",
+            {"tp_size": 8, "enable_hierarchical_cache": True, "cuda_graph_bs": [1, 2, 4]},
+            {"tp_size": 8},
+        ),
+        "vllm": (
+            "INFO 09-17 00:00:00 non-default args: {record}",
+            {"tensor_parallel_size": 8, "enable_prefix_caching": True, "moe_backend": "aiter"},
+            {"tensor_parallel_size": 8},
+        ),
+    }
+    for framework, (line, record, identity) in cases.items():
+        log = tmp_path / f"{framework}.log"
+        # ``Config(x=1)`` is spliced in after repr: it is not a literal.
+        text = repr(record)[:-1] + ", 'sampling': Config(x=1)}"
+        log.write_text(line.format(record=text) + "\n", encoding="utf-8")
+
+        assert evidence.observed_server_config_from_log(str(log), framework) == record, framework
+        # The same record through the identity read keeps only its allowlisted key.
+        assert evidence.observed_server_identity_from_log(str(log), framework) == identity, framework
+
+
+def test_flag_spellings_fold_to_the_name_the_engine_reports() -> None:
+    """chaojhou 1: parallelism is compared, so ``--dp`` must meet ``dp_size`` and not slip past it.
+
+    One flag, two keys: SGLang reports ``tp_size`` and vLLM ``tensor_parallel_size``,
+    so folding to SGLang's name would hide the setting from a vLLM record.
+    """
+    for flag in ("--dp", "--dp-size", "--data-parallel-size"):
+        assert evidence.launch_flag_setting_name(flag, "sglang") == "dp_size", flag
+    assert evidence.launch_flag_setting_name("--tensor-parallel-size", "sglang") == "tp_size"
+    assert evidence.launch_flag_setting_name("--tensor-parallel-size", "vllm") == "tensor_parallel_size"
