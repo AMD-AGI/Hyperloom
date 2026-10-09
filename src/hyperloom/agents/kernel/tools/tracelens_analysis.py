@@ -478,33 +478,25 @@ def _resolve_min_busy_ratio() -> float:
         return _DEFAULT_CHUNK_QUALITY_MIN_BUSY_RATIO
 
 
-def _busy_ratio(num_events: float, busy_us: float, dur_us: float) -> float | None:
-    """Compute the clamped busy ratio for a chunk.
-
-    Args:
-        num_events: GPU event count for the chunk.
-        busy_us: GPU busy duration in microseconds.
-        dur_us: Total chunk duration in microseconds.
-
-    Returns:
-        ``busy_us / dur_us`` clamped to ``[0, 1]``, or ``None`` when undefined
-        (the caller defers to the N25 structural gate).
-    """
-    if dur_us <= 0.0 or num_events <= 0:
-        return None
-    return max(0.0, min(1.0, busy_us / dur_us))
-
-
-def _check_selected_chunk_has_gpu_events_quality(
+def _check_chunk_quality(
     *,
     split_dir: "Path",
     selected_chunk: "Path",
     mode: str,
     available_modes: "dict[str, tuple[str, list[Path]]]",
 ) -> "dict[str, Any] | None":
-    """Quality gate complementing the structural GPU-events gate.
+    """Quality gate on the selected steady-state chunk.
 
-    See the module-level chunk-quality comment for the gate's rationale.
+    Reads ``busy_ratio`` directly from the splitter's ``execution_details.csv``
+    (the fraction of the chunk window during which the GPU was executing kernels,
+    as computed by the splitter from ``gpu_busy_duration / gpu_duration``).
+
+    A chunk whose ``busy_ratio`` is below the configured threshold is refused
+    when a materially better alternative mode exists.  Because the splitter emits
+    ``busy_ratio`` as a measured field, the zero-GPU-events case
+    (``busy_ratio=0.0``) is handled here without a separate structural gate: a
+    chunk with no kernel events produces ``busy_ratio=0.0``, which naturally
+    fails the threshold check and triggers the alternate-mode search.
 
     Args:
         split_dir: Directory holding the splitter's ``execution_details.csv``.
@@ -516,7 +508,7 @@ def _check_selected_chunk_has_gpu_events_quality(
     Returns:
         ``None`` when the chunk is acceptable (busy_ratio >= threshold), no
         alternate is materially better, or the CSV/row is absent. Otherwise a
-        ``steady_state_chunk_low_quality`` warning dict (same shape as N25).
+        ``steady_state_chunk_low_quality`` warning dict.
     """
     details_path = split_dir / "execution_details.csv"
     if not details_path.is_file():
@@ -549,43 +541,40 @@ def _check_selected_chunk_has_gpu_events_quality(
                 continue
         return None
 
-    def _stats(row: "dict[str, str] | None") -> "tuple[int, float, float]":
-        """Extract ``(num_gpu_events, gpu_busy_duration, gpu_duration)``.
+    def _read_busy_ratio(row: "dict[str, str] | None") -> float:
+        """Read ``busy_ratio`` directly from the splitter CSV row.
 
         Args:
             row (dict[str, str] | None): A splitter CSV row, or ``None``.
 
         Returns:
-            tuple[int, float, float]: The event count, busy duration (us),
-                and total duration (us); all zero when ``row`` is ``None``.
+            float: The busy ratio clamped to ``[0, 1]``, or ``0.0`` when the
+                row is ``None``.
         """
         if row is None:
-            return 0, 0.0, 0.0
+            return 0.0
+        return max(0.0, min(1.0, float(row["busy_ratio"])))
 
-        def _f(k: str) -> float:
-            """Read a numeric field from the CSV row.
+    def _num_gpu_events(row: "dict[str, str] | None") -> int:
+        """Read ``num_gpu_events`` from the splitter CSV row for observability.
 
-            Args:
-                k (str): Column name to read.
+        Args:
+            row (dict[str, str] | None): A splitter CSV row, or ``None``.
 
-            Returns:
-                float: The parsed value, or ``0.0`` when missing/unparseable.
-            """
-            try:
-                return float(row.get(k) or "0") or 0.0
-            except (TypeError, ValueError):
-                return 0.0
-
-        return int(_f("num_gpu_events")), _f("gpu_busy_duration"), _f("gpu_duration")
+        Returns:
+            int: The GPU event count, or ``0`` when absent or unparseable.
+        """
+        if row is None:
+            return 0
+        try:
+            return int(float(row.get("num_gpu_events") or "0"))
+        except (TypeError, ValueError):
+            return 0
 
     selected_row = _row_for(selected_chunk)
     if selected_row is None:
         return None
-    sel_events, sel_busy, sel_dur = _stats(selected_row)
-    sel_ratio = _busy_ratio(sel_events, sel_busy, sel_dur)
-    if sel_ratio is None:
-        # Can't measure ratio; defer to the structural-empty gate.
-        return None
+    sel_ratio = _read_busy_ratio(selected_row)
     threshold = _resolve_min_busy_ratio()
     if sel_ratio >= threshold:
         return None
@@ -596,10 +585,7 @@ def _check_selected_chunk_has_gpu_events_quality(
         if other_mode == mode or not chunks:
             continue
         other_row = _row_for(chunks[0])
-        if other_row is None:
-            continue
-        oth_events, oth_busy, oth_dur = _stats(other_row)
-        oth_ratio = _busy_ratio(oth_events, oth_busy, oth_dur)
+        oth_ratio = _read_busy_ratio(other_row)
         if oth_ratio is None:
             continue
         if oth_ratio >= threshold and (oth_ratio - sel_ratio) >= _CHUNK_QUALITY_ALTERNATE_MARGIN:
@@ -610,14 +596,13 @@ def _check_selected_chunk_has_gpu_events_quality(
     # Best alternate first (the retry path picks the head of non_empty_modes).
     alternates.sort(key=lambda mr: -mr[1])
     non_empty_modes = [m for m, _r in alternates]
+    sel_events = _num_gpu_events(selected_row)
     return {
         "code": "steady_state_chunk_low_quality",
         "severity": "blocking",
         "requested_mode": mode,
         "selected_chunk": str(selected_chunk),
         "num_gpu_events": sel_events,
-        "gpu_busy_duration": sel_busy,
-        "gpu_duration": sel_dur,
         "busy_ratio": sel_ratio,
         "threshold": threshold,
         "non_empty_modes": non_empty_modes,
@@ -626,17 +611,16 @@ def _check_selected_chunk_has_gpu_events_quality(
             "Re-issue roofline with env "
             "INFERENCE_OPTIMIZER_STEADY_STATE_MODE set to one of "
             f"{non_empty_modes}. The TraceLens splitter chunk for the "
-            f"requested mode '{mode}' is {sel_ratio * 100:.2f}% busy "
-            f"(threshold {threshold * 100:.0f}%) -- non-empty but "
-            "substantively garbage. Most common cause for prefill-"
-            "heavy workloads: profile window misalignment "
-            "(_workload_envs.delay_iters formula only considers OSL, "
-            "so high-ISL workloads land in pure-decode windows)."
+            f"requested mode '{mode}' has busy_ratio={sel_ratio * 100:.2f}% "
+            f"(threshold {threshold * 100:.0f}%) -- "
+            f"{'zero GPU events' if sel_events == 0 else 'non-empty but substantively garbage'}. "
+            "Most common cause for prefill-heavy workloads: profile window "
+            "misalignment (_workload_envs.delay_iters formula only considers "
+            "OSL, so high-ISL workloads land in pure-decode windows)."
         ),
         "message": (
             f"TraceLens splitter selected chunk ({mode}) busy_ratio="
-            f"{sel_ratio * 100:.3f}% (events={sel_events}, "
-            f"busy={sel_busy:.1f}us / dur={sel_dur:.1f}us) -- below "
+            f"{sel_ratio * 100:.3f}% (events={sel_events}) -- below "
             f"the {threshold * 100:.0f}% threshold and alternate "
             f"modes have higher busy_ratio. Refusing to feed it into "
             "TraceLens analysis (would produce a misleading analysis.md "
@@ -4604,7 +4588,7 @@ def _validate_selected_chunk(
 
     Returns a list of health warning dicts (empty when the chunk passes).
     """
-    low_quality_warning = _check_selected_chunk_has_gpu_events_quality(
+    low_quality_warning = _check_chunk_quality(
         split_dir=split_dir,
         selected_chunk=selected_chunk,
         mode=mode,

@@ -34,6 +34,12 @@ def _write_exec_details(
     split_dir: Path,
     rows: list[dict[str, object]],
 ) -> Path:
+    """Write ``execution_details.csv`` for tests.
+
+    Computes ``busy_ratio`` from ``gpu_busy_duration / gpu_duration`` when not
+    explicitly supplied and ``gpu_duration > 0``, mirroring the splitter.
+    Leaves it empty when ``gpu_duration == 0`` (undefined ratio).
+    """
     path = split_dir / "execution_details.csv"
     cols = [
         "idx",
@@ -42,6 +48,7 @@ def _write_exec_details(
         "num_gpu_events",
         "gpu_duration",
         "gpu_busy_duration",
+        "busy_ratio",
         "phase_num_prefill",
         "phase_num_prefilldecode",
         "phase_num_decode",
@@ -55,6 +62,14 @@ def _write_exec_details(
         for row in rows:
             full = {c: "" for c in cols}
             full.update({k: str(v) for k, v in row.items()})
+            # Compute busy_ratio from raw fields when not explicitly provided.
+            if not full["busy_ratio"]:
+                try:
+                    dur = float(full["gpu_duration"] or "0")
+                    busy = float(full["gpu_busy_duration"] or "0")
+                    full["busy_ratio"] = str(max(0.0, min(1.0, busy / dur)) if dur > 0 else 0.0)
+                except (TypeError, ValueError, ZeroDivisionError):
+                    full["busy_ratio"] = "0.0"
             w.writerow(full)
     return path
 
@@ -107,7 +122,7 @@ def test_dsr1_style_low_quality_chunk_emits_warning(tl_module, split_dir):
         "decode_only": ("decode_only_steady_state", []),
         "prefilldecode": ("prefilldecode_steady_state", [pd]),
     }
-    result = tl_module._check_selected_chunk_has_gpu_events_quality(
+    result = tl_module._check_chunk_quality(
         split_dir=split_dir,
         selected_chunk=mixed,
         mode="mixed",
@@ -150,7 +165,7 @@ def test_no_better_alternate_emits_no_warning(tl_module, split_dir):
         "decode_only": ("decode_only_steady_state", []),
         "prefilldecode": ("prefilldecode_steady_state", [pd]),
     }
-    result = tl_module._check_selected_chunk_has_gpu_events_quality(
+    result = tl_module._check_chunk_quality(
         split_dir=split_dir,
         selected_chunk=mixed,
         mode="mixed",
@@ -181,7 +196,7 @@ def test_high_quality_chunk_passes(tl_module, split_dir):
         "decode_only": ("decode_only_steady_state", []),
         "prefilldecode": ("prefilldecode_steady_state", []),
     }
-    result = tl_module._check_selected_chunk_has_gpu_events_quality(
+    result = tl_module._check_chunk_quality(
         split_dir=split_dir,
         selected_chunk=mixed,
         mode="mixed",
@@ -227,7 +242,7 @@ def test_quality_threshold_overridable_via_env(
         raising=False,
     )
     assert (
-        tl_module._check_selected_chunk_has_gpu_events_quality(
+        tl_module._check_chunk_quality(
             split_dir=split_dir,
             selected_chunk=mixed,
             mode="mixed",
@@ -240,7 +255,7 @@ def test_quality_threshold_overridable_via_env(
         "INFERENCE_OPTIMIZER_CHUNK_QUALITY_MIN_BUSY_RATIO",
         "0.20",
     )
-    result = tl_module._check_selected_chunk_has_gpu_events_quality(
+    result = tl_module._check_chunk_quality(
         split_dir=split_dir,
         selected_chunk=mixed,
         mode="mixed",
@@ -277,7 +292,7 @@ def test_zero_duration_does_not_divide_by_zero(tl_module, split_dir):
         "decode_only": ("decode_only_steady_state", []),
         "prefilldecode": ("prefilldecode_steady_state", [pd]),
     }
-    result = tl_module._check_selected_chunk_has_gpu_events_quality(
+    result = tl_module._check_chunk_quality(
         split_dir=split_dir,
         selected_chunk=mixed,
         mode="mixed",
@@ -286,6 +301,51 @@ def test_zero_duration_does_not_divide_by_zero(tl_module, split_dir):
     # gpu_duration==0 → either None or a low-quality warning, but must not crash.
     if result is not None:
         assert result["code"] == "steady_state_chunk_low_quality"
+
+
+def test_zero_gpu_events_chunk_fires_warning(tl_module, split_dir):
+    """Zero-GPU-events chunk (busy_ratio=0.0) fires the quality warning when a better alternate exists.
+
+    Previously the structural gate handled this; with busy_ratio from the splitter
+    the quality gate covers it directly: busy_ratio=0.0 < threshold → alternate search.
+    """
+    chunks = _make_chunks(split_dir)
+    mixed = chunks["mixed_steady_state"]
+    pd = chunks["prefilldecode_steady_state"]
+    _write_exec_details(
+        split_dir,
+        [
+            {
+                "output_path": str(mixed),
+                "num_gpu_events": 0,
+                "gpu_duration": 2000000.0,
+                "gpu_busy_duration": 0.0,  # busy_ratio=0.0
+            },
+            {
+                "output_path": str(pd),
+                "num_gpu_events": 2790,
+                "gpu_duration": 4538984.0,
+                "gpu_busy_duration": 2723452.0,  # 60% busy
+            },
+        ],
+    )
+    available = {
+        "mixed": ("mixed_steady_state", [mixed]),
+        "decode_only": ("decode_only_steady_state", []),
+        "prefilldecode": ("prefilldecode_steady_state", [pd]),
+    }
+    result = tl_module._check_chunk_quality(
+        split_dir=split_dir,
+        selected_chunk=mixed,
+        mode="mixed",
+        available_modes=available,
+    )
+    assert result is not None
+    assert result["code"] == "steady_state_chunk_low_quality"
+    assert result["num_gpu_events"] == 0
+    assert result["busy_ratio"] == 0.0
+    assert "prefilldecode" in result["non_empty_modes"]
+
 
 
 def test_missing_execution_details_csv_returns_none(tl_module, split_dir):
@@ -298,7 +358,7 @@ def test_missing_execution_details_csv_returns_none(tl_module, split_dir):
         "prefilldecode": ("prefilldecode_steady_state", []),
     }
     assert (
-        tl_module._check_selected_chunk_has_gpu_events_quality(
+        tl_module._check_chunk_quality(
             split_dir=split_dir,
             selected_chunk=mixed,
             mode="mixed",
