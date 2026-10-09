@@ -13,9 +13,9 @@ the annotations cannot.
 
 | Content | Origin | Licence | Why it ships |
 |---|---|---|---|
-| `src/kernelforge/data/local_knowledge/languages/flydsl/API_docs/examples/0{1,2,3,4}-*.py` | FlyDSL project | Apache-2.0 | Working reference kernels the agent reads when authoring FlyDSL. Four files. `04-preshuffle_gemm.py` carries no upstream header — see the note in `REUSE.toml`. |
-| `src/kernelforge/data/examples/flydsl-softmax-forge-loop/softmax_kernel.py` | FlyDSL project | Apache-2.0 | Starting point of a runnable example campaign. |
-| `src/kernelforge/data/examples/triton2flydsl-mxfp8-grouped-gemm/mxfp8_grouped_gemm.py` | SGLang (`kernels/ops/moe/mxfp8_moe_amd_gfx95.py`) | Apache-2.0 | The protected Triton oracle for a rewrite example. The pipeline reads it and never edits it; the FlyDSL port it produces is AMD's. |
+| `src/kernelforge/knowledge/local_wiki/resources/languages/flydsl/API_docs/examples/0{1,2,3,4}-*.py` | FlyDSL project | Apache-2.0 | Working reference kernels the agent reads when authoring FlyDSL. Four files. `04-preshuffle_gemm.py` carries no upstream header — see the note in `REUSE.toml`. |
+| `src/kernelforge/examples/flydsl-softmax-forge-loop/softmax_kernel.py` | FlyDSL project | Apache-2.0 | Starting point of a runnable example campaign. |
+| `src/kernelforge/examples/triton2flydsl-mxfp8-grouped-gemm/mxfp8_grouped_gemm.py` | SGLang (`kernels/ops/moe/mxfp8_moe_amd_gfx95.py`) | Apache-2.0 | The protected Triton oracle for a rewrite example. The pipeline reads it and never edits it; the FlyDSL port it produces is AMD's. |
 
 ## Named but not vendored
 

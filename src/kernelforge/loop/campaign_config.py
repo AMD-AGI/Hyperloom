@@ -17,11 +17,11 @@ from pathlib import Path
 
 from kernelforge.llm.git import git
 from kernelforge.kernel_backends.constants import KERNEL_BACKENDS
-from kernelforge.knowledge.experience_sink import (
+from kernelforge.knowledge.kb_store.identity.source_resolution import (
     infer_source_owner_framework,
     resolve_operation,
 )
-from kernelforge.knowledge.implementation_identity import (
+from kernelforge.knowledge.kb_store.identity.implementation import (
     hash_implementation_identity,
     implementation_signature,
 )
@@ -31,7 +31,8 @@ from kernelforge.durable_io import atomic_write_text
 from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
 
 
-_GPU_TARGET_RE = re.compile(r"\bgfx[0-9a-f]+\b", re.IGNORECASE)
+# The trailing lookahead skips rocminfo's generic ISA names (``gfx12-generic``), listed beside the concrete target.
+_GPU_TARGET_RE = re.compile(r"\bgfx[0-9a-f]+\b(?!-)", re.IGNORECASE)
 _AMDGPU_ASSEMBLY_RE = re.compile(
     r"^\s*\.(?:amdgcn_target\s+[\"']?amdgcn-amd-amdhsa\b|amdhsa_kernel\b|amdgpu_hsa_kernel\b)",
     re.MULTILINE,

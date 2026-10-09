@@ -2394,6 +2394,7 @@ class TestRunGemmTuningHandler:
                     "PYTORCH_TUNABLEOP_TUNING": "1",
                     "HL_TUNABLEOP_MODE": "candidate",
                 },
+                "unset_envs": ["PYTORCH_TUNABLEOP_ENABLED", "DROP_ME"],
             },
         )
         captured: dict = {}
@@ -2452,9 +2453,34 @@ class TestRunGemmTuningHandler:
         assert task.params["extra_envs"]["OSL"] == "512"
         assert task.params["extra_envs"]["MAX_MODEL_LEN"] == "4096"
         assert "HL_TUNABLEOP_MODE" in task.params["unset_envs"]
+        assert "DROP_ME" in task.params["unset_envs"]
+        assert not [name for name in task.params["unset_envs"] if name.startswith("PYTORCH_TUNABLEOP_")]
         assert captured["init"]["shared_state"] is not state
         assert captured["init"]["shared_state"].baseline_eager_fallback is False
         assert state.baseline_eager_fallback is True
+
+        import yaml
+
+        from hyperloom.orchestrator.actions.executors._workload_envs import materialize_config_with_envs
+
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+        monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "0")
+        base = tmp_path / "base.yaml"
+        base.write_text(yaml.safe_dump({"benchmark": {"framework": "vllm", "model": "/models/m", "envs": {}}}))
+        materialized = materialize_config_with_envs(
+            base,
+            tmp_path / "materialized",
+            extra_envs=task.params["extra_envs"],
+            unset_envs=task.params["unset_envs"],
+        )
+        envs = yaml.safe_load(materialized.read_text())["benchmark"]["envs"]
+        assert envs["PYTORCH_TUNABLEOP_ENABLED"] == "1"
+        assert envs["PYTORCH_TUNABLEOP_RECORD_UNTUNED"] == "1"
+        assert (
+            envs["PYTORCH_TUNABLEOP_UNTUNED_FILENAME"]
+            == task.params["extra_envs"]["PYTORCH_TUNABLEOP_UNTUNED_FILENAME"]
+        )
+        assert "HL_TUNABLEOP_MODE" not in envs
 
     def test_vllm_block_fp8_profile_capture_extracts_runtime_shapes(self, tmp_path, monkeypatch):
         import gzip

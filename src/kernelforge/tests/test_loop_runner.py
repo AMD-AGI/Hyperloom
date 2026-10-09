@@ -6376,7 +6376,7 @@ def test_a_snapshot_write_failure_records_degradation_and_continues(
         raise OSError("disk full")
 
     monkeypatch.setattr(
-        "kernelforge.knowledge.pr_monitor_refs.commit_snapshot",
+        "kernelforge.knowledge.pr_knowledge.references.commit_snapshot",
         fail_snapshot,
     )
 

@@ -214,6 +214,28 @@ def _record_geak_integration(entry: dict[str, Any], *, kernel_id: str, macro_cyc
     )
 
 
+def geak_absent_backends(eval_dir: str) -> dict[str, str]:
+    """``{backend: probe}`` for the backends GEAK's environment report lists as absent.
+
+    GEAK records them in ``<eval_dir>/env_report.json`` and deep in its final
+    report; they are provisioning gaps, and nothing else carries them to the
+    optimizer's log or reports.
+    """
+    if not eval_dir:
+        return {}
+    try:
+        report = json.loads((Path(eval_dir) / "env_report.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    absent = report.get("absent_backends") if isinstance(report, dict) else None
+    if not isinstance(absent, dict):
+        return {}
+    return {
+        str(name): str(entry.get("probe") or "") if isinstance(entry, dict) else str(entry or "")
+        for name, entry in absent.items()
+    }
+
+
 @dataclass(frozen=True)
 class KernelExitFacts:
     """What the phase machine's KERNEL exit reads from the task queue."""
@@ -1707,6 +1729,7 @@ class KernelPhase(CoordinatorCollaborator):
                     ),
                     "ref_tput": result.get("ref_tput"),
                     "orchestrator_best_tput_same_config": result.get("orchestrator_best_tput_same_config"),
+                    **({"absent_backends": result["absent_backends"]} if result.get("absent_backends") else {}),
                 },
                 record_delegation=False,
             )
@@ -2357,6 +2380,13 @@ class KernelPhase(CoordinatorCollaborator):
         kill_timeout_sec: int | None = None,
     ) -> None:
         """Record the delegated GEAK runner's terminal state."""
+        absent = geak_absent_backends(str(result.get("eval_dir") or handoff.get("eval_dir") or ""))
+        if absent:
+            result["absent_backends"] = absent
+            log.warning(
+                "GEAK could not use these backends (provisioning gaps, not measured no-wins): %s",
+                "; ".join(f"{name}: {probe}" for name, probe in absent.items()),
+            )
         recorder = self.timeline()
         if recorder is None:
             return
@@ -4120,7 +4150,7 @@ class KernelPhase(CoordinatorCollaborator):
             return False
         return cur / last_rl >= ROOFLINE_WATERMARK_RATIO
 
-    async def _release_finished_roofline_gate(self) -> None:
+    async def release_finished_roofline_gate(self) -> None:
         """Drop an in-flight marker that names a roofline which already finished."""
         pending = (self.shared_state.auto_roofline_pending_task_id or "").strip()
         if not pending:
@@ -4143,7 +4173,7 @@ class KernelPhase(CoordinatorCollaborator):
         reason: str,
     ) -> bool:
         """Enqueue a fresh roofline if the watermark crossed; idempotency-keyed via ``reason`` and the roofline tput it crossed from, stamps auto_roofline_pending_task_id. Returns True when enqueued."""
-        await self._release_finished_roofline_gate()
+        await self.release_finished_roofline_gate()
         if not self._needs_roofline_for_watermark():
             return False
         # Crossings share a reason; the anchor separates this crossing's task from an earlier one's.

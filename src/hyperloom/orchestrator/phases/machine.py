@@ -205,6 +205,11 @@ class MachinePhase(CoordinatorCollaborator):
         kernel_facts = await self._coord.phase_kernel.exit_facts()
         optimize_enabled = self.optimize_enabled()
         in_enablement = str(state.phase or "").upper() == _phase_state.PHASE_ENABLEMENT
+        if str(state.phase or "").upper() == _phase_state.PHASE_PRELUDE or in_enablement:
+            # Both phases hold their exit for this marker. A cancelled analysis, or one that ended before a
+            # restart booked it, never reaches the writeback that clears it, so the hold would run to its
+            # allowance.
+            await self._coord.phase_kernel.release_finished_roofline_gate()
         enablement_in_flight = in_enablement and await self._coord.enablement_lane.enablement_in_flight()
         next_phase = _phase_state.compute_next_phase(
             state,

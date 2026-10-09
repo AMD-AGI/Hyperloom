@@ -294,6 +294,17 @@ def test_build_options_effort_defaults_by_role(monkeypatch):
     assert other._build_options(tools=[], max_turns=4, system_prompt="sp").kwargs["effort"] == "low"
 
 
+def test_build_options_runs_the_cli_the_subprocess_specialists_spawn(monkeypatch, tmp_path):
+    """The in-process backend hands the SDK the same CLI ``resolve_claude_executable`` gives subprocesses."""
+    recorded = tmp_path / "claude"
+    recorded.write_text("#!/bin/sh\n", encoding="utf-8")
+    recorded.chmod(0o755)
+    monkeypatch.delenv("HYPERLOOM_CLAUDE_CLI_PATH", raising=False)
+    monkeypatch.setenv("GEAK_CLAUDE_BIN", str(recorded))
+    backend = ClaudeBackend(model="m", sdk_query_factory=_make_query_factory([]), sdk_options_cls=FakeOptions)
+    assert backend._build_options(tools=[], max_turns=1, system_prompt=None).kwargs["cli_path"] == str(recorded)
+
+
 def test_build_options_effort_env_override_and_thinking_off(monkeypatch):
     _clear_effort_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CLAUDE_ORCHESTRATION_EFFORT", "high")
