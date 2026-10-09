@@ -118,6 +118,16 @@ def test_before_and_after_are_recorded_not_derived():
     assert row["contribution_pct"] == 37.5
 
 
+def test_a_correctness_fix_adoption_names_its_keep_reason():
+    _adopt(0, "integrate", 100.0, 110.0)
+    _adopt(1, "integrate", 110.0, 108.0, keep_reason="correctness_fix", attribution_eligible=False)
+
+    assert [(row["keep_reason"], row["attribution_eligible"]) for row in _rows()] == [
+        (None, None),
+        ("correctness_fix", False),
+    ]
+
+
 def test_local_gain_and_contribution_diverge_once_the_anchor_leaves_the_baseline():
     _adopt(0, "explore", 100.0, 200.0)
     _adopt(1, "explore", 200.0, 300.0)

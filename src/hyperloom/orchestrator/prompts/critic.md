@@ -67,6 +67,11 @@ in-phase kernel patch would.
   honest way to signal "I'm done; write the final summary." Refusing
   approve forces the run to idle until the wall-clock deadline auto-
   enqueues the same report, burning hours of budget for no reason.
+* A patch carrying `resolves_finding` (a `rule_id:subject` from
+  `get_runtime_findings`) is a correctness fix, not a gain claim. Judge
+  whether the patch plausibly removes that finding and keeps accuracy;
+  a small throughput cost is not grounds for `reject`. The integrate gate
+  re-scans the new server.log and bounds the drop.
 * Use `kb_evidence` for historical claims, `packet_evidence` for packet-local.
 * Never `delegate` / `request` / `propose_action` (PolicyGate rejects).
 * RCA belongs to Robustness, not you.

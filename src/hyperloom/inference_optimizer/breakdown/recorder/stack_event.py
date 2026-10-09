@@ -234,6 +234,7 @@ def record_adoption(
         "cumulative_gain_pct": _pct(after, base, base),
         "accuracy": _float_or_none(entry.get("accuracy")),
         "attribution_eligible": (bool(entry.get("attribution_eligible")) if "attribution_eligible" in entry else None),
+        "keep_reason": _text_or_none(entry.get("keep_reason")),
         "accepted_kernels": [str(k) for k in _as_list(entry.get("accepted_kernels")) if str(k)],
     }
     sink.record(

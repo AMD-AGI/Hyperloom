@@ -1375,6 +1375,7 @@ class V6StackAdoption(TypedDict, total=False):
     cumulative_gain_pct: float | None
     accuracy: float | None
     attribution_eligible: bool | None
+    keep_reason: str | None
     accepted_kernels: list[str]
 
 
