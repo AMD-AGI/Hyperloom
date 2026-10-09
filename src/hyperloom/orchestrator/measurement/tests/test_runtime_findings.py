@@ -170,6 +170,39 @@ def test_sglang_capability_and_adjusted_settings(tmp_path):
     assert "vllm.unknown_env" not in _statuses(report)
 
 
+SGLANG_COMM_LOG = (
+    "[2026-09-10 14:31:35 TP3] [AR] All-reduce call path: NCCL (custom AR disabled)\n"
+    "[2026-09-10 14:31:35 TP4] [AR] All-reduce call path: NCCL (custom AR disabled)\n"
+    "[2026-09-11 05:05:26 TP4] multimem all-gather disabled "
+    "(module 'torch.distributed._symmetric_memory' has no attribute 'set_signal_pad_size')\n"
+)
+
+
+def test_sglang_reports_communication_fallbacks(tmp_path):
+    report = scan_server_log(_write(tmp_path, SGLANG_COMM_LOG), "sglang")
+
+    assert _detected(report) == [
+        ("comm.custom_ar_disabled", "custom_all_reduce", 2),
+        ("comm.multimem_allgather_disabled", "multimem_all_gather", 1),
+    ]
+    finding = next(f for f in report["findings"] if f["rule_id"] == "comm.multimem_allgather_disabled")
+    assert finding["category"] == "perf_path"
+    assert finding["evidence"] == (
+        "[2026-09-11 05:05:26 TP4] multimem all-gather disabled "
+        "(module 'torch.distributed._symmetric_memory' has no attribute 'set_signal_pad_size')"
+    )
+
+
+def test_communication_fallback_rules_are_sglang_only(tmp_path):
+    report = scan_server_log(_write(tmp_path, SGLANG_COMM_LOG), "vllm")
+
+    assert _detected(report) == []
+    assert not {f["rule_id"] for f in report["findings"]} & {
+        "comm.custom_ar_disabled",
+        "comm.multimem_allgather_disabled",
+    }
+
+
 def test_atom_skips_rules_it_cannot_observe(tmp_path):
     report = scan_server_log(_write(tmp_path, "server ready\n"), "atom")
 

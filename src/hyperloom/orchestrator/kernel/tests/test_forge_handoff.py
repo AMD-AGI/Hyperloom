@@ -147,7 +147,8 @@ def test_trace_evidence_ends_with_current_best_runtime_findings(tmp_path: Path) 
         "```text\n"
         f"runtime findings for {log} [sglang]\n"
         "- detected [perf_path] feature_disabled fuse_rope_kvcache x1: WARNING Disabling fuse_rope_kvcache.\n"
-        "- not_detected: capability_disabled, engine_adjusted, aiter.tuned_miss, runtime.traceback\n"
+        "- not_detected: capability_disabled, comm.custom_ar_disabled, comm.multimem_allgather_disabled, "
+        "engine_adjusted, aiter.tuned_miss, runtime.traceback\n"
         "```\n"
     )
 

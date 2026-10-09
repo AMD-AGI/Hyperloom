@@ -61,6 +61,10 @@ def _first_group_or_match(match: re.Match[str]) -> str:
     return (match.group(1) if match.re.groups else match.group(0)).strip()
 
 
+def _named(subject: str) -> Callable[[re.Match[str]], str]:
+    return lambda _match: subject
+
+
 _LINE_RULES: tuple[_LineRule, ...] = (
     _LineRule(
         rule_id="vllm.unknown_env",
@@ -81,6 +85,20 @@ _LINE_RULES: tuple[_LineRule, ...] = (
         category=PERF_PATH,
         patterns=CAPABILITY_DISABLED_PATTERNS,
         subject=_first_group_or_match,
+    ),
+    _LineRule(
+        rule_id="comm.custom_ar_disabled",
+        category=PERF_PATH,
+        patterns=(re.compile(r"All-reduce call path: NCCL \(custom AR disabled\)"),),
+        subject=_named("custom_all_reduce"),
+        frameworks=frozenset({"sglang"}),
+    ),
+    _LineRule(
+        rule_id="comm.multimem_allgather_disabled",
+        category=PERF_PATH,
+        patterns=(re.compile(r"multimem all-gather disabled"),),
+        subject=_named("multimem_all_gather"),
+        frameworks=frozenset({"sglang"}),
     ),
 )
 
