@@ -49,6 +49,11 @@ def test_resolvable_references_pass(root: Path) -> None:
     assert check(root) == []
 
 
+def test_legacy_removed_module_reference_allowed(root: Path) -> None:
+    _skill(root, "Do not run `python -m hyperloom.inference_optimizer.cli optimize` yourself.\n")
+    assert check(root) == []
+
+
 def test_unresolvable_references_are_reported(root: Path) -> None:
     _skill(
         root,

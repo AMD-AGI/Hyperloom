@@ -42,6 +42,8 @@ _MAIN_GUARD_RE = re.compile(r"^if __name__ == ['\"]__main__['\"]:", re.MULTILINE
 _EXTERNAL_MODULES = frozenset({"pip"})
 # Framework entrypoints installed outside the Hyperloom tree (e.g. ATOM in setup).
 _EXTERNAL_MODULE_PREFIXES = ("atom.entrypoints.",)
+# Removed entry points still cited in upstream skill docs until those files are updated.
+_LEGACY_MODULES = frozenset({"hyperloom.inference_optimizer.cli"})
 _RUNNABLE_TOP_LEVEL = frozenset({"hyperloom", "kernelforge", "hyperloom_kb"})
 _SKIPPED_TOP_DIRS = frozenset({".git", ".venv", "build", "node_modules"})
 
@@ -70,6 +72,8 @@ def _external_module_ok(module: str) -> bool:
 def _check_module(root: Path, module: str, first: str | None, second: str | None) -> str | None:
     if module.split(".")[0] not in _RUNNABLE_TOP_LEVEL:
         return None if _external_module_ok(module) else f"module {module} is not a hyperloom/kernelforge module"
+    if module in _LEGACY_MODULES:
+        return None
     if module != "hyperloom":
         return None if _module_runnable(root, module) else f"module {module} is not runnable with -m"
     if first is None or first in hyperloom_cli._COMMANDS:
