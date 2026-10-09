@@ -132,6 +132,7 @@ hyperloom optimize --model <path> --nodes 2 --mn-backend rayjob --tp 8 --ep 8 ..
 # rayjob only — infera skips these two:
 python3 -m hyperloom multi-node bootstrap [--print-logs]  # verify /opt/venv + write PATH env on head
 python3 -m hyperloom multi-node verify                    # check `ray` on PATH on head
+python3 -m hyperloom multi-node finalize-patch [--print-logs]  # parse per-pod dashboard JSON after kernel patch; --print-logs dumps job logs when parse fails
 # both backends:
 python3 -m hyperloom multi-node restart-server --framework <sglang|vllm> --model <path> --tp <N> [--ep <N>] [--extra-args "…"]
 python3 -m hyperloom multi-node kill-inference

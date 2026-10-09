@@ -94,6 +94,8 @@ def test_python_dash_m_hyperloom_runs_the_dispatcher() -> None:
 
 def test_inference_optimizer_cli_package_is_not_runnable_with_dash_m() -> None:
     src = Path(cli.__file__).resolve().parents[1]
+    cli_pkg = src / "hyperloom" / "inference_optimizer" / "cli"
+    assert not (cli_pkg / "__main__.py").is_file()
     proc = subprocess.run(
         [sys.executable, "-m", "hyperloom.inference_optimizer.cli", "--help"],
         capture_output=True,
@@ -102,4 +104,4 @@ def test_inference_optimizer_cli_package_is_not_runnable_with_dash_m() -> None:
         check=False,
     )
     assert proc.returncode != 0
-    assert "No module named hyperloom.inference_optimizer.cli.__main__" in proc.stderr
+    assert "__main__" in proc.stderr.lower()
