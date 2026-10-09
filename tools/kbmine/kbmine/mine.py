@@ -6,15 +6,17 @@
 Deciding whether a target is worth a session meant running one. This reads
 per-session envelopes instead (``GET /v1/kb/{id}/sessions/{sid}``, or an
 offline JSON list) and reports what prior sessions already settled: the
-distribution of ``validated_e2e_gain``, and which parallelism layout won
-inside a fixed GPU count.
+distribution of ``validated_e2e_gain``, which parallelism layout won inside a
+fixed GPU count, how throughput scaled with TP, the knobs prior sessions
+accepted, and what they recorded learning.
 
-It reads only what the Recipe KB already owns as replay material --
-``validated_e2e_gain``, ``workload_shape``, and the accepted
-``value.config.extra_server_args`` a layout is read out of. Execution
-evidence such as roofline arms, host platform, or token spend belongs to the
-session-evidence pipeline rather than to a replay record, so a
-remaining-headroom forecast is deliberately not attempted here.
+From a Recipe KB envelope it reads only replay material the KB already owns:
+``validated_e2e_gain``, ``workload_shape``, ``optimized_throughput``, the
+accepted ``value.config.extra_server_args`` and ``extra_envs``, and the
+recorded learnings (``recipe.LEARNING_FIELDS``). The KB carries no execution
+evidence such as roofline arms, host platform or token spend, so the capture
+ratio comes only from Pulse rows (``pulse.project_pulse_row``), and no
+remaining-headroom forecast is computed here.
 
 Scoping is the whole difficulty. Pooling every session a search returns makes
 the median meaningless, so rows are grouped by identity and by the full

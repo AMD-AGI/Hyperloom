@@ -44,7 +44,7 @@ flowchart LR
 
     subgraph pj["Projectors - one per source"]
         direction TB
-        PS["<b>project_session</b><br/>reads 3 replay fields only"]
+        PS["<b>project_session</b><br/>replay fields only: gain, shape,<br/>throughput, accepted args and envs,<br/>learnings"]
         PP["<b>project_pulse_row</b><br/>computes capture ratio"]
     end
 
