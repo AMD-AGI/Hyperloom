@@ -27,6 +27,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.roofline_event import (
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.orchestrator.actions.executors import roofline as roofline_mod
 from hyperloom.orchestrator.actions.executors.roofline import RooflineExecutor
+from hyperloom.orchestrator.actions.stop_attribution import ORCHESTRATOR_CANCELLED_CLASS
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import Task
@@ -258,8 +259,16 @@ async def test_a_recovered_profile_and_an_n26_retry_are_the_effective_runs(tmp_p
             },
             "capture_failed",
         ),
+        (
+            {
+                "status": "failed",
+                "error_class": ORCHESTRATOR_CANCELLED_CLASS,
+                "error": "no primary rank trace",
+            },
+            ORCHESTRATOR_CANCELLED_CLASS,
+        ),
     ],
-    ids=["error_class", "recipe_lever_unavailable", "capture_reason"],
+    ids=["error_class", "recipe_lever_unavailable", "capture_reason", "cancelled"],
 )
 @pytest.mark.asyncio
 async def test_a_non_retryable_failure_rows_one_attempt_and_stops(tmp_path, monkeypatch, fatal, error_class):
@@ -270,6 +279,26 @@ async def test_a_non_retryable_failure_rows_one_attempt_and_stops(tmp_path, monk
     ]
     assert result["phase"] == "profile"
     assert result["error"] == "no primary rank trace"
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_profile_is_not_recovered_from_the_trace_it_flushed(tmp_path, monkeypatch):
+    """Recovering it would run the analysis, and the re-profile that analysis can ask for, in the cancelled scope."""
+    cancelled = {
+        "status": "failed",
+        "error_class": ORCHESTRATOR_CANCELLED_CLASS,
+        "error": "the orchestrator cancelled this action while this round was running",
+        "main_trace_path": TRACE,
+    }
+    result, action = await _run(tmp_path, monkeypatch, [cancelled], [])
+
+    assert _rows(action, "profile") == [
+        (1, PROFILE_ATTEMPT_INITIAL, "failed", False, "profile", ORCHESTRATOR_CANCELLED_CLASS),
+    ]
+    assert action["profile"]["recovered"] is False
+    assert action["analysis"]["runs"] == []
+    assert result["status"] == "failed"
+    assert "profile_recovered" not in result
 
 
 @pytest.mark.asyncio

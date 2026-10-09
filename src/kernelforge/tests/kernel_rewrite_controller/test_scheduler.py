@@ -9,7 +9,7 @@ from pathlib import Path
 from kernelforge.kernel_rewrite_controller import ControllerLayout, TaskStateStore
 from kernelforge.kernel_rewrite_controller import scheduler
 from kernelforge.kernel_rewrite_controller.dispatcher import SingleTaskResult
-from kernelforge.knowledge.kernel_identity import (
+from kernelforge.knowledge.kb_store.identity.kernel_recipe import (
     KernelRecipeIdentity,
     kernel_recipe_canonical_id,
 )

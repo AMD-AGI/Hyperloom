@@ -38,7 +38,7 @@ repository with an initial commit. A workspace holds:
 | `program.md` | Free-form guidance handed to the agent | recommended |
 
 Keep build artifacts and `forge_experiments/` untracked so a revert never fails
-on a dirtied tree. Every `src/kernelforge/data/examples/<task>/run_example.sh` sets
+on a dirtied tree. Every `src/kernelforge/examples/<task>/run_example.sh` sets
 up exactly this and launches the loop; copying the closest one is the fastest
 way to start a new task.
 

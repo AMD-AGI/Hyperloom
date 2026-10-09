@@ -179,12 +179,13 @@ exclude = [
     "*.testing.*",
     "testing",
     "testing.*",
-    # kernelforge's shipped resource trees (knowledge_base / local_knowledge /
-    # examples). They contain .py files, so with implicit
-    # namespace discovery setuptools would otherwise hand them out as
-    # importable top-level modules. They ship as package-data instead.
-    "kernelforge.data",
-    "kernelforge.data.*",
+    # KernelForge's examples and local-wiki resources contain .py reference
+    # files. Keep those resource trees out of implicit namespace discovery;
+    # they ship only through the package-data declarations below.
+    "kernelforge.examples",
+    "kernelforge.examples.*",
+    "kernelforge.knowledge.local_wiki.resources",
+    "kernelforge.knowledge.local_wiki.resources.*",
     # Scripted launch/specialist backends and a virtual clock: scaffolding a
     # test drives, not a runtime component. Nothing in the shipped tree imports
     # it, and the production launch boundary it substitutes
@@ -284,15 +285,17 @@ hyperloom = [
 "hyperloom.inference_optimizer.multi_node.scripts" = [
     "*.sh",
 ]
-# kernelforge's read-only resource trees. Upstream KernelForge shipped these
-# from the repository root via hatchling ``force-include``; setuptools has no
-# equivalent, so they physically live under ``src/kernelforge/data`` and are
-# resolved through ``kernelforge.resources.resource_path``. The glob is
-# deliberately type-agnostic: the trees hold .md, .json, .py, .patch, .csv and
-# more, and a missed extension only breaks wheel installs (every dev and CI
-# path uses ``pip install -e``).
+# KernelForge's read-only resources live with their owning features and are
+# resolved through ``kernelforge.resources.resource_path``. The globs are
+# deliberately type-agnostic because the trees hold several asset types.
 kernelforge = [
-    "data/**/*",
+    "examples/**/*",
+]
+"kernelforge.knowledge.local_wiki" = [
+    "resources/**/*",
+]
+"kernelforge.roofline_ceiling" = [
+    "resources/**/*",
 ]
 hyperloom_kb = [
     "py.typed",
@@ -387,11 +390,11 @@ omit = [
     "src/hyperloom/orchestrator/actions/executors/baseline.py",
     # --- kernelforge (ported verbatim from KernelForge's own omit list) ---
     "*/test_*.py",
-    # Shipped resource trees: knowledge-base sample drivers and reference
-    # kernels, not library code.
-    "src/kernelforge/data/*",
+    # Shipped sample drivers, reference kernels, and local-wiki assets.
+    "src/kernelforge/examples/*",
+    "src/kernelforge/knowledge/local_wiki/resources/*",
     # Byte-identical upstream KB Store SDK; validated by checksum contract tests.
-    "src/kernelforge/knowledge/remote_exp/kb_store_client.py",
+    "src/kernelforge/knowledge/kb_store/remote_client.py",
     # CLI entry points (argument plumbing; exercised via the CLIs themselves).
     "src/kernelforge/cli.py",
     "src/kernelforge/gemm_tune/cli.py",
@@ -404,7 +407,7 @@ omit = [
     # Claude Agent SDK transport (spawns the agent CLI, network).
     "src/kernelforge/orchestrator/agent.py",
     # Filesystem index walker over the curated knowledge tree.
-    "src/kernelforge/knowledge/local_index.py",
+    "src/kernelforge/knowledge/local_wiki/index.py",
     # gemm-tune hardware tuners (drive vendor GEMM libraries on-device).
     "src/kernelforge/gemm_tune/tuners/sglang_dense_bf16.py",
     "src/kernelforge/gemm_tune/tuners/vllm_moe_triton.py",
@@ -452,9 +455,16 @@ relax_fail_under_repo_var = "COVERAGE_RELAX_FAIL_UNDER"
 # nearly all hits are test assertions and runtime invariants.
 [tool.bandit]
 skips = ["B101"]
-# ``src/kernelforge/data`` holds shipped knowledge-base sample kernels and
-# reference drivers -- third-party illustrative code, not Hyperloom's own.
-exclude_dirs = ["*/tests/*", "*/test/*", "build", ".venv", "src/kernelforge/data"]
+# Shipped knowledge-base sample kernels and reference drivers are third-party
+# illustrative code, not Hyperloom's own.
+exclude_dirs = [
+    "*/tests/*",
+    "*/test/*",
+    "build",
+    ".venv",
+    "src/kernelforge/examples",
+    "src/kernelforge/knowledge/local_wiki/resources",
+]
 
 # Pylint: minimal defaults for local runs; CI passes ``--errors-only``.
 [tool.pylint.main]
@@ -471,10 +481,11 @@ extend-exclude = [
     "TraceLens-internal",
     "InferenceX",
     "src/hyperloom/orchestrator/knowledge/remote_recipe/_vendor/kb_store_client.py",
-    # Knowledge base / examples, not source we own the style
-    # of. The example drivers are .py and would otherwise be reformatted.
-    "src/kernelforge/data",
-    "src/kernelforge/knowledge/remote_exp/kb_store_client.py",
+    # Local-wiki resources and example drivers are not source whose style this
+    # repository owns.
+    "src/kernelforge/examples",
+    "src/kernelforge/knowledge/local_wiki/resources",
+    "src/kernelforge/knowledge/kb_store/remote_client.py",
 ]
 
 [tool.ruff.lint]

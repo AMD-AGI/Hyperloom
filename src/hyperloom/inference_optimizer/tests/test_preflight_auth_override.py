@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import re
 import shutil
@@ -449,6 +450,77 @@ def test_dotenv_fallback_loads_gateway_custom_headers(tmp_path, monkeypatch):
         "Ocp-Apim-Subscription-Key": "ak-gateway-token"
     }
     assert parse_custom_headers(os.environ["OPENAI_CUSTOM_HEADERS"]) == {"X-Tenant": "acme"}
+
+
+def test_custom_header_env_refs_are_expanded_for_child_processes(monkeypatch):
+    """Children forward the headers verbatim, so the parent must not hand down a literal ``${VAR}``."""
+    anthropic_key_var = "_".join(("ANTHROPIC", "API", "KEY"))
+    monkeypatch.setenv(anthropic_key_var, "ak-gateway-token")
+    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", f"Ocp-Apim-Subscription-Key: ${{{anthropic_key_var}}}")
+    monkeypatch.setenv("OPENAI_CUSTOM_HEADERS", "X-Tenant: acme")
+
+    cli_preflight._expand_custom_header_env_refs()
+
+    assert os.environ["ANTHROPIC_CUSTOM_HEADERS"] == "Ocp-Apim-Subscription-Key: ak-gateway-token"
+    assert os.environ["OPENAI_CUSTOM_HEADERS"] == "X-Tenant: acme"
+
+
+def test_a_header_ref_outside_the_credentials_does_not_reach_children(monkeypatch, caplog):
+    """Expanding it would put a secret the child-env allowlist strips into a header every child inherits."""
+    anthropic_key_var = "_".join(("ANTHROPIC", "API", "KEY"))
+    other_secret_var = "_".join(("GITHUB", "TOKEN"))
+    monkeypatch.setenv(anthropic_key_var, "ak-gateway-token")
+    monkeypatch.setenv(other_secret_var, "not-for-children")
+    monkeypatch.setenv(
+        "ANTHROPIC_CUSTOM_HEADERS",
+        f"Ocp-Apim-Subscription-Key: ${{{anthropic_key_var}}}\nX-Leaked: ${{{other_secret_var}}}",
+    )
+
+    with caplog.at_level(logging.WARNING, logger="hyperloom.inference_optimizer.cli"):
+        cli_preflight._expand_custom_header_env_refs()
+
+    assert os.environ["ANTHROPIC_CUSTOM_HEADERS"] == (
+        f"Ocp-Apim-Subscription-Key: ak-gateway-token\nX-Leaked: ${{{other_secret_var}}}"
+    )
+    assert "not-for-children" not in caplog.text
+    assert "ANTHROPIC_CUSTOM_HEADERS references a variable outside" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("set_var", "referenced_var"),
+    [
+        ("_".join(("ANTHROPIC", "AUTH", "TOKEN")), "_".join(("ANTHROPIC", "API", "KEY"))),
+        ("_".join(("ANTHROPIC", "API", "KEY")), "_".join(("ANTHROPIC", "AUTH", "TOKEN"))),
+    ],
+)
+def test_custom_header_ref_to_the_other_anthropic_credential_is_filled_in(monkeypatch, set_var, referenced_var):
+    """The SDK path fills the missing Anthropic key from the other one before expanding; preflight must agree."""
+    for var in (set_var, referenced_var):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv(set_var, "gw-token")
+    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", f"Ocp-Apim-Subscription-Key: ${{{referenced_var}}}")
+
+    cli_preflight._expand_custom_header_env_refs()
+
+    assert os.environ["ANTHROPIC_CUSTOM_HEADERS"] == "Ocp-Apim-Subscription-Key: gw-token"
+    assert referenced_var not in os.environ
+
+
+def test_preflight_expands_header_refs_to_credentials_from_legacy_deepseek_env(
+    monkeypatch,
+    tmp_path,
+    clean_url_env,
+    stub_install_steps,
+):
+    """A header may reference a key that only the legacy ``DEEPSEEK_*`` normalization creates."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("_".join(("DEEPSEEK", "API", "KEY")), "ds-legacy-token")
+    anthropic_key_var = "_".join(("ANTHROPIC", "API", "KEY"))
+    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", f"Ocp-Apim-Subscription-Key: ${{{anthropic_key_var}}}")
+
+    cli_preflight._preflight()
+
+    assert cli.os.environ["ANTHROPIC_CUSTOM_HEADERS"] == "Ocp-Apim-Subscription-Key: ds-legacy-token"
 
 
 def test_preflight_does_not_export_a_derived_url_for_a_subscription_token(

@@ -23,7 +23,7 @@ from kernelforge.kernel_rewrite_controller.worktree import (
     OperatorWorktree,
     stage_operator_driver,
 )
-from kernelforge.knowledge.kernel_identity import (
+from kernelforge.knowledge.kb_store.identity.kernel_recipe import (
     KernelRecipeIdentity,
     kernel_recipe_canonical_id,
 )

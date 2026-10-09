@@ -780,6 +780,7 @@ def test_preflight_records_install_steps_in_execution_order(tmp_path, monkeypatc
         "ensure_magpie",
         "clone_inferencex",
         "patch_magpie_eval_concurrency",
+        "check_kernel_tuning_clis",
         "check_tracelens_cli",
         "check_tracelens_root",
         "ir3_pr_monitor_probe",
@@ -788,6 +789,8 @@ def test_preflight_records_install_steps_in_execution_order(tmp_path, monkeypatc
     steps = {step["step_id"]: step for step in event["ext"]["steps"]}
     assert steps["prepare_kb_environment"]["status"] == "skipped"
     assert steps["prepare_kb_environment"]["skip_reason"] == "explicit_flag"
+    assert steps["check_kernel_tuning_clis"]["status"] == "skipped"
+    assert steps["check_kernel_tuning_clis"]["skip_reason"] == "no_kernel"
     assert steps["ensure_magpie"]["message"] == "benchmark backend is 'bypass'"
 
 

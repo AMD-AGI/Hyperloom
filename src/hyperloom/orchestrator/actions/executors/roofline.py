@@ -24,6 +24,7 @@ from ...phases.machine_state import record_lifecycle_event
 from ...loop.sub_agent_runner import RunnerContext
 from hyperloom.inference_optimizer.trace.task_progress import report_progress
 from ._multi_node_env import is_multi_node
+from ..stop_attribution import ORCHESTRATOR_CANCELLED_CLASS
 from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
 from hyperloom.inference_optimizer.breakdown.recorder.roofline_event import (
     ANALYSIS_ATTEMPT_COMPUTE_BOUND,
@@ -68,6 +69,7 @@ _TRACE_SUFFIXES = (".pt.trace.json.gz", ".pt.trace.json", ".trace.json.gz", ".tr
 _PREFLIGHT_STALE_TRACE_LIMIT = 20
 _NON_RETRYABLE_PROFILE_ERRORS = frozenset(
     {
+        ORCHESTRATOR_CANCELLED_CLASS,
         "agentx_multi_node_profile_unsupported",
         "primary_rank_trace_missing",
         "recipe_lever_unavailable",
@@ -576,16 +578,18 @@ def _classify_profile(result: Any) -> _Unusable | None:
         return _Unusable("profile", "bad_return", message, PROFILE_ATTEMPT_AFTER_BAD_RETURN)
     trace_path = _extract_trace_path(result)
     if result.get("status") != "succeeded":
-        # A duplicate stop_profile failure can arrive after a trace was already flushed successfully.
-        if trace_path:
-            return None
         error = str(result.get("error") or "profile sub-step failed")
         capture_reason = str((result.get("trace_capture") or {}).get("reason") or "")
         if (
             result.get("error_class") in _NON_RETRYABLE_PROFILE_ERRORS
             or capture_reason in _NON_RETRYABLE_CAPTURE_REASONS
         ):
+            # Checked before the trace is adopted: a cancelled profile can already have flushed one, and
+            # analysing it would run the analysis and a re-profile inside the cancelled scope.
             return _Unusable("profile", str(result.get("error_class") or ""), error, "", result, retryable=False)
+        # A duplicate stop_profile failure can arrive after a trace was already flushed successfully.
+        if trace_path:
+            return None
         evidence = {
             "last_error": error,
             "profile_error": _profile_err_text(result),

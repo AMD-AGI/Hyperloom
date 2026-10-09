@@ -2942,18 +2942,10 @@ async def _capture_vllm_tunableop_shapes(
     else:
         capture_unset_envs = [str(key) for key in inherited_unset]
     if not profile_mode:
-        capture_unset_envs.extend(
-            [
-                "HL_TUNABLEOP_MODE",
-                "HL_TUNABLEOP_FILE",
-                "HL_TUNABLEOP_VERBOSE",
-                "PYTORCH_TUNABLEOP_ENABLED",
-                "PYTORCH_TUNABLEOP_TUNING",
-                "PYTORCH_TUNABLEOP_RECORD_UNTUNED",
-                "PYTORCH_TUNABLEOP_UNTUNED_FILENAME",
-                "PYTORCH_TUNABLEOP_FILENAME",
-            ]
-        )
+        # unset_envs is applied after extra_envs, so any PYTORCH_TUNABLEOP_* name left here (hard-coded or
+        # inherited from the payload or current best) strips the recording and the capture records nothing.
+        capture_unset_envs = [name for name in capture_unset_envs if not name.startswith("PYTORCH_TUNABLEOP_")]
+        capture_unset_envs.extend(["HL_TUNABLEOP_MODE", "HL_TUNABLEOP_FILE", "HL_TUNABLEOP_VERBOSE"])
     inherited_remove = payload.get("remove_args", current_best.get("remove_args")) or []
     if isinstance(inherited_remove, str):
         capture_remove_args = [inherited_remove]
