@@ -14,13 +14,11 @@ from unittest.mock import AsyncMock
 import pytest
 
 from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
-from hyperloom.inference_optimizer.protocol.intent import (
-    Intent,
-)
 from hyperloom.orchestrator.policy.gate import SPECIALIST_FROM_AGENT_PREFIX
 from hyperloom.orchestrator.specialists.dispatch import SpecialistDispatchCollaborator
 from hyperloom.orchestrator.state.shared_state import SharedState
 from ._dispatch_helpers import pump_until_settled
+from .conftest import use_fake_specialist_cli
 
 
 @dataclass
@@ -280,20 +278,20 @@ async def test_build_specialist_round_entry_round_id_falls_back_to_task_id(coord
 @pytest.mark.asyncio
 async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """End-to-end via the dispatcher exit hook: one specialist task lands the four bookkeeping mutations."""
+    import argparse
+
     from hyperloom.inference_optimizer.cli.executors import _build_specialist_executor
     from hyperloom.orchestrator.roles.mock_backend import (
-        MockBackend,
+        MockBackend as MockOrchBackend,
         MockTurn,
         ScriptedPlan,
     )
     from hyperloom.orchestrator.loop.coordinator import Coordinator
-    from hyperloom.inference_optimizer.protocol.intent import IntentType
-    from hyperloom.orchestrator.roles.mock_backend import (
-        MockBackend as MockOrchBackend,
-    )
     from hyperloom.orchestrator.roles.agent_role import default_role_registry
+    from hyperloom.orchestrator.state.task_registry import Task
 
     done_payload = _done_payload(
         domain="serving_specialist",
@@ -305,78 +303,56 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
             },
         ],
     )
-    plan = ScriptedPlan(
-        turns=[
-            MockTurn(
-                intents=[
-                    Intent(type=IntentType.SPECIALIST_DONE, payload=done_payload),
-                ]
-            )
-        ]
+    use_fake_specialist_cli(tmp_path, monkeypatch, behavior="done_only", payload=done_payload)
+    spec_args = argparse.Namespace(
+        claude_model="claude-3-5-sonnet-latest",
+        specialist_model=None,
+        specialist_max_turns=4,
+        research_lane_capacity=1,
+        specialist_mcp_config=None,
     )
+    idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
+    backends = {
+        "orchestration": MockOrchBackend(idle_plan),
+        "critic": MockOrchBackend(idle_plan),
+    }
 
-    import hyperloom.inference_optimizer.cli.executors as cli_mod
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    coord = Coordinator(
+        session_dir=session_dir,
+        backends=backends,
+        role_registry=default_role_registry(),
+        knowledge_plane=None,
+    )
+    executor = _build_specialist_executor(
+        spec_args,
+        session_dir=session_dir,
+        knowledge_plane=None,
+    )
+    coord.sub.register_executor("specialist", executor)
 
-    real_claude_cls = cli_mod.ClaudeBackend
-    cli_mod.ClaudeBackend = lambda **_kw: MockBackend(plan, name="spec-mock")
-    try:
-        import argparse
-
-        spec_args = argparse.Namespace(
-            claude_model="claude-3-5-sonnet-latest",
-            specialist_model=None,
-            specialist_max_turns=4,
-            specialist_per_turn_max_seconds=300.0,
-            research_lane_capacity=1,
-            # In-process dispatch so the mocked ClaudeBackend is used.
-            specialist_dispatch_mode="inprocess",
-            specialist_mcp_config=None,
-        )
-        idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
-        backends = {
-            "orchestration": MockOrchBackend(idle_plan),
-            "critic": MockOrchBackend(idle_plan),
-        }
-
-        session_dir = tmp_path / "session"
-        session_dir.mkdir()
-        coord = Coordinator(
-            session_dir=session_dir,
-            backends=backends,
-            role_registry=default_role_registry(),
-            knowledge_plane=None,
-        )
-        executor = _build_specialist_executor(
-            spec_args,
-            session_dir=session_dir,
-            knowledge_plane=None,
-        )
-        coord.sub.register_executor("specialist", executor)
-
-        # Enqueue directly through TaskRegistry to test the dispatcher hook, not the upstream intent flow.
-        from hyperloom.orchestrator.state.task_registry import Task
-
-        task = Task(
-            task_id="t-e2e-1",
-            kind="specialist",
-            state="queued",
-            params={
-                "domain": "serving_specialist",
-                "gap_canonical_id": "gap.attention.fp8_kv",
-                "max_turns": 4,
-            },
-            idempotency_key="t-e2e-1",
-            requires_lanes=tuple(),
-        )
-        await coord.tasks.create_or_return_existing(
-            kind=task.kind,
-            params=task.params,
-            idempotency_key=task.idempotency_key,
-        )
-        await coord.tick(n=1)
-        await pump_until_settled(coord.dispatcher)
-    finally:
-        cli_mod.ClaudeBackend = real_claude_cls
+    # Enqueue directly through TaskRegistry to test the dispatcher hook, not the upstream intent flow.
+    task = Task(
+        task_id="t-e2e-1",
+        kind="specialist",
+        state="queued",
+        params={
+            "domain": "serving_specialist",
+            "framework": "sglang",
+            "gap_canonical_id": "gap.attention.fp8_kv",
+            "max_turns": 4,
+        },
+        idempotency_key="t-e2e-1",
+        requires_lanes=tuple(),
+    )
+    await coord.tasks.create_or_return_existing(
+        kind=task.kind,
+        params=task.params,
+        idempotency_key=task.idempotency_key,
+    )
+    await coord.tick(n=1)
+    await pump_until_settled(coord.dispatcher)
 
     assert len(coord.shared_state.specialist_rounds) == 1, (
         "dispatcher hook should have triggered record_specialist_round"

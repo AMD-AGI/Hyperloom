@@ -277,3 +277,12 @@ def test_static_guards_pip_from_checkout() -> None:
     assert 'GEAK_HOME="${GEAK_ROOT}"' in body, "must pass GEAK_HOME to reuse the checkout"
     assert "git+" not in body, "must not build a git+<remote> pip URL"
     assert "setup.sh" not in body, "setup.sh path must be fully removed"
+
+
+def test_claude_cli_is_on_path_before_geak_installs() -> None:
+    """GEAK's bootstrap reuses the claude CLI on PATH, so it must exist before GEAK is installed."""
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    main = re.search(r"^main\(\) \{.*?^\}", text, re.S | re.M)
+    assert main, "could not locate main() in install.sh"
+    calls = re.findall(r"(?m)^\s*(ensure_claude_cli|ensure_geak)\s*$", main.group(0))
+    assert calls == ["ensure_claude_cli", "ensure_geak"], calls
