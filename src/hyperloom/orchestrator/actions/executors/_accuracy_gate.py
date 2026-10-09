@@ -337,11 +337,9 @@ def parse_quality_gate(workspace: Path | str) -> dict[str, Any]:
     return {"quality_gate": qg, "source_file": str(latest)}
 
 
-def parse_agentx_error_rate(workspace: Path | str) -> float | None:
-    """Read ``request_error_rate`` from the newest ``inferencex_result.json``; None when no result reported one."""
-    # None rather than 0.0 so an export without the field is incomparable instead of a perfect score.
-    workspace = Path(workspace)
-    results = [Path(f) for f in glob.glob(str(workspace / "**" / "inferencex_result.json"), recursive=True)]
+def _latest_agentx_result(workspace: Path | str) -> dict[str, Any] | None:
+    """The newest ``inferencex_result.json`` under *workspace*, or None."""
+    results = [Path(f) for f in glob.glob(str(Path(workspace) / "**" / "inferencex_result.json"), recursive=True)]
     if not results:
         return None
     latest = max(results, key=lambda p: p.stat().st_mtime)
@@ -350,8 +348,25 @@ def parse_agentx_error_rate(workspace: Path | str) -> float | None:
     except (json.JSONDecodeError, OSError) as exc:
         log.warning("accuracy_gate: unreadable %s: %s", latest, exc)
         return None
-    rate = data.get("request_error_rate")
-    return float(rate) if isinstance(rate, (int, float)) else None
+    return data if isinstance(data, dict) else None
+
+
+def parse_agentx_error_rate(workspace: Path | str) -> float | None:
+    """Read ``request_error_rate`` from the newest ``inferencex_result.json``; None when no result reported one."""
+    # None rather than 0.0 so an export without the field is incomparable instead of a perfect score.
+    rate = (_latest_agentx_result(workspace) or {}).get("request_error_rate")
+    return float(rate) if isinstance(rate, (int, float)) and not isinstance(rate, bool) else None
+
+
+def _mlperf_inline_accuracy(result: dict[str, Any] | None) -> float | None:
+    """The harness's inline score when every turn was scored; None otherwise."""
+    result = result or {}
+    score = result.get("accuracy_score")
+    if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score):
+        return None
+    if result.get("accuracy_missing_turns") != 0:
+        return None
+    return float(score)
 
 
 def quality_gate_passed(
@@ -411,6 +426,20 @@ def parse_eval_results(
         rate = parse_agentx_error_rate(workspace)
         passed = rate is not None and rate <= AGENTX_ERROR_RATE_THRESHOLD_PCT
         log.info("accuracy_gate: agentx request_error_rate=%s passed=%s", rate, passed)
+        from hyperloom.common.agentx_workload import is_mlperf_backend
+
+        if is_mlperf_backend():
+            # The harness scores every smoke run inline, so each KEEP is gated on that score against the
+            # baseline's, the same way lm-eval accuracy is. Over the error-rate ceiling, an unscored turn or no
+            # scores.json is a drop outright: 0.0, not None, which a lane without a required gate reads as
+            # "no eval ran" and skips.
+            score = _mlperf_inline_accuracy(_latest_agentx_result(workspace)) if passed else None
+            return {
+                "accuracy": 0.0 if score is None else score,
+                "task": "mlperf_agentic_inline",
+                "metric": "score",
+                "error_rate": rate,
+            }
         return {
             "accuracy": 1.0 if passed else 0.0,
             "task": "agentx_error_rate",
@@ -532,6 +561,130 @@ def accuracy_passed(
     return drop <= threshold
 
 
+def grade_accuracy(
+    result_dir: str,
+    baseline_accuracy: Any,
+    framework: str | None = None,
+    benchmark_mode: str = "",
+) -> bool | None:
+    """Grade a bench's accuracy against the baseline.
+
+    With a recorded baseline the measured drop is enforced; without one
+    (or no eval result) the check is skipped (``None``) and warned loudly.
+    For scriptable frameworks (xDiT) ``parse_eval_results`` fails closed on
+    a missing quality gate instead of falling back to GSM8K.
+    """
+    # Accept numeric strings in addition to int/float; non-numeric / missing
+    # values fall back to 0.0 (skip).
+    try:
+        baseline_value = float(baseline_accuracy)
+    except (TypeError, ValueError):
+        baseline_value = 0.0
+    eval_results = parse_eval_results(result_dir, framework=framework, benchmark_mode=benchmark_mode)
+    new_accuracy = eval_results.get("accuracy")
+    if new_accuracy is not None and baseline_value > 0:
+        return accuracy_passed(baseline_value, float(new_accuracy))
+    if baseline_value <= 0:
+        log.warning(
+            "integrate_patch: no baseline accuracy; accuracy gate skipped "
+            "(throughput-only KEEP). Accuracy regressions will not be caught.",
+        )
+    else:
+        log.warning("integrate_patch: variant produced no accuracy result; gate skipped")
+    return None
+
+
+def is_eval_origin(params: dict[str, Any]) -> bool:
+    """Whether the enablement candidate came from the eval gate, not the boot gate."""
+    return str(params.get("enablement_origin") or "") == "eval"
+
+
+def framework_run_eval_envs(params: dict[str, Any]) -> dict[str, Any] | None:
+    """Force ``RUN_EVAL=true`` for framework-authored source patches.
+
+    Two independent triggers:
+
+    * **Eval-origin enablement**: force ``RUN_EVAL=true`` so ``_bench_patch``
+      can obtain a raw accuracy for the runnable gate, which fails closed
+      without one. A boot-origin candidate is only ever provisional on a
+      missing accuracy, so it inherits the session's contract instead.
+    * **Perf framework authoring**: force only when a comparable baseline
+      accuracy exists (``accuracy_baseline > 0``); otherwise leave the
+      candidate's ``RUN_EVAL`` to the materializer's default handling.
+
+    A plain configuration integrate_patch is untouched (returns ``None``).
+
+    Args:
+        params: The integrate_patch task params.
+
+    Returns:
+        ``{"RUN_EVAL": "false"}`` when the session disabled evals,
+        ``{"RUN_EVAL": "true"}`` for eval-origin enablement patches or for
+        framework-authored perf patches with a positive baseline accuracy
+        to compare against; else ``None``.
+    """
+    # The session's opt-out outranks every force-on below.
+    if is_truthy(params.get("disable_run_eval")):
+        return {"RUN_EVAL": "false"}
+    if bool(params.get("enablement")):
+        return {"RUN_EVAL": "true"} if is_eval_origin(params) else None
+    fw_authored = bool(params.get("framework_agent_authoring") or params.get("framework_agent_candidate_id"))
+    try:
+        baseline = float(params.get("accuracy_baseline") or 0.0)
+    except (TypeError, ValueError):
+        baseline = 0.0
+    return {"RUN_EVAL": "true"} if (fw_authored and baseline > 0) else None
+
+
+def enablement_correctness(
+    params: dict[str, Any],
+    gate_evidence: dict[str, Any],
+) -> tuple[bool | None, dict[str, Any]]:
+    """Judge the candidate's accuracy against the floor its origin demands.
+
+    Returns:
+        ``(correctness_ok, eval_provenance)``. ``correctness_ok`` is ``None``
+        only for a boot-origin round with no score at all, which claimed
+        nothing about accuracy; every other absence fails closed.
+    """
+    enablement_accuracy = gate_evidence.get("enablement_accuracy")
+    param_floor = params.get("enablement_accuracy_floor")
+    floor = float(param_floor) if isinstance(param_floor, (int, float)) else DEFAULT_ENABLEMENT_ACCURACY_FLOOR
+    eval_origin = is_eval_origin(params)
+    accuracy_kind = classify_accuracy_failure(enablement_accuracy, floor)
+    correctness_ok: bool | None
+    if enablement_accuracy is None:
+        # Truly absent: eval-origin fails closed; boot-origin stays provisional.
+        correctness_ok = False if eval_origin else None
+    else:
+        # Present but below floor / non-positive / non-finite is a refusal.
+        correctness_ok = accuracy_meets_floor(enablement_accuracy, floor)
+    # eval-origin only: a score with no task/metric did not come from a real
+    # eval, so it cannot clear the gate. Both keys are read from the
+    # candidate's own run, stamped beside the accuracy being judged, and not
+    # from a stored contract fingerprint: RUN_EVAL is itself a hashed contract
+    # field, so an eval-less re-baseline would change that digest and veto
+    # every later candidate without ever consulting its accuracy.
+    if (
+        eval_origin
+        and correctness_ok
+        and not (gate_evidence.get("enablement_accuracy_task") and gate_evidence.get("enablement_accuracy_metric"))
+    ):
+        correctness_ok = False
+        log.warning(
+            "integrate_patch: eval-origin accuracy %s carries no task/metric; reverting",
+            enablement_accuracy,
+        )
+    return correctness_ok, {
+        "enablement_origin": str(params.get("enablement_origin") or ""),
+        "enablement_observed_accuracy": enablement_accuracy,
+        "enablement_accuracy_floor": floor,
+        "accuracy_task": gate_evidence.get("enablement_accuracy_task") or "",
+        "accuracy_metric": gate_evidence.get("enablement_accuracy_metric") or "",
+        "enablement_eval_failure_kind": accuracy_kind or "",
+    }
+
+
 __all__ = [
     "ACCURACY_THRESHOLD",
     "BASELINE_ACCURACY_STOP_REASON",
@@ -559,9 +712,13 @@ __all__ = [
     "accuracy_meets_floor",
     "accuracy_passed",
     "classify_accuracy_failure",
+    "enablement_correctness",
     "eval_contract_fingerprint",
     "eval_enablement_allowed",
     "eval_probe_summary",
+    "framework_run_eval_envs",
+    "grade_accuracy",
+    "is_eval_origin",
     "launch_enablement_allowed",
     "parse_eval_results",
     "read_eval_probe",

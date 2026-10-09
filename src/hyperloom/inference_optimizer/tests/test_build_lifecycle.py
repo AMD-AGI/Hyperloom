@@ -59,7 +59,7 @@ async def _enqueue_and_run(build_coord, executor, *, action, session_dir) -> tup
     """Run one build through SubAgentRunner; return (task_row, runner_result)."""
     from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
 
-    tid = await build_coord.enqueue_targeted_build(action)
+    tid = await build_coord.build_lifecycle.enqueue_targeted_build(action)
     task_obj = await build_coord.tasks.get(tid)
     runner = SubAgentRunner(
         locks=build_coord.locks,
@@ -86,8 +86,8 @@ async def _enqueue_and_run(build_coord, executor, *, action, session_dir) -> tup
 @pytest.mark.asyncio
 async def test_idempotent_enqueue_no_double_row(build_coord):
     a = _action([sys.executable, "-c", "print('x')"], ref="v1", gpu_arch="gfx950")
-    t1 = await build_coord.enqueue_targeted_build(a)
-    t2 = await build_coord.enqueue_targeted_build(a)
+    t1 = await build_coord.build_lifecycle.enqueue_targeted_build(a)
+    t2 = await build_coord.build_lifecycle.enqueue_targeted_build(a)
     assert t1 == t2
     all_builds = [t for t in await build_coord.tasks.queued() if t.kind == "targeted_build"]
     assert len(all_builds) == 1
@@ -96,10 +96,12 @@ async def test_idempotent_enqueue_no_double_row(build_coord):
 @pytest.mark.asyncio
 async def test_build_lane_serializes_two_builds(build_coord):
     """Capacity-1 build_lane: second build stays queued while first runs."""
-    a1 = await build_coord.enqueue_targeted_build(
+    a1 = await build_coord.build_lifecycle.enqueue_targeted_build(
         _action([sys.executable, "-c", "import time; time.sleep(60)"], ref="v1")
     )
-    a2 = await build_coord.enqueue_targeted_build(_action([sys.executable, "-c", "print('two')"], ref="v2"))
+    a2 = await build_coord.build_lifecycle.enqueue_targeted_build(
+        _action([sys.executable, "-c", "print('two')"], ref="v2")
+    )
     assert a1 != a2
     t1 = await build_coord.tasks.get(a1)
     lease = await build_coord.locks.try_acquire_many(
@@ -121,7 +123,9 @@ async def test_build_lane_serializes_two_builds(build_coord):
 @pytest.mark.asyncio
 async def test_build_lane_does_not_conflict_with_serving(build_coord):
     """build_lane must not mutex the serving/benchmark lanes."""
-    tid = await build_coord.enqueue_targeted_build(_action([sys.executable, "-c", "import time; time.sleep(2)"]))
+    tid = await build_coord.build_lifecycle.enqueue_targeted_build(
+        _action([sys.executable, "-c", "import time; time.sleep(2)"])
+    )
     t = await build_coord.tasks.get(tid)
     build_lease = await build_coord.locks.try_acquire_many(
         ["build_lane"],
@@ -447,7 +451,7 @@ async def test_real_component_writes_plan_json_before_spawn(build_coord, tmp_pat
 
     action = _real_action()
     executor = TargetedBuildExecutor()
-    tid = await build_coord.enqueue_targeted_build(action)
+    tid = await build_coord.build_lifecycle.enqueue_targeted_build(action)
     task_obj = await build_coord.tasks.get(tid)
     await build_coord.tasks.transition(tid, "running")
 
@@ -487,7 +491,7 @@ async def test_explicit_build_command_passed_verbatim(build_coord, tmp_path):
 
     action = _fake_action()
     executor = TargetedBuildExecutor()
-    tid = await build_coord.enqueue_targeted_build(action)
+    tid = await build_coord.build_lifecycle.enqueue_targeted_build(action)
     task_obj = await build_coord.tasks.get(tid)
     await build_coord.tasks.transition(tid, "running")
 
@@ -566,7 +570,7 @@ async def test_spawn_failure_marks_row_failed(build_coord, tmp_path):
     from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
 
     action = _action(["/nonexistent_compiler_xyz_P1_12"])
-    tid = await build_coord.enqueue_targeted_build(action)
+    tid = await build_coord.build_lifecycle.enqueue_targeted_build(action)
     task_obj = await build_coord.tasks.get(tid)
     executor = TargetedBuildExecutor()
     runner = SubAgentRunner(
@@ -628,7 +632,7 @@ def resume_coord(resume_session_dir):
 async def test_resume_kills_orphan_and_clears_sentinel(resume_coord):
     import subprocess
 
-    resume_coord._resumed_from["is_resume"] = True
+    resume_coord.writeback._resumed_from["is_resume"] = True
 
     proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"], start_new_session=True)
     pgid = os.getpgid(proc.pid)
@@ -656,7 +660,7 @@ async def test_resume_kills_orphan_and_clears_sentinel(resume_coord):
         "aiter_jit_dir": str(jit_dir),
     }
 
-    report = await resume_coord._resume_consistency_pass()
+    report = await resume_coord.writeback._resume_consistency_pass()
 
     fix = next(f for f in report["fixes"] if isinstance(f, dict) and f["kind"] == "reclaimed_pending_targeted_build")
     assert fix["task_id"] == task.task_id
@@ -674,9 +678,9 @@ async def test_resume_kills_orphan_and_clears_sentinel(resume_coord):
 
 @pytest.mark.asyncio
 async def test_resume_no_pending_is_noop(resume_coord):
-    resume_coord._resumed_from["is_resume"] = True
+    resume_coord.writeback._resumed_from["is_resume"] = True
     resume_coord.shared_state.pending_targeted_build = {}
-    report = await resume_coord._resume_consistency_pass()
+    report = await resume_coord.writeback._resume_consistency_pass()
     assert not any(isinstance(f, dict) and f.get("kind") == "reclaimed_pending_targeted_build" for f in report["fixes"])
 
 

@@ -31,6 +31,7 @@ from hyperloom.common.timeutil import now_iso
 
 from hyperloom.inference_optimizer.session.session_paths import fs_safe_id, runs_dir, specialist_intel_path
 from ..roles.base import BackendError, LLMCallFailed
+from ..state.experience_citations import normalize_citations, shown_ids
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
 from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, append_llm_call, new_call_id
@@ -649,6 +650,7 @@ class SpecialistRunner:
                 gap_layer=str(params.get("gap_layer") or ""),
                 gap_evidence=dict(params.get("gap_evidence") or {}),
                 kb_subgraph=dict(params.get("kb_subgraph") or {}),
+                experience_kb_block=str(params.get("experience_kb_block") or ""),
                 # Coordinator-populated roofline pre-fetch; empty when not warmed.
                 roofline_evidence=dict(params.get("roofline_evidence") or {}),
                 sub_kind=str(params.get("sub_kind") or ""),
@@ -661,6 +663,11 @@ class SpecialistRunner:
                 session_framework_tree=str(params.get("session_framework_tree") or ""),
                 framework_source_roots=tuple(params.get("framework_source_roots") or ()),
                 worktree_base=str(worktree_base) if worktree is not None and worktree_base is not None else "",
+                worktree_package_dir=(
+                    str(worktree_source.tree.relative_to(worktree_source.root))
+                    if worktree is not None and worktree_source is not None
+                    else ""
+                ),
                 source_hint_directories=tuple(params.get("source_hint_directories") or ()),
                 model_info=dict(params.get("model_info") or {}),
                 static_recon_checklist=str(params.get("static_recon_checklist") or ""),
@@ -668,6 +675,7 @@ class SpecialistRunner:
                 enablement_candidate_refs=tuple(
                     str(r).strip() for r in (params.get("enablement_candidate_refs") or ()) if str(r).strip()
                 ),
+                enablement_failure_signature=dict(params.get("enablement_failure_signature") or {}),
                 enablement_accepted_config={
                     "extra_envs": dict(params.get("base_extra_envs") or {}),
                     "extra_server_args": str(params.get("base_extra_args") or "").strip(),
@@ -692,6 +700,8 @@ class SpecialistRunner:
                 # shape supplies their numbers.
                 benchmark_mode=str(params.get("benchmark_mode") or ""),
                 agentx_corpus_shape=dict(params.get("agentx_corpus_shape") or {}),
+                agentx_grading=dict(params.get("agentx_grading") or {}),
+                agentx_backend=str(params.get("agentx_backend") or ""),
                 # Runtime fingerprint to flag version-mismatched lessons.
                 framework_version=str(params.get("framework_version") or ""),
                 workspace_path=(str(workspace_for_prompt) if workspace_for_prompt else ""),
@@ -699,7 +709,6 @@ class SpecialistRunner:
                 scope=profile.scope,
                 mode=profile.mode,
                 bench=profile.bench,
-                lane=profile.lane,
                 task_description=task_description,
                 # Coordinator-injected note when this is a bounded auto-retry.
                 auto_retry_reason=str(params.get("_auto_retry_reason") or ""),
@@ -1465,6 +1474,13 @@ class SpecialistRunner:
         for _proposal in done_payload.get("proposal_set") or []:
             if isinstance(_proposal, dict):
                 _proposal.setdefault("scope", prep.profile.scope)
+        # A specialist may cite only the Experiences its dispatch read showed it.
+        shown = shown_ids((ctx.task.params or {}).get("kb_rendered_refs"))
+        for _proposal in done_payload.get("proposal_set") or []:
+            if isinstance(_proposal, dict) and "experience_citations" in _proposal:
+                _proposal["experience_citations"] = normalize_citations(_proposal["experience_citations"], shown)
+        if "experience_citations" in done_payload:
+            done_payload["experience_citations"] = normalize_citations(done_payload["experience_citations"], shown)
 
         # Universal patch-safety gate: drop non-diff/escaping patches, git-ground
         # the rest, and scan for smuggled claims. Grounding is per set, not per

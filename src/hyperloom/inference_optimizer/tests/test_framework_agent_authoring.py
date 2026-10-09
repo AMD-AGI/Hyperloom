@@ -9,18 +9,27 @@ from typing import Any
 
 import pytest
 
+from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
 
 from hyperloom.orchestrator.state.shared_state import SharedState
 
-from ._optimize_fixtures import fake_coordinator, optimize_state
+from ._optimize_fixtures import optimize_state
+from .conftest import make_coordinator
 
 
-def _state(*, authoring: bool = True) -> SharedState:
+@pytest.fixture(autouse=True)
+def _a_node_with_gpus(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A node with GPUs to lease, so the authoring tests show FRAMEWORK authoring still takes none."""
+    for var in GPU_MASK_ENV_NAMES:
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7")
+
+
+def _state() -> SharedState:
     """Real ``SharedState`` seeded for the authoring track."""
     return optimize_state(
-        framework_agent_authoring_enabled=authoring,
         framework_local_explore_enabled=False,
         model="test-model",
         framework="sglang",
@@ -95,29 +104,14 @@ class _BusStub:
         return list(reversed(messages[-n:]))
 
 
-class _Stub(Coordinator):
-    """The state a FRAMEWORK pump tick reads; the rest resolves for real."""
-
-    async def _record_observation(self, *_a: Any, **_k: Any) -> None:
-        return None
-
-    async def _warm_specialist_params(self, params: dict[str, Any]) -> None:
-        return None
-
-
-def _stub(tmp_path: Path, *, authoring: bool = True) -> _Stub:
-    return fake_coordinator(
-        _Stub,
-        tmp_path,
-        shared_state=_state(authoring=authoring),
-        tasks=_TasksStub(),
-        bus=_BusStub(),
-        backends={"critic": _ApproveCritic()},
-        state=SimpleNamespace(pending_proposals={}),
-        framework_agent_discover_timeout_sec=0.0,
-        # No GPU pool: authoring degrades to the research-lane-only path.
-        framework_gpu_pool=None,
-    )
+def _stub(tmp_path: Path) -> Coordinator:
+    """A real Coordinator over a seeded authoring-track state with recording task and bus doubles."""
+    _state().save(tmp_path)
+    coord = make_coordinator(tmp_path)
+    coord.tasks = _TasksStub()
+    coord.bus = _BusStub()
+    coord.backends = {"critic": _ApproveCritic()}
+    return coord
 
 
 _CANDIDATE = {
@@ -130,16 +124,16 @@ _CANDIDATE = {
 }
 
 
-def _seed_batch(stub: _Stub, *candidates: dict[str, Any]) -> None:
+def _seed_batch(stub: Coordinator, *candidates: dict[str, Any]) -> None:
     """Put a discovered batch in state."""
     stub.shared_state.framework_agent_batches = [{"batch_id": "b1", "candidates": [dict(c) for c in candidates]}]
 
 
-def _pump(stub: _Stub) -> None:
+def _pump(stub: Coordinator) -> None:
     asyncio.run(stub.phase_framework._pump_framework_agent_phase())
 
 
-def _pump_then_materialize(stub: _Stub) -> None:
+def _pump_then_materialize(stub: Coordinator) -> None:
     """Run the pump (resolves audit route + submits a candidate proposal) then materialise it."""
     asyncio.run(stub.phase_framework._pump_framework_agent_phase())
     pendings = [
@@ -152,7 +146,7 @@ def _pump_then_materialize(stub: _Stub) -> None:
         p.decided = True
 
 
-def _materialize(stub: _Stub, *, audit_step: str = "") -> None:
+def _materialize(stub: Coordinator, *, audit_step: str = "") -> None:
     from hyperloom.orchestrator.loop.proposals import PendingProposal
 
     pending = PendingProposal(
@@ -177,7 +171,7 @@ def test_pump_submits_candidate_proposal(
 ):
     """The pump submits the candidate as a ``framework_agent`` proposal; no task is created inline."""
 
-    stub = _stub(tmp_path, authoring=True)
+    stub = _stub(tmp_path)
     _seed_batch(stub, _CANDIDATE)
 
     _pump(stub)
@@ -192,7 +186,7 @@ def test_materialize_unknown_route_dispatches_both_tracks(
     tmp_path: Path,
 ):
     """An approved candidate with an unknown audit route runs the raw-diff + authoring tracks."""
-    stub = _stub(tmp_path, authoring=True)
+    stub = _stub(tmp_path)
 
     _materialize(stub, audit_step="")
 
@@ -210,24 +204,14 @@ def test_materialize_unknown_route_dispatches_both_tracks(
     pr_lead = params.get("pr_lead") or {}
     assert _CANDIDATE["pr_url"] == pr_lead.get("url") or _CANDIDATE["pr_url"] in params.get("notes", "")
     assert _CANDIDATE["diff_url"] == pr_lead.get("diff_url") or _CANDIDATE["diff_url"] in params.get("notes", "")
+    assert "needs_gpu" not in params
     assert spec["requires_lanes"] == ["research_lane"]
-
-
-def test_materialize_authoring_disabled_runs_diff_track_only(
-    tmp_path: Path,
-):
-    stub = _stub(tmp_path, authoring=False)
-
-    _materialize(stub, audit_step="")
-
-    kinds = [c["kind"] for c in stub.tasks.created]
-    assert kinds == ["integrate_patch"]
 
 
 def test_reauthor_attempt_propagates_into_specialist_and_integrate_params(tmp_path: Path):
     from hyperloom.orchestrator.phases.framework import _forward_integrate_source
 
-    stub = _stub(tmp_path, authoring=True)
+    stub = _stub(tmp_path)
 
     task_id = asyncio.run(
         stub.phase_framework._enqueue_framework_agent_authoring_specialist(
@@ -240,41 +224,37 @@ def test_reauthor_attempt_propagates_into_specialist_and_integrate_params(tmp_pa
     specialist_task = stub.tasks._queued[-1]
     assert task_id == specialist_task.task_id
     assert specialist_task.params["reauthor_attempt"] == 1
-    round_entry = stub._build_specialist_round_entry(
+    round_entry = stub.specialist_dispatch.build_specialist_round_entry(
         task=specialist_task,
         done_payload={"proposal_set": []},
         source=f"specialist:{task_id}",
     )
     assert round_entry["reauthor_attempt"] == 1
     integrate_params: dict[str, Any] = {}
-    _forward_integrate_source(specialist_task.params, integrate_params)
+    _forward_integrate_source(specialist_task.params, integrate_params, {})
     assert integrate_params["reauthor_attempt"] == 1
 
 
 @pytest.mark.parametrize(
-    ("route", "authoring", "kinds"),
+    ("route", "kinds"),
     [
-        ("direct_framework", True, ["integrate_patch"]),
-        ("author_via_specialist", True, ["specialist"]),
-        # Author route with the arm off must still land on the raw-diff track: the alternative is a candidate that is
-        # approved and then stranded.
-        ("author_via_specialist", False, ["integrate_patch"]),
+        ("direct_framework", ["integrate_patch"]),
+        ("author_via_specialist", ["specialist"]),
         # An unlabelled candidate takes the author route: rewriting against live source is the safe default for one
         # nobody vetted.
-        ("", True, ["specialist"]),
+        ("", ["specialist"]),
         # A route the pump does not recognise runs both tracks rather than picking one on a guess.
-        ("unrecognised", True, ["integrate_patch", "specialist"]),
+        ("unrecognised", ["integrate_patch", "specialist"]),
     ],
 )
 def test_the_route_the_discovery_specialist_returns_picks_the_track(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     route: str,
-    authoring: bool,
     kinds: list[str],
 ):
     """``candidate[\"route\"]`` is the only input that selects apply-vs-author."""
-    stub = _stub(tmp_path, authoring=authoring)
+    stub = _stub(tmp_path)
     _seed_batch(stub, dict(_CANDIDATE, route=route))
 
     _pump_then_materialize(stub)
@@ -283,7 +263,7 @@ def test_the_route_the_discovery_specialist_returns_picks_the_track(
 
 
 def test_authoring_inflight_detects_specialist_and_proposals(tmp_path: Path):
-    stub = _stub(tmp_path, authoring=True)
+    stub = _stub(tmp_path)
     # One unprocessed candidate so the signal has a valid target.
     _CAND_ID = "https://github.com/ROCm/vllm/pull/999"
     stub.shared_state.framework_agent_batches = [{"batch_id": "b1", "candidates": [{"candidate_id": _CAND_ID}]}]
@@ -353,21 +333,11 @@ def test_authoring_inflight_detects_specialist_and_proposals(tmp_path: Path):
     }
     assert asyncio.run(stub.phase_framework._framework_agent_authoring_inflight()) is False
 
-    # A decided proposal does NOT count even if framework-owned.
-    stub.state.pending_proposals = {
-        "m4": SimpleNamespace(
-            action_name="integrate_patch",
-            decided=True,
-            payload={"framework_agent_candidate_id": _CAND_ID},
-        ),
-    }
-    assert asyncio.run(stub.phase_framework._framework_agent_authoring_inflight()) is False
-
 
 def test_record_authored_outcome_writes_progress(
     tmp_path: Path,
 ):
-    stub = _stub(tmp_path, authoring=True)
+    stub = _stub(tmp_path)
     task = SimpleNamespace(
         task_id="i-1",
         params={
@@ -386,6 +356,7 @@ def test_record_authored_outcome_writes_progress(
     stub.phase_framework._record_framework_agent_authored_outcome(
         task=task,
         result=result,
+        adopted=True,
     )
 
     progress = stub.shared_state.framework_agent_phase_progress
@@ -401,7 +372,7 @@ def test_record_authored_outcome_writes_progress(
 
 def test_record_authored_outcome_records_apply_failed_terminal(tmp_path: Path):
     """A non-keep terminal status (apply_failed) MUST still be recorded."""
-    stub = _stub(tmp_path, authoring=True)
+    stub = _stub(tmp_path)
     task = SimpleNamespace(
         task_id="i-2",
         params={"framework_agent_authoring": True, "framework_batch_id": "b1"},
@@ -414,6 +385,7 @@ def test_record_authored_outcome_records_apply_failed_terminal(tmp_path: Path):
     stub.phase_framework._record_framework_agent_authored_outcome(
         task=task,
         result=result,
+        adopted=False,
     )
 
     rows = stub.shared_state.framework_agent_phase_progress
@@ -423,12 +395,13 @@ def test_record_authored_outcome_records_apply_failed_terminal(tmp_path: Path):
 
 
 def test_record_authored_outcome_requires_task_provenance(tmp_path: Path):
-    stub = _stub(tmp_path, authoring=True)
+    stub = _stub(tmp_path)
     task = SimpleNamespace(task_id="unrelated", params={"specialist_task_id": "s-other"})
 
     stub.phase_framework._record_framework_agent_authored_outcome(
         task=task,
         result={"status": "kept", "delta_pct": 1.0},
+        adopted=True,
     )
 
     assert stub.shared_state.framework_agent_phase_progress == []
@@ -436,7 +409,7 @@ def test_record_authored_outcome_requires_task_provenance(tmp_path: Path):
 
 def test_record_authored_outcome_resolves_candidate_via_specialist_map(tmp_path: Path):
     """integrate_patch carries only specialist_task_id; the bridge must map it back to the originating PR-URL candidate so the row matches the select key."""
-    stub = _stub(tmp_path, authoring=True)
+    stub = _stub(tmp_path)
     stub.shared_state.framework_agent_specialist_candidate_map = {
         "spec-7": "https://github.com/ROCm/aiter/pull/3888",
     }
@@ -456,6 +429,7 @@ def test_record_authored_outcome_resolves_candidate_via_specialist_map(tmp_path:
     stub.phase_framework._record_framework_agent_authored_outcome(
         task=task,
         result=result,
+        adopted=False,
     )
 
     rows = stub.shared_state.framework_agent_phase_progress
@@ -465,7 +439,7 @@ def test_record_authored_outcome_resolves_candidate_via_specialist_map(tmp_path:
 
 
 def test_record_authored_outcome_replaces_stale_empty_row(tmp_path: Path):
-    stub = _stub(tmp_path, authoring=True)
+    stub = _stub(tmp_path)
     stub.shared_state.phase = "FRAMEWORK_AGENT"
     stub.shared_state.framework_agent_phase_progress = [
         {
@@ -486,6 +460,7 @@ def test_record_authored_outcome_replaces_stale_empty_row(tmp_path: Path):
     stub.phase_framework._record_framework_agent_authored_outcome(
         task=task,
         result={"status": "reverted", "delta_pct": -0.2},
+        adopted=False,
     )
 
     rows = stub.shared_state.framework_agent_phase_progress
@@ -495,10 +470,48 @@ def test_record_authored_outcome_replaces_stale_empty_row(tmp_path: Path):
     assert rows[0]["integrate_task_id"] == "integrate-local-2"
 
 
+def test_a_kept_patch_the_lift_refused_is_not_a_kept_row(tmp_path: Path):
+    """The row's ``kept`` follows the adoption, so a later attempt may still better the candidate."""
+    from hyperloom.orchestrator.framework.artifacts import summarize_candidate_outcomes
+
+    stub = _stub(tmp_path)
+    task = SimpleNamespace(
+        task_id="i-refused",
+        params={
+            "framework_agent_authoring": True,
+            "framework_agent_candidate_id": "pr-77",
+            "framework_batch_id": "b1",
+        },
+    )
+
+    stub.phase_framework._record_framework_agent_authored_outcome(
+        task=task,
+        result={"status": "kept", "delta_pct": 2.0, "output_throughput": 1020.0},
+        adopted=False,
+    )
+
+    rows = stub.shared_state.framework_agent_phase_progress
+    assert rows[0]["status"] == "kept"
+    assert rows[0]["kept"] is False
+    assert summarize_candidate_outcomes(rows)["keeps"] == 0
+
+    retry = SimpleNamespace(task_id="i-refused-2", params=task.params)
+    stub.phase_framework._record_framework_agent_authored_outcome(
+        task=retry,
+        result={"status": "kept", "delta_pct": 5.0, "output_throughput": 1050.0},
+        adopted=True,
+    )
+
+    rows = stub.shared_state.framework_agent_phase_progress
+    assert len(rows) == 1
+    assert rows[0]["kept"] is True
+    assert rows[0]["integrate_task_id"] == "i-refused-2"
+
+
 @pytest.mark.asyncio
 async def test_enqueue_authoring_stamps_recovery_failed_when_unrecoverable(tmp_path: Path):
     """A terminal specialist with no recoverable outcome stamps a terminal row so the pump cannot re-select it forever."""
-    stub = _stub(tmp_path, authoring=True)
+    stub = _stub(tmp_path)
     candidate = {
         "candidate_id": "cand-x",
         "pr_url": "https://github.com/o/r/pull/1",
@@ -533,7 +546,7 @@ async def test_enqueue_authoring_stamps_recovery_failed_when_unrecoverable(tmp_p
 
 @pytest.mark.asyncio
 async def test_recover_authored_outcome_uses_persisted_integrate_result(tmp_path: Path):
-    stub = _stub(tmp_path, authoring=True)
+    stub = _stub(tmp_path)
     stub.shared_state.phase = "FRAMEWORK_AGENT"
     specialist_task = SimpleNamespace(
         task_id="specialist-local-2",
@@ -593,24 +606,24 @@ async def test_recover_authored_outcome_uses_persisted_integrate_result(tmp_path
 
 @pytest.mark.asyncio
 async def test_dispatcher_records_authored_outcome_after_phase_transition(tmp_path: Path):
-    stub = _stub(tmp_path, authoring=False)
+    stub = _stub(tmp_path)
     stub.shared_state.phase = "FRAMEWORK_AGENT"
     recorded: list[str] = []
 
     async def _noop_async(*_args: Any, **_kwargs: Any) -> None:
         return None
 
-    stub._record_intervention_for_task = lambda *_args, **_kwargs: None
+    stub.record_intervention_for_task = lambda *_args, **_kwargs: None
     phase = stub.phase_framework
-    phase._record_framework_agent_authored_outcome = lambda *, task, result: recorded.append(
-        str(result.result.get("status") or "")
+    phase._record_framework_agent_authored_outcome = lambda *, task, result, adopted: recorded.append(
+        (str(result.result.get("status") or ""), adopted)
     )
     phase._maybe_rearm_authored_lane = _noop_async
     phase._drain_apply_fail_retry_pending = _noop_async
-    stub._is_promotable_result = lambda *_args, **_kwargs: False
-    stub._handle_unpromotable_result = _noop_async
-    stub._fact_write_hook = _noop_async
-    stub._record_coordinator_exception = lambda **_kwargs: None
+    stub.is_promotable_result = lambda *_args, **_kwargs: False
+    stub.handle_unpromotable_result = _noop_async
+    stub.fact_write_hook = _noop_async
+    stub.record_exception = lambda **_kwargs: None
     task = SimpleNamespace(
         task_id="integrate-cross-phase",
         kind="integrate_patch",
@@ -622,15 +635,15 @@ async def test_dispatcher_records_authored_outcome_after_phase_transition(tmp_pa
         result={"status": "reverted"},
     )
 
-    await stub._reap_dispatched_task(task, result, None)
+    await stub.dispatcher.reap_dispatched_task(task, result)
 
-    assert recorded == ["reverted"]
+    assert recorded == [("reverted", False)]
     assert result.result["reauthor_attempt"] == 1
 
 
 def test_empty_outcome_fires_when_patch_dropped_by_vetting(tmp_path: Path):
     """A patch dropped by safety-vetting (empty patches_written) must still stamp a terminal row (gate on patches_written, NOT proposal_set), else the FRAMEWORK pump re-dispatches the candidate forever (livelock)."""
-    stub = _stub(tmp_path, authoring=True)
+    stub = _stub(tmp_path)
     cand = "https://github.com/sgl-project/sglang/pull/28067"
     task = SimpleNamespace(
         task_id="spec-28067",
@@ -660,7 +673,7 @@ def test_empty_outcome_fires_when_patch_dropped_by_vetting(tmp_path: Path):
 
 
 def test_empty_outcome_records_after_phase_transition(tmp_path: Path):
-    stub = _stub(tmp_path, authoring=True)
+    stub = _stub(tmp_path)
     stub.shared_state.phase = "FRAMEWORK_AGENT"
     task = SimpleNamespace(
         task_id="spec-empty-cross-phase",
@@ -684,7 +697,7 @@ def test_empty_outcome_records_after_phase_transition(tmp_path: Path):
 
 def test_empty_outcome_skips_when_patches_written_present(tmp_path: Path):
     """Non-empty patches_written means autosubmit will create an integrate_patch that owns the terminal row; the empty-outcome bridge must NOT also stamp one."""
-    stub = _stub(tmp_path, authoring=True)
+    stub = _stub(tmp_path)
     task = SimpleNamespace(
         task_id="spec-x",
         params={
@@ -750,7 +763,7 @@ def test_config_levers_helper_extracts_from_proposal_set():
 
 def test_empty_outcome_skips_when_config_levers_present(tmp_path: Path):
     """A config-lever deliverable (proposal_set with extra_args/extra_envs and no patch) is routed to integrate_patch, so the empty-outcome bridge must NOT stamp an authored_empty row for it."""
-    stub = _stub(tmp_path, authoring=True)
+    stub = _stub(tmp_path)
     task = SimpleNamespace(
         task_id="spec-cfg",
         params={
@@ -789,7 +802,7 @@ def test_empty_outcome_skips_when_artifacts_written_routable(tmp_path: Path):
     """A non-diff tuned artifact (``artifacts_written`` with a real source file) is a FULL result: autosubmit routes it to ``integrate_patch``, so the empty-outcome bridge must NOT stamp an authored_empty row for it."""
     from hyperloom.inference_optimizer.session.session_paths import runs_dir
 
-    stub = _stub(tmp_path, authoring=True)
+    stub = _stub(tmp_path)
     sid = "spec-art"
     spec_root = runs_dir(tmp_path, "specialist", sid)
     art_dir = spec_root / "worktree" / "artifacts"
@@ -830,7 +843,7 @@ def test_empty_outcome_stamps_when_artifacts_source_missing(tmp_path: Path):
     ``integrate_patch``, so the empty-outcome bridge MUST still stamp a terminal row (else the FRAMEWORK pump
     livelocks).
     """
-    stub = _stub(tmp_path, authoring=True)
+    stub = _stub(tmp_path)
     task = SimpleNamespace(
         task_id="spec-art-missing",
         params={
@@ -869,7 +882,7 @@ def test_empty_outcome_stamps_when_artifacts_source_outside_sandbox(tmp_path: Pa
 
     from hyperloom.inference_optimizer.session.session_paths import runs_dir
 
-    stub = _stub(tmp_path, authoring=True)
+    stub = _stub(tmp_path)
     sid = "spec-art-fw-escape"
     worktree = runs_dir(tmp_path, "specialist", sid) / "worktree"
     worktree.mkdir(parents=True, exist_ok=True)
@@ -911,7 +924,7 @@ def test_empty_outcome_stamps_when_artifacts_source_outside_sandbox(tmp_path: Pa
 async def test_perf_explore_retry_stamps_immutable_explore_owner(
     tmp_path: Path,
 ) -> None:
-    stub = _stub(tmp_path, authoring=True)
+    stub = _stub(tmp_path)
 
     task_id = await stub.phase_framework._enqueue_author_specialist(
         lane="perf_explore",
@@ -922,3 +935,53 @@ async def test_perf_explore_retry_stamps_immutable_explore_owner(
     params = stub.tasks.created[-1]["params"]
     assert params["source_phase"] == "FRAMEWORK_AGENT"
     assert params["gap_layer"] == "perf_explore"
+
+
+# ── Parallel authoring ───────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def parallel_phase(tmp_path, monkeypatch):
+    """A FRAMEWORK phase with five PR candidates, capacity 3, and recorded review submissions."""
+    from hyperloom.orchestrator.phases.framework import FrameworkPhase
+
+    stub = _stub(tmp_path)
+    stub.shared_state.research_lane_capacity = 3
+    _seed_batch(stub, *({"pr_url": f"https://github.com/ex/repo/pull/{i}", "title": f"c{i}"} for i in range(5)))
+    stub.submitted = []
+    stub.discoveries = []
+
+    async def _submit(_self, candidate, *, audit, audit_step):
+        stub.submitted.append(candidate["pr_url"])
+
+    async def _discover(_self, *, reason):
+        stub.discoveries.append(reason)
+        return False
+
+    monkeypatch.setattr(FrameworkPhase, "_submit_framework_agent_candidate_for_review", _submit)
+    monkeypatch.setattr(FrameworkPhase, "_maybe_enqueue_candidate_discovery", _discover)
+    return stub
+
+
+async def test_parallel_authoring_fills_capacity_around_candidates_in_flight(parallel_phase):
+    in_flight = "https://github.com/ex/repo/pull/0"
+    parallel_phase.tasks._running.append(
+        SimpleNamespace(kind="integrate_patch", params={"framework_agent_candidate_id": in_flight})
+    )
+
+    await parallel_phase.phase_framework._pump_framework_agent_phase()
+
+    assert parallel_phase.submitted == ["https://github.com/ex/repo/pull/1", "https://github.com/ex/repo/pull/2"]
+
+
+async def test_discovery_fallback_waits_until_nothing_is_in_flight(parallel_phase):
+    parallel_phase.shared_state.framework_agent_batches = []
+    parallel_phase.tasks._queued.append(
+        SimpleNamespace(kind="specialist", params={"framework_agent_candidate_id": "https://github.com/ex/repo/pull/9"})
+    )
+    await parallel_phase.phase_framework._pump_framework_agent_phase()
+    assert parallel_phase.discoveries == []
+
+    parallel_phase.tasks._queued.clear()
+    await parallel_phase.phase_framework._pump_framework_agent_phase()
+    assert parallel_phase.discoveries == ["candidate_pool_empty"]

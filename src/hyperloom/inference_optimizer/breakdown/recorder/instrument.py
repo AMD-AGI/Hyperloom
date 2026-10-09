@@ -19,7 +19,7 @@ Payloads are shaped to the matching ``schema.py`` TypedDict.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from hyperloom.common.coerce import to_float
 from hyperloom.common.timeutil import iso_z
@@ -27,6 +27,9 @@ from hyperloom.common.timeutil import iso_z
 from . import tool_versions
 from .session_metadata import snapshot_metadata
 from .trace import trace_skip
+
+if TYPE_CHECKING:
+    from .kernel_event import KernelEventRecorder
 
 PRODUCER_COORDINATOR = "coordinator"
 PRODUCER_KERNEL_AGENT = "kernel-agent"
@@ -112,12 +115,11 @@ def _to_bool(value: Any) -> bool | None:
     return None
 
 
-def _mirror_backend_attempts_to_kernel_timeline(result: dict[str, Any]) -> None:
+def _mirror_backend_attempts_to_kernel_timeline(result: dict[str, Any], recorder: "KernelEventRecorder | None") -> None:
     """Mirror the result's backend attempts into the open KERNEL timeline event.
 
     The legacy ``kernel_backend_result`` fragment is session-wide; the V6 kernel
-    event is visit-scoped. This copies each attempt as its own
-    ``kernel_rewrites[]`` row while a KERNEL visit recorder is active.
+    event is visit-scoped. This copies each attempt as its own ``kernel_rewrites[]`` row.
 
     Every backend the kernel agent dispatched lands here, GEAK included: the
     lane is about a kernel having been rewritten, not about which backend did
@@ -125,9 +127,8 @@ def _mirror_backend_attempts_to_kernel_timeline(result: dict[str, Any]) -> None:
     delegated optimizer's own campaign, which is a different producer's account
     of a different run.
     """
-    from .kernel_event import LANE_FAULTED_STATUSES, active_kernel_recorder
+    from .kernel_event import LANE_FAULTED_STATUSES
 
-    recorder = active_kernel_recorder()
     if recorder is None:
         return
     kid = str(result.get("kernel_id") or "")
@@ -227,14 +228,15 @@ def record_backend_versions_and_timeline(
     session_dir: Path | str | None,
     result: dict[str, Any],
     *,
+    recorder: "KernelEventRecorder | None",
     producer: str = PRODUCER_KERNEL_AGENT,
 ) -> None:
     """Record what a kernel-agent result says about the backends that ran.
 
     Two facts are recorded: the build of each backend, which reaches the
     optimizer through nothing else, and the attempts themselves, which are
-    mirrored onto the kernel timeline event. A falsy ``session_dir``, or a
-    ``result`` that is not a dict, is a no-op.
+    mirrored onto the kernel timeline event via ``recorder``. A falsy
+    ``session_dir``, or a ``result`` that is not a dict, is a no-op.
     """
     if not session_dir or not isinstance(result, dict):
         trace_skip(
@@ -275,7 +277,7 @@ def record_backend_versions_and_timeline(
                 version=str(result_meta.get("version") or "") or None,
                 producer=producer,
             )
-    _mirror_backend_attempts_to_kernel_timeline(result)
+    _mirror_backend_attempts_to_kernel_timeline(result, recorder)
 
 
 __all__ = [

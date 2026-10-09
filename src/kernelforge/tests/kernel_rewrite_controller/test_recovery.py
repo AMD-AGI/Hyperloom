@@ -17,7 +17,7 @@ from kernelforge.kernel_rewrite_controller.worktree import (
     create_operator_worktree,
     export_patch_from_base,
 )
-from kernelforge.knowledge.kernel_identity import (
+from kernelforge.knowledge.kb_store.identity.kernel_recipe import (
     KernelRecipeIdentity,
     kernel_recipe_canonical_id,
 )

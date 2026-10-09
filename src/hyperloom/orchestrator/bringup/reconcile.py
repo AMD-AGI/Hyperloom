@@ -215,10 +215,6 @@ class Reconciler:
             msg_id = str(row["msg_id"])
             if await self._author_timeout_deny(msg_id, str(row["from_agent"]), age=age, now_unix=now_unix):
                 report.denied_reviews.append(msg_id)
-                self._record_timeout_terminal(msg_id, age=age)
-            # Marked either way: a verdict that beat this write to the log is
-            # still one the copy the loop reads has to carry.
-            self._mark_decided(msg_id)
 
     async def _author_timeout_deny(self, msg_id: str, to_agent: str, *, age: float, now_unix: float) -> bool:
         """Write the coordinator's timeout deny, unless a verdict beat it there.
@@ -247,6 +243,9 @@ class Reconciler:
             applied = cur.rowcount == 1
         if applied:
             log.warning("RECONCILE: review timeout denied proposal %s after %.0fs", msg_id, age)
+            self._record_timeout_terminal(msg_id, age=age)
+            if self._proposals is not None:
+                self._proposals().pop(msg_id, None)
         return applied
 
     def _record_timeout_terminal(self, msg_id: str, *, age: float) -> None:
@@ -265,16 +264,6 @@ class Reconciler:
                 "waited_sec": round(age, 1),
             },
         )
-
-    def _mark_decided(self, msg_id: str) -> None:
-        """Record the deny on the in-memory proposal the loop consults."""
-        if self._proposals is None:
-            return
-        pending = self._proposals().get(msg_id)
-        if pending is None:
-            return
-        pending.decided = True
-        pending.verdict = TIMEOUT_VERDICT
 
     async def _resolve_open_rounds(self, now_unix: float, report: ReconcileReport) -> None:
         """Advance completed owners without timing out active ownership."""
@@ -356,9 +345,7 @@ class Reconciler:
         successor = await self._successor(round_row.holder_task_id)
         if successor is not None:
             moved = await self._rounds.handoff(
-                round_row.round_id,
-                holder_task_id=round_row.holder_task_id,
-                fence=round_row.fence,
+                round_row,
                 new_holder_task_id=successor.task_id,
                 # A successor that declares no TTL inherits what the round has left.
                 lease_sec=float(successor.lease_ttl_sec) or (round_row.expires_unix - round_row.renewed_unix),
@@ -379,9 +366,7 @@ class Reconciler:
         """Settle a completed owner after its successor/review window ends."""
         outcome = EXPIRED_REAPED
         result = await self._rounds.settle(
-            round_row.round_id,
-            holder_task_id=round_row.holder_task_id,
-            fence=round_row.fence,
+            round_row,
             outcome=outcome,
             now_unix=now_unix,
             request_id=f"reconcile:{why}:{round_row.round_id}:{round_row.fence}",
@@ -435,8 +420,6 @@ class Reconciler:
         if self._proposals is None:
             return False
         for pending in self._proposals().values():
-            if pending.decided:
-                continue
             params = pending.payload.get("params", {})
             if str(params.get("specialist_task_id", "")) == holder_task_id:
                 return True

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import types
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
     make_kernel_recorder,
     record_integrate_verdict,
     record_trace_analyze_request,
+    reject_geak_attempts,
 )
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
@@ -48,7 +50,6 @@ def _forge_recorder():
         macro_cycle=3,
         route=ROUTE_FORGE,
         route_reason="kernel_opt_backend_order=forge",
-        code_revision="abc1234",
     )
     assert recorder is not None
     recorder.begin(
@@ -70,8 +71,10 @@ def _geak_recorder(*, macro_cycle: int = 1):
 
 def _phase_with_recorder(tmp_path: Path, recorder: Any) -> KernelPhase:
     phase = object.__new__(KernelPhase)
-    phase.session_dir = tmp_path
-    phase.shared_state = types.SimpleNamespace(macro_cycle=3)
+    phase._coord = types.SimpleNamespace(
+        session_dir=tmp_path,
+        shared_state=types.SimpleNamespace(macro_cycle=3),
+    )
     phase._kernel_timeline_recorder = recorder
     return phase
 
@@ -669,6 +672,74 @@ def test_geak_attempts_carry_what_it_tried_not_only_what_it_kept(tmp_path):
     # A kernel GEAK never dispatched produced nothing to gate.
     assert rows["k002"]["outcome"] == "rejected"
     assert rows["k002"]["settled_by"] == "lane"
+
+
+@pytest.mark.parametrize(
+    "kernel_id",
+    [
+        "aiter:paged_attention_ragged (pa_ragged / paged_attention_ll4mi_QKV_mfma16)",
+        "https://example.org/kernels/7",
+        "backend:kernel%3Avariant",
+    ],
+)
+def test_geak_opaque_ids_survive_acceptance_rebench_integration_and_late_rejection(tmp_path, kernel_id):
+    recorder = _geak_recorder(macro_cycle=0)
+    journey = {
+        "discovery_runs": [{"source": "trace:1", "status": "success"}],
+        "kernels": [{"kernel_id": kernel_id, "e2e": {"decision": "KEEP", "integrated": True, "e2e_gain_pct": 4.0}}],
+    }
+    recorder.record_geak_attempts(journey)
+    recorder.record_geak_claim({}, specs=[{"kind": "env", "short_name": kernel_id, "e2e_delta_pct": 4.0}])
+    _geak_rebench(recorder, "geak:rebench:0", REBENCH_VALIDATED)
+    record_integrate_verdict(
+        macro_cycle=0,
+        integration_id=f"geak:{kernel_id}",
+        kernel_id=kernel_id,
+        decision="KEEP",
+        gain_pct=4.0,
+    )
+    recorder.finish(tput_after=950.0)
+
+    ext = _kernel_events(tmp_path)[0]["ext"]
+    assert ext["geak"]["discovery_runs"][0]["source"] == "trace:1"
+    assert len(ext["attempts"]) == 2
+    attempts = {row["source_kind"]: row for row in ext["attempts"]}
+    assert attempts[SOURCE_GEAK_AUTHORED_KERNEL]["kernel_id"] == kernel_id
+    assert attempts[SOURCE_GEAK_AUTHORED_KERNEL]["e2e"]["decision"] == "KEEP"
+    assert ext["geak"]["claim"]["env_selections"][0]["selection"] == kernel_id
+    assert attempts[SOURCE_GEAK_ENV_SELECTION]["name"] == kernel_id
+    assert attempts[SOURCE_GEAK_ENV_SELECTION]["outcome"] == "adopted"
+    assert attempts[SOURCE_GEAK_ENV_SELECTION]["rebench_ref"] == "geak:rebench:0"
+    assert ext["rebench"][0]["attempt_id"] == "geak:rebench:0"
+    assert kernel_event_parts()["kernel_integrate"][0]["integration_id"] == f"geak:{kernel_id}"
+
+    reject_geak_attempts(
+        event=recorder.event_id,
+        measured_tput=850.0,
+        current_best_tput=900.0,
+        provenance="orchestrator_rebench",
+        rejection_reason="no_promote",
+    )
+    recorder.record_geak_attempts(journey)
+    attempts = [
+        row
+        for row in _kernel_events(tmp_path)[0]["ext"]["attempts"]
+        if row["source_kind"] == SOURCE_GEAK_AUTHORED_KERNEL
+    ]
+    assert len(attempts) == 1
+    assert attempts[0]["kernel_id"] == kernel_id
+    assert attempts[0]["e2e"]["decision"] == "REVERT"
+    assert attempts[0]["e2e"]["rejection_reason"] == "no_promote"
+
+
+def test_name_only_discovered_kernels_keep_distinct_rank_fallback_ids():
+    recorder = _forge_recorder()
+    recorder.record_discovered_kernels(
+        {"roofline_snapshot_id": 4, "hot_kernels_top15": [{"name": "kernel_a"}, {"name": "kernel_b"}]}
+    )
+    rows = kernel_event_parts()["kernel_discovered"]
+    assert [row["name"] for row in rows] == ["kernel_a", "kernel_b"]
+    assert [row["rank"] for row in rows] == [0, 1]
 
 
 def test_an_attempt_carries_what_made_the_kernel_worth_trying(tmp_path):
@@ -1410,6 +1481,7 @@ def test_record_backend_versions_and_timeline_mirrors_each_attempt(tmp_path):
             },
             "proposal": {"decision": "KEEP"},
         },
+        recorder=recorder,
     )
     recorder.finish(tput_after=1000.0)
 
@@ -1553,6 +1625,27 @@ def test_gemm_tuning_records_one_row_per_tuner_not_a_merged_row(tmp_path):
     assert failed["error_class"] == "input_missing"
     # The failed tuner's error must not land on the row that succeeded.
     assert kept["error_class"] != "input_missing"
+
+
+def test_geak_absent_backends_land_on_the_result(tmp_path):
+    eval_dir = tmp_path / "eval"
+    eval_dir.mkdir()
+    (eval_dir / "env_report.json").write_text(
+        json.dumps({"absent_backends": {"ck": {"probe": "which ckProfiler"}}}), encoding="utf-8"
+    )
+    result = {"status": "ok", "returncode": 0, "eval_dir": str(eval_dir)}
+    phase = _phase_with_recorder(tmp_path, _geak_recorder())
+
+    phase._record_geak_delegation_timeline(
+        result,
+        handoff={"exp_root": str(tmp_path)},
+        started_at="2026-09-02T00:00:00+00:00",
+        duration_sec=1.0,
+        runner_timeout_sec=300,
+        kill_timeout_sec=360,
+    )
+
+    assert result["absent_backends"] == {"ck": "which ckProfiler"}
 
 
 def test_geak_runner_outcome_is_wired_to_geak_delegation(tmp_path):

@@ -8,7 +8,10 @@ from __future__ import annotations
 import functools
 import logging
 import os
+import shlex
+import tempfile
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +20,7 @@ import yaml
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env import is_truthy
 from hyperloom.common.gain_math import gain_pct
+from hyperloom.common.launch_log_evidence import launch_flag_setting_name, settings_the_engine_rewrote
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.perf_metric import (
     GRADED_DURATION,
@@ -33,8 +37,10 @@ from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.grading import resolved_grading
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...state.failure_evidence import (
+    UNMEASURED_OUTCOMES,
     FAILURE_STAGE_DECISION,
     FAILURE_STAGE_WARMUP,
+    classify_failure_attribution,
     make_failure_id,
     tail_excerpt,
 )
@@ -62,12 +68,14 @@ from ._grid_base import (
     TS_KILLED_OVERTIME,
     TS_SKIPPED_DEDUP,
 )
+from .benchmark_result import double_run_requested
 from ._grid_runner import (
     DEFAULT_KEEP_THRESHOLD_PCT,
     _MN_BACKENDS_PRIORITY,
     _MN_PARAMS_PRIORITY,
     GridVariant,
     SessionDirField,
+    _build_variant_yaml,
     _num_gpus_for_config,
     apply_aiter_moe_pin_filter,
     apply_compatibility_filter,
@@ -80,9 +88,14 @@ from ._grid_runner import (
     sanitize_script_name,
     session_grid_bounds,
 )
-from hyperloom.inference_optimizer.grid_server_args import compose_server_args, server_args_env_name
+from hyperloom.inference_optimizer.grid_server_args import (
+    _MULTI_VALUE_FLAGS,
+    compose_server_args,
+    server_args_env_name,
+)
 from ._ray_serving import maybe_serving_lease
 
+from ._server_argv import config_server_argv
 from ._server_lifecycle import (
     resolve_lifecycle_params,
     teardown_lifecycle_server,
@@ -100,17 +113,34 @@ log = logging.getLogger(__name__)
 
 _now_iso = functools.partial(now_iso, "auto")
 
+STACK_REVALIDATE_SOURCE: str = "stack_revalidate"
+
+
+def is_stack_revalidation(params: dict | None) -> bool:
+    return str((params or {}).get("source") or "") == STACK_REVALIDATE_SOURCE
+
 
 # Audit/provenance metadata stashed on a GridVariant that must survive being rebuilt into a derived variant.
 _CARRIED_VARIANT_ATTRS: tuple[str, ...] = (
     "provenance",
+    "reasoning_origin",
     "scope",
     "overlay_pythonpath",
     "accepted_kernels",
     "kb_evidence",
     "pr_evidence",
     "source_evidence",
+    "experience_citations",
 )
+
+
+def _decision_fields(gv: Any) -> dict[str, Any]:
+    """Why this variant was proposed, as authored at action time, for every row that records it."""
+    return {
+        "note": gv.note,
+        "reasoning_origin": str(getattr(gv, "reasoning_origin", "") or ""),
+        "experience_citations": list(getattr(gv, "experience_citations", []) or []),
+    }
 
 
 def _explore_eval_disabled(shared_state: Any, params: dict[str, Any]) -> bool:
@@ -170,6 +200,15 @@ def _variant_control_fields(variant: Any) -> dict[str, Any]:
     return out
 
 
+def _action_reasoning(raw: dict[str, Any]) -> tuple[str, str]:
+    """Return the action-authored rationale and the payload field that supplied it."""
+    for field in ("reasoning", "rationale", "reason", "note"):
+        value = str(raw.get(field) or "").strip()
+        if value:
+            return value, f"action_payload.{field}"
+    return "", ""
+
+
 def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
     """Convert the LLM/specialist grid payload into GridVariant objects."""
     out: list[GridVariant] = []
@@ -177,17 +216,19 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
         if not isinstance(raw, dict) or not raw.get("name"):
             continue
         fields = normalize_proposal(raw)
+        reasoning, reasoning_origin = _action_reasoning(raw)
         gv = GridVariant(
             name=fields["name"],
             extra_server_args=fields["extra_args"],
             extra_envs=fields["extra_envs"],
-            note=str(raw.get("note") or raw.get("provenance") or ""),
+            note=reasoning,
             remove_args=fields["remove_args"],
             unset_envs=fields["unset_envs"],
             args_mode=fields["args_mode"],
         )
         # Stash extra metadata on the GridVariant so the ledger writer can pull provenance/evidence.
         gv.provenance = str(raw.get("provenance") or "default_grid")  # type: ignore[attr-defined]
+        gv.reasoning_origin = reasoning_origin  # type: ignore[attr-defined]
         gv.scope = str(raw.get("scope") or "")  # type: ignore[attr-defined]
         # Authored-kernel overlay dir (PYTHONPATH prefix); "" for env/flag variants.
         gv.overlay_pythonpath = str(raw.get("overlay_pythonpath") or "")  # type: ignore[attr-defined]
@@ -198,6 +239,10 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
         gv.kb_evidence = list(raw.get("kb_evidence") or [])  # type: ignore[attr-defined]
         gv.pr_evidence = list(raw.get("pr_evidence") or [])  # type: ignore[attr-defined]
         gv.source_evidence = list(raw.get("source_evidence") or [])  # type: ignore[attr-defined]
+        # Validated against what the proposing agent was shown before the grid reached this executor.
+        gv.experience_citations = [  # type: ignore[attr-defined]
+            dict(item) for item in (raw.get("experience_citations") or []) if isinstance(item, dict)
+        ]
         out.append(gv)
     return out
 
@@ -365,6 +410,255 @@ def _is_config_replay_variant(variant: Any) -> bool:
     return str(getattr(variant, "provenance", "") or "").strip() in _CONFIG_REPLAY_PROVENANCE
 
 
+def observed_launch_from_state(state: Any) -> tuple[dict[str, Any], dict[str, str]]:
+    """The running server's resolved config and env, empty unless ``current_best`` observed them.
+
+    A setting the engine rewrote after parsing it is left out of the config: its
+    resolved value is not the value a flag would pass, so it reads as unknown
+    and a variant touching it runs.
+    """
+    measurement = getattr(state, "current_best_measurement", None)
+    if not isinstance(measurement, dict) or not measurement:
+        return {}, {}
+    evidence = measurement.get("launch_evidence")
+    if not isinstance(evidence, Mapping):
+        return {}, {}
+
+    raw_config = evidence.get("observed_server_config")
+    config = dict(raw_config) if isinstance(raw_config, Mapping) else {}
+    raw_adjusted = evidence.get("engine_adjusted_settings")
+    for name in settings_the_engine_rewrote(config, raw_adjusted if isinstance(raw_adjusted, Mapping) else None):
+        config.pop(name, None)
+    raw_env = evidence.get("observed_server_env")
+    # Same shape as a variant's extra_envs, so the two compare directly.
+    env = {str(k): str(v) for k, v in raw_env.items()} if isinstance(raw_env, Mapping) else {}
+    return config, env
+
+
+def _config_envs(config_path: Path) -> dict[str, str]:
+    """Read ``benchmark.envs`` out of a built config file as a ``str -> str`` dict.
+
+    Drops the framework's server-args key (``EXTRA_SGLANG_ARGS`` and friends),
+    which holds the launch argv rather than an env value. Returns an empty dict
+    when the file carries no ``benchmark.envs`` mapping.
+    """
+    cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    bench = cfg.get("benchmark") if isinstance(cfg, Mapping) else None
+    envs = bench.get("envs") if isinstance(bench, Mapping) else None
+    if not isinstance(envs, Mapping):
+        return {}
+    args_env = server_args_env_name(str(bench.get("framework") or ""))
+    return {str(k): str(v) for k, v in envs.items() if str(k) != args_env}
+
+
+def _named_settings(argv_text: str, framework: str) -> dict[str, list[str]]:
+    """Map each setting ``argv_text`` names to its value tokens, last occurrence winning like the engine."""
+    try:
+        tokens = shlex.split(argv_text)
+    except ValueError:
+        return {}
+    settings: dict[str, list[str]] = {}
+    current = ""
+    for token in tokens:
+        if token.startswith("-"):
+            name, separator, attached = token.partition("=")
+            current = launch_flag_setting_name(name, framework)
+            settings[current] = [attached] if separator else []
+        elif current:
+            settings[current].append(token)
+    return settings
+
+
+def _setting_already_holds(proposed: list[str], observed: Any) -> bool:
+    """Whether ``observed`` is already the value ``proposed`` asks for."""
+    if not proposed:
+        # A bare flag asks for the feature on; anything else is a change.
+        return observed is True
+    if isinstance(observed, (list, tuple)):
+        return [str(item) for item in observed] == proposed
+    if len(proposed) != 1:
+        return False
+    text = proposed[0]
+    if isinstance(observed, bool):
+        return text.lower() == str(observed).lower()
+    if isinstance(observed, (int, float)):
+        try:
+            return float(text) == float(observed)
+        except ValueError:
+            return False
+    if observed is None:
+        return False
+    return text == str(observed)
+
+
+def _launch_delta(
+    variant_argv: str,
+    variant_envs: Mapping[str, str],
+    base_argv: str,
+    base_envs: Mapping[str, str],
+    framework: str,
+) -> tuple[dict[str, list[str]], dict[str, str]]:
+    """What a variant changes about the baseline launch, in argv settings and envs alike.
+
+    Only the delta is comparable to the running server. The rest is the
+    baseline's own request, which materialization, the recipe and the engine all
+    rewrite on the way to a launch -- a requested ``--watchdog-timeout 1800``
+    resolves to ``3600.0`` -- so weighing it would reject every variant. Those
+    rewrites hit base and variant alike, so the delta cancels them.
+    """
+    base_settings = _named_settings(base_argv, framework)
+    settings = {
+        name: values
+        for name, values in _named_settings(variant_argv, framework).items()
+        if base_settings.get(name) != values
+    }
+    envs = {name: value for name, value in variant_envs.items() if base_envs.get(name) != value}
+    return settings, envs
+
+
+def _settings_already_hold(settings: Mapping[str, list[str]], observed_config: Mapping[str, Any]) -> bool:
+    """Whether every named setting already holds that value in the running server.
+
+    Checked setting by setting rather than as one argv string: the observed side
+    is the engine's whole resolved config, which no config's argv can equal.
+    """
+    return all(
+        name in observed_config and _setting_already_holds(values, observed_config[name])
+        for name, values in settings.items()
+    )
+
+
+def _envs_already_hold(envs: Mapping[str, str], observed_env: Mapping[str, str]) -> bool:
+    """Whether every named env already carries that value in the running server."""
+    return all(observed_env.get(name) == value for name, value in envs.items())
+
+
+def _subtracts_from_the_launch(variant: GridVariant) -> bool:
+    """Whether ``variant`` removes something, which the probe's config cannot show."""
+    return bool(getattr(variant, "remove_args", None) or getattr(variant, "unset_envs", None))
+
+
+def _touches_a_multi_value_flag(argv_text: str) -> bool:
+    """Whether ``argv_text`` names a list-valued flag, whose ordering the merged config does not preserve."""
+    return any(flag in argv_text for flag in _MULTI_VALUE_FLAGS)
+
+
+# Separate from _CONFIG_REPLAY_PROVENANCE (shared with filter_operator_pinned_envs):
+# a revalidation re-measures its own config, so it must always run.
+_NOOP_FILTER_ALWAYS_RUNS = frozenset({"resume_stack_revalidate"})
+
+#: Names the throwaway variant that materializes the unchanged baseline to diff against.
+_NOOP_PROBE_BASE_NAME = "__baseline_noop_probe_base__"
+
+
+def _is_noop_filter_exempt(variant: GridVariant) -> bool:
+    """Whether ``variant`` must skip the baseline-noop probe outright and always run."""
+    if _is_config_replay_variant(variant):
+        return True
+    return str(getattr(variant, "provenance", "") or "").strip() in _NOOP_FILTER_ALWAYS_RUNS
+
+
+def filter_baseline_noop_variants(
+    grid: list[GridVariant],
+    *,
+    framework: str,
+    base_yaml_path: Path,
+    base_extra_args: str,
+    base_extra_envs: dict[str, str],
+    base_remove_args: list[str],
+    base_unset_envs: list[str],
+    base_args_mode: str,
+    model_path: str | None,
+    gpu_type: str | None,
+    benchmark_script: str | None,
+    observed_server_config: Mapping[str, Any] | None = None,
+    observed_server_env: Mapping[str, str] | None = None,
+) -> tuple[list[GridVariant], list[tuple[str, str]]]:
+    """Drop variants that would launch the server the stack is already running.
+
+    The baseline and each variant are materialized through ``_build_variant_yaml``
+    into throwaway configs, and only what the variant *changes* about the baseline
+    is judged: those settings against ``observed_server_config`` -- the engine's
+    own resolved settings -- and those envs against ``observed_server_env``. A
+    variant is dropped only when both halves are already in effect.
+
+    A variant that removes something, or names a list-valued flag, is exempt:
+    neither is visible here, so both would read as a restatement of the stack.
+
+    Returns the variants still to run, plus ``(name, reason)`` for each drop.
+    Filters nothing when the stack's launch was never observed.
+    """
+    observed_config = dict(observed_server_config or {})
+    if not observed_config or not grid:
+        return list(grid), []
+    observed_env = dict(observed_server_env or {})
+    kept: list[GridVariant] = []
+    dropped: list[tuple[str, str]] = []
+    with tempfile.TemporaryDirectory(prefix="explore_noop_probe_") as tmp_dir:
+        tmp_root = Path(tmp_dir)
+        try:
+            base_path = _build_variant_yaml(
+                base_yaml_path,
+                base_extra_args,
+                GridVariant(_NOOP_PROBE_BASE_NAME),
+                output_subdir=tmp_root / "base",
+                model_path=model_path,
+                gpu_type=gpu_type,
+                benchmark_script=benchmark_script,
+                base_args_mode=base_args_mode,
+                base_extra_envs=base_extra_envs,
+                base_remove_args=base_remove_args,
+                base_unset_envs=base_unset_envs,
+            )
+            base_argv = config_server_argv(base_path).text
+            base_envs = _config_envs(base_path)
+        except (OSError, ValueError, yaml.YAMLError) as exc:
+            log.warning(
+                "explore: baseline-noop probe could not materialize the baseline (%s); keeping every variant", exc
+            )
+            return list(grid), []
+        for idx, gv in enumerate(grid):
+            if _is_noop_filter_exempt(gv) or _subtracts_from_the_launch(gv):
+                kept.append(gv)
+                continue
+            if _touches_a_multi_value_flag(str(getattr(gv, "extra_server_args", "") or "")):
+                kept.append(gv)
+                continue
+            try:
+                out_path = _build_variant_yaml(
+                    base_yaml_path,
+                    base_extra_args,
+                    gv,
+                    output_subdir=tmp_root / f"v{idx}",
+                    model_path=model_path,
+                    gpu_type=gpu_type,
+                    benchmark_script=benchmark_script,
+                    base_args_mode=base_args_mode,
+                    base_extra_envs=base_extra_envs,
+                    base_remove_args=base_remove_args,
+                    base_unset_envs=base_unset_envs,
+                )
+                variant_argv = config_server_argv(out_path).text
+                variant_envs = _config_envs(out_path)
+            except (OSError, ValueError, yaml.YAMLError) as exc:
+                log.warning("explore: baseline-noop probe failed for variant %s (%s); keeping it", gv.name, exc)
+                kept.append(gv)
+                continue
+            delta_settings, delta_envs = _launch_delta(variant_argv, variant_envs, base_argv, base_envs, framework)
+            if not delta_settings and not delta_envs:
+                # A change the merged config does not express leaves no delta, and
+                # so does a variant that only restates the baseline. The two are
+                # indistinguishable here, so the variant runs rather than risk
+                # dropping a real experiment for a missed drop.
+                kept.append(gv)
+                continue
+            if _settings_already_hold(delta_settings, observed_config) and _envs_already_hold(delta_envs, observed_env):
+                dropped.append((gv.name, "merged launch already active in the observed server (baseline noop)"))
+                continue
+            kept.append(gv)
+    return kept, dropped
+
+
 def filter_operator_pinned_envs(
     grid: list[GridVariant],
     baseline_envs: dict[str, Any] | None,
@@ -506,7 +800,7 @@ class ExploreExecutor:
         # Revalidation reproduces the saved stack, so it never re-anchors.
         anchor, anchor_drifted = (
             (snapshot_tput, False)
-            if params.get("source") == "resume_stack_revalidate"
+            if params.get("source") == STACK_REVALIDATE_SOURCE
             else resolve_anchor_with_drift(snapshot_tput, ss)
         )
         if anchor > snapshot_tput:
@@ -654,8 +948,30 @@ class ExploreExecutor:
         # Attach the per-variant fingerprint as an attribute so the result loop needn't recompute.
         ws_sig = workload_signature()
 
+        # Drop variants that already match the current stack's observed launch.
+        _pre_noop_grid_len = len(grid)
+        observed_config, observed_env = observed_launch_from_state(ss)
+        grid, _noop_dropped = filter_baseline_noop_variants(
+            grid,
+            framework=framework,
+            base_yaml_path=config_path,
+            base_extra_args=base_extra_args,
+            base_extra_envs=base_extra_envs,
+            base_remove_args=base_remove_args,
+            base_unset_envs=base_unset_envs,
+            base_args_mode=base_args_mode,
+            model_path=resolved_model,
+            gpu_type=resolved_gpu,
+            benchmark_script=override_script,
+            observed_server_config=observed_config,
+            observed_server_env=observed_env,
+        )
+
         unique_in_round: dict[str, GridVariant] = {}
         skipped_dup: list[dict[str, Any]] = []
+        for _nm, _reason in _noop_dropped:
+            log.info("explore: skipping baseline-noop variant %s (%s)", _nm, _reason)
+            skipped_dup.append({"name": _nm, "reason": "baseline_noop", "detail": _reason})
         for gv in grid:
             fp = effective_fingerprint(
                 gv.extra_server_args,
@@ -681,10 +997,11 @@ class ExploreExecutor:
         runnable: list[GridVariant] = list(unique_in_round.values())
 
         log.info(
-            "explore dedup: payload=%d → runnable=%d (round_dup=%d)",
-            len(grid),
+            "explore dedup: payload=%d → runnable=%d (round_dup=%d baseline_noop=%d)",
+            _pre_noop_grid_len,
             len(runnable),
-            len(skipped_dup),
+            sum(1 for sd in skipped_dup if sd.get("reason") == "round_dup"),
+            len(_noop_dropped),
         )
 
         # Multi-node grid shaping.
@@ -788,7 +1105,8 @@ class ExploreExecutor:
         lifecycle_port = int(lifecycle.get("port") or 0)
 
         # Warm-decision mode.
-        use_warm_decision = lifecycle_eligible and bool(getattr(ss, "baseline_double_run", True))
+        _double_run = double_run_requested(params)
+        use_warm_decision = lifecycle_eligible and _double_run
         # Admission uses the measured warm duration when this round reuses a server.
         decision_anchor_sec = (
             baseline_warm_runtime_sec if (use_warm_decision and baseline_warm_runtime_sec > 0) else baseline_runtime_sec
@@ -934,7 +1252,7 @@ class ExploreExecutor:
                                 "extra_server_args": gv.extra_server_args,
                                 "extra_envs": dict(gv.extra_envs),
                                 **control_fields,
-                                "note": gv.note,
+                                **_decision_fields(gv),
                                 "outcome": TS_FAILED,
                                 "status": getattr(w, "status", "failed") if w is not None else "failed",
                                 "tput": None,
@@ -968,7 +1286,7 @@ class ExploreExecutor:
                                     "extra_server_args": gv.extra_server_args,
                                     "extra_envs": dict(gv.extra_envs),
                                     **control_fields,
-                                    "note": gv.note,
+                                    **_decision_fields(gv),
                                     "reason": "warmup_failed",
                                     "gain_pct": None,
                                     "tput": None,
@@ -1038,6 +1356,8 @@ class ExploreExecutor:
                         GRADED_INTVTY_P50: r.intvty_p50,
                         GRADED_DURATION: r.duration_seconds,
                         GRADED_ERROR_RATE: r.request_error_rate,
+                        # Graded against the session latency budget when one is set.
+                        "e2el_mean_ms": r.e2el_mean_ms,
                     }
                     stamp_output_per_gpu(variant_meas, getattr(ss, "tp", None))
                     graded = resolve_graded_comparison(
@@ -1065,7 +1385,7 @@ class ExploreExecutor:
                         gain = None
                         reason = (r.error or "")[-1200:] or "no_measurement"
                     elif graded.degrade_reason:
-                        # Same fail-closed rule as ``_lift_to_current_best``: an
+                        # Same fail-closed rule as ``lift_to_current_best``: an
                         # AgentX session that could not grade on interactivity
                         # does not KEEP on output throughput instead.
                         gain = None
@@ -1079,7 +1399,13 @@ class ExploreExecutor:
                     elif graded.verdict == VERDICT_REVERT:
                         gain = None
                         outcome = "REVERT"
-                        if _graded_on_intvty:
+                        if graded.veto_reason:
+                            # The variant is refused a round earlier than the
+                            # promotion gate would, so it is never folded onto the
+                            # stack and never becomes the anchor the rest of the
+                            # batch is graded against.
+                            reason = graded.veto_reason
+                        elif _graded_on_intvty:
                             reason = f"median_or_guard_failed ({axes})"
                         else:
                             reason = "gain_below_threshold"
@@ -1091,9 +1417,15 @@ class ExploreExecutor:
                         # all, which is why no row is appended then.
                         decision_gates.append(
                             {
-                                "gate": "graded_axes"
-                                if (_graded_on_intvty or graded.degrade_reason)
-                                else "keep_threshold",
+                                "gate": (
+                                    "latency_budget"
+                                    if graded.veto_reason
+                                    else (
+                                        "graded_axes"
+                                        if (_graded_on_intvty or graded.degrade_reason)
+                                        else "keep_threshold"
+                                    )
+                                ),
                                 "passed": (False if graded.degrade_reason else graded.verdict != VERDICT_REVERT),
                                 # The anchor is the reference; the floor the
                                 # candidate has to clear belongs to the gate, as
@@ -1163,7 +1495,7 @@ class ExploreExecutor:
                         "extra_server_args": gv.extra_server_args,
                         "extra_envs": dict(gv.extra_envs),
                         **control_fields,
-                        "note": gv.note,
+                        **_decision_fields(gv),
                         "outcome": outcome,
                         "status": r.status,
                         "tput": decision_tput,
@@ -1264,7 +1596,7 @@ class ExploreExecutor:
                             "effective_extra_server_args": next_effective_args,
                             "extra_envs": dict(next_envs),
                             **effective_control_fields,
-                            "note": gv.note,
+                            **_decision_fields(gv),
                             "provenance": provenance,
                             # Names of the authored kernels this config carried, when an overlay was loaded.
                             "accepted_kernels": list(getattr(gv, "accepted_kernels", []) or []),
@@ -1281,6 +1613,8 @@ class ExploreExecutor:
                             "total_throughput": r.total_token_throughput,
                             "e2e_norm_intvty_p90": r.intvty_p90,
                             "tpot_p90_ms": r.tpot_p90_ms,
+                            # Promotion re-checks the latency budget against this row, not the round's measurement.
+                            "e2el_mean_ms": r.e2el_mean_ms,
                             "single_workspace": r.workspace,
                             "launch_evidence": dict(r.launch_evidence or {}),
                             "launch_evidence_path": r.launch_evidence_path,
@@ -1326,7 +1660,7 @@ class ExploreExecutor:
                             "extra_server_args": gv.extra_server_args,
                             "extra_envs": dict(gv.extra_envs),
                             **control_fields,
-                            "note": gv.note,
+                            **_decision_fields(gv),
                             "reason": reason or "not_keep",
                             "gain_pct": gain,
                             "tput": decision_tput,
@@ -1415,6 +1749,14 @@ class ExploreExecutor:
                 metrics["wall_clock_ratio_vs_baseline"] = te.get(
                     "wall_clock_ratio_vs_baseline",
                 )
+            failure_attribution = ""
+            if outcome in UNMEASURED_OUTCOMES:
+                failure_attribution = classify_failure_attribution(
+                    error_class=te.get("error_class"),
+                    error_excerpt=te.get("error_excerpt"),
+                    reason=reasons_by_fp.get(fp_key, ""),
+                    explicit=te.get("failure_attribution"),
+                )
             per_variant_outcomes.append(
                 {
                     "variant_name": str(te.get("name") or ""),
@@ -1432,6 +1774,7 @@ class ExploreExecutor:
                     "metrics": metrics,
                     "reason": reasons_by_fp.get(fp_key, ""),
                     "error_class": str(te.get("error_class") or ""),
+                    "failure_attribution": failure_attribution,
                     "server_log_path": te.get("server_log_path"),
                     "workspace": te.get("workspace"),
                     "raw_result_path": te.get("raw_result_path"),
@@ -1440,7 +1783,12 @@ class ExploreExecutor:
                         "name": str(te.get("name") or ""),
                         "extra_server_args": str(te.get("extra_server_args") or ""),
                         "extra_envs": dict(te.get("extra_envs") or {}),
+                        "remove_args": list(te.get("remove_args") or []),
+                        "unset_envs": list(te.get("unset_envs") or []),
+                        "args_mode": str(te.get("args_mode") or "append"),
                         "note": str(te.get("note") or ""),
+                        "reasoning_origin": str(te.get("reasoning_origin") or ""),
+                        "experience_citations": list(te.get("experience_citations") or []),
                     },
                     # The verdicts and the stack behind them, as the round
                     # ruled. Absent keys mean the variant never got that far:

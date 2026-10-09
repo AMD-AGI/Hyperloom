@@ -117,6 +117,8 @@ class V6TaskConfig(TypedDict, total=False):
     framework_version: str
     gpu_type: str
     tp: int | None
+    ep: int | None
+    compute_partition: dict[str, Any]
     conc: int | None
     isl: int | None
     osl: int | None
@@ -375,7 +377,7 @@ class V6WarmStartReads(TypedDict, total=False):
     One row per read, recorded as the KB serves it, plus tallies over exactly
     those rows. Omitted when T0 made no read.
 
-    Only T0's own reads are here. ``_kb_amend_recipe`` consults the same store
+    Only T0's own reads are here. ``kb_amend_recipe`` consults the same store
     through the same audit hook in the middle of the session; those reads are
     real but they are not the anchor's, and this block would misreport the
     lookup if it counted them."""
@@ -1778,6 +1780,34 @@ class V6FrameworkLifecycleStep(TypedDict, total=False):
     reason: str
 
 
+class V6FrameworkRenderedRef(TypedDict, total=False):
+    """One Experience a KB read placed in the prompt that raised a proposal.
+
+    Exposure, not evidence of use: the read rendered it, which says nothing
+    about whether the model relied on it."""
+
+    id: str
+    purpose: str
+
+
+class V6FrameworkPatch(TypedDict, total=False):
+    """One session-local patch an authored attempt applied or reverted, verbatim."""
+
+    path: str
+    sha256: str
+    content: str
+
+
+class V6ExperienceCitation(TypedDict, total=False):
+    """An Experience the deciding agent was shown and says shaped this attempt.
+
+    ``stance`` is ``adopt``, ``adapt``, ``avoid``, or ``contrast``; ``claim`` is its reason, as it wrote it."""
+
+    id: str
+    stance: str
+    claim: str
+
+
 class V6FrameworkProposal(TypedDict, total=False):
     """One thing this entry pursued, whichever producer raised it.
 
@@ -1804,6 +1834,9 @@ class V6FrameworkProposal(TypedDict, total=False):
     route: str
     changed_files: list[str]
     confidence: float | None
+    reasoning: str
+    kb_read_id: str
+    rendered_refs: list[V6FrameworkRenderedRef]
     critic_review: V6FrameworkCriticReview
     terminal: V6FrameworkProposalTerminal
     lifecycle: list[V6FrameworkLifecycleStep]
@@ -1867,6 +1900,7 @@ class V6FrameworkAttemptFailure(TypedDict, total=False):
 
     error_class: str
     error_excerpt: str
+    attribution: str
 
 
 class V6FrameworkArtifacts(TypedDict, total=False):
@@ -1900,7 +1934,8 @@ class V6FrameworkAttempt(TypedDict, total=False):
     adoption ledger walks both arms with one reader. Which fields carry
     still follows the arm -- a variant has a ``fingerprint`` and a
     ``config_delta``, an authored patch has a ``patch_path`` and the files it
-    touched -- but the lifecycle and the verdict are the same shape for both.
+    touched, and an authored deliverable of server args or envs has those as
+    its ``config_delta`` -- but the lifecycle and the verdict are the same shape for both.
     ``blocked_by`` is projected at assembly as the first gate that did not
     pass."""
 
@@ -1926,6 +1961,11 @@ class V6FrameworkAttempt(TypedDict, total=False):
     patch_source: str
     patch_path: str
     patches_applied: list[str]
+    patches_reverted: list[str]
+    patch_material: list[V6FrameworkPatch]
+    reasoning: str
+    reasoning_origin: str
+    experience_citations: list[V6ExperienceCitation]
     target_files: list[str]
     accepted_kernels: list[str]
     measured_against: V6FrameworkStack
@@ -1981,7 +2021,6 @@ class V6KernelEntry(TypedDict, total=False):
     route: str
     route_reason: str
     resumed: bool
-    code_revision: str | None
     stack_depth_in: int | None
     budget_remaining_sec: float | None
     roofline_snapshot_id: int | None
@@ -2637,12 +2676,15 @@ __all__ = [
     "V6FrameworkGate",
     "V6FrameworkLifecycleStep",
     "V6FrameworkMeasurement",
+    "V6ExperienceCitation",
+    "V6FrameworkPatch",
     "V6FrameworkPlateauReading",
     "V6FrameworkPolicy",
     "V6FrameworkPolicyConfigArm",
     "V6FrameworkPolicySourceArm",
     "V6FrameworkProposal",
     "V6FrameworkProposalTerminal",
+    "V6FrameworkRenderedRef",
     "V6FrameworkRun",
     "V6FrameworkStack",
     "V6GeakCandidate",

@@ -48,6 +48,7 @@ from .model_gate import (
 from ..gpu_types import (
     _autodetect_gpu_type,
     _gpu_runner_type,
+    _resolve_amd_gpu_type,
     _resolve_gpu_type,
 )
 from ..model_config_utils import (
@@ -62,6 +63,9 @@ from .bootstrap import (
     _seed_shared_state,
     _snapshot_system_prompts,
     agentx_state_is_stale,
+    latency_budget_resume_conflict,
+    resolve_gpu_power_settings,
+    latency_budget_scope_error,
     parse_operator_extra_env,
     resolve_model_display_name,
 )
@@ -95,6 +99,7 @@ from .. import framework_registry
 from ..session.manifest import load_manifest, write_manifest
 from ..protocol.action_surfaces import ACTION_CATALOGUE, ActionMetadata
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.collaborator import OrchestrationPrompt as _OrchestrationPrompt
 from hyperloom.inference_optimizer.framework_paths import resolve_framework_tree, resolve_kernel_search_roots
 from hyperloom.orchestrator.state.objective import AnyObjective, Objective, build_objective
 from hyperloom.orchestrator.state.shared_state import SharedState, timed_teardown_step
@@ -263,6 +268,18 @@ def _persist_operator_supplied_paths(state: SharedState) -> None:
     state.benchmark_backend = os.environ.get(BENCHMARK_BACKEND_ENV, "").strip().lower()
 
 
+def _registered_framework_or_exit(requested: str, *, hint: str) -> str:
+    """Return ``requested`` normalised, or the default when blank; exit 2 when it names no registered framework."""
+    framework = requested.strip().lower() or framework_registry.DEFAULT_FRAMEWORK
+    if not framework_registry.is_supported(framework):
+        print(
+            f"ERROR: framework must be one of {', '.join(framework_registry.names())} (got {framework!r}); {hint}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    return framework
+
+
 def _enforce_expected_framework(
     framework: str,
     *,
@@ -315,11 +332,14 @@ def _build_orchestration_prompt(
     no_framework_agent: bool = False,
     macro_cycle: int = 0,
     cycle_directive: str = "",
+    cycle_strategy: Mapping[str, Any] | None = None,
     phase: str = "",
     transport: str = TRANSPORT_TOOLS,
     action_registry: Mapping[str, ActionMetadata] | None = None,
     benchmark_mode: str = "",
     agentx_corpus_shape: Mapping[str, Any] | None = None,
+    agentx_grading: Mapping[str, Any] | None = None,
+    agentx_backend: str = "",
 ) -> str:
     """Compose the Orchestration system prompt from typed inputs (``--orch-prompt`` overrides)."""
     registry = action_registry or ACTION_CATALOGUE
@@ -336,10 +356,13 @@ def _build_orchestration_prompt(
         max_minutes=int(max_minutes),
         macro_cycle=int(macro_cycle),
         cycle_directive=cycle_directive,
+        cycle_strategy=cycle_strategy,
         phase=phase,
         transport=transport,
         benchmark_mode=benchmark_mode,
         agentx_corpus_shape=agentx_corpus_shape,
+        agentx_grading=agentx_grading,
+        agentx_backend=agentx_backend,
         rules_fragment_path=_orchestration_rules_fragment_path(),
         framework_source_roots=resolve_kernel_search_roots(),
         session_framework_tree=resolve_framework_tree(framework),
@@ -907,8 +930,12 @@ def _resolve_critic_choice(args: argparse.Namespace) -> str:
     return chosen
 
 
-def _reset_state_file(session_dir: Path) -> None:
-    """Back up ``state.json`` to ``state.json.preReset.<unix_ts>`` and start fresh (Recipe KB untouched)."""
+def _reset_state_file(session_dir: Path, *, framework: str) -> None:
+    """Back up ``state.json`` to ``state.json.preReset.<unix_ts>`` and start fresh (Recipe KB untouched).
+
+    The fresh state keeps ``framework``: the session is single-framework, and
+    nothing after this point re-derives it.
+    """
     state_path = session_dir / "state.json"
     if not state_path.exists():
         return
@@ -928,11 +955,13 @@ def _reset_state_file(session_dir: Path) -> None:
             exc,
         )
         return
+    SharedState(framework=framework).save(session_dir)
     import logging as _logging
 
     _logging.getLogger(__name__).info(
-        "--reset-state: backed up state.json to %s; session starts blank.",
+        "--reset-state: backed up state.json to %s; session starts blank except for framework=%s.",
         backup_path.name,
+        framework,
     )
 
 
@@ -1059,8 +1088,7 @@ def _resume_can_disable_eval(baseline_accuracy: float) -> bool:
 def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
     """Map ``--*-pct`` CLI flags to a ``phase -> pct`` override dict.
 
-    ENABLEMENT has no flag: nothing enforces a cap for it, since
-    ``compute_next_phase`` does not consult ``phase_cap_exceeded`` there.
+    ENABLEMENT has no flag: nothing enforces a per-phase cap for it.
     """
     from hyperloom.orchestrator.phases.machine_state import (
         PHASE_CLOSE,
@@ -1078,7 +1106,7 @@ def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
         ("phase_budget_sweep_pct", PHASE_SWEEP),
         ("phase_budget_close_pct", PHASE_CLOSE),
     ):
-        val = getattr(args, cli_field, None)
+        val = getattr(args, cli_field)
         if val is not None:
             phase_budget_pct[phase_name] = float(val)
     return phase_budget_pct
@@ -1304,6 +1332,16 @@ def _export_partition_shape(
     return session_shape_summary(verdict.layout, streams, fanout_expected=fanout)
 
 
+def _publish_gpu_power_settings(record: Mapping[str, Any]) -> None:
+    """Expose the recorded power settings to the platform fingerprint, the way the partition shape is."""
+    from hyperloom.common.platform_probe import GPU_POWER_SETTINGS_ENV
+
+    if record:
+        os.environ[GPU_POWER_SETTINGS_ENV] = json.dumps(record, sort_keys=True)
+    else:
+        os.environ.pop(GPU_POWER_SETTINGS_ENV, None)
+
+
 def _restore_partition_shape_from_state(args: Any, state: SharedState) -> None:
     """Fill the partition flags from the archive when this resume omitted them."""
     archived = dict(getattr(state, "compute_partition", None) or {})
@@ -1516,6 +1554,25 @@ def _persist_preflight_failure_artifacts(
     return session_dir
 
 
+def _start_experience_kb() -> None:
+    """Bring the workspace's Experience KB service to serving, then check its Experiences can be collected."""
+    from hyperloom_kb import ConfigurationError, LocalServiceError, RemoteClientError
+    from hyperloom_kb.collect import MappingError
+
+    from ..experience_collect import validate_config as validate_experience_collection
+    from ..experience_kb_service import ensure_service
+
+    # The run must not depend on the Experience KB: reads come back empty and writes are spooled or skipped.
+    try:
+        ensure_service()
+    except (LocalServiceError, RemoteClientError) as exc:
+        log.warning("Experience KB service is not serving (%s); Experience writes are spooled until it is", exc)
+    try:
+        validate_experience_collection()
+    except (ConfigurationError, MappingError, RemoteClientError) as exc:
+        log.warning("Experience KB cannot take this run's Experiences (%s); the run continues without them", exc)
+
+
 async def _run_optimize(args: argparse.Namespace) -> int:
     """Run the ``optimize`` subcommand end to end."""
     # Surface --nodes (CLI flag wins) before _preflight runs.
@@ -1648,9 +1705,17 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         claude_follows_codex=claude_follows_codex,
         codex_follows_claude=codex_follows_claude,
     )
+    _start_experience_kb()
     # Before either session branch: these are read by the fresh-launch seeding AND by the resume path, so this is the
     # one place that covers both.
     _preflight_agentx_backend(args)
+    if not args.resume_from:
+        _scope_error = latency_budget_scope_error(
+            getattr(args, "framework", None) or os.environ.get("FRAMEWORK", ""), getattr(args, "max_latency_ms", None)
+        )
+        if _scope_error:
+            print(f"ERROR: {_scope_error}.", file=sys.stderr)
+            raise SystemExit(2)
     _apply_agentx_budget_profile(args)
     from hyperloom.orchestrator.actions.executors._subprocess_kill import resolve_benchmark_timeouts
 
@@ -1729,6 +1794,13 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             sys.exit(2)
+        _latency_conflict = latency_budget_scope_error(
+            state.framework, getattr(args, "max_latency_ms", None)
+        ) or latency_budget_resume_conflict(state, getattr(args, "max_latency_ms", None))
+        if _latency_conflict:
+            session_lock.release()
+            print(f"ERROR: cannot resume this session -- {_latency_conflict}.", file=sys.stderr)
+            sys.exit(2)
         prior_stop = state.stop_reason
         print(f"Resuming session: {session_dir}")
         print(f"  manifest.session_id    : {manifest.get('session_id')}")
@@ -1753,16 +1825,19 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 if state.model_info:
                     state.save(session_dir)
                     print("  backfilled model_info (from config.json)")
-        if state.framework:
-            _enforce_expected_framework(state.framework)
-            os.environ["FRAMEWORK"] = state.framework
-            print(f"  re-exported FRAMEWORK : {state.framework}")
-            # KERNEL_OPT_BACKEND_ORDER lives in the process environment, not in the session, so
-            # it is gone in this new process. Without re-applying the default, a resumed atom
-            # session runs GEAK while the persisted state still reads 'forge' -- and silently,
-            # because the warning for an operator-named backend lives in the same function.
-            if state.framework == "atom":
-                _apply_atom_auto_tighten(args)
+        state.framework = _registered_framework_or_exit(
+            state.framework or os.environ.get("FRAMEWORK", ""),
+            hint="it comes from the resumed session, or from $FRAMEWORK when the session recorded none",
+        )
+        _enforce_expected_framework(state.framework)
+        os.environ["FRAMEWORK"] = state.framework
+        print(f"  re-exported FRAMEWORK : {state.framework}")
+        # KERNEL_OPT_BACKEND_ORDER lives in the process environment, not in the session, so
+        # it is gone in this new process. Without re-applying the default, a resumed atom
+        # session runs GEAK while the persisted state still reads 'forge' -- and silently,
+        # because the warning for an operator-named backend lives in the same function.
+        if state.framework == "atom":
+            _apply_atom_auto_tighten(args)
         if state.gpu_type:
             runner_gpu_type = _gpu_runner_type(state.gpu_type)
             os.environ["TARGET_GPU_TYPE"] = state.gpu_type
@@ -1834,6 +1909,19 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # The partition shape is part of the measurement contract, so it resumes on the same restore / apply / persist
         # path as the paths above.
         _restore_partition_shape_from_state(args, state)
+        # The power settings resume on the same assert / record path: an omitted flag re-asserts the archived value.
+        _declared_power = dict((getattr(state, "gpu_power_settings", None) or {}).get("declared") or {})
+        gpu_power, _gpu_power_error = resolve_gpu_power_settings(
+            power_cap_w=getattr(args, "gpu_power_cap_w", None) or _declared_power.get("power_cap_w"),
+            perf_level=getattr(args, "gpu_perf_level", None) or _declared_power.get("perf_level"),
+            nodes=max(int(getattr(args, "nodes", 1) or 1), int(getattr(state, "nodes", 1) or 1)),
+        )
+        if _gpu_power_error:
+            session_lock.release()
+            print(f"ERROR: cannot resume this session -- {_gpu_power_error}.", file=sys.stderr)
+            sys.exit(2)
+        _publish_gpu_power_settings(gpu_power)
+        state.gpu_power_settings = gpu_power
         state.compute_partition = _export_partition_shape(
             declared_mode=getattr(args, "compute_partition_mode", None),
             streams_per_partition=getattr(args, "streams_per_partition", None),
@@ -1864,13 +1952,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # flags real defaults rather than None.
         if args.no_warm_replay:
             state.warm_replay_enabled = False
-        for _wr_attr, _wr_default in (
-            ("warm_replay_min_confidence", 0.7),
-            ("warm_replay_min_reproduce_pct", 0.8),
-        ):
-            _wr_value = getattr(args, _wr_attr)
-            if _wr_value != _wr_default:
-                setattr(state, _wr_attr, _wr_value)
+        _wr_value = getattr(args, "warm_replay_min_confidence", None)
+        if _wr_value is not None:
+            state.warm_replay_min_confidence = _wr_value
         # Honour persisted kernel_enabled on resume; CLI --no-kernel can still override.
         if not state.kernel_enabled:
             args.no_kernel = True
@@ -1945,7 +2029,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         _begin_resume_leg(state)
         extend_hours = float(args.extend_hours)
         if extend_hours > 0.0:
-            state.extend_budget_minutes(extend_hours * 60.0, reason="--extend-hours")
+            state.extend_budget_minutes(extend_hours * 60.0)
         state.save(session_dir)
         _record_resumed_model_gate(
             args,
@@ -2001,18 +2085,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         await _run_quantization_prelude(args)
 
         # Resolve framework: --framework > $FRAMEWORK > "sglang" (session-wide; no framework mixing).
-        framework = (
-            args.framework or os.environ.get("FRAMEWORK", "")
-        ).strip().lower() or framework_registry.DEFAULT_FRAMEWORK
-        if not framework_registry.is_supported(framework):
-            print(
-                f"ERROR: --framework must be one of "
-                f"{', '.join(framework_registry.names())} "
-                f"(got {framework!r}); set $FRAMEWORK accordingly or pass "
-                "--framework",
-                file=sys.stderr,
-            )
-            sys.exit(2)
+        framework = _registered_framework_or_exit(
+            args.framework or os.environ.get("FRAMEWORK", ""),
+            hint="set $FRAMEWORK accordingly or pass --framework",
+        )
         _enforce_expected_framework(framework)
         os.environ["FRAMEWORK"] = framework
         print(f"Framework       : {framework}")
@@ -2023,7 +2099,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             _apply_atom_auto_tighten(args)
 
         # Resolve real target GPU: probe > --gpu-type hint; probe wins to catch wrong-host typos that corrupt KB.
-        user_specified = (args.gpu_type or os.environ.get("GPU_TYPE", "")).strip().lower()
+        user_specified = _resolve_amd_gpu_type(args.gpu_type) or ""
         if _should_remote_probe_gpu(args):
             from ..multi_node._internal.gpu_probe import remote_autodetect_gpu_type
 
@@ -2162,11 +2238,21 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             model_path=str(args.model or os.environ.get("MODEL_PATH") or ""),
             precision=getattr(args, "precision", None),
         )
+        gpu_power, _gpu_power_error = resolve_gpu_power_settings(
+            power_cap_w=getattr(args, "gpu_power_cap_w", None),
+            perf_level=getattr(args, "gpu_perf_level", None),
+            nodes=nodes_resolved,
+        )
+        if _gpu_power_error:
+            print(f"ERROR: {_gpu_power_error}.", file=sys.stderr)
+            sys.exit(2)
+        _publish_gpu_power_settings(gpu_power)
         state = _seed_shared_state(
             session_dir,
             args,
             session_id=manifest["session_id"],
             compute_partition=compute_partition,
+            gpu_power_settings=gpu_power,
         )
         _start_model_gate(args, session_dir)
         # Unsupported-model preflight: reject multimodal/vision configs (runs after seed, before heavy bring-up).
@@ -2306,7 +2392,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     os.environ["INFERENCE_OPTIMIZER_STRICT_PATHS"] = "1"
     # --reset-state backs up state.json and starts blank, before Coordinator is constructed.
     if getattr(args, "reset_state", False):
-        _reset_state_file(session_dir)
+        _reset_state_file(session_dir, framework=state.framework)
     # Build phase budget pct dict from CLI flags; absent values fall back to Coordinator library defaults.
     phase_budget_pct = _build_phase_budget_pct(args)
 
@@ -2314,16 +2400,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         session_dir,
         backends=backends,
         model_class=(getattr(args, "model_class", None) or os.environ.get("MODEL_CLASS") or ""),
-        recipe_kb=recipe_kb_client,
         phase_budget_pct=phase_budget_pct or None,
         # KnowledgePlane facade (None when --degraded-pr).
         knowledge_plane=knowledge_plane,
         # Advisory multi-model specialist-proposal scorer, disabled by default (enable via --proposal-scoring).
         proposal_scorer=_build_proposal_scorer(args, session_dir),
-        # Warm-recipe replay controls.
-        warm_replay_enabled=state.warm_replay_enabled,
-        warm_replay_min_confidence=state.warm_replay_min_confidence,
-        warm_replay_min_reproduce_pct=state.warm_replay_min_reproduce_pct,
     )
     framework_for_prompt = os.environ.get("FRAMEWORK", "").strip().lower() or "sglang"
     max_minutes_for_prompt = int(round(float(args.max_hours) * 60))
@@ -2354,25 +2435,29 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             transport=_orch_transport,
             benchmark_mode=str(getattr(coordinator.shared_state, "benchmark_mode", "") or ""),
             agentx_corpus_shape=coordinator.shared_state.agentx_corpus_shape,
+            agentx_grading=coordinator.shared_state.grading,
+            agentx_backend=coordinator.shared_state.agentx_backend,
         ),
         "critic": args.critic_prompt or _load_critic_prompt(),
     }
-    coordinator.system_prompt_overrides = prompts
-    # Cache a pure rebuild closure so the macro-cycle boundary can re-focus the orchestration prompt without reaching
-    # back into argparse.
     import functools as _functools
 
-    coordinator._orch_prompt_is_user_supplied = bool(args.orch_prompt)
-    coordinator._rebuild_orch_prompt = _functools.partial(
-        _build_orchestration_prompt,
-        no_kernel=no_kernel,
-        no_framework_agent=no_framework_agent,
-        framework=framework_for_prompt,
-        objective=objective,
-        max_minutes=max_minutes_for_prompt,
-        transport=_orch_transport,
-        benchmark_mode=str(getattr(coordinator.shared_state, "benchmark_mode", "") or ""),
-        agentx_corpus_shape=coordinator.shared_state.agentx_corpus_shape,
+    coordinator.orch_prompt = _OrchestrationPrompt(
+        overrides=prompts,
+        is_user_supplied=bool(args.orch_prompt),
+        rebuild=_functools.partial(
+            _build_orchestration_prompt,
+            no_kernel=no_kernel,
+            no_framework_agent=no_framework_agent,
+            framework=framework_for_prompt,
+            objective=objective,
+            max_minutes=max_minutes_for_prompt,
+            transport=_orch_transport,
+            benchmark_mode=str(getattr(coordinator.shared_state, "benchmark_mode", "") or ""),
+            agentx_corpus_shape=coordinator.shared_state.agentx_corpus_shape,
+            agentx_grading=coordinator.shared_state.grading,
+            agentx_backend=coordinator.shared_state.agentx_backend,
+        ),
     )
     # Build specialist executor only when research_lane capacity > 0 (0 degrades to LLM-direct grid).
     specialist_capacity = int(getattr(args, "research_lane_capacity", 1) or 0)
@@ -2390,7 +2475,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         specialist_executor=specialist_executor,
     )
     # Persist effective system prompts for resume / drift inspection.
-    _snapshot_system_prompts(session_dir, prompts=prompts, orchestration_phase=_initial_phase)
+    _snapshot_system_prompts(
+        session_dir, prompts=prompts, orchestration_phase=_initial_phase, macro_cycle=_initial_macro_cycle
+    )
 
     def _backend_kind(role: str) -> str:
         backend = backends.get(role)

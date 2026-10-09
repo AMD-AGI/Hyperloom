@@ -17,9 +17,10 @@ import pytest
 
 from hyperloom.orchestrator.tests._helpers import patch_integrate_patch_roots
 
+from hyperloom.orchestrator.actions.executors import _accuracy_gate
 from hyperloom.orchestrator.actions.executors import integrate_patch as ip
 
-from hyperloom.orchestrator.tests._helpers import variant_result
+from hyperloom.orchestrator.tests._helpers import integrate_extra, variant_result
 from hyperloom.orchestrator.actions.executors.integrate_patch import (
     IntegratePatchExecutor,
     _git_checkout_clean,
@@ -85,7 +86,7 @@ def _make_ctx(task_id: str, params: dict[str, Any], extra: dict | None = None) -
         idempotency_key=task_id,
         requires_lanes=tuple(),
     )
-    return RunnerContext(task=task, lease=None, extra=extra or {})
+    return RunnerContext(task=task, lease=None, extra=integrate_extra(params) if extra is None else extra)
 
 
 def _stub_bench(result: dict, gate: dict):
@@ -188,7 +189,7 @@ async def test_forged_task_rejected_before_any_side_effect(tmp_path, monkeypatch
         called["setup"] = True
         return {"applied": [], "skipped": [], "failed": []}
 
-    monkeypatch.setattr(ip, "_run_setup_commands", _spy_setup)
+    monkeypatch.setattr(ip, "run_setup_commands", _spy_setup)
 
     class _SS:
         def get_specialist_patch_verdict(self, tid):
@@ -754,7 +755,10 @@ async def test_bench_patch_with_accuracy(tmp_path, monkeypatch):
         return [_FakeVR(status="succeeded", workspace=str(tmp_path))]
 
     monkeypatch.setattr(ip, "run_grid", _fake_run_grid)
-    monkeypatch.setattr(ip, "parse_eval_results", lambda rd, framework=None: {"accuracy": 0.9})
+    monkeypatch.setattr(ip, "parse_eval_results", lambda rd, framework=None, benchmark_mode="": {"accuracy": 0.9})
+    monkeypatch.setattr(
+        _accuracy_gate, "parse_eval_results", lambda rd, framework=None, benchmark_mode="": {"accuracy": 0.9}
+    )
     ex = IntegratePatchExecutor(session_dir=tmp_path)
     bench, gate = await ex._bench_patch(
         params={"config_path": str(cfg), "accuracy_baseline": 0.8},
@@ -776,7 +780,10 @@ async def test_bench_patch_accuracy_regression_fails(tmp_path, monkeypatch):
         return [_FakeVR(status="succeeded", workspace=str(tmp_path))]
 
     monkeypatch.setattr(ip, "run_grid", _fake_run_grid)
-    monkeypatch.setattr(ip, "parse_eval_results", lambda rd, framework=None: {"accuracy": 0.50})
+    monkeypatch.setattr(ip, "parse_eval_results", lambda rd, framework=None, benchmark_mode="": {"accuracy": 0.50})
+    monkeypatch.setattr(
+        _accuracy_gate, "parse_eval_results", lambda rd, framework=None, benchmark_mode="": {"accuracy": 0.50}
+    )
     ex = IntegratePatchExecutor(session_dir=tmp_path)
     _, gate = await ex._bench_patch(
         params={"config_path": str(cfg), "accuracy_baseline": 0.95},
@@ -798,7 +805,10 @@ async def test_bench_patch_missing_baseline_skips_with_warning(tmp_path, monkeyp
         return [_FakeVR(status="succeeded", workspace=str(tmp_path))]
 
     monkeypatch.setattr(ip, "run_grid", _fake_run_grid)
-    monkeypatch.setattr(ip, "parse_eval_results", lambda rd, framework=None: {"accuracy": 0.9})
+    monkeypatch.setattr(ip, "parse_eval_results", lambda rd, framework=None, benchmark_mode="": {"accuracy": 0.9})
+    monkeypatch.setattr(
+        _accuracy_gate, "parse_eval_results", lambda rd, framework=None, benchmark_mode="": {"accuracy": 0.9}
+    )
     ex = IntegratePatchExecutor(session_dir=tmp_path)
     with caplog.at_level("WARNING"):
         _, gate = await ex._bench_patch(
@@ -1162,11 +1172,20 @@ async def test_a_cancel_in_the_apply_stage_still_hands_the_stash_back(tmp_path, 
 
 
 @pytest.mark.asyncio
-async def test_provisioned_runtime_is_retired_when_no_mutation_reaches_gate(tmp_path, monkeypatch):
+@pytest.mark.parametrize(("verdict", "runtime_survives"), [("kept", True), ("reverted", False)])
+async def test_a_runtime_only_round_is_benched_and_its_verdict_decides_the_runtime(
+    tmp_path, monkeypatch, verdict, runtime_survives
+):
+    """The acquired runtime is the round's whole change; the gate, not the apply stage, decides its fate."""
     from types import SimpleNamespace
     from hyperloom.agents.framework import isolation
+    from hyperloom.common.failure_signature import classify_failure
     from hyperloom.orchestrator.enablement.runtime import adapters
-    from hyperloom.orchestrator.enablement.runtime.stack_actions import FrameworkRuntime, ProvisionResult
+    from hyperloom.orchestrator.enablement.runtime.stack_actions import (
+        EnablementStackAction,
+        FrameworkRuntime,
+        ProvisionResult,
+    )
 
     session = tmp_path / "session"
     workspace = _write_workspace(session, "spec")
@@ -1179,21 +1198,39 @@ async def test_provisioned_runtime_is_retired_when_no_mutation_reaches_gate(tmp_
         adapters,
         "get_adapter",
         lambda _fw: SimpleNamespace(
+            build_stack_action=lambda _gap, **_kw: EnablementStackAction(
+                kind="runtime_candidate",
+                framework="vllm",
+                gap_id="gap.enablement.missing_model_arch",
+                capability="missing_model_arch",
+            ),
             provision=lambda *_args: ProvisionResult(ok=True, runtime=FrameworkRuntime(venv_root=str(runtime))),
             probe=lambda *_args: True,
         ),
     )
+    gated: list[str] = []
+
+    async def _gate(_self, attempt, _params, _extra):
+        assert runtime.exists()
+        gated.append(attempt.pending["attempt_venv_root"])
+        return {"status": verdict, "specialist_task_id": "spec"}
+
+    monkeypatch.setattr(IntegratePatchExecutor, "_stage_gate", _gate)
     result = await IntegratePatchExecutor(session_dir=session)(
         _make_ctx(
             "task",
             {
                 "specialist_task_id": "spec",
-                "runtime_candidate": {"kind": "runtime_candidate", "framework": "vllm"},
+                "enablement": True,
+                "enablement_failure_signature": classify_failure(
+                    "ValueError: Model architectures ['DeepseekV4ForCausalLM'] are not supported for now."
+                ).to_dict(),
             },
         )
     )
-    assert result["status"] == "no_patches"
-    assert not runtime.exists()
+    assert gated == [str(runtime)]
+    assert result["status"] == verdict
+    assert runtime.exists() is runtime_survives
 
 
 @pytest.mark.asyncio
@@ -1299,7 +1336,7 @@ async def test_no_patches_forwards_ungrounded_patches(tmp_path, monkeypatch):
     """When a patch could not be grounded, the integrate result must carry
     ``patches_ungrounded`` so framework.py can surface it in the next round's
     mandate.  Without this forwarding the field stays in done_payload and is
-    never read by _maybe_rearm_enablement."""
+    never read by maybe_rearm_enablement."""
     session = tmp_path / "s"
     session.mkdir()
     ws = session / "runs" / "specialist" / "spec"

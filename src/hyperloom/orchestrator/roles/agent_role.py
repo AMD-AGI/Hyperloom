@@ -38,7 +38,6 @@ _ORCHESTRATION_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset(
     {
         IntentType.PROPOSE_ACTION,
         IntentType.DELEGATE,
-        IntentType.UPDATE_STATE,
         IntentType.REQUEST,
         IntentType.EXTEND_LEASE,
         IntentType.PRUNE_BRANCH,

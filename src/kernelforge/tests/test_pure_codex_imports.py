@@ -22,7 +22,7 @@ def blocked_import(name, *args, **kwargs):
 builtins.__import__ = blocked_import
 
 from kernelforge.orchestrator import agent as agent_module
-import kernelforge.knowledge.experience_sink
+import kernelforge.knowledge.kb_store.writer
 from kernelforge.config import Config
 import kernelforge.kernel_backends.base
 

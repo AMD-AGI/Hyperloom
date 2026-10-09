@@ -253,14 +253,14 @@ def test_write_specialist_done_partial(tmp_path):
     assert "ts" in payload
 
 
-def _finalize(r, tmp_path, payload):
+def _finalize(r, tmp_path, payload, params=None):
     """Drive ``_finalize`` far enough to inspect the artifact it writes."""
     prep = sr._PreparedRun(
         domain=SimpleNamespace(key="serving_specialist"),
         gap="gap-1",
         workspace=tmp_path,
     )
-    ctx = SimpleNamespace(task=SimpleNamespace(task_id="t1", params={}), extra={})
+    ctx = SimpleNamespace(task=SimpleNamespace(task_id="t1", params=dict(params or {})), extra={})
     result = r._finalize(
         ctx=ctx,
         prep=prep,
@@ -272,6 +272,28 @@ def _finalize(r, tmp_path, payload):
         patches_written=[],
     )
     return result, json.loads((tmp_path / "specialist_done.json").read_text(encoding="utf-8"))
+
+
+def test_a_specialist_keeps_only_citations_of_experiences_its_dispatch_showed(tmp_path):
+    shown_id, unshown_id = "exp-" + "1" * 32, "exp-" + "2" * 32
+    cite = {"id": shown_id, "stance": "avoid", "claim": "It reverted on this stack."}
+    _, written = _finalize(
+        _runner(),
+        tmp_path,
+        {
+            "proposal_set": [
+                {"name": "v1", "reason": "why", "experience_citations": [cite, {**cite, "id": unshown_id}]},
+                {"name": "v2", "reason": "why"},
+            ],
+            "experience_citations": [{**cite, "stance": "adapt"}, {**cite, "id": unshown_id, "stance": "adapt"}],
+            "summary": "s",
+        },
+        params={"kb_rendered_refs": [{"id": shown_id, "purpose": "representative"}]},
+    )
+
+    assert written["proposal_set"][0]["experience_citations"] == [cite]
+    assert "experience_citations" not in written["proposal_set"][1]
+    assert written["experience_citations"] == [{**cite, "stance": "adapt"}]
 
 
 def test_finalize_strips_forbidden_fields_before_the_critic_can_see_them(tmp_path):
@@ -391,7 +413,7 @@ def test_maybe_setup_worktree_bases_on_the_framework_being_optimised(tmp_path, m
     """
     aiter = _checkout(tmp_path / "aiter", "aiter/__init__.py")
     worldplay = _checkout(tmp_path / "HY-WorldPlay", "hyvideo/__init__.py")
-    monkeypatch.setenv("WORLDPLAY_REPO_PATH", str(worldplay))
+    monkeypatch.setenv("CUSTOM_REPO_PATH", str(worldplay))
 
     cfg = sr.SpecialistSubprocessConfig(
         framework_source_roots=(str(aiter), str(worldplay)),
@@ -407,7 +429,7 @@ def test_maybe_setup_worktree_bases_on_the_framework_being_optimised(tmp_path, m
     ctx = SimpleNamespace(
         task=SimpleNamespace(
             task_id="t",
-            params={"framework": "worldplay", "domain": "framework_rewrite_specialist"},
+            params={"framework": "custom", "domain": "framework_rewrite_specialist"},
         )
     )
 
@@ -423,7 +445,7 @@ def test_maybe_setup_worktree_snapshots_a_framework_that_is_not_a_checkout(tmp_p
     package = tmp_path / "site-packages" / "worldplay"
     package.mkdir(parents=True)
     (package / "__init__.py").write_text("", encoding="utf-8")
-    monkeypatch.setenv("WORLDPLAY_REPO_PATH", str(package))
+    monkeypatch.setenv("CUSTOM_REPO_PATH", str(package))
 
     cfg = sr.SpecialistSubprocessConfig(framework_source_roots=(str(aiter),))
     r = _runner(backend_factory=None, subprocess_config=cfg, session_dir=tmp_path / "session")
@@ -434,7 +456,7 @@ def test_maybe_setup_worktree_snapshots_a_framework_that_is_not_a_checkout(tmp_p
         return worktree_path, ""
 
     monkeypatch.setattr(sr, "_setup_worktree", _fake_setup)
-    ctx = SimpleNamespace(task=SimpleNamespace(task_id="t", params={"framework": "worldplay"}))
+    ctx = SimpleNamespace(task=SimpleNamespace(task_id="t", params={"framework": "custom"}))
 
     _wt, source, err = r._maybe_setup_worktree(ctx, workspace=tmp_path)
 
@@ -446,14 +468,14 @@ def test_maybe_setup_worktree_snapshots_a_framework_that_is_not_a_checkout(tmp_p
 
 def test_maybe_setup_worktree_has_nothing_to_isolate_without_a_named_tree(tmp_path, monkeypatch):
     aiter = _checkout(tmp_path / "aiter", "aiter/__init__.py")
-    monkeypatch.setenv("WORLDPLAY_REPO_PATH", str(tmp_path / "absent"))
+    monkeypatch.setenv("CUSTOM_REPO_PATH", str(tmp_path / "absent"))
     monkeypatch.delenv("FRAMEWORK_REPO_PATH", raising=False)
     monkeypatch.setattr(sr, "resolve_framework_tree", lambda framework: "")
 
     cfg = sr.SpecialistSubprocessConfig(framework_source_roots=(str(aiter),))
     r = _runner(backend_factory=None, subprocess_config=cfg)
     ctx = SimpleNamespace(
-        task=SimpleNamespace(task_id="t", params={"framework": "worldplay", "domain": "framework_rewrite_specialist"})
+        task=SimpleNamespace(task_id="t", params={"framework": "custom", "domain": "framework_rewrite_specialist"})
     )
 
     wt, source, err = r._maybe_setup_worktree(ctx, workspace=tmp_path)

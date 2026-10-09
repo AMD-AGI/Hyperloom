@@ -4,23 +4,27 @@
 """PendingProposal and the Critic-approved path: materializing an approved proposal into a dispatched task, and writing its KEEP into the recipe KB."""
 
 from __future__ import annotations
+import hashlib
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Mapping
 from hyperloom.common.framework_arm import is_upstream_pr_prescreen
 from hyperloom.orchestrator.knowledge.recipe_kb import recipe_canonical_id
+from hyperloom.orchestrator.lever import LEVER_CONFIG
 from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_framework_version
+from hyperloom.inference_optimizer.trace.trajectory_trace import EVENT_PROPOSAL, STATUS_QUEUED, record_event
 from ..phases import machine_state as _phase_state
 from ..bus.message_bus import Message
-from .coordinator_helpers import approved_proposal_idempotency_key
 from ..state.shared_state import inject_stack_base_params
 from ..state.task_registry import TERMINAL_STATES
+from ..collaborator import CoordinatorCollaborator
 
 if TYPE_CHECKING:
     from ..state.task_registry import Task
+    from .coordinator import Coordinator
 
 import logging as _logging
-from ..collaborator import CoordinatorCollaborator
 
 log = _logging.getLogger(__name__)
 
@@ -36,9 +40,137 @@ class PendingProposal:
     action_name: str
     predicted_gain_pct: float
     payload: dict[str, Any]
-    decided: bool = False
-    verdict: str | None = None  # approve / reject / redirect / advise / needs_review
+    #: The task this proposal materialized into, once the Critic approved it.
     task_id: str | None = None
+
+
+async def record_proposal(
+    coord: "Coordinator",
+    *,
+    from_agent: str,
+    action_name: str,
+    predicted_gain_pct: float,
+    payload: dict[str, Any],
+) -> PendingProposal:
+    """Create one PendingProposal, write it to the bus, and record it on the phase timeline.
+
+    This is the single path for both LLM-originated and coordinator-originated
+    proposals. Every proposal that goes through here gets a phase timeline row
+    so the Critic's ruling is always filed.
+
+    Returns the PendingProposal that was inserted into ``coord.state.pending_proposals``.
+    """
+    msg = Message.new(
+        from_agent,
+        "*",
+        "proposal",
+        {**payload, "needs_review": True},
+    )
+    await coord.bus.append_and_seq(msg)
+    pending = PendingProposal(
+        proposal_msg_id=msg.msg_id,
+        from_agent=from_agent,
+        action_name=action_name,
+        predicted_gain_pct=predicted_gain_pct,
+        payload=payload,
+    )
+    coord.state.pending_proposals[msg.msg_id] = pending
+    record_event(
+        EVENT_PROPOSAL,
+        status=STATUS_QUEUED,
+        span_id=msg.msg_id,
+        attributes={
+            "name": action_name,
+            "action_name": action_name,
+            "from_agent": from_agent,
+            "predicted_gain_pct": pending.predicted_gain_pct,
+        },
+    )
+    _record_phase_proposal(coord, pending)
+    record_config_proposal(coord, pending.proposal_msg_id, pending.action_name, pending.payload)
+    return pending
+
+
+def _record_phase_proposal(coord: "Coordinator", pending: PendingProposal) -> None:
+    """Record one proposal against the phase that raised it.
+
+    Every proposal, not only the ones a framework arm claims: this is the row
+    the Critic's ruling is filed on.
+    """
+    from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+
+    state = coord.shared_state
+    if not pending.proposal_msg_id or not state.phase:
+        return
+    params = pending.payload.get("params") if isinstance(pending.payload.get("params"), dict) else {}
+    phase_event.record_proposal(
+        proposal_msg_id=pending.proposal_msg_id,
+        action=pending.action_name,
+        phase=state.phase,
+        macro_cycle=state.macro_cycle,
+        from_agent=pending.from_agent,
+        tick=state.tick,
+        predicted_gain_pct=pending.predicted_gain_pct,
+        candidate_id=pending.payload.get("framework_agent_candidate_id") or params.get("framework_agent_candidate_id"),
+        variant_name=pending.payload.get("variant_name") or params.get("variant_name"),
+    )
+
+
+def record_config_proposal(
+    coord: "Coordinator",
+    proposal_id: str,
+    action_name: str,
+    payload: Mapping[str, Any],
+    *,
+    outcome: str = "submitted",
+) -> None:
+    """Record one config-arm grid on the framework event, as it is proposed or delegated.
+
+    Recorded at proposal time rather than at approval, so a grid the Critic
+    denies is still on record as a thing the phase pursued and dropped. One row
+    per grid, not per variant: the measured attempts point back at the grid
+    through their ``proposal_ref``.
+    """
+    if not proposal_id:
+        return
+    recorder = coord.phase_framework.timeline()
+    if recorder is None:
+        return
+    kb_read_id = str(payload.get("kb_read_id") or "")
+    rendered_refs = payload.get("kb_rendered_refs") or []
+    if kb_read_id or rendered_refs:
+        recorder.record_proposal(proposal_id, kb_read_id=kb_read_id, rendered_refs=rendered_refs)
+    if action_name != "explore":
+        return
+    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
+        ARM_CONFIG,
+        PRODUCER_ORCHESTRATION,
+        STEP_PROPOSED,
+        producer_for_provenance,
+    )
+
+    params = payload.get("params") or {}
+    grid = [row for row in (params.get("grid") or []) if isinstance(row, dict)]
+    labels = {str(row.get("provenance") or "").strip() for row in grid}
+    if len(labels) == 1:
+        producer, producer_ref = producer_for_provenance(next(iter(labels)))
+    else:
+        # A grid mixing provenances was assembled by the orchestration agent.
+        # Each variant keeps its own label on its attempt, so naming the
+        # assembler here loses nothing.
+        producer, producer_ref = PRODUCER_ORCHESTRATION, ""
+    scopes = {str(row.get("scope") or "").strip() for row in grid if str(row.get("scope") or "").strip()}
+    recorder.record_proposal(
+        proposal_id,
+        arm=ARM_CONFIG,
+        producer=producer,
+        producer_ref=producer_ref,
+        lever_kind=LEVER_CONFIG,
+        scope=scopes.pop() if len(scopes) == 1 else "",
+        kb_read_id=kb_read_id,
+        rendered_refs=rendered_refs,
+    )
+    recorder.record_proposal_step(proposal_id, step=STEP_PROPOSED, outcome=outcome)
 
 
 def apply_critic_grid_filter(
@@ -76,7 +208,7 @@ def _framework_recorder(coll: Any, pending: Any) -> Any:
         return None
     if not str(getattr(pending, "proposal_msg_id", "") or ""):
         return None
-    return coll.phase_framework.timeline()
+    return coll._coord.phase_framework.timeline()
 
 
 def _record_proposal_materialized(proposal_msg_id: str, task_id: str) -> None:
@@ -157,22 +289,42 @@ def _extra_server_args(payload: Mapping[str, Any]) -> str:
 
 
 class ProposalsCollaborator(CoordinatorCollaborator):
-    """Coordinator mixin; its methods run with the Coordinator as ``self``."""
+    """Manages recipe proposals: workload fingerprinting, proposal cache, and recipe writes."""
 
-    _local_recipe_cache: tuple[int, dict[str, Any]] | None
+    def __init__(self, coordinator: "Coordinator") -> None:
+        super().__init__(coordinator)
+        self._local_recipe_cache: tuple[int, dict[str, Any]] | None = None
 
-    def _workload_canonical_id(self) -> str:
+    def _approved_idempotency_key(self, action_name: str, params: dict[str, Any]) -> str:
+        """Content-addressed idempotency key for an approved proposal."""
+        payload: Any = (
+            self._coord.writeback.baseline_params_fingerprint(params) if action_name == "baseline" else params
+        )
+        digest = hashlib.sha1(
+            json.dumps(payload, sort_keys=True, default=str).encode(), usedforsecurity=False
+        ).hexdigest()[:16]
+        return f"approved:{action_name}:{digest}"
+
+    def _kb_hardware_slug(self) -> str:
+        """Topology-aware hardware dimension for the recipe ``canonical_id``."""
+        from hyperloom.orchestrator.actions.executors._multi_node_env import resolve_kb_topology
+        from hyperloom.inference_optimizer.recipe_snapshot_constants import kb_hardware_slug
+
+        ss = self.shared_state
+        return kb_hardware_slug(ss.gpu_type or "unknown_gpu", **resolve_kb_topology())
+
+    def workload_canonical_id(self) -> str:
         """Return the workload's canonical seven-dimension Recipe identity."""
         ss = self.shared_state
         workload = ss.model_name or "unknown_model"
         hw = self._kb_hardware_slug()
-        framework = str(getattr(ss, "framework", "") or "")
-        framework_version = str(getattr(ss, "framework_version", "") or "")
+        framework = str(ss.framework or "")
+        framework_version = str(ss.framework_version or "")
         if not framework_version and framework:
             framework_version = detect_framework_version(framework)
-        precision = str(getattr(ss, "precision", "") or "")
-        model_type = str(getattr(ss, "model_type", "") or "")
-        architectures = getattr(ss, "model_architectures", None) or []
+        precision = str(ss.precision or "")
+        model_type = str(ss.model_type or "")
+        architectures = ss.model_architectures or []
         from hyperloom.common.perf_metric import agentx_active
 
         return recipe_canonical_id(
@@ -183,21 +335,21 @@ class ProposalsCollaborator(CoordinatorCollaborator):
             precision=precision,
             model_type=model_type,
             architectures=architectures,
-            scheme=("agentx" if agentx_active(benchmark_mode=getattr(ss, "benchmark_mode", "")) else "inference"),
+            scheme=("agentx" if agentx_active(benchmark_mode=ss.benchmark_mode) else "inference"),
         )
 
-    def _read_local_recipe_row(self) -> dict[str, Any]:
+    def read_local_recipe_row(self) -> dict[str, Any]:
         """Load the selected store's exact authority row for writes."""
         if self.recipe_kb is None:
             return {}
-        tick = int(getattr(self.shared_state, "tick", 0) or 0)
-        cache = getattr(self, "_local_recipe_cache", None)
+        tick = int(self.shared_state.tick or 0)
+        cache = self._local_recipe_cache
         if isinstance(cache, tuple) and len(cache) == 2 and cache[0] == tick:
             return cache[1]
         try:
             row = (
                 self.recipe_kb.get_authoritative_recipe(
-                    canonical_id=self._workload_canonical_id(),
+                    canonical_id=self.workload_canonical_id(),
                 )
                 or {}
             )
@@ -207,7 +359,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         return row
 
     @staticmethod
-    def _extract_kept_best_config(
+    def extract_kept_best_config(
         *,
         task: "Task",
         variant_attrs: dict[str, Any] | None = None,
@@ -239,7 +391,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         return best_config
 
     @staticmethod
-    def _kb_best_config_overrides_for_keep(
+    def kb_best_config_overrides_for_keep(
         *,
         live: Mapping[str, Any],
         best_config_candidate: Mapping[str, Any],
@@ -272,7 +424,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
             return overrides
         return {}
 
-    def _kb_amend_recipe(
+    def kb_amend_recipe(
         self,
         *,
         append_lesson: dict[str, Any] | None = None,
@@ -281,28 +433,28 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         provenance_details: dict[str, Any] | None = None,
     ) -> None:
         """Read-modify-write helper for the recipe-snapshot KB: load live row, append lesson/pitfall, merge recipe_overrides (unset fields preserved), write back. Best-effort; lesson/pitfall appended without dedup."""
-        config = getattr(getattr(self, "knowledge_plane", None), "config", None)
+        config = getattr(self.knowledge_plane, "config", None)
         if getattr(getattr(config, "mode", None), "value", None) == "remote" or self.recipe_kb is None:
             return
         from hyperloom.common.perf_metric import agentx_active
 
-        if agentx_active(benchmark_mode=getattr(self.shared_state, "benchmark_mode", "")):
+        if agentx_active(benchmark_mode=self.shared_state.benchmark_mode):
             return
-        cid = self._workload_canonical_id()
+        cid = self.workload_canonical_id()
 
         ss = self.shared_state
-        framework = str(getattr(ss, "framework", "") or "")
-        framework_version = str(getattr(ss, "framework_version", "") or "")
+        framework = str(ss.framework or "")
+        framework_version = str(ss.framework_version or "")
         if not framework_version and framework:
             framework_version = detect_framework_version(framework)
-        precision = str(getattr(ss, "precision", "") or "")
+        precision = str(ss.precision or "")
 
         # Local mode reads the exact authority row before amending it.
         try:
             live = self.recipe_kb.get_authoritative_recipe(canonical_id=cid) or {}
         except Exception as exc:  # noqa: BLE001
             log.info(
-                "_kb_amend_recipe: authority get_recipe failed (%s); proceeding with empty live",
+                "kb_amend_recipe: authority get_recipe failed (%s); proceeding with empty live",
                 exc,
             )
             live = {}
@@ -345,12 +497,12 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         prior_extras = {k: v for k, v in live.items() if k not in _reserved}
         merged_extras = {**prior_extras, **(overrides.get("extras") or {})}
         # Re-stamp config.json architecture-identity tags; skipped when unset.
-        _arch = getattr(ss, "model_architectures", None) or []
+        _arch = ss.model_architectures or []
         if isinstance(_arch, list):
             _arch_list = [str(a).strip() for a in _arch if str(a or "").strip()]
             if _arch_list:
                 merged_extras["architectures"] = _arch_list
-        _mtype = str(getattr(ss, "model_type", "") or "").strip()
+        _mtype = str(ss.model_type or "").strip()
         if _mtype:
             merged_extras["model_type"] = _mtype
         put_kwargs: dict[str, Any] = {
@@ -409,30 +561,30 @@ class ProposalsCollaborator(CoordinatorCollaborator):
             self._local_recipe_cache = None
         except Exception:
             log.exception(
-                "_kb_amend_recipe: put_recipe failed for cid=%s",
+                "kb_amend_recipe: put_recipe failed for cid=%s",
                 cid,
             )
 
-    def _inject_explore_runtime_params(self, params: dict) -> None:
+    def inject_explore_runtime_params(self, params: dict) -> None:
         """Inject explore-task operational knobs from SharedState into ``params`` (single source of truth for both propose/Critic and direct-delegate paths). setdefault preserves LLM overrides."""
-        br = float(getattr(self.shared_state, "baseline_runtime_sec", 0.0) or 0.0)
+        br = float(self.shared_state.baseline_runtime_sec or 0.0)
         if br > 0:
             params.setdefault("baseline_runtime_sec", br)
-        baseline_accuracy = float(getattr(self.shared_state, "baseline_accuracy", 0.0) or 0.0)
+        baseline_accuracy = float(self.shared_state.baseline_accuracy or 0.0)
         if baseline_accuracy > 0:
             params.setdefault("accuracy_baseline", baseline_accuracy)
         # Warm measure-round anchor for admission costing.
-        bwr = float(getattr(self.shared_state, "baseline_warm_runtime_sec", 0.0) or 0.0)
+        bwr = float(self.shared_state.baseline_warm_runtime_sec or 0.0)
         if bwr > 0:
             params.setdefault("baseline_warm_runtime_sec", bwr)
         keep = _phase_state.resolve_keep_threshold(self.shared_state)
         params.setdefault("keep_threshold_pct", keep)
         # The round-id seed: the executor holds no cross-round state, so the round
         # it labels itself with has to come from the durable cursor.
-        cursor = int((getattr(self.shared_state, "explore_search", None) or {}).get("cursor") or 0)
+        cursor = int((self.shared_state.explore_search or {}).get("cursor") or 0)
         params.setdefault("explore_search_cursor", cursor)
 
-    async def _materialize_approved_proposal(
+    async def materialize_approved_proposal(
         self,
         pending: PendingProposal,
         *,
@@ -440,7 +592,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
     ) -> None:
         """Promote an approved proposal into a TaskRegistry entry. Stack-aware actions get current_best's anchor and the base config it was measured on; approved_variant_names filters the explore grid (None keeps full)."""
         if is_upstream_pr_prescreen(pending.action_name, pending.payload):
-            await self.phase_framework.materialize_candidate(pending)
+            await self._coord.phase_framework.materialize_candidate(pending)
             return
         params = dict(pending.payload.get("params") or {})
         # Carry the proposer's predicted gain onto the task for predicted-vs-realized calibration.
@@ -457,7 +609,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
                 original_grid=original_grid,
                 approved_variant_names=approved_variant_names,
             ):
-                await self._record_observation(
+                await self._coord.writeback.record_observation(
                     "coordinator",
                     "observation",
                     {
@@ -478,7 +630,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
             if self.shared_state.baseline_config_path:
                 params.setdefault("config_path", self.shared_state.baseline_config_path)
         if pending.action_name == "explore":
-            self._inject_explore_runtime_params(params)
+            self.inject_explore_runtime_params(params)
             inject_stack_base_params(params, self.shared_state, anchor=True)
         if pending.action_name == "integrate_patch":
             # ``source_phase`` is stamped where the specialist is created and carried from there; a
@@ -489,10 +641,10 @@ class ProposalsCollaborator(CoordinatorCollaborator):
             inject_stack_base_params(params, self.shared_state, anchor=True)
             if self.shared_state.baseline_config_path:
                 params.setdefault("config_path", self.shared_state.baseline_config_path)
-        lanes, ttl = self._registry_lanes_ttl(pending.action_name)
+        lanes, ttl = self._coord.dispatcher.registry_lanes_ttl(pending.action_name)
         # Content-addressed so a batch of proposals that would launch identical work collapses to one task; a
         # terminated twin still gets a fresh key so a legitimate retry after failure is never locked out.
-        raw_key = approved_proposal_idempotency_key(pending.action_name, params)
+        raw_key = self._approved_idempotency_key(pending.action_name, params)
         # Preserve the authoritative config-proposal join on the materialized task. Keep this out of the
         # content-addressed idempotency key above so two proposals for identical grids still collapse to one task.
         if pending.action_name == "explore" and pending.proposal_msg_id:
@@ -512,7 +664,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
             if not was_existing:
                 break
             if task.state not in TERMINAL_STATES:
-                await self._record_observation(
+                await self._coord.writeback.record_observation(
                     "coordinator",
                     "observation",
                     {
@@ -527,7 +679,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
                 )
                 return
         else:
-            await self._record_observation(
+            await self._coord.writeback.record_observation(
                 "coordinator",
                 "observation",
                 {
@@ -542,7 +694,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
             )
             return
         # The round the authoring specialist opened runs on under this task id.
-        await self._handoff_enablement_round(task)
+        await self._coord.enablement_lane.handoff_enablement_round(task)
         # proposal_msg_id is the resume contract for the deferred queue (see replay_for_resume).
         await self.bus.append_and_seq(
             Message.new(

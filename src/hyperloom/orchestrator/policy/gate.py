@@ -19,11 +19,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from hyperloom.inference_optimizer import framework_registry
 from hyperloom.inference_optimizer.framework_paths import (
     resolve_session_framework_root,
     resolved_within,
 )
-from hyperloom.common.env import env_bool, is_truthy
+from hyperloom.common.env import env_bool
 from hyperloom.common.framework_arm import verdict_subject
 from hyperloom.common.visible_devices import detect_gpu_count
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
@@ -54,7 +55,6 @@ from ..specialists.profile import (
 )
 from ..specialists.patch_safety import parse_patch_targets
 from ..state._shared_state.phase_state import gap_actionability_key
-from ..state.shared_state import SharedState
 
 if TYPE_CHECKING:  # pragma: no cover — type-only
     from ..roles.agent_role import AgentRole
@@ -332,8 +332,6 @@ class PolicyGate:
             self._validate_delegate(role, payload)
         elif intent.type == IntentType.PROPOSE_ACTION:
             self._validate_propose_action(role, payload)
-        elif intent.type == IntentType.UPDATE_STATE:
-            self._validate_state_transition(payload)
         elif intent.type == IntentType.SEND_MESSAGE:
             self._validate_send_message_topic(payload)
         elif intent.type == IntentType.REQUEST:
@@ -428,8 +426,7 @@ class PolicyGate:
         capability, presence of ``action_name``, the
         kernel_agent-owned-action guard, the per-action specialised paths
         (``specialist`` / ``integrate_patch`` / ``sweep``), the GEMM-tuning
-        ownership gate, the action-catalogue unknown-action lookup, per-action
-        source and required-payload guards, the phase-compatibility check,
+        ownership gate, per-action source and required-payload guards,
         and the external-tool collision guard (R5).
 
         Args:
@@ -580,35 +577,6 @@ class PolicyGate:
             rule=RULE_ROUND_IN_FLIGHT,
             hint="Let the round settle; a second bring-up would fight it for the same cards and ports.",
         )
-
-    def _validate_state_transition(self, payload: dict[str, Any]) -> None:
-        """Admit ``changes`` only when every key is in :data:`SharedState.AGENT_UPDATE_FIELDS` with its declared type.
-
-        One bad key refuses the whole intent, so an update never lands half of
-        itself and leaves the agent guessing which half.
-        """
-        changes = payload.get("changes")
-        if not isinstance(changes, dict) or not changes:
-            raise PolicyDenied(
-                "update_state.payload.changes must be a non-empty dict",
-                rule="payload",
-                hint=("include at least one allowed field, e.g. {'changes': {'current_action': '<action_name>'}}"),
-            )
-        writable = sorted(SharedState.AGENT_UPDATE_FIELDS)
-        for key, value in changes.items():
-            expected = SharedState.AGENT_UPDATE_FIELDS.get(key)
-            if expected is None:
-                raise PolicyDenied(
-                    f"{key!r} is not agent-writable; writable: {writable!r}",
-                    rule="state_field",
-                    hint="the whole update is refused, so re-send it carrying only the writable fields.",
-                )
-            if not isinstance(value, expected):
-                raise PolicyDenied(
-                    f"{key!r} must be {expected.__name__}, got {type(value).__name__}",
-                    rule="state_field",
-                    hint="the whole update is refused, so re-send it with a value of the declared type.",
-                )
 
     def _validate_send_message_topic(self, payload: dict[str, Any]) -> None:
         """Require a non-empty ``topic`` on a ``SEND_MESSAGE`` intent.
@@ -929,8 +897,9 @@ class PolicyGate:
                 ``params`` (tags, scope, gap_canonical_id, max_turns, ...).
 
         Raises:
-            PolicyDenied: when the role may not dispatch, params are malformed,
-                the gap id is missing, or max_turns exceeds the hard cap. Tag /
+            PolicyDenied: when the role may not dispatch, params are malformed
+                or name an unregistered framework, the gap id is missing, or
+                max_turns exceeds the hard cap. Tag /
                 scope incoherence is logged rather than denied.
         """
         if role.name not in SPECIALIST_DISPATCH_SOURCE_ALLOWLIST:
@@ -947,6 +916,7 @@ class PolicyGate:
                 rule="specialist_dispatch_source",
                 hint="pass params={tags, gap_canonical_id, ...} per §3.5 §6",
             )
+        _validate_specialist_framework(params)
 
         # scope='freeform' has no domain anchor: it skips the tag / gap
         # vocabulary checks and runs a lightweight mechanical sanity gate instead.
@@ -1010,8 +980,8 @@ class PolicyGate:
         """Validate a specialist's optional GPU request.
 
         The request's shape is judged here: whether the dispatch needs cards at
-        all (a bench-enabled patch specialist does whether or not it says so,
-        mirroring the dispatcher) and whether the count it names is positive.
+        all (:func:`requires_gpu`, the rule the dispatcher leases by) and whether
+        the count it names is positive.
         The pool-size arms come off the projection;
         ``SpecialistGpuPool.try_acquire`` hands out the cards.
 
@@ -1024,16 +994,14 @@ class PolicyGate:
                 exceeds the pool the projection last saw.
         """
         from ..specialists.profile import (
+            requires_gpu,
             resolve_specialist_profile,
             uses_whole_machine_gpu_lane,
         )
 
-        needs_gpu = is_truthy(params.get("needs_gpu"))
-        reserves_bench_lane = resolve_specialist_profile(params).reserves_benchmark_lane
-        if not needs_gpu and reserves_bench_lane:
-            needs_gpu = True
-        if not needs_gpu:
+        if not requires_gpu(params):
             return
+        reserves_bench_lane = resolve_specialist_profile(params).reserves_benchmark_lane
         facts = self.resources
         serving_tp = facts.serving_tp
         whole_machine = uses_whole_machine_gpu_lane(params)
@@ -1541,6 +1509,29 @@ class PolicyGate:
                     f"only cancels the queued backlog."
                 ),
             )
+
+
+def _validate_specialist_framework(params: dict[str, Any]) -> None:
+    """Refuse a specialist dispatch whose ``params.framework`` the registry does not know.
+
+    The specialist resolves the source tree it patches from that name, and a
+    dispatch that omits it inherits the session's.
+
+    Args:
+        params: The specialist dispatch ``params``.
+
+    Raises:
+        PolicyDenied: When ``params.framework`` is present and not registered.
+    """
+    if "framework" in params and not framework_registry.is_supported(params["framework"]):
+        raise PolicyDenied(
+            f"delegate{{action='specialist'}}: params.framework={params['framework']!r} is not a registered framework",
+            rule="specialist_framework_unregistered",
+            hint=(
+                "Omit params.framework to dispatch against the session's framework, "
+                f"or pass one of {list(framework_registry.names())!r}."
+            ),
+        )
 
 
 def validate_specialist_max_turns_raw(

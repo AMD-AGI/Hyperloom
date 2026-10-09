@@ -70,6 +70,7 @@ from hyperloom.inference_optimizer.grid_server_args import (
 from hyperloom.inference_optimizer.grid_server_args import merge_server_args
 from hyperloom.inference_optimizer.grid_server_args import remove_server_args
 from hyperloom.inference_optimizer.grid_server_args import validate_server_args_shell_safe
+from hyperloom.inference_optimizer import framework_registry
 from ._recipe_script import (
     RecipeLeverUnavailableError,
     apply_recipe_levers,
@@ -78,7 +79,6 @@ from ._recipe_script import (
 )
 from ._server_argv import add_server_arg_unless_pinned, seal_server_argv
 from ._server_patcher import (
-    ensure_sglang_patched_for_ck_blockscale,
     ensure_sglang_patched_for_tracelens,
     ensure_vllm_patched_for_tracelens,
 )
@@ -346,10 +346,10 @@ def build_agentx_workload_spec(
     env: Mapping[str, str] | None = None,
     grading: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Describe the AgentX trace-replay workload for downstream consumers.
+    """Describe the AgentX workload for downstream consumers.
 
     Written into the materialized recipe and forwarded in the GEAK handoff so
-    GEAK can select the aiperf client and refuse to treat the CLI's synthetic
+    GEAK can select the AgentX client and refuse to treat the CLI's synthetic
     ``isl``/``osl`` placeholders as the served load. Omitted entirely on non-AgentX
     runs, so the fixed-ISL/OSL path stays byte-identical.
 
@@ -364,6 +364,14 @@ def build_agentx_workload_spec(
         env: The resolved process environment, carrying this round's ``CONC``
             (see :func:`agentx_env_for_conc`). Defaults to ``os.environ``.
     """
+    from hyperloom.common.agentx_workload import (
+        MLPERF_CORPUS,
+        MLPERF_PORT,
+        is_mlperf_backend,
+        mlperf_flow,
+        mlperf_trajectories,
+    )
+
     proc_env: Mapping[str, str] = os.environ if env is None else env
 
     def client_knob(key: str, default: Any) -> str:
@@ -387,6 +395,38 @@ def build_agentx_workload_spec(
         return str(proc_env.get(key) or envs.get(key) or default)
 
     default_isl, default_osl, default_conc = cli_workload_defaults()
+    conc = int(served_knob("CONC", default_conc))
+    metric_basis = geak_metric_axis(benchmark_mode="agentx", grading=grading)[1]
+    intvty_p90_veto_pct = (
+        float(grading["noise_pct"])
+        if isinstance(grading, Mapping) and isinstance(grading.get("noise_pct"), (int, float))
+        else parse_intvty_noise_pct()
+    )
+    isl_osl_placeholder = {
+        "isl": int(served_knob("ISL", default_isl)),
+        "osl": int(served_knob("OSL", default_osl)),
+        "note": "CLI defaults only; agentic replay ignores fixed ISL/OSL",
+    }
+    if is_mlperf_backend(proc_env) or is_mlperf_backend(envs):
+        return {
+            "kind": "agentx_mlperf_agentic",
+            "client": "mlperf",
+            "scenario": "mlperf-agentic-v6",
+            "corpus": MLPERF_CORPUS,
+            "canonical_corpus": MLPERF_CORPUS,
+            "num_entries": mlperf_trajectories(envs),
+            "duration_s": 0,
+            "geak_loop_duration_s": 0,
+            "concurrency": conc,
+            "metric_basis": metric_basis,
+            "intvty_p90_veto_pct": intvty_p90_veto_pct,
+            "metric_window_s": 0.0,
+            "flow": mlperf_flow(envs),
+            "port": int(envs.get("PORT") or MLPERF_PORT),
+            "failed_request_threshold": float(client_knob("AGENTX_FAILED_REQUEST_THRESHOLD", 0.10)),
+            "isl_osl_placeholder": isl_osl_placeholder,
+        }
+
     model = str(model_path or bench.get("model") or envs.get("MODEL") or proc_env.get("MODEL_PATH", "")).strip()
     canon = client_knob("AGENTX_CANONICAL_DATASET", _agentx_default_corpus(model)).strip()
     corpus = str(
@@ -398,7 +438,6 @@ def build_agentx_workload_spec(
     ).strip()
     duration = int(client_knob("AGENTX_DURATION", 3600))
     num_entries = int(client_knob("AGENTX_NUM_ENTRIES", 393))
-    conc = int(served_knob("CONC", default_conc))
     return {
         "kind": "agentx_trace_replay",
         "client": "aiperf",
@@ -417,12 +456,8 @@ def build_agentx_workload_spec(
         # HYPERLOOM_PERF_METRIC at seed, so honouring the override again here
         # would let a subprocess that lost the variable -- or gained a different
         # one -- publish an axis the session never graded on.
-        "metric_basis": geak_metric_axis(benchmark_mode="agentx", grading=grading)[1],
-        "intvty_p90_veto_pct": (
-            float(grading["noise_pct"])
-            if isinstance(grading, Mapping) and isinstance(grading.get("noise_pct"), (int, float))
-            else parse_intvty_noise_pct()
-        ),
+        "metric_basis": metric_basis,
+        "intvty_p90_veto_pct": intvty_p90_veto_pct,
         # Hyperloom's analyzer window is the canonical duration plus grace/drain.
         "metric_window_s": float(duration) + 40.0,
         "trajectory_start_ratio": [0.25, 0.75],
@@ -432,12 +467,24 @@ def build_agentx_workload_spec(
         # bounded by the scaled number, so the handoff must publish that one.
         "warmup_grace_period_s": int(client_knob("AGENTX_WARMUP_GRACE_PERIOD", 1800)),
         "failed_request_threshold": float(client_knob("AGENTX_FAILED_REQUEST_THRESHOLD", 0.10)),
-        "isl_osl_placeholder": {
-            "isl": int(served_knob("ISL", default_isl)),
-            "osl": int(served_knob("OSL", default_osl)),
-            "note": "CLI defaults only; trace replay ignores fixed ISL/OSL",
-        },
+        "isl_osl_placeholder": isl_osl_placeholder,
     }
+
+
+def pin_mlperf_round_concurrency(envs: dict[str, Any]) -> None:
+    """Make ``AGENTIC_CONCURRENCY`` follow this round's ``CONC``.
+
+    The client used to prefer ``AGENTIC_CONCURRENCY``, and the baseline YAML
+    carries it. A conc-sweep rung that only changes ``CONC`` would then be
+    recorded at one concurrency and measured at another.
+    """
+    from hyperloom.common.agentx_workload import is_mlperf_backend
+
+    if not is_mlperf_backend(envs):
+        return
+    conc = envs.get("CONC")
+    if conc not in (None, ""):
+        envs["AGENTIC_CONCURRENCY"] = str(conc)
 
 
 def apply_agentx_switch(
@@ -469,10 +516,20 @@ def apply_agentx_switch(
     if not framework or framework_registry.is_scriptable(framework):
         return
     envs = bench.setdefault("envs", {})
-    bench["benchmark_script"] = "aiperf_client.sh"
+    from hyperloom.common.agentx_workload import (
+        BACKEND_ENV,
+        MLPERF_PORT,
+        MLPERF_SERVED_MODEL,
+        agentx_client_script,
+        is_mlperf_backend,
+        mlperf_flow,
+        mlperf_trajectories,
+    )
+
     from ._agentx_timeouts import agentx_warmup_grace_sec
 
     _agentx_env = agentx_env_for_conc(conc)
+    bench["benchmark_script"] = agentx_client_script(_agentx_env)
     envs["RUN_EVAL"] = "false"
     envs["MODEL"] = str(model_path or bench.get("model") or os.environ.get("MODEL_PATH", "")).strip()
     envs["FRAMEWORK"] = framework
@@ -484,6 +541,32 @@ def apply_agentx_switch(
     for key, value in os.environ.items():
         if key.startswith("AGENTX_") or key in ("AIPERF_BIN", "WEKA_LOADER_OVERRIDE"):
             envs[key] = value
+        if is_mlperf_backend(_agentx_env) and (key.startswith(("MLPERF_", "AGENTIC_")) or key == BACKEND_ENV):
+            envs[key] = value
+    if is_mlperf_backend(_agentx_env):
+        envs[BACKEND_ENV] = "mlperf"
+        # The harness dials a fixed port and model name. Pinning both here is the
+        # one place they are enforced, so a recipe PORT cannot leave the server
+        # and the client on different sockets.
+        envs["PORT"] = str(MLPERF_PORT)
+        envs["MLPERF_AGENTIC_MODEL"] = MLPERF_SERVED_MODEL
+        # Settled once here; the client and the published spec read these back.
+        envs["MLPERF_AGENTIC_FLOW"] = mlperf_flow(envs)
+        envs["AGENTIC_NUM_TRAJECTORIES"] = str(mlperf_trajectories(envs))
+        envs.setdefault("MLPERF_ENDPOINTS_DIR", os.environ.get("MLPERF_ENDPOINTS_DIR") or "/opt/mlperf-endpoints")
+        envs.setdefault("MLPERF_AGENTIC_HARDWARE", os.environ.get("MLPERF_AGENTIC_HARDWARE") or "mi355x")
+        # The round's CONC is what the measurement is recorded under. A baseline
+        # YAML that already carries AGENTIC_CONCURRENCY must not freeze it.
+        envs["CONC"] = str(conc or envs.get("CONC") or os.environ.get("CONC") or 16)
+        pin_mlperf_round_concurrency(envs)
+        from ._server_argv import add_server_arg_unless_pinned
+
+        add_server_arg_unless_pinned(
+            envs,
+            framework,
+            f"--served-model-name {MLPERF_SERVED_MODEL}",
+            pinned_by=("served-model-name", "served_model_name"),
+        )
     # Preserve the client's own warmup bound; it does not enlarge the benchmark cap.
     _grace = agentx_warmup_grace_sec(_agentx_env)
     _raw_grace = (os.environ.get("AGENTX_WARMUP_GRACE_PERIOD") or "").strip()
@@ -528,8 +611,10 @@ def prepare_agentx_runtime(
             try:
                 materialized = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
                 benchmark = materialized.get("benchmark") if isinstance(materialized, dict) else {}
-                active = (
-                    isinstance(benchmark, dict) and str(benchmark.get("benchmark_script") or "") == "aiperf_client.sh"
+                from hyperloom.common.agentx_workload import is_agentx_client_script
+
+                active = isinstance(benchmark, dict) and is_agentx_client_script(
+                    str(benchmark.get("benchmark_script") or "")
                 )
             except (OSError, ValueError, TypeError):
                 active = False
@@ -1015,32 +1100,16 @@ def _coerce_workload_int_env(env_key: str, raw: str) -> int:
     return value
 
 
-# ``$FRAMEWORK`` (lowercased) -> shipped Magpie YAML, relative to
-# ``asset_root()``. Unknown / unset frameworks fall back to
-# ``_DEFAULT_BASELINE_CONFIG`` (sglang) so existing sglang-default tests keep
-# passing. Values are relative so ``asset_root()`` is still resolved at call
-# time (honoring the ``$INFERENCE_OPTIMIZER_ASSET_ROOT`` override).
-_BASELINE_CONFIG_BY_FRAMEWORK: dict[str, Path] = {
-    "atom": Path("assets/configs/baseline_atom.yaml"),
-    "vllm": Path("assets/configs/baseline_vllm.yaml"),
-    "xdit": Path("assets/configs/baseline_xdit.yaml"),
-    "custom": Path("assets/configs/baseline_custom.yaml"),
-}
-_DEFAULT_BASELINE_CONFIG = Path("assets/configs/baseline_sglang.yaml")
-
-
 def default_baseline_config() -> Path:
-    """Resolve the shipped Magpie YAML based on ``$FRAMEWORK`` env.
+    """Resolve the shipped Magpie YAML for ``$FRAMEWORK``, or for the default framework when it is unset.
 
-    Returns the sglang YAML when ``$FRAMEWORK`` is unset/unknown so existing
-    sglang-default tests keep passing.
+    Resolved at call time so ``$INFERENCE_OPTIMIZER_ASSET_ROOT`` is honoured.
 
     Returns:
         Path: The shipped Magpie YAML config path for the resolved framework.
     """
-    fw = os.environ.get("FRAMEWORK", "sglang").strip().lower()
-    rel = _BASELINE_CONFIG_BY_FRAMEWORK.get(fw, _DEFAULT_BASELINE_CONFIG)
-    return asset_root() / rel
+    fw = os.environ.get("FRAMEWORK") or framework_registry.DEFAULT_FRAMEWORK
+    return asset_root() / "assets" / "configs" / framework_registry.shipped_config_name("baseline", fw)
 
 
 _PROFILER_FLAG_RE = re.compile(r"--profiler-config\.(\w+)[=\s]+(\S+)")
@@ -1070,7 +1139,9 @@ def _profiler_bound_holds(name: str, value: str | None, *, cap: int) -> bool:
     limit", and a frontend profiler left on tracks no iterations and captures the
     entire ``start_profile``..``stop_profile`` range. A guard that accepted those
     would report success while the run stayed unbounded, which is worse than not
-    guarding -- the warning would send the next investigation the wrong way.
+    guarding -- the warning would send the next investigation the wrong way. The
+    summary table is the same kind of flag: only an explicit false keeps vLLM from
+    building it after the trace is written.
 
     Every other flag only decides what the trace contains or where it lands, so its
     presence is the whole contract.
@@ -1085,6 +1156,8 @@ def _profiler_bound_holds(name: str, value: str | None, *, cap: int) -> bool:
         return 0 < iterations <= cap
     if name == "ignore_frontend":
         return is_truthy(value)
+    if name == "torch_profiler_dump_cuda_time_total":
+        return not is_truthy(value)
     return True
 
 
@@ -1619,6 +1692,17 @@ def materialize_config_with_envs(
                     "analysis may be degraded.",
                     fw or "<unset>",
                 )
+        elif sglang_sitecustomize and _tracelens_patch_enabled():
+            # Shapes come from kernel_shape_tool, but the per-batch-size capture trace still needs
+            # sglang_gc_patch or it IndexErrors. Only profiling captures traces, so patch only here.
+            if not ensure_sglang_patched_for_tracelens():
+                log.warning(
+                    "SGLang graph-capture patch (sglang_gc_patch) not applied; profiling "
+                    "continues on the unpatched server, where per-batch-size CUDA-graph "
+                    "capture can IndexError on multi-variant models (DSA dense+sparse). "
+                    "It needs TRACELENS_ROOT with an exact "
+                    "examples/custom_workflows/inference_analysis/sglang_gc_patch/sglang_<X_Y_Z> dir."
+                )
         if is_atom:
             # ATOM has no delay/max-iteration window; extra prompts only grow
             # the HTTP-bracketed trace. Force NUM_PROMPTS=CONC.
@@ -1660,6 +1744,11 @@ def materialize_config_with_envs(
             # flag, but a replacing candidate wipes the YAML value too, so it
             # belongs in the set the re-assertion can restore.
             profiler_flags.append(("ignore_frontend", "--profiler-config.ignore_frontend True"))
+            # vLLM's stop path builds a key_averages() summary table in Python on every rank. Nothing here reads
+            # it, and on a long-prompt eager trace it blocks the engine and grows each worker by hundreds of GiB.
+            profiler_flags.append(
+                ("torch_profiler_dump_cuda_time_total", "--profiler-config.torch_profiler_dump_cuda_time_total False")
+            )
             pending_vllm_profiler_flags = profiler_flags
             pending_vllm_profiler_cap = max_iters
             # Injected unconditionally so the computed cap WINS over anything the YAML
@@ -2089,18 +2178,6 @@ def materialize_config_with_envs(
                 "to restore the gate. This warning fires once per process."
             )
             _RUN_EVAL_DISABLED_WARN_EMITTED = True
-    # KernelForge fp8 block-scale CK backend switch: SGLANG_FP8_BLOCKSCALE_CK_MAX_M
-    # only takes effect on a KernelForge-patched sglang fp8_utils.py. Ensure the
-    # patch, scoped to sglang + the env present. Fail-soft (a failed patch leaves
-    # the env a no-op). Honors the HYPERLOOM_ENABLE_PATCH kill switch.
-    _fw = str(bench.get("framework") or "").lower()
-    if _tracelens_patch_enabled() and "sglang" in _fw and "SGLANG_FP8_BLOCKSCALE_CK_MAX_M" in envs:
-        if not ensure_sglang_patched_for_ck_blockscale():
-            log.warning(
-                "CK fp8 block-scale patch could not be applied; "
-                "SGLANG_FP8_BLOCKSCALE_CK_MAX_M will no-op on the unpatched "
-                "sglang fp8_utils.py (serving run continues unaffected)."
-            )
     # FlyDSL folds only same-directory helpers into its JIT cache key, so a patched
     # helper one directory over is served from a stale binary. Naming the roots
     # folds their sources into the key. Only the run that applied such a patch has

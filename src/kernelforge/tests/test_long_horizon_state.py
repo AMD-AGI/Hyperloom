@@ -23,10 +23,8 @@ from kernelforge.loop.run_state import (
     SESSION_COMPLETED,
     SESSION_INTERRUPTED,
     SESSION_PAUSED,
-    SCHEMA_VERSION,
     SESSION_RUNNING,
     _RECENT_RESULT_CACHE,
-    CriticRuling,
     LoopStateStore,
     RunState,
     WorkspaceLockError,
@@ -111,140 +109,35 @@ def test_load_corrupt_fails_closed(tmp_path):
         LoopStateStore(str(tmp_path)).load()
 
 
-def test_load_noncurrent_schema_fails_closed(tmp_path):
+def _write_run_state(tmp_path, payload: dict) -> LoopStateStore:
     root = tmp_path / "forge_experiments"
     root.mkdir(parents=True, exist_ok=True)
-    (root / "run_state.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "iteration": 7,
-                "phase": PHASE_EXPLOIT,
-                "best": {
-                    "iteration": 5,
-                    "wall_ms": 0.5,
-                    "commit_hash": "abc1234",
-                    "plan": "vectorize loads",
-                },
-            }
-        )
-    )
-
-    with pytest.raises(ValueError, match="unsupported run state schema"):
-        LoopStateStore(str(tmp_path)).load()
+    (root / "run_state.json").write_text(json.dumps(payload))
+    return LoopStateStore(str(tmp_path))
 
 
-def test_load_v13_migrates_with_empty_analysis_anchor(tmp_path):
-    """A v13 checkpoint crosses every version added since, not just the next."""
-    store = LoopStateStore(str(tmp_path))
+def test_load_checkpoint_missing_a_field_fails_closed(tmp_path):
     payload = RunState().to_dict()
-    payload["schema_version"] = 13
-    payload.pop("analysis")
     payload.pop("last_critic")
-    root = tmp_path / "forge_experiments"
-    root.mkdir(parents=True, exist_ok=True)
-    (root / "run_state.json").write_text(json.dumps(payload))
 
-    migrated = store.load()
-
-    assert migrated.schema_version == SCHEMA_VERSION
-    assert migrated.analysis.evidence_commit == ""
-    assert migrated.analysis.evidence_mean_case_speedup is None
-    assert migrated.last_critic == CriticRuling()
+    with pytest.raises(ValueError, match="run state missing fields: last_critic"):
+        _write_run_state(tmp_path, payload).load()
 
 
-def test_load_v14_migrates_with_no_critic_ruling(tmp_path):
-    """What such a campaign knows is that it never recorded a verdict."""
-    store = LoopStateStore(str(tmp_path))
+def test_load_checkpoint_with_an_unknown_field_fails_closed(tmp_path):
     payload = RunState().to_dict()
-    payload["schema_version"] = 14
-    payload.pop("last_critic")
-    root = tmp_path / "forge_experiments"
-    root.mkdir(parents=True, exist_ok=True)
-    (root / "run_state.json").write_text(json.dumps(payload))
+    payload["schema_version"] = 20
 
-    migrated = store.load()
-
-    assert migrated.schema_version == SCHEMA_VERSION
-    assert migrated.last_critic == CriticRuling()
+    with pytest.raises(ValueError, match="run state has unknown fields: schema_version"):
+        _write_run_state(tmp_path, payload).load()
 
 
-def test_load_v17_migrates_with_a_campaign_clock_that_covers_its_planning(
-    tmp_path,
-):
-    """A v17 checkpoint banked planning with no span to divide it by."""
-    store = LoopStateStore(str(tmp_path))
+def test_load_checkpoint_missing_a_nested_field_fails_closed(tmp_path):
     payload = RunState().to_dict()
-    payload["schema_version"] = 17
-    payload["round_costs"]["rounds"] = 3
-    payload["round_costs"]["planning_total_sec"] = 2700.0
-    payload["round_costs"]["total_sec"] = 3300.0
     payload["round_costs"].pop("campaign_sec")
-    root = tmp_path / "forge_experiments"
-    root.mkdir(parents=True, exist_ok=True)
-    (root / "run_state.json").write_text(json.dumps(payload))
 
-    migrated = store.load()
-
-    assert migrated.schema_version == SCHEMA_VERSION
-    assert migrated.round_costs.campaign_sec == 3300.0
-    # A share, not a number several times its own definition.
-    assert migrated.round_costs.planning_share_pct() == pytest.approx(100.0 * 2700.0 / 3300.0)
-
-
-def test_load_v17_without_round_wall_clock_still_covers_its_planning(tmp_path):
-    """The degenerate v17 shape: planning recorded, round totals missing."""
-    store = LoopStateStore(str(tmp_path))
-    payload = RunState().to_dict()
-    payload["schema_version"] = 17
-    payload["round_costs"]["rounds"] = 2
-    payload["round_costs"]["planning_total_sec"] = 2700.0
-    payload["round_costs"]["total_sec"] = 0.0
-    payload["round_costs"].pop("campaign_sec")
-    root = tmp_path / "forge_experiments"
-    root.mkdir(parents=True, exist_ok=True)
-    (root / "run_state.json").write_text(json.dumps(payload))
-
-    migrated = store.load()
-
-    assert migrated.round_costs.campaign_sec == 2700.0
-    assert migrated.round_costs.planning_share_pct() == pytest.approx(100.0)
-
-
-def test_load_v18_seeds_the_stall_counter_from_the_shared_streak(tmp_path):
-    """A v18 checkpoint held one counter for two questions."""
-    store = LoopStateStore(str(tmp_path))
-    payload = RunState().to_dict()
-    payload["schema_version"] = 18
-    payload["stall"]["no_improvement_iters"] = 4
-    payload["stall"].pop("unresolved_stall_iters")
-    root = tmp_path / "forge_experiments"
-    root.mkdir(parents=True, exist_ok=True)
-    (root / "run_state.json").write_text(json.dumps(payload))
-
-    migrated = store.load()
-
-    assert migrated.schema_version == SCHEMA_VERSION
-    assert migrated.stall.no_improvement_iters == 4
-    assert migrated.stall.unresolved_stall_iters == 4
-
-
-def test_load_v19_migrates_without_a_recorded_search_start_score(tmp_path):
-    """Every workspace in the field holds a v19 checkpoint, and the loop loads it whether or not it is resuming."""
-    store = LoopStateStore(str(tmp_path))
-    payload = RunState().to_dict()
-    payload["schema_version"] = 19
-    payload.pop("search_start_mean_case_speedup")
-    root = tmp_path / "forge_experiments"
-    root.mkdir(parents=True, exist_ok=True)
-    (root / "run_state.json").write_text(json.dumps(payload))
-
-    migrated = store.load()
-
-    assert migrated.schema_version == SCHEMA_VERSION
-    # Absent rather than 1.0: a campaign that never had a caller-supplied anchor never measured this, and only
-    # incremental reporting reads it -- the KEEP bar is derived from the incumbent's own per-case times.
-    assert migrated.search_start_mean_case_speedup is None
+    with pytest.raises(ValueError, match="run state round_costs missing fields: campaign_sec"):
+        _write_run_state(tmp_path, payload).load()
 
 
 def test_a_keep_clears_both_stall_counters():

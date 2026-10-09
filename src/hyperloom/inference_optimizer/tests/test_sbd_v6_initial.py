@@ -69,6 +69,8 @@ def test_v6_blocks_are_additive_to_the_rest_of_the_document(tmp_path):
         "model_path": "/models/qwen-test",
         "framework": "sglang",
         "gpu_type": "MI300X",
+        "ep": 4,
+        "compute_partition": {"mode": "CPX", "partitions": 8},
         "phase": "CLOSE",
         "start_ts": "2026-08-27T01:00:00+00:00",
         "stop_ts": "2026-08-27T02:00:00+00:00",
@@ -150,6 +152,11 @@ def test_v6_blocks_are_additive_to_the_rest_of_the_document(tmp_path):
     # The optimizer's revision is session identity, not a version block entry.
     assert after["metadata"]["session"]["code_revision"] == "abc1234"
     assert after["metadata"]["task_config"]["launch_env"] == {"TP": "8"}
+    assert after["metadata"]["task_config"]["ep"] == 4
+    assert after["metadata"]["task_config"]["compute_partition"] == {
+        "mode": "CPX",
+        "partitions": 8,
+    }
     assert after["outcome"]["status"] == "completed"
     assert after["outcome"]["stage_reached"] == "close"
     assert "token_usage" not in after["outcome"]
@@ -160,6 +167,51 @@ def test_v6_blocks_are_additive_to_the_rest_of_the_document(tmp_path):
     assert after["close"]["steps"] == []
     # ``close`` is a top-level key, never a timeline event.
     assert all(event["type"] != "close" for event in after["timeline"])
+
+
+def test_the_exported_launch_env_never_carries_a_credential(tmp_path):
+    _write_json(
+        tmp_path / "state.json",
+        {"session_id": "session-v6", "operator_extra_env": {"TP": "8", "OPENAI_API_KEY": "plaintext"}},
+    )
+    _write_json(tmp_path / "manifest.json", {"session_id": "session-v6"})
+
+    launch_env = exporter.build(tmp_path)["metadata"]["task_config"]["launch_env"]
+
+    assert launch_env == {"TP": "8", "OPENAI_API_KEY": "[REDACTED]"}
+
+
+def test_the_exported_launch_env_masks_a_generic_custom_headers_env(tmp_path):
+    headers = "Authorization: Bearer placeholder-not-a-secret"
+    _write_json(
+        tmp_path / "state.json",
+        {"session_id": "session-v6", "operator_extra_env": {"TP": "8", "SERVICE_CUSTOM_HEADERS": headers}},
+    )
+    _write_json(tmp_path / "manifest.json", {"session_id": "session-v6"})
+
+    document = exporter.build(tmp_path)
+
+    assert document["metadata"]["task_config"]["launch_env"] == {"TP": "8", "SERVICE_CUSTOM_HEADERS": "[REDACTED]"}
+    assert "placeholder-not-a-secret" not in json.dumps(document)
+
+
+def test_a_re_export_masks_a_credential_a_legacy_fragment_recorded_in_plaintext(tmp_path):
+    from hyperloom.inference_optimizer.breakdown.recorder import recorder_for
+
+    _write_json(
+        tmp_path / "state.json",
+        {"session_id": "session-v6", "operator_extra_env": {"TP": "8", "OPENAI_API_KEY": "plaintext-test-value"}},
+    )
+    _write_json(tmp_path / "manifest.json", {"session_id": "session-v6"})
+    # A fragment recorded before the recorder masked values: written raw, as the old snapshot did.
+    legacy_env = {"TP": "8", "OPENAI_API_KEY": "plaintext-test-value", "HF_TOKEN": "plaintext-test-value"}
+    recorder_for(tmp_path, producer="coordinator").record_upsert_singleton(
+        "metadata", {"task_config": {"launch_env": legacy_env}}
+    )
+
+    launch_env = exporter.build(tmp_path)["metadata"]["task_config"]["launch_env"]
+
+    assert launch_env == {"TP": "8", "OPENAI_API_KEY": "[REDACTED]", "HF_TOKEN": "[REDACTED]"}
 
 
 def test_an_invalid_v6_event_is_reported_without_disturbing_the_rest(tmp_path):
@@ -728,6 +780,7 @@ def test_preflight_records_install_steps_in_execution_order(tmp_path, monkeypatc
         "ensure_magpie",
         "clone_inferencex",
         "patch_magpie_eval_concurrency",
+        "check_kernel_tuning_clis",
         "check_tracelens_cli",
         "check_tracelens_root",
         "ir3_pr_monitor_probe",
@@ -736,6 +789,8 @@ def test_preflight_records_install_steps_in_execution_order(tmp_path, monkeypatc
     steps = {step["step_id"]: step for step in event["ext"]["steps"]}
     assert steps["prepare_kb_environment"]["status"] == "skipped"
     assert steps["prepare_kb_environment"]["skip_reason"] == "explicit_flag"
+    assert steps["check_kernel_tuning_clis"]["status"] == "skipped"
+    assert steps["check_kernel_tuning_clis"]["skip_reason"] == "no_kernel"
     assert steps["ensure_magpie"]["message"] == "benchmark backend is 'bypass'"
 
 

@@ -75,11 +75,11 @@ _AITER_LINE = (
 class TestForgeGemmHelperCoverage:
     def test_resolve_backend_requires_exact_kernel_order_forge(self, monkeypatch):
         monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-        assert krh._resolve_gemm_tuning_backend({}) == "geak"
-        assert krh._resolve_gemm_tuning_backend({"gemm_tuning_backend": "forge"}) == "geak"
-        assert krh._resolve_gemm_tuning_backend({"gemm_tuning_backend": "unknown"}) == "geak"
+        assert krh.resolve_gemm_tuning_backend({}) == "geak"
+        assert krh.resolve_gemm_tuning_backend({"gemm_tuning_backend": "forge"}) == "geak"
+        assert krh.resolve_gemm_tuning_backend({"gemm_tuning_backend": "unknown"}) == "geak"
         monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-        assert krh._resolve_gemm_tuning_backend({}) == "forge"
+        assert krh.resolve_gemm_tuning_backend({}) == "forge"
 
     def test_parse_forge_gemm_sentinel(self):
         payload = {"status": "ok", "micro_decision": "candidate"}
@@ -281,16 +281,10 @@ class TestForgeGemmHelperCoverage:
         assert "preflight timed out" in caplog.text
         assert str(krh._FORGE_GEMM_PREFLIGHT_TIMEOUT_SEC) in caplog.text
 
-    def test_resolve_forge_precision_falls_back_to_bf16(self, monkeypatch):
+    def test_resolve_forge_precision_falls_back_to_bf16(self):
         # Empty session precision + no fp8/fp4 quantization -> bf16/auto default.
         state = SharedState(precision="")
         state.current_best = {"extra_server_args": "", "extra_envs": {}}
-        import hyperloom.inference_optimizer.roofline_ceiling as rc
-
-        def _raise(*_a, **_k):
-            raise RuntimeError("no runtime workload")
-
-        monkeypatch.setattr(rc, "resolve_runtime_workload", _raise)
         assert krh._resolve_forge_precision_and_quant(state, {}) == ("bf16", "auto")
 
     def test_resolve_forge_server_log_uses_baseline_when_no_current_best(self, tmp_path):
@@ -2398,6 +2392,7 @@ class TestRunGemmTuningHandler:
                     "PYTORCH_TUNABLEOP_TUNING": "1",
                     "HL_TUNABLEOP_MODE": "candidate",
                 },
+                "unset_envs": ["PYTORCH_TUNABLEOP_ENABLED", "DROP_ME"],
             },
         )
         captured: dict = {}
@@ -2456,9 +2451,34 @@ class TestRunGemmTuningHandler:
         assert task.params["extra_envs"]["OSL"] == "512"
         assert task.params["extra_envs"]["MAX_MODEL_LEN"] == "4096"
         assert "HL_TUNABLEOP_MODE" in task.params["unset_envs"]
+        assert "DROP_ME" in task.params["unset_envs"]
+        assert not [name for name in task.params["unset_envs"] if name.startswith("PYTORCH_TUNABLEOP_")]
         assert captured["init"]["shared_state"] is not state
         assert captured["init"]["shared_state"].baseline_eager_fallback is False
         assert state.baseline_eager_fallback is True
+
+        import yaml
+
+        from hyperloom.orchestrator.actions.executors._workload_envs import materialize_config_with_envs
+
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+        monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "0")
+        base = tmp_path / "base.yaml"
+        base.write_text(yaml.safe_dump({"benchmark": {"framework": "vllm", "model": "/models/m", "envs": {}}}))
+        materialized = materialize_config_with_envs(
+            base,
+            tmp_path / "materialized",
+            extra_envs=task.params["extra_envs"],
+            unset_envs=task.params["unset_envs"],
+        )
+        envs = yaml.safe_load(materialized.read_text())["benchmark"]["envs"]
+        assert envs["PYTORCH_TUNABLEOP_ENABLED"] == "1"
+        assert envs["PYTORCH_TUNABLEOP_RECORD_UNTUNED"] == "1"
+        assert (
+            envs["PYTORCH_TUNABLEOP_UNTUNED_FILENAME"]
+            == task.params["extra_envs"]["PYTORCH_TUNABLEOP_UNTUNED_FILENAME"]
+        )
+        assert "HL_TUNABLEOP_MODE" not in envs
 
     def test_vllm_block_fp8_profile_capture_extracts_runtime_shapes(self, tmp_path, monkeypatch):
         import gzip
@@ -4436,6 +4456,27 @@ class TestTracelensRootResolution:
         assert out["status"] == "failed"
         assert out["error_class"] == "tracelens_root_missing"
 
+    def test_trace_analyze_handler_bypass_selfheals_default_root_then_fails_if_unrecovered(self, tmp_path, monkeypatch):
+        # Bypass transitively imports TraceLens for source mapping, so it is provisioned like the agent route:
+        # a missing default root self-heals, then fails clearly instead of crashing the subprocess at import time.
+        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(tmp_path))
+        monkeypatch.delenv("TRACELENS_ROOT", raising=False)
+        monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "no-tracelens-here"))
+        called = {"n": 0}
+
+        def _fake_heal(root, *, log=None):
+            called["n"] += 1
+
+        monkeypatch.setattr(ta, "_maybe_selfheal_tracelens_root", _fake_heal)
+        out = asyncio.run(
+            ta.trace_analyze_handler(
+                {"trace_input": str(tmp_path / "trace"), "analysis_route": "bypass"}, session_dir=tmp_path
+            )
+        )
+        assert called["n"] == 1  # self-heal attempted on the bypass route too
+        assert out["status"] == "failed"
+        assert out["error_class"] == "tracelens_root_missing"
+
     def test_trace_analyze_handler_selfheals_incomplete_default_root(self, tmp_path, monkeypatch):
         # an incomplete default checkout (dir present, no .git) must still trigger self-heal.
         monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(tmp_path))
@@ -4629,7 +4670,6 @@ class TestBuildTraceAnalyzeCmd:
         state, session_dir = self._common(monkeypatch, tmp_path)
         state.model_path = "/models/sglang-model"
         state.precision = "fp8"
-        state.baseline_config_path = "/session/materialized.yaml"
         cmd, _steady = ta._build_trace_analyze_cmd(
             {"trace_input": "/t/trace"},
             session_dir=session_dir,
@@ -4647,7 +4687,6 @@ class TestBuildTraceAnalyzeCmd:
         )
         assert cmd[cmd.index("--model-path") + 1] == "/models/sglang-model"
         assert cmd[cmd.index("--precision") + 1] == "fp8"
-        assert cmd[cmd.index("--runtime-config") + 1] == "/session/materialized.yaml"
 
     def test_bypass_scriptable_cmd(self, monkeypatch, tmp_path):
         state, session_dir = self._common(monkeypatch, tmp_path)
@@ -4683,7 +4722,6 @@ class TestBuildTraceAnalyzeCmd:
         assert "--model-path" in cmd and cmd[cmd.index("--model-path") + 1] == "/models/flux"
         assert "--precision" in cmd and cmd[cmd.index("--precision") + 1] == "bf16"
         assert "--split-conc" not in cmd
-        assert "--runtime-config" not in cmd
         assert "--steady-state-mode" in cmd and cmd[cmd.index("--steady-state-mode") + 1] == "auto"
         assert cmd[-1] == "--dry-run"
         assert steady == "auto"

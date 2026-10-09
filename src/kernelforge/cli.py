@@ -14,15 +14,15 @@ import sys
 import time
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterable
+from typing import TYPE_CHECKING, Iterable, Sequence
 
 import click
 
 from hyperloom.common.env import env_bool
 from kernelforge.llm.git import git
 from kernelforge.config import Config
-from kernelforge.knowledge.experience_store import KnowledgeConfig
-from kernelforge.knowledge.experience_integration import (
+from kernelforge.knowledge.kb_store.config import KnowledgeConfig
+from kernelforge.loop.knowledge_integration import (
     WarmStartRollbackError,
     kb_reference_program_md,
     kb_read_status,
@@ -40,7 +40,7 @@ from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
 
 if TYPE_CHECKING:
     # Imported lazily at runtime to keep CLI startup off the knowledge stack.
-    from kernelforge.knowledge.pr_monitor_refs import PRRefsResult
+    from kernelforge.knowledge.pr_knowledge.references import PRRefsResult
 
 
 MIN_MAX_HOURS = 1.0  # a run shorter than this can't complete a productive campaign
@@ -246,7 +246,7 @@ def _collect_pr_references(
     budget_sec: float,
 ) -> PRRefsResult | None:
     """Run position A, absorbing every recoverable failure into a warning."""
-    from kernelforge.knowledge.pr_monitor_refs import (
+    from kernelforge.knowledge.pr_knowledge.references import (
         PR_KB_RECOVERABLE,
         collect_references,
     )
@@ -280,7 +280,7 @@ def _write_pr_provenance(
     if not surfaced:
         return
 
-    from kernelforge.knowledge.pr_monitor_refs import (
+    from kernelforge.knowledge.pr_knowledge.references import (
         PR_KB_RECOVERABLE,
         write_provenance,
     )
@@ -289,7 +289,6 @@ def _write_pr_provenance(
         write_provenance(
             workspace_dir,
             {
-                "schema_version": 1,
                 "experiment_id": experiment_id,
                 "winning_iteration": winning_iteration,
                 "surfaced": list(surfaced),
@@ -317,6 +316,98 @@ def _forge_session_timeout_sec(max_hours: float, override_sec: int | None) -> in
 def _is_long_horizon(max_hours: float) -> bool:
     """Whether one campaign session enables expensive long-horizon agents."""
     return float(max_hours) > LONG_HORIZON_THRESHOLD_HOURS
+
+
+CEILING_ON = "on"
+CEILING_OFF = "off"
+
+
+def _roofline_ceiling_option(help_text: str):
+    """The ``--roofline-ceiling`` switch, spelled once for every command that offers it.
+
+    Off by default everywhere: an estimate costs a profiler pass and an analyst
+    session, so nobody pays for one without asking.
+    """
+    return click.option(
+        "--roofline-ceiling",
+        "roofline_ceiling",
+        type=click.Choice([CEILING_ON, CEILING_OFF], case_sensitive=False),
+        default=CEILING_OFF,
+        help=help_text,
+    )
+
+
+def _make_ceiling_estimator(
+    *,
+    enabled: bool,
+    workspace_dir: str,
+    driver_script: str,
+    source_files: Sequence[str],
+    agent_provider: str,
+    agent_model: str,
+    session_timeout_sec: int,
+    sandbox_mode: str,
+):
+    """Build the callable the loop uses to estimate a ceiling, or ``None``.
+
+    Only ``--roofline-ceiling on`` asks for one, because an estimate costs a
+    profiler pass and an analyst session. Whether it is called is the loop's
+    decision: a fresh campaign estimates, and a resumed one reads back the
+    ceiling it already estimated. The analyst runs in its own session under its
+    own role, so the backend is resolved here, where the registry already
+    lives, and the loop is handed a callable instead of a dependency on it.
+
+    The benchmark the estimate is taken against is the one the campaign scores,
+    built by ``bench_command`` rather than assembled again here: a ceiling
+    derived against a differently timed region would not be comparable with the
+    latencies it is divided by.
+    """
+    if not enabled:
+        return None
+
+    async def estimate(*, case_ids: Sequence[str], case_ms: dict[str, float]):
+        from kernelforge.mcp_server.tools.bench import bench_command
+        from kernelforge.roofline_ceiling.command import resolve_analyst_backend
+        from kernelforge.roofline_ceiling.estimate import estimate_ceiling
+
+        return await estimate_ceiling(
+            resolve_analyst_backend(agent_provider, agent_model, session_timeout_sec, sandbox_mode=sandbox_mode),
+            workspace=workspace_dir,
+            performance_command=bench_command(driver_script),
+            kernel_files=[str(path) for path in source_files],
+            driver_script=driver_script,
+            known_case_ids=list(case_ids),
+            known_case_ms=dict(case_ms),
+            agent_model=agent_model,
+            agent_timeout_sec=session_timeout_sec,
+        )
+
+    return estimate
+
+
+def _validate_roofline_target(target: float, ceiling_enabled: bool) -> float:
+    """Check the attainment target is a fraction, and that a ceiling can reach it.
+
+    A target above one is unreachable by construction -- attainment is bounded
+    by the ceiling it divides by -- and a target without ``--roofline-ceiling
+    on`` is a stop condition that can never fire. Both are refused rather than
+    run, because either one leaves a campaign quietly ignoring the limit its
+    operator thought they had set.
+    """
+    value = float(target or 0.0)
+    if value <= 0:
+        return 0.0
+    if value > 1.0:
+        raise click.BadParameter(
+            f"--roofline-target {value} is a fraction of the ceiling, so it cannot exceed 1.0",
+            param_hint="--roofline-target",
+        )
+    if not ceiling_enabled:
+        raise click.BadParameter(
+            "--roofline-target needs a ceiling to measure against; pass --roofline-ceiling on",
+            param_hint="--roofline-target",
+        )
+    return value
 
 
 def _load_external_baseline(path: str) -> tuple[float, dict[str, float]]:
@@ -828,6 +919,24 @@ def _make_lane_agent_factory(
     "campaign: it is snapshotted into campaign_config.json and "
     "read back on --resume.",
 )
+@_roofline_ceiling_option(
+    "Estimate the per-shape theoretical achievable latency the campaign "
+    "measures its attainment against. 'off' (default) skips it. 'on' estimates "
+    "it on a fresh campaign once the baseline is measured, which costs a "
+    "profiler pass and an analyst session, and on --resume reuses the ceiling "
+    "the campaign already estimated, estimating again only when that report "
+    "can no longer be read. Pass it on every --resume that should keep it."
+)
+@click.option(
+    "--roofline-target",
+    default=0.0,
+    type=float,
+    help="Stop the campaign once mean per-case attainment (ceiling / measured, "
+    "equal-weight across scored cases) reaches this fraction, e.g. 0.86. "
+    "Requires a ceiling. Zero (default) disables the gate: a ceiling is an "
+    "estimate whose arithmetic nothing checks, so stopping on one is opt-in. "
+    "It never affects KEEP, which stays a measurement.",
+)
 @click.option(
     "--prepare-task/--no-prepare-task",
     default=True,
@@ -996,6 +1105,8 @@ def forge_loop(
     supervisor_backend,
     profile_timeout_sec,
     profiling,
+    roofline_ceiling,
+    roofline_target,
     prepare_task,
     task_type,
     source_files,
@@ -1037,12 +1148,12 @@ def forge_loop(
     if return_after_read_kb and not kb_warmstart_enabled:
         raise click.UsageError("--return-after-read-kb cannot be used with --no-kb-warmstart")
     if producer:
-        from kernelforge.knowledge.kernel_identity import KERNEL_RECIPE_PRODUCERS
+        from kernelforge.knowledge.kb_store.identity.kernel_recipe import KERNEL_RECIPE_PRODUCERS
 
         if producer not in KERNEL_RECIPE_PRODUCERS:
             raise click.UsageError(f"--producer must be one of: {', '.join(sorted(KERNEL_RECIPE_PRODUCERS))}")
 
-    from kernelforge.knowledge.experience_integration import git_head
+    from kernelforge.loop.knowledge_integration import git_head
     from kernelforge.loop.campaign_config import (
         CampaignConfigStore,
         derive_campaign_implementation_contract,
@@ -1256,6 +1367,8 @@ def forge_loop(
         merge_stacking=merge_stacking,
         # New files a KEEP may carry; a REVERT removes exactly the same set.
         commit_new_paths=commit_new_paths,
+        # The attainment of the per-shape ceiling that ends the run; the ceiling itself is estimated inside the loop.
+        roofline_target=_validate_roofline_target(roofline_target, roofline_ceiling == CEILING_ON),
     )
     if baseline_json:
         # The anchor every speedup divides by, and the wall time published beside it, both come from the caller's
@@ -1478,9 +1591,30 @@ def forge_loop(
             + ". The Python launcher, original reference, driver, ABI and specialization are frozen."
         )
 
+    # Resolved before the loop is built: the ceiling estimator captures it, and the raw option is ``None`` by default.
+    session_timeout_sec = _forge_session_timeout_sec(max_hours, session_timeout_sec)
+
     # Construct the loop only after task preparation has resolved the profiling contract; IterationLoop snapshots that
     # readiness in its runtime state.
-    loop_runner = IterationLoop(iter_config, tracker, config, resume=resume)
+    loop_runner = IterationLoop(
+        iter_config,
+        tracker,
+        config,
+        resume=resume,
+        ceiling_estimator=_make_ceiling_estimator(
+            enabled=roofline_ceiling == CEILING_ON,
+            workspace_dir=workspace_dir,
+            driver_script=iter_config.driver_script,
+            source_files=source_files_list,
+            # The runtime the implementer lanes settle on is resolved further down, after this point, and the analyst
+            # is a different role anyway: it reads the same provider/model ladder the standalone command reads, so
+            # the raw selection is what it needs and an empty one means "take the default".
+            agent_provider=agent_backend or "",
+            agent_model=model or "",
+            session_timeout_sec=session_timeout_sec,
+            sandbox_mode=config.agent_sandbox_mode,
+        ),
+    )
 
     if resume:
         try:
@@ -1671,7 +1805,6 @@ def forge_loop(
     # A turn cap never bounded time: it fired on 2.2% of sessions, so a session that neither converged nor capped ran
     # until something outside killed it.
     config.max_turns = FORGE_IMPLEMENTER_TURN_BACKSTOP
-    session_timeout_sec = _forge_session_timeout_sec(max_hours, session_timeout_sec)
     print(
         f"  Implementer session budget: {session_timeout_sec}s "
         f"(campaign budget {max_hours:g}h; turn backstop {config.max_turns})"
@@ -1680,7 +1813,7 @@ def forge_loop(
     pr_task_context = ""
     pr_kb_repo = ""
     if _pr_kb_enabled(pr_kb):
-        from kernelforge.knowledge.pr_query_context import (
+        from kernelforge.knowledge.pr_knowledge.context import (
             REASON_LOCAL_FAILURE,
             REASON_SKIPPED_DEADLINE,
         )
@@ -2059,7 +2192,6 @@ def forge_loop(
             mean_case_speedup=mean_case_speedup,
         )
         checkpoint = {
-            "schema_version": 1,
             "state": "best_committed",
             "decision": "KEEP",
             "experiment_id": (caller_experiment_id or (experiment.experiment_id if experiment is not None else "")),
@@ -2238,13 +2370,12 @@ def _emit_rewrite_applyback_contract(ctx, _param, value):
 )
 @click.option(
     "--logical-op-name",
-    "--op-name",
     "op_name",
     required=True,
     help="Stable logical identity of the workload (a namespace or "
     "punctuation is allowed). KernelForge derives the FlyDSL factory "
     "symbol from it and reports the symbol in the result; never "
-    "re-derive it downstream. --op-name is a deprecated alias.",
+    "re-derive it downstream.",
 )
 @click.option("--workspace", "workspace_dir", required=True, help="Git workspace dir")
 @click.option("--experiments-dir", required=True, help="Where to write forge_experiments")
@@ -2349,6 +2480,13 @@ def _emit_rewrite_applyback_contract(ctx, _param, value):
 @click.option(
     "--profile-timeout-sec", default=3600, type=int, help="OPTIMIZE: ceiling for the complete Analysis Agent workflow"
 )
+@_roofline_ceiling_option(
+    "OPTIMIZE: passed to the nested forge-loop unchanged. 'off' (default) "
+    "skips the roofline ceiling. 'on' has the loop estimate the kernel's "
+    "per-shape theoretical achievable latency once its baseline is measured, "
+    "and steer its planner by the attainment against it; the estimate costs a "
+    "profiler pass and an analyst session, paid out of the OPTIMIZE budget."
+)
 @click.option("--result-json", default=None, help="Write the result dict here (also printed)")
 def forge_rewrite(
     source_kernel,
@@ -2379,17 +2517,12 @@ def forge_rewrite(
     git_branch,
     supervisor_backend,
     profile_timeout_sec,
+    roofline_ceiling,
     result_json,
 ):
     """Rewrite a source kernel into FlyDSL and optimize it via forge-loop."""
     import os
     import re as _re
-
-    if "--op-name" in sys.argv:
-        click.echo(
-            "warning: --op-name is deprecated; use --logical-op-name.",
-            err=True,
-        )
 
     overrides = {}
     if gpu_target:
@@ -2442,6 +2575,7 @@ def forge_rewrite(
         permission_mode=permission_mode,
         supervisor_backend=supervisor_backend,
         profile_timeout_sec=profile_timeout_sec,
+        roofline_ceiling=roofline_ceiling == CEILING_ON,
         result_json=result_json,
         deadline_unix=deadline_unix,
         framework=framework,
@@ -2491,6 +2625,16 @@ def _register_gemm_tune() -> None:
 
 
 _register_gemm_tune()
+
+
+def _register_roofline_ceiling() -> None:
+    """Attach the per-shape theoretical-ceiling estimator under `roofline-ceiling`."""
+    from kernelforge.roofline_ceiling.command import roofline_ceiling_command
+
+    main.add_command(roofline_ceiling_command, name="roofline-ceiling")
+
+
+_register_roofline_ceiling()
 
 
 if __name__ == "__main__":

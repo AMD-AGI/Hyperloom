@@ -17,6 +17,9 @@ _PYTHON_PACKAGE_ROOT_BASENAMES: frozenset[str] = frozenset({"site-packages", "di
 
 BLOCKED_UNTRUSTED_ENV_NAMES: frozenset[str] = frozenset(
     {
+        # Names a second variable for the agentic client to export, so it reaches a shell indirection the way the
+        # loader vars below do: whoever sets it chooses which variable gets written, not merely a value.
+        "AGENTX_KEEP_ALIVE_ENV",
         "BASH_ENV",
         "CDPATH",
         "ENV",
@@ -300,7 +303,61 @@ def is_secret_shaped_env_name(key: object) -> bool:
     upper = str(key or "").strip().upper()
     for exempt in _SECRET_FRAGMENT_EXEMPTIONS:
         upper = upper.replace(exempt, "")
+    # Header strings carry Authorization values, matching the ``*CUSTOM_HEADERS`` text-redaction pattern above.
+    if upper.endswith("CUSTOM_HEADERS"):
+        return True
     return any(fragment in upper for fragment in _SECRET_NAME_FRAGMENTS)
+
+
+# Env-var name fragments whose value is masked before an env snapshot leaves this process. Shared with the Langfuse
+# session_start snapshot, which matches every marker as a substring.
+SENSITIVE_ENV_NAME_MARKERS: tuple[str, ...] = (
+    "SECRET",
+    "TOKEN",
+    "PASSWORD",
+    "PASSWD",
+    "PASSPHRASE",
+    "CREDENTIAL",
+    "PRIVATE_KEY",
+    "PRIVATEKEY",
+    "API_KEY",
+    "APIKEY",
+    "ACCESS_KEY",
+    "SECRET_KEY",
+    "AUTH",
+    "SIGNATURE",
+    "HEADERS",
+    "CUSTOM_HEADERS",
+)
+
+# As a substring TOKEN also hits tuning knobs (``MAX_NUM_BATCHED_TOKENS``, ``TOKENIZERS_PARALLELISM``), so a record of
+# launch knobs treats it as a credential only as a whole name segment (``HF_TOKEN``, ``HF_TOKEN_2``,
+# ``GITHUB_TOKEN_BACKUP``), and never in ``PER_TOKEN`` (``SGLANG_USE_AITER_FP8_PER_TOKEN``).
+_SUBSTRING_MARKERS_EXCEPT_TOKEN: tuple[str, ...] = tuple(m for m in SENSITIVE_ENV_NAME_MARKERS if m != "TOKEN")
+_TOKEN_SEGMENT_RE = re.compile(r"(?:^|_)TOKEN(?=_|$)")
+_PER_TOKEN_SEGMENT_RE = re.compile(r"(?:^|_)PER_TOKEN(?=_|$)")
+
+
+def _is_credential_env_name(key: object) -> bool:
+    upper = str(key or "").strip().upper()
+    if upper in BENCHMARK_SECRET_ENV_NAMES:
+        return True
+    if any(marker in upper for marker in _SUBSTRING_MARKERS_EXCEPT_TOKEN):
+        return True
+    return bool(_TOKEN_SEGMENT_RE.search(_PER_TOKEN_SEGMENT_RE.sub("", upper)))
+
+
+def redact_secret_env_values(env: Mapping[str, object] | None) -> dict[str, object]:
+    """Copy ``env`` with every credential's value masked, for a record that leaves this process.
+
+    A credential-shaped name is masked whole; any other string value is still scrubbed of recognizable credentials.
+    """
+    return {
+        key: "[REDACTED]"
+        if _is_credential_env_name(key)
+        else (redact_secret_values(value) if isinstance(value, str) and value else value)
+        for key, value in (env or {}).items()
+    }
 
 
 def is_allowed_external_env_key(key: object) -> bool:
@@ -431,6 +488,7 @@ __all__ = [
     "BLOCKED_UNTRUSTED_ENV_NAMES",
     "BLOCKED_VARIANT_ENV_NAMES",
     "GPU_MASK_ENV_NAMES",
+    "SENSITIVE_ENV_NAME_MARKERS",
     "build_benchmark_env",
     "filter_untrusted_env_mapping",
     "is_allowed_dotenv_key",
@@ -440,6 +498,7 @@ __all__ = [
     "is_python_package_root",
     "is_secret_shaped_env_name",
     "redact_file_in_place",
+    "redact_secret_env_values",
     "redact_secret_values",
     "scrub_benchmark_process_env",
     "scrub_child_process_env",

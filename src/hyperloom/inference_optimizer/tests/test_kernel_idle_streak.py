@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from hyperloom.orchestrator.phases import machine_state as ps
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 
 @pytest.fixture
@@ -35,10 +36,10 @@ def kernel_coordinator(tmp_path, monkeypatch):
     async def _noop(*_args, **_kwargs):
         return None
 
-    c._maybe_enqueue_explore_research_scout = _noop  # type: ignore[method-assign]
-    c._maybe_force_stalled_domain_specialist = _noop  # type: ignore[method-assign]
-    c._maybe_enqueue_trajectory_reviewer = _noop  # type: ignore[method-assign]
-    c._on_phase_entered = _noop  # type: ignore[method-assign]
+    c.phase_internal.maybe_enqueue_explore_research_scout = _noop  # type: ignore[method-assign]
+    c.specialist_dispatch.maybe_force_stalled_domain_specialist = _noop  # type: ignore[method-assign]
+    c.phase_internal.maybe_enqueue_trajectory_reviewer = _noop  # type: ignore[method-assign]
+    c.phase_machine._on_phase_entered = _noop  # type: ignore[method-assign]
     yield c
 
 
@@ -81,18 +82,18 @@ async def test_idle_kernel_winds_down_even_while_work_pending(kernel_coordinator
 
     # First scan opens the streak (no fingerprint stored yet), the rest observe an unchanged fingerprint and no
     # in-flight task, so the counter grows.
-    await c._advance_phase_if_needed()
+    await c.phase_machine.advance_phase_if_needed()
     assert st.kernel_idle_ticks == 0
     assert st.kernel_idle_since_unix > 0.0
 
     for _ in range(ps.KERNEL_IDLE_MAX_TICKS):
-        await c._advance_phase_if_needed()
+        await c.phase_machine.advance_phase_if_needed()
     assert st.kernel_idle_ticks >= ps.KERNEL_IDLE_MAX_TICKS
     # The wall-clock floor has not elapsed yet, so the phase is still KERNEL.
     assert st.phase == ps.PHASE_KERNEL_AGENT
 
     _backdate_streak(st, ps.KERNEL_IDLE_MIN_SECONDS + 1.0)
-    await c._advance_phase_if_needed()
+    await c.phase_machine.advance_phase_if_needed()
 
     assert st.phase == ps.PHASE_SWEEP
     row = st.phase_history[-1]
@@ -119,7 +120,7 @@ async def test_running_kernel_task_never_winds_down(kernel_coordinator):
     # A real build compiles and benchmarks for 30+ minutes without writing a single ledger field while ticks keep
     # arriving every few seconds.
     for _ in range(ps.KERNEL_IDLE_MAX_TICKS * 20):
-        await c._advance_phase_if_needed()
+        await c.phase_machine.advance_phase_if_needed()
         # Even an aged streak clock must not help: the in-flight branch rebases it every scan, so no idle window can
         # accumulate under the build.
         _backdate_streak(st, ps.KERNEL_IDLE_MIN_SECONDS * 10)
@@ -140,12 +141,12 @@ async def test_inline_kernel_request_never_winds_down(kernel_coordinator):
     for _ in range(ps.KERNEL_IDLE_MAX_TICKS * 20):
         # What the intent router's heartbeat stamps while the handler runs.
         st.kernel_inline_step_seen_unix = datetime.now(timezone.utc).timestamp()
-        await c._advance_phase_if_needed()
+        await c.phase_machine.advance_phase_if_needed()
         _backdate_streak(st, ps.KERNEL_IDLE_MIN_SECONDS * 10)
 
     assert st.phase == ps.PHASE_KERNEL_AGENT
     assert st.kernel_idle_ticks == 0
-    assert not await c._inflight_kernel_task_ids()
+    assert not await c.phase_kernel._inflight_task_ids()
 
 
 @pytest.mark.asyncio
@@ -157,11 +158,11 @@ async def test_orphaned_inline_step_stamp_still_winds_down(kernel_coordinator):
     _stall_the_ledger(st)
     st.kernel_inline_step_seen_unix = datetime.now(timezone.utc).timestamp() - ps.KERNEL_INLINE_STEP_STALE_SECONDS - 1.0
 
-    await c._advance_phase_if_needed()
+    await c.phase_machine.advance_phase_if_needed()
     for _ in range(ps.KERNEL_IDLE_MAX_TICKS):
-        await c._advance_phase_if_needed()
+        await c.phase_machine.advance_phase_if_needed()
     _backdate_streak(st, ps.KERNEL_IDLE_MIN_SECONDS + 1.0)
-    await c._advance_phase_if_needed()
+    await c.phase_machine.advance_phase_if_needed()
 
     assert st.phase == ps.PHASE_SWEEP
 
@@ -182,7 +183,7 @@ async def test_queued_kernel_task_never_winds_down(kernel_coordinator):
     )
 
     for _ in range(ps.KERNEL_IDLE_MAX_TICKS * 20):
-        await c._advance_phase_if_needed()
+        await c.phase_machine.advance_phase_if_needed()
         _backdate_streak(st, ps.KERNEL_IDLE_MIN_SECONDS * 10)
 
     assert st.phase == ps.PHASE_KERNEL_AGENT
@@ -197,14 +198,14 @@ async def test_ledger_progress_restarts_the_streak(kernel_coordinator):
     _stall_the_ledger(st)
 
     for _ in range(ps.KERNEL_IDLE_MAX_TICKS + 1):
-        await c._advance_phase_if_needed()
+        await c.phase_machine.advance_phase_if_needed()
     assert st.kernel_idle_ticks >= ps.KERNEL_IDLE_MAX_TICKS
 
     # An attempt resolves: real forward motion resets the streak, and the aged clock is re-stamped so the floor
     # restarts from this moment too.
     _backdate_streak(st, ps.KERNEL_IDLE_MIN_SECONDS * 10)
     st.kernel_opt_task_attempts["k000"]["last_decision"] = "REVERT"
-    await c._advance_phase_if_needed()
+    await c.phase_machine.advance_phase_if_needed()
 
     assert st.phase == ps.PHASE_KERNEL_AGENT
     assert st.kernel_idle_ticks == 0
@@ -220,7 +221,7 @@ async def test_streak_state_is_cleared_outside_kernel(kernel_coordinator):
     st.kernel_progress_fingerprint = "stale"
     st.kernel_idle_since_unix = 1.0
 
-    await c._track_kernel_idle_streak()
+    await c.phase_kernel.exit_facts()
 
     assert st.kernel_idle_ticks == 0
     assert st.kernel_progress_fingerprint == ""
@@ -228,9 +229,7 @@ async def test_streak_state_is_cleared_outside_kernel(kernel_coordinator):
 
 
 def test_fingerprint_ignores_fields_that_are_not_progress():
-    from types import SimpleNamespace
-
-    base = SimpleNamespace(
+    base = SharedState(
         kernel_opt_task_attempts={"k000": {"last_decision": "", "last_micro_speedup": 1.0}},
         rejected_kernel_ids=[],
         last_kernel_opt={},
@@ -249,9 +248,7 @@ def test_fingerprint_ignores_fields_that_are_not_progress():
 
 
 def test_fingerprint_tracks_inflight_task_ids():
-    from types import SimpleNamespace
-
-    state = SimpleNamespace(
+    state = SharedState(
         kernel_opt_task_attempts={},
         rejected_kernel_ids=[],
         last_kernel_opt={},
@@ -266,3 +263,39 @@ def test_fingerprint_tracks_inflight_task_ids():
     assert ps.compute_kernel_progress_fingerprint(
         state, inflight_task_ids=("t2", "t1")
     ) == ps.compute_kernel_progress_fingerprint(state, inflight_task_ids=("t1", "t2"))
+
+
+@pytest.mark.asyncio
+async def test_exit_facts_report_a_queued_kernel_agent_only_inside_kernel(kernel_coordinator):
+    c = kernel_coordinator
+    st = c.shared_state
+    await c.tasks.create(kind="kernel_agent", params={}, idempotency_key="kernel-agent-queued")
+
+    st.phase = ps.PHASE_FRAMEWORK_AGENT
+    assert (await c.phase_kernel.exit_facts()).agent_in_flight is False
+
+    _arm_kernel_phase(st)
+    assert (await c.phase_kernel.exit_facts()).agent_in_flight is True
+
+
+@pytest.mark.asyncio
+async def test_framework_pump_drives_the_research_scout_and_the_stalled_domain_specialist(kernel_coordinator):
+    c = kernel_coordinator
+    calls: list[str] = []
+
+    async def _scout():
+        calls.append("scout")
+
+    async def _stalled():
+        calls.append("stalled")
+
+    async def _pump_phase():
+        calls.append("phase")
+
+    c.phase_internal.maybe_enqueue_explore_research_scout = _scout  # type: ignore[method-assign]
+    c.specialist_dispatch.maybe_force_stalled_domain_specialist = _stalled  # type: ignore[method-assign]
+    c.phase_framework._pump_framework_agent_phase = _pump_phase  # type: ignore[method-assign]
+
+    await c.phase_framework.pump()
+
+    assert calls == ["phase", "scout", "stalled"]

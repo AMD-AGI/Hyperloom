@@ -245,6 +245,18 @@ async def test_reply_that_is_not_the_enforced_shape_raises_no_intent(
         await _backend(tmp_path).run("p")
 
 
+async def test_an_empty_intents_list_returns_no_intents(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An envelope with nothing in it is a reply without intents, not a transport error."""
+    _stub_turn(monkeypatch, CodexSessionResult(text='{"intents": []}'))
+
+    result = await _backend(tmp_path).run("p")
+
+    assert result.intents == []
+
+
 async def test_payload_that_is_not_a_json_object_raises_no_intent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -13,6 +13,7 @@ import pytest
 
 from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
 from hyperloom.orchestrator.knowledge.pr_monitor import PRMonitorClient
+from hyperloom.orchestrator.phases.machine import Transition
 
 
 def test_plane_disabled_pr_returns_empty_mcp_url():
@@ -42,28 +43,23 @@ def test_plane_enabled_pr_returns_mcp_url():
 async def test_on_enter_the_optimisation_phase_runs_without_plane(tmp_path: Path):
     """plane=None must not raise."""
     from hyperloom.orchestrator.loop.coordinator import Coordinator
-    from hyperloom.orchestrator.phases.framework import FrameworkPhase
 
     coord = Coordinator.__new__(Coordinator)
-    coord.phase_framework = FrameworkPhase(coord)
     coord.knowledge_plane = None
     coord.shared_state = _make_bare_shared_state()
     coord.session_dir = tmp_path
-    await coord.phase_framework.on_enter(from_phase="PRELUDE")
+    await coord.phase_framework.on_enter_framework(
+        Transition(from_phase="PRELUDE", to_phase="FRAMEWORK", reason="test", evidence={}, loopback=False)
+    )
 
 
 def _make_bare_shared_state():
-    from dataclasses import dataclass, field
+    from dataclasses import dataclass
+
+    from hyperloom.orchestrator.state.shared_state import SharedState
 
     @dataclass
-    class _SS:
-        phase: str = ""
-        baseline_tput: float = 0.0
-        last_roofline_tput: float = 0.0
-        last_trace_analyze: dict = field(default_factory=dict)
-        cumulative_gain_validated: float = 0.0
-        auto_roofline_pending_task_id: str = ""
-        phase_history: list = field(default_factory=list)
+    class _SS(SharedState):
         save_count: int = 0
 
         def save(self, _session_dir):

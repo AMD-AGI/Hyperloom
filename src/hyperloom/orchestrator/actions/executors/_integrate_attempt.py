@@ -25,6 +25,7 @@ class IntegrateAttempt:
     done_payload: dict[str, Any] | None = field(default_factory=dict)
     provision_result: ProvisionResult | None = None
     stack_action: EnablementStackAction | None = None
+    localization_action: EnablementStackAction | None = None
     localization_patches: list[Path] = field(default_factory=list)
     localization_touched: list[str] = field(default_factory=list)
     base_sha_by_root: dict[str, str] = field(default_factory=dict)
@@ -45,3 +46,10 @@ class IntegrateAttempt:
         if self.provision_result is None:
             return ""
         return self.provision_result.runtime.venv_root
+
+    @property
+    def runtime_source_root(self) -> str:
+        """The tree the acquired runtime imports, or no tree when this attempt did not provision."""
+        if self.provision_result is None:
+            return ""
+        return self.provision_result.runtime.source_root

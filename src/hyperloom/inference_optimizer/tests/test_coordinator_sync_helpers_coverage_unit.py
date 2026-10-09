@@ -13,6 +13,7 @@ from hyperloom.orchestrator.roles import (
     ScriptedPlan,
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.state.objective import TargetGainObjective
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
 
@@ -35,22 +36,22 @@ def coord(session_dir) -> Coordinator:
 
 # -- The specialist wall-clock deadline ------------------------------------
 def test_specialist_wall_budget_base_no_macro_cycle(coord: Coordinator) -> None:
-    # macro_cycle == 0 → base lane values (cpu 10min / gpu 60min).
+    # macro_cycle == 0 → base mode values (research 10min / patch 60min).
     coord.shared_state.macro_cycle = 0
-    assert coord._specialist_wall_budget_sec(needs_gpu=False) == 10 * 60
-    assert coord._specialist_wall_budget_sec(needs_gpu=True) == 60 * 60
+    assert coord.dispatcher._specialist_wall_budget_sec(params={"mode": "research"}) == 10 * 60
+    assert coord.dispatcher._specialist_wall_budget_sec(params={"mode": "patch"}) == 60 * 60
 
 
 def test_specialist_wall_budget_macro_cycle_amplifies(coord: Coordinator) -> None:
     coord.shared_state.macro_cycle = 1
-    assert coord._specialist_wall_budget_sec(needs_gpu=False) == 20 * 60
-    assert coord._specialist_wall_budget_sec(needs_gpu=True) == 120 * 60
+    assert coord.dispatcher._specialist_wall_budget_sec(params={"mode": "research"}) == 20 * 60
+    assert coord.dispatcher._specialist_wall_budget_sec(params={"mode": "patch"}) == 120 * 60
 
 
 def test_specialist_wall_budget_caps_at_4h(coord: Coordinator) -> None:
     coord.shared_state.macro_cycle = 10
-    assert coord._specialist_wall_budget_sec(needs_gpu=True) == 240 * 60
-    assert coord._specialist_wall_budget_sec(needs_gpu=False) == 110 * 60
+    assert coord.dispatcher._specialist_wall_budget_sec(params={"mode": "patch"}) == 240 * 60
+    assert coord.dispatcher._specialist_wall_budget_sec(params={"mode": "research"}) == 110 * 60
 
 
 def test_bench_specialist_budget_covers_rebench_timeout(coord: Coordinator) -> None:
@@ -59,13 +60,12 @@ def test_bench_specialist_budget_covers_rebench_timeout(coord: Coordinator) -> N
     from hyperloom.orchestrator.actions.executors._subprocess_kill import resolve_benchmark_timeouts
 
     params = {"scope": "domain", "mode": "patch", "bench": True}
-    budget = coord._specialist_wall_budget_sec(
-        needs_gpu=True,
-        params=params,
-    )
+    budget = coord.dispatcher._specialist_wall_budget_sec(params=params)
 
     assert budget == max(60 * 60, resolve_benchmark_timeouts()[1] + 10 * 60)
-    assert coord._gpu_lease_ttl_sec(params=params) == pytest.approx(int(budget * (1.0 + GPU_LEASE_TTL_GRACE)), abs=2)
+    assert coord.dispatcher.gpu_lease_ttl_sec(params=params) == pytest.approx(
+        int(budget * (1.0 + GPU_LEASE_TTL_GRACE)), abs=2
+    )
 
 
 def test_specialist_deadline_does_not_outlast_the_session(coord: Coordinator) -> None:
@@ -73,10 +73,7 @@ def test_specialist_deadline_does_not_outlast_the_session(coord: Coordinator) ->
     coord.shared_state.max_minutes = 30
     coord.shared_state.begin_leg()
 
-    deadline = coord._specialist_deadline(
-        needs_gpu=True,
-        params={"scope": "domain", "mode": "patch", "bench": True},
-    )
+    deadline = coord.dispatcher._specialist_deadline(params={"scope": "domain", "mode": "patch", "bench": True})
 
     assert deadline.remaining() == pytest.approx(30 * 60, abs=2)
 
@@ -88,10 +85,10 @@ def test_a_spent_session_yields_an_expired_specialist_deadline(coord: Coordinato
     coord.shared_state.max_minutes = 30
     coord.shared_state.begin_leg(now_unix=_time.time() - 3_600.0)
 
-    ample = coord._specialist_deadline(needs_gpu=True)
+    ample = coord.dispatcher._specialist_deadline(params={"mode": "patch"})
     coord.shared_state.max_minutes = 240
     coord.shared_state.begin_leg()
-    fresh = coord._specialist_deadline(needs_gpu=True)
+    fresh = coord.dispatcher._specialist_deadline(params={"mode": "patch"})
 
     assert ample.expired()
     assert not fresh.expired()
@@ -104,11 +101,11 @@ def test_gpu_lease_ttl_grace_over_wall_budget(coord: Coordinator) -> None:
     from hyperloom.orchestrator.bus.gpu_pool import GPU_LEASE_TTL_GRACE
 
     coord.shared_state.macro_cycle = 0
-    budget = coord._specialist_wall_budget_sec(needs_gpu=True)  # 3600
+    budget = coord.dispatcher._specialist_wall_budget_sec(params={"mode": "patch"})  # 3600
     ttl = int(budget * (1.0 + GPU_LEASE_TTL_GRACE))
     assert ttl == int(3600 * 1.1)
     assert ttl >= budget
-    assert coord._gpu_lease_ttl_sec() == pytest.approx(ttl, abs=2)
+    assert coord.dispatcher.gpu_lease_ttl_sec(params={"mode": "patch"}) == pytest.approx(ttl, abs=2)
 
 
 def test_run_dispatched_releases_gpu_lease_on_success(coord: Coordinator) -> None:
@@ -132,7 +129,7 @@ def test_run_dispatched_releases_gpu_lease_on_success(coord: Coordinator) -> Non
     coord.gpu_specialist_pool.release = _fake_release
     sentinel_lease = object()
     out = asyncio.run(
-        coord.run_task_registered(
+        coord.dispatcher.run_task_registered(
             _Task(),
             prebound_lease=None,
             extra_context={},
@@ -167,7 +164,7 @@ def test_run_dispatched_releases_gpu_lease_on_exception(coord: Coordinator) -> N
     sentinel_lease = object()
     with pytest.raises(RuntimeError, match="subprocess crashed"):
         asyncio.run(
-            coord.run_task_registered(
+            coord.dispatcher.run_task_registered(
                 _Task(),
                 prebound_lease=None,
                 extra_context={},
@@ -198,7 +195,7 @@ def test_run_dispatched_no_gpu_lease_is_noop(coord: Coordinator) -> None:
     coord.sub.run_task = _fake_run_task
     coord.gpu_specialist_pool.release = _fake_release
     out = asyncio.run(
-        coord.run_task_registered(
+        coord.dispatcher.run_task_registered(
             _Task(),
             prebound_lease=None,
             extra_context={},
@@ -211,20 +208,20 @@ def test_run_dispatched_no_gpu_lease_is_noop(coord: Coordinator) -> None:
 
 # -- static / pure helpers -------------------------------------------------
 def test_gap_layer_for_action(coord: Coordinator) -> None:
-    assert coord._gap_layer_for_action("kernel_opt") == ("kernel_agent", "kernel_switch_specialist")
-    assert coord._gap_layer_for_action("profile") == ("kernel_agent", "kernel_switch_specialist")
-    assert coord._gap_layer_for_action("sweep") == ("framework", "serving_specialist")
-    assert coord._gap_layer_for_action("baseline") == ("system", "system_specialist")
-    assert coord._gap_layer_for_action("anything-else") == ("framework", "serving_specialist")
+    assert coord.gap_refresh._gap_layer_for_action("kernel_opt") == ("kernel_agent", "kernel_switch_specialist")
+    assert coord.gap_refresh._gap_layer_for_action("profile") == ("kernel_agent", "kernel_switch_specialist")
+    assert coord.gap_refresh._gap_layer_for_action("sweep") == ("framework", "serving_specialist")
+    assert coord.gap_refresh._gap_layer_for_action("baseline") == ("system", "system_specialist")
+    assert coord.gap_refresh._gap_layer_for_action("anything-else") == ("framework", "serving_specialist")
 
 
 def test_task_id_from_specialist_source(coord: Coordinator) -> None:
     from hyperloom.orchestrator.loop.coordinator import SPECIALIST_FROM_AGENT_PREFIX
 
-    assert coord._task_id_from_specialist_source("") == ""
-    assert coord._task_id_from_specialist_source("kernel_agent") == ""
+    assert coord.specialist_dispatch._task_id_from_specialist_source("") == ""
+    assert coord.specialist_dispatch._task_id_from_specialist_source("kernel_agent") == ""
     assert (
-        coord._task_id_from_specialist_source(
+        coord.specialist_dispatch._task_id_from_specialist_source(
             f"{SPECIALIST_FROM_AGENT_PREFIX}abc",
         )
         == "abc"
@@ -232,105 +229,104 @@ def test_task_id_from_specialist_source(coord: Coordinator) -> None:
 
 
 def test_lanes_fit(coord: Coordinator) -> None:
-    assert coord._lanes_fit(["gpu"], {"gpu": 0}, {"gpu": 1}) is True
-    assert coord._lanes_fit(["gpu"], {"gpu": 1}, {"gpu": 1}) is False
-    assert coord._lanes_fit(["gpu"], {}, {"gpu": 0}) is False
+    assert coord.dispatcher._lanes_fit(["gpu"], {"gpu": 0}, {"gpu": 1}) is True
+    assert coord.dispatcher._lanes_fit(["gpu"], {"gpu": 1}, {"gpu": 1}) is False
+    assert coord.dispatcher._lanes_fit(["gpu"], {}, {"gpu": 0}) is False
 
 
 def test_pitfall_severity_for(coord: Coordinator) -> None:
-    assert coord._pitfall_severity_for(None) is None
-    assert coord._pitfall_severity_for({"error_class": "oom"}) is not None
-    assert coord._pitfall_severity_for({"status": "crash"}) is not None
-    assert coord._pitfall_severity_for({"gain_pct": -10.0}) is not None
-    assert coord._pitfall_severity_for({"gain_pct": 2.0}) is None
-    assert coord._pitfall_severity_for({"gain_pct": "bad"}) is None
+    assert coord.writeback._pitfall_severity_for(None) is None
+    assert coord.writeback._pitfall_severity_for({"error_class": "oom"}) is not None
+    assert coord.writeback._pitfall_severity_for({"status": "crash"}) is not None
+    assert coord.writeback._pitfall_severity_for({"gain_pct": -10.0}) is not None
+    assert coord.writeback._pitfall_severity_for({"gain_pct": 2.0}) is None
+    assert coord.writeback._pitfall_severity_for({"gain_pct": "bad"}) is None
 
 
 def test_is_promotable_result(coord: Coordinator) -> None:
-    assert coord._is_promotable_result("baseline", "not-a-dict") is False
-    assert coord._is_promotable_result("sweep", {"status": "succeeded"}) is True
-    assert coord._is_promotable_result("sweep", {"status": "failed"}) is False
-    assert coord._is_promotable_result("replay_warm_recipe", {"status": "failed"}) is True
-    assert coord._is_promotable_result("explore", {"status": "ok"}) is True
-    assert coord._is_promotable_result("explore", {"status": "failed"}) is False
+    assert coord.writeback.is_promotable_result("sweep", {"status": "succeeded"}) is True
+    assert coord.writeback.is_promotable_result("sweep", {"status": "failed"}) is False
+    assert coord.writeback.is_promotable_result("replay_warm_recipe", {"status": "failed"}) is True
+    assert coord.writeback.is_promotable_result("explore", {"status": "ok"}) is True
+    assert coord.writeback.is_promotable_result("explore", {"status": "failed"}) is False
 
 
 def test_is_promotable_result_baseline_eval_failed(coord: Coordinator) -> None:
     measured = {"output_throughput": 1000.0, "completed_requests": 10}
-    assert coord._is_promotable_result("baseline", measured) is True
+    assert coord.writeback.is_promotable_result("baseline", measured) is True
     eval_failed = {**measured, "baseline_eval_failed": True}
-    assert coord._is_promotable_result("baseline", eval_failed) is False
+    assert coord.writeback.is_promotable_result("baseline", eval_failed) is False
     # profile with the same key still promotes (blocker is baseline-only).
-    assert coord._is_promotable_result("profile", eval_failed) is True
+    assert coord.writeback.is_promotable_result("profile", eval_failed) is True
 
 
 # -- phase / id helpers ----------------------------------------------------
 def test_journal_entry_phase(coord: Coordinator) -> None:
     coord.shared_state.phase = ""
-    assert coord._journal_entry_phase() == "UNKNOWN"
+    assert coord.writeback.journal_entry_phase() == "UNKNOWN"
     coord.shared_state.phase = "framework_agent"
-    assert coord._journal_entry_phase() == "FRAMEWORK_AGENT"
+    assert coord.writeback.journal_entry_phase() == "FRAMEWORK_AGENT"
 
 
 def test_source_session_id_prefers_recipe_kb(coord: Coordinator) -> None:
     coord.shared_state.recipe_kb_session_id = "recipe-kb-99"
-    assert coord._source_session_id() == "recipe-kb-99"
+    assert coord.writeback._source_session_id() == "recipe-kb-99"
     coord.shared_state.recipe_kb_session_id = ""
-    assert coord._source_session_id() == coord.session_dir.name
+    assert coord.writeback._source_session_id() == coord.session_dir.name
 
 
 def test_kernel_enabled(coord: Coordinator) -> None:
     coord.shared_state.kernel_enabled = True
-    assert coord._kernel_enabled() is True
+    assert coord.phase_machine.kernel_enabled() is True
     coord.shared_state.kernel_enabled = False
-    assert coord._kernel_enabled() is False
+    assert coord.phase_machine.kernel_enabled() is False
 
 
 def test_internal_analysis_kind(coord: Coordinator) -> None:
     coord.shared_state.enable_roofline = True
-    assert coord._internal_analysis_kind() == "roofline"
+    assert coord.phase_prelude.internal_analysis_kind() == "roofline"
     coord.shared_state.enable_roofline = False
-    assert coord._internal_analysis_kind() == "profile"
+    assert coord.phase_prelude.internal_analysis_kind() == "profile"
 
 
 # -- watermark / tput projection ------------------------------------------
 def test_current_tput_from_validated_gain(coord: Coordinator) -> None:
     coord.shared_state.baseline_tput = 0.0
-    assert coord._current_tput_from_validated_gain() == 0.0
+    assert coord.phase_kernel.current_tput_from_validated_gain() == 0.0
     coord.shared_state.baseline_tput = 100.0
     coord.shared_state.cumulative_gain_validated = 10.0
-    assert coord._current_tput_from_validated_gain() == pytest.approx(110.0)
+    assert coord.phase_kernel.current_tput_from_validated_gain() == pytest.approx(110.0)
 
 
 def test_needs_roofline_for_watermark_guards(coord: Coordinator) -> None:
     ss = coord.shared_state
     # pending roofline -> never re-arm
     ss.auto_roofline_pending_task_id = "task-1"
-    assert coord._needs_roofline_for_watermark() is False
+    assert coord.phase_kernel._needs_roofline_for_watermark() is False
     # no last roofline, no failure streak -> bootstrap guard
     ss.auto_roofline_pending_task_id = ""
     ss.last_roofline_tput = 0.0
     ss.roofline_failure_streak = 0
-    assert coord._needs_roofline_for_watermark() is False
+    assert coord.phase_kernel._needs_roofline_for_watermark() is False
     # crossing the watermark over last roofline
     ss.last_roofline_tput = 100.0
     ss.baseline_tput = 100.0
     ss.cumulative_gain_validated = 50.0
-    assert coord._needs_roofline_for_watermark() is True
+    assert coord.phase_kernel._needs_roofline_for_watermark() is True
 
 
 # -- gap extraction --------------------------------------------------------
 def test_extract_gaps_from_baseline_empty(coord: Coordinator) -> None:
     coord.shared_state.baseline_tput = 0.0
-    assert coord._extract_gaps_from_baseline() == []
+    assert coord.gap_refresh._extract_gaps_from_baseline(coord.proposals.workload_canonical_id()) == []
 
 
 def test_extract_gaps_from_baseline_populated(coord: Coordinator) -> None:
     ss = coord.shared_state
     ss.baseline_tput = 100.0
-    ss.target_gap_pct = 12.0
+    coord._current_objective = TargetGainObjective(target_gain_pct=12.0)
     ss.baseline_failure_streak = 2
-    gaps = coord._extract_gaps_from_baseline()
+    gaps = coord.gap_refresh._extract_gaps_from_baseline(coord.proposals.workload_canonical_id())
     ids = {g["canonical_id"].split("#")[-1] for g in gaps}
     assert "throughput_below_target" in ids
     assert "baseline_unstable" in ids
@@ -348,7 +344,7 @@ def test_extract_gaps_from_attempts(coord: Coordinator) -> None:
     ]
     ss.params_no_promote_streak = 6
     ss.explore_search = {"winners_history": []}
-    gaps = coord._extract_gaps_from_attempts()
+    gaps = coord.gap_refresh._extract_gaps_from_attempts(coord.proposals.workload_canonical_id())
     cids = {g["canonical_id"] for g in gaps}
     # distinct variant_names produce separate gaps; each has one attempt
     fail_gaps = [g for g in gaps if "fail:kernel_opt:oom" in g["canonical_id"]]
@@ -370,7 +366,7 @@ def test_extract_gaps_no_variant_collapses(coord: Coordinator) -> None:
     ]
     ss.params_no_promote_streak = 0
     ss.explore_search = {}
-    gaps = coord._extract_gaps_from_attempts()
+    gaps = coord.gap_refresh._extract_gaps_from_attempts(coord.proposals.workload_canonical_id())
     fail_gaps = [g for g in gaps if "fail:explore:server_init_dead" in g["canonical_id"]]
     assert len(fail_gaps) == 1
     assert len(fail_gaps[0]["attempts"]) == 2
@@ -390,7 +386,7 @@ def test_extract_gaps_symptom_uses_excerpt(coord: Coordinator) -> None:
     ]
     ss.params_no_promote_streak = 0
     ss.explore_search = {}
-    gaps = coord._extract_gaps_from_attempts()
+    gaps = coord.gap_refresh._extract_gaps_from_attempts(coord.proposals.workload_canonical_id())
     fail_gaps = [g for g in gaps if "fail:explore:server_init_dead" in g["canonical_id"]]
     assert fail_gaps
     assert "mla_gluon" in fail_gaps[0]["symptom"]
@@ -398,10 +394,10 @@ def test_extract_gaps_symptom_uses_excerpt(coord: Coordinator) -> None:
 
 # -- advisory blocks (empty-guard paths) ----------------------------------
 def test_advisory_blocks_empty_by_default(coord: Coordinator) -> None:
-    assert coord._plateau_advisory_block() == ""
-    assert coord._target_gap_advisory_block() == ""
-    assert coord._current_primary_gap() is None
-    assert coord._priors_match_advisory_block() == ""
+    assert coord.conversation.plateau_advisory_block() == ""
+    assert coord.conversation.target_gap_advisory_block() == ""
+    assert coord.conversation._current_primary_gap() is None
+    assert coord.conversation._priors_match_advisory_block() == ""
 
 
 # -- specialist findings block --------------------------------------------
@@ -416,7 +412,7 @@ def _round(domain: str, finding: str, confidence, questions=()) -> dict:
 
 def _findings(coord: Coordinator) -> str:
 
-    return coord._specialist_findings_block()
+    return coord.conversation._specialist_findings_block()
 
 
 def test_specialist_findings_survive_a_non_numeric_confidence(coord: Coordinator) -> None:
@@ -484,7 +480,7 @@ def test_specialist_findings_skip_rows_carrying_neither_findings_nor_questions(c
     ]
 
     assert _findings(coord) == ""
-    assert coord._recent_proposed_variants() == []
+    assert coord.conversation._recent_proposed_variants() == []
 
 
 def test_recent_proposed_variants_dedup(coord: Coordinator) -> None:
@@ -492,7 +488,7 @@ def test_recent_proposed_variants_dedup(coord: Coordinator) -> None:
         {"proposal_set": [{"name": "a"}, {"name": "b"}]},
         {"proposal_set": [{"name": "b"}, {"name": "c"}, "not-a-dict"]},
     ]
-    out = coord._recent_proposed_variants()
+    out = coord.conversation._recent_proposed_variants()
     names = {v["name"] for v in out}
     assert names == {"a", "b", "c"}
 
@@ -500,7 +496,7 @@ def test_recent_proposed_variants_dedup(coord: Coordinator) -> None:
 # -- warm recipe + workload tags ------------------------------------------
 def test_warm_recipe_proven_items(coord: Coordinator) -> None:
     coord.shared_state.warm_start_recipe = {}
-    assert coord._warm_recipe_proven_items() == []
+    assert coord.phase_prelude.warm_recipe_proven_items() == []
     coord.shared_state.warm_start_recipe = {
         "recipe": {
             "attrs": {
@@ -512,7 +508,7 @@ def test_warm_recipe_proven_items(coord: Coordinator) -> None:
             }
         },
     }
-    out = coord._warm_recipe_proven_items()
+    out = coord.phase_prelude.warm_recipe_proven_items()
     assert out == [{"name": "fp8", "source": "kb"}]
 
 
@@ -526,7 +522,7 @@ def test_collect_workload_tags(coord: Coordinator, monkeypatch) -> None:
     ss.precision = "fp8"
     ss.tp = 8
     ss.conc = 64
-    tags = coord._collect_workload_tags()
+    tags = coord.writeback._collect_workload_tags()
     assert tags["framework"] == "sglang"
     assert tags["model_class"] == "moe"
     assert tags["tp"] == 8
@@ -548,7 +544,7 @@ def test_build_kernel_optimizations_from_state(coord: Coordinator) -> None:
     ss.kernel_integrate_attempts = {
         "i1": {"kernel_id": "k1", "last_decision": "KEEP", "best_gain_pct": 5.0, "attempts": [{"new_tput": 210.0}]},
     }
-    out = coord._build_kernel_optimizations_from_state()
+    out = coord.writeback._build_kernel_optimizations_from_state()
     assert len(out) == 1  # only the KEEP'd k1
     row = out[0]
     assert row["kernel_id"] == "k1"
@@ -557,35 +553,30 @@ def test_build_kernel_optimizations_from_state(coord: Coordinator) -> None:
     assert row["e2e_tput"] == 210.0
 
 
-def test_derive_close_stop_reason_default(coord: Coordinator) -> None:
-    coord.shared_state.phase_history = []
-    assert coord._derive_close_stop_reason() == "time_exhausted"
-
-
 # -- phase denial gate -----------------------------------------------------
 def test_phase_denial_for_action(coord: Coordinator) -> None:
     ss = coord.shared_state
     ss.phase = "PRELUDE"
-    assert coord._phase_denial_for_action("baseline") is None
+    assert coord.dispatcher._phase_denial_for_action("baseline") is None
     # ENABLEMENT runs its baseline through the Coordinator's revalidation, so an
     # agent asking for one is refused.
     ss.phase = "ENABLEMENT"
-    denied = coord._phase_denial_for_action("baseline")
+    denied = coord.dispatcher._phase_denial_for_action("baseline")
     assert denied is not None and denied.rule == "phase_incompatible"
-    assert coord._phase_denial_for_action("specialist") is None
-    assert coord._phase_denial_for_action("integrate_patch") is None
+    assert coord.dispatcher._phase_denial_for_action("specialist") is None
+    assert coord.dispatcher._phase_denial_for_action("integrate_patch") is None
     # The gate reserves named actions only; it is not a phase-membership check.
-    assert coord._phase_denial_for_action("explore") is None
+    assert coord.dispatcher._phase_denial_for_action("explore") is None
     # An unknown phase reserves nothing, so the gate abstains.
     ss.phase = ""
-    assert coord._phase_denial_for_action("baseline") is None
+    assert coord.dispatcher._phase_denial_for_action("baseline") is None
 
 
 def test_the_coordinator_revalidation_baseline_is_not_phase_denied(coord: Coordinator) -> None:
     """The revalidation pump prices its own action and never runs the phase gate."""
     coord.shared_state.phase = "ENABLEMENT"
-    assert coord._time_budget_denial_for_action("baseline") is None
-    assert coord._admission_denial_for_action("baseline") is not None
+    assert coord.dispatcher.time_budget_denial_for_action("baseline") is None
+    assert coord.dispatcher.admission_denial_for_action("baseline") is not None
 
 
 # -- sequence denial gates -------------------------------------------------
@@ -594,15 +585,15 @@ def test_sequence_denial_for_action(coord: Coordinator) -> None:
     ss.stop_reason = ""
     ss.baseline_tput = 0.0
     # non-sequence action -> never denied
-    assert coord._sequence_denial_for_action("frobnicate") is None
+    assert coord.dispatcher._sequence_denial_for_action("frobnicate") is None
     # baseline itself allowed pre-baseline
-    assert coord._sequence_denial_for_action("baseline") is None
+    assert coord.dispatcher._sequence_denial_for_action("baseline") is None
     # explore denied until baseline measured
-    denied = coord._sequence_denial_for_action("explore")
+    denied = coord.dispatcher._sequence_denial_for_action("explore")
     assert denied is not None and denied.rule == "execution_order"
     # once baseline measured -> allowed
     ss.baseline_tput = 100.0
-    assert coord._sequence_denial_for_action("explore") is None
+    assert coord.dispatcher._sequence_denial_for_action("explore") is None
 
 
 def test_sequence_denial_for_request(coord: Coordinator) -> None:
@@ -610,18 +601,18 @@ def test_sequence_denial_for_request(coord: Coordinator) -> None:
     ss.stop_reason = ""
     ss.baseline_tput = 0.0
     # non-kernel target -> not gated
-    assert coord._sequence_denial_for_request("orchestration", "anything") is None
+    assert coord.dispatcher.sequence_denial_for_request("orchestration", "anything") is None
     # trace_analyze always allowed
-    assert coord._sequence_denial_for_request("kernel_agent", "trace_analyze") is None
+    assert coord.dispatcher.sequence_denial_for_request("kernel_agent", "trace_analyze") is None
     # unknown handler kind -> not gated
-    assert coord._sequence_denial_for_request("kernel_agent", "no_such_kind") is None
+    assert coord.dispatcher.sequence_denial_for_request("kernel_agent", "no_such_kind") is None
 
 
 def test_skip_gemm_tuning_env(coord: Coordinator, monkeypatch) -> None:
     monkeypatch.delenv("INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING", raising=False)
-    assert coord._skip_gemm_tuning() is False
+    assert coord.phase_kernel._skip_gemm_tuning() is False
     monkeypatch.setenv("INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING", "yes")
-    assert coord._skip_gemm_tuning() is True
+    assert coord.phase_kernel._skip_gemm_tuning() is True
 
 
 def test_gemm_tuning_required_before_kernel_opt(coord: Coordinator, monkeypatch) -> None:
@@ -632,17 +623,17 @@ def test_gemm_tuning_required_before_kernel_opt(coord: Coordinator, monkeypatch)
     # forge backend: any precision on a supported framework is eligible.
     ss.framework = "sglang"
     ss.precision = "fp16"
-    assert coord._gemm_tuning_required_before_kernel_opt() is True
+    assert coord.phase_kernel._gemm_tuning_required_before_kernel_opt() is True
     ss.precision = "bf16"
-    assert coord._gemm_tuning_required_before_kernel_opt() is True
+    assert coord.phase_kernel._gemm_tuning_required_before_kernel_opt() is True
     # Unsupported framework -> not eligible.
     ss.framework = "trt-llm"
-    assert coord._gemm_tuning_required_before_kernel_opt() is False
+    assert coord.phase_kernel._gemm_tuning_required_before_kernel_opt() is False
     # Supported framework + terminal status -> not required.
     ss.framework = "sglang"
     ss.precision = "fp8"
     ss.last_gemm_tuning = {"status": "succeeded"}
-    assert coord._gemm_tuning_required_before_kernel_opt() is False
+    assert coord.phase_kernel._gemm_tuning_required_before_kernel_opt() is False
 
 
 # -- canonical id helpers --------------------------------------------------
@@ -652,10 +643,10 @@ def test_workload_canonical_id_and_anchor(coord: Coordinator) -> None:
     ss.gpu_type = "mi300x"
     ss.framework = "sglang"
     ss.precision = "fp8"
-    cid = coord._workload_canonical_id()
+    cid = coord.proposals.workload_canonical_id()
     assert cid.startswith("inference:")
     assert "mi300x" in cid
-    assert coord._workload_canonical_id() == cid
+    assert coord.proposals.workload_canonical_id() == cid
 
 
 # -- framework candidate selection -------------------------------------

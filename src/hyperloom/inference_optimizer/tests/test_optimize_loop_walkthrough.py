@@ -14,6 +14,7 @@ import pytest
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.orchestrator.phases import machine_state as ps
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 
 def _coordinator(session_dir: Path):
@@ -39,13 +40,13 @@ def _coordinator(session_dir: Path):
             "critic": MockCriticBackend(),
         },
     )
-    coord.sub.register_executor("kernel_agent", coord._run_kernel_agent)
+    coord.sub.register_executor("kernel_agent", coord.phase_kernel.run_agent)
     return coord
 
 
 async def _settle_unjoined_actions(coord: Any) -> None:
     """Let the actions the pump dispatched without joining run to completion."""
-    handles = [entry.atask for entry in coord._inflight_actions.values()]
+    handles = [entry.atask for entry in coord.dispatcher._inflight_actions.values()]
     if handles:
         await asyncio.gather(*handles)
 
@@ -70,7 +71,10 @@ def session_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # KERNEL entry would otherwise launch a real GEAK runner or Controller process on its route.
     monkeypatch.setattr(_kernel_agent_tool, "_kernel_agent_tool_path", _tool_path_without_geak_runner)
     monkeypatch.setattr(controller_submit, "run_controller_subprocess", _no_controller_run)
-    return make_session_dir()
+    session_dir = make_session_dir()
+    # The CLI seeds a registered framework before the Coordinator ever loads the state.
+    SharedState(framework="sglang").save(session_dir)
+    return session_dir
 
 
 def _chain(state: Any) -> list[tuple[str, str, str]]:
@@ -142,6 +146,7 @@ async def test_both_arms_dry_walks_the_rest_of_the_chain(
                 fingerprint=f"fp-{i}",
                 variant_name=f"variant-{i}",
                 outcome="REVERT",
+                adopted=False,
                 gain_pct=0.01,
                 before_tput=1500.0,
                 after_tput=1500.15,

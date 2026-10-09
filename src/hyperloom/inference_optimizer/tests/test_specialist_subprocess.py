@@ -58,6 +58,11 @@ def test_build_specialist_env_inherits_provider_secrets_by_default(monkeypatch):
     assert "LD_PRELOAD" not in env
 
 
+def test_build_specialist_env_forwards_the_claude_config_dir(monkeypatch):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/tmp/claude-config")
+    assert _build_specialist_env()["CLAUDE_CONFIG_DIR"] == "/tmp/claude-config"
+
+
 def test_build_specialist_env_forwards_oauth_token_without_mirroring_it(monkeypatch):
     """A subscription-only parent must hand the token down untouched."""
     oauth_env = "_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN"))
@@ -291,9 +296,9 @@ def _make_runner_ctx(task_id: str = "t-spec-1") -> RunnerContext:
         state="queued",
         params={
             "domain": "serving_specialist",
+            "framework": "sglang",
             "gap_canonical_id": "gap.test.example",
             "max_turns": 2,
-            "framework": "sglang",
         },
         idempotency_key=task_id,
         requires_lanes=tuple(),
@@ -1447,3 +1452,44 @@ def test_a_ray_actor_names_no_local_process_group_for_the_operator_log():
     assert actor is None
     # Nothing to report is also the answer when the cleanup never spawned a root.
     assert subprocess_._local_tree_pgid(None) is None
+
+
+async def _spawn_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, gpu_ids: tuple[int, ...]) -> dict[str, str]:
+    """The env a local specialist spawn is handed; the fake ``Popen`` refuses to start."""
+    captured: dict[str, str] = {}
+
+    def _popen(_cmd, *, env, **_kwargs):
+        captured.update(env)
+        raise OSError("spawn refused by test")
+
+    monkeypatch.setattr(subprocess_.subprocess, "Popen", _popen)
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3")
+    disp = SpecialistSubprocessDispatcher(config=SpecialistSubprocessConfig(poll_interval_seconds=0.01))
+    result = await disp.run(
+        task_id="t-env",
+        workspace=tmp_path / "ws",
+        worktree=None,
+        worktree_base=None,
+        system_prompt="sys",
+        user_prompt="usr",
+        disallowed_tools=frozenset(),
+        max_turns=1,
+        gpu_ids=gpu_ids,
+        deadline=Deadline.after(5.0),
+    )
+    assert "spawn refused by test" in (result.error or "")
+    return captured
+
+
+async def test_cpu_specialist_env_hides_all_gpus_and_uses_private_caches(tmp_path, monkeypatch):
+    env = await _spawn_env(tmp_path, monkeypatch, gpu_ids=())
+    assert all(env[var] == "" for var in GPU_MASK_ENV_NAMES)
+    cache_root = tmp_path / "ws" / ".cache"
+    for var in ("TRITON_CACHE_DIR", "TORCHINDUCTOR_CACHE_DIR", "AITER_JIT_DIR", "INFERENCE_OPTIMIZER_AITER_JIT_DIR"):
+        assert Path(env[var]).parent == cache_root
+
+
+async def test_gpu_specialist_env_keeps_its_cards_and_shared_caches(tmp_path, monkeypatch):
+    env = await _spawn_env(tmp_path, monkeypatch, gpu_ids=(0, 1))
+    assert env["HIP_VISIBLE_DEVICES"] == env["ROCR_VISIBLE_DEVICES"] == "0,1"
+    assert "TRITON_CACHE_DIR" not in env and "AITER_JIT_DIR" not in env

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Long dispatcher joins do not require a supervisor progress stamp."""
+"""Long-running dispatched work does not require a supervisor progress stamp."""
 
 from __future__ import annotations
 
@@ -10,6 +10,8 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
+
+from ._dispatch_helpers import pump_until_settled
 
 
 async def _build_coord(tmp_path: Path):
@@ -34,23 +36,21 @@ async def _build_coord(tmp_path: Path):
         session_dir=tmp_path,
         backends=backends,
         role_registry=default_role_registry(),
-        recipe_kb=None,
         knowledge_plane=None,
     )
 
 
 @pytest.mark.asyncio
-async def test_pump_joins_long_work_without_a_supervisor_stamp(tmp_path, monkeypatch):
+async def test_long_work_is_booked_without_a_supervisor_stamp(tmp_path, monkeypatch):
     release = asyncio.Event()
     entered = asyncio.Event()
     coord = await _build_coord(tmp_path)
-    coord._dispatcher_poll_sec = 0.02
     assert not hasattr(coord.reconciler, "stamp_progress")
-    reaped = AsyncMock(wraps=coord._reap_dispatched_task)
-    monkeypatch.setattr(coord, "_reap_dispatched_task", reaped)
-    monkeypatch.setattr(coord, "_is_promotable_result", lambda *_args: True)
-    monkeypatch.setattr(coord, "_promote_to_shared_state", AsyncMock())
-    monkeypatch.setattr(coord, "_fact_write_hook", AsyncMock())
+    reaped = AsyncMock(wraps=coord.dispatcher.reap_dispatched_task)
+    monkeypatch.setattr(coord.dispatcher, "reap_dispatched_task", reaped)
+    monkeypatch.setattr(coord.writeback, "is_promotable_result", lambda *_args: True)
+    monkeypatch.setattr(coord.writeback, "promote_to_shared_state", AsyncMock())
+    monkeypatch.setattr(coord.writeback, "fact_write_hook", AsyncMock())
     calls = []
 
     async def execute(ctx):
@@ -61,21 +61,20 @@ async def test_pump_joins_long_work_without_a_supervisor_stamp(tmp_path, monkeyp
 
     coord.sub.register_executor("profile", execute)
     task = await coord.tasks.create(kind="profile", params={}, idempotency_key="long-profile")
-    pump = asyncio.create_task(coord._pump_dispatcher_once())
     try:
+        await asyncio.wait_for(coord.dispatcher.pump_dispatcher_once(), 5)
         await asyncio.wait_for(entered.wait(), 5)
-        assert not pump.done()
         assert (await coord.tasks.get(task.task_id)).state == "running"
         reaped.assert_not_awaited()
     finally:
         release.set()
-        await asyncio.wait_for(pump, timeout=5)
+        await pump_until_settled(coord.dispatcher)
     try:
         assert calls == [task.task_id]
         reaped.assert_awaited_once()
         assert (await coord.tasks.get(task.task_id)).state == "succeeded"
         events = await coord.db.fetchall("SELECT payload FROM events WHERE topic='delegated_result'")
         assert len(events) == 1
-        assert not coord._executions
+        assert not coord.dispatcher._executions
     finally:
         await coord.stop()

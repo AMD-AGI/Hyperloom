@@ -1022,7 +1022,7 @@ exec {shlex.quote(runner)}
     return path
 
 
-def _resolve_gemm_tuning_backend(payload: dict) -> str:
+def resolve_gemm_tuning_backend(payload: dict) -> str:
     """Resolve GEMM tuning backend under the forge-explicit-only invariant."""
     return "forge" if forge_explicitly_enabled() else "geak"
 
@@ -1180,12 +1180,7 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
 
     # Resolve from actual server args (baseline yaml + current_best overlay).
     current_best = getattr(state, "current_best", None) or {}
-    try:
-        server_args = resolve_runtime_workload(state, arm="current_best").server_args
-    except Exception:  # noqa: BLE001 - best-effort fallback for partial state/test doubles
-        server_args = ""
-        if isinstance(current_best, dict):
-            server_args = str(current_best.get("extra_server_args") or "")
+    server_args = resolve_runtime_workload(state, arm="current_best").server_args
     extra_envs = dict(current_best.get("extra_envs") or {}) if isinstance(current_best, dict) else {}
     ref_envs = dict(getattr(state, "reference_envs", None) or {})
     per_token_signal = is_truthy(extra_envs.get("SGLANG_USE_AITER_FP8_PER_TOKEN")) or is_truthy(
@@ -2949,18 +2944,10 @@ async def _capture_vllm_tunableop_shapes(
     else:
         capture_unset_envs = [str(key) for key in inherited_unset]
     if not profile_mode:
-        capture_unset_envs.extend(
-            [
-                "HL_TUNABLEOP_MODE",
-                "HL_TUNABLEOP_FILE",
-                "HL_TUNABLEOP_VERBOSE",
-                "PYTORCH_TUNABLEOP_ENABLED",
-                "PYTORCH_TUNABLEOP_TUNING",
-                "PYTORCH_TUNABLEOP_RECORD_UNTUNED",
-                "PYTORCH_TUNABLEOP_UNTUNED_FILENAME",
-                "PYTORCH_TUNABLEOP_FILENAME",
-            ]
-        )
+        # unset_envs is applied after extra_envs, so any PYTORCH_TUNABLEOP_* name left here (hard-coded or
+        # inherited from the payload or current best) strips the recording and the capture records nothing.
+        capture_unset_envs = [name for name in capture_unset_envs if not name.startswith("PYTORCH_TUNABLEOP_")]
+        capture_unset_envs.extend(["HL_TUNABLEOP_MODE", "HL_TUNABLEOP_FILE", "HL_TUNABLEOP_VERBOSE"])
     inherited_remove = payload.get("remove_args", current_best.get("remove_args")) or []
     if isinstance(inherited_remove, str):
         capture_remove_args = [inherited_remove]
@@ -3848,7 +3835,7 @@ async def run_gemm_tuning_handler(
     Returns:
         A ``HandlerResult`` describing the tuning outcome.
     """
-    backend = _resolve_gemm_tuning_backend(payload)
+    backend = resolve_gemm_tuning_backend(payload)
     log.info("run_gemm_tuning: backend=%s", backend)
 
     if backend == "forge":

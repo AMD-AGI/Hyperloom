@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""SharedState — single-writer (Coordinator) persisted session state, backed by atomic JSON at ``$SESSION_DIR/state.json``; an agent writes only ``AGENT_UPDATE_FIELDS``."""
+"""SharedState — single-writer (Coordinator) persisted session state, backed by atomic JSON at ``$SESSION_DIR/state.json``."""
 
 from __future__ import annotations
 
@@ -45,9 +45,9 @@ _MAX_INTEGRATE_FAULT_ATTEMPTS = _kernel_decision_settings._MAX_INTEGRATE_FAULT_A
 resolve_hot_kernel_min_gpu_pct = _kernel_decision_settings.resolve_hot_kernel_min_gpu_pct
 resolve_kernel_opt_max_failures = _kernel_decision_settings.resolve_kernel_opt_max_failures
 
-# escalate_strategy_change hint vocabulary (closed enum; unknown hints ignored). ``skip_to_sweep`` is the
-# non-terminal "exhausted the current lever" signal: from FRAMEWORK_AGENT it advances to KERNEL, from KERNEL it
-# winds down to SWEEP → CLOSE.
+# escalate_strategy_change hint vocabulary (closed enum; unknown hints ignored). ``skip_to_kernel`` is the
+# "exhausted the current lever" signal from EXPLORE or FRAMEWORK_AGENT; it advances to KERNEL.
+# KERNEL exits automatically when settled with no pending work — the LLM does not self-set a sweep hint.
 ESCALATE_HINT_SKIP_TO_KERNEL: str = "skip_to_kernel"
 ESCALATE_HINT_SKIP_TO_SWEEP: str = "skip_to_sweep"
 ESCALATE_HINT_SKIP_TO_CLOSE: str = "skip_to_close"
@@ -126,6 +126,7 @@ def resolve_graded_comparison(
         VERDICT_REVERT,
         axis_of,
         holds_within_band,
+        latency_veto_reason,
         output_tput_of,
         perf_snapshot_from_mapping,
         resolve_grading_anchor_perf,
@@ -135,6 +136,10 @@ def resolve_graded_comparison(
     from hyperloom.inference_optimizer.grading import resolved_grading
 
     on_intvty, noise_pct = resolved_grading(state)
+    # The session's latency ceiling vetoes a candidate the gain gates would KEEP, on whichever axis graded it. A
+    # candidate that already lost carries no veto, so the ledger names the gate that actually refused it.
+    budget_ms = float(getattr(state, "latency_budget_ms", 0.0))
+    observed_ms = measurement.get("e2el_mean_ms") if isinstance(measurement, Mapping) else None
     degrade_reason = ""
     if on_intvty:
         if anchor_perf is not None:
@@ -158,13 +163,15 @@ def resolve_graded_comparison(
                 and guards_hold
                 and rounds_are_comparable(cand_perf, ref_perf)
             )
+            sla_veto = latency_veto_reason(observed_ms, budget_ms) if keep else ""
             return GradedComparison(
                 objective=GRADED_INTVTY_P50,
                 candidate=axis_of(cand_perf, GRADED_INTVTY_P50),
                 reference=axis_of(ref_perf, GRADED_INTVTY_P50),
-                verdict=VERDICT_KEEP if keep else VERDICT_REVERT,
+                verdict=VERDICT_KEEP if keep and not sla_veto else VERDICT_REVERT,
                 tput_candidate=total_tput_of(cand_perf),
                 tput_reference=total_tput_of(ref_perf),
+                veto_reason=sla_veto,
             )
         degrade_reason = reason or "candidate_axes_missing"
 
@@ -182,12 +189,14 @@ def resolve_graded_comparison(
         verdict = VERDICT_REVERT
     else:
         verdict = VERDICT_KEEP if gain is not None and gain >= keep_threshold_pct else VERDICT_REVERT
+    sla_veto = latency_veto_reason(observed_ms, budget_ms) if verdict == VERDICT_KEEP else ""
     return GradedComparison(
         objective=GRADED_OUTPUT,
         candidate=candidate,
         reference=reference,
-        verdict=verdict,
+        verdict=VERDICT_REVERT if sla_veto else verdict,
         degrade_reason=degrade_reason,
+        veto_reason=sla_veto,
     )
 
 
@@ -272,6 +281,9 @@ _DEFAULT_LAST_FAILURES = 30
 
 # Lifecycle-event log cap (fires at every step boundary, so generous but bounded).
 _LIFECYCLE_CAP = 500
+
+# Experience KB injection log cap (orchestration and specialist rows share it).
+_KB_INJECTIONS_CAP = 20
 
 # roofline_snapshots history cap (record_trace_analyze).
 _ROOFLINE_SNAPSHOTS_CAP = 50
@@ -363,6 +375,11 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     benchmark_mode: str = ""
     # Generation counter for AgentX measurements.
     agentx_epoch: int = 0
+    # Which AgentX client measured this session: "aiperf" or "mlperf". Empty on
+    # sessions that predate the field; resume treats those as aiperf. Compared
+    # on resume so the two workloads cannot anchor each other without bumping
+    # the measurement epoch (which would invalidate unchanged aiperf sessions).
+    agentx_backend: str = ""
     # The grading configuration this session was seeded with: {"objective": GRADED_INTVTY|GRADED_OUTPUT,
     # "noise_pct": float}. Recorded rather than re-derived because the derivation reads HYPERLOOM_PERF_METRIC /
     # HYPERLOOM_PERF_NOISE_PCT, and a resume is a new process: a shell that lost the variable would flip the axis
@@ -375,8 +392,13 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     conc_sweep_concs: list[int] = field(default_factory=list)
     # Total wall-clock budget (s) for conc_sweep. 0 disables the gate.
     conc_sweep_total_budget_sec: int = 9000
-    target_summary: str = ""
     baseline_tput: float = 0.0
+    # Ceiling on mean end-to-end latency (ms) from ``--max-latency-ms``; 0.0 leaves KEEP behaviour unchanged. The
+    # only copy of the budget: it is written once at launch and archived with the session, so a resume restores it.
+    latency_budget_ms: float = 0.0
+    # The GPU power settings the session is measured under: {"declared": {power_cap_w, perf_level}, "observed":
+    # {gpu: {power_cap_w, perf_level}}}. Read at launch and asserted on resume; never set by the optimizer.
+    gpu_power_settings: dict[str, Any] = field(default_factory=dict)
     # AgentX corpus shape: written at seed from canonical constants, overwritten with measured values after every
     # AgentX measurement. Read by semantic consumers (prompts, manifest, reports) instead of the inert state.isl /
     # state.osl placeholders. Absent on synthetic sessions.
@@ -384,9 +406,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # Baseline AgentX perf snapshot: the slow-tail e2e_norm_intvty_p90 objective plus total_throughput and the
     # reported axes the summary renders.
     baseline_perf: dict[str, Any] = field(default_factory=dict)
-    # Internal-only baseline cold+hot double-run switch; default-on keeps the optimisation phase warm-decision
-    # apples-to-apples with the baseline measurement basis.
-    baseline_double_run: bool = True
     baseline_accuracy: float = 0.0
     # ``--no-eval``: no accuracy eval anywhere.
     eval_disabled: bool = False
@@ -458,7 +477,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     reference_envs: dict[str, str] = field(default_factory=dict)
     reference_launch_controls: dict[str, Any] = field(default_factory=dict)
     reference_model: str = ""
-    reference_source: str = ""
     # Operator launch shape, persisted so a bare --resume serves the same contract.
     operator_server_args: str = ""
     # ``--extra-env NAME=VALUE`` pins.
@@ -475,10 +493,9 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     nodes: int = 1
     # Per-agent Unix timestamp of the most recent completed reactor pass.
     agent_last_active: dict[str, float] = field(default_factory=dict)
-    # Warm-recipe replay gates (``--no-warm-replay`` / ``--warm-replay-min-*``).
+    # Warm-recipe replay gates (``--no-warm-replay`` / ``--warm-replay-min-confidence``).
     warm_replay_enabled: bool = True
     warm_replay_min_confidence: float = 0.7
-    warm_replay_min_reproduce_pct: float = 0.8
     # Full accepted configuration stack across action families; current_best keeps the materialized full args/env.
     optimization_stack: list[dict[str, Any]] = field(default_factory=list)
     # Index-aligned with ``optimization_stack``: per-entry incremental gain pct; missing => None.
@@ -495,7 +512,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     validated_recipe_generation: int = 0
     # Resume sentinels.
     pending_integrate: dict[str, Any] = field(default_factory=dict)
-    resume_pending_revalidation: bool = False
     # A GEAK e2e candidate with a self-reported win not yet confirmed by a main-flow rebench; kept OUT of current_best
     # / optimization_stack / the headline gain until validated.
     geak_pending: dict[str, Any] = field(default_factory=dict)
@@ -517,7 +533,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     close_sequence_done: bool = False
     # Auto-roofline gate (optimisation-phase entry): pending roofline task_id; blocks first-round specialist dispatch until snapshot lands.
     auto_roofline_pending_task_id: str = ""
-    current_action: str = ""
     crash_count: int = 0
     # Unix timestamps of recent crashes (bounded), used for the trailing-window emergency-stop rate so old crashes age
     # out instead of accumulating forever.
@@ -532,7 +547,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # ``0.0`` means unset or unbounded.
     elapsed_charged_sec: float = 0.0
     leg_anchor_unix: float = 0.0
-    budget_extensions: list[dict[str, Any]] = field(default_factory=list)
     # Wall-clock seconds spent in post-deadline teardown, keyed by step.
     teardown_timings_sec: dict[str, float] = field(default_factory=dict)
     # Operator's ``--closing-grace-sec``; ``None`` derives it from max_minutes.
@@ -552,8 +566,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     policy_denial_streak: dict[str, int] = field(default_factory=dict)
     # Server EXTRA_SGLANG_ARGS in effect when last_profile_trace was captured; identical args means the same trace.
     last_profile_args: str = ""
-    # Per-kernel GPU time breakdown JSON from the most recent profile.
-    last_profile_kernel_breakdown: str = ""
     # Merged host-side rewrite evidence document from the most recent profile (see ``_framework_rewrite_evidence``).
     last_framework_rewrite_evidence: str = ""
     # Why the field above is empty, when it is. "No candidates" and "the probe never ran" both render as no evidence,
@@ -596,8 +608,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     framework_agent_empty_discoveries: int = 0
     # Consecutive FRAMEWORK_AGENT phase completions that discovered zero candidates (empty_discovery).
     framework_consecutive_empty_discoveries: int = 0
-    # Default True: FRAMEWORK pump dispatches a write-capable serving_specialist per candidate alongside diff-only track. False restores diff-only.
-    framework_agent_authoring_enabled: bool = True
     # Default True: when PR discovery is empty/exhausted (or the ranker prefers it), the FRAMEWORK pump dispatches a
     # candidate-free authoring specialist that authors a throughput patch from the live source + profile evidence
     # instead of skipping the phase.
@@ -677,8 +687,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # Per-kb_anchor coverage counters: config-arm rounds since a specialist was dispatched / since a KEEP landed.
     rounds_since_last_specialist: dict[str, int] = field(default_factory=dict)
     rounds_since_last_keep: dict[str, int] = field(default_factory=dict)
-    # last specialist task snapshot (parity with other ``last_<action>`` mirrors).
-    last_specialist: dict[str, Any] = field(default_factory=dict)
     # Patch verdict ledger keyed by review subject (a specialist task_id, or a candidate id for a PR pre-screen); Critic must approve/advise before PolicyGate allows the integrate_patch delegate.
     specialist_patch_verdicts: dict[str, str] = field(default_factory=dict)
     # Intervention-mix ledger ({change_type∈{config,code_patch}, action, task_id, ts, delta_pct}); Robustness detects config-only loops.
@@ -699,16 +707,13 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # Static-recon specialist bookkeeping (explore-opt-5 capability A); master switch ``--no-static-recon``.
     static_recon_enabled: bool = True
     static_recon_runs: int = 0
-    # Research-lane capacity locked at session start; Coordinator-only.
+    # Research-lane capacity locked at session start (core field; PolicyGate denies mid-session mutation).
     research_lane_capacity: int = 1
     # GPU pool capacity for needs_gpu specialists (0 disables); locked at session start.
     gpu_specialist_capacity: int = 0
     # escalate_strategy_change carry-over: Coordinator writes validated next_action_hint here for compute_next_phase, then clears it either by consuming it (drove a transition) or discarding it (an unrelated transition fired while it was pending).
     pending_escalate_hint: str = ""
-    # last hint that actually drove a phase transition (audit only) for the breakdown.
-    last_consumed_escalate_hint: str = ""
-    last_consumed_escalate_hint_ts: str = ""
-    # last hint thrown away by an unrelated transition, never acted on (audit only) for the breakdown. Distinct from last_consumed_escalate_hint: that field means "this drove a transition", which a discarded hint never did.
+    # last hint thrown away by an unrelated transition, never acted on (audit only) for the breakdown.
     last_discarded_escalate_hint: str = ""
     last_discarded_escalate_hint_ts: str = ""
     # per-phase plateau threshold overrides locked at session start (CLI flags); empty => library defaults.
@@ -735,11 +740,9 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
 
     # Monotonic Coordinator tick counter; stable anchor for plateau/phase budget math.
     tick: int = 0
-    # Percent improvement still needed to reach the objective (0.0 => none/reached); fact for the "Mission progress" line, not a priority.
-    target_gap_pct: float = 0.0
 
     # Phase state machine fields ``phase`` — run-level pipeline phase
-    # (PRELUDE/FRAMEWORK_AGENT/KERNEL_AGENT/SWEEP/CLOSE); Coordinator-only.
+    # (PRELUDE/FRAMEWORK_AGENT/KERNEL_AGENT/SWEEP/CLOSE); Coordinator-only writer.
     phase: str = ""
     # ISO UTC timestamp the current phase was entered (breakdown.phase_segments + budget judge).
     phase_started_ts: str = ""
@@ -751,7 +754,11 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     phase_elapsed_totals: dict[str, float] = field(default_factory=dict)
     # Append-only operator-facing lifecycle log.
     lifecycle: list[dict[str, Any]] = field(default_factory=list)
-    # Wall-clock budget percentages per phase (from CLI flags/defaults); persisted for resume. Empty => library defaults.
+    # Experience KB blocks injected into FRAMEWORK_AGENT orchestration and specialist prompts: {tick, phase, ts,
+    # consumer, domain, gap_canonical_id, read_id, experience_ids, experiences, prompt_block}. Coordinator-only writer.
+    experience_kb_injections: list[dict[str, Any]] = field(default_factory=list)
+    # Wall-clock budget share per phase: seeded once at phase init from CLI flags/defaults with disabled phases' shares
+    # redistributed, raised by ``extend_*_budget`` hints, kept on resume unless a --*-pct flag is given.
     phase_budget_pct: dict[str, float] = field(default_factory=dict)
     # Cyclic phase machine macro-cycle counter (cycle 0 is the first pass; each SWEEP→FRAMEWORK_AGENT loopback
     # increments it).
@@ -785,19 +792,11 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # Model-facing advisory context built by ``recipe_kb_t0``.
     warm_start_context: dict[str, Any] = field(default_factory=dict)
 
-    # structured gaps ledger: dedup'd unresolved bottlenecks (Coordinator-only _refresh_gaps); dedup keyed by canonical_id, attempts capped 20/gap, list capped _GAPS_MAX_ENTRIES.
+    # structured gaps ledger: dedup'd unresolved bottlenecks (Coordinator-only refresh_gaps); dedup keyed by canonical_id, attempts capped 20/gap, list capped _GAPS_MAX_ENTRIES.
     gaps: list[dict[str, Any]] = field(default_factory=list)
 
-    # Orchestration working memory — macro-cycle handoff summary; only ``next_cycle_directive`` is read back (into the next cycle's CYCLE DIRECTIVE section), the rest is run-report evidence. Coordinator-only writer.
+    # The SWEEP handoff turn's result: ``next_cycle_directive``, its ``for_cycle``, and ``parse_error``. Coordinator-only writer.
     orchestration_memory: dict[str, Any] = field(default_factory=dict)
-
-    # Bounded ring (cap 10) of prior ``orchestration_memory`` records, so a cycle that captures nothing usable can fall
-    # back to an earlier one.
-    orchestration_memory_history: list[dict[str, Any]] = field(default_factory=list)
-
-    # Bounded ring (cap 10) of per-macro-cycle directives injected into the orchestration system prompt; entries:
-    # {cycle, directive, source, ts}.
-    cycle_directive_history: list[dict[str, Any]] = field(default_factory=list)
 
     # Non-field instance attr (set in load_or_init / save): session dir for breakdown instrumentation.
     _session_dir = None
@@ -811,13 +810,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     #: ``serving_config`` is excluded here too: it has its own comparison, which
     #: comes from ``current_best`` on both sides and is therefore symmetric.
     #:
-    #: ``ClassVar`` because a bare annotation would make this constant a
-    #: dataclass field: it would be written into every ``state.json`` and
-    #: accepted back from disk. Neither of those changes behaviour while the
-    #: sole reader goes through ``cls``, which is exactly what makes it worth
-    #: closing -- it decides trace staleness, so an instance-scoped read added
-    #: later would let a stored value govern whether a profile is reused or
-    #: re-run.
+    #: ClassVar so it never serialises into state.json.
     PROFILE_WORKLOAD_IDENTITY_KEYS: ClassVar[tuple[str, ...]] = (
         "benchmark_mode",
         "framework",
@@ -1053,8 +1046,26 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         return inst
 
     @classmethod
+    def _validate_resume_fields(cls, raw: Mapping[str, Any]) -> None:
+        """Reject damaged crash evidence before migrating a persisted state."""
+        if "crash_count" in raw:
+            count = raw["crash_count"]
+            if not isinstance(count, int) or isinstance(count, bool):
+                raise ValueError(f"state.json.crash_count must be int, got {type(count).__name__}")
+        if "crash_timestamps" in raw:
+            timestamps = raw["crash_timestamps"]
+            if not isinstance(timestamps, list):
+                raise ValueError(f"state.json.crash_timestamps must be list, got {type(timestamps).__name__}")
+            for index, timestamp in enumerate(timestamps):
+                if not isinstance(timestamp, (int, float)) or isinstance(timestamp, bool):
+                    raise ValueError(
+                        f"state.json.crash_timestamps[{index}] must be a number, got {type(timestamp).__name__}"
+                    )
+
+    @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "SharedState":
-        """Construct state from a mapping."""
+        """Construct state from a mapping, refusing invalid crash evidence with ``ValueError``."""
+        cls._validate_resume_fields(raw)
         # Filter to known fields; unknown keys dropped, missing keys default.
         known = {f.name for f in fields(cls)}
         filtered = {k: v for k, v in raw.items() if k in known}
@@ -1431,9 +1442,17 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         if not hint:
             return ""
         self.pending_escalate_hint = ""
-        self.last_consumed_escalate_hint = hint
-        self.last_consumed_escalate_hint_ts = now_iso()
         return hint
+
+    def bump_phase_budget(self, hint: str) -> None:
+        """Raise the phase share an ``extend_*_budget`` hint names."""
+        from ..phases.machine_state import PHASE_FRAMEWORK_AGENT, PHASE_KERNEL_AGENT, apply_escalate_budget_bump
+
+        phase = {
+            ESCALATE_HINT_EXTEND_EXPLORE_BUDGET: PHASE_FRAMEWORK_AGENT,
+            ESCALATE_HINT_EXTEND_KERNEL_BUDGET: PHASE_KERNEL_AGENT,
+        }[hint]
+        self.phase_budget_pct = apply_escalate_budget_bump(self.phase_budget_pct, phase=phase)
 
     def discard_pending_escalate_hint(self) -> str:
         """Pop the pending hint because an unrelated transition fired without acting on it; returns cleared hint."""
@@ -1444,6 +1463,15 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         self.last_discarded_escalate_hint = hint
         self.last_discarded_escalate_hint_ts = now_iso()
         return hint
+
+    def accepted_baseline_script(self) -> str | None:
+        """Benchmark script belonging to the accepted baseline anchor, or None."""
+        if self.baseline_benchmark_script is not None:
+            return self.baseline_benchmark_script or None
+        if self.last_baseline.get("decision") != "promoted":
+            return None
+        fingerprint = (self.last_baseline.get("extras") or {}).get("fingerprint") or {}
+        return str(fingerprint.get("benchmark_script") or "").strip() or None
 
     def current_top_bottleneck(self) -> str:
         """Return the latest roofline snapshot's ``top_bottleneck`` (\"\" when none)."""
@@ -1489,6 +1517,46 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             self.clear_bottleneck_switch()
             return True
         return False
+
+    def record_experience_kb_injection(
+        self,
+        *,
+        consumer: str,
+        read_id: str,
+        experience_ids: list[str],
+        experiences: list[dict[str, Any]],
+        prompt_block: str,
+        domain: str = "",
+        gap_canonical_id: str = "",
+    ) -> bool:
+        """Record an injected Experience KB block.
+
+        Orchestration re-reads every tick, so its row is skipped when it injects the same Experiences as the last
+        orchestration row; every specialist dispatch is its own injection and always records.
+        """
+        if consumer == "orchestration":
+            last = next(
+                (row for row in reversed(self.experience_kb_injections) if row.get("consumer") == consumer),
+                {},
+            )
+            if sorted(last.get("experience_ids") or []) == sorted(experience_ids):
+                return False
+        self.experience_kb_injections.append(
+            {
+                "tick": int(self.tick),
+                "phase": self.phase,
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "consumer": consumer,
+                "domain": domain,
+                "gap_canonical_id": gap_canonical_id,
+                "read_id": read_id,
+                "experience_ids": list(experience_ids),
+                "experiences": [dict(item) for item in experiences],
+                "prompt_block": prompt_block,
+            }
+        )
+        del self.experience_kb_injections[:-_KB_INJECTIONS_CAP]
+        return True
 
     def merge_lifecycle_events(self, incoming: Any) -> None:
         """Union ``incoming`` lifecycle rows into this state, ordered by timestamp."""
@@ -1553,16 +1621,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         }
         self.last_tick_exception = entry
         return entry
-
-    AGENT_UPDATE_FIELDS: ClassVar[dict[str, type]] = {
-        "current_action": str,
-        "target_summary": str,
-    }
-
-    def apply_agent_update(self, changes: Mapping[str, Any]) -> None:
-        """Write the agent-authored fields named in ``changes``; PolicyGate has already admitted every key."""
-        for key, value in changes.items():
-            setattr(self, key, value)
 
     def _resolve_kernel_patch_identity(
         self,
@@ -2205,6 +2263,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
                 # TraceLens kernel_category bucket ("" when absent).
                 "kernel_category": entry.get("kernel_category") or "",
                 "gpu_pct": entry.get("gpu_pct"),
+                "tracelens_pitem_rank": entry.get("tracelens_pitem_rank"),
+                "impact_score": entry.get("impact_score"),
                 "bottleneck": entry.get("bottleneck"),
                 "bound_type": entry.get("bound_type"),
                 "arithmetic_intensity": arithmetic_intensity,
@@ -2522,15 +2582,11 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             return 0.0
         return max(0.0, now_dt.timestamp() - started) / 60.0
 
-    def extend_budget_minutes(self, minutes: float, *, reason: str = "") -> float:
-        """Grant more wall-clock budget to this session, on the record.
-
-        The grant raises :attr:`max_minutes` and is appended to
-        :attr:`budget_extensions`; elapsed time is untouched.
+    def extend_budget_minutes(self, minutes: float) -> float:
+        """Grant more wall-clock budget to this session.
 
         Args:
             minutes: Minutes to add; non-positive is a no-op.
-            reason: Operator's stated reason, recorded with the grant.
 
         Returns:
             float: The session's budget in minutes after the grant; ``0.0``
@@ -2543,14 +2599,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             # Granting an unbounded session a budget would bound it.
             return 0.0
         self.max_minutes = int(float(self.max_minutes) + added)
-        self.budget_extensions.append(
-            {
-                "granted_unix": float(time.time()),
-                "minutes": added,
-                "max_minutes_after": int(self.max_minutes),
-                "reason": reason,
-            }
-        )
         return float(self.max_minutes)
 
     def remaining_minutes(self, *, now: datetime | None = None) -> float | None:
