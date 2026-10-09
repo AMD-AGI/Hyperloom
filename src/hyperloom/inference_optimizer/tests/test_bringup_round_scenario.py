@@ -166,7 +166,7 @@ def _lane(session: Path, tasks: TaskRegistry, rounds: RoundStore, launch_log: st
         session_dir=str(session),
         run_deadline=None,
         warm_specialist_params=_noop,
-        record_observation=_noop,
+        bus=types.SimpleNamespace(record_observation=_noop),
         action_registry=ACTION_CATALOGUE,
         state=types.SimpleNamespace(pending_proposals={}),
         _read_enablement_source_context=lambda _sig: "",

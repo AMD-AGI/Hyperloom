@@ -1126,7 +1126,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             result_dict = result.result if isinstance(result.result, dict) else {}
             done_payload = result_dict.get("specialist_done") or {}
             if isinstance(done_payload, dict):
-                await self._coord.writeback.record_specialist_result(
+                await self._coord.specialist_dispatch.record_specialist_result(
                     task=task,
                     done_payload=done_payload,
                     source=(f"{SPECIALIST_FROM_AGENT_PREFIX}{task.task_id}"),
@@ -1200,7 +1200,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         # write. replay_warm_recipe is excluded (verification, not a fact).
         if task.kind != "replay_warm_recipe":
             try:
-                await self._coord.writeback.fact_write_hook(
+                await self._coord.recipe_journal.fact_write_hook(
                     task=task,
                     result=result,
                     verdict=verdict,
@@ -1218,7 +1218,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         # explore-round gap update: append per-variant KEEP/REVERT, then re-run the global refresh.
         if task.kind == "explore":
             result_dict = result.result if isinstance(result.result, dict) else {}
-            workload_id = self._coord.proposals.workload_canonical_id()
+            workload_id = self._coord.recipe_journal.workload_canonical_id()
             self._coord.gap_refresh.record_explore_round_gaps(
                 task=task,
                 result=result_dict,
@@ -1441,7 +1441,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             task.kind,
             denied,
         )
-        await self._coord.writeback.record_observation(
+        await self.bus.record_observation(
             "coordinator",
             "observation",
             {

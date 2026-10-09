@@ -83,7 +83,7 @@ def coord(tmp_path: Path):
     c.tasks = _StubTaskRegistry()
     c.knowledge_plane = None
     c.knowledge_plane = KnowledgePlane(recipe_kb=None)
-    c.writeback.record_observation = AsyncMock()  # type: ignore[method-assign]
+    c.bus = SimpleNamespace(record_observation=AsyncMock())
     return c
 
 
@@ -128,7 +128,7 @@ async def test_record_specialist_result_non_empty_proposal_set(coord):
     coord.tasks.register(task)
 
     payload = _done_payload(domain="serving_specialist")
-    await coord.writeback.record_specialist_result(
+    await coord.specialist_dispatch.record_specialist_result(
         task=task,
         done_payload=payload,
         source=f"{SPECIALIST_FROM_AGENT_PREFIX}task-1",
@@ -157,7 +157,7 @@ async def test_record_specialist_result_enqueues_build_request(coord):
         "ref": "v0.1.15.post2",
     }
 
-    await coord.writeback.record_specialist_result(
+    await coord.specialist_dispatch.record_specialist_result(
         task=task,
         done_payload=payload,
         source=f"{SPECIALIST_FROM_AGENT_PREFIX}build-spec",
@@ -176,7 +176,7 @@ async def test_record_specialist_result_empty_proposal_set(coord):
     coord.tasks.register(task)
 
     payload = _done_payload(no_proposals=True, domain="kernel_switch_specialist")
-    await coord.writeback.record_specialist_result(
+    await coord.specialist_dispatch.record_specialist_result(
         task=task,
         done_payload=payload,
         source=f"{SPECIALIST_FROM_AGENT_PREFIX}task-empty-1",
@@ -196,12 +196,12 @@ async def test_record_specialist_result_idempotent_on_round_id(coord):
     )
     coord.tasks.register(task)
 
-    await coord.writeback.record_specialist_result(
+    await coord.specialist_dispatch.record_specialist_result(
         task=task,
         done_payload=_done_payload(),
         source=f"{SPECIALIST_FROM_AGENT_PREFIX}t-resume",
     )
-    await coord.writeback.record_specialist_result(
+    await coord.specialist_dispatch.record_specialist_result(
         task=task,
         done_payload=_done_payload(proposals=[]),
         source=f"{SPECIALIST_FROM_AGENT_PREFIX}t-resume",
@@ -211,27 +211,6 @@ async def test_record_specialist_result_idempotent_on_round_id(coord):
     assert len(state.specialist_rounds) == 1
     assert state.specialist_rounds[0]["proposals_total"] == 0
     assert state.specialist_rounds[0]["round_id"] == "round-7"
-
-
-# 3. _task_id_from_specialist_source helper
-def test_task_id_from_specialist_source_extracts_prefix():
-    assert (
-        SpecialistDispatchCollaborator._task_id_from_specialist_source(
-            "specialist:abc-123",
-        )
-        == "abc-123"
-    )
-
-
-def test_task_id_from_specialist_source_returns_empty_for_bad():
-    assert SpecialistDispatchCollaborator._task_id_from_specialist_source("orchestration") == ""
-    assert SpecialistDispatchCollaborator._task_id_from_specialist_source("") == ""
-    assert (
-        SpecialistDispatchCollaborator._task_id_from_specialist_source(
-            "unknown",
-        )
-        == ""
-    )
 
 
 # 4. build_specialist_round_entry — output shape

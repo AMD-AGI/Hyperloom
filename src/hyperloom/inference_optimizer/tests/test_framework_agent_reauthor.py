@@ -215,7 +215,7 @@ async def test_authoring_integrate_patch_reauthors_and_records_old_task(
             }
         )
 
-    coord.writeback.record_observation = _rec_obs  # type: ignore[method-assign]
+    coord.bus.record_observation = _rec_obs  # type: ignore[method-assign]
     coord.tasks.get = _get  # type: ignore[method-assign]
 
     pending = PendingProposal(

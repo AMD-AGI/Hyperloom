@@ -57,7 +57,7 @@ def promotion(tmp_path, monkeypatch, request):
     monkeypatch.setenv("HYPERLOOM_PERF_NOISE_PCT", "2")
     coord = Coordinator.__new__(Coordinator)
     coord.session_dir = tmp_path
-    coord.bus = SimpleNamespace(append_and_seq=AsyncMock())
+    coord.bus = SimpleNamespace(append_and_seq=AsyncMock(), record_observation=AsyncMock())
     coord.shared_state = SharedState(
         framework="sglang",
         benchmark_mode="synthetic",
