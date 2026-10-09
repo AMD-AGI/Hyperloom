@@ -597,6 +597,7 @@ with its result, the KB that sent it, and its request id, in the database's
 **Log rotation and stopping.** A workspace's `service.log` past 8 MiB is kept
 as `service.log.1`, replacing the one kept before, when the next service
 starts. `SIGTERM` stops a service taking requests and lets those in flight
-finish for up to 25 seconds. It holds `service.lock` until it exits, so a
-service restarted by hand on the same home starts once the old process is
-gone, not once its port closes.
+finish for up to 25 seconds. A service keeping its database in SQLite holds
+`service.lock` until it exits, so a replacement started by hand on the same
+home has to wait for the old process to exit, not only for its port to close:
+one started earlier exits at once, naming the old process's pid and port.
