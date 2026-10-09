@@ -351,6 +351,34 @@ def _record_review_outcome(router: Any, pending: Any, **outcome: Any) -> None:
 class IntentRouter(CoordinatorCollaborator):
     """Validates and dispatches agent-emitted intents on behalf of a Coordinator."""
 
+    def _resolve_primatune_mandate(self, params: dict[str, Any]) -> None:
+        """Swap a queued predictor mandate in for the ``primatune_mandate_id`` that cites it.
+
+        Side-effecting: rewrites ``task_description`` and the scope, mode,
+        provenance and lever params in place. An unknown id is left alone, so the
+        dispatch proceeds as the ordinary specialist it otherwise is.
+        """
+        from ..lever import LEVER_SOURCE_PATCH
+        from ..predictor.mandate import find_mandate
+        from ..predictor.rows import PROVENANCE
+
+        mandate_id = str(params.get("primatune_mandate_id") or "").strip()
+        mandate = find_mandate(self.shared_state, mandate_id) if mandate_id else ""
+        if not mandate:
+            if mandate_id:
+                log.warning("specialist dispatch cites unknown primatune_mandate_id=%r", mandate_id)
+            return
+        params.update(
+            task_description=mandate,
+            scope="freeform",
+            mode="patch",
+            provenance=PROVENANCE,
+            lever_kind=LEVER_SOURCE_PATCH,
+        )
+        # A domain would relabel the patch specialist:<domain> on its way to integrate_patch.
+        params.pop("domain", None)
+        params.pop("tags", None)
+
     def _stamp_specialist_owner(self, params: dict[str, Any]) -> str:
         """Freeze patch ownership when a specialist task is created."""
         lever = patch_lever_kind(params)
@@ -844,6 +872,8 @@ class IntentRouter(CoordinatorCollaborator):
                 )
                 return
         if action_name == "specialist":
+            # Before the ownership stamp: a resolved mandate sets the lever the stamp would otherwise derive.
+            self._resolve_primatune_mandate(params)
             # Capture proposal ownership at dispatch.
             self._stamp_specialist_owner(params)
         # idempotency_key is top-level per schema; strip a nested compat alias.
@@ -963,6 +993,11 @@ class IntentRouter(CoordinatorCollaborator):
             )
             return
         self.shared_state.reset_policy_denial_streak(action_name)
+        if action_name == "specialist":
+            from ..predictor.mandate import mark_mandate_consumed
+
+            # Only once a task exists, so a dispatch that bailed out above leaves the mandate on offer.
+            mark_mandate_consumed(self.shared_state, params.get("primatune_mandate_id"), task.task_id)
         from .proposals import record_config_proposal
 
         record_config_proposal(
