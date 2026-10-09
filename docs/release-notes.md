@@ -60,6 +60,13 @@ it.
 
 ### Changed
 
+- **Bump validated SGLang stack to 0.5.21 (ROCm 10 docker).** Updates
+  `SGLANG_REF`, `SGLANG_PRETEND_VERSION`, recommended
+  `lmsysorg/sglang-rocm:v0.5.21-rocm10-*` image tags, `models.tsv`, and the
+  quick-start `Dockerfile`. **Upgrade note:** move from
+  `v0.5.20-rocm10-mi30x|mi35x-20260920` to
+  `v0.5.21-rocm10-mi30x|mi35x-20261008` (or match `SGLANG_REF` on bare metal).
+
 - **A malformed environment value stops the run instead of being silently
   replaced by the default.** `INFERENCE_OPTIMIZER_CYCLE_HOURS`,
   `INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD`,
@@ -156,7 +163,7 @@ Installation prerequisites move with the stack:
   SGLang >= 0.5.18 profiles through TraceLens `kernel_shape_tool` under
   `TRACELENS_ROOT` instead of git-applied roofline patches.
 - The recommended SGLang image is
-  `lmsysorg/sglang-rocm:v0.5.21-rocm10-mi30x|mi35x-20261008`, and the vLLM image
+  `lmsysorg/sglang-rocm:v0.5.20-rocm10-mi30x|mi35x-20260920`, and the vLLM image
   is `rocm/vllm:rocm10.0.0_ubuntu24.04_py3.14_pytorch_2.12.0_vllm_0.27.0`.
 - Bare-metal vLLM accepts ROCm 7.2.x (the `0.29.0+rocm723` wheel) or ROCm 10
   (a source build of `VLLM_SOURCE_REF`); any other ROCm stack is rejected, and
@@ -217,13 +224,6 @@ Report consumers have to follow these field changes; no aliases are kept:
   a recording error as `interrupted`.
 
 ### Other changes
-
-- **Bump validated SGLang stack to 0.5.21 (ROCm 10 docker).** Updates
-  `SGLANG_REF`, `SGLANG_PRETEND_VERSION`, recommended
-  `lmsysorg/sglang-rocm:v0.5.21-rocm10-*` image tags, `models.tsv`, and the
-  quick-start `Dockerfile`. **Upgrade note:** move from
-  `v0.5.20-rocm10-mi30x|mi35x-20260920` to
-  `v0.5.21-rocm10-mi30x|mi35x-20261008` (or match `SGLANG_REF` on bare metal).
 
 - **Bump validated SGLang stack to 0.5.20 (ROCm 10 docker).** Updates
   `SGLANG_REF`, `SGLANG_PRETEND_VERSION`, recommended
