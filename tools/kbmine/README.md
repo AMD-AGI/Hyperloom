@@ -12,7 +12,7 @@ optimizer: nothing in `src/` imports it, it adds no step to the run loop, and it
 changes neither the Recipe KB schema nor what a session publishes. It only reads
 what the Recipe KB and Pulse already hold.
 
-Two questions, two sources, one report:
+Four questions, two sources, one report:
 
 | question | source | why that source |
 | --- | --- | --- |
