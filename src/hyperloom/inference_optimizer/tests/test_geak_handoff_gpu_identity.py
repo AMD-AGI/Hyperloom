@@ -38,14 +38,13 @@ async def _write_handoff(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state:
     monkeypatch.setenv("FRAMEWORK", "vllm")
     monkeypatch.delenv("GPU_TYPE", raising=False)
 
-    def stop_after_handoff(_name: str) -> Path:
+    def stop_after_handoff() -> None:
         raise RuntimeError("stop after handoff write")
 
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
-        stop_after_handoff,
-    )
-    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
+    # The timeline is the first thing the GEAK phase touches once handoff.json is on disk.
+    monkeypatch.setattr(coord.phase_kernel, "timeline", stop_after_handoff)
+    with pytest.raises(RuntimeError, match="stop after handoff write"):
+        await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
     return json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
 
 
