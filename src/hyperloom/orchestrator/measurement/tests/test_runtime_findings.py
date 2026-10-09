@@ -74,6 +74,70 @@ def test_traceback_subject_is_exception_class_behind_process_prefix(tmp_path):
     assert traceback["evidence"] == "RuntimeError: HIP error: invalid device function"
 
 
+def test_traceback_subject_behind_vllm_logger_prefix(tmp_path):
+    prefix = "(APIServer pid=29434) ERROR 09-22 15:43:00 [async_llm.py:819]"
+    log = (
+        f"{prefix} AsyncLLM output_handler failed.\n"
+        f"{prefix} Traceback (most recent call last):\n"
+        f'{prefix}   File "/opt/hyperloom/vllm/vllm/v1/engine/core_client.py", line 1105, in get_output_async\n'
+        f"{prefix}     raise self._format_exception(outputs) from None\n"
+        f"{prefix} vllm.v1.engine.exceptions.EngineDeadError: EngineCore encountered an issue.\n"
+        "(APIServer pid=29434) INFO:     Shutting down\n"
+    )
+    report = scan_server_log(_write(tmp_path, log), "vllm")
+
+    assert _detected(report) == [("runtime.traceback", "vllm.v1.engine.exceptions.EngineDeadError", 1)]
+    traceback = next(f for f in report["findings"] if f["rule_id"] == "runtime.traceback")
+    assert traceback["evidence"] == "vllm.v1.engine.exceptions.EngineDeadError: EngineCore encountered an issue."
+
+
+def test_traceback_subject_behind_torch_rank_prefix(tmp_path):
+    prefix = "[rank0]:W0914 19:04:11.578000 74827 torch/_inductor/codecache.py:639] [0/0]"
+    log = (
+        f"{prefix} Failed to pickle cache key\n"
+        f"{prefix} Traceback (most recent call last):\n"
+        f'{prefix}   File "/opt/venv/lib/python3.12/site-packages/torch/_inductor/codecache.py", line 629, in dumps\n'
+        f"{prefix}     self.dump(obj)\n"
+        f"{prefix} RuntimeError: <pybind11 object> is not pickleable\n"
+    )
+    report = scan_server_log(_write(tmp_path, log), "sglang")
+
+    assert _detected(report) == [("runtime.traceback", "RuntimeError", 1)]
+
+
+def test_shutdown_tracebacks_are_not_findings(tmp_path):
+    log = (
+        "[2026-09-14 15:48:56] ERROR:    Exception in ASGI application\n"
+        "Traceback (most recent call last):\n"
+        '  File "/usr/lib/python3.12/asyncio/runners.py", line 194, in run\n'
+        "    return runner.run(main)\n"
+        "SystemExit: 0\n"
+        "\n"
+        "During handling of the above exception, another exception occurred:\n"
+        "\n"
+        "Traceback (most recent call last):\n"
+        '  File "/usr/lib/python3.12/asyncio/tasks.py", line 520, in wait_for\n'
+        "    return await fut\n"
+        "asyncio.exceptions.CancelledError\n"
+        "[2026-09-14 15:48:56] ERROR:    Exception in ASGI application\n"
+    )
+    report = scan_server_log(_write(tmp_path, log), "sglang")
+
+    assert _detected(report) == []
+    assert _statuses(report)["runtime.traceback"] == "not_detected"
+
+
+def test_traceback_without_exception_line_keeps_empty_subject(tmp_path):
+    log = (
+        "Traceback (most recent call last):\n"
+        '  File "/sgl-workspace/sglang/python/sglang/srt/managers/scheduler.py", line 10, in run\n'
+        "[2026-09-14 15:48:56] Scheduler exited unexpectedly\n"
+    )
+    report = scan_server_log(_write(tmp_path, log), "sglang")
+
+    assert _detected(report) == [("runtime.traceback", "", 1)]
+
+
 def test_sglang_capability_and_adjusted_settings(tmp_path):
     log = (
         "[2026-10-09 12:00:00] chunked prefill size is adjusted from 16384 to 8192\n"

@@ -33,9 +33,15 @@ _EVIDENCE_MAX_CHARS = 300
 _LAUNCH_RECORD_FRAMEWORKS = frozenset({"sglang", "vllm"})
 _AITER_MISS_MARKER = "not found tuned config"
 _TRACEBACK_MARKER = "Traceback (most recent call last):"
-#: vLLM multiprocess prefix, e.g. ``(EngineCore_DP0 pid=123) ``.
-_PROCESS_PREFIX_RE = re.compile(r"^\([^)]*pid=\d+\)\s?")
-_EXCEPTION_LINE_RE = re.compile(r"^([A-Za-z_][\w.]*):")
+#: vLLM process, torch ``[rankN]:`` glog and vLLM logger prefixes; one trailing space only, so frames stay indented.
+_LOG_PREFIX_RE = re.compile(
+    r"^(\([^)]*pid=\d+\)\s?)?"
+    r"(\[rank\d+\]:\s?)?"
+    r"([IWEF]\d{4} \d\d:\d\d:\d\d\.\d+ \d+ \S+:\d+\] (\[[^\]]*\] )?)?"
+    r"((DEBUG|INFO|WARNING|ERROR|CRITICAL) \d\d-\d\d \d\d:\d\d:\d\d \[[^\]]+\]\s?)?"
+)
+_EXCEPTION_LINE_RE = re.compile(r"^([A-Za-z_][\w.]*)(?::|$)")
+_SHUTDOWN_EXCEPTIONS = frozenset({"SystemExit", "KeyboardInterrupt", "CancelledError"})
 
 
 @dataclass(frozen=True)
@@ -163,11 +169,14 @@ def _scan_lines(path: str, framework: str, hits: _Hits) -> None:
                 traceback_line = line
                 continue
             if traceback_line:
-                body = _PROCESS_PREFIX_RE.sub("", line)
+                body = _LOG_PREFIX_RE.sub("", line.rstrip("\n"), count=1)
+                if not body or body[0].isspace():
+                    continue
                 exception = _EXCEPTION_LINE_RE.match(body)
-                if exception is not None:
-                    hits.add(_RUNTIME_TRACEBACK, exception.group(1), body)
-                    traceback_line = ""
+                name = exception.group(1) if exception is not None else ""
+                if name.rsplit(".", 1)[-1] not in _SHUTDOWN_EXCEPTIONS:
+                    hits.add(_RUNTIME_TRACEBACK, name, body)
+                traceback_line = ""
     if traceback_line:
         hits.add(_RUNTIME_TRACEBACK, "", traceback_line)
     if missed_shapes:
