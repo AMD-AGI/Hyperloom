@@ -132,6 +132,43 @@ def test_trace_evidence_resolution_filename_has_one_owner(tmp_path: Path) -> Non
     assert str((candidates.parent / SOURCE_RESOLUTION_FILENAME)) in evidence
 
 
+def test_trace_evidence_ends_with_current_best_runtime_findings(tmp_path: Path) -> None:
+    from hyperloom.orchestrator.kernel.forge_handoff import build_trace_evidence_md
+    from hyperloom.orchestrator.measurement.runtime_findings import persist_runtime_findings, scan_server_log
+
+    log = tmp_path / "server.log"
+    log.write_text("WARNING Disabling fuse_rope_kvcache.\n", encoding="utf-8")
+    persist_runtime_findings(scan_server_log(str(log), "sglang"), slot=tmp_path / "slot")
+    state = _state(current_best_measurement={"launch_evidence_path": str(tmp_path / "slot" / "launch_evidence.json")})
+
+    evidence = build_trace_evidence_md(state)
+
+    assert evidence.split("## Runtime Findings\n\n", 1)[1] == (
+        "```text\n"
+        f"runtime findings for {log} [sglang]\n"
+        "- detected [perf_path] feature_disabled fuse_rope_kvcache x1: WARNING Disabling fuse_rope_kvcache.\n"
+        "- not_detected: capability_disabled, engine_adjusted, aiter.tuned_miss, runtime.traceback\n"
+        "```\n"
+    )
+
+
+def test_trace_evidence_runtime_findings_not_available_without_current_best() -> None:
+    from hyperloom.orchestrator.kernel.forge_handoff import build_trace_evidence_md
+
+    evidence = build_trace_evidence_md(_state(current_best_measurement={}))
+
+    assert evidence.split("## Runtime Findings\n\n", 1)[1] == "```text\nnot available\n```\n"
+
+
+def test_opportunity_rules_defer_fallback_paths_and_name_the_bound() -> None:
+    from kernelforge.kernel_rewrite_controller.opportunity_agent import _system_prompt
+
+    prompt = _system_prompt()
+
+    assert "12. Read the Runtime Findings section of trace-evidence.md" in prompt
+    assert "do not\n    publish a rewrite of the fallback implementation" in prompt
+
+
 def test_write_forge_handoff_survives_missing_trace_artifacts(tmp_path: Path) -> None:
     missing_candidates = tmp_path / "missing" / "kernel_candidates.json"
     state = _state(

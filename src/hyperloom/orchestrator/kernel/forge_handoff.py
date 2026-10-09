@@ -14,6 +14,7 @@ from hyperloom.common.io import atomic_write_text
 from hyperloom.common.kernel_source_contract import SOURCE_RESOLUTION_FILENAME
 from hyperloom.inference_optimizer.session.session_paths import forge_handoff_dir
 from hyperloom.orchestrator.kernel.campaign_baseline import campaign_repositories
+from hyperloom.orchestrator.measurement.runtime_findings import render_runtime_findings
 
 WORKLOAD_FILENAME = "workload.md"
 SERVING_CONTEXT_FILENAME = "serving-context.md"
@@ -201,6 +202,10 @@ def build_trace_evidence_md(state: Any) -> str:
                 lines.append(f"- {_display(warning)}")
     else:
         lines.append("- none")
+
+    lines.extend(["", "## Runtime Findings", ""])
+    measurement = getattr(state, "current_best_measurement", None)
+    lines.extend(["```text", render_runtime_findings(measurement) if measurement else "not available", "```"])
     return "\n".join(lines) + "\n"
 
 
