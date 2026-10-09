@@ -229,6 +229,10 @@ def agentx_active(shared_state: Any = None) -> bool:
 def agentx_env_for_conc(conc: int | None = None) -> "Mapping[str, str]":
     """The environment the AgentX derivations read, carrying a rung's own CONC.
 
+    The operator's ``--extra-env`` pins sit over the process environment: they
+    reach the client through ``benchmark.envs``, so every value derived from
+    them has to be derived from them too.
+
     Warmup is ``CANON_WARMUP_PER_LANE`` requests per lane across ``CONC`` lanes,
     so every bound derived from it is linear in the concurrency being measured,
     not in the one the session was launched at.
@@ -237,12 +241,22 @@ def agentx_env_for_conc(conc: int | None = None) -> "Mapping[str, str]":
         conc: The rung's concurrency, or ``None`` to read the session's.
 
     Returns:
-        ``os.environ`` unchanged when no rung concurrency is given, else a copy
-        with ``CONC`` replaced.
+        The process environment under the operator's pins, with ``CONC``
+        replaced when a rung concurrency is given.
     """
-    if not conc or conc <= 0:
-        return os.environ
-    return {**os.environ, "CONC": str(conc)}
+    env = {**os.environ, **_operator_extra_env()}
+    if conc and conc > 0:
+        env["CONC"] = str(conc)
+    return env
+
+
+def _is_agentx_client_key(key: str, env: "Mapping[str, str]") -> bool:
+    """True for a knob :func:`apply_agentx_switch` forwards to the AgentX client."""
+    from hyperloom.common.agentx_workload import BACKEND_ENV, is_mlperf_backend
+
+    if key.startswith("AGENTX_") or key in ("AIPERF_BIN", "WEKA_LOADER_OVERRIDE"):
+        return True
+    return is_mlperf_backend(env) and (key.startswith(("MLPERF_", "AGENTIC_")) or key == BACKEND_ENV)
 
 
 # The 1M-context families that replay the unfiltered corpus; everything else
@@ -533,10 +547,8 @@ def apply_agentx_switch(
     # documents it as a supported knob; without forwarding it only works when
     # the benchmark process happens to inherit the full parent environment,
     # which is exactly the kind of silent difference this path exists to remove.
-    for key, value in os.environ.items():
-        if key.startswith("AGENTX_") or key in ("AIPERF_BIN", "WEKA_LOADER_OVERRIDE"):
-            envs[key] = value
-        if is_mlperf_backend(_agentx_env) and (key.startswith(("MLPERF_", "AGENTIC_")) or key == BACKEND_ENV):
+    for key, value in _agentx_env.items():
+        if _is_agentx_client_key(key, _agentx_env):
             envs[key] = value
     if is_mlperf_backend(_agentx_env):
         envs[BACKEND_ENV] = "mlperf"
@@ -564,7 +576,7 @@ def apply_agentx_switch(
         )
     # Preserve the client's own warmup bound; it does not enlarge the benchmark cap.
     _grace = agentx_warmup_grace_sec(_agentx_env)
-    _raw_grace = (os.environ.get("AGENTX_WARMUP_GRACE_PERIOD") or "").strip()
+    _raw_grace = (_agentx_env.get("AGENTX_WARMUP_GRACE_PERIOD") or "").strip()
     envs["AGENTX_WARMUP_GRACE_PERIOD"] = str(_grace)
     if bench.get("timeout_seconds") is not None:
         envs["AGENTX_PHASE_WAIT_TIMEOUT_S"] = str(bench["timeout_seconds"])
@@ -1894,6 +1906,13 @@ def materialize_config_with_envs(
     # Magpie forwards only ``benchmark.envs``, so ``--extra-env`` lands there for
     # every framework: vLLM Ray workers see MTP pins only this way.
     combined_extra: dict[str, Any] = dict(_operator_extra_env())
+    from hyperloom.common.agentx_workload import is_agentx_client_script
+
+    if is_agentx_client_script(str(bench.get("benchmark_script") or "")):
+        # The AgentX switch already settled these from the same pins; the raw
+        # pin would undo its CONC scaling of the warmup grace.
+        agentx_env = agentx_env_for_conc()
+        combined_extra = {k: v for k, v in combined_extra.items() if not _is_agentx_client_key(k, agentx_env)}
     if extra_envs:
         combined_extra.update(extra_envs)
     safe_extra_envs, dropped_extra_envs = filter_untrusted_env_mapping(
