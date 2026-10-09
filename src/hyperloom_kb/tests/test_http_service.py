@@ -912,8 +912,10 @@ def test_sdk_uses_only_url_and_token_with_packaged_declaration(
             },
             rationale={"reasoning": "Prior evidence supports tuning page size."},
         )
+        log = tmp_path / "attempt.log"
+        log.write_text("recorded attempt\n", encoding="utf-8")
         session.complete(
-            outcome={"decision": "keep", "value": 110.0},
+            outcome={"decision": "keep", "value": 110.0, "raw_logs": [log]},
             reflection={"text": "The result improved."},
             completed_at=NOW,
         )

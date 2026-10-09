@@ -3,7 +3,9 @@
 A mapping cannot switch these checks off: an Experience that carries a
 credential-shaped value is skipped rather than published. Free-text fields get
 only the high-confidence token formats, because prose such as "per token: ..."
-would otherwise trip the assignment rules written for configuration text.
+would otherwise trip the assignment rules written for configuration text. Raw
+logs are screened the same way, so a benchmark key such as max_completion_tokens
+is kept while a bearer token or an sk- key inside a log is not.
 """
 
 from __future__ import annotations
@@ -63,9 +65,13 @@ _EMBEDDED_KEY = re.compile(r"\"([A-Za-z_][A-Za-z0-9_.-]*)\"\s*:")
 _SECRET_NAME_FRAGMENTS = ("APIKEY", "API_KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
 _SECRET_NAME_EXEMPTIONS = ("TOKENIZER",)
 
-#: The fields that hold prose by definition: the reasoning and the alternatives weighed, how the outcome reads, and
-#: labelled notes. Preconditions are not prose: they may restate the configuration measured against.
-FREE_TEXT_FIELDS = frozenset({"rationale.reasoning", "rationale.alternatives", "reflection", "notes"})
+#: The fields screened as prose: the reasoning and the alternatives weighed, how the outcome reads, labelled notes,
+#: and the raw logs that produced the Experience. A raw log is not prose, but it is full of benchmark key names, so
+#: it gets the same token-format screen. Preconditions are not prose: they may restate the configuration measured
+#: against.
+FREE_TEXT_FIELDS = frozenset(
+    {"rationale.reasoning", "rationale.alternatives", "reflection", "notes", "outcome.raw_logs"}
+)
 
 
 def is_secret_shaped_name(name: str) -> bool:

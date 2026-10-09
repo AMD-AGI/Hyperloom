@@ -91,6 +91,7 @@ experience:
   outcome:
     decision: $decision
     value: $attempt.after
+    raw_logs: $attempt.log_files          # list of file paths; a directory is not a file
   reflection:
     text: "Recorded outcome: {$attempt.after}"
 ```
@@ -162,8 +163,9 @@ A mapping cannot turn these off:
   assignments, credential CLI flags, and credential-shaped keys (a name containing
   `TOKEN`, `SECRET`, `PASSWORD`, `API_KEY`, or `CREDENTIAL`, with `TOKENIZER`
   exempt). The prose fields, `rationale.reasoning`, `rationale.alternatives`,
-  every `reflection` field, `notes`, and the change field with the `summary`
-  role, get only the token formats, so prose is not mistaken for an assignment;
+  every `reflection` field, `notes`, `outcome.raw_logs`, and the change field
+  with the `summary` role, get only the token formats, so prose and raw logs are
+  not mistaken for an assignment;
   `rationale.preconditions` is checked in full, since it may restate the
   configuration measured against. Every text file a record names is screened
   line by line the same way; a binary file is not.
@@ -201,7 +203,10 @@ Maps Hyperloom `session_breakdown.json` (SBD V6) to the packaged
 - source-arm patches from `attempts[].patch_material: [{path, sha256, content}]`,
   ordered as `patch_path`, `patches_applied`, `patches_reverted` without
   duplicates, into the text field `change.content`; an attempt whose change
-  content is over 32 KiB is skipped with `schema validation failed`.
+  content is over 32 KiB is skipped with `schema validation failed`;
+- `attempts[].log_files`, a list of local file paths, into `outcome.raw_logs`.
+  A path that is not a file, including a directory, skips the attempt. The
+  field is required, so an attempt that names no log file is skipped too.
 
 AgentX sessions are skipped until their Experience identity is supported, and a
 session whose `metadata.grading.objective` is not `output_throughput` is

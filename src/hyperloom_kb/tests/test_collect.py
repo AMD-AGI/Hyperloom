@@ -45,6 +45,12 @@ MAPPING = "hyperloom-sbd-v6"
 TOKEN = "collect-test-token"
 REASONING = "static_recon flags the hipBMM linear route as disabled on this build."
 PATCH = "--- a/vllm/x.py\n+++ b/vllm/x.py\n@@ -1 +1 @@\n-a = 1\n+a = 2\n"
+_ATTEMPT_LOG = Path(__file__).with_name("fixtures") / "attempt.txt"
+
+
+def _file_record(path: Path) -> dict[str, Any]:
+    data = path.read_bytes()
+    return {"name": path.name, "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)}
 
 
 def _attempt(attempt_id: str, **fields: Any) -> dict[str, Any]:
@@ -73,6 +79,7 @@ def _attempt(attempt_id: str, **fields: Any) -> dict[str, Any]:
         "accuracy": {"required": None, "reference": None, "value": None, "passed": None},
         "failure": {"error_class": "", "error_excerpt": "", "attribution": ""},
         "gates": [{"gate": "keep_threshold", "passed": False, "observed": -0.144}],
+        "log_files": [str(_ATTEMPT_LOG)],
     }
     row.update(fields)
     return row
@@ -211,6 +218,7 @@ def test_config_attempt_projects_a_complete_experience() -> None:
         "decision": "revert",
         "value": 4745.71,
         "constraints": ["keep_threshold: passed=false, observed=-0.144"],
+        "raw_logs": [_file_record(_ATTEMPT_LOG)],
     }
     assert experience["reflection"]["text"].startswith('Recorded outcome: {"after_tput":4745.71,')
     assert experience["provenance"]["extra"]["kb_read_id"] == "kb-read-1"
@@ -312,7 +320,11 @@ def test_candidate_caused_failure_becomes_a_failed_experience() -> None:
         gates=[],
     )
     outcome = _collected(_dry(_sbd(attempt)))["failed"]["outcome"]
-    assert outcome == {"decision": "failed", "error_class": "capability_unsupported"}
+    assert outcome == {
+        "decision": "failed",
+        "error_class": "capability_unsupported",
+        "raw_logs": [_file_record(_ATTEMPT_LOG)],
+    }
 
 
 def test_accuracy_is_added_only_when_no_gate_ruled_on_it() -> None:
@@ -492,7 +504,7 @@ def _mapping_document(**overrides: Any) -> dict[str, Any]:
                 "summary": "summary",
                 "content": "--flag",
             },
-            "outcome": {"decision": "keep", "value": 2},
+            "outcome": {"decision": "keep", "value": 2, "raw_logs": "$item.log_files"},
             "reflection": {"text": "reflection"},
         },
     }
@@ -543,6 +555,7 @@ def _custom_document(**item: Any) -> dict[str, Any]:
                     "precision": "bf16",
                 },
                 "change": {"change_family": "config_variant", "change_fingerprint": "abc"},
+                "log_files": [str(_ATTEMPT_LOG)],
                 **item,
             }
         ]
@@ -634,6 +647,42 @@ def test_a_unit_whose_file_is_absent_or_holds_a_credential_is_skipped(tmp_path: 
 
     assert skipped["secret"] == "sensitive content in change.patch file secret.diff, line 1: credential assignment"
     assert skipped["absent"].startswith("mapping evaluation failed: change.patch names")
+
+
+def test_raw_log_prose_keeps_a_benchmark_setting_and_skips_a_credential(tmp_path: Path) -> None:
+    first_dir = tmp_path / "run-a"
+    second_dir = tmp_path / "run-b"
+    first_dir.mkdir()
+    second_dir.mkdir()
+    benchmark = first_dir / "inputs.json"
+    other = second_dir / "inputs.json"
+    benchmark.write_text('{"model": "m", "max_completion_tokens": 1024}\n', encoding="utf-8")
+    other.write_text('{"model": "n", "passage": "a different log"}\n', encoding="utf-8")
+    bearer = tmp_path / "bearer.log"
+    bearer.write_text("Authorization: Bearer abcdefghijklmnop\n", encoding="utf-8")
+    secret_key = tmp_path / "key.log"
+    secret_key.write_text("model key sk-abcdef\n", encoding="utf-8")
+    directory = tmp_path / "logs"
+    directory.mkdir()
+
+    report = _dry(
+        _sbd(
+            _attempt("kept", log_files=[str(benchmark), str(other)]),
+            _attempt("bearer", log_files=[str(bearer)]),
+            _attempt("api-key", log_files=[str(secret_key)]),
+            _attempt("directory", log_files=[str(directory)]),
+        )
+    )
+
+    collected = _collected(report)
+    assert set(collected) == {"kept"}
+    assert collected["kept"]["outcome"]["raw_logs"] == [_file_record(benchmark), _file_record(other)]
+    skipped = _skipped(report)
+    assert skipped["bearer"] == "sensitive content in outcome.raw_logs file bearer.log, line 1: bearer token"
+    assert skipped["api-key"] == "sensitive content in outcome.raw_logs file key.log, line 1: api key"
+    assert skipped["directory"].startswith("mapping evaluation failed: outcome.raw_logs[] names")
+    assert "which is not a file" in skipped["directory"]
+    assert directory.name not in {item["name"] for item in collected["kept"]["outcome"]["raw_logs"]}
 
 
 def test_a_declared_field_named_like_a_credential_is_screened_by_its_value_not_its_name(tmp_path: Path) -> None:

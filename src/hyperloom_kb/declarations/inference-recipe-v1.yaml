@@ -81,6 +81,11 @@ outcome:
   - name: error_class
     description: What failed, for a failed attempt.
     search: 0.5
+  - name: raw_logs
+    description: The raw log files that produced this Experience.
+    kind: file
+    many: true
+    required: true
 
 reflection:
   - name: text

@@ -19,7 +19,7 @@ session_breakdown.timeline[type=framework_agent].ext
   ├── proposals   reasoning, kb_read_id, rendered_refs
   └── attempts    measured_against, measurement, config_delta, gates, accuracy,
                   failure.attribution, reasoning, reasoning_origin,
-                  experience_citations,
+                  experience_citations, log_files,
                   patch_path, patches_applied, patches_reverted, patch_material
 ```
 
@@ -31,6 +31,9 @@ declared in `breakdown/schema.py` (`V6FrameworkAttempt`, `V6FrameworkProposal`).
 - **Failure attribution.** Unmeasured attempts are classified as
   `candidate_caused`, `environment`, `harness`, or `unknown`; only
   `candidate_caused` failures become Experiences.
+- **Raw logs.** An attempt records `log_files`, a list of local file paths for
+  the logs that produced it. The published Experience stores each file on
+  `outcome.raw_logs`. A directory path is not a file and is not uploaded.
 - **Patch material.** Source attempts record each session-local patch they
   applied or reverted as `{path, sha256, content}`, in the order `patch_path`,
   `patches_applied`, `patches_reverted`, whatever their size. A patch outside

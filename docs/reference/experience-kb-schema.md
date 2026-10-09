@@ -153,7 +153,7 @@ service's default read schema:
 | baseline | `baseline_fingerprint` (group): the SHA-256 of the exact measured-against configuration; `value` (measurement): the baseline throughput. |
 | rationale | The KB defaults; the mapping writes `preconditions` and `reasoning`. |
 | change | `change_family` (group, search 4): `config_variant` or `source_patch`; `change_fingerprint` (group): the SHA-256 of the normalized configuration or the patch bytes; `summary` (summary, search 4); `content` (text): the configuration delta, or the source reference, target files, and patches, as canonical JSON. |
-| outcome | `decision` (decision, search 0.5): `keep`, `revert`, or `failed`; `value` (measurement); `constraints` (text, many): each gate as `name: passed=…, observed=…`; `error_class` (search 0.5). |
+| outcome | `decision` (decision, search 0.5): `keep`, `revert`, or `failed`; `value` (measurement); `constraints` (text, many): each gate as `name: passed=…, observed=…`; `error_class` (search 0.5); `raw_logs` (file, many, required): the raw log files that produced the Experience. |
 | reflection | `text` (text). |
 
 Hyperloom keeps its change inline: a configuration delta or patch it measured
