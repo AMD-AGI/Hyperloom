@@ -5325,6 +5325,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         *,
         measurement: Mapping[str, Any] | None = None,
         server_launch_flags: str | None = None,
+        server_launch_envs: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         """Fully-reproducible descriptor of ``current_best``'s launch environment.
 
@@ -5397,7 +5398,9 @@ class WritebackCollaborator(CoordinatorCollaborator):
             "schema_version": 1,
             "config": {
                 "extra_server_args": materialized.get("extra_server_args") or "",
-                "extra_envs": dict(materialized.get("extra_envs") or {}),
+                # A launch-time environment the recipe applied itself sits under
+                # the current_best delta, which wins on a shared name.
+                "extra_envs": {**dict(server_launch_envs or {}), **dict(materialized.get("extra_envs") or {})},
                 "remove_args": list(materialized["remove_args"]),
                 "unset_envs": list(materialized["unset_envs"]),
                 "args_mode": materialized["args_mode"],
