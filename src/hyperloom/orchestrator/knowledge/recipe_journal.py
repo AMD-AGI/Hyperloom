@@ -30,10 +30,10 @@ from hyperloom.orchestrator.lever import lever_kind_for_task
 from ..collaborator import CoordinatorCollaborator
 from ..state.attempt_ledger import record_config_attempt
 from ..state.failure_evidence import UNMEASURED_OUTCOMES, classify_failure_attribution
-from ..state.task_registry import Task
 
 if TYPE_CHECKING:
     from ..loop.coordinator import Coordinator
+    from ..state.task_registry import Task
 
 log = _logging.getLogger(__name__)
 
