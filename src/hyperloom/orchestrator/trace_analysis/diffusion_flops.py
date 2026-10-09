@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ._io_utils import read_json
+from hyperloom.common.jsonio import read_json
 
 # Hardware matrix-core peak TFLOPS (self-contained; mirrors roofline_ceiling.HW_SPECS so this tool runs standalone in
 # kernel-agent).

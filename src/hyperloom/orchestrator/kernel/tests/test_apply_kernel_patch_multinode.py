@@ -5,37 +5,27 @@
 
 from __future__ import annotations
 
-import types
-
-import pytest
-
-from hyperloom.orchestrator.kernel import apply_kernel_patch
+from hyperloom.orchestrator.kernel import apply_kernel_patch as akp
 
 
-@pytest.fixture()
-def akp(monkeypatch) -> types.ModuleType:
-    monkeypatch.setattr(apply_kernel_patch, "_CACHED_KNOWN_TARGET_ROOTS", None)
-    return apply_kernel_patch
-
-
-def test_is_multi_node_true_when_env_ge_2(akp, monkeypatch):
+def test_is_multi_node_true_when_env_ge_2(monkeypatch):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
     assert akp._is_multi_node() is True
 
 
-def test_is_multi_node_false_when_unset_or_single(akp, monkeypatch):
+def test_is_multi_node_false_when_unset_or_single(monkeypatch):
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
     assert akp._is_multi_node() is False
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
     assert akp._is_multi_node() is False
 
 
-def test_is_multi_node_false_on_non_numeric(akp, monkeypatch):
+def test_is_multi_node_false_on_non_numeric(monkeypatch):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "not-an-int")
     assert akp._is_multi_node() is False
 
 
-def test_is_multi_node_ignores_planted_state_file(akp, monkeypatch, tmp_path):
+def test_is_multi_node_ignores_planted_state_file(monkeypatch, tmp_path):
     planted = tmp_path / "multi_node_state.json"
     planted.write_text('{"nodes": 8}', encoding="utf-8")
     monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(planted))
@@ -44,14 +34,14 @@ def test_is_multi_node_ignores_planted_state_file(akp, monkeypatch, tmp_path):
 
 
 # -- _coerce_rebuild_command (SWSPLAT-42362) -------------------------------
-def test_coerce_rebuild_command_accepts_argv(akp):
+def test_coerce_rebuild_command_accepts_argv():
     assert akp._coerce_rebuild_command(["ninja", "-C", "build"]) == ["ninja", "-C", "build"]
     assert akp._coerce_rebuild_command("ninja -C build") == ["ninja", "-C", "build"]
     assert akp._coerce_rebuild_command(None) == []
     assert akp._coerce_rebuild_command("") == []
 
 
-def test_coerce_rebuild_command_rejects_shell_control(akp):
+def test_coerce_rebuild_command_rejects_shell_control():
     import pytest as _pytest
 
     for bad in ("make && rm -rf /", "a | b", "x; y", "echo `id`", "cat </etc/passwd"):
@@ -62,7 +52,7 @@ def test_coerce_rebuild_command_rejects_shell_control(akp):
         akp._coerce_rebuild_command(["bash", "-lc", "make"])
 
 
-def test_invalid_rebuild_command_rejected_before_target_mutation(akp, tmp_path, monkeypatch):
+def test_invalid_rebuild_command_rejected_before_target_mutation(tmp_path, monkeypatch):
     # SWSPLAT-42362 (all-or-nothing): an invalid rebuild_command must fail BEFORE the live target is overwritten — the
     # target keeps its original bytes, no partial apply.
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
@@ -88,7 +78,7 @@ def test_invalid_rebuild_command_rejected_before_target_mutation(akp, tmp_path, 
     assert target.read_text(encoding="utf-8") == orig_bytes
 
 
-def test_invalid_rebuild_command_rejected_before_snapshot_mutation(akp, tmp_path, monkeypatch):
+def test_invalid_rebuild_command_rejected_before_snapshot_mutation(tmp_path, monkeypatch):
     # SWSPLAT-42362 (all-or-nothing, snapshot path): the _apply_kernel_patch_snapshot early coercion must reject an
     # invalid rebuild_command BEFORE any snapshot write touches the live target — the target keeps its original bytes.
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
