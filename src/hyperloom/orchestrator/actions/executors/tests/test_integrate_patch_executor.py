@@ -2782,3 +2782,75 @@ async def test_a_scriptable_source_patch_over_the_latency_budget_is_reverted(
     if expected_status == "reverted":
         assert "latency_budget_exceeded" in result["reason"]
     assert (repo / "src.py").read_text().endswith(f"return {expected_return}\n")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("power_w", "expected_status", "expected_return"),
+    [
+        pytest.param(812.0, "reverted", 1, id="over-power-budget-reverts-its-own-patch"),
+        pytest.param(650.0, "kept", 2, id="in-power-budget-keeps"),
+    ],
+)
+async def test_a_source_patch_over_the_power_budget_is_reverted(
+    tmp_path: Path, monkeypatch, power_w, expected_status, expected_return
+):
+    from types import SimpleNamespace
+
+    from hyperloom.orchestrator.actions.executors import _ray_serving
+    from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
+    from hyperloom.orchestrator.actions.executors._grid_runner import VariantResult
+
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    session_dir = tmp_path / "session"
+    repo = tmp_path / "framework"
+    init_git_repo(repo)
+    _write_specialist_workspace(session_dir, "t-spec-power", patch_contents=[_VALID_PATCH])
+    config_path = tmp_path / "baseline.yaml"
+    config_path.write_text("benchmark: {}\n", encoding="utf-8")
+    workspace = tmp_path / "grid" / "benchmark_test"
+    workspace.mkdir(parents=True)
+    measured = VariantResult(
+        name="patch-power",
+        extra_server_args="",
+        extra_envs={},
+        status="succeeded",
+        output_throughput=200.0,
+        gpu_power_by_gpu_w={"4": power_w},
+        workspace=str(workspace),
+    )
+
+    async def fake_run_grid(**_kwargs):
+        return [measured]
+
+    monkeypatch.setattr(ip_mod, "run_grid", fake_run_grid)
+    monkeypatch.setattr(ip_mod, "materialize_config_with_envs", lambda *_args, **_kwargs: config_path)
+    monkeypatch.setattr(_ray_serving, "maybe_serving_lease", lambda **_kwargs: None)
+    state = SimpleNamespace(
+        framework="custom",
+        benchmark_mode="synthetic",
+        power_budget_w=700.0,
+        current_best={"tput": 100.0},
+        baseline_accuracy=0.0,
+        get_specialist_patch_verdict=lambda _sid: "approve",
+        save=lambda _path: None,
+    )
+    executor = IntegratePatchExecutor(session_dir=session_dir)
+    ctx = _make_ctx(
+        "t-int-power",
+        {
+            "specialist_task_id": "t-spec-power",
+            "framework_source_root": str(repo),
+            "framework": "custom",
+            "config_path": str(config_path),
+            "require_accuracy_for_keep": False,
+        },
+    )
+    ctx.extra["shared_state"] = state
+    result = await executor(ctx)
+
+    assert result["status"] == expected_status
+    if expected_status == "reverted":
+        assert "power_budget_exceeded" in result["reason"]
+    assert (repo / "src.py").read_text().endswith(f"return {expected_return}\n")

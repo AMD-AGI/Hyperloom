@@ -313,26 +313,75 @@ def holds_within_band(
     return _within_band(axis_of(candidate, key), axis_of(anchor, key), band)
 
 
+def _ceiling_veto(observed: Any, ceiling: float | None, *, exceeded: str, unmeasured: str) -> str:
+    """``exceeded`` over the ceiling, ``unmeasured`` without a usable reading, else ""; "" when no ceiling is set.
+
+    Fails closed on an unmeasured candidate: a constraint nobody measured is not one anybody satisfied.
+    """
+    if not ceiling or ceiling <= 0:
+        return ""
+    if isinstance(observed, bool) or not isinstance(observed, (int, float)):
+        return unmeasured
+    value = float(observed)
+    if not isfinite(value) or value <= 0:
+        return unmeasured
+    return exceeded if value > float(ceiling) else ""
+
+
 def latency_veto_reason(observed_ms: Any, budget_ms: float) -> str:
     """Why the latency budget refuses this candidate, or "" when it does not.
 
     The budget is a ceiling on mean end-to-end latency, so unlike the gain gates
     it refuses a candidate whose throughput won: a lever that buys throughput by
     making each stream slower is exactly the case a throughput-only comparison
-    selects for. Off entirely when *budget_ms* is not positive.
-
-    Fails closed on an unmeasured candidate — a constraint nobody measured is not
-    one anybody satisfied — which is why every lane copies ``e2el_mean_ms`` onto
-    the dict it promotes.
+    selects for. Off entirely when *budget_ms* is not positive. Every lane copies
+    ``e2el_mean_ms`` onto the dict it promotes.
     """
-    if not budget_ms or budget_ms <= 0:
+    return _ceiling_veto(observed_ms, budget_ms, exceeded="latency_budget_exceeded", unmeasured="latency_unmeasured")
+
+
+def power_veto_reason(
+    by_gpu_w: Any,
+    *,
+    total_budget_w: float = 0.0,
+    per_gpu_budget_w: Mapping[str, float] | None = None,
+) -> str:
+    """Why the power budgets refuse this candidate, or "" when they do not.
+
+    *by_gpu_w* is each serving card's mean power over the measured round, keyed by physical GPU id. *total_budget_w*
+    caps their sum (``--max-power-w``); *per_gpu_budget_w* caps individual cards (``--max-per-gpu-power-w``). A card
+    with no limit of its own is bound only by the total, and a limited card that did not serve this round is not
+    judged on it. Off entirely when neither budget is set. Fails closed on a candidate with no per-card reading: a
+    constraint nobody measured is not one anybody satisfied.
+    """
+    limits = {str(gpu): float(watts) for gpu, watts in (per_gpu_budget_w or {}).items() if watts and watts > 0}
+    total = float(total_budget_w or 0.0)
+    if total <= 0 and not limits:
         return ""
-    if isinstance(observed_ms, bool) or not isinstance(observed_ms, (int, float)):
-        return "latency_unmeasured"
-    observed = float(observed_ms)
-    if not isfinite(observed) or observed <= 0:
-        return "latency_unmeasured"
-    return "latency_budget_exceeded" if observed > float(budget_ms) else ""
+    if not isinstance(by_gpu_w, Mapping) or not by_gpu_w:
+        return "power_unmeasured"
+    readings: dict[str, float] = {}
+    for gpu, watts in by_gpu_w.items():
+        if isinstance(watts, bool) or not isinstance(watts, (int, float)) or not isfinite(float(watts)):
+            return "power_unmeasured"
+        readings[str(gpu)] = float(watts)
+    if any(gpu in readings and readings[gpu] > limit for gpu, limit in limits.items()):
+        return "gpu_power_budget_exceeded"
+    if total > 0 and sum(readings.values()) > total:
+        return "power_budget_exceeded"
+    return ""
+
+
+def constraint_veto_reason(measurement: Any, state: Any) -> str:
+    """The first session constraint *measurement* breaks, or ""; the one reader every KEEP decision uses."""
+    source = measurement if isinstance(measurement, Mapping) else {}
+    return latency_veto_reason(
+        source.get("e2el_mean_ms"), float(getattr(state, "latency_budget_ms", 0.0) or 0.0)
+    ) or power_veto_reason(
+        source.get("gpu_power_by_gpu_w"),
+        total_budget_w=float(getattr(state, "power_budget_w", 0.0) or 0.0),
+        per_gpu_budget_w=getattr(state, "power_budget_per_gpu_w", None),
+    )
 
 
 @dataclass(frozen=True)
@@ -394,7 +443,9 @@ __all__ = [
     "intvty_of",
     "intvty_serving_grading_enabled",
     "is_agentx_mode",
+    "constraint_veto_reason",
     "latency_veto_reason",
+    "power_veto_reason",
     "output_tput_of",
     "parse_intvty_noise_pct",
     "perf_snapshot_from_mapping",

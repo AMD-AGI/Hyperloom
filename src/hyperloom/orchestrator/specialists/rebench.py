@@ -125,6 +125,8 @@ async def run_specialist_rebench(
         "itl_ms": rb.tpot_mean_ms,
         # Canonical name: the latency budget fails closed, so a lane that does not carry this refuses every KEEP.
         "e2el_mean_ms": rb.e2el_mean_ms,
+        "gpu_power_avg_w": rb.gpu_power_avg_w,
+        "gpu_power_by_gpu_w": rb.gpu_power_by_gpu_w,
         "workspace": str(getattr(rb, "workspace", "") or ""),
         "port": resolved_port,
         "gpu_ids": gpu_ids,

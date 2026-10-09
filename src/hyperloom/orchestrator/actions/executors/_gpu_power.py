@@ -36,9 +36,12 @@ __all__ = [
     "GPU_POWER_ARTIFACT_NAME",
     "GPU_POWER_ENV",
     "GpuPowerRecorder",
+    "ServerLogPhaseDriver",
     "build_gpu_power_recorder",
+    "gpu_power_sampling_unavailable",
     "parse_power_sample",
     "read_measured_gpu_power",
+    "read_measured_gpu_power_by_gpu",
 ]
 
 #: Artifact written beside the round's ``server.log``.
@@ -181,6 +184,19 @@ class GpuPowerRecorder:
                 if power is not None:
                     watts.setdefault(gpu, []).append(power)
         serving = sorted(gpu for gpu, frac in peak_vram.items() if frac >= _SERVING_VRAM_FRACTION and gpu in watts)
+        # A card that may be serving but cannot be read would drop out of the total and escape its own limit, so it
+        # leaves the whole round unmeasured: a card holding a model with no power reading, or a card in scope whose
+        # VRAM was never read (absent from amd-smi, or reported N/A), so it cannot be ruled out as serving.
+        in_scope = self._gpus if self._gpus is not None else {gpu for reading in samples for gpu in reading}
+        unread = (
+            sorted(
+                gpu
+                for gpu in in_scope
+                if gpu not in peak_vram or (peak_vram[gpu] >= _SERVING_VRAM_FRACTION and gpu not in watts)
+            )
+            if samples
+            else []
+        )
         per_gpu = {
             str(gpu): {
                 "avg_power_w": round(sum(watts[gpu]) / len(watts[gpu]), 2),
@@ -190,7 +206,11 @@ class GpuPowerRecorder:
             }
             for gpu in sorted(watts)
         }
-        avg = round(sum(per_gpu[str(g)]["avg_power_w"] for g in serving) / len(serving), 2) if serving else None
+        avg = (
+            round(sum(per_gpu[str(g)]["avg_power_w"] for g in serving) / len(serving), 2)
+            if serving and not unread
+            else None
+        )
         peak = max((per_gpu[str(g)]["max_power_w"] for g in serving), default=None)
         return {
             "schema_version": 1,
@@ -200,6 +220,7 @@ class GpuPowerRecorder:
             "interval_sec": self._interval,
             "samples": len(samples),
             "serving_gpus": serving,
+            "unread_gpus": unread,
             "avg_power_w": avg,
             "max_power_w": peak,
             "per_gpu": per_gpu,
@@ -227,11 +248,90 @@ class GpuPowerRecorder:
         return payload
 
 
+class ServerLogPhaseDriver:
+    """Drives a recorder's phase from server logs that appear while one subprocess runs.
+
+    For a child the watchdog loop does not own, such as a GEAK replay that boots its own server once per replica. Each
+    newly seen log is a fresh boot, so the recorder returns to ``boot`` until that server reports ready; the markers are
+    the watchdog's own, so a replay is cut into phases exactly like a native round.
+    """
+
+    def __init__(
+        self,
+        recorder: Any,
+        find_logs: Callable[[], list[str]],
+        *,
+        scan: Callable[..., Any],
+        interval_sec: float = _DEFAULT_INTERVAL_SEC,
+    ) -> None:
+        """Prepare a driver; nothing is read until :meth:`start`.
+
+        ``scan`` is the watchdog's own log scanner, passed in rather than imported: the watchdog module builds this
+        module's recorder, so importing it back from here would close a cycle.
+        """
+        self._recorder = recorder
+        self._find_logs = find_logs
+        self._scan = scan
+        self._interval = max(_MIN_INTERVAL_SEC, float(interval_sec))
+        self._offsets: dict[str, int] = {}
+        self._residuals: dict[str, str] = {}
+        self._identities: dict[str, tuple[int, int]] = {}
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def poll(self) -> None:
+        """Read what every log appended since the last poll and move the recorder's phase on."""
+        for path in self._find_logs():
+            if path not in self._offsets:
+                self._offsets[path] = 0
+                self._recorder.note_phase("boot", time.monotonic())
+            scan = self._scan(path, self._offsets, self._residuals, self._identities)
+            now = time.monotonic()
+            if scan.saw_ready:
+                self._recorder.note_phase("measured", now)
+            if scan.saw_warmup_begin:
+                self._recorder.note_phase("warmup", now)
+            if scan.saw_measured_begin:
+                self._recorder.note_phase("measured", now)
+            if scan.saw_eval_start:
+                self._recorder.note_phase("eval", now)
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self.poll()
+            except Exception:
+                log.debug("gpu_power: replay log poll failed", exc_info=True)
+            self._stop.wait(self._interval)
+
+    def start(self) -> None:
+        """Begin polling on a background thread."""
+        self._thread = threading.Thread(target=self._loop, name="gpu-power-phase", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        """Stop polling, after one last read so a phase that began just before exit is not lost."""
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=self._interval + _QUERY_TIMEOUT_SEC)
+        try:
+            self.poll()
+        except Exception:
+            log.debug("gpu_power: final replay log poll failed", exc_info=True)
+
+
+def gpu_power_sampling_unavailable() -> str:
+    """Why no round on this host can be sampled, or ``""``."""
+    if not env_flag(GPU_POWER_ENV, default=True):
+        return f"{GPU_POWER_ENV}=0 turns the GPU power sampler off"
+    if shutil.which("amd-smi") is None:
+        return "amd-smi is not on PATH, so the GPU power sampler has nothing to read"
+    return ""
+
+
 def build_gpu_power_recorder(server_log_path: str | None, env: dict[str, str] | None) -> GpuPowerRecorder | None:
     """The round's power recorder, or ``None`` when sampling is off or there is no ``amd-smi`` to sample with."""
-    if not server_log_path or not env_flag(GPU_POWER_ENV, default=True):
-        return None
-    if shutil.which("amd-smi") is None:
+    if not server_log_path or gpu_power_sampling_unavailable():
         return None
     try:
         from hyperloom.common.gpu_power_settings import visible_gpu_indices
@@ -246,16 +346,10 @@ def build_gpu_power_recorder(server_log_path: str | None, env: dict[str, str] | 
         return None
 
 
-def read_measured_gpu_power(
-    workspace: Path | None, *, subprocess_started_unix: float | None = None
-) -> tuple[bool, float | None]:
-    """``(found, avg_power_w)`` from the round's ``gpu_power.json``, beside the report or one level up.
-
-    ``found`` is ``True`` whenever this round's artifact exists, even when it holds no reading, so a caller can tell
-    "the recorder ran and measured nothing" (fail closed) from "no recorder ran" (fall back to the report).
-    """
+def _read_round_artifact(workspace: Path | None, subprocess_started_unix: float | None) -> dict[str, Any] | None:
+    """This round's ``gpu_power.json``, beside the report or one level up; ``None`` when no recorder ran for it."""
     if workspace is None:
-        return False, None
+        return None
     for directory in (Path(workspace), Path(workspace).parent):
         path = directory / GPU_POWER_ARTIFACT_NAME
         try:
@@ -269,5 +363,39 @@ def read_measured_gpu_power(
             started is None or started < float(subprocess_started_unix) - _START_SLACK_SEC
         ):
             continue
-        return True, _value(payload.get("avg_power_w"))
-    return False, None
+        return payload
+    return None
+
+
+def read_measured_gpu_power(
+    workspace: Path | None, *, subprocess_started_unix: float | None = None
+) -> tuple[bool, float | None]:
+    """``(found, avg_power_w)`` from the round's ``gpu_power.json``.
+
+    ``found`` is ``True`` whenever this round's artifact exists, even when it holds no reading, so a caller can tell
+    "the recorder ran and measured nothing" (fail closed) from "no recorder ran" (fall back to the report).
+    """
+    payload = _read_round_artifact(workspace, subprocess_started_unix)
+    return (False, None) if payload is None else (True, _value(payload.get("avg_power_w")))
+
+
+def read_measured_gpu_power_by_gpu(
+    workspace: Path | None, *, subprocess_started_unix: float | None = None
+) -> tuple[bool, dict[str, float] | None]:
+    """``(found, {gpu_id: avg_power_w})`` for the round's serving cards; ``None`` when no serving card had a reading,
+    or when a card that may be serving could not be read (``unread_gpus``), since the budget cannot cover it.
+
+    Keyed by the physical ``amd-smi`` index as a string, the same ids ``--max-per-gpu-power-w`` names.
+    """
+    payload = _read_round_artifact(workspace, subprocess_started_unix)
+    if payload is None:
+        return False, None
+    if payload.get("unread_gpus"):
+        return True, None
+    per_gpu = payload.get("per_gpu") if isinstance(payload.get("per_gpu"), dict) else {}
+    readings = {
+        str(gpu): watts
+        for gpu in payload.get("serving_gpus") or []
+        if (watts := _value((per_gpu.get(str(gpu)) or {}).get("avg_power_w"))) is not None
+    }
+    return True, (readings or None)

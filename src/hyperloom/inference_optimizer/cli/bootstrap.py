@@ -161,6 +161,18 @@ def latency_budget_scope_error(framework: str | None, requested_ms: float | None
     )
 
 
+def _budget_resume_conflict(flag: str, unit: str, archived: float, requested: float | None) -> str:
+    """Why a resume-time budget differs from the archived one, or ``\"\"``; omitting the flag keeps the archive."""
+    if requested is None or float(requested) == archived:
+        return ""
+    recorded = f"{archived:g} {unit}" if archived > 0 else "no budget"
+    return (
+        f"{flag} {float(requested):g} differs from the {recorded} this session was "
+        "graded under; its KEEPs would be judged against a constraint they were never measured "
+        "for. Resume without the flag to keep the recorded budget, or start a fresh session"
+    )
+
+
 def latency_budget_resume_conflict(state: Any, requested_ms: float | None) -> str:
     """Return why ``--max-latency-ms`` cannot apply to a resumed session, or ``\"\"``.
 
@@ -168,17 +180,80 @@ def latency_budget_resume_conflict(state: Any, requested_ms: float | None) -> st
     value would leave them judged against a constraint the new one does not
     state. Omitting the flag keeps the archived budget.
     """
-    if requested_ms is None:
-        return ""
-    archived = float(getattr(state, "latency_budget_ms", 0.0) or 0.0)
-    if float(requested_ms) == archived:
-        return ""
-    recorded = f"{archived:g} ms" if archived > 0 else "no budget"
-    return (
-        f"--max-latency-ms {float(requested_ms):g} differs from the {recorded} this session was "
-        "graded under; its KEEPs would be judged against a constraint they were never measured "
-        "for. Resume without the flag to keep the recorded budget, or start a fresh session"
+    return _budget_resume_conflict(
+        "--max-latency-ms", "ms", float(getattr(state, "latency_budget_ms", 0.0) or 0.0), requested_ms
     )
+
+
+def power_budget_resume_conflict(state: Any, requested_w: float | None) -> str:
+    """Return why ``--max-power-w`` cannot apply to a resumed session, or ``\"\"``."""
+    return _budget_resume_conflict(
+        "--max-power-w", "W", float(getattr(state, "power_budget_w", 0.0) or 0.0), requested_w
+    )
+
+
+def per_gpu_power_budget_resume_conflict(state: Any, requested: dict[str, float] | None) -> str:
+    """Return why ``--max-per-gpu-power-w`` cannot apply to a resumed session, or ``\"\"``."""
+    if requested is None:
+        return ""
+    archived = {str(g): float(w) for g, w in (getattr(state, "power_budget_per_gpu_w", None) or {}).items()}
+    if {str(g): float(w) for g, w in requested.items()} == archived:
+        return ""
+    recorded = ", ".join(f"GPU {g} {w:g} W" for g, w in sorted(archived.items())) or "no per-GPU limits"
+    return (
+        f"--max-per-gpu-power-w differs from the {recorded} this session was graded under; its KEEPs would be "
+        "judged against a constraint they were never measured for. Resume without the flag to keep the recorded "
+        "limits, or start a fresh session"
+    )
+
+
+def power_budget_unmeasurable_error(*, total_w: float | None, per_gpu_w: dict[str, float] | None, nodes: int) -> str:
+    """Why a power budget could never be measured on this session, or ``""``; checked at launch and on resume.
+
+    Every round would be ``power_unmeasured``, so the run would spend a whole baseline only to stop as if it were over
+    budget.
+    """
+    if not (total_w and float(total_w) > 0) and not per_gpu_w:
+        return ""
+    if nodes >= 2:
+        return (
+            "--max-power-w / --max-per-gpu-power-w cannot be measured on a multi-node session: the GPU power sampler "
+            "reads only this host's cards"
+        )
+    from hyperloom.orchestrator.actions.executors._gpu_power import gpu_power_sampling_unavailable
+
+    reason = gpu_power_sampling_unavailable()
+    return f"--max-power-w / --max-per-gpu-power-w cannot be measured: {reason}" if reason else ""
+
+
+def per_gpu_power_budget_error(
+    per_gpu_w: dict[str, float] | None,
+    *,
+    total_w: float | None,
+    available_gpus: set[int] | None,
+) -> str:
+    """Why the per-GPU power limits cannot be used, or ``""``; checked at launch, before anything runs.
+
+    *available_gpus* is the session's visible mask, or every card amd-smi reported when there is no mask, or
+    ``None`` when neither is known (then a listed card cannot be checked, which refuses).
+    """
+    if not per_gpu_w:
+        return ""
+    listed = sorted(int(g) for g in per_gpu_w)
+    if available_gpus is None:
+        return "--max-per-gpu-power-w cannot be checked: no visible-device mask is set and amd-smi reported no GPUs"
+    missing = [g for g in listed if g not in available_gpus]
+    if missing:
+        return (
+            f"--max-per-gpu-power-w names GPU(s) {', '.join(map(str, missing))}, which this session cannot use "
+            f"(available: {', '.join(map(str, sorted(available_gpus))) or 'none'})"
+        )
+    if total_w is not None and sum(per_gpu_w.values()) > float(total_w):
+        return (
+            f"the --max-per-gpu-power-w limits add up to {sum(per_gpu_w.values()):g} W, more than --max-power-w "
+            f"{float(total_w):g} W"
+        )
+    return ""
 
 
 def resolve_gpu_power_settings(
@@ -362,6 +437,8 @@ def _seed_shared_state(
         # The only copy of the budget. Validated at the CLI, so anything that reaches here is usable, and archived
         # with the session so a resume restores it without a second source to reconcile.
         latency_budget_ms=float(getattr(args, "max_latency_ms", None) or 0.0),
+        power_budget_w=float(getattr(args, "max_power_w", None) or 0.0),
+        power_budget_per_gpu_w=dict(getattr(args, "max_per_gpu_power_w", None) or {}),
         gpu_power_settings=dict(gpu_power_settings or {}),
         gpu_type=str(getattr(args, "gpu_type", None) or os.environ.get("GPU_TYPE", "")),
         # Workload metadata mirrored from CLI/env.

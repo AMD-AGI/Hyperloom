@@ -64,6 +64,10 @@ from .bootstrap import (
     _snapshot_system_prompts,
     agentx_state_is_stale,
     latency_budget_resume_conflict,
+    power_budget_resume_conflict,
+    per_gpu_power_budget_error,
+    per_gpu_power_budget_resume_conflict,
+    power_budget_unmeasurable_error,
     resolve_gpu_power_settings,
     latency_budget_scope_error,
     parse_operator_extra_env,
@@ -1797,9 +1801,17 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             sys.exit(2)
-        _latency_conflict = latency_budget_scope_error(
-            state.framework, getattr(args, "max_latency_ms", None)
-        ) or latency_budget_resume_conflict(state, getattr(args, "max_latency_ms", None))
+        _latency_conflict = (
+            latency_budget_scope_error(state.framework, getattr(args, "max_latency_ms", None))
+            or latency_budget_resume_conflict(state, getattr(args, "max_latency_ms", None))
+            or power_budget_resume_conflict(state, getattr(args, "max_power_w", None))
+            or per_gpu_power_budget_resume_conflict(state, getattr(args, "max_per_gpu_power_w", None))
+            or power_budget_unmeasurable_error(
+                total_w=getattr(state, "power_budget_w", 0.0),
+                per_gpu_w=getattr(state, "power_budget_per_gpu_w", None),
+                nodes=max(int(getattr(args, "nodes", 1) or 1), int(getattr(state, "nodes", 1) or 1)),
+            )
+        )
         if _latency_conflict:
             session_lock.release()
             print(f"ERROR: cannot resume this session -- {_latency_conflict}.", file=sys.stderr)
@@ -2221,6 +2233,21 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         )
         if _gpu_power_error:
             print(f"ERROR: {_gpu_power_error}.", file=sys.stderr)
+            sys.exit(2)
+        from hyperloom.common.gpu_power_settings import visible_gpu_indices
+
+        _observed_gpus = {int(g) for g in (gpu_power.get("observed") or {})} or None
+        _per_gpu_error = power_budget_unmeasurable_error(
+            total_w=getattr(args, "max_power_w", None),
+            per_gpu_w=getattr(args, "max_per_gpu_power_w", None),
+            nodes=nodes_resolved,
+        ) or per_gpu_power_budget_error(
+            getattr(args, "max_per_gpu_power_w", None),
+            total_w=getattr(args, "max_power_w", None),
+            available_gpus=visible_gpu_indices() or _observed_gpus,
+        )
+        if _per_gpu_error:
+            print(f"ERROR: {_per_gpu_error}.", file=sys.stderr)
             sys.exit(2)
         _publish_gpu_power_settings(gpu_power)
         state = _seed_shared_state(

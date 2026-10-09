@@ -1351,6 +1351,8 @@ class ExploreExecutor:
                         GRADED_ERROR_RATE: r.request_error_rate,
                         # Graded against the session latency budget when one is set.
                         "e2el_mean_ms": r.e2el_mean_ms,
+                        "gpu_power_avg_w": r.gpu_power_avg_w,
+                        "gpu_power_by_gpu_w": r.gpu_power_by_gpu_w,
                     }
                     stamp_output_per_gpu(variant_meas, getattr(ss, "tp", None))
                     graded = resolve_graded_comparison(
@@ -1608,6 +1610,8 @@ class ExploreExecutor:
                             "tpot_p90_ms": r.tpot_p90_ms,
                             # Promotion re-checks the latency budget against this row, not the round's measurement.
                             "e2el_mean_ms": r.e2el_mean_ms,
+                            "gpu_power_avg_w": r.gpu_power_avg_w,
+                            "gpu_power_by_gpu_w": r.gpu_power_by_gpu_w,
                             "single_workspace": r.workspace,
                             "launch_evidence": dict(r.launch_evidence or {}),
                             "launch_evidence_path": r.launch_evidence_path,
