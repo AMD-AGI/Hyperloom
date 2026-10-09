@@ -1374,6 +1374,26 @@ def _export_operator_launch_shape(
         os.environ.pop(OPERATOR_EXTRA_ENV_VAR, None)
 
 
+def _export_predictor_settings(args: argparse.Namespace) -> None:
+    """Project ``--primatune-endpoint`` / ``--primatune-mode`` into the env the predictor reads.
+
+    An absent flag leaves the variable alone, so a value exported in the shell
+    still applies. Nothing is persisted: a ``--resume-from`` relaunch needs the
+    flags again unless the shell carries the variables.
+    """
+    from hyperloom.orchestrator.predictor import config as predictor_config
+
+    endpoint = str(getattr(args, "primatune_endpoint", "") or "").strip()
+    if endpoint:
+        os.environ[predictor_config.ENV_ENDPOINT] = endpoint
+    mode = str(getattr(args, "primatune_mode", "") or "").strip()
+    if mode:
+        os.environ[predictor_config.ENV_MODE] = mode
+    conf = predictor_config.load()
+    if conf.enabled:
+        print(f"  predictor          : {conf.mode} at {conf.endpoint}")
+
+
 def _partition_fanout_supported(framework: str | None) -> tuple[bool, str]:
     """Whether this framework's runner can place work per partition."""
     name = str(framework or "").strip().lower()
@@ -1777,6 +1797,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     if nodes_resolved >= 2:
         os.environ["INFERENCE_OPTIMIZER_GPUS_PER_NODE"] = str(gpus_per_node_resolved)
         os.environ["INFERENCE_OPTIMIZER_MN_BACKEND"] = _resolve_mn_backend(args)
+    _export_predictor_settings(args)
     # The partition shape is deliberately NOT exported here.
 
     # User-declared grid skip list; re-export so subprocess executors inherit it (empty clears stale values).
