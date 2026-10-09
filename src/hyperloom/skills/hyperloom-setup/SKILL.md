@@ -387,7 +387,7 @@ the dependency root, and verifies that `atom` and its server module import):
 
 ```bash
 export REPO_ROOT="$(pwd -P)"
-PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework atom --yes
+PYTHONPATH="$REPO_ROOT" python3 -m hyperloom setup -- --install-framework atom --yes
 ```
 
 `none` reuses a preinstalled framework; it does not remove it. If no serving
