@@ -13,6 +13,7 @@ from typing import Any
 from hyperloom.common.env_safety import is_secret_shaped_env_name, redact_secret_values
 from hyperloom.common.io import atomic_write_text
 from hyperloom.common.kernel_source_contract import SOURCE_RESOLUTION_FILENAME
+from hyperloom.inference_optimizer.roofline_snapshot import extract_workload_summary
 from hyperloom.inference_optimizer.session.session_paths import forge_handoff_dir
 from hyperloom.orchestrator.kernel.campaign_baseline import campaign_repositories
 from hyperloom.orchestrator.kernel.gemm_shape_coverage import parse_aiter_shape_lookups, traced_gemm_shapes
@@ -209,12 +210,22 @@ def build_trace_evidence_md(state: Any) -> str:
     else:
         lines.append("- none")
 
+    lines.extend(
+        ["", "## Exposed Memcpy", "", "```text", _exposed_memcpy_line(analysis.get("analysis_md_path")), "```"]
+    )
     lines.extend(["", "## Runtime Findings", ""])
     measurement = getattr(state, "current_best_measurement", None)
     lines.extend(["```text", render_runtime_findings(measurement) if measurement else "not available", "```"])
     lines.extend(["", "## Hot GEMMs Missing Tuned Config", ""])
     lines.extend(["```text", *_tuned_miss_lines(candidates_path, measurement), "```"])
     return "\n".join(lines) + "\n"
+
+
+def _exposed_memcpy_line(analysis_md_path: Any) -> str:
+    """Exposed memcpy share read beside analysis.md, which omits it."""
+    path_text = _absolute_path(analysis_md_path)
+    memcpy_pct = extract_workload_summary(path_text)["memcpy_pct"] if path_text else None
+    return "not available" if memcpy_pct is None else f"exposed_memcpy={memcpy_pct}% of GPU time"
 
 
 def _tuned_miss_lines(candidates_path: str, measurement: Mapping[str, Any] | None) -> list[str]:

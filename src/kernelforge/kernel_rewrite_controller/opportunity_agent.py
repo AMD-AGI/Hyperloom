@@ -391,8 +391,9 @@ Apply these non-negotiable opportunity rules:
     publish a rewrite of the fallback implementation; skip it, because the fix
     is restoring the dispatch or configuration. The Hot GEMMs Missing Tuned
     Config section names the exact kernel_ids whose traced shapes missed their
-    tuned config; those rows are such operators. When Idle or Exposed Comm
-    exceeds Compute, the workload is host- or communication-bound: publish a
+    tuned config; those rows are such operators. When Idle or Exposed Comm,
+    or the share in the Exposed Memcpy section of trace-evidence.md, exceeds
+    Compute, the workload is host-, communication-, or copy-bound: publish a
     compute kernel only when its measured share still justifies it, and state
     that bound in its evidence.
 

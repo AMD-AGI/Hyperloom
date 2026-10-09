@@ -160,6 +160,22 @@ def test_trace_evidence_runtime_findings_not_available_without_current_best() ->
 
     assert _section(evidence, "Runtime Findings") == "```text\nnot available\n```\n"
     assert _section(evidence, "Hot GEMMs Missing Tuned Config") == "```text\nnot available\n```\n"
+    assert _section(evidence, "Exposed Memcpy") == "```text\nnot available\n```\n"
+
+
+def test_trace_evidence_reports_exposed_memcpy_from_gpu_timeline(tmp_path: Path) -> None:
+    from hyperloom.orchestrator.kernel.forge_handoff import build_trace_evidence_md
+
+    analysis_md = tmp_path / "analysis.md"
+    analysis_md.write_text("| Compute % | 96.0% |\n", encoding="utf-8")
+    (tmp_path / "perf_report_csvs").mkdir()
+    (tmp_path / "perf_report_csvs" / "gpu_timeline.csv").write_text(
+        "type,time ms,percent\ncomputation_time,1295.08,96.05\nexposed_memcpy_time,40.5,3.0012\n", encoding="utf-8"
+    )
+
+    evidence = build_trace_evidence_md(_state(last_trace_analyze={"analysis_md_path": str(analysis_md)}))
+
+    assert _section(evidence, "Exposed Memcpy") == "```text\nexposed_memcpy=3.0% of GPU time\n```\n"
 
 
 def _section(evidence: str, title: str) -> str:
@@ -236,6 +252,7 @@ def test_opportunity_rules_defer_fallback_paths_and_name_the_bound() -> None:
     assert "12. Read the Runtime Findings section of trace-evidence.md" in prompt
     assert "do not\n    publish a rewrite of the fallback implementation" in prompt
     assert "The Hot GEMMs Missing Tuned\n    Config section names the exact kernel_ids" in prompt
+    assert "Exposed Memcpy section" in prompt
 
 
 def test_write_forge_handoff_survives_missing_trace_artifacts(tmp_path: Path) -> None:
