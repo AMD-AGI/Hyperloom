@@ -16,7 +16,7 @@ Two questions, two sources, one report:
 
 | question | source | why that source |
 | --- | --- | --- |
-| What gain did prior sessions settle on for this scope? | Pulse or Recipe KB | both carry validated gain |
+| What gain did prior sessions settle on for this scope? | Pulse or Recipe KB | both carry validated gain; the KB holds winners only |
 | How much roofline headroom did they actually close? | **Pulse only** | the KB has no roofline, storewide |
 | Which parallelism layout won inside a fixed GPU count? | **Recipe KB only** | Pulse carries no accepted server args |
 | What did prior sessions accept, and what did they learn? | **Recipe KB only** | Pulse carries no config and no prose |
@@ -288,12 +288,20 @@ python -m kbmine.cli --input prior_sessions.json --tp 8 --isl 1024 --osl 256
 
 ## Reading the report
 
-* `historical` — p50/p90 validated end-to-end gain across the pool.
+* `historical` — p50/p90 validated end-to-end gain across the pool. On the KB
+  path (and `--input` of KB envelopes) this is conditional on a session having
+  won: Hyperloom writes a Recipe KB record only for a session that kept a change
+  and beat the scope's champion, so a 0% outcome never appears. Read it as what a
+  winning session reached, not the odds of winning; Pulse rows include sessions
+  that did not win. The report says so in `limitations`.
 * `by_shape` — the same per `tp/conc/isl/osl` bucket. Read this instead of
   `historical` whenever the pool spans shapes.
 * `capture` — p50/p90 of the fraction of each session's roofline gap that was
   actually closed. Populated only from Pulse; on the KB path it is reported as
-  unmeasured, because an unmeasured capture is not a zero capture.
+  unmeasured, because an unmeasured capture is not a zero capture. The
+  snapshot's ceilings are whole-server figures (computed over `tp` GPUs), so
+  they are divided by the row's `tp` before being compared with Pulse's per-GPU
+  throughput.
 * `sharding_whatif` — accepted layouts ranked per replay scope, with the vLLM
   and SGLang spellings of tp/dp/ep/pp normalized. KB path only.
 * `recipe_knobs` — every accepted flag and env var, not just the sharding
@@ -364,7 +372,7 @@ Each of these was measured against the live services, not inferred:
   `gpu_type` matches far fewer rows than carry that value), so identity
   narrowing is done client-side where it is verifiable.
 * The token appears to see a leaderboard-filtered subset: the summary reports
-  `visibility: leaderboard` with 2,378 hidden models and 3,517 hidden rows.
+  `visibility: leaderboard`.
 * 3 of 5008 sampled rows show capture above 100%, meaning the analytic ceiling
   was too low. Pulse exposes `roofline_ceiling_exceeded`; this tool does not
   yet surface it.

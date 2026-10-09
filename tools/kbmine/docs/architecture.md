@@ -105,7 +105,7 @@ flowchart TD
 
     PICK -->|"pulse-url"| P1["page /v1/session-breakdowns<br/>limit 200, offset walks"]
     P1 --> P2["filter identity client-side<br/>server-side prec is ignored,<br/>gpu_type under-matches"]
-    P2 --> P3["project_pulse_row per row<br/>pick ceiling by bound kind,<br/>capture = closed / total gap,<br/>rescale per-GPU to total"]
+    P2 --> P3["project_pulse_row per row<br/>pick ceiling by bound kind, divide by tp,<br/>capture = closed / total gap,<br/>rescale per-GPU to total"]
 
     PICK -->|"neither, so KB"| K0{"URL configured?"}
     K0 -->|"no"| K0X(["exit 2, no network call"])

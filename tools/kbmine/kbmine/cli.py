@@ -80,6 +80,12 @@ def resolve_credentials(args: argparse.Namespace) -> tuple[str, str]:
 
 _FROM_ENV = object()
 
+_WINNERS_ONLY = (
+    "historical gains are conditional on a session having won: Hyperloom writes a Recipe KB record only for a "
+    "session that kept a change and beat the scope's champion, so no 0% outcome can appear; read p50/p90 as what a "
+    "winning session reached, not the odds of winning (Pulse rows include sessions that did not win)"
+)
+
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -289,6 +295,8 @@ def main(argv: list[str] | None = None) -> int:
         report["evidence_source"] = "pulse:/v1/session-breakdowns"
     if identity_counts:
         _note_identity_coverage(report, identity_counts, cap=max(1, args.max_identities))
+    if projector is None:
+        report["limitations"].append(_WINNERS_ONLY)
     report["fetch_errors"] = errors
     report["kb_store_url"] = store_url
     text = json.dumps(report, indent=2, sort_keys=True)
