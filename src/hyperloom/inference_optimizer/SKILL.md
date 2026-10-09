@@ -720,32 +720,34 @@ python3 -m hyperloom optimize \
 ```
 
 **Caller responsibility (post-classify-removal)**: the in-loop `setup` /
-`classify` actions were deleted; the SKILL caller is now expected to
-supply session metadata directly via CLI flags. **Any workload value the
+`classify` actions were deleted; the SKILL caller must supply session metadata
+through CLI flags or an explicit `--benchmark-config`. **Any workload value the
 operator states in the prompt (ISL, OSL, CONC, TP, EP, precision, budget, and
-every `--extra-env`) MUST be forwarded as the matching CLI flag** — these flags
-are the only source of truth; an omitted flag silently falls back to its default
-and the operator's stated value is lost:
+every `--extra-env`) MUST be forwarded as the matching CLI flag unless it is
+intentionally present in that source YAML.** Do not rely on ambient workload
+variables: without either source, the value falls back to its default and the
+operator's stated value is lost.
 
 | Surface | CLI flag | Notes |
 |---|---|---|
-| Model path | `--model` | required |
-| Framework | `--framework` | `sglang` (default) / `vllm` / `atom` / `xdit` / `custom` — atom is single-node-only; xdit is scriptable diffusion (`img/s`, no serving server); `custom` is an operator-supplied workload and **additionally requires `--framework-path` and `--benchmark-scripts-dir`** (see below) |
+| Benchmark YAML | `--benchmark-config` | Optional source Magpie config for a fresh launch. `benchmark.agentx: enable` automatically selects AgentX session mode; do not also require `HYPERLOOM_AGENTX`. A resume rejects this flag and restores the accepted materialized config, or the snapshotted source config when no baseline was accepted yet. |
+| Model path | `--model` | Required unless the benchmark YAML supplies a remote `benchmark.model`. For native AgentX, use it to distinguish a local mounted checkpoint from the canonical model id in the YAML. |
+| Framework | `--framework` | `sglang` (default) / `vllm` / `atom` / `xdit` / `custom`; a benchmark YAML may supply `benchmark.framework`, and a conflicting CLI value fails. Atom is single-node-only; xdit is scriptable diffusion (`img/s`, no serving server); `custom` is an operator-supplied workload and **additionally requires `--framework-path` and `--benchmark-scripts-dir`** (see below) |
 | Custom source tree | `--framework-path` | **Required for `--framework custom`.** The workload's own checkout; patches are authored against it. |
 | Custom bench scripts | `--benchmark-scripts-dir` | **Required for `--framework custom`.** Holds the entrypoint, looked up as `custom_<gpu-type>.sh`. Every knob it reads must be forwarded as `--extra-env`; the throughput unit is whatever its report declares. |
 | GPU type | `--gpu-type` | rocm-smi auto-detect when unset |
 | Model class | `--model-class` | categorical key for the deterministic consumers (atom seed grid, framework-agent gap search token, recipe key, prompt label); when unset, Coordinator boot infers and persists it from model metadata or model-path family keywords. For richer advisory model context see Step 1.5 (`model_arch.json`) |
-| Input seq length | `--isl` | Pass the prompt's ISL. Default `1024` when omitted. |
-| Output seq length | `--osl` | Pass the prompt's OSL. Default `1024` when omitted. |
-| Concurrency | `--conc` | Pass the prompt's CONC (max in-flight requests). Default `64`. SWEEP measures a ladder around it (under AgentX only with `--enable-conc-sweep`); `--conc-sweep-concs` overrides the workload's default ladder. |
-| Tensor parallel | `--tp` | Pass the prompt's TP. Default `1`. |
-| Expert parallel | `--ep` | Pass the prompt's EP for MoE. Default `1`. |
-| Precision | `--precision` | Match the checkpoint (`bf16` default / `fp8` / ...). Keep consistent with `--quantize`. |
-| Budget | `--max-hours` | Pass the prompt's time budget. Default `2.0`. |
+| Input seq length | `--isl` | Pass the prompt's ISL. Default `1024` when omitted. Native AgentX measurement takes its distribution from the trace corpus instead. |
+| Output seq length | `--osl` | Pass the prompt's OSL. Default `1024` when omitted. Native AgentX measurement takes its distribution from the trace corpus instead. |
+| Concurrency | `--conc` | Pass the prompt's CONC (max in-flight requests). Default `64`. Outside native AgentX, SWEEP can measure a ladder and `--conc-sweep-concs` overrides it. Native AgentX measures this fixed recipe point, defaults sweep off, and rejects explicit `--enable-conc-sweep`. |
+| Tensor parallel | `--tp` | Pass the prompt's TP. Default `1` outside native AgentX. With a native source YAML, the resolved physical `TP×PP×PCP` count is used and an explicit mismatch fails. |
+| Expert parallel | `--ep` | Pass the prompt's EP for MoE. Default `1` outside native AgentX; a native source YAML resolves EP and rejects an explicit mismatch. |
+| Precision | `--precision` | Match the checkpoint (`bf16` default / `fp8` / ...). A benchmark YAML may supply `benchmark.precision`. Keep consistent with `--quantize`. |
+| Budget | `--max-hours` | Pass the prompt's time budget. Default `2.0`. Always set it explicitly for native AgentX: one canonical round commonly exceeds the default after model load, warmup, drain, and its 3600-second measurement. |
 | Latency SLA | `--max-latency-ms` | **Scriptable frameworks only** (`xdit`, `custom`); refused for serving, where AgentX already grades interactivity. Pass any stated ceiling on per-request latency ("must stay under 250 ms", "interactive workload"). A **constraint, not a target**: it composes with `--target-*` rather than competing, and refuses any KEEP whose mean end-to-end latency exceeds it — including one that reported no latency at all. Off when omitted, which does not lose a preference but does remove the SLA from the search. |
 | GPU power settings | `--gpu-power-cap-w` / `--gpu-perf-level` | Assertions, not requests. Only when the prompt says the cards were set to a cap or perf level; Hyperloom never changes them. The session refuses to start if a card differs. |
-| Max model len | `--max-model-len` | Optional; auto-derived from ISL+OSL+headroom when omitted. |
-| External reference GPU | `--compare-against-gpu` | `target_analysis` writes `target_analysis/target_baseline.json` for query/status metadata and `competitor_target.json` for both advisory and final-report comparisons. Without a target GPU it writes `reason="no_target_gpu_configured"` and clears the competitor target. AgentX reads accepted `current_best.total_throughput / state.tp` and `current_best.e2e_norm_intvty_p90` at `state.conc`; it does not reread raw results or recipes. Missing targets or axes remain unavailable. This is a cross-system advisory, not proof of identical measurement estimators or deployment, and never changes Objective or KEEP/REVERT. |
+| Max model len | `--max-model-len` | Optional outside native AgentX; auto-derived from ISL+OSL+headroom when omitted. Native AgentX resolves the model context; custom workloads may cap it within that verified context. |
+| External reference GPU | `--compare-against-gpu` | `target_analysis` writes `target_analysis/target_baseline.json` for query/status metadata and `competitor_target.json` for both advisory and final-report comparisons. Without a target GPU it writes `reason="no_target_gpu_configured"` and clears the competitor target. AgentX reads accepted `current_best.total_throughput`, divides by the recorded resolved recipe TP×PP×PCP GPU count (`state.tp` is only the legacy-artifact fallback), and reads `current_best.e2e_norm_intvty_p90` at `state.conc`; it does not reread raw results or recipes. Missing targets or axes remain unavailable. This is a cross-system advisory, not proof of identical measurement estimators or deployment, and never changes Objective or KEEP/REVERT. |
 | Target advisory | `--no-target-advisory` | Disable external-target hints in prompts without disabling final-report comparison. `primary_gap` uses the existing latency/throughput categories; the interactivity axis is displayed as interactivity. |
 | Quantization prelude | `--quantize` | Optional. Natural-language quantization request. Runs the quantization-agent once before the loop and rewrites `--model` to the quantized model. See Step 2b. Never runs on a resume. |
 | Env pins | `--extra-env NAME=VALUE` | Repeatable; forward **every** one verbatim as its own flag (do not drop any or fold into the `Environment:` block). The CLI persists them in `state.json` and serializes them into `$INFERENCE_OPTIMIZER_EXTRA_ENV`; a dropped pin is lost silently — e.g. a missing `SGLANG_USE_AITER=0` leaves the explore aiter-MoE filter blind. A `--resume-from` re-exports the persisted set, so re-pass them only to change the set. |
@@ -925,8 +927,8 @@ them at runtime:
 - `benchmark.model` <- `--model` / `$MODEL_PATH`
 - `benchmark.runner_type` <- `--gpu-type` / `$GPU_TYPE` / rocm-smi auto-detect
 
-`benchmark.benchmark_script` is deliberately NOT set in the shipped
-YAMLs. At materialize time Hyperloom pins it to
+Outside native AgentX, `benchmark.benchmark_script` is deliberately NOT set in
+the shipped YAMLs. At materialize time Hyperloom pins it to
 `{framework}_{runner_type}.sh` (e.g. `sglang_mi300x.sh` /
 `sglang_mi355x.sh`) so Magpie's resolver hits priority 1 (explicit
 user override) and uses the generic script — which respects
@@ -935,7 +937,8 @@ user override) and uses the generic script — which respects
 debug overrides; Orchestration can also route per-task via
 `params.benchmark_script` (sanitized).
 
-Before a new model run, verify these fields match the environment:
+Before a new non-AgentX model run, verify these generic-config fields match the
+environment:
 
 - `benchmark.model`: model path.
 - `benchmark.envs.TP`: tensor parallel size.
@@ -975,12 +978,158 @@ Operator server flags have one supported CLI entry point:
 `optimize --server-args "<framework serve flags>"`. The CLI exports this as
 `INFERENCE_OPTIMIZER_SERVER_ARGS`, and YAML materialization routes it into
 `EXTRA_VLLM_ARGS` / `EXTRA_SGLANG_ARGS` / `EXTRA_ATOM_ARGS` for baseline,
-profile, explore, and sweep. Explicit `--max-model-len` / `$MAX_MODEL_LEN`
-wins over auto `ISL+OSL+headroom`. A comma `$CONC` value such as
+profile, explore, and sweep outside native AgentX. Native AgentX rejects this
+flag until its pinned launchers expose an optimizer-argv hook. Outside native
+AgentX, explicit `--max-model-len` / `$MAX_MODEL_LEN` wins over auto
+`ISL+OSL+headroom`. A comma `$CONC` value such as
 `4,16,128` is accepted for compatibility; baseline uses the first value.
-Use `--conc-sweep-concs` to override the ladder SWEEP measures (`256,128,64,32,16,8,4,2` synthetic, `1,4,8,10,14,20,28` under AgentX). Under AgentX the sweep is off unless `--enable-conc-sweep` is passed, since every rung is a 3600 s window.
+Use `--conc-sweep-concs` to override the synthetic ladder (`256,128,64,32,16,8,4,2`) or the legacy AgentX/MLPerf ladder (`1,4,8,10,14,20,28`). AgentX defaults sweep off. Legacy AgentX and MLPerf may enable it with `--enable-conc-sweep`; native AgentX measures a fixed recipe point and rejects explicit sweep enablement.
 
-Operator server flags are the workload baseline, but they are not sacred. When
+### Native Magpie AgentX contract
+
+Use Magpie-managed AgentX at commit
+`d80eb4d3dad7fabe01ce81d049e2983adf2c86dd` and InferenceX commit
+`408c015be4b22d14c69518643609669405507077`. Create a source Magpie YAML with
+the public model identity, framework, launcher, effective image pin, and fixed
+concurrency. Leave recipe internals in InferenceX:
+
+```yaml
+benchmark:
+  framework: sglang
+  model: amd/GLM-5.2-MXFP4
+  precision: fp4
+  runner_type: mi355x
+  run_mode: local
+  agentx: enable
+  docker_image: lmsysorg/sglang-rocm:v0.5.20-rocm720-mi35x-20260924
+  gpu_selection:
+    auto: false
+  envs:
+    CONC: 8
+    ROCR_VISIBLE_DEVICES: 0,1,2,3
+```
+
+Launch with the YAML from inside the exact image it names:
+
+```bash
+python3 -m hyperloom.inference_optimizer.cli optimize \
+  --benchmark-config ./agentx-glm52.yaml \
+  --max-hours 3
+```
+
+Three hours is the explicit one-baseline budget for this quickstart; increase it
+when more rounds are intended. Do not silently fall back to the normal two-hour
+default, which is commonly shorter than one complete canonical AgentX round.
+
+The source `benchmark.agentx: enable` switch automatically stamps Hyperloom
+session state and selects AgentX grading before preflight. Do not require or
+export `HYPERLOOM_AGENTX` on this path. A fresh `HYPERLOOM_AGENTX=1` launch
+also uses Magpie native AgentX, with the normal model/framework/GPU/precision/
+concurrency inputs resolved to an unambiguous upstream recipe and launcher.
+New sessions use epoch 4 and preserve Hyperloom optimization. Persisted epoch-1
+sessions keep the legacy client; epoch-2 native sessions keep their original
+measurement-only contract and pins; epoch-3 sessions retain their upstream
+launcher contract. Never migrate a saved epoch, baseline, or
+KEEP record implicitly.
+`--benchmark-config` is fresh-launch only. A
+resume rejects a new source-config flag. It restores the accepted materialized
+config and runtime pins after baseline acceptance, or the session's snapshotted
+source config and pins if baseline was not accepted yet.
+
+For a local checkpoint, source `benchmark.model` stays the canonical recipe id
+and CLI `--model` supplies the mounted path written to `MODEL_PATH`. For a
+remote Hugging Face checkpoint, omit CLI `--model`; Hyperloom uses the source
+model id and removes `MODEL_PATH` from the native InferenceX subprocess.
+Prefix a relative local path with `./`.
+Do not copy `MODEL_PREFIX`, TP/EP, KV-offload, backend, or CPU-DRAM fields from
+`amd-master.yaml`; native Magpie resolves them from the recipe. Hyperloom
+pre-resolves the recipe through the same benchmark interpreter that runs it.
+The fixed concurrency comes from `--conc` or `benchmark.envs.CONC` and must
+occur in that recipe. `envs.TP` is not an arm selector. If one concurrency has
+multiple arms, prefer the YAML-native object form:
+
+```yaml
+agentx:
+  enabled: true
+  selector:
+    tp: 4
+    kv_offloading: dram
+    kv_offload_backend: hicache
+```
+
+Add `agentx.recipe` only when multiple recipe names match. `AGENTX_RECIPE` and
+JSON `AGENTX_SELECTOR` remain legacy environment equivalents. Hyperloom removes
+input `agentx.concurrency` and writes the fixed measurement value to
+`benchmark.envs.CONC`.
+
+Native AgentX concurrency sweep defaults off. Explicit
+`--enable-conc-sweep` fails preflight because the pinned launcher provides no
+distinct optimized arm; `--conc-sweep-concs` does not enable it. The recipe
+configures a 393-trace dataset-entry cap, and native `AGENTX_DATASET` and
+`WEKA_LOADER_OVERRIDE` overrides are rejected. That value is a loader ceiling,
+not a guarantee that 393 traces, sessions, or requests survive availability and
+context-length filters. Canonical mode runs for 3600 seconds.
+`AGENTX_MODE=fast` runs for 1200 seconds and is only for a direct
+Magpie diagnostic; a full `optimize` rejects its non-publishable result.
+
+Omit `--tp` and `--ep` to use the recipe. Hyperloom sets outer `--tp` to the
+resolved physical `TP×PP×PCP` count and `--ep` to resolved EP; explicit values
+are consistency assertions and mismatches fail. Topology-changing AgentX sweeps
+are rejected. The pinned launchers copy ROCR's physical values back into logical
+HIP indices, so Hyperloom derives `gpu_selection.auto=false` and the zero-based
+`ROCR_VISIBLE_DEVICES=0,...,N-1` mask. Explicit source values are assertions; a
+nonzero or reordered mask is rejected.
+
+Hyperloom executes Magpie locally inside the already selected serving
+container, so it does not start nested Docker. The YAML's `docker_image`
+overrides and pins the effective recipe image, and Magpie includes it in the
+recipe fingerprint. A pre-existing `HYPERLOOM_IMAGE` is an optional strict
+consistency assertion. Hyperloom does not start or inspect the container and
+therefore cannot prove the actual outer image.
+
+The source may omit `benchmark.inferencex_path`, as above. Preflight then reuses
+a writable checkout at the tested commit or clones one into the dependency
+cache. A source path only nominates a preferred checkout: a missing or
+wrong-revision path falls back to the pinned clone, while an explicit correct
+but non-writable checkout fails. Managed AgentX accepts the repository root
+or its `inferencex-e2e/` project directory, including spaces. Saved shell-launcher
+sessions retain their original path restrictions.
+
+The Hyperloom bridge supports local, single-node SGLang and vLLM only. Do not
+use it with multi-node/disaggregated AgentX, `server_lifecycle`, or Atom. Native
+AgentX bypasses Hyperloom's outer Ray actor automatically; leave
+`INFERENCE_OPTIMIZER_RAY_EXEC` unset or set it to `0`, because an explicit true
+value is rejected.
+
+Normal native fixed-concurrency measurements require `benchmark_valid=true`
+and `publishable=true`. For epoch-4 profile/roofline actions, derive the
+configuration from the accepted native candidate and let Magpie own the server
+and torch profiler. Forward `num_steps`, `num_profiles`, `start_seconds`,
+`interval_seconds`, capture/flush timeouts, and `detailed_annotations` as
+structured torch profiler settings; never add a second set of framework
+profiler flags. Detailed annotations require an instrumented framework;
+unsupported runtimes fail explicitly instead of modifying accepted source.
+Preserve the existing shape and trace-quality checks before kernel analysis.
+
+Use the Magpie capture manifest to select one complete time window, retaining
+its rank traces and all other capture artifacts. Do not mix different
+`profile_index` values. Automatic count reduction can be successful; a failed
+runtime, cancellation, or incomplete capture cannot. Diagnostic results have
+`benchmark_valid=false` and `publishable=false` by design and never replace
+baseline or KEEP evidence. Saved epoch-3 sessions keep their old upstream
+launcher and compatibility-profiler path; saved epoch-2 sessions remain
+measurement-only. No saved session is automatically upgraded.
+
+Magpie-managed launch evidence binds candidate arguments, environment, source
+files, and resolved server specification. The client revision and recipe
+sources remain pinned. GEAK proxy scores cannot become KEEP results: candidates
+require Critic review where applicable and canonical native remeasurement.
+Hyperloom does not cryptographically prove the actual outer image. Credentials,
+cache routing, output paths, and unrelated shell variables remain outside the
+execution identity.
+
+Outside native AgentX, operator server flags are the workload baseline, but
+they are not sacred. When
 the configuration arm has evidence or an operator hint that a pinned flag may
 be harmful, it
 may test an ablation variant with `remove_args` (or `unset_envs` for inherited
@@ -993,7 +1142,8 @@ audit.
 
 ### Workload-contract reuse (baseline → explore/sweep)
 
-`baseline` materializes its YAML once with the operator's process env
+Outside native AgentX, `baseline` materializes its YAML once with the
+operator's process env
 (`CONC` / `ISL` / `OSL` / `TP` / `MAX_MODEL_LEN` / `PRECISION` / `RUN_EVAL`
 / `ROCR_VISIBLE_DEVICES` + adaptive `NUM_PROMPTS` / `NUM_WARMUPS`), saves it
 as `baseline_config.with_envs.yaml`, and forwards the path as
@@ -1166,7 +1316,8 @@ it can make `torch.cuda.is_available()` return false. Use
 Serving-parameter search runs through the `explore` action (the legacy
 `params` / `backends` actions were merged into it); candidates are
 written via `EXTRA_SGLANG_ARGS` / `benchmark.envs`. This is internal to
-the optimizer — the launcher does not drive it. Useful InferenceX-derived
+the optimizer — the launcher does not drive it. Native AgentX is excluded until
+its pinned launchers expose an optimizer hook. Useful InferenceX-derived
 candidate families a specialist may surface: `--disable-radix-cache`,
 `--max-running-requests`, `--tokenizer-worker-num`, `--stream-interval`,
 and ROCm/TileLang envs (`SGLANG_OPT_USE_MULTI_STREAM_OVERLAP`,

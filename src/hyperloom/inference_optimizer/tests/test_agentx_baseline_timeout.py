@@ -25,6 +25,7 @@ def _clear(monkeypatch):
     _timeouts._AGENTX_SAID.clear()
     for key in (
         "HYPERLOOM_AGENTX",
+        "AGENTX_MODEL_ID",
         "AGENTX_WARMUP_GRACE_PERIOD",
         "AGENTX_WARMUP_GRACE_CONC",
         "CONC",
@@ -55,10 +56,17 @@ def test_profile_retains_nonbenchmark_budget(monkeypatch, tmp_path):
 
 def test_agentx_switch_keeps_profile_yaml_cap(monkeypatch):
     _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_MODEL_ID", "amd/test-model")
     monkeypatch.setenv("AGENTX_DURATION", "50000")
-    bench = {"framework": "sglang", "timeout_seconds": 14400}
-    apply_agentx_switch(bench, active=True)
+    bench = {
+        "framework": "sglang",
+        "timeout_seconds": 14400,
+        "envs": {"PROFILE": "1"},
+        "profiler": {"torch_profiler": {"enabled": True}},
+    }
+    apply_agentx_switch(bench, active=True, allow_profile_compat=True)
     assert bench["timeout_seconds"] == 14400
+    assert bench["benchmark_script"] == "aiperf_client.sh"
 
 
 @pytest.mark.parametrize("conc", ["1", "4", "8"])

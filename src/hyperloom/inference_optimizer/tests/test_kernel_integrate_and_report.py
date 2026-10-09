@@ -215,7 +215,10 @@ def graded_integrate_case(session_dir, tmp_path, monkeypatch):
 
 # integrate_handler
 @pytest.mark.asyncio
-async def test_integrate_handler_materializes_persisted_agentx_mode(session_dir, tmp_path, monkeypatch):
+@pytest.mark.parametrize("native", [False, True], ids=["legacy", "native"])
+async def test_integrate_handler_preserves_legacy_mutations_and_refuses_native(
+    session_dir, tmp_path, monkeypatch, native
+):
     from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
 
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
@@ -226,6 +229,7 @@ async def test_integrate_handler_materializes_persisted_agentx_mode(session_dir,
     state = SharedState.load_or_init(session_dir)
     state.framework = "sglang"
     state.benchmark_mode = "agentx"
+    state.agentx_epoch = 2 if native else 1
     state.baseline_tput = 100.0
     state.baseline_accuracy = 0.80
     state.baseline_perf = {
@@ -281,6 +285,18 @@ async def test_integrate_handler_materializes_persisted_agentx_mode(session_dir,
         },
         session_dir=session_dir,
     )
+
+    if native:
+        assert seen == {}
+        assert target.read_text(encoding="utf-8") == "def kernel():\n    return 'original'\n"
+        assert result["status"] == "skipped"
+        assert result["decision"] == "NEEDS_REVIEW"
+        assert result["error_class"] == "unsupported_upstream_launcher_hook"
+        assert result["patches_applied"] == result["patches_reverted"] == []
+        assert (
+            yaml.safe_load(base_yaml.read_text(encoding="utf-8"))["benchmark"]["benchmark_script"] == "sglang_mi300x.sh"
+        )
+        return
 
     assert seen["benchmark"]["benchmark_script"] == "aiperf_client.sh"
     assert seen["shared_state"] is not None

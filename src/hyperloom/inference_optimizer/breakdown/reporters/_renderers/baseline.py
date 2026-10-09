@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ....performance_display import format_recorded_metric, recorded_throughput
+
 from ..base import (
     Decision,
     RenderedSection,
@@ -102,7 +104,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     anchor = _anchor(attempts)
     measurement = as_dict(anchor.get("measurement"))
     session = session_of(breakdown)
-    tput = measurement.get("throughput_tok_s_per_gpu")
+    tput = recorded_throughput(measurement)
     acc = measurement.get("accuracy")
     ttft = measurement.get("ttft_mean_ms")
     e2el = measurement.get("e2el_mean_ms")
@@ -117,11 +119,9 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     warnings: list[str] = []
     decisions: list[Decision] = []
 
-    from .... import framework_registry
-
     fw = task_config_of(breakdown).get("framework_name")
     if tput:
-        facts.append(f"Baseline: {framework_registry.format_primary_metric(fw, tput, precision=2)}.")
+        facts.append(f"Baseline: {format_recorded_metric(fw, measurement, precision=2)}.")
         decisions.append(
             Decision(
                 kind="attempted",
@@ -163,7 +163,8 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     md_parts.append(
         md_kv_list(
             [
-                ("throughput_tok_s_per_gpu", tput),
+                ("throughput_tok_s_per_gpu", measurement.get("throughput_tok_s_per_gpu")),
+                ("throughput_tok_s", measurement.get("throughput_tok_s")),
                 ("throughput_unit", measurement.get("throughput_unit") or None),
                 ("accuracy", acc),
                 ("submission_valid", measurement.get("submission_valid")),
@@ -190,7 +191,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
                 a.get("end_time") or a.get("start_time"),
                 a.get("status"),
                 a.get("decision"),
-                as_dict(a.get("measurement")).get("throughput_tok_s_per_gpu"),
+                format_recorded_metric(fw, as_dict(a.get("measurement")), precision=2),
                 as_dict(a.get("failure")).get("error_class"),
             ]
             for a in attempts[:10]

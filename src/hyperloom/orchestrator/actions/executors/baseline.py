@@ -34,6 +34,12 @@ from hyperloom.common.git_safety import safe_directory_args
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.perf_metric import is_agentx_mode
 from hyperloom.common.timeutil import now_iso
+from hyperloom.common.agentx_mode import (
+    config_enables_native_agentx,
+    managed_native_agentx_session,
+    native_agentx_optimization_session,
+    native_agentx_session,
+)
 from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     ROUND_ACCURACY,
     ROUND_MEASURE,
@@ -1631,6 +1637,7 @@ class BenchmarkRunExecutor:
     """One benchmark action: materialize the config, launch the backend, retry, parse the report."""
 
     benchmark_watchdog = False
+    allow_agentx_profile_compat = False
     session_dir = SessionDirField()
 
     def __init__(
@@ -1658,6 +1665,10 @@ class BenchmarkRunExecutor:
     def _resolve_default_config(self) -> Path:
         """Resolve the benchmark YAML the round runs when the task names none."""
         raise NotImplementedError
+
+    def _agentx_profile_compatibility_error(self, shared_state: Any) -> str:
+        """Return a subclass-specific diagnostic profile constraint."""
+        return ""
 
     def _resolve_workspace(self, ctx: RunnerContext, action: str) -> Path:
         """Pick the per-task workspace dir."""
@@ -1712,6 +1723,23 @@ class BenchmarkRunExecutor:
     ) -> dict[str, Any] | None:
         """Hook after YAML materialization, before launch; a returned dict aborts the round with it."""
         return None
+
+    def _agentx_runtime_checkout(
+        self,
+        *,
+        config_path: Path,
+        output_dir: Path,
+        inferencex_path: str,
+        agentx_session: bool,
+    ) -> tuple[str, dict[str, Any] | None]:
+        """Select the checkout runtime preparation may mutate.
+
+        Baseline/grid native AgentX uses its pinned checkout directly and the
+        native runtime path is read-only.  ``ProfileExecutor`` overrides this
+        hook because its generic compatibility client deploys and patches
+        files that must never touch that pinned tree.
+        """
+        return inferencex_path, None
 
     @staticmethod
     def _failure_carries_markers(
@@ -2306,6 +2334,35 @@ class BenchmarkRunExecutor:
         effective_extra_server_args = str(params.get("extra_server_args") or "")
         extra = getattr(ctx, "extra", None) or {}
         live_shared_state = extra.get("shared_state") or self.shared_state
+        native_agentx = native_agentx_session(live_shared_state)
+        native_optimizer = native_agentx_optimization_session(live_shared_state)
+        native_launch = native_optimizer and (
+            not self.allow_agentx_profile_compat or managed_native_agentx_session(live_shared_state)
+        )
+        mutation_replay = (
+            str(getattr(ctx.task, "kind", "") or "") == "replay_warm_recipe"
+            or bool(params.get("patches"))
+            or bool(params.get("warm_kernel_plan"))
+        )
+        if native_agentx and not native_optimizer and mutation_replay:
+            return {
+                "status": "skipped",
+                "error_class": "unsupported_upstream_launcher_hook",
+                "error": (
+                    "Native AgentX cannot replay source or kernel mutations until "
+                    "the pinned InferenceX launcher exposes a fingerprinted "
+                    "optimizer hook."
+                ),
+                "output_dir": str(self._resolve_workspace(ctx, "baseline")),
+            }
+        profile_compat_error = self._agentx_profile_compatibility_error(live_shared_state) if native_agentx else ""
+        if profile_compat_error:
+            return {
+                "status": "skipped",
+                "error_class": "agentx_profile_topology_unsupported",
+                "error": profile_compat_error,
+                "output_dir": str(self._resolve_workspace(ctx, "baseline")),
+            }
         fw = str(params.get("framework") or "").strip() or os.environ.get("FRAMEWORK", "").strip()
         if not fw and self._eager_fallback_armed(live_shared_state):
             log.warning(
@@ -2365,6 +2422,18 @@ class BenchmarkRunExecutor:
         # Accuracy eval (GSM8K) opt-out: ``--no-eval``, the ``disable_run_eval`` param and the eval-failure fallback
         # force ``RUN_EVAL=false``.
         base_extra_envs = dict(params.get("extra_envs") or {})
+        _rt_from_params = params.get("runtime_override")
+        if native_agentx and not native_optimizer and isinstance(_rt_from_params, dict) and _rt_from_params:
+            return {
+                "status": "failed",
+                "error_class": "unsupported_upstream_launcher_hook",
+                "error": (
+                    "Native AgentX cannot apply runtime_override with the pinned "
+                    "InferenceX launcher. PATH/PYTHONPATH/framework runtime "
+                    "changes would not be bound by the recipe fingerprint."
+                ),
+                "output_dir": str(output_dir),
+            }
         eval_disabled = self._eval_disabled(ctx)
         # The staged accuracy round is itself an eval, so ``--no-eval`` cancels it.
         defer_accuracy_until_after_measure = not eval_disabled and is_truthy(
@@ -2373,15 +2442,18 @@ class BenchmarkRunExecutor:
         if force_disable_eval or is_truthy(params.get("disable_run_eval")) or eval_disabled:
             base_extra_envs["RUN_EVAL"] = "false"
         await _prepare_aiter_serving_so(base_extra_envs, output_dir)
+        complete_native_snapshot = params.get("native_launch_overrides") if native_launch else None
         try:
             config_path = materialize_config_with_envs(
                 config_path,
                 output_dir,
-                extra_server_args=effective_extra_server_args,
-                extra_envs=base_extra_envs,
-                remove_args=params.get("remove_args"),
-                unset_envs=params.get("unset_envs"),
-                args_mode=str(params.get("args_mode") or "append"),
+                extra_server_args="" if complete_native_snapshot is not None else effective_extra_server_args,
+                extra_envs=None if complete_native_snapshot is not None else base_extra_envs,
+                remove_args=None if complete_native_snapshot is not None else params.get("remove_args"),
+                unset_envs=None if complete_native_snapshot is not None else params.get("unset_envs"),
+                args_mode="append"
+                if complete_native_snapshot is not None
+                else str(params.get("args_mode") or "append"),
                 model_path=resolved_model,
                 gpu_type=resolved_gpu,
                 benchmark_script=override_script,
@@ -2389,7 +2461,12 @@ class BenchmarkRunExecutor:
                 drop_moe_runner_backend=force_drop_moe_runner_backend,
                 flydsl_source_dirs=is_truthy(params.get("flydsl_source_dirs")),
                 agentx_mode=agentx_active(live_shared_state),
+                native_agentx_mode=native_agentx,
+                native_launch_overrides=None
+                if not native_launch
+                else params.get("native_launch_overrides") or params.get("base_native_launch_overrides"),
                 grading=getattr(live_shared_state, "grading", None),
+                allow_agentx_profile_compat=self.allow_agentx_profile_compat,
             )
         except FrameworkScriptMismatchError as exc:
             # Cross-framework script override: return a structured failure.
@@ -2404,8 +2481,17 @@ class BenchmarkRunExecutor:
         effective_inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
         # Apply runtime_override from params into the materialized YAML so the revalidation baseline boots under the
         # same framework runtime as the KEEP'd candidate (PATH/PYTHONPATH/framework_bin etc.).
-        _rt_from_params = params.get("runtime_override")
-        if isinstance(_rt_from_params, dict) and _rt_from_params:
+        if native_launch:
+            from ._native_candidate import update_native_candidate_file
+
+            update_native_candidate_file(
+                config_path,
+                runtime_override=_rt_from_params,
+                overlay_pythonpath=str(params.get("overlay_pythonpath") or params.get("final_overlay") or ""),
+                source_files=params.get("native_source_files"),
+                absent_source_files=params.get("native_absent_source_files") or (),
+            )
+        elif isinstance(_rt_from_params, dict) and _rt_from_params:
             try:
                 import yaml as _yaml
 
@@ -2433,6 +2519,17 @@ class BenchmarkRunExecutor:
                 model_path=resolved_model,
                 args_mode=str(params.get("args_mode") or "append"),
             )
+        effective_inferencex_path, checkout_error = await asyncio.to_thread(
+            self._agentx_runtime_checkout,
+            config_path=config_path,
+            output_dir=output_dir,
+            inferencex_path=effective_inferencex_path,
+            agentx_session=native_agentx,
+        )
+        if checkout_error is not None:
+            checkout_error.setdefault("materialized_config", str(config_path))
+            checkout_error.setdefault("output_dir", str(output_dir))
+            return checkout_error
         # AgentX: deploy the aiperf client into InferenceX benchmarks/ and
         # capability-preflight aiperf before Magpie runs the materialized config.
         # Baseline/profile shell out here (not via _run_magpie), so without this the
@@ -2447,10 +2544,14 @@ class BenchmarkRunExecutor:
         # ``_grid_runner`` already runs its copy of this through ``to_thread``.
         _agx_err = await asyncio.to_thread(
             prepare_agentx_runtime,
-            env=os.environ,
+            # Runtime preparation may scrub AgentX-only controls and a remote
+            # MODEL_PATH.  Validate/deploy with a copy here; the exact child
+            # environment is prepared again immediately before spawn.
+            env=dict(os.environ),
             inferencex_path=effective_inferencex_path,
             config_path=config_path,
             active=agentx_active(live_shared_state),
+            allow_profile_compat=self.allow_agentx_profile_compat,
         )
         if _agx_err:
             return {
@@ -2656,6 +2757,27 @@ class BenchmarkRunExecutor:
         else:
             applied_patches = patch_application
             _pre_patch_sha = before_apply_sha
+        if native_optimizer and (params.get("patches") or params.get("warm_kernel_apply_results")):
+            from ._native_source import warm_source_evidence
+
+            try:
+                evidence = warm_source_evidence(params, output_dir)
+                update_native_candidate_file(config_path, **evidence)
+            except (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError) as exc:
+                rollback = _revert_warm_patch_trees(params.get("_warm_patch_trees") or [])
+                kernel_rollback = _rollback_warm_kernel_apply_results(
+                    params.get("warm_kernel_apply_results") or [], params.get("warm_kernel_snapshots")
+                )
+                rollback["errors"] = list(rollback.get("errors") or []) + list(kernel_rollback.get("errors") or [])
+                rollback["ok"] = bool(rollback.get("ok") and kernel_rollback.get("ok"))
+                return {
+                    "status": "failed",
+                    "error_class": "native_source_attestation_failed",
+                    "error": str(exc),
+                    "rollback": rollback,
+                    "output_dir": str(output_dir),
+                }
+
         if applied_patches:
             log.info(
                 "baseline_executor: prepared %d warm-replay code patches: %s",
@@ -3388,7 +3510,8 @@ class BenchmarkRunExecutor:
             "run_eval_disabled": bool(run_eval_disabled),
         }
         # InferenceX ``run_lm_eval`` cleans ``$EVAL_RESULT_DIR`` after processing lm-eval output.
-        env["EVAL_RESULT_DIR"] = str(result_dir / "eval_output")
+        if not config_enables_native_agentx(config_path):
+            env["EVAL_RESULT_DIR"] = str(result_dir / "eval_output")
         # Pin SERVER_LOG / GPU_METRICS_CSV per-task so wrappers write into the task workspace;
         # ``harvest_leaked_artifacts`` is the defense-in-depth net.
         env["SERVER_LOG"] = str(output_dir / "server.log")
@@ -3425,6 +3548,25 @@ class BenchmarkRunExecutor:
             silence_timeout_sec, timeout_sec = resolve_benchmark_timeouts()
             env["PYTHONUNBUFFERED"] = "1"
             sync_benchmark_timeout(config_path, timeout_sec)
+        try:
+            from hyperloom.inference_optimizer.agentx.runtime import (
+                maybe_prepare_agentx,
+            )
+
+            maybe_prepare_agentx(
+                env=env,
+                inferencex_path=inferencex_path,
+                config_path=config_path,
+                allow_profile_compat=self.allow_agentx_profile_compat,
+            )
+        except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+            return {
+                "status": "failed",
+                "error_class": AGENTX_PREFLIGHT_ERROR_CLASS,
+                "error": (f"AgentX launch-boundary validation failed: {type(exc).__name__}: {exc}"),
+                "output_dir": str(output_dir),
+                "materialized_config": str(materialized_config_path),
+            }
         if not ctx_extra.get("mn_round_restarted"):
             try:
                 # Merge the reference base UNDER the per-task args (last-wins) so a multi-node per-round restart
@@ -3795,11 +3937,40 @@ class BenchmarkRunExecutor:
             except (OSError, json.JSONDecodeError):
                 report = None
 
+        if self.allow_agentx_profile_compat:
+            from ._native_profile import managed_profile_benchmark
+            from ._managed_profile_result import diagnostic_profile_result
+
+            configured = (yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}).get("benchmark") or {}
+            if managed_profile_benchmark(configured):
+                return {
+                    **diagnostic_profile_result(
+                        report,
+                        workspace=workspace,
+                        config_path=config_path,
+                        returncode=proc_returncode,
+                        subprocess_started_unix=subprocess_started_unix,
+                    ),
+                    "returncode": proc_returncode,
+                    "output_dir": str(output_dir),
+                    "workspace": str(workspace),
+                    "report_path": str(report_path),
+                    "materialized_config": str(materialized_config_path),
+                    "subprocess_runtime_sec": round(subprocess_runtime_sec, 2),
+                    "nonfatal_warnings": round_warnings,
+                    **capture_meta,
+                }
+
         measurement = extract_benchmark_measurement(
             report,
             workspace=workspace,
             subprocess_started_unix=subprocess_started_unix,
+            materialized_config_path=config_path,
         )
+        if measurement.get("agentx_launch_contract") == 1:
+            from ._native_candidate import record_launch_evidence
+
+            record_launch_evidence(config_path, measurement)
         warnings = round_warnings + list(measurement.pop("nonfatal_warnings", []) or [])
         for leak_src, _ in harvested:
             warnings.append(f"harvested_leaked_artifact:{leak_src}")
@@ -3827,7 +3998,12 @@ class BenchmarkRunExecutor:
                 error = f"benchmark_report.json missing under {workspace}"
             else:
                 error_class = "invalid_measurement"
-                error = "benchmark report did not contain positive throughput and completed requests"
+                protocol_errors = measurement.get("native_agentx_protocol_errors") or []
+                error = (
+                    "native AgentX report failed protocol validation: " + "; ".join(protocol_errors)
+                    if protocol_errors
+                    else "benchmark report did not contain positive throughput and completed requests"
+                )
             error = redact_secret_values(error)
             return {
                 "status": "failed",
@@ -3944,11 +4120,12 @@ class BenchmarkRunExecutor:
                 result["eval_probe"] = eval_probe
                 log.warning("baseline_executor: %s", eval_probe_summary(eval_probe))
 
+        from hyperloom.inference_optimizer.performance_display import format_measurement_metric
+
         log.info(
-            "baseline_executor: %s %.1f %s (output) e2el=%.1fms",
+            "baseline_executor: %s %s (output) e2el=%.1fms",
             "success_with_warning" if warnings else "success",
-            result["output_throughput"],
-            framework_registry.throughput_unit(eval_framework),
+            format_measurement_metric(eval_framework, result),
             result["e2el_mean_ms"] or 0.0,
         )
         return result
@@ -4013,6 +4190,21 @@ class BaselineExecutor(BenchmarkRunExecutor):
         output_dir: Path,
     ) -> dict[str, Any] | None:
         """Hook after YAML materialization, before launch."""
+        try:
+            cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError):
+            cfg = {}
+        bench = cfg.get("benchmark") if isinstance(cfg, dict) else {}
+        if isinstance(bench, dict):
+            from hyperloom.inference_optimizer.agentx.native import (
+                native_agentx_enabled,
+            )
+
+            if native_agentx_enabled(bench.get("agentx")):
+                # Native AgentX executes the pinned upstream launcher and
+                # benchmark_lib.sh with RUN_EVAL=false. Generic-client/eval
+                # compatibility patchers must not mutate that checkout.
+                return None
         ix_root = self._inferencex_root_from_config(config_path)
         if ix_root:
             ensure_benchmark_lib_eval_dest_patched(Path(ix_root))

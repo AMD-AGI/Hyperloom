@@ -14,9 +14,10 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.phases import machine_state
 from hyperloom.orchestrator.state.shared_state import SharedState
 
-from ._geak_helpers import stop_geak_before_launch
+from ._geak_helpers import forbid_geak_launch, stop_geak_before_launch
 
 
 @pytest.fixture(autouse=True)
@@ -258,3 +259,39 @@ async def test_synthetic_handoff_keeps_existing_protocol_and_metric_policy(
         "num_warmups": 3,
         "seed": 41,
     }
+
+
+@pytest.mark.parametrize("framework", ["sglang", "vllm"])
+@pytest.mark.asyncio
+async def test_native_agentx_skips_geak_before_writing_a_handoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, framework: str
+) -> None:
+    coord = _coord(tmp_path, framework=framework)
+    coord.shared_state.phase = machine_state.PHASE_KERNEL_AGENT
+    recipe_path = Path(coord.shared_state.baseline_config_path)
+    config = yaml.safe_load(recipe_path.read_text(encoding="utf-8"))
+    config["benchmark"]["agentx"] = "enable"
+    config["benchmark"]["benchmark_script"] = "single_node/agentic/glm.sh"
+    recipe_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    monkeypatch.setenv("FRAMEWORK", "vllm" if framework == "sglang" else "sglang")
+    monkeypatch.setenv("MODEL_PATH", "/models/wrong")
+    monkeypatch.setenv("GPU_TYPE", "mi300x")
+    monkeypatch.setenv("TP", "8")
+    monkeypatch.setenv("CONC", "99")
+
+    forbid_geak_launch(monkeypatch)
+    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
+
+    assert not (tmp_path / "geak" / "handoff.json").exists()
+    assert coord.shared_state.geak_result == {
+        "status": "skipped",
+        "error_class": "unsupported_upstream_launcher_hook",
+        "error": (
+            "native AgentX kernel optimization is unavailable until "
+            "InferenceX exposes a fingerprinted optimizer-argv hook"
+        ),
+    }
+    assert coord.shared_state.pending_escalate_hint == ""
+    transition = machine_state.compute_next_phase(coord.shared_state)
+    assert transition is not None
+    assert transition[:2] == (machine_state.PHASE_SWEEP, "kernel_no_more_leverage")

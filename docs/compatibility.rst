@@ -95,6 +95,26 @@ The following table lists the validated Hyperloom version and component combinat
 
 .. note::
 
+   The base benchmark path remains compatible with Magpie 0.2.0. The pinned
+   native AgentX pair is `Magpie v0.3.0
+   <https://github.com/AMD-AGI/Magpie/releases/tag/v0.3.0>`_ plus native launch overrides, custom-model replay, and client/eval
+   compatibility fixes at commit ``d80eb4d3dad7fabe01ce81d049e2983adf2c86dd`` and InferenceX commit
+   ``408c015be4b22d14c69518643609669405507077``. Pass the Magpie YAML with
+   ``--benchmark-config``; its ``benchmark.agentx: enable`` source switch
+   automatically selects Hyperloom's persisted AgentX session and grading mode.
+   Fresh ``HYPERLOOM_AGENTX=1`` launches also select native AgentX and resolve
+   a recipe from normal workload inputs. Saved epoch-1 sessions keep the legacy
+   client; saved epoch-2 native sessions keep their measurement-only contract,
+   and epoch-3 sessions keep their upstream launcher contract.
+   New native sessions use epoch 4 and the Magpie-managed launch-overrides contract. ``benchmark.docker_image`` overrides/pins the effective
+   recipe image and is included in its fingerprint; an existing
+   ``HYPERLOOM_IMAGE`` is only a strict consistency assertion. Neither value
+   starts or attests the outer container.
+   ``install.sh`` upgrades an importable pre-AgentX Magpie
+   build instead of treating import success as sufficient.
+
+.. note::
+
    TraceLens does not have hard requirements for the GPU, ROCm version, or the OS; it has scripts to verify whether a trace is valid/parseable. TraceLens is:
 
    - OS-independent and runs anywhere Python does.

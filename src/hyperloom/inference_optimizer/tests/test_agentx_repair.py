@@ -677,7 +677,7 @@ def isolated_aiperf(tmp_path):
             uv_path.unlink(missing_ok=True)
         text = repair.install_script_path().read_text(encoding="utf-8")
         pip_gate = text[text.index("PIP_EXTRA=()") : text.index("# --- 1. inference_optimizer")]
-        block = text[text.index("# --- 2a. aiperf") : text.index("# --- 2b. Atomic-write")]
+        block = text[text.index("# --- 2a. aiperf") : text.index("# --- 3. InferenceX checkout:")]
         polluted_vars = (
             "PYTHONHOME PYTHONPATH PYTHONUSERBASE PYTHONPLATLIBDIR __PYVENV_LAUNCHER__ "
             "PIP_TARGET PIP_PREFIX PIP_ROOT PIP_USER UV_SYSTEM_PYTHON UV_PYTHON "

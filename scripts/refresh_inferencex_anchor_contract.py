@@ -15,12 +15,14 @@ but it does have to exist.
 It refuses to record a broken contract. If an anchor no longer matches, re-anchor
 it in ``_inferencex_patcher.py`` first, then run this again.
 
-Requires ``gh`` authenticated against the (private) InferenceX repo.
+Uses immutable Git objects from ``--checkout`` when supplied, otherwise requires
+``gh`` authenticated against the InferenceX repo.
 
 Usage::
 
     python scripts/refresh_inferencex_anchor_contract.py
     python scripts/refresh_inferencex_anchor_contract.py --ref <commit>
+    python scripts/refresh_inferencex_anchor_contract.py --checkout /path/to/InferenceX
 """
 
 from __future__ import annotations
@@ -48,10 +50,11 @@ def main() -> int:
         default=_INFERENCEX_REF_DEFAULT,
         help="commit to verify against (default: the pin the code installs)",
     )
+    parser.add_argument("--checkout", type=Path, help="read pinned Git objects from a local repository")
     args = parser.parse_args()
 
     try:
-        record = build_record(args.ref)
+        record = build_record(args.ref, checkout=args.checkout)
     except RuntimeError as exc:
         print(f"refresh failed: {exc}", file=sys.stderr)
         return 1

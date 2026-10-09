@@ -436,6 +436,27 @@ def test_ensure_benchmark_serving_patched_patches_both_roots_when_they_differ(
     assert "PROFILE_EXTRA_BODY" in text_magpie, "$MAGPIE_PATH/InferenceX file must ALSO be patched (the #210 fix)"
 
 
+@pytest.mark.parametrize("explicit_exists", [True, False])
+def test_explicit_profile_checkout_preserves_native_and_bundled_sources(tmp_path, monkeypatch, explicit_exists):
+    native = tmp_path / "native"
+    magpie = tmp_path / "Magpie"
+    isolated = tmp_path / "profile" / ".agentx-profile-inferencex"
+    untouched = [
+        _make_inferencex_tree_with_serving(native),
+        _make_inferencex_tree_with_serving(magpie / "InferenceX"),
+    ]
+    snapshots = {path: path.read_bytes() for path in untouched}
+    target = _make_inferencex_tree_with_serving(isolated) if explicit_exists else None
+    monkeypatch.setenv("INFERENCEX_PATH", str(native))
+    monkeypatch.setenv("MAGPIE_PATH", str(magpie))
+
+    assert ensure_benchmark_serving_patched(isolated) is explicit_exists
+
+    assert {path: path.read_bytes() for path in untouched} == snapshots
+    if target is not None:
+        assert "PROFILE_EXTRA_BODY" in target.read_text(encoding="utf-8")
+
+
 def test_ensure_benchmark_serving_patched_returns_true_when_only_magpie_path_present(
     tmp_path,
     monkeypatch,
@@ -996,7 +1017,8 @@ def test_failed_patch_anchors_in_ignores_rot_outside_the_named_root(tmp_path, mo
     monkeypatch.delenv("INFERENCEX_PATH", raising=False)
     monkeypatch.setenv("MAGPIE_PATH", str(bundled))
 
-    assert [s.name for s in failed_patch_anchors(pinned)] == ["eval_dest"]
+    assert [s.name for s in failed_patch_anchors()] == ["eval_dest"]
+    assert failed_patch_anchors(pinned) == []
     assert failed_patch_anchors_in(pinned) == []
     assert [s.name for s in failed_patch_anchors_in(bundled / "InferenceX")] == ["eval_dest"]
 

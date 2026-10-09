@@ -73,13 +73,9 @@ def test_install_sh_gates_magpie_calls():
     # InferenceX stays unconditional (after the fi).
     inferencex_idx = text.index("ensure_inferencex\n", fi_idx)
     assert inferencex_idx > fi_idx
-    # The atomic-scripts patch also scrubs the redundant --concurrent-requests eval flag from the InferenceX benchmark
-    # copies, so it must run AFTER ensure_inferencex (which exports $INFERENCEX_PATH) and is gated on non-bypass by
-    # its own guard rather than the first else branch.
-    patch_guard_idx = text.index('if [ "$HYPERLOOM_BENCHMARK_BACKEND_LC" != "bypass" ]; then', gate_idx)
-    patch_idx = text.index("ensure_magpie_compat_patches\n", gate_idx)
-    patch_fi_idx = text.index("\nfi\n", patch_guard_idx)
-    assert inferencex_idx < patch_guard_idx < patch_idx < patch_fi_idx
+    # Install preserves the immutable execution trees; generic runtime paths
+    # apply their compatibility patches only when they need them.
+    assert "ensure_magpie_compat_patches" not in text
 
 
 def test_kernel_install_validates_ray_cli_and_serving_slot():

@@ -10,6 +10,8 @@ import time
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from ...performance_display import throughput_fields
+
 from .event_fields import (
     as_dict as _as_dict,
     as_list as _as_list,
@@ -22,7 +24,6 @@ from .event_fields import (
     now_iso_seconds as _now_iso,
     worst_status as _worst_status,
 )
-from ... import framework_registry
 from .event_ids import event_id
 from .event_rows import group_rows, rows_for_event, sort_rows, wire_rows
 from .event_sink import RecordSink
@@ -223,11 +224,12 @@ def _measurement(result: Mapping[str, Any], framework: str) -> dict[str, Any]:
     decides the throughput unit.
     """
     return {
-        # Named as the V5 section names it, which is what a consumer selects on.
-        "throughput_tok_s_per_gpu": _float_or_none(result.get("output_throughput")),
-        # The name above is the serving case; an image framework measures
-        # img/s through the same key, so the unit must be stated.
-        "throughput_unit": framework_registry.throughput_unit(framework),
+        **throughput_fields(
+            _float_or_none(result.get("output_throughput")),
+            framework,
+            native_agentx=result.get("native_agentx_report") is True,
+            gpu_count=result.get("agentx_gpu_count"),
+        ),
         "ttft_mean_ms": _float_or_none(result.get("ttft_mean_ms")),
         "e2el_mean_ms": _float_or_none(result.get("e2el_mean_ms")),
         "tpot_mean_ms": _float_or_none(result.get("tpot_mean_ms")),

@@ -280,9 +280,17 @@ downstream consumers:
 | `invocation`                       | Same shape as `baseline.invocation`; lets a consumer replay the final benchmark.          |
 | `closing_phase_entered`            | True iff Coordinator entered the closing phase cleanly (vs SIGTERM exit).                  |
 
-> **Scope of `throughput_tok_s_per_gpu`: whole-server total in `throughput_unit`, not per-GPU.**
-> The key name is a misnomer held fixed by this contract; do not divide it by a GPU count.
-> `cumulative_gain_pct_validated` is a ratio of two such numbers and is unaffected.
+> **Legacy scope of `throughput_tok_s_per_gpu`: whole-server total in `throughput_unit`.**
+> Existing synthetic and legacy AgentX records retain this historical contract;
+> the key name alone does not establish per-GPU normalization.
+>
+> Native AgentX records additionally retain the aggregate in `throughput_tok_s`.
+> When the measurement records `agentx_gpu_count`, `throughput_tok_s_per_gpu`
+> contains the aggregate divided by that physical count, with unit `tok/s/GPU`.
+> Without a recorded count, the per-GPU field is null and `throughput_unit` is
+> `tok/s (aggregate)`. Do not divide an already normalized native display value
+> again or infer the count from TP×EP. Grading keeps the original measurement
+> axes, and `graded_on` identifies the metric used for validated gain.
 
 > Consumer best practice: index on
 > `(session.session_id, final.throughput_tok_s_per_gpu,

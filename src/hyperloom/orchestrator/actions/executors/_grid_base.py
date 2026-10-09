@@ -56,6 +56,7 @@ class GridVariant:
             extra_envs,
             allow_predicate=is_allowed_variant_env_key,
         )
+        self.dropped_envs = list(dropped_envs)
         if dropped_envs:
             log.warning("Variant %s: dropping unsafe extra_envs %s", name, ", ".join(sorted(dropped_envs)))
         self.remove_args = to_str_list(remove_args)
@@ -119,6 +120,7 @@ class VariantResult:
     output_throughput: float | None = None
     request_throughput: float | None = None
     total_token_throughput: float | None = None
+    agentx_gpu_count: int | None = None
     completed_requests: int | None = None
     duration_seconds: float | None = None
     ttft_mean_ms: float | None = None
@@ -149,6 +151,8 @@ class VariantResult:
     server_log_path: str | None = None
     launch_evidence: dict[str, Any] = field(default_factory=dict)
     launch_evidence_path: str | None = None
+    materialized_config: str | None = None
+    native_measurement: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize this result to a plain JSON-friendly dict."""
@@ -160,6 +164,7 @@ class VariantResult:
             "output_throughput": self.output_throughput,
             "request_throughput": self.request_throughput,
             "total_token_throughput": self.total_token_throughput,
+            "agentx_gpu_count": self.agentx_gpu_count,
             "completed_requests": self.completed_requests,
             "duration_seconds": self.duration_seconds,
             "ttft_mean_ms": self.ttft_mean_ms,
@@ -185,4 +190,6 @@ class VariantResult:
             "server_log_path": self.server_log_path,
             "launch_evidence": self.launch_evidence,
             "launch_evidence_path": self.launch_evidence_path,
+            **({"materialized_config": self.materialized_config} if self.materialized_config else {}),
+            **self.native_measurement,
         }

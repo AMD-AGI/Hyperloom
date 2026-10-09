@@ -149,7 +149,8 @@ class TestTheSweepSwitchFallsBackToTheWorkload:
     def test_agentx_does_not_sweep_by_default(self, tmp_path, monkeypatch):
         assert self._seeded(tmp_path, monkeypatch, agentx=True).conc_sweep_enabled is False
 
-    def test_agentx_sweeps_when_asked(self, tmp_path, monkeypatch):
+    def test_mlperf_agentx_sweeps_when_asked(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HYPERLOOM_AGENTIC_BACKEND", "mlperf")
         state = self._seeded(tmp_path, monkeypatch, agentx=True, extra=("--enable-conc-sweep",))
         assert state.conc_sweep_enabled is True
 

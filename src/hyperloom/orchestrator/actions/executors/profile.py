@@ -5,10 +5,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import gzip
 import json
 import logging
 import os
+import re
+import subprocess
 import tempfile
 import uuid
 from pathlib import Path
@@ -26,6 +29,11 @@ from hyperloom.orchestrator.trace_analysis._trace_rank import (
 from hyperloom.common.io import atomic_write_json, safe_mtime
 from hyperloom.common.profile_args import sanitize_profile_server_args as _sanitize_profile_server_args
 from hyperloom.common.timeutil import now_iso
+from hyperloom.common.agentx_mode import (
+    managed_native_agentx_session,
+    native_agentx_optimization_session,
+    native_agentx_session,
+)
 from hyperloom.inference_optimizer.session.paths import asset_root, mn_profile_trace_root
 from hyperloom.inference_optimizer import framework_registry
 from ._inferencex_patcher import (
@@ -74,7 +82,8 @@ def _trace_contains(path: Path, substring: str, max_bytes: int | None = None) ->
     carry = ""
     chunk_size = 4_000_000
     try:
-        with gzip.open(path, "rt", encoding="utf-8", errors="replace") as fh:
+        opener = gzip.open if path.suffix == ".gz" else open
+        with opener(path, "rt", encoding="utf-8", errors="replace") as fh:
             while read < max_bytes:
                 chunk = fh.read(chunk_size)
                 if not chunk:
@@ -91,9 +100,10 @@ def _trace_contains(path: Path, substring: str, max_bytes: int | None = None) ->
 
 
 def _sample_trace_text(path: Path) -> str | None:
-    """Read up to ``_TRACE_INSPECT_BYTES`` of decompressed text from a gzipped trace."""
+    """Read a bounded sample from a plain or compressed trace."""
     try:
-        with gzip.open(path, "rt", encoding="utf-8", errors="replace") as fh:
+        opener = gzip.open if path.suffix == ".gz" else open
+        with opener(path, "rt", encoding="utf-8", errors="replace") as fh:
             return fh.read(_TRACE_INSPECT_BYTES)
     except (OSError, EOFError, UnicodeDecodeError) as e:
         # Best-effort: a malformed sample must not fail the profile path.
@@ -297,6 +307,7 @@ def _build_trace_validate(
         "probe_version": certificate.get("probe_version"),
         "probe_status": probe_status,
         "probe_error": str(probe_error or ""),
+        "workload_params": certificate.get("workload_params") or {},
         "checked_at": now_iso(timespec="seconds"),
         "trace_dir": str(trace_dir),
         "framework": str(framework or ""),
@@ -328,21 +339,29 @@ def _write_trace_certificate(trace_dir: Path, validate: dict[str, Any]) -> str:
     return str(target)
 
 
-def _certify_trace_dir(trace_dir: Path, framework: str) -> dict[str, Any]:
+def _certify_trace_dir(
+    trace_dir: Path, framework: str, *, workload_params: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
     """Run the capture-time self-certification probe over a profile trace."""
     from hyperloom.orchestrator.trace_analysis import trace_selfcert
 
     # The workload parameters shape the split forecast, and reading them from the benchmark config keeps the
     # certificate independent of any analysis having run -- the point of certifying at capture time.
-    params = trace_selfcert.read_workload_params(trace_dir)
-    return trace_selfcert.certify_trace_dir(
+    params = trace_selfcert.read_workload_params(trace_dir) if workload_params is None else workload_params
+    settings = {
+        "num_steps": int(params.get("num_steps", trace_selfcert.DEFAULT_NUM_STEPS)),
+        "conc": int(params["conc"]) if params.get("conc") is not None else None,
+        "osl": float(params["osl"]) if params.get("osl") is not None else None,
+        "r": float(params.get("r", trace_selfcert.DEFAULT_R)),
+    }
+    resolved_framework = framework or str(params.get("framework") or "")
+    certificate = trace_selfcert.certify_trace_dir(
         trace_dir,
-        framework=framework or str(params.get("framework") or ""),
-        num_steps=params.get("num_steps", trace_selfcert.DEFAULT_NUM_STEPS),
-        conc=params.get("conc"),
-        osl=params.get("osl"),
-        r=params.get("r", trace_selfcert.DEFAULT_R),
+        framework=resolved_framework,
+        **settings,
     )
+    certificate["workload_params"] = {"source": params.get("source"), "framework": resolved_framework, **settings}
+    return certificate
 
 
 def _validate_trace_structure(
@@ -490,7 +509,11 @@ def _validate_trace_structure(
     # --- Check 3 (Deval): main trace has user_annotation + execute_* --- execute_* annotations = InferenceX per-step
     # writes when detailed_annotations is honoured (distinct from check 5).
     main_traces = sorted(
-        (p for p in trace_dir.glob("*.trace.json.gz") if p.is_file()),
+        (
+            p
+            for p in trace_dir.glob("*.trace.json*")
+            if p.is_file() and p.name.endswith((".trace.json", ".trace.json.gz"))
+        ),
         key=lambda p: p.stat().st_size,
         reverse=True,
     )
@@ -783,6 +806,11 @@ def _default_profile_config() -> Path:
 class ProfileExecutor(BenchmarkRunExecutor):
     """Benchmark round with the torch profiler on; extracts and certifies the trace_dir."""
 
+    # The compatibility client is diagnostic evidence only. Baseline/grid
+    # materialization keeps the default False and therefore cannot silently
+    # downgrade a native AgentX measurement into this path.
+    allow_agentx_profile_compat = True
+
     def __init__(
         self,
         *,
@@ -813,6 +841,281 @@ class ProfileExecutor(BenchmarkRunExecutor):
     def _resolve_default_config(self) -> Path:
         """Pick the profile yaml for $FRAMEWORK."""
         return _default_profile_config()
+
+    def _agentx_profile_compatibility_error(self, shared_state: Any) -> str:
+        """Reject a generic trace whose TP would flatten native PP/PCP ranks."""
+        if managed_native_agentx_session(shared_state):
+            return ""
+        config_path = str(getattr(shared_state, "baseline_config_path", "") or "").strip()
+        if not config_path:
+            return (
+                "AgentX compatibility profiling requires an accepted native "
+                "baseline config with fingerprint-bound topology metadata."
+            )
+        try:
+            cfg = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError) as exc:
+            return f"Cannot read accepted AgentX baseline config {config_path!r}: {exc}"
+        bench = cfg.get("benchmark") if isinstance(cfg, dict) else {}
+        workload = bench.get("workload_spec") if isinstance(bench, dict) else {}
+        topology = workload.get("resolved_topology") if isinstance(workload, dict) else {}
+        if not isinstance(topology, dict):
+            return "Accepted AgentX baseline is missing fingerprint-bound workload_spec.resolved_topology metadata."
+        required = ("tp", "pp", "pcp_size", "gpu_count")
+        missing = [name for name in required if name not in topology]
+        if missing:
+            return f"Accepted AgentX topology is incomplete for compatibility profiling: missing {', '.join(missing)}."
+        try:
+            tp = int(topology["tp"])
+            pp = int(topology["pp"])
+            pcp = int(topology["pcp_size"])
+            gpu_count = int(topology["gpu_count"])
+        except (TypeError, ValueError):
+            return "Accepted AgentX topology contains non-integer rank counts."
+        if min(tp, pp, pcp, gpu_count) <= 0 or gpu_count != tp * pp * pcp:
+            return (
+                "Accepted AgentX topology is inconsistent: expected "
+                f"gpu_count=TP*PP*PCP, got {gpu_count} vs {tp}*{pp}*{pcp}."
+            )
+        if pp == 1 and pcp == 1:
+            return ""
+        return (
+            "AgentX compatibility profiling cannot preserve the accepted "
+            f"native topology (PP={pp}, PCP={pcp}); a generic TP-only server "
+            "would produce a non-equivalent trace."
+        )
+
+    def _agentx_runtime_checkout(
+        self,
+        *,
+        config_path: Path,
+        output_dir: Path,
+        inferencex_path: str,
+        agentx_session: bool,
+    ) -> tuple[str, dict[str, Any] | None]:
+        """Clone a disposable checkout for the AgentX compatibility profile.
+
+        This leg deploys ``aiperf_client.sh`` and applies profiler compatibility
+        patches.  The accepted native baseline pins a clean InferenceX tree by
+        commit and executable hashes, so mutating that tree would invalidate
+        every subsequent measurement.  A local, detached clone keeps the
+        diagnostic profile isolated without requiring network access.
+        """
+        if not agentx_session:
+            return inferencex_path, None
+        from ._native_profile import managed_profile_benchmark
+
+        configured = (yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}).get("benchmark") or {}
+        if managed_profile_benchmark(configured):
+            return str(configured.get("inferencex_path") or inferencex_path), None
+        try:
+            source = Path(inferencex_path).expanduser().resolve()
+        except (OSError, RuntimeError) as exc:
+            return inferencex_path, {
+                "status": "failed",
+                "error_class": "agentx_profile_checkout_unavailable",
+                "error": f"cannot resolve pinned AgentX InferenceX checkout: {exc}",
+            }
+        if not source.is_dir():
+            return inferencex_path, {
+                "status": "failed",
+                "error_class": "agentx_profile_checkout_unavailable",
+                "error": f"pinned AgentX InferenceX checkout is missing: {source}",
+            }
+
+        def run_git(
+            argv: list[str],
+            *,
+            timeout: int,
+        ) -> tuple[subprocess.CompletedProcess[str] | None, dict[str, Any] | None]:
+            try:
+                return (
+                    subprocess.run(
+                        argv,
+                        capture_output=True,
+                        text=True,
+                        timeout=timeout,
+                        check=False,
+                    ),
+                    None,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                return None, {
+                    "status": "failed",
+                    "error_class": "agentx_profile_checkout_unavailable",
+                    "error": (f"cannot prepare isolated AgentX profile checkout: {type(exc).__name__}: {exc}"),
+                }
+
+        head_proc, git_error = run_git(
+            ["git", "-C", str(source), "rev-parse", "HEAD"],
+            timeout=30,
+        )
+        if git_error is not None:
+            return inferencex_path, git_error
+        assert head_proc is not None
+        head = (head_proc.stdout or "").strip().lower()
+        if head_proc.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}", head):
+            return inferencex_path, {
+                "status": "failed",
+                "error_class": "agentx_profile_checkout_unavailable",
+                "error": f"cannot verify pinned AgentX InferenceX checkout at {source}",
+            }
+        expected = os.environ.get("INFERENCEX_REF", "").strip().lower()
+        if re.fullmatch(r"[0-9a-f]{7,40}", expected) and not (head.startswith(expected) or expected.startswith(head)):
+            return inferencex_path, {
+                "status": "failed",
+                "error_class": "agentx_profile_checkout_unavailable",
+                "error": (f"InferenceX HEAD {head} does not match pinned ref {expected}"),
+            }
+
+        output_root = output_dir.expanduser().resolve()
+        isolated = output_root / ".agentx-profile-inferencex"
+        if isolated.is_symlink():
+            return inferencex_path, {
+                "status": "failed",
+                "error_class": "agentx_profile_checkout_unavailable",
+                "error": (f"isolated InferenceX profile checkout must not be a symbolic link: {isolated}"),
+            }
+        try:
+            isolated_resolved = isolated.resolve(strict=False)
+            isolated_resolved.relative_to(output_root)
+        except (OSError, RuntimeError, ValueError) as exc:
+            return inferencex_path, {
+                "status": "failed",
+                "error_class": "agentx_profile_checkout_unavailable",
+                "error": (f"isolated InferenceX profile checkout escapes its output directory: {isolated} ({exc})"),
+            }
+        if isolated_resolved == source:
+            return inferencex_path, {
+                "status": "failed",
+                "error_class": "agentx_profile_checkout_unavailable",
+                "error": (f"isolated InferenceX profile checkout resolves to the pinned native checkout: {source}"),
+            }
+        if not isolated.exists():
+            clone, git_error = run_git(
+                [
+                    "git",
+                    "clone",
+                    "--local",
+                    "--no-hardlinks",
+                    "--no-checkout",
+                    "--no-tags",
+                    str(source),
+                    str(isolated_resolved),
+                ],
+                timeout=300,
+            )
+            if git_error is not None:
+                return inferencex_path, git_error
+            assert clone is not None
+            if clone.returncode != 0:
+                detail = (clone.stderr or clone.stdout or "").strip()
+                return inferencex_path, {
+                    "status": "failed",
+                    "error_class": "agentx_profile_checkout_unavailable",
+                    "error": f"cannot clone isolated InferenceX profile tree: {detail}",
+                }
+            checkout, git_error = run_git(
+                ["git", "-C", str(isolated_resolved), "checkout", "--detach", head],
+                timeout=120,
+            )
+            if git_error is not None:
+                return inferencex_path, git_error
+            assert checkout is not None
+            if checkout.returncode != 0:
+                detail = (checkout.stderr or checkout.stdout or "").strip()
+                return inferencex_path, {
+                    "status": "failed",
+                    "error_class": "agentx_profile_checkout_unavailable",
+                    "error": f"cannot checkout isolated InferenceX profile tree: {detail}",
+                }
+        top_level, git_error = run_git(
+            ["git", "-C", str(isolated_resolved), "rev-parse", "--show-toplevel"],
+            timeout=30,
+        )
+        if git_error is not None:
+            return inferencex_path, git_error
+        assert top_level is not None
+        try:
+            isolated_top = Path((top_level.stdout or "").strip()).resolve(strict=True)
+        except (OSError, RuntimeError):
+            isolated_top = Path()
+        if top_level.returncode != 0 or isolated_top != isolated_resolved:
+            return inferencex_path, {
+                "status": "failed",
+                "error_class": "agentx_profile_checkout_unavailable",
+                "error": (
+                    "isolated InferenceX profile checkout is not its own git "
+                    f"worktree: path={isolated_resolved}, top={isolated_top}"
+                ),
+            }
+        isolated_head, git_error = run_git(
+            ["git", "-C", str(isolated_resolved), "rev-parse", "HEAD"],
+            timeout=30,
+        )
+        if git_error is not None:
+            return inferencex_path, git_error
+        assert isolated_head is not None
+        isolated_sha = (isolated_head.stdout or "").strip().lower()
+        if (
+            isolated_head.returncode != 0
+            or isolated_sha != head
+            or not (isolated_resolved / "benchmarks" / "benchmark_lib.sh").is_file()
+        ):
+            return inferencex_path, {
+                "status": "failed",
+                "error_class": "agentx_profile_checkout_unavailable",
+                "error": (
+                    "isolated InferenceX profile checkout is incomplete or at "
+                    f"the wrong revision: path={isolated_resolved}, head={isolated_sha or '<unreadable>'}, "
+                    f"expected={head}"
+                ),
+            }
+        status, git_error = run_git(
+            [
+                "git",
+                "-C",
+                str(isolated_resolved),
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+            ],
+            timeout=30,
+        )
+        if git_error is not None:
+            return inferencex_path, git_error
+        assert status is not None
+        dirty = (status.stdout or "").strip()
+        if status.returncode != 0 or dirty:
+            detail = dirty or (status.stderr or "").strip() or "git status failed"
+            return inferencex_path, {
+                "status": "failed",
+                "error_class": "agentx_profile_checkout_unavailable",
+                "error": (
+                    "isolated InferenceX profile checkout is not clean; refusing "
+                    f"to reuse stale profiler patches: {detail}"
+                ),
+            }
+        try:
+            cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            bench = cfg.get("benchmark") if isinstance(cfg, dict) else None
+            if not isinstance(bench, dict):
+                raise ValueError("materialized profile config has no benchmark mapping")
+            bench["inferencex_path"] = str(isolated_resolved)
+            envs = bench.get("envs")
+            if isinstance(envs, dict) and "INFERENCEX_PATH" in envs:
+                envs["INFERENCEX_PATH"] = str(isolated_resolved)
+            config_path.write_text(
+                yaml.safe_dump(cfg, sort_keys=False),
+                encoding="utf-8",
+            )
+        except (OSError, ValueError, yaml.YAMLError) as exc:
+            return inferencex_path, {
+                "status": "failed",
+                "error_class": "agentx_profile_checkout_unavailable",
+                "error": f"cannot bind profile config to isolated checkout: {exc}",
+            }
+        return str(isolated_resolved), None
 
     def _resolve_mn_round_trace_root(self, ctx) -> str:
         """Return the shared torch-trace base dir for multi-node, or ''."""
@@ -913,6 +1216,19 @@ class ProfileExecutor(BenchmarkRunExecutor):
         output_dir: Path,
     ) -> dict[str, Any] | None:
         """Arm the host probe, then patch the InferenceX checkout Magpie will execute."""
+        from ._native_profile import managed_profile_benchmark
+
+        configured = (yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}).get("benchmark") or {}
+        if managed_profile_benchmark(configured):
+            self._host_probe_dir = ""
+            self._host_probe_status = "magpie_managed_diagnostic"
+            self._instrumentation_preflight = _check_row(
+                CHECK_INSTRUMENTATION_PREFLIGHT,
+                status="passed",
+                owner="magpie",
+                detailed_annotations=configured["profiler"]["torch_profiler"].get("detailed_annotations", False),
+            )
+            return None
         try:
             self._host_probe_dir = self._inject_host_probe(config_path, output_dir)
             self._host_probe_status = ""
@@ -1073,6 +1389,10 @@ class ProfileExecutor(BenchmarkRunExecutor):
 
     async def __call__(self, ctx) -> dict[str, Any]:
         """Run the profiling action for the given context."""
+        extra = getattr(ctx, "extra", None) or {}
+        state = extra.get("shared_state") or self.shared_state
+        if managed_native_agentx_session(state):
+            return await self._managed_profile(ctx, state)
         # atom: the Magpie atom wrapper bridges PROFILE=1 to atom's --torch-profiler-dir and writes standard
         # *.pt.trace.json.gz, so the executor falls through to the sglang/vllm path.
         params = ctx.task.params or {}
@@ -1115,6 +1435,28 @@ class ProfileExecutor(BenchmarkRunExecutor):
         from ._workload_envs import agentx_active
 
         agentx_session = agentx_active(shared_state)
+        if native_agentx_optimization_session(shared_state):
+            from ._native_profile import project_native_profile
+
+            try:
+                await asyncio.to_thread(project_native_profile, params, shared_state)
+                params["extra_server_args"] = _sanitize_profile_server_args(str(params.get("extra_server_args") or ""))
+            except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                return {
+                    "status": "failed",
+                    "error_class": "native_profile_launch_unverified",
+                    "error": str(exc),
+                    "trace_input_ready": False,
+                }
+        if native_agentx_session(shared_state):
+            compatibility_error = self._agentx_profile_compatibility_error(shared_state)
+            if compatibility_error:
+                return {
+                    "status": "failed",
+                    "error_class": "agentx_profile_topology_incompatible",
+                    "error": compatibility_error,
+                    "trace_input_ready": False,
+                }
         if not (params.get("output_dir") or extra.get("workspace")):
             output_dir = self._resolve_workspace(ctx, "profile")
             output_dir.mkdir(parents=True, exist_ok=True)
@@ -1577,6 +1919,63 @@ class ProfileExecutor(BenchmarkRunExecutor):
                 result["trace_manifest_path"] = str(trace_manifest_path)
             except OSError as exc:
                 log.warning("profile_executor: failed to write AgentX trace manifest: %s", exc)
+        return result
+
+    async def _managed_profile(self, ctx, state: Any) -> dict[str, Any]:
+        """Keep Magpie's accepted server and validate each independent trace window."""
+        from ._native_profile import managed_profile_workload_params, prepare_managed_profile
+
+        params = ctx.task.params
+        if params is None:
+            params = ctx.task.params = {}
+        output_dir = self._resolve_workspace(ctx, "profile")
+        try:
+            await asyncio.to_thread(prepare_managed_profile, params, state, output_dir)
+        except (OSError, ValueError, TypeError, KeyError, yaml.YAMLError, subprocess.SubprocessError) as exc:
+            return {
+                "status": "failed",
+                "error_class": "native_profile_launch_unverified",
+                "error": str(exc),
+                "trace_input_ready": False,
+            }
+        params["output_dir"] = str(output_dir)
+        result = await super().__call__(ctx)
+        if result.get("status") != "succeeded" or not result.get("trace_input_ready"):
+            result["trace_input_ready"] = False
+            return result
+        config = yaml.safe_load(Path(result["materialized_config"]).read_text(encoding="utf-8"))
+        framework = str(config["benchmark"].get("framework") or "")
+        for capture in result["profile_rounds"]:
+            directory = Path(capture["trace_dir"])
+            health = _validate_trace_structure(directory, framework)
+            certificate: dict[str, Any] = {}
+            probe_error = ""
+            try:
+                certificate = _certify_trace_dir(
+                    directory,
+                    framework,
+                    workload_params=managed_profile_workload_params(
+                        config["benchmark"],
+                        config_path=Path(result["materialized_config"]),
+                        capture=capture,
+                    ),
+                )
+            except (OSError, ValueError, TypeError, KeyError, ImportError) as exc:
+                probe_error = f"{type(exc).__name__}: {exc}"
+            validation = _build_trace_validate(
+                health,
+                trace_dir=directory,
+                framework=framework,
+                certificate=certificate,
+                probe_error=probe_error,
+                preflight=self._instrumentation_preflight,
+            )
+            capture["trace_health"] = health
+            capture["trace_validate"] = validation
+            capture["trace_validate_path"] = _write_trace_certificate(directory, validation)
+        selected = result["profile_rounds"][-1]
+        for name in ("trace_health", "trace_validate", "trace_validate_path"):
+            result[name] = selected[name]
         return result
 
 

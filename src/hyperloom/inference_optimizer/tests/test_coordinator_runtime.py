@@ -2700,3 +2700,40 @@ async def test_target_reached_close_still_runs_the_post_opt_roofline(session_dir
         assert ran == ["False"], f"post-opt roofline saw closing_phase={ran}"
     finally:
         await c.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status, ready", [("succeeded", True), ("failed", True), ("succeeded", False), ("succeeded", None)]
+)
+async def test_diagnostic_profile_dispatch_preserves_trace_without_promoting_performance(session_dir, status, ready):
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    trace = session_dir / "diagnostic.trace.json"
+    trace.write_text('{"traceEvents": []}')
+    result = {
+        "status": status,
+        "diagnostic_only": True,
+        "trace_input_ready": ready,
+        "main_trace_path": str(trace),
+        "valid_measurement": False,
+        "submission_valid": False,
+    }
+    c.sub.register_executor("profile", lambda ctx: _async_return(result))
+    c.shared_state.baseline_tput = 100.0
+    c.shared_state.current_best = {"action": "baseline", "tput": 100.0}
+    c.shared_state.current_best_measurement = {"output_throughput": 100.0, "completed_requests": 10}
+    try:
+        task = await c.tasks.create(kind="profile", params={"reason": "prelude_initial"}, idempotency_key="diagnostic")
+        c.shared_state.auto_roofline_pending_task_id = task.task_id
+        await pump_until_settled(c.dispatcher)
+        accepted = status == "succeeded" and ready is True
+        assert c.shared_state.last_profile["status"] == ("succeeded" if accepted else "failed")
+        assert c.shared_state.last_profile_trace == (str(trace) if accepted else "")
+        assert c.shared_state.auto_roofline_pending_task_id == ""
+        assert c.shared_state.baseline_tput == 100.0
+        assert c.shared_state.current_best == {"action": "baseline", "tput": 100.0}
+        assert c.shared_state.current_best_measurement == {"output_throughput": 100.0, "completed_requests": 10}
+        assert not c.writeback.is_promotable_result("baseline", result)
+    finally:
+        await c.stop()

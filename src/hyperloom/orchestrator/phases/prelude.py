@@ -2238,6 +2238,14 @@ class PreludePhase(CoordinatorCollaborator):
         keep_threshold = _phase_state.resolve_keep_threshold(state)
         graded = resolve_graded_comparison(state, result, keep_threshold_pct=keep_threshold, anchor_tput=baseline_tput)
         reproduced = graded.verdict == VERDICT_KEEP
+        from hyperloom.common.agentx_mode import native_agentx_optimization_session
+
+        if native_agentx_optimization_session(state):
+            from hyperloom.common.gain_math import gain_pct
+
+            outcome["graded_objective"] = graded.objective
+            outcome["graded_gain_pct"] = gain_pct(graded.candidate, graded.reference)
+            outcome["graded_rejection"] = graded.degrade_reason
         outcome["keep_threshold_pct"] = keep_threshold
         if graded.veto_reason:
             # The grading applies the session's latency ceiling, so the drift branch below rolls the replay back
@@ -2374,6 +2382,17 @@ class PreludePhase(CoordinatorCollaborator):
                 "replay_warm_recipe",
                 float(single_round_tput),
                 {
+                    **{
+                        key: result[key]
+                        for key in (
+                            "materialized_config",
+                            "agentx_server_launch",
+                            "final_overlay",
+                            "submission_valid",
+                            "native_agentx_protocol_valid",
+                        )
+                        if key in result
+                    },
                     "name": "warm_replay",
                     **graded_axes_of(result),
                     # The latency budget grades on this and fails closed without it.
@@ -2405,8 +2424,10 @@ class PreludePhase(CoordinatorCollaborator):
                 )
             if promoted_checkout:
                 outcome["active_framework_root"] = promoted_checkout
-                # Resume re-points $INFERENCEX_PATH at this checkout, and stops the run when it has since vanished.
-                state.active_inferencex_path = promoted_checkout
+                from hyperloom.common.agentx_mode import native_agentx_session
+
+                if not native_agentx_session(state):
+                    state.active_inferencex_path = promoted_checkout
             outcome["status"] = "reproduced"
             outcome.pop("replayed_patch_refs", None)
             if replayed_patch_refs:
@@ -2463,7 +2484,9 @@ class PreludePhase(CoordinatorCollaborator):
             task,
             outcome,
             recorder,
-            reason=graded.veto_reason or f"measured {measured_gain:+.2f}% below keep threshold {keep_threshold:+.2f}%",
+            reason=graded.veto_reason
+            or graded.degrade_reason
+            or f"measured {measured_gain:+.2f}% below keep threshold {keep_threshold:+.2f}%",
         )
 
     def _reject_warm_replay_as_drift(

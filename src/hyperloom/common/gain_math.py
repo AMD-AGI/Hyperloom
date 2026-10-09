@@ -8,7 +8,13 @@ from __future__ import annotations
 from typing import Any
 
 from hyperloom.common.coerce import to_float
-from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_TOTAL, graded_axes_of, holds_within_band
+from hyperloom.common.perf_metric import (
+    GRADED_INTVTY,
+    GRADED_TOTAL,
+    graded_axes_of,
+    passes_tput_guard,
+    total_tput_per_chip_of,
+)
 
 
 def gain_pct(new: float | None, base: float) -> float | None:
@@ -85,7 +91,9 @@ def conc_pair_comparison(
         opt_axes = graded_axes_of(o) if guard_axis else {}
         guard_holds: bool | None = None
         if guard_axis and base_axes.get(guard_axis) and opt_axes.get(guard_axis):
-            guard_holds = holds_within_band(opt_axes, base_axes, guard_axis, noise_pct=guard_noise_pct)
+            guard_holds = passes_tput_guard(opt_axes, base_axes, noise_pct=guard_noise_pct)
+        baseline_guard = total_tput_per_chip_of(base_axes) if guard_axis and base_axes.get(guard_axis) else None
+        optimized_guard = total_tput_per_chip_of(opt_axes) if guard_axis and opt_axes.get(guard_axis) else None
         rows.append(
             {
                 "conc": c,
@@ -100,8 +108,8 @@ def conc_pair_comparison(
                 # The guard axis beside the objective, so the frontier this rung sits on is readable rather than
                 # only the one number it was ranked by. Null off the interactivity objective, and null when a side
                 # did not measure the axis -- which is not the same as a rung that measured it and fell outside.
-                "baseline_guard": base_axes.get(guard_axis) if guard_axis else None,
-                "optimized_guard": opt_axes.get(guard_axis) if guard_axis else None,
+                "baseline_guard": baseline_guard,
+                "optimized_guard": optimized_guard,
                 "guard_holds": guard_holds,
             }
         )

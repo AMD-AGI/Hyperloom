@@ -465,18 +465,16 @@ def write_minimal_final_report(
         )[:600]
         return f"- **{label}** (`{ts}`): `{body}`"
 
-    from .. import framework_registry
+    from ..performance_display import format_session_metric
 
     framework = str(state.get("framework") or "")
     baseline_tput = state.get("baseline_tput") or 0.0
     current_best = state.get("current_best") or {}
     cb_action = current_best.get("action") or "-"
     cb_tput = current_best.get("tput")
-    # Framework-aware primary metric: serving shows tok/s/GPU, scriptable xDiT shows per-image latency e2el_mean_ms
-    # (ms).
-    baseline_metric_s = framework_registry.format_primary_metric(framework, baseline_tput, precision=2)
+    baseline_metric_s = format_session_metric(state, baseline_tput, precision=2)
     cb_metric_s = (
-        framework_registry.format_primary_metric(framework, cb_tput, precision=2)
+        format_session_metric(state, cb_tput, measurement=current_best, precision=2)
         if isinstance(cb_tput, (int, float))
         else "-"
     )

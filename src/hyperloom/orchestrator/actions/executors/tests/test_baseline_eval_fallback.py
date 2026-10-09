@@ -1292,6 +1292,7 @@ def test_an_mlperf_baseline_without_a_clean_inline_score_stops_the_session(tmp_p
 
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     monkeypatch.setenv("HYPERLOOM_AGENTIC_BACKEND", "mlperf")
+    monkeypatch.setattr("hyperloom.inference_optimizer.agentx.runtime.maybe_prepare_agentx", lambda **kwargs: True)
     base = tmp_path / "base.yaml"
     _write_yaml(base)
 
@@ -1311,6 +1312,8 @@ def test_an_mlperf_baseline_without_a_clean_inline_score_stops_the_session(tmp_p
         state,
     )
     with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=fake_run):
-        _run(executor(ctx))
+        result = _run(executor(ctx))
 
+    assert result["accuracy_task"] == "mlperf_agentic_inline"
+    assert result["accuracy"] == 0.0
     assert state.stop_reason == "baseline_accuracy_failed"

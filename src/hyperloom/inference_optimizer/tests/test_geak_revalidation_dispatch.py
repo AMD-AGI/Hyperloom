@@ -1338,3 +1338,75 @@ async def test_crash_recovery_retries_a_transiently_failed_revalidation(coordina
 
     assert revalidations == ["geak_e2e_win_recovered"]
     assert st.geak_pending["status"] == "awaiting_rebench"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("overlay_state", ["missing", "config_only"])
+async def test_native_agentx_refuses_geak_products_regardless_of_overlay_state(
+    coordinator, tmp_path, monkeypatch, overlay_state
+) -> None:
+    c = coordinator
+    st = c.shared_state
+    _arm_kernel_to_sweep(st)
+    st.benchmark_mode = "agentx"
+    st.agentx_epoch = 2
+    st.baseline_tput = 100.0
+    st.baseline_config_path = "/run/canonical-agentx.yaml"
+    st.current_best = {"action": "explore", "tput": 120.0}
+    st.resume_pending_revalidation = True
+    overlay = tmp_path / "candidate" / "overlay"
+    if overlay_state == "config_only":
+        overlay.mkdir(parents=True)
+        (overlay / "sitecustomize.py").write_text("pass\n", encoding="utf-8")
+        (overlay / "_overlay_manifest.json").write_text('{"modules": [], "rebinds": []}', encoding="utf-8")
+    candidate = {
+        "status": "ok",
+        "accepted_config": {},
+        "final_overlay": str(overlay.parent),
+        "final_throughput_tok_s": 130.0,
+    }
+    geak_dir = c.session_dir / "geak"
+    geak_dir.mkdir()
+    result_path = geak_dir / "result.json"
+    result_path.write_text(json.dumps(candidate), encoding="utf-8")
+    original_dispatch = c.writeback.geak_rebench_params
+    original_fallback = c.writeback.validate_geak_via_geak_harness
+    dispatches = []
+    fallbacks = []
+
+    def dispatch(**kwargs):
+        dispatches.append(kwargs)
+        return original_dispatch(**kwargs)
+
+    async def fallback(**kwargs):
+        fallbacks.append(kwargs)
+        return await original_fallback(**kwargs)
+
+    monkeypatch.setattr(c.writeback, "geak_rebench_params", dispatch)
+    monkeypatch.setattr(c.writeback, "validate_geak_via_geak_harness", fallback)
+    monkeypatch.setattr(c.phase_kernel, "_record_geak_kernel_journey", lambda _result: None)
+    forbid_geak_launch(monkeypatch)
+
+    await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
+    assert dispatches == fallbacks == []
+    assert st.geak_result["error_class"] == "unsupported_upstream_launcher_hook"
+    assert not await c.tasks.queued()
+    # Exercise the persisted verdict, not an in-memory object identity.
+    st.geak_result = json.loads(json.dumps(st.geak_result))
+    for _ in range(2):
+        st.macro_cycle += 1
+        await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
+    assert dispatches == fallbacks == []
+    assert st.resume_pending_revalidation is True
+    assert st.current_best["tput"] == 120.0
+    assert not st.optimization_stack
+
+    # The result JSON is unchanged; only the real overlay becomes loadable.
+    overlay.mkdir(parents=True, exist_ok=True)
+    (overlay / "sitecustomize.py").write_text("pass\n", encoding="utf-8")
+    (overlay / "_overlay_manifest.json").write_text('{"modules": ["kernel.py"]}', encoding="utf-8")
+    st.macro_cycle += 1
+    await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
+    assert not await c.tasks.queued()
+    assert dispatches == fallbacks == []
+    assert json.loads(result_path.read_text(encoding="utf-8")) == candidate

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import yaml
+import pytest
 from pathlib import Path
 
 
@@ -75,10 +76,12 @@ def test_empty_override_is_noop():
 # Integration test: override lands in materialized YAML, NOT os.environ
 
 
-def test_runtime_override_in_yaml_not_process_env(tmp_path):
+@pytest.mark.parametrize("legacy_agentx", [False, True])
+def test_runtime_override_in_yaml_not_process_env(tmp_path, monkeypatch, legacy_agentx):
     """The attempt framework_bin must appear in materialized YAML benchmark.envs, and os.environ must be unchanged."""
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1" if legacy_agentx else "0")
     base_yaml = _base_yaml(tmp_path)
-    variant = GridVariant(name="test-rt")
+    variant = GridVariant(name="test-rt", extra_server_args="--max-num-seqs 16", extra_envs={"CONC": "4"})
     variant.runtime_override = {
         "path_prefix": "/attempt/bin",
         "framework_bin": "/attempt/bin/vllm",
@@ -100,7 +103,12 @@ def test_runtime_override_in_yaml_not_process_env(tmp_path):
     with out_yaml.open(encoding="utf-8") as f:
         materialized = yaml.safe_load(f)
 
+    if legacy_agentx:
+        assert materialized["benchmark"]["benchmark_script"] == "aiperf_client.sh"
+        assert "agentx" not in materialized["benchmark"]
+        assert materialized["benchmark"]["workload_spec"]["concurrency"] == 4
     envs = materialized["benchmark"]["envs"]
+    assert "--max-num-seqs 16" in envs["EXTRA_VLLM_ARGS"]
     assert envs.get("HYPERLOOM_FRAMEWORK_BIN") == "/attempt/bin/vllm"
     assert envs.get("HYPERLOOM_FRAMEWORK_PYTHON") == "/attempt/bin/python"
     assert "/attempt/bin" in envs.get("PATH", "")

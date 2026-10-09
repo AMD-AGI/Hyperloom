@@ -66,17 +66,26 @@ def _function(module, name: str) -> ast.FunctionDef:
     raise AssertionError(f"{name} not found in {module.__file__}")
 
 
-def _seal_call(body: list[ast.stmt]) -> tuple[int, ast.Call]:
-    """Return the index and node of the sole seal call among a body's statements."""
+def _seal_call(body: list[ast.stmt]) -> ast.Call:
+    """Find the final seal, nested when its alternative uses native argv."""
+    statements = body
+    if not any(
+        isinstance(stmt, ast.Expr)
+        and isinstance(stmt.value, ast.Call)
+        and isinstance(stmt.value.func, ast.Name)
+        and stmt.value.func.id == SEAL
+        for stmt in body
+    ):
+        statements = list(ast.walk(ast.Module(body=body, type_ignores=[])))
     found = [
-        (index, stmt.value)
-        for index, stmt in enumerate(body)
+        stmt.value
+        for stmt in statements
         if isinstance(stmt, ast.Expr)
         and isinstance(stmt.value, ast.Call)
         and isinstance(stmt.value.func, ast.Name)
         and stmt.value.func.id == SEAL
     ]
-    assert len(found) == 1, f"expected exactly one top-level {SEAL} call, found {len(found)}"
+    assert len(found) == 1, f"expected exactly one {SEAL} call, found {len(found)}"
     return found[0]
 
 
@@ -125,14 +134,13 @@ def _argument_env_writes(source: str) -> list[tuple[str, int]]:
 def test_nothing_the_seal_was_given_is_touched_again_after_it(module, name):
     """The seal is the last statement naming the mapping it was handed."""
     body = _function(module, name).body
-    index, call = _seal_call(body)
+    call = _seal_call(body)
     sealed = {node.id for argument in call.args for node in ast.walk(argument) if isinstance(node, ast.Name)}
     assert sealed, "the seal call names nothing this test could follow"
     late = [
         node.lineno
-        for stmt in body[index + 1 :]
-        for node in ast.walk(stmt)
-        if isinstance(node, ast.Name) and node.id in sealed
+        for node in ast.walk(ast.Module(body=body, type_ignores=[]))
+        if isinstance(node, ast.Name) and node.id in sealed and node.lineno > call.end_lineno
     ]
     assert not late, f"{name} touches {sorted(sealed)} after the seal, at line(s) {late}"
 
@@ -153,7 +161,7 @@ def test_every_write_to_the_argument_env_is_one_the_seal_settles():
 def test_every_write_inside_a_composer_happens_above_the_seal(module, name):
     """Composition is what runs before the seal; nothing writes the env below it."""
     source = Path(module.__file__).read_text(encoding="utf-8")
-    seal_line = _seal_call(_function(module, name).body)[1].lineno
+    seal_line = _seal_call(_function(module, name).body).lineno
     late = [lineno for function, lineno in _argument_env_writes(source) if function == name and lineno > seal_line]
     assert not late, f"{name} writes the argument env after the seal at line {seal_line}, at line(s) {late}"
 

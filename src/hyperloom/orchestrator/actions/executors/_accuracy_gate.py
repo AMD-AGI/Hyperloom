@@ -16,6 +16,7 @@ from typing import Any
 
 import yaml
 
+from hyperloom.common.agentx_accounting import measured_request_errors
 from hyperloom.common.env import env_flag, is_truthy
 from hyperloom.common.io import safe_mtime
 from hyperloom.common.perf_metric import is_agentx_mode
@@ -337,6 +338,96 @@ def parse_quality_gate(workspace: Path | str) -> dict[str, Any]:
     return {"quality_gate": qg, "source_file": str(latest)}
 
 
+def _parse_agentx_error_gate(
+    workspace: Path | str,
+) -> tuple[float | None, float | None]:
+    """Read the newest AgentX error rate and its threshold, as percentages.
+
+    Legacy ``map_aiperf`` artifacts expose a top-level percentage. Native
+    Magpie reports bind both values as ratios under
+    ``agentx_metrics.requests``.  A native threshold is part of the accepted
+    measurement contract, so a missing, non-numeric, or out-of-range value is
+    returned as ``None`` and makes the quality gate fail closed.  Legacy and
+    raw InferenceX artifacts do not carry that field and retain the historical
+    10-percent default.
+    """
+    # None rather than 0.0 so an export without the field is incomparable
+    # instead of a perfect score.
+    workspace = Path(workspace)
+    patterns = ("benchmark_report.json", "inferencex_result.json")
+    candidates = [
+        Path(filename)
+        for pattern in patterns
+        for filename in glob.glob(str(workspace / "**" / pattern), recursive=True)
+    ]
+    for path in sorted(candidates, key=safe_mtime, reverse=True):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            log.warning("accuracy_gate: unreadable %s: %s", path, exc)
+            continue
+        if not isinstance(data, dict):
+            continue
+
+        legacy_rate = data.get("request_error_rate")
+        if isinstance(legacy_rate, (int, float)) and not isinstance(legacy_rate, bool):
+            return float(legacy_rate), AGENTX_ERROR_RATE_THRESHOLD_PCT
+
+        metrics = data.get("agentx_metrics")
+        requests = metrics.get("requests") if isinstance(metrics, dict) else None
+        if isinstance(requests, dict):
+            native_rate = requests.get("error_rate")
+            if isinstance(native_rate, (int, float)) and not isinstance(native_rate, bool):
+                threshold = requests.get("threshold")
+                if (
+                    isinstance(threshold, (int, float))
+                    and not isinstance(threshold, bool)
+                    and math.isfinite(float(threshold))
+                    and 0.0 <= float(threshold) <= 1.0
+                ):
+                    return 100.0 * float(native_rate), 100.0 * float(threshold)
+                log.warning(
+                    "accuracy_gate: native AgentX report %s has an invalid request threshold: %r",
+                    path,
+                    threshold,
+                )
+                return 100.0 * float(native_rate), None
+
+        accounting = data.get("request_accounting")
+        if isinstance(accounting, dict):
+            errors = measured_request_errors(accounting)
+            successful = data.get("num_requests_successful")
+            if "records_dropped_total" in accounting:
+                dropped = accounting["records_dropped_total"]
+                total = data.get("num_requests_total")
+                if (
+                    errors is None
+                    or not all(type(value) is int and value >= 0 for value in (successful, dropped, total))
+                    or successful + dropped != total
+                ):
+                    return None, None
+            if (
+                isinstance(errors, (int, float))
+                and not isinstance(errors, bool)
+                and isinstance(successful, (int, float))
+                and not isinstance(successful, bool)
+                and errors >= 0
+                and successful >= 0
+                and errors + successful > 0
+            ):
+                return (
+                    100.0 * float(errors) / float(errors + successful),
+                    AGENTX_ERROR_RATE_THRESHOLD_PCT,
+                )
+    return None, None
+
+
+def parse_agentx_error_rate(workspace: Path | str) -> float | None:
+    """Read the newest legacy or native AgentX error rate, as a percentage."""
+    rate, _threshold = _parse_agentx_error_gate(workspace)
+    return rate
+
+
 def _latest_agentx_result(workspace: Path | str) -> dict[str, Any] | None:
     """The newest ``inferencex_result.json`` under *workspace*, or None."""
     results = [Path(f) for f in glob.glob(str(Path(workspace) / "**" / "inferencex_result.json"), recursive=True)]
@@ -349,13 +440,6 @@ def _latest_agentx_result(workspace: Path | str) -> dict[str, Any] | None:
         log.warning("accuracy_gate: unreadable %s: %s", latest, exc)
         return None
     return data if isinstance(data, dict) else None
-
-
-def parse_agentx_error_rate(workspace: Path | str) -> float | None:
-    """Read ``request_error_rate`` from the newest ``inferencex_result.json``; None when no result reported one."""
-    # None rather than 0.0 so an export without the field is incomparable instead of a perfect score.
-    rate = (_latest_agentx_result(workspace) or {}).get("request_error_rate")
-    return float(rate) if isinstance(rate, (int, float)) and not isinstance(rate, bool) else None
 
 
 def _mlperf_inline_accuracy(result: dict[str, Any] | None) -> float | None:
@@ -423,9 +507,14 @@ def parse_eval_results(
     # that reported no rate is not comparable, and treating that as a pass is
     # how an incomparable measurement reaches the leaderboard set.
     if is_agentx_mode(benchmark_mode):
-        rate = parse_agentx_error_rate(workspace)
-        passed = rate is not None and rate <= AGENTX_ERROR_RATE_THRESHOLD_PCT
-        log.info("accuracy_gate: agentx request_error_rate=%s passed=%s", rate, passed)
+        rate, threshold = _parse_agentx_error_gate(workspace)
+        passed = rate is not None and threshold is not None and rate <= threshold
+        log.info(
+            "accuracy_gate: agentx request_error_rate=%s threshold=%s passed=%s",
+            rate,
+            threshold,
+            passed,
+        )
         from hyperloom.common.agentx_workload import is_mlperf_backend
 
         if is_mlperf_backend():
@@ -445,6 +534,7 @@ def parse_eval_results(
             "task": "agentx_error_rate",
             "metric": "request_error_rate",
             "error_rate": rate,
+            "error_rate_threshold": threshold,
         }
 
     # Scriptable quality gate first: map passed->1.0 / fail->0.0.

@@ -18,6 +18,8 @@ _REVALIDATION_ANNOTATION_KEYS: frozenset[str] = frozenset(
         "revalidation_error",
         "revalidation_error_class",
         "revalidation_blocked_overlay",
+        "native_source_revalidation",
+        "canonical_revalidation",
     }
 )
 
@@ -50,6 +52,8 @@ def geak_verdict_is_terminal(persisted: Any) -> bool:
     """
     prev = persisted if isinstance(persisted, dict) else {}
     status = str(prev.get("revalidation_status") or "")
+    if status == "validated" and (prev.get("native_source_revalidation") or {}).get("status") == "validated":
+        return True
     return status in _TERMINAL_REVALIDATION_STATUSES or (
         status == "fallback_failed" and str(prev.get("revalidation_error_class") or "") == INCOMPARABLE_REVALIDATION
     )
@@ -79,6 +83,29 @@ def geak_candidate_is_adjudicated(persisted: Any, recovered: Any, *, harness_can
         return str(prev.get("revalidation_status") or "") in _TERMINAL_REVALIDATION_STATUSES
     if not geak_verdict_is_terminal(prev):
         return False
+    source_review = prev.get("native_source_revalidation") or {}
+    if source_review:
+        import hashlib
+        from pathlib import Path
+
+        from .geak_native_revalidation import overlay_source_files
+
+        params = source_review.get("params") or {}
+        files = params.get("native_geak_original_files") or {}
+        for filename, expected in files.items():
+            try:
+                actual = hashlib.sha256(Path(filename).read_bytes()).hexdigest()
+            except OSError:
+                return False
+            if actual != expected:
+                return False
+        overlay = str(params.get("overlay_pythonpath") or "")
+        if overlay:
+            try:
+                if overlay_source_files(overlay) != params.get("native_geak_overlay_files"):
+                    return False
+            except (OSError, ValueError):
+                return False
     blocked_overlay = str(prev.get("revalidation_blocked_overlay") or "")
     if blocked_overlay:
         from ..kernel.geak_config import _geak_overlay_is_loadable, _normalize_geak_overlay_dir
