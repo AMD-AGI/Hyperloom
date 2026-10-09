@@ -301,7 +301,8 @@ def main(argv: list[str] | None = None) -> int:
     if projector is None:
         report["limitations"].append(_WINNERS_ONLY)
     report["fetch_errors"] = errors
-    report["kb_store_url"] = store_url
+    # One key per service, so a reader never takes the Pulse base for a KB Store address.
+    report["pulse_url" if projector is not None else "kb_store_url"] = store_url
     text = json.dumps(report, indent=2, sort_keys=True)
     if args.output is not None:
         try:

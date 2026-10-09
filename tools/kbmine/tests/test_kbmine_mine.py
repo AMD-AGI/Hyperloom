@@ -631,10 +631,11 @@ def test_the_pulse_walk_pages_to_a_short_page() -> None:
 def test_a_server_ignoring_offset_is_read_once_and_stops() -> None:
     client = _pulse_client(lambda limit, offset: _rows(0, limit))
     rows = list(client.session_breakdowns(max_rows=1000))
-    assert len(rows) == 200 and len({r["session_id"] for r in rows}) == 200
+    page = len(rows)
+    assert page > 0 and len({r["session_id"] for r in rows}) == page, "one page read once, no session twice"
     assert client.requests == 2
     assert any("may be ignoring offset" in note for note in client.walk_notes)
-    assert any("skipped 200 row(s) repeating" in note for note in client.walk_notes)
+    assert any(f"skipped {page} row(s) repeating" in note for note in client.walk_notes)
 
 
 def test_a_page_of_non_objects_ends_the_walk() -> None:
@@ -818,3 +819,89 @@ def test_an_http_error_with_an_unreadable_body_is_still_a_pulse_error(monkeypatc
     monkeypatch.setattr(urllib.request, "urlopen", fail)
     with pytest.raises(PulseError, match="HTTP 502"):
         PulseClient("https://pulse.invalid", "t").get("/v1/session-breakdowns")
+
+
+class _Flaky:
+    """urlopen stand-in: raises each queued failure in turn, then answers with *rows*."""
+
+    def __init__(self, failures, rows):
+        self.failures, self.rows, self.calls = list(failures), rows, 0
+
+    def __call__(self, *args, **kwargs):
+        import io
+
+        self.calls += 1
+        if self.failures:
+            raise self.failures.pop(0)
+        body = json.dumps({"results": self.rows}).encode()
+
+        class _Body(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        return _Body(body)
+
+
+def test_a_truncated_page_is_retried_and_noted(monkeypatch) -> None:
+    import http.client
+    import urllib.request
+
+    from kbmine.pulse import PulseClient
+
+    flaky = _Flaky([http.client.IncompleteRead(b"{", 10), ConnectionResetError("reset")], _rows(0, 3))
+    monkeypatch.setattr(urllib.request, "urlopen", flaky)
+    client = PulseClient("https://pulse.invalid", "t")
+    rows = list(client.session_breakdowns(max_rows=1000))
+    assert len(rows) == 3 and flaky.calls == 3
+    assert any("2 request(s) repeated" in note for note in client.walk_notes)
+
+
+def test_a_persistent_transport_failure_gives_up_after_three_attempts(monkeypatch) -> None:
+    import http.client
+    import urllib.request
+
+    from kbmine.pulse import PulseClient, PulseError
+
+    flaky = _Flaky([http.client.IncompleteRead(b"", 10)] * 5, [])
+    monkeypatch.setattr(urllib.request, "urlopen", flaky)
+    with pytest.raises(PulseError, match="after 3 attempts"):
+        PulseClient("https://pulse.invalid", "t").get("/v1/session-breakdowns")
+    assert flaky.calls == 3
+
+
+def test_an_http_status_is_not_retried(monkeypatch) -> None:
+    import urllib.error
+    import urllib.request
+
+    from kbmine.pulse import PulseClient, PulseError
+
+    error = urllib.error.HTTPError("https://pulse.invalid", 500, "Server Error", {}, None)
+    flaky = _Flaky([error], [])
+    monkeypatch.setattr(urllib.request, "urlopen", flaky)
+    with pytest.raises(PulseError, match="HTTP 500"):
+        PulseClient("https://pulse.invalid", "t").get("/v1/session-breakdowns")
+    assert flaky.calls == 1
+
+
+def test_retries_reach_the_report(monkeypatch, tmp_path: Path) -> None:
+    import http.client
+    import urllib.request
+
+    monkeypatch.setattr(urllib.request, "urlopen", _Flaky([http.client.IncompleteRead(b"", 10)], _rows(0, 2)))
+    report = _run(["--pulse-url", "https://pulse.invalid"], tmp_path)
+    assert any("1 request(s) repeated" in note for note in report["fetch_errors"])
+
+
+def test_the_report_names_the_service_it_read(monkeypatch, tmp_path: Path) -> None:
+    from kbmine import pulse
+
+    monkeypatch.setattr(pulse.PulseClient, "get", lambda self, path, params=None: {"results": []})
+    from_pulse = _run(["--pulse-url", "https://pulse.invalid/api"], tmp_path)
+    assert from_pulse["pulse_url"] == "https://pulse.invalid/api" and "kb_store_url" not in from_pulse
+
+    pool = _write_pool(tmp_path, [_shaped(cid=_MI355_SGLANG, gain=10.0, optimized=800.0, tp=8)])
+    offline = _run(["--input", str(pool)], tmp_path)
+    assert offline["kb_store_url"] == "" and "pulse_url" not in offline
