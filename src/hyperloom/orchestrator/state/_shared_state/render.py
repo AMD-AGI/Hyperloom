@@ -425,19 +425,45 @@ class _RenderMixin:
         return _flatten_for_prompt(" ".join(parts))
 
     def to_untested_proposals_summary(self, *, max_entries: int = 12) -> str:
-        """Render the specialist proposals still waiting for a benchmark slot."""
+        """Render the proposals still waiting for a benchmark slot, and any open predictor mandate."""
+        from ...predictor.mandate import open_mandate
+
         rows = self.untested_proposal_rows()
-        if not rows:
+        mandate = open_mandate(self)
+        if not rows and not mandate:
             return ""
-        out = [
-            "Executable specialist proposals from this cycle that no explore round has benched.",
-            "Ranked by gap severity, then most recent. The Coordinator benches the head of this",
-            "queue whenever no explore is queued or running; dispatch `explore` only for variants not listed here.",
-            "",
-        ]
-        out.extend(self._untested_proposal_line(row) for row in rows[:max_entries])
-        if len(rows) > max_entries:
-            out.append(f"(+{len(rows) - max_entries} more not shown)")
+        out: list[str] = []
+        if rows and any(row["provenance"] == "primatune" for row in rows):
+            out = [
+                "Executable proposals from this cycle that no explore round has benched.",
+                "Ranked predictor rows first, then by gap severity, then most recent. The Coordinator benches the",
+                "head of this queue whenever no explore is queued or running; dispatch `explore` only for variants",
+                "not listed here.",
+                "",
+            ]
+        elif rows:
+            out = [
+                "Executable specialist proposals from this cycle that no explore round has benched.",
+                "Ranked by gap severity, then most recent. The Coordinator benches the head of this",
+                "queue whenever no explore is queued or running; dispatch `explore` only for variants not listed here.",
+                "",
+            ]
+        if rows:
+            out.extend(self._untested_proposal_line(row) for row in rows[:max_entries])
+            if len(rows) > max_entries:
+                out.append(f"(+{len(rows) - max_entries} more not shown)")
+        if mandate:
+            if out:
+                out.append("")
+            out.extend(
+                [
+                    "Predictor source-change mandate (prose, not a variant). To act on it, dispatch",
+                    "`delegate{action_name='specialist', params={scope:'freeform', mode:'patch', "
+                    f"primatune_mandate_id:'{mandate['mandate_id']}', task_description:'<one line>'}}}}`.",
+                    "The Coordinator substitutes the mandate's own text for task_description; carry the id verbatim.",
+                    _flatten_for_prompt(f"• {mandate['mandate_id']} why={mandate['mandate'][:160]}"),
+                ]
+            )
         return "\n".join(out)
 
     def to_proposal_scores_summary(self, *, max_rounds: int = 2) -> str:

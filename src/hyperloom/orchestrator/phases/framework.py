@@ -227,6 +227,9 @@ def _forward_integrate_source(
     if domain:
         dst["domain"] = domain
         dst["provenance"] = f"specialist:{domain}"
+    elif src.get("provenance"):
+        # A domain-less dispatch such as a predictor mandate keeps the label it was dispatched under.
+        dst["provenance"] = str(src["provenance"])
     # ``framework`` is intentionally not forwarded: integrate_patch consumes
     # that parameter when selecting accuracy parsing/gating behavior, whereas
     # proposal ownership only needs the gap metadata below.
