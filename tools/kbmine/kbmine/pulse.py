@@ -149,13 +149,22 @@ def _positive_int(value: Any) -> int | None:
 
 
 def roofline_ceiling(row: Mapping[str, Any]) -> tuple[float | None, str]:
-    """Per-GPU ceiling for a row, chosen by the session's own bound kind."""
+    """Per-GPU ceiling for a row, chosen by the session's own bound kind.
+
+    Hyperloom computes the snapshot's ``roofline_*_ceiling_tok_per_sec`` over the whole server -- HBM bandwidth and
+    peak FLOPs times ``tp`` (``roofline_snapshot.py`` passes ``num_gpus=runtime.tp``) -- while Pulse's throughput arms
+    are per GPU, so the ceiling is divided by the row's ``tp`` before the two are compared. A row with no ``tp`` is
+    taken as one GPU.
+    """
     roofline = row.get("roofline")
     if not isinstance(roofline, Mapping):
         return None, "no roofline snapshot"
     bound = str(roofline.get("roofline_bound_kind") or "").lower()
+    gpus = _positive_int(row.get("tp")) or 1
     memory = _finite(roofline.get("roofline_mem_ceiling_tok_per_sec"))
     compute = _finite(roofline.get("roofline_cmp_ceiling_tok_per_sec"))
+    memory = memory / gpus if memory else memory
+    compute = compute / gpus if compute else compute
     if bound == "memory" and memory:
         return memory, "memory"
     if bound == "compute" and compute:

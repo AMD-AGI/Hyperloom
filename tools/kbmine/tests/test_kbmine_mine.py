@@ -524,10 +524,11 @@ def _pulse_row(**overrides) -> dict:
         "osl": 1024,
         "baseline_tok_per_s_per_gpu": 100.0,
         "opt_tok_per_s_per_gpu": 150.0,
+        # Server totals over tp=8, as Hyperloom's snapshot computes them: 300 and 500 tok/s per GPU.
         "roofline": {
             "roofline_bound_kind": "memory",
-            "roofline_mem_ceiling_tok_per_sec": 300.0,
-            "roofline_cmp_ceiling_tok_per_sec": 500.0,
+            "roofline_mem_ceiling_tok_per_sec": 2400.0,
+            "roofline_cmp_ceiling_tok_per_sec": 4000.0,
         },
     }
     row.update(overrides)
@@ -547,7 +548,7 @@ def test_capture_is_the_share_of_the_roofline_gap_closed() -> None:
 def test_an_unlabelled_bound_takes_the_lower_ceiling() -> None:
     from kbmine.pulse import roofline_ceiling
 
-    row = _pulse_row(roofline={"roofline_mem_ceiling_tok_per_sec": 300.0, "roofline_cmp_ceiling_tok_per_sec": 200.0})
+    row = _pulse_row(roofline={"roofline_mem_ceiling_tok_per_sec": 2400.0, "roofline_cmp_ceiling_tok_per_sec": 1600.0})
     assert roofline_ceiling(row) == (200.0, "inferred min")
 
 
@@ -667,3 +668,29 @@ def test_the_search_page_limit_is_reported_as_the_cause(monkeypatch, tmp_path: P
     matching = [line for line in report["limitations"] if "identities" in line or "identity" in line]
     assert len(matching) == 1 and expected in matching[0]
     assert "--max-identities" not in matching[0]
+
+
+def test_the_server_ceiling_is_divided_by_tp_before_capture() -> None:
+    """A tp8 session: per-GPU baseline 100, optimized 150, server ceiling 2400 (300 per GPU) closes 25% of its gap."""
+    from kbmine.pulse import capture_pct, roofline_ceiling
+
+    assert capture_pct(_pulse_row()) == pytest.approx(25.0)
+    single = _pulse_row(tp=1, roofline={"roofline_bound_kind": "memory", "roofline_mem_ceiling_tok_per_sec": 300.0})
+    assert roofline_ceiling(single) == (300.0, "memory")
+    assert capture_pct(single) == pytest.approx(25.0)
+    untagged = _pulse_row(
+        tp=None, roofline={"roofline_bound_kind": "memory", "roofline_mem_ceiling_tok_per_sec": 300.0}
+    )
+    assert roofline_ceiling(untagged) == (300.0, "memory")
+
+
+def test_kb_and_input_reports_say_the_gains_are_winners_only(tmp_path: Path, monkeypatch) -> None:
+    pool = _write_pool(tmp_path, [_shaped(cid=_MI355_SGLANG, gain=10.0, optimized=800.0, tp=8)])
+    offline = _run(["--input", str(pool)], tmp_path)
+    assert any("conditional on a session having won" in line for line in offline["limitations"])
+
+    from kbmine import pulse
+
+    monkeypatch.setattr(pulse.PulseClient, "get", lambda self, path, params=None: {"results": []})
+    from_pulse = _run(["--pulse-url", "https://pulse.invalid"], tmp_path)
+    assert not any("conditional on a session having won" in line for line in from_pulse["limitations"])
