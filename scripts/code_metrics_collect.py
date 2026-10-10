@@ -190,7 +190,9 @@ def list_files(root: Path, roots: Iterable[str], exclude: Iterable[str]) -> tupl
     production: list[str] = []
     tests: list[str] = []
     for path in sorted(set(out.split("\0"))):
-        if not path.endswith(".py") or is_excluded(path, excluded) or not (root / path).is_file():
+        full = root / path
+        # A symlink is skipped: its target may be outside the repository (``/proc/self/environ``).
+        if not path.endswith(".py") or is_excluded(path, excluded) or full.is_symlink() or not full.is_file():
             continue
         (tests if "tests" in Path(path).parts[:-1] else production).append(path)
     return production, tests

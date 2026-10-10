@@ -167,7 +167,7 @@ def read_diff(root: Path, since: str) -> Diff:
     """The change from ``since`` to the working tree (untracked files are wholly added)."""
     diff = parse_diff(git(root, "-c", "core.quotePath=false", *_DIFF_ARGS, since, "--").stdout)
     for path in untracked_files(root).split("\0"):
-        if path and (root / path).is_file():
+        if path and not (root / path).is_symlink() and (root / path).is_file():
             diff.added[path] = set(range(1, _line_count(root / path) + 1))
     return diff
 
@@ -561,9 +561,10 @@ def run_all(root: Path, roots: Iterable[str], exclude: Iterable[str], units: Uni
     touched = sorted(touched_files(root, since))
     literal_paths = []
     for path in touched:
-        if not path.endswith(".py") or is_excluded(path, excluded) or not (root / path).is_file():
+        full = root / path
+        if not path.endswith(".py") or is_excluded(path, excluded) or full.is_symlink() or not full.is_file():
             continue
-        text = (root / path).read_text(encoding=ENCODING)
+        text = full.read_text(encoding=ENCODING)
         problems += comment_problems(path, text, diff.added.get(path, set()), diff.removed)
         if path in modules and not is_test_path(path):
             literal_paths.append((path, text))

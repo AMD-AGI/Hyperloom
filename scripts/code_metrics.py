@@ -156,8 +156,11 @@ def parse_config(text: str) -> Config | None:
     thresholds = dict(table["thresholds"])
     if set(thresholds) != set(METRICS):
         raise ToolError(f"thresholds must name exactly {sorted(METRICS)}, got {sorted(thresholds)}")
+    baseline = str(table["baseline"])
+    if not _PLAIN_PATH.fullmatch(baseline) or baseline.endswith("/"):
+        raise ToolError("`baseline` takes a plain repository file path")
     return Config(
-        baseline=table["baseline"],
+        baseline=baseline,
         roots=_scope(table, "roots"),
         exclude=_scope(table, "exclude"),
         thresholds=thresholds,
@@ -237,7 +240,8 @@ def _parse_entry(line: str, number: int) -> tuple[Key, int]:
     metric, _, rest = line.partition(" ")
     where, _, value = rest.rpartition(" ")
     if metric not in METRICS or not where or not value.isdigit():
-        raise ToolError(f"baseline line {number} is not `<metric> <path>[::<unit>] <value>`: {line}")
+        # The line itself is not echoed: the error reaches a PR comment.
+        raise ToolError(f"baseline line {number} is not `<metric> <path>[::<unit>] <value>`")
     path, separator, unit = where.partition(_UNIT_SEPARATOR)
     return (metric, path, unit if separator else MODULE), int(value)
 
@@ -457,7 +461,7 @@ def read_pull_request(args: argparse.Namespace) -> checks.PullRequest | None:
 
 def run(args: argparse.Namespace, outcome: Outcome) -> int:
     root = args.root.resolve()
-    config = parse_config((root / _PYPROJECT).read_text(encoding=_ENCODING))
+    config = parse_config(_read_regular(root, _PYPROJECT) or "")
     if config is None:
         raise ToolError(f"{_PYPROJECT} has no [tool.hyperloom.code_metrics] table")
     outcome.thresholds = config.thresholds
@@ -468,6 +472,7 @@ def run(args: argparse.Namespace, outcome: Outcome) -> int:
             f"Verdict computed by the gate scripts in `{Path(__file__).resolve().parent}`, not by this tree's copy."
         )
     baseline_path = root / config.baseline
+    _read_regular(root, config.baseline)  # refuse a symlinked or escaping baseline before anything reads it
     units = Units(root)
     findings = measure(root, config, units)
     if args.seed_baseline:
@@ -496,6 +501,18 @@ def run(args: argparse.Namespace, outcome: Outcome) -> int:
         outcome.problems += checks.pull_request_cjk(pull_request)
         outcome.waived = pull_request.raises_baseline
     return 1 if outcome.failed else 0
+
+
+def _read_regular(root: Path, path: str) -> str | None:
+    """``path`` under ``root`` as text, or None when missing; a symlink or a path outside is refused.
+
+    The PR controls these paths, and the job holds a token: a link to ``/proc/self/environ``
+    must not become a parse error quoted in a PR comment.
+    """
+    full = root / path
+    if full.is_symlink() or not full.resolve().is_relative_to(root):
+        raise ToolError(f"`{path}` must be a regular file in the repository, not a symlink")
+    return full.read_text(encoding=_ENCODING) if full.is_file() else None
 
 
 def seed(path: Path, findings: dict[Key, Finding]) -> int:

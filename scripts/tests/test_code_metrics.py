@@ -243,6 +243,45 @@ def test_a_baseline_entry_cannot_move_away_from_a_unit_that_is_still_over(repo: 
     assert section(report, GREW) == ""
 
 
+SECRET = "GITHUB_TOKEN=ghs_not_a_real_token"
+
+
+@pytest.mark.parametrize("baseline", ["/proc/self/environ", "../outside.txt", "scripts/"])
+def test_the_baseline_path_must_be_a_plain_repository_file(repo: Repo, baseline: str) -> None:
+    pyproject = repo.path / "pyproject.toml"
+    text = pyproject.read_text(encoding="utf-8")
+    pyproject.write_text(text.replace(f'baseline = "{BASELINE}"', f'baseline = "{baseline}"'), encoding="utf-8")
+    code, report = repo.gate()
+    assert code == 2
+    assert "`baseline` takes a plain repository file path" in report
+
+
+def test_a_symlinked_baseline_is_refused_without_reading_it(repo: Repo, tmp_path_factory) -> None:
+    secret = tmp_path_factory.mktemp("outside") / "environ"
+    secret.write_text(SECRET + "\n", encoding="utf-8")
+    (repo.path / BASELINE).symlink_to(secret)
+    code, report = repo.gate()
+    assert code == 2
+    assert f"`{BASELINE}` must be a regular file in the repository, not a symlink" in report
+    assert SECRET not in report
+
+
+def test_a_malformed_baseline_line_is_not_echoed(repo: Repo) -> None:
+    (repo.path / BASELINE).write_text(SECRET + "\n", encoding="utf-8")
+    code, report = repo.gate()
+    assert code == 2
+    assert "baseline line 1 is not `<metric> <path>[::<unit>] <value>`" in report
+    assert SECRET not in report
+
+
+def test_list_files_skips_symlinks(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src/a.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "src/b.py").symlink_to(tmp_path / "src/a.py")
+    subprocess.run(["git", "-C", str(tmp_path), "init", "-q"], check=True)
+    assert collect.list_files(tmp_path, ["src"], []) == (["src/a.py"], [])
+
+
 def test_a_unit_copied_to_two_places_is_not_a_move(repo: Repo) -> None:
     repo.write_baseline({key("src/old.py", "A.run"): 14})
     repo.findings = [cc("src/x.py", "A.run", 12), cc("src/y.py", "A.run", 12)]
