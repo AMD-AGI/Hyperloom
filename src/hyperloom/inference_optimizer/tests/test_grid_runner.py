@@ -739,6 +739,47 @@ async def test_run_grid_reused_ready_server_records_warmup_log_evidence(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_run_grid_scans_the_ready_server_log_named_by_the_caller(tmp_path):
+    """Explore's warmup grid lives beside the decision slot; the caller passes its log."""
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml_mtime(base)
+    output_root = tmp_path / "v02_kv_cache_fp8"
+    warm_log = output_root / "warmup_round" / "variant_00_kv" / "benchmark_vllm_1" / "server.log"
+    warm_log.parent.mkdir(parents=True)
+    warm_log.write_text(
+        "[aiter] shape is M:8192, N:7168, K:5120, not found tuned config in /tmp/a.csv, will use default config!\n",
+        encoding="utf-8",
+    )
+
+    def fake_run(cmd, *args, **kwargs):
+        _fake_workspace(Path(cmd[cmd.index("--output-dir") + 1]))
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        results = await run_grid(
+            base_yaml_path=base,
+            base_extra_args="",
+            grid=[GridVariant("kv")],
+            output_root=output_root,
+            server_already_ready=True,
+            ready_server_log=str(warm_log),
+            warmup_before_measure=False,
+        )
+
+    result = results[0]
+    assert result.server_log_path == str(warm_log)
+    assert result.launch_evidence["warm_reuse"]["source_server_log_path"] == str(warm_log)
+    report = json.loads((output_root / "variant_00_kv" / "runtime_findings.json").read_text(encoding="utf-8"))
+    assert report["log_path"] == str(warm_log)
+    assert [(f["rule_id"], f["status"], f["count"]) for f in report["findings"] if f["status"] != "not_detected"] == [
+        ("aiter.tuned_miss", "detected", 1)
+    ]
+
+
+@pytest.mark.asyncio
 async def test_run_grid_failure_reused_ready_server_uses_same_warmup_fallback(tmp_path, monkeypatch):
     """Failure paths use the same narrowly scoped ready-server log fallback."""
     base = tmp_path / "base.yaml"

@@ -1323,6 +1323,7 @@ class ExploreExecutor:
                         base_remove_args=list(stack_remove_args),
                         base_unset_envs=list(stack_unset_envs),
                         server_already_ready=use_warm_decision,
+                        ready_server_log=w.server_log_path if use_warm_decision else None,
                         serving_lease=variant_lease,
                         session_deadline_sec=session_deadline_sec,
                         variant_expected_sec=decision_expected_sec,
