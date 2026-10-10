@@ -110,6 +110,17 @@ repos:
         pass_filenames: false
         files: (SKILL\.md|/actions/[^/]+\.md|/prompts/.+|/references/.+\.md|^src/hyperloom/cli\.py)$
 
+  # --- Architecture contracts in .importlinter (mirrors lint.yml) ---
+  - repo: local
+    hooks:
+      - id: import-linter
+        name: import-linter (architecture contracts)
+        entry: env PYTHONPATH=src lint-imports --no-cache
+        language: python
+        additional_dependencies: ["import-linter==2.15"]
+        pass_filenames: false
+        files: ^(src/.*\.py|\.importlinter)$
+
   # Enable once the mypy backlog is manageable (config in pyproject.toml):
   # - repo: local
   #   hooks:

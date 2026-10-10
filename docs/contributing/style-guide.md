@@ -119,6 +119,31 @@ from hyperloom... import local...
 - **Constants** — `UPPER_SNAKE_CASE` at module level; prefix private constants with `_`.
 - **Types** — use modern syntax (`str | None`, `list[str]`, `collections.abc` for parameters). Prefer typed public APIs; `Any` only at boundaries (JSON, subprocess, LLM payloads).
 
+#### Dependency direction
+
+Imports between packages point one way, and CI enforces it: the `import-linter (architecture contracts)` job in `lint.yml` (and the `import-linter` pre-commit hook) runs `lint-imports` against the contracts in [`.importlinter`](../../.importlinter). A PR that adds an import breaking one of them fails, and the output names the contract and the import chain.
+
+| Contract | Rule |
+|----------|------|
+| `hl-top-layers` | `hyperloom.cli` > `orchestrator` > `agents` > `inference_optimizer` > `common`: a package imports only from layers below it |
+| `kf-only-common` | `kernelforge` imports nothing from `hyperloom` except `hyperloom.common` |
+| `common-is-leaf` | `hyperloom.common` imports nothing else from the project, `kernelforge` included |
+| `agents-independent` | `hyperloom.agents.*` packages do not import each other |
+| `kf-backends-independent` | `kernelforge.kernel_backends.*` packages do not import each other |
+| `kf-entry-protected` | `hyperloom.agents`, `inference_optimizer` and `common` do not import `kernelforge` directly; the orchestrator and `hyperloom.cli` are the way in |
+| `acyclic` | no import cycle between sibling packages anywhere under `hyperloom` or `kernelforge` |
+
+Imports inside functions count; imports under `if TYPE_CHECKING:` and test code do not. A new package under `hyperloom/agents/` or `kernelforge/kernel_backends/` is added to its independence list in the same PR.
+
+Two contracts carry the violations that existed when the gate landed, as exact `importer -> imported` lines under `ignore_imports`: `hl-top-layers` lists the upward imports of `hyperloom.inference_optimizer.cli` (an entry point that sits inside the core layer), and `acyclic` lists the imports that break today's cycles. These baselines only shrink. The contracts fail on an `ignore_imports` line that no longer matches an import, so a PR that removes one of those imports deletes its line in the same commit. Do not add a line to get a new import through: move the code to the layer it belongs in, or invert the dependency (pass a callable or a protocol down instead of importing up). The baseline is per module pair, so another import between two modules already listed is not caught; do not lean on that.
+
+Run it locally without installing the project:
+
+```bash
+pip install "import-linter==2.15"
+PYTHONPATH=src lint-imports --no-cache
+```
+
 ### Type checking (mypy)
 
 mypy is **recommended locally**, not yet a CI gate:
@@ -246,7 +271,8 @@ reuse lint
 | `.pre-commit-config.yaml` | Local hooks mirroring static analysis |
 | `.gitleaks.toml` | Secret-scan allowlists |
 | `REUSE.toml` | Default license annotation |
-| `.github/workflows/lint.yml` | Ruff, Bandit, Pylint (CI) |
+| `.importlinter` | Architecture contracts (import-linter) |
+| `.github/workflows/lint.yml` | Ruff, import-linter, Bandit, Pylint (CI) |
 | `.github/workflows/tests-coverage.yml` | Pytest + coverage gate |
 | `.github/workflows/secret-scan.yml` | Gitleaks |
 | `.github/workflows/reuse-lint.yml` | REUSE |
