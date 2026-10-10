@@ -105,7 +105,7 @@ def project_accepted_config(accepted_config: Mapping[str, Any] | None) -> dict[s
 
 def _is_filesystem_path(value: str) -> bool:
     text = str(value or "")
-    return text.startswith("/") or text.startswith("~/")
+    return text.startswith(("/", "~/"))
 
 
 def _is_attempt_row(entry: Any) -> bool:

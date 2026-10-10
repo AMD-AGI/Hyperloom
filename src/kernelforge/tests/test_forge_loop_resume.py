@@ -211,7 +211,7 @@ def _install_cli_fakes(monkeypatch, tmp_path):
 
     def fake_make_agent_fn(**kwargs):
         captured["agent_fn_kwargs"] = kwargs
-        return None
+        return
 
     monkeypatch.setattr(agent_module, "make_agent_fn", fake_make_agent_fn)
     analysis_service = object()

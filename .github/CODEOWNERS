@@ -27,7 +27,6 @@
 
 # Package metadata and environment templates (root-level)
 /pyproject.toml                                                 @AMD-AGI/SaFE
-/setup.py                                                       @AMD-AGI/SaFE
 /.env.template                                                  @AMD-AGI/SaFE
 /*.py                                                           @AMD-AGI/SaFE
 /*.yaml                                                         @AMD-AGI/SaFE

@@ -555,8 +555,30 @@ select = ["E", "F", "W", "BLE", "RUF100"]
 # math / parsing helpers where single-letter locals are idiomatic.
 ignore = ["E501", "E741"]
 
-# Future-proofing -- uncomment once the current findings are at zero.
-# extend-select = ["B", "I", "UP", "SIM", "RUF"]
+# Principle rules held at zero: any new finding fails CI. See the style guide's
+# "Formatting and lint" section for what each family enforces and why.
+extend-select = [
+    "G",  # logging calls take %-style args, not pre-formatted strings
+    "TD001", "TD003", "TD004", "TD005", "TD006", "TD007",  # TODO hygiene (issue link required)
+    "FIX001", "FIX003", "FIX004",  # no FIXME / XXX / HACK markers (TODO stays allowed)
+    "PGH",  # no blanket `# noqa` / `# type: ignore`, no eval-like misuse
+    "RSE",  # `raise X`, not `raise X()`
+    "ERA",  # no commented-out code
+    "PIE",  # no redundant pass / range start / lambda wrappers
+    "RET",  # explicit, consistent returns
+    "DTZ",  # timezone-aware datetimes
+    "LOG",  # correct logging API use
+    "A",  # do not shadow builtins
+    "C4",  # comprehension / collection-call idioms
+]
+# Still off pending a team decision -- each rewrites hundreds of lines that the
+# open PRs touch: "I" (import sorting), "UP" (pyupgrade). "B", "SIM" and the
+# rest of "RUF" carry a backlog and belong behind a ratchet, not a hard gate.
+
+[tool.ruff.lint.flake8-builtins]
+# ``aiter`` is AMD's kernel library, imported under its own name throughout;
+# the builtin ``aiter`` (async iterator) is never used in this tree.
+ignorelist = ["aiter"]
 
 # C901 (mccabe) is the complexity trigger in the style guide's "Size and
 # complexity" table. It stays off rather than on-and-ignored: the tree carries a
@@ -568,8 +590,10 @@ ignore = ["E501", "E741"]
 
 [tool.ruff.lint.per-file-ignores]
 # Tests re-import inside function bodies (E402), redefine fixtures (F811), and
-# bind setup values they assert on indirectly (F841).
-"**/tests/**/*.py" = ["F811", "E402", "F841"]
+# bind setup values they assert on indirectly (F841). They build fixtures with
+# ``dict(key=...)`` (C408), and fakes mirror the keyword names of the APIs they
+# stand in for, builtins included (A002, A006).
+"**/tests/**/*.py" = ["F811", "E402", "F841", "C408", "A002", "A006"]
 # Modules whose imports sit below the module-level constants / helpers they
 # close over (cycle-safe or lazy ordering).
 "src/hyperloom/orchestrator/loop/coordinator.py" = ["E402"]
@@ -584,6 +608,29 @@ ignore = ["E501", "E741"]
 # The import sits under the comment block explaining why the attribute name is
 # shared with kernelforge.llm rather than redeclared here.
 "src/kernelforge/fusion/llm_failure.py" = ["E402"]
+# Sphinx reads the module-level name ``copyright``.
+"docs/conf.py" = ["A001"]
+# Keyword names that mirror a stdlib signature callers already use:
+# ``subprocess.run(input=...)`` and ``BaseHTTPRequestHandler.log_message(format, ...)``.
+# Renaming them would break keyword callers / the override.
+"src/hyperloom/orchestrator/actions/executors/_git.py" = ["A002"]
+"src/kernelforge/llm/git.py" = ["A002"]
+"src/hyperloom_kb/http_service.py" = ["A002"]
+# Naive local-time timestamps are part of these files' on-disk / directory-name
+# formats (persisted ``isoformat()`` strings, log-clock parsing); making them
+# timezone-aware would change what existing readers parse and compare.
+"src/kernelforge/tracker/experiment.py" = ["DTZ005"]
+"src/kernelforge/tracker/schema.py" = ["DTZ005"]
+"src/kernelforge/tracker/usage_ledger.py" = ["DTZ005"]
+"src/hyperloom/orchestrator/actions/executors/bypass_report.py" = ["DTZ005"]
+"src/hyperloom/orchestrator/actions/executors/baseline.py" = ["DTZ001"]
+"src/hyperloom/orchestrator/rehearsal/scenario.py" = ["DTZ001"]
+# These call the root logger directly; a root-level call configures logging on
+# first use when nothing else has, so moving them to a module logger changes
+# what an unconfigured process prints.
+"src/hyperloom/inference_optimizer/cli/model_gate.py" = ["LOG015"]
+"src/hyperloom/inference_optimizer/model_config_utils.py" = ["LOG015"]
+"src/hyperloom/orchestrator/actions/executors/_geak_sweep.py" = ["LOG015"]
 
 # Markdown formatting in Ruff is still preview/experimental; keep ``ruff format``
 # scoped to Python so CI ``ruff format --check`` does not rewrite docs/skills.

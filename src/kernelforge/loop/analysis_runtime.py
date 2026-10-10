@@ -34,7 +34,7 @@ class AnalysisRuntimeMixin(AnalysisEvidenceMixin):
     ) -> AnalysisRefreshDecision:
         state = self.run_state.analysis
         planning_iteration = self.run_state.iteration if iteration is None else int(iteration)
-        decision = decide_analysis_refresh(
+        return decide_analysis_refresh(
             canonical_commit=context.analysis_commit,
             evidence_commit=state.evidence_commit,
             evidence_mean_case_speedup=(state.evidence_mean_case_speedup),
@@ -46,7 +46,6 @@ class AnalysisRuntimeMixin(AnalysisEvidenceMixin):
             last_attempt_iteration=state.last_attempt_iteration,
             current_iteration=planning_iteration,
         )
-        return decision
 
     def _record_analysis_refresh_decision(
         self,

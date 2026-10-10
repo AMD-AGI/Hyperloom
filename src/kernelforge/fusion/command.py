@@ -371,7 +371,7 @@ def _probe_eager_alignment(
         workdir=repo_root or ".",
         framework_root=repo_root,
         gpu=gpu,
-        env_flags={f: "1" for f in recipe.env_flag.split()},
+        env_flags=dict.fromkeys(recipe.env_flag.split(), "1"),
     )
     report = runner.report(recipe)
     observed = [str(k) for k in (report.get("eager_kernels") or []) if str(k).strip()]
@@ -1986,7 +1986,7 @@ def _run_serving_smoke(
     max_model_len: int = 0,
 ) -> tuple[str, str, str]:
     """Wiring-check + CUDA-graph-ON serving smoke for ONE recipe."""
-    flags = {f: "1" for f in recipe.env_flag.split()}
+    flags = dict.fromkeys(recipe.env_flag.split(), "1")
     safe_id = _safe_artifact_id(recipe.pattern_id)
     smoke_block = int(block_size) if int(block_size or 0) > 0 else None
     smoke_mml = int(max_model_len) if int(max_model_len or 0) > 0 else 4096
@@ -2069,7 +2069,7 @@ def validate_existing_source(
         harness_path=harness_path,
         workdir=repo_root or ".",
         gpu=gpu,
-        env_flags={f: "1" for f in recipe.env_flag.split()},
+        env_flags=dict.fromkeys(recipe.env_flag.split(), "1"),
     )
     return validate_recipe(recipe, runner, target_speedup=target_speedup)
 
@@ -2137,7 +2137,7 @@ def measure_harness_noise(
 ) -> dict[str, object]:
     """Measure how much the same harness varies on this machine."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    flags = {name: "1" for name in env_flags}
+    flags = dict.fromkeys(env_flags, "1")
     speedups: list[float] = []
     eager: list[float] = []
     fused: list[float] = []

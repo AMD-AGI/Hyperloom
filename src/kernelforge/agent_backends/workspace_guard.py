@@ -388,7 +388,7 @@ class WorkspaceGuard:
     ) -> None:
         """Save enough exact state to reconstruct an arbitrary dirty baseline."""
         self.baseline_tracked_paths = set(_nul_paths(_git_output(self.root, "ls-files", "-z")))
-        self.baseline_dirty_paths = set([*unstaged, *staged, *untracked])
+        self.baseline_dirty_paths = {*unstaged, *staged, *untracked}
         for relative in self.baseline_dirty_paths:
             self.baseline_path_snapshots[relative] = self._filesystem_snapshot(self.root / relative)
         self.baseline_index_entries = self._index_entries()
@@ -515,17 +515,15 @@ class WorkspaceGuard:
         )
 
         after_unstaged, after_staged, after_untracked = self._current_changes()
-        changed_paths = set(
-            [
-                *before_unstaged,
-                *before_staged,
-                *before_untracked,
-                *after_unstaged,
-                *after_staged,
-                *after_untracked,
-                *self.baseline_path_snapshots,
-            ]
-        )
+        changed_paths = {
+            *before_unstaged,
+            *before_staged,
+            *before_untracked,
+            *after_unstaged,
+            *after_staged,
+            *after_untracked,
+            *self.baseline_path_snapshots,
+        }
         for relative in sorted(
             changed_paths,
             key=lambda value: len(Path(value).parts),

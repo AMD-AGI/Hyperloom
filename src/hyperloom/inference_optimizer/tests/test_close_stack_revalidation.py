@@ -166,7 +166,7 @@ async def test_busy_lanes_cancel_the_rebench_instead_of_leaving_it_queued(coordi
 
     async def _lanes_busy(task, **_kwargs):
         seen.append(task)
-        return None
+        return
 
     c.dispatcher.run_task_registered = _lanes_busy
 

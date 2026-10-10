@@ -24,7 +24,7 @@ from kernelforge.loop.runner import IterationConfig, IterationLoop
 
 
 def _report(cases=(("decode-t1", 12.8),)):
-    return load_report({"cases": {case_id: ideal for case_id, ideal in cases}})
+    return load_report({"cases": dict(cases)})
 
 
 def _publish(report, directory) -> Path:

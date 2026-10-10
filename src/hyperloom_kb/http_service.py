@@ -462,7 +462,7 @@ class ExperienceHTTPService:
         configuration = RetrievalConfiguration.create(
             declaration.schema_ref,
             READ_POLICY_VERSION,
-            limits={capability: eligible_count for capability in RetrievalCapability},
+            limits=dict.fromkeys(RetrievalCapability, eligible_count),
             provider_refs=provider_refs,
             ranking_policy_ref="weighted-signal-sum@v1",
             max_groups=limit,

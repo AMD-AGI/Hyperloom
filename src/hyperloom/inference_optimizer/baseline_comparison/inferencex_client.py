@@ -33,8 +33,6 @@ _DERIVED_BATCH_SIZE = 200
 class InferenceXFetchError(Exception):
     """Raised on any InferenceX fetch failure (unsupported URL scheme, non-200 status, network or transport error)."""
 
-    pass
-
 
 def _require_http_url(url: str) -> None:
     _base_require_http_url(url, error=InferenceXFetchError)

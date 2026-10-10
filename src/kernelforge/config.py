@@ -119,7 +119,7 @@ class Config:
     # the same block budget.
     max_turns: int = 500
 
-    # Paths (derived)
+    # Paths, derived
     project_root: Path = field(default_factory=default_project_root)
     experiments_dir: Path = field(default=None)
     # Curated per-backend knowledge tree injected into the forge-loop system

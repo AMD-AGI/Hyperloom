@@ -173,13 +173,12 @@ def _no_op_source(text: str) -> str:
         raise AssemblyPreparationError("assembly execution probe requires AMDHSA kernel entries")
     # gfx950 kernarg preloading can skip the function prologue and start at an
     # aligned LLVM basic block. Stop those entries too, without changing the ABI.
-    text = re.sub(
+    return re.sub(
         r"^([ \t]*\.LBB[\w.$]*:)[ \t]*(?:(?://|;)[^\n]*)?$",
         r"\1\n    s_endpgm // FORGE_ASSEMBLY_EXECUTION_PROBE",
         text,
         flags=re.MULTILINE,
     )
-    return text
 
 
 async def verify_assembly(

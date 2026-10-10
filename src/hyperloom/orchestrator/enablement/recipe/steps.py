@@ -56,7 +56,7 @@ def _build_step(
     if sentinel is None:
         return []
     step: dict[str, Any] = {"kind": BUILD_KIND}
-    step.update({key: None for key in _BUILD_CONTRACT_KEYS})
+    step.update(dict.fromkeys(_BUILD_CONTRACT_KEYS))
     step["build_task_id"] = str(sentinel.get("task_id") or "").strip() or None
     if row is None:
         return [step]

@@ -338,12 +338,11 @@ class LocalExperienceStore:
         _schema_digest(schema_ref)
         if not self.experiences.exists():
             return ()
-        records = tuple(
+        return tuple(
             record
             for path in sorted(self.experiences.glob("exp-*.json"))
             if (record := self._read(path)) is not None and record.experience.schema_ref == schema_ref
         )
-        return records
 
 
 __all__ = [

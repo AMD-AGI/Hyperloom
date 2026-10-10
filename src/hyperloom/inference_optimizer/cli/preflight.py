@@ -2155,7 +2155,7 @@ def _persist_install_event(args: argparse.Namespace | None, session_dir: Path) -
         exc = RuntimeError("pending install event is unavailable")
         log.warning("failed to persist SBD V6 install event: %s", exc)
         if not record_write_warning(session_dir, component="install.event", exc=exc):
-            log.debug("failed to persist SBD V6 install-event write warning", exc_info=True)
+            log.debug("failed to persist SBD V6 install-event write warning", exc_info=exc)
 
 
 def _preflight(

@@ -446,7 +446,7 @@ class LocalRecipeStore:
         )
         return rows[:clamped_limit]
 
-    # Attempts (append-only)
+    # Attempts, append-only
     def append_attempt(
         self,
         *,

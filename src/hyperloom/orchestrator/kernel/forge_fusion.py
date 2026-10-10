@@ -314,8 +314,8 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
         result.update(
             {
                 # Fused arm = all confirmed flags ON; baseline arm = same flags OFF.
-                "env_flags": {f: "1" for f in best_flags},
-                "baseline_env_flags": {f: "0" for f in best_flags},
+                "env_flags": dict.fromkeys(best_flags, "1"),
+                "baseline_env_flags": dict.fromkeys(best_flags, "0"),
                 "best_pattern": loop.get("best_pattern"),
             }
         )
@@ -555,8 +555,8 @@ def salvage_forge_fusion_from_workspace(output_dir: str) -> dict[str, Any] | Non
         "decision": "KEEP",
         "kept": True,
         "kernel_speedup": speedup,
-        "env_flags": {f: "1" for f in flags},
-        "baseline_env_flags": {f: "0" for f in flags},
+        "env_flags": dict.fromkeys(flags, "1"),
+        "baseline_env_flags": dict.fromkeys(flags, "0"),
         "artifact_files": [],
         "patch": str(patch),
         "source_file": source_file,

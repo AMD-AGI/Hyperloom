@@ -32,7 +32,7 @@ def _backends_with_mock_critic(
     }
 
 
-# MockCriticBackend (unit)
+# MockCriticBackend, unit
 @pytest.mark.asyncio
 async def test_mock_critic_extracts_msg_id_and_approves():
     backend = MockCriticBackend()

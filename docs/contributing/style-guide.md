@@ -39,7 +39,8 @@ When this guide and tooling disagree, **tooling wins** — update the guide if y
 Ruff is the single formatter and linter for Python.
 
 - **Format:** `ruff format .` (Black-compatible; 120 columns).
-- **Lint:** `ruff check .` — rules `E`, `F`, `W` (pycodestyle errors, Pyflakes, warnings).
+- **Lint:** `ruff check .` — base rules `E`, `F`, `W` (pycodestyle errors, Pyflakes, warnings), `BLE` (no blind `except Exception`), `RUF100` (no unused `# noqa`), plus the principle rules below.
+- **Ruff version:** CI pins `ruff==0.16.2` (`lint.yml`) and the pre-commit hook uses the same `rev`; bump both together.
 - **Ignored globally:** `E501` (line length — owned by the formatter), `E741` (single-letter names in math/parsing helpers).
 
 Run both before opening a PR that touches Python:
@@ -51,7 +52,22 @@ ruff format --check .   # or `ruff format .` to apply
 
 **Do not** add `# noqa` or per-file ignores unless there is a documented reason (import cycles, test patterns). Existing per-file ignores live in `[tool.ruff.lint.per-file-ignores]` — extend that table instead of inline suppressions.
 
-**Future rules** (`B`, `I`, `UP`, `SIM`, `RUF`) are commented in `pyproject.toml` and will be enabled once the backlog is zero. New code should already follow import sorting and common bugbear patterns even before those rules are turned on.
+**Principle rules** are hard gates (`extend-select` in `pyproject.toml`): the tree is at zero and any new finding fails CI.
+
+| Rules | What they hold |
+|-------|----------------|
+| `G`, `LOG` | Logging takes `%`-style arguments, not f-strings; correct logger API (`exc_info` only where there is an exception, no root-logger calls in new code) |
+| `TD001`, `TD003`–`TD007`, `FIX001`, `FIX003`, `FIX004` | A `TODO` is allowed but must link an issue and be well-formed; no `FIXME`/`XXX`/`HACK` markers |
+| `PGH` | No blanket `# noqa` or `# type: ignore` — name the code (`# type: ignore[import-not-found]`) |
+| `RSE`, `RET`, `PIE` | `raise X` not `raise X()`; explicit, consistent returns with no `else` after `return`; no redundant `pass`, `range(0, n)` or `lambda: []` wrappers |
+| `ERA` | No commented-out code. The detector is a heuristic: a prose comment that happens to parse as Python (`# Subcommand: verify`) trips it — reword the comment |
+| `DTZ` | `datetime` values carry a timezone |
+| `A` | Do not shadow builtins (`aiter`, AMD's kernel library, is allowed by name) |
+| `C4` | Comprehension and collection-call idioms (`{}` over `dict()`, no `[x for x in y]`) |
+
+Where existing code needs the old shape for a behavioural reason — persisted naive timestamps, keyword names that mirror a stdlib signature, root-logger calls in an unconfigured CLI — the exception is a per-file ignore with that reason next to it, not a `# noqa`.
+
+**Not yet enabled:** `I` (import sorting) and `UP` (pyupgrade) are clean mechanical rewrites but touch hundreds of lines that open PRs also touch, so turning them on waits for a team decision on when to land the rewrite. `B`, `SIM` and the rest of `RUF` carry a backlog and belong behind a ratchet rather than a hard gate. New code should already follow import sorting and common bugbear patterns.
 
 ### Size and complexity
 
