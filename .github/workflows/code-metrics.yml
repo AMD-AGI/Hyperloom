@@ -90,8 +90,11 @@ jobs:
           # that bypasses PRs cannot grow the baseline or loosen the config either.
           BEFORE: ${{ github.event.before }}
         run: |
-          mkdir -p code-metrics
-          args=(--root "$GITHUB_WORKSPACE" --report code-metrics/report.md --link-base "https://github.com/$REPO/blob/$HEAD_SHA")
+          # The report lives outside the checkout: a PR could make a checkout path a
+          # symlink into the runner's temp directory and have it uploaded.
+          out="$RUNNER_TEMP/code-metrics-report"
+          mkdir -p "$out"
+          args=(--root "$GITHUB_WORKSPACE" --report "$out/report.md" --link-base "https://github.com/$REPO/blob/$HEAD_SHA")
           if [ "$EVENT" = pull_request ]; then
             base=HEAD^1
             args+=(--pr-number "$PR_NUMBER")
@@ -117,24 +120,24 @@ jobs:
           python "$impl/code_metrics.py" "${args[@]}"
           code=$?
           set -e
-          if [ ! -s code-metrics/report.md ]; then
-            printf '<!-- code-metrics-report -->\n## Code metrics gate: could not run\n\nThe script exited %s without a report; see the job log.\n' "$code" > code-metrics/report.md
+          if [ ! -s "$out/report.md" ]; then
+            printf '<!-- code-metrics-report -->\n## Code metrics gate: could not run\n\nThe script exited %s without a report; see the job log.\n' "$code" > "$out/report.md"
           fi
-          cat code-metrics/report.md >> "$GITHUB_STEP_SUMMARY"
+          cat "$out/report.md" >> "$GITHUB_STEP_SUMMARY"
           echo "code=$code" >> "$GITHUB_OUTPUT"
 
       - name: Keep the report for the fork-PR comment workflow
         if: always() && github.event_name == 'pull_request' && steps.gate.outcome == 'success'
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: echo "$PR_NUMBER" > code-metrics/pr-number.txt
+        run: echo "$PR_NUMBER" > "$RUNNER_TEMP/code-metrics-report/pr-number.txt"
 
       - uses: actions/upload-artifact@v7
         if: always() && github.event_name == 'pull_request' && steps.gate.outcome == 'success'
         continue-on-error: true
         with:
           name: code-metrics-report
-          path: code-metrics/
+          path: ${{ runner.temp }}/code-metrics-report/
           retention-days: 7
 
       - name: Post the report on the PR
@@ -146,7 +149,7 @@ jobs:
           script: |
             try {
               const post = require(`${process.env.RUNNER_TEMP}/code-metrics-gate/comment.js`);
-              await post({ github, context, core, number: context.payload.pull_request.number, reportPath: 'code-metrics/report.md' });
+              await post({ github, context, core, number: context.payload.pull_request.number, reportPath: `${process.env.RUNNER_TEMP}/code-metrics-report/report.md` });
             } catch (err) {
               core.warning(`could not post the code-metrics PR comment (${err.status || 'error'}: ${err.message}); the job summary has the report and the gate step decides this job.`);
             }

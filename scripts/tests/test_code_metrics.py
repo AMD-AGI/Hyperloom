@@ -274,12 +274,15 @@ def test_a_malformed_baseline_line_is_not_echoed(repo: Repo) -> None:
     assert SECRET not in report
 
 
-def test_list_files_skips_symlinks(tmp_path: Path) -> None:
+def test_a_symlinked_python_file_in_scope_is_refused_not_skipped(tmp_path: Path) -> None:
     (tmp_path / "src").mkdir()
     (tmp_path / "src/a.py").write_text("x = 1\n", encoding="utf-8")
-    (tmp_path / "src/b.py").symlink_to(tmp_path / "src/a.py")
+    (tmp_path / "payload.txt").write_text("def f():\n    pass\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(tmp_path), "init", "-q"], check=True)
     assert collect.list_files(tmp_path, ["src"], []) == (["src/a.py"], [])
+    (tmp_path / "src/b.py").symlink_to(tmp_path / "payload.txt")
+    with pytest.raises(collect.ToolError, match=r"`src/b.py` is a symlink; the gate measures Python files only"):
+        collect.list_files(tmp_path, ["src"], [])
 
 
 def test_a_unit_copied_to_two_places_is_not_a_move(repo: Repo) -> None:
@@ -696,13 +699,26 @@ def test_fork_comment_skips_cancelled_runs_one_poster_per_branch() -> None:
     assert download["continue-on-error"] is True and download["id"] == "report"
 
 
+def test_the_report_is_written_and_uploaded_outside_the_checkout() -> None:
+    # A PR controls every path in the checkout; one made a symlink into the runner temp
+    # directory would upload the persisted git credential with the artifact.
+    text = (ROOT / ".github/workflows/code-metrics.yml").read_text(encoding="utf-8")
+    steps = workflow_steps("code-metrics.yml")
+    assert 'out="$RUNNER_TEMP/code-metrics-report"' in steps["Code metrics gate"]["run"]
+    assert '--report "$out/report.md"' in steps["Code metrics gate"]["run"]
+    assert steps["actions/upload-artifact@v7"]["with"]["path"] == "${{ runner.temp }}/code-metrics-report/"
+    assert "code-metrics/" not in text.replace("code-metrics-report/", "").replace("code-metrics-gate/", "")
+
+
 @pytest.mark.parametrize("refusal", ["Resource not accessible by integration", "API rate limit exceeded"])
 def test_a_refused_comment_is_a_warning_not_a_red_job(tmp_path: Path, refusal: str) -> None:
     gate_dir = tmp_path / "temp/code-metrics-gate"
     gate_dir.mkdir(parents=True)
     shutil.copy(ROOT / ".github/scripts/code_metrics_comment.js", gate_dir / "comment.js")
-    (tmp_path / "code-metrics").mkdir()
-    (tmp_path / "code-metrics/report.md").write_text(f"{MARKER}\n## Code metrics gate: PASSED\n", encoding="utf-8")
+    (tmp_path / "temp/code-metrics-report").mkdir()
+    (tmp_path / "temp/code-metrics-report/report.md").write_text(
+        f"{MARKER}\n## Code metrics gate: PASSED\n", encoding="utf-8"
+    )
     script = workflow_steps("code-metrics.yml")["Post the report on the PR"]["with"]["script"]
     payload = {"pull_request": {"number": 7}}
     code, calls = run_github_script(

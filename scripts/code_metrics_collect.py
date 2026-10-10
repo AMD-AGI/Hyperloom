@@ -191,8 +191,12 @@ def list_files(root: Path, roots: Iterable[str], exclude: Iterable[str]) -> tupl
     tests: list[str] = []
     for path in sorted(set(out.split("\0"))):
         full = root / path
-        # A symlink is skipped: its target may be outside the repository (``/proc/self/environ``).
-        if not path.endswith(".py") or is_excluded(path, excluded) or full.is_symlink() or not full.is_file():
+        if not path.endswith(".py") or is_excluded(path, excluded):
+            continue
+        if full.is_symlink():
+            # Not read (its target may be outside the repository) and not skipped (that would hide it).
+            raise ToolError(f"`{path}` is a symlink; the gate measures Python files only as regular files")
+        if not full.is_file():
             continue
         (tests if "tests" in Path(path).parts[:-1] else production).append(path)
     return production, tests
