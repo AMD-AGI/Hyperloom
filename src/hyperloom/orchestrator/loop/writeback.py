@@ -115,9 +115,6 @@ _BASELINE_MAX_TOTAL_FAILURES: int = 3
 _DEFAULT_RESUME_DRIFT_FLOOR_PCT: float = 95.0
 
 
-# Characters of the normalised error text a baseline failure signature keeps; the
-# tail is where the cause is printed.
-_BASELINE_SIGNATURE_TAIL_CHARS: int = 400
 _SIGNATURE_VOLATILE_RE = re.compile(r"0x[0-9a-f]+|[0-9a-f]{8,}|\d+")
 
 
@@ -132,8 +129,9 @@ def _baseline_failure_signature(err_class: str, error: Any) -> str:
     text = str(error or "").strip().lower()
     if not text:
         return ""
+    # The whole text, not a tail: two different causes can end in the same traceback.
     text = " ".join(_SIGNATURE_VOLATILE_RE.sub("#", text).split())
-    return f"{err_class}|{text[-_BASELINE_SIGNATURE_TAIL_CHARS:]}"
+    return f"{err_class}|{hashlib.sha256(text.encode('utf-8')).hexdigest()}"
 
 
 def _is_ray_cluster_infeasible(result_payload: Mapping[str, Any]) -> bool:

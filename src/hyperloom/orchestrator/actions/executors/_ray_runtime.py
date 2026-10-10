@@ -286,24 +286,75 @@ def force_restart_local_cluster(
 _NON_HELD_RESOURCE_PREFIXES = ("node:", "memory", "object_store_memory")
 
 
+def _visible_gcs_server_count() -> int:
+    """Count the Ray GCS servers (one per head) running in this PID namespace; ``-1`` when unreadable."""
+    count = 0
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return -1
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/comm", encoding="utf-8") as comm:
+                if comm.read().strip() == "gcs_server":
+                    count += 1
+        except OSError:
+            continue
+    return count
+
+
+def _cluster_activity() -> list[str]:
+    """Describe what is running on the connected cluster besides this driver; empty when nothing is.
+
+    Read from the GCS tables directly so it works without a dashboard: actors not yet
+    dead (including ones that hold no resources), and jobs whose driver is another
+    live process (which also covers tasks that driver has pending).
+    """
+    from ray._private import state as ray_state
+
+    import ray
+
+    own_job = str(ray.get_runtime_context().get_job_id() or "")
+    activity: list[str] = []
+    live_actors = [a for a in ray_state.actors().values() if str(a.get("State") or "") != "DEAD"]
+    if live_actors:
+        activity.append(f"{len(live_actors)} actor(s) not dead")
+    other_drivers = [
+        j
+        for j in ray_state.jobs()
+        if not j.get("IsDead") and str(j.get("JobID") or "") != own_job and j.get("DriverPid") != os.getpid()
+    ]
+    if other_drivers:
+        pids = ", ".join(str(j.get("DriverPid")) for j in other_drivers)
+        activity.append(f"other live driver(s) attached (pid {pids})")
+    return activity
+
+
 def local_head_restartable() -> Tuple[bool, str]:
     """Whether the connected Ray cluster is a lone local head this process may restart.
 
-    Restarting means ``ray stop --force`` on this host, so it is allowed only for a
-    head nothing else depends on: no explicit cluster address, not a multi-node run,
-    exactly one live node and it is this host's raylet, and no CPU, GPU or custom
-    resource currently held by a task or actor.
+    Restarting means ``ray stop --force``, which stops every Ray process visible on
+    this host, so it is allowed only when that is exactly the connected head and
+    nothing else depends on it: no explicit cluster address, not a multi-node run,
+    exactly one Ray head visible on the host, exactly one live node and it is this
+    host's raylet, no resource held, no actor that is not dead and no other live
+    driver. Anything that cannot be inspected counts as a reason not to restart.
 
     Returns:
         ``(True, "")`` when a restart is safe, else ``(False, why)``.
     """
     address = os.environ.get("RAY_ADDRESS", "").strip()
-    if address and address.lower() not in ("auto", "local"):
+    if address and address.lower() != "auto":
         return False, f"RAY_ADDRESS={address!r} names an explicit cluster"
     from ._multi_node_env import is_multi_node
 
     if is_multi_node():
         return False, "this is a multi-node run"
+    heads = _visible_gcs_server_count()
+    if heads != 1:
+        return False, f"{heads if heads >= 0 else 'an unknown number of'} Ray head(s) are visible on this host"
     import ray
 
     try:
@@ -311,6 +362,7 @@ def local_head_restartable() -> Tuple[bool, str]:
         local_node = ray.get_runtime_context().get_node_id()
         totals = ray.cluster_resources()
         available = ray.available_resources()
+        activity = _cluster_activity()
     except Exception as exc:  # noqa: BLE001 - an unreadable cluster is not a safe one to stop
         return False, f"could not inspect the cluster: {exc!r}"
     if len(alive) != 1:
@@ -324,6 +376,8 @@ def local_head_restartable() -> Tuple[bool, str]:
     )
     if held:
         return False, f"resources are in use on it ({', '.join(held)})"
+    if activity:
+        return False, f"it has work on it ({'; '.join(activity)})"
     return True, ""
 
 

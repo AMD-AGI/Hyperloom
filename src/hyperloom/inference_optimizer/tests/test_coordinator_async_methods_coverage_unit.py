@@ -1109,3 +1109,16 @@ async def test_unpromotable_baseline_same_failure_in_enablement_does_not_stop_ea
     await coord.writeback.handle_unpromotable_result(_baseline_task("bl-en-1"), result)
     await coord.writeback.handle_unpromotable_result(_baseline_task("bl-en-2"), result)
     assert coord.shared_state.stop_reason != "baseline_failed"
+
+
+@pytest.mark.asyncio
+async def test_unpromotable_baseline_different_causes_with_a_shared_tail_keep_three_strikes(coord: Coordinator) -> None:
+    """The signature covers the whole text: two causes that end in the same long traceback are not one failure."""
+    tail = "Traceback (most recent call last):\n" + "  File engine.py, in run\n" * 40 + "RuntimeError: engine died"
+    a = {"status": "failed", "error_class": "subprocess_nonzero", "error": "HIP out of memory\n" + tail}
+    b = {"status": "failed", "error_class": "subprocess_nonzero", "error": "NCCL timeout\n" + tail}
+
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-tail-1"), a)
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-tail-2"), b)
+    assert coord.shared_state.baseline_failure_streak == 2
+    assert coord.shared_state.stop_reason != "baseline_failed"

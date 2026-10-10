@@ -170,10 +170,12 @@ baseline. Prefer letting Hyperloom start the head (or re-running the installer)
 over starting one by hand.
 
 > **Note**: current Hyperloom startup paths can auto-start or reuse a local Ray
-> head. A lone local head with no work on it that lacks `serving_slot` is
-> restarted with it automatically; any other cluster without it (an explicit
-> `RAY_ADDRESS`, a multi-node cluster, or one with resources in use) fails with
-> `existing Ray head has no serving_slot resource`. If `ray_current_cluster`
+> head. A local head that lacks `serving_slot` is restarted with it
+> automatically only when it is the only Ray head on the host and has no work on
+> it (no held resources, live actors or other drivers); any other cluster
+> without it (an explicit `RAY_ADDRESS`, a multi-node cluster, a busy head, or a
+> host with a second head) fails with `existing Ray head has no serving_slot
+> resource` and the reason it was not restarted. If `ray_current_cluster`
 > points at a stale or incompatible cluster, stop Ray first so Hyperloom can
 > create a fresh head with the required GPU and custom-resource configuration.
 

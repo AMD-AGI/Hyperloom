@@ -85,9 +85,11 @@ class RayMissingServingSlotError(RayInfeasibleError):
     """The connected head does not declare the ``serving_slot`` resource."""
 
 
-#: Serialises the missing-``serving_slot`` repair: leases are ensured from pool
-#: threads, and two concurrent repairs would each stop the head the other started.
-_SERVING_SLOT_REPAIR_LOCK = threading.Lock()
+#: Held by every lease while it connects, checks feasibility and creates its actor,
+#: and by the missing-``serving_slot`` repair for its whole stop/start/reconnect.
+#: Leases start from pool threads; without it a lease could create its actor on
+#: the head the repair is about to stop, after the repair found the head idle.
+_CLUSTER_STARTUP_LOCK = threading.RLock()
 
 
 def _assert_cluster_feasible(*, num_gpus: float, serving_slot: bool) -> None:
@@ -125,7 +127,7 @@ def _ensure_cluster_feasible(*, num_gpus: float, serving_slot: bool, log_path: A
     from ._ray_backend import get_ray_backend
     from ._ray_runtime import local_head_restartable
 
-    with _SERVING_SLOT_REPAIR_LOCK:
+    with _CLUSTER_STARTUP_LOCK:
         try:
             # Another lease may have repaired the head while this one waited.
             _assert_cluster_feasible(num_gpus=num_gpus, serving_slot=serving_slot)
@@ -513,11 +515,12 @@ class ServingLease:
             return
         from ._ray_backend import get_ray_backend
 
-        get_ray_backend().ensure(log_path=self._ensure_log_path)
-        _ensure_cluster_feasible(
-            num_gpus=self._num_gpus, serving_slot=self._serving_slot, log_path=self._ensure_log_path
-        )
-        self._actor = make_serving_actor(self._num_gpus, serving_slot=self._serving_slot)
+        with _CLUSTER_STARTUP_LOCK:
+            get_ray_backend().ensure(log_path=self._ensure_log_path)
+            _ensure_cluster_feasible(
+                num_gpus=self._num_gpus, serving_slot=self._serving_slot, log_path=self._ensure_log_path
+            )
+            self._actor = make_serving_actor(self._num_gpus, serving_slot=self._serving_slot)
 
     def run_session_kill(
         self,
@@ -937,11 +940,12 @@ class GpuSpecialistLease:
         """Create the actor and SUBMIT the subprocess launch without blocking."""
         from ._ray_backend import get_ray_backend
 
-        get_ray_backend().ensure(log_path=self._ensure_log_path)
-        _ensure_cluster_feasible(
-            num_gpus=self._num_gpus, serving_slot=self._serving_slot, log_path=self._ensure_log_path
-        )
-        self._actor = make_gpu_specialist_actor(self._num_gpus, serving_slot=self._serving_slot)
+        with _CLUSTER_STARTUP_LOCK:
+            get_ray_backend().ensure(log_path=self._ensure_log_path)
+            _ensure_cluster_feasible(
+                num_gpus=self._num_gpus, serving_slot=self._serving_slot, log_path=self._ensure_log_path
+            )
+            self._actor = make_gpu_specialist_actor(self._num_gpus, serving_slot=self._serving_slot)
         self._start_ref = self._actor.start.remote(
             cmd,
             env=env,
