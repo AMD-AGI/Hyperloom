@@ -27,7 +27,7 @@ the rules listed. Rows overlap; a rule listed twice is read once.
 
 | The diff... | Read |
 |---|---|
-| changes any non-test file under `src/` | X1 X3 |
+| changes any non-test file under `src/` | X1 X3 D12 |
 | adds or changes a value that crosses a boundary: status literal, enum member, dataclass or TypedDict field, keyword argument, signature, return semantics | C1 C3 C5 |
 | adds or changes a knob or a pin: CLI flag, env var, config key, default value, a pinned external version, ref or sha, an install script, `docs/compatibility.rst`, or the argv or extra-args list one is assembled into | C3 C4 S6 T4 X5 X7 D8 D9 D11 |
 | removes a flag, env var, enum member, test, fallback/legacy/bypass route or whole file, or tightens a comparison (`<` returns as `==`, a new `all(...)`) | C3 T2 X4 D3 |
@@ -743,6 +743,47 @@ names the readers left on the old answer until then.
 the head tree for the readers the diff did not touch -- that count is the finding.
 **Report as:** `D11 <file>:<line> -- re-derives <value> at 1 of <N> readers; <producer module>
 publishes it and is untouched, so <other reader>:<line> still resolves it as <old answer>`
+
+### D12 -- A function this diff adds, or whose complexity it raises, may not exceed cyclomatic complexity 20
+
+**Severity:** blocking
+**Fires when:** the diff adds a `def` or `async def` under `src/` outside a `tests/` directory,
+or adds branches to an existing one, and the measurement below puts that function above 20 at
+the head while the merge base had it at 20 or below, absent, or at a lower number.
+**The rule:** measure, do not estimate -- the verdict is a comparison of two numbers, and a
+function that reads long is not the same claim. Run the ceiling against the changed files at the
+head, then against the same paths at `base.txt`, and match per function name:
+
+```bash
+ruff check --select C901 --config "lint.mccabe.max-complexity=20" --force-exclude \
+  --output-format concise $(cut -f3 "$WORK/numstat.txt" | grep '^src/.*\.py$' | grep -v '/tests/')
+
+git show "$(cat "$WORK/base.txt")":<path> > "$WORK/base-<name>.py"
+ruff check --select C901 --config "lint.mccabe.max-complexity=20" --isolated \
+  --output-format concise "$WORK/base-<name>.py"
+```
+
+`--force-exclude` keeps Ruff's `extend-exclude` (vendored SDK copies, `src/kernelforge/examples`)
+out when paths are passed explicitly; `--isolated` is what lets the base copy be checked from
+outside the tree. Present at head and absent at base, or a higher number at head than at base,
+fires. The same number on both sides is backlog and is silent. This is not a rule duplicating a
+static gate: `C901` is absent from `[tool.ruff.lint] select` and Pylint runs `--errors-only`, so
+nothing in CI measures it and review is the only place it surfaces. `AGENTS.md` *Size is a design
+signal* carries the gate and the style guide § *Complexity ceiling* carries the two cases; the
+finding names the function, both numbers, and the branch the diff added.
+**Seen in:** no single PR -- this is the gate written into the style guide's *Size and
+complexity* table rather than a shape clustered from review history. The tree held 124 units
+above 20 when it was introduced, which is the backlog the comparison exists to keep out of the
+finding.
+**Not a finding when:** the base number equals the head number (the unit was already over and
+this diff did not grow it); the file is a test, or sits in `extend-exclude`, which
+`--force-exclude` already settles; the added branches are a flat dispatch or validation table
+whose arms share no state and the body says so -- that is the trigger's accepted answer, and it
+survives at the ceiling only when the arms are genuinely independent.
+**Evidence:** both Ruff invocations above, with the head and base numbers quoted; `$WORK/diff.txt`
+for the branches that moved the number.
+**Report as:** `D12 <file>:<line> -- <function> is complexity <head> (base: <base|absent>), over
+the ceiling of 20; split it or keep <added branch> out of it`
 
 ## V -- Review method and PR hygiene
 
