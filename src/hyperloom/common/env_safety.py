@@ -7,9 +7,13 @@ from __future__ import annotations
 
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES as _GPU_MASK_ENV_NAMES
 
+import json
+import logging
 import os
 import re
 from collections.abc import Mapping
+
+log = logging.getLogger(__name__)
 
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -418,6 +422,35 @@ def filter_untrusted_env_mapping(
     return allowed, dropped
 
 
+OPERATOR_EXTRA_ENV_VAR = "INFERENCE_OPTIMIZER_EXTRA_ENV"
+
+
+def operator_extra_env(raw: str | None = None) -> dict[str, str]:
+    """Return the operator's ``--extra-env`` pins from the CLI handoff blob.
+
+    The pins are also exported under their own names; this blob is what survives a state roundtrip and what a
+    resume reads to tell which names the previous launch set.
+
+    Args:
+        raw: The serialized blob, or ``None`` to read it from the environment.
+
+    Returns:
+        The pins; empty when unset or unparseable, because a malformed pin must not take the run down with it.
+    """
+    blob = (os.environ.get(OPERATOR_EXTRA_ENV_VAR, "") if raw is None else raw).strip()
+    if not blob:
+        return {}
+    try:
+        parsed = json.loads(blob)
+    except (TypeError, ValueError):
+        log.warning("ignoring unparseable %s; the operator's pins are not in effect", OPERATOR_EXTRA_ENV_VAR)
+        return {}
+    if not isinstance(parsed, dict):
+        log.warning("ignoring non-object %s; the operator's pins are not in effect", OPERATOR_EXTRA_ENV_VAR)
+        return {}
+    return {str(key).strip(): str(value) for key, value in parsed.items() if str(key).strip()}
+
+
 def scrub_child_process_env(env: dict[str, str]) -> dict[str, str]:
     """Remove startup/preload hooks from a child-process environment in place."""
     for name in BLOCKED_CHILD_ENV_NAMES:
@@ -485,6 +518,7 @@ __all__ = [
     "BLOCKED_UNTRUSTED_ENV_NAMES",
     "BLOCKED_VARIANT_ENV_NAMES",
     "GPU_MASK_ENV_NAMES",
+    "OPERATOR_EXTRA_ENV_VAR",
     "SENSITIVE_ENV_NAME_MARKERS",
     "build_benchmark_env",
     "filter_untrusted_env_mapping",
@@ -494,6 +528,7 @@ __all__ = [
     "is_allowed_variant_env_key",
     "is_python_package_root",
     "is_secret_shaped_env_name",
+    "operator_extra_env",
     "redact_file_in_place",
     "redact_secret_env_values",
     "redact_secret_values",
