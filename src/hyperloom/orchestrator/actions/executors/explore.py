@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import functools
+import json
 import logging
 import os
 import shlex
@@ -62,7 +63,7 @@ from ._accuracy_gate import (
 )
 from . import _framework_switch_manifest as _switch_manifest
 from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
-from ._proposal_identity import effective_fingerprint, normalize_proposal
+from ._proposal_identity import effective_fingerprint, is_executable, normalize_proposal
 from ._grid_base import (
     TS_FAILED,
     TS_KILLED_OVERTIME,
@@ -244,6 +245,87 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
         ]
         out.append(gv)
     return out
+
+
+#: The adapter's declared lever file, resolved inside ``$HYPERLOOM_BYPASS_SCRIPTS_DIR``.
+#: The scripts dir is the adapter's contract directory and is already persisted and
+#: re-exported on ``--resume``, so the declaration travels with the session.
+DECLARED_LEVERS_FILENAME = "levers.json"
+
+
+class DeclaredLeversError(ValueError):
+    """A ``levers.json`` exists but cannot be used as a lever declaration."""
+
+
+def declared_levers_path() -> Path | None:
+    """Return the adapter's ``levers.json`` path, or ``None`` when unavailable.
+
+    Returns:
+        Path | None: ``<$HYPERLOOM_BYPASS_SCRIPTS_DIR>/levers.json`` when the
+            scripts dir is set and the file exists; ``None`` otherwise.
+    """
+    scripts_dir = (os.environ.get("HYPERLOOM_BYPASS_SCRIPTS_DIR") or "").strip()
+    if not scripts_dir:
+        return None
+    candidate = Path(scripts_dir) / DECLARED_LEVERS_FILENAME
+    return candidate if candidate.is_file() else None
+
+
+def load_declared_levers() -> list[dict[str, Any]]:
+    """Load the lever grid a ``custom`` adapter declares for itself.
+
+    A ``custom`` workload has no framework source for the model to read, so
+    ``_default_grid_for_framework`` returns ``[]`` and EXPLORE has nothing to
+    sweep. The adapter declares its own knob space instead.
+
+    Returns:
+        list[dict[str, Any]]: The declared variants, or ``[]`` when no
+            declaration exists.
+
+    Raises:
+        DeclaredLeversError: When the file exists but is unreadable, is not
+            valid JSON, is not a list of variant objects, or declares a
+            variant that no server restart could apply. Malformed input is
+            loud by design: every silent path here surfaces later as
+            ``empty_grid``, which reads as "the model proposed nothing".
+    """
+    path = declared_levers_path()
+    if path is None:
+        return []
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise DeclaredLeversError(f"{path} is unreadable: {exc}") from exc
+    try:
+        declared = json.loads(raw)
+    except ValueError as exc:
+        raise DeclaredLeversError(f"{path} is not valid JSON: {exc}") from exc
+    if not isinstance(declared, list):
+        raise DeclaredLeversError(
+            f"{path} must be a JSON list of variant objects, got {type(declared).__name__}"
+        )
+    variants: list[dict[str, Any]] = []
+    for index, entry in enumerate(declared):
+        if not isinstance(entry, dict):
+            raise DeclaredLeversError(
+                f"{path}[{index}] must be a variant object, got {type(entry).__name__}"
+            )
+        name = str(entry.get("name") or "").strip()
+        if not name:
+            raise DeclaredLeversError(f"{path}[{index}] has no 'name'")
+        if not is_executable(normalize_proposal(entry)):
+            # A name-only variant re-benchmarks the baseline under a new label.
+            raise DeclaredLeversError(
+                f"{path}[{index}] ({name!r}) declares nothing a restart could apply: "
+                "set at least one of extra_args, extra_envs, remove_args, unset_envs, "
+                "or args_mode='replace'"
+            )
+        variant = dict(entry)
+        # ``default_grid`` is the seed-grid provenance label; anything else is
+        # attributed to the orchestration agent in the session breakdown.
+        variant.setdefault("provenance", "default_grid")
+        variants.append(variant)
+    return variants
 
 
 def framework_lever_grid(shared_state: Any) -> list[dict[str, Any]]:
@@ -857,8 +939,24 @@ class ExploreExecutor:
         grid_payload = params.get("grid") or []
         if not isinstance(grid_payload, list):
             grid_payload = []
-        # Framework-rewrite levers first.
-        lever_payload = framework_lever_grid(extra.get("shared_state") or extra.get("state"))
+        # Framework-rewrite levers first, then a ``custom`` adapter's own declared levers.
+        _lever_shared_state = extra.get("shared_state") or extra.get("state")
+        lever_payload = framework_lever_grid(_lever_shared_state)
+        if framework == "custom":
+            # A ``custom`` workload has no framework source to infer levers from, so the
+            # adapter declares its knob space. Skip declarations the ledger has already
+            # benched: a re-proposal is still measured, so it re-spends the round's budget
+            # ahead of the model's own proposals.
+            _search = getattr(_lever_shared_state, "explore_search", None)
+            _tested_names = set((_search or {}).get("name_index") or {}) if isinstance(_search, dict) else set()
+            declared_fresh = [v for v in load_declared_levers() if str(v.get("name") or "") not in _tested_names]
+            if declared_fresh:
+                log.info(
+                    "explore: seeding %d declared lever variant(s) from %s",
+                    len(declared_fresh),
+                    DECLARED_LEVERS_FILENAME,
+                )
+            lever_payload = list(lever_payload) + declared_fresh
         if lever_payload:
             existing_names = {str(v.get("name") or "") for v in grid_payload if isinstance(v, dict)}
             fresh = [v for v in lever_payload if str(v.get("name") or "") not in existing_names]
