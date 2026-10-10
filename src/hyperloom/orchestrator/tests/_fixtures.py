@@ -26,8 +26,6 @@ def _isolate_session_layout_env(monkeypatch, tmp_path_factory):
     an image that ships aiter they would strip the host install. Every discovery route (``find_spec``, the env
     overrides, the probe paths) is pointed at a sandbox; tests that model an install plant their own on top of it.
     """
-    from hyperloom.orchestrator.actions.executors import _aiter_jit
-
     monkeypatch.delenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", raising=False)
     monkeypatch.setenv("HYPERLOOM_GPU_POWER_SAMPLING", "0")
     mn_state_sentinel = tmp_path_factory.mktemp("mn_state") / "missing_state.json"
@@ -43,7 +41,12 @@ def _isolate_session_layout_env(monkeypatch, tmp_path_factory):
     monkeypatch.syspath_prepend(str(aiter_sandbox))
     for name in ("AITER_JIT_DIR", "INFERENCE_OPTIMIZER_AITER_JIT_DIR", "VLLM_VENV_ROOT"):
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setattr(_aiter_jit, "AITER_JIT_PROBE_PATHS", ())
+    # Not imported here: that would pull the executors (and their third-party deps) into every test, including the
+    # packaging lint that runs on bare pytest. A test that reaches the module has imported it by collection time, and
+    # the sandbox already wins over the probe paths for discovery.
+    aiter_jit = sys.modules.get("hyperloom.orchestrator.actions.executors._aiter_jit")
+    if aiter_jit is not None:
+        monkeypatch.setattr(aiter_jit, "AITER_JIT_PROBE_PATHS", ())
 
 
 class NoLaunchBackendInstalled(BaseException):
