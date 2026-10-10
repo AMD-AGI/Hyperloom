@@ -246,12 +246,39 @@ def test_a_tree_without_a_configs_dir_still_checks_what_the_round_named(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_the_baseline_drop_stays_on_the_cache_filesystem(tmp_path, monkeypatch):
+    """Nothing restores what the baseline drops, so it is parked beside the cache, not copied off the host.
+
+    A run directory on NFS took a ~3.5 GB copy of ``jit/build`` and the modules on every session, kept forever.
+    """
+    jit = _aiter_tree(
+        tmp_path,
+        csv_rows="16,512,2048,a8w8_blockscale_bpreshuffle_never_built,ck\n",
+        so_contains=b"a8w8_blockscale_bpreshuffle_something_else",
+        overlay=True,
+    )
+    (jit / "build" / "module_gemm_a8w8_blockscale_bpreshuffle").mkdir(parents=True)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", str(jit))
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    monkeypatch.chdir(run_dir)
+
+    await baseline_mod._prepare_aiter_serving_so({})
+
+    assert not (jit / "module_gemm_a8w8_blockscale_bpreshuffle.so").exists()
+    assert list(run_dir.iterdir()) == []
+    parked = jit / "hyperloom_jit_backup"
+    assert [p.name for p in parked.glob("jit_modules_*/*")] == ["module_gemm_a8w8_blockscale_bpreshuffle.so"]
+    assert len(list(parked.glob("jit_build_*"))) == 1
+
+
+@pytest.mark.asyncio
 async def test_the_preflight_runs_even_when_the_round_names_no_csv(tmp_path, monkeypatch):
     """No env is exactly the case that needs the unset-branch check, not a reason to skip."""
-    seen: list[tuple[dict, Path]] = []
+    seen: list[dict] = []
 
     def _prepare(envs, backup_dir=None):
-        seen.append((dict(envs), backup_dir))
+        seen.append(dict(envs))
         return {"action": "skip"}
 
     monkeypatch.setattr(
@@ -259,9 +286,9 @@ async def test_the_preflight_runs_even_when_the_round_names_no_csv(tmp_path, mon
         _prepare,
     )
 
-    await baseline_mod._prepare_aiter_serving_so({"RUN_EVAL": "false"}, tmp_path)
+    await baseline_mod._prepare_aiter_serving_so({"RUN_EVAL": "false"})
 
-    assert seen == [({}, tmp_path / "aiter_jit_backup")]
+    assert seen == [{}]
 
 
 @pytest.mark.asyncio
@@ -283,7 +310,6 @@ async def test_only_the_csv_variables_travel(tmp_path, monkeypatch):
             "AITER_CONFIG_GEMM_BF16": "  ",
             "RUN_EVAL": "false",
         },
-        tmp_path,
     )
 
     # A blank value is an unset variable, and the rest of the round's environment is not
@@ -303,7 +329,7 @@ async def test_a_preflight_failure_does_not_abort_the_round(tmp_path, monkeypatc
         _prepare,
     )
 
-    await baseline_mod._prepare_aiter_serving_so({"AITER_CONFIG_GEMM_BF16": "/tuned/bf16.csv"}, tmp_path)
+    await baseline_mod._prepare_aiter_serving_so({"AITER_CONFIG_GEMM_BF16": "/tuned/bf16.csv"})
 
 
 def test_the_preflight_runs_before_the_config_is_materialized():
@@ -326,7 +352,7 @@ def test_the_preflight_runs_before_the_config_is_materialized():
 
     ordered = [name for _lineno, name in sorted(called)]
     assert ordered[:2] == ["_prepare_aiter_serving_so", "materialize_config_with_envs"]
-    preflight = source.index("await _prepare_aiter_serving_so(base_extra_envs, output_dir)")
+    preflight = source.index("await _prepare_aiter_serving_so(base_extra_envs)")
     materialize = source.index("config_path = materialize_config_with_envs(")
     assert preflight < materialize
 
