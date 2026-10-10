@@ -153,7 +153,7 @@ phase to protect work that the next cycle will revisit anyway.
 You drive each phase to its exit signal, and you may also request a
 phase advance directly by emitting
 `escalate_strategy_change{next_action_hint='skip_to_kernel'}` once you
-judge the current phase (EXPLORE or FRAMEWORK_AGENT) exhausted (see Hard rules).
+judge FRAMEWORK_AGENT exhausted (see Hard rules).
 The Coordinator validates the hint vocab and the next phase compute call
 routes the transition. Emitting this hint is the **correct, expected** move
 when the current phase has no remaining actionable lever — it is strictly

@@ -733,11 +733,6 @@ class Coordinator:
                 self.phase_machine.advance_phase_if_needed,
                 stage="advance_phase_pre_reactor",
             )
-            if self.shared_state.pending_escalate_hint.strip():
-                await self.await_within_session_bound(
-                    self.phase_machine.advance_phase_if_needed,
-                    stage="advance_phase_hint",
-                )
         except Exception as exc:
             log.exception("phase advance before reactors failed")
             self.record_exception(stage="advance_phase_pre_reactor", exc=exc)

@@ -250,7 +250,7 @@ class _PhaseStateMixin:
         self.params_no_promote_streak = 0
 
     def reset_per_cycle_plateau_state(self) -> None:
-        """Reset transient plateau and dispatch state for a macro-cycle, plus any stale escalate hint."""
+        """Reset transient plateau and dispatch state for a macro-cycle."""
         self.params_no_promote_streak = 0
         self.framework_agent_phase_done = False
         self.framework_agent_discover_failures = 0
@@ -259,7 +259,6 @@ class _PhaseStateMixin:
         self.rounds_since_last_keep = {}
         self.last_conc_sweep = {}
         self.conc_sweep_granted_until_unix = 0.0
-        self.discard_pending_escalate_hint()
 
     def open_macro_cycle(self, *, no_gain_cycle_streak: int | None = None) -> int:
         """Finish the current macro-cycle's strategy row, start the next cycle, and reset its per-cycle state.

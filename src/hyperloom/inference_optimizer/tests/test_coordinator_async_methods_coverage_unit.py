@@ -490,11 +490,24 @@ async def test_escalate_extend_budget_raises_the_phase_share(coord: Coordinator,
 
 @pytest.mark.asyncio
 async def test_escalate_skip_to_kernel_deferred(coord: Coordinator) -> None:
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
     await coord.router._handle_escalate_strategy_change(
         "orchestration",
         _escalate("skip_to_kernel"),
     )
     assert coord.shared_state.pending_escalate_hint == "skip_to_kernel"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["PRELUDE", "ENABLEMENT", "KERNEL_AGENT", "SWEEP"])
+async def test_escalate_skip_to_kernel_outside_framework_agent_is_dropped(coord: Coordinator, phase: str) -> None:
+    """Only the FRAMEWORK_AGENT exit reads skip_to_kernel; left pending elsewhere it would end that phase on arrival."""
+    coord.shared_state.phase = phase
+    await coord.router._handle_escalate_strategy_change(
+        "orchestration",
+        _escalate("skip_to_kernel"),
+    )
+    assert coord.shared_state.pending_escalate_hint == ""
 
 
 @pytest.mark.asyncio
