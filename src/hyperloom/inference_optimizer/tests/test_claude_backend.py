@@ -60,6 +60,14 @@ class FakeResultMessage:
 
 
 @dataclass
+class FakeSystemMessage:
+    """Stand-in for the SDK's SystemMessage; the CLI's init frame carries its tool list in ``data``."""
+
+    subtype: str
+    data: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class FakeOptions:
     """Stand-in for ClaudeAgentOptions — captures kwargs for assertions."""
 
@@ -475,6 +483,38 @@ async def test_run_without_an_emit_intent_call_returns_no_intents():
     result = await backend.run("p")
     assert result.intents == []
     assert "just thinking" in result.raw_text
+
+
+@pytest.mark.parametrize(
+    ("offered_tools", "offered"),
+    [
+        pytest.param([EMIT_INTENT_TOOL_QUALIFIED, "mcp__other__tool"], True, id="offered"),
+        pytest.param(["mcp__other__tool"], False, id="dropped"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_mcp_setup_diagnostic_reports_what_the_cli_offered(offered_tools, offered):
+    """Registering emit_intent does not mean the CLI offered it, so the setup snapshot carries the CLI's own account."""
+    init = FakeSystemMessage(
+        subtype="init",
+        data={
+            "claude_code_version": "2.1.294",
+            "tools": ["Read", *offered_tools],
+            "mcp_servers": [{"name": "inference_optimizer", "status": "connected"}],
+        },
+    )
+    backend = ClaudeBackend(
+        sdk_query_factory=_make_query_factory([init, FakeAssistantMessage(content=[TextBlock(text="hi")])]),
+        sdk_options_cls=FakeOptions,
+        enable_mcp_emit_intent=False,
+    )
+    assert backend.get_mcp_setup_diagnostic()["emit_intent"]["offered"] is None
+    await backend.run("p")
+    setup = backend.get_mcp_setup_diagnostic()
+    assert setup["cli_version"] == "2.1.294"
+    assert setup["mcp_tools"] == sorted(offered_tools)
+    assert setup["mcp_server_status"] == {"inference_optimizer": "connected"}
+    assert setup["emit_intent"]["offered"] is offered
 
 
 @pytest.mark.asyncio
