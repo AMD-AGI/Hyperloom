@@ -926,3 +926,16 @@ def test_base_values_measures_the_files_as_they_were_at_the_base(tmp_path: Path)
     config = code_metrics.parse_config((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     got = code_metrics.base_values(tmp_path, "HEAD", ["src/a.py", "src/new.py"], config)
     assert got == {(CC, "src/a.py", "f"): 22}
+
+
+def test_ci_reads_the_pr_from_the_api_and_logs_the_full_report() -> None:
+    steps = workflow_steps("code-metrics.yml")
+    gate = steps["Code metrics gate"]
+    assert gate["env"]["PR_NUMBER"] == "${{ github.event.pull_request.number }}"
+    assert gate["env"]["GITHUB_TOKEN"] == "${{ github.token }}"
+    run = gate["run"]
+    pull_request_branch = run.split('if [ "$EVENT" = pull_request ]; then', 1)[1].split("else", 1)[0]
+    assert 'args+=(--pr-number "$PR_NUMBER")' in pull_request_branch
+    assert "--pull-request-json" not in run
+    # stdout is the untruncated report (waived rows included) for the job log.
+    assert 'python "$impl/code_metrics.py" "${args[@]}"\n' in run and "/dev/null" not in run.split("set +e", 1)[1]
