@@ -53,6 +53,8 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         super().__init__(coordinator)
         # Advisory only: scores proposals, never gates them.
         self._proposal_scorer = proposal_scorer
+        # Macro-cycle suffix of the last custom-specialist guarantee attempt, admitted or denied.
+        self._custom_guarantee_cycle: str | None = None
 
     async def warm_specialist_params(self, params: dict[str, Any]) -> None:
         """Fill specialist task params with KnowledgePlane data before enqueue (mutates in place); missing fields stay empty.
@@ -657,9 +659,10 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
     async def maybe_ensure_custom_specialist(self) -> None:
         """Dispatch the operator-defined specialist when no custom task has started this session.
 
-        Idempotent per macro cycle; a custom task already queued or running is
-        left alone. Falls back to research mode when source patches cannot be
-        authored, so the guarantee does not stall on a deterministic denial.
+        At most one attempt per macro cycle, counting attempts the router
+        denies before creating a task; a custom task already queued or running
+        is left alone. Falls back to research mode when source patches cannot
+        be authored, so the guarantee does not stall on a deterministic denial.
         """
         state = self.shared_state
         if str(getattr(state, "phase", "") or "").upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
@@ -673,10 +676,10 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         for t in (*await self.tasks.queued(), *await self.tasks.running()):
             if t.kind == "specialist" and is_custom_specialist_dispatch(t.params or {}):
                 return
-        idempotency_key = f"custom-guarantee{self._coord.dispatcher.cycle_idem_suffix()}"
-        lookup = getattr(self.tasks, "find_by_idempotency_key", None)
-        if callable(lookup) and await lookup(idempotency_key) is not None:
+        cycle = self._coord.dispatcher.cycle_idem_suffix()
+        if self._custom_guarantee_cycle == cycle:
             return
+        self._custom_guarantee_cycle = cycle
 
         params: dict[str, Any] = {
             "domain": CUSTOM_SPECIALIST_KEY,
@@ -714,12 +717,12 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             payload={
                 "action_name": "specialist",
                 "params": params,
-                "idempotency_key": idempotency_key,
+                "idempotency_key": f"custom-guarantee{cycle}",
             },
         )
         await self._coord.router.handle_intent("orchestration", intent)
         log.info(
-            "custom specialist guarantee: dispatched gap=%s mode=%s",
+            "custom specialist guarantee: requested gap=%s mode=%s",
             params["gap_canonical_id"],
             params.get("mode") or "default",
         )

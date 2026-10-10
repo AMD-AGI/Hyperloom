@@ -26,6 +26,15 @@ from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.policy.gate import PolicyDenied, PolicyGate
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
     SpecialistPromptInputs,
+    _section_execution_budget,
+    _section_gap,
+    _section_hardware,
+    _section_identity,
+    _section_iron_rules,
+    _section_mandate,
+    _section_output_protocol,
+    _section_pd_disaggregation,
+    _section_source_hint,
     build_specialist_prompts,
 )
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
@@ -59,10 +68,22 @@ def _headers(text: str) -> list[str]:
     return [line for line in text.splitlines() if line.startswith("## ")]
 
 
+def _joined(*sections: list[str]) -> str:
+    out: list[str] = []
+    for sec in sections:
+        if sec:
+            if out:
+                out.append("")
+            out.extend(sec)
+    return "\n".join(out) + "\n"
+
+
 # Specialist prompt
 def test_custom_system_prompt_carries_operator_identity_and_verbatim_focus():
-    system, _ = build_specialist_prompts(_inputs(_custom_domain(), custom_specialist_prompt=_PROMPT))
+    inp = _inputs(_custom_domain(), custom_specialist_prompt=_PROMPT)
+    system, _ = build_specialist_prompts(inp)
 
+    assert system == _joined(_section_identity(inp), _section_output_protocol(inp), _section_iron_rules(inp))
     assert system.splitlines()[:7] == [
         "## 1. IDENTITY & AUTONOMY",
         "",
@@ -101,8 +122,18 @@ def test_custom_system_prompt_carries_operator_identity_and_verbatim_focus():
     ],
 )
 def test_custom_user_prompt_is_minimal(mode, expected):
-    _, user = build_specialist_prompts(
-        _inputs(_custom_domain(), custom_specialist_prompt=_PROMPT, mode=mode, notes="n")
+    inp = _inputs(_custom_domain(), custom_specialist_prompt=_PROMPT, mode=mode, notes="n")
+    _, user = build_specialist_prompts(inp)
+
+    source_hint = _section_source_hint(inp) if mode == "patch" else []
+    assert user == _joined(
+        _section_mandate(inp),
+        _section_hardware(inp),
+        _section_pd_disaggregation(inp),
+        _section_execution_budget(inp),
+        _section_gap(inp),
+        source_hint,
+        ["## 10. NOTES FROM ORCHESTRATION", "", "n"],
     )
     assert _headers(user) == expected
 
@@ -165,8 +196,17 @@ def test_orchestration_prompt_offers_custom_specialist_when_configured(phase):
     assert guide == [f"    OPERATOR-DEFINED DOMAIN: custom_specialist — {_DESCRIPTION}"]
 
 
-def test_orchestration_prompt_without_custom_specialist_never_mentions_it():
-    assert "custom_specialist" not in _orch("")
+def test_orchestration_prompt_without_custom_specialist_keeps_the_builtin_domain_list():
+    prompt = _orch("")
+    emit = next(line for line in prompt.splitlines() if "delegate{action_name='specialist'" in line)
+    domains = emit.split("domain=<one of ", 1)[1].split(">", 1)[0]
+
+    assert domains == (
+        "serving_specialist|kernel_switch_specialist|comm_specialist|compiler_specialist|system_specialist"
+        "|candidate_discovery_specialist|research_scout_specialist|static_recon_specialist"
+        "|framework_rewrite_specialist"
+    )
+    assert prompt.count("custom_specialist") == 0
 
 
 # PolicyGate
@@ -256,12 +296,29 @@ def test_resume_without_flags_keeps_the_stored_definition():
     assert (state.custom_specialist_prompt, state.custom_specialist_description) == ("old", "old desc")
 
 
-def test_resume_with_flags_replaces_the_stored_definition():
-    state = SharedState(custom_specialist_prompt="old", custom_specialist_description="old desc")
+def test_resume_with_a_new_definition_replaces_it_and_rearms_the_guarantee():
+    state = SharedState(
+        custom_specialist_prompt="old", custom_specialist_description="old desc", custom_specialist_dispatched=True
+    )
     _apply_custom_specialist_resume(
         _ns(custom_specialist_prompt=_PROMPT, custom_specialist_description=_DESCRIPTION), state
     )
     assert (state.custom_specialist_prompt, state.custom_specialist_description) == (_PROMPT, _DESCRIPTION)
+    assert state.custom_specialist_dispatched is False
+
+
+@pytest.mark.parametrize("repassed", [True, False])
+def test_resume_with_the_same_or_no_definition_keeps_the_guarantee_spent(repassed):
+    state = SharedState(
+        custom_specialist_prompt=_PROMPT, custom_specialist_description=_DESCRIPTION, custom_specialist_dispatched=True
+    )
+    args = (
+        _ns(custom_specialist_prompt=_PROMPT, custom_specialist_description=_DESCRIPTION)
+        if repassed
+        else _ns(custom_specialist_prompt="")
+    )
+    _apply_custom_specialist_resume(args, state)
+    assert (state.custom_specialist_prompt, state.custom_specialist_dispatched) == (_PROMPT, True)
 
 
 @pytest.mark.parametrize(
@@ -296,9 +353,42 @@ def test_custom_specialist_conflicts(overrides, state_kw, expected):
     assert _custom_specialist_conflict(_ns(**overrides), state) == expected
 
 
+def test_conflicts_apply_to_a_definition_passed_on_this_launch():
+    args = _ns(custom_specialist_prompt=_PROMPT, custom_specialist_description=_DESCRIPTION)
+    state = SharedState(framework_agent_phase_enabled=False)
+    assert _custom_specialist_conflict(args, state) == (
+        "the FRAMEWORK_AGENT phase is disabled, so custom_specialist cannot be guaranteed to run"
+    )
+
+
 def test_conflicts_are_ignored_when_no_custom_specialist_is_configured():
     args = _ns(orch_prompt="x", no_framework_agent=True, research_lane_capacity=0, reset_state=True)
     assert _custom_specialist_conflict(args, SharedState()) == ""
+
+
+def test_fresh_launch_conflict_exits_before_the_session_starts(tmp_path, monkeypatch):
+    import hyperloom.inference_optimizer.cli as cli
+
+    run_optimize = AsyncMock(return_value=0)
+    monkeypatch.setattr(cli, "_run_optimize", run_optimize)
+    prompt_file = tmp_path / "p.md"
+    prompt_file.write_text(_PROMPT, encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(
+            [
+                "optimize",
+                "--custom-specialist-prompt-file",
+                str(prompt_file),
+                "--custom-specialist-description",
+                _DESCRIPTION,
+                "--orch-prompt",
+                "inline orchestration prompt",
+            ]
+        )
+
+    assert exc.value.code == 2
+    run_optimize.assert_not_awaited()
 
 
 def test_custom_specialist_fields_roundtrip_and_default_on_old_state():
@@ -331,7 +421,6 @@ def guarantee_coord(tmp_path: Path, monkeypatch):
     (source_root / ".git").mkdir(parents=True)
     c.shared_state.framework_repo_path = str(source_root)
     c.tasks = SimpleNamespace(
-        find_by_idempotency_key=AsyncMock(return_value=None),
         queued=AsyncMock(return_value=[]),
         running=AsyncMock(return_value=[]),
     )
@@ -396,13 +485,17 @@ async def test_guarantee_key_is_cycle_scoped(guarantee_coord):
     assert key == "custom-guarantee-c2"
 
 
-async def test_guarantee_does_not_retry_within_a_cycle(guarantee_coord):
-    guarantee_coord.tasks.find_by_idempotency_key.return_value = SimpleNamespace(state="cancelled")
+async def test_a_denied_attempt_is_not_retried_until_the_next_cycle(guarantee_coord):
+    # The mocked router creates no task, as an admission denial does.
+    dispatch = guarantee_coord.specialist_dispatch
+    await dispatch.maybe_ensure_custom_specialist()
+    await dispatch.maybe_ensure_custom_specialist()
+    guarantee_coord.shared_state.macro_cycle = 1
+    await dispatch.maybe_ensure_custom_specialist()
+    await dispatch.maybe_ensure_custom_specialist()
 
-    await guarantee_coord.specialist_dispatch.maybe_ensure_custom_specialist()
-
-    guarantee_coord.router.handle_intent.assert_not_awaited()
-    guarantee_coord.tasks.find_by_idempotency_key.assert_awaited_once_with("custom-guarantee")
+    keys = [call.args[1].payload["idempotency_key"] for call in guarantee_coord.router.handle_intent.await_args_list]
+    assert keys == ["custom-guarantee", "custom-guarantee-c1"]
 
 
 async def test_guarantee_skips_while_a_tag_only_custom_task_is_queued(guarantee_coord):
@@ -433,7 +526,11 @@ async def test_guarantee_is_a_no_op(guarantee_coord, state_kw, phase):
 
 
 @pytest.mark.parametrize("pruned", [True, False])
-async def test_guarantee_falls_back_to_research_when_patches_are_impossible(guarantee_coord, pruned):
+async def test_guarantee_falls_back_to_research_when_patches_are_impossible(guarantee_coord, pruned, monkeypatch):
+    import hyperloom.orchestrator.specialists.runner as runner_mod
+
+    # An installed or env-pointed framework tree on the host must not satisfy the preflight.
+    monkeypatch.setattr(runner_mod, "resolve_framework_tree", lambda _framework: "")
     state = guarantee_coord.shared_state
     if pruned:
         state.add_pruned_family("source_patch")

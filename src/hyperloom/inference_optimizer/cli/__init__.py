@@ -978,15 +978,25 @@ def _load_custom_specialist_args(args: argparse.Namespace) -> None:
 
 
 def _apply_custom_specialist_resume(args: argparse.Namespace, state: SharedState) -> None:
-    """Flags passed on a resume replace the stored custom specialist; otherwise the stored one stays."""
-    if getattr(args, "custom_specialist_prompt", ""):
-        state.custom_specialist_prompt = args.custom_specialist_prompt
-        state.custom_specialist_description = args.custom_specialist_description
+    """Flags passed on a resume replace the stored custom specialist; otherwise the stored one stays.
+
+    A changed definition is guaranteed its own first run.
+    """
+    prompt = getattr(args, "custom_specialist_prompt", "")
+    if not prompt:
+        return
+    if (prompt, args.custom_specialist_description) != (
+        state.custom_specialist_prompt,
+        state.custom_specialist_description,
+    ):
+        state.custom_specialist_dispatched = False
+    state.custom_specialist_prompt = prompt
+    state.custom_specialist_description = args.custom_specialist_description
 
 
 def _custom_specialist_conflict(args: argparse.Namespace, state: SharedState) -> str:
-    """Return why a configured custom specialist cannot run with this launch, or ``""``."""
-    if not state.custom_specialist_prompt:
+    """Return why a custom specialist from this launch or the stored state cannot run, or ``""``."""
+    if not (getattr(args, "custom_specialist_prompt", "") or state.custom_specialist_prompt):
         return ""
     if args.orch_prompt:
         return "--orch-prompt replaces the Orchestration prompt, so custom_specialist would never be offered"
@@ -1864,6 +1874,12 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             session_lock.release()
             print(f"ERROR: cannot resume this session -- {_latency_conflict}.", file=sys.stderr)
             sys.exit(2)
+        # Checked before any resume step persists state, so a refused resume leaves the session as it was.
+        _custom_conflict = _custom_specialist_conflict(args, state)
+        if _custom_conflict:
+            session_lock.release()
+            print(f"ERROR: cannot resume this session -- {_custom_conflict}.", file=sys.stderr)
+            sys.exit(2)
         prior_stop = state.stop_reason
         print(f"Resuming session: {session_dir}")
         print(f"  manifest.session_id    : {manifest.get('session_id')}")
@@ -2414,10 +2430,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
 
     # T0 may have persisted warm-start state; preserve it before constructing the Coordinator.
     state = SharedState.load_or_init(session_dir)
-    custom_conflict = _custom_specialist_conflict(args, state)
-    if custom_conflict:
-        print(f"ERROR: custom specialist is configured but {custom_conflict}.", file=sys.stderr)
-        sys.exit(2)
 
     backends = _build_backends(
         claude_model=args.claude_model,
@@ -2635,6 +2647,11 @@ def main(argv: list[str] | None = None) -> int:
             _load_custom_specialist_args(args)
         except ValueError as exc:
             parser.error(str(exc))
+        # A fresh session's conflicts depend on flags only; a resume checks them against its stored state.
+        if not args.resume_from:
+            custom_conflict = _custom_specialist_conflict(args, SharedState())
+            if custom_conflict:
+                parser.error(custom_conflict)
         return asyncio.run(_run_optimize(args))
     if args.command == "recover":
         return _run_recover_session(args)
