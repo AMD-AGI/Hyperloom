@@ -442,8 +442,11 @@ class _RenderMixin:
             out = [
                 "Executable proposals from this cycle that no explore round has benched.",
                 "Ranked predictor rows first, then by gap severity, then most recent. The Coordinator benches the",
-                "head of this queue whenever no explore is queued or running; dispatch `explore` only for variants",
-                "not listed here.",
+                "head of this queue only while no explore is queued or running, which rarely happens while your",
+                "grids hold the lane. Predictor rows are the exception to dispatching only variants not listed",
+                "here: put the ones worth a slot into your next `explore` grid verbatim, keeping each row's name,",
+                "fields and `provenance: primatune`. The predictor is re-asked only when the stack moves, so a",
+                "predictor row you pass over now is very likely never measured; if you skip one, say why.",
                 "",
             ]
         elif rows:

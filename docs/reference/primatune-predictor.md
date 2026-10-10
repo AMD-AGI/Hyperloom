@@ -90,8 +90,13 @@ everything a predictor row says.
 
 The round carries `priority: 1`. Specialist rounds carry none, so predictor rows sit
 at the head of the untested-proposal queue, which the Coordinator benches from
-whenever no explore task is queued or running. They are graded like any other
-variant.
+whenever no explore task is queued or running. Orchestration usually keeps the
+benchmark lane busy with its own grids, so that rarely happens; the block's
+header therefore makes predictor rows an exception to orchestration's rule of
+dispatching only variants the queue does not list, and asks it to put the rows it
+judges worth a slot into its next grid verbatim, name and `provenance: primatune`
+included, and to say why when it skips one. Which rows run stays orchestration's
+choice. They are graded like any other variant.
 
 ## Attribution
 
