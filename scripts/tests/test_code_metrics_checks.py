@@ -63,6 +63,9 @@ def test_a_docstring_is_not_a_comment() -> None:
         ("# see PR 1811 for the history", "PR 1811"),
         ("# workaround for issue #77", "issue #77"),
         ("# https://github.com/o/r/pull/12", "github.com/o/r/pull/12"),
+        ("# same as PR-1812", "PR-1812"),
+        ("# tracked in GH-1813", "GH-1813"),
+        ("# Workaround for #1812 (no TODO needed)", "#1812"),
     ],
 )
 def test_an_added_comment_may_not_point_at_a_pr_or_issue(comment: str, shown: str) -> None:
@@ -72,9 +75,11 @@ def test_an_added_comment_may_not_point_at_a_pr_or_issue(comment: str, shown: st
 @pytest.mark.parametrize(
     ("comment", "shown"),
     [
-        ("# guards against the outage we had", "the outage"),
-        ("# added after the 2026-09-21 incident", "the 2026-09-21 incident"),
-        ("# see the postmortem", "the postmortem"),
+        ("# guards against the outage we had", "against the outage"),
+        ("# added after the 2026-09-21 incident", "after the 2026-09-21 incident"),
+        ("# see the postmortem", "postmortem"),
+        ("# there was an outage in October", "outage in October"),
+        ("# outage 2026-09-21: cache disabled", "outage 2026-09-21"),
     ],
 )
 def test_an_added_comment_may_not_narrate_an_incident(comment: str, shown: str) -> None:
@@ -83,7 +88,19 @@ def test_an_added_comment_may_not_narrate_an_incident(comment: str, shown: str) 
 
 @pytest.mark.parametrize(
     "comment",
-    ["# step #1 of 3", "# colour #fff", "# an outage is retried", "# not a PR: 1234 widgets", "# issues 3 calls"],
+    [
+        "# step #1 of 3",
+        "# colour #fff",
+        "# colour #000000",
+        "# an outage is retried",
+        "# not a PR: 1234 widgets",
+        "# issues 3 calls",
+        "# issue 4 requests in parallel",
+        "# may issue 2 probes",
+        "# the outage detector",
+        "# this outage-prone endpoint",
+        "# the incident id is returned",
+    ],
 )
 def test_ordinary_comments_are_not_history(comment: str) -> None:
     assert comment_refusals(f"{comment}\nx = 1\n") == []
@@ -96,6 +113,18 @@ def test_a_todo_and_its_issue_link_line_are_exempt() -> None:
 
 def test_a_reference_on_an_unchanged_line_is_not_this_changes() -> None:
     assert comment_refusals("# fixed in #1812\nx = 1\n", added={2}) == []
+
+
+def test_a_comment_the_change_removed_elsewhere_was_moved_not_added() -> None:
+    text = "    " + block(9).replace("\n", "\n    ").rstrip(" ") + "    # see #4321\n"
+    rows = set(range(1, 11))
+    removed = {f"# line {i}" for i in range(9)}
+    # Re-indented (or moved) block: its lines were removed elsewhere, so only the new reference counts.
+    got = [(p.line, p.message) for p in checks.comment_problems("m.py", text, rows, removed)]
+    assert got == [(10, "comment points at a PR or issue (`#4321`)")]
+    # Without the removed lines the same text is a new 9-line block.
+    got = [p.message for p in checks.comment_problems("m.py", text, rows)]
+    assert got[0] == "adds a 10-line comment block (limit 8)"
 
 
 # --- English only ----------------------------------------------------------------
@@ -113,8 +142,16 @@ def test_non_cjk_non_ascii_text_and_binary_files_pass(tmp_path: Path) -> None:
         f"price = '{chr(0x20AC)}5'  # caf{chr(0xE9)} {chr(0x661)}{chr(0x662)}\n", encoding="utf-8"
     )
     (tmp_path / "b.bin").write_bytes(b"\0" + CJK_CHAR.encode())
-    (tmp_path / "c.txt").write_bytes(CJK_CHAR.encode("utf-16"))
-    assert checks.cjk_problems(tmp_path, ["a.py", "b.bin", "c.txt", "missing.txt"]) == []
+    (tmp_path / "c.bin").write_bytes(b"\xff\xd8\xff\0" + CJK_CHAR.encode("utf-16-le"))
+    assert checks.cjk_problems(tmp_path, ["a.py", "b.bin", "c.bin", "missing.txt"]) == []
+
+
+@pytest.mark.parametrize("encoding", ["utf-16", "utf-16-be"])
+def test_utf16_text_with_a_byte_order_mark_is_read(tmp_path: Path, encoding: str) -> None:
+    data = ("\ufeff" + f"ok\nbad {CJK_CHAR}\n").encode("utf-16-be") if encoding == "utf-16-be" else None
+    (tmp_path / "c.txt").write_bytes(data or f"ok\nbad {CJK_CHAR}\n".encode(encoding))
+    got = [(p.check, p.where, p.line, p.message) for p in checks.cjk_problems(tmp_path, ["c.txt"])]
+    assert got == [("english", "c.txt", 2, "CJK character U+4E2D")]
 
 
 def test_the_pull_request_title_body_and_commits_are_checked() -> None:
@@ -148,12 +185,18 @@ def import_refusals(tmp_path: Path, files: dict[str, str]) -> list[tuple[str, in
         ("from .tests import helper\n", ".tests"),
         ("from pkg.sub import test_helpers\n", "pkg.sub.test_helpers"),
         ("from pkg.sub.test_helpers import x\n", "pkg.sub.test_helpers"),
+        ("import importlib\nm = importlib.import_module('pkg.tests.test_x')\n", "pkg.tests.test_x"),
+        ("from importlib import import_module\nm = import_module('pkg.tests')\n", "pkg.tests"),
+        ("m = __import__('pkg.sub.test_helpers')\n", "pkg.sub.test_helpers"),
+        ("from pkg.conftest import fixture\n", "pkg.conftest"),
+        ("from pkg import conftest\n", "pkg.conftest"),
     ],
 )
 def test_production_code_importing_test_code_fails(tmp_path: Path, source: str, target: str) -> None:
     files = {"src/pkg/mod.py": source, "src/pkg/sub/test_helpers.py": "x = 1\n"}
     got = import_refusals(tmp_path, files)
-    assert got == [("src/pkg/mod.py", 1, f"production code imports `{target}`")]
+    line = source.count("\n")
+    assert got == [("src/pkg/mod.py", line, f"production code imports `{target}`")]
 
 
 @pytest.mark.parametrize(
@@ -164,6 +207,8 @@ def test_production_code_importing_test_code_fails(tmp_path: Path, source: str, 
         "from pkg.sub import test_value\n",
         "from pkg.contest import x\n",
         "from pkg.testing import y\n",
+        "import importlib\nm = importlib.import_module(name)\n",
+        "m = __import__('pkg.testing')\n",
     ],
 )
 def test_a_module_merely_named_test_is_not_test_code(tmp_path: Path, source: str) -> None:
@@ -203,11 +248,32 @@ def test_adding_the_third_occurrence_of_a_literal_fails() -> None:
     ]
 
 
-def test_a_literal_already_repeated_at_the_base_only_fails_when_the_change_adds_one() -> None:
+def test_a_literal_already_repeated_at_the_base_is_backlog() -> None:
+    # Only crossing from under 3 to 3+ fails: a table that already repeats a value may gain a row.
     before = 'a = "region"\nb = "region"\nc = "region"\n'
     assert literal_refusals(before, before) == []
     assert literal_refusals(before, before.replace('c = "region"\n', "")) == []
-    assert literal_refusals(before, before + 'd = "region"\n') != []
+    assert literal_refusals(before, before + 'd = "region"\n') == []
+    table = 'KIND = {\n    "a": "technique",\n    "b": "technique",\n    "c": "technique",\n}\n'
+    assert literal_refusals(table, table.replace("}", '    "d": "technique",\n}')) == []
+
+
+def test_a_literal_that_only_moved_between_modules_is_not_added() -> None:
+    after = 'a = "region"\nb = "region"\nc = "region"\n'
+    moved = checks.moved_literals([("old.py", after), ("m.py", None)], [("old.py", ""), ("m.py", after)])
+    assert ("str", "region") in moved
+    assert checks.repeated_literal_problems("m.py", None, after, moved) == []
+    grown = checks.moved_literals([("old.py", 'a = "region"\n')], [("old.py", ""), ("m.py", after)])
+    assert ("str", "region") not in grown
+    assert [p.message for p in checks.repeated_literal_problems("m.py", None, after, grown)] == [
+        "`'region'` is written 3 times (was 0); name it as a module-level constant"
+    ]
+
+
+def test_bytes_literals_count() -> None:
+    assert literal_refusals(None, 'a = b"magic"\nb = b"magic"\nc = b"magic"\n') == [
+        (1, "`b'magic'` is written 3 times (was 0); name it as a module-level constant")
+    ]
 
 
 @pytest.mark.parametrize(
@@ -222,6 +288,8 @@ def test_a_literal_already_repeated_at_the_base_only_fails_when_the_change_adds_
         'a: "Thing" = 1\nb: "Thing" = 2\ndef f(c: "Thing") -> "Thing": ...\n',
         "a = 0\nb = 0\nc = 0\nd = 1\ne = 1\nf = 1\ng = -1\nh = -1\ni = -1\nj = 2\nk = 2\nl = 2\n",
         'a = "ab"\nb = "ab"\nc = "ab"\nd = True\ne = True\nf = True\ng = None\nh = None\ni = None\n',
+        'a = p.get("model")\nb = p.pop("model", None)\nc = p.setdefault("model", 1)\n',
+        'a = "model" in p\nb = "model" not in p\nc = "model" in q\n',
     ],
 )
 def test_keys_names_docstrings_fstring_text_all_and_plain_values_do_not_count(after: str) -> None:
@@ -254,6 +322,58 @@ def test_diff_only_checks_judge_the_change_and_skip_tests(tmp_path: Path) -> Non
     ]
     # Without a base there is no diff: only the whole-tree checks run.
     assert checks.run_all(tmp_path, ["src"], [], Units(tmp_path), None) == []
+
+
+def commit_base(root: Path, files: dict[str, str]) -> None:
+    for path, text in files.items():
+        (root / path).parent.mkdir(parents=True, exist_ok=True)
+        (root / path).write_text(text, encoding="utf-8")
+    git(root, "init", "-q")
+    git(root, "add", "-A")
+    git(root, "commit", "-q", "-m", "base")
+
+
+REPEATS = 'A = "seen"\nB = "seen"\nC = "seen"\nN = 4096\nM = 4096\nO = 4096\n'
+
+
+def test_a_renamed_module_is_compared_with_the_file_it_came_from(tmp_path: Path) -> None:
+    commit_base(tmp_path, {"src/pkg/old.py": REPEATS + block(9)})
+    git(tmp_path, "mv", "src/pkg/old.py", "src/pkg/new.py")
+    assert checks.run_all(tmp_path, ["src"], [], Units(tmp_path), "HEAD") == []
+    # The rename is still judged: an added literal occurrence crossing 3 fails.
+    (tmp_path / "src/pkg/new.py").write_text(REPEATS + block(9) + "P = 'twice'\nQ = 'twice'\nR = 'twice'\n")
+    got = [(p.check, p.where, p.line) for p in checks.run_all(tmp_path, ["src"], [], Units(tmp_path), "HEAD")]
+    assert got == [("literals", "src/pkg/new.py", 16)]
+
+
+def test_a_module_split_moves_its_literals_and_comments(tmp_path: Path) -> None:
+    commit_base(tmp_path, {"src/pkg/big.py": "X = 1\n" + REPEATS + block(9)})
+    (tmp_path / "src/pkg/big.py").write_text("X = 1\n", encoding="utf-8")
+    (tmp_path / "src/pkg/part.py").write_text(REPEATS + block(9), encoding="utf-8")
+    git(tmp_path, "add", "-A")
+    assert checks.run_all(tmp_path, ["src"], [], Units(tmp_path), "HEAD") == []
+
+
+def test_gitattributes_cannot_hide_added_comments(tmp_path: Path) -> None:
+    commit_base(tmp_path, {"src/pkg/m.py": "X = 1\n"})
+    (tmp_path / ".gitattributes").write_text("*.py -diff\n", encoding="utf-8")
+    (tmp_path / "src/pkg/m.py").write_text("X = 1\n" + block(9) + "# see PR 1812\n", encoding="utf-8")
+    got = [(p.check, p.line, p.message) for p in checks.run_all(tmp_path, ["src"], [], Units(tmp_path), "HEAD")]
+    assert got == [
+        ("comments", 2, "adds a 10-line comment block (limit 8)"),
+        ("comments", 11, "comment points at a PR or issue (`PR 1812`)"),
+    ]
+
+
+def test_parse_diff_keeps_hunk_lines_apart_from_headers() -> None:
+    text = (
+        "diff --git a/x.py b/y.py\nsimilarity index 90%\nrename from x.py\nrename to y.py\n"
+        "--- a/x.py\n+++ b/y.py\n@@ -3 +3,2 @@\n-    # old\n+++ added line\n+-- also\n"
+    )
+    diff = checks.parse_diff(text)
+    assert diff.added == {"y.py": {3, 4}}
+    assert diff.removed == {"# old"}
+    assert diff.renames == {"y.py": "x.py"}
 
 
 def test_parse_added_lines_reads_new_side_hunks() -> None:

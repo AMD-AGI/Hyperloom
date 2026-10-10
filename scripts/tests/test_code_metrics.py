@@ -512,6 +512,15 @@ def test_report_says_when_another_copy_of_the_gate_judged_the_tree(repo: Repo, m
     assert "not by this tree's copy" not in repo.gate()[1]
 
 
+def test_ci_reruns_when_the_label_or_the_pr_text_changes_and_keeps_every_main_run() -> None:
+    gate = yaml.safe_load((ROOT / ".github/workflows/code-metrics.yml").read_text(encoding="utf-8"))
+    # The label and the CJK check of the title and body are read at run time: each edit must re-run it.
+    types = set(gate[True]["pull_request"]["types"])
+    assert {"opened", "synchronize", "reopened", "edited", "labeled", "unlabeled"} <= types
+    assert "paths" not in gate[True]["pull_request"] and "paths-ignore" not in gate[True]["pull_request"]
+    assert gate["concurrency"]["cancel-in-progress"] == "${{ github.event_name == 'pull_request' }}"
+
+
 def test_ci_runs_the_base_branchs_copy_of_the_gate() -> None:
     gate = yaml.safe_load((ROOT / ".github/workflows/code-metrics.yml").read_text(encoding="utf-8"))
     steps = {step.get("name"): step for step in gate["jobs"]["code-metrics"]["steps"]}
@@ -908,9 +917,9 @@ def test_function_length_counts_def_to_last_line_and_nested_functions_alone(tmp_
     )
     units = FakeUnits(tmp_path, "src/f.py", source).units
     got = {f.unit: (f.value, f.line) for f in collect.function_line_findings(["src/f.py"], 80, units)}
-    # outer: def line, docstring, comment, 77 lines, inner (81 lines), return: 1 + 1 + 1 + 77 + 81 + 1.
-    assert got == {"outer": (162, 3), "outer.inner": (81, 83)}
-    assert collect.function_line_findings(["src/f.py"], 162, units) == []
+    # outer: def line, docstring, comment, 77 lines, return: 1 + 1 + 1 + 77 + 1; inner is its own unit.
+    assert got == {"outer": (81, 3), "outer.inner": (81, 83)}
+    assert collect.function_line_findings(["src/f.py"], 81, units) == []
 
 
 @pytest.mark.skipif(shutil.which("ruff") is None or shutil.which("complexipy") is None, reason="ruff/complexipy")

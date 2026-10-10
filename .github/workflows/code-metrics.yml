@@ -13,7 +13,7 @@ name: Code metrics
 #
 # The PR label ``baseline-raise`` waives new, worse and baseline-growth findings;
 # the script reads the labels from the API when it runs (--pr-number), never from
-# this event's payload, so adding the label and re-running the job is enough.
+# this event's payload. The job re-runs when the label, title or body changes.
 #
 # The job is a hard gate under the stable name ``code-metrics`` so it can be made
 # a required check. For that reason there is no paths-ignore: a required check
@@ -36,13 +36,15 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, edited, synchronize, reopened, labeled, unlabeled]
 
 permissions:
   contents: read
 
 concurrency:
   group: code-metrics-${{ github.ref }}
-  cancel-in-progress: true
+  # A newer push to a PR replaces its run; a push to main keeps every run, so each merge is checked.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   code-metrics:

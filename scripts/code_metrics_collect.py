@@ -303,17 +303,30 @@ def function_line_findings(files: list[str], threshold: int, units: Units) -> li
     """Functions longer than ``threshold`` physical lines.
 
     A function counts from its ``def`` line through its last line: decorators are not
-    counted, blank, comment and docstring lines are. A nested function is a unit of its
-    own, measured the same way; its lines are also part of the function around it, since
-    they are lines a reader of that function scrolls past.
+    counted, blank, comment and docstring lines are. A nested function is measured on its
+    own, not folded into its parent: the parent's count leaves out the lines of every
+    function nested in it.
     """
     findings = []
     for path in files:
-        for d in units.defs(path):
-            length = d.end - d.start + 1
-            if d.is_function and violates(FUNCTION_LINES, length, threshold):
+        defs = units.defs(path)
+        for d in defs:
+            if not d.is_function:
+                continue
+            length = d.end - d.start + 1 - _nested_function_lines(d, defs)
+            if violates(FUNCTION_LINES, length, threshold):
                 findings.append(Finding(FUNCTION_LINES, path, d.name, length, d.start))
     return findings
+
+
+def _nested_function_lines(parent: Def, defs: list[Def]) -> int:
+    """Lines of the outermost functions nested anywhere inside ``parent``."""
+    inside = [d for d in defs if d.name.startswith(parent.name + ".") and parent.start < d.start <= parent.end]
+    functions = [d for d in inside if d.is_function]
+    outermost = [
+        d for d in functions if not any(o is not d and o.start <= d.start and d.end <= o.end for o in functions)
+    ]
+    return sum(d.end - d.start + 1 for d in outermost)
 
 
 def vulture_findings(root: Path, files: list[str], min_confidence: int, units: Units) -> list[Finding]:

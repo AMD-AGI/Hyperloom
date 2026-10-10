@@ -7,11 +7,12 @@ None of these has a baseline:
 
 * **Comments** (diff-only, added lines of ``.py`` files): an added run of more than
   :data:`MAX_COMMENT_BLOCK` consecutive full-line ``#`` comments, or an added comment
-  that points at a pull request or issue (``#123`` or longer, ``PR 1234``, a ``/pull/`` link) or
-  narrates an incident (a dated or definite "the outage" / "incident" / "postmortem").
-  The history belongs in the commit message and the PR; a comment says what the code
-  does and why. A ``TODO`` line and the line after it may carry an issue link, which is
-  what Ruff's ``TD003`` asks for.
+  that points at a pull request or issue (``#123`` or longer, ``PR 1234``, ``issue #12``,
+  a ``/pull/`` link) or narrates an incident (a dated incident or outage, a postmortem,
+  "after the outage"). The history belongs in the commit message and the PR; a comment
+  says what the code does and why. A comment starting with ``TODO`` and the line after it
+  may carry an issue link, which is what Ruff's ``TD003`` asks for. A comment line whose
+  text the change removed elsewhere (moved, re-indented, a renamed file) is not added.
 * **English only** (whole tree): no git-tracked text file carries a CJK character
   (:data:`CJK`); on a pull request the title, the body and every commit message are
   held to the same rule.
@@ -19,15 +20,19 @@ None of these has a baseline:
   gate's roots that is not itself a test imports a ``tests`` package or a ``test_*``
   module.
 * **Repeated literals** (diff-only, production modules the change touches): the change
-  may not add an occurrence of a string (3+ characters) or a number (other than 0, 1,
-  -1 and 2) that leaves it written :data:`MAX_LITERAL_REPEATS` or more times in the
-  module. Keys (dict-literal keys, ``x["k"]``), docstrings, f-string text, annotations
-  and ``__all__`` do not count.
+  may not add an occurrence of a string or bytes value (3+ characters) or a number (other
+  than 0, 1, -1 and 2) that takes it from fewer than :data:`MAX_LITERAL_REPEATS` to that
+  many or more in the module. Keys (dict-literal keys, ``x["k"]``, the key of ``.get`` /
+  ``.pop`` / ``.setdefault`` and of an ``in`` test), docstrings, f-string text,
+  annotations and ``__all__`` do not count. A renamed module is compared with the file it
+  was renamed from, and a literal whose count over all the touched modules did not grow
+  only moved (a module split in two).
 """
 
 from __future__ import annotations
 
 import ast
+import codecs
 import dataclasses
 import io
 import json
@@ -47,6 +52,8 @@ MAX_LITERAL_REPEATS = 3
 #: Numbers that are idioms rather than magic values.
 _PLAIN_NUMBERS = frozenset({0, 1, -1, 2})
 _MIN_STRING = 3
+#: Methods whose first argument is a key, as ``x["k"]``'s is.
+_KEY_CALLS = frozenset({"get", "pop", "setdefault"})
 #: The PR label that waives baseline growth and new violations; read from the API.
 OVERRIDE_LABEL = "baseline-raise"
 ENCODING = "utf-8"
@@ -54,26 +61,35 @@ ENCODING = "utf-8"
 #: supplementary-plane extensions), CJK Symbols and Punctuation, Halfwidth and
 #: Fullwidth Forms.
 CJK = re.compile("[\u3000-\u303f\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef\U00020000-\U0003134f]")
+# A bare number needs 3-5 digits with no leading zero, so a colour (#000000) is not one.
 _REFERENCE = re.compile(
-    r"(?<![\w&/])#\d{3,}\b"
-    r"|\b(?:PR|pull request|issue)\s*#?\s*\d+\b"
+    r"(?<![\w&/])#[1-9]\d{2,4}\b"
+    r"|\b(?:PR|GH|pull request)[\s-]*#?\s*\d+\b"
+    r"|\bissue\s*(?:#\s*\d+|\d{3,})\b"
     r"|github\.com/\S+/(?:pull|issues)/\d+",
     re.IGNORECASE,
 )
-_EVENT = r"(?:incident|outage|post-?mortem)s?"
+_EVENT = r"(?:incident|outage)s?"
 _DATE = r"\d{4}-\d{2}-\d{2}"
+_MONTH = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*"
 _NARRATION = re.compile(
     rf"\b{_DATE}\b.{{0,40}}\b{_EVENT}\b"
     rf"|\b{_EVENT}\b.{{0,20}}\b{_DATE}\b"
-    rf"|\b(?:the|this|that|last|yesterday's|today's)\s+(?:[\w-]+\s+)?{_EVENT}\b",
+    r"|\bpost-?mortems?\b"
+    rf"|\b(?:during|after|before|since|from|in|against|caused)\s+(?:the|this|that|last|an?|our|yesterday's|today's)"
+    rf"\s+(?:[\w-]+\s+)?{_EVENT}\b"
+    rf"|\b{_EVENT}\s+(?:on|in|of|last)\s+(?:{_MONTH}|\d|yesterday|week|month)",
     re.IGNORECASE,
 )
+_TODO = re.compile(r"#\s*TODO\b")
 _HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 _SNIFF_BYTES = 8192
 #: Check names, as ``Problem.check`` and the report's sections carry them.
 COMMENTS, ENGLISH, TEST_IMPORTS, LITERALS = "comments", "english", "test-imports", "literals"
 #: What makes a module test code: a ``tests`` package on its path, or a ``test_`` file name.
-_TESTS, _TEST_PREFIX = "tests", "test_"
+_TESTS, _TEST_PREFIX, _CONFTEST = "tests", "test_", "conftest"
+#: Calls that import the module their first (string) argument names.
+_IMPORT_CALLS = frozenset({"import_module", "__import__"})
 
 
 @dataclasses.dataclass(frozen=True)
@@ -129,12 +145,56 @@ def show(root: Path, ref: str, path: str) -> str | None:
     return git(root, "show", f"{ref}:{path}").stdout
 
 
-def added_lines(root: Path, since: str, path: str, untracked: bool) -> set[int]:
-    """Line numbers of ``path`` in the working tree that the change added."""
-    if untracked:
-        return set(range(1, _line_count(root / path) + 1))
-    diff = git(root, "diff", "--no-renames", "--no-color", "--no-ext-diff", "-U0", since, "--", path)
-    return parse_added_lines(diff.stdout)
+@dataclasses.dataclass
+class Diff:
+    """What the change adds, per new path, and the text of every line it removes."""
+
+    #: New-side line numbers each path gains (whitespace-only changes are not gains).
+    added: dict[str, set[int]]
+    #: Stripped text of the removed lines, over every file: an "added" line with the same
+    #: text was moved or re-indented, not written.
+    removed: set[str]
+    #: New path -> old path of each rename the diff detected.
+    renames: dict[str, str]
+
+
+#: Read every file as text whatever ``.gitattributes`` says (``-diff``/``binary`` would hide
+#: the hunks), with no external diff or textconv driver, renames paired, whitespace ignored.
+_DIFF_ARGS = ("diff", "--text", "--no-textconv", "--no-ext-diff", "--no-color", "-M", "-w", "-U0")
+
+
+def read_diff(root: Path, since: str) -> Diff:
+    """The change from ``since`` to the working tree (untracked files are wholly added)."""
+    diff = parse_diff(git(root, "-c", "core.quotePath=false", *_DIFF_ARGS, since, "--").stdout)
+    for path in untracked_files(root).split("\0"):
+        if path and (root / path).is_file():
+            diff.added[path] = set(range(1, _line_count(root / path) + 1))
+    return diff
+
+
+def parse_diff(text: str) -> Diff:
+    """A :class:`Diff` from ``git diff -M -U0`` output."""
+    diff = Diff(added={}, removed=set(), renames={})
+    path = old = None
+    in_hunk = False
+    for line in text.splitlines():
+        if line.startswith("diff --git "):
+            path = old = None
+            in_hunk = False
+        elif line.startswith("@@"):
+            in_hunk = True
+            if path is not None:
+                diff.added.setdefault(path, set()).update(parse_added_lines(line))
+        elif in_hunk:
+            if line.startswith("-"):
+                diff.removed.add(line[1:].strip())
+        elif line.startswith("rename from "):
+            old = line[len("rename from ") :]
+        elif line.startswith("rename to ") and old is not None:
+            diff.renames[line[len("rename to ") :]] = old
+        elif line.startswith("+++ "):
+            path = line[len("+++ b/") :] if line.startswith("+++ b/") else None
+    return diff
 
 
 def _line_count(path: Path) -> int:
@@ -177,15 +237,23 @@ def _comment_lines_by_text(text: str) -> tuple[set[int], dict[int, str]]:
     return set(comments), comments
 
 
-def comment_problems(path: str, text: str, added: set[int]) -> list[Problem]:
-    """Refusals for the comments ``added`` puts into ``text``."""
+def comment_problems(path: str, text: str, added: set[int], removed: Iterable[str] = ()) -> list[Problem]:
+    """Refusals for the comments ``added`` puts into ``text``.
+
+    A line whose stripped text is in ``removed`` (the change took it out somewhere) was
+    moved or re-indented, not written, and does not count.
+    """
     full, comments = comment_lines(text)
+    moved = set(removed)
+    if moved:
+        lines = text.splitlines()
+        added = {row for row in added if row > len(lines) or lines[row - 1].strip() not in moved}
     problems = [
         Problem(COMMENTS, path, start, f"adds a {length}-line comment block (limit {MAX_COMMENT_BLOCK})")
         for start, length in _runs(sorted(added & full))
         if length > MAX_COMMENT_BLOCK
     ]
-    todo_rows = {row for row, comment in comments.items() if "TODO" in comment}
+    todo_rows = {row for row, comment in comments.items() if _TODO.match(comment)}
     exempt = todo_rows | {row + 1 for row in todo_rows if row + 1 in full}
     for row in sorted(added & set(comments) - exempt):
         problems += _comment_text_problems(path, row, comments[row])
@@ -241,15 +309,25 @@ def cjk_problems(root: Path, paths: Iterable[str]) -> list[Problem]:
         full = root / path
         if full.is_symlink() or not full.is_file():
             continue
-        data = full.read_bytes()
-        if b"\0" in data[:_SNIFF_BYTES]:
-            continue
-        try:
-            text = data.decode(ENCODING)
-        except UnicodeDecodeError:
-            continue
-        problems += cjk_in_text(path, text)
+        text = _decode(full.read_bytes())
+        if text is not None:
+            problems += cjk_in_text(path, text)
     return problems
+
+
+def _decode(data: bytes) -> str | None:
+    """``data`` as text: UTF-16 when it opens with a byte-order mark, else UTF-8; None for binary."""
+    if data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        try:
+            return data.decode("utf-16")
+        except UnicodeDecodeError:
+            return None
+    if b"\0" in data[:_SNIFF_BYTES]:
+        return None
+    try:
+        return data.decode(ENCODING)
+    except UnicodeDecodeError:
+        return None
 
 
 def pull_request_cjk(pr: PullRequest) -> list[Problem]:
@@ -269,7 +347,7 @@ def is_test_path(path: str) -> bool:
 
 
 def _is_test_module_name(dotted: str) -> bool:
-    return any(part == _TESTS or part.startswith(_TEST_PREFIX) for part in dotted.split("."))
+    return any(part in (_TESTS, _CONFTEST) or part.startswith(_TEST_PREFIX) for part in dotted.split("."))
 
 
 def test_import_problems(root: Path, files: Iterable[str], units: Units, roots: Iterable[str]) -> list[Problem]:
@@ -291,6 +369,8 @@ def _imported(node: ast.AST, file: Path, search: list[Path]) -> list[str]:
     """Dotted module paths ``node`` imports; a relative one keeps its leading dots."""
     if isinstance(node, ast.Import):
         return [alias.name for alias in node.names]
+    if isinstance(node, ast.Call):
+        return _dynamic_import(node)
     if not isinstance(node, ast.ImportFrom):
         return []
     base = "." * node.level + (node.module or "")
@@ -302,6 +382,16 @@ def _imported(node: ast.AST, file: Path, search: list[Path]) -> list[str]:
         if _names_module(alias.name, folders)
     ]
     return targets
+
+
+def _dynamic_import(call: ast.Call) -> list[str]:
+    """The module ``importlib.import_module("...")`` or ``__import__("...")`` names."""
+    func = call.func
+    name = func.attr if isinstance(func, ast.Attribute) else func.id if isinstance(func, ast.Name) else ""
+    if name not in _IMPORT_CALLS or not call.args:
+        return []
+    first = call.args[0]
+    return [first.value] if isinstance(first, ast.Constant) and isinstance(first.value, str) else []
 
 
 def _source_folders(node: ast.ImportFrom, file: Path, search: list[Path]) -> list[Path]:
@@ -316,8 +406,8 @@ def _source_folders(node: ast.ImportFrom, file: Path, search: list[Path]) -> lis
 
 
 def _names_module(name: str, folders: list[Path]) -> bool:
-    """Whether ``from package import name`` names a test module (``tests`` always does)."""
-    if name == _TESTS:
+    """Whether ``from package import name`` names a test module (``tests``/``conftest`` always do)."""
+    if name in (_TESTS, _CONFTEST):
         return True
     return name.startswith(_TEST_PREFIX) and any(
         (folder / f"{name}.py").is_file() or (folder / name).is_dir() for folder in folders
@@ -350,8 +440,8 @@ def _literal(node: ast.AST, skip: set[int]) -> Literal | None:
         return _number(-node.operand.value)
     if not isinstance(node, ast.Constant):
         return None
-    if isinstance(node.value, str):
-        return ("str", node.value) if len(node.value) >= _MIN_STRING else None
+    if isinstance(node.value, (str, bytes)):
+        return (type(node.value).__name__, node.value) if len(node.value) >= _MIN_STRING else None
     return _number(node.value) if _is_number(node) else None
 
 
@@ -379,6 +469,10 @@ def _non_value_children(node: ast.AST) -> list[ast.AST]:
         return [key for key in node.keys if key is not None]
     if isinstance(node, ast.Subscript):
         return [node.slice]
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in _KEY_CALLS:
+        return node.args[:1]
+    if isinstance(node, ast.Compare) and isinstance(node.ops[0], (ast.In, ast.NotIn)):
+        return [node.left]
     if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
         return [node.value]
     if isinstance(node, ast.JoinedStr):
@@ -399,12 +493,19 @@ def _assigns_all(node: ast.Assign | ast.AugAssign | ast.AnnAssign) -> bool:
     return any(isinstance(t, ast.Name) and t.id == "__all__" for t in targets)
 
 
-def repeated_literal_problems(path: str, before: str | None, after: str) -> list[Problem]:
-    """Literals whose added occurrences leave them written 3+ times in ``path``."""
+def repeated_literal_problems(
+    path: str, before: str | None, after: str, moved: Iterable[Literal] = ()
+) -> list[Problem]:
+    """Literals the change takes from under 3 to 3+ occurrences in ``path``.
+
+    A literal in ``moved`` only moved between modules (its count over every touched
+    module did not grow) and is not refused.
+    """
     old = {lit: len(rows) for lit, rows in _parse_literals(path, before).items()}
+    skip = set(moved)
     problems = []
     for literal, rows in sorted(_parse_literals(path, after).items(), key=lambda item: item[1][0]):
-        if len(rows) >= MAX_LITERAL_REPEATS and len(rows) > old.get(literal, 0):
+        if len(rows) >= MAX_LITERAL_REPEATS > old.get(literal, 0) and literal not in skip:
             problems.append(
                 Problem(
                     LITERALS,
@@ -415,6 +516,16 @@ def repeated_literal_problems(path: str, before: str | None, after: str) -> list
                 )
             )
     return problems
+
+
+def moved_literals(befores: Iterable[tuple[str, str | None]], afters: Iterable[tuple[str, str]]) -> set[Literal]:
+    """Literals whose total count over the touched modules did not grow: they only moved."""
+    total: dict[Literal, int] = {}
+    for sign, texts in ((-1, befores), (1, afters)):
+        for path, text in texts:
+            for literal, rows in _parse_literals(path, text).items():
+                total[literal] = total.get(literal, 0) + sign * len(rows)
+    return {literal for literal, grew in total.items() if grew <= 0}
 
 
 def _parse_literals(path: str, text: str | None) -> dict[Literal, list[int]]:
@@ -445,16 +556,28 @@ def run_all(root: Path, roots: Iterable[str], exclude: Iterable[str], units: Uni
     problems += test_import_problems(root, production, units, roots)
     if since is None:
         return problems
-    untracked = set(untracked_files(root).split("\0"))
+    diff = read_diff(root, since)
     excluded, modules = tuple(exclude), set(production)
-    for path in sorted(touched_files(root, since)):
+    touched = sorted(touched_files(root, since))
+    literal_paths = []
+    for path in touched:
         if not path.endswith(".py") or is_excluded(path, excluded) or not (root / path).is_file():
             continue
         text = (root / path).read_text(encoding=ENCODING)
-        problems += comment_problems(path, text, added_lines(root, since, path, path in untracked))
+        problems += comment_problems(path, text, diff.added.get(path, set()), diff.removed)
         if path in modules and not is_test_path(path):
-            problems += repeated_literal_problems(path, show(root, since, path), text)
+            literal_paths.append((path, text))
+    befores = [(p, show(root, since, p)) for p in touched if _counts_literals(p, roots, excluded)]
+    moved = moved_literals(befores, literal_paths)
+    for path, text in literal_paths:
+        problems += repeated_literal_problems(path, show(root, since, diff.renames.get(path, path)), text, moved)
     return problems
+
+
+def _counts_literals(path: str, roots: Iterable[str], excluded: tuple[str, ...]) -> bool:
+    """Whether ``path`` is a production module of the scope (at the base or now)."""
+    under = any(path == r.rstrip("/") or path.startswith(r.rstrip("/") + "/") for r in roots)
+    return under and path.endswith(".py") and not is_excluded(path, excluded) and not is_test_path(path)
 
 
 # --- pull request metadata -----------------------------------------------------
