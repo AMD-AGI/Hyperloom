@@ -20,7 +20,6 @@ the end of :func:`materialize_config_with_envs`; nothing may write it after.
 
 from __future__ import annotations
 
-import json
 import logging
 import math
 import os
@@ -229,9 +228,10 @@ def agentx_active(shared_state: Any = None) -> bool:
 def agentx_env_for_conc(conc: int | None = None) -> "Mapping[str, str]":
     """The environment the AgentX derivations read, carrying a rung's own CONC.
 
-    The operator's ``--extra-env`` pins sit over the process environment: they
-    reach the client through ``benchmark.envs``, so every value derived from
-    them has to be derived from them too.
+    The operator's ``--extra-env`` pins are already in the process environment,
+    exported by ``_export_operator_launch_shape``, so no layer over it is needed
+    here -- re-merging them would make this reader resolve a knob differently
+    from every other one.
 
     Warmup is ``CANON_WARMUP_PER_LANE`` requests per lane across ``CONC`` lanes,
     so every bound derived from it is linear in the concurrency being measured,
@@ -241,10 +241,10 @@ def agentx_env_for_conc(conc: int | None = None) -> "Mapping[str, str]":
         conc: The rung's concurrency, or ``None`` to read the session's.
 
     Returns:
-        The process environment under the operator's pins, with ``CONC``
-        replaced when a rung concurrency is given.
+        The process environment, with ``CONC`` replaced when a rung concurrency
+        is given.
     """
-    env = {**os.environ, **_operator_extra_env()}
+    env = dict(os.environ)
     if conc and conc > 0:
         env["CONC"] = str(conc)
     return env
@@ -795,26 +795,10 @@ def _custom_script_path(runner_type: str) -> str:
 
 
 def _operator_extra_env() -> dict[str, str]:
-    """Return the ``--extra-env`` pins the CLI serialized, or ``{}``.
+    """Return the ``--extra-env`` pins the CLI serialized, or ``{}``."""
+    from hyperloom.common.env_safety import operator_extra_env
 
-    Args:
-        None.
-
-    Returns:
-        The operator's ``NAME=VALUE`` pins; empty when unset or unparseable,
-        because a malformed pin must not take the run down with it.
-    """
-    raw = os.environ.get("INFERENCE_OPTIMIZER_EXTRA_ENV", "").strip()
-    if not raw:
-        return {}
-    try:
-        parsed = json.loads(raw)
-    except (TypeError, ValueError):
-        log.warning("custom: ignoring unparseable INFERENCE_OPTIMIZER_EXTRA_ENV")
-        return {}
-    if not isinstance(parsed, dict):
-        return {}
-    return {str(k).strip(): str(v) for k, v in parsed.items() if str(k).strip()}
+    return operator_extra_env()
 
 
 def resolve_reference_base() -> tuple[str, dict[str, str]]:

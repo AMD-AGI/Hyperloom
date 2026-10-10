@@ -1207,15 +1207,30 @@ def _export_operator_launch_shape(
     server_args: str,
     extra_env: dict[str, str],
 ) -> None:
-    """Project the operator's ``--server-args`` / ``--extra-env`` into env."""
+    """Project the operator's ``--server-args`` / ``--extra-env`` into env.
+
+    Each pin is exported under its own name, not only into the JSON blob. Every Hyperloom control variable is read
+    with a bare ``os.environ.get``, so a pin the blob alone carries is invisible to all of them and lets one reader
+    resolve a knob differently from the rest -- the workload a run measures and the axis it grades on are two such
+    readers. Nothing is withheld from the export: the operator who can pass ``--extra-env`` can equally ``export``
+    the same name, so an exception list would buy no safety and would reintroduce exactly the split this removes.
+    """
+    from hyperloom.common.env_safety import OPERATOR_EXTRA_ENV_VAR, operator_extra_env
+
     if server_args:
         os.environ["INFERENCE_OPTIMIZER_SERVER_ARGS"] = server_args
     else:
         os.environ.pop("INFERENCE_OPTIMIZER_SERVER_ARGS", None)
+    # Read before the blob is rewritten: it names what the previous launch exported, which a resume dropping a pin
+    # -- or a second session in the same shell -- has to unset rather than leave behind.
+    for name in operator_extra_env():
+        if name not in extra_env:
+            os.environ.pop(name, None)
+    os.environ.update(extra_env)
     if extra_env:
-        os.environ["INFERENCE_OPTIMIZER_EXTRA_ENV"] = json.dumps(extra_env)
+        os.environ[OPERATOR_EXTRA_ENV_VAR] = json.dumps(extra_env)
     else:
-        os.environ.pop("INFERENCE_OPTIMIZER_EXTRA_ENV", None)
+        os.environ.pop(OPERATOR_EXTRA_ENV_VAR, None)
 
 
 def _partition_fanout_supported(framework: str | None) -> tuple[bool, str]:
@@ -1623,10 +1638,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     if nodes_resolved >= 2:
         os.environ["INFERENCE_OPTIMIZER_GPUS_PER_NODE"] = str(gpus_per_node_resolved)
         os.environ["INFERENCE_OPTIMIZER_MN_BACKEND"] = _resolve_mn_backend(args)
-    _export_operator_launch_shape(
-        server_args=str(getattr(args, "server_args", "") or "").strip(),
-        extra_env=parse_operator_extra_env(args),
-    )
     # The partition shape is deliberately NOT exported here.
 
     # Project resolved workload knobs into env for the fresh-launch path only.
@@ -1636,6 +1647,12 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             tp_resolved=tp_resolved,
             ep_resolved=ep_resolved,
         )
+    # After the workload knobs: the pins are now real environment variables, and an operator who pinned TP/CONC/EP
+    # outranks the values derived from the flags.
+    _export_operator_launch_shape(
+        server_args=str(getattr(args, "server_args", "") or "").strip(),
+        extra_env=parse_operator_extra_env(args),
+    )
     # User-declared grid skip list; re-export so subprocess executors inherit it (empty clears stale values).
     skip_variants_resolved = (getattr(args, "skip_variants", "") or "").strip()
     os.environ["SKIP_VARIANTS"] = skip_variants_resolved

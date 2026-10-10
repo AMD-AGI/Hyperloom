@@ -148,7 +148,10 @@ def test_switch_on_materializes_workload_spec(tmp_path, monkeypatch):
 
 
 def _pin_extra_env(monkeypatch, **pins):
+    """Pin as ``_export_operator_launch_shape`` does: each name in the environment, plus the handoff blob."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", json.dumps(pins))
+    for name, value in pins.items():
+        monkeypatch.setenv(name, value)
 
 
 def test_operator_extra_env_pins_reach_the_published_spec(tmp_path, monkeypatch):

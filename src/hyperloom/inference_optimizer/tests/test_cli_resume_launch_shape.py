@@ -56,6 +56,51 @@ def test_export_operator_launch_shape_clears_stale_values(monkeypatch):
     assert "INFERENCE_OPTIMIZER_EXTRA_ENV" not in os.environ
 
 
+def test_export_operator_launch_shape_exports_each_pin(monkeypatch):
+    """A pin reaches the process environment under its own name, not only inside the JSON blob.
+
+    Every Hyperloom control variable is read with a bare ``os.environ.get``. A pin visible only as
+    ``INFERENCE_OPTIMIZER_EXTRA_ENV`` is therefore invisible to all of them, which is how one reader can resolve a
+    knob differently from the rest.
+    """
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", "")
+    monkeypatch.setenv("HYPERLOOM_AGENTIC_BACKEND", "")
+
+    _export_operator_launch_shape(server_args="", extra_env={"HYPERLOOM_AGENTIC_BACKEND": "mlperf"})
+
+    assert os.environ["HYPERLOOM_AGENTIC_BACKEND"] == "mlperf"
+
+
+def test_exported_pin_is_seen_by_the_bare_env_readers(monkeypatch):
+    """The workload the switch selects and the axis the session seeds agree once the pin is global."""
+    from hyperloom.common.agentx_workload import MLPERF_CLIENT_SCRIPT, agentx_client_script
+    from hyperloom.common.perf_metric import GRADED_OUTPUT
+    from hyperloom.inference_optimizer.cli.bootstrap import seed_grading
+
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", "")
+    monkeypatch.setenv("HYPERLOOM_AGENTIC_BACKEND", "")
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "")
+
+    _export_operator_launch_shape(server_args="", extra_env={"HYPERLOOM_AGENTIC_BACKEND": "mlperf"})
+
+    assert agentx_client_script() == MLPERF_CLIENT_SCRIPT
+    # MLPerf publishes no per-request OSL/E2EL series, so grading it on interactivity would REVERT every round.
+    assert seed_grading("sglang", "agentx")["objective"] == GRADED_OUTPUT
+
+
+def test_export_operator_launch_shape_unsets_pins_dropped_on_resume(monkeypatch):
+    """A resume that drops a pin must clear the name the previous launch exported."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", "")
+    monkeypatch.setenv("STALE_PIN", "")
+    monkeypatch.setenv("KEPT_PIN", "")
+
+    _export_operator_launch_shape(server_args="", extra_env={"STALE_PIN": "1", "KEPT_PIN": "a"})
+    _export_operator_launch_shape(server_args="", extra_env={"KEPT_PIN": "b"})
+
+    assert "STALE_PIN" not in os.environ
+    assert os.environ["KEPT_PIN"] == "b"
+
+
 def test_launch_shape_survives_a_state_roundtrip():
     """The fields reach disk, which is what a resume reads them back from."""
     state = SharedState(
