@@ -36,6 +36,8 @@ _BACKEND_RETRY_BASE_SEC: int = 2
 _BACKEND_RETRY_MAX_SEC: int = 300
 # How long one agent's backend may fail without a successful turn before the session stops, in seconds.
 _BACKEND_UNHEALTHY_STOP_SEC: float = 3600.0
+# How many turns in a row one agent may answer without an intent before the session stops.
+_NO_INTENT_STOP_TURNS: int = 50
 from ..phases import machine_state as _phase_state
 from hyperloom.inference_optimizer.session.paths import db_path_for
 from hyperloom.inference_optimizer.session.session_binding import bind_session
@@ -355,6 +357,8 @@ class Coordinator:
             1,
             env_int("INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD", default=5),
         )
+        # Per-agent run of consecutive turns that emitted no intent; a turn with an intent ends it.
+        self._no_intent_streak: dict[str, int] = {}
 
         # Stable tick order from the live role_registry.
         _CANONICAL_ORDER = ("orchestration", "critic")
@@ -1217,11 +1221,7 @@ class Coordinator:
             return
         except NoIntentEmitted as exc:
             # No parseable intents; surface as observation so the next tick self-corrects.
-            await self.bus.record_observation(
-                "coordinator",
-                "observation",
-                {"kind": "no_intent_emitted", "agent": agent_name, "error": str(exc)[:500]},
-            )
+            await self._record_no_intent_turn(agent_name, str(exc)[:500])
             await self.conversation.advance_rendered_cursor(agent_name)
             return
         except Exception as exc:
@@ -1254,12 +1254,10 @@ class Coordinator:
         with trajectory_scope(call_id=call_id, parent_span_id=call_span.span_id):
             for intent in result.intents:
                 await self.router.handle_intent(agent_name, intent)
-        if not result.intents and not request:
-            await self.bus.record_observation(
-                "coordinator",
-                "observation",
-                {"kind": "no_intent_emitted", "agent": agent_name, "error": "the turn emitted no intents"},
-            )
+        if result.intents:
+            self._no_intent_streak.pop(agent_name, None)
+        elif not request:
+            await self._record_no_intent_turn(agent_name, "the turn emitted no intents")
         await self.conversation.advance_rendered_cursor(agent_name)
         if agent_name == "orchestration":
             state = self.shared_state
@@ -1393,6 +1391,41 @@ class Coordinator:
                     ),
                 },
             )
+
+    async def _record_no_intent_turn(self, agent_name: str, error: str) -> None:
+        """Record a turn that emitted no intent and extend the agent's no-intent streak.
+
+        The ``_NO_INTENT_STOP_TURNS``-th such turn in a row records one high-severity no_intent_streak observation and
+        stops the session unless something else already has.
+        """
+        from hyperloom.inference_optimizer.breakdown.stop_reasons import BACKEND_UNHEALTHY_STOP_REASON
+
+        await self.bus.record_observation(
+            "coordinator",
+            "observation",
+            {"kind": "no_intent_emitted", "agent": agent_name, "error": error},
+        )
+        streak = self._no_intent_streak.get(agent_name, 0) + 1
+        self._no_intent_streak[agent_name] = streak
+        if streak != _NO_INTENT_STOP_TURNS:
+            return
+        log.error("Coordinator: the %s agent answered %d turns in a row without an intent", agent_name, streak)
+        await self.bus.record_observation(
+            "coordinator",
+            "observation",
+            {
+                "kind": "no_intent_streak",
+                "agent": agent_name,
+                "consecutive_turns": streak,
+                "severity": "high",
+                "hint": (
+                    "the agent keeps answering without calling emit_intent; for the orchestration agent, "
+                    "agents/orchestration/mcp_setup.json records whether Claude Code offered the tool"
+                ),
+            },
+        )
+        if not self.shared_state.stop_reason:
+            self.shared_state.set_stop_reason(BACKEND_UNHEALTHY_STOP_REASON)
 
 
 __all__ = [
