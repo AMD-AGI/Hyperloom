@@ -2402,3 +2402,37 @@ def test_a_revert_that_already_completed_is_not_run_again(tmp_path: Path):
     assert result["already_reverted"] is True
     assert result["restored_paths"] == ["/framework/src.py"]
     assert lifecycle_complete(result)
+
+
+@pytest.mark.asyncio
+async def test_enqueue_conc_sweep_grants_the_phase_its_budget_and_lease(coord):
+    """The grant SWEEP's budget exits wait for is the sweep's budget plus the lease grace, from enqueue time."""
+    coord.shared_state.phase_history = [
+        {"to_phase": "SWEEP", "reason": "kernel_no_more_leverage", "evidence": {}},
+    ]
+    coord.shared_state.conc_sweep_total_budget_sec = 9000
+    coord.shared_state.remaining_minutes = lambda: 62.4
+    coord.shared_state._now_unix = lambda: 1_800_000_000.0
+
+    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+
+    assert task.params["total_budget_sec"] == 3624
+    assert coord.shared_state.conc_sweep_granted_until_unix == 1_800_000_000.0 + 3624 + 600
+
+    # A re-entry that finds the task already queued does not move the grant.
+    coord.shared_state._now_unix = lambda: 1_800_000_100.0
+    await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+    assert coord.shared_state.conc_sweep_granted_until_unix == 1_800_000_000.0 + 3624 + 600
+
+
+@pytest.mark.asyncio
+async def test_enqueue_unbounded_conc_sweep_grants_nothing(coord):
+    """With no budget there is no grant: the phase's own budget stays the backstop."""
+    coord.shared_state.phase_history = [
+        {"to_phase": "SWEEP", "reason": "kernel_no_more_leverage", "evidence": {}},
+    ]
+    coord.shared_state.conc_sweep_total_budget_sec = 0
+
+    await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+
+    assert coord.shared_state.conc_sweep_granted_until_unix == 0.0

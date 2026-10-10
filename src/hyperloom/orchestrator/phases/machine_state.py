@@ -1366,7 +1366,32 @@ def _sweep_predicate_inputs(
             "min_remaining_sec": _cycle_reloop_min_remaining_sec(state),
         },
     }
-    return result, _budget_predicate_inputs(state, now_unix=now_unix)
+    budget = _budget_predicate_inputs(state, now_unix=now_unix)
+    if not result["status"]:
+        _extend_budget_to_sweep_grant(budget, state, now_unix=now_unix)
+    return result, budget
+
+
+def _extend_budget_to_sweep_grant(budget: dict[str, Any], state: Any, *, now_unix: float) -> None:
+    """Widen SWEEP's budget to cover the conc_sweep it granted and is still waiting on.
+
+    SWEEP's only work is the sweep it enqueued on entry, whose budget is already clamped to the session clock. The
+    per-phase cap is a share of the whole session (5% of three hours is nine minutes) and would otherwise cancel that
+    sweep mid-ladder. The widened numbers are what the predicate compares, so a replay of the frozen inputs reaches
+    the same decision.
+    """
+    grant_left = (_number(state.conc_sweep_granted_until_unix) or 0.0) - float(now_unix)
+    if grant_left <= 0.0:
+        return
+    remaining = _number(budget.get("remaining_sec"))
+    if remaining is not None and remaining < grant_left:
+        budget["remaining_sec"] = grant_left
+        if "current_balance" in budget:
+            budget["current_balance"] = grant_left
+    cap = _number(budget.get("cap_sec"))
+    cumulative = _number(budget.get("cumulative_elapsed_sec")) or 0.0
+    if cap is not None and cap < cumulative + grant_left:
+        budget["cap_sec"] = cumulative + grant_left
 
 
 def workflow_predicate_inputs(
@@ -1587,11 +1612,13 @@ def _sweep_exit(inputs: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
             if spent_without_pair or (no_pair and not evidence["sweep_skip_reason"]):
                 return "sweep_failed", evidence
         return "sweep_done", evidence
+    # Anything else -- nothing landed yet, or a sweep the orchestrator cancelled -- leaves the phase to its budget:
+    # a cancelled sweep was stopped by the transition that budget (or a session-wide stop) already decided on.
     return _budget_exit(
         dict(inputs.get("budget") or {}),
         exhausted_reason="sweep_budget_exhausted",
         cap_reason="sweep_budget_cap",
-        evidence={},
+        evidence={"sweep_status": status} if status else {},
     )
 
 

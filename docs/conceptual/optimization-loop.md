@@ -371,7 +371,12 @@ rung is a 3600 s window and the session grades at a fixed CONC; SWEEP then
 records a disabled skip.
 
 Results update `last_conc_sweep` and feed the final report and breakdown.
-The phase exits on `sweep_done` (or `sweep_failed`).
+The phase exits on `sweep_done` (or `sweep_failed`). While the sweep it
+enqueued is still running, SWEEP's own budget and cap wait for the budget the
+sweep was granted (plus its lease grace); the session deadline does not. A
+sweep the orchestrator cancels stops its ladder at once and records
+`cancelled`, so the phase closes on whatever ordered the cancel rather than on
+`sweep_failed`.
 
 ## CLOSE
 
