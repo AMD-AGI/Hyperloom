@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import re
 
 from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 
@@ -14,9 +15,9 @@ from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 #: let a board have a dispatch identity that ``_resolve_amd_gpu_type`` refused.
 _AMD_GPU_TYPES = frozenset(AMD_GPU_DISPATCH_IDENTITIES)
 
-#: rocm-smi product tags, reverse-sorted so a longer tag is tested before any
-#: tag that is a prefix of it -- an "MI300XL" must not be claimed by "MI300X".
-_PRODUCT_TAGS: tuple[str, ...] = tuple(sorted((t.upper() for t in _AMD_GPU_TYPES), reverse=True))
+#: Product tags normalized to alphanumeric uppercase, reverse-sorted so a
+#: longer tag is tested before any tag that is a prefix of it.
+_PRODUCT_TAGS: tuple[str, ...] = tuple(sorted((re.sub(r"[^A-Z0-9]", "", t.upper()) for t in _AMD_GPU_TYPES), reverse=True))
 
 _GFX_TO_RUNNER: dict[str, str] = {
     # gfx arch -> Magpie runner label, so launchers and runtime materializers agree on the selected benchmark script.
@@ -55,7 +56,7 @@ def _resolve_gpu_type(
 
 
 def _autodetect_gpu_type() -> str | None:
-    """Return mi300x|mi308x|mi325x|mi355x or None if undetectable."""
+    """Return a known AMD GPU SKU from product text or a supported arch."""
     import subprocess
 
     try:
@@ -64,9 +65,10 @@ def _autodetect_gpu_type() -> str | None:
             capture_output=True,
             text=True,
             timeout=5,
-        ).stdout.upper()
+        ).stdout
+        normalized_output = re.sub(r"[^A-Z0-9]", "", out.upper())
         for tag in _PRODUCT_TAGS:
-            if tag in out:
+            if tag in normalized_output:
                 return tag.lower()
     except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError, OSError):
         # rocm-smi missing / slow / not permitted; fall through to the torch gcnArchName probe below (autodetect is
@@ -75,7 +77,17 @@ def _autodetect_gpu_type() -> str | None:
     try:
         import torch
 
-        arch = torch.cuda.get_device_properties(0).gcnArchName
+        properties = torch.cuda.get_device_properties(0)
+        product_names = [getattr(properties, "name", "")]
+        get_device_name = getattr(torch.cuda, "get_device_name", None)
+        if callable(get_device_name):
+            product_names.append(get_device_name(0))
+        for name in product_names:
+            normalized_name = re.sub(r"[^A-Z0-9]", "", str(name).upper())
+            for tag in _PRODUCT_TAGS:
+                if tag in normalized_name:
+                    return tag.lower()
+        arch = properties.gcnArchName
         gfx = arch.split(":", 1)[0].lower()
         return _GFX_TO_RUNNER.get(gfx)
     except Exception:  # noqa: BLE001

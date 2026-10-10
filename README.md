@@ -1,3 +1,15 @@
+# ROCm Hyperloom-RX9000series
+This fork adds experimental RX 9070 XT (GFX1201) support. AMD lists the card for Windows 11 in ROCm 7.2.0; Hyperloom's managed serving and optimization workflow remains Linux-oriented and is not yet validated end to end on this GPU. See the [compatibility notes](docs/compatibility.rst#rx-9070-xt).
+
+## RX 9070 XT Update
+
+- Added the `rx9070xt` GPU identity (`gfx1201`, 64 CUs) to the CLI, provenance, shared target/build resolution, Recipe KB, and KernelForge architecture normalization.
+- Normalized local and remote GPU product-name detection, including Windows-style names such as `AMD Radeon RX 9070 XT`; architecture-only `gfx1201` detection does not guess a board SKU.
+- Added regression coverage for GPU discovery, SKU disambiguation, KernelForge routing, and build targets.
+- Updated compatibility and adaptation documentation with AMD's Windows ROCm 7.2.0 availability and the current Hyperloom support boundary.
+
+**Still outstanding:** native Windows orchestration, an RX-specific managed benchmark runner, calibrated roofline data, GFX1201-specific kernel guidance, and end-to-end validation on RX 9070 XT hardware.
+
 # ROCm Hyperloom
 
 [![Tests](https://github.com/AMD-AGI/Hyperloom/actions/workflows/tests-coverage.yml/badge.svg)](https://github.com/AMD-AGI/Hyperloom/actions/workflows/tests-coverage.yml)
@@ -100,7 +112,7 @@ the knowledge base are described further in
 | Feature | Options |
 |------|-------|
 | Workload | Text generation, image generation, and custom / scriptable pipelines |
-| Platform | MI300X, MI325X, MI355X |
+| Platform | MI300X, MI325X, MI355X; RX 9070 XT (GFX1201, experimental; end-to-end not validated) |
 | Framework | SGLang, vLLM, xDiT |
 | Kernel language | HIP, Triton, FlyDSL |
 | Kernel backends | GEAK, KernelForge |

@@ -89,7 +89,11 @@ def proven_fusion_fewshot() -> str:
 def _arch_phrase(gpu_arch: str) -> str:
     """How to name the target GPU in a prompt."""
     arch = (gpu_arch or "").strip().lower()
-    marketing = {"gfx950": "MI355X", "gfx942": "MI300X/MI325X"}.get(arch, "")
+    marketing = {
+        "gfx950": "MI355X",
+        "gfx942": "MI300X/MI325X",
+        "gfx1201": "Radeon RX 9070 XT",
+    }.get(arch, "")
     if not arch:
         return "an AMD ROCm GPU"
     return f"AMD {marketing} ({arch})" if marketing else f"an AMD GPU ({arch})"
