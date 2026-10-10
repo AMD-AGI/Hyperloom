@@ -36,7 +36,7 @@
               "const": "hyperloom.workflow_evaluation.v2"
             },
             "contract_digest": {
-              "const": "691c681d2d8abbac8953bad1e30deea3e3c9891e82f9ef9ff6ac45b2cde8ef09"
+              "const": "ea9c89768054ea13bdcac266c8c98d405b445bbaa16a7e266479110be37f8f22"
             },
             "run_flags": {
               "type": "object",
@@ -716,6 +716,7 @@
             "",
             "active_inferencex_checkout_missing",
             "agentx_client_unavailable",
+            "backend_unhealthy",
             "baseline_accuracy_failed",
             "baseline_arg_error",
             "baseline_failed",
@@ -1430,6 +1431,15 @@
         "tput": {
           "type": "number"
         },
+        "initial_analysis_pending": {
+          "type": "boolean"
+        },
+        "analysis_affordable_sec": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
         "session_usable_sec": {
           "type": [
             "number",
@@ -1469,6 +1479,15 @@
       "properties": {
         "tput": {
           "type": "number"
+        },
+        "initial_analysis_pending": {
+          "type": "boolean"
+        },
+        "analysis_affordable_sec": {
+          "type": [
+            "number",
+            "null"
+          ]
         }
       },
       "additionalProperties": false

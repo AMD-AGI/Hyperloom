@@ -16,6 +16,8 @@ from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.state.shared_state import SharedState
 
+from ._geak_helpers import stop_geak_before_launch
+
 
 def _coordinator(session_dir: Path):
     from hyperloom.orchestrator.loop.coordinator import Coordinator
@@ -57,19 +59,11 @@ def _no_controller_run(**kwargs: Any) -> dict[str, Any]:
 
 @pytest.fixture
 def session_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    from hyperloom.orchestrator.actions.executors import _kernel_agent_tool
     from hyperloom.orchestrator.kernel import controller_submit
-
-    real_tool_path = _kernel_agent_tool._kernel_agent_tool_path
-
-    def _tool_path_without_geak_runner(tool_name: str) -> Path:
-        if tool_name == "backends/geak_runner.py":
-            raise FileNotFoundError(tool_name)
-        return real_tool_path(tool_name)
 
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     # KERNEL entry would otherwise launch a real GEAK runner or Controller process on its route.
-    monkeypatch.setattr(_kernel_agent_tool, "_kernel_agent_tool_path", _tool_path_without_geak_runner)
+    stop_geak_before_launch(monkeypatch)
     monkeypatch.setattr(controller_submit, "run_controller_subprocess", _no_controller_run)
     session_dir = make_session_dir()
     # The CLI seeds a registered framework before the Coordinator ever loads the state.
@@ -111,7 +105,7 @@ async def test_a_baseline_carries_the_run_into_the_optimisation_phase_with_work(
 @pytest.mark.parametrize(
     ("backend_order", "result_field", "result_key", "expected"),
     [
-        ("", "geak_result", "error_class", "runner_not_found"),
+        ("", "geak_result", "error_class", "insufficient_budget"),
         ("forge", "kernel_rewrite_controller_result", "status", "no_opportunity"),
     ],
     ids=["geak", "forge"],

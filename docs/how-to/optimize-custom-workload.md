@@ -28,7 +28,7 @@ frameworks, see [Run a Hyperloom optimization](optimize.md) instead.
 
 ```bash
 export HYPERLOOM_BENCHMARK_BACKEND=bypass
-python3 -m hyperloom.inference_optimizer.cli -v optimize \
+python3 -m hyperloom optimize -v \
   --framework custom \
   --framework-path /path/to/my-checkout \
   --benchmark-scripts-dir /path/to/my-scripts \

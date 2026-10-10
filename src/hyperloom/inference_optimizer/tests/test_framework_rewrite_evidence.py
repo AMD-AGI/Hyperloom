@@ -1387,7 +1387,7 @@ def test_probe_injection_is_idempotent(tmp_path, monkeypatch):
 
 
 def test_probe_injection_respects_the_off_switch(tmp_path, monkeypatch):
-    """With the probe switched off the config is left untouched."""
+    """With the probe switched off only the start-up shim goes in, without the probe's environment."""
     import yaml
 
     from hyperloom.orchestrator.actions.executors.profile import ProfileExecutor
@@ -1397,7 +1397,8 @@ def test_probe_injection_respects_the_off_switch(tmp_path, monkeypatch):
     _write_profile_config(config, {"TP": 8})
     assert ProfileExecutor()._inject_host_probe(config, tmp_path / "ws") == ""
     envs = yaml.safe_load(config.read_text(encoding="utf-8"))["benchmark"]["envs"]
-    assert envs == {"TP": 8}
+    assert envs == {"TP": 8, "PYTHONPATH": str(evidence.probe_asset_dir())}
+    assert not (tmp_path / "ws").exists()
 
 
 def test_evidence_collection_annotates_the_profile_result(tmp_path, monkeypatch):

@@ -380,7 +380,9 @@ def test_config_attempts_record_the_pair_and_the_verbatim_outcome(session_dir: P
         ],
     }
     asyncio.run(
-        coord.writeback.fact_write_hook(task=task, result=result, verdict=Verdict.ADOPTED, adopted_variants={"fp1"})
+        coord.recipe_journal.fact_write_hook(
+            task=task, result=result, verdict=Verdict.ADOPTED, adopted_variants={"fp1"}
+        )
     )
     coord.phase_framework.close_framework_timeline(_tr("optimize_budget_cap"))
 
@@ -466,7 +468,7 @@ def test_the_config_arms_grid_lands_a_run_row(session_dir: Path):
 
     task = SimpleNamespace(task_id="t-exp-1", kind="explore", params={}, created_at="2026-09-18T01:00:00Z")
     asyncio.run(
-        coord.writeback.fact_write_hook(
+        coord.recipe_journal.fact_write_hook(
             task=task,
             result={
                 "status": "succeeded",
@@ -502,7 +504,7 @@ def test_a_grid_that_measured_nothing_still_lands_a_run_row(session_dir: Path):
 
     task = SimpleNamespace(task_id="t-exp-2", kind="explore", params={}, created_at="2026-09-18T02:00:00Z")
     asyncio.run(
-        coord.writeback.fact_write_hook(
+        coord.recipe_journal.fact_write_hook(
             task=task,
             result={"status": "failed", "error_class": "empty_grid", "error": "params.grid has no valid variants"},
             verdict=Verdict.FAILED,
@@ -531,7 +533,7 @@ def test_a_config_variants_accuracy_is_reported_as_well_as_gated(session_dir: Pa
 
     task = SimpleNamespace(task_id="t-exp-3", kind="explore", params={}, created_at="")
     asyncio.run(
-        coord.writeback.fact_write_hook(
+        coord.recipe_journal.fact_write_hook(
             task=task,
             result={
                 "round_id": "explore-003",
@@ -937,7 +939,7 @@ def test_a_delegated_grid_is_a_proposal_carrying_its_read_and_relayed_citations(
     state = coord.shared_state
     state.phase = "FRAMEWORK_AGENT"
     coord.phase_framework._open_framework_timeline()
-    coord._kb_last_read = ExperienceKBEvidence(
+    coord.conversation.kb_last_read = ExperienceKBEvidence(
         tick=state.tick,
         read_id="read-orchestration",
         status="completed",
@@ -989,7 +991,7 @@ def test_a_delegated_grid_is_a_proposal_carrying_its_read_and_relayed_citations(
 
     variant = {"extra_server_args": "--kv-cache-dtype fp8", "note": relayed["reasoning"]}
     asyncio.run(
-        coord.writeback.fact_write_hook(
+        coord.recipe_journal.fact_write_hook(
             task=task,
             result={
                 "round_id": "explore-001",
@@ -1323,7 +1325,7 @@ def test_measured_variants_settle_their_grid(session_dir: Path):
     task = asyncio.run(coord.tasks.get(pending.task_id))
     assert task.params["proposal_msg_id"] == msg_id
     asyncio.run(
-        coord.writeback.fact_write_hook(
+        coord.recipe_journal.fact_write_hook(
             task=task,
             result={
                 "round_id": "explore-009",
@@ -1360,7 +1362,7 @@ def test_a_measured_variant_keeps_the_name_a_reader_knows_it_by(session_dir: Pat
 
     msg_id = _propose_grid(coord, [{"provenance": "llm_direct"}])
     asyncio.run(
-        coord.writeback.fact_write_hook(
+        coord.recipe_journal.fact_write_hook(
             task=SimpleNamespace(task_id="t-exp-7", kind="explore", params={"proposal_msg_id": msg_id}),
             result={
                 "round_id": "explore-007",
@@ -1426,7 +1428,7 @@ def test_config_gates_and_stack_come_from_the_round_that_ruled(session_dir: Path
 
     task = SimpleNamespace(task_id="t-exp-2", kind="explore", params={})
     asyncio.run(
-        coord.writeback.fact_write_hook(
+        coord.recipe_journal.fact_write_hook(
             task=task,
             result={
                 "round_id": "explore-002",
@@ -1485,7 +1487,7 @@ def test_an_ungated_keep_does_not_claim_an_accuracy_pass(session_dir: Path):
     coord.phase_framework._open_framework_timeline()
 
     asyncio.run(
-        coord.writeback.fact_write_hook(
+        coord.recipe_journal.fact_write_hook(
             task=SimpleNamespace(task_id="t-exp-3", kind="explore", params={}),
             result={
                 "round_id": "explore-003",
@@ -1525,7 +1527,7 @@ def test_a_config_keep_the_lift_refused_is_not_adopted(session_dir: Path):
     coord.phase_framework._open_framework_timeline()
 
     asyncio.run(
-        coord.writeback.fact_write_hook(
+        coord.recipe_journal.fact_write_hook(
             task=SimpleNamespace(task_id="t-exp-4", kind="explore", params={}),
             result={
                 "round_id": "explore-004",
@@ -1550,7 +1552,7 @@ def test_a_config_keep_the_lift_refused_is_not_adopted(session_dir: Path):
     assert attempt["attribution_eligible"] is False
     (row,) = coord.shared_state.attempts
     assert row["adopted"] is False
-    (entry,) = [e for e in coord.writeback.ensure_journal().entries if e.task_id == "t-exp-4"]
+    (entry,) = [e for e in coord.recipe_journal.ensure_journal().entries if e.task_id == "t-exp-4"]
     assert entry.outcome == "no_promote"
 
 

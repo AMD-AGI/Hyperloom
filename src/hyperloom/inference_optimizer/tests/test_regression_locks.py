@@ -21,6 +21,7 @@ from hyperloom.orchestrator.roles import (
 from hyperloom.orchestrator.roles.base import BackendError
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType, NoIntentEmitted
 from hyperloom.orchestrator.bus.message_bus import Message
+from hyperloom.orchestrator.loop import conversation
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import Task
@@ -329,6 +330,47 @@ async def test_backend_error_turn_does_not_advance_cursor(session_dir):
         cur = await c.cursors.load("orchestration")
         assert cur.last_processed_seq == 0
         assert "stall_warning" in await c.conversation.compose_prompt("orchestration")
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_failing_backend_keeps_each_inbox_page_within_budget(session_dir, monkeypatch):
+    """Every failed turn adds to the unread inbox, yet each prompt renders one budgeted page of it."""
+    monkeypatch.setattr(conversation, "_INBOX_PROMPT_CHARS", 1_000)
+    failing = ScriptedPlan(turns=[MockTurn(raise_error=BackendError("Prompt is too long"))], loop_last=True)
+    backends = _silent_backends()
+    backends["orchestration"] = MockBackend(failing, name="o")
+    c = Coordinator(session_dir, backends=backends)
+    try:
+        await c.bus.append_and_seq(Message.new("robustness", "*", "alert", {"kind": "stall_warning"}))
+        for _ in range(20):
+            await c.reactor_pass("orchestration")
+
+        inbox = backends["orchestration"].calls[-1]["prompt"].split("=== Inbox for orchestration")[1]
+        assert len(inbox) < 1_200
+        assert "stall_warning" in inbox
+        assert "held for the next turn" in inbox
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_turn_consumes_only_the_inbox_page_it_rendered(session_dir, monkeypatch):
+    """Messages past the inbox budget stay unread and lead the next prompt."""
+    monkeypatch.setattr(conversation, "_INBOX_PROMPT_CHARS", 1_000)
+    c = Coordinator(session_dir, backends=_orchestration_turn(MockTurn(raise_error=NoIntentEmitted("no envelope"))))
+    try:
+        alerts = [Message.new("robustness", "*", "alert", {"kind": f"stall_{i}", "note": "x" * 300}) for i in range(4)]
+        for alert in alerts:
+            await c.bus.append_and_seq(alert)
+        await c.reactor_pass("orchestration")
+
+        cur = await c.cursors.load("orchestration")
+        assert alerts[0].seq <= cur.last_processed_seq < alerts[-1].seq
+        next_prompt = await c.conversation.compose_prompt("orchestration")
+        assert "stall_0" not in next_prompt
+        assert "stall_3" in next_prompt
     finally:
         await c.stop()
 

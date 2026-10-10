@@ -215,19 +215,6 @@ def test_gap_layer_for_action(coord: Coordinator) -> None:
     assert coord.gap_refresh._gap_layer_for_action("anything-else") == ("framework", "serving_specialist")
 
 
-def test_task_id_from_specialist_source(coord: Coordinator) -> None:
-    from hyperloom.orchestrator.loop.coordinator import SPECIALIST_FROM_AGENT_PREFIX
-
-    assert coord.specialist_dispatch._task_id_from_specialist_source("") == ""
-    assert coord.specialist_dispatch._task_id_from_specialist_source("kernel_agent") == ""
-    assert (
-        coord.specialist_dispatch._task_id_from_specialist_source(
-            f"{SPECIALIST_FROM_AGENT_PREFIX}abc",
-        )
-        == "abc"
-    )
-
-
 def test_lanes_fit(coord: Coordinator) -> None:
     assert coord.dispatcher._lanes_fit(["gpu"], {"gpu": 0}, {"gpu": 1}) is True
     assert coord.dispatcher._lanes_fit(["gpu"], {"gpu": 1}, {"gpu": 1}) is False
@@ -235,12 +222,12 @@ def test_lanes_fit(coord: Coordinator) -> None:
 
 
 def test_pitfall_severity_for(coord: Coordinator) -> None:
-    assert coord.writeback._pitfall_severity_for(None) is None
-    assert coord.writeback._pitfall_severity_for({"error_class": "oom"}) is not None
-    assert coord.writeback._pitfall_severity_for({"status": "crash"}) is not None
-    assert coord.writeback._pitfall_severity_for({"gain_pct": -10.0}) is not None
-    assert coord.writeback._pitfall_severity_for({"gain_pct": 2.0}) is None
-    assert coord.writeback._pitfall_severity_for({"gain_pct": "bad"}) is None
+    assert coord.recipe_journal._pitfall_severity_for(None) is None
+    assert coord.recipe_journal._pitfall_severity_for({"error_class": "oom"}) is not None
+    assert coord.recipe_journal._pitfall_severity_for({"status": "crash"}) is not None
+    assert coord.recipe_journal._pitfall_severity_for({"gain_pct": -10.0}) is not None
+    assert coord.recipe_journal._pitfall_severity_for({"gain_pct": 2.0}) is None
+    assert coord.recipe_journal._pitfall_severity_for({"gain_pct": "bad"}) is None
 
 
 def test_is_promotable_result(coord: Coordinator) -> None:
@@ -263,16 +250,16 @@ def test_is_promotable_result_baseline_eval_failed(coord: Coordinator) -> None:
 # -- phase / id helpers ----------------------------------------------------
 def test_journal_entry_phase(coord: Coordinator) -> None:
     coord.shared_state.phase = ""
-    assert coord.writeback.journal_entry_phase() == "UNKNOWN"
+    assert coord.recipe_journal.journal_entry_phase() == "UNKNOWN"
     coord.shared_state.phase = "framework_agent"
-    assert coord.writeback.journal_entry_phase() == "FRAMEWORK_AGENT"
+    assert coord.recipe_journal.journal_entry_phase() == "FRAMEWORK_AGENT"
 
 
 def test_source_session_id_prefers_recipe_kb(coord: Coordinator) -> None:
     coord.shared_state.recipe_kb_session_id = "recipe-kb-99"
-    assert coord.writeback._source_session_id() == "recipe-kb-99"
+    assert coord.recipe_journal._source_session_id() == "recipe-kb-99"
     coord.shared_state.recipe_kb_session_id = ""
-    assert coord.writeback._source_session_id() == coord.session_dir.name
+    assert coord.recipe_journal._source_session_id() == coord.session_dir.name
 
 
 def test_kernel_enabled(coord: Coordinator) -> None:
@@ -318,7 +305,7 @@ def test_needs_roofline_for_watermark_guards(coord: Coordinator) -> None:
 # -- gap extraction --------------------------------------------------------
 def test_extract_gaps_from_baseline_empty(coord: Coordinator) -> None:
     coord.shared_state.baseline_tput = 0.0
-    assert coord.gap_refresh._extract_gaps_from_baseline(coord.proposals.workload_canonical_id()) == []
+    assert coord.gap_refresh._extract_gaps_from_baseline(coord.recipe_journal.workload_canonical_id()) == []
 
 
 def test_extract_gaps_from_baseline_populated(coord: Coordinator) -> None:
@@ -326,7 +313,7 @@ def test_extract_gaps_from_baseline_populated(coord: Coordinator) -> None:
     ss.baseline_tput = 100.0
     coord._current_objective = TargetGainObjective(target_gain_pct=12.0)
     ss.baseline_failure_streak = 2
-    gaps = coord.gap_refresh._extract_gaps_from_baseline(coord.proposals.workload_canonical_id())
+    gaps = coord.gap_refresh._extract_gaps_from_baseline(coord.recipe_journal.workload_canonical_id())
     ids = {g["canonical_id"].split("#")[-1] for g in gaps}
     assert "throughput_below_target" in ids
     assert "baseline_unstable" in ids
@@ -344,7 +331,7 @@ def test_extract_gaps_from_attempts(coord: Coordinator) -> None:
     ]
     ss.params_no_promote_streak = 6
     ss.explore_search = {"winners_history": []}
-    gaps = coord.gap_refresh._extract_gaps_from_attempts(coord.proposals.workload_canonical_id())
+    gaps = coord.gap_refresh._extract_gaps_from_attempts(coord.recipe_journal.workload_canonical_id())
     cids = {g["canonical_id"] for g in gaps}
     # distinct variant_names produce separate gaps; each has one attempt
     fail_gaps = [g for g in gaps if "fail:kernel_opt:oom" in g["canonical_id"]]
@@ -366,7 +353,7 @@ def test_extract_gaps_no_variant_collapses(coord: Coordinator) -> None:
     ]
     ss.params_no_promote_streak = 0
     ss.explore_search = {}
-    gaps = coord.gap_refresh._extract_gaps_from_attempts(coord.proposals.workload_canonical_id())
+    gaps = coord.gap_refresh._extract_gaps_from_attempts(coord.recipe_journal.workload_canonical_id())
     fail_gaps = [g for g in gaps if "fail:explore:server_init_dead" in g["canonical_id"]]
     assert len(fail_gaps) == 1
     assert len(fail_gaps[0]["attempts"]) == 2
@@ -386,7 +373,7 @@ def test_extract_gaps_symptom_uses_excerpt(coord: Coordinator) -> None:
     ]
     ss.params_no_promote_streak = 0
     ss.explore_search = {}
-    gaps = coord.gap_refresh._extract_gaps_from_attempts(coord.proposals.workload_canonical_id())
+    gaps = coord.gap_refresh._extract_gaps_from_attempts(coord.recipe_journal.workload_canonical_id())
     fail_gaps = [g for g in gaps if "fail:explore:server_init_dead" in g["canonical_id"]]
     assert fail_gaps
     assert "mla_gluon" in fail_gaps[0]["symptom"]
@@ -447,6 +434,32 @@ def test_specialist_findings_are_ordered_newest_first(coord: Coordinator) -> Non
     assert block.index("newer finding") < block.index("older finding")
 
 
+def test_specialist_findings_render_a_harvested_finding_once(coord: Coordinator) -> None:
+    """Harvesting copies a round's sourced findings into research hints; the block still shows each once."""
+    from hyperloom.inference_optimizer.baseline_comparison import research_hints
+
+    finding = {"what": "ngram spec decode stacks with expert parallel", "source": "measured r41"}
+    coord.shared_state.specialist_rounds = [_round("serving_specialist", finding, 0.8)]
+    research_hints.append_hints(coord.session_dir, [finding])
+
+    assert _findings(coord).count("ngram spec decode stacks with expert parallel") == 1
+
+
+def test_specialist_findings_keep_the_newest_within_their_budget(coord: Coordinator, monkeypatch) -> None:
+    from hyperloom.orchestrator.loop import conversation
+
+    monkeypatch.setattr(conversation, "_FINDINGS_PROMPT_CHARS", 200)
+    coord.shared_state.specialist_rounds = [
+        _round("serving_specialist", f"finding-{i:02d} " + "x" * 40, 0.5) for i in range(10)
+    ]
+
+    block = _findings(coord)
+
+    assert "finding-09" in block
+    assert "finding-00" not in block
+    assert "older omitted)" in block
+
+
 def test_specialist_findings_skip_rows_carrying_neither_findings_nor_questions(coord: Coordinator) -> None:
     coord.shared_state.specialist_rounds = [
         {"domain": "serving_specialist", "new_findings": [], "residual_questions": []},
@@ -496,7 +509,7 @@ def test_collect_workload_tags(coord: Coordinator, monkeypatch) -> None:
     ss.precision = "fp8"
     ss.tp = 8
     ss.conc = 64
-    tags = coord.writeback._collect_workload_tags()
+    tags = coord.recipe_journal._collect_workload_tags()
     assert tags["framework"] == "sglang"
     assert tags["model_class"] == "moe"
     assert tags["tp"] == 8
@@ -518,7 +531,7 @@ def test_build_kernel_optimizations_from_state(coord: Coordinator) -> None:
     ss.kernel_integrate_attempts = {
         "i1": {"kernel_id": "k1", "last_decision": "KEEP", "best_gain_pct": 5.0, "attempts": [{"new_tput": 210.0}]},
     }
-    out = coord.writeback._build_kernel_optimizations_from_state()
+    out = coord.recipe_journal._build_kernel_optimizations_from_state()
     assert len(out) == 1  # only the KEEP'd k1
     row = out[0]
     assert row["kernel_id"] == "k1"
@@ -617,10 +630,10 @@ def test_workload_canonical_id_and_anchor(coord: Coordinator) -> None:
     ss.gpu_type = "mi300x"
     ss.framework = "sglang"
     ss.precision = "fp8"
-    cid = coord.proposals.workload_canonical_id()
+    cid = coord.recipe_journal.workload_canonical_id()
     assert cid.startswith("inference:")
     assert "mi300x" in cid
-    assert coord.proposals.workload_canonical_id() == cid
+    assert coord.recipe_journal.workload_canonical_id() == cid
 
 
 # -- framework candidate selection -------------------------------------

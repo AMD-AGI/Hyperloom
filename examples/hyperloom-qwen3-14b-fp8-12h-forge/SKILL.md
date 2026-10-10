@@ -82,7 +82,7 @@ In docker mode:
 - Pass `--install-framework none --yes` in the container (ROCm/framework comes from
   the image). Do **not** use `--skip-base-check` — let Phase 1 preflight validate
   the container environment.
-- Do not run `python -m hyperloom.inference_optimizer.cli optimize` on the host.
+- Do not run `python -m hyperloom optimize` on the host.
 - `KERNEL_OPT_BACKEND_ORDER=forge` must be set **inside the container**, in the
   same `docker exec` that launches `optimize`. Exporting it only on the host
   does not reach the optimizer.
@@ -97,8 +97,8 @@ skip the user-approval step (#1314).
 Suggested Docker images:
 
 - `vllm`: `docker.io/rocm/vllm:rocm10.0.0_ubuntu24.04_py3.14_pytorch_2.12.0_vllm_0.27.0`
-- `sglang` MI300X: `docker.io/lmsysorg/sglang-rocm:v0.5.20-rocm10-mi30x-20260920`
-- `sglang` MI355X: `docker.io/lmsysorg/sglang-rocm:v0.5.20-rocm10-mi35x-20260920`
+- `sglang` MI300X: `docker.io/lmsysorg/sglang-rocm:v0.5.21-rocm10-mi30x-20261008`
+- `sglang` MI355X: `docker.io/lmsysorg/sglang-rocm:v0.5.21-rocm10-mi35x-20261008`
 
 In Docker mode, start a long-running container on `HYPERLOOM_DOCKER_TARGET_HOST`
 (or the current host when it is unset) before running setup or optimize:
@@ -123,10 +123,10 @@ Then run the setup backend inside the container:
 
 ```bash
 docker exec -w "$REPO_ROOT" "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}" bash -lc \
-  'REPO_ROOT="$(pwd -P)"; PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework none --yes'
+  'REPO_ROOT="$(pwd -P)"; PYTHONPATH="$REPO_ROOT" python3 -m hyperloom setup -- --install-framework none --yes'
 ```
 
-After that, run all remaining commands for this demo inside the same container with `docker exec -w "$REPO_ROOT" ...`; do not run `python -m hyperloom.inference_optimizer.cli optimize` on the host in Docker mode. When the demo is finished, ask the user whether to stop the container. If they say yes, run:
+After that, run all remaining commands for this demo inside the same container with `docker exec -w "$REPO_ROOT" ...`; do not run `python -m hyperloom optimize` on the host in Docker mode. When the demo is finished, ask the user whether to stop the container. If they say yes, run:
 
 ```bash
 docker stop "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}"
@@ -148,8 +148,8 @@ Required optimize CLI flags:
 - `--precision fp8`
 - `--target-gain 50`
 - `--max-hours 12`
-- `--max-minutes-framework-pct 0.43`
-- `--max-minutes-kernel-pct 0.42`
+- `--phase-budget-framework-pct 0.43`
+- `--phase-budget-kernel-pct 0.42`
 
 There is no CLI flag for the kernel backend — it is selected by the environment
 variable only. Do not invent one.
@@ -278,8 +278,8 @@ and the stop reason. Never print API keys, tokens, or custom header values.
 3. Keep `PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"` in the launch shell so
    critic subprocesses can import `hyperloom.agents` after changing cwd.
 4. Run it detached the way the harness understands: if `$CLAW_SESSION_ID` is set and your bash tool takes a `run_in_background` parameter, hand the optimizer command to it with `run_in_background=true`, without shell-level detachment (`setsid`, `nohup`, or a trailing `&`); otherwise use `setsid nohup ... &`. See the Launch section of the packaged `hyperloom/inference_optimizer/SKILL.md` for why — a hand-detached run is invisible to Claw and its sandbox is reclaimed about fifteen minutes after the turn ends.
-5. Pass all required optimize CLI flags in the `python -m hyperloom.inference_optimizer.cli optimize` command. Do not rely on `.env` alone for `TP`, `CONC`, `ISL`, `OSL`, or `PRECISION`; CLI defaults can otherwise override the intended workload.
-6. Include `--max-minutes-framework-pct 0.43` and `--max-minutes-kernel-pct 0.42`
+5. Pass all required optimize CLI flags in the `python -m hyperloom optimize` command. Do not rely on `.env` alone for `TP`, `CONC`, `ISL`, `OSL`, or `PRECISION`; CLI defaults can otherwise override the intended workload.
+6. Include `--phase-budget-framework-pct 0.43` and `--phase-budget-kernel-pct 0.42`
    in the optimize command. Do **not** pass `--no-framework-agent` or `--no-kernel` —
    this demo runs the full OPTIMIZE phase (FRAMEWORK_AGENT + KERNEL_AGENT), and
    `--no-kernel` would skip the very phase this demo exists to exercise.

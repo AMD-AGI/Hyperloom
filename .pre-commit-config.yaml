@@ -103,6 +103,12 @@ repos:
         language: system
         pass_filenames: false
         types: [python]
+      - id: check-cli-references
+        name: check CLI references in agent-facing docs
+        entry: python scripts/check_cli_references.py
+        language: system
+        pass_filenames: false
+        files: (SKILL\.md|/actions/[^/]+\.md|/prompts/.+|/references/.+\.md|^src/hyperloom/cli\.py)$
 
   # Enable once the mypy backlog is manageable (config in pyproject.toml):
   # - repo: local
