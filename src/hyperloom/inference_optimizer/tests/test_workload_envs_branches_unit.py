@@ -623,6 +623,54 @@ def test_profile_manual_max_iters_above_cap_warns(monkeypatch, tmp_path, caplog)
     assert any("exceeds the serialization-safe cap" in r.message for r in caplog.records)
 
 
+def _arm_sglang_shape_tool(monkeypatch, tmp_path) -> Path:
+    """Route the SGLang profile through the kernel_shape_tool path and return the tool dir."""
+    from hyperloom.orchestrator.actions.executors import _server_patcher
+
+    tool_dir = tmp_path / "kernel_shape_tool"
+    tool_dir.mkdir()
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "0")
+    monkeypatch.delenv("HYPERLOOM_PROFILE_SHAPE_DISCOVERY", raising=False)
+    monkeypatch.setattr(_server_patcher, "resolve_sglang_shape_mode", lambda: "sitecustomize")
+    monkeypatch.setattr(_server_patcher, "kernel_shape_tool_dir", lambda: tool_dir)
+    return tool_dir
+
+
+def test_profile_shape_tool_keeps_the_inherited_pythonpath(monkeypatch, tmp_path):
+    # Magpie replaces the launch env's PYTHONPATH with the config's, so a config without one must carry the
+    # inherited entries, or the profile server loses the operator's and the image's import paths.
+    import os
+
+    from hyperloom.orchestrator.actions.executors import _framework_rewrite_evidence as evidence
+    from hyperloom.orchestrator.actions.executors.profile import ProfileExecutor
+
+    tool_dir = _arm_sglang_shape_tool(monkeypatch, tmp_path)
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(["/a", "/b"]))
+    src = _write(tmp_path / "cfg.yaml", envs={"PROFILE": "1"})
+    out = we.materialize_config_with_envs(src, tmp_path / "out")
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+    assert envs["TRACELENS_SHAPE_DISCOVERY"] == "1"
+    assert envs["PYTHONPATH"] == os.pathsep.join([str(tool_dir), "/a", "/b"])
+
+    # The profile shim lands in front of the tool, keeping the inherited tail.
+    ProfileExecutor()._inject_host_probe(out, tmp_path / "ws")
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+    assert envs["PYTHONPATH"] == os.pathsep.join([str(evidence.probe_asset_dir()), str(tool_dir), "/a", "/b"])
+
+
+def test_profile_shape_tool_prepends_to_the_config_pythonpath(monkeypatch, tmp_path):
+    # A config that carries PYTHONPATH is authoritative: the inherited value is not appended to it.
+    import os
+
+    tool_dir = _arm_sglang_shape_tool(monkeypatch, tmp_path)
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(["/a", "/b"]))
+    src = _write(tmp_path / "cfg.yaml", envs={"PROFILE": "1", "PYTHONPATH": "/c"})
+    bench = _materialize(src, tmp_path / "out")
+    assert bench["envs"]["PYTHONPATH"] == os.pathsep.join([str(tool_dir), "/c"])
+
+
 def test_quality_ref_variant_compares(monkeypatch, tmp_path):
     # A non-baseline scriptable variant must COMPARE against the operator reference and must NOT write.
     _clear_env(monkeypatch)
