@@ -227,6 +227,22 @@ def test_a_worse_unit_cannot_borrow_another_units_allowance_by_moving(repo: Repo
     assert repo.gate("--base-ref", base)[0] == 1
 
 
+def test_a_baseline_entry_cannot_move_away_from_a_unit_that_is_still_over(repo: Repo) -> None:
+    repo.write_baseline({key("src/old.py", "f"): 30})
+    base = repo.commit()
+    # The entry is edited over to a new same-named unit while the old one stays at 30.
+    repo.write_baseline({key("src/new.py", "f"): 30})
+    repo.findings = [cc("src/old.py", "f", 30), cc("src/new.py", "f", 30)]
+    repo.touch("src/new.py")
+    code, report = repo.gate("--base-ref", base)
+    assert code == 1
+    assert "`src/new.py` `f` | Cyclomatic complexity | absent | 30 |" in section(report, GREW)
+    # A real move (the old unit is gone) still keeps the entry.
+    repo.findings = [cc("src/new.py", "f", 30)]
+    code, report = repo.gate("--base-ref", base)
+    assert section(report, GREW) == ""
+
+
 def test_a_unit_copied_to_two_places_is_not_a_move(repo: Repo) -> None:
     repo.write_baseline({key("src/old.py", "A.run"): 14})
     repo.findings = [cc("src/x.py", "A.run", 12), cc("src/y.py", "A.run", 12)]

@@ -312,10 +312,18 @@ def compare(findings: dict[Key, Finding], baseline: dict[Key, int], outcome: Out
     outcome.untouched += [entry for entry in stale if not judged(entry[0][1])]
 
 
-def growth(head: dict[Key, int], base: dict[Key, int]) -> list[tuple[Key, int | None, int]]:
-    """Entries ``head`` adds or raises over ``base``: (key, base value or None, head value)."""
+def growth(
+    head: dict[Key, int], base: dict[Key, int], present: Iterable[Key] = ()
+) -> list[tuple[Key, int | None, int]]:
+    """Entries ``head`` adds or raises over ``base``: (key, base value or None, head value).
+
+    An entry ``head`` dropped counts as moved to a same-named added one only when its unit
+    is no longer over the limit (not in ``present``): otherwise the edit swapped an entry
+    for a second violation.
+    """
     added = {key: value for key, value in head.items() if key not in base}
-    moves = match_moves({key: value for key, value in base.items() if key not in head}, added)
+    still = set(present)
+    moves = match_moves({key: value for key, value in base.items() if key not in head and key not in still}, added)
     grown: list[tuple[Key, int | None, int]] = [(key, None, value) for key, value in added.items() if key not in moves]
     grown += [(key, base[key], value) for key, value in head.items() if key in base and worse(key[0], value, base[key])]
     return sorted(grown)
@@ -419,7 +427,7 @@ def git_show(root: Path, ref: str, path: str) -> str | None:
     return shown.stdout if shown.returncode == 0 else None
 
 
-def compare_with_base(root: Path, ref: str, config: Config, outcome: Outcome) -> None:
+def compare_with_base(root: Path, ref: str, config: Config, outcome: Outcome, present: Iterable[Key] = ()) -> None:
     """Fill ``outcome.growth`` / ``.loosened`` from the baseline and config on ``ref``."""
     base_config = parse_config(git_show(root, ref, _PYPROJECT) or "")
     if base_config is None:
@@ -429,7 +437,7 @@ def compare_with_base(root: Path, ref: str, config: Config, outcome: Outcome) ->
     if base_text is None:
         raise ToolError(f"{ref} configures the baseline {base_config.baseline} but has no such file")
     outcome.base_baseline = load_baseline(base_text)
-    outcome.growth = growth(outcome.baseline, outcome.base_baseline)
+    outcome.growth = growth(outcome.baseline, outcome.base_baseline, present)
     outcome.loosened = config_loosening(config, base_config) + scope_loss(root, config, base_config)
     outcome.gate_changes = gate_changes(root, ref, config, base_config)
 
@@ -479,7 +487,7 @@ def run(args: argparse.Namespace, outcome: Outcome) -> int:
     if since:
         touched_units = {f.path for f in outcome.new} | {f.path for f, _ in outcome.worsened}
         excuse_base_backlog(outcome, base_values(root, since, touched_units, config))
-        compare_with_base(root, args.base_ref, config, outcome)
+        compare_with_base(root, args.base_ref, config, outcome, findings)
     production, _tests = list_files(root, config.roots, config.exclude)
     outcome.module_warnings = module_warnings(root, filter(outcome.judged, production), config)
     outcome.problems = checks.run_all(root, config.roots, config.exclude, units, since)
