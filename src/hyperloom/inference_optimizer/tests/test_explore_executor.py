@@ -42,6 +42,7 @@ from hyperloom.orchestrator.actions.executors.explore import (
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.common.env import is_truthy
 from hyperloom.common.perf_metric import perf_snapshot_from_mapping
+from hyperloom.inference_optimizer.session.session_binding import session_scope
 from hyperloom.orchestrator.bus.resource_lock import (
     ResourceLockManager,
     SqliteLeaseBackend,
@@ -49,6 +50,8 @@ from hyperloom.orchestrator.bus.resource_lock import (
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
 from hyperloom.orchestrator.bus.storage import SqliteConnection
+
+from .conftest import make_coordinator
 
 
 def _eval_off(value: object) -> bool:
@@ -850,6 +853,84 @@ async def test_explore_missing_axes_preserves_running_grading_anchor(
         assert snapshot is not None
         assert snapshot["duration_seconds"] == 25.0
         assert snapshot["request_error_rate"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_an_agentx_explore_keep_is_promoted_by_writeback(sub_agent_runner, session_dir, tmp_path, monkeypatch):
+    """The winner explore writes is the record writeback re-grades, so the KEEP must survive the hand-off.
+
+    Each side was only ever exercised against hand-built dicts; a winner record thinner than the measurement that
+    graded it dropped every AgentX explore KEEP at promotion from #1652 until #1790.
+    """
+    _force_cold_decision(monkeypatch)
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    baseline_axes = {
+        "output_throughput": 200.0,
+        "total_token_throughput": 20000.0,
+        "e2e_norm_intvty_p90": 300.0,
+        "e2e_norm_intvty_p50": 300.0,
+        "duration_seconds": 25.0,
+        "request_error_rate": 0.0,
+    }
+    sub, tr, _ = sub_agent_runner
+    state = SharedState(framework="sglang", benchmark_mode="agentx")
+    state.baseline_tput = 200.0
+    state.baseline_perf = dict(baseline_axes)
+    sub.shared_state = state
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+
+    def _fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        _fake_workspace(
+            slot,
+            tput=210.0,
+            perf_axes={
+                "input_throughput": 21790.0,
+                "total_token_throughput": 22000.0,
+                "e2e_norm_intvty_p90": 330.0,
+                "e2e_norm_intvty_p50": 330.0,
+                "duration_seconds": 25.0,
+                "request_error_rate": 0.0,
+            },
+        )
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "explore-promote"),
+            "base_tput": 200.0,
+            "grid": [{"name": "v_good", "extra_args": "--good-flag"}],
+        },
+        idempotency_key="ex-promote",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+    [winner] = res.result["winners"]
+
+    with session_scope(session_dir):
+        coord = make_coordinator(session_dir)
+        coord.shared_state.benchmark_mode = "agentx"
+        coord.shared_state.baseline_tput = 200.0
+        coord.shared_state.baseline_perf = dict(baseline_axes)
+        coord.shared_state.current_best = {
+            "action": "baseline",
+            "tput": 200.0,
+            **baseline_axes,
+            "extra_server_args": "",
+            "extra_envs": {},
+        }
+
+        assert coord.writeback.lift_to_current_best("explore", float(winner["tput"]), dict(winner)) is True
+        assert coord.shared_state.current_best["variant_name"] == "v_good"
+        assert coord.shared_state.current_best["e2e_norm_intvty_p50"] == 330.0
 
 
 @pytest.mark.asyncio
