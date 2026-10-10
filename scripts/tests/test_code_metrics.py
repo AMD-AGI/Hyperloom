@@ -216,6 +216,14 @@ def test_a_worse_unit_cannot_borrow_another_units_allowance_by_moving(repo: Repo
     assert repo.gate("--base-ref", base)[0] == 1
 
 
+def test_a_unit_copied_to_two_places_is_not_a_move(repo: Repo) -> None:
+    repo.write_baseline({key("src/old.py", "A.run"): 14})
+    repo.findings = [cc("src/x.py", "A.run", 12), cc("src/y.py", "A.run", 12)]
+    code, report = repo.gate()
+    assert code == 1
+    assert "### New violations (not in the baseline): 2" in report
+
+
 def test_maintainability_index_ratchets_upward(repo: Repo) -> None:
     mi = "maintainability-index"
     repo.write_baseline({key("src/a.py", MODULE, mi): 8, key("src/b.py", MODULE, mi): 8})
