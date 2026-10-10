@@ -327,6 +327,7 @@ class _DispatchStub:
         from types import SimpleNamespace
 
         self.session_dir = tmp_path
+        self._framework_timeline_recorder = None
         self.tasks = _Tasks()
         self.shared_state = SharedState(framework=framework, last_framework_rewrite_evidence=evidence)
         # Build a minimal _coord stub so collaborator cross-calls resolve.

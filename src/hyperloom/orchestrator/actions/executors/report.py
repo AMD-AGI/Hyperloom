@@ -8,8 +8,6 @@ from __future__ import annotations
 import json
 import logging
 import math
-import os
-import subprocess
 from collections import Counter
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -17,13 +15,13 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common import io as _common_io
-from hyperloom.common.env import env_bool
 from hyperloom.common.platform_probe import platform_fingerprint
 
 from ...bus.message_bus import MessageBus
 from ...bus.storage.connection import SqliteConnection
 from hyperloom.inference_optimizer.breakdown.stop_reasons import (
     AGENTX_PREFLIGHT_STOP_REASON,
+    BACKEND_UNHEALTHY_STOP_REASON,
     PATCH_RECOVERY_INCOMPLETE_STOP_REASON,
 )
 from hyperloom.inference_optimizer.session.paths import db_path_for
@@ -335,6 +333,12 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
     # Host-level terminals: something outside the model ended the run.
     "supervisor_coordinator_died": "The out-of-band supervisor found the coordinator's process gone; this record was written by the supervisor because there was no coordinator left to write one.",
     "supervisor_tick_stalled": "The out-of-band supervisor found the coordinator's tick not advancing inside its stall window and asked the session to end.",
+    BACKEND_UNHEALTHY_STOP_REASON: (
+        "A reactor agent's LLM backend kept failing for an hour without one successful turn, so the run stopped "
+        "instead of spending the rest of its budget on a model it could not reach; the best validated result was "
+        "kept. The backend_error observations name the agent and carry the error each call returned. Repair the "
+        "backend (credentials, endpoint, quota, or a prompt the model rejects), then resume."
+    ),
 }
 
 
@@ -1362,14 +1366,12 @@ class ReportExecutor:
             json_path,
             state.cumulative_gain_validated,
         )
-        publish_result = self._maybe_publish_results(session_dir, state)
         return {
             "status": "succeeded",
             "session_id": state.session_id,
             "json_path": str(json_path),
             "md_path": str(md_path),
             "summary": summary,
-            "publish_result": publish_result,
         }
 
     def _resolve_session_dir(self, ctx) -> Path | None:
@@ -1386,50 +1388,6 @@ class ReportExecutor:
         if candidate.exists() and (candidate / "state.json").exists():
             return candidate
         return None
-
-    def _maybe_publish_results(self, session_dir: Path, state: SharedState) -> dict[str, Any]:
-        """Best-effort publish hook for code-driven optimizer runs (opt-in unless the results service URL is configured)."""
-        service_url = os.environ.get("HYPERLOOM_RESULTS_SERVICE_URL", "")
-        if not service_url and not env_bool("HYPERLOOM_RESULTS_AUTO_PUBLISH"):
-            return {"enabled": False, "reason": "HYPERLOOM_RESULTS_SERVICE_URL not set"}
-
-        repo_root = Path(__file__).resolve().parents[3]
-        helper = repo_root / "ci" / "publish_artifacts.py"
-        if not helper.exists():
-            return {"enabled": False, "reason": f"{helper} not found"}
-
-        cmd = [
-            "python3",
-            str(helper),
-            "--task-dir",
-            str(session_dir),
-            "--out-dir",
-            str(session_dir / "normalized"),
-            "--model",
-            state.model_name or "unknown",
-            "--display-name",
-            state.session_id or "hyperloom-report",
-        ]
-        if service_url:
-            cmd.extend(["--url", service_url])
-
-        try:
-            proc = subprocess.run(
-                cmd,
-                text=True,
-                capture_output=True,
-                timeout=60,
-                check=False,
-            )
-            return {
-                "enabled": True,
-                "returncode": proc.returncode,
-                "stdout": proc.stdout[-4000:],
-                "stderr": proc.stderr[-4000:],
-            }
-        except (OSError, subprocess.SubprocessError) as e:
-            log.warning("report_executor: result publish failed: %s", e)
-            return {"enabled": True, "error": str(e)}
 
 
 report_executor = ReportExecutor()

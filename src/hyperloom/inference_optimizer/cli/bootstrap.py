@@ -63,6 +63,26 @@ def resolve_model_display_name(args: argparse.Namespace) -> str:
 AGENTX_MEASUREMENT_EPOCH = 1
 
 
+def resolve_framework_version(args: argparse.Namespace) -> str:
+    """Resolve ``framework_version``: --framework-version > $FRAMEWORK_VERSION > auto-detect > ""."""
+    explicit = (getattr(args, "framework_version", None) or "").strip() or (
+        os.environ.get("FRAMEWORK_VERSION", "") or ""
+    ).strip()
+    if explicit:
+        return explicit
+    framework = (getattr(args, "framework", None) or "").strip() or (os.environ.get("FRAMEWORK", "") or "").strip()
+    if not framework:
+        return ""
+    from ..recipe_snapshot_constants import (
+        DEFAULT_FRAMEWORK_VERSION_SLUG,
+        detect_framework_version,
+    )
+
+    detected = detect_framework_version(framework)
+    # Treat the failure-slug as "no info".
+    return "" if detected == DEFAULT_FRAMEWORK_VERSION_SLUG else detected
+
+
 def seed_grading(framework: str, benchmark_mode: str) -> dict[str, Any]:
     """Resolve the grading axis and its noise band once, at seed, so they can be recorded.
 
@@ -161,6 +181,65 @@ def latency_budget_resume_conflict(state: Any, requested_ms: float | None) -> st
     )
 
 
+def resolve_gpu_power_settings(
+    *,
+    power_cap_w: float | None,
+    perf_level: str | None,
+    nodes: int,
+    read: Any = None,
+) -> tuple[dict[str, Any], str]:
+    """Read the cards' power settings and check the declared ones; ``(record, error)``.
+
+    ``record`` is what the session stores and the platform fingerprint shows: the declared values and what each card
+    reported. ``error`` is non-empty when a declared value does not hold, or cannot be checked, and the launch must stop.
+    Nothing is set here; the operator sets power cap and perf level with ``amd-smi set`` before launch.
+    """
+    from hyperloom.common.gpu_power_settings import (
+        GpuPowerSettingsError,
+        declared_setting_problems,
+        normalize_perf_level,
+        read_gpu_power_settings,
+        visible_gpu_indices,
+    )
+
+    declared: dict[str, Any] = {}
+    if power_cap_w is not None:
+        declared["power_cap_w"] = float(power_cap_w)
+    if perf_level:
+        declared["perf_level"] = normalize_perf_level(perf_level)
+    if nodes >= 2:
+        if declared:
+            return {}, (
+                "--gpu-power-cap-w / --gpu-perf-level cannot be checked on a multi-node session: they describe the "
+                "benchmark nodes' cards, which this process cannot read, and an unverifiable assertion is not a "
+                "satisfied one"
+            )
+        return {}, ""
+    try:
+        observed = (read or read_gpu_power_settings)()
+    except GpuPowerSettingsError as exc:
+        if declared:
+            return {"declared": declared}, f"the declared GPU power settings cannot be checked: {exc}"
+        return {}, ""
+    gpus = visible_gpu_indices()
+    record = {
+        "declared": declared,
+        "observed": {str(gpu): row for gpu, row in sorted(observed.items()) if gpus is None or gpu in gpus},
+    }
+    problems = declared_setting_problems(
+        observed,
+        power_cap_w=declared.get("power_cap_w"),
+        perf_level=declared.get("perf_level"),
+        gpus=gpus,
+    )
+    if problems:
+        return record, (
+            "the GPUs are not at the declared power settings (set them with amd-smi before launch): "
+            + "; ".join(problems)
+        )
+    return record, ""
+
+
 def _build_agentx_corpus_shape_seed() -> dict[str, Any]:
     """Return the canonical corpus shape, until a measurement replaces it."""
     from hyperloom.common.agentx_workload import MLPERF_CORPUS, is_mlperf_backend, mlperf_trajectories
@@ -198,6 +277,7 @@ def _seed_shared_state(
     *,
     session_id: str,
     compute_partition: dict[str, Any] | None = None,
+    gpu_power_settings: dict[str, Any] | None = None,
 ) -> SharedState:
     """Construct and persist the initial :class:`SharedState` for a run."""
     # research_lane capacity is locked for the session; clamp to [0, ceiling].
@@ -242,27 +322,6 @@ def _seed_shared_state(
             return int(default)
         return resolved if resolved > 0 else int(default)
 
-    def _resolve_framework_version(args_in: Any) -> str:
-        """Resolve ``framework_version`` for the recipe-snapshot canonical id."""
-        explicit = (getattr(args_in, "framework_version", None) or "").strip() or (
-            os.environ.get("FRAMEWORK_VERSION", "") or ""
-        ).strip()
-        if explicit:
-            return explicit
-        framework = (getattr(args_in, "framework", None) or "").strip() or (
-            os.environ.get("FRAMEWORK", "") or ""
-        ).strip()
-        if not framework:
-            return ""
-        from ..recipe_snapshot_constants import (
-            DEFAULT_FRAMEWORK_VERSION_SLUG,
-            detect_framework_version,
-        )
-
-        detected = detect_framework_version(framework)
-        # Treat the failure-slug as "no info".
-        return "" if detected == DEFAULT_FRAMEWORK_VERSION_SLUG else detected
-
     # KB architecture tags from config.json; fresh-launch only.
     _cfg_tags = _load_model_config_tags(str(args.model))
 
@@ -303,12 +362,13 @@ def _seed_shared_state(
         # The only copy of the budget. Validated at the CLI, so anything that reaches here is usable, and archived
         # with the session so a resume restores it without a second source to reconcile.
         latency_budget_ms=float(getattr(args, "max_latency_ms", None) or 0.0),
+        gpu_power_settings=dict(gpu_power_settings or {}),
         gpu_type=str(getattr(args, "gpu_type", None) or os.environ.get("GPU_TYPE", "")),
         # Workload metadata mirrored from CLI/env.
         tp=_int_arg("tp", DEFAULT_TP),
         ep=_int_arg("ep", DEFAULT_EP),
         precision=(str(getattr(args, "precision", None) or DEFAULT_PRECISION).strip()),
-        framework_version=_resolve_framework_version(args),
+        framework_version=resolve_framework_version(args),
         conc=_int_arg("conc", DEFAULT_CONC),
         isl=_int_arg("isl", DEFAULT_ISL),
         osl=_int_arg("osl", DEFAULT_OSL),

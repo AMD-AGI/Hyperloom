@@ -79,6 +79,8 @@ log = _logging.getLogger(__name__)
 # warning at geak promote.
 _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT: float = 3.0
 
+_GEAK_RUNNER_MODULE = "hyperloom.orchestrator.kernel.geak_runner"
+
 ROOFLINE_WATERMARK_RATIO: float = 1.10  # 10% step over last roofline
 
 # Consecutive roofline failures tolerated before the watermark stops re-arming.
@@ -210,6 +212,28 @@ def _record_geak_integration(entry: dict[str, Any], *, kernel_id: str, macro_cyc
         gain_attributed=bool(entry.get("validated", True)),
         settled_at=str(entry.get("updated_at") or ""),
     )
+
+
+def geak_absent_backends(eval_dir: str) -> dict[str, str]:
+    """``{backend: probe}`` for the backends GEAK's environment report lists as absent.
+
+    GEAK records them in ``<eval_dir>/env_report.json`` and deep in its final
+    report; they are provisioning gaps, and nothing else carries them to the
+    optimizer's log or reports.
+    """
+    if not eval_dir:
+        return {}
+    try:
+        report = json.loads((Path(eval_dir) / "env_report.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    absent = report.get("absent_backends") if isinstance(report, dict) else None
+    if not isinstance(absent, dict):
+        return {}
+    return {
+        str(name): str(entry.get("probe") or "") if isinstance(entry, dict) else str(entry or "")
+        for name, entry in absent.items()
+    }
 
 
 @dataclass(frozen=True)
@@ -1418,8 +1442,6 @@ class KernelPhase(CoordinatorCollaborator):
             recorder.enter_stage("geak_delegation")
             recorder.record_geak_handoff(handoff)
 
-        from ..actions.executors._kernel_agent_tool import _kernel_agent_tool_path
-
         def _read_geak_result(path: Path) -> dict[str, Any]:
             if not path.is_file():
                 return {}
@@ -1492,13 +1514,6 @@ class KernelPhase(CoordinatorCollaborator):
                 await self._revalidate_geak_candidate(reason="geak_e2e_win_recovered")
             return
 
-        try:
-            runner = _kernel_agent_tool_path("backends/geak_runner.py")
-        except Exception as exc:
-            log.exception("GEAK runner not resolvable; skipping KERNEL")
-            _finish_skip({"status": "error", "error_class": "runner_not_found", "error": repr(exc)})
-            return
-
         # Budget-aware timeouts: shrink to the remaining run deadline and always reserve the closing-grace window.
         runner_timeout, kill_timeout, budget_known = self._geak_timeouts()
         min_run = env_int("GEAK_MIN_RUN_S", default=600)
@@ -1526,7 +1541,8 @@ class KernelPhase(CoordinatorCollaborator):
 
         cmd = [
             sys.executable,
-            str(runner),
+            "-m",
+            _GEAK_RUNNER_MODULE,
             str(handoff_path),
             str(out_dir),
             "--timeout-s",
@@ -1713,6 +1729,7 @@ class KernelPhase(CoordinatorCollaborator):
                     ),
                     "ref_tput": result.get("ref_tput"),
                     "orchestrator_best_tput_same_config": result.get("orchestrator_best_tput_same_config"),
+                    **({"absent_backends": result["absent_backends"]} if result.get("absent_backends") else {}),
                 },
                 record_delegation=False,
             )
@@ -2363,6 +2380,13 @@ class KernelPhase(CoordinatorCollaborator):
         kill_timeout_sec: int | None = None,
     ) -> None:
         """Record the delegated GEAK runner's terminal state."""
+        absent = geak_absent_backends(str(result.get("eval_dir") or handoff.get("eval_dir") or ""))
+        if absent:
+            result["absent_backends"] = absent
+            log.warning(
+                "GEAK could not use these backends (provisioning gaps, not measured no-wins): %s",
+                "; ".join(f"{name}: {probe}" for name, probe in absent.items()),
+            )
         recorder = self.timeline()
         if recorder is None:
             return
@@ -3050,47 +3074,6 @@ class KernelPhase(CoordinatorCollaborator):
             log.warning("gemm E2E: merge failed (%s); rejecting candidate", exc)
             return None
 
-    def _ck_blockscale_switch_eligible(self, result: dict[str, Any]) -> bool:
-        """Whether the fp8 block-scale CK backend switch should be E2E-validated."""
-        if not isinstance(result, dict):
-            return False
-        from ..kernel.request_handlers import resolve_gemm_tuning_backend
-
-        backend = str(result.get("backend") or resolve_gemm_tuning_backend({})).strip().lower()
-        if backend != "forge":
-            return False
-        framework = str(self.shared_state.framework or "").strip().lower()
-        if framework != "sglang":
-            return False
-        if not self._ck_switch_precision_is_fp8(result):
-            return False
-
-        from hyperloom.inference_optimizer.gpu_types import _resolve_amd_gpu_type
-        from ..actions.executors._workload_envs import _GFX942_GPU_TYPES
-
-        gpu = _resolve_amd_gpu_type(self.shared_state.gpu_type or "")
-        if gpu not in _GFX942_GPU_TYPES:
-            return False
-
-        # Block-scale fp8 only, asserted positively via ``weight_block_size``.
-        from hyperloom.inference_optimizer.model_config_utils import _fp8_is_block_scale
-
-        model_path = str(self.shared_state.model_path or os.environ.get("MODEL_PATH", ""))
-        return _fp8_is_block_scale(model_path)
-
-    def _ck_switch_precision_is_fp8(self, result: dict[str, Any]) -> bool:
-        """Whether the workload runs fp8, resolved from any available signal."""
-        if str(self.shared_state.precision or "").strip().lower() == "fp8":
-            return True
-        if isinstance(result, dict) and str(result.get("precision") or "").strip().lower() == "fp8":
-            return True
-        from ..kernel.request_handlers import _resolve_forge_precision_and_quant
-
-        precision, _ = _resolve_forge_precision_and_quant(self.shared_state, {})
-        if str(precision or "").strip().lower() == "fp8":
-            return True
-        return False
-
     def _sync_profile_state_after_gemm_roofline(self, result: dict[str, Any]) -> None:
         """Merge a handler-owned Roofline fallback into the live Coordinator state."""
         shape_capture = result.get("shape_capture") if isinstance(result, dict) else None
@@ -3176,7 +3159,7 @@ class KernelPhase(CoordinatorCollaborator):
     ) -> None:
         """Mirror an adopted GEMM-tuning stack entry as an optimization_journal KEEP row."""
         try:
-            journal = self._coord.writeback.ensure_journal()
+            journal = self._coord.recipe_journal.ensure_journal()
             variant_name = str(entry.get("variant_name") or "gemm_tuning")
             backend = str(entry.get("backend") or "").strip().lower()
             try:
@@ -3192,7 +3175,7 @@ class KernelPhase(CoordinatorCollaborator):
                 metrics["tuned_file"] = str(entry.get("tuned_file"))
             journal.append_entry(
                 JournalEntry(
-                    phase=self._coord.writeback.journal_entry_phase(),
+                    phase=self._coord.recipe_journal.journal_entry_phase(),
                     iter=int(self.shared_state.tick or 0),
                     kind=KIND_GEMM_TUNING,
                     change=variant_name,
@@ -3335,19 +3318,6 @@ class KernelPhase(CoordinatorCollaborator):
                     }
                 )
 
-        # Standalone fp8 block-scale CK backend switch: inject as its own candidate so the loop E2E-validates baseline
-        # Triton vs CK.
-        if self._ck_blockscale_switch_eligible(result):
-            if not any(c.get("env_var") == "SGLANG_FP8_BLOCKSCALE_CK_MAX_M" for c in candidates):
-                candidates.append(
-                    {
-                        "tuner": "ck_blockscale_backend_switch",
-                        "env_var": "SGLANG_FP8_BLOCKSCALE_CK_MAX_M",
-                        "env_value": "256",
-                        "envs": {"SGLANG_FP8_BLOCKSCALE_CK_MAX_M": "256"},
-                        "micro_speedup": 1.0,
-                    }
-                )
         return candidates
 
     async def _validate_gemm_tuning_e2e(self, result: dict[str, Any]) -> None:
@@ -4180,7 +4150,7 @@ class KernelPhase(CoordinatorCollaborator):
             return False
         return cur / last_rl >= ROOFLINE_WATERMARK_RATIO
 
-    async def _release_finished_roofline_gate(self) -> None:
+    async def release_finished_roofline_gate(self) -> None:
         """Drop an in-flight marker that names a roofline which already finished."""
         pending = (self.shared_state.auto_roofline_pending_task_id or "").strip()
         if not pending:
@@ -4203,7 +4173,7 @@ class KernelPhase(CoordinatorCollaborator):
         reason: str,
     ) -> bool:
         """Enqueue a fresh roofline if the watermark crossed; idempotency-keyed via ``reason`` and the roofline tput it crossed from, stamps auto_roofline_pending_task_id. Returns True when enqueued."""
-        await self._release_finished_roofline_gate()
+        await self.release_finished_roofline_gate()
         if not self._needs_roofline_for_watermark():
             return False
         # Crossings share a reason; the anchor separates this crossing's task from an earlier one's.

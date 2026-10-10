@@ -50,7 +50,7 @@ defaults and are not part of this leg.
 
   ```
   --tp 1 --conc 64 --isl 1024 --osl 1024 --precision fp8 --max-hours 12
-  --max-minutes-framework-pct 0.43 --max-minutes-kernel-pct 0.42
+  --phase-budget-framework-pct 0.43 --phase-budget-kernel-pct 0.42
   ```
 
   Do **not** pass `--no-framework-agent` or `--no-kernel` — the 12h demo runs the full

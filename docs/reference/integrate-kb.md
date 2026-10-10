@@ -45,7 +45,7 @@ deprecated compatibility inputs.
 To force a run without KB hooks:
 
 ```bash
-python3 -m hyperloom.inference_optimizer.cli optimize --degraded-kb ...
+python3 -m hyperloom optimize --degraded-kb ...
 ```
 
 ---

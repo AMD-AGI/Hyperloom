@@ -10,7 +10,6 @@ import json
 import stat
 import subprocess
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -18,7 +17,7 @@ import pytest
 from hyperloom.common import llm_config
 from hyperloom.common.deadline import Deadline
 
-import hyperloom.orchestrator.roles.codex_agent as codex_agent
+import hyperloom.orchestrator.roles.claude as claude_role
 import hyperloom.orchestrator.specialists.subprocess_ as sp
 from hyperloom.inference_optimizer.trace import parse_usage as pu
 
@@ -483,6 +482,40 @@ def test_resolve_codex_executable_prefers_explicit_then_path(
     assert resolve_codex_executable() == str(on_path)
 
 
+def test_resolve_claude_executable_prefers_the_pin_then_the_record_then_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HYPERLOOM_CLAUDE_CLI_PATH wins, then the installer's GEAK_CLAUDE_BIN record, then ``claude`` on PATH."""
+    pinned = _write_executable(tmp_path / "pin" / "claude", "#!/usr/bin/env bash\nexit 0\n")
+    recorded = _write_executable(tmp_path / "local" / "claude", "#!/usr/bin/env bash\nexit 0\n")
+    on_path = _write_executable(tmp_path / "bin" / "claude", "#!/usr/bin/env bash\nexit 0\n")
+    monkeypatch.setenv("PATH", str(on_path.parent))
+    monkeypatch.setenv("HYPERLOOM_CLAUDE_CLI_PATH", str(pinned))
+    monkeypatch.setenv("GEAK_CLAUDE_BIN", str(recorded))
+    assert claude_role.resolve_claude_executable() == str(pinned)
+
+    monkeypatch.delenv("HYPERLOOM_CLAUDE_CLI_PATH")
+    assert claude_role.resolve_claude_executable() == str(recorded)
+
+    monkeypatch.delenv("GEAK_CLAUDE_BIN")
+    assert claude_role.resolve_claude_executable() == str(on_path)
+
+
+def test_resolve_claude_executable_reports_absence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A missing or non-executable pin resolves to nothing rather than a name that cannot run."""
+    monkeypatch.setenv("PATH", "/nonexistent")
+    monkeypatch.delenv("HYPERLOOM_CLAUDE_CLI_PATH", raising=False)
+    monkeypatch.delenv("GEAK_CLAUDE_BIN", raising=False)
+    assert claude_role.resolve_claude_executable() == ""
+
+    not_executable = tmp_path / "claude"
+    not_executable.write_text("", encoding="utf-8")
+    monkeypatch.setenv("HYPERLOOM_CLAUDE_CLI_PATH", str(not_executable))
+    monkeypatch.setenv("GEAK_CLAUDE_BIN", str(not_executable))
+    assert claude_role.resolve_claude_executable() == ""
+
+
 def test_resolve_codex_executable_falls_back_to_the_sdk_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -576,8 +609,6 @@ def test_cli_refuses_to_boot_an_openai_only_run_without_a_codex_runtime(
         codex_model="gpt-5.5",
         specialist_model="",
         specialist_max_turns=2,
-        specialist_per_turn_max_seconds=60.0,
-        specialist_dispatch_mode="subprocess",
         specialist_mcp_config="",
     )
     with pytest.raises(RuntimeError, match="codex"):
@@ -1309,8 +1340,6 @@ def _specialist_args(**overrides: Any) -> argparse.Namespace:
         "codex_model": "gpt-selected-model",
         "specialist_model": None,
         "specialist_max_turns": 3,
-        "specialist_per_turn_max_seconds": 42.0,
-        "specialist_dispatch_mode": "subprocess",
         "specialist_mcp_config": None,
     }
     values.update(overrides)
@@ -1383,125 +1412,6 @@ def test_explicit_specialist_model_overrides_the_selected_backend_model(
         )
     )
     assert runner.subprocess_config.model == "specialist-override"
-
-
-def test_openai_only_inprocess_uses_codex_agent_sdk_not_claude(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """OpenAI-only in-process dispatch must stay agentic without Claude fallback."""
-    from hyperloom.inference_optimizer.cli import executors
-
-    _pin_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
-    monkeypatch.setattr(
-        executors,
-        "ClaudeBackend",
-        lambda **_kwargs: pytest.fail("OpenAI-only in-process dispatch must not construct ClaudeBackend"),
-    )
-    runner = _runner_from_executor(
-        executors._build_specialist_executor(
-            _specialist_args(specialist_dispatch_mode="inprocess"),
-            session_dir=tmp_path,
-            knowledge_plane=None,
-        )
-    )
-    backend = runner.backend_factory(SimpleNamespace())
-
-    assert isinstance(backend, codex_agent.CodexAgentBackend)
-    assert backend.model == "gpt-selected-model"
-    assert Path(backend.cwd).is_relative_to(tmp_path)
-    assert Path(backend.cwd) in tuple(Path(root) for root in backend.writable_roots)
-
-
-def test_anthropic_inprocess_keeps_claude_backend(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The new SDK backend changes only the OpenAI-only in-process shape."""
-    from hyperloom.inference_optimizer.cli import executors
-
-    _pin_provider_env(monkeypatch, _ANTHROPIC_ONLY_ENV)
-    monkeypatch.setattr(executors, "ClaudeBackend", lambda **kwargs: ("claude", kwargs))
-    runner = _runner_from_executor(
-        executors._build_specialist_executor(
-            _specialist_args(specialist_dispatch_mode="inprocess"),
-            session_dir=tmp_path,
-            knowledge_plane=None,
-        )
-    )
-    backend_name, kwargs = runner.backend_factory(SimpleNamespace())
-    assert backend_name == "claude"
-    assert kwargs["model"] == "claude-selected-model"
-    # --specialist-per-turn-max-seconds bounds each in-process call, as it does for Codex.
-    assert kwargs["turn_timeout_s"] == 42.0
-
-
-@pytest.mark.asyncio
-async def test_codex_agent_backend_preserves_roles_and_returns_validated_usage(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The Agent SDK receives developer/user roles separately and returns intents."""
-    from hyperloom.common.codex_session import CodexSessionResult
-    from hyperloom.inference_optimizer.protocol.intent import IntentType
-
-    payload = {
-        "gap_canonical_id": "gap.sdk",
-        "domain": "serving_specialist",
-        "proposal_set": [],
-        "summary": "sdk result",
-    }
-    captured: dict[str, Any] = {}
-
-    async def _fake_run_codex_turn(**kwargs: Any) -> CodexSessionResult:
-        captured.update(kwargs)
-        return CodexSessionResult(
-            text=json.dumps(
-                {
-                    "intents": [
-                        {
-                            "intent_type": "specialist_done",
-                            "payload": payload,
-                        }
-                    ]
-                }
-            ),
-            usage={
-                "input_tokens": 11,
-                "output_tokens": 7,
-                "cache_read_input_tokens": 3,
-                "reasoning_output_tokens": 2,
-            },
-            thread_id="thread-123",
-        )
-
-    monkeypatch.setattr(codex_agent, "run_codex_turn", _fake_run_codex_turn)
-    backend = codex_agent.CodexAgentBackend(
-        model="gpt-agent",
-        cwd=tmp_path,
-        writable_roots=(tmp_path,),
-        call_timeout_s=17.0,
-    )
-    result = await backend.run(
-        "SYSTEM_ROLE_SENTINEL\n---\nUSER_ROLE_SENTINEL",
-        system_prompt="SYSTEM_ROLE_SENTINEL",
-        max_turns=1,
-    )
-
-    assert captured["prompt"] == "USER_ROLE_SENTINEL"
-    assert captured["developer_instructions"].startswith("SYSTEM_ROLE_SENTINEL")
-    assert "USER_ROLE_SENTINEL" not in captured["developer_instructions"]
-    assert captured["cwd"] == tmp_path
-    assert captured["writable_roots"] == (tmp_path,)
-    assert captured["model"] == "gpt-agent"
-    assert captured["timeout_sec"] == 17.0
-    assert result.intents[0].type is IntentType.SPECIALIST_DONE
-    assert result.intents[0].payload == payload
-    assert result.metadata["thread_id"] == "thread-123"
-    assert result.metadata["input_tokens"] == 11
-    assert result.metadata["cache_read_input_tokens"] == 3
-    assert result.metadata["reasoning_output_tokens"] == 2
-    assert result.metadata["error"] == ""
 
 
 def test_specialist_model_help_describes_generic_selected_backend_override() -> None:

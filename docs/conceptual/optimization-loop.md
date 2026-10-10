@@ -50,7 +50,7 @@ loop runs alongside the agentic kernel optimizer.
 
 ## Runtime contract
 
-The optimizer is launched through `python -m hyperloom.inference_optimizer.cli optimize`. A run
+The optimizer is launched through `python -m hyperloom optimize`. A run
 must be able to:
 
 - Create or resume a session directory,
@@ -224,6 +224,32 @@ than spending its whole budget refusing every candidate to learn what was
 knowable at launch. Off by default, leaving KEEP behaviour unchanged when
 unset.
 
+### GPU power: measured and asserted
+
+Each round's GPU power is sampled by Hyperloom itself, with read-only
+`amd-smi metric --power --mem-usage` every 2 s, only while the round is in its
+measured phase (from server ready, and from AIPerf's measured-phase line under
+AgentX, until the client exits or the eval starts). It is averaged over the
+serving cards: those in the visible-device mask that held at least 10% of VRAM
+during that phase, so a TP4 round on an unpinned eight-card host is averaged
+over its four cards. The result is the round's `gpu_power.json`, carried as
+`gpu_power_avg_w` on the measurement. A round that was sampled but had no
+serving card or no power reading stays unmeasured. The benchmark report's
+`gpu_monitor` block (`gpu_metrics.json`) is only the fallback for rounds no
+sampler ran on: on one node it reads a single card over the whole process
+lifetime, boot and idle tail included.
+
+The optimizer never changes power settings. The power cap and DPM performance
+level decide how much of the card's throughput is available at what power, so
+they are part of the measurement contract, and setting them is privileged and
+card-wide. Set them with `amd-smi set --power-cap` / `--perf-level` before
+launch; `--gpu-power-cap-w` and `--gpu-perf-level` then assert them, the way
+`--compute-partition-mode` asserts a partition mode: the session refuses to
+start (and to resume) if a card it uses is at a different value. The observed
+cap and perf level are recorded in the platform fingerprint whether or not
+they are asserted. Neither can be checked on a multi-node session, so asserting
+one there refuses.
+
 ### Runnable gate (earned KEEP)
 
 A verified build does not KEEP on artifact verification alone. After a
@@ -396,7 +422,7 @@ turn never depends on what an earlier turn happened to remember.
 
 Critic is likewise reactive and stateless per tick. Runtime RCA and automatic
 supervision are not roles in this loop. Stopped sessions require an explicit
-operator `--resume-from` decision; `recover-session` only reconstructs artifacts
+operator `--resume-from` decision; `recover` only reconstructs artifacts
 offline.
 
 ## Feedback loops

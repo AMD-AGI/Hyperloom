@@ -11,8 +11,8 @@ import logging
 import os
 from typing import Any
 
-from kernelforge.knowledge.implementation_identity import normalize_operator_name
-from kernelforge.knowledge.kernel_identity import KERNEL_RECIPE_PRODUCERS
+from kernelforge.knowledge.kb_store.identity.implementation import normalize_operator_name
+from kernelforge.knowledge.kb_store.identity.kernel_recipe import KERNEL_RECIPE_PRODUCERS
 
 from hyperloom.common.env import env_flag
 
@@ -709,7 +709,7 @@ def _canonical_kernel_recipe_operator(kernel_id: str) -> str:
     """The ``kernel_name`` dimension out of a ``kernel:<producer>:<kernel_name>:...`` id, or ``\"\"`` when ``kernel_id`` is not that scheme.
 
     forge-loop / flydsl / fusion land their integrations under this six-dimension recipe id (see
-    ``kernelforge.knowledge.kernel_identity``), not the roofline trace's synthetic ``kNNN`` id. The ``kernel_name``
+    ``kernelforge.knowledge.kb_store.identity.kernel_recipe``), not the roofline trace's synthetic ``kNNN`` id. The ``kernel_name``
     dimension is already ``normalize_operator_name``-clean at write time, so it is returned as-is.
     """
     parts = str(kernel_id or "").split(":")

@@ -105,7 +105,7 @@ host make "latest" pick the wrong run.
 Inputs that stay outside `$USER_DATA_PATH` by design (read-only sources
 or warm-start caches): **TraceLens** — `$TRACELENS_ROOT` (default
 `${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/TraceLens`; when unset,
-`src/hyperloom/agents/kernel/scripts/install.sh` clones
+`src/hyperloom/inference_optimizer/assets/install_kernel_tools.sh` clones
 [AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens) there and pins
 it to a fixed SHA. A pre-existing checkout you maintain is only used as
 an explicit operator override — export `TRACELENS_ROOT=<path>` to opt
@@ -140,11 +140,11 @@ Always prefer `manifest.json` / `state.json` / `coordinator.db` under the
 
 SKILL-level constraints the launcher MUST satisfy before `Coordinator`
 is allowed to boot. These IronRULEs are the gate
-that runs **before** `python -m hyperloom.inference_optimizer.cli optimize` is even spawned.
+that runs **before** `python -m hyperloom optimize` is even spawned.
 
 ### IR-1 — GPU MUST be unoccupied before every launch
 
-Before every `python -m hyperloom.inference_optimizer.cli optimize` invocation (fresh start OR
+Before every `python -m hyperloom optimize` invocation (fresh start OR
 `--resume-from`), verify that every visible GPU on this pod has **zero
 foreign serving PIDs and VRAM usage below 1% of each card's total capacity**. A leftover
 `sglang.launch_server` / `vllm.entrypoints` / `Magpie` from a previous
@@ -215,7 +215,7 @@ echo "prior_session=${PRIOR_SESSION:-none}"
 # VLLM::Worker_TP<n>, which no `vllm\.entrypoints` scan can see. An orphan that
 # is still loading weights also holds no VRAM yet, so the VRAM check below does
 # not cover for a missed process match.
-pgrep -af 'hyperloom\.inference_optimizer\.cli.*optimize' || true
+pgrep -af 'hyperloom optimize' || true
 pgrep -af 'sglang\.launch_server|sglang::|vllm\.entrypoints|vllm serve|VLLM::|Magpie' || true
 
 # VRAM — stdlib-only rocm-smi parse (must run on docker host; no hyperloom import)
@@ -497,8 +497,8 @@ bash "$INSTALL_SH"
 
 `src/hyperloom/inference_optimizer/assets/install.sh` is the only install entrypoint for
 full inference optimization. It installs the optimizer / Magpie / InferenceX
-first, then chains to `src/hyperloom/agents/kernel/scripts/install.sh` for the kernel
-optimization environment. `src/hyperloom/agents/kernel/scripts/install.sh` remains valid for
+first, then chains to `src/hyperloom/inference_optimizer/assets/install_kernel_tools.sh` for the kernel
+optimization environment. `src/hyperloom/inference_optimizer/assets/install_kernel_tools.sh` remains valid for
 standalone kernel-agent debugging, but should not be the main entrypoint for a
 full inference optimizer session.
 
@@ -517,7 +517,7 @@ remember). Direct steps in `src/hyperloom/inference_optimizer/assets/install.sh`
 | `INFERENCEX_PATH` resolution (honours a pre-existing `$INFERENCEX_PATH`, else clones `$INFERENCEX_REPO` pinned to `$INFERENCEX_REF` into `$INFERENCEX_DEFAULT_DIR` = `${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/InferenceX@<sha>`, reusing an existing checkout there on re-runs) | `ensure_inferencex` |
 | `INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS` appended to `kernel-agent.env.sh` | `_probe_framework_source_roots` |
 
-Chained from `src/hyperloom/agents/kernel/scripts/install.sh` (single chain at the end
+Chained from `src/hyperloom/inference_optimizer/assets/install_kernel_tools.sh` (single chain at the end
 of `src/hyperloom/inference_optimizer/assets/install.sh`):
 
 | Component | Provided by |
@@ -533,6 +533,94 @@ GEAK runtime variables, and InferenceX path. CLI preflight reads it; do not deri
 these by hand or source it in the launch shell. Generated env/config state is written to the pod-local runtime directory,
 not back into a shared WekaFS source checkout.
 
+### Experience KB service
+
+Every workspace runs its own local Experience KB service; it ships inside
+Hyperloom. `hyperloom-setup` writes the loopback `HYPERLOOM_KB_URL` and a
+generated `HYPERLOOM_KB_TOKEN` to the workspace `.env`. Load `.env` before
+launching; do not ask the user for these values again.
+
+Each optimize launch starts the service when nothing serves that URL, in the
+same environment as the optimizer (inside the container in docker mode). Its
+data and `service.log` live under `$USER_DATA_PATH/experience-kb`, and it keeps
+running after the run for the next one. When it cannot be started, the launch
+logs a warning and continues: reads return nothing and writes wait in
+`$USER_DATA_PATH/experience-kb/spool` until the service serves again, so they
+survive a removed container. A non-loopback `HYPERLOOM_KB_URL` names a
+service this workspace does not run; Hyperloom connects to it without starting
+anything. Without `HYPERLOOM_KB_URL`, Hyperloom runs without Experience KB reads
+or writes.
+
+No enable flag, declaration path, service identity, Run scope, worker identity,
+job identity, or spool path is required.
+
+The service keeps every schema written to it, so a workspace whose declaration
+changed keeps its older Experiences; a run's reads search only the schema that
+run writes.
+
+A global Experience KB, named by `HYPERLOOM_GLOBAL_KB_URL` and
+`HYPERLOOM_GLOBAL_KB_TOKEN` in `.env`, is shared through the local service;
+runs never read or write it directly. When the user asks to share or fetch
+Experiences, run in the optimizer's environment, with `.env` loaded:
+
+```bash
+python -m hyperloom.inference_optimizer.experience_kb_service push   # this workspace's Experiences not pushed yet
+python -m hyperloom.inference_optimizer.experience_kb_service pull   # the global KB's Experiences of this workspace's schemas
+```
+
+Report the one summary line each prints (global URL; `created`, `unchanged`,
+`skipped`, `rejected`) and never the token. A push resumes where an earlier one
+stopped and never sends back what was pulled. Push and pull use the service as
+it runs and never restart it under a running session; when they warn that its
+settings differ, `experience_kb_service ensure` or the next launch applies them. With `HYPERLOOM_KB_AUTO_PUSH=1`,
+every run pushes after its Experiences are written locally; a failed automatic
+push is only a warning, and the next push sends what it missed. An unusable
+switch value or a missing global KB is a launch warning, and that run does not
+push.
+
+During FRAMEWORK_AGENT the service is read at two points and the returned block
+is injected into the prompt:
+
+- every orchestration tick, with the untested proposals as context;
+- every specialist dispatch, with the specialist's domain, investigation, and
+  task as context. The block renders as the specialist prompt's
+  `EXPERIENCE KB` section.
+
+Every written Experience is readable by the next read. Retrieved evidence is
+advisory and never replaces the measured benchmark baseline. A read failure
+soft-degrades to the original prompt. An AgentX run neither reads nor writes
+Experiences: the Experience schema cannot yet tell its workload from a
+synthetic one. Neither does a run graded on anything but output throughput
+(for example `HYPERLOOM_PERF_METRIC=intvty_v1`), since every Experience records
+the throughput objective.
+
+Every complete measured attempt is written idempotently when the session
+breakdown is written. Rendered Experience references from an orchestration
+grid, proposed or delegated, are carried through to the measured Experience. A
+network write failure is spooled for retry.
+
+Each injection appends one entry to `state.json` `experience_kb_injections`
+(latest last, capped at 20); an orchestration entry is added only when its
+injected Experience set changes:
+`{tick, phase, ts, consumer, domain, gap_canonical_id, read_id, experience_ids, experiences, prompt_block}`.
+`consumer` is `orchestration` or `specialist`; `domain` and `gap_canonical_id`
+identify the specialist dispatch and are empty for orchestration.
+`prompt_block` is the injected text; each Experience appears in it under an
+`Experience <id>` heading with its complete record. A free-text field over
+2 KiB, typically a source patch in `change.content`, appears as
+`<external content sha256:...>` and is written whole under
+`<session>/experience_kb/contents/`, each patch also as its own file; the block
+ends with those paths. Records are injected whole while they fit 40,000
+characters; the rest of a read is left out, never cut. The injected agents
+cite the Experiences that shaped a proposal in its `experience_citations`,
+which reach the measured Experience's `provenance.extra`. `experiences` holds one
+summary per injected Experience, in `experience_ids` order: `experience_id`,
+`source_run_id`, `change_summary`, `decision`, `baseline_value`,
+`outcome_value`, `score`, and `why_matched`. `read_optimizer_state.py` prints
+the latest orchestration and specialist entries with one line per injected
+Experience. When a poll shows a new entry, report each Experience's summary
+together with the matching section of `prompt_block` to the user.
+
 ### Tool source fields (prompt → env, sandbox-only)
 
 Prompt fields naming read-only source trees consumed by sandbox-side
@@ -544,8 +632,8 @@ these.
 | Prompt field | Env name | Consumer |
 |---|---|---|
 | `INFERENCEX_PATH: <path>` | `$INFERENCEX_PATH` | `src/hyperloom/inference_optimizer/assets/install.sh:ensure_inferencex` |
-| `TRACELENS_ROOT: <path>` | `$TRACELENS_ROOT` | `src/hyperloom/agents/kernel/scripts/install.sh:ensure_tracelens` (public) |
-| `TRACELENS_INTERNAL_ROOT: <path>` (optional) | `$TRACELENS_INTERNAL_ROOT` | `src/hyperloom/agents/kernel/scripts/install.sh:ensure_tracelens` (internal; only when set) |
+| `TRACELENS_ROOT: <path>` | `$TRACELENS_ROOT` | `src/hyperloom/inference_optimizer/assets/install_kernel_tools.sh:ensure_tracelens` (public) |
+| `TRACELENS_INTERNAL_ROOT: <path>` (optional) | `$TRACELENS_INTERNAL_ROOT` | `src/hyperloom/inference_optimizer/assets/install_kernel_tools.sh:ensure_tracelens` (internal; only when set) |
 
 **Multi-node escape hatch**: if `$TRACELENS_ROOT` / `$TRACELENS_INTERNAL_ROOT` / `$GEAK_ROOT` /
 `$WORKSPACE_ROOT/Magpie` / `$INFERENCEX_PATH` may move or differ across nodes,
@@ -618,7 +706,7 @@ when the file is absent, invalid, or stale.
 **Multi-node (`nodes >= 2`):** [`multi_node/SKILL.md`](multi_node/SKILL.md).
 
 ```bash
-python3 -m hyperloom.inference_optimizer.cli optimize \
+python3 -m hyperloom optimize \
   --model "$MODEL_PATH" \
   --framework vllm \           # sglang (default) / vllm / atom / xdit / custom
   --gpu-type MI300X \          # or omit for rocm-smi auto-detect
@@ -655,6 +743,7 @@ and the operator's stated value is lost:
 | Precision | `--precision` | Match the checkpoint (`bf16` default / `fp8` / ...). Keep consistent with `--quantize`. |
 | Budget | `--max-hours` | Pass the prompt's time budget. Default `2.0`. |
 | Latency SLA | `--max-latency-ms` | **Scriptable frameworks only** (`xdit`, `custom`); refused for serving, where AgentX already grades interactivity. Pass any stated ceiling on per-request latency ("must stay under 250 ms", "interactive workload"). A **constraint, not a target**: it composes with `--target-*` rather than competing, and refuses any KEEP whose mean end-to-end latency exceeds it — including one that reported no latency at all. Off when omitted, which does not lose a preference but does remove the SLA from the search. |
+| GPU power settings | `--gpu-power-cap-w` / `--gpu-perf-level` | Assertions, not requests. Only when the prompt says the cards were set to a cap or perf level; Hyperloom never changes them. The session refuses to start if a card differs. |
 | Max model len | `--max-model-len` | Optional; auto-derived from ISL+OSL+headroom when omitted. |
 | External reference GPU | `--compare-against-gpu` | `target_analysis` writes `target_analysis/target_baseline.json` for query/status metadata and `competitor_target.json` for both advisory and final-report comparisons. Without a target GPU it writes `reason="no_target_gpu_configured"` and clears the competitor target. AgentX reads accepted `current_best.total_throughput / state.tp` and `current_best.e2e_norm_intvty_p90` at `state.conc`; it does not reread raw results or recipes. Missing targets or axes remain unavailable. This is a cross-system advisory, not proof of identical measurement estimators or deployment, and never changes Objective or KEEP/REVERT. |
 | Target advisory | `--no-target-advisory` | Disable external-target hints in prompts without disabling final-report comparison. `primary_gap` uses the existing latency/throughput categories; the interactivity axis is displayed as interactivity. |
@@ -671,7 +760,7 @@ prompt, then rewrites `--model` to the exported quantized model so the entire
 optimization loop runs on the quantized model.
 
 ```bash
-python3 -m hyperloom.inference_optimizer.cli optimize \
+python3 -m hyperloom optimize \
   --model "$MODEL_PATH" \
   --framework vllm \
   --quantize "fp8 global scheme, fp8 kv_cache, exclude lm_head; accept up to 5% relative eval gap" \
@@ -695,7 +784,7 @@ python3 -m hyperloom.inference_optimizer.cli optimize \
   operator-supplied precision label (e.g. `fp8`/`bf16`) and **mislabel** an
   actually-quantized model. Never leave a conflicting precision when quantizing.
 - Behavior: one-shot, **never runs on a resume**. On a failed/unusable
-  quantization the run **hard-stops (`SystemExit(3)`)** — it never silently
+  quantization the run **hard-stops (`SystemExit(4)`)** — it never silently
   optimizes the un-quantized source after an explicit `--quantize`.
   The one exception is a **pre-flight scheme/GPU mismatch** via
   `--quantize-scheme` (e.g. `mxfp4` on a non-MI355X target): this is **skipped**
@@ -716,8 +805,6 @@ node; do not stop for an extra confirmation. After IR-2, smoke-test the
 CLI:
 
 ```bash
-export HYPERLOOM_KERNEL_AGENT_ROOT="$REPO_ROOT/src/hyperloom/agents/kernel"
-export KERNEL_AGENT_ROOT="$HYPERLOOM_KERNEL_AGENT_ROOT"
 export WORKSPACE_PATH="${WORKSPACE_PATH:-/workspace}"
 # TRACELENS_ROOT: leave unset to let install.sh clone AMD-AGI/TraceLens
 # to ${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/TraceLens@<sha> and pin it
@@ -732,7 +819,7 @@ export PYTHON="${PYTHON:-$(command -v python3)}"
 export PATH="$(dirname "$PYTHON"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
 bash "$INSTALL_SH"
-"$PYTHON" -m hyperloom.inference_optimizer.cli --help
+"$PYTHON" -m hyperloom optimize --help
 ```
 
 Quirks: with `set -u`, assign dependent vars on separate lines (chained
@@ -766,7 +853,7 @@ signals. There is no automatic supervision or restart. After inspecting the
 failure and confirming that the old process is gone, explicitly resume the same
 session with `--resume-from "$SESSION_DIR"` when appropriate. Historical stop
 reasons remain readable; they are not instructions to restart automatically.
-`recover-session` remains an offline artifact-reconstruction tool, not a runtime
+`recover` remains an offline artifact-reconstruction tool, not a runtime
 recovery action.
 
 If the CLI exits with `Claude SDK exit code 1` or `Primus.00009 token not present`,
@@ -815,11 +902,11 @@ IR-2 must complete first so `torch` is available. Run the preflight tool
 and abort on any non-zero exit before spawning the optimizer:
 
 ```bash
-"$PYTHON" "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/preflight_optimizer.py" "$MODEL_PATH"
+"$PYTHON" -m hyperloom check "$MODEL_PATH"
 ```
 
 A non-zero exit means the GPU state is unknown or a violation was detected;
-do not continue to `python -m hyperloom.inference_optimizer.cli optimize`.
+do not continue to `python -m hyperloom optimize`.
 
 ## Benchmark Config
 
@@ -978,19 +1065,20 @@ A session is single-framework. Pick `sglang` (default), `vllm`, or
 `atom` via `--framework` or `$FRAMEWORK`:
 
 ```bash
-python3 -m hyperloom.inference_optimizer.cli optimize --framework vllm --model "$MODEL_PATH" --max-hours 2
-FRAMEWORK=vllm python3 -m hyperloom.inference_optimizer.cli optimize --model "$MODEL_PATH" --max-hours 2
-python3 -m hyperloom.inference_optimizer.cli optimize --framework atom --model "$MODEL_PATH" --max-hours 2  # IR-8 single-node only
+python3 -m hyperloom optimize --framework vllm --model "$MODEL_PATH" --max-hours 2
+FRAMEWORK=vllm python3 -m hyperloom optimize --model "$MODEL_PATH" --max-hours 2
+python3 -m hyperloom optimize --framework atom --model "$MODEL_PATH" --max-hours 2  # IR-8 single-node only
 ```
 
 Resolution order: `--framework` > `$FRAMEWORK` > `sglang` (default).
 
 What this controls:
 - Which Magpie YAML the executors default to —
-  `baseline_{sglang,vllm,atom}.yaml` and
-  `profile_{sglang,vllm,atom}.yaml`. The per-framework resolver
-  `_default_profile_config()` in `src/hyperloom/orchestrator/actions/executors/profile.py` picks
-  the right file from `$FRAMEWORK`.
+  `baseline_<framework>.yaml` and `profile_<framework>.yaml`, one pair
+  per framework registered in `framework_registry`
+  (`sglang`, `vllm`, `atom`, `xdit`, `custom`).
+  `framework_registry.shipped_config_name()` names the file for
+  `$FRAMEWORK`; an unregistered name is refused at launch and on resume.
 - Which framework-specific seed grid the `explore` action falls
   back to when no `params.grid` is supplied. atom is the only
   framework with a programmatic seed today
@@ -1014,7 +1102,7 @@ shell — set it when you resume a non-default session.
 atom's `--torch-profiler-dir`, and TraceLens consumes the resulting
 `*.pt.trace.json.gz` unchanged. atom source roots (`/app/ATOM/atom/`)
 are in the kernel search roots + `_REUSABLE_SOURCE_ROOTS`, and the repo
-URL `https://github.com/ROCm/ATOM.git` is in `hyperloom.agents.framework.repo_map`.
+URL `https://github.com/ROCm/ATOM.git` is atom's `FrameworkSpec.repo_url` in `framework_registry`.
 Unlike sglang/vllm, atom is the only framework with a programmatic
 cold-start seed grid (`_atom_default_grid`: `atom_level_{2,3}`,
 `atom_prefix_cache`, `atom_kv_fp8` on FP8, model-class-gated `atom_ep` /
@@ -1057,8 +1145,8 @@ either, the optimizer auto-detects via `rocm-smi --showproductname`
 (falling back to `torch.cuda.get_device_properties(0).gcnArchName`).
 
 ```bash
-python3 -m hyperloom.inference_optimizer.cli optimize --gpu-type mi355x --model "$MODEL_PATH" --max-hours 2
-GPU_TYPE=mi300x python3 -m hyperloom.inference_optimizer.cli optimize --model "$MODEL_PATH" --max-hours 2
+python3 -m hyperloom optimize --gpu-type mi355x --model "$MODEL_PATH" --max-hours 2
+GPU_TYPE=mi300x python3 -m hyperloom optimize --model "$MODEL_PATH" --max-hours 2
 ```
 
 Accepted values: `mi300x`, `mi308x`, `mi325x`, `mi355x`. **`mi308x` and
@@ -1115,7 +1203,7 @@ fill in the workload block, and `.` it each call.
 sessions on different pods share `$USER_DATA_PATH` via WekaFS; a single file
 causes MODEL_PATH race conditions where sessions launch the wrong model.
 After launching, locate the optimizer via
-`pgrep -af 'hyperloom.inference_optimizer.*optimize'` — `$!` may be a wrapper PID.
+`pgrep -af 'hyperloom optimize'` — `$!` may be a wrapper PID.
 
 **How you launch depends on the harness.** Two things have to hold before the
 bash tool's `run_in_background=true` is the right form: `$CLAW_SESSION_ID` must
@@ -1165,7 +1253,7 @@ export RUN_ENV="$RUN_DIR/run_env_${CLAW_SESSION_ID:-$(hostname)}.sh"
 printf 'export RUN_TAG=%q RUN_DIR=%q RUN_LOG=%q PID_FILE=%q LAUNCH_INFO_FILE=%q\n' \
   "$RUN_TAG" "$RUN_DIR" "$RUN_LOG" "$PID_FILE" "$LAUNCH_INFO_FILE" > "$RUN_ENV"
 
-python3 -m hyperloom.inference_optimizer.cli --verbose optimize \
+python3 -m hyperloom optimize --verbose \
   --model "$MODEL_PATH" \
   --framework "${FRAMEWORK:-sglang}" \
   --target-gain "${TARGET_GAIN:-10}" \
@@ -1211,7 +1299,7 @@ it. Under Claw, hand that attached exec to the bash tool with
 `run_in_background=true` and no `setsid`, `nohup`, or trailing `&`. Everywhere
 else, the command inside the exec is the `setsid nohup … > "$RUN_LOG" 2>&1 <
 /dev/null &` recipe (plus `--launch-info-file`). Confirm with
-`pgrep -af 'hyperloom.inference_optimizer.*optimize'`. If launch-info has no
+`pgrep -af 'hyperloom optimize'`. If launch-info has no
 `.session_dir`, read `$RUN_LOG` and fix that error; do not retry with a
 different backgrounding trick.
 
@@ -1371,12 +1459,13 @@ which is the workspace root, not the session dir.
 RUN_ENV="${RUN_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs/run_env_${CLAW_SESSION_ID:-$(hostname)}.sh}"
 . "$RUN_ENV"
 export SESSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["session_dir"])' "$LAUNCH_INFO_FILE")"
-python3 "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/read_optimizer_state.py" "$SESSION"
+python3 -m hyperloom session state "$SESSION"
 ```
 
 It prints `stop_reason`, `baseline_tput`, `cumulative_gain_validated`, `current_best`,
 `last_kernel_opt`, `last_trace_analyze`, `last_conc_sweep`, `explore_last_round`,
-`phase`, plus the recent lifecycle events.
+`phase`, the latest orchestration and specialist Experience KB injections when
+they exist, plus the recent lifecycle events.
 
 Recent action counts from SQLite (last 500 events grouped by category):
 
@@ -1386,7 +1475,7 @@ Recent action counts from SQLite (last 500 events grouped by category):
 RUN_ENV="${RUN_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs/run_env_${CLAW_SESSION_ID:-$(hostname)}.sh}"
 . "$RUN_ENV"
 export SESSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["session_dir"])' "$LAUNCH_INFO_FILE")"
-python3 "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/event_counts.py" "$SESSION"
+python3 -m hyperloom session events "$SESSION"
 ```
 
 ## Expected Flow
@@ -1563,4 +1652,5 @@ Report concise status:
 - `cumulative_gain_validated` and `current_best`
 - explore accepted/rejected summary
 - last kernel optimized, correctness, micro speedup, E2E gain, decision
+- any new `experience_kb_injections` entry: each injected Experience's summary and its section of `prompt_block`
 - whether the process is still running or stopped and why

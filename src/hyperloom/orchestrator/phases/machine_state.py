@@ -5,11 +5,8 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
-import json
 import logging
 import math
-from pathlib import Path
 import time
 from typing import Any
 
@@ -27,6 +24,7 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
 )
 from ..state.kernel_decision_settings import resolve_kernel_opt_max_failures
+from .session_contract import bound_session_declares
 from ..state.shared_state import (
     ESCALATE_HINT_SKIP_TO_CLOSE,
     ESCALATE_HINT_SKIP_TO_KERNEL,
@@ -766,6 +764,7 @@ GEAK_TERMINAL_STATUSES = frozenset(
         "ok",
         "no_gain",
         "error",
+        "timeout",
         "failed",
         "skipped",
         "baseline_reproduction_failed",
@@ -1206,56 +1205,15 @@ def _budget_predicate_inputs(
 ) -> dict[str, Any]:
     """Normalize the clocks compared by phase budget predicates."""
     remaining_sec = phase_budget_remaining_seconds(state, now_unix=now_unix)
-    return {
+    budget: dict[str, Any] = {
         "remaining_sec": remaining_sec,
-        "current_balance": remaining_sec,
         "cap_sec": phase_cap_seconds(state),
         "entry_elapsed_sec": phase_elapsed_seconds(state, now_unix=now_unix),
         "cumulative_elapsed_sec": phase_cumulative_seconds(state, now_unix=now_unix),
     }
-
-
-@lru_cache(maxsize=8)
-def _contract_admits_baseline_tput(session_dir: str) -> bool:
-    """Whether the session's workflow contract declares ``global.baseline_tput``.
-
-    A session keeps the contract identity its manifest was stamped with, so a
-    v1 session resumed on newer code still exports against the v1 schema, whose
-    ``workflow_global`` admits no additional property. The identity is read the
-    way the metadata recorder reads it: an unstamped manifest is v1. Cached per
-    session because the stamp never changes after the manifest is written.
-    """
-    from hyperloom.inference_optimizer.breakdown.workflow_contract import (
-        CURRENT_WORKFLOW_CONTRACT_VERSION,
-        WORKFLOW_CONTRACT_V1,
-        workflow_schema,
-    )
-    from hyperloom.inference_optimizer.session.session_paths import manifest_path
-
-    path = manifest_path(Path(session_dir))
-    if not path.exists():
-        version = CURRENT_WORKFLOW_CONTRACT_VERSION
-    else:
-        try:
-            manifest = json.loads(path.read_text(encoding="utf-8"))
-            version = str(manifest.get("workflow_contract_version") or WORKFLOW_CONTRACT_V1)
-        except (OSError, ValueError, AttributeError):
-            # Unreadable identity: leave the fact out. The close decision still
-            # reads the baseline from state, so only the frozen copy is lost.
-            return False
-    try:
-        properties = workflow_schema(version)["$defs"]["workflow_global"]["properties"]
-    except (KeyError, OSError):
-        return False
-    return "baseline_tput" in properties
-
-
-def _session_contract_admits_baseline_tput() -> bool:
-    from hyperloom.inference_optimizer.session.session_binding import bound_session_or_none
-
-    session = bound_session_or_none()
-    # Nothing bound means no recorded identity to honour: the current contract.
-    return session is None or _contract_admits_baseline_tput(str(session))
+    if bound_session_declares("phase_budget", "current_balance"):
+        budget["current_balance"] = remaining_sec
+    return budget
 
 
 def _base_workflow_predicate_inputs(
@@ -1283,7 +1241,7 @@ def _base_workflow_predicate_inputs(
             _cycle_reloop_min_remaining_sec(state) if hint == ESCALATE_HINT_SKIP_TO_CLOSE else 0.0
         ),
     }
-    if _session_contract_admits_baseline_tput():
+    if bound_session_declares("workflow_global", "baseline_tput"):
         global_inputs["baseline_tput"] = (
             (_number(state.baseline_tput) or 0.0) if hint == ESCALATE_HINT_SKIP_TO_CLOSE else None
         )
@@ -1316,6 +1274,8 @@ def _prelude_predicate_inputs(state: Any, *, now_unix: float) -> dict[str, Any]:
         "warm_replay_status": warm_status,
         "measure_round_dropped": bool(state.baseline_measure_round_dropped),
         "tput": _number(state.baseline_tput) or 0.0,
+        "initial_analysis_pending": bool((state.auto_roofline_pending_task_id or "").strip()),
+        "analysis_affordable_sec": prelude_affordable_seconds(state)[0],
         "session_usable_sec": session_usable_seconds(state),
         "phase_spent_sec": phase_cumulative_seconds(state, phase=PHASE_PRELUDE, now_unix=now_unix),
         "runtime_sec": _positive_number(state.baseline_runtime_sec),
@@ -1459,7 +1419,11 @@ def workflow_predicate_inputs(
         inputs["baseline"] = _prelude_predicate_inputs(state, now_unix=frozen_now)
     elif current == PHASE_ENABLEMENT:
         enablement = state.enablement
-        inputs["baseline"] = {"tput": _number(state.baseline_tput) or 0.0}
+        inputs["baseline"] = {
+            "tput": _number(state.baseline_tput) or 0.0,
+            "initial_analysis_pending": bool((state.auto_roofline_pending_task_id or "").strip()),
+            "analysis_affordable_sec": prelude_affordable_seconds(state)[0],
+        }
         inputs["pending_work"] = {
             "validation_pending": bool(enablement.validation_pending),
             "enablement_in_flight": bool(enablement_in_flight),
@@ -1764,6 +1728,18 @@ def _skip_to_close_reason(
     return reason, evidence
 
 
+def _holds_for_initial_analysis(baseline: dict[str, Any]) -> bool:
+    """Whether the phase must stay open for an initial roofline it enqueued but has not booked yet.
+
+    The transition barrier stops every running action, so leaving now would kill that analysis.
+    The hold is bounded by the optimization reserve, which it must never eat into.
+    """
+    if not bool(baseline.get("initial_analysis_pending")):
+        return False
+    affordable = _number(baseline.get("analysis_affordable_sec"))
+    return affordable is None or affordable > 0.0
+
+
 def replay_next_phase(
     inputs: dict[str, Any],
     *,
@@ -1847,6 +1823,8 @@ def replay_next_phase(
             and not bool(baseline.get("measure_round_dropped"))
             and (_number(baseline.get("tput")) or 0.0) > 0.0
         )
+        if normal and _holds_for_initial_analysis(baseline):
+            return None
         if normal:
             target = _post_prelude_target(optimize_enabled=optimize_enabled, kernel_enabled=kernel_enabled)
             evidence = {"baseline_tput": float(baseline["tput"]), **_prelude_viability(baseline)}
@@ -1875,6 +1853,10 @@ def replay_next_phase(
             and not bool(pending.get("validation_pending"))
             and not bool(pending.get("enablement_in_flight"))
         ):
+            if _holds_for_initial_analysis(baseline):
+                # A session whose first baseline failed promotes its first anchor here, and that is what
+                # enqueues the initial roofline, so this exit faces the same race PRELUDE does.
+                return None
             target = _post_prelude_target(optimize_enabled=optimize_enabled, kernel_enabled=kernel_enabled)
             evidence = {"baseline_tput": float(baseline["tput"])}
             if target != PHASE_FRAMEWORK_AGENT:

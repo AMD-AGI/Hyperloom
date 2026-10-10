@@ -164,25 +164,6 @@ def test_list_experiments():
         assert len(exps) == 2
 
 
-def test_legacy_experiment_json_remains_readable(tmp_path):
-    legacy = {
-        "experiment_id": "legacy-1",
-        "task_id": "legacy-task",
-        "created_at": "2026-07-20T10:00:00",
-        "iterations": [],
-    }
-    (tmp_path / "legacy-1.json").write_text(json.dumps(legacy))
-
-    exp = ExperimentTracker(tmp_path).get("legacy-1")
-
-    assert exp.task_id == "legacy-task"
-    assert exp.campaign_id == ""
-    assert exp.segment_index == 0
-    assert exp.parent_experiment_id == ""
-    assert exp.status == ""
-    assert exp.ended_at == ""
-
-
 def test_create_segment_persists_directly_in_experiments_root(tmp_path):
     tracker = ExperimentTracker(tmp_path)
 

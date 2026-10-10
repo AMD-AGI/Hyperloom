@@ -59,14 +59,15 @@ The following variables configure filesystem paths for Hyperloom's runtime depen
 |-------------------------------------------|----------------------|--------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `REPO_ROOT`                               | No (recommended)     | `$(pwd)`                           | This Hyperloom checkout. Used to locate `.env`, skills, scripts. Falls back to the current working directory when unset.                                                                                                                     |
 | `INFERENCEX_PATH`                         | Conditional          | Auto-cloned by `install.sh`                                    | Path to the SemiAnalysisAI/InferenceX repo, used by baseline / target analysis. `install.sh` clones it when unset; only required if that auto-clone fails.                                                                                                                                          |
-| `TRACELENS_ROOT`                          | No (installer auto-clones) | `${HYPER`<br>`LOOM_CA`<br>`CHE_DIR:-`<br>`$REPO_ROOT`<br>`/.cache}/Tr`<br>`aceLens@<resolved-sha>` (auto-clone of `AMD-AGI/TraceLens` pinned to a fixed SHA) | `src/hyperloom/agents/kernel/scripts/install.sh` clones the public repo into the repo-local cache root when unset. Export it to opt into a pre-existing checkout you maintain — that is an explicit operator override and skips both the clone and the SHA pin. |
-| `GEAK_CLAUDE_BIN`                          | No (installer auto-resolves) | First of `$HOME/.local/bin/claude`, `/usr/local/bin/claude`, `$(command -v claude)`; written to `kernel-agent.env.sh` | Pins the Claude Code binary the GEAK SDK path uses, so `claude_agent_sdk` doesn't fall back to its older bundled CLI. Export to force a specific build. |
+| `TRACELENS_ROOT`                          | No (installer auto-clones) | `${HYPER`<br>`LOOM_CA`<br>`CHE_DIR:-`<br>`$REPO_ROOT`<br>`/.cache}/Tr`<br>`aceLens@<resolved-sha>` (auto-clone of `AMD-AGI/TraceLens` pinned to a fixed SHA) | `src/hyperloom/inference_optimizer/assets/install_kernel_tools.sh` clones the public repo into the repo-local cache root when unset. Export it to opt into a pre-existing checkout you maintain — that is an explicit operator override and skips both the clone and the SHA pin. |
+| `GEAK_CLAUDE_BIN`                          | No (installer auto-resolves) | `$(command -v claude)` after the installer has put the Claude Code CLI on `PATH`; written to `kernel-agent.env.sh` | Pins the Claude Code binary the GEAK SDK path uses to the same CLI the specialists run, so `claude_agent_sdk` doesn't fall back to its older bundled CLI. Hyperloom's own agents also run it when `HYPERLOOM_CLAUDE_CLI_PATH` is unset. |
+| `HYPERLOOM_`<br>`CLAUDE_CLI_PATH`         | No | Unset | The Claude Code binary Hyperloom's agents run: the in-process backend and subprocess specialists alike. When unset they run `GEAK_CLAUDE_BIN`, then `claude` on `PATH`; the in-process backend leaves the choice to `claude_agent_sdk` only when none is found. |
 | `USER_DATA_PATH`                          | No                   | `/workspace/hyperloom` if `/workspace` is writable, else `<cwd>/session` | Session directory root (logs, runs, mirrors, breakdown). Container images ship a writable `/workspace`; a bare-metal host that has neither falls back to the second form and the CLI logs which root it took.                                                |
 | `HYPERLOOM_`<br>`RUNTIME_DIR`             | No                   | `$USER_DATA_PATH/runtime` (installer)                               | Private writable runtime state. Codex SDK turns create a unique mode-`0700` `CODEX_HOME` here and remove it after the SDK client closes. When unset, Codex uses the first safe declared output root, then a run-local working directory; it never falls back to `/tmp` or a source checkout. If launch config points this parent at storage unsuitable for SQLite, set it to a private local directory instead — see [Codex SDK turns stall](troubleshooting.md#codex-sdk-turns-stall-or-tracelens-roofline-times-out). |
 | `INFERENCE_`<br>`OPTIMI`<br>`ZER_CU`<br>`RRENT_S`<br>`ESSION_DIR` | No (set by CLI) | Set at session boot | Absolute path to the active session directory. Written by the CLI when a session starts and inherited by every benchmark subprocess; session-path resolution prefers it over scanning `USER_DATA_PATH`. Do not set by hand. |
 | `HYPERLOOM_ROOT`                          | No                   | `$HYPER`<br>`LOOM_R`<br>`UNTIME_`<br>`DIR/sou`<br>`rce-mirrors`                            | Legacy source-mirror root kept for compatibility. Current open-source dependency checkouts default to the repo-local cache root (`${HYPER`<br>`LOOM_CA`<br>`CHE_DIR:-`<br>`$REPO_ROOT`<br>`/.cache}`), not this path. |
 | `HYPERLOOM`<br>`_CACHE_`<br>`DIR`                          | No                   | `$REPO_ROOT`<br>`/.cache`                      | Writable, repo-local base for auto-cloned open-source deps (TraceLens, Magpie, etc.), cloned per revision as `<name>@<sha>`. Not under `$TMPDIR` so a reaper cannot wipe it mid-run. |
-| `KERNELFORGE`<br>`_PROJECT_`<br>`ROOT`              | No                   | `$USER_DATA_PATH/kernelforge`, else `~/.cache/hyperloom/kernelforge` | Writable root for forge's own state and for resource-tree overrides. Holds the learned knowledge base (`knowledge_base/<backend>/learned/`), the tuning DB, postmortems and `forge_experiments/`. A subtree placed here also **overrides the copy packaged inside `kernelforge`** — a `serving_patches/` or `examples/` directory under this root wins over the shipped one, which is the supported way to try a patch or a task without editing site-packages. Must be writable: it deliberately never resolves to the installed package directory or to the cwd. **This is the replacement for the removed `FORGE_PATH`**, which nothing reads any more — a stale `FORGE_PATH` is still forwarded (the `FORGE_` prefix is on the dotenv allowlist) and then ignored. |
+| `KERNELFORGE`<br>`_PROJECT_`<br>`ROOT`              | No                   | `$USER_DATA_PATH/kernelforge`, else `~/.cache/hyperloom/kernelforge` | Writable root for forge's own state and for resource-tree overrides. Holds the learned knowledge base (`knowledge_base/<backend>/learned/`), the tuning DB, postmortems and `forge_experiments/`. An `examples/` directory placed here overrides the copy packaged inside `kernelforge`, which is the supported way to try a task without editing site-packages. Must be writable: it deliberately never resolves to the installed package directory or to the cwd. **This is the replacement for the removed `FORGE_PATH`**, which nothing reads any more — a stale `FORGE_PATH` is still forwarded (the `FORGE_` prefix is on the dotenv allowlist) and then ignored. |
 | `SKIP_FORGE`<br>`_PROFILING`               | No                   | Unset (the extra is installed) | Set to `1` to make `install.sh` skip `pip install -e "$REPO_ROOT[forge-profiling]"`. That extra is rocprof-compute's own dependency set (~20 wheels, including the exact `kaleido==0.2.1` / `astunparse==1.6.2` pins ROCm 7.2.x requires); without it forge's profiler degrades to the lightweight PMC path instead of System Speed-of-Light + roofline. Installed by default on purpose — the previous gate made this a silent skip on every pod. |
 | `ROCPC_VENV`                               | No                   | `/opt/rocprof-compute-venv` | Private venv that rocprof-compute's analyze mode runs in, created by `install.sh` from the tool's own `requirements.txt` so its exact pins cannot displace the serving image's numpy and pandas. `rocpc_profile.py` derives the same path. Without the venv, analyze degrades and profiling still collects. |
 | `MAGPIE_PATH`                              | No                   | Resolved from installed `Magpie` package unless explicitly set                               | Magpie package root for benchmark wrappers and patch inspection.                                                                                                                                            |
@@ -89,6 +90,14 @@ Set with CLI flags, not env vars. Pre-set `ISL` / `OSL` / `CONC` / `PRECISION` /
   `--max-latency-ms` is a constraint on KEEP rather than a target, and applies
   to scriptable frameworks (`xdit`, `custom`) only; the CLI refuses it for a
   serving framework, including on resume.
+- **GPU power settings (asserted, never set):** `--gpu-power-cap-w`,
+  `--gpu-perf-level`. Set them with `amd-smi set` before launch; the session
+  refuses to start or resume if a card it uses differs, and records what the
+  cards report either way. Per-round GPU power is sampled by Hyperloom over
+  the measured phase into each round's `gpu_power.json`;
+  `HYPERLOOM_GPU_POWER_SAMPLING=0` turns the sampler off (the round then falls
+  back to the benchmark report's reading) and `HYPERLOOM_GPU_POWER_INTERVAL_S`
+  sets its cadence (default 2 s, minimum 0.5 s).
 - **Cluster topology & multi-node backend:** `--nodes`, `--gpus-per-node`,
   `--gpu-type`, `--mn-backend` (`rayjob` / `infera`), `--server-args` (rayjob).
   Per-pod sizing, the pod image and pod-side env are the provisioning
@@ -108,7 +117,7 @@ Set with CLI flags, not env vars. Pre-set `ISL` / `OSL` / `CONC` / `PRECISION` /
   `--extend-hours`.
 - **Quantization:** `--quantize`, `--quantize-scheme`.
 
-Run `inference_optimizer optimize --help` for the exhaustive flag list.
+Run `hyperloom optimize --help` for the exhaustive flag list.
 
 ---
 
@@ -187,6 +196,24 @@ its answer extraction depends on, so that list is never displaced: an explicit
 `HYPERLOOM_EVAL_STOP_STRINGS` goes first, the task's list next, and derived
 terminators last. Derived token ids travel separately as `stop_token_ids`, which
 has no such limit, so nothing is lost on a server that supports it.
+
+---
+
+## Experience KB
+
+Every workspace runs a local Experience KB service; a global KB is optional.
+See [Experience KB service](experience-kb.md) for how each is used.
+
+| Variable | Default | Description |
+|---|---|---|
+| `HYPERLOOM_KB_URL` | Written by `hyperloom-setup` (`http://127.0.0.1:<port>`, a port of the workspace's own in 20000–29999) | The workspace's local Experience service. A loopback URL is started by each optimize launch; unset disables Experience reads and writes. |
+| `HYPERLOOM_KB_TOKEN` | Generated by `hyperloom-setup` | The local service's access token. |
+| `HYPERLOOM_GLOBAL_KB_URL` | Unset | The global Experience KB the local service pushes to and pulls from. |
+| `HYPERLOOM_GLOBAL_KB_TOKEN` | Unset | The global KB's access token; required with its URL. |
+| `HYPERLOOM_KB_AUTO_PUSH` | Off | `1` pushes after every run's Experiences are written locally. |
+| `LOCAL_KB_PLANNER_MODEL` | `CLAUDE_MODEL` | The model the Experience service plans reads with, through `ANTHROPIC_BASE_URL`. |
+| `LOCAL_KB_PLANNER_TIMEOUT_SECONDS` | `20` | How long the Experience service waits on its planner before a read fails. A run waits 30 s per read, so a value above that makes every read fail. |
+| `LOCAL_KB_PLANNER_MAX_OUTPUT_TOKENS` | `1400` | The most output tokens the Experience service's planner may spend on one read plan. A plan cut at this limit fails its read with `planner gateway truncated output at max_tokens`. |
 
 ---
 
@@ -510,7 +537,7 @@ do not publish it unchanged in support bundles.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `HYPERLOOM_QUANTIZE_ENABLED` | Unset | Primary switch (`1` to enable) for the AMD Quark PTQ quantization prelude driven by `--quantize` / `--quantize-scheme`. |
-| `QUARK_ROOT` | Unset | AMD Quark checkout used by the quantization-agent. Set this explicitly when quantization is enabled. |
+| `QUARK_ROOT` | Unset | AMD Quark checkout used by the quantization agent. Set this explicitly when quantization is enabled. |
 
 ---
 
@@ -569,7 +596,7 @@ from these benchmark limits and retain their existing contracts.
 | Variable | Default | Description |
 |---|---|---|
 | `INFERENCE_OPTIMIZER_REACTOR_TURN_TIMEOUT_SEC` | `1800` | Total wall-clock limit for each reactor stage, including backend startup, streamed output, retries, backoff, and cleanup. This is independent of backend `*_CALL_TIMEOUT_SEC` settings: for streamed Claude turns those settings bound idle time between SDK messages, and activity resets that idle timer. Reaching this total limit cancels the stage and records a crash; a shorter remaining session bound still ends the stage without recording a crash. A malformed value raises `EnvValueError`; a non-positive or non-finite value falls back to the default. |
-| `INFERENCE_OPTIMIZER_CLAUDE_TURN_TIMEOUT_SEC` | `1500` | Total wall-clock limit for one Claude Agent SDK call made by the orchestration backend (reactor turns, including the SWEEP cycle-directive handoff), covering every retry and the backoff between them; tearing the CLI down afterwards adds at most 30 s. Unlike the idle bound of `INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC`, the CLI's own API-retry messages do not extend it. Past it the call is cancelled, the CLI and every process it started are killed, and the turn fails as a backend error the loop retries on its next tick. In-process Claude specialists use `--specialist-per-turn-max-seconds` instead. |
+| `INFERENCE_OPTIMIZER_CLAUDE_TURN_TIMEOUT_SEC` | `1500` | Total wall-clock limit for one Claude Agent SDK call made by the orchestration backend (reactor turns, including the SWEEP cycle-directive handoff), covering every retry and the backoff between them; tearing the CLI down afterwards adds at most 30 s. Unlike the idle bound of `INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC`, the CLI's own API-retry messages do not extend it. Past it the call is cancelled, the CLI and every process it started are killed, and the turn fails as a backend error the loop retries on its next tick. |
 
 ## TraceLens analysis budgets
 
@@ -713,21 +740,32 @@ Primary switch (default **off**) for live Langfuse trace push.
   recovery tool only when live push did not run.
 * **`flush_session` is idempotent, and retries only what failed**: the
   session-end reconcile runs as named steps (leftover halves, `ext/` shards,
-  recipe-KB audit, specialist intel, forge steps, GEMM tuning, decision scores,
-  span close, final SDK flush). Each step runs at most once **per process**, so
-  a duplicated CLOSE step won't double-push; a step that raised is retried by
-  the next call. The receipt reports `flush_steps_done` (the steps that
-  succeeded, for this process) and `counts_final`, which is `true` only once
-  *every* step has completed — a `false` there means the push is still
-  incomplete, not that the session was short-lived. Across processes (a crash
-  plus a `--resume`, or two shutdown paths racing), the durable unit is finer
-  than a step: `ext_rows_sent` records how far each `ext/*.jsonl` shard was
-  drained so its rows are never re-pushed while later ones still are, and the
+  recipe-KB audit, specialist intel, forge steps, GEMM tuning, trajectory,
+  decision scores, span close, final SDK flush). Every call runs every step,
+  and each step sends only what is still owed, so a duplicated CLOSE step
+  won't double-push, a row that failed is retried by the next call, and a
+  later call (the shutdown flush after CLOSE) pushes whatever was recorded
+  since the earlier one. `counts_final` is `true` when the latest call
+  completed every step — a `false` there means the push is still incomplete,
+  not that the session was short-lived. Every leg of a resumed session
+  (a crash plus a `--resume`, or two shutdown paths racing) reports into the
+  same trace. `rows_sent` maps each
+  append-only log, by its path under the session directory, to how many of its
+  rows were sent: the `ext/*.jsonl` and `trajectory/*.jsonl` shards, the
+  recipe-KB audit, specialist intel, forge steps and GEMM tuning logs. A call
+  sends only the rows past that count, advancing it one row at a time and
+  stopping at the first row it could not send, so that row is retried by the
+  next call or the next leg. A receipt written by v1.0.0 through v1.1.3 carries
+  the ext shard counts as `ext_rows_sent`, and a v1.1.3 receipt also carries the
+  trajectory shard counts as `trajectory_rows_sent`; both are still read. `decision_trace.jsonl` is rewritten ts-sorted on
+  every export, so decision scores are tracked by the `decision_id` its writer
+  stamps on each row instead (`decisions_sent`). Both record what was handed to
+  the Langfuse SDK: its flush does not report a failed export, so a row lost in
+  export is not re-pushed. The `*_read` counters count only what the current leg
+  read past those cursors. The
   one-shot `session_start` / `session_breakdown` pushes are claimed through an
   exclusive marker file (`reports/trace/.session_start.claim`) rather than
-  through the receipt read. The audit backfills (recipe-KB, specialist intel,
-  forge steps, GEMM tuning, decision scores) are *not* cursor-tracked: a second
-  process that reaches CLOSE for the same session re-emits those spans. The receipt also carries `payload_sha256` over its own body; a
+  through the receipt read. The receipt also carries `payload_sha256` over its own body; a
   receipt whose hash does not match is ignored on read, so a torn file cannot
   suppress or replay the one-shot `session_start` / breakdown pushes.
 * **Package completeness**: `PACKAGE_MANIFEST` describes what was actually
@@ -921,9 +959,8 @@ defaults to `trajectories × 26 s × 2 + 1800 s` (26 s per trajectory measured o
 8×MI355X at concurrency 16, doubled for a cold first round, plus boot), and never
 below the stock 7800 s: about 9600 s for smoke and 33,700 s for `full`.
 
-AgentX profiling starts when AIPerf reports its measured phase. The legacy
-`AGENTX_PROFILE_WARMUP_S` delay is ignored. `AGENTX_PROFILE_WINDOW_S` controls
-the capture window and defaults to 20 seconds; phase waiting is bounded by the
+AgentX profiling starts when AIPerf reports its measured phase.
+`AGENTX_PROFILE_WINDOW_S` controls the capture window and defaults to 20 seconds; phase waiting is bounded by the
 materialized benchmark timeout. Capture lifecycle status is
 written to a per-invocation `capture-status.json`; the adjacent
 `trace-manifest.json` records the selected primary and per-rank traces.
@@ -951,11 +988,9 @@ legacy fixed-delay capture is not aligned with the AIPerf phase signal.
 These are read by `os.environ` somewhere in the codebase but are
 internal-only — do not set them by hand:
 
-* `HYPERLOOM_KERNEL_AGENT_ROOT`: internal CLI-only handoff to the
-  kernel subprocess (Python constant `_KERNEL_AGENT_ROOT_ENV`).
 * `HYPERLOOM_HOST_PROBE`, `HYPERLOOM_HOST_PROBE_DEEP`,
   `HYPERLOOM_HOST_PROBE_DIR`, `HYPERLOOM_HOST_PROBE_ROOTS` (and the
-  `..._MAX_SITES` / `..._ARG_SAMPLES` caps): the same for the host-stall
+  `..._MAX_SITES` / `..._ARG_SAMPLES` caps): internal handoff to the host-stall
   evidence probe, armed by the profile leg that collects the evidence. The deep
   tier inflates host time by design, so setting it by hand distorts any trace
   collected alongside it.

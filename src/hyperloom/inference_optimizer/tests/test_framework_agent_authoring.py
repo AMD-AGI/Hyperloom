@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
+from hyperloom.orchestrator.bus.message_bus import MessageBus
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
 
@@ -92,6 +93,8 @@ class _ApproveCritic:
 
 
 class _BusStub:
+    record_observation = MessageBus.record_observation
+
     def __init__(self) -> None:
         self.messages: list[Any] = []
 
@@ -231,7 +234,7 @@ def test_reauthor_attempt_propagates_into_specialist_and_integrate_params(tmp_pa
     )
     assert round_entry["reauthor_attempt"] == 1
     integrate_params: dict[str, Any] = {}
-    _forward_integrate_source(specialist_task.params, integrate_params)
+    _forward_integrate_source(specialist_task.params, integrate_params, {})
     assert integrate_params["reauthor_attempt"] == 1
 
 

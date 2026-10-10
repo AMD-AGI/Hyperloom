@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import json
 import time
+import uuid
 from collections.abc import Mapping
 from contextlib import asynccontextmanager, suppress
 from typing import Any
@@ -28,6 +29,7 @@ from .verdicts import (
     verdict_held_to_its_rule,
     verdict_map_entry_held_to_its_rule,
 )
+from hyperloom.common.coerce import to_int
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ..bus.message_bus import Message, TOPIC_ALLOWLIST
@@ -43,6 +45,7 @@ from ..state.shared_state import (
     inject_stack_base_params,
     is_valid_escalate_hint,
 )
+from ..state.experience_citations import merge_citations, normalize_citations, shown_ids
 from ..state.task_registry import IllegalTransition, TaskNotFound
 from hyperloom.inference_optimizer.trace.trajectory_trace import (
     EVENT_INTENT,
@@ -101,6 +104,60 @@ def _lifecycle_paths(payload: Any) -> dict[str, str]:
 # as a back-reference and the annotation below is a deferred string.
 
 log = __import__("logging").getLogger(__name__)
+
+
+def _relayed_specialist_citations(state: Any) -> dict[str, list[dict[str, str]]]:
+    """This cycle's specialist proposal citations, keyed by the change each proposal asks for."""
+    from ..actions.executors._proposal_identity import content_fingerprint
+
+    cycle = to_int(getattr(state, "macro_cycle", 0), default=0)
+    by_change: dict[str, list[dict[str, str]]] = {}
+    for entry in getattr(state, "specialist_rounds", None) or []:
+        if not isinstance(entry, dict) or to_int(entry.get("cycle"), default=0) != cycle:
+            continue
+        for proposal in entry.get("proposal_set") or []:
+            if isinstance(proposal, dict) and proposal.get("experience_citations"):
+                change = content_fingerprint(proposal)
+                by_change[change] = merge_citations(by_change.get(change, []), proposal["experience_citations"])
+    return by_change
+
+
+def _stamp_kb_exposure(
+    router: Any,
+    payload: dict[str, Any],
+    *,
+    source: str,
+) -> None:
+    """Attach the current orchestration read to proposals emitted by that tick, and the citations it supports.
+
+    A grid row that asks for exactly the change a specialist proposed this cycle also carries that specialist's
+    citations, which were checked against the read its own dispatch was shown.
+    """
+    if source != "orchestration":
+        return
+    evidence = router._coord.conversation.kb_last_read
+    current = evidence is not None and int(getattr(evidence, "tick", -1)) == int(
+        getattr(router.shared_state, "tick", 0) or 0
+    )
+    if current:
+        payload["kb_read_id"] = str(getattr(evidence, "read_id", "") or "")
+        payload["kb_rendered_refs"] = list(getattr(evidence, "rendered_refs", ()) or ())
+    params = payload.get("params")
+    if not isinstance(params, dict) or not isinstance(params.get("grid"), list):
+        return
+    from ..actions.executors._proposal_identity import content_fingerprint
+
+    shown = shown_ids(payload.get("kb_rendered_refs") if current else ())
+    relayed = _relayed_specialist_citations(router.shared_state)
+    grid: list[Any] = []
+    for row in params["grid"]:
+        if isinstance(row, dict):
+            carried = relayed.get(content_fingerprint(row), [])
+            if "experience_citations" in row or carried:
+                own = normalize_citations(row.get("experience_citations"), shown)
+                row = {**row, "experience_citations": merge_citations(own, carried)}
+        grid.append(row)
+    payload["params"] = {**params, "grid": grid}
 
 
 def _variant_review_rows(
@@ -370,7 +427,7 @@ class IntentRouter(CoordinatorCollaborator):
             self.policy.validate_intent(source, intent)
         except PolicyDenied as denied:
             record_event(EVENT_INTENT, attributes={**attributes, "admitted": False, "denied": str(denied)[:200]})
-            await self._coord.writeback.record_policy_denied(source, intent, denied)
+            await self.record_policy_denied(source, intent, denied)
             return
         intent_span_id = record_event(EVENT_INTENT, attributes={**attributes, "admitted": True})
         with trajectory_scope(parent_span_id=intent_span_id):
@@ -396,7 +453,7 @@ class IntentRouter(CoordinatorCollaborator):
                 await handler(source, intent)
             else:
                 # Unknown / unhandled intent — record for replay.
-                await self._coord.writeback.record_observation(
+                await self.bus.record_observation(
                     source,
                     "observation",
                     {"intent": it.value, "payload": intent.payload},
@@ -411,7 +468,7 @@ class IntentRouter(CoordinatorCollaborator):
                 exc=exc,
             )
             try:
-                await self._coord.writeback.record_observation(
+                await self.bus.record_observation(
                     "coordinator",
                     "observation",
                     {
@@ -430,7 +487,7 @@ class IntentRouter(CoordinatorCollaborator):
         action_name = intent.payload["action_name"]
         # Pruned families are advisory: proposal still queues with an advisory note.
         if self.shared_state.is_pruned(action_name):
-            await self._coord.writeback.record_observation(
+            await self.bus.record_observation(
                 "coordinator",
                 "observation",
                 {
@@ -447,13 +504,14 @@ class IntentRouter(CoordinatorCollaborator):
             )
         denied = self._coord.dispatcher.admission_denial_for_action(action_name)
         if denied is not None:
-            await self._coord.writeback.record_policy_denied(source, intent, denied)
+            await self.record_policy_denied(source, intent, denied)
             return
         payload = dict(intent.payload)
+        _stamp_kb_exposure(self, payload, source=source)
         if action_name == "integrate_patch":
             params = dict(payload.get("params") or {})
             if not await self._stamp_integrate_patch_owner(params):
-                await self._coord.writeback.record_observation(
+                await self.bus.record_observation(
                     "coordinator",
                     "observation",
                     {
@@ -483,7 +541,7 @@ class IntentRouter(CoordinatorCollaborator):
         verdict_map = intent.payload.get("verdict_map")
         single_verdict = intent.payload.get("verdict")
         if pending is None:
-            await self._coord.writeback.record_observation(
+            await self.bus.record_observation(
                 "coordinator",
                 "observation",
                 {
@@ -577,7 +635,7 @@ class IntentRouter(CoordinatorCollaborator):
             verdict,
             downgraded_from_code,
         )
-        await self._coord.writeback.record_observation(
+        await self.bus.record_observation(
             "coordinator",
             "observation",
             {
@@ -614,7 +672,7 @@ class IntentRouter(CoordinatorCollaborator):
         """
         self.state.pending_proposals.pop(pending.proposal_msg_id, None)
         if is_upstream_pr_prescreen(pending.action_name, pending.payload):
-            await self._coord.writeback.record_observation(
+            await self.bus.record_observation(
                 "coordinator",
                 "observation",
                 {
@@ -743,7 +801,7 @@ class IntentRouter(CoordinatorCollaborator):
         """Validate and enqueue a delegated action as a TaskRegistry task."""
         action_name = intent.payload["action_name"]
         if self.shared_state.is_pruned(action_name):
-            await self._coord.writeback.record_observation(
+            await self.bus.record_observation(
                 "coordinator",
                 "observation",
                 {
@@ -760,7 +818,7 @@ class IntentRouter(CoordinatorCollaborator):
             )
         denied = self._coord.dispatcher.admission_denial_for_action(action_name)
         if denied is not None:
-            await self._coord.writeback.record_policy_denied(
+            await self.record_policy_denied(
                 source,
                 intent,
                 denied,
@@ -768,10 +826,12 @@ class IntentRouter(CoordinatorCollaborator):
             )
             return
         # delegate explore runs variants directly (no Critic pre-review).
-        params = dict(intent.payload.get("params") or {})
+        payload = dict(intent.payload)
+        _stamp_kb_exposure(self, payload, source=source)
+        params = dict(payload.get("params") or {})
         if action_name == "integrate_patch":
             if not await self._stamp_integrate_patch_owner(params):
-                await self._coord.writeback.record_observation(
+                await self.bus.record_observation(
                     "coordinator",
                     "observation",
                     {
@@ -838,6 +898,11 @@ class IntentRouter(CoordinatorCollaborator):
             ).hexdigest()[:10]
             raw_key = f"{source}:{action_name}:t{int(self.shared_state.tick or 0)}:{content_fp}"
         idempotency_key = str(raw_key)
+        # The grid's attempts join its proposal row through this id, as an approved proposal's do. Added after the
+        # key is derived, so an identical re-emit still lands on the task already running.
+        proposal_id = uuid.uuid4().hex if action_name == "explore" else ""
+        if proposal_id:
+            params["proposal_msg_id"] = proposal_id
         terminal_states = {
             "succeeded",
             "failed",
@@ -869,7 +934,7 @@ class IntentRouter(CoordinatorCollaborator):
                     f"task {task.task_id} is still {task.state!r}; wait for the "
                     f"delegated_result event instead of re-emitting the same key."
                 )
-                await self._coord.writeback.record_policy_denied(
+                await self.record_policy_denied(
                     source,
                     intent,
                     PolicyDenied(
@@ -885,7 +950,7 @@ class IntentRouter(CoordinatorCollaborator):
                 f"task {task.task_id if task else '?'} terminated and could not "
                 f"allocate a fresh idempotency_key after 5 retries"
             )
-            await self._coord.writeback.record_policy_denied(
+            await self.record_policy_denied(
                 source,
                 intent,
                 PolicyDenied(
@@ -898,6 +963,11 @@ class IntentRouter(CoordinatorCollaborator):
             )
             return
         self.shared_state.reset_policy_denial_streak(action_name)
+        from .proposals import record_config_proposal
+
+        record_config_proposal(
+            self._coord, proposal_id, action_name, {**payload, "params": params}, outcome="delegated"
+        )
         await self.bus.append_and_seq(
             Message.new(
                 "coordinator",
@@ -984,7 +1054,7 @@ class IntentRouter(CoordinatorCollaborator):
         kind = intent.payload["kind"]
         denied = self._coord.dispatcher.sequence_denial_for_request(target_agent, kind)
         if denied is not None:
-            await self._coord.writeback.record_policy_denied(source, intent, denied)
+            await self.record_policy_denied(source, intent, denied)
             return
         # Always record the request on the bus for replay.
         request_msg = Message.new(
@@ -1239,7 +1309,7 @@ class IntentRouter(CoordinatorCollaborator):
         try:
             new_ttl = await self.tasks.extend_lease(task_id, extra_sec)
         except (TaskNotFound, IllegalTransition) as exc:
-            await self._coord.writeback.record_observation(
+            await self.bus.record_observation(
                 "coordinator",
                 "observation",
                 {
@@ -1280,7 +1350,7 @@ class IntentRouter(CoordinatorCollaborator):
             wall_budget_error = repr(exc)[:200]
         # A swallowed GPU or wall-budget failure would leave the lane extended while the GPU reaper or subprocess
         # wall-clock cap can still interrupt the work — report the partial extension as degraded.
-        await self._coord.writeback.record_observation(
+        await self.bus.record_observation(
             "coordinator",
             "observation",
             {
@@ -1405,4 +1475,74 @@ class IntentRouter(CoordinatorCollaborator):
                 "alert",
                 dict(intent.payload),
             )
+        )
+
+    async def record_policy_denied(
+        self,
+        source: str,
+        intent: Intent,
+        denied: PolicyDenied,
+        *,
+        action_name: str | None = None,
+    ) -> None:
+        """Record a PolicyGate denial.
+
+        Publishes a ``policy_denied`` observation and records the denial streak.
+        The streak is a fact for LLM self-correction only: there is no
+        auto-prune and no ``policy_loop`` stop triggered from it.
+
+        Args:
+            source (str): The agent whose intent was denied.
+            intent (Intent): The denied intent.
+            denied (PolicyDenied): The denial carrying rule / hint / reason.
+            action_name (str | None): Explicit action name override; falls back
+                to ``intent.payload['action_name']``.
+        """
+        # Surface every PolicyGate denial in the process log (not just the bus)
+        # so security rejections are observable in ops logs.
+        log.warning(
+            "PolicyGate denied intent: source=%s type=%s rule=%s reason=%s",
+            source,
+            intent.type.value,
+            denied.rule,
+            str(denied),
+        )
+        await self.bus.append_and_seq(
+            Message.new(
+                "coordinator",
+                source,
+                "observation",
+                {
+                    "kind": "policy_denied",
+                    "intent_type": intent.type.value,
+                    "rule": denied.rule,
+                    "hint": denied.hint,
+                    "reason": str(denied),
+                },
+            )
+        )
+        resolved_action = action_name or str((intent.payload or {}).get("action_name") or "")
+        # Streak counter is a fact for LLM self-correction only; the system does not auto-prune or stop on it.
+        self.shared_state.record_policy_denial(
+            action_name=resolved_action,
+            rule=str(denied.rule or ""),
+            hint=str(denied.hint or ""),
+            intent_type=intent.type.value,
+            tick=int(self.shared_state.tick or 0),
+            intent_payload=intent.payload,
+        )
+        from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+
+        payload = intent.payload or {}
+        proposal_msg_id = (
+            payload.get("proposal_msg_id") or payload.get("target_proposal_msg_id") or payload.get("proposal_id")
+        )
+        phase_event.record_denial(
+            actor=source,
+            proposal_msg_id=str(proposal_msg_id) if proposal_msg_id else None,
+            action=resolved_action,
+            phase=str(self.shared_state.phase or ""),
+            macro_cycle=int(self.shared_state.macro_cycle or 0),
+            rule=str(denied.rule or ""),
+            hint=str(denied.hint or ""),
         )

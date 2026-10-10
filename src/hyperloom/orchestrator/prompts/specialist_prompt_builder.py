@@ -23,7 +23,7 @@ from typing import Any, Callable
 
 from hyperloom.common.perf_metric import is_agentx_mode
 from hyperloom.common.prompt_safety import defang_prompt_structure
-from hyperloom.inference_optimizer.framework_paths import framework_import_name
+from hyperloom.inference_optimizer.framework_registry import python_package
 from .agentx_context import corpus_lines, grading_lines
 
 from ..specialists.domains import (
@@ -889,6 +889,8 @@ class SpecialistPromptInputs:
 
     # Optional structured KB context. Empty in the RecipeKB-first path.
     kb_subgraph: dict[str, Any] = field(default_factory=dict)
+    # Experience service ``prompt_block`` read for this dispatch; empty when no Experience was rendered.
+    experience_kb_block: str = ""
 
     # Roofline / TraceLens evidence from ``SharedState.last_trace_analyze``;
     # empty dict renders a placeholder.
@@ -971,8 +973,6 @@ class SpecialistPromptInputs:
     task_kind: str = ""
     prior_attempts: list[dict[str, Any]] = field(default_factory=list)
     pr_lead: dict[str, Any] = field(default_factory=dict)
-    # "A" = emit_intent, "B" = file write, "" = render both (render-script path).
-    exit_channel: str = ""
 
 
 # Section 1 — Identity & autonomy
@@ -1160,13 +1160,16 @@ def _cpu_selfcheck_block(inp: SpecialistPromptInputs) -> list[str]:
     """Optional ``selfcheck`` helper for a patch specialist with a worktree and no GPU."""
     if inp.allocated_gpu_ids or inp.mode != MODE_PATCH or not inp.worktree_package_dir:
         return []
+    package = python_package(inp.framework)
+    if package is None:
+        return []
     return [
         "",
         "Optional helper: ``selfcheck`` installs your worktree's package into a private venv,",
         "imports it, byte-compiles the files you changed and runs any pytest targets you pass:",
         "    python -m hyperloom.orchestrator.specialists.selfcheck \\",
         f"        --worktree {inp.workspace_path} --package-dir {inp.worktree_package_dir} "
-        f"--package {framework_import_name(inp.framework)} [--pytest <target>]",
+        f"--package {package} [--pytest <target>]",
         "  It prints a JSON result. A framework with compiled extensions (e.g. vLLM) rebuilds",
         "  them on install, which can take well over your wall budget.",
     ]
@@ -1484,6 +1487,7 @@ def _is_cold_start(inp: SpecialistPromptInputs) -> bool:
     """
     return (
         not inp.kb_subgraph
+        and not inp.experience_kb_block
         and not inp.warm_start_recipe
         and not inp.warm_start_lessons
         and not inp.warm_start_pitfalls
@@ -1567,6 +1571,32 @@ def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
     rows.append(json.dumps(inp.kb_subgraph, sort_keys=True, separators=(",", ":")))
     rows.append("```")
     return rows
+
+
+def _section_experience_kb(inp: SpecialistPromptInputs) -> list[str]:
+    """Render the Experience KB section; omitted when this dispatch rendered no Experience.
+
+    Args:
+        inp: Assembled prompt inputs for the current dispatch.
+
+    Returns:
+        Prompt lines carrying the Experience service block, or ``[]``.
+    """
+    if not inp.experience_kb_block:
+        return []
+    return [
+        "## 4b. EXPERIENCE KB (measured outcomes from earlier sessions)",
+        "",
+        "Compare each Experience's identity and baseline configuration with Sections 2 and 3 "
+        + "before relying on it. When one shaped a proposal, cite it in that proposal's "
+        + "``experience_citations``, or for a patch you wrote in the payload's top-level "
+        + "``experience_citations``: ``{id, stance, claim}`` with ``stance`` one of ``adopt`` "
+        + "(you did its change), ``adapt`` (you did it modified), ``avoid`` (you left it out "
+        + "because of its outcome), or ``contrast`` (you chose a different change designed "
+        + "against it), and ``claim`` one sentence on why. Only ids shown below are kept.",
+        "",
+        inp.experience_kb_block,
+    ]
 
 
 def _vendor_substitution_candidates(hot_kernels: Any) -> list[dict[str, Any]]:
@@ -2086,27 +2116,13 @@ def _section_source_hint(inp: SpecialistPromptInputs) -> list[str]:
 def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
     """Render Section 8 (output protocol) of the specialist prompt."""
     workspace = inp.workspace_path or "<workspace>"
-    channel = (inp.exit_channel or "").upper().strip()
     authors_patches = _authors_patches(inp)
 
-    exit_lines: list[str] = []
-    if channel == "A" or channel == "":
-        exit_lines.extend(
-            [
-                "**Exit — ``emit_intent`` tool:** call ``emit_intent`` exactly once",
-                "with intent type ``specialist_done`` and the payload schema below.",
-            ]
-        )
-    if channel == "B" or channel == "":
-        if channel == "":
-            exit_lines.append("")
-        exit_lines.extend(
-            [
-                "**Exit — file write (subprocess runtime):** write the same payload to",
-                f"``{workspace}/specialist_done.json`` as your **absolute last action**.",
-                "The dispatcher polls for that file as the exit signal; stop after writing.",
-            ]
-        )
+    exit_lines = [
+        "**Exit — file write:** write the ``specialist_done`` payload (schema below) to",
+        f"``{workspace}/specialist_done.json`` as your **absolute last action**.",
+        "The dispatcher polls for that file as the exit signal; stop after writing.",
+    ]
 
     if authors_patches:
         patch_fields = [
@@ -2192,9 +2208,10 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
                             "kb_evidence": [],
                             "pr_evidence": [],
                             "source_evidence": [],
+                            "experience_citations": [],
                         }
                     ],
-                    **({"patches_written": []} if authors_patches else {}),
+                    **({"patches_written": [], "experience_citations": []} if authors_patches else {}),
                     "summary": "≤ 500 char overview of what you tried this round",
                     "confidence": 0.6,
                     "new_findings": [],
@@ -2483,6 +2500,7 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
             _section_gap(inp),
             _section_kb_subgraph(inp),
             _section_roofline_evidence(inp),
+            _section_experience_kb(inp),
             _section_recipe(inp),
             _section_lessons(inp),
             _section_pitfalls(inp),

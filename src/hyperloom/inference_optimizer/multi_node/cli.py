@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""``hyperloom.inference_optimizer.multi_node`` — single-entry sandbox CLI driving one handed-over cluster."""
+"""``hyperloom multi-node`` — single-entry sandbox CLI driving one handed-over cluster."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ import base64
 import json
 import os
 import shlex
-import sys
 import tempfile
 import time
 from collections.abc import Callable
@@ -832,12 +831,15 @@ def _build_multinode_finalize_patch_entrypoint(
 def _build_multinode_apply_tracelens_patch_entrypoint(
     tracelens_root: str,
     sglang_version_pin: str,
+    patch_set: str = "",
 ) -> str:
     """Compose the head-pod entrypoint fanning out the TraceLens patch set via heredoc-embedded apply_tracelens_patch_multinode.py."""
     py = _read_pod_script("apply_tracelens_patch_multinode.py")
-    pin_arg = ""
+    extra_args = ""
     if sglang_version_pin:
-        pin_arg = f" --sglang-version-pin {shlex.quote(str(sglang_version_pin))}"
+        extra_args += f" --sglang-version-pin {shlex.quote(str(sglang_version_pin))}"
+    if patch_set:
+        extra_args += f" --patch-set {shlex.quote(str(patch_set))}"
     return (
         f"{_MN_ENTRYPOINT_PREAMBLE}"
         f'cat > "$WORK_DIR/apply_tracelens_patch_multinode.py" '
@@ -845,7 +847,7 @@ def _build_multinode_apply_tracelens_patch_entrypoint(
         f"{py}__MN_TLPATCH_PY_EOF__\n"
         f'python3 "$WORK_DIR/apply_tracelens_patch_multinode.py" '
         f"--tracelens-root {shlex.quote(str(tracelens_root))}"
-        f"{pin_arg}"
+        f"{extra_args}"
     )
 
 
@@ -1122,7 +1124,7 @@ def cmd_finalize_patch(args: argparse.Namespace) -> int:
         args.records_json,
         args.timeout_sec,
     )
-    rc, parsed, _logs = _submit_and_collect_pod_json(
+    rc, parsed, logs = _submit_and_collect_pod_json(
         state,
         entrypoint,
         label="finalize-patch",
@@ -1130,6 +1132,9 @@ def cmd_finalize_patch(args: argparse.Namespace) -> int:
         poll_timeout=_poll_timeout_from_args(args),
     )
     if parsed is None:
+        err("finalize-patch: could not parse per-pod JSON from dashboard logs")
+        if args.print_logs:
+            print(logs)
         return EXIT_TRANSIENT
     print(json.dumps(parsed, indent=2, sort_keys=True))
     return rc
@@ -1156,11 +1161,16 @@ def cmd_apply_tracelens_patch(args: argparse.Namespace) -> int:
         )
         return EXIT_CONFIG_ERROR
 
-    info(f"apply-tracelens-patch: tracelens_root={tracelens_root!r} version_pin={args.sglang_version_pin!r}")
+    patch_set = getattr(args, "patch_set", None) or ""
+    info(
+        f"apply-tracelens-patch: tracelens_root={tracelens_root!r} version_pin={args.sglang_version_pin!r} "
+        f"patch_set={patch_set or 'pod-gated'!r}"
+    )
 
     entrypoint = _build_multinode_apply_tracelens_patch_entrypoint(
         tracelens_root,
         args.sglang_version_pin or "",
+        patch_set,
     )
     rc, parsed, logs = _submit_and_collect_pod_json(
         state,
@@ -1283,6 +1293,21 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
     except ServerArgsRejected as exc:
         err(str(exc))
         return EXIT_CONFIG_ERROR
+    if (getattr(args, "pd_mode", "") or "").lower() == "disaggregated":
+        # launch_multinode.py has no per-role EP or server args; only the infera launcher does.
+        per_role = [
+            flag
+            for flag, value in (
+                ("--pd-prefill-ep", getattr(args, "pd_prefill_ep", 0)),
+                ("--pd-decode-ep", getattr(args, "pd_decode_ep", 0)),
+                ("--pd-prefill-extra-args", getattr(args, "pd_prefill_extra_args", "")),
+                ("--pd-decode-extra-args", getattr(args, "pd_decode_extra_args", "")),
+            )
+            if value
+        ]
+        if per_role:
+            err(f"restart-server: {', '.join(per_role)} are supported on the infera backend only, not rayjob")
+            return EXIT_CONFIG_ERROR
     state = _require_state("head_pod_ip")
     nnodes = int(state.get("nodes") or 1)
 
@@ -1637,7 +1662,7 @@ def _add_common_poll_flags(p: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     """Build the top-level argparse parser with every subcommand."""
     p = argparse.ArgumentParser(
-        prog="python3 -m hyperloom.inference_optimizer.multi_node",
+        prog="hyperloom multi-node",
         description=(
             "Drive the multi-node cluster the platform provisioned and handed over "
             "via HYPERLOOM_MN_EXT_*. State persists in $MULTI_NODE_STATE_FILE."
@@ -1843,6 +1868,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp.add_argument("--records-json", required=True)
     sp.add_argument("--timeout-sec", type=int, default=60)
+    sp.add_argument("--print-logs", action="store_true", help="dump full dashboard job_logs on parse failure")
     _add_common_poll_flags(sp)
     sp.set_defaults(func=cmd_finalize_patch)
 
@@ -1867,6 +1893,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--sglang-version-pin",
         default=None,
         help=("advisory pin (e.g. '0.5.11'); logged on mismatch with the sglang installed in the pod. Optional."),
+    )
+    sp.add_argument(
+        "--patch-set",
+        choices=("roofline", "graph-capture"),
+        default=None,
+        help=(
+            "patch set every pod applies (the controller's resolved SGLang shape mode). "
+            "Optional; when omitted each pod gates on its own SGLang version."
+        ),
     )
     sp.add_argument("--print-logs", action="store_true", help="dump full dashboard job_logs on parse failure")
     _add_common_poll_flags(sp)
@@ -1954,7 +1989,3 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:  # noqa: BLE001
         err(f"{type(exc).__name__}: {exc}")
         return EXIT_TRANSIENT
-
-
-if __name__ == "__main__":
-    sys.exit(main())

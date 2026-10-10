@@ -95,7 +95,6 @@ from ._agentx_timeouts import (
     agentx_warmup_grace_conc as agentx_warmup_grace_conc,
     agentx_warmup_grace_sec as agentx_warmup_grace_sec,
 )
-from ._recipe_script import RecipeLeverUnavailableError
 from ._workload_envs import (
     _client_tokenizer_mode,
     _remove_moe_runner_backend_arg,
@@ -499,10 +498,11 @@ def _is_insufficient_gpu_memory(*texts: str) -> bool:
     return any(m in blob for m in _GPU_PREOCCUPIED_MARKERS)
 
 
-# Disable cuda-graph capture per framework: sglang uses --disable-cuda-graph, vllm uses --enforce-eager.
+# Disable cuda-graph capture per framework: sglang uses --disable-cuda-graph, vllm and atom use --enforce-eager.
 _DISABLE_CUDA_GRAPH_FLAGS = {
     "sglang": "--disable-cuda-graph",
     "vllm": "--enforce-eager",
+    "atom": "--enforce-eager",
 }
 
 
@@ -2396,13 +2396,6 @@ class BenchmarkRunExecutor:
             return {
                 "status": "failed",
                 "error_class": "framework_script_mismatch",
-                "error": str(exc),
-                "output_dir": str(output_dir),
-            }
-        except RecipeLeverUnavailableError as exc:
-            return {
-                "status": "failed",
-                "error_class": "recipe_lever_unavailable",
                 "error": str(exc),
                 "output_dir": str(output_dir),
             }

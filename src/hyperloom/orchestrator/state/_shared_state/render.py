@@ -348,19 +348,11 @@ class _RenderMixin:
         """Executable proposals from this cycle that no explore round has benched, highest severity first."""
         from hyperloom.common.coerce import to_int
 
-        from ...actions.executors._proposal_identity import (
-            controls_of,
-            effective_fingerprint,
-            is_executable,
-            normalize_proposal,
-        )
-
-        def content_fingerprint(fields: dict[str, Any]) -> str:
-            return effective_fingerprint(fields["extra_args"], fields["extra_envs"], controls=controls_of(fields))
+        from ...actions.executors._proposal_identity import content_fingerprint, is_executable, normalize_proposal
 
         cycle = to_int(self.macro_cycle, default=0)
         benched = {
-            content_fingerprint(normalize_proposal(row))
+            content_fingerprint(row)
             for row in ((self.explore_search or {}).get("tested") or {}).values()
             if isinstance(row, dict)
         }
@@ -391,6 +383,10 @@ class _RenderMixin:
                 row["domain"] = domain
                 row["severity"] = severity
                 row["fingerprint"] = fingerprint
+                # Already checked against the read this round's dispatch was shown, which travels with them.
+                row["experience_citations"] = list(proposal.get("experience_citations") or [])
+                row["kb_read_id"] = str(entry.get("kb_read_id") or "")
+                row["kb_rendered_refs"] = list(entry.get("kb_rendered_refs") or [])
                 ranked.append((GAP_SEVERITY_RANK.get(severity, 0), order, row))
         ranked.sort(key=lambda r: (-r[0], -r[1]))
         return [row for _, _, row in ranked]
@@ -542,7 +538,7 @@ class _RenderMixin:
         lines += [
             f"baseline_tput={self.baseline_tput}  baseline_acc={self.baseline_accuracy}",
             f"baseline_failure_streak={self.baseline_failure_streak}",
-            f"current_best={self.current_best or '(none)'}",
+            f"current_best={self._format_current_best()}",
             f"optimization_stack={self._format_optimization_stack()}",
             (
                 f"cumulative_gain_validated={self.cumulative_gain_validated}% "
@@ -760,6 +756,16 @@ class _RenderMixin:
             outcome = str(entry.get("outcome") or "?").upper()
             out.append(f"      {str(fp)[:16]} {outcome:7s} {_RenderMixin._format_variant_line(entry)}")
         return "\n".join(out)
+
+    def _format_current_best(self) -> str:
+        """Render ``current_best`` without its ``optimization_stack`` and ``measurement``.
+
+        The stack, which grows with every stacked KEEP, has its own line; the
+        measurement is launch evidence (paths, identity hashes) no decision reads.
+        """
+        if not self.current_best:
+            return "(none)"
+        return str({k: v for k, v in self.current_best.items() if k not in ("optimization_stack", "measurement")})
 
     def _format_optimization_stack(self) -> str:
         """Render the optimization stack as ``action:variant`` parts."""

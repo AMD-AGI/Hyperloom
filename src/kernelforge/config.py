@@ -6,10 +6,8 @@
 from __future__ import annotations
 
 import json
-import logging
 import os
 from dataclasses import dataclass, field
-from functools import cache
 from pathlib import Path
 
 from hyperloom.common.env import env_bool, env_flag
@@ -18,19 +16,8 @@ from hyperloom.common.reasoning_effort import (
     REASONING_EFFORT_LEVELS,
     normalize_reasoning_effort,
 )
-from kernelforge.knowledge.experience_store import KnowledgeConfig
+from kernelforge.knowledge.kb_store.config import KnowledgeConfig
 from kernelforge.resources import default_project_root, resource_path
-
-log = logging.getLogger(__name__)
-
-
-@cache
-def _warn_removed_max_turns_env() -> None:
-    """Warn once when the removed max-turns environment variable is present."""
-    log.warning(
-        "KERNEL_AGENTS_MAX_TURNS is no longer supported and will be "
-        "ignored; forge-loop derives its turn cap from --max-hours"
-    )
 
 
 def resolve_agent_model(agent_backend: str) -> str:
@@ -267,8 +254,6 @@ class Config:
     @classmethod
     def from_env(cls, **overrides) -> Config:
         """Load config from environment variables with optional overrides."""
-        if os.getenv("KERNEL_AGENTS_MAX_TURNS") is not None:
-            _warn_removed_max_turns_env()
         knowledge_config = overrides.get("knowledge_config")
         if knowledge_config is None:
             knowledge_config = KnowledgeConfig.from_env(

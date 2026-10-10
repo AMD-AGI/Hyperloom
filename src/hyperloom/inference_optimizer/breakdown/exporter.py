@@ -296,6 +296,9 @@ def write_breakdown_json(
     payload = json.dumps(breakdown, indent=2, sort_keys=True, default=_json_default)
     atomic_write_text(target, payload)
     log.info("session_breakdown: wrote %s (%d bytes)", target, len(payload))
+    from ..experience_collect import collect_session
+
+    collect_session(sd, breakdown)
     return target
 
 

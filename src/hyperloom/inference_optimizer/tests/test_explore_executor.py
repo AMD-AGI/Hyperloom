@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -31,9 +32,12 @@ from hyperloom.orchestrator.actions.stop_attribution import (
     ORCHESTRATOR_CANCELLED_CLASS,
     SESSION_TIME_EXHAUSTED_CLASS,
 )
+from hyperloom.orchestrator.actions.executors._launch_evidence import build_launch_evidence
 from hyperloom.orchestrator.actions.executors.explore import (
     _atom_default_grid,
     _default_grid_for_framework,
+    filter_baseline_noop_variants,
+    observed_launch_from_state,
 )
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.common.env import is_truthy
@@ -150,6 +154,225 @@ def test_canonical_fingerprint_distinguishes_envs():
         {"VLLM_ROCM_USE_AITER": "1"},
     )
     assert fp_args != fp_args_envs
+
+
+_CANDIDATE = "candidate"
+# Names a flag the observed stack already holds at this value, so the argv half
+# of the gate matches and the verdict turns on env alone.
+_RESTATES_ARGV = "--max-running-requests 512"
+# A knob a stack genuinely varies: the recipe reads it as
+# ``${HICACHE_IO_BACKEND:-direct}``, so both values below are reachable.
+_TUNED_ENV = "HICACHE_IO_BACKEND"
+# The recipe's own env. The stack stamps it whether or not a variant names it,
+# so it rides identically on both sides and the verdict turns on the delta.
+_RECIPE_ENV = {"KV_OFFLOADING": "1"}
+# The argv the base config carries before any variant overlays it.
+_BASE_ARGS_ENV = {"EXTRA_SGLANG_ARGS": "--mem-fraction-static 0.9"}
+
+
+def _stack_env(**changes: str) -> dict[str, str]:
+    """The env the stack stamped: the recipe's, plus its own tuning."""
+    return {**_RECIPE_ENV, **changes}
+
+
+def _stack_config(**changes: object) -> dict[str, object]:
+    """What the running engine resolved, typed as SGLang reports it."""
+    return {"mem_fraction_static": 0.9, "max_running_requests": 512, **changes}
+
+
+def _noop_filter_kwargs(tmp_path: Path, **overrides: object) -> dict:
+    base_yaml = tmp_path / "base.yaml"
+    base_yaml.write_text(
+        yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": {**_RECIPE_ENV, **_BASE_ARGS_ENV}}}),
+        encoding="utf-8",
+    )
+    kwargs = {
+        "framework": "sglang",
+        "base_yaml_path": base_yaml,
+        "base_extra_args": "",
+        "base_extra_envs": {},
+        "base_remove_args": [],
+        "base_unset_envs": [],
+        "base_args_mode": "append",
+        "model_path": None,
+        "gpu_type": None,
+        "benchmark_script": None,
+        "observed_server_config": _stack_config(),
+        "observed_server_env": _stack_env(),
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
+def _variant(args: str = _RESTATES_ARGV, **fields: object) -> GridVariant:
+    return GridVariant(_CANDIDATE, extra_server_args=args, **fields)
+
+
+# Each case is (id, variant, filter overrides). The verdict is the whole
+# expectation: does the launch this variant would produce already match the
+# stack the server is running?
+
+# Everything the variant changes already holds in the running server, so the
+# measurement would re-run the stack.
+_ALREADY_THE_STACK = (
+    (
+        "same_argv_and_env",
+        _variant(extra_envs={_TUNED_ENV: "kernel"}),
+        {"observed_server_env": _stack_env(HICACHE_IO_BACKEND="kernel")},
+    ),
+    (
+        # 3600 and 3600.0 are one value; the engine reports the float.
+        "a_value_the_engine_reports_as_a_float",
+        _variant("--watchdog-timeout 3600"),
+        {"observed_server_config": _stack_config(watchdog_timeout=3600.0)},
+    ),
+)
+
+# The variant changes something the stack does not hold, or the stack is not
+# known to hold it: either way the variant runs.
+_MUST_RUN = (
+    ("different_argv_value", _variant("--max-running-requests 128"), {}),
+    (
+        "different_env_value",
+        _variant(extra_envs={_TUNED_ENV: "direct"}),
+        {"observed_server_env": _stack_env(HICACHE_IO_BACKEND="kernel")},
+    ),
+    (
+        # chaojhou 1: parallelism is compared, not stripped.
+        "different_parallelism_value",
+        _variant("--dp-size 4"),
+        {"observed_server_config": _stack_config(dp_size=8)},
+    ),
+    (
+        # chaojhou 2: a list-valued flag is never judged against the merged config.
+        "multi_value_flag_is_not_comparable",
+        _variant("--cuda-graph-bs 1 2 4 8"),
+        {"observed_server_config": _stack_config(cuda_graph_bs=[1, 2, 4, 8, 16])},
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("variant", "overrides"),
+    [case[1:] for case in _ALREADY_THE_STACK],
+    ids=[case[0] for case in _ALREADY_THE_STACK],
+)
+def test_variant_that_is_already_the_stack_is_dropped(tmp_path, variant, overrides):
+    """The server is already running this launch, so measuring it buys nothing."""
+    kept, dropped = filter_baseline_noop_variants([variant], **_noop_filter_kwargs(tmp_path, **overrides))
+    assert kept == []
+    assert [name for name, _ in dropped] == [_CANDIDATE]
+    assert "baseline noop" in dropped[0][1]
+
+
+@pytest.mark.parametrize(
+    ("variant", "overrides"),
+    [case[1:] for case in _MUST_RUN],
+    ids=[case[0] for case in _MUST_RUN],
+)
+def test_variant_that_is_not_known_to_be_the_stack_is_kept(tmp_path, variant, overrides):
+    """Keep on a real difference, and keep on a guess: only a proven match may drop."""
+    kept, dropped = filter_baseline_noop_variants([variant], **_noop_filter_kwargs(tmp_path, **overrides))
+    assert [gv.name for gv in kept] == [_CANDIDATE]
+    assert dropped == []
+
+
+def test_a_removal_is_never_a_restatement_of_the_stack(tmp_path):
+    """chaojhou 3: the materialized config cannot show a subtraction, so it must not read as a noop.
+
+    ``unset_envs`` also pops the process env at run time, which the probe's
+    YAML never sees; ``remove_args`` leaves no trace in the merged argv.
+    """
+    grid = [
+        GridVariant("removes-an-arg", remove_args=["--enable-dp-attention"]),
+        GridVariant("unsets-an-env", unset_envs=["HIP_FORCE_DEV_KERNARG"]),
+    ]
+    kept, dropped = filter_baseline_noop_variants(grid, **_noop_filter_kwargs(tmp_path))
+    assert [gv.name for gv in kept] == ["removes-an-arg", "unsets-an-env"]
+    assert dropped == []
+
+
+def test_the_engines_own_record_is_what_makes_the_filter_fire(tmp_path):
+    """End to end on the only launch account SGLang gives: the resolved settings it logs.
+
+    No argv is echoed anywhere, so ``observed_server_launch_flags`` stays empty
+    and every earlier form of this gate filtered nothing.
+    """
+    config = tmp_path / "stack.yaml"
+    config.write_text(
+        yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": {**_RECIPE_ENV, **_BASE_ARGS_ENV}}}),
+        encoding="utf-8",
+    )
+    log = tmp_path / "server.log"
+    log.write_text(
+        "[2026-09-21 21:14:33] Attention backend not explicitly specified.\n"
+        "[2026-09-21 21:14:34] server_args="
+        f"{ {'mem_fraction_static': 0.9, 'max_running_requests': 512, 'dp_size': 8}!r}\n",
+        encoding="utf-8",
+    )
+    evidence = build_launch_evidence(config_path=config, actual_server_log=str(log), framework="sglang", slot=tmp_path)
+    assert evidence["observed_server_launch_flags"] == ""
+    assert evidence["observed_server_config"]["max_running_requests"] == 512
+    # The env is stamped from the recipe; the argv key holds the launch command, not an env value.
+    assert evidence["observed_server_env"] == _RECIPE_ENV
+
+    # chaojhou 4: last_baseline is an attempt entry that never carries launch_evidence,
+    # so a stack with no current best is unknown rather than read from it.
+    no_current_best = SimpleNamespace(current_best_measurement={}, last_baseline={"launch_evidence": evidence})
+    assert observed_launch_from_state(no_current_best) == ({}, {})
+
+    state = SimpleNamespace(current_best_measurement={"launch_evidence": evidence})
+    observed_config, observed_env = observed_launch_from_state(state)
+    kwargs = _noop_filter_kwargs(tmp_path, observed_server_config=observed_config, observed_server_env=observed_env)
+
+    _, dropped = filter_baseline_noop_variants([_variant(_RESTATES_ARGV)], **kwargs)
+    assert [name for name, _ in dropped] == [_CANDIDATE]
+
+    # A different value runs, and so does a setting the engine never reported:
+    # absence from the record is unknown, not equal.
+    for args in ("--max-running-requests 128", "--stream-interval 20"):
+        kept, none_dropped = filter_baseline_noop_variants([_variant(args)], **kwargs)
+        assert [gv.name for gv in kept] == [_CANDIDATE], args
+        assert none_dropped == []
+
+
+def test_a_setting_the_engine_rewrote_is_not_already_in_effect(tmp_path):
+    """DP attention divides chunked_prefill_size, so the resolved 8192 is not what ``--chunked-prefill-size 8192`` passes.
+
+    Taken from a real SGLang log: 65536 was requested and 8192 resolved under
+    dp_size=8. Passing 8192 would launch with 1024, a real change. The engine's
+    own report covers it, and so does the DP-attention rule for a log that never
+    carried the report.
+    """
+    config = tmp_path / "stack.yaml"
+    config.write_text(
+        yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": {**_RECIPE_ENV, **_BASE_ARGS_ENV}}}),
+        encoding="utf-8",
+    )
+    log = tmp_path / "server.log"
+    record = {"enable_dp_attention": True, "dp_size": 8, "chunked_prefill_size": 8192, "max_running_requests": 512}
+    log.write_text(
+        "[2026-09-18 19:11:48] DP attention is enabled. chunked prefill size is adjusted from 65536 to 8192.\n"
+        f"[2026-09-18 19:11:50] server_args={record!r}\n",
+        encoding="utf-8",
+    )
+    evidence = build_launch_evidence(config_path=config, actual_server_log=str(log), framework="sglang", slot=tmp_path)
+    assert evidence["engine_adjusted_settings"] == {"chunked_prefill_size": {"requested": "65536", "resolved": "8192"}}
+
+    for engine_report in (evidence["engine_adjusted_settings"], {}):
+        stack = {**evidence, "engine_adjusted_settings": engine_report}
+        observed_config, observed_env = observed_launch_from_state(
+            SimpleNamespace(current_best_measurement={"launch_evidence": stack})
+        )
+        kwargs = _noop_filter_kwargs(tmp_path, observed_server_config=observed_config, observed_server_env=observed_env)
+
+        kept, dropped = filter_baseline_noop_variants([_variant("--chunked-prefill-size 8192")], **kwargs)
+        assert [gv.name for gv in kept] == [_CANDIDATE]
+        assert dropped == []
+
+        # Only the rewritten settings are unknown: a plain restatement still drops.
+        _, dropped = filter_baseline_noop_variants([_variant(_RESTATES_ARGV)], **kwargs)
+        assert [name for name, _ in dropped] == [_CANDIDATE]
 
 
 def test_record_explore_accepted_dedup_by_fingerprint():
@@ -993,6 +1216,9 @@ async def test_per_variant_rows_carry_the_verdicts_and_the_stack(
                     "name": "v_keep",
                     "extra_args": "--keep-flag",
                     "extra_envs": {},
+                    "remove_args": ["--old-flag"],
+                    "unset_envs": ["OLD_ENV"],
+                    "args_mode": "replace",
                     "provenance": "llm_direct",
                 }
             ],
@@ -1017,6 +1243,9 @@ async def test_per_variant_rows_carry_the_verdicts_and_the_stack(
     # than reported as having passed.
     assert [g["gate"] for g in row["gates"]] == ["keep_threshold"]
     assert row["validation_basis"] == "keep_verdict_unscored"
+    assert row["variant"]["remove_args"] == ["--old-flag"]
+    assert row["variant"]["unset_envs"] == ["OLD_ENV"]
+    assert row["variant"]["args_mode"] == "replace"
     # The stack it launched on: the anchor plus a base config still empty,
     # since nothing has KEPT before it.
     assert row["measured_against"]["throughput"] == 800.0
@@ -1588,6 +1817,7 @@ async def test_explore_executor_warm_decision_warmup_failure_marks_failed(
                     "name": "warmfail",
                     "extra_args": "--warmfail-flag",
                     "extra_envs": {},
+                    "reasoning": "Test whether this launch flag enables the scheduler fast path.",
                     "provenance": "llm_direct",
                 }
             ],
@@ -1613,6 +1843,8 @@ async def test_explore_executor_warm_decision_warmup_failure_marks_failed(
     pvo = [v for v in out["per_variant_outcomes"] if v["outcome"] == "FAILED"]
     assert pvo, "expected FAILED entry in per_variant_outcomes"
     assert pvo[0]["stage"] == "warmup"
+    assert pvo[0]["failure_attribution"] == "harness"
+    assert pvo[0]["variant"]["reasoning_origin"] == "action_payload.reasoning"
     assert "failure_id" in pvo[0]
     assert pvo[0]["failure_id"].startswith("fail.")
 
@@ -2460,6 +2692,39 @@ def test_grid_variants_from_payload_carries_removal_controls():
     assert variant.unset_envs == ["SGLANG_ENABLE_FOO"]
     assert variant.args_mode == "replace"
     assert variant.extra_server_args == "--max-num-seqs 256"
+
+
+def test_grid_variants_preserve_authored_reason_as_experience_reasoning():
+    from hyperloom.orchestrator.actions.executors.explore import (
+        _grid_variants_from_payload,
+    )
+
+    variant = _grid_variants_from_payload(
+        [
+            {
+                "name": "chunked",
+                "extra_args": "--max-num-batched-tokens 8192",
+                "reason": "A larger chunk should reduce scheduler dispatch overhead.",
+                "provenance": "specialist:scheduler",
+            }
+        ]
+    )[0]
+
+    assert variant.note == "A larger chunk should reduce scheduler dispatch overhead."
+    assert variant.reasoning_origin == "action_payload.reason"
+
+
+def test_grid_variants_do_not_treat_provenance_as_reasoning():
+    from hyperloom.orchestrator.actions.executors.explore import (
+        _grid_variants_from_payload,
+    )
+
+    variant = _grid_variants_from_payload(
+        [{"name": "unexplained", "extra_args": "--foo", "provenance": "specialist:scheduler"}]
+    )[0]
+
+    assert variant.note == ""
+    assert variant.reasoning_origin == ""
 
 
 def test_on_disk_stderr_tail_reads_benchmark_stderr_log(tmp_path):

@@ -201,7 +201,13 @@ def test_discovery_round_records_its_run_and_both_outcomes(session_dir: Path):
         task=task,
         done_payload={
             "proposal_set": [
-                {"pr_url": "https://x/pr/1", "title": "live one", "repo": "vllm", "verdict": "worth_a_bench"},
+                {
+                    "pr_url": "https://x/pr/1",
+                    "title": "live one",
+                    "repo": "vllm",
+                    "verdict": "worth_a_bench",
+                    "reasoning": "The patch removes work from the profiled attention path.",
+                },
                 {"pr_url": "https://x/pr/2", "title": "landed", "repo": "vllm", "verdict": "already_present"},
                 {"pr_url": "https://x/pr/3", "title": "n/a", "repo": "vllm", "verdict": "not_applicable"},
             ]
@@ -222,6 +228,7 @@ def test_discovery_round_records_its_run_and_both_outcomes(session_dir: Path):
     live = by_id["https://x/pr/1"]
     assert live["producer"] == "specialist"
     assert live["run_ref"] == "t-disc-1"
+    assert live["reasoning"].startswith("The patch removes work")
     assert live.get("terminal") in (None, {})
     assert [step["step"] for step in live["lifecycle"]] == ["proposed"]
     for dropped, why in (("https://x/pr/2", "already_present"), ("https://x/pr/3", "not_applicable")):
@@ -304,7 +311,11 @@ def test_config_attempts_record_the_pair_and_the_verbatim_outcome(session_dir: P
     coord.shared_state.phase = "FRAMEWORK_AGENT"
     coord.phase_framework._open_framework_timeline()
 
-    task = SimpleNamespace(task_id="t-exp-1", kind="explore", params={})
+    task = SimpleNamespace(
+        task_id="t-exp-1",
+        kind="explore",
+        params={"proposal_msg_id": "proposal-config-1"},
+    )
     result = {
         "round_id": "explore-001",
         "per_variant_outcomes": [
@@ -314,7 +325,32 @@ def test_config_attempts_record_the_pair_and_the_verbatim_outcome(session_dir: P
                 "fingerprint": "fp1",
                 "provenance": "llm_direct",
                 "metrics": {"base_tput": 100.0, "tput": 112.0, "gain_pct": 12.0, "runtime_sec": 300.0},
-                "variant": {"extra_server_args": "--foo 2", "extra_envs": {"BAR": "1"}},
+                "variant": {
+                    "extra_server_args": "--foo 2",
+                    "extra_envs": {"BAR": "1"},
+                    "remove_args": ["--old-flag"],
+                    "unset_envs": ["OLD_ENV"],
+                    "args_mode": "replace",
+                    "note": "Increase the scheduler batch to reduce dispatch overhead.",
+                    "reasoning_origin": "action_payload.reasoning",
+                    "experience_citations": [
+                        {"id": "exp-00000000000000000000000000000001", "stance": "adapt", "claim": "Larger batch."}
+                    ],
+                },
+                "gates": [
+                    {
+                        "gate": "keep_threshold",
+                        "passed": True,
+                        "observed": 12.0,
+                        "threshold": 3.0,
+                    },
+                    {
+                        "gate": "accuracy",
+                        "passed": True,
+                        "observed": 0.83,
+                        "threshold": 0.80,
+                    },
+                ],
             },
             {
                 "variant_name": "v-killed",
@@ -324,17 +360,35 @@ def test_config_attempts_record_the_pair_and_the_verbatim_outcome(session_dir: P
                 "metrics": {"base_tput": 112.0, "estimated_output_throughput": 40.0},
                 "variant": {},
             },
+            {
+                "variant_name": "v-unsupported",
+                "outcome": "FAILED",
+                "fingerprint": "fp4",
+                "provenance": "llm_direct",
+                "reason": "warmup_failed",
+                "error_class": "capability_unsupported",
+                "error_excerpt": "the requested attention backend is unsupported",
+                "metrics": {"base_tput": 112.0},
+                "variant": {
+                    "extra_server_args": "--attention-backend unsupported",
+                    "extra_envs": {},
+                    "note": "Test whether the alternate backend removes decode launch overhead.",
+                    "reasoning_origin": "action_payload.reasoning",
+                },
+            },
             {"variant_name": "v-dup", "outcome": "SKIPPED_DEDUP", "fingerprint": "fp3"},
         ],
     }
     asyncio.run(
-        coord.writeback.fact_write_hook(task=task, result=result, verdict=Verdict.ADOPTED, adopted_variants={"fp1"})
+        coord.recipe_journal.fact_write_hook(
+            task=task, result=result, verdict=Verdict.ADOPTED, adopted_variants={"fp1"}
+        )
     )
     coord.phase_framework.close_framework_timeline(_tr("optimize_budget_cap"))
 
     attempts = {row["fingerprint"]: row for row in _events(session_dir)[0]["ext"]["attempts"]}
     # The deduped variant was never measured, so it is not in the funnel.
-    assert set(attempts) == {"fp1", "fp2"}
+    assert set(attempts) == {"fp1", "fp2", "fp4"}
 
     keep = attempts["fp1"]
     assert keep["arm"] == "config"
@@ -344,14 +398,34 @@ def test_config_attempts_record_the_pair_and_the_verbatim_outcome(session_dir: P
     assert keep["adopted"] is True
     assert keep["attribution_eligible"] is True
     assert keep["config_delta"]["extra_server_args"] == "--foo 2"
+    assert keep["config_delta"]["remove_args"] == ["--old-flag"]
+    assert keep["config_delta"]["unset_envs"] == ["OLD_ENV"]
+    assert keep["config_delta"]["args_mode"] == "replace"
+    assert keep["accuracy"] == {
+        "required": True,
+        "reference": 0.8,
+        "value": 0.83,
+        "passed": True,
+    }
+    assert keep["reasoning"] == "Increase the scheduler batch to reduce dispatch overhead."
+    assert keep["reasoning_origin"] == "action_payload.reasoning"
+    assert keep["proposal_ref"] == "proposal-config-1"
+    assert keep["experience_citations"] == [
+        {"id": "exp-00000000000000000000000000000001", "stance": "adapt", "claim": "Larger batch."}
+    ]
 
     killed = attempts["fp2"]
+    assert killed["experience_citations"] == []
     assert killed["outcome"] == "KILLED_OVERTIME"
     assert killed["adopted"] is False
     # An anchor with nothing measured against it, so there is no gain to divide back out.
     assert killed["measurement"]["before_tput"] == 112.0
     assert killed["measurement"]["after_tput"] is None
     assert killed["attribution_eligible"] is False
+    assert killed["failure"]["attribution"] == "unknown"
+
+    unsupported = attempts["fp4"]
+    assert unsupported["failure"]["attribution"] == "candidate_caused"
 
 
 @pytest.mark.asyncio
@@ -394,7 +468,7 @@ def test_the_config_arms_grid_lands_a_run_row(session_dir: Path):
 
     task = SimpleNamespace(task_id="t-exp-1", kind="explore", params={}, created_at="2026-09-18T01:00:00Z")
     asyncio.run(
-        coord.writeback.fact_write_hook(
+        coord.recipe_journal.fact_write_hook(
             task=task,
             result={
                 "status": "succeeded",
@@ -430,7 +504,7 @@ def test_a_grid_that_measured_nothing_still_lands_a_run_row(session_dir: Path):
 
     task = SimpleNamespace(task_id="t-exp-2", kind="explore", params={}, created_at="2026-09-18T02:00:00Z")
     asyncio.run(
-        coord.writeback.fact_write_hook(
+        coord.recipe_journal.fact_write_hook(
             task=task,
             result={"status": "failed", "error_class": "empty_grid", "error": "params.grid has no valid variants"},
             verdict=Verdict.FAILED,
@@ -459,7 +533,7 @@ def test_a_config_variants_accuracy_is_reported_as_well_as_gated(session_dir: Pa
 
     task = SimpleNamespace(task_id="t-exp-3", kind="explore", params={}, created_at="")
     asyncio.run(
-        coord.writeback.fact_write_hook(
+        coord.recipe_journal.fact_write_hook(
             task=task,
             result={
                 "round_id": "explore-003",
@@ -508,6 +582,9 @@ def test_source_attempt_records_its_pair_gate_and_lifecycle_step(session_dir: Pa
 
     from types import SimpleNamespace
 
+    patch = session_dir / "artifacts" / "source.patch"
+    patch.parent.mkdir()
+    patch.write_text("diff --git a/vllm/attention.py b/vllm/attention.py\n+optimized = True\n")
     task = SimpleNamespace(
         task_id="t-int-1",
         kind="integrate_patch",
@@ -517,6 +594,7 @@ def test_source_attempt_records_its_pair_gate_and_lifecycle_step(session_dir: Pa
             "framework_agent_candidate_id": "https://x/pr/1",
             "audit_step": "author_via_specialist",
             "lever_kind": "upstream_pr",
+            "reasoning": "Profiling shows redundant attention setup on every request.",
         },
     )
     coord.phase_framework._record_framework_agent_authored_outcome(
@@ -526,11 +604,22 @@ def test_source_attempt_records_its_pair_gate_and_lifecycle_step(session_dir: Pa
             "base_tput": 100.0,
             "output_throughput": 108.0,
             "delta_pct": 8.0,
+            "keep_threshold_pct": 3.0,
             "accuracy_pass": True,
             "accuracy_value": 0.83,
             "accuracy_reference": 0.80,
+            "source_realized_patch": str(patch),
+            "patches_applied": [str(patch)],
             "target_files": ["vllm/attention.py"],
             "reason": "above the floor",
+            "measured_against": {
+                "throughput": 100.0,
+                "extra_server_args": "--already-kept 1",
+                "extra_envs": {"SGLANG_TUNE": "1"},
+                "remove_args": ["--old-flag"],
+                "unset_envs": ["OLD_ENV"],
+                "args_mode": "append",
+            },
         },
         adopted=True,
     )
@@ -548,15 +637,103 @@ def test_source_attempt_records_its_pair_gate_and_lifecycle_step(session_dir: Pa
         "estimated_output_throughput": None,
     }
     assert attempt["accuracy"]["passed"] is True
+    assert attempt["outcome"] == "kept"
+    assert attempt["reasoning"] == "Profiling shows redundant attention setup on every request."
+    assert attempt["reasoning_origin"] == "action_params.reasoning"
+    assert attempt["patch_path"] == str(patch)
+    assert attempt["patches_applied"] == [str(patch)]
+    assert attempt["measured_against"] == {
+        "throughput": 100.0,
+        "accuracy": None,
+        "extra_server_args": "--already-kept 1",
+        "extra_envs": {"SGLANG_TUNE": "1"},
+        "remove_args": ["--old-flag"],
+        "unset_envs": ["OLD_ENV"],
+        "args_mode": "append",
+    }
     assert attempt["adopted"] is True
     assert attempt["attribution_eligible"] is True
     assert attempt["target_files"] == ["vllm/attention.py"]
-    assert [gate["gate"] for gate in attempt["gates"]] == ["accuracy"]
+    assert [gate["gate"] for gate in attempt["gates"]] == [
+        "keep_threshold",
+        "accuracy",
+    ]
 
     proposal = ext["proposals"][0]
     assert proposal["attempt_refs"] == ["t-int-1"]
     assert ("attempted", "t-auth-1") in [(s["step"], s["run_ref"]) for s in proposal["lifecycle"]]
     assert proposal["terminal"]["disposition"] == "attempted"
+
+    import hashlib
+
+    content = patch.read_text()
+    assert attempt["patch_material"] == [
+        {
+            "path": "artifacts/source.patch",
+            "sha256": hashlib.sha256(content.encode()).hexdigest(),
+            "content": content,
+        }
+    ]
+
+
+def test_a_source_proposal_keeps_every_kb_read_that_shaped_it(session_dir: Path):
+    """The discovery and the authoring specialist each saw a read; the proposal the attempt joins keeps both."""
+    from types import SimpleNamespace
+
+    from hyperloom.orchestrator.phases.framework import _forward_integrate_source
+
+    discovery_ref = {"id": "exp-00000000000000000000000000000001", "purpose": "representative"}
+    authoring_ref = {"id": "exp-00000000000000000000000000000002", "purpose": "representative"}
+    coord = _coordinator(session_dir)
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
+    coord.shared_state.framework_agent_specialist_candidate_map = {"t-auth-1": "https://x/pr/1"}
+    coord.phase_framework._open_framework_timeline()
+    coord.phase_framework._ingest_candidate_discovery(
+        task=SimpleNamespace(
+            task_id="t-disc-1",
+            params={
+                "candidate_discovery": True,
+                "domain": "candidate_discovery_specialist",
+                "kb_read_id": "read-discovery",
+                "kb_rendered_refs": [discovery_ref],
+            },
+        ),
+        done_payload={
+            "proposal_set": [
+                {
+                    "pr_url": "https://x/pr/1",
+                    "title": "live one",
+                    "repo": "vllm",
+                    "verdict": "worth_a_bench",
+                    "reasoning": "The patch removes work from the profiled attention path.",
+                }
+            ]
+        },
+    )
+    integrate_params = {
+        "framework_agent_authoring": True,
+        "specialist_task_id": "t-auth-1",
+        "framework_agent_candidate_id": "https://x/pr/1",
+    }
+    citation = {"id": authoring_ref["id"], "stance": "adapt", "claim": "Same fusion, rebased onto this version."}
+    _forward_integrate_source(
+        {"domain": "serving_specialist", "kb_read_id": "read-authoring", "kb_rendered_refs": [authoring_ref]},
+        integrate_params,
+        {"experience_citations": [citation]},
+    )
+    coord.phase_framework._record_framework_agent_authored_outcome(
+        task=SimpleNamespace(task_id="t-int-1", kind="integrate_patch", params=integrate_params),
+        result={"status": "reverted", "base_tput": 100.0, "output_throughput": 99.0, "delta_pct": -1.0},
+        adopted=False,
+    )
+    coord.phase_framework.close_framework_timeline(_tr("optimize_no_more_leverage"))
+
+    ext = _events(session_dir)[0]["ext"]
+    [attempt] = ext["attempts"]
+    [proposal] = [row for row in ext["proposals"] if row["proposal_id"] == attempt["proposal_ref"]]
+    assert proposal["rendered_refs"] == [discovery_ref, authoring_ref]
+    assert proposal["kb_read_id"] == "read-authoring"
+    assert attempt["experience_citations"] == [citation]
 
 
 def _authored_outcome(coord, result: dict) -> dict:
@@ -627,7 +804,11 @@ def test_absent_accuracy_gate_writes_no_gate_row(session_dir: Path):
         task=SimpleNamespace(
             task_id="t-int-2",
             kind="integrate_patch",
-            params={"framework_agent_authoring": True, "framework_agent_candidate_id": "cand-2"},
+            params={
+                "framework_agent_authoring": True,
+                "framework_agent_candidate_id": "cand-2",
+                "gap_symptom": "Profile evidence suggests repeated scheduler setup.",
+            },
         ),
         result={"status": "reverted", "base_tput": 100.0, "output_throughput": 99.0, "delta_pct": -1.0},
         adopted=False,
@@ -639,6 +820,39 @@ def test_absent_accuracy_gate_writes_no_gate_row(session_dir: Path):
     assert attempt["blocked_by"] is None
     assert attempt["accuracy"]["passed"] is None
     assert attempt["accuracy"]["required"] is None
+    assert attempt["reasoning"] == "Profile evidence suggests repeated scheduler setup."
+    assert attempt["reasoning_origin"] == "context.gap_symptom"
+
+
+def test_local_explore_records_proposal_reasoning_before_dispatch(
+    session_dir: Path,
+) -> None:
+    import asyncio
+
+    coord = _coordinator(session_dir)
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
+    coord.shared_state.framework = "sglang"
+    coord.phase_framework._open_framework_timeline()
+
+    task_id = asyncio.run(
+        coord.phase_framework._enqueue_framework_agent_local_explore_specialist(
+            {
+                "kind": "local_explore",
+                "candidate_id": "local_explore:0",
+                "title": "Investigate repeated scheduler setup.",
+                "framework": "sglang",
+                "gap_description": ("Profile evidence shows scheduler setup repeats on every request."),
+                "gap_canonical_id": "gap.framework.local_explore.0",
+            },
+            reason="no_new_candidates",
+        )
+    )
+    coord.phase_framework.close_framework_timeline(_tr("optimize_budget_cap"))
+
+    assert task_id
+    proposal = _events(session_dir)[0]["ext"]["proposals"][0]
+    assert proposal["proposal_id"] == "local_explore:0"
+    assert proposal["reasoning"] == ("Profile evidence shows scheduler setup repeats on every request.")
 
 
 def _propose_grid(coord: Coordinator, grid: list[dict[str, Any]]) -> str:
@@ -700,6 +914,111 @@ def test_a_specialist_labelled_grid_names_its_domain(session_dir: Path):
     assert proposal["producer"] == "specialist"
     assert proposal["producer_ref"] == "attention"
     assert proposal["scope"] == "domain"
+
+
+def _delegate_grid(coord: Coordinator, grid: list[dict[str, Any]]) -> None:
+    """Delegate one explore grid through the real intent seam."""
+    import asyncio
+
+    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+
+    if coord.shared_state.baseline_tput <= 0:
+        coord.shared_state.baseline_tput = 100.0
+    intent = Intent(type=IntentType.DELEGATE, payload={"action_name": "explore", "params": {"grid": grid}})
+    asyncio.run(coord.router.handle_delegate("orchestration", intent))
+
+
+def test_a_delegated_grid_is_a_proposal_carrying_its_read_and_relayed_citations(session_dir: Path):
+    import asyncio
+
+    from hyperloom.inference_optimizer.experience_kb import ExperienceKBEvidence
+
+    shown = "exp-" + "1" * 32
+    specialist_only = "exp-" + "2" * 32
+    coord = _coordinator(session_dir)
+    state = coord.shared_state
+    state.phase = "FRAMEWORK_AGENT"
+    coord.phase_framework._open_framework_timeline()
+    coord.conversation.kb_last_read = ExperienceKBEvidence(
+        tick=state.tick,
+        read_id="read-orchestration",
+        status="completed",
+        prompt_block="evidence",
+        rendered_refs=({"id": shown, "purpose": "representative"},),
+        warnings=(),
+    )
+    specialist_citation = {"id": specialist_only, "stance": "adopt", "claim": "Kept on the same model."}
+    state.record_specialist_round(
+        {
+            "round_id": "r-1",
+            "task_id": "t-spec-1",
+            "domain": "serving_specialist",
+            "proposal_set": [
+                {
+                    "name": "fp8-kv",
+                    "extra_args": "--kv-cache-dtype fp8",
+                    "reason": "Decode is KV-bandwidth bound.",
+                    "experience_citations": [specialist_citation],
+                }
+            ],
+        }
+    )
+    own_citation = {"id": shown, "stance": "contrast", "claim": "That run kept bf16 KV."}
+    grid = [
+        {
+            "name": "relayed-fp8-kv",
+            "extra_args": "--kv-cache-dtype fp8",
+            "provenance": "specialist:serving",
+            "reasoning": "Bench the specialist's KV proposal as it stands.",
+            "experience_citations": [own_citation, {"id": "exp-" + "9" * 32, "stance": "adopt", "claim": "unseen"}],
+        },
+        {
+            "name": "bigger-batch",
+            "extra_args": "--max-num-seqs 512",
+            "provenance": "llm_direct",
+            "reasoning": "Decode is launch-bound at this concurrency.",
+        },
+    ]
+
+    _delegate_grid(coord, grid)
+    _delegate_grid(coord, grid)
+
+    [task] = asyncio.run(coord.tasks.by_state("queued"))
+    proposal_id = task.params["proposal_msg_id"]
+    relayed, own = task.params["grid"]
+    assert relayed["experience_citations"] == [own_citation, specialist_citation]
+    assert "experience_citations" not in own
+
+    variant = {"extra_server_args": "--kv-cache-dtype fp8", "note": relayed["reasoning"]}
+    asyncio.run(
+        coord.recipe_journal.fact_write_hook(
+            task=task,
+            result={
+                "round_id": "explore-001",
+                "per_variant_outcomes": [
+                    {
+                        "variant_name": "relayed-fp8-kv",
+                        "outcome": "REVERT",
+                        "fingerprint": "fp1",
+                        "metrics": {"base_tput": 100.0, "tput": 99.0, "gain_pct": -1.0},
+                        "variant": {**variant, "experience_citations": relayed["experience_citations"]},
+                    }
+                ],
+            },
+            verdict=Verdict.REVERTED,
+        )
+    )
+    coord.phase_framework.close_framework_timeline(_tr("optimize_budget_cap"))
+
+    ext = _events(session_dir)[0]["ext"]
+    [proposal] = ext["proposals"]
+    assert proposal["proposal_id"] == proposal_id
+    assert proposal["kb_read_id"] == "read-orchestration"
+    assert proposal["rendered_refs"] == [{"id": shown, "purpose": "representative"}]
+    assert (proposal["lifecycle"][0]["step"], proposal["lifecycle"][0]["outcome"]) == ("proposed", "delegated")
+    [attempt] = ext["attempts"]
+    assert attempt["proposal_ref"] == proposal_id
+    assert attempt["experience_citations"] == [own_citation, specialist_citation]
 
 
 def test_a_seeded_grid_is_not_the_agents_idea(session_dir: Path):
@@ -1006,7 +1325,7 @@ def test_measured_variants_settle_their_grid(session_dir: Path):
     task = asyncio.run(coord.tasks.get(pending.task_id))
     assert task.params["proposal_msg_id"] == msg_id
     asyncio.run(
-        coord.writeback.fact_write_hook(
+        coord.recipe_journal.fact_write_hook(
             task=task,
             result={
                 "round_id": "explore-009",
@@ -1043,7 +1362,7 @@ def test_a_measured_variant_keeps_the_name_a_reader_knows_it_by(session_dir: Pat
 
     msg_id = _propose_grid(coord, [{"provenance": "llm_direct"}])
     asyncio.run(
-        coord.writeback.fact_write_hook(
+        coord.recipe_journal.fact_write_hook(
             task=SimpleNamespace(task_id="t-exp-7", kind="explore", params={"proposal_msg_id": msg_id}),
             result={
                 "round_id": "explore-007",
@@ -1109,7 +1428,7 @@ def test_config_gates_and_stack_come_from_the_round_that_ruled(session_dir: Path
 
     task = SimpleNamespace(task_id="t-exp-2", kind="explore", params={})
     asyncio.run(
-        coord.writeback.fact_write_hook(
+        coord.recipe_journal.fact_write_hook(
             task=task,
             result={
                 "round_id": "explore-002",
@@ -1168,7 +1487,7 @@ def test_an_ungated_keep_does_not_claim_an_accuracy_pass(session_dir: Path):
     coord.phase_framework._open_framework_timeline()
 
     asyncio.run(
-        coord.writeback.fact_write_hook(
+        coord.recipe_journal.fact_write_hook(
             task=SimpleNamespace(task_id="t-exp-3", kind="explore", params={}),
             result={
                 "round_id": "explore-003",
@@ -1208,7 +1527,7 @@ def test_a_config_keep_the_lift_refused_is_not_adopted(session_dir: Path):
     coord.phase_framework._open_framework_timeline()
 
     asyncio.run(
-        coord.writeback.fact_write_hook(
+        coord.recipe_journal.fact_write_hook(
             task=SimpleNamespace(task_id="t-exp-4", kind="explore", params={}),
             result={
                 "round_id": "explore-004",
@@ -1233,7 +1552,7 @@ def test_a_config_keep_the_lift_refused_is_not_adopted(session_dir: Path):
     assert attempt["attribution_eligible"] is False
     (row,) = coord.shared_state.attempts
     assert row["adopted"] is False
-    (entry,) = [e for e in coord.writeback.ensure_journal().entries if e.task_id == "t-exp-4"]
+    (entry,) = [e for e in coord.recipe_journal.ensure_journal().entries if e.task_id == "t-exp-4"]
     assert entry.outcome == "no_promote"
 
 

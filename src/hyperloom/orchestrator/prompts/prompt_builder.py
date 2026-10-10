@@ -485,8 +485,9 @@ def _format_grid_injection_hint(name: str) -> str | None:
             "GRID INPUT (REQUIRED): emit "
             "`delegate{action_name='explore', params={grid: [{name, "
             "extra_args, extra_envs, remove_args?, unset_envs?, "
-            "args_mode?: 'append'|'replace', provenance, kb_evidence?, "
-            "pr_evidence?, source_evidence?}, ...], "
+            "args_mode?: 'append'|'replace', reasoning, provenance, kb_evidence?, "
+            "pr_evidence?, source_evidence?, experience_citations?: [{id, stance: "
+            "'adopt'|'adapt'|'avoid'|'contrast', claim}]}, ...], "
             "base_extra_args?, base_tput?, accuracy_baseline?, "
             "keep_threshold_pct?: <session-cycle default>}}`. "
             "Variants run serially; a KEEP is graded on its decision "
@@ -496,6 +497,8 @@ def _format_grid_injection_hint(name: str) -> str | None:
             "may be re-proposed. "
             "Use remove_args/unset_envs to ablate harmful base flags; "
             "args_mode='replace' to drop inherited server args. "
+            "Every variant requires action-time reasoning that names the "
+            "evidence, mechanism, expected effect, and validation gate. "
             "provenance values: 'llm_direct', 'default_grid', "
             "'specialist:<domain-or-tag>' (audit/advisory, not a gate). "
             "SIZE: target 4 variants, hard maximum 6. Variants run serially "
@@ -749,11 +752,7 @@ def _idea_generation_lines() -> list[str]:
         "Variant identity is content-based (args+envs+remove_args+",
         "unset_envs+args_mode); only exact same-grid duplicates are collapsed.",
         "`extra_server_args` is framework-neutral (routed to EXTRA_SGLANG_ARGS",
-        "/ EXTRA_VLLM_ARGS / EXTRA_ATOM_ARGS by `--framework`). On an agentic",
-        "recipe a flag replaces the recipe's own value and `remove_args` deletes",
-        "a recipe flag. Its draft (method, model, length) and simulated acceptance",
-        "are pinned; other `--speculative-config` keys such as `attention_backend`",
-        "merge into the recipe's own config.",
+        "/ EXTRA_VLLM_ARGS / EXTRA_ATOM_ARGS by `--framework`).",
         "",
         "The Coordinator benches `=== Untested proposals (current cycle) ===`",
         "itself; build your own grid from the five moves above to a target of 4",

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -33,7 +34,8 @@ class SessionBreakdownExecutor:
         from hyperloom.inference_optimizer.breakdown import write_breakdown_json
 
         try:
-            target = write_breakdown_json(session_dir, output_path=output_path)
+            # The export also writes the session's Experiences to the local service; that I/O stays off the loop.
+            target = await asyncio.to_thread(write_breakdown_json, session_dir, output_path=output_path)
         except Exception as exc:
             log.exception("session_breakdown export failed")
             return {

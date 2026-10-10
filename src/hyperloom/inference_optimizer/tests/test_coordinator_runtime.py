@@ -466,7 +466,8 @@ async def test_plain_backend_error_records_no_llm_error_row(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_llm_call_failed_records_one_error_row_per_turn(session_dir):
+async def test_llm_call_failed_records_one_error_row_per_turn(session_dir, monkeypatch):
+    monkeypatch.setattr("hyperloom.orchestrator.loop.coordinator._BACKEND_RETRY_BASE_SEC", 0)
     backends = _build_backends({})
     backends["critic"] = _LLMFailingBackend("critic")
     c = Coordinator(session_dir, backends=backends)
@@ -576,6 +577,7 @@ async def test_backend_error_streak_fires_backend_unhealthy_once_at_threshold(
         "INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD",
         "3",
     )
+    monkeypatch.setattr("hyperloom.orchestrator.loop.coordinator._BACKEND_RETRY_BASE_SEC", 0)
     backends = _build_backends({})
     backends["critic"] = _AlwaysFailingBackend("critic")
     c = Coordinator(session_dir, backends=backends)
@@ -633,6 +635,7 @@ async def test_backend_error_streak_resets_after_successful_turn(
         "INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD",
         "2",
     )
+    monkeypatch.setattr("hyperloom.orchestrator.loop.coordinator._BACKEND_RETRY_BASE_SEC", 0)
     backends = _build_backends({})
     failing = _AlwaysFailingBackend("critic")
     backends["critic"] = failing
@@ -656,6 +659,45 @@ async def test_backend_error_streak_resets_after_successful_turn(
         backend_unhealthy = [o for o in observations if (o.payload or {}).get("kind") == "backend_unhealthy"]
         assert len(backend_unhealthy) == 2
         assert backend_unhealthy[-1].payload["consecutive_errors"] == 2
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_run_does_not_call_a_failing_backend_before_its_retry(session_dir, monkeypatch):
+    monkeypatch.setattr("hyperloom.orchestrator.loop.coordinator._BACKEND_RETRY_BASE_SEC", 3600)
+    backends = _build_backends({})
+    failing = _AlwaysFailingBackend("critic")
+    backends["critic"] = failing
+    c = Coordinator(session_dir, backends=backends)
+    try:
+        assert await c.run(max_ticks=3, tick_interval_sec=0.0) == "max_ticks"
+        assert failing.calls == 1
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_run_waits_for_a_retry_when_every_backend_is_failing(session_dir, monkeypatch):
+    monkeypatch.setattr("hyperloom.orchestrator.loop.coordinator._BACKEND_RETRY_BASE_SEC", 0.2)
+    backends = {name: _AlwaysFailingBackend(name) for name in ("orchestration", "critic")}
+    c = Coordinator(session_dir, backends=backends)
+    try:
+        assert await c.run(max_ticks=3, tick_interval_sec=0.0) == "max_ticks"
+        assert backends["orchestration"].calls >= 2
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_run_stops_once_a_backend_has_failed_for_the_unhealthy_window(session_dir, monkeypatch):
+    monkeypatch.setattr("hyperloom.orchestrator.loop.coordinator._BACKEND_UNHEALTHY_STOP_SEC", 0.0)
+    backends = _build_backends({})
+    backends["critic"] = _AlwaysFailingBackend("critic")
+    c = Coordinator(session_dir, backends=backends)
+    try:
+        assert await c.run(max_ticks=5, tick_interval_sec=0.0) == "backend_unhealthy"
+        assert c.shared_state.stop_reason == "backend_unhealthy"
     finally:
         await c.stop()
 
@@ -1987,6 +2029,66 @@ async def test_handle_unpromotable_roofline_increments_failure_streak(
         assert any("Auto-roofline" in r.message and "failed" in r.message for r in caplog.records), (
             "no 'Auto-roofline ... failed' WARNING was logged"
         )
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_handle_unpromotable_profile_clears_the_initial_analysis_gate(session_dir):
+    """With enable_roofline off the initial analysis is a profile; a failed one must release PRELUDE."""
+    from hyperloom.orchestrator.phases import machine_state as phase_state
+
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        c.shared_state.phase = "PRELUDE"
+        c.shared_state.baseline_tput = 1074.7
+        c.shared_state.auto_roofline_pending_task_id = "t-profile-initial"
+        await c.writeback.handle_unpromotable_result(
+            _mk_task("profile", "t-profile-initial"),
+            {"status": "failed", "measurement_status": "failed", "error_class": "no_trace_files"},
+        )
+        assert c.shared_state.auto_roofline_pending_task_id == ""
+        assert phase_state.compute_next_phase(c.shared_state, kernel_enabled=True) is not None
+
+        c.shared_state.auto_roofline_pending_task_id = "t-other"
+        await c.writeback.handle_unpromotable_result(
+            _mk_task("profile", "t-unrelated-profile"),
+            {"status": "failed", "measurement_status": "failed", "error_class": "no_trace_files"},
+        )
+        assert c.shared_state.auto_roofline_pending_task_id == "t-other"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["cancelled", "succeeded"])
+@pytest.mark.parametrize("phase", ["PRELUDE", "ENABLEMENT"])
+async def test_a_phase_releases_the_initial_analysis_gate_when_its_task_ended_unbooked(session_dir, ending, phase):
+    """A cancelled initial analysis, or one that ended before a restart booked it, must not hold the phase.
+
+    Neither path reaches the writeback that clears the marker: the dispatcher returns early for a
+    cancelled result, and a restart between the runner's terminal write and booking loses the outcome.
+    Both phases that hold for the marker have to release it.
+    """
+    from hyperloom.orchestrator.phases import machine_state as phase_state
+
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        task = await c.tasks.create(kind="roofline", params={}, idempotency_key=f"initial-{phase}-{ending}")
+        await c.tasks.transition(task.task_id, "running")
+        c.shared_state.phase = phase
+        c.shared_state.baseline_tput = 1074.7
+        c.shared_state.auto_roofline_pending_task_id = task.task_id
+
+        await c.phase_machine.advance_phase_if_needed()
+        assert c.shared_state.auto_roofline_pending_task_id == task.task_id
+
+        await c.tasks.transition(task.task_id, ending)
+        assert phase_state.compute_next_phase(c.shared_state, kernel_enabled=True) is None
+        await c.phase_machine.advance_phase_if_needed()
+        assert c.shared_state.auto_roofline_pending_task_id == ""
     finally:
         await c.stop()
 
