@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shlex
 import signal
 import time
 from pathlib import Path
@@ -81,6 +82,61 @@ def _assign_free_port(current_port: int) -> int:
             current_port,
         )
         return current_port
+
+
+def prepare_single_round_port(
+    config_paths: tuple[str, str],
+    env: dict[str, str],
+    *,
+    session_deadline_sec: float | None = None,
+) -> None:
+    """Pin a new local server's port on its execution host before launch.
+
+    The paths name the consumed config and the materialized recipe used by
+    launch evidence. Ray may have a separate config with device masks removed.
+    A free-port probe does not reserve the port after the socket is closed.
+    """
+    from hyperloom.inference_optimizer import framework_registry
+
+    from ..cancel_channel import stop_was_asked_for
+    from ._multi_node_env import is_multi_node
+    from .benchmark_backend import resolve_backend
+
+    if stop_was_asked_for() or (session_deadline_sec is not None and time.monotonic() >= session_deadline_sec):
+        return
+    config_path = Path(config_paths[0])
+    cfg = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    bench = cfg["benchmark"]
+    if is_multi_node() or not resolve_backend(env=env).owns_local_server(bench):
+        return None
+    framework = str(bench.get("framework") or "").lower()
+    if (
+        str(bench.get("workload_kind") or "").lower() == framework_registry.SCRIPTABLE
+        or framework_registry.is_scriptable(framework)
+        or (bench.get("server_lifecycle") or {}).get("enabled")
+    ):
+        return None
+    args_key = framework_registry.server_args_env_name(framework)
+    for values in (env, bench.get("envs") or {}):
+        if values.get("BENCHMARK_BASE_URL") or str(values.get("MAGPIE_RUN_PHASE") or "all") != "all":
+            return None
+        if any(
+            str(values.get(key) or "").strip().lower() not in {"", "0", "false", "no", "off"}
+            for key in ("SERVER_REUSE", "FORCE_SERVER_REUSE")
+        ):
+            return None
+        args = shlex.split(str(values.get(args_key) or ""))
+        if any(arg.split("=", 1)[0] in {"--host", "--port", "--base-url"} for arg in args):
+            return None
+
+    port = _pick_free_port()
+    for path in dict.fromkeys(config_paths):
+        target = Path(path)
+        effective = cfg if target == config_path else yaml.safe_load(target.read_text(encoding="utf-8"))
+        effective["benchmark"].setdefault("envs", {})["PORT"] = port
+        target.write_text(yaml.safe_dump(effective, sort_keys=False), encoding="utf-8")
+    env["PORT"] = str(port)
+    log.info("single-round local server port=%d config=%s", port, config_path)
 
 
 def resolve_lifecycle_params(materialized_config_path: Path) -> dict[str, Any]:
