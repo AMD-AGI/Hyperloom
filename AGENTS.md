@@ -145,6 +145,21 @@ doc is the authority on where that boundary lives.
   settles nothing on its own: a single-caller helper can earn its name, and code that only
   looks alike but answers to different contracts should stay apart rather than become one
   function with modes.
+- **Code shape.** A module is used through the names its owner exports; an `_`-name or an
+  `_internal` package is not an interface. A business-agnostic helper that more than one
+  module needs lives in `hyperloom.common` and names no business concept. Ask the owner of
+  a state rather than navigating its collaborators, and keep logic beside the state it
+  reads. A per-framework, per-backend or per-arch fact is a field on the owner's spec, not
+  a branch at each consumer; a closed vocabulary is one Enum or registry entry, converted
+  where the value enters. A signature states the real inputs once: no flag argument that
+  selects between two bodies, no parameter that is derivable, unread or set only by tests.
+  A result is one named type: no positional tuple of loosely related values, no dict whose
+  optional keys stand for states, no second channel written into an argument. A function
+  named as a query changes nothing; one that changes state is named for the change, and may
+  return its outcome. An abstraction — Protocol, ABC, base class, factory, registry —
+  arrives with its second implementation, not before, unless a lower layer declares it for
+  a higher one to implement or out-of-tree code implements it. A name states what the code
+  does; an alias or a shared role such as `log` keeps the meaning its package gives it.
 - **Leave nothing behind.** Working notes, audit trails, and analysis write-ups are
   byproducts of doing the work, not deliverables — don't commit them, least of all at the
   repo root, unless they were asked for. The change is the artifact.
