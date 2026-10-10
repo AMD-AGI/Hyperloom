@@ -318,6 +318,31 @@ def test_resume_continues_the_same_session_on_the_same_runtime(tmp_path: Path) -
     assert _FakeHarness.instances[0].prompts[1] == ("gate feedback", first.session_id)
 
 
+def test_a_read_only_resume_reaches_the_runtime_that_owns_the_session(tmp_path: Path) -> None:
+    """The lesson summarizer resumes a writable implementer read-only; a live run got 'session already exists'."""
+    repo, kernel = _make_repo(tmp_path)
+    backend = _backend()
+    first = asyncio.run(backend.run(_spec(repo, kernel)))
+
+    from kernelforge.agent_backends.base import AgentToolPolicy
+
+    summary_spec = _spec(
+        repo,
+        kernel,
+        writable=False,
+        read_only_resume=True,
+        allow_dirty_targets=True,
+        allow_untracked=True,
+        protected_globs=["*"],
+        tool_policy=AgentToolPolicy(read=True, search=True, write=False, shell=False, max_turns=4),
+    )
+    resumed = asyncio.run(backend.resume(summary_spec, first.session_id, "summarize what you explored"))
+
+    assert resumed.session_id == first.session_id
+    assert len(_FakeHarness.instances) == 1
+    assert _FakeHarness.instances[0].prompts[1] == ("summarize what you explored", first.session_id)
+
+
 def test_resume_without_a_session_id_is_refused(tmp_path: Path) -> None:
     """An empty id would start a new conversation and call it a continuation."""
     repo, kernel = _make_repo(tmp_path)

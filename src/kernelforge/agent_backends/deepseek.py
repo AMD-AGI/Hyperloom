@@ -246,6 +246,8 @@ class DeepSeekHarnessBackend:
         self.gateway = gateway
         self._preflight_done = False
         self._runtimes: dict[str, Any] = {}
+        # Which runtime ran each session: only that process can resume it, whatever spec the resume carries.
+        self._session_runtimes: dict[str, Any] = {}
         self._runtimes_lock = threading.Lock()
 
     def _effective_gateway(self) -> LlmGateway:
@@ -364,6 +366,7 @@ class DeepSeekHarnessBackend:
             # A deleted workspace (a finished lane round) can host no resume, so its runtime only holds a process.
             orphaned = [k for k in self._runtimes if not Path(k.split("\x00", 1)[0]).is_dir()]
             stale = [self._runtimes.pop(k) for k in orphaned]
+            self._forget_sessions_of(stale)
             workspace = str(Path(spec.cwd).resolve())
             harness = sdk.DeepSeekHarness(
                 dsh_home=str(self._harness_home()),
@@ -411,19 +414,31 @@ class DeepSeekHarnessBackend:
             raise DeepSeekHarnessUnavailableError(f"DeepSeek Harness initialization failed: {exc}") from exc
 
     def _discard_harness(self, spec: AgentRunSpec, harness: Any) -> None:
-        """Close one runtime and stop serving ``spec`` from it."""
-        key = self._runtime_key(spec)
+        """Close one runtime and stop serving anything from it."""
+        del spec
         with self._runtimes_lock:
-            if self._runtimes.get(key) is harness:
+            for key in [k for k, runtime in self._runtimes.items() if runtime is harness]:
                 del self._runtimes[key]
+            self._forget_sessions_of([harness])
         with contextlib.suppress(Exception):
             harness.close()
+
+    def _forget_sessions_of(self, runtimes: list[Any]) -> None:
+        """Drop the sessions owned by runtimes being closed; the caller holds the lock."""
+        for session_id in [s for s, runtime in self._session_runtimes.items() if any(runtime is r for r in runtimes)]:
+            del self._session_runtimes[session_id]
+
+    def _owning_harness(self, session_id: str) -> Any:
+        """The live runtime that already ran ``session_id``, if any."""
+        with self._runtimes_lock:
+            return self._session_runtimes.get(session_id)
 
     def close(self) -> None:
         """Shut down every harness runtime this backend started."""
         with self._runtimes_lock:
             runtimes = list(self._runtimes.values())
             self._runtimes.clear()
+            self._session_runtimes.clear()
         for harness in runtimes:
             with contextlib.suppress(Exception):
                 harness.close()
@@ -441,7 +456,9 @@ class DeepSeekHarnessBackend:
         guard = WorkspaceGuard(spec)
         guard.prepare()
         try:
-            harness = self._harness_for(spec)
+            harness = self._owning_harness(session_id) or self._harness_for(spec)
+            with self._runtimes_lock:
+                self._session_runtimes[session_id] = harness
             run = asyncio.to_thread(harness.run, prompt, session_id=session_id)
             try:
                 sdk_result = await asyncio.wait_for(run, timeout=spec.timeout_sec)
