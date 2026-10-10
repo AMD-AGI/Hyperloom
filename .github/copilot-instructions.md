@@ -34,6 +34,11 @@ Advisory review. Flag only what static gates can't.
   blocking calls on the event loop.
 - **Unused abstraction**: a flag, strategy, or generic helper added for a single caller,
   or a parameter always passed the same value.
+- **Code shape**: a private name or `_internal` module used across packages, a
+  per-framework branch at a consumer instead of a field on the owner's spec, a raw string
+  compared where an Enum exists, a flag argument, a positional tuple or dict bag returned
+  instead of a named type, or a query-named function with a side effect. `AGENTS.md`
+  *Code shape* states the principles.
 - **Contract & cache invariants**: a change that silently alters an external contract
   or breaks a documented rule.
 - **Test strategy**: exported behaviour — a CLI flag, public function, persisted schema,
