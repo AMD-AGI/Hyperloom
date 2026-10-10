@@ -12,7 +12,7 @@ from __future__ import annotations
 import dataclasses
 from collections import Counter
 
-from code_metrics_collect import METRICS, MODULE, Finding
+from code_metrics_collect import METRICS, MODULE, MODULE_LINES, Finding
 
 MARKER = "<!-- code-metrics-report -->"
 UPDATE_COMMAND = "python scripts/code_metrics.py --update-baseline"
@@ -70,6 +70,8 @@ class Outcome:
     gate_changes: list[str] = dataclasses.field(default_factory=list)
     #: (path, lines) of judged modules between the warning and the failing length.
     module_warnings: list[tuple[str, int]] = dataclasses.field(default_factory=list)
+    #: ``module-lines-warning``: a longer module is listed as a warning, never failed.
+    module_warning: int | None = None
     #: Refusals of the checks without a baseline (``code_metrics_checks.Problem``).
     problems: list = dataclasses.field(default_factory=list)
     #: The PR carries the override label: new, worse and growth are listed but do not fail.
@@ -131,7 +133,7 @@ def _summary(outcome: Outcome) -> str:
         delta = "n/a" if outcome.base_baseline is None else f"{counts['head'][name] - counts['base'][name]:+d}"
         cells = [counts[c][name] for c in ("new", "worse", "stale", "head")]
         rows.append(
-            f"| {metric.label} | {_limit(name, outcome.thresholds)} | " + _SEP.join(map(str, cells)) + f" | {delta} |"
+            f"| {metric.label} | {_dimension_limit(name, outcome)} | " + _SEP.join(map(str, cells)) + f" | {delta} |"
         )
     checks = Counter(problem.check for problem in outcome.problems)
     rows += ["", "| Check | Refusals |", "|---|---:|"]
@@ -141,6 +143,21 @@ def _summary(outcome: Outcome) -> str:
 
 def _limit(metric: str, thresholds: dict[str, int]) -> str:
     return f"fails > {thresholds.get(metric, '?')}"
+
+
+def _dimension_limit(metric: str, outcome: Outcome) -> str:
+    """Every level of the dimension: module length also warns, below its failing length."""
+    if metric == MODULE_LINES and outcome.module_warning is not None:
+        return f"{_warn_limit(outcome)}, {_limit(metric, outcome.thresholds)}"
+    return _limit(metric, outcome.thresholds)
+
+
+def _warn_limit(outcome: Outcome) -> str:
+    return f"warns > {_or_unknown(outcome.module_warning)}"
+
+
+def _or_unknown(value: int | None) -> object:
+    return "?" if value is None else value
 
 
 def _sections(outcome: Outcome, link_base: str, max_rows: int | None) -> list[str]:
@@ -188,10 +205,11 @@ def _sections(outcome: Outcome, link_base: str, max_rows: int | None) -> list[st
 
 def _informational(outcome: Outcome, link_base: str, max_rows: int | None) -> list[str]:
     """Sections that never fail the gate."""
+    warning, failing = _or_unknown(outcome.module_warning), _or_unknown(outcome.thresholds.get(MODULE_LINES))
     warn = _table(
-        "Module length warning (not failing)",
+        f"Module length warning: over {warning} lines, within the {failing}-line failure limit (not failing)",
         ["Module", "Lines", "Limit"],
-        [[f"`{path}`", lines, limit] for path, lines in outcome.module_warnings for limit in [_module_limit(outcome)]],
+        [[f"`{path}`", lines, _warn_limit(outcome)] for path, lines in outcome.module_warnings],
         max_rows,
     )
     backlog = _table(
@@ -208,10 +226,6 @@ def _informational(outcome: Outcome, link_base: str, max_rows: int | None) -> li
     if outside:
         outside = f"<details><summary>{len(rows)} findings in files this change does not touch</summary>\n\n{outside}\n</details>\n"
     return [warn, backlog, outside]
-
-
-def _module_limit(outcome: Outcome) -> str:
-    return _limit("module-lines", outcome.thresholds)
 
 
 def _table(title: str, header: list[str], rows: list[list[object]], max_rows: int | None) -> str:

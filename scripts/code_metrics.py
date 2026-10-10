@@ -465,6 +465,7 @@ def run(args: argparse.Namespace, outcome: Outcome) -> int:
     if config is None:
         raise ToolError(f"{_PYPROJECT} has no [tool.hyperloom.code_metrics] table")
     outcome.thresholds = config.thresholds
+    outcome.module_warning = config.params["module-lines-warning"]
     outcome.baseline_path = config.baseline
     outcome.versions = check_tools(config)
     if Path(__file__).resolve().parent != (root / "scripts").resolve():

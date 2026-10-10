@@ -962,21 +962,44 @@ def test_an_unreadable_api_is_could_not_run_not_a_pass(repo: Repo, monkeypatch) 
     assert code == 2 and "the API URL must be https" in report
 
 
-def test_module_length_between_warning_and_limit_is_reported_not_failed(repo: Repo) -> None:
+@pytest.mark.parametrize(("warn", "fail"), [(800, 1200), (700, 1000)])
+def test_module_length_between_warning_and_limit_is_reported_not_failed(repo: Repo, warn: int, fail: int) -> None:
+    pyproject = repo.path / "pyproject.toml"
+    text = pyproject.read_text(encoding="utf-8")
+    assert "module-lines-warning = 800\n" in text and "module-lines = 1200\n" in text
+    text = text.replace("module-lines-warning = 800\n", f"module-lines-warning = {warn}\n")
+    pyproject.write_text(text.replace("module-lines = 1200\n", f"module-lines = {fail}\n"), encoding="utf-8")
     repo.write_baseline({})
     base = repo.commit()
-    for path, lines in [("src/warn.py", 801), ("src/ok.py", 800), ("src/far.py", 900)]:
+    for path, lines in [("src/warn.py", warn + 1), ("src/ok.py", warn), ("src/far.py", warn + 100)]:
         (repo.path / path).parent.mkdir(parents=True, exist_ok=True)
         (repo.path / path).write_text("x = 1\n" * lines, encoding="utf-8")
     repo.git("add", "src/far.py")
     repo.commit()
-    (repo.path / "src/warn.py").write_text("x = 1\n" * 801, encoding="utf-8")
+    (repo.path / "src/warn.py").write_text("x = 1\n" * (warn + 1), encoding="utf-8")
     code, report = repo.gate("--base-ref", base)
-    warned = section(report, "### Module length warning (not failing)")
-    assert "`src/warn.py` | 801 | fails > 1200 |" in warned
+    assert f"\n| Module length (lines) | warns > {warn}, fails > {fail} | 0 | 0 | 0 | 0 | +0 |\n" in report
+    title = f"### Module length warning: over {warn} lines, within the {fail}-line failure limit (not failing): 2\n"
+    assert title in report
+    warned = section(report, title)
+    assert f"\n| `src/warn.py` | {warn + 1} | warns > {warn} |\n" in warned
+    assert "fails >" not in warned
     assert "src/ok.py" not in warned
     assert "src/far.py" in warned  # committed after the base: touched too
     assert code == 0, report
+
+
+def test_only_module_length_has_a_warning_level_in_the_dimension_table(repo: Repo) -> None:
+    repo.write_baseline({})
+    _code, report = repo.gate()
+    config = code_metrics.parse_config((repo.path / "pyproject.toml").read_text(encoding="utf-8"))
+    rows = [line for line in report.splitlines() if line.startswith("| ") and "fails > " in line]
+    assert len(rows) == len(collect.METRICS)
+    for metric in collect.METRICS.values():
+        limit = f"fails > {config.thresholds[metric.name]}"
+        if metric.name == collect.MODULE_LINES:
+            limit = f"warns > {config.params['module-lines-warning']}, {limit}"
+        assert any(row.startswith(f"| {metric.label} | {limit} | ") for row in rows), (metric.name, rows)
 
 
 def test_function_length_counts_def_to_last_line_and_nested_functions_alone(tmp_path: Path) -> None:
