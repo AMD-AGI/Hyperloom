@@ -387,10 +387,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Expert-parallel size for MoE inference. 1 (default) keeps "
         "experts sharded by TP (legacy behaviour). >=2 enables true "
-        "expert parallelism: sglang adds `--expert-parallel-size N`, "
-        "vllm adds `--enable-expert-parallel`. Typical: EP=TP for "
-        "DSr1/DSv3 on multi-node. Default: 1. "
-        "EP > TP is rejected at server-restart time.",
+        "expert parallelism: sglang adds `--ep-size N`, vllm and atom "
+        "add `--enable-expert-parallel` (EP then spans all TP ranks). "
+        "Typical: EP=TP. Default: 1. On a single node an EP that does "
+        "not divide TP is dropped with a warning; on multi-node EP > TP "
+        "is rejected at server-restart time.",
     )
     opt.add_argument(
         "--pd-mode",
