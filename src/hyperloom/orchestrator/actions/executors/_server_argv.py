@@ -13,7 +13,7 @@ from typing import Any
 
 import yaml
 
-from hyperloom.inference_optimizer.framework_registry import server_args_env_name
+from hyperloom.inference_optimizer.framework_registry import expert_parallel_flag, server_args_env_name
 
 from hyperloom.inference_optimizer.grid_server_args import merge_server_args
 from hyperloom.inference_optimizer.grid_server_args import tokenize_server_args_preserving_json
@@ -85,11 +85,53 @@ def add_server_arg_unless_pinned(
     return True
 
 
+def _pinned_values(tokens: Sequence[str], aliases: Sequence[str]) -> list[str | None]:
+    """Return the value of every whole-token occurrence of ``aliases``; ``None`` where one has none."""
+    values: list[str | None] = []
+    for index, token in enumerate(tokens):
+        name, assigned, value = token.partition("=")
+        if name not in aliases:
+            continue
+        if assigned:
+            values.append(value)
+        elif index + 1 < len(tokens) and not tokens[index + 1].startswith("-"):
+            values.append(tokens[index + 1])
+        else:
+            values.append(None)
+    return values
+
+
+def _expert_parallel_arg(text: str, framework: str | None, ep: Any) -> str:
+    """Return the flag ``text`` still owes the server to run at ``ep``; empty when it owes none.
+
+    Raises:
+        ValueError: When ``text`` pins an expert-parallel size other than ``ep``.
+    """
+    size = int(ep or 1)
+    row = expert_parallel_flag(framework)
+    if row is None or size <= 1:
+        return ""
+    flag, aliases, sized = row
+    split = tokenize_server_args_preserving_json(text)
+    pinned = _pinned_values(split[1] if split else [], aliases)
+    if not sized:
+        return "" if pinned else flag
+    if any(value is None or not value.isdigit() or int(value) != size for value in pinned):
+        raise ValueError(
+            f"EP={size} but the server args already pin an expert-parallel size of {pinned} "
+            f"({' / '.join(aliases)}); drop the pin or pass --ep to match it"
+        )
+    return "" if pinned else f"{flag} {size}"
+
+
 def seal_server_argv(
     envs: MutableMapping[str, Any],
     framework: str | None,
 ) -> ServerArgv:
     """Write the final server argument string into ``envs`` and return its argv.
+
+    The run's ``EP`` env is honoured here, below every composer, so no
+    replacement of the argument string can drop the expert-parallel flag.
 
     Args:
         envs: The benchmark env mapping being materialised.
@@ -99,10 +141,12 @@ def seal_server_argv(
         ServerArgv: The sealed argv.
 
     Raises:
-        ValueError: When the composed string carries shell control syntax.
+        ValueError: When the composed string carries shell control syntax, or
+            pins an expert-parallel size that contradicts ``envs["EP"]``.
     """
     env_name = server_args_env_name(framework)
     text = validate_server_args_shell_safe(str(envs.get(env_name) or ""))
+    text = merge_server_args(text, _expert_parallel_arg(text, framework, envs.get("EP")))
     sealed = _sealed(framework, env_name, text)
     if sealed.text or env_name in envs:
         envs[env_name] = sealed.text

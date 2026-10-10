@@ -13,7 +13,9 @@ import yaml
 
 from hyperloom.inference_optimizer.framework_registry import names, server_args_env_name
 from hyperloom.orchestrator.actions.executors import _grid_runner, _workload_envs
+from hyperloom.orchestrator.actions.executors._grid_base import GridVariant
 from hyperloom.orchestrator.actions.executors._server_argv import (
+    ServerArgv,
     add_server_arg_unless_pinned,
     config_launch_env,
     config_server_argv,
@@ -269,3 +271,94 @@ def test_a_repaired_argv_reaches_the_launch_through_the_rendered_config(tmp_path
     assert resealed.argv == ("--tp", "8")
     # Read back off disk, because the file is what the launch opens.
     assert config_server_argv(config).argv == ("--tp", "8")
+
+
+def _seal_with_ep(framework: str, args: str, ep: object) -> ServerArgv:
+    """Seal ``args`` for ``framework`` with ``ep`` in the envs; ``None`` leaves EP unset."""
+    envs: dict[str, object] = {server_args_env_name(framework): args}
+    if ep is not None:
+        envs["EP"] = ep
+    return seal_server_argv(envs, framework)
+
+
+@pytest.mark.parametrize(
+    ("framework", "args", "ep", "expected"),
+    [
+        ("sglang", "--tp 8", 4, ("--tp", "8", "--ep-size", "4")),
+        ("sglang", "", "8", ("--ep-size", "8")),
+        ("sglang", "--ep-size 4", 4, ("--ep-size", "4")),
+        ("sglang", "--expert-parallel-size=4", 4, ("--expert-parallel-size=4",)),
+        ("sglang", "--ep 4", "4", ("--ep", "4")),
+        # A flag that merely starts with an alias is a different option.
+        ("sglang", "--ep-num-redundant-experts 32", 4, ("--ep-num-redundant-experts", "32", "--ep-size", "4")),
+        ("vllm", "--foo", 8, ("--foo", "--enable-expert-parallel")),
+        ("vllm", "", 8, ("--enable-expert-parallel",)),
+        ("vllm", "--enable-expert-parallel", 8, ("--enable-expert-parallel",)),
+        ("vllm", "-ep", 8, ("-ep",)),
+        ("atom", "--level 2", 8, ("--level", "2", "--enable-expert-parallel")),
+        ("vllm", "--foo", 1, ("--foo",)),
+        ("vllm", "--foo", None, ("--foo",)),
+        # EP 1 is a no-op, so a recipe that pins its own EP size is left standing.
+        ("sglang", "--ep-size 4", 1, ("--ep-size", "4")),
+        ("xdit", "--foo", 8, ("--foo",)),
+    ],
+)
+def test_the_seal_hands_the_server_its_expert_parallel_flag(framework, args, ep, expected):
+    """EP > 1 reaches the server's argv exactly once, in the framework's own spelling."""
+    assert _seal_with_ep(framework, args, ep).argv == expected
+
+
+@pytest.mark.parametrize("pinned", ["--ep-size 2", "--expert-parallel-size=8", "--ep 1", "--ep-size"])
+def test_an_expert_parallel_pin_that_contradicts_ep_fails_the_seal(pinned):
+    """Neither the operator's pin nor the CLI's EP may win silently."""
+    with pytest.raises(ValueError, match="EP=4"):
+        _seal_with_ep("sglang", pinned, 4)
+
+
+def test_sealing_twice_adds_the_expert_parallel_flag_once():
+    """The seal reads its own output back as a pin."""
+    envs = {"EXTRA_SGLANG_ARGS": "--tp 8", "EP": 8}
+    seal_server_argv(envs, "sglang")
+
+    assert seal_server_argv(envs, "sglang").argv == ("--tp", "8", "--ep-size", "8")
+
+
+def test_a_resealed_argv_keeps_the_expert_parallel_flag(tmp_path):
+    """A repair rewrites the argument string, not the run's EP."""
+    config = tmp_path / "bench.yaml"
+    config.write_text(
+        yaml.safe_dump(
+            {"benchmark": {"framework": "sglang", "model": "/m", "envs": {"EP": 4, "EXTRA_SGLANG_ARGS": "--bogus x"}}}
+        ),
+        encoding="utf-8",
+    )
+
+    assert reseal_config_argv(config, "--tp 4").argv == ("--tp", "4", "--ep-size", "4")
+    assert config_server_argv(config).argv == ("--tp", "4", "--ep-size", "4")
+
+
+@pytest.mark.parametrize(("variant_mode", "base_mode"), [("replace", "append"), ("append", "replace")])
+def test_a_replacing_grid_variant_keeps_the_expert_parallel_flag(tmp_path, variant_mode, base_mode):
+    """Replacing the argument string does not replace the run's EP."""
+    base = tmp_path / "base.yaml"
+    base.write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "framework": "vllm",
+                    "model": "/m",
+                    "envs": {"TP": 8, "EP": 8, "EXTRA_VLLM_ARGS": "--enable-expert-parallel --block-size 64"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    variant = GridVariant(name="v", extra_server_args="--max-num-seqs 64", args_mode=variant_mode)
+
+    config = _grid_runner._build_variant_yaml(
+        base, "--max-num-seqs 32", variant, output_subdir=tmp_path / "v", base_args_mode=base_mode
+    )
+
+    argv = config_server_argv(config).argv
+    assert "--block-size" not in argv
+    assert argv.count("--enable-expert-parallel") == 1

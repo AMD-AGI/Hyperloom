@@ -82,6 +82,15 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
 
 DEFAULT_FRAMEWORK = "sglang"
 
+# Server option that turns on expert parallelism: (flag to write, every
+# argparse alias of it, whether it takes the EP size). vLLM and ATOM take a
+# switch and derive the size from TP x DP. Frameworks absent here have none.
+EXPERT_PARALLEL_FLAGS: dict[str, tuple[str, tuple[str, ...], bool]] = {
+    "sglang": ("--ep-size", ("--ep-size", "--expert-parallel-size", "--ep"), True),
+    "vllm": ("--enable-expert-parallel", ("--enable-expert-parallel", "-ep"), False),
+    "atom": ("--enable-expert-parallel", ("--enable-expert-parallel",), False),
+}
+
 
 def names() -> tuple[str, ...]:
     """Return the canonical tuple of supported framework names."""
@@ -148,6 +157,15 @@ def server_args_env_name(framework: str | None) -> str:
         if fw in name:
             return extra_args_env(fw)
     return extra_args_env(DEFAULT_FRAMEWORK)
+
+
+def expert_parallel_flag(framework: str | None) -> tuple[str, tuple[str, ...], bool] | None:
+    """Return the :data:`EXPERT_PARALLEL_FLAGS` row for the server reading ``framework``'s server args."""
+    env_name = server_args_env_name(framework)
+    return next(
+        (row for name, row in EXPERT_PARALLEL_FLAGS.items() if FRAMEWORKS[name].extra_args_env == env_name),
+        None,
+    )
 
 
 def throughput_unit(framework: str | None) -> str:
