@@ -45,7 +45,7 @@ def sweep_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launch_backend):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(tmp_path / "leaks"))
     monkeypatch.delenv("INFERENCEX_PATH", raising=False)
     monkeypatch.setattr(_ray_serving, "maybe_serving_lease", lambda **kwargs: None)
-    monkeypatch.setattr(_aiter_jit, "sweep_stale_aiter_locks_if_dead", lambda: {})
+    monkeypatch.setattr(_aiter_jit, "sweep_stale_aiter_locks_if_dead", dict)
     monkeypatch.setattr(_server_lifecycle, "teardown_lifecycle_server", MagicMock())
     monkeypatch.setattr(benchmark_backend, "resolve_benchmark_interpreter", lambda: sys.executable)
     monkeypatch.setattr(gr, "build_benchmark_command", lambda **kwargs: [sys.executable, "scripted-benchmark"])

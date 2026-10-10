@@ -35,7 +35,7 @@ def _make_fake_ray(init_side_effects):
         eff = effects.pop(0)
         if isinstance(eff, BaseException):
             raise eff
-        return None
+        return
 
     def _shutdown(*args, **kwargs):
         calls["shutdown"] += 1

@@ -97,7 +97,7 @@ def source_counters(breakdown: dict[str, Any], sources: tuple[str, ...]) -> dict
             because the gains are measured against a moving stack and adding
             them would claim a total no measurement supports.
     """
-    totals: dict[str, Any] = {key: 0 for key in _SUMMED}
+    totals: dict[str, Any] = dict.fromkeys(_SUMMED, 0)
     totals["e2e_gain_pct"] = None
     for row in _attempts(breakdown):
         if str(row.get("source_kind") or "") not in sources:

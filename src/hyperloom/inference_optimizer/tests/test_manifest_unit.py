@@ -230,7 +230,7 @@ def test_objective_summary_variants():
 # ---- build / write / load -------------------------------------------------
 def test_build_manifest_without_args(monkeypatch):
     monkeypatch.setattr(mf, "_git_revision", lambda: "rev1")
-    monkeypatch.setattr(mf, "_build_dependencies", lambda: {})
+    monkeypatch.setattr(mf, "_build_dependencies", dict)
     monkeypatch.setattr(mf, "_detect_image", lambda: None)
     m = mf.build_manifest(Path("/tmp/sd"))
     assert m["schema_version"] == mf.SCHEMA_VERSION
@@ -240,7 +240,7 @@ def test_build_manifest_without_args(monkeypatch):
 
 def test_build_manifest_with_args(monkeypatch):
     monkeypatch.setattr(mf, "_git_revision", lambda: "rev1")
-    monkeypatch.setattr(mf, "_build_dependencies", lambda: {})
+    monkeypatch.setattr(mf, "_build_dependencies", dict)
     monkeypatch.setattr(mf, "_detect_image", lambda: None)
     for v in ("ISL", "OSL", "CONC", "TP", "MAX_MODEL_LEN"):
         monkeypatch.delenv(v, raising=False)
@@ -273,7 +273,7 @@ def test_build_manifest_with_args(monkeypatch):
 def test_build_manifest_shared_provenance_fields(monkeypatch):
     """Schema v4 carries gfx/EP/graph-mode/server-args from the shared WP-0 provenance builder (kept in lockstep with the TraceShapeManifest)."""
     monkeypatch.setattr(mf, "_git_revision", lambda: "rev1")
-    monkeypatch.setattr(mf, "_build_dependencies", lambda: {})
+    monkeypatch.setattr(mf, "_build_dependencies", dict)
     monkeypatch.setattr(mf, "_detect_image", lambda: None)
     monkeypatch.setattr(
         mf,
@@ -298,7 +298,7 @@ def test_build_manifest_shared_provenance_fields(monkeypatch):
 def test_manifest_versions_a_framework_installed_in_its_own_venv(monkeypatch, tmp_path):
     """``--framework-env isolated`` is the default for vLLM, so the framework is installed where the orchestrator's interpreter cannot see it."""
     monkeypatch.setattr(mf, "_git_revision", lambda: "rev1")
-    monkeypatch.setattr(mf, "_build_dependencies", lambda: {})
+    monkeypatch.setattr(mf, "_build_dependencies", dict)
     monkeypatch.setattr(mf, "_detect_image", lambda: None)
     venv_root = tmp_path / "vllm-venv"
     info = venv_root / "lib" / "python3.12" / "site-packages" / "vllm-0.27.1+rocm723.dist-info"
@@ -313,7 +313,7 @@ def test_manifest_versions_a_framework_installed_in_its_own_venv(monkeypatch, tm
 
 def test_build_manifest_snapshots_user_data_path_from_env(monkeypatch, tmp_path):
     monkeypatch.setattr(mf, "_git_revision", lambda: "rev1")
-    monkeypatch.setattr(mf, "_build_dependencies", lambda: {})
+    monkeypatch.setattr(mf, "_build_dependencies", dict)
     monkeypatch.setattr(mf, "_detect_image", lambda: None)
     monkeypatch.setenv(mf._paths.ENV_USER_DATA_PATH, str(tmp_path / "ud"))
     m = mf.build_manifest(tmp_path / "ud" / "sess")
@@ -322,7 +322,7 @@ def test_build_manifest_snapshots_user_data_path_from_env(monkeypatch, tmp_path)
 
 def test_build_manifest_user_data_path_falls_back_to_workspace_root(monkeypatch):
     monkeypatch.setattr(mf, "_git_revision", lambda: "rev1")
-    monkeypatch.setattr(mf, "_build_dependencies", lambda: {})
+    monkeypatch.setattr(mf, "_build_dependencies", dict)
     monkeypatch.setattr(mf, "_detect_image", lambda: None)
     monkeypatch.delenv(mf._paths.ENV_USER_DATA_PATH, raising=False)
     m = mf.build_manifest(Path("/tmp/sd"))
@@ -332,7 +332,7 @@ def test_build_manifest_user_data_path_falls_back_to_workspace_root(monkeypatch)
 
 def test_write_and_load_manifest_roundtrip(monkeypatch, tmp_path):
     monkeypatch.setattr(mf, "_git_revision", lambda: "rev1")
-    monkeypatch.setattr(mf, "_build_dependencies", lambda: {})
+    monkeypatch.setattr(mf, "_build_dependencies", dict)
     monkeypatch.setattr(mf, "_detect_image", lambda: None)
     written = mf.write_manifest(tmp_path, session_id="sid-x")
     loaded = mf.load_manifest(tmp_path)

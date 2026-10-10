@@ -168,7 +168,7 @@ def test_pid_alive_edge_cases(monkeypatch):
     assert _pid_alive(os.getpid()) is True
 
     def raise_perm(_pid, _sig):
-        raise PermissionError()
+        raise PermissionError
 
     monkeypatch.setattr(session_lock.os, "kill", raise_perm)
     assert _pid_alive(12345) is True  # exists but owned by another user

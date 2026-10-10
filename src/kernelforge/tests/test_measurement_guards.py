@@ -284,7 +284,7 @@ def _floored_case_times() -> tuple[dict[str, float], dict[str, float]]:
     """Pristine and candidate suites whose per-case mean reads 19.29x."""
     pristine = {"k001": EXPENSIVE_PRISTINE_MS}
     pristine.update({f"k{index:03d}": TIMING_FLOOR_MS for index in range(2, 40)})
-    return pristine, {case_id: TIMING_FLOOR_MS for case_id in pristine}
+    return pristine, dict.fromkeys(pristine, TIMING_FLOOR_MS)
 
 
 def test_kb_warm_start_adopts_a_high_scoring_prior_solution(

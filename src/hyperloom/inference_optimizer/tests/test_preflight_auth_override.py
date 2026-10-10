@@ -54,7 +54,7 @@ def stub_install_steps(monkeypatch, tmp_path):
         return subprocess.CompletedProcess(cmd, 0, stdout if text_mode else stdout.encode(), "" if text_mode else b"")
 
     monkeypatch.setattr(cli_preflight.subprocess, "run", _fake_run)
-    return None
+    return
 
 
 @pytest.fixture(autouse=True)

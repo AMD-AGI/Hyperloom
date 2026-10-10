@@ -1549,8 +1549,8 @@ def materialize_config_with_envs(
     # a serialization-safe budget; the profile OSL is resolved (and lowered if
     # needed) so the steady-state floor fits that cap:
     #   max_iters    = HYPERLOOM_PROFILE_MAX_STEPS_CAP (default 128)
-    #   steady_floor = ceil(OSL * (1 + R) / (2 * CONC))   # must be <= max_iters
-    #   delay_iters  = OSL * (R + 1) * 3 - max_iters / 2
+    #   steady_floor = ceil(OSL * (1 + R) / (2 * CONC)), must be <= max_iters
+    #   delay_iters  = OSL * (R + 1) * 3 - max_iters / 2 iterations
     is_profile = str(envs.get("PROFILE", "")).strip() == "1" or (
         bench.get("profiler", {}).get("torch_profiler", {}).get("enabled") is True
     )
@@ -1770,7 +1770,7 @@ def materialize_config_with_envs(
             # shape-discovery for Gemma2. Escape hatch
             # HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE=1 only skips the Gemma2
             # gate; it does NOT override a global
-            # HYPERLOOM_PROFILE_SHAPE_DISCOVERY=0.
+            # HYPERLOOM_PROFILE_SHAPE_DISCOVERY=0 setting.
             _force_shape_disc = env_bool("HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE")
             if _shape_disc and not _force_shape_disc:
                 _model = str(bench.get("model") or "")

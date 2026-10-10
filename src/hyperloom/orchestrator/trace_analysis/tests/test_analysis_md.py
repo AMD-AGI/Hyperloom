@@ -86,7 +86,7 @@ def test_render_report_missing_values_render_dash():
     kw.update(
         model_name="",
         provenance_detail="",
-        exec_summary={k: None for k in kw["exec_summary"]},
+        exec_summary=dict.fromkeys(kw["exec_summary"]),
         system_signals={"idle_pct": None, "exposed_comm_pct": None, "exposed_memcpy_pct": None},
         hot_kernels=[],
         p_items=[],

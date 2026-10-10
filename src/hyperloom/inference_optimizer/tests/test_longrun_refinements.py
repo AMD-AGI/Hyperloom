@@ -39,7 +39,7 @@ def test_decaying_keep_threshold_multi_node_scales_by_two():
 # Decaying-gain convergence: a cycle only "gains" when it clears its own bar
 def _sweep_state(*, macro_cycle, cycle_delta, no_gain_streak):
     now = datetime.now(timezone.utc)
-    st = SharedState(
+    return SharedState(
         session_id="t",
         phase=ps.PHASE_SWEEP,
         start_ts=(now - timedelta(hours=1)).isoformat(),
@@ -49,7 +49,6 @@ def _sweep_state(*, macro_cycle, cycle_delta, no_gain_streak):
         cumulative_gain_validated=5.0 + cycle_delta,
         no_gain_cycle_streak=no_gain_streak,
     )
-    return st
 
 
 def test_subthreshold_gain_does_not_reset_streak():

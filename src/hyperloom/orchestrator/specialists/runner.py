@@ -316,11 +316,10 @@ def _safe_redact(s: str) -> str:
             ``[REDACTED]``.
     """
     out = redact_secret_values(s)
-    out = _SECRET_ASSIGNMENT_RE.sub(
+    return _SECRET_ASSIGNMENT_RE.sub(
         lambda m: f"{m.group('key')}{m.group('sep')}{m.group('quote')}[REDACTED]{m.group('quote')}",
         out,
     )
-    return out
 
 
 def _redact_transcript_value(value: Any) -> Any:

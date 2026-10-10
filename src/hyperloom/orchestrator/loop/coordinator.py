@@ -348,8 +348,8 @@ class Coordinator:
         self._prompt_snapshots = PromptSnapshotTracker()
 
         # Per-agent BackendError streak; crossing threshold records one backend_unhealthy, then re-arms.
-        self._backend_error_streak: dict[str, int] = {name: 0 for name in self.role_registry}
-        self._backend_error_alarm_armed: dict[str, bool] = {name: True for name in self.role_registry}
+        self._backend_error_streak: dict[str, int] = dict.fromkeys(self.role_registry, 0)
+        self._backend_error_alarm_armed: dict[str, bool] = dict.fromkeys(self.role_registry, True)
         # Monotonic time each failing agent's streak began, and before which the tick loop does not call it again.
         self._backend_error_since: dict[str, float] = {}
         self._backend_retry_at: dict[str, float] = {}
@@ -1218,12 +1218,12 @@ class Coordinator:
                 {"kind": "backend_error", "agent": agent_name, "error": repr(exc)},
             )
             await self._track_backend_error_streak(agent_name, exc)
-            return
+            return None
         except NoIntentEmitted as exc:
             # No parseable intents; surface as observation so the next tick self-corrects.
             await self._record_no_intent_turn(agent_name, str(exc)[:500])
             await self.conversation.advance_rendered_cursor(agent_name)
-            return
+            return None
         except Exception as exc:
             # Catch-all so one agent's bad turn never stops the loop.
             log.exception("reactor pass for %s raised", agent_name)
@@ -1237,7 +1237,7 @@ class Coordinator:
                 agent=agent_name,
                 exc=exc,
             )
-            return
+            return None
         finally:
             self._trace_mcp_setup(agent_name=agent_name, backend=backend)
         # Reset the streak — a successful turn proves the backend is alive again.

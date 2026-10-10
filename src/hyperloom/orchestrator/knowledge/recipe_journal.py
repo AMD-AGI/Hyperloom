@@ -686,7 +686,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         hw = self.shared_state.gpu_type or "?"
         if kind == "lesson":
             return f"{fw_tag}{change} on {model}/{hw}"
-        # kind == "pitfall"
+        # Remaining kind is "pitfall"
         return f"{fw_tag}{change} → {severity or '?'} on {model}/{hw}"
 
     @staticmethod
