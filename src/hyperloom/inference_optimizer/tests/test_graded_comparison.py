@@ -729,6 +729,18 @@ def test_agentx_revert_when_more_requests_failed_than_the_anchor(monkeypatch):
     assert graded.refused_by == "extra_failed_requests"
 
 
+def test_agentx_keeps_through_a_transient_failure_inside_the_slack(monkeypatch):
+    """One failed request in a full round is noise: it moves the median's rank by a fraction of a point."""
+    _agentx(monkeypatch)
+    state = _State(current_best=dict(_ANCHOR))
+    graded = resolve_graded_comparison(
+        state,
+        _full_measurement(total=25984.0, output=183.0, intvty=24.8, error_rate=0.18),
+        keep_threshold_pct=2.0,
+    )
+    assert graded.verdict == VERDICT_KEEP
+
+
 def test_agentx_revert_when_a_comparability_input_is_unreported(monkeypatch):
     """No evidence is not evidence of comparability: the gate fails closed."""
     _agentx(monkeypatch)

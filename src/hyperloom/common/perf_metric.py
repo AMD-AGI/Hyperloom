@@ -44,13 +44,18 @@ GRADED_ERROR_RATE = "request_error_rate"
 # same work. Sized to catch a truncated round, not the few percent a full round drifts by.
 DURATION_DRIFT_PCT = 5.0
 
+# Extra failed requests a candidate may report over its anchor, in the rate's percentage points. Dropping a fraction
+# f of the requests moves any percentile by at most f in rank, so the slack cannot buy a median gain anywhere near
+# AGENTX_KEEP_P50_THRESHOLD_PCT; without it, one transient failure in a full round refuses a real gain.
+ERROR_RATE_SLACK_PCT = 0.5
+
 # The axes ``graded_axes_of`` can carry, for a consumer that must publish all of them including the ones a
 # measurement did not supply. Absent and null are not the same fact: a recorder that omits an axis leaves a reader
 # unable to tell an unmeasured axis from one the framework failed to report, and zero reads as "measured, and it
 # was zero".
 #
 # Duration and error rate are members because they are decision inputs, not decoration: ``incomparability_reason``
-# refuses a pair whose windows differ by more than ``DURATION_DRIFT_PCT`` or whose candidate dropped more requests,
+# refuses a pair whose windows differ by more than ``DURATION_DRIFT_PCT`` or whose candidate dropped too many requests,
 # and a published verdict that omits them cannot be re-derived from the record. The objective and its two guards
 # are here for the same reason -- every input the verdict reads is recoverable from one block.
 GRADED_AXIS_KEYS = (
@@ -285,7 +290,7 @@ def stamp_output_per_gpu(measurement: Any, tp: Any) -> None:
 
 
 def incomparability_reason(candidate: Mapping[str, float], anchor: Mapping[str, float]) -> str:
-    """Why the pair did not measure the same work, or "" when it did: equal-length windows, no extra failed requests.
+    """Why the pair did not measure the same work, or "" when it did: equal-length windows, failures within the slack.
 
     Fails closed on an unreported input. A truncated round still publishes plausible rates, so treating "no
     evidence" as "comparable" is what lets one KEEP on a window it never ran.
@@ -298,7 +303,7 @@ def incomparability_reason(candidate: Mapping[str, float], anchor: Mapping[str, 
         return "comparability_inputs_missing"
     if abs(axis_of(candidate, GRADED_DURATION) / ref_duration - 1.0) * 100.0 > DURATION_DRIFT_PCT:
         return "duration_drift"
-    if axis_of(candidate, GRADED_ERROR_RATE) > axis_of(anchor, GRADED_ERROR_RATE):
+    if axis_of(candidate, GRADED_ERROR_RATE) > axis_of(anchor, GRADED_ERROR_RATE) + ERROR_RATE_SLACK_PCT:
         return "extra_failed_requests"
     return ""
 
@@ -376,6 +381,7 @@ class GradedComparison:
 __all__ = [
     "AGENTX_KEEP_P50_THRESHOLD_PCT",
     "DURATION_DRIFT_PCT",
+    "ERROR_RATE_SLACK_PCT",
     "GradedComparison",
     "GRADED_AXIS_KEYS",
     "GRADED_DURATION",
