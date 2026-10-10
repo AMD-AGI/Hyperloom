@@ -116,6 +116,12 @@ Set with CLI flags, not env vars. Pre-set `ISL` / `OSL` / `CONC` / `PRECISION` /
 - **Session / resume:** `--resume-from`, `--force-resume`, `--reset-state`,
   `--extend-hours`.
 - **Quantization:** `--quantize`, `--quantize-scheme`.
+- **Operator-defined specialist:** `--custom-specialist-prompt-file` (focus
+  text, max 16 KiB) and `--custom-specialist-description` (one line, max 200
+  chars), passed together; unset means no `custom_specialist`. Refused with
+  `--orch-prompt`, `--no-framework-agent`, `--research-lane-capacity 0` or
+  `--reset-state`. Persisted in `state.json`; re-pass both on `--resume-from`
+  only to replace the definition.
 
 Run `hyperloom optimize --help` for the exhaustive flag list.
 

@@ -390,7 +390,14 @@ brief:
   exclusively own their leased cards: they may start/stop their own servers
   (any port that is not the production serving port 8888), profile, autotune,
   and run real benchmark loops. The one invariant is that they must not touch
-  the production serving process, its cards, or port 8888.
+  the   production serving process, its cards, or port 8888.
+- **Operator-defined specialist**: with `--custom-specialist-prompt-file` and
+  `--custom-specialist-description` set, `custom_specialist` joins the
+  domains Orchestration may dispatch, and its system prompt carries the
+  operator's focus verbatim. Until a `custom_specialist` task has started, the
+  Coordinator requests one at most once per macro cycle in FRAMEWORK_AGENT,
+  in research mode when source patches cannot be authored. Unset, Orchestration
+  is not offered the domain and the policy gate denies it.
 - **Plateau**: both arms' signals are computed every tick and rendered in the
   orchestration prompt. One arm dry is advisory — the phase stays open on the
   other lever. **Both arms dry advances the phase** via
@@ -749,6 +756,7 @@ and the operator's stated value is lost:
 | Target advisory | `--no-target-advisory` | Disable external-target hints in prompts without disabling final-report comparison. `primary_gap` uses the existing latency/throughput categories; the interactivity axis is displayed as interactivity. |
 | Quantization prelude | `--quantize` | Optional. Natural-language quantization request. Runs the quantization-agent once before the loop and rewrites `--model` to the quantized model. See Step 2b. Never runs on a resume. |
 | Env pins | `--extra-env NAME=VALUE` | Repeatable; forward **every** one verbatim as its own flag (do not drop any or fold into the `Environment:` block). The CLI persists them in `state.json` and serializes them into `$INFERENCE_OPTIMIZER_EXTRA_ENV`; a dropped pin is lost silently — e.g. a missing `SGLANG_USE_AITER=0` leaves the explore aiter-MoE filter blind. A `--resume-from` re-exports the persisted set, so re-pass them only to change the set. |
+| Operator-defined specialist | `--custom-specialist-prompt-file` + `--custom-specialist-description` | Only when the prompt asks for a specialist with its own focus. Write the operator's focus text verbatim to a file and pass its path (max 16 KiB); the description is one line (max 200 chars) telling Orchestration when to pick it. Pass both or neither. The CLI refuses them (exit 2) together with `--orch-prompt`, `--no-framework-agent`, `--research-lane-capacity 0` or `--reset-state`. Persisted in `state.json`; a `--resume-from` keeps the stored definition, so re-pass both only to replace it. |
 
 ### Step 2b — Optional quantization prelude (`--quantize`)
 
