@@ -670,6 +670,16 @@ def _cold_anchor_from_warmup(
     return warmup_result
 
 
+def _skip_measure_after_failed_warmup(warmup_result: dict[str, Any]) -> dict[str, Any]:
+    """Return a failed warmup as the round's result; the failure almost certainly recurs, so nothing is measured."""
+    warmup_result.setdefault("nonfatal_warnings", []).append("baseline_warmup_round_failed")
+    log.warning(
+        "baseline_executor: warmup round failed (error_class=%s); skipping measured round",
+        warmup_result.get("error_class"),
+    )
+    return warmup_result
+
+
 def _a_use_must_follow_the_round(state: Any) -> bool:
     """Whether this round is only worth running if something can be measured after it."""
     phase = str(getattr(state, "phase", "") or "").strip().upper()
@@ -1772,6 +1782,12 @@ class BenchmarkRunExecutor:
         except Exception:
             log.debug("baseline convergence record failed", exc_info=True)
 
+    def _keep_measured_round(self, result: dict[str, Any], warmup_tput: Any) -> None:
+        """Mark ``result`` as the measured round of a double run whose discarded warmup measured ``warmup_tput``."""
+        result.setdefault("nonfatal_warnings", []).append("baseline_double_run_discarded_first")
+        result["warmup_round_tput"] = warmup_tput
+        self._record_baseline_convergence(result, warmup_tput)
+
     @staticmethod
     def _eval_failure_evidence(result: dict[str, Any]) -> tuple[bool, str]:
         """Detect an eval-rooted baseline failure and capture bounded evidence."""
@@ -2470,6 +2486,9 @@ class BenchmarkRunExecutor:
         lifecycle = _lifecycle.resolve_lifecycle_params(materialized_config_path)
         double_run_wanted = double_run_requested(params)
         double_run = double_run_wanted and lifecycle["eligible"]
+        # A client that tears its server down leaves nothing to re-attach to, so the anchor is measured on a second
+        # boot instead -- the state every variant read against it boots into.
+        fresh_double_run = double_run_wanted and is_genuine_baseline and bool(lifecycle.get("client_owns_server"))
         if defer_accuracy_until_after_measure and double_run:
             # Only the lifecycle path can reuse the hot server for a staged accuracy round.
             _set_materialized_run_eval(
@@ -2480,7 +2499,7 @@ class BenchmarkRunExecutor:
 
         # Asked before the lease, because a round that will not be run should not hold a GPU while being refused.
         ignitable, ignition_evidence = self._round_affordable_before_ignition(
-            double_run=double_run,
+            double_run=double_run or fresh_double_run,
             ctx_extra=extra,
         )
         if not ignitable:
@@ -2690,20 +2709,36 @@ class BenchmarkRunExecutor:
         }
 
         if not double_run:
-            if double_run_wanted and not lifecycle["eligible"]:
+            if fresh_double_run:
+                log.info(
+                    "baseline_executor: cold-start guard — the client owns its server (%s); "
+                    "measuring on a second fresh boot.",
+                    lifecycle["reason"],
+                )
+            elif double_run_wanted and not lifecycle["eligible"]:
                 log.info(
                     "baseline_executor: cold-start double-run not eligible (%s); running single round.",
                     lifecycle["reason"],
                 )
             try:
-                result = await self._run_reported_round(
-                    label=ROUND_SINGLE,
-                    config_path=config_path,
-                    output_dir=output_dir,
-                    recorder=recorder,
-                    run_index=run_index,
-                    **common,
-                )
+                if fresh_double_run:
+                    result = await self._run_fresh_double_run(
+                        config_path=config_path,
+                        output_dir=output_dir,
+                        recorder=recorder,
+                        run_index=run_index,
+                        ctx_extra=extra,
+                        **common,
+                    )
+                else:
+                    result = await self._run_reported_round(
+                        label=ROUND_SINGLE,
+                        config_path=config_path,
+                        output_dir=output_dir,
+                        recorder=recorder,
+                        run_index=run_index,
+                        **common,
+                    )
                 if applied_patches:
                     result["warm_patches_applied"] = list(applied_patches)
                 _stamp_warm_patch_outcome(result, patch_application, params, _pre_patch_sha)
@@ -2754,15 +2789,7 @@ class BenchmarkRunExecutor:
                 **common,
             )
             if warmup_result.get("status") != "succeeded":
-                # Warmup failure almost certainly recurs, so skip the measured round.
-                warmup_result.setdefault("nonfatal_warnings", [])
-                warmup_result["nonfatal_warnings"].append(
-                    "baseline_warmup_round_failed",
-                )
-                log.warning(
-                    "baseline_executor: warmup round failed (error_class=%s); skipping measured round",
-                    warmup_result.get("error_class"),
-                )
+                _skip_measure_after_failed_warmup(warmup_result)
                 if applied_patches:
                     warmup_result["warm_patches_applied"] = list(applied_patches)
                 _stamp_warm_patch_outcome(warmup_result, patch_application, params, _pre_patch_sha)
@@ -2856,10 +2883,7 @@ class BenchmarkRunExecutor:
                     },
                 )
             if result.get("status") == "succeeded":
-                result.setdefault("nonfatal_warnings", [])
-                result["nonfatal_warnings"].append(
-                    "baseline_double_run_discarded_first",
-                )
+                self._keep_measured_round(result, warmup_tput)
                 # The measured pass re-attaches to the server launched by the warmup pass.
                 for evidence_field in (
                     "launch_evidence",
@@ -2878,8 +2902,6 @@ class BenchmarkRunExecutor:
                         "source_server_log_path": str(result.get("server_log_path") or ""),
                     }
                     result["launch_evidence"] = measured_evidence
-                result["warmup_round_tput"] = warmup_tput
-                self._record_baseline_convergence(result, warmup_tput)
                 # The Coordinator promotes ``subprocess_runtime_sec`` into the explore soft-kill anchor.
                 if isinstance(warmup_runtime, (int, float)) and warmup_runtime > 0:
                     result["measure_round_runtime_sec"] = result.get(
@@ -3059,6 +3081,77 @@ class BenchmarkRunExecutor:
             **evidence,
         }
         return headroom_sec >= cost, priced
+
+    async def _run_fresh_double_run(
+        self,
+        *,
+        config_path: Path,
+        output_dir: Path,
+        recorder: Any,
+        run_index: int,
+        ctx_extra: dict[str, Any],
+        **common: Any,
+    ) -> dict[str, Any]:
+        """Discard a first round, then measure on a second, freshly booted server.
+
+        Re-attaching would also replay the corpus against the first round's prefix cache, which no variant gets.
+        """
+        warmup_result = await self._run_reported_round(
+            label=ROUND_WARMUP,
+            config_path=config_path,
+            output_dir=output_dir / _WARMUP_ROUND_DIR,
+            recorder=recorder,
+            run_index=run_index,
+            **common,
+        )
+        if warmup_result.get("status") != "succeeded":
+            return _skip_measure_after_failed_warmup(warmup_result)
+        warmup_tput = warmup_result.get("output_throughput")
+        warmup_runtime = warmup_result.get("subprocess_runtime_sec")
+        await report_progress(
+            unit="baseline_round",
+            label="warmup",
+            index=1,
+            total=2,
+            status="succeeded",
+            output_throughput=warmup_tput,
+            runtime_sec=warmup_runtime,
+        )
+        # Priced as one benchmark pass to match the gate before ignition; the second boot is left to the run's clock.
+        affordable, gate_evidence = self._measure_round_affordable(
+            warmup_runtime_sec=warmup_runtime,
+            warmup_post_ready_sec=warmup_result.get("post_ready_runtime_sec"),
+            ctx_extra=ctx_extra,
+        )
+        if not affordable:
+            log.warning(
+                "baseline_executor: a second boot and one variant to read against it need %.0fs, and %.0fs is "
+                "left (bound=%s); keeping the first round as the cold anchor.",
+                gate_evidence.get("expected_cost_sec", 0.0),
+                gate_evidence.get("affordable_sec", 0.0),
+                gate_evidence.get("bound", ""),
+            )
+            return _cold_anchor_from_warmup(warmup_result, dropped=gate_evidence)
+        result = await self._run_reported_round(
+            label=ROUND_MEASURE,
+            config_path=config_path,
+            output_dir=output_dir / _MEASURE_ROUND_DIR,
+            recorder=recorder,
+            run_index=run_index,
+            **common,
+        )
+        if result.get("status") != "succeeded" and result.get("error_class") == SESSION_TIME_EXHAUSTED_CLASS:
+            return _cold_anchor_from_warmup(
+                warmup_result,
+                dropped={"reason": "measure_round_reaped_by_the_run", "measure_round_error": result.get("error")},
+            )
+        if result.get("status") == "succeeded":
+            self._keep_measured_round(result, warmup_tput)
+            # Read downstream as what one pass costs on a server already up, and as proof that a warm pass landed;
+            # this round booted its own server, so that is its post-ready span.
+            if result.get("post_ready_runtime_sec"):
+                result["measure_round_runtime_sec"] = result["post_ready_runtime_sec"]
+        return result
 
     def _write_lifecycle_config(
         self,

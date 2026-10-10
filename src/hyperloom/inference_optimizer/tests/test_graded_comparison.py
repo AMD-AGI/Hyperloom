@@ -116,16 +116,18 @@ def test_agentx_keep_verdict_when_intvty_clears_threshold(monkeypatch):
         state, _full_measurement(total=25984.0, output=183.0, intvty=24.8), keep_threshold_pct=2.0
     )
     assert graded.verdict == VERDICT_KEEP
+    assert graded.refused_by == ""
 
 
 def test_agentx_revert_when_both_axes_worse(monkeypatch):
-    """Both interactivity AND tput regressed beyond the noise band -> REVERT."""
+    """Both interactivity AND tput regressed beyond the noise band -> REVERT, naming every gate that failed."""
     _agentx(monkeypatch)
     state = _State(current_best=_ANCHOR, baseline_tput=180.0)
     graded = resolve_graded_comparison(
         state, _full_measurement(total=20000.0, output=130.0, intvty=15.0), keep_threshold_pct=2.0
     )
     assert graded.verdict == VERDICT_REVERT
+    assert graded.refused_by == "p50_gain_below_threshold,p90_regressed,output_regressed"
 
 
 def test_agentx_revert_when_median_gain_is_below_threshold(monkeypatch):
@@ -137,6 +139,7 @@ def test_agentx_revert_when_median_gain_is_below_threshold(monkeypatch):
         state, _full_measurement(total=25984.0, output=183.0, intvty=22.79), keep_threshold_pct=2.0
     )
     assert graded.verdict == VERDICT_REVERT
+    assert graded.refused_by == "p50_gain_below_threshold"
 
 
 def test_agentx_revert_when_the_slow_tail_guard_fails(monkeypatch):
@@ -149,6 +152,7 @@ def test_agentx_revert_when_the_slow_tail_guard_fails(monkeypatch):
         keep_threshold_pct=2.0,
     )
     assert graded.verdict == VERDICT_REVERT
+    assert graded.refused_by == "p90_regressed"
 
 
 def test_agentx_revert_when_the_output_guard_fails(monkeypatch):
@@ -161,6 +165,7 @@ def test_agentx_revert_when_the_output_guard_fails(monkeypatch):
         keep_threshold_pct=2.0,
     )
     assert graded.verdict == VERDICT_REVERT
+    assert graded.refused_by == "output_regressed"
 
 
 def test_a_degraded_pair_never_reports_a_keep_verdict(monkeypatch):
@@ -696,6 +701,7 @@ def test_agentx_revert_when_the_windows_differ(monkeypatch):
         keep_threshold_pct=2.0,
     )
     assert graded.verdict == VERDICT_REVERT
+    assert graded.refused_by == "duration_drift"
 
 
 def test_agentx_keeps_when_the_window_drifts_inside_the_allowance(monkeypatch):
@@ -720,6 +726,19 @@ def test_agentx_revert_when_more_requests_failed_than_the_anchor(monkeypatch):
         keep_threshold_pct=2.0,
     )
     assert graded.verdict == VERDICT_REVERT
+    assert graded.refused_by == "extra_failed_requests"
+
+
+def test_agentx_keeps_through_a_transient_failure_inside_the_slack(monkeypatch):
+    """One failed request in a full round is noise: it moves the median's rank by a fraction of a point."""
+    _agentx(monkeypatch)
+    state = _State(current_best=dict(_ANCHOR))
+    graded = resolve_graded_comparison(
+        state,
+        _full_measurement(total=25984.0, output=183.0, intvty=24.8, error_rate=0.18),
+        keep_threshold_pct=2.0,
+    )
+    assert graded.verdict == VERDICT_KEEP
 
 
 def test_agentx_revert_when_a_comparability_input_is_unreported(monkeypatch):
@@ -730,6 +749,7 @@ def test_agentx_revert_when_a_comparability_input_is_unreported(monkeypatch):
     measurement.pop("duration_seconds")
     graded = resolve_graded_comparison(state, measurement, keep_threshold_pct=2.0)
     assert graded.verdict == VERDICT_REVERT
+    assert graded.refused_by == "comparability_inputs_missing"
 
 
 def test_the_mlperf_backend_grades_on_output(monkeypatch):

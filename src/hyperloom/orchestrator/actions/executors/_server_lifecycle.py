@@ -14,6 +14,8 @@ from typing import Any
 
 import yaml
 
+from hyperloom.common.agentx_workload import is_agentx_client_script
+
 from ._subprocess_kill import TERM_GRACE_SECONDS, _process_group_alive, _signal_group
 
 
@@ -90,6 +92,7 @@ def resolve_lifecycle_params(materialized_config_path: Path) -> dict[str, Any]:
         "framework": "",
         "port": REUSE_PORT_DEFAULT,
         "reason": "",
+        "client_owns_server": False,
     }
     try:
         with Path(materialized_config_path).open(encoding="utf-8") as f:
@@ -135,6 +138,9 @@ def resolve_lifecycle_params(materialized_config_path: Path) -> dict[str, Any]:
     script_name = Path(str(bench.get("benchmark_script") or "")).name
     if script_name not in MAGPIE_BUILTIN_SCRIPTS:
         info["reason"] = f"benchmark_script={script_name!r} is not a Magpie built-in ({sorted(MAGPIE_BUILTIN_SCRIPTS)})"
+        # The AgentX clients boot their server through the built-in and tear it down on exit, so each round boots
+        # its own.
+        info["client_owns_server"] = is_agentx_client_script(script_name)
         return info
 
     profiler_on = bool((bench.get("profiler") or {}).get("torch_profiler", {}).get("enabled"))
