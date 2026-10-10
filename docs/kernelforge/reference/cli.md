@@ -202,6 +202,9 @@ the same `__FORGE_RESULT__` contract as `forge-loop`.
 | `--max-port-attempts <n>` | `3` | Correctness-only port sessions before giving up. |
 | `--profile-timeout-sec <s>` | `3600` | OPTIMIZE: ceiling for the complete Analysis Agent workflow. |
 | `--roofline-ceiling <on\|off>` | `off` | OPTIMIZE: passed unchanged to the nested `forge-loop`, where it means what `forge-loop --roofline-ceiling` means. `on` estimates the kernel's per-shape theoretical achievable latency once the loop's baseline is measured and steers its planner by the attainment against it; the estimate's profiler pass and analyst session are paid out of the OPTIMIZE budget. |
+| `--search-policy <name>` | `sequential` | OPTIMIZE: passed to the nested `forge-loop`, where it means what `forge-loop --search-policy` means. |
+| `--lanes <n>` | `3` (`1` under `seqany`) | OPTIMIZE: Implementer lanes per round of the nested `forge-loop` (1–8), with the meaning and provider requirements of `forge-loop --lanes`. `seqany` with more than one lane is refused before PORT starts. |
+| `--merge-stacking` / `--no-merge-stacking` | on | OPTIMIZE: passed to the nested `forge-loop`, where it means what `forge-loop --merge-stacking` means. |
 | `--snr-threshold <dB>` | `30.0` | Correctness gate for the ported kernel. |
 
 ### Apply-back
