@@ -449,6 +449,67 @@ total_shards = 6
 # Repository variable name: when truthy, CI skips fail_under enforcement.
 relax_fail_under_repo_var = "COVERAGE_RELAX_FAIL_UNDER"
 
+# White-box code-metrics gate: ``scripts/code_metrics.py``, run by
+# ``.github/workflows/code-metrics.yml``. Every threshold is the industry default
+# of the tool or rule that defines the metric; the source is named next to it.
+# Units already over a threshold are recorded in ``baseline`` and may only go down.
+# CI refuses a change that loosens anything in this table relative to the base
+# branch: a raised limit, a new ``exclude`` entry, a dropped root, a raised
+# duplication or dead-code parameter.
+[tool.hyperloom.code_metrics]
+baseline = "scripts/code_metrics_baseline.json"
+# Production Python. Files under a ``tests/`` directory are exempt from every
+# dimension but duplication, as in the style guide's "Size and complexity".
+roots = ["src/hyperloom", "src/kernelforge", "scripts"]
+# Same vendored / shipped-example trees as ``[tool.ruff] extend-exclude``.
+exclude = [
+    "src/hyperloom/orchestrator/knowledge/remote_recipe/_vendor/kb_store_client.py",
+    "src/kernelforge/examples",
+    "src/kernelforge/knowledge/local_wiki/resources",
+    "src/kernelforge/knowledge/kb_store/remote_client.py",
+]
+# SonarSource CPD defaults: a clone is at least 100 tokens and 10 lines (jscpd).
+duplication-min-tokens = 100
+duplication-min-lines = 10
+# vulture's documented setting for CI: report only findings it is >= 80% sure of.
+dead-code-min-confidence = 80
+
+[tool.hyperloom.code_metrics.thresholds]
+# McCabe (1976); the mccabe plugin's and ruff C901's default max-complexity.
+cyclomatic-complexity = 10
+# SonarSource rule S3776 default (Cognitive Complexity, G. Ann Campbell 2017).
+cognitive-complexity = 15
+# pylint defaults, as implemented by ruff: R0915 max-statements, R0912
+# max-branches, R0911 max-returns, R0913 max-args, R0917
+# max-positional-arguments, R0914 max-locals, R1702 max-nested-blocks, R0904
+# max-public-methods.
+statements = 50
+branches = 12
+returns = 6
+arguments = 5
+positional-arguments = 5
+locals = 15
+nested-blocks = 5
+public-methods = 20
+# pylint C0302 max-module-lines default.
+module-lines = 1000
+# radon maintainability index: below 10 is rank C ("extremely low"). Higher is
+# better, so this one fails when a file drops *below* the limit.
+maintainability-index = 10
+# Any clone (see duplication-min-*) counts; the value is a file's duplicated lines.
+duplicated-lines = 0
+# Any vulture finding at dead-code-min-confidence counts.
+dead-code = 0
+
+# Exact versions: the script refuses to measure with any other, because each
+# release can change what a metric counts. CI installs these same pins.
+[tool.hyperloom.code_metrics.tools]
+ruff = "0.16.2"
+complexipy = "8.0.1"
+radon = "6.0.1"
+vulture = "2.16"
+jscpd = "5.4.1"
+
 # Bandit security linter. ``B101`` (assert_used) is skipped repo-wide because
 # nearly all hits are test assertions and runtime invariants.
 [tool.bandit]

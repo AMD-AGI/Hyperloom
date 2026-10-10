@@ -55,25 +55,42 @@ ruff format --check .   # or `ruff format .` to apply
 
 ### Size and complexity
 
-Nothing enforces these today: Ruff selects `E`/`F`/`W` only (no `C901`), and CI's Pylint is `--errors-only`, which excludes `R0912`/`R0915`. They are **review triggers for new and rewritten code** — the point at which a reviewer asks for a split or for the reason the shape is right.
+Two layers. The **gate** is the `code-metrics` CI job (`scripts/code_metrics.py`): it measures industry-standard white-box metrics at their tools' default thresholds and fails the PR when the code gets worse. The **review triggers** below it are the softer numbers a reviewer asks about.
+
+| Gated dimension | Fails when | Source of the threshold | Tool |
+|-----------------|-----------|-------------------------|------|
+| Cyclomatic complexity | > 10 | McCabe (1976); mccabe / ruff `C901` default | ruff `C901` |
+| Cognitive complexity | > 15 | SonarSource rule S3776 default | complexipy |
+| Statements, branches, returns per function | > 50, > 12, > 6 | pylint `R0915`, `R0912`, `R0911` defaults | ruff `PLR0915`/`PLR0912`/`PLR0911` |
+| Arguments, positional arguments | > 5, > 5 | pylint `R0913`, `R0917` defaults (`self`/`cls` not counted) | ruff `PLR0913`/`PLR0917` |
+| Local variables, nested block depth | > 15, > 5 | pylint `R0914`, `R1702` defaults | ruff `PLR0914`/`PLR1702` |
+| Public methods per class | > 20 | pylint `R0904` default | ruff `PLR0904` |
+| Module length | > 1000 lines | pylint `C0302` default | the script |
+| Maintainability index | < 10 | radon rank C ("extremely low") | radon |
+| Duplicated code | any clone of >= 100 tokens and >= 10 lines | SonarSource CPD defaults | jscpd |
+| Dead code | any finding at >= 80% confidence | vulture's recommended CI setting | vulture |
+
+The thresholds, their sources and the exact tool versions live in `pyproject.toml` under `[tool.hyperloom.code_metrics]`. The scope is `src/hyperloom`, `src/kernelforge` and `scripts`, minus the same vendored and shipped-example trees as Ruff's `extend-exclude`; files under a `tests/` directory are exempt from everything but duplication. Suppression comments (`# noqa`, complexipy's ignore marker) do not hide a unit from the gate.
+
+Units that were already over a threshold when the gate landed are recorded with their value in `scripts/code_metrics_baseline.json`, keyed by file and qualified name (`Class.method`), so moving code inside a file does not disturb them. The baseline only goes down:
+
+- a unit over a threshold that is not in the baseline fails the PR — new code meets the limits;
+- a baselined unit that got worse than its recorded value fails — **do not grow the backlog**: adding branches or lines to a unit, or lines to a module, that is already over is a failure, not a judgement call;
+- a baselined unit that improved, dropped under the limit or was deleted fails as *out of date* until `python scripts/code_metrics.py --update-baseline` is run and the baseline committed in the same PR (the command can only lower or remove entries);
+- relative to the base branch, the PR's baseline may only lose entries or lower values, and the config may not loosen (no raised limit, no new exclusion). Adding a unit to the baseline is not a way to pass.
+
+A unit that only moved to another file or class keeps its baseline entry when its short name and metric match and its value is no worse; a renamed unit does not, and has to meet the limits. The report — new, worse and out-of-date units with links to the lines — is on the job summary and in one sticky PR comment. Run the gate locally with the install line in the script's docstring; `--base-ref origin/main` adds the base-branch check.
+
+Editing a unit that was already over is not a demand to repay its debt — the gate only asks that it not get worse. Extracting a helper while you are in there is in scope, and the gate rewards it with an out-of-date entry to tighten; a standalone rewrite of an unrelated module is a separate PR (see [`AGENTS.md`](../../AGENTS.md) § *One concern per change*).
+
+**Review triggers.** These are not gated; they are the point at which a reviewer asks for a split or for the reason the shape is right.
 
 | Unit | Trigger | Where the number comes from |
 |------|---------|-----------------------------|
 | Function length | ~60 lines | Just above the tree's 90th percentile |
-| Cyclomatic complexity | 10 | McCabe default; measurable on demand with `ruff check --select C901` |
 | Module length | ~800 lines | Roughly the tree's 90th percentile |
 
-Neither number identifies a problem on its own. A long function can be one prompt template with a complexity of 1, and a short one can carry a dozen field comparisons that still need semantic review. Crossing a trigger asks the reviewer to look for a responsibility boundary, not to assume there is one — and "this is a single template" is an accepted answer. Split when it improves ownership, data flow, or testability.
-
-**How the lines are counted:** a function spans its `def` line through its last line, decorators excluded and blank, comment and docstring lines included; a nested or `async` function is measured on its own, not folded into its parent. Module length is physical lines. The triggers cover the Python whose style we own — `src/hyperloom` and `src/kernelforge`, minus Ruff's `extend-exclude` in `pyproject.toml`, which already names the vendored SDK copies and the shipped `src/kernelforge/examples` reference tasks. Tests are exempt from the size triggers — a table-driven test that gains a case per behaviour is doing its job — though the command below still reports them. They are not exempt from the duplication and boundary rules.
-
-Measure rather than argue:
-
-```bash
-ruff check --select C901 --config "lint.mccabe.max-complexity=10" src/hyperloom src/kernelforge
-```
-
-Passing a trigger is not a merge blocker — it means the PR description says why, or the change splits. The tree carries a backlog above all three: **do not grow it**, and prefer leaving a file you touched smaller than you found it. Editing a unit that was already over the trigger is not a demand to repay its debt; adding branches or a second responsibility to it is. Extracting a helper while you are in there is in scope; a standalone rewrite of an unrelated module is a separate PR (see [`AGENTS.md`](../../AGENTS.md) § *One concern per change*).
+Neither number identifies a problem on its own. A long function can be one prompt template with a complexity of 1, and a short one can carry a dozen field comparisons that still need semantic review. Crossing a trigger asks the reviewer to look for a responsibility boundary, not to assume there is one — and "this is a single template" is an accepted answer. Split when it improves ownership, data flow, or testability. A function counts from its `def` line through its last line, decorators excluded and blank, comment and docstring lines included; a nested or `async` function is measured on its own. Module length is physical lines. Tests are exempt from the triggers — a table-driven test that gains a case per behaviour is doing its job — though not from the duplication and boundary rules.
 
 Structure the split along the boundaries the code already has — one job per module, cohesive inside, dependencies pointing one way down the layers. A split that only moves lines to a second file, leaving the two halves reaching into each other, trades one long file for a cycle.
 
@@ -126,7 +143,7 @@ Bandit scans production code (`src/hyperloom`, `scripts/`). Tests are excluded.
 
 ### Pylint
 
-CI runs `pylint --errors-only` on core packages (fatal/error severity only). Fix new error-level issues in touched modules; convention, refactor, and style messages are intentionally out of scope — including `R0912`/`R0915`, which is why the thresholds in [Size and complexity](#size-and-complexity) are carried by review rather than by a gate.
+CI runs `pylint --errors-only` on core packages (fatal/error severity only). Fix new error-level issues in touched modules; convention, refactor, and style messages are intentionally out of scope here; the size and complexity rules among them (`R0912`, `R0915`, ...) are gated by the `code-metrics` job instead — see [Size and complexity](#size-and-complexity).
 
 ### Tests (pytest)
 

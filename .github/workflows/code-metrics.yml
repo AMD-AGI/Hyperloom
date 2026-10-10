@@ -1,0 +1,114 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+name: Code metrics
+
+# White-box code-metrics gate (scripts/code_metrics.py). Thresholds, sources and
+# tool pins live in pyproject.toml [tool.hyperloom.code_metrics]; units already
+# over a threshold are in scripts/code_metrics_baseline.json and may only go down.
+#
+# The job is a hard gate under the stable name ``code-metrics`` so it can be made
+# a required check. For that reason there is no paths-ignore: a required check
+# that a docs-only PR never starts would leave that PR blocked on "expected".
+# The whole job takes about a minute.
+#
+# The report is written to the job summary and kept as ONE sticky PR comment.
+# A same-repository PR gets the comment from this job. A fork PR's token is
+# read-only, so this job only uploads the report and code-metrics-comment.yml
+# posts it from a workflow_run (which runs from the default branch only).
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: code-metrics-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  code-metrics:
+    name: code-metrics
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      # Same-repository PRs only; a fork PR's token stays read-only regardless.
+      pull-requests: write
+    steps:
+      # Depth 2: on a PR the checkout is the merge commit, and its first parent is
+      # the base the merge was computed against -- the baseline it may not grow.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - name: Install pinned tools
+        # Same pins as [tool.hyperloom.code_metrics.tools]; the script refuses
+        # to measure with any other version.
+        run: |
+          pip install "ruff==0.16.2" "complexipy==8.0.1" "radon==6.0.1" "vulture==2.16"
+          npm install --global "jscpd@5.4.1"
+
+      - name: Code metrics gate
+        id: gate
+        env:
+          EVENT: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          mkdir -p code-metrics
+          args=(--report code-metrics/report.md --link-base "https://github.com/$REPO/blob/$HEAD_SHA")
+          if [ "$EVENT" = pull_request ]; then
+            args+=(--base-ref HEAD^1)
+          fi
+          set +e
+          python scripts/code_metrics.py "${args[@]}" > /dev/null
+          code=$?
+          set -e
+          if [ ! -s code-metrics/report.md ]; then
+            printf '<!-- code-metrics-report -->\n## Code metrics gate: could not run\n\nThe script exited %s without a report; see the job log.\n' "$code" > code-metrics/report.md
+          fi
+          cat code-metrics/report.md >> "$GITHUB_STEP_SUMMARY"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+
+      - name: Keep the report for the fork-PR comment workflow
+        if: always() && github.event_name == 'pull_request' && steps.gate.outcome == 'success'
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: echo "$PR_NUMBER" > code-metrics/pr-number.txt
+
+      - uses: actions/upload-artifact@v7
+        if: always() && github.event_name == 'pull_request' && steps.gate.outcome == 'success'
+        with:
+          name: code-metrics-report
+          path: code-metrics/
+          retention-days: 7
+
+      - name: Post the report on the PR
+        if: >-
+          always() && steps.gate.outcome == 'success' && github.event_name == 'pull_request'
+          && github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const post = require(`${process.env.GITHUB_WORKSPACE}/.github/scripts/code_metrics_comment.js`);
+            await post({ github, context, core, number: context.payload.pull_request.number, reportPath: 'code-metrics/report.md' });
+
+      - name: Fail when the gate failed
+        env:
+          CODE: ${{ steps.gate.outputs.code }}
+        run: |
+          if [ "$CODE" != 0 ]; then
+            echo "::error::code-metrics gate failed (exit $CODE); the job summary and the PR comment list each unit."
+            exit 1
+          fi
