@@ -398,6 +398,40 @@ async def test_entering_framework_files_the_answer_before_orchestrations_first_t
     assert [row["extra_args"] for row in round_["proposal_set"]] == ["--kv-cache-dtype fp8"]
 
 
+@pytest.mark.parametrize(
+    ("mode", "endpoint", "asks"),
+    [("shadow", "http://p:8973", 1), ("off", "http://p:8973", 0), ("active", None, 0)],
+)
+async def test_framework_entry_waits_only_when_the_answer_would_be_queued(service, monkeypatch, mode, endpoint, asks):
+    monkeypatch.setenv("HYPERLOOM_PREDICTOR_MODE", mode)
+    if endpoint is None:
+        monkeypatch.delenv("HYPERLOOM_PREDICTOR_ENDPOINT")
+    state = _state()
+    service.answer = _answer(Action(server_args={"--kv-cache-dtype": "fp8"}), votes={0: 1})
+    service.gate = threading.Event()
+    phase = _entering_phase(monkeypatch, state)
+    await asyncio.wait_for(phase.on_enter_framework(SimpleNamespace(from_phase="PRELUDE")), timeout=1.0)
+
+    service.gate.set()
+    if phase._predictor._inflight is not None:
+        await phase._predictor._inflight
+    assert (len(service.requests), _predictor_rounds(state)) == (asks, [])
+
+
+async def test_entry_asks_at_its_own_decision_point_after_filing_an_earlier_answer(service, monkeypatch):
+    state = _state()
+    service.answer = _answer(Action(server_args={"--kv-cache-dtype": "fp8"}), votes={0: 1})
+    phase = _entering_phase(monkeypatch, state)
+    await phase._pump_predictor()
+    # Answered while FRAMEWORK was away, so nothing filed it.
+    await phase._predictor._inflight
+    state.macro_cycle = 1
+    await phase.on_enter_framework(SimpleNamespace(from_phase="SWEEP"))
+
+    assert len(service.requests) == 2
+    assert [(r["round_id"], r["cycle"]) for r in _predictor_rounds(state)] == [("c0-s0-r0", 0), ("c1-s0-r0", 1)]
+
+
 async def test_a_slow_answer_does_not_hold_framework_entry_past_its_bound(service, monkeypatch):
     state = _state()
     service.answer = _answer(Action(server_args={"--kv-cache-dtype": "fp8"}), votes={0: 1})
