@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hyperloom-kb-no-run-estimator"
+version = "0.1.0"
+description = "Mine the Recipe KB and Pulse session evidence to estimate uplift without running"
+requires-python = ">=3.10"
+# Deliberately empty: the whole tool is stdlib, so it runs anywhere a Python
+# does and needs no wheel resolution inside a restricted network.
+dependencies = []
+
+[project.scripts]
+kbmine = "kbmine.cli:main"
+
+[tool.setuptools]
+packages = ["kbmine"]
