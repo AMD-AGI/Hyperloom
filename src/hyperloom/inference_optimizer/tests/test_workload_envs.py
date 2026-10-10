@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 from hyperloom.orchestrator.actions.executors import _workload_envs as we
 
 
@@ -272,79 +273,91 @@ def test_server_args_merge_existing(monkeypatch, tmp_path):
     assert "chunked-prefill-size" in merged
 
 
-def test_vllm_ep_injects_expert_parallel(monkeypatch, tmp_path):
+def _ep_materialize(monkeypatch, tmp_path, *, framework, args, tp, ep):
+    """Materialize ``framework`` at ``tp``/``ep`` and return its benchmark envs."""
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
-    monkeypatch.setenv("EP", "8")
-    src = _write(tmp_path / "cfg.yaml", framework="vllm", envs={"EXTRA_VLLM_ARGS": "--trust-remote-code"})
-
-    bench = _materialize(src, tmp_path / "out")
-
-    args = bench["envs"]["EXTRA_VLLM_ARGS"]
-    assert "--trust-remote-code" in args
-    assert "--enable-expert-parallel" in args
+    monkeypatch.setenv("TP", str(tp))
+    monkeypatch.setenv("EP", str(ep))
+    src = _write(tmp_path / "cfg.yaml", framework=framework, envs={server_args_env_name(framework): args})
+    return _materialize(src, tmp_path / "out")["envs"]
 
 
-def test_vllm_ep_one_does_not_inject_expert_parallel(monkeypatch, tmp_path):
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
-    monkeypatch.setenv("EP", "1")
-    src = _write(tmp_path / "cfg.yaml", framework="vllm", envs={"EXTRA_VLLM_ARGS": "--trust-remote-code"})
+def test_materialize_hands_sglang_its_expert_parallel_size(monkeypatch, tmp_path):
+    envs = _ep_materialize(monkeypatch, tmp_path, framework="sglang", args="--mem-fraction-static 0.9", tp=8, ep=4)
 
-    bench = _materialize(src, tmp_path / "out")
-
-    args = bench["envs"]["EXTRA_VLLM_ARGS"]
-    assert "--trust-remote-code" in args
-    assert "--enable-expert-parallel" not in args
+    argv = envs["EXTRA_SGLANG_ARGS"].split()
+    assert envs["EP"] == 4
+    assert "--mem-fraction-static" in argv
+    assert argv.count("--ep-size") == 1
+    assert argv[argv.index("--ep-size") + 1] == "4"
 
 
-def test_vllm_ep_preserves_profile_args(monkeypatch, tmp_path):
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
-    monkeypatch.setenv("EP", "8")
-    src = _write(
-        tmp_path / "cfg.yaml",
-        framework="vllm",
-        envs={"EXTRA_VLLM_ARGS": "--profiler-config.ignore_frontend True"},
-    )
+@pytest.mark.parametrize("pinned", ["--ep-size 4", "--expert-parallel-size=4"])
+def test_materialize_keeps_an_operator_pinned_expert_parallel_size(monkeypatch, tmp_path, pinned):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_SERVER_ARGS", pinned)
 
-    bench = _materialize(src, tmp_path / "out")
+    envs = _ep_materialize(monkeypatch, tmp_path, framework="sglang", args="", tp=8, ep=4)
 
-    args = bench["envs"]["EXTRA_VLLM_ARGS"]
-    assert "--profiler-config.ignore_frontend True" in args
-    assert "--enable-expert-parallel" in args
-
-
-def test_vllm_ep_does_not_duplicate_existing_flag(monkeypatch, tmp_path):
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
-    monkeypatch.setenv("EP", "8")
-    src = _write(
-        tmp_path / "cfg.yaml",
-        framework="vllm",
-        envs={"EXTRA_VLLM_ARGS": "--enable-expert-parallel"},
-    )
-
-    bench = _materialize(src, tmp_path / "out")
-
-    args = bench["envs"]["EXTRA_VLLM_ARGS"]
-    assert args.count("--enable-expert-parallel") == 1
+    flags = [tok.split("=", 1)[0] for tok in envs["EXTRA_SGLANG_ARGS"].split()]
+    assert sum(flag in {"--ep-size", "--expert-parallel-size", "--ep"} for flag in flags) == 1
 
 
 @pytest.mark.parametrize(
-    "server_args, framework, ep, expected",
-    [
-        ("--foo", "vllm", 8, "--foo --enable-expert-parallel"),
-        ("--foo", "vllm", 1, "--foo"),
-        ("--foo", "sglang", 8, "--foo"),
-        ("--foo", "vllm", "bad", "--foo"),
-        ("--foo", "vllm", None, "--foo"),
-        ("--enable-expert-parallel", "vllm", 8, "--enable-expert-parallel"),
-        ("", "vllm", 8, "--enable-expert-parallel"),
-    ],
+    "args",
+    ["--trust-remote-code", "--profiler-config.ignore_frontend True", "--enable-expert-parallel"],
 )
-def test_inject_vllm_expert_parallel_unit(server_args, framework, ep, expected):
-    assert we.inject_vllm_expert_parallel(server_args, framework, ep) == expected
+def test_materialize_enables_vllm_expert_parallel_once(monkeypatch, tmp_path, args):
+    envs = _ep_materialize(monkeypatch, tmp_path, framework="vllm", args=args, tp=8, ep=8)
+
+    assert args in envs["EXTRA_VLLM_ARGS"]
+    assert envs["EXTRA_VLLM_ARGS"].split().count("--enable-expert-parallel") == 1
+
+
+def test_materialize_ep_one_adds_no_expert_parallel_flag(monkeypatch, tmp_path):
+    envs = _ep_materialize(monkeypatch, tmp_path, framework="vllm", args="--trust-remote-code", tp=8, ep=1)
+
+    assert envs["EXTRA_VLLM_ARGS"] == "--trust-remote-code"
+
+
+def test_materialize_drops_an_ep_the_clamped_tp_cannot_hold(monkeypatch, tmp_path, caplog):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_VISIBLE_GPU_COUNT", "4")
+    monkeypatch.setenv("TP", "8")
+    monkeypatch.setenv("EP", "8")
+    src = _write(tmp_path / "cfg.yaml", envs={"EXTRA_SGLANG_ARGS": "--mem-fraction-static 0.9"})
+
+    with caplog.at_level("WARNING"):
+        envs = _materialize(src, tmp_path / "out")["envs"]
+
+    assert envs["TP"] == 4
+    assert "EP" not in envs
+    assert "--ep-size" not in envs["EXTRA_SGLANG_ARGS"]
+    assert "EP=8 does not divide the launched TP=4" in caplog.text
+
+
+def test_materialize_drops_an_ep_that_does_not_divide_tp(monkeypatch, tmp_path, caplog):
+    with caplog.at_level("WARNING"):
+        envs = _ep_materialize(monkeypatch, tmp_path, framework="sglang", args="--mem-fraction-static 0.9", tp=8, ep=3)
+
+    assert "EP" not in envs
+    assert "--ep-size" not in envs["EXTRA_SGLANG_ARGS"]
+    assert "EP=3 does not divide the launched TP=8" in caplog.text
+
+
+def test_materialize_leaves_multi_node_ep_to_the_launcher(monkeypatch, tmp_path):
+    """The multi-node launcher passes EP itself; this pod's GPU count is not the cluster's TP."""
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_VISIBLE_GPU_COUNT", "8")
+    monkeypatch.setenv("TP", "16")
+    monkeypatch.setenv("EP", "16")
+    src = _write(tmp_path / "cfg.yaml", envs={"EXTRA_SGLANG_ARGS": "--mem-fraction-static 0.9"})
+
+    envs = _materialize(src, tmp_path / "out")["envs"]
+
+    assert "EP" not in envs
+    assert "--ep-size" not in envs["EXTRA_SGLANG_ARGS"]
 
 
 def test_mimo_v2_injects_triton_attention(monkeypatch, tmp_path):
