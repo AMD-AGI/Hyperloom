@@ -1267,10 +1267,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 # numbers) will do so again: stop at two instead of spending a
                 # third attempt. Only ``subprocess_nonzero`` qualifies, because its
                 # error text is the process's own output; other classes carry a
-                # fixed sentence that two unrelated failures share. A Ray cluster
-                # that cannot place the round is not something an enablement patch
-                # can change, so that one stops even while the enablement lane is
-                # open.
+                # fixed sentence that two unrelated failures share.
                 signature = (
                     _baseline_failure_signature(err_class, result_payload.get("error"))
                     if err_class == "subprocess_nonzero"
@@ -1284,11 +1281,21 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 self.shared_state.baseline_failure_streak += 1
                 self.shared_state.baseline_last_failure_signature = signature
                 streak = self.shared_state.baseline_failure_streak
-                cluster_infeasible = _is_ray_cluster_infeasible(result_payload)
-                if not eval_pending_suppress and (
-                    (streak >= 3 and not in_enablement)
-                    or (streak >= 2 and repeated and (cluster_infeasible or not in_enablement))
-                ):
+                if _is_ray_cluster_infeasible(result_payload):
+                    # The Ray cluster cannot place the round, and the runtime has
+                    # already repaired what it safely could (a lone local head
+                    # without serving_slot). A retry meets the same cluster and no
+                    # framework patch changes it, so stop on the first one, like the
+                    # AgentX preflight above. Waiting for a second would not be
+                    # bounded: with no launch log to author against, the enablement
+                    # lane this failure opens never schedules another baseline.
+                    log.error(
+                        "baseline %s failed because the Ray cluster cannot place it; stopping the run: %s",
+                        task.task_id,
+                        result_payload.get("error") or err_class,
+                    )
+                    self.shared_state.set_stop_reason("baseline_failed")
+                elif not eval_pending_suppress and not in_enablement and (streak >= 3 or (streak >= 2 and repeated)):
                     self.shared_state.set_stop_reason("baseline_failed")
             # Combined backstop: count ALL baseline failures so mixed
             # error_classes that split the per-class streaks still fast-fail.

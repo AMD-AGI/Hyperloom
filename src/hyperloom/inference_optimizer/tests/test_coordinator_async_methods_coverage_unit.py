@@ -1076,14 +1076,10 @@ async def test_unpromotable_baseline_repeat_of_another_class_keeps_three_strikes
 
 
 @pytest.mark.asyncio
-async def test_unpromotable_baseline_infeasible_ray_cluster_stops_at_two_even_in_enablement(
-    coord: Coordinator,
-) -> None:
+async def test_unpromotable_baseline_infeasible_ray_cluster_stops_on_the_first(coord: Coordinator) -> None:
     """A Ray cluster that cannot place the round fails the same way every time, and no patch changes that."""
     from hyperloom.orchestrator.actions.executors._ray_serving import RAY_INFEASIBLE_MARKER
-    from hyperloom.orchestrator.phases.machine_state import PHASE_ENABLEMENT
 
-    coord.shared_state.phase = PHASE_ENABLEMENT
     result = {
         "status": "failed",
         "error_class": "subprocess_nonzero",
@@ -1091,10 +1087,26 @@ async def test_unpromotable_baseline_infeasible_ray_cluster_stops_at_two_even_in
     }
 
     await coord.writeback.handle_unpromotable_result(_baseline_task("bl-ray-1"), result)
-    assert coord.shared_state.stop_reason != "baseline_failed"
+
+    assert coord.shared_state.stop_reason == "baseline_failed"
     # Not handed to the enablement lane as something to author a patch against.
     assert not (coord.shared_state.enablement.launch_log or "").strip()
-    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-ray-2"), result)
+
+
+@pytest.mark.asyncio
+async def test_unpromotable_baseline_infeasible_ray_cluster_stops_in_enablement_too(coord: Coordinator) -> None:
+    from hyperloom.orchestrator.actions.executors._ray_serving import RAY_INFEASIBLE_MARKER
+    from hyperloom.orchestrator.phases.machine_state import PHASE_ENABLEMENT
+
+    coord.shared_state.phase = PHASE_ENABLEMENT
+    result = {
+        "status": "failed",
+        "error_class": "subprocess_nonzero",
+        "error": f"ray_ensure_error: {RAY_INFEASIBLE_MARKER}: cluster has 0.0 GPU(s), 1 requested",
+    }
+
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-ray-en"), result)
+
     assert coord.shared_state.stop_reason == "baseline_failed"
 
 
