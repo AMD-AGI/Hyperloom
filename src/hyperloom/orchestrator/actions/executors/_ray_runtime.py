@@ -254,10 +254,12 @@ def _is_ray_version_mismatch(text: str) -> bool:
 def force_restart_local_cluster(
     num_gpus: Optional[int] = None,
     log_path: Optional[Path] = None,
+    *,
+    reason: str = "Stopping foreign cluster before version-mismatch recovery",
 ) -> None:
     """Tear down any reachable Ray cluster and start a fresh local head."""
     ensure_fd_limit(log_path=log_path)
-    _stop_ray_force(log_path=log_path, reason="Stopping foreign cluster before version-mismatch recovery")
+    _stop_ray_force(log_path=log_path, reason=reason)
     gcs_port, iso_args = _isolated_head_port_args()
     start_cmd = ["ray", "start", "--head", f"--port={gcs_port}", "--dashboard-host=127.0.0.1"]
     if num_gpus is not None:
@@ -277,7 +279,148 @@ def force_restart_local_cluster(
             start_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, text=True, **_RAY_START_DETACH_KWARGS
         )
     if proc.returncode != 0:
-        raise RuntimeError(f"failed to restart local Ray after version mismatch; see {log_path}")
+        raise RuntimeError(f"failed to restart local Ray (rc={proc.returncode}); see {log_path}")
+
+
+#: Ray resource keys that describe capacity rather than something a task or actor holds.
+_NON_HELD_RESOURCE_PREFIXES = ("node:", "memory", "object_store_memory")
+
+
+#: The per-node Ray daemons ``ray stop --force`` would stop, and the argument that says which cluster each serves:
+#: a head's GCS server by its port, a node's raylet by its node id. Every other Ray process belongs to one of these.
+_RAY_DAEMON_IDENTITY_ARGS = {"gcs_server": "--gcs_server_port=", "raylet": "--node_id="}
+
+
+def _visible_ray_daemons() -> Optional[dict[str, list[str]]]:
+    """List the Ray GCS servers and raylets in this PID namespace by identity (see ``_RAY_DAEMON_IDENTITY_ARGS``).
+
+    A daemon whose identity cannot be read is listed as ``""``; ``None`` means ``/proc`` itself was unreadable.
+    """
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return None
+    found: dict[str, list[str]] = {name: [] for name in _RAY_DAEMON_IDENTITY_ARGS}
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/comm", encoding="utf-8") as comm:
+                name = comm.read().strip()
+            if name not in found:
+                continue
+            with open(f"/proc/{entry}/cmdline", "rb") as cmdline:
+                argv = cmdline.read().decode("utf-8", "replace").split("\0")
+        except OSError:
+            continue
+        prefix = _RAY_DAEMON_IDENTITY_ARGS[name]
+        found[name].append(next((a[len(prefix) :] for a in argv if a.startswith(prefix)), ""))
+    return found
+
+
+def _cluster_activity() -> list[str]:
+    """Describe what is running on the connected cluster besides this driver; empty when nothing is.
+
+    Read from the GCS tables directly so it works without a dashboard: actors not yet
+    dead (including ones that hold no resources), and jobs whose driver is another
+    live process (which also covers tasks that driver has pending).
+    """
+    from ray._private import state as ray_state
+
+    import ray
+
+    own_job = str(ray.get_runtime_context().get_job_id() or "")
+    activity: list[str] = []
+    live_actors = [a for a in ray_state.actors().values() if str(a.get("State") or "") != "DEAD"]
+    if live_actors:
+        activity.append(f"{len(live_actors)} actor(s) not dead")
+    # By job id alone: drivers in other PID namespaces can share this process's pid.
+    other_drivers = [j for j in ray_state.jobs() if not j.get("IsDead") and str(j.get("JobID") or "") != own_job]
+    if other_drivers:
+        pids = ", ".join(str(j.get("DriverPid")) for j in other_drivers)
+        activity.append(f"other live driver(s) attached (pid {pids})")
+    return activity
+
+
+def local_head_restartable() -> Tuple[bool, str]:
+    """Whether the connected Ray cluster is a lone local head this process may restart.
+
+    Restarting means ``ray stop --force``, which stops every Ray process visible on
+    this host, so it is allowed only when that is exactly the connected head and
+    nothing else depends on it: no explicit cluster address, not a multi-node run,
+    exactly one Ray head visible on the host, exactly one live node and it is this
+    host's raylet, no resource held, no actor that is not dead and no other live
+    driver. Anything that cannot be inspected counts as a reason not to restart.
+
+    Returns:
+        ``(True, "")`` when a restart is safe, else ``(False, why)``.
+    """
+    address = os.environ.get("RAY_ADDRESS", "").strip()
+    if address and address.lower() != "auto":
+        return False, f"RAY_ADDRESS={address!r} names an explicit cluster"
+    from ._multi_node_env import is_multi_node
+
+    if is_multi_node():
+        return False, "this is a multi-node run"
+    import ray
+
+    try:
+        # Every node record, dead ones included: a multi-node cluster whose worker is down is still multi-node.
+        nodes = list(ray.nodes())
+        context = ray.get_runtime_context()
+        local_node = context.get_node_id()
+        gcs_port = str(context.gcs_address or "").rsplit(":", 1)[-1]
+        totals = ray.cluster_resources()
+        available = ray.available_resources()
+        activity = _cluster_activity()
+    except Exception as exc:  # noqa: BLE001 - an unreadable cluster is not a safe one to stop
+        return False, f"could not inspect the cluster: {exc!r}"
+    if len(nodes) != 1:
+        return False, f"the cluster has {len(nodes)} nodes"
+    if not nodes[0].get("Alive") or str(nodes[0].get("NodeID") or "") != str(local_node or ""):
+        return False, "its only node is not this host's live raylet"
+    # ``ray stop --force`` stops every Ray process on the host, so the connected head's GCS server and raylet must
+    # be the only ones there: another cluster's head, or a worker node of one, would be stopped with it.
+    daemons = _visible_ray_daemons()
+    if daemons is None:
+        return False, "the Ray processes on this host cannot be listed"
+    if daemons["gcs_server"] != [gcs_port] or daemons["raylet"] != [str(local_node or "")]:
+        return False, (
+            f"{len(daemons['gcs_server'])} Ray head(s) and {len(daemons['raylet'])} raylet(s) are visible on this "
+            "host, not only the connected cluster's"
+        )
+    held = sorted(
+        key
+        for key, total in totals.items()
+        if not key.startswith(_NON_HELD_RESOURCE_PREFIXES) and available.get(key, 0.0) < total
+    )
+    if held:
+        return False, f"resources are in use on it ({', '.join(held)})"
+    if activity:
+        return False, f"it has work on it ({'; '.join(activity)})"
+    return True, ""
+
+
+def restart_local_head_with_serving_slot(num_gpus: Optional[int] = None, log_path: Optional[Path] = None) -> None:
+    """Replace a local head that lacks ``serving_slot`` with one that declares it, then reconnect.
+
+    The same repair ``install_kernel_tools.sh`` applies when it finds such a head:
+    ``ray stop --force`` and a fresh ``ray start --head --resources=...``.
+    """
+    import ray
+
+    try:
+        ray.shutdown()
+    except Exception:  # noqa: BLE001 - the driver is being replaced either way
+        pass
+    force_restart_local_cluster(
+        num_gpus=num_gpus,
+        log_path=log_path,
+        reason=f"Restarting local Ray head: it does not declare the {RAY_SERVING_SLOT} resource",
+    )
+    if not ray_status_ok():
+        raise RuntimeError(f"restarted local Ray head is not reachable; see {log_path}")
+    quiet_ray_init(num_gpus=num_gpus, log_path=log_path)
 
 
 # Env vars safe to forward to Ray workers; excludes *_VISIBLE_DEVICES (Ray-owned; forcing them triggers set_visible_accelerator_ids IndexError on ROCm).
