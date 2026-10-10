@@ -144,6 +144,20 @@ async def test_a_rationale_is_the_rows_reason_and_the_queue_shows_it_at_length(s
     assert specialist_line.endswith(f"why={long_reason[:80].rstrip()}")
 
 
+async def test_the_queue_offers_predictor_rows_to_orchestrations_own_grid(service):
+    specialist = {"task_id": "s1", "domain": "serving_specialist", "cycle": 0,
+                  "proposal_set": [{"name": "spec", "extra_args": "--enable-chunked-prefill"}]}  # fmt: skip
+    specialists_only = _state(specialist_rounds=[specialist]).to_untested_proposals_summary()
+    state = _state(specialist_rounds=[specialist])
+    service.answer = _answer(Action(server_args={"--kv-cache-dtype": "fp8"}), votes={0: 1})
+    await _ask_and_file(pump_mod.PredictorPump(), state)
+
+    header = " ".join(state.to_untested_proposals_summary().split())
+    assert "Predictor rows are the exception" in header
+    assert "into your next `explore` grid verbatim" in header and "`provenance: primatune`" in header
+    assert "grid verbatim" not in specialists_only
+
+
 async def test_benched_queued_and_on_stack_proposals_are_not_queued_again(service):
     queued = {"task_id": "s1", "domain": "serving_specialist", "cycle": 0,
               "proposal_set": [{"name": "q", "extra_args": "--enable-chunked-prefill"}]}  # fmt: skip
