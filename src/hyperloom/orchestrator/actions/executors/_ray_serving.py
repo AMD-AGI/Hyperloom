@@ -97,16 +97,18 @@ def _assert_cluster_feasible(*, num_gpus: float, serving_slot: bool) -> None:
     import ray
 
     totals = ray.cluster_resources()
+    # The slot first: a head started by hand without it often advertises too few GPUs as well, and the repair
+    # (a fresh head) fixes both, so it must not be hidden behind the GPU error.
+    if serving_slot and "serving_slot" not in totals:
+        raise RayMissingServingSlotError(
+            f"{RAY_INFEASIBLE_MARKER}: existing Ray head has no serving_slot resource; "
+            "restart with --resources='{\"serving_slot\":1}' or set INFERENCE_OPTIMIZER_RAY_EXEC=0"
+        )
     cluster_gpus = float(totals.get("GPU", 0))
     if cluster_gpus < num_gpus:
         raise RayInfeasibleError(
             f"{RAY_INFEASIBLE_MARKER}: cluster has {cluster_gpus} GPU(s), {num_gpus} requested; "
             "set INFERENCE_OPTIMIZER_RAY_EXEC=0 or add GPUs"
-        )
-    if serving_slot and "serving_slot" not in totals:
-        raise RayMissingServingSlotError(
-            f"{RAY_INFEASIBLE_MARKER}: existing Ray head has no serving_slot resource; "
-            "restart with --resources='{\"serving_slot\":1}' or set INFERENCE_OPTIMIZER_RAY_EXEC=0"
         )
 
 

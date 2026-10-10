@@ -17,6 +17,7 @@ from hyperloom.orchestrator.actions.executors import _ray_runtime as rr
 from hyperloom.orchestrator.actions.executors import _ray_serving as rs
 
 _LOCAL_NODE = "node-local"
+_GCS_PORT = "41234"
 
 
 class _FakeRay:
@@ -58,6 +59,8 @@ class _FakeRay:
             def get_job_id(self) -> str:
                 return "01000000"
 
+            gcs_address = f"127.0.0.1:{_GCS_PORT}"
+
         return _Ctx()
 
     def shutdown(self) -> None:
@@ -85,7 +88,7 @@ def single_node(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors._multi_node_env.is_multi_node", lambda: False)
 
 
-def _install(monkeypatch: pytest.MonkeyPatch, fake: _FakeRay, *, heads: int = 1) -> _StubBackend:
+def _install(monkeypatch: pytest.MonkeyPatch, fake: _FakeRay, *, heads: Any = (_GCS_PORT,)) -> _StubBackend:
     backend = _StubBackend(fake)
     state = types.ModuleType("ray._private.state")
     state.actors = lambda: dict(fake.actors)
@@ -96,7 +99,7 @@ def _install(monkeypatch: pytest.MonkeyPatch, fake: _FakeRay, *, heads: int = 1)
     monkeypatch.setitem(sys.modules, "ray", fake)
     monkeypatch.setitem(sys.modules, "ray._private", private)
     monkeypatch.setitem(sys.modules, "ray._private.state", state)
-    monkeypatch.setattr(rr, "_visible_gcs_server_count", lambda: heads)
+    monkeypatch.setattr(rr, "_visible_gcs_server_ports", lambda: None if heads is None else list(heads))
     monkeypatch.setattr(rb, "get_ray_backend", lambda: backend)
     return backend
 
@@ -160,7 +163,7 @@ def test_cluster_with_a_second_live_node_keeps_the_error(monkeypatch, single_nod
     )
     backend = _install(monkeypatch, fake)
 
-    with pytest.raises(rs.RayMissingServingSlotError, match="2 live nodes"):
+    with pytest.raises(rs.RayMissingServingSlotError, match="2 nodes"):
         rs._ensure_cluster_feasible(num_gpus=1, serving_slot=True)
     assert backend.restarts == 0
 
@@ -236,14 +239,48 @@ def test_force_restart_start_command_declares_the_slot(monkeypatch):
     assert '"serving_slot": 1' in starts[0][starts[0].index("--resources") + 1]
 
 
-@pytest.mark.parametrize("heads, why", [(2, "2 Ray head"), (-1, "unknown number")])
-def test_another_head_on_the_host_keeps_the_error(monkeypatch, single_node, heads, why):
-    """ray stop --force stops every head on the host, so a second (co-located) head forbids it."""
+@pytest.mark.parametrize(
+    "heads, why",
+    [
+        ((_GCS_PORT, "50000"), "2 Ray head"),
+        (("50000",), "connected one is not the only one"),
+        ((), "0 Ray head"),
+        (None, "cannot be listed"),
+    ],
+)
+def test_head_not_alone_or_not_the_connected_one_keeps_the_error(monkeypatch, single_node, heads, why):
+    """ray stop --force stops every head on the host, so the connected head must be the only one there."""
     backend = _install(monkeypatch, _FakeRay(has_serving_slot=False), heads=heads)
 
     with pytest.raises(rs.RayMissingServingSlotError, match=why):
         rs._ensure_cluster_feasible(num_gpus=1, serving_slot=True)
     assert backend.restarts == 0
+
+
+def test_cluster_with_a_dead_worker_record_keeps_the_error(monkeypatch, single_node):
+    """A multi-node cluster whose worker is down is still multi-node."""
+    fake = _FakeRay(
+        has_serving_slot=False,
+        nodes=[{"NodeID": _LOCAL_NODE, "Alive": True}, {"NodeID": "node-remote", "Alive": False}],
+    )
+    backend = _install(monkeypatch, fake)
+
+    with pytest.raises(rs.RayMissingServingSlotError, match="2 nodes"):
+        rs._ensure_cluster_feasible(num_gpus=1, serving_slot=True)
+    assert backend.restarts == 0
+
+
+def test_head_short_of_gpus_without_slot_is_still_repaired(monkeypatch, single_node):
+    """A hand-started head often lacks GPUs too; the fresh head fixes both, so the slot check comes first."""
+    fake = _FakeRay(has_serving_slot=False)
+    fake.cluster_resources = lambda: (  # type: ignore[method-assign]
+        {"CPU": 64.0, "GPU": 8.0, "serving_slot": 1.0} if fake.has_serving_slot else {"CPU": 64.0}
+    )
+    backend = _install(monkeypatch, fake)
+
+    rs._ensure_cluster_feasible(num_gpus=1, serving_slot=True)
+
+    assert backend.restarts == 1
 
 
 def test_head_with_a_resourceless_actor_keeps_the_error(monkeypatch, single_node):
@@ -259,11 +296,12 @@ def test_head_with_a_resourceless_actor_keeps_the_error(monkeypatch, single_node
 
 def test_head_with_another_live_driver_keeps_the_error(monkeypatch, single_node):
     fake = _FakeRay(has_serving_slot=False)
-    fake.jobs.append({"JobID": "02000000", "IsDead": False, "DriverPid": 424242})
+    # Same pid as this process: another PID namespace. The job id alone identifies it.
+    fake.jobs.append({"JobID": "02000000", "IsDead": False, "DriverPid": os.getpid()})
     fake.jobs.append({"JobID": "03000000", "IsDead": True, "DriverPid": 434343})
     backend = _install(monkeypatch, fake)
 
-    with pytest.raises(rs.RayMissingServingSlotError, match="pid 424242"):
+    with pytest.raises(rs.RayMissingServingSlotError, match="other live driver"):
         rs._ensure_cluster_feasible(num_gpus=1, serving_slot=True)
     assert backend.restarts == 0
 
@@ -306,10 +344,18 @@ def test_actor_creation_happens_under_the_startup_lock(monkeypatch, single_node,
     assert held == [True]
 
 
-def test_visible_gcs_server_count_reads_proc(monkeypatch, tmp_path):
-    for pid, comm in (("10", "gcs_server"), ("11", "raylet"), ("12", "gcs_server"), ("self", "x")):
+def test_visible_gcs_server_ports_reads_proc(monkeypatch, tmp_path):
+    procs = {
+        "10": ("gcs_server", ["gcs_server", "--log_dir=x", "--gcs_server_port=41234"]),
+        "11": ("raylet", ["raylet", "--gcs-address=127.0.0.1:41234"]),
+        "12": ("gcs_server", ["gcs_server", "--gcs_server_port=50000"]),
+        "13": ("gcs_server", ["gcs_server"]),
+    }
+    for pid, (comm, argv) in procs.items():
         (tmp_path / pid).mkdir()
         (tmp_path / pid / "comm").write_text(comm + "\n")
+        (tmp_path / pid / "cmdline").write_bytes("\0".join(argv).encode() + b"\0")
+    (tmp_path / "self").mkdir()
     real_listdir, real_open = os.listdir, open
     monkeypatch.setattr(rr.os, "listdir", lambda p: real_listdir(tmp_path) if p == "/proc" else real_listdir(p))
     monkeypatch.setattr(
@@ -321,4 +367,4 @@ def test_visible_gcs_server_count_reads_proc(monkeypatch, tmp_path):
         ),
     )
 
-    assert rr._visible_gcs_server_count() == 2
+    assert sorted(rr._visible_gcs_server_ports()) == ["", "41234", "50000"]

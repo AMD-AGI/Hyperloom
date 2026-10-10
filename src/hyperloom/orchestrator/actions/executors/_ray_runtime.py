@@ -286,23 +286,30 @@ def force_restart_local_cluster(
 _NON_HELD_RESOURCE_PREFIXES = ("node:", "memory", "object_store_memory")
 
 
-def _visible_gcs_server_count() -> int:
-    """Count the Ray GCS servers (one per head) running in this PID namespace; ``-1`` when unreadable."""
-    count = 0
+def _visible_gcs_server_ports() -> Optional[list[str]]:
+    """Return the ``--gcs_server_port`` of every Ray GCS server (one per head) in this PID namespace.
+
+    A server whose port cannot be read is listed as ``""``; ``None`` means ``/proc`` itself was unreadable.
+    """
     try:
         entries = os.listdir("/proc")
     except OSError:
-        return -1
+        return None
+    ports: list[str] = []
     for entry in entries:
         if not entry.isdigit():
             continue
         try:
             with open(f"/proc/{entry}/comm", encoding="utf-8") as comm:
-                if comm.read().strip() == "gcs_server":
-                    count += 1
+                if comm.read().strip() != "gcs_server":
+                    continue
+            with open(f"/proc/{entry}/cmdline", "rb") as cmdline:
+                argv = cmdline.read().decode("utf-8", "replace").split("\0")
         except OSError:
             continue
-    return count
+        port = next((a.split("=", 1)[1] for a in argv if a.startswith("--gcs_server_port=")), "")
+        ports.append(port)
+    return ports
 
 
 def _cluster_activity() -> list[str]:
@@ -321,11 +328,8 @@ def _cluster_activity() -> list[str]:
     live_actors = [a for a in ray_state.actors().values() if str(a.get("State") or "") != "DEAD"]
     if live_actors:
         activity.append(f"{len(live_actors)} actor(s) not dead")
-    other_drivers = [
-        j
-        for j in ray_state.jobs()
-        if not j.get("IsDead") and str(j.get("JobID") or "") != own_job and j.get("DriverPid") != os.getpid()
-    ]
+    # By job id alone: drivers in other PID namespaces can share this process's pid.
+    other_drivers = [j for j in ray_state.jobs() if not j.get("IsDead") and str(j.get("JobID") or "") != own_job]
     if other_drivers:
         pids = ", ".join(str(j.get("DriverPid")) for j in other_drivers)
         activity.append(f"other live driver(s) attached (pid {pids})")
@@ -352,23 +356,29 @@ def local_head_restartable() -> Tuple[bool, str]:
 
     if is_multi_node():
         return False, "this is a multi-node run"
-    heads = _visible_gcs_server_count()
-    if heads != 1:
-        return False, f"{heads if heads >= 0 else 'an unknown number of'} Ray head(s) are visible on this host"
     import ray
 
     try:
-        alive = [n for n in ray.nodes() if n.get("Alive")]
-        local_node = ray.get_runtime_context().get_node_id()
+        # Every node record, dead ones included: a multi-node cluster whose worker is down is still multi-node.
+        nodes = list(ray.nodes())
+        context = ray.get_runtime_context()
+        local_node = context.get_node_id()
+        gcs_port = str(context.gcs_address or "").rsplit(":", 1)[-1]
         totals = ray.cluster_resources()
         available = ray.available_resources()
         activity = _cluster_activity()
     except Exception as exc:  # noqa: BLE001 - an unreadable cluster is not a safe one to stop
         return False, f"could not inspect the cluster: {exc!r}"
-    if len(alive) != 1:
-        return False, f"the cluster has {len(alive)} live nodes"
-    if str(alive[0].get("NodeID") or "") != str(local_node or ""):
-        return False, "its only node is not this host's raylet"
+    if len(nodes) != 1:
+        return False, f"the cluster has {len(nodes)} nodes"
+    if not nodes[0].get("Alive") or str(nodes[0].get("NodeID") or "") != str(local_node or ""):
+        return False, "its only node is not this host's live raylet"
+    # ``ray stop --force`` stops every head on the host, so the only one there must be the connected one.
+    ports = _visible_gcs_server_ports()
+    if ports is None:
+        return False, "the Ray heads on this host cannot be listed"
+    if ports != [gcs_port]:
+        return False, f"{len(ports)} Ray head(s) are visible on this host and the connected one is not the only one"
     held = sorted(
         key
         for key, total in totals.items()
