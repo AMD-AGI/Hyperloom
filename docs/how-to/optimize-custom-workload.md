@@ -140,10 +140,11 @@ The CLI exports each pin under its own name, persists them in `state.json`, and
 also serializes them into `INFERENCE_OPTIMIZER_EXTRA_ENV` as a JSON object so a
 resume can tell which names the previous launch set.
 
-A knob Hyperloom resolves itself — `ISL`, `OSL`, `CONC`, `TP`, `EP`,
-`PRECISION`, `MAX_MODEL_LEN`, `FRAMEWORK` — takes its pin through that knob's
-own ladder rather than from the export: **an explicit flag wins, then the pin,
-then the resumed session's recorded value, then the default**. So
+A pin and an `export` of the same name are equivalent: no name is withheld. For
+a knob Hyperloom resolves itself — `ISL`, `OSL`, `CONC`, `TP`, `EP`,
+`PRECISION`, `MAX_MODEL_LEN`, `FRAMEWORK` — the environment is one rung of that
+knob's ladder: **an explicit flag wins, then the environment (where your pin
+lands), then the resumed session's recorded value, then the default**. So
 `--extra-env ISL=4096` sets the ISL, and `--isl 2048 --extra-env ISL=4096` runs
 at 2048. Everything else a pin names is set directly and is not interpreted.
 **Forward every pin as its own `--extra-env` flag** — a dropped pin is lost

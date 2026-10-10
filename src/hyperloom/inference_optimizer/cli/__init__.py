@@ -1153,52 +1153,35 @@ def _detect_checkpoint_precision(model_path: str | None) -> str:
     return _DTYPE_MAP.get(dtype, dtype) if dtype else ""
 
 
-def _pinned_positive_int(pins: dict[str, str], name: str) -> int:
-    """The operator's pin for *name* as a positive int, or 0.
+def _positive_env_int(name: str) -> int:
+    """``$name`` as a positive int, or 0.
 
-    A pin that is not a positive integer falls through to the rest of the ladder instead of failing the run: the
+    A value that is not a positive integer falls through to the rest of the ladder instead of failing the run: the
     knob has a flag, a persisted value and a default behind it, any of which is a better answer than an exit.
     """
     try:
-        value = int(str(pins.get(name.upper(), "")).strip())
+        value = int(os.environ.get(name.upper(), "").strip())
     except ValueError:
         return 0
     return value if value > 0 else 0
-
-
-def _resolve_resume_max_model_len(args: argparse.Namespace, pins: dict[str, str], state: Any) -> int:
-    """MAX_MODEL_LEN for a resume: an explicit flag, then a re-passed pin, then what the session recorded.
-
-    The same order ``_resolve_run_max_model_len_inner`` applies on a fresh launch, where the pin arrives as
-    ``$MAX_MODEL_LEN``. Without the pin rung the persisted value is written straight back over a pin re-passed to
-    change it, which is the one thing the docs say re-passing a pin is for.
-    """
-    return int(
-        getattr(args, "max_model_len", None)
-        or _pinned_positive_int(pins, "MAX_MODEL_LEN")
-        or getattr(state, "max_model_len", 0)
-        or 0
-    )
 
 
 def _resolve_workload_knobs(
     args: argparse.Namespace,
     state: Any | None = None,
 ) -> None:
-    """Fill the unset numeric workload knobs on ``args``: flag, pin, resumed state, default.
+    """Fill the unset numeric workload knobs on ``args``: flag, environment, resumed state, default.
 
-    The operator's ``--extra-env`` pins resolve here rather than surviving as their own export, because the fresh
-    branch projects ``args`` back into the environment afterwards and would overwrite them. One ladder, one answer,
-    and the projection writes what it decided. An explicit flag outranks a pin, the same way ``--max-model-len``
-    outranks ``$MAX_MODEL_LEN`` in :func:`_resolve_run_max_model_len_inner`.
+    The environment rung is what carries an ``--extra-env`` pin, exported by
+    :func:`_export_operator_launch_shape` before this runs -- the same shape ``--max-model-len`` and
+    ``$MAX_MODEL_LEN`` already have in :func:`_resolve_run_max_model_len_inner`, so a pin and an ``export`` of the
+    same name mean one thing and an explicit flag outranks both. ``args`` is then the single answer, and the
+    projection that follows writes it back.
 
     Precision is deliberately not resolved here: it reads the checkpoint, so it cannot run until the model is on
     disk, while these five have to be settled before ``_preflight`` -- ``check_gpu_visibility`` compares the run's
     TP against the visible GPU count. :func:`_resolve_precision` is the other half.
     """
-    from hyperloom.common.env_safety import operator_extra_env
-
-    pins = operator_extra_env()
     int_knobs = (
         ("isl", DEFAULT_ISL),
         ("osl", DEFAULT_OSL),
@@ -1209,25 +1192,22 @@ def _resolve_workload_knobs(
     for name, default in int_knobs:
         val = getattr(args, name, None)
         if val is None:
-            pinned = _pinned_positive_int(pins, name)
+            from_env = _positive_env_int(name)
             persisted = int(getattr(state, name, 0) or 0) if state is not None else 0
-            val = pinned or (persisted if persisted > 0 else default)
+            val = from_env or (persisted if persisted > 0 else default)
         setattr(args, name, int(val))
 
 
 def _resolve_precision(args: argparse.Namespace, state: Any | None = None) -> None:
-    """Fill ``args.precision``: flag, pin, resumed state, checkpoint detection, default.
+    """Fill ``args.precision``: flag, environment, resumed state, checkpoint detection, default.
 
     Split out of :func:`_resolve_workload_knobs` because this rung reads the checkpoint's ``config.json``: running
     it before the model is resolved would detect nothing, silently settle on the default, and leave a later call
     with ``args.precision`` already set and nothing to correct.
     """
-    from hyperloom.common.env_safety import operator_extra_env
-
-    pins = operator_extra_env()
     precision = getattr(args, "precision", None)
     if not precision:
-        precision = str(pins.get("PRECISION", "")).strip()
+        precision = os.environ.get("PRECISION", "").strip()
     if not precision:
         persisted = (getattr(state, "precision", "") or "").strip() if state is not None else ""
         if persisted:
@@ -1256,12 +1236,6 @@ def _export_workload_envs_for_optimize(
     os.environ["TP"] = str(max(1, int(tp_resolved or 1)))
     os.environ["CONC"] = str(max(1, int(getattr(args, "conc", DEFAULT_CONC) or DEFAULT_CONC)))
     os.environ["EP"] = str(max(1, int(ep_resolved or 1)))
-
-
-# Knobs with a resolution ladder of their own, which a pin enters through rather than by exporting itself. Exactly
-# the set ``_resolve_workload_knobs`` fills; ``MAX_MODEL_LEN`` and ``FRAMEWORK`` are deliberately absent because
-# their ladders read the environment, so those pins have to reach it to be seen.
-LADDER_RESOLVED_PIN_NAMES: frozenset[str] = frozenset({"ISL", "OSL", "CONC", "TP", "EP", "PRECISION"})
 
 
 def _enforce_topology_gates(*, nodes: int, gpus_per_node: int, tp: int, ep: int) -> None:
@@ -1303,18 +1277,14 @@ def _export_operator_launch_shape(
 ) -> None:
     """Project the operator's ``--server-args`` / ``--extra-env`` into env.
 
-    Each pin is exported under its own name, not only into the JSON blob. Every Hyperloom control variable is read
-    with a bare ``os.environ.get``, so a pin the blob alone carries is invisible to all of them and lets one reader
-    resolve a knob differently from the rest -- the workload a run measures and the axis it grades on are two such
-    readers.
+    Every pin is exported under its own name, not only into the JSON blob. Hyperloom's control variables are read
+    with a bare ``os.environ.get``, so a pin the blob alone carries is invisible to all of them -- which is how the
+    workload a run measured and the axis it graded on came to disagree. A pin and an ``export`` of the same name
+    are the same thing after this runs, and the knobs Hyperloom resolves for itself simply take the environment as
+    a rung of their own ladder.
 
-    A knob Hyperloom resolves itself is the one thing not exported here: it enters through its own ladder instead
-    (:data:`LADDER_RESOLVED_PIN_NAMES`). Those names reach the environment from exactly one place, the projection
-    of the ladder's answer, and keeping it that way is what makes their order checkable -- a pin that both exported
-    itself and fed the ladder would give them two writers whose relative order differs between the fresh and resume
-    branches, which is how an explicit flag ends up losing to a pin on one branch and winning on the other. The
-    blob still carries every pin: it is what the ladders read, what survives into ``state.json``, and what a later
-    resume diffs against.
+    The blob stays: it is what survives into ``state.json``, and what names the previous launch's pins so a resume
+    that drops one can unset it.
     """
     from hyperloom.common.env_safety import OPERATOR_EXTRA_ENV_VAR, operator_extra_env
 
@@ -1322,14 +1292,12 @@ def _export_operator_launch_shape(
         os.environ["INFERENCE_OPTIMIZER_SERVER_ARGS"] = server_args
     else:
         os.environ.pop("INFERENCE_OPTIMIZER_SERVER_ARGS", None)
-    direct = {k: v for k, v in extra_env.items() if k.upper() not in LADDER_RESOLVED_PIN_NAMES}
     # Read before the blob is rewritten: it names what the previous launch exported, which a resume dropping a pin
-    # -- or a second session in the same shell -- has to unset rather than leave behind. Ladder-resolved names are
-    # excluded on both sides: this function never wrote them, and the projection that did must not be cleared.
+    # -- or a second session in the same shell -- has to unset rather than leave behind.
     for name in operator_extra_env():
-        if name.upper() not in LADDER_RESOLVED_PIN_NAMES and name not in direct:
+        if name not in extra_env:
             os.environ.pop(name, None)
-    os.environ.update(direct)
+    os.environ.update(extra_env)
     if extra_env:
         os.environ[OPERATOR_EXTRA_ENV_VAR] = json.dumps(extra_env)
     else:
@@ -1983,7 +1951,15 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # YAML defaults).
         _resolve_workload_knobs(args, state)
         _resolve_precision(args, state)
-        _resume_max_model_len = _resolve_resume_max_model_len(args, _resume_extra_env, state)
+        # Same ladder as the knobs above: flag, environment (where a re-passed pin landed), recorded value. Without
+        # the environment rung a resume re-passing --extra-env MAX_MODEL_LEN to change it writes the recorded value
+        # straight back over it, which is the one thing re-passing a pin is for.
+        _resume_max_model_len = (
+            getattr(args, "max_model_len", None)
+            or _positive_env_int("MAX_MODEL_LEN")
+            or getattr(state, "max_model_len", 0)
+            or 0
+        )
         for env_name, val in (
             ("TP", args.tp),
             ("EP", args.ep),

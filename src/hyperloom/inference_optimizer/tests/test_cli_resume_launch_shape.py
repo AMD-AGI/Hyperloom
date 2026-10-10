@@ -24,15 +24,19 @@ def _knob_args(**kw) -> argparse.Namespace:
     return argparse.Namespace(**base)
 
 
-def test_pin_fills_a_workload_knob_the_flags_left_unset(monkeypatch):
-    """A pinned knob is resolved on ``args``, which is what every later env projection writes.
+def _pin(monkeypatch, **pins):
+    """Pin as the CLI does -- through the real export -- so the ladder is reached the way production reaches it."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", "")
+    for name in pins:
+        monkeypatch.setenv(name, "")
+    _export_operator_launch_shape(server_args="", extra_env=dict(pins))
 
-    Resolving it here rather than letting the pin's own export survive is what keeps one answer: the projections at
-    the end of the fresh branch write ``args`` unconditionally and would otherwise overwrite the pin.
-    """
+
+def test_pin_fills_a_workload_knob_the_flags_left_unset(monkeypatch):
+    """A pin reaches the ladder through the environment, and ``args`` is what every later projection writes."""
     from hyperloom.inference_optimizer.cli import _resolve_workload_knobs
 
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", json.dumps({"ISL": "4096", "OSL": "512"}))
+    _pin(monkeypatch, ISL="4096", OSL="512")
     args = _knob_args()
 
     _resolve_workload_knobs(args)
@@ -44,7 +48,7 @@ def test_an_explicit_flag_outranks_a_pin_of_the_same_knob(monkeypatch):
     """`--isl` wins over a pinned `ISL`, the ladder `_resolve_run_max_model_len_inner` already uses for its own knob."""
     from hyperloom.inference_optimizer.cli import _resolve_workload_knobs
 
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", json.dumps({"ISL": "4096"}))
+    _pin(monkeypatch, ISL="4096")
     args = _knob_args(isl=2048)
 
     _resolve_workload_knobs(args)
@@ -56,7 +60,7 @@ def test_pin_outranks_persisted_state_for_a_workload_knob(monkeypatch):
     """A pin sits above the resumed session's recorded value, below an explicit flag."""
     from hyperloom.inference_optimizer.cli import _resolve_workload_knobs
 
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", json.dumps({"CONC": "16"}))
+    _pin(monkeypatch, CONC="16")
     args = _knob_args()
 
     _resolve_workload_knobs(args, state=_ns(conc=4, isl=0, osl=0, tp=0, ep=0, precision=""))
@@ -64,33 +68,23 @@ def test_pin_outranks_persisted_state_for_a_workload_knob(monkeypatch):
     assert args.conc == 16
 
 
-def test_a_ladder_resolved_pin_is_not_exported_but_stays_in_the_blob(monkeypatch):
-    """A knob with its own ladder enters through it; exporting it too would beat an explicit flag on one branch.
+def test_a_pin_and_an_export_of_the_same_name_are_equivalent(monkeypatch):
+    """No name is withheld from the export, so a ladder sees a pin exactly as it sees an operator's own export."""
+    from hyperloom.inference_optimizer.cli import _resolve_workload_knobs
 
-    The blob keeps it, because the ladder is what reads it and ``state.json`` is what a later resume restores from.
-    """
     monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", "")
     monkeypatch.setenv("ISL", "")
-    monkeypatch.setenv("HYPERLOOM_AGENTIC_BACKEND", "")
 
-    _export_operator_launch_shape(server_args="", extra_env={"ISL": "4096", "HYPERLOOM_AGENTIC_BACKEND": "mlperf"})
+    _export_operator_launch_shape(server_args="", extra_env={"ISL": "4096"})
+    pinned = _knob_args()
+    _resolve_workload_knobs(pinned)
 
-    assert os.environ["ISL"] == ""
-    assert os.environ["HYPERLOOM_AGENTIC_BACKEND"] == "mlperf"
-    assert json.loads(os.environ["INFERENCE_OPTIMIZER_EXTRA_ENV"]) == {
-        "ISL": "4096",
-        "HYPERLOOM_AGENTIC_BACKEND": "mlperf",
-    }
-
-
-def test_the_unset_loop_leaves_a_ladder_resolved_projection_alone(monkeypatch):
-    """The projection writes ISL; a later export must not clear it just because the blob also names it."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", json.dumps({"ISL": "4096"}))
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", "")
     monkeypatch.setenv("ISL", "4096")
+    exported = _knob_args()
+    _resolve_workload_knobs(exported)
 
-    _export_operator_launch_shape(server_args="", extra_env={})
-
-    assert os.environ["ISL"] == "4096"
+    assert pinned.isl == exported.isl == 4096
 
 
 def test_a_pinned_tp_reaches_the_environment_on_the_fresh_branch(monkeypatch):
@@ -166,17 +160,13 @@ def test_the_fresh_launch_anchors_stay_in_order():
         )
 
 
-def test_a_repassed_max_model_len_pin_outranks_the_resumed_value():
-    """A resume re-passing the pin to change MAX_MODEL_LEN gets the new value, not what the session recorded."""
-    from hyperloom.inference_optimizer.cli import _resolve_resume_max_model_len
+def test_the_environment_rung_is_positive_ints_only(monkeypatch):
+    """The rung every ladder shares: a value that is not a positive integer falls through rather than raising."""
+    from hyperloom.inference_optimizer.cli import _positive_env_int
 
-    state = _ns(max_model_len=32768)
-
-    assert _resolve_resume_max_model_len(_knob_args(), {"MAX_MODEL_LEN": "65536"}, state) == 65536
-    # An explicit flag still wins, and with neither the session's own value stands.
-    assert _resolve_resume_max_model_len(_knob_args(max_model_len=8192), {"MAX_MODEL_LEN": "65536"}, state) == 8192
-    assert _resolve_resume_max_model_len(_knob_args(), {}, state) == 32768
-    assert _resolve_resume_max_model_len(_knob_args(), {"MAX_MODEL_LEN": "nope"}, state) == 32768
+    for raw, expected in (("65536", 65536), ("", 0), ("nope", 0), ("0", 0), ("-4", 0), ("  8  ", 8)):
+        monkeypatch.setenv("MAX_MODEL_LEN", raw)
+        assert _positive_env_int("MAX_MODEL_LEN") == expected
 
 
 def test_a_malformed_pinned_knob_does_not_take_the_run_down(monkeypatch):
@@ -184,7 +174,9 @@ def test_a_malformed_pinned_knob_does_not_take_the_run_down(monkeypatch):
     from hyperloom.inference_optimizer.cli import _resolve_workload_knobs
     from hyperloom.common.workload_defaults import DEFAULT_ISL
 
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", json.dumps({"ISL": "not-a-number"}))
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", "")
+    monkeypatch.setenv("ISL", "")
+    _export_operator_launch_shape(server_args="", extra_env={"ISL": "not-a-number"})
     args = _knob_args()
 
     _resolve_workload_knobs(args)
