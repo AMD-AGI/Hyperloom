@@ -170,10 +170,25 @@ async def test_the_predictor_block_states_the_accuracy_gate_a_keep_passes(servic
     assert ("a KEEP needs accuracy no more than 0.05 below the baseline's 0.938" in header) is stated
 
 
-async def test_an_explore_orchestration_copies_off_the_queue_is_credited_to_the_predictor(
-    service, tmp_path, monkeypatch
-):
-    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+async def test_a_predictor_row_already_in_a_grid_is_named_not_offered_again(service):
+    state = _state()
+    service.answer = _answer(
+        Action(server_args={"--kv-cache-dtype": "fp8"}), Action(server_args={"--max-num-seqs": 128}), votes={0: 2, 1: 1}
+    )
+    await _ask_and_file(pump_mod.PredictorPump(), state)
+    held, offered = state.untested_proposal_rows()
+
+    lines = state.to_untested_proposals_summary(in_grids={held["fingerprint"]}).splitlines()
+    assert [line.split()[1] for line in lines if line.startswith("• ")] == [offered["name"]]
+    assert (
+        lines[-1]
+        == f"Predictor rows already in a queued or running explore grid, not to be copied again: {held['name']}"
+    )
+
+
+@pytest.fixture
+async def coordinator(service, tmp_path, monkeypatch):
+    """A real Coordinator in FRAMEWORK whose predictor has queued one row, ``--kv-cache-dtype fp8``."""
     from hyperloom.inference_optimizer.session.paths import make_session_dir
     from hyperloom.orchestrator.loop.coordinator import Coordinator
     from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
@@ -190,31 +205,46 @@ async def test_an_explore_orchestration_copies_off_the_queue_is_credited_to_the_
         state.current_best = {"tput": 1000.0}
         service.answer = _answer(Action(server_args={"--kv-cache-dtype": "fp8"}), votes={0: 3})
         await _ask_and_file(pump_mod.PredictorPump(), state)
-        grid = [
-            {"name": "kv-fp8", "extra_args": "--kv-cache-dtype fp8", "provenance": "llm_direct"},
-            {
-                "name": "kv-fp8-async",
-                "extra_args": "--kv-cache-dtype fp8 --async-scheduling",
-                "provenance": "llm_direct",
-            },
-            {"name": "spec", "extra_args": "--kv-cache-dtype fp8 --block-size 32", "provenance": "specialist:serving"},
-            {"name": "mine", "extra_args": "--max-num-seqs 128", "provenance": "llm_direct"},
-        ]
-        intent = Intent(
-            type=IntentType.DELEGATE,
-            payload={"action_name": "explore", "idempotency_key": "e1", "params": {"grid": grid}},
-        )
-        await coord.router.handle_delegate("orchestration", intent)
-
-        (task,) = await coord.tasks.by_state("queued")
-        variants = {v["name"]: v for v in task.params["grid"]}
-        assert variants["kv-fp8"]["provenance"] == "primatune"
-        assert variants["kv-fp8-async"]["provenance"] == "llm_direct"
-        assert variants["kv-fp8-async"]["primatune_contains"] == ["primatune-c0-s0-r0-0"]
-        assert "primatune_contains" not in variants["spec"] and "primatune_contains" not in variants["mine"]
-        assert variants["spec"]["provenance"] == "specialist:serving"
+        yield coord
     finally:
         await coord.stop()
+
+
+async def _delegate_explore(coord: Any, grid: list[dict[str, Any]]) -> None:
+    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+
+    intent = Intent(
+        type=IntentType.DELEGATE,
+        payload={"action_name": "explore", "idempotency_key": "e1", "params": {"grid": grid}},
+    )
+    await coord.router.handle_delegate("orchestration", intent)
+
+
+async def test_an_explore_orchestration_copies_off_the_queue_is_credited_to_the_predictor(coordinator):
+    grid = [
+        {"name": "kv-fp8", "extra_args": "--kv-cache-dtype fp8", "provenance": "llm_direct"},
+        {"name": "kv-fp8-async", "extra_args": "--kv-cache-dtype fp8 --async-scheduling", "provenance": "llm_direct"},
+        {"name": "spec", "extra_args": "--kv-cache-dtype fp8 --block-size 32", "provenance": "specialist:serving"},
+        {"name": "mine", "extra_args": "--max-num-seqs 128", "provenance": "llm_direct"},
+    ]
+    await _delegate_explore(coordinator, grid)
+
+    (task,) = await coordinator.tasks.by_state("queued")
+    variants = {v["name"]: v for v in task.params["grid"]}
+    assert variants["kv-fp8"]["provenance"] == "primatune"
+    assert variants["kv-fp8-async"]["provenance"] == "llm_direct"
+    assert variants["kv-fp8-async"]["primatune_contains"] == ["primatune-c0-s0-r0-0"]
+    assert "primatune_contains" not in variants["spec"] and "primatune_contains" not in variants["mine"]
+    assert variants["spec"]["provenance"] == "specialist:serving"
+
+
+async def test_orchestrations_prompt_names_a_predictor_row_its_queued_grid_holds(coordinator):
+    assert "• primatune-c0-s0-r0-0 " in await coordinator.conversation.compose_prompt("orchestration")
+    await _delegate_explore(coordinator, [{"name": "kv-fp8", "extra_args": "--kv-cache-dtype fp8"}])
+
+    prompt = await coordinator.conversation.compose_prompt("orchestration")
+    assert "• primatune-c0-s0-r0-0 " not in prompt
+    assert "not to be copied again: primatune-c0-s0-r0-0" in prompt
 
 
 async def test_benched_queued_and_on_stack_proposals_are_not_queued_again(service):

@@ -111,6 +111,12 @@ the predictor often proposes changes to numerics, such as fp8 weights or KV
 cache, that cannot keep on throughput alone. They are graded like any other
 variant.
 
+A row stays on the queue until a grid benches it, so a row orchestration has
+already copied would be offered again on every turn while its grid waits. The
+block therefore lists a predictor row that a queued or running explore grid
+holds by name only, as not to be copied again. A grid cancelled before it runs
+gives the row back.
+
 ## Attribution
 
 Predictor rows carry `provenance: "primatune"`. The provenance travels with the

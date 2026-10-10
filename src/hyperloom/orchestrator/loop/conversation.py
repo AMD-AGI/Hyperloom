@@ -443,6 +443,18 @@ class ConversationCollaborator(CoordinatorCollaborator):
         )
         append_conversation(session_dir=self.session_dir, record=record)
 
+    async def _explore_grid_fingerprints(self) -> set[str]:
+        """Content fingerprints of the variants in every queued or running explore grid."""
+        from ..actions.executors._proposal_identity import content_fingerprint
+
+        return {
+            content_fingerprint(variant)
+            for task in (*await self.tasks.queued(), *await self.tasks.running())
+            if task.kind == "explore"
+            for variant in (task.params or {}).get("grid") or ()
+            if isinstance(variant, dict)
+        }
+
     async def compose_prompt(self, agent_name: str) -> str:
         """Compose the prompt for *agent_name*: session context + inbox tail (with canonical msg_id per inbox row)."""
         sections: list[str] = []
@@ -496,7 +508,9 @@ class ConversationCollaborator(CoordinatorCollaborator):
             if denial_summary:
                 sections.append(denial_summary)
             if (self.shared_state.phase or "").strip().upper() == _phase_state.PHASE_FRAMEWORK_AGENT:
-                untested_block = self.shared_state.to_untested_proposals_summary()
+                untested_block = self.shared_state.to_untested_proposals_summary(
+                    in_grids=await self._explore_grid_fingerprints()
+                )
                 if untested_block:
                     sections.append("=== Untested proposals (current cycle) ===")
                     sections.append(untested_block)

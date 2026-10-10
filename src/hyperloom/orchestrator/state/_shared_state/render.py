@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Collection
 from datetime import datetime
 from pathlib import PurePosixPath
 from typing import Any
@@ -441,17 +442,10 @@ class _RenderMixin:
             f"the baseline's {baseline:.3f}, so a row that changes numerics cannot keep on throughput alone.",
         ]
 
-    def to_untested_proposals_summary(self, *, max_entries: int = 12) -> str:
-        """Render the proposals still waiting for a benchmark slot, and any open predictor mandate."""
-        from ...predictor.mandate import open_mandate
-
-        rows = self.untested_proposal_rows()
-        mandate = open_mandate(self)
-        if not rows and not mandate:
-            return ""
-        out: list[str] = []
-        if rows and any(row["provenance"] == "primatune" for row in rows):
-            out = [
+    def _untested_header(self, rows: list[dict[str, Any]]) -> list[str]:
+        """The queue's header: the predictor's while it offers a predictor row, the specialists' otherwise."""
+        if any(row["provenance"] == "primatune" for row in rows):
+            return [
                 "Executable proposals from this cycle that no explore round has benched.",
                 "Ranked predictor rows first, then by gap severity, then most recent. The Coordinator benches the",
                 "head of this queue only while no explore is queued or running, which rarely happens while your",
@@ -462,17 +456,47 @@ class _RenderMixin:
                 *self._accuracy_gate_note(),
                 "",
             ]
-        elif rows:
-            out = [
-                "Executable specialist proposals from this cycle that no explore round has benched.",
-                "Ranked by gap severity, then most recent. The Coordinator benches the head of this",
-                "queue whenever no explore is queued or running; dispatch `explore` only for variants not listed here.",
-                "",
-            ]
+        return [
+            "Executable specialist proposals from this cycle that no explore round has benched.",
+            "Ranked by gap severity, then most recent. The Coordinator benches the head of this",
+            "queue whenever no explore is queued or running; dispatch `explore` only for variants not listed here.",
+            "",
+        ]
+
+    def to_untested_proposals_summary(self, *, max_entries: int = 12, in_grids: Collection[str] = frozenset()) -> str:
+        """Render the proposals still waiting for a benchmark slot, and any open predictor mandate.
+
+        Args:
+            max_entries: Rows rendered in full; the rest are counted.
+            in_grids: Content fingerprints of the variants in queued or running explore grids. A predictor
+                row among them is named rather than offered, since orchestration copies offered rows.
+        """
+        from ...predictor.mandate import open_mandate
+
+        rows = self.untested_proposal_rows()
+        held = {
+            row["fingerprint"] for row in rows if row["provenance"] == "primatune" and row["fingerprint"] in in_grids
+        }
+        waiting = [row["name"] for row in rows if row["fingerprint"] in held]
+        rows = [row for row in rows if row["fingerprint"] not in held]
+        mandate = open_mandate(self)
+        if not rows and not mandate and not waiting:
+            return ""
+        out: list[str] = []
         if rows:
+            out = self._untested_header(rows)
             out.extend(self._untested_proposal_line(row) for row in rows[:max_entries])
             if len(rows) > max_entries:
                 out.append(f"(+{len(rows) - max_entries} more not shown)")
+        if waiting:
+            if out:
+                out.append("")
+            out.append(
+                _flatten_for_prompt(
+                    "Predictor rows already in a queued or running explore grid, not to be copied again: "
+                    + ", ".join(waiting)
+                )
+            )
         if mandate:
             if out:
                 out.append("")
