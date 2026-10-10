@@ -17,7 +17,8 @@ Advisory review. Flag only what static gates can't.
   [Size and complexity](../docs/contributing/style-guide.md#size-and-complexity), which
   owns the numbers and the exceptions. The `code-metrics` CI job gates the complexity,
   size, duplication and dead-code metrics there; review still owns the function- and
-  module-length triggers and whether a split follows a real seam. Name the seam to
+  module-length triggers, the complexity ceiling for code outside the gate's scope, and
+  whether a split follows a real seam. Name the seam to
   split on, not just the line count, and don't ask for cleanup of an already oversized
   function merely because the change edits it — but do flag a newly crossed threshold, or
   branches and responsibilities added to a unit already over.

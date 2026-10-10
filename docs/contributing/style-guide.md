@@ -92,7 +92,28 @@ Editing a unit that was already over is not a demand to repay its debt — the g
 
 Neither number identifies a problem on its own. A long function can be one prompt template with a complexity of 1, and a short one can carry a dozen field comparisons that still need semantic review. Crossing a trigger asks the reviewer to look for a responsibility boundary, not to assume there is one — and "this is a single template" is an accepted answer. Split when it improves ownership, data flow, or testability. A function counts from its `def` line through its last line, decorators excluded and blank, comment and docstring lines included; a nested or `async` function is measured on its own. Module length is physical lines. Tests are exempt from the triggers — a table-driven test that gains a case per behaviour is doing its job — though not from the duplication and boundary rules.
 
+Passing a trigger is not a merge blocker — it means the PR description says why, or the change splits. Passing the [Complexity ceiling](#complexity-ceiling) below is; inside its scope the `code-metrics` gate is stricter still.
+
 Structure the split along the boundaries the code already has — one job per module, cohesive inside, dependencies pointing one way down the layers. A split that only moves lines to a second file, leaving the two halves reaching into each other, trades one long file for a cycle.
+
+#### Complexity ceiling
+
+Cyclomatic complexity above 20 is the one number here a review blocks on. It covers two cases: a function the change adds, and a function whose complexity the change raises — from at or below 20 to above it, or higher still when it was already above. A unit that stood above 20 before the change and that the change does not make worse is backlog, not this PR's debt.
+
+The ceiling sits at twice the trigger because the trigger asks a question the ceiling has stopped accepting answers to: at 10, "this is one dispatch table" settles it; at 20 the unit carries more branches than a reviewer can keep in their head while reading it, and a paragraph in the description does not make it reviewable. Split it, or keep the new branches out of it.
+
+Measure both sides — the head tree, and the same file at the merge base, since the verdict is a comparison:
+
+```bash
+ruff check --select C901 --config "lint.mccabe.max-complexity=20" --force-exclude \
+  --output-format concise <changed .py files under src/, tests excluded>
+
+git show "$(git merge-base origin/main HEAD)":<path> > /tmp/base.py
+ruff check --select C901 --config "lint.mccabe.max-complexity=20" --isolated \
+  --output-format concise /tmp/base.py
+```
+
+The tree carried 124 units above 20 when the ceiling was introduced (2026-10-10). The ceiling is what stops that number growing; it is not a demand to pay the 124 down.
 
 ### Module structure
 

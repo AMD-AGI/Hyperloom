@@ -25,7 +25,7 @@ Blocking means one of three things, and the repo treats them as equal:
 |---|---|
 | Wrong behaviour | correctness, crash, data or precision error, compatibility break, security, performance regression |
 | Desync | an operator-observable change the PR description never states; PR title or description does not match the diff at the current head |
-| Contract violation | the diff breaks a rule `AGENTS.md` states outright, and the finding names both the bullet it breaks and the module in this repo that already owns the concern |
+| Contract violation | the diff breaks a rule `AGENTS.md` states outright, and the finding names the bullet it breaks plus, where that bullet is about ownership, the module in this repo that already owns the concern |
 
 The third kind is the narrow one. "This could be simpler", "I would have put it elsewhere" and
 "consider extracting a helper" are reviewer taste and are deleted like anything else. What
@@ -84,7 +84,7 @@ Keep the `$WORK` it prints. Read `diff.txt` and `body.txt` before going on.
 
 Open the index at the top of [`rules.md`](rules.md) and take every row whose trigger matches
 `files.txt` and a skim of `diff.txt`. Write the union of their rule ids into `$WORK/rules.txt`, one
-per line, then read only those bodies. **Never read `rules.md` whole** — it holds 53 rules across 9
+per line, then read only those bodies. **Never read `rules.md` whole** — it holds 55 rules across 9
 families, and a reviewer told to attend to all of them attends to none. Match rows generously: a row
 you are unsure about is taken, never dropped. V1-V6 and X2 are on every list.
 

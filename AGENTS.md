@@ -63,7 +63,10 @@ doc is the authority on where that boundary lives.
   recorded backlog — may not get worse. Editing such a unit is not a demand to repay its
   debt; adding to it is a failure, and an improvement is banked by tightening the
   baseline in the same PR. The function-length and module-length triggers there stay
-  review triggers: crossing one needs a reason in the PR description or a split.
+  review triggers: crossing one needs a reason in the PR description or a split. The
+  style guide § *Complexity ceiling* (cyclomatic complexity above 20 in a function the
+  change adds or raises) is the reviewer's blocking rule; inside the gate's scope the gate
+  already refuses both cases at the lower limit.
   Maintainability, readability, extensibility, and reliability are what the thresholds
   stand in for; when a review trigger and one of those disagree, say so and keep the
   clearer code.
