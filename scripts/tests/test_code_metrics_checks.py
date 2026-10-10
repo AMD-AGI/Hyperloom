@@ -340,6 +340,9 @@ def test_a_renamed_module_is_compared_with_the_file_it_came_from(tmp_path: Path)
     commit_base(tmp_path, {"src/pkg/old.py": REPEATS + block(9)})
     git(tmp_path, "mv", "src/pkg/old.py", "src/pkg/new.py")
     assert checks.run_all(tmp_path, ["src"], [], Units(tmp_path), "HEAD") == []
+    # A fourth "seen" grows the total, but the module had three before the rename: backlog.
+    (tmp_path / "src/pkg/new.py").write_text(REPEATS + block(9) + "D = 'seen'\n")
+    assert checks.run_all(tmp_path, ["src"], [], Units(tmp_path), "HEAD") == []
     # The rename is still judged: an added literal occurrence crossing 3 fails.
     (tmp_path / "src/pkg/new.py").write_text(REPEATS + block(9) + "P = 'twice'\nQ = 'twice'\nR = 'twice'\n")
     got = [(p.check, p.where, p.line) for p in checks.run_all(tmp_path, ["src"], [], Units(tmp_path), "HEAD")]
