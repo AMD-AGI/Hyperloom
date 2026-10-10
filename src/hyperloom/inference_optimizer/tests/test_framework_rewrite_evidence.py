@@ -1386,6 +1386,50 @@ def test_probe_injection_is_idempotent(tmp_path, monkeypatch):
     assert entries.count(str(evidence.probe_asset_dir())) == 1
 
 
+def _injected_pythonpath(tmp_path: Path, envs: dict[str, Any]) -> str:
+    """Arm the start-up shim on a fresh config carrying ``envs`` and return the resulting PYTHONPATH."""
+    import yaml
+
+    from hyperloom.orchestrator.actions.executors.profile import ProfileExecutor
+
+    config = tmp_path / "profile.yaml"
+    _write_profile_config(config, envs)
+    ProfileExecutor()._inject_host_probe(config, tmp_path / "ws")
+    return yaml.safe_load(config.read_text(encoding="utf-8"))["benchmark"]["envs"]["PYTHONPATH"]
+
+
+def test_probe_injection_keeps_the_inherited_pythonpath(tmp_path, monkeypatch):
+    """Magpie replaces the launch PYTHONPATH with the config's, so a config without one carries the inherited one."""
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(["/a", "/b"]))
+    shim = str(evidence.probe_asset_dir())
+    assert _injected_pythonpath(tmp_path, {"TP": 8}) == os.pathsep.join([shim, "/a", "/b"])
+
+
+def test_probe_injection_does_not_append_the_inherited_pythonpath_to_the_config_one(tmp_path, monkeypatch):
+    """A config that carries PYTHONPATH is authoritative over the inherited value."""
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(["/a", "/b"]))
+    shim = str(evidence.probe_asset_dir())
+    assert _injected_pythonpath(tmp_path, {"PYTHONPATH": "/c"}) == os.pathsep.join([shim, "/c"])
+
+
+def test_probe_injection_moves_a_present_shim_to_the_front(tmp_path, monkeypatch):
+    """Python imports only the first sitecustomize, so a shim already on the path but not first is moved up."""
+    import yaml
+
+    from hyperloom.orchestrator.actions.executors.profile import ProfileExecutor
+
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    shim = str(evidence.probe_asset_dir())
+    config = tmp_path / "profile.yaml"
+    _write_profile_config(config, {"PYTHONPATH": os.pathsep.join(["/c", shim, "", "/d"])})
+    executor = ProfileExecutor()
+    executor._inject_host_probe(config, tmp_path / "ws")
+    first = yaml.safe_load(config.read_text(encoding="utf-8"))["benchmark"]["envs"]["PYTHONPATH"]
+    assert first == os.pathsep.join([shim, "/c", "/d"])
+    executor._inject_host_probe(config, tmp_path / "ws")
+    assert yaml.safe_load(config.read_text(encoding="utf-8"))["benchmark"]["envs"]["PYTHONPATH"] == first
+
+
 def test_probe_injection_respects_the_off_switch(tmp_path, monkeypatch):
     """With the probe switched off only the start-up shim goes in, without the probe's environment."""
     import yaml
@@ -1393,6 +1437,7 @@ def test_probe_injection_respects_the_off_switch(tmp_path, monkeypatch):
     from hyperloom.orchestrator.actions.executors.profile import ProfileExecutor
 
     monkeypatch.setenv(evidence.ENABLE_ENV, "0")
+    monkeypatch.delenv("PYTHONPATH", raising=False)
     config = tmp_path / "profile.yaml"
     _write_profile_config(config, {"TP": 8})
     assert ProfileExecutor()._inject_host_probe(config, tmp_path / "ws") == ""

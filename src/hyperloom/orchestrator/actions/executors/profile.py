@@ -848,6 +848,7 @@ class ProfileExecutor(BenchmarkRunExecutor):
         or ``""`` when the probe is not armed.
         """
         from . import _framework_rewrite_evidence as _evidence
+        from ._workload_envs import prepend_launch_pythonpath
 
         asset_dir = _evidence.probe_asset_dir()
         if not asset_dir.is_dir():
@@ -868,10 +869,9 @@ class ProfileExecutor(BenchmarkRunExecutor):
         envs = bench.setdefault("envs", {})
         if not isinstance(envs, dict):
             return ""
-        current = str(envs.get("PYTHONPATH", "") or "").strip()
-        entry = str(asset_dir)
-        if entry not in current.split(os.pathsep):
-            envs["PYTHONPATH"] = f"{entry}{os.pathsep}{current}" if current else entry
+        # First on the path even when already present: Python imports only the first sitecustomize, and the
+        # shim's chains to the next one.
+        prepend_launch_pythonpath(envs, str(asset_dir))
         for key, value in probe_env.items():
             envs[key] = value
         try:

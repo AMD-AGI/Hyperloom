@@ -744,6 +744,19 @@ def _resolve_framework_repo_path(
     return ""
 
 
+def prepend_launch_pythonpath(envs: dict[str, Any], *entries: str) -> None:
+    """Put ``entries`` first on the ``PYTHONPATH`` the materialized config hands the server launch.
+
+    Magpie launches with ``os.environ`` overlaid by ``benchmark.envs``, so a config ``PYTHONPATH`` replaces the
+    inherited one. A config without the key therefore builds on the inherited value, or prepending would drop the
+    operator's and the image's import paths; a config with the key stays authoritative. An entry already on the
+    path moves to the front, and empty parts are dropped.
+    """
+    base = envs["PYTHONPATH"] if "PYTHONPATH" in envs else os.environ.get("PYTHONPATH")
+    parts = [*entries, *str(base or "").strip().split(os.pathsep)]
+    envs["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(part for part in parts if part))
+
+
 #: Source-root envs Hyperloom writes into a vLLM launch; vLLM reports them as unknown.
 VLLM_SOURCE_ROOT_ENVS: tuple[str, ...] = ("FRAMEWORK_REPO_PATH", "VLLM_REPO_PATH", "VLLM_DIR")
 
@@ -1796,8 +1809,7 @@ def materialize_config_with_envs(
                 extra_body.setdefault("detailed_annotations", True)
                 _tool_dir = kernel_shape_tool_dir()
                 if _shape_disc and _tool_dir is not None:
-                    _existing_pp = str(envs.get("PYTHONPATH", "")).strip()
-                    envs["PYTHONPATH"] = f"{_tool_dir}{os.pathsep}{_existing_pp}" if _existing_pp else str(_tool_dir)
+                    prepend_launch_pythonpath(envs, str(_tool_dir))
                     envs["TRACELENS_SHAPE_DISCOVERY"] = "1"
                 else:
                     envs["TRACELENS_SHAPE_DISCOVERY"] = "0"
