@@ -18,6 +18,94 @@ def _ns(**kw) -> argparse.Namespace:
     return argparse.Namespace(**kw)
 
 
+def _knob_args(**kw) -> argparse.Namespace:
+    base = dict(isl=None, osl=None, conc=None, tp=None, ep=None, precision=None, model=None)
+    base.update(kw)
+    return argparse.Namespace(**base)
+
+
+def test_pin_fills_a_workload_knob_the_flags_left_unset(monkeypatch):
+    """A pinned knob is resolved on ``args``, which is what every later env projection writes.
+
+    Resolving it here rather than letting the pin's own export survive is what keeps one answer: the projections at
+    the end of the fresh branch write ``args`` unconditionally and would otherwise overwrite the pin.
+    """
+    from hyperloom.inference_optimizer.cli import _resolve_workload_knobs
+
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", json.dumps({"ISL": "4096", "OSL": "512"}))
+    args = _knob_args()
+
+    _resolve_workload_knobs(args)
+
+    assert (args.isl, args.osl) == (4096, 512)
+
+
+def test_an_explicit_flag_outranks_a_pin_of_the_same_knob(monkeypatch):
+    """`--isl` wins over a pinned `ISL`, the ladder `_resolve_run_max_model_len_inner` already uses for its own knob."""
+    from hyperloom.inference_optimizer.cli import _resolve_workload_knobs
+
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", json.dumps({"ISL": "4096"}))
+    args = _knob_args(isl=2048)
+
+    _resolve_workload_knobs(args)
+
+    assert args.isl == 2048
+
+
+def test_pin_outranks_persisted_state_for_a_workload_knob(monkeypatch):
+    """A pin sits above the resumed session's recorded value, below an explicit flag."""
+    from hyperloom.inference_optimizer.cli import _resolve_workload_knobs
+
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", json.dumps({"CONC": "16"}))
+    args = _knob_args()
+
+    _resolve_workload_knobs(args, state=_ns(conc=4, isl=0, osl=0, tp=0, ep=0, precision=""))
+
+    assert args.conc == 16
+
+
+def test_a_ladder_resolved_pin_is_not_exported_but_stays_in_the_blob(monkeypatch):
+    """A knob with its own ladder enters through it; exporting it too would beat an explicit flag on one branch.
+
+    The blob keeps it, because the ladder is what reads it and ``state.json`` is what a later resume restores from.
+    """
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", "")
+    monkeypatch.setenv("ISL", "")
+    monkeypatch.setenv("HYPERLOOM_AGENTIC_BACKEND", "")
+
+    _export_operator_launch_shape(server_args="", extra_env={"ISL": "4096", "HYPERLOOM_AGENTIC_BACKEND": "mlperf"})
+
+    assert os.environ["ISL"] == ""
+    assert os.environ["HYPERLOOM_AGENTIC_BACKEND"] == "mlperf"
+    assert json.loads(os.environ["INFERENCE_OPTIMIZER_EXTRA_ENV"]) == {
+        "ISL": "4096",
+        "HYPERLOOM_AGENTIC_BACKEND": "mlperf",
+    }
+
+
+def test_the_unset_loop_leaves_a_ladder_resolved_projection_alone(monkeypatch):
+    """The projection writes ISL; a later export must not clear it just because the blob also names it."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", json.dumps({"ISL": "4096"}))
+    monkeypatch.setenv("ISL", "4096")
+
+    _export_operator_launch_shape(server_args="", extra_env={})
+
+    assert os.environ["ISL"] == "4096"
+
+
+def test_a_malformed_pinned_knob_does_not_take_the_run_down(monkeypatch):
+    """A pin that is not a positive integer falls through to the rest of the ladder rather than raising."""
+    from hyperloom.inference_optimizer.cli import _resolve_workload_knobs
+    from hyperloom.common.workload_defaults import DEFAULT_ISL
+
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", json.dumps({"ISL": "not-a-number"}))
+    args = _knob_args()
+
+    _resolve_workload_knobs(args)
+
+    assert args.isl == DEFAULT_ISL
+
+
 def test_resume_restores_pins_before_the_agentx_staleness_guard(tmp_path, monkeypatch):
     """A session whose AgentX backend came from a pin resumes; the guard must not read an unpinned environment.
 

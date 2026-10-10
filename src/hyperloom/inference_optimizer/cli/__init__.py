@@ -1157,7 +1157,25 @@ def _resolve_workload_knobs(
     args: argparse.Namespace,
     state: Any | None = None,
 ) -> None:
-    """Fill unset workload knobs on ``args`` from a fixed priority ladder."""
+    """Fill unset workload knobs on ``args`` from a fixed priority ladder: flag, pin, state, default.
+
+    The operator's ``--extra-env`` pins resolve here rather than surviving as their own export, because the fresh
+    branch projects ``args`` back into the environment unconditionally afterwards and would overwrite them. One
+    ladder, one answer, and the later projections write what it decided. An explicit flag outranks a pin, the same
+    way ``--max-model-len`` outranks ``$MAX_MODEL_LEN`` in :func:`_resolve_run_max_model_len_inner`.
+    """
+    from hyperloom.common.env_safety import operator_extra_env
+
+    pins = operator_extra_env()
+
+    def _pinned_int(name: str) -> int:
+        """The pin for *name* as a positive int, or 0. A malformed pin falls through rather than failing the run."""
+        try:
+            value = int(str(pins.get(name.upper(), "")).strip())
+        except ValueError:
+            return 0
+        return value if value > 0 else 0
+
     int_knobs = (
         ("isl", DEFAULT_ISL),
         ("osl", DEFAULT_OSL),
@@ -1168,10 +1186,13 @@ def _resolve_workload_knobs(
     for name, default in int_knobs:
         val = getattr(args, name, None)
         if val is None:
+            pinned = _pinned_int(name)
             persisted = int(getattr(state, name, 0) or 0) if state is not None else 0
-            val = persisted if persisted > 0 else default
+            val = pinned or (persisted if persisted > 0 else default)
         setattr(args, name, int(val))
     precision = getattr(args, "precision", None)
+    if not precision:
+        precision = str(pins.get("PRECISION", "")).strip()
     if not precision:
         persisted = (getattr(state, "precision", "") or "").strip() if state is not None else ""
         if persisted:
@@ -1202,6 +1223,12 @@ def _export_workload_envs_for_optimize(
     os.environ["EP"] = str(max(1, int(ep_resolved or 1)))
 
 
+# Knobs with a resolution ladder of their own, which a pin enters through rather than by exporting itself. Exactly
+# the set ``_resolve_workload_knobs`` fills; ``MAX_MODEL_LEN`` and ``FRAMEWORK`` are deliberately absent because
+# their ladders read the environment, so those pins have to reach it to be seen.
+LADDER_RESOLVED_PIN_NAMES: frozenset[str] = frozenset({"ISL", "OSL", "CONC", "TP", "EP", "PRECISION"})
+
+
 def _export_operator_launch_shape(
     *,
     server_args: str,
@@ -1212,8 +1239,13 @@ def _export_operator_launch_shape(
     Each pin is exported under its own name, not only into the JSON blob. Every Hyperloom control variable is read
     with a bare ``os.environ.get``, so a pin the blob alone carries is invisible to all of them and lets one reader
     resolve a knob differently from the rest -- the workload a run measures and the axis it grades on are two such
-    readers. Nothing is withheld from the export: the operator who can pass ``--extra-env`` can equally ``export``
-    the same name, so an exception list would buy no safety and would reintroduce exactly the split this removes.
+    readers.
+
+    A knob Hyperloom resolves itself is the one thing not exported here: it enters through its own ladder instead
+    (:data:`LADDER_RESOLVED_PIN_NAMES`), because this function runs at a different point on the fresh and resume
+    branches while the projections of those knobs do not, so a pin that both exported itself and fed the ladder
+    would outrank an explicit flag on one branch and lose to it on the other. The blob still carries every pin --
+    it is what the ladders read, what survives into ``state.json``, and what a later resume diffs against.
     """
     from hyperloom.common.env_safety import OPERATOR_EXTRA_ENV_VAR, operator_extra_env
 
@@ -1221,12 +1253,14 @@ def _export_operator_launch_shape(
         os.environ["INFERENCE_OPTIMIZER_SERVER_ARGS"] = server_args
     else:
         os.environ.pop("INFERENCE_OPTIMIZER_SERVER_ARGS", None)
+    direct = {k: v for k, v in extra_env.items() if k.upper() not in LADDER_RESOLVED_PIN_NAMES}
     # Read before the blob is rewritten: it names what the previous launch exported, which a resume dropping a pin
-    # -- or a second session in the same shell -- has to unset rather than leave behind.
+    # -- or a second session in the same shell -- has to unset rather than leave behind. Ladder-resolved names are
+    # excluded on both sides: this function never wrote them, and the projection that did must not be cleared.
     for name in operator_extra_env():
-        if name not in extra_env:
+        if name.upper() not in LADDER_RESOLVED_PIN_NAMES and name not in direct:
             os.environ.pop(name, None)
-    os.environ.update(extra_env)
+    os.environ.update(direct)
     if extra_env:
         os.environ[OPERATOR_EXTRA_ENV_VAR] = json.dumps(extra_env)
     else:
@@ -1638,6 +1672,13 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     if nodes_resolved >= 2:
         os.environ["INFERENCE_OPTIMIZER_GPUS_PER_NODE"] = str(gpus_per_node_resolved)
         os.environ["INFERENCE_OPTIMIZER_MN_BACKEND"] = _resolve_mn_backend(args)
+    # Before the workload projections below, not after: a knob Hyperloom resolves itself takes its pin through
+    # ``_resolve_workload_knobs``'s ladder, and the projection of that resolved value is what must land last. This
+    # export is what carries the names Hyperloom does not resolve -- an AgentX backend, a recipe knob.
+    _export_operator_launch_shape(
+        server_args=str(getattr(args, "server_args", "") or "").strip(),
+        extra_env=parse_operator_extra_env(args),
+    )
     # The partition shape is deliberately NOT exported here.
 
     # Project resolved workload knobs into env for the fresh-launch path only.
@@ -1647,13 +1688,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             tp_resolved=tp_resolved,
             ep_resolved=ep_resolved,
         )
-    # After the workload knobs: the pins are now real environment variables, and an operator who pinned TP/CONC/EP
-    # outranks the values derived from the flags.
-    _export_operator_launch_shape(
-        server_args=str(getattr(args, "server_args", "") or "").strip(),
-        extra_env=parse_operator_extra_env(args),
-    )
     # User-declared grid skip list; re-export so subprocess executors inherit it (empty clears stale values).
+    # Not pinnable: this is the policy for one run, not part of the session's measurement contract, so it comes from
+    # this invocation's flag on a resume too rather than from what the original launch pinned.
     skip_variants_resolved = (getattr(args, "skip_variants", "") or "").strip()
     os.environ["SKIP_VARIANTS"] = skip_variants_resolved
     # Surface PD_* knobs for executors; empty means "resolve from state.json", pd_mode always exported.
