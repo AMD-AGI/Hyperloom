@@ -2319,6 +2319,30 @@ class IntegratePatchExecutor:
         )
         return None
 
+    async def _record_closure_baseline(self, attempt: IntegrateAttempt, params: dict[str, Any]) -> None:
+        """Observe the environment before the enablement's first setup command, through the KEEP's interpreter.
+
+        The KEEP closure alone cannot say which versions the enablement changed;
+        the setup script checks the difference between the two.
+        """
+        from ...enablement.recipe.keep_probe import graded_framework, probe_keep_environment
+
+        closure, _assertions = await asyncio.to_thread(
+            probe_keep_environment,
+            params,
+            framework=graded_framework(params, ""),
+            build_manifest=(),
+            specialist_task_id=attempt.specialist_task_id,
+            provision_result=attempt.provision_result,
+        )
+        if not attempt.shared_state.enablement.record_closure_baseline(closure):
+            return
+        try:
+            attempt.shared_state.save(self.session_dir)
+        except (OSError, AttributeError):
+            # Held in memory either way, and the rearm saves again.
+            log.debug("integrate_patch: save after closure baseline failed", exc_info=True)
+
     async def _stage_apply(
         self,
         attempt: IntegrateAttempt,
@@ -2341,6 +2365,8 @@ class IntegratePatchExecutor:
         inherited_args, inherited_envs = _established_enablement_config(params, shared_state)
         for candidate in _candidate_mutation_roots(params=params, done_payload=done_payload):
             _note_pre_mutation_head(attempt, candidate, enablement=is_enablement, session_dir=self.session_dir)
+        if is_enablement and not shared_state.enablement.environment_closure_baseline:
+            await self._record_closure_baseline(attempt, params)
         setup_result: dict[str, Any] = {"applied": [], "skipped": [], "failed": [], "executions": []}
         if bool(params.get("enablement")):
             setup_cmds = resolve_setup_commands(params=params, done_payload=done_payload)
