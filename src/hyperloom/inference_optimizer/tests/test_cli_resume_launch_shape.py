@@ -93,6 +93,72 @@ def test_the_unset_loop_leaves_a_ladder_resolved_projection_alone(monkeypatch):
     assert os.environ["ISL"] == "4096"
 
 
+def test_a_pinned_tp_reaches_the_environment_on_the_fresh_branch(monkeypatch):
+    """Mirrors the fresh branch: launch-shape export, ladder, then the TP/CONC/EP projection.
+
+    The environment is what the server launches from while ``state.json`` records ``args``, so a split between the
+    two runs one shape and reports another. The projection has to sit after the ladder for them to agree.
+    """
+    from hyperloom.inference_optimizer.cli import _export_workload_envs_for_optimize, _resolve_workload_knobs
+
+    for name in ("TP", "EP", "CONC"):
+        monkeypatch.setenv(name, "")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", "")
+    args = _knob_args()
+
+    _export_operator_launch_shape(server_args="", extra_env={"TP": "4", "EP": "2", "CONC": "63"})
+    _resolve_workload_knobs(args)
+    _export_workload_envs_for_optimize(args, tp_resolved=int(args.tp), ep_resolved=int(args.ep))
+
+    assert (args.tp, args.ep, args.conc) == (4, 2, 63)
+    assert (os.environ["TP"], os.environ["EP"], os.environ["CONC"]) == ("4", "2", "63")
+
+
+def test_every_tp_projection_sits_after_the_ladder_that_resolves_the_pin():
+    """The ordering is the fix, and the test above cannot see it: it calls the two in the order it wants.
+
+    ``_export_workload_envs_for_optimize`` is the only non-test writer of ``os.environ["TP"|"CONC"|"EP"]``. Called
+    before ``_resolve_workload_knobs``, it publishes the flag-derived default over a pin and the run launches at a
+    shape its own ``state.json`` does not record. Asserted against the source because that is where the defect lives.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    from hyperloom.inference_optimizer import cli
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(cli._run_optimize)))
+    calls = [
+        (node.lineno, node.func.id)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in ("_resolve_workload_knobs", "_export_workload_envs_for_optimize")
+    ]
+    ladders = [line for line, name in calls if name == "_resolve_workload_knobs"]
+    projections = [line for line, name in calls if name == "_export_workload_envs_for_optimize"]
+
+    assert projections, "_run_optimize no longer projects TP/CONC/EP at all"
+    assert ladders, "_run_optimize no longer resolves the workload knobs"
+    assert min(projections) > min(ladders), (
+        f"TP/CONC/EP projected at line {min(projections)} of _run_optimize, "
+        f"before the ladder at line {min(ladders)} -- a pinned TP would not reach the environment"
+    )
+
+
+def test_a_repassed_max_model_len_pin_outranks_the_resumed_value():
+    """A resume re-passing the pin to change MAX_MODEL_LEN gets the new value, not what the session recorded."""
+    from hyperloom.inference_optimizer.cli import _resolve_resume_max_model_len
+
+    state = _ns(max_model_len=32768)
+
+    assert _resolve_resume_max_model_len(_knob_args(), {"MAX_MODEL_LEN": "65536"}, state) == 65536
+    # An explicit flag still wins, and with neither the session's own value stands.
+    assert _resolve_resume_max_model_len(_knob_args(max_model_len=8192), {"MAX_MODEL_LEN": "65536"}, state) == 8192
+    assert _resolve_resume_max_model_len(_knob_args(), {}, state) == 32768
+    assert _resolve_resume_max_model_len(_knob_args(), {"MAX_MODEL_LEN": "nope"}, state) == 32768
+
+
 def test_a_malformed_pinned_knob_does_not_take_the_run_down(monkeypatch):
     """A pin that is not a positive integer falls through to the rest of the ladder rather than raising."""
     from hyperloom.inference_optimizer.cli import _resolve_workload_knobs

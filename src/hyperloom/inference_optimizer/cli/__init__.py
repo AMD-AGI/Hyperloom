@@ -1153,6 +1153,34 @@ def _detect_checkpoint_precision(model_path: str | None) -> str:
     return _DTYPE_MAP.get(dtype, dtype) if dtype else ""
 
 
+def _pinned_positive_int(pins: dict[str, str], name: str) -> int:
+    """The operator's pin for *name* as a positive int, or 0.
+
+    A pin that is not a positive integer falls through to the rest of the ladder instead of failing the run: the
+    knob has a flag, a persisted value and a default behind it, any of which is a better answer than an exit.
+    """
+    try:
+        value = int(str(pins.get(name.upper(), "")).strip())
+    except ValueError:
+        return 0
+    return value if value > 0 else 0
+
+
+def _resolve_resume_max_model_len(args: argparse.Namespace, pins: dict[str, str], state: Any) -> int:
+    """MAX_MODEL_LEN for a resume: an explicit flag, then a re-passed pin, then what the session recorded.
+
+    The same order ``_resolve_run_max_model_len_inner`` applies on a fresh launch, where the pin arrives as
+    ``$MAX_MODEL_LEN``. Without the pin rung the persisted value is written straight back over a pin re-passed to
+    change it, which is the one thing the docs say re-passing a pin is for.
+    """
+    return int(
+        getattr(args, "max_model_len", None)
+        or _pinned_positive_int(pins, "MAX_MODEL_LEN")
+        or getattr(state, "max_model_len", 0)
+        or 0
+    )
+
+
 def _resolve_workload_knobs(
     args: argparse.Namespace,
     state: Any | None = None,
@@ -1167,15 +1195,6 @@ def _resolve_workload_knobs(
     from hyperloom.common.env_safety import operator_extra_env
 
     pins = operator_extra_env()
-
-    def _pinned_int(name: str) -> int:
-        """The pin for *name* as a positive int, or 0. A malformed pin falls through rather than failing the run."""
-        try:
-            value = int(str(pins.get(name.upper(), "")).strip())
-        except ValueError:
-            return 0
-        return value if value > 0 else 0
-
     int_knobs = (
         ("isl", DEFAULT_ISL),
         ("osl", DEFAULT_OSL),
@@ -1186,7 +1205,7 @@ def _resolve_workload_knobs(
     for name, default in int_knobs:
         val = getattr(args, name, None)
         if val is None:
-            pinned = _pinned_int(name)
+            pinned = _pinned_positive_int(pins, name)
             persisted = int(getattr(state, name, 0) or 0) if state is not None else 0
             val = pinned or (persisted if persisted > 0 else default)
         setattr(args, name, int(val))
@@ -1227,6 +1246,39 @@ def _export_workload_envs_for_optimize(
 # the set ``_resolve_workload_knobs`` fills; ``MAX_MODEL_LEN`` and ``FRAMEWORK`` are deliberately absent because
 # their ladders read the environment, so those pins have to reach it to be seen.
 LADDER_RESOLVED_PIN_NAMES: frozenset[str] = frozenset({"ISL", "OSL", "CONC", "TP", "EP", "PRECISION"})
+
+
+def _enforce_topology_gates(*, nodes: int, gpus_per_node: int, tp: int, ep: int) -> None:
+    """Fail fast on a TP/EP shape the cluster cannot place, rather than on a cryptic launcher crash mid-cold-start.
+
+    Multi-node only: a single node places whatever its own GPU count allows and the launcher reports that itself.
+    Called twice on a fresh launch -- once on the flag-derived values, so a bad ``--tp`` is refused before any of
+    the slow preflight work, and again once ``_resolve_workload_knobs`` has applied an ``--extra-env`` pin, which
+    is the shape that actually launches.
+    """
+    if nodes < 2:
+        return
+    total_gpus = nodes * gpus_per_node
+    # Gate 1: total cluster GPUs (nodes*gpus_per_node) must hold the model's TP shards.
+    if total_gpus < tp:
+        print(
+            f"ERROR: TP={tp} exceeds total GPU count "
+            f"({nodes} nodes * {gpus_per_node} "
+            f"gpus_per_node = {total_gpus}). Either lower --tp, raise "
+            "--nodes, or use a larger --gpus-per-node pod "
+            "template.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    # Gate 2: EP cannot exceed TP (can't place more expert shards than ranks); fail before bootstrap.
+    if ep > tp:
+        print(
+            f"ERROR: EP={ep} > TP={tp}. Expert-parallel "
+            "size must be <= tensor-parallel size. Either lower --ep or "
+            "raise --tp.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
 
 def _export_operator_launch_shape(
@@ -1641,30 +1693,13 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         gpus_per_node_resolved = int(gpn_attr)
     else:
         gpus_per_node_resolved = 8
-    total_gpus = nodes_resolved * gpus_per_node_resolved
 
-    # Topology sanity gates — multi-node only (nodes>=2); fail fast vs a cryptic launcher crash mid-cold-start.
-    if nodes_resolved >= 2:
-        # Gate 1: total cluster GPUs (nodes*gpus_per_node) must hold the model's TP shards.
-        if total_gpus < tp_resolved:
-            print(
-                f"ERROR: TP={tp_resolved} exceeds total GPU count "
-                f"({nodes_resolved} nodes * {gpus_per_node_resolved} "
-                f"gpus_per_node = {total_gpus}). Either lower --tp, raise "
-                "--nodes, or use a larger --gpus-per-node pod "
-                "template.",
-                file=sys.stderr,
-            )
-            sys.exit(2)
-        # Gate 2: EP cannot exceed TP (can't place more expert shards than ranks); fail before bootstrap.
-        if ep_resolved > tp_resolved:
-            print(
-                f"ERROR: EP={ep_resolved} > TP={tp_resolved}. Expert-parallel "
-                "size must be <= tensor-parallel size. Either lower --ep or "
-                "raise --tp.",
-                file=sys.stderr,
-            )
-            sys.exit(2)
+    _enforce_topology_gates(
+        nodes=nodes_resolved,
+        gpus_per_node=gpus_per_node_resolved,
+        tp=tp_resolved,
+        ep=ep_resolved,
+    )
 
     os.environ["INFERENCE_OPTIMIZER_NODES"] = str(nodes_resolved)
     # Multi-node topology handoff: export the CLI-flag-resolved backend / gpus-per-node so downstream subprocesses
@@ -1681,13 +1716,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     )
     # The partition shape is deliberately NOT exported here.
 
-    # Project resolved workload knobs into env for the fresh-launch path only.
-    if not args.resume_from:
-        _export_workload_envs_for_optimize(
-            args,
-            tp_resolved=tp_resolved,
-            ep_resolved=ep_resolved,
-        )
+    # TP/CONC/EP are projected on the fresh branch only after ``_resolve_workload_knobs`` has run, because the
+    # values here are flag-derived and would publish the default over a pin. The resume branch projects them
+    # after its own ladder.
     # User-declared grid skip list; re-export so subprocess executors inherit it (empty clears stale values).
     # Not pinnable: this is the policy for one run, not part of the session's measurement contract, so it comes from
     # this invocation's flag on a resume too rather than from what the original launch pinned.
@@ -1926,7 +1957,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # resume still win), then project the resolved values into env so resume sees the same workload contract (not
         # YAML defaults).
         _resolve_workload_knobs(args, state)
-        _resume_max_model_len = getattr(args, "max_model_len", None) or getattr(state, "max_model_len", 0) or 0
+        _resume_max_model_len = _resolve_resume_max_model_len(args, _resume_extra_env, state)
         for env_name, val in (
             ("TP", args.tp),
             ("EP", args.ep),
@@ -2192,6 +2223,17 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # Resolve workload knobs (flag > default; no resume state on a fresh launch) so ISL/OSL/CONC/TP/EP are
         # authoritative reals before MAX_MODEL_LEN auto-derivation and env projection (issue #903).
         _resolve_workload_knobs(args)
+        # Now that a pinned TP/EP is resolved, re-check the shape the run actually launches with: the gates above
+        # saw only the flags.
+        _enforce_topology_gates(
+            nodes=nodes_resolved,
+            gpus_per_node=gpus_per_node_resolved,
+            tp=int(args.tp),
+            ep=int(args.ep),
+        )
+        # Projected here rather than beside the flag-derived values near the top: this is the first point where a
+        # pinned TP/CONC/EP has been resolved, and the environment is what the server launches from.
+        _export_workload_envs_for_optimize(args, tp_resolved=int(args.tp), ep_resolved=int(args.ep))
         # MAX_MODEL_LEN is operator-overridable.
         max_model_len, max_model_len_source = _resolve_run_max_model_len(args)
         args.max_model_len = max_model_len
