@@ -669,7 +669,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             return
         if not str(state.custom_specialist_prompt or "").strip() or state.custom_specialist_dispatched:
             return
-        from .domains import CUSTOM_SPECIALIST_ANCHOR, CUSTOM_SPECIALIST_KEY, is_custom_specialist_dispatch
+        from .domains import CUSTOM_SPECIALIST_KEY, is_custom_specialist_dispatch
         from .profile import MODE_RESEARCH
         from ..state._shared_state.phase_state import gap_actionability_key
 
@@ -683,7 +683,6 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
 
         params: dict[str, Any] = {
             "domain": CUSTOM_SPECIALIST_KEY,
-            "tags": [CUSTOM_SPECIALIST_ANCHOR],
             "scope": "domain",
             "source": "coordinator_internal",
             "reason": "custom_specialist_guarantee",

@@ -42,7 +42,7 @@ PR_QUERY_REPOS: tuple[str, ...] = (
 
 
 CUSTOM_SPECIALIST_KEY: str = "custom_specialist"
-CUSTOM_SPECIALIST_ANCHOR: str = "custom"
+OPERATOR_DEFINED_LAYER: str = "operator-defined"
 
 # Canonical catalogue of knowledge-domain anchors.
 SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
@@ -179,8 +179,8 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
     SpecialistDomain(
         key=CUSTOM_SPECIALIST_KEY,
         llm_selectable=False,
-        layer="operator-defined",
-        kb_anchor=CUSTOM_SPECIALIST_ANCHOR,
+        layer=OPERATOR_DEFINED_LAYER,
+        kb_anchor=CUSTOM_SPECIALIST_KEY,
         description="Operator-defined specialist; description is supplied per session.",
     ),
 )
@@ -197,6 +197,9 @@ def _derive_knowledge_domain_tags() -> tuple[str, ...]:
     """Collect the distinct knowledge-domain tags from the catalogue."""
     seen: dict[str, None] = {}
     for d in SPECIALIST_DOMAINS:
+        # Operator-defined domains are per session, so they get no round counters.
+        if d.layer == OPERATOR_DEFINED_LAYER:
+            continue
         anchor = d.kb_anchor.strip()
         if anchor:
             seen.setdefault(anchor, None)
@@ -270,10 +273,10 @@ def normalize_dispatch_tags(params: dict) -> list[str]:
 
 
 def is_custom_specialist_dispatch(params: dict) -> bool:
-    """Whether a dispatch runs as ``custom_specialist`` (by domain key or tag)."""
+    """Whether a dispatch names ``custom_specialist`` as its domain or as a tag."""
     if str(params.get("domain") or "").strip() == CUSTOM_SPECIALIST_KEY:
         return True
-    return CUSTOM_SPECIALIST_ANCHOR in normalize_dispatch_tags(params)
+    return CUSTOM_SPECIALIST_KEY in normalize_dispatch_tags(params)
 
 
 def get_domain(key: str) -> SpecialistDomain | None:
@@ -314,7 +317,6 @@ SPECIALIST_MAX_TURNS_HARD_CAP: int = 1000
 
 
 __all__ = [
-    "CUSTOM_SPECIALIST_ANCHOR",
     "CUSTOM_SPECIALIST_KEY",
     "DEFAULT_SPECIALIST_MAX_TURNS",
     "EXTRA_KNOWLEDGE_DOMAIN_TAGS",

@@ -39,7 +39,7 @@ from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
 )
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.specialists.dispatch import SpecialistDispatchCollaborator
-from hyperloom.orchestrator.specialists.domains import get_domain
+from hyperloom.orchestrator.specialists.domains import KNOWLEDGE_DOMAIN_TAGS, get_domain
 from hyperloom.orchestrator.specialists.runner import SpecialistRunner, SpecialistSubprocessConfig
 from hyperloom.orchestrator.state.objective import build_objective
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -89,7 +89,7 @@ def test_custom_system_prompt_carries_operator_identity_and_verbatim_focus():
         "",
         "You are a fully autonomous **custom_specialist** dispatched by the",
         "Hyperloom Coordinator. Layer: operator-defined.",
-        "KB anchor: custom.",
+        "KB anchor: custom_specialist.",
         "",
         f"Description: {_DESCRIPTION}",
     ]
@@ -138,16 +138,21 @@ def test_custom_user_prompt_is_minimal(mode, expected):
     assert _headers(user) == expected
 
 
-def test_builtin_with_custom_tag_renders_custom_focus_only_when_configured():
+def test_builtin_tagged_custom_specialist_renders_custom_focus_only_when_configured():
     serving = get_domain("serving_specialist")
     configured, _ = build_specialist_prompts(
+        _inputs(serving, extra_focus_tags=("custom_specialist",), custom_specialist_prompt=_PROMPT)
+    )
+    unconfigured, _ = build_specialist_prompts(_inputs(serving, extra_focus_tags=("custom_specialist",)))
+    generic_tag, _ = build_specialist_prompts(
         _inputs(serving, extra_focus_tags=("custom",), custom_specialist_prompt=_PROMPT)
     )
-    unconfigured, _ = build_specialist_prompts(_inputs(serving, extra_focus_tags=("custom",)))
     untagged, _ = build_specialist_prompts(_inputs(serving))
+    untagged_configured, _ = build_specialist_prompts(_inputs(serving, custom_specialist_prompt=_PROMPT))
 
     assert f"### Domain focus — custom_specialist\n\n{_PROMPT}\n" in configured
     assert unconfigured == untagged
+    assert generic_tag == untagged_configured
 
 
 @dataclass
@@ -218,7 +223,7 @@ def _delegate(params: dict[str, Any]) -> Intent:
     "params",
     [
         {"domain": "custom_specialist", "gap_canonical_id": "gap.x"},
-        {"tags": ["custom"], "gap_canonical_id": "gap.x"},
+        {"tags": ["custom_specialist"], "gap_canonical_id": "gap.x"},
         {"scope": "freeform", "domain": "custom_specialist", "task_description": "do it"},
     ],
 )
@@ -234,6 +239,28 @@ def test_gate_allows_custom_specialist_when_configured():
     gate = PolicyGate(role_registry=default_role_registry())
     gate.shared_state = SharedState(custom_specialist_prompt=_PROMPT, custom_specialist_description=_DESCRIPTION)
     gate.validate_intent("orchestration", _delegate({"domain": "custom_specialist", "gap_canonical_id": "gap.x"}))
+
+
+def test_gate_allows_a_builtin_dispatch_tagged_custom_when_not_configured():
+    gate = PolicyGate(role_registry=default_role_registry())
+    gate.shared_state = SharedState()
+    gate.validate_intent(
+        "orchestration",
+        _delegate({"domain": "serving_specialist", "tags": ["framework", "custom"], "gap_canonical_id": "gap.x"}),
+    )
+
+
+def test_knowledge_domain_tags_do_not_include_the_custom_specialist():
+    assert KNOWLEDGE_DOMAIN_TAGS == (
+        "framework",
+        "kernel_agent",
+        "communication",
+        "compiler",
+        "systems",
+        "pr_intelligence",
+        "research_scout",
+        "static_recon",
+    )
 
 
 # CLI
@@ -443,7 +470,6 @@ def _dispatched(coord) -> tuple[dict[str, Any], str]:
 
 _BASE_PARAMS = {
     "domain": "custom_specialist",
-    "tags": ["custom"],
     "scope": "domain",
     "source": "coordinator_internal",
     "reason": "custom_specialist_guarantee",
@@ -499,7 +525,9 @@ async def test_a_denied_attempt_is_not_retried_until_the_next_cycle(guarantee_co
 
 
 async def test_guarantee_skips_while_a_tag_only_custom_task_is_queued(guarantee_coord):
-    guarantee_coord.tasks.queued.return_value = [SimpleNamespace(kind="specialist", params={"tags": ["custom"]})]
+    guarantee_coord.tasks.queued.return_value = [
+        SimpleNamespace(kind="specialist", params={"tags": ["custom_specialist"]})
+    ]
 
     await guarantee_coord.specialist_dispatch.maybe_ensure_custom_specialist()
 
@@ -552,6 +580,24 @@ async def test_guarantee_falls_back_to_research_when_patches_are_impossible(guar
     )
 
 
+async def test_stalled_domain_force_ignores_a_custom_hinted_gap_when_not_configured(guarantee_coord):
+    state = guarantee_coord.shared_state
+    state.custom_specialist_prompt = ""
+    state.upsert_gap({"canonical_id": "gap.hint", "domain_hint": "custom", "severity": "high"})
+    state.upsert_gap({"canonical_id": "gap.serving", "domain_hint": "serving_specialist", "severity": "low"})
+    for _ in range(50):
+        state.bump_domain_round_counters()
+
+    await guarantee_coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
+
+    params, _ = _dispatched(guarantee_coord)
+    assert (params["domain"], params["tags"], params["gap_canonical_id"]) == (
+        "serving_specialist",
+        ["framework"],
+        "gap.serving",
+    )
+
+
 # Spawn marks the custom specialist as run
 async def test_spawning_a_tag_only_custom_task_marks_it_dispatched(tmp_path):
     from hyperloom.orchestrator.loop.coordinator import Coordinator
@@ -576,7 +622,7 @@ async def test_spawning_a_tag_only_custom_task_marks_it_dispatched(tmp_path):
     coord.sub.register_executor("specialist", _specialist)
     await coord.tasks.create_or_return_existing(
         kind="specialist",
-        params={"tags": ["custom"], "gap_canonical_id": "gap.x"},
+        params={"tags": ["custom_specialist"], "gap_canonical_id": "gap.x"},
         idempotency_key="custom-spawn",
         requires_lanes=["research_lane"],
         lease_ttl_sec=600,
