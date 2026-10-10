@@ -43,6 +43,11 @@ jobs:
         with:
           python-version: "3.11"
 
+      # A PR's own .gitattributes could mark *.py as binary (``-diff``), which
+      # makes git report no changed lines. info/attributes takes precedence.
+      - name: Force text diffs for Python files
+        run: attrs="$(git rev-parse --git-path info/attributes)"; mkdir -p "$(dirname "$attrs")"; echo '*.py diff' >> "$attrs"
+
       - name: Diff budget
         id: size
         env:
@@ -57,10 +62,22 @@ jobs:
           fi
           python scripts/pr_hygiene.py size --base HEAD^1 --head HEAD
 
-      # Agent-facing docs are run verbatim by LLM agents.
+      # Agent-facing docs are run verbatim by LLM agents. The checker prints
+      # PR-controlled file paths, so workflow commands are suspended while it
+      # runs: a crafted filename cannot forge an annotation.
       - name: Check CLI references in agent docs
         if: always()
-        run: python scripts/check_cli_references.py
+        run: |
+          set -euo pipefail
+          resume="$(python -c 'import secrets; print(secrets.token_hex(16))')"
+          echo "::stop-commands::${resume}"
+          rc=0
+          python scripts/check_cli_references.py || rc=$?
+          echo "::${resume}::"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error title=cli-references::Agent docs reference a module, subcommand or script that does not exist (see the lines above)."
+          fi
+          exit "$rc"
 
       # Advisory for now: findings are warnings. To make it blocking, set
       # PR_TEMPLATE_ENFORCE to "true".

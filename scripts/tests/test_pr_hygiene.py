@@ -272,13 +272,19 @@ def test_pr_hygiene_workflow_always_runs_read_only():
     assert {"labeled", "unlabeled", "edited", "synchronize"} <= set(on["pull_request"]["types"])
     assert wf["permissions"] == {"contents": "read", "pull-requests": "read"}
     steps = {s.get("name"): s for s in wf["jobs"]["pr-hygiene"]["steps"]}
-    assert steps["Check CLI references in agent docs"]["run"] == "python scripts/check_cli_references.py"
     tpl = steps["PR template completeness"]
     # The body reaches the script only as data, never inside the shell text.
     assert tpl["env"]["PR_BODY"] == "${{ github.event.pull_request.body }}"
     assert "github.event" not in tpl["run"]
     assert tpl["env"]["PR_TEMPLATE_ENFORCE"] == "false"
-    assert steps["Check CLI references in agent docs"]["if"] == "always()"
+    cli = steps["Check CLI references in agent docs"]
+    assert cli["if"] == "always()"
+    # PR-controlled paths are printed only while workflow commands are suspended.
+    run = cli["run"]
+    assert run.index("::stop-commands::") < run.index("check_cli_references.py") < run.index('echo "::${resume}::"')
+    names = list(steps)
+    assert names.index("Force text diffs for Python files") < names.index("Diff budget")
+    assert "'*.py diff'" in steps["Force text diffs for Python files"]["run"]
 
 
 def test_cli_reference_check_moved_out_of_docs_workflow():
@@ -294,5 +300,6 @@ def test_diff_coverage_step_is_pr_only_and_pinned():
     step = next(s for s in job["steps"] if s.get("name") == "Diff coverage (changed lines >= 80%)")
     assert "github.event_name == 'pull_request'" in step["if"]
     assert '"diff-cover==9.7.1"' in step["run"]
+    assert step["run"].index("'*.py diff'") < step["run"].index("diff-cover coverage.xml")
     assert "--fail-under=80" in step["run"]
     assert "GITHUB_STEP_SUMMARY" in step["run"]

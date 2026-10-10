@@ -653,6 +653,9 @@ jobs:
             exit 1
           fi
           python -m pip install "diff-cover==9.7.1"
+          # A PR's .gitattributes could mark *.py ``-diff`` (binary), hiding its
+          # lines from diff-cover; info/attributes takes precedence over it.
+          attrs="$(git rev-parse --git-path info/attributes)"; mkdir -p "$(dirname "$attrs")"; echo '*.py diff' >> "$attrs"
           # fail_under is the total gate's job; the XML is only diff-cover's input.
           coverage xml -o coverage.xml --fail-under=0
           set +e
