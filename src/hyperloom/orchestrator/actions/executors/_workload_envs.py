@@ -981,26 +981,6 @@ def _client_tokenizer_mode(model_path: str | None) -> str:
     return model_type
 
 
-def inject_vllm_expert_parallel(
-    server_args: str | None,
-    framework: Any,
-    ep: Any,
-) -> str:
-    """Append vLLM expert-parallel flag when EP is enabled."""
-    args = str(server_args or "").strip()
-    if "vllm" not in str(framework or "").lower():
-        return args
-    try:
-        ep_int = int(ep if ep not in (None, "") else 1)
-    except (TypeError, ValueError):
-        return args
-    if ep_int <= 1:
-        return args
-    if re.search(r"(?:^|\s)--enable-expert-parallel(?:\s|$)", args):
-        return args
-    return f"{args} --enable-expert-parallel".strip()
-
-
 class FrameworkScriptMismatchError(ValueError):
     """Raised when benchmark_script targets a different framework than the run.
 
@@ -1099,6 +1079,29 @@ def _coerce_workload_int_env(env_key: str, raw: str) -> int:
     return value
 
 
+def _set_single_node_ep(envs: dict[str, Any], resolved_tp: int) -> None:
+    """Write the run's ``EP`` into ``envs`` for the seal to turn into the server's expert-parallel flag.
+
+    The flag shards experts across the TP ranks this config launches with. A multi-node server is launched by the
+    multi-node launcher, which passes EP itself, and this pod's GPU count says nothing about that cluster's TP.
+    """
+    from ._multi_node_env import is_multi_node
+
+    ep_env = os.environ.get("EP", "").strip()
+    if not ep_env or is_multi_node():
+        return
+    resolved_ep = _coerce_workload_int_env("EP", ep_env)
+    if resolved_ep > 1 and resolved_tp % resolved_ep:
+        log.warning(
+            "EP=%d does not divide the launched TP=%d (after any clamp to the visible GPUs); "
+            "launching without expert parallelism.",
+            resolved_ep,
+            resolved_tp,
+        )
+        return
+    envs["EP"] = resolved_ep
+
+
 def default_baseline_config() -> Path:
     """Resolve the shipped Magpie YAML for ``$FRAMEWORK``, or for the default framework when it is unset.
 
@@ -1170,7 +1173,7 @@ def _finalize_framework_server_args(
     drop_moe_runner_backend: bool = False,
 ) -> None:
     """Apply the final framework server-arg guard pipeline in place
-    (context-length/watchdog/attention/MoE/EP/dedup/compact/shell-safe); order is fixed.
+    (context-length/watchdog/attention/MoE/dedup/compact/shell-safe); order is fixed.
 
     1. --context-length cap: sglang sizes max_total_tokens off the model's
        max_position_embeddings, so a huge native window balloons the aiter
@@ -1215,11 +1218,6 @@ def _finalize_framework_server_args(
     #    crashed the server.
     if drop_moe_runner_backend and framework_env == "EXTRA_SGLANG_ARGS":
         resolved_server_args = _remove_moe_runner_backend_arg(resolved_server_args)
-    resolved_server_args = inject_vllm_expert_parallel(
-        resolved_server_args,
-        bench.get("framework"),
-        os.environ.get("EP", "").strip() or envs.get("EP"),
-    )
     # 5. vLLM/atom argparse dedup: collapse repeated single-value flags to
     #    last-wins (vLLM crashes EngineCoreProc on a duplicate); no-op for
     #    sglang.
@@ -1520,6 +1518,7 @@ def materialize_config_with_envs(
             )
             resolved_tp = visible
     envs["TP"] = resolved_tp
+    _set_single_node_ep(envs, resolved_tp)
     if not rocr_yaml or len(rocr_devices) < resolved_tp:
         derived = ",".join(str(i) for i in range(resolved_tp))
         if rocr_yaml and rocr_yaml != derived:
