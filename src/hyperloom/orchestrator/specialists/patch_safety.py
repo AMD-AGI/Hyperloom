@@ -289,6 +289,22 @@ def _collapse_nested_roots(roots: tuple[Path, ...]) -> tuple[Path, ...]:
     )
 
 
+def _git_apply_check(root: Path, patch_text: str, timeout_sec: float = 30.0) -> tuple[bool | None, str]:
+    """Whether ``patch_text`` applies cleanly in ``root``, with git's complaint; ``None`` when git cannot run."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root), "apply", "--check", "-"],
+            input=patch_text if patch_text.endswith("\n") else patch_text + "\n",
+            capture_output=True,
+            text=True,
+            timeout=timeout_sec,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        return None, repr(exc)
+    return proc.returncode == 0, (proc.stderr or "").strip()
+
+
 def resolve_patch_apply_root(
     patch_texts: Sequence[str],
     *,
@@ -307,7 +323,13 @@ def resolve_patch_apply_root(
     A create-only set carries no pre-image, so no candidate can be matched and
     only a root the caller already knows will do -- an explicit one, or the
     ``default_root`` a caller supplies when it has independent grounds for it,
-    such as the checkout a specialist's worktree was cut from.
+    such as the checkout a specialist's worktree was cut from. The same grounds
+    settle a tie: when several candidates hold every pre-image, ``default_root``
+    is one of them and every patch applies to it cleanly, it is the one. Copies
+    of a tree meet this on a host that patches a writable copy of an installed
+    package, and the copy the session runs is the tree the patch was written
+    against. A ``default_root`` the patches no longer apply to leaves the tie
+    unresolved.
 
     When pre-images do exist but no candidate was offered, the answer is
     ``no_candidate_roots`` rather than a miss, because absence of a tree is not
@@ -319,8 +341,10 @@ def resolve_patch_apply_root(
         explicit_root: The checkout the caller declared, if any.
         candidate_roots: Checkouts to match the pre-images against when no
             explicit root is declared.
-        default_root: The checkout to use for a create-only set. Never
-            consulted while a pre-image can pick a candidate.
+        default_root: The checkout to use for a create-only set, and the
+            candidate that wins when several hold every pre-image and the
+            patches apply to it. Not consulted while the pre-images single out
+            one candidate.
 
     Returns:
         A :class:`PatchRootResolution` naming the checkout, or carrying one of
@@ -388,6 +412,12 @@ def resolve_patch_apply_root(
     matches = tuple(root for root in roots if not any(patch_targets_missing(text, root) for text in texts))
     if not matches:
         return PatchRootResolution(None, "no_matching_root")
+    if (
+        len(matches) > 1
+        and resolved_default in matches
+        and all(_git_apply_check(resolved_default, text)[0] for text in texts)
+    ):
+        return PatchRootResolution(resolved_default, matches=matches)
     if len(matches) > 1:
         matches = _collapse_nested_roots(matches)
     if len(matches) > 1:
@@ -697,24 +727,12 @@ def ground_patch_text(
         if resolution.reason == "ambiguous_root":
             return PatchGroundingResult(GROUND_AMBIGUOUS_ROOT, detail)
         return PatchGroundingResult(GROUND_MISSING_TARGET, detail)
-    root = resolution.root
-    try:
-        proc = subprocess.run(
-            ["git", "-C", str(root), "apply", "--check", "-"],
-            input=patch_text if patch_text.endswith("\n") else patch_text + "\n",
-            capture_output=True,
-            text=True,
-            timeout=git_timeout_sec,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        return PatchGroundingResult(GROUND_UNCHECKED, f"git unavailable: {exc!r}")
-    if proc.returncode == 0:
+    applies, detail = _git_apply_check(resolution.root, patch_text, git_timeout_sec)
+    if applies is None:
+        return PatchGroundingResult(GROUND_UNCHECKED, f"git unavailable: {detail}")
+    if applies:
         return PatchGroundingResult(GROUND_APPLIES)
-    return PatchGroundingResult(
-        GROUND_STALE,
-        (proc.stderr or "").strip()[:240],
-    )
+    return PatchGroundingResult(GROUND_STALE, detail[:240])
 
 
 @dataclass

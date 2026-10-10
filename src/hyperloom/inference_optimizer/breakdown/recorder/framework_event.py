@@ -89,6 +89,7 @@ ROLE_AUTHORING = "authoring"
 PRODUCER_SPECIALIST = "specialist"
 PRODUCER_ORCHESTRATION = "orchestration_agent"
 PRODUCER_SEED_GRID = "seed_grid"
+PRODUCER_PRIMATUNE = "primatune"
 
 #: Which reader evaluated a plateau. The advisory asks whether to switch arms
 #: and the exit whether the phase may leave, so a snapshot that did not say
@@ -133,6 +134,7 @@ __all__ = [
     "PLATEAU_PATH_EXIT",
     "PRODUCER",
     "PRODUCER_ORCHESTRATION",
+    "PRODUCER_PRIMATUNE",
     "PRODUCER_SEED_GRID",
     "PRODUCER_SPECIALIST",
     "REVIEWER_CRITIC",
@@ -177,6 +179,8 @@ def producer_for_provenance(provenance: Any) -> tuple[str, str]:
         return PRODUCER_SPECIALIST, label.split(":", 1)[1].strip()
     if label == "default_grid":
         return PRODUCER_SEED_GRID, ""
+    if label == PRODUCER_PRIMATUNE:
+        return PRODUCER_PRIMATUNE, ""
     return PRODUCER_ORCHESTRATION, ""
 
 

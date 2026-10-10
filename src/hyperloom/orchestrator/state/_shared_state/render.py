@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Collection
 from datetime import datetime
 from pathlib import PurePosixPath
 from typing import Any
@@ -53,6 +54,9 @@ def render_model_arch_compact(arch: dict | None) -> str:
 
 # Width budget for artifact anchors; sized so a full uuid4 fid still fits ws=.
 _VARIANT_ANCHOR_MAX_CHARS = 100
+
+# Width budget for a predictor row's ``why=``: the vote share and the 600-character rationale a row keeps.
+_PREDICTOR_WHY_CHARS = 640
 
 # Numeric fields a ``trace_health_warnings[]`` entry may carry, as ``(key, label, suffix)`` in render order.
 _WARNING_EXTRA_FIELDS: tuple[tuple[str, str, str], ...] = (
@@ -344,30 +348,41 @@ class _RenderMixin:
             rows.append(f"  · (+{len(ordered) - max_entries} older gaps elided; see state.json `gaps[]`)")
         return "\n".join(rows)
 
+    def benched_fingerprints(self) -> set[str]:
+        """Content fingerprints of every variant an explore round has benched."""
+        from ...actions.executors._proposal_identity import content_fingerprint
+
+        return {
+            content_fingerprint(row)
+            for row in ((self.explore_search or {}).get("tested") or {}).values()
+            if isinstance(row, dict)
+        }
+
     def untested_proposal_rows(self) -> list[dict[str, Any]]:
-        """Executable proposals from this cycle that no explore round has benched, highest severity first."""
+        """Executable proposals from this cycle that no explore round has benched.
+
+        Ordered by round ``priority`` (predictor rounds set one, specialist rounds
+        do not), then gap severity, then most recent.
+        """
         from hyperloom.common.coerce import to_int
 
         from ...actions.executors._proposal_identity import content_fingerprint, is_executable, normalize_proposal
 
         cycle = to_int(self.macro_cycle, default=0)
-        benched = {
-            content_fingerprint(row)
-            for row in ((self.explore_search or {}).get("tested") or {}).values()
-            if isinstance(row, dict)
-        }
+        benched = self.benched_fingerprints()
         severity_of = {
             str(g.get("canonical_id") or ""): str(g.get("severity") or "").strip().lower()
             for g in (self.gaps or [])
             if isinstance(g, dict)
         }
-        ranked: list[tuple[int, int, dict[str, Any]]] = []
+        ranked: list[tuple[int, int, int, dict[str, Any]]] = []
         seen: set[str] = set()
         for order, entry in enumerate(self.specialist_rounds or []):
             if not isinstance(entry, dict) or to_int(entry.get("cycle"), default=0) != cycle:
                 continue
             domain = str(entry.get("domain") or "?").removesuffix("_specialist")
             severity = severity_of.get(str(entry.get("gap_canonical_id") or ""), "")
+            priority = to_int(entry.get("priority"), default=0)
             task_id = str(entry.get("task_id") or "")[:8]
             for index, proposal in enumerate(entry.get("proposal_set") or []):
                 if not isinstance(proposal, dict):
@@ -383,13 +398,14 @@ class _RenderMixin:
                 row["domain"] = domain
                 row["severity"] = severity
                 row["fingerprint"] = fingerprint
+                row["provenance"] = str(proposal.get("provenance") or f"specialist:{domain}")
                 # Already checked against the read this round's dispatch was shown, which travels with them.
                 row["experience_citations"] = list(proposal.get("experience_citations") or [])
                 row["kb_read_id"] = str(entry.get("kb_read_id") or "")
                 row["kb_rendered_refs"] = list(entry.get("kb_rendered_refs") or [])
-                ranked.append((GAP_SEVERITY_RANK.get(severity, 0), order, row))
-        ranked.sort(key=lambda r: (-r[0], -r[1]))
-        return [row for _, _, row in ranked]
+                ranked.append((priority, GAP_SEVERITY_RANK.get(severity, 0), order, row))
+        ranked.sort(key=lambda r: (-r[0], -r[1], -r[2]))
+        return [row for _, _, _, row in ranked]
 
     @staticmethod
     def _untested_proposal_line(row: dict[str, Any]) -> str:
@@ -407,25 +423,92 @@ class _RenderMixin:
             parts.append("-envs=" + ",".join(row["unset_envs"]))
         if row["args_mode"] == "replace":
             parts.append("mode=replace")
-        reason = row["reason"].replace("\n", " ").strip()[:80].rstrip()
+        # A specialist's findings reach orchestration in their own section; a predictor row's reason is all it sends.
+        limit = _PREDICTOR_WHY_CHARS if row["provenance"] == "primatune" else 80
+        reason = row["reason"].replace("\n", " ").strip()[:limit].rstrip()
         if reason:
             parts.append(f"why={reason}")
         return _flatten_for_prompt(" ".join(parts))
 
-    def to_untested_proposals_summary(self, *, max_entries: int = 12) -> str:
-        """Render the specialist proposals still waiting for a benchmark slot."""
-        rows = self.untested_proposal_rows()
-        if not rows:
-            return ""
-        out = [
+    def _accuracy_gate_note(self) -> list[str]:
+        """The accuracy gate every explore KEEP passes, as header lines; none while the session measures no accuracy."""
+        from ...actions.executors._accuracy_gate import ACCURACY_THRESHOLD
+
+        baseline = float(self.baseline_accuracy or 0.0)
+        if self.eval_disabled or baseline <= 0:
+            return []
+        return [
+            f"Every variant runs the accuracy eval, and a KEEP needs accuracy no more than {ACCURACY_THRESHOLD:g} below",
+            f"the baseline's {baseline:.3f}, so a row that changes numerics cannot keep on throughput alone.",
+        ]
+
+    def _untested_header(self, rows: list[dict[str, Any]]) -> list[str]:
+        """The queue's header: the predictor's while it offers a predictor row, the specialists' otherwise."""
+        if any(row["provenance"] == "primatune" for row in rows):
+            return [
+                "Executable proposals from this cycle that no explore round has benched.",
+                "Ranked predictor rows first, then by gap severity, then most recent. The Coordinator benches the",
+                "head of this queue only while no explore is queued or running, which rarely happens while your",
+                "grids hold the lane. Predictor rows are the exception to dispatching only variants not listed",
+                "here: put the ones worth a slot into your next `explore` grid verbatim, keeping each row's name,",
+                "fields and `provenance: primatune`. The predictor is re-asked only when the stack moves, so a",
+                "predictor row you pass over now is very likely never measured; if you skip one, say why.",
+                *self._accuracy_gate_note(),
+                "",
+            ]
+        return [
             "Executable specialist proposals from this cycle that no explore round has benched.",
             "Ranked by gap severity, then most recent. The Coordinator benches the head of this",
             "queue whenever no explore is queued or running; dispatch `explore` only for variants not listed here.",
             "",
         ]
-        out.extend(self._untested_proposal_line(row) for row in rows[:max_entries])
-        if len(rows) > max_entries:
-            out.append(f"(+{len(rows) - max_entries} more not shown)")
+
+    def to_untested_proposals_summary(self, *, max_entries: int = 12, in_grids: Collection[str] = frozenset()) -> str:
+        """Render the proposals still waiting for a benchmark slot, and any open predictor mandate.
+
+        Args:
+            max_entries: Rows rendered in full; the rest are counted.
+            in_grids: Content fingerprints of the variants in queued or running explore grids. A predictor
+                row among them is named rather than offered, since orchestration copies offered rows.
+        """
+        from ...predictor.mandate import open_mandate
+
+        rows = self.untested_proposal_rows()
+        held = {
+            row["fingerprint"] for row in rows if row["provenance"] == "primatune" and row["fingerprint"] in in_grids
+        }
+        waiting = [row["name"] for row in rows if row["fingerprint"] in held]
+        rows = [row for row in rows if row["fingerprint"] not in held]
+        mandate = open_mandate(self)
+        if not rows and not mandate and not waiting:
+            return ""
+        out: list[str] = []
+        if rows:
+            out = self._untested_header(rows)
+            out.extend(self._untested_proposal_line(row) for row in rows[:max_entries])
+            if len(rows) > max_entries:
+                out.append(f"(+{len(rows) - max_entries} more not shown)")
+        if waiting:
+            if out:
+                out.append("")
+            out.append(
+                _flatten_for_prompt(
+                    "Predictor rows already in a queued or running explore grid, not to be copied again: "
+                    + ", ".join(waiting)
+                )
+            )
+        if mandate:
+            if out:
+                out.append("")
+            out.extend(
+                [
+                    "Predictor source-change mandate (prose, not a variant). To act on it, dispatch",
+                    "`delegate{action_name='specialist', params={scope:'freeform', mode:'patch', "
+                    f"primatune_mandate_id:'{mandate['mandate_id']}', task_description:'<one line>'}}}}`.",
+                    "The Coordinator substitutes the mandate's own text for task_description; carry the id verbatim.",
+                    _flatten_for_prompt(f"• {mandate['mandate_id']} why={mandate['mandate'][:160]}"),
+                ]
+            )
         return "\n".join(out)
 
     def to_proposal_scores_summary(self, *, max_rounds: int = 2) -> str:

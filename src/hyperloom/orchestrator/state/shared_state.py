@@ -767,6 +767,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # no-gain cycle streak.
     gain_at_cycle_start: float = 0.0
     no_gain_cycle_streak: int = 0
+    # Decision points the PrimaTune predictor has been asked about (``predictor/pump.py``); each is asked once.
+    predictor_asked_keys: list[str] = field(default_factory=list)
     # Cyclic bottleneck re-direction: set when a cyclic config plateau winds the cycle down; the next macro-cycle's
     # prompt surfaces a redirect advisory off ``last_cycle_bottleneck``.
     pending_bottleneck_switch: bool = False

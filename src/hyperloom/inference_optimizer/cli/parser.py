@@ -863,6 +863,27 @@ def _build_parser() -> argparse.ArgumentParser:
         "does not. Raise it above 0.7 to require an exact hit "
         "before spending a verify on the warm config.",
     )
+    # PrimaTune predictor: off unless an endpoint is given, so a session that passes none behaves as before.
+    opt.add_argument(
+        "--primatune-endpoint",
+        dest="primatune_endpoint",
+        type=str,
+        default=None,
+        help="Base URL of a PrimaTune predictor service, asked once per FRAMEWORK_AGENT decision point. "
+        "Its proposals join the untested-proposal queue beside the specialists' and are graded by the "
+        "same KEEP threshold. Exported as $HYPERLOOM_PREDICTOR_ENDPOINT. "
+        "See docs/reference/primatune-predictor.md.",
+    )
+    opt.add_argument(
+        "--primatune-mode",
+        dest="primatune_mode",
+        type=str,
+        choices=("off", "shadow", "active"),
+        default=None,
+        help="'shadow' (the default once an endpoint is set) asks and logs, queueing nothing; "
+        "'active' queues the answer for benchmarking; 'off' disables. "
+        "Exported as $HYPERLOOM_PREDICTOR_MODE.",
+    )
     # PR Monitor REST + MCP are co-hosted by KB Store and derived from $KB_STORE_URL.
     opt.add_argument(
         "--degraded-pr",
