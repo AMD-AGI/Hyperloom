@@ -299,7 +299,10 @@ One phase, two levers worked in parallel:
   independent of how fast proposals arrive.
 
 `specialist` serves both levers — investigation, patch authoring, and
-candidate discovery are all dispatches of the one specialist action.
+candidate discovery are all dispatches of the one specialist action. An
+operator can add one domain of their own, `custom_specialist`, whose focus is
+the text they supply at launch; until one has started, the Coordinator
+requests it at most once per macro cycle in this phase.
 
 The phase advances to KERNEL_AGENT only when **both** levers are dry
 (`optimize_no_more_leverage`). Either arm going quiet raises
