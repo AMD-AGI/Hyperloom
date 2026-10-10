@@ -46,6 +46,7 @@ from ..bus.resource_lock import (
     _expand_lanes,
 )
 from .sub_agent_runner import SubAgentResult
+from ..specialists.domains import is_custom_specialist_dispatch
 from ..state.task_registry import Task, TaskNotFound
 from .time_budget import (
     TIME_BUDGET_EXEMPT_ACTIONS,
@@ -739,6 +740,8 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             atask.add_done_callback(self._report_spawned_failure(task))
             if task.kind == "specialist":
                 self.shared_state.note_specialist_dispatched(str((task.params or {}).get("domain") or ""))
+                if is_custom_specialist_dispatch(task.params or {}):
+                    self.shared_state.custom_specialist_dispatched = True
 
     @staticmethod
     def _report_spawned_failure(task: Task) -> "Callable[[asyncio.Task[Any]], None]":

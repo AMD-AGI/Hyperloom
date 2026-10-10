@@ -41,6 +41,9 @@ PR_QUERY_REPOS: tuple[str, ...] = (
 )
 
 
+CUSTOM_SPECIALIST_KEY: str = "custom_specialist"
+CUSTOM_SPECIALIST_ANCHOR: str = "custom"
+
 # Canonical catalogue of knowledge-domain anchors.
 SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
     SpecialistDomain(
@@ -172,6 +175,14 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
             "frameworks) and kernel_switch_specialist (operator kernels)."
         ),
     ),
+    # Operator-defined type; description and focus come from the session config.
+    SpecialistDomain(
+        key=CUSTOM_SPECIALIST_KEY,
+        llm_selectable=False,
+        layer="operator-defined",
+        kb_anchor=CUSTOM_SPECIALIST_ANCHOR,
+        description="Operator-defined specialist; description is supplied per session.",
+    ),
 )
 
 
@@ -258,6 +269,13 @@ def normalize_dispatch_tags(params: dict) -> list[str]:
     return list(dict.fromkeys(tags))
 
 
+def is_custom_specialist_dispatch(params: dict) -> bool:
+    """Whether a dispatch runs as ``custom_specialist`` (by domain key or tag)."""
+    if str(params.get("domain") or "").strip() == CUSTOM_SPECIALIST_KEY:
+        return True
+    return CUSTOM_SPECIALIST_ANCHOR in normalize_dispatch_tags(params)
+
+
 def get_domain(key: str) -> SpecialistDomain | None:
     """Return the catalogue entry for ``key`` or None when unknown."""
     for d in SPECIALIST_DOMAINS:
@@ -296,6 +314,8 @@ SPECIALIST_MAX_TURNS_HARD_CAP: int = 1000
 
 
 __all__ = [
+    "CUSTOM_SPECIALIST_ANCHOR",
+    "CUSTOM_SPECIALIST_KEY",
     "DEFAULT_SPECIALIST_MAX_TURNS",
     "EXTRA_KNOWLEDGE_DOMAIN_TAGS",
     "FREEFORM_DOMAIN",
@@ -308,5 +328,6 @@ __all__ = [
     "SpecialistDomain",
     "domain_for_tag",
     "get_domain",
+    "is_custom_specialist_dispatch",
     "normalize_dispatch_tags",
 ]

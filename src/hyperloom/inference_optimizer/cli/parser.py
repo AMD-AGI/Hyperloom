@@ -813,6 +813,25 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     opt.add_argument("--critic-prompt", type=str, default=None, help="Override Critic system prompt")
     opt.add_argument(
+        "--custom-specialist-prompt-file",
+        dest="custom_specialist_prompt_file",
+        type=str,
+        default=None,
+        help="Register an operator-defined specialist type (custom_specialist) whose domain focus is this file's "
+        "text (max 16 KiB). Requires --custom-specialist-description. Orchestration may select it, and the "
+        "Coordinator dispatches it at least once in FRAMEWORK_AGENT. Persisted for --resume-from; passing it on a "
+        "resume replaces the stored definition. The text is written in clear to state.json and every task's "
+        "prompt.md: do not put credentials in it.",
+    )
+    opt.add_argument(
+        "--custom-specialist-description",
+        dest="custom_specialist_description",
+        type=str,
+        default=None,
+        help="One line (max 200 chars) telling Orchestration when to pick custom_specialist. Requires "
+        "--custom-specialist-prompt-file.",
+    )
+    opt.add_argument(
         "--local-kb-root",
         dest="local_kb_root",
         type=str,

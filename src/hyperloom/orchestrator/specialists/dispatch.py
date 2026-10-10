@@ -42,6 +42,9 @@ SPECIALIST_AUTO_RETRY_MAX: int = 2
 FORCE_STALLED_SPECIALIST_ROUNDS: int = 8
 FORCE_STALLED_KEEP_ROUNDS: int = 12
 
+# Gap id for the guaranteed custom dispatch when the ledger has no gap yet.
+CUSTOM_SESSION_GAP_ID: str = "gap.custom.session"
+
 
 class SpecialistDispatchCollaborator(CoordinatorCollaborator):
     """Specialist dispatch: warmup, auto-retry, wave fan-out, stalled-domain forcing, and round-entry construction."""
@@ -650,6 +653,76 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             # One forced dispatch per tick.
             return None
         return None
+
+    async def maybe_ensure_custom_specialist(self) -> None:
+        """Dispatch the operator-defined specialist when no custom task has started this session.
+
+        Idempotent per macro cycle; a custom task already queued or running is
+        left alone. Falls back to research mode when source patches cannot be
+        authored, so the guarantee does not stall on a deterministic denial.
+        """
+        state = self.shared_state
+        if str(getattr(state, "phase", "") or "").upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
+            return
+        if not str(state.custom_specialist_prompt or "").strip() or state.custom_specialist_dispatched:
+            return
+        from .domains import CUSTOM_SPECIALIST_ANCHOR, CUSTOM_SPECIALIST_KEY, is_custom_specialist_dispatch
+        from .profile import MODE_RESEARCH
+        from ..state._shared_state.phase_state import gap_actionability_key
+
+        for t in (*await self.tasks.queued(), *await self.tasks.running()):
+            if t.kind == "specialist" and is_custom_specialist_dispatch(t.params or {}):
+                return
+        idempotency_key = f"custom-guarantee{self._coord.dispatcher.cycle_idem_suffix()}"
+        lookup = getattr(self.tasks, "find_by_idempotency_key", None)
+        if callable(lookup) and await lookup(idempotency_key) is not None:
+            return
+
+        params: dict[str, Any] = {
+            "domain": CUSTOM_SPECIALIST_KEY,
+            "tags": [CUSTOM_SPECIALIST_ANCHOR],
+            "scope": "domain",
+            "source": "coordinator_internal",
+            "reason": "custom_specialist_guarantee",
+        }
+        gaps = [g for g in state.gaps if isinstance(g, dict) and str(g.get("canonical_id") or "").strip()]
+        if gaps:
+            params["gap_canonical_id"] = str(min(gaps, key=gap_actionability_key)["canonical_id"]).strip()
+        else:
+            params["gap_canonical_id"] = CUSTOM_SESSION_GAP_ID
+            params["gap_symptom"] = "No profiled gap; follow the operator-defined focus."
+            params["gap_layer"] = "operator-defined"
+        await self.warm_specialist_params(params)
+
+        research_reason = (
+            _SOURCE_PATCH_FAMILY + "_pruned"
+            if state.is_pruned(_SOURCE_PATCH_FAMILY)
+            else specialist_patch_preflight_error(
+                params,
+                framework_repo_path=str(getattr(state, "framework_repo_path", "") or ""),
+            )
+        )
+        if research_reason:
+            params["mode"] = MODE_RESEARCH
+            await self.bus.record_observation(
+                "coordinator",
+                "observation",
+                {"kind": "custom_specialist_guarantee_research_only", "reason": research_reason},
+            )
+        intent = Intent(
+            type=IntentType.DELEGATE,
+            payload={
+                "action_name": "specialist",
+                "params": params,
+                "idempotency_key": idempotency_key,
+            },
+        )
+        await self._coord.router.handle_intent("orchestration", intent)
+        log.info(
+            "custom specialist guarantee: dispatched gap=%s mode=%s",
+            params["gap_canonical_id"],
+            params.get("mode") or "default",
+        )
 
     def build_specialist_round_entry(
         self,
