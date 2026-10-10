@@ -286,30 +286,36 @@ def force_restart_local_cluster(
 _NON_HELD_RESOURCE_PREFIXES = ("node:", "memory", "object_store_memory")
 
 
-def _visible_gcs_server_ports() -> Optional[list[str]]:
-    """Return the ``--gcs_server_port`` of every Ray GCS server (one per head) in this PID namespace.
+#: The per-node Ray daemons ``ray stop --force`` would stop, and the argument that says which cluster each serves:
+#: a head's GCS server by its port, a node's raylet by its node id. Every other Ray process belongs to one of these.
+_RAY_DAEMON_IDENTITY_ARGS = {"gcs_server": "--gcs_server_port=", "raylet": "--node_id="}
 
-    A server whose port cannot be read is listed as ``""``; ``None`` means ``/proc`` itself was unreadable.
+
+def _visible_ray_daemons() -> Optional[dict[str, list[str]]]:
+    """List the Ray GCS servers and raylets in this PID namespace by identity (see ``_RAY_DAEMON_IDENTITY_ARGS``).
+
+    A daemon whose identity cannot be read is listed as ``""``; ``None`` means ``/proc`` itself was unreadable.
     """
     try:
         entries = os.listdir("/proc")
     except OSError:
         return None
-    ports: list[str] = []
+    found: dict[str, list[str]] = {name: [] for name in _RAY_DAEMON_IDENTITY_ARGS}
     for entry in entries:
         if not entry.isdigit():
             continue
         try:
             with open(f"/proc/{entry}/comm", encoding="utf-8") as comm:
-                if comm.read().strip() != "gcs_server":
-                    continue
+                name = comm.read().strip()
+            if name not in found:
+                continue
             with open(f"/proc/{entry}/cmdline", "rb") as cmdline:
                 argv = cmdline.read().decode("utf-8", "replace").split("\0")
         except OSError:
             continue
-        port = next((a.split("=", 1)[1] for a in argv if a.startswith("--gcs_server_port=")), "")
-        ports.append(port)
-    return ports
+        prefix = _RAY_DAEMON_IDENTITY_ARGS[name]
+        found[name].append(next((a[len(prefix) :] for a in argv if a.startswith(prefix)), ""))
+    return found
 
 
 def _cluster_activity() -> list[str]:
@@ -373,12 +379,16 @@ def local_head_restartable() -> Tuple[bool, str]:
         return False, f"the cluster has {len(nodes)} nodes"
     if not nodes[0].get("Alive") or str(nodes[0].get("NodeID") or "") != str(local_node or ""):
         return False, "its only node is not this host's live raylet"
-    # ``ray stop --force`` stops every head on the host, so the only one there must be the connected one.
-    ports = _visible_gcs_server_ports()
-    if ports is None:
-        return False, "the Ray heads on this host cannot be listed"
-    if ports != [gcs_port]:
-        return False, f"{len(ports)} Ray head(s) are visible on this host and the connected one is not the only one"
+    # ``ray stop --force`` stops every Ray process on the host, so the connected head's GCS server and raylet must
+    # be the only ones there: another cluster's head, or a worker node of one, would be stopped with it.
+    daemons = _visible_ray_daemons()
+    if daemons is None:
+        return False, "the Ray processes on this host cannot be listed"
+    if daemons["gcs_server"] != [gcs_port] or daemons["raylet"] != [str(local_node or "")]:
+        return False, (
+            f"{len(daemons['gcs_server'])} Ray head(s) and {len(daemons['raylet'])} raylet(s) are visible on this "
+            "host, not only the connected cluster's"
+        )
     held = sorted(
         key
         for key, total in totals.items()

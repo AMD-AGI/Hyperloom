@@ -88,7 +88,13 @@ def single_node(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors._multi_node_env.is_multi_node", lambda: False)
 
 
-def _install(monkeypatch: pytest.MonkeyPatch, fake: _FakeRay, *, heads: Any = (_GCS_PORT,)) -> _StubBackend:
+def _install(
+    monkeypatch: pytest.MonkeyPatch,
+    fake: _FakeRay,
+    *,
+    heads: Any = (_GCS_PORT,),
+    raylets: Any = (_LOCAL_NODE,),
+) -> _StubBackend:
     backend = _StubBackend(fake)
     state = types.ModuleType("ray._private.state")
     state.actors = lambda: dict(fake.actors)
@@ -99,7 +105,11 @@ def _install(monkeypatch: pytest.MonkeyPatch, fake: _FakeRay, *, heads: Any = (_
     monkeypatch.setitem(sys.modules, "ray", fake)
     monkeypatch.setitem(sys.modules, "ray._private", private)
     monkeypatch.setitem(sys.modules, "ray._private.state", state)
-    monkeypatch.setattr(rr, "_visible_gcs_server_ports", lambda: None if heads is None else list(heads))
+    monkeypatch.setattr(
+        rr,
+        "_visible_ray_daemons",
+        lambda: None if heads is None else {"gcs_server": list(heads), "raylet": list(raylets)},
+    )
     monkeypatch.setattr(rb, "get_ray_backend", lambda: backend)
     return backend
 
@@ -240,17 +250,20 @@ def test_force_restart_start_command_declares_the_slot(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "heads, why",
+    "heads, raylets, why",
     [
-        ((_GCS_PORT, "50000"), "2 Ray head"),
-        (("50000",), "connected one is not the only one"),
-        ((), "0 Ray head"),
-        (None, "cannot be listed"),
+        ((_GCS_PORT, "50000"), (_LOCAL_NODE,), "2 Ray head"),
+        (("50000",), (_LOCAL_NODE,), "not only the connected"),
+        ((), (_LOCAL_NODE,), "0 Ray head"),
+        # A worker node of an unrelated cluster: a raylet with no GCS server beside it.
+        ((_GCS_PORT,), (_LOCAL_NODE, "node-of-another-cluster"), "2 raylet"),
+        ((_GCS_PORT,), ("node-of-another-cluster",), "not only the connected"),
+        (None, (), "cannot be listed"),
     ],
 )
-def test_head_not_alone_or_not_the_connected_one_keeps_the_error(monkeypatch, single_node, heads, why):
-    """ray stop --force stops every head on the host, so the connected head must be the only one there."""
-    backend = _install(monkeypatch, _FakeRay(has_serving_slot=False), heads=heads)
+def test_ray_processes_beyond_the_connected_head_keep_the_error(monkeypatch, single_node, heads, raylets, why):
+    """ray stop --force stops every Ray process on the host, so only the connected head's may be there."""
+    backend = _install(monkeypatch, _FakeRay(has_serving_slot=False), heads=heads, raylets=raylets)
 
     with pytest.raises(rs.RayMissingServingSlotError, match=why):
         rs._ensure_cluster_feasible(num_gpus=1, serving_slot=True)
@@ -344,12 +357,14 @@ def test_actor_creation_happens_under_the_startup_lock(monkeypatch, single_node,
     assert held == [True]
 
 
-def test_visible_gcs_server_ports_reads_proc(monkeypatch, tmp_path):
+def test_visible_ray_daemons_reads_proc(monkeypatch, tmp_path):
     procs = {
         "10": ("gcs_server", ["gcs_server", "--log_dir=x", "--gcs_server_port=41234"]),
-        "11": ("raylet", ["raylet", "--gcs-address=127.0.0.1:41234"]),
+        "11": ("raylet", ["raylet", "--python_worker_command=w --node_id=bogus", "--node_id=abc", "--head"]),
         "12": ("gcs_server", ["gcs_server", "--gcs_server_port=50000"]),
         "13": ("gcs_server", ["gcs_server"]),
+        "14": ("raylet", ["raylet", "--node_id=def"]),
+        "15": ("python3", ["python3", "--node_id=nope"]),
     }
     for pid, (comm, argv) in procs.items():
         (tmp_path / pid).mkdir()
@@ -367,4 +382,7 @@ def test_visible_gcs_server_ports_reads_proc(monkeypatch, tmp_path):
         ),
     )
 
-    assert sorted(rr._visible_gcs_server_ports()) == ["", "41234", "50000"]
+    daemons = rr._visible_ray_daemons()
+
+    assert sorted(daemons["gcs_server"]) == ["", "41234", "50000"]
+    assert sorted(daemons["raylet"]) == ["abc", "def"]
