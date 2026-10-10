@@ -1268,9 +1268,8 @@ def _enforce_topology_gates(*, nodes: int, gpus_per_node: int, tp: int, ep: int)
     """Fail fast on a TP/EP shape the cluster cannot place, rather than on a cryptic launcher crash mid-cold-start.
 
     Multi-node only: a single node places whatever its own GPU count allows and the launcher reports that itself.
-    Called twice on a fresh launch -- once on the flag-derived values, so a bad ``--tp`` is refused before any of
-    the slow preflight work, and again once ``_resolve_workload_knobs`` has applied an ``--extra-env`` pin, which
-    is the shape that actually launches.
+    Called once, after ``_resolve_workload_knobs`` and before ``_preflight``, so the shape it refuses is the one
+    the run would have launched with -- a pinned TP faces the same gate an explicit ``--tp`` does.
     """
     if nodes < 2:
         return
@@ -1310,10 +1309,12 @@ def _export_operator_launch_shape(
     readers.
 
     A knob Hyperloom resolves itself is the one thing not exported here: it enters through its own ladder instead
-    (:data:`LADDER_RESOLVED_PIN_NAMES`), because this function runs at a different point on the fresh and resume
-    branches while the projections of those knobs do not, so a pin that both exported itself and fed the ladder
-    would outrank an explicit flag on one branch and lose to it on the other. The blob still carries every pin --
-    it is what the ladders read, what survives into ``state.json``, and what a later resume diffs against.
+    (:data:`LADDER_RESOLVED_PIN_NAMES`). Those names reach the environment from exactly one place, the projection
+    of the ladder's answer, and keeping it that way is what makes their order checkable -- a pin that both exported
+    itself and fed the ladder would give them two writers whose relative order differs between the fresh and resume
+    branches, which is how an explicit flag ends up losing to a pin on one branch and winning on the other. The
+    blob still carries every pin: it is what the ladders read, what survives into ``state.json``, and what a later
+    resume diffs against.
     """
     from hyperloom.common.env_safety import OPERATOR_EXTRA_ENV_VAR, operator_extra_env
 
