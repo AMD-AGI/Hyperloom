@@ -1039,6 +1039,7 @@ class RooflineExecutor:
 
         state = self.shared_state
         state.last_profile_trace = str(profiled.trace_path)
+        state.last_profile_launch_evidence_path = str(profiled.result.get("launch_evidence_path") or "")
         state.last_profile_status = "succeeded"
         state.record_profile_workload(profiled.params or ctx.task.params or {}, arm=roofline_arm)
         backend = detect_kineto_backend(profiled.trace_path)
@@ -1252,6 +1253,7 @@ class RooflineExecutor:
         )
         params = dict(cb_ctx.task.params or {})
         self.shared_state.last_profile_trace = cb_trace
+        self.shared_state.last_profile_launch_evidence_path = str(cb_profile.get("launch_evidence_path") or "")
         self.shared_state.record_profile_workload(params, arm=payload["roofline_arm"])
         if recorder is not None:
             recorder.adopt_profile_run(run_index=profile_run, profile_result=cb_profile, params=params)

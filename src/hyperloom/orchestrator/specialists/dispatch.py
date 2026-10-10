@@ -15,6 +15,7 @@ from hyperloom.common.env import env_flag
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
 from ..collaborator import CoordinatorCollaborator
+from ..measurement.runtime_findings import render_runtime_findings
 from ..phases import machine_state as _phase_state
 from ..policy.gate import (
     PolicyDenied,
@@ -265,6 +266,10 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 "executive_summary": executive_summary,
                 "hot_kernels_top15": hot_kernels,
             }
+
+        measurement = getattr(state, "current_best_measurement", None)
+        if measurement and "runtime_findings" not in params:
+            params["runtime_findings"] = await asyncio.to_thread(render_runtime_findings, measurement)
 
         await self._warm_experience_kb(params)
 

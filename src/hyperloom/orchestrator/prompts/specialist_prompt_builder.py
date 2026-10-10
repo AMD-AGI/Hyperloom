@@ -25,6 +25,7 @@ from hyperloom.common.perf_metric import is_agentx_mode
 from hyperloom.common.prompt_safety import defang_prompt_structure
 from hyperloom.inference_optimizer.framework_registry import python_package
 from .agentx_context import corpus_lines, grading_lines
+from ..measurement.runtime_findings import CORRECTNESS_FIX_MAX_DROP_PCT, CORRECTNESS_FIX_RULES
 
 from ..specialists.domains import (
     DEFAULT_SPECIALIST_MAX_TURNS,
@@ -895,6 +896,8 @@ class SpecialistPromptInputs:
     # Roofline / TraceLens evidence from ``SharedState.last_trace_analyze``;
     # empty dict renders a placeholder.
     roofline_evidence: dict[str, Any] = field(default_factory=dict)
+    # Rendered runtime findings of the current best's server log; empty omits the section.
+    runtime_findings: str = ""
 
     # Recipe summary from the T0 warm-start recipe search
     # (``recipe_kb_t0._cascade_warm_start_search``)
@@ -1665,6 +1668,22 @@ def _vendor_substitution_directive(hot_kernels: Any) -> list[str]:
     return rows
 
 
+def _section_runtime_findings(inp: SpecialistPromptInputs) -> list[str]:
+    """Render the scanned runtime findings; omitted when none were injected."""
+    if not inp.runtime_findings:
+        return []
+    return [
+        "## 4c. RUNTIME FINDINGS (current best server.log, already scanned)",
+        "",
+        "Do not re-read the server log for these. A disabled or falling-back hot "
+        "path is restored first; do not optimize the fallback implementation.",
+        "",
+        "```text",
+        inp.runtime_findings,
+        "```",
+    ]
+
+
 def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
     """Render the ROOFLINE EVIDENCE section from ``inp.roofline_evidence``;
     empty evidence renders a heading + ``(none)`` placeholder.
@@ -1698,6 +1717,7 @@ def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
             ("Compute %", "compute_pct"),
             ("Idle %", "idle_pct"),
             ("Exposed Comm %", "comm_pct"),
+            ("Exposed memcpy %", "memcpy_pct"),
             ("Top bottleneck", "top_bottleneck"),
         ):
             val = summary.get(key)
@@ -2146,6 +2166,12 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
             "  runs the same E2E gate, and restores the backup on REVERT. A non-diff",
             "  tuned artifact is a FULL result — keep ``proposal_set`` non-empty or",
             "  list the artifact in ``artifacts_written``.",
+            "- ``resolves_finding`` (optional string ``rule_id:subject``): set it only",
+            f"  when the patch fixes a ``{'`` / ``'.join(sorted(CORRECTNESS_FIX_RULES))}`` entry from section 4c,",
+            "  copied verbatim. The gate then verifies the entry is gone from the new log and",
+            f"  accuracy passes, and may KEEP a drop of up to {CORRECTNESS_FIX_MAX_DROP_PCT:.0f}% on the graded axis",
+            "  (throughput, or p50 interactivity with the other interactivity guards still held)",
+            "  within the latency budget.",
         ]
         no_output = "  AND no ``patches_written``/``artifacts_written``; in that case"
     else:
@@ -2501,6 +2527,7 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
             _section_kb_subgraph(inp),
             _section_roofline_evidence(inp),
             _section_experience_kb(inp),
+            _section_runtime_findings(inp),
             _section_recipe(inp),
             _section_lessons(inp),
             _section_pitfalls(inp),

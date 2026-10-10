@@ -1627,6 +1627,11 @@ async def test_explore_executor_defaults_to_warm_decision_matching_hot_baseline(
         out_idx = cmd.index("--output-dir")
         slot = Path(cmd[out_idx + 1])
         bench_calls.append(str(slot))
+        if "warmup_round" in str(slot):
+            (slot / "server.log").write_text(
+                "[aiter] shape is M:1, N:2, K:3, not found tuned config in /tmp/a.csv, will use default config!\n",
+                encoding="utf-8",
+            )
         _fake_workspace(slot, tput=920.0)  # +15% vs 800 — KEEP and stable
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
@@ -1661,6 +1666,13 @@ async def test_explore_executor_defaults_to_warm_decision_matching_hot_baseline(
     assert len(bench_calls) == 2, bench_calls
     assert sum("warmup_round" in c for c in bench_calls) == 1
     assert {w["name"] for w in out["winners"]} == {"warm_keep"}
+    warm_log = next(Path(c) for c in bench_calls if "warmup_round" in c) / "server.log"
+    decision_slot = next(Path(c) for c in bench_calls if "warmup_round" not in c)
+    report = json.loads((decision_slot / "runtime_findings.json").read_text(encoding="utf-8"))
+    assert report["log_path"] == str(warm_log)
+    assert [(f["rule_id"], f["status"]) for f in report["findings"] if f["status"] != "not_detected"] == [
+        ("aiter.tuned_miss", "detected")
+    ]
 
 
 def _run_eval_of(cmd: list[str]) -> str:

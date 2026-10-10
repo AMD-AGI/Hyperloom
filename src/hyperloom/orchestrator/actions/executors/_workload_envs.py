@@ -744,6 +744,10 @@ def _resolve_framework_repo_path(
     return ""
 
 
+#: Source-root envs Hyperloom writes into a vLLM launch; vLLM reports them as unknown.
+VLLM_SOURCE_ROOT_ENVS: tuple[str, ...] = ("FRAMEWORK_REPO_PATH", "VLLM_REPO_PATH", "VLLM_DIR")
+
+
 def _apply_vllm_source_runtime(bench: dict[str, Any], envs: dict[str, Any]) -> None:
     """Route a prepared image checkout into the vLLM server launch."""
     if str(bench.get("framework") or "").strip().lower() != "vllm":
@@ -753,7 +757,7 @@ def _apply_vllm_source_runtime(bench: dict[str, Any], envs: dict[str, Any]) -> N
     repo_path = _resolve_framework_repo_path(envs, framework="vllm")
     if not repo_path:
         return
-    for name in ("FRAMEWORK_REPO_PATH", "VLLM_REPO_PATH", "VLLM_DIR"):
+    for name in VLLM_SOURCE_ROOT_ENVS:
         envs[name] = repo_path
         os.environ[name] = repo_path
     existing = str(envs.get("PYTHONPATH") or os.environ.get("PYTHONPATH") or "")

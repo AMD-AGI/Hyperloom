@@ -92,6 +92,7 @@ from ..actions.executors._accuracy_gate import (
 from ..knowledge.agent_kb import PatchKB
 from .proposals import PendingProposal
 from ..measurement.integrate_performance import integrate_measurement_fields
+from ..measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX
 from ..collaborator import CoordinatorCollaborator
 
 if TYPE_CHECKING:
@@ -1390,7 +1391,9 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     "current_best held: %s winner refused by the latency budget (%s)", task_kind, graded.veto_reason
                 )
                 return False
-            if graded.graded_on_intvty and graded.verdict != VERDICT_KEEP:
+            # A verified correctness fix was already bounded by the integrate gate.
+            correctness_fix = bv.get("keep_reason") == KEEP_REASON_CORRECTNESS_FIX
+            if graded.graded_on_intvty and graded.verdict != VERDICT_KEEP and not correctness_fix:
                 log.info(
                     "current_best held: %s winner %s intvty %.1f->%.1f tput %.1f->%.1f",
                     task_kind,
@@ -1401,7 +1404,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     graded.tput_candidate,
                 )
                 return False
-            if graded.reference > 0 and graded.candidate <= graded.reference:
+            if graded.reference > 0 and graded.candidate <= graded.reference and not correctness_fix:
                 log.info(
                     "current_best held at %.1f %s: %s winner measured %.1f (no lift)",
                     graded.reference,
@@ -1591,7 +1594,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                         stack_entry["recipe_publishable"] = bool(bv.get("recipe_publishable"))
                     if "framework_agent_authoring" in bv:
                         stack_entry["framework_agent_authoring"] = bool(bv.get("framework_agent_authoring"))
-                    for _origin_key in ("domain", "gap_layer"):
+                    for _origin_key in ("domain", "gap_layer", "keep_reason", "resolves_finding"):
                         if bv.get(_origin_key):
                             stack_entry[_origin_key] = str(bv.get(_origin_key))
                 if _overlay:
@@ -2183,11 +2186,13 @@ class WritebackCollaborator(CoordinatorCollaborator):
             self.shared_state.last_profile_workload = {}
             if not trace_path:
                 self.shared_state.last_profile_trace = ""
+                self.shared_state.last_profile_launch_evidence_path = ""
             self.shared_state.last_profile_args = ""
             self.shared_state.last_profile_workload_action = ""
             changed = True
         elif trace_path:
             self.shared_state.last_profile_trace = str(trace_path)
+            self.shared_state.last_profile_launch_evidence_path = str(result.get("launch_evidence_path") or "")
             self.shared_state.last_profile_status = "succeeded"
             # Record the server config in effect for this trace, tagged with the
             # arm it measured so a later same-arm check can trust it.
@@ -3016,6 +3021,10 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 lift["gap_layer"] = str(task_params.get("gap_layer"))
             if task_params.get("framework_agent_authoring"):
                 lift["framework_agent_authoring"] = True
+            if result.get("keep_reason") == KEEP_REASON_CORRECTNESS_FIX:
+                lift["keep_reason"] = KEEP_REASON_CORRECTNESS_FIX
+                lift["resolves_finding"] = str(result.get("resolves_finding") or "")
+                lift["attribution_eligible"] = False
             if enablement_landing:
                 lift["recipe_publishable"] = False
             if prebaseline_enablement:

@@ -132,6 +132,161 @@ def test_trace_evidence_resolution_filename_has_one_owner(tmp_path: Path) -> Non
     assert str((candidates.parent / SOURCE_RESOLUTION_FILENAME)) in evidence
 
 
+def test_trace_evidence_ends_with_current_best_runtime_findings(tmp_path: Path) -> None:
+    from hyperloom.orchestrator.kernel.forge_handoff import build_trace_evidence_md
+    from hyperloom.orchestrator.measurement.runtime_findings import persist_runtime_findings, scan_server_log
+
+    log = tmp_path / "server.log"
+    log.write_text("WARNING Disabling fuse_rope_kvcache.\n", encoding="utf-8")
+    persist_runtime_findings(scan_server_log(str(log), "sglang"), slot=tmp_path / "slot")
+    state = _state(current_best_measurement={"launch_evidence_path": str(tmp_path / "slot" / "launch_evidence.json")})
+
+    evidence = build_trace_evidence_md(state)
+
+    assert _section(evidence, "Runtime Findings") == (
+        "```text\n"
+        f"runtime findings for {log} [sglang]\n"
+        "- detected [perf_path] feature_disabled fuse_rope_kvcache x1: WARNING Disabling fuse_rope_kvcache.\n"
+        "- not_detected: capability_disabled, comm.custom_ar_disabled, comm.multimem_allgather_disabled, "
+        "engine_adjusted, aiter.tuned_miss, runtime.traceback\n"
+        "```\n"
+    )
+
+
+def test_trace_evidence_runtime_findings_not_available_without_current_best() -> None:
+    from hyperloom.orchestrator.kernel.forge_handoff import build_trace_evidence_md
+
+    evidence = build_trace_evidence_md(_state(current_best_measurement={}))
+
+    assert _section(evidence, "Runtime Findings") == "```text\nnot available\n```\n"
+    assert _section(evidence, "Hot GEMMs Missing Tuned Config") == "```text\nnot available\n```\n"
+    assert _section(evidence, "Exposed Memcpy") == "```text\nnot available\n```\n"
+
+
+def test_trace_evidence_reports_exposed_memcpy_from_gpu_timeline(tmp_path: Path) -> None:
+    from hyperloom.orchestrator.kernel.forge_handoff import build_trace_evidence_md
+
+    analysis_md = tmp_path / "analysis.md"
+    analysis_md.write_text("| Compute % | 96.0% |\n", encoding="utf-8")
+    (tmp_path / "perf_report_csvs").mkdir()
+    (tmp_path / "perf_report_csvs" / "gpu_timeline.csv").write_text(
+        "type,time ms,percent\ncomputation_time,1295.08,96.05\nexposed_memcpy_time,40.5,3.0012\n", encoding="utf-8"
+    )
+
+    evidence = build_trace_evidence_md(_state(last_trace_analyze={"analysis_md_path": str(analysis_md)}))
+
+    assert _section(evidence, "Exposed Memcpy") == "```text\nexposed_memcpy=3.0% of GPU time\n```\n"
+
+
+def _section(evidence: str, title: str) -> str:
+    """The body of one ``## title`` section, up to the next section."""
+    return evidence.split(f"## {title}\n\n", 1)[1].split("\n## ", 1)[0].rstrip("\n") + "\n"
+
+
+_MISS_LOG = "[aiter] shape is M:64, N:3072, K:7168, not found tuned config in /tmp/a8w8.csv, will use default config!\n"
+
+
+def _gemm_row(kernel_id: str, name: str, a: str, b: str) -> dict:
+    return {
+        "kernel_id": kernel_id,
+        "name": name,
+        "gpu_pct": 12.5,
+        "input_shapes": [{"shape": a, "call_num": 10}, {"shape": b, "call_num": 10}],
+    }
+
+
+def _tuned_miss_state(tmp_path: Path, log_text: str | None) -> _State:
+    import json
+
+    from hyperloom.orchestrator.measurement.runtime_findings import persist_runtime_findings, scan_server_log
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    log = None
+    if log_text is not None:
+        log = tmp_path / "server.log"
+        log.write_text(log_text, encoding="utf-8")
+    persist_runtime_findings(scan_server_log(str(log) if log else None, "sglang"), slot=tmp_path / "slot")
+    candidates = tmp_path / "kernel_candidates.json"
+    rows = [
+        _gemm_row("k1", "gemm_a8w8_blockscale", "(64,7168) fp8", "(3072,7168) fp8"),
+        _gemm_row("k2", "gemm_a8w8_blockscale", "(128,7168) fp8", "(3072,7168) fp8"),
+        _gemm_row("k3", "fused_moe_kernel", "(64,7168) fp8", "(3072,7168) fp8"),
+    ]
+    candidates.write_text(json.dumps({"hot_kernels": rows}), encoding="utf-8")
+    evidence_path = str(tmp_path / "slot" / "launch_evidence.json")
+    return _state(
+        last_trace_analyze={"candidates_path": str(candidates)},
+        last_profile_launch_evidence_path=evidence_path,
+        current_best_measurement={"launch_evidence_path": evidence_path},
+    )
+
+
+def test_trace_evidence_names_hot_gemms_whose_shapes_missed_tuned_config(tmp_path: Path) -> None:
+    from hyperloom.orchestrator.kernel.forge_handoff import build_trace_evidence_md
+
+    evidence = build_trace_evidence_md(_tuned_miss_state(tmp_path, _MISS_LOG))
+
+    assert _section(evidence, "Hot GEMMs Missing Tuned Config") == (
+        "```text\n"
+        "- k1 gemm_a8w8_blockscale gpu_pct=12.5: M=64 N=3072 K=7168\n"
+        "Rows not listed: unknown; a tuned-config hit is only logged under AITER_LOG_TUNED_CONFIG.\n"
+        "```\n"
+    )
+
+
+def test_trace_evidence_matches_tuned_misses_from_the_profiled_run(tmp_path: Path) -> None:
+    import json
+
+    from hyperloom.orchestrator.kernel.forge_handoff import build_trace_evidence_md
+    from hyperloom.orchestrator.measurement.runtime_findings import persist_runtime_findings, scan_server_log
+
+    def slot(name: str, m: int) -> str:
+        log = tmp_path / name / "server.log"
+        log.parent.mkdir(parents=True)
+        log.write_text(_MISS_LOG.replace("M:64", f"M:{m}"), encoding="utf-8")
+        persist_runtime_findings(scan_server_log(str(log), "sglang"), slot=tmp_path / name)
+        return str(tmp_path / name / "launch_evidence.json")
+
+    candidates = tmp_path / "kernel_candidates.json"
+    rows = [_gemm_row("k1", "gemm_a8w8_blockscale", "(7211,7168) fp8", "(3072,7168) fp8")]
+    candidates.write_text(json.dumps({"hot_kernels": rows}), encoding="utf-8")
+    state = _state(
+        last_trace_analyze={"candidates_path": str(candidates)},
+        last_profile_launch_evidence_path=slot("profile", 7211),
+        current_best_measurement={"launch_evidence_path": slot("current_best", 3119)},
+    )
+
+    assert _section(build_trace_evidence_md(state), "Hot GEMMs Missing Tuned Config") == (
+        "```text\n"
+        "- k1 gemm_a8w8_blockscale gpu_pct=12.5: M=7211 N=3072 K=7168\n"
+        "Rows not listed: unknown; a tuned-config hit is only logged under AITER_LOG_TUNED_CONFIG.\n"
+        "```\n"
+    )
+
+
+def test_trace_evidence_tuned_miss_states_without_a_join(tmp_path: Path) -> None:
+    from hyperloom.orchestrator.kernel.forge_handoff import build_trace_evidence_md
+
+    clean = build_trace_evidence_md(_tuned_miss_state(tmp_path / "clean", "server ready\n"))
+    blind = build_trace_evidence_md(_tuned_miss_state(tmp_path / "blind", None))
+
+    assert _section(clean, "Hot GEMMs Missing Tuned Config") == (
+        "```text\nnone: the profiled server log reports no tuned-config miss\n```\n"
+    )
+    assert _section(blind, "Hot GEMMs Missing Tuned Config") == "```text\nunknown: no_server_log\n```\n"
+
+
+def test_opportunity_rules_defer_fallback_paths_and_name_the_bound() -> None:
+    from kernelforge.kernel_rewrite_controller.opportunity_agent import _system_prompt
+
+    prompt = _system_prompt()
+
+    assert "12. Read the Runtime Findings section of trace-evidence.md" in prompt
+    assert "do not\n    publish a rewrite of the fallback implementation" in prompt
+    assert "The Hot GEMMs Missing Tuned\n    Config section names the exact kernel_ids" in prompt
+    assert "Exposed Memcpy section" in prompt
+
+
 def test_write_forge_handoff_survives_missing_trace_artifacts(tmp_path: Path) -> None:
     missing_candidates = tmp_path / "missing" / "kernel_candidates.json"
     state = _state(
