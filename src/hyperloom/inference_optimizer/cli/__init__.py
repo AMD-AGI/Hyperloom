@@ -1678,7 +1678,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # Settle the numeric knobs before anything derives from them. A resume has no state loaded yet, so it runs its
     # own ladder later; here the ladder, the topology gates, the TP/CONC/EP projection and ``_preflight``'s
     # ``check_gpu_visibility`` all have to see the same TP, and that is only true if the ladder goes first.
-    if not args.resume_from:
+    _is_resume = bool(getattr(args, "resume_from", None))
+    if not _is_resume:
         _resolve_workload_knobs(args)
     tp_resolved = max(1, int(getattr(args, "tp", 1) or 1))
     ep_resolved = max(1, int(getattr(args, "ep", 1) or 1))
@@ -1690,8 +1691,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         gpus_per_node_resolved = 8
 
     # Project before ``_preflight``: ``check_gpu_visibility`` reads ``$TP`` to warn when the run asks for more
-    # shards than rocm-smi can see, and ``TP`` is withheld from the pin export because the ladder owns it.
-    if not args.resume_from:
+    # shards than rocm-smi can see.
+    if not _is_resume:
         _export_workload_envs_for_optimize(args, tp_resolved=tp_resolved, ep_resolved=ep_resolved)
 
     _enforce_topology_gates(
