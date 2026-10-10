@@ -29,11 +29,12 @@ the rules listed. Rows overlap; a rule listed twice is read once.
 |---|---|
 | changes any non-test file under `src/` | X1 X3 |
 | adds or changes a value that crosses a boundary: status literal, enum member, dataclass or TypedDict field, keyword argument, signature, return semantics | C1 C3 C5 |
-| adds or changes a knob or a pin: CLI flag, env var, config key, default value, a pinned external version, ref or sha, an install script, `docs/compatibility.rst`, or the argv or extra-args list one is assembled into | C3 C4 S6 T4 X5 X7 D8 D9 |
+| adds or changes a knob or a pin: CLI flag, env var, config key, default value, a pinned external version, ref or sha, an install script, `docs/compatibility.rst`, or the argv or extra-args list one is assembled into | C3 C4 S6 T4 X5 X7 D8 D9 D11 |
 | removes a flag, env var, enum member, test, fallback/legacy/bypass route or whole file, or tightens a comparison (`<` returns as `==`, a new `all(...)`) | C3 T2 X4 D3 |
-| fixes one site of an operation that has siblings (executors, per-framework patchers, sync and async twins), or moves, copies or consolidates code | C2 T4 D1 D2 D4 |
+| fixes one site of an operation that has siblings (executors, per-framework patchers, sync and async twins), or moves, copies or consolidates code | C2 T4 D1 D2 D4 D11 |
 | adds a second implementation of an operation the repo already owns (patch deploy, revert, snapshot, cleanup, revalidation), or a `pre_applied`/`skip_*`/already-done branch that short-circuits one | D1 D2 D10 |
 | defines, outside the module that owns the concern, a constant, precedence list, parser or client constructor the owner exports: an LLM model, SDK client, API key, base URL or header read outside `llm_config.py`, a backend registered outside `agent_backends/registry.py` | D5 D10 |
+| repairs a value where it is consumed: a local re-merge of `os.environ`, a second parse of a handoff blob or serialized mapping, or any re-derivation of something another module already publishes | D11 V3 |
 | touches persisted or shared state: `SCHEMA_VERSION`, `from_dict`, `CREATE TABLE`, a `record_*`/`read_*`/`seal_*` pair, `.save()`, a spec, manifest or recipe, a context manager, recovery or resume | X6 R4 P4 P5 |
 | touches a prompt, `SKILL.md`, `docs/**`, `*.md` or `*.rst` | X3 X5 |
 | adds error handling or a default: `except`, `contextlib.suppress`, `ignore_errors=True`, `.get(k, 0)`, `or {}`, an early `isinstance` guard, a noop or degraded implementation | S1 S2 S3 S4 S5 S7 |
@@ -709,6 +710,40 @@ which is what removes the layering excuse.
 **Report as:** `D10: <file>:<line> defines <name>, already owned and exported by <owner>:<line>
 -- import it, or state the barrier that prevents it`
 
+### D11 -- Repair a wrong value at its producer, not by re-deriving it inside one consumer
+
+**Severity:** blocking
+**Fires when:** the diff makes a value correct by re-reading, re-parsing, re-merging or
+re-deriving it inside a consumer, while the single place that produces or publishes that value
+to every reader is untouched. The shape is a local `{**os.environ, **something}`, a second
+`json.loads` of a handoff blob, or a helper that reassembles upstream's output before using it.
+**The rule:** count the readers before accepting the repair. When a value is wrong because its
+producer never published it in the form readers expect, repairing one reader leaves the rest on
+the old answer and adds a second resolution path -- the defect stops being "this value is
+missing" and becomes "this value means two things", which is strictly harder to find and is the
+state the repair was supposed to end. One repaired reader out of N blocks; changing the producer
+fixes all N without touching any of them. This is D10's dual: D10 is a concern copied beside its
+caller while an owner exports it, D11 is an owner that exists but does not publish, compensated
+for downstream. `AGENTS.md` *Clean design* ("a second copy of a behaviour is a bug you will later
+fix once and miss elsewhere") is the bullet, and the finding names the producer module that
+should have changed instead.
+**Seen in:** PR #1797 -- `--extra-env` pins reached only the `INFERENCE_OPTIMIZER_EXTRA_ENV`
+blob and never the individual names, so the first version re-merged that blob inside
+`agentx_env_for_conc`. Every other reader kept its bare `os.environ.get`, and a pinned
+`HYPERLOOM_AGENTIC_BACKEND` then selected the MLPerf client while the seeded grading axis, the
+persisted backend identity and the benchmark timeout all still resolved `aiperf` -- a session
+that REVERTed every round. Exporting each pin at the producer, `_export_operator_launch_shape`,
+corrected all of them without changing a single reader.
+**Not a finding when:** the producer is out of tree, or cannot carry the value for a reason the
+diff or body states; the consumer is provably the only reader and the diff says so; the
+re-derivation is a declared rung in a documented precedence ladder, which is one resolution
+point rather than a second; or the producer is being changed in a stated follow-up and the body
+names the readers left on the old answer until then.
+**Evidence:** `$WORK/diff.txt` for the added re-derivation; a grep of the value's name across
+the head tree for the readers the diff did not touch -- that count is the finding.
+**Report as:** `D11 <file>:<line> -- re-derives <value> at 1 of <N> readers; <producer module>
+publishes it and is untouched, so <other reader>:<line> still resolves it as <old answer>`
+
 ## V -- Review method and PR hygiene
 
 ### V1 -- Confirm the finding is introduced by this diff, and that the diff contains nothing it did not intend
@@ -768,7 +803,9 @@ author to treat review feedback as a hypothesis; this is the reviewer-side oblig
 comparison, not the guard the PR added; PR #1097's body attributed the KB hardware dimension
 to `detect_gfx_arch()` when it comes from `kb_hardware_slug(gpu_type, ...)`.
 **Not a finding when:** the body's stated cause matches the data flow, even if the fix is
-narrower than you would have written.
+narrower than you would have written -- narrowness on its own is taste. It stops being taste
+when the narrow fix leaves the cause in place and adds a second way to resolve something the
+tree already resolves elsewhere: that is D11, and it blocks on its own terms.
 **Evidence:** `$WORK/body.txt`, `$WORK/commits.txt`, `$WORK/diff.txt`.
 **Report as:** `V3: the body states <claim>, but <consumer> reads <actual source> -- correct
 the description` / `V3: the diff narrows <window> without removing <cause>`

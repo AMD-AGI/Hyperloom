@@ -84,7 +84,7 @@ Keep the `$WORK` it prints. Read `diff.txt` and `body.txt` before going on.
 
 Open the index at the top of [`rules.md`](rules.md) and take every row whose trigger matches
 `files.txt` and a skim of `diff.txt`. Write the union of their rule ids into `$WORK/rules.txt`, one
-per line, then read only those bodies. **Never read `rules.md` whole** — it holds 53 rules across 9
+per line, then read only those bodies. **Never read `rules.md` whole** — it holds 54 rules across 9
 families, and a reviewer told to attend to all of them attends to none. Match rows generously: a row
 you are unsure about is taken, never dropped. V1-V6 and X2 are on every list.
 
