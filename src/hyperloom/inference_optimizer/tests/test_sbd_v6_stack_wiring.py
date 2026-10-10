@@ -141,6 +141,87 @@ def test_a_degraded_agentx_lift_is_refused(session_dir, monkeypatch):
         assert _rows() == []
 
 
+def test_an_agentx_lift_refuses_a_winner_missing_comparability_axes(session_dir, monkeypatch):
+    """Explore KEEP that omits duration/error_rate must not promote: rounds_are_comparable fails closed."""
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    with session_scope(session_dir):
+        coord = _coord(session_dir, baseline=1000.0, anchor=1000.0)
+        coord.shared_state.benchmark_mode = "agentx"
+        coord.shared_state.grading = {"objective": GRADED_INTVTY, "noise_pct": 5.0}
+        coord.shared_state.current_best = {
+            "action": "baseline",
+            "tput": 1000.0,
+            "output_throughput": 1000.0,
+            "total_throughput": 20000.0,
+            "e2e_norm_intvty_p50": 87.9,
+            "e2e_norm_intvty_p90": 33.7,
+            "duration_seconds": 3600.0,
+            "request_error_rate": 0.0,
+            "extra_server_args": "",
+            "extra_envs": {},
+        }
+
+        assert (
+            coord.writeback.lift_to_current_best(
+                "explore",
+                1100.0,
+                {
+                    "name": "keep-without-comparability",
+                    "output_throughput": 1100.0,
+                    "total_throughput": 22000.0,
+                    "e2e_norm_intvty_p50": 93.2,
+                    "e2e_norm_intvty_p90": 38.3,
+                    # duration_seconds / request_error_rate deliberately omitted
+                },
+            )
+            is False
+        )
+        assert coord.shared_state.current_best["action"] == "baseline"
+        assert _rows() == []
+
+
+def test_an_agentx_lift_keeps_a_winner_with_comparability_axes(session_dir, monkeypatch):
+    """The same intvty win promotes once duration and error_rate travel with the winner."""
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    with session_scope(session_dir):
+        coord = _coord(session_dir, baseline=1000.0, anchor=1000.0)
+        coord.shared_state.benchmark_mode = "agentx"
+        coord.shared_state.grading = {"objective": GRADED_INTVTY, "noise_pct": 5.0}
+        coord.shared_state.current_best = {
+            "action": "baseline",
+            "tput": 1000.0,
+            "output_throughput": 1000.0,
+            "total_throughput": 20000.0,
+            "e2e_norm_intvty_p50": 87.9,
+            "e2e_norm_intvty_p90": 33.7,
+            "duration_seconds": 3600.0,
+            "request_error_rate": 0.0,
+            "extra_server_args": "",
+            "extra_envs": {},
+        }
+
+        assert (
+            coord.writeback.lift_to_current_best(
+                "explore",
+                1100.0,
+                {
+                    "name": "ref-conc10",
+                    "output_throughput": 1100.0,
+                    "total_throughput": 19000.0,
+                    "e2e_norm_intvty_p50": 93.2,
+                    "e2e_norm_intvty_p90": 38.3,
+                    "duration_seconds": 3600.0,
+                    "request_error_rate": 0.0,
+                },
+            )
+            is True
+        )
+        assert coord.shared_state.current_best["variant_name"] == "ref-conc10"
+        assert coord.shared_state.current_best["e2e_norm_intvty_p50"] == 93.2
+        assert coord.shared_state.current_best["duration_seconds"] == 3600.0
+        assert coord.shared_state.current_best["request_error_rate"] == 0.0
+
+
 def test_a_refused_lift_records_nothing(session_dir):
     with session_scope(session_dir):
         coord = _coord(session_dir, baseline=1000.0, anchor=1200.0)

@@ -842,6 +842,13 @@ async def test_explore_missing_axes_preserves_running_grading_anchor(
     assert [row["name"] for row in out["winners"]] == expected_winners
     assert [row["variant_name"] for row in out["explore_search_update"]["winners_history"]] == expected_winners
     assert out["running_base_tput"] == (220.0 if intvty_outcome == "KEEP" else 210.0)
+    # Lift re-grades winners; duration/error_rate must ride along for rounds_are_comparable.
+    for winner in out["winners"]:
+        assert winner["duration_seconds"] == 25.0
+        assert winner["request_error_rate"] == 0.0
+        assert winner["e2e_norm_intvty_p50"] is not None
+    assert tested["v_good"]["duration_seconds"] == 25.0
+    assert tested["v_good"]["request_error_rate"] == 0.0
 
 
 @pytest.mark.asyncio
