@@ -55,7 +55,11 @@ and that its proposals look sane for a model before letting them be measured.
 `c<macro_cycle>-s<stack_depth>-r<roofline_count>`. A KEEP, a new macro-cycle and a
 new roofline each change what the answer is conditioned on. A key counts as asked as
 soon as its request goes out, so it is never asked twice, not even after a failure.
-Asked keys persist in `state.json` as `predictor_asked_keys`.
+Asked keys persist in `state.json` as `predictor_asked_keys`. A KEEP moves the
+decision point at once, and the re-profile it triggers moves it again minutes
+later, so while a re-profile is in flight the predictor holds the decision point
+for up to 15 minutes rather than answer on the profile of the stack before the
+KEEP; past that it asks on the profile the session has.
 
 **When it asks.** Only in an open FRAMEWORK_AGENT phase, only for `vllm` and `sglang`
 (the frameworks the service has flag catalogues for), and only while the phase can
