@@ -250,7 +250,7 @@ def agentx_env_for_conc(conc: int | None = None) -> "Mapping[str, str]":
 # which is the side that actually selects the corpus at runtime -- this one only
 # reports it -- so the two are pinned together by
 # ``test_agentx_corpus_rules_consistency``.
-AGENTX_FULL_CONTEXT_FAMILIES = ("dsv4", "deepseekv4", "glm52", "minimaxm3", "kimik3")
+AGENTX_FULL_CONTEXT_FAMILIES = ("dsv4", "deepseekv4", "glm52", "glm53", "minimaxm3", "kimik3")
 AGENTX_CORPUS_FULL = "semianalysis_cc_traces_weka_062126"
 AGENTX_CORPUS_256K = "semianalysis_cc_traces_weka_062126_256k"
 
