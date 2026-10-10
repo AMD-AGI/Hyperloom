@@ -12,7 +12,12 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ...gpu_types import _AMD_GPU_TYPES, _GFX_TO_RUNNER, _PRODUCT_TAGS
+from ...gpu_types import (
+    _AMD_GPU_TYPES,
+    _GFX_TO_RUNNER,
+    _PRODUCT_TAGS,
+    _product_tag_matches,
+)
 from . import ray_dashboard, ssh_client, ssh_known_hosts
 from .external_state import build_external_state_from_env, external_service_url
 
@@ -34,7 +39,7 @@ def _parse_gpu_type(text: str) -> str | None:
     """Map rocm-smi / gcnArchName output to a known AMD runner type."""
     upper = (text or "").upper()
     for tag in _PRODUCT_TAGS:
-        if tag in upper:
+        if _product_tag_matches(tag, upper):
             candidate = tag.lower()
             if candidate in _AMD_GPU_TYPES:
                 return candidate

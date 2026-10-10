@@ -9,6 +9,7 @@ import os
 from typing import Any, Mapping
 
 from hyperloom.common.agentx_workload import is_agentx_client_script
+from hyperloom.inference_optimizer.gpu_types import _gpu_runner_type
 
 from ._workload_envs import (
     apply_agentx_switch,
@@ -39,12 +40,13 @@ def apply_runtime_benchmark_overrides(
         bench["precision"] = precision
 
     if gpu_type:
-        bench["runner_type"] = str(gpu_type)
-        # Force-pin the generic ``{framework}_{gpu_type}.sh`` so Magpie's resolver doesn't fall through to InferenceX
+        runner_gpu_type = _gpu_runner_type(gpu_type)
+        bench["runner_type"] = runner_gpu_type
+        # Force-pin the generic ``{framework}_{runner_type}.sh`` so Magpie's resolver doesn't fall through to InferenceX
         # native scripts that ignore ``EXTRA_*_ARGS``.
         framework = str(bench.get("framework") or "").lower()
         if framework:
-            bench["benchmark_script"] = f"{framework}_{gpu_type}.sh"
+            bench["benchmark_script"] = f"{framework}_{runner_gpu_type}.sh"
         else:
             bench.pop("benchmark_script", None)
 

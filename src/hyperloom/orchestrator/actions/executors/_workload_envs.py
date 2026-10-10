@@ -54,6 +54,7 @@ from hyperloom.common.workload_defaults import (
     DEFAULT_ISL,
     DEFAULT_OSL,
 )
+from hyperloom.inference_optimizer.gpu_types import _gpu_runner_type
 from hyperloom.inference_optimizer.session.paths import asset_root
 from hyperloom.inference_optimizer.framework_paths import ENV_FLYDSL_EXTRA_SOURCE_DIRS
 from hyperloom.inference_optimizer.framework_paths import GENERIC_FRAMEWORK_ROOT_ENV
@@ -1359,7 +1360,7 @@ def materialize_config_with_envs(
     """Render a per-run Magpie YAML with caller-provided overrides.
 
     Process env wins over YAML defaults: ``MODEL_PATH`` → ``benchmark.model``;
-    ``GPU_TYPE`` → ``runner_type`` + pinned generic ``{framework}_{gpu_type}.sh``
+    GPU product → family ``runner_type`` + pinned generic ``{framework}_{runner_type}.sh``
     (so Magpie doesn't fall through to a native script hardcoding
     ``--result-dir /workspace/``); ``benchmark_script`` (pre-sanitized) re-pins
     after that; ``PRECISION`` → ``precision``; ``CONC/ISL/OSL/MAX_MODEL_LEN/TP/
@@ -1387,7 +1388,7 @@ def materialize_config_with_envs(
         args_mode: ``"append"`` (default) or ``"replace"`` for
             ``extra_server_args``.
         model_path: Model path/id; overrides ``benchmark.model`` when set.
-        gpu_type: GPU type; sets ``runner_type`` and pins the generic script.
+        gpu_type: Product or runner type; resolves ``runner_type`` and pins the generic script.
         inferencex_path: Explicit InferenceX checkout to pin into the YAML.
         benchmark_script: Pre-sanitized benchmark script name to re-pin.
         out_name: File name for the materialized YAML.
@@ -1429,10 +1430,11 @@ def materialize_config_with_envs(
     if precision:
         bench["precision"] = precision
     if gpu_type:
-        bench["runner_type"] = str(gpu_type)
+        runner_gpu_type = _gpu_runner_type(gpu_type)
+        bench["runner_type"] = runner_gpu_type
         framework = str(bench.get("framework") or "").lower()
         if framework:
-            bench["benchmark_script"] = f"{framework}_{gpu_type}.sh"
+            bench["benchmark_script"] = f"{framework}_{runner_gpu_type}.sh"
         else:
             bench.pop("benchmark_script", None)
     if benchmark_script:
