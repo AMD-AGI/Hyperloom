@@ -38,6 +38,7 @@ from kernelforge.loop.recovery import (
 )
 from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
 from kernelforge.loop.search_policy import (
+    DEFAULT_SEARCH_POLICY,
     SEQUENTIAL_DEFAULT_LANES,
     SearchPolicy,
     parse_search_policy,
@@ -2517,6 +2518,29 @@ def _emit_rewrite_applyback_contract(ctx, _param, value):
     "and steer its planner by the attainment against it; the estimate costs a "
     "profiler pass and an analyst session, paid out of the OPTIMIZE budget."
 )
+@click.option(
+    "--search-policy",
+    default=DEFAULT_SEARCH_POLICY.value,
+    show_default=True,
+    type=click.Choice([policy.value for policy in SearchPolicy], case_sensitive=False),
+    help="OPTIMIZE: which measured candidates the nested forge-loop builds on; "
+    "same meaning as forge-loop --search-policy.",
+)
+@click.option(
+    "--lanes",
+    default=None,
+    type=click.IntRange(min=1, max=8),
+    help="OPTIMIZE: Implementer lanes per round of the nested forge-loop. "
+    f"Default {SEQUENTIAL_DEFAULT_LANES} under the sequential search policy; "
+    "seqany runs exactly one lane and refuses more.",
+)
+@click.option(
+    "--merge-stacking/--no-merge-stacking",
+    default=True,
+    show_default=True,
+    help="OPTIMIZE: whether a stalled nested forge-loop may measure two archived "
+    "rejected gains applied together; same meaning as on forge-loop.",
+)
 @click.option("--result-json", default=None, help="Write the result dict here (also printed)")
 def forge_rewrite(
     source_kernel,
@@ -2548,11 +2572,20 @@ def forge_rewrite(
     supervisor_backend,
     profile_timeout_sec,
     roofline_ceiling,
+    search_policy,
+    lanes,
+    merge_stacking,
     result_json,
 ):
     """Rewrite a source kernel into FlyDSL and optimize it via forge-loop."""
     import os
     import re as _re
+
+    policy = parse_search_policy(search_policy)
+    try:
+        lanes = resolve_lanes(policy, lanes)
+    except ValueError as error:
+        raise click.ClickException(f"--lanes: {error}") from error
 
     overrides = {}
     if gpu_target:
@@ -2606,6 +2639,9 @@ def forge_rewrite(
         supervisor_backend=supervisor_backend,
         profile_timeout_sec=profile_timeout_sec,
         roofline_ceiling=roofline_ceiling == CEILING_ON,
+        search_policy=policy,
+        lanes=lanes,
+        merge_stacking=merge_stacking,
         result_json=result_json,
         deadline_unix=deadline_unix,
         framework=framework,

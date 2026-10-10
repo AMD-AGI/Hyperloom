@@ -12,6 +12,7 @@ import pytest
 from click.testing import CliRunner
 
 from kernelforge.cli import main
+from kernelforge.loop.search_policy import SEQUENTIAL_DEFAULT_LANES, SearchPolicy
 from kernelforge.rewrite_by_flydsl import protocol
 
 from kernelforge.conftest import SRC_ROOT
@@ -296,6 +297,45 @@ def test_the_rewrite_offers_the_same_roofline_switch_as_forge_loop():
     assert rewrite.opts == loop.opts == ["--roofline-ceiling"]
     assert rewrite.default == loop.default == "off"
     assert list(rewrite.type.choices) == list(loop.type.choices) == ["on", "off"]
+
+
+@pytest.mark.parametrize(
+    ("flags", "policy", "lanes", "merge_stacking"),
+    [
+        ([], SearchPolicy.SEQUENTIAL, SEQUENTIAL_DEFAULT_LANES, True),
+        (["--search-policy", "sequential", "--lanes", "1", "--no-merge-stacking"], SearchPolicy.SEQUENTIAL, 1, False),
+        (["--search-policy", "SeqAny"], SearchPolicy.SEQANY, 1, True),
+    ],
+)
+def test_search_controls_reach_the_rewrite_resolved(monkeypatch, tmp_path, flags, policy, lanes, merge_stacking):
+    result, captured = _invoke_rewrite(monkeypatch, tmp_path, "--logical-op-name", tuple(flags))
+
+    assert result.exit_code == 0, result.output
+    assert captured["search_policy"] is policy
+    assert captured["lanes"] == lanes
+    assert captured["merge_stacking"] is merge_stacking
+
+
+def test_seqany_with_more_than_one_lane_is_refused_before_the_rewrite_starts(monkeypatch, tmp_path):
+    result, captured = _invoke_rewrite(
+        monkeypatch, tmp_path, "--logical-op-name", ("--search-policy", "seqany", "--lanes", "2")
+    )
+
+    assert result.exit_code != 0
+    assert "single lane" in result.output
+    assert captured == {}
+
+
+def test_the_rewrite_offers_the_same_search_controls_as_forge_loop():
+    def option(command, name):
+        return next(param for param in command.params if param.name == name)
+
+    rewrite = main.commands["forge-rewrite-by-flydsl"]
+    loop = main.commands["forge-loop"]
+    for name in ("search_policy", "lanes", "merge_stacking"):
+        assert option(rewrite, name).opts == option(loop, name).opts
+    assert list(option(rewrite, "search_policy").type.choices) == list(option(loop, "search_policy").type.choices)
+    assert option(rewrite, "merge_stacking").secondary_opts == option(loop, "merge_stacking").secondary_opts
 
 
 def test_a_framework_outside_the_handshake_is_rejected(monkeypatch, tmp_path):
