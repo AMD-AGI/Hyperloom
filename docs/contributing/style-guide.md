@@ -71,46 +71,69 @@ Where existing code needs the old shape for a behavioural reason — persisted n
 
 ### Size and complexity
 
-Two layers. The **gate** is the `code-metrics` CI job (`scripts/code_metrics.py`): it measures industry-standard white-box metrics at their tools' default thresholds and fails the PR when the code gets worse. The **review triggers** below it are the softer numbers a reviewer asks about.
+Two layers. The **gate** is the `code-metrics` CI job (`scripts/code_metrics.py`): it measures the white-box metrics below on every PR and fails the PR when a file the PR touches gets worse. The **review triggers** under it are the softer numbers a reviewer asks about.
 
-| Gated dimension | Fails when | Source of the threshold | Tool |
-|-----------------|-----------|-------------------------|------|
-| Cyclomatic complexity | > 10 | McCabe (1976); mccabe / ruff `C901` default | ruff `C901` |
-| Cognitive complexity | > 15 | SonarSource rule S3776 default | complexipy |
-| Statements, branches, returns per function | > 50, > 12, > 6 | pylint `R0915`, `R0912`, `R0911` defaults | ruff `PLR0915`/`PLR0912`/`PLR0911` |
-| Arguments, positional arguments | > 5, > 5 | pylint `R0913`, `R0917` defaults (`self`/`cls` not counted) | ruff `PLR0913`/`PLR0917` |
-| Local variables, nested block depth | > 15, > 5 | pylint `R0914`, `R1702` defaults | ruff `PLR0914`/`PLR1702` |
-| Public methods per class | > 20 | pylint `R0904` default | ruff `PLR0904` |
-| Module length | > 1000 lines | pylint `C0302` default | the script |
-| Maintainability index | < 10 | radon rank C ("extremely low") | radon |
+| Gated dimension | Fails when | Why this number | Tool |
+|-----------------|-----------|-----------------|------|
+| Cyclomatic complexity | > 20 | The [Complexity ceiling](#complexity-ceiling): twice McCabe's 10, the point where a function has more paths than a reviewer can hold while reading it | ruff `C901` |
+| Cognitive complexity | > 30 | Twice SonarSource's S3776 default of 15, the same step as the ceiling; it weights nesting, so past 30 a function has to be re-read rather than read | complexipy |
+| Function length | > 80 lines | A function past one screen; counted as below, `def` line through the last line | the script |
+| Nested block depth | > 5 | pylint `R1702` default: past five levels the innermost line depends on six conditions at once | ruff `PLR1702` |
+| Module length | > 1200 lines (over 800 is a report-only warning) | Half again the 800-line review trigger; at that size a module almost always holds more than one job | the script |
 | Duplicated code | any clone of >= 100 tokens and >= 10 lines | SonarSource CPD defaults | jscpd |
 | Dead code | any finding at >= 80% confidence | vulture's recommended CI setting | vulture |
 
-The thresholds, their sources and the exact tool versions live in `pyproject.toml` under `[tool.hyperloom.code_metrics]`. The scope is all of `src` and `scripts`, minus the same vendored and shipped-example trees as Ruff's `extend-exclude`; files under a `tests/` directory are exempt from everything but duplication. Suppression comments (`# noqa` for the Ruff-measured dimensions, complexipy's ignore marker, `jscpd:ignore-start`) do not hide a unit from the gate: Ruff and complexipy run with their ignore switches, and jscpd reads copies with its markers defused. Vulture alone honours `# noqa`, because that marker belongs to Ruff: `# noqa: F401` is the sanctioned form for a side-effect import or a re-export, and Ruff's `RUF100` flags one that suppresses nothing.
+The thresholds, the reason for each and the exact tool versions live in `pyproject.toml` under `[tool.hyperloom.code_metrics]`. The scope is all of `src` and `scripts`, minus the same vendored and shipped-example trees as Ruff's `extend-exclude`; files under a `tests/` directory are exempt from everything but duplication. Suppression comments (`# noqa` for the Ruff-measured dimensions, complexipy's ignore marker, `jscpd:ignore-start`) do not hide a unit from the gate: Ruff and complexipy run with their ignore switches, and jscpd reads copies with its markers defused. Vulture alone honours `# noqa`, because that marker belongs to Ruff: `# noqa: F401` is the sanctioned form for a side-effect import or a re-export, and Ruff's `RUF100` flags one that suppresses nothing.
 
-Units that were already over a threshold when the gate landed are recorded with their value in `scripts/code_metrics_baseline.json`, keyed by file and qualified name (`Class.method`), so moving code inside a file does not disturb them. The baseline only goes down:
+Units that were already over a threshold when the gate landed are recorded with their value in `scripts/code_metrics_baseline.txt`, one sorted line per unit (`<metric> <path>::<Class.method> <value>`, or `<metric> <path> <value>` for a module), so moving code inside a file does not disturb them and a change to the baseline is one line per unit in the diff.
 
-- a unit over a threshold that is not in the baseline fails the PR — new code meets the limits;
+**Only the files a PR touches are judged** (the diff against the merge base; for a push to `main`, against the commit it replaced). A file the PR does not touch never fails it, whatever is found there; the report lists such findings as information. In a touched file:
+
+- a unit over a threshold that is not in the baseline fails — new code meets the limits;
 - a baselined unit that got worse than its recorded value fails — **do not grow the backlog**: adding branches or lines to a unit, or lines to a module, that is already over is a failure, not a judgement call;
-- a baselined unit that improved, dropped under the limit or was deleted fails as *out of date* until `python scripts/code_metrics.py --update-baseline` is run and the baseline committed in the same PR (the command can only lower or remove entries);
-- relative to the base branch, the PR's baseline may only lose entries or lower values, and the config may not loosen (no raised limit, no new exclusion, no file the base's scope measured left unmeasured). Adding a unit to the baseline is not a way to pass.
+- in both cases the same file at the merge base is measured too, and a unit the base already had at that value or worse is backlog, not this PR's debt — the comparison the [Complexity ceiling](#complexity-ceiling) defines;
+- a baselined unit that improved, dropped under the limit or was deleted fails as *out of date* until `python scripts/code_metrics.py --update-baseline` is run and the baseline committed in the same PR (the command can only lower or remove entries).
+
+Across the whole file, not only touched entries: relative to the base branch the PR's baseline may only lose entries or lower values, and the config may not loosen (no raised limit, no new exclusion, no file the base's scope measured left unmeasured). Adding a unit to the baseline is not a way to pass.
+
+**Override: the `baseline-raise` label.** A PR that has to land a new or worse unit, or grow the baseline, carries the `baseline-raise` label, and its description says why. The gate reads the label from the GitHub API when it runs (re-run the job after adding it); new, worse and baseline-growth findings are then *waived* — still listed in full in the job log and the report, no longer failing. It waives nothing else: an out-of-date entry, a loosened config and the checks below still fail.
 
 CI judges a PR with the base branch's copy of the gate scripts, so a PR that edits `scripts/code_metrics*.py` does not grade itself; the report lists every edit to the gate's scripts, workflows or tool pins under *Gate implementation changed* for a reviewer. A gate change that the base's copy cannot run (a new config key, say) lands in two steps: first teach the scripts to accept it, then use it.
 
-A unit that only moved to another file keeps its baseline entry when its qualified name (a module: its file name) is unique among the moved units and its value is no worse; a renamed unit, or one moved to another class, does not, and has to meet the limits. The report — new, worse and out-of-date units with links to the lines — is on the job summary and in one sticky PR comment. Run the gate locally with the install line in the script's docstring; `--base-ref origin/main` adds the base-branch check.
+A unit that only moved to another file keeps its baseline entry when its qualified name (a module: its file name) is unique among the moved units and its value is no worse; a renamed unit, or one moved to another class, does not, and has to meet the limits. The report — new, worse and out-of-date units with links to the lines — is on the job summary and in one sticky PR comment. Run the gate locally with the install line in the script's docstring; `--base-ref origin/main` judges the files changed since the merge base and adds the base-branch checks.
 
 Editing a unit that was already over is not a demand to repay its debt — the gate only asks that it not get worse. Extracting a helper while you are in there is in scope, and the gate rewards it with an out-of-date entry to tighten; a standalone rewrite of an unrelated module is a separate PR (see [`AGENTS.md`](../../AGENTS.md) § *One concern per change*).
 
-**Review triggers.** These are not gated; they are the point at which a reviewer asks for a split or for the reason the shape is right.
+**Checks without a baseline.** The same job runs four checks that have no backlog to carry; each fails the PR on its own:
+
+| Check | Fails when | Scope |
+|-------|-----------|-------|
+| Comments | an added run of more than 8 consecutive full-line `#` comments; an added comment that points at a PR or issue (`#1234`, `PR 1234`, `issue 1234`, a `/pull/` link) or narrates an incident (`the outage`, a dated `incident`, `postmortem`). A `TODO` and the line after it may link an issue, as Ruff's `TD003` asks | added lines of `.py` files, tests included; docstrings are not comments |
+| English only | a CJK character (CJK ideographs, CJK symbols and punctuation, halfwidth and fullwidth forms) | every tracked text file, and on a PR its title, body and every commit message. Test data that needs a multi-byte character uses a non-CJK one (the euro sign is three bytes in UTF-8) |
+| Production code does not import test code | a module under `src/` or `scripts/` that is not itself a test imports a `tests` package or a `test_*` module (a module merely named `test` is not test code) | the whole tree. Move what both sides need into a non-test module |
+| Repeated literals | the PR adds an occurrence of a string (3+ characters) or a number (other than 0, 1, -1 and 2) that leaves it written 3 or more times in the module | the production modules the PR touches, counted before and after; dict keys, `x["key"]` subscripts, keyword names, docstrings, f-string text, annotations and `__all__` do not count. Name the value once as a module-level constant |
+
+The comment and literal checks are diff-only on purpose: the history in a comment is cheap to keep out and expensive to strip later, and a whole-tree literal count would flag most modules in the tree for values nobody is changing.
+
+**Review triggers.** These are not gated; they are the point at which a reviewer asks for a split or for the reason the shape is right. One of them has a ceiling above it that a reviewer blocks on; see [Complexity ceiling](#complexity-ceiling).
 
 | Unit | Trigger | Where the number comes from |
 |------|---------|-----------------------------|
 | Function length | ~60 lines | Just above the tree's 90th percentile |
+| Cyclomatic complexity | 10 | McCabe default; measurable on demand with `ruff check --select C901` |
 | Module length | ~800 lines | Roughly the tree's 90th percentile |
 
-Neither number identifies a problem on its own. A long function can be one prompt template with a complexity of 1, and a short one can carry a dozen field comparisons that still need semantic review. Crossing a trigger asks the reviewer to look for a responsibility boundary, not to assume there is one — and "this is a single template" is an accepted answer. Split when it improves ownership, data flow, or testability. A function counts from its `def` line through its last line, decorators excluded and blank, comment and docstring lines included; a nested or `async` function is measured on its own. Module length is physical lines. Tests are exempt from the triggers — a table-driven test that gains a case per behaviour is doing its job — though not from the duplication and boundary rules.
+Neither number identifies a problem on its own. A long function can be one prompt template with a complexity of 1, and a short one can carry a dozen field comparisons that still need semantic review. Crossing a trigger asks the reviewer to look for a responsibility boundary, not to assume there is one — and "this is a single template" is an accepted answer. Split when it improves ownership, data flow, or testability.
 
-Passing a trigger is not a merge blocker — it means the PR description says why, or the change splits. Passing the [Complexity ceiling](#complexity-ceiling) below is; inside its scope the `code-metrics` gate is stricter still.
+**How the lines are counted:** a function spans its `def` line through its last line, decorators excluded and blank, comment and docstring lines included; a nested or `async` function is measured on its own as well (its lines are also part of the function around it). Module length is physical lines. Tests are exempt from the size triggers — a table-driven test that gains a case per behaviour is doing its job — though not from the duplication and boundary rules.
+
+Measure rather than argue:
+
+```bash
+ruff check --select C901 --config "lint.mccabe.max-complexity=10" src/hyperloom src/kernelforge
+```
+
+Passing a trigger is not a merge blocker — it means the PR description says why, or the change splits. Passing the ceiling below is, and so is the `code-metrics` gate above.
 
 Structure the split along the boundaries the code already has — one job per module, cohesive inside, dependencies pointing one way down the layers. A split that only moves lines to a second file, leaving the two halves reaching into each other, trades one long file for a cycle.
 
@@ -132,6 +155,8 @@ ruff check --select C901 --config "lint.mccabe.max-complexity=20" --isolated \
 ```
 
 The tree carried 124 units above 20 when the ceiling was introduced (2026-10-10). The ceiling is what stops that number growing; it is not a demand to pay the 124 down.
+
+CI now measures the ceiling: the `code-metrics` job (see [Size and complexity](#size-and-complexity)) applies exactly these two cases to every function in the files a PR touches under `src/` and `scripts/`, comparing the head with the merge base, and the units already above 20 are its baseline. The review rule stands; the job makes the measurement for it.
 
 ### Module structure
 
@@ -207,7 +232,7 @@ Bandit scans production code (`src/hyperloom`, `scripts/`). Tests are excluded.
 
 ### Pylint
 
-CI runs `pylint --errors-only` on core packages (fatal/error severity only). Fix new error-level issues in touched modules; convention, refactor, and style messages are intentionally out of scope here; the size and complexity rules among them (`R0912`, `R0915`, ...) are gated by the `code-metrics` job instead — see [Size and complexity](#size-and-complexity).
+CI runs `pylint --errors-only` on core packages (fatal/error severity only). Fix new error-level issues in touched modules; convention, refactor, and style messages are intentionally out of scope here; the size and complexity limits CI does hold are the `code-metrics` job's — see [Size and complexity](#size-and-complexity).
 
 ### Tests (pytest)
 

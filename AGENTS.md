@@ -55,21 +55,20 @@ doc is the authority on where that boundary lives.
   harder. Cleanup in an unrelated file is a separate PR.
 - **Size is a design signal.** A function that keeps growing, a branch tree you have to
   scroll, a module that collects everything — that is the design telling you a boundary is
-  missing, and the answer is the split, not a bigger screen. The style guide § *Size and
-  complexity* is the authority on the numbers. The industry-standard metrics there
-  (cyclomatic and cognitive complexity, statements, branches, arguments, nesting, module
-  length, maintainability index, duplication, dead code) are a CI gate, `code-metrics`:
-  new code meets the limits, and a unit or module already over them — the tree's
-  recorded backlog — may not get worse. Editing such a unit is not a demand to repay its
-  debt; adding to it is a failure, and an improvement is banked by tightening the
-  baseline in the same PR. The function-length and module-length triggers there stay
-  review triggers: crossing one needs a reason in the PR description or a split. The
-  style guide § *Complexity ceiling* (cyclomatic complexity above 20 in a function the
-  change adds or raises) is the reviewer's blocking rule; inside the gate's scope the gate
-  already refuses both cases at the lower limit.
-  Maintainability, readability, extensibility, and reliability are what the thresholds
-  stand in for; when a review trigger and one of those disagree, say so and keep the
-  clearer code.
+  missing, and the answer is the split, not a bigger screen. New or rewritten code that
+  crosses a trigger in the style guide § *Size and complexity* — the authority on the
+  numbers, how to measure them, and when a long unit is fine as it stands — needs a reason
+  in the PR description or a split. Editing a unit that was already over is not a demand to
+  repay its debt; adding branches or a second responsibility to it is. The three numbers
+  are review triggers, not gates: no linter measures them today and the tree carries a
+  backlog above all three. Above them sits one gate — **a function this change adds, or
+  whose cyclomatic complexity this change raises, may not exceed 20**; the style guide §
+  *Complexity ceiling* has the measurement and the two cases it covers. Maintainability,
+  readability, extensibility, and reliability are what the thresholds stand in for; when a
+  threshold and one of those disagree, say so and keep the clearer code.
+  Separately, the `code-metrics` CI job enforces the ceiling, and the gated limits in the
+  style guide § *Size and complexity* (their baseline and the `baseline-raise` override),
+  on the files a change touches.
 - **Review feedback is a hypothesis.** A comment can be wrong, or right about the symptom
   and wrong about the fix. Before acting on one, ask what you would build if this code did
   not exist yet, and whether the mechanism under discussion should exist at all. Answering

@@ -15,13 +15,14 @@ Advisory review. Flag only what static gates can't.
   exists. Point to the existing one and ask to extend it.
 - **Size and complexity**: a unit past a trigger in the style guide's
   [Size and complexity](../docs/contributing/style-guide.md#size-and-complexity), which
-  owns the numbers and the exceptions. The `code-metrics` CI job gates the complexity,
-  size, duplication and dead-code metrics there; review still owns the function- and
-  module-length triggers, the complexity ceiling for code outside the gate's scope, and
-  whether a split follows a real seam. Name the seam to
-  split on, not just the line count, and don't ask for cleanup of an already oversized
-  function merely because the change edits it — but do flag a newly crossed threshold, or
+  owns the numbers and the exceptions. No linter covers this (Ruff runs `E`/`F`/`W`;
+  Pylint is `--errors-only`), so review is the only place it surfaces — including the one
+  case that blocks, a unit the change adds or whose complexity it raises past 20. Name
+  the seam to split on, not just the line count, and don't ask for cleanup of an already
+  oversized function merely because the change edits it — but do flag a newly crossed threshold, or
   branches and responsibilities added to a unit already over.
+  The `code-metrics` CI job now enforces that ceiling (and the style guide's gated limits)
+  on the files a change touches.
 - **Cohesion and coupling**: a module that has acquired a second job, a responsibility
   moved to the wrong layer, a dependency pointing back up the layers, a new import cycle,
   or a caller reaching around the layer that owns a thing. A diff that bypasses an
