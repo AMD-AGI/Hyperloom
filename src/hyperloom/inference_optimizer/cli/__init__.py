@@ -1806,6 +1806,16 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             )
             sys.exit(2)
         state = SharedState.load_or_init(session_dir)
+        # Operator launch shape, restored before the staleness guard rather than with the other re-exports below:
+        # the guard resolves the AgentX backend and mode from the process environment, so a session whose identity
+        # came from an --extra-env pin would be compared against an unpinned environment and refused as a workload
+        # mismatch. An explicit flag on this resume wins, else the persisted value.
+        _resume_server_args = str(getattr(args, "server_args", "") or "").strip() or state.operator_server_args
+        _resume_extra_env = parse_operator_extra_env(args) or dict(state.operator_extra_env)
+        _export_operator_launch_shape(
+            server_args=_resume_server_args,
+            extra_env=_resume_extra_env,
+        )
         _stale = agentx_state_is_stale(state)
         if _stale:
             print(
@@ -1904,13 +1914,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         if getattr(state, "framework_version", ""):
             os.environ["FRAMEWORK_VERSION"] = state.framework_version
             print(f"  re-exported FRAMEWORK_VERSION: {state.framework_version}")
-        # Operator launch shape: an explicit flag on this resume wins, else the persisted value.
-        _resume_server_args = str(getattr(args, "server_args", "") or "").strip() or state.operator_server_args
-        _resume_extra_env = parse_operator_extra_env(args) or dict(state.operator_extra_env)
-        _export_operator_launch_shape(
-            server_args=_resume_server_args,
-            extra_env=_resume_extra_env,
-        )
+        # Operator launch shape: already exported above, ahead of the staleness guard that reads the pins.
         state.operator_server_args = _resume_server_args
         state.operator_extra_env = _resume_extra_env
         if _resume_server_args:

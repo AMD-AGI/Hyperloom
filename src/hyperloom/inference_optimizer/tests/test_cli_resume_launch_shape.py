@@ -18,6 +18,66 @@ def _ns(**kw) -> argparse.Namespace:
     return argparse.Namespace(**kw)
 
 
+def test_resume_restores_pins_before_the_agentx_staleness_guard(tmp_path, monkeypatch):
+    """A session whose AgentX backend came from a pin resumes; the guard must not read an unpinned environment.
+
+    The guard resolves the backend with a bare ``os.environ.get``, so restoring the persisted pins after it runs
+    compares a session seeded as ``mlperf`` against an ambient ``aiperf`` and refuses the resume outright.
+    """
+    import asyncio
+
+    import pytest
+
+    import hyperloom.inference_optimizer.cli as optimizer_cli
+    from hyperloom.inference_optimizer.cli.bootstrap import AGENTX_MEASUREMENT_EPOCH
+
+    workspace = tmp_path / "sessions"
+    resume_dir = workspace / "Qwen-Test" / "pinned-backend"
+    model = tmp_path / "Qwen-Test"
+    resume_dir.mkdir(parents=True, exist_ok=True)
+    (resume_dir / "reports").mkdir(parents=True, exist_ok=True)
+    SharedState(
+        session_id="resume-pinned-backend",
+        model_name=model.name,
+        model_path=str(model),
+        benchmark_mode="agentx",
+        agentx_epoch=AGENTX_MEASUREMENT_EPOCH,
+        agentx_backend="mlperf",
+        operator_extra_env={"HYPERLOOM_AGENTIC_BACKEND": "mlperf"},
+    ).save(resume_dir)
+    (resume_dir / "manifest.json").write_text(
+        json.dumps({"schema_version": 4, "session_id": "resume-pinned-backend"}), encoding="utf-8"
+    )
+
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(resume_dir))
+    monkeypatch.setenv("USER_DATA_PATH", str(workspace))
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    # The operator exports AgentX in the shell but not the backend: that came from --extra-env on the fresh launch.
+    monkeypatch.delenv("HYPERLOOM_AGENTIC_BACKEND", raising=False)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", "")
+    monkeypatch.delenv("MODEL_PATH", raising=False)
+    monkeypatch.setattr(
+        optimizer_cli,
+        "clean_stale_aiter_locks",
+        lambda: {"dir": "", "deleted": 0, "skipped_fresh": 0, "errors": 0},
+    )
+
+    monkeypatch.setattr(optimizer_cli, "_preflight", lambda args: ("", ""))
+
+    def past_the_guard(*a, **kw):
+        raise RuntimeError("resume cleared the staleness guard")
+
+    # The first call after the guard: reaching it means the guard did not reject the session.
+    monkeypatch.setattr(optimizer_cli, "latency_budget_scope_error", past_the_guard)
+    args = optimizer_cli._build_parser().parse_args(["optimize", "--resume-from", str(resume_dir), "--critic-mock"])
+
+    # A SystemExit instead means the guard compared the session's pinned backend against an unpinned environment.
+    with pytest.raises(RuntimeError, match="resume cleared the staleness guard"):
+        asyncio.run(optimizer_cli._run_optimize(args))
+
+    assert os.environ["HYPERLOOM_AGENTIC_BACKEND"] == "mlperf"
+
+
 def test_parse_operator_extra_env_keeps_pairs_and_drops_junk():
     """``NAME=VALUE`` pins survive; entries without ``=`` or with a blank name do not."""
     args = _ns(extra_env=["SGLANG_USE_AITER=0", "EMPTY=", "novalue", "=blank"])
