@@ -850,15 +850,19 @@ class FrameworkPhase(CoordinatorCollaborator):
         # and before the pump so the entry's first dispatch is inside the event.
         self._open_framework_timeline()
         await self._pump_framework_agent_phase()
-        await self._pump_predictor()
+        # Settled here, before orchestration's first turn, so the first grid it composes can carry the answer.
+        await self._predictor_pump().settle(self.shared_state)
 
-    async def _pump_predictor(self) -> None:
-        """Step the PrimaTune predictor; a no-op unless an endpoint is configured."""
+    def _predictor_pump(self) -> Any:
         from ..predictor.pump import PredictorPump
 
         if self._predictor is None:
             self._predictor = PredictorPump()
-        await self._predictor.step(self.shared_state)
+        return self._predictor
+
+    async def _pump_predictor(self) -> None:
+        """Step the PrimaTune predictor; a no-op unless an endpoint is configured."""
+        await self._predictor_pump().step(self.shared_state)
 
     def _authoring_inflight_candidate_ids(self, queued: list[Any], running: list[Any]) -> set[str]:
         """Candidate ids with a live specialist / integrate_patch task or a review proposal awaiting its verdict."""

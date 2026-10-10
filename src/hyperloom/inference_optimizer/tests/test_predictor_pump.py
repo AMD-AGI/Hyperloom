@@ -376,7 +376,7 @@ async def test_the_framework_tick_steps_the_predictor(service, monkeypatch):
     assert [r["extra_args"] for r in _predictor_rounds(state)[0]["proposal_set"]] == ["--kv-cache-dtype fp8"]
 
 
-async def test_entering_framework_asks_the_predictor(service, monkeypatch):
+def _entering_phase(monkeypatch, state: SharedState) -> Any:
     from hyperloom.orchestrator.phases.framework import FrameworkPhase
 
     async def _noop(*args, **kwargs):
@@ -384,12 +384,33 @@ async def test_entering_framework_asks_the_predictor(service, monkeypatch):
 
     monkeypatch.setattr(FrameworkPhase, "_pump_framework_agent_phase", _noop)
     monkeypatch.setattr(FrameworkPhase, "_open_framework_timeline", lambda self: None)
-    state = _state()
     coord = SimpleNamespace(shared_state=state, phase_macro_cycle=SimpleNamespace(on_cycle_start_reprofile=_noop))
-    phase = FrameworkPhase(coord)
-    await phase.on_enter_framework(SimpleNamespace(from_phase="ENABLEMENT"))
-    await phase._predictor._inflight
+    return FrameworkPhase(coord)
+
+
+async def test_entering_framework_files_the_answer_before_orchestrations_first_turn(service, monkeypatch):
+    state = _state()
+    service.answer = _answer(Action(server_args={"--kv-cache-dtype": "fp8"}), votes={0: 1})
+    await _entering_phase(monkeypatch, state).on_enter_framework(SimpleNamespace(from_phase="ENABLEMENT"))
+
     assert len(service.requests) == 1 and service.requests[0]["phase"]["phase"] == "EXPLORE"
+    (round_,) = _predictor_rounds(state)
+    assert [row["extra_args"] for row in round_["proposal_set"]] == ["--kv-cache-dtype fp8"]
+
+
+async def test_a_slow_answer_does_not_hold_framework_entry_past_its_bound(service, monkeypatch):
+    state = _state()
+    service.answer = _answer(Action(server_args={"--kv-cache-dtype": "fp8"}), votes={0: 1})
+    service.gate = threading.Event()
+    monkeypatch.setattr(pump_mod, "MAX_ENTRY_WAIT_SEC", 0.05)
+    phase = _entering_phase(monkeypatch, state)
+    await phase.on_enter_framework(SimpleNamespace(from_phase="ENABLEMENT"))
+    assert _predictor_rounds(state) == []
+
+    service.gate.set()
+    await phase._predictor._inflight
+    await phase._pump_predictor()
+    assert len(_predictor_rounds(state)) == 1
 
 
 def test_primatune_is_its_own_producer():

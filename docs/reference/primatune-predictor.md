@@ -67,7 +67,11 @@ still bench one variant, about ten minutes.
 
 **Off the tick loop.** The request runs in a worker thread. The tick that finds it
 finished files the answer, so a slow service never stalls the Coordinator. One
-request is in flight at a time. An answer that arrives after the macro-cycle has moved
+request is in flight at a time. FRAMEWORK entry is the exception: the tick runs
+orchestration's turn before it files anything, so an answer to the entry request
+would miss the first grid. Entry therefore waits for that answer, up to five
+minutes, before orchestration's first turn; the wait yields to the event loop,
+and the benchmark lane holds nothing yet at that point. An answer that arrives after the macro-cycle has moved
 on is filed under the cycle it was asked in, so it never reaches the new cycle's
 queue.
 
