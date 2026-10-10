@@ -1284,6 +1284,20 @@ def _prelude_predicate_inputs(state: Any, *, now_unix: float) -> dict[str, Any]:
     }
 
 
+def _rounds_since_phase_entry(state: Any) -> list[dict[str, Any]]:
+    """This cycle's specialist rounds booked since the current phase was entered.
+
+    PRELUDE shares macro-cycle 0 with FRAMEWORK_AGENT, and ``source_phase`` names a round's ownership lane rather
+    than the phase it ran in, so only the entry time separates this phase's rounds from earlier ones.
+    """
+    rows = _rows_for_current_cycle(state.specialist_rounds or [], state)
+    entered = _phase_started_unix(state)
+    # No entry time: keep every row of the cycle. With one: a row with no parseable completed_at is not counted.
+    if entered <= 0.0:
+        return rows
+    return [row for row in rows if (to_unix(row.get("completed_at")) or 0.0) >= entered]
+
+
 def _framework_predicate_inputs(
     state: Any,
     *,
@@ -1296,7 +1310,7 @@ def _framework_predicate_inputs(
         if key not in {"config_arm_plateaued", "source_arm_plateaued", "switch_bottleneck"}
     }
     plateau["attempt_count"] = len(_rows_for_current_cycle(state.attempts or [], state))
-    plateau["specialist_round_count"] = len(_rows_for_current_cycle(state.specialist_rounds or [], state))
+    plateau["specialist_round_count"] = len(_rounds_since_phase_entry(state))
     return plateau, _budget_predicate_inputs(state, now_unix=now_unix)
 
 
