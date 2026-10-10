@@ -3060,7 +3060,7 @@
     "<module>": 0
    },
    "module-lines": {
-    "<module>": 1396
+    "<module>": 1399
    },
    "statements": {
     "_append_composite_perf_section": 53,
@@ -4203,7 +4203,7 @@
     "_infer_model_class_from_config": 52
    },
    "cyclomatic-complexity": {
-    "Coordinator._reactor_turn": 11,
+    "Coordinator._reactor_turn": 12,
     "Coordinator._run_ticks": 23,
     "Coordinator._tick_once": 13,
     "_infer_model_class_from_config": 21
@@ -4212,14 +4212,14 @@
     "<module>": 0
    },
    "module-lines": {
-    "<module>": 1401
+    "<module>": 1434
    },
    "public-methods": {
     "Coordinator": 39
    },
    "statements": {
-    "Coordinator.__init__": 63,
-    "Coordinator._reactor_turn": 52,
+    "Coordinator.__init__": 64,
+    "Coordinator._reactor_turn": 54,
     "Coordinator._run_ticks": 94
    }
   },
@@ -4893,35 +4893,35 @@
   "src/hyperloom/orchestrator/roles/claude.py": {
    "branches": {
     "ClaudeBackend._build_options": 15,
-    "ClaudeBackend._invoke_and_collect": 29
+    "ClaudeBackend._invoke_and_collect": 30
    },
    "cognitive-complexity": {
     "ClaudeBackend.__post_init__": 21,
     "ClaudeBackend._build_options": 23,
-    "ClaudeBackend._invoke_and_collect": 79,
+    "ClaudeBackend._invoke_and_collect": 82,
     "ClaudeBackend._update_turn_options": 32,
     "_kill_turn_processes": 17
    },
    "cyclomatic-complexity": {
     "ClaudeBackend.__post_init__": 13,
     "ClaudeBackend._build_options": 16,
-    "ClaudeBackend._invoke_and_collect": 25
+    "ClaudeBackend._invoke_and_collect": 26
    },
    "locals": {
     "ClaudeBackend._invoke_and_collect": 29,
     "ClaudeBackend.run": 17
    },
    "maintainability-index": {
-    "<module>": 6
+    "<module>": 4
    },
    "module-lines": {
-    "<module>": 1073
+    "<module>": 1106
    },
    "nested-blocks": {
     "ClaudeBackend._invoke_and_collect": 8
    },
    "statements": {
-    "ClaudeBackend._invoke_and_collect": 91
+    "ClaudeBackend._invoke_and_collect": 93
    }
   },
   "src/hyperloom/orchestrator/roles/critic_agent.py": {
