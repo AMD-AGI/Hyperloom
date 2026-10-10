@@ -217,7 +217,8 @@ def build_trace_evidence_md(state: Any) -> str:
     measurement = getattr(state, "current_best_measurement", None)
     lines.extend(["```text", render_runtime_findings(measurement) if measurement else "not available", "```"])
     lines.extend(["", "## Hot GEMMs Missing Tuned Config", ""])
-    lines.extend(["```text", *_tuned_miss_lines(candidates_path, measurement), "```"])
+    profiled = {"launch_evidence_path": str(getattr(state, "last_profile_launch_evidence_path", "") or "")}
+    lines.extend(["```text", *_tuned_miss_lines(candidates_path, profiled), "```"])
     return "\n".join(lines) + "\n"
 
 
@@ -228,16 +229,19 @@ def _exposed_memcpy_line(analysis_md_path: Any) -> str:
     return "not available" if memcpy_pct is None else f"exposed_memcpy={memcpy_pct}% of GPU time"
 
 
-def _tuned_miss_lines(candidates_path: str, measurement: Mapping[str, Any] | None) -> list[str]:
-    """Name the candidate GEMM rows whose traced shapes the current-best server log reported as untuned."""
-    findings = load_runtime_findings(measurement) if measurement else None
+def _tuned_miss_lines(candidates_path: str, profiled: Mapping[str, Any]) -> list[str]:
+    """Name the candidate GEMM rows whose traced shapes the profiled run's server log reported as untuned.
+
+    Prefill M depends on batching, so only the run that produced the trace can match its shapes.
+    """
+    findings = load_runtime_findings(profiled)
     entry = next((f for f in (findings or {}).get("findings", []) if f["rule_id"] == AITER_TUNED_MISS), None)
     if entry is None or not candidates_path or not Path(candidates_path).is_file():
         return ["not available"]
     if entry["status"] == "unknown":
         return [f"unknown: {entry['reason']}"]
     if entry["status"] == "not_detected":
-        return ["none: the current-best server log reports no tuned-config miss"]
+        return ["none: the profiled server log reports no tuned-config miss"]
     missed, _hit = parse_aiter_shape_lookups(Path(findings["log_path"]).read_text(encoding="utf-8", errors="replace"))
     rows = json.loads(Path(candidates_path).read_text(encoding="utf-8")).get("hot_kernels", [])
     lines = []

@@ -2186,11 +2186,13 @@ class WritebackCollaborator(CoordinatorCollaborator):
             self.shared_state.last_profile_workload = {}
             if not trace_path:
                 self.shared_state.last_profile_trace = ""
+                self.shared_state.last_profile_launch_evidence_path = ""
             self.shared_state.last_profile_args = ""
             self.shared_state.last_profile_workload_action = ""
             changed = True
         elif trace_path:
             self.shared_state.last_profile_trace = str(trace_path)
+            self.shared_state.last_profile_launch_evidence_path = str(result.get("launch_evidence_path") or "")
             self.shared_state.last_profile_status = "succeeded"
             # Record the server config in effect for this trace, tagged with the
             # arm it measured so a later same-arm check can trust it.

@@ -213,9 +213,11 @@ def _tuned_miss_state(tmp_path: Path, log_text: str | None) -> _State:
         _gemm_row("k3", "fused_moe_kernel", "(64,7168) fp8", "(3072,7168) fp8"),
     ]
     candidates.write_text(json.dumps({"hot_kernels": rows}), encoding="utf-8")
+    evidence_path = str(tmp_path / "slot" / "launch_evidence.json")
     return _state(
         last_trace_analyze={"candidates_path": str(candidates)},
-        current_best_measurement={"launch_evidence_path": str(tmp_path / "slot" / "launch_evidence.json")},
+        last_profile_launch_evidence_path=evidence_path,
+        current_best_measurement={"launch_evidence_path": evidence_path},
     )
 
 
@@ -232,6 +234,36 @@ def test_trace_evidence_names_hot_gemms_whose_shapes_missed_tuned_config(tmp_pat
     )
 
 
+def test_trace_evidence_matches_tuned_misses_from_the_profiled_run(tmp_path: Path) -> None:
+    import json
+
+    from hyperloom.orchestrator.kernel.forge_handoff import build_trace_evidence_md
+    from hyperloom.orchestrator.measurement.runtime_findings import persist_runtime_findings, scan_server_log
+
+    def slot(name: str, m: int) -> str:
+        log = tmp_path / name / "server.log"
+        log.parent.mkdir(parents=True)
+        log.write_text(_MISS_LOG.replace("M:64", f"M:{m}"), encoding="utf-8")
+        persist_runtime_findings(scan_server_log(str(log), "sglang"), slot=tmp_path / name)
+        return str(tmp_path / name / "launch_evidence.json")
+
+    candidates = tmp_path / "kernel_candidates.json"
+    rows = [_gemm_row("k1", "gemm_a8w8_blockscale", "(7211,7168) fp8", "(3072,7168) fp8")]
+    candidates.write_text(json.dumps({"hot_kernels": rows}), encoding="utf-8")
+    state = _state(
+        last_trace_analyze={"candidates_path": str(candidates)},
+        last_profile_launch_evidence_path=slot("profile", 7211),
+        current_best_measurement={"launch_evidence_path": slot("current_best", 3119)},
+    )
+
+    assert _section(build_trace_evidence_md(state), "Hot GEMMs Missing Tuned Config") == (
+        "```text\n"
+        "- k1 gemm_a8w8_blockscale gpu_pct=12.5: M=7211 N=3072 K=7168\n"
+        "Rows not listed: unknown; a tuned-config hit is only logged under AITER_LOG_TUNED_CONFIG.\n"
+        "```\n"
+    )
+
+
 def test_trace_evidence_tuned_miss_states_without_a_join(tmp_path: Path) -> None:
     from hyperloom.orchestrator.kernel.forge_handoff import build_trace_evidence_md
 
@@ -239,7 +271,7 @@ def test_trace_evidence_tuned_miss_states_without_a_join(tmp_path: Path) -> None
     blind = build_trace_evidence_md(_tuned_miss_state(tmp_path / "blind", None))
 
     assert _section(clean, "Hot GEMMs Missing Tuned Config") == (
-        "```text\nnone: the current-best server log reports no tuned-config miss\n```\n"
+        "```text\nnone: the profiled server log reports no tuned-config miss\n```\n"
     )
     assert _section(blind, "Hot GEMMs Missing Tuned Config") == "```text\nunknown: no_server_log\n```\n"
 
