@@ -8,6 +8,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shlex
 import time
 import uuid
@@ -46,6 +47,7 @@ from ..actions.executors.explore import STACK_REVALIDATE_SOURCE, is_stack_revali
 from hyperloom.inference_optimizer.grid_server_args import strip_benchmark_harness_flags
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 from ..actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
+from ..actions.executors._ray_serving import RAY_INFEASIBLE_MARKER
 from hyperloom.inference_optimizer.breakdown.stop_reasons import (
     AGENTX_PREFLIGHT_STOP_REASON,
     PATCH_RECOVERY_INCOMPLETE_STOP_REASON,
@@ -111,6 +113,32 @@ _BASELINE_MAX_TOTAL_FAILURES: int = 3
 # Default resume-drift floor (%): a re-measured current_best below this fraction of its recorded tput is flagged as
 # drift.
 _DEFAULT_RESUME_DRIFT_FLOOR_PCT: float = 95.0
+
+
+# Characters of the normalised error text a baseline failure signature keeps; the
+# tail is where the cause is printed.
+_BASELINE_SIGNATURE_TAIL_CHARS: int = 400
+_SIGNATURE_VOLATILE_RE = re.compile(r"0x[0-9a-f]+|[0-9a-f]{8,}|\d+")
+
+
+def _baseline_failure_signature(err_class: str, error: Any) -> str:
+    """Identify a baseline failure by its class and error text, ignoring numbers.
+
+    Numbers (pids, ports, timestamps, durations) and hex ids differ between two
+    attempts that failed for the same reason, so they are folded away. An empty
+    error text has no signature: two failures that said nothing are not known
+    to be the same failure.
+    """
+    text = str(error or "").strip().lower()
+    if not text:
+        return ""
+    text = " ".join(_SIGNATURE_VOLATILE_RE.sub("#", text).split())
+    return f"{err_class}|{text[-_BASELINE_SIGNATURE_TAIL_CHARS:]}"
+
+
+def _is_ray_cluster_infeasible(result_payload: Mapping[str, Any]) -> bool:
+    """Whether a baseline failed because the Ray cluster can never place its round."""
+    return RAY_INFEASIBLE_MARKER in str(result_payload.get("error") or "")
 
 
 def _extract_enablement_launch_log(result_payload: dict[str, Any] | None) -> str:
@@ -1237,8 +1265,32 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 # ``baseline_arg_error_streak`` is deliberately left alone: a boot
                 # that failed some other way is no evidence the arguments were
                 # fixed.
+                # A process that exited with the same output as last time (modulo
+                # numbers) will do so again: stop at two instead of spending a
+                # third attempt. Only ``subprocess_nonzero`` qualifies, because its
+                # error text is the process's own output; other classes carry a
+                # fixed sentence that two unrelated failures share. A Ray cluster
+                # that cannot place the round is not something an enablement patch
+                # can change, so that one stops even while the enablement lane is
+                # open.
+                signature = (
+                    _baseline_failure_signature(err_class, result_payload.get("error"))
+                    if err_class == "subprocess_nonzero"
+                    else ""
+                )
+                repeated = bool(
+                    signature
+                    and self.shared_state.baseline_failure_streak >= 1
+                    and signature == self.shared_state.baseline_last_failure_signature
+                )
                 self.shared_state.baseline_failure_streak += 1
-                if self.shared_state.baseline_failure_streak >= 3 and not eval_pending_suppress and not in_enablement:
+                self.shared_state.baseline_last_failure_signature = signature
+                streak = self.shared_state.baseline_failure_streak
+                cluster_infeasible = _is_ray_cluster_infeasible(result_payload)
+                if not eval_pending_suppress and (
+                    (streak >= 3 and not in_enablement)
+                    or (streak >= 2 and repeated and (cluster_infeasible or not in_enablement))
+                ):
                     self.shared_state.set_stop_reason("baseline_failed")
             # Combined backstop: count ALL baseline failures so mixed
             # error_classes that split the per-class streaks still fast-fail.
@@ -1264,7 +1316,9 @@ class WritebackCollaborator(CoordinatorCollaborator):
             # fast arg errors, and an AgentX preflight abort -- the pump treats a
             # non-blank log as "there is something here to author against", and
             # for a missing pinned dependency there is not.
-            if err_class not in ("fast_exit_arg_error", AGENTX_PREFLIGHT_ERROR_CLASS):
+            if err_class not in ("fast_exit_arg_error", AGENTX_PREFLIGHT_ERROR_CLASS) and not (
+                _is_ray_cluster_infeasible(result_payload)
+            ):
                 launch_log = _extract_enablement_launch_log(result_payload)
                 if launch_log:
                     self.shared_state.enablement.launch_log = launch_log

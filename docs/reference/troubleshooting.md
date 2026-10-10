@@ -159,14 +159,23 @@ ray stop --force || true
 # issue #433: raise the soft open-files limit before `ray start` so the
 # raylet stays up (see "Ray raylet unstable / zombie" below).
 ulimit -Sn "${RAY_MIN_NOFILE:-65536}" 2>/dev/null || true
-ray start --head --disable-usage-stats --num-gpus="$RAY_NUM_GPUS" --include-dashboard=false
+ray start --head --disable-usage-stats --num-gpus="$RAY_NUM_GPUS" --include-dashboard=false \
+  --resources='{"serving_slot":1}'
 ray status
 ```
 
+The `--resources='{"serving_slot":1}'` argument is required: Hyperloom
+serializes serving work on that resource, and a head without it cannot run a
+baseline. Prefer letting Hyperloom start the head (or re-running the installer)
+over starting one by hand.
+
 > **Note**: current Hyperloom startup paths can auto-start or reuse a local Ray
-> head. If `ray_current_cluster` points at a stale or incompatible cluster, stop
-> Ray first so Hyperloom can create a fresh head with the required GPU and
-> custom-resource configuration.
+> head. A lone local head with no work on it that lacks `serving_slot` is
+> restarted with it automatically; any other cluster without it (an explicit
+> `RAY_ADDRESS`, a multi-node cluster, or one with resources in use) fails with
+> `existing Ray head has no serving_slot resource`. If `ray_current_cluster`
+> points at a stale or incompatible cluster, stop Ray first so Hyperloom can
+> create a fresh head with the required GPU and custom-resource configuration.
 
 ---
 

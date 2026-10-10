@@ -412,6 +412,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     baseline_roofline_ceiling: dict[str, Any] = field(default_factory=dict)
     baseline_failure_streak: int = 0
     baseline_arg_error_streak: int = 0
+    # Signature of the last failure counted in ``baseline_failure_streak``; two in a row that match end the run.
+    baseline_last_failure_signature: str = ""
     # Combined backstop counting ANY baseline failure regardless of error_class, catching mixed classes that never
     # trip a per-class streak (anti time-exhaustion).
     baseline_total_failures: int = 0

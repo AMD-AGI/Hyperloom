@@ -254,10 +254,12 @@ def _is_ray_version_mismatch(text: str) -> bool:
 def force_restart_local_cluster(
     num_gpus: Optional[int] = None,
     log_path: Optional[Path] = None,
+    *,
+    reason: str = "Stopping foreign cluster before version-mismatch recovery",
 ) -> None:
     """Tear down any reachable Ray cluster and start a fresh local head."""
     ensure_fd_limit(log_path=log_path)
-    _stop_ray_force(log_path=log_path, reason="Stopping foreign cluster before version-mismatch recovery")
+    _stop_ray_force(log_path=log_path, reason=reason)
     gcs_port, iso_args = _isolated_head_port_args()
     start_cmd = ["ray", "start", "--head", f"--port={gcs_port}", "--dashboard-host=127.0.0.1"]
     if num_gpus is not None:
@@ -277,7 +279,74 @@ def force_restart_local_cluster(
             start_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, text=True, **_RAY_START_DETACH_KWARGS
         )
     if proc.returncode != 0:
-        raise RuntimeError(f"failed to restart local Ray after version mismatch; see {log_path}")
+        raise RuntimeError(f"failed to restart local Ray (rc={proc.returncode}); see {log_path}")
+
+
+#: Ray resource keys that describe capacity rather than something a task or actor holds.
+_NON_HELD_RESOURCE_PREFIXES = ("node:", "memory", "object_store_memory")
+
+
+def local_head_restartable() -> Tuple[bool, str]:
+    """Whether the connected Ray cluster is a lone local head this process may restart.
+
+    Restarting means ``ray stop --force`` on this host, so it is allowed only for a
+    head nothing else depends on: no explicit cluster address, not a multi-node run,
+    exactly one live node and it is this host's raylet, and no CPU, GPU or custom
+    resource currently held by a task or actor.
+
+    Returns:
+        ``(True, "")`` when a restart is safe, else ``(False, why)``.
+    """
+    address = os.environ.get("RAY_ADDRESS", "").strip()
+    if address and address.lower() not in ("auto", "local"):
+        return False, f"RAY_ADDRESS={address!r} names an explicit cluster"
+    from ._multi_node_env import is_multi_node
+
+    if is_multi_node():
+        return False, "this is a multi-node run"
+    import ray
+
+    try:
+        alive = [n for n in ray.nodes() if n.get("Alive")]
+        local_node = ray.get_runtime_context().get_node_id()
+        totals = ray.cluster_resources()
+        available = ray.available_resources()
+    except Exception as exc:  # noqa: BLE001 - an unreadable cluster is not a safe one to stop
+        return False, f"could not inspect the cluster: {exc!r}"
+    if len(alive) != 1:
+        return False, f"the cluster has {len(alive)} live nodes"
+    if str(alive[0].get("NodeID") or "") != str(local_node or ""):
+        return False, "its only node is not this host's raylet"
+    held = sorted(
+        key
+        for key, total in totals.items()
+        if not key.startswith(_NON_HELD_RESOURCE_PREFIXES) and available.get(key, 0.0) < total
+    )
+    if held:
+        return False, f"resources are in use on it ({', '.join(held)})"
+    return True, ""
+
+
+def restart_local_head_with_serving_slot(num_gpus: Optional[int] = None, log_path: Optional[Path] = None) -> None:
+    """Replace a local head that lacks ``serving_slot`` with one that declares it, then reconnect.
+
+    The same repair ``install_kernel_tools.sh`` applies when it finds such a head:
+    ``ray stop --force`` and a fresh ``ray start --head --resources=...``.
+    """
+    import ray
+
+    try:
+        ray.shutdown()
+    except Exception:  # noqa: BLE001 - the driver is being replaced either way
+        pass
+    force_restart_local_cluster(
+        num_gpus=num_gpus,
+        log_path=log_path,
+        reason=f"Restarting local Ray head: it does not declare the {RAY_SERVING_SLOT} resource",
+    )
+    if not ray_status_ok():
+        raise RuntimeError(f"restarted local Ray head is not reachable; see {log_path}")
+    quiet_ray_init(num_gpus=num_gpus, log_path=log_path)
 
 
 # Env vars safe to forward to Ray workers; excludes *_VISIBLE_DEVICES (Ray-owned; forcing them triggers set_visible_accelerator_ids IndexError on ROCm).
