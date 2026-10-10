@@ -3,9 +3,17 @@
 
 name: Code metrics
 
-# White-box code-metrics gate (scripts/code_metrics.py). Thresholds, sources and
-# tool pins live in pyproject.toml [tool.hyperloom.code_metrics]; units already
-# over a threshold are in scripts/code_metrics_baseline.json and may only go down.
+# White-box code-metrics gate (scripts/code_metrics.py). Thresholds, their reasons
+# and tool pins live in pyproject.toml [tool.hyperloom.code_metrics]; units already
+# over a threshold are in scripts/code_metrics_baseline.txt and may only go down.
+# Only files the change touches are judged (against the first parent on a PR, the
+# replaced main on a push). The same job runs the checks without a baseline:
+# comments, English only (tree, PR title, body and commits), production imports of
+# test code, and added repeated literals.
+#
+# The PR label ``baseline-raise`` waives new, worse and baseline-growth findings;
+# the script reads the labels from the API when it runs (--pr-number), never from
+# this event's payload, so adding the label and re-running the job is enough.
 #
 # The job is a hard gate under the stable name ``code-metrics`` so it can be made
 # a required check. For that reason there is no paths-ignore: a required check
@@ -64,7 +72,7 @@ jobs:
         # Same pins as [tool.hyperloom.code_metrics.tools]; the script refuses
         # to measure with any other version.
         run: |
-          pip install "ruff==0.16.2" "complexipy==8.0.1" "radon==6.0.1" "vulture==2.16"
+          pip install "ruff==0.16.2" "complexipy==8.0.1" "vulture==2.16"
           npm install --global "jscpd@5.4.1"
 
       - name: Code metrics gate
@@ -72,6 +80,9 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
           REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          # Read-only use: the PR's labels, title, body and commit messages.
+          GITHUB_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           # A push to main is checked against the main it replaced, so a push
           # that bypasses PRs cannot grow the baseline or loosen the config either.
@@ -81,6 +92,7 @@ jobs:
           args=(--root "$GITHUB_WORKSPACE" --report code-metrics/report.md --link-base "https://github.com/$REPO/blob/$HEAD_SHA")
           if [ "$EVENT" = pull_request ]; then
             base=HEAD^1
+            args+=(--pr-number "$PR_NUMBER")
           else
             git fetch --no-tags --depth=1 origin "$BEFORE"
             base=$BEFORE
@@ -90,6 +102,7 @@ jobs:
           mkdir -p "$gate"
           impl=scripts
           if git show "$base:scripts/code_metrics.py" > "$gate/code_metrics.py" 2>/dev/null \
+            && git show "$base:scripts/code_metrics_checks.py" > "$gate/code_metrics_checks.py" 2>/dev/null \
             && git show "$base:scripts/code_metrics_collect.py" > "$gate/code_metrics_collect.py" 2>/dev/null \
             && git show "$base:scripts/code_metrics_report.py" > "$gate/code_metrics_report.py" 2>/dev/null; then
             impl="$gate"
@@ -98,7 +111,8 @@ jobs:
             || cp .github/scripts/code_metrics_comment.js "$gate/comment.js"
           echo "gate scripts from: $impl"
           set +e
-          python "$impl/code_metrics.py" "${args[@]}" > /dev/null
+          # stdout is the full report (every row, waived ones included) for the job log.
+          python "$impl/code_metrics.py" "${args[@]}"
           code=$?
           set -e
           if [ ! -s code-metrics/report.md ]; then

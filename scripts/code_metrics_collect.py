@@ -29,7 +29,6 @@ from __future__ import annotations
 import ast
 import dataclasses
 import json
-import math
 import os
 import re
 import shlex
@@ -39,32 +38,27 @@ from collections.abc import Iterable, Iterator
 from pathlib import Path
 
 MODULE = "<module>"
+#: Metric names used by more than one collector.
+COGNITIVE, FUNCTION_LINES, MODULE_LINES = "cognitive-complexity", "function-lines", "module-lines"
+_JSON, _CONFIG = "json", "--config"
 
 
 @dataclasses.dataclass(frozen=True)
 class Metric:
-    """One gated dimension. ``higher_is_better`` flips every comparison (MI)."""
+    """One gated dimension; a higher value is always worse."""
 
     name: str
     label: str
-    higher_is_better: bool = False
 
 
 METRICS = {
     m.name: m
     for m in (
         Metric("cyclomatic-complexity", "Cyclomatic complexity"),
-        Metric("cognitive-complexity", "Cognitive complexity"),
-        Metric("statements", "Statements per function"),
-        Metric("branches", "Branches per function"),
-        Metric("returns", "Returns per function"),
-        Metric("arguments", "Arguments"),
-        Metric("positional-arguments", "Positional arguments"),
-        Metric("locals", "Local variables"),
+        Metric(COGNITIVE, "Cognitive complexity"),
+        Metric(FUNCTION_LINES, "Function length (lines)"),
         Metric("nested-blocks", "Nested block depth"),
-        Metric("public-methods", "Public methods per class"),
-        Metric("module-lines", "Module length (lines)"),
-        Metric("maintainability-index", "Maintainability index", higher_is_better=True),
+        Metric(MODULE_LINES, "Module length (lines)"),
         Metric("duplicated-lines", "Duplicated lines per file"),
         Metric("dead-code", "Dead code (vulture)"),
     )
@@ -73,20 +67,14 @@ METRICS = {
 #: Ruff rule -> (metric, the ruff setting that carries its threshold).
 RUFF_RULES = {
     "C901": ("cyclomatic-complexity", "lint.mccabe.max-complexity"),
-    "PLR0915": ("statements", "lint.pylint.max-statements"),
-    "PLR0912": ("branches", "lint.pylint.max-branches"),
-    "PLR0911": ("returns", "lint.pylint.max-returns"),
-    "PLR0913": ("arguments", "lint.pylint.max-args"),
-    "PLR0917": ("positional-arguments", "lint.pylint.max-positional-args"),
-    "PLR0914": ("locals", "lint.pylint.max-locals"),
     "PLR1702": ("nested-blocks", "lint.pylint.max-nested-blocks"),
-    "PLR0904": ("public-methods", "lint.pylint.max-public-methods"),
 }
 
 _RUFF_VALUE = re.compile(r"\((\d+) > \d+\)")
 _VULTURE_LINE = re.compile(r"^(?P<path>.+?):(?P<line>\d+): (?P<message>.+) \(\d+% confidence")
 _QUOTED = re.compile(r"'([^']+)'")
-_DEFS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+_FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef)
+_DEFS = (*_FUNCTIONS, ast.ClassDef)
 _THREADS = "4"
 #: Suppression markers each tool honours, and what they are rewritten to (same line count).
 _JSCPD_MARKER = (re.compile(rb"jscpd:ignore", re.IGNORECASE), b"jscpd-defused")
@@ -110,9 +98,9 @@ class Finding:
 
 
 def worse(metric: str, value: float, reference: float) -> bool:
-    """True when ``value`` is worse than ``reference`` for ``metric``."""
-    if METRICS[metric].higher_is_better:
-        return value < reference
+    """True when ``value`` is worse than ``reference`` for ``metric`` (every metric: higher)."""
+    if metric not in METRICS:
+        raise ToolError(f"unknown metric {metric}")
     return value > reference
 
 
@@ -120,41 +108,59 @@ def violates(metric: str, value: float, threshold: float) -> bool:
     return worse(metric, value, threshold)
 
 
+@dataclasses.dataclass(frozen=True)
+class Def:
+    """One class or function: its ``def``/``class`` line, last line and qualified name."""
+
+    start: int
+    end: int
+    name: str
+    is_function: bool
+
+
 class Units:
-    """Qualified names of the classes and functions in each file, parsed on demand."""
+    """Parsed files and the qualified names of their classes and functions, on demand."""
 
     def __init__(self, root: Path) -> None:
         self._root = root
-        self._defs: dict[str, list[tuple[int, int, str]]] = {}
+        self._trees: dict[str, ast.Module] = {}
+        self._defs: dict[str, list[Def]] = {}
 
-    def _load(self, path: str) -> list[tuple[int, int, str]]:
+    def tree(self, path: str) -> ast.Module:
+        if path not in self._trees:
+            try:
+                self._trees[path] = ast.parse((self._root / path).read_bytes(), filename=path)
+            except (SyntaxError, ValueError) as exc:
+                raise ToolError(f"cannot parse {path}: {exc}") from exc
+        return self._trees[path]
+
+    def defs(self, path: str) -> list[Def]:
         if path not in self._defs:
-            tree = ast.parse((self._root / path).read_bytes(), filename=path)
-            self._defs[path] = list(_walk_defs(tree, ""))
+            self._defs[path] = list(_walk_defs(self.tree(path), ""))
         return self._defs[path]
 
     def owner(self, path: str, line: int) -> str:
         """The def starting on ``line``, else the innermost def enclosing it."""
-        defs = self._load(path)
-        exact = [name for start, _end, name in defs if start == line]
+        defs = self.defs(path)
+        exact = [d.name for d in defs if d.start == line]
         if exact:
             return exact[-1]
-        enclosing = [(start, name) for start, end, name in defs if start <= line <= end]
+        enclosing = [(d.start, d.name) for d in defs if d.start <= line <= d.end]
         return max(enclosing)[1] if enclosing else MODULE
 
     def line_of(self, path: str, unit: str) -> int:
         """First line of the def named ``unit`` (or ending in ``.unit``), else 1."""
-        for start, _end, name in self._load(path):
-            if name == unit or name.endswith("." + unit):
-                return start
+        for d in self.defs(path):
+            if d.name == unit or d.name.endswith("." + unit):
+                return d.start
         return 1
 
 
-def _walk_defs(node: ast.AST, prefix: str) -> Iterator[tuple[int, int, str]]:
+def _walk_defs(node: ast.AST, prefix: str) -> Iterator[Def]:
     for child in ast.iter_child_nodes(node):
         if isinstance(child, _DEFS):
             name = prefix + child.name
-            yield child.lineno, child.end_lineno or child.lineno, name
+            yield Def(child.lineno, child.end_lineno or child.lineno, name, isinstance(child, _FUNCTIONS))
             yield from _walk_defs(child, name + ".")
         else:
             yield from _walk_defs(child, prefix)
@@ -184,13 +190,13 @@ def list_files(root: Path, roots: Iterable[str], exclude: Iterable[str]) -> tupl
     production: list[str] = []
     tests: list[str] = []
     for path in sorted(set(out.split("\0"))):
-        if not path.endswith(".py") or _is_excluded(path, excluded) or not (root / path).is_file():
+        if not path.endswith(".py") or is_excluded(path, excluded) or not (root / path).is_file():
             continue
         (tests if "tests" in Path(path).parts[:-1] else production).append(path)
     return production, tests
 
 
-def _is_excluded(path: str, exclude: tuple[str, ...]) -> bool:
+def is_excluded(path: str, exclude: tuple[str, ...]) -> bool:
     return any(path == prefix or path.startswith(prefix.rstrip("/") + "/") for prefix in exclude)
 
 
@@ -234,10 +240,10 @@ def tool_version(argv: list[str]) -> str:
 
 
 def ruff_findings(root: Path, files: list[str], thresholds: dict[str, int], units: Units) -> list[Finding]:
-    argv = ["ruff", "check", "--isolated", "--no-cache", "--ignore-noqa", "--exit-zero", "--output-format", "json"]
-    argv += ["--preview", "--config", "lint.explicit-preview-rules=true", "--select", ",".join(RUFF_RULES)]
+    argv = ["ruff", "check", "--isolated", "--no-cache", "--ignore-noqa", "--exit-zero", "--output-format", _JSON]
+    argv += ["--preview", _CONFIG, "lint.explicit-preview-rules=true", "--select", ",".join(RUFF_RULES)]
     for metric, setting in RUFF_RULES.values():
-        argv += ["--config", f"{setting}={thresholds[metric]}"]
+        argv += [_CONFIG, f"{setting}={thresholds[metric]}"]
     with tempfile.TemporaryDirectory() as work:
         rows = json.loads(_run([*argv, *(str(root / f) for f in files)], work))
     return parse_ruff(rows, root, units)
@@ -261,7 +267,7 @@ def complexipy_findings(root: Path, files: list[str], threshold: int, units: Uni
         report = Path(work) / "complexipy.json"
         # No --quiet: complexipy 8.0.1 then exits 1 despite --ignore-complexity.
         argv = ["complexipy", *(str(root / f) for f in files), "--ignore-complexity", "--no-ignore"]
-        argv += ["--output-format", "json", "--output", str(report), "--cache-dir", str(Path(work) / "cache")]
+        argv += ["--output-format", _JSON, "--output", str(report), "--cache-dir", str(Path(work) / "cache")]
         _run(argv, work)
         rows = json.loads(report.read_text(encoding="utf-8"))
     return parse_complexipy(rows, root, threshold, units)
@@ -271,47 +277,47 @@ def parse_complexipy(rows: list[dict], root: Path, threshold: int, units: Units)
     findings = []
     for row in rows:
         value = int(row["complexity"])
-        if not violates("cognitive-complexity", value, threshold):
+        if not violates(COGNITIVE, value, threshold):
             continue
         path = _relative(root, row["path"])
         unit = row["function_name"].replace("::", ".")
-        findings.append(Finding("cognitive-complexity", path, unit, value, units.line_of(path, unit)))
+        findings.append(Finding(COGNITIVE, path, unit, value, units.line_of(path, unit)))
     return findings
 
 
-def radon_findings(root: Path, files: list[str], threshold: int) -> list[Finding]:
-    with tempfile.TemporaryDirectory() as work:
-        data = json.loads(_run(["radon", "mi", "--json", *(str(root / f) for f in files)], work))
-    return parse_radon(data, root, threshold)
-
-
-def parse_radon(data: dict[str, dict], root: Path, threshold: int) -> list[Finding]:
-    """MI is recorded rounded up to a whole point.
-
-    radon ranks a file C ("extremely low") at MI <= 9, so with the limit at 10 the
-    rounded-up value is under the limit exactly when radon would rank the file C.
-    """
-    findings = []
-    for name, result in data.items():
-        if "mi" not in result:
-            raise ToolError(f"radon could not measure {name}: {result.get('error')}")
-        value = math.ceil(result["mi"])
-        if violates("maintainability-index", value, threshold):
-            findings.append(Finding("maintainability-index", _relative(root, name), MODULE, value, 1))
-    return findings
+def module_lines(root: Path, path: str) -> int:
+    """Physical lines of ``path``."""
+    return len((root / path).read_bytes().splitlines())
 
 
 def module_line_findings(root: Path, files: list[str], threshold: int) -> list[Finding]:
     findings = []
     for path in files:
-        lines = len((root / path).read_bytes().splitlines())
-        if violates("module-lines", lines, threshold):
-            findings.append(Finding("module-lines", path, MODULE, lines, 1))
+        lines = module_lines(root, path)
+        if violates(MODULE_LINES, lines, threshold):
+            findings.append(Finding(MODULE_LINES, path, MODULE, lines, 1))
+    return findings
+
+
+def function_line_findings(files: list[str], threshold: int, units: Units) -> list[Finding]:
+    """Functions longer than ``threshold`` physical lines.
+
+    A function counts from its ``def`` line through its last line: decorators are not
+    counted, blank, comment and docstring lines are. A nested function is a unit of its
+    own, measured the same way; its lines are also part of the function around it, since
+    they are lines a reader of that function scrolls past.
+    """
+    findings = []
+    for path in files:
+        for d in units.defs(path):
+            length = d.end - d.start + 1
+            if d.is_function and violates(FUNCTION_LINES, length, threshold):
+                findings.append(Finding(FUNCTION_LINES, path, d.name, length, d.start))
     return findings
 
 
 def vulture_findings(root: Path, files: list[str], min_confidence: int, units: Units) -> list[Finding]:
-    argv = ["vulture", "--config", os.devnull, "--min-confidence", str(min_confidence)]
+    argv = ["vulture", _CONFIG, os.devnull, "--min-confidence", str(min_confidence)]
     # The real files, not a copy: vulture honours Ruff's noqa markers (see the module doc).
     with tempfile.TemporaryDirectory() as work:
         # vulture exits 3 when it found dead code; 1 and 2 are input/usage errors.
@@ -340,7 +346,7 @@ def jscpd_command() -> list[str]:
 
 def jscpd_findings(root: Path, files: list[str], min_tokens: int, min_lines: int) -> list[Finding]:
     argv = [*jscpd_command(), "--min-tokens", str(min_tokens), "--min-lines", str(min_lines), "--format", "python"]
-    argv += ["--reporters", "json", "--absolute", "--silent", "--no-tips", "--workers", _THREADS]
+    argv += ["--reporters", _JSON, "--absolute", "--silent", "--no-tips", "--workers", _THREADS]
     with tempfile.TemporaryDirectory() as work, tempfile.TemporaryDirectory() as copy:
         tree = defused_copy(root, files, _JSCPD_MARKER, copy)
         _run([*argv, "--output", work, *(str(tree / f) for f in files)], work)

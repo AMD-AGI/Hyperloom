@@ -40,6 +40,8 @@ WRITE_ROLES = frozenset({"admin", "maintain", "write"})
 _SIZE_BUCKETS = ((10, "XS"), (30, "S"), (100, "M"), (500, "L"), (1000, "XL"))
 _PRODUCTION_ROOTS = ("src/", "scripts/")
 _TEST_DIRS = frozenset({"tests", "test"})
+_DIFF_BUDGET = "diff-budget"
+_ENCODING = "utf-8"
 
 # (field, regex matching the start of the normalised bullet, required, must answer yes/no).
 # test_pr_hygiene.py pins every key to a line of the real template, so a template edit that
@@ -70,7 +72,7 @@ def _annotate(level: str, title: str, message: str) -> None:
 def _summary(lines: list[str]) -> None:
     path = os.environ.get("GITHUB_STEP_SUMMARY")
     if path:
-        with open(path, "a", encoding="utf-8") as fh:
+        with open(path, "a", encoding=_ENCODING) as fh:
             fh.write("\n".join(lines) + "\n\n")
 
 
@@ -93,7 +95,7 @@ def parse_numstat_z(raw: bytes) -> list[tuple[str | None, str, int]]:
     A rename is ``A<TAB>D<TAB><NUL>old<NUL>new<NUL>``: it is attributed to the new path, so a pure
     move counts 0 and a move with edits counts only the edits.
     """
-    tokens = raw.decode("utf-8", errors="surrogateescape").split("\0")
+    tokens = raw.decode(_ENCODING, errors="surrogateescape").split("\0")
     out: list[tuple[str | None, str, int]] = []
     i = 0
     while i < len(tokens):
@@ -225,20 +227,20 @@ def cmd_size(args: argparse.Namespace) -> int:
         )
         if ex.granted:
             msg = f"{total} production Python lines changed exceeds the {args.limit}-line budget; exempt: {ex.reason}."
-            _annotate("notice", "diff-budget", msg)
+            _annotate("notice", _DIFF_BUDGET, msg)
         else:
             msg = (
                 f"diff budget exceeded: {total} production Python lines changed (limit {args.limit}); "
                 f"split the PR, or a maintainer with write access adds the '{EXEMPT_LABEL}' label ({ex.reason})."
             )
-            _annotate("error", "diff-budget", msg)
+            _annotate("error", _DIFF_BUDGET, msg)
             rc = 1
         lines += ["", f"**{msg}**"]
     elif total > args.warn:
         msg = (
             f"{total} production Python lines changed is above the {args.warn}-line review trigger; consider splitting."
         )
-        _annotate("warning", "diff-budget", msg)
+        _annotate("warning", _DIFF_BUDGET, msg)
         lines += ["", msg]
     print(f"diff budget: {total} production Python lines changed (size/{bucket})")
     _summary(lines)
@@ -326,7 +328,7 @@ def cmd_template(args: argparse.Namespace) -> int:
     if os.environ.get("PR_AUTHOR_TYPE") == "Bot":
         print("PR template: skipped for bot-authored PR")
         return 0
-    template = Path(args.template).read_text(encoding="utf-8")
+    template = Path(args.template).read_text(encoding=_ENCODING)
     findings = template_findings(os.environ.get("PR_BODY", ""), template)
     level = "error" if args.enforce else "warning"
     mode = "required" if args.enforce else "advisory"

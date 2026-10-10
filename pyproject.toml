@@ -450,14 +450,14 @@ total_shards = 6
 relax_fail_under_repo_var = "COVERAGE_RELAX_FAIL_UNDER"
 
 # White-box code-metrics gate: ``scripts/code_metrics.py``, run by
-# ``.github/workflows/code-metrics.yml``. Every threshold is the industry default
-# of the tool or rule that defines the metric; the source is named next to it.
-# Units already over a threshold are recorded in ``baseline`` and may only go down.
-# CI refuses a change that loosens anything in this table relative to the base
-# branch: a raised limit, a new ``exclude`` entry, a dropped root, a raised
-# duplication or dead-code parameter.
+# ``.github/workflows/code-metrics.yml``. Each number below carries its reason.
+# Units already over a threshold are recorded in ``baseline`` (one line each) and
+# may only go down; a file is judged only when a change touches it. CI refuses a
+# change that loosens anything in this table relative to the base branch: a
+# raised limit, a new ``exclude`` entry, a dropped root, a raised duplication,
+# dead-code or warning parameter.
 [tool.hyperloom.code_metrics]
-baseline = "scripts/code_metrics_baseline.json"
+baseline = "scripts/code_metrics_baseline.txt"
 # Production Python: all of ``src`` (so a new package is in scope by default) and
 # ``scripts``. Plain repository paths only; pathspec magic and globs are refused.
 # Files under a ``tests/`` directory are exempt from every dimension but
@@ -475,29 +475,31 @@ duplication-min-tokens = 100
 duplication-min-lines = 10
 # vulture's documented setting for CI: report only findings it is >= 80% sure of.
 dead-code-min-confidence = 80
+# A module over this many lines is listed in the report as a warning, never a
+# failure: the size at which a reviewer asks for a split (the style guide's
+# module-length review trigger).
+module-lines-warning = 800
 
 [tool.hyperloom.code_metrics.thresholds]
-# McCabe (1976); the mccabe plugin's and ruff C901's default max-complexity.
-cyclomatic-complexity = 10
-# SonarSource rule S3776 default (Cognitive Complexity, G. Ann Campbell 2017).
-cognitive-complexity = 15
-# pylint defaults, as implemented by ruff: R0915 max-statements, R0912
-# max-branches, R0911 max-returns, R0913 max-args, R0917
-# max-positional-arguments, R0914 max-locals, R1702 max-nested-blocks, R0904
-# max-public-methods.
-statements = 50
-branches = 12
-returns = 6
-arguments = 5
-positional-arguments = 5
-locals = 15
+# Twice McCabe's 10 (the style guide's review trigger): at 20 a function has
+# more paths than a reviewer can hold while reading it, so an explanation in the
+# PR no longer makes it reviewable. Same number and the same two cases (added,
+# or raised) as the style guide's "Complexity ceiling".
+cyclomatic-complexity = 20
+# Twice SonarSource's S3776 default of 15, the same step as the cyclomatic
+# limit: cognitive complexity weights nesting, so a value past 30 is a function
+# a reader has to re-read rather than read.
+cognitive-complexity = 30
+# Physical lines, ``def`` through the last line, decorators excluded, comments
+# and docstrings included: a function no longer fits one screen past 80, and
+# most of this tree's functions stay well under (the review trigger is ~60).
+function-lines = 80
+# pylint R1702 default: past five nested blocks, the innermost line depends on
+# six conditions at once; extract the inner loop or invert a condition.
 nested-blocks = 5
-public-methods = 20
-# pylint C0302 max-module-lines default.
-module-lines = 1000
-# radon maintainability index: below 10 is rank C ("extremely low"). Higher is
-# better, so this one fails when a file drops *below* the limit.
-maintainability-index = 10
+# Fails above 1200 physical lines: half again the review trigger of 800, the
+# size at which a module almost always holds more than one job.
+module-lines = 1200
 # Any clone (see duplication-min-*) counts; the value is a file's duplicated lines.
 duplicated-lines = 0
 # Any vulture finding at dead-code-min-confidence counts.
@@ -508,7 +510,6 @@ dead-code = 0
 [tool.hyperloom.code_metrics.tools]
 ruff = "0.16.2"
 complexipy = "8.0.1"
-radon = "6.0.1"
 vulture = "2.16"
 jscpd = "5.4.1"
 
@@ -583,7 +584,8 @@ ignorelist = ["aiter"]
 # C901 (mccabe) is the complexity trigger in the style guide's "Size and
 # complexity" table. It stays off rather than on-and-ignored: the tree carries a
 # backlog above the default max of 10, so selecting it would red the tree instead
-# of gating new code. Measure on demand -- no config edit needed:
+# of gating new code. The code-metrics gate above measures it at 20 on the files a
+# change touches. Measure on demand -- no config edit needed:
 #   ruff check --select C901 --config "lint.mccabe.max-complexity=10" src/hyperloom src/kernelforge
 # [tool.ruff.lint.mccabe]
 # max-complexity = 10
