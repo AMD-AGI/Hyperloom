@@ -185,6 +185,59 @@ async def test_agentx_handoff_keeps_supported_schema_and_frozen_launch_controls(
     assert spec["config"]["args_mode"] == "replace"
 
 
+_RECIPE_SERVER_COMMAND = (
+    "python -m atom.entrypoints.openai_server --model /models/accepted --served-model-name /models/accepted"
+    " --host 0.0.0.0 --server-port 8000 --tensor-parallel-size 2 --kv_cache_dtype fp8 --block-size 128"
+    " --gpu-memory-utilization 0.95 --cudagraph-capture-sizes \\[1\\,2\\,4\\]"
+    ' --online_quant_config \\{\\"global_quant_config\\":\\"ptpc_fp8\\"\\}'
+    " --method eagle3 --draft-model Inferact/MiniMax-M3-EAGLE3-GQA --num-speculative-tokens 3"
+    " --trust-remote-code\n"
+)
+_RECIPE_STDERR_TRACE = (
+    "++ export PYTHONDONTWRITEBYTECODE=1\n"
+    "+ export HIP_VISIBLE_DEVICES=0,1\n"
+    "+ export AIPERF_SERVER_METRICS_URLS=http://localhost:8000/metrics\n"
+    "+ export AITER_LOG_LEVEL\n"
+    "+ export AITER_QUICK_REDUCE_QUANTIZATION=INT4\n"
+    "+ export ATOM_FORCE_ATTN_TRITON=1\n"
+    "+ write_command /run/server_command.txt python -m atom.entrypoints.openai_server\n"
+    "+ export AFTER_LAUNCH=1\n"
+)
+
+
+@pytest.mark.asyncio
+async def test_agentx_handoff_forwards_the_recipe_measured_server_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    coord = _coord(tmp_path, framework="atom")
+    run_dir = tmp_path / "runs" / "baseline" / "benchmark_atom"
+    run_dir.mkdir(parents=True)
+    (run_dir / "server.log").write_text("atom server log without an argv line\n", encoding="utf-8")
+    (run_dir / "server_command.txt").write_text(_RECIPE_SERVER_COMMAND, encoding="utf-8")
+    (run_dir / "benchmark_stderr.log").write_text(_RECIPE_STDERR_TRACE, encoding="utf-8")
+    measurement = coord.shared_state.current_best["measurement"]
+    measurement.pop("resolved_server_launch_flags")
+    measurement["launch_evidence"] = {"framework": "atom", "actual_server_log_path": str(run_dir / "server.log")}
+
+    handoff = await _handoff(coord, monkeypatch)
+
+    config = handoff["baseline_env_spec"]["config"]
+    assert config["server_launch_flags"] == (
+        "--kv_cache_dtype fp8 --block-size 128 --gpu-memory-utilization 0.95"
+        " --method eagle3 --draft-model Inferact/MiniMax-M3-EAGLE3-GQA --num-speculative-tokens 3"
+        " --trust-remote-code"
+    )
+    assert config["extra_envs"] == {
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "AITER_QUICK_REDUCE_QUANTIZATION": "INT4",
+        "ATOM_FORCE_ATTN_TRITON": "1",
+        "ACCEPTED_SETTING": "1",
+    }
+    assert handoff["accepted_env"] == "ACCEPTED_SETTING=1"
+    assert handoff["mem_fraction"] == 0.95
+    assert handoff["bench_launcher"] == "native"
+
+
 @pytest.mark.parametrize(
     ("metric_override", "expected_metric"),
     [(None, "total"), ("intvty_v1", "total"), ("composite_v1", "output"), ("output", "output")],

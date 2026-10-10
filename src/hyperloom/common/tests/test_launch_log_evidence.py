@@ -266,3 +266,52 @@ def test_flag_spellings_fold_to_the_name_the_engine_reports() -> None:
         assert evidence.launch_flag_setting_name(flag, "sglang") == "dp_size", flag
     assert evidence.launch_flag_setting_name("--tensor-parallel-size", "sglang") == "tp_size"
     assert evidence.launch_flag_setting_name("--tensor-parallel-size", "vllm") == "tensor_parallel_size"
+
+
+def _write_recipe_run(run_dir: Path, command: str, trace: str) -> str:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "server.log").write_text("", encoding="utf-8")
+    (run_dir / "server_command.txt").write_text(command, encoding="utf-8")
+    (run_dir / "benchmark_stderr.log").write_text(trace, encoding="utf-8")
+    return str(run_dir / "server.log")
+
+
+def test_recipe_server_launch_keeps_scalar_flags_and_drops_run_specific_ones(tmp_path: Path) -> None:
+    command = (
+        "python -m atom.entrypoints.openai_server --model /m --served-model-name /m --host 0.0.0.0"
+        " --server-port 8000 --port 9000 --tensor-parallel-size 4 --block-size 128 --enable_prefix_caching"
+        r" --cudagraph-capture-sizes \[1\,2\] --online_quant_config \{\"q\":\"ptpc_fp8\"\}"
+        " --method eagle3 --draft-model org/draft --num-speculative-tokens 3\n"
+    )
+    launch = evidence.recipe_server_launch(_write_recipe_run(tmp_path, command, ""))
+
+    assert launch.flags == (
+        "--block-size 128 --enable_prefix_caching --method eagle3 --draft-model org/draft --num-speculative-tokens 3"
+    )
+
+
+def test_recipe_server_launch_env_is_the_trace_exported_before_the_launch(tmp_path: Path) -> None:
+    trace = (
+        "++ export PYTHONDONTWRITEBYTECODE=1\n"
+        "+ export ROCR_VISIBLE_DEVICES=0,1\n"
+        "+ export AIPERF_HTTP_TCP_USER_TIMEOUT=900000\n"
+        "+ export AITER_LOG_LEVEL\n"
+        "+ export 'SPACED=a b'\n"
+        "+ export ATOM_FORCE_ATTN_TRITON=1\n"
+        "+ write_command /run/server_command.txt python -m atom.entrypoints.openai_server\n"
+        "+ export AFTER_LAUNCH=1\n"
+    )
+    launch = evidence.recipe_server_launch(_write_recipe_run(tmp_path, "", trace))
+
+    assert launch.env == {"PYTHONDONTWRITEBYTECODE": "1", "SPACED": "a b", "ATOM_FORCE_ATTN_TRITON": "1"}
+
+
+def test_recipe_server_launch_without_a_launch_marker_has_no_env(tmp_path: Path) -> None:
+    launch = evidence.recipe_server_launch(_write_recipe_run(tmp_path, "", "+ export ATOM_FORCE_ATTN_TRITON=1\n"))
+
+    assert launch.env == {}
+
+
+@pytest.mark.parametrize("server_log", ["", "/nonexistent/run/server.log"])
+def test_recipe_server_launch_without_artifacts_is_empty(server_log: str) -> None:
+    assert evidence.recipe_server_launch(server_log) == evidence.RecipeServerLaunch("", {})
