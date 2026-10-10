@@ -143,7 +143,7 @@ def test_pinned_upstream_still_takes_the_magpie_splice():
 @pytest.fixture
 def upstream(monkeypatch):
     """Stand in for the pinned upstream tree: every file fetches, every anchor matches once."""
-    import hyperloom.orchestrator.actions.executors._inferencex_anchor_contract as contract
+    from hyperloom.orchestrator.actions.executors import _inferencex_anchor_contract as contract
 
     files: dict[str, str | None] = {path: f"text of {path}\n" for path in anchors_by_file()}
     files[PROBE_TARGET_PATH] = "probe target\n"
@@ -202,7 +202,7 @@ def test_build_record_refuses_a_magpie_patch_that_no_longer_applies(upstream):
 def test_fetch_pinned_file_returns_none_when_gh_fails_or_is_missing(monkeypatch):
     import subprocess
 
-    import hyperloom.orchestrator.actions.executors._inferencex_anchor_contract as contract
+    from hyperloom.orchestrator.actions.executors import _inferencex_anchor_contract as contract
 
     def run(stdout: bytes, returncode: int):
         return lambda *args, **kwargs: subprocess.CompletedProcess(args, returncode, stdout=stdout)

@@ -147,7 +147,8 @@ def _limit(metric: str, thresholds: dict[str, int]) -> str:
 
 def _dimension_limit(metric: str, outcome: Outcome) -> str:
     """Every level of the dimension: module length also warns, below its failing length."""
-    if metric == MODULE_LINES and outcome.module_warning is not None:
+    warning, failing = outcome.module_warning, outcome.thresholds.get(MODULE_LINES)
+    if metric == MODULE_LINES and warning is not None and failing is not None and warning < failing:
         return f"{_warn_limit(outcome)}, {_limit(metric, outcome.thresholds)}"
     return _limit(metric, outcome.thresholds)
 
@@ -283,11 +284,15 @@ def _how_to_fix(outcome: Outcome) -> str:
     pip = " ".join(f"{name}=={pins[name]}" for name in ("ruff", "complexipy", "vulture") if name in pins)
     lines = [
         "### How to fix\n",
-        "- **New or worse**: split the unit (extract a function, a class, a module) until it is back under the "
-        "limit, or no worse than its recorded value. The baseline cannot absorb a new violation: CI refuses any "
-        "baseline entry added or raised relative to the base branch.",
-        f"- **Baseline out of date**: something improved. Run `{UPDATE_COMMAND}` and commit "
-        f"`{outcome.baseline_path}`; the command only lowers or removes entries.",
+        (
+            "- **New or worse**: split the unit (extract a function, a class, a module) until it is back under the "
+            "limit, or no worse than its recorded value. The baseline cannot absorb a new violation: CI refuses any "
+            "baseline entry added or raised relative to the base branch."
+        ),
+        (
+            f"- **Baseline out of date**: something improved. Run `{UPDATE_COMMAND}` and commit "
+            f"`{outcome.baseline_path}`; the command only lowers or removes entries."
+        ),
     ]
     lines += [
         f"- **{title}**: {fix}."

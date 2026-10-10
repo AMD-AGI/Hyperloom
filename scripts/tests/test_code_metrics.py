@@ -21,7 +21,7 @@ import yaml
 
 import code_metrics
 import code_metrics_collect as collect
-from code_metrics_collect import Finding
+import code_metrics_report
 
 ROOT = Path(__file__).resolve().parents[2]
 BASELINE = "scripts/code_metrics_baseline.txt"
@@ -38,7 +38,7 @@ class Repo:
 
     def __init__(self, path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         self.path = path
-        self.findings: list[Finding] = []
+        self.findings: list[collect.Finding] = []
         #: What the per-file tools would report for the touched files at the base.
         self.at_base: dict[tuple[str, str, str], int] = {}
         (path / "scripts").mkdir()
@@ -90,8 +90,8 @@ def section(report: str, title: str) -> str:
     return report[start : end if end >= 0 else len(report)]
 
 
-def cc(path: str, unit: str, value: int, line: int = 3) -> Finding:
-    return Finding(CC, path, unit, value, line)
+def cc(path: str, unit: str, value: int, line: int = 3) -> collect.Finding:
+    return collect.Finding(CC, path, unit, value, line)
 
 
 def key(path: str, unit: str, metric: str = CC) -> tuple[str, str, str]:
@@ -440,13 +440,15 @@ def test_complexipy_rows_keep_only_violations_with_their_line(tmp_path: Path) ->
         {"complexity": 15, "function_name": "helper", "path": str(tmp_path / "src/p.py")},
     ]
     got = collect.parse_complexipy(rows, tmp_path, 15, units)
-    assert got == [Finding("cognitive-complexity", "src/p.py", "Planner.pick", 16, 2)]
+    assert got == [collect.Finding("cognitive-complexity", "src/p.py", "Planner.pick", 16, 2)]
 
 
 def test_vulture_lines_become_scoped_units(tmp_path: Path) -> None:
     units = FakeUnits(tmp_path, "src/p.py", SOURCE).units
     text = f"{tmp_path}/src/p.py:2: unused variable 'a' (100% confidence)\n"
-    assert collect.parse_vulture(text, tmp_path, units) == [Finding("dead-code", "src/p.py", "Planner.pick:a", 1, 2)]
+    assert collect.parse_vulture(text, tmp_path, units) == [
+        collect.Finding("dead-code", "src/p.py", "Planner.pick:a", 1, 2)
+    ]
     with pytest.raises(collect.ToolError, match="unexpected vulture output"):
         collect.parse_vulture("garbage\n", tmp_path, units)
 
@@ -762,7 +764,7 @@ def test_jscpd_reads_a_defused_copy_and_vulture_the_real_file(tmp_path, monkeypa
     monkeypatch.setattr(collect, "jscpd_command", lambda: ["jscpd"])
     units = collect.Units(tmp_path)
     found = collect.vulture_findings(tmp_path, ["src/p.py"], 80, units)
-    assert found == [Finding("dead-code", "src/p.py", "<module>:x", 1, 3)]
+    assert found == [collect.Finding("dead-code", "src/p.py", "<module>:x", 1, 3)]
     # Ruff owns the noqa marker (F401 for a side-effect import, RUF100 for an unused one), so
     # vulture reads the real file and honours it; jscpd's own marker is defused.
     assert seen["vulture"] == (tmp_path / "src/p.py", source)
@@ -820,7 +822,7 @@ def test_a_violation_in_an_untouched_file_never_fails_the_change(repo: Repo) -> 
         (cc("src/old.py", "f", 22), WORSE),
     ],
 )
-def test_a_new_or_worse_unit_in_a_touched_file_fails(repo: Repo, finding: Finding, title: str) -> None:
+def test_a_new_or_worse_unit_in_a_touched_file_fails(repo: Repo, finding: collect.Finding, title: str) -> None:
     repo.write_baseline({key("src/old.py", "f"): 21})
     base = repo.commit()
     repo.touch(finding.path)
@@ -987,6 +989,15 @@ def test_module_length_between_warning_and_limit_is_reported_not_failed(repo: Re
     assert "src/ok.py" not in warned
     assert "src/far.py" in warned  # committed after the base: touched too
     assert code == 0, report
+
+
+@pytest.mark.parametrize("warn", [700, 699])
+def test_a_warning_level_at_or_above_the_failing_length_is_not_reported(warn: int) -> None:
+    # module_warnings lists lengths in (warn, fail]: empty once warn >= fail, so no warning level exists.
+    thresholds = dict.fromkeys(collect.METRICS, 0) | {collect.MODULE_LINES: 700}
+    rendered = code_metrics_report.render(code_metrics_report.Outcome(thresholds=thresholds, module_warning=warn))
+    shown = "fails > 700" if warn == 700 else "warns > 699, fails > 700"
+    assert f"\n| Module length (lines) | {shown} | 0 | 0 | 0 | 0 | n/a |\n" in rendered
 
 
 def test_only_module_length_has_a_warning_level_in_the_dimension_table(repo: Repo) -> None:
