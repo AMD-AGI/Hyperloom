@@ -641,6 +641,9 @@ jobs:
       # One leg is enough -- both run the same suite. Runs after the total
       # gate under always() so both verdicts show; skipped on a failed or
       # incomplete suite, which the shard-results gate already reds.
+      # Files excluded by ``[tool.coverage.run].omit`` (scripts/*, tests, CLI
+      # drivers, ...) are not in the XML, so diff-cover does not count their
+      # lines: that omit list is this gate's exemption surface.
       - name: Diff coverage (changed lines >= 80%)
         if: always() && github.event_name == 'pull_request' && matrix.python-version == '3.10' && steps.outcomes.outputs.complete == 'true' && steps.outcomes.outputs.tests_ok == 'true'
         run: |
