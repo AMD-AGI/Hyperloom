@@ -135,3 +135,89 @@ def test_pinned_upstream_still_takes_the_magpie_splice():
         f"{MAGPIE_LIB_PATH} at {record['ref'][:9]} no longer takes the run_lm_eval "
         f"--concurrent-requests splice; install.sh would die(). Re-anchor _magpie_patcher.py."
     )
+
+
+# --- recording the contract (scripts/refresh_inferencex_anchor_contract.py) ----
+
+
+@pytest.fixture
+def upstream(monkeypatch):
+    """Stand in for the pinned upstream tree: every file fetches, every anchor matches once."""
+    import hyperloom.orchestrator.actions.executors._inferencex_anchor_contract as contract
+
+    files: dict[str, str | None] = {path: f"text of {path}\n" for path in anchors_by_file()}
+    files[PROBE_TARGET_PATH] = "probe target\n"
+    files.setdefault(MAGPIE_LIB_PATH, "magpie lib\n")
+    hits: dict[str, int] = {}
+    monkeypatch.setattr(contract, "fetch_pinned_file", lambda rel_path, ref: files.get(rel_path))
+    monkeypatch.setattr(contract, "count_anchor_hits", lambda text, anchor: hits.get(anchor, 1))
+    monkeypatch.setattr(contract, "magpie_patch_applies", lambda text: files.get("applies", "yes") == "yes")
+    return contract, files, hits
+
+
+def test_build_record_records_each_file_the_probe_and_the_magpie_patch(upstream):
+    contract, files, _hits = upstream
+    record = contract.build_record("abc123")
+    assert record["ref"] == "abc123"
+    assert record["refresh_with"] == REFRESH_CMD
+    assert record["anchors_fingerprint"] == anchors_fingerprint()
+    assert set(record["files"]) == set(anchors_by_file())
+    for rel_path, entry in record["files"].items():
+        assert entry["sha256"] == hashlib.sha256(files[rel_path].encode("utf-8")).hexdigest()
+        assert set(entry["anchors"].values()) == {1}
+    assert record["probe_target"]["sha256"] == hashlib.sha256(b"probe target\n").hexdigest()
+    assert record["magpie_patch"] == {"path": MAGPIE_LIB_PATH, "applies": True}
+
+
+def test_build_record_refuses_an_unreachable_file(upstream):
+    contract, files, _hits = upstream
+    missing = sorted(anchors_by_file())[0]
+    files[missing] = None
+    with pytest.raises(RuntimeError, match=f"cannot fetch {missing} at abc123"):
+        contract.build_record("abc123")
+
+
+def test_build_record_refuses_an_anchor_that_does_not_match_exactly_once(upstream):
+    contract, _files, hits = upstream
+    name, _rel_parts, _sentinel, anchor = _ANCHOR_CONTRACT[0]
+    hits[anchor] = 2
+    with pytest.raises(RuntimeError, match=rf"expected each anchor to match exactly one site, got \{{'{name}': 2\}}"):
+        contract.build_record("abc123")
+
+
+def test_build_record_refuses_a_missing_probe_target(upstream):
+    contract, files, _hits = upstream
+    files[PROBE_TARGET_PATH] = None
+    with pytest.raises(RuntimeError, match=f"cannot fetch {PROBE_TARGET_PATH} at abc123. The probe"):
+        contract.build_record("abc123")
+
+
+def test_build_record_refuses_a_magpie_patch_that_no_longer_applies(upstream):
+    contract, files, _hits = upstream
+    files["applies"] = "no"
+    with pytest.raises(RuntimeError, match="the run_lm_eval --concurrent-requests splice no longer finds its site"):
+        contract.build_record("abc123")
+
+
+def test_fetch_pinned_file_returns_none_when_gh_fails_or_is_missing(monkeypatch):
+    import subprocess
+
+    import hyperloom.orchestrator.actions.executors._inferencex_anchor_contract as contract
+
+    def run(stdout: bytes, returncode: int):
+        return lambda *args, **kwargs: subprocess.CompletedProcess(args, returncode, stdout=stdout)
+
+    monkeypatch.setattr(contract.subprocess, "run", run(b"body\n", 0))
+    assert fetch_pinned_file("a/b.sh", "abc123") == "body\n"
+    monkeypatch.setattr(contract.subprocess, "run", run(b"", 1))
+    assert fetch_pinned_file("a/b.sh", "abc123") is None
+
+    def missing(*args, **kwargs):
+        raise OSError("gh not found")
+
+    monkeypatch.setattr(contract.subprocess, "run", missing)
+    assert fetch_pinned_file("a/b.sh", "abc123") is None
+
+
+def test_magpie_patch_applies_needs_the_parser_site():
+    assert magpie_patch_applies("#!/bin/bash\necho nothing to splice\n") is False
