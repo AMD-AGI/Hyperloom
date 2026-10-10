@@ -49,6 +49,9 @@ MAX_ASKED_KEYS = 200
 #: Longest a decision point is held for a re-profile in flight; past it the predictor answers on the profile there is.
 MAX_PROFILE_WAIT_SEC = 900.0
 
+#: Longest FRAMEWORK entry waits for the answer before orchestration's first turn.
+MAX_ENTRY_WAIT_SEC = 300.0
+
 
 def decision_point_key(state: Any) -> str:
     """``c{macro_cycle}-s{stack_depth}-r{roofline_snapshot_count}``."""
@@ -116,6 +119,28 @@ class PredictorPump:
             self._held_since[key] = time.monotonic()
             log.info("predictor: holding decision point %s for re-profile task %s", key, pending)
         return time.monotonic() - self._held_since[key] < MAX_PROFILE_WAIT_SEC
+
+    async def settle(self, state: Any) -> None:
+        """Ask when this decision point warrants it, then wait up to :data:`MAX_ENTRY_WAIT_SEC` to file the answer.
+
+        FRAMEWORK entry calls this before orchestration's first turn. The tick
+        files an answer only after that turn, by which time the first grid is
+        composed. The wait yields to the event loop, and a request still running
+        at the deadline is left for a later step to file.
+        """
+        await self.step(state)
+        if self._inflight is None or not self._conf.enqueues:
+            return
+        log.info("predictor: holding orchestration's first turn up to %.0fs for %s", MAX_ENTRY_WAIT_SEC, self._key)
+        await asyncio.wait({self._inflight}, timeout=MAX_ENTRY_WAIT_SEC)
+        if self._inflight.done():
+            await self.step(state)
+        else:
+            log.info(
+                "predictor: no answer at %s within %.0fs; orchestration starts without it",
+                self._key,
+                MAX_ENTRY_WAIT_SEC,
+            )
 
     async def step(self, state: Any) -> None:
         """File an answer that has arrived, or ask when this decision point warrants it."""
