@@ -121,8 +121,9 @@ margin, then require later legs to stay inside it) is the pattern that holds up.
 
 ## Pinning knobs with `--extra-env`
 
-`--extra-env` carries the knobs your script reads. Hyperloom interprets none of
-them, but their semantics matter:
+`--extra-env` carries the knobs your script reads. A pin becomes a real
+environment variable for the session, so it also sets a Hyperloom control
+variable of the same name. Their semantics matter:
 
 > Whatever you pin becomes part of the **measurement contract**. A variant can
 > add keys but must not overwrite a pinned one, because the baseline number was
@@ -135,8 +136,17 @@ and asks the search for an increment on existing work; pinning none of them
 makes the baseline the stock path, so every switch the search finds is its own
 discovery.
 
-The CLI persists these pins in `state.json` and serializes them into
-`INFERENCE_OPTIMIZER_EXTRA_ENV` as a JSON object for the executors.
+The CLI exports each pin under its own name, persists them in `state.json`, and
+also serializes them into `INFERENCE_OPTIMIZER_EXTRA_ENV` as a JSON object so a
+resume can tell which names the previous launch set.
+
+A pin and an `export` of the same name are equivalent: no name is withheld. For
+a knob Hyperloom resolves itself — `ISL`, `OSL`, `CONC`, `TP`, `EP`,
+`PRECISION`, `MAX_MODEL_LEN`, `FRAMEWORK` — the environment is one rung of that
+knob's ladder: **an explicit flag wins, then the environment (where your pin
+lands), then the resumed session's recorded value, then the default**. So
+`--extra-env ISL=4096` sets the ISL, and `--isl 2048 --extra-env ISL=4096` runs
+at 2048. Everything else a pin names is set directly and is not interpreted.
 **Forward every pin as its own `--extra-env` flag** — a dropped pin is lost
 silently. On `--resume` the persisted pins are re-exported, so they only need
 re-passing when you want to change them.

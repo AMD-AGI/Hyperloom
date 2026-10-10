@@ -1153,11 +1153,24 @@ def _detect_checkpoint_precision(model_path: str | None) -> str:
     return _DTYPE_MAP.get(dtype, dtype) if dtype else ""
 
 
+def _positive_env_int(name: str) -> int:
+    """``$name`` as a positive int, or 0 so the caller falls through to the next rung of its ladder."""
+    try:
+        value = int(os.environ.get(name.upper(), "").strip())
+    except ValueError:
+        return 0
+    return value if value > 0 else 0
+
+
 def _resolve_workload_knobs(
     args: argparse.Namespace,
     state: Any | None = None,
 ) -> None:
-    """Fill unset workload knobs on ``args`` from a fixed priority ladder."""
+    """Fill the unset numeric workload knobs on ``args``: flag, environment, resumed state, default.
+
+    The environment rung carries an ``--extra-env`` pin, which :func:`_export_operator_launch_shape` has already
+    written. Precision has its own function because it reads the checkpoint, so it cannot run this early.
+    """
     int_knobs = (
         ("isl", DEFAULT_ISL),
         ("osl", DEFAULT_OSL),
@@ -1168,10 +1181,21 @@ def _resolve_workload_knobs(
     for name, default in int_knobs:
         val = getattr(args, name, None)
         if val is None:
+            from_env = _positive_env_int(name)
             persisted = int(getattr(state, name, 0) or 0) if state is not None else 0
-            val = persisted if persisted > 0 else default
+            val = from_env or (persisted if persisted > 0 else default)
         setattr(args, name, int(val))
+
+
+def _resolve_precision(args: argparse.Namespace, state: Any | None = None) -> None:
+    """Fill ``args.precision``: flag, environment, resumed state, checkpoint detection, default.
+
+    Must run after the model is resolved: the detection rung reads the checkpoint's ``config.json``, and finding
+    nothing there settles ``args.precision`` on the default with no later call able to correct it.
+    """
     precision = getattr(args, "precision", None)
+    if not precision:
+        precision = os.environ.get("PRECISION", "").strip()
     if not precision:
         persisted = (getattr(state, "precision", "") or "").strip() if state is not None else ""
         if persisted:
@@ -1202,20 +1226,63 @@ def _export_workload_envs_for_optimize(
     os.environ["EP"] = str(max(1, int(ep_resolved or 1)))
 
 
+def _enforce_topology_gates(*, nodes: int, gpus_per_node: int, tp: int, ep: int) -> None:
+    """Fail fast on a TP/EP shape the cluster cannot place, rather than on a cryptic launcher crash mid-cold-start.
+
+    Multi-node only: a single node places whatever its own GPU count allows and the launcher reports that itself.
+    """
+    if nodes < 2:
+        return
+    total_gpus = nodes * gpus_per_node
+    # Gate 1: total cluster GPUs (nodes*gpus_per_node) must hold the model's TP shards.
+    if total_gpus < tp:
+        print(
+            f"ERROR: TP={tp} exceeds total GPU count "
+            f"({nodes} nodes * {gpus_per_node} "
+            f"gpus_per_node = {total_gpus}). Either lower --tp, raise "
+            "--nodes, or use a larger --gpus-per-node pod "
+            "template.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    # Gate 2: EP cannot exceed TP (can't place more expert shards than ranks); fail before bootstrap.
+    if ep > tp:
+        print(
+            f"ERROR: EP={ep} > TP={tp}. Expert-parallel "
+            "size must be <= tensor-parallel size. Either lower --ep or "
+            "raise --tp.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+
 def _export_operator_launch_shape(
     *,
     server_args: str,
     extra_env: dict[str, str],
 ) -> None:
-    """Project the operator's ``--server-args`` / ``--extra-env`` into env."""
+    """Project the operator's ``--server-args`` / ``--extra-env`` into env.
+
+    Every pin is exported under its own name, with no exceptions: Hyperloom's control variables are read with a
+    bare ``os.environ.get``, so a pin the JSON blob alone carries is invisible to all of them. The blob is kept
+    because it reaches ``state.json`` and names the previous launch's pins, which a resume dropping one must unset.
+    """
+    from hyperloom.common.env_safety import OPERATOR_EXTRA_ENV_VAR, operator_extra_env
+
     if server_args:
         os.environ["INFERENCE_OPTIMIZER_SERVER_ARGS"] = server_args
     else:
         os.environ.pop("INFERENCE_OPTIMIZER_SERVER_ARGS", None)
+    # Read before the blob is rewritten: it names what the previous launch exported, which a resume dropping a pin
+    # -- or a second session in the same shell -- has to unset rather than leave behind.
+    for name in operator_extra_env():
+        if name not in extra_env:
+            os.environ.pop(name, None)
+    os.environ.update(extra_env)
     if extra_env:
-        os.environ["INFERENCE_OPTIMIZER_EXTRA_ENV"] = json.dumps(extra_env)
+        os.environ[OPERATOR_EXTRA_ENV_VAR] = json.dumps(extra_env)
     else:
-        os.environ.pop("INFERENCE_OPTIMIZER_EXTRA_ENV", None)
+        os.environ.pop(OPERATOR_EXTRA_ENV_VAR, None)
 
 
 def _partition_fanout_supported(framework: str | None) -> tuple[bool, str]:
@@ -1584,6 +1651,16 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     """Run the ``optimize`` subcommand end to end."""
     # Surface --nodes (CLI flag wins) before _preflight runs.
     nodes_resolved = max(1, int(args.nodes))
+    # The operator's pins have to be in the environment before the ladder below reads them.
+    _export_operator_launch_shape(
+        server_args=str(getattr(args, "server_args", "") or "").strip(),
+        extra_env=parse_operator_extra_env(args),
+    )
+    # Settle the knobs before the gates, the projection and ``_preflight`` derive from them. A resume runs its own
+    # ladder once the state is loaded.
+    _is_resume = bool(getattr(args, "resume_from", None))
+    if not _is_resume:
+        _resolve_workload_knobs(args)
     tp_resolved = max(1, int(getattr(args, "tp", 1) or 1))
     ep_resolved = max(1, int(getattr(args, "ep", 1) or 1))
     # Resolve gpus_per_node from the explicit CLI flag or the policy default.
@@ -1592,30 +1669,18 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         gpus_per_node_resolved = int(gpn_attr)
     else:
         gpus_per_node_resolved = 8
-    total_gpus = nodes_resolved * gpus_per_node_resolved
 
-    # Topology sanity gates — multi-node only (nodes>=2); fail fast vs a cryptic launcher crash mid-cold-start.
-    if nodes_resolved >= 2:
-        # Gate 1: total cluster GPUs (nodes*gpus_per_node) must hold the model's TP shards.
-        if total_gpus < tp_resolved:
-            print(
-                f"ERROR: TP={tp_resolved} exceeds total GPU count "
-                f"({nodes_resolved} nodes * {gpus_per_node_resolved} "
-                f"gpus_per_node = {total_gpus}). Either lower --tp, raise "
-                "--nodes, or use a larger --gpus-per-node pod "
-                "template.",
-                file=sys.stderr,
-            )
-            sys.exit(2)
-        # Gate 2: EP cannot exceed TP (can't place more expert shards than ranks); fail before bootstrap.
-        if ep_resolved > tp_resolved:
-            print(
-                f"ERROR: EP={ep_resolved} > TP={tp_resolved}. Expert-parallel "
-                "size must be <= tensor-parallel size. Either lower --ep or "
-                "raise --tp.",
-                file=sys.stderr,
-            )
-            sys.exit(2)
+    # Project before ``_preflight``: ``check_gpu_visibility`` reads ``$TP`` to warn when the run asks for more
+    # shards than rocm-smi can see.
+    if not _is_resume:
+        _export_workload_envs_for_optimize(args, tp_resolved=tp_resolved, ep_resolved=ep_resolved)
+
+    _enforce_topology_gates(
+        nodes=nodes_resolved,
+        gpus_per_node=gpus_per_node_resolved,
+        tp=tp_resolved,
+        ep=ep_resolved,
+    )
 
     os.environ["INFERENCE_OPTIMIZER_NODES"] = str(nodes_resolved)
     # Multi-node topology handoff: export the CLI-flag-resolved backend / gpus-per-node so downstream subprocesses
@@ -1623,20 +1688,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     if nodes_resolved >= 2:
         os.environ["INFERENCE_OPTIMIZER_GPUS_PER_NODE"] = str(gpus_per_node_resolved)
         os.environ["INFERENCE_OPTIMIZER_MN_BACKEND"] = _resolve_mn_backend(args)
-    _export_operator_launch_shape(
-        server_args=str(getattr(args, "server_args", "") or "").strip(),
-        extra_env=parse_operator_extra_env(args),
-    )
     # The partition shape is deliberately NOT exported here.
 
-    # Project resolved workload knobs into env for the fresh-launch path only.
-    if not args.resume_from:
-        _export_workload_envs_for_optimize(
-            args,
-            tp_resolved=tp_resolved,
-            ep_resolved=ep_resolved,
-        )
     # User-declared grid skip list; re-export so subprocess executors inherit it (empty clears stale values).
+    # Not pinnable: it is the policy for one run, not part of the session's measurement contract, so a resume takes
+    # it from the flag it was passed rather than from what the original launch pinned.
     skip_variants_resolved = (getattr(args, "skip_variants", "") or "").strip()
     os.environ["SKIP_VARIANTS"] = skip_variants_resolved
     # Surface PD_* knobs for executors; empty means "resolve from state.json", pd_mode always exported.
@@ -1789,6 +1845,15 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             )
             sys.exit(2)
         state = SharedState.load_or_init(session_dir)
+        # Restored before the staleness guard below, which resolves the AgentX backend from the environment: a
+        # session whose backend came from a pin would otherwise be refused as a workload mismatch. An explicit flag
+        # on this resume wins, else the persisted value.
+        _resume_server_args = str(getattr(args, "server_args", "") or "").strip() or state.operator_server_args
+        _resume_extra_env = parse_operator_extra_env(args) or dict(state.operator_extra_env)
+        _export_operator_launch_shape(
+            server_args=_resume_server_args,
+            extra_env=_resume_extra_env,
+        )
         _stale = agentx_state_is_stale(state)
         if _stale:
             print(
@@ -1862,7 +1927,14 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # resume still win), then project the resolved values into env so resume sees the same workload contract (not
         # YAML defaults).
         _resolve_workload_knobs(args, state)
-        _resume_max_model_len = getattr(args, "max_model_len", None) or getattr(state, "max_model_len", 0) or 0
+        _resolve_precision(args, state)
+        # Same ladder as the knobs above; the environment rung is what lets a re-passed pin change it.
+        _resume_max_model_len = (
+            getattr(args, "max_model_len", None)
+            or _positive_env_int("MAX_MODEL_LEN")
+            or getattr(state, "max_model_len", 0)
+            or 0
+        )
         for env_name, val in (
             ("TP", args.tp),
             ("EP", args.ep),
@@ -1887,13 +1959,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         if getattr(state, "framework_version", ""):
             os.environ["FRAMEWORK_VERSION"] = state.framework_version
             print(f"  re-exported FRAMEWORK_VERSION: {state.framework_version}")
-        # Operator launch shape: an explicit flag on this resume wins, else the persisted value.
-        _resume_server_args = str(getattr(args, "server_args", "") or "").strip() or state.operator_server_args
-        _resume_extra_env = parse_operator_extra_env(args) or dict(state.operator_extra_env)
-        _export_operator_launch_shape(
-            server_args=_resume_server_args,
-            extra_env=_resume_extra_env,
-        )
+        # Operator launch shape: already exported above, ahead of the staleness guard that reads the pins.
         state.operator_server_args = _resume_server_args
         state.operator_extra_env = _resume_extra_env
         if _resume_server_args:
@@ -2131,9 +2197,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # unanswerable until args.gpu_type is final.
         _check_gfx_arch_resolvable(args.gpu_type)
 
-        # Resolve workload knobs (flag > default; no resume state on a fresh launch) so ISL/OSL/CONC/TP/EP are
-        # authoritative reals before MAX_MODEL_LEN auto-derivation and env projection (issue #903).
-        _resolve_workload_knobs(args)
+        # ISL/OSL/CONC/TP/EP were settled and projected before _preflight; precision could not be, because it reads
+        # the checkpoint and the model is only resolved above (issue #903).
+        _resolve_precision(args)
         # MAX_MODEL_LEN is operator-overridable.
         max_model_len, max_model_len_source = _resolve_run_max_model_len(args)
         args.max_model_len = max_model_len
