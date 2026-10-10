@@ -114,12 +114,12 @@ def test_a_pinned_tp_reaches_the_environment_on_the_fresh_branch(monkeypatch):
     assert (os.environ["TP"], os.environ["EP"], os.environ["CONC"]) == ("4", "2", "63")
 
 
-def test_every_tp_projection_sits_after_the_ladder_that_resolves_the_pin():
-    """The ordering is the fix, and the test above cannot see it: it calls the two in the order it wants.
+def test_the_fresh_launch_anchors_stay_in_order():
+    """The ordering is the fix, and the behavioural test above cannot see it: it calls them in the order it wants.
 
-    ``_export_workload_envs_for_optimize`` is the only non-test writer of ``os.environ["TP"|"CONC"|"EP"]``. Called
-    before ``_resolve_workload_knobs``, it publishes the flag-derived default over a pin and the run launches at a
-    shape its own ``state.json`` does not record. Asserted against the source because that is where the defect lives.
+    Every anchor is here rather than one pair, because each time this order was corrected for one of them it broke
+    for another: resolving the ladder late left the projection publishing a default over a pin, and moving the
+    projection after the ladder carried it past ``_preflight``, whose ``check_gpu_visibility`` reads ``$TP``.
     """
     import ast
     import inspect
@@ -128,22 +128,42 @@ def test_every_tp_projection_sits_after_the_ladder_that_resolves_the_pin():
     from hyperloom.inference_optimizer.cli import _run_optimize
 
     tree = ast.parse(textwrap.dedent(inspect.getsource(_run_optimize)))
-    calls = [
-        (node.lineno, node.func.id)
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id in ("_resolve_workload_knobs", "_export_workload_envs_for_optimize")
-    ]
-    ladders = [line for line, name in calls if name == "_resolve_workload_knobs"]
-    projections = [line for line, name in calls if name == "_export_workload_envs_for_optimize"]
+    first: dict[str, int] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            name = node.func.id
+            if name not in first or node.lineno < first[name]:
+                first[name] = node.lineno
 
-    assert projections, "_run_optimize no longer projects TP/CONC/EP at all"
-    assert ladders, "_run_optimize no longer resolves the workload knobs"
-    assert min(projections) > min(ladders), (
-        f"TP/CONC/EP projected at line {min(projections)} of _run_optimize, "
-        f"before the ladder at line {min(ladders)} -- a pinned TP would not reach the environment"
-    )
+    # (earlier, later, why the order matters)
+    anchors = [
+        (
+            "_export_operator_launch_shape",
+            "_resolve_workload_knobs",
+            "the ladder reads the pins out of the environment this export writes",
+        ),
+        (
+            "_resolve_workload_knobs",
+            "_export_workload_envs_for_optimize",
+            "projecting first publishes the flag-derived default over a pinned TP/CONC/EP",
+        ),
+        (
+            "_export_workload_envs_for_optimize",
+            "_preflight",
+            "check_gpu_visibility compares $TP against the visible GPU count",
+        ),
+        (
+            "_resolve_workload_knobs",
+            "_enforce_topology_gates",
+            "a pinned TP must be refused by the same gate an explicit --tp is",
+        ),
+    ]
+    for earlier, later, why in anchors:
+        assert earlier in first, f"{earlier} is no longer called by _run_optimize"
+        assert later in first, f"{later} is no longer called by _run_optimize"
+        assert first[earlier] < first[later], (
+            f"{earlier} (line {first[earlier]} of _run_optimize) must come before {later} (line {first[later]}): {why}"
+        )
 
 
 def test_a_repassed_max_model_len_pin_outranks_the_resumed_value():

@@ -1185,12 +1185,16 @@ def _resolve_workload_knobs(
     args: argparse.Namespace,
     state: Any | None = None,
 ) -> None:
-    """Fill unset workload knobs on ``args`` from a fixed priority ladder: flag, pin, state, default.
+    """Fill the unset numeric workload knobs on ``args``: flag, pin, resumed state, default.
 
     The operator's ``--extra-env`` pins resolve here rather than surviving as their own export, because the fresh
-    branch projects ``args`` back into the environment unconditionally afterwards and would overwrite them. One
-    ladder, one answer, and the later projections write what it decided. An explicit flag outranks a pin, the same
-    way ``--max-model-len`` outranks ``$MAX_MODEL_LEN`` in :func:`_resolve_run_max_model_len_inner`.
+    branch projects ``args`` back into the environment afterwards and would overwrite them. One ladder, one answer,
+    and the projection writes what it decided. An explicit flag outranks a pin, the same way ``--max-model-len``
+    outranks ``$MAX_MODEL_LEN`` in :func:`_resolve_run_max_model_len_inner`.
+
+    Precision is deliberately not resolved here: it reads the checkpoint, so it cannot run until the model is on
+    disk, while these five have to be settled before ``_preflight`` -- ``check_gpu_visibility`` compares the run's
+    TP against the visible GPU count. :func:`_resolve_precision` is the other half.
     """
     from hyperloom.common.env_safety import operator_extra_env
 
@@ -1209,6 +1213,18 @@ def _resolve_workload_knobs(
             persisted = int(getattr(state, name, 0) or 0) if state is not None else 0
             val = pinned or (persisted if persisted > 0 else default)
         setattr(args, name, int(val))
+
+
+def _resolve_precision(args: argparse.Namespace, state: Any | None = None) -> None:
+    """Fill ``args.precision``: flag, pin, resumed state, checkpoint detection, default.
+
+    Split out of :func:`_resolve_workload_knobs` because this rung reads the checkpoint's ``config.json``: running
+    it before the model is resolved would detect nothing, silently settle on the default, and leave a later call
+    with ``args.precision`` already set and nothing to correct.
+    """
+    from hyperloom.common.env_safety import operator_extra_env
+
+    pins = operator_extra_env()
     precision = getattr(args, "precision", None)
     if not precision:
         precision = str(pins.get("PRECISION", "")).strip()
@@ -1685,6 +1701,16 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     """Run the ``optimize`` subcommand end to end."""
     # Surface --nodes (CLI flag wins) before _preflight runs.
     nodes_resolved = max(1, int(args.nodes))
+    # The operator's pins have to be in the environment before the ladder below reads them.
+    _export_operator_launch_shape(
+        server_args=str(getattr(args, "server_args", "") or "").strip(),
+        extra_env=parse_operator_extra_env(args),
+    )
+    # Settle the numeric knobs before anything derives from them. A resume has no state loaded yet, so it runs its
+    # own ladder later; here the ladder, the topology gates, the TP/CONC/EP projection and ``_preflight``'s
+    # ``check_gpu_visibility`` all have to see the same TP, and that is only true if the ladder goes first.
+    if not args.resume_from:
+        _resolve_workload_knobs(args)
     tp_resolved = max(1, int(getattr(args, "tp", 1) or 1))
     ep_resolved = max(1, int(getattr(args, "ep", 1) or 1))
     # Resolve gpus_per_node from the explicit CLI flag or the policy default.
@@ -1693,6 +1719,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         gpus_per_node_resolved = int(gpn_attr)
     else:
         gpus_per_node_resolved = 8
+
+    # Project before ``_preflight``: ``check_gpu_visibility`` reads ``$TP`` to warn when the run asks for more
+    # shards than rocm-smi can see, and ``TP`` is withheld from the pin export because the ladder owns it.
+    if not args.resume_from:
+        _export_workload_envs_for_optimize(args, tp_resolved=tp_resolved, ep_resolved=ep_resolved)
 
     _enforce_topology_gates(
         nodes=nodes_resolved,
@@ -1707,13 +1738,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     if nodes_resolved >= 2:
         os.environ["INFERENCE_OPTIMIZER_GPUS_PER_NODE"] = str(gpus_per_node_resolved)
         os.environ["INFERENCE_OPTIMIZER_MN_BACKEND"] = _resolve_mn_backend(args)
-    # Before the workload projections below, not after: a knob Hyperloom resolves itself takes its pin through
-    # ``_resolve_workload_knobs``'s ladder, and the projection of that resolved value is what must land last. This
-    # export is what carries the names Hyperloom does not resolve -- an AgentX backend, a recipe knob.
-    _export_operator_launch_shape(
-        server_args=str(getattr(args, "server_args", "") or "").strip(),
-        extra_env=parse_operator_extra_env(args),
-    )
     # The partition shape is deliberately NOT exported here.
 
     # TP/CONC/EP are projected on the fresh branch only after ``_resolve_workload_knobs`` has run, because the
@@ -1957,6 +1981,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # resume still win), then project the resolved values into env so resume sees the same workload contract (not
         # YAML defaults).
         _resolve_workload_knobs(args, state)
+        _resolve_precision(args, state)
         _resume_max_model_len = _resolve_resume_max_model_len(args, _resume_extra_env, state)
         for env_name, val in (
             ("TP", args.tp),
@@ -2220,20 +2245,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # unanswerable until args.gpu_type is final.
         _check_gfx_arch_resolvable(args.gpu_type)
 
-        # Resolve workload knobs (flag > default; no resume state on a fresh launch) so ISL/OSL/CONC/TP/EP are
-        # authoritative reals before MAX_MODEL_LEN auto-derivation and env projection (issue #903).
-        _resolve_workload_knobs(args)
-        # Now that a pinned TP/EP is resolved, re-check the shape the run actually launches with: the gates above
-        # saw only the flags.
-        _enforce_topology_gates(
-            nodes=nodes_resolved,
-            gpus_per_node=gpus_per_node_resolved,
-            tp=int(args.tp),
-            ep=int(args.ep),
-        )
-        # Projected here rather than beside the flag-derived values near the top: this is the first point where a
-        # pinned TP/CONC/EP has been resolved, and the environment is what the server launches from.
-        _export_workload_envs_for_optimize(args, tp_resolved=int(args.tp), ep_resolved=int(args.ep))
+        # ISL/OSL/CONC/TP/EP were settled and projected before _preflight; precision could not be, because it reads
+        # the checkpoint and the model is only resolved above (issue #903).
+        _resolve_precision(args)
         # MAX_MODEL_LEN is operator-overridable.
         max_model_len, max_model_len_source = _resolve_run_max_model_len(args)
         args.max_model_len = max_model_len
