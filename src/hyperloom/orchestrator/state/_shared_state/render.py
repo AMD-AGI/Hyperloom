@@ -429,6 +429,18 @@ class _RenderMixin:
             parts.append(f"why={reason}")
         return _flatten_for_prompt(" ".join(parts))
 
+    def _accuracy_gate_note(self) -> list[str]:
+        """The accuracy gate every explore KEEP passes, as header lines; none while the session measures no accuracy."""
+        from ...actions.executors._accuracy_gate import ACCURACY_THRESHOLD
+
+        baseline = float(self.baseline_accuracy or 0.0)
+        if self.eval_disabled or baseline <= 0:
+            return []
+        return [
+            f"Every variant runs the accuracy eval, and a KEEP needs accuracy no more than {ACCURACY_THRESHOLD:g} below",
+            f"the baseline's {baseline:.3f}, so a row that changes numerics cannot keep on throughput alone.",
+        ]
+
     def to_untested_proposals_summary(self, *, max_entries: int = 12) -> str:
         """Render the proposals still waiting for a benchmark slot, and any open predictor mandate."""
         from ...predictor.mandate import open_mandate
@@ -447,6 +459,7 @@ class _RenderMixin:
                 "here: put the ones worth a slot into your next `explore` grid verbatim, keeping each row's name,",
                 "fields and `provenance: primatune`. The predictor is re-asked only when the stack moves, so a",
                 "predictor row you pass over now is very likely never measured; if you skip one, say why.",
+                *self._accuracy_gate_note(),
                 "",
             ]
         elif rows:

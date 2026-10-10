@@ -158,6 +158,18 @@ async def test_the_queue_offers_predictor_rows_to_orchestrations_own_grid(servic
     assert "grid verbatim" not in specialists_only
 
 
+@pytest.mark.parametrize(
+    ("accuracy", "eval_disabled", "stated"), [(0.938, False, True), (0.938, True, False), (0.0, False, False)]
+)
+async def test_the_predictor_block_states_the_accuracy_gate_a_keep_passes(service, accuracy, eval_disabled, stated):
+    state = _state(baseline_accuracy=accuracy, eval_disabled=eval_disabled)
+    service.answer = _answer(Action(server_args={"--kv-cache-dtype": "fp8"}), votes={0: 1})
+    await _ask_and_file(pump_mod.PredictorPump(), state)
+
+    header = " ".join(state.to_untested_proposals_summary().split())
+    assert ("a KEEP needs accuracy no more than 0.05 below the baseline's 0.938" in header) is stated
+
+
 async def test_benched_queued_and_on_stack_proposals_are_not_queued_again(service):
     queued = {"task_id": "s1", "domain": "serving_specialist", "cycle": 0,
               "proposal_set": [{"name": "q", "extra_args": "--enable-chunked-prefill"}]}  # fmt: skip

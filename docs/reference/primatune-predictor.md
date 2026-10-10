@@ -96,7 +96,11 @@ header therefore makes predictor rows an exception to orchestration's rule of
 dispatching only variants the queue does not list, and asks it to put the rows it
 judges worth a slot into its next grid verbatim, name and `provenance: primatune`
 included, and to say why when it skips one. Which rows run stays orchestration's
-choice. They are graded like any other variant.
+choice. When the session measures accuracy, the header also states the gate
+every explore KEEP passes (no more than 0.05 below the baseline accuracy), since
+the predictor often proposes changes to numerics, such as fp8 weights or KV
+cache, that cannot keep on throughput alone. They are graded like any other
+variant.
 
 ## Attribution
 
