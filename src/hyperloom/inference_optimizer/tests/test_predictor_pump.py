@@ -170,6 +170,53 @@ async def test_the_predictor_block_states_the_accuracy_gate_a_keep_passes(servic
     assert ("a KEEP needs accuracy no more than 0.05 below the baseline's 0.938" in header) is stated
 
 
+async def test_an_explore_orchestration_copies_off_the_queue_is_credited_to_the_predictor(
+    service, tmp_path, monkeypatch
+):
+    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+    from hyperloom.inference_optimizer.session.paths import make_session_dir
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
+
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    silent = ScriptedPlan(turns=[])
+    coord = Coordinator(
+        make_session_dir(),
+        backends={"orchestration": MockBackend(silent, name="o"), "critic": MockBackend(silent, name="c")},
+    )
+    try:
+        state = coord.shared_state
+        state.phase, state.framework, state.baseline_tput = "FRAMEWORK_AGENT", "vllm", 1000.0
+        state.current_best = {"tput": 1000.0}
+        service.answer = _answer(Action(server_args={"--kv-cache-dtype": "fp8"}), votes={0: 3})
+        await _ask_and_file(pump_mod.PredictorPump(), state)
+        grid = [
+            {"name": "kv-fp8", "extra_args": "--kv-cache-dtype fp8", "provenance": "llm_direct"},
+            {
+                "name": "kv-fp8-async",
+                "extra_args": "--kv-cache-dtype fp8 --async-scheduling",
+                "provenance": "llm_direct",
+            },
+            {"name": "spec", "extra_args": "--kv-cache-dtype fp8 --block-size 32", "provenance": "specialist:serving"},
+            {"name": "mine", "extra_args": "--max-num-seqs 128", "provenance": "llm_direct"},
+        ]
+        intent = Intent(
+            type=IntentType.DELEGATE,
+            payload={"action_name": "explore", "idempotency_key": "e1", "params": {"grid": grid}},
+        )
+        await coord.router.handle_delegate("orchestration", intent)
+
+        (task,) = await coord.tasks.by_state("queued")
+        variants = {v["name"]: v for v in task.params["grid"]}
+        assert variants["kv-fp8"]["provenance"] == "primatune"
+        assert variants["kv-fp8-async"]["provenance"] == "llm_direct"
+        assert variants["kv-fp8-async"]["primatune_contains"] == ["primatune-c0-s0-r0-0"]
+        assert "primatune_contains" not in variants["spec"] and "primatune_contains" not in variants["mine"]
+        assert variants["spec"]["provenance"] == "specialist:serving"
+    finally:
+        await coord.stop()
+
+
 async def test_benched_queued_and_on_stack_proposals_are_not_queued_again(service):
     queued = {"task_id": "s1", "domain": "serving_specialist", "cycle": 0,
               "proposal_set": [{"name": "q", "extra_args": "--enable-chunked-prefill"}]}  # fmt: skip

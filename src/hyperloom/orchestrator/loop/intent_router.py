@@ -886,6 +886,7 @@ class IntentRouter(CoordinatorCollaborator):
             inject_stack_base_params(params, self.shared_state, anchor=True)
         if action_name == "explore":
             self._coord.proposals.inject_explore_runtime_params(params)
+            self._coord.proposals.credit_predictor_proposals(params)
         # Wave sugar: a specialist delegate carrying params.tasks=[...] fans out into N standard freeform specialist
         # tasks, each dispatched through the normal SpecialistRunner + TaskRegistry + lease + reap path.
         if (

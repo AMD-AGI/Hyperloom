@@ -285,6 +285,22 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         ).hexdigest()[:16]
         return f"approved:{action_name}:{digest}"
 
+    def credit_predictor_proposals(self, params: dict) -> None:
+        """Credit the predictor for an orchestration grid's copies of its rows (see ``predictor.attribution``)."""
+        grid = params.get("grid")
+        if not isinstance(grid, list) or not grid:
+            return
+        from ..predictor.attribution import stamp_predictor_provenance
+
+        stamped, containing = stamp_predictor_provenance(grid, self.shared_state.specialist_rounds or [])
+        if stamped or containing:
+            log.info(
+                "explore grid: %d/%d variant(s) credited to the predictor; %d more contain a predictor proposal",
+                stamped,
+                len(grid),
+                containing,
+            )
+
     def inject_explore_runtime_params(self, params: dict) -> None:
         """Inject explore-task operational knobs from SharedState into ``params`` (single source of truth for both propose/Critic and direct-delegate paths). setdefault preserves LLM overrides."""
         br = float(self.shared_state.baseline_runtime_sec or 0.0)
@@ -351,6 +367,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
                 params.setdefault("config_path", self.shared_state.baseline_config_path)
         if pending.action_name == "explore":
             self.inject_explore_runtime_params(params)
+            self.credit_predictor_proposals(params)
             inject_stack_base_params(params, self.shared_state, anchor=True)
         if pending.action_name == "integrate_patch":
             # ``source_phase`` is stamped where the specialist is created and carried from there; a

@@ -110,6 +110,15 @@ breakdown records `primatune` as the variant's producer. A grid that mixes predi
 rows with specialist rows is recorded as the orchestration agent's, as for any mixed
 grid; each variant keeps its own provenance on its attempt.
 
+Orchestration composes its own grids and may rename what it copies, so the
+explore it dispatches is matched against every proposal the predictor has
+queued, by fingerprint rather than by name or label. A variant equal to one is
+stamped `provenance: "primatune"`. A variant orchestration authored that contains
+a proposal's whole delta keeps its own provenance and names the proposal in
+`primatune_contains`, which is recorded for measurement only. Only proposals
+queued before the grid was dispatched can match, so an idea orchestration had
+first stays its own.
+
 ## Source-change channel
 
 When an answer describes a source edit, the round also carries `mandate_id` and
