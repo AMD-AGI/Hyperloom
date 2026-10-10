@@ -60,6 +60,41 @@ def test_extract_workload_summary_full(tmp_path):
     assert out["idle_pct"] == 12.0
     assert out["comm_pct"] == 3.2
     assert out["top_bottleneck"] == "MoE_fused"
+    assert out["memcpy_pct"] is None
+
+
+_GPU_TIMELINE_CSV = """\
+type,time ms,percent
+computation_time,1295.08,96.05
+exposed_comm_time,0.0,0.0
+exposed_memcpy_time,0.24,0.0179
+total_memcpy_time,0.74,0.0550
+"""
+
+
+def _write_tracelens(tmp_path, timeline=_GPU_TIMELINE_CSV):
+    md = tmp_path / "analysis.md"
+    md.write_text(_EXEC_MD, encoding="utf-8")
+    csvs = tmp_path / "perf_report_csvs"
+    csvs.mkdir()
+    (csvs / "gpu_timeline.csv").write_text(timeline, encoding="utf-8")
+    return md
+
+
+def test_extract_workload_summary_reads_exposed_memcpy(tmp_path):
+    assert rs.extract_workload_summary(_write_tracelens(tmp_path))["memcpy_pct"] == 0.02
+
+
+def test_extract_workload_summary_memcpy_none_without_row(tmp_path):
+    md = _write_tracelens(tmp_path, timeline="type,time ms,percent\ncomputation_time,1.0,90.0\n")
+    assert rs.extract_workload_summary(md)["memcpy_pct"] is None
+
+
+def test_profiler_digest_reports_memcpy(tmp_path):
+    snap = rs.build_roofline_snapshot(snapshot_id=1, ts="t1", analysis_md_path=str(_write_tracelens(tmp_path)))
+    first = rs.build_profiler_digest([snap], None).splitlines()[0]
+    assert snap["memcpy_pct"] == 0.02
+    assert first == "bound_kind=unknown  compute=70.5%  idle=12.0%  comm=3.2%  memcpy=0.0%"
 
 
 # ---- extract_top_kernel ----

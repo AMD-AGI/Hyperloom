@@ -52,8 +52,7 @@ class TestGridRunnerPrepend:
         assert _prepend_magpie_pythonpath("", "/existing") == "/existing"
 
 
-ROOT = Path(__file__).resolve().parents[3] / "hyperloom" / "agents" / "kernel"
-INSTALL_SCRIPT = ROOT / "scripts" / "install.sh"
+INSTALL_SCRIPT = Path(__file__).resolve().parents[1] / "assets" / "install_kernel_tools.sh"
 
 
 def _sourceable_installer(dest_dir: Path) -> Path:

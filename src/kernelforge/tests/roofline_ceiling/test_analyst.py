@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -319,6 +320,26 @@ def test_the_guard_rolls_back_and_rejects_an_edit_to_any_other_tracked_file(tmp_
     with pytest.raises(WorkspaceSafetyError, match="helpers.py"):
         guard.verify()
     assert (workspace / "helpers.py").read_text(encoding="utf-8") == "SCALE = 1\n"
+
+
+def test_the_guard_restores_an_edit_whose_stat_matches_the_index(tmp_path):
+    """A same-size, same-mtime edit is seen while the index is racy, but restoring the index snapshot rewrites it
+    later, after which git trusts the matching stat and checkout-index skips the path."""
+    workspace = _git_workspace(tmp_path / "ws")
+    helpers = workspace / "helpers.py"
+    old = helpers.stat().st_mtime_ns - 3600 * 10**9
+    os.utime(helpers, ns=(old, old))
+    for command in (["git", "config", "core.trustctime", "false"], ["git", "update-index", "--refresh"]):
+        subprocess.run(command, cwd=workspace, check=True, capture_output=True)
+    os.utime(workspace / ".git" / "index", ns=(old, old))
+
+    guard = _guarded(workspace, tmp_path / "scratch")
+    helpers.write_text("SCALE = 2\n", encoding="utf-8")
+    os.utime(helpers, ns=(old, old))
+
+    with pytest.raises(WorkspaceSafetyError, match="helpers.py"):
+        guard.verify()
+    assert helpers.read_text(encoding="utf-8") == "SCALE = 1\n"
 
 
 def test_a_file_already_dirty_mid_campaign_is_restored_to_what_the_session_found(tmp_path):

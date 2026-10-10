@@ -957,27 +957,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "specialist_done (Inv-5.3).",
     )
     opt.add_argument(
-        "--specialist-per-turn-max-seconds",
-        dest="specialist_per_turn_max_seconds",
-        type=float,
-        default=600.0,
-        help="Per-LLM-call timeout for an in-process specialist backend "
-        "(default 600s). It bounds one call, never the task: the task is "
-        "bounded by the absolute deadline the dispatcher hands down.",
-    )
-    # specialist dispatch shape
-    opt.add_argument(
-        "--specialist-dispatch-mode",
-        dest="specialist_dispatch_mode",
-        type=str,
-        choices=("subprocess", "inprocess"),
-        default="subprocess",
-        help="Specialist execution shape. 'subprocess' (default) spawns "
-        "a fresh selected-provider agent CLI per task. 'inprocess' uses "
-        "the matching Claude or Codex Agent SDK backend in the orchestrator "
-        "process.",
-    )
-    opt.add_argument(
         "--specialist-mcp-config",
         dest="specialist_mcp_config",
         type=str,

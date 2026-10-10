@@ -8,6 +8,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from hyperloom.orchestrator.measurement.runtime_findings import render_runtime_findings
+
 log = logging.getLogger(__name__)
 
 
@@ -80,6 +82,13 @@ class ContextProvider:
         if self.analysis_reader is None:
             return "(analysis.md reader not wired)"
         return self._safe(self.analysis_reader, "analysis_md")
+
+    def runtime_findings(self) -> str:
+        """Return the runtime findings scanned from the current best's server log."""
+        return self._safe(
+            lambda: render_runtime_findings(self.shared_state.current_best_measurement),
+            "runtime_findings",
+        )
 
     def inbox(self, since_seq: int = 0) -> str:
         """Return inbox messages newer than a sequence number."""
@@ -234,6 +243,15 @@ CONTEXT_TOOL_SPECS: tuple[tuple[str, str, dict[str, Any], str], ...] = (
         "priority markers).",
         _NO_ARGS_SCHEMA,
         "analysis_md",
+    ),
+    (
+        "get_runtime_findings",
+        "Return what the current best's server.log shows the server actually "
+        "did: unknown env vars, features the framework disabled, capability "
+        "fallbacks, settings the engine adjusted, AITER tuned-config misses, "
+        "tracebacks. Each rule is detected / not_detected / unknown(reason).",
+        _NO_ARGS_SCHEMA,
+        "runtime_findings",
     ),
     (
         "get_inbox",

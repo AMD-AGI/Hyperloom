@@ -172,7 +172,6 @@ DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "HYPERLOOM_WHEEL_TAG",
         "INFERENCE_OPTIMIZER_FORCE_PYTHON",
         "KERNEL_AGENT_ENV",
-        "KERNEL_AGENT_ROOT",
         "KERNEL_OPT_BACKEND_ORDER",
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
@@ -221,7 +220,6 @@ KERNEL_AGENT_ENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "GEAK_RUN_MODE",
         "GEAK_SCORE_TARGET",
         "GEAK_SKIP_PROFILE",
-        "HYPERLOOM_KERNEL_AGENT_ROOT",
         "HYPERLOOM_ROOT",
         "HYPERLOOM_RUNTIME_DIR",
         "HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV",
@@ -229,7 +227,6 @@ KERNEL_AGENT_ENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "INFERENCEX_PATH",
         "KERNEL_AGENT_ENV",
         "KERNEL_AGENT_LOG_LEVEL",
-        "KERNEL_AGENT_ROOT",
         # KernelForge's writable-state root.
         "KERNELFORGE_PROJECT_ROOT",
         "KERNEL_OPT_BACKEND_ORDER",

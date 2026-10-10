@@ -41,6 +41,8 @@ from hyperloom.orchestrator.actions.executors.explore import (
 )
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.common.env import is_truthy
+from hyperloom.common.perf_metric import perf_snapshot_from_mapping
+from hyperloom.inference_optimizer.session.session_binding import session_scope
 from hyperloom.orchestrator.bus.resource_lock import (
     ResourceLockManager,
     SqliteLeaseBackend,
@@ -48,6 +50,8 @@ from hyperloom.orchestrator.bus.resource_lock import (
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
 from hyperloom.orchestrator.bus.storage import SqliteConnection
+
+from .conftest import make_coordinator
 
 
 def _eval_off(value: object) -> bool:
@@ -842,6 +846,91 @@ async def test_explore_missing_axes_preserves_running_grading_anchor(
     assert [row["name"] for row in out["winners"]] == expected_winners
     assert [row["variant_name"] for row in out["explore_search_update"]["winners_history"]] == expected_winners
     assert out["running_base_tput"] == (220.0 if intvty_outcome == "KEEP" else 210.0)
+    # Promotion re-grades a winner from its record alone; a record thinner than the measurement reads as
+    # candidate_axes_missing (or as an incomparable round) and the KEEP is dropped.
+    for row in (*out["winners"], tested["v_good"]):
+        snapshot = perf_snapshot_from_mapping(row)
+        assert snapshot is not None
+        assert snapshot["duration_seconds"] == 25.0
+        assert snapshot["request_error_rate"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_an_agentx_explore_keep_is_promoted_by_writeback(sub_agent_runner, session_dir, tmp_path, monkeypatch):
+    """The winner explore writes is the record writeback re-grades, so the KEEP must survive the hand-off.
+
+    Each side was only ever exercised against hand-built dicts; a winner record thinner than the measurement that
+    graded it dropped every AgentX explore KEEP at promotion from #1652 until #1790.
+    """
+    _force_cold_decision(monkeypatch)
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    baseline_axes = {
+        "output_throughput": 200.0,
+        "total_token_throughput": 20000.0,
+        "e2e_norm_intvty_p90": 300.0,
+        "e2e_norm_intvty_p50": 300.0,
+        "duration_seconds": 25.0,
+        "request_error_rate": 0.0,
+    }
+    sub, tr, _ = sub_agent_runner
+    state = SharedState(framework="sglang", benchmark_mode="agentx")
+    state.baseline_tput = 200.0
+    state.baseline_perf = dict(baseline_axes)
+    sub.shared_state = state
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+
+    def _fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        _fake_workspace(
+            slot,
+            tput=210.0,
+            perf_axes={
+                "input_throughput": 21790.0,
+                "total_token_throughput": 22000.0,
+                "e2e_norm_intvty_p90": 330.0,
+                "e2e_norm_intvty_p50": 330.0,
+                "duration_seconds": 25.0,
+                "request_error_rate": 0.0,
+            },
+        )
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "explore-promote"),
+            "base_tput": 200.0,
+            "grid": [{"name": "v_good", "extra_args": "--good-flag"}],
+        },
+        idempotency_key="ex-promote",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+    [winner] = res.result["winners"]
+
+    with session_scope(session_dir):
+        coord = make_coordinator(session_dir)
+        coord.shared_state.benchmark_mode = "agentx"
+        coord.shared_state.baseline_tput = 200.0
+        coord.shared_state.baseline_perf = dict(baseline_axes)
+        coord.shared_state.current_best = {
+            "action": "baseline",
+            "tput": 200.0,
+            **baseline_axes,
+            "extra_server_args": "",
+            "extra_envs": {},
+        }
+
+        assert coord.writeback.lift_to_current_best("explore", float(winner["tput"]), dict(winner)) is True
+        assert coord.shared_state.current_best["variant_name"] == "v_good"
+        assert coord.shared_state.current_best["e2e_norm_intvty_p50"] == 330.0
 
 
 @pytest.mark.asyncio
@@ -1538,6 +1627,11 @@ async def test_explore_executor_defaults_to_warm_decision_matching_hot_baseline(
         out_idx = cmd.index("--output-dir")
         slot = Path(cmd[out_idx + 1])
         bench_calls.append(str(slot))
+        if "warmup_round" in str(slot):
+            (slot / "server.log").write_text(
+                "[aiter] shape is M:1, N:2, K:3, not found tuned config in /tmp/a.csv, will use default config!\n",
+                encoding="utf-8",
+            )
         _fake_workspace(slot, tput=920.0)  # +15% vs 800 — KEEP and stable
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
@@ -1572,6 +1666,13 @@ async def test_explore_executor_defaults_to_warm_decision_matching_hot_baseline(
     assert len(bench_calls) == 2, bench_calls
     assert sum("warmup_round" in c for c in bench_calls) == 1
     assert {w["name"] for w in out["winners"]} == {"warm_keep"}
+    warm_log = next(Path(c) for c in bench_calls if "warmup_round" in c) / "server.log"
+    decision_slot = next(Path(c) for c in bench_calls if "warmup_round" not in c)
+    report = json.loads((decision_slot / "runtime_findings.json").read_text(encoding="utf-8"))
+    assert report["log_path"] == str(warm_log)
+    assert [(f["rule_id"], f["status"]) for f in report["findings"] if f["status"] != "not_detected"] == [
+        ("aiter.tuned_miss", "detected")
+    ]
 
 
 def _run_eval_of(cmd: list[str]) -> str:

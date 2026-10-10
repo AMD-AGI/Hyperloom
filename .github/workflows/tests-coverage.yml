@@ -121,13 +121,13 @@ jobs:
             echo "::notice::OOB/ not in checkout (no pyproject.toml); skipping editable OOB install."
           fi
 
-      # Kernel-agent tests import TraceLens as a module, so it must be importable for
-      # collection. It is not on PyPI: derive the repo+SHA from install.sh so the pod
-      # installer stays the single pin owner. kernel_source pulls itanium-demangler.
+      # Kernel tool tests import TraceLens as a module, so it must be importable for
+      # collection. It is not on PyPI: derive the repo+SHA from install_kernel_tools.sh
+      # so the pod installer stays the single pin owner. kernel_source pulls itanium-demangler.
       - name: Install TraceLens (pinned, kernel_source extra)
         run: |
           set -euo pipefail
-          INSTALL_SH="src/hyperloom/agents/kernel/scripts/install.sh"
+          INSTALL_SH="src/hyperloom/inference_optimizer/assets/install_kernel_tools.sh"
           TL_REPO="$(sed -n 's/^TRACELENS_REPO="\(.*\)"$/\1/p' "$INSTALL_SH" | head -n1)"
           TL_REF="$(sed -n 's/^TRACELENS_REF="\(.*\)"$/\1/p' "$INSTALL_SH" | head -n1)"
           if [ -z "$TL_REPO" ] || [ -z "$TL_REF" ]; then

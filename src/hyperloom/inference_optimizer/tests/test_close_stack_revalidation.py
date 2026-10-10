@@ -89,7 +89,7 @@ async def test_a_successful_rebench_validates_the_stack_close_then_publishes(coo
     assert not state.optimization_stack_has_unvalidated_keeps()
     assert state.cumulative_gain_validated == pytest.approx(12.0)
     assert state.optimization_stack[-1]["variant_name"] == "page16" and len(state.optimization_stack) == 1
-    assert c.writeback.finalize_recipe_and_journal()["reason"] != "unvalidated_recipe_stack"
+    assert c.recipe_journal.finalize_recipe_and_journal()["reason"] != "unvalidated_recipe_stack"
 
 
 @pytest.mark.asyncio
@@ -128,7 +128,7 @@ async def test_a_failed_rebench_leaves_close_publishing_nothing(coordinator) -> 
     assert len(calls) == 1
     assert c.shared_state.optimization_stack_has_unvalidated_keeps()
     assert _steps(c)[-1]["status"] == "failed"
-    assert c.writeback.finalize_recipe_and_journal()["reason"] == "unvalidated_recipe_stack"
+    assert c.recipe_journal.finalize_recipe_and_journal()["reason"] == "unvalidated_recipe_stack"
 
 
 @pytest.mark.asyncio

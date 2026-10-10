@@ -139,11 +139,11 @@ case "$BACKEND" in
     # --- Codex CLI carrier -------------------------------------------------
     # Outer coding-agent host: `codex exec` loads SKILL.md and drives the same
     # `python -m hyperloom optimize` command agentically (analogous to the
-    # claude carrier). node/npm come from install.sh (ensure_forge_claude_cli);
+    # claude carrier). install.sh does not provide node/npm, so the image must;
     # install the codex CLI on top of that.
     if ! command -v codex >/dev/null 2>&1; then
       echo "[hl] installing codex CLI (@openai/codex) ..."
-      command -v npm >/dev/null 2>&1 || { echo "[hl] npm missing; install.sh should provide node/npm" >&2; exit 3; }
+      command -v npm >/dev/null 2>&1 || { echo "[hl] npm missing; the image must provide node/npm for the codex CLI" >&2; exit 3; }
       npm config set prefix /usr/local >/dev/null 2>&1 || true
       CODEX_NON_INTERACTIVE=1 npm install -g @openai/codex \
         || { echo "[hl] codex CLI install failed" >&2; exit 3; }

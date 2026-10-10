@@ -16,10 +16,10 @@ from typing import Any, Mapping
 
 import yaml
 
-from hyperloom.agents.kernel.tools._capture_shapes import (
+from hyperloom.orchestrator.trace_analysis._capture_shapes import (
     is_capture_fragment as _shared_is_capture_fragment,
 )
-from hyperloom.agents.kernel.tools._trace_rank import (
+from hyperloom.orchestrator.trace_analysis._trace_rank import (
     select_primary_trace,
     trace_rank as _trace_rank,
 )
@@ -330,15 +330,7 @@ def _write_trace_certificate(trace_dir: Path, validate: dict[str, Any]) -> str:
 
 def _certify_trace_dir(trace_dir: Path, framework: str) -> dict[str, Any]:
     """Run the capture-time self-certification probe over a profile trace."""
-    import sys
-
-    from hyperloom.agents.kernel.tools import _capture_shapes
-
-    tools_dir = str(Path(_capture_shapes.__file__).resolve().parent)
-    if tools_dir not in sys.path:
-        sys.path.insert(0, tools_dir)
-
-    from hyperloom.agents.kernel.tools import trace_selfcert
+    from hyperloom.orchestrator.trace_analysis import trace_selfcert
 
     # The workload parameters shape the split forecast, and reading them from the benchmark config keeps the
     # certificate independent of any analysis having run -- the point of certifying at capture time.

@@ -5,16 +5,11 @@
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
 
-_TOOL_DIR = Path(__file__).resolve().parents[4] / "src" / "hyperloom" / "agents" / "kernel" / "tools"
-if str(_TOOL_DIR) not in sys.path:
-    sys.path.insert(0, str(_TOOL_DIR))
-
-import diffusion_roofline as dr
+from hyperloom.orchestrator.trace_analysis import diffusion_roofline as dr
 
 
 def _write_csvs(csv_dir: Path, *, with_timeline: bool = True) -> None:

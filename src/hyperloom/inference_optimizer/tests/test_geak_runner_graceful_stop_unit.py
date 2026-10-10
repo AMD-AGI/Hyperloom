@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import sys
@@ -13,26 +12,7 @@ from pathlib import Path
 
 import pytest
 
-_RUNNER_PY = (
-    Path(__file__).resolve().parents[4]
-    / "src"
-    / "hyperloom"
-    / "agents"
-    / "kernel"
-    / "tools"
-    / "backends"
-    / "geak_runner.py"
-)
-
-
-def _load_module():
-    spec = importlib.util.spec_from_file_location("geak_runner", _RUNNER_PY)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-psr = _load_module()
+from hyperloom.orchestrator.kernel import geak_runner as psr
 
 
 def _write_fake_runner(tmp_path: Path, body: str) -> Path:

@@ -264,7 +264,7 @@ def _is_agentx_client_key(key: str, env: "Mapping[str, str]") -> bool:
 # which is the side that actually selects the corpus at runtime -- this one only
 # reports it -- so the two are pinned together by
 # ``test_agentx_corpus_rules_consistency``.
-AGENTX_FULL_CONTEXT_FAMILIES = ("dsv4", "deepseekv4", "glm52", "minimaxm3", "kimik3")
+AGENTX_FULL_CONTEXT_FAMILIES = ("dsv4", "deepseekv4", "glm52", "glm53", "minimaxm3", "kimik3")
 AGENTX_CORPUS_FULL = "semianalysis_cc_traces_weka_062126"
 AGENTX_CORPUS_256K = "semianalysis_cc_traces_weka_062126_256k"
 
@@ -756,6 +756,10 @@ def _resolve_framework_repo_path(
     return ""
 
 
+#: Source-root envs Hyperloom writes into a vLLM launch; vLLM reports them as unknown.
+VLLM_SOURCE_ROOT_ENVS: tuple[str, ...] = ("FRAMEWORK_REPO_PATH", "VLLM_REPO_PATH", "VLLM_DIR")
+
+
 def _apply_vllm_source_runtime(bench: dict[str, Any], envs: dict[str, Any]) -> None:
     """Route a prepared image checkout into the vLLM server launch."""
     if str(bench.get("framework") or "").strip().lower() != "vllm":
@@ -765,7 +769,7 @@ def _apply_vllm_source_runtime(bench: dict[str, Any], envs: dict[str, Any]) -> N
     repo_path = _resolve_framework_repo_path(envs, framework="vllm")
     if not repo_path:
         return
-    for name in ("FRAMEWORK_REPO_PATH", "VLLM_REPO_PATH", "VLLM_DIR"):
+    for name in VLLM_SOURCE_ROOT_ENVS:
         envs[name] = repo_path
         os.environ[name] = repo_path
     existing = str(envs.get("PYTHONPATH") or os.environ.get("PYTHONPATH") or "")

@@ -238,12 +238,13 @@ class MachinePhase(CoordinatorCollaborator):
         stopped = await dispatcher.cancel_inflight_actions(reason=barrier_reason)
         if cancelled or stopped:
             log.info(
-                "Coordinator.phase: %s cancelled %d queued and stopped %d running task(s)",
+                "Coordinator.phase: %s (reason=%s) cancelled %d queued and stopped %d running task(s)",
                 barrier_reason,
+                reason,
                 len(cancelled),
                 len(stopped),
             )
-            await self._coord.writeback.record_observation(
+            await self.bus.record_observation(
                 "coordinator",
                 "observation",
                 {
@@ -258,7 +259,10 @@ class MachinePhase(CoordinatorCollaborator):
         running = await self.tasks.running()
         if running or dispatcher.has_unbooked_completions():
             log.info(
-                "phase_machine: holding %s until %d running task(s) stop and are booked", barrier_reason, len(running)
+                "phase_machine: holding %s (reason=%s) until %d running task(s) stop and are booked",
+                barrier_reason,
+                reason,
+                len(running),
             )
             return
         dispatcher.admission_frozen = False
@@ -427,7 +431,7 @@ class MachinePhase(CoordinatorCollaborator):
     def _reseed_orch_prompt_for_phase(self, to_phase: str) -> bool:
         """Re-scope the orchestration system prompt to the phase being entered."""
         phase = (to_phase or "").strip().upper()
-        orch_prompt = self._coord.orch_prompt
+        orch_prompt = self.orch_prompt
         if not phase or orch_prompt.is_user_supplied:
             return False
         rebuild = orch_prompt.rebuild

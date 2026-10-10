@@ -488,8 +488,8 @@ async def test_stack_validation_preserves_actual_measurement(
     verdict,
 ):
     """The real stack verdict and its writeback envelope share one E2E measurement."""
-    import hyperloom.orchestrator.actions.executors._kernel_agent_tool as kernel_agent_tool
     import hyperloom.orchestrator.actions.executors.baseline as baseline_mod
+    from hyperloom.orchestrator.kernel import apply_kernel_patch as akp
 
     agentx = grading_mode != "synthetic"
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1" if agentx else "0")
@@ -499,9 +499,7 @@ async def test_stack_validation_preserves_actual_measurement(
     monkeypatch.delenv("HYPERLOOM_ALLOW_UNVERIFIED_SUBMISSION", raising=False)
     monkeypatch.setenv("HYPERLOOM_PERF_NOISE_PCT", "5")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
-    monkeypatch.setattr(
-        kernel_agent_tool._load_apply_tool(), "_clear_python_kernel_caches", lambda target: {"status": "skipped"}
-    )
+    monkeypatch.setattr(akp, "_clear_python_kernel_caches", lambda target: {"status": "skipped"})
     c = _stack_validation_coordinator(tmp_path)
     c.shared_state.framework = "vllm"
     c.shared_state.benchmark_mode = "agentx" if agentx else "synthetic"
@@ -1884,9 +1882,9 @@ def _materialize_stack_sources(tmp_path: Path, stack: list[dict[str, Any]]) -> N
 
 def _stub_python_cache_clear(monkeypatch) -> None:
     """Keep the real apply away from this machine's Triton / inductor cache directories."""
-    from hyperloom.orchestrator.kernel import request_handlers as krh
+    from hyperloom.orchestrator.kernel import apply_kernel_patch as akp
 
-    monkeypatch.setattr(krh._load_apply_tool(), "_clear_python_kernel_caches", lambda target: {"status": "skipped"})
+    monkeypatch.setattr(akp, "_clear_python_kernel_caches", lambda target: {"status": "skipped"})
 
 
 def _stub_stack_benchmark(monkeypatch, *, new_tput: float) -> None:
@@ -1903,7 +1901,7 @@ def _stub_stack_benchmark(monkeypatch, *, new_tput: float) -> None:
 
 def _break_backup_restore(monkeypatch, *, target: Path) -> None:
     """Fail one member's backup->target copy; its apply (patch->target) still succeeds."""
-    from hyperloom.agents.kernel.tools import apply_kernel_patch as akp
+    from hyperloom.orchestrator.kernel import apply_kernel_patch as akp
 
     # apply_kernel_patch resolves both paths, so the discriminator has to as well.
     patched = target.with_name(f"{target.stem}_opt{target.suffix}").resolve()
@@ -2381,7 +2379,7 @@ def test_a_revert_that_already_completed_is_not_run_again(tmp_path: Path):
 
     An apply that reverted itself and is then unwound by the stack hits exactly that.
     """
-    from hyperloom.agents.kernel.tools.apply_kernel_patch import revert_kernel_patch
+    from hyperloom.orchestrator.kernel.apply_kernel_patch import revert_kernel_patch
 
     manifest = tmp_path / "manifest.json"
     manifest.write_text(
@@ -2404,3 +2402,37 @@ def test_a_revert_that_already_completed_is_not_run_again(tmp_path: Path):
     assert result["already_reverted"] is True
     assert result["restored_paths"] == ["/framework/src.py"]
     assert lifecycle_complete(result)
+
+
+@pytest.mark.asyncio
+async def test_enqueue_conc_sweep_grants_the_phase_its_budget_and_lease(coord):
+    """The grant SWEEP's budget exits wait for is the sweep's budget plus the lease grace, from enqueue time."""
+    coord.shared_state.phase_history = [
+        {"to_phase": "SWEEP", "reason": "kernel_no_more_leverage", "evidence": {}},
+    ]
+    coord.shared_state.conc_sweep_total_budget_sec = 9000
+    coord.shared_state.remaining_minutes = lambda: 62.4
+    coord.shared_state._now_unix = lambda: 1_800_000_000.0
+
+    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+
+    assert task.params["total_budget_sec"] == 3624
+    assert coord.shared_state.conc_sweep_granted_until_unix == 1_800_000_000.0 + 3624 + 600
+
+    # A re-entry that finds the task already queued does not move the grant.
+    coord.shared_state._now_unix = lambda: 1_800_000_100.0
+    await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+    assert coord.shared_state.conc_sweep_granted_until_unix == 1_800_000_000.0 + 3624 + 600
+
+
+@pytest.mark.asyncio
+async def test_enqueue_unbounded_conc_sweep_grants_nothing(coord):
+    """With no budget there is no grant: the phase's own budget stays the backstop."""
+    coord.shared_state.phase_history = [
+        {"to_phase": "SWEEP", "reason": "kernel_no_more_leverage", "evidence": {}},
+    ]
+    coord.shared_state.conc_sweep_total_budget_sec = 0
+
+    await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+
+    assert coord.shared_state.conc_sweep_granted_until_unix == 0.0

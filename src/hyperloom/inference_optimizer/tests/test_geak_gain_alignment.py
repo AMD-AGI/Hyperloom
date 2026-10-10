@@ -167,7 +167,7 @@ def test_revalidation_validated_when_beating_current_best() -> None:
 def _coord(tmp_path: Path, *, baseline: float, best_tput: float) -> Coordinator:
     coord = Coordinator.__new__(Coordinator)
     coord.session_dir = tmp_path
-    coord.bus = SimpleNamespace(append_and_seq=AsyncMock())
+    coord.bus = SimpleNamespace(append_and_seq=AsyncMock(), record_observation=AsyncMock())
     coord.shared_state = SharedState(
         baseline_tput=baseline,
         current_best={"action": "explore", "tput": best_tput},
