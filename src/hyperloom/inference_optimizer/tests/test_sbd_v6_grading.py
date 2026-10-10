@@ -51,6 +51,8 @@ AGENTX_AXES: dict[str, Any] = {
     "ttft_p90_ms": 240.0,
     "tpot_p50_ms": 18.0,
     "tpot_p90_ms": 24.3,
+    "e2el_p50_ms": 1850.0,
+    "e2el_p90_ms": 4200.0,
     "duration_seconds": 3600.0,
     "request_error_rate": 0.0,
 }

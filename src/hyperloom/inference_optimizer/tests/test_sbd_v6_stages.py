@@ -238,6 +238,8 @@ _UNMEASURED_AXES = {
     "ttft_p90_ms": None,
     "tpot_p50_ms": None,
     "tpot_p90_ms": None,
+    "e2el_p50_ms": None,
+    "e2el_p90_ms": None,
     "duration_seconds": None,
     "request_error_rate": None,
 }
