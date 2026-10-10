@@ -91,6 +91,18 @@ class RayMissingServingSlotError(RayInfeasibleError):
 #: the head the repair is about to stop, after the repair found the head idle.
 _CLUSTER_STARTUP_LOCK = threading.RLock()
 
+#: Leases in this process that have submitted an actor, under the lock above. Actor
+#: creation is asynchronous, so a submitted actor can be absent from the GCS actor
+#: table and hold nothing yet; the repair refuses while this is non-zero instead of
+#: trusting the cluster's own view to have caught up.
+_LEASE_ACTORS_SUBMITTED = 0
+
+
+def _note_lease_actor_submitted() -> None:
+    """Record that a lease submitted an actor; called with ``_CLUSTER_STARTUP_LOCK`` held."""
+    global _LEASE_ACTORS_SUBMITTED
+    _LEASE_ACTORS_SUBMITTED += 1
+
 
 def _assert_cluster_feasible(*, num_gpus: float, serving_slot: bool) -> None:
     """Raise :exc:`RayInfeasibleError` when the cluster cannot satisfy the request."""
@@ -136,7 +148,10 @@ def _ensure_cluster_feasible(*, num_gpus: float, serving_slot: bool, log_path: A
             return
         except RayMissingServingSlotError:
             pass
-        restartable, why = local_head_restartable()
+        if _LEASE_ACTORS_SUBMITTED:
+            restartable, why = False, f"this process has submitted {_LEASE_ACTORS_SUBMITTED} lease actor(s) to it"
+        else:
+            restartable, why = local_head_restartable()
         if not restartable:
             raise RayMissingServingSlotError(f"{missing}; not restarting it automatically: {why}") from missing
         log.warning("Ray head has no serving_slot resource; restarting the local head with it")
@@ -523,6 +538,7 @@ class ServingLease:
                 num_gpus=self._num_gpus, serving_slot=self._serving_slot, log_path=self._ensure_log_path
             )
             self._actor = make_serving_actor(self._num_gpus, serving_slot=self._serving_slot)
+            _note_lease_actor_submitted()
 
     def run_session_kill(
         self,
@@ -948,6 +964,7 @@ class GpuSpecialistLease:
                 num_gpus=self._num_gpus, serving_slot=self._serving_slot, log_path=self._ensure_log_path
             )
             self._actor = make_gpu_specialist_actor(self._num_gpus, serving_slot=self._serving_slot)
+            _note_lease_actor_submitted()
         self._start_ref = self._actor.start.remote(
             cmd,
             env=env,

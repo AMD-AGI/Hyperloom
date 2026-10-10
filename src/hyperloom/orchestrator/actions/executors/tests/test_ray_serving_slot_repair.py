@@ -88,6 +88,11 @@ def single_node(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors._multi_node_env.is_multi_node", lambda: False)
 
 
+@pytest.fixture(autouse=True)
+def _no_lease_actors(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(rs, "_LEASE_ACTORS_SUBMITTED", 0)
+
+
 def _install(
     monkeypatch: pytest.MonkeyPatch,
     fake: _FakeRay,
@@ -386,3 +391,22 @@ def test_visible_ray_daemons_reads_proc(monkeypatch, tmp_path):
 
     assert sorted(daemons["gcs_server"]) == ["", "41234", "50000"]
     assert sorted(daemons["raylet"]) == ["abc", "def"]
+
+
+def test_head_this_process_already_submitted_an_actor_to_keeps_the_error(monkeypatch, single_node):
+    """Actor creation is asynchronous: a just-submitted specialist may not show in the cluster's view yet."""
+    _install(monkeypatch, _FakeRay(has_serving_slot=False))
+    monkeypatch.setattr(rs, "make_gpu_specialist_actor", lambda *_a, **_kw: _StartableActor())
+    rs.GpuSpecialistLease(num_gpus=1).start_async(["true"])
+    backend = rb.get_ray_backend()
+
+    with pytest.raises(rs.RayMissingServingSlotError, match="submitted 1 lease actor"):
+        rs.ServingLease(num_gpus=1, serving_slot=True).ensure()
+    assert backend.restarts == 0
+
+
+class _StartableActor:
+    class start:
+        @staticmethod
+        def remote(*_a: Any, **_kw: Any) -> object:
+            return object()
