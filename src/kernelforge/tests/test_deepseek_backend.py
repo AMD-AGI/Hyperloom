@@ -327,6 +327,26 @@ def test_resume_without_a_session_id_is_refused(tmp_path: Path) -> None:
         asyncio.run(backend.resume(_spec(repo, kernel), "  ", "feedback"))
 
 
+def test_a_runtime_whose_workspace_is_gone_is_shut_down(tmp_path: Path) -> None:
+    """Every lane round clones and then deletes its workspaces; a live campaign held ten runtimes for them."""
+    import shutil
+
+    lane_root = tmp_path / "lane"
+    lane_root.mkdir()
+    lane_repo, lane_kernel = _make_repo(lane_root)
+    (tmp_path / "main").mkdir()
+    repo, kernel = _make_repo(tmp_path / "main")
+    backend = _backend()
+    asyncio.run(backend.run(_spec(lane_repo, lane_kernel)))
+    shutil.rmtree(lane_repo)
+
+    asyncio.run(backend.run(_spec(repo, kernel)))
+
+    lane_runtime, main_runtime = _FakeHarness.instances
+    assert lane_runtime.closed
+    assert not main_runtime.closed
+
+
 def test_close_shuts_down_every_runtime_it_started(tmp_path: Path) -> None:
     """A campaign must not leak one Node subprocess per workspace it visited."""
     repo, kernel = _make_repo(tmp_path)

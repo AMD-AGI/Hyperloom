@@ -361,6 +361,9 @@ class DeepSeekHarnessBackend:
             harness = self._runtimes.get(key)
             if harness is not None:
                 return harness
+            # A deleted workspace (a finished lane round) can host no resume, so its runtime only holds a process.
+            orphaned = [k for k in self._runtimes if not Path(k.split("\x00", 1)[0]).is_dir()]
+            stale = [self._runtimes.pop(k) for k in orphaned]
             workspace = str(Path(spec.cwd).resolve())
             harness = sdk.DeepSeekHarness(
                 dsh_home=str(self._harness_home()),
@@ -376,7 +379,10 @@ class DeepSeekHarnessBackend:
                 request_timeout_seconds=float(spec.timeout_sec or self.runtime.timeout_sec),
             )
             self._runtimes[key] = harness
-            return harness
+        for runtime in stale:
+            with contextlib.suppress(Exception):
+                runtime.close()
+        return harness
 
     def preflight(self) -> None:
         """Validate SDK and gateway prerequisites without spending tokens."""
