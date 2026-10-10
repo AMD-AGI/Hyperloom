@@ -286,6 +286,24 @@ async def test_one_request_in_flight_and_a_keep_opens_a_new_decision_point(servi
     assert len(service.requests) == 2 and state.predictor_asked_keys == ["c0-s0-r0", "c0-s1-r0"]
 
 
+async def test_a_decision_point_waits_for_the_reprofile_in_flight(service, monkeypatch):
+    landed = _state(auto_roofline_pending_task_id="roofline-1")
+    pump = pump_mod.PredictorPump()
+    await pump.step(landed)
+    assert service.requests == [] and landed.predictor_asked_keys == []
+    landed.auto_roofline_pending_task_id = ""
+    landed.roofline_snapshots = [{}]
+    await _ask_and_file(pump, landed)
+    assert landed.predictor_asked_keys == ["c0-s0-r1"]
+
+    stuck = _state(auto_roofline_pending_task_id="roofline-2")
+    pump = pump_mod.PredictorPump()
+    await pump.step(stuck)
+    monkeypatch.setattr(pump_mod, "MAX_PROFILE_WAIT_SEC", 0.0)
+    await _ask_and_file(pump, stuck)
+    assert stuck.predictor_asked_keys == ["c0-s0-r0"]
+
+
 async def test_a_request_that_raises_is_not_retried_at_the_same_decision_point(service, monkeypatch):
     def _raising(request, *, endpoint, timeout_sec):
         service.requests.append(request)

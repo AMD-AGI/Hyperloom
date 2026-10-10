@@ -46,6 +46,9 @@ MIN_VARIANT_SEC = 600.0
 #: Decision points remembered; an evicted key risks one repeat request at a depth long since passed.
 MAX_ASKED_KEYS = 200
 
+#: Longest a decision point is held for a re-profile in flight; past it the predictor answers on the profile there is.
+MAX_PROFILE_WAIT_SEC = 900.0
+
 
 def decision_point_key(state: Any) -> str:
     """``c{macro_cycle}-s{stack_depth}-r{roofline_snapshot_count}``."""
@@ -97,6 +100,22 @@ class PredictorPump:
         self._cycle = 0
         self._conf = predictor_config.PredictorConfig()
         self._started = 0.0
+        self._held_since: dict[str, float] = {}
+
+    def _held_for_profile(self, state: Any, key: str) -> bool:
+        """Whether to hold ``key`` for the re-profile in flight, for at most :data:`MAX_PROFILE_WAIT_SEC`.
+
+        A KEEP moves the decision point at once, and the re-profile it triggers
+        moves it again minutes later; an answer in between reads the profile of
+        the stack before the KEEP.
+        """
+        pending = str(state.auto_roofline_pending_task_id or "").strip()
+        if not pending:
+            return False
+        if key not in self._held_since:
+            self._held_since[key] = time.monotonic()
+            log.info("predictor: holding decision point %s for re-profile task %s", key, pending)
+        return time.monotonic() - self._held_since[key] < MAX_PROFILE_WAIT_SEC
 
     async def step(self, state: Any) -> None:
         """File an answer that has arrived, or ask when this decision point warrants it."""
@@ -110,7 +129,10 @@ class PredictorPump:
         if reason is not None:
             log.debug("predictor: not asking (%s)", reason)
             return
-        self._key, self._conf, self._started = decision_point_key(state), conf, time.monotonic()
+        key = decision_point_key(state)
+        if self._held_for_profile(state, key):
+            return
+        self._key, self._conf, self._started = key, conf, time.monotonic()
         self._cycle = int(state.macro_cycle or 0)
         # Before anything can raise: a request that fails is not retried at the same decision point.
         _note_asked(state, self._key)
