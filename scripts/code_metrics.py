@@ -17,8 +17,9 @@ value in the baseline file named there. The baseline only ever goes down:
   the baseline on that ref, and the thresholds, scope and tool parameters may not
   loosen. Editing the whitelist is not a way to make the gate pass.
 
-A unit that only moved (same metric, same short name, value no worse) is matched to the
-baseline entry it left, deterministically; see :func:`match_moves` for the limit.
+A unit that only moved to another file (same metric, same qualified name, or the same
+file name for a module; value no worse) keeps the baseline entry it left; see
+:func:`match_moves` for the limit.
 
 Usage::
 
@@ -146,32 +147,37 @@ def dump_baseline(entries: dict[Key, int]) -> str:
     return json.dumps(doc, indent=1, sort_keys=True) + "\n"
 
 
-def short_name(key: Key) -> str:
-    """What a move keeps: the file name for module-level units, else the last name segment."""
+def move_identity(key: Key) -> tuple[str, str]:
+    """What a move keeps: the metric and the qualified name, or the file name for a module."""
     metric, path, unit = key
-    if unit == MODULE:
-        return Path(path).name
-    return unit.replace(":", ".").rsplit(".", 1)[-1]
+    return metric, (Path(path).name if unit == MODULE else unit)
 
 
 def match_moves(removed: dict[Key, int], added: dict[Key, int]) -> dict[Key, Key]:
-    """Pair each added key with a removed one it plausibly moved from: added -> removed.
+    """Pair each added key with the removed key it moved from: added -> removed.
 
-    A pair needs the same metric, the same :func:`short_name` and an added value no worse
-    than the removed one. Keys are visited in sorted order and each removed key is used at
-    most once, so the result is deterministic. The limit: a renamed unit (new short name)
-    is not matched, and two same-named units that move together may swap partners, which
-    is harmless because either pairing satisfies the value rule.
+    A pair needs a :func:`move_identity` that exactly one removed and exactly one added key
+    share, and an added value no worse than the removed one. Uniqueness on both sides
+    makes the pairing deterministic and stops a worse unit from borrowing the allowance of
+    a same-named one (two ``main`` functions, say). The limit: a renamed unit, a method
+    moved to another class, or a name shared by several moved units is not matched and has
+    to meet the limits as new code.
     """
-    pairs: dict[Key, Key] = {}
-    free = sorted(removed)
-    for key in sorted(added):
-        for old in free:
-            if old[0] == key[0] and short_name(old) == short_name(key) and not worse(key[0], added[key], removed[old]):
-                pairs[key] = old
-                free.remove(old)
-                break
-    return pairs
+    olds, news = _by_identity(removed), _by_identity(added)
+    return {
+        news[identity][0]: keys[0]
+        for identity, keys in olds.items()
+        if len(keys) == 1
+        and len(news.get(identity, ())) == 1
+        and not worse(identity[0], added[news[identity][0]], removed[keys[0]])
+    }
+
+
+def _by_identity(keys: Iterable[Key]) -> dict[tuple[str, str], list[Key]]:
+    groups: dict[tuple[str, str], list[Key]] = {}
+    for key in keys:
+        groups.setdefault(move_identity(key), []).append(key)
+    return groups
 
 
 def compare(findings: dict[Key, Finding], baseline: dict[Key, int], outcome: Outcome) -> None:

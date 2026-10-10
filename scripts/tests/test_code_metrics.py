@@ -184,7 +184,7 @@ def test_moved_unit_is_matched_not_new_and_its_update_passes_against_the_base(re
     assert repo.gate("--base-ref", base)[0] == 0
 
 
-@pytest.mark.parametrize(("unit", "value"), [("Planner.pick", 15), ("Planner.choose", 14)])
+@pytest.mark.parametrize(("unit", "value"), [("Planner.pick", 15), ("Planner.choose", 14), ("Scheduler.pick", 14)])
 def test_move_that_got_worse_or_renamed_is_a_new_violation(repo: Repo, unit: str, value: int) -> None:
     repo.write_baseline({key("src/old.py", "Planner.pick"): 14})
     repo.findings = [cc("src/new.py", unit, value)]
@@ -192,6 +192,28 @@ def test_move_that_got_worse_or_renamed_is_a_new_violation(repo: Repo, unit: str
     assert code == 1
     assert f"`{unit}`" in section(report, NEW)
     assert "within the limit, or removed" in section(report, OUT_OF_DATE)
+
+
+@pytest.mark.parametrize(
+    "baseline",
+    [
+        # A.run improves under the limit while B.run worsens; both move.
+        {key("src/a.py", "A.run"): 14, key("src/b.py", "B.run"): 11},
+        # Two same-named units: the worse one must not borrow the other's allowance.
+        {key("src/a.py", "main"): 14, key("src/b.py", "main"): 11},
+    ],
+)
+def test_a_worse_unit_cannot_borrow_another_units_allowance_by_moving(repo: Repo, baseline) -> None:
+    repo.write_baseline(baseline)
+    base = repo.commit()
+    unit = sorted(baseline)[1][2]
+    repo.findings = [cc("src/new.py", unit, 13)]
+    code, report = repo.gate()
+    assert code == 1
+    assert f"`{unit}` | Cyclomatic complexity | 13 |" in section(report, NEW)
+    assert repo.gate("--update-baseline")[0] == 0
+    assert key("src/new.py", unit) not in repo.baseline()
+    assert repo.gate("--base-ref", base)[0] == 1
 
 
 def test_maintainability_index_ratchets_upward(repo: Repo) -> None:
