@@ -34,9 +34,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from hyperloom.inference_optimizer.cli.preflight import _INFERENCEX_REF_DEFAULT
-from hyperloom.inference_optimizer.tests.test_inferencex_anchor_contract import (
-    CONTRACT_PATH,
-    build_record,
+from hyperloom.orchestrator.actions.executors._inferencex_anchor_contract import build_record
+
+#: The record ``test_inferencex_anchor_contract.py`` checks; a test fixture, read as data.
+CONTRACT_PATH = (
+    Path(__file__).resolve().parent.parent
+    / "src/hyperloom/inference_optimizer/tests/fixtures/inferencex_anchor_contract.json"
 )
 
 

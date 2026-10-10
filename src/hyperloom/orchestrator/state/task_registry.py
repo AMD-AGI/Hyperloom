@@ -165,13 +165,9 @@ def _validate_dispatch_reuse(task: Task, requested: str | None) -> None:
 class IllegalTransition(RuntimeError):
     """Raised when a requested task state transition is not allowed."""
 
-    pass
-
 
 class TaskNotFound(RuntimeError):
     """Raised when a task lookup by ``task_id`` finds no row."""
-
-    pass
 
 
 class TerminalTaskReuse(RuntimeError):

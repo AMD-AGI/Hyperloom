@@ -212,7 +212,7 @@ class Journal:
 
         entries_raw = blob.get("entries") or []
         entries = [JournalEntry.from_dict(e) for e in entries_raw if isinstance(e, dict)]
-        journal = cls(
+        return cls(
             session_id=str(blob.get("session_id") or session_id),
             model=str(blob.get("model") or model),
             hardware=str(blob.get("hardware") or hardware),
@@ -224,7 +224,6 @@ class Journal:
             entries=entries,
             path=path,
         )
-        return journal
 
     @staticmethod
     def _journal_path(session_dir: Path) -> Path:

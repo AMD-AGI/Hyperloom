@@ -738,7 +738,7 @@ def _sentinel_returncodes() -> dict[int, set[str]]:
         for name, value in vars(module).items():
             if not isinstance(value, int) or isinstance(value, bool):
                 continue
-            if not (name.endswith("_RETURNCODE") or name.endswith("_RC")):
+            if not (name.endswith(("_RETURNCODE", "_RC"))):
                 continue
             assigned.setdefault(value, set()).add(f"{short}.{name}")
     return assigned

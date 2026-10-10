@@ -1,0 +1,94 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+name: PR Hygiene
+
+# Always-run PR checks with no paths filter, so the ``pr-hygiene`` job can be a
+# required status check without leaving unrelated PRs pending forever:
+#   - diff budget (AGENTS.md): production Python lines changed, src/ + scripts/
+#     minus tests. Warn above 400, fail above 1000 unless the PR carries the
+#     ``size-exception`` label added by someone with write access (verified via
+#     the timeline + collaborator-permission API; unverifiable = not exempt);
+#   - agent-doc CLI references (scripts/check_cli_references.py), moved here
+#     from docs.yml, whose paths filter would keep a required check pending;
+#   - PR template completeness, read from the event payload as data.
+#
+# The token is read-only and nothing is written back to the PR. The checkout
+# is the PR merge ref with its two parents, so ``HEAD^1..HEAD`` is exactly what
+# the PR changes on top of the current base.
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, labeled, unlabeled]
+
+concurrency:
+  group: pr-hygiene-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  pr-hygiene:
+    name: pr-hygiene
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      # A PR's own .gitattributes could mark *.py as binary (``-diff``), which
+      # makes git report no changed lines. info/attributes takes precedence.
+      - name: Force text diffs for Python files
+        run: attrs="$(git rev-parse --git-path info/attributes)"; mkdir -p "$(dirname "$attrs")"; echo '*.py diff' >> "$attrs"
+
+      - name: Diff budget
+        id: size
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          set -euo pipefail
+          if [ "$(git rev-list --parents -n 1 HEAD | wc -w)" -ne 3 ]; then
+            echo "::error title=diff-budget::HEAD is not the PR merge commit; cannot compute the PR diff."
+            exit 1
+          fi
+          python scripts/pr_hygiene.py size --base HEAD^1 --head HEAD
+
+      # Agent-facing docs are run verbatim by LLM agents. The checker prints
+      # PR-controlled file paths, so workflow commands are suspended while it
+      # runs: a crafted filename cannot forge an annotation.
+      - name: Check CLI references in agent docs
+        if: always()
+        run: |
+          set -euo pipefail
+          resume="$(python -c 'import secrets; print(secrets.token_hex(16))')"
+          echo "::stop-commands::${resume}"
+          rc=0
+          python scripts/check_cli_references.py || rc=$?
+          echo "::${resume}::"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error title=cli-references::Agent docs reference a module, subcommand or script that does not exist (see the lines above)."
+          fi
+          exit "$rc"
+
+      # Advisory for now: findings are warnings. To make it blocking, set
+      # PR_TEMPLATE_ENFORCE to "true".
+      - name: PR template completeness
+        if: always()
+        env:
+          PR_TEMPLATE_ENFORCE: "false"
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_AUTHOR_TYPE: ${{ github.event.pull_request.user.type }}
+        run: |
+          set -euo pipefail
+          ARGS=()
+          if [ "$PR_TEMPLATE_ENFORCE" = "true" ]; then ARGS+=(--enforce); fi
+          python scripts/pr_hygiene.py template "${ARGS[@]}"

@@ -48,7 +48,7 @@ def _write_exec_details(
         w = csv.DictWriter(fh, fieldnames=cols)
         w.writeheader()
         for row in rows:
-            full = {c: "" for c in cols}
+            full = dict.fromkeys(cols, "")
             full.update({k: str(v) for k, v in row.items()})
             w.writerow(full)
     return path

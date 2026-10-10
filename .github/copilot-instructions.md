@@ -21,6 +21,8 @@ Advisory review. Flag only what static gates can't.
   the seam to split on, not just the line count, and don't ask for cleanup of an already
   oversized function merely because the change edits it — but do flag a newly crossed threshold, or
   branches and responsibilities added to a unit already over.
+  The `code-metrics` CI job now enforces that ceiling (and the style guide's gated limits)
+  on the files a change touches.
 - **Cohesion and coupling**: a module that has acquired a second job, a responsibility
   moved to the wrong layer, a dependency pointing back up the layers, a new import cycle,
   or a caller reaching around the layer that owns a thing. A diff that bypasses an

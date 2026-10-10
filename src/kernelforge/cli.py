@@ -567,7 +567,6 @@ def _agent_runtime_overrides(
 @click.version_option(package_name="hyperloom-inference_optimizer")
 def main():
     """Kernel Agents — Agentic GPU kernel development system."""
-    pass
 
 
 def _lane_workspace_path(value: str, *, lane_dir: str, workspace_dir: str, label: str) -> str:

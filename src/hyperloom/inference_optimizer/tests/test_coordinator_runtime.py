@@ -177,7 +177,7 @@ async def test_stop_signals_follow_the_normal_terminal_path(session_dir, stop_si
         finalize_calls += 1
 
     async def _cancel_tick(_now):
-        raise asyncio.CancelledError()
+        raise asyncio.CancelledError
 
     if cancelled:
         monkeypatch.setattr(c.reconciler, "run", _cancel_tick)
@@ -234,7 +234,7 @@ async def test_mock_backend_records_calls():
     assert backend.calls[0]["tools"] == ["emit_intent"]
 
 
-# SubAgentRunner (standalone)
+# SubAgentRunner, standalone
 @pytest.mark.asyncio
 async def test_sub_agent_runner_succeeds(tmp_path):
     db = SqliteConnection(tmp_path / "x.db")
@@ -1127,7 +1127,7 @@ def _silent_backends() -> dict[str, object]:
 
 def _mute_action_scoring(coordinator: Coordinator) -> None:
     """No-op kept for back-compat."""
-    return None
+    return
 
 
 def _mk_task(kind: str, task_id: str = "t-aud-1") -> Task:

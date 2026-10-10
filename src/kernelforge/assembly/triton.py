@@ -131,7 +131,12 @@ class TritonAssembly:
         # but not tensor addresses or runtime grid dimensions.
         fingerprint = hashlib.sha256((triton.__version__ + ":" + compiled.hash).encode()).hexdigest()
         frontend = "gluon" if compiled.src.fn.is_gluon() else "triton"
-        identity = dict(schema_version=1, frontend=frontend, gpu_target=self.target, source_ir_sha256=fingerprint)
+        identity = {
+            "schema_version": 1,
+            "frontend": frontend,
+            "gpu_target": self.target,
+            "source_ir_sha256": fingerprint,
+        }
         if self.export and not self.manifest.exists():
             self.source.write_text(original, encoding="utf-8")
             self.manifest.write_text(

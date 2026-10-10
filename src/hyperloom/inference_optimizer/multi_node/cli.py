@@ -372,7 +372,7 @@ def install_geak_on_pods_best_effort() -> int:
         return 0
 
 
-# Subcommand: bootstrap
+# Subcommand `bootstrap`
 def cmd_bootstrap(args: argparse.Namespace) -> int:
     """Run the BYOI bootstrap script inside the RayJob via Ray Dashboard REST."""
     # Only head_pod_ip: the Ray Dashboard client addresses the head pod directly, and a cluster the platform
@@ -423,7 +423,7 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
     return 0
 
 
-# Subcommand: verify
+# Subcommand `verify`
 def cmd_verify(args: argparse.Namespace) -> int:
     """Sanity-check the toolchain bootstrap installed inside the RayJob."""
     state = _require_state("head_pod_ip")
@@ -468,7 +468,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
     return 0
 
 
-# Subcommand: restart-server
+# Subcommand `restart-server`
 _SCRIPTS_DIR = Path(__file__).parent / "scripts"
 
 
@@ -539,7 +539,7 @@ def _build_restart_entrypoint(
 
     wait_flag = "--no-wait-health" if args.no_wait_health else "--wait-health"
 
-    entrypoint = (
+    return (
         "set -euo pipefail; "
         f'WORK_DIR=/tmp/multi_node_pod_scripts; mkdir -p "$WORK_DIR"; '
         f"cat > \"$WORK_DIR/kill_server.sh\" <<'__MN_KILL_EOF__'\n"
@@ -555,7 +555,6 @@ def _build_restart_entrypoint(
         f"{shlex.quote(str(pid_file))} {shlex.quote(str(log_file))} "
         f"{wait_flag} -- {safe_extra_args}"
     )
-    return entrypoint
 
 
 # Common entrypoint preamble: sources the bootstrap env file so PATH points at /opt/venv/bin (no-op when bootstrap was

@@ -43,7 +43,7 @@ def _install_min_ray_stub() -> None:
 
     ray_mod = types.ModuleType("ray")
     ray_mod.init = lambda **kwargs: None
-    ray_mod.nodes = lambda: []
+    ray_mod.nodes = list
     ray_mod.remote = _remote_decorator
     ray_mod.get = lambda ref, timeout=None: ref
 
@@ -130,7 +130,7 @@ def test_resolve_kb_topology_carries_the_partition_mode_into_the_key(monkeypatch
     from hyperloom.inference_optimizer.recipe_snapshot_constants import kb_hardware_slug
 
     _kb_env(monkeypatch, tmp_path, HYPERLOOM_PARTITION_MODE="CPX")
-    monkeypatch.setattr(mne, "_read_state", lambda: {})
+    monkeypatch.setattr(mne, "_read_state", dict)
 
     topo = mne.resolve_kb_topology()
 
@@ -151,7 +151,7 @@ def test_resolve_kb_topology_leaves_the_partition_mode_unset_when_nobody_publish
     from hyperloom.inference_optimizer.recipe_snapshot_constants import kb_hardware_slug
 
     _kb_env(monkeypatch, tmp_path)
-    monkeypatch.setattr(mne, "_read_state", lambda: {})
+    monkeypatch.setattr(mne, "_read_state", dict)
 
     topo = mne.resolve_kb_topology()
 
@@ -384,7 +384,7 @@ def test_kill_remote_dead_pid_stale(tmp_path, monkeypatch):
 
     def _kill(pid, sig):
         if sig == 0:
-            raise ProcessLookupError()
+            raise ProcessLookupError
 
     monkeypatch.setattr("os.kill", _kill)
     out = km._kill_remote(str(d), grace_sec=0)
@@ -403,8 +403,8 @@ def test_kill_remote_sigterms_then_process_exits(tmp_path, monkeypatch):
     def _kill(pid, sig):
         if sig == 0:
             if after_term["done"]:
-                raise ProcessLookupError()
-            return None
+                raise ProcessLookupError
+            return
         assert pid == 4242
 
     def _getpgid(pid):
@@ -609,8 +609,8 @@ def _prep_killable_pid_dir(km, monkeypatch, tmp_path, pid=7777, pgid=770000):
     def _kill(p, sig):
         if sig == 0:
             if state["dead"]:
-                raise ProcessLookupError()
-            return None
+                raise ProcessLookupError
+            return
 
     def _killpg(pg, sig):
         if sig == signal.SIGTERM:
@@ -634,7 +634,7 @@ def test_kill_remote_primary_reclaim_when_footprint_known(monkeypatch, tmp_path)
     def _reclaim(target, slack, timeout):
         calls["primary"] += 1
         assert timeout == 120.0  # primary uses gpu_free_timeout_s default
-        return None
+        return
 
     monkeypatch.setattr(km, "_wait_gpu_reclaimed", _reclaim)
     monkeypatch.setattr(km, "_wait_gpu_free", lambda *a: calls.__setitem__("fallback", calls["fallback"] + 1) or [])

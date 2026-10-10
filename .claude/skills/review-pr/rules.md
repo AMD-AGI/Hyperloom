@@ -784,6 +784,8 @@ survives at the ceiling only when the arms are genuinely independent.
 for the branches that moved the number.
 **Report as:** `D12 <file>:<line> -- <function> is complexity <head> (base: <base|absent>), over
 the ceiling of 20; split it or keep <added branch> out of it`
+**CI:** the `code-metrics` job now enforces this ceiling on the files a PR touches (style guide
+§ *Size and complexity*); this rule still applies.
 
 ## V -- Review method and PR hygiene
 

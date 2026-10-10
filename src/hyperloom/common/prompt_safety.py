@@ -13,8 +13,7 @@ def defang_prompt_structure(text: str) -> str:
     out = str(text or "")
     out = out.replace("```", "`\u200b``").replace("~~~", "~\u200b~~")
     out = out.replace("data:", "data\u200b:").replace("DATA:", "DATA\u200b:")
-    out = out.replace("<", "\u2039").replace(">", "\u203a")
-    return out
+    return out.replace("<", "\u2039").replace(">", "\u203a")
 
 
 def flatten_for_prompt(text: str) -> str:

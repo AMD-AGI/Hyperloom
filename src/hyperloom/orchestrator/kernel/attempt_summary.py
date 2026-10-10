@@ -585,7 +585,7 @@ def build_kernel_optimization_summary(
         previous = attempts_map.get(current_kernel_id)
         if previous is None or str(attempt.get("last_ts") or "") >= str(previous.get("last_ts") or ""):
             attempts_map[current_kernel_id] = attempt
-    rejected_ids: set[str] = set(str(x) for x in (getattr(state, "rejected_kernel_ids", []) or []))
+    rejected_ids: set[str] = {str(x) for x in (getattr(state, "rejected_kernel_ids", []) or [])}
     integrated_ids: set[str] = set()
     for entry in getattr(state, "optimization_stack", []) or []:
         if not isinstance(entry, dict):
@@ -607,7 +607,7 @@ def build_kernel_optimization_summary(
             keep_pending_kid = cand_kid
 
     by_kernel: list[dict[str, Any]] = []
-    rejection_breakdown: dict[str, int] = {r: 0 for r in KNOWN_REJECTION_REASONS}
+    rejection_breakdown: dict[str, int] = dict.fromkeys(KNOWN_REJECTION_REASONS, 0)
     rejection_breakdown["other"] = 0
     counts = {
         "top_candidates": len(top15),

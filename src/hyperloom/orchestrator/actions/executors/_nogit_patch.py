@@ -39,7 +39,7 @@ def _old_path_after_index(lines: list[str], start: int) -> str | None:
     for line in lines[start + 1 :]:
         if line.startswith("--- "):
             return line[4:].strip().split("\t")[0]
-        if line.startswith("diff --git ") or line.startswith("@@"):
+        if line.startswith(("diff --git ", "@@")):
             return None
     return None
 

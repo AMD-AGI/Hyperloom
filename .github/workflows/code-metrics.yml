@@ -1,0 +1,164 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+name: Code metrics
+
+# White-box code-metrics gate (scripts/code_metrics.py). Thresholds, their reasons
+# and tool pins live in pyproject.toml [tool.hyperloom.code_metrics]; units already
+# over a threshold are in scripts/code_metrics_baseline.txt and may only go down.
+# Only files the change touches are judged (against the first parent on a PR, the
+# replaced main on a push). The same job runs the checks without a baseline:
+# comments, English only (tree, PR title, body and commits), production imports of
+# test code, and added repeated literals.
+#
+# The PR label ``baseline-raise`` waives new, worse and baseline-growth findings;
+# the script reads the labels from the API when it runs (--pr-number), never from
+# this event's payload. The job re-runs when the label, title or body changes.
+#
+# The job is a hard gate under the stable name ``code-metrics`` so it can be made
+# a required check. For that reason there is no paths-ignore: a required check
+# that a docs-only PR never starts would leave that PR blocked on "expected".
+# The whole job takes about a minute.
+#
+# The verdict comes from the BASE's copy of the gate scripts (the first parent
+# on a PR, the replaced main on a push) run over this tree, so a change to
+# scripts/code_metrics*.py cannot grade itself; the scripts list any edit to the
+# gate for a reviewer. Only when the base has no gate yet does this tree's copy run.
+#
+# The report is written to the job summary and kept as ONE sticky PR comment.
+# A same-repository PR gets the comment from this job. A fork PR's token is
+# read-only, so this job only uploads the report and code-metrics-comment.yml
+# posts it from a workflow_run (which runs from the default branch only).
+# Posting or uploading the report is best effort: a 403, 5xx or rate limit there is
+# a warning, and the job's result comes from the gate step alone (a gate that could
+# not run is exit 2, which is red).
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, edited, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: code-metrics-${{ github.ref }}
+  # A newer push to a PR replaces its run; a push to main keeps every run, so each merge is checked.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  code-metrics:
+    name: code-metrics
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      # Same-repository PRs only; a fork PR's token stays read-only regardless.
+      pull-requests: write
+    steps:
+      # Depth 2: on a PR the checkout is the merge commit, and its first parent is
+      # the base the merge was computed against -- the baseline it may not grow.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - name: Install pinned tools
+        # Same pins as [tool.hyperloom.code_metrics.tools]; the script refuses
+        # to measure with any other version.
+        run: |
+          pip install "ruff==0.16.2" "complexipy==8.0.1" "vulture==2.16"
+          npm install --global "jscpd@5.4.1"
+
+      - name: Code metrics gate
+        id: gate
+        env:
+          EVENT: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          # Read-only use: the PR's labels, title, body and commit messages.
+          GITHUB_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          # A push to main is checked against the main it replaced, so a push
+          # that bypasses PRs cannot grow the baseline or loosen the config either.
+          BEFORE: ${{ github.event.before }}
+        run: |
+          # The report lives outside the checkout: a PR could make a checkout path a
+          # symlink into the runner's temp directory and have it uploaded.
+          out="$RUNNER_TEMP/code-metrics-report"
+          mkdir -p "$out"
+          args=(--root "$GITHUB_WORKSPACE" --report "$out/report.md" --link-base "https://github.com/$REPO/blob/$HEAD_SHA")
+          if [ "$EVENT" = pull_request ]; then
+            base=HEAD^1
+            args+=(--pr-number "$PR_NUMBER")
+          else
+            git fetch --no-tags --depth=1 origin "$BEFORE"
+            base=$BEFORE
+          fi
+          args+=(--base-ref "$base")
+          gate="$RUNNER_TEMP/code-metrics-gate"
+          mkdir -p "$gate"
+          impl=scripts
+          if git show "$base:scripts/code_metrics.py" > "$gate/code_metrics.py" 2>/dev/null \
+            && git show "$base:scripts/code_metrics_checks.py" > "$gate/code_metrics_checks.py" 2>/dev/null \
+            && git show "$base:scripts/code_metrics_collect.py" > "$gate/code_metrics_collect.py" 2>/dev/null \
+            && git show "$base:scripts/code_metrics_report.py" > "$gate/code_metrics_report.py" 2>/dev/null; then
+            impl="$gate"
+          fi
+          git show "$base:.github/scripts/code_metrics_comment.js" > "$gate/comment.js" 2>/dev/null \
+            || cp .github/scripts/code_metrics_comment.js "$gate/comment.js"
+          echo "gate scripts from: $impl"
+          set +e
+          # stdout is the full report (every row, waived ones included) for the job log.
+          python "$impl/code_metrics.py" "${args[@]}"
+          code=$?
+          set -e
+          if [ ! -s "$out/report.md" ]; then
+            printf '<!-- code-metrics-report -->\n## Code metrics gate: could not run\n\nThe script exited %s without a report; see the job log.\n' "$code" > "$out/report.md"
+          fi
+          cat "$out/report.md" >> "$GITHUB_STEP_SUMMARY"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+
+      - name: Keep the report for the fork-PR comment workflow
+        if: always() && github.event_name == 'pull_request' && steps.gate.outcome == 'success'
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: echo "$PR_NUMBER" > "$RUNNER_TEMP/code-metrics-report/pr-number.txt"
+
+      - uses: actions/upload-artifact@v7
+        if: always() && github.event_name == 'pull_request' && steps.gate.outcome == 'success'
+        continue-on-error: true
+        with:
+          name: code-metrics-report
+          path: ${{ runner.temp }}/code-metrics-report/
+          retention-days: 7
+
+      - name: Post the report on the PR
+        if: >-
+          always() && steps.gate.outcome == 'success' && github.event_name == 'pull_request'
+          && github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/github-script@v9
+        with:
+          script: |
+            try {
+              const post = require(`${process.env.RUNNER_TEMP}/code-metrics-gate/comment.js`);
+              await post({ github, context, core, number: context.payload.pull_request.number, reportPath: `${process.env.RUNNER_TEMP}/code-metrics-report/report.md` });
+            } catch (err) {
+              core.warning(`could not post the code-metrics PR comment (${err.status || 'error'}: ${err.message}); the job summary has the report and the gate step decides this job.`);
+            }
+
+      - name: Fail when the gate failed
+        env:
+          CODE: ${{ steps.gate.outputs.code }}
+        run: |
+          if [ "$CODE" != 0 ]; then
+            echo "::error::code-metrics gate failed (exit $CODE); the job summary and the PR comment list each unit."
+            exit 1
+          fi

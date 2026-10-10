@@ -1782,7 +1782,7 @@ def test_absent_rollup_is_treated_as_first_write(tmp_path: Path) -> None:
     class _FirstWriteStore(_FakeStore):
         def get_rollup(self, canonical_id, *, scope=None):
             self.calls.append(("get_rollup", canonical_id, scope))
-            return None
+            return
 
     store = _FirstWriteStore()
     result = write_final_remote_recipe(

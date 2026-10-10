@@ -107,7 +107,7 @@ class HIPAssembly:
         binary, isa = _compile(Path(source), gpu_target, flags, rocm, timeout_sec)
         normalized = re.sub(r"^\s*\.(?:file|loc)\s+.*$", "", isa, flags=re.MULTILINE)
         fingerprint = hashlib.sha256(normalized.encode()).hexdigest()
-        identity = dict(schema_version=1, frontend="hip", gpu_target=self.target, source_ir_sha256=fingerprint)
+        identity = {"schema_version": 1, "frontend": "hip", "gpu_target": self.target, "source_ir_sha256": fingerprint}
         if self.export and not self.manifest.exists():
             self.source.write_text(isa, encoding="utf-8")
             self.manifest.write_text(

@@ -46,8 +46,7 @@ def _normalise(value: Any) -> str:
     """Apply contract G-3 normalisation: trim + lowercase, stringified."""
     if value is None:
         return ""
-    text = str(value).strip().lower()
-    return text
+    return str(value).strip().lower()
 
 
 def _is_present(value: Any) -> bool:

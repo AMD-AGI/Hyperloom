@@ -42,7 +42,7 @@ def parser(request, monkeypatch):
     if request.param == "real_forge":
         # Skip on the submodule production actually imports, not the top-level package.
         pytest.importorskip("kernelforge.gemm_tune.evidence", reason="real parser unavailable")
-        return None
+        return
 
     import re
 
@@ -74,7 +74,7 @@ def parser(request, monkeypatch):
     fake.evidence = fake_ev  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "kernelforge.gemm_tune", fake)
     monkeypatch.setitem(sys.modules, "kernelforge.gemm_tune.evidence", fake_ev)
-    return None
+    return
 
 
 class TestServed:

@@ -40,7 +40,7 @@ class _ParentRejectsStartTime:
 
 def test_start_obs_retries_without_start_time() -> None:
     parent = _ParentRejectsStartTime()
-    out = lfe._start_obs(parent, name="x", start_time=datetime.now())
+    out = lfe._start_obs(parent, name="x", start_time=datetime.now(timezone.utc))
     assert out == "obs"
     assert "start_time" not in parent.calls[-1]
 
@@ -86,7 +86,7 @@ def test_end_time_wants_int_unreadable_signature_defaults_false() -> None:
 
 
 def test_end_obs_none_observation_is_noop() -> None:
-    lfe._end_obs(None, datetime.now())  # must not raise
+    lfe._end_obs(None, datetime.now(timezone.utc))  # must not raise
 
 
 def test_end_obs_none_end_dt_calls_bare_end() -> None:
@@ -120,7 +120,7 @@ def test_end_obs_typed_call_rejected_falls_back_to_bare() -> None:
             self.bare += 1
 
     obs = _Rejects()
-    lfe._end_obs(obs, datetime.now())
+    lfe._end_obs(obs, datetime.now(timezone.utc))
     assert obs.bare == 1
 
 

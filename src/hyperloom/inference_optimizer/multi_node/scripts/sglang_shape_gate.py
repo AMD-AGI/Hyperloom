@@ -23,7 +23,7 @@ def sglang_shape_mode() -> str:
         return "sitecustomize"
     version = ""
     try:
-        import sglang  # type: ignore
+        import sglang  # type: ignore[import-not-found]
 
         version = (getattr(sglang, "__version__", "") or "").strip()
     except Exception:  # noqa: BLE001

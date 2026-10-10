@@ -118,7 +118,7 @@ def test_real_writer_fixtures_cover_declared_consumer_paths(tmp_path, denied: bo
     assert fixture["outcome"]["stop_reason"] == ("baseline_failed" if denied else "target_reached")
 
     event = next(row for row in fixture["timeline"] if row["type"] == "phase")
-    assert set(("process_status", "business_outcome", "failure", "blocked_by")) <= event.keys()
+    assert {"process_status", "business_outcome", "failure", "blocked_by"} <= event.keys()
     assert event["ext"]["segments"][0]["exit_evidence"]["predicate_inputs"]["macro_cycle"] == 0
     action = event["ext"]["actions"]["rows"][0]
     assert (action["dispatch_class"], action["allowed"], action["denial_rule"]) == ("llm", True, None)

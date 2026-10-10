@@ -41,6 +41,7 @@ pytest src/hyperloom/inference_optimizer/tests/test_prompt_builder.py -k subset
 ruff check .                      # lint (E, F, W; line-length 120, E501/E741 ignored)
 ruff format --check .
 mypy src/hyperloom                # advisory (runs as a non-gating CI job)
+python scripts/code_metrics.py --base-ref origin/main   # code-metrics gate (tool pins: see the script)
 ```
 
 ## Authoring rules of engagement
@@ -65,6 +66,9 @@ doc is the authority on where that boundary lives.
   *Complexity ceiling* has the measurement and the two cases it covers. Maintainability,
   readability, extensibility, and reliability are what the thresholds stand in for; when a
   threshold and one of those disagree, say so and keep the clearer code.
+  Separately, the `code-metrics` CI job enforces the ceiling, and the gated limits in the
+  style guide § *Size and complexity* (their baseline and the `baseline-raise` override),
+  on the files a change touches.
 - **Review feedback is a hypothesis.** A comment can be wrong, or right about the symptom
   and wrong about the fix. Before acting on one, ask what you would build if this code did
   not exist yet, and whether the mechanism under discussion should exist at all. Answering

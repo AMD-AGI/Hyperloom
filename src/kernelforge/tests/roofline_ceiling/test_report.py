@@ -11,7 +11,7 @@ from kernelforge.roofline_ceiling.report import read_report, render_for_prompt
 
 
 def _report(cases=(("c0", 12.8),)):
-    return load_report({"cases": {case_id: ideal for case_id, ideal in cases}})
+    return load_report({"cases": dict(cases)})
 
 
 def test_a_file_the_analyst_wrote_is_read_back(tmp_path):
