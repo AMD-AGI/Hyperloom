@@ -31,10 +31,11 @@ the rules listed. Rows overlap; a rule listed twice is read once.
 | adds or changes a value that crosses a boundary: status literal, enum member, dataclass or TypedDict field, keyword argument, signature, return semantics | C1 C3 C5 |
 | adds or changes a knob or a pin: CLI flag, env var, config key, default value, a pinned external version, ref or sha, an install script, `docs/compatibility.rst`, or the argv or extra-args list one is assembled into | C3 C4 S6 T4 X5 X7 D8 D9 D11 |
 | removes a flag, env var, enum member, test, fallback/legacy/bypass route or whole file, or tightens a comparison (`<` returns as `==`, a new `all(...)`) | C3 T2 X4 D3 |
-| fixes one site of an operation that has siblings (executors, per-framework patchers, sync and async twins), or moves, copies or consolidates code | C2 T4 D1 D2 D4 D11 |
+| fixes one site of an operation that has siblings (executors, per-framework patchers, sync and async twins), or moves, copies or consolidates code | C2 T4 T5 D1 D2 D4 D11 |
 | adds a second implementation of an operation the repo already owns (patch deploy, revert, snapshot, cleanup, revalidation), or a `pre_applied`/`skip_*`/already-done branch that short-circuits one | D1 D2 D10 |
 | defines, outside the module that owns the concern, a constant, precedence list, parser or client constructor the owner exports: an LLM model, SDK client, API key, base URL or header read outside `llm_config.py`, a backend registered outside `agent_backends/registry.py` | D5 D10 |
 | repairs a value where it is consumed: a local re-merge of `os.environ`, a second parse of a handoff blob or serialized mapping, or any re-derivation of something another module already publishes | D11 V3 |
+| moves a call, an export or an assignment relative to another, or adds one that has to run after an existing one: a re-ordered projection, a guard that must see a restored value, a seed that must follow a resolver | T5 P5 D8 |
 | touches persisted or shared state: `SCHEMA_VERSION`, `from_dict`, `CREATE TABLE`, a `record_*`/`read_*`/`seal_*` pair, `.save()`, a spec, manifest or recipe, a context manager, recovery or resume | X6 R4 P4 P5 |
 | touches a prompt, `SKILL.md`, `docs/**`, `*.md` or `*.rst` | X3 X5 |
 | adds error handling or a default: `except`, `contextlib.suppress`, `ignore_errors=True`, `.get(k, 0)`, `or {}`, an early `isinstance` guard, a noop or degraded implementation | S1 S2 S3 S4 S5 S7 |
@@ -44,7 +45,7 @@ the rules listed. Rows overlap; a rule listed twice is read once.
 | matches or selects by name: substring, `startswith`, `fnmatch`, a first-wins loop, a dedup/grouping/sort key, or an LLM backend, model or credential choice | D5 D6 D7 |
 | runs a destructive or privileged command: `pkill`/`kill -9`/`scancel`/`docker rm`, `rmtree`/`unlink`/`move`, `git reset --hard`/`git checkout -- <path>`, `git apply`, `tar -x`/`extractall`, or a cleanup, teardown or self-heal step | R1 R2 R3 R5 |
 
-V1-V6 apply to every PR: they govern how the review is run and published, not what the diff
+V1-V7 apply to every PR: they govern how the review is run and published, not what the diff
 contains. X2 does too — it reads `title.txt`, `body.txt` and `commits.txt`, so no row can trigger
 it from the file list, and a docs- or CI-only PR whose description went stale is the case a
 file-shaped row would miss.
@@ -290,6 +291,35 @@ file-shaped row would miss.
 **Not a finding when:** the fix is not observable from any test seam (a log string, a comment, a type annotation), or an existing test already fails on `base.txt` for this defect -- check it before asking for a new one.
 **Evidence:** `$WORK/title.txt`, `$WORK/testfiles.txt`, `$WORK/base.txt` -- the claimed fix against the tests added and the merge base they must fail on.
 **Report as:** `T4 -- fix for <defect> has no test that fails on <base sha>; missing case: <the discrimination>`
+
+### T5 -- When the defect is an order of statements, the assertion has to be on the order
+
+**Severity:** blocking
+**Fires when:** the fix moves a call, an export or an assignment relative to another, or adds
+one that must run after an existing one, and the added test calls those functions itself.
+**The rule:** a test that calls the participants in the order it wants proves nothing about the
+order the production path uses -- it passes before the fix and after it, and reads as coverage.
+The assertion has to be anchored where the defect lives: drive the real entry point so the
+production order is what executes, or assert the order itself (walk the caller's AST and
+compare the line numbers of the two calls). Either way, run it against the commit before the
+fix and confirm it fails for the stated reason, not on an `ImportError` from a helper the fix
+introduced -- that failure mode proves the symbol is new, not that the order was wrong. T4 asks
+for a test that fails on the merge base; this rule is the ordering case, where a test can fail
+there for the wrong reason or pass there while the defect is live.
+**Seen in:** PR #1797 -- `_export_workload_envs_for_optimize`, the only writer of
+`os.environ["TP"|"CONC"|"EP"]`, ran about 500 lines before the ladder that resolves a pinned
+`TP`, so the run launched at a shape its own `state.json` did not record. The four ladder tests
+added with that change called `_resolve_workload_knobs` in isolation and covered `ISL`/`OSL`
+only, so CI was green across the whole defect; the test that finally pinned it asserts that
+every `_export_workload_envs_for_optimize` call in `_run_optimize` appears after the first
+`_resolve_workload_knobs`.
+**Not a finding when:** the real entry point is driven by the test, so the production order is
+the one under test; or the moved call has exactly one caller and a reader can see both lines at
+once, which the finding has to show rather than assert.
+**Evidence:** `$WORK/diff.txt` for the moved call; the added test for whether it fixes the
+order itself or merely replays it; `$WORK/base.txt` for the run that must fail.
+**Report as:** `T5 <file>:<line> -- the ordering fix is covered by a test that calls <a> and
+<b> in its own order; it passes on <base sha> with the defect live`
 
 ---
 
@@ -912,3 +942,28 @@ the body names.
 issue's cases the change actually covers.
 **Report as:** `V6: <body> closes #<N>, but the diff covers <X> while the issue also
 describes <Y> -- keep #<N> open or split it`
+
+### V7 -- Enumerate a value's writers and readers across the tree, not within the diff's frame
+
+**Severity:** blocking
+**Fires when:** always, for any finding or clearance that turns on "which code touches this
+value". Escalate when the diff changes where a value is produced, exported or resolved.
+**The rule:** the enumeration is a tree-wide search for the value's own name -- every non-test
+writer, every reader -- not a walk of the functions the diff happens to show. A value is
+typically written one frame below the function being read: an `os.environ[...]` assignment
+inside a helper the caller invokes does not appear in that caller's body, so an AST walk or a
+`sed` range scoped to the caller reports nothing and the reviewer reads the empty result as
+"no writers". State the scope of any tool used, because a tool's blind spot and a clean result
+are the same output. A clearance written without this enumeration is not a clearance; say
+`SKIPPED` instead.
+**Seen in:** PR #1797 -- the author's AST walk recording every `os.environ[...]` write in
+`_run_optimize` never listed `TP`, `CONC` or `EP`, because they are written inside
+`_export_workload_envs_for_optimize`, one frame down. The ordering table built from it was used
+to justify the change, and the review that caught the defect had run a tree-wide sweep for
+every non-test writer of those three names instead.
+**Not a finding when:** n/a -- this is a precondition for the enumeration, not a finding in its
+own right. What it blocks is a card that claims coverage the search did not have.
+**Evidence:** the search itself, with its scope stated: the pattern, the paths covered, and
+whether it crossed function boundaries.
+**Report as:** on the card's `Checked:` line, as the scope of the sweep -- `tree-wide sweep for
+every non-test writer of <names>`; or `SKIPPED: <axis> -- enumeration was scoped to <frame>`
