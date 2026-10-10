@@ -14,8 +14,12 @@ that is within its limit.
 Tools run from an empty temporary directory with absolute paths, so no in-repo tool
 config (``[tool.complexipy]``, ``[tool.vulture]``, ``.jscpd.json``, ruff per-file
 ignores) can narrow what they measure. Ruff also runs with ``--isolated`` and
-``--ignore-noqa`` and complexipy with ``--no-ignore``, so a suppression comment
-cannot hide a unit either.
+``--ignore-noqa`` and complexipy with ``--no-ignore``; vulture and jscpd, which have
+no such switch, read copies with their markers (``# noqa``, ``jscpd:ignore-start``)
+defused line for line. A suppression comment cannot hide a unit either.
+
+Scope entries are passed to git as literal paths (``--literal-pathspecs``), so a
+pathspec such as ``:(exclude)x.py`` in ``roots`` names a path, it does not exclude one.
 """
 
 from __future__ import annotations
@@ -82,6 +86,9 @@ _VULTURE_LINE = re.compile(r"^(?P<path>.+?):(?P<line>\d+): (?P<message>.+) \(\d+
 _QUOTED = re.compile(r"'([^']+)'")
 _DEFS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 _THREADS = "4"
+#: Suppression markers each tool honours, and what they are rewritten to (same line count).
+_VULTURE_MARKER = (re.compile(rb"#\s*noqa", re.IGNORECASE), b"#")
+_JSCPD_MARKER = (re.compile(rb"jscpd:ignore", re.IGNORECASE), b"jscpd-defused")
 
 
 class ToolError(RuntimeError):
@@ -155,7 +162,19 @@ def _walk_defs(node: ast.AST, prefix: str) -> Iterator[tuple[int, int, str]]:
 def list_files(root: Path, roots: Iterable[str], exclude: Iterable[str]) -> tuple[list[str], list[str]]:
     """(production, tests): the tracked and untracked-but-not-ignored ``.py`` files under ``roots``."""
     out = subprocess.run(
-        ["git", "-C", str(root), "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", *roots],
+        [
+            "git",
+            "-C",
+            str(root),
+            "--literal-pathspecs",
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "--",
+            *roots,
+        ],
         capture_output=True,
         text=True,
         check=True,
@@ -172,6 +191,21 @@ def list_files(root: Path, roots: Iterable[str], exclude: Iterable[str]) -> tupl
 
 def _is_excluded(path: str, exclude: tuple[str, ...]) -> bool:
     return any(path == prefix or path.startswith(prefix.rstrip("/") + "/") for prefix in exclude)
+
+
+def defused_copy(root: Path, files: list[str], marker: tuple[re.Pattern[bytes], bytes], work: str) -> Path:
+    """Copies of ``files`` under ``work`` with every suppression ``marker`` rewritten, line for line.
+
+    The copy keeps each file's relative path and line numbers, so findings map back to
+    the real file by path alone.
+    """
+    pattern, replacement = marker
+    tree = Path(work) / "tree"
+    for path in files:
+        target = tree / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(pattern.sub(replacement, (root / path).read_bytes()))
+    return tree
 
 
 def _run(argv: list[str], cwd: str, ok: tuple[int, ...] = (0,)) -> str:
@@ -277,10 +311,13 @@ def module_line_findings(root: Path, files: list[str], threshold: int) -> list[F
 
 def vulture_findings(root: Path, files: list[str], min_confidence: int, units: Units) -> list[Finding]:
     argv = ["vulture", "--config", os.devnull, "--min-confidence", str(min_confidence)]
-    with tempfile.TemporaryDirectory() as work:
+    # The copy lives outside the tool's working directory: vulture prints paths under
+    # its cwd relative to it.
+    with tempfile.TemporaryDirectory() as work, tempfile.TemporaryDirectory() as copy:
+        tree = defused_copy(root, files, _VULTURE_MARKER, copy)
         # vulture exits 3 when it found dead code; 1 and 2 are input/usage errors.
-        text = _run([*argv, *(str(root / f) for f in files)], work, ok=(0, 3))
-    return parse_vulture(text, root, units)
+        text = _run([*argv, *(str(tree / f) for f in files)], work, ok=(0, 3))
+        return parse_vulture(text, tree, units)
 
 
 def parse_vulture(text: str, root: Path, units: Units) -> list[Finding]:
@@ -305,10 +342,11 @@ def jscpd_command() -> list[str]:
 def jscpd_findings(root: Path, files: list[str], min_tokens: int, min_lines: int) -> list[Finding]:
     argv = [*jscpd_command(), "--min-tokens", str(min_tokens), "--min-lines", str(min_lines), "--format", "python"]
     argv += ["--reporters", "json", "--absolute", "--silent", "--no-tips", "--workers", _THREADS]
-    with tempfile.TemporaryDirectory() as work:
-        _run([*argv, "--output", work, *(str(root / f) for f in files)], work)
+    with tempfile.TemporaryDirectory() as work, tempfile.TemporaryDirectory() as copy:
+        tree = defused_copy(root, files, _JSCPD_MARKER, copy)
+        _run([*argv, "--output", work, *(str(tree / f) for f in files)], work)
         data = json.loads((Path(work) / "jscpd-report.json").read_text(encoding="utf-8"))
-    return parse_jscpd(data, root)
+        return parse_jscpd(data, tree)
 
 
 def parse_jscpd(data: dict, root: Path) -> list[Finding]:

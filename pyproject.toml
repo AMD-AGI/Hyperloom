@@ -458,9 +458,11 @@ relax_fail_under_repo_var = "COVERAGE_RELAX_FAIL_UNDER"
 # duplication or dead-code parameter.
 [tool.hyperloom.code_metrics]
 baseline = "scripts/code_metrics_baseline.json"
-# Production Python. Files under a ``tests/`` directory are exempt from every
-# dimension but duplication, as in the style guide's "Size and complexity".
-roots = ["src/hyperloom", "src/kernelforge", "scripts"]
+# Production Python: all of ``src`` (so a new package is in scope by default) and
+# ``scripts``. Plain repository paths only; pathspec magic and globs are refused.
+# Files under a ``tests/`` directory are exempt from every dimension but
+# duplication, as in the style guide's "Size and complexity".
+roots = ["src", "scripts"]
 # Same vendored / shipped-example trees as ``[tool.ruff] extend-exclude``.
 exclude = [
     "src/hyperloom/orchestrator/knowledge/remote_recipe/_vendor/kb_store_client.py",

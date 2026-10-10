@@ -15,7 +15,12 @@ value in the baseline file named there. The baseline only ever goes down:
   ``--update-baseline`` (which can only lower or remove entries);
 * with ``--base-ref``, the baseline may only lose entries or lower values relative to
   the baseline on that ref, and the thresholds, scope and tool parameters may not
-  loosen. Editing the whitelist is not a way to make the gate pass.
+  loosen: the scope is compared by the files each config measures in this tree, not by
+  its text. Editing the whitelist is not a way to make the gate pass.
+
+CI runs the base branch's copy of these scripts against the change, so editing the gate
+does not change the verdict on the same change; the report lists any edit to the gate
+implementation or its tool pins for a reviewer.
 
 A unit that only moved to another file (same metric, same qualified name, or the same
 file name for a module; value no worse) keeps the baseline entry it left; see
@@ -39,6 +44,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import re
 import subprocess
 import sys
 from collections.abc import Iterable
@@ -79,6 +85,18 @@ _TOOL_COMMANDS = {
 }
 #: Scalar parameters where a larger value makes the gate see less.
 _NO_RAISE = ("duplication-min-tokens", "duplication-min-lines", "dead-code-min-confidence")
+#: A scope entry is a plain repository path: no pathspec magic, glob, ``.`` or ``..``.
+_PLAIN_PATH = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*(/[A-Za-z0-9_-][A-Za-z0-9_.-]*)*/?")
+#: The gate's own implementation; an edit to any of these is listed for review.
+GATE_FILES = (
+    "scripts/code_metrics.py",
+    "scripts/code_metrics_collect.py",
+    "scripts/code_metrics_report.py",
+    ".github/workflows/code-metrics.yml",
+    ".github/workflows/code-metrics-comment.yml",
+    ".github/scripts/code_metrics_comment.js",
+)
+_MAX_LISTED = 20
 
 
 @dataclasses.dataclass(frozen=True)
@@ -101,12 +119,53 @@ def parse_config(text: str) -> Config | None:
         raise ToolError(f"thresholds must name exactly {sorted(METRICS)}, got {sorted(thresholds)}")
     return Config(
         baseline=table["baseline"],
-        roots=tuple(table["roots"]),
-        exclude=tuple(table["exclude"]),
+        roots=_scope(table, "roots"),
+        exclude=_scope(table, "exclude"),
         thresholds=thresholds,
         tools=dict(table["tools"]),
         params={name: int(table[name]) for name in _NO_RAISE},
     )
+
+
+def _scope(table: dict, name: str) -> tuple[str, ...]:
+    paths = tuple(table[name])
+    bad = [path for path in paths if not _PLAIN_PATH.fullmatch(path)]
+    if bad:
+        raise ToolError(f"`{name}` takes plain repository paths, not pathspecs or globs: {bad}")
+    return paths
+
+
+def _is_under(path: str, roots: Iterable[str]) -> bool:
+    return any(path.rstrip("/") == r.rstrip("/") or path.startswith(r.rstrip("/") + "/") for r in roots)
+
+
+def scope_loss(root: Path, head: Config, base: Config) -> list[str]:
+    """Files of this tree that ``base``'s scope measures and ``head``'s does not."""
+    measured = {
+        name: set(sum(list_files(root, c.roots, c.exclude), [])) for name, c in (("head", head), ("base", base))
+    }
+    lost = sorted(measured["base"] - measured["head"])
+    problems = [f"scope no longer measures `{path}`" for path in lost[:_MAX_LISTED]]
+    if len(lost) > _MAX_LISTED:
+        problems.append(f"...and {len(lost) - _MAX_LISTED} more files dropped from the scope")
+    return problems
+
+
+def gate_changes(root: Path, ref: str, head: Config, base: Config) -> list[str]:
+    """Edits to the gate implementation or its tool pins relative to ``ref``."""
+    diff = subprocess.run(
+        ["git", "-C", str(root), "--literal-pathspecs", "diff", "--name-only", ref, "--", *GATE_FILES],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    changes = [f"`{path}` changed" for path in diff.split()]
+    changes += [
+        f"tool pin `{name}` changed from {base.tools.get(name)} to {head.tools.get(name)}"
+        for name in sorted(set(head.tools) | set(base.tools))
+        if head.tools.get(name) != base.tools.get(name)
+    ]
+    return changes
 
 
 def config_loosening(head: Config, base: Config) -> list[str]:
@@ -117,7 +176,7 @@ def config_loosening(head: Config, base: Config) -> list[str]:
         if metric not in head.thresholds or worse(metric, head.thresholds[metric], limit)
     ]
     problems += [f"`exclude` gained `{path}`" for path in sorted(set(head.exclude) - set(base.exclude))]
-    problems += [f"`roots` lost `{path}`" for path in sorted(set(base.roots) - set(head.roots))]
+    problems += [f"`roots` lost `{path}`" for path in sorted(set(base.roots)) if not _is_under(path, head.roots)]
     problems += [
         f"`{name}` raised from {base.params[name]} to {head.params[name]}"
         for name in _NO_RAISE
@@ -276,7 +335,8 @@ def compare_with_base(root: Path, ref: str, config: Config, outcome: Outcome) ->
         raise ToolError(f"{ref} configures the baseline {base_config.baseline} but has no such file")
     outcome.base_baseline = load_baseline(base_text)
     outcome.growth = growth(outcome.baseline, outcome.base_baseline)
-    outcome.loosened = config_loosening(config, base_config)
+    outcome.loosened = config_loosening(config, base_config) + scope_loss(root, config, base_config)
+    outcome.gate_changes = gate_changes(root, ref, config, base_config)
 
 
 def run(args: argparse.Namespace, outcome: Outcome) -> int:
@@ -287,6 +347,10 @@ def run(args: argparse.Namespace, outcome: Outcome) -> int:
     outcome.thresholds = config.thresholds
     outcome.baseline_path = config.baseline
     outcome.versions = check_tools(config)
+    if Path(__file__).resolve().parent != (root / "scripts").resolve():
+        outcome.notes.append(
+            f"Verdict computed by the gate scripts in `{Path(__file__).resolve().parent}`, not by this tree's copy."
+        )
     baseline_path = root / config.baseline
     findings = measure(root, config)
     if args.seed_baseline:

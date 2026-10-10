@@ -12,6 +12,11 @@ name: Code metrics
 # that a docs-only PR never starts would leave that PR blocked on "expected".
 # The whole job takes about a minute.
 #
+# The verdict comes from the BASE's copy of the gate scripts (the first parent
+# on a PR, the replaced main on a push) run over this tree, so a change to
+# scripts/code_metrics*.py cannot grade itself; the scripts list any edit to the
+# gate for a reviewer. Only when the base has no gate yet does this tree's copy run.
+#
 # The report is written to the job summary and kept as ONE sticky PR comment.
 # A same-repository PR gets the comment from this job. A fork PR's token is
 # read-only, so this job only uploads the report and code-metrics-comment.yml
@@ -70,15 +75,27 @@ jobs:
           BEFORE: ${{ github.event.before }}
         run: |
           mkdir -p code-metrics
-          args=(--report code-metrics/report.md --link-base "https://github.com/$REPO/blob/$HEAD_SHA")
+          args=(--root "$GITHUB_WORKSPACE" --report code-metrics/report.md --link-base "https://github.com/$REPO/blob/$HEAD_SHA")
           if [ "$EVENT" = pull_request ]; then
-            args+=(--base-ref HEAD^1)
+            base=HEAD^1
           else
             git fetch --no-tags --depth=1 origin "$BEFORE"
-            args+=(--base-ref "$BEFORE")
+            base=$BEFORE
           fi
+          args+=(--base-ref "$base")
+          gate="$RUNNER_TEMP/code-metrics-gate"
+          mkdir -p "$gate"
+          impl=scripts
+          if git show "$base:scripts/code_metrics.py" > "$gate/code_metrics.py" 2>/dev/null \
+            && git show "$base:scripts/code_metrics_collect.py" > "$gate/code_metrics_collect.py" 2>/dev/null \
+            && git show "$base:scripts/code_metrics_report.py" > "$gate/code_metrics_report.py" 2>/dev/null; then
+            impl="$gate"
+          fi
+          git show "$base:.github/scripts/code_metrics_comment.js" > "$gate/comment.js" 2>/dev/null \
+            || cp .github/scripts/code_metrics_comment.js "$gate/comment.js"
+          echo "gate scripts from: $impl"
           set +e
-          python scripts/code_metrics.py "${args[@]}" > /dev/null
+          python "$impl/code_metrics.py" "${args[@]}" > /dev/null
           code=$?
           set -e
           if [ ! -s code-metrics/report.md ]; then
@@ -107,7 +124,7 @@ jobs:
         uses: actions/github-script@v9
         with:
           script: |
-            const post = require(`${process.env.GITHUB_WORKSPACE}/.github/scripts/code_metrics_comment.js`);
+            const post = require(`${process.env.RUNNER_TEMP}/code-metrics-gate/comment.js`);
             await post({ github, context, core, number: context.payload.pull_request.number, reportPath: 'code-metrics/report.md' });
 
       - name: Fail when the gate failed

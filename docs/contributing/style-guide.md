@@ -70,14 +70,16 @@ Two layers. The **gate** is the `code-metrics` CI job (`scripts/code_metrics.py`
 | Duplicated code | any clone of >= 100 tokens and >= 10 lines | SonarSource CPD defaults | jscpd |
 | Dead code | any finding at >= 80% confidence | vulture's recommended CI setting | vulture |
 
-The thresholds, their sources and the exact tool versions live in `pyproject.toml` under `[tool.hyperloom.code_metrics]`. The scope is `src/hyperloom`, `src/kernelforge` and `scripts`, minus the same vendored and shipped-example trees as Ruff's `extend-exclude`; files under a `tests/` directory are exempt from everything but duplication. Suppression comments (`# noqa`, complexipy's ignore marker) do not hide a unit from the gate.
+The thresholds, their sources and the exact tool versions live in `pyproject.toml` under `[tool.hyperloom.code_metrics]`. The scope is all of `src` and `scripts`, minus the same vendored and shipped-example trees as Ruff's `extend-exclude`; files under a `tests/` directory are exempt from everything but duplication. Suppression comments (`# noqa`, complexipy's ignore marker, `jscpd:ignore-start`) do not hide a unit from the gate: Ruff and complexipy run with their ignore switches, and vulture and jscpd read copies with the markers defused.
 
 Units that were already over a threshold when the gate landed are recorded with their value in `scripts/code_metrics_baseline.json`, keyed by file and qualified name (`Class.method`), so moving code inside a file does not disturb them. The baseline only goes down:
 
 - a unit over a threshold that is not in the baseline fails the PR — new code meets the limits;
 - a baselined unit that got worse than its recorded value fails — **do not grow the backlog**: adding branches or lines to a unit, or lines to a module, that is already over is a failure, not a judgement call;
 - a baselined unit that improved, dropped under the limit or was deleted fails as *out of date* until `python scripts/code_metrics.py --update-baseline` is run and the baseline committed in the same PR (the command can only lower or remove entries);
-- relative to the base branch, the PR's baseline may only lose entries or lower values, and the config may not loosen (no raised limit, no new exclusion). Adding a unit to the baseline is not a way to pass.
+- relative to the base branch, the PR's baseline may only lose entries or lower values, and the config may not loosen (no raised limit, no new exclusion, no file the base's scope measured left unmeasured). Adding a unit to the baseline is not a way to pass.
+
+CI judges a PR with the base branch's copy of the gate scripts, so a PR that edits `scripts/code_metrics*.py` does not grade itself; the report lists every edit to the gate's scripts, workflows or tool pins under *Gate implementation changed* for a reviewer. A gate change that the base's copy cannot run (a new config key, say) lands in two steps: first teach the scripts to accept it, then use it.
 
 A unit that only moved to another file keeps its baseline entry when its qualified name (a module: its file name) is unique among the moved units and its value is no worse; a renamed unit, or one moved to another class, does not, and has to meet the limits. The report — new, worse and out-of-date units with links to the lines — is on the job summary and in one sticky PR comment. Run the gate locally with the install line in the script's docstring; `--base-ref origin/main` adds the base-branch check.
 

@@ -49,6 +49,9 @@
     "main": 24,
     "run_mode": 11
    },
+   "dead-code": {
+    "read_measurement:hyperloom": 1
+   },
    "locals": {
     "main": 22
    },
@@ -103,6 +106,9 @@
    "cyclomatic-complexity": {
     "main": 12
    },
+   "dead-code": {
+    "<module>:hyperloom": 1
+   },
    "statements": {
     "main": 61
    }
@@ -111,6 +117,9 @@
    "cognitive-complexity": {
     "_analyze": 20,
     "_count_server_launches": 17
+   },
+   "dead-code": {
+    "<module>:hyperloom": 1
    }
   },
   "src/hyperloom/agents/critic/runtime/dead_letter.py": {
@@ -3206,6 +3215,13 @@
     "SqliteLeaseBackend.acquire_many": 13
    }
   },
+  "src/hyperloom/orchestrator/conftest.py": {
+   "dead-code": {
+    "<module>:_isolate_session_layout_env": 1,
+    "<module>:launch_backend": 1,
+    "<module>:virtual_clock": 1
+   }
+  },
   "src/hyperloom/orchestrator/delivery/ledger.py": {
    "branches": {
     "restore_records": 14
@@ -5695,6 +5711,139 @@
    },
    "statements": {
     "aggregate_by_source_function": 66
+   }
+  },
+  "src/hyperloom_kb/collect/engine.py": {
+   "arguments": {
+    "CollectionTarget.begin": 11
+   },
+   "branches": {
+    "collect": 15
+   },
+   "cognitive-complexity": {
+    "collect": 31
+   },
+   "cyclomatic-complexity": {
+    "collect": 15
+   },
+   "statements": {
+    "collect": 53
+   }
+  },
+  "src/hyperloom_kb/collect/expressions.py": {
+   "cognitive-complexity": {
+    "_compile_call": 34
+   },
+   "cyclomatic-complexity": {
+    "_compile_call": 13
+   }
+  },
+  "src/hyperloom_kb/collect/mapping.py": {
+   "cognitive-complexity": {
+    "_experience": 21
+   },
+   "locals": {
+    "compile_mapping": 19
+   }
+  },
+  "src/hyperloom_kb/collect/sensitive.py": {
+   "cognitive-complexity": {
+    "find_sensitive": 22
+   }
+  },
+  "src/hyperloom_kb/http_service.py": {
+   "arguments": {
+    "ExperienceHTTPService.read": 7
+   },
+   "cognitive-complexity": {
+    "ExperienceHTTPService.read": 22,
+    "RequestHandler._dispatch": 19
+   },
+   "locals": {
+    "ExperienceHTTPService.read": 21
+   },
+   "returns": {
+    "RequestHandler._dispatch": 7
+   }
+  },
+  "src/hyperloom_kb/knowledge_read.py": {
+   "arguments": {
+    "KnowledgeReadService.__init__": 6
+   },
+   "cognitive-complexity": {
+    "QueryExecutor.execute": 28
+   },
+   "cyclomatic-complexity": {
+    "QueryExecutor.execute": 11
+   },
+   "locals": {
+    "QueryExecutor.execute": 17
+   },
+   "maintainability-index": {
+    "<module>": 0
+   },
+   "module-lines": {
+    "<module>": 1201
+   }
+  },
+  "src/hyperloom_kb/query_view.py": {
+   "maintainability-index": {
+    "<module>": 6
+   }
+  },
+  "src/hyperloom_kb/remote.py": {
+   "arguments": {
+    "RemoteClient.read": 7,
+    "RemoteExperienceKB.begin": 11
+   }
+  },
+  "src/hyperloom_kb/retrieval.py": {
+   "arguments": {
+    "LocalRetrievalService.result": 6
+   }
+  },
+  "src/hyperloom_kb/retrieval_policy.py": {
+   "arguments": {
+    "RetrievalConfiguration.create": 9
+   },
+   "cognitive-complexity": {
+    "LexicalFuzzyProvider.recall": 25,
+    "RetrievalConfiguration.__post_init__": 19,
+    "RetrievalRunner.execute": 20
+   },
+   "cyclomatic-complexity": {
+    "RetrievalConfiguration.__post_init__": 12
+   },
+   "locals": {
+    "LexicalFuzzyProvider.recall": 18
+   },
+   "maintainability-index": {
+    "<module>": 5
+   }
+  },
+  "src/hyperloom_kb/schema.py": {
+   "branches": {
+    "Experience.__post_init__": 19
+   },
+   "cognitive-complexity": {
+    "Experience.__post_init__": 28
+   },
+   "cyclomatic-complexity": {
+    "Experience.__post_init__": 20
+   },
+   "maintainability-index": {
+    "<module>": 0
+   },
+   "module-lines": {
+    "<module>": 1113
+   },
+   "statements": {
+    "Experience.__post_init__": 54
+   }
+  },
+  "src/hyperloom_kb/sync.py": {
+   "arguments": {
+    "_report": 6
    }
   },
   "src/kernelforge/agent_backends/claude.py": {

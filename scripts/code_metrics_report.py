@@ -16,6 +16,7 @@ from code_metrics_collect import METRICS, MODULE, Finding
 
 MARKER = "<!-- code-metrics-report -->"
 UPDATE_COMMAND = "python scripts/code_metrics.py --update-baseline"
+GATE_CHANGED = "Gate implementation changed (needs review)"
 _MAX_ROWS = 25
 Key = tuple[str, str, str]
 
@@ -37,6 +38,8 @@ class Outcome:
     #: (key, base value or None when added, head value)
     growth: list[tuple[Key, int | None, int]] = dataclasses.field(default_factory=list)
     loosened: list[str] = dataclasses.field(default_factory=list)
+    #: Edits to the gate's own implementation or tool pins; reported, not a failure.
+    gate_changes: list[str] = dataclasses.field(default_factory=list)
     notes: list[str] = dataclasses.field(default_factory=list)
 
     @property
@@ -109,6 +112,12 @@ def _sections(outcome: Outcome, link_base: str) -> list[str]:
     ]
     if outcome.loosened:
         sections.append("### Gate configuration loosened\n\n" + "".join(f"- {p}\n" for p in outcome.loosened))
+    if outcome.gate_changes:
+        sections.append(
+            f"### {GATE_CHANGED}\n\n> [!WARNING]\n> This change edits the gate itself. CI judged it with the base "
+            "branch's copy of the gate scripts; a reviewer has to approve the gate change on its own merits.\n\n"
+            + "".join(f"- {c}\n" for c in outcome.gate_changes)
+        )
     return [s for s in sections if s]
 
 

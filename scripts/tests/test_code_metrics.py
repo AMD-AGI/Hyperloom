@@ -446,3 +446,126 @@ def test_comment_poster_never_runs_pull_request_code() -> None:
     gate = yaml.safe_load((ROOT / ".github/workflows/code-metrics.yml").read_text(encoding="utf-8"))
     assert gate["jobs"]["code-metrics"]["name"] == "code-metrics"
     assert gate["name"] in poster[True]["workflow_run"]["workflows"]
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [":(exclude)scripts/x.py", ":!scripts/x.py", ":/scripts", "scripts/*.py", "../outside", "/abs", "a/./b", ""],
+)
+def test_scope_entries_must_be_plain_paths(entry: str) -> None:
+    text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    text = text.replace('roots = ["src", "scripts"]', f'roots = ["src", "scripts", {json.dumps(entry)}]')
+    assert entry in text
+    with pytest.raises(collect.ToolError, match="plain repository paths"):
+        code_metrics.parse_config(text)
+
+
+def test_list_files_reads_a_pathspec_as_a_literal_path(tmp_path: Path) -> None:
+    for path in ["scripts/a.py", "scripts/b.py"]:
+        (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / path).write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "init", "-q"], check=True)
+    assert collect.list_files(tmp_path, ["scripts", ":(exclude)scripts/a.py"], []) == (
+        ["scripts/a.py", "scripts/b.py"],
+        [],
+    )
+    assert collect.list_files(tmp_path, [":!scripts/a.py"], []) == ([], [])
+
+
+def test_scope_that_measures_fewer_files_than_the_base_is_loosened(repo: Repo) -> None:
+    for path in ["src/a/x.py", "src/b/y.py", "scripts/z.py"]:
+        (repo.path / path).parent.mkdir(parents=True, exist_ok=True)
+        (repo.path / path).write_text("x = 1\n", encoding="utf-8")
+    repo.write_baseline({})
+    base = repo.commit()
+    pyproject = repo.path / "pyproject.toml"
+    text = pyproject.read_text(encoding="utf-8")
+    # Replacing a root by narrower ones loses no root by name that the base listed twice,
+    # yet stops measuring src/b; only the file sets show it.
+    pyproject.write_text(text.replace('roots = ["src", "scripts"]', 'roots = ["src/a", "scripts", "src/c"]'))
+    code, report = repo.gate("--base-ref", base)
+    assert code == 1
+    assert "scope no longer measures `src/b/y.py`" in section(report, "### Gate configuration loosened")
+    assert "src/a/x.py" not in report
+
+
+def test_widening_the_scope_is_not_loosening(repo: Repo) -> None:
+    (repo.path / "src/a").mkdir(parents=True)
+    (repo.path / "src/a/x.py").write_text("x = 1\n", encoding="utf-8")
+    repo.write_baseline({})
+    pyproject = repo.path / "pyproject.toml"
+    text = pyproject.read_text(encoding="utf-8")
+    pyproject.write_text(text.replace('roots = ["src", "scripts"]', 'roots = ["src/a"]'))
+    base = repo.commit()
+    pyproject.write_text(text)
+    code, report = repo.gate("--base-ref", base)
+    assert code == 0, report
+
+
+def test_an_edit_to_the_gate_is_reported_for_review_without_failing(repo: Repo) -> None:
+    (repo.path / "scripts/code_metrics.py").write_text("x = 1\n", encoding="utf-8")
+    repo.write_baseline({})
+    base = repo.commit()
+    (repo.path / "scripts/code_metrics.py").write_text("x = 2\n", encoding="utf-8")
+    pyproject = repo.path / "pyproject.toml"
+    pyproject.write_text(pyproject.read_text(encoding="utf-8").replace('ruff = "0.16.2"', 'ruff = "0.16.1"'))
+    code, report = repo.gate("--base-ref", base)
+    assert code == 0, report
+    changed = section(report, "### Gate implementation changed (needs review)")
+    assert "`scripts/code_metrics.py` changed" in changed
+    assert "tool pin `ruff` changed from 0.16.2 to 0.16.1" in changed
+
+
+def test_report_says_when_another_copy_of_the_gate_judged_the_tree(repo: Repo, monkeypatch) -> None:
+    repo.write_baseline({})
+    assert "not by this tree's copy" in repo.gate()[1]
+    monkeypatch.setattr(code_metrics, "__file__", str(repo.path / "scripts" / "code_metrics.py"))
+    assert "not by this tree's copy" not in repo.gate()[1]
+
+
+def test_ci_runs_the_base_branchs_copy_of_the_gate() -> None:
+    gate = yaml.safe_load((ROOT / ".github/workflows/code-metrics.yml").read_text(encoding="utf-8"))
+    steps = {step.get("name"): step for step in gate["jobs"]["code-metrics"]["steps"]}
+    run = steps["Code metrics gate"]["run"]
+    for name in ("code_metrics.py", "code_metrics_collect.py", "code_metrics_report.py"):
+        assert f'git show "$base:scripts/{name}" > "$gate/{name}"' in run
+    assert 'python "$impl/code_metrics.py"' in run and "python scripts/" not in run
+    assert '--root "$GITHUB_WORKSPACE"' in run
+    assert "RUNNER_TEMP}/code-metrics-gate/comment.js" in steps["Post the report on the PR"]["with"]["script"]
+
+
+def test_vulture_and_jscpd_read_copies_with_suppression_markers_defused(tmp_path, monkeypatch) -> None:
+    source = "import os  # noqa\nimport re  # NOQA: F401\n# jscpd:ignore-start\nx = 1\n# jscpd:ignore-end\n"
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src/p.py").write_text(source, encoding="utf-8")
+    seen: dict[str, str] = {}
+
+    def fake_run(argv, cwd, ok=(0,)):
+        name = Path(argv[0]).name
+        seen[name] = Path(next(a for a in argv if a.endswith("p.py"))).read_text(encoding="utf-8")
+        if name == "vulture":
+            # vulture prints a path under its cwd relative to it, any other path as given.
+            path = Path(next(a for a in argv if a.endswith("p.py")))
+            shown = path.relative_to(cwd) if path.is_relative_to(cwd) else path
+            return f"{shown}:1: unused import 'os' (90% confidence)\n"
+        Path(cwd, "jscpd-report.json").write_text('{"duplicates": []}', encoding="utf-8")
+        return ""
+
+    monkeypatch.setattr(collect, "_run", fake_run)
+    monkeypatch.setattr(collect, "jscpd_command", lambda: ["jscpd"])
+    units = collect.Units(tmp_path)
+    found = collect.vulture_findings(tmp_path, ["src/p.py"], 80, units)
+    assert found == [Finding("dead-code", "src/p.py", "<module>:os", 1, 1)]
+    collect.jscpd_findings(tmp_path, ["src/p.py"], 100, 10)
+    assert "noqa" not in seen["vulture"].lower()
+    assert "jscpd:ignore" not in seen["jscpd"]
+    assert [len(text.splitlines()) for text in seen.values()] == [5, 5]
+
+
+def test_every_package_under_src_is_measured() -> None:
+    config = code_metrics.parse_config((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    assert config is not None
+    production, _tests = collect.list_files(ROOT, config.roots, config.exclude)
+    packages = {p.parent.name for p in (ROOT / "src").glob("*/__init__.py")}
+    assert {"hyperloom", "kernelforge", "hyperloom_kb"} <= packages
+    assert packages <= {Path(path).parts[1] for path in production if path.startswith("src/")}
