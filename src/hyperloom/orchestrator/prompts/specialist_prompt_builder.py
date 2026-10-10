@@ -2169,7 +2169,9 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
             "- ``resolves_finding`` (optional string ``rule_id:subject``): set it only",
             f"  when the patch fixes a ``{'`` / ``'.join(sorted(CORRECTNESS_FIX_RULES))}`` entry from section 4c,",
             "  copied verbatim. The gate then verifies the entry is gone from the new log and",
-            f"  accuracy passes, and may KEEP a throughput drop of up to {CORRECTNESS_FIX_MAX_DROP_PCT:.0f}%.",
+            f"  accuracy passes, and may KEEP a drop of up to {CORRECTNESS_FIX_MAX_DROP_PCT:.0f}% on the graded axis",
+            "  (throughput, or p50 interactivity with the other interactivity guards still held)",
+            "  within the latency budget.",
         ]
         no_output = "  AND no ``patches_written``/``artifacts_written``; in that case"
     else:

@@ -55,7 +55,17 @@ from hyperloom.orchestrator.lever import LEVER_UPSTREAM_PR
 from hyperloom.common.failure_signature import CapabilityGap, FailureSignature
 from hyperloom.common.github_urls import repo_slug
 from hyperloom.common.gain_math import gain_pct
-from hyperloom.common.perf_metric import VERDICT_KEEP
+from hyperloom.common.perf_metric import (
+    GRADED_INTVTY,
+    GRADED_OUTPUT,
+    VERDICT_KEEP,
+    holds_within_band,
+    latency_veto_reason,
+    perf_snapshot_from_mapping,
+    resolve_grading_anchor_perf,
+    rounds_are_comparable,
+)
+from hyperloom.inference_optimizer.grading import resolved_grading
 from hyperloom.orchestrator.measurement.runtime_findings import (
     CORRECTNESS_FIX_MAX_DROP_PCT,
     KEEP_REASON_CORRECTNESS_FIX,
@@ -1768,6 +1778,26 @@ def _stamp_framework_kb_provenance(
 _FIX_ACCURACY_UNAVAILABLE = "accuracy result unavailable"
 
 
+def _fix_axis(graded: Any) -> str:
+    return "interactivity p50" if graded.graded_on_intvty else "throughput"
+
+
+def _intvty_guard_refusals(shared_state: Any, bench_result: dict[str, Any]) -> list[str]:
+    """The interactivity KEEP guards a correctness fix still owes; only the p50 gain is relaxed."""
+    ref_perf, _ = resolve_grading_anchor_perf(shared_state)
+    cand_perf = perf_snapshot_from_mapping(bench_result)
+    _, noise_pct = resolved_grading(shared_state)
+    band = f"{noise_pct:.1f}% noise band" if noise_pct is not None else "noise band"
+    refusals = [
+        f"{key} fell outside the {band}"
+        for key in (GRADED_INTVTY, GRADED_OUTPUT)
+        if not holds_within_band(cand_perf, ref_perf, key, noise_pct=noise_pct)
+    ]
+    if not rounds_are_comparable(cand_perf, ref_perf):
+        refusals.append("rounds are not comparable")
+    return refusals
+
+
 def _correctness_fix_refusals(
     resolves_finding: str,
     *,
@@ -1786,16 +1816,21 @@ def _correctness_fix_refusals(
     )
     if finding_refusal:
         refusals.append(finding_refusal)
+    # The resolver only vetoes a KEEP verdict, and this route runs after a REVERT, so the budget is read here.
+    veto = latency_veto_reason(bench_result.get("e2el_mean_ms"), float(getattr(shared_state, "latency_budget_ms", 0.0)))
     if not graded.comparable:
         refusals.append(f"performance comparison unavailable: {graded.degrade_reason}")
-    elif graded.veto_reason:
-        refusals.append(graded.veto_reason)
+    elif veto:
+        refusals.append(veto)
     elif delta_pct is None:
-        refusals.append("no measurable throughput")
+        refusals.append(f"no measurable {_fix_axis(graded)}")
     elif delta_pct < -CORRECTNESS_FIX_MAX_DROP_PCT:
         refusals.append(
-            f"throughput delta {delta_pct:+.2f}% exceeds the {CORRECTNESS_FIX_MAX_DROP_PCT:.1f}% correctness-fix allowance"
+            f"{_fix_axis(graded)} delta {delta_pct:+.2f}% exceeds the "
+            f"{CORRECTNESS_FIX_MAX_DROP_PCT:.1f}% correctness-fix allowance"
         )
+    if graded.comparable and graded.graded_on_intvty:
+        refusals.extend(_intvty_guard_refusals(shared_state, bench_result))
     if accuracy_pass is None:
         refusals.append(_FIX_ACCURACY_UNAVAILABLE)
     elif accuracy_pass is not True:
@@ -3992,7 +4027,7 @@ class IntegratePatchExecutor:
             "measured_against": measured_against,
             "keep_threshold_pct": keep_threshold_pct,
             "reason": (
-                f"correctness fix {resolves_finding} verified at throughput delta {delta_pct:+.2f}%"
+                f"correctness fix {resolves_finding} verified at {_fix_axis(graded)} delta {delta_pct:+.2f}%"
                 if correctness_fix
                 else f"throughput delta {delta_pct:+.2f}% >= {keep_threshold_pct:.2f}%"
             ),

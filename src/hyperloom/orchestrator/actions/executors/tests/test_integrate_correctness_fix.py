@@ -41,8 +41,19 @@ def _state(tmp_path: Path) -> SharedState:
     )
 
 
-async def _gate(tmp_path: Path, *, after_log: str, tput: float, accuracy_pass: bool | None, finding: str = FINDING):
+async def _gate(
+    tmp_path: Path,
+    *,
+    after_log: str,
+    tput: float,
+    accuracy_pass: bool | None,
+    finding: str = FINDING,
+    state_fields: dict | None = None,
+    bench_fields: dict | None = None,
+):
     state = _state(tmp_path)
+    for key, value in (state_fields or {}).items():
+        setattr(state, key, value)
     attempt = IntegrateAttempt(
         task_id="t-int",
         specialist_task_id="t-spec",
@@ -54,7 +65,11 @@ async def _gate(tmp_path: Path, *, after_log: str, tput: float, accuracy_pass: b
         attempt=attempt,
         params={"base_tput": 1000.0, "keep_threshold_pct": 1.0},
         extra={"shared_state": state},
-        bench_result={"output_throughput": tput, "launch_evidence_path": _slot(tmp_path, "after", after_log)},
+        bench_result={
+            "output_throughput": tput,
+            "launch_evidence_path": _slot(tmp_path, "after", after_log),
+            **(bench_fields or {}),
+        },
         gate_evidence={"accuracy_pass": accuracy_pass},
     )
 
@@ -112,6 +127,67 @@ async def test_traceback_finding_cannot_claim_the_allowance(tmp_path):
 
     assert out["status"] == "reverted"
     assert out["reason"].endswith("runtime.traceback cannot justify a correctness fix")
+
+
+@pytest.mark.asyncio
+async def test_fix_over_the_latency_budget_reverts(tmp_path):
+    out = await _gate(
+        tmp_path,
+        after_log=CLEAN_LOG,
+        tput=985.0,
+        accuracy_pass=True,
+        state_fields={"latency_budget_ms": 100.0},
+        bench_fields={"e2el_mean_ms": 5000.0},
+    )
+
+    assert out["status"] == "reverted"
+    assert out["reason"] == (
+        f"throughput delta -1.50% < keep_threshold 1.00%; correctness fix {FINDING} refused: latency_budget_exceeded"
+    )
+
+
+def _intvty_axes(p50: float, output: float) -> dict:
+    return {
+        "e2e_norm_intvty_p90": 100.0,
+        "e2e_norm_intvty_p50": p50,
+        "output_throughput": output,
+        "total_throughput": 2 * output,
+        "duration_seconds": 60.0,
+        "request_error_rate": 0.0,
+    }
+
+
+async def _intvty_gate(tmp_path: Path, *, p50: float, output: float):
+    return await _gate(
+        tmp_path,
+        after_log=CLEAN_LOG,
+        tput=output,
+        accuracy_pass=True,
+        state_fields={
+            "grading": {"objective": "e2e_norm_intvty_p90", "noise_pct": 2.0},
+            "current_best": _intvty_axes(100.0, 1000.0),
+        },
+        bench_fields=_intvty_axes(p50, output),
+    )
+
+
+@pytest.mark.asyncio
+async def test_intvty_fix_keeps_and_names_the_axis(tmp_path):
+    out = await _intvty_gate(tmp_path, p50=99.0, output=1000.0)
+
+    assert (out["status"], out["keep_reason"]) == ("kept", "correctness_fix")
+    assert out["reason"] == f"correctness fix {FINDING} verified at interactivity p50 delta -1.00%"
+
+
+@pytest.mark.asyncio
+async def test_intvty_fix_with_an_output_collapse_reverts(tmp_path):
+    out = await _intvty_gate(tmp_path, p50=99.0, output=600.0)
+
+    assert out["status"] == "reverted"
+    assert out["reason"] == (
+        "no measurable throughput; "
+        f"correctness fix {FINDING} refused: output_throughput fell outside the 2.0% noise band"
+    )
 
 
 def _coord(tmp_path: Path) -> Coordinator:
