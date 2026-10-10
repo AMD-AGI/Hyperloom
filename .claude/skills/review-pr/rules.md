@@ -254,8 +254,10 @@ file-shaped row would miss.
 
 **Severity:** blocking
 **Fires when:** an added comment or docstring says what the arrangement used to be, why it is not somewhere else,
-which round of review produced it, or restates what the next line already says. The measurable tell: the comment
-and docstring lines a diff adds outnumber the code lines it adds.
+which round of review produced it, or restates what the next line already says. The measurable tell: within a
+single production file, net of removals, the comment and docstring lines the diff adds outnumber the code lines.
+Measure per file and exclude tests -- a whole-diff total buries the one bloated module under the test code and
+the other files, and a docs-only commit inverts the ratio by construction.
 **The rule:** `AGENTS.md` *Comment below the local average* is explicit -- a comment earns its place only by
 saying what the code cannot, "never narrate the change itself: no step or plan numbering, no 'previously this did
 X', nothing addressed to the reviewer". Prose written to defend a diff during review is addressed to the reviewer
@@ -268,8 +270,10 @@ docstring still describing a call that had been deleted and an orphaned block le
 **Not a finding when:** the prose states a constraint that the code genuinely cannot carry -- an invariant, an
 ordering requirement, a value whose origin is another system -- even where that takes several sentences; or the
 file's local average is already high and the addition matches it.
-**Evidence:** `$WORK/diff.txt` -- count added comment/docstring lines against added code lines, then read the
-block for sentences that would be false or pointless once the PR is merged and the review is over.
+**Evidence:** `$WORK/diff.txt` -- per non-test file, net added comment/docstring lines against net added code
+lines, then read the block for sentences that would be false or pointless once the PR is merged and the review
+is over. On #1797 the whole-diff totals read 6591 code against 1216 comment and cleared; `cli/__init__.py` on its
+own read 28 against 56.
 **Report as:** `X8 <file>:<line> -- "<narrating sentence>" describes the change, not a constraint; <N> comment
 lines added against <M> code lines`
 
