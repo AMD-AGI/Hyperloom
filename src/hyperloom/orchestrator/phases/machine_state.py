@@ -1386,7 +1386,8 @@ def _extend_budget_to_sweep_grant(budget: dict[str, Any], state: Any, *, now_uni
     remaining = _number(budget.get("remaining_sec"))
     if remaining is not None and remaining < grant_left:
         budget["remaining_sec"] = grant_left
-        budget["current_balance"] = grant_left
+        if "current_balance" in budget:
+            budget["current_balance"] = grant_left
     cap = _number(budget.get("cap_sec"))
     cumulative = _number(budget.get("cumulative_elapsed_sec")) or 0.0
     if cap is not None and cap < cumulative + grant_left:
