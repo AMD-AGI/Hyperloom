@@ -87,14 +87,14 @@ def is_production_python(path: str) -> bool:
     return not (name.startswith("test_") or name.endswith("_test.py") or name == "conftest.py")
 
 
-def parse_numstat_z(raw: bytes) -> list[tuple[str, int]]:
-    """Parse ``git diff --numstat -z`` into (path, added + deleted); binary files count 0.
+def parse_numstat_z(raw: bytes) -> list[tuple[str | None, str, int]]:
+    """Parse ``git diff --numstat -z`` into (old path or None, path, added + deleted); binary counts 0.
 
-    A rename is ``A<TAB>D<TAB><NUL>old<NUL>new<NUL>`` and is attributed to the new path, so a pure
+    A rename is ``A<TAB>D<TAB><NUL>old<NUL>new<NUL>``: it is attributed to the new path, so a pure
     move counts 0 and a move with edits counts only the edits.
     """
     tokens = raw.decode("utf-8", errors="surrogateescape").split("\0")
-    out: list[tuple[str, int]] = []
+    out: list[tuple[str | None, str, int]] = []
     i = 0
     while i < len(tokens):
         head = tokens[i]
@@ -102,10 +102,27 @@ def parse_numstat_z(raw: bytes) -> list[tuple[str, int]]:
         if not head:
             continue
         added, deleted, path = head.split("\t", 2)
+        old = None
         if not path:  # rename/copy: the two paths follow as separate tokens
-            path = tokens[i + 1]
+            old, path = tokens[i], tokens[i + 1]
             i += 2
         lines = 0 if added == "-" else int(added) + int(deleted)
+        out.append((old, path, lines))
+    return out
+
+
+def production_rows(rows: list[tuple[str | None, str, int]], line_count: Callable[[str], int]) -> list[tuple[str, int]]:
+    """Production files and their changed lines.
+
+    A file moved into production from a path the budget excludes (a test file) is new production
+    code, so it counts in full via ``line_count``; a move within production counts only its edits.
+    """
+    out = []
+    for old, path, lines in rows:
+        if not is_production_python(path):
+            continue
+        if old is not None and not is_production_python(old):
+            lines = line_count(path)
         out.append((path, lines))
     return out
 
@@ -180,7 +197,12 @@ def cmd_size(args: argparse.Namespace) -> int:
         check=True,
         capture_output=True,
     ).stdout
-    rows = sorted(((p, n) for p, n in parse_numstat_z(raw) if is_production_python(p)), key=lambda r: -r[1])
+
+    def line_count(path: str) -> int:
+        blob = subprocess.run(["git", "show", f"{args.head}:{path}"], check=True, capture_output=True).stdout
+        return len(blob.splitlines())
+
+    rows = sorted(production_rows(parse_numstat_z(raw), line_count), key=lambda r: -r[1])
     total = sum(n for _, n in rows)
     bucket = size_bucket(total)
     lines = [

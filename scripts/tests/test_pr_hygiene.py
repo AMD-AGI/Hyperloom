@@ -49,7 +49,24 @@ def test_production_python_predicate(path, expected):
 
 def test_numstat_rename_counts_only_edits_under_the_new_path():
     raw = b"3\t1\tsrc/a.py\x000\t0\t\x00src/old.py\x00src/new.py\x002\t2\t\x00src/b.py\x00src/c.py\x00-\t-\tbin.png\x00"
-    assert parse_numstat_z(raw) == [("src/a.py", 4), ("src/new.py", 0), ("src/c.py", 4), ("bin.png", 0)]
+    assert parse_numstat_z(raw) == [
+        (None, "src/a.py", 4),
+        ("src/old.py", "src/new.py", 0),
+        ("src/b.py", "src/c.py", 4),
+        (None, "bin.png", 0),
+    ]
+
+
+def test_size_counts_a_test_file_moved_into_production_in_full(repo, monkeypatch, capsys):
+    (repo / "src/tests").mkdir()
+    (repo / "src/tests/test_big.py").write_text("".join(f"v{i} = {i}\n" for i in range(1001)), encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "test file")
+    _git(repo, "mv", "src/tests/test_big.py", "src/runtime.py")
+    _git(repo, "commit", "-qm", "move into production")
+    rc, out = _size(repo, monkeypatch, capsys)
+    assert rc == 1
+    assert "diff budget exceeded: 1001 production Python lines changed (limit 1000)" in out
 
 
 def _git(repo: Path, *args: str) -> None:
