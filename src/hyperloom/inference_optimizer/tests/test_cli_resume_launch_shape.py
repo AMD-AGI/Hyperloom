@@ -125,9 +125,9 @@ def test_every_tp_projection_sits_after_the_ladder_that_resolves_the_pin():
     import inspect
     import textwrap
 
-    from hyperloom.inference_optimizer import cli
+    from hyperloom.inference_optimizer.cli import _run_optimize
 
-    tree = ast.parse(textwrap.dedent(inspect.getsource(cli._run_optimize)))
+    tree = ast.parse(textwrap.dedent(inspect.getsource(_run_optimize)))
     calls = [
         (node.lineno, node.func.id)
         for node in ast.walk(tree)
@@ -182,8 +182,10 @@ def test_resume_restores_pins_before_the_agentx_staleness_guard(tmp_path, monkey
 
     import pytest
 
-    import hyperloom.inference_optimizer.cli as optimizer_cli
+    from hyperloom.inference_optimizer.cli import _build_parser, _run_optimize
     from hyperloom.inference_optimizer.cli.bootstrap import AGENTX_MEASUREMENT_EPOCH
+
+    cli_mod = "hyperloom.inference_optimizer.cli"
 
     # ``_run_optimize`` writes the environment directly -- SKIP_VARIANTS, PD_MODE, INFERENCE_OPTIMIZER_NODES and
     # more -- so monkeypatch has nothing recorded to undo for them. Driving the real entry point means restoring the
@@ -217,23 +219,21 @@ def test_resume_restores_pins_before_the_agentx_staleness_guard(tmp_path, monkey
     monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", "")
     monkeypatch.delenv("MODEL_PATH", raising=False)
     monkeypatch.setattr(
-        optimizer_cli,
-        "clean_stale_aiter_locks",
+        f"{cli_mod}.clean_stale_aiter_locks",
         lambda: {"dir": "", "deleted": 0, "skipped_fresh": 0, "errors": 0},
     )
-
-    monkeypatch.setattr(optimizer_cli, "_preflight", lambda args: ("", ""))
+    monkeypatch.setattr(f"{cli_mod}._preflight", lambda args: ("", ""))
 
     def past_the_guard(*a, **kw):
         raise RuntimeError("resume cleared the staleness guard")
 
     # The first call after the guard: reaching it means the guard did not reject the session.
-    monkeypatch.setattr(optimizer_cli, "latency_budget_scope_error", past_the_guard)
-    args = optimizer_cli._build_parser().parse_args(["optimize", "--resume-from", str(resume_dir), "--critic-mock"])
+    monkeypatch.setattr(f"{cli_mod}.latency_budget_scope_error", past_the_guard)
+    args = _build_parser().parse_args(["optimize", "--resume-from", str(resume_dir), "--critic-mock"])
 
     # A SystemExit instead means the guard compared the session's pinned backend against an unpinned environment.
     with pytest.raises(RuntimeError, match="resume cleared the staleness guard"):
-        asyncio.run(optimizer_cli._run_optimize(args))
+        asyncio.run(_run_optimize(args))
 
     assert os.environ["HYPERLOOM_AGENTIC_BACKEND"] == "mlperf"
 
