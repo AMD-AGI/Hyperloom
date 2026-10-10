@@ -27,14 +27,15 @@ the rules listed. Rows overlap; a rule listed twice is read once.
 
 | The diff... | Read |
 |---|---|
-| changes any non-test file under `src/` | X1 X3 D12 |
-| adds or changes a value that crosses a boundary: status literal, enum member, dataclass or TypedDict field, keyword argument, signature, return semantics | C1 C3 C5 |
+| changes any non-test file under `src/` | X1 X3 D12 X8 |
+| adds or changes a value that crosses a boundary: status literal, enum member, dataclass or TypedDict field, keyword argument, signature, return semantics | C1 C3 C5 V8 |
 | adds or changes a knob or a pin: CLI flag, env var, config key, default value, a pinned external version, ref or sha, an install script, `docs/compatibility.rst`, or the argv or extra-args list one is assembled into | C3 C4 S6 T4 X5 X7 D8 D9 D11 |
 | removes a flag, env var, enum member, test, fallback/legacy/bypass route or whole file, or tightens a comparison (`<` returns as `==`, a new `all(...)`) | C3 T2 X4 D3 |
-| fixes one site of an operation that has siblings (executors, per-framework patchers, sync and async twins), or moves, copies or consolidates code | C2 T4 D1 D2 D4 D11 |
+| fixes one site of an operation that has siblings (executors, per-framework patchers, sync and async twins), or moves, copies or consolidates code | C2 T4 T5 D1 D2 D4 D11 D13 V8 |
 | adds a second implementation of an operation the repo already owns (patch deploy, revert, snapshot, cleanup, revalidation), or a `pre_applied`/`skip_*`/already-done branch that short-circuits one | D1 D2 D10 |
 | defines, outside the module that owns the concern, a constant, precedence list, parser or client constructor the owner exports: an LLM model, SDK client, API key, base URL or header read outside `llm_config.py`, a backend registered outside `agent_backends/registry.py` | D5 D10 |
-| repairs a value where it is consumed: a local re-merge of `os.environ`, a second parse of a handoff blob or serialized mapping, or any re-derivation of something another module already publishes | D11 V3 |
+| repairs a value where it is consumed: a local re-merge of `os.environ`, a second parse of a handoff blob or serialized mapping, or any re-derivation of something another module already publishes | D11 D13 V3 |
+| moves a call, an export or an assignment relative to another, or adds one that has to run after an existing one: a re-ordered projection, a guard that must see a restored value, a seed that must follow a resolver | T5 P5 D8 V8 |
 | touches persisted or shared state: `SCHEMA_VERSION`, `from_dict`, `CREATE TABLE`, a `record_*`/`read_*`/`seal_*` pair, `.save()`, a spec, manifest or recipe, a context manager, recovery or resume | X6 R4 P4 P5 |
 | touches a prompt, `SKILL.md`, `docs/**`, `*.md` or `*.rst` | X3 X5 |
 | adds error handling or a default: `except`, `contextlib.suppress`, `ignore_errors=True`, `.get(k, 0)`, `or {}`, an early `isinstance` guard, a noop or degraded implementation | S1 S2 S3 S4 S5 S7 |
@@ -44,7 +45,7 @@ the rules listed. Rows overlap; a rule listed twice is read once.
 | matches or selects by name: substring, `startswith`, `fnmatch`, a first-wins loop, a dedup/grouping/sort key, or an LLM backend, model or credential choice | D5 D6 D7 |
 | runs a destructive or privileged command: `pkill`/`kill -9`/`scancel`/`docker rm`, `rmtree`/`unlink`/`move`, `git reset --hard`/`git checkout -- <path>`, `git apply`, `tar -x`/`extractall`, or a cleanup, teardown or self-heal step | R1 R2 R3 R5 |
 
-V1-V6 apply to every PR: they govern how the review is run and published, not what the diff
+V1-V8 apply to every PR: they govern how the review is run and published, not what the diff
 contains. X2 does too — it reads `title.txt`, `body.txt` and `commits.txt`, so no row can trigger
 it from the file list, and a docs- or CI-only PR whose description went stale is the case a
 file-shaped row would miss.
@@ -249,6 +250,29 @@ file-shaped row would miss.
 **Evidence:** `$WORK/files.txt` -- which of the three locations moved; `$WORK/base.txt` to check any quoted previous value; `$WORK/body.txt` for the declared bump.
 **Report as:** `X7 -- <COMPONENT> pin moves in <files touched> but not in <files missing>`
 
+### X8 -- A comment states a constraint, never the history of the change
+
+**Severity:** blocking
+**Fires when:** an added comment or docstring says what the arrangement used to be, why it is not somewhere else,
+which round of review produced it, or restates what the next line already says. The measurable tell: the comment
+and docstring lines a diff adds outnumber the code lines it adds.
+**The rule:** `AGENTS.md` *Comment below the local average* is explicit -- a comment earns its place only by
+saying what the code cannot, "never narrate the change itself: no step or plan numbering, no 'previously this did
+X', nothing addressed to the reviewer". Prose written to defend a diff during review is addressed to the reviewer
+and does not survive the merge that ends the conversation; the constraint it was wrapped around does. Keep the
+constraint -- the ordering that must hold, the bound that comes from outside the file, why the slower path is the
+correct one -- and cut the rest. The finding quotes the narrating sentence, not the whole block.
+**Seen in:** PR #1797 -- `cli/__init__.py` gained 56 lines of comment and docstring against 28 lines of code,
+most of it recounting how the arrangement arrived at its final shape across four rounds of review, including a
+docstring still describing a call that had been deleted and an orphaned block left behind by a move.
+**Not a finding when:** the prose states a constraint that the code genuinely cannot carry -- an invariant, an
+ordering requirement, a value whose origin is another system -- even where that takes several sentences; or the
+file's local average is already high and the addition matches it.
+**Evidence:** `$WORK/diff.txt` -- count added comment/docstring lines against added code lines, then read the
+block for sentences that would be false or pointless once the PR is merged and the review is over.
+**Report as:** `X8 <file>:<line> -- "<narrating sentence>" describes the change, not a constraint; <N> comment
+lines added against <M> code lines`
+
 ## T -- Tests and coverage
 
 ### T1 -- A test must drive the production entry point, with inputs the real path can produce
@@ -290,6 +314,35 @@ file-shaped row would miss.
 **Not a finding when:** the fix is not observable from any test seam (a log string, a comment, a type annotation), or an existing test already fails on `base.txt` for this defect -- check it before asking for a new one.
 **Evidence:** `$WORK/title.txt`, `$WORK/testfiles.txt`, `$WORK/base.txt` -- the claimed fix against the tests added and the merge base they must fail on.
 **Report as:** `T4 -- fix for <defect> has no test that fails on <base sha>; missing case: <the discrimination>`
+
+### T5 -- When the defect is an order of statements, the assertion has to be on the order
+
+**Severity:** blocking
+**Fires when:** the fix moves a call, an export or an assignment relative to another, or adds
+one that must run after an existing one, and the added test calls those functions itself.
+**The rule:** a test that calls the participants in the order it wants proves nothing about the
+order the production path uses -- it passes before the fix and after it, and reads as coverage.
+The assertion has to be anchored where the defect lives: drive the real entry point so the
+production order is what executes, or assert the order itself (walk the caller's AST and
+compare the line numbers of the two calls). Either way, run it against the commit before the
+fix and confirm it fails for the stated reason, not on an `ImportError` from a helper the fix
+introduced -- that failure mode proves the symbol is new, not that the order was wrong. T4 asks
+for a test that fails on the merge base; this rule is the ordering case, where a test can fail
+there for the wrong reason or pass there while the defect is live.
+**Seen in:** PR #1797 -- `_export_workload_envs_for_optimize`, the only writer of
+`os.environ["TP"|"CONC"|"EP"]`, ran about 500 lines before the ladder that resolves a pinned
+`TP`, so the run launched at a shape its own `state.json` did not record. The four ladder tests
+added with that change called `_resolve_workload_knobs` in isolation and covered `ISL`/`OSL`
+only, so CI was green across the whole defect; the test that finally pinned it asserts that
+every `_export_workload_envs_for_optimize` call in `_run_optimize` appears after the first
+`_resolve_workload_knobs`.
+**Not a finding when:** the real entry point is driven by the test, so the production order is
+the one under test; or the moved call has exactly one caller and a reader can see both lines at
+once, which the finding has to show rather than assert.
+**Evidence:** `$WORK/diff.txt` for the moved call; the added test for whether it fixes the
+order itself or merely replays it; `$WORK/base.txt` for the run that must fail.
+**Report as:** `T5 <file>:<line> -- the ordering fix is covered by a test that calls <a> and
+<b> in its own order; it passes on <base sha> with the defect live`
 
 ---
 
@@ -785,6 +838,34 @@ for the branches that moved the number.
 **Report as:** `D12 <file>:<line> -- <function> is complexity <head> (base: <base|absent>), over
 the ceiling of 20; split it or keep <added branch> out of it`
 
+### D13 -- Count the mechanisms a fix needs to hold itself up; the count is the finding
+
+**Severity:** blocking
+**Fires when:** a fix introduces several parts whose only job is to keep its other parts from colliding -- an
+exclusion set plus the filter that applies it plus the matching exclusion somewhere else, a flag that exists so a
+second code path can tell it is the second code path, a helper whose only caller is the mechanism above it.
+**The rule:** mechanisms that exist to manage each other, rather than to serve the feature, mean the shape is
+wrong one level up. Ask what the fix would need if the thing it is defending against could not arise: when the
+answer is "almost none of this", the concept that makes it arise is the defect. The usual cause is a new entity
+invented where the tree already has one -- a third source of a value that is really the second source wearing a
+different name. Before adding the first of these parts, find whether the repo already resolves something of the
+same shape and take that form. `AGENTS.md` *Clean design* ("duplicated state or a duplicated decision is the same
+problem: name the owner it derives from") is the bullet, and the finding names the existing form that should have
+been reused. A count on its own is taste; a count plus the simpler form the tree already contains is a finding.
+**Seen in:** PR #1797 -- treating an `--extra-env` pin as a third source alongside the flag and the environment
+required an exclusion set, a filter in the export, a matching exclusion in the unset loop, a pin-reading int
+helper and a resume-only resolver, five parts existing only to keep the pin from colliding with the projection.
+`_resolve_run_max_model_len_inner` already resolved its own knob as flag, then `$MAX_MODEL_LEN`, then derivation;
+exporting every pin and giving the other ladders the same environment rung removed all five and 92 lines, and the
+two defects found in the intervening rounds could not arise in that form at all.
+**Not a finding when:** each part serves the feature rather than the other parts -- a gate, a projection and a
+persistence step are three mechanisms doing three jobs; or the body names the simpler form and says why it cannot
+serve this case.
+**Evidence:** `$WORK/diff.txt` for the added parts and what each one guards against; the head tree for the
+existing resolver, ladder or owner of the same shape.
+**Report as:** `D13 -- <N> mechanisms added to keep <A> from colliding with <B>; <existing form>:<line> already
+resolves this shape -- reuse it`
+
 ## V -- Review method and PR hygiene
 
 ### V1 -- Confirm the finding is introduced by this diff, and that the diff contains nothing it did not intend
@@ -912,3 +993,51 @@ the body names.
 issue's cases the change actually covers.
 **Report as:** `V6: <body> closes #<N>, but the diff covers <X> while the issue also
 describes <Y> -- keep #<N> open or split it`
+
+### V7 -- Enumerate a value's writers and readers across the tree, not within the diff's frame
+
+**Severity:** blocking
+**Fires when:** always, for any finding or clearance that turns on "which code touches this
+value". Escalate when the diff changes where a value is produced, exported or resolved.
+**The rule:** the enumeration is a tree-wide search for the value's own name -- every non-test
+writer, every reader -- not a walk of the functions the diff happens to show. A value is
+typically written one frame below the function being read: an `os.environ[...]` assignment
+inside a helper the caller invokes does not appear in that caller's body, so an AST walk or a
+`sed` range scoped to the caller reports nothing and the reviewer reads the empty result as
+"no writers". State the scope of any tool used, because a tool's blind spot and a clean result
+are the same output. A clearance written without this enumeration is not a clearance; say
+`SKIPPED` instead.
+**Seen in:** PR #1797 -- the author's AST walk recording every `os.environ[...]` write in
+`_run_optimize` never listed `TP`, `CONC` or `EP`, because they are written inside
+`_export_workload_envs_for_optimize`, one frame down. The ordering table built from it was used
+to justify the change, and the review that caught the defect had run a tree-wide sweep for
+every non-test writer of those three names instead.
+**Not a finding when:** n/a -- this is a precondition for the enumeration, not a finding in its
+own right. What it blocks is a card that claims coverage the search did not have.
+**Evidence:** the search itself, with its scope stated: the pattern, the paths covered, and
+whether it crossed function boundaries.
+**Report as:** on the card's `Checked:` line, as the scope of the sweep -- `tree-wide sweep for
+every non-test writer of <names>`; or `SKIPPED: <axis> -- enumeration was scoped to <frame>`
+
+### V8 -- When a function's shape or job changes, enumerate its callers, tests included
+
+**Severity:** blocking
+**Fires when:** the diff splits a function, moves a responsibility out of one, renames it, changes its
+signature, or moves a call earlier so it reads attributes its old position never needed.
+**The rule:** the caller list comes from a tree-wide grep on the symbol, not from the files the diff already
+touches. Tests are callers: they construct the arguments the production path never has to, so a split that leaves
+one half unfilled, or an earlier call site that now reads an attribute the old one did not, shows up there first.
+The ones that matter most are in files the PR did not open, which is exactly the set a reviewer reading the diff
+cannot see. V7 enumerates the readers of a *value*; this is its counterpart for a *symbol*, and the two together
+are what a reordering or a split has to clear.
+**Seen in:** PR #1797 -- splitting `_resolve_workload_knobs` and moving the call above `_preflight` broke nine
+tests across three files the author had not run: topology-gate cases building a four-attribute `Namespace` that
+suddenly needed `resume_from`, precision cases still calling the half that no longer resolved precision, and
+ladder cases that now had to start from an empty environment. A `git grep -l` on the symbol lists all three in
+under a second.
+**Not a finding when:** the symbol is new in this PR and has no callers outside it, or the enumeration was run
+and the card states its scope.
+**Evidence:** `git grep -ln '<symbol>' -- src` against `$WORK/files.txt` -- any file in the first list and not
+the second is a caller the diff did not visit.
+**Report as:** `V8 -- <symbol> changed shape; <file>:<line> still calls the old one` / `V8 -- callers were not
+enumerated: <N> files reference <symbol>, <M> of them untouched by this PR`
