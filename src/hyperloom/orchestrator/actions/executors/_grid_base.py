@@ -19,6 +19,26 @@ log = logging.getLogger(__name__)
 # Per-variant KEEP threshold (gain-pct + accuracy gate); the grid noise floor.
 DEFAULT_KEEP_THRESHOLD_PCT = 1.0
 
+# The agentic corpus needs its own floor. Two identical 150-trajectory MLPerf baselines a day apart differed by 7.2%
+# on output throughput -- the axis these sessions grade on, since the harness publishes no per-request OSL/E2EL
+# series -- so the 1% gate above adopts noise. A replay is not identical either: the agent re-derives its own turn
+# count, and the two runs differed by 2.8% in turns completed for the same prompts.
+MLPERF_KEEP_THRESHOLD_PCT = 10.0
+
+# Override for either floor. Clamped at ``DEFAULT_KEEP_THRESHOLD_PCT``: a gate below the generic noise floor cannot
+# separate a win from a re-run.
+KEEP_THRESHOLD_PCT_ENV = "HYPERLOOM_KEEP_THRESHOLD_PCT"
+
+
+def default_keep_threshold_pct() -> float:
+    """The KEEP floor this workload's measurement noise supports."""
+    from hyperloom.common.agentx_workload import is_mlperf_backend
+    from hyperloom.common.env import env_float
+
+    floor = MLPERF_KEEP_THRESHOLD_PCT if is_mlperf_backend() else DEFAULT_KEEP_THRESHOLD_PCT
+    return max(DEFAULT_KEEP_THRESHOLD_PCT, env_float(KEEP_THRESHOLD_PCT_ENV, floor))
+
+
 # Terminal outcomes that ended a grid variant without a graded comparison, so
 # they are neither a KEEP nor a REVERT.
 TS_FAILED = "FAILED"

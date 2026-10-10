@@ -70,8 +70,8 @@ from ._grid_base import (
 )
 from .benchmark_result import double_run_requested
 from ._grid_runner import (
-    DEFAULT_KEEP_THRESHOLD_PCT,
     _MN_BACKENDS_PRIORITY,
+    default_keep_threshold_pct,
     _MN_PARAMS_PRIORITY,
     GridVariant,
     SessionDirField,
@@ -720,12 +720,16 @@ class ExploreExecutor:
         *,
         default_config_path: Path | str | None = None,
         session_dir: Path | str | None = None,
-        keep_threshold_pct: float = DEFAULT_KEEP_THRESHOLD_PCT,
+        keep_threshold_pct: float | None = None,
     ):
         """Initialize the explore executor and its gating thresholds."""
         self.default_config_path = Path(default_config_path) if default_config_path else None
         self.session_dir = session_dir
-        self.keep_threshold_pct = float(keep_threshold_pct)
+        # Resolved rather than defaulted in the signature: the floor depends on the workload, and a module-level
+        # default binds at import, before the backend is known.
+        self.keep_threshold_pct = (
+            default_keep_threshold_pct() if keep_threshold_pct is None else float(keep_threshold_pct)
+        )
 
     async def __call__(self, ctx) -> dict[str, Any]:
         """Run the merged ``explore`` action for one task."""
