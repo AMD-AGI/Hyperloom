@@ -48,6 +48,17 @@ def test_cumulative_gain_is_relative_to_last_evidence_score():
     assert reached.reasons == ("CUMULATIVE_GAIN",)
 
 
+def test_a_starting_version_that_fell_behind_its_evidence_refreshes_too():
+    """Under seqany the starting version can be slower than the commit the evidence profiled."""
+    below = _decide(evidence_mean_case_speedup=1.2, current_mean_case_speedup=1.1401)
+    reached = _decide(evidence_mean_case_speedup=1.2, current_mean_case_speedup=1.14)
+
+    assert below.refresh is False
+    assert below.reasons == ("CUMULATIVE_GAIN_BELOW_THRESHOLD",)
+    assert reached.refresh is True
+    assert reached.reasons == ("CUMULATIVE_DECLINE",)
+
+
 def test_supervisor_refreshes_only_stale_evidence():
     stale = _decide(supervisor_due=True)
     current = _decide(

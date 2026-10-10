@@ -48,7 +48,7 @@ class Iteration:
     spill_bytes: int = 0
 
     # Decision made after this iteration
-    decision: str = ""  # "KEEP" / "REVERT" / ""
+    decision: str = ""  # "KEEP" / "ACCEPT" / "REVERT" / ""
     notes: str = ""
 
     def to_dict(self) -> dict:

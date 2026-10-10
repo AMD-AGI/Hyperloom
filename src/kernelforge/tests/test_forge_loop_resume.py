@@ -32,6 +32,7 @@ from kernelforge.loop.run_state import (
     WorkspaceLockError,
 )
 from kernelforge.loop.runner import IterationConfig, IterationLoop
+from kernelforge.loop.search_policy import SearchPolicy
 
 
 # The forge-loop CLI activates per-workspace aiter cache isolation, which writes AITER_ROOT_DIR / AITER_JIT_DIR (and
@@ -349,6 +350,38 @@ def test_forge_loop_defaults_gpu_type(tmp_path, monkeypatch):
 
     assert result.exit_code == 0
     assert captured["config_overrides"][-1]["gpu_type"] == "mi355x"
+
+
+def test_forge_loop_defaults_to_the_sequential_policy_and_three_lanes(tmp_path, monkeypatch):
+    captured = _install_cli_fakes(monkeypatch, tmp_path)
+
+    result, workspace = _invoke_forge_loop(tmp_path, [])
+
+    assert result.exit_code == 0, result.output
+    loop = captured["loops"][0]
+    assert (loop.ic.search_policy, loop.ic.lanes) == (SearchPolicy.SEQUENTIAL, 3)
+    assert CampaignConfigStore(str(workspace)).load().search_policy is SearchPolicy.SEQUENTIAL
+
+
+def test_forge_loop_seqany_runs_one_lane_and_is_snapshotted(tmp_path, monkeypatch):
+    captured = _install_cli_fakes(monkeypatch, tmp_path)
+
+    result, workspace = _invoke_forge_loop(tmp_path, ["--search-policy", "seqany"])
+
+    assert result.exit_code == 0, result.output
+    loop = captured["loops"][0]
+    assert (loop.ic.search_policy, loop.ic.lanes) == (SearchPolicy.SEQANY, 1)
+    assert CampaignConfigStore(str(workspace)).load().search_policy is SearchPolicy.SEQANY
+
+
+def test_forge_loop_refuses_seqany_with_more_than_one_lane(tmp_path, monkeypatch):
+    captured = _install_cli_fakes(monkeypatch, tmp_path)
+
+    result, _workspace = _invoke_forge_loop(tmp_path, ["--search-policy", "seqany", "--lanes", "2"])
+
+    assert result.exit_code != 0
+    assert "single lane" in result.output
+    assert captured["loops"] == []
 
 
 def test_the_ceiling_estimator_gets_the_resolved_session_budget_and_the_deployments_sandbox(tmp_path, monkeypatch):
@@ -826,6 +859,7 @@ def _driver_integrity_resume(tmp_path, monkeypatch):
         task_fingerprint=loop._task_fingerprint(),
         git_branch=campaign.git_branch,
         head_commit=head,
+        start_commit=head,
         baseline_case_times={"case": 1.0},
     )
     store = LoopStateStore(str(workspace))
@@ -1184,6 +1218,8 @@ def test_resume_reuses_persisted_framework_without_inference(
     assert result.exit_code == 0, result.output
     assert store.load().framework == "vllm"
     assert captured["kb_writes"][-1]["framework"] == "vllm"
+    # The end-of-run publication names the durable best, never the branch's latest commit.
+    assert captured["kb_writes"][-1]["commit"] == "best-commit"
 
 
 def test_keep_callback_snapshots_result_and_kb_before_iteration_callback(
@@ -1229,9 +1265,10 @@ def test_keep_callback_snapshots_result_and_kb_before_iteration_callback(
     assert snapshot["search_start_mean_case_speedup"] == 1.0
     assert not captured["kb_writes"]
     remote_callback = captured["run_kwargs"]["on_best_ready"]
-    remote_callback(SimpleNamespace(kept=True))
+    remote_callback(SimpleNamespace(kept=True, commit_hash="kept-commit"))
     assert captured["kb_writes"]
     assert captured["kb_writes"][-1]["llm_summary"] is False
+    assert captured["kb_writes"][-1]["commit"] == "kept-commit"
     checkpoint = captured["checkpoints"]["hyperloom"]
     assert checkpoint["best_commit"] == "best-commit"
     assert checkpoint["search_start_mean_case_speedup"] == 1.0

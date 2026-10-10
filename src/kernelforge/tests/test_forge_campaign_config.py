@@ -22,6 +22,7 @@ from kernelforge.loop.campaign_config import (
     validate_pending_campaign_head,
 )
 from kernelforge.llm.git import GitError
+from kernelforge.loop.search_policy import SearchPolicy
 
 
 def _git_workspace(tmp_path, name="workspace"):
@@ -500,6 +501,7 @@ _DIGEST = "a" * 64
         ({"implementation_signature": ""}, "signature is missing or invalid"),
         ({"implementation_signature": _DIGEST}, "does not match its signature"),
         ({"implementation_identity": {}}, "does not match its signature"),
+        ({"search_policy": "mcts"}, "unsupported search policy"),
     ],
 )
 def test_from_dict_rejects_incoherent_campaign_snapshot(
@@ -528,6 +530,21 @@ def test_from_dict_rejects_the_retired_pre_rename_key(tmp_path, monkeypatch):
     payload[retired_key] = payload.pop("kernel_backend")
 
     with pytest.raises(ValueError, match="unsupported campaign config fields"):
+        CampaignConfig.from_dict(payload)
+
+
+def test_search_policy_round_trips_and_must_be_recorded(tmp_path, monkeypatch):
+    """The policy decides what the branch's latest commit means; a snapshot without one is not a campaign."""
+    payload = _campaign_payload(tmp_path, monkeypatch)
+    assert payload["search_policy"] == "sequential"
+    payload["search_policy"] = "seqany"
+
+    restored = CampaignConfig.from_dict(payload)
+
+    assert restored.search_policy is SearchPolicy.SEQANY
+    assert CampaignConfig.from_dict(restored.to_dict()) == restored
+    del payload["search_policy"]
+    with pytest.raises(ValueError, match="campaign config missing fields: search_policy"):
         CampaignConfig.from_dict(payload)
 
 

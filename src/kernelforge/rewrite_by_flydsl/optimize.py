@@ -21,6 +21,7 @@ from typing import Callable
 
 from kernelforge.llm.git import git
 from kernelforge.config import Config
+from kernelforge.loop.search_policy import DEFAULT_SEARCH_POLICY, SearchPolicy, resolve_lanes
 from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
 from kernelforge.tracker import ExperimentTracker
 
@@ -235,6 +236,9 @@ def run_optimize(
     supervisor_backend: str = "codex",
     profile_timeout_sec: int = 1800,
     roofline_ceiling: bool = False,
+    search_policy: SearchPolicy = DEFAULT_SEARCH_POLICY,
+    lanes: int | None = None,
+    merge_stacking: bool = True,
     result_json: str | None = None,
     deadline_unix: float | None = None,
     stop_at_unix: float | None = None,
@@ -250,6 +254,9 @@ def run_optimize(
     the port replaced rather than against the port. Without them the loop anchors on its own first bench, which
     scores the search against the port and cannot be composed back onto the source: the equal-weight mean of
     per-case ratios does not multiply.
+
+    ``search_policy``, ``lanes`` and ``merge_stacking`` are the nested loop's search controls; ``lanes=None`` asks for
+    the policy's default lane count.
 
     ``on_new_best`` is polled every ``new_best_poll_sec`` with the parsed result of each KEEP, and once more after the
     loop exits so the last one cannot be missed by timing. Anything it raises is logged and swallowed, because the
@@ -312,6 +319,11 @@ def run_optimize(
         # Spelled out either way, so the nested loop does what this caller asked rather than whatever its default is.
         "--roofline-ceiling",
         "on" if roofline_ceiling else "off",
+        "--search-policy",
+        search_policy.value,
+        "--lanes",
+        str(resolve_lanes(search_policy, lanes)),
+        "--merge-stacking" if merge_stacking else "--no-merge-stacking",
     ]
     if baseline_json:
         cmd += ["--baseline-json", baseline_json]

@@ -15,6 +15,7 @@ from pathlib import Path
 from kernelforge.llm.git import git
 from kernelforge.config import Config
 from kernelforge.loop.knowledge_integration import git_checkout_branch
+from kernelforge.loop.search_policy import DEFAULT_SEARCH_POLICY, SearchPolicy, resolve_lanes
 from kernelforge.knowledge.kb_store.errors import (
     kb_store_secrets,
     sanitize_read_error,
@@ -149,6 +150,9 @@ def run_rewrite(
     supervisor_backend: str = "codex",
     profile_timeout_sec: int = 1800,
     roofline_ceiling: bool = False,
+    search_policy: SearchPolicy = DEFAULT_SEARCH_POLICY,
+    lanes: int | None = None,
+    merge_stacking: bool = True,
     optimize_git_branch: str = "forge-rewrite-optimize",
     result_json: str | None = None,
     deadline_unix: float | None = None,
@@ -161,6 +165,8 @@ def run_rewrite(
     rewrite_kb_enabled: bool = True,
 ) -> dict:
     """Run the full rewrite pipeline; return (and sentinel-print) the result dict."""
+    # Resolved before PORT, so a lane count the policy refuses fails the run before it has spent anything.
+    lanes = resolve_lanes(search_policy, lanes)
     # The nested forge-loop runs from the workspace and resolves this path against its own working directory, so a
     # relative one would send the two processes to different directories for the artifacts they share.
     experiments_dir = str(Path(experiments_dir).resolve())
@@ -577,6 +583,9 @@ def run_rewrite(
             supervisor_backend=supervisor_backend,
             profile_timeout_sec=profile_timeout_sec,
             roofline_ceiling=roofline_ceiling,
+            search_policy=search_policy,
+            lanes=lanes,
+            merge_stacking=merge_stacking,
             deadline_unix=deadline_unix,
             stop_at_unix=search_stop_unix,
             # Anchor the loop on the source, so every score it reports -- each KEEP published below and the run's

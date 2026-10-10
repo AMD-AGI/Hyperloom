@@ -61,7 +61,8 @@ from kernelforge.loop.runner import (
     WindowGain,
 )
 from kernelforge.loop.scoring import passes_keep_threshold
-from kernelforge.loop.search_policy import (
+from kernelforge.loop.search_policy import SearchPolicy
+from kernelforge.loop.search_mode import (
     MARGINAL_GAIN_WINDOW,
     OBJECTIVE_DISCOVER_NEW_MECHANISM,
     NO_CHANGES_ESCALATION_THRESHOLD,
@@ -275,6 +276,7 @@ def test_pending_keep_publication_patch_is_cumulative(tmp_path, monkeypatch):
     )
 
     assert set(pending) == runner_module.PENDING_KEEP_FIELDS
+    assert pending["promotes_best"] is True
     assert pending["changed_files"] == ["kernel.py"]
     assert set(pending["publication_changed_files"]) == {"driver.py", "kernel.py"}
     assert "prior kept optimization" in pending["publication_patch"]
@@ -922,6 +924,7 @@ def _seed_round_costs(workspace, *, planning_sec, lanes=3, rounds=2):
         campaign_id="campaign",
         baseline_case_times={"case": 1.0},
         head_commit=head,
+        start_commit=head,
     )
     for iteration in range(1, rounds + 1):
         apply_round_cost(
@@ -1083,6 +1086,7 @@ def test_a_resumed_campaign_reports_a_planning_share_within_its_definition(
             campaign_id="campaign",
             baseline_case_times={"case": 1.0},
             head_commit=head,
+            start_commit=head,
             round_costs=RoundCostState(
                 rounds=3,
                 planning_total_sec=_BANKED_PLANNING_SEC,
@@ -1515,17 +1519,19 @@ def test_a_stack_does_not_take_an_iteration_that_is_holding_a_plan(tmp_path, mon
         check=True,
         capture_output=True,
     )
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=workspace,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
     state = RunState(
         campaign_id="campaign",
         baseline_case_times=dict(cases),
         best_case_times=dict(cases),
-        head_commit=subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=workspace,
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip(),
+        head_commit=head,
+        start_commit=head,
     )
     state.stall.unresolved_stall_iters = 2
     LoopStateStore(str(workspace)).save(state)
@@ -1825,6 +1831,7 @@ def _stalled_loop_behind_a_full_queue(
         check=True,
         capture_output=True,
     )
+    loop.run_state.start_commit = loop._git("rev-parse", "HEAD").strip()
     kernel = workspace / "kernel.py"
     loop._lane_queue = [
         runner_module.LaneResult(
@@ -2327,6 +2334,7 @@ def _measurement_loop(monkeypatch, benchmark_result, workspace_dir="."):
         source_files=[],
         target_functions=[],
         workspace_dir=str(workspace_dir),
+        search_policy=SearchPolicy.SEQUENTIAL,
     )
     loop.best_wall_ms = 5.0
     loop.best_mean_case_speedup = 1.0
@@ -3019,7 +3027,7 @@ def test_optimization_plan_path_is_injected_before_implementer(
     assert captured["service"] is orchestration_service
     assert captured["history"].startswith("## Required optimization plan")
     assert "optimization_plan.md" in captured["history"]
-    assert "## Search Policy" in captured["history"]
+    assert "## Search Mode" in captured["history"]
     assert "Mode: EXPLOIT" in captured["history"]
 
 
@@ -3030,7 +3038,7 @@ def test_orchestration_context_uses_current_scored_cases(tmp_path, monkeypatch):
         baseline_case_times={"case-b": 2.0, "case-a": 1.0},
     )
     head = loop._git("rev-parse", "HEAD").splitlines()[0]
-    loop.run_state = RunState(head_commit=head)
+    loop.run_state = RunState(head_commit=head, start_commit=head)
     loop.config = SimpleNamespace(
         experiments_dir=workspace / "forge_experiments",
         gpu_target="gfx942",
@@ -3058,7 +3066,10 @@ def test_orchestration_context_publishes_the_campaign_editable_sources(
     editable file, and the planner has to be told so.
     """
     loop, workspace = _make_loop(tmp_path, monkeypatch)
-    loop.run_state = RunState(head_commit=loop._git("rev-parse", "HEAD").splitlines()[0])
+    loop.run_state = RunState(
+        head_commit=loop._git("rev-parse", "HEAD").splitlines()[0],
+        start_commit=loop._git("rev-parse", "HEAD").splitlines()[0],
+    )
     kernel = str((workspace / "kernel.py").resolve())
     tuned_csv = str((workspace / "configs" / "tuned_shapes.csv").resolve())
     sibling = str((workspace / "pkg" / "dispatch_limits.py").resolve())
@@ -3084,7 +3095,10 @@ def test_orchestration_context_editable_sources_cover_a_single_file_task(
 ):
     """A single-file task leaves ``source_files`` empty; the anchor is still it."""
     loop, workspace = _make_loop(tmp_path, monkeypatch)
-    loop.run_state = RunState(head_commit=loop._git("rev-parse", "HEAD").splitlines()[0])
+    loop.run_state = RunState(
+        head_commit=loop._git("rev-parse", "HEAD").splitlines()[0],
+        start_commit=loop._git("rev-parse", "HEAD").splitlines()[0],
+    )
     loop.config = SimpleNamespace(
         experiments_dir=workspace / "forge_experiments",
         gpu_target="gfx942",
@@ -3121,7 +3135,7 @@ def test_lessons_are_orchestration_evidence_and_handoff_is_audit_only(
     handoff = json.loads((workspace / "forge_experiments" / "handoffs" / "iter_001.json").read_text())
     assert handoff["canonical_verdict"] == "NO_CHANGES"
     assert handoff["lesson_path"].endswith("lessons/iter_001.md")
-    assert handoff["search_policy"]["mode"] == "EXPLOIT"
+    assert handoff["search_mode"]["mode"] == "EXPLOIT"
 
 
 def test_implementer_receives_partial_analysis_artifact_catalog(
@@ -3130,7 +3144,7 @@ def test_implementer_receives_partial_analysis_artifact_catalog(
 ):
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     head = loop._git("rev-parse", "HEAD").splitlines()[0]
-    loop.run_state = RunState(head_commit=head)
+    loop.run_state = RunState(head_commit=head, start_commit=head)
     loop.config = SimpleNamespace(
         experiments_dir=workspace / "forge_experiments",
         gpu_target="gfx942",
@@ -3186,7 +3200,7 @@ def test_runner_uses_analysis_checkpoint_after_session_failure(
         gpu_target="gfx942",
     )
     head = loop._git("rev-parse", "HEAD").splitlines()[0]
-    loop.run_state = RunState(head_commit=head)
+    loop.run_state = RunState(head_commit=head, start_commit=head)
     loop.state_store = LoopStateStore(str(workspace))
     catalog = workspace / "forge_experiments" / "analysis" / "catalog.json"
     catalog.parent.mkdir(parents=True)
@@ -3232,7 +3246,7 @@ def test_failed_initial_analysis_retries_next_planning_iteration(
         gpu_target="gfx942",
     )
     head = loop._git("rev-parse", "HEAD").splitlines()[0]
-    loop.run_state = RunState(head_commit=head)
+    loop.run_state = RunState(head_commit=head, start_commit=head)
     loop.state_store = LoopStateStore(str(workspace))
     calls = 0
 
@@ -3305,7 +3319,7 @@ def test_exhausted_analysis_session_budget_is_not_retried(
         gpu_target="gfx942",
     )
     head = loop._git("rev-parse", "HEAD").splitlines()[0]
-    loop.run_state = RunState(head_commit=head)
+    loop.run_state = RunState(head_commit=head, start_commit=head)
     loop.state_store = LoopStateStore(str(workspace))
     calls = 0
 
@@ -3482,7 +3496,7 @@ def test_stale_published_analysis_paths_survive_resume_style_reuse(
     assert supervisor["artifact_paths"]["analysis_bundle"] == str(generation.resolve())
 
 
-def test_warm_start_search_policy_is_exploit_and_persisted(
+def test_warm_start_search_mode_is_exploit_and_persisted(
     tmp_path,
     monkeypatch,
 ):
@@ -3498,7 +3512,7 @@ def test_warm_start_search_policy_is_exploit_and_persisted(
     )
     loop.handoff_store = runner_module.HandoffStore(str(workspace))
 
-    decision = loop._update_search_policy(1)
+    decision = loop._update_search_mode(1)
     persisted = loop.state_store.load()
 
     assert decision.mode == "EXPLOIT"
@@ -3530,8 +3544,8 @@ def test_completed_diversify_cycle_enters_bounded_exploit_residence(
     loop.handoff_store = runner_module.HandoffStore(str(workspace))
     loop.run_state.stall.unresolved_stall_iters = 1
 
-    exploit = loop._update_search_policy(2)
-    residence = loop._update_search_policy(3)
+    exploit = loop._update_search_mode(2)
+    residence = loop._update_search_mode(3)
 
     assert exploit.mode == "EXPLOIT"
     assert exploit.reason_codes == ("DIVERSIFY_PLAN_CREATED",)
@@ -3541,7 +3555,7 @@ def test_completed_diversify_cycle_enters_bounded_exploit_residence(
     assert residence.residence_iterations_remaining == 1
 
 
-def test_search_policy_uses_run_state_when_handoff_is_unavailable(
+def test_search_mode_uses_run_state_when_handoff_is_unavailable(
     tmp_path,
     monkeypatch,
 ):
@@ -3557,7 +3571,7 @@ def test_search_policy_uses_run_state_when_handoff_is_unavailable(
     loop._apply_iteration_planning_state(
         optimization_plan_created=True,
     )
-    decision = loop._update_search_policy(2)
+    decision = loop._update_search_mode(2)
 
     assert decision.reason_codes == ("DIVERSIFY_PLAN_CREATED",)
     assert decision.mode == "EXPLOIT"
@@ -3579,7 +3593,7 @@ def test_unsuccessful_diversify_cycle_stays_in_diversify(
     loop._apply_iteration_planning_state(
         optimization_plan_created=False,
     )
-    decision = loop._update_search_policy(4)
+    decision = loop._update_search_mode(4)
 
     assert decision.reason_codes == ("NO_IMPROVEMENT_STALL",)
     assert decision.mode == "DIVERSIFY"
@@ -3592,7 +3606,7 @@ def test_a_supervisor_intervention_no_longer_erases_the_stall_it_answers(
     """The mla_decode sequence: three REVERTs, an intervention, then DIVERSIFY.
 
     While both mechanisms read one counter, the intervention zeroed it and
-    ``_update_search_policy`` read the zero fourteen lines later, so the
+    ``_update_search_mode`` read the zero fourteen lines later, so the
     no-improvement route into DIVERSIFY could never fire: four and seven
     interventions in the 2026-08-18 batch produced no mode switch at all.
     Asking for advice and changing search direction are now simultaneous.
@@ -3633,7 +3647,7 @@ def test_a_supervisor_intervention_no_longer_erases_the_stall_it_answers(
     assert loop.run_state.stall.no_improvement_iters == 0
     assert loop.monitor.should_intervene(5) == (False, "")
 
-    decision = loop._update_search_policy(4)
+    decision = loop._update_search_mode(4)
 
     assert loop.run_state.stall.unresolved_stall_iters == 3
     assert decision.mode == "DIVERSIFY"
@@ -3677,9 +3691,9 @@ def test_a_flat_window_of_keeps_diversifies_a_campaign_that_never_stalled(
     for offset in range(MARGINAL_GAIN_WINDOW + 1):
         loop.state_store.append_event(_kept_outcome(offset + 1, 1.50 + 0.005 * offset))
 
-    decision = loop._update_search_policy(MARGINAL_GAIN_WINDOW + 2)
+    decision = loop._update_search_mode(MARGINAL_GAIN_WINDOW + 2)
     persisted = loop.state_store.load()
-    recorded = [event for event in loop.state_store.read_events() if event.get("type") == "search_policy_decision"]
+    recorded = [event for event in loop.state_store.read_events() if event.get("type") == "search_mode_decision"]
 
     assert loop.run_state.stall.no_improvement_iters == 0
     assert decision.mode == SEARCH_MODE_DIVERSIFY
@@ -3836,8 +3850,8 @@ def test_an_unevaluable_window_says_so_in_the_decision_event(
     for offset in range(MARGINAL_GAIN_WINDOW + 1):
         loop.state_store.append_event(_kept_outcome(offset + 1, None))
 
-    decision = loop._update_search_policy(MARGINAL_GAIN_WINDOW + 2)
-    recorded = [event for event in loop.state_store.read_events() if event.get("type") == "search_policy_decision"]
+    decision = loop._update_search_mode(MARGINAL_GAIN_WINDOW + 2)
+    recorded = [event for event in loop.state_store.read_events() if event.get("type") == "search_mode_decision"]
 
     assert decision.mode == SEARCH_MODE_EXPLOIT
     assert "window_gain_ratio" not in recorded[-1]
@@ -3856,8 +3870,8 @@ def test_a_short_window_says_so_rather_than_saying_nothing(
     loop.handoff_store = runner_module.HandoffStore(str(workspace))
     loop.state_store.append_event(_kept_outcome(1, 1.50))
 
-    loop._update_search_policy(2)
-    recorded = [event for event in loop.state_store.read_events() if event.get("type") == "search_policy_decision"]
+    loop._update_search_mode(2)
+    recorded = [event for event in loop.state_store.read_events() if event.get("type") == "search_mode_decision"]
 
     assert recorded[-1]["window_gain_unavailable"] == "short_window"
 
@@ -4086,7 +4100,7 @@ def test_orchestration_persists_optimization_plan_without_decision_json(
 ):
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     head = loop._git("rev-parse", "HEAD").splitlines()[0]
-    loop.run_state = RunState(head_commit=head)
+    loop.run_state = RunState(head_commit=head, start_commit=head)
     loop.config = SimpleNamespace(
         experiments_dir=workspace / "forge_experiments",
         gpu_target="gfx942",
@@ -4128,7 +4142,7 @@ def test_orchestration_persists_critic_draft_review_and_final_paths(
 ):
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     head = loop._git("rev-parse", "HEAD").splitlines()[0]
-    loop.run_state = RunState(head_commit=head)
+    loop.run_state = RunState(head_commit=head, start_commit=head)
     loop.config = SimpleNamespace(
         experiments_dir=workspace / "forge_experiments",
         gpu_target="gfx942",
@@ -4183,7 +4197,7 @@ def test_a_round_the_critic_could_not_review_is_carried_as_unreviewed(
     """The next round is told the review never happened, not that it passed."""
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     head = loop._git("rev-parse", "HEAD").splitlines()[0]
-    loop.run_state = RunState(head_commit=head)
+    loop.run_state = RunState(head_commit=head, start_commit=head)
     loop.config = SimpleNamespace(
         experiments_dir=workspace / "forge_experiments",
         gpu_target="gfx942",
@@ -4234,6 +4248,7 @@ def test_framework_fallback_plan_does_not_complete_diversify_cycle(
     head = loop._git("rev-parse", "HEAD").splitlines()[0]
     loop.run_state = RunState(
         head_commit=head,
+        start_commit=head,
         search_mode="DIVERSIFY",
     )
     loop.config = SimpleNamespace(
@@ -4276,7 +4291,7 @@ def test_orchestration_plan_persistence_error_propagates(
 ):
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     head = loop._git("rev-parse", "HEAD").splitlines()[0]
-    loop.run_state = RunState(head_commit=head)
+    loop.run_state = RunState(head_commit=head, start_commit=head)
     loop.config = SimpleNamespace(
         experiments_dir=workspace / "forge_experiments",
         gpu_target="gfx942",
@@ -4330,7 +4345,7 @@ def test_analysis_service_rechecks_same_commit_for_partial_upgrade(
 ):
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     head = loop._git("rev-parse", "HEAD").splitlines()[0]
-    loop.run_state = RunState(head_commit=head)
+    loop.run_state = RunState(head_commit=head, start_commit=head)
     loop.config = SimpleNamespace(
         experiments_dir=workspace / "forge_experiments",
         gpu_target="gfx942",
@@ -5184,6 +5199,7 @@ def test_resume_requires_authoritative_task_fingerprint(
         task_fingerprint=current,
         git_branch=loop.ic.git_branch,
         head_commit=head,
+        start_commit=head,
         baseline_case_times={"case": 1.0},
     )
 
@@ -5231,6 +5247,7 @@ def test_resume_rejects_missing_baseline_cases_before_iterations(
         task_fingerprint=loop._task_fingerprint(),
         git_branch=loop.ic.git_branch,
         head_commit=head,
+        start_commit=head,
     )
 
     with pytest.raises(
@@ -5419,6 +5436,7 @@ def test_resume_restores_baselines_before_best_publication_reconcile(
         task_fingerprint=loop._task_fingerprint(),
         git_branch=loop.ic.git_branch,
         head_commit=head,
+        start_commit=head,
         baseline_wall_ms=0.8,
         pristine_baseline_wall_ms=1.0,
         baseline_case_times={"case": 1.0},
@@ -5762,7 +5780,7 @@ def test_free_form_supervisor_ruling_still_creates_fresh_plan_each_iteration(
     evidence = json.loads(supervisor_evidence[0])
     assert evidence["latest_optimization_plan"].endswith("iter_001/optimization_plan.md")
     assert "orchestration_context" in evidence
-    assert evidence["orchestration_context"]["search_policy"]["mode"] == "EXPLOIT"
+    assert evidence["orchestration_context"]["search_mode"]["mode"] == "EXPLOIT"
     assert evidence["artifact_paths"]["latest_lesson"].endswith("lessons/iter_001.md")
     assert "latest_handoff" not in evidence["artifact_paths"]
 
@@ -6291,6 +6309,9 @@ def test_recovered_keep_archive_none_retains_pending_journal(
     )
     pending = {
         "iteration": 1,
+        "promotes_best": True,
+        "parent_iteration": 0,
+        "base_head": "base-hash",
         "wall_ms": 0.9,
         "kernel_source": "def kernel():\n    return 2\n",
         "patch": "candidate patch\n",

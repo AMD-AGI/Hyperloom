@@ -207,6 +207,44 @@ def test_render_digest_table_capping_keeps_and_recent(tmp_path):
     assert "revert-11" in digest  # most recent retained
 
 
+def test_a_capped_table_and_the_diff_selection_keep_accepted_lineage(tmp_path):
+    """An ACCEPT is a commit the current kernel is built on, so it is lineage like a KEEP."""
+    archive = CandidateArchive(str(tmp_path))
+    archive.record(
+        CandidateRecord(
+            iteration=1,
+            decision="ACCEPT",
+            accepted=True,
+            wall_ms=2.2,
+            baseline_wall_ms=2.0,
+            best_wall_ms_before=2.0,
+            parent_iteration=0,
+            parent_commit="base",
+            plan="the-accept",
+        )
+    )
+    for i in range(2, 12):
+        archive.record(
+            CandidateRecord(
+                iteration=i,
+                decision="REVERT_VALIDATION",
+                wall_ms=None,
+                baseline_wall_ms=2.0,
+                best_wall_ms_before=2.0,
+                plan=f"revert-{i}",
+            )
+        )
+
+    digest = archive.render_digest(max_table_rows=4)
+    selected = archive._select_for_diffs(archive.load_index(), max_full_diffs=1, near_miss_count=0, recent_count=0)
+
+    assert "older rows omitted" in digest
+    assert "the-accept" in digest
+    assert [entry["iter"] for entry in selected] == [1]
+    meta = archive.load_meta(1)
+    assert (meta["accepted"], meta["parent_iteration"], meta["parent_commit"]) == (True, 0, "base")
+
+
 def test_select_for_diffs_prioritizes_keep_near_recent(tmp_path):
     archive = CandidateArchive(str(tmp_path))
     index = [

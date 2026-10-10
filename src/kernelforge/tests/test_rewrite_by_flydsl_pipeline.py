@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from kernelforge.config import Config
+from kernelforge.loop.search_policy import SEQUENTIAL_DEFAULT_LANES, SearchPolicy
 from kernelforge.rewrite_by_flydsl import (
     driver_contract,
     flydsl_rewrite_driver_preparation,
@@ -240,6 +241,45 @@ def test_optimize_spells_the_roofline_switch_out_for_the_nested_loop(tmp_path, m
     assert command[command.index("--roofline-ceiling") + 1] == passed
 
 
+@pytest.mark.parametrize(
+    ("requested", "policy", "lanes", "merge_flag"),
+    [
+        ({}, "sequential", str(SEQUENTIAL_DEFAULT_LANES), "--merge-stacking"),
+        (
+            {"search_policy": SearchPolicy.SEQUENTIAL, "lanes": 1, "merge_stacking": False},
+            "sequential",
+            "1",
+            "--no-merge-stacking",
+        ),
+        ({"search_policy": SearchPolicy.SEQANY}, "seqany", "1", "--merge-stacking"),
+    ],
+)
+def test_optimize_spells_the_search_controls_out_for_the_nested_loop(
+    tmp_path, monkeypatch, requested, policy, lanes, merge_flag
+):
+    captured = {}
+
+    def fake_popen(command, **_kwargs):
+        captured["command"] = command
+        return _FakeProc(["Experiment: EXP-SEARCH\n"])
+
+    monkeypatch.setattr(optimize.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(optimize, "_restore_best_kernel", lambda *a, **k: None)
+    optimize.run_optimize(
+        _spec(tmp_path),
+        "driver.py",
+        Config.from_env(workspace=str(tmp_path)),
+        experiments_dir=str(tmp_path),
+        **requested,
+    )
+
+    command = captured["command"]
+    assert command[command.index("--search-policy") + 1] == policy
+    assert command[command.index("--lanes") + 1] == lanes
+    assert merge_flag in command
+    assert ({"--merge-stacking", "--no-merge-stacking"} - {merge_flag}).isdisjoint(command)
+
+
 def test_run_rewrite_hands_the_source_timings_to_optimize(tmp_path, monkeypatch):
     """Without them every score the loop reports would divide by the port instead of the source."""
     src = tmp_path / "softmax.py"
@@ -297,6 +337,55 @@ def test_run_rewrite_hands_the_roofline_switch_to_optimize(tmp_path, monkeypatch
     )
 
     assert seen["roofline_ceiling"] is True
+
+
+def test_run_rewrite_hands_the_search_controls_to_optimize(tmp_path, monkeypatch):
+    src = tmp_path / "softmax.py"
+    src.write_text("def softmax(x):\n    return x\n")
+    driver = tmp_path / "driver.py"
+    driver.write_text("print('drive')\n")
+    _wire_stub_pipeline(monkeypatch, port_ok=True, best_ms=0.5, source_ms=1.0)
+    seen = {}
+
+    def capture_optimize(*_args, **kwargs):
+        seen.update(kwargs)
+        return {"best_ms": 0.4, "mean_case_speedup": 2.5, "best_commit": "flydsl-best"}
+
+    monkeypatch.setattr(runner, "run_optimize", capture_optimize)
+    runner.run_rewrite(
+        op_name="softmax",
+        source_kernel=str(src),
+        driver=str(driver),
+        workspace=str(tmp_path),
+        experiments_dir=str(tmp_path / "exp"),
+        target_functions=["softmax"],
+        config=Config.from_env(workspace=str(tmp_path)),
+        search_policy=SearchPolicy.SEQANY,
+        merge_stacking=False,
+    )
+
+    assert (seen["search_policy"], seen["lanes"], seen["merge_stacking"]) == (SearchPolicy.SEQANY, 1, False)
+
+
+def test_run_rewrite_refuses_a_lane_count_the_policy_cannot_run_before_any_stage(tmp_path, monkeypatch):
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("no stage may run for a refused lane count")
+
+    monkeypatch.setattr(runner, "run_optimize", unexpected)
+    monkeypatch.setattr(runner, "run_port_loop", unexpected)
+    with pytest.raises(ValueError, match="single lane"):
+        runner.run_rewrite(
+            op_name="softmax",
+            source_kernel=str(tmp_path / "softmax.py"),
+            driver=str(tmp_path / "driver.py"),
+            workspace=str(tmp_path),
+            experiments_dir=str(tmp_path / "exp"),
+            target_functions=["softmax"],
+            config=Config.from_env(workspace=str(tmp_path)),
+            search_policy=SearchPolicy.SEQANY,
+            lanes=2,
+        )
+    assert not (tmp_path / "exp").exists()
 
 
 def test_optimize_trusts_result_json_by_experiment_id(tmp_path, monkeypatch):

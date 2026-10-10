@@ -34,7 +34,7 @@ def test_handoff_store_writes_and_reads_latest(tmp_path):
     latest_path, payload = latest
     assert latest_path == second
     assert payload["iteration"] == 2
-    assert payload["search_policy"]["mode"] == "EXPLOIT"
+    assert payload["search_mode"]["mode"] == "EXPLOIT"
     assert payload["optimization_plan_path"] == ("forge_experiments/orchestration/iter_002/optimization_plan.md")
     assert payload["supervisor_ruling_path"] == "forge_experiments/supervisor/latest.md"
 

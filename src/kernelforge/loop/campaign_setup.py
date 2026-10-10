@@ -21,6 +21,7 @@ from kernelforge.loop.campaign_config import (
     resolve_kernel_backend_override,
     validate_pending_campaign_head,
 )
+from kernelforge.loop.search_policy import DEFAULT_SEARCH_POLICY, SearchPolicy
 
 
 def parse_list(raw: str) -> list[str]:
@@ -61,8 +62,13 @@ def resolve_campaign(
     nproc_per_node: int = 1,
     bench_repeat: int = 1,
     commit_new_paths: list[str] | None = None,
+    search_policy: SearchPolicy | None = None,
 ) -> CampaignResolution:
-    """Resolve or create the immutable campaign configuration."""
+    """Resolve or create the immutable campaign configuration.
+
+    ``search_policy`` is ``None`` when the caller did not choose one: a fresh campaign then gets the default and a
+    resumed or retried one keeps the policy it was created with.
+    """
     workspace = Path(workspace_dir).resolve()
     campaign_store = CampaignConfigStore(str(workspace))
     campaign_root = campaign_store.root
@@ -88,6 +94,11 @@ def resolve_campaign(
                 "--workspace, --resume, and session options only"
             )
         campaign = campaign_store.load()
+        if search_policy is not None and search_policy is not campaign.search_policy:
+            raise ValueError(
+                f"campaign was created with search policy {campaign.search_policy.value!r}; "
+                f"it cannot be resumed under {search_policy.value!r}"
+            )
         return CampaignResolution(
             campaign=campaign,
             program_text=None,
@@ -127,6 +138,11 @@ def resolve_campaign(
         bench_repeat=bench_repeat,
         # What a KEEP may ship beyond the tracked diff is part of the campaign, not of one session's invocation.
         commit_new_paths=list(commit_new_paths or []),
+        search_policy=(
+            search_policy
+            if search_policy is not None
+            else (existing_campaign.search_policy if existing_campaign is not None else DEFAULT_SEARCH_POLICY)
+        ),
         workspace_dir=str(workspace),
         kernel=kernel,
         driver=driver,

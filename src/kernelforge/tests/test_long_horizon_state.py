@@ -25,6 +25,7 @@ from kernelforge.loop.run_state import (
     SESSION_PAUSED,
     SESSION_RUNNING,
     _RECENT_RESULT_CACHE,
+    BestRecord,
     LoopStateStore,
     RunState,
     WorkspaceLockError,
@@ -39,7 +40,9 @@ from kernelforge.loop.run_state import (
     reconcile_stale_running_session,
     should_resume,
     start_session,
+    starting_version,
 )
+from kernelforge.loop.search_policy import SearchCandidate, SearchPolicy, StartingVersion
 from kernelforge.loop.runner import (
     LONG_HORIZON_OUTCOME_WINDOW,
     _long_horizon_header,
@@ -599,6 +602,21 @@ def test_header_contains_best_and_retrieval_pointers():
     assert "iter_NNN" in header
 
 
+def test_header_names_a_starting_version_only_when_it_is_not_the_best():
+    state = RunState(start_commit="base")
+    state.best = BestRecord(iteration=1, wall_ms=0.8, mean_case_speedup=1.25, commit_hash="c1", source="iteration")
+    accepted = StartingVersion(iteration=2, commit_hash="c2", mean_case_speedup=0.9, case_times={"case": 1.1})
+    best = StartingVersion(iteration=1, commit_hash="c1", mean_case_speedup=1.25, case_times={"case": 0.8})
+
+    behind = render_long_horizon_header(state, [], starting=accepted)
+    at_best = render_long_horizon_header(state, [], starting=best)
+
+    assert "Current best: iter 1" in behind
+    assert "Starting version: iter 2 (accepted, not the best), mean case speedup 0.900000x" in behind
+    assert "Starting version" not in at_best
+    assert render_long_horizon_header(state, []) == at_best
+
+
 def test_header_bounded_by_max_chars():
     state = RunState(baseline_wall_ms=1.0)
     apply_iteration(
@@ -742,7 +760,7 @@ def _store_with_live_iteration_events(tmp_path, iterations: range) -> LoopStateS
     """A store fed the events a live iteration writes, for each iteration."""
     store = LoopStateStore(str(tmp_path))
     for iteration in iterations:
-        store.append_event(make_event("search_policy_decision", iteration, mode="EXPLOIT"))
+        store.append_event(make_event("search_mode_decision", iteration, mode="EXPLOIT"))
         store.append_event(make_event("iteration_started", iteration, phase=PHASE_EXPLOIT))
         store.append_event(make_event("analysis_result", iteration, status="ready"))
         store.append_event(
@@ -892,19 +910,110 @@ def test_no_best_recorded_before_first_keep():
 
 def test_should_resume_only_when_commit_is_head():
     fresh = RunState()
-    assert should_resume(fresh, "abc123") is False  # no recorded best
+    assert should_resume(fresh, "abc123", SearchPolicy.SEQUENTIAL) is False  # no recorded best
 
     state = RunState()
     state.best.commit_hash = "abc123"
     state.best.wall_ms = 0.5
     state.best.mean_case_speedup = 2.0
-    assert should_resume(state, "abc123") is True
-    assert should_resume(state, "def456") is False
-    assert should_resume(state, "") is False
+    assert should_resume(state, "abc123", SearchPolicy.SEQUENTIAL) is True
+    assert should_resume(state, "def456", SearchPolicy.SEQUENTIAL) is False
+    assert should_resume(state, "", SearchPolicy.SEQUENTIAL) is False
 
     no_wall = RunState()
     no_wall.best.commit_hash = "abc123"  # commit but never measured
-    assert should_resume(no_wall, "abc123") is False
+    assert should_resume(no_wall, "abc123", SearchPolicy.SEQUENTIAL) is False
+
+
+def test_seqany_resumes_at_the_latest_accepted_commit_not_at_the_best():
+    state = RunState(start_commit="base")
+    state.best = BestRecord(iteration=1, wall_ms=0.5, mean_case_speedup=2.0, commit_hash="c1", source="iteration")
+    state.best_case_times = {"a": 5.0}
+    state.candidates = [
+        SearchCandidate(1, 0, "base", "KEEP", "c1", 2.0, {"a": 5.0}),
+        SearchCandidate(2, 1, "c1", "ACCEPT", "c2", 1.8, {"a": 5.5}),
+    ]
+
+    assert should_resume(state, "c2", SearchPolicy.SEQANY) is True
+    assert should_resume(state, "c1", SearchPolicy.SEQANY) is False
+    assert should_resume(state, "c1", SearchPolicy.SEQUENTIAL) is True
+
+
+@pytest.mark.parametrize("policy", [SearchPolicy.SEQUENTIAL, SearchPolicy.SEQANY])
+def test_the_starting_version_before_any_keep_is_the_campaign_start(policy):
+    state = RunState(start_commit="base", best_case_times={"a": 10.0})
+
+    start = starting_version(state, policy)
+
+    assert (start.iteration, start.commit_hash, start.case_times) == (0, "base", {"a": 10.0})
+
+
+def test_candidate_records_round_trip_and_an_accept_counts_as_no_improvement():
+    state = RunState(start_commit="base")
+    record = SearchCandidate(1, 0, "base", "ACCEPT", "c1", 0.9, {"a": 11.0})
+
+    apply_iteration(
+        state,
+        iteration=1,
+        decision="ACCEPT",
+        kept=False,
+        wall_ms=1.1,
+        mean_case_speedup=0.9,
+        commit_hash="c1",
+        plan="restructure the tile loop",
+        baseline_wall_ms=1.0,
+        best_wall_ms=1.0,
+        candidate=record,
+    )
+
+    assert state.candidates == [record]
+    assert (state.cumulative.accepted, state.cumulative.kept, state.cumulative.reverted) == (1, 0, 0)
+    assert state.stall.unresolved_stall_iters == 1
+    assert state.best.commit_hash == ""
+    assert RunState.from_dict(state.to_dict()) == state
+
+
+def test_a_candidate_record_must_describe_the_iteration_it_is_applied_with():
+    with pytest.raises(ValueError, match="does not describe iteration"):
+        apply_iteration(
+            RunState(),
+            iteration=2,
+            decision="REVERT_PERF",
+            kept=False,
+            wall_ms=1.0,
+            commit_hash="",
+            plan="",
+            baseline_wall_ms=1.0,
+            best_wall_ms=1.0,
+            candidate=SearchCandidate(1, 0, "base", "REVERT_PERF", "", 1.0, {"a": 1.0}),
+        )
+
+
+def test_candidate_records_out_of_order_are_refused():
+    payload = RunState().to_dict()
+    payload["candidates"] = [
+        {
+            "iteration": 2,
+            "parent_iteration": 0,
+            "parent_commit": "b",
+            "decision": "REVERT_VALIDATION",
+            "commit_hash": "",
+            "mean_case_speedup": None,
+            "case_times": {},
+        },
+        {
+            "iteration": 1,
+            "parent_iteration": 0,
+            "parent_commit": "b",
+            "decision": "REVERT_VALIDATION",
+            "commit_hash": "",
+            "mean_case_speedup": None,
+            "case_times": {},
+        },
+    ]
+
+    with pytest.raises(ValueError, match="strictly increasing"):
+        RunState.from_dict(payload)
 
 
 def test_supervisor_intervention_resets_the_cooldown_but_not_the_stall():

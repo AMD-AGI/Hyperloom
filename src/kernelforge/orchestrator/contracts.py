@@ -369,7 +369,7 @@ class OrchestrationContext:
                 "verdict": self.last_critic_verdict,
                 "review": self.last_critic_review,
             },
-            "search_policy": {
+            "search_mode": {
                 "mode": self.search_mode,
                 "reason_codes": list(self.search_reason_codes),
                 "objective_kind": self.search_objective,

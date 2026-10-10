@@ -61,7 +61,7 @@ def test_git_checkout_branch_reports_exception(monkeypatch, tmp_path):
 
 def test_git_cumulative_diff_empty_without_base(tmp_path):
     repo = _init_repo(tmp_path)
-    assert integ._git_cumulative_diff(str(repo), "") == ""
+    assert integ._git_cumulative_diff(str(repo), "", "HEAD") == ""
 
 
 def test_git_cumulative_diff_returns_diff(tmp_path):
@@ -69,9 +69,42 @@ def test_git_cumulative_diff_returns_diff(tmp_path):
     base = integ.git_head(str(repo))
     (repo / "kernel.py").write_text("new\n")
     _run(["git", "commit", "-am", "change"], repo)
-    diff = integ._git_cumulative_diff(str(repo), base)
+    diff = integ._git_cumulative_diff(str(repo), base, "HEAD")
     assert "kernel.py" in diff
     assert "+new" in diff
+
+
+def test_git_cumulative_diff_stops_at_the_given_commit(tmp_path):
+    repo = _init_repo(tmp_path)
+    base = integ.git_head(str(repo))
+    (repo / "kernel.py").write_text("best\n")
+    _run(["git", "commit", "-am", "best"], repo)
+    best = integ.git_head(str(repo))
+    (repo / "kernel.py").write_text("accepted\n")
+    _run(["git", "commit", "-am", "accepted"], repo)
+
+    diff = integ._git_cumulative_diff(str(repo), base, best)
+
+    assert "+best" in diff
+    assert "accepted" not in diff
+
+
+def test_git_sources_at_reads_each_file_as_the_commit_holds_it(tmp_path):
+    repo = _init_repo(tmp_path)
+    (repo / "kernel.py").write_text("best\n")
+    _run(["git", "commit", "-am", "best"], repo)
+    best = integ.git_head(str(repo))
+    (repo / "kernel.py").write_text("accepted\n")
+    (repo / "helper.py").write_text("added later\n")
+    _run(["git", "add", "-A"], repo)
+    _run(["git", "commit", "-m", "accepted"], repo)
+    outside = tmp_path / "outside.py"
+    outside.write_text("not in the workspace\n")
+    paths = [str(repo / "kernel.py"), str(repo / "helper.py"), str(outside)]
+
+    contents = integ._git_sources_at(str(repo), best, paths)
+
+    assert contents == {paths[0]: "best\n", paths[1]: "", paths[2]: ""}
 
 
 def test_git_cumulative_diff_empty_on_exception(monkeypatch, tmp_path):
@@ -79,7 +112,7 @@ def test_git_cumulative_diff_empty_on_exception(monkeypatch, tmp_path):
         raise OSError("git missing")
 
     monkeypatch.setattr(integ, "git", boom)
-    assert integ._git_cumulative_diff(str(tmp_path), "base") == ""
+    assert integ._git_cumulative_diff(str(tmp_path), "base", "HEAD") == ""
 
 
 def test_git_apply_check_and_exception(tmp_path):
@@ -290,7 +323,7 @@ def test_write_experience_to_kb_does_not_synthesize_speedup(monkeypatch, tmp_pat
         "kernelforge.knowledge.kb_store.writer.write_run_experience",
         reject_missing_speedup,
     )
-    monkeypatch.setattr(integ, "_git_cumulative_diff", lambda _w, _b: "diff")
+    monkeypatch.setattr(integ, "_git_cumulative_diff", lambda *_args: "diff")
 
     class _LR:
         experiment = type("E", (), {"experiment_id": "e"})()
@@ -306,6 +339,7 @@ def test_write_experience_to_kb_does_not_synthesize_speedup(monkeypatch, tmp_pat
         kernel_backend="triton",
         gpu_target="gfx942",
         base_sha="base",
+        commit="best",
     )
     assert status == {
         "written": False,

@@ -5,7 +5,8 @@
 
 from __future__ import annotations
 
-from kernelforge.loop.run_state import RunState
+from kernelforge.loop.run_state import RunState, best_version
+from kernelforge.loop.search_policy import StartingVersion
 
 # Canonical on-disk locations, shown to the agent so it can Read detail on demand.
 _ARCHIVE_REL = "forge_experiments/candidates"
@@ -92,8 +93,12 @@ def render_long_horizon_header(
     max_recent: int = MAX_RECENT_ATTEMPT_LINES,
     max_chars: int = 4000,
     include_handoffs: bool = False,
+    starting: StartingVersion | None = None,
 ) -> str:
-    """Render the compact long-horizon memory header, or \"\" when state is empty."""
+    """Render the compact long-horizon memory header, or \"\" when state is empty.
+
+    ``starting`` is the version this iteration starts from; it is named when it is not the best.
+    """
     # Render nothing until there is substantive history, so the loop's cold-start prompt (iteration 1, before any
     # result) is unchanged.
     has_history = (
@@ -126,6 +131,13 @@ def render_long_horizon_header(
         lead.append(
             "Baseline: mean case speedup 1.000000x, raw mean "
             f"{_fmt_ms(state.baseline_wall_ms)} (no kept improvement yet)"
+        )
+    if starting is not None and starting.commit_hash != best_version(state).commit_hash:
+        score = f"{starting.mean_case_speedup:.6f}x" if starting.mean_case_speedup is not None else "?"
+        lead.append(
+            f"Starting version: iter {starting.iteration} (accepted, not the best), mean case speedup {score}. "
+            "The workspace holds this version and this iteration's candidate is made from it; "
+            "a KEEP still has to beat the current best."
         )
 
     if state.stall.unresolved_stall_iters > 0:

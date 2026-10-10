@@ -48,10 +48,14 @@ The state contains:
 
 - Campaign, session, branch, task, and Git HEAD identity.
 - Current and next iteration numbers.
-- KEEP, REVERT, API error, and orchestration error counters.
+- KEEP, ACCEPT, REVERT, API error, and orchestration error counters.
 - EXPLOIT/DIVERSIFY search state.
 - Pristine per-case baseline and complete KEEP/REVERT scoring state.
 - Current best commit and score.
+- One record per candidate-producing iteration: its parent version, decision,
+  commit, score and per-case times. The search policy derives each iteration's
+  starting version from these records; see
+  [Forge-loop search policy](forge_search_policy.md).
 - Active Analysis evidence commit, score anchor, status, and last attempt.
 - Stall and supervisor intervention state, as two separate counters: how many
   iterations the search has gone without a real KEEP, which drives the phase
@@ -80,7 +84,7 @@ and `iter`. Event types include:
 - `session_started`
 - `session_interrupted`
 - `iteration_started`
-- `search_policy_decision`
+- `search_mode_decision`
 - `analysis_refresh_decision`
 - `analysis_result`
 - `supervisor_ruling`
@@ -100,15 +104,18 @@ Resume is fail-closed. It requires:
 
 - A `campaign_config.json` and `run_state.json` written by the current code.
   Files from a different field set are rejected, never migrated.
-- Matching task fingerprint, driver digest, Git branch, and canonical HEAD.
+- Matching task fingerprint, driver digest, Git branch, and a HEAD equal to the
+  search policy's starting version, with the best commit as its ancestor or
+  itself.
 - Complete pristine per-case baseline and current best score.
 - No unexplained tracked working-tree changes.
 
 `pending_keep.json` is the crash journal for the narrow interval between
-canonical validation, Git commit, state publication, and archive publication.
-Resume reconciles this journal before admitting another Implementer session.
-A journal whose key set differs from the one the current code writes is
-rejected.
+canonical validation, Git commit, state publication, and archive publication of
+a `KEEP` or an `ACCEPT`. Resume reconciles this journal before admitting another
+Implementer session. Its `promotes_best` field distinguishes a `KEEP`, whose
+best record and publication resume must also finish, from an `ACCEPT`. A
+journal whose key set differs from the one the current code writes is rejected.
 
 Every process-local resume creates a new experiment segment while retaining the
 campaign identity and cumulative state.
@@ -305,16 +312,17 @@ writes an `optimization_plan.md` that points the Implementer at the current Anal
 bundle and asks it to plan directly. `ORCHESTRATION_ERROR` is reserved for
 deterministic infrastructure failures such as being unable to persist that plan.
 
-Analysis evidence is commit-bound but is not rebuilt after every KEEP. The
-refresh threshold is currently a code-level constant of 5%. A stale bundle is
-refreshed when the current canonical mean-case score reaches the score measured
-at the evidence commit multiplied by `1.05`, or immediately before a Supervisor
+Analysis evidence is bound to the commit the search policy starts the next
+iteration from, and is not rebuilt after every commit. The refresh threshold is
+a code-level constant of 5%. A stale bundle is refreshed when the starting
+version's mean-case score has moved by at least 5% from the score measured at
+the evidence commit, in either direction, or immediately before a Supervisor
 intervention. Supervisor admission does not reprofile evidence that already
-matches the current canonical.
+matches the starting version.
 
 Between refreshes, Orchestration, specialists, the Supervisor, and the
 Implementer receive the last published bundle, its absolute artifact paths, the
-commit it measured, the current canonical commit, current case timings, and the
+commit it measured, the starting version's commit and case timings, and the
 cumulative Git diff between those commits. Historical profiling is explicitly
 marked stale and is never presented as a current measurement. Cumulative diff
 generation has its own 60-second timeout. If it fails, the bundle remains
@@ -419,4 +427,6 @@ the case, the benches bought and the before/after sigma whenever this happens. T
 is no upper limit on the score a candidate may claim. The mean of the three
 passing scores becomes the new monotonic best -- the same statistic the bar is
 set on, so the incumbent and the threshold are measured the same way. Neither raw aggregate wall time nor
-individual case regressions decide KEEP/REVERT.
+individual case regressions decide KEEP/REVERT. Whether a valid candidate that misses the bar is reverted or
+accepted as the next starting version is decided by the
+[search policy](forge_search_policy.md).

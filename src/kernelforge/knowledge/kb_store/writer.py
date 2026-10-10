@@ -357,6 +357,7 @@ def write_run_experience(
     digest: str,
     snr_db: float | None = None,
     source_files: list[str] | None = None,
+    source_contents: dict[str, str] | None = None,
     target_functions: list[str] | None = None,
     operator_name: str = "",
     implementation_signature_override: str = "",
@@ -366,7 +367,10 @@ def write_run_experience(
     reused_speedup: float | None = None,
     usage=None,
 ) -> dict[str, Any]:
-    """Mirror one run's best solution into the experience store. Never raises."""
+    """Mirror one run's best solution into the experience store. Never raises.
+
+    ``source_contents`` holds the solution's source files by path; a path it lists is never read from the workspace.
+    """
     try:
         return _write_run_experience_impl(
             config=config,
@@ -383,6 +387,7 @@ def write_run_experience(
             digest=digest,
             snr_db=snr_db,
             source_files=source_files,
+            source_contents=source_contents,
             target_functions=target_functions,
             operator_name=operator_name,
             implementation_signature_override=implementation_signature_override,
@@ -414,6 +419,7 @@ def _write_run_experience_impl(
     digest,
     snr_db,
     source_files=None,
+    source_contents=None,
     target_functions=None,
     operator_name="",
     implementation_signature_override="",
@@ -463,13 +469,20 @@ def _write_run_experience_impl(
         gpu_type=gpu_type,
         target_functions=target_functions,
         source_files=source_files,
+        source_contents=source_contents,
         framework=framework,
         operator_name=operator_name,
         producer=getattr(config, "producer", ""),
     )
     op = identity.kernel_name
     backend_lang = identity.backend
-    op_source = find_defining_source(concrete_op, kernel_path, kernel_source, source_files)
+    op_source = find_defining_source(
+        concrete_op,
+        kernel_path,
+        kernel_source,
+        source_files,
+        source_contents=source_contents,
+    )
     dtypes = extract_input_dtypes(op_source, concrete_op, backend_lang)
     if implementation_signature_override and implementation_identity_override:
         impl_signature = str(implementation_signature_override)

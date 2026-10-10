@@ -14,6 +14,7 @@ from pathlib import Path
 
 from kernelforge.llm.git import git
 from kernelforge.kernel_backends.constants import resolve_language_dirs
+from kernelforge.loop.run_state import best_version, starting_version
 from kernelforge.orchestrator.contracts import EvidenceRef
 from kernelforge.orchestrator.supervisor import latest_supervisor_ruling_path
 from kernelforge.durable_io import atomic_write_text
@@ -107,11 +108,22 @@ class AnalysisEvidenceMixin:
         self._analysis_diff_results[cache_key] = result
         return result
 
+    def _starting_version_measurements(self) -> tuple[float | None, dict[str, float]]:
+        """Score and per-case times of the version the next iteration starts from.
+
+        When that version is the best, the loop's live incumbent is the authority: before the first KEEP it holds the
+        scored starting kernel, which the best record leaves unset.
+        """
+        start = starting_version(self.run_state, self.ic.search_policy)
+        if start.commit_hash == best_version(self.run_state).commit_hash:
+            return self.best_mean_case_speedup, self._best_case_times
+        return start.mean_case_speedup, start.case_times
+
     def _canonical_commit(self) -> str:
         """The tree state everything planned this round is attributed to."""
         head_lines = self._git("rev-parse", "HEAD").strip().splitlines()
         return (
-            self.run_state.best.commit_hash
+            starting_version(self.run_state, self.ic.search_policy).commit_hash
             or self.run_state.head_commit
             or (head_lines[0] if head_lines else "")
             or self.ic.campaign_base_commit
@@ -142,10 +154,11 @@ class AnalysisEvidenceMixin:
         ]
         if not scored_case_ids:
             scored_case_ids = sorted(self._baseline_case_times)
+        starting_score, starting_case_times = self._starting_version_measurements()
         cases = tuple(
             CaseEvidence(
                 case_id=case_id,
-                latency_ms=(self._best_case_times.get(case_id) or self._baseline_case_times.get(case_id)),
+                latency_ms=(starting_case_times.get(case_id) or self._baseline_case_times.get(case_id)),
             )
             for case_id in scored_case_ids
         )
@@ -274,7 +287,7 @@ class AnalysisEvidenceMixin:
             evidence_stale=bool(evidence_commit and evidence_commit != canonical_commit),
             evidence_status=analysis_state.evidence_status,
             evidence_mean_case_speedup=(analysis_state.evidence_mean_case_speedup),
-            current_mean_case_speedup=self.best_mean_case_speedup,
+            current_mean_case_speedup=starting_score,
             cumulative_diff_path=cumulative_diff_path,
             cumulative_diff_error=cumulative_diff.error,
         )
@@ -334,9 +347,9 @@ class AnalysisEvidenceMixin:
                 self._last_published_analysis_commit = commit
                 self.run_state.analysis.evidence_commit = commit
                 self.run_state.analysis.evidence_status = str(event.get("available_tier") or "published")
-                current_best_commit = self.run_state.best.commit_hash or self.run_state.head_commit
-                if commit == current_best_commit:
-                    self.run_state.analysis.evidence_mean_case_speedup = self.run_state.best.mean_case_speedup or 1.0
+                start = starting_version(self.run_state, self.ic.search_policy)
+                if commit == start.commit_hash:
+                    self.run_state.analysis.evidence_mean_case_speedup = start.mean_case_speedup or 1.0
                 return
         head_lines = self._git("rev-parse", "HEAD").splitlines()
         if head_lines and self._looks_like_git_commit(head_lines[0]):

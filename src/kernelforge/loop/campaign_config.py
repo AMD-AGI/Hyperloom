@@ -29,6 +29,7 @@ from kernelforge.loop.new_path_allowlist import normalize_commit_new_paths
 from kernelforge.mcp_server.tools.pmc import derive_kernel_names
 from kernelforge.durable_io import atomic_write_text
 from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.loop.search_policy import DEFAULT_SEARCH_POLICY, SearchPolicy, parse_search_policy
 
 
 # The trailing lookahead skips rocminfo's generic ISA names (``gfx12-generic``), listed beside the concrete target.
@@ -74,9 +75,13 @@ class CampaignConfig:
     # Paths the Implementer may CREATE and still have committed with a KEEP (see
     # ``IterationConfig.commit_new_paths``).
     commit_new_paths: list[str] = field(default_factory=list)
+    # Fixed per campaign: it decides what the campaign branch's latest commit means.
+    search_policy: SearchPolicy = DEFAULT_SEARCH_POLICY
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        payload = asdict(self)
+        payload["search_policy"] = self.search_policy.value
+        return payload
 
     @classmethod
     def from_dict(cls, payload: dict) -> "CampaignConfig":
@@ -116,6 +121,7 @@ class CampaignConfig:
             # hand-edited pattern the loop would read differently than its author meant is refused here rather than
             # acted on later.
             commit_new_paths=normalize_commit_new_paths(payload["commit_new_paths"]),
+            search_policy=parse_search_policy(payload["search_policy"]),
         )
         if config.nproc_per_node < 1:
             raise ValueError("campaign nproc_per_node must be positive")
@@ -440,6 +446,7 @@ def create_campaign_config(
     nproc_per_node: int = 1,
     bench_repeat: int = 1,
     commit_new_paths: list[str] | None = None,
+    search_policy: SearchPolicy = DEFAULT_SEARCH_POLICY,
 ) -> CampaignConfig:
     """Resolve and normalize all immutable inputs for a fresh campaign."""
     workspace = Path(workspace_dir).resolve()
@@ -552,4 +559,5 @@ def create_campaign_config(
         nproc_per_node=max(1, int(nproc_per_node or 1)),
         bench_repeat=max(1, int(bench_repeat or 1)),
         commit_new_paths=normalize_commit_new_paths(commit_new_paths or []),
+        search_policy=search_policy,
     )

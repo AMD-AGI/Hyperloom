@@ -1360,7 +1360,12 @@ def test_write_experience_to_kb_extracts_run_context(monkeypatch, tmp_path):
         "kernelforge.knowledge.kb_store.writer.write_run_experience",
         fake_write_run_experience,
     )
-    monkeypatch.setattr(integ, "_git_cumulative_diff", lambda _workspace, _base: "diff")
+    monkeypatch.setattr(integ, "_git_cumulative_diff", lambda *_args: "diff")
+    monkeypatch.setattr(
+        integ,
+        "_git_sources_at",
+        lambda _workspace, _commit, paths: {path: Path(path).read_text() for path in paths},
+    )
     usage = object()
 
     status = integ.write_experience_to_kb(
@@ -1371,6 +1376,7 @@ def test_write_experience_to_kb_extracts_run_context(monkeypatch, tmp_path):
         kernel_backend="triton",
         gpu_target="gfx942",
         base_sha="base",
+        commit="best",
         pristine_baseline_ms=12.0,
         usage=usage,
     )
@@ -1379,6 +1385,7 @@ def test_write_experience_to_kb_extracts_run_context(monkeypatch, tmp_path):
     assert captured["workspace"] == str(tmp_path)
     assert captured["kernel_path"] == str(kernel)
     assert captured["kernel_source"] == kernel.read_text()
+    assert captured["source_contents"] == {str(kernel): kernel.read_text()}
     assert captured["kernel_backend"] == "triton"
     assert captured["gpu_target"] == "gfx942"
     assert captured["experiment_id"] == "exp123"
@@ -1390,6 +1397,91 @@ def test_write_experience_to_kb_extracts_run_context(monkeypatch, tmp_path):
     assert captured["snr_db"] == 42.0
     assert "workload_key" not in captured
     assert captured["usage"] is usage
+
+
+def _commit_all(workspace: Path, message: str) -> str:
+    subprocess.run(["git", "add", "-A"], cwd=workspace, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", message],
+        cwd=workspace,
+        check=True,
+        capture_output=True,
+    )
+    return integ.git_head(str(workspace))
+
+
+def _accepted_past_the_best(tmp_path: Path) -> tuple[Path, Path, Path, str, str]:
+    """A seqany workspace whose latest commit is an ACCEPT made after the best."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=workspace, check=True)
+    kernel = workspace / "kernel.py"
+    helper = workspace / "helper.py"
+    kernel.write_text("def kernel(x):\n    return x\n")
+    helper.write_text("BLOCK = 64\n")
+    base = _commit_all(workspace, "base")
+    kernel.write_text("def kernel(x):\n    return x * 1  # best\n")
+    best = _commit_all(workspace, "best")
+    kernel.write_text("def kernel(x):\n    return x * 1  # accepted, slower\n")
+    helper.write_text("BLOCK = 128\n")
+    _commit_all(workspace, "accepted")
+    return workspace, kernel, helper, base, best
+
+
+def _captured_write(monkeypatch) -> dict:
+    captured: dict = {}
+
+    def fake_write_run_experience(**kwargs):
+        captured.update(kwargs)
+        return {"written": True, "solution": "solution", "speedup": 3.0}
+
+    monkeypatch.setattr("kernelforge.knowledge.kb_store.writer.write_run_experience", fake_write_run_experience)
+    return captured
+
+
+def test_the_published_solution_is_the_best_commit_not_the_latest_accept(monkeypatch, tmp_path):
+    """Under seqany the workspace holds a slower accepted version; the KB record must carry the best's code."""
+    workspace, kernel, helper, base, best = _accepted_past_the_best(tmp_path)
+    captured = _captured_write(monkeypatch)
+
+    integ.write_experience_to_kb(
+        config=object(),
+        loop_runner=_FakeLoopRunner(),
+        workspace_dir=str(workspace),
+        kernel=str(kernel),
+        kernel_backend="triton",
+        gpu_target="gfx942",
+        base_sha=base,
+        commit=best,
+        source_files=[str(helper)],
+    )
+
+    assert "# best" in captured["cumulative_diff"]
+    assert "accepted" not in captured["cumulative_diff"]
+    assert "helper.py" not in captured["cumulative_diff"]
+    assert captured["kernel_source"] == "def kernel(x):\n    return x * 1  # best\n"
+    assert captured["source_contents"][str(helper)] == "BLOCK = 64\n"
+
+
+def test_a_run_with_no_keep_publishes_no_patch_even_when_it_accepted_some(monkeypatch, tmp_path):
+    """Before the first KEEP the solution is the base, so the accepted commits never reach the KB."""
+    workspace, kernel, helper, base, _best = _accepted_past_the_best(tmp_path)
+    captured = _captured_write(monkeypatch)
+
+    integ.write_experience_to_kb(
+        config=object(),
+        loop_runner=_FakeLoopRunner(),
+        workspace_dir=str(workspace),
+        kernel=str(kernel),
+        kernel_backend="triton",
+        gpu_target="gfx942",
+        base_sha=base,
+        commit="",
+        source_files=[str(helper)],
+    )
+
+    assert captured["cumulative_diff"] == ""
+    assert captured["kernel_source"] == "def kernel(x):\n    return x\n"
 
 
 def test_write_experience_to_kb_names_the_failure_that_stopped_the_publish(
@@ -1416,6 +1508,7 @@ def test_write_experience_to_kb_names_the_failure_that_stopped_the_publish(
         kernel_backend="triton",
         gpu_target="gfx942",
         base_sha="base",
+        commit="best",
     )
 
     assert status["written"] is False
@@ -1480,6 +1573,7 @@ def test_write_uses_pristine_campaign_signature_after_helper_is_added(
         kernel_backend="triton",
         gpu_target="gfx942",
         base_sha="base",
+        commit="best",
         target_functions=["different_caller_target"],
         framework="vllm",
     )
@@ -1589,6 +1683,7 @@ def test_a_store_failure_reaches_the_publish_status_already_redacted(
         kernel_backend="triton",
         gpu_target="gfx950",
         base_sha="base",
+        commit="best",
         pristine_baseline_ms=12.0,
         framework="vllm",
         llm_summary=False,

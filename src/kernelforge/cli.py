@@ -37,6 +37,13 @@ from kernelforge.loop.recovery import (
     rollback_unpublished_warm_start,
 )
 from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.loop.search_policy import (
+    DEFAULT_SEARCH_POLICY,
+    SEQUENTIAL_DEFAULT_LANES,
+    SearchPolicy,
+    parse_search_policy,
+    resolve_lanes,
+)
 
 if TYPE_CHECKING:
     # Imported lazily at runtime to keep CLI startup off the knowledge stack.
@@ -871,17 +878,31 @@ def _make_lane_agent_factory(
     "(single-GPU, unchanged behavior).",
 )
 @click.option(
+    "--search-policy",
+    default=None,
+    type=click.Choice([policy.value for policy in SearchPolicy], case_sensitive=False),
+    help="Which measured candidates later iterations build on. "
+    "'sequential' (default) continues only from a candidate that beats "
+    "the current best; 'seqany' continues from every correct candidate "
+    "whose benchmark completed, while the published best still only "
+    "moves on a KEEP. Immutable per campaign: snapshotted into "
+    "campaign_config.json, used on --resume when omitted, and a "
+    "different value on --resume is refused.",
+)
+@click.option(
     "--lanes",
-    default=3,
+    default=None,
     type=click.IntRange(min=1, max=8),
     help="Implementer lanes per round. Above 1 the round's analysis is "
     "partitioned into that many non-overlapping plans, each run "
     "concurrently in its own workspace copy, and each candidate is "
-    "measured on its own. Default 3: the lanes of a round run "
+    f"measured on its own. Default {SEQUENTIAL_DEFAULT_LANES} under the "
+    "sequential search policy: the lanes of a round run "
     "concurrently, so a lane costs a session rather than a share "
     "of the round's wall clock, and three is what the three "
     "specialist analyses can be divided into. The partition "
-    "returns fewer when the evidence supports fewer. Above 1 "
+    "returns fewer when the evidence supports fewer. The seqany "
+    "search policy runs exactly one lane and refuses more. Above 1 "
     "needs a provider that declares session_env and is refused on "
     "one that does not; a provider without stop_hooks runs and is "
     "warned, because it can waste a round but not misreport one.",
@@ -894,7 +915,9 @@ def _make_lane_agent_factory(
     "together, chosen for winning on different cases. Costs a "
     "measurement but no Implementer session. Default on; this "
     "applies at every --lanes setting, so turn it off to compare "
-    "against a run that predates it.",
+    "against a run that predates it. Has no effect under the seqany "
+    "search policy, which accepts every valid candidate and so never "
+    "has a rejected gain to stack.",
 )
 @click.option(
     "--bench-repeat",
@@ -1121,6 +1144,7 @@ def forge_loop(
     resume,
     nproc_per_node,
     bench_repeat,
+    search_policy,
     lanes,
     merge_stacking,
     specialist_probe,
@@ -1225,6 +1249,7 @@ def forge_loop(
             nproc_per_node=nproc_per_node,
             bench_repeat=bench_repeat,
             commit_new_paths=list(commit_new_paths),
+            search_policy=(parse_search_policy(search_policy) if search_policy is not None else None),
         )
     except (OSError, ValueError) as error:
         raise click.ClickException(str(error)) from error
@@ -1263,6 +1288,10 @@ def forge_loop(
     # From the campaign for the same reason: a resumed session that fell back to an empty allowlist could neither ship
     # nor remove the new file an earlier session was configured to.
     commit_new_paths = list(campaign.commit_new_paths)
+    try:
+        lanes = resolve_lanes(campaign.search_policy, lanes)
+    except ValueError as error:
+        raise click.ClickException(f"--lanes: {error}") from error
     profiling_enabled = bool(profiling and long_horizon)
 
     overrides = {"gpu_target": gpu_target}
@@ -1364,6 +1393,7 @@ def forge_loop(
         # Measurement fidelity: in-process repeats within each independent bench.
         bench_repeat=bench_repeat,
         lanes=lanes,
+        search_policy=campaign.search_policy,
         merge_stacking=merge_stacking,
         # New files a KEEP may carry; a REVERT removes exactly the same set.
         commit_new_paths=commit_new_paths,
@@ -2125,6 +2155,7 @@ def forge_loop(
                 kernel_backend=kernel_backend,
                 gpu_target=config.gpu_target,
                 base_sha=base_sha,
+                commit=commit,
                 pristine_baseline_ms=kb_pristine_baseline_ms,
                 reused_speedup=kb_reused_speedup,
                 source_files=source_files_list,
@@ -2487,6 +2518,29 @@ def _emit_rewrite_applyback_contract(ctx, _param, value):
     "and steer its planner by the attainment against it; the estimate costs a "
     "profiler pass and an analyst session, paid out of the OPTIMIZE budget."
 )
+@click.option(
+    "--search-policy",
+    default=DEFAULT_SEARCH_POLICY.value,
+    show_default=True,
+    type=click.Choice([policy.value for policy in SearchPolicy], case_sensitive=False),
+    help="OPTIMIZE: which measured candidates the nested forge-loop builds on; "
+    "same meaning as forge-loop --search-policy.",
+)
+@click.option(
+    "--lanes",
+    default=None,
+    type=click.IntRange(min=1, max=8),
+    help="OPTIMIZE: Implementer lanes per round of the nested forge-loop. "
+    f"Default {SEQUENTIAL_DEFAULT_LANES} under the sequential search policy; "
+    "seqany runs exactly one lane and refuses more.",
+)
+@click.option(
+    "--merge-stacking/--no-merge-stacking",
+    default=True,
+    show_default=True,
+    help="OPTIMIZE: whether a stalled nested forge-loop may measure two archived "
+    "rejected gains applied together; same meaning as on forge-loop.",
+)
 @click.option("--result-json", default=None, help="Write the result dict here (also printed)")
 def forge_rewrite(
     source_kernel,
@@ -2518,11 +2572,20 @@ def forge_rewrite(
     supervisor_backend,
     profile_timeout_sec,
     roofline_ceiling,
+    search_policy,
+    lanes,
+    merge_stacking,
     result_json,
 ):
     """Rewrite a source kernel into FlyDSL and optimize it via forge-loop."""
     import os
     import re as _re
+
+    policy = parse_search_policy(search_policy)
+    try:
+        lanes = resolve_lanes(policy, lanes)
+    except ValueError as error:
+        raise click.ClickException(f"--lanes: {error}") from error
 
     overrides = {}
     if gpu_target:
@@ -2576,6 +2639,9 @@ def forge_rewrite(
         supervisor_backend=supervisor_backend,
         profile_timeout_sec=profile_timeout_sec,
         roofline_ceiling=roofline_ceiling == CEILING_ON,
+        search_policy=policy,
+        lanes=lanes,
+        merge_stacking=merge_stacking,
         result_json=result_json,
         deadline_unix=deadline_unix,
         framework=framework,

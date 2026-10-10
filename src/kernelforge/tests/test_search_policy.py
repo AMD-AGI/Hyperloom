@@ -1,296 +1,125 @@
-"""Tests for deterministic EXPLOIT and DIVERSIFY policy decisions."""
+"""Tests for the search policy: what is accepted and where the next iteration starts."""
 
 from __future__ import annotations
 
 import pytest
 
-from kernelforge.loop.run_state import RunState
 from kernelforge.loop.search_policy import (
-    MARGINAL_GAIN_FLOOR,
-    NO_CHANGES_ESCALATION_THRESHOLD,
-    OBJECTIVE_DISCOVER_NEW_MECHANISM,
-    OBJECTIVE_IMMEDIATE_CANONICAL_GAIN,
-    SEARCH_MODE_DIVERSIFY,
-    SEARCH_MODE_EXPLOIT,
-    SearchPolicyDecision,
-    SearchPolicyEngine,
+    DEFAULT_SEARCH_POLICY,
+    SEQUENTIAL_DEFAULT_LANES,
+    SearchCandidate,
+    SearchPolicy,
+    StartingVersion,
+    accepts,
+    parse_search_policy,
+    resolve_lanes,
+    select_starting_version,
 )
 
+BEST = StartingVersion(iteration=3, commit_hash="best", mean_case_speedup=1.4, case_times={"a": 7.0})
 
-def test_warm_start_exploits_until_stalled():
-    decision = SearchPolicyEngine().decide(
-        best_source="warm_start",
-        no_improvement_iters=0,
-        stall_threshold=3,
+
+def _record(iteration: int, decision: str, *, commit: str = "", score: float | None = None) -> SearchCandidate:
+    valid = decision in {"KEEP", "ACCEPT", "REVERT_PERF"}
+    return SearchCandidate(
+        iteration=iteration,
+        parent_iteration=iteration - 1,
+        parent_commit=f"parent-{iteration}",
+        decision=decision,
+        commit_hash=commit,
+        mean_case_speedup=score if valid else None,
+        case_times={"a": 10.0 / (score or 1.0)} if valid else {},
     )
 
-    assert decision.mode == SEARCH_MODE_EXPLOIT
-    assert decision.reason_codes == ("KB_WARM_START_EXPLOIT",)
+
+def test_sequential_is_the_default():
+    assert DEFAULT_SEARCH_POLICY is SearchPolicy.SEQUENTIAL
 
 
-def test_stalled_warm_start_enters_diversify():
-    decision = SearchPolicyEngine().decide(
-        best_source="warm_start",
-        no_improvement_iters=3,
-        stall_threshold=3,
-    )
-
-    assert decision.mode == SEARCH_MODE_DIVERSIFY
-    assert decision.reason_codes == ("NO_IMPROVEMENT_STALL",)
-
-
-def test_fresh_productive_search_exploits():
-    decision = SearchPolicyEngine().decide(
-        best_source="iteration",
-        no_improvement_iters=0,
-        stall_threshold=3,
-    )
-
-    assert decision.mode == SEARCH_MODE_EXPLOIT
+@pytest.mark.parametrize(
+    ("policy", "valid", "improves_best", "expected"),
+    [
+        (SearchPolicy.SEQUENTIAL, True, True, True),
+        (SearchPolicy.SEQUENTIAL, True, False, False),
+        (SearchPolicy.SEQUENTIAL, False, False, False),
+        (SearchPolicy.SEQANY, True, True, True),
+        (SearchPolicy.SEQANY, True, False, True),
+        (SearchPolicy.SEQANY, False, False, False),
+    ],
+)
+def test_acceptance_rule(policy, valid, improves_best, expected):
+    assert accepts(policy, valid=valid, improves_best=improves_best) is expected
 
 
-def test_stall_enters_diversify():
-    stalled = SearchPolicyEngine().decide(
-        best_source="iteration",
-        no_improvement_iters=3,
-        stall_threshold=3,
-    )
+def test_sequential_always_starts_from_the_best_version():
+    records = [_record(4, "ACCEPT", commit="c4", score=1.2)]
 
-    assert stalled.mode == SEARCH_MODE_DIVERSIFY
-    assert stalled.reason_codes == ("NO_IMPROVEMENT_STALL",)
+    assert select_starting_version(SearchPolicy.SEQUENTIAL, candidates=records, best=BEST) == BEST
 
 
-def test_completed_diversify_cycle_opens_bounded_exploit_window():
-    engine = SearchPolicyEngine()
+def test_seqany_starts_from_the_most_recent_committed_candidate():
+    records = [
+        _record(4, "KEEP", commit="c4", score=1.5),
+        _record(5, "ACCEPT", commit="c5", score=1.3),
+        _record(6, "REVERT_VALIDATION"),
+        _record(7, "REVERT_INTEGRITY"),
+    ]
 
-    first = engine.decide(
-        best_source="warm_start",
-        no_improvement_iters=1,
-        stall_threshold=3,
-        current_mode=SEARCH_MODE_DIVERSIFY,
-        diversification_cycle_completed=True,
-    )
-    second = engine.decide(
-        best_source="warm_start",
-        no_improvement_iters=2,
-        stall_threshold=3,
-        current_mode=first.mode,
-        residence_iterations_remaining=(first.residence_iterations_remaining),
-    )
+    start = select_starting_version(SearchPolicy.SEQANY, candidates=records, best=BEST)
 
-    assert first.mode == SEARCH_MODE_EXPLOIT
-    assert first.reason_codes == ("DIVERSIFY_PLAN_CREATED",)
-    assert first.residence_iterations_remaining == 2
-    assert second.mode == SEARCH_MODE_EXPLOIT
-    assert second.reason_codes == ("MODE_RESIDENCE",)
-    assert second.residence_iterations_remaining == 1
+    assert start == StartingVersion(iteration=5, commit_hash="c5", mean_case_speedup=1.3, case_times={"a": 10.0 / 1.3})
 
 
-def test_incomplete_diversify_cycle_stays_in_diversify():
-    decision = SearchPolicyEngine().decide(
-        best_source="iteration",
-        no_improvement_iters=5,
-        stall_threshold=3,
-        current_mode=SEARCH_MODE_DIVERSIFY,
-    )
+def test_seqany_starts_from_the_best_version_before_anything_is_committed():
+    records = [_record(1, "REVERT_VALIDATION")]
 
-    assert decision.mode == SEARCH_MODE_DIVERSIFY
-    assert decision.reason_codes == ("NO_IMPROVEMENT_STALL",)
+    assert select_starting_version(SearchPolicy.SEQANY, candidates=records, best=BEST) == BEST
 
 
-def test_repeated_no_changes_diversifies_below_the_stall_threshold():
-    decision = SearchPolicyEngine().decide(
-        best_source="iteration",
-        no_improvement_iters=NO_CHANGES_ESCALATION_THRESHOLD,
-        stall_threshold=NO_CHANGES_ESCALATION_THRESHOLD + 1,
-        consecutive_no_changes=NO_CHANGES_ESCALATION_THRESHOLD,
-    )
-
-    assert decision.mode == SEARCH_MODE_DIVERSIFY
-    assert decision.reason_codes == ("REPEATED_NO_CHANGES",)
-    assert decision.objective_kind == OBJECTIVE_DISCOVER_NEW_MECHANISM
-    assert decision.residence_iterations_remaining == 0
-
-
-def test_first_no_changes_does_not_escalate():
-    decision = SearchPolicyEngine().decide(
-        best_source="iteration",
-        no_improvement_iters=1,
-        stall_threshold=3,
-        consecutive_no_changes=NO_CHANGES_ESCALATION_THRESHOLD - 1,
-    )
-
-    assert decision.mode == SEARCH_MODE_EXPLOIT
-    assert decision.reason_codes == ("CANONICAL_GAIN_AVAILABLE",)
+@pytest.mark.parametrize(
+    ("policy", "requested", "expected"),
+    [
+        (SearchPolicy.SEQUENTIAL, None, SEQUENTIAL_DEFAULT_LANES),
+        (SearchPolicy.SEQUENTIAL, 5, 5),
+        (SearchPolicy.SEQANY, None, 1),
+        (SearchPolicy.SEQANY, 1, 1),
+    ],
+)
+def test_lane_count_follows_the_policy(policy, requested, expected):
+    assert resolve_lanes(policy, requested) == expected
 
 
-def test_repeated_no_changes_outranks_mode_residence():
-    """Escalate on empty diffs even while the mode is held in EXPLOIT."""
-    engine = SearchPolicyEngine()
-
-    held = engine.decide(
-        best_source="iteration",
-        no_improvement_iters=0,
-        stall_threshold=3,
-        current_mode=SEARCH_MODE_EXPLOIT,
-        residence_iterations_remaining=2,
-        consecutive_no_changes=NO_CHANGES_ESCALATION_THRESHOLD,
-    )
-    # Same residence, one empty diff short of the threshold: the only difference is the streak, so residence must
-    # still win here or the test above proves nothing about which signal outranks which.
-    not_yet = engine.decide(
-        best_source="iteration",
-        no_improvement_iters=0,
-        stall_threshold=3,
-        current_mode=SEARCH_MODE_EXPLOIT,
-        residence_iterations_remaining=2,
-        consecutive_no_changes=NO_CHANGES_ESCALATION_THRESHOLD - 1,
-    )
-
-    assert held.mode == SEARCH_MODE_DIVERSIFY
-    assert held.reason_codes == ("REPEATED_NO_CHANGES",)
-    assert not_yet.mode == SEARCH_MODE_EXPLOIT
-    assert not_yet.reason_codes == ("MODE_RESIDENCE",)
+def test_seqany_refuses_more_than_one_lane():
+    with pytest.raises(ValueError, match="single lane"):
+        resolve_lanes(SearchPolicy.SEQANY, 2)
 
 
-def test_diminishing_returns_diversify_while_the_last_iteration_still_kept():
-    """A ladder can flatten without ever stopping, and that is the case here."""
-    decision = SearchPolicyEngine().decide(
-        best_source="iteration",
-        no_improvement_iters=0,
-        stall_threshold=3,
-        window_gain_ratio=MARGINAL_GAIN_FLOOR / 5,
-    )
-
-    assert decision.mode == SEARCH_MODE_DIVERSIFY
-    assert decision.reason_codes == ("DIMINISHING_RETURNS",)
-    assert decision.objective_kind == OBJECTIVE_DISCOVER_NEW_MECHANISM
-    assert decision.residence_iterations_remaining == 0
+def test_policy_names_are_parsed_case_insensitively_and_unknown_ones_refused():
+    assert parse_search_policy(" SeqAny ") is SearchPolicy.SEQANY
+    with pytest.raises(ValueError, match="unsupported search policy 'mcts'"):
+        parse_search_policy("mcts")
 
 
-def test_a_ladder_still_climbing_keeps_its_direction():
-    decision = SearchPolicyEngine().decide(
-        best_source="iteration",
-        no_improvement_iters=0,
-        stall_threshold=3,
-        window_gain_ratio=MARGINAL_GAIN_FLOOR * 2,
-    )
-
-    assert decision.mode == SEARCH_MODE_EXPLOIT
-    assert decision.reason_codes == ("CANONICAL_GAIN_AVAILABLE",)
-
-
-def test_an_unmeasured_window_is_not_a_flat_one():
-    """No window yet must not read as a window of zero gain."""
-    decision = SearchPolicyEngine().decide(
-        best_source="iteration",
-        no_improvement_iters=0,
-        stall_threshold=3,
-        window_gain_ratio=None,
-    )
-
-    assert decision.mode == SEARCH_MODE_EXPLOIT
-    assert decision.reason_codes == ("CANONICAL_GAIN_AVAILABLE",)
-
-
-def test_diminishing_returns_outrank_a_warm_started_incumbent():
-    """A warm start earns exploitation, but not a whole flat window of it."""
-    decision = SearchPolicyEngine().decide(
-        best_source="warm_start",
-        no_improvement_iters=0,
-        stall_threshold=3,
-        window_gain_ratio=0.0,
-    )
-
-    assert decision.mode == SEARCH_MODE_DIVERSIFY
-    assert decision.reason_codes == ("DIMINISHING_RETURNS",)
-
-
-def test_mode_residence_outranks_diminishing_returns():
-    """The round after a diversification is protected from the new trigger."""
-    engine = SearchPolicyEngine()
-
-    completed = engine.decide(
-        best_source="iteration",
-        no_improvement_iters=0,
-        stall_threshold=3,
-        current_mode=SEARCH_MODE_DIVERSIFY,
-        diversification_cycle_completed=True,
-        window_gain_ratio=0.0,
-    )
-    held = engine.decide(
-        best_source="iteration",
-        no_improvement_iters=0,
-        stall_threshold=3,
-        current_mode=completed.mode,
-        residence_iterations_remaining=(completed.residence_iterations_remaining),
-        window_gain_ratio=0.0,
-    )
-
-    assert completed.mode == SEARCH_MODE_EXPLOIT
-    assert completed.reason_codes == ("DIVERSIFY_PLAN_CREATED",)
-    assert held.mode == SEARCH_MODE_EXPLOIT
-    assert held.reason_codes == ("MODE_RESIDENCE",)
-
-
-def test_a_stall_is_still_reported_as_a_stall():
-    """A flat window and a stalled one are the same campaign; codes must not swap."""
-    decision = SearchPolicyEngine().decide(
-        best_source="iteration",
-        no_improvement_iters=3,
-        stall_threshold=3,
-        window_gain_ratio=0.0,
-    )
-
-    assert decision.mode == SEARCH_MODE_DIVERSIFY
-    assert decision.reason_codes == ("NO_IMPROVEMENT_STALL",)
-
-
-@pytest.mark.parametrize("ratio", [float("nan"), float("inf")])
-def test_a_gain_ratio_that_is_not_a_number_is_refused(ratio):
-    """A non-finite ratio compares false against the floor and reads as healthy."""
-    with pytest.raises(ValueError, match="window_gain_ratio"):
-        SearchPolicyEngine().decide(
-            best_source="iteration",
-            no_improvement_iters=0,
-            stall_threshold=3,
-            window_gain_ratio=ratio,
-        )
-
-
-def test_a_decision_cannot_carry_a_mode_the_loop_cannot_run():
-    """A mode outside the pair is not a third strategy, it is a typo."""
-    with pytest.raises(ValueError, match="unsupported search mode"):
-        SearchPolicyDecision(
-            mode="EXPLORE",
-            reason_codes=("NO_IMPROVEMENT_STALL",),
-            objective_kind=OBJECTIVE_DISCOVER_NEW_MECHANISM,
-        )
-
-
-def test_a_decision_must_state_why_it_was_taken():
-    """The reason codes are the audit trail; an unexplained mode switch is a bug."""
-    with pytest.raises(ValueError, match="reason_codes"):
-        SearchPolicyDecision(
-            mode=SEARCH_MODE_EXPLOIT,
-            reason_codes=(),
-            objective_kind=OBJECTIVE_IMMEDIATE_CANONICAL_GAIN,
-        )
-
-
-def test_run_state_persists_plan_search_policy():
-    state = RunState(
-        search_mode=SEARCH_MODE_DIVERSIFY,
-        search_reason_codes=["NO_IMPROVEMENT_STALL"],
-        search_objective=OBJECTIVE_DISCOVER_NEW_MECHANISM,
-        search_mode_residence_remaining=2,
-        diversification_cycle_completed=True,
-    )
-
-    restored = RunState.from_dict(state.to_dict())
-
-    assert restored.search_mode == SEARCH_MODE_DIVERSIFY
-    assert restored.search_reason_codes == ["NO_IMPROVEMENT_STALL"]
-    assert restored.search_objective == OBJECTIVE_DISCOVER_NEW_MECHANISM
-    assert restored.search_mode_residence_remaining == 2
-    assert restored.diversification_cycle_completed is True
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ({"decision": "ACCEPT", "commit_hash": ""}, "requires a commit"),
+        ({"decision": "REVERT_PERF", "commit_hash": "c1"}, "must not carry a commit"),
+        ({"parent_iteration": 2}, "parent iteration must precede it"),
+        ({"parent_commit": " "}, "no parent commit"),
+        ({"mean_case_speedup": float("nan")}, "positive finite number"),
+    ],
+)
+def test_a_record_that_cannot_describe_a_candidate_is_refused(change, message):
+    fields = {
+        "iteration": 2,
+        "parent_iteration": 1,
+        "parent_commit": "p1",
+        "decision": "REVERT_PERF",
+        "commit_hash": "",
+        "mean_case_speedup": 1.1,
+        "case_times": {"a": 9.0},
+        **change,
+    }
+    with pytest.raises(ValueError, match=message):
+        SearchCandidate(**fields)

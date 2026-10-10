@@ -92,15 +92,30 @@ def git_checkout_branch(workspace_dir: str, branch: str) -> str:
         return f"checkout failed: {e}"
 
 
-def _git_cumulative_diff(workspace_dir: str, base_sha: str) -> str:
-    """Full diff from ``base_sha`` to HEAD (the run's net winning change)."""
-    if not base_sha:
+def _git_cumulative_diff(workspace_dir: str, base_sha: str, commit: str) -> str:
+    """Full diff from ``base_sha`` to ``commit`` (the run's net winning change)."""
+    if not base_sha or not commit:
         return ""
     try:
-        r = git("diff", base_sha, "HEAD", cwd=workspace_dir, check=False, text=False)
+        r = git("diff", base_sha, commit, cwd=workspace_dir, check=False, text=False)
     except OSError:
         return ""
     return "" if r.returncode != 0 else r.stdout.decode("utf-8", errors="replace")
+
+
+def _git_sources_at(workspace_dir: str, commit: str, paths: list[str]) -> dict[str, str]:
+    """Each path's content at ``commit``, keyed as given; empty for a path the commit does not carry."""
+    root = Path(workspace_dir).resolve()
+    contents: dict[str, str] = {}
+    for path in paths:
+        try:
+            relative = Path(path).resolve().relative_to(root).as_posix()
+            r = git("show", f"{commit}:./{relative}", cwd=workspace_dir, check=False)
+        except (OSError, ValueError):
+            contents[path] = ""
+            continue
+        contents[path] = r.stdout if r.returncode == 0 else ""
+    return contents
 
 
 # Strip depths tried when applying a KB diff, in order.
@@ -1345,6 +1360,7 @@ def write_experience_to_kb(
     kernel_backend,
     gpu_target,
     base_sha,
+    commit,
     pristine_baseline_ms=None,
     source_files=None,
     target_functions=None,
@@ -1359,7 +1375,12 @@ def write_experience_to_kb(
     reused_speedup=None,
     usage=None,
 ) -> dict:
-    """Gather the run's outcome and mirror the best solution into the KB Store."""
+    """Gather the run's outcome and mirror the best solution into the KB Store.
+
+    ``commit`` is the best solution's commit, empty before the first KEEP. The patch and sources are read from it
+    rather than from the workspace, because the workspace need not hold the best: under the ``seqany`` search policy
+    the branch's latest commit is the next starting version.
+    """
     try:
         from kernelforge.knowledge.kb_store.writer import write_run_experience
 
@@ -1372,7 +1393,8 @@ def write_experience_to_kb(
         )
         best_ms = getattr(loop_runner, "best_wall_ms", None)
         mean_case_speedup = getattr(loop_runner, "best_mean_case_speedup", None)
-        cumulative_diff = _git_cumulative_diff(workspace_dir, base_sha)
+        solution_commit = commit or base_sha
+        cumulative_diff = _git_cumulative_diff(workspace_dir, base_sha, solution_commit)
 
         snr_db = None
         digest = ""
@@ -1391,9 +1413,8 @@ def write_experience_to_kb(
         if snr_db_override is not None:
             snr_db = snr_db_override
 
-        kernel_source = ""
-        with contextlib.suppress(OSError):
-            kernel_source = Path(kernel).read_text(errors="replace")
+        source_contents = _git_sources_at(workspace_dir, solution_commit, [kernel, *(source_files or [])])
+        kernel_source = source_contents.get(kernel, "")
 
         summary_override = None if llm_summary else incremental_summary or _cheap_summary(archive)
         pristine_signature = implementation_signature_value or getattr(loop_runner.ic, "implementation_signature", "")
@@ -1414,6 +1435,7 @@ def write_experience_to_kb(
             digest=digest,
             snr_db=snr_db,
             source_files=source_files,
+            source_contents=source_contents,
             target_functions=target_functions,
             operator_name=operator_name,
             implementation_signature_override=pristine_signature,

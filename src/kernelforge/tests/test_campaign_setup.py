@@ -8,6 +8,7 @@ import pytest
 
 from kernelforge.loop.campaign_setup import parse_list, resolve_campaign
 from kernelforge.loop.campaign_config import CampaignConfigStore
+from kernelforge.loop.search_policy import SearchPolicy
 
 
 class TestParseList:
@@ -73,6 +74,17 @@ def _base_args(workspace, kernel, driver):
         kernel=str(kernel),
         driver=str(driver),
         kernel_backend="triton",
+        snr_threshold=2.0,
+    )
+
+
+def _resume_args(workspace):
+    return dict(
+        workspace_dir=str(workspace),
+        resume=True,
+        prepare_task=False,
+        kernel="",
+        driver="",
         snr_threshold=2.0,
     )
 
@@ -149,6 +161,39 @@ class TestResolveCampaign:
                 driver="",
                 snr_threshold=2.0,
             )
+
+    def test_fresh_campaign_defaults_to_the_sequential_policy(self, tmp_path):
+        workspace, kernel, driver = _git_workspace(tmp_path)
+        resolve_campaign(**_base_args(workspace, kernel, driver))
+
+        assert CampaignConfigStore(str(workspace)).load().search_policy is SearchPolicy.SEQUENTIAL
+
+    def test_search_policy_is_snapshotted_and_kept_on_resume(self, tmp_path):
+        workspace, kernel, driver = _git_workspace(tmp_path)
+        resolve_campaign(**_base_args(workspace, kernel, driver), search_policy=SearchPolicy.SEQANY)
+
+        resumed = resolve_campaign(**_resume_args(workspace))
+        restated = resolve_campaign(**_resume_args(workspace), search_policy=SearchPolicy.SEQANY)
+
+        assert resumed.campaign.search_policy is SearchPolicy.SEQANY
+        assert restated.campaign.search_policy is SearchPolicy.SEQANY
+
+    def test_resume_under_a_different_search_policy_is_refused(self, tmp_path):
+        workspace, kernel, driver = _git_workspace(tmp_path)
+        resolve_campaign(**_base_args(workspace, kernel, driver), search_policy=SearchPolicy.SEQANY)
+
+        with pytest.raises(ValueError, match="cannot be resumed under 'sequential'"):
+            resolve_campaign(**_resume_args(workspace), search_policy=SearchPolicy.SEQUENTIAL)
+
+    def test_pending_retry_keeps_the_policy_it_was_created_with(self, tmp_path):
+        workspace, kernel, driver = _git_workspace(tmp_path)
+        resolve_campaign(**_base_args(workspace, kernel, driver), search_policy=SearchPolicy.SEQANY)
+
+        retried = resolve_campaign(**_base_args(workspace, kernel, driver))
+
+        assert retried.campaign.search_policy is SearchPolicy.SEQANY
+        with pytest.raises(ValueError, match="does not match"):
+            resolve_campaign(**_base_args(workspace, kernel, driver), search_policy=SearchPolicy.SEQUENTIAL)
 
     def test_pending_retry_mismatch_raises(self, tmp_path):
         workspace, kernel, driver = _git_workspace(tmp_path)

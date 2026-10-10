@@ -39,7 +39,7 @@ class AnalysisRuntimeMixin(AnalysisEvidenceMixin):
             evidence_commit=state.evidence_commit,
             evidence_mean_case_speedup=(state.evidence_mean_case_speedup),
             evidence_status=state.evidence_status,
-            current_mean_case_speedup=self.best_mean_case_speedup,
+            current_mean_case_speedup=self._starting_version_measurements()[0],
             supervisor_due=supervisor_due,
             last_attempt_commit=state.last_attempt_commit,
             last_attempt_status=state.last_attempt_status,
@@ -72,7 +72,7 @@ class AnalysisRuntimeMixin(AnalysisEvidenceMixin):
                     cumulative_diff_path=context.cumulative_diff_path,
                     cumulative_diff_error=context.cumulative_diff_error,
                     refresh_threshold=ANALYSIS_REFRESH_THRESHOLD,
-                    current_mean_case_speedup=(self.best_mean_case_speedup),
+                    current_mean_case_speedup=self._starting_version_measurements()[0],
                     evidence_mean_case_speedup=(self.run_state.analysis.evidence_mean_case_speedup),
                 )
             )
@@ -177,10 +177,11 @@ class AnalysisRuntimeMixin(AnalysisEvidenceMixin):
                 evidence_status = available_tier or "ready"
                 attempt_status = "success"
 
+            collected_score = self._starting_version_measurements()[0] or 1.0
             if published:
                 self._last_published_analysis_commit = context.analysis_commit
                 analysis_state.evidence_commit = context.analysis_commit
-                analysis_state.evidence_mean_case_speedup = self.best_mean_case_speedup or 1.0
+                analysis_state.evidence_mean_case_speedup = collected_score
                 analysis_state.evidence_status = evidence_status
             analysis_state.last_attempt_status = attempt_status
             if getattr(self, "state_store", None) is not None:
@@ -189,7 +190,7 @@ class AnalysisRuntimeMixin(AnalysisEvidenceMixin):
                     "analysis_commit": context.analysis_commit,
                     "artifact_path": str(self._analysis_bundle.root),
                     "refresh_reasons": list(decision.reasons),
-                    "mean_case_speedup_at_collection": (self.best_mean_case_speedup or 1.0),
+                    "mean_case_speedup_at_collection": collected_score,
                 }
                 if outcome is not None:
                     event_payload.update(outcome.to_dict())
@@ -291,7 +292,7 @@ class AnalysisRuntimeMixin(AnalysisEvidenceMixin):
             ),
             evidence_status=analysis_state.evidence_status,
             evidence_mean_case_speedup=(analysis_state.evidence_mean_case_speedup),
-            current_mean_case_speedup=self.best_mean_case_speedup,
+            current_mean_case_speedup=self._starting_version_measurements()[0],
             cumulative_diff_path=cumulative_diff.path,
             cumulative_diff_error=cumulative_diff.error,
         )
