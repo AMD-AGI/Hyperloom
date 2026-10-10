@@ -449,6 +449,10 @@ jobs:
         python-version: ["3.10", "3.11"]
     steps:
       - uses: actions/checkout@v7
+        with:
+          # The PR merge commit plus both parents: ``HEAD^1`` is the base the
+          # diff-coverage step compares against.
+          fetch-depth: 2
 
       - uses: actions/setup-python@v7
         with:
@@ -631,6 +635,32 @@ jobs:
           COVERAGE_RELAX_FAIL_UNDER: ${{ vars.COVERAGE_RELAX_FAIL_UNDER }}
           REPORT_EXIT_CODE: ${{ steps.coverage_report.outputs.report_exit_code }}
         run: python3 scripts/ci_coverage_report.py gate
+
+      # New-code coverage: on pull requests, the lines the PR adds or changes
+      # (``HEAD^1..HEAD`` of the merge commit) must be at least 80% covered.
+      # One leg is enough -- both run the same suite. Runs after the total
+      # gate under always() so both verdicts show; skipped on a failed or
+      # incomplete suite, which the shard-results gate already reds.
+      - name: Diff coverage (changed lines >= 80%)
+        if: always() && github.event_name == 'pull_request' && matrix.python-version == '3.10' && steps.outcomes.outputs.complete == 'true' && steps.outcomes.outputs.tests_ok == 'true'
+        run: |
+          set -euo pipefail
+          if [ "$(git rev-list --parents -n 1 HEAD | wc -w)" -ne 3 ]; then
+            echo "::error title=diff-coverage::HEAD is not the PR merge commit; cannot compute the PR diff."
+            exit 1
+          fi
+          python -m pip install "diff-cover==9.7.1"
+          # fail_under is the total gate's job; the XML is only diff-cover's input.
+          coverage xml -o coverage.xml --fail-under=0
+          set +e
+          diff-cover coverage.xml --compare-branch="$(git rev-parse HEAD^1)" --fail-under=80 --format markdown:diff-cover.md
+          rc=$?
+          set -e
+          { echo "## Diff coverage (lines changed by this PR)"; cat diff-cover.md 2>/dev/null || echo "diff-cover wrote no report (exit $rc)."; } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error title=diff-coverage::Lines changed by this PR are below 80% covered (diff-cover exit $rc); see this job's Summary for the uncovered lines."
+          fi
+          exit "$rc"
 
       # Single fail-closed gate for BOTH failure modes: a shard's tests failed
       # (tests_ok != true) OR a shard never fully reported (complete != true).
