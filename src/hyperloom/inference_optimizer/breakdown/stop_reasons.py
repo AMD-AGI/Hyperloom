@@ -32,6 +32,12 @@ AGENTX_PREFLIGHT_STOP_REASON: str = "agentx_client_unavailable"
 #: the same thing about a tree whose members are no longer identifiable.
 PATCH_RECOVERY_INCOMPLETE_STOP_REASON: str = "patch_recovery_incomplete"
 
+#: A reactor agent's LLM backend kept failing for an hour without one
+#: successful turn. Without the Orchestration agent nothing is decided, and
+#: without the critic every proposal times out denied, so the rest of the
+#: budget would buy nothing.
+BACKEND_UNHEALTHY_STOP_REASON: str = "backend_unhealthy"
+
 #: Terminals that mean the run optimized and closed normally.
 SUCCESS_STOP_REASONS: frozenset[str] = frozenset(
     {
@@ -53,9 +59,11 @@ ABORTED_STOP_REASONS: frozenset[str] = frozenset({"signal"})
 
 #: Terminals about the machine or the harness rather than the model: a host
 #: that cannot run the combo, an argv the installed parser refuses, a bring-up
-#: round that expired unreaped, or a supervisor that found the coordinator dead
-#: or its tick wedged.
-INFRASTRUCTURE_STOP_REASONS: frozenset[str] = frozenset({ENV_FAULT, ARGV_INVALID, DIED_STOP_REASON, WEDGED_STOP_REASON})
+#: round that expired unreaped, a supervisor that found the coordinator dead
+#: or its tick wedged, or an agent's LLM backend that stopped answering.
+INFRASTRUCTURE_STOP_REASONS: frozenset[str] = frozenset(
+    {ENV_FAULT, ARGV_INVALID, DIED_STOP_REASON, WEDGED_STOP_REASON, BACKEND_UNHEALTHY_STOP_REASON}
+)
 
 #: Terminals the model gate reached before the loop started. Verdicts about the
 #: model, so absent from :data:`INFRASTRUCTURE_STOP_REASONS`.
@@ -137,6 +145,7 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         # INFRASTRUCTURE_STOP_REASONS -- the host is healthy and a person has to
         # settle the tree, which reads as a failure rather than an abort.
         PATCH_RECOVERY_INCOMPLETE_STOP_REASON,
+        BACKEND_UNHEALTHY_STOP_REASON,
     }
 )
 
@@ -171,6 +180,7 @@ __all__ = [
     "ABORTED_STOP_REASONS",
     "AGENTX_PREFLIGHT_STOP_REASON",
     "ARGV_INVALID",
+    "BACKEND_UNHEALTHY_STOP_REASON",
     "DIED_STOP_REASON",
     "ENV_FAULT",
     "INFRASTRUCTURE_STOP_REASONS",

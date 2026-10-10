@@ -162,7 +162,7 @@ def ensure_resume_safe(session_dir: Path, *, owner_scope: str) -> None:
             + "\nNo ownership was cleared. Inspect and finish cleanup in the original execution environment "
             "before retrying; do not start replacement work on the same resources. "
             "For legacy empty-scope ownership only, after verifying the task's entire process tree and any "
-            "remote workers/Ray actors have stopped, record that confirmation with recover-session "
+            "remote workers/Ray actors have stopped, record that confirmation with hyperloom recover "
             "--session-dir <session> --confirm-stopped <task-id> --confirmation-reason <reason>."
         )
 

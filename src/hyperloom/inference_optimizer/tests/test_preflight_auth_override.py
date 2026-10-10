@@ -116,7 +116,6 @@ def test_env_loaders_respect_explicit_mode_and_python_pins(monkeypatch, tmp_path
     marker.touch()
     monkeypatch.setattr(cli_preflight, "_CONTAINER_MARKER_FILES", (str(marker),))
     monkeypatch.setenv("REPO_ROOT", str(tmp_path))
-    monkeypatch.delenv("HYPERLOOM_KERNEL_AGENT_ROOT", raising=False)
     monkeypatch.delenv("HYPERLOOM_RUN_MODE", raising=False)
     if shell_mode is not None:
         monkeypatch.setenv("HYPERLOOM_RUN_MODE", shell_mode)
@@ -127,7 +126,7 @@ def test_env_loaders_respect_explicit_mode_and_python_pins(monkeypatch, tmp_path
     env_file = tmp_path / (".env" if loader == "dotenv" else "kernel-agent.env.sh")
     env_file.write_text(
         "PYTHON=/file/python\nVIRTUAL_ENV=/file/venv\nINFERENCE_OPTIMIZER_FORCE_PYTHON=1\n"
-        f"HYPERLOOM_RUN_MODE={file_mode}\nHYPERLOOM_KERNEL_AGENT_ROOT=/file/kernel\n",
+        f"HYPERLOOM_RUN_MODE={file_mode}\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("KERNEL_AGENT_ENV", str(env_file))
@@ -149,11 +148,8 @@ def test_env_loaders_respect_explicit_mode_and_python_pins(monkeypatch, tmp_path
             assert os.environ[key] == value
 
 
-@pytest.mark.parametrize("root_already_set", [False, True])
 @pytest.mark.parametrize("valid_override", [False, True])
-def test_runtime_loader_fills_missing_values_and_corrects_only_invalid_paths(
-    monkeypatch, tmp_path, root_already_set, valid_override
-):
+def test_runtime_loader_fills_missing_values_and_corrects_only_invalid_paths(monkeypatch, tmp_path, valid_override):
     installed = tmp_path / "TraceLens installed"
     installed.mkdir()
     override = tmp_path / "TraceLens override"
@@ -161,7 +157,6 @@ def test_runtime_loader_fills_missing_values_and_corrects_only_invalid_paths(
         override.mkdir()
     runtime = tmp_path / "runtime.env.sh"
     runtime.write_text(
-        "HYPERLOOM_KERNEL_AGENT_ROOT=/installed/kernel\n"
         f"TRACELENS_ROOT='{installed}'\n"
         "MAGPIE_PATH=/installed/Magpie\n"
         "KERNEL_AGENT_LOG_LEVEL=INFO\n"
@@ -169,9 +164,6 @@ def test_runtime_loader_fills_missing_values_and_corrects_only_invalid_paths(
         encoding="utf-8",
     )
     monkeypatch.setenv("KERNEL_AGENT_ENV", str(runtime))
-    monkeypatch.delenv("HYPERLOOM_KERNEL_AGENT_ROOT", raising=False)
-    if root_already_set:
-        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", "/operator/kernel")
     monkeypatch.delenv("MAGPIE_PATH", raising=False)
     monkeypatch.setenv("TRACELENS_ROOT", str(override))
     monkeypatch.setenv("KERNEL_AGENT_LOG_LEVEL", "DEBUG")
@@ -180,9 +172,6 @@ def test_runtime_loader_fills_missing_values_and_corrects_only_invalid_paths(
 
     cli_preflight._load_kernel_agent_env_fallback()
 
-    assert os.environ["HYPERLOOM_KERNEL_AGENT_ROOT"] == (
-        "/operator/kernel" if root_already_set else "/installed/kernel"
-    )
     assert os.environ["MAGPIE_PATH"] == "/installed/Magpie"
     assert os.environ["KERNEL_AGENT_LOG_LEVEL"] == "DEBUG"
     assert os.environ["TRACELENS_ROOT"] == str(override if valid_override else installed)
@@ -198,11 +187,7 @@ def test_runtime_loader_fills_missing_values_and_corrects_only_invalid_paths(
     assert child.stdout.splitlines() == ["/installed/Magpie", str(override if valid_override else installed)]
 
 
-@pytest.mark.parametrize("root_already_set", [False, True])
-def test_runtime_loader_still_rejects_a_missing_env_file(monkeypatch, tmp_path, root_already_set):
-    monkeypatch.delenv("HYPERLOOM_KERNEL_AGENT_ROOT", raising=False)
-    if root_already_set:
-        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", "/operator/kernel")
+def test_runtime_loader_rejects_a_missing_env_file(monkeypatch, tmp_path):
     monkeypatch.setenv("KERNEL_AGENT_ENV", str(tmp_path / "missing.env.sh"))
 
     with pytest.raises(SystemExit) as failure:
@@ -214,7 +199,7 @@ def test_runtime_loader_still_rejects_a_missing_env_file(monkeypatch, tmp_path, 
 @pytest.fixture
 def credential_emitter():
     """Read the production emitter without running the installer or sourcing its output."""
-    script = Path(cli_preflight.__file__).resolve().parents[2] / "agents/kernel/scripts/install.sh"
+    script = Path(cli_preflight.__file__).resolve().parents[1] / "assets" / "install_kernel_tools.sh"
     source = script.read_text(encoding="utf-8")
     match = re.search(r"^  _emit_credential_fallback\(\) \{\n.*?^  \}", source, re.MULTILINE | re.DOTALL)
     assert match, "production credential emitter not found"
@@ -273,12 +258,9 @@ def test_runtime_multiline_headers_from_real_emitter_survive_loading(
 ):
     headers = "X-Tenant: acme\nOcp-Apim-Subscription-Key: test-value"
     runtime = tmp_path / "kernel-agent.env.sh"
-    runtime.write_text(
-        "HYPERLOOM_KERNEL_AGENT_ROOT=/installed/kernel\n" + credential_emitter(key, headers), encoding="utf-8"
-    )
+    runtime.write_text(credential_emitter(key, headers), encoding="utf-8")
     assert _source_harmless_headers(runtime, key) == headers
     monkeypatch.setenv("KERNEL_AGENT_ENV", str(runtime))
-    monkeypatch.delenv("HYPERLOOM_KERNEL_AGENT_ROOT", raising=False)
     monkeypatch.delenv(key, raising=False)
     if operator_value is not None:
         monkeypatch.setenv(key, operator_value)
@@ -299,7 +281,7 @@ def test_env_loaders_preserve_quoted_multiline_headers(monkeypatch, tmp_path, lo
     headers = "X-Tenant: acme\nOcp-Apim-Subscription-Key: test-value"
     path = tmp_path / (".env" if loader == "dotenv" else "kernel-agent.env.sh")
     path.write_text(
-        f"{key}={quote}{headers}{quote}\n{key}='X-Tenant: duplicate'\nHYPERLOOM_KERNEL_AGENT_ROOT=/installed/kernel\n",
+        f"{key}={quote}{headers}{quote}\n{key}='X-Tenant: duplicate'\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("REPO_ROOT", str(tmp_path))
@@ -330,7 +312,7 @@ def test_env_loaders_decode_escaped_json_quotes_without_executing_substitutions(
         f'ANTHROPIC_CUSTOM_HEADERS="{escaped}"\n'
         f'OPENAI_CUSTOM_HEADERS="X-Literal: $(touch {payload.as_posix()}) ${{UNCHANGED_REF}} `touch ignored`\n'
         'HYPERLOOM_RUN_MODE=docker"\n'
-        "HYPERLOOM_RUN_MODE=baremetal\nHYPERLOOM_KERNEL_AGENT_ROOT=/installed/kernel\n",
+        "HYPERLOOM_RUN_MODE=baremetal\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("REPO_ROOT", str(tmp_path))
@@ -361,13 +343,13 @@ def test_env_loaders_reject_unclosed_quoted_values_without_partial_exports(monke
     path = tmp_path / (".env" if loader == "dotenv" else "kernel-agent.env.sh")
     path.write_text(
         'ANTHROPIC_CUSTOM_HEADERS="X-Tenant: acme\n'
-        "Ocp-Apim-Subscription-Key: test-value\nHYPERLOOM_KERNEL_AGENT_ROOT=/installed/kernel\n",
+        "Ocp-Apim-Subscription-Key: test-value\nHYPERLOOM_RUN_MODE=baremetal\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("REPO_ROOT", str(tmp_path))
     monkeypatch.setenv("KERNEL_AGENT_ENV", str(path))
     monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
-    monkeypatch.delenv("HYPERLOOM_KERNEL_AGENT_ROOT", raising=False)
+    monkeypatch.delenv("HYPERLOOM_RUN_MODE", raising=False)
 
     with pytest.raises(ValueError, match="ANTHROPIC_CUSTOM_HEADERS"):
         if loader == "dotenv":
@@ -376,7 +358,7 @@ def test_env_loaders_reject_unclosed_quoted_values_without_partial_exports(monke
             cli_preflight._load_kernel_agent_env_fallback()
 
     assert "ANTHROPIC_CUSTOM_HEADERS" not in os.environ
-    assert "HYPERLOOM_KERNEL_AGENT_ROOT" not in os.environ
+    assert "HYPERLOOM_RUN_MODE" not in os.environ
 
 
 def test_parse_env_assignments_keeps_internal_but_not_external_whitespace():
@@ -2284,7 +2266,6 @@ def test_parser_retired_deepseek_key_only_defaults_to_gateway_model(monkeypatch)
         "OPENAI_API_KEY",
         "CLAUDE_MODEL",
         "CODEX_MODEL",
-        "INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -2305,7 +2286,6 @@ def test_parser_standard_dual_protocol_config_defaults_to_gateway_model(monkeypa
         "DEEPSEEK_BASE_URL",
         "CLAUDE_MODEL",
         "CODEX_MODEL",
-        "INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -2392,20 +2372,6 @@ def test_parser_openai_only_empty_claude_model_uses_codex_model(monkeypatch):
     assert args.claude_model == "GPT-5.4"
     assert args.codex_model == "GPT-5.4"
     assert cli._claude_model_should_follow_codex() is True
-
-
-def test_parser_marker_forces_claude_model_to_follow_codex(monkeypatch):
-    """Launchers may pre-derive ANTHROPIC_BASE_URL while preserving OpenAI-only model semantics."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX", "1")
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://llm.example.invalid/Unified/v1")
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm.example.invalid/Unified")
-    monkeypatch.setenv("CODEX_MODEL", "GPT-5.5")
-    monkeypatch.delenv("CLAUDE_MODEL", raising=False)
-
-    args = _build_parser().parse_args(["optimize", "--model", "/m", "--framework", "vllm"])
-
-    assert args.claude_model == "GPT-5.5"
-    assert args.codex_model == "GPT-5.5"
 
 
 def test_validate_claude_model_openai_only_accepts_codex_model(monkeypatch):

@@ -135,9 +135,7 @@ dev = [
 ]
 
 [project.scripts]
-inference_optimizer = "hyperloom.inference_optimizer.cli:main"
-hyperloom = "hyperloom.inference_optimizer.setup:main"
-quantization-agent = "hyperloom.agents.quantization.cli:main"
+hyperloom = "hyperloom.cli:main"
 # Built-in kernel-opt agent. The orchestrator dispatches
 # ``python -m kernelforge.cli`` directly; this is for interactive use.
 kernelforge = "kernelforge.cli:main"
@@ -264,14 +262,9 @@ hyperloom = [
     "SKILL.md",
     "README.md",
 ]
-# No top-level SKILL.md: kernel work is dispatched programmatically, so the
-# former agent skill file was replaced by docs/reference/kernel-execution-path.md.
-"hyperloom.agents.kernel" = [
-    "scripts/*.sh",
-]
-# Vendor-operator-playbook registry (see tools/_vendor_operator_playbooks.py):
+# Vendor-operator-playbook registry (see trace_analysis/_vendor_operator_playbooks.py):
 # read at runtime by classify_patchability(), so it must ship.
-"hyperloom.agents.kernel.tools" = [
+"hyperloom.orchestrator.trace_analysis" = [
     "vendor_operator_playbooks.json",
 ]
 # ``agentx/deploy.py`` copies these into InferenceX ``benchmarks/`` at runtime
@@ -364,12 +357,13 @@ omit = [
     "src/hyperloom/orchestrator/actions/executors/_multi_node_env.py",
     # Breakdown LLM HTTP client.
     "src/hyperloom/inference_optimizer/breakdown/reporters/llm_client.py",
-    # Stand-alone kernel-agent CLI tools.
-    "src/hyperloom/agents/kernel/tools/tracelens_analysis.py",
-    "src/hyperloom/agents/kernel/tools/tracelens_skill_runner.py",
-    "src/hyperloom/agents/kernel/tools/apply_kernel_patch.py",
-    # Kernel-agent tool backends (subprocess submit).
-    "src/hyperloom/agents/kernel/tools/backends/*",
+    # Kernel tools that need real traces or a live framework install.
+    "src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py",
+    "src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py",
+    "src/hyperloom/orchestrator/kernel/apply_kernel_patch.py",
+    # GEAK runner and Ray cluster lifecycle (subprocess submit).
+    "src/hyperloom/orchestrator/kernel/geak_runner.py",
+    "src/hyperloom/orchestrator/actions/executors/_ray_runtime.py",
     # quantization_agent CLI driver (argparse entrypoint).
     "src/hyperloom/agents/quantization/cli.py",
     # OOB server-side runtime (CLI, HTTP server, scheduler, auth proxy, agent

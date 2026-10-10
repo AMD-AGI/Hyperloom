@@ -61,8 +61,7 @@ def test_main_propagates_busy_gpu_to_exit_code(
     monkeypatch.setattr(rocm_smi, "gpu_vram_usage", lambda: _usage(0.05))
     monkeypatch.setattr(preflight, "_print_torch_visibility", lambda: True)
     monkeypatch.setattr(preflight, "_find_stale_processes", lambda: [])
-    monkeypatch.setattr(sys, "argv", ["preflight_optimizer", str(model)])
-    assert preflight.main() == 2
+    assert preflight.run_checks([str(model)]) == 2
 
 
 def test_exit_bypasses_interpreter_teardown(preflight: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -86,9 +85,27 @@ def test_stale_scan_skips_the_launcher_ancestry(preflight: ModuleType, monkeypat
     monkeypatch.setattr(
         preflight,
         "_read_cmdline",
-        lambda pid: f"bash -c python -m hyperloom.inference_optimizer.cli optimize  # pid {pid}",
+        lambda pid: f"bash -c python -m hyperloom optimize  # pid {pid}",
     )
     assert [pid for pid, _ in preflight._find_stale_processes()] == ["12"]
+
+
+@pytest.mark.parametrize(
+    ("cmdline", "stale"),
+    [
+        ("/venv/bin/python3 -m hyperloom optimize --model /m", True),
+        ("/venv/bin/hyperloom optimize --model /m", True),
+        ("/venv/bin/python3 -m hyperloom check /m", False),
+    ],
+)
+def test_stale_scan_matches_the_unified_optimize_command(
+    preflight: ModuleType, monkeypatch: pytest.MonkeyPatch, cmdline: str, stale: bool
+) -> None:
+    monkeypatch.setattr(preflight.os, "getpid", lambda: 11)
+    monkeypatch.setattr(preflight, "_parent_pid", lambda pid: 1)
+    monkeypatch.setattr(preflight.os, "listdir", lambda path: ["12"])
+    monkeypatch.setattr(preflight, "_read_cmdline", lambda pid: cmdline)
+    assert [pid for pid, _ in preflight._find_stale_processes()] == (["12"] if stale else [])
 
 
 def test_stale_scan_sees_an_atom_server(preflight: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -100,6 +117,15 @@ def test_stale_scan_sees_an_atom_server(preflight: ModuleType, monkeypatch: pyte
     assert [pid for pid, _ in preflight._find_stale_processes()] == ["12"]
 
 
+def test_main_leaves_through_exit_with_the_check_status(preflight: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``hyperloom check`` calls main(); torch teardown must not get to rewrite its status."""
+    left_with: list[int] = []
+    monkeypatch.setattr(preflight, "run_checks", lambda argv: 2)
+    monkeypatch.setattr(preflight.os, "_exit", left_with.append)
+    preflight.main(["/models/m"])
+    assert left_with == [2]
+
+
 def test_main_returns_zero_when_every_check_passes(
     preflight: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -109,5 +135,4 @@ def test_main_returns_zero_when_every_check_passes(
     monkeypatch.setattr(rocm_smi, "gpu_vram_usage", lambda: _usage(0.002))
     monkeypatch.setattr(preflight, "_print_torch_visibility", lambda: True)
     monkeypatch.setattr(preflight, "_find_stale_processes", lambda: [])
-    monkeypatch.setattr(sys, "argv", ["preflight_optimizer", str(model)])
-    assert preflight.main() == 0
+    assert preflight.run_checks([str(model)]) == 0

@@ -561,13 +561,7 @@ class TestHyperloomArchSpec:
     """TraceLens arch spec derived from hyperloom's HW_SPECS_ACHIEVABLE."""
 
     def _tab(self):
-        import sys
-        from pathlib import Path
-
-        tool_dir = Path(__file__).resolve().parents[4] / "src" / "hyperloom" / "agents" / "kernel" / "tools"
-        if str(tool_dir) not in sys.path:
-            sys.path.insert(0, str(tool_dir))
-        import tracelens_arch_benchmark as tab  # noqa: WPS433
+        from hyperloom.orchestrator.trace_analysis import tracelens_arch_benchmark as tab
 
         return tab
 

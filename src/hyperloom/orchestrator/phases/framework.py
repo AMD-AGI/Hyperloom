@@ -1941,7 +1941,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             batch_id,
             audit_step or "<unknown>",
         )
-        await self._coord.writeback.record_observation(
+        await self.bus.record_observation(
             "coordinator",
             "observation",
             {
@@ -2190,7 +2190,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             self.shared_state.specialist_reauthor_attempts = attempts
         prior = int(attempts.get(cand_id, 0) or 0)
         if prior >= _AUTHORED_LANE_MAX_ATTEMPTS:
-            await self._coord.writeback.record_observation(
+            await self.bus.record_observation(
                 "coordinator",
                 "observation",
                 {
@@ -2231,7 +2231,7 @@ class FrameworkPhase(CoordinatorCollaborator):
                 "save after re-author dispatch failed candidate=%s",
                 cand_id,
             )
-        await self._coord.writeback.record_observation(
+        await self.bus.record_observation(
             "coordinator",
             "observation",
             {
@@ -2835,7 +2835,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         routable_artifacts = _resolvable_artifacts_from_done(done_payload, resolve_bases)
         if not existing_patches and not routable_artifacts:
             if patches:
-                await self._coord.writeback.record_observation(
+                await self.bus.record_observation(
                     "coordinator",
                     "observation",
                     {
@@ -2946,7 +2946,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             predicted_gain_pct=0.0,
             payload=dict(propose_payload),
         )
-        await self._coord.writeback.record_observation(
+        await self.bus.record_observation(
             "coordinator",
             "observation",
             {
@@ -3089,7 +3089,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             predicted_gain_pct=0.0,
             payload=dict(propose_payload),
         )
-        await self._coord.writeback.record_observation(
+        await self.bus.record_observation(
             "coordinator",
             "observation",
             {

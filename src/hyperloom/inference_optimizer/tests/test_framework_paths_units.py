@@ -6,8 +6,6 @@
 from __future__ import annotations
 
 import importlib.util
-import sys
-import types
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -22,6 +20,7 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
     build_orchestration_prompt,
 )
 from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
+from hyperloom.orchestrator.kernel import apply_kernel_patch as akp
 
 
 @pytest.fixture(autouse=True)
@@ -167,14 +166,6 @@ class TestResolveKernelSearchRoots:
         checkout.mkdir()
         monkeypatch.setattr(fp, "_discover_installed_framework_roots", lambda: ())
         monkeypatch.setenv(fp.GENERIC_FRAMEWORK_ROOT_ENV, str(checkout))
-        assert f"{checkout}/" in fp.resolve_kernel_search_roots()
-
-    def test_includes_the_inferencex_checkout(self, monkeypatch, tmp_path):
-        """Its recipes decide how the server boots, so a patch has to reach them."""
-        checkout = tmp_path / "InferenceX"
-        checkout.mkdir()
-        monkeypatch.setattr(fp, "_discover_installed_framework_roots", lambda: ())
-        monkeypatch.setenv("INFERENCEX_PATH", str(checkout))
         assert f"{checkout}/" in fp.resolve_kernel_search_roots()
 
 
@@ -612,64 +603,26 @@ class TestAtomPathPresentInAllThreeLocations:
 
     def test_atom_present_in_tracelens_reusable_roots(self):
         """The kernel-agent's tracelens_analysis ``_REUSABLE_SOURCE_ROOTS`` must track the orchestrator-side list."""
-        ka_path = (
-            Path(__file__).resolve().parents[4]
-            / "src"
-            / "hyperloom"
-            / "agents"
-            / "kernel"
-            / "tools"
-            / "tracelens_analysis.py"
-        )
-        if not ka_path.is_file():
-            pytest.skip(f"kernel-agent tracelens_analysis not on disk at {ka_path}")
+        from hyperloom.orchestrator import trace_analysis
+
+        ka_path = Path(trace_analysis.__file__).resolve().parent / "tracelens_analysis.py"
         text = ka_path.read_text(encoding="utf-8")
         assert "/app/atom/atom/" in text.lower(), (
-            "src/hyperloom/agents/kernel/tools/tracelens_analysis.py _REUSABLE_SOURCE_ROOTS "
+            "src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py _REUSABLE_SOURCE_ROOTS "
             "is out of sync with src/hyperloom/orchestrator/kernel/"
             "request_handlers._REUSABLE_SOURCE_ROOTS (atom missing)"
         )
 
     def test_kernel_request_handlers_and_tracelens_analysis_atom_paths_in_sync(self):
         """The orchestrator gate and kernel-agent classifier derive reusable roots from the same source, so their atom subsets must match."""
-        ka_path = (
-            Path(__file__).resolve().parents[4]
-            / "src"
-            / "hyperloom"
-            / "agents"
-            / "kernel"
-            / "tools"
-            / "tracelens_analysis.py"
-        )
-        if not ka_path.is_file():
-            pytest.skip(f"kernel-agent tracelens_analysis not on disk at {ka_path}")
         from hyperloom.orchestrator.kernel import (
             request_handlers as krh,
         )
+        from hyperloom.orchestrator.trace_analysis import tracelens_analysis
 
         orch_atom = frozenset(r.lower() for r in krh._reusable_source_roots() if "/atom/" in r.lower())
-        # Put the tools dir on sys.path: the sister tool imports sibling kernel-agent tools.
-        import importlib.util as _ilu
-        import sys as _sys
-
-        tools_dir = str(ka_path.parent)
-        added = tools_dir not in _sys.path
-        if added:
-            _sys.path.insert(0, tools_dir)
-        try:
-            spec = _ilu.spec_from_file_location(
-                "_tracelens_atom_sync_probe",
-                ka_path,
-            )
-            assert spec is not None and spec.loader is not None
-            mod = _ilu.module_from_spec(spec)
-            # Register before exec so self-referential dataclass annotations resolve.
-            _sys.modules[spec.name] = mod
-            spec.loader.exec_module(mod)
-            ka_atom = frozenset(r.lower() for r in mod._reusable_roots() if "/atom/" in r.lower())
-        finally:
-            if added and tools_dir in _sys.path:
-                _sys.path.remove(tools_dir)
+        tracelens_analysis._framework_source_roots.cache_clear()
+        ka_atom = frozenset(r.lower() for r in tracelens_analysis._reusable_roots() if "/atom/" in r.lower())
         assert orch_atom, "orchestrator reusable roots carry no atom entry"
         assert ka_atom, "tracelens reusable roots carry no atom entry"
         assert orch_atom == ka_atom, f"atom subsets diverged — orch={sorted(orch_atom)!r} ka={sorted(ka_atom)!r}"
@@ -703,51 +656,12 @@ def test_probe_framework_source_roots_includes_defaults(tmp_path, monkeypatch):
     assert str(ws) in out or (str(ws) + "/") in out
 
 
-# apply_kernel_patch known-target roots
-_APPLY_TOOL_PATH = (
-    Path(__file__).resolve().parents[4] / "src" / "hyperloom" / "agents" / "kernel" / "tools" / "apply_kernel_patch.py"
-)
-
-
-@pytest.fixture(scope="module")
-def apply_tool() -> types.ModuleType:
-    spec = importlib.util.spec_from_file_location(
-        "_apply_kernel_patch_roots_test",
-        _APPLY_TOOL_PATH,
-    )
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-def test_known_target_roots_includes_dist_packages_vllm(
-    apply_tool,
-    monkeypatch,
-) -> None:
-    monkeypatch.setattr(
-        fp, "_discover_installed_framework_roots", lambda: ("/usr/local/lib/python3.12/dist-packages/vllm/",)
-    )
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS", raising=False)
-    apply_tool._CACHED_KNOWN_TARGET_ROOTS = None
-    roots = apply_tool.known_target_roots()
-    assert "/usr/local/lib/python3.12/dist-packages/vllm/" in roots
-
-
-def test_detect_strategy_accepts_dist_packages_vllm_py(
-    apply_tool,
-    monkeypatch,
-) -> None:
+# apply_kernel_patch strategy detection
+def test_detect_strategy_accepts_dist_packages_vllm_py() -> None:
     target = Path(
         "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/parameter.py",
     )
-    monkeypatch.setattr(
-        apply_tool,
-        "known_target_roots",
-        lambda: ("/usr/local/lib/python3.12/dist-packages/vllm/",),
-    )
-    strat = apply_tool._detect_strategy(target)
+    strat = akp._detect_strategy(target)
     assert strat["compiled"] is False
 
 
@@ -762,33 +676,31 @@ _AITER_META_CU = Path("/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/k
 _AITER_META_CPP_ITFS_CU = Path("/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/cpp_itfs/mha_fwd.cu")
 
 
-def test_target_is_in_aiter_csrc_matches_aiter_meta(apply_tool) -> None:
+def test_target_is_in_aiter_csrc_matches_aiter_meta() -> None:
     # split-wheel layout must be recognised as an aiter csrc source
-    assert apply_tool._target_is_in_aiter_csrc(_AITER_META_CU) is True
+    assert akp._target_is_in_aiter_csrc(_AITER_META_CU) is True
     # classic layout still recognised
-    assert apply_tool._target_is_in_aiter_csrc(Path("/sgl-workspace/aiter/csrc/kernels/quant_kernels.cu")) is True
+    assert akp._target_is_in_aiter_csrc(Path("/sgl-workspace/aiter/csrc/kernels/quant_kernels.cu")) is True
     # unrelated source stays out
     assert (
-        apply_tool._target_is_in_aiter_csrc(
-            Path("/usr/local/lib/python3.12/dist-packages/vllm/model_executor/parameter.py")
-        )
+        akp._target_is_in_aiter_csrc(Path("/usr/local/lib/python3.12/dist-packages/vllm/model_executor/parameter.py"))
         is False
     )
 
 
-def test_target_is_in_aiter_cpp_itfs_matches_aiter_meta(apply_tool) -> None:
-    assert apply_tool._target_is_in_aiter_cpp_itfs(_AITER_META_CPP_ITFS_CU) is True
+def test_target_is_in_aiter_cpp_itfs_matches_aiter_meta() -> None:
+    assert akp._target_is_in_aiter_cpp_itfs(_AITER_META_CPP_ITFS_CU) is True
     # a non-cpp_itfs aiter_meta source is csrc but NOT cpp_itfs
-    assert apply_tool._target_is_in_aiter_cpp_itfs(_AITER_META_CU) is False
+    assert akp._target_is_in_aiter_cpp_itfs(_AITER_META_CU) is False
 
 
-def test_invalidate_aiter_jit_build_runs_for_aiter_meta_target(apply_tool, tmp_path) -> None:
+def test_invalidate_aiter_jit_build_runs_for_aiter_meta_target(tmp_path) -> None:
     jit_build = tmp_path / "aiter" / "jit" / "build"
     jit_build.mkdir(parents=True)
     (jit_build / "module_aiter_core.so").write_bytes(b"stale")
     backup_dir = tmp_path / "backup"
 
-    res = apply_tool._invalidate_aiter_jit_build(
+    res = akp._invalidate_aiter_jit_build(
         _AITER_META_CU,
         backup_dir,
         jit_build_dir=jit_build,
@@ -801,7 +713,6 @@ def test_invalidate_aiter_jit_build_runs_for_aiter_meta_target(apply_tool, tmp_p
 
 
 def test_invalidate_aiter_jit_build_ignores_orphaned_prior_backup(
-    apply_tool,
     tmp_path,
 ) -> None:
     jit_build = tmp_path / "aiter" / "jit" / "build"
@@ -809,14 +720,14 @@ def test_invalidate_aiter_jit_build_ignores_orphaned_prior_backup(
     (jit_build / "first.so").write_bytes(b"first")
     backup_dir = tmp_path / "backup"
 
-    first = apply_tool._invalidate_aiter_jit_build(
+    first = akp._invalidate_aiter_jit_build(
         _AITER_META_CU,
         backup_dir,
         jit_build_dir=jit_build,
     )
     jit_build.mkdir(parents=True)
     (jit_build / "second.so").write_bytes(b"second")
-    second = apply_tool._invalidate_aiter_jit_build(
+    second = akp._invalidate_aiter_jit_build(
         _AITER_META_CU,
         backup_dir,
         jit_build_dir=jit_build,

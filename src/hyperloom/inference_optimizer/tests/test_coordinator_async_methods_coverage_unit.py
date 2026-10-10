@@ -438,7 +438,7 @@ async def test_harvest_specialist_findings_does_not_persist_llm_competitor_targe
     from hyperloom.inference_optimizer.session import session_paths
     from hyperloom.inference_optimizer.baseline_comparison import research_hints
 
-    await coord.writeback._harvest_specialist_findings(
+    await coord.specialist_dispatch._harvest_specialist_findings(
         {
             "new_findings": [{"what": "try mtp", "source": "https://pr/1"}],
             "competitor_target": {
@@ -692,19 +692,19 @@ def test_record_fact_per_task_keep_and_revert(coord: Coordinator) -> None:
     from hyperloom.orchestrator.state.task_registry import Task
 
     task = Task(task_id="t-fact", kind="explore", state="succeeded", params={}, idempotency_key="kf")
-    coord.writeback._record_fact_per_task(
+    coord.recipe_journal._record_fact_per_task(
         task=task,
         source_session_id="sess-a",
         result_dict={"gain_pct": 5.0, "output_throughput": 900.0},
         verdict=Verdict.ADOPTED,
     )
-    coord.writeback._record_fact_per_task(
+    coord.recipe_journal._record_fact_per_task(
         task=task,
         source_session_id="sess-a",
         result_dict={"error_class": "boom", "reason": "bad"},
         verdict=Verdict.FAILED,
     )
-    outcomes = [entry.outcome for entry in coord.writeback.ensure_journal().entries[-2:]]
+    outcomes = [entry.outcome for entry in coord.recipe_journal.ensure_journal().entries[-2:]]
     assert outcomes == ["KEEP", "no_promote"]
 
 
@@ -722,7 +722,7 @@ def test_record_fact_reverted_integrate_patch_journals_revert(coord: Coordinator
         params={},
         idempotency_key="t-revert-fake-keep",
     )
-    coord.writeback._record_fact_per_task(
+    coord.recipe_journal._record_fact_per_task(
         task=task,
         source_session_id="sess-a",
         # tput == baseline → delta_pct ~0, executor returns "reverted", promotable.
@@ -734,7 +734,7 @@ def test_record_fact_reverted_integrate_patch_journals_revert(coord: Coordinator
         },
         verdict=Verdict.REVERTED,
     )
-    entry = coord.writeback.ensure_journal().entries[-1]
+    entry = coord.recipe_journal.ensure_journal().entries[-1]
     assert entry.outcome == OUTCOME_REVERT
     assert entry.gain_pct == -0.44
     assert entry.reason and "keep_threshold" in entry.reason
@@ -751,13 +751,13 @@ def test_record_fact_kept_integrate_patch_journals_keep(coord: Coordinator) -> N
         params={},
         idempotency_key="t-real-keep",
     )
-    coord.writeback._record_fact_per_task(
+    coord.recipe_journal._record_fact_per_task(
         task=task,
         source_session_id="sess-a",
         result_dict={"status": "kept", "delta_pct": 6.2, "output_throughput": 1100.0},
         verdict=Verdict.ADOPTED,
     )
-    entry = coord.writeback.ensure_journal().entries[-1]
+    entry = coord.recipe_journal.ensure_journal().entries[-1]
     assert entry.outcome == OUTCOME_KEEP
     assert entry.gain_pct == 6.2
 
@@ -973,7 +973,7 @@ async def test_warm_specialist_params_fills_defaults(coord: Coordinator) -> None
 def test_recipe_kb_finalize_recipe_and_journal_no_kb(coord: Coordinator) -> None:
     coord.shared_state.current_best = {"tput": 950.0}
     coord.shared_state.cumulative_gain_validated = 12.5
-    coord.writeback.finalize_recipe_and_journal()
+    coord.recipe_journal.finalize_recipe_and_journal()
 
 
 # -- _record_fact_per_variant ----------------------------------------------
@@ -982,13 +982,13 @@ def test_record_fact_per_variant_keep_revert_skip(coord: Coordinator) -> None:
 
     task = Task(task_id="t-var", kind="explore", state="succeeded", params={}, idempotency_key="kv")
     # SKIPPED_DEDUP -> early return (no journal row)
-    coord.writeback._record_fact_per_variant(
+    coord.recipe_journal._record_fact_per_variant(
         task=task,
         source_session_id="s",
         variant_outcome={"outcome": "SKIPPED_DEDUP", "variant_name": "v0"},
         adopted=False,
     )
-    coord.writeback._record_fact_per_variant(
+    coord.recipe_journal._record_fact_per_variant(
         task=task,
         source_session_id="s",
         variant_outcome={
@@ -999,7 +999,7 @@ def test_record_fact_per_variant_keep_revert_skip(coord: Coordinator) -> None:
         },
         adopted=True,
     )
-    coord.writeback._record_fact_per_variant(
+    coord.recipe_journal._record_fact_per_variant(
         task=task,
         source_session_id="s",
         variant_outcome={
@@ -1011,7 +1011,7 @@ def test_record_fact_per_variant_keep_revert_skip(coord: Coordinator) -> None:
         },
         adopted=False,
     )
-    coord.writeback._record_fact_per_variant(
+    coord.recipe_journal._record_fact_per_variant(
         task=task,
         source_session_id="s",
         variant_outcome={
@@ -1022,6 +1022,6 @@ def test_record_fact_per_variant_keep_revert_skip(coord: Coordinator) -> None:
         },
         adopted=False,
     )
-    by_name = {entry.variant_name: entry.outcome for entry in coord.writeback.ensure_journal().entries}
+    by_name = {entry.variant_name: entry.outcome for entry in coord.recipe_journal.ensure_journal().entries}
     # An executor KEEP whose lift did not land adopted nothing.
     assert by_name == {"v1": "KEEP", "v2": "REVERT", "v3": "no_promote"}

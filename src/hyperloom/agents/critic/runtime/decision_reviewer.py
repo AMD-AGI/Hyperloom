@@ -231,53 +231,6 @@ class DecisionReviewer:
             kb_writer = KBWriter(kb_client, session_memory=self.session_memory)
         self.kb_writer = kb_writer
 
-    # Phase 0: init / close session
-    def init_session(self, raw_request: dict[str, Any]) -> dict[str, Any]:
-        """Initialise a session by merging its first context payload."""
-        req = parse_request(raw_request)
-        merge = self.session_memory.merge_context(req.session_id, req.context)
-        return {
-            "session_id": req.session_id,
-            "merged_context": merge.merged,
-            "missing_context": merge.missing_keys,
-        }
-
-    def close_session(
-        self,
-        raw_request: dict[str, Any],
-        kb_draft: dict[str, Any] | None = None,
-    ) -> CommitOutcome:
-        """Close a session, optionally flushing KB drafts to the KB."""
-        req = parse_request(raw_request)
-        outcome = CommitOutcome(
-            kind="session_close",
-            session_id=req.session_id,
-            decision_id=req.decision_id,
-        )
-        if kb_draft:
-            drafts = list(kb_draft.get("kb_drafts") or [])
-            ctx = WriteContext(
-                session_id=req.session_id,
-                review_id=req.decision_id,
-                source_type="critic_kb_draft",
-                topic=None,
-            )
-            session_ctx = self.session_memory.load_context(req.session_id)
-            res = self.kb_writer.write_kb_drafts(
-                kb_drafts=drafts,
-                packet_context=req.context,
-                session_context=session_ctx,
-                ctx=ctx,
-            )
-            outcome.kb_writes.append(
-                {
-                    "trigger": "session_close",
-                    "result": res.to_dict(),
-                    "items": len(drafts),
-                }
-            )
-        return outcome
-
     # Phase 1: prepare-review
     def prepare_review(self, raw_request: dict[str, Any]) -> JudgeBundle:
         """Build the phase-1 judge bundle for a review request."""

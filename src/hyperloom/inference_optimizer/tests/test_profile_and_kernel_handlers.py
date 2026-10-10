@@ -60,8 +60,6 @@ _PROFILE_SGLANG_CONFIG = asset_root() / "assets" / "configs" / "profile_sglang.y
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    kernel_agent_root = Path(__file__).resolve().parents[4] / "src" / "hyperloom" / "agents" / "kernel"
-    monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(kernel_agent_root))
     tracelens_root = tmp_path / "TraceLens"
     # A usable checkout needs .git (completeness gate).
     (tracelens_root / ".git").mkdir(parents=True)
@@ -1275,19 +1273,8 @@ def test_trace_certificate_stays_out_of_the_resolver_namespace(tmp_path):
     that tuple. A certificate written among the traces used to add a second unranked candidate, which makes
     ``require_single_rank`` resolve to nothing and lets the certificate win the size fallback over a small trace.
     """
-    import sys
-    from pathlib import Path as _Path
-
-    _tools_dir = str(_Path(__file__).resolve().parents[2] / "agents" / "kernel" / "tools")
-    _added = _tools_dir not in sys.path
-    if _added:
-        sys.path.insert(0, _tools_dir)
-    try:
-        from hyperloom.agents.kernel.tools._bypass_trace_reader import _trace_candidates, resolve_trace_file
-    finally:
-        if _added and _tools_dir in sys.path:
-            sys.path.remove(_tools_dir)
     from hyperloom.orchestrator.actions.executors.profile import _write_trace_certificate
+    from hyperloom.orchestrator.trace_analysis._bypass_trace_reader import _trace_candidates, resolve_trace_file
 
     # A lone unranked trace: the certificate must not become the second candidate that makes this unresolvable.
     single = tmp_path / "single" / "torch_trace"
@@ -2679,9 +2666,7 @@ async def test_trace_analyze_handler_xdit_defaults_to_tracelens_agent(session_di
     )
     assert res["status"] == "ok"
     cmd = captured["cmd"]
-    assert cmd[0] == "/task/deps/venv/bin/python"
-    assert any("tracelens_analysis.py" in c for c in cmd)
-    assert not any("bypass_trace_analysis.py" in c for c in cmd)
+    assert cmd[:3] == ["/task/deps/venv/bin/python", "-m", ta._TRACELENS_ANALYSIS_MODULE]
     assert "--tracelens-root" in cmd
     assert "--skip-split" in cmd
 
@@ -2828,7 +2813,7 @@ async def test_trace_analyze_handler_env_route_forces_bypass(session_dir, monkey
     )
     assert res["status"] == "ok"
     cmd = captured["cmd"]
-    assert any("bypass_trace_analysis.py" in c for c in cmd)
+    assert cmd[1:3] == ["-m", ta._BYPASS_TRACE_ANALYSIS_MODULE]
     assert "--tracelens-root" not in cmd
 
 
@@ -2858,8 +2843,7 @@ async def test_trace_analyze_handler_text_gen_defaults_to_tracelens_agent(sessio
     )
     assert res["status"] == "ok"
     cmd = captured["cmd"]
-    assert any("tracelens_analysis.py" in c for c in cmd)
-    assert not any("bypass_trace_analysis.py" in c for c in cmd)
+    assert cmd[1:3] == ["-m", ta._TRACELENS_ANALYSIS_MODULE]
 
 
 @pytest.mark.parametrize(
@@ -2937,13 +2921,13 @@ async def test_trace_analyze_handler_scriptable_converges_route_params(session_d
     # Explicit bypass route: no --skip-split, but --num-denoise-steps forwarded.
     await ta.trace_analyze_handler({**base, "analysis_route": "bypass"}, session_dir=session_dir)
     cmd = captured["cmd"]
-    assert any("bypass_trace_analysis.py" in c for c in cmd)
+    assert cmd[1:3] == ["-m", ta._BYPASS_TRACE_ANALYSIS_MODULE]
     assert "--skip-split" not in cmd
     assert "--num-denoise-steps" in cmd and "20" in cmd
     # TraceLens (agent) route: both flags present.
     await ta.trace_analyze_handler({**base, "analysis_route": "agent"}, session_dir=session_dir)
     cmd = captured["cmd"]
-    assert any("tracelens_analysis.py" in c for c in cmd)
+    assert cmd[1:3] == ["-m", ta._TRACELENS_ANALYSIS_MODULE]
     assert "--skip-split" in cmd
     assert "--num-denoise-steps" in cmd
 
@@ -2992,7 +2976,7 @@ async def test_trace_analyze_handler_records_bypass_discovery_success(
     )
     assert res["status"] == "ok"
     # The bypass route dispatches its own tool, never TraceLens.
-    assert any("bypass_trace_analysis.py" in c for c in captured["cmd"])
+    assert captured["cmd"][1:3] == ["-m", ta._BYPASS_TRACE_ANALYSIS_MODULE]
 
     meta = res["analysis_meta"]
     assert meta["route"] == "bypass"
@@ -3485,19 +3469,6 @@ async def test_trace_analyze_handler_missing_trace_input(session_dir):
     res = await ta.trace_analyze_handler({}, session_dir=session_dir)
     assert res["status"] == "failed"
     assert "trace_input" in res["error"]
-
-
-@pytest.mark.asyncio
-async def test_trace_analyze_handler_requires_kernel_agent_root(session_dir, monkeypatch):
-    # HYPERLOOM_KERNEL_AGENT_ROOT is a lazy env read; delenv exercises the "not configured" branch.
-    monkeypatch.delenv("HYPERLOOM_KERNEL_AGENT_ROOT", raising=False)
-    res = await ta.trace_analyze_handler(
-        {"trace_input": str(session_dir)},
-        session_dir=session_dir,
-    )
-    assert res["status"] == "failed"
-    assert res["error_class"] == "kernel_agent_root_missing"
-    assert "HYPERLOOM_KERNEL_AGENT_ROOT is not set" in res["error"]
 
 
 # TraceLens permanent failure stays failed (no fallback).

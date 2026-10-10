@@ -62,6 +62,19 @@ def _pin_fusion_provider_env(monkeypatch, shape):
         monkeypatch.setenv(key, value)
 
 
+def _stub_tracelens_analysis(monkeypatch, ensure_checkout):
+    """Serve a stand-in ``tracelens_analysis`` to the self-heal's lazy import.
+
+    ``from package import module`` reads the package attribute before ``sys.modules``, so both are replaced.
+    """
+    from hyperloom.orchestrator import trace_analysis
+
+    stub = types.ModuleType(f"{trace_analysis.__name__}.tracelens_analysis")
+    stub._ensure_tracelens_checkout = ensure_checkout  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, stub.__name__, stub)
+    monkeypatch.setattr(trace_analysis, "tracelens_analysis", stub, raising=False)
+
+
 #: A candidate server.log must now carry an aiter dispatch line; these tests
 #: are about priority order, so every candidate gets one.
 _AITER_LINE = (
@@ -1029,11 +1042,6 @@ class TestForgeGemmHelperCoverage:
             {**_OPENAI_ONLY_ENV, "CODEX_MODEL": "gpt-fusion"},
         )
         monkeypatch.setattr(krh, "_forge_fusion_available", lambda: True)
-        monkeypatch.setattr(
-            krh,
-            "_kernel_agent_tool_path",
-            lambda name: tmp_path / "tools" / name,
-        )
         calls: list[tuple[list[str], int]] = []
 
         async def _fake_subprocess(cmd, *, timeout_sec):
@@ -1092,7 +1100,6 @@ class TestForgeGemmHelperCoverage:
         state.save(tmp_path)
         _pin_fusion_provider_env(monkeypatch, {**_OPENAI_ONLY_ENV, "CODEX_MODEL": "gpt-fusion"})
         monkeypatch.setattr(krh, "_forge_fusion_available", lambda: True)
-        monkeypatch.setattr(krh, "_kernel_agent_tool_path", lambda name: tmp_path / "tools" / name)
 
         async def _fake_subprocess(cmd, *, timeout_sec):
             body = json.dumps({"status": "ok", "decision": "REVERT", "kept": False})
@@ -1148,11 +1155,10 @@ class TestForgeGemmHelperCoverage:
         _pin_fusion_provider_env(monkeypatch, _ANTHROPIC_ONLY_ENV)
         monkeypatch.setenv("FORGE_FUSION_TIMEOUT", "not-an-int")
         monkeypatch.setattr(krh, "_forge_fusion_available", lambda: True)
-        monkeypatch.setattr(krh, "_kernel_agent_tool_path", lambda name: Path(name))
-        calls: list[int] = []
+        calls: list[tuple[str, int]] = []
 
         async def _fake_subprocess(cmd, *, timeout_sec):
-            calls.append(timeout_sec)
+            calls.append((cmd[0], timeout_sec))
             result = {"status": "complete", "decision": "REVERT", "kept": False}
             return (
                 0,
@@ -1165,7 +1171,7 @@ class TestForgeGemmHelperCoverage:
         result = await krh._run_forge_fusion({"task_id": "fusion_task"}, session_dir=tmp_path)
 
         assert result["status"] == "complete"
-        assert calls == [krh._forge_fusion_wrapper_timeout_sec(7200)]
+        assert calls == [(krh.sys.executable, krh._forge_fusion_wrapper_timeout_sec(7200))]
         input_payload = json.loads(
             (tmp_path / "runs" / "fusion" / "fusion_task" / "forge_fusion_input.json").read_text(encoding="utf-8")
         )
@@ -1186,7 +1192,6 @@ class TestForgeGemmHelperCoverage:
         # Pinned: a live clock would tick between the split and the assertion.
         monkeypatch.setattr(SharedState, "remaining_minutes", lambda _self, **_kw: 600.0)
         monkeypatch.setattr(krh, "_forge_fusion_available", lambda: True)
-        monkeypatch.setattr(krh, "_kernel_agent_tool_path", lambda name: Path(name))
 
         async def _fake_subprocess(cmd, *, timeout_sec):
             result = {"status": "complete", "decision": "REVERT", "kept": False}
@@ -1237,7 +1242,6 @@ class TestForgeGemmHelperCoverage:
         ).save(tmp_path)
         _pin_fusion_provider_env(monkeypatch, _ANTHROPIC_ONLY_ENV)
         monkeypatch.setattr(krh, "_forge_fusion_available", lambda: True)
-        monkeypatch.setattr(krh, "_kernel_agent_tool_path", lambda name: Path(name))
 
         async def _timeout(cmd, *, timeout_sec):
             raise subprocess.TimeoutExpired(cmd, timeout_sec)
@@ -1270,7 +1274,6 @@ class TestForgeGemmHelperCoverage:
         ).save(tmp_path)
         _pin_fusion_provider_env(monkeypatch, _ANTHROPIC_ONLY_ENV)
         monkeypatch.setattr(krh, "_forge_fusion_available", lambda: True)
-        monkeypatch.setattr(krh, "_kernel_agent_tool_path", Path)
 
         async def _fake_subprocess(cmd, *, timeout_sec):
             result = {"status": "complete", "decision": "REVERT", "kept": False}
@@ -1301,7 +1304,6 @@ class TestForgeGemmHelperCoverage:
         ).save(tmp_path)
         _pin_fusion_provider_env(monkeypatch, _ANTHROPIC_ONLY_ENV)
         monkeypatch.setattr(krh, "_forge_fusion_available", lambda: True)
-        monkeypatch.setattr(krh, "_kernel_agent_tool_path", Path)
 
         async def _timeout(cmd, *, timeout_sec):
             workspace = tmp_path / "runs" / "fusion" / "kernel_entry_fusion"
@@ -2969,11 +2971,6 @@ class TestRunGemmTuningHandler:
         )
 
     def test_explicit_tunableop_input_bypasses_vllm_shape_capture(self, tmp_path, monkeypatch):
-        root = tmp_path / "kernel-agent"
-        tool = root / "tools" / "forge_gemm_tuning.py"
-        tool.parent.mkdir(parents=True)
-        tool.write_text("# placeholder\n")
-        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(root))
         monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
 
         model = tmp_path / "model"
@@ -3021,11 +3018,6 @@ class TestRunGemmTuningHandler:
         assert result["status"] == "ok"
 
     def test_vllm_dense_without_shapes_captures_tunableop_input(self, tmp_path, monkeypatch):
-        root = tmp_path / "kernel-agent"
-        tool = root / "tools" / "forge_gemm_tuning.py"
-        tool.parent.mkdir(parents=True)
-        tool.write_text("# placeholder\n")
-        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(root))
         monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
 
         model = tmp_path / "model"
@@ -3095,11 +3087,6 @@ class TestRunGemmTuningHandler:
         assert result["status"] == "ok"
 
     def test_vllm_dense_capture_failure_stops_before_forge(self, tmp_path, monkeypatch):
-        root = tmp_path / "kernel-agent"
-        tool = root / "tools" / "forge_gemm_tuning.py"
-        tool.parent.mkdir(parents=True)
-        tool.write_text("# placeholder\n")
-        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(root))
         monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
 
         model = tmp_path / "model"
@@ -3143,11 +3130,6 @@ class TestRunGemmTuningHandler:
     def test_vllm_block_fp8_reuses_roofline_trace_without_recapture(self, tmp_path, monkeypatch):
         import gzip
 
-        root = tmp_path / "kernel-agent"
-        tool = root / "tools" / "forge_gemm_tuning.py"
-        tool.parent.mkdir(parents=True)
-        tool.write_text("# placeholder\n")
-        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(root))
         monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
 
         model = tmp_path / "model"
@@ -3274,11 +3256,6 @@ class TestRunGemmTuningHandler:
 
         from hyperloom.orchestrator.actions.executors import roofline as roofline_module
 
-        root = tmp_path / "kernel-agent"
-        tool = root / "tools" / "forge_gemm_tuning.py"
-        tool.parent.mkdir(parents=True)
-        tool.write_text("# placeholder\n")
-        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(root))
         monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
         model = tmp_path / "model"
         model.mkdir()
@@ -3625,11 +3602,6 @@ class TestRunGemmTuningHandler:
         assert reused["shape_count"] == 1
 
     def test_vllm_block_fp8_routes_profile_shapes_to_aiter(self, tmp_path, monkeypatch):
-        root = tmp_path / "kernel-agent"
-        tool = root / "tools" / "forge_gemm_tuning.py"
-        tool.parent.mkdir(parents=True)
-        tool.write_text("# placeholder\n")
-        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(root))
         monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
 
         model = tmp_path / "model"
@@ -3714,25 +3686,20 @@ class TestRunGemmTuningHandler:
         assert result["status"] == "ok"
 
     def test_handler_passes_non_fp8_geak_to_next_hyperloom_prereq(self, tmp_path, monkeypatch):
-        # An ambient KERNEL_OPT_BACKEND_ORDER=forge sends this down the forge branch instead -- which
-        # reports model_path_missing, a prerequisite this test is not about.
+        # An ambient KERNEL_OPT_BACKEND_ORDER=forge sends this down the forge branch instead.
         monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-        monkeypatch.delenv("HYPERLOOM_KERNEL_AGENT_ROOT", raising=False)
-        state = SharedState(precision="bf16", framework="sglang")
+        monkeypatch.delenv("GEAK_CONFIG", raising=False)
+        state = SharedState(precision="bf16", framework="sglang", model_path="/models/qwen")
         state.save(tmp_path)
 
         result = asyncio.run(krh.run_gemm_tuning_handler({}, session_dir=tmp_path))
 
-        assert result["status"] == "failed"
-        assert result["error_class"] == "kernel_agent_root_missing"
+        assert result["backend"] == "geak"
+        assert result["precision"] == "bf16"
+        assert result["error_class"] == "legacy_geak_config_missing"
 
     def test_builds_task_file_input_not_task_argv(self, tmp_path, monkeypatch):
         monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-        root = tmp_path / "kernel-agent"
-        tool = root / "tools" / "gemm_tuning.py"
-        tool.parent.mkdir(parents=True)
-        tool.write_text("# placeholder\n")
-        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(root))
 
         state = SharedState(
             precision="fp8",
@@ -3786,14 +3753,10 @@ class TestRunGemmTuningHandler:
         assert "run_sglang_test" not in cmd_text
         assert "gemm_a8w8_blockscale_tune" not in cmd_text
         assert "--input-json" in captured["cmd"]  # type: ignore[operator]
+        assert captured["cmd"][2] == krh.sys.executable  # type: ignore[index]
 
     def test_generates_isolated_benchmark_script_when_missing(self, tmp_path, monkeypatch):
         monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-        root = tmp_path / "kernel-agent"
-        tool = root / "tools" / "gemm_tuning.py"
-        tool.parent.mkdir(parents=True)
-        tool.write_text("# placeholder\n")
-        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(root))
 
         state = SharedState(
             precision="fp8",
@@ -3844,9 +3807,6 @@ class TestRunGemmTuningHandler:
     def test_geak_without_config_does_not_fall_back_to_forge(self, tmp_path, monkeypatch):
         monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
         monkeypatch.delenv("GEAK_CONFIG", raising=False)
-        root = tmp_path / "kernel-agent"
-        root.mkdir()
-        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(root))
         state = SharedState(
             precision="fp8",
             framework="sglang",
@@ -4438,7 +4398,6 @@ class TestTracelensRootResolution:
 
     def test_trace_analyze_handler_selfheals_default_root_then_fails_if_unrecovered(self, tmp_path, monkeypatch):
         # Default root missing: handler attempts self-heal before failing.
-        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(tmp_path))
         monkeypatch.delenv("TRACELENS_ROOT", raising=False)
         monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "no-tracelens-here"))
         called = {"n": 0}
@@ -4459,7 +4418,6 @@ class TestTracelensRootResolution:
     def test_trace_analyze_handler_bypass_selfheals_default_root_then_fails_if_unrecovered(self, tmp_path, monkeypatch):
         # Bypass transitively imports TraceLens for source mapping, so it is provisioned like the agent route:
         # a missing default root self-heals, then fails clearly instead of crashing the subprocess at import time.
-        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(tmp_path))
         monkeypatch.delenv("TRACELENS_ROOT", raising=False)
         monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "no-tracelens-here"))
         called = {"n": 0}
@@ -4479,7 +4437,6 @@ class TestTracelensRootResolution:
 
     def test_trace_analyze_handler_selfheals_incomplete_default_root(self, tmp_path, monkeypatch):
         # an incomplete default checkout (dir present, no .git) must still trigger self-heal.
-        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(tmp_path))
         monkeypatch.delenv("TRACELENS_ROOT", raising=False)
         monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "podlocal"))
         # Create an incomplete default checkout: the dir exists but has no .git.
@@ -4506,7 +4463,6 @@ class TestTracelensRootResolution:
     def test_trace_analyze_handler_failfast_on_incomplete_override(self, tmp_path, monkeypatch):
         # an incomplete non-default operator override (dir present, no .git) must fail fast — never adopted, never
         # auto-cloned.
-        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(tmp_path))
         monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "podlocal"))
         override = tmp_path / "operator-tl"
         override.mkdir()
@@ -4536,19 +4492,8 @@ class TestTracelensRootResolution:
         def _fake_ensure(root, *, log_path=None):
             called["n"] += 1
 
-        import sys as _sys
-        import types as _types
-
-        fake_mod = _types.ModuleType("tracelens_analysis")
-        fake_mod._ensure_tracelens_checkout = _fake_ensure  # type: ignore[attr-defined]
-        _sys.modules["tracelens_analysis"] = fake_mod
-        monkeypatch.setattr(
-            krh, "_kernel_agent_tool_path", lambda *_a, **_k: tmp_path / "tools" / "tracelens_analysis.py"
-        )
-        try:
-            ta._maybe_selfheal_tracelens_root(override)
-        finally:
-            _sys.modules.pop("tracelens_analysis", None)
+        _stub_tracelens_analysis(monkeypatch, _fake_ensure)
+        ta._maybe_selfheal_tracelens_root(override)
         assert called["n"] == 0
 
     def test_selfheal_runs_on_default_path_even_when_env_set(self, tmp_path, monkeypatch):
@@ -4563,20 +4508,8 @@ class TestTracelensRootResolution:
             called["n"] += 1
             called["root"] = Path(root)
 
-        # Route _kernel_agent_tool_path to a fake module exposing _ensure_tracelens_checkout.
-        import sys as _sys
-        import types as _types
-
-        fake_mod = _types.ModuleType("tracelens_analysis")
-        fake_mod._ensure_tracelens_checkout = _fake_ensure  # type: ignore[attr-defined]
-        _sys.modules["tracelens_analysis"] = fake_mod
-        monkeypatch.setattr(
-            krh, "_kernel_agent_tool_path", lambda *_a, **_k: tmp_path / "tools" / "tracelens_analysis.py"
-        )
-        try:
-            ta._maybe_selfheal_tracelens_root(default_root)
-        finally:
-            _sys.modules.pop("tracelens_analysis", None)
+        _stub_tracelens_analysis(monkeypatch, _fake_ensure)
+        ta._maybe_selfheal_tracelens_root(default_root)
         assert called["n"] == 1
         assert called["root"] == default_root
 
@@ -4592,19 +4525,8 @@ class TestTracelensRootResolution:
             called["n"] += 1
             called["root"] = Path(root)
 
-        import sys as _sys
-        import types as _types
-
-        fake_mod = _types.ModuleType("tracelens_analysis")
-        fake_mod._ensure_tracelens_checkout = _fake_ensure  # type: ignore[attr-defined]
-        _sys.modules["tracelens_analysis"] = fake_mod
-        monkeypatch.setattr(
-            krh, "_kernel_agent_tool_path", lambda *_a, **_k: tmp_path / "tools" / "tracelens_analysis.py"
-        )
-        try:
-            ta._maybe_selfheal_tracelens_root(default_root)
-        finally:
-            _sys.modules.pop("tracelens_analysis", None)
+        _stub_tracelens_analysis(monkeypatch, _fake_ensure)
+        ta._maybe_selfheal_tracelens_root(default_root)
         assert called["n"] == 1
         assert called["root"] == default_root
 
@@ -4615,7 +4537,6 @@ class TestBuildTraceAnalyzeCmd:
     def _common(self, monkeypatch, tmp_path):
         monkeypatch.delenv("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", raising=False)
         monkeypatch.delenv("MODEL_PATH", raising=False)
-        monkeypatch.setattr(ta, "_kernel_agent_tool_path", lambda name: Path("/tools") / name)
         state = SharedState()
         return state, tmp_path / "sess"
 
@@ -4638,7 +4559,8 @@ class TestBuildTraceAnalyzeCmd:
         )
         assert cmd == [
             krh.sys.executable,
-            "/tools/tracelens_analysis.py",
+            "-m",
+            ta._TRACELENS_ANALYSIS_MODULE,
             "--trace-input",
             "/t/trace",
             "--session-id",
@@ -4713,8 +4635,9 @@ class TestBuildTraceAnalyzeCmd:
             target_platform="",
             analysis_mode="",
         )
-        # bypass tool name; no --tracelens-root and no --skip-split.
-        assert cmd[1] == "/tools/bypass_trace_analysis.py"
+        # bypass tool module; no --tracelens-root and no --skip-split.
+        assert cmd[0] == krh.sys.executable
+        assert cmd[1:3] == ["-m", ta._BYPASS_TRACE_ANALYSIS_MODULE]
         assert "--tracelens-root" not in cmd
         assert "--skip-split" not in cmd
         # scriptable forwards denoise/model/precision; not the splitter hints.

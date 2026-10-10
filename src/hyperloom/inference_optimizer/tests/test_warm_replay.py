@@ -937,7 +937,7 @@ def test_promote_warm_replay_refused_by_the_lift_is_not_reproduced(tmp_path):
     assert coord.shared_state.current_best == prior_best
     assert coord.shared_state.cumulative_gain_validated == 0.0
     assert coord.shared_state.cumulative_gain_validated_ts == ""
-    journal = coord.writeback.ensure_journal()
+    journal = coord.recipe_journal.ensure_journal()
     assert not [e for e in journal.entries if e.outcome == OUTCOME_KEEP]
 
 

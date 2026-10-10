@@ -14,7 +14,7 @@ import pytest
 _SRC = Path(__file__).resolve().parents[2]
 _INSTALLERS = [
     _SRC / "inference_optimizer" / "assets" / "install.sh",
-    _SRC / "agents" / "kernel" / "scripts" / "install.sh",
+    _SRC / "inference_optimizer" / "assets" / "install_kernel_tools.sh",
 ]
 
 

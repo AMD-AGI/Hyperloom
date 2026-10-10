@@ -5,6 +5,9 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+# Distinct from SESSION_BUSY_EXIT_CODE (3) so a launcher that retries a busy session does not retry a failed quantization.
+QUANTIZATION_FAILED_EXIT_CODE = 4
+
 
 async def run_quantization_prelude_async(
     *,
@@ -56,7 +59,7 @@ async def run_quantization_prelude_async(
         f"optimize the un-quantized source model. See {workspace} for details.",
         file=sys.stderr,
     )
-    raise SystemExit(3)
+    raise SystemExit(QUANTIZATION_FAILED_EXIT_CODE)
 
 
 __all__ = ["run_quantization_prelude_async"]

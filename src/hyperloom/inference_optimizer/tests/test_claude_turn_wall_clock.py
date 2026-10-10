@@ -318,6 +318,7 @@ def _heartbeat() -> Intent:
 @pytest.mark.parametrize("mode", ["retrying", "busy"])
 async def test_the_tick_loop_keeps_ticking_past_a_hung_orchestration_turn(mode: str, session_dir, monkeypatch):
     monkeypatch.setattr(claude_mod, "_TURN_CLEANUP_GRACE_SEC", 5.0)
+    monkeypatch.setattr("hyperloom.orchestrator.loop.coordinator._BACKEND_RETRY_BASE_SEC", 0)
     sdk = _StallingSdk(mode)
     orchestration = _backend(sdk, turn_timeout_s=0.3)
     critic = MockBackend(ScriptedPlan(turns=[], default_intent=_heartbeat()), name="critic")
@@ -326,13 +327,13 @@ async def test_the_tick_loop_keeps_ticking_past_a_hung_orchestration_turn(mode: 
     # Only the backend's own bound may end the turn here.
     coord.reactor_turn_timeout_sec = 600.0
     observations: list[dict[str, Any]] = []
-    record = coord.writeback.record_observation
+    record = coord.bus.record_observation
 
     async def _capture(sender: str, kind: str, payload: dict[str, Any], *args: Any, **kwargs: Any) -> Any:
         observations.append(payload)
         return await record(sender, kind, payload, *args, **kwargs)
 
-    coord.writeback.record_observation = _capture  # type: ignore[method-assign]
+    coord.bus.record_observation = _capture  # type: ignore[method-assign]
     try:
         reason = await asyncio.wait_for(coord.run(max_ticks=2, tick_interval_sec=0.0), timeout=30.0)
     finally:
