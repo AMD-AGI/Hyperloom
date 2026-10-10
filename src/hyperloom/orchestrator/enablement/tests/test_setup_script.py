@@ -402,8 +402,64 @@ def test_the_setting_script_exports_the_accepted_launch(tmp_path):
     assert text.rstrip().endswith("vllm serve $MODEL --tp 4")
 
 
-def test_an_isolated_runtime_is_named_in_the_setup_script(tmp_path):
-    en = EnablementRound(active_runtime={"venv_root": "/session/enablement/stacks/sglang/s1/venv"})
-    write_setting_script(tmp_path, en, "sglang")
-    text = (tmp_path / "reports" / "enablement" / "enablement_setup.sh").read_text(encoding="utf-8")
-    assert "isolated runtime" in text
+def _attempt_runtime(tmp_path: Path, task_id: str) -> dict[str, str]:
+    """An attempt runtime as a round provisions it, under its own attempt directory."""
+    venv = tmp_path / "stacks" / "sglang" / task_id / "venv"
+    return {"venv_root": str(venv), "python_path": str(venv / "bin" / "python"), "bin_path": str(venv / "bin")}
+
+
+def _assert_runtime_refused(stack: _Stack, out: Path) -> None:
+    proc = _run(out / "enablement_setting.sh", env={**os.environ, "PATH": f"{out}:{os.environ['PATH']}"})
+    assert proc.returncode != 0
+    assert "isolated attempt runtime" in proc.stderr
+    assert "first-setup" not in proc.stdout
+    assert (stack.site / "ops" / "moe.py").read_text(encoding="utf-8") == "ORIGINAL = 2\n"
+    assert "LAUNCHED" not in proc.stdout
+    assert REFUSAL_MARKER in (out / "enablement_setup.sh").read_text(encoding="utf-8")
+    # A sufficient verdict assumes a consumer rebuilds the runtime; this script does not.
+    assert setup_script_record(stack.session, sufficient=True)["standalone"] is False
+
+
+def _fake_launcher(out: Path) -> None:
+    """A ``python3`` on PATH that reports a launch, so a launch on the base interpreter is seen."""
+    fake = out / "python3"
+    fake.write_text("#!/bin/sh\necho LAUNCHED\n", encoding="utf-8")
+    fake.chmod(0o755)
+
+
+def test_a_later_round_keep_on_its_own_runtime_is_refused_without_setup_commands(tmp_path):
+    # The baseline was read through the first round's runtime, the KEEP through a
+    # later round's: no diff, so no version check would be emitted at all.
+    stack = _Stack(tmp_path)
+    stack.en.setup_commands = []
+    first, later = _attempt_runtime(tmp_path, "spec-1"), _attempt_runtime(tmp_path, "spec-2")
+    stack.en.environment_closure_baseline = {"interpreter": first["python_path"], "distributions": {"pytest": "0"}}
+    stack.en.environment_closure = {"interpreter": later["python_path"], "distributions": {"pytest": "1"}}
+    stack.en.active_runtime = later
+    assert changed_versions(stack.en) is None
+    out = stack.write()
+    stack.restore()
+    _fake_launcher(out)
+
+    _assert_runtime_refused(stack, out)
+
+
+def test_a_baseline_round_keep_on_its_runtime_is_refused(tmp_path):
+    stack = _Stack(tmp_path)
+    runtime = _attempt_runtime(tmp_path, "spec-1")
+    stack.en.environment_closure_baseline = {"interpreter": runtime["python_path"], "distributions": {"pytest": "0"}}
+    stack.en.environment_closure = {"interpreter": runtime["python_path"], "distributions": {"pytest": "1"}}
+    stack.en.active_runtime = runtime
+    assert changed_versions(stack.en) is not None
+    out = stack.write()
+    stack.restore()
+    _fake_launcher(out)
+
+    _assert_runtime_refused(stack, out)
+
+
+def test_the_base_environment_is_not_refused_as_a_runtime(tmp_path):
+    stack = _Stack(tmp_path)
+    stack.en.active_runtime = {"venv_root": "", "python_path": "", "envs": {}}
+    stack.write()
+    assert setup_script_record(stack.session, sufficient=True)["standalone"] is True
