@@ -1400,7 +1400,7 @@ class ExploreExecutor:
                             # batch is graded against.
                             reason = graded.veto_reason
                         elif _graded_on_intvty:
-                            reason = f"median_or_guard_failed ({axes})"
+                            reason = f"{graded.refused_by} ({axes})"
                         else:
                             reason = "gain_below_threshold"
                     else:

@@ -1392,9 +1392,9 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 return False
             if graded.graded_on_intvty and graded.verdict != VERDICT_KEEP:
                 log.info(
-                    "current_best held: %s winner %s intvty %.1f->%.1f tput %.1f->%.1f",
+                    "current_best held: %s winner refused by %s, intvty %.1f->%.1f tput %.1f->%.1f",
                     task_kind,
-                    graded.verdict,
+                    graded.refused_by,
                     graded.reference,
                     graded.candidate,
                     graded.tput_reference,

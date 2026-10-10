@@ -633,7 +633,7 @@ async def test_actual_explore_axis_rejection_cannot_be_revived_by_geak_fallback(
     with patch("hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill", side_effect=fake_measure):
         produced = (await sub.run_task(task)).result
     rejection = produced["per_variant_outcomes"][0]
-    assert rejection["reason"].startswith("median_or_guard_failed")
+    assert rejection["reason"].startswith("p50_gain_below_threshold,p90_regressed (")
     assert any(gate["gate"] == "graded_axes" and gate["passed"] is False for gate in rejection["gates"])
     await coord.writeback.promote_to_shared_state("explore", produced, task=task)
     assert state.current_best["tput"] == 110.0
