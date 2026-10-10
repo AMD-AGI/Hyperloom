@@ -65,11 +65,17 @@ jobs:
           EVENT: ${{ github.event_name }}
           REPO: ${{ github.repository }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          # A push to main is checked against the main it replaced, so a push
+          # that bypasses PRs cannot grow the baseline or loosen the config either.
+          BEFORE: ${{ github.event.before }}
         run: |
           mkdir -p code-metrics
           args=(--report code-metrics/report.md --link-base "https://github.com/$REPO/blob/$HEAD_SHA")
           if [ "$EVENT" = pull_request ]; then
             args+=(--base-ref HEAD^1)
+          else
+            git fetch --no-tags --depth=1 origin "$BEFORE"
+            args+=(--base-ref "$BEFORE")
           fi
           set +e
           python scripts/code_metrics.py "${args[@]}" > /dev/null
