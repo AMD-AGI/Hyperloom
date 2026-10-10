@@ -106,7 +106,7 @@ def test_a_malformed_pinned_knob_does_not_take_the_run_down(monkeypatch):
     assert args.isl == DEFAULT_ISL
 
 
-def test_resume_restores_pins_before_the_agentx_staleness_guard(tmp_path, monkeypatch):
+def test_resume_restores_pins_before_the_agentx_staleness_guard(tmp_path, monkeypatch, request):
     """A session whose AgentX backend came from a pin resumes; the guard must not read an unpinned environment.
 
     The guard resolves the backend with a bare ``os.environ.get``, so restoring the persisted pins after it runs
@@ -118,6 +118,12 @@ def test_resume_restores_pins_before_the_agentx_staleness_guard(tmp_path, monkey
 
     import hyperloom.inference_optimizer.cli as optimizer_cli
     from hyperloom.inference_optimizer.cli.bootstrap import AGENTX_MEASUREMENT_EPOCH
+
+    # ``_run_optimize`` writes the environment directly -- SKIP_VARIANTS, PD_MODE, INFERENCE_OPTIMIZER_NODES and
+    # more -- so monkeypatch has nothing recorded to undo for them. Driving the real entry point means restoring the
+    # whole environment here, or a later test in the same worker grades on what this one left behind.
+    saved_environ = dict(os.environ)
+    request.addfinalizer(lambda: (os.environ.clear(), os.environ.update(saved_environ)))
 
     workspace = tmp_path / "sessions"
     resume_dir = workspace / "Qwen-Test" / "pinned-backend"
