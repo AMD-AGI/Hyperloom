@@ -41,6 +41,7 @@ from hyperloom.orchestrator.actions.executors.explore import (
 )
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.common.env import is_truthy
+from hyperloom.common.perf_metric import perf_snapshot_from_mapping
 from hyperloom.orchestrator.bus.resource_lock import (
     ResourceLockManager,
     SqliteLeaseBackend,
@@ -842,13 +843,13 @@ async def test_explore_missing_axes_preserves_running_grading_anchor(
     assert [row["name"] for row in out["winners"]] == expected_winners
     assert [row["variant_name"] for row in out["explore_search_update"]["winners_history"]] == expected_winners
     assert out["running_base_tput"] == (220.0 if intvty_outcome == "KEEP" else 210.0)
-    # Lift re-grades winners; duration/error_rate must ride along for rounds_are_comparable.
-    for winner in out["winners"]:
-        assert winner["duration_seconds"] == 25.0
-        assert winner["request_error_rate"] == 0.0
-        assert winner["e2e_norm_intvty_p50"] is not None
-    assert tested["v_good"]["duration_seconds"] == 25.0
-    assert tested["v_good"]["request_error_rate"] == 0.0
+    # Promotion re-grades a winner from its record alone; a record thinner than the measurement reads as
+    # candidate_axes_missing (or as an incomparable round) and the KEEP is dropped.
+    for row in (*out["winners"], tested["v_good"]):
+        snapshot = perf_snapshot_from_mapping(row)
+        assert snapshot is not None
+        assert snapshot["duration_seconds"] == 25.0
+        assert snapshot["request_error_rate"] == 0.0
 
 
 @pytest.mark.asyncio

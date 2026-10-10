@@ -29,6 +29,7 @@ from hyperloom.common.perf_metric import (
     GRADED_INTVTY_P50,
     GRADED_OUTPUT,
     VERDICT_REVERT,
+    graded_axes_of,
     perf_snapshot_from_mapping,
     resolve_grading_anchor_perf,
     stamp_output_per_gpu,
@@ -1493,13 +1494,7 @@ class ExploreExecutor:
                         "status": r.status,
                         "tput": decision_tput,
                         "decision_tput": decision_tput,
-                        "input_throughput": r.input_throughput,
-                        "total_throughput": r.total_token_throughput,
-                        "e2e_norm_intvty_p50": r.intvty_p50,
-                        "e2e_norm_intvty_p90": r.intvty_p90,
-                        "duration_seconds": r.duration_seconds,
-                        "request_error_rate": r.request_error_rate,
-                        "tpot_p90_ms": r.tpot_p90_ms,
+                        **graded_axes_of(variant_meas),
                         "gain_pct": gain,
                         "graded_objective": graded.objective,
                         "base_tput": running_base_tput,
@@ -1605,18 +1600,7 @@ class ExploreExecutor:
                             "decision_tput": decision_tput,
                             # The axes this KEEP was graded on travel with it: current_best becomes the next round's
                             # anchor, and an anchor without them degrades the session.
-                            # p50 must travel with p90: lift_to_current_best re-grades via
-                            # perf_snapshot_from_mapping, which refuses candidates missing either axis
-                            # (candidate_axes_missing → no_promote). duration_seconds and
-                            # request_error_rate must travel too: rounds_are_comparable fails closed
-                            # without them, turning an explore KEEP into a lift REVERT.
-                            "input_throughput": r.input_throughput,
-                            "total_throughput": r.total_token_throughput,
-                            "e2e_norm_intvty_p50": r.intvty_p50,
-                            "e2e_norm_intvty_p90": r.intvty_p90,
-                            "duration_seconds": r.duration_seconds,
-                            "request_error_rate": r.request_error_rate,
-                            "tpot_p90_ms": r.tpot_p90_ms,
+                            **graded_axes_of(variant_meas),
                             # Promotion re-checks the latency budget against this row, not the round's measurement.
                             "e2el_mean_ms": r.e2el_mean_ms,
                             "single_workspace": r.workspace,
