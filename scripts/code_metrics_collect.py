@@ -14,9 +14,11 @@ that is within its limit.
 Tools run from an empty temporary directory with absolute paths, so no in-repo tool
 config (``[tool.complexipy]``, ``[tool.vulture]``, ``.jscpd.json``, ruff per-file
 ignores) can narrow what they measure. Ruff also runs with ``--isolated`` and
-``--ignore-noqa`` and complexipy with ``--no-ignore``; vulture and jscpd, which have
-no such switch, read copies with their markers (``# noqa``, ``jscpd:ignore-start``)
-defused line for line. A suppression comment cannot hide a unit either.
+``--ignore-noqa`` and complexipy with ``--no-ignore``; jscpd, which has no such
+switch, reads copies with its ``jscpd:ignore-start`` markers defused line for line.
+Vulture alone honours ``# noqa``: Ruff owns that marker (``# noqa: F401`` is the
+sanctioned form for a side-effect import or a re-export, and RUF100 flags one that
+suppresses nothing), so it is not a way around this gate.
 
 Scope entries are passed to git as literal paths (``--literal-pathspecs``), so a
 pathspec such as ``:(exclude)x.py`` in ``roots`` names a path, it does not exclude one.
@@ -87,7 +89,6 @@ _QUOTED = re.compile(r"'([^']+)'")
 _DEFS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 _THREADS = "4"
 #: Suppression markers each tool honours, and what they are rewritten to (same line count).
-_VULTURE_MARKER = (re.compile(rb"#\s*noqa", re.IGNORECASE), b"#")
 _JSCPD_MARKER = (re.compile(rb"jscpd:ignore", re.IGNORECASE), b"jscpd-defused")
 
 
@@ -311,13 +312,11 @@ def module_line_findings(root: Path, files: list[str], threshold: int) -> list[F
 
 def vulture_findings(root: Path, files: list[str], min_confidence: int, units: Units) -> list[Finding]:
     argv = ["vulture", "--config", os.devnull, "--min-confidence", str(min_confidence)]
-    # The copy lives outside the tool's working directory: vulture prints paths under
-    # its cwd relative to it.
-    with tempfile.TemporaryDirectory() as work, tempfile.TemporaryDirectory() as copy:
-        tree = defused_copy(root, files, _VULTURE_MARKER, copy)
+    # The real files, not a copy: vulture honours Ruff's noqa markers (see the module doc).
+    with tempfile.TemporaryDirectory() as work:
         # vulture exits 3 when it found dead code; 1 and 2 are input/usage errors.
-        text = _run([*argv, *(str(tree / f) for f in files)], work, ok=(0, 3))
-        return parse_vulture(text, tree, units)
+        text = _run([*argv, *(str(root / f) for f in files)], work, ok=(0, 3))
+    return parse_vulture(text, root, units)
 
 
 def parse_vulture(text: str, root: Path, units: Units) -> list[Finding]:

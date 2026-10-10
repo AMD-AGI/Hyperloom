@@ -12,6 +12,10 @@ name: Code metrics comment
 # trusted files are checked out (the default branch's comment helper), the PR
 # number in the artifact must name an open PR whose head is exactly the commit
 # that run measured, and the report is posted as comment text and nothing else.
+# Since the fork's code wrote that text, the comment opens with the run's
+# conclusion, head SHA and link taken from github.event.workflow_run, so a forged
+# "PASSED" cannot misstate the real result. A cancelled run (superseded by a newer
+# push) has nothing to post and is skipped rather than failing on the default branch.
 on:
   workflow_run:
     workflows: [Code metrics]
@@ -22,12 +26,19 @@ permissions:
   contents: read
   pull-requests: write
 
+# One poster per fork branch; a newer run's report replaces an older one's.
+concurrency:
+  group: code-metrics-comment-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: true
+
 jobs:
   comment:
     name: post code-metrics report (fork PRs)
     if: >-
       github.event.workflow_run.event == 'pull_request'
       && github.event.workflow_run.head_repository.full_name != github.repository
+      && github.event.workflow_run.conclusion != 'cancelled'
+      && github.event.workflow_run.conclusion != 'skipped'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -37,7 +48,11 @@ jobs:
           sparse-checkout: .github/scripts
           persist-credentials: false
 
+      # A run that died before uploading (setup or install failure) has no report;
+      # its own check is red, so the poster notes that and does not fail as well.
       - uses: actions/download-artifact@v8
+        id: report
+        continue-on-error: true
         with:
           name: code-metrics-report
           path: ${{ runner.temp }}/code-metrics
@@ -47,11 +62,16 @@ jobs:
       - uses: actions/github-script@v9
         env:
           REPORT_DIR: ${{ runner.temp }}/code-metrics
+          REPORT_OUTCOME: ${{ steps.report.outcome }}
         with:
           script: |
             const fs = require('fs');
             const path = require('path');
             const run = context.payload.workflow_run;
+            if (process.env.REPORT_OUTCOME !== 'success') {
+              core.notice(`run ${run.html_url} (${run.conclusion}) uploaded no code-metrics report; not posting.`);
+              return;
+            }
             const text = fs.readFileSync(path.join(process.env.REPORT_DIR, 'pr-number.txt'), 'utf8').trim();
             if (!/^[1-9][0-9]{0,9}$/.test(text)) {
               core.setFailed(`artifact names no PR number: ${JSON.stringify(text.slice(0, 40))}`);
@@ -63,4 +83,4 @@ jobs:
               return;
             }
             const post = require(`${process.env.GITHUB_WORKSPACE}/.github/scripts/code_metrics_comment.js`);
-            await post({ github, context, core, number: pr.number, reportPath: path.join(process.env.REPORT_DIR, 'report.md') });
+            await post({ github, context, core, number: pr.number, reportPath: path.join(process.env.REPORT_DIR, 'report.md'), run });

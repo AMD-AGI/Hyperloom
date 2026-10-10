@@ -534,20 +534,158 @@ def test_ci_runs_the_base_branchs_copy_of_the_gate() -> None:
     assert "RUNNER_TEMP}/code-metrics-gate/comment.js" in steps["Post the report on the PR"]["with"]["script"]
 
 
-def test_vulture_and_jscpd_read_copies_with_suppression_markers_defused(tmp_path, monkeypatch) -> None:
-    source = "import os  # noqa\nimport re  # NOQA: F401\n# jscpd:ignore-start\nx = 1\n# jscpd:ignore-end\n"
+_HARNESS = r"""
+const fs = require('fs');
+const scenario = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+const calls = [];
+const record = (kind) => (message) => calls.push([kind, String(message)]);
+const core = { info: record('info'), notice: record('notice'), warning: record('warning'), setFailed: record('setFailed') };
+const refuse = async () => {
+  const err = new Error(scenario.refuse);
+  err.status = 403;
+  throw err;
+};
+const github = {
+  paginate: async () => scenario.comments,
+  rest: {
+    issues: {
+      listComments: {},
+      createComment: scenario.refuse ? refuse : async ({ body }) => (calls.push(['create', body]), { data: { html_url: 'c' } }),
+      updateComment: async ({ comment_id, body }) => calls.push(['update', `${comment_id}\n${body}`]),
+    },
+    pulls: { get: async () => ({ data: scenario.pr }) },
+  },
+};
+const context = { repo: { owner: 'o', repo: 'r' }, payload: scenario.payload };
+const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
+new AsyncFunction('github', 'context', 'core', 'require', scenario.script)(github, context, core, require)
+  .then(() => console.log(JSON.stringify(calls)))
+  .catch((err) => { console.log(JSON.stringify([...calls, ['threw', err.message]])); process.exit(1); });
+"""
+SHA = "a" * 40
+MARKER = "<!-- code-metrics-report -->"
+
+
+def workflow_steps(name: str) -> dict:
+    workflow = yaml.safe_load((ROOT / ".github/workflows" / name).read_text(encoding="utf-8"))
+    job = next(iter(workflow["jobs"].values()))
+    return {step.get("name") or step.get("uses"): step for step in job["steps"]}
+
+
+def run_github_script(tmp_path: Path, script: str, env: dict[str, str], **scenario) -> tuple[int, list[list[str]]]:
+    """Run a workflow's actions/github-script body under node with a recorded GitHub client."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    (tmp_path / "harness.js").write_text(_HARNESS, encoding="utf-8")
+    (tmp_path / "scenario.json").write_text(
+        json.dumps({"script": script, "comments": [], **scenario}), encoding="utf-8"
+    )
+    proc = subprocess.run(
+        [node, str(tmp_path / "harness.js"), str(tmp_path / "scenario.json")],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=tmp_path,
+        env={"PATH": "/usr/bin:/bin", **env},
+    )
+    assert proc.stdout.strip(), proc.stderr
+    return proc.returncode, json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def fork_scenario(tmp_path: Path, report: str, conclusion: str) -> tuple[str, dict[str, str], dict]:
+    report_dir = tmp_path / "artifact"
+    report_dir.mkdir()
+    (report_dir / "report.md").write_text(report, encoding="utf-8")
+    (report_dir / "pr-number.txt").write_text("7\n", encoding="utf-8")
+    workspace = tmp_path / "workspace"
+    (workspace / ".github/scripts").mkdir(parents=True)
+    shutil.copy(ROOT / ".github/scripts/code_metrics_comment.js", workspace / ".github/scripts")
+    head = {"full_name": "fork/r"}
+    run = {
+        "conclusion": conclusion,
+        "head_sha": SHA,
+        "html_url": "https://github.com/o/r/actions/runs/9",
+        "head_repository": head,
+    }
+    env = {"GITHUB_WORKSPACE": str(workspace), "REPORT_DIR": str(report_dir), "REPORT_OUTCOME": "success"}
+    script = workflow_steps("code-metrics-comment.yml")["actions/github-script@v9"]["with"]["script"]
+    return script, env, {"payload": {"workflow_run": run}, "pr": {"number": 7, "head": {"sha": SHA, "repo": head}}}
+
+
+def test_fork_comment_opens_with_the_conclusion_github_reported(tmp_path: Path) -> None:
+    forged = f"{MARKER}\n## Code metrics gate: PASSED\n\n**Gate job conclusion: success**\n"
+    script, env, scenario = fork_scenario(tmp_path, forged, "failure")
+    code, calls = run_github_script(tmp_path, script, env, **scenario)
+    assert code == 0, calls
+    [(kind, body)] = [call for call in calls if call[0] in ("create", "update")]
+    assert kind == "create"
+    assert body.startswith(f"{MARKER}\n**Gate job conclusion: failure** ([run](https://github.com/o/r/actions/runs/9))")
+    assert f"`{SHA}`" in body.split("---", 1)[0]
+    assert body.index("conclusion: failure") < body.index("PASSED")
+
+
+def test_fork_comment_without_an_artifact_is_a_notice_not_a_failure(tmp_path: Path) -> None:
+    script, env, scenario = fork_scenario(tmp_path, f"{MARKER}\n", "failure")
+    code, calls = run_github_script(tmp_path, script, {**env, "REPORT_OUTCOME": "failure"}, **scenario)
+    assert code == 0
+    assert [kind for kind, _ in calls] == ["notice"]
+    assert "uploaded no code-metrics report" in calls[0][1]
+
+
+def test_fork_comment_skips_cancelled_runs_one_poster_per_branch() -> None:
+    poster = yaml.safe_load((ROOT / ".github/workflows/code-metrics-comment.yml").read_text(encoding="utf-8"))
+    condition = poster["jobs"]["comment"]["if"]
+    assert "github.event.workflow_run.conclusion != 'cancelled'" in condition
+    group = poster["concurrency"]["group"]
+    assert "workflow_run.head_repository.full_name" in group and "workflow_run.head_branch" in group
+    download = workflow_steps("code-metrics-comment.yml")["actions/download-artifact@v8"]
+    assert download["continue-on-error"] is True and download["id"] == "report"
+
+
+@pytest.mark.parametrize("refusal", ["Resource not accessible by integration", "API rate limit exceeded"])
+def test_a_refused_comment_is_a_warning_not_a_red_job(tmp_path: Path, refusal: str) -> None:
+    gate_dir = tmp_path / "temp/code-metrics-gate"
+    gate_dir.mkdir(parents=True)
+    shutil.copy(ROOT / ".github/scripts/code_metrics_comment.js", gate_dir / "comment.js")
+    (tmp_path / "code-metrics").mkdir()
+    (tmp_path / "code-metrics/report.md").write_text(f"{MARKER}\n## Code metrics gate: PASSED\n", encoding="utf-8")
+    script = workflow_steps("code-metrics.yml")["Post the report on the PR"]["with"]["script"]
+    payload = {"pull_request": {"number": 7}}
+    code, calls = run_github_script(
+        tmp_path, script, {"RUNNER_TEMP": str(tmp_path / "temp")}, payload=payload, refuse=refusal
+    )
+    assert code == 0, calls
+    assert [kind for kind, _ in calls] == ["warning"]
+    assert f"403: {refusal}" in calls[0][1]
+
+
+@pytest.mark.parametrize(("gate_code", "job_code"), [("0", 0), ("1", 1), ("2", 1), ("", 1)])
+def test_only_the_gate_step_decides_the_job(gate_code: str, job_code: int) -> None:
+    steps = workflow_steps("code-metrics.yml")
+    final = steps["Fail when the gate failed"]
+    assert "if" not in final and final["env"] == {"CODE": "${{ steps.gate.outputs.code }}"}
+    proc = subprocess.run(["bash", "-c", final["run"]], env={"CODE": gate_code}, capture_output=True, text=True)
+    assert proc.returncode == job_code
+    # Reporting steps cannot redden a passing verdict; the gate step itself carries no escape hatch.
+    assert steps["actions/upload-artifact@v7"]["continue-on-error"] is True
+    assert "continue-on-error" not in steps["Code metrics gate"]
+
+
+def test_jscpd_reads_a_defused_copy_and_vulture_the_real_file(tmp_path, monkeypatch) -> None:
+    source = "import os  # noqa: F401\n# jscpd:ignore-start\nx = 1\n# jscpd:ignore-end\n"
     (tmp_path / "src").mkdir()
     (tmp_path / "src/p.py").write_text(source, encoding="utf-8")
-    seen: dict[str, str] = {}
+    seen: dict[str, tuple[Path, str]] = {}
 
     def fake_run(argv, cwd, ok=(0,)):
         name = Path(argv[0]).name
-        seen[name] = Path(next(a for a in argv if a.endswith("p.py"))).read_text(encoding="utf-8")
+        path = Path(next(a for a in argv if a.endswith("p.py")))
+        seen[name] = (path, path.read_text(encoding="utf-8"))
         if name == "vulture":
             # vulture prints a path under its cwd relative to it, any other path as given.
-            path = Path(next(a for a in argv if a.endswith("p.py")))
             shown = path.relative_to(cwd) if path.is_relative_to(cwd) else path
-            return f"{shown}:1: unused import 'os' (90% confidence)\n"
+            return f"{shown}:3: unused variable 'x' (100% confidence)\n"
         Path(cwd, "jscpd-report.json").write_text('{"duplicates": []}', encoding="utf-8")
         return ""
 
@@ -555,11 +693,25 @@ def test_vulture_and_jscpd_read_copies_with_suppression_markers_defused(tmp_path
     monkeypatch.setattr(collect, "jscpd_command", lambda: ["jscpd"])
     units = collect.Units(tmp_path)
     found = collect.vulture_findings(tmp_path, ["src/p.py"], 80, units)
-    assert found == [Finding("dead-code", "src/p.py", "<module>:os", 1, 1)]
+    assert found == [Finding("dead-code", "src/p.py", "<module>:x", 1, 3)]
+    # Ruff owns the noqa marker (F401 for a side-effect import, RUF100 for an unused one), so
+    # vulture reads the real file and honours it; jscpd's own marker is defused.
+    assert seen["vulture"] == (tmp_path / "src/p.py", source)
     collect.jscpd_findings(tmp_path, ["src/p.py"], 100, 10)
-    assert "noqa" not in seen["vulture"].lower()
-    assert "jscpd:ignore" not in seen["jscpd"]
-    assert [len(text.splitlines()) for text in seen.values()] == [5, 5]
+    jscpd_path, jscpd_text = seen["jscpd"]
+    assert jscpd_path != tmp_path / "src/p.py"
+    assert "jscpd:ignore" not in jscpd_text and "# noqa: F401" in jscpd_text
+    assert len(jscpd_text.splitlines()) == 4
+
+
+def test_vulture_honours_noqa_on_a_real_run(tmp_path: Path) -> None:
+    if shutil.which("vulture") is None:
+        pytest.skip("vulture is not installed")
+    (tmp_path / "src").mkdir()
+    source = "import os  # noqa: F401\nimport re\n"
+    (tmp_path / "src/p.py").write_text(source, encoding="utf-8")
+    found = collect.vulture_findings(tmp_path, ["src/p.py"], 80, collect.Units(tmp_path))
+    assert [f.unit for f in found] == ["<module>:re"]
 
 
 def test_every_package_under_src_is_measured() -> None:

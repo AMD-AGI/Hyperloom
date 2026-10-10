@@ -21,6 +21,9 @@ name: Code metrics
 # A same-repository PR gets the comment from this job. A fork PR's token is
 # read-only, so this job only uploads the report and code-metrics-comment.yml
 # posts it from a workflow_run (which runs from the default branch only).
+# Posting or uploading the report is best effort: a 403, 5xx or rate limit there is
+# a warning, and the job's result comes from the gate step alone (a gate that could
+# not run is exit 2, which is red).
 on:
   push:
     branches: [main]
@@ -112,6 +115,7 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         if: always() && github.event_name == 'pull_request' && steps.gate.outcome == 'success'
+        continue-on-error: true
         with:
           name: code-metrics-report
           path: code-metrics/
@@ -124,8 +128,12 @@ jobs:
         uses: actions/github-script@v9
         with:
           script: |
-            const post = require(`${process.env.RUNNER_TEMP}/code-metrics-gate/comment.js`);
-            await post({ github, context, core, number: context.payload.pull_request.number, reportPath: 'code-metrics/report.md' });
+            try {
+              const post = require(`${process.env.RUNNER_TEMP}/code-metrics-gate/comment.js`);
+              await post({ github, context, core, number: context.payload.pull_request.number, reportPath: 'code-metrics/report.md' });
+            } catch (err) {
+              core.warning(`could not post the code-metrics PR comment (${err.status || 'error'}: ${err.message}); the job summary has the report and the gate step decides this job.`);
+            }
 
       - name: Fail when the gate failed
         env:

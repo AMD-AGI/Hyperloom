@@ -49,9 +49,6 @@
     "main": 24,
     "run_mode": 11
    },
-   "dead-code": {
-    "read_measurement:hyperloom": 1
-   },
    "locals": {
     "main": 22
    },
@@ -106,9 +103,6 @@
    "cyclomatic-complexity": {
     "main": 12
    },
-   "dead-code": {
-    "<module>:hyperloom": 1
-   },
    "statements": {
     "main": 61
    }
@@ -117,9 +111,6 @@
    "cognitive-complexity": {
     "_analyze": 20,
     "_count_server_launches": 17
-   },
-   "dead-code": {
-    "<module>:hyperloom": 1
    }
   },
   "src/hyperloom/agents/critic/runtime/dead_letter.py": {
@@ -3213,13 +3204,6 @@
    },
    "cyclomatic-complexity": {
     "SqliteLeaseBackend.acquire_many": 13
-   }
-  },
-  "src/hyperloom/orchestrator/conftest.py": {
-   "dead-code": {
-    "<module>:_isolate_session_layout_env": 1,
-    "<module>:launch_backend": 1,
-    "<module>:virtual_clock": 1
    }
   },
   "src/hyperloom/orchestrator/delivery/ledger.py": {
