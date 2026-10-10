@@ -185,7 +185,7 @@ async def test_intvty_fix_with_an_output_collapse_reverts(tmp_path):
 
     assert out["status"] == "reverted"
     assert out["reason"] == (
-        "no measurable throughput; "
+        "interactivity p50 100.0->99.0 did not clear the interactivity KEEP gate; "
         f"correctness fix {FINDING} refused: output_throughput fell outside the 2.0% noise band"
     )
 

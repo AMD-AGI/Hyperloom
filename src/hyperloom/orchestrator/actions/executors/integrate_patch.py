@@ -1807,7 +1807,7 @@ def _correctness_fix_refusals(
     delta_pct: float | None,
     accuracy_pass: bool | None,
 ) -> list[str]:
-    """Reasons a declared correctness fix may not KEEP below the throughput threshold; empty when it may."""
+    """Reasons a declared correctness fix may not KEEP below the graded-axis threshold; empty when it may."""
     refusals: list[str] = []
     finding_refusal = correctness_fix_refusal(
         load_runtime_findings(getattr(shared_state, "current_best_measurement", None) or {}),
@@ -3838,6 +3838,11 @@ class IntegratePatchExecutor:
             reasons: list[str] = []
             if not graded.comparable:
                 reasons.append(f"performance comparison unavailable: {graded.degrade_reason}")
+            elif graded.graded_on_intvty and delta_pct is None:
+                reasons.append(
+                    graded.veto_reason
+                    or f"interactivity p50 {graded.reference:.1f}->{graded.candidate:.1f} did not clear the interactivity KEEP gate"
+                )
             elif delta_pct is None:
                 reasons.append("no measurable throughput")
             elif delta_pct < keep_threshold_pct:
