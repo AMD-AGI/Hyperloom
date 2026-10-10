@@ -125,11 +125,15 @@ class PredictorPump:
 
         FRAMEWORK entry calls this before orchestration's first turn. The tick
         files an answer only after that turn, by which time the first grid is
-        composed. The wait yields to the event loop, and a request still running
-        at the deadline is left for a later step to file.
+        composed. Only active mode with an endpoint waits; off, shadow and an
+        unset endpoint return at once. The wait yields to the event loop, and a
+        request still running at the deadline is left for a later step to file.
         """
         await self.step(state)
-        if self._inflight is None or not self._conf.enqueues:
+        if self._inflight is None:
+            # A step that filed an earlier decision point's answer has not asked at this one yet.
+            await self.step(state)
+        if self._inflight is None or not self._conf.enqueues or self._key != decision_point_key(state):
             return
         log.info("predictor: holding orchestration's first turn up to %.0fs for %s", MAX_ENTRY_WAIT_SEC, self._key)
         await asyncio.wait({self._inflight}, timeout=MAX_ENTRY_WAIT_SEC)
