@@ -1509,6 +1509,53 @@ def test_baseline_double_run_can_be_disabled_by_task_param(tmp_path, monkeypatch
     assert "server_lifecycle" not in captured[0]["benchmark"]
 
 
+def _run_agentx_baseline(tmp_path, monkeypatch, **task_params) -> tuple[dict, list, list]:
+    """Run a ``baseline`` task in an AgentX session, returning the result and each round's config and launch."""
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="sglang")
+    captured: list = []
+    launches: list = []
+    fake_run, _ = _cold_then_hot_fake_run(captured, launches=launches)
+    executor = BaselineExecutor(
+        magpie_python=sys.executable,
+        default_config_path=base,
+        session_dir=tmp_path,
+        shared_state=_unbounded_shared_state(benchmark_mode="agentx"),
+    )
+    ctx = _make_ctx({"output_dir": str(tmp_path / "ws"), "timeout_sec": 10, "gpu_type": "mi300x", **task_params})
+    ctx.task.kind = "baseline"
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+    return result, captured, launches
+
+
+def test_agentx_anchor_discards_a_first_round_and_measures_on_a_fresh_boot(tmp_path, monkeypatch):
+    """The AgentX client tears its server down, so the anchor is measured on a second boot, never the cold first."""
+    result, captured, launches = _run_agentx_baseline(tmp_path, monkeypatch)
+
+    assert result["status"] == "succeeded"
+    assert [cfg["benchmark"]["benchmark_script"] for cfg in captured] == ["aiperf_client.sh"] * 2
+    assert all("server_lifecycle" not in cfg["benchmark"] for cfg in captured)
+    assert [launch["server_already_ready"] for launch in launches] == [False, False]
+    assert result["output_throughput"] == pytest.approx(_HOT_TPUT)
+    assert result["warmup_round_tput"] == pytest.approx(_COLD_TPUT)
+    assert "baseline_double_run_discarded_first" in result["nonfatal_warnings"]
+    assert Path(result["launch_evidence_path"]).parts[-2:] == ("measure_round", "launch_evidence.json")
+
+
+def test_agentx_candidate_measurement_keeps_its_single_round(tmp_path, monkeypatch):
+    """A synthetic ``baseline`` that only measures a candidate against the anchor does not pay for a second round."""
+    result, captured, _ = _run_agentx_baseline(tmp_path, monkeypatch, quality_ref_exempt=True)
+
+    assert result["status"] == "succeeded"
+    assert len(captured) == 1
+    assert result["output_throughput"] == pytest.approx(_COLD_TPUT)
+
+
 def test_run_grid_discards_cold_first_round_via_lifecycle(tmp_path, monkeypatch):
     """The shared grid runner reports the HOT measured round when lifecycle reuse is eligible."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "1")
