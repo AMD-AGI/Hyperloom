@@ -280,9 +280,10 @@ def test_import_problems(root: Path, files: Iterable[str], units: Units, roots: 
         if is_test_path(path):
             continue
         for node in ast.walk(units.tree(path)):
-            for target in _imported(node, root / path, search):
-                if _is_test_module_name(target):
-                    problems.append(Problem(TEST_IMPORTS, path, node.lineno, f"production code imports `{target}`"))
+            # One refusal per import statement: ``from pkg.tests import test_x`` names one test module.
+            target = next((t for t in _imported(node, root / path, search) if _is_test_module_name(t)), None)
+            if target is not None:
+                problems.append(Problem(TEST_IMPORTS, path, node.lineno, f"production code imports `{target}`"))
     return problems
 
 

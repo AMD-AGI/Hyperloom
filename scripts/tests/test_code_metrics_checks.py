@@ -259,3 +259,8 @@ def test_diff_only_checks_judge_the_change_and_skip_tests(tmp_path: Path) -> Non
 def test_parse_added_lines_reads_new_side_hunks() -> None:
     diff = "@@ -1,0 +2,3 @@\n+a\n+b\n+c\n@@ -9 +12 @@\n-x\n+y\n@@ -20,2 +24,0 @@\n-z\n-w\n"
     assert checks.parse_added_lines(diff) == {2, 3, 4, 12}
+
+
+def test_one_import_statement_is_one_refusal(tmp_path: Path) -> None:
+    files = {"src/pkg/mod.py": "from pkg.tests import test_x\n", "src/pkg/tests/test_x.py": "x = 1\n"}
+    assert import_refusals(tmp_path, files) == [("src/pkg/mod.py", 1, "production code imports `pkg.tests`")]
