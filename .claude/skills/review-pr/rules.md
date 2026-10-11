@@ -264,16 +264,18 @@ X', nothing addressed to the reviewer". Prose written to defend a diff during re
 and does not survive the merge that ends the conversation; the constraint it was wrapped around does. Keep the
 constraint -- the ordering that must hold, the bound that comes from outside the file, why the slower path is the
 correct one -- and cut the rest. The finding quotes the narrating sentence, not the whole block.
-**Seen in:** PR #1797 -- `cli/__init__.py` gained 56 lines of comment and docstring against 28 lines of code,
-most of it recounting how the arrangement arrived at its final shape across four rounds of review, including a
-docstring still describing a call that had been deleted and an orphaned block left behind by a move.
+**Seen in:** PR #1797 -- the comment block in `cli/__init__.py` was appended to across four rounds of review and
+recounted how the arrangement had reached its final shape; one docstring still described a call that had been
+deleted, and a move left an orphaned block behind.
 **Not a finding when:** the prose states a constraint that the code genuinely cannot carry -- an invariant, an
 ordering requirement, a value whose origin is another system -- even where that takes several sentences; or the
 file's local average is already high and the addition matches it.
-**Evidence:** `$WORK/diff.txt` -- per non-test file, net added comment/docstring lines against net added code
-lines, then read the block for sentences that would be false or pointless once the PR is merged and the review
-is over. On #1797 the whole-diff totals read 6591 code against 1216 comment and cleared; `cli/__init__.py` on its
-own read 28 against 56.
+**Evidence:** `$WORK/diff.txt` -- per non-test file, take the diff's `+` and `-` lines, count a line as comment
+when it is a whole line leading with `#` or part of a bare string-expression statement, drop blanks, net the adds
+against the removes, and compare net comment lines to net code lines; then read the block for sentences that
+would be false or pointless once the PR is merged and the review is over. The ratio is taken on the head under
+review, not on the merged result: #1797 cut its own commentary back in `e8ff4867c`, so its final state no longer
+fires, while `7a9752e4d` -- a head the review actually ran on -- does.
 **Report as:** `X8 <file>:<line> -- "<narrating sentence>" describes the change, not a constraint; <N> comment
 lines added against <M> code lines`
 
