@@ -104,7 +104,7 @@ A unit that only moved to another file keeps its baseline entry when its qualifi
 
 Editing a unit that was already over is not a demand to repay its debt — the gate only asks that it not get worse. Extracting a helper while you are in there is in scope, and the gate rewards it with an out-of-date entry to tighten; a standalone rewrite of an unrelated module is a separate PR (see [`AGENTS.md`](../../AGENTS.md) § *One concern per change*).
 
-**Checks without a baseline.** The same job runs four checks that have no backlog to carry; each fails the PR on its own:
+**Checks without a baseline.** The same job runs four checks that have no backlog to carry, and the design checks below; each fails the PR on its own:
 
 | Check | Fails when | Scope |
 |-------|-----------|-------|
@@ -114,6 +114,20 @@ Editing a unit that was already over is not a demand to repay its debt — the g
 | Repeated literals | the PR takes a string or bytes value (3+ characters) or a number (other than 0, 1, -1 and 2) from fewer than 3 occurrences in a module to 3 or more | the production modules the PR touches, counted before and after (a renamed module against the file it came from; a literal that only moved between touched modules is not added); dict keys, `x["key"]` subscripts, the key of `.get`/`.pop`/`.setdefault` and of an `in` test, keyword names, docstrings, f-string text, annotations and `__all__` do not count. Name the value once as a module-level constant |
 
 The comment and literal checks are diff-only on purpose: the history in a comment is cheap to keep out and expensive to strip later, and a whole-tree literal count would flag most modules in the tree for values nobody is changing.
+
+**Design checks.** The same job also runs diff-only checks for the code-shape review rules A1 and A8-A12 (`scripts/code_metrics_design.py`). Each has its own section in the report and fails the PR on its own. They judge only what the PR adds in the production modules it touches; tests (a `tests/` package, a `test_*.py` module, `conftest.py`) are exempt from all of them. A line is *added* when the diff adds it and the PR did not remove the same text elsewhere (a move, a re-indent, a renamed file); a function or class is *new* when its `def`/`class` line is added and the same file at the merge base (for a renamed file, the file it came from) had no unit of that qualified name, so editing an existing function never makes it new.
+
+| Check | Fails when | Exempt |
+|-------|-----------|--------|
+| A1 Private name of another package | an added import, or attribute access through an imported name, of a private name (`_x`, not a dunder) or of a module under a private package, owned by another package unit. The units come from `.importlinter`: the root packages and every module a contract names as a layer or an independent module (`hyperloom.cli`, `hyperloom.orchestrator`, `hyperloom.agents.critic`, `kernelforge.kernel_backends.hip`, ...); a module belongs to the longest unit that prefixes it, and `scripts/` is a unit of its own | same-unit use; dunders; third-party packages. Fix: make the name public in its owner, or move the caller there |
+| A8 Flag argument | a new function whose first statement is `if <flag>:` (or `if not <flag>:`, or a comparison of a two-value `Literal` parameter) with a branch ending in `return` or `raise`, where the flag is a `bool` (annotated, or defaulting to `True`/`False`) or two-value `Literal` parameter | `main`, click/typer commands (`@*.command`, `.group`, `.option`, ...), functions taking an `argparse.Namespace`. Fix: one function per value |
+| A9 Tuple return | a new function annotated to return `tuple[...]` of more than `tuple-return-max-elements` (2) positions, or returning a tuple display that long | `tuple[X, ...]`. Fix: a dataclass or `NamedTuple` |
+| A10 Raw vocabulary comparison | an added `==`/`!=` against, or `in` over a tuple/list/set display of, a string that is the value of a member of exactly one `Enum` under `vocabulary-roots` (`src`), in a module that names that enum (imports or defines it) | a value two enums share, or one compared in a module that never names its enum: that is another vocabulary using the same word. Fix: compare with the member; convert outside input once, where it enters |
+| A11 Hidden global write | an added `global` statement | none. Fix: pass the value in and return the result, or keep the state on an object the caller owns |
+| A12 Pure forwarder | a new function (not a dunder, not `@overload`/`@abstractmethod`) whose body is one `return` of a call passing exactly its own parameters (receiver aside) through unchanged | a call of a builtin, of a class (a factory) or of `.get` (a table lookup); a call of one of the parameters. Fix: call the target directly |
+| A12 Single-implementation abstraction | a new ABC or `Protocol` with exactly one implementation under `vocabulary-roots` (a subclass; for a protocol also a class defining all its methods), in the same package unit | an interface a lower unit declares for a higher one to implement. Fix: use the implementation until a second one exists |
+
+A10 is limited to the enum's own vocabulary on purpose: matched against every enum value in `src`, almost every hit in the tree was a dict field that uses the same word for another vocabulary (a `status` of `"failed"` or `"unknown"` read from a tool's JSON), not a bypassed enum.
 
 **Review triggers.** These are not gated; they are the point at which a reviewer asks for a split or for the reason the shape is right. One of them has a ceiling above it that a reviewer blocks on; see [Complexity ceiling](#complexity-ceiling).
 
