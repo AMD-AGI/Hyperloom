@@ -1166,8 +1166,8 @@ def _seed_env_from_resumed_state(state: Any, pins: dict[str, str]) -> None:
     """Put the session's recorded workload in the environment, so a resume outranks whatever the shell exported.
 
     Hyperloom's own repro scripts ``export TP``/``CONC``/``ISL``/``OSL``, and sourcing one before a resume must not
-    silently re-measure the session at another shape. A name this resume re-pins is skipped, so changing the
-    workload stays an explicit act.
+    silently re-measure the session at another shape. ``pins`` -- this resume's ``--extra-env``, or, when it
+    passes none, the pins persisted from the launch -- is skipped, so changing the workload stays an explicit act.
     """
     for name in ("ISL", "OSL", "CONC", "TP", "EP", "PRECISION", "MAX_MODEL_LEN"):
         recorded = getattr(state, name.lower(), 0)
