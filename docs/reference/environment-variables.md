@@ -77,9 +77,13 @@ The following variables configure filesystem paths for Hyperloom's runtime depen
 
 ## Workload configuration
 
-Set with CLI flags, not env vars. Pre-set `ISL` / `OSL` / `CONC` / `PRECISION` /
-`TP` / `EP` env vars are ignored and overwritten (`GPU_TYPE` is a fallback when
-`--gpu-type` is omitted).
+Set with CLI flags. `ISL` / `OSL` / `CONC` / `PRECISION` / `TP` / `EP` resolve on
+a ladder — **an explicit flag, then the environment, then the resumed session's
+recorded value, then the default** — so a pre-set env var, or the same name
+passed as `--extra-env NAME=VALUE`, is used when the flag is absent. Export them
+deliberately: a value left in the shell by a generated repro script is
+indistinguishable from one you meant. `GPU_TYPE` is a fallback when `--gpu-type`
+is omitted.
 
 - **Model / workload shape:** `--model`, `--model-class`, `--framework`,
   `--framework-version`, `--precision`, `--tp`, `--ep`, `--isl`, `--osl`,

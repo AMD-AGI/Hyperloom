@@ -1162,6 +1162,19 @@ def _positive_env_int(name: str) -> int:
     return value if value > 0 else 0
 
 
+def _seed_env_from_resumed_state(state: Any, pins: dict[str, str]) -> None:
+    """Put the session's recorded workload in the environment, so a resume outranks whatever the shell exported.
+
+    Hyperloom's own repro scripts ``export TP``/``CONC``/``ISL``/``OSL``, and sourcing one before a resume must not
+    silently re-measure the session at another shape. A name this resume re-pins is skipped, so changing the
+    workload stays an explicit act.
+    """
+    for name in ("ISL", "OSL", "CONC", "TP", "EP", "PRECISION", "MAX_MODEL_LEN"):
+        recorded = getattr(state, name.lower(), 0)
+        if recorded and name not in pins:
+            os.environ[name] = str(recorded)
+
+
 def _resolve_workload_knobs(
     args: argparse.Namespace,
     state: Any | None = None,
@@ -1923,6 +1936,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             model=str(state.model_path or ""),
             launch_info_file=getattr(args, "launch_info_file", None),
         )
+        _seed_env_from_resumed_state(state, _resume_extra_env)
         # Resolve workload knobs with the resumed state as the fallback source (explicit --isl/--conc/... on this
         # resume still win), then project the resolved values into env so resume sees the same workload contract (not
         # YAML defaults).

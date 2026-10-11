@@ -151,8 +151,8 @@ The following flags are used in multi-node workload skill blocks.
 | `--gpus-per-node` | GPUs per pod (default 8); feeds the TP feasibility check |
 | `--tp` | Tensor parallelism degree |
 | `--ep` | Expert parallelism degree (MoE; often `ep == tp`) |
-| `--isl`, `--osl`, `--conc` | Benchmark input length, output length, and concurrency. These must be flags — the corresponding env vars are ignored and overwritten |
-| `--gpu-type`, `--precision` | Target GPU (for example `mi325x`) and dtype (`bf16`). Flags are authoritative; env vars are not |
+| `--isl`, `--osl`, `--conc` | Benchmark input length, output length, and concurrency. The flag wins; without it the corresponding env var is used, then the resumed session's value, then the default |
+| `--gpu-type`, `--precision` | Target GPU (for example `mi325x`) and dtype (`bf16`). `--precision` follows the same ladder as the knobs above; for `--gpu-type` the flag is authoritative and `GPU_TYPE` is only a fallback |
 | `--framework` | `sglang` |
 | `--target-gain`, `--max-hours` | Optimization goal and time budget |
 | `--pd-mode disaggregated` | Enable PD disaggregation (infera and rayjob) |

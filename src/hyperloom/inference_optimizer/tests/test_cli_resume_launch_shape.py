@@ -184,6 +184,32 @@ def test_a_malformed_pinned_knob_does_not_take_the_run_down(monkeypatch):
     assert args.isl == DEFAULT_ISL
 
 
+def test_a_stale_shell_export_does_not_re_measure_a_resumed_session(monkeypatch):
+    """The recorded workload outranks the shell; a name this resume re-pins still changes it.
+
+    Hyperloom's own repro scripts ``export TP``/``CONC``/``ISL``/``OSL``, so sourcing one before a resume would
+    otherwise re-measure the session at a different shape and record the shell's numbers as its own.
+    """
+    from hyperloom.inference_optimizer.cli import _resolve_workload_knobs, _seed_env_from_resumed_state
+
+    state = _ns(isl=3333, osl=777, conc=99, tp=8, ep=2, precision="int4", max_model_len=32768)
+    # What sourcing a generated repro script leaves behind, plus the one knob this resume re-pins.
+    for name, value in (("TP", "4"), ("CONC", "256"), ("ISL", "4096"), ("OSL", ""), ("EP", ""), ("PRECISION", "")):
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("MAX_MODEL_LEN", "")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", "")
+    repinned = {"CONC": "16"}
+    _export_operator_launch_shape(server_args="", extra_env=repinned)
+
+    _seed_env_from_resumed_state(state, repinned)
+    args = _knob_args()
+    _resolve_workload_knobs(args, state)
+
+    assert (args.tp, args.isl) == (8, 3333), "a stale shell export replaced the recorded workload"
+    assert args.conc == 16, "a re-passed pin must still change the workload"
+    assert os.environ["MAX_MODEL_LEN"] == "32768"
+
+
 def test_resume_restores_pins_before_the_agentx_staleness_guard(tmp_path, monkeypatch, request):
     """A session whose AgentX backend came from a pin resumes; the guard must not read an unpinned environment.
 
