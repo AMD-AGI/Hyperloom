@@ -674,7 +674,16 @@ class _RenderMixin:
         gain = entry.get("gain_pct")
         result = entry.get("result") if isinstance(entry.get("result"), dict) else {}
         tput = entry.get("tput") or entry.get("output_throughput") or result.get("output_throughput")
-        gain_s = f"{gain:+.2f}%" if isinstance(gain, (int, float)) else " no_meas"
+        # A REVERT carries no ``gain_pct`` by design; its graded movement is ``graded_gain_pct``. Only a row with
+        # neither was never measured on the graded axis -- printing "no_meas" for a guard refusal sends readers
+        # hunting for a broken extractor.
+        graded_gain = entry.get("graded_gain_pct")
+        if isinstance(gain, (int, float)) and not isinstance(gain, bool):
+            gain_s = f"{gain:+.2f}%"
+        elif isinstance(graded_gain, (int, float)) and not isinstance(graded_gain, bool):
+            gain_s = f"{graded_gain:+.2f}%"
+        else:
+            gain_s = " no_meas"
         tput_s = f" (tput={tput:.1f})" if isinstance(tput, (int, float)) and tput > 0 else ""
         # The gain column is meaningless without the axis it was taken on.
         graded_obj = str(entry.get("graded_objective") or "").strip()
