@@ -230,7 +230,9 @@ def test_a_plain_resume_does_not_warn_about_the_recorded_precision(tmp_path, mon
     model = tmp_path / "model"
     model.mkdir()
     (model / "config.json").write_text('{"torch_dtype": "bfloat16"}', encoding="utf-8")
-    monkeypatch.setenv("PRECISION", "")
+    # Every name the seeding writes, so monkeypatch restores it: an unscoped EP reaches the next test in the shard.
+    for name in ("ISL", "OSL", "CONC", "TP", "EP", "MAX_MODEL_LEN", "PRECISION"):
+        monkeypatch.setenv(name, "")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", "")
     state = _ns(isl=3333, osl=777, conc=99, tp=8, ep=2, precision="fp8", max_model_len=0)
 
