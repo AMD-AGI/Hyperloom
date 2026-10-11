@@ -156,6 +156,16 @@ def test_same_unit_dunders_public_and_foreign_names_pass(tmp_path: Path, source:
     assert refusals(tmp_path, {TOP: ""}, {TOP: source}) == []
 
 
+def test_a_local_name_shadowing_an_import_is_not_the_import(tmp_path: Path) -> None:
+    head = (
+        "from pkg.low.mod import obj\n\n\n"
+        "def f(obj):\n    return obj._cache\n\n\n"
+        "def g():\n    obj = make()\n    return lambda: obj._cache\n\n\n"
+        "def h():\n    return obj._cache\n"
+    )
+    assert refusals(tmp_path, {TOP: ""}, {TOP: head}) == [("private-reach", TOP, 14)]
+
+
 def test_tests_may_reach_private_names(tmp_path: Path) -> None:
     path = "src/pkg/top/tests/test_mod.py"
     assert refusals(tmp_path, {path: ""}, {path: "from pkg.low.mod import _helper\n"}) == []
@@ -263,6 +273,13 @@ def test_pairs_variadic_tuples_and_other_shapes_pass(tmp_path: Path, source: str
 def test_a_protocol_method_returns_the_tuple_its_protocol_fixes(tmp_path: Path) -> None:
     source = "class C:\n    def __reduce__(self):\n        return (C, (), {})\n"
     assert refusals(tmp_path, {LOW: ""}, {LOW: source}) == []
+
+
+def test_a_display_returned_as_a_variadic_tuple_passes(tmp_path: Path) -> None:
+    source = "def f() -> tuple[int, ...]:\n    return (1, 2, 3)\n"
+    assert refusals(tmp_path, {LOW: ""}, {LOW: source}) == []
+    fixed = "def f() -> tuple[int, int]:\n    return (1, 2, 3)\n"
+    assert refusals(tmp_path / "fixed", {LOW: ""}, {LOW: fixed}) == [("tuple-return", LOW, 1)]
 
 
 def test_a_variadic_tuple_has_no_fixed_number_of_positions(tmp_path: Path) -> None:

@@ -299,8 +299,8 @@ def private_reach_problems(change: Change, packages: Packages) -> list[Problem]:
             reach = _reach(name.full, packages, own) if change.fresh(name.line) else None
             if reach:
                 found.setdefault(name.line, reach)
-    for node in ast.walk(change.tree):
-        if isinstance(node, ast.Attribute) and is_private(node.attr) and change.fresh(node.lineno):
+    for node, local in _attributes(change.tree, frozenset()):
+        if is_private(node.attr) and change.fresh(node.lineno) and _root(node) not in local:
             owner = _resolve(node.value, bindings)
             reach = _reach(f"{owner}.{node.attr}", packages, own) if owner else None
             if reach:
@@ -314,6 +314,36 @@ def private_reach_problems(change: Change, packages: Packages) -> list[Problem]:
         )
         for line, reach in sorted(found.items())
     ]
+
+
+def _attributes(node: ast.AST, local: frozenset[str]) -> Iterator[tuple[ast.Attribute, frozenset[str]]]:
+    """Every attribute access under ``node``, with the names the enclosing functions bind locally."""
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, (*_FUNCTIONS, ast.Lambda)):
+            yield from _attributes(child, local | _locals(child))
+            continue
+        if isinstance(child, ast.Attribute):
+            yield child, local
+        yield from _attributes(child, local)
+
+
+def _locals(function: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda) -> frozenset[str]:
+    """The parameters of ``function`` and the names its own body assigns (a ``global`` name is not local)."""
+    args = function.args
+    names = {a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg) if a}
+    declared = set()
+    for node in _own_nodes(function):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            names.add(node.id)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            declared.update(node.names)
+    return frozenset(names - declared)
+
+
+def _root(node: ast.expr) -> str:
+    while isinstance(node, ast.Attribute):
+        node = node.value
+    return node.id if isinstance(node, ast.Name) else ""
 
 
 def _reach(dotted: str, packages: Packages, own: str) -> str | None:
@@ -410,7 +440,10 @@ def tuple_return_problems(change: Change, max_elements: int) -> list[Problem]:
     for unit in change.new_functions():
         if _is_dunder(unit.node.name):
             continue
-        size = max(_annotated_size(_annotation(unit.node.returns)), _returned_size(unit.node))
+        returns = _annotation(unit.node.returns)
+        # An annotation that admits any length (``tuple[X, ...]``) is what the displays return.
+        returned = 0 if _is_variadic(returns) else _returned_size(unit.node)
+        size = max(_annotated_size(returns), returned)
         if size > max_elements:
             problems.append(
                 Problem(
@@ -437,6 +470,16 @@ def _annotated_size(node: ast.AST | None) -> int:
     if any(isinstance(e, ast.Constant) and e.value is Ellipsis for e in elements):
         return 0
     return len(elements)
+
+
+def _is_variadic(node: ast.AST | None) -> bool:
+    return node is not None and any(
+        isinstance(sub, ast.Subscript)
+        and _terminal(sub.value) in _TUPLES
+        and isinstance(sub.slice, ast.Tuple)
+        and any(isinstance(e, ast.Constant) and e.value is Ellipsis for e in sub.slice.elts)
+        for sub in ast.walk(node)
+    )
 
 
 def _returned_size(function: ast.AST) -> int:
