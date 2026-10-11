@@ -315,6 +315,12 @@ def test_an_expert_parallel_pin_that_contradicts_ep_fails_the_seal(pinned):
         _seal_with_ep("sglang", pinned, 4)
 
 
+def test_a_contradicting_pin_fails_the_seal_even_when_ep_does_not_divide_tp():
+    """The skip for an EP that TP cannot hold must not let a different pinned size launch unreported."""
+    with pytest.raises(ValueError, match="EP=3"):
+        seal_server_argv({"EXTRA_SGLANG_ARGS": "--ep-size 2", "EP": 3, "TP": 8}, "sglang")
+
+
 def test_sealing_twice_adds_the_expert_parallel_flag_once():
     """The seal reads its own output back as a pin."""
     envs = {"EXTRA_SGLANG_ARGS": "--tp 8", "EP": 8}
@@ -362,3 +368,46 @@ def test_a_replacing_grid_variant_keeps_the_expert_parallel_flag(tmp_path, varia
     argv = config_server_argv(config).argv
     assert "--block-size" not in argv
     assert argv.count("--enable-expert-parallel") == 1
+
+
+@pytest.mark.parametrize(
+    ("nodes", "tp", "ep"),
+    [("1", 8, 3), ("2", 16, 16)],
+    ids=["ep-does-not-divide-tp", "multi-node"],
+)
+def test_a_resealed_argv_gets_no_expert_parallel_flag_the_launch_cannot_take(tmp_path, monkeypatch, nodes, tp, ep):
+    """A repair goes through the same EP rule as the first seal."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", nodes)
+    config = tmp_path / "bench.yaml"
+    config.write_text(
+        yaml.safe_dump(
+            {"benchmark": {"framework": "sglang", "model": "/m", "envs": {"TP": tp, "EP": ep, "EXTRA_SGLANG_ARGS": ""}}}
+        ),
+        encoding="utf-8",
+    )
+
+    assert reseal_config_argv(config, "--mem-fraction-static 0.9").argv == ("--mem-fraction-static", "0.9")
+
+
+def test_a_grid_variant_ep_that_does_not_divide_tp_adds_no_flag(tmp_path, caplog):
+    """A variant's extra_envs reach the seal unfiltered, so the seal is where EP meets TP."""
+    base = tmp_path / "base.yaml"
+    base.write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "framework": "sglang",
+                    "model": "/m",
+                    "envs": {"TP": 8, "EXTRA_SGLANG_ARGS": "--mem-fraction-static 0.9"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    variant = GridVariant(name="v", extra_envs={"EP": "3"})
+
+    with caplog.at_level("WARNING"):
+        config = _grid_runner._build_variant_yaml(base, "", variant, output_subdir=tmp_path / "v")
+
+    assert "--ep-size" not in config_server_argv(config).argv
+    assert "EP=3 does not divide the launched TP=8" in caplog.text

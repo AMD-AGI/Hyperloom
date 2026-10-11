@@ -5,12 +5,14 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from types import SimpleNamespace
 
 import pytest
 import yaml
 
+from hyperloom.common.env_safety import OPERATOR_EXTRA_ENV_VAR
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 from hyperloom.orchestrator.actions.executors import _workload_envs as we
 
@@ -331,7 +333,7 @@ def test_materialize_drops_an_ep_the_clamped_tp_cannot_hold(monkeypatch, tmp_pat
         envs = _materialize(src, tmp_path / "out")["envs"]
 
     assert envs["TP"] == 4
-    assert "EP" not in envs
+    assert envs["EP"] == 8
     assert "--ep-size" not in envs["EXTRA_SGLANG_ARGS"]
     assert "EP=8 does not divide the launched TP=4" in caplog.text
 
@@ -340,24 +342,51 @@ def test_materialize_drops_an_ep_that_does_not_divide_tp(monkeypatch, tmp_path, 
     with caplog.at_level("WARNING"):
         envs = _ep_materialize(monkeypatch, tmp_path, framework="sglang", args="--mem-fraction-static 0.9", tp=8, ep=3)
 
-    assert "EP" not in envs
+    assert envs["EP"] == 3
     assert "--ep-size" not in envs["EXTRA_SGLANG_ARGS"]
     assert "EP=3 does not divide the launched TP=8" in caplog.text
 
 
-def test_materialize_leaves_multi_node_ep_to_the_launcher(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("environ", "extra_envs"),
+    [
+        # ``--extra-env EP=3`` serializes the pin and also exports it under its own name.
+        ({OPERATOR_EXTRA_ENV_VAR: json.dumps({"EP": "3"}), "EP": "3"}, None),
+        ({}, {"EP": "3"}),
+    ],
+    ids=["operator-pin", "extra-envs"],
+)
+def test_an_extra_env_ep_that_does_not_divide_tp_adds_no_flag(monkeypatch, tmp_path, caplog, environ, extra_envs):
+    """An EP written by the extra-env merge meets the same TP rule as the run's own EP."""
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("TP", "8")
+    for name, value in environ.items():
+        monkeypatch.setenv(name, value)
+    src = _write(tmp_path / "cfg.yaml", envs={"EXTRA_SGLANG_ARGS": "--mem-fraction-static 0.9"})
+
+    with caplog.at_level("WARNING"):
+        envs = _materialize(src, tmp_path / "out", extra_envs=extra_envs)["envs"]
+
+    assert "--ep-size" not in envs["EXTRA_SGLANG_ARGS"].split()
+    assert "EP=3 does not divide the launched TP=8" in caplog.text
+
+
+@pytest.mark.parametrize("operator_pin", [False, True])
+def test_materialize_leaves_multi_node_ep_to_the_launcher(monkeypatch, tmp_path, operator_pin):
     """The multi-node launcher passes EP itself; this pod's GPU count is not the cluster's TP."""
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_VISIBLE_GPU_COUNT", "8")
     monkeypatch.setenv("TP", "16")
     monkeypatch.setenv("EP", "16")
+    if operator_pin:
+        monkeypatch.setenv(OPERATOR_EXTRA_ENV_VAR, json.dumps({"EP": "16"}))
     src = _write(tmp_path / "cfg.yaml", envs={"EXTRA_SGLANG_ARGS": "--mem-fraction-static 0.9"})
 
     envs = _materialize(src, tmp_path / "out")["envs"]
 
-    assert "EP" not in envs
-    assert "--ep-size" not in envs["EXTRA_SGLANG_ARGS"]
+    assert "--ep-size" not in envs["EXTRA_SGLANG_ARGS"].split()
 
 
 def test_mimo_v2_injects_triton_attention(monkeypatch, tmp_path):

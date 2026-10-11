@@ -1075,29 +1075,6 @@ def _coerce_workload_int_env(env_key: str, raw: str) -> int:
     return value
 
 
-def _set_single_node_ep(envs: dict[str, Any], resolved_tp: int) -> None:
-    """Write the run's ``EP`` into ``envs`` for the seal to turn into the server's expert-parallel flag.
-
-    The flag shards experts across the TP ranks this config launches with. A multi-node server is launched by the
-    multi-node launcher, which passes EP itself, and this pod's GPU count says nothing about that cluster's TP.
-    """
-    from ._multi_node_env import is_multi_node
-
-    ep_env = os.environ.get("EP", "").strip()
-    if not ep_env or is_multi_node():
-        return
-    resolved_ep = _coerce_workload_int_env("EP", ep_env)
-    if resolved_ep > 1 and resolved_tp % resolved_ep:
-        log.warning(
-            "EP=%d does not divide the launched TP=%d (after any clamp to the visible GPUs); "
-            "launching without expert parallelism.",
-            resolved_ep,
-            resolved_tp,
-        )
-        return
-    envs["EP"] = resolved_ep
-
-
 def default_baseline_config() -> Path:
     """Resolve the shipped Magpie YAML for ``$FRAMEWORK``, or for the default framework when it is unset.
 
@@ -1473,6 +1450,7 @@ def materialize_config_with_envs(
         "OSL",
         "MAX_MODEL_LEN",
         "TP",
+        "EP",
         "PORT",
     ):
         val = os.environ.get(env_key, "").strip()
@@ -1514,7 +1492,6 @@ def materialize_config_with_envs(
             )
             resolved_tp = visible
     envs["TP"] = resolved_tp
-    _set_single_node_ep(envs, resolved_tp)
     if not rocr_yaml or len(rocr_devices) < resolved_tp:
         derived = ",".join(str(i) for i in range(resolved_tp))
         if rocr_yaml and rocr_yaml != derived:
