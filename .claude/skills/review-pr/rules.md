@@ -1039,11 +1039,13 @@ are what a reordering or a split has to clear.
 **Seen in:** PR #1797 -- splitting `_resolve_workload_knobs` and moving the call above `_preflight` broke nine
 tests across three files the author had not run: topology-gate cases building a four-attribute `Namespace` that
 suddenly needed `resume_from`, precision cases still calling the half that no longer resolved precision, and
-ladder cases that now had to start from an empty environment. A `git grep -l` on the symbol lists all three in
-under a second.
+ladder cases that now had to start from an empty environment. A `git grep -l` on `_resolve_workload_knobs`
+reaches two of those three in under a second; the topology-gate file names that symbol nowhere and is reached
+only by grepping `_run_optimize`, the entry point the moved call sits inside.
 **Not a finding when:** the symbol is new in this PR and has no callers outside it, or the enumeration was run
 and the card states its scope.
 **Evidence:** `git grep -ln '<symbol>' -- src` against `$WORK/files.txt` -- any file in the first list and not
-the second is a caller the diff did not visit.
+the second is a caller the diff did not visit. Run it once per reshaped symbol and once for the function a moved
+call now sits inside: a test driving the entry point names neither half of a split.
 **Report as:** `V8 -- <symbol> changed shape; <file>:<line> still calls the old one` / `V8 -- callers were not
 enumerated: <N> files reference <symbol>, <M> of them untouched by this PR`
