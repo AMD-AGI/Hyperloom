@@ -252,6 +252,7 @@ def project_launch_evidence(evidence: Mapping[str, Any] | None) -> tuple[dict[st
         sanitize_publish_server_args,
         sanitize_shared_knowledge,
     )
+    from .sufficiency import requested_setting_names
 
     out: dict[str, Any] = {}
     argv_refused = False
@@ -265,16 +266,17 @@ def project_launch_evidence(evidence: Mapping[str, Any] | None) -> tuple[dict[st
             except ValueError:
                 argv_refused = True
         elif key == "observed_server_identity" and isinstance(value, Mapping):
-            # vLLM's identity is its whole record, which can name any setting
-            # the operator passed: secrets and host paths go the way the argv's do.
+            identity = {str(k): v for k, v in value.items() if str(k) not in _IDENTITY_PATH_FIELDS}
+            if str(evidence.get("framework") or "").strip().lower() == "vllm":
+                # vLLM's identity is its whole record, which can carry any
+                # setting the engine resolved. Only the settings the launch
+                # asked for are published: they are what the verdict confirms,
+                # and they disclose no more than the requested argv itself.
+                asked = requested_setting_names(str(evidence.get("requested_server_args") or ""))
+                identity = {k: v for k, v in identity.items() if k in asked}
             # The sanitizer exempts a ``host_origin`` subtree from path removal;
             # nothing in an engine's record is that, so it is dropped first.
-            out[key] = sanitize_shared_knowledge(
-                _without_key(
-                    {str(k): v for k, v in value.items() if str(k) not in _IDENTITY_PATH_FIELDS},
-                    HOST_ORIGIN_KEY,
-                )
-            )
+            out[key] = sanitize_shared_knowledge(_without_key(identity, HOST_ORIGIN_KEY))
         else:
             out[key] = dict(value) if isinstance(value, Mapping) else value
     requested_env = evidence.get("requested_server_env")

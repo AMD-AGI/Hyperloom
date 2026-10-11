@@ -171,6 +171,17 @@ def _requested_flags(argv: str) -> dict[str, str]:
     return flags
 
 
+def requested_setting_names(argv: str) -> frozenset[str]:
+    """The setting names a requested argv sets, ``--no-X`` naming ``X`` as well.
+
+    The parallelism widths are always included: they are compared on every
+    launch, through the binding, whether or not the argv spells them.
+    """
+    names = set(_requested_flags(argv))
+    names |= {name[3:] for name in names if name.startswith("no_")}
+    return frozenset(names.union(*(spellings for _axis, spellings in _PARALLELISM_AXES)))
+
+
 def _activation_reasons(section: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Judge the graded launch: was this configuration actually launched?"""
     reasons: list[dict[str, Any]] = []

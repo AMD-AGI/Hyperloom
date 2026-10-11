@@ -163,6 +163,31 @@ def test_a_requested_setting_the_record_lacks_is_still_unconfirmed(tmp_path: Pat
     assert _launch_codes(tmp_path, log_text=missing) == [("activation_incomplete", "requested:moe_backend")]
 
 
+def test_the_published_identity_holds_only_what_the_launch_asked_for(tmp_path: Path) -> None:
+    """A setting nobody requested is not published, whatever the record holds."""
+    record = VLLM_030_LOG.replace(
+        "'max_num_seqs': 64,",
+        "'max_num_seqs': 64, 'kv_transfer_config': {'kv_connector_extra_config': "
+        "{'socket_path': 'unix:///run/private.sock'}},",
+    )
+    config = tmp_path / "bench.yaml"
+    config.write_text("benchmark: {}\n", encoding="utf-8")
+    evidence = build_launch_evidence(
+        config_path=config,
+        actual_server_log=_log(tmp_path, record),
+        framework="vllm",
+        slot=tmp_path / "slot",
+        requested_server_args=REQUESTED,
+    )
+    assert "kv_transfer_config" in evidence["observed_server_identity"], "observed in full"
+    identity = project_launch_evidence(evidence)[0]["observed_server_identity"]
+    assert "kv_transfer_config" not in identity and "private.sock" not in str(identity)
+    assert identity["disable_hybrid_kv_cache_manager"] is False, "--no-X publishes X"
+    assert identity["compilation_config"]["mode"] == "<CompilationMode.VLLM_COMPILE: 3>"
+    # The record's other settings, requested by nobody, are not published either.
+    assert "gpu_memory_utilization" not in identity and "trust_remote_code" not in identity
+
+
 def test_the_published_identity_carries_no_host_path_or_secret(tmp_path: Path) -> None:
     log_text = VLLM_030_LOG.replace(
         "'max_num_seqs': 64,",
@@ -172,7 +197,12 @@ def test_the_published_identity_carries_no_host_path_or_secret(tmp_path: Path) -
     config = tmp_path / "bench.yaml"
     config.write_text("benchmark: {}\n", encoding="utf-8")
     evidence = build_launch_evidence(
-        config_path=config, actual_server_log=_log(tmp_path, log_text), framework="vllm", slot=tmp_path / "slot"
+        config_path=config,
+        actual_server_log=_log(tmp_path, log_text),
+        framework="vllm",
+        slot=tmp_path / "slot",
+        # Requested, so it is the sanitizer and not the requested-only filter that removes them.
+        requested_server_args="--max-num-seqs 64 --api-key x --chat-template t.jinja --hf-overrides {}",
     )
     projected, _ = project_launch_evidence(evidence)
     identity = projected["observed_server_identity"]
