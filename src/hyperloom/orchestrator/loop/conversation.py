@@ -929,8 +929,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
     def _discarded_escalate_hint_advisory_block(self) -> str:
         """Render the advisory for an escalate_strategy_change hint that was discarded.
 
-        A transition to a phase other than FRAMEWORK_AGENT drops the hint before
-        the exit rules that consume it can read it.
+        A phase transition the hint did not drive drops it.
 
         Returns:
             The advisory string, or ``""`` when no discarded hint is recorded.
@@ -941,6 +940,6 @@ class ConversationCollaborator(CoordinatorCollaborator):
             return ""
         return (
             f"ADVISORY: your escalate_strategy_change hint '{hint}' (at {ts}) was discarded "
-            "because a phase transition to a phase other than FRAMEWORK_AGENT fired before "
+            "because a phase transition it did not drive fired before "
             "it could be consumed. Re-emit escalate_strategy_change if still needed."
         )

@@ -323,14 +323,6 @@ def _is_safe_path_entry(entry: str) -> bool:
     )
 
 
-def _prepend_path_entry(envs: dict[str, str], var: str, entry: str) -> None:
-    """Prepend a single already-validated entry onto a ``:``-joined env var."""
-    parts = [p for p in str(envs.get(var, "") or "").split(":") if p]
-    if entry not in parts:
-        parts.insert(0, entry)
-    envs[var] = ":".join(parts)
-
-
 # Reserved keys carried by dedicated override fields; never accepted via runtime_env.
 _RUNTIME_ENV_RESERVED: frozenset[str] = frozenset({"PATH", "PYTHONPATH", "LD_LIBRARY_PATH"})
 
@@ -339,35 +331,34 @@ def apply_runtime_override(envs: dict[str, str], override: dict[str, Any]) -> No
     """Inject an attempt runtime override into the materialized YAML envs dict."""
     if not override:
         return
+    from ._workload_envs import prepend_launch_path
+
     path_prefix = str(override.get("path_prefix") or "").strip()
     if path_prefix:
-        _prepend_path_entry(envs, "PATH", path_prefix)
+        prepend_launch_path(envs, "PATH", path_prefix)
     entrypoint_bin = str(override.get("entrypoint_bin_dir") or "").strip()
     if entrypoint_bin:
         if _is_safe_path_entry(entrypoint_bin):
-            _prepend_path_entry(envs, "PATH", entrypoint_bin)
+            prepend_launch_path(envs, "PATH", entrypoint_bin)
         else:
             log.warning("apply_runtime_override: dropping unsafe entrypoint_bin_dir %r", entrypoint_bin)
     pp_prefix = str(override.get("pythonpath_prefix") or "").strip()
     if pp_prefix:
         if _is_safe_path_entry(pp_prefix):
-            _cur_pp = str(envs.get("PYTHONPATH", "") or "")
-            envs["PYTHONPATH"] = f"{pp_prefix}:{_cur_pp}" if _cur_pp else pp_prefix
+            prepend_launch_path(envs, "PYTHONPATH", pp_prefix)
         else:
             log.warning("apply_runtime_override: dropping unsafe pythonpath_prefix %r", pp_prefix)
     # Multi-entry prefixes: prepend in order so the first entry wins, ahead of any single-dir pythonpath_prefix and
     # the inherited value.
     for entry in reversed(_coerce_prefix_list(override.get("pythonpath_prefixes"))):
         if _is_safe_path_entry(entry):
-            _cur_pp = str(envs.get("PYTHONPATH", "") or "")
-            envs["PYTHONPATH"] = f"{entry}:{_cur_pp}" if _cur_pp else entry
+            prepend_launch_path(envs, "PYTHONPATH", entry)
         else:
             log.warning("apply_runtime_override: dropping unsafe pythonpath entry %r", entry)
-    # Native loader path: prepend attempt entries while preserving any inherited entries (e.g. /opt/rocm/lib), which
-    # _prepend_path_entry never drops.
+    # Native loader path: prepend attempt entries while preserving any inherited entries (e.g. /opt/rocm/lib).
     for entry in reversed(_coerce_prefix_list(override.get("ld_library_path_prefix"))):
         if _is_safe_path_entry(entry):
-            _prepend_path_entry(envs, "LD_LIBRARY_PATH", entry)
+            prepend_launch_path(envs, "LD_LIBRARY_PATH", entry)
         else:
             log.warning("apply_runtime_override: dropping unsafe ld_library_path entry %r", entry)
     _runtime_env = override.get("runtime_env")
@@ -474,7 +465,7 @@ def _build_variant_yaml(
         envs.pop(str(k), None)
     for k, v in variant.extra_envs.items():
         envs[str(k)] = str(v)
-    from ._workload_envs import pin_mlperf_round_concurrency
+    from ._workload_envs import pin_mlperf_round_concurrency, prepend_launch_path
 
     pin_mlperf_round_concurrency(envs)
     # The launcher re-exports these unconditionally, so a value carried here is
@@ -496,8 +487,7 @@ def _build_variant_yaml(
             and Path(_overlay).is_dir()
         )
         if _overlay_ok:
-            _cur_pp = str(envs.get("PYTHONPATH", "") or "")
-            envs["PYTHONPATH"] = f"{_overlay}:{_cur_pp}" if _cur_pp else _overlay
+            prepend_launch_path(envs, "PYTHONPATH", _overlay)
         else:
             log.warning(
                 "grid: dropping unsafe overlay_pythonpath %r (not a single "

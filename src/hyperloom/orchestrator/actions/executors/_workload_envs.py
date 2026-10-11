@@ -756,6 +756,20 @@ def _resolve_framework_repo_path(
     return ""
 
 
+def prepend_launch_path(envs: dict[str, Any], var: str, *entries: str) -> None:
+    """Put ``entries`` first on the path-list env ``var`` the materialized config hands the server launch.
+
+    Magpie and the bypass launcher start the server with ``os.environ`` overlaid by ``benchmark.envs``, so a config
+    value replaces the inherited one. A config without the key therefore builds on the inherited value, or
+    prepending would drop the operator's and the image's entries (import paths, ``PATH``, ``/opt/rocm/lib``); a
+    config with the key stays authoritative. An entry already on the path moves to the front, and empty parts are
+    dropped.
+    """
+    base = envs[var] if var in envs else os.environ.get(var)
+    parts = [*entries, *str(base or "").strip().split(os.pathsep)]
+    envs[var] = os.pathsep.join(dict.fromkeys(part for part in parts if part))
+
+
 #: Source-root envs Hyperloom writes into a vLLM launch; vLLM reports them as unknown.
 VLLM_SOURCE_ROOT_ENVS: tuple[str, ...] = ("FRAMEWORK_REPO_PATH", "VLLM_REPO_PATH", "VLLM_DIR")
 
@@ -977,26 +991,6 @@ def _client_tokenizer_mode(model_path: str | None) -> str:
     return model_type
 
 
-def inject_vllm_expert_parallel(
-    server_args: str | None,
-    framework: Any,
-    ep: Any,
-) -> str:
-    """Append vLLM expert-parallel flag when EP is enabled."""
-    args = str(server_args or "").strip()
-    if "vllm" not in str(framework or "").lower():
-        return args
-    try:
-        ep_int = int(ep if ep not in (None, "") else 1)
-    except (TypeError, ValueError):
-        return args
-    if ep_int <= 1:
-        return args
-    if re.search(r"(?:^|\s)--enable-expert-parallel(?:\s|$)", args):
-        return args
-    return f"{args} --enable-expert-parallel".strip()
-
-
 class FrameworkScriptMismatchError(ValueError):
     """Raised when benchmark_script targets a different framework than the run.
 
@@ -1166,7 +1160,7 @@ def _finalize_framework_server_args(
     drop_moe_runner_backend: bool = False,
 ) -> None:
     """Apply the final framework server-arg guard pipeline in place
-    (context-length/watchdog/attention/MoE/EP/dedup/compact/shell-safe); order is fixed.
+    (context-length/watchdog/attention/MoE/dedup/compact/shell-safe); order is fixed.
 
     1. --context-length cap: sglang sizes max_total_tokens off the model's
        max_position_embeddings, so a huge native window balloons the aiter
@@ -1211,11 +1205,6 @@ def _finalize_framework_server_args(
     #    crashed the server.
     if drop_moe_runner_backend and framework_env == "EXTRA_SGLANG_ARGS":
         resolved_server_args = _remove_moe_runner_backend_arg(resolved_server_args)
-    resolved_server_args = inject_vllm_expert_parallel(
-        resolved_server_args,
-        bench.get("framework"),
-        os.environ.get("EP", "").strip() or envs.get("EP"),
-    )
     # 5. vLLM/atom argparse dedup: collapse repeated single-value flags to
     #    last-wins (vLLM crashes EngineCoreProc on a duplicate); no-op for
     #    sglang.
@@ -1475,6 +1464,7 @@ def materialize_config_with_envs(
         "OSL",
         "MAX_MODEL_LEN",
         "TP",
+        "EP",
         "PORT",
     ):
         val = os.environ.get(env_key, "").strip()
@@ -1792,8 +1782,7 @@ def materialize_config_with_envs(
                 extra_body.setdefault("detailed_annotations", True)
                 _tool_dir = kernel_shape_tool_dir()
                 if _shape_disc and _tool_dir is not None:
-                    _existing_pp = str(envs.get("PYTHONPATH", "")).strip()
-                    envs["PYTHONPATH"] = f"{_tool_dir}{os.pathsep}{_existing_pp}" if _existing_pp else str(_tool_dir)
+                    prepend_launch_path(envs, "PYTHONPATH", str(_tool_dir))
                     envs["TRACELENS_SHAPE_DISCOVERY"] = "1"
                 else:
                     envs["TRACELENS_SHAPE_DISCOVERY"] = "0"
@@ -1874,8 +1863,7 @@ def materialize_config_with_envs(
     if reference_controls.get("overlay_pythonpath"):
         from hyperloom.common.overlay import validate_overlay_pythonpath
 
-        overlay = validate_overlay_pythonpath(reference_controls["overlay_pythonpath"])
-        envs["PYTHONPATH"] = overlay + (f":{envs['PYTHONPATH']}" if envs.get("PYTHONPATH") else "")
+        prepend_launch_path(envs, "PYTHONPATH", validate_overlay_pythonpath(reference_controls["overlay_pythonpath"]))
     recipe_overwritten = launcher_overwritten_envs(bench)
     if server_args:
         # Merge into (not overwrite) the framework env so the profile path's
