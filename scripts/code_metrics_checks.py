@@ -120,7 +120,12 @@ class PullRequest:
 
 def git(root: Path, *args: str, ok: tuple[int, ...] = (0,)) -> subprocess.CompletedProcess[str]:
     proc = subprocess.run(
-        ["git", "-C", str(root), "--literal-pathspecs", *args], capture_output=True, text=True, check=False
+        ["git", "-C", str(root), "--literal-pathspecs", *args],
+        capture_output=True,
+        # ``diff --text`` prints binary files as they are: a byte that is not UTF-8 is not an error.
+        encoding=ENCODING,
+        errors="replace",
+        check=False,
     )
     if proc.returncode not in ok:
         raise ToolError(f"git {' '.join(args[:3])} exited {proc.returncode}: {proc.stderr.strip()[-500:]}")

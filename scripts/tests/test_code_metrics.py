@@ -43,6 +43,7 @@ class Repo:
         self.at_base: dict[tuple[str, str, str], int] = {}
         (path / "scripts").mkdir()
         shutil.copyfile(ROOT / "pyproject.toml", path / "pyproject.toml")
+        shutil.copyfile(ROOT / ".importlinter", path / ".importlinter")
         self.git("init", "-q", "-b", "main")
         monkeypatch.setattr(code_metrics, "measure", lambda root, config, units: collect.worst_per_unit(self.findings))
         monkeypatch.setattr(code_metrics, "base_values", lambda root, since, paths, config: dict(self.at_base))
@@ -585,7 +586,8 @@ def test_ci_runs_the_base_branchs_copy_of_the_gate() -> None:
     gate = yaml.safe_load((ROOT / ".github/workflows/code-metrics.yml").read_text(encoding="utf-8"))
     steps = {step.get("name"): step for step in gate["jobs"]["code-metrics"]["steps"]}
     run = steps["Code metrics gate"]["run"]
-    for name in ("code_metrics.py", "code_metrics_checks.py", "code_metrics_collect.py", "code_metrics_report.py"):
+    names = ("code_metrics.py", "code_metrics_checks.py", "code_metrics_collect.py", "code_metrics_design.py")
+    for name in (*names, "code_metrics_report.py"):
         assert f'git show "$base:scripts/{name}" > "$gate/{name}"' in run
     assert 'python "$impl/code_metrics.py"' in run and "python scripts/" not in run
     assert '--root "$GITHUB_WORKSPACE"' in run

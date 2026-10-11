@@ -36,6 +36,7 @@ import subprocess
 import tempfile
 from collections.abc import Iterable, Iterator
 from pathlib import Path
+from typing import NamedTuple
 
 MODULE = "<module>"
 #: Metric names used by more than one collector.
@@ -84,6 +85,14 @@ class ToolError(RuntimeError):
     """A tool is missing, at the wrong version, or produced output the gate cannot read."""
 
 
+class Key(NamedTuple):
+    """What identifies a measured unit, in the baseline and across runs."""
+
+    metric: str
+    path: str
+    unit: str
+
+
 @dataclasses.dataclass(frozen=True)
 class Finding:
     metric: str
@@ -93,8 +102,8 @@ class Finding:
     line: int
 
     @property
-    def key(self) -> tuple[str, str, str]:
-        return (self.metric, self.path, self.unit)
+    def key(self) -> Key:
+        return Key(self.metric, self.path, self.unit)
 
 
 def worse(metric: str, value: float, reference: float) -> bool:
@@ -102,10 +111,6 @@ def worse(metric: str, value: float, reference: float) -> bool:
     if metric not in METRICS:
         raise ToolError(f"unknown metric {metric}")
     return value > reference
-
-
-def violates(metric: str, value: float, threshold: float) -> bool:
-    return worse(metric, value, threshold)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -283,7 +288,7 @@ def parse_complexipy(rows: list[dict], root: Path, threshold: int, units: Units)
     findings = []
     for row in rows:
         value = int(row["complexity"])
-        if not violates(COGNITIVE, value, threshold):
+        if not worse(COGNITIVE, value, threshold):
             continue
         path = _relative(root, row["path"])
         unit = row["function_name"].replace("::", ".")
@@ -300,7 +305,7 @@ def module_line_findings(root: Path, files: list[str], threshold: int) -> list[F
     findings = []
     for path in files:
         lines = module_lines(root, path)
-        if violates(MODULE_LINES, lines, threshold):
+        if worse(MODULE_LINES, lines, threshold):
             findings.append(Finding(MODULE_LINES, path, MODULE, lines, 1))
     return findings
 
@@ -320,7 +325,7 @@ def function_line_findings(files: list[str], threshold: int, units: Units) -> li
             if not d.is_function:
                 continue
             length = d.end - d.start + 1 - _nested_function_lines(d, defs)
-            if violates(FUNCTION_LINES, length, threshold):
+            if worse(FUNCTION_LINES, length, threshold):
                 findings.append(Finding(FUNCTION_LINES, path, d.name, length, d.start))
     return findings
 

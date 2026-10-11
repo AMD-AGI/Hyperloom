@@ -479,6 +479,16 @@ dead-code-min-confidence = 80
 # failure: the size at which a reviewer asks for a split (the style guide's
 # module-length review trigger).
 module-lines-warning = 800
+# Design checks (scripts/code_metrics_design.py), diff-only like the comment and
+# literal checks. A1 takes its package units (root packages, layers and
+# independent modules) from these import-linter contracts.
+import-contracts = ".importlinter"
+# A10 compares against the values of the enums defined here; A12 counts the
+# implementations of a new ABC or Protocol here.
+vocabulary-roots = ["src"]
+# A9: a function returning a tuple of more elements than this fails; past two,
+# positions stop naming themselves (the review rule's NamedTuple/dataclass line).
+tuple-return-max-elements = 2
 
 [tool.hyperloom.code_metrics.thresholds]
 # Twice McCabe's 10 (the style guide's review trigger): at 20 a function has

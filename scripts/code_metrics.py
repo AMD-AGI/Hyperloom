@@ -34,7 +34,9 @@ the log and the report, no longer failing. It waives nothing else.
 Next to the ratchet, ``code_metrics_checks`` runs checks that have no baseline: added
 comment blocks and history in comments, CJK characters (in the tree and, on a pull
 request, in its title, body and commit messages), production imports of test code, and
-added repeated literals. The diff-only ones need ``--base-ref``.
+added repeated literals; ``code_metrics_design`` runs the diff-only design checks (A1
+private-name reach, A8 flag arguments, A9 tuple returns, A10 raw vocabulary, A11 global
+writes, A12 forwarders and single implementations). The diff-only ones need ``--base-ref``.
 
 CI runs the base branch's copy of these scripts against the change, so editing the gate
 does not change the verdict on the same change; the report lists any edit to the gate
@@ -75,10 +77,12 @@ except ModuleNotFoundError:  # Python 3.10
     import tomli as tomllib
 
 import code_metrics_checks as checks
+import code_metrics_design as design
 from code_metrics_collect import (
     METRICS,
     MODULE,
     Finding,
+    Key,
     ToolError,
     Units,
     complexipy_findings,
@@ -96,7 +100,6 @@ from code_metrics_collect import (
 )
 from code_metrics_report import UPDATE_COMMAND, Outcome, render
 
-Key = tuple[str, str, str]
 _PYPROJECT = "pyproject.toml"
 _ENCODING = "utf-8"
 #: Metrics a single file determines, so the same file at the base can be measured alone.
@@ -120,14 +123,17 @@ _NO_RAISE = (
     "duplication-min-lines",
     "dead-code-min-confidence",
     "module-lines-warning",
+    "tuple-return-max-elements",
 )
-#: A scope entry is a plain repository path: no pathspec magic, glob, ``.`` or ``..``.
-_PLAIN_PATH = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*(/[A-Za-z0-9_-][A-Za-z0-9_.-]*)*/?")
+#: A scope entry is a plain repository path: no pathspec magic, glob, ``.`` or ``..`` (a dotfile is fine).
+_SEGMENT = r"(?!\.\.?(?:/|$))[A-Za-z0-9_.-]+"
+_PLAIN_PATH = re.compile(rf"{_SEGMENT}(?:/{_SEGMENT})*/?")
 #: The gate's own implementation; an edit to any of these is listed for review.
 GATE_FILES = (
     "scripts/code_metrics.py",
     "scripts/code_metrics_checks.py",
     "scripts/code_metrics_collect.py",
+    "scripts/code_metrics_design.py",
     "scripts/code_metrics_report.py",
     ".github/workflows/code-metrics.yml",
     ".github/workflows/code-metrics-comment.yml",
@@ -146,6 +152,10 @@ class Config:
     thresholds: dict[str, int]
     tools: dict[str, str]
     params: dict[str, int]
+    #: The import-linter contracts that define the package units of the A1 check.
+    contracts: str
+    #: Where the A10 and A12 checks collect enums and implementations.
+    vocabulary_roots: tuple[str, ...]
 
 
 def parse_config(text: str) -> Config | None:
@@ -156,9 +166,7 @@ def parse_config(text: str) -> Config | None:
     thresholds = dict(table["thresholds"])
     if set(thresholds) != set(METRICS):
         raise ToolError(f"thresholds must name exactly {sorted(METRICS)}, got {sorted(thresholds)}")
-    baseline = str(table["baseline"])
-    if not _PLAIN_PATH.fullmatch(baseline) or baseline.endswith("/"):
-        raise ToolError("`baseline` takes a plain repository file path")
+    baseline, contracts = _file_path(table, "baseline"), _file_path(table, "import-contracts")
     return Config(
         baseline=baseline,
         roots=_scope(table, "roots"),
@@ -166,7 +174,16 @@ def parse_config(text: str) -> Config | None:
         thresholds=thresholds,
         tools=dict(table["tools"]),
         params={name: int(table[name]) for name in _NO_RAISE},
+        contracts=contracts,
+        vocabulary_roots=_scope(table, "vocabulary-roots"),
     )
+
+
+def _file_path(table: dict, name: str) -> str:
+    path = str(table[name])
+    if not _PLAIN_PATH.fullmatch(path) or path.endswith("/"):
+        raise ToolError(f"`{name}` takes a plain repository file path")
+    return path
 
 
 def _scope(table: dict, name: str) -> tuple[str, ...]:
@@ -214,6 +231,11 @@ def config_loosening(head: Config, base: Config) -> list[str]:
     ]
     problems += [f"`exclude` gained `{path}`" for path in sorted(set(head.exclude) - set(base.exclude))]
     problems += [f"`roots` lost `{path}`" for path in sorted(set(base.roots)) if not _is_under(path, head.roots)]
+    problems += [
+        f"`vocabulary-roots` lost `{path}`"
+        for path in sorted(set(base.vocabulary_roots))
+        if not _is_under(path, head.vocabulary_roots)
+    ]
     problems += [
         f"`{name}` raised from {base.params[name]} to {head.params[name]}"
         for name in _NO_RAISE
@@ -497,11 +519,26 @@ def run(args: argparse.Namespace, outcome: Outcome) -> int:
     production, _tests = list_files(root, config.roots, config.exclude)
     outcome.module_warnings = module_warnings(root, filter(outcome.judged, production), config)
     outcome.problems = checks.run_all(root, config.roots, config.exclude, units, since)
+    if since:
+        outcome.problems += design.design_problems(root, design_scope(root, config), units, since)
     pull_request = read_pull_request(args)
     if pull_request is not None:
         outcome.problems += checks.pull_request_cjk(pull_request)
         outcome.waived = pull_request.raises_baseline
     return 1 if outcome.failed else 0
+
+
+def design_scope(root: Path, config: Config) -> design.Scope:
+    contracts = _read_regular(root, config.contracts)
+    if contracts is None:
+        raise ToolError(f"`{config.contracts}` (import-contracts) does not exist; the A1 check reads its packages")
+    return design.Scope(
+        roots=config.roots,
+        exclude=config.exclude,
+        contracts=contracts,
+        vocabulary_roots=config.vocabulary_roots,
+        max_tuple=config.params["tuple-return-max-elements"],
+    )
 
 
 def _read_regular(root: Path, path: str) -> str | None:

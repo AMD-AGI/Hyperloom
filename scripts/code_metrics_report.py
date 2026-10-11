@@ -12,7 +12,7 @@ from __future__ import annotations
 import dataclasses
 from collections import Counter
 
-from code_metrics_collect import METRICS, MODULE, MODULE_LINES, Finding
+from code_metrics_collect import METRICS, MODULE, MODULE_LINES, Finding, Key
 
 MARKER = "<!-- code-metrics-report -->"
 UPDATE_COMMAND = "python scripts/code_metrics.py --update-baseline"
@@ -20,7 +20,6 @@ OVERRIDE_LABEL = "baseline-raise"
 GATE_CHANGED = "Gate implementation changed (needs review)"
 WAIVED = f" (waived by the `{OVERRIDE_LABEL}` label)"
 _MAX_ROWS = 25
-Key = tuple[str, str, str]
 _SEP = " | "
 _UNIT, _DIMENSION, _BASELINE, _BASE, _NOW = "Unit", "Dimension", "Baseline", "Base", "Now"
 _UNIT_CHANGE = [_UNIT, _DIMENSION, _BASELINE, _NOW]
@@ -39,6 +38,37 @@ CHECKS = {
     "literals": (
         "Repeated literals",
         "name the value once as a module-level constant and use the name",
+    ),
+    "private-reach": (
+        "A1 Private name of another package",
+        "make the name public in the package that owns it (or move the caller into that package); "
+        "the units are the root packages, layers and independent modules of `.importlinter`",
+    ),
+    "flag-argument": (
+        "A8 Flag argument",
+        "split the function into one function per value of the flag and let the caller pick the one it means",
+    ),
+    "tuple-return": (
+        "A9 Tuple return",
+        "return a dataclass or NamedTuple whose fields name the parts, so callers read them by name",
+    ),
+    "raw-vocabulary": (
+        "A10 Raw vocabulary comparison",
+        "compare with the enum member instead of its string value; convert outside input to the enum once, "
+        "where it enters",
+    ),
+    "global-write": (
+        "A11 Hidden global write",
+        "pass the value in and return the result, or keep the state on an object the caller owns",
+    ),
+    "forwarder": (
+        "A12 Pure forwarder",
+        "call the target directly, or give the layer a job of its own (validation, conversion, a narrower type)",
+    ),
+    "single-implementation": (
+        "A12 Single-implementation abstraction",
+        "use the one implementation directly until a second one exists; a lower package declaring an interface "
+        "for a higher one to implement is exempt",
     ),
 }
 

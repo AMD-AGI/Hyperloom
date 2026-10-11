@@ -387,3 +387,10 @@ def test_parse_added_lines_reads_new_side_hunks() -> None:
 def test_one_import_statement_is_one_refusal(tmp_path: Path) -> None:
     files = {"src/pkg/mod.py": "from pkg.tests import test_x\n", "src/pkg/tests/test_x.py": "x = 1\n"}
     assert import_refusals(tmp_path, files) == [("src/pkg/mod.py", 1, "production code imports `pkg.tests`")]
+
+
+def test_a_binary_file_in_the_diff_does_not_stop_the_checks(tmp_path: Path) -> None:
+    commit_base(tmp_path, {"src/pkg/m.py": "X = 1\n"})
+    (tmp_path / "src/pkg/logo.png").write_bytes(b"\x89PNG\r\n\x1a\n\xff\xfe")
+    git(tmp_path, "add", "-A")
+    assert checks.run_all(tmp_path, ["src"], [], Units(tmp_path), "HEAD") == []

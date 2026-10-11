@@ -9,7 +9,9 @@ name: Code metrics
 # Only files the change touches are judged (against the first parent on a PR, the
 # replaced main on a push). The same job runs the checks without a baseline:
 # comments, English only (tree, PR title, body and commits), production imports of
-# test code, and added repeated literals.
+# test code, added repeated literals, and the diff-only design checks (A1 private
+# names across packages, A8 flag arguments, A9 tuple returns, A10 raw enum values,
+# A11 global writes, A12 forwarders and single-implementation abstractions).
 #
 # The PR label ``baseline-raise`` waives new, worse and baseline-growth findings;
 # the script reads the labels from the API when it runs (--pr-number), never from
@@ -109,6 +111,7 @@ jobs:
           if git show "$base:scripts/code_metrics.py" > "$gate/code_metrics.py" 2>/dev/null \
             && git show "$base:scripts/code_metrics_checks.py" > "$gate/code_metrics_checks.py" 2>/dev/null \
             && git show "$base:scripts/code_metrics_collect.py" > "$gate/code_metrics_collect.py" 2>/dev/null \
+            && git show "$base:scripts/code_metrics_design.py" > "$gate/code_metrics_design.py" 2>/dev/null \
             && git show "$base:scripts/code_metrics_report.py" > "$gate/code_metrics_report.py" 2>/dev/null; then
             impl="$gate"
           fi
