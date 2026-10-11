@@ -287,4 +287,8 @@ def probe_keep_environment(
         build_manifest=build_manifest,
         specialist_task_id=specialist_task_id,
     )
+    # The serving framework is always asserted: an enablement that patches it
+    # in place provisions and builds nothing, so without this it names no
+    # package at all, while its patches hold only against the version graded.
+    packages = tuple(dict.fromkeys((*packages, framework))) if framework else packages
     return probe_environment_closure(interpreter, env=graded_env, packages=packages)

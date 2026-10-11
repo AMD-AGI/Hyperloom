@@ -11,7 +11,9 @@ produced by an older writer cannot be mistaken for one this contract judged.
 
 from __future__ import annotations
 
+import json
 from pathlib import PurePosixPath
+import re
 import shlex
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -133,11 +135,22 @@ def _normalize_flag(name: str) -> str:
 
 
 def _requested_flags(argv: str) -> dict[str, str]:
-    """Parse an argv string into ``{normalized_flag: value}``."""
-    try:
-        tokens = shlex.split(str(argv or ""))
-    except ValueError:
-        return {}
+    """Parse an argv string into ``{normalized_flag: value}``.
+
+    JSON operands keep their inner quotes, as the launch passes them: a POSIX
+    split turns ``{"mode":3}`` into ``{mode:3}``, which is no longer JSON and
+    cannot be compared with what the engine recorded.
+    """
+    from hyperloom.inference_optimizer.grid_server_args import tokenize_server_args_preserving_json
+
+    tokenized = tokenize_server_args_preserving_json(str(argv or ""))
+    if tokenized is not None:
+        tokens = tokenized[1]
+    else:
+        try:
+            tokens = shlex.split(str(argv or ""))
+        except ValueError:
+            return {}
     flags: dict[str, str] = {}
     index = 0
     while index < len(tokens):
@@ -220,15 +233,72 @@ def _requested_vs_observed_reasons(evidence: Mapping[str, Any]) -> list[dict[str
         if flag in _RUN_LOCAL_REQUESTED_FLAGS or flag in _MODEL_AND_PARALLELISM_FLAGS:
             continue
         if flag in observed:
-            value = observed[flag]
+            value: Any = observed[flag]
         elif flag in identity:
-            value = str(identity[flag])
+            value = identity[flag]
+        elif flag.startswith("no_") and not requested and isinstance(identity.get(flag[3:]), bool):
+            # ``--no-X`` is argparse's negation of ``--X``: the engine records
+            # it as ``X: False``, under the name without the prefix.
+            value, requested = identity[flag[3:]], "false"
         else:
             reasons.append(_reason("activation_incomplete", f"requested:{flag}"))
             continue
-        if requested and str(value).strip().lower() != requested.strip().lower():
+        if not _setting_matches(requested, value):
             reasons.append(_reason("launch_evidence_mismatch", f"requested:{flag}"))
     return reasons
+
+
+def _setting_matches(requested: str, observed: Any) -> bool:
+    """Whether an observed setting is the one a requested flag asked for.
+
+    A bare flag asks for presence, and for ``True`` where the engine records a
+    boolean. A JSON operand is compared as structure: the engine records the
+    parsed object, which prints differently from the JSON that was passed and
+    carries the defaults it filled in besides, so each requested key must hold
+    its requested value and the rest are the engine's own.
+    """
+    if not requested:
+        return observed is True or not isinstance(observed, bool)
+    return _value_matches(_as_structure(requested), _as_structure(observed))
+
+
+def _as_structure(value: Any) -> Any:
+    if isinstance(value, str) and value.lstrip().startswith(("{", "[")):
+        try:
+            return json.loads(value)
+        except ValueError:
+            return value
+    return value
+
+
+def _value_matches(requested: Any, observed: Any) -> bool:
+    if isinstance(requested, Mapping):
+        return isinstance(observed, Mapping) and all(
+            key in observed and _value_matches(item, observed[key]) for key, item in requested.items()
+        )
+    if isinstance(requested, list):
+        return (
+            isinstance(observed, (list, tuple))
+            and len(observed) == len(requested)
+            and all(_value_matches(r, o) for r, o in zip(requested, observed))
+        )
+    want = _scalar_text(requested)
+    if isinstance(observed, str):
+        enum = _ENUM_REPR_RE.fullmatch(observed.strip())
+        if enum:
+            # ``<CUDAGraphMode.FULL: 2>`` is what ``"FULL"`` and ``2`` both select.
+            return want in (enum.group("name").lower(), enum.group("value").strip().strip("'\"").lower())
+    return want == _scalar_text(observed)
+
+
+def _scalar_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip().lower()
+    return json.dumps(value).lower() if isinstance(value, (bool, type(None))) else str(value).strip().lower()
+
+
+#: An enum member as the engine's record prints it, kept verbatim by the reader.
+_ENUM_REPR_RE = re.compile(r"<[A-Za-z_][\w.]*\.(?P<name>[A-Za-z_]\w*): (?P<value>.*)>", re.DOTALL)
 
 
 def _acquisition_is_pinned(acquisition: Mapping[str, Any]) -> bool:

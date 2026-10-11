@@ -50,8 +50,9 @@ _LAUNCH_EVIDENCE_KEYS: tuple[str, ...] = (
 #: differently walks straight through a filter that looks correct; both
 #: spellings belong here or the published recipe carries the operator's private
 #: model path.
+#: ``model_tag`` is vLLM's positional ``serve <model>`` operand.
 _IDENTITY_PATH_FIELDS: frozenset[str] = frozenset(
-    {"model_path", "tokenizer_path", "served_model_name", "model", "tokenizer"}
+    {"model_path", "tokenizer_path", "served_model_name", "model", "tokenizer", "model_tag"}
 )
 
 _BUILD_INPUT_KEYS: tuple[str, ...] = (
@@ -246,7 +247,7 @@ def project_launch_evidence(evidence: Mapping[str, Any] | None) -> tuple[dict[st
     """
     if not isinstance(evidence, Mapping) or not evidence:
         return None, False
-    from ...knowledge.remote_recipe.sanitize import sanitize_publish_server_args
+    from ...knowledge.remote_recipe.sanitize import sanitize_publish_server_args, sanitize_shared_knowledge
 
     out: dict[str, Any] = {}
     argv_refused = False
@@ -260,7 +261,11 @@ def project_launch_evidence(evidence: Mapping[str, Any] | None) -> tuple[dict[st
             except ValueError:
                 argv_refused = True
         elif key == "observed_server_identity" and isinstance(value, Mapping):
-            out[key] = {str(k): v for k, v in value.items() if str(k) not in _IDENTITY_PATH_FIELDS}
+            # vLLM's identity is its whole record, which can name any setting
+            # the operator passed: secrets and host paths go the way the argv's do.
+            out[key] = sanitize_shared_knowledge(
+                {str(k): v for k, v in value.items() if str(k) not in _IDENTITY_PATH_FIELDS}
+            )
         else:
             out[key] = dict(value) if isinstance(value, Mapping) else value
     requested_env = evidence.get("requested_server_env")
