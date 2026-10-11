@@ -116,6 +116,12 @@ Set with CLI flags, not env vars. Pre-set `ISL` / `OSL` / `CONC` / `PRECISION` /
 - **Session / resume:** `--resume-from`, `--force-resume`, `--reset-state`,
   `--extend-hours`.
 - **Quantization:** `--quantize`, `--quantize-scheme`.
+- **Operator-defined specialist:** `--custom-specialist-prompt-file` (focus
+  text, max 16 KiB) and `--custom-specialist-description` (one line, max 200
+  chars), passed together; unset means no `custom_specialist`. Refused with
+  `--orch-prompt`, `--no-framework-agent`, `--research-lane-capacity 0` or
+  `--reset-state`. Persisted in `state.json`; re-pass both on `--resume-from`
+  only to replace the definition, or pass `--reset-state` alone to clear it.
 
 Run `hyperloom optimize --help` for the exhaustive flag list.
 
@@ -945,7 +951,7 @@ answering, checks that the listener belongs to the server it booted, and checks
 
 | Variable | Default | Description |
 |---|---|---|
-| `HYPERLOOM_AGENTIC_BACKEND` | `aiperf` | `mlperf` selects the MLPerf agentic client. Any other value is aiperf. |
+| `HYPERLOOM_AGENTIC_BACKEND` | `aiperf` | `mlperf` selects the MLPerf agentic client. Any other value is aiperf. Settable by `export` or `--extra-env`; both reach every reader. |
 | `MLPERF_ENDPOINTS_DIR` | `/opt/mlperf-endpoints` | Checkout of `mlcommons/endpoints` holding `utility/run_agentic.sh`. Checked at preflight. |
 | `AGENTIC_DATASET_PATH` | — (required) | Path to `agentic_combined_v6.jsonl`. Checked at preflight; its stem is recorded as the corpus. |
 | `MLPERF_TOKENIZER_DIR` | — (required) | Kimi-K3 fast-tokenizer directory the harness counts tokens with. Checked at preflight. |

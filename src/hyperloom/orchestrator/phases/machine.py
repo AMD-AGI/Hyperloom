@@ -267,7 +267,7 @@ class MachinePhase(CoordinatorCollaborator):
             return
         dispatcher.admission_frozen = False
         # Consume escalate hint after a hint-driven transition.
-        if isinstance(evidence, dict) and (evidence.get("evidence") == "llm_escalation" or "hint" in evidence):
+        if isinstance(evidence, dict) and "hint" in evidence:
             state.consume_pending_escalate_hint()
         elif (
             str(prior or "").strip().upper() == _phase_state.PHASE_SWEEP
@@ -275,10 +275,9 @@ class MachinePhase(CoordinatorCollaborator):
         ):
             # SWEEP already had an honest closeout, so skip_to_close was suppressed in _global_terminal.
             state.consume_pending_escalate_hint()
-        elif state.pending_escalate_hint and target != _phase_state.PHASE_FRAMEWORK_AGENT:
-            # FRAMEWORK_AGENT exit consumes ``skip_to_kernel``; a transition to any other phase leaves the hint
-            # unclaimable. A transition *into* FRAMEWORK_AGENT is the opposite case: discarding there would drop
-            # the hint on the doorstep of the rules that read it.
+        elif state.pending_escalate_hint:
+            # A hint speaks for the phase it was emitted in; carried across a transition it did not drive, it would
+            # act on a phase it was never about.
             discarded_hint = state.discard_pending_escalate_hint()
             log.info(
                 "phase_machine: discarded stale pending_escalate_hint=%r on unrelated transition %s -> %s (reason=%s)",
