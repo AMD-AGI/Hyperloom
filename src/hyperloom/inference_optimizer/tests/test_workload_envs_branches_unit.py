@@ -671,6 +671,27 @@ def test_profile_shape_tool_prepends_to_the_config_pythonpath(monkeypatch, tmp_p
     assert bench["envs"]["PYTHONPATH"] == os.pathsep.join([str(tool_dir), "/c"])
 
 
+@pytest.mark.parametrize(
+    ("config_envs", "tail"),
+    [({}, ["/a", "/b"]), ({"PYTHONPATH": "/c"}, ["/c"])],
+    ids=["inherited", "config-authoritative"],
+)
+def test_reference_overlay_builds_on_the_launch_pythonpath(monkeypatch, tmp_path, config_envs, tail):
+    # The reference overlay is prepended like every launch path entry: on the inherited value when the config has
+    # no PYTHONPATH, on the config's otherwise. The overlay is relative so it carries no drive colon on any host.
+    import os
+
+    _clear_env(monkeypatch)
+    (tmp_path / "overlay").mkdir()
+    (tmp_path / "overlay" / "sitecustomize.py").write_text("", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(we, "resolve_reference_launch", lambda: ("", {}, {"overlay_pythonpath": "overlay"}))
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(["/a", "/b"]))
+    src = _write(tmp_path / "cfg.yaml", envs=config_envs)
+    bench = _materialize(src, tmp_path / "out")
+    assert bench["envs"]["PYTHONPATH"] == os.pathsep.join(["overlay", *tail])
+
+
 def test_quality_ref_variant_compares(monkeypatch, tmp_path):
     # A non-baseline scriptable variant must COMPARE against the operator reference and must NOT write.
     _clear_env(monkeypatch)
