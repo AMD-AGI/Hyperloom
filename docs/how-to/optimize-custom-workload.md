@@ -146,9 +146,16 @@ is withheld. For a knob Hyperloom resolves itself — `ISL`, `OSL`, `CONC`, `TP`
 that knob's ladder: **an explicit flag wins, then the environment (where your
 pin lands), then the default**. So `--extra-env ISL=4096` sets the ISL, and
 `--isl 2048 --extra-env ISL=4096` runs at 2048. On a resume the two stop being
-equivalent for the knobs above: the pin is still honoured, but a bare `export`
-is overwritten by the session's recorded value, so the ladder reads **flag, then
-the pin, then the recorded value, then the environment, then the default**.
+equivalent for `ISL`, `OSL`, `CONC`, `TP`, `EP` and — when the session recorded
+one — `MAX_MODEL_LEN`: the pin is still honoured, but a bare `export` is
+overwritten by the session's recorded value, so the ladder reads **flag, then the
+pins in effect for this resume (its own `--extra-env`, or the launch's persisted
+pins when it passes none), then the recorded value, then the environment, then
+the default**. `PRECISION` keeps the fresh-launch ladder on a resume too, with
+the recorded value and the checkpoint's dtype below the environment. `FRAMEWORK`
+belongs to the session: a resume re-exports the recorded framework and reads
+`$FRAMEWORK` only when the session recorded none, so neither a pin nor a flag
+changes it.
 Everything else a pin names is set directly and is not interpreted.
 **Forward every pin as its own `--extra-env` flag** — a dropped pin is lost
 silently. On `--resume` the persisted pins are re-exported, so they only need

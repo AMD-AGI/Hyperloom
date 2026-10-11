@@ -77,14 +77,18 @@ The following variables configure filesystem paths for Hyperloom's runtime depen
 
 ## Workload configuration
 
-Set with CLI flags. `ISL` / `OSL` / `CONC` / `PRECISION` / `TP` / `EP` resolve
-on a ladder, and the ladder differs by branch. A fresh launch takes **an
-explicit flag, then the environment (where an `--extra-env NAME=VALUE` pin
-lands), then the default**. A resume takes **an explicit flag, then this
-resume's `--extra-env` pin, then the session's recorded value, then the shell
-environment, then the default** — so a value left over in the shell cannot
-displace the shape the session was measured at. `GPU_TYPE` is a fallback when
-`--gpu-type` is omitted.
+Set with CLI flags. `ISL` / `OSL` / `CONC` / `TP` / `EP` resolve on a ladder,
+and the ladder differs by branch. A fresh launch takes **an explicit flag, then
+the environment (where an `--extra-env NAME=VALUE` pin lands), then the
+default**. A resume takes **an explicit flag, then the pins in effect for this
+resume — its own `--extra-env`, or the launch's persisted pins when it passes
+none — then the session's recorded value, then the shell environment, then the
+default** — so a value left over in the shell cannot displace the shape the
+session was measured at. `PRECISION` is not on that ladder: on both branches it
+is **`--precision`, then `$PRECISION`, then the session's recorded value, then
+the checkpoint's own dtype, then the default**, so on a resume a `$PRECISION`
+left in the shell still outranks the recorded value. `GPU_TYPE` is a fallback
+when `--gpu-type` is omitted.
 
 - **Model / workload shape:** `--model`, `--model-class`, `--framework`,
   `--framework-version`, `--precision`, `--tp`, `--ep`, `--isl`, `--osl`,

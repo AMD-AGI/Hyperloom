@@ -151,8 +151,8 @@ The following flags are used in multi-node workload skill blocks.
 | `--gpus-per-node` | GPUs per pod (default 8); feeds the TP feasibility check |
 | `--tp` | Tensor parallelism degree |
 | `--ep` | Expert parallelism degree (MoE; often `ep == tp`) |
-| `--isl`, `--osl`, `--conc` | Benchmark input length, output length, and concurrency. The flag wins; on a fresh launch the corresponding env var is next, then the default. On a resume it is this resume's `--extra-env` pin, then the session's recorded value, then the env var, then the default |
-| `--gpu-type`, `--precision` | Target GPU (for example `mi325x`) and dtype (`bf16`). `--precision` follows the same ladder as the knobs above; for `--gpu-type` the flag is authoritative and `GPU_TYPE` is only a fallback |
+| `--isl`, `--osl`, `--conc` | Benchmark input length, output length, and concurrency. The flag wins; on a fresh launch the corresponding env var is next, then the default. On a resume it is the pins in effect for this resume (its own `--extra-env`, or the launch's persisted pins when it passes none), then the session's recorded value, then the env var, then the default |
+| `--gpu-type`, `--precision` | Target GPU (for example `mi325x`) and dtype (`bf16`). `--precision` has its own ladder on both branches: the flag, then `$PRECISION`, then the session's recorded value, then the checkpoint's dtype, then the default. `--gpu-type` is a hint: on a fresh launch the hardware probe wins and a disagreeing flag only warns; a resume takes the GPU type from the session and ignores the flag |
 | `--framework` | `sglang` |
 | `--target-gain`, `--max-hours` | Optimization goal and time budget |
 | `--pd-mode disaggregated` | Enable PD disaggregation (infera and rayjob) |

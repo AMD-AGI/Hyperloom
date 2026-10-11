@@ -219,6 +219,29 @@ def test_a_stale_shell_export_does_not_re_measure_a_resumed_session(monkeypatch)
     assert os.environ["MAX_MODEL_LEN"] == "32768"
 
 
+def test_a_plain_resume_does_not_warn_about_the_recorded_precision(tmp_path, monkeypatch, capsys):
+    """The recorded precision reaches ``args`` without taking the flag branch, whose warning no operator asked for.
+
+    A seeded ``PRECISION`` is indistinguishable from ``--precision``, so a resume of an fp8 session whose checkpoint
+    reads bf16 would warn on every restart while changing nothing.
+    """
+    from hyperloom.inference_optimizer.cli import _resolve_precision, _seed_env_from_resumed_state
+
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text('{"torch_dtype": "bfloat16"}', encoding="utf-8")
+    monkeypatch.setenv("PRECISION", "")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", "")
+    state = _ns(isl=3333, osl=777, conc=99, tp=8, ep=2, precision="fp8", max_model_len=0)
+
+    _seed_env_from_resumed_state(state, {})
+    args = _knob_args(model=str(model))
+    _resolve_precision(args, state)
+
+    assert args.precision == "fp8"
+    assert capsys.readouterr().err == ""
+
+
 def test_resume_restores_pins_before_the_agentx_staleness_guard(tmp_path, monkeypatch, request):
     """A session whose AgentX backend came from a pin resumes; the guard must not read an unpinned environment.
 

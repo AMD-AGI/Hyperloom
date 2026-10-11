@@ -1169,7 +1169,7 @@ def _seed_env_from_resumed_state(state: Any, pins: dict[str, str]) -> None:
     silently re-measure the session at another shape. ``pins`` -- this resume's ``--extra-env``, or, when it
     passes none, the pins persisted from the launch -- is skipped, so changing the workload stays an explicit act.
     """
-    for name in ("ISL", "OSL", "CONC", "TP", "EP", "PRECISION", "MAX_MODEL_LEN"):
+    for name in ("ISL", "OSL", "CONC", "TP", "EP", "MAX_MODEL_LEN"):
         recorded = getattr(state, name.lower(), 0)
         if recorded and name not in pins:
             os.environ[name] = str(recorded)
@@ -1181,8 +1181,10 @@ def _resolve_workload_knobs(
 ) -> None:
     """Fill the unset numeric workload knobs on ``args``: flag, environment, resumed state, default.
 
-    The environment rung carries an ``--extra-env`` pin, which :func:`_export_operator_launch_shape` has already
-    written. Precision has its own function because it reads the checkpoint, so it cannot run this early.
+    The environment rung carries the ``--extra-env`` pins :func:`_export_operator_launch_shape` has already written,
+    and on a resume also the recorded workload :func:`_seed_env_from_resumed_state` writes over any shell export -- a
+    resumed value therefore arrives through that rung rather than through ``state``. Precision has its own function
+    because it reads the checkpoint, so it cannot run this early.
     """
     int_knobs = (
         ("isl", DEFAULT_ISL),
@@ -1204,7 +1206,8 @@ def _resolve_precision(args: argparse.Namespace, state: Any | None = None) -> No
     """Fill ``args.precision``: flag, environment, resumed state, checkpoint detection, default.
 
     Must run after the model is resolved: the detection rung reads the checkpoint's ``config.json``, and finding
-    nothing there settles ``args.precision`` on the default with no later call able to correct it.
+    nothing there settles ``args.precision`` on the default with no later call able to correct it. A ``PRECISION``
+    reaching this function through the environment is treated as an explicit flag, mismatch warning included.
     """
     precision = getattr(args, "precision", None)
     if not precision:
@@ -1937,9 +1940,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             launch_info_file=getattr(args, "launch_info_file", None),
         )
         _seed_env_from_resumed_state(state, _resume_extra_env)
-        # Resolve workload knobs with the resumed state as the fallback source (explicit --isl/--conc/... on this
-        # resume still win), then project the resolved values into env so resume sees the same workload contract (not
-        # YAML defaults).
+        # The seeding above puts the recorded workload on the environment rung, so it outranks a shell export while an
+        # explicit --isl/--conc/... on this resume still wins. The resolved values are then projected back into env so
+        # resume sees the same workload contract (not YAML defaults).
         _resolve_workload_knobs(args, state)
         _resolve_precision(args, state)
         # Same ladder as the knobs above; the environment rung is what lets a re-passed pin change it.
