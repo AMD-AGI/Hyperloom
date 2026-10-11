@@ -274,8 +274,8 @@ file's local average is already high and the addition matches it.
 when it is a whole line leading with `#` or part of a bare string-expression statement, drop blanks, net the adds
 against the removes, and compare net comment lines to net code lines; then read the block for sentences that
 would be false or pointless once the PR is merged and the review is over. The ratio is taken on the head under
-review, not on the merged result: #1797 cut its own commentary back in `e8ff4867c`, so its final state no longer
-fires, while `7a9752e4d` -- a head the review actually ran on -- does.
+review, not on the merged result: a PR that cuts its commentary back in a later round leaves a final state that
+no longer fires, and the head the review actually ran on is the one the finding is written against.
 **Report as:** `X8 <file>:<line> -- "<narrating sentence>" describes the change, not a constraint; <N> comment
 lines added against <M> code lines`
 
