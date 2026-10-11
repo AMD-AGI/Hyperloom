@@ -179,10 +179,23 @@ async def test_runner_prepare_reads_the_custom_definition_from_shared_state(tmp_
     assert f"### Domain focus — custom_specialist\n\n{_PROMPT}\n" in prep.system_prompt
 
 
-async def test_custom_specialist_prompt_shows_the_experience_kb_block_its_warmup_records(tmp_path):
+def _coordinator(session_dir: Path, state: SharedState):
     from hyperloom.orchestrator.loop.coordinator import Coordinator
     from hyperloom.orchestrator.roles.mock_backend import MockBackend, MockTurn, ScriptedPlan
 
+    state.save(session_dir)
+    idle = ScriptedPlan(turns=[MockTurn(intents=[])])
+    coord = Coordinator(
+        session_dir=session_dir,
+        backends={name: MockBackend(idle) for name in ("orchestration", "critic")},
+        role_registry=default_role_registry(),
+        knowledge_plane=None,
+    )
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
+    return coord
+
+
+async def test_custom_specialist_prompt_shows_the_experience_kb_block_its_warmup_records(tmp_path):
     block = "Experience exp-1: raise chunked prefill"
     evidence = SimpleNamespace(
         read_id="read-1",
@@ -191,15 +204,9 @@ async def test_custom_specialist_prompt_shows_the_experience_kb_block_its_warmup
         prompt_block=block,
         experiences=({"id": "exp-1"},),
     )
-    SharedState(custom_specialist_prompt=_PROMPT, custom_specialist_description=_DESCRIPTION).save(tmp_path)
-    idle = ScriptedPlan(turns=[MockTurn(intents=[])])
-    coord = Coordinator(
-        session_dir=tmp_path,
-        backends={name: MockBackend(idle) for name in ("orchestration", "critic")},
-        role_registry=default_role_registry(),
-        knowledge_plane=None,
+    coord = _coordinator(
+        tmp_path, SharedState(custom_specialist_prompt=_PROMPT, custom_specialist_description=_DESCRIPTION)
     )
-    coord.shared_state.phase = "FRAMEWORK_AGENT"
     coord.__dict__["_experience_kb"] = SimpleNamespace(read_for_specialist=lambda state, params: evidence)
     params = {"domain": "custom_specialist", "gap_canonical_id": "gap.x", "mode": "research"}
 
@@ -565,14 +572,38 @@ async def test_a_denied_attempt_is_not_retried_until_the_next_cycle(guarantee_co
     assert keys == ["custom-guarantee", "custom-guarantee-c1"]
 
 
-async def test_guarantee_skips_while_a_tag_only_custom_task_is_queued(guarantee_coord):
-    guarantee_coord.tasks.queued.return_value = [
-        SimpleNamespace(kind="specialist", params={"tags": ["custom_specialist"]})
-    ]
+@pytest.mark.parametrize(
+    ("lane", "params"),
+    [
+        ("queued", {"tags": ["custom_specialist"]}),
+        ("queued", {"domain": "custom_specialist"}),
+        ("running", {"domain": "custom_specialist"}),
+    ],
+)
+async def test_guarantee_skips_while_a_custom_task_is_queued_or_running(guarantee_coord, lane, params):
+    getattr(guarantee_coord.tasks, lane).return_value = [SimpleNamespace(kind="specialist", params=params)]
 
     await guarantee_coord.specialist_dispatch.maybe_ensure_custom_specialist()
 
     guarantee_coord.router.handle_intent.assert_not_awaited()
+
+
+async def test_guarantee_enqueues_one_task_through_the_real_gate_and_router(tmp_path):
+    state = SharedState(custom_specialist_prompt=_PROMPT, custom_specialist_description=_DESCRIPTION)
+    state.max_minutes = 30
+    state.framework = "sglang"
+    coord = _coordinator(tmp_path, state)
+    dispatch = coord.specialist_dispatch
+
+    await dispatch.maybe_ensure_custom_specialist()
+    # A new cycle clears the per-cycle marker, so only the queued task holds the second call back.
+    coord.shared_state.macro_cycle = 1
+    await dispatch.maybe_ensure_custom_specialist()
+
+    queued = await coord.tasks.queued()
+    assert [(t.kind, t.params["domain"], t.params["mode"], t.params["gap_canonical_id"]) for t in queued] == [
+        ("specialist", "custom_specialist", "research", "gap.custom.session")
+    ]
 
 
 @pytest.mark.parametrize(
