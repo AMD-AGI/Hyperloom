@@ -247,7 +247,11 @@ def project_launch_evidence(evidence: Mapping[str, Any] | None) -> tuple[dict[st
     """
     if not isinstance(evidence, Mapping) or not evidence:
         return None, False
-    from ...knowledge.remote_recipe.sanitize import sanitize_publish_server_args, sanitize_shared_knowledge
+    from ...knowledge.remote_recipe.sanitize import (
+        HOST_ORIGIN_KEY,
+        sanitize_publish_server_args,
+        sanitize_shared_knowledge,
+    )
 
     out: dict[str, Any] = {}
     argv_refused = False
@@ -263,8 +267,13 @@ def project_launch_evidence(evidence: Mapping[str, Any] | None) -> tuple[dict[st
         elif key == "observed_server_identity" and isinstance(value, Mapping):
             # vLLM's identity is its whole record, which can name any setting
             # the operator passed: secrets and host paths go the way the argv's do.
+            # The sanitizer exempts a ``host_origin`` subtree from path removal;
+            # nothing in an engine's record is that, so it is dropped first.
             out[key] = sanitize_shared_knowledge(
-                {str(k): v for k, v in value.items() if str(k) not in _IDENTITY_PATH_FIELDS}
+                _without_key(
+                    {str(k): v for k, v in value.items() if str(k) not in _IDENTITY_PATH_FIELDS},
+                    HOST_ORIGIN_KEY,
+                )
             )
         else:
             out[key] = dict(value) if isinstance(value, Mapping) else value
@@ -278,6 +287,15 @@ def project_launch_evidence(evidence: Mapping[str, Any] | None) -> tuple[dict[st
             "provenance": str(warm.get("provenance") or ""),
         }
     return out, argv_refused
+
+
+def _without_key(value: Any, name: str) -> Any:
+    """``value`` with every mapping entry keyed ``name`` removed, at any depth."""
+    if isinstance(value, Mapping):
+        return {k: _without_key(v, name) for k, v in value.items() if str(k) != name}
+    if isinstance(value, (list, tuple)):
+        return [_without_key(v, name) for v in value]
+    return value
 
 
 def project_roots(roots: Any) -> list[dict[str, Any]]:

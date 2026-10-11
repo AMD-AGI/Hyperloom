@@ -255,11 +255,14 @@ def _setting_matches(requested: str, observed: Any) -> bool:
     boolean. A JSON operand is compared as structure: the engine records the
     parsed object, which prints differently from the JSON that was passed and
     carries the defaults it filled in besides, so each requested key must hold
-    its requested value and the rest are the engine's own.
+    its requested value and the rest are the engine's own. Strings inside it
+    compare exactly -- an architecture name is case-sensitive -- while a plain
+    operand keeps the case-insensitive comparison it always had.
     """
     if not requested:
         return observed is True or not isinstance(observed, bool)
-    return _value_matches(_as_structure(requested), _as_structure(observed))
+    structured = _as_structure(requested)
+    return _value_matches(structured, _as_structure(observed), fold=not isinstance(structured, (Mapping, list)))
 
 
 def _as_structure(value: Any) -> Any:
@@ -271,7 +274,7 @@ def _as_structure(value: Any) -> Any:
     return value
 
 
-def _value_matches(requested: Any, observed: Any) -> bool:
+def _value_matches(requested: Any, observed: Any, *, fold: bool = False) -> bool:
     if isinstance(requested, Mapping):
         return isinstance(observed, Mapping) and all(
             key in observed and _value_matches(item, observed[key]) for key, item in requested.items()
@@ -282,19 +285,24 @@ def _value_matches(requested: Any, observed: Any) -> bool:
             and len(observed) == len(requested)
             and all(_value_matches(r, o) for r, o in zip(requested, observed))
         )
-    want = _scalar_text(requested)
+    want = _scalar_text(requested, fold=fold)
     if isinstance(observed, str):
         enum = _ENUM_REPR_RE.fullmatch(observed.strip())
         if enum:
             # ``<CUDAGraphMode.FULL: 2>`` is what ``"FULL"`` and ``2`` both select.
-            return want in (enum.group("name").lower(), enum.group("value").strip().strip("'\"").lower())
-    return want == _scalar_text(observed)
+            members = (enum.group("name"), enum.group("value").strip().strip("'\""))
+            return want in {_scalar_text(member, fold=fold) for member in members}
+    return want == _scalar_text(observed, fold=fold)
 
 
-def _scalar_text(value: Any) -> str:
+def _scalar_text(value: Any, *, fold: bool) -> str:
     if isinstance(value, str):
-        return value.strip().lower()
-    return json.dumps(value).lower() if isinstance(value, (bool, type(None))) else str(value).strip().lower()
+        text = value.strip()
+    elif isinstance(value, (bool, type(None))):
+        text = json.dumps(value)
+    else:
+        text = str(value).strip()
+    return text.lower() if fold or not isinstance(value, str) else text
 
 
 #: An enum member as the engine's record prints it, kept verbatim by the reader.

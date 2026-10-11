@@ -137,6 +137,17 @@ def test_a_json_setting_is_compared_as_structure_and_can_still_contradict(tmp_pa
     assert _launch_codes(tmp_path, wrong_spec) == [("launch_evidence_mismatch", "requested:speculative_config")]
 
 
+def test_strings_inside_a_json_setting_compare_exactly(tmp_path: Path) -> None:
+    """An architecture name is case-sensitive; folding case passed a launch that ran another one."""
+    record = VLLM_030_LOG.replace(
+        "'max_num_seqs': 64,", "'max_num_seqs': 64, 'hf_overrides': {'architectures': ['WrongCase']},"
+    )
+    asked = REQUESTED + ' --hf-overrides {"architectures":["wrongcase"]}'
+    assert _launch_codes(tmp_path, asked, record) == [("launch_evidence_mismatch", "requested:hf_overrides")]
+    exact = REQUESTED + ' --hf-overrides {"architectures":["WrongCase"]}'
+    assert _launch_codes(tmp_path, exact, record) == []
+
+
 def test_a_boolean_flag_must_be_recorded_as_set(tmp_path: Path) -> None:
     off = VLLM_030_LOG.replace("'enable_prefix_caching': True", "'enable_prefix_caching': False")
     assert _launch_codes(tmp_path, log_text=off) == [("launch_evidence_mismatch", "requested:enable_prefix_caching")]
@@ -154,7 +165,9 @@ def test_a_requested_setting_the_record_lacks_is_still_unconfirmed(tmp_path: Pat
 
 def test_the_published_identity_carries_no_host_path_or_secret(tmp_path: Path) -> None:
     log_text = VLLM_030_LOG.replace(
-        "'max_num_seqs': 64,", "'max_num_seqs': 64, 'api_key': 'shh', 'chat_template': '/srv/t.jinja',"
+        "'max_num_seqs': 64,",
+        "'max_num_seqs': 64, 'api_key': 'shh', 'chat_template': '/srv/t.jinja', "
+        "'hf_overrides': {'host_origin': {'trace': '/srv/private.log'}},",
     )
     config = tmp_path / "bench.yaml"
     config.write_text("benchmark: {}\n", encoding="utf-8")
