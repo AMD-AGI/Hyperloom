@@ -2504,12 +2504,14 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
         ]
     elif inp.domain.key == "custom_specialist":
         # The operator focus is the mandate; perf context is left to the operator text.
+        # Experience KB stays: the warmup records its block as shown to every FRAMEWORK_AGENT specialist.
         user_sections = [
             _section_mandate(inp),
             _section_hardware(inp),
             _section_pd_disaggregation(inp),
             _section_execution_budget(inp),
             _section_gap(inp),
+            _section_experience_kb(inp),
         ]
         if _authors_patches(inp):
             user_sections.append(_section_source_hint(inp))

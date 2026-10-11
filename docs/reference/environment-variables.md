@@ -121,7 +121,7 @@ Set with CLI flags, not env vars. Pre-set `ISL` / `OSL` / `CONC` / `PRECISION` /
   chars), passed together; unset means no `custom_specialist`. Refused with
   `--orch-prompt`, `--no-framework-agent`, `--research-lane-capacity 0` or
   `--reset-state`. Persisted in `state.json`; re-pass both on `--resume-from`
-  only to replace the definition.
+  only to replace the definition, or pass `--reset-state` alone to clear it.
 
 Run `hyperloom optimize --help` for the exhaustive flag list.
 

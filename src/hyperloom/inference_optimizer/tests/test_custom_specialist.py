@@ -179,6 +179,41 @@ async def test_runner_prepare_reads_the_custom_definition_from_shared_state(tmp_
     assert f"### Domain focus — custom_specialist\n\n{_PROMPT}\n" in prep.system_prompt
 
 
+async def test_custom_specialist_prompt_shows_the_experience_kb_block_its_warmup_records(tmp_path):
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.roles.mock_backend import MockBackend, MockTurn, ScriptedPlan
+
+    block = "Experience exp-1: raise chunked prefill"
+    evidence = SimpleNamespace(
+        read_id="read-1",
+        rendered_refs=({"id": "exp-1"},),
+        status="completed",
+        prompt_block=block,
+        experiences=({"id": "exp-1"},),
+    )
+    SharedState(custom_specialist_prompt=_PROMPT, custom_specialist_description=_DESCRIPTION).save(tmp_path)
+    idle = ScriptedPlan(turns=[MockTurn(intents=[])])
+    coord = Coordinator(
+        session_dir=tmp_path,
+        backends={name: MockBackend(idle) for name in ("orchestration", "critic")},
+        role_registry=default_role_registry(),
+        knowledge_plane=None,
+    )
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
+    coord.__dict__["_experience_kb"] = SimpleNamespace(read_for_specialist=lambda state, params: evidence)
+    params = {"domain": "custom_specialist", "gap_canonical_id": "gap.x", "mode": "research"}
+
+    await coord.specialist_dispatch.warm_specialist_params(params)
+    runner = SpecialistRunner(subprocess_config=SpecialistSubprocessConfig(), session_dir=tmp_path)
+    prep = await runner._prepare(
+        RunnerContext(task=_StubTask("task-custom", params), lease=None, extra={"shared_state": coord.shared_state}),
+        prompt_inputs=None,
+    )
+
+    assert [r["read_id"] for r in coord.shared_state.experience_kb_injections] == ["read-1"]
+    assert block in prep.user_prompt
+
+
 # Orchestration prompt
 def _orch(description: str, phase: str = "FRAMEWORK_AGENT") -> str:
     return _build_orchestration_prompt(
@@ -368,11 +403,8 @@ def test_resume_with_the_same_or_no_definition_keeps_the_guarantee_spent(repasse
             "the FRAMEWORK_AGENT phase is disabled, so custom_specialist cannot be guaranteed to run",
         ),
         ({"research_lane_capacity": 0}, {}, "--research-lane-capacity 0 builds no specialist executor"),
-        (
-            {"reset_state": True},
-            {},
-            "--reset-state wipes the custom specialist definition; reset first, then launch with the flags",
-        ),
+        ({"reset_state": True}, {}, ""),
+        ({"reset_state": True, "orch_prompt": "x"}, {}, ""),
     ],
 )
 def test_custom_specialist_conflicts(overrides, state_kw, expected):
@@ -385,6 +417,15 @@ def test_conflicts_apply_to_a_definition_passed_on_this_launch():
     state = SharedState(framework_agent_phase_enabled=False)
     assert _custom_specialist_conflict(args, state) == (
         "the FRAMEWORK_AGENT phase is disabled, so custom_specialist cannot be guaranteed to run"
+    )
+
+
+@pytest.mark.parametrize("stored", [True, False])
+def test_reset_state_conflicts_with_a_definition_passed_on_this_launch(stored):
+    args = _ns(custom_specialist_prompt=_PROMPT, custom_specialist_description=_DESCRIPTION, reset_state=True)
+    state = SharedState(custom_specialist_prompt=_PROMPT if stored else "")
+    assert _custom_specialist_conflict(args, state) == (
+        "--reset-state wipes the custom specialist definition; reset first, then launch with the flags"
     )
 
 

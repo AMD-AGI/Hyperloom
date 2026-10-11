@@ -996,7 +996,9 @@ def _apply_custom_specialist_resume(args: argparse.Namespace, state: SharedState
 
 def _custom_specialist_conflict(args: argparse.Namespace, state: SharedState) -> str:
     """Return why a custom specialist from this launch or the stored state cannot run, or ``""``."""
-    if not (getattr(args, "custom_specialist_prompt", "") or state.custom_specialist_prompt):
+    # --reset-state wipes the stored definition, so only a definition passed on this launch counts.
+    stored = "" if getattr(args, "reset_state", False) else state.custom_specialist_prompt
+    if not (getattr(args, "custom_specialist_prompt", "") or stored):
         return ""
     if args.orch_prompt:
         return "--orch-prompt replaces the Orchestration prompt, so custom_specialist would never be offered"
