@@ -46,7 +46,7 @@ resolve_hot_kernel_min_gpu_pct = _kernel_decision_settings.resolve_hot_kernel_mi
 resolve_kernel_opt_max_failures = _kernel_decision_settings.resolve_kernel_opt_max_failures
 
 # escalate_strategy_change hint vocabulary (closed enum; unknown hints ignored). ``skip_to_kernel`` is the
-# "exhausted the current lever" signal from EXPLORE or FRAMEWORK_AGENT; it advances to KERNEL.
+# "exhausted the current lever" signal from FRAMEWORK_AGENT; it advances to KERNEL.
 # KERNEL exits automatically when settled with no pending work — the LLM does not self-set a sweep hint.
 ESCALATE_HINT_SKIP_TO_KERNEL: str = "skip_to_kernel"
 ESCALATE_HINT_SKIP_TO_SWEEP: str = "skip_to_sweep"
