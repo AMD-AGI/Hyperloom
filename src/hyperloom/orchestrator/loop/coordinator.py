@@ -545,6 +545,9 @@ class Coordinator:
                 # its contents, so a snapshot taken here would be pre-replay.
                 proposals=lambda: self.state.pending_proposals,
                 session_dir=self.session_dir,
+                # The window a revalidation holds is closed by the writeback when
+                # its result is booked; this pass only closes one nobody will.
+                result_pending=lambda task_id: self.dispatcher.owes_result(task_id),
             )
             self.__dict__["_reconciler"] = r
         return r
