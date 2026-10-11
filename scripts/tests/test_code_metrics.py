@@ -311,6 +311,47 @@ def test_loosening_the_config_relative_to_base_fails(repo: Repo) -> None:
     assert "`exclude` gained `src/hyperloom/agents`" in loosened
 
 
+def test_raising_the_tuple_limit_or_dropping_a_vocabulary_root_is_loosening(repo: Repo) -> None:
+    repo.write_baseline({})
+    base = repo.commit()
+    pyproject = repo.path / "pyproject.toml"
+    text = pyproject.read_text(encoding="utf-8")
+    assert "tuple-return-max-elements = 2\n" in text and 'vocabulary-roots = ["src"]\n' in text
+    text = text.replace("tuple-return-max-elements = 2\n", "tuple-return-max-elements = 4\n")
+    pyproject.write_text(text.replace('vocabulary-roots = ["src"]\n', "vocabulary-roots = []\n"), encoding="utf-8")
+    code, report = repo.gate("--base-ref", base)
+    assert code == 1
+    loosened = section(report, "### Gate configuration loosened")
+    assert "`tuple-return-max-elements` raised from 2 to 4" in loosened
+    assert "`vocabulary-roots` lost `src`" in loosened
+
+
+def test_the_design_checks_run_on_the_change_and_report_in_their_own_section(repo: Repo) -> None:
+    repo.write_baseline({})
+    (repo.path / "src/hyperloom/common").mkdir(parents=True)
+    (repo.path / "src/hyperloom/common/state.py").write_text("X = 1\n", encoding="utf-8")
+    base = repo.commit()
+    (repo.path / "src/hyperloom/common/state.py").write_text(
+        "X = 1\n\n\ndef bump():\n    global X\n    X += 1\n", encoding="utf-8"
+    )
+    code, report = repo.gate("--base-ref", base)
+    assert code == 1
+    rows = section(report, "### A11 Hidden global write")
+    assert "`src/hyperloom/common/state.py:5`" in rows and "A11 hidden global write: `global X`" in rows
+    assert "- **A11 Hidden global write**: pass the value in and return the result" in report
+    # Without a base there is no change to judge.
+    assert "### A11" not in repo.gate()[1]
+
+
+def test_a_missing_import_contracts_file_is_could_not_run(repo: Repo) -> None:
+    repo.write_baseline({})
+    base = repo.commit()
+    (repo.path / ".importlinter").unlink()
+    code, report = repo.gate("--base-ref", base)
+    assert code == 2
+    assert "`.importlinter` (import-contracts) does not exist" in report
+
+
 def test_moving_the_baseline_file_does_not_escape_the_base_comparison(repo: Repo) -> None:
     repo.write_baseline({key("src/a.py", "f"): 12})
     base = repo.commit()
