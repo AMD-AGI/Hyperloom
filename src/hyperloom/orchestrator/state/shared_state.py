@@ -477,6 +477,11 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     reference_model: str = ""
     # Operator launch shape, persisted so a bare --resume serves the same contract.
     operator_server_args: str = ""
+    # Operator-defined specialist (``--custom-specialist-*``); empty prompt means not configured.
+    custom_specialist_prompt: str = ""
+    custom_specialist_description: str = ""
+    # Set once a custom_specialist task has started; drives the at-least-once dispatch.
+    custom_specialist_dispatched: bool = False
     # ``--extra-env NAME=VALUE`` pins.
     operator_extra_env: dict[str, str] = field(default_factory=dict)
     # Operator-supplied custom-workload paths.
