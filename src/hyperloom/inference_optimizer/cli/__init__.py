@@ -992,6 +992,7 @@ def _apply_custom_specialist_resume(args: argparse.Namespace, state: SharedState
         state.custom_specialist_dispatched = False
     state.custom_specialist_prompt = prompt
     state.custom_specialist_description = args.custom_specialist_description
+    print(f"  re-exported custom specialist: {state.custom_specialist_description}")
 
 
 def _custom_specialist_conflict(args: argparse.Namespace, state: SharedState) -> str:
@@ -1869,18 +1870,15 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             sys.exit(2)
-        _latency_conflict = latency_budget_scope_error(
-            state.framework, getattr(args, "max_latency_ms", None)
-        ) or latency_budget_resume_conflict(state, getattr(args, "max_latency_ms", None))
-        if _latency_conflict:
-            session_lock.release()
-            print(f"ERROR: cannot resume this session -- {_latency_conflict}.", file=sys.stderr)
-            sys.exit(2)
         # Checked before any resume step persists state, so a refused resume leaves the session as it was.
-        _custom_conflict = _custom_specialist_conflict(args, state)
-        if _custom_conflict:
+        _resume_conflict = (
+            latency_budget_scope_error(state.framework, getattr(args, "max_latency_ms", None))
+            or latency_budget_resume_conflict(state, getattr(args, "max_latency_ms", None))
+            or _custom_specialist_conflict(args, state)
+        )
+        if _resume_conflict:
             session_lock.release()
-            print(f"ERROR: cannot resume this session -- {_custom_conflict}.", file=sys.stderr)
+            print(f"ERROR: cannot resume this session -- {_resume_conflict}.", file=sys.stderr)
             sys.exit(2)
         prior_stop = state.stop_reason
         print(f"Resuming session: {session_dir}")
@@ -1979,8 +1977,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         if _resume_extra_env:
             print(f"  re-exported extra_env     : {','.join(sorted(_resume_extra_env))}")
         _apply_custom_specialist_resume(args, state)
-        if state.custom_specialist_prompt:
-            print(f"  re-exported custom specialist: {state.custom_specialist_description}")
         # Custom-workload paths: an explicit --framework-path / --benchmark-scripts-dir on this resume wins, else the
         # persisted value.
         _restore_operator_supplied_paths_from_state(args, state)
