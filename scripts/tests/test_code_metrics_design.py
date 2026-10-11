@@ -221,8 +221,8 @@ def test_an_existing_function_that_gains_a_flag_is_not_new(tmp_path: Path) -> No
     assert refusals(tmp_path, base, head) == []
 
 
-def test_a_flag_argument_in_a_test_passes(tmp_path: Path) -> None:
-    path = "src/pkg/low/tests/test_x.py"
+@pytest.mark.parametrize("path", ["src/pkg/low/tests/test_x.py", "src/pkg/low/test_x.py", "src/pkg/low/conftest.py"])
+def test_a_flag_argument_in_a_test_passes(tmp_path: Path, path: str) -> None:
     assert refusals(tmp_path, {}, {path: "def f(fast: bool):\n    if fast:\n        return 1\n    return 2\n"}) == []
 
 
@@ -254,6 +254,11 @@ def test_a_new_function_returning_three_or_more_positions_fails(tmp_path: Path, 
 def test_pairs_variadic_tuples_and_other_shapes_pass(tmp_path: Path, source: str) -> None:
     got = refusals(tmp_path, {LOW: ""}, {LOW: source})
     assert all(line != 1 for _check, _path, line in got)
+
+
+def test_a_variadic_tuple_has_no_fixed_number_of_positions(tmp_path: Path) -> None:
+    source = "def f() -> tuple[int, ...]:\n    return g()\n"
+    assert refusals(tmp_path, {LOW: ""}, {LOW: source}, max_tuple=1) == []
 
 
 def test_the_tuple_limit_comes_from_the_config(tmp_path: Path) -> None:
