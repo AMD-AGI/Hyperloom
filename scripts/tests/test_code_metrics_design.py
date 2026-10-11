@@ -188,6 +188,7 @@ def test_the_private_reach_message_names_the_rule_and_the_fix(tmp_path: Path) ->
         "def f(x, *, fast=False):\n    '''Doc.'''\n    if not fast:\n        raise ValueError(x)\n    return x\n",
         "def f(x, mode: Literal['a', 'b']):\n    if mode == 'a':\n        return 1\n    return 2\n",
         "def f(x, mode: 'bool'):\n    if mode:\n        return 1\n    return 2\n",
+        "def f(x, mode: typing.Literal['a', 'b']):\n    if 'a' == mode:\n        return 1\n    return 2\n",
     ],
 )
 def test_a_new_function_whose_flag_picks_its_body_fails(tmp_path: Path, source: str) -> None:
@@ -235,6 +236,8 @@ def test_a_flag_argument_in_a_test_passes(tmp_path: Path, path: str) -> None:
         "def f() -> tuple[int, str, bytes]:\n    return g()\n",
         "def f() -> 'Tuple[int, int, int]':\n    return g()\n",
         "def f() -> tuple[int, int, int] | None:\n    return None\n",
+        "def f() -> Optional[tuple[int, int, int]]:\n    return None\n",
+        "def f() -> typing.Union[str, Tuple[int, int, int]]:\n    return ''\n",
         "def f(x):\n    if x:\n        return 1, 2, 3\n    return None\n",
     ],
 )
@@ -249,11 +252,17 @@ def test_a_new_function_returning_three_or_more_positions_fails(tmp_path: Path, 
         "def f() -> tuple[int, ...]:\n    return (1, 2, 3, 4)[:1]\n",
         "def f():\n    def g():\n        return 1, 2, 3\n    return g\n",  # g is new too, but is the one returning
         "def f():\n    return [1, 2, 3]\n",
+        "def f() -> Optional[tuple[int, int]]:\n    return None\n",
     ],
 )
 def test_pairs_variadic_tuples_and_other_shapes_pass(tmp_path: Path, source: str) -> None:
     got = refusals(tmp_path, {LOW: ""}, {LOW: source})
     assert all(line != 1 for _check, _path, line in got)
+
+
+def test_a_protocol_method_returns_the_tuple_its_protocol_fixes(tmp_path: Path) -> None:
+    source = "class C:\n    def __reduce__(self):\n        return (C, (), {})\n"
+    assert refusals(tmp_path, {LOW: ""}, {LOW: source}) == []
 
 
 def test_a_variadic_tuple_has_no_fixed_number_of_positions(tmp_path: Path) -> None:
@@ -295,6 +304,12 @@ def test_the_enum_may_be_named_through_its_module_or_defined_here(tmp_path: Path
     assert refusals(tmp_path / "local", {}, {TOP: local}) == [("raw-vocabulary", TOP, 5)]
 
 
+def test_a_case_pattern_is_a_comparison(tmp_path: Path) -> None:
+    source = "match state:\n    case 'unknown':\n        pass\n    case 'done' | 'running':\n        pass\n"
+    got = refusals(tmp_path, {TOP: ""}, {TOP: USES_STATUS + source})
+    assert got == [("raw-vocabulary", TOP, 5), ("raw-vocabulary", TOP, 5)]
+
+
 def test_a_module_that_never_names_the_enum_compares_another_vocabulary(tmp_path: Path) -> None:
     assert refusals(tmp_path, {TOP: ""}, {TOP: "ok = row.get('status') == 'running'\n"}) == []
 
@@ -331,6 +346,16 @@ def test_an_added_global_statement_fails(tmp_path: Path) -> None:
     assert refusals(tmp_path, {LOW: "CACHE = None\n"}, head) == [("global-write", LOW, 5)]
 
 
+def test_a_store_into_globals_fails(tmp_path: Path) -> None:
+    head = {LOW: "def load():\n    globals()['CACHE'] = 1\n    return globals()['CACHE']\n"}
+    assert refusals(tmp_path, {LOW: ""}, head) == [("global-write", LOW, 2)]
+
+
+def test_a_nonlocal_closure_passes(tmp_path: Path) -> None:
+    source = "def f():\n    n = 0\n\n    def g():\n        nonlocal n\n        n += 1\n\n    g()\n    return n\n"
+    assert refusals(tmp_path, {LOW: ""}, {LOW: source}) == []
+
+
 def test_an_existing_global_and_one_in_a_test_pass(tmp_path: Path) -> None:
     source = "def load():\n    global CACHE\n    CACHE = 1\n"
     test = "src/pkg/low/tests/test_cache.py"
@@ -348,6 +373,7 @@ def test_an_existing_global_and_one_in_a_test_pass(tmp_path: Path) -> None:
         "def f(a, *, b):\n    return mod.g(a, b=b)\n",
         "async def f(a):\n    return await g(a)\n",
         "class C:\n    def f(self, a):\n        return self._impl.f(a)\n",
+        "class C:\n    def f(self, a):\n        return self._impl.next(a)\n",  # a method named like a builtin
     ],
 )
 def test_a_new_function_that_only_passes_its_parameters_on_fails(tmp_path: Path, source: str) -> None:
@@ -367,6 +393,8 @@ def test_a_new_function_that_only_passes_its_parameters_on_fails(tmp_path: Path,
         "def f(path):\n    return str(path)\n",  # a builtin conversion
         "def f(state):\n    return Executor(state)\n",  # a factory
         "def f(kind):\n    return HANDLERS.get(kind)\n",  # a table lookup
+        "def f(*parts):\n    return ', '.join(parts)\n",  # a method of a constant
+        "def deco(fn):\n    @functools.wraps(fn)\n    def inner(*a, **k):\n        return fn(*a, **k)\n\n    return inner\n",
         "def f(a):\n    x = g(a)\n    return x\n",
         "class C:\n    def __len__(self):\n        return len(self)\n",  # a protocol method
         "class C:\n    @abstractmethod\n    def f(self, a):\n        return g(a)\n",
@@ -374,6 +402,14 @@ def test_a_new_function_that_only_passes_its_parameters_on_fails(tmp_path: Path,
 )
 def test_functions_that_do_something_with_their_parameters_pass(tmp_path: Path, source: str) -> None:
     assert refusals(tmp_path, {LOW: ""}, {LOW: source}) == []
+
+
+def test_a_method_overriding_its_base_may_delegate(tmp_path: Path) -> None:
+    base = {"src/pkg/low/base.py": "class Base(ABC):\n    @abstractmethod\n    def submit(self, job): ...\n"}
+    source = "from pkg.low.base import Base\n\n\nclass Impl(Base):\n    def submit(self, job):\n        return self._client.submit(job)\n"
+    assert refusals(tmp_path, base, {LOW: source}) == []
+    extra = source + "\n    def other(self, job):\n        return self._client.other(job)\n"
+    assert refusals(tmp_path / "extra", base, {LOW: extra}) == [("forwarder", LOW, 8)]
 
 
 def test_a_static_method_has_no_receiver_to_drop(tmp_path: Path) -> None:

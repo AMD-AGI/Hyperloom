@@ -20,18 +20,22 @@ ids are those of the review rules' A family (code shape).
   branch ends in ``return`` or ``raise``, where the flag is a ``bool`` or two-value
   ``Literal`` parameter: the flag picks one of two bodies. ``main``, click/typer
   commands and functions taking an ``argparse.Namespace`` are exempt.
-* **A9 tuple returns**: a new function annotated to return ``tuple[...]`` of more than
-  ``tuple-return-max-elements`` elements, or returning a tuple display that long.
-* **A10 raw vocabulary**: an added ``==``/``!=`` against, or ``in`` over a display of,
-  a string literal that is the value of a member of exactly one ``Enum`` defined under
+* **A9 tuple returns**: a new function (not a dunder: ``__reduce__`` and kin have their
+  shape fixed by the protocol) annotated to return ``tuple[...]`` (``typing.Tuple``, and
+  inside ``Optional``/``Union``/``|``) of more than ``tuple-return-max-elements``
+  elements, or returning a tuple display that long.
+* **A10 raw vocabulary**: an added ``==``/``!=`` against, ``in`` over a display of, or
+  ``case`` pattern of, a string literal that is the value of a member of exactly one ``Enum`` defined under
   ``vocabulary-roots``, in a module that names that enum (imports or defines it). A
   value two enums share, or one compared in a module that never names its enum, is
   some other vocabulary that happens to use the same word ("failed", "unknown").
-* **A11 hidden global write**: an added ``global`` statement.
+* **A11 hidden global write**: an added ``global`` statement, or store into ``globals()``.
 * **A12 forwarder**: a new function (not a dunder) whose body is one ``return`` of a call
-  passing exactly its own parameters through unchanged. A call of a builtin, of a class
-  (a capitalised name: a factory) or of ``.get`` (a table lookup) is a conversion or an
-  accessor, not a forwarder.
+  passing exactly its own parameters through unchanged. A call of a builtin (by its bare
+  name), of a class (a capitalised name: a factory), of ``.get`` (a table lookup) or of a
+  method of a constant (``", ".join``) is a conversion or an accessor, not a forwarder;
+  a ``functools.wraps`` wrapper and a method overriding one its base class defines (in
+  ``vocabulary-roots``) exist for their signature, not their body.
 * **A12 single implementation**: a new ABC or ``Protocol`` with exactly one implementation
   (a subclass, or for a protocol a class defining all its methods) under
   ``vocabulary-roots``, in the same package unit; an abstraction a lower unit declares
@@ -70,6 +74,7 @@ _RECEIVERS = frozenset({"self", "cls"})
 _BOOL = "bool"
 _LITERAL = "Literal"
 _TUPLES = frozenset({"tuple", "Tuple"})
+_UNIONS = frozenset({"Optional", "Union"})
 _ABSTRACT_BASES = frozenset({"ABC", "Protocol"})
 _PROTOCOL = "Protocol"
 _ABSTRACT_META = "ABCMeta"
@@ -90,7 +95,11 @@ _MEMBERSHIP = (ast.In, ast.NotIn)
 _DISPLAYS = (ast.Tuple, ast.List, ast.Set)
 _LITERAL_VALUES = 2
 #: Callees that make a one-line function an accessor or a conversion rather than a forwarder.
-_NOT_FORWARDED = frozenset(dir(builtins)) | {"get"}
+_BUILTINS = frozenset(dir(builtins))
+_LOOKUP = "get"
+_GLOBALS = "globals"
+#: Decorators of a wrapper that exists to carry the wrapped function's metadata.
+_WRAPS = "wraps"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -147,8 +156,12 @@ def module_of(path: str) -> str:
     return ".".join(parts)
 
 
+def _is_dunder(name: str) -> bool:
+    return name.startswith("__") and name.endswith("__")
+
+
 def is_private(name: str) -> bool:
-    return name.startswith("_") and name != "_" and not (name.startswith("__") and name.endswith("__"))
+    return name.startswith("_") and name != "_" and not _is_dunder(name)
 
 
 def _terminal(node: ast.AST) -> str:
@@ -364,7 +377,8 @@ def _tested_name(test: ast.expr) -> str | None:
     if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
         test = test.operand
     if isinstance(test, ast.Compare) and len(test.ops) == 1 and isinstance(test.ops[0], _SELECTOR_OPS):
-        test = test.left if isinstance(test.comparators[0], ast.Constant) else test
+        left, right = test.left, test.comparators[0]
+        test = left if isinstance(right, ast.Constant) else right if isinstance(left, ast.Constant) else test
     return test.id if isinstance(test, ast.Name) else None
 
 
@@ -394,6 +408,8 @@ def _is_flag(arg: ast.arg, default: ast.expr | None) -> bool:
 def tuple_return_problems(change: Change, max_elements: int) -> list[Problem]:
     problems = []
     for unit in change.new_functions():
+        if _is_dunder(unit.node.name):
+            continue
         size = max(_annotated_size(_annotation(unit.node.returns)), _returned_size(unit.node))
         if size > max_elements:
             problems.append(
@@ -411,9 +427,13 @@ def tuple_return_problems(change: Change, max_elements: int) -> list[Problem]:
 def _annotated_size(node: ast.AST | None) -> int:
     if isinstance(node, ast.BinOp):
         return max(_annotated_size(node.left), _annotated_size(node.right))
-    if not isinstance(node, ast.Subscript) or _terminal(node.value) not in _TUPLES:
+    if not isinstance(node, ast.Subscript):
         return 0
     elements = node.slice.elts if isinstance(node.slice, ast.Tuple) else [node.slice]
+    if _terminal(node.value) in _UNIONS:
+        return max((_annotated_size(e) for e in elements), default=0)
+    if _terminal(node.value) not in _TUPLES:
+        return 0
     if any(isinstance(e, ast.Constant) and e.value is Ellipsis for e in elements):
         return 0
     return len(elements)
@@ -440,7 +460,7 @@ def raw_vocabulary_problems(change: Change, vocabulary: dict[str, list[str]]) ->
     }
     problems = []
     for node in ast.walk(change.tree):
-        if not isinstance(node, ast.Compare):
+        if not isinstance(node, (ast.Compare, ast.MatchValue)):
             continue
         hit = next((c for c in _compared_strings(node) if c.value in owned and change.fresh(c.lineno)), None)
         if hit is not None:
@@ -457,16 +477,21 @@ def raw_vocabulary_problems(change: Change, vocabulary: dict[str, list[str]]) ->
     return problems
 
 
-def _compared_strings(node: ast.Compare) -> Iterator[ast.Constant]:
+def _compared_strings(node: ast.Compare | ast.MatchValue) -> Iterator[ast.Constant]:
+    yield from (c for c in _operands(node) if isinstance(c, ast.Constant) and isinstance(c.value, str))
+
+
+def _operands(node: ast.Compare | ast.MatchValue) -> Iterator[ast.expr]:
+    """What ``node`` tests a value for equality with: a ``case`` value, or a side of ``==``/``!=``/``in``."""
+    if isinstance(node, ast.MatchValue):
+        yield node.value
+        return
     operands = [node.left, *node.comparators]
     for op, left, right in zip(node.ops, operands, operands[1:], strict=False):
         if isinstance(op, _EQUALITY):
-            candidates = [left, right]
+            yield from (left, right)
         elif isinstance(op, _MEMBERSHIP) and isinstance(right, _DISPLAYS):
-            candidates = right.elts
-        else:
-            continue
-        yield from (c for c in candidates if isinstance(c, ast.Constant) and isinstance(c.value, str))
+            yield from right.elts
 
 
 def _names(tree: ast.Module) -> set[str]:
@@ -524,16 +549,38 @@ def global_write_problems(change: Change) -> list[Problem]:
         )
         for node in ast.walk(change.tree)
         if isinstance(node, ast.Global) and change.fresh(node.lineno)
+    ] + [
+        Problem(
+            GLOBAL_WRITE,
+            change.path,
+            node.lineno,
+            "A11 hidden global write: `globals()[...]` rebinds module state; pass the value in and return the "
+            "result, or keep the state on an object the caller owns",
+        )
+        for node in ast.walk(change.tree)
+        if _is_globals_store(node) and change.fresh(node.lineno)
     ]
+
+
+def _is_globals_store(node: ast.AST) -> bool:
+    """``globals()[name] = ...`` (or ``del``, or an augmented assignment)."""
+    return (
+        isinstance(node, ast.Subscript)
+        and isinstance(node.ctx, (ast.Store, ast.Del))
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+        and node.value.func.id == _GLOBALS
+    )
 
 
 # --- A12 forwarders and single implementations ------------------------------------
 
 
-def forwarder_problems(change: Change) -> list[Problem]:
+def forwarder_problems(change: Change, index: list[ClassInfo]) -> list[Problem]:
     problems = []
+    overrides = _overrides(change.tree, index)
     for unit in change.new_functions():
-        callee = _forwarded_to(unit)
+        callee = None if id(unit.node) in overrides else _forwarded_to(unit)
         if callee:
             problems.append(
                 Problem(
@@ -550,7 +597,7 @@ def forwarder_problems(change: Change) -> list[Problem]:
 def _forwarded_to(unit: Unit) -> str | None:
     function = unit.node
     decorators = {_terminal(d) for d in function.decorator_list}
-    if function.name.startswith("__") or decorators & _BODILESS:
+    if function.name.startswith("__") or decorators & _BODILESS or _WRAPS in decorators:
         return None
     body = _body(function)
     if len(body) != 1 or not isinstance(body[0], ast.Return):
@@ -565,8 +612,26 @@ def _forwarded_to(unit: Unit) -> str | None:
 
 
 def _forwards_to(callee: ast.expr, params: list[str]) -> bool:
+    """Whether calling ``callee`` is forwarding: not a builtin, a factory, a lookup or a method of a constant."""
     name = _terminal(callee)
-    return name not in params and name not in _NOT_FORWARDED and not name[:1].isupper()
+    if isinstance(callee, ast.Name):
+        return name not in params and name not in _BUILTINS and not name[:1].isupper()
+    if not isinstance(callee, ast.Attribute) or isinstance(callee.value, ast.Constant):
+        return False
+    return name != _LOOKUP and not name[:1].isupper()
+
+
+def _overrides(tree: ast.Module, index: list[ClassInfo]) -> set[int]:
+    """The ``id`` of every method in ``tree`` that overrides a method a known base class defines."""
+    defined: dict[str, set[str]] = {}
+    for info in index:
+        defined.setdefault(info.name, set()).update(info.methods)
+    found = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            inherited = set().union(*(defined.get(_terminal(base), set()) for base in node.bases))
+            found.update(id(stmt) for stmt in node.body if isinstance(stmt, _FUNCTIONS) and stmt.name in inherited)
+    return found
 
 
 def _parameter_names(function: ast.FunctionDef | ast.AsyncFunctionDef, receiver: bool) -> list[str]:
@@ -691,7 +756,7 @@ def design_problems(root: Path, scope: Scope, units: Units, since: str) -> list[
         problems += tuple_return_problems(change, scope.max_tuple)
         problems += raw_vocabulary_problems(change, vocabulary)
         problems += global_write_problems(change)
-        problems += forwarder_problems(change)
+        problems += forwarder_problems(change, index)
         problems += single_implementation_problems(change, index, packages)
     return problems
 
