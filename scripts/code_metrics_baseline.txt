@@ -665,7 +665,7 @@ function-lines src/hyperloom/orchestrator/actions/executors/_server_patcher.py::
 function-lines src/hyperloom/orchestrator/actions/executors/_server_patcher.py::_discover_sglang_plan 92
 function-lines src/hyperloom/orchestrator/actions/executors/_subprocess_kill.py::_communicate_with_watchdog 96
 function-lines src/hyperloom/orchestrator/actions/executors/_workload_envs.py::_profile_capture_window 88
-function-lines src/hyperloom/orchestrator/actions/executors/_workload_envs.py::apply_agentx_switch 106
+function-lines src/hyperloom/orchestrator/actions/executors/_workload_envs.py::apply_agentx_switch 104
 function-lines src/hyperloom/orchestrator/actions/executors/_workload_envs.py::build_agentx_workload_spec 113
 function-lines src/hyperloom/orchestrator/actions/executors/_workload_envs.py::materialize_config_with_envs 922
 function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::BaselineExecutor._after_materialize_config 101
@@ -1076,7 +1076,7 @@ module-lines src/hyperloom/orchestrator/kernel/request_handlers.py 5248
 module-lines src/hyperloom/orchestrator/knowledge/recipe_journal.py 1822
 module-lines src/hyperloom/orchestrator/knowledge/recipe_kb_t0.py 1353
 module-lines src/hyperloom/orchestrator/knowledge/remote_recipe/values.py 1284
-module-lines src/hyperloom/orchestrator/loop/coordinator.py 1434
+module-lines src/hyperloom/orchestrator/loop/coordinator.py 1429
 module-lines src/hyperloom/orchestrator/loop/dispatcher.py 1503
 module-lines src/hyperloom/orchestrator/loop/intent_router.py 1548
 module-lines src/hyperloom/orchestrator/loop/writeback.py 4748
