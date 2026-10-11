@@ -345,11 +345,42 @@ def test_the_design_checks_run_on_the_change_and_report_in_their_own_section(rep
 
 def test_a_missing_import_contracts_file_is_could_not_run(repo: Repo) -> None:
     repo.write_baseline({})
-    base = repo.commit()
     (repo.path / ".importlinter").unlink()
+    base = repo.commit()
     code, report = repo.gate("--base-ref", base)
     assert code == 2
     assert "`.importlinter` (import-contracts) does not exist" in report
+
+
+def test_the_change_cannot_redraw_the_package_units_it_is_judged_by(repo: Repo) -> None:
+    repo.write_baseline({})
+    base = repo.commit()
+    (repo.path / ".importlinter").write_text("[importlinter]\nroot_packages =\n    hyperloom\n", encoding="utf-8")
+    (repo.path / "src/hyperloom/orchestrator").mkdir(parents=True, exist_ok=True)
+    (repo.path / "src/hyperloom/orchestrator/reach.py").write_text(
+        "from hyperloom.inference_optimizer.cli.preflight import _HIDDEN\n", encoding="utf-8"
+    )
+    code, report = repo.gate("--base-ref", base)
+    assert code == 1
+    rows = section(report, "### A1 Private name of another package")
+    assert "`src/hyperloom/orchestrator/reach.py:1`" in rows and "private to `hyperloom.inference_optimizer`" in rows
+
+
+def test_moving_the_import_contracts_file_is_loosening(repo: Repo) -> None:
+    repo.write_baseline({})
+    base = repo.commit()
+    shutil.copyfile(repo.path / ".importlinter", repo.path / "other.ini")
+    pyproject = repo.path / "pyproject.toml"
+    text = pyproject.read_text(encoding="utf-8")
+    assert 'import-contracts = ".importlinter"\n' in text
+    pyproject.write_text(
+        text.replace('import-contracts = ".importlinter"\n', 'import-contracts = "other.ini"\n'), encoding="utf-8"
+    )
+    code, report = repo.gate("--base-ref", base)
+    assert code == 1
+    assert "`import-contracts` moved from `.importlinter` to `other.ini`" in section(
+        report, "### Gate configuration loosened"
+    )
 
 
 def test_moving_the_baseline_file_does_not_escape_the_base_comparison(repo: Repo) -> None:

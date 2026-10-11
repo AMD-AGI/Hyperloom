@@ -303,10 +303,10 @@ def test_an_existing_function_returning_a_triple_is_backlog(tmp_path: Path) -> N
 @pytest.mark.parametrize(
     "source",
     [
-        "ok = state == 'running'\n",
-        "ok = 'done' != state\n",
-        "ok = state in ('queued', 'done')\n",
-        "ok = state not in {'running'}\n",
+        "ok = status == 'running'\n",
+        "ok = 'done' != status\n",
+        "ok = status in ('queued', 'done')\n",
+        "ok = status not in {'running'}\n",
     ],
 )
 def test_comparing_with_an_enum_value_fails(tmp_path: Path, source: str) -> None:
@@ -315,34 +315,65 @@ def test_comparing_with_an_enum_value_fails(tmp_path: Path, source: str) -> None
 
 
 def test_the_enum_may_be_named_through_its_module_or_defined_here(tmp_path: Path) -> None:
-    head = {TOP: "from pkg.common import states\nx = states.Status\nok = state == 'running'\n"}
+    head = {TOP: "from pkg.common import states\nx = states.Status\nok = status == 'running'\n"}
     assert refusals(tmp_path, {TOP: ""}, head) == [("raw-vocabulary", TOP, 3)]
-    local = "class Mode(Enum):\n    FAST = 'fast'\n\n\nok = s == 'fast'\n"
+    local = "class Mode(Enum):\n    FAST = 'fast'\n\n\nok = mode == 'fast'\n"
     assert refusals(tmp_path / "local", {}, {TOP: local}) == [("raw-vocabulary", TOP, 5)]
 
 
 def test_a_case_pattern_is_a_comparison(tmp_path: Path) -> None:
-    source = "match state:\n    case 'unknown':\n        pass\n    case 'done' | 'running':\n        pass\n"
+    source = "match status:\n    case 'unknown':\n        pass\n    case 'done' | 'running':\n        pass\n"
     got = refusals(tmp_path, {TOP: ""}, {TOP: USES_STATUS + source})
     assert got == [("raw-vocabulary", TOP, 5), ("raw-vocabulary", TOP, 5)]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "ok = run.status.value == 'running'\n",  # a member's value
+        "ok = getattr(run.status, 'value', None) == 'running'\n",
+        "ok = job.run_status == 'running'\n",  # named for the enum's last words
+    ],
+)
+def test_a_members_value_or_a_name_for_the_vocabulary_is_the_enum(tmp_path: Path, source: str) -> None:
+    assert refusals(tmp_path, {TOP: ""}, {TOP: USES_STATUS + source}) == [("raw-vocabulary", TOP, 2)]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "def parse(raw):\n    if raw == 'running':\n        return Status.RUNNING\n",  # the conversion
+        "ok = v != 'running'\n",
+        "ok = str(x or '') in {'running', 'kept'}\n",
+        "ok = status_text == 'running'\n",  # not the enum's last words
+    ],
+)
+def test_raw_input_on_its_way_to_the_enum_passes(tmp_path: Path, source: str) -> None:
+    assert refusals(tmp_path, {TOP: ""}, {TOP: USES_STATUS + source}) == []
 
 
 def test_a_module_that_never_names_the_enum_compares_another_vocabulary(tmp_path: Path) -> None:
     assert refusals(tmp_path, {TOP: ""}, {TOP: "ok = row.get('status') == 'running'\n"}) == []
 
 
+def test_one_enum_defined_in_two_modules_is_still_one_vocabulary(tmp_path: Path) -> None:
+    copy = {"src/pkg/low/states.py": "import enum\n\n\nclass Status(enum.Enum):\n    RUNNING = 'running'\n"}
+    head = {TOP: USES_STATUS + "ok = status == 'running'\n"}
+    assert refusals(tmp_path, {TOP: "", **copy}, head) == [("raw-vocabulary", TOP, 2)]
+
+
 def test_a_value_two_enums_share_is_not_one_vocabulary(tmp_path: Path) -> None:
-    assert refusals(tmp_path, {TOP: ""}, {TOP: USES_STATUS + "ok = state == 'skipped'\n"}) == []
+    assert refusals(tmp_path, {TOP: ""}, {TOP: USES_STATUS + "ok = status == 'skipped'\n"}) == []
 
 
 @pytest.mark.parametrize(
     "source",
     [
-        "ok = state == 'queued'\n",  # not an enum value
-        "ok = state == 'plain'\n",  # a class that is not an enum
-        "ok = state == 'hidden'\n",  # a private member
+        "ok = status == 'queued'\n",  # not an enum value
+        "ok = status == 'plain'\n",  # a class that is not an enum
+        "ok = status == 'hidden'\n",  # a private member
         "ok = 'running' in text\n",  # a substring or key test, not a vocabulary comparison
-        "ok = state is Status.RUNNING\n",
+        "ok = status is Status.RUNNING\n",
         "x = {'running': 1}\n",
     ],
 )
@@ -352,7 +383,7 @@ def test_other_strings_and_enum_members_pass(tmp_path: Path, source: str) -> Non
 
 def test_raw_vocabulary_in_a_test_passes(tmp_path: Path) -> None:
     path = "src/pkg/top/tests/test_states.py"
-    assert refusals(tmp_path, {}, {path: USES_STATUS + "assert state == 'running'\n"}) == []
+    assert refusals(tmp_path, {}, {path: USES_STATUS + "assert status == 'running'\n"}) == []
 
 
 # --- A11 hidden global write ------------------------------------------------------
@@ -391,6 +422,7 @@ def test_an_existing_global_and_one_in_a_test_pass(tmp_path: Path) -> None:
         "async def f(a):\n    return await g(a)\n",
         "class C:\n    def f(self, a):\n        return self._impl.f(a)\n",
         "class C:\n    def f(self, a):\n        return self._impl.next(a)\n",  # a method named like a builtin
+        "class C:\n    @classmethod\n    def f(cls, a):\n        return cls.g(a)\n",  # no decorator of its own
     ],
 )
 def test_a_new_function_that_only_passes_its_parameters_on_fails(tmp_path: Path, source: str) -> None:
@@ -412,6 +444,8 @@ def test_a_new_function_that_only_passes_its_parameters_on_fails(tmp_path: Path,
         "def f(kind):\n    return HANDLERS.get(kind)\n",  # a table lookup
         "def f(*parts):\n    return ', '.join(parts)\n",  # a method of a constant
         "def deco(fn):\n    @functools.wraps(fn)\n    def inner(*a, **k):\n        return fn(*a, **k)\n\n    return inner\n",
+        "@functools.lru_cache(maxsize=128)\ndef parse(key):\n    return parse_uncached(key)\n",  # adds a cache
+        "@registry.register('x')\ndef run(job):\n    return execute(job)\n",  # registers
         "def f(a):\n    x = g(a)\n    return x\n",
         "class C:\n    def __len__(self):\n        return len(self)\n",  # a protocol method
         "class C:\n    @abstractmethod\n    def f(self, a):\n        return g(a)\n",

@@ -231,6 +231,8 @@ def config_loosening(head: Config, base: Config) -> list[str]:
     ]
     problems += [f"`exclude` gained `{path}`" for path in sorted(set(head.exclude) - set(base.exclude))]
     problems += [f"`roots` lost `{path}`" for path in sorted(set(base.roots)) if not _is_under(path, head.roots)]
+    if head.contracts != base.contracts:
+        problems.append(f"`import-contracts` moved from `{base.contracts}` to `{head.contracts}`")
     problems += [
         f"`vocabulary-roots` lost `{path}`"
         for path in sorted(set(base.vocabulary_roots))
@@ -520,7 +522,7 @@ def run(args: argparse.Namespace, outcome: Outcome) -> int:
     outcome.module_warnings = module_warnings(root, filter(outcome.judged, production), config)
     outcome.problems = checks.run_all(root, config.roots, config.exclude, units, since)
     if since:
-        outcome.problems += design.design_problems(root, design_scope(root, config), units, since)
+        outcome.problems += design.design_problems(root, design_scope(root, config, since), units, since)
     pull_request = read_pull_request(args)
     if pull_request is not None:
         outcome.problems += checks.pull_request_cjk(pull_request)
@@ -528,8 +530,14 @@ def run(args: argparse.Namespace, outcome: Outcome) -> int:
     return 1 if outcome.failed else 0
 
 
-def design_scope(root: Path, config: Config) -> design.Scope:
-    contracts = _read_regular(root, config.contracts)
+def design_scope(root: Path, config: Config, since: str) -> design.Scope:
+    """The design checks' scope; A1's package units come from the base's contracts when it has them.
+
+    The change cannot redraw the units it is judged by (a contracts file with only the
+    root package would make every private name same-unit); a unit it adds counts from
+    the next change on.
+    """
+    contracts = checks.show(root, since, config.contracts) or _read_regular(root, config.contracts)
     if contracts is None:
         raise ToolError(f"`{config.contracts}` (import-contracts) does not exist; the A1 check reads its packages")
     return design.Scope(

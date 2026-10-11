@@ -26,16 +26,19 @@ ids are those of the review rules' A family (code shape).
   elements, or returning a tuple display that long.
 * **A10 raw vocabulary**: an added ``==``/``!=`` against, ``in`` over a display of, or
   ``case`` pattern of, a string literal that is the value of a member of exactly one ``Enum`` defined under
-  ``vocabulary-roots``, in a module that names that enum (imports or defines it). A
-  value two enums share, or one compared in a module that never names its enum, is
-  some other vocabulary that happens to use the same word ("failed", "unknown").
+  ``vocabulary-roots``, in a module that names that enum (imports or defines it), when
+  the other side is a member: its ``.value``, or a name for the enum's vocabulary
+  (``status`` for ``RunStatus``). A value two enums share, one compared in a module that
+  never names its enum, or one compared with raw input (``raw == "running"``: that input
+  is being converted to the member) is another vocabulary or the conversion itself.
 * **A11 hidden global write**: an added ``global`` statement, or store into ``globals()``.
 * **A12 forwarder**: a new function (not a dunder) whose body is one ``return`` of a call
   passing exactly its own parameters through unchanged. A call of a builtin (by its bare
   name), of a class (a capitalised name: a factory), of ``.get`` (a table lookup) or of a
   method of a constant (``", ".join``) is a conversion or an accessor, not a forwarder;
-  a ``functools.wraps`` wrapper and a method overriding one its base class defines (in
-  ``vocabulary-roots``) exist for their signature, not their body.
+  a decorated function (other than ``staticmethod``/``classmethod``: the decorator adds
+  caching, registration, wrapping) and a method overriding one its base class defines (in
+  ``vocabulary-roots``) exist for more than their body.
 * **A12 single implementation**: a new ABC or ``Protocol`` with exactly one implementation
   (a subclass, or for a protocol a class defining all its methods) under
   ``vocabulary-roots``, in the same package unit; an abstraction a lower unit declares
@@ -84,9 +87,8 @@ _ENUM_SUFFIX = "Enum"
 _CLI_DECORATORS = frozenset({"command", "group", "option", "argument", "callback"})
 _CLI_ENTRY = "main"
 _CLI_NAMESPACE = "Namespace"
-#: Decorators that leave a method without a receiver, or a function without a body of its own.
+#: The decorator that leaves a method without a receiver.
 _NO_RECEIVER = "staticmethod"
-_BODILESS = frozenset({"overload", "abstractmethod"})
 _FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef)
 _SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
 _EQUALITY = (ast.Eq, ast.NotEq)
@@ -94,12 +96,15 @@ _SELECTOR_OPS = (ast.Eq, ast.NotEq, ast.Is, ast.IsNot)
 _MEMBERSHIP = (ast.In, ast.NotIn)
 _DISPLAYS = (ast.Tuple, ast.List, ast.Set)
 _LITERAL_VALUES = 2
+_VALUE = "value"
+_GETATTR = "getattr"
+_CAMEL_WORDS = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z0-9]+")
 #: Callees that make a one-line function an accessor or a conversion rather than a forwarder.
 _BUILTINS = frozenset(dir(builtins))
 _LOOKUP = "get"
 _GLOBALS = "globals"
-#: Decorators of a wrapper that exists to carry the wrapped function's metadata.
-_WRAPS = "wraps"
+#: The only decorators that add nothing to a function's body (any other caches, registers, wraps...).
+_PLAIN_METHODS = frozenset({"staticmethod", "classmethod"})
 
 
 @dataclasses.dataclass(frozen=True)
@@ -499,42 +504,69 @@ def raw_vocabulary_problems(change: Change, vocabulary: dict[str, list[str]]) ->
     owned = {
         value: members[0]
         for value, members in vocabulary.items()
-        if len(members) == 1 and members[0].split(".")[0] in named
+        if len(set(members)) == 1 and members[0].split(".")[0] in named
     }
-    problems = []
-    for node in ast.walk(change.tree):
-        if not isinstance(node, (ast.Compare, ast.MatchValue)):
-            continue
-        hit = next((c for c in _compared_strings(node) if c.value in owned and change.fresh(c.lineno)), None)
-        if hit is not None:
-            member = owned[hit.value]
-            problems.append(
-                Problem(
-                    RAW_VOCABULARY,
-                    change.path,
-                    hit.lineno,
-                    f"A10 raw vocabulary: compares the string {hit.value!r}, the value of `{member}`; "
-                    f"compare with `{member}` (convert the input to the enum once, where it enters)",
-                )
-            )
-    return problems
+    found: dict[int, tuple[ast.Constant, str]] = {}
+    for test, subject, string in _comparisons(change.tree):
+        member = owned.get(string.value)
+        if member and change.fresh(string.lineno) and _holds(subject, member.split(".")[0]):
+            found.setdefault(id(test), (string, member))
+    return [
+        Problem(
+            RAW_VOCABULARY,
+            change.path,
+            string.lineno,
+            f"A10 raw vocabulary: compares the string {string.value!r}, the value of `{member}`; "
+            f"compare with `{member}` (convert the input to the enum once, where it enters)",
+        )
+        for string, member in sorted(found.values(), key=lambda hit: hit[0].lineno)
+    ]
 
 
-def _compared_strings(node: ast.Compare | ast.MatchValue) -> Iterator[ast.Constant]:
-    yield from (c for c in _operands(node) if isinstance(c, ast.Constant) and isinstance(c.value, str))
+def _comparisons(tree: ast.Module) -> Iterator[tuple[ast.AST, ast.expr, ast.Constant]]:
+    """(test, subject, string) of every ``==``/``!=``, ``in`` over a display and ``case`` with a string."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Match):
+            for case in node.cases:
+                for pattern in ast.walk(case.pattern):
+                    if isinstance(pattern, ast.MatchValue) and _is_string(pattern.value):
+                        yield pattern, node.subject, pattern.value
+        elif isinstance(node, ast.Compare):
+            operands = [node.left, *node.comparators]
+            for op, left, right in zip(node.ops, operands, operands[1:], strict=False):
+                if isinstance(op, _EQUALITY):
+                    yield from ((node, b, a) for a, b in ((left, right), (right, left)) if _is_string(a))
+                elif isinstance(op, _MEMBERSHIP) and isinstance(right, _DISPLAYS):
+                    yield from ((node, left, e) for e in right.elts if _is_string(e))
 
 
-def _operands(node: ast.Compare | ast.MatchValue) -> Iterator[ast.expr]:
-    """What ``node`` tests a value for equality with: a ``case`` value, or a side of ``==``/``!=``/``in``."""
-    if isinstance(node, ast.MatchValue):
-        yield node.value
-        return
-    operands = [node.left, *node.comparators]
-    for op, left, right in zip(node.ops, operands, operands[1:], strict=False):
-        if isinstance(op, _EQUALITY):
-            yield from (left, right)
-        elif isinstance(op, _MEMBERSHIP) and isinstance(right, _DISPLAYS):
-            yield from right.elts
+def _is_string(node: ast.expr) -> bool:
+    return isinstance(node, ast.Constant) and isinstance(node.value, str)
+
+
+def _holds(subject: ast.expr, enum: str) -> bool:
+    """Whether ``subject`` reads as a member of ``enum``: its ``.value``, or a name for the enum's vocabulary.
+
+    A name is for the vocabulary when its snake_case words and the enum's words end alike
+    (``status`` or ``run_status`` for ``RunStatus``, ``failure_type`` for
+    ``SpecialistFailureType``). Any
+    other subject (``raw``, ``v``, ``str(x)``) is input on its way in, the one place a
+    string is compared to build the member.
+    """
+    if isinstance(subject, ast.Attribute) and subject.attr == _VALUE:
+        return True
+    if isinstance(subject, ast.Call) and _terminal(subject.func) == _GETATTR and len(subject.args) > 1:
+        return isinstance(subject.args[1], ast.Constant) and subject.args[1].value == _VALUE
+    if isinstance(subject, ast.Name):
+        name = subject.id
+    elif isinstance(subject, ast.Attribute):
+        name = subject.attr
+    else:
+        return False
+    words = [w for w in name.lower().split("_") if w]
+    vocabulary = [w.lower() for w in _CAMEL_WORDS.findall(enum)]
+    common = min(len(words), len(vocabulary))
+    return common > 0 and words[-common:] == vocabulary[-common:]
 
 
 def _names(tree: ast.Module) -> set[str]:
@@ -640,7 +672,7 @@ def forwarder_problems(change: Change, index: list[ClassInfo]) -> list[Problem]:
 def _forwarded_to(unit: Unit) -> str | None:
     function = unit.node
     decorators = {_terminal(d) for d in function.decorator_list}
-    if function.name.startswith("__") or decorators & _BODILESS or _WRAPS in decorators:
+    if function.name.startswith("__") or decorators - _PLAIN_METHODS:
         return None
     body = _body(function)
     if len(body) != 1 or not isinstance(body[0], ast.Return):
