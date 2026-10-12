@@ -6,6 +6,11 @@
 # subshell after its own setup (paths, .env, credentials, install lock) and
 # calls install_kernel_tools; the file has no entry point of its own.
 
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  echo "install_kernel_tools.sh is sourced by install.sh; run src/hyperloom/inference_optimizer/assets/install.sh" >&2
+  exit 2
+fi
+
 # Ray/K8s subprocesses may inherit a minimal PATH; prepend the standard system
 # bins, then the interpreter install.sh selected, so the bare python3 calls
 # below install into its environment.
