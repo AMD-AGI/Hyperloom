@@ -633,7 +633,7 @@ async def test_actual_explore_axis_rejection_cannot_be_revived_by_geak_fallback(
     with patch("hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill", side_effect=fake_measure):
         produced = (await sub.run_task(task)).result
     rejection = produced["per_variant_outcomes"][0]
-    assert rejection["reason"].startswith("median_or_guard_failed")
+    assert rejection["reason"].startswith("p50_gain_below_threshold,p90_regressed (")
     assert any(gate["gate"] == "graded_axes" and gate["passed"] is False for gate in rejection["gates"])
     await coord.writeback.promote_to_shared_state("explore", produced, task=task)
     assert state.current_best["tput"] == 110.0
@@ -808,11 +808,11 @@ async def test_explore_guard_revert_row_reads_as_measured(sub_agent_runner, tmp_
     assert tested["gain_pct"] is None
     assert tested["graded_gain_pct"] == pytest.approx(10.0)
     assert tested["e2e_norm_intvty_p50"] == pytest.approx(110.0)
-    assert tested["reason"].startswith("median_or_guard_failed")
+    assert tested["reason"].startswith("p90_regressed (")
     line = SharedState._format_variant_line(tested)
     assert "no_meas" not in line
     assert "+10.00%" in line
-    assert "median_or_guard_failed" in line
+    assert "p90_regressed" in line
 
 
 @pytest.mark.asyncio

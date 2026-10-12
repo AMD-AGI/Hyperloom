@@ -1395,9 +1395,9 @@ class WritebackCollaborator(CoordinatorCollaborator):
             correctness_fix = bv.get("keep_reason") == KEEP_REASON_CORRECTNESS_FIX
             if graded.graded_on_intvty and graded.verdict != VERDICT_KEEP and not correctness_fix:
                 log.info(
-                    "current_best held: %s winner %s intvty %.1f->%.1f tput %.1f->%.1f",
+                    "current_best held: %s winner refused by %s, intvty %.1f->%.1f tput %.1f->%.1f",
                     task_kind,
-                    graded.verdict,
+                    graded.refused_by,
                     graded.reference,
                     graded.candidate,
                     graded.tput_reference,

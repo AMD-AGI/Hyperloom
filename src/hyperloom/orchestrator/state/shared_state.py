@@ -126,11 +126,11 @@ def resolve_graded_comparison(
         VERDICT_REVERT,
         axis_of,
         holds_within_band,
+        incomparability_reason,
         latency_veto_reason,
         output_tput_of,
         perf_snapshot_from_mapping,
         resolve_grading_anchor_perf,
-        rounds_are_comparable,
         total_tput_of,
     )
     from hyperloom.inference_optimizer.grading import resolved_grading
@@ -154,24 +154,25 @@ def resolve_graded_comparison(
             gain = gain_pct(axis_of(cand_perf, GRADED_INTVTY_P50), axis_of(ref_perf, GRADED_INTVTY_P50))
             # The output guard reads the raw aggregate: the chip count divides both sides of the ratio, so the band
             # holds identically per GPU.
-            guards_hold = holds_within_band(
-                cand_perf, ref_perf, GRADED_INTVTY, noise_pct=noise_pct
-            ) and holds_within_band(cand_perf, ref_perf, GRADED_OUTPUT, noise_pct=noise_pct)
-            keep = (
-                gain is not None
-                and gain >= AGENTX_KEEP_P50_THRESHOLD_PCT
-                and guards_hold
-                and rounds_are_comparable(cand_perf, ref_perf)
+            gates = (
+                ("p50_gain_below_threshold", gain is not None and gain >= AGENTX_KEEP_P50_THRESHOLD_PCT),
+                ("p90_regressed", holds_within_band(cand_perf, ref_perf, GRADED_INTVTY, noise_pct=noise_pct)),
+                ("output_regressed", holds_within_band(cand_perf, ref_perf, GRADED_OUTPUT, noise_pct=noise_pct)),
             )
-            sla_veto = latency_veto_reason(observed_ms, budget_ms) if keep else ""
+            refused = [gate for gate, held in gates if not held]
+            incomparable = incomparability_reason(cand_perf, ref_perf)
+            if incomparable:
+                refused.append(incomparable)
+            sla_veto = "" if refused else latency_veto_reason(observed_ms, budget_ms)
             return GradedComparison(
                 objective=GRADED_INTVTY_P50,
                 candidate=axis_of(cand_perf, GRADED_INTVTY_P50),
                 reference=axis_of(ref_perf, GRADED_INTVTY_P50),
-                verdict=VERDICT_KEEP if keep and not sla_veto else VERDICT_REVERT,
+                verdict=VERDICT_REVERT if refused or sla_veto else VERDICT_KEEP,
                 tput_candidate=total_tput_of(cand_perf),
                 tput_reference=total_tput_of(ref_perf),
                 veto_reason=sla_veto,
+                refused_by=",".join(refused),
             )
         degrade_reason = reason or "candidate_axes_missing"
 

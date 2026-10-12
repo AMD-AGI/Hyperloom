@@ -146,18 +146,18 @@ async def test_fix_over_the_latency_budget_reverts(tmp_path):
     )
 
 
-def _intvty_axes(p50: float, output: float) -> dict:
+def _intvty_axes(p50: float, output: float, error_rate: float = 0.0) -> dict:
     return {
         "e2e_norm_intvty_p90": 100.0,
         "e2e_norm_intvty_p50": p50,
         "output_throughput": output,
         "total_throughput": 2 * output,
         "duration_seconds": 60.0,
-        "request_error_rate": 0.0,
+        "request_error_rate": error_rate,
     }
 
 
-async def _intvty_gate(tmp_path: Path, *, p50: float, output: float):
+async def _intvty_gate(tmp_path: Path, *, p50: float, output: float, error_rate: float = 0.0):
     return await _gate(
         tmp_path,
         after_log=CLEAN_LOG,
@@ -167,7 +167,7 @@ async def _intvty_gate(tmp_path: Path, *, p50: float, output: float):
             "grading": {"objective": "e2e_norm_intvty_p90", "noise_pct": 2.0},
             "current_best": _intvty_axes(100.0, 1000.0),
         },
-        bench_fields=_intvty_axes(p50, output),
+        bench_fields=_intvty_axes(p50, output, error_rate),
     )
 
 
@@ -187,6 +187,17 @@ async def test_intvty_fix_with_an_output_collapse_reverts(tmp_path):
     assert out["reason"] == (
         "interactivity p50 100.0->99.0 did not clear the interactivity KEEP gate; "
         f"correctness fix {FINDING} refused: output_throughput fell outside the 2.0% noise band"
+    )
+
+
+@pytest.mark.asyncio
+async def test_intvty_fix_that_fails_extra_requests_names_the_gate(tmp_path):
+    out = await _intvty_gate(tmp_path, p50=99.0, output=1000.0, error_rate=1.0)
+
+    assert out["status"] == "reverted"
+    assert out["reason"] == (
+        "interactivity p50 100.0->99.0 did not clear the interactivity KEEP gate; "
+        f"correctness fix {FINDING} refused: rounds are not comparable (extra_failed_requests)"
     )
 
 
