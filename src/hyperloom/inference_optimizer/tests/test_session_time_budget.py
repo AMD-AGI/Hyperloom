@@ -315,7 +315,7 @@ class TestTimeBudgetGate:
         assert coord.dispatcher.time_budget_denial_for_action(_EXPENSIVE_ACTION) is not None
 
 
-# What the baseline round of the session in issue #1828 took: longer than any single GPU action's catalogue lease.
+# A slow AgentX baseline round: longer than any single GPU action's catalogue lease.
 _SLOW_BASELINE_SEC = 9000.0
 
 

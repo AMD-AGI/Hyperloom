@@ -52,6 +52,7 @@ from .time_budget import (
     TIME_BUDGET_EXEMPT_ACTIONS,
     action_fits_time_budget,
     expected_action_cost_minutes,
+    lease_ttl_sec,
     measured_baseline_runtime_sec,
 )
 
@@ -242,13 +243,6 @@ class DispatcherCollaborator(CoordinatorCollaborator):
     def registry_lanes_ttl(self, kind: str) -> tuple[list[str], int]:
         """Resolve ``(requires_lanes, lease_ttl_sec)`` from the action catalogue; lanes filtered to KNOWN_LANES.
 
-        The lease is the catalogue's, raised to the cost admission prices the
-        action at (:func:`expected_action_cost_minutes`) plus
-        :data:`GPU_LEASE_TTL_GRACE`: once this session has measured a baseline
-        round, a GPU action is leased for at least one such round, so the
-        remaining lease orchestration reads does not show a healthy round as
-        overdue.
-
         Args:
             kind: The action name to resolve.
 
@@ -260,11 +254,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         if meta is None:
             return [], 0
         lanes = [lane for lane in meta.requires_lanes if lane in KNOWN_LANES]
-        expected_sec = 60.0 * expected_action_cost_minutes(
-            meta,
-            measured_baseline_sec=measured_baseline_runtime_sec(self.shared_state),
-        )
-        return lanes, max(meta.lease_ttl_sec, math.ceil(expected_sec * (1.0 + GPU_LEASE_TTL_GRACE)))
+        return lanes, lease_ttl_sec(meta, measured_baseline_sec=measured_baseline_runtime_sec(self.shared_state))
 
     def cycle_idem_suffix(self) -> str:
         """Idempotency-key suffix scoping a per-cycle internal singleton to the

@@ -5,7 +5,10 @@
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING, Any
+
+from ..bus.gpu_pool import GPU_LEASE_TTL_GRACE
 
 if TYPE_CHECKING:
     from ..state.shared_state import SharedState
@@ -56,6 +59,16 @@ def expected_action_cost_minutes(
     if measured_baseline_sec <= 0.0 or not _action_benches_on_gpu(meta):
         return catalogue_min
     return max(catalogue_min, measured_baseline_sec / 60.0)
+
+
+def lease_ttl_sec(meta: Any, *, measured_baseline_sec: float = 0.0) -> int:
+    """Lease an action for the longer of its catalogue TTL and the cost it is admitted at, plus the GPU lease grace.
+
+    Once this session has measured a baseline round, a GPU action is leased for at least one such round, so the
+    remaining lease orchestration reads does not show a healthy round as overdue.
+    """
+    expected_sec = 60.0 * expected_action_cost_minutes(meta, measured_baseline_sec=measured_baseline_sec)
+    return max(int(meta.lease_ttl_sec), math.ceil(expected_sec * (1.0 + GPU_LEASE_TTL_GRACE)))
 
 
 def action_fits_time_budget(
