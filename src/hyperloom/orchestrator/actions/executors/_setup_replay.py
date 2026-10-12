@@ -23,27 +23,18 @@ SETUP_CMD_MAX = 12  # cap on distinct setup commands per integrate
 SETUP_CMD_TIMEOUT_SEC = 1800  # 30 min per install command
 
 
-def setup_report_fields(reason: str, setup_result: dict[str, Any]) -> dict[str, Any]:
-    """The ``reason`` and ``setup_commands_*`` fields of a round's result.
+def refused_setup_commands(commands: list[tuple[str, str]]) -> list[str]:
+    """The sanitized commands the install-only allowlist refuses, in replay order.
 
-    Allowlist rejections are named in the reason, not only logged. A rejection
-    that was only a ``log.warning`` left downstream with the round's outcome and
-    no link to the cause, so the same proposal was re-authored and re-dropped
-    until the budget ran out.
-
-    Args:
-        reason: The round's own reason text.
-        setup_result: The :func:`run_setup_commands` result.
+    A refused command is LLM-written text that can hold a bearer token or a
+    credentialed URL, and this list travels into the result payload, the journal
+    and the next round's mandate, so it is only ever carried sanitized.
     """
-    applied = list(setup_result.get("applied") or [])
-    skipped = list(setup_result.get("skipped") or [])
-    if skipped:
-        note = (
-            f"{len(skipped)} setup command(s) were REJECTED by the install-only allowlist "
-            f"and never ran: {'; '.join(skipped)}"
-        )
-        reason = f"{reason} ({note})" if reason else note
-    return {"reason": reason, "setup_commands_applied": applied, "setup_commands_skipped": skipped}
+    return [
+        sanitize_command_text(cmd, clip=CMD_SANITIZED_CHARS)
+        for cmd, _ in commands
+        if not is_allowlisted_setup_command(cmd)
+    ]
 
 
 def resolve_setup_commands(*, params: dict[str, Any], done_payload: dict[str, Any] | None) -> list[tuple[str, str]]:
@@ -112,21 +103,21 @@ def run_setup_commands(
     seq_start: int,
     on_execution: Callable[[dict[str, Any]], None],
 ) -> dict[str, Any]:
-    """Replay allowlisted enablement setup commands (installs) before boot.
+    """Replay enablement setup commands (installs) before boot.
 
     Blocking (serial ``subprocess.run``, 1800s cap); call via ``asyncio.to_thread``.
     Cancel is checked between commands; a command already in ``subprocess.run``
     is not killed. Cancelling the await unwinds integrate and does not continue
     to apply patches.
 
-    Runs each allowlisted command non-interactively with a per-command timeout,
-    appending combined output to ``<log_dir>/enablement_setup.log``. Commands
-    that fail the allowlist are skipped (never executed). A non-zero install is
+    Runs each command non-interactively with a per-command timeout, appending
+    combined output to ``<log_dir>/enablement_setup.log``. A non-zero install is
     recorded but does NOT hard-fail the integration — the subsequent boot/gate
     is the source of truth for runnability.
 
     Args:
-        commands: :func:`resolve_setup_commands` output.
+        commands: :func:`resolve_setup_commands` output, already cleared by
+            :func:`refused_setup_commands`.
         cwd: Working directory for the commands.
         log_dir: Directory to write ``enablement_setup.log`` into.
         round_task_id: The round the executions belong to.
@@ -135,13 +126,11 @@ def run_setup_commands(
         on_execution: Persists one ledger row as its command finishes.
 
     Returns:
-        dict[str, Any]: ``{"applied", "skipped", "failed", "executions"}`` where
-        ``applied`` are the allowlisted commands that ran (rc==0), ``skipped``
-        the rejected ones in sanitized form, and ``executions`` one ledger row
-        per ATTEMPTED command.
+        dict[str, Any]: ``{"applied", "failed", "executions"}`` where ``applied``
+        are the commands that ran (rc==0) and ``executions`` one ledger row per
+        ATTEMPTED command.
     """
     applied: list[str] = []
-    skipped: list[str] = []
     failed: list[str] = []
     executions: list[dict[str, Any]] = []
     log_path = log_dir / "enablement_setup.log"
@@ -175,20 +164,10 @@ def run_setup_commands(
             if stop_was_asked_for():
                 log.info("integrate_patch: enablement setup replay stopped after cancel")
                 break
-            if not is_allowlisted_setup_command(cmd):
-                # A rejected command is LLM-written text that can hold a bearer
-                # token or a credentialed URL, and this list is copied into every
-                # result payload and from there into the journal, the report and
-                # the KB, so it is only ever stored sanitized.
-                safe_cmd = sanitize_command_text(cmd, clip=CMD_SANITIZED_CHARS)
-                skipped.append(safe_cmd)
-                log.warning("integrate_patch: skipping non-allowlisted enablement setup command: %s", safe_cmd)
-                _record(cmd, cmd_index, source, "skipped")
-                continue
             if execute_setup_command(cmd, cwd=cwd, env=env, log_path=log_path):
                 applied.append(cmd)
                 _record(cmd, cmd_index, source, "applied")
             else:
                 failed.append(cmd)
                 _record(cmd, cmd_index, source, "failed")
-    return {"applied": applied, "skipped": skipped, "failed": failed, "executions": executions}
+    return {"applied": applied, "failed": failed, "executions": executions}

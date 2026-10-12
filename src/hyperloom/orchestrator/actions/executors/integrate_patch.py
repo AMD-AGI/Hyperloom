@@ -90,7 +90,7 @@ from ._accuracy_gate import (
 from ._apply_feedback import ApplyFeedback, build_apply_feedback
 from ._git import _git_head_sha, _run_git_cp
 from ._integrate_attempt import IntegrateAttempt
-from ._setup_replay import resolve_setup_commands, run_setup_commands, setup_report_fields
+from ._setup_replay import refused_setup_commands, resolve_setup_commands, run_setup_commands
 from ._patch_source_pr import (
     DEFAULT_DIFF_FETCH_TIMEOUT_SEC,
     _candidate_slug,
@@ -2451,9 +2451,30 @@ class IntegratePatchExecutor:
             _note_pre_mutation_head(attempt, candidate, enablement=is_enablement, session_dir=self.session_dir)
         if is_enablement and not shared_state.enablement.environment_closure_baseline:
             await self._record_closure_baseline(attempt, params)
-        setup_result: dict[str, Any] = {"applied": [], "skipped": [], "failed": [], "executions": []}
-        if bool(params.get("enablement")):
+        setup_result: dict[str, Any] = {"applied": [], "failed": [], "executions": []}
+        if is_enablement:
             setup_cmds = resolve_setup_commands(params=params, done_payload=done_payload)
+            refused = refused_setup_commands(setup_cmds)
+            if refused:
+                # Refused before anything runs, not command by command. The
+                # replay is what makes the proposal's environment real, so a
+                # partial one would boot an environment the round never
+                # proposed and grade the patches against it.
+                return {
+                    "status": "apply_failed",
+                    "enablement": True,
+                    "error_class": "setup_commands_refused",
+                    "error": (
+                        f"{len(refused)} setup command(s) are not package/tool installation and "
+                        f"were refused by the install-only allowlist; none of this round's "
+                        f"setup commands ran: {'; '.join(refused)}"
+                    ),
+                    "reason": "setup commands refused by the install-only allowlist",
+                    "setup_commands_refused": refused,
+                    "specialist_task_id": specialist_task_id,
+                    "patches_applied": [],
+                    "patches_reverted": [],
+                }
             if setup_cmds:
                 setup_result = await asyncio.to_thread(
                     run_setup_commands,
@@ -2609,12 +2630,12 @@ class IntegratePatchExecutor:
                 "patches_reverted": [],
                 "artifacts_applied": [],
                 "artifact_errors": artifact_resolve_errors,
-                **setup_report_fields(
+                "reason": (
                     "neither patches, config_changes, installable artifacts, nor "
                     "allowlisted setup commands were supplied / discoverable for "
-                    "this specialist task",
-                    setup_result,
+                    "this specialist task"
                 ),
+                "setup_commands_applied": setup_result["applied"],
             }
             if params.get("enablement"):
                 _no_patches["enablement"] = True
@@ -3159,11 +3180,8 @@ class IntegratePatchExecutor:
                 "enablement": True,
                 "runnable": False,
                 "correctness_verified": correctness_ok is True,
-                # The round ran and the boot still did not come up. When the
-                # specialist's own setup commands were dropped on the way in,
-                # that is the likeliest reason -- and the one the next round
-                # needs, since re-authoring the same proposal cannot help.
-                **setup_report_fields(f"enablement not runnable: {run_reason}", setup_result),
+                "reason": f"enablement not runnable: {run_reason}",
+                "setup_commands_applied": setup_result["applied"],
                 "bench_result": bench_result,
                 "workspace": str(output_root),
                 **bringup_evidence,
@@ -3233,11 +3251,11 @@ class IntegratePatchExecutor:
                 "advanced": True,
                 "runnable": False,
                 "correctness_verified": False,
-                **setup_report_fields(
+                "reason": (
                     f"enablement progressed: {run_reason}; boot advanced "
-                    f"to a new gap ({wall.name if wall is not None else 'no wall recorded'})",
-                    setup_result,
+                    f"to a new gap ({wall.name if wall is not None else 'no wall recorded'})"
                 ),
+                "setup_commands_applied": setup_result["applied"],
                 "after_signature": after_signature.to_dict() if after_signature is not None else {},
                 "enablement_launch_log": str(bench_result.get("error") or ""),
                 # The wall this round advanced to, for the next round's
@@ -3274,7 +3292,8 @@ class IntegratePatchExecutor:
             "runnable": True,
             "correctness_verified": correctness_ok is True,
             "provisional": provisional,
-            **setup_report_fields(reason, setup_result),
+            "reason": reason,
+            "setup_commands_applied": setup_result["applied"],
             "bench_result": bench_result,
             "workspace": str(output_root),
             **bringup_evidence,

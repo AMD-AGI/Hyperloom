@@ -137,6 +137,7 @@ class EnablementParams(CoordinatorCollaborator):
         notes = ""
         grounding_drops = list(state.enablement.last_grounding_drop_reason or [])
         apply_feedback = [fb for fb in (state.enablement.last_apply_feedback or []) if isinstance(fb, dict)]
+        setup_refusals = [str(c) for c in (state.enablement.last_setup_refusals or [])]
         spanned_roots = bool(state.enablement.patches_span_multiple_roots)
         acc_envs = dict((state.enablement.accepted_config or {}).get("extra_envs") or {})
         acc_args = str((state.enablement.accepted_config or {}).get("extra_server_args") or "").strip()
@@ -193,6 +194,16 @@ class EnablementParams(CoordinatorCollaborator):
                 "before authoring the diff."
             )
             notes = (drop_note + "\n\n" + notes).strip() if notes else drop_note
+        if setup_refusals:
+            refusal_note = (
+                "SETUP COMMAND REFUSED: setup_commands are replayed before every "
+                "boot and are limited to package/tool installation, so the prior "
+                "round was failed WITHOUT running any of them. Refused: "
+                + "; ".join(setup_refusals[:4])
+                + ". Re-author these as installer invocations, or carry the work "
+                "in a patch instead."
+            )
+            notes = (refusal_note + "\n\n" + notes).strip() if notes else refusal_note
         if spanned_roots:
             span_note = (
                 "CROSS-TREE PATCH SET: the prior round's patches targeted more "

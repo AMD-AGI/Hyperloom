@@ -1601,6 +1601,43 @@ async def test_enablement_replays_setup_commands_before_boot(tmp_path: Path, mon
     assert replayed["commands"] == [("pip install -U transformers", "inherited")]
 
 
+@pytest.mark.asyncio
+async def test_a_setup_command_that_is_not_an_install_fails_the_round_before_anything_runs(tmp_path: Path, monkeypatch):
+    """A refused command is a broken proposal, and the round is graded on the environment it proposed.
+
+    Replaying the rest would boot an environment no round asked for and grade
+    the patches against it, so nothing runs and no patch applies.
+    """
+    from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    repo = tmp_path / "framework"
+    init_git_repo(repo)
+    _write_specialist_workspace(session_dir, "t-spec-refused", patch_contents=[_VALID_PATCH])
+    executor = IntegratePatchExecutor(session_dir=session_dir)
+
+    monkeypatch.setattr(
+        ip_mod,
+        "run_setup_commands",
+        lambda *a, **kw: pytest.fail("a refused proposal still reached the replay"),
+    )
+
+    params = {
+        "specialist_task_id": "t-spec-refused",
+        "framework_source_root": str(repo),
+        "enablement": True,
+        "enablement_setup_commands": ["pip install -U transformers", "ln -sf /a /b"],
+    }
+    result = await executor(_make_ctx("t-int-refused", params))
+
+    assert result["status"] == "apply_failed"
+    assert result["enablement"] is True
+    assert result["error_class"] == "setup_commands_refused"
+    assert result["setup_commands_refused"] == ["ln -sf /a /b"]
+    assert result["patches_applied"] == []
+
+
 async def _round_exiting_after_setup(tmp_path: Path, monkeypatch, *, arrange, patch_contents=None, ledger=None):
     """Drive one enablement round to an exit that reports no outcome lists.
 

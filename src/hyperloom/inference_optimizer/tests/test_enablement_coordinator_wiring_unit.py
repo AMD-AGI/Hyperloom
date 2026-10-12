@@ -709,6 +709,24 @@ async def test_rearm_kept_dedupes_the_accepted_server_args(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_rearm_records_the_refused_setup_commands_of_the_round_that_failed(tmp_path):
+    """The refusal is the round's whole cause, and the next author is the only one who can fix it."""
+    fake = _enqueue_self(tmp_path, enablement_origin="eval")
+    await _hold_round(fake, "spec-1")
+    await fake.enablement_lane.maybe_rearm_enablement(
+        {
+            "status": "apply_failed",
+            "enablement": True,
+            "specialist_task_id": "spec-1",
+            "error_class": "setup_commands_refused",
+            "setup_commands_refused": ["ln -sf /a /b"],
+        }
+    )
+    assert fake.shared_state.enablement.last_setup_refusals == ["ln -sf /a /b"]
+    assert fake.shared_state.enablement.succeeded is False
+
+
+@pytest.mark.asyncio
 async def test_rearm_kept_replaces_the_observations_a_probe_could_not_make(tmp_path):
     """A KEEP that observed nothing must not inherit the previous KEEP's map.
 
@@ -916,6 +934,17 @@ def test_build_params_threads_base_setup_commands_when_stacked(monkeypatch, tmp_
     assert params["enablement_setup_commands"] == ["pip install -U transformers"]
     assert "PRIOR ENABLEMENT PROGRESS" in params["notes"]
     assert "setup command" in params["notes"]
+
+
+def test_build_params_tells_the_next_round_which_setup_commands_were_refused(monkeypatch, tmp_path):
+    """A refusal the author cannot see is re-authored until the budget runs out."""
+    _stub_enumerate(monkeypatch, [])
+    fake = _enqueue_self(tmp_path)
+    fake.shared_state.enablement.last_setup_refusals = ["ln -sf /a /b"]
+    params = fake.enablement_params.build_enablement_specialist_params(_MISSING_ARCH_LOG)
+    assert params is not None
+    assert "SETUP COMMAND REFUSED" in params["notes"]
+    assert "ln -sf /a /b" in params["notes"]
 
 
 def test_build_params_notes_prior_patches_for_mandate(monkeypatch, tmp_path):

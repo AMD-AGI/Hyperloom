@@ -101,6 +101,10 @@ class EnablementRound:
     # Why the last round's patches were all dropped for absent targets; injected into the next round's mandate so it
     # stops writing diffs that cannot apply.
     last_grounding_drop_reason: list = field(default_factory=list)
+    # Sanitized setup commands the last round proposed that are not package/tool
+    # installation; injected into the next round's mandate so it stops
+    # re-authoring a command the replay refuses to run.
+    last_setup_refusals: list = field(default_factory=list)
     # Serialized ApplyFeedback records from the last round's failed ``git apply``
     # (stderr, reject hunks, target source window), injected into the next
     # round's mandate so it re-grounds instead of resubmitting the same diff.

@@ -525,6 +525,7 @@ class EnablementLane(CoordinatorCollaborator):
         state.enablement.last_apply_feedback = [
             fb for fb in (res.get("retry_feedback") or [])[:5] if isinstance(fb, dict)
         ]
+        state.enablement.last_setup_refusals = [str(c) for c in (res.get("setup_commands_refused") or [])[:8]]
         state.enablement.patches_span_multiple_roots = bool(res.get("patches_span_multiple_roots"))
         # Phase-synthesised rounds carry no framework_root; keep the last real one.
         res_fw_root = str(res.get("framework_root") or "").strip()

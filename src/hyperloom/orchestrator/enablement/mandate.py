@@ -280,8 +280,10 @@ ENABLEMENT_SETUP_GUIDANCE: tuple[str, ...] = (
     "your patch and booting, so an install you depended on is reproduced rather "
     "than lost after your session ends. An unrecorded install will NOT persist.",
     "Keep setup commands minimal and deterministic (pin versions), non-"
-    "interactive (`-y` / `--yes`), and limited to package/tool installation — "
-    "they are validated against an install-only allowlist on replay.",
+    "interactive (`-y` / `--yes`), and limited to package/tool installation. "
+    "Replay validates every one against an install-only allowlist BEFORE "
+    "running any of them, and a single command that is not an install fails "
+    "the whole round — carry anything else in a patch instead.",
     "If NO environment setup is needed (a pure source fix), leave `setup_commands` empty.",
 )
 
