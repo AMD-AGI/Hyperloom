@@ -272,6 +272,7 @@ def _steady_state_forecast(certificate: dict[str, Any]) -> dict[str, Any]:
 
 _PHASE_PREFILL = "prefill"
 _PHASE_DECODE = "decode"
+_TRACE_SPLIT_DIR = "trace_split"
 
 
 def _phase_coverage_check(trace_dir: Path, framework: str) -> dict[str, Any]:
@@ -285,7 +286,7 @@ def _phase_coverage_check(trace_dir: Path, framework: str) -> dict[str, Any]:
     from hyperloom.inference_optimizer import framework_registry as _fw_reg
 
     framework = str(framework or os.environ.get("FRAMEWORK", "") or "")
-    split = trace_dir / "trace_split"
+    split = trace_dir / _TRACE_SPLIT_DIR
     if _fw_reg.is_scriptable(framework) or not split.is_dir():
         return _check_row(CHECK_PHASE_COVERAGE, status="skipped", skip_reason="scriptable framework or no trace_split/")
     names = [p.name for p in split.iterdir() if p.is_file()]
@@ -590,7 +591,7 @@ def _validate_trace_structure(
 
     # --- Check 4 (Deval): per-file execute_* in trace_split/ --- An empty split means the splitter ran but got no
     # usable events.
-    split = trace_dir / "trace_split"
+    split = trace_dir / _TRACE_SPLIT_DIR
     split_files: list[Path] = []
     if split.is_dir() and not scriptable:
         split_files = sorted(p for p in split.iterdir() if p.is_file())
@@ -655,7 +656,6 @@ def _validate_trace_structure(
             status="skipped",
             skip_reason=("scriptable framework has no per-step split" if scriptable else "no trace_split/ directory"),
         )
-
 
     # --- Check 7 (Hyperloom): torch-profiler captured zero ops --- A metadata-only trace (no ``cpu_op`` / ``kernel``
     # events) means the profiler active window never recorded real execution; flag it so roofline re-profiles rather
@@ -762,7 +762,7 @@ def _is_split_chunk(path: Path, root: Path) -> bool:
         relative = path.relative_to(root)
     except ValueError:
         relative = path
-    return any(part == "trace_split" for part in relative.parts)
+    return any(part == _TRACE_SPLIT_DIR for part in relative.parts)
 
 
 def _trace_files_for_dir(trace_dir: Path) -> list[Path]:
