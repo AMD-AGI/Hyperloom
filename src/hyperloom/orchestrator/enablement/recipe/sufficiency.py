@@ -14,9 +14,10 @@ from __future__ import annotations
 import json
 from pathlib import PurePosixPath
 import re
-import shlex
 from typing import Any, Iterable, Mapping, Sequence
 
+from .launch_flags import PARALLELISM_AXES as _PARALLELISM_AXES
+from .launch_flags import requested_flags as _requested_flags
 from .steps import BUILD_KIND, PATCH_KIND, SETUP_KIND, command_digest, select_linked_build
 
 SCHEMA_VERSION = 1
@@ -74,15 +75,6 @@ _RUN_LOCAL_REQUESTED_FLAGS: frozenset[str] = frozenset(
     }
 )
 
-#: The requested spellings of each parallelism axis ``observed_model_binding``
-#: reports, so the requested side is compared against the binding rather than
-#: against a launch line the extractor strips these from.
-_PARALLELISM_AXES: tuple[tuple[str, frozenset[str]], ...] = (
-    ("tp", frozenset({"tensor_parallel_size", "tp_size", "tp"})),
-    ("dp", frozenset({"data_parallel_size", "dp_size"})),
-    ("pp", frozenset({"pipeline_parallel_size", "pp_size"})),
-)
-
 #: Compared through ``observed_model_binding.model_digest`` instead.
 _MODEL_IDENTITY_FLAGS: frozenset[str] = frozenset(
     {"model", "model_path", "tokenizer", "tokenizer_path", "served_model_name"}
@@ -128,58 +120,6 @@ def read_status(section: Mapping[str, Any] | None) -> dict[str, Any]:
     if any(str(r.get("code")) not in REASON_BLOCKS for r in reasons):
         return {**dict(decision), "status": "insufficient"}
     return dict(decision)
-
-
-def _normalize_flag(name: str) -> str:
-    return str(name or "").lstrip("-").replace("-", "_")
-
-
-def _requested_flags(argv: str) -> dict[str, str]:
-    """Parse an argv string into ``{normalized_flag: value}``.
-
-    JSON operands keep their inner quotes, as the launch passes them: a POSIX
-    split turns ``{"mode":3}`` into ``{mode:3}``, which is no longer JSON and
-    cannot be compared with what the engine recorded.
-    """
-    from hyperloom.inference_optimizer.grid_server_args import tokenize_server_args_preserving_json
-
-    tokenized = tokenize_server_args_preserving_json(str(argv or ""))
-    if tokenized is not None:
-        tokens = tokenized[1]
-    else:
-        try:
-            tokens = shlex.split(str(argv or ""))
-        except ValueError:
-            return {}
-    flags: dict[str, str] = {}
-    index = 0
-    while index < len(tokens):
-        token = tokens[index]
-        if not token.startswith("-"):
-            index += 1
-            continue
-        if "=" in token:
-            name, _, value = token.partition("=")
-            flags[_normalize_flag(name)] = value
-        else:
-            value = ""
-            if index + 1 < len(tokens) and not tokens[index + 1].startswith("-"):
-                value = tokens[index + 1]
-                index += 1
-            flags[_normalize_flag(token)] = value
-        index += 1
-    return flags
-
-
-def requested_setting_names(argv: str) -> frozenset[str]:
-    """The setting names a requested argv sets, ``--no-X`` naming ``X`` as well.
-
-    The parallelism widths are always included: they are compared on every
-    launch, through the binding, whether or not the argv spells them.
-    """
-    names = set(_requested_flags(argv))
-    names |= {name[3:] for name in names if name.startswith("no_")}
-    return frozenset(names.union(*(spellings for _axis, spellings in _PARALLELISM_AXES)))
 
 
 def _activation_reasons(section: Mapping[str, Any]) -> list[dict[str, Any]]:

@@ -18,6 +18,7 @@ from typing import Any, Mapping
 from hyperloom.common.env_safety import is_secret_shaped_env_name
 
 from .credentials import classify_credential_value, strip_url_userinfo
+from .launch_flags import requested_setting_names
 
 #: ``accepted_config`` keys Hyperloom's own revalidation applies. Two of the five
 #: are subtractive, so a projection that drops them replays a *superset* of the
@@ -252,7 +253,6 @@ def project_launch_evidence(evidence: Mapping[str, Any] | None) -> tuple[dict[st
         sanitize_publish_server_args,
         sanitize_shared_knowledge,
     )
-    from .sufficiency import requested_setting_names
 
     out: dict[str, Any] = {}
     argv_refused = False
