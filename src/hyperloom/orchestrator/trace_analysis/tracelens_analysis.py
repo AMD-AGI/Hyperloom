@@ -3969,105 +3969,16 @@ def _ensure_tracelens_checkout(tl_root: Path, *, log_path: Path) -> None:
         append_log(log_path, f"TraceLens checkout self-healed at {tl_root}")
 
 
-def roofline_match_key(name: str) -> str:
-    """Normalize trace and rocprof names enough to join roofline data.
-
-    Args:
-        name (str): A kernel name from a trace or rocprof report.
-
-    Returns:
-        str: A canonical match key (e.g. ``hipblaslt_gemm``, ``attention``),
-            falling back to the first 80 lower-cased chars.
-    """
-    lower = (name or "").lower()
-    if "cijk_" in lower:
-        return "hipblaslt_gemm"
-    if "gemm_a16w16_asm" in lower or "a16w16" in lower:
-        return "aiter_asm_gemm"
-    if "attn_fwd" in lower or "flash_attn" in lower:
-        return "attention"
-    if "moe_ck2stages" in lower or "moe_ck_tile" in lower:
-        return "moe_gemm"
-    if "vectorized_layer_norm" in lower or "rms_norm" in lower:
-        return "rms_norm"
-    if "topk" in lower:
-        return "topk"
-    if "rope" in lower or "rotary" in lower:
-        return "rope"
-    if "nccl" in lower or "allreduce" in lower:
-        return "allreduce"
-    if "copy" in lower or "memcpy" in lower:
-        return "memcpy"
-    if "softmax" in lower:
-        return "softmax"
-    if "skinny" in lower:
-        return "skinny_gemm"
-    return lower[:80]
-
-
-def load_roofline_results(path: str | None) -> dict[str, dict[str, Any]]:
-    """Load roofline results JSON keyed by normalized kernel match key.
-
-    Args:
-        path (str | None): Path to a roofline results JSON file (a list of
-            rows or a dict with a ``results`` list); may be empty/``None``.
-
-    Returns:
-        dict[str, dict[str, Any]]: Map of :func:`roofline_match_key` to row;
-            empty when the path is missing or unparseable.
-    """
-    if not path:
-        return {}
-    p = Path(path).expanduser()
-    if not p.exists():
-        return {}
-    try:
-        payload = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    rows = payload.get("results") if isinstance(payload, dict) else payload
-    if not isinstance(rows, list):
-        return {}
-    out: dict[str, dict[str, Any]] = {}
-    for row in rows:
-        if isinstance(row, dict) and row.get("name"):
-            out[roofline_match_key(str(row["name"]))] = row
-    return out
-
-
-def merge_roofline_into_candidates(
-    candidates: list[dict[str, Any]],
-    roofline_by_name: dict[str, dict[str, Any]],
-) -> None:
-    """Merge roofline metrics into candidate rows in place.
-
-    For each candidate, looks up roofline data by normalized name and copies
-    bottleneck / utilization / suggestion fields; candidates without a match
-    get conservative ``None``/default placeholders.
-
-    Args:
-        candidates (list[dict[str, Any]]): Hot-kernel candidate rows to enrich.
-        roofline_by_name (dict[str, dict[str, Any]]): Roofline rows keyed by
-            :func:`roofline_match_key`.
-    """
+def default_roofline_fields(candidates: list[dict[str, Any]]) -> None:
+    """Give every candidate row the roofline fields it does not already carry, as unknown/None placeholders."""
     for item in candidates:
         if not isinstance(item, dict):
             continue
-        roofline = roofline_by_name.get(roofline_match_key(str(item.get("name") or "")))
-        if roofline:
-            item["bottleneck"] = roofline.get("bottleneck", "unknown")
-            item["arithmetic_intensity"] = roofline.get("arithmetic_intensity")
-            item["compute_utilization_pct"] = roofline.get("compute_utilization_pct", 0.0)
-            item["bandwidth_utilization_pct"] = roofline.get("bandwidth_utilization_pct", 0.0)
-            item["suggestion"] = roofline.get("suggestion", "")
-            item["recommended_actions"] = roofline.get("recommended_actions") or []
-            item["roofline_name"] = roofline.get("name")
-        else:
-            item.setdefault("bottleneck", "unknown")
-            item.setdefault("arithmetic_intensity", None)
-            item.setdefault("compute_utilization_pct", None)
-            item.setdefault("bandwidth_utilization_pct", None)
-            item.setdefault("recommended_actions", [])
+        item.setdefault("bottleneck", "unknown")
+        item.setdefault("arithmetic_intensity", None)
+        item.setdefault("compute_utilization_pct", None)
+        item.setdefault("bandwidth_utilization_pct", None)
+        item.setdefault("recommended_actions", [])
 
 
 def _first_non_empty(*values: Any) -> Any:
@@ -4146,20 +4057,17 @@ def build_kernel_roofline_payload(
     trace_input_type: str,
     analysis_md_path: str,
     kernel_candidates_path: str,
-    roofline_json_path: str,
     candidates: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """Build the per-kernel roofline sidecar payload.
 
-    A view over the candidates plus an optional ``--roofline-json``; missing
-    counters stay null.
+    A view over the candidates; missing counters stay null.
 
     Args:
         trace_input: The trace input path recorded in the payload.
         trace_input_type: Whether ``trace_input`` is a file or capture dir.
         analysis_md_path: Path to the source analysis report.
         kernel_candidates_path: Path to the candidates JSON.
-        roofline_json_path: Optional path to an external roofline JSON.
         candidates: The finalized hot-kernel candidate rows.
 
     Returns:
@@ -4173,7 +4081,6 @@ def build_kernel_roofline_payload(
         "trace_input_type": trace_input_type,
         "analysis_md_path": analysis_md_path,
         "kernel_candidates_path": kernel_candidates_path,
-        "roofline_json_path": roofline_json_path,
         "kernels": rows,
     }
 
@@ -4390,7 +4297,6 @@ def enrich_candidates_with_runtime_metadata(
     target_platform = str(getattr(args, "target_platform", "") or "")
     runtime_flags = {
         "analysis_mode": getattr(args, "analysis_mode", ""),
-        "runtime_env": getattr(args, "runtime_env", ""),
         "target_platform": target_platform,
     }
     for item in candidates:
@@ -4739,7 +4645,6 @@ def write_reports(
         "framework": args.framework,
         "target_platform": args.target_platform,
         "analysis_mode": args.analysis_mode,
-        "runtime_env": args.runtime_env,
         "trace_input_type": trace_input_type,
         "hot_kernels": candidates,
         "task_groups": task_groups,
@@ -4810,7 +4715,6 @@ def write_reports(
         trace_input_type=trace_input_type,
         analysis_md_path=(str(existing_report_path) if existing_report_path else ""),
         kernel_candidates_path=str(kernel_candidates_path),
-        roofline_json_path=(str(Path(args.roofline_json).expanduser()) if getattr(args, "roofline_json", "") else ""),
         candidates=candidates,
     )
     atomic_write_json(kernel_roofline_path, kernel_roofline_payload, trailing_newline=True)
@@ -4854,17 +4758,11 @@ def write_reports(
 
                         _gpu = str(getattr(args, "target_platform", "") or "mi355x").strip() or "mi355x"
                         _prec = str(getattr(args, "precision", "") or "bf16").strip() or "bf16"
-                        _h = int(getattr(args, "height", 0) or 0)
-                        _w = int(getattr(args, "width", 0) or 0)
-                        _cfg_batch = int(getattr(args, "cfg_batch", 0) or 0)
                         _est = _dflops.analytic_ceiling(
                             _model_dir,
                             gpu_type=_gpu,
                             precision=_prec,
-                            height=_h or 1024,
-                            width=_w or 1024,
                             num_steps=_num_steps or None,
-                            cfg_batch=_cfg_batch or None,
                         )
                         if _est:
                             _diff_report["analytic_ceiling"] = _est
@@ -4961,7 +4859,6 @@ def main() -> int:
     parser.add_argument("--framework", default="")
     parser.add_argument("--target-platform", default="MI355X")
     parser.add_argument("--analysis-mode", default="default")
-    parser.add_argument("--runtime-env", default="local")
     parser.add_argument(
         "--source-root",
         default=os.environ.get("TRACELENS_SOURCE_ROOT", "") or None,
@@ -5000,7 +4897,6 @@ def main() -> int:
         "Rehydration module; plumbed to run_tracelens_skill. "
         "Leave empty for the open-source-only report.",
     )
-    parser.add_argument("--roofline-json", default="")
     parser.add_argument(
         "--num-denoise-steps",
         type=int,
@@ -5026,24 +4922,6 @@ def main() -> int:
         "--precision",
         default="",
         help="Diffusion analytic-ceiling precision (bf16/fp8/fp16); default bf16.",
-    )
-    parser.add_argument(
-        "--height",
-        type=int,
-        default=0,
-        help="Diffusion image height for the analytic ceiling (0 = estimator default).",
-    )
-    parser.add_argument(
-        "--width",
-        type=int,
-        default=0,
-        help="Diffusion image width for the analytic ceiling (0 = estimator default).",
-    )
-    parser.add_argument(
-        "--cfg-batch",
-        type=int,
-        default=0,
-        help="Forwards per denoise step for the analytic ceiling (0 = family default).",
     )
     parser.add_argument(
         "--roofline-output-name",
@@ -6125,10 +6003,7 @@ def main() -> int:
                     "truth. Inspect the TraceLens skill log and report "
                     "upstream if reproducible."
                 )
-        roofline_by_name = load_roofline_results(args.roofline_json)
-        if roofline_by_name:
-            append_log(log_path, f"merged roofline results: {len(roofline_by_name)} kernels")
-        merge_roofline_into_candidates(candidates, roofline_by_name)
+        default_roofline_fields(candidates)
         source_resolution_path = run_dir / _KSC.SOURCE_RESOLUTION_FILENAME
         if not source_resolution_path.is_file():
             write_source_resolution_artifact(
@@ -6151,8 +6026,6 @@ def main() -> int:
                 trace_health_warnings=trace_health_warnings,
             )
         )
-        if args.roofline_json:
-            artifacts["roofline_json"] = str(Path(args.roofline_json).expanduser())
         artifacts["cli_log_path"] = str(log_path)
         artifacts["status_path"] = str(status_path)
 

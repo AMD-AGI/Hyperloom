@@ -67,7 +67,6 @@ def _write_reports_for(tmp_path, framework):
         framework=framework,
         target_platform="MI300X",
         analysis_mode="inference",
-        runtime_env="local",
         dry_run=False,
     )
     return tl.write_reports(
@@ -144,8 +143,6 @@ class TestTheTwoRoutesAgree:
             "MI300X",
             "--model-name",
             "utest",
-            "--top-k",
-            "8",
         ]
         assert bta.main(argv) == 0
         lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
