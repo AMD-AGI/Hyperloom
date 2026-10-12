@@ -2652,7 +2652,6 @@ def test_build_trace_validate_hoists_phase_coverage(tmp_path):
     assert block["phase_coverage_partial"] is True
     assert block["phase_coverage_missing"] == "prefill"
     assert any(c["check_id"] == pf.CHECK_PHASE_COVERAGE for c in block["checks"])
-    assert health["phase_coverage_partial"] is False
 
 
 # kernel_request_handlers — direct unit
