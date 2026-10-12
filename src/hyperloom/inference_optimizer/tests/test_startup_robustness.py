@@ -574,30 +574,10 @@ def test_launch_info_is_emitted_on_resume_too():
     The health check reads pid and session_dir from that file; a resume that skips it leaves the launcher unable
     to identify the optimizer it just started.
     """
-    import ast
-    import pathlib
-
-    tree = ast.parse(pathlib.Path(cli.__file__).read_text(encoding="utf-8"))
-    module_functions = {
-        node.name: node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
-
-    def emits(name: str, seen: set[str] | None = None) -> bool:
-        """Whether this function emits launch info, directly or through another in this module."""
-        seen = seen if seen is not None else set()
-        if name in seen or name not in module_functions:
-            return False
-        seen.add(name)
-        called = {
-            node.func.id
-            for node in ast.walk(module_functions[name])
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-        }
-        return "_emit_launch_info" in called or any(emits(callee, seen) for callee in called)
+    from .conftest import cli_call_sequence
 
     for path in ("_resume_session", "_seed_fresh_session"):
-        assert path in module_functions, f"{path} is not where the session-opening paths live any more"
-        assert emits(path), f"{path} does not emit launch info"
+        assert "_emit_launch_info" in cli_call_sequence(path), f"{path} does not emit launch info"
 
 
 def test_emit_launch_info_no_file_no_extra_print(tmp_path, capsys):
