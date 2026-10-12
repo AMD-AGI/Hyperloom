@@ -16,6 +16,7 @@ import stat
 import statistics
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
@@ -564,6 +565,353 @@ def _verdict_override(
     return ""
 
 
+def _require_run_options(trace_path: str, model_path: str, framework: str, output_dir: str) -> None:
+    """Refuse a run that is missing an option it cannot proceed without."""
+    missing = [
+        name
+        for name, value in (
+            ("--trace", trace_path),
+            ("--model-path", model_path),
+            ("--framework", framework),
+            ("--output-dir", output_dir),
+        )
+        if not value
+    ]
+    if missing:
+        raise click.UsageError(f"Missing option(s): {', '.join(missing)}.")
+
+
+def _resolve_discover_mode(fuse_kernel: str, discover_mode: str) -> str:
+    """The discovery mode this run uses, which naming a kernel to fuse around decides."""
+    if fuse_kernel:
+        return "anchored"
+    if discover_mode == "anchored":
+        raise click.UsageError("--discover anchored requires --fuse-kernel to name the kernel to fuse around.")
+    return discover_mode
+
+
+@dataclass
+class _Discovery:
+    """What the discovery stage located, and why it located nothing when it did not."""
+
+    recipes: list
+    anchor_report: AnchorReport | None = None
+    llm_error: LlmUnavailableError | None = None
+
+
+def _discover_anchored(
+    *,
+    trace_path: str,
+    model_path: str,
+    framework: str,
+    framework_root: str,
+    model_type: str,
+    fuse_kernel: str,
+    decode_batch: int,
+    attn_tp_size: int,
+    diagnosis,
+    repo_scope: bool,
+    dry_run: bool,
+    out: Path,
+    agent_factory,
+) -> _Discovery:
+    """Resolve the named kernel in the trace, then discover fusions anchored on it."""
+    try:
+        anchor_report = resolve_anchor(trace_path, KernelAnchor(name=fuse_kernel))
+    except AnchorResolutionError as exc:
+        raise click.UsageError(str(exc)) from exc
+    write_anchor_report(anchor_report, out)
+    log.info(
+        "anchor: %s | %d launches, %.1fus, %.2f%% of kernel time | %s (%.1f%%)",
+        anchor_report.category,
+        anchor_report.occurrences,
+        anchor_report.total_us,
+        anchor_report.share * 100,
+        anchor_report.signature,
+        anchor_report.consistency * 100,
+    )
+    for text in anchor_report.warnings:
+        log.warning("anchor: %s", text)
+    if dry_run:
+        # Resolution is the whole point of a dry run here: the operator has to see which launches were
+        # selected before an agent or a GPU is paid for.
+        log.info("dry run: anchor resolved to %s, skipping discovery", out / ANCHOR_REPORT_NAME)
+        return _Discovery([], anchor_report)
+    shapes = resolve_decode_shapes(model_path, decode_batch=decode_batch, attn_tp_size=attn_tp_size)
+    source_file, _source_note = resolve_framework_source_file(
+        model_path, framework, framework_root=framework_root, model_type=model_type
+    )
+    discovery_root = _discovery_root(source_file, framework_root)
+    try:
+        discovery_agent = agent_factory()
+        recipes = discover_anchored_recipes(
+            model_type=model_type,
+            framework=framework,
+            source_file=source_file,
+            shapes=shapes,
+            report=anchor_report,
+            framework_root=framework_root,
+            category_shares=diagnosis.category_shares,
+            repo_scope=repo_scope,
+            repo_root=discovery_root,
+            llm_fn=registered_agent_llm_fn(
+                discovery_agent,
+                model=discovery_agent.runtime.model,
+                workdir=discovery_root,
+                # Discovery is read-only, so the file it is shown is snapshotted
+                # and restored. Under repo scope no file is shown and the whole
+                # tree is off limits, so the session's own read-only spec
+                # carries that instead.
+                protected_files=[source_file] if source_file else [],
+                log_path=str(out / "discovery_llm.txt"),
+            ),
+        )
+    except LlmUnavailableError as exc:
+        log.error(
+            "anchored discovery could not reach the LLM (%s after %d attempt(s)): %s",
+            exc.kind,
+            exc.attempts,
+            exc,
+        )
+        return _Discovery([], anchor_report, exc)
+    return _Discovery(recipes, anchor_report)
+
+
+def _discover_by_llm(
+    *,
+    trace_path: str,
+    model_path: str,
+    framework: str,
+    framework_root: str,
+    model_type: str,
+    decode_batch: int,
+    attn_tp_size: int,
+    diagnosis,
+    repo_scope: bool,
+    out: Path,
+    agent_factory,
+) -> _Discovery:
+    """Let the model read the launch-bound profile and the real source and propose chains itself.
+
+    Not capped to the template library, unlike ``patterns``.
+    """
+    shapes = resolve_decode_shapes(model_path, decode_batch=decode_batch, attn_tp_size=attn_tp_size)
+    source_file, _source_note = resolve_framework_source_file(
+        model_path, framework, framework_root=framework_root, model_type=model_type
+    )
+    try:
+        discovery_agent = agent_factory()
+        discovery_workdir = _discovery_root(source_file, framework_root)
+        recipes = discover_recipes(
+            diagnosis,
+            model_type=model_type,
+            framework=framework,
+            source_file=source_file,
+            shapes=shapes,
+            trace_path=trace_path,
+            # Forwarded for the same reason build_recipes gets it: each proposal is checked against THIS install's
+            # compile-pass config, and that verdict rewrites the pattern id.
+            framework_root=framework_root,
+            repo_scope=repo_scope,
+            repo_root=discovery_workdir,
+            llm_fn=registered_agent_llm_fn(
+                discovery_agent,
+                model=discovery_agent.runtime.model,
+                workdir=discovery_workdir,
+                protected_files=[source_file] if source_file else [],
+                log_path=str(out / "discovery_llm.txt"),
+            ),
+        )
+    except LlmUnavailableError as exc:
+        # The model was never reached, so this run knows nothing about the kernel.
+        log.error("discovery could not reach the LLM (%s after %d attempt(s)): %s", exc.kind, exc.attempts, exc)
+        return _Discovery([], None, exc)
+    log.info("discovery(llm) proposed %d fusion(s)", len(recipes))
+    return _Discovery(recipes)
+
+
+def _log_located_recipes(discovery: _Discovery, *, dry_run: bool) -> None:
+    """Say what discovery located, and when it located nothing, why -- which is not always a verdict."""
+    if discovery.recipes:
+        log.info(
+            "located %d candidate recipe(s): %s",
+            len(discovery.recipes),
+            ", ".join(f"{r.pattern_id}({r.trigger_share:.2f})" for r in discovery.recipes),
+        )
+    elif discovery.llm_error is not None:
+        log.error(
+            "no fusion recipe located because the LLM was unreachable "
+            "(verdict: %s) — this is NOT a no_opportunity result",
+            LLM_UNAVAILABLE_VERDICT,
+        )
+    elif discovery.anchor_report is not None and dry_run:
+        log.info(
+            "anchor resolved, discovery not run (verdict: %s) — this is NOT a no_opportunity result",
+            ANCHOR_RESOLVED_VERDICT,
+        )
+    else:
+        log.info("no fusion recipe located (verdict: no_opportunity)")
+
+
+def _run_author_only(
+    authored: list,
+    *,
+    framework: str,
+    out: Path,
+    repo_root: str,
+    gpu: str,
+    llm_model: Optional[str],
+    max_turns: int,
+    ab_hint: str,
+    target_speedup: float,
+    run_arch: str,
+    model_path: str,
+    agent_factory,
+) -> int:
+    """Author the fusion and stop there, for a run that asked for no validation."""
+    harness_path = str(out / "kernel_harness.py")
+    author_harness_path = _author_harness_target(repo_root, out)
+    ready, harness_error, harness_fatal = _prepare_author_harness(author_harness_path, harness_path, inherited=False)
+    if not ready:
+        _append_author_rejection(str(out / "author.log"), harness_error)
+        log.error("author harness preparation failed: %s", harness_error)
+        return AUTHOR_RC_SAFETY if harness_fatal else AUTHOR_RC_FAILED
+    prompt_harness_path = author_harness_path or harness_path
+    # Every call-site file, not just the primary: the author transaction treats this list as its exact
+    # write allowlist, so a multi-file fusion whose second file is missing here cannot be delivered.
+    author_sources = _recipe_files(authored)
+    prompt = build_multi_author_prompt(
+        [r.to_dict() for r in authored],
+        framework=framework,
+        ab_hint=ab_hint,
+        target_speedup=target_speedup,
+        harness_path=prompt_harness_path,
+        gpu_arch=run_arch,
+        model_path=model_path,
+    )
+    (out / "author_prompt.md").write_text(prompt, encoding="utf-8")
+    rc = run_author(
+        prompt,
+        workdir=repo_root or ".",
+        log_path=str(out / "author.log"),
+        gpu=gpu,
+        model=llm_model,
+        max_turns=max_turns,
+        backend=agent_factory,
+        timeout_s=_agent_timeout_sec(),
+        target_files=[*author_sources, prompt_harness_path],
+        new_module_dirs=_author_module_dirs(author_sources),
+    )
+    harness_ok, harness_error = _finish_author_harness(
+        author_harness_path,
+        harness_path,
+        inherited=False,
+        author_ok=rc == 0,
+    )
+    if not harness_ok:
+        rc = _author_rc_after_harness(rc, harness_ok=harness_ok)
+        _append_author_rejection(str(out / "author.log"), harness_error)
+        log.error("author harness finalization failed: %s", harness_error)
+    return rc
+
+
+def _echo_run_summary(manifest: dict[str, Any], path: Path, recipes: list, compile_pass_outcome, validation) -> None:
+    """Print the one-line JSON summary a caller reads instead of the manifest.
+
+    A compile_pass run has no kernel-level ValidationResult, so ITS verdict is
+    reported rather than a null that reads as "no validation ran".
+    """
+    click.echo(
+        json.dumps(
+            {
+                "verdict": manifest["verdict"],
+                "manifest": str(path),
+                "patterns": [r.pattern_id for r in recipes],
+                "speedup": (
+                    compile_pass_outcome.speedup
+                    if compile_pass_outcome is not None
+                    else (validation.kernel_speedup if validation else None)
+                ),
+                "kept": (
+                    compile_pass_outcome.kept
+                    if compile_pass_outcome is not None
+                    else (validation.kept if validation else None)
+                ),
+                "error": manifest["error"],
+                "agent_backend": manifest.get("agent_backend"),
+                "agent_model": manifest.get("agent_model"),
+                "agent_sandbox_mode": manifest.get("agent_sandbox_mode"),
+            }
+        )
+    )
+
+
+def _exit_code_for_run(llm_error, loop_result) -> None:
+    """Leave non-zero when the run failed for a reason an exit-code watcher must see.
+
+    The manifest is the contract, but a run that never reached the model, or one
+    whose pipeline never had a chance to fuse anything, must also be visible to
+    anything that only watches exit codes.
+    """
+    if llm_error is not None:
+        raise SystemExit(EXIT_LLM_UNAVAILABLE)
+    if (
+        loop_result is not None
+        and not loop_result.kept
+        and loop_result.termination_reason in ("no_git_workspace", "harness_author_failed", "serving_unconfirmed")
+    ):
+        raise SystemExit(EXIT_INFRASTRUCTURE_FAILURE)
+
+
+def _settle_single_patch_workspace(
+    *,
+    repo_root: str,
+    top_recipe,
+    out: Path,
+    pristine_dir,
+    artifacts,
+    exported_ok: bool,
+    compile_pass_outcome,
+    did_multi_patch: bool,
+    repo_scope: bool,
+):
+    """Export what a single-patch run produced and put the framework tree back as it was.
+
+    None of this runs for the other two paths. The multi-patch nomination already
+    exported each sibling and restored the tree to base inside its own
+    transaction, so exporting again would diff the wrong (reset) tree and file a
+    bogus discard; a compile_pass claim likewise runs inside its own restore
+    transaction and authors no modules.
+    """
+    if did_multi_patch or compile_pass_outcome is not None:
+        return artifacts
+    # Only export a patch when the run produced a USABLE fusion (validate path: kernel parity + speedup AND
+    # serving survived).
+    if repo_root and exported_ok:
+        artifacts = export_artifacts(
+            repo_root,
+            top_recipe.source_file,
+            out,
+            pristine_dir=pristine_dir,
+            extra_files=top_recipe.extra_files,
+            repo_scope=repo_scope,
+        )
+    # The exported patch is taken back out of the framework.
+    if repo_root and artifacts and artifacts.patch:
+        restore_exported_changes(repo_root, artifacts, pristine_dir=pristine_dir)
+    if repo_root and pristine_dir and _needs_discard(exported_ok, artifacts):
+        # Nothing usable came out, so leave the framework exactly as found rather than carrying unvalidated code
+        # into whatever runs next.
+        _discard_failed_attempt(
+            repo_root,
+            top_recipe.source_file,
+            out,
+            pristine_dir,
+            extra_files=top_recipe.extra_files,
+        )
+    return artifacts
+
+
 @click.command("forge-fuse")
 @click.version_option(version=__version__)
 @click.option(
@@ -786,24 +1134,9 @@ def run(
         )
         return
 
-    missing = [
-        name
-        for name, value in (
-            ("--trace", trace_path),
-            ("--model-path", model_path),
-            ("--framework", framework),
-            ("--output-dir", output_dir),
-        )
-        if not value
-    ]
-    if missing:
-        raise click.UsageError(f"Missing option(s): {', '.join(missing)}.")
-
+    _require_run_options(trace_path, model_path, framework, output_dir)
     fuse_kernel = fuse_kernel.strip()
-    if fuse_kernel:
-        discover_mode = "anchored"
-    elif discover_mode == "anchored":
-        raise click.UsageError("--discover anchored requires --fuse-kernel to name the kernel to fuse around.")
+    discover_mode = _resolve_discover_mode(fuse_kernel, discover_mode)
 
     out = Path(output_dir)
     _setup_logging(out, verbose)
@@ -849,139 +1182,51 @@ def run(
         # ``patterns`` matches a fixed template library against the trace and never asks a model anything, so there is
         # nothing in it that could explore a repository.
         raise click.UsageError("--repo-scope requires --discover llm or --discover anchored")
-    llm_error: LlmUnavailableError | None = None
-    anchor_report = None
     if discover_mode == "anchored":
-        try:
-            anchor_report = resolve_anchor(trace_path, KernelAnchor(name=fuse_kernel))
-        except AnchorResolutionError as exc:
-            raise click.UsageError(str(exc)) from exc
-        write_anchor_report(anchor_report, out)
-        log.info(
-            "anchor: %s | %d launches, %.1fus, %.2f%% of kernel time | %s (%.1f%%)",
-            anchor_report.category,
-            anchor_report.occurrences,
-            anchor_report.total_us,
-            anchor_report.share * 100,
-            anchor_report.signature,
-            anchor_report.consistency * 100,
-        )
-        for text in anchor_report.warnings:
-            log.warning("anchor: %s", text)
-        shapes = resolve_decode_shapes(model_path, decode_batch=decode_batch, attn_tp_size=attn_tp_size)
-        source_file, _source_note = resolve_framework_source_file(
-            model_path, framework, framework_root=framework_root, model_type=model_type
-        )
-        discovery_root = _discovery_root(source_file, framework_root)
-        if dry_run:
-            # Resolution is the whole point of a dry run here: the operator has to see which launches were
-            # selected before an agent or a GPU is paid for.
-            recipes = []
-            log.info("dry run: anchor resolved to %s, skipping discovery", out / ANCHOR_REPORT_NAME)
-        else:
-            try:
-                discovery_agent = require_agent_backend()
-                recipes = discover_anchored_recipes(
-                    model_type=model_type,
-                    framework=framework,
-                    source_file=source_file,
-                    shapes=shapes,
-                    report=anchor_report,
-                    framework_root=framework_root,
-                    category_shares=diagnosis.category_shares,
-                    repo_scope=repo_scope,
-                    repo_root=discovery_root,
-                    llm_fn=registered_agent_llm_fn(
-                        discovery_agent,
-                        model=discovery_agent.runtime.model,
-                        workdir=discovery_root,
-                        # Discovery is read-only, so the file it is shown is snapshotted
-                        # and restored. Under repo scope no file is shown and the whole
-                        # tree is off limits, so the session's own read-only spec
-                        # carries that instead.
-                        protected_files=[source_file] if source_file else [],
-                        log_path=str(out / "discovery_llm.txt"),
-                    ),
-                )
-            except LlmUnavailableError as exc:
-                llm_error = exc
-                recipes = []
-                log.error(
-                    "anchored discovery could not reach the LLM (%s after %d attempt(s)): %s",
-                    exc.kind,
-                    exc.attempts,
-                    exc,
-                )
-    elif discover_mode == "llm":
-        # LLM-autonomous discovery: the model reads the launch-bound profile + the real source and proposes fusible
-        # chains itself (not capped to templates).
-        shapes = resolve_decode_shapes(model_path, decode_batch=decode_batch, attn_tp_size=attn_tp_size)
-        source_file, _source_note = resolve_framework_source_file(
-            model_path, framework, framework_root=framework_root, model_type=model_type
-        )
-        try:
-            discovery_agent = require_agent_backend()
-            discovery_workdir = _discovery_root(source_file, framework_root)
-            recipes = discover_recipes(
-                diagnosis,
-                model_type=model_type,
-                framework=framework,
-                source_file=source_file,
-                shapes=shapes,
-                trace_path=trace_path,
-                # Forwarded for the same reason build_recipes gets it: each proposal is checked against THIS install's
-                # compile-pass config, and that verdict rewrites the pattern id.
-                framework_root=framework_root,
-                repo_scope=repo_scope,
-                repo_root=discovery_workdir,
-                llm_fn=registered_agent_llm_fn(
-                    discovery_agent,
-                    model=discovery_agent.runtime.model,
-                    workdir=discovery_workdir,
-                    protected_files=[source_file] if source_file else [],
-                    log_path=str(out / "discovery_llm.txt"),
-                ),
-            )
-        except LlmUnavailableError as exc:
-            # The model was never reached, so this run knows nothing about the kernel.
-            llm_error = exc
-            recipes = []
-            log.error(
-                "discovery could not reach the LLM (%s after %d attempt(s)): %s",
-                exc.kind,
-                exc.attempts,
-                exc,
-            )
-        else:
-            log.info("discovery(llm) proposed %d fusion(s)", len(recipes))
-    else:
-        recipes = build_recipes(
-            diagnosis,
+        discovery = _discover_anchored(
+            trace_path=trace_path,
             model_path=model_path,
             framework=framework,
             framework_root=framework_root,
+            model_type=model_type,
+            fuse_kernel=fuse_kernel,
             decode_batch=decode_batch,
+            attn_tp_size=attn_tp_size,
+            diagnosis=diagnosis,
+            repo_scope=repo_scope,
+            dry_run=dry_run,
+            out=out,
+            agent_factory=require_agent_backend,
         )
-    top_recipe = recipes[0] if recipes else None
-    if recipes:
-        log.info(
-            "located %d candidate recipe(s): %s",
-            len(recipes),
-            ", ".join(f"{r.pattern_id}({r.trigger_share:.2f})" for r in recipes),
-        )
-    elif llm_error is not None:
-        log.error(
-            "no fusion recipe located because the LLM was unreachable "
-            "(verdict: %s) — this is NOT a no_opportunity result",
-            LLM_UNAVAILABLE_VERDICT,
-        )
-    elif anchor_report is not None and dry_run:
-        log.info(
-            "anchor resolved, discovery not run (verdict: %s) — this is NOT a no_opportunity result",
-            ANCHOR_RESOLVED_VERDICT,
+    elif discover_mode == "llm":
+        discovery = _discover_by_llm(
+            trace_path=trace_path,
+            model_path=model_path,
+            framework=framework,
+            framework_root=framework_root,
+            model_type=model_type,
+            decode_batch=decode_batch,
+            attn_tp_size=attn_tp_size,
+            diagnosis=diagnosis,
+            repo_scope=repo_scope,
+            out=out,
+            agent_factory=require_agent_backend,
         )
     else:
-        log.info("no fusion recipe located (verdict: no_opportunity)")
+        discovery = _Discovery(
+            build_recipes(
+                diagnosis,
+                model_path=model_path,
+                framework=framework,
+                framework_root=framework_root,
+                decode_batch=decode_batch,
+            )
+        )
+    recipes = discovery.recipes
+    anchor_report = discovery.anchor_report
+    llm_error = discovery.llm_error
+    top_recipe = recipes[0] if recipes else None
+    _log_located_recipes(discovery, dry_run=dry_run)
 
     def publish(
         patches: Optional[list[dict[str, Any]]],
@@ -1036,20 +1281,11 @@ def run(
     patches_out: Optional[list[dict[str, Any]]] = None
     nomination_summary: Optional[dict[str, Any]] = None
 
-    # A claim and an authored kernel are validated and exported by different, non-interchangeable machinery (config
-    # A/B vs kernel parity + microbench), so a single UNIT cannot do both.
-    claims = [r for r in recipes if r.candidate_kind == "compile_pass"]
-    deferred = [r for r in recipes if r.candidate_kind != "compile_pass"]
-    multi_patch = not fuse_all_confirmed
-    if fuse_all_confirmed and claims and deferred:
-        top_recipe = claims[0]
-        fuse_all_confirmed = False
-        multi_patch = False  # combine narrowed to the claim; NOT the multi-patch path
-        log.info(
-            "combine: claiming compile pass %s first; deferring %s",
-            top_recipe.pattern_id,
-            ", ".join(r.pattern_id for r in deferred),
-        )
+    split = _split_nomination(recipes, top_recipe, fuse_all_confirmed)
+    claims, deferred = split.claims, split.deferred
+    top_recipe = split.top_recipe
+    fuse_all_confirmed = split.fuse_all_confirmed
+    multi_patch = split.multi_patch
 
     if not dry_run and top_recipe is not None:
         repo_root = _framework_repo_root(top_recipe.source_file, framework_root)
@@ -1066,13 +1302,7 @@ def run(
             f"microbench speedup), decode batch {decode_batch} isl {ab_isl} osl {ab_osl}"
         )
         target_speedup = DEFAULT_TARGET_SPEEDUP
-        # One arch value for the whole run: the author tunes for it, so a mismatch would have it writing for a chip
-        # the run is not on.
-        run_arch = canon_arch(gpu_arch) or canon_arch(detect_arch())
-        if run_arch:
-            log.info("target GPU arch: %s", run_arch)
-        else:
-            log.warning("GPU arch undetectable; the author will not be told a target ISA")
+        run_arch = _run_target_arch(gpu_arch)
 
         exported_ok = False
 
@@ -1187,98 +1417,34 @@ def run(
                 loop_result.termination_reason,
             )
         elif author:
-            # Author-only (validation disabled): keep the single-pass authoring path.
-            harness_path = str(out / "kernel_harness.py")
-            author_harness_path = _author_harness_target(repo_root, out)
-            ready, harness_error, harness_fatal = _prepare_author_harness(
-                author_harness_path,
-                harness_path,
-                inherited=False,
+            rc = _run_author_only(
+                authored,
+                framework=framework,
+                out=out,
+                repo_root=repo_root,
+                gpu=gpu,
+                llm_model=llm_model,
+                max_turns=max_turns,
+                ab_hint=ab_hint,
+                target_speedup=target_speedup,
+                run_arch=run_arch,
+                model_path=model_path,
+                agent_factory=require_agent_backend,
             )
-            if not ready:
-                rc = AUTHOR_RC_SAFETY if harness_fatal else AUTHOR_RC_FAILED
-                _append_author_rejection(str(out / "author.log"), harness_error)
-                log.error("author harness preparation failed: %s", harness_error)
-            else:
-                prompt_harness_path = author_harness_path or harness_path
-                # Every call-site file, not just the primary: the author transaction treats this list as its exact
-                # write allowlist, so a multi-file fusion whose second file is missing here cannot be delivered.
-                author_sources = _recipe_files(authored)
-                prompt = build_multi_author_prompt(
-                    [r.to_dict() for r in authored],
-                    framework=framework,
-                    ab_hint=ab_hint,
-                    target_speedup=target_speedup,
-                    harness_path=prompt_harness_path,
-                    gpu_arch=run_arch,
-                    model_path=model_path,
-                )
-                (out / "author_prompt.md").write_text(prompt, encoding="utf-8")
-                rc = run_author(
-                    prompt,
-                    workdir=repo_root or ".",
-                    log_path=str(out / "author.log"),
-                    gpu=gpu,
-                    model=llm_model,
-                    max_turns=max_turns,
-                    backend=require_agent_backend,
-                    timeout_s=_agent_timeout_sec(),
-                    target_files=[*author_sources, prompt_harness_path],
-                    new_module_dirs=_author_module_dirs(author_sources),
-                )
-                harness_ok, harness_error = _finish_author_harness(
-                    author_harness_path,
-                    harness_path,
-                    inherited=False,
-                    author_ok=rc == 0,
-                )
-                if not harness_ok:
-                    rc = _author_rc_after_harness(rc, harness_ok=harness_ok)
-                    _append_author_rejection(
-                        str(out / "author.log"),
-                        harness_error,
-                    )
-                    log.error("author harness finalization failed: %s", harness_error)
             exported_ok = rc == 0
             log.info("author finished rc=%s (no validation requested)", rc)
 
-        # The multi-patch nomination already exported each sibling and restored the tree to base inside its own
-        # transaction, so the single-patch export / restore / discard below must not run for it -- it would diff the
-        # wrong (reset) tree and file a bogus discard.
-        did_multi_patch = patches_out is not None
-        # Only export a patch when the run produced a USABLE fusion (validate path: kernel parity + speedup AND
-        # serving survived).
-        if repo_root and exported_ok and compile_pass_outcome is None and not did_multi_patch:
-            artifacts = export_artifacts(
-                repo_root,
-                top_recipe.source_file,
-                out,
-                pristine_dir=pristine_dir,
-                extra_files=top_recipe.extra_files,
-                repo_scope=repo_scope,
-            )
-
-        # The exported patch is taken back out of the framework.
-        if repo_root and artifacts and artifacts.patch and compile_pass_outcome is None and not did_multi_patch:
-            restore_exported_changes(repo_root, artifacts, pristine_dir=pristine_dir)
-        # A compile_pass claim runs inside its own restore transaction and authors no modules, so this rollback has
-        # nothing to do there and would only file a bogus ".failed" attempt.
-        if (
-            repo_root
-            and pristine_dir
-            and compile_pass_outcome is None
-            and not did_multi_patch
-            and _needs_discard(exported_ok, artifacts)
-        ):
-            # Nothing usable came out, so leave the framework exactly as found rather than carrying unvalidated code
-            # into whatever runs next.
-            _discard_failed_attempt(
-                repo_root,
-                top_recipe.source_file,
-                out,
-                pristine_dir,
-                extra_files=top_recipe.extra_files,
-            )
+        artifacts = _settle_single_patch_workspace(
+            repo_root=repo_root,
+            top_recipe=top_recipe,
+            out=out,
+            pristine_dir=pristine_dir,
+            artifacts=artifacts,
+            exported_ok=exported_ok,
+            compile_pass_outcome=compile_pass_outcome,
+            did_multi_patch=patches_out is not None,
+            repo_scope=repo_scope,
+        )
 
     manifest, path = publish(
         patches_out,
@@ -1291,42 +1457,8 @@ def run(
         nomination=nomination_summary,
     )
     log.info("wrote manifest: %s (verdict=%s)", path, manifest["verdict"])
-    # A compile_pass run has no kernel-level ValidationResult, so report ITS verdict instead of a null that reads as
-    # "no validation ran".
-    click.echo(
-        json.dumps(
-            {
-                "verdict": manifest["verdict"],
-                "manifest": str(path),
-                "patterns": [r.pattern_id for r in recipes],
-                "speedup": (
-                    compile_pass_outcome.speedup
-                    if compile_pass_outcome is not None
-                    else (validation.kernel_speedup if validation else None)
-                ),
-                "kept": (
-                    compile_pass_outcome.kept
-                    if compile_pass_outcome is not None
-                    else (validation.kept if validation else None)
-                ),
-                "error": manifest["error"],
-                "agent_backend": manifest.get("agent_backend"),
-                "agent_model": manifest.get("agent_model"),
-                "agent_sandbox_mode": manifest.get("agent_sandbox_mode"),
-            }
-        )
-    )
-    if llm_error is not None:
-        # Exit non-zero as well: the manifest is the contract, but a run that never reached the model must also be
-        # visible to anything that only watches exit codes.
-        raise SystemExit(EXIT_LLM_UNAVAILABLE)
-    if (
-        loop_result is not None
-        and not loop_result.kept
-        and loop_result.termination_reason in ("no_git_workspace", "harness_author_failed", "serving_unconfirmed")
-    ):
-        # Infrastructure failure: the pipeline never had a chance to fuse anything.
-        raise SystemExit(EXIT_INFRASTRUCTURE_FAILURE)
+    _echo_run_summary(manifest, path, recipes, compile_pass_outcome, validation)
+    _exit_code_for_run(llm_error, loop_result)
 
 
 def _publish_partial_nomination(
@@ -1628,6 +1760,128 @@ def _combined_recipe(recipes: list[Recipe]) -> Recipe:
     )
 
 
+def _run_target_arch(gpu_arch: str) -> str:
+    """One GPU arch for the whole run.
+
+    The author tunes for it, so a mismatch would have it writing for a chip the
+    run is not on.
+    """
+    run_arch = canon_arch(gpu_arch) or canon_arch(detect_arch())
+    if run_arch:
+        log.info("target GPU arch: %s", run_arch)
+    else:
+        log.warning("GPU arch undetectable; the author will not be told a target ISA")
+    return run_arch
+
+
+def _open_shadow_workspace(repo_root: str, loop_recipes: list, out: Path, campaign_files: list[str]):
+    """The git workspace the campaigns keep and revert in, or None when there is none.
+
+    Every recipe's fused module is tracked at the baseline, not just the one
+    about to run: the loop keeps with ``git add -u``, which cannot commit a file
+    created mid-campaign.
+    """
+    shadow = ensure_git_workspace(
+        repo_root,
+        loop_recipes[0].source_file,
+        git_dir=str(out / "shadow.git"),
+        extra_paths=tuple(fused_module_path(r) for r in loop_recipes),
+        # A fusion whose call sites span packages is keepable only if every one of
+        # those packages is in the index.
+        scope_files=campaign_files,
+    )
+    if shadow is None:
+        log.error("no git workspace over %s: the forge-loop cannot keep or revert a candidate there", repo_root)
+    return shadow
+
+
+@dataclass
+class _NominationSplit:
+    """How a run's recipes divide between the two non-interchangeable pipelines.
+
+    A claim and an authored kernel are validated and exported by different
+    machinery (config A/B vs kernel parity + microbench), so a single UNIT
+    cannot do both.
+    """
+
+    claims: list
+    deferred: list
+    top_recipe: Any
+    fuse_all_confirmed: bool
+    multi_patch: bool
+
+
+def _split_nomination(recipes: list, top_recipe, fuse_all_confirmed: bool) -> _NominationSplit:
+    """Divide the recipes by candidate kind, narrowing a combine run to its claim."""
+    claims = [r for r in recipes if r.candidate_kind == "compile_pass"]
+    deferred = [r for r in recipes if r.candidate_kind != "compile_pass"]
+    if not (fuse_all_confirmed and claims and deferred):
+        return _NominationSplit(claims, deferred, top_recipe, fuse_all_confirmed, not fuse_all_confirmed)
+    log.info(
+        "combine: claiming compile pass %s first; deferring %s",
+        claims[0].pattern_id,
+        ", ".join(r.pattern_id for r in deferred),
+    )
+    # Combine narrowed to the claim; NOT the multi-patch path.
+    return _NominationSplit(claims, deferred, claims[0], False, False)
+
+
+def _snapshot_recipe_sources(loop_recipes: list, repo_root: str, out: Path) -> dict[str, str]:
+    """A pristine snapshot per recipe, which the multi-patch export diffs each sibling against."""
+    snapshots: dict[str, str] = {}
+    for recipe in loop_recipes:
+        snap = _snapshot_fusion_source(
+            repo_root,
+            recipe.source_file,
+            out,
+            subdir=f".pristine_{_safe_artifact_id(recipe.pattern_id)}",
+            extra_files=recipe.extra_files,
+        )
+        if snap:
+            snapshots[recipe.pattern_id] = snap
+    return snapshots
+
+
+def _export_recipe_sibling(recipe, *, repo_root: str, out: Path, pristine: str, repo_scope: bool):
+    """This recipe's own patch, scoped to its fused module, or None when there is nothing to export.
+
+    Exported while the recipe's edits are still live in the shared tree -- the
+    loop has not reset to base yet.
+    """
+    if not pristine:
+        log.warning("no pristine snapshot for kept recipe %s; cannot export its sibling", recipe.pattern_id)
+        return None
+    arts = export_artifacts(
+        repo_root,
+        recipe.source_file,
+        out,
+        pristine_dir=pristine,
+        patch_name=f"fusion_{_safe_artifact_id(recipe.pattern_id)}.patch",
+        fused_module=fused_module_path(recipe),
+        extra_files=recipe.extra_files,
+        repo_scope=repo_scope,
+    )
+    if not (arts and arts.patch):
+        log.warning("kept recipe %s produced no patch on export", recipe.pattern_id)
+        return None
+    return arts
+
+
+def _reject_fusion_sibling(recipe, vr, arts, disposition: str) -> None:
+    """Withdraw a sibling the serving smoke refused, and the patch that was exported for it.
+
+    The run rejected it, so its exported patch must not outlive the decision: a
+    later reader has no way to tell it apart from one that passed.
+    """
+    vr.kept = False
+    vr.kernel_speedup = None
+    if disposition == "serving_crash":
+        vr.correctness_passed = False
+    with contextlib.suppress(OSError):
+        Path(arts.patch).unlink()
+    log.warning("dropping fusion sibling %s from nomination (%s)", recipe.pattern_id, disposition)
+
+
 def _run_fusion_autoloop(
     recipes,
     *,
@@ -1667,18 +1921,7 @@ def _run_fusion_autoloop(
 
     # Per-recipe pristine snapshots for the multi-patch export.
     multi_patch = not combine
-    recipe_pristine: dict[str, str] = {}
-    if multi_patch and repo_root:
-        for r in loop_recipes:
-            snap = _snapshot_fusion_source(
-                repo_root,
-                r.source_file,
-                out,
-                subdir=f".pristine_{_safe_artifact_id(r.pattern_id)}",
-                extra_files=r.extra_files,
-            )
-            if snap:
-                recipe_pristine[r.pattern_id] = snap
+    recipe_pristine = _snapshot_recipe_sources(loop_recipes, repo_root, out) if multi_patch and repo_root else {}
 
     # The author aims at ``target_speedup`` (raised when a record was inherited); the gate keeps anything above
     # ``keep_threshold`` (absolute).
@@ -1687,28 +1930,9 @@ def _run_fusion_autoloop(
     # Only the authoring path runs campaigns.
     shadow = None
     if author and loop_recipes:
-        # Every recipe's fused module is tracked at the baseline, not just the one about to run: the loop keeps with
-        # ``git add -u``, which cannot commit a file created mid-campaign.
-        shadow = ensure_git_workspace(
-            repo_root,
-            loop_recipes[0].source_file,
-            git_dir=str(out / "shadow.git"),
-            extra_paths=tuple(fused_module_path(r) for r in loop_recipes),
-            # A fusion whose call sites span packages is keepable only if every one of
-            # those packages is in the index.
-            scope_files=campaign_files,
-        )
+        shadow = _open_shadow_workspace(repo_root, loop_recipes, out, campaign_files)
         if shadow is None:
-            log.error(
-                "no git workspace over %s: the forge-loop cannot keep or revert a candidate there",
-                repo_root,
-            )
-            return LoopResult(
-                kept=False,
-                best=None,
-                best_recipe=None,
-                termination_reason="no_git_workspace",
-            )
+            return LoopResult(kept=False, best=None, best_recipe=None, termination_reason="no_git_workspace")
 
     campaign_experiments: dict[str, str] = {}
 
@@ -1787,25 +2011,8 @@ def _run_fusion_autoloop(
         if not multi_patch or not repo_root:
             return None
         pristine = recipe_pristine.get(recipe.pattern_id, "")
-        if not pristine:
-            log.warning("no pristine snapshot for kept recipe %s; cannot export its sibling", recipe.pattern_id)
-            return None
-        # Export the patch FIRST, while this recipe's edits are still live in the shared tree (the loop has not reset
-        # to base yet).
-        patch_name = f"fusion_{_safe_artifact_id(recipe.pattern_id)}.patch"
-        # Scope the export to THIS recipe's own fused module.
-        arts = export_artifacts(
-            repo_root,
-            recipe.source_file,
-            out,
-            pristine_dir=pristine,
-            patch_name=patch_name,
-            fused_module=fused_module_path(recipe),
-            extra_files=recipe.extra_files,
-            repo_scope=repo_scope,
-        )
-        if not (arts and arts.patch):
-            log.warning("kept recipe %s produced no patch on export", recipe.pattern_id)
+        arts = _export_recipe_sibling(recipe, repo_root=repo_root, out=out, pristine=pristine, repo_scope=repo_scope)
+        if arts is None:
             return None
         # Serving smoke EACH keeper, not just the strongest: a sibling that boots and crashes real decode only reveals
         # it on a full server boot, and Hyperloom's integrate lane is serial at ~25 min per patch.
@@ -1825,15 +2032,7 @@ def _run_fusion_autoloop(
         )
         vr.note = note
         if disposition in ("not_wired", "serving_crash"):
-            vr.kept = False
-            vr.kernel_speedup = None
-            if disposition == "serving_crash":
-                vr.correctness_passed = False
-            # The run rejected this sibling, so its exported patch must not outlive the decision: a later
-            # reader has no way to tell it apart from one that passed.
-            with contextlib.suppress(OSError):
-                Path(arts.patch).unlink()
-            log.warning("dropping fusion sibling %s from nomination (%s)", recipe.pattern_id, disposition)
+            _reject_fusion_sibling(recipe, vr, arts, disposition)
             return None
         patch = RecipePatch(
             kernel_name=recipe.pattern_id,
@@ -1864,10 +2063,9 @@ def _run_fusion_autoloop(
         )
         # The combine path folds everything into ONE recipe whose edits are still live in the tree, so the strongest
         # (only) keeper is smoked here.
-        if multi_patch:
-            if shadow is not None:
-                shadow.reset_to_base()
-        elif result.kept and result.best_recipe is not None:
+        if multi_patch and shadow is not None:
+            shadow.reset_to_base()
+        elif not multi_patch and result.kept and result.best_recipe is not None:
             apply_serving_gate(
                 result,
                 framework=framework,
