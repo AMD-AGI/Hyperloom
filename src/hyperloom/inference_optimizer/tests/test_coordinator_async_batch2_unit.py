@@ -2073,38 +2073,30 @@ async def test_advance_phase_terminal_sets_stop_reason(coord: Coordinator, monke
 
 
 @pytest.mark.asyncio
-async def test_advance_phase_hint_survives_arrival_at_its_consumer(coord: Coordinator, monkeypatch) -> None:
-    """A hint set during PRELUDE must survive PRELUDE -> FRAMEWORK_AGENT."""
+@pytest.mark.parametrize(
+    ("prior", "target", "reason"),
+    [
+        # Entering the phase whose exit reads the hint is no exception: the hint was emitted for the phase it was
+        # emitted in, and carrying it across would end FRAMEWORK_AGENT on arrival.
+        ("PRELUDE", "FRAMEWORK_AGENT", "prelude_done"),
+        ("FRAMEWORK_AGENT", "SWEEP", "some_other_reason"),
+    ],
+)
+async def test_advance_phase_hint_discarded_on_a_transition_it_did_not_drive(
+    coord: Coordinator, monkeypatch, prior: str, target: str, reason: str
+) -> None:
     import hyperloom.orchestrator.phases.machine_state as ps
 
-    coord.shared_state.phase = "PRELUDE"
+    coord.shared_state.phase = prior
     coord.shared_state.pending_escalate_hint = "skip_to_kernel"
-    monkeypatch.setattr(ps, "compute_next_phase", lambda *a, **k: ("FRAMEWORK_AGENT", "prelude_done", {}))
+    monkeypatch.setattr(ps, "compute_next_phase", lambda *a, **k: (target, reason, {}))
 
     async def _entered(*, from_phase, to_phase, reason="", evidence=None):
         return None
 
     monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
     await coord.phase_machine.advance_phase_if_needed()
-    assert (coord.shared_state.phase or "").upper() == "FRAMEWORK_AGENT"
-    assert coord.shared_state.pending_escalate_hint == "skip_to_kernel"
-
-
-@pytest.mark.asyncio
-async def test_advance_phase_hint_discarded_when_not_headed_to_its_consumer(coord: Coordinator, monkeypatch) -> None:
-    """A pending hint is genuinely stale once the target is not the phase whose exit rule reads it -- it can never reach that check again -- so this is the one case the unrelated-transition cleanup should still clear it."""
-    import hyperloom.orchestrator.phases.machine_state as ps
-
-    coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord.shared_state.pending_escalate_hint = "skip_to_kernel"
-    monkeypatch.setattr(ps, "compute_next_phase", lambda *a, **k: ("SWEEP", "some_other_reason", {}))
-
-    async def _entered(*, from_phase, to_phase, reason="", evidence=None):
-        return None
-
-    monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
-    await coord.phase_machine.advance_phase_if_needed()
-    assert (coord.shared_state.phase or "").upper() == "SWEEP"
+    assert (coord.shared_state.phase or "").upper() == target
     assert coord.shared_state.pending_escalate_hint == ""
     assert coord.shared_state.last_discarded_escalate_hint == "skip_to_kernel"
     assert coord.shared_state.last_discarded_escalate_hint_ts

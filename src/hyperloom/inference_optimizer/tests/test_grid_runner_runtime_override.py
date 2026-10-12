@@ -34,15 +34,44 @@ def test_path_prefix_prepended():
 
 
 def test_path_prefix_not_duplicated():
-    envs = {"PATH": "/attempt/bin:/usr/bin"}
+    envs = {"PATH": os.pathsep.join(["/attempt/bin", "/usr/bin"])}
     apply_runtime_override(envs, {"path_prefix": "/attempt/bin"})
     assert envs["PATH"].count("/attempt/bin") == 1
+
+
+def test_path_prefix_moves_a_present_entry_to_the_front():
+    envs = {"PATH": os.pathsep.join(["/usr/bin", "/attempt/bin"])}
+    apply_runtime_override(envs, {"path_prefix": "/attempt/bin"})
+    assert envs["PATH"] == os.pathsep.join(["/attempt/bin", "/usr/bin"])
+
+
+def test_path_prefix_keeps_the_inherited_path(monkeypatch):
+    """The launch overlays ``benchmark.envs`` on ``os.environ``, so a config without PATH must carry the inherited one."""
+    monkeypatch.setenv("PATH", os.pathsep.join(["/usr/local/bin", "/usr/bin"]))
+    envs: dict[str, str] = {}
+    apply_runtime_override(envs, {"path_prefix": "/attempt/bin"})
+    assert envs["PATH"] == os.pathsep.join(["/attempt/bin", "/usr/local/bin", "/usr/bin"])
 
 
 def test_pythonpath_prefix_prepended(tmp_path):
     envs: dict[str, str] = {}
     apply_runtime_override(envs, {"pythonpath_prefix": str(tmp_path)})
     assert str(tmp_path) in envs.get("PYTHONPATH", "")
+
+
+def test_pythonpath_prefix_keeps_the_inherited_pythonpath(monkeypatch):
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(["/inh/a", "/inh/b"]))
+    envs: dict[str, str] = {}
+    apply_runtime_override(envs, {"pythonpath_prefix": "/attempt/pkg"})
+    assert envs["PYTHONPATH"] == os.pathsep.join(["/attempt/pkg", "/inh/a", "/inh/b"])
+
+
+def test_pythonpath_prefix_prepends_to_the_config_pythonpath(monkeypatch):
+    """A config that carries PYTHONPATH is authoritative over the inherited value."""
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(["/inh/a", "/inh/b"]))
+    envs = {"PYTHONPATH": "/cfg"}
+    apply_runtime_override(envs, {"pythonpath_prefix": "/attempt/pkg"})
+    assert envs["PYTHONPATH"] == os.pathsep.join(["/attempt/pkg", "/cfg"])
 
 
 def test_pythonpath_unsafe_colon_dropped():
@@ -125,28 +154,46 @@ def test_no_runtime_override_field_is_noop(tmp_path):
 # compiled-artifact runtime prefixes
 
 
-def test_pythonpath_prefixes_multi_entry_ordered_prepended():
+def test_pythonpath_prefixes_multi_entry_ordered_prepended(monkeypatch):
+    monkeypatch.setenv("PYTHONPATH", "/inh/a")
     envs = {"PYTHONPATH": "/opt/venv"}
     apply_runtime_override(envs, {"pythonpath_prefixes": ["/a/pkg", "/b/pkg"]})
-    assert envs["PYTHONPATH"] == "/a/pkg:/b/pkg:/opt/venv"
+    assert envs["PYTHONPATH"] == os.pathsep.join(["/a/pkg", "/b/pkg", "/opt/venv"])
 
 
-def test_pythonpath_prefixes_drops_unsafe_entry():
+def test_pythonpath_prefixes_keep_the_inherited_pythonpath(monkeypatch):
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(["/inh/a", "/inh/b"]))
+    envs: dict[str, str] = {}
+    apply_runtime_override(envs, {"pythonpath_prefixes": ["/a/pkg", "/b/pkg"]})
+    assert envs["PYTHONPATH"] == os.pathsep.join(["/a/pkg", "/b/pkg", "/inh/a", "/inh/b"])
+
+
+def test_pythonpath_prefixes_drops_unsafe_entry(monkeypatch):
+    monkeypatch.delenv("PYTHONPATH", raising=False)
     envs = {}
     apply_runtime_override(envs, {"pythonpath_prefixes": ["/good", "../evil"]})
     assert envs.get("PYTHONPATH") == "/good"
 
 
-def test_ld_library_path_prefix_prepends_and_preserves_rocm():
+def test_ld_library_path_prefix_prepends_and_preserves_rocm(monkeypatch):
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/inh/lib")
     envs = {"LD_LIBRARY_PATH": "/opt/rocm/lib"}
     apply_runtime_override(envs, {"ld_library_path_prefix": ["/attempt/lib"]})
-    assert envs["LD_LIBRARY_PATH"] == "/attempt/lib:/opt/rocm/lib"
+    assert envs["LD_LIBRARY_PATH"] == os.pathsep.join(["/attempt/lib", "/opt/rocm/lib"])
 
 
-def test_ld_library_path_prefix_multi_entry_order():
+def test_ld_library_path_prefix_keeps_the_inherited_rocm_lib(monkeypatch):
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/opt/rocm/lib")
+    envs: dict[str, str] = {}
+    apply_runtime_override(envs, {"ld_library_path_prefix": ["/attempt/lib"]})
+    assert envs["LD_LIBRARY_PATH"] == os.pathsep.join(["/attempt/lib", "/opt/rocm/lib"])
+
+
+def test_ld_library_path_prefix_multi_entry_order(monkeypatch):
+    monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
     envs = {}
     apply_runtime_override(envs, {"ld_library_path_prefix": ["/a", "/b"]})
-    assert envs["LD_LIBRARY_PATH"] == "/a:/b"
+    assert envs["LD_LIBRARY_PATH"] == os.pathsep.join(["/a", "/b"])
 
 
 def test_runtime_env_merged():
@@ -162,10 +209,18 @@ def test_runtime_env_rejects_reserved_and_blocked_keys():
     assert envs == {"OK_KEY": "v"}
 
 
-def test_entrypoint_bin_dir_prepended_to_path():
+def test_entrypoint_bin_dir_prepended_to_path(monkeypatch):
+    monkeypatch.setenv("PATH", "/inh/bin")
     envs = {"PATH": "/usr/bin"}
     apply_runtime_override(envs, {"entrypoint_bin_dir": "/attempt/bin"})
-    assert envs["PATH"] == "/attempt/bin:/usr/bin"
+    assert envs["PATH"] == os.pathsep.join(["/attempt/bin", "/usr/bin"])
+
+
+def test_entrypoint_bin_dir_keeps_the_inherited_path(monkeypatch):
+    monkeypatch.setenv("PATH", os.pathsep.join(["/usr/local/bin", "/usr/bin"]))
+    envs: dict[str, str] = {}
+    apply_runtime_override(envs, {"entrypoint_bin_dir": "/attempt/bin"})
+    assert envs["PATH"] == os.pathsep.join(["/attempt/bin", "/usr/local/bin", "/usr/bin"])
 
 
 def test_entrypoint_bin_dir_unsafe_dropped():
