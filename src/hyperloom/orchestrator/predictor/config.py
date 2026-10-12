@@ -31,9 +31,9 @@ ENV_TIMEOUT_SEC = "HYPERLOOM_PREDICTOR_TIMEOUT_SEC"
 #: An endpoint alone measures; spending benchmark time takes an explicit ``active``.
 DEFAULT_MODE = MODE_SHADOW
 
-#: One round samples eight completions, about two minutes on an 8x MI355X
-#: service, and a service shared by several sessions queues them. The request
-#: runs off the tick loop, so a generous bound costs nothing while it waits.
+#: One round samples several completions, minutes on an 8x MI355X service, and
+#: a service shared by several sessions queues them. The request runs off the
+#: tick loop, so a generous bound costs nothing while it waits.
 DEFAULT_TIMEOUT_SEC = 900.0
 
 #: ``phase.phase`` on the wire. The predictor was trained on sessions in which

@@ -25,6 +25,8 @@ from ..state.task_registry import TaskNotFound
 from ..state.shared_state import resolve_grading_anchor_tput, inject_stack_base_params
 
 if TYPE_CHECKING:
+    from ..predictor.pump import PhaseBudget
+    from ..predictor.view import SessionView
     from ..state.task_registry import Task
     from .machine import Transition
 from ..loop.proposals import PendingProposal, record_proposal
@@ -261,6 +263,24 @@ def _forward_integrate_source(
 def _recorder(coord: Any):
     """Return the framework recorder for this phase entry, or ``None`` outside an open entry."""
     return coord._framework_timeline_recorder
+
+
+def predictor_budget(state: SessionView) -> PhaseBudget:
+    """The FRAMEWORK clock a predictor request is conditioned on, read when the request goes out."""
+    from ..predictor.pump import PhaseBudget
+
+    limits: list[float] = []
+    remaining = _phase_state.phase_budget_remaining_seconds(state)
+    if remaining is not None:
+        limits.append(float(remaining))
+    cap = _phase_state.phase_cap_seconds(state)
+    if cap is not None:
+        limits.append(float(cap) - float(_phase_state.phase_cumulative_seconds(state)))
+    return PhaseBudget(
+        headroom_sec=min(limits) if limits else None,
+        elapsed_sec=_phase_state.phase_elapsed_seconds(state),
+        keep_threshold_pct=_phase_state.resolve_keep_threshold(state),
+    )
 
 
 def _record_run(coord: Any, task: Any, *, role: str, status: str, **fields: Any) -> None:
@@ -850,14 +870,15 @@ class FrameworkPhase(CoordinatorCollaborator):
         # and before the pump so the entry's first dispatch is inside the event.
         self._open_framework_timeline()
         await self._pump_framework_agent_phase()
-        # Settled here, before orchestration's first turn, so the first grid it composes can carry the answer.
+        # Before orchestration's first turn, so the first grid it composes can carry the answer; last, as on the
+        # tick, so a predictor fault reaches the transition's guard after the entry's own work has run.
         await self._predictor_pump().settle(self.shared_state)
 
     def _predictor_pump(self) -> Any:
         from ..predictor.pump import PredictorPump
 
         if self._predictor is None:
-            self._predictor = PredictorPump(on_filed=self._record_predictor_round)
+            self._predictor = PredictorPump(budget=predictor_budget, on_filed=self._record_predictor_round)
         return self._predictor
 
     def _record_predictor_round(self, entry: dict[str, Any]) -> None:
@@ -2294,6 +2315,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         exception, because a pump that raises on every tick otherwise leaves a
         phase that never dispatched anything closing clean.
         """
+        stage = "framework_pump"
         try:
             await self._pump_framework_agent_phase()
             await self._maybe_bench_untested_proposals()
@@ -2301,11 +2323,12 @@ class FrameworkPhase(CoordinatorCollaborator):
             await self._coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
             await self._coord.specialist_dispatch.maybe_ensure_custom_specialist()
             self._record_advisory_plateau()
-            # Last, so a predictor fault cannot keep the phase's own work from running this tick.
+            # Last, as at entry, so a predictor fault is filed here after the phase's own work has run.
+            stage = "framework_predictor"
             await self._pump_predictor()
         except Exception as exc:
-            log.exception("FRAMEWORK pump failed")
-            self._coord.record_exception(stage="framework_pump", exc=exc)
+            log.exception("FRAMEWORK pump failed at %s", stage)
+            self._coord.record_exception(stage=stage, exc=exc)
 
     def _record_framework_agent_authored_outcome(
         self,

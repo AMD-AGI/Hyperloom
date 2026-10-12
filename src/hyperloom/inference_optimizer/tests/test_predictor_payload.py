@@ -10,6 +10,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from hyperloom.orchestrator.phases.framework import predictor_budget
 from hyperloom.orchestrator.predictor import evidence
 from hyperloom.orchestrator.predictor.payload import build_request as _build_request
 from hyperloom.orchestrator.predictor.sidecars import load_sidecars
@@ -19,9 +20,17 @@ from hyperloom.orchestrator.trace_analysis import _analysis_md
 
 
 def build_request(state: SharedState, *, session_id: str) -> dict:
-    """The body the pump sends: source sites and sidecars loaded from the session's own analysis run."""
-    path = (state.last_trace_analyze if isinstance(state.last_trace_analyze, dict) else {}).get("analysis_md_path")
-    return _build_request(state, session_id=session_id, sites=load_source_sites(path), sidecars=load_sidecars(path))
+    """The body the pump sends: source sites and sidecars from the session's own analysis run, FRAMEWORK's clock."""
+    path = state.last_trace_analyze.get("analysis_md_path")
+    budget = predictor_budget(state)
+    return _build_request(
+        state,
+        session_id=session_id,
+        sites=load_source_sites(path),
+        sidecars=load_sidecars(path),
+        elapsed_sec=budget.elapsed_sec,
+        keep_threshold_pct=budget.keep_threshold_pct,
+    )
 
 
 _P_HEADER = _analysis_md.P_ITEM_COLUMNS + "\n|---|---|---|---|---|---|---|---|---|---|---|"

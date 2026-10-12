@@ -13,12 +13,13 @@ completely is omitted rather than half-filled. See
 from __future__ import annotations
 
 import datetime as _dt
-import math
 from typing import Any, Mapping
 
-from hyperloom.orchestrator.phases.machine_state import phase_elapsed_seconds, resolve_keep_threshold
+from hyperloom.common.coerce import to_float
 from hyperloom.orchestrator.predictor import evidence
 from hyperloom.orchestrator.predictor.config import PHASE_LABEL
+from hyperloom.orchestrator.predictor.view import SessionView
+
 
 REQUEST_SCHEMA = "hyperloom.predictor_request.v1"
 
@@ -32,19 +33,9 @@ _MODEL_INFO_KEYS = ("model_type", "attention_type", "num_hidden_layers", "num_ex
 _KERNEL_KEYS = ("name", "gpu_pct", "efficiency_percent", "arithmetic_intensity", "kernel_category")
 
 
-def _num(value: Any) -> float | None:
-    """A finite float, or ``None`` for anything else, bools included."""
-    if value is None or isinstance(value, bool):
-        return None
-    try:
-        out = float(value)
-    except (TypeError, ValueError):
-        return None
-    return out if math.isfinite(out) else None
-
-
 def _positive(value: Any) -> float | None:
-    out = _num(value)
+    """A rate or a ceiling, which is absent unless positive."""
+    out = to_float(value)
     return out if out is not None and out > 0 else None
 
 
@@ -83,7 +74,7 @@ def _roofline(snapshot: dict[str, Any]) -> dict[str, Any] | None:
         "roofline_cmp_ceiling_tok_per_sec": cmp_,
         "roofline_bound_kind": _bound(snapshot.get("roofline_bound_kind")),
         "achieved_tok_per_sec": _positive(snapshot.get("achieved_tok_per_sec")),
-        "gap_to_roofline_pct": _num(snapshot.get("gap_to_roofline_pct")),
+        "gap_to_roofline_pct": to_float(snapshot.get("gap_to_roofline_pct")),
         "hbm_bw_gbps": _positive(perfmodel.get("hbm_bw_gbps")),
         "peak_achievable_tflops": _positive(perfmodel.get("peak_achievable_tflops")),
         "n_ops_total": len(ops) if ops else None,
@@ -126,13 +117,12 @@ def _first(*values: Any) -> Any:
     return next((value for value in values if value is not None), None)
 
 
-def _evidence(state: Any, sites: Mapping[str, dict[str, Any]], sidecars: Mapping[str, Any]) -> dict[str, Any]:
-    trace = state.last_trace_analyze if isinstance(state.last_trace_analyze, dict) else {}
+def _evidence(state: SessionView, sites: Mapping[str, dict[str, Any]], sidecars: Mapping[str, Any]) -> dict[str, Any]:
+    trace = state.last_trace_analyze
     # Hot kernels alone count: a trace whose quality gate withheld analysis.md still names where device time went.
     if not (trace.get("analysis_md_text") or trace.get("hot_kernels_top15")):
         return {"profile_available": False}
-    snapshots = state.roofline_snapshots if isinstance(state.roofline_snapshots, list) else []
-    snapshot = snapshots[-1] if snapshots and isinstance(snapshots[-1], dict) else {}
+    snapshot = state.roofline_snapshots[-1] if state.roofline_snapshots else {}
     report = str(trace.get("analysis_md_text") or "")
     block = {
         "profile_available": True,
@@ -146,12 +136,10 @@ def _evidence(state: Any, sites: Mapping[str, dict[str, Any]], sidecars: Mapping
     return {key: value for key, value in block.items() if value is not None}
 
 
-def _stack(state: Any) -> list[dict[str, Any]]:
+def _stack(state: SessionView) -> list[dict[str, Any]]:
     """The applied stack, one row per KEEP with that step's own contribution rather than the accumulation."""
     out: list[dict[str, Any]] = []
-    for step in state.optimization_stack or []:
-        if not isinstance(step, dict):
-            continue
+    for step in state.optimization_stack:
         envs = step.get("extra_envs")
         out.append(
             {
@@ -164,22 +152,24 @@ def _stack(state: Any) -> list[dict[str, Any]]:
 
 
 def build_request(
-    state: Any,
+    state: SessionView,
     *,
     session_id: str,
     sites: Mapping[str, dict[str, Any]],
     sidecars: Mapping[str, Any] | None = None,
+    elapsed_sec: float,
+    keep_threshold_pct: float,
 ) -> dict[str, Any]:
     """Build the request body for the current decision point.
 
     ``sites`` and ``sidecars`` are :func:`~hyperloom.orchestrator.predictor.source_sites.load_source_sites`
     and :func:`~hyperloom.orchestrator.predictor.sidecars.load_sidecars` for the session's analysis
-    run, read by the caller off the event loop.
+    run, read by the caller off the event loop. ``elapsed_sec`` and ``keep_threshold_pct`` are the
+    phase's clock and KEEP bar as FRAMEWORK reads them when it asks.
     """
-    info = state.model_info if isinstance(state.model_info, dict) else {}
-    history = state.phase_history if isinstance(state.phase_history, list) else []
-    last_transition = history[-1] if history and isinstance(history[-1], dict) else {}
-    best = state.current_best if isinstance(state.current_best, dict) else {}
+    info = state.model_info
+    last_transition = state.phase_history[-1] if state.phase_history else {}
+    best = state.current_best
     return {
         "schema": REQUEST_SCHEMA,
         "session_id": session_id,
@@ -203,15 +193,15 @@ def build_request(
         "phase": {
             "phase": PHASE_LABEL,
             "phase_reason": _text(last_transition.get("reason")),
-            "phase_elapsed_seconds": round(phase_elapsed_seconds(state), 1),
+            "phase_elapsed_seconds": round(elapsed_sec, 1),
         },
         "performance": {
             "baseline_tput": _positive(state.baseline_tput),
             # Candidates are graded against the champion once the stack is non-empty.
             "current_best_tput": _positive(best.get("tput")),
-            "cumulative_gain_validated": _num(state.cumulative_gain_validated),
+            "cumulative_gain_validated": to_float(state.cumulative_gain_validated),
             # Decays with the macro-cycle and doubles on multi-node.
-            "keep_threshold_pct": resolve_keep_threshold(state),
+            "keep_threshold_pct": keep_threshold_pct,
             "optimization_stack": _stack(state),
         },
         "evidence": _evidence(state, sites, sidecars or {}),

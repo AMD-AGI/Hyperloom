@@ -18,6 +18,8 @@ from typing import Any, Mapping
 from hyperloom.inference_optimizer.grid_server_args import remove_server_args
 from hyperloom.orchestrator.actions.executors._proposal_identity import content_fingerprint
 from hyperloom.orchestrator.predictor.client import Action, Prediction
+from hyperloom.orchestrator.predictor.view import SessionView
+
 
 #: Attribution label on predictor rows, the explore variants made from them, and their attempts.
 PROVENANCE = "primatune"
@@ -25,7 +27,8 @@ PROVENANCE = "primatune"
 QUEUE_DOMAIN = "primatune"
 #: Specialist rounds carry no priority, so predictor rows sort ahead of them in the queue the Coordinator benches from.
 QUEUE_PRIORITY = 1
-#: Rows one answer may queue: orchestration's grid ceiling.
+#: Rows one answer may queue: as many as one orchestration grid can hold (orchestration.md's hard maximum),
+#: so a single answer can fill a grid. The Coordinator's own bench of the queue's head takes fewer at a time.
 MAX_QUEUED = 6
 #: Characters of the service's rationale a row keeps.
 RATIONALE_CHARS = 600
@@ -108,14 +111,14 @@ def _reason(action: Action, flags: Mapping[str, Any], envs: Mapping[str, str], v
     return "predictor: " + ", ".join(knobs[:4]) + (f" (+{len(knobs) - 4})" if len(knobs) > 4 else "")
 
 
-def _champion(state: Any) -> tuple[str, dict[str, str]]:
-    best = state.current_best if isinstance(state.current_best, dict) else {}
+def _champion(state: SessionView) -> tuple[str, dict[str, str]]:
+    best = state.current_best
     args = str(best.get("effective_extra_server_args") or best.get("extra_server_args") or "").strip()
     envs = best.get("extra_envs")
     return args, ({str(k): str(v) for k, v in envs.items()} if isinstance(envs, dict) else {})
 
 
-def proposal_rows(prediction: Prediction, *, key: str, state: Any) -> list[dict[str, Any]]:
+def proposal_rows(prediction: Prediction, *, key: str, state: SessionView) -> list[dict[str, Any]]:
     """Queue rows for one answer, most-voted first; empty when every proposal is a duplicate."""
     foreign = _FOREIGN_ENV_PREFIXES.get(str(state.framework or "").strip().lower(), ())
     base_args, base_envs = _champion(state)
