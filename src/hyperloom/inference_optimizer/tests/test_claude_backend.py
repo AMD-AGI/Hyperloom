@@ -60,6 +60,14 @@ class FakeResultMessage:
 
 
 @dataclass
+class FakeSystemMessage:
+    """Stand-in for the SDK's SystemMessage; the CLI's init frame carries its tool list in ``data``."""
+
+    subtype: str
+    data: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class FakeOptions:
     """Stand-in for ClaudeAgentOptions — captures kwargs for assertions."""
 
@@ -294,6 +302,17 @@ def test_build_options_effort_defaults_by_role(monkeypatch):
     assert other._build_options(tools=[], max_turns=4, system_prompt="sp").kwargs["effort"] == "low"
 
 
+def test_build_options_runs_the_cli_the_subprocess_specialists_spawn(monkeypatch, tmp_path):
+    """The in-process backend hands the SDK the same CLI ``resolve_claude_executable`` gives subprocesses."""
+    recorded = tmp_path / "claude"
+    recorded.write_text("#!/bin/sh\n", encoding="utf-8")
+    recorded.chmod(0o755)
+    monkeypatch.delenv("HYPERLOOM_CLAUDE_CLI_PATH", raising=False)
+    monkeypatch.setenv("GEAK_CLAUDE_BIN", str(recorded))
+    backend = ClaudeBackend(model="m", sdk_query_factory=_make_query_factory([]), sdk_options_cls=FakeOptions)
+    assert backend._build_options(tools=[], max_turns=1, system_prompt=None).kwargs["cli_path"] == str(recorded)
+
+
 def test_build_options_effort_env_override_and_thinking_off(monkeypatch):
     _clear_effort_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CLAUDE_ORCHESTRATION_EFFORT", "high")
@@ -464,6 +483,38 @@ async def test_run_without_an_emit_intent_call_returns_no_intents():
     result = await backend.run("p")
     assert result.intents == []
     assert "just thinking" in result.raw_text
+
+
+@pytest.mark.parametrize(
+    ("offered_tools", "offered"),
+    [
+        pytest.param([EMIT_INTENT_TOOL_QUALIFIED, "mcp__other__tool"], True, id="offered"),
+        pytest.param(["mcp__other__tool"], False, id="dropped"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_mcp_setup_diagnostic_reports_what_the_cli_offered(offered_tools, offered):
+    """Registering emit_intent does not mean the CLI offered it, so the setup snapshot carries the CLI's own account."""
+    init = FakeSystemMessage(
+        subtype="init",
+        data={
+            "claude_code_version": "2.1.294",
+            "tools": ["Read", *offered_tools],
+            "mcp_servers": [{"name": "inference_optimizer", "status": "connected"}],
+        },
+    )
+    backend = ClaudeBackend(
+        sdk_query_factory=_make_query_factory([init, FakeAssistantMessage(content=[TextBlock(text="hi")])]),
+        sdk_options_cls=FakeOptions,
+        enable_mcp_emit_intent=False,
+    )
+    assert backend.get_mcp_setup_diagnostic()["emit_intent"]["offered"] is None
+    await backend.run("p")
+    setup = backend.get_mcp_setup_diagnostic()
+    assert setup["cli_version"] == "2.1.294"
+    assert setup["mcp_tools"] == sorted(offered_tools)
+    assert setup["mcp_server_status"] == {"inference_optimizer": "connected"}
+    assert setup["emit_intent"]["offered"] is offered
 
 
 @pytest.mark.asyncio

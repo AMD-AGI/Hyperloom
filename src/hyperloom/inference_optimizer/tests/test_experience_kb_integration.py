@@ -385,7 +385,7 @@ def test_conversation_kb_block_is_fail_open_and_records_exposure(tmp_path) -> No
     assert evidence.prompt_block in block
     assert "original Recipe benchmark measurement remains" in block
     assert "never replace benchmark_baseline" in block
-    assert coordinator._kb_last_read == evidence
+    assert coordinator.conversation.kb_last_read == evidence
     [record] = state.experience_kb_injections
     assert record["tick"] == 7
     assert record["phase"] == "FRAMEWORK_AGENT"
@@ -458,7 +458,7 @@ def _kb_coordinator(tmp_path, state: SharedState, integration: _Integration) -> 
     coordinator.session_dir = tmp_path
     coordinator.shared_state = state
     coordinator.knowledge_plane = None
-    coordinator._kb_integration = integration
+    coordinator._experience_kb = integration
     return coordinator
 
 
@@ -574,8 +574,7 @@ def test_an_agentx_run_reads_no_experience_since_none_of_its_own_is_published(tm
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
     monkeypatch.setenv("HYPERLOOM_KB_URL", "https://kb.example")
     monkeypatch.setenv("HYPERLOOM_KB_TOKEN", "service-token")
-    synthetic = SimpleNamespace(shared_state=SharedState(phase="FRAMEWORK_AGENT"))
-    assert isinstance(integration_for(synthetic, tmp_path), ExperienceKBIntegration)
+    assert isinstance(integration_for(SharedState(phase="FRAMEWORK_AGENT"), tmp_path), ExperienceKBIntegration)
 
     state = SharedState(tick=4, phase="FRAMEWORK_AGENT", benchmark_mode="agentx")
     coordinator = Coordinator.__new__(Coordinator)
@@ -587,7 +586,7 @@ def test_an_agentx_run_reads_no_experience_since_none_of_its_own_is_published(tm
     assert asyncio.run(coordinator.conversation._kb_prompt_block("proposal")) == ""
     asyncio.run(coordinator.specialist_dispatch.warm_specialist_params(params))
 
-    assert coordinator._kb_integration is None
+    assert coordinator.experience_kb is None
     assert not {"experience_kb_block", "kb_read_id", "kb_rendered_refs"} & set(params)
     assert state.experience_kb_injections == []
 
@@ -596,11 +595,11 @@ def test_only_a_run_graded_on_throughput_reads_throughput_experiences(tmp_path, 
     monkeypatch.setenv("HYPERLOOM_KB_URL", "https://kb.example")
     monkeypatch.setenv("HYPERLOOM_KB_TOKEN", "service-token")
 
-    def owner(objective: str) -> SimpleNamespace:
-        return SimpleNamespace(shared_state=SharedState(phase="FRAMEWORK_AGENT", grading={"objective": objective}))
+    def state(objective: str) -> SharedState:
+        return SharedState(phase="FRAMEWORK_AGENT", grading={"objective": objective})
 
-    assert isinstance(integration_for(owner("output_throughput"), tmp_path), ExperienceKBIntegration)
-    assert integration_for(owner("e2e_norm_intvty_p90"), tmp_path) is None
+    assert isinstance(integration_for(state("output_throughput"), tmp_path), ExperienceKBIntegration)
+    assert integration_for(state("e2e_norm_intvty_p90"), tmp_path) is None
 
 
 def test_proposal_exposure_only_uses_current_orchestration_tick() -> None:
@@ -613,7 +612,7 @@ def test_proposal_exposure_only_uses_current_orchestration_tick() -> None:
         warnings=(),
     )
     router = SimpleNamespace(
-        _coord=SimpleNamespace(_kb_last_read=evidence),
+        _coord=SimpleNamespace(conversation=SimpleNamespace(kb_last_read=evidence)),
         shared_state=SimpleNamespace(tick=7),
     )
     payload = {}
@@ -643,7 +642,10 @@ def test_a_grid_keeps_only_citations_of_experiences_its_tick_showed() -> None:
         rendered_refs=({"id": _FIRST, "purpose": "representative"},),
         warnings=(),
     )
-    router = SimpleNamespace(_coord=SimpleNamespace(_kb_last_read=evidence), shared_state=SimpleNamespace(tick=7))
+    router = SimpleNamespace(
+        _coord=SimpleNamespace(conversation=SimpleNamespace(kb_last_read=evidence)),
+        shared_state=SimpleNamespace(tick=7),
+    )
     shown = {"id": _FIRST, "stance": "ADOPT", "claim": "  Kept   twice on this model. "}
     unshown = {"id": _SECOND, "stance": "adopt", "claim": "Never rendered."}
     unknown_stance = {"id": _FIRST, "stance": "trust", "claim": "Not a stance."}

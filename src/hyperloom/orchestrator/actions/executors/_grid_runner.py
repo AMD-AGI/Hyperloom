@@ -43,12 +43,7 @@ from ._benchmark_interpreter import (
     _resolve_probe_python as _resolve_probe_python,
 )
 from ._accuracy_gate import materialized_run_eval_disabled
-from ._recipe_script import (
-    RecipeLeverUnavailableError,
-    apply_recipe_levers,
-    launcher_overwritten_envs,
-    recipe_owns_argv,
-)
+from ._recipe_script import launcher_overwritten_envs
 from ._subprocess_kill import (
     AGENTX_PREFLIGHT_ERROR_CLASS,
     AGENTX_PREFLIGHT_RETURNCODE,
@@ -78,6 +73,7 @@ from ._inferencex_patcher import (
     eval_probe_targets_exist,
 )
 from ._launch_evidence import build_launch_evidence, persist_launch_evidence
+from ...measurement.runtime_findings import persist_runtime_findings, scan_server_log
 from ._server_argv import seal_server_argv
 
 # Re-exported from sibling modules to keep the module namespace intact.
@@ -327,14 +323,6 @@ def _is_safe_path_entry(entry: str) -> bool:
     )
 
 
-def _prepend_path_entry(envs: dict[str, str], var: str, entry: str) -> None:
-    """Prepend a single already-validated entry onto a ``:``-joined env var."""
-    parts = [p for p in str(envs.get(var, "") or "").split(":") if p]
-    if entry not in parts:
-        parts.insert(0, entry)
-    envs[var] = ":".join(parts)
-
-
 # Reserved keys carried by dedicated override fields; never accepted via runtime_env.
 _RUNTIME_ENV_RESERVED: frozenset[str] = frozenset({"PATH", "PYTHONPATH", "LD_LIBRARY_PATH"})
 
@@ -343,35 +331,34 @@ def apply_runtime_override(envs: dict[str, str], override: dict[str, Any]) -> No
     """Inject an attempt runtime override into the materialized YAML envs dict."""
     if not override:
         return
+    from ._workload_envs import prepend_launch_path
+
     path_prefix = str(override.get("path_prefix") or "").strip()
     if path_prefix:
-        _prepend_path_entry(envs, "PATH", path_prefix)
+        prepend_launch_path(envs, "PATH", path_prefix)
     entrypoint_bin = str(override.get("entrypoint_bin_dir") or "").strip()
     if entrypoint_bin:
         if _is_safe_path_entry(entrypoint_bin):
-            _prepend_path_entry(envs, "PATH", entrypoint_bin)
+            prepend_launch_path(envs, "PATH", entrypoint_bin)
         else:
             log.warning("apply_runtime_override: dropping unsafe entrypoint_bin_dir %r", entrypoint_bin)
     pp_prefix = str(override.get("pythonpath_prefix") or "").strip()
     if pp_prefix:
         if _is_safe_path_entry(pp_prefix):
-            _cur_pp = str(envs.get("PYTHONPATH", "") or "")
-            envs["PYTHONPATH"] = f"{pp_prefix}:{_cur_pp}" if _cur_pp else pp_prefix
+            prepend_launch_path(envs, "PYTHONPATH", pp_prefix)
         else:
             log.warning("apply_runtime_override: dropping unsafe pythonpath_prefix %r", pp_prefix)
     # Multi-entry prefixes: prepend in order so the first entry wins, ahead of any single-dir pythonpath_prefix and
     # the inherited value.
     for entry in reversed(_coerce_prefix_list(override.get("pythonpath_prefixes"))):
         if _is_safe_path_entry(entry):
-            _cur_pp = str(envs.get("PYTHONPATH", "") or "")
-            envs["PYTHONPATH"] = f"{entry}:{_cur_pp}" if _cur_pp else entry
+            prepend_launch_path(envs, "PYTHONPATH", entry)
         else:
             log.warning("apply_runtime_override: dropping unsafe pythonpath entry %r", entry)
-    # Native loader path: prepend attempt entries while preserving any inherited entries (e.g. /opt/rocm/lib), which
-    # _prepend_path_entry never drops.
+    # Native loader path: prepend attempt entries while preserving any inherited entries (e.g. /opt/rocm/lib).
     for entry in reversed(_coerce_prefix_list(override.get("ld_library_path_prefix"))):
         if _is_safe_path_entry(entry):
-            _prepend_path_entry(envs, "LD_LIBRARY_PATH", entry)
+            prepend_launch_path(envs, "LD_LIBRARY_PATH", entry)
         else:
             log.warning("apply_runtime_override: dropping unsafe ld_library_path entry %r", entry)
     _runtime_env = override.get("runtime_env")
@@ -423,12 +410,6 @@ def _build_variant_yaml(
         cfg = yaml.safe_load(f)
     bench = cfg.setdefault("benchmark", {})
     replacing = str(base_args_mode).strip().lower() == "replace"
-    # Read before the AgentX switch resets it to the session's recipe.
-    inherited_script = (
-        ""
-        if replacing or variant.args_mode == "replace"
-        else str((bench.get("envs") or {}).get("AGENTX_SERVER_SCRIPT") or "").strip()
-    )
     envs = apply_runtime_benchmark_overrides(
         bench,
         model_path=model_path,
@@ -484,7 +465,7 @@ def _build_variant_yaml(
         envs.pop(str(k), None)
     for k, v in variant.extra_envs.items():
         envs[str(k)] = str(v)
-    from ._workload_envs import pin_mlperf_round_concurrency
+    from ._workload_envs import pin_mlperf_round_concurrency, prepend_launch_path
 
     pin_mlperf_round_concurrency(envs)
     # The launcher re-exports these unconditionally, so a value carried here is
@@ -506,8 +487,7 @@ def _build_variant_yaml(
             and Path(_overlay).is_dir()
         )
         if _overlay_ok:
-            _cur_pp = str(envs.get("PYTHONPATH", "") or "")
-            envs["PYTHONPATH"] = f"{_overlay}:{_cur_pp}" if _cur_pp else _overlay
+            prepend_launch_path(envs, "PYTHONPATH", _overlay)
         else:
             log.warning(
                 "grid: dropping unsafe overlay_pythonpath %r (not a single "
@@ -539,24 +519,6 @@ def _build_variant_yaml(
             cleanup=bool(server_lifecycle.get("cleanup", True)),
             pid_dir=server_lifecycle["pid_dir"],
             port=int(server_lifecycle["port"]),
-        )
-
-    if recipe_owns_argv(bench):
-        env_levers: dict[str, str | None] = {
-            str(k): None for k in to_str_list(base_unset_envs) if k.strip().upper() not in BLOCKED_EXTERNAL_ENV_NAMES
-        }
-        env_levers.update({str(k): str(v) for k, v in (base_extra_envs or {}).items()})
-        env_levers.update(
-            {str(k): None for k in variant.unset_envs if str(k).strip().upper() not in BLOCKED_EXTERNAL_ENV_NAMES}
-        )
-        env_levers.update({str(k): str(v) for k, v in variant.extra_envs.items()})
-        # The recipe's argv is never dropped, so base removals apply even under replace.
-        envs["AGENTX_SERVER_SCRIPT"] = apply_recipe_levers(
-            bench,
-            inherited_script=inherited_script,
-            server_args=str(envs.get(extra_args_env, "")),
-            remove_args=list(dict.fromkeys(to_str_list(base_remove_args) + variant_remove)),
-            env_levers=env_levers,
         )
 
     # The final write to the argument env; nothing below may touch it.
@@ -917,13 +879,17 @@ async def run_grid(
     base_unset_envs: list[str] | None = None,
     warmup_before_measure: bool | None = None,
     server_already_ready: bool = False,
+    ready_server_log: str | None = None,
     serving_lease: Any = None,
     session_deadline_sec: float | None = None,
     variant_expected_sec: float | None = None,
     deadline_stop: StoppedByTheRun = STOPPED_BY_THE_RUN[SESSION_TIME_EXHAUSTED_CLASS],
     lifecycle_boot_only: bool = False,
 ) -> list[VariantResult]:
-    """Execute variants; ``deadline_stop`` names the owner of the supplied deadline."""
+    """Execute variants; ``deadline_stop`` names the owner of the supplied deadline.
+
+    ``ready_server_log`` is the log of the caller's ready server, measured when no variant log exists.
+    """
     silence_timeout_sec, benchmark_timeout_sec = resolve_benchmark_timeouts()
     if not magpie_python:
         # Backend-aware: bypass uses a plain python3, not Magpie's venv.
@@ -1139,9 +1105,7 @@ async def run_grid(
                 base_unset_envs=base_unset_envs,
             )
         except Exception as exc:  # noqa: BLE001
-            build_error = (
-                "recipe_lever_unavailable" if isinstance(exc, RecipeLeverUnavailableError) else "yaml_build_error"
-            )
+            build_error = "yaml_build_error"
             log.warning(
                 "grid_runner: variant %d/%d name=%s aborted: %s: %r",
                 i + 1,
@@ -2052,11 +2016,13 @@ async def run_grid(
             results[-1].output_throughput or 0.0,
         )
         await _report_finished_variant(i)
-    _attach_grid_launch_evidence(
+    await asyncio.to_thread(
+        _attach_grid_launch_evidence,
         results,
         grid=grid,
         output_root=output_root,
         caller_reused_ready_server=server_already_ready,
+        ready_server_log=ready_server_log,
     )
     return results
 
@@ -2122,8 +2088,11 @@ def _attach_grid_launch_evidence(
     grid: list[GridVariant],
     output_root: Path,
     caller_reused_ready_server: bool,
+    ready_server_log: str | None = None,
 ) -> None:
     """Persist declared and observed launch evidence for each grid result."""
+    from ._workload_envs import VLLM_SOURCE_ROOT_ENVS
+
     for idx, result in enumerate(results):
         if idx >= len(grid):
             break
@@ -2139,6 +2108,8 @@ def _attach_grid_launch_evidence(
         workspace = Path(result.workspace) if result.workspace else None
         primary_log = Path(result.server_log_path) if result.server_log_path else slot / "server.log"
         actual_log = _measurement_server_log_path(primary_log, workspace, slot=slot)
+        if not actual_log and ready_server_log:
+            actual_log = _existing_log_path(Path(ready_server_log))
         result.server_log_path = actual_log
         evidence = build_launch_evidence(
             config_path=config_path,
@@ -2149,6 +2120,9 @@ def _attach_grid_launch_evidence(
         )
         result.launch_evidence = evidence
         result.launch_evidence_path = persist_launch_evidence(evidence, slot=slot)
+        declared_env = evidence["requested_server_env"].keys() - set(VLLM_SOURCE_ROOT_ENVS)
+        report = scan_server_log(actual_log, evidence["framework"], declared_env=declared_env)
+        persist_runtime_findings(report, slot=slot)
 
 
 def _safe(name: str) -> str:

@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -31,12 +32,17 @@ from hyperloom.orchestrator.actions.stop_attribution import (
     ORCHESTRATOR_CANCELLED_CLASS,
     SESSION_TIME_EXHAUSTED_CLASS,
 )
+from hyperloom.orchestrator.actions.executors._launch_evidence import build_launch_evidence
 from hyperloom.orchestrator.actions.executors.explore import (
     _atom_default_grid,
     _default_grid_for_framework,
+    filter_baseline_noop_variants,
+    observed_launch_from_state,
 )
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.common.env import is_truthy
+from hyperloom.common.perf_metric import perf_snapshot_from_mapping
+from hyperloom.inference_optimizer.session.session_binding import session_scope
 from hyperloom.orchestrator.bus.resource_lock import (
     ResourceLockManager,
     SqliteLeaseBackend,
@@ -44,6 +50,8 @@ from hyperloom.orchestrator.bus.resource_lock import (
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
 from hyperloom.orchestrator.bus.storage import SqliteConnection
+
+from .conftest import make_coordinator
 
 
 def _eval_off(value: object) -> bool:
@@ -150,6 +158,225 @@ def test_canonical_fingerprint_distinguishes_envs():
         {"VLLM_ROCM_USE_AITER": "1"},
     )
     assert fp_args != fp_args_envs
+
+
+_CANDIDATE = "candidate"
+# Names a flag the observed stack already holds at this value, so the argv half
+# of the gate matches and the verdict turns on env alone.
+_RESTATES_ARGV = "--max-running-requests 512"
+# A knob a stack genuinely varies: the recipe reads it as
+# ``${HICACHE_IO_BACKEND:-direct}``, so both values below are reachable.
+_TUNED_ENV = "HICACHE_IO_BACKEND"
+# The recipe's own env. The stack stamps it whether or not a variant names it,
+# so it rides identically on both sides and the verdict turns on the delta.
+_RECIPE_ENV = {"KV_OFFLOADING": "1"}
+# The argv the base config carries before any variant overlays it.
+_BASE_ARGS_ENV = {"EXTRA_SGLANG_ARGS": "--mem-fraction-static 0.9"}
+
+
+def _stack_env(**changes: str) -> dict[str, str]:
+    """The env the stack stamped: the recipe's, plus its own tuning."""
+    return {**_RECIPE_ENV, **changes}
+
+
+def _stack_config(**changes: object) -> dict[str, object]:
+    """What the running engine resolved, typed as SGLang reports it."""
+    return {"mem_fraction_static": 0.9, "max_running_requests": 512, **changes}
+
+
+def _noop_filter_kwargs(tmp_path: Path, **overrides: object) -> dict:
+    base_yaml = tmp_path / "base.yaml"
+    base_yaml.write_text(
+        yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": {**_RECIPE_ENV, **_BASE_ARGS_ENV}}}),
+        encoding="utf-8",
+    )
+    kwargs = {
+        "framework": "sglang",
+        "base_yaml_path": base_yaml,
+        "base_extra_args": "",
+        "base_extra_envs": {},
+        "base_remove_args": [],
+        "base_unset_envs": [],
+        "base_args_mode": "append",
+        "model_path": None,
+        "gpu_type": None,
+        "benchmark_script": None,
+        "observed_server_config": _stack_config(),
+        "observed_server_env": _stack_env(),
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
+def _variant(args: str = _RESTATES_ARGV, **fields: object) -> GridVariant:
+    return GridVariant(_CANDIDATE, extra_server_args=args, **fields)
+
+
+# Each case is (id, variant, filter overrides). The verdict is the whole
+# expectation: does the launch this variant would produce already match the
+# stack the server is running?
+
+# Everything the variant changes already holds in the running server, so the
+# measurement would re-run the stack.
+_ALREADY_THE_STACK = (
+    (
+        "same_argv_and_env",
+        _variant(extra_envs={_TUNED_ENV: "kernel"}),
+        {"observed_server_env": _stack_env(HICACHE_IO_BACKEND="kernel")},
+    ),
+    (
+        # 3600 and 3600.0 are one value; the engine reports the float.
+        "a_value_the_engine_reports_as_a_float",
+        _variant("--watchdog-timeout 3600"),
+        {"observed_server_config": _stack_config(watchdog_timeout=3600.0)},
+    ),
+)
+
+# The variant changes something the stack does not hold, or the stack is not
+# known to hold it: either way the variant runs.
+_MUST_RUN = (
+    ("different_argv_value", _variant("--max-running-requests 128"), {}),
+    (
+        "different_env_value",
+        _variant(extra_envs={_TUNED_ENV: "direct"}),
+        {"observed_server_env": _stack_env(HICACHE_IO_BACKEND="kernel")},
+    ),
+    (
+        # chaojhou 1: parallelism is compared, not stripped.
+        "different_parallelism_value",
+        _variant("--dp-size 4"),
+        {"observed_server_config": _stack_config(dp_size=8)},
+    ),
+    (
+        # chaojhou 2: a list-valued flag is never judged against the merged config.
+        "multi_value_flag_is_not_comparable",
+        _variant("--cuda-graph-bs 1 2 4 8"),
+        {"observed_server_config": _stack_config(cuda_graph_bs=[1, 2, 4, 8, 16])},
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("variant", "overrides"),
+    [case[1:] for case in _ALREADY_THE_STACK],
+    ids=[case[0] for case in _ALREADY_THE_STACK],
+)
+def test_variant_that_is_already_the_stack_is_dropped(tmp_path, variant, overrides):
+    """The server is already running this launch, so measuring it buys nothing."""
+    kept, dropped = filter_baseline_noop_variants([variant], **_noop_filter_kwargs(tmp_path, **overrides))
+    assert kept == []
+    assert [name for name, _ in dropped] == [_CANDIDATE]
+    assert "baseline noop" in dropped[0][1]
+
+
+@pytest.mark.parametrize(
+    ("variant", "overrides"),
+    [case[1:] for case in _MUST_RUN],
+    ids=[case[0] for case in _MUST_RUN],
+)
+def test_variant_that_is_not_known_to_be_the_stack_is_kept(tmp_path, variant, overrides):
+    """Keep on a real difference, and keep on a guess: only a proven match may drop."""
+    kept, dropped = filter_baseline_noop_variants([variant], **_noop_filter_kwargs(tmp_path, **overrides))
+    assert [gv.name for gv in kept] == [_CANDIDATE]
+    assert dropped == []
+
+
+def test_a_removal_is_never_a_restatement_of_the_stack(tmp_path):
+    """chaojhou 3: the materialized config cannot show a subtraction, so it must not read as a noop.
+
+    ``unset_envs`` also pops the process env at run time, which the probe's
+    YAML never sees; ``remove_args`` leaves no trace in the merged argv.
+    """
+    grid = [
+        GridVariant("removes-an-arg", remove_args=["--enable-dp-attention"]),
+        GridVariant("unsets-an-env", unset_envs=["HIP_FORCE_DEV_KERNARG"]),
+    ]
+    kept, dropped = filter_baseline_noop_variants(grid, **_noop_filter_kwargs(tmp_path))
+    assert [gv.name for gv in kept] == ["removes-an-arg", "unsets-an-env"]
+    assert dropped == []
+
+
+def test_the_engines_own_record_is_what_makes_the_filter_fire(tmp_path):
+    """End to end on the only launch account SGLang gives: the resolved settings it logs.
+
+    No argv is echoed anywhere, so ``observed_server_launch_flags`` stays empty
+    and every earlier form of this gate filtered nothing.
+    """
+    config = tmp_path / "stack.yaml"
+    config.write_text(
+        yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": {**_RECIPE_ENV, **_BASE_ARGS_ENV}}}),
+        encoding="utf-8",
+    )
+    log = tmp_path / "server.log"
+    log.write_text(
+        "[2026-09-21 21:14:33] Attention backend not explicitly specified.\n"
+        "[2026-09-21 21:14:34] server_args="
+        f"{ {'mem_fraction_static': 0.9, 'max_running_requests': 512, 'dp_size': 8}!r}\n",
+        encoding="utf-8",
+    )
+    evidence = build_launch_evidence(config_path=config, actual_server_log=str(log), framework="sglang", slot=tmp_path)
+    assert evidence["observed_server_launch_flags"] == ""
+    assert evidence["observed_server_config"]["max_running_requests"] == 512
+    # The env is stamped from the recipe; the argv key holds the launch command, not an env value.
+    assert evidence["observed_server_env"] == _RECIPE_ENV
+
+    # chaojhou 4: last_baseline is an attempt entry that never carries launch_evidence,
+    # so a stack with no current best is unknown rather than read from it.
+    no_current_best = SimpleNamespace(current_best_measurement={}, last_baseline={"launch_evidence": evidence})
+    assert observed_launch_from_state(no_current_best) == ({}, {})
+
+    state = SimpleNamespace(current_best_measurement={"launch_evidence": evidence})
+    observed_config, observed_env = observed_launch_from_state(state)
+    kwargs = _noop_filter_kwargs(tmp_path, observed_server_config=observed_config, observed_server_env=observed_env)
+
+    _, dropped = filter_baseline_noop_variants([_variant(_RESTATES_ARGV)], **kwargs)
+    assert [name for name, _ in dropped] == [_CANDIDATE]
+
+    # A different value runs, and so does a setting the engine never reported:
+    # absence from the record is unknown, not equal.
+    for args in ("--max-running-requests 128", "--stream-interval 20"):
+        kept, none_dropped = filter_baseline_noop_variants([_variant(args)], **kwargs)
+        assert [gv.name for gv in kept] == [_CANDIDATE], args
+        assert none_dropped == []
+
+
+def test_a_setting_the_engine_rewrote_is_not_already_in_effect(tmp_path):
+    """DP attention divides chunked_prefill_size, so the resolved 8192 is not what ``--chunked-prefill-size 8192`` passes.
+
+    Taken from a real SGLang log: 65536 was requested and 8192 resolved under
+    dp_size=8. Passing 8192 would launch with 1024, a real change. The engine's
+    own report covers it, and so does the DP-attention rule for a log that never
+    carried the report.
+    """
+    config = tmp_path / "stack.yaml"
+    config.write_text(
+        yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": {**_RECIPE_ENV, **_BASE_ARGS_ENV}}}),
+        encoding="utf-8",
+    )
+    log = tmp_path / "server.log"
+    record = {"enable_dp_attention": True, "dp_size": 8, "chunked_prefill_size": 8192, "max_running_requests": 512}
+    log.write_text(
+        "[2026-09-18 19:11:48] DP attention is enabled. chunked prefill size is adjusted from 65536 to 8192.\n"
+        f"[2026-09-18 19:11:50] server_args={record!r}\n",
+        encoding="utf-8",
+    )
+    evidence = build_launch_evidence(config_path=config, actual_server_log=str(log), framework="sglang", slot=tmp_path)
+    assert evidence["engine_adjusted_settings"] == {"chunked_prefill_size": {"requested": "65536", "resolved": "8192"}}
+
+    for engine_report in (evidence["engine_adjusted_settings"], {}):
+        stack = {**evidence, "engine_adjusted_settings": engine_report}
+        observed_config, observed_env = observed_launch_from_state(
+            SimpleNamespace(current_best_measurement={"launch_evidence": stack})
+        )
+        kwargs = _noop_filter_kwargs(tmp_path, observed_server_config=observed_config, observed_server_env=observed_env)
+
+        kept, dropped = filter_baseline_noop_variants([_variant("--chunked-prefill-size 8192")], **kwargs)
+        assert [gv.name for gv in kept] == [_CANDIDATE]
+        assert dropped == []
+
+        # Only the rewritten settings are unknown: a plain restatement still drops.
+        _, dropped = filter_baseline_noop_variants([_variant(_RESTATES_ARGV)], **kwargs)
+        assert [name for name, _ in dropped] == [_CANDIDATE]
 
 
 def test_record_explore_accepted_dedup_by_fingerprint():
@@ -406,7 +633,7 @@ async def test_actual_explore_axis_rejection_cannot_be_revived_by_geak_fallback(
     with patch("hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill", side_effect=fake_measure):
         produced = (await sub.run_task(task)).result
     rejection = produced["per_variant_outcomes"][0]
-    assert rejection["reason"].startswith("median_or_guard_failed")
+    assert rejection["reason"].startswith("p50_gain_below_threshold,p90_regressed (")
     assert any(gate["gate"] == "graded_axes" and gate["passed"] is False for gate in rejection["gates"])
     await coord.writeback.promote_to_shared_state("explore", produced, task=task)
     assert state.current_best["tput"] == 110.0
@@ -512,6 +739,80 @@ async def test_explore_missing_axes_fails_closed(
     assert any(gate["gate"] == "graded_axes" and gate["passed"] is False for gate in tested["gates"])
     assert state.baseline_perf == baseline_before
     assert state.current_best == best_before
+    # A variant that could not be graded on its axes is the one row the ledger may still call unmeasured.
+    assert tested["graded_gain_pct"] is None
+    assert "no_meas" in SharedState._format_variant_line(tested)
+
+
+@pytest.mark.asyncio
+async def test_explore_guard_revert_row_reads_as_measured(sub_agent_runner, tmp_path, monkeypatch):
+    """A variant the tail guard refuses keeps its graded movement and the gate's reason on its ledger row.
+
+    The median here clears the KEEP bar by a wide margin and the slow tail halves, so the verdict is REVERT on a
+    fully measured variant. The prompt ledger must say so rather than render the row as never measured.
+    """
+    _force_cold_decision(monkeypatch)
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState(framework="sglang", benchmark_mode="agentx")
+    state.baseline_tput = 200.0
+    state.baseline_perf = {
+        "output_throughput": 200.0,
+        "total_token_throughput": 20000.0,
+        "e2e_norm_intvty_p90": 100.0,
+        "e2e_norm_intvty_p50": 100.0,
+        "duration_seconds": 25.0,
+        "request_error_rate": 0.0,
+    }
+    sub.shared_state = state
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+
+    def _fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        _fake_workspace(
+            slot,
+            tput=200.0,
+            perf_axes={
+                "total_token_throughput": 20000.0,
+                "e2e_norm_intvty_p90": 50.0,
+                "e2e_norm_intvty_p50": 110.0,
+                "duration_seconds": 25.0,
+                "request_error_rate": 0.0,
+            },
+        )
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "explore-guard-revert"),
+            "base_tput": 200.0,
+            "grid": [{"name": "v_tail_regress", "extra_args": "--tail-flag"}],
+        },
+        idempotency_key="ex-guard-revert",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    tested = res.result["explore_search_update"]["tested"][canonical_fingerprint("--tail-flag", {})]
+    assert tested["outcome"] == "REVERT"
+    assert tested["graded_objective"] == "e2e_norm_intvty_p50"
+    # A refused variant still contributes no gain anywhere a gain is summed or ranked.
+    assert tested["gain_pct"] is None
+    assert tested["graded_gain_pct"] == pytest.approx(10.0)
+    assert tested["e2e_norm_intvty_p50"] == pytest.approx(110.0)
+    assert tested["reason"].startswith("p90_regressed (")
+    line = SharedState._format_variant_line(tested)
+    assert "no_meas" not in line
+    assert "+10.00%" in line
+    assert "p90_regressed" in line
 
 
 @pytest.mark.asyncio
@@ -619,6 +920,91 @@ async def test_explore_missing_axes_preserves_running_grading_anchor(
     assert [row["name"] for row in out["winners"]] == expected_winners
     assert [row["variant_name"] for row in out["explore_search_update"]["winners_history"]] == expected_winners
     assert out["running_base_tput"] == (220.0 if intvty_outcome == "KEEP" else 210.0)
+    # Promotion re-grades a winner from its record alone; a record thinner than the measurement reads as
+    # candidate_axes_missing (or as an incomparable round) and the KEEP is dropped.
+    for row in (*out["winners"], tested["v_good"]):
+        snapshot = perf_snapshot_from_mapping(row)
+        assert snapshot is not None
+        assert snapshot["duration_seconds"] == 25.0
+        assert snapshot["request_error_rate"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_an_agentx_explore_keep_is_promoted_by_writeback(sub_agent_runner, session_dir, tmp_path, monkeypatch):
+    """The winner explore writes is the record writeback re-grades, so the KEEP must survive the hand-off.
+
+    Each side was only ever exercised against hand-built dicts; a winner record thinner than the measurement that
+    graded it dropped every AgentX explore KEEP at promotion from #1652 until #1790.
+    """
+    _force_cold_decision(monkeypatch)
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    baseline_axes = {
+        "output_throughput": 200.0,
+        "total_token_throughput": 20000.0,
+        "e2e_norm_intvty_p90": 300.0,
+        "e2e_norm_intvty_p50": 300.0,
+        "duration_seconds": 25.0,
+        "request_error_rate": 0.0,
+    }
+    sub, tr, _ = sub_agent_runner
+    state = SharedState(framework="sglang", benchmark_mode="agentx")
+    state.baseline_tput = 200.0
+    state.baseline_perf = dict(baseline_axes)
+    sub.shared_state = state
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+
+    def _fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        _fake_workspace(
+            slot,
+            tput=210.0,
+            perf_axes={
+                "input_throughput": 21790.0,
+                "total_token_throughput": 22000.0,
+                "e2e_norm_intvty_p90": 330.0,
+                "e2e_norm_intvty_p50": 330.0,
+                "duration_seconds": 25.0,
+                "request_error_rate": 0.0,
+            },
+        )
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "explore-promote"),
+            "base_tput": 200.0,
+            "grid": [{"name": "v_good", "extra_args": "--good-flag"}],
+        },
+        idempotency_key="ex-promote",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+    [winner] = res.result["winners"]
+
+    with session_scope(session_dir):
+        coord = make_coordinator(session_dir)
+        coord.shared_state.benchmark_mode = "agentx"
+        coord.shared_state.baseline_tput = 200.0
+        coord.shared_state.baseline_perf = dict(baseline_axes)
+        coord.shared_state.current_best = {
+            "action": "baseline",
+            "tput": 200.0,
+            **baseline_axes,
+            "extra_server_args": "",
+            "extra_envs": {},
+        }
+
+        assert coord.writeback.lift_to_current_best("explore", float(winner["tput"]), dict(winner)) is True
+        assert coord.shared_state.current_best["variant_name"] == "v_good"
+        assert coord.shared_state.current_best["e2e_norm_intvty_p50"] == 330.0
 
 
 @pytest.mark.asyncio
@@ -1315,6 +1701,11 @@ async def test_explore_executor_defaults_to_warm_decision_matching_hot_baseline(
         out_idx = cmd.index("--output-dir")
         slot = Path(cmd[out_idx + 1])
         bench_calls.append(str(slot))
+        if "warmup_round" in str(slot):
+            (slot / "server.log").write_text(
+                "[aiter] shape is M:1, N:2, K:3, not found tuned config in /tmp/a.csv, will use default config!\n",
+                encoding="utf-8",
+            )
         _fake_workspace(slot, tput=920.0)  # +15% vs 800 — KEEP and stable
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
@@ -1349,6 +1740,13 @@ async def test_explore_executor_defaults_to_warm_decision_matching_hot_baseline(
     assert len(bench_calls) == 2, bench_calls
     assert sum("warmup_round" in c for c in bench_calls) == 1
     assert {w["name"] for w in out["winners"]} == {"warm_keep"}
+    warm_log = next(Path(c) for c in bench_calls if "warmup_round" in c) / "server.log"
+    decision_slot = next(Path(c) for c in bench_calls if "warmup_round" not in c)
+    report = json.loads((decision_slot / "runtime_findings.json").read_text(encoding="utf-8"))
+    assert report["log_path"] == str(warm_log)
+    assert [(f["rule_id"], f["status"]) for f in report["findings"] if f["status"] != "not_detected"] == [
+        ("aiter.tuned_miss", "detected")
+    ]
 
 
 def _run_eval_of(cmd: list[str]) -> str:

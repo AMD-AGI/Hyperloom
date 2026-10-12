@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import csv
 import logging
 import os
 import re
@@ -68,6 +69,16 @@ def _parse_top_bottleneck(raw: str | None) -> str | None:
     return name or None
 
 
+def _exposed_memcpy_pct(tracelens_dir: Path) -> float | None:
+    """Exposed memcpy share from ``perf_report_csvs/gpu_timeline.csv``; analysis.md omits it."""
+    try:
+        with (tracelens_dir / "perf_report_csvs" / "gpu_timeline.csv").open(encoding="utf-8", newline="") as fh:
+            row = next((r for r in csv.DictReader(fh) if r.get("type") == "exposed_memcpy_time"), None)
+    except OSError:
+        return None
+    return _parse_pct(row.get("percent")) if row else None
+
+
 def extract_workload_summary(analysis_md_path: str | Path) -> dict[str, Any]:
     """Best-effort workload-level metrics from Executive Summary table."""
     path = Path(analysis_md_path)
@@ -75,6 +86,7 @@ def extract_workload_summary(analysis_md_path: str | Path) -> dict[str, Any]:
         "compute_pct": None,
         "idle_pct": None,
         "comm_pct": None,
+        "memcpy_pct": None,
         "top_bottleneck": None,
     }
     if not path.is_file():
@@ -88,6 +100,7 @@ def extract_workload_summary(analysis_md_path: str | Path) -> dict[str, Any]:
     out["idle_pct"] = _parse_pct(rows.get("Idle %"))
     out["comm_pct"] = _parse_pct(rows.get("Exposed Communication %") or rows.get("Communication %"))
     out["top_bottleneck"] = _parse_top_bottleneck(rows.get("Top Bottleneck Category"))
+    out["memcpy_pct"] = _exposed_memcpy_pct(_tracelens_dir_for_analysis_md(path))
     return out
 
 
@@ -264,6 +277,7 @@ def build_roofline_snapshot(
         "compute_pct": None,
         "idle_pct": None,
         "comm_pct": None,
+        "memcpy_pct": None,
         "top_bottleneck": None,
         "top_kernel": None,
         # Primary decode ceiling plus memory/compute sides; None when unavailable.
@@ -292,6 +306,7 @@ def build_roofline_snapshot(
     snap["compute_pct"] = wl.get("compute_pct")
     snap["idle_pct"] = wl.get("idle_pct")
     snap["comm_pct"] = wl.get("comm_pct")
+    snap["memcpy_pct"] = wl.get("memcpy_pct")
     snap["top_bottleneck"] = wl.get("top_bottleneck")
     top_k = extract_top_kernel(analysis_md_path)
     if top_k:
@@ -692,7 +707,8 @@ def build_profiler_digest(
         f"bound_kind={bound_kind}  "
         f"compute={_pct(latest.get('compute_pct'))}  "
         f"idle={_pct(latest.get('idle_pct'))}  "
-        f"comm={_pct(latest.get('comm_pct'))}"
+        f"comm={_pct(latest.get('comm_pct'))}  "
+        f"memcpy={_pct(latest.get('memcpy_pct'))}"
     ]
 
     if len(snaps) >= 2:

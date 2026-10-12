@@ -14,6 +14,8 @@ import yaml
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.state.shared_state import SharedState
 
+from ._geak_helpers import stop_geak_before_launch
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("value", ["two words", '{"key": "a b", "eq": "a=b"}', "user's config", r"a\b", "", "plain"])
@@ -30,13 +32,7 @@ async def test_handoff_preserves_environment_values(
     coord._record_geak_kernel_journey = lambda _result: None
     monkeypatch.setenv("FRAMEWORK", "sglang")
 
-    def stop_after_handoff(_name: str) -> Path:
-        raise RuntimeError("stop after handoff write")
-
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
-        stop_after_handoff,
-    )
+    stop_geak_before_launch(monkeypatch)
     await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
@@ -76,13 +72,7 @@ def capture_handoff(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.delenv("MAX_MODEL_LEN", raising=False)
         monkeypatch.delenv("GPU_MEMORY_UTILIZATION", raising=False)
 
-        def stop_after_handoff(_name: str) -> Path:
-            raise RuntimeError("stop after handoff write")
-
-        monkeypatch.setattr(
-            "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
-            stop_after_handoff,
-        )
+        stop_geak_before_launch(monkeypatch)
         await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
         return json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
 

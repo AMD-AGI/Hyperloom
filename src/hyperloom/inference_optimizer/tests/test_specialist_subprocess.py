@@ -8,7 +8,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import stat
 import subprocess
 import time
 from pathlib import Path
@@ -18,7 +17,7 @@ import pytest
 
 from hyperloom.common.deadline import Deadline
 
-from .conftest import init_git_repo
+from .conftest import init_git_repo, make_fake_claude
 
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 
@@ -93,193 +92,6 @@ def test_build_specialist_env_secret_inheritance_can_be_disabled(monkeypatch):
     assert "GITHUB_TOKEN" not in env
 
 
-def _make_fake_claude(
-    bin_dir: Path,
-    *,
-    behavior: str,
-    payload: dict[str, Any] | None = None,
-) -> Path:
-    """Write a fake ``claude`` executable simulating one of: done_only / done_with_patch / done_with_env / crash."""
-    bin_dir.mkdir(parents=True, exist_ok=True)
-    script_path = bin_dir / "claude"
-    payload_json = json.dumps(
-        payload
-        or {
-            "gap_canonical_id": "gap.test.example",
-            "domain": "serving_specialist",
-            "proposal_set": [
-                {
-                    "name": "fake_variant",
-                    "extra_args": "--fake",
-                    "extra_envs": {},
-                    "reason": "fake",
-                }
-            ],
-            "patches_written": [],
-            "summary": "fake claude subprocess output",
-            "confidence": 0.5,
-        }
-    )
-    body = """#!/usr/bin/env bash
-set -e
-# Parse --add-dir paths (first is worktree, second is workspace).
-ADD_DIRS=()
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --add-dir) ADD_DIRS+=("$2"); shift 2 ;;
-    *) shift ;;
-  esac
-done
-WORKTREE="${ADD_DIRS[0]:-}"
-WORKSPACE="${ADD_DIRS[1]:-}"
-if [[ -n "$WORKTREE" && -f "$WORKTREE/prompt.md" ]]; then
-  WORKSPACE="$WORKTREE"
-fi
-"""
-    if behavior == "done_only":
-        body += f"""
-cat > "$WORKSPACE/specialist_done.json" <<'EOF'
-{payload_json}
-EOF
-exit 0
-"""
-    elif behavior == "done_with_patch":
-        patch_payload = json.dumps(
-            {
-                **(payload or {}),
-                "gap_canonical_id": "gap.test.example",
-                "domain": "serving_specialist",
-                "proposal_set": [
-                    {
-                        "name": "patched_variant",
-                        "extra_args": "",
-                        "extra_envs": {},
-                        "reason": "see patch",
-                    }
-                ],
-                "patches_written": ["patches/001_test.patch"],
-                "summary": "fake patch-authoring specialist",
-                "confidence": 0.7,
-            }
-        )
-        body += f"""
-mkdir -p "$WORKTREE/patches"
-cat > "$WORKTREE/patches/001_test.patch" <<'EOF'
-diff --git a/dummy.txt b/dummy.txt
-new file mode 100644
---- /dev/null
-+++ b/dummy.txt
-@@ -0,0 +1 @@
-+pr-a2 patch
-EOF
-cat > "$WORKSPACE/specialist_done.json" <<'EOF'
-{patch_payload}
-EOF
-exit 0
-"""
-    elif behavior == "done_with_env":
-        body += """
-cat > "$WORKSPACE/specialist_done.json" <<EOF
-{
-  "gap_canonical_id": "gap.test.example",
-  "domain": "serving_specialist",
-  "proposal_set": [],
-  "patches_written": [],
-  "summary": "env echo",
-  "confidence": 0.0,
-  "hip_visible": "$HIP_VISIBLE_DEVICES",
-  "cuda_visible": "$CUDA_VISIBLE_DEVICES",
-  "rocr_visible": "$ROCR_VISIBLE_DEVICES"
-}
-EOF
-exit 0
-"""
-    elif behavior == "done_with_llm_env":
-        # Echo the LLM-transport stability env for the dispatcher assertion.
-        body += """
-cat > "$WORKSPACE/specialist_done.json" <<EOF
-{
-  "gap_canonical_id": "gap.test.example",
-  "domain": "serving_specialist",
-  "proposal_set": [],
-  "patches_written": [],
-  "summary": "llm env echo",
-  "confidence": 0.0,
-  "api_timeout_ms": "$API_TIMEOUT_MS",
-  "disable_autoupdater": "$DISABLE_AUTOUPDATER",
-  "disable_nonessential": "$CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
-}
-EOF
-exit 0
-"""
-    elif behavior == "done_with_stream_json":
-        # Zeroed per-message usage with the real counts only on the result row, as a GLM gateway streams it.
-        zeroed = {"input_tokens": 0, "output_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}
-        stream = [
-            {"type": "system", "subtype": "init", "model": "glm-5-3"},
-            {
-                "type": "assistant",
-                "message": {
-                    "id": "m1",
-                    "model": "glm-5-3",
-                    "usage": zeroed,
-                    "content": [{"type": "tool_use", "id": "tu1", "name": "Bash", "input": {"command": "ls"}}],
-                },
-            },
-            {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "tu1", "content": "ok"}]}},
-            {"type": "assistant", "message": {"id": "m2", "model": "glm-5-3", "usage": zeroed, "content": []}},
-            {
-                "type": "result",
-                "usage": {
-                    "input_tokens": 50632,
-                    "cache_read_input_tokens": 291392,
-                    "cache_creation_input_tokens": 0,
-                    "output_tokens": 7542,
-                },
-            },
-        ]
-        stream_lines = "\n".join(json.dumps(row) for row in stream)
-        body += f"""
-cat <<'EOF'
-{stream_lines}
-EOF
-cat > "$WORKSPACE/specialist_done.json" <<'EOF'
-{payload_json}
-EOF
-exit 0
-"""
-    elif behavior == "crash":
-        body += "exit 3\n"
-    elif behavior == "partial_then_crash":
-        # Write only the partial checkpoint, then die before the final done.json.
-        body += f"""
-cat > "$WORKSPACE/specialist_done.partial.json" <<'EOF'
-{payload_json}
-EOF
-exit 3
-"""
-    elif behavior == "partial_then_done":
-        # Checkpoint first, wait for the reaper to see it, then exit normally.
-        body += f"""
-cat > "$WORKSPACE/specialist_done.partial.json" <<'EOF'
-{payload_json}
-EOF
-sleep 1
-cat > "$WORKSPACE/specialist_done.json" <<'EOF'
-{payload_json}
-EOF
-exit 0
-"""
-    elif behavior == "hang":
-        # Sleep past any wall budget without writing done.json.
-        body += "sleep 600\n"
-    else:
-        raise ValueError(f"unknown behavior {behavior!r}")
-    script_path.write_text(body, encoding="utf-8")
-    script_path.chmod(script_path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-    return script_path
-
-
 @pytest.fixture
 def fake_framework_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """The checkout the session optimises, named the way a session names it."""
@@ -296,9 +108,9 @@ def _make_runner_ctx(task_id: str = "t-spec-1") -> RunnerContext:
         state="queued",
         params={
             "domain": "serving_specialist",
+            "framework": "sglang",
             "gap_canonical_id": "gap.test.example",
             "max_turns": 2,
-            "framework": "sglang",
         },
         idempotency_key=task_id,
         requires_lanes=tuple(),
@@ -306,22 +118,11 @@ def _make_runner_ctx(task_id: str = "t-spec-1") -> RunnerContext:
     return RunnerContext(task=task, lease=None, extra={})
 
 
-def test_runner_requires_exactly_one_dispatch_mode():
-    with pytest.raises(ValueError, match="exactly one"):
-        SpecialistRunner()
-    with pytest.raises(ValueError, match="mutually exclusive"):
-        SpecialistRunner(
-            backend_factory=lambda d: None,
-            subprocess_config=SpecialistSubprocessConfig(),
-        )
-
-
 def test_runner_accepts_subprocess_config_only():
     runner = SpecialistRunner(
         subprocess_config=SpecialistSubprocessConfig(),
     )
     assert runner.subprocess_dispatcher is not None
-    assert runner.backend_factory is None
 
 
 def test_denylist_blocks_dangerous_process_tools():
@@ -416,7 +217,7 @@ async def test_subprocess_path_harvests_done_file(
 ):
     """The fake ``claude`` writes specialist_done.json; the runner reads it and returns status=succeeded."""
     bin_dir = tmp_path / "bin"
-    fake_claude = _make_fake_claude(bin_dir, behavior="done_only")
+    fake_claude = make_fake_claude(bin_dir, behavior="done_only")
     session_dir = tmp_path / "session"
     session_dir.mkdir()
 
@@ -453,7 +254,7 @@ async def test_subprocess_run_is_one_specialist_llm_call_on_the_trajectory(
     from hyperloom.inference_optimizer.session.session_paths import llm_calls_path
     from hyperloom.inference_optimizer.trace import trajectory_trace as tt
 
-    fake_claude = _make_fake_claude(tmp_path / "bin", behavior="done_with_stream_json")
+    fake_claude = make_fake_claude(tmp_path / "bin", behavior="done_with_stream_json")
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     runner = SpecialistRunner(
@@ -508,7 +309,7 @@ async def test_local_specialist_spawn_uses_file_stdin(
 ):
     """The local specialist path feeds the user prompt via stdin."""
     bin_dir = tmp_path / "bin"
-    fake_claude = _make_fake_claude(bin_dir, behavior="done_only")
+    fake_claude = make_fake_claude(bin_dir, behavior="done_only")
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     seen_stdin: list[Any] = []
@@ -544,7 +345,7 @@ async def test_subprocess_path_injects_allocated_gpu_env(
     fake_framework_repo: Path,
 ):
     bin_dir = tmp_path / "bin"
-    fake_claude = _make_fake_claude(bin_dir, behavior="done_with_env")
+    fake_claude = make_fake_claude(bin_dir, behavior="done_with_env")
     session_dir = tmp_path / "session"
     session_dir.mkdir()
 
@@ -587,7 +388,7 @@ async def test_subprocess_path_injects_llm_stability_env(
         monkeypatch.delenv(var, raising=False)
 
     bin_dir = tmp_path / "bin"
-    fake_claude = _make_fake_claude(bin_dir, behavior="done_with_llm_env")
+    fake_claude = make_fake_claude(bin_dir, behavior="done_with_llm_env")
     session_dir = tmp_path / "session"
     session_dir.mkdir()
 
@@ -618,7 +419,7 @@ async def test_readonly_research_scout_skips_worktree(
     fake_framework_repo: Path,
 ):
     bin_dir = tmp_path / "bin"
-    fake_claude = _make_fake_claude(bin_dir, behavior="done_only")
+    fake_claude = make_fake_claude(bin_dir, behavior="done_only")
     session_dir = tmp_path / "session"
     session_dir.mkdir()
 
@@ -657,7 +458,7 @@ async def test_subprocess_path_collects_patches(
 ):
     """A done file + worktree patch threads the patch path into specialist_done['patches_written']."""
     bin_dir = tmp_path / "bin"
-    fake_claude = _make_fake_claude(bin_dir, behavior="done_with_patch")
+    fake_claude = make_fake_claude(bin_dir, behavior="done_with_patch")
     session_dir = tmp_path / "session"
     session_dir.mkdir()
 
@@ -691,7 +492,7 @@ async def test_subprocess_crash_falls_back_to_empty_synthesised(
 ):
     """A crash with no done.json synthesises an empty specialist_done and a stale-like status."""
     bin_dir = tmp_path / "bin"
-    fake_claude = _make_fake_claude(bin_dir, behavior="crash")
+    fake_claude = make_fake_claude(bin_dir, behavior="crash")
     session_dir = tmp_path / "session"
     session_dir.mkdir()
 
@@ -721,7 +522,7 @@ async def test_subprocess_path_isolates_writes_to_worktree(
 ):
     """Worktree patches must NOT appear in the base repo's working tree until ``integrate_patch`` applies them."""
     bin_dir = tmp_path / "bin"
-    fake_claude = _make_fake_claude(bin_dir, behavior="done_with_patch")
+    fake_claude = make_fake_claude(bin_dir, behavior="done_with_patch")
     session_dir = tmp_path / "session"
     session_dir.mkdir()
 
@@ -754,7 +555,7 @@ async def test_subprocess_recovers_partial_when_no_final(
 ):
     """A specialist that wrote only the partial (then died before the final done.json) surfaces the partial as a non-empty result."""
     bin_dir = tmp_path / "bin"
-    fake_claude = _make_fake_claude(bin_dir, behavior="partial_then_crash")
+    fake_claude = make_fake_claude(bin_dir, behavior="partial_then_crash")
     session_dir = tmp_path / "session"
     session_dir.mkdir()
 
@@ -787,7 +588,7 @@ async def test_the_dispatch_deadline_kills_a_hung_specialist(
 ):
     """A small Coordinator-injected ``wall_budget_sec`` must kill a hung specialist well before the legacy ``max_turns × per_turn`` ceiling (here 2 × 15 = 30s)."""
     bin_dir = tmp_path / "bin"
-    fake_claude = _make_fake_claude(bin_dir, behavior="hang")
+    fake_claude = make_fake_claude(bin_dir, behavior="hang")
     session_dir = tmp_path / "session"
     session_dir.mkdir()
 
@@ -1310,7 +1111,7 @@ async def test_partial_checkpoint_published_while_alive(
 ):
     """A checkpoint written mid-run reaches the progress callback before exit."""
     bin_dir = tmp_path / "bin"
-    fake_claude = _make_fake_claude(bin_dir, behavior="partial_then_done")
+    fake_claude = make_fake_claude(bin_dir, behavior="partial_then_done")
     session_dir = tmp_path / "session"
     session_dir.mkdir()
 

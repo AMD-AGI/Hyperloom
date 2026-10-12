@@ -83,7 +83,7 @@ def test_install_sh_gates_magpie_calls():
 
 
 def test_kernel_install_validates_ray_cli_and_serving_slot():
-    install_sh = Path(preflight_mod.__file__).resolve().parents[2] / "agents" / "kernel" / "scripts" / "install.sh"
+    install_sh = Path(preflight_mod.__file__).resolve().parents[1] / "assets" / "install_kernel_tools.sh"
     text = install_sh.read_text(encoding="utf-8")
 
     assert 'RAY_VERSION="${RAY_VERSION:-2.44.1}"' in text

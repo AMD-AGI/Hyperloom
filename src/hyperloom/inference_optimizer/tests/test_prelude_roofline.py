@@ -696,7 +696,7 @@ async def test_kernel_entry_reprofiles_when_backend_config_changed_at_same_tput(
     }
     coord.shared_state.current_best = {
         "extra_server_args": "--attention-backend aiter",
-        "extra_envs": {"SGLANG_FP8_BLOCKSCALE_CK_MAX_M": "256"},
+        "extra_envs": {"AITER_CONFIG_DENSE": "/tmp/dense.csv"},
     }
     coord.sub = _StubSub(coord.shared_state, landed_tput=100.0)
 
@@ -706,8 +706,8 @@ async def test_kernel_entry_reprofiles_when_backend_config_changed_at_same_tput(
     # After the reprofile the recorded workload reflects the current config (aiter + the new env), so the next entry
     # sees no config change.
     assert (
-        coord.shared_state.last_profile_workload["serving_config"]["extra_envs"]["SGLANG_FP8_BLOCKSCALE_CK_MAX_M"]
-        == "256"
+        coord.shared_state.last_profile_workload["serving_config"]["extra_envs"]["AITER_CONFIG_DENSE"]
+        == "/tmp/dense.csv"
     )
 
     coord.sub = _StubSub(coord.shared_state)

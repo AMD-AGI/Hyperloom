@@ -698,64 +698,6 @@ def test_decision_request_commit_emits_decision_review(reviewer):
     assert outcome.kb_writes
 
 
-def test_init_session_merges_context(reviewer):
-    rev, kb, sm = reviewer
-    out = rev.init_session(
-        {
-            "kind": "critic_decision_request",
-            "session_id": "sess_init",
-            "context": {"model": "qwen3-14b", "framework": "sglang"},
-            "messages": [],
-        }
-    )
-    assert out["session_id"] == "sess_init"
-
-
-def test_close_session_writes_kb_drafts_when_provided(reviewer):
-    rev, kb, sm = reviewer
-    rev.init_session(
-        {
-            "kind": "critic_decision_request",
-            "session_id": "sess_close",
-            "context": {
-                "model": "qwen3-14b",
-                "framework": "sglang",
-                "model_family": "qwen",
-                "workload": "decode",
-                "precision": "fp8",
-            },
-            "messages": [],
-        }
-    )
-    outcome = rev.close_session(
-        {
-            "kind": "critic_decision_request",
-            "session_id": "sess_close",
-            "context": {
-                "model": "qwen3-14b",
-                "framework": "sglang",
-                "model_family": "qwen",
-                "workload": "decode",
-                "precision": "fp8",
-            },
-        },
-        kb_draft={
-            "kb_drafts": [
-                {
-                    "category": "kernel_optimization",
-                    "action": "Patched the active dispatch path for Qwen3-14B.",
-                    "lesson": "Active dispatch path must be kept in sync with kernel rewrite.",
-                    "tags": ["dispatch"],
-                    "result": {"status": "KEEP", "gain_pct": 4.2},
-                    "confidence": 0.9,
-                }
-            ]
-        },
-    )
-    assert outcome.kb_writes
-    assert outcome.kb_writes[0]["result"]["status"] in ("ok", "skipped", "dead_lettered")
-
-
 def test_kb_priors_cache_hit_avoids_second_kb_call(reviewer):
     rev, kb, sm = reviewer
     kb.upsert(

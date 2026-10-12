@@ -308,6 +308,32 @@ def check_aiperf_capability(
             )
 
 
+def _check_mlperf_framework(env: Mapping[str, str]) -> None:
+    """Raise unless this framework can serve the agentic client.
+
+    The client speaks OpenAI chat-completions to ``$PORT`` and delegates the server to Magpie's
+    ``{framework}_{gpu}.sh``, so every registered *serving* framework qualifies -- sglang, vllm and atom all expose
+    that surface. A scriptable framework has no endpoint to drive and is refused by kind rather than by name, so a
+    framework added to the registry later does not silently inherit a guard written before it existed.
+    """
+    from .. import framework_registry
+
+    framework = str(env.get("FRAMEWORK") or "").strip().lower()
+    if not framework:
+        return
+    if not framework_registry.is_supported(framework):
+        raise AgentXPreflightError(
+            f"HYPERLOOM_AGENTIC_BACKEND=mlperf: {framework!r} is not a registered framework "
+            f"(known: {', '.join(framework_registry.names())}).",
+            repairable=False,
+        )
+    if framework_registry.is_scriptable(framework):
+        raise AgentXPreflightError(
+            f"HYPERLOOM_AGENTIC_BACKEND=mlperf drives an HTTP endpoint; refusing scriptable framework {framework!r}.",
+            repairable=False,
+        )
+
+
 def check_mlperf_harness(env: Mapping[str, str]) -> None:
     """Raise :class:`AgentXPreflightError` unless the MLPerf agentic harness can run."""
     root = Path(str(env.get("MLPERF_ENDPOINTS_DIR") or "/opt/mlperf-endpoints"))
@@ -336,12 +362,7 @@ def check_mlperf_harness(env: Mapping[str, str]) -> None:
             "HYPERLOOM_AGENTIC_BACKEND=mlperf needs inference-endpoint or uv on PATH.",
             repairable=False,
         )
-    framework = str(env.get("FRAMEWORK") or "").strip().lower()
-    if framework and "sglang" not in framework:
-        raise AgentXPreflightError(
-            f"HYPERLOOM_AGENTIC_BACKEND=mlperf drives the Kimi-K3 SGLang recipe; refusing framework {framework!r}.",
-            repairable=False,
-        )
+    _check_mlperf_framework(env)
     model = str(env.get("MODEL") or env.get("MODEL_PATH") or "").strip().lower()
     if model and "kimi" not in model:
         raise AgentXPreflightError(

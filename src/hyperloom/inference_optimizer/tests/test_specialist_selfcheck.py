@@ -92,3 +92,18 @@ def test_prompt_offers_selfcheck_only_to_cpu_patch_specialists_with_a_worktree()
         SpecialistPromptInputs(**base, worktree_package_dir="xfuser", allocated_gpu_ids=(0,))
     )
     assert not _cpu_selfcheck_block(SpecialistPromptInputs(**base, worktree_package_dir="xfuser", mode="research"))
+
+
+def test_prompt_offers_no_selfcheck_for_a_framework_without_a_package():
+    from hyperloom.orchestrator.prompts.specialist_prompt_builder import SpecialistPromptInputs, _cpu_selfcheck_block
+    from hyperloom.orchestrator.specialists.domains import get_domain
+
+    inputs = SpecialistPromptInputs(
+        task_id="t",
+        domain=get_domain("serving_specialist"),
+        max_turns=4,
+        framework="custom",
+        workspace_path="/ws/worktree",
+        worktree_package_dir="hyvideo",
+    )
+    assert not _cpu_selfcheck_block(inputs)

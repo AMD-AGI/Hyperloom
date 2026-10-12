@@ -757,6 +757,18 @@ def test_geak_accepted_kernel_is_counted_as_e2e_success(tmp_path: Path) -> None:
     }
 
 
+def test_geak_absent_backends_surface_as_a_takeaway(tmp_path: Path) -> None:
+    state = _make_state(top15=[])
+    state.geak_result = {
+        "status": "validated_no_win",
+        "absent_backends": {"hipblaslt_bench_cli": "hipblaslt-bench not on PATH", "ck": "ckProfiler not on PATH"},
+    }
+
+    out = build_kernel_optimization_summary(state, tmp_path)
+
+    assert out["top_takeaways"][-1].startswith("GEAK ran without these backends (unavailable): ck, hipblaslt_bench_cli")
+
+
 def test_forge_micro_winners_without_e2e_are_unvalidated(tmp_path: Path) -> None:
     state = _make_state(top15=[])
     state.gemm_tuning_attempts = [

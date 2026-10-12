@@ -6,8 +6,7 @@
 Per-task git worktree under ``runs/specialist/<task_id>/worktree/``, an agent
 CLI subprocess scoped via ``--add-dir``, and a ``specialist_done.json``
 (+ ``worktree/patches/``) exit signal harvested into the final
-:class:`SpecialistRunResult`. The explicit in-process dispatch mode is wired
-separately by the CLI to the matching provider's Agent SDK backend.
+:class:`SpecialistRunResult`.
 
 Two agent CLIs can drive that contract, and the deployment's credential shape
 picks one (:func:`hyperloom.common.llm_config.preferred_agent_backend`):
@@ -359,8 +358,7 @@ def _codex_mcp_config(
                 if (
                     key in _CODEX_MCP_RESERVED_ENV_NAMES
                     or key in protected_env_names
-                    or key.startswith(_CODEX_PROVIDER_ENV_PREFIX)
-                    or key.startswith(_CODEX_MCP_ENV_PREFIX)
+                    or key.startswith((_CODEX_PROVIDER_ENV_PREFIX, _CODEX_MCP_ENV_PREFIX))
                 ):
                     raise SpecialistAgentUnavailableError(
                         f"Codex MCP server {name!r} env key {key!r} is reserved "

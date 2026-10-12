@@ -1660,9 +1660,9 @@ async def test_record_fact_per_task_writes_lesson(coord: Coordinator, monkeypatc
     coord.shared_state.model_name = "llama"
     coord.shared_state.gpu_type = "mi300x"
     amends: list[dict] = []
-    monkeypatch.setattr(coord.proposals, "kb_amend_recipe", lambda **k: amends.append(k))
+    monkeypatch.setattr(coord.recipe_journal, "kb_amend_recipe", lambda **k: amends.append(k))
     task = Task(task_id="fact-keep", kind="explore", state="succeeded", params={}, idempotency_key="fk")
-    coord.writeback._record_fact_per_task(
+    coord.recipe_journal._record_fact_per_task(
         task=task,
         source_session_id="sess",
         result_dict={"gain_pct": 6.0, "output_throughput": 950.0},
@@ -1678,9 +1678,9 @@ async def test_record_fact_per_task_writes_no_lesson_for_an_unadopted_gain(coord
 
     coord.knowledge_plane = KnowledgePlane(recipe_kb=object())
     amends: list[dict] = []
-    monkeypatch.setattr(coord.proposals, "kb_amend_recipe", lambda **k: amends.append(k))
+    monkeypatch.setattr(coord.recipe_journal, "kb_amend_recipe", lambda **k: amends.append(k))
     task = Task(task_id="fact-refused", kind="integrate_patch", state="succeeded", params={}, idempotency_key="fx")
-    coord.writeback._record_fact_per_task(
+    coord.recipe_journal._record_fact_per_task(
         task=task,
         source_session_id="sess",
         result_dict={"status": "kept", "gain_pct": 6.0, "output_throughput": 950.0},
@@ -1695,10 +1695,10 @@ async def test_record_fact_per_task_writes_pitfall(coord: Coordinator, monkeypat
 
     coord.knowledge_plane = KnowledgePlane(recipe_kb=object())
     amends: list[dict] = []
-    monkeypatch.setattr(coord.proposals, "kb_amend_recipe", lambda **k: amends.append(k))
-    monkeypatch.setattr(coord.writeback, "_pitfall_severity_for", lambda rd: "high")
+    monkeypatch.setattr(coord.recipe_journal, "kb_amend_recipe", lambda **k: amends.append(k))
+    monkeypatch.setattr(coord.recipe_journal, "_pitfall_severity_for", lambda rd: "high")
     task = Task(task_id="fact-revert", kind="integrate_patch", state="failed", params={}, idempotency_key="fr")
-    coord.writeback._record_fact_per_task(
+    coord.recipe_journal._record_fact_per_task(
         task=task,
         source_session_id="sess",
         result_dict={"error_class": "oom", "reason": "bad"},
@@ -1810,7 +1810,7 @@ def _ptask(tid: str, kind: str) -> Task:
 @pytest.mark.asyncio
 async def test_record_specialist_result_with_proposals(coord: Coordinator) -> None:
     task = _ptask("rec-spec-1", "specialist")
-    await coord.writeback.record_specialist_result(
+    await coord.specialist_dispatch.record_specialist_result(
         task=task,
         done_payload={
             "domain": "kernel_agent",
@@ -1828,7 +1828,7 @@ async def test_record_specialist_result_with_proposals(coord: Coordinator) -> No
 @pytest.mark.asyncio
 async def test_record_specialist_result_seeds_gaps_from_static_recon(coord: Coordinator) -> None:
     task = _ptask("rec-spec-recon", "specialist")
-    await coord.writeback.record_specialist_result(
+    await coord.specialist_dispatch.record_specialist_result(
         task=task,
         done_payload={
             "domain": "static_recon_specialist",
@@ -1856,7 +1856,7 @@ async def test_record_specialist_result_logs_ungrounded_patches(coord: Coordinat
     line for its task, which is rendered once.
     """
     task = _ptask("rec-spec-ug", "specialist")
-    await coord.writeback.record_specialist_result(
+    await coord.specialist_dispatch.record_specialist_result(
         task=task,
         done_payload={
             "domain": "kernel_agent",
@@ -1881,7 +1881,7 @@ async def test_record_specialist_result_no_dead_research_evidence_log(
 
     task = _ptask("rec-spec-dead", "specialist")
     with caplog.at_level(logging.ERROR):
-        await coord.writeback.record_specialist_result(
+        await coord.specialist_dispatch.record_specialist_result(
             task=task,
             done_payload={
                 "domain": "kernel_agent",
@@ -1901,8 +1901,8 @@ async def test_record_specialist_result_harvests_findings(coord: Coordinator, mo
     async def harvest(done_payload):
         harvested.append(done_payload)
 
-    monkeypatch.setattr(coord.writeback, "_harvest_specialist_findings", harvest)
-    await coord.writeback.record_specialist_result(
+    monkeypatch.setattr(coord.specialist_dispatch, "_harvest_specialist_findings", harvest)
+    await coord.specialist_dispatch.record_specialist_result(
         task=task,
         done_payload={
             "domain": "kernel_agent",
@@ -1923,9 +1923,9 @@ async def test_record_specialist_result_with_scorer(coord: Coordinator) -> None:
             calls.append({"proposals": proposals, "task_id": task_id})
             return {"models": ["m1"], "ranking": [0]}
 
-    coord.writeback._proposal_scorer = _Scorer()
+    coord.specialist_dispatch._proposal_scorer = _Scorer()
     task = _ptask("rec-spec-3", "specialist")
-    await coord.writeback.record_specialist_result(
+    await coord.specialist_dispatch.record_specialist_result(
         task=task,
         done_payload={
             "domain": "kernel_agent",
@@ -1957,7 +1957,7 @@ async def test_recipe_kb_finalize_skips_without_model(coord: Coordinator) -> Non
     coord.knowledge_plane = KnowledgePlane(recipe_kb=_FakeRecipeKB())
     coord.shared_state.model_name = ""  # missing model -> skip update_recipe
     coord.shared_state.gpu_type = "mi300x"
-    coord.writeback.finalize_recipe_and_journal()
+    coord.recipe_journal.finalize_recipe_and_journal()
 
 
 @pytest.mark.asyncio
@@ -1968,8 +1968,8 @@ async def test_recipe_kb_finalize_amends_recipe(coord: Coordinator, monkeypatch)
     coord.shared_state.cumulative_gain_validated = 12.0
     coord.shared_state.current_best = {"tput": 950.0}
     amends: list[dict] = []
-    monkeypatch.setattr(coord.proposals, "kb_amend_recipe", lambda **k: amends.append(k))
-    coord.writeback.finalize_recipe_and_journal()
+    monkeypatch.setattr(coord.recipe_journal, "kb_amend_recipe", lambda **k: amends.append(k))
+    coord.recipe_journal.finalize_recipe_and_journal()
     assert amends and "recipe_overrides" in amends[0]
 
 
@@ -1988,7 +1988,7 @@ async def test_handle_intent_policy_denied(coord: Coordinator, monkeypatch) -> N
     async def _rec(source, intent, denied):
         recorded.append(denied)
 
-    monkeypatch.setattr(coord.writeback, "record_policy_denied", _rec)
+    monkeypatch.setattr(coord.router, "record_policy_denied", _rec)
     await coord.router.handle_intent("orchestration", _idle_intent())
     assert recorded
 
@@ -2073,38 +2073,30 @@ async def test_advance_phase_terminal_sets_stop_reason(coord: Coordinator, monke
 
 
 @pytest.mark.asyncio
-async def test_advance_phase_hint_survives_arrival_at_its_consumer(coord: Coordinator, monkeypatch) -> None:
-    """A hint set during PRELUDE must survive PRELUDE -> FRAMEWORK_AGENT."""
+@pytest.mark.parametrize(
+    ("prior", "target", "reason"),
+    [
+        # Entering the phase whose exit reads the hint is no exception: the hint was emitted for the phase it was
+        # emitted in, and carrying it across would end FRAMEWORK_AGENT on arrival.
+        ("PRELUDE", "FRAMEWORK_AGENT", "prelude_done"),
+        ("FRAMEWORK_AGENT", "SWEEP", "some_other_reason"),
+    ],
+)
+async def test_advance_phase_hint_discarded_on_a_transition_it_did_not_drive(
+    coord: Coordinator, monkeypatch, prior: str, target: str, reason: str
+) -> None:
     import hyperloom.orchestrator.phases.machine_state as ps
 
-    coord.shared_state.phase = "PRELUDE"
+    coord.shared_state.phase = prior
     coord.shared_state.pending_escalate_hint = "skip_to_kernel"
-    monkeypatch.setattr(ps, "compute_next_phase", lambda *a, **k: ("FRAMEWORK_AGENT", "prelude_done", {}))
+    monkeypatch.setattr(ps, "compute_next_phase", lambda *a, **k: (target, reason, {}))
 
     async def _entered(*, from_phase, to_phase, reason="", evidence=None):
         return None
 
     monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
     await coord.phase_machine.advance_phase_if_needed()
-    assert (coord.shared_state.phase or "").upper() == "FRAMEWORK_AGENT"
-    assert coord.shared_state.pending_escalate_hint == "skip_to_kernel"
-
-
-@pytest.mark.asyncio
-async def test_advance_phase_hint_discarded_when_not_headed_to_its_consumer(coord: Coordinator, monkeypatch) -> None:
-    """A pending hint is genuinely stale once the target is not the phase whose exit rule reads it -- it can never reach that check again -- so this is the one case the unrelated-transition cleanup should still clear it."""
-    import hyperloom.orchestrator.phases.machine_state as ps
-
-    coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord.shared_state.pending_escalate_hint = "skip_to_kernel"
-    monkeypatch.setattr(ps, "compute_next_phase", lambda *a, **k: ("SWEEP", "some_other_reason", {}))
-
-    async def _entered(*, from_phase, to_phase, reason="", evidence=None):
-        return None
-
-    monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
-    await coord.phase_machine.advance_phase_if_needed()
-    assert (coord.shared_state.phase or "").upper() == "SWEEP"
+    assert (coord.shared_state.phase or "").upper() == target
     assert coord.shared_state.pending_escalate_hint == ""
     assert coord.shared_state.last_discarded_escalate_hint == "skip_to_kernel"
     assert coord.shared_state.last_discarded_escalate_hint_ts
@@ -2371,7 +2363,7 @@ async def test_handle_delegate_sequence_denied(coord: Coordinator, monkeypatch) 
     async def _rec(source, intent, denied, action_name=None):
         recorded.append(denied)
 
-    monkeypatch.setattr(coord.writeback, "record_policy_denied", _rec)
+    monkeypatch.setattr(coord.router, "record_policy_denied", _rec)
     await coord.router.handle_delegate("orchestration", _delegate("explore", "d-seq"))
     assert recorded
 
@@ -2386,7 +2378,7 @@ async def test_handle_delegate_duplicate_running_denied(coord: Coordinator, monk
     async def _rec(source, intent, denied, action_name=None):
         recorded.append(denied)
 
-    monkeypatch.setattr(coord.writeback, "record_policy_denied", _rec)
+    monkeypatch.setattr(coord.router, "record_policy_denied", _rec)
     # Same key while the first task is still queued (non-terminal) -> denied.
     await coord.router.handle_delegate("orchestration", _delegate("explore", "d-same"))
     assert recorded
@@ -2495,8 +2487,8 @@ async def test_recipe_kb_finalize_merges_existing_row(coord: Coordinator, monkey
     coord.shared_state.cumulative_gain_validated = 15.0
     coord.shared_state.current_best = {"tput": 999.0}
     amends: list[dict] = []
-    monkeypatch.setattr(coord.proposals, "kb_amend_recipe", lambda **k: amends.append(k))
-    coord.writeback.finalize_recipe_and_journal()
+    monkeypatch.setattr(coord.recipe_journal, "kb_amend_recipe", lambda **k: amends.append(k))
+    coord.recipe_journal.finalize_recipe_and_journal()
     assert amends
     overrides = amends[0]["recipe_overrides"]
     assert any(s.get("session_id") == "other-session" for s in overrides["sessions"])

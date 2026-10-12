@@ -60,6 +60,13 @@ it.
 
 ### Changed
 
+- **Bump validated SGLang stack to 0.5.21 (ROCm 10 docker).** Updates
+  `SGLANG_REF`, `SGLANG_PRETEND_VERSION`, recommended
+  `lmsysorg/sglang-rocm:v0.5.21-rocm10-*` image tags, `models.tsv`, and the
+  quick-start `Dockerfile`. **Upgrade note:** move from
+  `v0.5.20-rocm10-mi30x|mi35x-20260920` to
+  `v0.5.21-rocm10-mi30x|mi35x-20261008` (or match `SGLANG_REF` on bare metal).
+
 - **A malformed environment value stops the run instead of being silently
   replaced by the default.** `INFERENCE_OPTIMIZER_CYCLE_HOURS`,
   `INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD`,

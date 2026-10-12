@@ -246,7 +246,7 @@ def _section_phase_semantics(
             "KERNEL_AGENT / SWEEP; the wall-clock deadline (closing phase) routes",
             "to CLOSE.",
             "You may also emit `escalate_strategy_change{next_action_hint=",
-            "'skip_to_kernel'}` in EXPLORE or FRAMEWORK_AGENT when you judge",
+            "'skip_to_kernel'}` in FRAMEWORK_AGENT when you judge",
             "the current phase exhausted; the Coordinator validates the hint",
             "vocab and routes the transition on the next tick. `skip_to_close`",
             "is not in that set — see the exception below for when it applies.",
@@ -417,14 +417,17 @@ def _format_gain_pair(meta: ActionMetadata) -> str:
     return f"{lo:.0f}-{hi:.0f}%"
 
 
-def _llm_selectable_domains() -> str:
+def _llm_selectable_domains(*, custom_specialist: bool = False) -> str:
     """The domains Orchestration may name, pipe-separated, from the registry."""
-    from ..specialists.domains import SPECIALIST_DOMAINS
+    from ..specialists.domains import CUSTOM_SPECIALIST_KEY, SPECIALIST_DOMAINS
 
-    return "|".join(d.key for d in SPECIALIST_DOMAINS if d.llm_selectable)
+    keys = [d.key for d in SPECIALIST_DOMAINS if d.llm_selectable]
+    if custom_specialist:
+        keys.append(CUSTOM_SPECIALIST_KEY)
+    return "|".join(keys)
 
 
-def _format_emit_hint(meta: ActionMetadata) -> str:
+def _format_emit_hint(meta: ActionMetadata, *, custom_specialist_description: str = "") -> str:
     """Build the per-action ``EMIT:`` hint showing the correct transport.
 
     Kernel-owned actions render a ``REQUEST{...}`` template; ``specialist`` /
@@ -434,6 +437,8 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
 
     Args:
         meta (ActionMetadata): The action to build an emit hint for.
+        custom_specialist_description (str): Non-empty when the session
+            defines ``custom_specialist``; adds it to the domain list.
 
     Returns:
         str: The emit-hint string for the catalogue entry.
@@ -452,7 +457,7 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
     if meta.name == "specialist":
         return (
             "delegate{action_name='specialist', params={"
-            f"domain=<one of {_llm_selectable_domains()}>, "
+            f"domain=<one of {_llm_selectable_domains(custom_specialist=bool(custom_specialist_description))}>, "
             "gap_canonical_id=<stable gap id>, "
             "gap_symptom?=<str>, gap_layer?=<str>, "
             "gap_evidence?={profile_trace:..., ...}, "
@@ -511,7 +516,11 @@ def _format_grid_injection_hint(name: str) -> str | None:
     return None
 
 
-def _section_action_catalogue(actions: list[ActionMetadata]) -> list[str]:
+def _section_action_catalogue(
+    actions: list[ActionMetadata],
+    *,
+    custom_specialist_description: str = "",
+) -> list[str]:
     """Build the ACTIONS YOU MAY USE catalogue section, grouped by phase.
 
     Every enabled action keeps its description, cost/gain/risk line and payload
@@ -520,6 +529,8 @@ def _section_action_catalogue(actions: list[ActionMetadata]) -> list[str]:
 
     Args:
         actions (list[ActionMetadata]): The actions enabled for this run.
+        custom_specialist_description (str): The operator's one-line
+            description of ``custom_specialist``; empty when not defined.
 
     Returns:
         list[str]: Markdown lines for the action catalogue.
@@ -551,7 +562,11 @@ def _section_action_catalogue(actions: list[ActionMetadata]) -> list[str]:
                 f"crash_risk={meta.crash_risk:.2f}  "
                 f"family={meta.family}"
             )
-            lines.append(f"    EMIT: {_format_emit_hint(meta)}")
+            lines.append(
+                f"    EMIT: {_format_emit_hint(meta, custom_specialist_description=custom_specialist_description)}"
+            )
+            if name == "specialist" and custom_specialist_description:
+                lines.append(f"    OPERATOR-DEFINED DOMAIN: custom_specialist — {custom_specialist_description}")
             grid_hint = _format_grid_injection_hint(name)
             if grid_hint:
                 lines.append(f"    {grid_hint}")
@@ -647,7 +662,7 @@ def _section_decision_framework(*, kernel_enabled: bool, phase: str = "", transp
             "   In OPTIMIZE the Plateau advisory reports each arm separately: BOTH arms",
             "   dry advances to KERNEL_AGENT (``reason=optimize_no_more_leverage``) at",
             "   the next phase-compute, while one arm dry means work the other.",
-            "   When you judge EXPLORE or FRAMEWORK_AGENT exhausted,",
+            "   When you judge FRAMEWORK_AGENT exhausted,",
             "   emit ``escalate_strategy_change{next_action_hint=",
             "   'skip_to_kernel'}``. `skip_to_close` is not a",
             "   phase advance -- see PHASE CONTRACT before emitting it.",
@@ -752,11 +767,7 @@ def _idea_generation_lines() -> list[str]:
         "Variant identity is content-based (args+envs+remove_args+",
         "unset_envs+args_mode); only exact same-grid duplicates are collapsed.",
         "`extra_server_args` is framework-neutral (routed to EXTRA_SGLANG_ARGS",
-        "/ EXTRA_VLLM_ARGS / EXTRA_ATOM_ARGS by `--framework`). On an agentic",
-        "recipe a flag replaces the recipe's own value and `remove_args` deletes",
-        "a recipe flag. Its draft (method, model, length) and simulated acceptance",
-        "are pinned; other `--speculative-config` keys such as `attention_backend`",
-        "merge into the recipe's own config.",
+        "/ EXTRA_VLLM_ARGS / EXTRA_ATOM_ARGS by `--framework`).",
         "",
         "The Coordinator benches `=== Untested proposals (current cycle) ===`",
         "itself; build your own grid from the five moves above to a target of 4",
@@ -1050,6 +1061,7 @@ def build_orchestration_prompt(
     agentx_corpus_shape: Mapping[str, Any] | None = None,
     agentx_grading: Mapping[str, Any] | None = None,
     agentx_backend: str = "",
+    custom_specialist_description: str = "",
 ) -> str:
     """Compose the Orchestration system prompt (deterministic for given inputs).
 
@@ -1089,6 +1101,8 @@ def build_orchestration_prompt(
             to the session-context section.
         references_dir: directory of on-demand reference documents; defaults
             to ``asset_prompt_references_dir()`` when ``None``.
+        custom_specialist_description: the operator's one-line description of
+            ``custom_specialist``; empty leaves the domain out of the prompt.
 
     Returns:
         The composed Orchestration system prompt text.
@@ -1141,7 +1155,7 @@ def build_orchestration_prompt(
             kernel_enabled=kernel_enabled,
             framework_agent_phase_enabled=framework_agent_phase_enabled,
         ),
-        _section_action_catalogue(actions),
+        _section_action_catalogue(actions, custom_specialist_description=custom_specialist_description),
         _section_decision_framework(kernel_enabled=kernel_enabled, phase=phase_norm, transport=transport),
         _section_cycle_directive(
             macro_cycle=macro_cycle, cycle_directive=cycle_directive, cycle_strategy=cycle_strategy

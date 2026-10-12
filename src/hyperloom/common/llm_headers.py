@@ -16,7 +16,7 @@ import json
 import logging
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 
 log = logging.getLogger(__name__)
 
@@ -32,10 +32,20 @@ __all__ = [
 ]
 
 
-def expand_env_refs(raw: str, env: Mapping[str, str] | None = None) -> str:
-    """Substitute shell-style ``${VAR}`` references, from *env* or the process."""
+def expand_env_refs(raw: str, env: Mapping[str, str] | None = None, *, only: Collection[str] | None = None) -> str:
+    """Substitute shell-style ``${VAR}`` references, from *env* or the process.
+
+    With *only*, a reference to any other name is left as written.
+    """
     source = env if env is not None else os.environ
-    return _ENV_REF_RE.sub(lambda match: str(source.get(match.group(1), "")), raw)
+
+    def _value(match: re.Match[str]) -> str:
+        name = match.group(1)
+        if only is not None and name not in only:
+            return match.group(0)
+        return str(source.get(name, ""))
+
+    return _ENV_REF_RE.sub(_value, raw)
 
 
 def _from_json(text: str) -> dict[str, str] | None:

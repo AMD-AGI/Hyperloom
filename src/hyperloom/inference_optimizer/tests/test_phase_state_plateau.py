@@ -388,10 +388,11 @@ def test_kernel_holds_while_work_pending_untried_hot_kernel():
     assert compute_next_phase(state, kernel_enabled=True) is None
 
 
-def test_geak_terminal_exits_kernel_ignoring_per_kernel_pending_work():
+@pytest.mark.parametrize("status", ["no_gain", "timeout"])
+def test_geak_terminal_exits_kernel_ignoring_per_kernel_pending_work(status):
     state = _skip_to_sweep_state("KERNEL_AGENT")
     state.kernel_optimizer = "geak"
-    state.geak_result = {"status": "no_gain"}
+    state.geak_result = {"status": status}
     state.untried_hot_reusable_kernels = lambda: ["k017"]
 
     assert kernel_work_pending(state) is False

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
@@ -18,20 +17,20 @@ Examples
 
     # Live session in this sandbox ($INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR,
     # else $USER_DATA_PATH / /workspace/hyperloom)
-    python -m hyperloom.inference_optimizer.tools.dump_session_breakdown
+    hyperloom session breakdown
 
     # Historical session on a shared filesystem
-    python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \\
+    hyperloom session breakdown \\
         --session-dir /shared/hyperloom-sessions/<user>/<sid>
 
     # Override output path (don't touch session_dir)
-    python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \\
+    hyperloom session breakdown \\
         --session-dir <SD> --output /tmp/breakdown-<sid>.json
 
     # Bulk historical
     for d in /shared/hyperloom-sessions/*/*; do
         [ -d "$d" ] || continue
-        python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \\
+        hyperloom session breakdown \\
             --session-dir "$d" > /dev/null
     done
 """
@@ -59,7 +58,7 @@ def _build_parser() -> argparse.ArgumentParser:
         and ``--verbose`` options.
     """
     parser = argparse.ArgumentParser(
-        prog="dump_session_breakdown",
+        prog="hyperloom session breakdown",
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -184,7 +183,3 @@ def main(argv: list[str] | None = None) -> int:
     if args.print_json:
         print(json.dumps(breakdown, indent=2, sort_keys=True))
     return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

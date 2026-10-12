@@ -39,7 +39,7 @@ class SweepPhase(CoordinatorCollaborator):
         state = self.shared_state
         if (
             "orchestration" not in self.backends
-            or self._coord.orch_prompt.is_user_supplied
+            or self.orch_prompt.is_user_supplied
             or state.orchestration_memory.get("for_cycle") == state.macro_cycle
         ):
             return
@@ -194,6 +194,12 @@ class SweepPhase(CoordinatorCollaborator):
             lease_ttl_sec=_conc_sweep_lease_ttl_sec(clamped_budget),
             dispatch_class="coordinator",
         )
+        if not was_existing and clamped_budget is not None and clamped_budget > 0:
+            # The phase granted this budget, so its own budget exits must not cut the sweep short of it: they defer
+            # until the grant (and the lease grace that bounds the task anyway) runs out.
+            state.conc_sweep_granted_until_unix = _phase_state._now_unix(state) + _conc_sweep_lease_ttl_sec(
+                clamped_budget
+            )
         if was_existing:
             log.info(
                 "internal-conc_sweep task already exists (idempotent: task_id=%s, state=%s)",

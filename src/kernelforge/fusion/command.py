@@ -371,7 +371,7 @@ def _probe_eager_alignment(
         workdir=repo_root or ".",
         framework_root=repo_root,
         gpu=gpu,
-        env_flags={f: "1" for f in recipe.env_flag.split()},
+        env_flags=dict.fromkeys(recipe.env_flag.split(), "1"),
     )
     report = runner.report(recipe)
     observed = [str(k) for k in (report.get("eager_kernels") or []) if str(k).strip()]
@@ -679,8 +679,7 @@ def _verdict_override(
     "llm_model",
     default=None,
     help="Agent model. Explicit value wins; otherwise uses provider-specific "
-    "$CODEX_MODEL/$CLAUDE_MODEL, then the registered provider default. "
-    "``--model`` is accepted as an alias (Hyperloom forge-fuse spelling).",
+    "$CODEX_MODEL/$CLAUDE_MODEL, then the registered provider default.",
 )
 @click.option("--max-turns", default=100, type=int, help="Max authoring turns.")
 @click.option(
@@ -1987,7 +1986,7 @@ def _run_serving_smoke(
     max_model_len: int = 0,
 ) -> tuple[str, str, str]:
     """Wiring-check + CUDA-graph-ON serving smoke for ONE recipe."""
-    flags = {f: "1" for f in recipe.env_flag.split()}
+    flags = dict.fromkeys(recipe.env_flag.split(), "1")
     safe_id = _safe_artifact_id(recipe.pattern_id)
     smoke_block = int(block_size) if int(block_size or 0) > 0 else None
     smoke_mml = int(max_model_len) if int(max_model_len or 0) > 0 else 4096
@@ -2070,7 +2069,7 @@ def validate_existing_source(
         harness_path=harness_path,
         workdir=repo_root or ".",
         gpu=gpu,
-        env_flags={f: "1" for f in recipe.env_flag.split()},
+        env_flags=dict.fromkeys(recipe.env_flag.split(), "1"),
     )
     return validate_recipe(recipe, runner, target_speedup=target_speedup)
 
@@ -2138,7 +2137,7 @@ def measure_harness_noise(
 ) -> dict[str, object]:
     """Measure how much the same harness varies on this machine."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    flags = {name: "1" for name in env_flags}
+    flags = dict.fromkeys(env_flags, "1")
     speedups: list[float] = []
     eager: list[float] = []
     fused: list[float] = []
@@ -2581,12 +2580,3 @@ def _framework_repo_root(source_file: str, framework_root: str) -> str:
             return _package_root(source_file) or toplevel or framework_root or ""
     # Not a git work tree at all (plain pip install).
     return _package_root(source_file) or framework_root or ""
-
-
-# The command is registered on the kernelforge CLI as `forge-fuse`; this alias keeps `python -m
-# kernelforge.fusion.command` working for direct debugging.
-main = run
-
-
-if __name__ == "__main__":
-    main()

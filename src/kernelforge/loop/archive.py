@@ -154,10 +154,7 @@ class CandidateArchive:
             return "incomplete", None
         if meta.get("iteration") != iteration or not isinstance(meta.get("files"), dict):
             return "incomplete", None
-        archive_format = meta.get("archive_format", 1)
-        if not isinstance(archive_format, int):
-            return "incomplete", None
-        if archive_format >= 2 and meta.get("complete") is not True:
+        if meta.get("complete") is not True:
             return "incomplete", None
         for filename in meta["files"].values():
             if filename is None:
@@ -356,8 +353,7 @@ class CandidateArchive:
             # 2) Full diff of the commit (captures sibling-file edits too).
             if rec.change_diff:
                 self._write_text(temp_dir / "change.diff", rec.change_diff)
-            # 3) Full profiling summary (backend-aware name; may be rocprof-compute SoL or the legacy PMC summary —
-            # profile_meta.backend says which).
+            # 3) Full profiling summary (rocprof-compute SoL or a PMC summary; profile_meta.backend says which).
             if rec.pmc_full:
                 self._write_text(temp_dir / "profile.txt", rec.pmc_full)
             # 4) Validation report / failure tail.
@@ -370,7 +366,6 @@ class CandidateArchive:
                 rec.best_mean_case_speedup_before,
             )
             meta = {
-                "archive_format": 2,
                 "complete": True,
                 "iteration": rec.iteration,
                 "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),

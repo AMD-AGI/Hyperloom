@@ -43,9 +43,9 @@ configured upstream gateway.
 2. Re-run preflight (idempotent — rewrites `~/.claude/config.json`
    `customApiUrl` and `primaryApiKey` and re-derives all alias keys):
    ```bash
-   bash "$REPO_ROOT/hyperloom/agents/kernel/scripts/install.sh" --check-only
+   bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install_kernel_tools.sh" --check-only
    # If check-only reports issues, re-run without --check-only:
-   bash "$REPO_ROOT/hyperloom/agents/kernel/scripts/install.sh"
+   bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install_kernel_tools.sh"
    ```
 3. Inspect `~/.claude/config.json` — `customApiUrl` must point at the
    upstream gateway (for example, `https://<your-gateway-host>/api/v1/llm-proxy/v1`).
@@ -197,8 +197,8 @@ docker run --ulimit nofile=1048576 ...   # minimum: --ulimit nofile=65536
 
 The runtime also runs an fd-limit preflight that raises this process's
 *soft* limit (up to the hard cap) before every `ray start`
-(`hyperloom/agents/kernel/scripts/install.sh` `ensure_fd_limit_for_ray` and
-`hyperloom/agents/kernel/tools/backends/ray_runtime.py` `ensure_fd_limit`), so a
+(`hyperloom/inference_optimizer/assets/install_kernel_tools.sh` `ensure_fd_limit_for_ray` and
+`hyperloom/orchestrator/actions/executors/_ray_runtime.py` `ensure_fd_limit`), so a
 high hard cap is enough; you do not need to set the soft limit yourself.
 Override the target with `RAY_MIN_NOFILE` if needed. If the preflight
 warns that the **hard** cap is below the target, the container was not
@@ -251,9 +251,9 @@ hiccup and the installer continued.
 **Fix**:
 
 ```bash
-bash "$REPO_ROOT/hyperloom/agents/kernel/scripts/install.sh" --check-only
+bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install_kernel_tools.sh" --check-only
 # If --check-only reports missing packages, re-run without --check-only:
-bash "$REPO_ROOT/hyperloom/agents/kernel/scripts/install.sh"
+bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install_kernel_tools.sh"
 ```
 
 The installer is idempotent and re-installs only what's missing.
@@ -346,7 +346,7 @@ training-mode CLI is being looked for (no longer accepted as of v0.4).
    open-source checkout root, pins it to a fixed SHA, runs `pip install -e`,
    and smokes the CLI):
    ```bash
-   bash "$REPO_ROOT/hyperloom/agents/kernel/scripts/install.sh"
+   bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install_kernel_tools.sh"
    ```
 2. If `install.sh` succeeds but the CLI still isn't on PATH, install
    manually. By default use the installer-managed clone; only point
@@ -386,7 +386,7 @@ that path is missing or reaped.
    default is re-resolved to the cache root, then reinstall:
    ```bash
    unset TRACELENS_ROOT   # remove any hard-coded old path from env or .env first
-   bash "$REPO_ROOT/hyperloom/agents/kernel/scripts/install.sh"
+   bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install_kernel_tools.sh"
    ```
    The installer rewrites `kernel-agent.env.sh` with the
    `${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/TraceLens@<sha>` default and
@@ -396,7 +396,7 @@ that path is missing or reaped.
    ```bash
    export HYPERLOOM_CACHE_DIR="$USER_DATA_PATH/.hyperloom-cache"
    unset TRACELENS_ROOT
-   bash "$REPO_ROOT/hyperloom/agents/kernel/scripts/install.sh"
+   bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install_kernel_tools.sh"
    ```
 3. **Keep an operator checkout** only if you deliberately maintain one —
    set `TRACELENS_ROOT` to that path. It is adopted as-is (no clone, no
@@ -407,7 +407,7 @@ that path is missing or reaped.
 
 ## Resume fails: "manifest.json not found"
 
-**Symptom.** `python -m hyperloom.inference_optimizer.cli optimize --resume-from` exits with
+**Symptom.** `python -m hyperloom optimize --resume-from` exits with
 `manifest.json not found under <dir>` or `state.json missing`.
 
 **Cause**: `USER_DATA_PATH` points at a different directory than the
@@ -425,7 +425,7 @@ original session, or the session never reached the point of writing
    ```
 2. Pass the actual session directory:
    ```bash
-   python3 -m hyperloom.inference_optimizer.cli optimize --resume-from "$SESSION_DIR"
+   python3 -m hyperloom optimize --resume-from "$SESSION_DIR"
    ```
 3. If `manifest.json` truly never existed, resume is not possible —
    restart with a fresh `--model …` launch.
@@ -478,7 +478,7 @@ action no longer derives this automatically.
 **Fix**: Add the flag at launch:
 
 ```bash
-python3 -m hyperloom.inference_optimizer.cli optimize ... --compare-against-gpu B200
+python3 -m hyperloom optimize ... --compare-against-gpu B200
 ```
 
 The marker is informational, not a failure — the optimisation still
@@ -519,13 +519,13 @@ Three commands give you a fast situation report:
 SD="${INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR:-$SESSION_DIR}"
 
 # 1. Are events landing?
-python -m hyperloom.inference_optimizer.tools.event_counts "$SD"
+python -m hyperloom session events "$SD"
 
 # 2. What was the last action's outcome?
 jq '.optimization_stack | last' "$SD/state.json"
 
 # 3. What phase, lifecycle events, and stop reason are persisted?
-python -m hyperloom.inference_optimizer.tools.read_optimizer_state "$SD"
+python -m hyperloom session state "$SD"
 ```
 
 See [Hyperloom operator scripts](operator-scripts.md) for the full set of

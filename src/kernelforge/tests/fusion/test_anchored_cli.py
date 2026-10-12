@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from click.testing import CliRunner
 
 from kernelforge.fusion import command as cli_module
-from kernelforge.fusion.command import main
+from kernelforge.fusion.command import run as main
 from kernelforge.fusion.models import Diagnosis
 from kernelforge.fusion.report import ANCHOR_REPORT_NAME, ANCHOR_RESOLVED_VERDICT
 

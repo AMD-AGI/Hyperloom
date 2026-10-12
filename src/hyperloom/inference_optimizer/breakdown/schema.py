@@ -150,8 +150,8 @@ class V6GradedAxes(TypedDict, total=False):
     never graded. ``total_throughput`` is reported for continuity and enters no verdict.
 
     ``duration_seconds`` and ``request_error_rate`` are the comparability inputs. A pair is graded only when both
-    replayed a window of the same length and the candidate dropped no more requests than its anchor, so a verdict
-    published without them cannot be re-derived from this record.
+    replayed a window of the same length and the candidate's error rate exceeds its anchor's by no more than
+    ``ERROR_RATE_SLACK_PCT``, so a verdict published without them cannot be re-derived from this record.
 
     Every axis is present on every measurement, ``None`` where nothing measured
     it: absent would be indistinguishable from an axis the framework failed to
@@ -283,6 +283,11 @@ class V6OutcomeValidation(TypedDict, total=False):
     #: re-promoting the recipe, so ``current_best`` can be a later measurement.
     perf: V6GradedAxes
     attributed_gain_pct: float
+    #: ``attributed_gain_pct`` without adoptions kept for a non-gain reason;
+    #: ``None`` on a ledger recorded before the field existed.
+    attributed_gain_pct_excluding_fixes: float | None
+    #: Per ``keep_reason``: ``count``, ``total_gain_pct``, ``unmeasured``.
+    by_keep_reason: dict[str, Any]
     unattributed_gain_pct: float
     chain_total_gain_pct: float | None
     validated_total_gain_pct: float | None
@@ -1375,6 +1380,7 @@ class V6StackAdoption(TypedDict, total=False):
     cumulative_gain_pct: float | None
     accuracy: float | None
     attribution_eligible: bool | None
+    keep_reason: str | None
     accepted_kernels: list[str]
 
 
@@ -1415,6 +1421,7 @@ class V6StackExt(TypedDict, total=False):
     adoptions: dict[str, Any]
     validations: dict[str, Any]
     attributed_gain_pct: float
+    attributed_gain_pct_excluding_fixes: float
     chain_total_gain_pct: float | None
     unattributed_gain_pct: float | None
     validated_total_gain_pct: float | None

@@ -29,14 +29,13 @@ def _any_env_set(names: tuple[str, ...]) -> bool:
     return any((os.environ.get(name) or "").strip() for name in names)
 
 
-def orchestration_runs_on_codex(*, codex_follows_claude: bool) -> bool:
+def orchestration_runs_on_codex(*, codex_follows_claude: bool, claude_follows_codex: bool = False) -> bool:
     """Whether the orchestration role runs on the Codex CLI rather than the Claude CLI."""
     # Both flags mean the caller has already rewritten one model id into the other's, which drops the backend that
     # would be handed the foreign id out of the running; only a launch that rewrote neither has two candidates left to
     # rank.
     return (not codex_follows_claude) and (
-        os.environ.get("INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX") == "1"
-        or llm_config.preferred_agent_backend() == llm_config.AGENT_BACKEND_CODEX
+        claude_follows_codex or llm_config.preferred_agent_backend() == llm_config.AGENT_BACKEND_CODEX
     )
 
 
@@ -103,6 +102,7 @@ def _build_backends(
     critic_agent_root: Path | None = None,
     critic_kb_mode: str = "inmemory",
     codex_follows_claude: bool = False,
+    claude_follows_codex: bool = False,
     critic_protocol: str = "auto",
 ) -> dict[str, Any]:
     """Construct all per-role backends."""
@@ -111,7 +111,9 @@ def _build_backends(
 
     # Orchestration is an agentic role like any other, so which CLI runs it is the shared rule's answer rather than a
     # second reading of the endpoint shape.
-    orchestration_on_codex = orchestration_runs_on_codex(codex_follows_claude=codex_follows_claude)
+    orchestration_on_codex = orchestration_runs_on_codex(
+        codex_follows_claude=codex_follows_claude, claude_follows_codex=claude_follows_codex
+    )
 
     if critic_choice == "mock":
         critic_backend: Any = MockCriticBackend()

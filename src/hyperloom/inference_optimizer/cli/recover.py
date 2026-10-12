@@ -62,8 +62,8 @@ def _run_recover_session(args: argparse.Namespace) -> int:
                 "ERROR: --confirm-stopped and a nonempty --confirmation-reason are required together.", file=sys.stderr
             )
             return 2
-        if getattr(args, "force", False) or getattr(args, "backfill_trace", False):
-            print("ERROR: cleanup confirmation cannot be combined with --force or --backfill-trace.", file=sys.stderr)
+        if getattr(args, "force", False):
+            print("ERROR: cleanup confirmation cannot be combined with --force.", file=sys.stderr)
             return 2
         from ..session.resume_guard import CleanupConfirmationError, confirm_task_stopped
 
@@ -80,7 +80,7 @@ def _run_recover_session(args: argparse.Namespace) -> int:
 
     status = _session_recovery_status(session_dir)
     print(
-        f"recover-session   : {session_dir}\n"
+        f"recover           : {session_dir}\n"
         f"  close_sequence_done={status['close_done']} "
         f"breakdown_exists={status['breakdown_exists']} "
         f"breakdown_recorded={status['breakdown_recorded']} "
@@ -97,7 +97,7 @@ def _run_recover_session(args: argparse.Namespace) -> int:
         breakdown_path = write_breakdown_json(session_dir)
         print(f"  rebuilt breakdown : {breakdown_path}")
     except Exception:
-        log.exception("recover-session: breakdown rebuild failed")
+        log.exception("recover: breakdown rebuild failed")
         return 1
 
     # 2) Reconcile + flush Langfuse, splice the final receipt, attach the SBD.
@@ -113,19 +113,9 @@ def _run_recover_session(args: argparse.Namespace) -> int:
         record_session_breakdown(session_dir)
         print("  langfuse          : flushed + breakdown attached")
     except Exception:
-        log.exception("recover-session: langfuse push failed (non-fatal)")
+        log.exception("recover: langfuse push failed (non-fatal)")
 
-    # 3) Optional full generation replay (off by default).
-    if args.backfill_trace:
-        try:
-            from ..tools.backfill_langfuse import build_plan, ingest
-
-            rc = ingest(build_plan(session_dir))
-            print(f"  trace backfill    : rc={rc}")
-        except Exception:
-            log.exception("recover-session: trace backfill failed (non-fatal)")
-
-    # 4) Re-package the artifact bundle so /workspace carries the recovered SBD.
+    # 3) Re-package the artifact bundle so /workspace carries the recovered SBD.
     try:
         from ..breakdown import package_session_artifacts
 
@@ -133,6 +123,6 @@ def _run_recover_session(args: argparse.Namespace) -> int:
         if pkg_path is not None:
             print(f"  artifact package  : {pkg_path}")
     except Exception:
-        log.exception("recover-session: artifact package failed (non-fatal)")
+        log.exception("recover: artifact package failed (non-fatal)")
 
     return 0

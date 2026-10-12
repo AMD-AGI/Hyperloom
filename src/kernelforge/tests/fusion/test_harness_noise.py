@@ -10,7 +10,7 @@ import json
 from click.testing import CliRunner
 
 from kernelforge.fusion import command as cli
-from kernelforge.fusion.command import main
+from kernelforge.fusion.command import run as main
 from kernelforge.fusion.validate import BenchOutcome
 
 

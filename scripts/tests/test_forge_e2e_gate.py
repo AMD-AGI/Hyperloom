@@ -32,7 +32,7 @@ def test_vendored_forge_changes_trigger() -> None:
     for path in (
         "src/kernelforge/cli.py",
         "src/kernelforge/loop/runner.py",
-        "src/kernelforge/data/examples/triton-softmax-forge-loop/driver.py",
+        "src/kernelforge/examples/triton-softmax-forge-loop/driver.py",
         "pyproject.toml",
     ):
         assert gate.requires_forge_e2e([path]), path
@@ -156,4 +156,4 @@ def test_legacy_template_entry_point_runs_the_vendored_example() -> None:
     wrapper = (_ROOT / "examples" / "triton-softmax-forge-loop" / "run_example.sh").read_text(encoding="utf-8")
 
     assert '"${ROOT}[forge,forge-profiling]"' in wrapper
-    assert "/src/kernelforge/data/examples/triton-softmax-forge-loop/run_example.sh" in wrapper
+    assert "/src/kernelforge/examples/triton-softmax-forge-loop/run_example.sh" in wrapper

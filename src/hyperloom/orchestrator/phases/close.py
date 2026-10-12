@@ -324,18 +324,6 @@ class ClosePhase(CoordinatorCollaborator):
         except Exception:
             log.debug("CLOSE: final recipe record failed", exc_info=True)
 
-    def _record_close_geak_candidate(self) -> None:
-        """Snapshot where the GEAK candidate stood into the close section."""
-        try:
-            state = self.shared_state
-            _close_out.record_geak_candidate(
-                self.session_dir,
-                pending=state.geak_pending if isinstance(state.geak_pending, dict) else {},
-                revalidation_pending=state.optimization_stack_has_unvalidated_keeps(),
-            )
-        except Exception:
-            log.debug("CLOSE: geak candidate record failed", exc_info=True)
-
     async def _run_close_step(self, step_name: str, coro: Awaitable[None]) -> None:
         """Execute one CLOSE step and record success or failure.
 
@@ -359,7 +347,7 @@ class ClosePhase(CoordinatorCollaborator):
 
     async def _do_fact_finalize(self) -> None:
         """Recipe KB commit: publishes the terminal outcome before telemetry steps."""
-        outcome = self._coord.writeback.ensure_recipe_finalized(source="close") or {}
+        outcome = self._coord.recipe_journal.ensure_recipe_finalized(source="close") or {}
         kb_status = str(outcome.get("status") or "done")
         close_status = (
             "failed" if kb_status == "error" else "skipped" if kb_status in {"disabled", "skipped"} else "done"

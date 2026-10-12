@@ -31,7 +31,7 @@ a failure surfaces, not by file size or churn.
 Applies to new files too.
 
 ```
-Q1 — If this file raises at import time, does `inference_optimizer optimize`
+Q1 — If this file raises at import time, does `hyperloom optimize`
      still reach the point of creating a session directory?
      (cli/__init__.py imports Coordinator, executors, _workload_envs,
      ACTION_CATALOGUE at module level — so most of orchestrator/ is in

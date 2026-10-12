@@ -14,8 +14,11 @@ from pathlib import Path
 
 from kernelforge.llm.git import git
 from kernelforge.config import Config
-from kernelforge.knowledge.experience_integration import git_checkout_branch
-from kernelforge.knowledge.experience_reader import sanitize_read_error
+from kernelforge.loop.knowledge_integration import git_checkout_branch
+from kernelforge.knowledge.kb_store.errors import (
+    kb_store_secrets,
+    sanitize_read_error,
+)
 from kernelforge.rewrite_by_flydsl import (
     driver_contract,
     flydsl_rewrite_driver_preparation,
@@ -23,7 +26,6 @@ from kernelforge.rewrite_by_flydsl import (
     report,
     seed,
 )
-from kernelforge.rewrite_by_flydsl.agent_kb import kb_store_secrets
 from kernelforge.rewrite_by_flydsl.applyback import generate_applyback_patch
 from kernelforge.rewrite_by_flydsl.attempt import (
     create_attempt_workspace,
@@ -146,6 +148,7 @@ def run_rewrite(
     permission_mode: str | None = None,
     supervisor_backend: str = "codex",
     profile_timeout_sec: int = 1800,
+    roofline_ceiling: bool = False,
     optimize_git_branch: str = "forge-rewrite-optimize",
     result_json: str | None = None,
     deadline_unix: float | None = None,
@@ -573,6 +576,7 @@ def run_rewrite(
             permission_mode=permission_mode,
             supervisor_backend=supervisor_backend,
             profile_timeout_sec=profile_timeout_sec,
+            roofline_ceiling=roofline_ceiling,
             deadline_unix=deadline_unix,
             stop_at_unix=search_stop_unix,
             # Anchor the loop on the source, so every score it reports -- each KEEP published below and the run's

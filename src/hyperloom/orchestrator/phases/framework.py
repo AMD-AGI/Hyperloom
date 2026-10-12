@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 from hyperloom.common.coerce import to_float
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
+from hyperloom.inference_optimizer import framework_registry
 
 from . import machine_state as _phase_state
 from ..state.attempt_ledger import record_patch_attempt
@@ -1940,7 +1941,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             batch_id,
             audit_step or "<unknown>",
         )
-        await self._coord.writeback.record_observation(
+        await self.bus.record_observation(
             "coordinator",
             "observation",
             {
@@ -2189,7 +2190,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             self.shared_state.specialist_reauthor_attempts = attempts
         prior = int(attempts.get(cand_id, 0) or 0)
         if prior >= _AUTHORED_LANE_MAX_ATTEMPTS:
-            await self._coord.writeback.record_observation(
+            await self.bus.record_observation(
                 "coordinator",
                 "observation",
                 {
@@ -2230,7 +2231,7 @@ class FrameworkPhase(CoordinatorCollaborator):
                 "save after re-author dispatch failed candidate=%s",
                 cand_id,
             )
-        await self._coord.writeback.record_observation(
+        await self.bus.record_observation(
             "coordinator",
             "observation",
             {
@@ -2258,6 +2259,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             await self._maybe_bench_untested_proposals()
             await self._coord.phase_internal.maybe_enqueue_explore_research_scout()
             await self._coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
+            await self._coord.specialist_dispatch.maybe_ensure_custom_specialist()
             self._record_advisory_plateau()
         except Exception as exc:
             log.exception("FRAMEWORK pump failed")
@@ -2688,6 +2690,14 @@ class FrameworkPhase(CoordinatorCollaborator):
             head_sha = str(entry.get("head_sha") or "").strip()
             if not pr_url and not head_sha:
                 continue
+            framework = str(entry.get("framework") or "").strip().lower()
+            if framework and not framework_registry.is_supported(framework):
+                log.warning(
+                    "FRAMEWORK: dropping discovery proposal %s: framework=%r is not registered",
+                    pr_url or head_sha,
+                    framework,
+                )
+                continue
             cand: dict[str, Any] = {
                 "pr_url": pr_url,
                 "url": pr_url,
@@ -2697,7 +2707,7 @@ class FrameworkPhase(CoordinatorCollaborator):
                 "repo": str(entry.get("repo") or "").strip(),
                 "pr_number": entry.get("pr_number"),
                 "ref": str(entry.get("ref") or "").strip(),
-                "framework": str(entry.get("framework") or "").strip().lower(),
+                "framework": framework,
                 "changed_files": entry.get("changed_files") or [],
                 "gap_canonical_id": str(entry.get("gap_canonical_id") or "").strip(),
                 "gap_keywords": entry.get("gap_keywords") or [],
@@ -2826,7 +2836,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         routable_artifacts = _resolvable_artifacts_from_done(done_payload, resolve_bases)
         if not existing_patches and not routable_artifacts:
             if patches:
-                await self._coord.writeback.record_observation(
+                await self.bus.record_observation(
                     "coordinator",
                     "observation",
                     {
@@ -2937,7 +2947,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             predicted_gain_pct=0.0,
             payload=dict(propose_payload),
         )
-        await self._coord.writeback.record_observation(
+        await self.bus.record_observation(
             "coordinator",
             "observation",
             {
@@ -3080,7 +3090,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             predicted_gain_pct=0.0,
             payload=dict(propose_payload),
         )
-        await self._coord.writeback.record_observation(
+        await self.bus.record_observation(
             "coordinator",
             "observation",
             {

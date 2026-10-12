@@ -154,12 +154,9 @@ def test_a_run_that_succeeded_still_reports_its_engine_dying(tmp_path: Path) -> 
     """The process outcome rides on the attempt row, because the result dict cannot show it."""
     recorder = _recorder(reason="kernel_followup")
     recorder.begin(max_profile_attempts=3)
-    recorder.record_profile_run(
-        run_index=1,
-        attempt_reason=PROFILE_ATTEMPT_INITIAL,
+    recorder.end_profile_run(
+        run_index=recorder.begin_profile_run(attempt_reason=PROFILE_ATTEMPT_INITIAL),
         status="succeeded",
-        started_at="2026-01-01T00:00:00+00:00",
-        duration_sec=30.0,
         disable_cuda_graph=False,
         profile_result=_profile_result(),
         server_liveness={"pidfiles": 1, "alive": 0, "dead_with_pidfile": 1},
@@ -269,12 +266,9 @@ def test_selfcert_scalars_reach_the_event_and_the_tables_do_not(tmp_path: Path) 
     """The numbers a reader needs come inline; the per-rank and per-file tables stay behind a path."""
     recorder = _recorder()
     recorder.begin(max_profile_attempts=1)
-    recorder.record_profile_run(
-        run_index=1,
-        attempt_reason=PROFILE_ATTEMPT_INITIAL,
+    recorder.end_profile_run(
+        run_index=recorder.begin_profile_run(attempt_reason=PROFILE_ATTEMPT_INITIAL),
         status="succeeded",
-        started_at="2026-01-01T00:00:00+00:00",
-        duration_sec=30.0,
         disable_cuda_graph=False,
         profile_result=_profile_result(
             trace_validate=_validate(),
@@ -320,12 +314,9 @@ def test_an_attempt_that_produced_no_trace_still_carries_its_patch_state(tmp_pat
     """Patch facts cannot live in the certificate: the attempts whose patching is in question produce none."""
     recorder = _recorder()
     recorder.begin(max_profile_attempts=3)
-    recorder.record_profile_run(
-        run_index=1,
-        attempt_reason=PROFILE_ATTEMPT_INITIAL,
+    recorder.end_profile_run(
+        run_index=recorder.begin_profile_run(attempt_reason=PROFILE_ATTEMPT_INITIAL),
         status="failed",
-        started_at="2026-01-01T00:00:00+00:00",
-        duration_sec=1.0,
         disable_cuda_graph=False,
         profile_result=None,
         failure={"stage": "profile", "error_class": "RuntimeError", "message": "boom"},
@@ -353,12 +344,9 @@ def test_a_successful_attempt_records_the_patchers_that_worked(tmp_path: Path) -
     """A patch that succeeded used to write nothing, making "fine" and "nobody looked" the same record."""
     recorder = _recorder()
     recorder.begin(max_profile_attempts=1)
-    recorder.record_profile_run(
-        run_index=1,
-        attempt_reason=PROFILE_ATTEMPT_INITIAL,
+    recorder.end_profile_run(
+        run_index=recorder.begin_profile_run(attempt_reason=PROFILE_ATTEMPT_INITIAL),
         status="succeeded",
-        started_at="2026-01-01T00:00:00+00:00",
-        duration_sec=30.0,
         disable_cuda_graph=False,
         profile_result=_profile_result(trace_validate=_validate()),
         instrumentation={
@@ -383,22 +371,16 @@ def test_a_successful_attempt_records_the_patchers_that_worked(tmp_path: Path) -
 def test_profile_retries_collapse_into_one_action(tmp_path: Path) -> None:
     recorder = _recorder(reason="kernel_followup")
     recorder.begin(max_profile_attempts=3)
-    recorder.record_profile_run(
-        run_index=1,
-        attempt_reason=PROFILE_ATTEMPT_INITIAL,
+    recorder.end_profile_run(
+        run_index=recorder.begin_profile_run(attempt_reason=PROFILE_ATTEMPT_INITIAL),
         status="failed",
-        started_at="2026-01-01T00:00:00+00:00",
-        duration_sec=12.0,
         disable_cuda_graph=False,
         profile_result=_profile_result(trace_health={"zero_ops": True, "issues": ["[7] no ops"], "checks": []}),
         failure={"stage": "profile_zero_ops", "error_class": "zero_ops", "message": "metadata-only trace"},
     )
-    recorder.record_profile_run(
-        run_index=2,
-        attempt_reason=PROFILE_ATTEMPT_AFTER_ZERO_OPS,
+    recorder.end_profile_run(
+        run_index=recorder.begin_profile_run(attempt_reason=PROFILE_ATTEMPT_AFTER_ZERO_OPS),
         status="succeeded",
-        started_at="2026-01-01T00:01:00+00:00",
-        duration_sec=30.0,
         disable_cuda_graph=True,
         profile_result=_profile_result(),
     )
@@ -425,26 +407,55 @@ def test_profile_retries_collapse_into_one_action(tmp_path: Path) -> None:
     assert profile["effective_run"]["trace"]["main_path"].endswith("merged-a.pt.trace.json.gz")
 
 
+def test_the_recorder_numbers_each_half_and_times_each_run_from_its_begin(tmp_path: Path, monkeypatch) -> None:
+    """Indices are allocated per half at begin; a row only appears at end, carrying the start held since begin."""
+    from hyperloom.inference_optimizer.breakdown.recorder import roofline_event
+
+    recorder = _recorder(reason="kernel_followup")
+    recorder.begin(max_profile_attempts=3)
+    stamps = iter(f"2026-01-01T00:00:{second:02d}+00:00" for second in range(60))
+    monkeypatch.setattr(roofline_event, "_now_iso", lambda: next(stamps))
+
+    first_profile = recorder.begin_profile_run(attempt_reason=PROFILE_ATTEMPT_INITIAL)
+    first_analysis = recorder.begin_analysis_run(attempt_reason=ANALYSIS_ATTEMPT_INITIAL)
+    second_analysis = recorder.begin_analysis_run(attempt_reason=ANALYSIS_ATTEMPT_N26_RETRY)
+    assert (first_profile, first_analysis, second_analysis) == (1, 1, 2)
+    recorder.end_analysis_run(run_index=second_analysis, status="succeeded", trace_input="/w/traces/a.gz")
+    recorder.end_profile_run(run_index=first_profile, status="succeeded", disable_cuda_graph=False)
+    recorder.finish_failed(phase="analysis", message="stop")
+
+    action = _actions(tmp_path)[0]
+    (profile_run,) = action["profile"]["runs"]
+    (analysis_run,) = action["analysis"]["runs"]
+    assert (profile_run["run_index"], profile_run["start_time"], profile_run["end_time"]) == (
+        1,
+        "2026-01-01T00:00:00+00:00",
+        "2026-01-01T00:00:04+00:00",
+    )
+    assert (analysis_run["run_index"], analysis_run["attempt_reason"], analysis_run["start_time"]) == (
+        2,
+        ANALYSIS_ATTEMPT_N26_RETRY,
+        "2026-01-01T00:00:02+00:00",
+    )
+    assert analysis_run["end_time"] == "2026-01-01T00:00:03+00:00"
+    assert profile_run["duration_sec"] >= 0 and analysis_run["duration_sec"] >= 0
+    assert action["analysis"]["attempt_count"] == 1, "an analysis run that never ended leaves no row"
+
+
 def test_analysis_retry_keeps_both_runs_and_one_conclusion(tmp_path: Path) -> None:
     recorder = _recorder(reason="kernel_followup")
     recorder.begin(max_profile_attempts=3)
-    recorder.record_analysis_run(
-        run_index=1,
-        attempt_reason=ANALYSIS_ATTEMPT_INITIAL,
+    recorder.end_analysis_run(
+        run_index=recorder.begin_analysis_run(attempt_reason=ANALYSIS_ATTEMPT_INITIAL),
         status="failed",
-        started_at="2026-01-01T00:02:00+00:00",
-        duration_sec=5.0,
         trace_input="/w/traces/a.gz",
         ta_result=_ta_result(status="failed"),
         failure={"stage": "trace_analyze", "error_class": "", "message": "steady_state_chunk_low_quality"},
     )
     retried = _ta_result(n26_auto_retry={"applied": True, "from_mode": "mixed", "to_mode": "decode_only"})
-    recorder.record_analysis_run(
-        run_index=2,
-        attempt_reason=ANALYSIS_ATTEMPT_N26_RETRY,
+    recorder.end_analysis_run(
+        run_index=recorder.begin_analysis_run(attempt_reason=ANALYSIS_ATTEMPT_N26_RETRY),
         status="succeeded",
-        started_at="2026-01-01T00:03:00+00:00",
-        duration_sec=6.0,
         trace_input="/w/traces/a.gz",
         requested_steady_state_mode="decode_only",
         ta_result=retried,
@@ -890,12 +901,9 @@ def test_probe_failure_is_recorded_rather_than_read_as_a_verdict() -> None:
 def test_validate_lands_per_profile_attempt(tmp_path: Path) -> None:
     recorder = _recorder(reason="kernel_followup")
     recorder.begin(max_profile_attempts=3)
-    recorder.record_profile_run(
-        run_index=1,
-        attempt_reason=PROFILE_ATTEMPT_INITIAL,
+    recorder.end_profile_run(
+        run_index=recorder.begin_profile_run(attempt_reason=PROFILE_ATTEMPT_INITIAL),
         status="failed",
-        started_at="2026-01-01T00:00:00+00:00",
-        duration_sec=1.0,
         disable_cuda_graph=False,
         profile_result=_profile_result(
             trace_validate={
@@ -907,12 +915,9 @@ def test_validate_lands_per_profile_attempt(tmp_path: Path) -> None:
         ),
         failure={"stage": "profile_zero_ops", "error_class": "zero_ops", "message": "no ops"},
     )
-    recorder.record_profile_run(
-        run_index=2,
-        attempt_reason=PROFILE_ATTEMPT_AFTER_ZERO_OPS,
+    recorder.end_profile_run(
+        run_index=recorder.begin_profile_run(attempt_reason=PROFILE_ATTEMPT_AFTER_ZERO_OPS),
         status="succeeded",
-        started_at="2026-01-01T00:01:00+00:00",
-        duration_sec=2.0,
         disable_cuda_graph=False,
         profile_result=_profile_result(
             trace_validate={
@@ -953,16 +958,13 @@ def test_crash_closes_the_event(tmp_path: Path) -> None:
 def test_a_crash_after_the_profile_was_adopted_blames_the_analysis(tmp_path: Path) -> None:
     recorder = _recorder(reason="kernel_followup")
     recorder.begin(max_profile_attempts=3)
-    recorder.record_profile_run(
-        run_index=0,
-        attempt_reason=PROFILE_ATTEMPT_INITIAL,
+    recorder.end_profile_run(
+        run_index=recorder.begin_profile_run(attempt_reason=PROFILE_ATTEMPT_INITIAL),
         status="succeeded",
-        started_at="2026-01-01T00:00:00+00:00",
-        duration_sec=30.0,
         disable_cuda_graph=False,
         profile_result=_profile_result(),
     )
-    recorder.adopt_profile_run(run_index=0, profile_result=_profile_result(), params={"reason": "kernel_followup"})
+    recorder.adopt_profile_run(run_index=1, profile_result=_profile_result(), params={"reason": "kernel_followup"})
     recorder.finish_crashed(RuntimeError("trace_analyze_handler blew up"))
 
     action = _actions(tmp_path)[0]

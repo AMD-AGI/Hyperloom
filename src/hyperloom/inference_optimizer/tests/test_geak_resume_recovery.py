@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,8 @@ import yaml
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import Task
+
+from ._geak_helpers import forbid_geak_launch, stop_geak_before_launch
 
 
 class _TaskRegistry:
@@ -78,14 +81,7 @@ async def test_geak_kernel_phase_recovers_existing_ok_result_on_resume(
     )
     phase = coord.phase_kernel
     phase._record_geak_kernel_journey = lambda _result: None
-
-    def _runner_should_not_be_needed(_name: str) -> Path:
-        raise RuntimeError("runner should not be resolved when result.json exists")
-
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
-        _runner_should_not_be_needed,
-    )
+    forbid_geak_launch(monkeypatch)
 
     revalidations: list[str] = []
 
@@ -145,22 +141,59 @@ async def test_geak_kernel_phase_does_not_reuse_already_promoted_result(
     ]
     coord.shared_state.geak_result = dict(result)
 
-    resolved: list[str] = []
+    reached_launch_gate: list[bool] = []
 
-    def _runner_resolved(name: str) -> Path:
-        resolved.append(name)
-        raise RuntimeError("stop before launching subprocess")
+    def _no_budget() -> tuple[int, int, bool]:
+        reached_launch_gate.append(True)
+        return 0, 0, True
 
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
-        _runner_resolved,
-    )
+    coord.phase_kernel._geak_timeouts = _no_budget
 
     await coord.phase_kernel._run_geak_kernel_phase(from_phase="FRAMEWORK_AGENT")
 
-    # The recovery short-circuit must not have fired; the normal path resolves the runner (and here aborts via the
-    # injected error).
-    assert resolved, "new cycle must re-run GEAK, not reuse stale result.json"
+    # The recovery short-circuit must not have fired; the normal path reaches the runner launch gate (and here stops
+    # there for lack of budget).
+    assert reached_launch_gate, "new cycle must re-run GEAK, not reuse stale result.json"
+
+
+@pytest.mark.asyncio
+async def test_a_baseline_reproduction_failure_keeps_the_absent_backends(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = tmp_path / "geak_runner.py"
+    runner.write_text(
+        "import json, pathlib, sys\n"
+        "out = pathlib.Path(sys.argv[2])\n"
+        "ev = out / 'eval'\n"
+        "ev.mkdir(parents=True, exist_ok=True)\n"
+        "(ev / 'env_report.json').write_text(json.dumps("
+        "{'absent_backends': {'ck': {'probe': 'which ckProfiler'}}}))\n"
+        "(out / 'result.json').write_text(json.dumps({'status': 'baseline_reproduction_failed', "
+        "'error': 'ref 90.0 != best 100.0', 'eval_dir': str(ev)}))\n",
+        encoding="utf-8",
+    )
+    coord = Coordinator.__new__(Coordinator)
+    coord.session_dir = tmp_path
+    coord.shared_state = SharedState(
+        baseline_tput=100.0,
+        current_best={"action": "baseline", "tput": 100.0},
+        model_path="/models/qwen",
+        gpu_type="mi300x",
+        isl=512,
+        osl=128,
+        conc=15,
+    )
+    coord._run_deadline = None
+    coord.phase_kernel._record_geak_kernel_journey = lambda _result: None
+    monkeypatch.setattr("hyperloom.orchestrator.phases.kernel._GEAK_RUNNER_MODULE", runner.stem)
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(filter(None, [str(tmp_path), os.environ.get("PYTHONPATH")])))
+
+    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
+
+    geak_result = coord.shared_state.geak_result
+    assert geak_result["status"] == "baseline_reproduction_failed"
+    assert geak_result["absent_backends"] == {"ck": "which ckProfiler"}
 
 
 @pytest.mark.asyncio
@@ -192,13 +225,7 @@ async def test_geak_handoff_preserves_serving_fidelity_knobs_and_output_metric(
     monkeypatch.setenv("TP", "8")
     monkeypatch.setenv("GPU_MEMORY_UTILIZATION", "0.9")
 
-    def _runner_resolved(_name: str) -> Path:
-        raise RuntimeError("stop after handoff write")
-
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
-        _runner_resolved,
-    )
+    stop_geak_before_launch(monkeypatch)
 
     await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
@@ -273,13 +300,7 @@ async def test_an_agentx_handoff_names_the_server_script_not_the_aiperf_client(
     monkeypatch.setenv("FRAMEWORK", "vllm")
     monkeypatch.setenv("TP", "8")
 
-    def _runner_resolved(_name: str) -> Path:
-        raise RuntimeError("stop after handoff write")
-
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
-        _runner_resolved,
-    )
+    stop_geak_before_launch(monkeypatch)
 
     await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
@@ -315,13 +336,7 @@ async def test_geak_handoff_forwards_the_actual_gpu_pin(
     monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
 
-    def _runner_resolved(_name: str) -> Path:
-        raise RuntimeError("stop after handoff write")
-
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
-        _runner_resolved,
-    )
+    stop_geak_before_launch(monkeypatch)
 
     await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
@@ -374,13 +389,7 @@ async def test_geak_handoff_keeps_a_hip_pin_against_the_recipe_autofill(
     monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
 
-    def _runner_resolved(_name: str) -> Path:
-        raise RuntimeError("stop after handoff write")
-
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
-        _runner_resolved,
-    )
+    stop_geak_before_launch(monkeypatch)
 
     await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 

@@ -50,7 +50,7 @@ loop runs alongside the agentic kernel optimizer.
 
 ## Runtime contract
 
-The optimizer is launched through `python -m hyperloom.inference_optimizer.cli optimize`. A run
+The optimizer is launched through `python -m hyperloom optimize`. A run
 must be able to:
 
 - Create or resume a session directory,
@@ -299,7 +299,10 @@ One phase, two levers worked in parallel:
   independent of how fast proposals arrive.
 
 `specialist` serves both levers — investigation, patch authoring, and
-candidate discovery are all dispatches of the one specialist action.
+candidate discovery are all dispatches of the one specialist action. An
+operator can add one domain of their own, `custom_specialist`, whose focus is
+the text they supply at launch; until one has started, the Coordinator
+requests it at most once per macro cycle in this phase.
 
 The phase advances to KERNEL_AGENT only when **both** levers are dry
 (`optimize_no_more_leverage`). Either arm going quiet raises
@@ -371,7 +374,12 @@ rung is a 3600 s window and the session grades at a fixed CONC; SWEEP then
 records a disabled skip.
 
 Results update `last_conc_sweep` and feed the final report and breakdown.
-The phase exits on `sweep_done` (or `sweep_failed`).
+The phase exits on `sweep_done` (or `sweep_failed`). While the sweep it
+enqueued is still running, SWEEP's own budget and cap wait for the budget the
+sweep was granted (plus its lease grace); the session deadline does not. A
+sweep the orchestrator cancels stops its ladder at once and records
+`cancelled`, so the phase closes on whatever ordered the cancel rather than on
+`sweep_failed`.
 
 ## CLOSE
 
@@ -417,7 +425,7 @@ turn never depends on what an earlier turn happened to remember.
 
 Critic is likewise reactive and stateless per tick. Runtime RCA and automatic
 supervision are not roles in this loop. Stopped sessions require an explicit
-operator `--resume-from` decision; `recover-session` only reconstructs artifacts
+operator `--resume-from` decision; `recover` only reconstructs artifacts
 offline.
 
 ## Feedback loops

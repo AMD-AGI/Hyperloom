@@ -572,6 +572,9 @@ def _infera_apply_tracelens_patch(args: argparse.Namespace) -> int:
     op_args = f"--local --tracelens-root {shlex.quote(str(tracelens_root))}"
     if pin:
         op_args += f" --sglang-version-pin {shlex.quote(str(pin))}"
+    patch_set = getattr(args, "patch_set", None) or ""
+    if patch_set:
+        op_args += f" --patch-set {shlex.quote(str(patch_set))}"
     timeout = _mn_cli._poll_timeout_from_args(args)
     per_pod: list[dict] = []
     failures: list[dict] = []

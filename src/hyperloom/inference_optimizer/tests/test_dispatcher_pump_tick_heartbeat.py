@@ -50,7 +50,7 @@ async def test_long_work_is_booked_without_a_supervisor_stamp(tmp_path, monkeypa
     monkeypatch.setattr(coord.dispatcher, "reap_dispatched_task", reaped)
     monkeypatch.setattr(coord.writeback, "is_promotable_result", lambda *_args: True)
     monkeypatch.setattr(coord.writeback, "promote_to_shared_state", AsyncMock())
-    monkeypatch.setattr(coord.writeback, "fact_write_hook", AsyncMock())
+    monkeypatch.setattr(coord.recipe_journal, "fact_write_hook", AsyncMock())
     calls = []
 
     async def execute(ctx):

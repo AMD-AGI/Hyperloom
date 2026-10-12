@@ -72,15 +72,6 @@ Apply to any framework whose recipe touches the speculative-decoding knobs:
   well as model, so a method change invalidates the previously matched row.
 - **TensorRT-LLM / ATOM**: their respective draft-length equivalents.
 
-On an **agentic recipe** (the session's `AGENTX_SERVER_SCRIPT` sits under
-`agentic/`) the recipe already simulates acceptance for its own draft, so the
-draft and its acceptance are pinned: a variant that changes the draft length,
-block size, top-k, method or draft model, sets any synthetic-acceptance value,
-or removes `--speculative-config` is refused when the variant is built. The
-lookup above then only confirms the recipe's own cell; spend variants on other
-knobs. `--speculative-config` keys that do not describe the draft (e.g.
-`attention_backend`) still merge into the recipe's config.
-
 Before proposing or marking `KEEP` on any such variant, cross-check against the
 model's golden AL curve (if one exists per the lookup above):
 

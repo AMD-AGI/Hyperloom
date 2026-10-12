@@ -15,7 +15,7 @@ from hyperloom.orchestrator.actions.executors import roofline as roofline_mod
 from hyperloom.orchestrator.actions.executors.roofline import (
     RooflineExecutor,
     _extract_trace_path,
-    _failed,
+    _fail,
     _gpu_trace_unsupported_reason,
     make_roofline_executor,
 )
@@ -694,8 +694,8 @@ def test_extract_trace_path_handles_non_dict():
     assert _extract_trace_path("garbage") == ""  # type: ignore[arg-type]
 
 
-def test_failed_helper_constructs_canonical_shape():
-    f = _failed("profile", "boom")
+def test_fail_helper_constructs_canonical_shape():
+    f = _fail(None, "profile", "boom")
     assert f["status"] == "failed"
     assert f["error_class"] == "profile_failed"
     assert f["error"] == "boom"
@@ -703,7 +703,7 @@ def test_failed_helper_constructs_canonical_shape():
     assert "executed_at_iso" in f
     assert "sub_result" not in f
 
-    f2 = _failed("trace_analyze", "x", sub_result={"status": "failed", "error": "y", "extra": "ignored"})
+    f2 = _fail(None, "trace_analyze", "x", {"status": "failed", "error": "y", "extra": "ignored"})
     assert f2["sub_result"] == {"status": "failed", "error": "y"}
     assert "extra" not in f2["sub_result"]
 

@@ -145,6 +145,13 @@ def _grp(match: re.Match[str]) -> str:
     return ""
 
 
+#: A fast path the framework reports switching off; also scanned on successful runs.
+CAPABILITY_DISABLED_PATTERNS: tuple[Pattern[str], ...] = (
+    re.compile(r"([A-Za-z_][A-Za-z0-9_]*_supported)\s*\(\s*\)\s*(?:returned|is|==)?\s*False"),
+    re.compile(r"falling back to (?:the\s+)?(?:naive|slow|reference) (?:path|implementation)"),
+    re.compile(r"disabled on (?:ROCm|HIP|AMD)"),
+)
+
 _RULES: tuple[_Rule, ...] = (
     _Rule(
         kind=MISSING_MODEL_ARCH,
@@ -272,11 +279,7 @@ _RULES: tuple[_Rule, ...] = (
     _Rule(
         kind=CAPABILITY_DISABLED,
         bridge_layer="framework",
-        patterns=(
-            re.compile(r"([A-Za-z_][A-Za-z0-9_]*_supported)\s*\(\s*\)\s*(?:returned|is|==)?\s*False"),
-            re.compile(r"falling back to (?:the\s+)?(?:naive|slow|reference) (?:path|implementation)"),
-            re.compile(r"disabled on (?:ROCm|HIP|AMD)"),
-        ),
+        patterns=CAPABILITY_DISABLED_PATTERNS,
         confidence=0.6,
         symbol_from=_grp,
     ),

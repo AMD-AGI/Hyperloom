@@ -41,20 +41,20 @@ Use these commands to produce a session breakdown.
 
 ```bash
 # Live session in the current sandbox (USER_DATA_PATH or /workspace/hyperloom)
-python -m hyperloom.inference_optimizer.tools.dump_session_breakdown
+python -m hyperloom session breakdown
 
 # Historical session on a shared filesystem
-python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \
+python -m hyperloom session breakdown \
     --session-dir /shared/hyperloom-sessions/<user>/<sid>
 
 # Override output path (don't touch session_dir)
-python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \
+python -m hyperloom session breakdown \
     --session-dir <SD> --output /tmp/breakdown-<sid>.json
 
 # Bulk historical
 for d in /shared/hyperloom-sessions/*/*; do
     [ -d "$d" ] || continue
-    python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \
+    python -m hyperloom session breakdown \
         --session-dir "$d" > /dev/null
 done
 ```
@@ -90,7 +90,7 @@ Use the following commands to render a session report.
 
 ```bash
 # Deterministic only (no LLM):
-python -m hyperloom.inference_optimizer.tools.dump_session_report \
+python -m hyperloom session report \
     --input  /shared/hyperloom-sessions/<user>/<sid>/session_breakdown.json \
     --output /shared/hyperloom-sessions/<user>/<sid>/session_report.md
 
@@ -98,7 +98,7 @@ python -m hyperloom.inference_optimizer.tools.dump_session_report \
 HYPERLOOM_REPORT_LLM_BACKEND=openai \
 OPENAI_BASE_URL=https://your-openai-compatible-endpoint/v1 \
 OPENAI_API_KEY=... \
-python -m hyperloom.inference_optimizer.tools.dump_session_report \
+python -m hyperloom session report \
     --input  /shared/hyperloom-sessions/<user>/<sid>/session_breakdown.json \
     --output /shared/hyperloom-sessions/<user>/<sid>/session_report.md
 ```
@@ -140,8 +140,8 @@ Use this when:
 Use the following commands to print event counts for a session.
 
 ```bash
-python -m hyperloom.inference_optimizer.tools.event_counts            # default session_dir
-python -m hyperloom.inference_optimizer.tools.event_counts /path/to/session
+python -m hyperloom session events            # default session_dir
+python -m hyperloom session events /path/to/session
 ```
 
 Reads at most the last 500 events from
@@ -179,17 +179,17 @@ incident response or launch validation:
 
 * `backfill_langfuse.py`: replay one finished session's `reports/trace/` into
   Langfuse after the fact:
-  `python -m hyperloom.inference_optimizer.tools.backfill_langfuse --session-dir <SD> [--dry-run]`.
+  `python -m hyperloom session backfill --session-dir <SD> [--dry-run]`.
 * `preflight_optimizer.py`: launcher-side local preflight for stale serving
   processes, torch/ROCm device visibility, GPU VRAM occupancy (exits non-zero
   when any card exceeds 1% of its total capacity), and model path existence:
-  `python src/hyperloom/inference_optimizer/tools/preflight_optimizer.py MODEL_PATH`.
+  `python -m hyperloom check MODEL_PATH`.
   A non-zero exit must abort the launch.
 * `read_optimizer_state.py`: concise `state.json` / lifecycle summary:
-  `python src/hyperloom/inference_optimizer/tools/read_optimizer_state.py SESSION_DIR`.
-* `recover-session`: explicit offline artifact recovery without restarting the
+  `python -m hyperloom session state SESSION_DIR`.
+* `recover`: explicit offline artifact recovery without restarting the
   optimization loop:
-  `python -m hyperloom.inference_optimizer.cli recover-session --session-dir <SD>`.
+  `python -m hyperloom recover --session-dir <SD>`.
   To keep optimizing instead, inspect the failed run and explicitly use
   `optimize --resume-from <SD>`.
 

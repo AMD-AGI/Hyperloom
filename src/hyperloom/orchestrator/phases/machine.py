@@ -205,6 +205,11 @@ class MachinePhase(CoordinatorCollaborator):
         kernel_facts = await self._coord.phase_kernel.exit_facts()
         optimize_enabled = self.optimize_enabled()
         in_enablement = str(state.phase or "").upper() == _phase_state.PHASE_ENABLEMENT
+        if str(state.phase or "").upper() == _phase_state.PHASE_PRELUDE or in_enablement:
+            # Both phases hold their exit for this marker. A cancelled analysis, or one that ended before a
+            # restart booked it, never reaches the writeback that clears it, so the hold would run to its
+            # allowance.
+            await self._coord.phase_kernel.release_finished_roofline_gate()
         enablement_in_flight = in_enablement and await self._coord.enablement_lane.enablement_in_flight()
         next_phase = _phase_state.compute_next_phase(
             state,
@@ -233,12 +238,13 @@ class MachinePhase(CoordinatorCollaborator):
         stopped = await dispatcher.cancel_inflight_actions(reason=barrier_reason)
         if cancelled or stopped:
             log.info(
-                "Coordinator.phase: %s cancelled %d queued and stopped %d running task(s)",
+                "Coordinator.phase: %s (reason=%s) cancelled %d queued and stopped %d running task(s)",
                 barrier_reason,
+                reason,
                 len(cancelled),
                 len(stopped),
             )
-            await self._coord.writeback.record_observation(
+            await self.bus.record_observation(
                 "coordinator",
                 "observation",
                 {
@@ -253,12 +259,15 @@ class MachinePhase(CoordinatorCollaborator):
         running = await self.tasks.running()
         if running or dispatcher.has_unbooked_completions():
             log.info(
-                "phase_machine: holding %s until %d running task(s) stop and are booked", barrier_reason, len(running)
+                "phase_machine: holding %s (reason=%s) until %d running task(s) stop and are booked",
+                barrier_reason,
+                reason,
+                len(running),
             )
             return
         dispatcher.admission_frozen = False
         # Consume escalate hint after a hint-driven transition.
-        if isinstance(evidence, dict) and (evidence.get("evidence") == "llm_escalation" or "hint" in evidence):
+        if isinstance(evidence, dict) and "hint" in evidence:
             state.consume_pending_escalate_hint()
         elif (
             str(prior or "").strip().upper() == _phase_state.PHASE_SWEEP
@@ -266,10 +275,9 @@ class MachinePhase(CoordinatorCollaborator):
         ):
             # SWEEP already had an honest closeout, so skip_to_close was suppressed in _global_terminal.
             state.consume_pending_escalate_hint()
-        elif state.pending_escalate_hint and target != _phase_state.PHASE_FRAMEWORK_AGENT:
-            # FRAMEWORK_AGENT exit consumes ``skip_to_kernel``; a transition to any other phase leaves the hint
-            # unclaimable. A transition *into* FRAMEWORK_AGENT is the opposite case: discarding there would drop
-            # the hint on the doorstep of the rules that read it.
+        elif state.pending_escalate_hint:
+            # A hint speaks for the phase it was emitted in; carried across a transition it did not drive, it would
+            # act on a phase it was never about.
             discarded_hint = state.discard_pending_escalate_hint()
             log.info(
                 "phase_machine: discarded stale pending_escalate_hint=%r on unrelated transition %s -> %s (reason=%s)",
@@ -422,7 +430,7 @@ class MachinePhase(CoordinatorCollaborator):
     def _reseed_orch_prompt_for_phase(self, to_phase: str) -> bool:
         """Re-scope the orchestration system prompt to the phase being entered."""
         phase = (to_phase or "").strip().upper()
-        orch_prompt = self._coord.orch_prompt
+        orch_prompt = self.orch_prompt
         if not phase or orch_prompt.is_user_supplied:
             return False
         rebuild = orch_prompt.rebuild

@@ -46,7 +46,6 @@ _CREDENTIALED_URL_RE = re.compile(
 #: The ambient spelling of ``--index-url``; an inline assignment of one is the
 #: same flag by another name, and the allowlist admits it as readily.
 _PIP_INDEX_ENV_NAMES: tuple[str, ...] = ("PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "UV_INDEX_URL")
-_TRUSTED_BIN_PREFIX_RE = re.compile(r"^(?:/opt/[^/]+|/usr(?:/local)?|/bin|/sbin)(?:/[^/]+)*/")
 
 #: Ambient channels proved by a variable name.
 _ENV_CHANNELS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -109,7 +108,7 @@ def installer_class(cmd: str) -> str:
     _, tokens = split_env_assignments(cmd)
     if not tokens:
         return ""
-    head = Path(_TRUSTED_BIN_PREFIX_RE.sub("", tokens[0], count=1)).name
+    head = Path(tokens[0]).name
     for family, heads in _INSTALLER_FAMILIES:
         if head in heads:
             return family
@@ -149,17 +148,18 @@ def option_operands(tokens: Iterable[str]) -> list[tuple[str, str]]:
     pairs: list[tuple[str, str]] = []
     pending = ""
     for token in tokens:
-        if token.startswith("-") and "=" in token:
-            option, _, operand = token.partition("=")
-            pairs.append((option, operand))
-            pending = ""
-            continue
+        # Before the ``=`` split: an attached operand such as ``-iURL?k=v`` may itself contain ``=``.
         attached = next(
             (option for option in _ATTACHED_SHORT_VALUE_OPTIONS if token.startswith(option) and token != option),
             "",
         )
         if attached:
             pairs.append((attached, token[len(attached) :].removeprefix("=")))
+            pending = ""
+            continue
+        if token.startswith("-") and "=" in token:
+            option, _, operand = token.partition("=")
+            pairs.append((option, operand))
             pending = ""
             continue
         if token.startswith("-"):
@@ -323,21 +323,14 @@ def sanitize_command_text(cmd: str, *, clip: int = 0) -> str:
     for name, option, value in assignment_pairs(assignments):
         found = _class_for_pair(option, value, family=family)
         rebuilt.append(f"{name}=<{found}>" if found else f"{name}={value}")
-    for option, operand in option_operands(tokens):
-        if not operand:
-            rebuilt.append(option)
-            continue
+    # ``option_operands`` yields one pair per token, and a pair's operand is
+    # always that token's suffix.
+    for token, (option, operand) in zip(tokens, option_operands(tokens)):
         # The whole operand goes, not just its userinfo: the host it names is
         # the private index the credential unlocks, and the class alone is what
         # a replay operator needs to know.
         found = _class_for_pair(option, operand, family=family)
-        safe = f"<{found}>" if found else operand
-        if option and option.startswith("-") and rebuilt and rebuilt[-1] == option:
-            rebuilt[-1] = f"{option} {safe}"
-        elif option and option.startswith("-"):
-            rebuilt.append(f"{option}={safe}")
-        else:
-            rebuilt.append(safe)
+        rebuilt.append(f"{token[: len(token) - len(operand)]}<{found}>" if found else token)
     return _clip(redact_secret_values(" ".join(rebuilt)), clip)
 
 

@@ -34,7 +34,7 @@ def only_these_search_dirs(tmp_path, monkeypatch):
         monkeypatch.setattr(editable_repo.sys, "exec_prefix", str(empty))
         monkeypatch.setattr(editable_repo.sys, "base_prefix", str(empty))
         monkeypatch.setattr(editable_repo.sys, "executable", str(empty / "bin" / "python3"))
-        monkeypatch.setattr(editable_repo.site, "getsitepackages", lambda: [])
+        monkeypatch.setattr(editable_repo.site, "getsitepackages", list)
         monkeypatch.setattr(editable_repo.site, "getusersitepackages", lambda: "")
         for name in ("VIRTUAL_ENV", "CONDA_PREFIX"):
             monkeypatch.delenv(name, raising=False)

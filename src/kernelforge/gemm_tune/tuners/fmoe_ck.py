@@ -107,7 +107,7 @@ class FmoeCKTuner(BaseTuner):
         """Write the observed key out as an untuned fmoe CSV."""
         from ..evidence import moe_untuned_csv_text
 
-        tokens = sorted({int(t) for t in (key.get("untuned_tokens") or key.get("tokens") or [])})
+        tokens = sorted({int(t) for t in key["untuned_tokens"]})
         # A token hint is a *set*, not a count.
         hint = getattr(self.ctx, "token_hint", None)
         if hint and tokens:

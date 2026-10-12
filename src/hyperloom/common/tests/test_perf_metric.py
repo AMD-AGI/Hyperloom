@@ -371,7 +371,7 @@ def test_graded_axes_publish_the_display_figures():
 def test_the_comparability_inputs_are_published_axes():
     """A verdict SBD cannot re-derive is a verdict nobody can audit.
 
-    ``rounds_are_comparable`` refuses a pair on these two, so publishing the objective and its guards while
+    ``incomparability_reason`` refuses a pair on these two, so publishing the objective and its guards while
     omitting them leaves a reader unable to tell a REVERT on the objective from one on a drifted window.
     """
     from hyperloom.common.perf_metric import (

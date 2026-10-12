@@ -46,6 +46,7 @@ from ..bus.resource_lock import (
     _expand_lanes,
 )
 from .sub_agent_runner import SubAgentResult
+from ..specialists.domains import is_custom_specialist_dispatch
 from ..state.task_registry import Task, TaskNotFound
 from .time_budget import (
     TIME_BUDGET_EXEMPT_ACTIONS,
@@ -145,6 +146,11 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         # Entries remove themselves in :meth:`run_task_registered`.
         self._inflight_actions: dict[str, _InflightAction] = {}
         self._executions: set[asyncio.Task[Any]] = set()
+        # The shielded execution behind each dispatched task, ``task_id -> execution``.
+        # The registered handle can finish early (a cancelled caller stops waiting)
+        # while the execution still writes the terminal row and queues the result;
+        # :meth:`owes_result` asks this one. Entries remove themselves when done.
+        self._execution_of: dict[str, asyncio.Task[Any]] = {}
         # Poll cadence of the waits on running dispatched work (closing grace, close steps).
         self.poll_sec = 10.0
         # Finished executions awaiting bookkeeping; drained only by the pump so
@@ -188,6 +194,41 @@ class DispatcherCollaborator(CoordinatorCollaborator):
     def has_unbooked_completions(self) -> bool:
         """Whether a finished execution still awaits its bookkeeping."""
         return bool(self._completion_queue)
+
+    def _forget_execution(self, task_id: str) -> Callable[[asyncio.Task[Any]], None]:
+        """Done callback dropping ``task_id``'s execution, unless a newer one replaced it."""
+
+        def _forget(execution: asyncio.Task[Any]) -> None:
+            if self._execution_of.get(task_id) is execution:
+                del self._execution_of[task_id]
+
+        return _forget
+
+    def owes_result(self, task_id: str) -> bool:
+        """Whether ``task_id``'s result has yet to be booked by the pump.
+
+        A dispatched task's row goes terminal inside its execution, but its
+        result is only routed -- ``delegated_result``, promotion, the
+        enablement revalidation verdict -- when a later pump drains the
+        completion. Between the two, the row reads as finished while nothing
+        has acted on what it returned.
+
+        Args:
+            task_id: The task to ask about.
+
+        Returns:
+            bool: True while the execution is still running -- however early
+            its caller stopped waiting -- or its completion waits in the
+            queue. An execution that ended by raising queues nothing, so it
+            owes nothing.
+        """
+        tid = str(task_id or "")
+        if not tid:
+            return False
+        execution = self._execution_of.get(tid)
+        if execution is not None and not execution.done():
+            return True
+        return any(str(getattr(task, "task_id", "") or "") == tid for task, _result in self._completion_queue)
 
     async def _drain_completions(self) -> int:
         """Book every queued completion in order; returns how many were booked."""
@@ -739,6 +780,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             atask.add_done_callback(self._report_spawned_failure(task))
             if task.kind == "specialist":
                 self.shared_state.note_specialist_dispatched(str((task.params or {}).get("domain") or ""))
+                self.shared_state.custom_specialist_dispatched |= is_custom_specialist_dispatch(task.params or {})
 
     @staticmethod
     def _report_spawned_failure(task: Task) -> "Callable[[asyncio.Task[Any]], None]":
@@ -880,7 +922,9 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         ):
             execution = asyncio.create_task(execute_and_complete())
         self._executions.add(execution)
+        self._execution_of[task.task_id] = execution
         execution.add_done_callback(self._report_spawned_failure(task))
+        execution.add_done_callback(self._forget_execution(task.task_id))
         try:
             return await asyncio.shield(execution)
         except asyncio.CancelledError:
@@ -1126,7 +1170,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             result_dict = result.result if isinstance(result.result, dict) else {}
             done_payload = result_dict.get("specialist_done") or {}
             if isinstance(done_payload, dict):
-                await self._coord.writeback.record_specialist_result(
+                await self._coord.specialist_dispatch.record_specialist_result(
                     task=task,
                     done_payload=done_payload,
                     source=(f"{SPECIALIST_FROM_AGENT_PREFIX}{task.task_id}"),
@@ -1200,7 +1244,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         # write. replay_warm_recipe is excluded (verification, not a fact).
         if task.kind != "replay_warm_recipe":
             try:
-                await self._coord.writeback.fact_write_hook(
+                await self._coord.recipe_journal.fact_write_hook(
                     task=task,
                     result=result,
                     verdict=verdict,
@@ -1218,7 +1262,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         # explore-round gap update: append per-variant KEEP/REVERT, then re-run the global refresh.
         if task.kind == "explore":
             result_dict = result.result if isinstance(result.result, dict) else {}
-            workload_id = self._coord.proposals.workload_canonical_id()
+            workload_id = self._coord.recipe_journal.workload_canonical_id()
             self._coord.gap_refresh.record_explore_round_gaps(
                 task=task,
                 result=result_dict,
@@ -1441,7 +1485,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             task.kind,
             denied,
         )
-        await self._coord.writeback.record_observation(
+        await self.bus.record_observation(
             "coordinator",
             "observation",
             {

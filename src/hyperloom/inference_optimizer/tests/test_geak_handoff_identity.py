@@ -14,6 +14,8 @@ from hyperloom.common.launch_log_evidence import observed_sglang_server_identity
 from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 from hyperloom.orchestrator.state.shared_state import SharedState
 
+from ._geak_helpers import stop_geak_before_launch
+
 
 def _writeback(tmp_path: Path, state: SharedState) -> WritebackCollaborator:
     writer = WritebackCollaborator.__new__(WritebackCollaborator)
@@ -252,13 +254,7 @@ async def test_handoff_rejects_stale_tput_without_matching_measurement(
     coord._record_geak_kernel_journey = lambda _result: None
     monkeypatch.setenv("FRAMEWORK", "vllm")
 
-    def _stop_after_handoff(_name: str) -> Path:
-        raise RuntimeError("stop after handoff write")
-
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
-        _stop_after_handoff,
-    )
+    stop_geak_before_launch(monkeypatch)
 
     await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
@@ -298,13 +294,7 @@ async def test_handoff_uses_only_matching_current_best_measurement(
     coord._record_geak_kernel_journey = lambda _result: None
     monkeypatch.setenv("FRAMEWORK", "sglang")
 
-    def _stop_after_handoff(_name: str) -> Path:
-        raise RuntimeError("stop after handoff write")
-
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
-        _stop_after_handoff,
-    )
+    stop_geak_before_launch(monkeypatch)
 
     await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
@@ -339,13 +329,7 @@ async def test_handoff_marks_declared_only_identity_without_faking_observation(
     coord._record_geak_kernel_journey = lambda _result: None
     monkeypatch.setenv("FRAMEWORK", "sglang")
 
-    def _stop_after_handoff(_name: str) -> Path:
-        raise RuntimeError("stop after handoff write")
-
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
-        _stop_after_handoff,
-    )
+    stop_geak_before_launch(monkeypatch)
 
     await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
@@ -372,13 +356,7 @@ async def test_handoff_does_not_verify_matching_identity_without_evidence(
     coord._record_geak_kernel_journey = lambda _result: None
     monkeypatch.setenv("FRAMEWORK", "sglang")
 
-    def _stop_after_handoff(_name: str) -> Path:
-        raise RuntimeError("stop after handoff write")
-
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
-        _stop_after_handoff,
-    )
+    stop_geak_before_launch(monkeypatch)
 
     await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
@@ -415,10 +393,7 @@ async def test_handoff_exposes_archived_sglang_observed_identity_map(
     coord._record_geak_kernel_journey = lambda _result: None
     monkeypatch.setenv("FRAMEWORK", "sglang")
 
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
-        lambda _name: (_ for _ in ()).throw(RuntimeError("stop after handoff write")),
-    )
+    stop_geak_before_launch(monkeypatch)
     await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
@@ -451,10 +426,7 @@ async def test_handoff_hashes_observed_identity_from_server_args_alone(
     coord._record_geak_kernel_journey = lambda _result: None
     monkeypatch.setenv("FRAMEWORK", "sglang")
 
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
-        lambda _name: (_ for _ in ()).throw(RuntimeError("stop after handoff write")),
-    )
+    stop_geak_before_launch(monkeypatch)
     await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))

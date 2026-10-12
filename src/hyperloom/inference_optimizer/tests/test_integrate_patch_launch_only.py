@@ -17,6 +17,7 @@ from hyperloom.orchestrator.rehearsal import boot_log_for
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import Task
+from hyperloom.orchestrator.tests._helpers import integrate_extra
 
 
 def _make_ctx(task_id: str, params: dict[str, Any], extra: dict | None = None) -> RunnerContext:
@@ -28,7 +29,7 @@ def _make_ctx(task_id: str, params: dict[str, Any], extra: dict | None = None) -
         idempotency_key=task_id,
         requires_lanes=tuple(),
     )
-    return RunnerContext(task=task, lease=None, extra=extra or {})
+    return RunnerContext(task=task, lease=None, extra=integrate_extra(params) if extra is None else extra)
 
 
 def _runtime_override() -> dict[str, Any]:
@@ -428,8 +429,7 @@ async def test_launch_probe_inherits_the_flag_earlier_rounds_established(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_launch_probe_with_no_state_inherits_nothing(tmp_path):
-    """The defensive read: a context carrying no SharedState must not abort the round."""
+async def test_launch_probe_with_nothing_established_inherits_nothing(tmp_path):
     session = tmp_path / "s"
     session.mkdir()
     _write_minimal_config(session / "bench.yaml")
@@ -437,7 +437,7 @@ async def test_launch_probe_with_no_state_inherits_nothing(tmp_path):
     params = _params_base(session)
     params["_obs_path"] = _booted_observation(session)
 
-    _res, captured = await _capture_launch(ex, params, {})
+    _res, captured = await _capture_launch(ex, params, {"shared_state": SharedState()})
     assert captured["extra_server_args_applied"] == ""
     assert captured["extra_envs_applied"] == {}
 

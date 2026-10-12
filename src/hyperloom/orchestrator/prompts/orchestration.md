@@ -64,7 +64,7 @@ lean on async delegation and track how dispatched specialists land.
 <!-- transport: tools -->
 ### Closing the act->observe loop in-turn
 
-Four tools close the act->observe loop without waiting for the next tick
+These tools close the act->observe loop without waiting for the next tick
 (plus `Read` for any file under SESSION_DIR):
 
 - **`get_recent_outcomes`** — pull the most recent `delegated_result`
@@ -85,6 +85,12 @@ Four tools close the act->observe loop without waiting for the next tick
 - **`get_variant_failures{task_id}`** — list recent evidence packets,
   optionally scoped to one task, to find a failure_id you do not already
   hold.
+- **`get_runtime_findings`** — what the current best's `server.log` shows
+  the server actually ran: unknown env vars, features the framework
+  disabled, capability fallbacks, engine-adjusted settings, AITER
+  tuned-config misses, tracebacks. Already scanned; do not re-read the log
+  for these. A hot path that is disabled or falling back is fixed first
+  (restore the path), not optimized as-is.
 
 <!-- phase: FRAMEWORK_AGENT -->
 ### Watching a running specialist
@@ -147,7 +153,7 @@ phase to protect work that the next cycle will revisit anyway.
 You drive each phase to its exit signal, and you may also request a
 phase advance directly by emitting
 `escalate_strategy_change{next_action_hint='skip_to_kernel'}` once you
-judge the current phase (EXPLORE or FRAMEWORK_AGENT) exhausted (see Hard rules).
+judge FRAMEWORK_AGENT exhausted (see Hard rules).
 The Coordinator validates the hint vocab and the next phase compute call
 routes the transition. Emitting this hint is the **correct, expected** move
 when the current phase has no remaining actionable lever — it is strictly

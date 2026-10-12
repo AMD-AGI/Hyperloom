@@ -107,6 +107,20 @@ def anthropic_synthesizable_key(env: Mapping[str, str] | None = None) -> str:
     )
 
 
+def with_synthesized_anthropic_keys(env: Mapping[str, str]) -> dict[str, str]:
+    """Copy of *env* whose missing Anthropic API key or auth token is filled from the other one.
+
+    Only the synthesizable subset: an OAuth token copied into either API-key var would drop the CLI out of
+    subscription mode and 401 the run.
+    """
+    source = dict(env)
+    fallback_key = anthropic_synthesizable_key(source)
+    if fallback_key:
+        source.setdefault("ANTHROPIC_API_KEY", fallback_key)
+        source.setdefault("ANTHROPIC_AUTH_TOKEN", fallback_key)
+    return source
+
+
 CLAUDE_GATEWAY_SIGNAL_KEYS: tuple[str, ...] = (
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_API_KEY",
@@ -612,12 +626,7 @@ def claude_sdk_env_options(
     if not any((source.get(key) or "").strip() for key in CLAUDE_GATEWAY_SIGNAL_KEYS):
         return {}
 
-    # Anthropic-side credentials only, and only the synthesizable subset: an OAuth token copied into either API-key
-    # var would drop the CLI out of subscription mode and 401 the run.
-    fallback_key = anthropic_synthesizable_key(source)
-    if fallback_key:
-        source.setdefault("ANTHROPIC_API_KEY", fallback_key)
-        source.setdefault("ANTHROPIC_AUTH_TOKEN", fallback_key)
+    source = with_synthesized_anthropic_keys(source)
     # Claude/Anthropic side reads only ANTHROPIC_CUSTOM_HEADERS.
     if source.get("ANTHROPIC_CUSTOM_HEADERS"):
         source["ANTHROPIC_CUSTOM_HEADERS"] = expand_env_refs(source["ANTHROPIC_CUSTOM_HEADERS"], source)
@@ -1222,4 +1231,5 @@ __all__ = [
     "resolve_forge_llm_model",
     "resolve_openai_client_config",
     "stream_chat_completion_text",
+    "with_synthesized_anthropic_keys",
 ]

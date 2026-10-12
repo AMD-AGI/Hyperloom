@@ -131,8 +131,7 @@ _GRAPH_PROBE_SITECUSTOMIZE = r'''
 import atexit, json, os, sys
 
 _n = [0]
-# Collected only when the caller declares a rank count. A single-rank probe
-# reports replays alone, exactly as before.
+# Harness evidence is collected only when the caller declares a rank count.
 _expect_ranks = 0
 try:
     _expect_ranks = int(os.environ.get("GRAPH_PROBE_EXPECT_RANKS") or 0)
@@ -324,11 +323,6 @@ def _read_graph_probe_shards(out_path: str, *, expected_world_size: int | None =
         except (OSError, json.JSONDecodeError, ValueError) as exc:
             return PROBE_FAILED, f"invalid graph probe shard {Path(shard).name}: {exc}"
 
-        if isinstance(payload, int) and not isinstance(payload, bool):
-            if payload < 0:
-                return PROBE_FAILED, f"invalid negative replay count in {Path(shard).name}"
-            unranked_replays.append(payload)
-            continue
         if not isinstance(payload, dict):
             return PROBE_FAILED, f"invalid graph probe shard payload in {Path(shard).name}"
 
@@ -1403,7 +1397,7 @@ def summarize_agent_progress(progress_log: list[str]) -> str:
         parts.append("backend does not support progress streaming")
     else:
         parts.append("no tool calls at all")
-    tail = [entry for entry in progress_log[-6:]]
+    tail = list(progress_log[-6:])
     if tail:
         parts.append("last steps:\n" + "\n".join(f"  {entry}" for entry in tail))
     return "; ".join(parts[:1]) + ("\n" + parts[1] if len(parts) > 1 else "")

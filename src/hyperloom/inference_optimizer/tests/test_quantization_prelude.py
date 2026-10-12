@@ -234,18 +234,18 @@ def test_adapter_partial_with_model_returns_dir(tmp_path, monkeypatch):
     assert out == str(tmp_path / "q")
 
 
-def test_adapter_partial_without_model_exits_3(tmp_path, monkeypatch):
+def test_adapter_partial_without_model_exits_4(tmp_path, monkeypatch):
     _patch_quantize(monkeypatch, _fake_result("partial", None, final="must_validate_skipped"))
     with pytest.raises(SystemExit) as ei:
         asyncio.run(qrh.run_quantization_prelude_async(prompt="fp8", source_model="/m", workspace=tmp_path))
-    assert ei.value.code == 3
+    assert ei.value.code == 4
 
 
-def test_adapter_failed_exits_3(tmp_path, monkeypatch):
+def test_adapter_failed_exits_4(tmp_path, monkeypatch):
     _patch_quantize(monkeypatch, _fake_result("failed", None, final="exec_model_load_failed"))
     with pytest.raises(SystemExit) as ei:
         asyncio.run(qrh.run_quantization_prelude_async(prompt="fp8", source_model="/m", workspace=tmp_path))
-    assert ei.value.code == 3
+    assert ei.value.code == 4
 
 
 # Group C — cli prelude hook

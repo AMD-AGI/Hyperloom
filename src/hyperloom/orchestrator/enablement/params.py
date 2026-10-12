@@ -76,12 +76,12 @@ class EnablementParams(CoordinatorCollaborator):
             return None
         from hyperloom.common.failure_signature import EnablementRequest
         from .mandate import build_search_plan
-        from hyperloom.agents.framework.repo_map import repo_url_for_framework
+        from hyperloom.inference_optimizer import framework_registry
 
         state = self.shared_state
         framework = (getattr(state, "framework", "") or "").strip().lower()
         model = (getattr(state, "model_name", "") or "").strip()
-        repo_url = repo_url_for_framework(framework)
+        repo_url = framework_registry.repo_url(framework)
 
         # Dispatch a specialist for ANY non-blank launch log, even one that
         # classifies as ``UNKNOWN``: ``kind`` is advisory (routes bridge-repo

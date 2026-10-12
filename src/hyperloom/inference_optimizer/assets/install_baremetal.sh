@@ -48,9 +48,9 @@ INSTALL_FRAMEWORK="none"
 _FRAMEWORK_ENV_WAS_SET="${FRAMEWORK_ENV+x}"
 FRAMEWORK_ENV="${FRAMEWORK_ENV:-shared}"
 SGLANG_REPO="${SGLANG_REPO:-https://github.com/sgl-project/sglang.git}"
-# Framework versions track docs/compatibility.rst (SGLang 0.5.20, ROCm 10 docker).
-# SGLANG_REF is the v0.5.20 release commit (peeled from the tag, not the tag
-# object) aligned with lmsysorg/sglang-rocm:v0.5.20-rocm10-* images. Through
+# Framework versions track docs/compatibility.rst (SGLang 0.5.21, ROCm 10 docker).
+# SGLANG_REF is the v0.5.21 release commit (peeled from the tag, not the tag
+# object) aligned with lmsysorg/sglang-rocm:v0.5.21-rocm10-* images. Through
 # 0.5.18 the HIP extra pinned compressed-tensors to 0.15.0, which caps torch
 # below 2.11 and so cannot resolve against a ROCm 10 stack at all; 0.5.19 moved
 # that dependency into runtime_common unpinned, which leaves the installer's
@@ -60,10 +60,10 @@ SGLANG_REPO="${SGLANG_REPO:-https://github.com/sgl-project/sglang.git}"
 # ROCm 10.0 rocm/vllm image, so the two paths no longer share a patch level. AITER_REF
 # can pin ROCm/aiter to a released tag; when unset, the installer selects the
 # newest tag compatible with the already-installed ROCm torch/triton stack.
-SGLANG_REF="${SGLANG_REF:-94602c9c2b7cbdb8efd5c52802dac6a1c180089e}"
+SGLANG_REF="${SGLANG_REF:-e00930c5489053f26d86b179cee0d087f846acbb}"
 # The pin is a commit SHA (not the annotated tag object), so setuptools_scm and
 # shallow git fetch behave predictably. Declare the point release for source installs.
-SGLANG_PRETEND_VERSION="${SGLANG_PRETEND_VERSION:-0.5.20}"
+SGLANG_PRETEND_VERSION="${SGLANG_PRETEND_VERSION:-0.5.21}"
 _SGLANG_ROCM_PYPI_VERSION_WAS_SET="${SGLANG_ROCM_PYPI_VERSION+x}"
 _AITER_REF_WAS_SET="${AITER_REF+x}"
 # Left unset so the wheel target is derived from the ROCm stack that is
@@ -195,7 +195,7 @@ log() { echo "[install-baremetal] $*"; }
 warn() { echo "[install-baremetal WARN] $*" >&2; }
 die() { echo "[install-baremetal ERROR] $*" >&2; exit 1; }
 
-IMAGE_HINT="Provision the ROCm framework base first (SGLang: lmsysorg/sglang-rocm:v0.5.20-rocm10-mi30x|mi35x-*; \
+IMAGE_HINT="Provision the ROCm framework base first (SGLang: lmsysorg/sglang-rocm:v0.5.21-rocm10-mi30x|mi35x-*; \
 vLLM bare-metal: Ubuntu 24.04+ host with ROCm torch, or use docker mode with \
 rocm/vllm:rocm10.0.0_ubuntu24.04_py3.14_pytorch_2.12.0_vllm_0.27.0), then re-run."
 

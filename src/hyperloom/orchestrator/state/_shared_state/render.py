@@ -538,7 +538,7 @@ class _RenderMixin:
         lines += [
             f"baseline_tput={self.baseline_tput}  baseline_acc={self.baseline_accuracy}",
             f"baseline_failure_streak={self.baseline_failure_streak}",
-            f"current_best={self.current_best or '(none)'}",
+            f"current_best={self._format_current_best()}",
             f"optimization_stack={self._format_optimization_stack()}",
             (
                 f"cumulative_gain_validated={self.cumulative_gain_validated}% "
@@ -674,7 +674,16 @@ class _RenderMixin:
         gain = entry.get("gain_pct")
         result = entry.get("result") if isinstance(entry.get("result"), dict) else {}
         tput = entry.get("tput") or entry.get("output_throughput") or result.get("output_throughput")
-        gain_s = f"{gain:+.2f}%" if isinstance(gain, (int, float)) else " no_meas"
+        # A REVERT carries no ``gain_pct`` by design; its graded movement is ``graded_gain_pct``. Only a row with
+        # neither was never measured on the graded axis -- printing "no_meas" for a guard refusal sends readers
+        # hunting for a broken extractor.
+        graded_gain = entry.get("graded_gain_pct")
+        if isinstance(gain, (int, float)) and not isinstance(gain, bool):
+            gain_s = f"{gain:+.2f}%"
+        elif isinstance(graded_gain, (int, float)) and not isinstance(graded_gain, bool):
+            gain_s = f"{graded_gain:+.2f}%"
+        else:
+            gain_s = " no_meas"
         tput_s = f" (tput={tput:.1f})" if isinstance(tput, (int, float)) and tput > 0 else ""
         # The gain column is meaningless without the axis it was taken on.
         graded_obj = str(entry.get("graded_objective") or "").strip()
@@ -756,6 +765,16 @@ class _RenderMixin:
             outcome = str(entry.get("outcome") or "?").upper()
             out.append(f"      {str(fp)[:16]} {outcome:7s} {_RenderMixin._format_variant_line(entry)}")
         return "\n".join(out)
+
+    def _format_current_best(self) -> str:
+        """Render ``current_best`` without its ``optimization_stack`` and ``measurement``.
+
+        The stack, which grows with every stacked KEEP, has its own line; the
+        measurement is launch evidence (paths, identity hashes) no decision reads.
+        """
+        if not self.current_best:
+            return "(none)"
+        return str({k: v for k, v in self.current_best.items() if k not in ("optimization_stack", "measurement")})
 
     def _format_optimization_stack(self) -> str:
         """Render the optimization stack as ``action:variant`` parts."""

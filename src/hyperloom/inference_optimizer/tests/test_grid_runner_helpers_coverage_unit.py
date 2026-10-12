@@ -337,6 +337,28 @@ def test_build_variant_yaml_prepends_legit_overlay(tmp_path: Path) -> None:
     assert envs.get("PYTHONPATH", "").startswith(str(overlay))
 
 
+@pytest.mark.parametrize(
+    ("config_envs", "tail"),
+    [({}, ["/inh/a", "/inh/b"]), ({"PYTHONPATH": "/cfg"}, ["/cfg"])],
+    ids=["inherited", "config-authoritative"],
+)
+def test_build_variant_yaml_overlay_builds_on_the_launch_pythonpath(tmp_path, monkeypatch, config_envs, tail) -> None:
+    # The launch overlays benchmark.envs on os.environ, so a config without PYTHONPATH carries the inherited one.
+    # The overlay is relative so the path carries no drive colon on any host.
+    import os
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(["/inh/a", "/inh/b"]))
+    (tmp_path / "overlay").mkdir()
+    base = tmp_path / "base.yaml"
+    base.write_text(yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": config_envs}}), encoding="utf-8")
+    variant = _variant("v1")
+    variant.overlay_pythonpath = "overlay"  # type: ignore[attr-defined]
+    out = gr._build_variant_yaml(base, "", variant, output_subdir=tmp_path / "v1")
+    envs = yaml.safe_load(out.read_text(encoding="utf-8"))["benchmark"]["envs"]
+    assert envs["PYTHONPATH"] == os.pathsep.join(["overlay", *tail])
+
+
 def test_build_variant_yaml_drops_unsafe_overlay(tmp_path: Path) -> None:
     # SWSPLAT-42358: a ``:``-joined / traversal / non-existent overlay is dropped (would otherwise smuggle extra
     # PYTHONPATH entries or escape).
