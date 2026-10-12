@@ -233,10 +233,10 @@ async def test_an_explore_orchestration_copies_off_the_queue_is_credited_to_the_
     (task,) = await coordinator.tasks.by_state("queued")
     variants = {v["name"]: v for v in task.params["grid"]}
     assert variants["kv-fp8"]["provenance"] == "primatune"
+    # A variant that only contains a predictor row's delta keeps its author.
     assert variants["kv-fp8-async"]["provenance"] == "llm_direct"
-    assert variants["kv-fp8-async"]["primatune_contains"] == ["primatune-c0-s0-r0-0"]
-    assert "primatune_contains" not in variants["spec"] and "primatune_contains" not in variants["mine"]
     assert variants["spec"]["provenance"] == "specialist:serving"
+    assert variants["mine"]["provenance"] == "llm_direct"
 
 
 async def test_orchestrations_prompt_names_a_predictor_row_its_queued_grid_holds(coordinator):

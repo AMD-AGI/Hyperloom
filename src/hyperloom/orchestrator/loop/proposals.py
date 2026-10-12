@@ -292,14 +292,9 @@ class ProposalsCollaborator(CoordinatorCollaborator):
             return
         from ..predictor.attribution import stamp_predictor_provenance
 
-        stamped, containing = stamp_predictor_provenance(grid, self.shared_state.specialist_rounds or [])
-        if stamped or containing:
-            log.info(
-                "explore grid: %d/%d variant(s) credited to the predictor; %d more contain a predictor proposal",
-                stamped,
-                len(grid),
-                containing,
-            )
+        stamped = stamp_predictor_provenance(grid, self.shared_state.specialist_rounds or [])
+        if stamped:
+            log.info("explore grid: %d/%d variant(s) credited to the predictor", stamped, len(grid))
 
     def inject_explore_runtime_params(self, params: dict) -> None:
         """Inject explore-task operational knobs from SharedState into ``params`` (single source of truth for both propose/Critic and direct-delegate paths). setdefault preserves LLM overrides."""
