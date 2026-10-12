@@ -374,10 +374,15 @@ class ClaudeBackend:
         except json.JSONDecodeError as error:
             raise ClaudeUnavailableError(f"Claude model probe returned invalid JSON for {selected_model!r}") from error
         text = str(payload.get("result") or "").strip()
-        if text != "OK":
-            raise ClaudeUnavailableError(
-                f"Claude model probe returned an unexpected response for {selected_model!r}: {text[:200]!r}"
-            )
+        if payload.get("is_error"):
+            raise ClaudeUnavailableError(f"Claude model probe returned an error for {selected_model!r}: {text[:1200]}")
+        if not text:
+            raise ClaudeUnavailableError(f"Claude model probe returned an empty response for {selected_model!r}")
+        # The probe proves the URL, key and model answer. The wording is the model's own: glm in a campaign workspace
+        # answers "OK." or "Standing by ..." now and then, and rejecting that cost whole lanes.
+        if text.rstrip(".!").strip().upper() != "OK":
+            log.warning("Claude model probe for %r answered %r instead of OK; treating the model as available",
+                        selected_model, text[:200])
         return AgentRunResult(text=text, end_reason="agent_stopped")
 
     def _provider_options(self, spec: AgentRunSpec) -> dict[str, Any]:
