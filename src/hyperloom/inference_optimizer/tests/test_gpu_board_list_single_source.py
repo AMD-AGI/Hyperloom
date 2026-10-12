@@ -52,6 +52,11 @@ def test_every_listed_board_actually_resolves():
         assert amd_gpu_dispatch_identity(board) is not None, board
 
 
+def test_mi300a_dispatch_uses_228_cus_not_the_mi300x_count():
+    assert amd_gpu_dispatch_identity("MI300A") == ("gfx942", 228)
+    assert amd_gpu_dispatch_identity("mi300x") == ("gfx942", 304)
+
+
 def test_product_tags_cover_the_same_boards():
     assert set(_PRODUCT_TAGS) == {b.upper() for b in AMD_GPU_DISPATCH_IDENTITIES}
 
