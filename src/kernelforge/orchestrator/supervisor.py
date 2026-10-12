@@ -16,6 +16,7 @@ from typing import Awaitable, Callable
 from kernelforge.agent_backends import AgentRunSpec, watchdog_timeout_sec
 from kernelforge.agent_backends.session_resume import is_api_failure
 from kernelforge.config import Config, resolve_agent_model
+from kernelforge.knowledge.wiki_tool import KnowledgeWikiTool, require_mcp_backend, wiki_servers, wiki_tool_names
 from kernelforge.tools.durable_io import atomic_write_text
 
 log = logging.getLogger(__name__)
@@ -232,6 +233,7 @@ def make_supervisor_fn(
     if supervisor_model != runtime.model:
         runtime = replace(runtime, model=supervisor_model)
     timeout_sec = int(runtime.options.get("supervisor_timeout_sec") or runtime.timeout_sec)
+    knowledge_wiki = KnowledgeWikiTool.from_config(config)
     selected_backend = None
 
     async def supervisor_fn(
@@ -273,8 +275,10 @@ def make_supervisor_fn(
                             shell=False,
                             max_turns=SUPERVISOR_MAX_TURNS,
                             thinking_budget_tokens=(SUPERVISOR_THINKING_BUDGET),
+                            extra_tools=wiki_tool_names(knowledge_wiki),
                         ),
                         protected_globs=["*"],
+                        mcp_servers=wiki_servers(knowledge_wiki, "supervisor"),
                     ),
                     usage=usage,
                 ),
@@ -290,6 +294,7 @@ def make_supervisor_fn(
         try:
             if selected_backend is None:
                 selected_backend = create_registered_backend(runtime)
+                require_mcp_backend(knowledge_wiki, selected_backend, "supervisor")
                 setattr(supervisor_fn, "backend_name", selected_backend.name)
                 setattr(
                     supervisor_fn,

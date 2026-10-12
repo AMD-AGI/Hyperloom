@@ -24,6 +24,7 @@ from kernelforge.agent_backends import (
     watchdog_timeout_sec,
 )
 from kernelforge.agent_backends.session_resume import is_api_failure
+from kernelforge.knowledge.wiki_tool import KnowledgeWikiTool, require_mcp_backend, wiki_servers, wiki_tool_names
 from kernelforge.tools.process_reaping import ReapReport, reap_processes_under
 from kernelforge.orchestrator.specialist_probe import (
     ANALYSIS_RESERVE_SEC,
@@ -453,16 +454,19 @@ class SpecialistAgent:
         timeout_sec: int,
         max_turns: int,
         probe: SpecialistProbeConfig | None = None,
+        knowledge_wiki: KnowledgeWikiTool | None = None,
     ) -> None:
         if timeout_sec <= 0:
             raise ValueError("timeout_sec must be greater than zero")
         if max_turns <= 0:
             raise ValueError("max_turns must be greater than zero")
+        require_mcp_backend(knowledge_wiki, backend, f"specialist {definition.role_id}")
         self.definition = definition
         self.backend = backend
         self.timeout_sec = timeout_sec
         self.max_turns = max_turns
         self.probe = probe
+        self.knowledge_wiki = knowledge_wiki
 
     async def run(
         self,
@@ -499,10 +503,13 @@ class SpecialistAgent:
                             write=False,
                             shell=False,
                             max_turns=self.max_turns,
-                            extra_tools=probe_setup.tool_names(),
+                            extra_tools=(*probe_setup.tool_names(), *wiki_tool_names(self.knowledge_wiki)),
                         ),
                         protected_globs=["*"],
-                        mcp_servers=probe_setup.mcp_servers(),
+                        mcp_servers={
+                            **probe_setup.mcp_servers(),
+                            **wiki_servers(self.knowledge_wiki, f"specialist {self.definition.role_id}"),
+                        },
                     ),
                     usage=usage,
                 ),
