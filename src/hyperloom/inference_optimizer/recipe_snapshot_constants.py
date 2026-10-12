@@ -6,7 +6,10 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Final
+
+from hyperloom.common.provenance import framework_distribution_version
 
 log = logging.getLogger(__name__)
 
@@ -238,6 +241,10 @@ def detect_framework_version(framework_name: str) -> str:
     module_name = _FRAMEWORK_VERSION_MODULES.get(fw_slug)
     if not module_name:
         return DEFAULT_FRAMEWORK_VERSION_SLUG
+    # An isolated framework venv is not importable from this interpreter.
+    served = framework_distribution_version(os.environ, fw_slug)
+    if served:
+        return _slug(served, DEFAULT_FRAMEWORK_VERSION_SLUG)
     try:
         import importlib
 
