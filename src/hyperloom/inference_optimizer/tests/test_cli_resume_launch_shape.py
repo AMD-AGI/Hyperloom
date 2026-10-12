@@ -122,12 +122,16 @@ def test_the_fresh_launch_anchors_stay_in_order():
     from hyperloom.inference_optimizer.cli import _run_optimize
 
     tree = ast.parse(textwrap.dedent(inspect.getsource(_run_optimize)))
-    first: dict[str, int] = {}
+    calls: dict[str, list[int]] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-            name = node.func.id
-            if name not in first or node.lineno < first[name]:
-                first[name] = node.lineno
+            calls.setdefault(node.func.id, []).append(node.lineno)
+    first = {name: min(lines) for name, lines in calls.items()}
+    # The ladder runs on both branches; the resume anchor needs that branch's call, not the fresh one. -1 when the
+    # seeding has drifted past every ladder call, so the comparison below fails rather than skipping.
+    if "_seed_env_from_resumed_state" in first:
+        after = [ln for ln in calls.get("_resolve_workload_knobs", []) if ln > first["_seed_env_from_resumed_state"]]
+        first["_resolve_workload_knobs_resume"] = min(after) if after else -1
 
     # (earlier, later, why the order matters)
     anchors = [
@@ -140,6 +144,11 @@ def test_the_fresh_launch_anchors_stay_in_order():
             "_resolve_workload_knobs",
             "_export_workload_envs_for_optimize",
             "projecting first publishes the flag-derived default over a pinned TP/CONC/EP",
+        ),
+        (
+            "_seed_env_from_resumed_state",
+            "_resolve_workload_knobs_resume",
+            "seeding after the resume ladder leaves a stale shell export as the session's workload",
         ),
         (
             "_export_workload_envs_for_optimize",
@@ -182,6 +191,57 @@ def test_a_malformed_pinned_knob_does_not_take_the_run_down(monkeypatch):
     _resolve_workload_knobs(args)
 
     assert args.isl == DEFAULT_ISL
+
+
+def test_a_stale_shell_export_does_not_re_measure_a_resumed_session(monkeypatch):
+    """The recorded workload outranks the shell; a name this resume re-pins still changes it.
+
+    Hyperloom's own repro scripts ``export TP``/``CONC``/``ISL``/``OSL``, so sourcing one before a resume would
+    otherwise re-measure the session at a different shape and record the shell's numbers as its own.
+    """
+    from hyperloom.inference_optimizer.cli import _resolve_workload_knobs, _seed_env_from_resumed_state
+
+    state = _ns(isl=3333, osl=777, conc=99, tp=8, ep=2, precision="int4", max_model_len=32768)
+    # What sourcing a generated repro script leaves behind, plus the one knob this resume re-pins.
+    for name, value in (("TP", "4"), ("CONC", "256"), ("ISL", "4096"), ("OSL", ""), ("EP", ""), ("PRECISION", "")):
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("MAX_MODEL_LEN", "")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", "")
+    repinned = {"CONC": "16"}
+    _export_operator_launch_shape(server_args="", extra_env=repinned)
+
+    _seed_env_from_resumed_state(state, repinned)
+    args = _knob_args()
+    _resolve_workload_knobs(args, state)
+
+    assert (args.tp, args.isl) == (8, 3333), "a stale shell export replaced the recorded workload"
+    assert args.conc == 16, "a re-passed pin must still change the workload"
+    assert os.environ["MAX_MODEL_LEN"] == "32768"
+
+
+def test_a_plain_resume_does_not_warn_about_the_recorded_precision(tmp_path, monkeypatch, capsys):
+    """The recorded precision reaches ``args`` without taking the flag branch, whose warning no operator asked for.
+
+    A seeded ``PRECISION`` is indistinguishable from ``--precision``, so a resume of an fp8 session whose checkpoint
+    reads bf16 would warn on every restart while changing nothing.
+    """
+    from hyperloom.inference_optimizer.cli import _resolve_precision, _seed_env_from_resumed_state
+
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text('{"torch_dtype": "bfloat16"}', encoding="utf-8")
+    # Every name the seeding writes, so monkeypatch restores it: an unscoped EP reaches the next test in the shard.
+    for name in ("ISL", "OSL", "CONC", "TP", "EP", "MAX_MODEL_LEN", "PRECISION"):
+        monkeypatch.setenv(name, "")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", "")
+    state = _ns(isl=3333, osl=777, conc=99, tp=8, ep=2, precision="fp8", max_model_len=0)
+
+    _seed_env_from_resumed_state(state, {})
+    args = _knob_args(model=str(model))
+    _resolve_precision(args, state)
+
+    assert args.precision == "fp8"
+    assert capsys.readouterr().err == ""
 
 
 def test_resume_restores_pins_before_the_agentx_staleness_guard(tmp_path, monkeypatch, request):
