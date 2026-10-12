@@ -300,6 +300,31 @@ _AUDITED_MAGPIE_EXECUTION_TREES = {
         "file_count": 87,
         "tree_sha256": "65b4acccbe70c05c033f75a5054344bd2fead13dc81878f343427c6c04142e4a",
     },
+    # Local experiment: cf805323 without the SGLang shape_discovery profiling requirement.
+    "0b065388ec6c41551d0af6501a5d75c738add755": {
+        "file_count": 87,
+        "tree_sha256": "252bee85ce428e7117d5229cb0bf1ea881b4de3023e8551112fc0c8d381e13f6",
+    },
+    # Local experiment: 0b065388 plus a single combined SGLang CUDA-graph capture trace.
+    "289e3de48c1db11cb1476a0f25f1c88f6ddc9862": {
+        "file_count": 87,
+        "tree_sha256": "3eb61f389c059b8939ff43bb1a0383a8a38c64ced5b472810bd8a79b36ce8aae",
+    },
+    # Local experiment: 289e3de4 plus SGLang launches with speculative decoding removed.
+    "42a093ba51dbd3024f3af6c96ee95c035084cadd": {
+        "file_count": 87,
+        "tree_sha256": "3e9f8bdc01e2b4294ae277e36c7b0c0d8927db425209d0d94f0095e261095f9e",
+    },
+    # Local experiment: 42a093ba plus a 3600s native health deadline for cold MI355X starts.
+    "8827b5fdaa7606d21f6bb2c5bfe39a5c23e34ead": {
+        "file_count": 87,
+        "tree_sha256": "e5cba1105a780f9ad5c934a44eb2bf326516ac653a88e3029a57cb9fc8da767a",
+    },
+    # Local experiment: 8827b5fd plus per-shape CUDA-graph capture (TraceLens sglang_gc_patch).
+    "35bb3ba10fad96864c45cc4ddcec4004454ae12d": {
+        "file_count": 87,
+        "tree_sha256": "f6dd329715f1f41743642dfe16cfe1925cfece14bec60ec0f0d076ea3fd48adc",
+    },
     "311d56429a3aadc3cfe1e1e0e2e533482d224cf0": {
         "file_count": 87,
         "tree_sha256": "f8be61cf4566f4daaf3c2463a600e49b11d97bade6632a7bb5b99050b4ce5656",

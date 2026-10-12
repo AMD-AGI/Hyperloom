@@ -1321,6 +1321,7 @@ def _prelude_predicate_inputs(state: Any, *, now_unix: float) -> dict[str, Any]:
         "runtime_sec": _positive_number(state.baseline_runtime_sec),
         "post_ready_runtime_sec": _positive_number(state.baseline_post_ready_runtime_sec),
         "warm_runtime_sec": _positive_number(state.baseline_warm_runtime_sec),
+        "auto_roofline_pending": bool((getattr(state, "auto_roofline_pending_task_id", "") or "").strip()),
     }
 
 
@@ -1820,6 +1821,10 @@ def replay_next_phase(
             str(baseline.get("warm_replay_status") or "") != "in_flight"
             and not bool(baseline.get("measure_round_dropped"))
             and (_number(baseline.get("tput")) or 0.0) > 0.0
+            # Hold PRELUDE until the bootstrap roofline/profile settles; otherwise the
+            # baseline-landed signal that enqueues it also trips this exit, and the
+            # PRELUDE->FRAMEWORK_AGENT barrier cancels the in-flight capture.
+            and not bool(baseline.get("auto_roofline_pending"))
         )
         if normal:
             target = _post_prelude_target(optimize_enabled=optimize_enabled, kernel_enabled=kernel_enabled)

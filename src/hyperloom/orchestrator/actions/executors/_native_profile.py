@@ -90,6 +90,10 @@ def prepare_managed_profile(params: dict[str, Any], state: Any, output_dir: Path
         "workload_fingerprint": (workload.get("execution") or {}).get("workload_fingerprint"),
     }
     settings: dict[str, Any] = {"enabled": True, "detailed_annotations": True}
+    accepted_profile = (benchmark.get("profiler") or {}).get("torch_profiler") or {}
+    settings.update(
+        {key: value for key, value in accepted_profile.items() if key not in ("enabled", "detailed_annotations")}
+    )
     template = params.get("config_path")
     if template and Path(template).resolve() != Path(accepted).resolve():
         template_benchmark = (yaml.safe_load(Path(template).read_text(encoding="utf-8")) or {}).get("benchmark") or {}
