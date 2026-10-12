@@ -314,7 +314,7 @@ def test_cli_can_actually_call_kb_warmstart():
     from kernelforge.loop.knowledge_integration import kb_warmstart
 
     accepted = set(inspect.signature(kb_warmstart).parameters)
-    src = inspect.getsource(cli.forge_loop.callback)
+    src = inspect.getsource(cli._read_kb_warm_start)
     call = src[src.index("kb_warmstart(") + len("kb_warmstart(") :]
     call = call[: call.index(")\n")]
     passed = set(re.findall(r"(?:^|[\s,(])([a-z_][a-z0-9_]*)\s*=", call))
