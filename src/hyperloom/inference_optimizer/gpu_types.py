@@ -31,6 +31,7 @@ _VLLM_OR_LLAMACPP = frozenset({"vllm", "llamacpp"})
 
 #: Keyed by ``AMD_GPU_BOARDS``: every board has exactly one policy row.
 _BOARD_POLICIES: dict[str, BoardPolicy] = {
+    "mi300a": BoardPolicy(targeted_build_validated=False),
     "mi300x": BoardPolicy(names_its_arch=True),
     "mi308x": BoardPolicy(),
     "mi325x": BoardPolicy(),
@@ -126,6 +127,7 @@ def _autodetect_gpu_type() -> str | None:
     """Return a canonical supported board name, or ``None`` if undetectable."""
     import subprocess
 
+    out = ""
     try:
         out = subprocess.run(
             ["rocm-smi", "--showproductname"],
@@ -133,19 +135,21 @@ def _autodetect_gpu_type() -> str | None:
             text=True,
             timeout=5,
         ).stdout
-        detected = parse_gpu_type(out)
-        if detected:
-            return detected
+        board = board_named_in(out)
+        if board:
+            return board.product
     except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError, OSError):
-        # rocm-smi missing / slow / not permitted; fall through to the torch gcnArchName probe below (autodetect is
-        # best-effort).
+        # Try PyTorch when rocm-smi is unavailable.
         pass
     try:
         import torch
 
-        return parse_gpu_type(str(torch.cuda.get_device_properties(0).gcnArchName))
+        props = torch.cuda.get_device_properties(0)
+        product = getattr(props, "name", "")
+        arch = getattr(props, "gcnArchName", "")
+        return parse_gpu_type(f"{product} {arch} {out}")
     except (ImportError, OSError, RuntimeError, AssertionError, AttributeError):
-        return None
+        return parse_gpu_type(out)
 
 
 def _resolve_amd_gpu_type(explicit: str | None = None) -> str | None:

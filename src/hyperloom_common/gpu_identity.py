@@ -60,6 +60,7 @@ AMD_GPU_BOARDS: dict[str, GpuBoard] = {
     board.product: board
     for board in (
         # product, gfx, CUs, HBM GB, HBM GB/s, vendor peak TFLOPS
+        GpuBoard("mi300a", "gfx942", 228),
         GpuBoard(
             "mi300x",
             "gfx942",

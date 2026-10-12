@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import logging
+import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -15,18 +17,25 @@ from typing import Any
 
 import httpx
 
+from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
+
 from ...gpu_types import parse_gpu_type
 from . import ray_dashboard, ssh_client, ssh_known_hosts
 from .external_state import build_external_state_from_env, external_service_url
 
 log = logging.getLogger(__name__)
 
-# One command that prints the product name, falling back to torch's gcnArchName (gfx942 / gfx950) when rocm-smi is
-# unavailable on PATH.
+# SMI can return success with an N/A product and only a shared gfx arch.
+_BOARD_NAMES = "|".join(
+    re.escape(name) for board in AMD_GPU_BOARDS.values() for name in (board.product, *board.aliases)
+)
+_BOARD_PATTERN = shlex.quote(f"(^|[^[:alnum:]])({_BOARD_NAMES})([^[:alnum:]]|$)")
 _PROBE_CMD = (
-    "rocm-smi --showproductname 2>/dev/null || "
+    "smi=$(rocm-smi --showproductname 2>/dev/null); "
+    'printf "%s\\n" "$smi"; '
+    f'printf "%s\\n" "$smi" | grep -Eiq {_BOARD_PATTERN} || '
     'python3 -c "import torch;'
-    'print(torch.cuda.get_device_properties(0).gcnArchName)" 2>/dev/null'
+    'p=torch.cuda.get_device_properties(0);print(p.name, p.gcnArchName)" 2>/dev/null'
 )
 
 # Ray Dashboard job terminal states (mirror multi_node.cluster_access).

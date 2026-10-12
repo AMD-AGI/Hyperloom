@@ -50,6 +50,13 @@ def test_every_listed_board_actually_resolves():
         assert amd_gpu_board(product) is board, product
 
 
+@pytest.mark.parametrize(("product", "cus"), [("MI300A", 228), ("MI300X", 304)])
+def test_mi300_dispatch_uses_the_product_cu_count(product, cus):
+    board = amd_gpu_board(product)
+    assert board is not None
+    assert (board.gfx, board.compute_units) == ("gfx942", cus)
+
+
 def test_r9700_has_explicit_gfx1201_dispatch_identity():
     board = AMD_GPU_BOARDS["r9700"]
     assert (board.gfx, board.compute_units) == ("gfx1201", 64)

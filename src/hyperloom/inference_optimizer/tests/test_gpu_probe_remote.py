@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import tempfile
 from pathlib import Path
@@ -225,3 +226,23 @@ def test_parse_gpu_type_preserves_exact_r9700_for_topology_validation():
     assert parse_gpu_type("AMD Radeon AI PRO R9700") == "r9700"
     assert parse_gpu_type("AMD Radeon AI PRO R9700S") is None
     assert parse_gpu_type("gfx1201") is None
+
+
+@pytest.mark.parametrize("board", ["mi300a", "mi300x", "mi308x", "mi325x"])
+def test_remote_torch_product_name_wins_over_shared_architecture(board):
+    assert parse_gpu_type(f"AMD Instinct {board.upper()} gfx942:sramecc+:xnack-") == board
+
+
+@pytest.mark.parametrize("smi_exit", [0, 1])
+def test_remote_probe_command_preserves_torch_product_name(tmp_path, smi_exit):
+    smi = tmp_path / "rocm-smi"
+    smi.write_text(f"#!/bin/sh\nprintf 'GPU[0]: Card series: N/A\\n'\nexit {smi_exit}\n", newline="\n")
+    smi.chmod(0o755)
+    (tmp_path / "torch.py").write_text(
+        "from types import SimpleNamespace\n"
+        "cuda = SimpleNamespace(get_device_properties=lambda _: "
+        "SimpleNamespace(name='AMD Instinct MI300A', gcnArchName='gfx942:sramecc+:xnack-'))\n"
+    )
+    env = {**os.environ, "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}", "PYTHONPATH": str(tmp_path)}
+    result = subprocess.run(["bash", "-c", gpu_probe._PROBE_CMD], env=env, text=True, capture_output=True, check=True)
+    assert parse_gpu_type(result.stdout) == "mi300a"
