@@ -92,11 +92,11 @@ Units that were already over a threshold when the gate landed are recorded with 
 - a unit over a threshold that is not in the baseline fails — new code meets the limits;
 - a baselined unit that got worse than its recorded value fails — **do not grow the backlog**: adding branches or lines to a unit, or lines to a module, that is already over is a failure, not a judgement call;
 - in both cases the same file at the merge base is measured too, and a unit the base already had at that value or worse is backlog, not this PR's debt — the comparison the [Complexity ceiling](#complexity-ceiling) defines;
-- a baselined unit that improved, dropped under the limit or was deleted fails as *out of date* until `python scripts/code_metrics.py --update-baseline` is run and the baseline committed in the same PR (the command can only lower or remove entries).
+- a baselined unit that improved, dropped under the limit or was deleted fails as *out of date* until `python scripts/code_metrics.py --update-baseline` is run and the baseline committed in the same PR (the command can only lower or remove entries). When the merge base already had the unit that low (`main` improved it without tightening the baseline), the entry is listed for information and does not fail; this covers the per-file dimensions, which the gate can measure at the base.
 
 Across the whole file, not only touched entries: relative to the base branch the PR's baseline may only lose entries or lower values, and the config may not loosen (no raised limit, no new exclusion, no file the base's scope measured left unmeasured). Adding a unit to the baseline is not a way to pass.
 
-**Override: the `baseline-raise` label.** A PR that has to land a new or worse unit, or grow the baseline, carries the `baseline-raise` label, and its description says why. The gate reads the label from the GitHub API when it runs (adding or removing the label re-runs the job); new, worse and baseline-growth findings are then *waived* — still listed in full in the job log and the report, no longer failing. It waives nothing else: an out-of-date entry, a loosened config and the checks below still fail.
+**Override: the `baseline-raise` label.** A PR that has to land a new or worse unit, grow the baseline, or keep a failing design-check finding carries the `baseline-raise` label, and its description says why. The gate reads the label from the GitHub API when it runs (adding or removing the label re-runs the job; the push to `main` reads the label of the PR whose merge it is); new, worse and baseline-growth findings and the failing design checks are then *waived* — still listed in full in the job log and the report, no longer failing. It waives nothing else: an out-of-date entry, a loosened config and the checks without a baseline still fail.
 
 CI judges a PR with the base branch's copy of the gate scripts, so a PR that edits `scripts/code_metrics*.py` does not grade itself; the report lists every edit to the gate's scripts, workflows or tool pins under *Gate implementation changed* for a reviewer. A gate change that the base's copy cannot run (a new config key, say) lands in two steps: first teach the scripts to accept it, then use it.
 
@@ -104,7 +104,7 @@ A unit that only moved to another file keeps its baseline entry when its qualifi
 
 Editing a unit that was already over is not a demand to repay its debt — the gate only asks that it not get worse. Extracting a helper while you are in there is in scope, and the gate rewards it with an out-of-date entry to tighten; a standalone rewrite of an unrelated module is a separate PR (see [`AGENTS.md`](../../AGENTS.md) § *One concern per change*).
 
-**Checks without a baseline.** The same job runs four checks that have no backlog to carry, and the design checks below; each fails the PR on its own:
+**Checks without a baseline.** The same job runs four checks that have no backlog to carry, and the design checks below. Each of the four fails the PR on its own, and `baseline-raise` does not waive them:
 
 | Check | Fails when | Scope |
 |-------|-----------|-------|
@@ -115,7 +115,7 @@ Editing a unit that was already over is not a demand to repay its debt — the g
 
 The comment and literal checks are diff-only on purpose: the history in a comment is cheap to keep out and expensive to strip later, and a whole-tree literal count would flag most modules in the tree for values nobody is changing.
 
-**Design checks.** The same job also runs diff-only checks for the code-shape review rules A1 and A8-A12 (`scripts/code_metrics_design.py`). Each has its own section in the report and fails the PR on its own. They judge only what the PR adds in the production modules it touches; tests (a `tests/` package, a `test_*.py` module, `conftest.py`) are exempt from all of them. A line is *added* when the diff adds it and the PR did not remove the same text elsewhere (a move, a re-indent, a renamed file); a function or class is *new* when its `def`/`class` line is added and the same file at the merge base (for a renamed file, the file it came from) had no unit of that qualified name, so editing an existing function never makes it new.
+**Design checks.** The same job also runs diff-only checks for the code-shape review rules A1 and A8-A12 (`scripts/code_metrics_design.py`). Each has its own section in the report. A1, A8 and the A12 forwarder fail the PR (the `baseline-raise` label waives them, with the reason in the description); A9, A10, A11 and the A12 single-implementation abstraction are advisory, as the A rules rate them, and are listed without failing. They judge only what the PR adds in the production modules it touches; tests (a `tests/` package, a `test_*.py` module, `conftest.py`) are exempt from all of them. A line is *added* when the diff adds it and the PR did not remove the same text elsewhere (a move, a re-indent, a renamed file); a function or class is *new* when its `def`/`class` line is added and the same file at the merge base (for a renamed file, the file it came from) had no unit of that qualified name, so editing an existing function never makes it new.
 
 | Check | Fails when | Exempt |
 |-------|-----------|--------|
@@ -170,7 +170,7 @@ ruff check --select C901 --config "lint.mccabe.max-complexity=20" --isolated \
 
 The tree carried 124 units above 20 when the ceiling was introduced (2026-10-10). The ceiling is what stops that number growing; it is not a demand to pay the 124 down.
 
-CI now measures the ceiling: the `code-metrics` job (see [Size and complexity](#size-and-complexity)) applies exactly these two cases to every function in the files a PR touches under `src/` and `scripts/`, comparing the head with the merge base, and the units already above 20 are its baseline. The review rule stands; the job makes the measurement for it.
+CI now measures the ceiling: the `code-metrics` job (see [Size and complexity](#size-and-complexity)) applies exactly these two cases to every function in the files a PR touches under `src/` and `scripts/`, comparing the head with the merge base, and the units already above 20 are its baseline. The `baseline-raise` label waives that CI check; review then accepts the override only when the PR description gives the reason the function stays above 20.
 
 ### Module structure
 
