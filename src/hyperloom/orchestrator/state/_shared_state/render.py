@@ -204,6 +204,14 @@ class _RenderMixin:
             "(reason latency_budget_exceeded / latency_unmeasured in explore_search and the journal)"
         )
 
+    def to_constraint_sections(self) -> list[str]:
+        """A header and the summary line for each session budget that is set, latency first."""
+        sections: list[str] = []
+        for title, block in (("Latency", self.to_latency_budget_summary()), ("Power", self.to_power_budget_summary())):
+            if block:
+                sections += [f"=== {title} budget (constraint) ===", block]
+        return sections
+
     def to_power_budget_summary(self) -> str:
         """One line stating the power budgets and the cap the cards are at; empty when no budget is set."""
         budget = float(getattr(self, "power_budget_w", 0.0) or 0.0)

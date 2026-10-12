@@ -105,6 +105,20 @@ def _replay_server_logs(out_dir: Path) -> list[str]:
 
 
 def _run_with_power_sampling(
+    run: Callable[[], subprocess.CompletedProcess], out_dir: Path, env: Mapping[str, str], entry: dict[str, Any]
+) -> subprocess.CompletedProcess:
+    """Run one replay under the power recorder and record its measured power into ``entry``.
+
+    Both power fields stay ``None`` when sampling is off, nothing was measured, or the replay raised.
+    """
+    entry.update(gpu_power_avg_w=None, gpu_power_by_gpu_w=None)
+    proc = _run_sampled(run, out_dir, env)
+    entry["gpu_power_avg_w"] = read_measured_gpu_power(out_dir)[1]
+    entry["gpu_power_by_gpu_w"] = read_measured_gpu_power_by_gpu(out_dir)[1]
+    return proc
+
+
+def _run_sampled(
     run: Callable[[], subprocess.CompletedProcess], out_dir: Path, env: Mapping[str, str]
 ) -> subprocess.CompletedProcess:
     """Run one replay with the measured-phase power recorder a native round gets.
@@ -315,12 +329,8 @@ async def sweep_via_geak(
             tput = None
             succeeded = False
             err: str | None = None
-            entry["gpu_power_avg_w"] = None
-            entry["gpu_power_by_gpu_w"] = None
             try:
-                proc = await asyncio.to_thread(_run_with_power_sampling, _run, out_dir, env)
-                entry["gpu_power_avg_w"] = read_measured_gpu_power(out_dir)[1]
-                entry["gpu_power_by_gpu_w"] = read_measured_gpu_power_by_gpu(out_dir)[1]
+                proc = await asyncio.to_thread(_run_with_power_sampling, _run, out_dir, env, entry)
                 summ = read_json(out_dir / "bench_summary.json", default={}, require_dict=True)
                 # ``throughput_tok_s_median`` is the metric-neutral median of
                 # whatever basis GEAK measured, and the only field populated in

@@ -267,10 +267,10 @@ class TestUnmeasurableBudget:
 
     @pytest.fixture
     def sampler_available(self, monkeypatch):
-        from hyperloom.orchestrator.actions.executors import _gpu_power
+        from hyperloom.common import gpu_power_settings
 
-        monkeypatch.delenv(_gpu_power.GPU_POWER_ENV, raising=False)
-        monkeypatch.setattr(_gpu_power.shutil, "which", lambda name: "/usr/bin/amd-smi")
+        monkeypatch.delenv(gpu_power_settings.GPU_POWER_SAMPLING_ENV, raising=False)
+        monkeypatch.setattr(gpu_power_settings.shutil, "which", lambda name: "/usr/bin/amd-smi")
 
     def test_a_measurable_budget_passes(self, sampler_available):
         assert self._error() == ""
@@ -295,10 +295,10 @@ class TestUnmeasurableBudget:
         assert "HYPERLOOM_GPU_POWER_SAMPLING=0" in self._error()
 
     def test_no_amd_smi_refuses(self, monkeypatch):
-        from hyperloom.orchestrator.actions.executors import _gpu_power
+        from hyperloom.common import gpu_power_settings
 
-        monkeypatch.delenv(_gpu_power.GPU_POWER_ENV, raising=False)
-        monkeypatch.setattr(_gpu_power.shutil, "which", lambda name: None)
+        monkeypatch.delenv(gpu_power_settings.GPU_POWER_SAMPLING_ENV, raising=False)
+        monkeypatch.setattr(gpu_power_settings.shutil, "which", lambda name: None)
         assert "amd-smi is not on PATH" in self._error(total_w=None, per_gpu_w={"4": 700.0})
 
     @pytest.mark.parametrize("off", [None, 0.0])

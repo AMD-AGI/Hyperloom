@@ -59,6 +59,7 @@ from hyperloom.common.perf_metric import (
     GRADED_INTVTY,
     GRADED_OUTPUT,
     VERDICT_KEEP,
+    constraint_fields,
     holds_within_band,
     constraint_veto_reason,
     incomparability_reason,
@@ -4656,11 +4657,8 @@ class IntegratePatchExecutor:
                     # the emitted keys stay ``ttft_ms`` / ``itl_ms`` for the collectors.
                     "ttft_ms": r.ttft_mean_ms,
                     "itl_ms": r.tpot_mean_ms,
-                    # Canonical name: the latency budget fails closed, so a lane that
-                    # does not carry this refuses every KEEP it would ever have made.
-                    "e2el_mean_ms": r.e2el_mean_ms,
-                    "gpu_power_avg_w": r.gpu_power_avg_w,
-                    "gpu_power_by_gpu_w": r.gpu_power_by_gpu_w,
+                    # The session's constraints fail closed: a lane that drops these refuses every KEEP.
+                    **constraint_fields(r),
                     # Benchmark dir; ``grade_accuracy`` locates accuracy artifacts here.
                     "workspace": r.workspace or "",
                     "error": r.error or "",

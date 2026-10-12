@@ -21,24 +21,22 @@ from __future__ import annotations
 
 import json
 import logging
-import shutil
 import subprocess  # nosec B404 - fixed read-only amd-smi invocation.
 import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
 
-from hyperloom.common.env import env_flag, env_float
+from hyperloom.common.env import env_float
+from hyperloom.common.gpu_power_settings import gpu_power_sampling_unavailable
 
 log = logging.getLogger(__name__)
 
 __all__ = [
     "GPU_POWER_ARTIFACT_NAME",
-    "GPU_POWER_ENV",
     "GpuPowerRecorder",
     "ServerLogPhaseDriver",
     "build_gpu_power_recorder",
-    "gpu_power_sampling_unavailable",
     "parse_power_sample",
     "read_measured_gpu_power",
     "read_measured_gpu_power_by_gpu",
@@ -47,8 +45,6 @@ __all__ = [
 #: Artifact written beside the round's ``server.log``.
 GPU_POWER_ARTIFACT_NAME = "gpu_power.json"
 
-#: Escape hatch for a host where running ``amd-smi`` every couple of seconds is not acceptable.
-GPU_POWER_ENV = "HYPERLOOM_GPU_POWER_SAMPLING"
 _INTERVAL_ENV = "HYPERLOOM_GPU_POWER_INTERVAL_S"
 _DEFAULT_INTERVAL_SEC = 2.0
 _MIN_INTERVAL_SEC = 0.5
@@ -62,7 +58,8 @@ _SERVING_VRAM_FRACTION = 0.10
 #: How far a recorder's start may precede the subprocess it is paired with and still be that round's.
 _START_SLACK_SEC = 5.0
 
-_PHASES = ("boot", "warmup", "measured", "eval")
+_BOOT = "boot"
+_PHASES = (_BOOT, "warmup", "measured", "eval")
 
 
 def _value(block: Any) -> float | None:
@@ -123,7 +120,7 @@ class GpuPowerRecorder:
         self._gpus = None if gpus is None else set(gpus)
         self._interval = max(_MIN_INTERVAL_SEC, float(interval_sec))
         self._query = query or (lambda: _query_amd_smi(subprocess.run))
-        self._phase = "boot"
+        self._phase = _BOOT
         self._samples: list[dict[int, tuple[float | None, float | None]]] = []
         self._errors = 0
         self._last_error: str | None = None
@@ -284,7 +281,7 @@ class ServerLogPhaseDriver:
         for path in self._find_logs():
             if path not in self._offsets:
                 self._offsets[path] = 0
-                self._recorder.note_phase("boot", time.monotonic())
+                self._recorder.note_phase(_BOOT, time.monotonic())
             scan = self._scan(path, self._offsets, self._residuals, self._identities)
             now = time.monotonic()
             if scan.saw_ready:
@@ -318,15 +315,6 @@ class ServerLogPhaseDriver:
             self.poll()
         except Exception:
             log.debug("gpu_power: final replay log poll failed", exc_info=True)
-
-
-def gpu_power_sampling_unavailable() -> str:
-    """Why no round on this host can be sampled, or ``""``."""
-    if not env_flag(GPU_POWER_ENV, default=True):
-        return f"{GPU_POWER_ENV}=0 turns the GPU power sampler off"
-    if shutil.which("amd-smi") is None:
-        return "amd-smi is not on PATH, so the GPU power sampler has nothing to read"
-    return ""
 
 
 def build_gpu_power_recorder(server_log_path: str | None, env: dict[str, str] | None) -> GpuPowerRecorder | None:

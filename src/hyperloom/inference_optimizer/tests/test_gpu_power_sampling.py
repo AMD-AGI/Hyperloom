@@ -341,8 +341,22 @@ def test_a_geak_replay_is_sampled_over_its_measured_phase(tmp_path, monkeypatch)
         time.sleep(2.5)
         return sp.CompletedProcess(["bash"], 0, "", "")
 
-    proc = _geak_sweep._run_with_power_sampling(_replay, tmp_path, {})
+    entry: dict = {}
+    proc = _geak_sweep._run_with_power_sampling(_replay, tmp_path, {}, entry)
     assert proc.returncode == 0
     found, watts = read_measured_gpu_power(tmp_path)
     assert found is True
     assert watts == 780.0
+    assert entry["gpu_power_avg_w"] == 780.0
+
+
+def test_a_geak_replay_that_raises_records_no_power(tmp_path):
+    from hyperloom.orchestrator.actions.executors import _geak_sweep
+
+    def _replay():
+        raise TimeoutError("replay timed out")
+
+    entry: dict = {}
+    with pytest.raises(TimeoutError):
+        _geak_sweep._run_with_power_sampling(_replay, tmp_path, {}, entry)
+    assert entry == {"gpu_power_avg_w": None, "gpu_power_by_gpu_w": None}

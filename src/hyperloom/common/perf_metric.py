@@ -395,6 +395,18 @@ def constraint_veto_reason(measurement: Any, state: Any) -> str:
     )
 
 
+#: Every measurement field a session constraint reads, with the mean power reported beside the per-card figures. A
+#: carrier that hands a measurement to a KEEP decision copies them together, so no lane drops one.
+CONSTRAINT_FIELDS = ("e2el_mean_ms", "gpu_power_avg_w", "gpu_power_by_gpu_w")
+
+
+def constraint_fields(source: Any) -> dict[str, Any]:
+    """:data:`CONSTRAINT_FIELDS` read off a mapping or an object; an absent field is ``None``."""
+    if isinstance(source, Mapping):
+        return {name: source.get(name) for name in CONSTRAINT_FIELDS}
+    return {name: getattr(source, name, None) for name in CONSTRAINT_FIELDS}
+
+
 @dataclass(frozen=True)
 class GradedComparison:
     """A candidate, the figure it must beat, and the verdict on that pair.
@@ -433,6 +445,7 @@ class GradedComparison:
 
 __all__ = [
     "AGENTX_KEEP_P50_THRESHOLD_PCT",
+    "CONSTRAINT_FIELDS",
     "DURATION_DRIFT_PCT",
     "ERROR_RATE_SLACK_PCT",
     "GradedComparison",
@@ -458,6 +471,7 @@ __all__ = [
     "intvty_of",
     "intvty_serving_grading_enabled",
     "is_agentx_mode",
+    "constraint_fields",
     "constraint_veto_reason",
     "latency_veto_reason",
     "power_veto_reason",

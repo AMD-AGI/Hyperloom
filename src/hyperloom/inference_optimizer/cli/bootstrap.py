@@ -63,6 +63,11 @@ def resolve_model_display_name(args: argparse.Namespace) -> str:
 AGENTX_MEASUREMENT_EPOCH = 1
 
 
+def _requested_framework(args: Any) -> str:
+    """--framework, else $FRAMEWORK, else ""."""
+    return (getattr(args, "framework", None) or "").strip() or (os.environ.get("FRAMEWORK", "") or "").strip()
+
+
 def resolve_framework_version(args: argparse.Namespace) -> str:
     """Resolve ``framework_version``: --framework-version > $FRAMEWORK_VERSION > auto-detect > ""."""
     explicit = (getattr(args, "framework_version", None) or "").strip() or (
@@ -70,7 +75,7 @@ def resolve_framework_version(args: argparse.Namespace) -> str:
     ).strip()
     if explicit:
         return explicit
-    framework = (getattr(args, "framework", None) or "").strip() or (os.environ.get("FRAMEWORK", "") or "").strip()
+    framework = _requested_framework(args)
     if not framework:
         return ""
     from ..recipe_snapshot_constants import (
@@ -229,7 +234,7 @@ def power_budget_unmeasurable_error(
             f"--max-power-w / --max-per-gpu-power-w cannot be measured on the scriptable framework {framework!r}: the "
             "GPU power sampler follows a server's measured phase, and a scriptable round runs no server"
         )
-    from hyperloom.orchestrator.actions.executors._gpu_power import gpu_power_sampling_unavailable
+    from hyperloom.common.gpu_power_settings import gpu_power_sampling_unavailable
 
     reason = gpu_power_sampling_unavailable()
     return f"--max-power-w / --max-per-gpu-power-w cannot be measured: {reason}" if reason else ""
@@ -263,6 +268,67 @@ def per_gpu_power_budget_error(
             f"{float(total_w):g} W"
         )
     return ""
+
+
+_MAX_LATENCY_MS = "max_latency_ms"
+_MAX_POWER_W = "max_power_w"
+_MAX_PER_GPU_POWER_W = "max_per_gpu_power_w"
+_NODES = "nodes"
+
+
+def constraint_budgets_from_args(args: Any) -> dict[str, Any]:
+    """The session's latency and power budgets from the CLI: the only copy, archived with the session."""
+    return {
+        "latency_budget_ms": float(getattr(args, _MAX_LATENCY_MS, None) or 0.0),
+        "power_budget_w": float(getattr(args, _MAX_POWER_W, None) or 0.0),
+        "power_budget_per_gpu_w": dict(getattr(args, _MAX_PER_GPU_POWER_W, None) or {}),
+    }
+
+
+def constraint_budget_resume_conflict(args: Any, state: Any) -> str:
+    """Why a resume cannot keep the latency and power budgets the session was graded under, or ``""``."""
+    return (
+        latency_budget_resume_conflict(state, getattr(args, _MAX_LATENCY_MS, None))
+        or power_budget_resume_conflict(state, getattr(args, _MAX_POWER_W, None))
+        or per_gpu_power_budget_resume_conflict(state, getattr(args, _MAX_PER_GPU_POWER_W, None))
+        or power_budget_unmeasurable_error(
+            total_w=getattr(state, "power_budget_w", 0.0),
+            per_gpu_w=getattr(state, "power_budget_per_gpu_w", None),
+            nodes=max(int(getattr(args, _NODES, 1) or 1), int(getattr(state, _NODES, 1) or 1)),
+            framework=state.framework,
+        )
+    )
+
+
+def resolve_launch_gpu_power(args: Any, *, nodes: int) -> dict[str, Any]:
+    """The launch's GPU power settings record; exits 2 before anything runs when the declared settings cannot be
+    applied or a requested power budget cannot be measured or checked."""
+    from hyperloom.common.gpu_power_settings import visible_gpu_indices
+
+    gpu_power, error = resolve_gpu_power_settings(
+        power_cap_w=getattr(args, "gpu_power_cap_w", None),
+        perf_level=getattr(args, "gpu_perf_level", None),
+        nodes=nodes,
+    )
+    observed = {int(gpu) for gpu in (gpu_power.get("observed") or {})} or None
+    error = (
+        error
+        or power_budget_unmeasurable_error(
+            total_w=getattr(args, _MAX_POWER_W, None),
+            per_gpu_w=getattr(args, _MAX_PER_GPU_POWER_W, None),
+            nodes=nodes,
+            framework=_requested_framework(args),
+        )
+        or per_gpu_power_budget_error(
+            getattr(args, _MAX_PER_GPU_POWER_W, None),
+            total_w=getattr(args, _MAX_POWER_W, None),
+            available_gpus=visible_gpu_indices() or observed,
+        )
+    )
+    if error:
+        print(f"ERROR: {error}.", file=sys.stderr)
+        sys.exit(2)
+    return gpu_power
 
 
 def resolve_gpu_power_settings(
@@ -443,11 +509,9 @@ def _seed_shared_state(
         # config.json structural summary, persisted for downstream collectors.
         model_info=summarize_model_config(str(args.model)),
         framework=os.environ.get("FRAMEWORK", "sglang"),
-        # The only copy of the budget. Validated at the CLI, so anything that reaches here is usable, and archived
-        # with the session so a resume restores it without a second source to reconcile.
-        latency_budget_ms=float(getattr(args, "max_latency_ms", None) or 0.0),
-        power_budget_w=float(getattr(args, "max_power_w", None) or 0.0),
-        power_budget_per_gpu_w=dict(getattr(args, "max_per_gpu_power_w", None) or {}),
+        # The only copy of the budgets. Validated at the CLI, so anything that reaches here is usable, and archived
+        # with the session so a resume restores them without a second source to reconcile.
+        **constraint_budgets_from_args(args),
         gpu_power_settings=dict(gpu_power_settings or {}),
         gpu_type=str(getattr(args, "gpu_type", None) or os.environ.get("GPU_TYPE", "")),
         # Workload metadata mirrored from CLI/env.
@@ -481,7 +545,7 @@ def _seed_shared_state(
         framework_repo_path=os.environ.get("FRAMEWORK_REPO_PATH", "").strip(),
         benchmark_backend=os.environ.get("HYPERLOOM_BENCHMARK_BACKEND", "").strip().lower(),
         compute_partition=dict(compute_partition if compute_partition is not None else (published_shape() or {})),
-        nodes=max(1, int(getattr(args, "nodes", 1) or 1)),
+        nodes=max(1, int(getattr(args, _NODES, 1) or 1)),
         warm_replay_enabled=not bool(getattr(args, "no_warm_replay", False)),
         **(
             {}

@@ -8,7 +8,7 @@ import logging as _logging
 from pathlib import Path
 from collections.abc import Mapping, Sequence
 from typing import Any
-from hyperloom.common.perf_metric import VERDICT_KEEP, graded_axes_of
+from hyperloom.common.perf_metric import VERDICT_KEEP, constraint_fields, graded_axes_of
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
     GATE_ACCURACY,
@@ -2377,9 +2377,7 @@ class PreludePhase(CoordinatorCollaborator):
                     "name": "warm_replay",
                     **graded_axes_of(result),
                     # The latency and power budgets grade on these and fail closed without them.
-                    "e2el_mean_ms": result.get("e2el_mean_ms"),
-                    "gpu_power_avg_w": result.get("gpu_power_avg_w"),
-                    "gpu_power_by_gpu_w": result.get("gpu_power_by_gpu_w"),
+                    **constraint_fields(result),
                     "candidate_extra_server_args": warm_args,
                     "candidate_extra_envs": warm_envs,
                     "recipe_delta": {
