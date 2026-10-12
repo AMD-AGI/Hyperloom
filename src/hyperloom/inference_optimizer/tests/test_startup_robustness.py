@@ -578,24 +578,26 @@ def test_launch_info_is_emitted_on_resume_too():
     import pathlib
 
     tree = ast.parse(pathlib.Path(cli.__file__).read_text(encoding="utf-8"))
+    module_functions = {
+        node.name: node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
 
-    def emits(stmts) -> bool:
-        return any(
-            isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "_emit_launch_info"
-            for stmt in stmts
-            for node in ast.walk(stmt)
-        )
+    def emits(name: str, seen: set[str] | None = None) -> bool:
+        """Whether this function emits launch info, directly or through another in this module."""
+        seen = seen if seen is not None else set()
+        if name in seen or name not in module_functions:
+            return False
+        seen.add(name)
+        called = {
+            node.func.id
+            for node in ast.walk(module_functions[name])
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        return "_emit_launch_info" in called or any(emits(callee, seen) for callee in called)
 
-    resume_ifs = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.If)
-        and any(isinstance(sub, ast.Attribute) and sub.attr == "resume_from" for sub in ast.walk(node.test))
-        and node.orelse
-    ]
-    assert any(emits(node.body) and emits(node.orelse) for node in resume_ifs), (
-        "_emit_launch_info runs on only one side of `if args.resume_from:`"
-    )
+    for path in ("_resume_session", "_seed_fresh_session"):
+        assert path in module_functions, f"{path} is not where the session-opening paths live any more"
+        assert emits(path), f"{path} does not emit launch info"
 
 
 def test_emit_launch_info_no_file_no_extra_print(tmp_path, capsys):
