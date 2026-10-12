@@ -2996,6 +2996,34 @@ async def _capture_vllm_tunableop_shapes(
     }
 
 
+async def _invoke_forge_gemm_tune(input_payload: dict[str, Any], timeout: int) -> dict[str, Any]:
+    """Run ``kernelforge gemm-tune`` for ``input_payload`` and return its result, or a failed result."""
+    try:
+        cmd = forge_gemm_tuning.build_command(input_payload)
+    except ValueError as exc:
+        return {
+            "status": "failed",
+            "micro_decision": "failed",
+            "error_class": exc.__class__.__name__,
+            "error": repr(exc),
+        }
+    aiter_root = _resolve_aiter_root_for_forge()
+    if aiter_root:
+        cmd = ["env", f"AITER_ROOT_DIR={aiter_root}", *cmd]
+    try:
+        rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout, label="forge_gemm_tuning")
+    except subprocess.TimeoutExpired as exc:
+        # Reaped by the process-group kill in _run_subprocess; shape a failed result.
+        cmd_repr = " ".join(str(c) for c in (getattr(exc, "cmd", None) or cmd))
+        return {
+            "status": "failed",
+            "error_class": "subprocess_timeout",
+            "error": f"TimeoutExpired after {timeout}s: {cmd_repr[:1500]}",
+        }
+    result = _parse_forge_gemm_sentinel(stdout)
+    return result if result is not None else _shape_tool_result(rc, stdout, stderr)
+
+
 async def _run_forge_gemm_tuning(
     payload: dict,
     *,
@@ -3339,32 +3367,7 @@ async def _run_forge_gemm_tuning(
         # Exhaustive search when budget allows (>= 24h) and mp >= 4.
         "thorough": bool(session_max_min >= 1440 and mp >= 4),
     }
-    try:
-        cmd = forge_gemm_tuning.build_command(input_payload)
-    except ValueError as exc:
-        result = {
-            "status": "failed",
-            "micro_decision": "failed",
-            "error_class": exc.__class__.__name__,
-            "error": repr(exc),
-        }
-    else:
-        aiter_root = _resolve_aiter_root_for_forge()
-        if aiter_root:
-            cmd = ["env", f"AITER_ROOT_DIR={aiter_root}", *cmd]
-        try:
-            rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout, label="forge_gemm_tuning")
-            result = _parse_forge_gemm_sentinel(stdout)
-            if result is None:
-                result = _shape_tool_result(rc, stdout, stderr)
-        except subprocess.TimeoutExpired as exc:
-            # Reaped by the process-group kill in _run_subprocess; shape a failed result.
-            cmd_repr = " ".join(str(c) for c in (getattr(exc, "cmd", None) or cmd))
-            result = {
-                "status": "failed",
-                "error_class": "subprocess_timeout",
-                "error": f"TimeoutExpired after {timeout}s: {cmd_repr[:1500]}",
-            }
+    result = await _invoke_forge_gemm_tune(input_payload, timeout)
 
     result.setdefault("backend", "forge")
     # Tag the tuning engine so the breakdown attributes this run to forge.
