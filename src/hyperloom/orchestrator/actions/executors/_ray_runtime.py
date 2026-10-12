@@ -60,6 +60,8 @@ def _resources_start_args() -> list[str]:
 # co-scheduled on ONE compute node (SLURM packs sub-node ``--gpus`` requests), and spur runs the container on the host
 # network stack (the bridge has no egress).
 _HL_RAY_HEAD_PORT_ENV = "HL_RAY_HEAD_PORT"
+# The Ray address that means "discover the cluster this host already runs".
+_RAY_ADDRESS_AUTO = "auto"
 
 
 def _free_tcp_port() -> int:
@@ -359,7 +361,7 @@ def local_head_restartable() -> Tuple[bool, str]:
         ``(True, "")`` when a restart is safe, else ``(False, why)``.
     """
     address = os.environ.get("RAY_ADDRESS", "").strip()
-    if address and address.lower() != "auto":
+    if address and address.lower() != _RAY_ADDRESS_AUTO:
         return False, f"RAY_ADDRESS={address!r} names an explicit cluster"
     from ._multi_node_env import is_multi_node
 
@@ -601,7 +603,7 @@ def quiet_ray_init(num_gpus: Optional[int] = None, log_path: Optional[Path] = No
             raise error
 
     try:
-        _init(os.environ.get("RAY_ADDRESS", "auto"))
+        _init(os.environ.get("RAY_ADDRESS", _RAY_ADDRESS_AUTO))
     except Exception as exc:
         if not _is_ray_version_mismatch(str(exc)):
             raise
@@ -611,5 +613,5 @@ def quiet_ray_init(num_gpus: Optional[int] = None, log_path: Optional[Path] = No
         except Exception:  # noqa: BLE001
             pass
         force_restart_local_cluster(num_gpus=num_gpus, log_path=log_path)
-        _init("auto")
+        _init(_RAY_ADDRESS_AUTO)
     return runtime_env

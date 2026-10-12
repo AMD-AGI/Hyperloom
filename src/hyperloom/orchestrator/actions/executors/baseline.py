@@ -186,6 +186,8 @@ _MOE_SCHEME_CONTEXT_MARKERS = (
 
 # Fast-exit arg errors (vLLM/sglang exits in <30s on bad CLI args) should not consume the slow-baseline retry budget.
 FAST_EXIT_THRESHOLD_SEC = 30.0
+# The error class of a subprocess that exited nonzero for no recognised cause.
+_SUBPROCESS_NONZERO = "subprocess_nonzero"
 _ARG_ERROR_PATTERNS = (
     "unrecognized arguments",
     "invalid choice",
@@ -731,12 +733,12 @@ def _classify_subprocess_error(
     if any(m in tail for m in _KV_CACHE_OOM_MARKERS):
         return "kv_cache_oom"
     if elapsed_sec >= FAST_EXIT_THRESHOLD_SEC:
-        return "subprocess_nonzero"
+        return _SUBPROCESS_NONZERO
     if any(p.lower() in tail for p in _ARG_ERROR_PATTERNS):
         return "fast_exit_arg_error"
     if "valueerror:" in tail and any(p in tail for p in _ARG_ERROR_CONTEXT_PATTERNS):
         return "fast_exit_arg_error"
-    return "subprocess_nonzero"
+    return _SUBPROCESS_NONZERO
 
 
 _SIGNATURE_VOLATILE_RE = re.compile(r"0x[0-9a-f]+|[0-9a-f]{8,}|\d+")
@@ -763,7 +765,7 @@ def nonzero_output_signature(err_class: str, proc_stdout: str | None, proc_stder
         ``"<class>|<sha256>"``, or ``""`` when there is no signature (another class, or
         no output: two failures that said nothing are not known to be the same failure).
     """
-    if err_class != "subprocess_nonzero":
+    if err_class != _SUBPROCESS_NONZERO:
         return ""
     text = redact_secret_values(f"{proc_stderr or ''}\n{proc_stdout or ''}").strip().lower()
     if not text:
