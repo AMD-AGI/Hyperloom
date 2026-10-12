@@ -972,20 +972,23 @@ DRIFT = "### Baseline already out of date at the base (not this change's"
 
 
 @pytest.mark.parametrize(
-    ("at_base", "now", "code"),
+    ("recorded", "at_base", "now", "code"),
     [
-        # Main improved the unit (or fixed it) before this change touched the file: informational.
-        (18, 18, 0),
-        (None, None, 0),
+        # Main improved the unit (or fixed it) and this change left it as the base had it: informational.
+        (21, 18, 18, 0),
+        (21, None, None, 0),
         # This change improved it: the baseline must be tightened in the same change.
-        (21, 18, 1),
-        (21, None, 1),
+        (21, 21, 18, 1),
+        (21, 21, None, 1),
         # Main improved it, and this change improved it further: still this change's to record.
-        (20, 18, 1),
+        (21, 20, 18, 1),
+        # This change made it worse than the base, under a stale allowance: never excused.
+        (30, 25, 26, 1),
+        (30, None, 25, 1),
     ],
 )
-def test_an_out_of_date_entry_main_already_outgrew_does_not_fail(repo: Repo, at_base, now, code) -> None:
-    repo.write_baseline({key("src/a.py", "f"): 21})
+def test_an_out_of_date_entry_main_already_outgrew_does_not_fail(repo: Repo, recorded, at_base, now, code) -> None:
+    repo.write_baseline({key("src/a.py", "f"): recorded})
     base = repo.commit()
     repo.touch("src/a.py")
     repo.at_base = {} if at_base is None else {key("src/a.py", "f"): at_base}
@@ -993,12 +996,12 @@ def test_an_out_of_date_entry_main_already_outgrew_does_not_fail(repo: Repo, at_
     got, report = repo.gate("--base-ref", base)
     assert got == code, report
     if code:
-        assert "`src/a.py` `f` | Cyclomatic complexity | 21 |" in section(report, OUT_OF_DATE)
+        assert f"`src/a.py` `f` | Cyclomatic complexity | {recorded} |" in section(report, OUT_OF_DATE)
         assert section(report, DRIFT) == ""
     else:
         assert section(report, OUT_OF_DATE) == ""
         shown = "under the limit" if at_base is None else at_base
-        assert f"`src/a.py` `f` | Cyclomatic complexity | 21 | {shown} |" in section(report, DRIFT)
+        assert f"`src/a.py` `f` | Cyclomatic complexity | {recorded} | {shown} |" in section(report, DRIFT)
 
 
 def test_an_out_of_date_entry_the_base_cannot_measure_still_fails(repo: Repo) -> None:

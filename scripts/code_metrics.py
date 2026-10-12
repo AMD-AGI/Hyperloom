@@ -19,8 +19,8 @@ information and never fails an unrelated change. In a touched file:
   the base fails;
 * a baselined unit that improved, dropped under the threshold or disappeared fails as
   *out of date* until the baseline is tightened in the same change, with
-  ``--update-baseline`` (which can only lower or remove entries), unless the base had
-  already improved it that far (main changed the file; the entry is listed, not failed).
+  ``--update-baseline`` (which can only lower or remove entries), unless the change left
+  the unit exactly as the base had it (main improved it; the entry is listed, not failed).
 
 Whole-file, not scoped to the touched files: the baseline may only lose entries or lower
 values relative to the baseline on ``--base-ref``, and the thresholds, scope and tool
@@ -443,18 +443,17 @@ def excuse_base_drift(outcome: Outcome, base: dict[Key, int]) -> None:
 
     Main can improve a baselined unit without tightening the baseline (a change is judged
     only on the files it touches), and the next change to touch that file would then fail
-    for main's improvement. An entry is the base's when the base already measured the
-    unit no higher than this tree does, or under the limit. Only :data:`PER_FILE` metrics
+    for main's improvement. An entry is the base's when this change left the unit exactly as
+    the base had it: the same value, or under the limit (or gone) on both sides. A change
+    that moves the value either way still has to tighten the entry, so a unit it made
+    worse than the base cannot hide under a stale allowance. Only :data:`PER_FILE` metrics
     are measured at the base; an out-of-date duplication or dead-code entry still fails.
     """
 
     def drifted(entry: tuple[Key, int, Finding | None]) -> bool:
         key, _recorded, finding = entry
-        if key[0] not in PER_FILE:
-            return False
-        if key not in base:
-            return True
-        return finding is not None and finding.key == key and not worse(key[0], base[key], finding.value)
+        now = finding.value if finding is not None and finding.key == key else None
+        return key[0] in PER_FILE and base.get(key) == now
 
     outcome.base_drift = [(key, was, base.get(key), now) for key, was, now in outcome.stale if drifted((key, was, now))]
     outcome.stale = [entry for entry in outcome.stale if not drifted(entry)]
