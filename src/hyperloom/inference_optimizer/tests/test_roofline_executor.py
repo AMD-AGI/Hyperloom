@@ -191,13 +191,12 @@ async def test_cuda_graph_capture_failure_is_reported_not_retried_eager(tmp_path
     assert calls == 1
     assert not state.last_profile_workload
 
-    evidence = tmp_path / "diagnostics" / "roofline_cuda_graph_capture_t-roofline-1_attempt1.json"
+    evidence = tmp_path / "diagnostics" / "roofline_cuda_graph_capture_t-roofline-1.json"
     # The message has to name the evidence: a failure nobody can act on offline is the thing being removed here.
     assert str(evidence) in result["error"]
     diagnosis = json.loads(evidence.read_text(encoding="utf-8"))
     assert diagnosis["category"] == "config"
     assert diagnosis["matched_marker"] == "capture cuda graph failed"
-    assert diagnosis["attempt"] == 1
     assert diagnosis["config"]["disable_cuda_graph"] is False
     assert diagnosis["config"]["framework"] == "vllm"
     assert "Capture cuda graph failed" in diagnosis["sources"]["last_error"]
@@ -210,7 +209,7 @@ async def test_capture_marker_is_not_classified_when_capture_was_already_off(tmp
     """With the operator override set, a capture marker is not evidence about this run.
 
     The server log tail can span an earlier boot, so a stale marker must not hard-fail the action as a capture
-    failure -- and "does not retry with graph capture disabled" would be nonsense to read on a run that already
+    failure -- and "does not re-profile with graph capture disabled" would be nonsense to read on a run that already
     had it disabled. The failure stays a plain profile failure.
     """
     state = _state()
@@ -230,7 +229,7 @@ async def test_capture_marker_is_not_classified_when_capture_was_already_off(tmp
 
     assert result["status"] == "failed"
     assert not result["error_class"].startswith("profile_cuda_graph_capture_")
-    assert "does not retry with graph capture disabled" not in result["error"]
+    assert "does not re-profile with graph capture disabled" not in result["error"]
     assert not (tmp_path / "diagnostics").exists()
 
 
@@ -256,9 +255,7 @@ async def test_profile_instrumentation_capture_failure_is_classified_apart(tmp_p
 
     assert result["error_class"] == "profile_cuda_graph_capture_instrumentation_failed"
     diagnosis = json.loads(
-        (tmp_path / "diagnostics" / "roofline_cuda_graph_capture_t-roofline-1_attempt1.json").read_text(
-            encoding="utf-8"
-        )
+        (tmp_path / "diagnostics" / "roofline_cuda_graph_capture_t-roofline-1.json").read_text(encoding="utf-8")
     )
     assert diagnosis["category"] == "instrumentation"
 
