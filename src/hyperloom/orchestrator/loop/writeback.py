@@ -1457,9 +1457,9 @@ class WritebackCollaborator(CoordinatorCollaborator):
             correctness_fix = bv.get("keep_reason") == KEEP_REASON_CORRECTNESS_FIX
             if graded.graded_on_intvty and graded.verdict != VERDICT_KEEP and not correctness_fix:
                 log.info(
-                    "current_best held: %s winner %s intvty %.1f->%.1f tput %.1f->%.1f",
+                    "current_best held: %s winner refused by %s, intvty %.1f->%.1f tput %.1f->%.1f",
                     task_kind,
-                    graded.verdict,
+                    graded.refused_by,
                     graded.reference,
                     graded.candidate,
                     graded.tput_reference,
@@ -2865,29 +2865,28 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 outcome.verdict = Verdict.ADOPTED if promoted else Verdict.REFUSED
                 outcome.changed = True
                 return
-            else:
-                if measured_ok and self.shared_state.baseline_tput > 0 and not stale_measurement:
-                    self.validate(measured, result, source=STACK_REVALIDATE_SOURCE)
-                    cb_rec = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
-                    recorded = cb_rec.get("tput")
-                    floor = _DEFAULT_RESUME_DRIFT_FLOOR_PCT
-                    if (
-                        isinstance(recorded, (int, float))
-                        and recorded > 0
-                        and float(measured) < float(recorded) * floor / 100.0
-                    ):
-                        await self.bus.record_observation(
-                            "coordinator",
-                            "observation",
-                            {
-                                "kind": "current_best_drift",
-                                "severity": "high",
-                                "measured_tput": float(measured),
-                                "recorded_tput": float(recorded),
-                                "floor_pct": floor,
-                            },
-                        )
-                changed = True
+            if measured_ok and self.shared_state.baseline_tput > 0 and not stale_measurement:
+                self.validate(measured, result, source=STACK_REVALIDATE_SOURCE)
+                cb_rec = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
+                recorded = cb_rec.get("tput")
+                floor = _DEFAULT_RESUME_DRIFT_FLOOR_PCT
+                if (
+                    isinstance(recorded, (int, float))
+                    and recorded > 0
+                    and float(measured) < float(recorded) * floor / 100.0
+                ):
+                    await self.bus.record_observation(
+                        "coordinator",
+                        "observation",
+                        {
+                            "kind": "current_best_drift",
+                            "severity": "high",
+                            "measured_tput": float(measured),
+                            "recorded_tput": float(recorded),
+                            "floor_pct": floor,
+                        },
+                    )
+            changed = True
         # A revalidation task only CONFIRMS the existing stack/current_best; its
         # winner is not a new discovery. Skip the accept/lift path so a rebench
         # (e.g. geak_revalidate) never appends a duplicate optimization_stack

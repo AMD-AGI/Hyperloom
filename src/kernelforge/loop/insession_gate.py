@@ -803,13 +803,7 @@ class InSessionGate:
 
         def _safe_redirect_target(raw: str) -> bool:
             target = raw.strip().strip("'\"")
-            return (
-                not target
-                or target == "/dev/null"
-                or target.startswith("/tmp/")
-                or target.startswith("$tmp")
-                or target.startswith("${tmp")
-            )
+            return not target or target == "/dev/null" or target.startswith(("/tmp/", "$tmp", "${tmp"))
 
         # A path names a protected file if it resolves to one OR shares a basename with one (agents `cd` into the
         # workspace, so args are often relative and would not resolve to the protected ABSPATH).

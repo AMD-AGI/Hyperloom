@@ -107,7 +107,7 @@ class DenoiserGeometry:
     text_tokens: int = 256
     default_steps: int = 28
     default_cfg_batch: int = 2  # classifier-free guidance -> 2 forwards/step
-    # UNet-only (SDXL)
+    # UNet-only, SDXL
     unet: dict[str, Any] = field(default_factory=dict)
     notes: str = ""
 

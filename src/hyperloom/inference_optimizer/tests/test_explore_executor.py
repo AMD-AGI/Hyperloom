@@ -633,7 +633,7 @@ async def test_actual_explore_axis_rejection_cannot_be_revived_by_geak_fallback(
     with patch("hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill", side_effect=fake_measure):
         produced = (await sub.run_task(task)).result
     rejection = produced["per_variant_outcomes"][0]
-    assert rejection["reason"].startswith("median_or_guard_failed")
+    assert rejection["reason"].startswith("p50_gain_below_threshold,p90_regressed (")
     assert any(gate["gate"] == "graded_axes" and gate["passed"] is False for gate in rejection["gates"])
     await coord.writeback.promote_to_shared_state("explore", produced, task=task)
     assert state.current_best["tput"] == 110.0
@@ -739,6 +739,80 @@ async def test_explore_missing_axes_fails_closed(
     assert any(gate["gate"] == "graded_axes" and gate["passed"] is False for gate in tested["gates"])
     assert state.baseline_perf == baseline_before
     assert state.current_best == best_before
+    # A variant that could not be graded on its axes is the one row the ledger may still call unmeasured.
+    assert tested["graded_gain_pct"] is None
+    assert "no_meas" in SharedState._format_variant_line(tested)
+
+
+@pytest.mark.asyncio
+async def test_explore_guard_revert_row_reads_as_measured(sub_agent_runner, tmp_path, monkeypatch):
+    """A variant the tail guard refuses keeps its graded movement and the gate's reason on its ledger row.
+
+    The median here clears the KEEP bar by a wide margin and the slow tail halves, so the verdict is REVERT on a
+    fully measured variant. The prompt ledger must say so rather than render the row as never measured.
+    """
+    _force_cold_decision(monkeypatch)
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState(framework="sglang", benchmark_mode="agentx")
+    state.baseline_tput = 200.0
+    state.baseline_perf = {
+        "output_throughput": 200.0,
+        "total_token_throughput": 20000.0,
+        "e2e_norm_intvty_p90": 100.0,
+        "e2e_norm_intvty_p50": 100.0,
+        "duration_seconds": 25.0,
+        "request_error_rate": 0.0,
+    }
+    sub.shared_state = state
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+
+    def _fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        _fake_workspace(
+            slot,
+            tput=200.0,
+            perf_axes={
+                "total_token_throughput": 20000.0,
+                "e2e_norm_intvty_p90": 50.0,
+                "e2e_norm_intvty_p50": 110.0,
+                "duration_seconds": 25.0,
+                "request_error_rate": 0.0,
+            },
+        )
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "explore-guard-revert"),
+            "base_tput": 200.0,
+            "grid": [{"name": "v_tail_regress", "extra_args": "--tail-flag"}],
+        },
+        idempotency_key="ex-guard-revert",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    tested = res.result["explore_search_update"]["tested"][canonical_fingerprint("--tail-flag", {})]
+    assert tested["outcome"] == "REVERT"
+    assert tested["graded_objective"] == "e2e_norm_intvty_p50"
+    # A refused variant still contributes no gain anywhere a gain is summed or ranked.
+    assert tested["gain_pct"] is None
+    assert tested["graded_gain_pct"] == pytest.approx(10.0)
+    assert tested["e2e_norm_intvty_p50"] == pytest.approx(110.0)
+    assert tested["reason"].startswith("p90_regressed (")
+    line = SharedState._format_variant_line(tested)
+    assert "no_meas" not in line
+    assert "+10.00%" in line
+    assert "p90_regressed" in line
 
 
 @pytest.mark.asyncio

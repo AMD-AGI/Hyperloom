@@ -47,13 +47,12 @@ def coord(tmp_path: Path):
     state.max_minutes = 30
     state.save(tmp_path)
     idle = ScriptedPlan(turns=[MockTurn(intents=[])])
-    coord = Coordinator(
+    return Coordinator(
         session_dir=tmp_path,
         backends={name: MockBackend(idle) for name in ("orchestration", "critic")},
         role_registry=default_role_registry(),
         knowledge_plane=None,
     )
-    return coord
 
 
 async def _enqueue(coord, kind: str, key: str, lanes: list[str] | None = None, params: dict | None = None):

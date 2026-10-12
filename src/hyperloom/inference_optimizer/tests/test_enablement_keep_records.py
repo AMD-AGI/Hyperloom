@@ -2763,3 +2763,23 @@ def test_an_empty_drop_in_directory_is_not_a_credential_store(tmp_path):
     (drop_in / "private.conf").write_text("machine repo login u password p\n", encoding="utf-8")
 
     assert detect_credential_channels({}, fs_root=str(tmp_path)) == ["apt_auth"]
+
+
+def test_an_in_place_patch_asserts_the_serving_framework_at_the_keep(tmp_path: Path):
+    """A KEEP that only patches the framework tree provisions and builds nothing,
+    so it named no package and the assertion set was empty -- while its patches
+    hold only against the framework version that was graded."""
+    params = {
+        "runtime_override": {
+            "runtime_python_exe": sys.executable,
+            "pythonpath_prefixes": [_installed_dist(tmp_path, "vllm", "0.30.0")],
+        }
+    }
+    _closure, assertions = probe_keep_environment(
+        params,
+        framework="vllm",
+        build_manifest=[],
+        specialist_task_id=PROBE_TASK,
+        provision_result=None,
+    )
+    assert assertions == {"vllm": "0.30.0"}

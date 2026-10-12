@@ -69,7 +69,7 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
         state = self.shared_state
         cycle = int(state.macro_cycle or 0)
         domains = sorted({v[0] for v in BOTTLENECK_DOMAIN_HINTS.values()} | {"freeform_specialist"})
-        scores: dict[str, float] = {d: 0.0 for d in domains}
+        scores: dict[str, float] = dict.fromkeys(domains, 0.0)
         reasons: dict[str, list[str]] = {d: [] for d in domains}
         shift = state.bottleneck_shift or {}
         to_domain = str(shift.get("to_domain") or "").strip()

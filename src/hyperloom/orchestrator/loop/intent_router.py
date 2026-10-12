@@ -42,6 +42,7 @@ from ..policy.gate import (
 from ..state.shared_state import (
     ESCALATE_HINT_EXTEND_EXPLORE_BUDGET,
     ESCALATE_HINT_EXTEND_KERNEL_BUDGET,
+    ESCALATE_HINT_SKIP_TO_KERNEL,
     inject_stack_base_params,
     is_valid_escalate_hint,
 )
@@ -1413,6 +1414,13 @@ class IntentRouter(CoordinatorCollaborator):
         if hint in (ESCALATE_HINT_EXTEND_EXPLORE_BUDGET, ESCALATE_HINT_EXTEND_KERNEL_BUDGET):
             self.shared_state.bump_phase_budget(hint)
             self.shared_state.save(self.session_dir)
+            return
+        from ..phases.machine_state import PHASE_FRAMEWORK_AGENT
+
+        phase = str(self.shared_state.phase or "").strip().upper()
+        if hint == ESCALATE_HINT_SKIP_TO_KERNEL and phase != PHASE_FRAMEWORK_AGENT:
+            # Only the FRAMEWORK_AGENT exit reads it; left pending, it would end that phase on arrival.
+            log.info("escalate_strategy_change: dropped %r emitted in phase %s", hint, phase or "<none>")
             return
         # skip_to_kernel / skip_to_close are deferred; next compute_next_phase picks them up.
         self.shared_state.set_pending_escalate_hint(hint)

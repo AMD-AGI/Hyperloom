@@ -1368,6 +1368,10 @@ class ExploreExecutor:
                         f"tput {graded.tput_reference:.1f}->{graded.tput_candidate:.1f}"
                     )
                     gain: float | None
+                    # The graded movement of a variant the verdict refused. ``gain`` stays None on a REVERT so no
+                    # consumer counts a refused variant's gain as a win, but the ledger row still has to say the
+                    # axis was measured: rendered with neither, a guard-refused variant reads as unmeasured.
+                    graded_gain: float | None = None
                     outcome = TS_FAILED
                     reason: str = ""
                     # Each gate's verdict as it rules, in the order it ruled.
@@ -1393,6 +1397,7 @@ class ExploreExecutor:
                         )
                     elif graded.verdict == VERDICT_REVERT:
                         gain = None
+                        graded_gain = gain_pct(graded.candidate, graded.reference) if graded.reference > 0 else None
                         outcome = "REVERT"
                         if graded.veto_reason:
                             # The variant is refused a round earlier than the
@@ -1401,7 +1406,7 @@ class ExploreExecutor:
                             # batch is graded against.
                             reason = graded.veto_reason
                         elif _graded_on_intvty:
-                            reason = f"median_or_guard_failed ({axes})"
+                            reason = f"{graded.refused_by} ({axes})"
                         else:
                             reason = "gain_below_threshold"
                     else:
@@ -1497,7 +1502,11 @@ class ExploreExecutor:
                         "decision_tput": decision_tput,
                         **graded_axes_of(variant_meas),
                         "gain_pct": gain,
+                        "graded_gain_pct": graded_gain,
                         "graded_objective": graded.objective,
+                        # Which gate refused the variant. The prompt ledger renders this row, and without the reason a
+                        # REVERT on the tail guard is indistinguishable from one the benchmark never measured.
+                        "reason": reason,
                         "base_tput": running_base_tput,
                         "round_id": round_id,
                         "ts": _now_iso(),

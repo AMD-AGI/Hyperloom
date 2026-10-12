@@ -184,7 +184,7 @@ def extract_last_json_with_key(
 def iter_sse_objects(raw: str) -> Iterator[Any]:
     """Yield JSON objects decoded from an MCP HTTP response body."""
     text = raw.lstrip()
-    if text.startswith("{") or text.startswith("["):
+    if text.startswith(("{", "[")):
         try:
             yield json.loads(text)
         except json.JSONDecodeError:

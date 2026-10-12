@@ -60,7 +60,7 @@ def tunableop_untuned_line(m: int, n: int, k: int, op: str) -> str:
 
 def _is_tunableop_result_line(line: str) -> bool:
     stripped = line.strip()
-    if not stripped or stripped.startswith("#") or stripped.startswith("Validator"):
+    if not stripped or stripped.startswith(("#", "Validator")):
         return False
     return stripped.count(",") >= 3
 

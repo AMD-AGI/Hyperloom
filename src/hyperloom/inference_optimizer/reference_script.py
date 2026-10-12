@@ -122,7 +122,7 @@ def _strip_redirection(tokens: list[str]) -> list[str]:
         t = tokens[i]
         if t in ("&", ";"):
             break
-        if t.startswith(">") or t.startswith("<") or t.startswith("2>") or "2>&1" in t:
+        if t.startswith((">", "<", "2>")) or "2>&1" in t:
             # redirection target may be the next token
             if t in (">", "<", "2>") and i + 1 < len(tokens):
                 i += 2

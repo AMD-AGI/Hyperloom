@@ -215,7 +215,7 @@ def _confirm_task_stopped_in_transaction(
             dict(row) for row in db.execute("SELECT gpu_id, holder_id FROM gpu_leases WHERE task_id=?", (task_id,))
         ]
 
-    result = dict(status="nothing_to_confirm", task_id=task_id, released_leases=0, released_gpu_leases=0)
+    result = {"status": "nothing_to_confirm", "task_id": task_id, "released_leases": 0, "released_gpu_leases": 0}
     manual_index = next(
         (
             index

@@ -45,6 +45,28 @@ def test_format_variant_line_no_measurement_carries_reason():
     assert "gain_below_threshold" not in measured
 
 
+def test_format_variant_line_refused_variant_is_not_unmeasured():
+    """A REVERT has no ``gain_pct`` by design; its ``graded_gain_pct`` is what it measured."""
+    line = SharedState._format_variant_line(
+        {
+            "name": "spec",
+            "outcome": "REVERT",
+            "gain_pct": None,
+            "graded_gain_pct": 7.2,
+            "graded_objective": "e2e_norm_intvty_p50",
+            "tput": 1074.9,
+            "reason": "p90_regressed (intvty 85.1->91.3 tput 168970.6->169070.5)",
+        }
+    )
+    assert "no_meas" not in line
+    assert "+7.20%" in line
+    assert "[e2e_norm_intvty_p50]" in line
+    assert "p90_regressed" in line
+    # The refused gain never displaces a recorded one, and a bool is not a measurement.
+    assert "+1.00%" in SharedState._format_variant_line({"name": "k", "gain_pct": 1.0, "graded_gain_pct": 9.0})
+    assert "no_meas" in SharedState._format_variant_line({"name": "b", "graded_gain_pct": True})
+
+
 def test_format_search_state_enumerates_every_tested_entry():
     """No truncation: a variant missing from the render reads as untried."""
     search = {"cursor": 40, "tested": {f"fp{i:02d}": {"outcome": "REJECT", "name": f"v{i}"} for i in range(40)}}

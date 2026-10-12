@@ -233,7 +233,7 @@ def print_plan(plan: dict[str, Any]) -> None:
 def ingest(plan: dict[str, Any]) -> int:
     """Emit a backfill plan to Langfuse as a full trace tree."""
     try:
-        from langfuse import get_client  # type: ignore
+        from langfuse import get_client  # type: ignore[import-not-found]
     except Exception as exc:  # noqa: BLE001
         print(
             "ERROR: langfuse SDK not importable. Install it first:\n"

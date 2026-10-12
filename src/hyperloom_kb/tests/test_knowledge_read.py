@@ -174,7 +174,7 @@ def _stack():
     configuration = RetrievalConfiguration.create(
         schema.schema_ref,
         "weighted-read@v1",
-        limits={capability: 20 for capability in RetrievalCapability},
+        limits=dict.fromkeys(RetrievalCapability, 20),
         provider_refs={
             RetrievalCapability.FUZZY: LEXICAL_FUZZY_PROVIDER_REF,
         },

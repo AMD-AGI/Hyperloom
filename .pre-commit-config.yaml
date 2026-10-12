@@ -37,7 +37,7 @@ repos:
 
   # --- Python: Ruff (same rules as pyproject.toml and lint.yml) ---
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.20
+    rev: v0.16.2
     hooks:
       - id: ruff
         args: ["--force-exclude"]
@@ -109,6 +109,17 @@ repos:
         language: system
         pass_filenames: false
         files: (SKILL\.md|/actions/[^/]+\.md|/prompts/.+|/references/.+\.md|^src/hyperloom/cli\.py)$
+
+  # --- Architecture contracts in .importlinter (mirrors lint.yml) ---
+  - repo: local
+    hooks:
+      - id: import-linter
+        name: import-linter (architecture contracts)
+        entry: env PYTHONPATH=src lint-imports --no-cache
+        language: python
+        additional_dependencies: ["import-linter==2.15"]
+        pass_filenames: false
+        files: ^(src/.*\.py|\.importlinter)$
 
   # Enable once the mypy backlog is manageable (config in pyproject.toml):
   # - repo: local

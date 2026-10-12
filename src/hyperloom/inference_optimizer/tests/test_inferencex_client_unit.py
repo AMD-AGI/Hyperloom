@@ -343,7 +343,7 @@ def test_normalize_benchmark_id_accepts_integer_and_string_subclasses(value):
     assert ix.normalize_benchmark_id(value) == "7"
 
 
-@pytest.mark.parametrize("value", [True, False, None, b"1", 0, -1, 1.0, 1.5, "1.0", "1,2", "", "abc", "１２"])
+@pytest.mark.parametrize("value", [True, False, None, b"1", 0, -1, 1.0, 1.5, "1.0", "1,2", "", "abc", "\u0661\u0662"])
 def test_agentic_interactivity_rejects_invalid_request_ids(monkeypatch, value):
     monkeypatch.setattr(ix, "_fetch_raw", lambda url: pytest.fail("invalid IDs must not request the API"))
     with pytest.raises(ValueError, match="benchmark ID"):
