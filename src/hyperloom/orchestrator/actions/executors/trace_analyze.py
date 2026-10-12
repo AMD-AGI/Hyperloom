@@ -411,14 +411,14 @@ def _build_trace_analyze_cmd(
             state_tp = 0
         if state_tp > 0:
             cmd += ["--tensor-parallel-size", str(state_tp)]
-    if model_name:
-        cmd += ["--model-name", str(model_name)]
-    if framework:
-        cmd += ["--framework", str(framework)]
-    if target_platform:
-        cmd += ["--target-platform", str(target_platform)]
-    if analysis_mode:
-        cmd += ["--analysis-mode", str(analysis_mode)]
+    for flag, val in (
+        ("--model-name", model_name),
+        ("--framework", framework),
+        ("--target-platform", target_platform),
+        ("--analysis-mode", analysis_mode),
+    ):
+        if val:
+            cmd += [flag, str(val)]
 
     # Model identity informs source resolution for every framework, not only the
     # diffusion roofline. Keep the standard payload > state > environment
