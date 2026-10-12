@@ -808,11 +808,11 @@ async def test_explore_guard_revert_row_reads_as_measured(sub_agent_runner, tmp_
     assert tested["gain_pct"] is None
     assert tested["graded_gain_pct"] == pytest.approx(10.0)
     assert tested["e2e_norm_intvty_p50"] == pytest.approx(110.0)
-    assert tested["reason"].startswith("median_or_guard_failed")
+    assert tested["reason"].startswith("p90_regressed (")
     line = SharedState._format_variant_line(tested)
     assert "no_meas" not in line
     assert "+10.00%" in line
-    assert "median_or_guard_failed" in line
+    assert "p90_regressed" in line
 
 
 @pytest.mark.asyncio
