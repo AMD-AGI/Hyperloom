@@ -10,9 +10,6 @@ from typing import Any
 from kernelforge.durable_io import atomic_write_text
 
 
-HANDOFF_SCHEMA_VERSION = 2
-
-
 @dataclass(frozen=True)
 class IterationHandoff:
     """Compact machine-readable outcome passed to the next planning cycle."""
@@ -46,7 +43,6 @@ class IterationHandoff:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "schema_version": HANDOFF_SCHEMA_VERSION,
             "complete": True,
             "iteration": self.iteration,
             "analysis_commit": self.analysis_commit,
@@ -113,14 +109,9 @@ class HandoffStore:
             raise ValueError(f"invalid handoff: {path}") from error
         if not isinstance(payload, dict):
             raise ValueError(f"handoff must be an object: {path}")
-        if payload.get("schema_version") != HANDOFF_SCHEMA_VERSION:
-            raise ValueError(
-                f"unsupported handoff schema: expected v{HANDOFF_SCHEMA_VERSION}, got {payload.get('schema_version')!r}"
-            )
         if payload.get("complete") is not True:
             raise ValueError(f"incomplete handoff: {path}")
         expected = {
-            "schema_version",
             "complete",
             "iteration",
             "analysis_commit",

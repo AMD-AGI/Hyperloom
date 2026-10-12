@@ -99,12 +99,29 @@ def record_close_opened(session_dir: Path | str | None, *, ts: str = "") -> None
     _write(
         session_dir,
         {
+            "sequence_schema_version": "hyperloom.close.v1",
+            "source": "normal_close",
             "status": "running",
             "start_time": _stamp(ts),
             "close_sequence_done": False,
             "artifacts": {"session_breakdown_path": SESSION_BREAKDOWN_PATH},
         },
     )
+
+
+def record_close_safety_net(session_dir: Path | str | None) -> None:
+    """Mark a terminal write that never entered the CLOSE sequencer."""
+    if not session_dir:
+        return
+    from .assembler import assemble_parts
+
+    try:
+        if assemble_parts(Path(session_dir), only_sections=(SECTION,)).get(SECTION):
+            return
+    except RECORDING_ERRORS as exc:
+        note_failure(section=SECTION, error=exc, detail="safety-net source readback failed")
+        return
+    _write(session_dir, {"source": "safety_net", "sequence_schema_version": "hyperloom.close.v1"})
 
 
 def record_close_step(
@@ -115,6 +132,10 @@ def record_close_step(
     ts: str = "",
     task_id: str = "",
     detail: str = "",
+    optional: bool | None = None,
+    artifact_path: str = "",
+    artifact_digest: str = "",
+    error: str = "",
 ) -> None:
     """Append one settled close step.
 
@@ -134,6 +155,14 @@ def record_close_step(
         row["task_id"] = str(task_id)
     if detail:
         row["detail"] = str(detail)
+    if optional is not None:
+        row["optional"] = optional
+    if artifact_path:
+        row["artifact_path"] = artifact_path
+    if artifact_digest:
+        row["artifact_digest"] = artifact_digest
+    if error:
+        row["error"] = error
     recorder_for(session_dir, producer=PRODUCER).record_item(STEP_SECTION, row)
 
 
@@ -220,38 +249,6 @@ def record_final_recipe(
                 "action_path": [str(step) for step in (action_path or []) if str(step)],
                 "extra_server_args": str(extra_server_args or ""),
                 "extra_envs": {str(key): str(value) for key, value in dict(extra_envs or {}).items()},
-            }
-        },
-    )
-
-
-def record_geak_candidate(
-    session_dir: Path | str | None,
-    *,
-    pending: Mapping[str, Any] | None = None,
-    revalidation_pending: Any = None,
-) -> None:
-    """Record where the GEAK candidate stood when the session wound down.
-
-    A slot awaiting a rebench settles after the kernel event that ran its
-    attempts has closed. ``pending`` is empty both when the session had no
-    candidate and when the slot was released; ``status`` tells the two apart.
-    """
-    if not session_dir:
-        trace_skip(reason="no session_dir", section=SECTION)
-        return
-    slot = dict(pending or {})
-    _write(
-        session_dir,
-        {
-            "geak_candidate": {
-                "revalidation_pending": bool(revalidation_pending),
-                "status": str(slot.get("status") or ""),
-                "revalidation_error": str(slot.get("revalidation_error") or "") or None,
-                "revalidation_error_class": str(slot.get("revalidation_error_class") or "") or None,
-                "self_reported_gain_pct": to_float(slot.get("self_reported_gain_pct")),
-                "self_reported_tput": to_float(slot.get("self_reported_tput")),
-                "self_reported_basis": str(slot.get("self_reported_basis") or ""),
             }
         },
     )
@@ -601,9 +598,9 @@ __all__ = [
     "record_baseline_progress",
     "record_close_artifacts",
     "record_close_opened",
+    "record_close_safety_net",
     "record_close_settled",
     "record_close_step",
-    "record_geak_candidate",
     "record_roofline_progress",
     "record_write_back_opened",
     "record_write_back_settled",

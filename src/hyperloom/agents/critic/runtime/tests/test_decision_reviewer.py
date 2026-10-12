@@ -229,13 +229,14 @@ def test_classify_enablement_integrate_patch_is_enablement_landing():
     # Plain integrate_patch (no enablement marker) stays strict.
     assert classify_proposal_action("integrate_patch", {"params": {}}) == ACTION_CLASS_PATCH_LANDING
     assert classify_proposal_action("integrate_patch", None) == ACTION_CLASS_PATCH_LANDING
-    # enablement=True or framework_agent_authoring=True downgrades the class.
+    # Only enablement=True downgrades the class; framework_agent_authoring alone does not.
     assert (
         classify_proposal_action("integrate_patch", {"params": {"enablement": True}}) == ACTION_CLASS_ENABLEMENT_LANDING
     )
+    # FRAMEWORK authoring patches (no enablement key) stay in the strict PATCH_LANDING class.
     assert (
-        classify_proposal_action("integrate", {"params": {"framework_agent_authoring": True}})
-        == ACTION_CLASS_ENABLEMENT_LANDING
+        classify_proposal_action("integrate_patch", {"params": {"framework_agent_authoring": True}})
+        == ACTION_CLASS_PATCH_LANDING
     )
     # The lighter bar excludes the pre-boot-impossible production evidence and the redundant rollback restatement.
     reqs = _APPROVE_REQUIRES_BY_CLASS[ACTION_CLASS_ENABLEMENT_LANDING]
@@ -255,7 +256,7 @@ def test_prepare_review_enablement_integrate_relaxes_approve_requires(reviewer):
         "=== Inbox for critic ===\n"
         "  seq=1 msg_id=enA from=orchestration topic=proposal payload="
         "{'action_name': 'integrate_patch', 'provenance': 'specialist', "
-        "'params': {'enablement': True, 'framework_agent_authoring': True}}\n"
+        "'params': {'enablement': True}}\n"
     )
     bundle = rev.prepare_review(_coordinator_request(prompt, "sess_enable"))
     constraints = bundle.review_constraints
@@ -695,64 +696,6 @@ def test_decision_request_commit_emits_decision_review(reviewer):
     assert outcome.decision_review is not None
     assert outcome.decision_review["verdict"] == "adopt"
     assert outcome.kb_writes
-
-
-def test_init_session_merges_context(reviewer):
-    rev, kb, sm = reviewer
-    out = rev.init_session(
-        {
-            "kind": "critic_decision_request",
-            "session_id": "sess_init",
-            "context": {"model": "qwen3-14b", "framework": "sglang"},
-            "messages": [],
-        }
-    )
-    assert out["session_id"] == "sess_init"
-
-
-def test_close_session_writes_kb_drafts_when_provided(reviewer):
-    rev, kb, sm = reviewer
-    rev.init_session(
-        {
-            "kind": "critic_decision_request",
-            "session_id": "sess_close",
-            "context": {
-                "model": "qwen3-14b",
-                "framework": "sglang",
-                "model_family": "qwen",
-                "workload": "decode",
-                "precision": "fp8",
-            },
-            "messages": [],
-        }
-    )
-    outcome = rev.close_session(
-        {
-            "kind": "critic_decision_request",
-            "session_id": "sess_close",
-            "context": {
-                "model": "qwen3-14b",
-                "framework": "sglang",
-                "model_family": "qwen",
-                "workload": "decode",
-                "precision": "fp8",
-            },
-        },
-        kb_draft={
-            "kb_drafts": [
-                {
-                    "category": "kernel_optimization",
-                    "action": "Patched the active dispatch path for Qwen3-14B.",
-                    "lesson": "Active dispatch path must be kept in sync with kernel rewrite.",
-                    "tags": ["dispatch"],
-                    "result": {"status": "KEEP", "gain_pct": 4.2},
-                    "confidence": 0.9,
-                }
-            ]
-        },
-    )
-    assert outcome.kb_writes
-    assert outcome.kb_writes[0]["result"]["status"] in ("ok", "skipped", "dead_lettered")
 
 
 def test_kb_priors_cache_hit_avoids_second_kb_call(reviewer):

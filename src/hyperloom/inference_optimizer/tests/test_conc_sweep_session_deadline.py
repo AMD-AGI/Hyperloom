@@ -45,7 +45,7 @@ def sweep_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launch_backend):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(tmp_path / "leaks"))
     monkeypatch.delenv("INFERENCEX_PATH", raising=False)
     monkeypatch.setattr(_ray_serving, "maybe_serving_lease", lambda **kwargs: None)
-    monkeypatch.setattr(_aiter_jit, "sweep_stale_aiter_locks_if_dead", lambda: {})
+    monkeypatch.setattr(_aiter_jit, "sweep_stale_aiter_locks_if_dead", dict)
     monkeypatch.setattr(_server_lifecycle, "teardown_lifecycle_server", MagicMock())
     monkeypatch.setattr(benchmark_backend, "resolve_benchmark_interpreter", lambda: sys.executable)
     monkeypatch.setattr(gr, "build_benchmark_command", lambda **kwargs: [sys.executable, "scripted-benchmark"])
@@ -107,7 +107,6 @@ def sweep_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launch_backend):
         max_minutes=20,
         closing_grace_sec=60.0,
         recorder=None,
-        write_reports=False,
         benchmark_mode="",
     ):
         monkeypatch.setattr(
@@ -128,7 +127,6 @@ def sweep_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launch_backend):
                     tmp_path / "session",
                     concs=list(concs) if concs is not None else None,
                     total_budget_sec=total_budget_sec,
-                    write_reports=write_reports,
                     recorder=recorder,
                 )
             )
@@ -290,7 +288,6 @@ def test_boot_retries_share_total_budget_and_preserve_stop_source(sweep_run, usa
         total_budget_sec=9000,
         concs=(8, 4),
         recorder=recorder,
-        write_reports=True,
     )
     limit = min(usable, 9000.0) if usable is not None else 9000.0
     session_first = usable is not None and usable <= 9000.0
@@ -344,7 +341,6 @@ def test_sweep_admission_prices_measurement_and_preserves_budget_fields(sweep_ru
         bounded=False,
         total_budget_sec=total,
         recorder=recorder,
-        write_reports=True,
     )
     assert len(backend.calls) == launches
     assert clock.elapsed == (first_duration or 0.0)

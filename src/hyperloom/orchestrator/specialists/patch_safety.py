@@ -837,6 +837,7 @@ def strip_forbidden_proposal_fields(payload: dict[str, Any]) -> list[str]:
 
 _SPECIALIST_WORK_ARTIFACT_ROOTS = (
     "patches",
+    "heartbeat.json",
     "specialist_done.json",
     "specialist_done.partial.json",
     "scratch/rebench",

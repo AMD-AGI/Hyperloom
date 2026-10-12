@@ -137,11 +137,6 @@ class _RenderMixin:
             if unvalidated
             else ""
         )
-        resume_revalidation_tag = (
-            " ⚠ resume_pending_revalidation=true — recheck current stack before trusting validated gain"
-            if bool(getattr(self, "resume_pending_revalidation", False))
-            else ""
-        )
         geak_pending_status = (
             str(self.geak_pending.get("status") or "") if isinstance(getattr(self, "geak_pending", None), dict) else ""
         )
@@ -172,7 +167,7 @@ class _RenderMixin:
             f"gain      : validated={self.cumulative_gain_validated:.2f}%{validated_age}",
             f"stack     : {len(self.optimization_stack)} entries "
             f"(validated_at_len={self.cumulative_gain_validated_stack_len})"
-            f"{unvalidated_tag}{resume_revalidation_tag}{geak_pending_tag}",
+            f"{unvalidated_tag}{geak_pending_tag}",
         ]
         # Surface reusable hot kernels still owing a kernel_opt attempt.
         untried_hot = self.untried_hot_reusable_kernels()
@@ -197,6 +192,16 @@ class _RenderMixin:
             f"action={self.current_best.get('action', '?')} "
             f"perf={perf} "
             f"variant={self.current_best.get('variant_name', '?')}"
+        )
+
+    def to_latency_budget_summary(self) -> str:
+        """One line stating the latency budget; empty when unset. Refusals surface in the existing ledgers."""
+        budget = float(getattr(self, "latency_budget_ms", 0.0))
+        if budget <= 0:
+            return ""
+        return (
+            f"{budget:g} ms mean end-to-end: a KEEP over it, or with no latency reported, is refused "
+            "(reason latency_budget_exceeded / latency_unmeasured in explore_search and the journal)"
         )
 
     def to_warm_start_summary(self, *, max_lines: int = 12) -> str:
@@ -339,23 +344,15 @@ class _RenderMixin:
             rows.append(f"  · (+{len(ordered) - max_entries} older gaps elided; see state.json `gaps[]`)")
         return "\n".join(rows)
 
-    def _untested_proposal_rows(self) -> list[dict[str, Any]]:
-        """Executable proposals from this cycle that no explore round has benched."""
+    def untested_proposal_rows(self) -> list[dict[str, Any]]:
+        """Executable proposals from this cycle that no explore round has benched, highest severity first."""
         from hyperloom.common.coerce import to_int
 
-        from ...actions.executors._proposal_identity import (
-            controls_of,
-            effective_fingerprint,
-            is_executable,
-            normalize_proposal,
-        )
-
-        def content_fingerprint(fields: dict[str, Any]) -> str:
-            return effective_fingerprint(fields["extra_args"], fields["extra_envs"], controls=controls_of(fields))
+        from ...actions.executors._proposal_identity import content_fingerprint, is_executable, normalize_proposal
 
         cycle = to_int(self.macro_cycle, default=0)
         benched = {
-            content_fingerprint(normalize_proposal(row))
+            content_fingerprint(row)
             for row in ((self.explore_search or {}).get("tested") or {}).values()
             if isinstance(row, dict)
         }
@@ -385,6 +382,11 @@ class _RenderMixin:
                 row["name"] = row["name"] or f"{domain or 'specialist'}-{task_id}-{index}"
                 row["domain"] = domain
                 row["severity"] = severity
+                row["fingerprint"] = fingerprint
+                # Already checked against the read this round's dispatch was shown, which travels with them.
+                row["experience_citations"] = list(proposal.get("experience_citations") or [])
+                row["kb_read_id"] = str(entry.get("kb_read_id") or "")
+                row["kb_rendered_refs"] = list(entry.get("kb_rendered_refs") or [])
                 ranked.append((GAP_SEVERITY_RANK.get(severity, 0), order, row))
         ranked.sort(key=lambda r: (-r[0], -r[1]))
         return [row for _, _, row in ranked]
@@ -412,13 +414,13 @@ class _RenderMixin:
 
     def to_untested_proposals_summary(self, *, max_entries: int = 12) -> str:
         """Render the specialist proposals still waiting for a benchmark slot."""
-        rows = self._untested_proposal_rows()
+        rows = self.untested_proposal_rows()
         if not rows:
             return ""
         out = [
             "Executable specialist proposals from this cycle that no explore round has benched.",
-            "Ranked by gap severity, then most recent. Compose the next `explore` grid from these;",
-            "dispatch an ATOMIC entry verbatim as one variant — never split or re-derive its flags.",
+            "Ranked by gap severity, then most recent. The Coordinator benches the head of this",
+            "queue whenever no explore is queued or running; dispatch `explore` only for variants not listed here.",
             "",
         ]
         out.extend(self._untested_proposal_line(row) for row in rows[:max_entries])
@@ -536,14 +538,13 @@ class _RenderMixin:
         lines += [
             f"baseline_tput={self.baseline_tput}  baseline_acc={self.baseline_accuracy}",
             f"baseline_failure_streak={self.baseline_failure_streak}",
-            f"current_best={self.current_best or '(none)'}",
+            f"current_best={self._format_current_best()}",
             f"optimization_stack={self._format_optimization_stack()}",
             (
                 f"cumulative_gain_validated={self.cumulative_gain_validated}% "
                 f"(stack_len_at_validation={self.cumulative_gain_validated_stack_len}, "
                 f"ts={self.cumulative_gain_validated_ts or '(never)'})"
             ),
-            f"current_action={self.current_action or '(idle)'}",
             f"crash_count={self.crash_count}",
             f"pruned_families={self.pruned_families or '(none)'}",
             f"last_profile_trace={self.last_profile_trace or '(none)'}",
@@ -570,7 +571,7 @@ class _RenderMixin:
             f"last_action_failures={self._format_last_action_failures()}",
             f"agent_last_active={self._format_agent_last_active()}",
             f"gain_gated_action_count={int(self.gain_gated_action_count or 0)}",
-            f"tick={int(self.tick or 0)}  target_gap_pct={float(self.target_gap_pct or 0.0):.2f}",
+            f"tick={int(self.tick or 0)}",
             f"macro_cycle={int(self.macro_cycle or 0)}",
             f"stop_reason={self.stop_reason or '(none)'}",
             f"closing_phase={self.closing_phase}  "
@@ -673,7 +674,16 @@ class _RenderMixin:
         gain = entry.get("gain_pct")
         result = entry.get("result") if isinstance(entry.get("result"), dict) else {}
         tput = entry.get("tput") or entry.get("output_throughput") or result.get("output_throughput")
-        gain_s = f"{gain:+.2f}%" if isinstance(gain, (int, float)) else " no_meas"
+        # A REVERT carries no ``gain_pct`` by design; its graded movement is ``graded_gain_pct``. Only a row with
+        # neither was never measured on the graded axis -- printing "no_meas" for a guard refusal sends readers
+        # hunting for a broken extractor.
+        graded_gain = entry.get("graded_gain_pct")
+        if isinstance(gain, (int, float)) and not isinstance(gain, bool):
+            gain_s = f"{gain:+.2f}%"
+        elif isinstance(graded_gain, (int, float)) and not isinstance(graded_gain, bool):
+            gain_s = f"{graded_gain:+.2f}%"
+        else:
+            gain_s = " no_meas"
         tput_s = f" (tput={tput:.1f})" if isinstance(tput, (int, float)) and tput > 0 else ""
         # The gain column is meaningless without the axis it was taken on.
         graded_obj = str(entry.get("graded_objective") or "").strip()
@@ -755,6 +765,16 @@ class _RenderMixin:
             outcome = str(entry.get("outcome") or "?").upper()
             out.append(f"      {str(fp)[:16]} {outcome:7s} {_RenderMixin._format_variant_line(entry)}")
         return "\n".join(out)
+
+    def _format_current_best(self) -> str:
+        """Render ``current_best`` without its ``optimization_stack`` and ``measurement``.
+
+        The stack, which grows with every stacked KEEP, has its own line; the
+        measurement is launch evidence (paths, identity hashes) no decision reads.
+        """
+        if not self.current_best:
+            return "(none)"
+        return str({k: v for k, v in self.current_best.items() if k not in ("optimization_stack", "measurement")})
 
     def _format_optimization_stack(self) -> str:
         """Render the optimization stack as ``action:variant`` parts."""

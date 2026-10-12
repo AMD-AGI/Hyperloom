@@ -1,0 +1,68 @@
+{
+  "score": 0.7178,
+  "turns": {
+    "issued": 357,
+    "expected": 288,
+    "observed": 288,
+    "missing": 0,
+    "scored": 288
+  },
+  "domains": {
+    "coding": {
+      "score": 0.4813,
+      "scored": 149
+    },
+    "workflow": {
+      "score": 0.9712,
+      "scored": 139
+    }
+  },
+  "per_turn": [
+    {
+      "conversation_id": "participle-grammar-conflict-analysis",
+      "repeat": 1,
+      "turn": 2,
+      "domain": "coding",
+      "gt_actions": [
+        "find",
+        "head"
+      ],
+      "model_actions": [
+        "ls",
+        "cat",
+        "cat",
+        "head"
+      ],
+      "score": 0.2
+    },
+    {
+      "conversation_id": "participle-grammar-conflict-analysis",
+      "repeat": 1,
+      "turn": 4,
+      "domain": "coding",
+      "gt_actions": [
+        "ls",
+        "grep"
+      ],
+      "model_actions": [
+        "ls",
+        "find"
+      ],
+      "score": 0.3333
+    }
+  ],
+  "excluded_turns": [
+    {
+      "conversation_id": "abs-module-cache-flags",
+      "turn": 86,
+      "domain": "coding",
+      "exclude_reason": "no ground truth"
+    },
+    {
+      "conversation_id": "abs-module-cache-flags",
+      "turn": 88,
+      "domain": "coding",
+      "exclude_reason": "no ground truth"
+    }
+  ]
+}

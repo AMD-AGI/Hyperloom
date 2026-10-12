@@ -621,7 +621,7 @@ def test_t0_anchor_claims_only_the_reads_its_own_lookup_made(
     kb: RecipeKB,
     session_dir: Path,
 ) -> None:
-    """``_kb_amend_recipe`` reads the same store later through the same hook."""
+    """``kb_amend_recipe`` reads the same store later through the same hook."""
     from hyperloom.inference_optimizer.breakdown.recorder import warm_start_event
     from hyperloom.inference_optimizer.session.session_binding import session_scope
 

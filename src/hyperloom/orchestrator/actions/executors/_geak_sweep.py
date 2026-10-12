@@ -19,10 +19,12 @@ import yaml
 from hyperloom.common.env_safety import build_benchmark_env
 from hyperloom.common.jsonio import read_json
 from hyperloom.common.visible_devices import VISIBLE_DEVICE_VARS, effective_mask_tokens, is_rocr_level
-from hyperloom.orchestrator.loop.coordinator_helpers import (
+from hyperloom.orchestrator.kernel.geak_config import (
     _accepted_config_as_variant,
-    _coerce_tp,
-    _resolve_gpu_pin,
+)
+from hyperloom.orchestrator.actions.executors._gpu_pin import (
+    coerce_tp,
+    resolve_gpu_pin,
     _resolve_handoff_gpu_ids,
     _resolve_handoff_gpu_ids_space,
 )
@@ -109,10 +111,10 @@ def _replay_serving_env(handoff: Mapping[str, Any], env_spec: Mapping[str, Any])
         raise ValueError("invalid_replay_recipe_envs")
     frozen = bool(handoff or benchmark)
     legacy_env = {} if frozen else os.environ
-    tp = _coerce_tp(handoff.get("tp"), recipe_envs.get("TP"), legacy_env.get("TP"))
+    tp = coerce_tp(handoff.get("tp"), recipe_envs.get("TP"), legacy_env.get("TP"))
     pin = handoff.get("gpu_pin")
     if not isinstance(pin, dict):
-        pin = _resolve_gpu_pin(recipe_envs=recipe_envs, environ=legacy_env)
+        pin = resolve_gpu_pin(recipe_envs=recipe_envs, environ=legacy_env)
     gpu_ids = ",".join(effective_mask_tokens(handoff.get("gpu_ids"))) or _resolve_handoff_gpu_ids(gpu_pin=pin, tp=tp)
     space = str(handoff.get("gpu_ids_space") or _resolve_handoff_gpu_ids_space(gpu_pin=pin))
     if space not in {"absolute", "logical"} or _resolve_handoff_gpu_ids_space(gpu_pin=pin) == "none":

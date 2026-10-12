@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.orchestrator.loop.coordinator_helpers import (
+from hyperloom.orchestrator.actions.executors._gpu_pin import (
     _parse_server_arg_value,
     _resolve_serving_fidelity,
 )

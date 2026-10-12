@@ -22,7 +22,7 @@ from kernelforge.kernel_rewrite_controller.worktree import (
     untracked_paths,
 )
 from kernelforge.loop.editable_repo import release_repo_lock
-from kernelforge.knowledge.kernel_identity import (
+from kernelforge.knowledge.kb_store.identity.kernel_recipe import (
     KernelRecipeIdentity,
     kernel_recipe_canonical_id,
 )

@@ -10,6 +10,7 @@ import difflib
 import logging
 import subprocess
 from pathlib import Path
+from typing import Sequence
 
 from .models import FusionArtifacts
 from kernelforge.llm.git import git
@@ -97,6 +98,7 @@ def _export_nongit(
     pristine_dir: Path,
     patch_name: str = "fusion.patch",
     fused_module: str = "",
+    extra_files: Sequence[str] = (),
 ) -> FusionArtifacts:
     """Export ``patch_name`` without git, using a pre-authoring pristine snapshot."""
     arts = FusionArtifacts()
@@ -113,23 +115,30 @@ def _export_nongit(
                 return p.resolve().relative_to(root).as_posix()
         return p.name
 
-    # 1) edited model source: pristine snapshot vs current.
-    if source_file and Path(source_file).is_file():
-        rel = _rel(Path(source_file))
+    # 1) every edited framework file: pristine snapshot vs current.
+    edited = [source_file, *extra_files]
+    seen_rel: set[str] = set()
+    for path in edited:
+        if not path or not Path(path).is_file():
+            continue
+        rel = _rel(Path(path))
+        if rel in seen_rel:
+            continue
+        seen_rel.add(rel)
         snap = pristine_dir / rel
         created = not snap.is_file()
         old_text = "" if created else snap.read_text(encoding="utf-8", errors="replace")
-        new_text = Path(source_file).read_text(encoding="utf-8", errors="replace")
+        new_text = Path(path).read_text(encoding="utf-8", errors="replace")
         d = _unified_file_diff(rel, old_text, new_text, created=created)
         if d:
             parts.append(d)
             names.append(rel)
 
     # 2) fused modules beside the source: diff snapshot-vs-current.
-    src_resolved = Path(source_file).resolve() if source_file else None
+    edited_resolved = {Path(p).resolve() for p in edited if p and Path(p).is_file()}
     for f in _fused_module_candidates(source_file, fused_module):
-        if src_resolved is not None and f.resolve() == src_resolved:
-            continue  # the edited source is handled by (1)
+        if f.resolve() in edited_resolved:
+            continue  # an edited framework file is handled by (1)
         rel = _rel(f)
         snap = pristine_dir / rel
         created = not snap.is_file()
@@ -172,22 +181,51 @@ def _classify(rel_path: str, source_file: str) -> str:
     return "framework_wiring_edit"
 
 
-def _fusion_scoped_paths(repo_root: str, source_file: str, fused_module: str = "") -> list[str]:
-    """Repo-relative paths that belong to THIS fusion (not the whole dirty tree)."""
+def _fusion_scoped_paths(
+    repo_root: str,
+    source_file: str,
+    fused_module: str = "",
+    extra_files: Sequence[str] = (),
+    repo_scope: bool = False,
+) -> list[str]:
+    """Repo-relative paths that belong to THIS fusion (not the whole dirty tree).
+
+    ``extra_files`` are the further call-site files a multi-file fusion edits. They
+    have to be named here or the export silently drops them: the campaign tracks
+    and keeps them, and the patch -- the only thing that leaves this pipeline --
+    would then contain a wiring edit missing the half that makes it work.
+
+    ``repo_scope`` additionally sweeps in every OTHER tracked file the campaign
+    modified. Repo scope tells the author the repository is editable, so the export
+    cannot go on believing the set of edited files was known in advance.
+    """
     root = Path(repo_root).resolve()
     paths: list[str] = []
-    if source_file:
+
+    def _add_rel(path: str) -> None:
         with contextlib.suppress(ValueError):
             # POSIX form to match what git itself reports, so the manifest's changed-file paths are comparable across
             # platforms.
-            paths.append(Path(source_file).resolve().relative_to(root).as_posix())
-    # Untracked fused-kernel modules next to the source file.
-    model_dir = Path(source_file).parent if source_file else root
+            paths.append(Path(path).resolve().relative_to(root).as_posix())
+
+    for named in (source_file, *extra_files):
+        if named:
+            _add_rel(named)
+    if repo_scope:
+        paths.extend(_git(repo_root, "diff", "--name-only", "--", ".").stdout.split())
+    # Untracked fused-kernel modules: beside the source file, or anywhere the author put them under repo scope.
+    model_dir = (Path(source_file).parent if source_file else root).resolve()
     scoped = {Path(fused_module).resolve()} if fused_module else None
     others = _git(repo_root, "ls-files", "--others", "--exclude-standard").stdout.split()
     for rel in others:
-        name = Path(rel).name
-        if not (_is_fused_module_name(name) and (root / rel).parent == model_dir.resolve()):
+        if not _is_fused_module_name(Path(rel).name):
+            continue
+        if repo_scope:
+            # Every sibling's placeholder is created and committed at the baseline, and the tree is reset to base
+            # before each recipe runs, so an UNTRACKED fused module can only be one this campaign just wrote.
+            paths.append(rel)
+            continue
+        if (root / rel).parent != model_dir:
             continue
         if scoped is not None and (root / rel).resolve() not in scoped:
             continue
@@ -205,6 +243,8 @@ def export_artifacts(
     snapshot_diff_only: bool = False,
     patch_name: str = "fusion.patch",
     fused_module: str = "",
+    extra_files: Sequence[str] = (),
+    repo_scope: bool = False,
 ) -> FusionArtifacts:
     """Export ``patch_name`` + a classified change list, scoped to the fusion."""
     out = Path(out_dir)
@@ -214,7 +254,13 @@ def export_artifacts(
     def _nongit() -> FusionArtifacts | None:
         if pristine_dir and source_file:
             return _export_nongit(
-                repo_root, source_file, out, Path(pristine_dir), patch_name, fused_module=fused_module
+                repo_root,
+                source_file,
+                out,
+                Path(pristine_dir),
+                patch_name,
+                fused_module=fused_module,
+                extra_files=extra_files,
             )
         return None
 
@@ -225,7 +271,13 @@ def export_artifacts(
         return arts
 
     try:
-        rel_paths = _fusion_scoped_paths(repo_root, source_file, fused_module)
+        rel_paths = _fusion_scoped_paths(
+            repo_root,
+            source_file,
+            fused_module,
+            extra_files=extra_files,
+            repo_scope=repo_scope,
+        )
         if not rel_paths:
             return arts
         tracked = _tracked_paths(repo_root, rel_paths)

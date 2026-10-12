@@ -138,8 +138,8 @@ def test_setup_cli_scrubs_stale_workspace_runtime_env_when_dotenv_exists(tmp_pat
     monkeypatch.setenv("HYPERLOOM_RUNTIME_DIR", "/old/workspace/session/runtime")
     monkeypatch.setenv("KERNEL_AGENT_ENV", "/old/workspace/session/runtime/kernel-agent.env.sh")
     monkeypatch.setenv("HYPERLOOM_ROOT", "/old/workspace/session/runtime/source-mirrors")
-    monkeypatch.setenv("KERNEL_AGENT_ROOT", "/old/workspace/hyperloom/agents/kernel")
-    monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", "/old/workspace/hyperloom/agents/kernel")
+    monkeypatch.setenv("KERNEL_AGENT_ROOT", "/old/workspace/kernel-agent")
+    monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", "/old/workspace/kernel-agent")
     monkeypatch.setenv("FRAMEWORK_AGENT_ROOT", "/old/workspace/hyperloom/agents/framework")
     monkeypatch.setenv("HYPERLOOM_SKILL_PATH", "/old/workspace/hyperloom/inference_optimizer/SKILL.md")
     monkeypatch.setenv("PYTHONPATH", "/old/workspace:/old/site-packages")
@@ -674,7 +674,7 @@ def test_install_preflights_accept_dual_protocol_gateway(tmp_path: Path):
         ),
         (
             "kernel",
-            Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh",
+            Path(setup.__file__).resolve().parent / "assets" / "install_kernel_tools.sh",
             [],
         ),
     ]
@@ -724,7 +724,7 @@ def test_install_preflights_reject_cross_provider_pairing(tmp_path: Path):
         ),
         (
             "kernel",
-            Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh",
+            Path(setup.__file__).resolve().parent / "assets" / "install_kernel_tools.sh",
             [],
         ),
     ]
@@ -821,7 +821,7 @@ def test_install_preflights_accept_oauth_only_credentials(tmp_path: Path):
         ),
         (
             "kernel",
-            Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh",
+            Path(setup.__file__).resolve().parent / "assets" / "install_kernel_tools.sh",
             [],
         ),
     ]
@@ -912,7 +912,7 @@ def test_install_preflights_accept_oauth_alongside_bare_openai_key(tmp_path: Pat
         ),
         (
             "kernel",
-            Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh",
+            Path(setup.__file__).resolve().parent / "assets" / "install_kernel_tools.sh",
             [],
         ),
     ]
@@ -960,7 +960,7 @@ def test_install_preflights_still_reject_gateway_url_with_bare_openai_key(tmp_pa
         ),
         (
             "kernel",
-            Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh",
+            Path(setup.__file__).resolve().parent / "assets" / "install_kernel_tools.sh",
             [],
         ),
     ]
@@ -1341,6 +1341,382 @@ def test_baremetal_atom_only_host_writes_framework_atom(tmp_path: Path):
 
     assert res.returncode == 0, res.stderr
     assert "FRAMEWORK=atom" in _dotenv_lines(dotenv)
+
+
+_ATOM_DEV_IMAGE_COMMIT = "fe1099b15ddc52e6873e1932935f722864cdeee0"
+
+
+def _logging_python(
+    tmp_path: Path,
+    *,
+    atom_importable: bool,
+    atom_import_after_install: bool = True,
+    server_module_imports: bool = True,
+) -> Path:
+    """A python stub that records every invocation and answers the ATOM probes."""
+    log = tmp_path / "python-calls.log"
+    stub = tmp_path / "logging-python"
+    stub.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                f'printf "%s\\n" "$*" >> "{log.as_posix()}"',
+                'case "$*" in',
+                f"""  *"find_spec('atom')"*) exit {0 if atom_importable else 1} ;;""",
+                "  *find_spec*) exit 1 ;;",
+                f'  "-c import atom") exit {0 if atom_import_after_install else 1} ;;',
+                f'  "-c import atom.entrypoints.openai.api_server") exit {0 if server_module_imports else 1} ;;',
+                # ATOM's own --help crashes: its argparse help text carries an unescaped "%".
+                '  *"atom.entrypoints.openai_server --help"*) exit 1 ;;',
+                "esac",
+                "exit 0",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    stub.chmod(0o755)
+    return stub
+
+
+def _drive_atom_installer(tmp_path: Path, python: Path, body: str) -> subprocess.CompletedProcess:
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+    lib = _sourceable_installer(install_script, tmp_path)
+    runner = tmp_path / "atom-runner.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                f'source "{lib.as_posix()}"',
+                f'REPO_ROOT="{tmp_path.as_posix()}"',
+                f'HYPERLOOM_CACHE_DIR="{tmp_path.as_posix()}/deps"',
+                "INSTALL_FRAMEWORK=atom",
+                "FRAMEWORK_ENV=shared",
+                f'VLLM_VENV_ROOT="{tmp_path.as_posix()}/absent"',
+                "DRY_RUN=0",
+                "CHECK_ONLY=0",
+                f'resolve_python() {{ printf "%s" "{python.as_posix()}"; }}',
+                body,
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    return subprocess.run(["bash", runner.as_posix()], text=True, capture_output=True)
+
+
+def test_installer_accepts_install_framework_atom():
+    """Argument parsing must not reject atom before --help is reached."""
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+
+    res = subprocess.run(
+        ["bash", install_script.as_posix(), "--install-framework", "atom", "--help"],
+        text=True,
+        capture_output=True,
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert "none, sglang, vllm, atom" in res.stdout
+
+
+def test_install_requested_framework_dispatches_atom(tmp_path: Path):
+    res = _drive_installer(
+        tmp_path,
+        importable=set(),
+        dotenv=tmp_path / ".env",
+        install_framework="atom",
+        body="install_atom_framework() { echo ATOM_INSTALLER_CALLED; }\ninstall_requested_framework",
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert "ATOM_INSTALLER_CALLED" in res.stdout
+
+
+def test_atom_install_defaults_to_the_atom_dev_image_commit(tmp_path: Path):
+    """The default ATOM source is the commit rocm/atom-dev:v0.1.7-rc0 was built from."""
+    python = _logging_python(tmp_path, atom_importable=False)
+
+    res = _drive_atom_installer(tmp_path, python, "DRY_RUN=1\ninstall_atom_framework")
+
+    assert res.returncode == 0, res.stderr
+    assert f"https://github.com/ROCm/ATOM.git@{_ATOM_DEV_IMAGE_COMMIT}" in res.stdout
+    assert "AITER" in res.stdout
+
+
+def test_atom_check_only_reports_a_missing_atom_without_installing(tmp_path: Path):
+    python = _logging_python(tmp_path, atom_importable=False)
+
+    res = _drive_atom_installer(
+        tmp_path,
+        python,
+        "CHECK_ONLY=1\n"
+        "ensure_aiter_for_python() { echo STEP aiter; }\n"
+        "install_atom_from_source() { echo STEP atom-source; }\n"
+        "install_atom_framework",
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert "STEP" not in res.stdout
+    assert "atom missing" in res.stderr
+
+
+def test_atom_install_puts_aiter_first_and_verifies_the_server(tmp_path: Path):
+    python = _logging_python(tmp_path, atom_importable=False)
+
+    res = _drive_atom_installer(
+        tmp_path,
+        python,
+        "ensure_aiter_for_python() { echo STEP aiter; }\n"
+        "install_atom_from_source() { echo STEP atom-source; }\n"
+        "install_atom_framework",
+    )
+
+    assert res.returncode == 0, res.stderr
+    steps = [line for line in res.stdout.splitlines() if line.startswith("STEP ")]
+    assert steps == ["STEP aiter", "STEP atom-source"]
+    calls = (tmp_path / "python-calls.log").read_text(encoding="utf-8")
+    assert "-c import atom.entrypoints.openai.api_server" in calls
+
+
+def test_atom_install_does_not_depend_on_atom_help_rendering(tmp_path: Path):
+    """ATOM fe1099b15 crashes printing --help, yet its server imports and serves."""
+    python = _logging_python(tmp_path, atom_importable=False)
+
+    res = _drive_atom_installer(
+        tmp_path,
+        python,
+        "ensure_aiter_for_python() { :; }\ninstall_atom_from_source() { :; }\ninstall_atom_framework",
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert "ATOM framework install complete" in res.stdout
+
+
+def test_atom_install_fails_when_the_server_module_does_not_import(tmp_path: Path):
+    python = _logging_python(tmp_path, atom_importable=False, server_module_imports=False)
+
+    res = _drive_atom_installer(
+        tmp_path,
+        python,
+        "ensure_aiter_for_python() { :; }\ninstall_atom_from_source() { :; }\ninstall_atom_framework",
+    )
+
+    assert res.returncode != 0
+    assert "atom.entrypoints.openai.api_server" in res.stderr
+
+
+def test_atom_install_fails_when_atom_still_does_not_import(tmp_path: Path):
+    python = _logging_python(tmp_path, atom_importable=False, atom_import_after_install=False)
+
+    res = _drive_atom_installer(
+        tmp_path,
+        python,
+        "ensure_aiter_for_python() { :; }\ninstall_atom_from_source() { :; }\ninstall_atom_framework",
+    )
+
+    assert res.returncode != 0
+    assert "atom not importable after install" in res.stderr
+
+
+def test_atom_install_skips_the_source_build_when_atom_already_imports(tmp_path: Path):
+    python = _logging_python(tmp_path, atom_importable=True)
+
+    res = _drive_atom_installer(
+        tmp_path,
+        python,
+        "ensure_aiter_for_python() { echo STEP aiter; }\n"
+        "install_atom_from_source() { echo STEP atom-source; }\n"
+        "install_atom_framework",
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert "STEP atom-source" not in res.stdout
+
+
+def test_atom_source_install_fetches_the_pinned_commit_under_rocm_torch_constraints(tmp_path: Path):
+    """Without the constraint file pip is free to replace ROCm torch with a PyPI CUDA build."""
+    python = _logging_python(tmp_path, atom_importable=False)
+    git_log = tmp_path / "git-calls.log"
+
+    res = _drive_atom_installer(
+        tmp_path,
+        python,
+        "\n".join(
+            [
+                f'git() {{ printf "%s\\n" "$*" >> "{git_log.as_posix()}"; }}',
+                "write_rocm_torch_constraints() { printf 'torch==2.11.0\\n' > \"$2\"; }",
+                f'install_atom_from_source "{python.as_posix()}" "{tmp_path.as_posix()}/deps"',
+            ]
+        ),
+    )
+
+    assert res.returncode == 0, res.stderr
+    git_calls = git_log.read_text(encoding="utf-8")
+    assert f"fetch --depth 1 origin {_ATOM_DEV_IMAGE_COMMIT}" in git_calls
+    pip_calls = [
+        line
+        for line in (tmp_path / "python-calls.log").read_text(encoding="utf-8").splitlines()
+        if "pip install" in line
+    ]
+    atom_install = [line for line in pip_calls if f"{tmp_path.as_posix()}/deps/atom" in line]
+    assert atom_install, pip_calls
+    assert "--constraint" in atom_install[0]
+    assert " -e " in f" {atom_install[0]} "
+
+
+def test_atom_install_records_framework_atom_when_frameworks_omits_it(tmp_path: Path):
+    """The engine the operator asked setup to install is the one downstream skills must use."""
+    dotenv = tmp_path / ".env"
+
+    res = _drive_installer(
+        tmp_path,
+        importable={"atom"},
+        dotenv=dotenv,
+        install_framework="atom",
+        body="FRAMEWORKS=sglang,vllm\nwrite_runtime_dotenv",
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert "FRAMEWORK=atom" in _dotenv_lines(dotenv)
+
+
+def test_atom_install_rejects_an_isolated_framework_env(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("REPO_ROOT", tmp_path.as_posix())
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+
+    res = subprocess.run(
+        [
+            "bash",
+            install_script.as_posix(),
+            "--install-framework",
+            "atom",
+            "--framework-env",
+            "isolated",
+            "--dry-run",
+            "--yes",
+        ],
+        text=True,
+        capture_output=True,
+    )
+
+    assert res.returncode != 0
+    assert "isolated is currently supported for vLLM only" in res.stderr
+
+
+def _vllm_venv(tmp_path: Path, *, system_site_packages: bool) -> Path:
+    """A VLLM_VENV_ROOT whose python imports vllm; an overlay also sees the base site-packages."""
+    root = tmp_path / "vllm-venv"
+    (root / "bin").mkdir(parents=True)
+    _fake_python(root / "bin", {"vllm"}).rename(root / "bin" / "python")
+    (root / "pyvenv.cfg").write_text(
+        f"include-system-site-packages = {'true' if system_site_packages else 'false'}\n", encoding="utf-8"
+    )
+    return root
+
+
+_ATOM_INSTALL_STEPS = (
+    "ensure_aiter_for_python() { echo STEP aiter; }\ninstall_atom_from_source() { echo STEP atom-source; }\n"
+)
+
+
+@pytest.mark.parametrize("engine", ["sglang", "vllm"])
+def test_atom_install_refuses_a_python_that_serves_vllm_or_sglang(tmp_path: Path, engine: str):
+    """vLLM and SGLang load ATOM's entry-point plugins by default, so a shared Python would serve ATOM code."""
+    res = _drive_installer(
+        tmp_path,
+        importable={engine},
+        dotenv=tmp_path / ".env",
+        install_framework="atom",
+        body=f"DRY_RUN=1\n{_ATOM_INSTALL_STEPS}install_atom_framework",
+    )
+
+    assert res.returncode != 0
+    assert "would install" not in res.stdout
+    assert f"ATOM cannot share {tmp_path.as_posix()}/fake-python with {engine}" in res.stderr
+
+
+def test_atom_install_refuses_a_base_python_under_a_vllm_overlay(tmp_path: Path):
+    """The ROCm 10 vLLM overlay imports the base site-packages, and with them ATOM's plugins."""
+    overlay = _vllm_venv(tmp_path, system_site_packages=True)
+
+    res = _drive_installer(
+        tmp_path,
+        importable=set(),
+        dotenv=tmp_path / ".env",
+        install_framework="atom",
+        body=f'VLLM_VENV_ROOT="{overlay.as_posix()}"\n{_ATOM_INSTALL_STEPS}install_atom_framework',
+    )
+
+    assert res.returncode != 0
+    assert "STEP" not in res.stdout
+    assert f"ATOM cannot share {overlay.as_posix()}/bin/python with vllm" in res.stderr
+
+
+def test_atom_install_proceeds_beside_a_self_contained_vllm_venv(tmp_path: Path):
+    venv = _vllm_venv(tmp_path, system_site_packages=False)
+
+    res = _drive_installer(
+        tmp_path,
+        importable=set(),
+        dotenv=tmp_path / ".env",
+        install_framework="atom",
+        body=f'VLLM_VENV_ROOT="{venv.as_posix()}"\n{_ATOM_INSTALL_STEPS}install_atom_framework',
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert [line for line in res.stdout.splitlines() if line.startswith("STEP ")] == ["STEP aiter", "STEP atom-source"]
+
+
+_VLLM_ROUTE_STUBS = "assert_vllm_glibc_compatible() { :; }\nensure_openmpi_runtime() { :; }\n"
+
+
+@pytest.mark.parametrize(
+    ("installer", "framework"),
+    [
+        pytest.param("install_sglang_framework", "sglang", id="sglang"),
+        pytest.param(
+            f"{_VLLM_ROUTE_STUBS}route_vllm_install_method() {{ VLLM_INSTALL_METHOD=wheel; }}\ninstall_vllm_framework",
+            "vllm",
+            id="vllm-shared",
+        ),
+        pytest.param(
+            "FRAMEWORK_ENV=isolated\n"
+            f"{_VLLM_ROUTE_STUBS}route_vllm_install_method() {{ VLLM_INSTALL_METHOD=source; }}\ninstall_vllm_framework",
+            "vllm",
+            id="vllm-source-overlay",
+        ),
+    ],
+)
+def test_engine_install_refuses_a_python_that_imports_atom(tmp_path: Path, installer: str, framework: str):
+    """ATOM installed first must not end up inside the interpreter a later vLLM/SGLang serves from."""
+    res = _drive_installer(
+        tmp_path,
+        importable={"atom"},
+        dotenv=tmp_path / ".env",
+        install_framework=framework,
+        body=f"DRY_RUN=1\n{installer}",
+    )
+
+    assert res.returncode != 0
+    assert "would " not in res.stdout
+    assert f"ATOM cannot share {tmp_path.as_posix()}/fake-python with {framework}" in res.stderr
+
+
+def test_isolated_vllm_wheel_install_proceeds_on_an_atom_host(tmp_path: Path):
+    """The wheel venv is created without the system site-packages, so it never sees ATOM."""
+    res = _drive_installer(
+        tmp_path,
+        importable={"atom"},
+        dotenv=tmp_path / ".env",
+        install_framework="vllm",
+        body="DRY_RUN=1\nFRAMEWORK_ENV=isolated\n"
+        f"{_VLLM_ROUTE_STUBS}route_vllm_install_method() {{ VLLM_INSTALL_METHOD=wheel; }}\ninstall_vllm_framework",
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert "would create/update isolated vLLM venv" in res.stdout
 
 
 def test_baremetal_clears_stale_framework_when_none_importable(tmp_path: Path):
@@ -2335,6 +2711,7 @@ def test_baremetal_sglang_installs_aiter_when_find_spec_succeeds_but_import_fail
                 "warn() { :; }",
                 'die() { echo "$*" >&2; exit 99; }',
                 '_py_has() { [ "$2" = aiter ] && return 0; return 0; }',
+                "refuse_atom_beside_vllm_or_sglang() { :; }",
                 "install_sglang_from_wheel() { :; }",
                 "install_sglang_from_source() { :; }",
                 "sglang_rocm_extra_for_torch() { printf 'rocm724\\n'; }",
@@ -2356,7 +2733,7 @@ def test_baremetal_sglang_installs_aiter_when_find_spec_succeeds_but_import_fail
 
 
 def test_kernel_install_no_longer_exports_openai_safe_credentials():
-    install_script = Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh"
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_kernel_tools.sh"
     script_text = install_script.read_text(encoding="utf-8")
     write_start = script_text.index("write_env_file() {")
     write_end = script_text.index("\nensure_geak()", write_start)
@@ -2469,8 +2846,8 @@ def test_install_sh_scrubs_stale_runtime_env_for_setup_dotenv(tmp_path: Path):
                 "HYPERLOOM_RUNTIME_DIR=/old/workspace/session/runtime",
                 "KERNEL_AGENT_ENV=/old/workspace/session/runtime/kernel-agent.env.sh",
                 "HYPERLOOM_ROOT=/old/workspace/session/runtime/source-mirrors",
-                "KERNEL_AGENT_ROOT=/old/workspace/hyperloom/agents/kernel",
-                "HYPERLOOM_KERNEL_AGENT_ROOT=/old/workspace/hyperloom/agents/kernel",
+                "KERNEL_AGENT_ROOT=/old/workspace/kernel-agent",
+                "HYPERLOOM_KERNEL_AGENT_ROOT=/old/workspace/kernel-agent",
                 "FRAMEWORK_AGENT_ROOT=/old/workspace/hyperloom/agents/framework",
                 "HYPERLOOM_SKILL_PATH=/old/workspace/hyperloom/inference_optimizer/SKILL.md",
                 "PYTHONPATH=/old/workspace",
@@ -2504,7 +2881,7 @@ def test_install_sh_scrubs_stale_runtime_env_for_setup_dotenv(tmp_path: Path):
 
 
 def test_kernel_env_authoritative_anthropic_mode_does_not_emit_openai_aliases(tmp_path: Path):
-    install_script = Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh"
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_kernel_tools.sh"
     script_text = install_script.read_text(encoding="utf-8")
     upsert_start = script_text.index("upsert_dotenv_var() {")
     upsert_end = script_text.index("\n# In --check-only mode")
@@ -2552,8 +2929,6 @@ def test_kernel_env_authoritative_anthropic_mode_does_not_emit_openai_aliases(tm
                 "_OPENAI_KEY_VAL=",
                 "LLM_GATEWAY_KEY=",
                 "LLM_API_KEY=",
-                "HYPERLOOM_KERNEL_AGENT_ROOT=",
-                "KERNEL_AGENT_ROOT=",
                 "MAGPIE_PATH=",
                 "MAGPIE_PYTHON=",
                 "PYTHONPATH=",
@@ -2597,7 +2972,7 @@ def test_kernel_env_authoritative_anthropic_mode_does_not_emit_openai_aliases(tm
 
 def test_kernel_env_keeps_anthropic_creds_in_dotenv(tmp_path: Path):
     """Writing kernel-agent env must NOT wipe the Anthropic creds the operator put in .env (an Anthropic-only setup must keep ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL after install)."""
-    install_script = Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh"
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_kernel_tools.sh"
     script_text = install_script.read_text(encoding="utf-8")
     upsert_start = script_text.index("upsert_dotenv_var() {")
     upsert_end = script_text.index("\n# In --check-only mode")
@@ -2640,8 +3015,6 @@ def test_kernel_env_keeps_anthropic_creds_in_dotenv(tmp_path: Path):
                 "_OPENAI_KEY_VAL=",
                 "LLM_GATEWAY_KEY=",
                 "LLM_API_KEY=",
-                "HYPERLOOM_KERNEL_AGENT_ROOT=",
-                "KERNEL_AGENT_ROOT=",
                 "MAGPIE_PATH=",
                 "MAGPIE_PYTHON=",
                 "PYTHONPATH=",
@@ -2695,7 +3068,7 @@ def test_kernel_env_persists_geak_claude_model_to_dotenv(tmp_path: Path):
             return f"/mnt/{path.drive[0].lower()}{rest}"
         return text
 
-    install_script = Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh"
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_kernel_tools.sh"
     script_text = install_script.read_text(encoding="utf-8")
     upsert_start = script_text.index("upsert_dotenv_var() {")
     upsert_end = script_text.index("\n# In --check-only mode")
@@ -2709,7 +3082,7 @@ def test_kernel_env_persists_geak_claude_model_to_dotenv(tmp_path: Path):
     dotenv = tmp_path / ".env"
     kernel_env = tmp_path / "runtime" / "kernel-agent.env.sh"
     dotenv.write_text(
-        f"HYPERLOOM_KERNEL_AGENT_ROOT={tmp_path / 'kernel-agent'}\n",
+        "HYPERLOOM_RUN_MODE=baremetal\n",
         encoding="utf-8",
     )
     runner = tmp_path / "kernel-run.sh"
@@ -2730,8 +3103,6 @@ def test_kernel_env_persists_geak_claude_model_to_dotenv(tmp_path: Path):
                 "_OPENAI_KEY_VAL=",
                 "LLM_GATEWAY_KEY=",
                 "LLM_API_KEY=",
-                "HYPERLOOM_KERNEL_AGENT_ROOT=",
-                "KERNEL_AGENT_ROOT=",
                 "MAGPIE_PATH=",
                 "MAGPIE_PYTHON=",
                 "PYTHONPATH=",

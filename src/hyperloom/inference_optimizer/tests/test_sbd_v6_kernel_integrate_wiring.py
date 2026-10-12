@@ -42,7 +42,9 @@ def _visited_kernel(*, macro_cycle: int) -> None:
     recorder = make_kernel_recorder(macro_cycle=macro_cycle, route=ROUTE_FORGE)
     assert recorder is not None
     recorder.begin(tput_before=1000.0)
-    recorder.record_kernel_rewrite(run_id="attempt-1", kernel_id="k001", status="success", micro_decision="keep")
+    recorder.record_kernel_rewrite(
+        run_id="attempt-1", kernel_id="k001", status="success", micro_decision="keep", integrate_ref="int-1"
+    )
     recorder.finish(tput_after=1000.0)
 
 

@@ -59,7 +59,8 @@ PRODUCER = "orchestrator"
 #: The session baseline every contribution is measured against, and the axis.
 SECTION_EVENT = "stack_event"
 
-#: One row per adoption, keyed by its position in the stack.
+#: One row per adoption, keyed by its author-time ID when available. Stack
+#: positions can be reused after a revert.
 SECTION_ADOPTION = "stack_adoption"
 
 #: One row per session validation, keyed by the stack length it validated, so a
@@ -200,6 +201,7 @@ def record_adoption(
     base = _float_or_none(baseline_tput)
     action = str(entry.get("action") or "")
     row: dict[str, Any] = {
+        "stack_entry_id": _text_or_none(entry.get("stack_entry_id")),
         "stack_index": int(stack_index),
         "recorded_at": _now(),
         "ts": _text_or_none(entry.get("ts")) or _now(),
@@ -213,6 +215,7 @@ def record_adoption(
         "source_phase": _text_or_none(entry.get("source_phase")),
         "task_id": _text_or_none(entry.get("task_id")),
         "kernel_id": _text_or_none(entry.get("kernel_id")),
+        "integration_id": _text_or_none(entry.get("integration_id")),
         "fingerprint": _text_or_none(entry.get("fingerprint")),
         "provenance": _text_or_none(entry.get("provenance")),
         "gap_canonical_id": _text_or_none(entry.get("gap_canonical_id")),
@@ -231,9 +234,15 @@ def record_adoption(
         "cumulative_gain_pct": _pct(after, base, base),
         "accuracy": _float_or_none(entry.get("accuracy")),
         "attribution_eligible": (bool(entry.get("attribution_eligible")) if "attribution_eligible" in entry else None),
+        "keep_reason": _text_or_none(entry.get("keep_reason")),
         "accepted_kernels": [str(k) for k in _as_list(entry.get("accepted_kernels")) if str(k)],
     }
-    sink.record(SECTION_ADOPTION, row, row_type="adoption", natural_ids=str(int(stack_index)))
+    sink.record(
+        SECTION_ADOPTION,
+        row,
+        row_type="adoption",
+        natural_ids=str(row["stack_entry_id"] or int(stack_index)),
+    )
 
 
 def record_validation(
@@ -366,7 +375,9 @@ def assemble_stack_ext(
     """
     header = _header(rows_for_event(parts.get(SECTION_EVENT) or [], event))
     adoptions = wire_rows(
-        sort_rows(rows_for_event(parts.get(SECTION_ADOPTION) or [], event), keys=("stack_index",)),
+        sort_rows(
+            rows_for_event(parts.get(SECTION_ADOPTION) or [], event), keys=("ts", "stack_entry_id", "stack_index")
+        ),
         drop=("event_id",),
     )
     validations = wire_rows(
@@ -379,6 +390,7 @@ def assemble_stack_ext(
     # Not a sum: asking two figures the same question is how the ledger checks
     # itself below.
     chain_total = _last_cumulative(adoptions)
+    by_keep_reason = _by_keep_reason(adoptions)
     settled = validations[-1] if validations else {}
     recorded_total = _float_or_none(settled.get("validated_gain_pct"))
     ext: dict[str, Any] = {
@@ -387,6 +399,7 @@ def assemble_stack_ext(
         "adoptions": {
             "count": len(adoptions),
             "by_source": _by_source(adoptions),
+            "by_keep_reason": by_keep_reason,
             "rows": adoptions,
         },
         "validations": {
@@ -400,6 +413,11 @@ def assemble_stack_ext(
             ),
         },
         "attributed_gain_pct": attributed,
+        # Adoptions kept for a reason other than a gain (a correctness fix) are
+        # not throughput wins, so this caliber leaves them out.
+        "attributed_gain_pct_excluding_fixes": round(
+            attributed - sum(float(b["total_gain_pct"]) for b in by_keep_reason.values()), 6
+        ),
         "chain_total_gain_pct": chain_total,
         # Throughput no adoption claims, the anchor having moved between two
         # measurements. An identity: the sum of the chain breaks below.
@@ -449,6 +467,23 @@ def _by_source(adoptions: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         else:
             slot["total_gain_pct"] = round(float(slot["total_gain_pct"]) + share, 6)
     buckets[SOURCE_KERNEL]["by_backend"] = backends
+    return buckets
+
+
+def _by_keep_reason(adoptions: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Sum the adoptions kept for a stated reason rather than a gain, per reason."""
+    buckets: dict[str, Any] = {}
+    for row in adoptions:
+        reason = str(row.get("keep_reason") or "")
+        if not reason:
+            continue
+        bucket = buckets.setdefault(reason, {"count": 0, "total_gain_pct": 0.0, "unmeasured": 0})
+        share = _float_or_none(row.get("contribution_pct"))
+        bucket["count"] += 1
+        if share is None:
+            bucket["unmeasured"] += 1
+        else:
+            bucket["total_gain_pct"] = round(float(bucket["total_gain_pct"]) + share, 6)
     return buckets
 
 

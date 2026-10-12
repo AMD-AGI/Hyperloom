@@ -243,17 +243,15 @@ def restore_records(records: Sequence[Mapping[str, Any]]) -> tuple[list[str], li
                 if target.is_symlink():
                     raise ValueError(f"existing backup target became a symlink: {name}")
                 backup = _backup_of(record)
-                digest = str(record.get("pre_image_sha256") or "")
-                if not digest:
-                    raise ValueError(f"missing preimage hash: {name}")
+                digest = record["pre_image_sha256"]
                 if file_digest(target) != digest:
-                    if not backup or file_digest(Path(backup)) != digest:
+                    if file_digest(Path(backup)) != digest:
                         raise ValueError(f"missing or corrupt backup: {name}")
                     target.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(backup, target)
                 mode = record.get("mode")
                 if mode is not None:
-                    target.chmod(int(mode))
+                    target.chmod(mode)
                 if file_digest(target) != digest:
                     raise OSError(f"preimage verification failed: {name}")
             else:
@@ -266,32 +264,6 @@ def restore_records(records: Sequence[Mapping[str, Any]]) -> tuple[list[str], li
     return restored, errors
 
 
-def merge_records(
-    in_memory: Sequence[Mapping[str, Any]],
-    backup_root: Path | str,
-) -> list[dict[str, Any]]:
-    """Return the records to revert, the persisted ledger first.
-
-    Args:
-        in_memory: Records the caller accumulated this process, folded in for
-            the case where the ledger could not be written.
-        backup_root: Directory the apply wrote its backups under.
-
-    Returns:
-        list[dict[str, Any]]: De-duplicated records in the order they were
-        taken, so a caller can revert them in reverse.
-    """
-    merged: list[dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
-    for record in [*load_records(backup_root), *in_memory]:
-        key = (str(record["target"]), str(record["backup_path"]))
-        if key in seen:
-            continue
-        seen.add(key)
-        merged.append(dict(record))
-    return merged
-
-
 __all__ = [
     "ABSENT",
     "LEDGER_NAME",
@@ -301,6 +273,5 @@ __all__ = [
     "load_prepared_records",
     "load_records",
     "mark_prepared",
-    "merge_records",
     "restore_records",
 ]

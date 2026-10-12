@@ -43,7 +43,7 @@ async def test_flow_driver_uses_the_current_sweep_contract(flow, tmp_path, monke
     call = sweep.call_args
     inspect.signature(run_conc_sweep).bind(*call.args, **call.kwargs)
     assert call.args == (state, tmp_path)
-    assert call.kwargs == {"concs": [8, 4], "total_budget_sec": None, "write_reports": True}
+    assert call.kwargs == {"concs": [8, 4], "total_budget_sec": None}
     assert state.isl == 32 and state.osl == 64
     assert state.max_minutes == 0
     assert state.closing_phase is False and state.stop_reason == ""

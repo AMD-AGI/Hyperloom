@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Parse the Coordinator-style ``_compose_prompt`` text into structured fields."""
+"""Parse the Coordinator-style ``compose_prompt`` text into structured fields."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from .request_models import Proposal
 # ``=== Section title ===`` marker; capture group 1 is the trimmed title.
 _SECTION_RE = re.compile(r"^\s*===\s*(.+?)\s*===\s*$")
 
-# Inbox row layout (matches Coordinator._compose_prompt).
+# Inbox row layout (matches ConversationCollaborator.compose_prompt).
 _INBOX_ROW_RE = re.compile(
     r"^\s*seq=(?P<seq>\d+)\s+"
     r"msg_id=(?P<msg_id>[A-Za-z0-9_\-]+)\s+"

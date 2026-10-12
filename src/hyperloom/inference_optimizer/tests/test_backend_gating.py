@@ -46,7 +46,7 @@ def test_preflight_resolves_interpreter_via_backend_not_magpie():
     # Ray availability is probed with the SAME interpreter (not shutil.which, which only inspects PATH and would
     # false-positive on a bypass-only host that has a stray ``ray`` on PATH but cannot run Ray correctly).
     ray_src = inspect.getsource(preflight_mod._ensure_ray)
-    assert "_ray_smoke(python_exe)" in ray_src
+    assert "_ray_smoke(python_exe," in ray_src
     assert "shutil.which" not in ray_src
     # Magpie interpreter is no longer resolved unconditionally in _preflight; it comes through
     # resolve_benchmark_interpreter for the Magpie backend.
@@ -83,7 +83,7 @@ def test_install_sh_gates_magpie_calls():
 
 
 def test_kernel_install_validates_ray_cli_and_serving_slot():
-    install_sh = Path(preflight_mod.__file__).resolve().parents[2] / "agents" / "kernel" / "scripts" / "install.sh"
+    install_sh = Path(preflight_mod.__file__).resolve().parents[1] / "assets" / "install_kernel_tools.sh"
     text = install_sh.read_text(encoding="utf-8")
 
     assert 'RAY_VERSION="${RAY_VERSION:-2.44.1}"' in text

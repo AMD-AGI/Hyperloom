@@ -131,8 +131,7 @@ _GRAPH_PROBE_SITECUSTOMIZE = r'''
 import atexit, json, os, sys
 
 _n = [0]
-# Collected only when the caller declares a rank count. A single-rank probe
-# reports replays alone, exactly as before.
+# Harness evidence is collected only when the caller declares a rank count.
 _expect_ranks = 0
 try:
     _expect_ranks = int(os.environ.get("GRAPH_PROBE_EXPECT_RANKS") or 0)
@@ -324,11 +323,6 @@ def _read_graph_probe_shards(out_path: str, *, expected_world_size: int | None =
         except (OSError, json.JSONDecodeError, ValueError) as exc:
             return PROBE_FAILED, f"invalid graph probe shard {Path(shard).name}: {exc}"
 
-        if isinstance(payload, int) and not isinstance(payload, bool):
-            if payload < 0:
-                return PROBE_FAILED, f"invalid negative replay count in {Path(shard).name}"
-            unranked_replays.append(payload)
-            continue
         if not isinstance(payload, dict):
             return PROBE_FAILED, f"invalid graph probe shard payload in {Path(shard).name}"
 
@@ -456,8 +450,8 @@ def _distributed_contract_violation(worker_payloads: dict[int, dict]) -> str:
     measure inside ``dist_harness``? The harness binds each rank to its own
     device, seeds them apart, keeps the timed region free of synchronization,
     reduces with the slowest rank and destroys the process group -- properties
-    that used to be inferred one at a time from what the run happened to do,
-    each inference weaker than the property it stood for. A driver that went its
+    that, inferred one at a time from what the run happened to do, would each be
+    weaker than the property it stood for. A driver that went its
     own way is refused for that, not for whichever of them it broke first.
     """
     outside = sorted(rank for rank, shard in worker_payloads.items() if shard.get("harness") is not True)
@@ -1403,7 +1397,7 @@ def summarize_agent_progress(progress_log: list[str]) -> str:
         parts.append("backend does not support progress streaming")
     else:
         parts.append("no tool calls at all")
-    tail = [entry for entry in progress_log[-6:]]
+    tail = list(progress_log[-6:])
     if tail:
         parts.append("last steps:\n" + "\n".join(f"  {entry}" for entry in tail))
     return "; ".join(parts[:1]) + ("\n" + parts[1] if len(parts) > 1 else "")

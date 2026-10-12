@@ -234,7 +234,11 @@ def _collect_recipe(
         ("accepted_stack_targets", enablement.get("accepted_stack_targets") or {}),
         ("base_sha", str(enablement.get("base_sha") or "") or None),
         ("runtime_provenance", project_runtime_provenance(enablement)),
-        ("environment_closure", enablement.get("environment_closure") or None),
+        # The interpreter is an absolute path on this host; the setup script reads it from state.
+        (
+            "environment_closure",
+            {k: v for k, v in (enablement.get("environment_closure") or {}).items() if k != "interpreter"},
+        ),
         ("installed_versions_at_keep", enablement.get("installed_versions_at_keep") or None),
     ):
         if value:
@@ -255,13 +259,18 @@ def _collect_recipe(
     )
     out["replay_sufficiency"] = decision
     out["dependency_closure_status"] = _closure_status(decision, enablement)
+    from ..setup_script import setup_script_record
+
+    setup_script = setup_script_record(session_dir, sufficient=decision["status"] == "sufficient")
+    if setup_script:
+        out["setup_script"] = setup_script
 
 
 def _lane_dispatched(state: dict[str, Any]) -> bool:
     """Whether the lane ever opened a round, over both state generations.
 
-    A round no longer parks its task id in the enablement state, so the
-    post-rework evidence that one ran is the specialist it settled onto, the
+    A round does not park its task id in the enablement state, so the
+    evidence that one ran is the specialist it settled onto, the
     per-round records it kept, and the setup rows a round stamped its own id
     onto. ``inflight_task_id`` / ``attempts`` are read for a document written
     before the rework, not as the primary signal -- reading only those would
@@ -381,9 +390,9 @@ def _collect_landed_stack(out: dict[str, Any], state: dict[str, Any], *, session
     kept_patches_raw = _eg(state, "kept_patches")
     if isinstance(kept_patches_raw, list) and kept_patches_raw:
         # Same portability rule as ``kept_rounds`` below, and for the same
-        # reason: ``_rel`` falls back to ``str(path)``, so the ``or`` that used
-        # to stand here never fired and a patch outside the session travelled as
-        # an authoring-host absolute path. Left alone it would also put the same
+        # reason: ``_rel`` falls back to ``str(path)``, so ``_rel(p) or p`` would
+        # never fall through and a patch outside the session would travel as an
+        # authoring-host absolute path. It would also put the same
         # patch in the recipe twice under two different names -- one of them
         # naming a directory the consumer does not have.
         out["kept_patches"] = [_portable_patch_ref(str(p), session_dir) for p in kept_patches_raw]
@@ -559,6 +568,9 @@ _RECIPE_KEYS: tuple[str, ...] = (
     "recipe_steps",
     "replay_sufficiency",
     "dependency_closure_status",
+    # Path and sha256 of the script that reproduces the setup, and whether it
+    # does so on its own -- claimed only beside a sufficient verdict.
+    "setup_script",
     "accepted_stack_targets",
     "source_snapshots",
     "roots",

@@ -123,13 +123,12 @@ def resolve_codex_reasoning_effort(explicit: str = "") -> str:
 
     ``max`` is a level of the shared vocabulary that this protocol cannot be
     told by name, so it arrives here as ``xhigh`` -- the deepest the gateway
-    has. The projection is shared rather than local to this backend: when it
-    lived here only, the same ``max`` reaching Hyperloom's own chat.completions
-    was a 400.
+    has. The projection is shared rather than local to this backend, so the
+    same ``max`` reaching Hyperloom's own chat.completions is projected too.
 
-    Anything off the ladder is refused loudly. An unrecognized effort used to
-    travel into the run and come back a 400 mid-campaign, hours after it
-    started with a typo nobody had a reason to look at.
+    Anything off the ladder is refused loudly, before the run starts: an
+    unrecognized effort would otherwise travel into the run and come back a 400
+    mid-campaign, hours after a typo nobody had a reason to look at.
     """
     effort = gateway_reasoning_effort(explicit or DEFAULT_REASONING_EFFORT)
     if not effort:
@@ -568,7 +567,7 @@ class CodexBackend:
         """Map the generic runtime sandbox into a Codex SDK preset."""
         if self.runtime.sandbox_mode == "bypass" or self.bypass_sandbox:
             return sdk.Sandbox.full_access
-        elif spec.writable and self.runtime.sandbox_mode != "read-only":
+        if spec.writable and self.runtime.sandbox_mode != "read-only":
             return sdk.Sandbox.workspace_write
         return sdk.Sandbox.read_only
 

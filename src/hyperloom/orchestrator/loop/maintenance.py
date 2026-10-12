@@ -6,6 +6,7 @@
 from __future__ import annotations
 from typing import Any
 from ..state.shared_state import SharedState
+from ..collaborator import CoordinatorCollaborator
 
 import logging as _logging
 
@@ -62,23 +63,24 @@ async def run_lease_and_db_reclaim(
         log.exception("%s: DB retention failed", reason)
 
 
-class MaintenanceCollaborator:
-    """Extracted collaborator; delegates unknown attrs to its Coordinator."""
+class MaintenanceCollaborator(CoordinatorCollaborator):
+    """Handles session maintenance: disk cleanup, task reclaim, and health checks."""
 
-    def __init__(self, coordinator) -> None:
-        self._coord = coordinator
+    # Advisory disk guard: when the session partition runs low, LRU-trim per-task runs/ workspaces; durable state is
+    # never touched.
+    _DISK_FREE_MIN_GB: float = 20.0
+    _DISK_USED_MAX_FRAC: float = 0.85
+    _DISK_RUNS_KEEP_PER_ACTION: int = 50
+    _STATE_JSON_WARN_BYTES: int = 50 * 1024 * 1024
 
-    def __getattr__(self, name: str):
-        return getattr(object.__getattribute__(self, "_coord"), name)
-
-    async def _run_maintenance(
+    async def run(
         self,
         *,
         tick: int,
     ) -> dict[str, Any] | None:
         """Report ownership cleanup, prune the DB, and trim ``runs/`` when disk is low."""
         summary: dict[str, Any] = {"tick": tick}
-        await run_lease_and_db_reclaim(self, summary, reason="maintenance_watchdog")
+        await run_lease_and_db_reclaim(self._coord, summary, reason="maintenance_watchdog")
         disk = self._maybe_prune_runs_for_disk()
         if disk is not None:
             summary["disk"] = disk

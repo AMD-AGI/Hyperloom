@@ -110,3 +110,27 @@ def test_the_grading_block_names_the_axis_and_both_verdicts():
 def test_the_grading_block_takes_the_threshold_from_the_one_constant():
     """A literal here would drift from the threshold the resolver actually applies."""
     assert f">=+{AGENTX_KEEP_P50_THRESHOLD_PCT:.0f}%" in "\n".join(grading_lines())
+
+
+_INTVTY = {"objective": "e2e_norm_intvty_p90", "noise_pct": 5.0}
+_OUTPUT = {"objective": "output_throughput", "noise_pct": 5.0}
+
+
+def test_an_aiperf_session_seeded_on_output_is_not_told_it_runs_mlperf(monkeypatch):
+    """The MLPerf wording follows the recorded backend, not whether interactivity happens to be off."""
+    monkeypatch.delenv("HYPERLOOM_AGENTIC_BACKEND", raising=False)
+    body = "\n".join(grading_lines(_OUTPUT, "aiperf"))
+    assert "output token throughput" in body
+    assert "MLPerf" not in body
+
+
+def test_an_mlperf_session_gets_the_mlperf_wording():
+    body = "\n".join(grading_lines(_OUTPUT, "mlperf"))
+    assert "MLPerf agentic harness" in body
+
+
+def test_the_axis_comes_from_the_recorded_grading_not_the_process_env(monkeypatch):
+    """A resumed process with HYPERLOOM_PERF_METRIC changed must still describe the axis the session grades on."""
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
+    monkeypatch.delenv("HYPERLOOM_AGENTIC_BACKEND", raising=False)
+    assert "E2E normalised interactivity P50" in "\n".join(grading_lines(_INTVTY, "aiperf"))

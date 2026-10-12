@@ -203,6 +203,11 @@ def trace_ext_dir(session_dir: Path) -> Path:
     return trace_dir(session_dir) / "ext"
 
 
+def trajectory_dir(session_dir: Path) -> Path:
+    """``<sd>/reports/trace/trajectory/`` — one ``<writer>.jsonl`` event shard per writing process; the append-only source of truth for the session trajectory (Langfuse spans are a projection of it)."""
+    return trace_dir(session_dir) / "trajectory"
+
+
 def decision_trace_path(session_dir: Path) -> Path:
     """``<sd>/reports/trace/decision_trace.jsonl`` — collector output joining every decision to its LLM token spend along the phase→tick timeline."""
     return trace_dir(session_dir) / "decision_trace.jsonl"
@@ -285,10 +290,19 @@ def agent_dir(session_dir: Path, role: str) -> Path:
     return Path(session_dir) / "agents" / role
 
 
-def agent_prompt_snapshot(session_dir: Path, role: str, *, phase: str = "") -> Path:
-    """Compute the path to the per-agent system-prompt snapshot."""
-    stem = f"system_prompt.{phase.strip().upper()}" if phase.strip() else "system_prompt"
-    return agent_dir(session_dir, role) / f"{stem}.snapshot.md"
+def agent_prompt_snapshot(session_dir: Path, role: str, *, macro_cycle: int, phase: str = "") -> Path:
+    """Compute the path to the per-agent system-prompt snapshot.
+
+    Only the orchestration role's snapshot carries the macro-cycle prefix (``cN``);
+    all other roles use a plain ``system_prompt.snapshot.md``.
+    """
+    if role == "orchestration":
+        cycle_part = f"c{macro_cycle}."
+        phase_part = f"{phase.strip().upper()}." if phase.strip() else ""
+        stem = f"system_prompt.{cycle_part}{phase_part}snapshot"
+    else:
+        stem = "system_prompt.snapshot"
+    return agent_dir(session_dir, role) / f"{stem}.md"
 
 
 def agent_mcp_setup_path(session_dir: Path, role: str) -> Path:
@@ -487,4 +501,5 @@ __all__ = [
     "target_analysis_report_md",
     "target_baseline_json",
     "trace_dir",
+    "trajectory_dir",
 ]

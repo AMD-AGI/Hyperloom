@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Step 1 of the review-pr skill: collect the PR evidence every later step reads.
 #
-# usage: fetch.sh <PR-NUMBER> [WORK_DIR]
+# usage: fetch.sh <PR-NUMBER> [WORK_DIR [EXPECTED_HEAD [EXPECTED_BASE_TIP]]]
 # Writes the artifacts listed in SKILL.md into WORK_DIR and prints WORK_DIR last.
 # Anything that cannot be collected exits non-zero with the reason: reviewing on
 # partial evidence produces a confident review of a diff nobody read.
@@ -13,11 +13,16 @@ die() {
   exit 1
 }
 
-[ "$#" -ge 1 ] && [ "$#" -le 2 ] || die "usage: fetch.sh <PR-NUMBER> [WORK_DIR]"
-case "$1" in '' | *[!0-9]*) die "usage: fetch.sh <PR-NUMBER> [WORK_DIR]" ;; esac
+[ "$#" -ge 1 ] && [ "$#" -le 4 ] \
+  || die "usage: fetch.sh <PR-NUMBER> [WORK_DIR [EXPECTED_HEAD [EXPECTED_BASE_TIP]]]"
+case "$1" in
+  '' | *[!0-9]*) die "usage: fetch.sh <PR-NUMBER> [WORK_DIR [EXPECTED_HEAD [EXPECTED_BASE_TIP]]]" ;;
+esac
 
 PR="$1"
 WORK="${2:-/tmp/hl-review-$PR}"
+EXPECTED_HEAD="${3:-}"
+EXPECTED_BASE_TIP="${4:-}"
 command -v gh >/dev/null 2>&1 || die "gh (GitHub CLI) is required"
 
 REPO="${HL_REPO:-$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)}"
@@ -46,6 +51,10 @@ sed -n 's/^title: //p' "$WORK/meta.txt" > "$WORK/title.txt"
 HEAD_SHA=$(sed -n 's/^head: //p' "$WORK/meta.txt")
 BASE_TIP=$(sed -n 's/^base_tip: //p' "$WORK/meta.txt")
 [ -n "$HEAD_SHA" ] && [ -n "$BASE_TIP" ] || die "PR metadata carries no head sha or base sha"
+[ -z "$EXPECTED_HEAD" ] || [ "$HEAD_SHA" = "$EXPECTED_HEAD" ] \
+  || die "head mismatch: expected $EXPECTED_HEAD, got $HEAD_SHA"
+[ -z "$EXPECTED_BASE_TIP" ] || [ "$BASE_TIP" = "$EXPECTED_BASE_TIP" ] \
+  || die "base tip mismatch: expected $EXPECTED_BASE_TIP, got $BASE_TIP"
 
 gh pr view "$PR" --repo "$REPO" --json body --jq '.body // ""' > "$WORK/body.txt"
 
@@ -128,14 +137,31 @@ gh api --paginate "repos/$REPO/commits/$HEAD_SHA/check-runs" \
 gh api --paginate "repos/$REPO/commits/$HEAD_SHA/status" \
   --jq '.statuses[] | [.context, .state, (.target_url // "")] | @tsv' >> "$WORK/ci.txt"
 
-{
-  gh api --paginate "repos/$REPO/pulls/$PR/reviews" \
-    --jq '.[] | select((.body // "") != "") | "[REVIEW \(.user.login) \(.state)]\n\(.body)\n"'
-  gh api --paginate "repos/$REPO/pulls/$PR/comments" \
-    --jq '.[] | "[INLINE \(.user.login)] \(.path):\(.line // .original_line // 0)\n\(.body)\n"'
-  gh api --paginate "repos/$REPO/issues/$PR/comments" \
-    --jq '.[] | "[COMMENT \(.user.login)]\n\(.body)\n"'
-} > "$WORK/comments.txt"
+# Only the author, users with write access and this bot reach comments.txt, so an outside comment
+# cannot steer the review.
+raw=$(mktemp -d)
+trap 'rm -rf "$raw"' EXIT
+gh api --paginate --slurp "repos/$REPO/pulls/$PR/reviews" | jq -s '[.[][][]]' > "$raw/reviews.json"
+gh api --paginate --slurp "repos/$REPO/pulls/$PR/comments" | jq -s '[.[][][]]' > "$raw/inline.json"
+gh api --paginate --slurp "repos/$REPO/issues/$PR/comments" | jq -s '[.[][][]]' > "$raw/issue.json"
+
+PR_AUTHOR=$(sed -n 's/^author: //p' "$WORK/meta.txt")
+jq -r '.[].user.login' "$raw"/{reviews,inline,issue}.json | sort -u | while IFS= read -r login; do
+  if [ "$login" = "$PR_AUTHOR" ] || [ "$login" = 'github-actions[bot]' ]; then
+    echo "$login"
+    continue
+  fi
+  case "$(gh api "repos/$REPO/collaborators/$login/permission" --jq .permission 2>/dev/null || true)" in
+    admin | write) echo "$login" ;;
+  esac
+done | jq -Rsc 'split("\n") | map(select(length > 0))' > "$raw/trusted.json"
+
+jq -nr --slurpfile t "$raw/trusted.json" '
+  def trusted: select(.user.login | IN($t[0][]));
+  (input[] | trusted | select((.body // "") != "") | "[REVIEW \(.user.login) \(.state)]\n\(.body)\n"),
+  (input[] | trusted | "[INLINE \(.user.login)] \(.path):\(.line // .original_line // 0)\n\(.body)\n"),
+  (input[] | trusted | "[COMMENT \(.user.login)]\n\(.body)\n")' \
+  "$raw"/{reviews,inline,issue}.json > "$WORK/comments.txt"
 
 # Other open PRs whose changed paths intersect this one's (rule V4). One query: gh
 # returns each open PR's file list, and the intersection is computed locally rather

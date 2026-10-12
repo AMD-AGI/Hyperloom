@@ -32,6 +32,7 @@ SectionShape = Literal["item", "singleton"]
 SECTION_SHAPES: dict[str, SectionShape] = {
     "session": "singleton",
     "metadata": "singleton",
+    "outcome": "singleton",
     # A section of its own rather than a second producer on ``metadata``,
     # because assembly keeps only the newest singleton per producer and the
     # Coordinator's -- reissued on every state save -- would always win.

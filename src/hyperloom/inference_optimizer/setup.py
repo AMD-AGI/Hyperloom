@@ -106,7 +106,3 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"[hyperloom setup] running: {' '.join(cmd)}")
     return subprocess.run(cmd, env=env).returncode
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

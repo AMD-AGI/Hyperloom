@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.inference_optimizer.cli import model_gate as cli
+from hyperloom.inference_optimizer import gpu_types
 from hyperloom.inference_optimizer.cli import model_gate as cli_model_gate
 
 
@@ -45,8 +46,7 @@ def _seed_state(session_dir: Path, monkeypatch):
 def _default_non_amd_gpu(monkeypatch):
     """Keep config checks hermetic unless a test passes gpu_type explicitly."""
     monkeypatch.delenv("GPU_TYPE", raising=False)
-    # Patch the real GPU autodetect call site (cli re-exports the same object).
-    monkeypatch.setattr(cli_model_gate, "_autodetect_gpu_type", lambda: None)
+    monkeypatch.setattr(gpu_types, "_autodetect_gpu_type", lambda: None)
 
 
 # _detect_incompatible_model_config
@@ -1402,7 +1402,7 @@ def test_run_compat_detector_resolves_repo_id_before_dispatch(tmp_path, monkeypa
 
     def _fake_detector(model_path):
         seen["model_path"] = model_path
-        return None
+        return
 
     spec = cli_model_gate.DetectorSpec("t", _fake_detector, args=("model_path",))
     cli_model_gate._run_compat_detector(spec, model_path="org/repo", data={}, gpu_type=None)
@@ -1416,7 +1416,7 @@ def test_run_compat_detector_falls_back_to_raw_when_unresolvable(monkeypatch):
 
     def _fake_detector(model_path):
         seen["model_path"] = model_path
-        return None
+        return
 
     spec = cli_model_gate.DetectorSpec("t", _fake_detector, args=("model_path",))
     cli_model_gate._run_compat_detector(spec, model_path="/raw/model/path", data={}, gpu_type=None)

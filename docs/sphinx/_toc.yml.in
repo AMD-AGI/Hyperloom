@@ -65,6 +65,12 @@ subtrees:
     title: Session output schema
   - file: reference/integrate-kb.md
     title: Knowledge base integration
+  - file: reference/experience-kb.md
+    title: Experience KB service
+  - file: reference/experience-kb-collect.md
+    title: Experience collection
+  - file: reference/experience-kb-schema.md
+    title: Experience schema
   - file: reference/operator-scripts.md
     title: Operator scripts
   - file: reference/multi-node.md

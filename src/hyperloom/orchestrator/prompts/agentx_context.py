@@ -5,9 +5,12 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any, Mapping
 
+from hyperloom.common.agentx_workload import BACKEND_ENV, is_mlperf_backend
 from hyperloom.common.perf_metric import AGENTX_KEEP_P50_THRESHOLD_PCT
+from hyperloom.inference_optimizer.grading import resolved_grading
 
 # Percentiles rendered per axis, in order.
 _RENDERED = ("p50", "p90", "p99")
@@ -47,8 +50,23 @@ def corpus_lines(shape: Mapping[str, Any] | None) -> list[str]:
     return lines
 
 
-def grading_lines() -> list[str]:
-    """Describe what an AgentX KEEP is decided on."""
+def grading_lines(grading: Mapping[str, Any] | None = None, backend: str = "") -> list[str]:
+    """Describe what an AgentX KEEP is decided on, from the session's recorded ``grading`` and ``agentx_backend``.
+
+    A session recorded before the backend field existed falls back to the process environment for it.
+    """
+    if is_mlperf_backend({BACKEND_ENV: backend} if backend else None):
+        return [
+            "**Graded on output token throughput** — the MLPerf agentic harness replays a",
+            "fixed trajectory set and publishes no per-request interactivity, so a KEEP is",
+            "an output-throughput gain that holds the smoke accuracy of the baseline.",
+        ]
+    on_intvty, _ = resolved_grading(SimpleNamespace(grading=dict(grading or {}), framework="", benchmark_mode="agentx"))
+    if not on_intvty:
+        return [
+            "**Graded on output token throughput** — this session was seeded on that axis,",
+            "so a KEEP is an output-throughput gain; interactivity is measured, not graded.",
+        ]
     return [
         "**Graded on E2E normalised interactivity P50** — the median of",
         "`OSL_i / E2EL_i` in tok/s/user. InferenceX ranks submissions on the P90 of the",

@@ -219,14 +219,7 @@ class TestTheWrapperForwardsTheNewInputs:
         ],
     )
     def test_a_populated_field_reaches_the_forge_cli(self, key, flag):
-        import importlib.util
-
-        spec = importlib.util.spec_from_file_location(
-            "_fgt",
-            Path(rh.__file__).parents[2] / "agents" / "kernel" / "tools" / "forge_gemm_tuning.py",
-        )
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
+        from hyperloom.orchestrator.kernel import forge_gemm_tuning as mod
 
         base = {
             "model_path": "/m",

@@ -5,7 +5,7 @@
 Dispatch an LLM specialist sub-agent on the **research_lane** to investigate
 one canonical gap in depth. The specialist reads advisory RecipeKB
 warm-start facts, source-backed research hints, and the framework source
-roots under `INFERENCEX_PATH`, and can query the PR Monitor on demand (over
+roots, and can query the PR Monitor on demand (over
 the shared `PR_QUERY_REPOS` allowlist) via `mcp__pr_monitor__*` tools.
 It then emits exactly one `specialist_done` intent on exit (Inv-5.3 single
 exit protocol).
@@ -42,7 +42,7 @@ write source patches. The new contract is:
   `runs/specialist/<task_id>/worktree/`.
 - The patch files (`*.patch` / `*.diff`) are produced via
   `git diff > patches/NNN_<slug>.patch` inside the worktree.
-- The physical `git apply` against `INFERENCEX_PATH` is the job of the
+- The physical `git apply` against the framework source roots is the job of the
   `integrate_patch` action — never the specialist itself. Inv-3 (single
   tenant GPU) and Inv-1 (Coordinator-only fact-layer writer) are
   preserved by routing every source-tree mutation through that single

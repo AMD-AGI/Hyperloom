@@ -26,13 +26,13 @@ the breakdown is written the steps after it have not run yet. The recording
 reports ``running`` at that point — it is the sequencer's own last act that
 records a verdict — and the sequencer then calls
 :func:`~..exporter.patch_breakdown_close` to splice the settled section back
-in. So ``running`` on a breakdown found on disk means the process died during
-its close-out, which is a fact about the session rather than about the record.
+in. A ``running`` breakdown may be an in-progress snapshot; it does not by
+itself show that close-out terminated before settling.
 
 A reader wanting to know whether a step genuinely failed must look at
 ``steps[].status``; the absence of a step is not evidence against it.
-``langfuse_flush`` in particular only ever records a step when it fails, so its
-silence is success.
+``langfuse_flush`` records ``done`` when the sequencer step returns and
+``failed`` if it raises; ``done`` alone does not attest to live delivery.
 
 The projection below is the fallback for a session with no recorded close
 fragments, and is retained only for the length of the migration.
@@ -58,6 +58,7 @@ _KNOWN_STEPS = frozenset(
         "sequencer_started",
         "geak_rebench_drain",
         "stack_revalidation",
+        "post_opt_roofline",
         "fact_finalize",
         "report",
         "session_breakdown",
@@ -90,6 +91,7 @@ def _close_step(row: dict[str, Any]) -> dict[str, Any]:
         "ts": str(row.get("ts") or ""),
         "task_id": task_id,
         "detail": detail,
+        **{key: row[key] for key in ("optional", "artifact_path", "artifact_digest", "error") if key in row},
     }
 
 
@@ -111,6 +113,12 @@ def collect_v6_close(
         than vanishing.
     """
     if isinstance(recorded, dict) and recorded:
+        if recorded.get("source") == "safety_net" and not recorded.get("status"):
+            return {
+                **_unclosed(),
+                "source": "safety_net",
+                "sequence_schema_version": recorded.get("sequence_schema_version"),
+            }
         return _recorded_close(recorded, warnings=warnings)
     return _unclosed()
 
@@ -171,6 +179,9 @@ def _recorded_close(
             "artifact_package_path": artifacts.get("artifact_package_path") or None,
         },
     }
+    for key in ("sequence_schema_version", "source"):
+        if recorded.get(key):
+            close[key] = recorded[key]
     # Absent when the session never attempted a publication. Left out rather
     # than emitted empty: the key is the record that it was tried, so an empty
     # one would claim an attempt that never happened.
@@ -218,11 +229,10 @@ def _unclosed() -> dict[str, Any]:
     omitting the key: no step happened, so there is nothing to summarize and
     ``failed`` is the whole of what can be said.
 
-    The export used to derive a verdict here by re-reading ``phase_history``
-    and probing the reports directory, and could not tell a step that had not
-    happened yet from one that never would -- so it called a healthy
-    mid-sequence session ``degraded``, which is why the sequencer records its
-    own verdict now.
+    The export does not derive a verdict by re-reading ``phase_history`` and
+    probing the reports directory: that cannot tell a step that has not
+    happened yet from one that never will, and calls a healthy mid-sequence
+    session ``degraded``. The sequencer records its own verdict instead.
 
     Returns:
         dict[str, Any]: The ``close`` object for a session with no close-out.

@@ -26,22 +26,6 @@ def _isolate_session_memory(tmp_path, monkeypatch):
     yield
 
 
-def test_init_session_writes_context(tmp_path, capsys):
-    request = _write(
-        tmp_path / "req.json",
-        {
-            "kind": "critic_decision_request",
-            "session_id": "sess_cli_init",
-            "context": {"model": "qwen3-14b", "framework": "sglang"},
-            "messages": [],
-        },
-    )
-    rc = main(["init-session", "--request", str(request)])
-    assert rc == 0
-    captured = capsys.readouterr().out
-    assert json.loads(captured)["session_id"] == "sess_cli_init"
-
-
 def test_prepare_and_commit_review_for_coordinator_inbox(tmp_path, capsys):
     request = _write(
         tmp_path / "req.json",
@@ -89,155 +73,20 @@ def test_prepare_and_commit_review_for_coordinator_inbox(tmp_path, capsys):
     assert emit["intent_envelope"]["intents"][0]["payload"]["verdict"] == "approve"
 
 
-def test_close_session_emits_summary(tmp_path):
-    request = _write(
-        tmp_path / "req.json",
-        {
-            "kind": "critic_decision_request",
-            "session_id": "sess_cli_close",
-            "context": {
-                "model": "qwen3-14b",
-                "framework": "sglang",
-                "model_family": "qwen",
-                "workload": "decode",
-                "precision": "fp8",
-            },
-        },
-    )
-    main(["init-session", "--request", str(request)])
-    rc = main(
-        [
-            "close-session",
-            "--request",
-            str(request),
-            "--out",
-            str(tmp_path / "close.json"),
-        ]
-    )
-    assert rc == 0
-    out = json.loads((tmp_path / "close.json").read_text("utf-8"))
-    assert out["session_id"] == "sess_cli_close"
-
-
 def test_invalid_request_returns_exit_code_2(tmp_path):
     bad = _write(tmp_path / "bad.json", {"kind": "wat"})
-    rc = main(["init-session", "--request", str(bad)])
+    rc = main(["prepare-review", "--request", str(bad)])
     assert rc == 2
 
 
-# Low-level KB commands (inmemory client).
-
-_PACKET = {
-    "context": {
-        "framework": "sglang",
-        "model": "deepseek-r1-0528-fp8",
-        "model_family": "deepseek",
-        "workload": "decode",
-        "precision": "fp8",
-    }
-}
-
-
-def test_list_priors_emits_scope_cache_key(tmp_path):
-    packet = _write(tmp_path / "packet.json", _PACKET)
-    out_path = tmp_path / "priors.json"
-    rc = main(["list-priors", "--packet", str(packet), "--out", str(out_path)])
-    assert rc == 0
-    payload = json.loads(out_path.read_text("utf-8"))
-    assert payload["cache"] in {"miss", "hit", "disabled"}
-    assert isinstance(payload["scope_cache_key"], str)
-    assert payload["scope_cache_key"]
-
-
-def test_write_verdict_persists_reject_lesson(tmp_path):
-    packet = _write(tmp_path / "packet.json", _PACKET)
-    verdict = _write(
-        tmp_path / "verdict.json",
-        {
-            "verdict": "reject",
-            "reasoning": "active dispatch path unproven for this kernel",
-            "packet_evidence": ["benchmark.after.gain_pct"],
-            "confidence": "high",
-        },
-    )
-    ctx = _write(
-        tmp_path / "ctx.json",
-        {"session_id": "sess_wv", "review_id": "rev_1", "topic": "active dispatch path unproven"},
-    )
-    out_path = tmp_path / "wv.json"
-    rc = main(
-        [
-            "write-verdict",
-            "--packet",
-            str(packet),
-            "--verdict",
-            str(verdict),
-            "--ctx",
-            str(ctx),
-            "--out",
-            str(out_path),
-        ]
-    )
-    assert rc == 0
-    result = json.loads(out_path.read_text("utf-8"))
-    assert result["status"] in {"ok", "skipped", "dead_lettered", "disabled"}
-
-
-def test_write_kb_drafts_batch(tmp_path):
-    packet = _write(tmp_path / "packet.json", _PACKET)
-    kb_draft = _write(
-        tmp_path / "draft.json",
-        {
-            "kb_drafts": [
-                {
-                    "category": "kernel_optimization",
-                    "action": "Patch fused attention kernel for the decode path.",
-                    "lesson": "Active dispatch path must be updated jointly.",
-                    "tags": ["attention"],
-                    "result": {"status": "KEEP", "gain_pct": 4.2},
-                }
-            ]
-        },
-    )
-    ctx = _write(tmp_path / "ctx.json", {"session_id": "sess_wd", "review_id": "rev_wd"})
-    out_path = tmp_path / "wd.json"
-    rc = main(
-        [
-            "write-kb-drafts",
-            "--packet",
-            str(packet),
-            "--kb-draft",
-            str(kb_draft),
-            "--ctx",
-            str(ctx),
-            "--out",
-            str(out_path),
-        ]
-    )
-    assert rc == 0
-    result = json.loads(out_path.read_text("utf-8"))
-    assert result["status"] in {"ok", "skipped", "dead_lettered", "disabled"}
-
-
-def test_add_contradiction_command(tmp_path):
-    ctx = _write(tmp_path / "ctx.json", {"session_id": "sess_ac", "review_id": "rev_ac"})
-    out_path = tmp_path / "ac.json"
-    rc = main(
-        [
-            "add-contradiction",
-            "--new-id",
-            "kb_new_1",
-            "--old-ids",
-            "kb_old_1, kb_old_2 ,",
-            "--ctx",
-            str(ctx),
-            "--out",
-            str(out_path),
-        ]
-    )
-    assert rc == 0
-    result = json.loads(out_path.read_text("utf-8"))
-    assert "status" in result
+@pytest.mark.parametrize(
+    "command",
+    ["init-session", "close-session", "list-priors", "write-verdict", "write-kb-drafts", "add-contradiction"],
+)
+def test_removed_subcommands_are_rejected(command):
+    with pytest.raises(SystemExit) as exc:
+        main([command])
+    assert exc.value.code == 2
 
 
 def test_replay_dead_letter_empty_queue(tmp_path):

@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.orchestrator.actions.executors import integrate_patch as ip
+from hyperloom.orchestrator.actions.executors._git import _git_head_sha
 from hyperloom.orchestrator.actions.executors.integrate_patch import (
     IntegratePatchExecutor,
 )
@@ -324,7 +325,7 @@ def test_recovery_deletes_an_artifact_whose_target_the_patch_created(tmp_path):
             "version": 1,
             "phase": "ready",
             "root": str(recovery_root),
-            "git_head": ip._git_head_sha(repo),
+            "git_head": _git_head_sha(repo),
             "artifacts_prepared": True,
         },
     }
@@ -367,7 +368,7 @@ def test_recovery_restores_an_artifact_target_that_predates_the_attempt(tmp_path
             "version": 1,
             "phase": "ready",
             "root": str(recovery_root),
-            "git_head": ip._git_head_sha(repo),
+            "git_head": _git_head_sha(repo),
             "artifacts_prepared": True,
         },
     }

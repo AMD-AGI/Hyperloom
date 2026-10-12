@@ -184,6 +184,26 @@ def test_parse_turn_usages_drops_placeholder_output_without_a_result_row(tmp_pat
     assert [u["output_tokens"] for u in usages] == [None, None]
 
 
+def test_parse_turn_usages_defers_to_cumulative_row_when_turns_are_zeroed(tmp_path):
+    """A gateway that zeroes every streamed usage must not book the session at zero tokens."""
+    zeroed = '{"input_tokens": 0, "output_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}'
+    log = tmp_path / "p.log"
+    log.write_text(
+        f'{{"type": "assistant", "message": {{"id": "msg_1", "usage": {zeroed}}}}}\n'
+        f'{{"type": "assistant", "message": {{"id": "msg_2", "usage": {zeroed}}}}}\n'
+        '{"type": "result", "usage": {"input_tokens": 50632, "cache_read_input_tokens": 291392, '
+        '"cache_creation_input_tokens": 0, "output_tokens": 7542}}\n',
+        encoding="utf-8",
+    )
+    assert pu.parse_claude_stream_json_turn_usages(log) == []
+    assert pu.parse_claude_stream_json_usage(log) == {
+        "input_tokens": 50632,
+        "output_tokens": 7542,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 291392,
+    }
+
+
 def test_parse_turn_usages_none_when_no_per_message_usage(tmp_path):
     log = tmp_path / "p.log"
     log.write_text(

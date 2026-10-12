@@ -25,6 +25,7 @@ class IntegrateAttempt:
     done_payload: dict[str, Any] | None = field(default_factory=dict)
     provision_result: ProvisionResult | None = None
     stack_action: EnablementStackAction | None = None
+    localization_action: EnablementStackAction | None = None
     localization_patches: list[Path] = field(default_factory=list)
     localization_touched: list[str] = field(default_factory=list)
     base_sha_by_root: dict[str, str] = field(default_factory=dict)
@@ -37,9 +38,6 @@ class IntegrateAttempt:
     dropped_env_overrides: list[str] = field(default_factory=list)
     setup_result: dict[str, Any] = field(default_factory=dict)
     switch_manifest: list[dict[str, Any]] = field(default_factory=list)
-    switch_problems: list[str] = field(default_factory=list)
-    nogit_patch_backups: list[dict[str, Any]] | None = None
-    nogit_backup_root: Path | None = None
     pending: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -48,3 +46,10 @@ class IntegrateAttempt:
         if self.provision_result is None:
             return ""
         return self.provision_result.runtime.venv_root
+
+    @property
+    def runtime_source_root(self) -> str:
+        """The tree the acquired runtime imports, or no tree when this attempt did not provision."""
+        if self.provision_result is None:
+            return ""
+        return self.provision_result.runtime.source_root

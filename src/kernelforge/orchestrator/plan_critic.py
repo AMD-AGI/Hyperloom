@@ -51,7 +51,7 @@ _NARROWING_NOTE_MAX_CHARS = 240
 
 log = logging.getLogger(__name__)
 
-# The verdict stays a regex.
+# The verdict is one prose line, matched by regex; only the width block is structured.
 _VERDICT_PATTERN = re.compile(
     r"(?im)^[ \t]*(?:#{1,6}[ \t]*)?(?:\*\*)?"
     r"VERDICT(?:\*\*)?[ \t]*:[ \t]*(?:\*\*)?"
@@ -73,8 +73,6 @@ _WIDTH_BLOCK_LABEL = "plan critic width block"
 _WIDTH_BLOCK_ABSENT = f"the review ended with no {_WIDTH_BLOCK_KEY} block"
 # The two ways a round ends up not knowing what width the review wanted.
 _UNREAD_WIDTH_STATUSES = frozenset({"absent", "malformed"})
-
-# There is deliberately no prose fallback beside this parser.
 
 
 def _bounded_error_detail(error: Exception) -> str:

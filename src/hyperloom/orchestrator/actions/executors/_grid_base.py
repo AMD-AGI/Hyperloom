@@ -12,7 +12,6 @@ from typing import Any
 
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
-from hyperloom.common.perf_metric import VERDICT_KEEP
 
 log = logging.getLogger(__name__)
 
@@ -25,16 +24,6 @@ DEFAULT_KEEP_THRESHOLD_PCT = 1.0
 TS_FAILED = "FAILED"
 TS_KILLED_OVERTIME = "KILLED_OVERTIME"
 TS_SKIPPED_DEDUP = "SKIPPED_DEDUP"
-
-
-def is_kept(outcome: str) -> bool:
-    """True when *outcome* is an adoption.
-
-    The graded executors spell it ``VERDICT_KEEP``; ``integrate_patch`` spells
-    it ``"kept"``. Both derive ``adopted`` from here so the two spellings cannot
-    disagree about what counts.
-    """
-    return outcome in (VERDICT_KEEP, "kept")
 
 
 @dataclass

@@ -5,8 +5,9 @@
 
 Thin shell around ``orchestrator.kernel.conc_sweep.run_conc_sweep``. The
 Coordinator auto-enqueues one ``conc_sweep`` task per SWEEP phase via
-``_enqueue_internal_conc_sweep_task`` (when ``conc_sweep_enabled``, which is
-on by default; disable via ``--no-enable-conc-sweep``); a LLM-proposed
+``_enqueue_internal_conc_sweep_task`` (when ``conc_sweep_enabled``: on by
+default, off under AgentX; force either way with ``--enable-conc-sweep`` /
+``--no-enable-conc-sweep``); a LLM-proposed
 ``conc_sweep`` delegate is denied by PolicyGate.
 
 Inputs (``task.params``): ``concs`` (CONC ladder),

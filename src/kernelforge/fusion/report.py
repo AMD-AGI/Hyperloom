@@ -19,6 +19,13 @@ FUSION_MANIFEST_SCHEMA_VERSION = 2
 # Third verdict: the run could not ask the model, so it has no opinion about this kernel at all.
 LLM_UNAVAILABLE_VERDICT = "llm_unavailable"
 
+# Fourth verdict: the operator's kernel was located but discovery was deliberately not run, so this run has no
+# opinion about what to fuse it with -- distinct from having looked and found nothing.
+ANCHOR_RESOLVED_VERDICT = "anchor_resolved"
+
+# Written whenever an operator named the kernel, so a dry run hands back the resolution on its own.
+ANCHOR_REPORT_NAME = "fusion_anchor.json"
+
 
 def build_manifest(
     *,
@@ -36,6 +43,7 @@ def build_manifest(
     error: Optional[dict[str, Any]] = None,
     patches: Optional[list[dict[str, Any]]] = None,
     nomination: Optional[dict[str, Any]] = None,
+    anchor: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Assemble the JSON manifest dict."""
     verdict = verdict_override or ("candidate" if (diagnosis.is_candidate and recipe is not None) else "no_opportunity")
@@ -60,6 +68,8 @@ def build_manifest(
         # The nomination contract: N independent sibling patches.
         "patches": [dict(p) for p in patches] if patches is not None else None,
         "nomination": dict(nomination) if nomination else None,
+        # Which kernel the operator named, and what the trace says runs around it.
+        "anchor": dict(anchor) if anchor else None,
     }
 
 
@@ -67,4 +77,11 @@ def write_manifest(manifest: dict[str, Any], output_dir: str | Path) -> Path:
     """Write the manifest to ``<output_dir>/fusion_manifest.json``; return the path."""
     path = Path(output_dir) / "fusion_manifest.json"
     atomic_write_text(path, json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    return path
+
+
+def write_anchor_report(report: Any, output_dir: str | Path) -> Path:
+    """Write the resolved anchor to ``<output_dir>/fusion_anchor.json``; return the path."""
+    path = Path(output_dir) / ANCHOR_REPORT_NAME
+    atomic_write_text(path, json.dumps(report.to_dict(), indent=2, sort_keys=True) + "\n")
     return path

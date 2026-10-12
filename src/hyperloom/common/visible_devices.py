@@ -5,7 +5,7 @@
 The same tuple of mask variables and the same "split on ``,``/``;``, keep the
 first occurrence of each non-negative int" parser had accumulated five separate
 copies (``bus/gpu_pool``, ``policy/gate``, ``actions/executors/_ray_serving``,
-``common/env_safety``, ``loop/coordinator_helpers``), and their empty-mask
+``common/env_safety``, ``actions/executors/_gpu_pin``), and their empty-mask
 semantics had already drifted apart. This module is the single definition; it
 imports nothing outside the standard library so the pure-helper layers can use
 it without dragging in the SQLite connection ``gpu_pool`` owns.

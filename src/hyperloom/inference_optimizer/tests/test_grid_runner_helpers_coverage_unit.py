@@ -38,7 +38,6 @@ def test_validate_magpie_python_override_requires_python(tmp_path):
 # -- apply_compatibility_filter -------------------------------------------
 def test_compatibility_filter_drops_on_model_class(monkeypatch) -> None:
     monkeypatch.setattr(vf, "_detect_model_class", lambda mp: (False, False))
-    monkeypatch.setattr(vf, "_probe_server_help_text", lambda fw: "")
     grid = [_variant("mla", "--enable-flashinfer-mla"), _variant("plain", "")]
     kept, dropped = gr.apply_compatibility_filter(grid, framework="sglang", model_path="meta-llama-3-8b")
     assert [v.name for v in kept] == ["plain"]
@@ -47,17 +46,15 @@ def test_compatibility_filter_drops_on_model_class(monkeypatch) -> None:
     assert "MLA" in dropped[0]["reason"]
 
 
-def test_compatibility_filter_drops_on_missing_help_flag(monkeypatch) -> None:
+def test_compatibility_filter_keeps_a_flag_the_model_class_supports(monkeypatch) -> None:
+    # Whether the installed server accepts the flag is left to its own argparse at launch.
     monkeypatch.setattr(vf, "_detect_model_class", lambda mp: (True, True))
-    monkeypatch.setattr(vf, "_probe_server_help_text", lambda fw: "--some-other-flag")
     grid = [_variant("moe", "--enable-ep-moe")]
     kept, dropped = gr.apply_compatibility_filter(grid, framework="sglang", model_path="deepseek-moe")
-    assert kept == []
-    assert "too old" in dropped[0]["reason"]
+    assert [v.name for v in kept] == ["moe"] and dropped == []
 
 
-def test_compatibility_filter_no_model_path_assumes_compatible(monkeypatch) -> None:
-    monkeypatch.setattr(vf, "_probe_server_help_text", lambda fw: "--enable-ep-moe")
+def test_compatibility_filter_no_model_path_assumes_compatible() -> None:
     grid = [_variant("moe", "--enable-ep-moe")]
     kept, dropped = gr.apply_compatibility_filter(grid, framework="sglang", model_path="")
     assert [v.name for v in kept] == ["moe"] and dropped == []
@@ -338,6 +335,28 @@ def test_build_variant_yaml_prepends_legit_overlay(tmp_path: Path) -> None:
     out = gr._build_variant_yaml(base, "", variant, output_subdir=tmp_path / "v1")
     envs = yaml.safe_load(out.read_text(encoding="utf-8"))["benchmark"]["envs"]
     assert envs.get("PYTHONPATH", "").startswith(str(overlay))
+
+
+@pytest.mark.parametrize(
+    ("config_envs", "tail"),
+    [({}, ["/inh/a", "/inh/b"]), ({"PYTHONPATH": "/cfg"}, ["/cfg"])],
+    ids=["inherited", "config-authoritative"],
+)
+def test_build_variant_yaml_overlay_builds_on_the_launch_pythonpath(tmp_path, monkeypatch, config_envs, tail) -> None:
+    # The launch overlays benchmark.envs on os.environ, so a config without PYTHONPATH carries the inherited one.
+    # The overlay is relative so the path carries no drive colon on any host.
+    import os
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(["/inh/a", "/inh/b"]))
+    (tmp_path / "overlay").mkdir()
+    base = tmp_path / "base.yaml"
+    base.write_text(yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": config_envs}}), encoding="utf-8")
+    variant = _variant("v1")
+    variant.overlay_pythonpath = "overlay"  # type: ignore[attr-defined]
+    out = gr._build_variant_yaml(base, "", variant, output_subdir=tmp_path / "v1")
+    envs = yaml.safe_load(out.read_text(encoding="utf-8"))["benchmark"]["envs"]
+    assert envs["PYTHONPATH"] == os.pathsep.join(["overlay", *tail])
 
 
 def test_build_variant_yaml_drops_unsafe_overlay(tmp_path: Path) -> None:

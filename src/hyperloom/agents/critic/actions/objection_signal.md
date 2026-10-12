@@ -7,7 +7,7 @@ not a fresh verdict.
 ## Step 1 — Prepare
 
 ```bash
-python -m runtime.cli prepare-review \
+python -m hyperloom.agents.critic.runtime.cli prepare-review \
   --request "$CRITIC_WORKDIR/request.json" \
   --out "$CRITIC_WORKDIR/judge_bundle.json"
 ```

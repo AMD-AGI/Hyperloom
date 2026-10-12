@@ -124,6 +124,24 @@ def main():
         print("PARITY MISSING: harness reported no comparable shape")
         return 1
 
+    # Launch counts are the fusion's actual lever, and the loop scores on time
+    # alone, so surface them here: the author reads this stdout every iteration,
+    # and a regression found now is one that forge-fuse does not have to reject
+    # at export. The baseline run has no fusion yet and is exempt.
+    eager_launches = report.get("eager_launches")
+    fused_launches = report.get("fused_launches")
+    if isinstance(eager_launches, int) and isinstance(fused_launches, int):
+        print("launches: eager %d -> fused %d" % (eager_launches, fused_launches))
+        if fused_launches >= eager_launches and _fused_kernel_authored():
+            print(
+                "LAUNCH COUNT NOT REDUCED: the fused path issues %d launches vs %d "
+                "eager. This candidate will be REJECTED even if it benchmarks "
+                "faster; find what the fused path launches besides your kernel."
+                % (fused_launches, eager_launches)
+            )
+    elif _fused_kernel_authored():
+        print("launches: UNCOUNTED (harness reported no eager_launches/fused_launches)")
+
     eager_us = report.get("eager_us")
     fused_us = report.get("fused_us")
     if report.get("skipped"):

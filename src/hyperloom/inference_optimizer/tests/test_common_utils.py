@@ -9,7 +9,6 @@ import argparse
 import json
 import subprocess
 import sys
-from concurrent.futures import TimeoutError as FuturesTimeoutError
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -329,15 +328,15 @@ def test_recover_session_status_and_run_paths(tmp_path: Path, monkeypatch: pytes
     )
     monkeypatch.setattr(emitter, "flush_session", lambda s: calls.append("flush"))
     monkeypatch.setattr(emitter, "record_session_breakdown", lambda s: calls.append("record"))
-    rc = recover._run_recover_session(argparse.Namespace(session_dir=session, force=True, backfill_trace=False))
+    rc = recover._run_recover_session(argparse.Namespace(session_dir=session, force=True))
     assert rc == 0
     assert calls == ["write", "flush", "patch", "record", "package"]
 
     monkeypatch.setattr(breakdown_mod, "write_breakdown_json", lambda _s: (_ for _ in ()).throw(RuntimeError("boom")))
-    assert recover._run_recover_session(argparse.Namespace(session_dir=session, force=True, backfill_trace=False)) == 1
+    assert recover._run_recover_session(argparse.Namespace(session_dir=session, force=True)) == 1
 
 
-def test_recover_session_nonfatal_backfill_and_package_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_recover_session_nonfatal_langfuse_and_package_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.inference_optimizer.cli import recover
     import hyperloom.inference_optimizer.breakdown as breakdown_mod
     import hyperloom.inference_optimizer.trace.langfuse_emitter as emitter
@@ -364,17 +363,9 @@ def test_recover_session_nonfatal_backfill_and_package_errors(tmp_path: Path, mo
         breakdown_mod, "package_session_artifacts", lambda _s: (_ for _ in ()).throw(RuntimeError("zip failed"))
     )
 
-    fake_backfill = SimpleNamespace(
-        build_plan=lambda s: calls.append("plan") or {"session": str(s)},
-        ingest=lambda plan: calls.append("ingest") or 0,
-    )
-    monkeypatch.setitem(
-        __import__("sys").modules, "hyperloom.inference_optimizer.tools.backfill_langfuse", fake_backfill
-    )
-
-    rc = recover._run_recover_session(argparse.Namespace(session_dir=session, force=True, backfill_trace=True))
+    rc = recover._run_recover_session(argparse.Namespace(session_dir=session, force=True))
     assert rc == 0
-    assert calls == ["write", "plan", "ingest"]
+    assert calls == ["write"]
 
 
 def test_recover_looks_complete_requires_breakdown_on_disk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -410,7 +401,7 @@ def test_recover_looks_complete_requires_breakdown_on_disk(tmp_path: Path, monke
     monkeypatch.setattr(emitter, "flush_session", lambda _s: None)
     monkeypatch.setattr(emitter, "record_session_breakdown", lambda _s: None)
 
-    assert recover._run_recover_session(argparse.Namespace(session_dir=session, force=False, backfill_trace=False)) == 0
+    assert recover._run_recover_session(argparse.Namespace(session_dir=session, force=False)) == 0
     assert rebuilt == [session]
 
 
@@ -449,7 +440,7 @@ def test_cli_multi_node_gc_backend_and_replay(tmp_path: Path, monkeypatch: pytes
     monkeypatch.setattr(mn, "_session_dir_resolve", lambda: session)
     monkeypatch.setattr(mn.subprocess, "run", lambda cmd, **kw: calls.append(cmd) or _Completed(returncode=0))
     mn._replay_kernel_patches_for_multi_node(argparse.Namespace(nodes=2))
-    assert calls and calls[0][2:4] == ["hyperloom.inference_optimizer.multi_node", "apply-patch"]
+    assert calls and calls[0][1:5] == ["-m", "hyperloom", "multi-node", "apply-patch"]
 
 
 def _patch_infera_state(monkeypatch: pytest.MonkeyPatch, state: dict) -> list[dict]:
@@ -1111,144 +1102,37 @@ def test_multi_node_patch_replay_skip_and_failure_paths(tmp_path: Path, monkeypa
 
 def test_framework_isolation_helpers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.agents.framework import isolation
-    from hyperloom.agents.framework.models import Baseline, Candidate, ExploreRequest
+    from hyperloom.agents.framework.models import Candidate
+    from hyperloom.common.env import EnvValueError
 
-    req = ExploreRequest(
-        framework="sglang",
-        repo_url="https://github.com/sgl-project/sglang.git",
-        work_dir=tmp_path,
-        baseline=Baseline(throughput=100.0),
-    )
-    candidate = Candidate(ref="PR:42", repo=req.repo_url, head_sha="")
-    assert isolation._repo_cache_dir(req).name == "https---github-com-sgl-project-sglang-git"
+    repo_url = "https://github.com/sgl-project/sglang.git"
+    candidate = Candidate(ref="PR:42", repo=repo_url)
+    assert isolation._repo_cache_dir(repo_url, tmp_path).name == "https---github-com-sgl-project-sglang-git"
     assert isolation._worktree_ref(candidate) == "refs/pull/42/head"
-    assert isolation._worktree_ref(Candidate(ref="main", repo=req.repo_url, head_sha="abc123")) == "abc123"
-
-    monkeypatch.setenv("FRAMEWORK_EXPLORER_DISK_MIN_GB", "bad")
-    assert isolation._resolve_min_free_gb(None) == pytest.approx(20.0)
-    assert isolation._resolve_min_free_gb(3.5) == pytest.approx(3.5)
+    assert isolation._worktree_ref(Candidate(ref="main", repo=repo_url)) == "main"
 
     usage = SimpleNamespace(free=2 * 1024**3)
     monkeypatch.setattr(isolation.shutil, "disk_usage", lambda _p: usage)
-    isolation.disk_preflight(tmp_path / "ok", n_candidates=1, min_free_gb=1.0, per_candidate_gb=0.5)
+    monkeypatch.setenv("FRAMEWORK_EXPLORER_DISK_MIN_GB", "bad")
+    with pytest.raises(EnvValueError, match="FRAMEWORK_EXPLORER_DISK_MIN_GB"):
+        isolation.disk_preflight(tmp_path / "typo", n_candidates=1)
+    monkeypatch.setenv("FRAMEWORK_EXPLORER_DISK_MIN_GB", "1.0")
+    isolation.disk_preflight(tmp_path / "ok", n_candidates=1, per_candidate_gb=0.5)
     with pytest.raises(isolation.DiskPreflightError, match="insufficient disk"):
-        isolation.disk_preflight(tmp_path / "bad", n_candidates=3, min_free_gb=1.0, per_candidate_gb=1.0)
+        isolation.disk_preflight(tmp_path / "bad", n_candidates=3, per_candidate_gb=1.0)
 
     git_calls: list[tuple[list[str], Path | None]] = []
     monkeypatch.setattr(isolation, "_run_git", lambda args, cwd=None, timeout_sec=1800: git_calls.append((args, cwd)))
-    repo_dir = isolation.prepare_repo_cache(req)
+    repo_dir = isolation.prepare_repo_cache(repo_url, tmp_path)
     assert git_calls[-1][0][:3] == ["git", "clone", "--mirror"]
     repo_dir.mkdir(parents=True, exist_ok=True)
-    assert isolation.prepare_repo_cache(req) == repo_dir
+    assert isolation.prepare_repo_cache(repo_url, tmp_path) == repo_dir
     assert git_calls[-1][0] == ["git", "fetch", "--all", "--tags", "--prune"]
 
-    isolation.fetch_candidate_ref(repo_dir, Candidate(ref="main", repo=req.repo_url))
+    isolation._fetch_candidate_ref(repo_dir, Candidate(ref="main", repo=repo_url))
     assert git_calls[-1][0] == ["git", "fetch", "--all", "--tags", "--prune"]
-    isolation.fetch_candidate_ref(repo_dir, candidate)
+    isolation._fetch_candidate_ref(repo_dir, candidate)
     assert "refs/pull/42/head:refs/pull/42/head" in git_calls[-1][0]
-
-    plan_req = ExploreRequest(
-        framework="sglang",
-        repo_url=req.repo_url,
-        work_dir=tmp_path / "plan",
-        baseline=Baseline(throughput=100.0),
-        prepare_candidate_env=False,
-    )
-    paths = isolation.prepare_candidate_workspace(plan_req, candidate, index=3, execute=True)
-    assert paths.candidate_dir.name == "03_pr-42"
-    assert not paths.worktree_dir.exists()
-
-    worktree = tmp_path / "cleanup" / "worktree"
-    venv = tmp_path / "cleanup" / "venv"
-    worktree.mkdir(parents=True)
-    venv.mkdir(parents=True)
-    isolation.cleanup_workspace(
-        isolation.WorkspacePaths(tmp_path / "cleanup", worktree, venv),
-        is_winner=False,
-        keep_winner_only=True,
-        repo_dir=repo_dir,
-    )
-    assert not worktree.exists()
-    assert not venv.exists()
-
-
-def test_gbrain_page_client_envelopes(monkeypatch: pytest.MonkeyPatch) -> None:
-    from hyperloom.agents.framework import gbrain_page_client as gbrain
-    from hyperloom.common import jsonio
-
-    assert list(jsonio.iter_sse_objects('not json\n\ndata: {bad}\n\ndata: {"id":"1","result":{"ok":true}}\n\n')) == [
-        {"id": "1", "result": {"ok": True}}
-    ]
-    assert gbrain._select_mcp_response('data: {"id":"0","result":{"fallback":true}}\n\n', want_id="missing") == {
-        "id": "0",
-        "result": {"fallback": True},
-    }
-    assert gbrain._as_hit_list({"pages": [{"slug": "a"}, "bad"]}) == [{"slug": "a"}]
-    assert gbrain._as_hit_list("bad") == []
-
-    class _Resp:
-        headers = {"Content-Type": "application/json", "Content-Length": "10"}
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return False
-
-        def read(self, *_args):
-            payload = {"result": {"content": [{"text": json.dumps({"slug": "page-1"})}]}}
-            return json.dumps(payload).encode()
-
-    captured = {}
-
-    def _urlopen(req, timeout):
-        captured["url"] = req.full_url
-        captured["timeout"] = timeout
-        captured["auth"] = req.headers.get("Authorization")
-        return _Resp()
-
-    monkeypatch.setattr(gbrain.urllib.request, "urlopen", _urlopen)
-    client = gbrain.GbrainPageClient("https://gbrain.example/", "tok", timeout_sec=0.1)
-    assert client.call("get_page", {"slug": "page-1"}) == {"slug": "page-1"}
-    assert captured["url"] == "https://gbrain.example/mcp"
-    assert captured["auth"] == "Bearer tok"
-    assert client.get_page("page-1") == {"slug": "page-1"}
-
-    class _ErrorResp(_Resp):
-        def read(self, *_args):
-            return b'{"error":{"message":"nope"}}'
-
-    monkeypatch.setattr(gbrain.urllib.request, "urlopen", lambda req, timeout: _ErrorResp())
-    with pytest.raises(gbrain.GbrainPageError, match="JSON-RPC error"):
-        client.call("search", {"query": "x"})
-
-    monkeypatch.setattr(gbrain.urllib.request, "urlopen", lambda req, timeout: (_ for _ in ()).throw(OSError("down")))
-    with pytest.raises(gbrain.GbrainPageError, match="transport error"):
-        client.call("search", {"query": "x"})
-
-    # An absent page is an in-band isError; get_page reports it as a miss.
-    class _MissingResp(_Resp):
-        def read(self, *_args):
-            payload = {"result": {"isError": True, "content": [{"text": "page_not_found"}]}}
-            return json.dumps(payload).encode()
-
-    monkeypatch.setattr(gbrain.urllib.request, "urlopen", lambda req, timeout: _MissingResp())
-    assert client.get_page("absent") is None
-    with pytest.raises(gbrain.GbrainPageError, match="page_not_found"):
-        client.call("get_page", {"slug": "absent"})
-
-    # A transport failure is still an outage, not a miss.
-    monkeypatch.setattr(gbrain.urllib.request, "urlopen", lambda req, timeout: (_ for _ in ()).throw(OSError("down")))
-    with pytest.raises(gbrain.GbrainPageError, match="transport error"):
-        client.get_page("page-1")
-
-    monkeypatch.setenv("GBRAIN_BASE_URL", "https://gbrain.example")
-    monkeypatch.setenv("GBRAIN_TOKEN", "tok")
-    monkeypatch.setenv("GBRAIN_HTTP_TIMEOUT_SEC", "not-a-number")
-    assert isinstance(gbrain.build_gbrain_page_client_from_env(), gbrain.GbrainPageClient)
-
-
-# orchestrator.knowledge.kb_writeback
 
 
 def test_kb_writeback_default_root_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -1515,75 +1399,6 @@ def test_paths_helpers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     assert paths.workspace_root() == tmp_path / "does_not_exist"
 
 
-# orchestrator.loop.dispatcher
-
-
-def test_dispatcher_inline_whitelist_filters_denied_unregistered_and_lane_holding(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
-
-    coord = SimpleNamespace(
-        action_registry={name: object() for name in ("report", "missing", "lane_action", "ok_action")},
-        sub=SimpleNamespace(executor_registry={"lane_action": object(), "ok_action": object()}),
-        _INLINE_ACTION_DENY=frozenset({"report"}),
-    )
-    disp = DispatcherCollaborator(coord)
-    monkeypatch.setattr(disp, "_registry_lanes_ttl", lambda name: (["gpu"] if name == "lane_action" else [], 60))
-    # report is denied, missing has no executor, lane_action holds a lane.
-    assert disp._inline_action_whitelist() == frozenset({"ok_action"})
-
-    coord.action_registry = {}
-    assert disp._inline_action_whitelist() == frozenset()
-
-
-def test_dispatcher_run_action_now_sync_edge_returns(monkeypatch: pytest.MonkeyPatch) -> None:
-    from hyperloom.orchestrator.loop import dispatcher as dispatcher_mod
-    from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
-
-    coord = SimpleNamespace(
-        _inline_fast_actions_enabled=True,
-        _coordinator_loop=None,
-        _INLINE_ACTION_DENY=frozenset(),
-        action_registry=None,
-        sub=SimpleNamespace(executor_registry={}),
-    )
-    disp = DispatcherCollaborator(coord)
-    assert "action_name required" in disp._run_action_now_sync("  ", {})
-
-    monkeypatch.setattr(disp, "_inline_action_whitelist", lambda: frozenset({"probe"}))
-    assert "coordinator loop not running" in disp._run_action_now_sync("probe", {})
-
-    coord._coordinator_loop = SimpleNamespace(is_closed=lambda: False)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_INLINE_ACTION_TIMEOUT_S", "not-a-float")
-    monkeypatch.setattr(disp, "_run_action_now", lambda _name, _params: object())
-
-    class _TimeoutFuture:
-        def result(self, timeout):
-            assert timeout == 120.0
-            raise FuturesTimeoutError()
-
-    monkeypatch.setattr(dispatcher_mod.asyncio, "run_coroutine_threadsafe", lambda _coro, _loop: _TimeoutFuture())
-    assert "still running after 120s" in disp._run_action_now_sync("probe", {})
-
-    class _ErrorFuture:
-        def result(self, timeout):
-            raise RuntimeError("boom")
-
-    monkeypatch.setattr(dispatcher_mod.asyncio, "run_coroutine_threadsafe", lambda _coro, _loop: _ErrorFuture())
-    assert "errored" in disp._run_action_now_sync("probe", {})
-
-    monkeypatch.setattr(
-        dispatcher_mod.asyncio,
-        "run_coroutine_threadsafe",
-        lambda _coro, _loop: (_ for _ in ()).throw(RuntimeError("closed")),
-    )
-    assert "could not schedule" in disp._run_action_now_sync("probe", {})
-
-
-# inference_optimizer.multi_node.state_paths
-
-
 def test_multi_node_state_paths_resolution_and_binding(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from hyperloom.inference_optimizer.multi_node import state_paths
     from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
@@ -1672,7 +1487,7 @@ def test_gpu_type_autodetect_rocm_and_torch_fallback(monkeypatch: pytest.MonkeyP
     assert gpu_types._autodetect_gpu_type() is None
 
 
-# breakdown.recorder.section_shape / breakdown.reporters
+# Tests for breakdown.recorder.section_shape / breakdown.reporters
 
 
 def test_section_shape_unknown_is_none() -> None:

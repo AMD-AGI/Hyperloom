@@ -59,17 +59,14 @@ current `analysis.md` snapshot and resource conflicts (concurrent
 profile / kernel work on the same GPU) are serialised by the lane /
 GPU lease rather than a policy deny.
 
-## PolicyGate denies LLM proposals
+## Coordinator-owned: not LLM-proposable
 
-`propose_action{action_name='roofline'|'profile'}` and
-`delegate{action_name='roofline'|'profile'}` are denied at PolicyGate
-with `rule='phase_incompatible'`: both names are Coordinator-managed
-and absent from `PHASE_LLM_PROPOSABLE_ACTIONS`, so the single LLM-
-facing R1 phase rule rejects any LLM-side proposal. To run a profile
-instead of a full roofline, the operator launches with
-`--no-enable-roofline` (the Coordinator then auto-enqueues a `profile`
-task in PRELUDE and at every watermark crossing); there is no
-LLM-driven path.
+`roofline` and `profile` are Coordinator-managed actions. They are not
+in the LLM-proposable action set for any phase, so any LLM proposal for
+either is denied at PolicyGate with `rule="coordinator_managed_action"`. To run a plain profile instead of a full roofline,
+the operator launches with `--no-enable-roofline` (the Coordinator then
+auto-enqueues a `profile` task in PRELUDE and at every watermark
+crossing); there is no LLM-driven path.
 
 ## Failure semantics
 

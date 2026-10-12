@@ -21,6 +21,7 @@ from kernelforge.agent_backends import (
 )
 from kernelforge.agent_backends.session_resume import run_session_with_api_resume
 from kernelforge.config import Config, resolve_agent_model
+from kernelforge.llm.workspace_policy import TOOL_OWNED_UNTRACKED_GLOBS
 from kernelforge.mcp_server.pr_stdio_server import TOOL_NAMES as PR_TOOL_NAMES
 from kernelforge.loop.scoring import (
     DEFAULT_SNR_THRESHOLD_DB,
@@ -38,19 +39,6 @@ _REPO_EXTRA_PROTECTED_GLOBS = [
     "*_ref.py",
     "*_reference.py",
     "conftest.py",
-]
-
-# Ignore only named tool outputs; undeclared files remain safety violations.
-# Exported so tests exercise the exact list used by agent sessions.
-TOOL_OWNED_UNTRACKED_GLOBS = [
-    # rocprof runs below the git root, so cover root and nested directories.
-    ".rocprofv3/*",
-    "*/.rocprofv3/*",
-    "*_results.db",
-    # AITER may create JIT shards during a turn; its configured root always ends
-    # in ``aiter_cache``, regardless of the experiments directory.
-    "aiter_cache/*",
-    "*/aiter_cache/*",
 ]
 
 # task_type values that mean "a full source tree, not a self-contained snippet".
@@ -184,10 +172,8 @@ def make_agent_fn(
         )
 
     # The backend prompts name the STEPS (build, run the driver, profile) but not the mechanism, because only this
-    # loop knows it: this agent has Bash and the driver documented above, and no build/test/bench/pmc tools. They used
-    # to name those four as tools and this framing spent a sentence translating them back into shell -- prompt tokens
-    # paid, every session, to correct the prompt sitting directly beneath them. The backend prompts name the mechanism
-    # now, so only the framing that is actually about this loop is left.
+    # loop knows it: this agent has Bash and the driver documented above, and no build/test/bench/pmc tools. So this
+    # framing covers only what is specific to this loop.
     kernel_backend_section = ""
     if kernel_backend_context:
         # Profiling off means the loop hands the session no profiler, so this framing must not promise one. (The loaded

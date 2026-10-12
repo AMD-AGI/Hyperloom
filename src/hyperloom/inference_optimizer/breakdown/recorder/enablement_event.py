@@ -550,9 +550,8 @@ def finish(
             if isinstance(runtime, Mapping)
         ],
     }
-    # Recorded on the close, on every path that reaches a terminal, so the
-    # verdict cannot be computed and dropped the way it was while the read side
-    # that used to publish it no longer existed.
+    # Recorded on the close, on every path that reaches a terminal: the close is
+    # the only writer of the verdict, so a path that skipped it would drop it.
     fragment: dict[str, Any] = {"result": result, "end_time": end_time}
     if recipe:
         fragment["recipe"] = recipe

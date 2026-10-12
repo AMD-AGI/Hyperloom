@@ -33,11 +33,16 @@ from hyperloom.orchestrator.actions.executors._accuracy_gate import (
     BASELINE_EVAL_OBSERVED_ACCURACY_KEY,
 )
 from hyperloom.orchestrator.enablement.lane import EnablementLane
-from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.enablement.params import EnablementParams
+from hyperloom.orchestrator.enablement.revalidation import EnablementRevalidation
+from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.orchestrator.phases.machine_state import ENABLEMENT_MAX_ATTEMPTS, PHASE_ENABLEMENT
 from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 from hyperloom.orchestrator.state.round_store import FAILED, RoundStore
+from hyperloom.orchestrator.state.shared_state import SharedState
+
+from .conftest import make_coordinator
 
 _MISSING_ARCH_LOG = (
     "Traceback (most recent call last):\n"
@@ -118,9 +123,7 @@ async def _seed_stalled(rounds: RoundStore, n: int) -> None:
         holder = f"holder-{i:03d}"
         await rounds.open(rid, holder_task_id=holder, lease_sec=3600.0, now_unix=float(i), request_id=rid)
         await rounds.settle(
-            rid,
-            holder_task_id=holder,
-            fence=1,
+            await rounds.get(rid),
             outcome=FAILED,
             now_unix=float(i) + 1.0,
             request_id=f"settle-{rid}",
@@ -129,7 +132,7 @@ async def _seed_stalled(rounds: RoundStore, n: int) -> None:
 
 def _lane(session_dir: Path, **overrides: Any):
     """A lane bound to the real dispatch, rearm and revalidation methods."""
-    state = types.SimpleNamespace(
+    state = SharedState(
         framework="sglang",
         model_name="zai-org/GLM-5",
         model_path="",
@@ -153,11 +156,10 @@ def _lane(session_dir: Path, **overrides: Any):
         baseline_failure_streak=1,
         baseline_arg_error_streak=0,
         baseline_total_failures=0,
+        phase=PHASE_ENABLEMENT,
+        macro_cycle=0,
         tick=0,
-        stop_reason="",
-        save=lambda *a, **k: None,
     )
-    state.set_stop_reason = lambda value, **k: setattr(state, "stop_reason", str(value or ""))
 
     async def _noop(*_a: Any, **_k: Any) -> None:
         return None
@@ -168,47 +170,80 @@ def _lane(session_dir: Path, **overrides: Any):
         tasks=_FakeTasks(),
         rounds=overrides.get("rounds") or _rounds(session_dir),
         session_dir=str(session_dir),
-        _run_deadline=None,
-        _warm_specialist_params=_noop,
-        _record_observation=_noop,
-        _maybe_enqueue_specialist_requested_build=_noop,
-        _maybe_escalate_to_targeted_build=_noop,
+        run_deadline=None,
+        warm_specialist_params=_noop,
+        bus=types.SimpleNamespace(record_observation=_noop),
+        maybe_enqueue_specialist_requested_build=_noop,
+        maybe_escalate_to_targeted_build=_noop,
         _read_enablement_source_context=lambda _sig: "",
         _derive_checkpoint_weight_facts=lambda _log: "",
-        _framework_gpu_params=lambda: {},
-        _framework_authoring_lanes_ttl=lambda params, *, base_ttl_sec: (["research_lane"], base_ttl_sec),
-        _time_budget_denial_for_action=lambda _action: None,
+        framework_authoring_lanes_ttl=lambda params, *, base_ttl_sec: (["research_lane"], base_ttl_sec),
+        time_budget_denial_for_action=lambda _action: None,
         action_registry=ACTION_CATALOGUE,
+        knowledge_plane=None,
         # The host preflight would stat a checkpoint named by the ambient ``MODEL_PATH``, which belongs
         # to whichever test ran before this one, so the host answers that it cannot tell.
         _environment_verdict=lambda: None,
     )
+    for name in ("registry_lanes_ttl",):
+        setattr(fake, name, types.MethodType(getattr(DispatcherCollaborator, name), fake))
+    for name in ("build_enablement_specialist_params", "_discover_enablement_candidate_refs"):
+        setattr(fake, name, types.MethodType(getattr(EnablementParams, name), fake))
     for name in (
-        "_registry_lanes_ttl",
-        "_build_enablement_specialist_params",
-        "_discover_enablement_candidate_refs",
         "_maybe_enqueue_enablement_specialist",
         "_maybe_record_enablement_human_review",
-        "_maybe_rearm_enablement",
-        "_maybe_enqueue_enablement_baseline_revalidation",
+        "maybe_rearm_enablement",
+    ):
+        setattr(fake, name, types.MethodType(getattr(EnablementLane, name), fake))
+    for name in (
+        "maybe_enqueue_enablement_baseline_revalidation",
         "_open_revalidation_row",
-        "_open_row_past_spent_generations",
+        "open_row_past_spent_generations",
         "_open_round_past_spent_generations",
     ):
-        setattr(fake, name, types.MethodType(getattr(Coordinator, name), fake))
+        setattr(fake, name, types.MethodType(getattr(EnablementRevalidation, name), fake))
     # The round ledger's own surface: the cap, the lease and the settle all live on it.
     for name in (
-        "_enablement_admitted",
+        "enablement_admitted",
         "_check_argv_terminal",
         "_check_environment_terminal",
-        "_enablement_in_flight",
+        "enablement_in_flight",
         "_round_has_live_work",
         "_open_authoring_round",
         "_renew_enablement_round",
-        "_settle_enablement_round",
+        "settle_enablement_round",
+        "close_lane_event",
     ):
         setattr(fake, name, types.MethodType(getattr(EnablementLane, name), fake))
-    fake._close_enablement_lane = types.MethodType(WritebackCollaborator._close_enablement_lane, fake)
+    # Wire a minimal _coord so collaborator methods that use self._coord.sub.method can reach
+    # the overrides the test placed directly on fake.
+    fake._coord = types.SimpleNamespace(
+        run_deadline=None,
+        record_exception=lambda *_a, **_k: None,
+        enablement_params=types.SimpleNamespace(
+            build_enablement_specialist_params=lambda *a, **k: fake.build_enablement_specialist_params(*a, **k),
+        ),
+        enablement_build=types.SimpleNamespace(
+            maybe_enqueue_specialist_requested_build=lambda: fake.maybe_enqueue_specialist_requested_build(),
+            maybe_escalate_to_targeted_build=lambda *a, **k: fake.maybe_escalate_to_targeted_build(*a, **k),
+            maybe_route_build_outcomes=_noop,
+        ),
+        enablement_revalidation=types.SimpleNamespace(
+            maybe_enqueue_enablement_baseline_revalidation=lambda: (
+                fake.maybe_enqueue_enablement_baseline_revalidation()
+            ),
+        ),
+        specialist_dispatch=types.SimpleNamespace(
+            warm_specialist_params=lambda *a, **k: fake.warm_specialist_params(*a, **k),
+        ),
+        gpu_lanes=types.SimpleNamespace(
+            framework_authoring_lanes_ttl=lambda *a, **k: fake.framework_authoring_lanes_ttl(*a, **k),
+        ),
+        dispatcher=types.SimpleNamespace(
+            time_budget_denial_for_action=lambda a: fake.time_budget_denial_for_action(a),
+            registry_lanes_ttl=lambda kind: fake.registry_lanes_ttl(kind),
+        ),
+    )
     return fake
 
 
@@ -231,7 +266,7 @@ def _writeback(session_dir: Path, **overrides: Any):
         rounds=overrides.get("rounds") or _rounds(session_dir),
         session_dir=str(session_dir),
     )
-    for name in ("_persist_eval_failure", "_record_enablement_eval_trigger", "_close_enablement_lane"):
+    for name in ("_persist_eval_failure", "_record_enablement_eval_trigger"):
         setattr(fake, name, types.MethodType(getattr(WritebackCollaborator, name), fake))
     return fake
 
@@ -268,7 +303,7 @@ async def test_the_dispatch_opens_the_lane_the_trigger_missed(_bound_session):
 async def test_two_dispatches_are_two_rounds_on_one_event(_bound_session):
     lane = _lane(_bound_session)
     first = await lane._maybe_enqueue_enablement_specialist()
-    await lane._maybe_rearm_enablement({"enablement": True, "status": "reverted", "specialist_task_id": first})
+    await lane.maybe_rearm_enablement({"enablement": True, "status": "reverted", "specialist_task_id": first})
     second = await lane._maybe_enqueue_enablement_specialist()
 
     assert len(_events(_bound_session)) == 1
@@ -282,7 +317,7 @@ async def test_a_kept_round_records_the_patch_it_landed(_bound_session):
     lane = _lane(_bound_session)
     task_id = await lane._maybe_enqueue_enablement_specialist()
 
-    await lane._maybe_rearm_enablement(
+    await lane.maybe_rearm_enablement(
         {
             "enablement": True,
             "status": "kept",
@@ -312,7 +347,7 @@ async def test_an_advanced_round_records_the_gap_it_revealed(_bound_session):
     lane = _lane(_bound_session)
     task_id = await lane._maybe_enqueue_enablement_specialist()
 
-    await lane._maybe_rearm_enablement(
+    await lane.maybe_rearm_enablement(
         {
             "enablement": True,
             "status": "advanced",
@@ -336,7 +371,7 @@ async def test_the_stall_cap_closes_the_lane_as_failed(_bound_session):
     for _ in range(ENABLEMENT_MAX_ATTEMPTS):
         task_id = await lane._maybe_enqueue_enablement_specialist()
         lane.shared_state.enablement.last_specialist_task_id = task_id
-        await lane._maybe_rearm_enablement({"enablement": True, "status": "reverted", "specialist_task_id": task_id})
+        await lane.maybe_rearm_enablement({"enablement": True, "status": "reverted", "specialist_task_id": task_id})
     await lane._maybe_enqueue_enablement_specialist()
 
     assert lane.shared_state.stop_reason == "enablement_attempts_exhausted"
@@ -348,11 +383,34 @@ async def test_the_stall_cap_closes_the_lane_as_failed(_bound_session):
 
 
 @pytest.mark.asyncio
+async def test_the_stall_cap_closes_the_lane_on_a_real_coordinator(_bound_session):
+    """The cap's close resolves on the lane the Coordinator builds, not on a surface a test lends it."""
+    SharedState(framework="sglang", enablement_mode="all", phase=PHASE_ENABLEMENT).save(_bound_session)
+    coord = make_coordinator(_bound_session)
+    coord.shared_state.enablement.launch_log = _MISSING_ARCH_LOG
+    await _seed_stalled(coord.rounds, ENABLEMENT_MAX_ATTEMPTS)
+    enablement_event.record_trigger(origin=enablement_event.ORIGIN_BOOT, mode="all", kind="missing_model_arch")
+    lane = coord.enablement_lane
+    lane._environment_verdict = lambda: None
+
+    assert await lane._maybe_enqueue_enablement_specialist() == ""
+
+    assert coord.shared_state.stop_reason == "enablement_attempts_exhausted"
+    events = _events(_bound_session)
+    assert len(events) == 1
+    assert events[0]["status"] == "failed"
+    result = events[0]["ext"]["result"]
+    assert result["outcome"] == enablement_event.OUTCOME_STALLED
+    assert result["reason"] == "enablement_attempts_exhausted"
+    assert result["stall_streak"] == ENABLEMENT_MAX_ATTEMPTS
+
+
+@pytest.mark.asyncio
 async def test_a_kept_round_does_not_close_the_lane(_bound_session):
     lane = _lane(_bound_session)
     lane.shared_state.enablement.last_specialist_task_id = "spec-1"
 
-    await lane._maybe_rearm_enablement(
+    await lane.maybe_rearm_enablement(
         {
             "enablement": True,
             "status": "kept",
@@ -381,7 +439,7 @@ async def test_the_rearm_hands_the_round_its_archive(_bound_session):
     config.parent.mkdir(parents=True)
     config.write_text("tp: 8\n", encoding="utf-8")
 
-    await lane._maybe_rearm_enablement(
+    await lane.maybe_rearm_enablement(
         {
             "enablement": True,
             "status": "kept",
@@ -407,7 +465,7 @@ async def test_a_snapshot_that_raised_leaves_the_row_silent(_bound_session, monk
     lane = _lane(_bound_session)
     lane.shared_state.enablement.last_specialist_task_id = "spec-1"
 
-    await lane._maybe_rearm_enablement({"enablement": True, "status": "reverted", "specialist_task_id": "spec-1"})
+    await lane.maybe_rearm_enablement({"enablement": True, "status": "reverted", "specialist_task_id": "spec-1"})
 
     # Absent, not empty: an archive that blew up did not establish that
     # nothing landed. The round is still ruled.
@@ -552,7 +610,7 @@ async def test_the_revalidation_enqueue_records_the_window_it_opened(_bound_sess
         accepted_config_path="/s/accepted.yaml",
     )
 
-    task_id = await lane._maybe_enqueue_enablement_baseline_revalidation()
+    task_id = await lane.maybe_enqueue_enablement_baseline_revalidation()
 
     assert task_id
     rows = _ext()["revalidations"]["rows"]
@@ -602,7 +660,7 @@ async def test_a_lane_with_no_session_bound_still_dispatches(tmp_path, monkeypat
     lane = _lane(tmp_path)
 
     task_id = await lane._maybe_enqueue_enablement_specialist()
-    await lane._maybe_rearm_enablement({"enablement": True, "status": "kept", "specialist_task_id": task_id})
+    await lane.maybe_rearm_enablement({"enablement": True, "status": "kept", "specialist_task_id": task_id})
 
     assert task_id
     assert lane.shared_state.enablement.validation_pending is True
@@ -626,7 +684,10 @@ def test_an_exception_the_lane_did_not_raise_is_not_named_on_it(_bound_session):
         mode="all",
         kind="accuracy_below_floor",
     )
-    coordinator = types.SimpleNamespace(_framework_timeline=lambda: None)
+    coordinator = types.SimpleNamespace(
+        phase_kernel=types.SimpleNamespace(timeline=lambda: None),
+        phase_framework=types.SimpleNamespace(timeline=lambda: None),
+    )
     Coordinator._fault_open_phase_event(
         coordinator,
         stage="reactor:optimizer",
@@ -669,17 +730,22 @@ async def test_a_raising_pump_is_named_on_the_event(_bound_session):
 
     fake = types.SimpleNamespace(
         shared_state=types.SimpleNamespace(phase=PHASE_ENABLEMENT),
-        _maybe_route_build_outcomes=_boom,
-        _maybe_enqueue_enablement_baseline_revalidation=_ok,
+        maybe_route_build_outcomes=_boom,
+        maybe_enqueue_enablement_baseline_revalidation=_ok,
         _maybe_enqueue_enablement_specialist=_ok,
-        _record_coordinator_exception=_record,
+        record_exception=_record,
     )
-    await EnablementLane._pump_enablement_safely(fake, caller="tick")
+    fake._coord = types.SimpleNamespace(
+        enablement_build=types.SimpleNamespace(maybe_route_build_outcomes=_boom),
+        enablement_revalidation=types.SimpleNamespace(maybe_enqueue_enablement_baseline_revalidation=_ok),
+        record_exception=_record,
+    )
+    await EnablementLane.pump_enablement_safely(fake)
     enablement_event.finish(outcome=enablement_event.OUTCOME_SUCCEEDED, reason="kept")
 
     event = _events(_bound_session)[0]
     assert event["status"] == "failed"
-    assert event["ext"]["failure"]["stage"] == "enablement_pump:_boom:tick"
+    assert event["ext"]["failure"]["stage"] == "enablement_pump:_boom"
     assert event["ext"]["failure"]["error_class"] == "RuntimeError"
     assert "task store went away" in event["ext"]["failure"]["message"]
     assert len(crashes) == 1
@@ -695,11 +761,11 @@ async def test_a_kept_round_leaves_the_lane_open_for_its_revalidation(tmp_path):
     verdict recorded here would describe a stack no measurement had confirmed.
 
     The guard that the close still computes a verdict lives on the terminal that
-    remains: :func:`test_the_writeback_close_also_carries_a_replay_verdict`.
+    remains: :func:`test_the_lane_close_carries_a_replay_verdict`.
     """
     lane = _lane(tmp_path)
 
-    await lane._maybe_rearm_enablement(
+    await lane.maybe_rearm_enablement(
         {
             "enablement": True,
             "status": "kept",
@@ -714,11 +780,11 @@ async def test_a_kept_round_leaves_the_lane_open_for_its_revalidation(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_the_writeback_close_also_carries_a_replay_verdict(tmp_path):
-    """The second terminal. A guard on one path is a guard on one path."""
-    writeback = _writeback(tmp_path)
+async def test_the_lane_close_carries_a_replay_verdict(tmp_path):
+    """Every terminal that closes the lane publishes the replay verdict."""
+    lane = _lane(tmp_path)
 
-    await writeback._close_enablement_lane(
+    await lane.close_lane_event(
         outcome=enablement_event.OUTCOME_STALLED,
         reason="cap reached",
     )

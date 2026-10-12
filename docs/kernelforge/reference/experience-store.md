@@ -30,8 +30,7 @@ When `KNOWLEDGE_LOCAL_ROOT` is unset, its default is
 `local` mode never constructs a remote client and ignores ambient
 `KB_STORE_URL` and `KB_STORE_TOKEN` values. In `remote` mode, both KB Store values
 must be non-empty; validation happens before `forge-loop` starts.
-`GBRAIN_BASE_URL` and `GBRAIN_TOKEN` do not configure this store in either mode;
-they belong to the Hyperloom Framework PR client.
+`GBRAIN_BASE_URL` and `GBRAIN_TOKEN` do not configure this store in either mode.
 
 ## Local layout
 

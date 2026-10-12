@@ -14,12 +14,11 @@ the OpenAI protocol. ``minimal`` and ``none`` go the other way: the gateway
 takes them but the Claude CLI does not know them, and there is no Claude level
 below ``low`` to project them onto, so they are not levels at all.
 
-Before this module each component carried its own table, and the tables
-disagreed -- ``HYPERLOOM_REASONING_EFFORT=minimal`` was accepted by Hyperloom's
-own calls and then crashed the Forge Codex backend, which is exactly the
-failure a shared vocabulary exists to prevent. The projection lives here for
-the same reason: ``max`` used to be folded inside the Codex backend only, so
-the identical value reaching Hyperloom's own chat.completions was a 400.
+Every component reads this one table. Two tables can disagree -- a
+``HYPERLOOM_REASONING_EFFORT=minimal`` that Hyperloom's own calls accept and
+the Forge Codex backend rejects. The projection lives here for the same
+reason: folded inside the Codex backend only, ``max`` would reach Hyperloom's
+own chat.completions unprojected and come back a 400.
 
 The ordering is meaningful: an index is the level's rank, so a call site that
 caps a session can compare what it allows against what the deployment asked

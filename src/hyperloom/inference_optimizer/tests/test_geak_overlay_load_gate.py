@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from hyperloom.orchestrator.loop.coordinator_helpers import (
+from hyperloom.orchestrator.kernel.geak_config import (
     _geak_overlay_digest,
     _geak_overlay_is_loadable,
 )

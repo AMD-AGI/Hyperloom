@@ -193,7 +193,7 @@ def test_an_action_that_outlived_its_phase_stays_with_its_phase(tmp_path):
     phase_event.record_settle(
         task_id="t-1",
         status="succeeded",
-        decision="promoted",
+        decision="adopted",
         settled_unix=44.0,
         phase="KERNEL_AGENT",
         macro_cycle=0,
@@ -204,7 +204,7 @@ def test_an_action_that_outlived_its_phase_stays_with_its_phase(tmp_path):
     assert ordered["count"] == 1
     assert ordered["settled"] == 1
     assert ordered["rows"][0]["status"] == "succeeded"
-    assert ordered["rows"][0]["decision"] == "promoted"
+    assert ordered["rows"][0]["decision"] == "adopted"
     # Measured across the phase boundary, because the action really did run that long.
     assert ordered["rows"][0]["duration_sec"] == 32.0
     assert _ext("KERNEL_AGENT")["actions"]["count"] == 0
@@ -228,7 +228,7 @@ def test_a_failed_dispatch_keeps_its_error_class(tmp_path):
     phase_event.record_settle(
         task_id="t-2",
         status="failed",
-        decision="no_promote",
+        decision="failed",
         error_class="server_init_dead",
         workspace="/s/ws/t-2",
         settled_unix=25.0,
@@ -257,22 +257,19 @@ def test_every_kind_is_recorded_not_just_the_audited_four(tmp_path):
     assert actions["kinds"] == ["recover", "report", "session_breakdown", "target_analysis"]
 
 
-def test_a_settle_with_no_dispatch_row_is_still_recorded(tmp_path):
+def test_a_settle_with_no_dispatch_row_does_not_invent_provenance(tmp_path):
     _enter("KERNEL_AGENT", sequence=1, at=10.0)
     phase_event.record_settle(
         task_id="t-orphan",
         status="succeeded",
-        decision="promoted",
+        decision="adopted",
         settled_unix=20.0,
         phase="KERNEL_AGENT",
         macro_cycle=0,
         action="kernel_opt",
     )
 
-    rows = _ext("KERNEL_AGENT")["actions"]["rows"]
-    assert [row["task_id"] for row in rows] == ["t-orphan"]
-    assert rows[0]["action"] == "kernel_opt"
-    assert rows[0]["status"] == "succeeded"
+    assert _ext("KERNEL_AGENT")["actions"]["rows"] == []
 
 
 def test_an_unidentified_settle_is_not_recorded(tmp_path):
@@ -311,9 +308,9 @@ def test_a_marker_alone_still_opens_the_phase(tmp_path):
 def test_a_phase_that_dispatched_a_failure_still_succeeded(tmp_path):
     _enter("FRAMEWORK_AGENT", sequence=1, at=10.0)
     phase_event.record_dispatch(action="explore", task_id="t-1", phase="FRAMEWORK_AGENT", macro_cycle=0)
-    phase_event.record_settle(task_id="t-1", status="failed", decision="no_promote")
+    phase_event.record_settle(task_id="t-1", status="failed", decision="failed")
     phase_event.record_dispatch(action="baseline", task_id="t-2", phase="FRAMEWORK_AGENT", macro_cycle=0)
-    phase_event.record_settle(task_id="t-2", status="succeeded", decision="promoted")
+    phase_event.record_settle(task_id="t-2", status="succeeded", decision="adopted")
     _exit("FRAMEWORK_AGENT", at=60.0, to_phase="KERNEL_AGENT")
 
     assert _status("FRAMEWORK_AGENT") == phase_event.STATUS_SUCCEEDED
@@ -322,7 +319,7 @@ def test_a_phase_that_dispatched_a_failure_still_succeeded(tmp_path):
 def test_a_phase_where_nothing_settled_well_is_degraded(tmp_path):
     _enter("KERNEL_AGENT", sequence=1, at=10.0)
     phase_event.record_dispatch(action="kernel_opt", task_id="t-1", phase="KERNEL_AGENT", macro_cycle=0)
-    phase_event.record_settle(task_id="t-1", status="failed", decision="no_promote")
+    phase_event.record_settle(task_id="t-1", status="failed", decision="failed")
     _exit("KERNEL_AGENT", at=60.0, to_phase="SWEEP")
 
     assert _status("KERNEL_AGENT") == phase_event.STATUS_DEGRADED
@@ -358,8 +355,14 @@ def test_finalize_publishes_every_phase_it_finds(tmp_path):
 
 def test_the_phase_event_holds_no_copy_of_the_stage_detail(tmp_path):
     _enter("FRAMEWORK_AGENT", sequence=1, at=10.0)
-    phase_event.record_dispatch(action="baseline", task_id="t-1", phase="FRAMEWORK_AGENT", macro_cycle=0)
-    phase_event.record_settle(task_id="t-1", status="succeeded", decision="promoted")
+    phase_event.record_dispatch(
+        action="baseline",
+        task_id="t-1",
+        phase="FRAMEWORK_AGENT",
+        macro_cycle=0,
+        dispatch_class="coordinator",
+    )
+    phase_event.record_settle(task_id="t-1", status="succeeded", decision="adopted")
 
     row = _ext("FRAMEWORK_AGENT")["actions"]["rows"][0]
     assert set(row) == {
@@ -368,6 +371,9 @@ def test_the_phase_event_holds_no_copy_of_the_stage_detail(tmp_path):
         "phase",
         "macro_cycle",
         "tick",
+        "dispatch_class",
+        "allowed",
+        "denial_rule",
         "dispatched_at",
         "dispatched_unix",
         "status",
@@ -510,3 +516,21 @@ def test_a_malformed_spool_event_id_does_not_raise_out_of_exit(tmp_path, monkeyp
         ],
     )
     _exit("PRELUDE", at=20.0, to_phase="FRAMEWORK_AGENT")
+
+
+def test_repeated_denials_without_proposal_ids_are_not_collapsed(tmp_path):
+    _enter("PRELUDE", sequence=1, at=10.0)
+    for _ in range(2):
+        phase_event.record_denial(
+            actor="orchestration",
+            proposal_msg_id=None,
+            action="profile",
+            phase="PRELUDE",
+            macro_cycle=0,
+            rule="phase_action_not_allowed",
+            hint="use baseline",
+        )
+
+    rows = _ext("PRELUDE")["denials"]["rows"]
+    assert len(rows) == 2
+    assert all(row["proposal_msg_id"] is None for row in rows)

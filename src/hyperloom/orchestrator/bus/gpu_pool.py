@@ -88,6 +88,14 @@ def resolve_whole_machine_devices() -> list[int]:
     return list(range(max(0, int(detect_gpu_count() or 0))))
 
 
+def gpus_by_task_sync(db: SqliteConnection) -> dict[str, list[int]]:
+    """Return ``{task_id: gpu_ids}`` from ``gpu_leases``, the one table every pool on ``db`` shares."""
+    by_task: dict[str, list[int]] = {}
+    for row in db.fetchall_sync("SELECT gpu_id, task_id FROM gpu_leases", ()):
+        by_task.setdefault(str(row["task_id"]), []).append(int(row["gpu_id"]))
+    return by_task
+
+
 @dataclass(frozen=True)
 class GpuLease:
     holder_id: str
@@ -270,6 +278,7 @@ __all__ = [
     "GPU_LEASE_TTL_GRACE",
     "GpuLease",
     "SpecialistGpuPool",
+    "gpus_by_task_sync",
     "resolve_gpu_specialist_devices",
     "resolve_whole_machine_devices",
 ]

@@ -234,6 +234,7 @@ def run_optimize(
     permission_mode: str | None = None,
     supervisor_backend: str = "codex",
     profile_timeout_sec: int = 1800,
+    roofline_ceiling: bool = False,
     result_json: str | None = None,
     deadline_unix: float | None = None,
     stop_at_unix: float | None = None,
@@ -308,6 +309,9 @@ def run_optimize(
         supervisor_backend,
         "--profile-timeout-sec",
         str(profile_timeout_sec),
+        # Spelled out either way, so the nested loop does what this caller asked rather than whatever its default is.
+        "--roofline-ceiling",
+        "on" if roofline_ceiling else "off",
     ]
     if baseline_json:
         cmd += ["--baseline-json", baseline_json]

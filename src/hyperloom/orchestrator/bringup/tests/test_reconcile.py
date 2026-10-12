@@ -76,8 +76,6 @@ class _Pending:
 
     def __init__(self, specialist: str) -> None:
         self.payload = {"params": {"specialist_task_id": specialist}}
-        self.decided = False
-        self.verdict = None
 
 
 @pytest.fixture
@@ -380,8 +378,32 @@ async def test_an_unanswered_review_is_denied_and_a_verdict_that_arrived_is_not_
         ("m-answered", "approve"),
         ("m-late", TIMEOUT_VERDICT),
     ]
-    assert pending["m-late"].verdict == TIMEOUT_VERDICT
-    assert pending["m-late"].decided is True
+    assert list(pending) == ["m-answered"]
+
+
+@pytest.mark.asyncio
+async def test_a_timeout_deny_closes_the_proposal_span_once(db, tmp_path):
+    """The deny bypasses the verdict handler, so the pass itself closes the proposal on the trajectory ledger."""
+    from hyperloom.inference_optimizer.trace import trajectory_trace as tt
+
+    pending = {"m-late": _Pending("spec-1")}
+    pending["m-late"].action_name = "integrate_patch"
+    rec, _rounds, _tasks, _ = _build(db, proposals=pending, review_ttl_sec=1.0)
+    async with db.transaction() as cur:
+        cur.execute(
+            "INSERT INTO events (msg_id, from_agent, to_agent, topic, in_reply_to, payload, ts)"
+            " VALUES ('m-late', 'orchestration', '*', 'proposal', NULL, '{}', '2020-01-01T00:00:00+00:00')"
+        )
+
+    with tt.trajectory_scope(session_dir=tmp_path, component="coordinator"):
+        await rec.run(_NOW)
+        await rec.run(_NOW)
+
+    rows = [row for row in tt.load_events(tmp_path) if row["event_type"] == tt.EVENT_PROPOSAL]
+    assert [(row["span_id"], row["status"]) for row in rows] == [("m-late", tt.STATUS_CANCELLED)]
+    assert rows[0]["attributes"]["reason"] == "review_timeout"
+    assert rows[0]["attributes"]["verdict"] == TIMEOUT_VERDICT
+    assert rows[0]["attributes"]["name"] == "integrate_patch"
 
 
 @pytest.mark.asyncio
@@ -598,3 +620,28 @@ async def test_a_round_wedged_by_lane_rows_stays_wedged_and_is_reported(db):
     assert (await rounds.get("round-spec-1")).state == OPEN
     # The lane rows are still there, and counted for the operator.
     assert report.leases_unverifiable >= 1
+
+
+@pytest.mark.asyncio
+async def test_a_revalidation_window_whose_result_is_still_to_be_booked_is_left_alone(db):
+    """A terminal row whose result the dispatcher has not booked yet still reports."""
+    state = _State()
+    state.enablement.validation_pending = True
+    state.enablement.revalidation_task_id = "reval-1"
+    owed = {"reval-1"}
+    rec, _, tasks, _ = _build(db, state=state, result_pending=lambda task_id: task_id in owed)
+    await tasks.create(kind="baseline", params={}, idempotency_key="k:reval-1", task_id="reval-1")
+    await tasks.transition("reval-1", "running")
+    await tasks.transition("reval-1", "succeeded")
+
+    report = await rec.run(_NOW + 1.0)
+
+    assert report.closed_windows == []
+    assert state.enablement.validation_pending is True
+    assert state.enablement.revalidation_task_id == "reval-1"
+
+    owed.clear()
+    report = await rec.run(_NOW + 2.0)
+
+    assert report.closed_windows == ["reval-1"]
+    assert state.enablement.validation_pending is False

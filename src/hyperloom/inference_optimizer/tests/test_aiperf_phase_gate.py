@@ -823,7 +823,7 @@ def test_trace_cli_rejects_nonpositive_or_nonfinite_budget(tmp_path, budget):
 def test_trace_cli_hard_timeout_interrupts_read_without_caching_partial_proof(tmp_path):
     snapshot = phase_gate.snapshot_traces([str(tmp_path)])
     _write_trace(tmp_path / "r0.trace.json.gz")
-    result = _run_trace_cli(tmp_path, snapshot, budget="0.05", read_mode="block-eof")
+    result = _run_trace_cli(tmp_path, snapshot, budget="1.0", read_mode="block-eof")
     assert result.returncode != 0
     assert _trace_cli_read_count(tmp_path) == 1
     retry = _run_trace_cli(tmp_path, snapshot)

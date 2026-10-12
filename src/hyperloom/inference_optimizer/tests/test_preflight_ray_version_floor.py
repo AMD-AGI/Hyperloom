@@ -9,7 +9,15 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from hyperloom.inference_optimizer.cli import preflight as cli_preflight
+
+
+@pytest.fixture(autouse=True)
+def ray_defaults(monkeypatch):
+    monkeypatch.delenv("RAY_VERSION", raising=False)
+    monkeypatch.delenv("RAY_CLI_CLICK_MAX_VERSION", raising=False)
 
 
 def _fake_site(tmp_path: Path, *, ray_version: str, click_version: str) -> Path:
@@ -118,7 +126,7 @@ def _ensure_ray_with(monkeypatch, recorder: _InstallRecorder, *, version_after: 
             subprocess.CompletedProcess([], 0, f"{version_after}\n", ""),
         ]
     )
-    monkeypatch.setattr(cli_preflight, "_ray_smoke", lambda _exe: next(smoke_results))
+    monkeypatch.setattr(cli_preflight, "_ray_smoke", lambda _exe, *_overrides: next(smoke_results))
     monkeypatch.setattr(cli_preflight.subprocess, "run", recorder)
     return cli_preflight._ensure_ray("/usr/bin/python3", [])
 

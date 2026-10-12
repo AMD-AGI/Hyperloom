@@ -29,13 +29,25 @@ def _any_env_set(names: tuple[str, ...]) -> bool:
     return any((os.environ.get(name) or "").strip() for name in names)
 
 
-def _resolve_critic_protocol(requested: str, *, provider_anthropic_only: bool) -> str:
+def orchestration_runs_on_codex(*, codex_follows_claude: bool, claude_follows_codex: bool = False) -> bool:
+    """Whether the orchestration role runs on the Codex CLI rather than the Claude CLI."""
+    # Both flags mean the caller has already rewritten one model id into the other's, which drops the backend that
+    # would be handed the foreign id out of the running; only a launch that rewrote neither has two candidates left to
+    # rank.
+    return (not codex_follows_claude) and (
+        claude_follows_codex or llm_config.preferred_agent_backend() == llm_config.AGENT_BACKEND_CODEX
+    )
+
+
+def _resolve_critic_protocol(requested: str, *, orchestration_on_codex: bool) -> str:
     """Pick the critic's review protocol and verify that side is configured."""
     if requested not in CRITIC_PROTOCOL_CHOICES:
         raise ValueError(f"_build_backends: critic_protocol={requested!r} not in {set(CRITIC_PROTOCOL_CHOICES)}")
 
     if requested == "auto":
-        return "anthropic" if provider_anthropic_only else "openai"
+        # The critic reviews on the side the orchestration model was validated on, so a launch configures one model
+        # and every role uses it.
+        return "openai" if orchestration_on_codex else "anthropic"
 
     if requested == "anthropic":
         # Asked through the registry rather than a local list of names, so a newly recognized credential form is
@@ -62,6 +74,18 @@ def _resolve_critic_protocol(requested: str, *, provider_anthropic_only: bool) -
     return requested
 
 
+def critic_review_target(
+    requested: str,
+    *,
+    orchestration_on_codex: bool,
+    claude_model: str,
+    codex_model: str,
+) -> tuple[str, str]:
+    """Return the ``(protocol, model)`` the critic reviews with."""
+    protocol = _resolve_critic_protocol(requested, orchestration_on_codex=orchestration_on_codex)
+    return protocol, (claude_model if protocol == "anthropic" else codex_model)
+
+
 def _load_action_verdict_policy() -> dict[str, str]:
     """Return the registry-derived per-action verdict policy (or empty on error)."""
     from ..protocol.action_surfaces import ACTION_CATALOGUE
@@ -78,22 +102,17 @@ def _build_backends(
     critic_agent_root: Path | None = None,
     critic_kb_mode: str = "inmemory",
     codex_follows_claude: bool = False,
+    claude_follows_codex: bool = False,
     critic_protocol: str = "auto",
 ) -> dict[str, Any]:
     """Construct all per-role backends."""
     if critic_choice not in ("mock", "agent"):
         raise ValueError(f"_build_backends: critic_choice={critic_choice!r} not in {{'mock','agent'}}")
 
-    # The two operands differ only in when they were evaluated, and that is the point: the caller samples this before
-    # _preflight() derives OPENAI_BASE_URL from ANTHROPIC_BASE_URL.
-    provider_anthropic_only = codex_follows_claude or llm_config.is_anthropic_only()
     # Orchestration is an agentic role like any other, so which CLI runs it is the shared rule's answer rather than a
-    # second reading of the endpoint shape. Both flags mean the caller has already rewritten one model id into the
-    # other's, which drops the backend that would be handed the foreign id out of the running; only a launch that
-    # rewrote neither has two candidates left to rank.
-    orchestration_on_codex = (not codex_follows_claude) and (
-        os.environ.get("INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX") == "1"
-        or llm_config.preferred_agent_backend() == llm_config.AGENT_BACKEND_CODEX
+    # second reading of the endpoint shape.
+    orchestration_on_codex = orchestration_runs_on_codex(
+        codex_follows_claude=codex_follows_claude, claude_follows_codex=claude_follows_codex
     )
 
     if critic_choice == "mock":
@@ -105,7 +124,7 @@ def _build_backends(
             raise ValueError("_build_backends: critic_choice='agent' requires critic_agent_root")
         protocol = _resolve_critic_protocol(
             critic_protocol,
-            provider_anthropic_only=provider_anthropic_only,
+            orchestration_on_codex=orchestration_on_codex,
         )
         _policy = _load_action_verdict_policy()
         if protocol == "anthropic":

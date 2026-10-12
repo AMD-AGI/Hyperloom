@@ -27,6 +27,7 @@ from ..base import (
     task_config_of,
     validation_of,
 )
+from ._agentx_metrics import graded_axes_facts, render_graded_axes
 from ._invocation import render_invocation_block
 
 # ``geak_candidate.status`` values meaning the candidate was measured but its
@@ -158,6 +159,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
                 rationale=f"validated at stack_len={val_stack_len} ts={val_ts}",
             )
         )
+    facts.extend(graded_axes_facts(validation.get("perf"), label="Final"))
     self_gain = candidate.get("self_reported_gain_pct")
     self_gain_str = fmt_pct(self_gain, plus=True) if isinstance(self_gain, (int, float)) else "unknown"
     if candidate_status in _GEAK_DROPPED_STATUSES:
@@ -240,6 +242,13 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     )
 
     md_parts = [md_kv]
+    # The axes the validation round was graded on, beside the throughput figure above. On an AgentX session the two
+    # answer different questions: the verdict was decided on these, not on ``final_throughput_tok_s_per_gpu``.
+    graded_md = render_graded_axes(validation.get("perf"))
+    if graded_md:
+        md_parts.append("")
+        md_parts.append("**AgentX graded axes** (validation round):")
+        md_parts.append(graded_md)
     inv_md = render_invocation_block(f.get("invocation"), session.get("image"))
     if inv_md:
         md_parts.append("")

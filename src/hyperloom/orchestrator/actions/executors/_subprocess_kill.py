@@ -279,8 +279,19 @@ _WARM_REUSE_PROBE_AFTER_SEC: float = 30.0
 
 
 def resolve_benchmark_timeouts(env: Mapping[str, str] | None = None) -> tuple[float, float]:
-    """Resolve the invocation's silence and hard caps, rejecting invalid overrides."""
+    """Resolve the invocation's silence and hard caps, rejecting invalid overrides.
+
+    An MLPerf agentic run works through a fixed trajectory count rather than a
+    fixed window, so its default hard cap is sized to that count; the stock
+    default reaped a healthy 150-trajectory baseline at 38%. An explicit
+    ``INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC`` still wins.
+    """
+    from hyperloom.common.agentx_workload import is_mlperf_backend, mlperf_benchmark_timeout_sec
+
     source = os.environ if env is None else env
+    hard_default = 7800.0
+    if is_mlperf_backend(source):
+        hard_default = max(hard_default, mlperf_benchmark_timeout_sec(source))
 
     def positive(name: str, default: float) -> float:
         raw = source.get(name, str(default))
@@ -294,7 +305,7 @@ def resolve_benchmark_timeouts(env: Mapping[str, str] | None = None) -> tuple[fl
 
     return (
         positive("INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC", 600.0),
-        positive("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", 7800.0),
+        positive("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", hard_default),
     )
 
 
@@ -665,6 +676,12 @@ class _IncrementScan(NamedTuple):
     saw_warmup_begin: bool = False
     saw_measured_begin: bool = False
     residual: str = ""
+    active: bool = True
+
+
+#: Access lines for the endpoints monitors poll on their own tick. An HTTP front end whose engine died keeps answering
+#: them, so a log that grew only by these says nothing about whether the server is still serving.
+_HEALTH_PROBE_LINE = re.compile(r'"GET /(?:metrics|health|healthz|ping)(?:[/?][^" ]*)? HTTP/[\d.]+"')
 
 
 # Cap on the partial line carried between scans. A log that appends a very long line without a newline -- or none at
@@ -721,7 +738,7 @@ def _scan_logs_increment(
         saw_warmup_begin = saw_warmup_begin or scan.saw_warmup_begin
         saw_measured_begin = saw_measured_begin or scan.saw_measured_begin
         if scan.offset > prev:
-            grew = True
+            grew = grew or scan.active
             child_spoke = child_spoke or Path(path).name == _EVAL_LOG_NAME
     return _LogScan(saw_ready, saw_progress, saw_eval_start, grew, child_spoke, saw_warmup_begin, saw_measured_begin)
 
@@ -759,6 +776,8 @@ def _scan_server_log_increment(path: str, from_offset: int, residual: str = "") 
     saw_eval_start = any(marker in chunk for marker in _EVAL_START_MARKERS)
     saw_warmup_begin = any(marker in chunk for marker in _AGENTX_WARMUP_BEGIN_MARKERS)
     saw_measured_begin = any(marker in chunk for marker in _AGENTX_MEASURED_BEGIN_MARKERS)
+    complete = [line for line in chunk[: tail_at + 1].splitlines() if line.strip()] if tail_at >= 0 else []
+    active = not complete or any(not _HEALTH_PROBE_LINE.search(line) for line in complete)
     return _IncrementScan(
         size,
         saw_ready,
@@ -767,6 +786,7 @@ def _scan_server_log_increment(path: str, from_offset: int, residual: str = "") 
         saw_warmup_begin,
         saw_measured_begin,
         residual=next_residual,
+        active=active,
     )
 
 
@@ -824,6 +844,46 @@ def _build_kv_recorder(server_log_path: str | None, env: dict[str, str] | None) 
         return None
 
 
+class _RecorderFanout:
+    """Drives several round recorders from the watchdog's single ``note_phase`` / ``tick`` / ``close`` calls.
+
+    Each call is isolated: one recorder raising must not starve the others of their phase marks or their ``close``.
+    """
+
+    def __init__(self, recorders: list[Any]) -> None:
+        self._recorders = recorders
+
+    def _each(self, method: str, *args: Any, **kwargs: Any) -> None:
+        for recorder in self._recorders:
+            try:
+                getattr(recorder, method)(*args, **kwargs)
+            except Exception:
+                log.warning("round recorder %s.%s failed", type(recorder).__name__, method, exc_info=True)
+
+    def note_phase(self, phase: str, mono: float) -> None:
+        self._each("note_phase", phase, mono)
+
+    def tick(self, mono: float) -> None:
+        self._each("tick", mono)
+
+    def close(self, *, aborted: bool = False) -> None:
+        self._each("close", aborted=aborted)
+
+
+def _build_round_recorders(server_log_path: str | None, env: dict[str, str] | None) -> Any:
+    """KV metrics and measured-phase GPU power for this round, behind one recorder surface; ``None`` when neither runs."""
+    from ._gpu_power import build_gpu_power_recorder
+
+    recorders = [
+        recorder
+        for recorder in (_build_kv_recorder(server_log_path, env), build_gpu_power_recorder(server_log_path, env))
+        if recorder is not None
+    ]
+    if not recorders:
+        return None
+    return recorders[0] if len(recorders) == 1 else _RecorderFanout(recorders)
+
+
 def _run_relative_path(workspace: Path) -> str:
     """Path of this round's workspace below ``runs/``, which is what the session breakdown keys rows by."""
     parts = workspace.parts
@@ -879,7 +939,7 @@ def run_with_session_kill(
                     server_already_ready=server_already_ready,
                     session_deadline_sec=session_deadline_sec,
                     cancel_scope=cancel_scope,
-                    kv_recorder=_build_kv_recorder(server_log_path, env),
+                    kv_recorder=_build_round_recorders(server_log_path, child_env),
                 )
             except subprocess.TimeoutExpired as exc:
                 kill_my_spawned_server(proc)

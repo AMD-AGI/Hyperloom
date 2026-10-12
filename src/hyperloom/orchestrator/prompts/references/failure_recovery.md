@@ -69,8 +69,7 @@ measurement, NOT a failure — do not retry it.
   outside the workspace and outside the configured leak destinations.
   Override `params.benchmark_script` to a script that respects
   `$RESULT_DIR` (Coordinator already exports `RESULT_DIR=<workspace>` by
-  default), or set `$INFERENCE_OPTIMIZER_RESCUE_PATHS` via `update_state`
-  so the next attempt salvages the leak.
+  default).
 * **RULE F3 — repeated `error_class='subprocess_nonzero'` on `baseline`
   ⇒ stop retrying baseline.** `send_message` with `body_md='blocked: subprocess
   repeatedly nonzero baseline'`. Explore variants

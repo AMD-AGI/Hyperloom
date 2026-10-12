@@ -685,3 +685,58 @@ def test_the_keep_source_overlay_every_snapshot_ref_points_at_is_packaged(tmp_pa
     assert "optimization_stack/enablement/roota/files/srt/module.py" in rels
     assert "optimization_stack/enablement/roota/manifest.json" in rels
     assert any(g.startswith("optimization_stack/") for g in PACKAGE_GLOBS)
+
+
+def test_exported_state_json_masks_extra_env_credentials_but_keeps_knobs(tmp_path: Path) -> None:
+    sd = tmp_path / "session"
+    _build_session(sd)
+    state = {
+        "session_id": "sid",
+        "operator_extra_env": {
+            "HF_TOKEN": "hf_plaintextvalue",
+            "SSH_PRIVATE_KEY": "plaintextvalue",
+            "EXTRA_ARGS": "--header Bearer plaintextvalue",
+            "VLLM_MAX_NUM_BATCHED_TOKENS": "8192",
+            "SGLANG_USE_AITER_FP8_PER_TOKEN": "1",
+        },
+    }
+    on_disk = json.dumps(state)
+    _write(sd / "state.json", on_disk)
+    dest = tmp_path / "ws"
+
+    out = package_session_artifacts(sd, session_id="sid", dest_root=dest)
+
+    assert out is not None
+    with zipfile.ZipFile(out) as zf:
+        zipped = zf.read("state.json").decode("utf-8")
+    loose = (dest / "state.json").read_text(encoding="utf-8")
+    expected = {
+        "HF_TOKEN": "[REDACTED]",
+        "SSH_PRIVATE_KEY": "[REDACTED]",
+        "EXTRA_ARGS": "--header Bearer [REDACTED]",
+        "VLLM_MAX_NUM_BATCHED_TOKENS": "8192",
+        "SGLANG_USE_AITER_FP8_PER_TOKEN": "1",
+    }
+    for exported in (zipped, loose):
+        assert "plaintextvalue" not in exported
+        assert json.loads(exported)["operator_extra_env"] == expected
+        assert json.loads(exported)["session_id"] == "sid"
+    sizes = {e["path"]: e["bytes"] for e in _manifest(out)["included_files"]}
+    assert sizes["state.json"] == len(zipped.encode("utf-8"))
+    # --resume re-exports the pins from the session's own state.json, so that copy keeps them.
+    assert (sd / "state.json").read_text(encoding="utf-8") == on_disk
+
+
+def test_state_json_that_cannot_be_inspected_is_not_shipped(tmp_path: Path) -> None:
+    sd = tmp_path / "session"
+    _build_session(sd)
+    _write(sd / "state.json", '{"operator_extra_env": {"HF_TOKEN": "hf_plaintextvalue"')
+    dest = tmp_path / "ws"
+
+    out = package_session_artifacts(sd, session_id="sid", dest_root=dest)
+
+    assert out is not None
+    assert "state.json" not in _zip_names(out)
+    assert _manifest(out)["failed_files"] == ["state.json"]
+    assert _manifest(out)["complete"] is False
+    assert not (dest / "state.json").exists()

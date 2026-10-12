@@ -282,7 +282,7 @@ def _unverifiable_holders(cur: sqlite3.Cursor, *, scope: str) -> list[dict]:
 
     This is the whole operator story for a leaked lane: there is no cleanup
     command, so :func:`_report_unverifiable` logging the remedy IS the
-    interface. Nothing reclaims these rows any more, so everything it returns
+    interface. Nothing reclaims these rows, so everything it returns
     is a lane that will stay held until an operator acts on it.
 
     Unlike that pass it does NOT filter on ``owner_scope``. A row this process
@@ -333,9 +333,8 @@ def _unverifiable_holders(cur: sqlite3.Cursor, *, scope: str) -> list[dict]:
         # Carried for the operator log only; see _report_unverifiable.
         row["pgid"] = evidence.get(CLEANUP_TREE_PGID_KEY)
         if evidence.get(CLEANUP_CONFIRMED_KEY) is True:
-            # Nothing reclaims rows any more, so a confirmed holder whose row
-            # survived is no longer quietly cleaned up behind the scenes: it
-            # sits there like any other. Say so instead of skipping it.
+            # Nothing reclaims rows, so a confirmed holder whose row survived
+            # stays held like any other. Say so instead of skipping it.
             row["reason"] = UNVERIFIABLE_CONFIRMED_BUT_HELD
             stuck.append(row)
             continue
@@ -405,7 +404,7 @@ def _report_unverifiable(rows: list[dict], *, db_path: str = "") -> None:
             row["holder_id"],
             row["reason"],
             row["task_id"],
-            # The spawn process group, when one was recorded. It is no longer
+            # The spawn process group, when one was recorded. It is not
             # evidence -- a served process setsid's out of it -- but it is still
             # the best starting point a human has for "what did this task leave".
             f" (its spawn process group was {row['pgid']}; a server it started may have left it)"
@@ -683,6 +682,20 @@ class SqliteLeaseBackend:
         rows = await self.db.fetchall("SELECT lane, COUNT(*) AS n FROM leases GROUP BY lane")
         return {r["lane"]: int(r["n"]) for r in rows}
 
+    def lanes_by_task_sync(self) -> dict[str, tuple[list[str], str]]:
+        """Return ``{task_id: (lanes, soonest_expiry)}`` for every retained row.
+
+        Soonest, because reclaim starts when the first lane lapses.
+        """
+        by_task: dict[str, tuple[list[str], str]] = {}
+        for row in self.db.fetchall_sync("SELECT lane, task_id, expires_at FROM leases", ()):
+            task_id = str(row["task_id"])
+            expires = str(row["expires_at"])
+            lanes, soonest = by_task.get(task_id, ([], ""))
+            lanes.append(str(row["lane"]))
+            by_task[task_id] = (lanes, expires if not soonest or expires < soonest else soonest)
+        return by_task
+
     async def lane_capacities(self) -> dict[str, int]:
         """Return ``{lane: capacity}`` for every row in ``lane_capacity``."""
         try:
@@ -701,26 +714,12 @@ class ResourceLockManager:
     """Coordinator-facing wrapper."""
 
     def __init__(self, backend: SqliteLeaseBackend):
-        """Wrap a lease backend and initialise the per-process counters."""
+        """Wrap a lease backend."""
         self.backend = backend
-        # Per-process cumulative acquire / lane-full / lane-busy counters.
-        self._counters: dict[str, dict[str, int]] = {}
 
     async def acquire_many(self, lanes: list[str], **kwargs) -> Lease:
-        """Acquire lanes via the backend, updating lifetime counters."""
-        try:
-            lease = await self.backend.acquire_many(lanes, **kwargs)
-        except LaneFull as exc:
-            for lane in exc.full_lanes:
-                self._bump_counter(lane, "lane_full_count")
-            raise
-        except LaneBusy as exc:
-            for lane in exc.busy_lanes:
-                self._bump_counter(lane, "lane_busy_count")
-            raise
-        for lane in lease.lanes:
-            self._bump_counter(lane, "acquire_count")
-        return lease
+        """Acquire lanes via the backend."""
+        return await self.backend.acquire_many(lanes, **kwargs)
 
     async def try_acquire_many(self, lanes: list[str], **kwargs) -> Lease | None:
         """Non-blocking variant of :meth:`acquire_many`."""
@@ -738,32 +737,20 @@ class ResourceLockManager:
         return await self.backend.heartbeat_by_task(task_id, ttl_sec=ttl_sec)
 
     async def release(self, lease: Lease) -> int:
-        """Release a lease and bump each lane's release counter."""
-        n = await self.backend.release(lease)
-        for lane in lease.lanes:
-            self._bump_counter(lane, "release_count")
-        return n
+        """Release a lease via the backend."""
+        return await self.backend.release(lease)
 
     async def reap_dead_holders(self) -> list[dict]:
         """Release leases whose holder process is dead via the backend."""
-        fn = getattr(self.backend, "reap_dead_holders", None)
-        if not callable(fn):
-            return []
-        return await fn()
+        return await self.backend.reap_dead_holders()
 
     async def diagnose_unverifiable_holders(self) -> list[dict]:
         """Report retained lanes nothing can prove free, via the backend."""
-        fn = getattr(self.backend, "diagnose_unverifiable_holders", None)
-        if not callable(fn):
-            return []
-        return await fn()
+        return await self.backend.diagnose_unverifiable_holders()
 
     async def cleanup_confirmation_rate(self) -> tuple[int, int]:
         """Unconfirmed-cleanup count and total ended tasks, via the backend."""
-        fn = getattr(self.backend, "cleanup_confirmation_rate", None)
-        if not callable(fn):
-            return 0, 0
-        return await fn()
+        return await self.backend.cleanup_confirmation_rate()
 
     async def bringup_round_holders(self, now_unix: float) -> set[str]:
         """Return the ids of rounds still holding their lane, via the backend.
@@ -780,14 +767,13 @@ class ResourceLockManager:
         """Return ``{lane: live_holder_count}`` via the backend."""
         return await self.backend.lane_holders()
 
+    def lanes_by_task_sync(self) -> dict[str, tuple[list[str], str]]:
+        """Return ``{task_id: (lanes, soonest_expiry)}`` via the backend."""
+        return self.backend.lanes_by_task_sync()
+
     async def lane_capacities(self) -> dict[str, int]:
         """Return ``{lane: capacity}`` via the backend."""
         return await self.backend.lane_capacities()
-
-    def _bump_counter(self, lane: str, field: str) -> None:
-        """Increment one per-lane lifetime counter by 1."""
-        d = self._counters.setdefault(lane, {})
-        d[field] = int(d.get(field, 0)) + 1
 
 
 __all__ = [

@@ -399,12 +399,6 @@ class TestReportedProvenance:
 
 
 class TestRecordedShapeIsProvenanceNotADecision:
-    def test_the_topology_cannot_be_rewritten_by_update_state(self):
-        """Locked for the same reason as model_path: the report prints whatever it says."""
-        from hyperloom.orchestrator.policy.gate import CORE_STATE_FIELDS
-
-        assert "compute_partition" in CORE_STATE_FIELDS
-
     def test_the_published_env_is_a_lossy_subset_of_the_verdict(self):
         """Why the seed is handed the verdict instead of re-reading the environment."""
         from hyperloom.common.gpu_partition import published_shape

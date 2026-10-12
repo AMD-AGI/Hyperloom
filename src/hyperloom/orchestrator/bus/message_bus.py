@@ -142,6 +142,10 @@ class MessageBus:
             msg.seq = int(cur.lastrowid)
         return msg.seq
 
+    async def record_observation(self, source: str, topic: str, payload: dict) -> None:
+        """Broadcast one ``source`` message under ``topic`` to every agent."""
+        await self.append_and_seq(Message.new(source, "*", topic, payload))
+
     async def tail(
         self,
         n: int = 200,
@@ -163,6 +167,10 @@ class MessageBus:
         params.append(n)
         rows = await self.db.fetchall(sql, params)
         return [Message.from_row(r) for r in rows]
+
+    def count_sync(self) -> int:
+        """Return how many events the log holds."""
+        return int(self.db.fetchone_sync("SELECT COUNT(*) FROM events")[0])
 
     def inbox_context_sync(self, to_agent: str, *, after_seq: int = 0) -> list[Message]:
         """Read an uncapped recipient inbox, including all topics and self-sent events."""

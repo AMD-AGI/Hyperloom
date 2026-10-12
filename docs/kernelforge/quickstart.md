@@ -11,8 +11,9 @@ This guide walks through a complete kernel development workflow — from install
 | rocprofv3 | (included with ROCm) | `rocprofv3 --version` |
 | GPU | MI300X / MI355X | `rocm-smi --showproductname` |
 | Claude auth | API key, subscription token, **or** Claude Code Max | `echo $ANTHROPIC_API_KEY` / `echo $CLAUDE_CODE_OAUTH_TOKEN` **or** `claude --version` |
+| Codex auth (instead of Claude) | OpenAI-side key and endpoint | `echo $OPENAI_API_KEY` / `echo $OPENAI_BASE_URL` |
 
-**Billing choice.** `kernelforge forge-loop` drives its agent sessions through `claude-agent-sdk.query()`, which spawns the `claude` CLI as a subprocess, so whatever that CLI authenticates with is what gets billed. A `claude` logged in with Claude Code Max bills against your Max subscription and needs **no `ANTHROPIC_API_KEY`**. Where a login cannot persist — a container, CI — `CLAUDE_CODE_OAUTH_TOKEN` reaches the same subscription. Set `ANTHROPIC_API_KEY` only if you want API-credit billing instead; the CLI reads it ahead of the subscription token, so setting both bills the key.
+**Billing choice.** `kernelforge forge-loop` drives its agent sessions through `claude-agent-sdk.query()`, which spawns the `claude` CLI as a subprocess, so whatever that CLI authenticates with is what gets billed. A `claude` logged in with Claude Code Max bills against your Max subscription and needs **no `ANTHROPIC_API_KEY`**. Where a login cannot persist — a container, CI — `CLAUDE_CODE_OAUTH_TOKEN` reaches the same subscription. Set `ANTHROPIC_API_KEY` only if you want API-credit billing instead; the CLI reads it ahead of the subscription token, so setting both bills the key. To run on Codex instead, pass `--agent-backend codex` or configure only the OpenAI side (`OPENAI_BASE_URL` + `OPENAI_API_KEY`); sessions then run through the Codex SDK, billed to that key, with `CODEX_MODEL` as the model.
 
 Optional but recommended:
 - AITER repo cloned at `/work/aiter-amd` (or wherever your kernel workspace is)
@@ -113,10 +114,10 @@ Or create a `.env` file (see `.env.example`).
 
 ## Step 3: Run your first campaign
 
-`kernelforge forge-loop` runs one campaign: it proposes ONE change per iteration, validates it with your driver, benchmarks it, and keeps only measured improvements. The tasks ship inside the package, under `src/kernelforge/data/examples/` in a checkout — the Triton softmax one is the smallest task that exercises the whole loop:
+`kernelforge forge-loop` runs one campaign: it proposes ONE change per iteration, validates it with your driver, benchmarks it, and keeps only measured improvements. The tasks ship inside the package, under `src/kernelforge/examples/` in a checkout — the Triton softmax one is the smallest task that exercises the whole loop:
 
 ```bash
-cd src/kernelforge/data/examples/triton-softmax-forge-loop
+cd src/kernelforge/examples/triton-softmax-forge-loop
 MAX_HOURS=1 ./run_example.sh /tmp/forge_softmax
 ```
 
@@ -148,7 +149,7 @@ docker run --rm \
   -v "$PWD:/workspace" -w /workspace \
   rocm/primus-training-private:<tag> \
   bash -lc 'pip install -q --break-system-packages -e ".[forge,forge-profiling]" && \
-            src/kernelforge/data/examples/triton-softmax-forge-loop/run_example.sh /tmp/forge_softmax' \
+            src/kernelforge/examples/triton-softmax-forge-loop/run_example.sh /tmp/forge_softmax' \
   > /tmp/forge.log 2>&1
 ```
 
@@ -288,11 +289,11 @@ calls only while stuck; bench remains the final gate on every accepted edit.
 
 ## Example Tasks
 
-Paths below are relative to `src/kernelforge/data/examples/` in a checkout. From
-an installed wheel, `python -c "import kernelforge, pathlib;
-print(pathlib.Path(kernelforge.__file__).parent / 'data/examples')"` prints the
-same tree — copy a task out of it rather than running in place, because the
-package directory is not meant to be written to.
+Paths below are relative to `src/kernelforge/examples/` in a checkout. From
+an installed wheel, `python -c "from kernelforge.resources import resource_path;
+print(resource_path('examples'))"` prints the same tree — copy a task out of it
+rather than running in place, because the package directory is not meant to be
+written to.
 
 | Task | Backend | What it shows |
 |------|---------|---------------|
@@ -330,7 +331,7 @@ python driver.py --warmup 10 --iters 200 --bench-mode   # wall_ms: 0.081920 per 
                                                         # case_ms: case_001 0.081920
 ```
 
-The full contract — every mode, every line, and the rules for multi-rank and self-managed-stream tasks — is in [`src/kernelforge/data/examples/README.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/kernelforge/data/examples/README.md).
+The full contract — every mode, every line, and the rules for multi-rank and self-managed-stream tasks — is in [`src/kernelforge/examples/README.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/kernelforge/examples/README.md).
 
 ## Troubleshooting
 
@@ -376,6 +377,6 @@ The loop checks for that file at the next iteration boundary, then finalizes nor
 
 ## Next Steps
 
-- Read the shipped knowledge base under `src/kernelforge/data/local_knowledge/` to understand what the agent knows
-- Browse the [runnable examples](https://github.com/AMD-AGI/Hyperloom/tree/main/src/kernelforge/data/examples) for task templates and the full driver contract
+- Read the shipped knowledge base under `src/kernelforge/knowledge/local_wiki/resources/` to understand what the agent knows
+- Browse the [runnable examples](https://github.com/AMD-AGI/Hyperloom/tree/main/src/kernelforge/examples) for task templates and the full driver contract
 - See {doc}`Architecture </kernelforge/conceptual/architecture>` and {doc}`Extending forge </kernelforge/how-to/extending>`

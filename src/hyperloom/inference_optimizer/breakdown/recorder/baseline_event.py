@@ -13,6 +13,7 @@ from typing import Any
 from .event_fields import (
     as_dict as _as_dict,
     as_list as _as_list,
+    bool_or_none as _bool_or_none,
     clip as _clip,
     failure_row as _failure_row,
     float_or_none as _float_or_none,
@@ -241,6 +242,11 @@ def _measurement(result: Mapping[str, Any], framework: str) -> dict[str, Any]:
         # because this block is already where ``outcome.baseline`` comes from, and a second source for one baseline
         # is a second answer to the same question.
         "perf": _graded_axes(result),
+        # Upstream's own verdict on whether the round is a submittable measurement at all, and why not when it is
+        # not. Tri-state: a framework that never answered is not the same fact as one that answered no, and a
+        # reader weighing a graded axis needs to know the round it came from was admissible.
+        "submission_valid": _bool_or_none(result.get("submission_valid")),
+        "submission_invalid_reasons": [str(reason) for reason in (result.get("submission_invalid_reasons") or [])],
         "accuracy": _float_or_none(result.get("accuracy")),
         "accuracy_task": str(result.get("accuracy_task") or ""),
         "accuracy_metric": str(result.get("accuracy_metric") or ""),

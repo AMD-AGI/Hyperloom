@@ -18,7 +18,7 @@ from typing import Any
 
 from .aiter_script_map import TUNER_SCRIPT_HINTS as _TUNER_SCRIPT_HINTS
 
-# Re-exported: these used to live here, and both callers and tests import them from this module.
+# Re-exported: callers and tests import them from this module.
 from .aiter_script_map import resolve_aiter_csrc, resolve_aiter_root  # noqa: F401
 
 log = logging.getLogger(__name__)

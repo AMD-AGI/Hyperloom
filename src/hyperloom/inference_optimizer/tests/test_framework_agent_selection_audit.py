@@ -122,7 +122,7 @@ def test_collect_framework_agent_candidate_priors(coord: Coordinator) -> None:
         {"candidate_id": "c2", "status": "in_flight"},  # non-terminal -> excluded
         {"candidate_id": "c3", "status": "critic_denied", "rationale": "off the bottleneck"},
     ]
-    priors = coord._collect_framework_agent_candidate_priors()
+    priors = coord.phase_framework._collect_framework_agent_candidate_priors()
     statuses = {o["status"] for o in priors["recent_outcomes"]}
     assert statuses == {"kept", "critic_denied"}
     # The denial reason has to reach the Critic, or the priors carry the verdict without the argument behind it.
@@ -271,7 +271,7 @@ def test_materialize_pr_diff_ignores_an_unusable_pr_number(monkeypatch, tmp_path
 # Dispatch pause on a spent phase budget
 def test_dispatch_pause_phase_not_gated(coord: Coordinator) -> None:
     coord.shared_state.phase = "PRELUDE"
-    assert coord._dispatch_paused_for_phase_budget() is False
+    assert coord.dispatcher.dispatch_paused_for_phase_budget() is False
 
 
 def test_dispatch_pause_budget_spent(coord: Coordinator, monkeypatch) -> None:
@@ -282,9 +282,9 @@ def test_dispatch_pause_budget_spent(coord: Coordinator, monkeypatch) -> None:
     monkeypatch.setattr(
         coord_mod._phase_state,
         "phase_budget_remaining_seconds",
-        lambda _s, budget_pct=None: 0.0,
+        lambda _s: 0.0,
     )
-    assert coord._dispatch_paused_for_phase_budget() is True
+    assert coord.dispatcher.dispatch_paused_for_phase_budget() is True
 
 
 def test_dispatch_pause_budget_remaining(coord: Coordinator, monkeypatch) -> None:
@@ -292,12 +292,12 @@ def test_dispatch_pause_budget_remaining(coord: Coordinator, monkeypatch) -> Non
     monkeypatch.setattr(
         coord_mod._phase_state,
         "phase_budget_remaining_seconds",
-        lambda _s, budget_pct=None: 123.0,
+        lambda _s: 123.0,
     )
-    assert coord._dispatch_paused_for_phase_budget() is False
+    assert coord.dispatcher.dispatch_paused_for_phase_budget() is False
 
 
-# _maybe_autosubmit_framework_config
+# maybe_autosubmit_framework_config
 def _authoring_task(task_id: str = "spec-1") -> types.SimpleNamespace:
     return types.SimpleNamespace(
         task_id=task_id,
@@ -312,13 +312,13 @@ def _authoring_task(task_id: str = "spec-1") -> types.SimpleNamespace:
 @pytest.mark.asyncio
 async def test_autosubmit_config_not_authoring_returns(coord: Coordinator) -> None:
     task = types.SimpleNamespace(task_id="x", params={})
-    await coord._maybe_autosubmit_framework_config(task=task, done_payload={})
+    await coord.phase_framework.maybe_autosubmit_framework_config(task=task, done_payload={})
     assert not coord.state.pending_proposals
 
 
 @pytest.mark.asyncio
 async def test_autosubmit_config_patch_deliverable_returns(coord: Coordinator) -> None:
-    await coord._maybe_autosubmit_framework_config(
+    await coord.phase_framework.maybe_autosubmit_framework_config(
         task=_authoring_task(),
         done_payload={"patches_written": ["p.patch"]},
     )
@@ -327,7 +327,7 @@ async def test_autosubmit_config_patch_deliverable_returns(coord: Coordinator) -
 
 @pytest.mark.asyncio
 async def test_autosubmit_config_no_levers_returns(coord: Coordinator) -> None:
-    await coord._maybe_autosubmit_framework_config(
+    await coord.phase_framework.maybe_autosubmit_framework_config(
         task=_authoring_task(),
         done_payload={"proposal_set": [{"name": "n"}]},  # no extra_args/envs -> no levers
     )
@@ -338,7 +338,7 @@ async def test_autosubmit_config_no_levers_returns(coord: Coordinator) -> None:
 async def test_autosubmit_config_routes_to_integrate_patch(coord: Coordinator) -> None:
     done = {"proposal_set": [{"name": "mtp-toggle", "extra_envs": {"VLLM_MTP": "1"}, "extra_args": "--speculative 4"}]}
     before = len(coord.state.pending_proposals)
-    await coord._maybe_autosubmit_framework_config(task=_authoring_task(), done_payload=done)
+    await coord.phase_framework.maybe_autosubmit_framework_config(task=_authoring_task(), done_payload=done)
     assert len(coord.state.pending_proposals) == before + 1
     prop = next(iter(coord.state.pending_proposals.values()))
     assert prop.action_name == "integrate_patch"
@@ -354,7 +354,7 @@ async def test_autosubmit_config_routes_to_integrate_patch(coord: Coordinator) -
 async def test_autosubmit_config_idempotent_on_existing_verdict(coord: Coordinator, monkeypatch) -> None:
     monkeypatch.setattr(coord.shared_state, "get_specialist_patch_verdict", lambda _sid: "approve", raising=False)
     done = {"proposal_set": [{"name": "n", "extra_envs": {"X": "1"}}]}
-    await coord._maybe_autosubmit_framework_config(task=_authoring_task(), done_payload=done)
+    await coord.phase_framework.maybe_autosubmit_framework_config(task=_authoring_task(), done_payload=done)
     assert not coord.state.pending_proposals
 
 
@@ -362,9 +362,6 @@ def _enablement_authoring_task(task_id: str = "spec-enable-1") -> types.SimpleNa
     return types.SimpleNamespace(
         task_id=task_id,
         params={
-            "framework_agent_authoring": True,
-            "framework_agent_candidate_id": "cand-e",
-            "framework_batch_id": "batch-e",
             "enablement": True,
             "enablement_before_observation_path": "/s/reports/bringup/round-abc-000.json",
             "enablement_setup_commands": ["pip install -U vllm==0.21.0"],
@@ -374,14 +371,14 @@ def _enablement_authoring_task(task_id: str = "spec-enable-1") -> types.SimpleNa
 
 @pytest.mark.asyncio
 async def test_autosubmit_config_enablement_propagates_marker_and_setup(coord: Coordinator) -> None:
-    """Regression: a config-lever ENABLEMENT deliverable must carry the ``enablement`` marker + setup commands into integrate_patch, otherwise the integrate result never gets ``enablement=True`` and ``_maybe_rearm_enablement`` no-ops, the stall streak never advances, and the run spins until wall-clock."""
+    """Regression: a config-lever ENABLEMENT deliverable must carry the ``enablement`` marker + setup commands into integrate_patch, otherwise the integrate result never gets ``enablement=True`` and ``maybe_rearm_enablement`` no-ops, the stall streak never advances, and the run spins until wall-clock."""
     done = {
         "proposal_set": [{"name": "v4-serve-flags", "extra_args": "--tokenizer-mode deepseek_v4"}],
         # NEW setup command proposed by the specialist in this deliverable.
         "setup_commands": ["pip install -U aiter"],
     }
     before = len(coord.state.pending_proposals)
-    await coord._maybe_autosubmit_framework_config(task=_enablement_authoring_task(), done_payload=done)
+    await coord.phase_framework.maybe_autosubmit_framework_config(task=_enablement_authoring_task(), done_payload=done)
     assert len(coord.state.pending_proposals) == before + 1
     prop = next(iter(coord.state.pending_proposals.values()))
     params = (prop.payload or {}).get("params") or {}
@@ -396,7 +393,7 @@ async def test_autosubmit_config_enablement_setup_only_still_routes(coord: Coord
     """An enablement deliverable with NO config levers (setup-only stack upgrade) must still reach integrate_patch so the stall accounting can advance."""
     done = {"proposal_set": [], "setup_commands": ["pip install -U vllm==0.21.0"]}
     before = len(coord.state.pending_proposals)
-    await coord._maybe_autosubmit_framework_config(task=_enablement_authoring_task(), done_payload=done)
+    await coord.phase_framework.maybe_autosubmit_framework_config(task=_enablement_authoring_task(), done_payload=done)
     assert len(coord.state.pending_proposals) == before + 1
     prop = next(iter(coord.state.pending_proposals.values()))
     params = (prop.payload or {}).get("params") or {}
@@ -417,7 +414,7 @@ async def test_autosubmit_config_build_only_skips_integrate(coord: Coordinator) 
         },
     }
 
-    await coord._maybe_autosubmit_framework_config(
+    await coord.phase_framework.maybe_autosubmit_framework_config(
         task=_enablement_authoring_task(),
         done_payload=done,
     )
@@ -428,19 +425,21 @@ async def test_autosubmit_config_build_only_skips_integrate(coord: Coordinator) 
 # _record_framework_agent_authored_outcome
 def test_record_authored_outcome_non_dict_and_empty_status(coord: Coordinator) -> None:
     # result.result not a dict -> no-op.
-    coord._record_framework_agent_authored_outcome(
+    coord.phase_framework._record_framework_agent_authored_outcome(
         task=types.SimpleNamespace(task_id="t", params={}),
         result=types.SimpleNamespace(result=None),
+        adopted=False,
     )
     # empty status -> no-op.
-    coord._record_framework_agent_authored_outcome(
+    coord.phase_framework._record_framework_agent_authored_outcome(
         task=types.SimpleNamespace(task_id="t", params={}),
         result=types.SimpleNamespace(result={"status": ""}),
+        adopted=False,
     )
     assert not (coord.shared_state.framework_agent_phase_progress or [])
 
 
-def test_record_authored_outcome_kept_rolls_batch_stat(coord: Coordinator) -> None:
+def test_record_authored_outcome_kept_writes_progress(coord: Coordinator) -> None:
     coord.shared_state.framework_agent_batches = [{"batch_id": "batch-1"}]
     coord.shared_state.framework_agent_phase_progress = []
     task = types.SimpleNamespace(
@@ -461,12 +460,11 @@ def test_record_authored_outcome_kept_rolls_batch_stat(coord: Coordinator) -> No
             "accuracy_pass": True,
         }
     )
-    coord._record_framework_agent_authored_outcome(task=task, result=result)
+    coord.phase_framework._record_framework_agent_authored_outcome(task=task, result=result, adopted=True)
     rows = coord.shared_state.framework_agent_phase_progress
     assert rows[-1]["candidate_id"] == "cand-1"
     assert rows[-1]["status"] == "kept" and rows[-1]["kept"] is True
     assert rows[-1]["gain_pct"] == 4.5
-    assert coord.shared_state.framework_agent_batches[0]["max_gain_pct_observed_in_batch"] == 4.5
 
 
 def test_record_authored_outcome_uses_candidate_map_and_batch_fallback(coord: Coordinator) -> None:
@@ -478,7 +476,7 @@ def test_record_authored_outcome_uses_candidate_map_and_batch_fallback(coord: Co
         params={"framework_agent_authoring": True, "specialist_task_id": "spec-9"},
     )
     result = types.SimpleNamespace(result={"status": "reverted", "delta_pct": -1.0})
-    coord._record_framework_agent_authored_outcome(task=task, result=result)
+    coord.phase_framework._record_framework_agent_authored_outcome(task=task, result=result, adopted=False)
     row = coord.shared_state.framework_agent_phase_progress[-1]
     assert row["candidate_id"] == "cand-from-map"
     assert row["batch_id"] == "latest-batch"
@@ -493,16 +491,16 @@ def _enter_fpr(coord: Coordinator) -> None:
 def test_record_authoring_empty_guards(coord: Coordinator) -> None:
     _enter_fpr(coord)
     # Not authoring -> no-op.
-    coord._record_framework_agent_authoring_empty_outcome(
+    coord.phase_framework._record_framework_agent_authoring_empty_outcome(
         task=types.SimpleNamespace(task_id="t", params={}), done_payload={}
     )
     # Patch present -> no-op (integrate_patch will own the row).
-    coord._record_framework_agent_authoring_empty_outcome(
+    coord.phase_framework._record_framework_agent_authoring_empty_outcome(
         task=_authoring_task(),
         done_payload={"patches_written": ["p.patch"]},
     )
     # Config-lever deliverable -> no-op (config autosubmit owns the row).
-    coord._record_framework_agent_authoring_empty_outcome(
+    coord.phase_framework._record_framework_agent_authoring_empty_outcome(
         task=_authoring_task(),
         done_payload={"proposal_set": [{"extra_envs": {"X": "1"}}]},
     )
@@ -520,14 +518,14 @@ def test_record_authoring_empty_already_present(coord: Coordinator) -> None:
             "framework_audit": {"semantic_status": "already_equivalent"},
         },
     )
-    coord._record_framework_agent_authoring_empty_outcome(
+    coord.phase_framework._record_framework_agent_authoring_empty_outcome(
         task=task, done_payload={"payload": {"patches_written": [], "summary": "already there"}}
     )
     row = coord.shared_state.framework_agent_phase_progress[-1]
     assert row["candidate_id"] == "cand-2"
     assert row["status"] == "already_present"
     # Idempotent: a second call does not append a duplicate.
-    coord._record_framework_agent_authoring_empty_outcome(
+    coord.phase_framework._record_framework_agent_authoring_empty_outcome(
         task=task, done_payload={"payload": {"patches_written": [], "summary": "again"}}
     )
     assert sum(1 for p in coord.shared_state.framework_agent_phase_progress if p["candidate_id"] == "cand-2") == 1
@@ -537,7 +535,7 @@ def test_record_authoring_empty_status_variants(coord: Coordinator) -> None:
     _enter_fpr(coord)
     coord.shared_state.framework_agent_phase_progress = []
     # not_present -> not_applicable.
-    coord._record_framework_agent_authoring_empty_outcome(
+    coord.phase_framework._record_framework_agent_authoring_empty_outcome(
         task=types.SimpleNamespace(
             task_id="s-a",
             params={
@@ -549,7 +547,7 @@ def test_record_authoring_empty_status_variants(coord: Coordinator) -> None:
         done_payload={"patches_written": [], "summary": "missing"},
     )
     # no audit -> author_empty.
-    coord._record_framework_agent_authoring_empty_outcome(
+    coord.phase_framework._record_framework_agent_authoring_empty_outcome(
         task=types.SimpleNamespace(
             task_id="s-b",
             params={"framework_agent_authoring": True, "framework_agent_candidate_id": "ae-1"},

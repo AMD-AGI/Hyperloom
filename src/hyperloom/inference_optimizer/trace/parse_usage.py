@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.env_safety import redact_secret_values
+from hyperloom.common.token_usage import uncached_input_tokens
 
 from ._row_utils import coerce_optional_int
 
@@ -68,6 +69,16 @@ def normalize_usage(usage: dict[str, Any] | None) -> dict[str, int | None] | Non
     return projected
 
 
+def _claude_stream_model(obj: dict[str, Any]) -> str | None:
+    """The model a stream-json row names: an assistant message's, else the ``system/init`` row's."""
+    message = obj.get("message")
+    model = message.get("model") if obj.get("type") == "assistant" and isinstance(message, dict) else None
+    if model is None and obj.get("type") == "system":
+        model = obj.get("model")
+    # The CLI stamps locally generated assistant messages (errors, interrupts) with ``<synthetic>``.
+    return model if isinstance(model, str) and model and not model.startswith("<") else None
+
+
 def _iter_json_events(log_path: str | Path, kind: str) -> Iterator[dict[str, Any]]:
     """Yield each JSON object of a line-delimited ``kind`` log, in stream order."""
     path = Path(log_path)
@@ -91,16 +102,21 @@ def _iter_json_events(log_path: str | Path, kind: str) -> Iterator[dict[str, Any
 
 def parse_claude_stream_json_usage(
     log_path: str | Path,
-) -> dict[str, int | None] | None:
-    """Extract the final ``usage`` from a Claude CLI ``stream-json`` log."""
+) -> dict[str, Any] | None:
+    """Extract the final ``usage`` (plus the serving ``model``, when named) from a Claude CLI ``stream-json`` log."""
     last_usage: dict[str, Any] | None = None
+    model: str | None = None
     for obj in _iter_json_events(log_path, "stream-json"):
+        model = _claude_stream_model(obj) or model
         usage = obj.get("usage")
         if isinstance(usage, dict) and usage:
             # A result-typed row is authoritative over earlier usage.
             if obj.get("type") == "result" or last_usage is None:
                 last_usage = usage
-    return normalize_usage(last_usage)
+    normalized: dict[str, Any] | None = normalize_usage(last_usage)
+    if normalized is not None and model is not None:
+        normalized["model"] = model
+    return normalized
 
 
 def parse_claude_stream_json_response(
@@ -150,6 +166,16 @@ def _claude_result_output_tokens(result: dict[str, Any]) -> int | None:
     return None
 
 
+_INPUT_SIDE_KEYS = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+
+
+def _input_side_total(usage: dict[str, Any] | None) -> int:
+    """Sum the prompt-side buckets of one normalized usage block."""
+    if not usage:
+        return 0
+    return sum(int(usage.get(key) or 0) for key in _INPUT_SIDE_KEYS)
+
+
 def _reattach_turn_output(
     usages: list[dict[str, int | None]],
     session_output: int | None,
@@ -174,11 +200,14 @@ def parse_claude_stream_json_turn_usages(
     seen_ids: set[str] = set()
     saw_message_id = False
     session_output: int | None = None
+    session_input = 0
     for obj in _iter_json_events(log_path, "stream-json"):
         if obj.get("type") == "result":
             recovered = _claude_result_output_tokens(obj)
             if recovered is not None:
                 session_output = recovered
+            result_usage = obj.get("usage")
+            session_input = _input_side_total(normalize_usage(result_usage if isinstance(result_usage, dict) else None))
             continue
         if obj.get("type") != "assistant":
             continue
@@ -198,6 +227,14 @@ def parse_claude_stream_json_turn_usages(
         log.warning(
             "parse_usage: stream-json log %s names no message ids; per-turn rows "
             "cannot be de-duplicated, deferring to the cumulative result row",
+            log_path,
+        )
+        return []
+    if usages and session_input and not any(_input_side_total(usage) for usage in usages):
+        # Some gateways (seen with GLM behind LiteLLM) stream every assistant message with zeroed usage and report the
+        # real counts only on the result row; per-turn rows would then book the whole session at zero.
+        log.warning(
+            "parse_usage: stream-json log %s carries zeroed per-turn usage; deferring to the cumulative result row",
             log_path,
         )
         return []
@@ -356,6 +393,10 @@ def _codex_usage_to_canonical(usage: Any) -> dict[str, int | None] | None:
     normalized = normalize_usage(renamed)
     if normalized is None:
         return None
+    normalized["input_tokens"] = uncached_input_tokens(
+        normalized["input_tokens"],
+        normalized["cache_read_input_tokens"],
+    )
     reasoning = coerce_optional_int(usage.get(_CODEX_REASONING_TOKENS_KEY))
     if reasoning is not None:
         normalized[_CODEX_REASONING_TOKENS_KEY] = reasoning

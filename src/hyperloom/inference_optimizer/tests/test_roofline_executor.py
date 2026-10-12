@@ -15,7 +15,7 @@ from hyperloom.orchestrator.actions.executors import roofline as roofline_mod
 from hyperloom.orchestrator.actions.executors.roofline import (
     RooflineExecutor,
     _extract_trace_path,
-    _failed,
+    _fail,
     _gpu_trace_unsupported_reason,
     make_roofline_executor,
 )
@@ -694,8 +694,8 @@ def test_extract_trace_path_handles_non_dict():
     assert _extract_trace_path("garbage") == ""  # type: ignore[arg-type]
 
 
-def test_failed_helper_constructs_canonical_shape():
-    f = _failed("profile", "boom")
+def test_fail_helper_constructs_canonical_shape():
+    f = _fail(None, "profile", "boom")
     assert f["status"] == "failed"
     assert f["error_class"] == "profile_failed"
     assert f["error"] == "boom"
@@ -703,7 +703,7 @@ def test_failed_helper_constructs_canonical_shape():
     assert "executed_at_iso" in f
     assert "sub_result" not in f
 
-    f2 = _failed("trace_analyze", "x", sub_result={"status": "failed", "error": "y", "extra": "ignored"})
+    f2 = _fail(None, "trace_analyze", "x", {"status": "failed", "error": "y", "extra": "ignored"})
     assert f2["sub_result"] == {"status": "failed", "error": "y"}
     assert "extra" not in f2["sub_result"]
 
@@ -730,7 +730,7 @@ def test_wrap_profile_ctx_creates_child_task():
     assert child.task.task_id == "t-roofline-1-profile"
     assert child.task.idempotency_key == "roofline:t-1-profile"
     assert child.task.state == "running"
-    assert child.task.params == {"base_extra_args": "--mem-fraction-static=0.92"}
+    assert child.task.params == {"base_extra_args": "--mem-fraction-static=0.92", "disable_run_eval": True}
     assert child.extra["session_dir"] == "/sess"
     assert child.lease is parent.lease
 
@@ -881,14 +881,14 @@ async def test_promote_roofline_flips_changed_and_saves(session_dir):
     assert pre.get("last_profile_trace", "") == s.last_profile_trace
 
     s.last_profile_trace = "/sessions/abc/.../NEW_trace.gz"
-    await coord._promote_to_shared_state(
+    await coord.writeback.promote_to_shared_state(
         "roofline",
         _roofline_result(snapshot_id=1),
         task=_roofline_task(),
     )
     post = json.loads((session_dir / "state.json").read_text())
     assert post.get("last_profile_trace") == "/sessions/abc/.../NEW_trace.gz", (
-        "N10 _promote_to_shared_state 'roofline' branch must trigger "
+        "N10 promote_to_shared_state 'roofline' branch must trigger "
         "the tail-save; otherwise the post-promote state.json would "
         "still show the pre-mutate trace path"
     )
@@ -905,7 +905,7 @@ async def test_promote_roofline_records_audit_attempt(session_dir):
     s.last_profile_trace = "/t/trace.gz"
 
     assert s.roofline_attempts == []
-    await coord._promote_to_shared_state(
+    await coord.writeback.promote_to_shared_state(
         "roofline",
         _roofline_result(snapshot_id=1),
         task=_roofline_task(),
@@ -931,7 +931,7 @@ async def test_promote_roofline_does_not_remutate_state(session_dir):
     }
     s.last_profile_status = "succeeded"
 
-    await coord._promote_to_shared_state(
+    await coord.writeback.promote_to_shared_state(
         "roofline",
         _roofline_result(snapshot_id=3),
         task=_roofline_task(snapshot_id=3),
@@ -940,17 +940,6 @@ async def test_promote_roofline_does_not_remutate_state(session_dir):
     assert s.last_trace_analyze["analysis_md_text"] == "before report"
     assert s.last_trace_analyze["roofline_snapshot_id"] == 3
     assert s.last_profile_status == "succeeded"
-
-
-@pytest.mark.asyncio
-async def test_promote_roofline_non_dict_result_short_circuits(session_dir):
-    coord = Coordinator(session_dir, backends=_silent_backends())
-    await coord._promote_to_shared_state(
-        "roofline",
-        None,
-        task=_roofline_task(),  # type: ignore[arg-type]
-    )
-    assert coord.shared_state.roofline_attempts == []
 
 
 # N11: strip base64 image data URLs from analysis.md.

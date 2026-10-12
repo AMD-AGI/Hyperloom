@@ -188,12 +188,41 @@ Operational checks:
 ```bash
 test -n "${OPENAI_API_KEY:-${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-}}}"
 test -n "${OPENAI_BASE_URL:-${ANTHROPIC_BASE_URL:-}}"
-bash "$REPO_ROOT/hyperloom/agents/kernel/scripts/install.sh" --check-only
+bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install_kernel_tools.sh" --check-only
 ```
 
 Child processes inherit the gateway settings prepared by preflight; keep
 operator-facing gateway configuration in `OPENAI_API_KEY` / `OPENAI_BASE_URL`
 or the split Anthropic/OpenAI credentials.
+
+---
+
+## Launcher contract
+
+Launchers can rely on these outputs of `hyperloom optimize`.
+
+**Exit codes**
+
+| Code | Meaning |
+|---|---|
+| 0 | The run finished with a completed outcome |
+| 1 | The run failed or was aborted, including by a signal |
+| 2 | Invalid arguments or a startup check failed (topology, resume, model gate, credentials) |
+| 3 | The session lock is held by another optimizer |
+| 4 | The `--quantize` prelude failed; the run refuses to optimize the unquantized model |
+
+`hyperloom recover` exits 0 on success, 1 when the breakdown rebuild fails and 2 on invalid arguments.
+
+**Launch line**
+
+Once the session directory exists, stdout carries one line
+
+```text
+HYPERLOOM_LAUNCH event=launch pid=... session_dir=... session_id=... run_log=... manifest=... gpu_type=... framework=... model=...
+```
+
+with shell-quoted values, and `--launch-info-file PATH` writes the same keys as JSON. A skipped quantization prelude prints a line starting
+with `QUANTIZATION_SKIPPED:`.
 
 ---
 
@@ -225,7 +254,7 @@ ingest it whole on session end.
    `ls "$SESSION_DIR/state.json"`.
 2. Relaunch with `--resume-from`:
    ```bash
-   python3 -m hyperloom.inference_optimizer.cli optimize --resume-from "$SESSION_DIR"
+   python3 -m hyperloom optimize --resume-from "$SESSION_DIR"
    ```
 3. Coordinator reads `manifest.json` + `state.json`, re-enters the
    loop at the last completed action. The current in-flight action
@@ -240,14 +269,13 @@ that exited abnormally — without re-running the optimization loop — use the
 dedicated subcommand instead of `--resume-from`:
 
 ```bash
-  python3 -m hyperloom.inference_optimizer.cli recover-session --session-dir "$SESSION_DIR" [--force] [--backfill-trace]
+  python3 -m hyperloom recover --session-dir "$SESSION_DIR" [--force]
 ```
 
-`--force` re-runs even when the session already looks complete;
-`--backfill-trace` replays `reports/trace/llm_calls.jsonl` as Langfuse
-generations (use only when the live emitter never ran, or it duplicates
-generations). `--resume-from` = keep optimizing; `recover-session` = rebuild
-the breakdown artifact.
+`--force` re-runs even when the session already looks complete. To replay
+`reports/trace/llm_calls.jsonl` as Langfuse generations (only when the live
+emitter never ran), use `hyperloom session backfill --session-dir "$SESSION_DIR"`.
+`--resume-from` = keep optimizing; `recover` = rebuild the breakdown artifact.
 
 ### Scenario B: PV lost or corrupted
 
@@ -260,7 +288,7 @@ the breakdown artifact.
 
 1. Confirm the pod has a current key and base URL (`OPENAI_API_KEY` /
    `OPENAI_BASE_URL`, or split Anthropic/OpenAI credentials).
-2. Re-run `bash "$REPO_ROOT/hyperloom/agents/kernel/scripts/install.sh" --check-only`
+2. Re-run `bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install_kernel_tools.sh" --check-only`
    and then without `--check-only` if it reports missing aliases.
 3. Inspect `~/.claude/config.json`; `customApiUrl` must point at the upstream
    gateway.

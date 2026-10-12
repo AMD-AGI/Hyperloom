@@ -1736,16 +1736,27 @@ def test_eval_returncode_sentinel_roundtrip_and_invalid(tmp_path):
 
 
 def test_finalize_report_client_failure_without_raw(tmp_path):
-    rc = bypass_runner._finalize_report(
-        workspace=tmp_path,
+    r = bypass_runner._Round(
         framework="sglang",
         model="/models/x",
-        server_log=tmp_path / "server.log",
-        bench_envs={"RUN_EVAL": "false"},
-        start=0.0,
-        rc=9,
+        tp=1,
+        port=8888,
+        max_model_len=None,
         profile=True,
+        profile_dir=str(tmp_path / "torch_trace"),
+        bench_envs={"RUN_EVAL": "false"},
+        server_log=tmp_path / "server.log",
+        base_url="http://127.0.0.1:8888",
+        timeout_s=60.0,
+        server_ready_timeout_s=60.0,
+        inferencex_root=str(tmp_path),
+        conc=4,
+        isl=128,
+        osl=64,
+        rrr=0.5,
+        workspace=tmp_path,
     )
+    rc = r.finalize(0.0, 9)
     assert rc == 9
     rep = json.loads((tmp_path / "benchmark_report.json").read_text(encoding="utf-8"))
     assert rep["success"] is False
@@ -1835,6 +1846,9 @@ def test_server_phase_build_command_value_error_fails(tmp_path, monkeypatch):
     (inferencex / "utils" / "bench_serving").mkdir(parents=True)
     (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
     cfg_path = _write_cfg(tmp_path, inferencex)
+    cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    cfg["benchmark"]["profiler"] = {"torch_profiler": {"enabled": True}}
+    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
     pid_dir = tmp_path / "pids"
     pid_dir.mkdir()
 
@@ -1842,9 +1856,31 @@ def test_server_phase_build_command_value_error_fails(tmp_path, monkeypatch):
         raise ValueError("bad server args")
 
     monkeypatch.setattr(bypass_engine, "build_server_command", boom)
+    monkeypatch.setattr(bypass_runner, "_launch_server", lambda *a: pytest.fail("server launched"))
 
     rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out", phase="server", pid_dir=str(pid_dir))
     assert rc == 2
+    (ws,) = (tmp_path / "out").glob("benchmark_sglang_*")
+    rep = json.loads((ws / "benchmark_report.json").read_text(encoding="utf-8"))
+    assert rep["errors"] == ["bad server args"]
+    assert rep["profiling_enabled"] is True
+
+
+def test_server_phase_without_pid_dir_reports_the_configured_profiler(tmp_path):
+    inferencex = tmp_path / "InferenceX"
+    (inferencex / "utils" / "bench_serving").mkdir(parents=True)
+    (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
+    cfg_path = _write_cfg(tmp_path, inferencex)
+    cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    cfg["benchmark"]["profiler"] = {"torch_profiler": {"enabled": True}}
+    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+    rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out", phase="server")
+    assert rc == 2
+    (ws,) = (tmp_path / "out").glob("benchmark_sglang_*")
+    rep = json.loads((ws / "benchmark_report.json").read_text(encoding="utf-8"))
+    assert rep["errors"] == ["phase=server requires pid_dir"]
+    assert rep["profiling_enabled"] is True
 
 
 def test_server_phase_pgid_oserror_falls_back_to_pid(tmp_path, monkeypatch):

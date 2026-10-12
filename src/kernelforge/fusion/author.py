@@ -37,7 +37,7 @@ from .llm_failure import (
     is_agent_timeout_error,
     retry_delay,
 )
-from .harness_contract import harness_contract
+from .harness_contract import harness_contract, trace_kernels_block
 from .validate import DEFAULT_TARGET_SPEEDUP
 from kernelforge.llm.git import git
 
@@ -153,7 +153,7 @@ def build_author_prompt(
 - Framework source file to edit: {recipe.get("source_file") or "(resolve it under the framework model dir)"}
 {_model_dir_block(model_path)}- Fusion pattern: {recipe.get("pattern")}
 - {recipe.get("description")}
-
+{trace_kernels_block(recipe.get("trace_kernels"))}
 ## What to fuse (the recipe)
 {recipe.get("fusion_math")}
 
@@ -179,6 +179,11 @@ Grep the model file for these anchors and fuse the chain they mark:
 - The fusion MUST be env-gated by `{env_flag}`. With the flag UNSET the code path
   stays bit-for-bit the original eager path.
 {rocm_line}- Cast to fp32 inside the fused kernel; one launch instead of the multi-op chain.
+- NET launch count must DROP. Count the kernels the eager path launches per decode
+  step and the kernels the fused path launches; the fused number must be strictly
+  smaller. A scratch-fill, a separate cast or a contiguous copy added to feed your
+  kernel can cancel the launches it saved while the chain alone still benchmarks
+  faster. Report both counts alongside the speedup.
 - CUDA-graph safe: no Python-side dynamic allocation or host sync in the decode
   hot path (preallocate outputs; use tl.constexpr for shapes).
 - Keep all public function/class signatures and imports intact.
@@ -261,7 +266,7 @@ next to the speedup. A microbenchmark win alone is NOT sufficient to keep it.
     return f"""You are optimizing the {framework} model file `{src}` with SEVERAL decode-path
 kernel fusions on {_arch_phrase(gpu_arch)}, bf16 serving. Work autonomously; no questions.
 
-{_model_dir_block(model_path)}
+{_model_dir_block(model_path)}{trace_kernels_block(recipes[0].get("trace_kernels"))}
 ## Representative decode shapes (model config + trace)
 {shapes}
 

@@ -7,12 +7,10 @@ post-prelude target, and history-row builder.
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
 
 from hyperloom.orchestrator.phases import machine_state as ps
-from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_VOCAB, is_valid_escalate_hint
+from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_VOCAB, SharedState, is_valid_escalate_hint
 
 
 def test_is_valid_escalate_hint() -> None:
@@ -52,52 +50,55 @@ def test_apply_escalate_budget_bump() -> None:
 
 
 def test_now_unix_injected() -> None:
-    state = SimpleNamespace(_now_unix=lambda: 1234.0)
+    state = SharedState()
+    state._now_unix = lambda: 1234.0  # type: ignore[attr-defined]
     assert ps._now_unix(state) == 1234.0
 
 
 def test_phase_started_unix_bad_value() -> None:
-    assert ps._phase_started_unix(SimpleNamespace(phase_started_unix="bad")) == 0.0
-    assert ps._phase_started_unix(SimpleNamespace(phase_started_unix=10.0)) == 10.0
+    assert ps._phase_started_unix(SharedState(phase_started_unix="bad")) == 0.0
+    assert ps._phase_started_unix(SharedState(phase_started_unix=10.0)) == 10.0
 
 
 def test_pending_escalate_hint() -> None:
     valid = next(iter(ESCALATE_HINT_VOCAB))
-    assert ps._pending_escalate_hint(SimpleNamespace(pending_escalate_hint=valid)) == valid
-    assert ps._pending_escalate_hint(SimpleNamespace(pending_escalate_hint="garbage")) == ""
-    assert ps._pending_escalate_hint(SimpleNamespace(pending_escalate_hint="")) == ""
+    assert ps._pending_escalate_hint(SharedState(pending_escalate_hint=valid)) == valid
+    assert ps._pending_escalate_hint(SharedState(pending_escalate_hint="garbage")) == ""
+    assert ps._pending_escalate_hint(SharedState(pending_escalate_hint="")) == ""
 
 
 def test_max_minutes_coercion() -> None:
-    assert ps._max_minutes(SimpleNamespace(max_minutes=30)) == 30.0
-    assert ps._max_minutes(SimpleNamespace(max_minutes="bad")) == 0.0
-    assert ps._max_minutes(SimpleNamespace(max_minutes=0)) == 0.0
+    assert ps._max_minutes(SharedState(max_minutes=30)) == 30.0
+    assert ps._max_minutes(SharedState(max_minutes="bad")) == 0.0
+    assert ps._max_minutes(SharedState(max_minutes=0)) == 0.0
 
 
 def test_phase_elapsed_seconds() -> None:
     # not started -> 0
-    assert ps.phase_elapsed_seconds(SimpleNamespace(phase_started_unix=0.0)) == 0.0
+    assert ps.phase_elapsed_seconds(SharedState(phase_started_unix=0.0)) == 0.0
     # started -> now - started, clamped non-negative.
-    state = SimpleNamespace(phase_started_unix=100.0)
+    state = SharedState(phase_started_unix=100.0)
     assert ps.phase_elapsed_seconds(state, now_unix=160.0) == 60.0
     assert ps.phase_elapsed_seconds(state, now_unix=50.0) == 0.0
 
 
 def test_phase_budget_remaining_seconds() -> None:
     # unlimited -> None
-    assert ps.phase_budget_remaining_seconds(SimpleNamespace(max_minutes=0)) is None
+    assert ps.phase_budget_remaining_seconds(SharedState(max_minutes=0)) is None
     # phase not in the budget map -> None
-    state = SimpleNamespace(
+    state = SharedState(
         max_minutes=60,
         phase="UNKNOWN_PHASE",
+        start_ts="",
         phase_started_unix=0.0,
         phase_budget_pct={ps.PHASE_FRAMEWORK_AGENT: 0.5},
     )
     assert ps.phase_budget_remaining_seconds(state) is None
     # 60min * 0.5 = 1800s budget, minus elapsed.
-    state2 = SimpleNamespace(
+    state2 = SharedState(
         max_minutes=60,
         phase=ps.PHASE_FRAMEWORK_AGENT,
+        start_ts="",
         phase_started_unix=1000.0,
         phase_budget_pct={ps.PHASE_FRAMEWORK_AGENT: 0.5},
     )
@@ -106,18 +107,18 @@ def test_phase_budget_remaining_seconds() -> None:
 
 
 def test_session_remaining_seconds() -> None:
-    assert ps.session_remaining_seconds(SimpleNamespace(max_minutes=0)) is None
+    assert ps.session_remaining_seconds(SharedState(max_minutes=0)) is None
     # Nothing dates the session: no charge, no anchor, no stamp.
     assert (
         ps.session_remaining_seconds(
-            SimpleNamespace(max_minutes=60, start_ts=""),
+            SharedState(max_minutes=60, start_ts=""),
         )
         is None
     )
     # bad ts -> None
     assert (
         ps.session_remaining_seconds(
-            SimpleNamespace(max_minutes=60, start_ts="not-a-date"),
+            SharedState(max_minutes=60, start_ts="not-a-date"),
         )
         is None
     )
@@ -126,14 +127,14 @@ def test_session_remaining_seconds() -> None:
 
     now_iso = datetime.now(timezone.utc).isoformat()
     rem = ps.session_remaining_seconds(
-        SimpleNamespace(max_minutes=60, start_ts=now_iso),
+        SharedState(max_minutes=60, start_ts=now_iso),
     )
     assert rem is not None and 0.0 < rem <= 3600.0
 
 
 def test_a_live_leg_is_charged_from_its_anchor() -> None:
     """With a leg open, the answer is the charged total plus the leg so far."""
-    state = SimpleNamespace(max_minutes=12 * 60, elapsed_charged_sec=3600.0, leg_anchor_unix=10_000.0, start_ts="")
+    state = SharedState(max_minutes=12 * 60, elapsed_charged_sec=3600.0, leg_anchor_unix=10_000.0, start_ts="")
 
     remaining = ps.session_remaining_seconds(state, now_unix=10_000.0 + 10 * 3600.0)
 
@@ -149,7 +150,7 @@ def test_an_unarmed_anchor_does_not_hand_a_started_session_its_budget_again() ->
     from datetime import datetime, timezone
 
     started = 1_000_000.0
-    state = SimpleNamespace(
+    state = SharedState(
         max_minutes=12 * 60,
         elapsed_charged_sec=0.0,
         leg_anchor_unix=0.0,
@@ -163,7 +164,7 @@ def test_an_unarmed_anchor_does_not_hand_a_started_session_its_budget_again() ->
 
 def test_an_unarmed_anchor_between_legs_is_not_charged_for_the_idle_gap() -> None:
     """A charged total answers on its own: the gap between legs ran nothing."""
-    state = SimpleNamespace(max_minutes=12 * 60, elapsed_charged_sec=3600.0, leg_anchor_unix=0.0, start_ts="")
+    state = SharedState(max_minutes=12 * 60, elapsed_charged_sec=3600.0, leg_anchor_unix=0.0, start_ts="")
 
     remaining = ps.session_remaining_seconds(state, now_unix=10_000_000.0)
 

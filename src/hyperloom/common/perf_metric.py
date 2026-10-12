@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import isfinite
 from typing import Any, Mapping
 
 from hyperloom.common.env import env_bool, env_float, env_str
@@ -43,10 +44,24 @@ GRADED_ERROR_RATE = "request_error_rate"
 # same work. Sized to catch a truncated round, not the few percent a full round drifts by.
 DURATION_DRIFT_PCT = 5.0
 
+# Extra failed requests a candidate may report over its anchor, in the rate's percentage points. aiperf counts a reply
+# that carries no content as failed, and a corpus turn answered with a single token comes back with content under one
+# configuration and without it under another, so with no slack that one turn refuses a real gain. Being a rate, the
+# slack admits more failures in a longer or more concurrent round and none in a round of fewer than 200 requests (an
+# MLPerf smoke run issues 150 samples). Percentiles are read over the same round's successful requests, so dropping a
+# fraction f of them moves any percentile by at most f in rank, and the slack cannot buy a median gain anywhere near
+# AGENTX_KEEP_P50_THRESHOLD_PCT.
+ERROR_RATE_SLACK_PCT = 0.5
+
 # The axes ``graded_axes_of`` can carry, for a consumer that must publish all of them including the ones a
 # measurement did not supply. Absent and null are not the same fact: a recorder that omits an axis leaves a reader
 # unable to tell an unmeasured axis from one the framework failed to report, and zero reads as "measured, and it
 # was zero".
+#
+# Duration and error rate are members because they are decision inputs, not decoration: ``incomparability_reason``
+# refuses a pair whose windows differ by more than ``DURATION_DRIFT_PCT`` or whose candidate dropped too many requests,
+# and a published verdict that omits them cannot be re-derived from the record. The objective and its two guards
+# are here for the same reason -- every input the verdict reads is recoverable from one block.
 GRADED_AXIS_KEYS = (
     GRADED_INTVTY,
     GRADED_INTVTY_P50,
@@ -57,6 +72,8 @@ GRADED_AXIS_KEYS = (
     "ttft_p90_ms",
     "tpot_p50_ms",
     "tpot_p90_ms",
+    GRADED_DURATION,
+    GRADED_ERROR_RATE,
 )
 
 # Upstream reports run-to-run noise on this workload as 1-5% depending on the concurrency regime, so the band opens
@@ -89,6 +106,13 @@ def intvty_grading_enabled(*, benchmark_mode: str = "") -> bool:
     """True when interactivity grading applies; ``benchmark_mode`` is a parameter to keep this module a leaf."""
     # Passing the mode matters: the env var describes only the shell that happens to be running, so a re-baseline or
     # integrate round in a subprocess would otherwise grade an agentic measurement on the synthetic axis.
+    # The MLPerf harness publishes no per-request OSL/E2EL series, so its sessions grade on output throughput;
+    # asking for interactivity there would only degrade every round. Adding that series upstream in
+    # mlcommons/endpoints is future work, if MLPerf mandates grading on interactivity.
+    from hyperloom.common.agentx_workload import is_mlperf_backend
+
+    if is_mlperf_backend():
+        return False
     raw = env_str("HYPERLOOM_PERF_METRIC").strip().lower()
     if raw:
         return raw == INTVTY_V1
@@ -269,21 +293,23 @@ def stamp_output_per_gpu(measurement: Any, tp: Any) -> None:
     measurement[GRADED_OUTPUT_PER_GPU] = out / chips
 
 
-def rounds_are_comparable(candidate: Mapping[str, float], anchor: Mapping[str, float]) -> bool:
-    """Whether the pair measured the same work: equal-length windows and no extra failed requests.
+def incomparability_reason(candidate: Mapping[str, float], anchor: Mapping[str, float]) -> str:
+    """Why the pair did not measure the same work, or "" when it did: equal-length windows, failures within the slack.
 
     Fails closed on an unreported input. A truncated round still publishes plausible rates, so treating "no
     evidence" as "comparable" is what lets one KEEP on a window it never ran.
     """
     for side in (candidate, anchor):
         if not all(key in side for key in (GRADED_DURATION, GRADED_ERROR_RATE)):
-            return False
+            return "comparability_inputs_missing"
     ref_duration = axis_of(anchor, GRADED_DURATION)
     if ref_duration <= 0:
-        return False
+        return "comparability_inputs_missing"
     if abs(axis_of(candidate, GRADED_DURATION) / ref_duration - 1.0) * 100.0 > DURATION_DRIFT_PCT:
-        return False
-    return axis_of(candidate, GRADED_ERROR_RATE) <= axis_of(anchor, GRADED_ERROR_RATE)
+        return "duration_drift"
+    if axis_of(candidate, GRADED_ERROR_RATE) > axis_of(anchor, GRADED_ERROR_RATE) + ERROR_RATE_SLACK_PCT:
+        return "extra_failed_requests"
+    return ""
 
 
 def holds_within_band(
@@ -298,12 +324,36 @@ def holds_within_band(
     return _within_band(axis_of(candidate, key), axis_of(anchor, key), band)
 
 
+def latency_veto_reason(observed_ms: Any, budget_ms: float) -> str:
+    """Why the latency budget refuses this candidate, or "" when it does not.
+
+    The budget is a ceiling on mean end-to-end latency, so unlike the gain gates
+    it refuses a candidate whose throughput won: a lever that buys throughput by
+    making each stream slower is exactly the case a throughput-only comparison
+    selects for. Off entirely when *budget_ms* is not positive.
+
+    Fails closed on an unmeasured candidate — a constraint nobody measured is not
+    one anybody satisfied — which is why every lane copies ``e2el_mean_ms`` onto
+    the dict it promotes.
+    """
+    if not budget_ms or budget_ms <= 0:
+        return ""
+    if isinstance(observed_ms, bool) or not isinstance(observed_ms, (int, float)):
+        return "latency_unmeasured"
+    observed = float(observed_ms)
+    if not isfinite(observed) or observed <= 0:
+        return "latency_unmeasured"
+    return "latency_budget_exceeded" if observed > float(budget_ms) else ""
+
+
 @dataclass(frozen=True)
 class GradedComparison:
     """A candidate, the figure it must beat, and the verdict on that pair.
 
     ``candidate`` and ``reference`` are both read on ``objective``. ``tput_*`` carry total throughput and are 0.0 off
     AgentX. ``degrade_reason`` names why the interactivity axis did not apply on a session that asked for it.
+    ``veto_reason`` names a constraint that refused a candidate its throughput would otherwise have kept.
+    ``refused_by`` names, comma-joined, every interactivity gate the candidate failed.
     """
 
     objective: str
@@ -313,6 +363,8 @@ class GradedComparison:
     tput_candidate: float = 0.0
     tput_reference: float = 0.0
     degrade_reason: str = ""
+    veto_reason: str = ""
+    refused_by: str = ""
 
     @property
     def comparable(self) -> bool:
@@ -333,6 +385,7 @@ class GradedComparison:
 __all__ = [
     "AGENTX_KEEP_P50_THRESHOLD_PCT",
     "DURATION_DRIFT_PCT",
+    "ERROR_RATE_SLACK_PCT",
     "GradedComparison",
     "GRADED_AXIS_KEYS",
     "GRADED_DURATION",
@@ -351,15 +404,16 @@ __all__ = [
     "graded_axes_of",
     "graded_metric_key",
     "holds_within_band",
+    "incomparability_reason",
     "intvty_grading_enabled",
     "intvty_of",
     "intvty_serving_grading_enabled",
     "is_agentx_mode",
+    "latency_veto_reason",
     "output_tput_of",
     "parse_intvty_noise_pct",
     "perf_snapshot_from_mapping",
     "resolve_grading_anchor_perf",
-    "rounds_are_comparable",
     "stamp_output_per_gpu",
     "total_tput_of",
 ]

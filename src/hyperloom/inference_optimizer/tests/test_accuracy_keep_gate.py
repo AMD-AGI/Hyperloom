@@ -5,11 +5,11 @@
 
 from __future__ import annotations
 
+from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.actions.executors._accuracy_gate import (
     BASELINE_ACCURACY_STOP_REASON,
     accuracy_keep_block,
     request_baseline_accuracy_stop,
-    require_framework_accuracy_default,
 )
 
 
@@ -51,29 +51,8 @@ def test_none_required_with_non_numeric_baseline_degrades():
     assert degraded is True
 
 
-def test_require_default_on(monkeypatch):
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_REQUIRE_FRAMEWORK_ACCURACY", raising=False)
-    assert require_framework_accuracy_default() is True
-
-
-def test_require_default_env_off(monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_REQUIRE_FRAMEWORK_ACCURACY", "0")
-    assert require_framework_accuracy_default() is False
-
-
-class _StopRecorder:
-    """Minimal SharedState stub capturing ``set_stop_reason`` calls."""
-
-    def __init__(self) -> None:
-        self.stop_reason = ""
-
-    def set_stop_reason(self, value, **_kwargs):
-        self.stop_reason = value
-        return value
-
-
 def test_request_baseline_accuracy_stop_records_reason():
-    ss = _StopRecorder()
+    ss = SharedState()
     assert request_baseline_accuracy_stop(ss, context="unit") is True
     assert ss.stop_reason == BASELINE_ACCURACY_STOP_REASON
 

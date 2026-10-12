@@ -28,11 +28,12 @@ def write_prompt_snapshot(
     role: str,
     body: str,
     *,
+    macro_cycle: int,
     phase: str = "",
 ) -> None:
     """Persist a role's effective system prompt for audit / drift inspection."""
     try:
-        target = agent_prompt_snapshot(session_dir, role, phase=phase)
+        target = agent_prompt_snapshot(session_dir, role, phase=phase, macro_cycle=macro_cycle)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(body or "(empty)", encoding="utf-8")
     except OSError:

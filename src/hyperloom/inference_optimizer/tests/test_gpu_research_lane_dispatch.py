@@ -33,7 +33,6 @@ def _build_coord(tmp_path: Path, *, gpu_capacity: int) -> Coordinator:
         session_dir=tmp_path,
         backends=backends,
         role_registry=default_role_registry(),
-        recipe_kb=None,
         knowledge_plane=None,
     )
 
@@ -56,7 +55,7 @@ async def _queued_specialist(coord: Coordinator):
 async def test_needs_gpu_specialist_acquires_gpu_research_lane(tmp_path):
     coord = _build_coord(tmp_path, gpu_capacity=8)
     coord.shared_state.macro_cycle = 0
-    await coord._handle_delegate(
+    await coord.router.handle_delegate(
         "orchestration",
         _delegate(
             {
@@ -69,10 +68,10 @@ async def test_needs_gpu_specialist_acquires_gpu_research_lane(tmp_path):
     )
     task = await _queued_specialist(coord)
     assert "gpu_research_lane" in task.requires_lanes
-    # research_lane is kept for LLM-concurrency accounting.
-    assert "research_lane" in task.requires_lanes
+    # GPU specialists hold gpu_research_lane only; research_lane is for CPU specialists.
+    assert "research_lane" not in task.requires_lanes
     # TTL re-sourced to the time left on the specialist deadline × (1 + grace).
-    budget = coord._specialist_wall_budget_sec(needs_gpu=True)
+    budget = coord.dispatcher._specialist_wall_budget_sec(params={"needs_gpu": True})
     assert task.lease_ttl_sec == pytest.approx(max(1800, int(budget * (1.0 + GPU_LEASE_TTL_GRACE))), abs=2)
     # Iron law: the lane TTL outlives the kill the reaper performs at the deadline.
     assert task.lease_ttl_sec >= int(budget)
@@ -81,7 +80,7 @@ async def test_needs_gpu_specialist_acquires_gpu_research_lane(tmp_path):
 @pytest.mark.asyncio
 async def test_cpu_specialist_has_no_gpu_research_lane(tmp_path):
     coord = _build_coord(tmp_path, gpu_capacity=8)
-    await coord._handle_delegate(
+    await coord.router.handle_delegate(
         "orchestration",
         _delegate(
             {

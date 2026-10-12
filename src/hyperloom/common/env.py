@@ -4,10 +4,10 @@
 """Environment-variable readers (canonical ``env_*``).
 
 An environment value the reader cannot interpret raises :class:`EnvValueError`
-rather than falling back to the caller's default. A typo in a boolean pin
-(``ture``) or a unit left on a number (``30s``) used to be indistinguishable
-from leaving the variable unset, so a run could silently execute the opposite
-configuration from the one the operator wrote and report success. The default
+rather than falling back to the caller's default. Read as unset, a typo in a
+boolean pin (``ture``) or a unit left on a number (``30s``) would let a run
+silently execute the opposite configuration from the one the operator wrote
+and report success. The default
 still answers the one question it can answer honestly -- "the operator said
 nothing" -- and an unreadable value is a configuration error at the boundary
 that read it.

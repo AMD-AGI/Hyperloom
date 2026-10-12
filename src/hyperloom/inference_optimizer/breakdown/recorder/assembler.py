@@ -328,9 +328,8 @@ def recorded_section(section: str, *, detail: str = "") -> list[dict[str, Any]]:
     The guarded counterpart of :meth:`~.event_sink.EventSink.record`, and the
     one place the read side is allowed to fail quietly. A writer consults its
     own rows all the time -- to settle the open segment, to keep the first
-    trigger, to find the start time a later close needs -- and every one of
-    those call sites used to carry its own catch, which is how the subpackage
-    came to swallow everything it touched.
+    trigger, to find the start time a later close needs -- and a catch at each
+    of those call sites would let the subpackage swallow everything it touches.
 
     An unreadable spool is not a reason to skip the write that was about to
     happen, so the answer is an empty list and the loss is noted. Fragments

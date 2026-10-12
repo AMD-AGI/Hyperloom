@@ -1,0 +1,313 @@
+# Hyperloom session_breakdown.json (SBD V6) Framework attempts -> inference-recipe-v1 Experiences.
+#
+# One Experience per timeline[type=framework_agent].ext.attempts[] row. Source-arm attempts
+# carry their patches in attempts[].patch_material: [{path, sha256, content}], ordered as
+# patch_path, patches_applied, patches_reverted with duplicate paths removed.
+format: hyperloom-kb.collect.v1
+description: Hyperloom SBD V6 Framework attempts
+declaration: inference-recipe-v1
+producer:
+  name: hyperloom-framework
+  version: sbd-v6
+  snapshot_version: hyperloom.session_breakdown.v6
+
+skip:
+  - reason: agentx_experience_identity_not_supported
+    when: {eq: [{lower: $doc.metadata.grading.benchmark_mode}, agentx]}
+  # Every Experience records e2e_throughput@v1, so a session graded on any other axis (or on none it recorded)
+  # publishes nothing: its KEEP/REVERT decisions answer another objective.
+  - reason: session_not_graded_on_throughput
+    when: {ne: [{text: $doc.metadata.grading.objective}, output_throughput]}
+
+units:
+  - each: $doc.timeline
+    as: event
+    where: {eq: [{text: $event.type}, framework_agent]}
+  - each: $event.ext.attempts
+    as: attempt
+
+unit_id: {first: [{text: $attempt.attempt_id}, unknown-attempt]}
+
+lookup:
+  proposal:
+    from: $event.ext.proposals
+    as: candidate
+    where:
+      all:
+        - {present: {text: $candidate.proposal_id}}
+        - {eq: [{text: $candidate.proposal_id}, {text: $attempt.proposal_ref}]}
+
+let:
+  task: $doc.metadata.task_config
+  architecture: $task.architecture
+  run_id: {token: $doc.metadata.session.session_id}
+  attempt_id: {token: $attempt.attempt_id}
+  event_id: {text: {first: [$event.event, $event.event_id, $event.id]}}
+  arm: {lower: $attempt.arm}
+  outcome_code: {upper: {first: [$attempt.outcome, $attempt.decision]}}
+  decision:
+    map: $outcome_code
+    table:
+      KEEP: keep
+      KEPT: keep
+      KEEP_UNSTABLE: revert
+      REVERT: revert
+      REVERTED: revert
+      ACCURACY_UNAVAILABLE_REJECT: revert
+      FAILED: failed
+      KILLED_OVERTIME: failed
+  baseline_value: {number: $attempt.measurement.before_tput}
+  outcome_value: {number: $attempt.measurement.after_tput}
+
+  identity:
+    compact:
+      object:
+        model: {text: $task.model_name}
+        gpu: {text: $task.gpu_type}
+        framework: {text: $task.framework_name}
+        model_type: {text: $architecture.model_type}
+        architecture:
+          text: {first: [$architecture.architectures.0, $architecture.model_class, $architecture.model_family]}
+        framework_version: {text: $task.framework_version}
+        precision: {text: $task.precision}
+        tp: {integer: $task.tp}
+        conc: {integer: $task.conc}
+        isl: {integer: $task.isl}
+        osl: {integer: $task.osl}
+        max_model_len: {integer: $task.max_model_len}
+        ep: {if: {gt: [$task.ep, 1]}, then: {integer: $task.ep}}
+        compute_partition_mode: {upper: $task.compute_partition.mode}
+        partitions:
+          if: {gt: [$task.compute_partition.partitions, 1]}
+          then: {integer: $task.compute_partition.partitions}
+
+  baseline_configuration:
+    object:
+      extra_server_args: {text: $attempt.measured_against.extra_server_args}
+      extra_envs: {string_map: $attempt.measured_against.extra_envs}
+      remove_args: {sorted_set: $attempt.measured_against.remove_args}
+      unset_envs: {sorted_set: $attempt.measured_against.unset_envs}
+      args_mode: {first: [{lower: $attempt.measured_against.args_mode}, append]}
+
+  action_time_prefixes: [action_payload., action_params., candidate., generated_variant., proposal.]
+  attempt_origin: {text: $attempt.reasoning_origin}
+  attempt_is_action_time:
+    all:
+      - {present: {text: $attempt.reasoning}}
+      - {starts_with_any: [$attempt_origin, $action_time_prefixes]}
+  proposal_has_reasoning: {present: {text: $proposal.reasoning}}
+  reasoning:
+    squash:
+      if: $attempt_is_action_time
+      then: $attempt.reasoning
+      else: {if: $proposal_has_reasoning, then: $proposal.reasoning, else: $attempt.reasoning}
+  reasoning_origin:
+    if: $attempt_is_action_time
+    then: $attempt_origin
+    else: {if: $proposal_has_reasoning, then: proposal.reasoning, else: $attempt_origin}
+
+  config_delta:
+    object:
+      extra_server_args: {text: $attempt.config_delta.extra_server_args}
+      extra_envs: {string_map: $attempt.config_delta.extra_envs}
+      remove_args: {sorted_set: $attempt.config_delta.remove_args}
+      unset_envs: {sorted_set: $attempt.config_delta.unset_envs}
+      args_mode: {first: [{lower: $attempt.config_delta.args_mode}, append]}
+  patches:
+    each: $attempt.patch_material
+    as: patch
+    where:
+      all:
+        - {present: {text: $patch.path}}
+        - {present: {text: $patch.sha256}}
+        - {present: $patch.content}
+    value:
+      object:
+        path: {text: $patch.path}
+        sha256: {text: $patch.sha256}
+        content: $patch.content
+  patch_fingerprint:
+    if: {eq: [{length: $patches}, 1]}
+    then: $patches.0.sha256
+    else: {if: {present: $patches}, then: {sha256: $patches}}
+  config_delta_is_effective:
+    any:
+      - {present: $config_delta.extra_server_args}
+      - {present: $config_delta.extra_envs}
+      - {present: $config_delta.remove_args}
+      - {present: $config_delta.unset_envs}
+      - {eq: [$config_delta.args_mode, replace]}
+  source_summary: {text: {first: [$proposal.title, $attempt.candidate_id]}}
+  # The family follows what the attempt changed: a source-arm deliverable of server args or envs alone is a
+  # configuration change measured through integrate_patch.
+  change_family:
+    if:
+      any:
+        - {eq: [$arm, config]}
+        - all:
+            - {eq: [$arm, source]}
+            - {absent: $patch_fingerprint}
+            - $config_delta_is_effective
+    then: config_variant
+    else: {map: $arm, table: {source: source_patch}}
+  change_content:
+    if: {eq: [$change_family, config_variant]}
+    then: {canonical_json: $config_delta}
+    else:
+      canonical_json:
+        object:
+          source_ref: {text: {first: [$attempt.source_ref, $proposal.source_ref]}}
+          target_files: {sorted_set: $attempt.target_files}
+          patches: $patches
+          patch_sha256: $patch_fingerprint
+
+  gate_constraints:
+    each: $attempt.gates
+    as: gate
+    where: {all: [{present: {text: $gate.gate}}, {is_bool: $gate.passed}]}
+    value: {object: {name: {text: $gate.gate}, passed: $gate.passed, value: $gate.observed}}
+  constraints:
+    concat:
+      - $gate_constraints
+      - if:
+          all:
+            - {is_bool: $attempt.accuracy.passed}
+            - {not_in: [accuracy, {each: $gate_constraints, as: row, value: $row.name}]}
+        then:
+          - {object: {name: accuracy, passed: $attempt.accuracy.passed, value: $attempt.accuracy.value}}
+  outcome_facts:
+    object:
+      attempt_id: $attempt_id
+      decision: $decision
+      before_tput: $baseline_value
+      after_tput: $outcome_value
+      gain_pct: {number: $attempt.measurement.gain_pct}
+      reason: {text: $attempt.reason}
+      constraints: $constraints
+
+require:
+  - reason: attempt_id is missing
+    check: {present: $attempt_id}
+  - reason: metadata.session.session_id is missing
+    check: {present: $run_id}
+  - reason: attempt has no valid measured baseline
+    check: {gt: [$baseline_value, 0]}
+  - reason: attempt has no measured-against configuration
+    check: {present: $attempt.measured_against}
+  - reason: measured-against has unsupported args_mode
+    check: {in: [$baseline_configuration.args_mode, [append, replace]]}
+  - reason: decision reasoning is missing or non-specific
+    check:
+      all:
+        - {min_length: [$reasoning, 20]}
+        - not_in:
+            - {rstrip: [{lower: $reasoning}, "."]}
+            - [improve performance, improve throughput, optimize, optimization, test, try]
+  - reason: decision reasoning is not traceable to the action-time proposal
+    check: {starts_with_any: [$reasoning_origin, $action_time_prefixes]}
+  - reason: unsupported Framework attempt arm
+    check: {present: $change_family}
+  - reason: config attempt has no effective config_delta
+    check: {any: [{ne: [$change_family, config_variant]}, $config_delta_is_effective]}
+  - reason: config delta has unsupported args_mode
+    check: {any: [{ne: [$change_family, config_variant]}, {in: [$config_delta.args_mode, [append, replace]]}]}
+  - reason: source attempt has no durable patch material
+    check: {any: [{ne: [$change_family, source_patch]}, {present: $patch_fingerprint}]}
+  - reason: source attempt has no change summary
+    check: {any: [{ne: [$change_family, source_patch]}, {present: $source_summary}]}
+  - reason: attempt has no supported terminal outcome
+    check: {present: $decision}
+  - reason: failed attempt is not candidate-attributed
+    check:
+      any:
+        - {ne: [$decision, failed]}
+        - {eq: [{lower: $attempt.failure.attribution}, candidate_caused]}
+  - reason: measured attempt has no valid after_tput
+    check: {any: [{eq: [$decision, failed]}, {gt: [$outcome_value, 0]}]}
+  - reason: kept attempt did not pass required accuracy
+    check:
+      any:
+        - {ne: [$decision, keep]}
+        - {ne: [$attempt.accuracy.required, true]}
+        - {eq: [$attempt.accuracy.passed, true]}
+
+experience:
+  run_id: $run_id
+  seq: {hash48: [$event_id, $attempt_id]}
+  created_at: {first: [$event.start_time, $attempt.ts]}
+  completed_at: $attempt.ts
+  identity: $identity
+  objective: e2e_throughput@v1
+  baseline_value: $baseline_value
+  baseline_identity:
+    object:
+      baseline_fingerprint: {sha256: $baseline_configuration}
+  preconditions:
+    - "measured_baseline_tput={$baseline_value}"
+    - "schema_identity={$identity}"
+    - "materialized_baseline_configuration={$baseline_configuration}"
+  provenance:
+    source_ref: "session:{$run_id}:attempt:{$attempt_id}"
+    extra:
+      object:
+        attempt_id: $attempt_id
+        framework_event_id: $event_id
+        arm: {text: $attempt.arm}
+        proposal_ref: {text: $attempt.proposal_ref}
+        action_ref: {text: {first: [$attempt.proposal_ref, $attempt.task_id]}}
+        reasoning_origin: $reasoning_origin
+        kb_read_id: {text: $proposal.kb_read_id}
+        # The Experiences the deciding agent says shaped this attempt, and how (adopt/adapt/avoid/contrast).
+        experience_citations:
+          each: $attempt.experience_citations
+          as: citation
+          where: {present: {token: $citation.id}}
+          value:
+            object:
+              id: {token: $citation.id}
+              stance: {token: $citation.stance}
+              claim: {text: $citation.claim}
+        round_id: {text: $attempt.round_id}
+        variant_name: {text: $attempt.variant_name}
+        validation_basis: {text: $attempt.validation_basis}
+        reflection_source: deterministic_outcome_summary
+        failure_attribution:
+          if: {eq: [$decision, failed]}
+          then: {lower: $attempt.failure.attribution}
+          else: ""
+        failure_stage: {text: $attempt.stage}
+  reasoning: $reasoning
+  change:
+    identity:
+      object:
+        change_family: $change_family
+        change_fingerprint:
+          if: {eq: [$change_family, config_variant]}
+          then: {sha256: $change_content}
+          else: $patch_fingerprint
+    summary:
+      if: {eq: [$change_family, config_variant]}
+      then: {first: [{text: $attempt.variant_name}, Framework configuration variant]}
+      else: $source_summary
+    kind: $change_family
+    content: $change_content
+    resource_refs:
+      if: {eq: [$change_family, source_patch]}
+      then: {each: $patches, as: patch, value: $patch.path}
+  rendered_refs:
+    each: $proposal.rendered_refs
+    as: ref
+    where: {present: {text: $ref.id}}
+    value:
+      object:
+        id: {token: $ref.id}
+        purpose: {token: {first: [$ref.purpose, representative]}}
+  outcome:
+    decision: $decision
+    value: $outcome_value
+    constraints: $constraints
+    error_class:
+      if: {eq: [$decision, failed]}
+      then: {token: {first: [$attempt.failure.error_class, {lower: $outcome_code}]}}
+      else: ""
+  reflection: "Recorded outcome: {$outcome_facts}"

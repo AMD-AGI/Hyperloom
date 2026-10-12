@@ -112,7 +112,7 @@ _GEMM_CMD_BASE = {
 
 def test_the_gemm_ceiling_travels_as_a_tuner_count() -> None:
     """The producer owns routing, so the lane supplies a count, not a name."""
-    from hyperloom.agents.kernel.tools import forge_gemm_tuning as fgt
+    from hyperloom.orchestrator.kernel import forge_gemm_tuning as fgt
 
     cmd = fgt._build_cmd({**_GEMM_CMD_BASE, "max_tuners": 2})
     assert cmd[cmd.index("--max-tuners") + 1] == "2"
@@ -120,7 +120,7 @@ def test_the_gemm_ceiling_travels_as_a_tuner_count() -> None:
 
 def test_no_gemm_ceiling_leaves_the_routed_tuner_set_untouched() -> None:
     """A zero ceiling means none could be derived, not "run nothing"."""
-    from hyperloom.agents.kernel.tools import forge_gemm_tuning as fgt
+    from hyperloom.orchestrator.kernel import forge_gemm_tuning as fgt
 
     cmd = fgt._build_cmd(dict(_GEMM_CMD_BASE))
     assert "--max-tuners" not in cmd

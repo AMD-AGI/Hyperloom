@@ -11,25 +11,23 @@ from pathlib import Path
 import pytest
 
 from kernelforge.config import Config
-from kernelforge.knowledge.experience_store import (
+from kernelforge.knowledge.kb_store.config import (
     KnowledgeConfig,
     KnowledgeStoreMode,
 )
-from kernelforge.knowledge.kernel_identity import (
+from kernelforge.knowledge.kb_store.identity.kernel_recipe import (
     KernelRecipeIdentity,
     kernel_recipe_canonical_id,
 )
-from kernelforge.rewrite_by_flydsl import (
-    driver_contract,
-    identity as rewrite_identity,
-    kb,
-    record_store,
+from kernelforge.rewrite_by_flydsl import driver_contract, identity as rewrite_identity, kb
+from kernelforge.knowledge.kb_store import record_store
+from kernelforge.knowledge.kb_store.recipe import (
+    KernelRecipeKB,
+    candidate_session_id as build_candidate_session_id,
 )
-from kernelforge.rewrite_by_flydsl.agent_kb import KernelRecipeKB
 from kernelforge.rewrite_by_flydsl.identity import (
     framework_version,
     segment,
-    session_id,
 )
 from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
 
@@ -505,7 +503,7 @@ def test_gpu_target_does_not_change_the_recipe_identity(tmp_path, monkeypatch):
 
 def test_a_session_id_stays_inside_the_length_the_store_allows():
     overlong = "a" * 200
-    generated = session_id(
+    generated = build_candidate_session_id(
         f"kernel:flydsl:{overlong}:vllm:0.1:flydsl:mi355x",
         overlong,
         "b" * 40,
@@ -514,8 +512,8 @@ def test_a_session_id_stays_inside_the_length_the_store_allows():
 
 
 def test_a_session_id_is_stable_so_one_port_stays_one_candidate():
-    first = session_id(SOFTMAX_IDENTITY, "softmax", "c" * 40)
-    second = session_id(SOFTMAX_IDENTITY, "softmax", "c" * 40)
+    first = build_candidate_session_id(SOFTMAX_IDENTITY, "softmax", "c" * 40)
+    second = build_candidate_session_id(SOFTMAX_IDENTITY, "softmax", "c" * 40)
     assert first == second
 
 

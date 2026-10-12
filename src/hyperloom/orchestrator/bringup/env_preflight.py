@@ -74,9 +74,6 @@ _IMPORT_TIMEOUT_SEC = 60.0
 #: Seconds a connect to the serving port may take before it counts as free.
 _PORT_CONNECT_TIMEOUT_SEC = 1.0
 
-#: Weight file suffixes, most preferred first. A checkpoint that ships two
-#: formats ships the same tensors twice, so only the first one present counts.
-
 # The verdict is the exception's class and its ``name`` attribute, never its
 # message: two interpreters phrase the same missing extension differently.
 _IMPORT_PROGRAM = (
@@ -307,6 +304,7 @@ def env_fault_observation(verdict: EnvVerdict, *, session_dir: Path | None = Non
         stage_reached=stage,
         stage_failed=stage,
         matched_marker=verdict.fault,
+        failure_text=excerpt.text,
         excerpt=excerpt,
         evidence_ref=STREAM,
         env_fault=verdict.fault,

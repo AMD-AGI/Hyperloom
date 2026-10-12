@@ -154,7 +154,6 @@ async def _run(
         session_dir,
         concs=concs,
         total_budget_sec=None,
-        write_reports=True,
     )
 
 

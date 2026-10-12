@@ -748,13 +748,15 @@ def inject_sglang_attention_backend(
     )
 
 
-# sglang MoE runner backend: Hyperloom no longer forces a backend. sglang's own
-# ``--moe-runner-backend auto`` correctly follows ``SGLANG_USE_AITER`` (aiter
-# when the harness pre-shuffles MoE weights for it, triton otherwise) without
-# crashing on current sglang/ROCm images; verified end-to-end on a real MoE
-# checkpoint before this override was removed. ``moe_runner_requires_aiter``
-# below is still used to strip an *inherited* ``--moe-runner-backend`` that
-# would crash an aiter-only quant scheme (grid variants, baseline retries).
+# sglang MoE runner backend: Hyperloom pins none for the baseline or grid
+# variants, the fmoe_ck tuner's validation bench aside (``phases/kernel.py``
+# serves it with ``--moe-runner-backend aiter``). sglang's own
+# ``--moe-runner-backend auto`` follows ``SGLANG_USE_AITER`` (aiter when the
+# harness pre-shuffles MoE weights for it, triton otherwise) on current
+# sglang/ROCm images, verified end-to-end on a real MoE checkpoint.
+# ``moe_runner_requires_aiter`` below strips an *inherited*
+# ``--moe-runner-backend`` that would crash an aiter-only quant scheme (grid
+# variants, baseline retries).
 _SGLANG_MOE_RUNNER_BACKEND_FLAG = "--moe-runner-backend"
 
 # Matches space- or equals-separated form without false-matching a longer flag.
@@ -794,3 +796,70 @@ def moe_runner_requires_aiter(server_args: str | None, model_path: str | None) -
         str(server_args or ""),
         path,
     )
+
+
+def dedupe_extra_server_args(args_str: str) -> str:
+    """Collapse repeated ``--flag value`` pairs into a unique launch string."""
+    if not args_str:
+        return ""
+    parsed = tokenize_server_args_preserving_json(args_str)
+    if parsed is None:
+        return args_str
+    normalized, tokens = parsed
+    pair_by_flag: dict[str, list[str]] = {}
+    order: list[str] = []
+    i = 0
+    while i < len(tokens):
+        t = tokens[i]
+        if t.startswith("--"):
+            if "=" in t:
+                flag, _, value = t.partition("=")
+                values = [value] if value else []
+                i += 1
+            else:
+                flag = t
+                i += 1
+                values = []
+                if flag in _MULTI_VALUE_FLAGS:
+                    while i < len(tokens) and not tokens[i].startswith("--"):
+                        values.append(tokens[i])
+                        i += 1
+                elif i < len(tokens) and not tokens[i].startswith("--"):
+                    values = [tokens[i]]
+                    i += 1
+            pair = [flag, *values] if values else [flag]
+            if flag not in pair_by_flag:
+                order.append(flag)
+            pair_by_flag[flag] = pair
+        else:
+            # Stray positional token; preserve as-is.
+            key = f"__positional_{len(order)}__"
+            order.append(key)
+            pair_by_flag[key] = [t]
+            i += 1
+    out: list[str] = []
+    for k in order:
+        out.extend(pair_by_flag[k])
+    rendered = " ".join(out)
+    return rendered if rendered != normalized else normalized
+
+
+def merge_cumulative_extra_server_args(
+    base_args: str,
+    candidate_args: str,
+    full_args: str,
+) -> str:
+    """Build cumulative launch args for a KEEP without double-stacking."""
+    base = str(base_args or "").strip()
+    candidate = str(candidate_args or "").strip()
+    full = str(full_args or "").strip()
+    if full and full != candidate:
+        merged = full
+    elif candidate and base:
+        if candidate.startswith(base) or base in candidate.split():
+            merged = candidate
+        else:
+            merged = f"{base} {candidate}".strip()
+    else:
+        merged = candidate or full or base
+    return dedupe_extra_server_args(merged)

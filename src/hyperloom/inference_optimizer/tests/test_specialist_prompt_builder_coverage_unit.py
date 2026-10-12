@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import pytest
 
+from hyperloom.common.failure_signature import classify_failure
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
     SpecialistPromptInputs,
     build_specialist_prompts,
@@ -19,6 +20,9 @@ from hyperloom.orchestrator.specialists.domains import SPECIALIST_DOMAINS, get_d
 # Derived, not copied: a hand-maintained list goes stale silently when a domain is added, and fails en masse when one
 # is removed.
 _DOMAIN_KEYS = tuple(sorted(d.key for d in SPECIALIST_DOMAINS))
+
+# Every enablement round is dispatched on a classified verdict.
+_DISPATCHED = classify_failure("ValueError: Model architectures ['MixtralForCausalLM'] are not supported.").to_dict()
 
 
 @pytest.mark.parametrize("domain_key", _DOMAIN_KEYS)
@@ -46,6 +50,7 @@ def test_build_for_each_domain_and_framework(domain_key, framework):
             gap_layer="kernel_agent",
             gap_symptom="slow",
             gap_evidence={"k": 1},
+            enablement_failure_signature=_DISPATCHED,
         )
     )
     assert sys_p

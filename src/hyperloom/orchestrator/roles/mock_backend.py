@@ -50,7 +50,6 @@ class MockBackend:
         tools: list[str] | None = None,
         disallowed_tools: list[str] | None = None,
         max_turns: int = 1,
-        allow_no_intent: bool = False,
     ) -> BackendTurnResult:
         """Record the call and play back the next scripted turn."""
         self.calls.append(
@@ -127,7 +126,6 @@ class MockRowScanBackend:
         tools: list[str] | None = None,
         disallowed_tools: list[str] | None = None,
         max_turns: int = 1,
-        allow_no_intent: bool = False,
     ) -> BackendTurnResult:
         """Emit one intent per not-yet-seen matched row, else an idle message."""
         self.calls.append({"prompt": prompt})

@@ -35,26 +35,9 @@ _COLLAPSE_ALLOWED: tuple[tuple[str, str, str], ...] = (
 # Occurrences that are deliberate. Each entry is (path glob, line regex, why).
 _ALLOWED: tuple[tuple[str, str, str], ...] = (
     (
-        "*",
-        r"KERNEL_AGENTS_MAX_TURNS",
-        "Removed environment variable. The literal exists only so Config.from_env "
-        "can warn the operator that it is ignored; renaming it silences the warning.",
-    ),
-    (
-        "src/kernelforge/agent_backends/registry.py",
-        r"kernel_agents\.agent_providers",
-        "Pre-rename entry-point group, still read so third-party provider plugins "
-        "keep loading (with a DeprecationWarning).",
-    ),
-    (
         "src/kernelforge/tests/test_rename_completeness.py",
         r".",
         "This file names the old spellings in order to forbid them.",
-    ),
-    (
-        "src/kernelforge/tests/test_provider_registry.py",
-        r"kernel_agents",
-        "Coverage for the deprecated entry-point group's dual-read; the test has to name the group it is asserting on.",
     ),
     (
         "src/kernelforge/tests/test_agent_env_contract.py",
@@ -77,13 +60,13 @@ _FELLOW_PATTERN = re.compile(r"fellow", re.IGNORECASE)
 # so nothing outside a historical record may name it.
 _FELLOW_ALLOWED: tuple[tuple[str, str, str], ...] = (
     (
-        "src/kernelforge/data/*.md",
+        "src/kernelforge/knowledge/local_wiki/resources/*.md",
         r"(?i)fellow",
         "Knowledge-base records of campaigns that really did run under the old "
         "vocabulary. The P2 rule stands: paths and commands may be renamed, the "
         "narrative may not, because rewriting it falsifies the record. Scoped to "
-        "*.md for the same reason its kernel_agents sibling is: a data/* glob also "
-        "swallowed examples/*/run_example.sh, seven of which kept passing a "
+        "*.md so runnable examples are not included; seven run_example.sh files "
+        "kept passing a "
         "--fellow flag the CLI no longer declares. forge-loop tolerated unknown "
         "options at the time, so those runs did not fail -- they silently ran an "
         "inferred backend instead of the intended one. That tolerance is gone: an "

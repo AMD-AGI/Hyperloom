@@ -3,9 +3,8 @@
 
 """Deterministic GEMM tuning for AMD GPUs -- the ``kernelforge gemm-tune`` tree."""
 
-#: Not the distribution version any more: this subpackage stopped shipping as
-#: its own wheel when it was folded into kernelforge. It survives as the stamp
-#: ``artifact_manifest`` writes into every produced manifest, so consumers can
-#: tell which tuner-artifact layout they are reading. Bump it when that layout
-#: changes, not when the distribution is released.
+#: The tuner-artifact layout version ``artifact_manifest`` stamps into every
+#: produced manifest, so consumers can tell which layout they are reading. It
+#: is not the distribution version: bump it when that layout changes, not when
+#: kernelforge is released.
 __version__ = "0.1.0"

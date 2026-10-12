@@ -40,13 +40,11 @@ from kernelforge.orchestrator.analysis_session import (
     AnalysisAttemptLimitError,
     AnalysisSessionJournal,
     MAX_ANALYSIS_SESSION_ATTEMPTS,
-    SESSION_SCHEMA_VERSION,
 )
 from kernelforge.durable_io import atomic_write_text, fsync_directory, fsync_tree
 from kernelforge.resources import assert_sandbox_grant
 
 
-ANALYSIS_SCHEMA_VERSION = 1
 ANALYSIS_SESSION_STEP_ID = "analysis_session"
 PROFILING_METHODOLOGY_FILES = (
     "measure_rocpc_workflow.md",
@@ -205,8 +203,6 @@ def _parse_request_payload(
 ) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise AnalysisBundleError("analysis request must be an object")
-    if payload.get("schema_version") != ANALYSIS_SCHEMA_VERSION:
-        raise AnalysisBundleError("analysis request schema_version is invalid")
     if payload.get("analysis_commit") != analysis_commit:
         raise AnalysisBundleError("analysis request commit is invalid")
     if not isinstance(payload.get("analysis_profiling_enabled"), bool):
@@ -227,9 +223,7 @@ def _parse_workflow_payload(
 ) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise AnalysisBundleError("analysis workflow must be an object")
-    if payload.get("schema_version") != SESSION_SCHEMA_VERSION:
-        raise AnalysisBundleError("analysis workflow schema_version is invalid")
-    if payload.get("analysis_commit") not in {analysis_commit, None, ""}:
+    if payload.get("analysis_commit") != analysis_commit:
         raise AnalysisBundleError("analysis workflow commit is invalid")
     session = payload.get("session")
     if not isinstance(session, dict):
@@ -247,8 +241,6 @@ def _parse_catalog_payload(
 ) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise AnalysisBundleError("analysis artifact catalog must be an object")
-    if payload.get("schema_version") != ANALYSIS_SCHEMA_VERSION:
-        raise AnalysisBundleError("analysis catalog schema_version is invalid")
     if payload.get("analysis_commit") != analysis_commit:
         raise AnalysisBundleError("analysis catalog commit is invalid")
     artifacts = payload.get("artifacts")
@@ -573,7 +565,6 @@ class AnalysisAgentService:
             _atomic_write_json(
                 inventory_path,
                 {
-                    "schema_version": ANALYSIS_SCHEMA_VERSION,
                     "analysis_commit": context.analysis_commit,
                     "cases": [case.to_dict() for case in cases],
                 },
@@ -583,7 +574,6 @@ class AnalysisAgentService:
             _atomic_write_json(
                 progress_path,
                 {
-                    "schema_version": ANALYSIS_SCHEMA_VERSION,
                     "analysis_commit": context.analysis_commit,
                     "status": "RUNNING",
                     "cases": [{"case_id": case.case_id, "status": "PENDING"} for case in cases],
@@ -622,7 +612,6 @@ class AnalysisAgentService:
 
         framework_commands_path = work_root / "framework_commands.jsonl"
         provenance_payload = {
-            "schema_version": ANALYSIS_SCHEMA_VERSION,
             "case_id": case.case_id,
             "framework_owned": True,
             "validation": "artifact_digest",
@@ -648,7 +637,6 @@ class AnalysisAgentService:
         _atomic_write_json(
             profile_root.parent / "profile_provenance.json",
             {
-                "schema_version": ANALYSIS_SCHEMA_VERSION,
                 "case_id": case.case_id,
                 "framework_owned": True,
                 "artifacts": provenance_payload["artifacts"],
@@ -709,7 +697,6 @@ class AnalysisAgentService:
         _atomic_write_json(
             work_root / "case_inventory.json",
             {
-                "schema_version": ANALYSIS_SCHEMA_VERSION,
                 "analysis_commit": context.analysis_commit,
                 "cases": case_states,
             },
@@ -717,7 +704,6 @@ class AnalysisAgentService:
         _atomic_write_json(
             work_root / "progress.json",
             {
-                "schema_version": ANALYSIS_SCHEMA_VERSION,
                 "analysis_commit": context.analysis_commit,
                 "status": status,
                 "cases": [
@@ -732,7 +718,6 @@ class AnalysisAgentService:
         _atomic_write_json(
             work_root / "manifest.json",
             {
-                "schema_version": ANALYSIS_SCHEMA_VERSION,
                 "analysis_commit": context.analysis_commit,
                 "driver_digest": driver_digest,
                 "source_digest": source_digest,
@@ -935,7 +920,6 @@ class AnalysisAgentService:
         )
         request_path = work_root / "request.json"
         request_payload = {
-            "schema_version": ANALYSIS_SCHEMA_VERSION,
             "analysis_commit": context.analysis_commit,
             "workspace": str(workspace),
             "kernel_file": str(Path(kernel_file).resolve()),
@@ -959,7 +943,6 @@ class AnalysisAgentService:
             try:
                 durable_request = json.loads(request_path.read_text())
                 immutable_keys = {
-                    "schema_version",
                     "analysis_commit",
                     "workspace",
                     "kernel_file",
@@ -1196,7 +1179,6 @@ class AnalysisAgentService:
         _atomic_write_json(
             catalog_path,
             {
-                "schema_version": ANALYSIS_SCHEMA_VERSION,
                 "analysis_commit": workflow.analysis_commit,
                 "workflow_status": workflow.state["status"],
                 "analysis_session_status": workflow.status,
@@ -1225,9 +1207,7 @@ class AnalysisAgentService:
         if not isinstance(workflow, dict) or not isinstance(catalog, dict):
             return context
         if (
-            workflow.get("schema_version") != SESSION_SCHEMA_VERSION
-            or workflow.get("analysis_commit") != context.analysis_commit
-            or catalog.get("schema_version") != ANALYSIS_SCHEMA_VERSION
+            workflow.get("analysis_commit") != context.analysis_commit
             or catalog.get("analysis_commit") != context.analysis_commit
         ):
             return context
@@ -1235,13 +1215,9 @@ class AnalysisAgentService:
             request_payload = json.loads((work_root / "request.json").read_text())
         except (OSError, TypeError, ValueError, json.JSONDecodeError):
             return context
-        if (
-            not isinstance(request_payload, dict)
-            or request_payload.get("schema_version") != ANALYSIS_SCHEMA_VERSION
-            or not isinstance(
-                request_payload.get("analysis_profiling_enabled"),
-                bool,
-            )
+        if not isinstance(request_payload, dict) or not isinstance(
+            request_payload.get("analysis_profiling_enabled"),
+            bool,
         ):
             return context
         static_only = request_payload["analysis_profiling_enabled"] is False
@@ -1854,8 +1830,6 @@ Update analysis incrementally:
             raise AnalysisBundleError(f"invalid manifest.json: {error}") from error
         if not isinstance(manifest, dict):
             raise AnalysisBundleError("manifest.json must be an object")
-        if manifest.get("schema_version") != ANALYSIS_SCHEMA_VERSION:
-            raise AnalysisBundleError("unsupported analysis manifest schema")
         if manifest.get("analysis_commit") != context.analysis_commit:
             raise AnalysisBundleError("analysis manifest commit does not match")
         if manifest.get("driver_digest") != driver_digest:
@@ -2026,7 +2000,7 @@ Update analysis incrementally:
             except (OSError, json.JSONDecodeError):
                 pointer = {}
             if isinstance(pointer, dict):
-                generation_name = str(pointer.get("generation_root") or pointer.get("artifact_root") or "")
+                generation_name = str(pointer.get("generation_root") or "")
                 if generation_name:
                     candidate = (commit_root / generation_name).resolve()
                     if candidate.is_dir():
@@ -2034,8 +2008,6 @@ Update analysis incrementally:
         generations = sorted(commit_root.glob("generation-*"))
         if generations:
             return generations[-1]
-        if (commit_root / "manifest.json").is_file():
-            return commit_root
         return None
 
     @staticmethod
@@ -2070,7 +2042,6 @@ Update analysis incrementally:
         _atomic_write_json(
             commit_root / "published.json",
             {
-                "schema_version": ANALYSIS_SCHEMA_VERSION,
                 "generation_root": generation_root.name,
                 "published_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             },

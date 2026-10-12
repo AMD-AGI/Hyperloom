@@ -161,5 +161,6 @@ Allowed values:
 
 There is no combined wrapper object. When both a review and a KB draft
 are produced, they are supplied as two separate JSON payloads — the
-review via `commit-review --review`, the draft via `close-session
---kb-draft` — each matching its own schema above.
+review via `commit-review --review`, the draft via a separate `commit-review`
+on a `kb_draft_request` whose review carries `kb_drafts` — each matching its
+own schema above.

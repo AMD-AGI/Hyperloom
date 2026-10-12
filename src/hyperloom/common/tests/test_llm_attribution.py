@@ -483,6 +483,20 @@ class TestConfigurationIsReadFromTheParent:
         parsed = parse_custom_headers(child[_ANTHROPIC], env={})
         assert parsed["x-litellm-tags"] == "application=hyperloom,session=claw-abc,component=specialist"
 
+    def test_a_specialist_child_carries_its_task(self) -> None:
+        child: dict[str, str] = {}
+        llm_attribution.inject_env(child, component="specialist", operation="run_agent", task="t-42", source=_env())
+        tags = parse_custom_headers(child[_ANTHROPIC], env={})["x-litellm-tags"]
+        assert tags == "application=hyperloom,session=claw-abc,component=specialist,operation=run_agent,task=t-42"
+
+    def test_a_process_the_specialist_spawns_keeps_the_task(self) -> None:
+        child: dict[str, str] = {}
+        llm_attribution.inject_env(child, component="specialist", task="t-42", source=_env())
+        llm_attribution.inject_env(child, component="tracelens", source={_ATTR: "litellm"})
+        tags = parse_custom_headers(child[_ANTHROPIC], env={})["x-litellm-tags"]
+        assert "component=tracelens" in tags
+        assert "task=t-42" in tags
+
 
 class TestActionScope:
     """``type`` names the action executing, which is a concurrent scope."""

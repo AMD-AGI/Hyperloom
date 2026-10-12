@@ -430,6 +430,18 @@ def test_no_pidfile_fail_loud_exit_3(tmp_path):
     assert not (res / "inferencex_result.json").exists()
 
 
+def test_agentic_recipe_is_refused_before_it_runs(tmp_path):
+    bench, bind, res = _sandbox(tmp_path, make_builtin=False)
+    recipe = bench / "single_node" / "agentic" / "recipe.sh"
+    recipe.parent.mkdir(parents=True)
+    marker = tmp_path / "ran.txt"
+    _write_exec(recipe, f"#!/usr/bin/env bash\ntouch {marker}\n")
+    r = _run(bench, bind, res, tmp_path, AGENTX_SERVER_SCRIPT="single_node/agentic/recipe.sh")
+    assert r.returncode == 2
+    assert "is an agentic recipe" in r.stdout + r.stderr
+    assert not marker.exists()
+
+
 def test_aiperf_failure_not_mapped(tmp_path):
     bench, bind, res = _sandbox(tmp_path)
     r = _run(bench, bind, res, tmp_path, FAKE_RC="7")
@@ -1049,13 +1061,6 @@ def test_profile_phase_wait_has_bounded_fallback(tmp_path):
     assert r.returncode == 0, r.stderr
     argv = json.loads(marker.read_text())
     assert argv[argv.index("--timeout-seconds") + 1] == "3618"
-
-
-def test_legacy_profile_warmup_delay_is_ignored(tmp_path):
-    bench, bind, res = _sandbox(tmp_path)
-    r = _run_profile(bench, bind, res, tmp_path, AGENTX_PROFILE_WARMUP_S="not-a-duration")
-    assert r.returncode == 0, r.stderr
-    assert "AGENTX_PROFILE_WARMUP_S is ignored" in (r.stdout + r.stderr)
 
 
 def test_phase_gate_failure_keeps_measurement_but_skips_capture(tmp_path):

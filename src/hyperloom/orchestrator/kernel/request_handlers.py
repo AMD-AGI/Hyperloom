@@ -28,7 +28,7 @@ import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
 
-from hyperloom.agents.kernel.tools._capture_shapes import (
+from hyperloom.orchestrator.trace_analysis._capture_shapes import (
     is_capture_fragment as _shared_is_capture_fragment,
 )
 from hyperloom.common import codex_session, llm_config
@@ -38,9 +38,6 @@ from hyperloom.common.gpu_identity import is_gfx_arch
 from hyperloom.common.io import append_jsonl
 from ..actions.executors._kernel_agent_tool import (
     HandlerResult,
-    _kernel_agent_root_error,
-    _kernel_agent_tool_path,
-    _load_apply_tool,
     _maybe_apply_kernel_patch,
     _maybe_finalize_kernel_patch,
     _maybe_revert_kernel_patch,
@@ -49,6 +46,8 @@ from ..actions.executors._kernel_agent_tool import (
 )
 from ..actions.executors.trace_analyze import trace_analyze_handler
 from ..actions.stop_attribution import stopped_by_the_run_class
+from . import apply_kernel_patch
+from .gemm_shape_coverage import canonical_dtype, traced_gemm_shapes
 from .lane_budget import (
     LANE_FUSION,
     LANE_GEMM,
@@ -243,15 +242,6 @@ def _reusable_source_roots() -> tuple[str, ...]:
 # whole-pipeline GEAK delegate (``geak``); per-kernel selection is opt-in via
 # KERNEL_OPT_BACKEND_ORDER=forge.
 _DEFAULT_KERNEL_PHASE_BACKEND_ORDER = ("geak",)
-# Soft cap on concurrent kernel-backend coroutines (pin with KERNEL_OPT_MAX_PARALLEL).
-_DEFAULT_KERNEL_BATCH_PARALLEL = 8
-# forge-loop holds back a finalize reserve of half this window, so the figure
-# here buys only half as much search as it reads. At 60 a campaign completed one
-# iteration -- planning alone took 16 of its 30 usable minutes -- and terminated
-# on budget_exhausted with nothing kept, which reads as "the kernel cannot be
-# optimized" rather than "the kernel was tried once". 90 leaves ~45 usable
-# minutes, enough for a second iteration to act on what the first measured.
-_DEFAULT_BACKEND_BUDGET_MINUTES = 90.0
 # Outer subprocess cap for the whole GEMM-tuning run (all shapes/tuners); sized
 # for large models with many GEMM shapes. Independent of the session --max-hours
 # budget; override via HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC (or payload timeout_sec).
@@ -282,7 +272,7 @@ def _preapplied_snapshot_payload(payload: dict) -> dict:
     repo_root = Path(str(payload.get("repo") or payload.get("kernel_repo") or ""))
     if not repo_root.is_dir():
         raise RuntimeError(f"pre-applied patch needs its repo root, got {repo_root!s:.200}")
-    descriptors = _load_apply_tool().parse_patch_manifest(patch_path.read_text(encoding="utf-8", errors="replace"))
+    descriptors = apply_kernel_patch.parse_patch_manifest(patch_path.read_text(encoding="utf-8", errors="replace"))
     snapshot = patch_path.parent / "preapplied_snapshot"
     for descriptor in descriptors:
         if descriptor.get("op") != "write":
@@ -891,6 +881,37 @@ def _positive_int(value: object) -> int:
     return parsed if parsed > 0 else 0
 
 
+def _fusion_attn_tp_size(state: object, payload: dict, *, tp: int) -> int:
+    """Attention TP shard behind the session's serving ``tp``.
+
+    DP-attention splits the ``tp`` ranks into ``dp`` attention groups, so
+    forge-fuse cannot infer the attention shard from ``--tp`` alone -- and it
+    stamps the harness group/head dims from exactly this number.
+    """
+    explicit = _positive_int(payload.get("attn_tp"))
+    if explicit:
+        return explicit
+    from hyperloom.inference_optimizer.roofline_ceiling import _parse_server_arg, resolve_runtime_workload
+
+    server_args = str(payload.get("extra_server_args") or "").strip()
+    if not server_args:
+        try:
+            server_args = resolve_runtime_workload(state, arm="current_best").server_args
+        except Exception:  # noqa: BLE001 - best-effort for partial state / test doubles
+            server_args = ""
+
+    if "--enable-dp-attention" not in str(server_args).replace("=", " ").split():
+        return tp
+    # launch_infera_node injects --dp-size = tp when a dp-attention flag arrives
+    # without one, and these args are read before that injection.
+    dp = (
+        _positive_int(_parse_server_arg(server_args, "--dp-size"))
+        or _positive_int(_parse_server_arg(server_args, "--data-parallel-size"))
+        or tp
+    )
+    return max(1, tp // dp)
+
+
 def _fusion_session_serve_args(
     state: object,
     payload: dict,
@@ -898,7 +919,7 @@ def _fusion_session_serve_args(
     framework: str,
     model_path: str,
 ) -> dict[str, int]:
-    """TP / KV block size / max-model-len the serving smoke must match."""
+    """TP / attention TP / KV block size / max-model-len the smoke must match."""
     tp = _positive_int(payload.get("tp") or getattr(state, "tp", 0))
     max_model_len = _positive_int(payload.get("max_model_len") or getattr(state, "max_model_len", 0))
     block_size = _positive_int(payload.get("block_size"))
@@ -911,6 +932,7 @@ def _fusion_session_serve_args(
     args: dict[str, int] = {}
     if tp:
         args["tp"] = tp
+        args["attn_tp"] = _fusion_attn_tp_size(state, payload, tp=tp)
     if block_size:
         args["block_size"] = block_size
     if max_model_len:
@@ -999,7 +1021,7 @@ exec {shlex.quote(runner)}
     return path
 
 
-def _resolve_gemm_tuning_backend(payload: dict) -> str:
+def resolve_gemm_tuning_backend(payload: dict) -> str:
     """Resolve GEMM tuning backend under the forge-explicit-only invariant."""
     return "forge" if forge_explicitly_enabled() else "geak"
 
@@ -1157,12 +1179,7 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
 
     # Resolve from actual server args (baseline yaml + current_best overlay).
     current_best = getattr(state, "current_best", None) or {}
-    try:
-        server_args = resolve_runtime_workload(state, arm="current_best").server_args
-    except Exception:  # noqa: BLE001 - best-effort fallback for partial state/test doubles
-        server_args = ""
-        if isinstance(current_best, dict):
-            server_args = str(current_best.get("extra_server_args") or "")
+    server_args = resolve_runtime_workload(state, arm="current_best").server_args
     extra_envs = dict(current_best.get("extra_envs") or {}) if isinstance(current_best, dict) else {}
     ref_envs = dict(getattr(state, "reference_envs", None) or {})
     per_token_signal = is_truthy(extra_envs.get("SGLANG_USE_AITER_FP8_PER_TOKEN")) or is_truthy(
@@ -1549,7 +1566,7 @@ def _resolve_forge_shapes(
             precision=precision,
         )
 
-    if _canonical_dtype(precision):
+    if canonical_dtype(precision):
         scoped = _extracted()
         if scoped:
             return scoped
@@ -1560,36 +1577,6 @@ def _resolve_forge_shapes(
             return str(p)
 
     return _extracted()
-
-
-# TraceLens has spelled the tensor separator <br>, <br/> and <BR/> over time.
-_BR_SPLIT_RE = re.compile(r"<\s*br\s*/?\s*>", re.IGNORECASE)
-
-
-def _canonical_dtype(raw: str) -> str:
-    """Fold a precision name or traced dtype token onto one canonical family.
-
-    Both sides of the comparison spell the same dtype many ways: a tuning
-    precision arrives as ``fp8`` / ``mxfp4``, while TraceLens renders whatever
-    the framework reported -- ``fp8_e4m3``, ``e4m3fnuz``, ``fp4x2``, and
-    ``_TRACE_DTYPE_SUFFIX`` in this repo emits ``f16`` for float16. Matching the
-    raw strings drops shapes that do belong to the tuned precision, so both are
-    folded onto a family first.
-
-    Returns "" for anything unrecognised, which callers treat as "do not scope".
-    """
-    token = str(raw or "").strip().lower().removeprefix("torch.")
-    if not token:
-        return ""
-    if token.startswith(("fp4", "mxfp4", "float4")) or "e2m1" in token:
-        return "fp4"
-    if token.startswith(("fp8", "float8")) or token == "f8" or "e4m3" in token or "e5m2" in token:
-        return "fp8"
-    if token.startswith(("bf16", "bfloat16")) or token == "b16":
-        return "bf16"
-    if token.startswith(("fp16", "float16")) or token in {"f16", "half"}:
-        return "fp16"
-    return ""
 
 
 def _extract_gemm_shapes_from_candidates(candidates_path_str: str, session_dir: Path, *, precision: str = "") -> str:
@@ -1605,7 +1592,6 @@ def _extract_gemm_shapes_from_candidates(candidates_path_str: str, session_dir: 
     dtype (historical behaviour).
     """
     import json as _json
-    import re as _re
 
     if not candidates_path_str:
         return ""
@@ -1622,41 +1608,6 @@ def _extract_gemm_shapes_from_candidates(candidates_path_str: str, session_dir: 
     if not isinstance(hot_kernels, list):
         return ""
 
-    # Tolerate whitespace after the comma ("(1024, 5120)") and any leading token
-    # before the tuple; TraceLens formats vary. .search() rather than .match() so
-    # a leading dtype/name does not defeat it.
-    dim_pattern = _re.compile(r"\((\d+)\s*,\s*(\d+)\)")
-    # TraceLens renders the dtype right after the dims: "(64,3072) fp8".
-    # Dots are allowed so a fully-qualified spelling ("torch.float8_e4m3fn") is
-    # captured whole rather than truncated at "torch".
-    dtype_pattern = _re.compile(r"\)\s*([A-Za-z][A-Za-z0-9_.]*)")
-    wanted_dtype = _canonical_dtype(precision)
-
-    def _dtype_matches(a_text: str) -> bool:
-        """Whether the A tensor's traced dtype is the family being tuned."""
-        if not wanted_dtype:
-            return True
-        found = dtype_pattern.search(a_text)
-        return bool(found) and _canonical_dtype(found.group(1)) == wanted_dtype
-
-    def _mnk(a_text: str, b_text: str) -> tuple[int, int, int] | None:
-        """Derive (M, N, K) from the A ``(M,K)`` and B tensor texts."""
-        if not _dtype_matches(a_text):
-            return None
-        m0 = dim_pattern.search(a_text)
-        m1 = dim_pattern.search(b_text)
-        if not m0 or not m1:
-            return None
-        M, K = int(m0.group(1)), int(m0.group(2))
-        b0, b1 = int(m1.group(1)), int(m1.group(2))
-        # B is stored either (N,K) or (K,N); pick the orientation whose
-        # contracted dim matches K, else keep the legacy first-dim reading.
-        N = b0 if b1 == K else (b1 if b0 == K else b0)
-        # ``N == 1`` is a matrix-vector head (e.g. a scalar projection), not a
-        # tunable GEMM tile; it would otherwise sort first on call count and
-        # burn a tuning slot.
-        return (M, N, K) if min(M, K) > 0 and N > 1 else None
-
     # ``weight`` is the observed call count: decode GEMMs are invoked far more
     # often than prefill ones, so ordering by it puts the throughput-dominant
     # shapes first and they still get tuned when the tuner runs out of budget.
@@ -1665,37 +1616,11 @@ def _extract_gemm_shapes_from_candidates(candidates_path_str: str, session_dir: 
     weights: dict[tuple[int, int, int], int] = {}
     order: dict[tuple[int, int, int], int] = {}
 
-    def _record(key: tuple[int, int, int] | None, weight: int) -> None:
-        if key is None:
-            return
-        if key not in order:
-            order[key] = len(order)
-        weights[key] = max(weights.get(key, 0), weight)
-
     for kernel in hot_kernels:
-        name = str(kernel.get("name", ""))
-        if "gemm" not in name.lower():
-            continue
-        input_shapes = kernel.get("input_shapes", [])
-        if not isinstance(input_shapes, list):
-            continue
-        entries = [e for e in input_shapes if isinstance(e, dict) and e.get("shape")]
-
-        # Legacy format: one entry carries every tensor, "<br>"-joined. The tag
-        # is spelled several ways across TraceLens versions (<br>, <br/>, <BR/>).
-        matched_joined = False
-        for entry in entries:
-            parts = [p.strip() for p in _BR_SPLIT_RE.split(str(entry["shape"])) if p.strip()]
-            if len(parts) < 2:
-                continue
-            matched_joined = True
-            _record(_mnk(parts[0], parts[1]), int(entry.get("call_num") or 0))
-        if matched_joined or len(entries) < 2:
-            continue
-
-        # Current format: one entry per tensor, so A and B are the first two.
-        weight = max(int(e.get("call_num") or 0) for e in entries[:2])
-        _record(_mnk(str(entries[0]["shape"]), str(entries[1]["shape"])), weight)
+        for key, weight in traced_gemm_shapes(kernel, precision=precision):
+            if key not in order:
+                order[key] = len(order)
+            weights[key] = max(weights.get(key, 0), weight)
 
     if not weights:
         return ""
@@ -1994,7 +1919,7 @@ def _normalize_tokens(value: Any) -> str:
         text = str(value).strip().strip("[](){}")
         if not text:
             return ""
-        items = [p for p in text.split(",")]
+        items = list(text.split(","))
     out: list[str] = []
     for it in items:
         s = str(it).strip().strip("'\"")
@@ -2771,7 +2696,7 @@ def _resolve_shape_capture_port(value: Any) -> int:
 def _is_tunableop_untuned_row(line: str) -> bool:
     """Recognize a native PyTorch TunableOp offline-input row."""
     stripped = line.strip()
-    if not stripped or stripped.startswith("#") or stripped.startswith("Validator"):
+    if not stripped or stripped.startswith(("#", "Validator")):
         return False
     fields = [field.strip() for field in stripped.split(",")]
     if len(fields) < 2 or "TunableOp" not in fields[0] or not fields[1]:
@@ -2926,18 +2851,10 @@ async def _capture_vllm_tunableop_shapes(
     else:
         capture_unset_envs = [str(key) for key in inherited_unset]
     if not profile_mode:
-        capture_unset_envs.extend(
-            [
-                "HL_TUNABLEOP_MODE",
-                "HL_TUNABLEOP_FILE",
-                "HL_TUNABLEOP_VERBOSE",
-                "PYTORCH_TUNABLEOP_ENABLED",
-                "PYTORCH_TUNABLEOP_TUNING",
-                "PYTORCH_TUNABLEOP_RECORD_UNTUNED",
-                "PYTORCH_TUNABLEOP_UNTUNED_FILENAME",
-                "PYTORCH_TUNABLEOP_FILENAME",
-            ]
-        )
+        # unset_envs is applied after extra_envs, so any PYTORCH_TUNABLEOP_* name left here (hard-coded or
+        # inherited from the payload or current best) strips the recording and the capture records nothing.
+        capture_unset_envs = [name for name in capture_unset_envs if not name.startswith("PYTORCH_TUNABLEOP_")]
+        capture_unset_envs.extend(["HL_TUNABLEOP_MODE", "HL_TUNABLEOP_FILE", "HL_TUNABLEOP_VERBOSE"])
     inherited_remove = payload.get("remove_args", current_best.get("remove_args")) or []
     if isinstance(inherited_remove, str):
         capture_remove_args = [inherited_remove]
@@ -3085,6 +3002,9 @@ async def _capture_vllm_tunableop_shapes(
     }
 
 
+_FORGE_GEMM_TUNING_MODULE = "hyperloom.orchestrator.kernel.forge_gemm_tuning"
+
+
 async def _run_forge_gemm_tuning(
     payload: dict,
     *,
@@ -3145,8 +3065,8 @@ async def _run_forge_gemm_tuning(
     if resolved_model_dir is None:
         # Forge needs the config on disk to derive shapes, so it cannot run --
         # but not running one tuning backend is a skip, not a session failure.
-        # Reporting it as failed spends a REVERT verdict on an experiment that
-        # never started, which is the misattribution this change set removes.
+        # Reporting it as failed would spend a REVERT verdict on an experiment
+        # that never started.
         return {
             "status": "skipped",
             "error_class": "model_path_unavailable",
@@ -3208,12 +3128,10 @@ async def _run_forge_gemm_tuning(
     #
     # This has to happen BEFORE the MoE untuned CSV is built, not just before
     # the payload is assembled: ``_write_fmoe_untuned_csv_from_log`` consumes
-    # ``tokens`` directly, and its fallback for an empty one is ``[1]``. Derive
-    # afterwards and the dense lane got the full observed sweep while the MoE
-    # lane got a table with a single M=1 row -- which then missed on every
-    # prefill and large-batch lookup and was reverted as no_shape_key_matched.
-    # That is precisely the failure this change set exists to remove, so leaving
-    # it in place on the MoE side would have fixed one lane and not the other.
+    # ``tokens`` directly, and its fallback for an empty one is ``[1]``. Derived
+    # afterwards, the dense lane would get the full observed sweep while the MoE
+    # lane gets a table with a single M=1 row, which misses on every prefill and
+    # large-batch lookup and is reverted as no_shape_key_matched.
     if not tokens and kernel_sig_log:
         tokens = _normalize_tokens(await asyncio.to_thread(_tokens_from_serving_log, kernel_sig_log))
         if tokens:
@@ -3434,7 +3352,8 @@ async def _run_forge_gemm_tuning(
     input_json.write_text(json.dumps(input_payload, indent=2, sort_keys=True), encoding="utf-8")
     cmd = [
         sys.executable,
-        str(_kernel_agent_tool_path("forge_gemm_tuning.py")),
+        "-m",
+        _FORGE_GEMM_TUNING_MODULE,
         "--input-json",
         str(input_json),
     ]
@@ -3497,9 +3416,9 @@ async def _run_forge_gemm_tuning(
             result["skip_reason"] = reason
 
     # Surface crashed tuners. forge lists every failure in ``failed_tuners``
-    # regardless of the overall decision, but this array was previously dropped
-    # here -- so a dense tuner winning made a MoE tuner's crash invisible, and a
-    # KEEP read as "no headroom elsewhere" when siblings had in fact hard-failed.
+    # regardless of the overall decision; dropped here, a dense tuner winning
+    # would hide a MoE tuner's crash, and a KEEP would read as "no headroom
+    # elsewhere" when siblings had in fact hard-failed.
     # Backfill from disk when the sentinel omitted it (mirrors tuners_skipped),
     # keep it on the envelope for the trace row / breakdown, and log it so the
     # failure is never silent even when the session is kept.
@@ -3677,6 +3596,9 @@ def _persist_forge_gemm_csv_durably(extra_envs: dict, *, model_path: str, sessio
     return updated, snap_dir
 
 
+_GEMM_TUNING_MODULE = "hyperloom.orchestrator.kernel.gemm_tuning"
+
+
 async def _run_geak_gemm_tuning(
     payload: dict,
     *,
@@ -3692,9 +3614,6 @@ async def _run_geak_gemm_tuning(
     state = SharedState.load_or_init(session_dir)
     precision = _normalize_precision(payload.get("precision") or state.precision)
     framework = str(payload.get("framework") or state.framework or "sglang").strip().lower()
-    root_err = _kernel_agent_root_error()
-    if root_err:
-        return {"status": "failed", "error_class": "kernel_agent_root_missing", "error": root_err}
 
     workspace = _gemm_tuning_workspace(payload, session_dir=session_dir)
     workspace.mkdir(parents=True, exist_ok=True)
@@ -3782,8 +3701,9 @@ async def _run_geak_gemm_tuning(
     cmd = [
         "env",
         f"E2E_METRIC={_geak_e2e_metric}",
-        "python3",
-        str(_kernel_agent_tool_path("gemm_tuning.py")),
+        sys.executable,
+        "-m",
+        _GEMM_TUNING_MODULE,
         "--input-json",
         str(input_json),
     ]
@@ -3827,7 +3747,7 @@ async def run_gemm_tuning_handler(
     Returns:
         A ``HandlerResult`` describing the tuning outcome.
     """
-    backend = _resolve_gemm_tuning_backend(payload)
+    backend = resolve_gemm_tuning_backend(payload)
     log.info("run_gemm_tuning: backend=%s", backend)
 
     if backend == "forge":
@@ -4011,11 +3931,14 @@ def _resolve_forge_fusion_sandbox_mode(
     )
 
 
+_FORGE_FUSION_MODULE = "hyperloom.orchestrator.kernel.forge_fusion"
+
+
 async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResult:
     """Autonomous kernel fusion via the forge-fusion CLI.
 
     Builds an input-json with one provider-compatible agent backend, model, and
-    validated sandbox policy, shells out to the ``forge_fusion.py`` wrapper, and
+    validated sandbox policy, shells out to the ``forge_fusion`` wrapper module, and
     parses the result sentinel. A KEPT fusion carries a source patch + env flags
     and ``requires_e2e_validation`` so the integrate gate confirms the
     end-to-end gain. Reuses the PRELUDE decode trace (no re-profiling).
@@ -4149,7 +4072,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
     input_json = workspace / "forge_fusion_input.json"
     input_json.write_text(json.dumps(input_payload, indent=2, sort_keys=True), encoding="utf-8")
 
-    cmd = ["python3", str(_kernel_agent_tool_path("forge_fusion.py")), "--input-json", str(input_json)]
+    cmd = [sys.executable, "-m", _FORGE_FUSION_MODULE, "--input-json", str(input_json)]
 
     wrapper_timeout = _forge_fusion_wrapper_timeout_sec(timeout)
     try:
@@ -4158,9 +4081,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
         if result is None:
             result = _shape_tool_result(rc, stdout, stderr)
     except subprocess.TimeoutExpired as exc:
-        from hyperloom.agents.kernel.tools.forge_fusion import (
-            salvage_forge_fusion_from_workspace,
-        )
+        from .forge_fusion import salvage_forge_fusion_from_workspace
 
         cmd_repr = " ".join(str(c) for c in (getattr(exc, "cmd", None) or cmd))
         timeout_error = f"TimeoutExpired after {wrapper_timeout}s: {cmd_repr[:1500]}"
@@ -4216,13 +4137,10 @@ _TRACE_TUNER_ALWAYS_KEYS = ("tuner", "best_micro_speedup", "kept")
 def _trace_tuner_row(tuner: dict[str, Any]) -> dict[str, Any]:
     """One per-tuner entry for the audit row, keeping why it ended as it did.
 
-    The row used to carry only ``tuner``/``best_micro_speedup``/``kept``, which
-    cannot separate a tuner that crashed from one that ran and found nothing --
-    the single question the audit trail exists to answer. Across one campaign 38
-    of 337 tuner runs ended ``failed`` or ``empty_output`` and the trace showed
-    none of them; one of those was 82 runs rejected by argparse in 11 seconds
-    and recorded as a clean ``no_improvement`` (#1211), which stayed invisible
-    for three weeks because this row had nowhere to put it.
+    ``tuner``/``best_micro_speedup``/``kept`` alone cannot separate a tuner that
+    crashed from one that ran and found nothing -- the single question the audit
+    trail exists to answer. Without the reason, a tuner whose runs argparse
+    rejected in seconds reads as a clean ``no_improvement`` (#1211).
     """
     error = tuner.get("error")
     if isinstance(error, str) and len(error) > _TRACE_TUNER_ERROR_MAXLEN:
@@ -5081,7 +4999,7 @@ async def integrate_handler(
     # cpp_itfs path, so this gate is a strict no-op there.
     rebuild_check: HandlerResult = {"verified": True, "status": "skipped"}
     if force_aiter_rebuild and not is_multi_node():
-        rebuild_check = _load_apply_tool().verify_cpp_itfs_rebuilt(cpp_itfs_backup)
+        rebuild_check = apply_kernel_patch.verify_cpp_itfs_rebuilt(cpp_itfs_backup)
         if not rebuild_check.get("verified", True):
             revert_result = _maybe_revert_kernel_patch(apply_result)
             return {
