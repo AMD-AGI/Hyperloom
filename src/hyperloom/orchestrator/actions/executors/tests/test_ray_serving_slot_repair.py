@@ -20,6 +20,14 @@ _LOCAL_NODE = "node-local"
 _GCS_PORT = "41234"
 
 
+class _FakeRayError(Exception):
+    """Stands in for ``ray.exceptions.RayError``, the base of the errors Ray's own calls raise."""
+
+
+_FAKE_RAY_EXCEPTIONS = types.ModuleType("ray.exceptions")
+_FAKE_RAY_EXCEPTIONS.RayError = _FakeRayError
+
+
 class _FakeRay:
     """The slice of the ``ray`` API the feasibility check and the restart guard read."""
 
@@ -34,6 +42,8 @@ class _FakeRay:
         self._nodes = nodes if nodes is not None else [{"NodeID": _LOCAL_NODE, "Alive": True}]
         self._available = available
         self.shutdowns = 0
+        self.shutdown_error: Exception | None = None
+        self.exceptions = _FAKE_RAY_EXCEPTIONS
         self.actors: dict[str, dict[str, Any]] = {}
         self.jobs: list[dict[str, Any]] = [{"JobID": "01000000", "IsDead": False, "DriverPid": os.getpid()}]
 
@@ -65,6 +75,13 @@ class _FakeRay:
 
     def shutdown(self) -> None:
         self.shutdowns += 1
+        if self.shutdown_error is not None:
+            raise self.shutdown_error
+
+
+def _install_ray_module(monkeypatch: pytest.MonkeyPatch, fake: _FakeRay) -> None:
+    monkeypatch.setitem(sys.modules, "ray", fake)
+    monkeypatch.setitem(sys.modules, "ray.exceptions", _FAKE_RAY_EXCEPTIONS)
 
 
 class _StubBackend:
@@ -107,7 +124,7 @@ def _install(
     private = types.ModuleType("ray._private")
     private.state = state
     fake._private = private
-    monkeypatch.setitem(sys.modules, "ray", fake)
+    _install_ray_module(monkeypatch, fake)
     monkeypatch.setitem(sys.modules, "ray._private", private)
     monkeypatch.setitem(sys.modules, "ray._private.state", state)
     monkeypatch.setattr(
@@ -217,7 +234,7 @@ def test_serving_lease_round_runs_after_the_repair(monkeypatch, single_node):
 def test_restart_stops_then_starts_with_the_slot_and_reconnects(monkeypatch):
     """The runtime repair is the installer's: ray stop --force, then a head that declares serving_slot."""
     fake = _FakeRay()
-    monkeypatch.setitem(sys.modules, "ray", fake)
+    _install_ray_module(monkeypatch, fake)
     calls: list[Any] = []
     monkeypatch.setattr(
         rr, "force_restart_local_cluster", lambda **kw: calls.append(("restart", kw["num_gpus"], kw["reason"]))
@@ -329,12 +346,44 @@ def test_uninspectable_cluster_keeps_the_error(monkeypatch, single_node):
     backend = _install(monkeypatch, fake)
 
     def _boom() -> dict:
-        raise RuntimeError("gcs unavailable")
+        raise _FakeRayError("gcs unavailable")
 
     sys.modules["ray._private.state"].actors = _boom
     with pytest.raises(rs.RayMissingServingSlotError, match="could not inspect"):
         rs._ensure_cluster_feasible(num_gpus=1, serving_slot=True)
     assert backend.restarts == 0
+
+
+def test_a_bug_in_the_restart_guard_raises_instead_of_reading_as_uninspectable(monkeypatch, single_node):
+    """Only Ray's own errors (and a moved private API) mean "could not inspect"; a bug in the guard surfaces."""
+    fake = _FakeRay(has_serving_slot=False)
+    backend = _install(monkeypatch, fake)
+
+    def _bug() -> dict:
+        raise TypeError("unsupported operand type(s)")
+
+    sys.modules["ray._private.state"].actors = _bug
+    with pytest.raises(TypeError, match="unsupported operand"):
+        rs._ensure_cluster_feasible(num_gpus=1, serving_slot=True)
+    assert backend.restarts == 0
+
+
+def test_restart_logs_a_failed_driver_shutdown_and_still_restarts(monkeypatch, caplog):
+    fake = _FakeRay()
+    fake.shutdown_error = _FakeRayError("driver already gone")
+    _install_ray_module(monkeypatch, fake)
+    calls: list[str] = []
+    monkeypatch.setattr(rr, "force_restart_local_cluster", lambda **kw: calls.append("restart"))
+    monkeypatch.setattr(rr, "ray_status_ok", lambda: True)
+    monkeypatch.setattr(rr, "quiet_ray_init", lambda **kw: calls.append("init"))
+
+    with caplog.at_level("WARNING", logger=rr.__name__):
+        rr.restart_local_head_with_serving_slot(num_gpus=4)
+
+    assert calls == ["restart", "init"]
+    assert any(
+        "ray.shutdown() failed" in r.getMessage() and "driver already gone" in r.getMessage() for r in caplog.records
+    )
 
 
 @pytest.mark.parametrize("lease_kind", ["serving", "gpu_specialist"])

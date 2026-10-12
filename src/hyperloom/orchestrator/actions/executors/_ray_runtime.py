@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import resource
 import subprocess
@@ -14,6 +15,8 @@ import tempfile
 import threading
 from pathlib import Path
 from typing import Optional, Tuple
+
+log = logging.getLogger(__name__)
 
 # Minimum soft RLIMIT_NOFILE the Ray raylet needs to stay up.
 DEFAULT_MIN_NOFILE = 65536
@@ -363,6 +366,7 @@ def local_head_restartable() -> Tuple[bool, str]:
     if is_multi_node():
         return False, "this is a multi-node run"
     import ray
+    from ray.exceptions import RayError
 
     try:
         # Every node record, dead ones included: a multi-node cluster whose worker is down is still multi-node.
@@ -373,7 +377,11 @@ def local_head_restartable() -> Tuple[bool, str]:
         totals = ray.cluster_resources()
         available = ray.available_resources()
         activity = _cluster_activity()
-    except Exception as exc:  # noqa: BLE001 - an unreadable cluster is not a safe one to stop
+    except (RayError, OSError, ImportError, AttributeError) as exc:
+        # An unreadable cluster is not a safe one to stop. ``OSError`` covers a GCS that
+        # refuses or times out; ``ImportError``/``AttributeError`` a private ``ray._private.state``
+        # API that moved. Anything else is a bug here and raises.
+        log.warning("could not inspect the Ray cluster before a serving_slot repair: %r", exc)
         return False, f"could not inspect the cluster: {exc!r}"
     if len(nodes) != 1:
         return False, f"the cluster has {len(nodes)} nodes"
@@ -408,11 +416,13 @@ def restart_local_head_with_serving_slot(num_gpus: Optional[int] = None, log_pat
     ``ray stop --force`` and a fresh ``ray start --head --resources=...``.
     """
     import ray
+    from ray.exceptions import RayError
 
     try:
         ray.shutdown()
-    except Exception:  # noqa: BLE001 - the driver is being replaced either way
-        pass
+    except RayError as exc:
+        # ``ray stop --force`` below ends the cluster this driver was attached to either way.
+        log.warning("ray.shutdown() failed before restarting the local head; continuing: %r", exc)
     force_restart_local_cluster(
         num_gpus=num_gpus,
         log_path=log_path,

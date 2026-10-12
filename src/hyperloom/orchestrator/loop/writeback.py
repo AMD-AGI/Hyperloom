@@ -8,7 +8,6 @@ import argparse
 import hashlib
 import json
 import os
-import re
 import shlex
 import time
 import uuid
@@ -113,25 +112,6 @@ _BASELINE_MAX_TOTAL_FAILURES: int = 3
 # Default resume-drift floor (%): a re-measured current_best below this fraction of its recorded tput is flagged as
 # drift.
 _DEFAULT_RESUME_DRIFT_FLOOR_PCT: float = 95.0
-
-
-_SIGNATURE_VOLATILE_RE = re.compile(r"0x[0-9a-f]+|[0-9a-f]{8,}|\d+")
-
-
-def _baseline_failure_signature(err_class: str, error: Any) -> str:
-    """Identify a baseline failure by its class and error text, ignoring numbers.
-
-    Numbers (pids, ports, timestamps, durations) and hex ids differ between two
-    attempts that failed for the same reason, so they are folded away. An empty
-    error text has no signature: two failures that said nothing are not known
-    to be the same failure.
-    """
-    text = str(error or "").strip().lower()
-    if not text:
-        return ""
-    # The whole text, not a tail: two different causes can end in the same traceback.
-    text = " ".join(_SIGNATURE_VOLATILE_RE.sub("#", text).split())
-    return f"{err_class}|{hashlib.sha256(text.encode('utf-8')).hexdigest()}"
 
 
 def _is_ray_cluster_infeasible(result_payload: Mapping[str, Any]) -> bool:
@@ -1114,6 +1094,56 @@ class WritebackCollaborator(CoordinatorCollaborator):
             not bool(state.stop_reason),
         )
 
+    def _generic_baseline_failure_stops(
+        self,
+        task: Task,
+        err_class: str,
+        result_payload: Mapping[str, Any],
+        *,
+        retries_suppressed: bool,
+    ) -> bool:
+        """Count a baseline failure of no specially handled class; whether it ends the run.
+
+        Args:
+            task: The failed baseline task.
+            err_class: The failure's ``error_class``.
+            result_payload: The failed result.
+            retries_suppressed: A pending eval or an open enablement lane owns the
+                retries, so the streak alone does not stop the run.
+
+        Returns:
+            ``True`` when the run should stop as ``baseline_failed``.
+        """
+        # A process that exited with the same output as last time (modulo numbers)
+        # will do so again: stop at two instead of spending a third attempt. The
+        # executor signs only ``subprocess_nonzero``, from the process's whole
+        # output rather than the 2000-character ``error`` tail; other classes carry
+        # a fixed sentence that two unrelated failures share.
+        signature = str(result_payload.get("output_signature") or "") if err_class == "subprocess_nonzero" else ""
+        repeated = bool(
+            signature
+            and self.shared_state.baseline_failure_streak >= 1
+            and signature == self.shared_state.baseline_last_failure_signature
+        )
+        self.shared_state.baseline_failure_streak += 1
+        self.shared_state.baseline_last_failure_signature = signature
+        streak = self.shared_state.baseline_failure_streak
+        if _is_ray_cluster_infeasible(result_payload):
+            # The Ray cluster cannot place the round, and the runtime has already
+            # repaired what it safely could (a lone local head without
+            # serving_slot). A retry meets the same cluster and no framework patch
+            # changes it, so stop on the first one, like the AgentX preflight.
+            # Waiting for a second would not be bounded: with no launch log to
+            # author against, the enablement lane this failure opens never
+            # schedules another baseline.
+            log.error(
+                "baseline %s failed because the Ray cluster cannot place it; stopping the run: %s",
+                task.task_id,
+                result_payload.get("error") or err_class,
+            )
+            return True
+        return not retries_suppressed and (streak >= 3 or (streak >= 2 and repeated))
+
     async def handle_unpromotable_result(
         self,
         task: Task,
@@ -1263,39 +1293,12 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 # ``baseline_arg_error_streak`` is deliberately left alone: a boot
                 # that failed some other way is no evidence the arguments were
                 # fixed.
-                # A process that exited with the same output as last time (modulo
-                # numbers) will do so again: stop at two instead of spending a
-                # third attempt. Only ``subprocess_nonzero`` qualifies, because its
-                # error text is the process's own output; other classes carry a
-                # fixed sentence that two unrelated failures share.
-                signature = (
-                    _baseline_failure_signature(err_class, result_payload.get("error"))
-                    if err_class == "subprocess_nonzero"
-                    else ""
-                )
-                repeated = bool(
-                    signature
-                    and self.shared_state.baseline_failure_streak >= 1
-                    and signature == self.shared_state.baseline_last_failure_signature
-                )
-                self.shared_state.baseline_failure_streak += 1
-                self.shared_state.baseline_last_failure_signature = signature
-                streak = self.shared_state.baseline_failure_streak
-                if _is_ray_cluster_infeasible(result_payload):
-                    # The Ray cluster cannot place the round, and the runtime has
-                    # already repaired what it safely could (a lone local head
-                    # without serving_slot). A retry meets the same cluster and no
-                    # framework patch changes it, so stop on the first one, like the
-                    # AgentX preflight above. Waiting for a second would not be
-                    # bounded: with no launch log to author against, the enablement
-                    # lane this failure opens never schedules another baseline.
-                    log.error(
-                        "baseline %s failed because the Ray cluster cannot place it; stopping the run: %s",
-                        task.task_id,
-                        result_payload.get("error") or err_class,
-                    )
-                    self.shared_state.set_stop_reason("baseline_failed")
-                elif not eval_pending_suppress and not in_enablement and (streak >= 3 or (streak >= 2 and repeated)):
+                if self._generic_baseline_failure_stops(
+                    task,
+                    err_class,
+                    result_payload,
+                    retries_suppressed=bool(eval_pending_suppress or in_enablement),
+                ):
                     self.shared_state.set_stop_reason("baseline_failed")
             # Combined backstop: count ALL baseline failures so mixed
             # error_classes that split the per-class streaks still fast-fail.
