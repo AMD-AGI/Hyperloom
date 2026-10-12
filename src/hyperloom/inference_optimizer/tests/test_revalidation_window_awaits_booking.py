@@ -132,8 +132,9 @@ async def test_an_execution_that_raised_owes_nothing(coord, tmp_path):
         raise RuntimeError("executor raised after the row went terminal")
 
     crashed = asyncio.ensure_future(_raised())
-    with pytest.raises(RuntimeError):
-        await crashed
+    await asyncio.wait({crashed})
+    with pytest.raises(RuntimeError, match="executor raised"):
+        crashed.result()
     coord.dispatcher._execution_of[task.task_id] = crashed
 
     assert not coord.dispatcher.owes_result(task.task_id)
@@ -155,7 +156,7 @@ async def test_a_running_execution_owes_its_result(coord, tmp_path):
         assert coord.shared_state.enablement.validation_pending is True
     finally:
         gate.set()
-        await running
+        await asyncio.wait_for(running, timeout=5)
         coord.dispatcher._execution_of.clear()
 
 
