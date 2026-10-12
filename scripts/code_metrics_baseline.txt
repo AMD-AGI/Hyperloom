@@ -25,7 +25,7 @@ cognitive-complexity src/hyperloom/inference_optimizer/breakdown/recorder/kernel
 cognitive-complexity src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py::record_geak_attempts 31
 cognitive-complexity src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/final.py::render 42
 cognitive-complexity src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/kernel_lifecycle.py::render 59
-cognitive-complexity src/hyperloom/inference_optimizer/cli/__init__.py::_run_optimize 238
+cognitive-complexity src/hyperloom/inference_optimizer/cli/__init__.py::_run_optimize 234
 cognitive-complexity src/hyperloom/inference_optimizer/cli/__init__.py::_validate_and_resolve_claude_model 57
 cognitive-complexity src/hyperloom/inference_optimizer/cli/model_gate.py::_detect_unsupported_model 32
 cognitive-complexity src/hyperloom/inference_optimizer/cli/preflight.py::_preflight 106
@@ -61,8 +61,7 @@ cognitive-complexity src/hyperloom/orchestrator/actions/executors/_framework_rew
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_framework_switch_manifest.py::parse_manifest 62
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_geak_sweep.py::sweep_via_geak 67
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_grid_base.py::coerce_extra_envs 38
-cognitive-complexity src/hyperloom/orchestrator/actions/executors/_grid_runner.py::_build_variant_yaml 41
-cognitive-complexity src/hyperloom/orchestrator/actions/executors/_grid_runner.py::apply_runtime_override 37
+cognitive-complexity src/hyperloom/orchestrator/actions/executors/_grid_runner.py::_build_variant_yaml 37
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_grid_runner.py::run_grid 222
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_kv_metrics.py::_read_aiperf_aggregate_json 91
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_kv_metrics.py::sample_from_families 33
@@ -189,7 +188,6 @@ cognitive-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._v
 cognitive-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase.promote_geak_from_candidate 57
 cognitive-complexity src/hyperloom/orchestrator/phases/kernel_stack.py::KernelStackPhase._run_kernel_stack_validation_e2e 62
 cognitive-complexity src/hyperloom/orchestrator/phases/kernel_stack.py::KernelStackPhase.drain_pending_keep_integrates 32
-cognitive-complexity src/hyperloom/orchestrator/phases/machine.py::MachinePhase.advance_phase_if_needed 32
 cognitive-complexity src/hyperloom/orchestrator/phases/machine_state.py::kernel_work_pending 70
 cognitive-complexity src/hyperloom/orchestrator/phases/machine_state.py::replay_next_phase 83
 cognitive-complexity src/hyperloom/orchestrator/phases/macro_cycle.py::MacroCycleCollaborator.plan_cycle_focus 41
@@ -332,7 +330,7 @@ cyclomatic-complexity scripts/partition_mode_sweep.py::main 24
 cyclomatic-complexity src/hyperloom/common/kernel_source_contract.py::validate_document 21
 cyclomatic-complexity src/hyperloom/common/launch_log_evidence.py::_server_args_from_log 22
 cyclomatic-complexity src/hyperloom/inference_optimizer/baseline_comparison/target_analyzer.py::analyze 24
-cyclomatic-complexity src/hyperloom/inference_optimizer/cli/__init__.py::_run_optimize 99
+cyclomatic-complexity src/hyperloom/inference_optimizer/cli/__init__.py::_run_optimize 97
 cyclomatic-complexity src/hyperloom/inference_optimizer/cli/__init__.py::_validate_and_resolve_claude_model 24
 cyclomatic-complexity src/hyperloom/inference_optimizer/cli/preflight.py::_preflight 37
 cyclomatic-complexity src/hyperloom/inference_optimizer/model_config_utils.py::_derive_model_family 26
@@ -535,8 +533,8 @@ duplicated-lines src/hyperloom/inference_optimizer/tests/test_sweep_phase_auto.p
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_trace_edge_coverage.py 114
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_trace_utils.py 114
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_warm_replay.py 34
-duplicated-lines src/hyperloom/inference_optimizer/tests/test_workload_envs.py 481
-duplicated-lines src/hyperloom/inference_optimizer/tests/test_workload_envs_branches_unit.py 482
+duplicated-lines src/hyperloom/inference_optimizer/tests/test_workload_envs.py 402
+duplicated-lines src/hyperloom/inference_optimizer/tests/test_workload_envs_branches_unit.py 403
 duplicated-lines src/hyperloom/orchestrator/actions/executors/tests/test_baseline_eval_fallback.py 144
 duplicated-lines src/hyperloom/orchestrator/actions/executors/tests/test_integrate_patch_artifacts_unit.py 40
 duplicated-lines src/hyperloom/orchestrator/actions/executors/tests/test_integrate_patch_coverage_unit.py 80
@@ -644,7 +642,7 @@ function-lines src/hyperloom/orchestrator/actions/executors/_framework_rewrite_e
 function-lines src/hyperloom/orchestrator/actions/executors/_framework_switch_manifest.py::parse_manifest 95
 function-lines src/hyperloom/orchestrator/actions/executors/_geak_sweep.py::sweep_via_geak 217
 function-lines src/hyperloom/orchestrator/actions/executors/_gpu_pin.py::resolve_gpu_pin 105
-function-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py::_build_variant_yaml 139
+function-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py::_build_variant_yaml 138
 function-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py::_run_magpie 125
 function-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py::run_grid 1073
 function-lines src/hyperloom/orchestrator/actions/executors/_kernel_agent_tool.py::materialize_unified_patch_snapshot 106
@@ -835,7 +833,7 @@ function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._run_ker
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._validate_gemm_tuning_e2e 427
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase.promote_geak_from_candidate 165
 function-lines src/hyperloom/orchestrator/phases/kernel_stack.py::KernelStackPhase._run_kernel_stack_validation_e2e 220
-function-lines src/hyperloom/orchestrator/phases/machine.py::MachinePhase.advance_phase_if_needed 193
+function-lines src/hyperloom/orchestrator/phases/machine.py::MachinePhase.advance_phase_if_needed 192
 function-lines src/hyperloom/orchestrator/phases/machine_state.py::record_phase_transition 93
 function-lines src/hyperloom/orchestrator/phases/machine_state.py::replay_next_phase 167
 function-lines src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._judge_warm_replay_accuracy 123
@@ -1060,10 +1058,10 @@ module-lines src/hyperloom/inference_optimizer/cli/model_gate.py 1823
 module-lines src/hyperloom/inference_optimizer/cli/preflight.py 2786
 module-lines src/hyperloom/inference_optimizer/multi_node/cli.py 1990
 module-lines src/hyperloom/inference_optimizer/roofline_ceiling.py 1488
-module-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py 2268
+module-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py 2258
 module-lines src/hyperloom/orchestrator/actions/executors/_kv_metrics.py 1615
 module-lines src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py 1242
-module-lines src/hyperloom/orchestrator/actions/executors/_workload_envs.py 2270
+module-lines src/hyperloom/orchestrator/actions/executors/_workload_envs.py 2261
 module-lines src/hyperloom/orchestrator/actions/executors/baseline.py 4270
 module-lines src/hyperloom/orchestrator/actions/executors/explore.py 1905
 module-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py 4915
