@@ -44,6 +44,8 @@ The `--precision` flag reflects the **runtime kernel precision**, not the model'
 | AWQ/GPTQ int8 | vllm int8_w8a16 | `awq` | `awq` |
 | FP4/MXFP4 | aiter FP4 | `fp4` | `fp4` |
 
+A `--precision` that only names the checkpoint's quantization toolkit (`quark`, `compressed-tensors`) defers to the formats nested in its `quantization_config`: MoE tuners route on the routed experts' format and dense tuners on the other linear layers', so a Quark checkpoint with MXFP4 experts and fp8 attention gets `fmoe_ck` and an fp8 dense tuner. A format precision such as `fp8` or `mxfp4` applies to both.
+
 **How Hyperloom determines precision:**
 - From server launch args: `--quantization fp8` → precision=fp8
 - From `--fp8-gemm-backend aiter` → confirms aiter path
