@@ -134,9 +134,9 @@ screening treats them as prose.
 
 `raw_logs` is the list of files that produced the Experience. It is not declared
 in a category, so it leaves `schema_ref` unchanged, and it takes no part in
-Repeat Group keys, exact lookup, or fuzzy matching. A complete record must name
-at least one file; an in-progress record may omit the list. Each item is a
-`FileRef`. A read renders its name, size, and the local path of its bytes.
+Repeat Group keys, exact lookup, or fuzzy matching. The list may be empty: a
+record without raw logs encodes without the field, as records did before it
+existed, so its content hash stays the same. Each item is a `FileRef`. A read renders its name, size, and the local path of its bytes.
 Credential screening treats those files as prose: token formats only, so a
 benchmark key such as `max_completion_tokens` is kept, while a bearer token or
 an `sk-` key inside a log is not.

@@ -9,8 +9,8 @@ bound before it.
 ``identity`` is one expression that evaluates to the whole identity. Each other
 category is a mapping from the fields its declaration names to one expression
 each; a file field's expression evaluates to the path of a local file, relative
-to the source document. ``raw_logs`` is one required expression for the list of
-local files that produced the Experience.
+to the source document. ``raw_logs`` is one optional expression for the list of
+local files that produced the Experience; an empty list records none.
 """
 
 from __future__ import annotations
@@ -68,7 +68,7 @@ _EXPERIENCE_FIELDS: dict[str, bool | dict[str, bool]] = {
     "provenance": {"source_ref": False, "extra": False},
     "rendered_refs": False,
     "notes": False,
-    "raw_logs": True,
+    "raw_logs": False,
     "parent_id": False,
     "supersedes": False,
 }

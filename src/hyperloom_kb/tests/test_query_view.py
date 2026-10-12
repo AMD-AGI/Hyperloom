@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import replace
-
-from hyperloom_kb.tests.logs import LOG
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -84,7 +82,6 @@ def experience(
         change={"knob": knob, "summary": f"Change {knob}.", "content": f"--{knob} 32"},
         outcome={"decision": decision, "value": value, "accuracy_passed": accuracy_passed, "gates": ("accuracy",)},
         reflection={"text": f"{decision} after measurement."},
-        raw_logs=(LOG,),
     )
 
 

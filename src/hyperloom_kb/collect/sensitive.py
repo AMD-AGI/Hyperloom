@@ -69,9 +69,7 @@ _SECRET_NAME_EXEMPTIONS = ("TOKENIZER",)
 #: and the top-level raw logs that produced the Experience. A raw log is not prose, but it is full of benchmark key
 #: names, so it gets the same token-format screen. Preconditions are not prose: they may restate the configuration
 #: measured against.
-FREE_TEXT_FIELDS = frozenset(
-    {"rationale.reasoning", "rationale.alternatives", "reflection", "notes", "raw_logs"}
-)
+FREE_TEXT_FIELDS = frozenset({"rationale.reasoning", "rationale.alternatives", "reflection", "notes", "raw_logs"})
 
 
 def is_secret_shaped_name(name: str) -> bool:

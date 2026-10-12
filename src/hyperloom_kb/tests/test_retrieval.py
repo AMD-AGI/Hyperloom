@@ -4,10 +4,10 @@ import json
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from hyperloom_kb.tests.logs import LOG
 from hyperloom_kb import (
     METADATA_FIELDS,
     CandidateHit,
@@ -36,6 +36,7 @@ from hyperloom_kb import (
     derive_experience_id,
 )
 from hyperloom_kb.retrieval import render_complete_experience
+from hyperloom_kb.tests.logs import LOG
 
 NOW = datetime(2026, 9, 17, tzinfo=timezone.utc)
 TRACE = FileRef("traces/decode.json", "b" * 64, 4096)
@@ -80,7 +81,6 @@ def experience(schema: ExperienceDeclaration, run_id: str, knob: str) -> Experie
         change={"knob": knob, "summary": f"Change {knob}."},
         outcome={"decision": "keep", "value": 110.0},
         reflection={"text": "Throughput improved."},
-        raw_logs=(LOG,),
     )
 
 
@@ -322,11 +322,7 @@ def test_complete_renderer_without_budget_keeps_every_knowledge_field_and_no_met
     assert rendered.truncated is False
     assert rendered.text.startswith(f"Experience {record.id}\n")
     record_json = json.loads(rendered.text.split("\nRecord:\n", 1)[1])
-    expected = record.knowledge()
-    expected["raw_logs"] = [
-        {"file": ref.name, "bytes": ref.bytes, "sha256": ref.sha256} for ref in record.raw_logs
-    ]
-    assert record_json == expected
+    assert record_json == record.knowledge()
     assert not METADATA_FIELDS & set(record_json)
     annotations_json = rendered.text.split("Repeat Group Annotations:\n", 1)[1].split("\nRecord:\n", 1)[0]
     assert json.loads(annotations_json)["decision_counts"] == {"keep": 1}
@@ -344,20 +340,29 @@ def test_a_file_renders_as_its_name_size_and_where_it_is_read_never_its_content(
     located = render_complete_experience(record, view, file_path=lambda ref: Path("/kb/files") / ref.sha256)
     unlocated = render_complete_experience(record, view)
 
-    located_record = json.loads(located.split("\nRecord:\n", 1)[1])
-    unlocated_record = json.loads(unlocated.split("\nRecord:\n", 1)[1])
-    assert located_record["outcome"]["traces"] == [
+    assert json.loads(located.split("\nRecord:\n", 1)[1])["outcome"]["traces"] == [
         {"file": "traces/decode.json", "bytes": 4096, "path": f"/kb/files/{TRACE.sha256}"}
     ]
-    assert unlocated_record["outcome"]["traces"] == [
+    assert json.loads(unlocated.split("\nRecord:\n", 1)[1])["outcome"]["traces"] == [
         {"file": "traces/decode.json", "bytes": 4096, "sha256": TRACE.sha256}
     ]
-    assert located_record["raw_logs"] == [
-        {"file": LOG.name, "bytes": LOG.bytes, "path": f"/kb/files/{LOG.sha256}"}
-    ]
-    assert unlocated_record["raw_logs"] == [
-        {"file": LOG.name, "bytes": LOG.bytes, "sha256": LOG.sha256}
-    ]
+
+
+def test_raw_logs_render_like_files_and_a_record_without_them_renders_none() -> None:
+    schema = declaration()
+    logged = replace(experience(schema, "run-logged", "page_size"), raw_logs=(LOG,))
+    unlogged = experience(schema, "run-unlogged", "page_size")
+    store = InMemoryExperienceStore()
+    for record in (logged, unlogged):
+        store.insert_complete(record)
+    view = QueryViewBuilder().build(schema, store.list_experiences(schema.schema_ref))
+
+    def rendered(record: Experience) -> dict[str, Any]:
+        text = render_complete_experience(record, view, file_path=lambda ref: Path("/kb/files") / ref.sha256)
+        return json.loads(text.split("\nRecord:\n", 1)[1])
+
+    assert rendered(logged)["raw_logs"] == [{"file": LOG.name, "bytes": LOG.bytes, "path": f"/kb/files/{LOG.sha256}"}]
+    assert "raw_logs" not in rendered(unlogged)
 
 
 def test_restricted_view_limits_recall_but_keeps_full_group_annotations() -> None:

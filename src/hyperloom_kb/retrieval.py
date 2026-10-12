@@ -439,7 +439,8 @@ def render_complete_experience(
     record: dict[str, JsonValue] = {"objective": experience.objective}
     for category in CATEGORIES:
         record[category] = {name: _rendered(value, file_path) for name, value in getattr(experience, category).items()}
-    record["raw_logs"] = [_rendered(ref, file_path) for ref in experience.raw_logs]
+    if experience.raw_logs:
+        record["raw_logs"] = [_rendered(ref, file_path) for ref in experience.raw_logs]
     record["notes"] = dict(experience.notes)
     return "\n".join(
         (

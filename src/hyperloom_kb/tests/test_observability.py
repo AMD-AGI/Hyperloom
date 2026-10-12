@@ -36,7 +36,6 @@ from hyperloom_kb.database import SQLITE_FILE, Database, PostgresDatabase, Sqlit
 from hyperloom_kb.http_service import create_http_server, serve_until_stopped
 from hyperloom_kb.observability import JsonLogFormatter, event
 from hyperloom_kb.tests.conftest import fresh_database
-from hyperloom_kb.tests.logs import LOG
 from hyperloom_kb.tests.database_fixtures import TEST_DATABASE_URL_ENV
 from hyperloom_kb.tests.test_http_service import TOKEN, RunningServer, _declaration, _experience, _http
 
@@ -157,8 +156,8 @@ def test_a_file_lost_since_the_last_start_makes_the_next_start_unready(tmp_path:
         metrics = _metrics(_get(url, "/metrics")[2].decode())
 
     assert (status, json.loads(body)["checks"]["files"]) == (503, "failed")
-    assert (metrics["hyperloom_kb_files_missing"], metrics["hyperloom_kb_files"]) == (1, 2)
-    assert metrics["hyperloom_kb_file_bytes"] == ref.bytes + LOG.bytes
+    assert (metrics["hyperloom_kb_files_missing"], metrics["hyperloom_kb_files"]) == (1, 1)
+    assert metrics["hyperloom_kb_file_bytes"] == ref.bytes
 
 
 def test_metrics_count_requests_writes_and_refusals_and_sample_what_the_kb_holds(tmp_path: Path) -> None:

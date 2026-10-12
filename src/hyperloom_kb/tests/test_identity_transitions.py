@@ -5,8 +5,6 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from hyperloom_kb.tests.logs import LOG
-
 from hyperloom_kb import (
     Experience,
     ExperienceConflictError,
@@ -53,7 +51,6 @@ def completed() -> Experience:
         completed_at=NOW + timedelta(minutes=1),
         outcome={"decision": "keep", "value": 2600},
         reflection={"text": "The measured result improved."},
-        raw_logs=(LOG,),
     )
 
 

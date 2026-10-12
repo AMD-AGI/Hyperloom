@@ -333,8 +333,18 @@ def test_completion_fields_follow_the_status() -> None:
         replace(started, status=ExperienceStatus.COMPLETE)
     with pytest.raises(SchemaValidationError, match="cannot be before created_at"):
         replace(started, status=ExperienceStatus.COMPLETE, completed_at=NOW - timedelta(seconds=1))
-    with pytest.raises(SchemaValidationError, match="requires raw_logs"):
-        replace(started, status=ExperienceStatus.COMPLETE, completed_at=NOW)
+
+
+def test_a_complete_experience_without_raw_logs_encodes_as_before_they_existed() -> None:
+    logged = complete_experience()
+    unlogged = replace(logged, raw_logs=())
+
+    encoded = unlogged.to_dict()
+
+    assert "raw_logs" not in encoded
+    assert Experience.from_dict(json.loads(json.dumps(encoded))) == unlogged
+    assert unlogged.files() == (PATCH,)
+    assert logged.to_dict()["raw_logs"] == [LOG.to_dict()]
 
 
 def test_file_refs_name_a_relative_path_and_a_sha256() -> None:

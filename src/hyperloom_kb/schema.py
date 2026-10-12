@@ -250,7 +250,7 @@ def _notes(value: Any, name: str) -> dict[str, str]:
 
 
 def _raw_logs(value: Any, name: str) -> tuple[FileRef, ...]:
-    """The raw logs of one Experience: a list of files, empty only while the record is in progress."""
+    """The raw logs of one Experience: a list of files, empty when its producer recorded none."""
 
     if value is None:
         return ()
@@ -882,8 +882,6 @@ class Experience:
         completed_at = _aware_datetime(self.completed_at, "experience.completed_at")
         if completed_at < self.created_at:
             raise SchemaValidationError("completed_at cannot be before created_at")
-        if not self.raw_logs:
-            raise SchemaValidationError("a complete Experience requires raw_logs")
         object.__setattr__(self, "completed_at", completed_at)
 
     def files(self) -> tuple[FileRef, ...]:
@@ -913,10 +911,13 @@ class Experience:
             "supersedes": self.supersedes,
             "objective": self.objective,
             "rendered_refs": [item.to_dict() for item in self.rendered_refs],
-            "raw_logs": [_encode(ref) for ref in self.raw_logs],
             "notes": dict(self.notes),
             "provenance": self.provenance.to_dict(),
         }
+        # A record without raw logs encodes as one from before they existed, so the content hash a KB stored for it
+        # still holds, and a client that does not know raw logs still reads it.
+        if self.raw_logs:
+            record["raw_logs"] = [_encode(ref) for ref in self.raw_logs]
         for category in CATEGORIES:
             record[category] = {name: _encode(value) for name, value in getattr(self, category).items()}
         return record

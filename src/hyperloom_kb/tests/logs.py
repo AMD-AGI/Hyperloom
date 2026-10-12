@@ -1,4 +1,4 @@
-"""The raw log every complete Experience in these tests names."""
+"""A raw log the tests give an Experience."""
 
 from __future__ import annotations
 

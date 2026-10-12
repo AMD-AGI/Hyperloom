@@ -19,8 +19,6 @@ from typing import Any
 
 import pytest
 
-from hyperloom_kb.tests.logs import LOG
-
 from hyperloom_kb import (
     Experience,
     ExperienceDeclaration,
@@ -84,7 +82,6 @@ def _experience(schema: ExperienceDeclaration, seq: int, *, run_id: str = "local
         change={"knob": f"knob_{seq}", "summary": f"Set knob {seq}."},
         outcome={"decision": "keep", "value": 110.0 + seq},
         reflection={"text": "Measured."},
-        raw_logs=(LOG,),
     )
 
 
@@ -197,7 +194,7 @@ def test_a_pull_that_cannot_fetch_a_file_yet_stops_before_its_record_and_resumes
     failures = [urllib.error.URLError("global KB went away")]
 
     def fails_the_first_download(request: urllib.request.Request, **options: Any) -> Any:
-        if request.get_method() == "GET" and request.full_url.endswith(f"/v1/files/{ref.sha256}") and failures:
+        if request.get_method() == "GET" and "/v1/files/" in request.full_url and failures:
             raise failures.pop()
         return urllib.request.urlopen(request, **options)
 
@@ -284,7 +281,7 @@ def test_a_pull_whose_file_download_is_cut_short_resumes_at_that_record(tmp_path
 
     def cuts_the_first_download(request: urllib.request.Request, **options: Any) -> Any:
         response = urllib.request.urlopen(request, **options)
-        if request.get_method() == "GET" and request.full_url.endswith(f"/v1/files/{ref.sha256}") and cuts:
+        if request.get_method() == "GET" and "/v1/files/" in request.full_url and cuts:
             return _CutShort(response, cuts.pop())
         return response
 
@@ -308,7 +305,7 @@ def test_a_push_the_global_kb_drops_resumes_where_it_stopped(tmp_path: Path) -> 
     puts: list[str] = []
 
     def drops_the_second_write(request: urllib.request.Request, **options: Any) -> Any:
-        if request.get_method() == "PUT" and "/v1/experiences/" in request.full_url:
+        if request.get_method() == "PUT":
             puts.append(request.full_url)
             if len(puts) == 2:
                 raise urllib.error.URLError("global KB went away")

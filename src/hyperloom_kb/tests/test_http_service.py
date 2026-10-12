@@ -20,8 +20,6 @@ from typing import Any, BinaryIO
 
 import pytest
 
-from hyperloom_kb.tests.logs import LOG, LOG_PATH
-
 from hyperloom_kb import (
     Experience,
     ExperienceDeclaration,
@@ -111,7 +109,6 @@ def _experience(
         change={"knob": knob, "summary": f"Test {knob}."},
         outcome={"decision": decision, "value": outcome_value},
         reflection={"text": f"The {knob} result was {decision}."},
-        raw_logs=(LOG,),
     )
 
 
@@ -245,16 +242,6 @@ def _record_json(prompt_block: str, experience_id: str) -> dict[str, Any]:
     return value
 
 
-def _rendered_knowledge(experience: Experience, app: ExperienceHTTPService) -> dict[str, Any]:
-    """Knowledge as a prompt shows it: each raw log as its name, size, and local path."""
-
-    rendered = experience.knowledge()
-    rendered["raw_logs"] = [
-        {"file": ref.name, "bytes": ref.bytes, "path": str(app.file_path(ref))} for ref in experience.raw_logs
-    ]
-    return rendered
-
-
 def test_write_is_immediately_readable_immutable_and_rendered_losslessly(
     tmp_path: Path,
 ) -> None:
@@ -287,7 +274,7 @@ def test_write_is_immediately_readable_immutable_and_rendered_losslessly(
     assert read.status == "completed"
     assert read.read_id.startswith("read-")
     assert [item.id for item in read.rendered_refs] == [experience.id]
-    assert _record_json(read.prompt_block, experience.id) == _rendered_knowledge(experience, app)
+    assert _record_json(read.prompt_block, experience.id) == experience.knowledge()
     assert "… [truncated]" not in read.prompt_block
     assert read.experiences[0]["experience_id"] == experience.id
     assert read.experiences[0]["change_summary"] == "Test page_size."
@@ -328,14 +315,13 @@ def test_what_shaped_a_decision_stays_in_the_record_but_never_reaches_a_prompt(t
             },
         ),
     )
-    app = _app(tmp_path / "service", schema)
-    with RunningServer(app) as url:
+    with RunningServer(_app(tmp_path / "service", schema)) as url:
         client = _client(url, tmp_path)
         client.publish(experience)
         read = client.read(DECISION, _read_context())
         [exported] = client.export_page().items
 
-    assert _record_json(read.prompt_block, experience.id) == _rendered_knowledge(experience, app)
+    assert _record_json(read.prompt_block, experience.id) == experience.knowledge()
     for recorded in ("provenance", "rendered_refs", "kb_read_id", "experience_citations", cited, "run_id"):
         assert recorded not in read.prompt_block
     assert exported["experience"] == experience.to_dict()
@@ -364,11 +350,7 @@ def test_a_file_field_is_kept_by_the_kb_and_a_read_renders_the_path_it_is_read_f
             change={"knob": "page_size", "summary": "Test page_size.", "artifact": artifact},
             rationale={"reasoning": "The profile shows paged attention dominating decode."},
         )
-        session.complete(
-            outcome={"decision": "keep", "value": 110.0},
-            completed_at=NOW,
-            raw_logs=[LOG_PATH],
-        )
+        session.complete(outcome={"decision": "keep", "value": 110.0}, completed_at=NOW)
         receipt = session.publish()
         artifact.unlink()
         read = client.read(DECISION, _read_context())
@@ -383,6 +365,44 @@ def test_a_file_field_is_kept_by_the_kb_and_a_read_renders_the_path_it_is_read_f
     assert Path(rendered["path"]).read_bytes() == content
     assert content.decode() not in read.prompt_block
     assert (fetched, held) == (content, ())
+
+
+def test_raw_logs_are_kept_by_the_kb_with_their_record_and_a_read_renders_where_they_are_read(tmp_path: Path) -> None:
+    schema = _declaration()
+    log = tmp_path / "work" / "benchmark.log"
+    log.parent.mkdir()
+    content = b"output_throughput=110.0\n"
+    log.write_bytes(content)
+    app = _app(tmp_path / "service", schema)
+
+    with RunningServer(app) as url:
+        client = _client(url, tmp_path)
+        session = RemoteExperienceKB(client, schema).begin(
+            run_id="run-log",
+            seq=0,
+            objective="throughput@v1",
+            provenance=Provenance("service-test", "1"),
+            identity={"model": "qwen3", "gpu": "mi325x"},
+            baseline={"config": "default", "value": 100.0},
+            created_at=NOW,
+        )
+        session.decide(
+            change={"knob": "page_size", "summary": "Test page_size."},
+            rationale={"reasoning": "Prior evidence supports testing page_size."},
+        )
+        session.complete(outcome={"decision": "keep", "value": 110.0}, completed_at=NOW, raw_logs=[log])
+        receipt = session.publish()
+        log.unlink()
+        read = client.read(DECISION, _read_context())
+        [exported] = client.export_page().items
+
+    ref = FileRef("benchmark.log", hashlib.sha256(content).hexdigest(), len(content))
+    rendered = _record_json(read.prompt_block, session.record.id)["raw_logs"]
+    assert receipt.status == "created"
+    assert session.record.raw_logs == (ref,)
+    assert exported["experience"]["raw_logs"] == [ref.to_dict()]
+    assert rendered == [{"file": "benchmark.log", "bytes": len(content), "path": str(app.file_path(ref))}]
+    assert Path(rendered[0]["path"]).read_bytes() == content
 
 
 def test_a_write_naming_a_file_the_kb_lacks_is_refused_until_its_bytes_arrive(tmp_path: Path) -> None:
@@ -438,7 +458,6 @@ def test_notes_written_outside_the_schema_are_kept_and_rendered_like_other_text(
             reflection={"text": "Kept."},
             completed_at=NOW,
             notes={"xgmi": observed},
-            raw_logs=[LOG_PATH],
         )
         session.publish()
         read = client.read(DECISION, _read_context())
@@ -458,8 +477,7 @@ def test_a_read_budget_carries_whole_records_and_names_only_those_it_carries(tmp
         for seq, knob in enumerate(("page_size", "chunk"))
     ]
 
-    app = _app(tmp_path / "service", schema)
-    with RunningServer(app) as url:
+    with RunningServer(_app(tmp_path / "service", schema)) as url:
         client = _client(url, tmp_path)
         for record in records:
             client.publish(record)
@@ -469,10 +487,10 @@ def test_a_read_budget_carries_whole_records_and_names_only_those_it_carries(tmp
         budgeted = client.read(DECISION, _read_context(), render_budget_chars=one_record)
         nothing_fits = client.read(DECISION, _read_context(), render_budget_chars=1)
 
-    assert all(_record_json(full.prompt_block, record.id) == _rendered_knowledge(record, app) for record in records)
+    assert all(_record_json(full.prompt_block, record.id) == record.knowledge() for record in records)
     [shown] = budgeted.rendered_refs
     [record] = [item for item in records if item.id == shown.id]
-    assert _record_json(budgeted.prompt_block, shown.id) == _rendered_knowledge(record, app)
+    assert _record_json(budgeted.prompt_block, shown.id) == record.knowledge()
     assert "render_budget_reached" in budgeted.warnings
     assert (nothing_fits.prompt_block, nothing_fits.rendered_refs) == ("", ())
     assert "render_budget_reached" in nothing_fits.warnings
@@ -856,7 +874,7 @@ def test_a_client_that_lost_its_service_spools_without_waiting_until_a_flush_del
         after = client.publish(records[0]).status
 
     assert spooled == ["spooled"] * 3
-    assert tried_while_offline == ["POST"]
+    assert tried_while_offline == ["PUT"]
     assert flushed == ["created"] * 3
     assert after == "unchanged"
 
@@ -932,13 +950,10 @@ def test_sdk_uses_only_url_and_token_with_packaged_declaration(
             },
             rationale={"reasoning": "Prior evidence supports tuning page size."},
         )
-        log = tmp_path / "attempt.log"
-        log.write_text("recorded attempt\n", encoding="utf-8")
         session.complete(
             outcome={"decision": "keep", "value": 110.0},
             reflection={"text": "The result improved."},
             completed_at=NOW,
-            raw_logs=[log],
         )
         receipt = session.publish()
         read = kb.read(DECISION, _read_context(), outcome="keep")

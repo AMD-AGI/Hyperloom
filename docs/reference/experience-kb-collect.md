@@ -91,7 +91,7 @@ experience:
   outcome:
     decision: $decision
     value: $attempt.after
-  raw_logs: $attempt.log_files            # required list of file paths; a directory is not a file
+  raw_logs: $attempt.log_files            # optional list of file paths; a directory is not a file
   reflection:
     text: "Recorded outcome: {$attempt.after}"
 ```
@@ -101,8 +101,8 @@ identity may carry keys no field declares. Each of `baseline`, `rationale`,
 `change`, `outcome`, and `reflection` maps the fields its declaration names to
 one expression each: a key the declaration does not name, or a `required` field
 left unmapped, fails when the mapping loads. A field whose expression evaluates
-to `null`, `""`, `[]`, or `{}` is left out of the record. `raw_logs` is required
-on every mapping, as a list of local file paths; a directory path is not a file.
+to `null`, `""`, `[]`, or `{}` is left out of the record. `raw_logs` is optional,
+a list of local file paths; a directory path is not a file.
 
 A `file` field's expression evaluates to the path of a local file, or a list
 of paths for a `many` field; a relative path is read from the source document's
@@ -206,8 +206,8 @@ Maps Hyperloom `session_breakdown.json` (SBD V6) to the packaged
   duplicates, into the text field `change.content`; an attempt whose change
   content is over 32 KiB is skipped with `schema validation failed`;
 - `attempts[].log_files`, a list of local file paths, into the top-level `raw_logs`.
-  A path that is not a file, including a directory, skips the attempt. The
-  field is required, so an attempt that names no log file is skipped too.
+  A path that is not a file, including a directory, skips the attempt; an
+  attempt that names no log file is recorded without raw logs.
 
 AgentX sessions are skipped until their Experience identity is supported, and a
 session whose `metadata.grading.objective` is not `output_throughput` is

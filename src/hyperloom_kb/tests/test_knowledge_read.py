@@ -8,8 +8,6 @@ from datetime import datetime, timezone
 
 import pytest
 
-from hyperloom_kb.tests.logs import LOG
-
 from hyperloom_kb import (
     LEXICAL_FUZZY_PROVIDER_REF,
     AnthropicPlannerBackend,
@@ -91,7 +89,6 @@ def _experience(
         change={"knob": knob, "summary": f"Change {knob}."},
         outcome={"decision": "keep", "value": 110.0},
         reflection={"text": "The measured result improved."},
-        raw_logs=(LOG,),
     )
 
 

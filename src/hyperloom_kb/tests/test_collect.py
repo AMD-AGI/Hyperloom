@@ -684,6 +684,16 @@ def test_raw_log_prose_keeps_a_benchmark_setting_and_skips_a_credential(tmp_path
     assert directory.name not in {item["name"] for item in collected["kept"]["raw_logs"]}
 
 
+def test_an_attempt_that_names_no_log_file_is_collected_without_raw_logs() -> None:
+    unlogged = _attempt("unlogged")
+    del unlogged["log_files"]
+
+    collected = _collected(_dry(_sbd(unlogged, _attempt("logged", log_files=[]))))
+
+    assert set(collected) == {"unlogged", "logged"}
+    assert all("raw_logs" not in experience for experience in collected.values())
+
+
 def test_a_declared_field_named_like_a_credential_is_screened_by_its_value_not_its_name(tmp_path: Path) -> None:
     declaration = {
         "schema_version": 2,
