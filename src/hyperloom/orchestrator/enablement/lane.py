@@ -275,7 +275,7 @@ class EnablementLane(CoordinatorCollaborator):
             )
 
         acquired = await self.rounds.open(
-            f"enablement-{holder}",
+            _authoring_round_id(holder),
             holder_task_id=holder,
             lease_sec=float(lease_ttl_sec),
             now_unix=time.time(),
@@ -492,8 +492,8 @@ class EnablementLane(CoordinatorCollaborator):
           ``enablement.launch_log`` replaced, so the next round targets that gap.
         * anything else — no patch is kept.
 
-        Every outcome charges one observation to the round ledger, stops the run
-        when the ledger reports the budget spent, and settles the round.
+        A kept or advanced patch moves the lane whoever authored it; a stall
+        from a specialist the lane never dispatched leaves it untouched.
 
         Args:
             res: The integrate_patch result dict (may be ``None`` / non-dict).
@@ -502,16 +502,19 @@ class EnablementLane(CoordinatorCollaborator):
             return
         state = self.shared_state
         status = str(res.get("status") or "")
+        is_advanced = status == "advanced" or bool(res.get("advanced"))
         stop_set = ""
         # Only a real specialist round carries this; targeted_build rearm rows
         # do not, and must not clear it.
         spec_tid = str(res.get("specialist_task_id") or "").strip()
+        if await _is_foreign_stall(self.rounds, spec_tid, status=status, moved=status == "kept" or is_advanced):
+            return
         if spec_tid:
             state.enablement.last_specialist_task_id = spec_tid
 
         if status == "kept":
             _rearm_on_kept(state, res)
-        elif status == "advanced" or bool(res.get("advanced")):
+        elif is_advanced:
             _rearm_on_advanced(state, res)
         # A round that bought no ground gets no branch of its own: it is charged
         # by the FAILED settle below, which the pre-hoc ``consecutive_stalled``
@@ -557,13 +560,9 @@ class EnablementLane(CoordinatorCollaborator):
         archived_config = archive.path_for(ROLE_LAUNCH_CONFIG)
         if status == "kept" and archived_config:
             state.enablement.accepted_config_path = str(Path(self.session_dir) / archived_config)
-        # A rearm always ends the round; only a KEEP booted and was graded, and
-        # an advance is the ledger's record that the cap must not charge it.
-        is_advanced = status == "advanced" or bool(res.get("advanced"))
-        await self.settle_enablement_round(
-            BOOTED if status == "kept" else ADVANCED if is_advanced else FAILED,
-            reason=status,
-        )
+        outcome = await _answered_round_outcome(self.rounds, spec_tid, status=status, is_advanced=is_advanced)
+        if outcome:
+            await self.settle_enablement_round(outcome, reason=status)
         # Recorded after the accepted path is settled, because the row carries
         # it, and after the round is settled, because the streak the row states
         # is the one this round's own outcome left behind.
@@ -735,6 +734,40 @@ def _finish_lane_event(
         framework_root=str(lane.framework_root or ""),
         stall_streak=stall_streak,
     )
+
+
+def _authoring_round_id(holder: str) -> str:
+    """The id of the round the lane opened for specialist ``holder``."""
+    return f"enablement-{holder}"
+
+
+async def _is_foreign_stall(rounds: Any, spec_tid: str, *, status: str, moved: bool) -> bool:
+    """Whether this result bought nothing for a specialist the lane never dispatched."""
+    if not spec_tid or moved or await rounds.get(_authoring_round_id(spec_tid)) is not None:
+        return False
+    log.info(
+        "ENABLEMENT: integrate for specialist %s, which the lane did not dispatch, bought nothing (%s); "
+        "the lane's round is left to its holder",
+        spec_tid,
+        status or "unreported",
+    )
+    return True
+
+
+async def _answered_round_outcome(rounds: Any, spec_tid: str, *, status: str, is_advanced: bool) -> str:
+    """The outcome to settle the held round with, or ``""`` when this result answers none.
+
+    A kept or advanced patch settles whichever round is held: the wall that
+    round was aimed at is behind the boot now. A stall settles only the round
+    it was dispatched for, so a late result cannot charge a newer one. Only a
+    KEEP booted and was graded, and an advance is the ledger's record that the
+    cap must not charge it.
+    """
+    held = await rounds.held()
+    moved = status == "kept" or is_advanced
+    if held is None or not (moved or not spec_tid or held.round_id == _authoring_round_id(spec_tid)):
+        return ""
+    return BOOTED if status == "kept" else ADVANCED if is_advanced else FAILED
 
 
 def _round_task_id(state: Any, res: dict[str, Any]) -> str:

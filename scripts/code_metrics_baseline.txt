@@ -709,10 +709,10 @@ function-lines src/hyperloom/orchestrator/enablement/build.py::EnablementBuild._
 function-lines src/hyperloom/orchestrator/enablement/build.py::EnablementBuild.maybe_enqueue_specialist_requested_build 99
 function-lines src/hyperloom/orchestrator/enablement/build.py::EnablementBuild.maybe_escalate_to_targeted_build 139
 function-lines src/hyperloom/orchestrator/enablement/lane.py::EnablementLane._maybe_enqueue_enablement_specialist 94
-function-lines src/hyperloom/orchestrator/enablement/lane.py::EnablementLane.maybe_rearm_enablement 105
+function-lines src/hyperloom/orchestrator/enablement/lane.py::EnablementLane.maybe_rearm_enablement 104
 function-lines src/hyperloom/orchestrator/enablement/params.py::EnablementParams._derive_checkpoint_weight_facts 117
 function-lines src/hyperloom/orchestrator/enablement/params.py::EnablementParams._discover_enablement_candidate_refs 87
-function-lines src/hyperloom/orchestrator/enablement/params.py::EnablementParams.build_enablement_specialist_params 130
+function-lines src/hyperloom/orchestrator/enablement/params.py::EnablementParams.build_enablement_specialist_params 114
 function-lines src/hyperloom/orchestrator/enablement/recipe/section.py::_collect_landed_stack 96
 function-lines src/hyperloom/orchestrator/enablement/recipe/sufficiency.py::_patch_step_reasons 92
 function-lines src/hyperloom/orchestrator/enablement/runtime/targeted_build.py::run_aiter_build 218
@@ -783,7 +783,7 @@ function-lines src/hyperloom/orchestrator/loop/dispatcher.py::DispatcherCollabor
 function-lines src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter._handle_request 253
 function-lines src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter._handle_single_verdict 111
 function-lines src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter.handle_delegate 179
-function-lines src/hyperloom/orchestrator/loop/proposals.py::ProposalsCollaborator.materialize_approved_proposal 131
+function-lines src/hyperloom/orchestrator/loop/proposals.py::ProposalsCollaborator.materialize_approved_proposal 124
 function-lines src/hyperloom/orchestrator/loop/sub_agent_runner.py::SubAgentRunner.run_task 177
 function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_baseline 320
 function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_explore 493

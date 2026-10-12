@@ -13,6 +13,7 @@ from hyperloom.orchestrator.lever import LEVER_ENABLEMENT
 
 from ..bringup import recorded_verdict, session_root
 from ..collaborator import CoordinatorCollaborator
+from ..phases.machine_state import PHASE_ENABLEMENT
 
 import logging as _logging
 
@@ -146,6 +147,31 @@ def _mandate_notes(enablement: Any, *, attempt: int) -> str:
     return "\n\n".join(block for block in blocks if block)
 
 
+def _round_carriers(state: Any, signature: Any) -> dict[str, Any]:
+    """What an integrate_patch needs to be graded as this enablement round.
+
+    Shared by the lane's own specialist dispatch, whose integrate inherits it,
+    and by an integrate the round did not dispatch but that lands in its phase.
+    """
+    return {
+        "enablement": True,
+        # The verdict this round was dispatched on. The prompt builder renders
+        # it; nothing downstream re-classifies a log to recover it.
+        "enablement_failure_signature": signature.to_dict(),
+        # The before half of integrate_patch's gate.
+        "enablement_before_observation_path": state.enablement.launch_observation_path,
+        # Only prior rounds' *actually-applied* setup commands (recorded by the
+        # specialist and replayed by integrate_patch) stack as a base. No install
+        # command is ever auto-seeded here: an unpinned upgrade of the shared
+        # serving venv is unsafe (CUDA-wheel clobber of ROCm vLLM/torch,
+        # transformers-major skew) and environment/build acquisition is owned by
+        # the isolated targeted-build path + the specialist's own setup_commands.
+        "enablement_setup_commands": [str(c) for c in (state.enablement.setup_commands or [])],
+        # eval-origin trigger context (empty for boot-origin enablement).
+        **_enablement_carrier_params(state),
+    }
+
+
 class EnablementParams(CoordinatorCollaborator):
     """Builds the enablement authoring specialist's parameters."""
 
@@ -228,13 +254,6 @@ class EnablementParams(CoordinatorCollaborator):
         weight_facts = self._derive_checkpoint_weight_facts(text)
         if weight_facts:
             source_context = (weight_facts + "\n\n" + source_context) if source_context else weight_facts
-        # Only prior rounds' *actually-applied* setup commands (recorded by the
-        # specialist and replayed by integrate_patch) stack as a base. No install
-        # command is ever auto-seeded here: an unpinned upgrade of the shared
-        # serving venv is unsafe (CUDA-wheel clobber of ROCm vLLM/torch,
-        # transformers-major skew) and environment/build acquisition is owned by
-        # the isolated targeted-build path + the specialist's own setup_commands.
-        base_setup = [str(c) for c in (state.enablement.setup_commands or [])]
         # §1b ENABLEMENT PLAYBOOK renders mandate.task_description via _section_enablement_playbook.
         # notes carries only per-dispatch dynamic context that §1b cannot provide.
         notes = _mandate_notes(state.enablement, attempt=attempt)
@@ -248,23 +267,15 @@ class EnablementParams(CoordinatorCollaborator):
             "gap_layer": "framework",
             "gap_evidence": {"model": model, "failure_kind": signature.kind},
             "framework": framework,
-            "enablement": True,
             "lever_kind": LEVER_ENABLEMENT,
             "enablement_attempt": attempt,
             "enablement_failure_kind": signature.kind,
-            # The verdict this round was dispatched on. The prompt builder renders
-            # it; nothing downstream re-classifies a log to recover it.
-            "enablement_failure_signature": signature.to_dict(),
             "enablement_search_repos": list(plan.repos),
-            # The before half of integrate_patch's gate.
-            "enablement_before_observation_path": state.enablement.launch_observation_path,
             "enablement_candidate_refs": list(candidate_refs),
             # Source lines near the offending site, plus (on a weight-init
             # failure) the checkpoint's per-layer weight inventory. Rendered
             # into the mandate by _section_enablement_playbook.
             "enablement_source_context": source_context,
-            # Allowlisted setup commands from prior rounds, replayed before boot.
-            "enablement_setup_commands": base_setup,
             # Config accumulated by prior advanced rounds. The bench variant
             # layers this round's proposal on top, so a KEEP is graded on the
             # whole stack and its effective_config records the whole stack.
@@ -272,13 +283,35 @@ class EnablementParams(CoordinatorCollaborator):
             "base_extra_args": state.enablement.accepted_extra_server_args,
             "source": "coordinator_internal",
             "notes": notes,
-            # eval-origin trigger context (empty for boot-origin enablement).
-            **_enablement_carrier_params(state),
+            **_round_carriers(state, signature),
         }
         last_build_failure = state.enablement.last_build_failure or {}
         if last_build_failure:
             params_out["enablement_last_build_failure"] = dict(last_build_failure)
         return params_out
+
+    def stamp_phase_integrate(self, params: dict[str, Any]) -> None:
+        """Make an integrate_patch approved during ENABLEMENT an enablement round.
+
+        The lane's own integrate inherits the round context from its specialist;
+        one the orchestration LLM proposed for a specialist of its own carries
+        none, and would be graded on a throughput this phase has not measured.
+
+        Args:
+            params: The integrate_patch params about to be materialised; updated
+                in place and left alone outside ENABLEMENT or when already
+                tagged.
+        """
+        state = self.shared_state
+        if (state.phase or "").strip().upper() != PHASE_ENABLEMENT or params.get("enablement"):
+            return
+        verdict, _ = recorded_verdict(
+            state.enablement.launch_observation_path,
+            wrapper_text=state.enablement.launch_log or "",
+            session_dir=session_root(self),
+        )
+        for key, value in _round_carriers(state, verdict.signature).items():
+            params.setdefault(key, value)
 
     def _read_enablement_source_context(self, signature: Any, *, window: int = 12) -> str:
         """Best-effort read a small source window near the offending site.
