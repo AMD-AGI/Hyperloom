@@ -55,13 +55,13 @@ def test_format_variant_line_refused_variant_is_not_unmeasured():
             "graded_gain_pct": 7.2,
             "graded_objective": "e2e_norm_intvty_p50",
             "tput": 1074.9,
-            "reason": "median_or_guard_failed (intvty 85.1->91.3 tput 168970.6->169070.5)",
+            "reason": "p90_regressed (intvty 85.1->91.3 tput 168970.6->169070.5)",
         }
     )
     assert "no_meas" not in line
     assert "+7.20%" in line
     assert "[e2e_norm_intvty_p50]" in line
-    assert "median_or_guard_failed" in line
+    assert "p90_regressed" in line
     # The refused gain never displaces a recorded one, and a bool is not a measurement.
     assert "+1.00%" in SharedState._format_variant_line({"name": "k", "gain_pct": 1.0, "graded_gain_pct": 9.0})
     assert "no_meas" in SharedState._format_variant_line({"name": "b", "graded_gain_pct": True})

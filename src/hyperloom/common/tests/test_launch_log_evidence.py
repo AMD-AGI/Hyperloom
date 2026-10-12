@@ -228,10 +228,12 @@ def test_missing_log_is_unavailable(tmp_path: Path) -> None:
 
 
 def test_the_config_read_keeps_the_settings_identity_discards(tmp_path: Path) -> None:
-    """The filter needs the tuned knobs, which the identity allowlist drops.
+    """The filter needs the tuned knobs, which SGLang's identity allowlist drops.
 
     Both engines, one record each. A value that is not a literal (an object
     repr, which vLLM prints routinely) costs its own key and not the record.
+    vLLM's record holds only non-default settings, every one of them asked for,
+    so its identity is the whole record.
     """
     cases = {
         "sglang": (
@@ -242,7 +244,7 @@ def test_the_config_read_keeps_the_settings_identity_discards(tmp_path: Path) ->
         "vllm": (
             "INFO 09-17 00:00:00 non-default args: {record}",
             {"tensor_parallel_size": 8, "enable_prefix_caching": True, "moe_backend": "aiter"},
-            {"tensor_parallel_size": 8},
+            {"tensor_parallel_size": 8, "enable_prefix_caching": True, "moe_backend": "aiter"},
         ),
     }
     for framework, (line, record, identity) in cases.items():
@@ -252,7 +254,7 @@ def test_the_config_read_keeps_the_settings_identity_discards(tmp_path: Path) ->
         log.write_text(line.format(record=text) + "\n", encoding="utf-8")
 
         assert evidence.observed_server_config_from_log(str(log), framework) == record, framework
-        # The same record through the identity read keeps only its allowlisted key.
+        # The same record through the identity read keeps only what that engine's identity names.
         assert evidence.observed_server_identity_from_log(str(log), framework) == identity, framework
 
 
