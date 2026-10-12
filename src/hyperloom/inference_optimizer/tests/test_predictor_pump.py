@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -462,6 +463,30 @@ async def test_entry_asks_at_its_own_decision_point_after_filing_an_earlier_answ
 
     assert len(service.requests) == 2
     assert [(r["round_id"], r["cycle"]) for r in _predictor_rounds(state)] == [("c0-s0-r0", 0), ("c1-s0-r0", 1)]
+
+
+async def test_a_filed_answer_is_the_phases_work_and_a_run_on_its_event(service, monkeypatch):
+    from hyperloom.orchestrator.phases.machine_state import _framework_exit, _framework_predicate_inputs
+    from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_SKIP_TO_KERNEL
+
+    state = _state(phase_started_unix=time.time() - 60)
+    service.answer = _answer(Action(server_args={"--kv-cache-dtype": "fp8"}), votes={0: 1})
+    phase = _entering_phase(monkeypatch, state)
+    runs: list[tuple[str, dict[str, Any]]] = []
+    phase._framework_timeline_recorder = SimpleNamespace(record_run=lambda run_id, **f: runs.append((run_id, f)))
+    await phase.on_enter_framework(SimpleNamespace(from_phase="ENABLEMENT"))
+
+    (round_,) = _predictor_rounds(state)
+    assert "task_id" not in round_ and round_["completed_at"] >= round_["asked_at"]
+    plateau, budget = _framework_predicate_inputs(state, now_unix=time.time())
+    assert plateau["specialist_round_count"] == 1
+    # The skip hint is honoured only once the phase did work.
+    exit_ = _framework_exit({"plateau": plateau, "budget": budget, "hint": ESCALATE_HINT_SKIP_TO_KERNEL})
+    assert exit_ is not None and exit_[0] == "optimize_no_more_leverage"
+    assert [(run_id, f["role"], f["status"], f["domain"], f["proposals_total"]) for run_id, f in runs] == [
+        ("c0-s0-r0", "config", "succeeded", "primatune", 1)
+    ]
+    assert runs[0][1]["dispatched_at"] == round_["asked_at"]
 
 
 async def test_a_slow_answer_does_not_hold_framework_entry_past_its_bound(service, monkeypatch):

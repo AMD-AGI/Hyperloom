@@ -21,8 +21,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Callable
 from typing import Any
 
+from hyperloom.common.timeutil import now_iso
 from hyperloom.orchestrator.phases.machine_state import (
     PHASE_FRAMEWORK_AGENT,
     phase_budget_remaining_seconds,
@@ -95,15 +97,20 @@ def _note_asked(state: Any, key: str) -> None:
 
 
 class PredictorPump:
-    """The request one session has in flight, if any."""
+    """The request one session has in flight, if any.
 
-    def __init__(self) -> None:
+    ``on_filed`` receives each round as it lands in ``specialist_rounds``.
+    """
+
+    def __init__(self, *, on_filed: Callable[[dict[str, Any]], None] | None = None) -> None:
         self._inflight: asyncio.Task[Prediction] | None = None
         self._key = ""
         self._cycle = 0
         self._conf = predictor_config.PredictorConfig()
         self._started = 0.0
+        self._asked_at = ""
         self._held_since: dict[str, float] = {}
+        self._on_filed = on_filed
 
     def _held_for_profile(self, state: Any, key: str) -> bool:
         """Whether to hold ``key`` for the re-profile in flight, for at most :data:`MAX_PROFILE_WAIT_SEC`.
@@ -161,7 +168,7 @@ class PredictorPump:
         key = decision_point_key(state)
         if self._held_for_profile(state, key):
             return
-        self._key, self._conf, self._started = key, conf, time.monotonic()
+        self._key, self._conf, self._started, self._asked_at = key, conf, time.monotonic(), now_iso()
         self._cycle = int(state.macro_cycle or 0)
         # Before anything can raise: a request that fails is not retried at the same decision point.
         _note_asked(state, self._key)
@@ -194,13 +201,14 @@ class PredictorPump:
         if not rows and mandate is None:
             log.info("predictor: nothing new to queue at %s (%d proposals)", key, len(answer.config_actions))
             return
-        state.record_specialist_round(
+        # No task_id: the round has no task, and task_id names a registry task.
+        filed = state.record_specialist_round(
             {
                 "round_id": key,
-                "task_id": key,
                 "cycle": self._cycle,
                 "domain": QUEUE_DOMAIN,
                 "priority": QUEUE_PRIORITY,
+                "asked_at": self._asked_at,
                 "proposal_set": rows,
                 "predict_meta": {
                     "latency_ms": latency_ms,
@@ -219,3 +227,5 @@ class PredictorPump:
             " with a source-change mandate" if mandate else "",
             [(row["extra_args"], row["extra_envs"], row["votes"]) for row in rows],
         )
+        if filed is not None and self._on_filed is not None:
+            self._on_filed(filed)

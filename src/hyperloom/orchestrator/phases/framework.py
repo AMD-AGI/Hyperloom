@@ -857,8 +857,30 @@ class FrameworkPhase(CoordinatorCollaborator):
         from ..predictor.pump import PredictorPump
 
         if self._predictor is None:
-            self._predictor = PredictorPump()
+            self._predictor = PredictorPump(on_filed=self._record_predictor_round)
         return self._predictor
+
+    def _record_predictor_round(self, entry: dict[str, Any]) -> None:
+        """Record a filed predictor answer on this entry's event, as the config-arm run that produced it.
+
+        Keyed by the round id, since no task produced it; only an answer that
+        queued something is filed, so the run never reads as a failure.
+        """
+        from hyperloom.inference_optimizer.breakdown.recorder.framework_event import ROLE_CONFIG
+
+        rows = entry.get("proposal_set") or []
+        mandate = str(entry.get("mandate_id") or "")
+        _record_run(
+            self,
+            str(entry.get("round_id") or ""),
+            role=ROLE_CONFIG,
+            status="succeeded",
+            domain=str(entry.get("domain") or ""),
+            dispatched_at=str(entry.get("asked_at") or ""),
+            completed_at=str(entry.get("completed_at") or ""),
+            proposals_total=len(rows),
+            summary=f"{len(rows)} config row(s)" + (f", source-change mandate {mandate}" if mandate else ""),
+        )
 
     async def _pump_predictor(self) -> None:
         """Step the PrimaTune predictor; a no-op unless an endpoint is configured."""
