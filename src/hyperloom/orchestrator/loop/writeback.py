@@ -1082,7 +1082,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             reason="stopped by the run" if stopped_by_the_run else "revalidation baseline failed",
         )
         launch_log = _extract_enablement_launch_log(result_payload)
-        if launch_log:
+        if launch_log and not stopped_by_the_run:
             state.enablement.launch_log = launch_log
             state.enablement.launch_observation_path = str(result_payload.get("boot_observation_path") or "")
         log.warning(
@@ -1323,9 +1323,14 @@ class WritebackCollaborator(CoordinatorCollaborator):
             # Stash the launch/traceback text for the FRAMEWORK pump. Excluded:
             # fast arg errors, and an AgentX preflight abort -- the pump treats a
             # non-blank log as "there is something here to author against", and
-            # for a missing pinned dependency there is not.
-            if err_class not in ("fast_exit_arg_error", AGENTX_PREFLIGHT_ERROR_CLASS) and not (
-                _is_ray_cluster_infeasible(result_payload)
+            # for a missing pinned dependency there is not. A round the run
+            # stopped is excluded too: its observation never got past process
+            # start, and as integrate_patch's "before" boot it would grade any
+            # patch that starts the server as having advanced the wall.
+            if (
+                not stopped_by_the_run
+                and err_class not in ("fast_exit_arg_error", AGENTX_PREFLIGHT_ERROR_CLASS)
+                and not _is_ray_cluster_infeasible(result_payload)
             ):
                 launch_log = _extract_enablement_launch_log(result_payload)
                 if launch_log:
