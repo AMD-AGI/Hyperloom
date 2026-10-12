@@ -270,6 +270,45 @@ def _steady_state_forecast(certificate: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+_PHASE_PREFILL = "prefill"
+_PHASE_DECODE = "decode"
+
+
+def _phase_coverage_check(trace_dir: Path, framework: str) -> dict[str, Any]:
+    """Report which serving phases (prefill/decode) the trace split captured.
+
+    A partial capture (one phase only) means the missing phase's component shares drop out of the Amdahl denominator,
+    so the gap refresh can steer instrumentation to it instead of treating it as free. A single-phase split can be
+    legitimate (a steady-state decode-only capture), so the row is advisory, not a hard trace failure. The returned
+    row's ``detail`` carries ``prefill``/``decode`` presence and, on a partial split, the ``missing`` phase name.
+    """
+    from hyperloom.inference_optimizer import framework_registry as _fw_reg
+
+    framework = str(framework or os.environ.get("FRAMEWORK", "") or "")
+    split = trace_dir / "trace_split"
+    if _fw_reg.is_scriptable(framework) or not split.is_dir():
+        return _check_row(CHECK_PHASE_COVERAGE, status="skipped", skip_reason="scriptable framework or no trace_split/")
+    names = [p.name for p in split.iterdir() if p.is_file()]
+    prefill = any("_extend_" in n or "extend_only_" in n for n in names)
+    decode = any("_decode_" in n or "decode_only_" in n for n in names)
+    if not (prefill or decode):
+        return _check_row(
+            CHECK_PHASE_COVERAGE,
+            status="skipped",
+            skip_reason="trace_split/ carries no phase-labelled chunks",
+            prefill=prefill,
+            decode=decode,
+        )
+    partial = prefill != decode
+    return _check_row(
+        CHECK_PHASE_COVERAGE,
+        status="failed" if partial else "passed",
+        prefill=prefill,
+        decode=decode,
+        missing=((_PHASE_PREFILL if decode else _PHASE_DECODE) if partial else ""),
+    )
+
+
 def _build_trace_validate(
     health: dict[str, Any],
     *,
@@ -287,6 +326,8 @@ def _build_trace_validate(
     checks = [row for row in (health.get("checks") or []) if isinstance(row, dict)]
     if isinstance(preflight, dict):
         checks = [preflight] + checks
+    phase_coverage = _phase_coverage_check(trace_dir, framework)
+    checks = checks + [phase_coverage]
     certificate = certificate or {}
     if certificate:
         checks = checks + _probe_check_rows(certificate)
@@ -305,8 +346,8 @@ def _build_trace_validate(
         "steady_state_forecast": _steady_state_forecast(certificate),
         # Which serving phases the split captured; a partial capture drops the missing phase out of the Amdahl
         # denominator, so the gap refresh reads these to steer instrumentation rather than let the phase go unseen.
-        "phase_coverage_partial": bool(health.get("phase_coverage_partial")),
-        "phase_coverage_missing": str(health.get("phase_coverage_missing") or ""),
+        "phase_coverage_partial": phase_coverage["status"] == "failed",
+        "phase_coverage_missing": str((phase_coverage.get("detail") or {}).get("missing") or ""),
         "trace_dir_level": certificate.get("trace_dir_level") or {},
         "rank_level": certificate.get("rank_level") or [],
         "chunk_level": [],
@@ -615,53 +656,6 @@ def _validate_trace_structure(
             skip_reason=("scriptable framework has no per-step split" if scriptable else "no trace_split/ directory"),
         )
 
-    # --- Check 8 (Hyperloom): both serving phases present in trace_split/ --- The optimizer ranks targets by the
-    # per-component shares this trace produces, so a phase that never lands in the split is not "zero cost" — it is
-    # unmeasured, and its share silently drops out of the denominator. On a prefill-heavy serving workload a
-    # decode-only capture hides the phase that dominates the engine, which is exactly how a run ends up optimising the
-    # phase it happened to measure. Surface the gap here so the loop instruments the missing phase instead of
-    # inferring it is free. A single-phase split can be legitimate (a steady-state decode-only capture), so this is an
-    # advisory signal, not a hard failure of the trace.
-    if split.is_dir() and not scriptable and split_files:
-        names = [p.name for p in split_files]
-        prefill_present = any("_extend_" in n or "extend_only_" in n for n in names)
-        decode_present = any("_decode_" in n or "decode_only_" in n for n in names)
-        phase_coverage = {"prefill": prefill_present, "decode": decode_present}
-        if not (prefill_present or decode_present):
-            # Neither phase is labelled — an unlabelled split is check [4]/[6]'s domain, not a coverage verdict.
-            _note_check(
-                CHECK_PHASE_COVERAGE,
-                status="skipped",
-                skip_reason="trace_split/ carries no phase-labelled (_extend_ / _decode_) chunks",
-                **phase_coverage,
-            )
-        else:
-            partial = prefill_present != decode_present
-            _note_check(
-                CHECK_PHASE_COVERAGE,
-                status="failed" if partial else "passed",
-                **phase_coverage,
-            )
-            if partial:
-                missing = "prefill" if decode_present else "decode"
-                issues.append(
-                    f"[8] trace_split/ carries only the {'decode' if decode_present else 'prefill'} phase — the "
-                    f"{missing} phase is unmeasured. If this workload exercises {missing} (agentic / long-prompt "
-                    "serving is prefill-heavy), do NOT read the component shares as complete: the missing phase drops "
-                    "out of the Amdahl denominator. Instrument the "
-                    f"{missing} path directly (a targeted per-component eval) before ranking or de-prioritising it, "
-                    "rather than optimising only the phase this capture happened to record."
-                )
-    else:
-        _note_check(
-            CHECK_PHASE_COVERAGE,
-            status="skipped",
-            skip_reason=(
-                "scriptable framework has no per-step split"
-                if scriptable
-                else "no trace_split/ directory or no split chunks"
-            ),
-        )
 
     # --- Check 7 (Hyperloom): torch-profiler captured zero ops --- A metadata-only trace (no ``cpu_op`` / ``kernel``
     # events) means the profiler active window never recorded real execution; flag it so roofline re-profiles rather
@@ -737,21 +731,11 @@ def _validate_trace_structure(
             "above for the actionable check.",
             len(issues),
         )
-    phase_coverage_row = next((c for c in checks if c["check_id"] == CHECK_PHASE_COVERAGE), None)
-    phase_coverage_partial = bool(phase_coverage_row and phase_coverage_row["status"] == "failed")
-    # The phase the split is missing (the one the gap refresh must steer instrumentation toward), or "" when covered.
-    phase_coverage_missing = ""
-    if phase_coverage_partial:
-        detail = phase_coverage_row.get("detail") or {}
-        phase_coverage_missing = "prefill" if not detail.get("prefill") else "decode"
     return {
         "issues": issues,
         "per_kernel_attribution_degraded": per_kernel_attribution_degraded,
         "capture_traces_present": capture_traces_present,
         "zero_ops": zero_ops,
-        # Hoisted from ``checks`` so the gap composer can key on a missing phase without re-scanning the vocabulary.
-        "phase_coverage_partial": phase_coverage_partial,
-        "phase_coverage_missing": phase_coverage_missing,
         "checks": checks,
     }
 
