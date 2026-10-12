@@ -181,6 +181,7 @@ class TestCollectSplitChunks:
             split_dir,
             "mixed",
             tmp_path / "trace.json.gz",
+            [],
         )
         assert chunk.name == "mixed_steady_state_test.json.gz"
         assert meta["chunks_by_mode"]["mixed"] == 1
@@ -196,6 +197,7 @@ class TestCollectSplitChunks:
             split_dir,
             "generic",
             tmp_path / "trace.json.gz",
+            [],
         )
         assert chunk.name == "steady_state_test.json.gz"
         assert meta["chunks_by_mode"]["generic"] == 1
@@ -208,6 +210,7 @@ class TestCollectSplitChunks:
                 split_dir,
                 "mixed",
                 tmp_path / "trace.json.gz",
+                [],
             )
 
     def test_missing_mode_raises(self, tmp_path):
@@ -220,6 +223,7 @@ class TestCollectSplitChunks:
                 split_dir,
                 "mixed",
                 tmp_path / "trace.json.gz",
+                [],
             )
 
 
@@ -285,6 +289,7 @@ class TestSplitterE2E:
             split_dir,
             tl_root,
             log_path,
+            [],
         )
         assert meta["chunks_by_mode"]["mixed"] >= 1
         assert chunk.exists()
@@ -311,6 +316,7 @@ class TestSplitterE2E:
             split_dir,
             tl_root,
             log_path,
+            [],
         )
         assert meta["chunks_by_mode"]["generic"] >= 1
         assert chunk.exists()
@@ -343,7 +349,7 @@ class TestBuildTraceAnalyzeCmd:
     def _run(self, *, scriptable: bool, framework: str, **payload_kw):
         import os
 
-        os.environ.setdefault("HYPERLOOM_KERNEL_AGENT_ROOT", str(TOOLS_DIR.parent))
+        os.environ.setdefault("HYPERLOOM_KERNEL_AGENT_ROOT", str(Path(__file__).resolve().parent.parent))
         from hyperloom.orchestrator.actions.executors.trace_analyze import (
             _build_trace_analyze_cmd,
         )

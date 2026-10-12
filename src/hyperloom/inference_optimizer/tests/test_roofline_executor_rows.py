@@ -232,7 +232,7 @@ async def test_a_recovered_profile_and_an_n26_retry_are_the_effective_runs(tmp_p
         "applied": True,
         "from_mode": "mixed",
         "to_mode": "decode_only",
-        "source_warning_code": "steady_state_chunk_empty",
+        "source_warning_code": "steady_state_chunk_low_quality",
     }
     assert result["status"] == "succeeded"
     assert result["profile_recovered"] is True

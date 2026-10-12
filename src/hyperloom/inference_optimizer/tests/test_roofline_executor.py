@@ -1146,13 +1146,13 @@ def _ta_empty_chunk_failure(
     return {
         "status": "failed",
         "error": (
-            f"RuntimeError: steady_state_chunk_empty: requested "
+            f"RuntimeError: steady_state_chunk_low_quality: requested "
             f"--steady-state-mode={requested} but the selected chunk has "
             "zero GPU events"
         ),
         "trace_health_warnings": [
             {
-                "code": "steady_state_chunk_empty",
+                "code": "steady_state_chunk_low_quality",
                 "severity": "blocking",
                 "requested_mode": requested,
                 "selected_chunk": f"/tmp/{requested}.json.gz",
@@ -1278,7 +1278,7 @@ def test_extract_picks_first_non_empty_mode():
     assert out is not None
     mode, w = out
     assert mode == "prefilldecode"
-    assert w["code"] == "steady_state_chunk_empty"
+    assert w["code"] == "steady_state_chunk_low_quality"
 
 
 def test_extract_handles_missing_chunk_warning():
@@ -1414,7 +1414,7 @@ async def test_no_retry_when_no_alternate_modes(tmp_path):
 
     assert result["status"] == "failed"
     assert result.get("phase") == "trace_analyze"
-    assert "steady_state_chunk_empty" in str(result.get("error") or "")
+    assert "steady_state_chunk_low_quality" in str(result.get("error") or "")
     assert calls["n"] == 1
     assert state.last_trace_analyze == {}
 
@@ -1448,13 +1448,13 @@ async def test_retry_failure_propagates_without_third_attempt(tmp_path):
     fail2 = {
         "status": "failed",
         "error": (
-            "RuntimeError: steady_state_chunk_empty: requested "
+            "RuntimeError: steady_state_chunk_low_quality: requested "
             "--steady-state-mode=prefilldecode but the selected chunk has "
             "zero GPU events"
         ),
         "trace_health_warnings": [
             {
-                "code": "steady_state_chunk_empty",
+                "code": "steady_state_chunk_low_quality",
                 "requested_mode": "prefilldecode",
                 "non_empty_modes": ["decode_only"],
             },
@@ -1557,7 +1557,7 @@ async def test_retry_success_stamps_n26_metadata(tmp_path):
     assert stamp.get("applied") is True
     assert stamp.get("from_mode") == "mixed"
     assert stamp.get("to_mode") == "prefilldecode"
-    assert stamp.get("source_warning_code") == "steady_state_chunk_empty"
+    assert stamp.get("source_warning_code") == "steady_state_chunk_low_quality"
 
 
 @pytest.mark.asyncio
