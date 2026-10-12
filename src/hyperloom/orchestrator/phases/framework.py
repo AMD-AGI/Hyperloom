@@ -2259,6 +2259,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             await self._maybe_bench_untested_proposals()
             await self._coord.phase_internal.maybe_enqueue_explore_research_scout()
             await self._coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
+            await self._coord.specialist_dispatch.maybe_ensure_custom_specialist()
             self._record_advisory_plateau()
         except Exception as exc:
             log.exception("FRAMEWORK pump failed")

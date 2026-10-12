@@ -531,38 +531,40 @@ def test_detect_checkpoint_precision_float8_e4m3fn(tmp_path):
     assert _detect_checkpoint_precision(str(tmp_path)) == "fp8"
 
 
-def test_resolve_workload_knobs_precision_auto_detected(tmp_path):
+def test_resolve_precision_auto_detected(tmp_path, monkeypatch):
     import argparse
 
-    from hyperloom.inference_optimizer.cli import _resolve_workload_knobs
+    from hyperloom.inference_optimizer.cli import _resolve_precision
 
+    monkeypatch.setenv("PRECISION", "")
     (tmp_path / "config.json").write_text('{"torch_dtype": "bfloat16"}', encoding="utf-8")
     args = argparse.Namespace(precision=None, model=str(tmp_path), tp=None, ep=None, conc=None)
-    _resolve_workload_knobs(args)
+    _resolve_precision(args)
     assert args.precision == "bf16"
 
 
-def test_resolve_workload_knobs_explicit_precision_kept_with_warning(tmp_path, capsys):
+def test_resolve_precision_explicit_kept_with_warning(tmp_path, capsys):
     import argparse
 
-    from hyperloom.inference_optimizer.cli import _resolve_workload_knobs
+    from hyperloom.inference_optimizer.cli import _resolve_precision
 
     (tmp_path / "config.json").write_text('{"torch_dtype": "bfloat16"}', encoding="utf-8")
     args = argparse.Namespace(precision="fp8", model=str(tmp_path), tp=None, ep=None, conc=None)
-    _resolve_workload_knobs(args)
+    _resolve_precision(args)
     assert args.precision == "fp8"
     captured = capsys.readouterr()
     assert "WARN" in captured.err and "bf16" in captured.err
 
 
-def test_resolve_workload_knobs_resume_precision_wins(tmp_path):
+def test_resolve_precision_resume_value_wins(tmp_path, monkeypatch):
     import argparse
     from types import SimpleNamespace
 
-    from hyperloom.inference_optimizer.cli import _resolve_workload_knobs
+    from hyperloom.inference_optimizer.cli import _resolve_precision
 
+    monkeypatch.setenv("PRECISION", "")
     (tmp_path / "config.json").write_text('{"torch_dtype": "bfloat16"}', encoding="utf-8")
     args = argparse.Namespace(precision=None, model=str(tmp_path), tp=None, ep=None, conc=None)
     state = SimpleNamespace(precision="fp8", tp=2, ep=1, conc=64)
-    _resolve_workload_knobs(args, state)
+    _resolve_precision(args, state)
     assert args.precision == "fp8"

@@ -545,6 +545,9 @@ class Coordinator:
                 # its contents, so a snapshot taken here would be pre-replay.
                 proposals=lambda: self.state.pending_proposals,
                 session_dir=self.session_dir,
+                # The window a revalidation holds is closed by the writeback when
+                # its result is booked; this pass only closes one nobody will.
+                result_pending=lambda task_id: self.dispatcher.owes_result(task_id),
             )
             self.__dict__["_reconciler"] = r
         return r
@@ -733,11 +736,6 @@ class Coordinator:
                 self.phase_machine.advance_phase_if_needed,
                 stage="advance_phase_pre_reactor",
             )
-            if self.shared_state.pending_escalate_hint.strip():
-                await self.await_within_session_bound(
-                    self.phase_machine.advance_phase_if_needed,
-                    stage="advance_phase_hint",
-                )
         except Exception as exc:
             log.exception("phase advance before reactors failed")
             self.record_exception(stage="advance_phase_pre_reactor", exc=exc)

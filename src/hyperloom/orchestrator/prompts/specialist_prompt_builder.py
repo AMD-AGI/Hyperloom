@@ -822,6 +822,12 @@ def _focus_framework_rewrite_specialist(
     ]
 
 
+def _focus_custom_specialist(inp: SpecialistPromptInputs) -> list[str]:
+    """Render the operator-supplied focus verbatim; empty when not configured."""
+    text = inp.custom_specialist_prompt.strip()
+    return text.splitlines() if text else []
+
+
 _DOMAIN_FOCUS_TEMPLATES: dict[str, "Callable[[SpecialistPromptInputs], list[str]]"] = {
     "serving_specialist": _focus_serving_specialist,
     "framework_rewrite_specialist": _focus_framework_rewrite_specialist,
@@ -833,6 +839,7 @@ _DOMAIN_FOCUS_TEMPLATES: dict[str, "Callable[[SpecialistPromptInputs], list[str]
     "research_scout_specialist": _focus_research_scout_specialist,
     "static_recon_specialist": _focus_static_recon_specialist,
     "enablement_specialist": _focus_enablement_specialist,
+    "custom_specialist": _focus_custom_specialist,
 }
 
 
@@ -977,6 +984,9 @@ class SpecialistPromptInputs:
     prior_attempts: list[dict[str, Any]] = field(default_factory=list)
     pr_lead: dict[str, Any] = field(default_factory=dict)
 
+    # Operator-defined specialist focus, rendered verbatim; empty when not configured.
+    custom_specialist_prompt: str = ""
+
 
 # Section 1 — Identity & autonomy
 def _authors_patches(inp: SpecialistPromptInputs) -> bool:
@@ -1061,12 +1071,13 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         if tag_domain is None or tag_domain.key in rendered_focus_keys:
             continue
         tag_focus = _DOMAIN_FOCUS_TEMPLATES.get(tag_domain.key)
-        if tag_focus is None:
+        tag_lines = tag_focus(inp) if tag_focus is not None else []
+        if not tag_lines:
             continue
         body.append("")
         body.append(f"### Domain focus — {tag_domain.key}")
         body.append("")
-        body.extend(tag_focus(inp))
+        body.extend(tag_lines)
         rendered_focus_keys.add(tag_domain.key)
     if inp.scope == "domains":
         body.extend(_cross_domain_block(inp))
@@ -2517,6 +2528,19 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
             _section_pr_feed(inp),
             _section_source_hint(inp),
         ]
+    elif inp.domain.key == "custom_specialist":
+        # The operator focus is the mandate; perf context is left to the operator text.
+        # Experience KB stays: the warmup records its block as shown to every FRAMEWORK_AGENT specialist.
+        user_sections = [
+            _section_mandate(inp),
+            _section_hardware(inp),
+            _section_pd_disaggregation(inp),
+            _section_execution_budget(inp),
+            _section_gap(inp),
+            _section_experience_kb(inp),
+        ]
+        if _authors_patches(inp):
+            user_sections.append(_section_source_hint(inp))
     else:
         user_sections = [
             _section_mandate(inp),

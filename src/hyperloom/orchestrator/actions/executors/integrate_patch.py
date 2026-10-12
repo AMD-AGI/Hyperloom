@@ -60,10 +60,10 @@ from hyperloom.common.perf_metric import (
     GRADED_OUTPUT,
     VERDICT_KEEP,
     holds_within_band,
+    incomparability_reason,
     latency_veto_reason,
     perf_snapshot_from_mapping,
     resolve_grading_anchor_perf,
-    rounds_are_comparable,
 )
 from hyperloom.inference_optimizer.grading import resolved_grading
 from hyperloom.orchestrator.measurement.runtime_findings import (
@@ -1793,8 +1793,9 @@ def _intvty_guard_refusals(shared_state: Any, bench_result: dict[str, Any]) -> l
         for key in (GRADED_INTVTY, GRADED_OUTPUT)
         if not holds_within_band(cand_perf, ref_perf, key, noise_pct=noise_pct)
     ]
-    if not rounds_are_comparable(cand_perf, ref_perf):
-        refusals.append("rounds are not comparable")
+    incomparable = incomparability_reason(cand_perf, ref_perf)
+    if incomparable:
+        refusals.append(f"rounds are not comparable ({incomparable})")
     return refusals
 
 
