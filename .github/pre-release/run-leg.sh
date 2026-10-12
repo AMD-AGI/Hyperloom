@@ -28,13 +28,16 @@
 #   CI_VERSION          unique id of this attempt; keys the workspace and the claude
 #                       session, so a new attempt never resumes an old conversation
 #   LEG_WORK_DIR        writable root; the leg workspace is LEG_WORK_DIR/CI_VERSION/<leg>
-#   USER_DATA_PATH      Hyperloom session root (written to .env unchanged)
+#   USER_DATA_PATH      Hyperloom session root (written to .env unchanged); it must be
+#                       exclusive to this leg, since the runner judges the newest
+#                       state.json written under it during this attempt
 #   LEG_MODEL_PATH      model directory for this leg, or
 #   LEG_MODELS_DIR      a directory holding Qwen3-8B/ and Qwen3-14B-FP8/
 #   ANTHROPIC_API_KEY  ANTHROPIC_BASE_URL  CLAUDE_MODEL
 #   CLAUDE_CLI_VERSION  only when no `claude` is on PATH
 # Optional env: LEG_WHEEL (prebuilt wheel instead of building this checkout),
-#   HF_TOKEN, ANTHROPIC_CUSTOM_HEADERS, INFERENCE_OPTIMIZER_SESSION_LAYOUT,
+#   HF_TOKEN, ANTHROPIC_CUSTOM_HEADERS (a gateway that needs a header gets it from
+#   the caller; none is assumed), INFERENCE_OPTIMIZER_SESSION_LAYOUT,
 #   GEAK_CLAUDE_MODEL, FORGE_CLAUDE_MODEL, OPENAI_BASE_URL, OPENAI_API_KEY,
 #   CODEX_MODEL; timing knobs LEG_SETUP_DEADLINE_S, LEG_SETUP_STALL_S,
 #   LEG_SETUP_MAX_TURNS, LEG_TURN_GAP_S, LEG_WAIT_INTERVAL_S, LEG_STALL_GRACE_S,
