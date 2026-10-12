@@ -240,6 +240,49 @@ def test_python_rename_and_replace_apis_protect_both_paths(tmp_path: Path):
     assert all(gate._bash_deny_reason(command) for command in commands)
 
 
+def test_python_shutil_apis_protect_both_of_their_paths(tmp_path: Path):
+    gate, workspace = _gate(tmp_path)
+    driver = workspace / "forge_driver.py"
+    commands = [
+        f"python -c \"import shutil; shutil.copy('scratch.py', {str(driver)!r})\"",
+        f"python -c \"import shutil; shutil.copy2({str(driver)!r}, 'saved.py')\"",
+        f"python -c \"import shutil; shutil.copyfile('scratch.py', {str(driver)!r})\"",
+        f"python -c \"import shutil; shutil.move({str(driver)!r}, 'saved.py')\"",
+        f'python -c "import shutil; shutil.rmtree({str(workspace / "scripts" / "task_runner.py")!r})"',
+    ]
+
+    assert all(gate._bash_deny_reason(command) for command in commands)
+
+
+def test_a_composed_protected_path_is_still_resolved(tmp_path: Path):
+    gate, workspace = _gate(tmp_path)
+    commands = [
+        "python -c \"import os; open(os.path.join({!r}, 'forge_driver.py'), 'w').write('x')\"".format(str(workspace)),
+        "python -c \"from pathlib import Path; (Path({!r}) / 'forge_driver.py').write_text('x')\"".format(
+            str(workspace)
+        ),
+        "python -c \"from pathlib import Path; Path({!r}).resolve().write_text('x')\"".format(
+            str(workspace / "forge_driver.py")
+        ),
+        # The name is bound once and written through later, which is how a script usually names its output.
+        "python -c \"from pathlib import Path; out = Path({!r}); out.write_text('x')\"".format(
+            str(workspace / "config.yaml")
+        ),
+    ]
+
+    assert all(gate._bash_deny_reason(command) for command in commands)
+
+
+def test_a_heredoc_that_is_not_fed_to_python_is_not_scanned_as_shell(tmp_path: Path):
+    gate, _workspace = _gate(tmp_path)
+    command = """cat <<'DOC'
+rm forge_driver.py
+DOC
+"""
+
+    assert not gate._bash_deny_reason(command)
+
+
 def test_stop_detects_protected_snapshot_changes(tmp_path: Path):
     gate, workspace = _gate(tmp_path)
 
