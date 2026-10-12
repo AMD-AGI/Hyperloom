@@ -1,0 +1,230 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+name: Dispatron sync
+
+# Carries out what the run control plane asks of this repository, with this
+# workflow's own GITHUB_TOKEN -- the control plane holds no credential for it:
+#
+#   issue_open     file an issue for a regression a health check found and a
+#                  triage verified
+#   issue_comment  add a recurrence of that regression to the open issue
+#   issue_close    comment and close once the configuration is green again
+#   commit_status  set the `release-qualification` status on a candidate commit
+#
+# Each request is pulled from the run API (the same one ci-e2e reaches, with the
+# same key), carried out, and acknowledged, so it is done once. Every text was
+# checked for internal identifiers before it was queued and again when pulled;
+# this workflow posts it verbatim and never adds anything of its own. An issue or
+# comment carries a hidden `<!-- sync:<key> -->` line: a request whose earlier
+# attempt was made but never acknowledged finds it instead of posting twice.
+#
+# Fails closed: an unreachable run API, a refused key, a request for another
+# repository or of an unknown shape, or any GitHub error makes the run red; the
+# request stays pending and the next run tries it again.
+
+on:
+  schedule:
+    - cron: '7,22,37,52 * * * *'   # every 15 minutes
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  statuses: write
+
+concurrency:
+  group: dispatron-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.repository == 'AMD-AGI/Hyperloom'
+    # A self-hosted runner that can reach github.com and the run API: the same
+    # pool ci-e2e runs on.
+    runs-on: ${{ vars.CI_E2E_RUNNER_LABEL || 'Hyperloom-e2e-ci' }}
+    timeout-minutes: 15
+    steps:
+      - name: Ensure jq
+        run: command -v jq >/dev/null 2>&1 || (sudo apt-get update && sudo apt-get install -y jq)
+
+      - name: Pull, carry out, acknowledge
+        env:
+          DISPATRON_BASE_URL: ${{ vars.CI_E2E_DISPATRON_BASE_URL || 'http://dispatron-api.dispatron.svc.cluster.local:8080' }}
+          DISPATCH_TOKEN: ${{ secrets.CI_E2E_API_KEY }}
+          CI_E2E_INSECURE: ${{ secrets.CI_E2E_INSECURE || '0' }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          API_URL: ${{ github.api_url }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          : "${DISPATCH_TOKEN:?the CI_E2E_API_KEY secret is required}"
+          insecure=()
+          [ "${CI_E2E_INSECURE:-0}" = "1" ] && insecure=(--insecure)
+          requests="${DISPATRON_BASE_URL%/}/dispatch/github-sync/requests"
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+
+          # METHOD PATH [JSON] -> the HTTP status; the body is left in $tmp/gh.json.
+          github() {
+            local args=(-sS -o "$tmp/gh.json" -w '%{http_code}' -X "$1"
+              -H "Authorization: Bearer $GH_TOKEN"
+              -H "Accept: application/vnd.github+json"
+              -H "X-GitHub-Api-Version: 2022-11-28")
+            [ $# -ge 3 ] && args+=(--data "$3")
+            local code
+            code="$(curl "${args[@]}" "$API_URL$2" || true)"
+            echo "${code:-000}"
+          }
+
+          # ID OK RESULT_JSON ERROR. A refused acknowledgement stops the run: the
+          # request stays pending and its marker keeps the retry from repeating it.
+          ack() {
+            local body
+            body="$(jq -nc --argjson ok "$2" --argjson r "$3" --arg e "$4" \
+              '{ok: $ok, result: $r, error: $e[0:500]}')"
+            curl -fsS "${insecure[@]}" -X POST \
+              -H "Authorization: Bearer $DISPATCH_TOKEN" -H "Content-Type: application/json" \
+              --data "$body" "$requests/$1/ack" >/dev/null
+          }
+
+          # NUMBER -> the issue's state, or nothing when GitHub did not answer.
+          issue_state() {
+            [ "$(github GET "/repos/$REPO/issues/$1")" = 200 ] || return 0
+            jq -r '.state // empty' "$tmp/gh.json"
+          }
+
+          # NUMBER MARKER: whether a comment carrying MARKER is already there.
+          has_comment() {
+            [ "$(github GET "/repos/$REPO/issues/$1/comments?per_page=100")" = 200 ] || return 2
+            jq -e --arg m "$2" 'any(.[]; (.body // "") | contains($m))' "$tmp/gh.json" >/dev/null
+          }
+
+          # NUMBER BODY MARKER -> 0 once the comment is there.
+          comment_once() {
+            local found=0
+            has_comment "$1" "$3" || found=$?
+            [ "$found" = 0 ] && return 0
+            [ "$found" = 1 ] || return 1
+            [ "$(github POST "/repos/$REPO/issues/$1/comments" \
+              "$(jq -nc --arg b "$2" '{body: $b}')")" = 201 ]
+          }
+
+          open_issue() {
+            local title body
+            title="$(jq -r '.payload.title // empty' "$tmp/req.json")"
+            body="$(jq -r '.payload.body // empty' "$tmp/req.json")"
+            [ -n "$title" ] && [ -n "$body" ] || { error="no title or body"; return; }
+            code="$(github GET "/repos/$REPO/issues?state=all&creator=github-actions%5Bbot%5D&sort=created&direction=desc&per_page=100")"
+            [ "$code" = 200 ] || { error="listing issues answered HTTP $code"; return; }
+            result="$(jq -c --arg m "$marker" \
+              'first(.[] | select(.pull_request == null and ((.body // "") | contains($m)))
+                     | {number, url: .html_url}) // empty' "$tmp/gh.json")"
+            [ -n "$result" ] && return
+            code="$(github POST "/repos/$REPO/issues" \
+              "$(jq -nc --arg t "$title" --arg b "$body" '{title: $t, body: $b}')")"
+            if [ "$code" = 201 ]; then
+              result="$(jq -c '{number, url: .html_url}' "$tmp/gh.json")"
+            else
+              error="filing answered HTTP $code"
+            fi
+          }
+
+          comment_issue() {
+            local body state
+            body="$(jq -r '.payload.body // empty' "$tmp/req.json")"
+            [ -n "$body" ] || { error="no body"; return; }
+            state="$(issue_state "$number")"
+            case "$state" in
+              closed) result='{"issue_state":"closed"}' ;;
+              open)
+                if comment_once "$number" "$body" "$marker"; then
+                  result='{"issue_state":"open"}'
+                else
+                  error="commenting failed"
+                fi
+                ;;
+              *) error="issue $number could not be read" ;;
+            esac
+          }
+
+          close_issue() {
+            local body state
+            body="$(jq -r '.payload.body // empty' "$tmp/req.json")"
+            [ -n "$body" ] || { error="no body"; return; }
+            state="$(issue_state "$number")"
+            case "$state" in
+              closed) result='{"issue_state":"closed"}' ;;
+              open)
+                if ! comment_once "$number" "$body" "$marker"; then
+                  error="commenting failed"
+                else
+                  code="$(github PATCH "/repos/$REPO/issues/$number" \
+                    '{"state":"closed","state_reason":"completed"}')"
+                  if [ "$code" = 200 ]; then
+                    result='{"issue_state":"closed"}'
+                  else
+                    error="closing answered HTTP $code"
+                  fi
+                fi
+                ;;
+              *) error="issue $number could not be read" ;;
+            esac
+          }
+
+          set_status() {
+            local sha state
+            sha="$(jq -r '.payload.sha // empty' "$tmp/req.json")"
+            state="$(jq -r '.payload.state // empty' "$tmp/req.json")"
+            [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { error="sha is not a full commit id"; return; }
+            case "$state" in pending|success|failure|error) ;; *) error="unknown state"; return ;; esac
+            code="$(github POST "/repos/$REPO/statuses/$sha" \
+              "$(jq -c '.payload | {state, context, description}' "$tmp/req.json")")"
+            if [ "$code" = 201 ]; then
+              result='{}'
+            else
+              error="setting the status answered HTTP $code"
+            fi
+          }
+
+          curl -fsS "${insecure[@]}" -H "Authorization: Bearer $DISPATCH_TOKEN" \
+            "$requests?limit=50" > "$tmp/pending.json"
+          count="$(jq '.requests | length' "$tmp/pending.json")"
+          echo "pending requests: $count"
+          failed=0
+          for ((i = 0; i < count; i++)); do
+            jq -c ".requests[$i]" "$tmp/pending.json" > "$tmp/req.json"
+            id="$(jq -r '.id' "$tmp/req.json")"
+            kind="$(jq -r '.kind' "$tmp/req.json")"
+            key="$(jq -r '.key' "$tmp/req.json")"
+            number="$(jq -r '.issue_number // empty' "$tmp/req.json")"
+            marker="<!-- sync:$key -->"
+            result="" error=""
+            if [ "$(jq -r '.repo' "$tmp/req.json")" != "$REPO" ]; then
+              error="the request is for another repository"
+            elif ! [[ "$id" =~ ^[0-9]+$ && "$key" =~ ^[a-z_]+:[A-Za-z0-9_.:-]+$ ]]; then
+              error="malformed request"
+            else
+              case "$kind" in
+                issue_open) open_issue ;;
+                issue_comment|issue_close)
+                  if [[ "$number" =~ ^[0-9]+$ ]]; then
+                    if [ "$kind" = issue_comment ]; then comment_issue; else close_issue; fi
+                  else
+                    error="no issue number"
+                  fi
+                  ;;
+                commit_status) set_status ;;
+                *) error="unknown kind" ;;
+              esac
+            fi
+            if [ -n "$result" ]; then
+              echo "request $id ($kind): done"
+              ack "$id" true "$result" ""
+            else
+              echo "::warning::request $id ($kind): ${error:-no outcome}"
+              ack "$id" false '{}' "${error:-no outcome}"
+              failed=1
+            fi
+          done
+          exit "$failed"
