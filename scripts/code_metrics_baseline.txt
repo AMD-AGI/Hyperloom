@@ -102,7 +102,6 @@ cognitive-complexity src/hyperloom/orchestrator/delivery/ledger.py::restore_reco
 cognitive-complexity src/hyperloom/orchestrator/enablement/artifacts.py::snapshot_round 38
 cognitive-complexity src/hyperloom/orchestrator/enablement/build.py::EnablementBuild.maybe_escalate_to_targeted_build 37
 cognitive-complexity src/hyperloom/orchestrator/enablement/params.py::EnablementParams._derive_checkpoint_weight_facts 32
-cognitive-complexity src/hyperloom/orchestrator/enablement/params.py::EnablementParams.build_enablement_specialist_params 59
 cognitive-complexity src/hyperloom/orchestrator/enablement/recipe/section.py::_collect_landed_stack 49
 cognitive-complexity src/hyperloom/orchestrator/enablement/recipe/sufficiency.py::_payload_references 31
 cognitive-complexity src/hyperloom/orchestrator/enablement/runtime/localization.py::build_localization_diff 31
@@ -168,7 +167,7 @@ cognitive-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackColl
 cognitive-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._replay_keep_from_result 41
 cognitive-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._resume_recover_orphaned_keeps 36
 cognitive-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator.build_env_spec 36
-cognitive-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator.handle_unpromotable_result 61
+cognitive-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator.handle_unpromotable_result 57
 cognitive-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator.lift_to_current_best 213
 cognitive-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator.validate_geak_via_geak_harness 50
 cognitive-complexity src/hyperloom/orchestrator/measurement/apply_verification.py::verify_applied 32
@@ -394,7 +393,7 @@ cyclomatic-complexity src/hyperloom/orchestrator/loop/sub_agent_runner.py::SubAg
 cyclomatic-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_baseline 29
 cyclomatic-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_explore 48
 cyclomatic-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_integrate_patch 22
-cyclomatic-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator.handle_unpromotable_result 26
+cyclomatic-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator.handle_unpromotable_result 25
 cyclomatic-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator.lift_to_current_best 51
 cyclomatic-complexity src/hyperloom/orchestrator/phases/framework.py::FrameworkPhase.maybe_autosubmit_framework_config 21
 cyclomatic-complexity src/hyperloom/orchestrator/phases/framework.py::FrameworkPhase.maybe_autosubmit_specialist_patches 26
@@ -681,11 +680,11 @@ function-lines src/hyperloom/orchestrator/actions/executors/explore.py::ExploreE
 function-lines src/hyperloom/orchestrator/actions/executors/explore.py::filter_baseline_noop_variants 99
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._bench_patch 264
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._enablement_keep_records 211
-function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._gate_enablement 284
+function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._gate_enablement 281
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._gate_perf 459
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._keep_inert_switches 111
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._maybe_write_framework_kb_record 114
-function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._stage_apply 538
+function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._stage_apply 521
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._stage_gate 84
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._stage_localize_source 81
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._stage_provision_attempt_runtime 107
@@ -713,10 +712,10 @@ function-lines src/hyperloom/orchestrator/enablement/build.py::EnablementBuild._
 function-lines src/hyperloom/orchestrator/enablement/build.py::EnablementBuild.maybe_enqueue_specialist_requested_build 99
 function-lines src/hyperloom/orchestrator/enablement/build.py::EnablementBuild.maybe_escalate_to_targeted_build 139
 function-lines src/hyperloom/orchestrator/enablement/lane.py::EnablementLane._maybe_enqueue_enablement_specialist 94
-function-lines src/hyperloom/orchestrator/enablement/lane.py::EnablementLane.maybe_rearm_enablement 112
+function-lines src/hyperloom/orchestrator/enablement/lane.py::EnablementLane.maybe_rearm_enablement 105
 function-lines src/hyperloom/orchestrator/enablement/params.py::EnablementParams._derive_checkpoint_weight_facts 117
 function-lines src/hyperloom/orchestrator/enablement/params.py::EnablementParams._discover_enablement_candidate_refs 87
-function-lines src/hyperloom/orchestrator/enablement/params.py::EnablementParams.build_enablement_specialist_params 211
+function-lines src/hyperloom/orchestrator/enablement/params.py::EnablementParams.build_enablement_specialist_params 130
 function-lines src/hyperloom/orchestrator/enablement/recipe/section.py::_collect_landed_stack 96
 function-lines src/hyperloom/orchestrator/enablement/recipe/sufficiency.py::_patch_step_reasons 92
 function-lines src/hyperloom/orchestrator/enablement/runtime/targeted_build.py::run_aiter_build 218
@@ -1061,7 +1060,7 @@ module-lines src/hyperloom/orchestrator/actions/executors/_multi_node_server_lif
 module-lines src/hyperloom/orchestrator/actions/executors/_workload_envs.py 2261
 module-lines src/hyperloom/orchestrator/actions/executors/baseline.py 4270
 module-lines src/hyperloom/orchestrator/actions/executors/explore.py 1905
-module-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py 4915
+module-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py 4886
 module-lines src/hyperloom/orchestrator/actions/executors/profile.py 1590
 module-lines src/hyperloom/orchestrator/actions/executors/report.py 1399
 module-lines src/hyperloom/orchestrator/actions/executors/roofline.py 1398
