@@ -303,7 +303,7 @@ class _MarkdownOnlyBackend:
         return AgentRunResult(text="markdown analysis complete")
 
 
-def _service(tmp_path, backend, *, profiling_enabled=True):
+def _service(tmp_path, backend, *, profiling_enabled=True, **config_fields):
     knowledge = tmp_path / "knowledge"
     profiling = knowledge / "common_methodology" / "profiling"
     profiling.mkdir(
@@ -320,7 +320,7 @@ def _service(tmp_path, backend, *, profiling_enabled=True):
         (profiling / name).write_text(f"# {name}\n")
     return AnalysisAgentService(
         backend=backend,
-        config=SimpleNamespace(local_knowledge_dir=knowledge),
+        config=SimpleNamespace(local_knowledge_dir=knowledge, **config_fields),
         timeout_sec=10,
         max_turns=10,
         profiling_enabled=profiling_enabled,
