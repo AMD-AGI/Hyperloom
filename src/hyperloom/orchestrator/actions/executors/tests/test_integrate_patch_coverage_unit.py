@@ -18,6 +18,7 @@ import pytest
 from hyperloom.orchestrator.tests._helpers import patch_integrate_patch_roots
 
 from hyperloom.orchestrator.actions.executors import _accuracy_gate
+from hyperloom.orchestrator.actions.executors import _setup_replay
 from hyperloom.orchestrator.actions.executors import integrate_patch as ip
 
 from hyperloom.orchestrator.tests._helpers import integrate_extra, variant_result
@@ -187,9 +188,9 @@ async def test_forged_task_rejected_before_any_side_effect(tmp_path, monkeypatch
 
     def _spy_setup(*args, **kwargs):
         called["setup"] = True
-        return {"applied": [], "skipped": [], "failed": []}
+        return {"applied": [], "failed": [], "executions": []}
 
-    monkeypatch.setattr(ip, "run_setup_commands", _spy_setup)
+    monkeypatch.setattr(_setup_replay, "run_setup_commands", _spy_setup)
 
     class _SS:
         def get_specialist_patch_verdict(self, tid):

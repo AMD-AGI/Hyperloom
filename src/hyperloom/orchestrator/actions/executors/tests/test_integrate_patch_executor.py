@@ -20,6 +20,7 @@ from hyperloom.orchestrator.tests._helpers import (
     patch_integrate_patch_roots,
 )
 
+from hyperloom.orchestrator.actions.executors import _setup_replay as sr_mod
 from hyperloom.orchestrator.actions.executors._accuracy_gate import framework_run_eval_envs
 from hyperloom.orchestrator.actions.executors.integrate_patch import (
     IntegratePatchExecutor,
@@ -528,7 +529,7 @@ async def test_same_executor_second_early_return_does_not_reuse_runtime(tmp_path
     )
     monkeypatch.setattr(ip, "_candidate_mutation_roots", lambda **_kwargs: [])
     monkeypatch.setattr(ip, "_resolve_framework_root", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(ip, "run_setup_commands", forbidden)
+    monkeypatch.setattr(sr_mod, "run_setup_commands", forbidden)
     executor = IntegratePatchExecutor(session_dir=session)
     monkeypatch.setattr(executor, "_bench_patch", forbidden)
     state = SimpleNamespace(
@@ -1554,7 +1555,6 @@ async def test_enablement_zero_patch_round_does_not_erase_prior_accepted_work(tm
 @pytest.mark.asyncio
 async def test_enablement_replays_setup_commands_before_boot(tmp_path: Path, monkeypatch):
     """Enablement integrate replays setup_commands and surfaces them in the result."""
-    from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
@@ -1569,7 +1569,7 @@ async def test_enablement_replays_setup_commands_before_boot(tmp_path: Path, mon
         replayed["commands"] = list(commands)
         return {"applied": [cmd for cmd, _source in commands], "skipped": [], "failed": [], "executions": []}
 
-    monkeypatch.setattr(ip_mod, "run_setup_commands", _spy_run_setup)
+    monkeypatch.setattr(sr_mod, "run_setup_commands", _spy_run_setup)
 
     async def _fake_bench(**_kwargs):
         return {
@@ -1608,7 +1608,6 @@ async def test_a_setup_command_that_is_not_an_install_fails_the_round_before_any
     Replaying the rest would boot an environment no round asked for and grade
     the patches against it, so nothing runs and no patch applies.
     """
-    from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
@@ -1618,7 +1617,7 @@ async def test_a_setup_command_that_is_not_an_install_fails_the_round_before_any
     executor = IntegratePatchExecutor(session_dir=session_dir)
 
     monkeypatch.setattr(
-        ip_mod,
+        sr_mod,
         "run_setup_commands",
         lambda *a, **kw: pytest.fail("a refused proposal still reached the replay"),
     )
@@ -1672,7 +1671,7 @@ async def _round_exiting_after_setup(tmp_path: Path, monkeypatch, *, arrange, pa
         on_execution(row)
         return {"applied": [cmd], "skipped": [], "failed": [], "executions": [row]}
 
-    monkeypatch.setattr(ip_mod, "run_setup_commands", _installed)
+    monkeypatch.setattr(sr_mod, "run_setup_commands", _installed)
     arrange(ip_mod, monkeypatch)
 
     shared_state = SimpleNamespace(
@@ -1805,7 +1804,7 @@ async def test_base_sha_is_captured_before_the_setup_commands_run(tmp_path: Path
         git_commit_all(repo, "install")
         return {"applied": [cmd for cmd, _source in commands], "skipped": [], "failed": [], "executions": []}
 
-    monkeypatch.setattr(ip_mod, "run_setup_commands", _installing_commits)
+    monkeypatch.setattr(sr_mod, "run_setup_commands", _installing_commits)
     monkeypatch.setattr(ip_mod, "resolve_session_framework_root", lambda: str(repo))
 
     shared_state = SimpleNamespace(
@@ -1865,7 +1864,7 @@ async def test_base_sha_of_an_explicit_root_predates_the_setup_commands(tmp_path
         git_commit_all(explicit_root, "install")
         return {"applied": [cmd for cmd, _source in commands], "skipped": [], "failed": [], "executions": []}
 
-    monkeypatch.setattr(ip_mod, "run_setup_commands", _installing_commits)
+    monkeypatch.setattr(sr_mod, "run_setup_commands", _installing_commits)
     monkeypatch.setattr(ip_mod, "resolve_session_framework_root", lambda: str(session_root))
 
     shared_state = SimpleNamespace(
@@ -1944,7 +1943,7 @@ async def test_setup_replay_runs_off_the_event_loop_thread(tmp_path: Path, monke
         seen["ident"] = threading.get_ident()
         return {"applied": [], "skipped": [], "failed": []}
 
-    monkeypatch.setattr(ip_mod, "run_setup_commands", _spy_run_setup)
+    monkeypatch.setattr(sr_mod, "run_setup_commands", _spy_run_setup)
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
@@ -2827,7 +2826,6 @@ async def test_the_closure_baseline_is_read_before_the_first_setup_command(tmp_p
     """The setup script checks what changed against this reading, so it must predate every install."""
     from types import SimpleNamespace
 
-    from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
     from hyperloom.orchestrator.enablement.recipe import keep_probe
 
     session_dir = tmp_path / "session"
@@ -2846,7 +2844,7 @@ async def test_the_closure_baseline_is_read_before_the_first_setup_command(tmp_p
         return {"applied": [cmd for cmd, _source in commands], "skipped": [], "failed": [], "executions": []}
 
     monkeypatch.setattr(keep_probe, "probe_keep_environment", _probe)
-    monkeypatch.setattr(ip_mod, "run_setup_commands", _installed)
+    monkeypatch.setattr(sr_mod, "run_setup_commands", _installed)
     shared_state = SimpleNamespace(
         enablement=EnablementRound(setup_executions=list(prior_ledger)),
         save=lambda _dir: None,

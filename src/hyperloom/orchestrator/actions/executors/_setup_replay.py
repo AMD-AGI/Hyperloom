@@ -5,17 +5,23 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+from hyperloom.inference_optimizer.session.session_paths import runs_dir
 
 from ...enablement.recipe.credentials import sanitize_command_text
 from ...enablement.recipe.setup_allowlist import is_allowlisted_setup_command
 from ...enablement.recipe.setup_ledger import CMD_SANITIZED_CHARS, build_execution_row
 from ..cancel_channel import cancel_scope_listener, stop_was_asked_for
+
+if TYPE_CHECKING:
+    from ._integrate_attempt import IntegrateAttempt
 
 log = logging.getLogger(__name__)
 
@@ -171,3 +177,69 @@ def run_setup_commands(
                 failed.append(cmd)
                 _record(cmd, cmd_index, source, "failed")
     return {"applied": applied, "failed": failed, "executions": executions}
+
+
+def empty_replay_outcome() -> dict[str, Any]:
+    """The outcome of a round that replayed nothing."""
+    return {"applied": [], "failed": [], "executions": []}
+
+
+def _append_setup_execution(shared_state: Any, row: dict[str, Any], *, session_dir: Path) -> None:
+    """Append one execution row to the durable, append-only ledger."""
+    shared_state.enablement.append_setup_execution(row)
+    try:
+        shared_state.save(session_dir)
+    except OSError:
+        # The rows are on the in-memory state either way, and the rearm saves again.
+        log.debug("integrate_patch: save after setup ledger append failed", exc_info=True)
+
+
+async def replay_setup_commands(
+    attempt: IntegrateAttempt,
+    *,
+    params: dict[str, Any],
+    session_dir: Path,
+) -> dict[str, Any] | None:
+    """Replay this round's setup commands, recording the outcome on ``attempt``.
+
+    Returns an ``apply_failed`` result when any command is not package/tool
+    installation, in which case none of them ran: the replay is what makes the
+    proposal's environment real, so a partial one would boot an environment the
+    round never proposed and grade the patches against it. ``None`` means the
+    round is clear to apply its patches.
+    """
+    commands = resolve_setup_commands(params=params, done_payload=attempt.done_payload)
+    refused = refused_setup_commands(commands)
+    if refused:
+        return {
+            "status": "apply_failed",
+            "enablement": True,
+            "error_class": "setup_commands_refused",
+            "error": (
+                f"{len(refused)} setup command(s) are not package/tool installation and were "
+                f"refused by the install-only allowlist; none of this round's setup commands "
+                f"ran: {'; '.join(refused)}"
+            ),
+            "reason": "setup commands refused by the install-only allowlist",
+            "setup_commands_refused": refused,
+            "specialist_task_id": attempt.specialist_task_id,
+            "patches_applied": [],
+            "patches_reverted": [],
+        }
+    if commands:
+        shared_state = attempt.shared_state
+        attempt.setup_result = await asyncio.to_thread(
+            run_setup_commands,
+            commands,
+            cwd=session_dir,
+            log_dir=runs_dir(session_dir, "integrate_patch", attempt.task_id),
+            round_task_id=attempt.specialist_task_id,
+            seq_start=shared_state.enablement.last_execution_seq(),
+            on_execution=lambda row: _append_setup_execution(shared_state, row, session_dir=session_dir),
+        )
+        # Each row is already durable: the callback appends it inside the worker
+        # as its command finishes. Several integrate exits return after setup has
+        # mutated the shared venv, and one carries no enablement flag at all, so
+        # the rearm that would have recorded them never runs -- and a cancelled
+        # await never returns this payload in the first place.
+    return None

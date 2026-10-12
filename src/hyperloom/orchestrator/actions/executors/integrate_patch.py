@@ -90,7 +90,7 @@ from ._accuracy_gate import (
 from ._apply_feedback import ApplyFeedback, build_apply_feedback
 from ._git import _git_head_sha, _run_git_cp
 from ._integrate_attempt import IntegrateAttempt
-from ._setup_replay import refused_setup_commands, resolve_setup_commands, run_setup_commands
+from ._setup_replay import replay_setup_commands
 from ._patch_source_pr import (
     DEFAULT_DIFF_FETCH_TIMEOUT_SEC,
     _candidate_slug,
@@ -463,16 +463,6 @@ def _persist_base_sha_for_root(
         # The value is on the in-memory state either way, and the rearm saves
         # again; a failed write must not stop the round.
         log.debug("integrate_patch: save after base-sha record failed", exc_info=True)
-
-
-def _append_setup_execution(shared_state: Any, row: dict[str, Any], *, session_dir: Path) -> None:
-    """Append one execution row to the durable, append-only ledger."""
-    shared_state.enablement.append_setup_execution(row)
-    try:
-        shared_state.save(session_dir)
-    except OSError:
-        # The rows are on the in-memory state either way, and the rearm saves again.
-        log.debug("integrate_patch: save after setup ledger append failed", exc_info=True)
 
 
 def resolved_explicit_root(explicit: str) -> Path | None:
@@ -2451,46 +2441,10 @@ class IntegratePatchExecutor:
             _note_pre_mutation_head(attempt, candidate, enablement=is_enablement, session_dir=self.session_dir)
         if is_enablement and not shared_state.enablement.environment_closure_baseline:
             await self._record_closure_baseline(attempt, params)
-        setup_result: dict[str, Any] = {"applied": [], "failed": [], "executions": []}
         if is_enablement:
-            setup_cmds = resolve_setup_commands(params=params, done_payload=done_payload)
-            refused = refused_setup_commands(setup_cmds)
-            if refused:
-                # Refused before anything runs, not command by command. The
-                # replay is what makes the proposal's environment real, so a
-                # partial one would boot an environment the round never
-                # proposed and grade the patches against it.
-                return {
-                    "status": "apply_failed",
-                    "enablement": True,
-                    "error_class": "setup_commands_refused",
-                    "error": (
-                        f"{len(refused)} setup command(s) are not package/tool installation and "
-                        f"were refused by the install-only allowlist; none of this round's "
-                        f"setup commands ran: {'; '.join(refused)}"
-                    ),
-                    "reason": "setup commands refused by the install-only allowlist",
-                    "setup_commands_refused": refused,
-                    "specialist_task_id": specialist_task_id,
-                    "patches_applied": [],
-                    "patches_reverted": [],
-                }
-            if setup_cmds:
-                setup_result = await asyncio.to_thread(
-                    run_setup_commands,
-                    setup_cmds,
-                    cwd=self.session_dir,
-                    log_dir=runs_dir(self.session_dir, "integrate_patch", attempt.task_id),
-                    round_task_id=specialist_task_id,
-                    seq_start=shared_state.enablement.last_execution_seq(),
-                    on_execution=lambda row: _append_setup_execution(shared_state, row, session_dir=self.session_dir),
-                )
-                # Each row is already durable: it is appended by the callback
-                # above, inside the worker, as its command finishes. Several
-                # exits below return after setup has mutated the shared venv,
-                # and one carries no enablement flag at all, so the rearm that
-                # would have recorded them never runs -- and a cancelled await
-                # never returns this payload in the first place.
+            refusal = await replay_setup_commands(attempt, params=params, session_dir=self.session_dir)
+            if refusal is not None:
+                return refusal
 
         specialist_workspace = attempt.specialist_workspace
         assert specialist_workspace is not None
@@ -2602,7 +2556,7 @@ class IntegratePatchExecutor:
                 ),
             }
 
-        _setup_ran = bool(setup_result.get("applied"))
+        _setup_ran = bool(attempt.setup_result.get("applied"))
         # A runtime this round acquired changes what the next boot executes; a
         # re-provisioned kept one is the stack the last KEEP was already graded on.
         acquired_runtime = bool(attempt.attempt_venv_root) and not attempt.shared_state.enablement.kept_stack_action
@@ -2621,7 +2575,6 @@ class IntegratePatchExecutor:
                 attempt.output_root = output_root
                 attempt.extra_envs_applied = dict(inherited_envs)
                 attempt.extra_server_args_applied = inherited_args
-                attempt.setup_result = setup_result
                 return None
             _no_patches: dict[str, Any] = {
                 "status": "no_patches",
@@ -2635,7 +2588,7 @@ class IntegratePatchExecutor:
                     "allowlisted setup commands were supplied / discoverable for "
                     "this specialist task"
                 ),
-                "setup_commands_applied": setup_result["applied"],
+                "setup_commands_applied": attempt.setup_result["applied"],
             }
             if params.get("enablement"):
                 _no_patches["enablement"] = True
@@ -2984,7 +2937,6 @@ class IntegratePatchExecutor:
         attempt.extra_envs_applied = extra_envs_applied
         attempt.extra_server_args_applied = extra_server_args_applied
         attempt.dropped_env_overrides = dropped_env_overrides
-        attempt.setup_result = setup_result
         return None
 
     async def _stage_gate(
