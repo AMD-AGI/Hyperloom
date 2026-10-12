@@ -686,6 +686,29 @@ async def test_rearm_kept_stores_accepted_config(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_rearm_kept_dedupes_the_accepted_server_args(tmp_path):
+    """A KEEP bench composing two rounds that each named a flag is stored with one occurrence.
+
+    The bench's own effective config carries the repeat, and this config is
+    published verbatim into the setting script an operator copies.
+    """
+    fake = _enqueue_self(tmp_path, enablement_origin="eval")
+    await _hold_round(fake, "spec-1")
+    await fake.enablement_lane.maybe_rearm_enablement(
+        {
+            "status": "kept",
+            "enablement": True,
+            "enablement_accepted_config_path": "/runs/specialist/accepted.yaml",
+            "enablement_effective_config": {
+                "extra_server_args": "--reasoning-parser glm47 --reasoning-parser glm47",
+                "args_mode": "append",
+            },
+        }
+    )
+    assert fake.shared_state.enablement.accepted_config["extra_server_args"] == "--reasoning-parser glm47"
+
+
+@pytest.mark.asyncio
 async def test_rearm_kept_replaces_the_observations_a_probe_could_not_make(tmp_path):
     """A KEEP that observed nothing must not inherit the previous KEEP's map.
 

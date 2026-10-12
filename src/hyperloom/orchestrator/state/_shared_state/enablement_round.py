@@ -9,6 +9,8 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, fields
 from typing import Any
 
+from hyperloom.inference_optimizer.grid_server_args import dedupe_extra_server_args
+
 #: Identity and payload of the accepted stack, accumulated across the rounds
 #: that contributed to it: a round that contributes none leaves the standing
 #: records alone.
@@ -184,6 +186,20 @@ class EnablementRound:
             return False
         self.environment_closure_baseline = dict(closure)
         return True
+
+    def record_accepted_config(self, config: Mapping[str, Any], *, source: str) -> None:
+        """Record the configuration the accepted launch runs with, and the branch that produced it.
+
+        ``extra_server_args`` is deduped here rather than at each writer: a
+        repeated flag is what the server hard-errors on, and this config is
+        published verbatim into the setting script an operator runs.
+        """
+        cfg = dict(config)
+        args = str(cfg.get("extra_server_args") or "")
+        if args:
+            cfg["extra_server_args"] = dedupe_extra_server_args(args)
+        self.accepted_config = cfg
+        self.accepted_config_source = source
 
     def record_patch_roots(self, roots: Mapping[str, str]) -> None:
         """Bind each patch to the tree it applied to, first writer wins.

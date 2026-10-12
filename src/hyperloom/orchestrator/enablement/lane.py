@@ -21,7 +21,6 @@ from hyperloom.inference_optimizer.grid_server_args import merge_server_args
 from ..bringup import ARGV_INVALID, ENV_FAULT, is_argv_invalid, is_env_fault, load_boot_observation, observation_summary
 from ..collaborator import CoordinatorCollaborator
 from hyperloom.inference_optimizer.breakdown.round_archive import ROLE_LAUNCH_CONFIG, RoundArchive
-from hyperloom.inference_optimizer.grid_server_args import dedupe_extra_server_args
 from ..phases.machine_state import ENABLEMENT_MAX_ATTEMPTS as _ENABLEMENT_MAX_ATTEMPTS, PHASE_ENABLEMENT
 from ..loop.offload import offload
 from .params import ENABLEMENT_PARAMS_BUDGET_SEC
@@ -670,8 +669,7 @@ def _rearm_on_kept(state: Any, res: dict[str, Any]) -> None:
     if isinstance(effective, dict) and effective:
         # Replaced, not merged: what the KEEP bench launched already supersedes
         # every advanced round that fed into it.
-        state.enablement.accepted_config = dict(effective)
-        state.enablement.accepted_config_source = "kept_bench"
+        state.enablement.record_accepted_config(effective, source="kept_bench")
     state.enablement.record_keep(res)
     # Hold succeeded until the revalidation baseline promotes so every KEEP is
     # validated against a real measurement, not the bench the patch round itself
@@ -699,15 +697,12 @@ def _rearm_on_advanced(state: Any, res: dict[str, Any]) -> None:
         merged.update({str(k): str(v) for k, v in adv_envs.items()})
         cfg["extra_envs"] = merged
         # Folded by flag keeping the last value, so this round overrides an earlier one.
-        cfg["extra_server_args"] = dedupe_extra_server_args(
-            merge_server_args(str(cfg.get("extra_server_args") or ""), adv_args)
-        )
+        cfg["extra_server_args"] = merge_server_args(str(cfg.get("extra_server_args") or ""), adv_args)
         cfg.setdefault("args_mode", "append")
-        state.enablement.accepted_config = cfg
         # An advanced round is by construction not booted, so nothing observed
         # this configuration; the tag is what keeps "verified" and "unverified"
         # distinguishable at all.
-        state.enablement.accepted_config_source = "advanced_merge"
+        state.enablement.record_accepted_config(cfg, source="advanced_merge")
     new_log = str(res.get("enablement_launch_log") or "").strip()
     if new_log:
         state.enablement.launch_log = new_log
