@@ -3914,9 +3914,9 @@ def _resolve_forge_fusion_sandbox_mode(
 async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResult:
     """Autonomous kernel fusion via the forge-fusion CLI.
 
-    Builds an input-json with one provider-compatible agent backend, model, and
-    validated sandbox policy, shells out to the ``forge_fusion`` wrapper module, and
-    parses the result sentinel. A KEPT fusion carries a source patch + env flags
+    Resolves one provider-compatible agent backend, model, and validated sandbox
+    policy, then runs forge-fuse through :func:`forge_fusion.run_forge_fusion`,
+    which returns the fusion contract result. A KEPT fusion carries a source patch + env flags
     and ``requires_e2e_validation`` so the integrate gate confirms the
     end-to-end gain. Reuses the PRELUDE decode trace (no re-profiling).
     """
