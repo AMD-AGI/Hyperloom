@@ -574,38 +574,6 @@ async def test_missing_codex_runtime_fails_the_task_instead_of_spawning_claude(
 
 
 @pytest.mark.asyncio
-async def test_a_deepseek_selection_fails_the_task_instead_of_spawning_claude(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """This dispatcher has no harness launch, so naming it must not become a Claude spawn."""
-    _pin_provider_env(monkeypatch, _ANTHROPIC_ONLY_ENV)
-    monkeypatch.setenv(llm_config.AGENT_BACKEND_ENV, llm_config.AGENT_BACKEND_DEEPSEEK)
-    monkeypatch.setattr(llm_config, "deepseek_harness_sdk_installed", lambda: True)
-    monkeypatch.setattr(
-        sp.subprocess,
-        "Popen",
-        lambda *_a, **_k: pytest.fail("a deepseek selection must not fall back to a claude spawn"),
-    )
-
-    dispatcher = SpecialistSubprocessDispatcher(SpecialistSubprocessConfig(poll_interval_seconds=0.05))
-    result = await dispatcher.run(
-        task_id="t-deepseek",
-        workspace=tmp_path / "workspace",
-        worktree=None,
-        worktree_base=None,
-        system_prompt="sys",
-        user_prompt="usr",
-        disallowed_tools=frozenset(),
-        max_turns=1,
-        deadline=Deadline.after(60.0),
-    )
-
-    assert result.done_payload is None
-    assert "deepseek" in result.error.lower()
-
-
-@pytest.mark.asyncio
 async def test_unconfigured_codex_gateway_fails_the_task(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -258,6 +258,10 @@ def codex_agent_sdk_installed() -> bool:
 #: admits a pre-release only when the specifier itself does.
 DEEPSEEK_HARNESS_SDK_SPEC = "deepseek-harness-sdk>=0.1.5rc1"
 
+#: Decodes the zstd session logs a ``dsh`` specialist run leaves under its
+#: ``DSH_HOME``, where its token usage and tool calls are read from.
+DEEPSEEK_SESSION_LOG_DECODER_SPEC = "zstandard>=0.22"
+
 
 def deepseek_harness_sdk_installed() -> bool:
     """Return whether the optional DeepSeek Harness SDK is installed."""

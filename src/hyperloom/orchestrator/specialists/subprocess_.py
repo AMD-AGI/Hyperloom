@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+﻿# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Subprocess-based specialist dispatcher.
@@ -74,6 +74,11 @@ from hyperloom.inference_optimizer.trace.parse_usage import (
     parse_codex_jsonl_tool_calls,
     parse_codex_jsonl_turn_usages,
     parse_codex_jsonl_usage,
+    parse_dsh_session_error,
+    parse_dsh_session_response,
+    parse_dsh_session_tool_calls,
+    parse_dsh_session_turn_usages,
+    parse_dsh_session_usage,
 )
 from hyperloom.inference_optimizer.trace.context_events import record_stream_json_compactions
 from hyperloom.inference_optimizer.trace.request_events import record_stream_json_requests
@@ -122,6 +127,34 @@ def resolve_codex_executable(explicit: str = "") -> str:
     except ImportError:
         return ""
     return str(bundled) if bundled.exists() else ""
+
+
+def resolve_dsh_executable(explicit: str = "") -> str:
+    """Resolve the DeepSeek Harness CLI a specialist subprocess should spawn.
+
+    Order: an explicit path, then ``dsh`` on ``$PATH``, then the runtime the
+    harness SDK ships, so an operator's own installation still wins.
+
+    Args:
+        explicit: Operator-configured path; returned as-is when non-empty.
+
+    Returns:
+        The resolved executable path, or ``""`` when no harness runtime exists.
+    """
+    pinned = (explicit or "").strip()
+    if pinned:
+        return pinned
+    on_path = shutil.which("dsh")
+    if on_path:
+        return on_path
+    try:
+        # Installed as the ``deepseek-harness-sdk`` package's own runtime dependency.
+        from deepseek_harness_runtime import resolve_bundled_launch_args  # type: ignore[import-not-found]
+
+        launch = tuple(resolve_bundled_launch_args())
+    except (ImportError, OSError):
+        return ""
+    return launch[0] if len(launch) == 1 and Path(launch[0]).exists() else ""
 
 
 _SPECIALIST_ENV_ALLOWLIST: frozenset[str] = frozenset(
@@ -178,6 +211,7 @@ _SPECIALIST_SECRET_ENV_ALLOWLIST: frozenset[str] = frozenset(
 _CODEX_MCP_SERVER_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 _ENV_REFERENCE_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _CODEX_MCP_ENV_PREFIX = "HYPERLOOM_CODEX_MCP_ENV_"
+_DSH_MCP_ENV_PREFIX = "HYPERLOOM_DSH_MCP_ENV_"
 _CODEX_PROVIDER_ENV_PREFIX = "HYPERLOOM_CODEX_HTTP_HEADER_"
 _CODEX_MCP_RESERVED_ENV_NAMES: frozenset[str] = frozenset(
     {
@@ -221,9 +255,10 @@ def _private_mcp_env_name(
     source: Mapping[str, str],
     additions: Mapping[str, str],
     protected_env_names: frozenset[str],
+    prefix: str = _CODEX_MCP_ENV_PREFIX,
 ) -> str:
     """Return a collision-free child-only variable name for one MCP header."""
-    base = f"{_CODEX_MCP_ENV_PREFIX}{index}"
+    base = f"{prefix}{index}"
     candidate = base
     suffix = 1
     while candidate in source or candidate in additions or candidate in protected_env_names:
@@ -422,6 +457,181 @@ def _write_private_codex_config(
     return config_path
 
 
+# ``dsh --profile headless`` reads its task from argv alone, and Linux caps one argument at MAX_ARG_STRLEN (32 pages).
+_DSH_TASK_ARG_LIMIT_BYTES = 32 * 4096
+# dsh-mcp-client's ``serverName`` rule.
+_DSH_MCP_SERVER_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
+# The shipped headless profile's default instruction budget; raised when the system prompt needs more.
+_DSH_DEFAULT_INSTRUCTION_BYTES = 65536
+
+
+def _yaml_string(value: str) -> str:
+    """Encode a string as a YAML double-quoted scalar (JSON strings are a subset)."""
+    return json.dumps(str(value), ensure_ascii=False)
+
+
+def _yaml_env_reference(name: str) -> str:
+    """A dsh config value read from the harness process environment at boot."""
+    return f"!!js process.env.{name}"
+
+
+def _dsh_mcp_rows(
+    config_path: str | None,
+    *,
+    source: Mapping[str, str],
+    protected_env_names: frozenset[str],
+) -> tuple[list[str], dict[str, str]]:
+    """Translate Claude-style MCP JSON into ``dsh-mcp-client`` patch rows.
+
+    Header and env values are resolved into child-only variables that the rows
+    reference, so the patch file carries no secret.
+
+    Returns:
+        tuple[list[str], dict[str, str]]: Indented YAML lines for the rows of
+            one ``insert`` entry, and the env additions they reference.
+    """
+    if not config_path:
+        return [], {}
+    path = Path(config_path)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SpecialistAgentUnavailableError(f"cannot read specialist MCP config {path}: {exc}") from exc
+    servers = payload.get("mcpServers") if isinstance(payload, dict) else None
+    if not isinstance(servers, dict):
+        raise SpecialistAgentUnavailableError(f"specialist MCP config {path} must contain an object at 'mcpServers'")
+
+    rows: list[str] = []
+    env_additions: dict[str, str] = {}
+
+    def _private_value(raw_value: str, *, context: str) -> str:
+        value = _resolve_env_references(raw_value, source=source, context=context)
+        env_name = _private_mcp_env_name(
+            len(env_additions),
+            source=source,
+            additions=env_additions,
+            protected_env_names=protected_env_names,
+            prefix=_DSH_MCP_ENV_PREFIX,
+        )
+        env_additions[env_name] = value
+        return _yaml_env_reference(env_name)
+
+    for raw_name, raw_server in servers.items():
+        name = str(raw_name or "")
+        if not _DSH_MCP_SERVER_NAME_RE.fullmatch(name):
+            raise SpecialistAgentUnavailableError(
+                f"dsh MCP server name {name!r} is not translatable; use 1-32 letters, digits, '_' or '-'"
+            )
+        if not isinstance(raw_server, dict):
+            raise SpecialistAgentUnavailableError(f"dsh MCP server {name!r} must be an object")
+        server = dict(raw_server)
+        declared_type = str(server.get("type") or "").strip().lower()
+        if not declared_type:
+            declared_type = "http" if server.get("url") else "stdio" if server.get("command") else ""
+        rows.extend(
+            [
+                f"    - id: {_yaml_string('mcp-' + name)}",
+                "      name: '@deepseek-ai/dsh-mcp-client'",
+                "      config:",
+                f"        serverName: {_yaml_string(name)}",
+            ]
+        )
+        if declared_type == "http":
+            unsupported = set(server) - {"type", "url", "headers"}
+            if unsupported:
+                raise SpecialistAgentUnavailableError(
+                    f"dsh MCP server {name!r} has unsupported HTTP fields: {sorted(unsupported)!r}"
+                )
+            url = server.get("url")
+            parsed_url = urlsplit(url.strip()) if isinstance(url, str) else None
+            if parsed_url is None or parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+                raise SpecialistAgentUnavailableError(f"dsh MCP server {name!r} has invalid HTTP URL")
+            if parsed_url.username is not None or parsed_url.password is not None:
+                raise SpecialistAgentUnavailableError(
+                    f"dsh MCP server {name!r} URL embeds credentials; use environment-backed headers instead"
+                )
+            headers = server.get("headers") or {}
+            if not isinstance(headers, dict):
+                raise SpecialistAgentUnavailableError(f"dsh MCP server {name!r} headers must be an object")
+            rows.extend(["        transport: streamable-http", f"        url: {_yaml_string(url.strip())}"])
+            if headers:
+                rows.append("        headers:")
+            for raw_header, raw_value in headers.items():
+                header = str(raw_header or "").strip()
+                if not header or not isinstance(raw_value, str):
+                    raise SpecialistAgentUnavailableError(f"dsh MCP server {name!r} has an invalid HTTP header")
+                reference = _private_value(raw_value, context=f"dsh MCP server {name!r} header {header!r}")
+                rows.append(f"          {_yaml_string(header)}: {reference}")
+        elif declared_type == "stdio":
+            unsupported = set(server) - {"type", "command", "args", "env"}
+            if unsupported:
+                raise SpecialistAgentUnavailableError(
+                    f"dsh MCP server {name!r} has unsupported stdio fields: {sorted(unsupported)!r}"
+                )
+            command = server.get("command")
+            if not isinstance(command, str) or not command.strip():
+                raise SpecialistAgentUnavailableError(f"dsh MCP server {name!r} requires a non-empty command")
+            args = server.get("args") or []
+            if not isinstance(args, list) or not all(isinstance(value, str) for value in args):
+                raise SpecialistAgentUnavailableError(f"dsh MCP server {name!r} args must be a list of strings")
+            raw_env = server.get("env") or {}
+            if not isinstance(raw_env, dict):
+                raise SpecialistAgentUnavailableError(f"dsh MCP server {name!r} env must be an object")
+            rows.extend(
+                [
+                    "        transport: stdio",
+                    f"        command: {_yaml_string(command.strip())}",
+                    f"        args: {json.dumps(args, ensure_ascii=False)}",
+                ]
+            )
+            if raw_env:
+                rows.append("        env:")
+            for raw_key, raw_value in raw_env.items():
+                key = str(raw_key or "").strip()
+                if not valid_env_key(key) or key in BLOCKED_CHILD_ENV_NAMES or not isinstance(raw_value, str):
+                    raise SpecialistAgentUnavailableError(
+                        f"dsh MCP server {name!r} has an unsafe or invalid env entry {key!r}"
+                    )
+                reference = _private_value(raw_value, context=f"dsh MCP server {name!r} env {key!r}")
+                rows.append(f"          {_yaml_string(key)}: {reference}")
+        else:
+            raise SpecialistAgentUnavailableError(
+                f"dsh MCP server {name!r} uses unsupported transport "
+                f"{declared_type or '<missing>'!r}; expected 'http' or 'stdio'"
+            )
+    return rows, env_additions
+
+
+def _render_dsh_patch(*, model: str, instruction_bytes: int, mcp_rows: list[str]) -> str:
+    """The patch overlay a specialist's headless ``dsh`` run boots with."""
+    lines = [
+        # The shipped headless profile lists a session-title plugin whose
+        # package the runtime does not ship, and boot fails while it is enabled.
+        "- id: session-title-llm",
+        "  disabled: true",
+        "- id: agent-default-model",
+        "  config:",
+        "    provider: deepseek-official",
+        f"    model: {_yaml_string(model)}",
+        # ``$DSH_HOME/AGENTS.md`` carries the system prompt; never clip it.
+        "- id: agent-instructions",
+        "  config:",
+        f"    maxBytes: {max(_DSH_DEFAULT_INSTRUCTION_BYTES, instruction_bytes + _DSH_DEFAULT_INSTRUCTION_BYTES)}",
+    ]
+    if mcp_rows:
+        lines.append("- insert:")
+        lines.extend(mcp_rows)
+    return "\n".join(lines) + "\n"
+
+
+def _write_private_text(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` readable by the owner only."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(text)
+    path.chmod(0o600)
+
+
 def _build_specialist_env() -> dict[str, str]:
     """Build a minimal env for Bash-enabled specialist subprocesses."""
     inherit_secrets = env_bool("HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV", True)
@@ -455,7 +665,7 @@ class SpecialistSubprocessConfig:
     """
 
     agent_backend: str = ""
-    """Which agent CLI to spawn: ``"claude"``, ``"codex"``, or ``""``.
+    """Which agent CLI to spawn: ``"claude"``, ``"codex"``, ``"deepseek"``, or ``""``.
 
     Empty resolves the deployment's credential shape per dispatch via
     :func:`preferred_agent_backend`. The CLI pins it explicitly at boot
@@ -469,6 +679,10 @@ class SpecialistSubprocessConfig:
     codex_executable: str = ""
     """Path / name of the codex CLI binary. Empty resolves it per
     :func:`resolve_codex_executable`."""
+
+    dsh_executable: str = ""
+    """Path / name of the DeepSeek Harness ``dsh`` CLI. Empty resolves it per
+    :func:`resolve_dsh_executable`."""
 
     model: str = ""
     """Model id for the selected agent CLI. Empty = that CLI's own default."""
@@ -908,6 +1122,17 @@ class SpecialistSubprocessDispatcher:
                     probe_sandbox=True,
                 )
                 env.update(launch_env_additions)
+            elif backend == AGENT_BACKEND_DEEPSEEK:
+                # The task rides argv; prompt.md is the record and the Ray launcher's stdin.
+                prompt_file.write_text(request.user_prompt, encoding="utf-8")
+                prompt_file.chmod(0o600)
+                cmd, launch_env_additions = self._build_dsh_launch(
+                    workspace=request.workspace,
+                    system_prompt=request.system_prompt,
+                    user_prompt=request.user_prompt,
+                    base_env=env,
+                )
+                env.update(launch_env_additions)
             else:
                 prompt_file.write_text(request.user_prompt, encoding="utf-8")
                 prompt_file.chmod(0o600)
@@ -1157,6 +1382,21 @@ class SpecialistSubprocessDispatcher:
                 outcome["error"] = (
                     f"{prior_error}; codex: {structured_error}" if prior_error else f"codex: {structured_error}"
                 )
+        elif backend == AGENT_BACKEND_DEEPSEEK:
+            # dsh prints only its final message and reasoning; the session log under DSH_HOME holds the record.
+            dsh_home = request.workspace / ".dsh"
+            usage = parse_dsh_session_usage(dsh_home)
+            response = parse_dsh_session_response(dsh_home)
+            tool_calls = parse_dsh_session_tool_calls(dsh_home)
+            turn_usages = parse_dsh_session_turn_usages(dsh_home)
+            structured_error = parse_dsh_session_error(dsh_home)
+            # dsh materializes megabytes of profile modules per DSH_HOME; a finished task never boots it again.
+            shutil.rmtree(dsh_home / "profiles", ignore_errors=True)
+            if structured_error and (outcome["exit_code"] not in (None, 0) or done_payload is None):
+                prior_error = str(outcome.get("error") or "").strip()
+                outcome["error"] = (
+                    f"{prior_error}; dsh: {structured_error}" if prior_error else f"dsh: {structured_error}"
+                )
         else:
             usage = parse_claude_stream_json_usage(process_log)
             response = parse_claude_stream_json_response(process_log)
@@ -1190,7 +1430,8 @@ class SpecialistSubprocessDispatcher:
         selection decides (:func:`resolve_agent_backend`).
 
         Returns:
-            str: :data:`AGENT_BACKEND_CLAUDE` or :data:`AGENT_BACKEND_CODEX`.
+            str: :data:`AGENT_BACKEND_CLAUDE`, :data:`AGENT_BACKEND_CODEX` or
+                :data:`AGENT_BACKEND_DEEPSEEK`.
 
         Raises:
             SpecialistAgentUnavailableError: If the selected backend is not
@@ -1200,15 +1441,10 @@ class SpecialistSubprocessDispatcher:
 
         pinned = (self.config.agent_backend or "").strip().lower()
         backend = pinned or resolve_agent_backend()
-        if backend == AGENT_BACKEND_DEEPSEEK:
-            raise SpecialistAgentUnavailableError(
-                "the DeepSeek Harness has no specialist CLI launch; run specialists with "
-                "specialist_dispatch_mode=inprocess"
-            )
-        if backend not in (AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX):
+        if backend not in (AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX, AGENT_BACKEND_DEEPSEEK):
             raise SpecialistAgentUnavailableError(
                 f"agent_backend={self.config.agent_backend!r} is not one of "
-                f"{AGENT_BACKEND_CLAUDE!r} / {AGENT_BACKEND_CODEX!r}"
+                f"{AGENT_BACKEND_CLAUDE!r} / {AGENT_BACKEND_CODEX!r} / {AGENT_BACKEND_DEEPSEEK!r}"
             )
         return backend
 
@@ -1328,6 +1564,87 @@ class SpecialistSubprocessDispatcher:
         if cfg.extra_codex_args:
             cmd.extend(list(cfg.extra_codex_args))
         cmd.append("-")
+        return cmd, env_additions
+
+    def _build_dsh_launch(
+        self,
+        *,
+        workspace: Path,
+        system_prompt: str,
+        user_prompt: str,
+        base_env: Mapping[str, str],
+    ) -> tuple[list[str], dict[str, str]]:
+        """Build the ``dsh --profile headless`` argv and its child-only env values.
+
+        A per-task ``DSH_HOME`` keeps concurrent specialists' sessions apart and
+        holds the system prompt as ``AGENTS.md``, which the harness sends as
+        the run's baseline instructions. The user prompt is the headless task.
+        """
+        from hyperloom.common.llm_config import (
+            DEFAULT_DEEPSEEK_HARNESS_MODEL,
+            LLMConfigError,
+            resolve_openai_client_config,
+        )
+
+        cfg = self.config
+        executable = resolve_dsh_executable(cfg.dsh_executable)
+        if not executable:
+            raise SpecialistAgentUnavailableError(
+                "no dsh CLI found: set SpecialistSubprocessConfig.dsh_executable, install `dsh` on $PATH, "
+                "or install the DeepSeek Harness SDK (pip install 'hyperloom-inference_optimizer[deepseek]')"
+            )
+        if len(user_prompt.encode("utf-8")) >= _DSH_TASK_ARG_LIMIT_BYTES:
+            raise SpecialistAgentUnavailableError(
+                f"the specialist user prompt is {len(user_prompt.encode('utf-8'))} bytes; dsh headless takes its "
+                f"task as one argument, which the kernel caps below {_DSH_TASK_ARG_LIMIT_BYTES} bytes"
+            )
+        resolver_env = _codex_provider_resolver_overlay(base_env)
+        try:
+            gateway = resolve_openai_client_config(env=resolver_env)
+        except LLMConfigError as exc:
+            raise SpecialistAgentUnavailableError(
+                f"the DeepSeek Harness needs OPENAI_BASE_URL and OPENAI_API_KEY: {exc}"
+            ) from exc
+        if not gateway.base_url or not gateway.api_key:
+            raise SpecialistAgentUnavailableError("the DeepSeek Harness needs both OPENAI_BASE_URL and OPENAI_API_KEY")
+        env_additions = {
+            "DEEPSEEK_BASE_URL": gateway.base_url,
+            "DEEPSEEK_API_KEY": gateway.api_key,
+            "DSH_PERMISSION_MODE": "danger-full-access",
+            "DSH_TELEMETRY_MODE": "DISABLED",
+        }
+        effective_source = os.environ.copy()
+        effective_source.update(resolver_env)
+        mcp_rows, mcp_env_additions = _dsh_mcp_rows(
+            cfg.mcp_config_path,
+            source=effective_source,
+            protected_env_names=frozenset(env_additions),
+        )
+        env_additions.update(mcp_env_additions)
+
+        dsh_home = workspace / ".dsh"
+        instructions = system_prompt or ""
+        patch_path = dsh_home / "specialist_patch.yml"
+        try:
+            dsh_home.mkdir(parents=True, mode=0o700, exist_ok=True)
+            dsh_home.chmod(0o700)
+            # The harvest reads every session under DSH_HOME; a rerun of this task id must not count the last one.
+            shutil.rmtree(dsh_home / "sessions", ignore_errors=True)
+            _write_private_text(dsh_home / "AGENTS.md", instructions)
+            _write_private_text(
+                patch_path,
+                _render_dsh_patch(
+                    model=cfg.model or DEFAULT_DEEPSEEK_HARNESS_MODEL,
+                    instruction_bytes=len(instructions.encode("utf-8")),
+                    mcp_rows=mcp_rows,
+                ),
+            )
+        except OSError as exc:
+            raise SpecialistAgentUnavailableError(f"cannot prepare private dsh home under {dsh_home}: {exc}") from exc
+        env_additions["DSH_HOME"] = str(dsh_home)
+        # The launcher consumes the first ``--`` and the headless app the second,
+        # so a task that starts with ``-`` is not parsed as an option.
+        cmd = [executable, "--profile", "headless", "--patch", str(patch_path), "--", "--", user_prompt]
         return cmd, env_additions
 
     def _build_claude_cmd(

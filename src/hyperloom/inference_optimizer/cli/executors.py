@@ -91,6 +91,7 @@ def _build_specialist_executor(
     from hyperloom.orchestrator.specialists.subprocess_ import (
         SpecialistSubprocessConfig,
         resolve_codex_executable,
+        resolve_dsh_executable,
     )
 
     max_turns = int(getattr(args, "specialist_max_turns", DEFAULT_SPECIALIST_MAX_TURNS) or DEFAULT_SPECIALIST_MAX_TURNS)
@@ -109,8 +110,15 @@ def _build_specialist_executor(
     selected_model = specialist_override or default_model
     codex_bin = ""
     claude_bin = ""
+    dsh_bin = ""
     if agent_backend == AGENT_BACKEND_DEEPSEEK:
-        pass
+        dsh_bin = resolve_dsh_executable()
+        if not dsh_bin:
+            raise RuntimeError(
+                "INFERENCE_OPTIMIZER_AGENT_BACKEND=deepseek runs specialists on the dsh CLI, but none was "
+                "found on PATH or in the DeepSeek Harness SDK runtime. Install the 'deepseek' extra "
+                "(pip install 'hyperloom-inference_optimizer[deepseek]')."
+            )
     elif agent_backend == AGENT_BACKEND_CODEX:
         codex_bin = resolve_codex_executable()
         if not codex_bin:
@@ -150,6 +158,7 @@ def _build_specialist_executor(
         "agent_backend": agent_backend,
         "claude_executable": claude_bin or "claude",
         "codex_executable": codex_bin,
+        "dsh_executable": dsh_bin,
         "model": selected_model,
         "framework_source_roots": framework_source_roots,
         "mcp_config_path": mcp_config_path,

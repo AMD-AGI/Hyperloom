@@ -41,6 +41,7 @@ llm = [
 # only by naming it, so a deployment that does not is not made to carry it.
 deepseek = [
     "deepseek-harness-sdk>=0.1.5rc1",
+    "zstandard>=0.22",
 ]
 # Critic-agent web tools (web_search / web_fetch).
 web = [

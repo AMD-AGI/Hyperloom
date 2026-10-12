@@ -63,7 +63,12 @@ from .report import (
 )
 from .shapes import load_model_config, resolve_decode_shapes
 from .validate import DEFAULT_TARGET_SPEEDUP, HarnessKernelRunner, validate_recipe
-from .agent_selection import _agent_timeout_sec, _campaign_agent_provider, _create_agent_backend
+from .agent_selection import (
+    _agent_timeout_sec,
+    _campaign_agent_provider,
+    _create_agent_backend,
+    _validate_agent_backend,
+)
 from .compile_pass_claim import ClaimExport, ClaimGate, ClaimServing, _run_single_compile_pass_claim
 from .harness_authoring import (
     _author_baseline_harness,

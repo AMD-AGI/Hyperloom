@@ -503,13 +503,21 @@ def _ensure_python_sdks(python_exe: str, pip_extra: list[str]) -> dict[str, Any]
     )
     # The third runtime does not ship by default: no role selects it on a
     # credential shape, so only a launch that named it needs it installed.
-    from hyperloom.common.llm_config import AGENT_BACKEND_ENV, DEEPSEEK_HARNESS_SDK_SPEC
+    from hyperloom.common.llm_config import (
+        AGENT_BACKEND_ENV,
+        DEEPSEEK_HARNESS_SDK_SPEC,
+        DEEPSEEK_SESSION_LOG_DECODER_SPEC,
+    )
 
     harness_backend = (os.environ.get(ORCHESTRATION_BACKEND_ENV) or "").strip().lower() or (
         os.environ.get(AGENT_BACKEND_ENV) or ""
     ).strip().lower()
     if harness_backend == AGENT_BACKEND_DEEPSEEK:
-        candidates = (*candidates, ("deepseek_harness", DEEPSEEK_HARNESS_SDK_SPEC))
+        candidates = (
+            *candidates,
+            ("deepseek_harness", DEEPSEEK_HARNESS_SDK_SPEC),
+            ("zstandard", DEEPSEEK_SESSION_LOG_DECODER_SPEC),
+        )
     installed: list[str] = []
     already_present: list[str] = []
     for module_name, pip_spec in candidates:

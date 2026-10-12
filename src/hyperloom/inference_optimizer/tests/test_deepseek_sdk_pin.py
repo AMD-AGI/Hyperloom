@@ -36,4 +36,7 @@ def test_the_shared_pin_admits_the_published_release() -> None:
 def test_the_deepseek_extra_uses_the_shared_pin() -> None:
     """pip reads the extra and preflight reads the constant; both must install the same thing."""
     extras = tomllib.loads(_PYPROJECT.read_text(encoding="utf-8"))["project"]["optional-dependencies"]
-    assert extras["deepseek"] == [llm_config.DEEPSEEK_HARNESS_SDK_SPEC]
+    assert extras["deepseek"] == [
+        llm_config.DEEPSEEK_HARNESS_SDK_SPEC,
+        llm_config.DEEPSEEK_SESSION_LOG_DECODER_SPEC,
+    ]
