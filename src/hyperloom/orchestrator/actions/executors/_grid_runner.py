@@ -8,7 +8,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import math
 import os
 import re
 import shutil
@@ -57,6 +56,7 @@ from ._subprocess_kill import (
     run_with_session_kill,
     server_log_death_excerpt,
     session_deadline_to_remaining_sec,
+    sync_agentx_phase_wait,
 )
 from .benchmark_result import (
     extract_benchmark_measurement,
@@ -604,8 +604,7 @@ def sync_benchmark_timeout(config_path: Path, timeout_sec: float) -> None:
         bench["server_lifecycle"]["server_ready_timeout_s"] = timeout_sec
     envs = bench.setdefault("envs", {})
     envs["PYTHONUNBUFFERED"] = "1"
-    if "AGENTX_PHASE_WAIT_TIMEOUT_S" in envs:
-        envs["AGENTX_PHASE_WAIT_TIMEOUT_S"] = str(math.ceil(timeout_sec))
+    sync_agentx_phase_wait(envs, timeout_sec)
     config_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
 
 

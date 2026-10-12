@@ -1038,9 +1038,7 @@ def anthropic_completion(
         )
     if not transport:
         raise LLMConfigError(_ANTHROPIC_NO_CREDENTIAL)
-    http_client = get_anthropic_client(
-        env=dict(env) if env is not None else None, timeout=timeout if timeout is not None else timeout_s
-    )
+    http_client = get_anthropic_client(env=dict(env) if env is not None else None, timeout=timeout or timeout_s)
     with http_client:  # type: ignore[attr-defined]
         return anthropic_messages(
             http_client,
@@ -1081,9 +1079,7 @@ async def aanthropic_completion(
         )
     if not transport:
         raise LLMConfigError(_ANTHROPIC_NO_CREDENTIAL)
-    http_client = get_async_anthropic_client(
-        env=dict(env) if env is not None else None, timeout=timeout if timeout is not None else timeout_s
-    )
+    http_client = get_async_anthropic_client(env=dict(env) if env is not None else None, timeout=timeout or timeout_s)
     async with http_client:  # type: ignore[attr-defined]
         return await aanthropic_messages(
             http_client,
