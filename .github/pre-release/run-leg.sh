@@ -28,20 +28,28 @@
 #   CI_VERSION          unique id of this attempt; keys the workspace and the claude
 #                       session, so a new attempt never resumes an old conversation
 #   LEG_WORK_DIR        writable root; the leg workspace is LEG_WORK_DIR/CI_VERSION/<leg>
-#   USER_DATA_PATH      Hyperloom session root (written to .env unchanged); it must be
-#                       exclusive to this leg, since the runner judges the newest
-#                       state.json written under it during this attempt
+#   USER_DATA_PATH      Hyperloom session root (written to .env unchanged). With
+#                       CLAW_SESSION_ID set it may be shared with other runs: the runner
+#                       judges only a <model>/<ts> session whose manifest.json names that
+#                       id. Without it the root must be exclusive to this leg, since the
+#                       runner then judges the newest state.json written under it
 #   LEG_MODEL_PATH      model directory for this leg, or
 #   LEG_MODELS_DIR      a directory holding Qwen3-8B/ and Qwen3-14B-FP8/
 #   ANTHROPIC_API_KEY  ANTHROPIC_BASE_URL  CLAUDE_MODEL
 #   CLAUDE_CLI_VERSION  only when no `claude` is on PATH
 # Optional env: LEG_WHEEL (prebuilt wheel instead of building this checkout),
+#   CLAW_SESSION_ID (the optimizer records it in manifest.json; see USER_DATA_PATH),
 #   HF_TOKEN, ANTHROPIC_CUSTOM_HEADERS (a gateway that needs a header gets it from
 #   the caller; none is assumed), INFERENCE_OPTIMIZER_SESSION_LAYOUT,
 #   GEAK_CLAUDE_MODEL, FORGE_CLAUDE_MODEL, OPENAI_BASE_URL, OPENAI_API_KEY,
 #   CODEX_MODEL; timing knobs LEG_SETUP_DEADLINE_S, LEG_SETUP_STALL_S,
 #   LEG_SETUP_MAX_TURNS, LEG_TURN_GAP_S, LEG_WAIT_INTERVAL_S, LEG_STALL_GRACE_S,
 #   LEG_DEMO_REDRIVES, LEG_DEADLINE_S.
+#
+# Every claude turn runs with CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1: a turn's
+# background shells end with the turn, so an optimize started that way dies the
+# moment the runner moves on; with the option gone the prompts fall back to
+# `setsid nohup`. The runner logs to stdout and to its workspace's run-leg.log.
 #
 # Secrets: the LLM key is written only into the leg's 0600 .env (Hyperloom's setup
 # treats that file as authoritative and drops ambient ANTHROPIC_* values), and the
@@ -59,7 +67,12 @@ CLEAN_STOP_REASONS="target_reached global_converged time_exhausted max_ticks swe
 PASSTHROUGH_KEYS="ANTHROPIC_CUSTOM_HEADERS GEAK_CLAUDE_MODEL FORGE_CLAUDE_MODEL OPENAI_BASE_URL OPENAI_API_KEY CODEX_MODEL INFERENCE_OPTIMIZER_SESSION_LAYOUT"
 SECRET_KEYS="ANTHROPIC_API_KEY ANTHROPIC_CUSTOM_HEADERS OPENAI_API_KEY"
 
-log() { echo "[run-leg $(date -u +%H:%M:%S)] $*"; }
+log() {
+  local line; line="[run-leg $(date -u +%H:%M:%S)] $*"
+  echo "$line"
+  # The caller's log may be shared by several legs; this copy is the leg's own.
+  if [ -n "${RUN_LOG:-}" ]; then echo "$line" >>"$RUN_LOG" 2>/dev/null || true; fi
+}
 die_usage() { echo "run-leg: $*" >&2; exit 2; }
 
 # Sets LEG SCENARIO BACKEND FORGE HOURS MODEL_NAME SETUP_PROMPT DEMO_PROMPT, or fails.
@@ -141,13 +154,38 @@ leg_session_uuid() {
   printf '%s-%s-4%s-8%s-%s' "${h:0:8}" "${h:8:4}" "${h:12:3}" "${h:15:3}" "${h:18:12}"
 }
 
-# Seconds since the newest file under the workspace or the session root was
-# written, floored at $2 so a previous attempt's files never count as progress.
+# This attempt's sessions. With CLAW_SESSION_ID set: the <model>/<ts> dirs under
+# USER_DATA_PATH whose manifest.json names it and was written since $1 (stat
+# first, so a shared root costs one stat per session). Without it: the whole
+# root, which the caller then keeps exclusive to this leg.
+own_session_dirs() {
+  if [ -z "${CLAW_SESSION_ID:-}" ]; then echo "$USER_DATA_PATH"; return 0; fi
+  python3 - "$USER_DATA_PATH" "$CLAW_SESSION_ID" "$1" 2>/dev/null <<'PY' || true
+import glob, json, os, sys
+
+root, claw, since = sys.argv[1], sys.argv[2].strip(), float(sys.argv[3])
+for manifest in sorted(glob.glob(os.path.join(glob.escape(root), "*", "*", "manifest.json"))):
+    try:
+        if os.stat(manifest).st_mtime < since:
+            continue
+        with open(manifest) as fh:
+            owner = json.load(fh).get("claw_session_id")
+    except Exception:
+        continue
+    if str(owner or "").strip() == claw:
+        print(os.path.dirname(manifest))
+PY
+}
+
+# Seconds since the newest file under the workspace or this attempt's sessions
+# was written, floored at $2 so a previous attempt's files never count as
+# progress. Another run's writes under a shared root are not this leg's progress.
 leg_idle_s() {
-  local since="$1" now="$2" last
+  local since="$1" now="$2" last dirs=()
+  mapfile -t dirs < <(own_session_dirs "$LEG_T0")
   # awk reads all input: `sort | head` would SIGPIPE on a large tree and, under
   # pipefail, end the runner.
-  last="$(find "$ROOT" "$USER_DATA_PATH" -type f -printf '%T@\n' 2>/dev/null \
+  last="$(find "$ROOT" "${dirs[@]}" -type f -printf '%T@\n' 2>/dev/null \
           | awk '$1 > m { m = $1 } END { if (m) printf "%d\n", m }' || true)"
   if [ -n "$last" ] && [ "$last" -ge "$since" ] 2>/dev/null; then since="$last"; fi
   echo $(( now - since ))
@@ -217,7 +255,11 @@ scrub_dotenv() {
 }
 
 agent_turn() {
-  claude --print --dangerously-skip-permissions "$@" >>"$AGENT_LOG" 2>&1
+  # No background tasks: a turn's background shell is torn down with the turn, and
+  # the demo prompt then launches optimize with `setsid nohup` instead. CLAW_SESSION_ID
+  # stays in the env: the optimizer writes it into the session's manifest.json.
+  CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 \
+    claude --print --dangerously-skip-permissions "$@" >>"$AGENT_LOG" 2>&1
 }
 
 SETUP_RESUME_NUDGE='Your previous turn ended before setup finished. Do NOT restart anything that is already running. Check on the install you launched: if it is still in progress, keep monitoring it and only answer once it has finished. Once it has finished successfully, complete any remaining setup steps and then reply with exactly the completion line the setup instructions asked for. If it has failed, report the failure.'
@@ -253,9 +295,14 @@ run_setup() {
   done
 }
 
-# Newest state.json under the session root written by this attempt, as its dir.
+# Newest state.json written by this attempt in one of its sessions, as its dir.
 find_session_dir() {
-  find "$USER_DATA_PATH" -mindepth 2 -type f -name state.json -newermt "@$LEG_T0" -printf '%T@ %h\n' 2>/dev/null \
+  local dirs=() depth=(-mindepth 2)
+  mapfile -t dirs < <(own_session_dirs "$LEG_T0")
+  [ "${#dirs[@]}" -gt 0 ] || return 0
+  # An owned session dir holds its state.json directly.
+  [ -n "${CLAW_SESSION_ID:-}" ] && depth=(-maxdepth 1)
+  find "${dirs[@]}" "${depth[@]}" -type f -name state.json -newermt "@$LEG_T0" -printf '%T@ %h\n' 2>/dev/null \
     | sort -rn | awk 'NR == 1 { sub(/^[^ ]+ /, ""); print }' || true
 }
 
@@ -326,12 +373,13 @@ main() {
   fi
   ENV_FILE="$ROOT/.env"
   AGENT_LOG="$ROOT/agent.log"
+  RUN_LOG="$ROOT/run-leg.log"
   LEG_T0="$(date +%s)"
   SESSION_UUID="$(leg_session_uuid "$LEG" "$CI_VERSION")"
   trap scrub_dotenv EXIT
 
   log "leg=$LEG scenario=$SCENARIO backend=$BACKEND forge=$FORGE hours=$HOURS model=$MODEL_PATH"
-  log "workspace=$ROOT user_data_path=$USER_DATA_PATH hf_token=$([ -n "${HF_TOKEN:-}" ] && echo set || echo unset)"
+  log "workspace=$ROOT user_data_path=$USER_DATA_PATH claw_session=$([ -n "${CLAW_SESSION_ID:-}" ] && echo set || echo unset) hf_token=$([ -n "${HF_TOKEN:-}" ] && echo set || echo unset)"
   log "setup_prompt=${SETUP_PROMPT#"$SRC_DIR"/} demo_prompt=${DEMO_PROMPT#"$SRC_DIR"/}"
 
   ensure_claude_cli

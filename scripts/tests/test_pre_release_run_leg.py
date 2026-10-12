@@ -45,16 +45,31 @@ LEGS = {
 }
 
 # Stub claude: turn 1 (--session-id) prints the setup completion line for the
-# backend in .env; a resumed turn fed a demo prompt writes the session state.json
-# that STUB_STOP_REASON names. STUB_SETUP=never keeps setup from completing.
+# backend in .env; a resumed turn fed a demo prompt writes the session (manifest.json
+# naming the inherited CLAW_SESSION_ID, and the state.json that STUB_STOP_REASON
+# names). STUB_SETUP=never keeps setup from completing. STUB_OWN=none skips this
+# run's session; STUB_FOREIGN=<stop_reason> also writes, later and with a future
+# mtime, another run's session under the same root, as a shared root would hold.
+# Every turn appends its background-task switch and CLAW_SESSION_ID to turns.log.
 STUB_CLAUDE = r"""#!/usr/bin/env bash
 prompt="$(cat)"
+echo "bg_disabled=${CLAUDE_CODE_DISABLE_BACKGROUND_TASKS:-unset} claw=${CLAW_SESSION_ID:-unset}" >> turns.log
 backend="$(sed -n 's/^FRAMEWORK=//p' .env)"
+session() {  # session <dir> <claw id> <stop_reason>
+  mkdir -p "$1/reports"
+  printf '{"claw_session_id": "%s"}' "$2" > "$1/manifest.json"
+  printf '{"stop_reason": "%s", "close_sequence_done": true}' "$3" > "$1/state.json"
+  echo '{}' > "$1/reports/final.json"
+}
 case "$(printf '%s\n' "$prompt" | head -n1)" in
-  "# "*demo*)
-    d="$USER_DATA_PATH/qwen/20260101T000000Z"; mkdir -p "$d"
-    printf '{"stop_reason": "%s", "close_sequence_done": true}' "$STUB_STOP_REASON" > "$d/state.json"
-    mkdir -p "$d/reports"; echo '{}' > "$d/reports/final.json"
+  "# "*demo*|"Your previous turn ended without"*)
+    d="$USER_DATA_PATH/qwen/20260101T000000Z-own"
+    [ "${STUB_OWN:-}" = none ] || session "$d" "${CLAW_SESSION_ID:-}" "$STUB_STOP_REASON"
+    if [ -n "${STUB_FOREIGN:-}" ]; then
+      f="$USER_DATA_PATH/qwen/20260101T000001Z-other"
+      session "$f" other-claw-session "$STUB_FOREIGN"
+      find "$f" -exec touch -d '+1 hour' {} +
+    fi
     echo "launched; state.json at $d" ;;
   *)
     [ "${STUB_SETUP:-}" = never ] && { echo "still installing"; exit 0; }
@@ -195,6 +210,49 @@ def test_setup_that_never_completes_fails_after_its_turn_budget(leg_env: dict[st
     assert "setup incomplete after 3 turns" in result.stdout
     agent_log = Path(leg_env["LEG_WORK_DIR"]) / "attempt-1/baremetal-sglang-3h/agent.log"
     assert agent_log.read_text(encoding="utf-8").count("still installing") == 3
+
+
+def test_every_claude_turn_runs_without_background_tasks(leg_env: dict[str, str]) -> None:
+    # A turn's background shell ends with the turn: optimize must not be started there.
+    env = {**leg_env, "CLAW_SESSION_ID": "claw-own", "STUB_SETUP": "never", "LEG_SETUP_MAX_TURNS": "2"}
+    _run(["docker-vllm-3h"], env)
+    turns = (Path(leg_env["LEG_WORK_DIR"]) / "attempt-1/docker-vllm-3h/turns.log").read_text(encoding="utf-8")
+    assert turns.splitlines() == ["bg_disabled=1 claw=claw-own"] * 2
+    result = _run(["docker-vllm-3h"], {**leg_env, "CI_VERSION": "attempt-2", "CLAW_SESSION_ID": "claw-own"})
+    assert result.returncode == 0, result.stdout + result.stderr
+    turns = (Path(leg_env["LEG_WORK_DIR"]) / "attempt-2/docker-vllm-3h/turns.log").read_text(encoding="utf-8")
+    assert turns.splitlines() == ["bg_disabled=1 claw=claw-own"] * 2
+
+
+@pytest.mark.parametrize(("own", "foreign", "verdict"), [("signal", "sweep_done", 1), ("sweep_done", "signal", 0)])
+def test_a_shared_session_root_judges_only_this_runs_session(
+    leg_env: dict[str, str], own: str, foreign: str, verdict: int
+) -> None:
+    # Another run's newer session under the same root must not decide this leg.
+    env = {**leg_env, "CLAW_SESSION_ID": "claw-own", "STUB_STOP_REASON": own, "STUB_FOREIGN": foreign}
+    result = _run(["docker-vllm-3h"], env)
+    assert result.returncode == verdict, result.stdout + result.stderr
+    assert f"stop_reason={own}" in result.stdout
+    assert "20260101T000000Z-own" in result.stdout
+    run_log = Path(leg_env["LEG_WORK_DIR"]) / "attempt-1/docker-vllm-3h/run-leg.log"
+    assert f"stop_reason={own}" in run_log.read_text(encoding="utf-8")
+
+
+def test_another_runs_progress_does_not_hold_off_the_relaunch(leg_env: dict[str, str]) -> None:
+    # Only a foreign session is being written: this leg has no optimizer, so it is
+    # re-driven and then failed, instead of waiting out the whole deadline.
+    env = {
+        **leg_env,
+        "CLAW_SESSION_ID": "claw-own",
+        "STUB_OWN": "none",
+        "STUB_FOREIGN": "sweep_done",
+        "LEG_STALL_GRACE_S": "1",
+        "LEG_DEMO_REDRIVES": "1",
+        "LEG_DEADLINE_S": "20",
+    }
+    result = _run(["docker-vllm-3h"], env)
+    assert result.returncode == 1
+    assert "no state.json after 1 demo re-drive(s)" in result.stdout, result.stdout
 
 
 def test_runner_success_set_matches_the_optimizer() -> None:
