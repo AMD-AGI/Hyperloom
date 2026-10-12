@@ -36,6 +36,10 @@ def _binding_from_vllm_identity(identity: dict[str, Any]) -> dict[str, Any]:
 
     Separate from the SGLang one because the field names differ; sharing a table
     would silently read ``{}`` for one of the two frameworks.
+
+    The record lists only non-default settings, so an absent width is vLLM's
+    default of 1 rather than unknown: ``--data-parallel-size 1`` never appears
+    in it, and reading that absence as unobserved fails every such launch.
     """
     model = str(identity.get("model") or "")
     if not model:
@@ -44,9 +48,9 @@ def _binding_from_vllm_identity(identity: dict[str, Any]) -> dict[str, Any]:
         "model_digest": _digest_operand(model),
         "tokenizer_digest": _digest_operand(str(identity.get("tokenizer") or "")),
         "served_model_digest": _digest_operand(str(identity.get("served_model_name") or "")),
-        "tp": str(identity.get("tensor_parallel_size") or ""),
-        "dp": str(identity.get("data_parallel_size") or ""),
-        "pp": str(identity.get("pipeline_parallel_size") or ""),
+        "tp": str(identity.get("tensor_parallel_size", 1)),
+        "dp": str(identity.get("data_parallel_size", 1)),
+        "pp": str(identity.get("pipeline_parallel_size", 1)),
     }
 
 
