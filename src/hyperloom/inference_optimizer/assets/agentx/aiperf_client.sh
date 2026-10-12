@@ -48,7 +48,10 @@
 #   AGENTX_TRACE_FIRST_FILE_TIMEOUT_S (separate, shorter bound for the case
 #     where NO trace file appears at all -- a failed capture, not a slow one;
 #     default 900, clamped to AGENTX_TRACE_FLUSH_TIMEOUT_S. The first rank file
-#     landed at t+350s on that same GLM-5.3 capture),
+#     landed at t+350s on that same GLM-5.3 capture. A server-bounded capture
+#     whose traces are not complete this long after /start_profile, with the
+#     measured phase still running, is stopped once with /stop_profile and
+#     then flushed like any other),
 #   AGENTX_KEEP_SERVER, AGENTX_PROFILE_WINDOW_S,
 #   AGENTX_SERVER_SCRIPT (override builtin name), AIPERF_BIN.
 set -euo pipefail
@@ -593,6 +596,8 @@ if [ "${PROFILE:-0}" = "1" ]; then
   TRACE_CACHE_FILE="$(dirname "$CAPTURE_STATUS_FILE")/trace-validation-cache.json"
   TRACE_FLUSH_BUDGET="${AGENTX_TRACE_FLUSH_TIMEOUT_S:-1800}"
   case "$TRACE_FLUSH_BUDGET" in "" | *[!0-9]*) TRACE_FLUSH_BUDGET=1800 ;; esac
+  TRACE_FIRST_FILE_BOUND="${AGENTX_TRACE_FIRST_FILE_TIMEOUT_S:-900}"
+  case "$TRACE_FIRST_FILE_BOUND" in "" | *[!0-9]*) TRACE_FIRST_FILE_BOUND=900 ;; esac
   rm -f "$CAPTURE_STATUS_FILE"
   PHASE_GATE_FAILURE_REASON="profiling_phase_unavailable"
   _write_profile_capture_status() {
@@ -692,8 +697,7 @@ if [ "${PROFILE:-0}" = "1" ]; then
     # /start_profile, a profiler that never armed) -- waiting out the full
     # flush budget for it buys nothing. The first rank file landed at t+350s on
     # the GLM-5.3 8-rank measurement, so the default leaves real margin.
-    _first="${AGENTX_TRACE_FIRST_FILE_TIMEOUT_S:-900}"
-    case "$_first" in "" | *[!0-9]*) _first=900 ;; esac
+    _first="$TRACE_FIRST_FILE_BOUND"
     [ "$_first" -gt "$_budget" ] && _first="$_budget"
     log "waiting for the profiler trace to finish writing (expect ${_want:-?} rank files, bound ${_budget}s, first-file bound ${_first}s)"
     _prev=""; _stable=0; _cnt=0
@@ -737,24 +741,36 @@ if [ "${PROFILE:-0}" = "1" ]; then
     return 4
   }
   # The server stops a step-bounded capture itself and answers a second stop with
-  # an error (SGLang) or ignores it (vLLM), so the client never posts one: the
-  # capture ends when every rank trace is complete, or fails if the measured phase
-  # ends first.
+  # an error (SGLang) or ignores it (vLLM), so the client posts none while the
+  # bound can still end it: the capture ends when every rank trace is complete, or
+  # fails if the measured phase ends first. Only a capture still open after
+  # TRACE_FIRST_FILE_BOUND is stopped, so a server that ignores its bound cannot
+  # keep recording into host RAM; the traces, not the stop response, decide it.
   _wait_for_bounded_capture() {
-    local _rc=0
+    local _rc=0 _stop=rejected
     CAPTURE_RESULT=""
     if [ -z "$(_trace_dirs)" ]; then
       log "no profiler output directory is configured; nothing to wait for"
       return 2
     fi
-    log "server-bounded capture: waiting for all ${TP:-0} rank traces or the end of the measured phase"
+    log "server-bounded capture: waiting for all ${TP:-0} rank traces or the end of the measured phase (safety deadline ${TRACE_FIRST_FILE_BOUND}s)"
     CAPTURE_RESULT="$(
       _trace_command wait-bounded-capture --snapshot "$TRACE_SNAPSHOT" --tp "${TP:-0}" \
-        --api-url "http://127.0.0.1:${AIPERF_PROGRESS_PORT}" --phase profiling --pid "$APID"
+        --api-url "http://127.0.0.1:${AIPERF_PROGRESS_PORT}" --phase profiling --pid "$APID" \
+        --deadline-seconds "$TRACE_FIRST_FILE_BOUND"
     )" || _rc=$?
     case "$_rc" in
       0) log "bounded capture complete: ${CAPTURE_RESULT}"; return 0 ;;
       3) log "WARN the measured phase ended before every rank trace was complete: ${CAPTURE_RESULT}" ;;
+      4)
+        TRACE_FLUSH_START_NS=$(date +%s%N)
+        TRACE_FLUSH_DEADLINE_NS=$(( TRACE_FLUSH_START_NS + TRACE_FLUSH_BUDGET * 1000000000 ))
+        curl -sf -X POST "http://localhost:${PORT}/stop_profile" >/dev/null 2>&1 && _stop=accepted
+        log "WARN the capture bound did not end the capture within ${TRACE_FIRST_FILE_BOUND}s; stop_profile ${_stop}: ${CAPTURE_RESULT}"
+        CAPTURE_RESULT="${CAPTURE_RESULT%\}}, \"stop_profile\": \"${_stop}\"}"
+        _wait_for_trace_flush
+        return
+        ;;
       *)
         CAPTURE_RESULT='{"stop_reason":"capture_gate_failed"}'
         log "WARN bounded capture gate failed (rc=${_rc})"

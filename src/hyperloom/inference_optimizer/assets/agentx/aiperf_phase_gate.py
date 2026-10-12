@@ -579,8 +579,13 @@ def wait_for_bounded_capture(
     snapshot: dict[str, Any],
     tp: int,
     poll_interval_seconds: float,
+    deadline_seconds: float,
 ) -> dict[str, Any]:
-    """Wait until a server-bounded capture has written every rank, or the measured phase ends."""
+    """Wait until a server-bounded capture has written every rank, or the measured phase ends.
+
+    ``safety_deadline`` means neither happened within ``deadline_seconds``: the server
+    may not honour its own step bound, and the caller has to stop the profiler.
+    """
     probe = _PhaseEndProbe(api_url=api_url, phase=phase, pid=pid, poll_interval_seconds=poll_interval_seconds)
     cache: dict[str, Any] = {}
     previous = None
@@ -592,8 +597,11 @@ def wait_for_bounded_capture(
             return probe.decision("traces_complete")
         if ended:
             return probe.decision(ended)
+        remaining = deadline_seconds - probe.elapsed()
+        if remaining <= 0:
+            return probe.decision("safety_deadline")
         previous = files
-        time.sleep(poll_interval_seconds)
+        time.sleep(min(poll_interval_seconds, remaining))
 
 
 def write_capture_status(
@@ -639,6 +647,10 @@ def write_capture_status(
             os.unlink(temporary_path)
 
 
+# Every other stop reason means the measured phase ended first (exit 3).
+_BOUNDED_CAPTURE_EXIT_CODES = {"traces_complete": 0, "safety_deadline": 4}
+
+
 def _wait_bounded_capture_command(args: argparse.Namespace) -> int:
     try:
         decision = wait_for_bounded_capture(
@@ -649,12 +661,13 @@ def _wait_bounded_capture_command(args: argparse.Namespace) -> int:
             snapshot=json.loads(args.snapshot),
             tp=args.tp,
             poll_interval_seconds=args.poll_interval_seconds,
+            deadline_seconds=args.deadline_seconds,
         )
     except (OSError, ValueError) as exc:
         print(f"aiperf phase gate failed: {exc}", file=sys.stderr)
         return 1
     print(json.dumps(decision, sort_keys=True))
-    return 0 if decision["stop_reason"] == "traces_complete" else 3
+    return _BOUNDED_CAPTURE_EXIT_CODES.get(decision["stop_reason"], 3)
 
 
 def _add_phase_arguments(parser: argparse.ArgumentParser, *, poll_interval_seconds: float) -> None:
@@ -697,12 +710,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     bounded_parser = subparsers.add_parser(
         "wait-bounded-capture",
-        help="wait until a server-bounded capture wrote every rank (exit 0) or the measured phase ended (exit 3)",
+        help=(
+            "wait until a server-bounded capture wrote every rank (exit 0), the measured phase ended (exit 3) "
+            "or the safety deadline passed (exit 4)"
+        ),
     )
     _add_phase_arguments(bounded_parser, poll_interval_seconds=1.0)
     bounded_parser.add_argument("--trace-dir", action="append", default=[])
     bounded_parser.add_argument("--snapshot", required=True)
     bounded_parser.add_argument("--tp", required=True, type=int)
+    bounded_parser.add_argument("--deadline-seconds", required=True, type=float)
 
     status_parser = subparsers.add_parser(
         "write-capture-status",

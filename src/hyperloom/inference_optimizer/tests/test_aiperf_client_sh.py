@@ -97,6 +97,10 @@ for a in "$@"; do
     *stop_profile*)
       printf '%s\n' "$@" > "${AGENTX_CURL_STOP_MARKER:-/dev/null}"
       printf '%s\n' stop_profile >> "${AGENTX_PROFILE_EVENTS:-/dev/null}"
+      # A server that ignored its step bound writes its traces once it is told to stop.
+      if [ -n "${FAKE_STOP_TRACE_SOURCE:-}" ]; then
+        cp "$FAKE_STOP_TRACE_SOURCE"/* "$FAKE_TRACE_DEST/"
+      fi
       exit "${FAKE_STOP_PROFILE_RC:-0}";;
   esac
 done
@@ -1029,6 +1033,52 @@ def test_capture_end_follows_the_server_side_bound(
     else:
         assert argv[argv.index("-d") + 1] == body
     assert capture["requested_window_seconds"] == 0
+    _assert_external_server_untouched(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "stop_rc,traces_after_stop,reason",
+    [
+        ("0", False, "trace_files_missing"),
+        ("22", True, "capture_complete"),
+    ],
+)
+def test_bounded_capture_that_overruns_the_safety_deadline_is_stopped_once(
+    tmp_path, stop_rc, traces_after_stop, reason
+):
+    bench, bind, res = _sandbox(tmp_path, write_pid=False)
+    trace = res / "torch_trace"
+    source = tmp_path / "trace-source"
+    trace.mkdir()
+    source.mkdir()
+    for rank in range(2):
+        with gzip.open(source / f"177-TP-{rank}-DECODE.trace.json.gz", "wt", encoding="utf-8") as handle:
+            json.dump({"traceEvents": [{"cat": "kernel", "ph": "X", "ts": 1, "dur": 2}]}, handle)
+    events = tmp_path / "profile-events.txt"
+    r = _run_profile(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        TP="2",
+        FRAMEWORK="sglang",
+        PROFILE_EXTRA_BODY=_SGLANG_BOUND,
+        AGENTX_PROFILE_EVENTS=str(events),
+        AGENTX_CURL_STOP_MARKER=str(tmp_path / "stop.txt"),
+        AGENTX_TRACE_FIRST_FILE_TIMEOUT_S="1",
+        AGENTX_TRACE_FLUSH_TIMEOUT_S="75",
+        FAKE_STOP_PROFILE_RC=stop_rc,
+        FAKE_STOP_TRACE_SOURCE=str(source) if traces_after_stop else None,
+        FAKE_TRACE_DEST=str(trace),
+        **_fast_trace_poll_env(bind, tmp_path),
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert events.read_text().splitlines() == ["start_profile", "stop_profile"]
+    capture = json.loads(_capture_status_path(res).read_text())
+    assert capture["reason"] == reason
+    assert capture["status"] == ("succeeded" if reason == "capture_complete" else "failed")
+    assert capture["decision"]["stop_reason"] == "safety_deadline"
+    assert capture["decision"]["stop_profile"] == ("accepted" if stop_rc == "0" else "rejected")
     _assert_external_server_untouched(tmp_path)
 
 

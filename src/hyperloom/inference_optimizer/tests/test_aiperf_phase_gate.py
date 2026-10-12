@@ -1081,7 +1081,7 @@ def _fake_progress(monkeypatch, *, stats, alive=True, on_poll=None):
     return polls
 
 
-def _wait_bounded(tmp_path, snapshot, tp):
+def _wait_bounded(tmp_path, snapshot, tp, *, deadline_seconds=60.0):
     return phase_gate.wait_for_bounded_capture(
         api_url="http://127.0.0.1:1",
         phase="profiling",
@@ -1090,6 +1090,7 @@ def _wait_bounded(tmp_path, snapshot, tp):
         snapshot=snapshot,
         tp=tp,
         poll_interval_seconds=0.01,
+        deadline_seconds=deadline_seconds,
     )
 
 
@@ -1149,6 +1150,27 @@ def test_bounded_capture_parses_traces_only_once_they_hold_still(tmp_path, monke
     assert len(trace_metadata_reads) == 1
 
 
+@pytest.mark.parametrize("case", ["no_files", "partial_ranks"])
+def test_bounded_capture_gives_up_at_the_safety_deadline(tmp_path, monkeypatch, case):
+    snapshot = phase_gate.snapshot_traces([str(tmp_path)])
+    if case == "partial_ranks":
+        _write_trace(tmp_path / "177-TP-0-DECODE.trace.json.gz")
+    polls = _fake_progress(monkeypatch, stats=_PHASE_RUNNING)
+    result = _wait_bounded(tmp_path, snapshot, 2, deadline_seconds=0.2)
+    assert result["stop_reason"] == "safety_deadline"
+    assert result["elapsed_seconds"] >= 0.2
+    assert len(polls) > 1
+
+
+def test_bounded_capture_outcome_at_the_deadline_wins_over_the_deadline(tmp_path, monkeypatch):
+    snapshot = phase_gate.snapshot_traces([str(tmp_path)])
+    _fake_progress(monkeypatch, stats=_PHASE_ENDED)
+    assert _wait_bounded(tmp_path, snapshot, 1, deadline_seconds=0)["stop_reason"] == "phase_complete"
+    _write_trace(tmp_path / "r0.trace.json.gz")
+    _fake_progress(monkeypatch, stats=_PHASE_RUNNING, alive=False)
+    assert _wait_bounded(tmp_path, snapshot, 1, deadline_seconds=0)["stop_reason"] == "traces_complete"
+
+
 def test_bounded_capture_records_transient_api_errors(tmp_path, monkeypatch):
     snapshot = phase_gate.snapshot_traces([str(tmp_path)])
     errors = {1: phase_gate.http.client.IncompleteRead(b"partial"), 2: OSError("refused")}
@@ -1159,13 +1181,16 @@ def test_bounded_capture_records_transient_api_errors(tmp_path, monkeypatch):
     assert "refused" in result["last_api_error"]
 
 
-@pytest.mark.parametrize("complete", [True, False])
-def test_wait_bounded_capture_cli_exit_code_says_whether_traces_completed(tmp_path, monkeypatch, capsys, complete):
+@pytest.mark.parametrize(
+    "case,stop_reason,rc",
+    [("complete", "traces_complete", 0), ("phase_ended", "phase_complete", 3), ("deadline", "safety_deadline", 4)],
+)
+def test_wait_bounded_capture_cli_exit_code_names_the_outcome(tmp_path, monkeypatch, capsys, case, stop_reason, rc):
     snapshot = phase_gate.snapshot_traces([str(tmp_path)])
-    if complete:
+    if case == "complete":
         _write_trace(tmp_path / "r0.trace.json.gz")
-    _fake_progress(monkeypatch, stats=_PHASE_ENDED)
-    rc = phase_gate.main(
+    _fake_progress(monkeypatch, stats=_PHASE_RUNNING if case == "deadline" else _PHASE_ENDED)
+    exit_code = phase_gate.main(
         [
             "wait-bounded-capture",
             "--api-url",
@@ -1180,18 +1205,32 @@ def test_wait_bounded_capture_cli_exit_code_says_whether_traces_completed(tmp_pa
             "1",
             "--poll-interval-seconds",
             "0.01",
+            "--deadline-seconds",
+            "0.1",
         ]
     )
+    assert exit_code == rc
     decision = json.loads(capsys.readouterr().out)
-    assert rc == (0 if complete else 3)
-    assert decision["stop_reason"] == ("traces_complete" if complete else "phase_complete")
+    assert decision["stop_reason"] == stop_reason
     assert decision["elapsed_seconds"] >= 0
 
 
 def test_wait_bounded_capture_cli_rejects_a_missing_snapshot(tmp_path, monkeypatch, capsys):
     _fake_progress(monkeypatch, stats=_PHASE_ENDED)
     rc = phase_gate.main(
-        ["wait-bounded-capture", "--api-url", "http://127.0.0.1:1", "--pid", "42", "--snapshot", "", "--tp", "1"]
+        [
+            "wait-bounded-capture",
+            "--api-url",
+            "http://127.0.0.1:1",
+            "--pid",
+            "42",
+            "--snapshot",
+            "",
+            "--tp",
+            "1",
+            "--deadline-seconds",
+            "1",
+        ]
     )
     assert rc == 1
     assert "aiperf phase gate failed" in capsys.readouterr().err
