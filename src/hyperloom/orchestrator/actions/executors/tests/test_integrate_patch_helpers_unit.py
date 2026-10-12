@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+import ast
 import inspect
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -840,3 +842,20 @@ def test_measured_against_leaves_an_unmeasured_anchor_null():
     assert stack["throughput"] is None
     assert stack["accuracy"] is None
     assert stack["args_mode"] == "append"
+
+
+def test_apply_resolves_the_patch_root_off_the_event_loop():
+    # Settling a tie between matching trees runs git once per patch, so the apply stage must not call it inline.
+    stage = ast.parse(textwrap.dedent(inspect.getsource(ip.IntegratePatchExecutor._stage_apply)))
+    calls = [node for node in ast.walk(stage) if isinstance(node, ast.Call)]
+    inline = [c for c in calls if isinstance(c.func, ast.Name) and c.func.id == "_resolve_framework_root"]
+    threaded = [
+        c
+        for c in calls
+        if isinstance(c.func, ast.Attribute)
+        and c.func.attr == "to_thread"
+        and c.args
+        and isinstance(c.args[0], ast.Name)
+        and c.args[0].id == "_resolve_framework_root"
+    ]
+    assert (len(inline), len(threaded)) == (0, 1)

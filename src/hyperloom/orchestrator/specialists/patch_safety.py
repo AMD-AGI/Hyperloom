@@ -289,6 +289,17 @@ def _collapse_nested_roots(roots: tuple[Path, ...]) -> tuple[Path, ...]:
     )
 
 
+def _settle_tie(matches: tuple[Path, ...], default_root: Path | None, texts: Sequence[str]) -> tuple[Path, ...]:
+    """Narrow several matching checkouts: the caller's own tree when every patch applies to it, else the outermost.
+
+    Runs ``git apply --check`` once per patch against ``default_root``, so an
+    async caller reaches it through ``asyncio.to_thread``.
+    """
+    if default_root in matches and all(_git_apply_check(default_root, text)[0] for text in texts):
+        return (default_root,)
+    return _collapse_nested_roots(matches)
+
+
 def _git_apply_check(root: Path, patch_text: str, timeout_sec: float = 30.0) -> tuple[bool | None, str]:
     """Whether ``patch_text`` applies cleanly in ``root``, with git's complaint; ``None`` when git cannot run."""
     try:
@@ -412,14 +423,8 @@ def resolve_patch_apply_root(
     matches = tuple(root for root in roots if not any(patch_targets_missing(text, root) for text in texts))
     if not matches:
         return PatchRootResolution(None, "no_matching_root")
-    if (
-        len(matches) > 1
-        and resolved_default in matches
-        and all(_git_apply_check(resolved_default, text)[0] for text in texts)
-    ):
-        return PatchRootResolution(resolved_default, matches=matches)
     if len(matches) > 1:
-        matches = _collapse_nested_roots(matches)
+        matches = _settle_tie(matches, resolved_default, texts)
     if len(matches) > 1:
         return PatchRootResolution(None, "ambiguous_root", matches)
     return PatchRootResolution(matches[0], matches=matches)

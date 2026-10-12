@@ -2636,7 +2636,9 @@ class IntegratePatchExecutor:
         framework_root = (
             resolved_explicit_root(runtime_source_root)
             if runtime_source_root
-            else _resolve_framework_root(
+            # Off the loop: settling a tie between matching trees runs git once per patch.
+            else await asyncio.to_thread(
+                _resolve_framework_root,
                 explicit_framework_root,
                 patch_paths=patch_paths,
                 recorded_root=_sole_patch_root(done_payload, patch_paths, specialist_workspace=specialist_workspace),
