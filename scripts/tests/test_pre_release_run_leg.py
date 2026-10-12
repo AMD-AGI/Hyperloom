@@ -56,6 +56,7 @@ STUB_CLAUDE = r"""#!/usr/bin/env bash
 prompt="$(cat)"
 echo "bg_disabled=${CLAUDE_CODE_DISABLE_BACKGROUND_TASKS:-unset} claw=${CLAW_SESSION_ID:-unset} kb=${HYPERLOOM_KB_HOME:-unset}" >> turns.log
 echo "${HYPERLOOM_CODE_REVISION:-unset}" >> revisions.log
+echo "$(command -v python3)" >> pythons.log
 backend="$(sed -n 's/^FRAMEWORK=//p' .env)"
 session() {  # session <dir> <claw id> <stop_reason>
   mkdir -p "$1/reports"
@@ -75,6 +76,10 @@ case "$(printf '%s\n' "$prompt" | head -n1)" in
     echo "launched; state.json at $d" ;;
   *)
     [ "${STUB_SETUP:-}" = never ] && { echo "still installing"; exit 0; }
+    if [ -n "${STUB_VENV:-}" ]; then
+      mkdir -p "$STUB_VENV/bin"; printf '#!/bin/sh\n' > "$STUB_VENV/bin/python3"; chmod +x "$STUB_VENV/bin/python3"
+      echo "VIRTUAL_ENV=$STUB_VENV" >> .env
+    fi
     echo "setup complete: baremetal/$backend" ;;
 esac
 """
@@ -290,6 +295,18 @@ def test_the_optimizer_is_told_the_checkouts_revision(leg_env: dict[str, str]) -
     assert pinned.returncode == 0, pinned.stdout + pinned.stderr
     revisions = (Path(leg_env["LEG_WORK_DIR"]) / "attempt-2/docker-vllm-3h/revisions.log").read_text(encoding="utf-8")
     assert set(revisions.split()) == {"abc1234"}
+
+
+def test_the_demo_launches_with_the_interpreter_setup_installed_into(leg_env: dict[str, str], tmp_path: Path) -> None:
+    # Setup records its interpreter as VIRTUAL_ENV in .env; a PATH that dropped the
+    # image's venv must not hand the demo a python3 without the framework.
+    venv = tmp_path / "framework-venv"
+    result = _run(["baremetal-sglang-3h"], {**leg_env, "STUB_VENV": str(venv)})
+    assert result.returncode == 0, result.stdout + result.stderr
+    pythons = (Path(leg_env["LEG_WORK_DIR"]) / "attempt-1/baremetal-sglang-3h/pythons.log").read_text(encoding="utf-8")
+    setup_turn, demo_turn = pythons.splitlines()
+    assert setup_turn != f"{venv}/bin/python3"
+    assert demo_turn == f"{venv}/bin/python3"
 
 
 def test_runner_success_set_matches_the_optimizer() -> None:

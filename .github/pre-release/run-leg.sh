@@ -260,11 +260,15 @@ scrub_dotenv() {
   for k in $SECRET_KEYS; do sed -i "/^${k}=/d" "$ENV_FILE" 2>/dev/null || true; done
 }
 
+# Extra env for the agent's turns only (see use_setup_venv); the runner's own
+# helpers keep the caller's PATH.
+AGENT_ENV=()
+
 agent_turn() {
   # No background tasks: a turn's background shell is torn down with the turn, and
   # the demo prompt then launches optimize with `setsid nohup` instead. CLAW_SESSION_ID
   # stays in the env: the optimizer writes it into the session's manifest.json.
-  CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 \
+  env "${AGENT_ENV[@]}" CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 \
     claude --print --dangerously-skip-permissions "$@" >>"$AGENT_LOG" 2>&1
 }
 
@@ -299,6 +303,19 @@ run_setup() {
     log "WARN: setup turn $turn ended early (idle ${idle}s); resuming"
     sleep "${LEG_TURN_GAP_S:-30}"
   done
+}
+
+# Puts the interpreter setup installed the framework into (the VIRTUAL_ENV it wrote
+# to .env) first on the demo turns' PATH, as activating it would. A scheduler that
+# replaces the image's PATH drops the image's own venv, and the launch then picks a
+# python3 without the framework, so the baseline fails on an import.
+use_setup_venv() {
+  local venv
+  venv="$(sed -n 's/^VIRTUAL_ENV=//p' "$ENV_FILE" | tail -n 1)"
+  venv="${venv%\"}"; venv="${venv#\"}"
+  [ -n "$venv" ] && [ -x "$venv/bin/python3" ] || return 0
+  AGENT_ENV=("PATH=$venv/bin:$PATH" "VIRTUAL_ENV=$venv")
+  log "demo uses setup's interpreter $venv/bin/python3"
 }
 
 # Newest state.json written by this attempt in one of its sessions, as its dir.
@@ -413,6 +430,7 @@ main() {
   cd "$ROOT"
 
   run_setup || exit 1
+  use_setup_venv
   run_demo || exit 1
 }
 
