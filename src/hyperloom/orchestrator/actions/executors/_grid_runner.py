@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -604,7 +605,7 @@ def sync_benchmark_timeout(config_path: Path, timeout_sec: float) -> None:
     envs = bench.setdefault("envs", {})
     envs["PYTHONUNBUFFERED"] = "1"
     if "AGENTX_PHASE_WAIT_TIMEOUT_S" in envs:
-        envs["AGENTX_PHASE_WAIT_TIMEOUT_S"] = str(timeout_sec)
+        envs["AGENTX_PHASE_WAIT_TIMEOUT_S"] = str(math.ceil(timeout_sec))
     config_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
 
 
