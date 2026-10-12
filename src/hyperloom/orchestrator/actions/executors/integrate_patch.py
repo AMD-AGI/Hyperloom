@@ -60,8 +60,8 @@ from hyperloom.common.perf_metric import (
     GRADED_OUTPUT,
     VERDICT_KEEP,
     holds_within_band,
+    constraint_veto_reason,
     incomparability_reason,
-    latency_veto_reason,
     perf_snapshot_from_mapping,
     resolve_grading_anchor_perf,
 )
@@ -1749,8 +1749,8 @@ def _correctness_fix_refusals(
     )
     if finding_refusal:
         refusals.append(finding_refusal)
-    # The resolver only vetoes a KEEP verdict, and this route runs after a REVERT, so the budget is read here.
-    veto = latency_veto_reason(bench_result.get("e2el_mean_ms"), float(getattr(shared_state, "latency_budget_ms", 0.0)))
+    # The resolver only vetoes a KEEP verdict, and this route runs after a REVERT, so the budgets are read here.
+    veto = constraint_veto_reason(bench_result, shared_state)
     if not graded.comparable:
         refusals.append(f"performance comparison unavailable: {graded.degrade_reason}")
     elif veto:

@@ -284,7 +284,8 @@ otherwise KEEP is a REVERT with `veto_reason` `gpu_power_budget_exceeded` when a
 card is over its own limit, `power_budget_exceeded` when the total is over, or
 `power_unmeasured` when its round reported no per-GPU power (fail closed).
 Every KEEP decision point reads that verdict, so a lane reverts its own
-over-budget change. If the baseline itself breaks a budget, or reported no
+over-budget change; the correctness-fix route, which can KEEP a verified fix
+after that verdict reverted it, applies the same budgets itself. If the baseline itself breaks a budget, or reported no
 power, the run stops with `baseline_over_power_budget`. The reading is the
 measured-phase per-GPU figure described above, carried as `gpu_power_by_gpu_w`;
 only Hyperloom's own sampler reads every serving card, so a round it did not
