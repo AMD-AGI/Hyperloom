@@ -1004,6 +1004,18 @@ def test_an_out_of_date_entry_main_already_outgrew_does_not_fail(repo: Repo, rec
         assert f"`src/a.py` `f` | Cyclomatic complexity | {recorded} | {shown} |" in section(report, DRIFT)
 
 
+def test_an_entry_a_new_unit_moved_into_is_never_excused_as_drift(repo: Repo) -> None:
+    """Main removed ``old.py::f``; a same-named unit this change adds elsewhere is matched as its move."""
+    repo.write_baseline({key("src/old.py", "f"): 30})
+    base = repo.commit()
+    repo.touch("src/old.py", "src/new.py")
+    repo.findings = [cc("src/new.py", "f", 25)]
+    code, report = repo.gate("--base-ref", base)
+    assert code == 1, report
+    assert "moved to `src/new.py:3` `f` (25)" in section(report, OUT_OF_DATE)
+    assert section(report, DRIFT) == ""
+
+
 def test_an_out_of_date_entry_the_base_cannot_measure_still_fails(repo: Repo) -> None:
     dup = key("src/a.py", collect.MODULE, "duplicated-lines")
     repo.write_baseline({dup: 40})

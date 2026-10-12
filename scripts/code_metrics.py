@@ -452,8 +452,9 @@ def excuse_base_drift(outcome: Outcome, base: dict[Key, int]) -> None:
 
     def drifted(entry: tuple[Key, int, Finding | None]) -> bool:
         key, _recorded, finding = entry
-        now = finding.value if finding is not None and finding.key == key else None
-        return key[0] in PER_FILE and base.get(key) == now
+        if key[0] not in PER_FILE or (finding is not None and finding.key != key):
+            return False  # a move: the entry carries a unit this tree has elsewhere, not the base's drift
+        return base.get(key) == (None if finding is None else finding.value)
 
     outcome.base_drift = [(key, was, base.get(key), now) for key, was, now in outcome.stale if drifted((key, was, now))]
     outcome.stale = [entry for entry in outcome.stale if not drifted(entry)]
