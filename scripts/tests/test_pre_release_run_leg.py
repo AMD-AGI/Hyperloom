@@ -55,6 +55,7 @@ LEGS = {
 STUB_CLAUDE = r"""#!/usr/bin/env bash
 prompt="$(cat)"
 echo "bg_disabled=${CLAUDE_CODE_DISABLE_BACKGROUND_TASKS:-unset} claw=${CLAW_SESSION_ID:-unset} kb=${HYPERLOOM_KB_HOME:-unset}" >> turns.log
+echo "${HYPERLOOM_CODE_REVISION:-unset}" >> revisions.log
 backend="$(sed -n 's/^FRAMEWORK=//p' .env)"
 session() {  # session <dir> <claw id> <stop_reason>
   mkdir -p "$1/reports"
@@ -271,6 +272,24 @@ def test_another_runs_progress_does_not_hold_off_the_relaunch(leg_env: dict[str,
     result = _run(["docker-vllm-3h"], env)
     assert result.returncode == 1
     assert "no state.json after 1 demo re-drive(s)" in result.stdout, result.stdout
+
+
+def test_the_optimizer_is_told_the_checkouts_revision(leg_env: dict[str, str]) -> None:
+    # The wheel installed into the workspace is not a checkout, so without this the
+    # session's manifest carries no code revision.
+    head = subprocess.run(
+        ["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"], capture_output=True, text=True, check=False
+    )
+    if head.returncode != 0:
+        pytest.skip("not a git checkout")
+    result = _run(["docker-vllm-3h"], leg_env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    revisions = (Path(leg_env["LEG_WORK_DIR"]) / "attempt-1/docker-vllm-3h/revisions.log").read_text(encoding="utf-8")
+    assert set(revisions.split()) == {head.stdout.strip()}
+    pinned = _run(["docker-vllm-3h"], {**leg_env, "CI_VERSION": "attempt-2", "HYPERLOOM_CODE_REVISION": "abc1234"})
+    assert pinned.returncode == 0, pinned.stdout + pinned.stderr
+    revisions = (Path(leg_env["LEG_WORK_DIR"]) / "attempt-2/docker-vllm-3h/revisions.log").read_text(encoding="utf-8")
+    assert set(revisions.split()) == {"abc1234"}
 
 
 def test_runner_success_set_matches_the_optimizer() -> None:

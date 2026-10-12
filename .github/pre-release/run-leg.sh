@@ -39,6 +39,9 @@
 #   CLAUDE_CLI_VERSION  only when no `claude` is on PATH
 # Optional env: LEG_WHEEL (prebuilt wheel instead of building this checkout),
 #   CLAW_SESSION_ID (the optimizer records it in manifest.json; see USER_DATA_PATH),
+#   HYPERLOOM_CODE_REVISION (default: this checkout's short HEAD; the installed wheel
+#   is not a checkout, and a session without a code revision is refused by consumers
+#   that key on it),
 #   HYPERLOOM_KB_HOME (default: the leg workspace's experience-kb/, so legs sharing a
 #   session root do not contend for one Experience KB home, which serves one service),
 #   HF_TOKEN, ANTHROPIC_CUSTOM_HEADERS (a gateway that needs a header gets it from
@@ -391,6 +394,18 @@ main() {
   ensure_claude_cli
   install_hyperloom
   write_dotenv
+
+  # The optimizer records its code revision from the checkout it runs from, and the
+  # wheel installed into the workspace is not one.
+  if [ -z "${HYPERLOOM_CODE_REVISION:-}" ]; then
+    HYPERLOOM_CODE_REVISION="$(git -C "$SRC_DIR" rev-parse --short HEAD 2>/dev/null || true)"
+  fi
+  if [ -n "$HYPERLOOM_CODE_REVISION" ]; then
+    export HYPERLOOM_CODE_REVISION
+    log "code_revision=$HYPERLOOM_CODE_REVISION"
+  else
+    log "WARN: no code revision: $SRC_DIR is not a git checkout and HYPERLOOM_CODE_REVISION is unset"
+  fi
 
   # The claude CLI reads ANTHROPIC_MODEL, not Hyperloom's CLAUDE_MODEL.
   export ANTHROPIC_MODEL="$CLAUDE_MODEL" ANTHROPIC_SMALL_FAST_MODEL="$CLAUDE_MODEL"
