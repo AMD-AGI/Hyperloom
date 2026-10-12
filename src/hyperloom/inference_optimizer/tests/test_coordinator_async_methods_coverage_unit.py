@@ -1144,7 +1144,9 @@ _SHARED_TAIL = (
 )
 
 
-async def _executor_nonzero_result(tmp_path, monkeypatch, name: str, stderr: str, *, workspace: bool) -> dict:
+async def _executor_nonzero_result(
+    tmp_path, monkeypatch, name: str, stderr: str, *, workspace: bool, stdout: str = ""
+) -> dict:
     """Run one baseline round through the executor's real result builder, with only Magpie's process faked."""
     import types
 
@@ -1162,7 +1164,7 @@ async def _executor_nonzero_result(tmp_path, monkeypatch, name: str, stderr: str
     monkeypatch.setattr(bl, "snapshot_workspaces", lambda *a, **k: set())
     monkeypatch.setattr(bl, "select_run_workspace", lambda *a, **k: run_workspace)
     monkeypatch.setattr(
-        bl, "run_with_session_kill", lambda cmd, **kw: types.SimpleNamespace(returncode=1, stdout="", stderr=stderr)
+        bl, "run_with_session_kill", lambda cmd, **kw: types.SimpleNamespace(returncode=1, stdout=stdout, stderr=stderr)
     )
     cfg = session / "bench.yaml"
     cfg.write_text("benchmark:\n  framework: vllm\n  model: /tmp/m\n", encoding="utf-8")
@@ -1223,3 +1225,22 @@ async def test_baseline_executor_same_output_modulo_numbers_stops_at_two(
     assert coord.shared_state.stop_reason != "baseline_failed"
     await coord.writeback.handle_unpromotable_result(_baseline_task("bl-same-2"), second)
     assert coord.shared_state.stop_reason == "baseline_failed"
+
+
+@pytest.mark.asyncio
+async def test_baseline_executor_signs_stdout_as_well_as_stderr(coord: Coordinator, tmp_path, monkeypatch) -> None:
+    """The same generic stderr over different causes on stdout is two failures, not one."""
+    stderr = "RuntimeError: engine died\n"
+    oom = await _executor_nonzero_result(
+        tmp_path, monkeypatch, "oom", stderr, stdout="HIP out of memory on device 3\n", workspace=False
+    )
+    nccl = await _executor_nonzero_result(
+        tmp_path, monkeypatch, "nccl", stderr, stdout="NCCL watchdog timeout after 600s\n", workspace=False
+    )
+
+    assert oom["error"] == nccl["error"]
+    assert oom["output_signature"] != nccl["output_signature"]
+
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-out-1"), oom)
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-out-2"), nccl)
+    assert coord.shared_state.stop_reason != "baseline_failed"

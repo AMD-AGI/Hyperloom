@@ -745,9 +745,10 @@ _SIGNATURE_VOLATILE_RE = re.compile(r"0x[0-9a-f]+|[0-9a-f]{8,}|\d+")
 def nonzero_output_signature(err_class: str, proc_stdout: str | None, proc_stderr: str | None) -> str:
     """Identify a ``subprocess_nonzero`` failure by the process's whole output, ignoring numbers.
 
-    The result's ``error`` is only the last 2000 characters, and two different causes
-    (a HIP OOM, an NCCL timeout) can end in the same engine-death traceback that long,
-    so the signature is taken from the full, redacted output instead. Numbers (pids,
+    The result's ``error`` is only the last 2000 characters of one stream, and two
+    different causes (a HIP OOM, an NCCL timeout) can end in the same engine-death
+    traceback that long, or differ only in the stream ``error`` leaves out, so the
+    signature is taken from both full, redacted streams instead. Numbers (pids,
     ports, timestamps, durations) and hex ids differ between two attempts that failed
     for the same reason, so they are folded away.
 
@@ -756,7 +757,7 @@ def nonzero_output_signature(err_class: str, proc_stdout: str | None, proc_stder
             signature, because other classes carry a fixed sentence that unrelated
             failures share.
         proc_stdout: The process's whole stdout.
-        proc_stderr: The process's whole stderr; preferred over stdout, as for ``error``.
+        proc_stderr: The process's whole stderr.
 
     Returns:
         ``"<class>|<sha256>"``, or ``""`` when there is no signature (another class, or
@@ -764,7 +765,7 @@ def nonzero_output_signature(err_class: str, proc_stdout: str | None, proc_stder
     """
     if err_class != "subprocess_nonzero":
         return ""
-    text = redact_secret_values(proc_stderr or proc_stdout or "").strip().lower()
+    text = redact_secret_values(f"{proc_stderr or ''}\n{proc_stdout or ''}").strip().lower()
     if not text:
         return ""
     text = " ".join(_SIGNATURE_VOLATILE_RE.sub("#", text).split())
