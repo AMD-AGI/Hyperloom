@@ -739,6 +739,80 @@ async def test_explore_missing_axes_fails_closed(
     assert any(gate["gate"] == "graded_axes" and gate["passed"] is False for gate in tested["gates"])
     assert state.baseline_perf == baseline_before
     assert state.current_best == best_before
+    # A variant that could not be graded on its axes is the one row the ledger may still call unmeasured.
+    assert tested["graded_gain_pct"] is None
+    assert "no_meas" in SharedState._format_variant_line(tested)
+
+
+@pytest.mark.asyncio
+async def test_explore_guard_revert_row_reads_as_measured(sub_agent_runner, tmp_path, monkeypatch):
+    """A variant the tail guard refuses keeps its graded movement and the gate's reason on its ledger row.
+
+    The median here clears the KEEP bar by a wide margin and the slow tail halves, so the verdict is REVERT on a
+    fully measured variant. The prompt ledger must say so rather than render the row as never measured.
+    """
+    _force_cold_decision(monkeypatch)
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState(framework="sglang", benchmark_mode="agentx")
+    state.baseline_tput = 200.0
+    state.baseline_perf = {
+        "output_throughput": 200.0,
+        "total_token_throughput": 20000.0,
+        "e2e_norm_intvty_p90": 100.0,
+        "e2e_norm_intvty_p50": 100.0,
+        "duration_seconds": 25.0,
+        "request_error_rate": 0.0,
+    }
+    sub.shared_state = state
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+
+    def _fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        _fake_workspace(
+            slot,
+            tput=200.0,
+            perf_axes={
+                "total_token_throughput": 20000.0,
+                "e2e_norm_intvty_p90": 50.0,
+                "e2e_norm_intvty_p50": 110.0,
+                "duration_seconds": 25.0,
+                "request_error_rate": 0.0,
+            },
+        )
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "explore-guard-revert"),
+            "base_tput": 200.0,
+            "grid": [{"name": "v_tail_regress", "extra_args": "--tail-flag"}],
+        },
+        idempotency_key="ex-guard-revert",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    tested = res.result["explore_search_update"]["tested"][canonical_fingerprint("--tail-flag", {})]
+    assert tested["outcome"] == "REVERT"
+    assert tested["graded_objective"] == "e2e_norm_intvty_p50"
+    # A refused variant still contributes no gain anywhere a gain is summed or ranked.
+    assert tested["gain_pct"] is None
+    assert tested["graded_gain_pct"] == pytest.approx(10.0)
+    assert tested["e2e_norm_intvty_p50"] == pytest.approx(110.0)
+    assert tested["reason"].startswith("median_or_guard_failed")
+    line = SharedState._format_variant_line(tested)
+    assert "no_meas" not in line
+    assert "+10.00%" in line
+    assert "median_or_guard_failed" in line
 
 
 @pytest.mark.asyncio
@@ -1627,6 +1701,11 @@ async def test_explore_executor_defaults_to_warm_decision_matching_hot_baseline(
         out_idx = cmd.index("--output-dir")
         slot = Path(cmd[out_idx + 1])
         bench_calls.append(str(slot))
+        if "warmup_round" in str(slot):
+            (slot / "server.log").write_text(
+                "[aiter] shape is M:1, N:2, K:3, not found tuned config in /tmp/a.csv, will use default config!\n",
+                encoding="utf-8",
+            )
         _fake_workspace(slot, tput=920.0)  # +15% vs 800 — KEEP and stable
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
@@ -1661,6 +1740,13 @@ async def test_explore_executor_defaults_to_warm_decision_matching_hot_baseline(
     assert len(bench_calls) == 2, bench_calls
     assert sum("warmup_round" in c for c in bench_calls) == 1
     assert {w["name"] for w in out["winners"]} == {"warm_keep"}
+    warm_log = next(Path(c) for c in bench_calls if "warmup_round" in c) / "server.log"
+    decision_slot = next(Path(c) for c in bench_calls if "warmup_round" not in c)
+    report = json.loads((decision_slot / "runtime_findings.json").read_text(encoding="utf-8"))
+    assert report["log_path"] == str(warm_log)
+    assert [(f["rule_id"], f["status"]) for f in report["findings"] if f["status"] != "not_detected"] == [
+        ("aiter.tuned_miss", "detected")
+    ]
 
 
 def _run_eval_of(cmd: list[str]) -> str:

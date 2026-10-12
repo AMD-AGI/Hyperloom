@@ -475,13 +475,8 @@ class WorkspaceGuard:
 
     def _checkout_index_path(self, relative: str) -> None:
         """Restore one clean tracked path from the already-restored index."""
-        path = self.root / relative
-        try:
-            metadata = path.lstat()
-        except FileNotFoundError:
-            metadata = None
-        if metadata is not None and stat.S_ISDIR(metadata.st_mode):
-            shutil.rmtree(path)
+        # checkout-index skips a path whose stat matches the index entry, which a same-size edit can satisfy.
+        self._remove_filesystem_path(self.root / relative)
         self._run_git_restore("checkout-index", "--force", "--", relative)
 
     def _restore_baseline(self) -> None:

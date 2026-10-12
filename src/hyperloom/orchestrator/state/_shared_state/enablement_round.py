@@ -160,14 +160,30 @@ class EnablementRound:
     # framework tree reads. A lever is accepted because a round advanced, not
     # because a reader was shown to exist.
     levers_without_readers: list = field(default_factory=list)
-    # {interpreter_tag, distributions} of the accepted runtime.
+    # {interpreter_tag, interpreter, distributions} of the accepted runtime.
     environment_closure: dict = field(default_factory=dict)
+    # The same observation, read once before the stack's first setup command:
+    # what the accepted closure is compared against to name the versions the
+    # enablement changed. Never replaced, like ``base_sha_by_root``.
+    environment_closure_baseline: dict = field(default_factory=dict)
 
     def record_base_sha(self, root: str, sha: str) -> bool:
         """Record ``root``'s pre-mutation head, first writer wins; return whether this call recorded it."""
         before = self.base_sha_by_root
         self.base_sha_by_root = _first_writer_wins(before, {root: sha})
         return len(self.base_sha_by_root) > len(before)
+
+    def record_closure_baseline(self, closure: Mapping[str, Any]) -> bool:
+        """Record the closure observed before any setup command ran; return whether this call recorded it.
+
+        Refused once a setup execution is on the ledger: a reading taken after an
+        install already names the changed versions as the starting point, and a
+        diff against it would report nothing changed.
+        """
+        if self.environment_closure_baseline or self.setup_executions or not closure:
+            return False
+        self.environment_closure_baseline = dict(closure)
+        return True
 
     def record_patch_roots(self, roots: Mapping[str, str]) -> None:
         """Bind each patch to the tree it applied to, first writer wins.

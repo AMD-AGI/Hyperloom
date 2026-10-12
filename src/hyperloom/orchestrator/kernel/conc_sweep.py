@@ -12,7 +12,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from hyperloom.common import io as _common_io
 from hyperloom.common.gain_math import conc_pair_comparison
@@ -40,7 +40,13 @@ from ..actions.executors._grid_runner import (
     variant_conc,
 )
 from ..actions.executors._subprocess_kill import resolve_benchmark_timeouts, session_deadline_to_remaining_sec
-from ..actions.stop_attribution import SESSION_TIME_EXHAUSTED_CLASS, STOPPED_BY_THE_RUN, StoppedByTheRun
+from ..actions.cancel_channel import current_cancel_scope
+from ..actions.stop_attribution import (
+    ORCHESTRATOR_CANCELLED_CLASS,
+    SESSION_TIME_EXHAUSTED_CLASS,
+    STOPPED_BY_THE_RUN,
+    StoppedByTheRun,
+)
 from ..actions.executors._workload_envs import (
     FrameworkScriptMismatchError,
     default_baseline_config,
@@ -140,6 +146,11 @@ _SWEEP_BUDGET_STOP = StoppedByTheRun(
     never_started="conc_sweep total budget exhausted before this round ran",
     ends_the_batch=True,
 )
+
+
+# The orchestrator stopped the sweep's action from outside -- a phase transition or a shutdown. Every rung after the
+# one it interrupted is recorded under this cause and never run.
+_CANCEL_STOP = STOPPED_BY_THE_RUN[ORCHESTRATOR_CANCELLED_CLASS]
 
 
 def _deadline_skip_result(variant: GridVariant, stopped: StoppedByTheRun) -> VariantResult:
@@ -457,6 +468,37 @@ class _SweepRun:
     recorder: Any = None
     results: list[VariantResult] = field(default_factory=list)
     budget: _Budget = field(default_factory=_Budget)
+    cancel_reason: str = ""
+
+    @property
+    def cancelled(self) -> bool:
+        """Whether the orchestrator has stopped this sweep's action."""
+        return bool(self.cancel_reason)
+
+    def observe_cancel(self, results: Sequence[VariantResult] = ()) -> bool:
+        """Latch a cancel seen on the action's scope or on a rung it reaped; return whether the sweep is cancelled.
+
+        A cancelled scope stays cancelled, so every rung after it would be reaped the moment it started. Latching here
+        is what lets the ladder stop instead of reading each of those reaps as a rung that failed.
+        """
+        if self.cancelled:
+            return True
+        scope = current_cancel_scope()
+        if scope is not None and scope.cancelled:
+            self.cancel_reason = scope.reason or ORCHESTRATOR_CANCELLED_CLASS
+        elif any(result.error_class == ORCHESTRATOR_CANCELLED_CLASS for result in results):
+            self.cancel_reason = ORCHESTRATOR_CANCELLED_CLASS
+        return self.cancelled
+
+    def stop_named_by(self, result: VariantResult | None) -> StoppedByTheRun | None:
+        """The run-side stop a rung's result names, or ``None`` for a rung that ran or failed on its own."""
+        if result is None:
+            return None
+        if result.error_class == self.deadline_stop.error_class:
+            return self.deadline_stop
+        if result.error_class == ORCHESTRATOR_CANCELLED_CLASS:
+            return _CANCEL_STOP
+        return None
 
     @property
     def concs_desc(self) -> list[int]:
@@ -545,6 +587,8 @@ class _SweepRun:
         lifecycle_boot_only: bool = False,
     ) -> list[VariantResult]:
         """Run one rung from the sweep's base config; a deadline stop inside it exhausts the sweep's budget."""
+        if self.observe_cancel():
+            return [_deadline_skip_result(variant, _CANCEL_STOP)]
         if self.budget.exhausted:
             return [_deadline_skip_result(variant, self.deadline_stop)]
         results = await run_grid(
@@ -565,6 +609,7 @@ class _SweepRun:
             deadline_stop=self.deadline_stop,
             lifecycle_boot_only=lifecycle_boot_only,
         )
+        self.observe_cancel(results)
         if any(result.error_class == self.deadline_stop.error_class for result in results):
             remaining = session_deadline_to_remaining_sec(self.session_deadline_sec)
             reason = self.deadline_stop.error_class
@@ -605,6 +650,10 @@ class _SweepRun:
         )
         if in_progress:
             status = "in_progress"
+        elif self.cancelled:
+            # Stopped from outside, not failed: whatever ended the phase is the reason the session records, and a
+            # ladder it cut short is not evidence that the stack cannot serve.
+            status = "cancelled"
         elif summary["successful_pairs"]:
             status = "succeeded"
         else:
@@ -629,6 +678,9 @@ class _SweepRun:
             "total_budget_sec": self.total_budget_sec,
             "budget_exhausted": self.budget.exhausted,
         }
+        if self.cancelled and not in_progress:
+            payload["cancelled"] = True
+            payload["cancel_reason"] = self.cancel_reason
         if budget_limited_no_pair:
             payload["was_skipped"] = True
             payload["skip_reason"] = "budget_exhausted_no_successful_pairs"
@@ -804,9 +856,23 @@ async def _sweep_one_arm_single_server(run: _SweepRun, arm: _Arm) -> None:
         boot_failed = br is None or br.status in {"failed", "skipped"}
         boot_elapsed = round(time.time() - boot_started_at, 3)
 
-        if br is not None and br.error_class == run.deadline_stop.error_class:
+        boot_stop = run.stop_named_by(br)
+        if boot_stop is None and boot_failed and run.cancelled:
+            # A boot that failed under a cancel still ends the ladder: every lower rung would be reaped on start.
+            boot_stop = _CANCEL_STOP
+        if boot_stop is not None:
+            if boot_stop is _CANCEL_STOP:
+                log.info(
+                    "conc_sweep single-server: arm=%s stopped at boot conc=%s (%s); not trying lower concs",
+                    arm_name,
+                    boot_variant.extra_envs.get("CONC", "?"),
+                    run.cancel_reason or ORCHESTRATOR_CANCELLED_CLASS,
+                )
             run.commit_failed_boots(arm_name, failed_boots)
-            stopped_results = [br, *[_deadline_skip_result(v, run.deadline_stop) for v in grid[boot_idx + 1 :]]]
+            stopped_results = [
+                *([br] if br is not None else []),
+                *[_deadline_skip_result(v, boot_stop) for v in grid[boot_idx + 1 :]],
+            ]
             for stopped in stopped_results:
                 run.results.append(stopped)
                 run.record_rung(
@@ -911,6 +977,12 @@ async def _sweep_one_arm_single_server(run: _SweepRun, arm: _Arm) -> None:
         )
         for r_idx, variant in enumerate(reuse_grid):
             _reuse_remaining = session_deadline_to_remaining_sec(run.session_deadline_sec)
+            if run.observe_cancel():
+                for v in reuse_grid[r_idx:]:
+                    skip_r = _deadline_skip_result(v, _CANCEL_STOP)
+                    run.results.append(skip_r)
+                    run.record_rung(arm_name, skip_r, stage=STAGE_BUDGET_SKIP)
+                break
             # Check session deadline before each reuse point.
             if run.session_closing():
                 run.budget.spend_on_session_reserve()
@@ -956,7 +1028,7 @@ async def _sweep_one_arm_single_server(run: _SweepRun, arm: _Arm) -> None:
             reuse_elapsed = round(time.time() - reuse_started_at, 3)
             for rr in reuse_results:
                 run.results.append(rr)
-                stopped = rr.error_class == run.deadline_stop.error_class
+                stopped = run.stop_named_by(rr) is not None
                 run.record_rung(
                     arm_name,
                     rr,
@@ -1001,6 +1073,11 @@ async def _sweep_arm_option_b(
     """
     for variant in grid:
         _ob_rem = session_deadline_to_remaining_sec(run.session_deadline_sec)
+        if run.observe_cancel():
+            skip_r = _deadline_skip_result(variant, _CANCEL_STOP)
+            run.results.append(skip_r)
+            run.record_rung(arm_name, skip_r, stage=STAGE_BUDGET_SKIP)
+            continue
         if run.session_closing():
             run.budget.spend_on_session_reserve()
             skip_r = _budget_skip_result(variant)
@@ -1025,7 +1102,7 @@ async def _sweep_arm_option_b(
         rung_elapsed = round(time.time() - rung_started_at, 3)
         for r in sub:
             run.results.append(r)
-            stopped = r.error_class == run.deadline_stop.error_class
+            stopped = run.stop_named_by(r) is not None
             run.record_rung(
                 arm_name,
                 r,
@@ -1282,6 +1359,11 @@ async def run_conc_sweep(
             arms_order=[arm.name for arm in arms_order],
         )
     for arm in arms_order:
+        if run.observe_cancel():
+            run.results.extend(_deadline_skip_result(v, _CANCEL_STOP) for v in run.arm_grid(arm))
+            if recorder is not None:
+                recorder.record_arm_refused(arm.name, reason=ORCHESTRATOR_CANCELLED_CLASS, remaining_sec=0.0)
+            continue
         if run.budget.refuses_next_arm():
             run.results.extend(_deadline_skip_result(v, deadline_stop) for v in run.arm_grid(arm))
             if recorder is not None:
@@ -1322,10 +1404,12 @@ async def run_conc_sweep(
         recorder.finish(payload, stop_reason=getattr(state, "stop_reason", ""))
 
     log.info(
-        "conc_sweep: done — successful_pairs=%d failed_pairs=%d best_speedup=%s",
+        "conc_sweep: done — status=%s successful_pairs=%d failed_pairs=%d best_speedup=%s%s",
+        payload["status"],
         summary["successful_pairs"],
         summary["failed_pairs"],
         summary["best_speedup"],
+        f" cancelled_by={run.cancel_reason}" if run.cancelled else "",
     )
     return payload
 

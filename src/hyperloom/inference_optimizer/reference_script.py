@@ -332,54 +332,6 @@ def _extract_server_args(
     return " ".join(kept), model
 
 
-#: ``vcs`` value of a framework root with no version control of its own.
-#: Duplicates ``orchestrator.bringup.trees.VCS_NONE``, which this layer cannot
-#: import without inverting the package layering.
-VCS_NONE = "none"
-
-# git -C resolves a relative patch path against the target tree, not the caller, so the script dir is baked in.
-_APPLY_PATCH_GIT = """\
-apply_patch() {
-  local patch_file="$SCRIPT_DIR/$1"
-  for lvl in 1 0 2 3 4 5 6 7 8; do
-    if git -C "$FRAMEWORK_ROOT" apply --check -p"$lvl" "$patch_file" 2>/dev/null; then
-      git -C "$FRAMEWORK_ROOT" apply -p"$lvl" "$patch_file"
-      return 0
-    fi
-  done
-  echo "ERROR: could not apply $patch_file at any strip level" >&2
-  return 1
-}"""
-
-# For a root with no git of its own -- an installed wheel -- where ``git
-# apply`` has nothing to run against.
-_APPLY_PATCH_NO_GIT = """\
-apply_patch() {
-  local patch_file="$SCRIPT_DIR/$1"
-  for lvl in 1 0 2 3 4 5 6 7 8; do
-    if patch -p"$lvl" --fuzz=0 --dry-run -d "$FRAMEWORK_ROOT" -i "$patch_file" >/dev/null 2>&1; then
-      patch -p"$lvl" --fuzz=0 -d "$FRAMEWORK_ROOT" -i "$patch_file"
-      return 0
-    fi
-  done
-  echo "ERROR: could not apply $patch_file at any strip level" >&2
-  return 1
-}"""
-
-
-def _apply_patch_func(framework_root_vcs: str) -> str:
-    """Return the ``apply_patch`` helper that matches the target tree's kind.
-
-    Args:
-        framework_root_vcs: The framework root's vcs discriminant. Only
-            :data:`VCS_NONE` selects the POSIX ``patch`` channel.
-
-    Returns:
-        str: The shell function body.
-    """
-    return _APPLY_PATCH_NO_GIT if framework_root_vcs == VCS_NONE else _APPLY_PATCH_GIT
-
-
 def _shell_ready_server_args(server_args: Any) -> str:
     """Return ``server_args`` with every token quoted for the shell that will run it.
 
@@ -388,8 +340,7 @@ def _shell_ready_server_args(server_args: Any) -> str:
     {"max_cudagraph_capture_size":8,"cudagraph_mode":"NONE"}`` interpolated raw
     is brace-expanded and quote-stripped into three words -- the flag, a value
     that is no longer JSON, and a stray operand -- so the one setting that kept
-    the server from segfaulting silently did not reach it. Patches and artifacts
-    on the lines above are already quoted; this line was not.
+    the server from segfaulting silently did not reach it.
 
     Tokenized by the splitter the launch path itself uses, so the script hands
     the server the same argv every other consumer got, rather than a second
@@ -421,15 +372,16 @@ def render_reference_script(
     tp: int | None = None,
     max_model_len: int | None = None,
     gpu_type: str | None = None,
-    setup_commands: list[str] | None = None,
-    framework_root: str | None = None,
-    framework_root_vcs: str = "",
-    runtime: str | None = None,
-    rounds: list[dict[str, Any]] | None = None,
+    setup_script: str | None = None,
 ) -> str:
-    """Render a runnable ``*.sh`` artifact from a launch recipe."""
+    """Render a runnable ``*.sh`` artifact from a launch recipe.
+
+    ``setup_script`` names a script beside this one that prepares the
+    environment. It runs before the launch envs are exported, as the session's
+    own setup did, and the launch follows only when it succeeds.
+    """
     fw = str(framework or "sglang").strip().lower()
-    has_enablement = bool(setup_commands or framework_root or rounds)
+    has_enablement = bool(setup_script)
 
     lines: list[str] = ["#!/usr/bin/env bash"]
     controls = _validate_launch_controls(
@@ -462,14 +414,15 @@ def render_reference_script(
     if has_enablement and not exported_model:
         # The launch line dereferences $MODEL, which set -u would kill first.
         lines.append(': "${MODEL:?set MODEL to the model path before running}"')
+    if setup_script:
+        # $SCRIPT_DIR stays outside the quotes so the shell still expands it.
+        lines.append(f'bash "$SCRIPT_DIR"/{shlex.quote(setup_script)}')
     if tp and int(tp) > 0:
         lines.append(f"export TP={int(tp)}")
     if max_model_len and int(max_model_len) > 0:
         lines.append(f"export MAX_MODEL_LEN={int(max_model_len)}")
     if gpu_type:
         lines.append(f"export GPU_TYPE={shlex.quote(str(gpu_type))}")
-    if framework_root:
-        lines.append(f"export FRAMEWORK_ROOT={shlex.quote(str(framework_root))}")
     for k, v in (envs or {}).items():
         if not str(k).strip():
             continue
@@ -481,33 +434,6 @@ def render_reference_script(
     if overlay_pythonpath:
         prefix = shlex.quote(str(overlay_pythonpath))
         lines.append(f'export PYTHONPATH={prefix}"${{PYTHONPATH:+:$PYTHONPATH}}"')
-
-    if runtime:
-        lines.append("")
-        lines.append(f"# NOTE: this enablement round used an isolated attempt venv at {runtime!r}.")
-        lines.append("# That layer is not archived and cannot be reproduced by this script.")
-        lines.append("# The script reproduces only the install commands, patches, and server args.")
-
-    if setup_commands:
-        lines.append("")
-        for cmd in setup_commands:
-            lines.append(cmd)
-
-    if rounds:
-        if any(rnd.get("patches") for rnd in rounds):
-            lines.append("")
-            lines.append(_apply_patch_func(framework_root_vcs))
-        for rnd in rounds:
-            if rnd.get("patches"):
-                lines.append("")
-                for patch in rnd["patches"]:
-                    lines.append(f"apply_patch {shlex.quote(str(patch))}")
-            if rnd.get("artifacts"):
-                lines.append("")
-                for art in rnd["artifacts"]:
-                    # $SCRIPT_DIR stays outside the quotes so the shell still expands it.
-                    src = f'"$SCRIPT_DIR"/{shlex.quote(art["archive_path"])}'
-                    lines.append(f"install -D {src} {shlex.quote(art['target'])}")
 
     args = _shell_ready_server_args(server_args)
     lines.append("")

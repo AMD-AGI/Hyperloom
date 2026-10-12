@@ -46,7 +46,7 @@ resolve_hot_kernel_min_gpu_pct = _kernel_decision_settings.resolve_hot_kernel_mi
 resolve_kernel_opt_max_failures = _kernel_decision_settings.resolve_kernel_opt_max_failures
 
 # escalate_strategy_change hint vocabulary (closed enum; unknown hints ignored). ``skip_to_kernel`` is the
-# "exhausted the current lever" signal from EXPLORE or FRAMEWORK_AGENT; it advances to KERNEL.
+# "exhausted the current lever" signal from FRAMEWORK_AGENT; it advances to KERNEL.
 # KERNEL exits automatically when settled with no pending work — the LLM does not self-set a sweep hint.
 ESCALATE_HINT_SKIP_TO_KERNEL: str = "skip_to_kernel"
 ESCALATE_HINT_SKIP_TO_SWEEP: str = "skip_to_sweep"
@@ -478,6 +478,11 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     reference_model: str = ""
     # Operator launch shape, persisted so a bare --resume serves the same contract.
     operator_server_args: str = ""
+    # Operator-defined specialist (``--custom-specialist-*``); empty prompt means not configured.
+    custom_specialist_prompt: str = ""
+    custom_specialist_description: str = ""
+    # Set once a custom_specialist task has started; drives the at-least-once dispatch.
+    custom_specialist_dispatched: bool = False
     # ``--extra-env NAME=VALUE`` pins.
     operator_extra_env: dict[str, str] = field(default_factory=dict)
     # Operator-supplied custom-workload paths.
@@ -551,6 +556,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # Operator's ``--closing-grace-sec``; ``None`` derives it from max_minutes.
     closing_grace_sec: float | None = None
     last_profile_trace: str = ""
+    # Launch evidence of the run that produced ``last_profile_trace``; its runtime findings share the trace's shapes.
+    last_profile_launch_evidence_path: str = ""
     # ``succeeded``/``failed`` for most recent profile; failed allows re-run even when last_profile_trace is non-empty.
     last_profile_status: str = ""
     # Workload context captured with ``last_profile_trace``; strict matching prevents consumers from reusing runtime
@@ -640,6 +647,9 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # Durable watermark from the last real conc_sweep measurement; survives the macro-cycle reloop clearing
     # ``last_conc_sweep`` so redundant closeout is skipped when no validated gain landed since the prior conc_sweep.
     last_conc_sweep_watermark: dict[str, Any] = field(default_factory=dict)
+    # Wall-clock instant (unix seconds) until which the ``conc_sweep`` SWEEP enqueued is entitled to run: its granted
+    # budget plus the lease grace. SWEEP's own budget exits defer to it while no result has landed; 0 means no grant.
+    conc_sweep_granted_until_unix: float = 0.0
     # Most recent per-kernel optimization record.
     last_kernel_opt: dict[str, Any] = field(default_factory=dict)
     # Most recent forge-fusion run result and its e2e integrate result; persisted so resume does not rerun a completed

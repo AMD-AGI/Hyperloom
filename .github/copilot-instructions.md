@@ -16,9 +16,10 @@ Advisory review. Flag only what static gates can't.
 - **Size and complexity**: a unit past a trigger in the style guide's
   [Size and complexity](../docs/contributing/style-guide.md#size-and-complexity), which
   owns the numbers and the exceptions. No linter covers this (Ruff runs `E`/`F`/`W`;
-  Pylint is `--errors-only`), so review is the only place it surfaces. Name the seam to
-  split on, not just the line count, and don't ask for cleanup of an already oversized
-  function merely because the change edits it — but do flag a newly crossed threshold, or
+  Pylint is `--errors-only`), so review is the only place it surfaces — including the one
+  case that blocks, a unit the change adds or whose complexity it raises past 20. Name
+  the seam to split on, not just the line count, and don't ask for cleanup of an already
+  oversized function merely because the change edits it — but do flag a newly crossed threshold, or
   branches and responsibilities added to a unit already over.
 - **Cohesion and coupling**: a module that has acquired a second job, a responsibility
   moved to the wrong layer, a dependency pointing back up the layers, a new import cycle,

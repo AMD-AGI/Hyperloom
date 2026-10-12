@@ -389,6 +389,8 @@ def _seed_shared_state(
         # rather than from argv.
         operator_server_args=str(getattr(args, "server_args", "") or "").strip(),
         operator_extra_env=parse_operator_extra_env(args),
+        custom_specialist_prompt=str(getattr(args, "custom_specialist_prompt", "") or ""),
+        custom_specialist_description=str(getattr(args, "custom_specialist_description", "") or ""),
         bypass_scripts_dir=os.environ.get("HYPERLOOM_BYPASS_SCRIPTS_DIR", "").strip(),
         framework_repo_path=os.environ.get("FRAMEWORK_REPO_PATH", "").strip(),
         benchmark_backend=os.environ.get("HYPERLOOM_BENCHMARK_BACKEND", "").strip().lower(),

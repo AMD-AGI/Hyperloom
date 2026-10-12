@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import errno
 import json
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -64,6 +66,39 @@ def test_phase_exit_budget_exports_under_session_contract(tmp_path, phase: str, 
         if segment.get("exit_reason") == "target_reached"
     ]
     assert [row["predicate_inputs"]["budget"] for row in exits] == [budget]
+    validate(instance=exported, schema=workflow_schema(version))
+
+
+@pytest.mark.parametrize("legacy", [True, False], ids=["v1", "v2"])
+def test_sweep_exit_with_live_grant_exports_under_session_contract(tmp_path, legacy: bool):
+    """A session-wide exit while SWEEP still waits on its grant freezes a widened budget the session's schema accepts."""
+    version = _stamp_session(tmp_path, legacy=legacy)
+    state = SharedState(
+        session_id="session-budget",
+        phase="SWEEP",
+        baseline_tput=100.0,
+        start_ts=(datetime.now(timezone.utc) - timedelta(minutes=175)).isoformat(),
+        max_minutes=180,
+        phase_budget_pct={"SWEEP": 0.05, "CLOSE": 0.02},
+    )
+    # Five minutes of session left, less the CLOSE reserve; the sweep's grant runs past the session deadline.
+    grant_sec = 900.0
+    with session_scope(tmp_path):
+        record_phase_transition(state, to_phase="SWEEP", reason="phase_entered")
+        state.conc_sweep_granted_until_unix = time.time() + grant_sec
+        state.set_stop_reason("target_reached")
+        target, reason, evidence = compute_next_phase(state)
+        assert (target, reason) == ("CLOSE", "target_reached")
+        budget = evidence["predicate_inputs"]["budget"]
+        assert budget["remaining_sec"] > grant_sec - 60.0, "the grant did not widen the budget"
+        assert ("current_balance" in budget) is not legacy
+        if not legacy:
+            assert budget["current_balance"] == budget["remaining_sec"]
+        record_phase_transition(state, to_phase=target, reason=reason, evidence=evidence)
+    state.save(tmp_path)
+
+    exported = build(tmp_path)
+    assert exported["metadata"]["workflow"]["workflow_contract_version"] == version
     validate(instance=exported, schema=workflow_schema(version))
 
 

@@ -234,7 +234,11 @@ def _collect_recipe(
         ("accepted_stack_targets", enablement.get("accepted_stack_targets") or {}),
         ("base_sha", str(enablement.get("base_sha") or "") or None),
         ("runtime_provenance", project_runtime_provenance(enablement)),
-        ("environment_closure", enablement.get("environment_closure") or None),
+        # The interpreter is an absolute path on this host; the setup script reads it from state.
+        (
+            "environment_closure",
+            {k: v for k, v in (enablement.get("environment_closure") or {}).items() if k != "interpreter"},
+        ),
         ("installed_versions_at_keep", enablement.get("installed_versions_at_keep") or None),
     ):
         if value:
@@ -255,6 +259,11 @@ def _collect_recipe(
     )
     out["replay_sufficiency"] = decision
     out["dependency_closure_status"] = _closure_status(decision, enablement)
+    from ..setup_script import setup_script_record
+
+    setup_script = setup_script_record(session_dir, sufficient=decision["status"] == "sufficient")
+    if setup_script:
+        out["setup_script"] = setup_script
 
 
 def _lane_dispatched(state: dict[str, Any]) -> bool:
@@ -559,6 +568,9 @@ _RECIPE_KEYS: tuple[str, ...] = (
     "recipe_steps",
     "replay_sufficiency",
     "dependency_closure_status",
+    # Path and sha256 of the script that reproduces the setup, and whether it
+    # does so on its own -- claimed only beside a sufficient verdict.
+    "setup_script",
     "accepted_stack_targets",
     "source_snapshots",
     "roots",

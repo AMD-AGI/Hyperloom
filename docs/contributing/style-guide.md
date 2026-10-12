@@ -55,7 +55,7 @@ ruff format --check .   # or `ruff format .` to apply
 
 ### Size and complexity
 
-Nothing enforces these today: Ruff selects `E`/`F`/`W` only (no `C901`), and CI's Pylint is `--errors-only`, which excludes `R0912`/`R0915`. They are **review triggers for new and rewritten code** — the point at which a reviewer asks for a split or for the reason the shape is right.
+No linter enforces these today: Ruff selects `E`/`F`/`W` only (no `C901`), and CI's Pylint is `--errors-only`, which excludes `R0912`/`R0915`. They are **review triggers for new and rewritten code** — the point at which a reviewer asks for a split or for the reason the shape is right. One of them has a ceiling above it that a reviewer blocks on; see [Complexity ceiling](#complexity-ceiling).
 
 | Unit | Trigger | Where the number comes from |
 |------|---------|-----------------------------|
@@ -73,9 +73,28 @@ Measure rather than argue:
 ruff check --select C901 --config "lint.mccabe.max-complexity=10" src/hyperloom src/kernelforge
 ```
 
-Passing a trigger is not a merge blocker — it means the PR description says why, or the change splits. The tree carries a backlog above all three: **do not grow it**, and prefer leaving a file you touched smaller than you found it. Editing a unit that was already over the trigger is not a demand to repay its debt; adding branches or a second responsibility to it is. Extracting a helper while you are in there is in scope; a standalone rewrite of an unrelated module is a separate PR (see [`AGENTS.md`](../../AGENTS.md) § *One concern per change*).
+Passing a trigger is not a merge blocker — it means the PR description says why, or the change splits. Passing the ceiling below is. The tree carries a backlog above all three: **do not grow it**, and prefer leaving a file you touched smaller than you found it. Editing a unit that was already over the trigger is not a demand to repay its debt; adding branches or a second responsibility to it is. Extracting a helper while you are in there is in scope; a standalone rewrite of an unrelated module is a separate PR (see [`AGENTS.md`](../../AGENTS.md) § *One concern per change*).
 
 Structure the split along the boundaries the code already has — one job per module, cohesive inside, dependencies pointing one way down the layers. A split that only moves lines to a second file, leaving the two halves reaching into each other, trades one long file for a cycle.
+
+#### Complexity ceiling
+
+Cyclomatic complexity above 20 is the one number here a review blocks on. It covers two cases: a function the change adds, and a function whose complexity the change raises — from at or below 20 to above it, or higher still when it was already above. A unit that stood above 20 before the change and that the change does not make worse is backlog, not this PR's debt.
+
+The ceiling sits at twice the trigger because the trigger asks a question the ceiling has stopped accepting answers to: at 10, "this is one dispatch table" settles it; at 20 the unit carries more branches than a reviewer can keep in their head while reading it, and a paragraph in the description does not make it reviewable. Split it, or keep the new branches out of it.
+
+Measure both sides — the head tree, and the same file at the merge base, since the verdict is a comparison:
+
+```bash
+ruff check --select C901 --config "lint.mccabe.max-complexity=20" --force-exclude \
+  --output-format concise <changed .py files under src/, tests excluded>
+
+git show "$(git merge-base origin/main HEAD)":<path> > /tmp/base.py
+ruff check --select C901 --config "lint.mccabe.max-complexity=20" --isolated \
+  --output-format concise /tmp/base.py
+```
+
+The tree carried 124 units above 20 when the ceiling was introduced (2026-10-10). The ceiling is what stops that number growing; it is not a demand to pay the 124 down.
 
 ### Module structure
 
@@ -126,7 +145,7 @@ Bandit scans production code (`src/hyperloom`, `scripts/`). Tests are excluded.
 
 ### Pylint
 
-CI runs `pylint --errors-only` on core packages (fatal/error severity only). Fix new error-level issues in touched modules; convention, refactor, and style messages are intentionally out of scope — including `R0912`/`R0915`, which is why the thresholds in [Size and complexity](#size-and-complexity) are carried by review rather than by a gate.
+CI runs `pylint --errors-only` on core packages (fatal/error severity only). Fix new error-level issues in touched modules; convention, refactor, and style messages are intentionally out of scope — including `R0912`/`R0915`, which is why the thresholds in [Size and complexity](#size-and-complexity) are carried by review rather than by CI.
 
 ### Tests (pytest)
 

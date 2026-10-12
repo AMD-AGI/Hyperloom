@@ -334,10 +334,13 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
     "supervisor_coordinator_died": "The out-of-band supervisor found the coordinator's process gone; this record was written by the supervisor because there was no coordinator left to write one.",
     "supervisor_tick_stalled": "The out-of-band supervisor found the coordinator's tick not advancing inside its stall window and asked the session to end.",
     BACKEND_UNHEALTHY_STOP_REASON: (
-        "A reactor agent's LLM backend kept failing for an hour without one successful turn, so the run stopped "
-        "instead of spending the rest of its budget on a model it could not reach; the best validated result was "
-        "kept. The backend_error observations name the agent and carry the error each call returned. Repair the "
-        "backend (credentials, endpoint, quota, or a prompt the model rejects), then resume."
+        "A reactor agent stopped producing decisions, so the run stopped instead of spending the rest of its budget "
+        "on it; the best validated result was kept. A no_intent_streak observation naming the agent means it kept "
+        "answering without emitting an intent; for the orchestration agent, agents/orchestration/mcp_setup.json "
+        "records whether Claude Code offered it the emit_intent tool. Without one, its LLM backend kept failing for "
+        "an hour without one successful turn, and the backend_error observations name the agent and carry the error "
+        "each call returned: repair the backend (credentials, endpoint, quota, or a prompt the model rejects). "
+        "Resume once the cause is fixed."
     ),
 }
 
