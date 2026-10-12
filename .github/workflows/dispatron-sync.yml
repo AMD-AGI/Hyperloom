@@ -94,35 +94,56 @@ jobs:
             jq -r '.state // empty' "$tmp/gh.json"
           }
 
-          # NUMBER MARKER: whether a comment carrying MARKER is already there.
-          has_comment() {
-            [ "$(github GET "/repos/$REPO/issues/$1/comments?per_page=100")" = 200 ] || return 2
-            jq -e --arg m "$2" 'any(.[]; (.body // "") | contains($m))' "$tmp/gh.json" >/dev/null
+          # PATH SELECT: the first item on any page of PATH that passes the jq filter
+          # SELECT and carries $marker, into $tmp/found.json. Returns 0 when found, 1
+          # when every page was read without it, 2 when GitHub could not be read (or
+          # there were too many pages to be sure) -- never read as "not there".
+          find_marked() {
+            local page code
+            for ((page = 1; page <= 20; page++)); do
+              code="$(github GET "$1&per_page=100&page=$page")"
+              [ "$code" = 200 ] || return 2
+              jq -c --arg m "$marker" "[.[] | $2 | select((.body // \"\") | contains(\$m))] | first // empty" \
+                "$tmp/gh.json" > "$tmp/found.json"
+              [ -s "$tmp/found.json" ] && return 0
+              [ "$(jq 'length' "$tmp/gh.json")" -lt 100 ] && return 1
+            done
+            return 2
           }
 
-          # NUMBER BODY MARKER -> 0 once the comment is there.
+          # The request's payload text, posted byte for byte (no shell round trip).
+          has_text() {
+            jq -e "$1 | type == \"string\" and length > 0" "$tmp/req.json" >/dev/null
+          }
+
+          # NUMBER -> 0 once the request's comment is on the issue.
           comment_once() {
             local found=0
-            has_comment "$1" "$3" || found=$?
+            find_marked "/repos/$REPO/issues/$1/comments?since=1970-01-01T00:00:00Z" '.' \
+              || found=$?
             [ "$found" = 0 ] && return 0
             [ "$found" = 1 ] || return 1
             [ "$(github POST "/repos/$REPO/issues/$1/comments" \
-              "$(jq -nc --arg b "$2" '{body: $b}')")" = 201 ]
+              "$(jq -c '{body: .payload.body}' "$tmp/req.json")")" = 201 ]
           }
 
           open_issue() {
-            local title body
-            title="$(jq -r '.payload.title // empty' "$tmp/req.json")"
-            body="$(jq -r '.payload.body // empty' "$tmp/req.json")"
-            [ -n "$title" ] && [ -n "$body" ] || { error="no title or body"; return; }
-            code="$(github GET "/repos/$REPO/issues?state=all&creator=github-actions%5Bbot%5D&sort=created&direction=desc&per_page=100")"
-            [ "$code" = 200 ] || { error="listing issues answered HTTP $code"; return; }
-            result="$(jq -c --arg m "$marker" \
-              'first(.[] | select(.pull_request == null and ((.body // "") | contains($m)))
-                     | {number, url: .html_url}) // empty' "$tmp/gh.json")"
-            [ -n "$result" ] && return
+            local found=0 since
+            if ! has_text .payload.title || ! has_text .payload.body; then
+              error="no title or body"
+              return
+            fi
+            # An unacknowledged attempt is retried within minutes; a week is ample.
+            since="$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ)"
+            find_marked "/repos/$REPO/issues?state=all&creator=github-actions%5Bbot%5D&sort=created&direction=desc&since=$since" \
+              'select(.pull_request == null)' || found=$?
+            case "$found" in
+              0) result="$(jq -c '{number, url: .html_url}' "$tmp/found.json")"; return ;;
+              1) ;;
+              *) error="existing issues could not be read"; return ;;
+            esac
             code="$(github POST "/repos/$REPO/issues" \
-              "$(jq -nc --arg t "$title" --arg b "$body" '{title: $t, body: $b}')")"
+              "$(jq -c '{title: .payload.title, body: .payload.body}' "$tmp/req.json")")"
             if [ "$code" = 201 ]; then
               result="$(jq -c '{number, url: .html_url}' "$tmp/gh.json")"
             else
@@ -131,14 +152,13 @@ jobs:
           }
 
           comment_issue() {
-            local body state
-            body="$(jq -r '.payload.body // empty' "$tmp/req.json")"
-            [ -n "$body" ] || { error="no body"; return; }
+            local state
+            has_text .payload.body || { error="no body"; return; }
             state="$(issue_state "$number")"
             case "$state" in
               closed) result='{"issue_state":"closed"}' ;;
               open)
-                if comment_once "$number" "$body" "$marker"; then
+                if comment_once "$number"; then
                   result='{"issue_state":"open"}'
                 else
                   error="commenting failed"
@@ -149,14 +169,13 @@ jobs:
           }
 
           close_issue() {
-            local body state
-            body="$(jq -r '.payload.body // empty' "$tmp/req.json")"
-            [ -n "$body" ] || { error="no body"; return; }
+            local state
+            has_text .payload.body || { error="no body"; return; }
             state="$(issue_state "$number")"
             case "$state" in
               closed) result='{"issue_state":"closed"}' ;;
               open)
-                if ! comment_once "$number" "$body" "$marker"; then
+                if ! comment_once "$number"; then
                   error="commenting failed"
                 else
                   code="$(github PATCH "/repos/$REPO/issues/$number" \
@@ -189,7 +208,8 @@ jobs:
 
           curl -fsS "${insecure[@]}" -H "Authorization: Bearer $DISPATCH_TOKEN" \
             "$requests?limit=50" > "$tmp/pending.json"
-          count="$(jq '.requests | length' "$tmp/pending.json")"
+          count="$(jq -e '.requests | if type == "array" then length else error("no requests") end' \
+            "$tmp/pending.json")"
           echo "pending requests: $count"
           failed=0
           for ((i = 0; i < count; i++)); do
