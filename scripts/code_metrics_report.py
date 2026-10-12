@@ -19,9 +19,11 @@ UPDATE_COMMAND = "python scripts/code_metrics.py --update-baseline"
 OVERRIDE_LABEL = "baseline-raise"
 GATE_CHANGED = "Gate implementation changed (needs review)"
 WAIVED = f" (waived by the `{OVERRIDE_LABEL}` label)"
+ADVISORY = " (advisory, never fails)"
 _MAX_ROWS = 25
 _SEP = " | "
 _UNIT, _DIMENSION, _BASELINE, _BASE, _NOW = "Unit", "Dimension", "Baseline", "Base", "Now"
+_ENTRY = "Baseline entry"
 _UNIT_CHANGE = [_UNIT, _DIMENSION, _BASELINE, _NOW]
 #: Section title and how-to-fix line of each check in ``code_metrics_checks``.
 CHECKS = {
@@ -89,6 +91,8 @@ class Outcome:
     worsened: list[tuple[Finding, int]] = dataclasses.field(default_factory=list)
     #: (baseline key, recorded value, the tree's finding: None when gone, another key when moved)
     stale: list[tuple[Key, int, Finding | None]] = dataclasses.field(default_factory=list)
+    #: Out-of-date entries the base had already outgrown: (key, recorded, base value or None, finding).
+    base_drift: list[tuple[Key, int, int | None, Finding | None]] = dataclasses.field(default_factory=list)
     #: New, worse or out-of-date units in files the change does not touch: (key, recorded or None, finding).
     untouched: list[tuple[Key, int | None, Finding | None]] = dataclasses.field(default_factory=list)
     #: New or worse units the base already had at that value or worse: (finding, base value).
@@ -104,7 +108,11 @@ class Outcome:
     module_warning: int | None = None
     #: Refusals of the checks without a baseline (``code_metrics_checks.Problem``).
     problems: list = dataclasses.field(default_factory=list)
-    #: The PR carries the override label: new, worse and growth are listed but do not fail.
+    #: Failing design findings (A1, A8, A12 forwarder); the override label waives them.
+    design: list = dataclasses.field(default_factory=list)
+    #: Design findings the A rules rate advisory (A9, A10, A11, A12 single implementation).
+    advisories: list = dataclasses.field(default_factory=list)
+    #: The PR carries the override label: new, worse, growth and design are listed but do not fail.
     waived: bool = False
     notes: list[str] = dataclasses.field(default_factory=list)
 
@@ -112,12 +120,13 @@ class Outcome:
         return self.touched is None or path in self.touched
 
     @property
-    def ratchet_failed(self) -> bool:
-        return bool(self.new or self.worsened or self.growth)
+    def waivable_failed(self) -> bool:
+        """Findings the override label waives: new, worse, baseline growth and failing design checks."""
+        return bool(self.new or self.worsened or self.growth or self.design)
 
     @property
     def failed(self) -> bool:
-        waivable = self.ratchet_failed and not self.waived
+        waivable = self.waivable_failed and not self.waived
         return bool(self.error or waivable or self.stale or self.loosened or self.problems)
 
 
@@ -125,7 +134,7 @@ def render(outcome: Outcome, link_base: str = "", max_rows: int | None = _MAX_RO
     if outcome.error:
         return f"{MARKER}\n## Code metrics gate: could not run\n\n```\n{outcome.error}\n```\n"
     verdict = "FAILED" if outcome.failed else "PASSED"
-    if outcome.waived and outcome.ratchet_failed:
+    if outcome.waived and outcome.waivable_failed:
         verdict += f" with waived findings (`{OVERRIDE_LABEL}`)"
     parts = [f"{MARKER}\n## Code metrics gate: {verdict}\n", _scope(outcome), _summary(outcome)]
     parts += _sections(outcome, link_base, max_rows)
@@ -165,9 +174,14 @@ def _summary(outcome: Outcome) -> str:
         rows.append(
             f"| {metric.label} | {_dimension_limit(name, outcome)} | " + _SEP.join(map(str, cells)) + f" | {delta} |"
         )
-    checks = Counter(problem.check for problem in outcome.problems)
-    rows += ["", "| Check | Refusals |", "|---|---:|"]
-    rows += [f"| {title} | {checks[name]} |" for name, (title, _fix) in CHECKS.items()]
+    found = Counter(problem.check for problem in _all_problems(outcome))
+    effects = {p.check: "advisory, never fails" for p in outcome.advisories}
+    effects.update({p.check: f"fails; `{OVERRIDE_LABEL}` waives" for p in outcome.design})
+    rows += ["", "| Check | Findings | Effect |", "|---|---:|---|"]
+    rows += [
+        f"| {title} | {found[name]} | {effects.get(name, 'fails') if found[name] else ''} |"
+        for name, (title, _fix) in CHECKS.items()
+    ]
     return "\n".join(rows) + "\n"
 
 
@@ -209,20 +223,21 @@ def _sections(outcome: Outcome, link_base: str, max_rows: int | None) -> list[st
         ),
         _table(
             f"Baseline out of date (run `{UPDATE_COMMAND}`)",
-            ["Baseline entry", _DIMENSION, _BASELINE, _NOW],
+            [_ENTRY, _DIMENSION, _BASELINE, _NOW],
             [[_key(key), _label(key[0]), was, _now(key, now, link_base)] for key, was, now in outcome.stale],
             max_rows,
         ),
         _table(
             f"Baseline grew relative to the base branch{waived}",
-            ["Baseline entry", _DIMENSION, _BASE, "This change"],
+            [_ENTRY, _DIMENSION, _BASE, "This change"],
             [[_key(key), _label(key[0]), "absent" if was is None else was, now] for key, was, now in outcome.growth],
             max_rows,
         ),
     ]
     for name, (title, _fix) in CHECKS.items():
-        rows = [[_where(p, link_base), p.message] for p in outcome.problems if p.check == name]
-        sections.append(_table(title, ["Where", "Problem"], rows, max_rows))
+        for problems, suffix in ((outcome.problems, ""), (outcome.design, waived), (outcome.advisories, ADVISORY)):
+            rows = [[_where(p, link_base), p.message] for p in problems if p.check == name]
+            sections.append(_table(title + suffix, ["Where", "Problem"], rows, max_rows))
     if outcome.loosened:
         sections.append("### Gate configuration loosened\n\n" + "".join(f"- {p}\n" for p in outcome.loosened))
     if outcome.gate_changes:
@@ -256,7 +271,20 @@ def _informational(outcome: Outcome, link_base: str, max_rows: int | None) -> li
     outside = _table("Outside this change (informational)", _UNIT_CHANGE, rows, max_rows)
     if outside:
         outside = f"<details><summary>{len(rows)} findings in files this change does not touch</summary>\n\n{outside}\n</details>\n"
-    return [warn, backlog, outside]
+    drift = _table(
+        f"Baseline already out of date at the base (not this change's; `{UPDATE_COMMAND}` tightens it)",
+        [_ENTRY, _DIMENSION, _BASELINE, _BASE, _NOW],
+        [
+            [_key(key), _label(key[0]), was, "under the limit" if base is None else base, _now(key, now, link_base)]
+            for key, was, base, now in outcome.base_drift
+        ],
+        max_rows,
+    )
+    return [warn, backlog, drift, outside]
+
+
+def _all_problems(outcome: Outcome) -> list:
+    return outcome.problems + outcome.design + outcome.advisories
 
 
 def _table(title: str, header: list[str], rows: list[list[object]], max_rows: int | None) -> str:
@@ -327,11 +355,12 @@ def _how_to_fix(outcome: Outcome) -> str:
     lines += [
         f"- **{title}**: {fix}."
         for name, (title, fix) in CHECKS.items()
-        if any(p.check == name for p in outcome.problems)
+        if any(p.check == name for p in _all_problems(outcome))
     ]
     lines.append(
-        f"- **Override**: the `{OVERRIDE_LABEL}` PR label waives new, worse and baseline-growth findings (they stay "
-        "listed here). Use it only with the reason in the PR description; it waives nothing else."
+        f"- **Override**: the `{OVERRIDE_LABEL}` PR label waives new, worse and baseline-growth findings and the "
+        "failing design checks (they stay listed here). Use it only with the reason in the PR description; it "
+        "waives nothing else."
     )
     lines.append(
         f"- Tools for a local run: `pip install {pip}` and `npm install -g jscpd@{pins.get('jscpd', '?')}` "

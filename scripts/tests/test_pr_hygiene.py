@@ -267,8 +267,11 @@ def test_bot_prs_skip_template(monkeypatch, capsys):
 def test_pr_hygiene_workflow_always_runs_read_only():
     wf = _workflow("pr-hygiene.yml")
     on = wf[True]  # YAML 1.1 reads the bare ``on`` key as True
-    assert set(on) == {"pull_request"}
+    assert set(on) == {"pull_request", "push"}
     assert "paths" not in on["pull_request"] and "paths-ignore" not in on["pull_request"]
+    # main runs the CLI-reference check on every push: two passing PRs can break it together.
+    assert on["push"] == {"branches": ["main"]}
+    assert wf["concurrency"]["cancel-in-progress"] == "${{ github.event_name == 'pull_request' }}"
     assert {"labeled", "unlabeled", "edited", "synchronize"} <= set(on["pull_request"]["types"])
     assert wf["permissions"] == {"contents": "read", "pull-requests": "read"}
     steps = {s.get("name"): s for s in wf["jobs"]["pr-hygiene"]["steps"]}
@@ -279,6 +282,9 @@ def test_pr_hygiene_workflow_always_runs_read_only():
     assert tpl["env"]["PR_TEMPLATE_ENFORCE"] == "false"
     cli = steps["Check CLI references in agent docs"]
     assert cli["if"] == "always()"
+    # The diff budget and the template read the PR; a push has none.
+    assert steps["Diff budget"]["if"] == "github.event_name == 'pull_request'"
+    assert tpl["if"] == "always() && github.event_name == 'pull_request'"
     # PR-controlled paths are printed only while workflow commands are suspended.
     run = cli["run"]
     assert run.index("::stop-commands::") < run.index("check_cli_references.py") < run.index('echo "::${resume}::"')

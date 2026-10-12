@@ -13,16 +13,22 @@ name: PR Hygiene
 #     from docs.yml, whose paths filter would keep a required check pending;
 #   - PR template completeness, read from the event payload as data.
 #
+# A push to main runs the CLI-reference check alone: two PRs that each pass
+# (one renames a subcommand, the other cites the old name) can still break main.
+#
 # The token is read-only and nothing is written back to the PR. The checkout
 # is the PR merge ref with its two parents, so ``HEAD^1..HEAD`` is exactly what
 # the PR changes on top of the current base.
 on:
+  push:
+    branches: [main]
   pull_request:
     types: [opened, edited, synchronize, reopened, labeled, unlabeled]
 
 concurrency:
-  group: pr-hygiene-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  group: pr-hygiene-${{ github.event.pull_request.number || github.ref }}
+  # A newer push to a PR replaces its run; a push to main keeps every run.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -50,6 +56,7 @@ jobs:
 
       - name: Diff budget
         id: size
+        if: github.event_name == 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -82,7 +89,7 @@ jobs:
       # Advisory for now: findings are warnings. To make it blocking, set
       # PR_TEMPLATE_ENFORCE to "true".
       - name: PR template completeness
-        if: always()
+        if: always() && github.event_name == 'pull_request'
         env:
           PR_TEMPLATE_ENFORCE: "false"
           PR_BODY: ${{ github.event.pull_request.body }}

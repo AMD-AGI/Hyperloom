@@ -67,6 +67,8 @@ RAW_VOCABULARY = "raw-vocabulary"
 GLOBAL_WRITE = "global-write"
 FORWARDER = "forwarder"
 SINGLE_IMPLEMENTATION = "single-implementation"
+#: Checks the A rules rate advisory: listed in the report, never failing the gate.
+ADVISORY = frozenset({TUPLE_RETURN, RAW_VOCABULARY, GLOBAL_WRITE, SINGLE_IMPLEMENTATION})
 
 _CONTRACT = "importlinter:contract:"
 _UNIT_KEYS = ("layers", "modules")

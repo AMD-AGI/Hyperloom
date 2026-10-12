@@ -609,6 +609,20 @@ def fetch_pull_request(api: str, repo: str, number: int, token: str) -> PullRequ
     )
 
 
+def merged_pull_request(api: str, repo: str, sha: str, token: str) -> int | None:
+    """The number of the PR whose merge produced commit ``sha``, or None for a push no PR made.
+
+    A push to main runs after the merge; this is how it finds the PR whose label applies.
+    Only a PR whose recorded merge commit is ``sha`` counts: a PR that merely contains the
+    commit did not produce this push. An unreadable API is an error, never "no PR".
+    """
+    rows = _get_json(f"{api}/repos/{repo}/commits/{sha}/pulls?per_page=100", token)
+    if not isinstance(rows, list):
+        raise ToolError(f"unexpected reply listing the pull requests of commit {sha}")
+    merged = [row["number"] for row in rows if row.get("merged_at") and row.get("merge_commit_sha") == sha]
+    return merged[0] if merged else None
+
+
 def _get_json(url: str, token: str) -> object:
     if not url.startswith("https://"):
         raise ToolError(f"refusing to read {url}: the API URL must be https")

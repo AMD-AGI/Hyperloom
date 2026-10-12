@@ -335,12 +335,43 @@ def test_the_design_checks_run_on_the_change_and_report_in_their_own_section(rep
         "X = 1\n\n\ndef bump():\n    global X\n    X += 1\n", encoding="utf-8"
     )
     code, report = repo.gate("--base-ref", base)
-    assert code == 1
-    rows = section(report, "### A11 Hidden global write")
+    # A11 is advisory in the A rules: listed with its finding, never failing.
+    assert code == 0, report
+    rows = section(report, "### A11 Hidden global write (advisory, never fails): 1")
     assert "`src/hyperloom/common/state.py:5`" in rows and "A11 hidden global write: `global X`" in rows
-    assert "- **A11 Hidden global write**: pass the value in and return the result" in report
+    assert "| A11 Hidden global write | 1 | advisory, never fails |" in report
     # Without a base there is no change to judge.
     assert "### A11" not in repo.gate()[1]
+
+
+FLAGGED = """def pick(fast: bool) -> int:
+    if fast:
+        return 1
+    return 2
+
+
+def pair(a: int, b: int) -> tuple[int, int, int]:
+    return a, b, a + b
+"""
+
+
+def test_failing_design_checks_fail_and_the_override_label_waives_them(repo: Repo) -> None:
+    repo.write_baseline({})
+    (repo.path / "src/hyperloom/common").mkdir(parents=True)
+    (repo.path / "src/hyperloom/common/pick.py").write_text("X = 1\n", encoding="utf-8")
+    base = repo.commit()
+    (repo.path / "src/hyperloom/common/pick.py").write_text(FLAGGED, encoding="utf-8")
+    code, report = repo.gate("--base-ref", base, "--pull-request-json", write_pr(repo, []))
+    assert code == 1, report
+    assert "`src/hyperloom/common/pick.py:1`" in section(report, "### A8 Flag argument: 1")
+    assert "| A8 Flag argument | 1 | fails; `baseline-raise` waives |" in report
+    assert "`src/hyperloom/common/pick.py:7`" in section(report, "### A9 Tuple return (advisory, never fails): 1")
+    code, report = repo.gate("--base-ref", base, "--pull-request-json", write_pr(repo, [LABEL]))
+    assert code == 0, report
+    assert f"## Code metrics gate: PASSED with waived findings (`{LABEL}`)" in report
+    assert "`src/hyperloom/common/pick.py:1`" in section(
+        report, f"### A8 Flag argument (waived by the `{LABEL}` label)"
+    )
 
 
 def test_a_missing_import_contracts_file_is_could_not_run(repo: Repo) -> None:
@@ -911,6 +942,7 @@ def test_a_fixed_unit_in_a_touched_file_must_leave_the_baseline(repo: Repo) -> N
     repo.write_baseline({key("src/old.py", "f"): 21})
     base = repo.commit()
     repo.touch("src/old.py")
+    repo.at_base = {key("src/old.py", "f"): 21}
     code, report = repo.gate("--base-ref", base)
     assert code == 1
     assert "`src/old.py` `f` | Cyclomatic complexity | 21 | within the limit, or removed |" in section(
@@ -934,6 +966,49 @@ def test_the_complexity_ceiling_compares_head_with_the_base(repo: Repo, at_base,
         assert f"| Cyclomatic complexity | {now} | fails > 20 |" in section(report, NEW)
     else:
         assert f"`f` | Cyclomatic complexity | {at_base} | {now} |" in section(report, AT_BASE)
+
+
+DRIFT = "### Baseline already out of date at the base (not this change's"
+
+
+@pytest.mark.parametrize(
+    ("at_base", "now", "code"),
+    [
+        # Main improved the unit (or fixed it) before this change touched the file: informational.
+        (18, 18, 0),
+        (None, None, 0),
+        # This change improved it: the baseline must be tightened in the same change.
+        (21, 18, 1),
+        (21, None, 1),
+        # Main improved it, and this change improved it further: still this change's to record.
+        (20, 18, 1),
+    ],
+)
+def test_an_out_of_date_entry_main_already_outgrew_does_not_fail(repo: Repo, at_base, now, code) -> None:
+    repo.write_baseline({key("src/a.py", "f"): 21})
+    base = repo.commit()
+    repo.touch("src/a.py")
+    repo.at_base = {} if at_base is None else {key("src/a.py", "f"): at_base}
+    repo.findings = [] if now is None else [cc("src/a.py", "f", now)]
+    got, report = repo.gate("--base-ref", base)
+    assert got == code, report
+    if code:
+        assert "`src/a.py` `f` | Cyclomatic complexity | 21 |" in section(report, OUT_OF_DATE)
+        assert section(report, DRIFT) == ""
+    else:
+        assert section(report, OUT_OF_DATE) == ""
+        shown = "under the limit" if at_base is None else at_base
+        assert f"`src/a.py` `f` | Cyclomatic complexity | 21 | {shown} |" in section(report, DRIFT)
+
+
+def test_an_out_of_date_entry_the_base_cannot_measure_still_fails(repo: Repo) -> None:
+    dup = key("src/a.py", collect.MODULE, "duplicated-lines")
+    repo.write_baseline({dup: 40})
+    base = repo.commit()
+    repo.touch("src/a.py")
+    code, report = repo.gate("--base-ref", base)
+    assert code == 1, report
+    assert "`src/a.py` | Duplicated lines per file | 40 |" in section(report, OUT_OF_DATE)
 
 
 def test_a_worse_than_baseline_unit_the_base_already_had_is_backlog(repo: Repo) -> None:
@@ -981,6 +1056,7 @@ def test_the_override_label_waives_nothing_else(repo: Repo) -> None:
     repo.write_baseline({key("src/a.py", "f"): 21})
     base = repo.commit()
     repo.touch("src/a.py")
+    repo.at_base = {key("src/a.py", "f"): 21}
     pr = write_pr(repo, [LABEL], title=f"Fix {chr(0x4E2D)}")
     code, report = repo.gate("--base-ref", base, "--pull-request-json", pr)
     assert code == 1
@@ -1025,6 +1101,76 @@ def test_the_label_comes_from_the_api_at_run_time(repo: Repo, monkeypatch) -> No
         ("https://api.github.com/repos/o/r/pulls/7", "tok"),
         ("https://api.github.com/repos/o/r/pulls/7/commits?per_page=100&page=1", "tok"),
     ]
+
+
+PUSHED = "d" * 40
+
+
+def api_stub(monkeypatch: pytest.MonkeyPatch, pulls_of_commit, labels: list[str]) -> list[str]:
+    """Stand the GitHub API in with ``pulls_of_commit`` for ``PUSHED``; returns the URLs read."""
+    calls: list[str] = []
+
+    def fake_get(url: str, token: str):
+        calls.append(url)
+        if f"/commits/{PUSHED}/pulls" in url:
+            if isinstance(pulls_of_commit, Exception):
+                raise pulls_of_commit
+            return pulls_of_commit
+        if url.endswith("/pulls/7"):
+            return {"labels": [{"name": name} for name in labels], "title": "t", "body": "b"}
+        return []
+
+    monkeypatch.setattr(code_metrics.checks, "_get_json", fake_get)
+    monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
+    monkeypatch.delenv("GITHUB_API_URL", raising=False)
+    return calls
+
+
+MERGED = {"number": 7, "merged_at": "2026-10-12T00:00:00Z", "merge_commit_sha": PUSHED}
+
+
+def test_a_push_applies_the_label_of_the_pr_whose_merge_it_is(repo: Repo, monkeypatch) -> None:
+    other = {"number": 9, "merged_at": "2026-10-11T00:00:00Z", "merge_commit_sha": "e" * 40}
+    calls = api_stub(monkeypatch, [other, MERGED], [LABEL])
+    repo.write_baseline({})
+    repo.findings = [cc("src/a.py", "f", 30)]
+    code, report = repo.gate("--pushed-sha", PUSHED)
+    assert code == 0, report
+    assert "is the merge of #7; its labels apply" in report
+    assert calls[:2] == [
+        f"https://api.github.com/repos/o/r/commits/{PUSHED}/pulls?per_page=100",
+        "https://api.github.com/repos/o/r/pulls/7",
+    ]
+
+
+@pytest.mark.parametrize(
+    "pulls",
+    [
+        [],
+        # A PR that only contains the commit, or was closed unmerged, did not produce this push.
+        [{"number": 7, "merged_at": "2026-10-12T00:00:00Z", "merge_commit_sha": "e" * 40}],
+        [{"number": 7, "merged_at": None, "merge_commit_sha": PUSHED}],
+    ],
+)
+def test_a_push_no_pr_made_waives_nothing(repo: Repo, monkeypatch, pulls) -> None:
+    calls = api_stub(monkeypatch, pulls, [LABEL])
+    repo.write_baseline({})
+    repo.findings = [cc("src/a.py", "f", 30)]
+    code, report = repo.gate("--pushed-sha", PUSHED)
+    assert code == 1, report
+    assert "No merged pull request produced" in report
+    assert all("/pulls/7" not in url for url in calls)
+
+
+def test_a_push_whose_pr_cannot_be_read_is_could_not_run(repo: Repo, monkeypatch) -> None:
+    api_stub(monkeypatch, collect.ToolError("could not read the API: HTTP Error 502"), [LABEL])
+    repo.write_baseline({})
+    repo.findings = [cc("src/a.py", "f", 30)]
+    code, report = repo.gate("--pushed-sha", PUSHED)
+    assert code == 2 and "HTTP Error 502" in report
+    api_stub(monkeypatch, {"message": "Not Found"}, [LABEL])
+    code, report = repo.gate("--pushed-sha", PUSHED)
+    assert code == 2 and "unexpected reply" in report
 
 
 def test_an_unreadable_api_is_could_not_run_not_a_pass(repo: Repo, monkeypatch) -> None:
@@ -1124,6 +1270,8 @@ def test_ci_reads_the_pr_from_the_api_and_logs_the_full_report() -> None:
     run = gate["run"]
     pull_request_branch = run.split('if [ "$EVENT" = pull_request ]; then', 1)[1].split("else", 1)[0]
     assert 'args+=(--pr-number "$PR_NUMBER")' in pull_request_branch
+    push_branch = run.split('if [ "$EVENT" = pull_request ]; then', 1)[1].split("else", 1)[1].split("fi", 1)[0]
+    assert 'args+=(--pushed-sha "$GITHUB_SHA")' in push_branch
     assert "--pull-request-json" not in run
     # stdout is the untruncated report (waived rows included) for the job log.
     assert 'python "$impl/code_metrics.py" "${args[@]}"\n' in run and "/dev/null" not in run.split("set +e", 1)[1]

@@ -19,7 +19,8 @@ information and never fails an unrelated change. In a touched file:
   the base fails;
 * a baselined unit that improved, dropped under the threshold or disappeared fails as
   *out of date* until the baseline is tightened in the same change, with
-  ``--update-baseline`` (which can only lower or remove entries).
+  ``--update-baseline`` (which can only lower or remove entries), unless the base had
+  already improved it that far (main changed the file; the entry is listed, not failed).
 
 Whole-file, not scoped to the touched files: the baseline may only lose entries or lower
 values relative to the baseline on ``--base-ref``, and the thresholds, scope and tool
@@ -27,16 +28,19 @@ parameters may not loosen (the scope is compared by the files each config measur
 this tree, not by its text). Editing the baseline is not a way to make the gate pass.
 
 The pull-request label ``baseline-raise``, read from the GitHub API at run time
-(``--pr-number``; ``--pull-request-json`` stands in for the API in a local run), turns
-baseline growth and new or worse units into *waived* findings: still listed in full in
-the log and the report, no longer failing. It waives nothing else.
+(``--pr-number``; on a push, ``--pushed-sha`` finds the PR whose merge made the commit;
+``--pull-request-json`` stands in for the API in a local run), turns baseline growth, new
+or worse units and the failing design checks into *waived* findings: still listed in
+full in the log and the report, no longer failing. It waives nothing else.
 
 Next to the ratchet, ``code_metrics_checks`` runs checks that have no baseline: added
 comment blocks and history in comments, CJK characters (in the tree and, on a pull
 request, in its title, body and commit messages), production imports of test code, and
 added repeated literals; ``code_metrics_design`` runs the diff-only design checks (A1
 private-name reach, A8 flag arguments, A9 tuple returns, A10 raw vocabulary, A11 global
-writes, A12 forwarders and single implementations). The diff-only ones need ``--base-ref``.
+writes, A12 forwarders and single implementations). A9, A10, A11 and A12 single
+implementations are advisory, as the A rules rate them: listed, never failing. The
+diff-only ones need ``--base-ref``.
 
 CI runs the base branch's copy of these scripts against the change, so editing the gate
 does not change the verdict on the same change; the report lists any edit to the gate
@@ -434,6 +438,28 @@ def excuse_base_backlog(outcome: Outcome, base: dict[Key, int]) -> None:
     outcome.worsened = [(f, was) for f, was in outcome.worsened if not carried(f)]
 
 
+def excuse_base_drift(outcome: Outcome, base: dict[Key, int]) -> None:
+    """Move out-of-date entries the base had already outgrown to ``outcome.base_drift``.
+
+    Main can improve a baselined unit without tightening the baseline (a change is judged
+    only on the files it touches), and the next change to touch that file would then fail
+    for main's improvement. An entry is the base's when the base already measured the
+    unit no higher than this tree does, or under the limit. Only :data:`PER_FILE` metrics
+    are measured at the base; an out-of-date duplication or dead-code entry still fails.
+    """
+
+    def drifted(entry: tuple[Key, int, Finding | None]) -> bool:
+        key, _recorded, finding = entry
+        if key[0] not in PER_FILE:
+            return False
+        if key not in base:
+            return True
+        return finding is not None and finding.key == key and not worse(key[0], base[key], finding.value)
+
+    outcome.base_drift = [(key, was, base.get(key), now) for key, was, now in outcome.stale if drifted((key, was, now))]
+    outcome.stale = [entry for entry in outcome.stale if not drifted(entry)]
+
+
 def merge_base(root: Path, ref: str) -> str:
     """The merge base of ``ref`` and HEAD, or ``ref`` itself when history is too shallow to tell."""
     found = checks.git(root, "merge-base", ref, "HEAD", ok=_ANY)
@@ -470,17 +496,30 @@ def compare_with_base(root: Path, ref: str, config: Config, outcome: Outcome, pr
     outcome.gate_changes = gate_changes(root, ref, config, base_config)
 
 
-def read_pull_request(args: argparse.Namespace) -> checks.PullRequest | None:
-    """The PR under test: from the GitHub API now (CI), or a JSON stand-in (local)."""
+def read_pull_request(args: argparse.Namespace, outcome: Outcome) -> checks.PullRequest | None:
+    """The PR under test: from the GitHub API now (CI), or a JSON stand-in (local).
+
+    On a push (``--pushed-sha``) it is the PR whose merge made the pushed commit, so a
+    reviewed override that passed on the PR still applies after the merge; a push no PR
+    made has no label to read and waives nothing.
+    """
     if args.pull_request_json:
         return checks.load_pull_request(args.pull_request_json)
-    if not args.pr_number:
+    if not (args.pr_number or args.pushed_sha):
         return None
     repo = os.environ.get("GITHUB_REPOSITORY", "")
     if not repo:
-        raise ToolError("--pr-number needs GITHUB_REPOSITORY (owner/name)")
+        raise ToolError("reading the pull request from the API needs GITHUB_REPOSITORY (owner/name)")
     api = os.environ.get("GITHUB_API_URL", "https://api.github.com")
-    return checks.fetch_pull_request(api, repo, args.pr_number, os.environ.get("GITHUB_TOKEN", ""))
+    token = os.environ.get("GITHUB_TOKEN", "")
+    number = args.pr_number
+    if args.pushed_sha:
+        number = checks.merged_pull_request(api, repo, args.pushed_sha, token)
+        if number is None:
+            outcome.notes.append(f"No merged pull request produced `{args.pushed_sha}`, so no label applies.")
+            return None
+        outcome.notes.append(f"`{args.pushed_sha}` is the merge of #{number}; its labels apply.")
+    return checks.fetch_pull_request(api, repo, number, token)
 
 
 def run(args: argparse.Namespace, outcome: Outcome) -> int:
@@ -515,15 +554,20 @@ def run(args: argparse.Namespace, outcome: Outcome) -> int:
         outcome.touched = checks.touched_files(root, since)
     compare(findings, outcome.baseline, outcome)
     if since:
-        touched_units = {f.path for f in outcome.new} | {f.path for f, _ in outcome.worsened}
-        excuse_base_backlog(outcome, base_values(root, since, touched_units, config))
+        paths = {f.path for f in outcome.new} | {f.path for f, _ in outcome.worsened}
+        paths |= {key[1] for key, _was, _now in outcome.stale if key[0] in PER_FILE}
+        at_base = base_values(root, since, paths, config)
+        excuse_base_backlog(outcome, at_base)
+        excuse_base_drift(outcome, at_base)
         compare_with_base(root, args.base_ref, config, outcome, findings)
     production, _tests = list_files(root, config.roots, config.exclude)
     outcome.module_warnings = module_warnings(root, filter(outcome.judged, production), config)
     outcome.problems = checks.run_all(root, config.roots, config.exclude, units, since)
     if since:
-        outcome.problems += design.design_problems(root, design_scope(root, config, since), units, since)
-    pull_request = read_pull_request(args)
+        found = design.design_problems(root, design_scope(root, config, since), units, since)
+        outcome.design = [p for p in found if p.check not in design.ADVISORY]
+        outcome.advisories = [p for p in found if p.check in design.ADVISORY]
+    pull_request = read_pull_request(args, outcome)
     if pull_request is not None:
         outcome.problems += checks.pull_request_cjk(pull_request)
         outcome.waived = pull_request.raises_baseline
@@ -588,6 +632,7 @@ def parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--pr-number", type=int, help="read this PR's labels, title, body and commits from the API")
     source.add_argument("--pull-request-json", type=Path, help="a local stand-in for --pr-number (no API call)")
+    source.add_argument("--pushed-sha", help="on a push: read the PR whose merge made this commit from the API")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
         "--update-baseline", action="store_true", help="lower or remove baseline entries to match the tree"

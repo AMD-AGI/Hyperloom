@@ -13,9 +13,12 @@ name: Code metrics
 # names across packages, A8 flag arguments, A9 tuple returns, A10 raw enum values,
 # A11 global writes, A12 forwarders and single-implementation abstractions).
 #
-# The PR label ``baseline-raise`` waives new, worse and baseline-growth findings;
-# the script reads the labels from the API when it runs (--pr-number), never from
-# this event's payload. The job re-runs when the label, title or body changes.
+# The PR label ``baseline-raise`` waives new, worse and baseline-growth findings
+# and the failing design checks (A1, A8, A12 forwarders; A9, A10, A11 and A12 single
+# implementations are advisory and never fail). The script reads the labels from
+# the API when it runs (--pr-number; on a push, --pushed-sha finds the PR whose
+# merge made the commit), never from this event's payload. The job re-runs when
+# the label, title or body changes.
 #
 # The job is a hard gate under the stable name ``code-metrics`` so it can be made
 # a required check. For that reason there is no paths-ignore: a required check
@@ -103,6 +106,8 @@ jobs:
           else
             git fetch --no-tags --depth=1 origin "$BEFORE"
             base=$BEFORE
+            # The merged PR's label applies after the merge too; a push no PR made waives nothing.
+            args+=(--pushed-sha "$GITHUB_SHA")
           fi
           args+=(--base-ref "$base")
           gate="$RUNNER_TEMP/code-metrics-gate"
