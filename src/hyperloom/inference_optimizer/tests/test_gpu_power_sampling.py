@@ -108,6 +108,16 @@ def test_a_serving_card_with_no_power_reading_leaves_the_round_unmeasured(tmp_pa
     assert read_measured_gpu_power_by_gpu(tmp_path) == (True, None)
 
 
+@pytest.mark.parametrize("bad_w", [0.0, -5.0])
+def test_a_serving_card_reading_non_positive_power_leaves_the_round_unmeasured(tmp_path, bad_w):
+    """A sensor reporting 0 W instead of N/A is the same failure: card 7 must not count as measured at 0 W."""
+    rows = [_row(g, 500.0, 250_000) for g in (4, 5, 6)] + [_row(7, bad_w, 250_000)]
+    out = _summary_of(tmp_path, rows, gpus={4, 5, 6, 7})
+    assert out["unread_gpus"] == [7]
+    assert out["avg_power_w"] is None
+    assert read_measured_gpu_power_by_gpu(tmp_path) == (True, None)
+
+
 def test_a_masked_card_missing_from_amd_smi_leaves_the_round_unmeasured(tmp_path):
     out = _summary_of(tmp_path, [_row(g, 500.0, 250_000) for g in (4, 5, 6)], gpus={4, 5, 6, 7})
     assert out["unread_gpus"] == [7]

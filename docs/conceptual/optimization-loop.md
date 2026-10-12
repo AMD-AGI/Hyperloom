@@ -292,7 +292,8 @@ power, the run stops with `baseline_over_power_budget`. The reading is the
 measured-phase per-GPU figure described above, carried as `gpu_power_by_gpu_w`;
 only Hyperloom's own sampler reads every serving card, so a round it did not
 sample counts as unmeasured. So does a round in which a card that may be
-serving could not be read: one holding a model with no power reading, or one in
+serving could not be read: one holding a model with no power reading (`N/A`, or
+a 0 W or negative socket power, which no working sensor reports), or one in
 scope (the visible-device mask, or every card `amd-smi` reported) whose VRAM was
 never read. Such cards are listed as `unread_gpus` in `gpu_power.json`, since a
 card missing from the readings would drop out of the total and escape its own

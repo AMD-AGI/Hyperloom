@@ -82,7 +82,8 @@ def parse_power_sample(payload: Any) -> dict[int, tuple[float | None, float | No
         mem = row.get("mem_usage") if isinstance(row.get("mem_usage"), dict) else {}
         used, total = _value(mem.get("used_vram")), _value(mem.get("total_vram"))
         fraction = used / total if used is not None and total else None
-        out[row["gpu"]] = (watts, fraction)
+        # No card draws 0 W: a non-positive socket power is a sensor that failed to read, the same as N/A.
+        out[row["gpu"]] = (watts if watts is not None and watts > 0 else None, fraction)
     return out
 
 
