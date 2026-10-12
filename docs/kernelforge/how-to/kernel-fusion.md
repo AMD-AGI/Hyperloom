@@ -29,6 +29,38 @@ campaign is not worth its time.
 Both numbers rank candidates rather than veto them. A modest share with one
 clearly fusible chain beats a large share with nothing fusible in it.
 
+## Checking the opportunity survives CUDA graphs
+
+The diagnosis runs on a graph-disabled trace, so the share it reports is the
+opportunity as it looks with nothing amortizing the launches. Production runs with
+graphs on. To find out how much of that opportunity replay has already taken,
+capture the same workload a second time with graphs enabled and compare the two:
+
+```bash
+kernelforge fusion-intercept \
+    --cgoff-trace decode.cgoff.trace.json.gz \
+    --cgon-trace  decode.cgon.trace.json.gz
+```
+
+It splits the opportunity the way fusion earns it. Replay closes the gaps between
+tiny kernels, so the launch half appears as the rise in GPU-busy-of-wall between
+the traces. A fused kernel also keeps intermediates in registers instead of
+round-tripping HBM, which replay cannot touch, so the memory half is measured on
+the graph-ON trace and survives whatever replay did.
+
+`headroom_remains` means something is left -- surviving traffic above the 3% bar,
+or gaps replay never closed. `intercepted` means both channels are spent and
+authoring the chain would buy what replay already delivers. Two results are input
+problems rather than answers, and both exit non-zero: `not_comparable` when the
+launch-bound share moved sharply between captures, which means they did not record
+the same code path, since replay changes the gaps and never which kernels run; and
+`graphs_not_active` when the graph-ON trace is no busier than its pair, which
+otherwise reads as "nothing was intercepted".
+
+This is worth the second capture before an authoring campaign, not after: the
+end-to-end integrate gate answers the same question with a real server, but only
+once discovery, authoring and validation have already been paid for.
+
 ## Running it
 
 ```bash
