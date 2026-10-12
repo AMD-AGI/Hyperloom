@@ -50,10 +50,11 @@ LEGS = {
 # names). STUB_SETUP=never keeps setup from completing. STUB_OWN=none skips this
 # run's session; STUB_FOREIGN=<stop_reason> also writes, later and with a future
 # mtime, another run's session under the same root, as a shared root would hold.
-# Every turn appends its background-task switch and CLAW_SESSION_ID to turns.log.
+# Every turn appends its background-task switch, CLAW_SESSION_ID and Experience KB
+# home to turns.log.
 STUB_CLAUDE = r"""#!/usr/bin/env bash
 prompt="$(cat)"
-echo "bg_disabled=${CLAUDE_CODE_DISABLE_BACKGROUND_TASKS:-unset} claw=${CLAW_SESSION_ID:-unset}" >> turns.log
+echo "bg_disabled=${CLAUDE_CODE_DISABLE_BACKGROUND_TASKS:-unset} claw=${CLAW_SESSION_ID:-unset} kb=${HYPERLOOM_KB_HOME:-unset}" >> turns.log
 backend="$(sed -n 's/^FRAMEWORK=//p' .env)"
 session() {  # session <dir> <claw id> <stop_reason>
   mkdir -p "$1/reports"
@@ -217,11 +218,28 @@ def test_every_claude_turn_runs_without_background_tasks(leg_env: dict[str, str]
     env = {**leg_env, "CLAW_SESSION_ID": "claw-own", "STUB_SETUP": "never", "LEG_SETUP_MAX_TURNS": "2"}
     _run(["docker-vllm-3h"], env)
     turns = (Path(leg_env["LEG_WORK_DIR"]) / "attempt-1/docker-vllm-3h/turns.log").read_text(encoding="utf-8")
-    assert turns.splitlines() == ["bg_disabled=1 claw=claw-own"] * 2
+    assert [line.split(" kb=")[0] for line in turns.splitlines()] == ["bg_disabled=1 claw=claw-own"] * 2
     result = _run(["docker-vllm-3h"], {**leg_env, "CI_VERSION": "attempt-2", "CLAW_SESSION_ID": "claw-own"})
     assert result.returncode == 0, result.stdout + result.stderr
     turns = (Path(leg_env["LEG_WORK_DIR"]) / "attempt-2/docker-vllm-3h/turns.log").read_text(encoding="utf-8")
-    assert turns.splitlines() == ["bg_disabled=1 claw=claw-own"] * 2
+    assert [line.split(" kb=")[0] for line in turns.splitlines()] == ["bg_disabled=1 claw=claw-own"] * 2
+
+
+def test_legs_sharing_a_session_root_keep_separate_experience_kb_homes(leg_env: dict[str, str]) -> None:
+    # One Experience KB home serves one service: a second leg on the same root must
+    # not be pointed at the first leg's home.
+    homes = []
+    for leg in ("docker-vllm-3h", "baremetal-sglang-3h"):
+        result = _run([leg], {**leg_env, "CLAW_SESSION_ID": f"claw-{leg}"})
+        assert result.returncode == 0, result.stdout + result.stderr
+        workspace = Path(leg_env["LEG_WORK_DIR"]) / "attempt-1" / leg
+        home = f"{workspace}/experience-kb"
+        assert f"HYPERLOOM_KB_HOME={home}" in (workspace / ".env").read_text(encoding="utf-8").splitlines()
+        assert {
+            line.split(" kb=")[1] for line in (workspace / "turns.log").read_text(encoding="utf-8").splitlines()
+        } == {home}
+        homes.append(home)
+    assert len(set(homes)) == 2
 
 
 @pytest.mark.parametrize(("own", "foreign", "verdict"), [("signal", "sweep_done", 1), ("sweep_done", "signal", 0)])

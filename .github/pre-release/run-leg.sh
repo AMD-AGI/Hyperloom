@@ -39,6 +39,8 @@
 #   CLAUDE_CLI_VERSION  only when no `claude` is on PATH
 # Optional env: LEG_WHEEL (prebuilt wheel instead of building this checkout),
 #   CLAW_SESSION_ID (the optimizer records it in manifest.json; see USER_DATA_PATH),
+#   HYPERLOOM_KB_HOME (default: the leg workspace's experience-kb/, so legs sharing a
+#   session root do not contend for one Experience KB home, which serves one service),
 #   HF_TOKEN, ANTHROPIC_CUSTOM_HEADERS (a gateway that needs a header gets it from
 #   the caller; none is assumed), INFERENCE_OPTIMIZER_SESSION_LAYOUT,
 #   GEAK_CLAUDE_MODEL, FORGE_CLAUDE_MODEL, OPENAI_BASE_URL, OPENAI_API_KEY,
@@ -239,6 +241,7 @@ write_dotenv() {
         [ -n "${!k:-}" ] && printf '%s="%s"\n' "$k" "${!k}"
       done
       echo "USER_DATA_PATH=${USER_DATA_PATH}"
+      echo "HYPERLOOM_KB_HOME=${HYPERLOOM_KB_HOME}"
       echo "HYPERLOOM_RUN_MODE=baremetal"
       echo "FRAMEWORK=${BACKEND}"
       echo "MODEL_PATH=${MODEL_PATH}"
@@ -374,6 +377,9 @@ main() {
   ENV_FILE="$ROOT/.env"
   AGENT_LOG="$ROOT/agent.log"
   RUN_LOG="$ROOT/run-leg.log"
+  # The leg's own Experience KB: a shared session root would otherwise put every
+  # leg's service on one home, which serves one service at a time.
+  export HYPERLOOM_KB_HOME="${HYPERLOOM_KB_HOME:-$ROOT/experience-kb}"
   LEG_T0="$(date +%s)"
   SESSION_UUID="$(leg_session_uuid "$LEG" "$CI_VERSION")"
   trap scrub_dotenv EXIT
