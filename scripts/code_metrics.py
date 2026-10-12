@@ -466,7 +466,9 @@ def confirm_tolerance(outcome: Outcome, base: dict[Key, int], tolerance: dict[st
     The tolerance is for units already over the limit: one under the limit at the base
     (absent from ``base``) crosses it again in this change and fails as before. Its anchor
     is the recorded value, or the base's when main brought the unit lower without
-    tightening the entry, so a unit main improved cannot grow back by the stale gap.
+    tightening the entry, so the tolerance cannot add the stale gap on top. Only values
+    past the recorded one reach this check: a value at or under it is judged as before
+    the tolerance existed (worse, out of date or unchanged).
     """
 
     entries = [(f, was) for f, was, _top in outcome.tolerated]

@@ -492,9 +492,9 @@ vocabulary-roots = ["src"]
 tuple-return-max-elements = 2
 # Growth tolerance for units already over the limit (module and function length
 # only). A baselined unit that was over the limit at the base may exceed its
-# recorded value by at most this much in total; the anchor is the recorded value
-# (or the base's, when lower), so the allowance does not compound per PR and the
-# baseline still only goes down. Measured on the first gate reds (2026-10-12):
+# recorded value: the ceiling is the anchor plus this much, the anchor being the
+# recorded value (or the base's, when lower), so the allowance does not compound
+# per PR and the baseline still only goes down. Measured on the first gate reds (2026-10-12):
 # legitimate fixes grew such units by 1-62 lines (0.04%-1.31%) for modules and
 # 1-6 lines for functions. Modules: max(10 lines, 1% of the anchor); functions:
 # 10 lines. Complexity, new or first-time-over units, repeated literals and
