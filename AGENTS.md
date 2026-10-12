@@ -41,6 +41,7 @@ pytest src/hyperloom/inference_optimizer/tests/test_prompt_builder.py -k subset
 ruff check .                      # lint (E, F, W; line-length 120, E501/E741 ignored)
 ruff format --check .
 mypy src/hyperloom                # advisory (runs as a non-gating CI job)
+python scripts/code_metrics.py --base-ref origin/main   # code-metrics gate (tool pins: see the script)
 ```
 
 ## Authoring rules of engagement
@@ -59,12 +60,15 @@ doc is the authority on where that boundary lives.
   numbers, how to measure them, and when a long unit is fine as it stands — needs a reason
   in the PR description or a split. Editing a unit that was already over is not a demand to
   repay its debt; adding branches or a second responsibility to it is. The three numbers
-  are review triggers, not gates: no linter measures them today and the tree carries a
-  backlog above all three. Above them sits one gate — **a function this change adds, or
+  are review triggers, not gates, and the tree carries a backlog above all three. Above
+  them sits one ceiling — **a function this change adds, or
   whose cyclomatic complexity this change raises, may not exceed 20**; the style guide §
   *Complexity ceiling* has the measurement and the two cases it covers. Maintainability,
   readability, extensibility, and reliability are what the thresholds stand in for; when a
   threshold and one of those disagree, say so and keep the clearer code.
+  The `code-metrics` CI job measures that ceiling and the other gated limits in the style
+  guide § *Size and complexity* on the files a change touches; its `baseline-raise` label
+  waives them only with the reason in the PR description.
 - **Review feedback is a hypothesis.** A comment can be wrong, or right about the symptom
   and wrong about the fix. Before acting on one, ask what you would build if this code did
   not exist yet, and whether the mechanism under discussion should exist at all. Answering

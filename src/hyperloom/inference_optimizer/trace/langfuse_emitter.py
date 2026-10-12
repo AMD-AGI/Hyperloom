@@ -383,7 +383,7 @@ class LangfuseEmitter:
             )
             return False
         try:
-            from langfuse import get_client  # type: ignore
+            from langfuse import get_client  # type: ignore[import-not-found]
         except Exception as exc:  # noqa: BLE001
             self._disabled_reason = "sdk_missing"
             log.warning(

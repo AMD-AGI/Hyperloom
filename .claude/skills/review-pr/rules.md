@@ -825,9 +825,9 @@ ruff check --select C901 --config "lint.mccabe.max-complexity=20" --isolated \
 `--force-exclude` keeps Ruff's `extend-exclude` (vendored SDK copies, `src/kernelforge/examples`)
 out when paths are passed explicitly; `--isolated` is what lets the base copy be checked from
 outside the tree. Present at head and absent at base, or a higher number at head than at base,
-fires. The same number on both sides is backlog and is silent. This is not a rule duplicating a
-static gate: `C901` is absent from `[tool.ruff.lint] select` and Pylint runs `--errors-only`, so
-nothing in CI measures it and review is the only place it surfaces. `AGENTS.md` *Size is a design
+fires. The same number on both sides is backlog and is silent. The `code-metrics` CI job measures
+the same two cases, but its `baseline-raise` label waives them, so the rule stays for the one
+question CI cannot answer: whether a labelled PR gives the reason. `AGENTS.md` *Size is a design
 signal* carries the gate and the style guide § *Complexity ceiling* carries the two cases; the
 finding names the function, both numbers, and the branch the diff added.
 **Seen in:** no single PR -- this is the gate written into the style guide's *Size and
@@ -843,6 +843,9 @@ survives at the ceiling only when the arms are genuinely independent.
 for the branches that moved the number.
 **Report as:** `D12 <file>:<line> -- <function> is complexity <head> (base: <base|absent>), over
 the ceiling of 20; split it or keep <added branch> out of it`
+**CI:** the `code-metrics` job fails this ceiling on the files a PR touches (style guide § *Size
+and complexity*). The `baseline-raise` label waives that CI check; D12 then accepts the override
+only when the PR description gives the reason the function stays above 20, and fires otherwise.
 
 ### D13 -- Count the mechanisms a fix needs to hold itself up; the count is the finding
 

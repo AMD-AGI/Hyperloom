@@ -1487,7 +1487,7 @@ def test_gpu_type_autodetect_rocm_and_torch_fallback(monkeypatch: pytest.MonkeyP
     assert gpu_types._autodetect_gpu_type() is None
 
 
-# breakdown.recorder.section_shape / breakdown.reporters
+# Tests for breakdown.recorder.section_shape / breakdown.reporters
 
 
 def test_section_shape_unknown_is_none() -> None:

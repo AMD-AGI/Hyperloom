@@ -1919,7 +1919,7 @@ def _normalize_tokens(value: Any) -> str:
         text = str(value).strip().strip("[](){}")
         if not text:
             return ""
-        items = [p for p in text.split(",")]
+        items = list(text.split(","))
     out: list[str] = []
     for it in items:
         s = str(it).strip().strip("'\"")
@@ -2696,7 +2696,7 @@ def _resolve_shape_capture_port(value: Any) -> int:
 def _is_tunableop_untuned_row(line: str) -> bool:
     """Recognize a native PyTorch TunableOp offline-input row."""
     stripped = line.strip()
-    if not stripped or stripped.startswith("#") or stripped.startswith("Validator"):
+    if not stripped or stripped.startswith(("#", "Validator")):
         return False
     fields = [field.strip() for field in stripped.split(",")]
     if len(fields) < 2 or "TunableOp" not in fields[0] or not fields[1]:

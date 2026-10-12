@@ -152,14 +152,17 @@ def test_oversized_server_log_keeps_its_tail(tmp_path):
 
 
 def test_server_log_tail_survives_a_split_codepoint(tmp_path):
-    """A byte offset lands mid-character; the decode must not cost the whole log."""
+    """A byte offset lands mid-character; the decode must not cost the whole log.
+
+    The euro sign is three bytes in UTF-8, so the seek can land inside one.
+    """
     log = tmp_path / "server.log"
-    log.write_bytes("码".encode() * (_SERVER_LOG_TAIL_LIMIT // 3 + 1))
+    log.write_bytes("€".encode() * (_SERVER_LOG_TAIL_LIMIT // 3 + 1))
     snapshot_round(tmp_path, _res(bench_result={"server_log_path": str(log)}))
     text = (tmp_path / "reports" / "enablement" / "abc123" / "server.log").read_text(encoding="utf-8")
     body = text[len(_LOG_TRUNCATION_NOTE.format(dropped=2)) :]
     # Only the character the seek landed inside is lost, and nothing is replaced.
-    assert set(body) == {"码"}
+    assert set(body) == {"€"}
     assert len(body) == _SERVER_LOG_TAIL_LIMIT // 3
 
 

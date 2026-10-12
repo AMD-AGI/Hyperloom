@@ -309,7 +309,7 @@ def test_derive_runtime_paths_noop_when_no_rocm_sdk_wheel(monkeypatch):
     monkeypatch.setenv("PATH", "/usr/bin")
     monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
     monkeypatch.delenv("ROCM_PATH", raising=False)
-    monkeypatch.setattr(cli_preflight, "_rocm_sdk_wheel_lib_dirs", lambda: [])
+    monkeypatch.setattr(cli_preflight, "_rocm_sdk_wheel_lib_dirs", list)
 
     cli_preflight._derive_runtime_paths()
 

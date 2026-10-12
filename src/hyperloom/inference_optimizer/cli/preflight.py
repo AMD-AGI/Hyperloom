@@ -1808,7 +1808,7 @@ def _print_recipe_kb_queue_status() -> dict[str, Any]:
     }
 
 
-_INFERENCEX_REPO_DEFAULT = "https://github.com/SemiAnalysisAI/InferenceX.git"
+INFERENCEX_REPO_DEFAULT = "https://github.com/SemiAnalysisAI/InferenceX.git"
 # MUST stay in lockstep with INFERENCEX_REF in assets/install.sh.
 _INFERENCEX_REF_DEFAULT = "3d5581562f643f9bdeb8410cd924e2c70906c966"
 
@@ -1932,7 +1932,7 @@ def _ensure_client_trust_compat(magpie_path: str) -> bool:
 
 def _clone_inferencex(dest: Path) -> str | None:
     """Clone InferenceX into ``dest`` (writable), pinned to INFERENCEX_REF."""
-    repo = os.environ.get("INFERENCEX_REPO") or _INFERENCEX_REPO_DEFAULT
+    repo = os.environ.get("INFERENCEX_REPO") or INFERENCEX_REPO_DEFAULT
     ref = os.environ.get("INFERENCEX_REF") or _INFERENCEX_REF_DEFAULT
     dest_str = str(dest)
     try:
@@ -2155,7 +2155,7 @@ def _persist_install_event(args: argparse.Namespace | None, session_dir: Path) -
         exc = RuntimeError("pending install event is unavailable")
         log.warning("failed to persist SBD V6 install event: %s", exc)
         if not record_write_warning(session_dir, component="install.event", exc=exc):
-            log.debug("failed to persist SBD V6 install-event write warning", exc_info=True)
+            log.debug("failed to persist SBD V6 install-event write warning", exc_info=exc)
 
 
 def _preflight(

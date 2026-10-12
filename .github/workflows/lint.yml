@@ -17,6 +17,10 @@ name: Lint
 # single editable install below covers all of them (no more per-agent
 # editable installs / separate PYTHONPATH entries / bare ``runtime`` module).
 #
+# import-linter enforces the architecture contracts in ``.importlinter``
+# (layer direction, package boundaries, no new import cycles). It is a hard
+# gate; two contracts carry an exact baseline that can only shrink.
+#
 # Bandit scans production Python code only (tests excluded) for medium+ security
 # findings. It remains advisory while the security baseline is being ratcheted.
 on:
@@ -85,6 +89,32 @@ jobs:
       - name: Check for unjustified contextlib.suppress(Exception)
         id: broad_suppress
         run: python scripts/check_broad_suppress.py src scripts
+
+  import-linter:
+    name: import-linter (architecture contracts)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Install import-linter
+        # Pinned exactly for the same reason as ruff above: the acyclic
+        # contract's baseline is the set of cycle breakers this version
+        # nominates, and a release that changes the nomination would red main
+        # with no code change. Bump it together with a re-check of
+        # ``.importlinter``. The project itself is not installed: the import
+        # graph is built statically from ``src/``.
+        run: |
+          pip install --upgrade pip
+          pip install "import-linter==2.15"
+
+      - name: Check architecture contracts
+        env:
+          PYTHONPATH: src
+        run: lint-imports --no-cache
 
   compile:
     name: byte-compile (syntax check)

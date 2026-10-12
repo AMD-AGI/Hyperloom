@@ -470,7 +470,7 @@ def _import_sdk() -> tuple[Any, Any]:
             ``query`` / ``ClaudeAgentOptions`` attributes.
     """
     try:
-        import claude_agent_sdk as sdk  # type: ignore
+        import claude_agent_sdk as sdk  # type: ignore[import-not-found]
     except ImportError as exc:  # pragma: no cover - exercised via caller fallback
         raise RuntimeError(
             "claude_agent_sdk not installed; run src/hyperloom/inference_optimizer/assets/install.sh first"

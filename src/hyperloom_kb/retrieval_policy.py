@@ -212,7 +212,7 @@ class RetrievalConfiguration:
         max_groups: int = 20,
         render_budget_chars: int | None = 4_000,
     ) -> RetrievalConfiguration:
-        normalized_limits = dict(limits or {capability: 20 for capability in RetrievalCapability})
+        normalized_limits = dict(limits or dict.fromkeys(RetrievalCapability, 20))
         normalized_providers = dict(provider_refs or {})
         manifest: dict[str, JsonValue] = {
             "version": RETRIEVAL_POLICY_VERSION,

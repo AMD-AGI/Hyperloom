@@ -489,7 +489,7 @@ _GPU_PREOCCUPIED_MARKERS: tuple[str, ...] = (
     # (0.95, 273.59 GiB).
     "on startup is less than desired gpu memory utilization",
     "reduce gpu memory used by other processes",
-    # sglang: "Not enough memory. Please try to increase --mem-fraction-static."
+    # sglang says "Not enough memory. Please try to increase --mem-fraction-static."
     "not enough memory. please try to increase --mem-fraction-static",
 )
 

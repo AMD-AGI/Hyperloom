@@ -563,9 +563,9 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         """
         state = self.shared_state
         if str(getattr(state, "phase", "") or "").upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
-            return None
+            return
         if not bool(getattr(state, "force_stalled_specialist_enabled", True)):
-            return None
+            return
         spec_thr = max(1, int(getattr(state, "force_stalled_specialist_rounds", 0) or FORCE_STALLED_SPECIALIST_ROUNDS))
         keep_thr = max(1, int(getattr(state, "force_stalled_keep_rounds", 0) or FORCE_STALLED_KEEP_ROUNDS))
         stalled = state.stalled_domains(
@@ -573,7 +573,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             keep_threshold=keep_thr,
         )
         if not stalled:
-            return None
+            return
 
         from .domains import domain_for_tag
 
@@ -658,8 +658,8 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 keep_thr,
             )
             # One forced dispatch per tick.
-            return None
-        return None
+            return
+        return
 
     async def maybe_ensure_custom_specialist(self) -> None:
         """Dispatch the operator-defined specialist when no custom task has started this session.
