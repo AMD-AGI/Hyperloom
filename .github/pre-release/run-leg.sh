@@ -190,7 +190,7 @@ leg_idle_s() {
   mapfile -t dirs < <(own_session_dirs "$LEG_T0")
   # awk reads all input: `sort | head` would SIGPIPE on a large tree and, under
   # pipefail, end the runner.
-  last="$(find "$ROOT" "${dirs[@]}" -type f -printf '%T@\n' 2>/dev/null \
+  last="$(find "$ROOT" ${dirs[@]+"${dirs[@]}"} -type f -printf '%T@\n' 2>/dev/null \
           | awk '$1 > m { m = $1 } END { if (m) printf "%d\n", m }' || true)"
   if [ -n "$last" ] && [ "$last" -ge "$since" ] 2>/dev/null; then since="$last"; fi
   echo $(( now - since ))
@@ -268,7 +268,7 @@ agent_turn() {
   # No background tasks: a turn's background shell is torn down with the turn, and
   # the demo prompt then launches optimize with `setsid nohup` instead. CLAW_SESSION_ID
   # stays in the env: the optimizer writes it into the session's manifest.json.
-  env "${AGENT_ENV[@]}" CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 \
+  env ${AGENT_ENV[@]+"${AGENT_ENV[@]}"} CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 \
     claude --print --dangerously-skip-permissions "$@" >>"$AGENT_LOG" 2>&1
 }
 
