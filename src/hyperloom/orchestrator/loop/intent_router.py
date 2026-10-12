@@ -352,23 +352,32 @@ def _record_review_outcome(router: Any, pending: Any, **outcome: Any) -> None:
 class IntentRouter(CoordinatorCollaborator):
     """Validates and dispatches agent-emitted intents on behalf of a Coordinator."""
 
-    def _resolve_primatune_mandate(self, params: dict[str, Any]) -> None:
+    def _resolve_primatune_mandate(self, params: dict[str, Any]) -> PolicyDenied | None:
         """Swap a queued predictor mandate in for the ``primatune_mandate_id`` that cites it.
 
         Side-effecting: rewrites ``task_description`` and the scope, mode,
-        provenance and lever params in place. An unknown id is left alone, so the
-        dispatch proceeds as the ordinary specialist it otherwise is.
+        provenance and lever params in place. An id no round carries is refused
+        rather than dispatched: the task_description beside it is the
+        placeholder the prompt has orchestration write for the mandate's text.
         """
         from ..lever import LEVER_SOURCE_PATCH
         from ..predictor.mandate import find_mandate
         from ..predictor.rows import PROVENANCE
 
         mandate_id = str(params.get("primatune_mandate_id") or "").strip()
-        mandate = find_mandate(self.shared_state, mandate_id) if mandate_id else ""
+        if not mandate_id:
+            return None
+        mandate = find_mandate(self.shared_state, mandate_id)
         if not mandate:
-            if mandate_id:
-                log.warning("specialist dispatch cites unknown primatune_mandate_id=%r", mandate_id)
-            return
+            return PolicyDenied(
+                f"delegate{{action_name='specialist'}} cites primatune_mandate_id={mandate_id!r}, "
+                "which no predictor round carries",
+                rule="unknown_primatune_mandate",
+                hint=(
+                    "Copy the id verbatim from the predictor's source-change mandate line, or dispatch the "
+                    "specialist without primatune_mandate_id and with a task_description of its own."
+                ),
+            )
         params.update(
             task_description=mandate,
             scope="freeform",
@@ -379,6 +388,18 @@ class IntentRouter(CoordinatorCollaborator):
         # A domain would relabel the patch specialist:<domain> on its way to integrate_patch.
         params.pop("domain", None)
         params.pop("tags", None)
+        return None
+
+    async def _admit_specialist(self, source: str, intent: Intent, params: dict[str, Any]) -> bool:
+        """Resolve a cited predictor mandate and stamp ownership; ``False`` once the dispatch is refused."""
+        # Before the ownership stamp: a resolved mandate sets the lever the stamp would otherwise derive.
+        refused = self._resolve_primatune_mandate(params)
+        if refused is not None:
+            await self.record_policy_denied(source, intent, refused, action_name="specialist")
+            return False
+        # Capture proposal ownership at dispatch.
+        self._stamp_specialist_owner(params)
+        return True
 
     def _consume_primatune_mandate(self, action_name: str, params: dict[str, Any], task_id: str) -> None:
         """Mark the predictor mandate a specialist dispatch cites as consumed by ``task_id``."""
@@ -880,11 +901,8 @@ class IntentRouter(CoordinatorCollaborator):
                     },
                 )
                 return
-        if action_name == "specialist":
-            # Before the ownership stamp: a resolved mandate sets the lever the stamp would otherwise derive.
-            self._resolve_primatune_mandate(params)
-            # Capture proposal ownership at dispatch.
-            self._stamp_specialist_owner(params)
+        if action_name == "specialist" and not await self._admit_specialist(source, intent, params):
+            return
         # idempotency_key is top-level per schema; strip a nested compat alias.
         nested_idempotency_key = params.pop("idempotency_key", None)
         # Plumb baseline's materialized YAML into grid-style tasks (delegator may override).

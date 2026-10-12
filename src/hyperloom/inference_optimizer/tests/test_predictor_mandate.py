@@ -8,6 +8,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from hyperloom.orchestrator.predictor.mandate import mark_mandate_consumed
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -48,7 +50,7 @@ def test_the_router_dispatches_the_predictors_own_text_and_attribution():
     state = _state_with_mandate()
     router = IntentRouter(SimpleNamespace(shared_state=state))
     params = {"primatune_mandate_id": MANDATE_ID, "task_description": "x", "domain": "serving", "tags": ["a"]}
-    router._resolve_primatune_mandate(params)
+    assert router._resolve_primatune_mandate(params) is None
 
     assert params["task_description"] == "Fuse rmsnorm into the QKV GEMM in tuned_gemm.py"
     assert (params["scope"], params["mode"], params["provenance"], params["lever_kind"]) == (
@@ -60,12 +62,14 @@ def test_the_router_dispatches_the_predictors_own_text_and_attribution():
     assert "domain" not in params and "tags" not in params
 
     unknown = {"primatune_mandate_id": "nope", "task_description": "x"}
-    router._resolve_primatune_mandate(unknown)
+    refused = router._resolve_primatune_mandate(unknown)
+    assert refused is not None and refused.rule == "unknown_primatune_mandate"
     assert unknown == {"primatune_mandate_id": "nope", "task_description": "x"}
 
 
-async def test_a_mandate_delegate_queues_the_patch_specialist_and_withdraws_the_mandate(tmp_path, monkeypatch):
-    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+@pytest.fixture
+async def coordinator(tmp_path, monkeypatch):
+    """A real Coordinator holding the mandate, with a framework checkout for patch specialists."""
     from hyperloom.inference_optimizer.session.paths import make_session_dir
     from hyperloom.orchestrator.loop.coordinator import Coordinator
     from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
@@ -80,23 +84,36 @@ async def test_a_mandate_delegate_queues_the_patch_specialist_and_withdraws_the_
         (tmp_path / "fw").mkdir()
         coord.shared_state.framework, coord.shared_state.framework_repo_path = "sglang", str(tmp_path / "fw")
         coord.shared_state.specialist_rounds = _state_with_mandate().specialist_rounds
-        params = {"primatune_mandate_id": MANDATE_ID, "task_description": "x", "domain": "serving_specialist"}
-        intent = Intent(
-            type=IntentType.DELEGATE, payload={"action_name": "specialist", "idempotency_key": "m1", "params": params}
-        )
-        await coord.router.handle_delegate("orchestration", intent)
-
-        (task,) = await coord.tasks.by_state("queued")
-        assert task.params["task_description"] == "Fuse rmsnorm into the QKV GEMM in tuned_gemm.py"
-        assert (task.params["provenance"], task.params["scope"], task.params["mode"]) == (
-            "primatune",
-            "freeform",
-            "patch",
-        )
-        assert coord.shared_state.specialist_rounds[0]["mandate_consumed_by"] == task.task_id
-        assert coord.shared_state.to_untested_proposals_summary() == ""
+        yield coord
     finally:
         await coord.stop()
+
+
+async def _delegate_specialist(coord: Any, params: dict[str, Any], key: str) -> None:
+    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+
+    payload = {"action_name": "specialist", "idempotency_key": key, "params": params}
+    await coord.router.handle_delegate("orchestration", Intent(type=IntentType.DELEGATE, payload=payload))
+
+
+async def test_a_mandate_delegate_queues_the_patch_specialist_and_withdraws_the_mandate(coordinator):
+    params = {"primatune_mandate_id": MANDATE_ID, "task_description": "x", "domain": "serving_specialist"}
+    await _delegate_specialist(coordinator, params, "m1")
+
+    (task,) = await coordinator.tasks.by_state("queued")
+    assert task.params["task_description"] == "Fuse rmsnorm into the QKV GEMM in tuned_gemm.py"
+    assert (task.params["provenance"], task.params["scope"], task.params["mode"]) == ("primatune", "freeform", "patch")
+    assert coordinator.shared_state.specialist_rounds[0]["mandate_consumed_by"] == task.task_id
+    assert coordinator.shared_state.to_untested_proposals_summary() == ""
+
+
+async def test_a_delegate_citing_no_known_mandate_is_refused_rather_than_run_on_its_placeholder(coordinator):
+    params = {"primatune_mandate_id": "primatune-patch-c9-s9-r9", "task_description": "<one line>"}
+    await _delegate_specialist(coordinator, params, "m2")
+
+    assert await coordinator.tasks.by_state("queued") == []
+    assert coordinator.shared_state.policy_denial_streak == {"specialist:unknown_primatune_mandate": 1}
+    assert "mandate_consumed_by" not in coordinator.shared_state.specialist_rounds[0]
 
 
 def test_a_consumed_mandate_is_withdrawn_and_keeps_its_first_consumer():
