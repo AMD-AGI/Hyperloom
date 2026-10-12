@@ -86,6 +86,25 @@ as a domain-anchored one — freeform is not a GPU loophole. Pair
 `mode=patch + bench=true + needs_gpu` to give a freeform specialist a real
 measure → edit → measure loop on its own cards inside its worktree.
 
+## Instrumentation coverage — a missing phase is a gap, not zero cost
+
+The profile you rank against is only as complete as the phases it captured. The
+trace certificate emits a `phase_coverage` check: when it is `failed`, one
+serving phase (prefill / decode) never landed in the split, so its component
+shares are **absent from the Amdahl denominator, not zero**. Do not read the
+shares as complete and do not let the phase the profiler happened to capture
+decide which front you optimise — a decode-only capture on a prefill-heavy
+workload (agentic / long-prompt serving, where prefill can be the majority of
+the engine) will steer you to decode micro-optimisation while the dominant lever
+sits unmeasured. When a phase is uncovered: **raise it explicitly, then measure
+it directly** — build a targeted per-component eval for the uncovered phase and
+price its Amdahl ceiling before you rank it, deprioritise it, or declare it
+saturated. Being blocked on the phase profiler is not a reason to fall back to
+"optimise what I can see"; it is a reason to instrument the phase you cannot.
+On an agentic workload a prefill miss is surfaced for you as a high-severity
+`#phase_unmeasured:prefill` gap in `SharedState.gaps[]`, so the missing phase
+arrives as a ranked target rather than an advisory you have to notice.
+
 ## Inputs (task.params)
 
 | Key                  | Type     | Required | Description |

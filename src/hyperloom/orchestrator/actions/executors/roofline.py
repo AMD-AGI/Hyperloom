@@ -1041,6 +1041,11 @@ class RooflineExecutor:
         state.last_profile_trace = str(profiled.trace_path)
         state.last_profile_launch_evidence_path = str(profiled.result.get("launch_evidence_path") or "")
         state.last_profile_status = "succeeded"
+        _trace_validate = (profiled.result or {}).get("trace_validate") or {}
+        state.last_profile_phase_coverage = {
+            "partial": bool(_trace_validate.get("phase_coverage_partial")),
+            "missing": str(_trace_validate.get("phase_coverage_missing") or ""),
+        }
         state.record_profile_workload(profiled.params or ctx.task.params or {}, arm=roofline_arm)
         backend = detect_kineto_backend(profiled.trace_path)
         if backend:
