@@ -27,7 +27,7 @@ MAX_SAFE_INTEGER = (1 << 53) - 1
 #: The most one text value holds; a read injects text whole, so a longer one belongs in a file.
 TEXT_MAX_BYTES = 32 * 1024
 #: The most one file holds; a record naming a larger one is invalid, so no client ever tries to send it.
-MAX_FILE_BYTES = 4 * 1024 * 1024 * 1024
+MAX_FILE_BYTES = 4 * 1024**3
 
 JsonScalar: TypeAlias = str | int | float | bool | None
 JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
@@ -81,16 +81,17 @@ class ObjectiveDirection(str, Enum):
 
 #: The categories whose fields a declaration names, in record order.
 CATEGORIES = ("identity", "baseline", "rationale", "change", "outcome", "reflection")
-#: Where a field may join the Repeat Group key; every identity field always does.
-_GROUP_CATEGORIES = frozenset({"baseline", "change"})
+IDENTITY, BASELINE, RATIONALE, CHANGE, OUTCOME, REFLECTION = CATEGORIES
+#: Where a field may join the Repeat Group key, in key order; every identity field always does.
+_GROUP_CATEGORIES = (BASELINE, CHANGE)
 #: Where each role may be declared; each category holds at most one field per role.
 _ROLE_CATEGORIES = {
-    FieldRole.DECISION: frozenset({"outcome"}),
-    FieldRole.MEASUREMENT: frozenset({"baseline", "outcome"}),
-    FieldRole.SUMMARY: frozenset({"change"}),
+    FieldRole.DECISION: frozenset({OUTCOME}),
+    FieldRole.MEASUREMENT: frozenset({BASELINE, OUTCOME}),
+    FieldRole.SUMMARY: frozenset({CHANGE}),
 }
 #: The search weight a field gets when its declaration names none.
-_DEFAULT_SEARCH = {"identity": 3.0}
+_DEFAULT_SEARCH = {IDENTITY: 3.0}
 
 
 def default_search_weight(category: str) -> float:
@@ -272,8 +273,9 @@ class FileRef:
 
     @classmethod
     def from_dict(cls, value: Any) -> FileRef:
-        data = _mapping(value, "file")
-        _reject_unknown(data, {"name", "sha256", "bytes"}, "file")
+        where = "file"
+        data = _mapping(value, where)
+        _reject_unknown(data, {"name", "sha256", "bytes"}, where)
         return cls(
             name=_required(data, "name", "file.name"),
             sha256=_required(data, "sha256", "file.sha256"),
@@ -567,7 +569,7 @@ class ExperienceDeclaration:
             names = [item.name for item in fields]
             if len(set(names)) != len(names):
                 raise SchemaValidationError(f"declaration.{category} contains duplicate fields")
-            if category == "rationale" and defaults & set(names):
+            if category == RATIONALE and defaults & set(names):
                 raise SchemaValidationError(
                     f"declaration.rationale redeclares a default field: {', '.join(sorted(defaults & set(names)))}"
                 )
@@ -581,7 +583,7 @@ class ExperienceDeclaration:
     @staticmethod
     def _check_field(category: str, item: FieldDeclaration) -> None:
         where = f"declaration.{category}.{item.name}"
-        if category == "identity" and (item.kind not in SCALAR_KINDS or item.many):
+        if category == IDENTITY and (item.kind not in SCALAR_KINDS or item.many):
             raise SchemaValidationError(f"{where}: an identity field holds one scalar")
         if item.group and category not in _GROUP_CATEGORIES:
             raise SchemaValidationError(f"{where}: only baseline and change fields declare group")
@@ -592,7 +594,7 @@ class ExperienceDeclaration:
         """Every field of ``category``, the rationale defaults included."""
 
         declared: tuple[FieldDeclaration, ...] = getattr(self, category)
-        return (*RATIONALE_DEFAULTS, *declared) if category == "rationale" else declared
+        return (*RATIONALE_DEFAULTS, *declared) if category == RATIONALE else declared
 
     def field(self, category: str, name: str) -> FieldDeclaration | None:
         return next((item for item in self.fields(category) if item.name == name), None)
@@ -607,14 +609,14 @@ class ExperienceDeclaration:
     def decision_values(self) -> tuple[str, ...]:
         """The values the outcome's decision field takes; empty when the schema declares none."""
 
-        decision = self.role_field("outcome", FieldRole.DECISION)
+        decision = self.role_field(OUTCOME, FieldRole.DECISION)
         return decision.values if decision is not None else ()
 
     def group_fields(self) -> tuple[tuple[str, str], ...]:
         """The baseline and change fields of the Repeat Group key, beside the identity, objective, and schema."""
 
         return tuple(
-            (category, item.name) for category in ("baseline", "change") for item in self.fields(category) if item.group
+            (category, item.name) for category in _GROUP_CATEGORIES for item in self.fields(category) if item.group
         )
 
     def lookup_fields(self) -> frozenset[str]:
@@ -655,7 +657,7 @@ class ExperienceDeclaration:
             values: dict[str, FieldValue] = getattr(experience, category)
             declared = {item.name: item for item in self.fields(category)}
             # Identity keeps keys no field declares, so another consumer can index them later.
-            if category != "identity":
+            if category != IDENTITY:
                 unknown = sorted(set(values) - set(declared))
                 if unknown:
                     raise SchemaValidationError(f"{category} holds undeclared fields: {', '.join(unknown)}")
@@ -840,7 +842,7 @@ class Experience:
             if value:
                 object.__setattr__(self, name, _require_token(value, f"experience.{name}"))
         for category in CATEGORIES:
-            values = _field_values(getattr(self, category), category, scalars_only=category == "identity")
+            values = _field_values(getattr(self, category), category, scalars_only=category == IDENTITY)
             object.__setattr__(self, category, values)
         object.__setattr__(self, "notes", _notes(self.notes, "experience.notes"))
         object.__setattr__(self, "rendered_refs", tuple(self.rendered_refs))
@@ -948,12 +950,18 @@ def derive_schema_ref(declaration: ExperienceDeclaration) -> str:
 
 
 __all__ = [
+    "BASELINE",
     "CATEGORIES",
+    "CHANGE",
     "CURRENT_SCHEMA_VERSION",
+    "IDENTITY",
     "KNOWLEDGE_FIELDS",
     "MAX_FILE_BYTES",
     "METADATA_FIELDS",
+    "OUTCOME",
+    "RATIONALE",
     "RATIONALE_DEFAULTS",
+    "REFLECTION",
     "SCALAR_KINDS",
     "TEXT_MAX_BYTES",
     "Experience",

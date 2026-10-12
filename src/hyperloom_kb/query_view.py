@@ -15,6 +15,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from hyperloom_kb.schema import (
     CATEGORIES,
+    OUTCOME,
     Experience,
     ExperienceDeclaration,
     FieldKind,
@@ -410,10 +411,10 @@ def repeat_group_key(declaration: ExperienceDeclaration, experience: Experience)
 
 
 def _annotations(declaration: ExperienceDeclaration, experiences: tuple[Experience, ...]) -> RepeatAnnotations:
-    decision = declaration.role_field("outcome", FieldRole.DECISION)
-    measurement = declaration.role_field("outcome", FieldRole.MEASUREMENT)
+    decision = declaration.role_field(OUTCOME, FieldRole.DECISION)
+    measurement = declaration.role_field(OUTCOME, FieldRole.MEASUREMENT)
     flag_fields = tuple(
-        item.name for item in declaration.fields("outcome") if item.kind is FieldKind.BOOLEAN and not item.many
+        item.name for item in declaration.fields(OUTCOME) if item.kind is FieldKind.BOOLEAN and not item.many
     )
     decisions: dict[str, int] = {}
     run_ids: set[str] = set()

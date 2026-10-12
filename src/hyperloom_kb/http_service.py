@@ -100,8 +100,9 @@ SERVICE_LOCK = "service.lock"
 DATABASE_URL_ENV = "HYPERLOOM_KB_DATABASE_URL"
 _CONFLICT = "conflict"
 _MISSING_FILES = "missing_files"
+_AUDIT = "audit"
 # Below this a write could fail for space, so the service stops reporting ready.
-MIN_FREE_DISK_BYTES = 512 * 1024 * 1024
+MIN_FREE_DISK_BYTES = 512 * 1024**2
 # A SIGTERM lets requests in flight finish this long; below an orchestrator's usual 30 s grace period.
 DRAIN_SECONDS = 25.0
 # How long a probe or a metrics scrape waits on the database: inside the few seconds an orchestrator or a scraper
@@ -109,11 +110,12 @@ DRAIN_SECONDS = 25.0
 PROBE_TIMEOUT_SECONDS = 2.0
 # A transport guard, not a data policy: a record's text fields and the size of each file it names are bounded by its
 # schema.
-_MAX_REQUEST_BYTES = 256 * 1024 * 1024
+_MAX_REQUEST_BYTES = 256 * 1024**2
 _READ_FIELDS = frozenset({"decision", "context", "outcome", "limit", "schema_ref", "render_budget_chars"})
 _WRITE_FIELDS = frozenset({"experience", "declaration"})
 _FILES_PREFIX = "/v1/files/"
 _FILES_MISSING = "/v1/files/missing"
+_GET, _POST, _PUT, _DELETE = "GET", "POST", "PUT", "DELETE"
 
 
 class HTTPServiceError(ValueError):
@@ -451,7 +453,7 @@ class ExperienceHTTPService:
                 (self.kb_id, declaration.schema_ref, _canonical(declaration.to_dict()), _utc_now()),
             ).rowcount
         if registered:
-            event(log, "audit", action="register_schema", schema_ref=declaration.schema_ref)
+            event(log, _AUDIT, action="register_schema", schema_ref=declaration.schema_ref)
         self._declarations[declaration.schema_ref] = declaration
 
     def _decision(self, declaration: ExperienceDeclaration, store: InMemoryExperienceStore, experience_id: str) -> str:
@@ -886,13 +888,13 @@ class ExperienceHTTPService:
         with self._database.transaction() as connection:
             self._schema_row(connection, schema, changes_reads=False)
             label = self._state.label(connection, schema, name=name, reason=LABEL_MANUAL)
-        event(log, "audit", action="label", schema_ref=schema, label_id=label.label_id, name=label.name)
+        event(log, _AUDIT, action="label", schema_ref=schema, label_id=label.label_id, name=label.name)
         return label.to_dict()
 
     def delete_label(self, label_id: str) -> dict[str, JsonValue]:
         with self._database.transaction() as connection:
             self._state.delete_label(connection, label_id)
-        event(log, "audit", action="delete_label", label_id=label_id)
+        event(log, _AUDIT, action="delete_label", label_id=label_id)
         return {"deleted": label_id}
 
     def restore(self, label_id: str) -> dict[str, JsonValue]:
@@ -905,7 +907,7 @@ class ExperienceHTTPService:
             saved = self._state.restore(connection, label)
         event(
             log,
-            "audit",
+            _AUDIT,
             action="restore",
             schema_ref=label.schema_ref,
             label_id=label.label_id,
@@ -918,7 +920,7 @@ class ExperienceHTTPService:
             schema = self._schema_of(connection, experience_id)
             self._schema_row(connection, schema, changes_reads=True)
             self._state.exclude(connection, schema, experience_id, reason)
-        event(log, "audit", action="exclude", schema_ref=schema, experience_id=experience_id, reason=reason)
+        event(log, _AUDIT, action="exclude", schema_ref=schema, experience_id=experience_id, reason=reason)
         return {"experience_id": experience_id, "status": "excluded"}
 
     def include(self, experience_id: str) -> dict[str, JsonValue]:
@@ -926,7 +928,7 @@ class ExperienceHTTPService:
             schema = self._schema_of(connection, experience_id)
             self._schema_row(connection, schema, changes_reads=True)
             lifted = self._state.include(connection, schema, experience_id)
-        event(log, "audit", action="include", schema_ref=schema, experience_id=experience_id, lifted=lifted)
+        event(log, _AUDIT, action="include", schema_ref=schema, experience_id=experience_id, lifted=lifted)
         return {"experience_id": experience_id, "status": "included" if lifted else "not_excluded"}
 
     def exclusions(self, schema_ref: str | None = None) -> dict[str, JsonValue]:
@@ -964,7 +966,7 @@ class ExperienceHTTPService:
 
     def rebind(self) -> dict[str, JsonValue]:
         result = self._sync.rebind()
-        event(log, "audit", action="rebind", **result)
+        event(log, _AUDIT, action="rebind", **result)
         return result
 
     def begin_pull(self, schema_ref: str) -> dict[str, JsonValue] | None:
@@ -1148,7 +1150,7 @@ class RequestHandler(BaseHTTPRequestHandler):
     def _dispatch_files(self, app: ExperienceHTTPService, path: str) -> bool:
         """Serve the file routes; ``False`` when ``path`` is none of them."""
 
-        if self.command == "POST" and path == _FILES_MISSING:
+        if self.command == _POST and path == _FILES_MISSING:
             body = self._body()
             _reject_unknown(body, frozenset({"files"}))
             files = body.get("files")
@@ -1156,10 +1158,10 @@ class RequestHandler(BaseHTTPRequestHandler):
                 raise HTTPServiceError("files must be a list of file references")
             missing = app.missing_files(FileRef.from_dict(item) for item in files)
             self._write(HTTPStatus.OK, {"missing": list(missing)})
-        elif self.command == "PUT" and path.startswith(_FILES_PREFIX):
+        elif self.command == _PUT and path.startswith(_FILES_PREFIX):
             sha256 = path.removeprefix(_FILES_PREFIX)
             self._write(HTTPStatus.OK, app.put_file(sha256, self._length(MAX_FILE_BYTES), cast(BinaryIO, self.rfile)))
-        elif self.command == "GET" and path.startswith(_FILES_PREFIX):
+        elif self.command == _GET and path.startswith(_FILES_PREFIX):
             self._send_file(*app.held_file(path.removeprefix(_FILES_PREFIX)))
         else:
             return False
@@ -1172,7 +1174,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         """
 
         app = self.server.app
-        if self.command != "GET" or path not in PROBE_ROUTES:
+        if self.command != _GET or path not in PROBE_ROUTES:
             return False
         if path == "/livez":
             self._write(HTTPStatus.OK, {"status": "alive"})
@@ -1198,10 +1200,10 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._write(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
             return
         query = parse_qs(parsed.query)
-        if self.command == "GET" and parsed.path == "/health":
+        if self.command == _GET and parsed.path == "/health":
             self._write(HTTPStatus.OK, app.health())
             return
-        if self.command == "GET" and parsed.path == "/v1/list":
+        if self.command == _GET and parsed.path == "/v1/list":
             self._write(
                 HTTPStatus.OK,
                 app.list_experiences(
@@ -1212,7 +1214,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 ),
             )
             return
-        if self.command == "GET" and parsed.path == "/v1/export":
+        if self.command == _GET and parsed.path == "/v1/export":
             self._write(
                 HTTPStatus.OK,
                 app.export(
@@ -1225,20 +1227,20 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         if self._dispatch_state(app, parsed.path, query) or self._dispatch_files(app, parsed.path):
             return
-        if self.command == "POST" and parsed.path == "/v1/push":
+        if self.command == _POST and parsed.path == "/v1/push":
             _reject_unknown(self._body(), frozenset())
             self._write(HTTPStatus.OK, app.push())
             return
-        if self.command == "POST" and parsed.path == "/v1/pull":
+        if self.command == _POST and parsed.path == "/v1/pull":
             body = self._body()
             _reject_unknown(body, frozenset({"schema_ref"}))
             self._write(HTTPStatus.OK, app.pull(_required_text(body.get("schema_ref"), "schema_ref")))
             return
-        if self.command == "POST" and parsed.path == "/v1/rebind":
+        if self.command == _POST and parsed.path == "/v1/rebind":
             _reject_unknown(self._body(), frozenset())
             self._write(HTTPStatus.OK, app.rebind())
             return
-        if self.command == "POST" and parsed.path == "/v1/read":
+        if self.command == _POST and parsed.path == "/v1/read":
             body = self._body()
             _reject_unknown(body, _READ_FIELDS)
             outcome = body.get("outcome")
@@ -1261,7 +1263,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             )
             return
         prefix = "/v1/experiences/"
-        if self.command == "PUT" and parsed.path.startswith(prefix):
+        if self.command == _PUT and parsed.path.startswith(prefix):
             body = self._body()
             _reject_unknown(body, _WRITE_FIELDS)
             experience = Experience.from_dict(body.get("experience"))
@@ -1284,9 +1286,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         """Serve the label and exclusion routes; ``False`` when ``path`` is none of them."""
 
         labels, exclusions = "/v1/labels", "/v1/exclusions"
-        if self.command == "GET" and path == labels:
+        if self.command == _GET and path == labels:
             self._write(HTTPStatus.OK, app.labels(_query_text(query, "schema_ref")))
-        elif self.command == "POST" and path == labels:
+        elif self.command == _POST and path == labels:
             body = self._body()
             _reject_unknown(body, frozenset({"schema_ref", "name"}))
             schema_ref, name = body.get("schema_ref"), body.get("name", "")
@@ -1299,15 +1301,15 @@ class RequestHandler(BaseHTTPRequestHandler):
                     name=name.strip(),
                 ),
             )
-        elif self.command == "DELETE" and path.startswith(f"{labels}/"):
+        elif self.command == _DELETE and path.startswith(f"{labels}/"):
             self._write(HTTPStatus.OK, app.delete_label(path.removeprefix(f"{labels}/")))
-        elif self.command == "POST" and path == "/v1/restore":
+        elif self.command == _POST and path == "/v1/restore":
             body = self._body()
             _reject_unknown(body, frozenset({"label_id"}))
             self._write(HTTPStatus.OK, app.restore(_required_text(body.get("label_id"), "label_id")))
-        elif self.command == "GET" and path == exclusions:
+        elif self.command == _GET and path == exclusions:
             self._write(HTTPStatus.OK, app.exclusions(_query_text(query, "schema_ref")))
-        elif self.command == "POST" and path == exclusions:
+        elif self.command == _POST and path == exclusions:
             body = self._body()
             _reject_unknown(body, frozenset({"experience_id", "reason"}))
             self._write(
@@ -1317,7 +1319,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     _required_text(body.get("reason"), "reason"),
                 ),
             )
-        elif self.command == "DELETE" and path.startswith(f"{exclusions}/"):
+        elif self.command == _DELETE and path.startswith(f"{exclusions}/"):
             self._write(HTTPStatus.OK, app.include(path.removeprefix(f"{exclusions}/")))
         else:
             return False
@@ -1337,7 +1339,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             route = route_of(urlsplit(self.path).path)
             status, sent = self._answered
             seconds = time.monotonic() - started
-            received = int(self.headers.get("Content-Length") or 0) if self.command in ("POST", "PUT") else 0
+            received = int(self.headers.get("Content-Length") or 0) if self.command in (_POST, _PUT) else 0
             metrics.observe_request(
                 method=self.command, route=route, status=status, seconds=seconds, bytes_in=received, bytes_out=sent
             )
