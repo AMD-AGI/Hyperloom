@@ -14,8 +14,9 @@
 # Then run `aiperf profile` (AgentX weka-trace scenario) as the client, and map
 # its export into the InferenceX result schema. The client owns profiling: InferenceX's
 # benchmark_serving.py self-triggers /start_profile, and aiperf does not, so
-# when PROFILE=1 this script self-brackets a /start_profile..stop_profile window
-# after AIPerf reports the measured phase through its progress API.
+# when PROFILE=1 this script calls /start_profile after AIPerf reports the
+# measured phase through its progress API, and ends the capture as described in
+# the PROFILE branch below.
 #
 # Inputs (from Magpie env): MODEL, TP, PORT, MAX_MODEL_LEN, CONC, RESULT_DIR,
 #   RESULT_FILENAME, PROFILE, EXTRA_VLLM_ARGS, FRAMEWORK, GPU_TYPE/RUNNER_TYPE,
@@ -574,11 +575,14 @@ AIPERF_RC=0
 if [ "${PROFILE:-0}" = "1" ]; then
   # Single-node trace capture: aiperf (a generic client) never triggers vLLM's
   # /start_profile the way InferenceX's benchmark_serving.py does, so this script
-  # self-brackets a bounded profiling window inside aiperf's measured phase.
-  # The profiler is already ENABLED on the server (builtin server phase adds the
-  # framework's --profiler-config/env when PROFILE=1); /start_profile begins
-  # recording and /stop_profile flushes the trace to torch_profiler_dir for
-  # TraceLens. Only fires under PROFILE=1, so measurement rounds pay no cost.
+  # starts the capture inside aiperf's measured phase. The profiler is already
+  # ENABLED on the server (builtin server phase adds the framework's
+  # --profiler-config/env when PROFILE=1); /start_profile begins recording. A
+  # capture with a server-side step bound (SGLang num_steps, vLLM max_iterations)
+  # stops and writes its traces on its own; any other capture is closed after
+  # AGENTX_PROFILE_WINDOW_S by /stop_profile, which flushes the trace to
+  # torch_profiler_dir for TraceLens. Only fires under PROFILE=1, so measurement
+  # rounds pay no cost.
   PWIN="${AGENTX_PROFILE_WINDOW_S:-20}"
   _require_uint AGENTX_PROFILE_WINDOW_S "$PWIN"
   : "${AGENTX_CAPTURE_ID:?AGENTX_CAPTURE_ID required for AgentX profiling}"
@@ -732,7 +736,36 @@ if [ "${PROFILE:-0}" = "1" ]; then
     log "WARN trace flush did not settle within ${_budget}s (${_cnt} file(s), $(( ${_now##* } / 1048576 )) MiB, expected ${_want} ranks). The files are very likely TRUNCATED and will fail gzip -t; raise AGENTX_TRACE_FLUSH_TIMEOUT_S. The benchmark measurement remains available, but trace capture will be marked failed."
     return 4
   }
-  log "PROFILE=1: waiting for AIPerf's measured phase before opening a ${PWIN}s profile window"
+  # The server stops a step-bounded capture itself and answers a second stop with
+  # an error (SGLang) or ignores it (vLLM), so the client never posts one: the
+  # capture ends when every rank trace is complete, or fails if the measured phase
+  # ends first.
+  _wait_for_bounded_capture() {
+    local _rc=0
+    CAPTURE_RESULT=""
+    if [ -z "$(_trace_dirs)" ]; then
+      log "no profiler output directory is configured; nothing to wait for"
+      return 2
+    fi
+    log "server-bounded capture: waiting for all ${TP:-0} rank traces or the end of the measured phase"
+    CAPTURE_RESULT="$(
+      _trace_command wait-bounded-capture --snapshot "$TRACE_SNAPSHOT" --tp "${TP:-0}" \
+        --api-url "http://127.0.0.1:${AIPERF_PROGRESS_PORT}" --phase profiling --pid "$APID"
+    )" || _rc=$?
+    case "$_rc" in
+      0) log "bounded capture complete: ${CAPTURE_RESULT}"; return 0 ;;
+      3) log "WARN the measured phase ended before every rank trace was complete: ${CAPTURE_RESULT}" ;;
+      *)
+        CAPTURE_RESULT='{"stop_reason":"capture_gate_failed"}'
+        log "WARN bounded capture gate failed (rc=${_rc})"
+        return 1
+        ;;
+    esac
+    _now=$(_trace_stat) || return 1
+    [ "${_now%% *}" -eq 0 ] && return 3
+    return 5
+  }
+  log "PROFILE=1: waiting for AIPerf's measured phase before starting the profile capture"
   run_aiperf & APID=$!
   PHASE_START_NS=""
   if [ -n "$AIPERF_PROGRESS_PORT" ] && PHASE_START_NS="$(
@@ -750,43 +783,41 @@ if [ "${PROFILE:-0}" = "1" ]; then
     # until the cgroup OOM-killer takes it out mid-run. Forward the body when
     # there is one; vLLM ignores it (its bounds ride on --profiler-config.*).
     _pbody="${PROFILE_EXTRA_BODY:-}"
-    AUTO_BOUNDED=0
     if [ -n "$_pbody" ] && [ "$_pbody" != "{}" ]; then
       _pstart=(-H "Content-Type: application/json" -d "$_pbody")
       log "start_profile: forwarding capture bounds ${_pbody}"
-      if python3 "$PHASE_GATE" is-auto-bounded --framework "${_ka_target:-${FRAMEWORK:-}}" --body "$_pbody"; then
-        AUTO_BOUNDED=1
-      fi
     else
       _pstart=()
+    fi
+    AUTO_BOUNDED=0
+    if python3 "$PHASE_GATE" is-auto-bounded --framework "${_ka_target:-${FRAMEWORK:-}}" \
+         --body "$_pbody" --vllm-args="${EXTRA_VLLM_ARGS:-}"; then
+      AUTO_BOUNDED=1
     fi
     TRACE_SNAPSHOT="$(_trace_command snapshot-traces)" || TRACE_SNAPSHOT=""
     if curl -sf -X POST "${_pstart[@]+"${_pstart[@]}"}" \
          "http://localhost:${PORT}/start_profile" >/dev/null 2>&1; then
       log "start_profile OK"
-      if CAPTURE_RESULT="$(
-        python3 "$PHASE_GATE" wait-capture-stop \
-          --api-url "http://127.0.0.1:${AIPERF_PROGRESS_PORT}" \
-          --phase profiling \
-          --pid "$APID" \
-          --max-window-seconds "$PWIN"
-      )"; then
-        log "profile capture stop decision: ${CAPTURE_RESULT}"
-      else
-        CAPTURE_RESULT='{"stop_reason":"capture_gate_failed"}'
-        log "WARN capture stop gate failed; stopping the profiler immediately"
-      fi
-      STOP_OK=0
+      STOP_OK=1
       FLUSH_RC=0
-      # Auto-stop validation and any subsequent flush share one completion budget.
-      TRACE_FLUSH_START_NS=$(date +%s%N)
-      TRACE_FLUSH_DEADLINE_NS=$(( TRACE_FLUSH_START_NS + TRACE_FLUSH_BUDGET * 1000000000 ))
-      # Native num_steps may already have stopped SGLang. Never POST a redundant
-      # stop unless current complete traces cannot prove that auto-stop finished.
-      if [ "$AUTO_BOUNDED" -eq 1 ] && _trace_complete; then
-        STOP_OK=1
-        log "profile auto-completed: current GPU traces cover all expected ranks; skipping stop_profile"
+      if [ "$AUTO_BOUNDED" -eq 1 ]; then
+        _wait_for_bounded_capture || FLUSH_RC=$?
       else
+        if CAPTURE_RESULT="$(
+          python3 "$PHASE_GATE" wait-capture-stop \
+            --api-url "http://127.0.0.1:${AIPERF_PROGRESS_PORT}" \
+            --phase profiling \
+            --pid "$APID" \
+            --max-window-seconds "$PWIN"
+        )"; then
+          log "profile capture stop decision: ${CAPTURE_RESULT}"
+        else
+          CAPTURE_RESULT='{"stop_reason":"capture_gate_failed"}'
+          log "WARN capture stop gate failed; stopping the profiler immediately"
+        fi
+        STOP_OK=0
+        TRACE_FLUSH_START_NS=$(date +%s%N)
+        TRACE_FLUSH_DEADLINE_NS=$(( TRACE_FLUSH_START_NS + TRACE_FLUSH_BUDGET * 1000000000 ))
         if curl -sf -X POST "http://localhost:${PORT}/stop_profile" >/dev/null 2>&1; then
           STOP_OK=1
           log "stop_profile OK"
@@ -804,6 +835,7 @@ if [ "${PROFILE:-0}" = "1" ]; then
           2) FLUSH_REASON="profiler_output_unconfigured" ;;
           3) FLUSH_REASON="trace_files_missing" ;;
           4) FLUSH_REASON="trace_flush_timeout" ;;
+          5) FLUSH_REASON="bounded_capture_incomplete" ;;
           *) FLUSH_REASON="trace_flush_failed" ;;
         esac
         _write_profile_capture_status "failed" "$FLUSH_REASON" "$PHASE_START_NS" "$CAPTURE_RESULT"
