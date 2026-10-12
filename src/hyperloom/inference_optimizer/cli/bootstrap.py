@@ -207,7 +207,9 @@ def per_gpu_power_budget_resume_conflict(state: Any, requested: dict[str, float]
     )
 
 
-def power_budget_unmeasurable_error(*, total_w: float | None, per_gpu_w: dict[str, float] | None, nodes: int) -> str:
+def power_budget_unmeasurable_error(
+    *, total_w: float | None, per_gpu_w: dict[str, float] | None, nodes: int, framework: str | None
+) -> str:
     """Why a power budget could never be measured on this session, or ``""``; checked at launch and on resume.
 
     Every round would be ``power_unmeasured``, so the run would spend a whole baseline only to stop as if it were over
@@ -219,6 +221,13 @@ def power_budget_unmeasurable_error(*, total_w: float | None, per_gpu_w: dict[st
         return (
             "--max-power-w / --max-per-gpu-power-w cannot be measured on a multi-node session: the GPU power sampler "
             "reads only this host's cards"
+        )
+    from .. import framework_registry
+
+    if framework_registry.is_scriptable(framework):
+        return (
+            f"--max-power-w / --max-per-gpu-power-w cannot be measured on the scriptable framework {framework!r}: the "
+            "GPU power sampler follows a server's measured phase, and a scriptable round runs no server"
         )
     from hyperloom.orchestrator.actions.executors._gpu_power import gpu_power_sampling_unavailable
 

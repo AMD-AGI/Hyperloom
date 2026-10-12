@@ -260,10 +260,10 @@ class TestUnmeasurableBudget:
     """A budget that no round could measure is refused up front instead of costing a baseline."""
 
     @staticmethod
-    def _error(*, total_w=2800.0, per_gpu_w=None, nodes=1):
+    def _error(*, total_w=2800.0, per_gpu_w=None, nodes=1, framework="vllm"):
         from hyperloom.inference_optimizer.cli.bootstrap import power_budget_unmeasurable_error
 
-        return power_budget_unmeasurable_error(total_w=total_w, per_gpu_w=per_gpu_w, nodes=nodes)
+        return power_budget_unmeasurable_error(total_w=total_w, per_gpu_w=per_gpu_w, nodes=nodes, framework=framework)
 
     @pytest.fixture
     def sampler_available(self, monkeypatch):
@@ -279,6 +279,16 @@ class TestUnmeasurableBudget:
     @pytest.mark.parametrize(("total_w", "per_gpu_w"), [(2800.0, None), (None, {"4": 700.0})])
     def test_a_multi_node_session_refuses_either_budget(self, sampler_available, total_w, per_gpu_w):
         assert "multi-node" in self._error(total_w=total_w, per_gpu_w=per_gpu_w, nodes=2)
+
+    @pytest.mark.parametrize("framework", ["xdit", "custom"])
+    @pytest.mark.parametrize(("total_w", "per_gpu_w"), [(2800.0, None), (None, {"4": 700.0})])
+    def test_a_scriptable_framework_refuses_either_budget(self, sampler_available, framework, total_w, per_gpu_w):
+        """A scriptable round runs no server, so the sampler never starts and every round would be unmeasured."""
+        error = self._error(total_w=total_w, per_gpu_w=per_gpu_w, framework=framework)
+        assert "scriptable framework" in error and framework in error
+
+    def test_a_scriptable_framework_without_a_budget_passes(self, sampler_available):
+        assert self._error(total_w=None, per_gpu_w=None, framework="xdit") == ""
 
     def test_sampling_turned_off_refuses(self, sampler_available, monkeypatch):
         monkeypatch.setenv("HYPERLOOM_GPU_POWER_SAMPLING", "0")

@@ -262,7 +262,7 @@ one there refuses.
 
 ### Power budget (constraint on KEEP)
 
-Two budgets bound a round's GPU power, for every framework:
+Two budgets bound a round's GPU power, for the serving frameworks:
 
 - `--max-power-w N` caps the serving GPUs' total: the sum of each serving
   card's mean power over the measured phase (for example 2800 W for four cards
@@ -275,7 +275,9 @@ The session refuses to start (exit 2) if a listed GPU is not one it can use
 (its visible-device mask, or every card `amd-smi` reports when there is no
 mask), or if the per-GPU limits add up to more than `--max-power-w`. Either
 budget is refused, at launch and on resume, when no round could be measured: on
-a multi-node session (the sampler reads only its own host's cards), with
+a multi-node session (the sampler reads only its own host's cards), on a
+scriptable framework (`xdit`, `custom`: the sampler follows a server's measured
+phase, and a scriptable round runs no server), with
 `HYPERLOOM_GPU_POWER_SAMPLING=0`, or without `amd-smi` on `PATH`. Resuming with
 different values is refused.
 

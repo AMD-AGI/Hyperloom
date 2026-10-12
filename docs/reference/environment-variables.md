@@ -99,7 +99,8 @@ when `--gpu-type` is omitted.
   `--max-latency-ms` is a constraint on KEEP rather than a target, and applies
   to scriptable frameworks (`xdit`, `custom`) only; the CLI refuses it for a
   serving framework, including on resume. `--max-power-w` is the same kind of
-  constraint on the serving GPUs' total mean power, for every framework, and
+  constraint on the serving GPUs' total mean power, for the serving frameworks
+  (refused on a scriptable one, which runs no server to sample), and
   `--max-per-gpu-power-w GPU_ID W` (repeatable) adds a limit for one card; the
   per-GPU limits must add up to no more than the total. That power is sampled
   by Hyperloom over the measured phase into each round's `gpu_power.json`;

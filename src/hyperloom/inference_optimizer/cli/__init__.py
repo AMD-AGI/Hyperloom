@@ -1965,6 +1965,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 total_w=getattr(state, "power_budget_w", 0.0),
                 per_gpu_w=getattr(state, "power_budget_per_gpu_w", None),
                 nodes=max(int(getattr(args, "nodes", 1) or 1), int(getattr(state, "nodes", 1) or 1)),
+                framework=state.framework,
             )
             or _custom_specialist_conflict(args, state)
         )
@@ -2400,6 +2401,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             total_w=getattr(args, "max_power_w", None),
             per_gpu_w=getattr(args, "max_per_gpu_power_w", None),
             nodes=nodes_resolved,
+            framework=getattr(args, "framework", None) or os.environ.get("FRAMEWORK", ""),
         ) or per_gpu_power_budget_error(
             getattr(args, "max_per_gpu_power_w", None),
             total_w=getattr(args, "max_power_w", None),
