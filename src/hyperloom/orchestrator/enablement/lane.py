@@ -518,15 +518,7 @@ class EnablementLane(CoordinatorCollaborator):
         # cap reads off the durable ledger. Counting it in state again here
         # would double-charge it.
         state.enablement.mark_setup_round(spec_tid, status or "unreported", accepted=status == "kept")
-        # Set on every round so neither outlives the round it describes.
-        state.enablement.last_grounding_drop_reason = [
-            str(d) for d in (res.get("patches_dropped_by_grounding") or [])[:8]
-        ]
-        state.enablement.last_apply_feedback = [
-            fb for fb in (res.get("retry_feedback") or [])[:5] if isinstance(fb, dict)
-        ]
-        state.enablement.last_setup_refusals = [str(c) for c in (res.get("setup_commands_refused") or [])[:8]]
-        state.enablement.patches_span_multiple_roots = bool(res.get("patches_span_multiple_roots"))
+        state.enablement.record_round_defects(res)
         # Phase-synthesised rounds carry no framework_root; keep the last real one.
         res_fw_root = str(res.get("framework_root") or "").strip()
         if res_fw_root:
@@ -706,9 +698,10 @@ def _rearm_on_advanced(state: Any, res: dict[str, Any]) -> None:
         state.enablement.record_accepted_config(cfg, source="advanced_merge")
     new_log = str(res.get("enablement_launch_log") or "").strip()
     if new_log:
-        state.enablement.launch_log = new_log
         # The wall this round advanced to: the next round's before half.
-        state.enablement.launch_observation_path = str(res.get("enablement_observation_path") or "")
+        state.enablement.record_launch_observation(
+            log=new_log, observation_path=str(res.get("enablement_observation_path") or "")
+        )
     _reset_baseline_failure_backstop(state)
 
 

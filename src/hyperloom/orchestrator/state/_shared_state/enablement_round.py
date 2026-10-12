@@ -205,6 +205,28 @@ class EnablementRound:
         self.accepted_config = cfg
         self.accepted_config_source = source
 
+    def record_round_defects(self, result: Mapping[str, Any]) -> None:
+        """Record the structural defects of the round just settled, for the next mandate.
+
+        Written from every round, including a clean one, so no defect outlives
+        the round that produced it.
+        """
+        self.last_grounding_drop_reason = [str(d) for d in (result.get("patches_dropped_by_grounding") or [])[:8]]
+        self.last_apply_feedback = [fb for fb in (result.get("retry_feedback") or [])[:5] if isinstance(fb, dict)]
+        self.last_setup_refusals = [str(c) for c in (result.get("setup_commands_refused") or [])[:8]]
+        self.patches_span_multiple_roots = bool(result.get("patches_span_multiple_roots"))
+
+    def record_launch_observation(self, *, log: str, observation_path: str) -> None:
+        """Record the boot the next enablement round authors against.
+
+        The text and the observation it was captured from are written together
+        because integrate_patch grades a round by comparing this observation
+        with the one its own boot produces; a path left over from an earlier
+        boot would compare the new round against someone else's wall.
+        """
+        self.launch_log = log
+        self.launch_observation_path = observation_path
+
     def record_patch_roots(self, roots: Mapping[str, str]) -> None:
         """Bind each patch to the tree it applied to, first writer wins.
 
