@@ -19,6 +19,7 @@ from types import SimpleNamespace
 
 from kernelforge.loop import knowledge_integration
 from kernelforge.loop import task_preparer
+from kernelforge.loop import task_preflight
 
 FORGE_IDENTITY = "KernelForge <kernel-forge@localhost>"
 
@@ -82,7 +83,7 @@ def _conforming_preparation(monkeypatch, driver: Path) -> None:
         return "prepared"
 
     async def fake_preflight(*_args, **_kwargs):
-        return task_preparer.PreflightResult(
+        return task_preflight.PreflightResult(
             ok=True,
             correctness_ok=True,
             bench_ok=True,
@@ -107,7 +108,7 @@ def _prepare(tmp_path: Path, workspace: Path, kernel: Path, driver: Path):
             program_md="# Task",
             target_functions=[],
             source_files=[str(kernel)],
-            preflight=task_preparer.PreflightResult(
+            preflight=task_preflight.PreflightResult(
                 ok=False,
                 correctness_ok=False,
                 bench_ok=False,
