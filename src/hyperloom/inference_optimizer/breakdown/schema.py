@@ -150,8 +150,8 @@ class V6GradedAxes(TypedDict, total=False):
     never graded. ``total_throughput`` is reported for continuity and enters no verdict.
 
     ``duration_seconds`` and ``request_error_rate`` are the comparability inputs. A pair is graded only when both
-    replayed a window of the same length and the candidate dropped no more requests than its anchor, so a verdict
-    published without them cannot be re-derived from this record.
+    replayed a window of the same length and the candidate's error rate exceeds its anchor's by no more than
+    ``ERROR_RATE_SLACK_PCT``, so a verdict published without them cannot be re-derived from this record.
 
     Every axis is present on every measurement, ``None`` where nothing measured
     it: absent would be indistinguishable from an axis the framework failed to

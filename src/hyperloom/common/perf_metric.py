@@ -44,9 +44,13 @@ GRADED_ERROR_RATE = "request_error_rate"
 # same work. Sized to catch a truncated round, not the few percent a full round drifts by.
 DURATION_DRIFT_PCT = 5.0
 
-# Extra failed requests a candidate may report over its anchor, in the rate's percentage points. Dropping a fraction
-# f of the requests moves any percentile by at most f in rank, so the slack cannot buy a median gain anywhere near
-# AGENTX_KEEP_P50_THRESHOLD_PCT; without it, one transient failure in a full round refuses a real gain.
+# Extra failed requests a candidate may report over its anchor, in the rate's percentage points. aiperf counts a reply
+# that carries no content as failed, and a corpus turn answered with a single token comes back with content under one
+# configuration and without it under another, so with no slack that one turn refuses a real gain. Being a rate, the
+# slack admits more failures in a longer or more concurrent round and none in a round of fewer than 200 requests (an
+# MLPerf smoke run issues 150 samples). Percentiles are read over the same round's successful requests, so dropping a
+# fraction f of them moves any percentile by at most f in rank, and the slack cannot buy a median gain anywhere near
+# AGENTX_KEEP_P50_THRESHOLD_PCT.
 ERROR_RATE_SLACK_PCT = 0.5
 
 # The axes ``graded_axes_of`` can carry, for a consumer that must publish all of them including the ones a
