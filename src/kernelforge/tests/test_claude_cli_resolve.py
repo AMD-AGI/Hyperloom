@@ -6,6 +6,7 @@ the binary is absent, plus offline preflight validation of an explicitly configu
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 import subprocess
@@ -323,6 +324,39 @@ def test_claude_probe_rejects_unsupported_model(tmp_path, monkeypatch):
     )
 
     with pytest.raises(ClaudeUnavailableError, match="model not available"):
+        backend.probe(cwd=str(tmp_path))
+
+
+def _probe_backend_answering(monkeypatch, stdout):
+    backend = object.__new__(ClaudeBackend)
+    backend.runtime = AgentRuntimeConfig(provider="claude", model="glm-5-3", executable="/usr/bin/claude")
+    monkeypatch.setattr(backend, "preflight", lambda: None)
+    monkeypatch.setattr(
+        "kernelforge.agent_backends.claude.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=stdout, stderr=""),
+    )
+    return backend
+
+
+@pytest.mark.parametrize("reply", ["OK.", "ok", "Standing by — what would you like me to work on?"])
+def test_claude_probe_accepts_any_answer_the_model_gives(tmp_path, monkeypatch, reply):
+    # The probe proves the URL, key and model answer; the wording is the model's. glm in a real
+    # campaign workspace answered "OK." and "Standing by ..." and each answer cost a lane.
+    backend = _probe_backend_answering(monkeypatch, json.dumps({"result": reply, "is_error": False}))
+    assert backend.probe(cwd=str(tmp_path)).text == reply
+
+
+def test_claude_probe_rejects_an_error_result(tmp_path, monkeypatch):
+    backend = _probe_backend_answering(
+        monkeypatch, json.dumps({"result": "API Error: 404 model glm-5-3 not found", "is_error": True})
+    )
+    with pytest.raises(ClaudeUnavailableError, match="404 model glm-5-3 not found"):
+        backend.probe(cwd=str(tmp_path))
+
+
+def test_claude_probe_rejects_an_empty_answer(tmp_path, monkeypatch):
+    backend = _probe_backend_answering(monkeypatch, json.dumps({"result": "  ", "is_error": False}))
+    with pytest.raises(ClaudeUnavailableError, match="empty"):
         backend.probe(cwd=str(tmp_path))
 
 
