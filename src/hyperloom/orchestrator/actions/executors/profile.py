@@ -252,7 +252,6 @@ def _probe_check_rows(certificate: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
-
 def _build_trace_validate(
     health: dict[str, Any],
     *,

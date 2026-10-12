@@ -333,7 +333,6 @@ def _evaluate_low_compute_gate(
     )
 
 
-
 _DEFAULT_CHUNK_QUALITY_MIN_BUSY_RATIO = 0.05  # 5%
 # Alternate must beat the requested mode by this margin to avoid thrashing.
 _CHUNK_QUALITY_ALTERNATE_MARGIN = 0.10  # 10 ppt
@@ -4385,18 +4384,20 @@ def _collect_split_chunks(
     }
 
     if not (mixed_chunks or decode_chunks or prefill_chunks or generic_chunks):
-        health_warnings.append({
-            "code": "trace_split_no_steady_state",
-            "severity": "blocking",
-            "trace_input": str(analysis_trace_path),
-            "split_dir": str(split_dir),
-            "chunks_by_mode": split_meta["chunks_by_mode"],
-            "message": (
-                "TraceLens splitter produced no steady-state chunks; refusing "
-                "to analyze the raw trace because that can report misleading "
-                "high idle and suppress valid kernel opportunities."
-            ),
-        })
+        health_warnings.append(
+            {
+                "code": "trace_split_no_steady_state",
+                "severity": "blocking",
+                "trace_input": str(analysis_trace_path),
+                "split_dir": str(split_dir),
+                "chunks_by_mode": split_meta["chunks_by_mode"],
+                "message": (
+                    "TraceLens splitter produced no steady-state chunks; refusing "
+                    "to analyze the raw trace because that can report misleading "
+                    "high idle and suppress valid kernel opportunities."
+                ),
+            }
+        )
         raise RuntimeError(
             "trace_split_no_steady_state: TraceLens splitter "
             "produced no steady-state chunks; refusing to run "
