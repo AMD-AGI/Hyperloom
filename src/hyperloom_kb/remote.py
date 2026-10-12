@@ -55,6 +55,9 @@ _PERMANENT_HTTP_STATUSES = frozenset(
 _SYNC_COUNTS = ("created", "unchanged", "skipped", "held_back")
 _DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 _SPOOLED_FILES = "files"
+_PRIVATE_DIRECTORY, _PRIVATE_FILE = 0o700, 0o600
+_GET, _POST, _PUT, _DELETE = "GET", "POST", "PUT", "DELETE"
+_JSON = "application/json"
 _T = TypeVar("_T")
 
 #: Where each file a record names is read from on this host, by its sha256.
@@ -250,9 +253,9 @@ class RemoteClient:
         path: str,
         body: dict[str, JsonValue] | None = None,
     ) -> dict[str, JsonValue]:
-        headers = {"Accept": "application/json"}
+        headers = {"Accept": _JSON}
         if body is not None:
-            headers["Content-Type"] = "application/json"
+            headers["Content-Type"] = _JSON
         payload = self._exchange(
             method,
             path,
@@ -269,7 +272,7 @@ class RemoteClient:
 
         if not refs:
             return ()
-        payload = self._request("POST", "/v1/files/missing", {"files": [ref.to_dict() for ref in refs]})
+        payload = self._request(_POST, "/v1/files/missing", {"files": [ref.to_dict() for ref in refs]})
         missing = payload.get("missing")
         if not isinstance(missing, list):
             raise RemoteClientError("Experience file check response is invalid")
@@ -280,12 +283,12 @@ class RemoteClient:
 
         with path.open("rb") as stream:
             payload = self._exchange(
-                "PUT",
+                _PUT,
                 f"/v1/files/{ref.sha256}",
                 lambda response: json.loads(response.read()),
                 data=stream,
                 headers={
-                    "Accept": "application/json",
+                    "Accept": _JSON,
                     "Content-Type": "application/octet-stream",
                     "Content-Length": str(ref.bytes),
                 },
@@ -301,7 +304,7 @@ class RemoteClient:
             size = int(response.headers["Content-Length"])
             receive(size, cast(BinaryIO, _WholeBody(response, size)))
 
-        self._exchange("GET", f"/v1/files/{sha256}", answer)
+        self._exchange(_GET, f"/v1/files/{sha256}", answer)
 
     def send_files(self, experience: Experience, files: LocalFiles) -> None:
         """Send each file ``experience`` names that the service does not hold, from where ``files`` says it is."""
@@ -317,7 +320,7 @@ class RemoteClient:
             self.put_file(refs[sha256], path)
 
     def health(self) -> dict[str, JsonValue]:
-        return self._request("GET", "/health")
+        return self._request(_GET, "/health")
 
     def read(
         self,
@@ -339,7 +342,7 @@ class RemoteClient:
         if render_budget_chars is not None:
             body["render_budget_chars"] = render_budget_chars
         try:
-            payload = self._request("POST", "/v1/read", body)
+            payload = self._request(_POST, "/v1/read", body)
             refs = payload.get("rendered_refs")
             experiences = payload.get("experiences")
             warnings = payload.get("warnings")
@@ -382,7 +385,7 @@ class RemoteClient:
         """
 
         self.send_files(experience, files or {})
-        payload = self._request("PUT", f"/v1/experiences/{experience.id}", self._write_body(experience, declaration))
+        payload = self._request(_PUT, f"/v1/experiences/{experience.id}", self._write_body(experience, declaration))
         return self._write_result(payload, experience.id)
 
     def publish(
@@ -411,7 +414,7 @@ class RemoteClient:
 
     def _spool(self, experience: Experience, body: dict[str, JsonValue], files: LocalFiles) -> None:
         root = self.config.spool_root
-        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        root.mkdir(parents=True, exist_ok=True, mode=_PRIVATE_DIRECTORY)
         # The spool keeps its own copy of each file, so a flush does not depend on the producer keeping them.
         for ref in experience.files():
             self._spool_file(ref, files.get(ref.sha256))
@@ -428,7 +431,7 @@ class RemoteClient:
             stream.write(encoded)
             stream.flush()
             os.fsync(stream.fileno())
-        os.chmod(temporary, 0o600)
+        os.chmod(temporary, _PRIVATE_FILE)
         os.replace(temporary, target)
 
     def _spool_file(self, ref: FileRef, source: Path | None) -> None:
@@ -438,14 +441,14 @@ class RemoteClient:
             return
         if source is None:
             raise RemoteClientError(f"cannot spool file {ref.sha256}: this client has no copy of it", retryable=False)
-        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        directory.mkdir(parents=True, exist_ok=True, mode=_PRIVATE_DIRECTORY)
         with tempfile.NamedTemporaryFile(mode="wb", prefix=f".{ref.sha256}.", dir=directory, delete=False) as stream:
             temporary = Path(stream.name)
             with source.open("rb") as original:
                 shutil.copyfileobj(original, stream)
             stream.flush()
             os.fsync(stream.fileno())
-        os.chmod(temporary, 0o600)
+        os.chmod(temporary, _PRIVATE_FILE)
         os.replace(temporary, target)
 
     def _spooled_files(self) -> dict[str, Path]:
@@ -460,7 +463,7 @@ class RemoteClient:
 
     def _reject_spooled(self, path: Path, reason: str) -> None:
         rejected = self.config.spool_root / "rejected"
-        rejected.mkdir(parents=True, exist_ok=True, mode=0o700)
+        rejected.mkdir(parents=True, exist_ok=True, mode=_PRIVATE_DIRECTORY)
         os.replace(path, rejected / path.name)
         log.warning("Experience service rejected spooled write %s: %s", path.name, reason)
 
@@ -532,7 +535,7 @@ class RemoteClient:
     ) -> ListPage:
         """Summaries of the Experiences written to this service, of those its reads see unless ``include_excluded``."""
 
-        payload = self._request("GET", f"/v1/list?{self._page_query(after, limit, schema_ref, include_excluded)}")
+        payload = self._request(_GET, f"/v1/list?{self._page_query(after, limit, schema_ref, include_excluded)}")
         items = payload.get("items")
         if not isinstance(items, list):
             raise RemoteClientError("Experience list response is invalid")
@@ -548,7 +551,7 @@ class RemoteClient:
         """One page of complete records, ``{"sequence", "experience"}``, in the service's write order; the records
         are chosen as ``list_experiences`` chooses them."""
 
-        payload = self._request("GET", f"/v1/export?{self._page_query(after, limit, schema_ref, include_excluded)}")
+        payload = self._request(_GET, f"/v1/export?{self._page_query(after, limit, schema_ref, include_excluded)}")
         items = payload.get("items")
         if not isinstance(items, list):
             raise RemoteClientError("Experience export response is invalid")
@@ -580,32 +583,32 @@ class RemoteClient:
     def labels(self, *, schema_ref: str | None = None) -> dict[str, JsonValue]:
         """A schema's labels, newest first, its ``current_label_id``, and whether its state is ``modified`` since."""
 
-        return self._request("GET", f"/v1/labels{self._schema_query(schema_ref)}")
+        return self._request(_GET, f"/v1/labels{self._schema_query(schema_ref)}")
 
     def create_label(self, *, schema_ref: str | None = None, name: str = "") -> dict[str, JsonValue]:
         body: dict[str, JsonValue] = {"name": name}
         if schema_ref is not None:
             body["schema_ref"] = schema_ref
-        return self._request("POST", "/v1/labels", body)
+        return self._request(_POST, "/v1/labels", body)
 
     def delete_label(self, label_id: str) -> dict[str, JsonValue]:
-        return self._request("DELETE", f"/v1/labels/{urllib.parse.quote(label_id, safe='')}")
+        return self._request(_DELETE, f"/v1/labels/{urllib.parse.quote(label_id, safe='')}")
 
     def restore(self, label_id: str) -> dict[str, JsonValue]:
         """Make a label's state current; ``saved`` names the label an unlabelled current state was saved under."""
 
-        return self._request("POST", "/v1/restore", {"label_id": label_id})
+        return self._request(_POST, "/v1/restore", {"label_id": label_id})
 
     def exclude(self, experience_id: str, *, reason: str) -> dict[str, JsonValue]:
-        return self._request("POST", "/v1/exclusions", {"experience_id": experience_id, "reason": reason})
+        return self._request(_POST, "/v1/exclusions", {"experience_id": experience_id, "reason": reason})
 
     def include(self, experience_id: str) -> dict[str, JsonValue]:
-        return self._request("DELETE", f"/v1/exclusions/{urllib.parse.quote(experience_id, safe='')}")
+        return self._request(_DELETE, f"/v1/exclusions/{urllib.parse.quote(experience_id, safe='')}")
 
     def exclusions(self, *, schema_ref: str | None = None) -> dict[str, JsonValue]:
         """A schema's current exclusions and the history of every exclude and include."""
 
-        return self._request("GET", f"/v1/exclusions{self._schema_query(schema_ref)}")
+        return self._request(_GET, f"/v1/exclusions{self._schema_query(schema_ref)}")
 
     def push(self) -> dict[str, JsonValue]:
         """Ask this service to send every Experience written here and not yet pushed to its global KB."""
@@ -624,7 +627,7 @@ class RemoteClient:
         """Ask this service to forget the global KB it synced with, so its next push and pull start over with
         whichever KB its global URL reaches; ``forgotten_kb_id`` names the one it forgot."""
 
-        return self._request("POST", "/v1/rebind", {})
+        return self._request(_POST, "/v1/rebind", {})
 
     def _sync(self, path: str, body: dict[str, JsonValue]) -> dict[str, JsonValue]:
         # Each request handles one bounded batch, so no single request outlives the client timeout.
@@ -632,7 +635,7 @@ class RemoteClient:
         rejected: list[JsonValue] = []
         saved: JsonValue = None
         while True:
-            report = self._request("POST", path, body)
+            report = self._request(_POST, path, body)
             for key in _SYNC_COUNTS:
                 totals[key] += _int(report.get(key, 0), key)
             batch_rejected = report.get("rejected")
