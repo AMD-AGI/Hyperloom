@@ -55,7 +55,23 @@ from hyperloom.orchestrator.lever import LEVER_UPSTREAM_PR
 from hyperloom.common.failure_signature import CapabilityGap, FailureSignature
 from hyperloom.common.github_urls import repo_slug
 from hyperloom.common.gain_math import gain_pct
-from hyperloom.common.perf_metric import VERDICT_KEEP
+from hyperloom.common.perf_metric import (
+    GRADED_INTVTY,
+    GRADED_OUTPUT,
+    VERDICT_KEEP,
+    holds_within_band,
+    incomparability_reason,
+    latency_veto_reason,
+    perf_snapshot_from_mapping,
+    resolve_grading_anchor_perf,
+)
+from hyperloom.inference_optimizer.grading import resolved_grading
+from hyperloom.orchestrator.measurement.runtime_findings import (
+    CORRECTNESS_FIX_MAX_DROP_PCT,
+    KEEP_REASON_CORRECTNESS_FIX,
+    correctness_fix_refusal,
+    load_runtime_findings,
+)
 from hyperloom.common.agentx_mode import native_agentx_optimization_session, native_agentx_session
 from ...bringup import load_boot_observation, observation_summary, verdict_of, write_boot_observation
 from ...delivery import file_digest
@@ -313,6 +329,16 @@ def _merge_established_server_args(inherited_args: str, round_args: str) -> str:
     return " ".join([*missing, round_args]).strip()
 
 
+def _done_field(done_payload: dict[str, Any] | None, key: str) -> Any:
+    """Read ``key`` from a specialist done payload, top level or nested under ``payload``."""
+    if not isinstance(done_payload, dict):
+        return None
+    if done_payload.get(key):
+        return done_payload[key]
+    inner = done_payload.get("payload")
+    return inner.get(key) if isinstance(inner, dict) else None
+
+
 def _parse_framework_switches(
     *,
     params: dict[str, Any],
@@ -332,13 +358,7 @@ def _parse_framework_switches(
         ``(switches, problems)`` from :func:`_switch_manifest.parse_manifest`;
         ``([], [])`` when no manifest was delivered.
     """
-    raw = params.get(_switch_manifest.MANIFEST_KEY)
-    if not raw and isinstance(done_payload, dict):
-        raw = done_payload.get(_switch_manifest.MANIFEST_KEY)
-        if not raw:
-            inner = done_payload.get("payload")
-            if isinstance(inner, dict):
-                raw = inner.get(_switch_manifest.MANIFEST_KEY)
+    raw = params.get(_switch_manifest.MANIFEST_KEY) or _done_field(done_payload, _switch_manifest.MANIFEST_KEY)
     if not raw:
         return [], []
     # Env the benchmark already defines is reserved: a "switch" colliding with it
@@ -1756,6 +1776,70 @@ def _stamp_framework_kb_provenance(
     target.setdefault("framework", framework)
 
 
+_FIX_ACCURACY_UNAVAILABLE = "accuracy result unavailable"
+
+
+def _fix_axis(graded: Any) -> str:
+    return "interactivity p50" if graded.graded_on_intvty else "throughput"
+
+
+def _intvty_guard_refusals(shared_state: Any, bench_result: dict[str, Any]) -> list[str]:
+    """The interactivity KEEP guards a correctness fix still owes; only the p50 gain is relaxed."""
+    ref_perf, _ = resolve_grading_anchor_perf(shared_state)
+    cand_perf = perf_snapshot_from_mapping(bench_result)
+    _, noise_pct = resolved_grading(shared_state)
+    band = f"{noise_pct:.1f}% noise band" if noise_pct is not None else "noise band"
+    refusals = [
+        f"{key} fell outside the {band}"
+        for key in (GRADED_INTVTY, GRADED_OUTPUT)
+        if not holds_within_band(cand_perf, ref_perf, key, noise_pct=noise_pct)
+    ]
+    incomparable = incomparability_reason(cand_perf, ref_perf)
+    if incomparable:
+        refusals.append(f"rounds are not comparable ({incomparable})")
+    return refusals
+
+
+def _correctness_fix_refusals(
+    resolves_finding: str,
+    *,
+    shared_state: Any,
+    bench_result: dict[str, Any],
+    graded: Any,
+    delta_pct: float | None,
+    accuracy_pass: bool | None,
+) -> list[str]:
+    """Reasons a declared correctness fix may not KEEP below the graded-axis threshold; empty when it may."""
+    refusals: list[str] = []
+    finding_refusal = correctness_fix_refusal(
+        load_runtime_findings(getattr(shared_state, "current_best_measurement", None) or {}),
+        load_runtime_findings(bench_result),
+        resolves_finding,
+    )
+    if finding_refusal:
+        refusals.append(finding_refusal)
+    # The resolver only vetoes a KEEP verdict, and this route runs after a REVERT, so the budget is read here.
+    veto = latency_veto_reason(bench_result.get("e2el_mean_ms"), float(getattr(shared_state, "latency_budget_ms", 0.0)))
+    if not graded.comparable:
+        refusals.append(f"performance comparison unavailable: {graded.degrade_reason}")
+    elif veto:
+        refusals.append(veto)
+    elif delta_pct is None:
+        refusals.append(f"no measurable {_fix_axis(graded)}")
+    elif delta_pct < -CORRECTNESS_FIX_MAX_DROP_PCT:
+        refusals.append(
+            f"{_fix_axis(graded)} delta {delta_pct:+.2f}% exceeds the "
+            f"{CORRECTNESS_FIX_MAX_DROP_PCT:.1f}% correctness-fix allowance"
+        )
+    if graded.comparable and graded.graded_on_intvty:
+        refusals.extend(_intvty_guard_refusals(shared_state, bench_result))
+    if accuracy_pass is None:
+        refusals.append(_FIX_ACCURACY_UNAVAILABLE)
+    elif accuracy_pass is not True:
+        refusals.append("accuracy eval failed")
+    return refusals
+
+
 def _enforce_critic_gate(
     shared_state: Any,
     subject: str,
@@ -2333,6 +2417,30 @@ class IntegratePatchExecutor:
         )
         return None
 
+    async def _record_closure_baseline(self, attempt: IntegrateAttempt, params: dict[str, Any]) -> None:
+        """Observe the environment before the enablement's first setup command, through the KEEP's interpreter.
+
+        The KEEP closure alone cannot say which versions the enablement changed;
+        the setup script checks the difference between the two.
+        """
+        from ...enablement.recipe.keep_probe import graded_framework, probe_keep_environment
+
+        closure, _assertions = await asyncio.to_thread(
+            probe_keep_environment,
+            params,
+            framework=graded_framework(params, ""),
+            build_manifest=(),
+            specialist_task_id=attempt.specialist_task_id,
+            provision_result=attempt.provision_result,
+        )
+        if not attempt.shared_state.enablement.record_closure_baseline(closure):
+            return
+        try:
+            attempt.shared_state.save(self.session_dir)
+        except (OSError, AttributeError):
+            # Held in memory either way, and the rearm saves again.
+            log.debug("integrate_patch: save after closure baseline failed", exc_info=True)
+
     async def _stage_apply(
         self,
         attempt: IntegrateAttempt,
@@ -2355,6 +2463,8 @@ class IntegratePatchExecutor:
         inherited_args, inherited_envs = _established_enablement_config(params, shared_state)
         for candidate in _candidate_mutation_roots(params=params, done_payload=done_payload):
             _note_pre_mutation_head(attempt, candidate, enablement=is_enablement, session_dir=self.session_dir)
+        if is_enablement and not shared_state.enablement.environment_closure_baseline:
+            await self._record_closure_baseline(attempt, params)
         setup_result: dict[str, Any] = {"applied": [], "skipped": [], "failed": [], "executions": []}
         if bool(params.get("enablement")):
             setup_cmds = resolve_setup_commands(params=params, done_payload=done_payload)
@@ -3639,6 +3749,22 @@ class IntegratePatchExecutor:
             and not graded.veto_reason
             and not acc_block
         )
+        resolves_finding = str(_done_field(done_payload, "resolves_finding") or "").strip()
+        fix_refusals: list[str] = []
+        correctness_fix = False
+        if not gate_pass and resolves_finding:
+            fix_delta_pct = gain_pct(graded.candidate, graded.reference) if graded.graded_on_intvty else delta_pct
+            fix_refusals = _correctness_fix_refusals(
+                resolves_finding,
+                shared_state=shared_state,
+                bench_result=bench_result,
+                graded=graded,
+                delta_pct=fix_delta_pct,
+                accuracy_pass=accuracy_pass,
+            )
+            if not fix_refusals:
+                gate_pass = correctness_fix = True
+                delta_pct = fix_delta_pct
         _ss_kb = extra.get("shared_state") or extra.get("state")
         acc_delta_pct = _accuracy_delta_pct(
             gate_evidence.get("accuracy"),
@@ -3765,6 +3891,11 @@ class IntegratePatchExecutor:
             reasons: list[str] = []
             if not graded.comparable:
                 reasons.append(f"performance comparison unavailable: {graded.degrade_reason}")
+            elif graded.graded_on_intvty and delta_pct is None:
+                reasons.append(
+                    graded.veto_reason
+                    or f"interactivity p50 {graded.reference:.1f}->{graded.candidate:.1f} did not clear the interactivity KEEP gate"
+                )
             elif delta_pct is None:
                 reasons.append("no measurable throughput")
             elif delta_pct < keep_threshold_pct:
@@ -3773,12 +3904,16 @@ class IntegratePatchExecutor:
                 reasons.append(graded.veto_reason)
             if acc_block and acc_reason:
                 reasons.append(acc_reason)
+            if fix_refusals:
+                reasons.append(f"correctness fix {resolves_finding} refused: {'; '.join(fix_refusals)}")
             _probe_reason = eval_probe_summary(gate_evidence.get("eval_probe"))
             if _probe_reason:
                 reasons.append(_probe_reason)
             _tput_ok = delta_pct is not None and delta_pct >= keep_threshold_pct
             revert_status = (
-                "accuracy_unavailable_reject" if (acc_block and accuracy_pass is None and _tput_ok) else "reverted"
+                "accuracy_unavailable_reject"
+                if (acc_block and accuracy_pass is None and _tput_ok) or fix_refusals == [_FIX_ACCURACY_UNAVAILABLE]
+                else "reverted"
             )
             await self._maybe_write_framework_kb_record(
                 params=params,
@@ -3858,8 +3993,8 @@ class IntegratePatchExecutor:
             if framework_root is not None:
                 source_base_sha = _git_head_sha(framework_root)
                 upserted_patch, deleted_patch = _patch_touched_paths_split(framework_root, applied)
-                declared_ops = {r: "upsert" for r in upserted_patch}
-                declared_ops.update({r: "delete" for r in deleted_patch})
+                declared_ops = dict.fromkeys(upserted_patch, "upsert")
+                declared_ops.update(dict.fromkeys(deleted_patch, "delete"))
                 rel_paths = upserted_patch + deleted_patch
                 # An artifact installed into a sibling tree is not addressable by
                 # a rel path under this root, so it belongs to no snapshot here.
@@ -3949,7 +4084,13 @@ class IntegratePatchExecutor:
             "base_tput": base_tput,
             "measured_against": measured_against,
             "keep_threshold_pct": keep_threshold_pct,
-            "reason": (f"throughput delta {delta_pct:+.2f}% >= {keep_threshold_pct:.2f}%"),
+            "reason": (
+                f"correctness fix {resolves_finding} verified at {_fix_axis(graded)} delta {delta_pct:+.2f}%"
+                if correctness_fix
+                else f"throughput delta {delta_pct:+.2f}% >= {keep_threshold_pct:.2f}%"
+            ),
+            "keep_reason": KEEP_REASON_CORRECTNESS_FIX if correctness_fix else "",
+            "resolves_finding": resolves_finding if correctness_fix else "",
             "bench_result": bench_result,
             "workspace": str(output_root),
             "source_snapshot": source_snapshot_dir,

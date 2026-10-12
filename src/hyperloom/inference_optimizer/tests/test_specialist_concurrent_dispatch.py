@@ -53,13 +53,12 @@ async def _build_coord_with_capacity(
         "orchestration": MockBackend(idle_plan),
         "critic": MockBackend(idle_plan),
     }
-    coord = Coordinator(
+    return Coordinator(
         session_dir=tmp_path,
         backends=backends,
         role_registry=default_role_registry(),
         knowledge_plane=None,
     )
-    return coord
 
 
 async def _pump_until_drained(coord) -> None:

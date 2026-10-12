@@ -556,7 +556,8 @@ def test_native_agentx_protocol_keeps_all_phase_error_category_validation(tmp_pa
         (330.0, 170.0, 812.5, 3600.0, 100 * 2 / 392, "REVERT"),
         (330.0, 184.75, 700.0, 3600.0, 100 * 2 / 392, "REVERT"),
         (330.0, 184.75, 812.5, 3000.0, 100 * 2 / 392, "REVERT"),
-        (330.0, 184.75, 812.5, 3600.0, 1.0, "REVERT"),
+        (330.0, 184.75, 812.5, 3600.0, 100 * 2 / 392 + 0.5, "KEEP"),
+        (330.0, 184.75, 812.5, 3600.0, 100 * 2 / 392 + 0.51, "REVERT"),
     ],
 )
 def test_native_measurement_uses_median_grading_and_all_guards(

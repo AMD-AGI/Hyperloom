@@ -19,7 +19,7 @@ import json
 import logging
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -41,6 +41,7 @@ from hyperloom.inference_optimizer.trace.trajectory_trace import (
     trajectory_span,
 )
 from .domains import (
+    CUSTOM_SPECIALIST_KEY,
     DEFAULT_SPECIALIST_MAX_TURNS,
     FREEFORM_DOMAIN,
     SPECIALIST_DOMAIN_KEYS,
@@ -316,11 +317,10 @@ def _safe_redact(s: str) -> str:
             ``[REDACTED]``.
     """
     out = redact_secret_values(s)
-    out = _SECRET_ASSIGNMENT_RE.sub(
+    return _SECRET_ASSIGNMENT_RE.sub(
         lambda m: f"{m.group('key')}{m.group('sep')}{m.group('quote')}[REDACTED]{m.group('quote')}",
         out,
     )
-    return out
 
 
 def _redact_transcript_value(value: Any) -> Any:
@@ -603,6 +603,13 @@ class SpecialistRunner:
         if domain.key not in SPECIALIST_DOMAIN_KEYS:
             notes.append(f"domain={domain.key!r} is outside the domain catalogue; using generic prompt template")
 
+        # The operator-defined specialist reads its description and focus from the session.
+        shared_state = ctx.extra.get("shared_state")
+        custom_specialist_prompt = str(getattr(shared_state, "custom_specialist_prompt", "") or "")
+        custom_specialist_description = str(getattr(shared_state, "custom_specialist_description", "") or "")
+        if domain.key == CUSTOM_SPECIALIST_KEY and custom_specialist_description:
+            domain = replace(domain, description=custom_specialist_description)
+
         # Worktree — created only under subprocess dispatch; surfaced via ``workspace_path``.
         worktree, worktree_source, worktree_err = await asyncio.to_thread(
             self._maybe_setup_worktree,
@@ -630,6 +637,7 @@ class SpecialistRunner:
                 experience_kb_block=str(params.get("experience_kb_block") or ""),
                 # Coordinator-populated roofline pre-fetch; empty when not warmed.
                 roofline_evidence=dict(params.get("roofline_evidence") or {}),
+                runtime_findings=str(params.get("runtime_findings") or ""),
                 sub_kind=str(params.get("sub_kind") or ""),
                 extra_focus_tags=_extra_focus_tags(params, domain),
                 warm_start_recipe=dict(params.get("warm_start_recipe") or {}),
@@ -703,6 +711,7 @@ class SpecialistRunner:
                 task_kind=str(params.get("task_kind") or ""),
                 prior_attempts=[e for e in (params.get("prior_attempts") or []) if isinstance(e, dict)],
                 pr_lead=dict(params.get("pr_lead") or {}),
+                custom_specialist_prompt=custom_specialist_prompt,
             )
 
         system_prompt, user_prompt = build_specialist_prompts(prompt_inputs)

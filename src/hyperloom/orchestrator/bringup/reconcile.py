@@ -134,6 +134,7 @@ class Reconciler:
         resources: Any = None,
         proposals: Callable[[], Mapping[str, Any]] | None = None,
         session_dir: Any = None,
+        result_pending: Callable[[str], bool] | None = None,
         terminal_holder_cap_sec: float = TERMINAL_HOLDER_CAP_SEC,
         review_ttl_sec: float = REVIEW_TTL_SEC,
     ):
@@ -149,6 +150,9 @@ class Reconciler:
             proposals: Returns the in-memory pending proposals, so a durable
                 timeout deny also reaches the copy the loop consults.
             session_dir: Where SharedState is saved after a terminal is set.
+            result_pending: Whether a terminal task's result is still to be
+                booked by the dispatcher; ``None`` treats every terminal row
+                as booked.
             terminal_holder_cap_sec: Cap for a round whose holder went terminal.
             review_ttl_sec: TTL for an undecided review.
         """
@@ -162,6 +166,7 @@ class Reconciler:
         self._resources = resources
         self._proposals = proposals
         self._session_dir = session_dir
+        self._result_pending = result_pending
         self.terminal_holder_cap_sec = max(0.0, float(terminal_holder_cap_sec))
         self.review_ttl_sec = max(0.0, float(review_ttl_sec))
         self.last_report = ReconcileReport()
@@ -271,7 +276,14 @@ class Reconciler:
             await self._advance_or_expire(round_row, now_unix, report)
 
     async def _close_stale_validation_window(self, now_unix: float, report: ReconcileReport) -> None:
-        """Close a revalidation window whose task will never report."""
+        """Close a revalidation window whose task will never report.
+
+        A terminal row is not yet a task that will never report: the row goes
+        terminal inside the execution, and the result is booked by the pump that
+        runs after this pass. Closing the window in between leaves the writeback
+        a promoted revalidation with no window to credit it to, so the lane never
+        succeeds although the baseline it was waiting for passed.
+        """
         state = self._shared_state
         if state is None or not bool(state.enablement.validation_pending):
             return
@@ -280,6 +292,8 @@ class Reconciler:
             return
         row = await self._task(tracked)
         if row is not None and row.state not in TERMINAL_STATES:
+            return
+        if self._result_pending is not None and self._result_pending(tracked):
             return
         state.enablement.validation_pending = False
         state.enablement.revalidation_task_id = ""

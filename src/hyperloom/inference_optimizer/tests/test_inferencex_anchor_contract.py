@@ -7,131 +7,28 @@ from __future__ import annotations
 
 import hashlib
 import json
-import subprocess
 from pathlib import Path
 
 import pytest
 
-from hyperloom.inference_optimizer.cli.preflight import (
-    _INFERENCEX_REF_DEFAULT,
-    _INFERENCEX_REPO_DEFAULT,
+from hyperloom.inference_optimizer.cli.preflight import _INFERENCEX_REF_DEFAULT
+from hyperloom.orchestrator.actions.executors.inferencex_anchor_contract import (
+    MAGPIE_LIB_PATH,
+    PROBE_TARGET_PATH,
+    REFRESH_CMD,
+    upstream_candidates,
+    anchors_by_file,
+    anchors_fingerprint,
+    fetch_pinned_file,
+    magpie_patch_applies,
 )
 from hyperloom.orchestrator.actions.executors._inferencex_patcher import (
     _ANCHOR_CONTRACT,
-    _ANCHOR_ALTERNATIVES,
-    _BENCH_SERVING_REL_PARTS,
-    EVAL_PROBE_TARGET_PARTS,
     EVAL_PROBE_TARGETS,
     count_anchor_hits,
 )
 
 CONTRACT_PATH = Path(__file__).parent / "fixtures" / "inferencex_anchor_contract.json"
-REFRESH_CMD = "python scripts/refresh_inferencex_anchor_contract.py"
-_FETCH_TIMEOUT_SEC = 30
-
-
-PROBE_TARGET_PATH = "/".join(EVAL_PROBE_TARGET_PARTS)
-
-# The second patcher aimed at the same file, and the one whose failure is louder.
-MAGPIE_LIB_PATH = "benchmarks/benchmark_lib.sh"
-
-
-def magpie_patch_applies(text: str) -> bool:
-    """Whether the run_lm_eval argument-parser splice still finds its site."""
-    from hyperloom.orchestrator.actions.executors._magpie_patcher import (
-        _patch_merged_case_parser,
-    )
-
-    return _patch_merged_case_parser(text) is not None
-
-
-def _magpie_pattern_parts() -> list[str]:
-    """The magpie-side patterns, for the fingerprint."""
-    from hyperloom.orchestrator.actions.executors import _magpie_patcher as mp
-
-    return [
-        f"magpie_merged_catchall\x1f{MAGPIE_LIB_PATH}\x1f{mp._RUN_LM_EVAL_MERGED_CATCHALL_RE.pattern}",
-        f"magpie_run_lm_eval_fn\x1f{MAGPIE_LIB_PATH}\x1f{mp._RUN_LM_EVAL_FN_MARKER}",
-    ]
-
-
-def anchors_fingerprint() -> str:
-    """Fingerprint the anchor definitions themselves."""
-    parts = [f"{name}\x1f{'/'.join(rel_parts)}\x1f{anchor}" for name, rel_parts, _sentinel, anchor in _ANCHOR_CONTRACT]
-    parts.append(f"probe_target\x1f{PROBE_TARGET_PATH}")
-    parts.extend(_magpie_pattern_parts())
-    parts.append(json.dumps(_ANCHOR_ALTERNATIVES, sort_keys=True))
-    parts.append(json.dumps([_BENCH_SERVING_REL_PARTS, EVAL_PROBE_TARGETS]))
-    return hashlib.sha256("\x1e".join(parts).encode("utf-8")).hexdigest()
-
-
-def github_slug(clone_url: str) -> str:
-    """Turn a clone URL into the ``owner/repo`` form the API expects."""
-    return clone_url.rstrip("/").removesuffix(".git").split("github.com/", 1)[-1]
-
-
-def fetch_pinned_file(rel_path: str, ref: str, checkout: Path | None = None) -> str | None:
-    """Fetch one upstream file at ``ref``, or ``None`` when unreachable."""
-    command = (
-        ["git", "-C", str(checkout), "show", f"{ref}:{rel_path}"]
-        if checkout is not None
-        else [
-            "gh",
-            "api",
-            f"repos/{github_slug(_INFERENCEX_REPO_DEFAULT)}/contents/{rel_path}?ref={ref}",
-            "-H",
-            "Accept: application/vnd.github.raw",
-        ]
-    )
-    try:
-        proc = subprocess.run(
-            command,
-            capture_output=True,
-            timeout=_FETCH_TIMEOUT_SEC,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if proc.returncode != 0:
-        return None
-    return proc.stdout.decode("utf-8", errors="replace")
-
-
-def upstream_candidates(paths: tuple[tuple[str, ...], ...]) -> list[str]:
-    """Resolve project-relative targets in either repository layout."""
-    return ["/".join((*prefix, *parts)) for prefix in (("inferencex-e2e",), ()) for parts in paths]
-
-
-def _fetch_target(paths: tuple[tuple[str, ...], ...], ref: str, checkout: Path | None) -> tuple[str, str]:
-    for path in upstream_candidates(paths):
-        text = fetch_pinned_file(path, ref, checkout)
-        if text is not None:
-            return path, text
-    raise RuntimeError(f"cannot read any supported path {upstream_candidates(paths)} at {ref}")
-
-
-def build_record(ref: str, checkout: Path | None = None) -> dict:
-    """Verify every active synthetic patch against immutable upstream objects."""
-    files: dict[str, dict] = {}
-    for name, parts, _sentinel, anchor in _ANCHOR_CONTRACT:
-        paths = _BENCH_SERVING_REL_PARTS if name == "profile_extra_body" else (parts,)
-        rel_path, text = _fetch_target(paths, ref, checkout)
-        hits = count_anchor_hits(text, anchor)
-        if hits != 1:
-            raise RuntimeError(f"{rel_path} at {ref}: anchor {name} matched {hits} sites, expected exactly one")
-        spec = files.setdefault(rel_path, {"sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(), "anchors": {}})
-        spec["anchors"][name] = hits
-    probe_path, probe_text = _fetch_target(EVAL_PROBE_TARGETS, ref, checkout)
-    magpie_path, magpie_text = _fetch_target((("benchmarks", "benchmark_lib.sh"),), ref, checkout)
-    if not magpie_patch_applies(magpie_text):
-        raise RuntimeError(f"{magpie_path} at {ref}: run_lm_eval --concurrent-requests splice no longer applies")
-    return {
-        "ref": ref,
-        "anchors_fingerprint": anchors_fingerprint(),
-        "refresh_with": REFRESH_CMD,
-        "files": files,
-        "probe_target": {"path": probe_path, "sha256": hashlib.sha256(probe_text.encode("utf-8")).hexdigest()},
-        "magpie_patch": {"path": magpie_path, "applies": True},
-    }
 
 
 def load_record() -> dict:
@@ -244,3 +141,89 @@ def test_pinned_upstream_still_takes_the_magpie_splice():
         f"{MAGPIE_LIB_PATH} at {record['ref'][:9]} no longer takes the run_lm_eval "
         f"--concurrent-requests splice; install.sh would die(). Re-anchor _magpie_patcher.py."
     )
+
+
+# --- recording the contract (scripts/refresh_inferencex_anchor_contract.py) ----
+
+
+@pytest.fixture
+def upstream(monkeypatch):
+    """Stand in for the pinned upstream tree: every file fetches, every anchor matches once."""
+    from hyperloom.orchestrator.actions.executors import inferencex_anchor_contract as contract
+
+    files: dict[str, str | None] = {path: f"text of {path}\n" for path in anchors_by_file()}
+    files[PROBE_TARGET_PATH] = "probe target\n"
+    files.setdefault(MAGPIE_LIB_PATH, "magpie lib\n")
+    hits: dict[str, int] = {}
+    monkeypatch.setattr(contract, "fetch_pinned_file", lambda rel_path, ref, checkout=None: files.get(rel_path))
+    monkeypatch.setattr(contract, "count_anchor_hits", lambda text, anchor: hits.get(anchor, 1))
+    monkeypatch.setattr(contract, "magpie_patch_applies", lambda text: files.get("applies", "yes") == "yes")
+    return contract, files, hits
+
+
+def test_build_record_records_each_file_the_probe_and_the_magpie_patch(upstream):
+    contract, files, _hits = upstream
+    record = contract.build_record("abc123")
+    assert record["ref"] == "abc123"
+    assert record["refresh_with"] == REFRESH_CMD
+    assert record["anchors_fingerprint"] == anchors_fingerprint()
+    assert set(record["files"]) == set(anchors_by_file())
+    for rel_path, entry in record["files"].items():
+        assert entry["sha256"] == hashlib.sha256(files[rel_path].encode("utf-8")).hexdigest()
+        assert set(entry["anchors"].values()) == {1}
+    assert record["probe_target"]["sha256"] == hashlib.sha256(b"probe target\n").hexdigest()
+    assert record["magpie_patch"] == {"path": MAGPIE_LIB_PATH, "applies": True}
+
+
+def test_build_record_refuses_an_unreachable_file(upstream):
+    contract, files, _hits = upstream
+    missing = sorted(anchors_by_file())[0]
+    files[missing] = None
+    with pytest.raises(RuntimeError, match="cannot read any supported path"):
+        contract.build_record("abc123")
+
+
+def test_build_record_refuses_an_anchor_that_does_not_match_exactly_once(upstream):
+    contract, _files, hits = upstream
+    name, _rel_parts, _sentinel, anchor = _ANCHOR_CONTRACT[0]
+    hits[anchor] = 2
+    with pytest.raises(RuntimeError, match=rf"anchor {name} matched 2 sites"):
+        contract.build_record("abc123")
+
+
+def test_build_record_refuses_a_missing_probe_target(upstream):
+    contract, files, _hits = upstream
+    files[PROBE_TARGET_PATH] = None
+    with pytest.raises(RuntimeError, match="cannot read any supported path"):
+        contract.build_record("abc123")
+
+
+def test_build_record_refuses_a_magpie_patch_that_no_longer_applies(upstream):
+    contract, files, _hits = upstream
+    files["applies"] = "no"
+    with pytest.raises(RuntimeError, match="run_lm_eval --concurrent-requests splice no longer applies"):
+        contract.build_record("abc123")
+
+
+def test_fetch_pinned_file_returns_none_when_gh_fails_or_is_missing(monkeypatch):
+    import subprocess
+
+    from hyperloom.orchestrator.actions.executors import inferencex_anchor_contract as contract
+
+    def run(stdout: bytes, returncode: int):
+        return lambda *args, **kwargs: subprocess.CompletedProcess(args, returncode, stdout=stdout)
+
+    monkeypatch.setattr(contract.subprocess, "run", run(b"body\n", 0))
+    assert fetch_pinned_file("a/b.sh", "abc123") == "body\n"
+    monkeypatch.setattr(contract.subprocess, "run", run(b"", 1))
+    assert fetch_pinned_file("a/b.sh", "abc123") is None
+
+    def missing(*args, **kwargs):
+        raise OSError("gh not found")
+
+    monkeypatch.setattr(contract.subprocess, "run", missing)
+    assert fetch_pinned_file("a/b.sh", "abc123") is None
+
+
+def test_magpie_patch_applies_needs_the_parser_site():
+    assert magpie_patch_applies("#!/bin/bash\necho nothing to splice\n") is False

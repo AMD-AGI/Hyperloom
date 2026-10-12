@@ -267,7 +267,7 @@ _model_family() {
 }
 _default_loader() {
   case "$(_model_family "$1")" in
-    dsv4*|deepseekv4*|glm52*|minimaxm3*|kimik3*)
+    dsv4*|deepseekv4*|glm52*|glm53*|minimaxm3*|kimik3*)
       printf 'semianalysis_cc_traces_weka_062126' ;;
     *)
       printf 'semianalysis_cc_traces_weka_062126_256k' ;;

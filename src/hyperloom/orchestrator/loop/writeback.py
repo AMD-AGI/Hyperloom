@@ -92,6 +92,7 @@ from ..actions.executors._accuracy_gate import (
 from ..knowledge.agent_kb import PatchKB
 from .proposals import PendingProposal
 from ..measurement.integrate_performance import integrate_measurement_fields
+from ..measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX
 from ..collaborator import CoordinatorCollaborator
 
 if TYPE_CHECKING:
@@ -1397,18 +1398,20 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     "current_best held: %s winner refused by the latency budget (%s)", task_kind, graded.veto_reason
                 )
                 return False
-            if graded.graded_on_intvty and graded.verdict != VERDICT_KEEP:
+            # A verified correctness fix was already bounded by the integrate gate.
+            correctness_fix = bv.get("keep_reason") == KEEP_REASON_CORRECTNESS_FIX
+            if graded.graded_on_intvty and graded.verdict != VERDICT_KEEP and not correctness_fix:
                 log.info(
-                    "current_best held: %s winner %s intvty %.1f->%.1f tput %.1f->%.1f",
+                    "current_best held: %s winner refused by %s, intvty %.1f->%.1f tput %.1f->%.1f",
                     task_kind,
-                    graded.verdict,
+                    graded.refused_by,
                     graded.reference,
                     graded.candidate,
                     graded.tput_reference,
                     graded.tput_candidate,
                 )
                 return False
-            if graded.reference > 0 and graded.candidate <= graded.reference:
+            if graded.reference > 0 and graded.candidate <= graded.reference and not correctness_fix:
                 log.info(
                     "current_best held at %.1f %s: %s winner measured %.1f (no lift)",
                     graded.reference,
@@ -1611,7 +1614,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                         stack_entry["recipe_publishable"] = bool(bv.get("recipe_publishable"))
                     if "framework_agent_authoring" in bv:
                         stack_entry["framework_agent_authoring"] = bool(bv.get("framework_agent_authoring"))
-                    for _origin_key in ("domain", "gap_layer"):
+                    for _origin_key in ("domain", "gap_layer", "keep_reason", "resolves_finding"):
                         if bv.get(_origin_key):
                             stack_entry[_origin_key] = str(bv.get(_origin_key))
                 if _overlay:
@@ -2209,11 +2212,13 @@ class WritebackCollaborator(CoordinatorCollaborator):
             self.shared_state.last_profile_workload = {}
             if not trace_path:
                 self.shared_state.last_profile_trace = ""
+                self.shared_state.last_profile_launch_evidence_path = ""
             self.shared_state.last_profile_args = ""
             self.shared_state.last_profile_workload_action = ""
             changed = True
         elif trace_path:
             self.shared_state.last_profile_trace = str(trace_path)
+            self.shared_state.last_profile_launch_evidence_path = str(result.get("launch_evidence_path") or "")
             self.shared_state.last_profile_status = "succeeded"
             # Record the server config in effect for this trace, tagged with the
             # arm it measured so a later same-arm check can trust it.
@@ -2824,29 +2829,28 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 outcome.verdict = Verdict.ADOPTED if promoted else Verdict.REFUSED
                 outcome.changed = True
                 return
-            else:
-                if measured_ok and self.shared_state.baseline_tput > 0 and not stale_measurement:
-                    self.validate(measured, result, source=STACK_REVALIDATE_SOURCE)
-                    cb_rec = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
-                    recorded = cb_rec.get("tput")
-                    floor = _DEFAULT_RESUME_DRIFT_FLOOR_PCT
-                    if (
-                        isinstance(recorded, (int, float))
-                        and recorded > 0
-                        and float(measured) < float(recorded) * floor / 100.0
-                    ):
-                        await self.bus.record_observation(
-                            "coordinator",
-                            "observation",
-                            {
-                                "kind": "current_best_drift",
-                                "severity": "high",
-                                "measured_tput": float(measured),
-                                "recorded_tput": float(recorded),
-                                "floor_pct": floor,
-                            },
-                        )
-                changed = True
+            if measured_ok and self.shared_state.baseline_tput > 0 and not stale_measurement:
+                self.validate(measured, result, source=STACK_REVALIDATE_SOURCE)
+                cb_rec = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
+                recorded = cb_rec.get("tput")
+                floor = _DEFAULT_RESUME_DRIFT_FLOOR_PCT
+                if (
+                    isinstance(recorded, (int, float))
+                    and recorded > 0
+                    and float(measured) < float(recorded) * floor / 100.0
+                ):
+                    await self.bus.record_observation(
+                        "coordinator",
+                        "observation",
+                        {
+                            "kind": "current_best_drift",
+                            "severity": "high",
+                            "measured_tput": float(measured),
+                            "recorded_tput": float(recorded),
+                            "floor_pct": floor,
+                        },
+                    )
+            changed = True
         # A revalidation task only CONFIRMS the existing stack/current_best; its
         # winner is not a new discovery. Skip the accept/lift path so a rebench
         # (e.g. geak_revalidate) never appends a duplicate optimization_stack
@@ -3042,6 +3046,10 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 lift["gap_layer"] = str(task_params.get("gap_layer"))
             if task_params.get("framework_agent_authoring"):
                 lift["framework_agent_authoring"] = True
+            if result.get("keep_reason") == KEEP_REASON_CORRECTNESS_FIX:
+                lift["keep_reason"] = KEEP_REASON_CORRECTNESS_FIX
+                lift["resolves_finding"] = str(result.get("resolves_finding") or "")
+                lift["attribution_eligible"] = False
             if enablement_landing:
                 lift["recipe_publishable"] = False
             if prebaseline_enablement:

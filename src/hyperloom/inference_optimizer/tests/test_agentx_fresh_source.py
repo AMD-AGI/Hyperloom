@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import copy
 import hashlib
 import json
@@ -60,6 +61,30 @@ def _args(**updates):
     )
     values.update(updates)
     return argparse.Namespace(**values)
+
+
+@pytest.mark.parametrize("flags, expected", [([], (None, None)), (["--tp", "4", "--ep", "4"], (4, 4))])
+def test_native_cli_preserves_explicit_topology_until_recipe_resolution(monkeypatch, flags, expected):
+    monkeypatch.setattr(os, "environ", os.environ.copy())
+    monkeypatch.setenv("TP", "8")
+    monkeypatch.setenv("EP", "8")
+    monkeypatch.setattr(cli, "_load_dotenv_fallback", lambda: None)
+    monkeypatch.setattr(
+        cli, "clean_stale_aiter_locks", lambda: {"dir": "", "deleted": 0, "skipped_fresh": 0, "errors": 0}
+    )
+    monkeypatch.setattr(cli, "_persist_preflight_failure_artifacts", lambda *args: None)
+
+    class PreflightReached(Exception):
+        pass
+
+    def preflight(args):
+        assert (args.tp, args.ep) == expected
+        raise PreflightReached
+
+    monkeypatch.setattr(cli, "_preflight", preflight)
+    args = cli._build_parser().parse_args(["optimize", "--model", "Qwen/Qwen3-32B", *flags])
+    with pytest.raises(PreflightReached):
+        asyncio.run(cli._run_optimize(args))
 
 
 @pytest.mark.parametrize(

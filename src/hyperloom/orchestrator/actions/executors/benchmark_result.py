@@ -1901,7 +1901,7 @@ def is_valid_measurement(result: dict[str, Any] | None) -> bool:
     # Native reports and merged legacy AgentX raw results serialize their
     # scenario, so a resumed subprocess need not inherit HYPERLOOM_AGENTX.
     # A stray similarly named key on a synthetic result remains inert.
-    from ._workload_envs import agentx_enabled
+    from hyperloom.common.perf_metric import agentx_enabled
 
     agentx_result = str(result.get("scenario") or "").strip().lower() == "agentx" or agentx_enabled()
     if result.get("native_agentx_report") is True and result.get("native_agentx_schema_valid") is not True:

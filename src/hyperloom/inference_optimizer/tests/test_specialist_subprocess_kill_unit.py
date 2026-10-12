@@ -76,7 +76,7 @@ async def test_specialist_scope_cancel_stops_before_harvest(monkeypatch, tmp_pat
 
         def poll_started():
             entered.set()
-            return None
+            return
 
         lease.poll_started.side_effect = poll_started
         lease.close.return_value = confirmed_dead

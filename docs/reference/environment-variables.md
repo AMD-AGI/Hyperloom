@@ -77,10 +77,19 @@ The following variables configure filesystem paths for Hyperloom's runtime depen
 
 ## Workload configuration
 
-Set with CLI flags or an explicit `--benchmark-config`, not ambient workload
-env vars. Pre-set `ISL` / `OSL` / `CONC` / `PRECISION` / `TP` / `EP` env vars
-are ignored and overwritten (`GPU_TYPE` is a fallback when `--gpu-type` is
-omitted).
+Set with CLI flags or an explicit `--benchmark-config`. Native AgentX resolves
+its topology from the recipe; explicit topology values must match it. `ISL` / `OSL` / `CONC` / `TP` / `EP` resolve on a ladder,
+and the ladder differs by branch. A fresh launch takes **an explicit flag, then
+the environment (where an `--extra-env NAME=VALUE` pin lands), then the
+default**. A resume takes **an explicit flag, then the pins in effect for this
+resume — its own `--extra-env`, or the launch's persisted pins when it passes
+none — then the session's recorded value, then the shell environment, then the
+default** — so a value left over in the shell cannot displace the shape the
+session was measured at. `PRECISION` is not on that ladder: on both branches it
+is **`--precision`, then `$PRECISION`, then the session's recorded value, then
+the checkpoint's own dtype, then the default**, so on a resume a `$PRECISION`
+left in the shell still outranks the recorded value. `GPU_TYPE` is a fallback
+when `--gpu-type` is omitted.
 
 - **Model / workload shape:** `--benchmark-config`, `--model`, `--model-class`, `--framework`,
   `--framework-version`, `--precision`, `--tp`, `--ep`, `--isl`, `--osl`,
@@ -117,6 +126,12 @@ omitted).
 - **Session / resume:** `--resume-from`, `--force-resume`, `--reset-state`,
   `--extend-hours`.
 - **Quantization:** `--quantize`, `--quantize-scheme`.
+- **Operator-defined specialist:** `--custom-specialist-prompt-file` (focus
+  text, max 16 KiB) and `--custom-specialist-description` (one line, max 200
+  chars), passed together; unset means no `custom_specialist`. Refused with
+  `--orch-prompt`, `--no-framework-agent`, `--research-lane-capacity 0` or
+  `--reset-state`. Persisted in `state.json`; re-pass both on `--resume-from`
+  only to replace the definition, or pass `--reset-state` alone to clear it.
 
 Run `hyperloom optimize --help` for the exhaustive flag list.
 
@@ -1083,7 +1098,7 @@ answering, checks that the listener belongs to the server it booted, and checks
 
 | Variable | Default | Description |
 |---|---|---|
-| `HYPERLOOM_AGENTIC_BACKEND` | `aiperf` | `mlperf` selects the MLPerf agentic client. Any other value is aiperf. |
+| `HYPERLOOM_AGENTIC_BACKEND` | `aiperf` | `mlperf` selects the MLPerf agentic client. Any other value is aiperf. Settable by `export` or `--extra-env`; both reach every reader. |
 | `MLPERF_ENDPOINTS_DIR` | `/opt/mlperf-endpoints` | Checkout of `mlcommons/endpoints` holding `utility/run_agentic.sh`. Checked at preflight. |
 | `AGENTIC_DATASET_PATH` | — (required) | Path to `agentic_combined_v6.jsonl`. Checked at preflight; its stem is recorded as the corpus. |
 | `MLPERF_TOKENIZER_DIR` | — (required) | Kimi-K3 fast-tokenizer directory the harness counts tokens with. Checked at preflight. |

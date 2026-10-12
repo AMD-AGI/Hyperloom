@@ -909,7 +909,7 @@ def test_resume_ignores_preflight_generated_path_when_operator_did_not_pin_one(
 
     restored = _restore_agentx_runtime_pins_from_state(
         state,
-        operator_pins={name: "" for name in pins},
+        operator_pins=dict.fromkeys(pins, ""),
     )
 
     assert restored["INFERENCEX_PATH"] == pins["INFERENCEX_PATH"]

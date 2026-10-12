@@ -415,9 +415,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Expert-parallel size for MoE inference outside native AgentX. "
         "1 (default) keeps "
         "experts sharded by TP (legacy behaviour). >=2 enables true "
-        "expert parallelism: sglang adds `--expert-parallel-size N`, "
-        "vllm adds `--enable-expert-parallel`. Typical: EP=TP for "
-        "DSr1/DSv3 on multi-node. EP > TP is rejected at server-restart time. "
+        "expert parallelism: sglang adds `--ep-size N`, vllm and atom "
+        "add `--enable-expert-parallel` (EP then spans all TP ranks). "
+        "Typical: EP=TP. Default: 1. On a single node an EP that does "
+        "not divide TP is dropped with a warning; on multi-node EP > TP "
+        "is rejected at server-restart time. "
         "Native AgentX resolves EP from the recipe when omitted and treats an "
         "explicit value as an exact consistency assertion.",
     )
@@ -861,6 +863,25 @@ def _build_parser() -> argparse.ArgumentParser:
         "--orch-prompt", type=str, default=None, help="Override Orchestration system prompt (file path or inline)"
     )
     opt.add_argument("--critic-prompt", type=str, default=None, help="Override Critic system prompt")
+    opt.add_argument(
+        "--custom-specialist-prompt-file",
+        dest="custom_specialist_prompt_file",
+        type=str,
+        default=None,
+        help="Register an operator-defined specialist type (custom_specialist) whose domain focus is this file's "
+        "text (max 16 KiB). Requires --custom-specialist-description. Orchestration may select it, and the "
+        "Coordinator dispatches it at least once in FRAMEWORK_AGENT. Persisted for --resume-from; passing it on a "
+        "resume replaces the stored definition. The text is written in clear to state.json and every task's "
+        "prompt.md: do not put credentials in it.",
+    )
+    opt.add_argument(
+        "--custom-specialist-description",
+        dest="custom_specialist_description",
+        type=str,
+        default=None,
+        help="One line (max 200 chars) telling Orchestration when to pick custom_specialist. Requires "
+        "--custom-specialist-prompt-file.",
+    )
     opt.add_argument(
         "--local-kb-root",
         dest="local_kb_root",

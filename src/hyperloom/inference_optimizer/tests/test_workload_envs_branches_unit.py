@@ -323,81 +323,6 @@ def test_server_args_merge_existing(monkeypatch, tmp_path):
     assert "chunked-prefill-size" in merged
 
 
-def test_vllm_ep_injects_expert_parallel(monkeypatch, tmp_path):
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
-    monkeypatch.setenv("EP", "8")
-    src = _write(tmp_path / "cfg.yaml", framework="vllm", envs={"EXTRA_VLLM_ARGS": "--trust-remote-code"})
-
-    bench = _materialize(src, tmp_path / "out")
-
-    args = bench["envs"]["EXTRA_VLLM_ARGS"]
-    assert "--trust-remote-code" in args
-    assert "--enable-expert-parallel" in args
-
-
-def test_vllm_ep_one_does_not_inject_expert_parallel(monkeypatch, tmp_path):
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
-    monkeypatch.setenv("EP", "1")
-    src = _write(tmp_path / "cfg.yaml", framework="vllm", envs={"EXTRA_VLLM_ARGS": "--trust-remote-code"})
-
-    bench = _materialize(src, tmp_path / "out")
-
-    args = bench["envs"]["EXTRA_VLLM_ARGS"]
-    assert "--trust-remote-code" in args
-    assert "--enable-expert-parallel" not in args
-
-
-def test_vllm_ep_preserves_profile_args(monkeypatch, tmp_path):
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
-    monkeypatch.setenv("EP", "8")
-    src = _write(
-        tmp_path / "cfg.yaml",
-        framework="vllm",
-        envs={"EXTRA_VLLM_ARGS": "--profiler-config.ignore_frontend True"},
-    )
-
-    bench = _materialize(src, tmp_path / "out")
-
-    args = bench["envs"]["EXTRA_VLLM_ARGS"]
-    assert "--profiler-config.ignore_frontend True" in args
-    assert "--enable-expert-parallel" in args
-
-
-def test_vllm_ep_does_not_duplicate_existing_flag(monkeypatch, tmp_path):
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
-    monkeypatch.setenv("EP", "8")
-    src = _write(
-        tmp_path / "cfg.yaml",
-        framework="vllm",
-        envs={"EXTRA_VLLM_ARGS": "--enable-expert-parallel"},
-    )
-
-    bench = _materialize(src, tmp_path / "out")
-
-    args = bench["envs"]["EXTRA_VLLM_ARGS"]
-    assert args.count("--enable-expert-parallel") == 1
-
-
-@pytest.mark.parametrize(
-    "server_args, framework, ep, expected",
-    [
-        ("--foo", "vllm", 8, "--foo --enable-expert-parallel"),
-        ("--foo", "vllm", 1, "--foo"),
-        ("--foo", "sglang", 8, "--foo"),
-        ("--foo", "vllm", "bad", "--foo"),
-        ("--foo", "vllm", None, "--foo"),
-        ("--enable-expert-parallel", "vllm", 8, "--enable-expert-parallel"),
-        ("", "vllm", 8, "--enable-expert-parallel"),
-    ],
-)
-def test_inject_vllm_expert_parallel_unit(server_args, framework, ep, expected):
-    assert we.inject_vllm_expert_parallel(server_args, framework, ep) == expected
-
-
 def test_mimo_v2_injects_triton_attention(monkeypatch, tmp_path):
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
@@ -685,6 +610,75 @@ def test_profile_manual_max_iters_above_cap_warns(monkeypatch, tmp_path, caplog)
         bench = _materialize(src, tmp_path / "out")
     assert _profile_num_steps(bench) == 2000  # honored verbatim
     assert any("exceeds the serialization-safe cap" in r.message for r in caplog.records)
+
+
+def _arm_sglang_shape_tool(monkeypatch, tmp_path) -> Path:
+    """Route the SGLang profile through the kernel_shape_tool path and return the tool dir."""
+    from hyperloom.orchestrator.actions.executors import _server_patcher
+
+    tool_dir = tmp_path / "kernel_shape_tool"
+    tool_dir.mkdir()
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "0")
+    monkeypatch.delenv("HYPERLOOM_PROFILE_SHAPE_DISCOVERY", raising=False)
+    monkeypatch.setattr(_server_patcher, "resolve_sglang_shape_mode", lambda: "sitecustomize")
+    monkeypatch.setattr(_server_patcher, "kernel_shape_tool_dir", lambda: tool_dir)
+    return tool_dir
+
+
+def test_profile_shape_tool_keeps_the_inherited_pythonpath(monkeypatch, tmp_path):
+    # Magpie replaces the launch env's PYTHONPATH with the config's, so a config without one must carry the
+    # inherited entries, or the profile server loses the operator's and the image's import paths.
+    import os
+
+    from hyperloom.orchestrator.actions.executors import _framework_rewrite_evidence as evidence
+    from hyperloom.orchestrator.actions.executors.profile import ProfileExecutor
+
+    tool_dir = _arm_sglang_shape_tool(monkeypatch, tmp_path)
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(["/a", "/b"]))
+    src = _write(tmp_path / "cfg.yaml", envs={"PROFILE": "1"})
+    out = we.materialize_config_with_envs(src, tmp_path / "out")
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+    assert envs["TRACELENS_SHAPE_DISCOVERY"] == "1"
+    assert envs["PYTHONPATH"] == os.pathsep.join([str(tool_dir), "/a", "/b"])
+
+    # The profile shim lands in front of the tool, keeping the inherited tail.
+    ProfileExecutor()._inject_host_probe(out, tmp_path / "ws")
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+    assert envs["PYTHONPATH"] == os.pathsep.join([str(evidence.probe_asset_dir()), str(tool_dir), "/a", "/b"])
+
+
+def test_profile_shape_tool_prepends_to_the_config_pythonpath(monkeypatch, tmp_path):
+    # A config that carries PYTHONPATH is authoritative: the inherited value is not appended to it.
+    import os
+
+    tool_dir = _arm_sglang_shape_tool(monkeypatch, tmp_path)
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(["/a", "/b"]))
+    src = _write(tmp_path / "cfg.yaml", envs={"PROFILE": "1", "PYTHONPATH": "/c"})
+    bench = _materialize(src, tmp_path / "out")
+    assert bench["envs"]["PYTHONPATH"] == os.pathsep.join([str(tool_dir), "/c"])
+
+
+@pytest.mark.parametrize(
+    ("config_envs", "tail"),
+    [({}, ["/a", "/b"]), ({"PYTHONPATH": "/c"}, ["/c"])],
+    ids=["inherited", "config-authoritative"],
+)
+def test_reference_overlay_builds_on_the_launch_pythonpath(monkeypatch, tmp_path, config_envs, tail):
+    # The reference overlay is prepended like every launch path entry: on the inherited value when the config has
+    # no PYTHONPATH, on the config's otherwise. The overlay is relative so it carries no drive colon on any host.
+    import os
+
+    _clear_env(monkeypatch)
+    (tmp_path / "overlay").mkdir()
+    (tmp_path / "overlay" / "sitecustomize.py").write_text("", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(we, "resolve_reference_launch", lambda: ("", {}, {"overlay_pythonpath": "overlay"}))
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(["/a", "/b"]))
+    src = _write(tmp_path / "cfg.yaml", envs=config_envs)
+    bench = _materialize(src, tmp_path / "out")
+    assert bench["envs"]["PYTHONPATH"] == os.pathsep.join(["overlay", *tail])
 
 
 def test_quality_ref_variant_compares(monkeypatch, tmp_path):

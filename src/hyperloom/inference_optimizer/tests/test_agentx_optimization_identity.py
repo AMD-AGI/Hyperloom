@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.common.perf_metric import graded_axes_of, perf_snapshot_from_mapping, rounds_are_comparable
+from hyperloom.common.perf_metric import graded_axes_of, perf_snapshot_from_mapping, incomparability_reason
 from hyperloom.inference_optimizer.agentx.identity import canonical_sha256, native_workload_fingerprint
 from hyperloom.inference_optimizer.agentx.identity import validate_server_launch
 from hyperloom.inference_optimizer.tests.test_benchmark_result import (
@@ -76,7 +76,7 @@ def test_native_server_candidates_retain_comparable_workload_and_distinct_proven
     assert candidate["agentx_candidate_fingerprint"] != baseline["agentx_candidate_fingerprint"]
     persisted = graded_axes_of(baseline)
     persisted["output_throughput"] = baseline["output_throughput"]
-    assert rounds_are_comparable(perf_snapshot_from_mapping(candidate), perf_snapshot_from_mapping(persisted))
+    assert incomparability_reason(perf_snapshot_from_mapping(candidate), perf_snapshot_from_mapping(persisted)) == ""
 
 
 @pytest.mark.parametrize("change", ["model", "corpus", "concurrency", "dependencies", "environment"])

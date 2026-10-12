@@ -101,7 +101,12 @@ def _runtime_candidate(benchmark: Mapping[str, Any], override: Mapping[str, Any]
             path = Path(str(entry)).expanduser()
             if not path.is_absolute() or not path.is_dir() or ":" in str(path) or any(c in str(path) for c in "\n\r\0"):
                 raise ValueError(f"Native runtime requires an existing absolute directory for {key}: {entry}")
-    combined = {**{str(k): str(v) for k, v in (benchmark.get("envs") or {}).items()}, **env}
+    launch = (benchmark.get("workload_spec") or {}).get("server_launch") or {}
+    combined = {
+        **{str(k): str(v) for k, v in (benchmark.get("envs") or {}).items()},
+        **{str(k): str(v) for k, v in (launch.get("runtime_environment") or {}).items()},
+        **env,
+    }
     before = dict(combined)
     apply_runtime_override(combined, dict(override))
     env.update({k: v for k, v in combined.items() if before.get(k) != v and not k.startswith("HYPERLOOM_FRAMEWORK_")})

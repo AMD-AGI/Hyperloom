@@ -156,7 +156,7 @@ def _pdeathsig_preexec() -> None:
     try:
         import ctypes
 
-        # PR_SET_PDEATHSIG = 1
+        # PR_SET_PDEATHSIG is option 1
         libc = ctypes.CDLL("libc.so.6", use_errno=True)
         libc.prctl(1, signal.SIGTERM)
     except Exception:  # noqa: BLE001 — best-effort hardening only

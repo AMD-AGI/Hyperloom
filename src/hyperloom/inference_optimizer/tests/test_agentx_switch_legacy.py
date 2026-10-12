@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 import yaml
 
@@ -12,6 +14,10 @@ from hyperloom.orchestrator.actions.executors import _workload_envs as we
 
 _AGENTX_ENV_KEYS = (
     "HYPERLOOM_AGENTX",
+    "AGENTX_CANONICAL_DATASET",
+    "AGENTX_WARMUP_GRACE_PERIOD",
+    "AGENTX_WARMUP_GRACE_CONC",
+    "INFERENCE_OPTIMIZER_EXTRA_ENV",
     "AGENTX_MODEL_ID",
     "AGENTX_SERVER_SCRIPT",
     "AGENTX_DATASET",
@@ -232,3 +238,44 @@ def test_disabled_native_yaml_keeps_the_legacy_environment_contract(tmp_path, mo
     assert bench["benchmark_script"] == "aiperf_client.sh"
     assert bench["envs"]["MODEL"] == "/models/checkpoint"
     assert "harness" not in bench["workload_spec"]
+
+
+def _pin_extra_env(monkeypatch, **pins):
+    """Pin as ``_export_operator_launch_shape`` does: each name in the environment, plus the handoff blob."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", json.dumps(pins))
+    for name, value in pins.items():
+        monkeypatch.setenv(name, value)
+
+
+def test_operator_extra_env_pins_reach_the_published_spec(tmp_path, monkeypatch):
+    """``--extra-env`` AgentX pins are the operator's environment: the client and the spec see the same values."""
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("CONC", "8")
+    _pin_extra_env(
+        monkeypatch,
+        AGENTX_CANONICAL_DATASET="semianalysis_cc_traces_weka_062126",
+        AGENTX_WARMUP_GRACE_PERIOD="600",
+        AGENTX_WARMUP_GRACE_CONC="4",
+    )
+    src = _write(tmp_path / "base.yaml")
+    bench = _materialize(src, tmp_path / "out", gpu_type="mi355x", model_path="/models/Unlisted-Model")
+    envs, spec = bench["envs"], bench["workload_spec"]
+    assert envs["AGENTX_CANONICAL_DATASET"] == "semianalysis_cc_traces_weka_062126"
+    assert spec["corpus"] == spec["canonical_corpus"] == "semianalysis_cc_traces_weka_062126"
+    assert envs["AGENTX_WARMUP_GRACE_PERIOD"] == "1200"
+    assert spec["warmup_grace_period_s"] == 1200
+
+
+def test_rebuild_path_scales_an_extra_env_warmup_grace(monkeypatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    _pin_extra_env(monkeypatch, AGENTX_WARMUP_GRACE_PERIOD="600", AGENTX_WARMUP_GRACE_CONC="4")
+    from hyperloom.orchestrator.actions.executors._benchmark_runtime import (
+        apply_runtime_benchmark_overrides,
+    )
+
+    bench = {"framework": "sglang", "envs": {"AGENTX_WARMUP_GRACE_PERIOD": "600"}}
+    apply_runtime_benchmark_overrides(bench, model_path="/m", gpu_type="mi355x", conc=8)
+    assert bench["envs"]["AGENTX_WARMUP_GRACE_PERIOD"] == "1200"
+    assert bench["workload_spec"]["warmup_grace_period_s"] == 1200

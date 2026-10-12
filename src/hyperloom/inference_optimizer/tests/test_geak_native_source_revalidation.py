@@ -129,7 +129,7 @@ async def test_cancelled_covered_run_reuses_review_and_task_identity(coordinator
     async def execute(task):
         tasks.append(task)
         if len(tasks) == 1:
-            raise asyncio.CancelledError()
+            raise asyncio.CancelledError
         return {"status": "reverted", "reason": "canonical replay did not improve"}
 
     async def promote(*args, **kwargs):

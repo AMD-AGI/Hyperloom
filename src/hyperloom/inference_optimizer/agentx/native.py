@@ -985,15 +985,7 @@ def native_execution_identity(
     launcher_sha256 = _sha256_file(launcher)
     if all(launcher_sha256 != expected_sha256 for _recipe, expected_sha256 in launcher_manifest_entries):
         raise ValueError(f"native AgentX launcher bytes do not match the exact-ref manifest: {benchmark_script}")
-    transitive_relative = sorted(
-        {
-            helper
-            for helper in _NATIVE_LAUNCHER_TRANSITIVE_INPUTS.get(
-                (head, benchmark_script),
-                (),
-            )
-        }
-    )
+    transitive_relative = sorted(set(_NATIVE_LAUNCHER_TRANSITIVE_INPUTS.get((head, benchmark_script), ())))
     if head in _NATIVE_LAUNCH_CONTRACT_REFS:
         transitive_relative = sorted(
             set(transitive_relative)

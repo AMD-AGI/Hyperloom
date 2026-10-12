@@ -54,6 +54,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EV
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...loop.sub_agent_runner import RunnerContext
 from ...measurement.integrate_performance import assess_integrate_performance
+from ...measurement.runtime_findings import persist_runtime_findings, scan_server_log
 from hyperloom.inference_optimizer.trace.task_progress import heartbeat_while_output_flows, report_progress
 from ...phases import machine_state as _phase_state
 from ..stop_attribution import (
@@ -102,6 +103,7 @@ from ._agentx_timeouts import (
     agentx_warmup_grace_sec as agentx_warmup_grace_sec,
 )
 from ._workload_envs import (
+    VLLM_SOURCE_ROOT_ENVS,
     _client_tokenizer_mode,
     _remove_moe_runner_backend_arg,
     FrameworkScriptMismatchError,
@@ -493,7 +495,7 @@ _GPU_PREOCCUPIED_MARKERS: tuple[str, ...] = (
     # (0.95, 273.59 GiB).
     "on startup is less than desired gpu memory utilization",
     "reduce gpu memory used by other processes",
-    # sglang: "Not enough memory. Please try to increase --mem-fraction-static."
+    # sglang says "Not enough memory. Please try to increase --mem-fraction-static."
     "not enough memory. please try to increase --mem-fraction-static",
 )
 
@@ -512,7 +514,7 @@ _DISABLE_CUDA_GRAPH_FLAGS = {
 }
 
 
-async def _prepare_aiter_serving_so(extra_envs: dict[str, Any], output_dir: Path) -> None:
+async def _prepare_aiter_serving_so(extra_envs: dict[str, Any]) -> None:
     """Rebuild the serving ``.so`` before boot when the CSVs it loads name kernels it lacks.
 
     sglang starts against whatever ``get_config_file`` resolves each ``AITER_CONFIG_*`` to,
@@ -525,10 +527,12 @@ async def _prepare_aiter_serving_so(extra_envs: dict[str, Any], output_dir: Path
     unset is exactly the case where aiter merges the model overlays, which is where the
     kernel that fails the boot comes from.
 
+    Nothing restores what this drops, so it is parked on the cache's own filesystem (the
+    preflight's default) rather than copied into the run directory, which sits on shared NFS.
+
     Args:
         extra_envs: The round's environment, whose ``AITER_CONFIG_*`` values decide which
             branch of aiter's resolution each table takes.
-        output_dir: Where to back up selected serving modules and build staging for recompilation.
     """
     csv_envs = {
         str(key): str(value)
@@ -538,11 +542,7 @@ async def _prepare_aiter_serving_so(extra_envs: dict[str, Any], output_dir: Path
     from ._aiter_jit import prepare_serving_so_for_csvs
 
     try:
-        outcome = await asyncio.to_thread(
-            prepare_serving_so_for_csvs,
-            csv_envs,
-            backup_dir=output_dir / "aiter_jit_backup",
-        )
+        outcome = await asyncio.to_thread(prepare_serving_so_for_csvs, csv_envs)
     except OSError as exc:
         # A jit directory this cannot read is not a reason to lose the measurement.
         log.warning("baseline_executor: aiter serving .so preflight failed: %s", exc)
@@ -585,6 +585,9 @@ def _attach_baseline_launch_evidence(
     )
     result["launch_evidence"] = evidence
     result["launch_evidence_path"] = persist_launch_evidence(evidence, slot=output_dir)
+    declared_env = evidence["requested_server_env"].keys() - set(VLLM_SOURCE_ROOT_ENVS)
+    report = scan_server_log(actual_log, evidence["framework"], declared_env=declared_env)
+    persist_runtime_findings(report, slot=output_dir)
 
 
 def _watchdog_server_log_path(output_dir: Path, framework: str) -> str | None:
@@ -2441,7 +2444,7 @@ class BenchmarkRunExecutor:
         )
         if force_disable_eval or is_truthy(params.get("disable_run_eval")) or eval_disabled:
             base_extra_envs["RUN_EVAL"] = "false"
-        await _prepare_aiter_serving_so(base_extra_envs, output_dir)
+        await _prepare_aiter_serving_so(base_extra_envs)
         complete_native_snapshot = params.get("native_launch_overrides") if native_launch else None
         try:
             config_path = materialize_config_with_envs(
@@ -4074,7 +4077,8 @@ class BenchmarkRunExecutor:
             "boot_observation_path": boot_observation_ref,
             "boot_observation_degraded": capture_meta.get("boot_observation_degraded", ""),
         }
-        _attach_baseline_launch_evidence(
+        await asyncio.to_thread(
+            _attach_baseline_launch_evidence,
             result,
             config_path=materialized_config_path,
             output_dir=output_dir,

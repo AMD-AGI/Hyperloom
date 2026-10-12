@@ -3127,6 +3127,7 @@ class KernelPhase(CoordinatorCollaborator):
             return
         for field_name in (
             "last_profile_trace",
+            "last_profile_launch_evidence_path",
             "last_profile_status",
             "last_profile_args",
             "last_profile_workload",

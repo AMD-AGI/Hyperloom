@@ -44,13 +44,22 @@ GRADED_ERROR_RATE = "request_error_rate"
 # same work. Sized to catch a truncated round, not the few percent a full round drifts by.
 DURATION_DRIFT_PCT = 5.0
 
+# Extra failed requests a candidate may report over its anchor, in the rate's percentage points. aiperf counts a reply
+# that carries no content as failed, and a corpus turn answered with a single token comes back with content under one
+# configuration and without it under another, so with no slack that one turn refuses a real gain. Being a rate, the
+# slack admits more failures in a longer or more concurrent round and none in a round of fewer than 200 requests (an
+# MLPerf smoke run issues 150 samples). Percentiles are read over the same round's successful requests, so dropping a
+# fraction f of them moves any percentile by at most f in rank, and the slack cannot buy a median gain anywhere near
+# AGENTX_KEEP_P50_THRESHOLD_PCT.
+ERROR_RATE_SLACK_PCT = 0.5
+
 # The axes ``graded_axes_of`` can carry, for a consumer that must publish all of them including the ones a
 # measurement did not supply. Absent and null are not the same fact: a recorder that omits an axis leaves a reader
 # unable to tell an unmeasured axis from one the framework failed to report, and zero reads as "measured, and it
 # was zero".
 #
-# Duration and error rate are members because they are decision inputs, not decoration: ``rounds_are_comparable``
-# refuses a pair whose windows differ by more than ``DURATION_DRIFT_PCT`` or whose candidate dropped more requests,
+# Duration and error rate are members because they are decision inputs, not decoration: ``incomparability_reason``
+# refuses a pair whose windows differ by more than ``DURATION_DRIFT_PCT`` or whose candidate dropped too many requests,
 # and a published verdict that omits them cannot be re-derived from the record. The objective and its two guards
 # are here for the same reason -- every input the verdict reads is recoverable from one block.
 GRADED_AXIS_KEYS = (
@@ -306,8 +315,8 @@ def stamp_output_per_gpu(measurement: Any, tp: Any) -> None:
     measurement[GRADED_OUTPUT_PER_GPU] = out / chips
 
 
-def rounds_are_comparable(candidate: Mapping[str, Any], anchor: Mapping[str, Any]) -> bool:
-    """Whether the pair measured the same work: equal-length windows and no extra failed requests.
+def incomparability_reason(candidate: Mapping[str, Any], anchor: Mapping[str, Any]) -> str:
+    """Why the pair did not measure the same work, or "" when it did: equal-length windows, failures within the slack.
 
     Fails closed on an unreported input. A truncated round still publishes plausible rates, so treating "no
     evidence" as "comparable" is what lets one KEEP on a window it never ran.
@@ -316,16 +325,18 @@ def rounds_are_comparable(candidate: Mapping[str, Any], anchor: Mapping[str, Any
     if any("agentx_launch_contract" in side or identity_key in side for side in (candidate, anchor)):
         identity = candidate.get(identity_key)
         if not isinstance(identity, str) or len(identity) != 64 or identity != anchor.get(identity_key):
-            return False
+            return "agentx_workload_mismatch"
     for side in (candidate, anchor):
         if not all(key in side for key in (GRADED_DURATION, GRADED_ERROR_RATE)):
-            return False
+            return "comparability_inputs_missing"
     ref_duration = axis_of(anchor, GRADED_DURATION)
     if ref_duration <= 0:
-        return False
+        return "comparability_inputs_missing"
     if abs(axis_of(candidate, GRADED_DURATION) / ref_duration - 1.0) * 100.0 > DURATION_DRIFT_PCT:
-        return False
-    return axis_of(candidate, GRADED_ERROR_RATE) <= axis_of(anchor, GRADED_ERROR_RATE)
+        return "duration_drift"
+    if axis_of(candidate, GRADED_ERROR_RATE) > axis_of(anchor, GRADED_ERROR_RATE) + ERROR_RATE_SLACK_PCT:
+        return "extra_failed_requests"
+    return ""
 
 
 def holds_within_band(
@@ -388,6 +399,7 @@ class GradedComparison:
     ``candidate`` and ``reference`` are both read on ``objective``. ``tput_*`` carry total throughput and are 0.0 off
     AgentX. ``degrade_reason`` names why the interactivity axis did not apply on a session that asked for it.
     ``veto_reason`` names a constraint that refused a candidate its throughput would otherwise have kept.
+    ``refused_by`` names, comma-joined, every interactivity gate the candidate failed.
     """
 
     objective: str
@@ -398,6 +410,7 @@ class GradedComparison:
     tput_reference: float = 0.0
     degrade_reason: str = ""
     veto_reason: str = ""
+    refused_by: str = ""
 
     @property
     def comparable(self) -> bool:
@@ -418,6 +431,7 @@ class GradedComparison:
 __all__ = [
     "AGENTX_KEEP_P50_THRESHOLD_PCT",
     "DURATION_DRIFT_PCT",
+    "ERROR_RATE_SLACK_PCT",
     "GradedComparison",
     "GRADED_AXIS_KEYS",
     "GRADED_DURATION",
@@ -436,6 +450,7 @@ __all__ = [
     "graded_axes_of",
     "graded_metric_key",
     "holds_within_band",
+    "incomparability_reason",
     "intvty_grading_enabled",
     "intvty_of",
     "intvty_serving_grading_enabled",
@@ -446,7 +461,6 @@ __all__ = [
     "passes_tput_guard",
     "perf_snapshot_from_mapping",
     "resolve_grading_anchor_perf",
-    "rounds_are_comparable",
     "stamp_output_per_gpu",
     "total_tput_of",
     "total_tput_per_chip_of",

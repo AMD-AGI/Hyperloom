@@ -28,7 +28,7 @@ from hyperloom.orchestrator.roles import (
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.writeback import _BASELINE_FINGERPRINT_KEYS, WritebackCollaborator
 from hyperloom.orchestrator.loop.proposals import ProposalsCollaborator
-from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType, NoIntentEmitted
 from hyperloom.orchestrator.state.objective import TargetGainObjective
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.loop.sub_agent_runner import (
@@ -177,7 +177,7 @@ async def test_stop_signals_follow_the_normal_terminal_path(session_dir, stop_si
         finalize_calls += 1
 
     async def _cancel_tick(_now):
-        raise asyncio.CancelledError()
+        raise asyncio.CancelledError
 
     if cancelled:
         monkeypatch.setattr(c.reconciler, "run", _cancel_tick)
@@ -234,7 +234,7 @@ async def test_mock_backend_records_calls():
     assert backend.calls[0]["tools"] == ["emit_intent"]
 
 
-# SubAgentRunner (standalone)
+# SubAgentRunner, standalone
 @pytest.mark.asyncio
 async def test_sub_agent_runner_succeeds(tmp_path):
     db = SqliteConnection(tmp_path / "x.db")
@@ -703,6 +703,46 @@ async def test_run_stops_once_a_backend_has_failed_for_the_unhealthy_window(sess
 
 
 @pytest.mark.asyncio
+async def test_a_no_intent_streak_stops_the_session_once(session_dir, monkeypatch):
+    """An agent that keeps answering without an intent ends the run, whichever way its turns come back empty."""
+    monkeypatch.setattr("hyperloom.orchestrator.loop.coordinator._NO_INTENT_STOP_TURNS", 3)
+    plan = ScriptedPlan(
+        turns=[MockTurn(raise_error=NoIntentEmitted("no envelope")), MockTurn(raw_text="thinking out loud")],
+        loop_last=True,
+    )
+    c = Coordinator(session_dir, backends=_build_backends({"orchestration": plan}))
+    try:
+        for _ in range(2):
+            await c.reactor_pass("orchestration")
+        assert not c.shared_state.stop_reason
+        for _ in range(2):
+            await c.reactor_pass("orchestration")
+        assert c.shared_state.stop_reason == "backend_unhealthy"
+        observations = await c.bus.tail(n=50, topic="observation")
+        streaks = [o.payload for o in observations if (o.payload or {}).get("kind") == "no_intent_streak"]
+        assert len(streaks) == 1
+        assert streaks[0]["agent"] == "orchestration"
+        assert streaks[0]["consecutive_turns"] == 3
+        assert streaks[0]["severity"] == "high"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_turn_with_an_intent_ends_the_no_intent_streak(session_dir, monkeypatch):
+    monkeypatch.setattr("hyperloom.orchestrator.loop.coordinator._NO_INTENT_STOP_TURNS", 3)
+    silent = MockTurn(raw_text="thinking out loud")
+    plan = ScriptedPlan(turns=[silent, silent, MockTurn(intents=[_heartbeat()]), silent, silent])
+    c = Coordinator(session_dir, backends=_build_backends({"orchestration": plan}))
+    try:
+        for _ in range(5):
+            await c.reactor_pass("orchestration")
+        assert not c.shared_state.stop_reason
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
 async def test_coordinator_propose_action_creates_pending(session_dir):
     propose = Intent(
         type=IntentType.PROPOSE_ACTION,
@@ -1087,7 +1127,7 @@ def _silent_backends() -> dict[str, object]:
 
 def _mute_action_scoring(coordinator: Coordinator) -> None:
     """No-op kept for back-compat."""
-    return None
+    return
 
 
 def _mk_task(kind: str, task_id: str = "t-aud-1") -> Task:

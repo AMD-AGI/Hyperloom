@@ -192,7 +192,7 @@ def build(session_dir: Path | str) -> dict[str, Any]:
     if isinstance(metadata, dict):
         metadata["warnings"] = list(warnings)
 
-    breakdown = {
+    return {
         "schema_version": schema_version,
         "exported_at_utc": exported_at,
         "exporter_version": EXPORTER_VERSION,
@@ -203,7 +203,6 @@ def build(session_dir: Path | str) -> dict[str, Any]:
         "critic": v6_critic,
         "robustness": v6_robustness,
     }
-    return breakdown
 
 
 def _load_assembled(

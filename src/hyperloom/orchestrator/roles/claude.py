@@ -315,6 +315,9 @@ class ClaudeBackend:
     _active_turn_diagnostic: dict[str, Any] | None = field(default=None, init=False)
     _last_turn_diagnostic: dict[str, Any] = field(default_factory=dict, init=False)
     _active_stderr: list[str] = field(default_factory=list, init=False)
+    # The CLI's own account from its latest init message: its version, the MCP tools it offered the model, and each
+    # MCP server's connection status.
+    _cli_init: dict[str, Any] = field(default_factory=dict, init=False)
     # SDK calls abandoned past their bound whose close is still running; held so the task is not collected mid-close.
     _abandoned_turns: set[asyncio.Task[Any]] = field(default_factory=set, init=False)
     # Stops of turns whose caller was cancelled: they outlive that caller, so they are held here until they finish.
@@ -550,20 +553,24 @@ class ClaudeBackend:
         return dict(self._last_turn_diagnostic)
 
     def get_mcp_setup_diagnostic(self) -> dict[str, Any]:
-        """Return the current MCP setup snapshot."""
+        """Return the current MCP setup snapshot: what Hyperloom configured and what the CLI offered the model."""
         schema = json.dumps(EMIT_INTENT_TOOL_INPUT_SCHEMA, sort_keys=True, separators=(",", ":"))
         diag = self.get_turn_diagnostic()
+        mcp_tools = self._cli_init.get("mcp_tools")
         return {
             "backend": type(self).__name__,
             "model": self.model,
             "sdk_name": getattr(self.sdk_module, "__name__", None),
             "sdk_version": getattr(self.sdk_module, "__version__", None),
-            "cli_version": os.environ.get("CLAUDE_CODE_VERSION") or None,
+            "cli_version": self._cli_init.get("cli_version"),
             "gateway_endpoint": self._gateway_endpoint_identifier(),
             "mcp_servers": diag.get("mcp_servers", []),
+            "mcp_server_status": self._cli_init.get("mcp_server_status"),
+            "mcp_tools": mcp_tools,
             "emit_intent": {
                 "qualified_name": EMIT_INTENT_TOOL_QUALIFIED,
                 "registered": bool(self.mcp_server_config is not None and self.mcp_tool_name),
+                "offered": None if mcp_tools is None else EMIT_INTENT_TOOL_QUALIFIED in mcp_tools,
                 "schema_sha256": hashlib.sha256(schema.encode("utf-8")).hexdigest(),
                 "setup_error": self._mcp_setup_error,
             },
@@ -585,7 +592,7 @@ class ClaudeBackend:
             "model": self.model,
             "sdk_name": getattr(self.sdk_module, "__name__", None),
             "sdk_version": getattr(self.sdk_module, "__version__", None),
-            "cli_version": os.environ.get("CLAUDE_CODE_VERSION") or None,
+            "cli_version": self._cli_init.get("cli_version"),
             "gateway_endpoint": self._gateway_endpoint_identifier(),
             "session_id_hash": None,
             "max_turns": None,
@@ -883,6 +890,8 @@ class ClaudeBackend:
                 # A stop whose cancellation was lost in the wait above (see ``_TurnStop``) is raised here.
                 turn_stop.raise_if_requested()
                 requests.observe(message)
+                if getattr(message, "subtype", None) == "init":
+                    self._record_cli_init(getattr(message, "data", None) or {})
                 if getattr(message, "subtype", None) == "api_retry":
                     # Each of these resets the idle timer above; only the turn's wall-clock bound ends a retry loop.
                     retry = getattr(message, "data", None) or {}
@@ -1024,6 +1033,30 @@ class ClaudeBackend:
                 self._active_turn_diagnostic["parse_errors"].append(str(exc))
             return None
         return validated[0] if validated else None
+
+    def _record_cli_init(self, data: dict[str, Any]) -> None:
+        """Keep what the CLI's init message says it offered the model; warn on the first one lacking emit_intent."""
+        tools = data.get("tools")
+        mcp_tools = sorted(tool for tool in tools if tool.startswith("mcp__")) if isinstance(tools, list) else None
+        if (
+            not self._cli_init
+            and self.mcp_server_config is not None
+            and mcp_tools is not None
+            and EMIT_INTENT_TOOL_QUALIFIED not in mcp_tools
+        ):
+            log.warning(
+                "Claude Code %s did not offer %s to the model; MCP tools offered: %s",
+                data.get("claude_code_version"),
+                EMIT_INTENT_TOOL_QUALIFIED,
+                mcp_tools,
+            )
+        self._cli_init = {
+            "cli_version": data.get("claude_code_version"),
+            "mcp_tools": mcp_tools,
+            "mcp_server_status": {server.get("name"): server.get("status") for server in data.get("mcp_servers") or []},
+        }
+        if self._active_turn_diagnostic is not None:
+            self._active_turn_diagnostic["cli_version"] = self._cli_init["cli_version"]
 
     def _record_message_diagnostic(self, message: Any) -> None:
         diag = self._active_turn_diagnostic
