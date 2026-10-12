@@ -4989,7 +4989,7 @@ def main() -> int:
         "--tracelens-root",
         default=os.environ.get("TRACELENS_ROOT", ""),
         help="TraceLens public checkout (TRACELENS_ROOT). Required: "
-        "src/hyperloom/inference_optimizer/assets/install_kernel_tools.sh exports it from "
+        "src/hyperloom/inference_optimizer/assets/install.sh exports it from "
         "kernel-agent.env.sh; pass --tracelens-root only when "
         "running outside the installer-managed env.",
     )
@@ -5430,7 +5430,7 @@ def main() -> int:
             if not tl_root_arg:
                 raise SystemExit(
                     "TraceLens root not provided: set TRACELENS_ROOT in env "
-                    "(src/hyperloom/inference_optimizer/assets/install_kernel_tools.sh writes it to "
+                    "(src/hyperloom/inference_optimizer/assets/install.sh writes it to "
                     "kernel-agent.env.sh) or pass --tracelens-root."
                 )
             tl_root = Path(tl_root_arg)
