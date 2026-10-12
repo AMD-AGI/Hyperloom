@@ -729,8 +729,8 @@ def test_agentx_revert_when_more_requests_failed_than_the_anchor(monkeypatch):
     assert graded.refused_by == "extra_failed_requests"
 
 
-def test_agentx_keeps_through_a_transient_failure_inside_the_slack(monkeypatch):
-    """One failed request in a full round is noise: it moves the median's rank by a fraction of a point."""
+def test_agentx_keeps_through_one_extra_failure_inside_the_slack(monkeypatch):
+    """One extra failure in a full round cannot carry the gain: it moves the median's rank by a fraction of a point."""
     _agentx(monkeypatch)
     state = _State(current_best=dict(_ANCHOR))
     graded = resolve_graded_comparison(
