@@ -333,50 +333,6 @@ def _evaluate_low_compute_gate(
     )
 
 
-def _build_trace_split_warning(
-    *,
-    trace_input: Path,
-    split_dir: Path,
-    split_rc: int,
-    mixed_count: int,
-    decode_count: int,
-    prefilldecode_count: int,
-) -> dict[str, Any]:
-    """Build the ``trace_split_no_steady_state`` trace-health warning.
-
-    Emitted when the TraceLens splitter produces no steady-state chunks,
-    so analyzing the raw trace would risk misleading high-idle results.
-
-    Args:
-        trace_input (Path): The raw trace that was handed to the splitter.
-        split_dir (Path): Directory the splitter wrote its outputs into.
-        split_rc (int): Return code from the splitter subprocess.
-        mixed_count (int): Number of ``mixed`` steady-state chunks produced.
-        decode_count (int): Number of ``decode_only`` chunks produced.
-        prefilldecode_count (int): Number of ``prefilldecode`` chunks produced.
-
-    Returns:
-        dict[str, Any]: A structured warning entry with code
-            ``trace_split_no_steady_state`` and the supporting counts/message.
-    """
-    return {
-        "code": "trace_split_no_steady_state",
-        "severity": "warning",
-        "trace_input": str(trace_input),
-        "split_dir": str(split_dir),
-        "split_returncode": split_rc,
-        "mixed_count": mixed_count,
-        "decode_only_count": decode_count,
-        "prefilldecode_count": prefilldecode_count,
-        "message": (
-            "TraceLens splitter produced no steady-state chunks; refusing "
-            "to analyze the raw trace because that can report misleading "
-            "high idle and suppress valid kernel opportunities. Verify the "
-            "profile request used TraceLens-compatible annotations and enough "
-            "NUM_PROMPTS to reach the requested start_step/num_steps window."
-        ),
-    }
-
 
 _DEFAULT_CHUNK_QUALITY_MIN_BUSY_RATIO = 0.05  # 5%
 # Alternate must beat the requested mode by this margin to avoid thrashing.
@@ -420,11 +376,8 @@ def _check_chunk_quality(
     as computed by the splitter from ``gpu_busy_duration / gpu_duration``).
 
     A chunk whose ``busy_ratio`` is below the configured threshold is refused
-    when a materially better alternative mode exists.  Because the splitter emits
-    ``busy_ratio`` as a measured field, the zero-GPU-events case
-    (``busy_ratio=0.0``) is handled here without a separate structural gate: a
-    chunk with no kernel events produces ``busy_ratio=0.0``, which naturally
-    fails the threshold check and triggers the alternate-mode search.
+    when a materially better alternative mode exists.  A chunk with zero GPU
+    events is refused unconditionally.
 
     Args:
         split_dir: Directory holding the splitter's ``execution_details.csv``.
@@ -518,13 +471,13 @@ def _check_chunk_quality(
             continue
         if oth_ratio >= threshold and (oth_ratio - sel_ratio) >= _CHUNK_QUALITY_ALTERNATE_MARGIN:
             alternates.append((other_mode, oth_ratio))
-    if not alternates:
+    sel_events = _num_gpu_events(selected_row)
+    if not alternates and sel_events > 0:
         return None  # No better mode exists; let roofline_failure_streak path handle.
 
     # Best alternate first (the retry path picks the head of non_empty_modes).
     alternates.sort(key=lambda mr: -mr[1])
     non_empty_modes = [m for m, _r in alternates]
-    sel_events = _num_gpu_events(selected_row)
     return {
         "code": "steady_state_chunk_low_quality",
         "severity": "blocking",
@@ -4432,6 +4385,18 @@ def _collect_split_chunks(
     }
 
     if not (mixed_chunks or decode_chunks or prefill_chunks or generic_chunks):
+        health_warnings.append({
+            "code": "trace_split_no_steady_state",
+            "severity": "blocking",
+            "trace_input": str(analysis_trace_path),
+            "split_dir": str(split_dir),
+            "chunks_by_mode": split_meta["chunks_by_mode"],
+            "message": (
+                "TraceLens splitter produced no steady-state chunks; refusing "
+                "to analyze the raw trace because that can report misleading "
+                "high idle and suppress valid kernel opportunities."
+            ),
+        })
         raise RuntimeError(
             "trace_split_no_steady_state: TraceLens splitter "
             "produced no steady-state chunks; refusing to run "
@@ -4823,7 +4788,7 @@ def main() -> int:
             "May also be set via env "
             "INFERENCE_OPTIMIZER_STEADY_STATE_MODE so the coordinator "
             "can re-issue roofline with a different mode after a "
-            "steady_state_chunk_empty warning lands."
+            "steady_state_chunk_low_quality warning lands."
         ),
     )
     args = parser.parse_args()

@@ -833,10 +833,7 @@ def test_trace_validate_keeps_the_two_verdict_axes_apart() -> None:
     assert out["verdict"]["decode_conclusions_valid"] is False
     assert out["verdict"]["silently_wrong"] is True
     assert out["probe_status"] == "ok"
-    # Chunks do not exist until the splitter runs, so the profile stage records the forecast the analysis stage will
-    # later be measured against instead.
     assert out["chunk_level"] == []
-    assert out["steady_state_forecast"]["viable_modes"] == ["mixed"]
 
     coverage = next(row for row in out["checks"] if row["check_id"] == CHECK_GRAPH_LAUNCH_COVERAGE)
     assert coverage["status"] == "failed"

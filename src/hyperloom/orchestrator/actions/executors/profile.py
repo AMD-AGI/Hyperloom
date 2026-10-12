@@ -252,22 +252,6 @@ def _probe_check_rows(certificate: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
-def _steady_state_forecast(certificate: dict[str, Any]) -> dict[str, Any]:
-    """Project the modes the splitter would survive, off the resolved rank."""
-    ranks = [row for row in (certificate.get("rank_level") or []) if isinstance(row, dict)]
-    if not ranks:
-        return {}
-    forecast = ranks[0].get("split_forecast") or {}
-    return {
-        "viable_modes": forecast.get("viable_modes"),
-        "viable_consumer_modes": forecast.get("viable_consumer_modes"),
-        "candidate_window_count": forecast.get("candidate_window_count"),
-        "candidate_windows_with_prefill": forecast.get("candidate_windows_with_prefill"),
-        "step_count": forecast.get("step_count"),
-        "prefill_step_count": forecast.get("prefill_step_count"),
-        "num_steps_effective": forecast.get("num_steps_effective"),
-    }
-
 
 def _build_trace_validate(
     health: dict[str, Any],
@@ -301,7 +285,6 @@ def _build_trace_validate(
         "trace_dir": str(trace_dir),
         "framework": str(framework or ""),
         "verdict": certificate.get("verdict") or {},
-        "steady_state_forecast": _steady_state_forecast(certificate),
         "trace_dir_level": certificate.get("trace_dir_level") or {},
         "rank_level": certificate.get("rank_level") or [],
         "chunk_level": [],

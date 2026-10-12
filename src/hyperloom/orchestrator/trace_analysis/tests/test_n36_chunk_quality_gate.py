@@ -212,6 +212,23 @@ def test_zero_gpu_events_chunk_fires_warning(tl_module, split_dir):
     assert "prefilldecode" in result["non_empty_modes"]
 
 
+def test_zero_gpu_events_no_alternate_still_fires(tl_module, split_dir):
+    """Zero-GPU-events chunk with no better alternate still fires the warning.
+
+    Prevents an empty chunk from reaching TraceLens analysis and producing a
+    misleading report, even when no retry target exists.
+    """
+    result = _run_quality_check(
+        tl_module,
+        split_dir,
+        mixed_row={"num_gpu_events": 0, "gpu_duration": 2000000.0, "gpu_busy_duration": 0.0},
+    )
+    assert result is not None
+    assert result["code"] == "steady_state_chunk_low_quality"
+    assert result["num_gpu_events"] == 0
+    assert result["busy_ratio"] == 0.0
+
+
 def test_missing_execution_details_csv_returns_none(tl_module, split_dir):
     """Back-compat: builds without execution_details.csv keep pass-through behaviour."""
     assert _run_quality_check(tl_module, split_dir) is None

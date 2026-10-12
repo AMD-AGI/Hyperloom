@@ -431,11 +431,7 @@ def _summarize_validate(profile_result: dict[str, Any]) -> dict[str, Any]:
         "blocking_reasons": [_clip(row) for row in _as_list(verdict.get("blocking_reasons"))],
         "warnings": [_clip(row) for row in _as_list(verdict.get("warnings"))],
         "severity": verdict.get("severity"),
-        "recommended_steady_state_mode": verdict.get("recommended_steady_state_mode"),
         "recommended_splitter_mode": verdict.get("recommended_splitter_mode"),
-        "modes_that_would_fail": verdict.get("modes_that_would_fail"),
-        "steady_state_forecast": _as_dict(validate.get("steady_state_forecast")),
-        "hot_kernel_list_would_be_suppressed": verdict.get("hot_kernel_list_would_be_suppressed"),
         "thresholds_effective": _as_dict(verdict.get("thresholds_effective")),
         "trace_quality": _summarize_trace_quality(validate),
         # Where the unbounded per-rank / per-candidate / per-chunk tables live.
