@@ -54,6 +54,7 @@ case "$(printf '%s\n' "$prompt" | head -n1)" in
   "# "*demo*)
     d="$USER_DATA_PATH/qwen/20260101T000000Z"; mkdir -p "$d"
     printf '{"stop_reason": "%s", "close_sequence_done": true}' "$STUB_STOP_REASON" > "$d/state.json"
+    mkdir -p "$d/reports"; echo '{}' > "$d/reports/final.json"
     echo "launched; state.json at $d" ;;
   *)
     [ "${STUB_SETUP:-}" = never ] && { echo "still installing"; exit 0; }
@@ -173,6 +174,18 @@ def test_unclean_stop_reason_fails_the_leg(leg_env: dict[str, str], stop_reason:
     result = _run(["baremetal-atom-3h"], {**leg_env, "STUB_STOP_REASON": stop_reason})
     assert result.returncode == 1
     assert f"FAIL: stop_reason={stop_reason}" in result.stdout
+
+
+def test_closed_run_without_a_stop_reason_is_not_a_pass(leg_env: dict[str, str]) -> None:
+    result = _run(["docker-vllm-3h"], {**leg_env, "STUB_STOP_REASON": "", "LEG_DEADLINE_S": "2"})
+    assert result.returncode == 1
+    assert "no terminal stop_reason within 2s" in result.stdout
+
+
+def test_relative_workspace_is_refused(leg_env: dict[str, str]) -> None:
+    result = _run(["docker-vllm-3h"], {**leg_env, "LEG_WORK_DIR": "work"})
+    assert result.returncode == 2
+    assert "LEG_WORK_DIR must be an absolute path" in result.stderr
 
 
 def test_setup_that_never_completes_fails_after_its_turn_budget(leg_env: dict[str, str]) -> None:

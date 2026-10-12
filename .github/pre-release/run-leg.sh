@@ -100,6 +100,9 @@ require_env() {
   [ -n "${LEG_MODEL_PATH:-}${LEG_MODELS_DIR:-}" ] || missing+=("LEG_MODEL_PATH or LEG_MODELS_DIR")
   [ "${#missing[@]}" -eq 0 ] || die_usage "missing required env: ${missing[*]}"
   case "$CI_VERSION" in */*|.|..) die_usage "CI_VERSION must be a single path segment" ;; esac
+  for k in LEG_WORK_DIR USER_DATA_PATH; do
+    case "${!k}" in /*) ;; *) die_usage "$k must be an absolute path" ;; esac
+  done
   MODEL_PATH="${LEG_MODEL_PATH:-${LEG_MODELS_DIR%/}/$MODEL_NAME}"
   [ -f "$MODEL_PATH/config.json" ] || die_usage "no config.json under the model path $MODEL_PATH"
 }
@@ -289,13 +292,10 @@ run_demo() {
       state="$sdir/state.json"
       stop="$(state_field "$state" stop_reason "")"
       close="$(state_field "$state" close_sequence_done false)"
-      # stop_reason first: a baseline_failed run also writes final.json.
+      # Only a recorded stop_reason decides: a baseline_failed run also writes final.json.
       if [ -n "$stop" ] && [ "$close" = true ]; then
         if is_clean_stop_reason "$stop"; then log "PASS: stop_reason=$stop after ${elapsed}s"; return 0; fi
         log "FAIL: stop_reason=$stop is not a clean terminal exit"; return 1
-      fi
-      if [ -z "$stop" ] && [ "$close" = true ] && [ -f "$sdir/reports/final.json" ]; then
-        log "PASS: final.json present and close sequence done after ${elapsed}s"; return 0
       fi
     fi
     if [ "$elapsed" -ge "$deadline" ]; then
