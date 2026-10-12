@@ -27,7 +27,6 @@ import pytest
 from hyperloom.orchestrator.trace_analysis import tracelens_analysis as tla
 
 
-
 def _make_vllm_trace(num_steps: int = 10, conc: int = 16) -> dict:
     """Build a minimal vLLM-style trace with step annotations.
 
@@ -159,8 +158,6 @@ def _write_trace(path: Path, trace: dict) -> None:
         json.dump(trace, f)
 
 
-
-
 class TestCollectSplitChunks:
     """Verify _collect_split_chunks handles both LLM and generic chunk layouts."""
 
@@ -225,8 +222,6 @@ class TestCollectSplitChunks:
                 tmp_path / "trace.json.gz",
                 [],
             )
-
-
 
 
 def _tracelens_importable() -> bool:
@@ -321,8 +316,6 @@ class TestSplitterE2E:
         assert meta["chunks_by_mode"]["generic"] >= 1
         assert chunk.exists()
         assert chunk.stat().st_size > 0
-
-
 
 
 def _request_handlers_importable() -> bool:
