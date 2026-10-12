@@ -395,7 +395,7 @@ omit = [
     # Byte-identical upstream KB Store SDK; validated by checksum contract tests.
     "src/kernelforge/knowledge/kb_store/remote_client.py",
     # CLI entry points (argument plumbing; exercised via the CLIs themselves).
-    "src/kernelforge/cli.py",
+    "src/kernelforge/cli/*",
     "src/kernelforge/gemm_tune/cli.py",
     "src/kernelforge/fusion/command.py",
     # GPU toolchain + profilers: shell out to rocprofv3 / rocprof-compute /
