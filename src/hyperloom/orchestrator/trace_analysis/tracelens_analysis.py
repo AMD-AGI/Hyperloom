@@ -4418,10 +4418,7 @@ def _enrich_kernel_contract(item: dict[str, Any], model_params: dict[str, Any] |
             contract["tp_size"] = int(mp.get("TP_SIZE") or mp.get("TENSOR_PARALLEL_SIZE"))
         contract.setdefault("reduce_op", "sum")
         contract["reference"] = f"torch.distributed.{op}"
-        contract["e2e_note"] = (
-            "comm-bound collective: a 1-GPU GEAK slot cannot "
-            "reproduce inter-GPU traffic; needs KERNEL_AGENT_NUM_GPUS>=world_size"
-        )
+        contract["e2e_note"] = "comm-bound collective: a 1-GPU GEAK slot cannot reproduce inter-GPU traffic"
     # --- attention ---
     elif any(t in name for t in ("mha", "flash", "attn", "attention", "paged")):
         contract["kind"] = "attention"
