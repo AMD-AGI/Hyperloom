@@ -18,22 +18,14 @@ from __future__ import annotations
 
 import gzip
 import json
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
-TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"
-if str(TOOLS_DIR) not in sys.path:
-    sys.path.insert(0, str(TOOLS_DIR))
+from hyperloom.orchestrator.trace_analysis import tracelens_analysis as tla
 
-import tracelens_analysis as tla
-
-# ---------------------------------------------------------------------------
-# Synthetic trace builders
-# ---------------------------------------------------------------------------
 
 
 def _make_vllm_trace(num_steps: int = 10, conc: int = 16) -> dict:
@@ -167,14 +159,6 @@ def _write_trace(path: Path, trace: dict) -> None:
         json.dump(trace, f)
 
 
-# ---------------------------------------------------------------------------
-# Tests: _build_split_cmd flag gating
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Tests: _collect_split_chunks
-# ---------------------------------------------------------------------------
 
 
 class TestCollectSplitChunks:
@@ -239,9 +223,6 @@ class TestCollectSplitChunks:
             )
 
 
-# ---------------------------------------------------------------------------
-# Tests: end-to-end splitting via TraceLens splitter subprocess
-# ---------------------------------------------------------------------------
 
 
 def _tracelens_importable() -> bool:
@@ -336,9 +317,6 @@ class TestSplitterE2E:
         assert chunk.stat().st_size > 0
 
 
-# ---------------------------------------------------------------------------
-# Tests: _build_trace_analyze_cmd flag wiring (request_handlers.py)
-# ---------------------------------------------------------------------------
 
 
 def _request_handlers_importable() -> bool:

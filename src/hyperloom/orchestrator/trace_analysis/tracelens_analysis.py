@@ -4418,7 +4418,7 @@ def _collect_split_chunks(
     prefill_chunks = _collect("prefilldecode_steady_state_*")
     generic_chunks = _collect("steady_state_*")
     # Exclude LLM-inference chunks from the generic set
-    llm_set = set(str(p) for p in mixed_chunks + decode_chunks + prefill_chunks)
+    llm_set = {str(p) for p in mixed_chunks + decode_chunks + prefill_chunks}
     generic_chunks = [p for p in generic_chunks if str(p) not in llm_set]
 
     split_meta = {

@@ -65,9 +65,9 @@ def _ta_ok(md: Path, *, hot: int = 0, host_bound: bool = False) -> dict[str, Any
 def _ta_empty_chunk() -> dict[str, Any]:
     return {
         "status": "failed",
-        "error": "steady_state_chunk_empty",
+        "error": "steady_state_chunk_low_quality",
         "trace_health_warnings": [
-            {"code": "steady_state_chunk_empty", "requested_mode": "mixed", "non_empty_modes": ["decode_only"]}
+            {"code": "steady_state_chunk_low_quality", "requested_mode": "mixed", "non_empty_modes": ["decode_only"]}
         ],
     }
 
