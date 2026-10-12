@@ -568,8 +568,13 @@ def observed_vllm_server_identity_from_log(path: str) -> dict[str, Any]:
     return observed_server_identity_from_log(path, "vllm")
 
 
-def _server_args_from_log(path: str, spec: _LaunchRecord, *, keep: frozenset[str] | None) -> dict[str, Any]:
-    """Parse a capped launch record, limited to ``keep`` when given."""
+def _read_launch_record(path: str, spec: _LaunchRecord) -> str:
+    """The launch record's payload, read under the line and character caps, or "".
+
+    The caps bound how much of a serving log is read for one record; crossing
+    either without finding a balanced payload is reported, because it is the one
+    case where "no record" might mean "not read far enough".
+    """
     chunks: list[str] = []
     remaining = _SERVER_ARGS_MAX_CHARS
     scanned_lines = 0
@@ -590,36 +595,52 @@ def _server_args_from_log(path: str, spec: _LaunchRecord, *, keep: frozenset[str
                 if remaining <= 0:
                     break
     except OSError:
-        return {}
-    text = "".join(chunks)
-    content = parsed or _balanced_record_payload(text, spec.marker)
-    if not content or len(content) > _SERVER_ARGS_MAX_CHARS:
-        if scanned_lines >= _SERVER_ARGS_MAX_LINES or remaining <= 0:
-            log.debug(
-                "launch record unavailable after scanning bounded log %s (lines=%d chars_remaining=%d)",
-                path,
-                scanned_lines,
-                remaining,
-            )
+        return ""
+    content = parsed or _balanced_record_payload("".join(chunks), spec.marker)
+    if content and len(content) <= _SERVER_ARGS_MAX_CHARS:
+        return content
+    if scanned_lines >= _SERVER_ARGS_MAX_LINES or remaining <= 0:
+        log.debug(
+            "launch record unavailable after scanning bounded log %s (lines=%d chars_remaining=%d)",
+            path,
+            scanned_lines,
+            remaining,
+        )
+    return ""
+
+
+def _record_fields(record: ast.expr) -> list[tuple[str, ast.expr]] | None:
+    """The ``name -> value`` pairs a launch record states, or None when it states none readably.
+
+    Both shapes the engines emit are accepted: a dict literal, and a call whose
+    keywords are the settings.
+    """
+    if isinstance(record, ast.Dict):
+        if len(record.keys) > _SERVER_ARGS_MAX_FIELDS:
+            return None
+        fields: list[tuple[str, ast.expr]] = []
+        for key, value in zip(record.keys, record.values):
+            if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
+                return None
+            fields.append((key.value, value))
+        return fields
+    if isinstance(record, ast.Call):
+        if len(record.keywords) > _SERVER_ARGS_MAX_FIELDS:
+            return None
+        if any(keyword.arg is None for keyword in record.keywords):
+            return None
+        return [(keyword.arg, keyword.value) for keyword in record.keywords]
+    return None
+
+
+def _server_args_from_log(path: str, spec: _LaunchRecord, *, keep: frozenset[str] | None) -> dict[str, Any]:
+    """Parse a capped launch record, limited to ``keep`` when given."""
+    content = _read_launch_record(path, spec)
+    if not content:
         return {}
     try:
-        record = ast.parse(content, mode="eval").body
-        fields: list[tuple[str, ast.expr]] = []
-        if isinstance(record, ast.Dict):
-            if len(record.keys) > _SERVER_ARGS_MAX_FIELDS:
-                return {}
-            for key, value in zip(record.keys, record.values):
-                if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
-                    return {}
-                fields.append((key.value, value))
-        elif isinstance(record, ast.Call):
-            if len(record.keywords) > _SERVER_ARGS_MAX_FIELDS:
-                return {}
-            for keyword in record.keywords:
-                if keyword.arg is None:
-                    return {}
-                fields.append((keyword.arg, keyword.value))
-        else:
+        fields = _record_fields(ast.parse(content, mode="eval").body)
+        if fields is None:
             return {}
         values: dict[str, Any] = {}
         for name, value in fields:
