@@ -21,6 +21,7 @@ from kernelforge.agent_backends import (
     watchdog_timeout_sec,
 )
 from kernelforge.config import Config
+from kernelforge.knowledge.wiki_tool import KnowledgeWikiTool, require_mcp_backend, wiki_servers, wiki_tool_names
 from kernelforge.orchestrator.agent_response import (
     AgentResponseIncompleteError,
     AgentResponseInfrastructureError,
@@ -286,6 +287,7 @@ class OrchestrationAgent:
         timeout_sec: int,
         max_turns: int,
         min_assignments: int = 1,
+        knowledge_wiki: KnowledgeWikiTool | None = None,
     ) -> None:
         if timeout_sec <= 0:
             raise ValueError("timeout_sec must be greater than zero")
@@ -293,10 +295,12 @@ class OrchestrationAgent:
             raise ValueError("max_turns must be greater than zero")
         if min_assignments <= 0:
             raise ValueError("min_assignments must be greater than zero")
+        require_mcp_backend(knowledge_wiki, backend, "orchestration")
         self.backend = backend
         self.timeout_sec = timeout_sec
         self.max_turns = max_turns
         self.min_assignments = min_assignments
+        self.knowledge_wiki = knowledge_wiki
         self.structured_output_diagnostics: dict[str, dict] = {}
         # What each planning phase cost this round, in the units the round is budgeted in.
         self.phase_durations_sec: dict[str, float] = {}
@@ -1256,6 +1260,8 @@ class OrchestrationAgent:
         max_reasoning_effort: str = "",
     ) -> AgentRunSpec:
         """One read-only orchestration turn."""
+        # A turn run without tools is a pure formatting turn; the knowledge base goes only where the other tools do.
+        knowledge_wiki = self.knowledge_wiki if tools else None
         return AgentRunSpec(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
@@ -1273,8 +1279,10 @@ class OrchestrationAgent:
                 write=False,
                 shell=False,
                 max_turns=(self.max_turns if max_turns is None else max_turns),
+                extra_tools=wiki_tool_names(knowledge_wiki),
             ),
             protected_globs=["*"],
+            mcp_servers=wiki_servers(knowledge_wiki, role),
         )
 
     def _backend_supports_resume(self) -> bool:
@@ -1914,6 +1922,7 @@ def make_orchestration_service(
         else None
     )
     specialist_probe = _specialist_probe_config(config)
+    knowledge_wiki = KnowledgeWikiTool.from_config(config)
     specialist_agents = {
         role_id: SpecialistAgent(
             definition=definition,
@@ -1925,6 +1934,7 @@ def make_orchestration_service(
             timeout_sec=effective_runtime.timeout_sec,
             max_turns=config.max_turns,
             probe=specialist_probe,
+            knowledge_wiki=knowledge_wiki,
         )
         for role_id, definition in resolved_definitions.items()
     }
@@ -1934,6 +1944,7 @@ def make_orchestration_service(
             timeout_sec=effective_runtime.timeout_sec,
             max_turns=config.max_turns,
             min_assignments=min(2, len(resolved_definitions)),
+            knowledge_wiki=knowledge_wiki,
         ),
         specialist_pool=SpecialistPool(
             specialist_agents,
@@ -1953,6 +1964,7 @@ def make_orchestration_service(
                     PLAN_CRITIC_MAX_TURNS,
                     max(1, config.max_turns),
                 ),
+                knowledge_wiki=knowledge_wiki,
             )
             if critic_backend is not None
             else None

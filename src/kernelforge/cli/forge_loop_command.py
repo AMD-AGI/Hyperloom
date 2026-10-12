@@ -2052,6 +2052,11 @@ def forge_loop(
     )
     analysis_mode = "profiled" if profiling_enabled else "static-only"
     print("  Analysis Agent: " + analysis_mode)
+    from kernelforge.knowledge.wiki_tool import KnowledgeWikiTool
+
+    knowledge_wiki = KnowledgeWikiTool.from_config(config)
+    if knowledge_wiki is not None:
+        print(f"  Knowledge base: {knowledge_wiki.root} (calls logged to {knowledge_wiki.log_path})")
 
     from kernelforge.orchestrator.orchestration import (
         default_specialist_definitions,
