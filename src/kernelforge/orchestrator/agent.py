@@ -22,6 +22,7 @@ from kernelforge.agent_backends import (
 )
 from kernelforge.agent_backends.session_resume import run_session_with_api_resume
 from kernelforge.config import Config, resolve_agent_model
+from kernelforge.knowledge.wiki_tool import KnowledgeWikiTool, require_mcp_backend, wiki_servers
 from kernelforge.workspace.edit_policy import TOOL_OWNED_UNTRACKED_GLOBS
 from kernelforge.knowledge.pr_knowledge.agent_tools import TOOL_NAMES as PR_TOOL_NAMES
 from kernelforge.loop.insession_gate import GateMeasurement, GateScope, InSessionGate
@@ -538,6 +539,8 @@ prints the tables). If this environment lacks rocprof-compute's deps the script 
             tool_timeout_sec=60,
             tools=tuple(f"mcp__pr_monitor__{name}" for name in PR_TOOL_NAMES),
         )
+    knowledge_wiki = KnowledgeWikiTool.from_config(config)
+    require_mcp_backend(knowledge_wiki, backend, "implementer")
 
     base_system_prompt = f"""\
 You are a GPU kernel optimization agent in an autonomous iteration loop.
@@ -822,7 +825,7 @@ Make your change(s) now.
                 if gate is not None and backend.capabilities.stop_hooks
                 else None
             ),
-            mcp_servers=pr_mcp_servers,
+            mcp_servers={**pr_mcp_servers, **wiki_servers(knowledge_wiki, "implementer")},
             progress_log=progress_log,
         )
 
