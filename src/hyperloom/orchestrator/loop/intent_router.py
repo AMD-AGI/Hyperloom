@@ -380,6 +380,14 @@ class IntentRouter(CoordinatorCollaborator):
         params.pop("domain", None)
         params.pop("tags", None)
 
+    def _consume_primatune_mandate(self, action_name: str, params: dict[str, Any], task_id: str) -> None:
+        """Mark the predictor mandate a specialist dispatch cites as consumed by ``task_id``."""
+        if action_name != "specialist":
+            return
+        from ..predictor.mandate import mark_mandate_consumed
+
+        mark_mandate_consumed(self.shared_state, params.get("primatune_mandate_id"), task_id)
+
     def _stamp_specialist_owner(self, params: dict[str, Any]) -> str:
         """Freeze patch ownership when a specialist task is created."""
         lever = patch_lever_kind(params)
@@ -995,11 +1003,8 @@ class IntentRouter(CoordinatorCollaborator):
             )
             return
         self.shared_state.reset_policy_denial_streak(action_name)
-        if action_name == "specialist":
-            from ..predictor.mandate import mark_mandate_consumed
-
-            # Only once a task exists, so a dispatch that bailed out above leaves the mandate on offer.
-            mark_mandate_consumed(self.shared_state, params.get("primatune_mandate_id"), task.task_id)
+        # Only once a task exists, so a dispatch that bailed out above leaves the mandate on offer.
+        self._consume_primatune_mandate(action_name, params, task.task_id)
         from .proposals import record_config_proposal
 
         record_config_proposal(
