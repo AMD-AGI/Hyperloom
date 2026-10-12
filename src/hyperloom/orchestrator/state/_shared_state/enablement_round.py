@@ -227,6 +227,16 @@ class EnablementRound:
         self.launch_log = log
         self.launch_observation_path = observation_path
 
+    @property
+    def accepted_extra_envs(self) -> dict[str, str]:
+        """The env overrides every launch re-applies on top of the base config."""
+        return dict((self.accepted_config or {}).get("extra_envs") or {})
+
+    @property
+    def accepted_extra_server_args(self) -> str:
+        """The server args every launch re-applies on top of the base config."""
+        return str((self.accepted_config or {}).get("extra_server_args") or "").strip()
+
     def record_patch_roots(self, roots: Mapping[str, str]) -> None:
         """Bind each patch to the tree it applied to, first writer wins.
 
