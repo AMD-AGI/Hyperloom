@@ -16,7 +16,9 @@ information and never fails an unrelated change. In a touched file:
   file at the base already had it at this value or worse (the backlog is the base's, as
   in the style guide's complexity ceiling);
 * a baselined unit whose value got worse than its recorded value and than its value at
-  the base fails;
+  the base fails, except module and function length within the configured growth
+  tolerance of a unit already over the limit at the base (see :func:`allowance`), which is
+  listed as *grew within tolerance*;
 * a baselined unit that improved, dropped under the threshold or disappeared fails as
   *out of date* until the baseline is tightened in the same change, with
   ``--update-baseline`` (which can only lower or remove entries), unless the change left
@@ -83,8 +85,10 @@ except ModuleNotFoundError:  # Python 3.10
 import code_metrics_checks as checks
 import code_metrics_design as design
 from code_metrics_collect import (
+    FUNCTION_LINES,
     METRICS,
     MODULE,
+    MODULE_LINES,
     Finding,
     Key,
     ToolError,
@@ -129,6 +133,12 @@ _NO_RAISE = (
     "module-lines-warning",
     "tuple-return-max-elements",
 )
+#: Growth tolerance of units already over the limit: (lines key, percent key or None) per metric.
+TOLERANCE = {
+    MODULE_LINES: ("module-lines-growth-tolerance", "module-lines-growth-tolerance-percent"),
+    FUNCTION_LINES: ("function-lines-growth-tolerance", None),
+}
+_TOLERANCE_KEYS = tuple(name for pair in TOLERANCE.values() for name in pair if name)
 #: A scope entry is a plain repository path: no pathspec magic, glob, ``.`` or ``..`` (a dotfile is fine).
 _SEGMENT = r"(?!\.\.?(?:/|$))[A-Za-z0-9_.-]+"
 _PLAIN_PATH = re.compile(rf"{_SEGMENT}(?:/{_SEGMENT})*/?")
@@ -160,6 +170,8 @@ class Config:
     contracts: str
     #: Where the A10 and A12 checks collect enums and implementations.
     vocabulary_roots: tuple[str, ...]
+    #: The :data:`TOLERANCE` keys the table sets; an absent one is 0 (no tolerance).
+    tolerance: dict[str, int] = dataclasses.field(default_factory=dict)
 
 
 def parse_config(text: str) -> Config | None:
@@ -180,6 +192,7 @@ def parse_config(text: str) -> Config | None:
         params={name: int(table[name]) for name in _NO_RAISE},
         contracts=contracts,
         vocabulary_roots=_scope(table, "vocabulary-roots"),
+        tolerance={name: int(table[name]) for name in _TOLERANCE_KEYS if name in table},
     )
 
 
@@ -247,7 +260,24 @@ def config_loosening(head: Config, base: Config) -> list[str]:
         for name in _NO_RAISE
         if head.params[name] > base.params[name]
     ]
+    problems += [
+        f"`{name}` raised from {base.tolerance[name]} to {head.tolerance.get(name, 0)}"
+        for name in _TOLERANCE_KEYS
+        if name in base.tolerance and head.tolerance.get(name, 0) > base.tolerance[name]
+    ]
     return problems
+
+
+def allowance(metric: str, anchor: int, tolerance: dict[str, int]) -> int:
+    """How far a unit already over the limit may grow past ``anchor``: 0 outside :data:`TOLERANCE`.
+
+    Module length: max(lines, percent of the anchor, rounded down); function length: lines.
+    """
+    if metric not in TOLERANCE:
+        return 0
+    lines, percent = TOLERANCE[metric]
+    share = anchor * tolerance.get(percent, 0) // 100 if percent else 0
+    return max(tolerance.get(lines, 0), share)
 
 
 def load_baseline(text: str) -> dict[Key, int]:
@@ -317,8 +347,15 @@ def _by_identity(keys: Iterable[Key]) -> dict[tuple[str, str], list[Key]]:
     return groups
 
 
-def compare(findings: dict[Key, Finding], baseline: dict[Key, int], outcome: Outcome) -> None:
-    """Fill ``outcome.new``, ``.worsened`` and ``.stale``; outside ``outcome.touched``, ``.untouched``."""
+def compare(
+    findings: dict[Key, Finding], baseline: dict[Key, int], outcome: Outcome, tolerance: dict[str, int] | None = None
+) -> None:
+    """Fill ``outcome.new``, ``.worsened``, ``.tolerated`` and ``.stale``; outside ``outcome.touched``, ``.untouched``.
+
+    A baselined unit that grew within :func:`allowance` of its recorded value goes to
+    ``.tolerated`` instead of ``.worsened``; with a base, :func:`confirm_tolerance` then
+    holds it to the base as well.
+    """
     new = {key: f for key, f in findings.items() if key not in baseline}
     gone = {key: value for key, value in baseline.items() if key not in findings}
     moves = match_moves(gone, {key: f.value for key, f in new.items()})
@@ -342,6 +379,8 @@ def compare(findings: dict[Key, Finding], baseline: dict[Key, int], outcome: Out
     outcome.untouched = [(f.key, None, f) for f in fresh if not judged(f.path)]
     outcome.untouched += [(f.key, was, f) for f, was in worsened if not judged(f.path)]
     outcome.untouched += [entry for entry in stale if not judged(entry[0][1])]
+    anchors = {f.key: was for f, was in outcome.worsened}
+    outcome.tolerated, outcome.worsened = split_by_tolerance(outcome.worsened, tolerance or {}, anchors)
 
 
 def growth(
@@ -421,6 +460,40 @@ def base_values(root: Path, since: str, paths: Iterable[str], config: Config) ->
     return {key: f.value for key, f in found.items()}
 
 
+def confirm_tolerance(outcome: Outcome, base: dict[Key, int], tolerance: dict[str, int]) -> None:
+    """Return to ``outcome.worsened`` each tolerated unit the tolerance does not cover at the base.
+
+    The tolerance is for units already over the limit: one under the limit at the base
+    (absent from ``base``) crosses it again in this change and fails as before. Its anchor
+    is the recorded value, or the base's when main brought the unit lower without
+    tightening the entry, so a unit main improved cannot grow back by the stale gap.
+    """
+
+    entries = [(f, was) for f, was, _top in outcome.tolerated]
+    anchors = {f.key: min(was, base[f.key]) for f, was in entries if f.key in base}
+    outcome.tolerated, failing = split_by_tolerance(entries, tolerance, anchors)
+    outcome.worsened = sorted(outcome.worsened + failing, key=lambda entry: entry[0].key)
+
+
+def split_by_tolerance(
+    entries: list[tuple[Finding, int]], tolerance: dict[str, int], anchors: dict[Key, int]
+) -> tuple[list[tuple[Finding, int, int]], list[tuple[Finding, int]]]:
+    """(finding, recorded) entries within :func:`allowance` of their anchor, with the ceiling; and the rest.
+
+    A unit without an anchor gets no tolerance.
+    """
+    tolerated: list[tuple[Finding, int, int]] = []
+    failing: list[tuple[Finding, int]] = []
+    for finding, recorded in entries:
+        anchor = anchors.get(finding.key)
+        top = None if anchor is None else anchor + allowance(finding.metric, anchor, tolerance)
+        if top is not None and not worse(finding.metric, finding.value, top):
+            tolerated.append((finding, recorded, top))
+        else:
+            failing.append((finding, recorded))
+    return tolerated, failing
+
+
 def excuse_base_backlog(outcome: Outcome, base: dict[Key, int]) -> None:
     """Move new or worse units the base already had at that value or worse to ``outcome.base_backlog``.
 
@@ -434,8 +507,10 @@ def excuse_base_backlog(outcome: Outcome, base: dict[Key, int]) -> None:
 
     outcome.base_backlog = [(f, base[f.key]) for f in outcome.new if carried(f)]
     outcome.base_backlog += [(f, base[f.key]) for f, _was in outcome.worsened if carried(f)]
+    outcome.base_backlog += [(f, base[f.key]) for f, _was, _top in outcome.tolerated if carried(f)]
     outcome.new = [f for f in outcome.new if not carried(f)]
     outcome.worsened = [(f, was) for f, was in outcome.worsened if not carried(f)]
+    outcome.tolerated = [entry for entry in outcome.tolerated if not carried(entry[0])]
 
 
 def excuse_base_drift(outcome: Outcome, base: dict[Key, int]) -> None:
@@ -494,6 +569,9 @@ def compare_with_base(root: Path, ref: str, config: Config, outcome: Outcome, pr
     outcome.growth = growth(outcome.baseline, outcome.base_baseline, present)
     outcome.loosened = config_loosening(config, base_config) + scope_loss(root, config, base_config)
     outcome.gate_changes = gate_changes(root, ref, config, base_config)
+    unset = [name for name in _TOLERANCE_KEYS if name in config.tolerance and name not in base_config.tolerance]
+    if unset:
+        outcome.notes.append(f"`{ref}` does not set {', '.join(f'`{n}`' for n in unset)}; this change introduces it.")
 
 
 def read_pull_request(args: argparse.Namespace, outcome: Outcome) -> checks.PullRequest | None:
@@ -552,11 +630,14 @@ def run(args: argparse.Namespace, outcome: Outcome) -> int:
         git_show(root, args.base_ref, _PYPROJECT)
         since = merge_base(root, args.base_ref)
         outcome.touched = checks.touched_files(root, since)
-    compare(findings, outcome.baseline, outcome)
+    compare(findings, outcome.baseline, outcome, config.tolerance)
     if since:
         paths = {f.path for f in outcome.new} | {f.path for f, _ in outcome.worsened}
+        paths |= {f.path for f, _was, _top in outcome.tolerated}
         paths |= {key[1] for key, _was, _now in outcome.stale if key[0] in PER_FILE}
         at_base = base_values(root, since, paths, config)
+        outcome.at_base, outcome.base_metrics = at_base, PER_FILE
+        confirm_tolerance(outcome, at_base, config.tolerance)
         excuse_base_backlog(outcome, at_base)
         excuse_base_drift(outcome, at_base)
         compare_with_base(root, args.base_ref, config, outcome, findings)

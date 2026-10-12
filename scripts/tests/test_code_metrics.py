@@ -1039,6 +1039,135 @@ def test_a_worse_than_baseline_unit_the_base_already_had_is_backlog(repo: Repo) 
     assert repo.gate("--base-ref", base)[0] == 1
 
 
+# --- growth tolerance of units already over the limit -------------------------
+
+TOLERATED = "### Grew within tolerance (already over the limit; not failing)"
+FN, MOD = collect.FUNCTION_LINES, collect.MODULE_LINES
+
+
+def lines(metric: str, path: str, value: int) -> collect.Finding:
+    return collect.Finding(metric, path, "f" if metric == FN else collect.MODULE, value, 3 if metric == FN else 1)
+
+
+def grow(repo: Repo, finding: collect.Finding, recorded: int, at_base: int | None) -> tuple[int, str]:
+    """Gate a change that leaves ``finding``, recorded at ``recorded``, at ``at_base`` on the base (None: under)."""
+    repo.write_baseline({finding.key: recorded})
+    base = repo.commit()
+    repo.touch(finding.path)
+    repo.findings = [finding]
+    repo.at_base = {} if at_base is None else {finding.key: at_base}
+    return repo.gate("--base-ref", base)
+
+
+@pytest.mark.parametrize(
+    ("metric", "recorded", "at_base", "now", "code"),
+    [
+        # Function length: 10 lines over the recorded value.
+        (FN, 100, 100, 110, 0),
+        (FN, 100, 100, 111, 1),
+        # Module length: max(10, 1% of the recorded value, rounded down); 1% of 2689 is 26.
+        (MOD, 2689, 2695, 2715, 0),
+        (MOD, 2689, 2695, 2716, 1),
+        # The anchor is the recorded value, not the base: main's own drift uses up the allowance.
+        (FN, 100, 108, 111, 1),
+        # ...or the base's value when main brought the unit below its entry without tightening it,
+        # so the stale gap is not extra allowance.
+        (FN, 120, 115, 125, 0),
+        (FN, 120, 115, 126, 1),
+        (FN, 120, 100, 121, 1),
+    ],
+)
+def test_a_unit_already_over_may_grow_within_the_tolerance_and_not_one_line_more(
+    repo: Repo, metric, recorded, at_base, now, code
+) -> None:
+    got, report = grow(repo, lines(metric, "src/a.py", now), recorded, at_base)
+    assert got == code, report
+    if code:
+        assert f"| {recorded} | {at_base} | {now} |" in section(report, WORSE)
+        assert section(report, TOLERATED) == ""
+    else:
+        assert f"| {recorded} | {at_base} | {now} |" in section(report, TOLERATED)
+        assert section(report, WORSE) == ""
+        assert "## Code metrics gate: PASSED" in report
+
+
+def test_a_unit_under_the_limit_at_the_base_gets_no_tolerance(repo: Repo) -> None:
+    """A baselined unit main brought under the limit crosses it again: worse, as before."""
+    code, report = grow(repo, lines(FN, "src/a.py", 101), 100, None)
+    assert code == 1, report
+    assert "| 100 | under the limit | 101 |" in section(report, WORSE)
+
+
+@pytest.mark.parametrize("metric", [FN, MOD])
+def test_a_unit_crossing_the_limit_for_the_first_time_gets_no_tolerance(repo: Repo, metric: str) -> None:
+    repo.write_baseline({})
+    base = repo.commit()
+    repo.touch("src/a.py")
+    repo.findings = [lines(metric, "src/a.py", 81 if metric == FN else 1201)]
+    code, report = repo.gate("--base-ref", base)
+    assert code == 1, report
+    assert section(report, NEW) and section(report, TOLERATED) == ""
+
+
+def test_complexity_gets_no_tolerance(repo: Repo) -> None:
+    code, report = grow(repo, cc("src/a.py", "f", 26), 25, 25)
+    assert code == 1, report
+    assert "| 25 | 25 | 26 |" in section(report, WORSE)
+
+
+def test_without_a_base_the_tolerance_is_against_the_recorded_value(repo: Repo) -> None:
+    repo.write_baseline({key("src/a.py", "f", FN): 100})
+    repo.findings = [lines(FN, "src/a.py", 110)]
+    code, report = repo.gate()
+    assert code == 0, report
+    assert "| 100 | 110 | 110 |" in section(report, TOLERATED)
+    repo.findings = [lines(FN, "src/a.py", 111)]
+    assert repo.gate()[0] == 1
+
+
+def test_raising_the_growth_tolerance_is_loosening(repo: Repo) -> None:
+    repo.write_baseline({})
+    base = repo.commit()
+    pyproject = repo.path / "pyproject.toml"
+    text = pyproject.read_text(encoding="utf-8")
+    assert "function-lines-growth-tolerance = 10\n" in text
+    pyproject.write_text(
+        text.replace("function-lines-growth-tolerance = 10\n", "function-lines-growth-tolerance = 11\n")
+    )
+    code, report = repo.gate("--base-ref", base)
+    assert code == 1
+    assert "`function-lines-growth-tolerance` raised from 10 to 11" in section(
+        report, "### Gate configuration loosened"
+    )
+
+
+def test_a_base_without_the_tolerance_keys_is_a_note_not_loosening(repo: Repo) -> None:
+    pyproject = repo.path / "pyproject.toml"
+    text = pyproject.read_text(encoding="utf-8")
+    pyproject.write_text(text.replace("module-lines-growth-tolerance-percent = 1\n", ""), encoding="utf-8")
+    repo.write_baseline({})
+    base = repo.commit()
+    pyproject.write_text(text, encoding="utf-8")
+    code, report = repo.gate("--base-ref", base)
+    assert code == 0, report
+    assert "does not set `module-lines-growth-tolerance-percent`; this change introduces it." in report
+
+
+def test_out_of_date_entries_lead_the_report_with_the_command(repo: Repo) -> None:
+    repo.write_baseline({key("src/a.py", "f"): 21})
+    base = repo.commit()
+    repo.touch("src/a.py")
+    repo.at_base = {key("src/a.py", "f"): 21}
+    code, report = repo.gate("--base-ref", base)
+    assert code == 1
+    head = report.split("\nJudged:")[0]
+    assert "run `python scripts/code_metrics.py --update-baseline`" in head and "the only thing failing" in head
+    repo.findings = [cc("src/b.py", "g", 25)]
+    repo.touch("src/b.py")
+    head = repo.gate("--base-ref", base)[1].split("\nJudged:")[0]
+    assert "--update-baseline" in head and "the only thing failing" not in head
+
+
 def write_pr(repo: Repo, labels: list[str], **fields) -> str:
     path = repo.path.parent / "pr.json"
     path.write_text(json.dumps({"number": 7, "labels": labels, "title": "t", "body": "b", **fields}), encoding="utf-8")
@@ -1059,7 +1188,7 @@ def test_the_override_label_waives_new_worse_and_growth_but_lists_them_all(repo:
     assert code == 0, report
     assert f"## Code metrics gate: PASSED with waived findings (`{LABEL}`)" in report
     waived = f" (waived by the `{LABEL}` label)"
-    assert "`src/a.py:3` `f` | Cyclomatic complexity | 21 | 23 |" in section(report, WORSE + waived)
+    assert "`src/a.py:3` `f` | Cyclomatic complexity | 21 | under the limit | 23 |" in section(report, WORSE + waived)
     assert "`src/b.py` `g` | Cyclomatic complexity | absent | 30 |" in section(report, GREW + waived)
     assert f"{NEW}{waived}: 30" in report and "...and 5 more" in report
     # The job log is the full list: every waived row, untruncated.

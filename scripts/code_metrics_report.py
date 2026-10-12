@@ -89,6 +89,12 @@ class Outcome:
     touched: set[str] | None = None
     new: list[Finding] = dataclasses.field(default_factory=list)
     worsened: list[tuple[Finding, int]] = dataclasses.field(default_factory=list)
+    #: Units already over the limit that grew within the growth tolerance, not failing:
+    #: (finding, recorded value, the most the tolerance allows).
+    tolerated: list[tuple[Finding, int, int]] = dataclasses.field(default_factory=list)
+    #: Values over the limits at the merge base, for the metrics in ``base_metrics`` (empty without a base).
+    at_base: dict[Key, int] = dataclasses.field(default_factory=dict)
+    base_metrics: tuple[str, ...] = ()
     #: (baseline key, recorded value, the tree's finding: None when gone, another key when moved)
     stale: list[tuple[Key, int, Finding | None]] = dataclasses.field(default_factory=list)
     #: Out-of-date entries the base had already outgrown: (key, recorded, base value or None, finding).
@@ -136,7 +142,7 @@ def render(outcome: Outcome, link_base: str = "", max_rows: int | None = _MAX_RO
     verdict = "FAILED" if outcome.failed else "PASSED"
     if outcome.waived and outcome.waivable_failed:
         verdict += f" with waived findings (`{OVERRIDE_LABEL}`)"
-    parts = [f"{MARKER}\n## Code metrics gate: {verdict}\n", _scope(outcome), _summary(outcome)]
+    parts = [f"{MARKER}\n## Code metrics gate: {verdict}\n", _stale_first(outcome), _scope(outcome), _summary(outcome)]
     parts += _sections(outcome, link_base, max_rows)
     if outcome.failed or outcome.waived:
         parts.append(_how_to_fix(outcome))
@@ -147,6 +153,40 @@ def render(outcome: Outcome, link_base: str = "", max_rows: int | None = _MAX_RO
         f"<sub>Thresholds and sources: `[tool.hyperloom.code_metrics]` in pyproject.toml. Tools: {tools}.</sub>\n"
     )
     return "\n".join(part for part in parts if part)
+
+
+def _stale_first(outcome: Outcome) -> str:
+    """The one-command fix for out-of-date entries, up front: they mean this change improved something."""
+    if not outcome.stale:
+        return ""
+    rest = bool(
+        outcome.error or (outcome.waivable_failed and not outcome.waived) or outcome.loosened or outcome.problems
+    )
+    alone = "" if rest else " That is the only thing failing."
+    return (
+        f"> [!TIP]\n> {len(outcome.stale)} baseline entries are out of date because this change improved them: run "
+        f"`{UPDATE_COMMAND}` and commit `{outcome.baseline_path}`.{alone}\n"
+    )
+
+
+def _base(outcome: Outcome, key: Key) -> object:
+    """The unit's value at the merge base, as far as the gate measured it there."""
+    if key[0] not in outcome.base_metrics:
+        return "n/a"
+    return outcome.at_base.get(key, "under the limit")
+
+
+def _growth_table(
+    outcome: Outcome, title: str, header: list[str], rows: list[list[object]], max_rows: int | None
+) -> str:
+    """A table of grown units with a *Base* column after *Baseline* when the run measured a base.
+
+    The baseline value alone overstates a change's growth when main already grew the unit
+    past its entry; the base value is what the verdict compares with.
+    """
+    if not outcome.base_metrics:
+        return _table(title, header, [row[:3] + row[4:] for row in rows], max_rows)
+    return _table(title, [*header[:3], _BASE, *header[3:]], rows, max_rows)
 
 
 def _scope(outcome: Outcome) -> str:
@@ -215,10 +255,14 @@ def _sections(outcome: Outcome, link_base: str, max_rows: int | None) -> list[st
             [[_unit(f, link_base), _label(f.metric), f.value, _limit(f.metric, limits)] for f in outcome.new],
             max_rows,
         ),
-        _table(
+        _growth_table(
+            outcome,
             f"Worse than the baseline{waived}",
             _UNIT_CHANGE,
-            [[_unit(f, link_base), _label(f.metric), was, f.value] for f, was in outcome.worsened],
+            [
+                [_unit(f, link_base), _label(f.metric), was, _base(outcome, f.key), f.value]
+                for f, was in outcome.worsened
+            ],
             max_rows,
         ),
         _table(
@@ -264,6 +308,16 @@ def _informational(outcome: Outcome, link_base: str, max_rows: int | None) -> li
         [[_unit(f, link_base), _label(f.metric), was, f.value] for f, was in outcome.base_backlog],
         max_rows,
     )
+    tolerated = _growth_table(
+        outcome,
+        "Grew within tolerance (already over the limit; not failing)",
+        [*_UNIT_CHANGE, "Tolerated up to"],
+        [
+            [_unit(f, link_base), _label(f.metric), was, _base(outcome, f.key), f.value, top]
+            for f, was, top in outcome.tolerated
+        ],
+        max_rows,
+    )
     rows = [
         [_key(key), _label(key[0]), "absent" if was is None else was, _now(key, now, link_base)]
         for key, was, now in outcome.untouched
@@ -280,7 +334,7 @@ def _informational(outcome: Outcome, link_base: str, max_rows: int | None) -> li
         ],
         max_rows,
     )
-    return [warn, backlog, drift, outside]
+    return [tolerated, warn, backlog, drift, outside]
 
 
 def _all_problems(outcome: Outcome) -> list:
