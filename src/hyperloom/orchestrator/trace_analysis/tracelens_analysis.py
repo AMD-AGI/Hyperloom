@@ -469,8 +469,6 @@ def _check_chunk_quality(
             continue
         other_row = _row_for(chunks[0])
         oth_ratio = _read_busy_ratio(other_row)
-        if oth_ratio is None:
-            continue
         if oth_ratio >= threshold and (oth_ratio - sel_ratio) >= _CHUNK_QUALITY_ALTERNATE_MARGIN:
             alternates.append((other_mode, oth_ratio))
     sel_events = _num_gpu_events(selected_row)
