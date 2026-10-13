@@ -218,7 +218,9 @@ def _confirm_task_stopped_in_transaction(
             else "SELECT lane, holder_id, '' AS owner_scope FROM leases WHERE task_id=?"
         )
         rows = list(db.execute(query, (task_id,)))
-        if any(row["owner_scope"] != owner_scope for row in rows):
+        # A bring-up round's lane never records a scope; the round reconciler owns it, not the execution.
+        scoped = [row for row in rows if not owner_scope or row["lane"] != "bringup_round"]
+        if any(row["owner_scope"] != owner_scope for row in scoped):
             raise CleanupConfirmationError(
                 "confirmation is limited to strictly empty owner scope on every target lease"
                 if not owner_scope
@@ -347,6 +349,8 @@ def _confirm_scope_gone_in_transaction(
     now = datetime.fromisoformat(confirmed_at)
     target_tasks: set[str] = set()
     for row in db.execute("SELECT lane, holder_id, task_id, owner_scope, expires_at FROM leases"):
+        if row["lane"] == "bringup_round":
+            continue
         if row["owner_scope"] == owner_scope:
             target_tasks.add(row["task_id"])
         elif _lease_is_live(row["expires_at"], now):

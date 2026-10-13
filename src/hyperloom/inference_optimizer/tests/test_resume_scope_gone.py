@@ -126,6 +126,32 @@ def test_lost_scope_blocks_resume_until_confirmed_then_work_is_redone(tmp_path, 
     assert record["cancelled_tasks"] == sorted(running)
 
 
+@pytest.mark.parametrize("round_expires_unix", [1.0, 32503680000.0])
+def test_open_bringup_round_held_by_the_lost_task_stays_with_the_round_reconciler(tmp_path, round_expires_unix):
+    from hyperloom.orchestrator.bus.resource_lock import hold_round_lane
+
+    path = _session(tmp_path, LOST_SHAPES["integrate_and_specialist"])
+    with closing(sqlite3.connect(path)) as db, db:
+        db.execute(
+            "INSERT INTO bringup_rounds (round_id, state, holder_task_id, opened_unix, renewed_unix, expires_unix)"
+            " VALUES ('round-1', 'open', 'integrate-1', 0, 0, ?)",
+            (round_expires_unix,),
+        )
+        hold_round_lane(
+            db.cursor(), round_id="round-1", holder_task_id="integrate-1", expires_unix=round_expires_unix, now_unix=0
+        )
+    rounds = _rows(path, "SELECT * FROM bringup_rounds")
+    with pytest.raises(ResumeBlocked):
+        ensure_resume_safe(tmp_path, owner_scope=HERE)
+
+    result = confirm_scope_gone(tmp_path, owner_scope=LOST, reason=REASON, current_scope=HERE)
+
+    assert result["status"] == "confirmed" and result["released_leases"] == 6
+    assert [row["lane"] for row in _rows(path, "SELECT lane FROM leases")] == ["bringup_round"]
+    assert _rows(path, "SELECT * FROM bringup_rounds") == rounds
+    ensure_resume_safe(tmp_path, owner_scope=HERE)
+
+
 def test_confirmation_is_idempotent(tmp_path):
     path = _session(tmp_path, LOST_SHAPES["explore"])
     confirm_scope_gone(tmp_path, owner_scope=LOST, reason=REASON, current_scope=HERE)
