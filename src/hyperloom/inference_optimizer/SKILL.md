@@ -547,10 +547,11 @@ launching; do not ask the user for these values again.
 
 Each optimize launch starts the service when nothing serves that URL, in the
 same environment as the optimizer (inside the container in docker mode). Its
-data and `service.log` live under `$USER_DATA_PATH/experience-kb`, and it keeps
-running after the run for the next one. When it cannot be started, the launch
-logs a warning and continues: reads return nothing and writes wait in
-`$USER_DATA_PATH/experience-kb/spool` until the service serves again, so they
+data and `service.log` live under its data home, `$HYPERLOOM_KB_HOME` when set,
+otherwise `$USER_DATA_PATH/experience-kb`, and it keeps running after the run
+for the next one. When it cannot be started, the launch logs a warning and
+continues: reads return nothing and writes wait in `spool/` under that data home
+until the service serves again, so they
 survive a removed container. A non-loopback `HYPERLOOM_KB_URL` names a
 service this workspace does not run; Hyperloom connects to it without starting
 anything. Without `HYPERLOOM_KB_URL`, Hyperloom runs without Experience KB reads

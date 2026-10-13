@@ -186,9 +186,12 @@ authoring specialist's prompt. The rungs, in increasing complexity:
    there. A kept runtime is re-provisioned for every later round, whatever
    that round's failure.
 4. **Rung 4 — source localization.** Localize a merged-PR or vendored
-   closure into the source tree the server imports. A change that touches
-   compiled or build-backend files cannot be satisfied by a plain source
-   edit, so it defers to Rung 5.
+   closure into the source tree the server imports. Only the files under the
+   framework's package are localized. A change that touches compiled or
+   build-backend files cannot be satisfied by a plain source edit, and one
+   that is oversize or does not apply to the tree is not backported either;
+   in each case the round runs on its own patches, and a compiled gap is
+   left to Rung 5.
 5. **Rung 5 — off-loop compiled build.** Perform a compiled-component build
    (AITER kernels, sgl-kernel, or vLLM-from-source). Builds run *off* the
    coordinator tick loop on a dedicated single-slot build lane: each build
