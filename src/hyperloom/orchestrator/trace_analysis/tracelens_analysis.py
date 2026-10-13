@@ -433,7 +433,10 @@ def _check_chunk_quality(
         """
         if row is None:
             return 0.0
-        return max(0.0, min(1.0, float(row["busy_ratio"])))
+        try:
+            return max(0.0, min(1.0, float(row.get("busy_ratio", 0.0))))
+        except (TypeError, ValueError):
+            return 0.0
 
     def _num_gpu_events(row: "dict[str, str] | None") -> int:
         """Read ``num_gpu_events`` from the splitter CSV row for observability.
