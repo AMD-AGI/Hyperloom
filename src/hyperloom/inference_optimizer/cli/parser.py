@@ -317,8 +317,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--xdit-model-name",
         default=None,
         metavar="NAME",
-        help="xDiT HuggingFace repo ID (e.g., 'black-forest-labs/FLUX.2-dev'). "
-        "Required for xDiT runs.",
+        help="xDiT HuggingFace repo ID (e.g., 'black-forest-labs/FLUX.2-dev'). Required for xDiT runs.",
     )
     opt.add_argument(
         "--nodes",
