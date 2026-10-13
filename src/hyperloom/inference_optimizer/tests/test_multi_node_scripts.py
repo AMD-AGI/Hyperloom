@@ -1305,7 +1305,9 @@ def test_export_ray_address_to_os(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     monkeypatch.setenv("HYPERLOOM_MN_EXT_SERVICE_URL", "http://head:8888")
     monkeypatch.setenv("HYPERLOOM_MN_EXT_HEAD_IP", "10.0.0.5")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", "rayjob")
-    monkeypatch.delenv("RAY_ADDRESS", raising=False)
+    # delenv on an unset name records nothing to undo, so the address the call writes would outlive this test.
+    monkeypatch.setenv("RAY_ADDRESS", "")
+    monkeypatch.delenv("RAY_ADDRESS")
     mne.export_ray_address_to_os()
     assert os.environ.get("RAY_ADDRESS") == "10.0.0.5:6379"
 
