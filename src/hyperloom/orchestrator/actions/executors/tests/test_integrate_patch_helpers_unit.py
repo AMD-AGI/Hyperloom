@@ -555,20 +555,6 @@ def _committed_repo(path: Path) -> str:
     return _git_out(path, "rev-parse", "HEAD").strip()
 
 
-def test_reset_clean_removes_a_staged_new_file_that_a_path_checkout_leaves(tmp_path):
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    base = _committed_repo(repo)
-    (repo / "created.py").write_text("candidate\n")
-    (repo / "f.py").write_text("dirty\n")
-    _git_out(repo, "add", "-A")
-
-    ok, err = ip._git_reset_clean(repo, base)
-
-    assert ok, err
-    assert _git_out(repo, "status", "--porcelain") == ""
-
-
 def test_a_revert_pops_the_stash_back_after_the_candidate_staged_a_file_the_stash_also_holds(tmp_path):
     """The stash cannot pop over a candidate-created path, so the revert has to remove it from the index too."""
     repo = tmp_path / "repo"

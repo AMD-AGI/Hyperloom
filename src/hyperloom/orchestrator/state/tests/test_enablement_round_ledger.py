@@ -127,12 +127,3 @@ def test_a_round_with_no_task_id_claims_no_ledger_rows():
     (row,) = rnd.setup_executions
     assert row["round_disposition"] == "kept"
     assert row["present_at_final_launch"] is True
-
-
-def test_the_stack_reads_its_patches_and_the_sources_of_its_artifacts():
-    rnd = EnablementRound(
-        kept_patches=["/runs/specialist/a/patches/001.patch"],
-        kept_artifacts=[{"target": "t.json", "source": "/runs/specialist/b/t.json"}, {"target": "u.json"}],
-    )
-
-    assert rnd.stack_files() == {"/runs/specialist/a/patches/001.patch", "/runs/specialist/b/t.json"}

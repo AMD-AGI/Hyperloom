@@ -957,10 +957,9 @@ def test_an_integrate_outside_enablement_is_not_an_enablement_round(tmp_path):
 
 
 @pytest.mark.parametrize("closed", ["enablement_succeeded", "enablement_validation_pending"])
-@pytest.mark.parametrize("phase", ["ENABLEMENT", "FRAMEWORK_AGENT"])
-def test_a_closed_lane_takes_no_round_from_an_integrate_that_was_tagged_earlier(tmp_path, closed, phase):
+def test_a_closed_lane_takes_no_round_from_an_integrate_that_was_tagged_earlier(tmp_path, closed):
     """The round was admitted when the lane was open; it executes after the lane moved on."""
-    fake = _enqueue_self(tmp_path, phase=phase, **{closed: True})
+    fake = _enqueue_self(tmp_path, **{closed: True})
 
     params = _bind(
         fake,

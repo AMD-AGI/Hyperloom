@@ -193,7 +193,7 @@ class BaseAdapter:
     """Base enablement adapter."""
 
     framework: str = ""
-    # Where the framework's importable package sits in its upstream repo; a localized diff keeps only files under it.
+    # The importable package's directory in the upstream repo; localization keeps only files under it.
     package_path: str = ""
 
     def __init__(self, run: RunFn = _default_run) -> None:
@@ -259,7 +259,7 @@ class BaseAdapter:
         The directory above the package when the checkout holds it, so a
         ``python/sglang`` layout gives ``python`` and a top-level package none.
         """
-        if not framework_root or not self.package_path or not (Path(framework_root) / self.package_path).is_dir():
+        if not framework_root or not (Path(framework_root) / self.package_path).is_dir():
             return ""
         parent = PurePosixPath(self.package_path).parent.as_posix()
         return "" if parent == "." else parent

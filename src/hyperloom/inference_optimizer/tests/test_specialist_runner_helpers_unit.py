@@ -259,53 +259,32 @@ def _finalize(r, tmp_path, payload, params=None):
     return result, json.loads((tmp_path / "specialist_done.json").read_text(encoding="utf-8"))
 
 
-def _vetted_patches(r, tmp_path, monkeypatch, *, claimed, written, roots):
-    """The patch set ``_finalize`` hands to vetting for a round that claimed ``claimed`` and wrote ``written``."""
-    seen: list[list[str]] = []
-
-    def _spy_vet(patches, **_kwargs):
-        seen.append(list(patches))
-        return list(patches), [], {}, False
-
-    monkeypatch.setattr(sr._patch_safety, "vet_patches", _spy_vet)
-    prep = sr._PreparedRun(domain=SimpleNamespace(key="serving_specialist"), gap="gap-1", workspace=tmp_path)
-    ctx = SimpleNamespace(task=SimpleNamespace(task_id="t1", params={}), extra={})
-    r._finalize(
-        ctx=ctx,
-        prep=prep,
-        specialist_done_payload={"proposal_set": [], "summary": "s", "patches_written": [str(p) for p in claimed]},
-        turns_used=1,
-        tool_violations=[],
-        backend_error="",
-        extra_notes=[],
-        patches_written=[str(p) for p in written],
-        patch_roots={str(p): str(tmp_path) for p in roots},
-    )
-    return seen[0]
-
-
 def test_a_harvested_diff_is_the_whole_round_and_the_specialists_copy_of_it_is_not_added(tmp_path, monkeypatch):
     patches = tmp_path / "patches"
     patches.mkdir()
     harvested, copy = patches / "_worktree_diff.patch", patches / "001_x.patch"
     harvested.write_text("diff\n")
     copy.write_text("diff\n")
+    vetted: list[list[str]] = []
 
-    vetted = _vetted_patches(_runner(), tmp_path, monkeypatch, claimed=[copy], written=[harvested], roots=[harvested])
+    def _spy_vet(patches, **_kwargs):
+        vetted.append(list(patches))
+        return list(patches), [], {}, False
 
-    assert vetted == [str(harvested)]
+    monkeypatch.setattr(sr._patch_safety, "vet_patches", _spy_vet)
+    _runner()._finalize(
+        ctx=SimpleNamespace(task=SimpleNamespace(task_id="t1", params={}), extra={}),
+        prep=sr._PreparedRun(domain=SimpleNamespace(key="serving_specialist"), gap="gap-1", workspace=tmp_path),
+        specialist_done_payload={"proposal_set": [], "summary": "s", "patches_written": [str(copy)]},
+        turns_used=1,
+        tool_violations=[],
+        backend_error="",
+        extra_notes=[],
+        patches_written=[str(harvested)],
+        patch_roots={str(harvested): str(tmp_path)},
+    )
 
-
-def test_without_a_harvest_the_claimed_patches_join_the_scanned_ones(tmp_path, monkeypatch):
-    patches = tmp_path / "patches"
-    patches.mkdir()
-    scanned, claimed = patches / "a.patch", patches / "b.patch"
-    scanned.write_text("diff\n")
-    claimed.write_text("diff\n")
-
-    vetted = _vetted_patches(_runner(), tmp_path, monkeypatch, claimed=[claimed], written=[scanned], roots=[])
-
-    assert vetted == [str(claimed), str(scanned)]
+    assert vetted == [[str(harvested)]]
 
 
 def test_a_specialist_keeps_only_citations_of_experiences_its_dispatch_showed(tmp_path):

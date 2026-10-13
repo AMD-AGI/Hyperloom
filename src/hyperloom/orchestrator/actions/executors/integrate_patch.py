@@ -872,14 +872,8 @@ def _git_apply_collect_feedback(
             )
             return False, stderr_apply, feedback
 
-    # Distinguish "does not apply" from "already applied": a specialist often
-    # writes both a superset patch and the subset it contains, so applying one
-    # leaves the other a satisfied no-op that ``git apply --check``
-    # nonetheless rejects. A clean *reverse* check succeeds only when every
-    # hunk's post-state is already in the tree, which is exactly what a forward
-    # apply would have produced -- so treat it as success rather than failing
-    # the whole combo. Partial overlap fails the reverse check and stays a real
-    # failure.
+    # A subset of a patch already applied is a no-op that ``--check`` still
+    # rejects; a clean reverse check proves every hunk is in the tree.
     if _git_reverse_applies_cleanly(framework_root, patch_path):
         log.info(
             "integrate_patch: %s is already fully applied (clean git apply -R --check); treating as a no-op",
@@ -1160,11 +1154,9 @@ def _git_restore_stash_if_needed(
 def _git_reset_clean(framework_root: Path, base: str, *, exclude: list[str] | None = None) -> tuple[bool, str]:
     """Return the tree to ``base`` exactly: tracked, staged and untracked candidate files all go.
 
-    This is the REVERT: ``base`` is the HEAD recorded before the candidate, which
-    is the accepted stack because every KEEP is committed. A hard reset also
-    drops what a failed apply left in the index, which a per-path checkout
-    cannot. User changes must already have been stashed before the candidate
-    was applied.
+    This is the REVERT: ``base`` is the HEAD recorded before the candidate,
+    which is the accepted stack because every KEEP is committed. User changes
+    must already have been stashed before the candidate was applied.
 
     Args:
         framework_root: Directory to run ``git reset`` in.
@@ -2314,18 +2306,17 @@ class IntegratePatchExecutor:
     def _admit_localization(attempt: IntegrateAttempt, framework_root: Path, patch_paths: list[Path]) -> list[Path]:
         """Put the localization ahead of the round's patches when it applies to the stashed tree, else drop it.
 
-        Only the check against the tree the round will run on can tell, so a
-        localization that does not apply costs the round nothing but itself.
         The recorded patch set is what recovery sweeps, so it follows.
         """
-        patch_paths = list(patch_paths)
-        loc = [p for p in attempt.localization_patches if p.is_file() and p not in patch_paths]
-        if loc and all(_detect_p_level(framework_root, p) is not None for p in loc):
-            log.info("integrate_patch: localization %s applies, placing it ahead of the round's patches", loc)
-            patch_paths = loc + patch_paths
-            attempt.pending["patches"] = [str(p) for p in patch_paths]
-        else:
+        loc = attempt.localization_patches
+        if not loc:
+            return patch_paths
+        if any(_detect_p_level(framework_root, p) is None for p in loc):
+            log.info("integrate_patch: localization %s does not apply to %s; skipped", loc, framework_root)
             attempt.drop_localization()
+            return patch_paths
+        patch_paths = [*loc, *patch_paths]
+        attempt.pending["patches"] = [str(p) for p in patch_paths]
         return patch_paths
 
     async def _record_closure_baseline(self, attempt: IntegrateAttempt, params: dict[str, Any]) -> None:

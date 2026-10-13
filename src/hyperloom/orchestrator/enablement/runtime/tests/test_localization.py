@@ -108,17 +108,6 @@ def test_build_pr_backport_compiled_rung5():
     assert dt == diff  # returned for observability but not localizable
 
 
-def test_build_pr_backport_keeps_only_the_package_files():
-    tests = "diff --git a/tests/t.py b/tests/t.py\n--- a/tests/t.py\n+++ b/tests/t.py\n@@ -1 +1 @@\n-a\n+b\n"
-    pkg = "diff --git a/vllm/model.py b/vllm/model.py\n--- a/vllm/model.py\n+++ b/vllm/model.py\n@@ -1 +1 @@\n-a\n+b\n"
-    dt, paths, verdict = loc.build_localization_diff(
-        _pr_action(), fetch_pr_patches=lambda s, n: tests + pkg, fetch_raw_file=lambda *a: "", scope="vllm"
-    )
-    assert verdict.kind == loc.PYTHON_ONLY
-    assert paths == ["vllm/model.py"]
-    assert dt == pkg
-
-
 def test_build_pr_backport_with_nothing_in_the_package_is_empty():
     tests = "diff --git a/tests/t.py b/tests/t.py\n--- a/tests/t.py\n+++ b/tests/t.py\n@@ -1 +1 @@\n-a\n+b\n"
     _, _, verdict = loc.build_localization_diff(

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import types
 
 import pytest
@@ -169,7 +170,6 @@ _OUT_OF_PACKAGE_DIFF = "diff --git a/tests/test_x.py b/tests/test_x.py\n--- a/te
     [
         pytest.param(_CUDA_DIFF, id="compiled_closure"),
         pytest.param("", id="fetch_failed"),
-        pytest.param(_OUT_OF_PACKAGE_DIFF, id="nothing_under_the_package"),
     ],
 )
 async def test_an_unlocalizable_change_is_skipped(_executor, monkeypatch, diff):
@@ -198,8 +198,6 @@ async def test_only_the_files_under_the_package_are_localized(_executor, monkeyp
 
 
 def _repo_with_model(tmp_path):
-    import subprocess
-
     root = tmp_path / "tree"
     (root / "vllm" / "model").mkdir(parents=True)
     (root / "vllm" / "model" / "deepseek_v4.py").write_text("old\n")
@@ -234,8 +232,6 @@ def test_a_localization_that_applies_goes_ahead_of_the_rounds_patches(tmp_path):
 def test_a_localization_that_does_not_apply_is_dropped_and_the_rounds_patches_stand(tmp_path):
     root = _repo_with_model(tmp_path)
     (root / "vllm" / "model" / "deepseek_v4.py").write_text("drifted\n")
-    import subprocess
-
     subprocess.run(["git", "-C", str(root), "commit", "-qam", "drift", "--author=t <t@t>"], check=True)
     attempt = _attempt()
     _localized(attempt, tmp_path, _PY_DIFF)

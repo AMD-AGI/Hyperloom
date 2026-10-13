@@ -80,16 +80,12 @@ def parse_diff_paths(diff_text: str) -> list[str]:
     return [c.path for c in parse_unified_diff(diff_text or "") if c.path and not c.is_deleted]
 
 
-def _in_scope(path: str, scope: str) -> bool:
-    """Whether ``path`` is the ``scope`` directory or below it; every path is in an empty scope."""
-    return not scope or path == scope or path.startswith(scope.rstrip("/") + "/")
-
-
-def scope_diff(diff_text: str, scope: str) -> str:
-    """Keep only the file sections of a git diff that touch ``scope``, so tests, docs and benchmarks are not backported."""
+def _scope_diff(diff_text: str, scope: str) -> str:
+    """Keep only the file sections of a git diff under ``scope``."""
     sections = re.split(r"(?m)^(?=diff --git )", diff_text)
-    kept = [s for s in sections if s.startswith("diff --git ") and _in_scope(_section_path(s), scope)]
-    return "".join(kept)
+    return "".join(
+        s for s in sections if s.startswith("diff --git ") and PurePosixPath(_section_path(s)).is_relative_to(scope)
+    )
 
 
 def _section_path(section: str) -> str:
@@ -144,9 +140,9 @@ def build_localization_diff(
 ) -> tuple[str, list[str], ClosureVerdict]:
     """Fetch/synthesize the localization diff and classify its closure.
 
-    A compiled or build file anywhere in the change makes it a compiled gap.
-    Only the files under ``scope`` are returned, since the rest cannot be
-    imported by the server.
+    A compiled or build file anywhere in a PR makes it a compiled gap; of the
+    rest, only the files under ``scope`` (the package the server imports) are
+    backported.
 
     Blocking (synchronous HTTP); call via ``asyncio.to_thread``.
     """
@@ -161,10 +157,11 @@ def build_localization_diff(
         diff_text = fetch_pr_patches(slug, pr_number) or ""
         if not diff_text.strip():
             return "", [], ClosureVerdict(kind=EMPTY, reason="empty PR diff (fetch failed?)")
-        verdict = classify_closure(parse_diff_paths(diff_text))
+        paths = parse_diff_paths(diff_text)
+        verdict = classify_closure(paths)
         if not verdict.is_localizable:
-            return diff_text, parse_diff_paths(diff_text), verdict
-        diff_text = scope_diff(diff_text, scope)
+            return diff_text, paths, verdict
+        diff_text = _scope_diff(diff_text, scope)
         paths = parse_diff_paths(diff_text)
         if not paths:
             return "", [], ClosureVerdict(kind=EMPTY, reason=f"no file of the PR is under {scope!r}")
@@ -180,9 +177,6 @@ def build_localization_diff(
         verdict = classify_closure(rels)
         if not verdict.is_localizable:
             return "", rels, verdict
-        rels = [rel for rel in rels if _in_scope(rel, scope)]
-        if not rels:
-            return "", [], ClosureVerdict(kind=EMPTY, reason=f"no vendored path is under {scope!r}")
         triples: list[tuple[str, str, str]] = []
         for rel in rels:
             new_text = fetch_raw_file(slug, ref, rel) or ""
@@ -214,6 +208,5 @@ __all__ = [
     "build_localization_diff",
     "classify_closure",
     "parse_diff_paths",
-    "scope_diff",
     "synthesize_vendor_diff",
 ]

@@ -172,7 +172,7 @@ def _round_carriers(state: Any, signature: Any) -> dict[str, Any]:
     }
 
 
-def bind_integrate_to_lane(params: dict[str, Any], state: Any, *, session_dir: Path | None) -> None:
+def bind_integrate_to_lane(params: dict[str, Any], state: Any, *, session_dir: Path) -> None:
     """Make an integrate_patch an enablement round exactly when the lane can take one as it starts to run.
 
     Admission happens long before execution, so the lane may have moved on. A
