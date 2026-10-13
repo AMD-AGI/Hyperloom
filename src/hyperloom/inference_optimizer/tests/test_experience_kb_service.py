@@ -308,7 +308,7 @@ def test_skills_describe_the_service_by_the_commands_and_variables_it_reads() ->
     optimizer = (_PACKAGE / "inference_optimizer/SKILL.md").read_text(encoding="utf-8")
     global_kb = (_PACKAGE / "skills/hyperloom-global-kb/SKILL.md").read_text(encoding="utf-8")
 
-    for name in ("HYPERLOOM_KB_URL", "HYPERLOOM_KB_TOKEN"):
+    for name in ("HYPERLOOM_KB_URL", "HYPERLOOM_KB_TOKEN", experience_kb_service.HOME_ENV):
         assert name in setup
         assert name in optimizer
     # Every workspace gets its local service: setup generates its .env entries and starts it; nobody opts out.
