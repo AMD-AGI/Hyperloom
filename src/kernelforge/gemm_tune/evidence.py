@@ -36,9 +36,10 @@ HIT_TABLE = re.compile(r"is tuned on cu_num\s*=\s*\d+\s+in\s+(?P<table>[^,]+)")
 # Which tables the runtime actually loaded (os.pathsep-separated path list).
 MERGE_TABLES = re.compile(r"\[aiter\]\s+merge tuned file under model_configs/ and configs/\s+(?P<paths>\S+)")
 
-# aiter CK MoE dispatch; the tuple carries the dtype combination and token count.
+# aiter CK MoE dispatch; the tuple carries the dtype combination and token count. The tag is one word ("default",
+# "asm") except on a dispatch that names its kernels, which prints them as a parenthesised group.
 FUSED_MOE = re.compile(
-    r"\[aiter\]\s+\[fused_moe\]\s+using\s+(?P<stage>\S+)\s+(?P<tag>\S+)\s+for\s+\((?P<tuple>[^)]*)\)"
+    r"\[aiter\]\s+\[fused_moe\]\s+using\s+(?P<stage>\S+)\s+(?P<tag>\([^)]*\)|\S+)\s+for\s+\((?P<tuple>[^)]*)\)"
 )
 
 # The same tuple, on the line that says the lookup MISSED.
@@ -197,8 +198,8 @@ def _moe_field(raw: str) -> str:
     return value
 
 
-def _moe_tuple(raw: str) -> list[str]:
-    """Split a dispatch tuple into normalised fields."""
+def moe_tuple(raw: str) -> list[str]:
+    """Split a dispatch tuple into its fields, each spelled the way the fmoe CSV spells it."""
     return [_moe_field(p) for p in raw.split(",")]
 
 
@@ -379,7 +380,7 @@ def parse_log(text: str, *, hit_logging: bool | None = None) -> dict[str, Any]:
         if fm:
             # One model dispatches DIFFERENT stages at different token counts, so a single "saw 1stage" boolean
             # collapses the decode range away and suppresses tuning that 2stage would have covered.
-            parts = _moe_tuple(fm.group("tuple"))
+            parts = moe_tuple(fm.group("tuple"))
             moe = dispatch.setdefault("moe", _blank_moe())
             moe.setdefault("by_stage", {})
             moe.setdefault("keys", {})
@@ -398,7 +399,7 @@ def parse_log(text: str, *, hit_logging: bool | None = None) -> dict[str, Any]:
             moe.setdefault("by_stage", {})
             moe.setdefault("keys", {})
             moe["fallback_flavour"] = fmm.group("flavour")
-            _record_moe_key(moe, _moe_tuple(fmm.group("tuple")), miss=True)
+            _record_moe_key(moe, moe_tuple(fmm.group("tuple")), miss=True)
             continue
 
         vh = VLLM_MOE_HIT.search(line)

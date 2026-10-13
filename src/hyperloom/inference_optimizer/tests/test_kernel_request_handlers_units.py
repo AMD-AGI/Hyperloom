@@ -30,6 +30,7 @@ from hyperloom.common.llm_config import (
     DEFAULT_CODEX_MODEL,
 )
 from hyperloom.orchestrator.state.shared_state import SharedState
+from kernelforge.gemm_tune.evidence import MOE_KEY_FIELDS
 
 
 _FUSION_PROVIDER_ENV_KEYS = (
@@ -1880,7 +1881,7 @@ class TestForgeGemmHelperCoverage:
         log = tmp_path / "server.log"
         log.write_text(self._REAL_MOE_DISPATCH + "\n", encoding="utf-8")
         supplied = tmp_path / "operator_moe.csv"
-        supplied.write_text(krh._FMOE_UNTUNED_CSV_HEADER + "\n", encoding="utf-8")
+        supplied.write_text(",".join(MOE_KEY_FIELDS) + "\n", encoding="utf-8")
 
         async def _fake_subprocess(cmd, *, timeout_sec, **_kwargs):
             return 0, self._sentinel(), ""
