@@ -8,8 +8,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
-from hyperloom_multibranch.notebook.records import SessionProfile
 from hyperloom_multibranch.notebook.peers import (
+    FailureClass,
     Intent,
     IntentLayer,
     Judgement,
@@ -21,6 +21,7 @@ from hyperloom_multibranch.notebook.peers import (
     Verdict,
     placeholder_intent_fingerprint,
 )
+from hyperloom_multibranch.notebook.records import SessionProfile
 
 START = 1_800_000_000.0
 TTL = 60.0
@@ -97,12 +98,16 @@ def result(
     gpu_seconds: float = 600.0,
     validity: Validity = Validity.SUCCESS,
     profile_location: str = "",
+    failure_reason: str = "",
+    node: str = "node-1",
 ) -> TestResult:
     return TestResult(
         request_id=request_id,
         validity=validity,
-        sandbox=SandboxFacts(node="node-1", gpu_ids=(0, 1), backend="local"),
+        sandbox=SandboxFacts(node=node, gpu_ids=(0, 1), backend="local"),
         manifest_sha256="m" * 64,
+        failure=FailureClass.CANDIDATE if validity is Validity.CANDIDATE_FAILURE else None,
+        failure_reason=failure_reason,
         gpu_seconds=gpu_seconds,
         profile_location=profile_location,
     )

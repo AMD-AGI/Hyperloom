@@ -1,0 +1,102 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""``session_breakdown.json`` for a multi-branch session: the notebook's facts, laid out for people and the RSI.
+
+The single-lineage breakdown describes one lineage of phases. A multi-branch session is a tree of branches, so this
+export has its own schema version and its own sections:
+
+* ``metadata``: the session profile, and the manifest fingerprint of each activity.
+* ``baseline``: the root's recorded values, dispersion and thresholds.
+* ``lineage``: every commit and branch, with when each was made, opened or stopped.
+* ``branches`` and ``committed``: each branch's progress, and each commit with its gain and merge state.
+* ``tests``: every test record: request, result with its attempts and GPU time, judgement, conclusion, commit, times.
+* ``measurement_sandboxes``: per node, GPU model, backend and image, the tests run there, their GPU time and failed
+  attempts.
+* ``close``: the Recipe KB write-back, as the single-lineage export reports it.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+
+from hyperloom.common.io import atomic_write_json
+from hyperloom.orchestrator.knowledge.remote_recipe.models import RemoteWriteResult
+from hyperloom_multibranch.notebook.codec import encode
+from hyperloom_multibranch.notebook.records import NotebookSnapshot, TestRecord
+
+SCHEMA_VERSION = "multibranch-1"
+EXPORTER_VERSION = "hyperloom-multibranch-breakdown-1"
+FILENAME = "session_breakdown.json"
+
+
+@dataclass
+class MeasurementUsage:
+    """What one measurement environment ran: tests, their GPU time, and the attempts that failed and were retried."""
+
+    node: str
+    gpu_model: str
+    backend: str
+    image_digest: str
+    tests: int = 0
+    gpu_seconds: float = 0.0
+    failed_attempts: int = 0
+
+
+def measurement_usage(records: Iterable[TestRecord]) -> tuple[MeasurementUsage, ...]:
+    """Usage per measurement environment, sorted by node, GPU model, backend and image."""
+
+    usage: dict[tuple[str, str, str, str], MeasurementUsage] = {}
+    for record in records:
+        if record.result is None:
+            continue
+        sandbox = record.result.sandbox
+        key = (sandbox.node, sandbox.gpu_model, sandbox.backend, sandbox.image_digest)
+        row = usage.setdefault(key, MeasurementUsage(*key))
+        row.tests += 1
+        row.gpu_seconds += record.result.gpu_seconds
+        row.failed_attempts += sum(attempt.failure is not None for attempt in record.result.attempts)
+    return tuple(usage[key] for key in sorted(usage))
+
+
+def build_breakdown(snapshot: NotebookSnapshot, *, kb_write_back: RemoteWriteResult | None = None) -> dict[str, object]:
+    """The breakdown document of ``snapshot``, stamped with the time the snapshot was taken."""
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "exporter_version": EXPORTER_VERSION,
+        "exported_at_utc": datetime.fromtimestamp(snapshot.taken_at, timezone.utc).isoformat(),
+        "metadata": {
+            "session_profile": encode(snapshot.profile),
+            "manifest_fingerprints": encode(snapshot.fingerprints),
+        },
+        "baseline": encode(snapshot.baseline),
+        "lineage": encode(snapshot.lineage),
+        "branches": encode(snapshot.progress),
+        "committed": encode(snapshot.committed),
+        "tests": encode(snapshot.records),
+        "measurement_sandboxes": encode(measurement_usage(snapshot.records)),
+        "close": {"kb_write_back": encode(kb_write_back)},
+    }
+
+
+def write_breakdown(directory: Path, breakdown: Mapping[str, object]) -> Path:
+    """Write ``breakdown`` atomically as ``directory / FILENAME`` and return the path."""
+
+    path = directory / FILENAME
+    atomic_write_json(path, dict(breakdown), indent=2, sort_keys=True, make_parents=True)
+    return path
+
+
+__all__ = [
+    "EXPORTER_VERSION",
+    "FILENAME",
+    "SCHEMA_VERSION",
+    "MeasurementUsage",
+    "build_breakdown",
+    "measurement_usage",
+    "write_breakdown",
+]
