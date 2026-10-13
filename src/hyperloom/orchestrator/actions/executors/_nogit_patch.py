@@ -141,6 +141,13 @@ def _bak_name(patch_stem: str, rel_target: Path, seq: int) -> str:
     return f"{safe_stem}__{flat}__{seq:04d}.bak"
 
 
+def _rejected_hunks(reject_path: Path) -> str:
+    """The hunk bodies ``patch`` could not apply; empty when it failed before rejecting any."""
+    if not reject_path.exists():
+        return ""
+    return reject_path.read_text(encoding="utf-8", errors="replace").strip()
+
+
 def _apply_patch_no_git(
     framework_root: Path,
     patch_path: Path,
@@ -389,10 +396,12 @@ def _apply_patch_no_git(
     if not mark_prepared(backup_root):
         return _fail("backup prepare record could not be persisted", backups)
 
-    # Apply for real.
+    # Rejects land under the backup root, where no other apply writes; ``--no-backup-if-mismatch`` drops ``.orig``.
+    reject_path = backup_root / f"{patch_stem}.rej"
+    apply_argv = ["patch", f"-p{detected_level}", f"--reject-file={reject_path}", "--no-backup-if-mismatch"]
     try:
         cp2 = subprocess.run(
-            ["patch", f"-p{detected_level}", "--reject-file=-", "-i", str(patch_input)],
+            [*apply_argv, "-i", str(patch_input)],
             capture_output=True,
             text=True,
             timeout=120,
@@ -401,17 +410,9 @@ def _apply_patch_no_git(
             stdin=subprocess.DEVNULL,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        err_msg = f"patch apply failed: {exc}"
-        feedback = ApplyFeedback(
-            patch=str(patch_path),
-            channel="nogit",
-            tried_levels=tried_levels,
-            stderr=err_msg,
-        )
-        return False, err_msg, backups, feedback
+        return _fail(f"patch apply failed: {exc}", backups)
     if cp2.returncode != 0:
-        # Collect any .rej files left next to the target files.
-        rejected_hunks = _collect_rej_files(framework_root, patch_path)
+        rejected_hunks = _rejected_hunks(reject_path)
         apply_stderr = cp2.stderr.strip() or cp2.stdout.strip()
         source_ctx = read_patch_source_context(patch_text, framework_root, radius=50)
         feedback = ApplyFeedback(
@@ -426,33 +427,10 @@ def _apply_patch_no_git(
     return True, "", backups, None
 
 
-def _collect_rej_files(framework_root: Path, patch_path: Path) -> str:
-    """Collect ``.rej`` reject files left by a failed ``patch`` apply."""
-    import time
-
-    cutoff = time.time() - 60.0
-    parts: list[str] = []
-    try:
-        for rej in sorted(framework_root.rglob("*.rej")):
-            try:
-                if rej.stat().st_mtime >= cutoff:
-                    content = rej.read_text(encoding="utf-8", errors="replace").strip()
-                    if content:
-                        parts.append(f"# {rej.relative_to(framework_root)}\n{content}")
-                    rej.unlink(missing_ok=True)
-            except OSError:
-                # Best-effort scan: skip unreadable/racing .rej files.
-                continue
-    except Exception:
-        log.debug("_collect_rej_files: scan failed for %s", patch_path, exc_info=True)
-    return "\n\n".join(parts)
-
-
 __all__ = [
     "_P_LEVELS",
     "_PATCH_DEV_NULL",
     "_apply_patch_no_git",
-    "_collect_rej_files",
     "_is_git_tree",
     "_is_within",
     "_sanitize_git_index_lines",

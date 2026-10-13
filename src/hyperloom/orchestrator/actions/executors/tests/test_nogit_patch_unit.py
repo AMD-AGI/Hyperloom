@@ -710,12 +710,11 @@ def test_apply_backup_failure_returns_error(tmp_path, monkeypatch):
     assert "backup of" in err
 
 
-# _apply_patch_no_git — real apply failure collects .rej hunks
+# _apply_patch_no_git — real apply failure reports the rejected hunks
 
 
-def test_apply_real_failure_collects_rej(tmp_path):
-    """When dry-run passes for a level but the real apply fails, we surface a nogit ApplyFeedback (with any .rej content) rather than raising."""
-
+def _apply_failing_after_dry_run(tmp_path, backup_root):
+    """Let the dry-run pass, then move the target out from under the real apply so it rejects."""
     target = tmp_path / "target.py"
     target.write_text("original\n", encoding="utf-8")
     patch_file = tmp_path / "fix.patch"
@@ -725,24 +724,50 @@ def test_apply_real_failure_collects_rej(tmp_path):
     call_state = {"n": 0}
 
     def _run(cmd, *a, **k):
-        # Let dry-run pass through; force the real apply to fail.
-        is_dry = any("--dry-run" in str(c) for c in cmd)
-        if is_dry:
-            return real_run(cmd, *a, **k)
+        if any("--dry-run" in str(c) for c in cmd):
+            cp = real_run(cmd, *a, **k)
+            if cp.returncode == 0:
+                target.write_text("unrelated\n", encoding="utf-8")
+            return cp
         call_state["n"] += 1
-        return _CP(1, "", "Hunk #1 FAILED at 1.")
+        return real_run(cmd, *a, **k)
 
     import unittest.mock as um
 
     with um.patch.object(ng.subprocess, "run", _run):
-        ok, err, backups, feedback = ng._apply_patch_no_git(tmp_path, patch_file, tmp_path / "bak")
+        result = ng._apply_patch_no_git(tmp_path, patch_file, backup_root)
 
     if call_state["n"] == 0:
         pytest.skip("dry-run never succeeded on this patch CLI")
+    return result
+
+
+def test_apply_real_failure_reports_rejected_hunks(tmp_path):
+    """A failed real apply carries the rejected hunk body, not just the CLI's one-line summary."""
+    ok, _err, _backups, feedback = _apply_failing_after_dry_run(tmp_path, tmp_path / "bak")
+
     assert ok is False
     assert isinstance(feedback, af.ApplyFeedback)
     assert feedback.channel == "nogit"
-    assert "FAILED" in feedback.stderr
+    assert "patched" in feedback.rejected_hunks, "the rejected hunk body must reach the patch author"
+
+
+def test_apply_real_failure_leaves_foreign_rej_untouched(tmp_path):
+    """Rejects land under the backup root, so another channel's .rej is neither read nor removed."""
+    foreign = tmp_path / "other.py.rej"
+    foreign.write_text("@@ -1 +1 @@\n-foreign\n", encoding="utf-8")
+
+    _ok, _err, _backups, feedback = _apply_failing_after_dry_run(tmp_path, tmp_path / "bak")
+
+    assert foreign.exists(), "a concurrent apply's .rej must survive"
+    assert "foreign" not in feedback.rejected_hunks
+
+
+def test_apply_real_failure_leaves_no_orig_copies(tmp_path):
+    """A failed apply does not litter the framework tree with patch's .orig backups."""
+    _apply_failing_after_dry_run(tmp_path, tmp_path / "bak")
+
+    assert list(tmp_path.glob("*.orig")) == []
 
 
 def test_apply_real_apply_cli_vanishes(tmp_path):
@@ -771,38 +796,6 @@ def test_apply_real_apply_cli_vanishes(tmp_path):
         pytest.skip("dry-run failed; cannot reach real-apply branch")
     assert isinstance(feedback, af.ApplyFeedback)
     assert "patch apply failed" in err
-
-
-# _collect_rej_files
-
-
-def test_collect_rej_files_reads_and_removes(tmp_path):
-    """A recent .rej file is read into the summary and then removed."""
-    rej = tmp_path / "foo.py.rej"
-    rej.write_text("@@ -1 +1 @@\n-old\n+new\n", encoding="utf-8")
-
-    out = ng._collect_rej_files(tmp_path, tmp_path / "some.patch")
-    assert "foo.py.rej" in out
-    assert "@@ -1 +1 @@" in out
-    assert not rej.exists(), ".rej file must be cleaned up after collection"
-
-
-def test_collect_rej_files_skips_stale(tmp_path):
-    """A .rej file older than the 60s cutoff is ignored (and left in place)."""
-    import os
-    import time
-
-    rej = tmp_path / "old.py.rej"
-    rej.write_text("stale hunk\n", encoding="utf-8")
-    old = time.time() - 3600
-    os.utime(rej, (old, old))
-
-    out = ng._collect_rej_files(tmp_path, tmp_path / "some.patch")
-    assert out == ""
-
-
-def test_collect_rej_files_no_rej_returns_empty(tmp_path):
-    assert ng._collect_rej_files(tmp_path, tmp_path / "some.patch") == ""
 
 
 # ledger.restore_records — a failed restore is reported, never raised
@@ -962,32 +955,6 @@ def test_patch_file_unreadable_after_dry_run(tmp_path, monkeypatch):
     err = result[1]
     assert ok is False
     assert "cannot read patch file" in err
-
-
-def test_collect_rej_files_scan_exception_is_swallowed(tmp_path, monkeypatch):
-    """An exception during the rglob scan is logged and yields ''."""
-
-    def _boom(*a, **k):
-        raise RuntimeError("fs blew up")
-
-    monkeypatch.setattr(ng.Path, "rglob", _boom)
-    assert ng._collect_rej_files(tmp_path, tmp_path / "p.patch") == ""
-
-
-def test_collect_rej_files_stat_oserror_skips(tmp_path, monkeypatch):
-    """An OSError while stat-ing a .rej file is skipped (continue branch)."""
-    rej = tmp_path / "foo.py.rej"
-    rej.write_text("@@ hunk @@\n", encoding="utf-8")
-
-    real_stat = Path.stat
-
-    def _stat(self, *a, **k):
-        if self.name.endswith(".rej"):
-            raise OSError("stat denied")
-        return real_stat(self, *a, **k)
-
-    monkeypatch.setattr(Path, "stat", _stat)
-    assert ng._collect_rej_files(tmp_path, tmp_path / "p.patch") == ""
 
 
 # Escape / continue edge branches in the create / delete / rename arms
