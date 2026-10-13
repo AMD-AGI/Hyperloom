@@ -553,9 +553,10 @@ def _build_parser() -> argparse.ArgumentParser:
             "Framework version slug for the recipe-snapshot canonical id "
             "(scopes recipes to a specific framework release — sglang 0.4.5 "
             "and sglang 0.5.x have different scheduler defaults so they "
-            "deserve separate KB rows). When omitted, auto-detected via "
-            "importing the framework's top-level package and reading "
-            "``__version__`` (sglang/vllm/atom supported); auto-detect "
+            "deserve separate KB rows). When omitted, auto-detected from "
+            "the interpreter preflight resolved to serve the framework, "
+            "else by importing the framework's top-level package and "
+            "reading ``__version__`` (sglang/vllm/atom supported); auto-detect "
             "failure degrades to 'unknown_version'. Override with "
             "--framework-version=0.4.5 to pin a specific tag for the run."
         ),
