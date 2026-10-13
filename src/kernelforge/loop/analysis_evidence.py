@@ -259,6 +259,7 @@ class AnalysisEvidenceMixin:
             # The declared source set, verbatim and in campaign order, so the planner is told what it may edit instead
             # of inferring it from the one path in program_context.
             editable_sources=tuple(self._target_source_files()),
+            new_file_allowlist=tuple(self.ic.commit_new_paths or ()),
             cases=cases,
             knowledge_index=knowledge_index,
             supervisor_guidance=self._supervisor_ruling,
