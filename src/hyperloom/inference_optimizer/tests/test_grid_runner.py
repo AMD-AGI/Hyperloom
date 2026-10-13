@@ -2556,7 +2556,7 @@ async def test_report_read_does_not_wait_when_the_process_already_failed(tmp_pat
 
 
 class TestServerArgTokenizerOnTheSyntheticPath:
-    """``strip_benchmark_harness_flags`` runs for every variant, AgentX or not."""
+    """Every variant's args go through the JSON-preserving tokenizer, AgentX or not, and normalizing them drops no flag."""
 
     def _off(self, monkeypatch):
         monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
