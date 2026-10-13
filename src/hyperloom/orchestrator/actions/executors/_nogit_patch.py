@@ -11,13 +11,12 @@ import shutil
 import subprocess
 
 from hyperloom.common.git_safety import safe_directory_args
-from hyperloom.common.unified_diff import strip_path_components
+from hyperloom.common.unified_diff import parse_patch_manifest, strip_path_components
 from pathlib import Path
 from typing import Any
 
 from ...delivery.ledger import append_record, mark_prepared
 from ...delivery import file_digest as _file_digest
-from ...specialists.patch_safety import patch_file_targets
 
 log = logging.getLogger(__name__)
 
@@ -139,6 +138,13 @@ def _bak_name(patch_stem: str, rel_target: Path, seq: int) -> str:
     flat = _UNSAFE_NAME_RE.sub("_", str(rel_target))
     safe_stem = _UNSAFE_NAME_RE.sub("_", patch_stem)
     return f"{safe_stem}__{flat}__{seq:04d}.bak"
+
+
+def _rejected_hunks(reject_path: Path) -> str:
+    """The hunk bodies ``patch`` could not apply; empty when it failed before rejecting any."""
+    if not reject_path.exists():
+        return ""
+    return reject_path.read_text(encoding="utf-8", errors="replace").strip()
 
 
 def _apply_patch_no_git(
@@ -291,7 +297,7 @@ def _apply_patch_no_git(
         backups.append(record)
         return ""
 
-    def _backup_existing(abs_path: Path, rel: Path, action: str) -> tuple[dict[str, Any] | None, str]:
+    def _backup_existing(abs_path: Path, rel: Path) -> tuple[dict[str, Any] | None, str]:
         """Copy ``abs_path`` to a uniquely named backup and return the record."""
         seq = seq_offset + len(backups)
         bak = backup_root / _bak_name(patch_stem, rel, seq)
@@ -304,95 +310,39 @@ def _apply_patch_no_git(
             "target": str(abs_path),
             "existed": True,
             "backup_path": str(bak),
-            "revert_action": action,
+            "revert_action": "restore",
             "mode": mode,
             "pre_image_sha256": _file_digest(abs_path),
         }, ""
 
-    def _record_restore(abs_path: Path, rel: Path) -> str:
-        """Back ``abs_path`` up to restore on revert, or record that revert deletes it when it does not exist."""
-        if not abs_path.exists():
-            return _record(
-                {
-                    "target": str(abs_path),
-                    "existed": False,
-                    "backup_path": None,
-                    "revert_action": "delete",
-                }
-            )
-        rec, err = _backup_existing(abs_path, rel, "restore")
-        return err or _record(rec)  # type: ignore[arg-type]
+    try:
+        manifest = parse_patch_manifest(patch_text)
+    except ValueError as exc:
+        return _fail(f"unparseable patch: {exc}", backups)
 
-    for old_raw, new_raw in patch_file_targets(patch_text):
-        is_create = old_raw == _PATCH_DEV_NULL or not old_raw
-        is_delete = new_raw == _PATCH_DEV_NULL or not new_raw
-
-        if is_create:
-            # New file created by patch: track for deletion on revert.
-            if not new_raw or new_raw == _PATCH_DEV_NULL:
-                continue
-            rel_new, abs_new, err = _resolve_target(new_raw)
-            if err:
-                return _fail(err, backups)
-            err = _record(
-                {
-                    "target": str(abs_new),
-                    "existed": False,
-                    "backup_path": None,
-                    "revert_action": "delete",
-                }
-            )
-            if err:
-                return _fail(err, backups)
-
-        elif is_delete:
-            # Existing file deleted by patch: back it up to restore on revert.
-            rel_old, abs_old, err = _resolve_target(old_raw)
-            if err:
-                return _fail(err, backups)
-            err = _record_restore(abs_old, rel_old)  # type: ignore[arg-type]
-            if err:
-                return _fail(err, backups)
-
+    for entry in manifest:
+        rel, abs_path, err = _resolve_target(entry.path)
+        if err:
+            return _fail(err, backups)
+        if entry.is_new or not abs_path.exists():
+            record = {"target": str(abs_path), "existed": False, "backup_path": None, "revert_action": "delete"}
         else:
-            # Header tokens differ by their a/ b/ prefixes even for a modification; only stripped paths show a rename.
-            rel_old, abs_old, err = _resolve_target(old_raw)
+            record, err = _backup_existing(abs_path, rel)
             if err:
                 return _fail(err, backups)
-            rel_new, abs_new, err = _resolve_target(new_raw)
-            if err:
-                return _fail(err, backups)
-            # Rename/move: back up old source (to restore on revert) and track new destination (to delete on revert).
-            if rel_old != rel_new:
-                if abs_old.exists():  # type: ignore[union-attr]
-                    rec, err = _backup_existing(abs_old, rel_old, "restore_old")  # type: ignore[arg-type]
-                    if err:
-                        return _fail(err, backups)
-                    err = _record(rec)  # type: ignore[arg-type]
-                    if err:
-                        return _fail(err, backups)
-                err = _record(
-                    {
-                        "target": str(abs_new),
-                        "existed": False,
-                        "backup_path": None,
-                        "revert_action": "delete",
-                    }
-                )
-                if err:
-                    return _fail(err, backups)
-            else:
-                err = _record_restore(abs_old, rel_old)  # type: ignore[arg-type]
-                if err:
-                    return _fail(err, backups)
+        err = _record(record)
+        if err:
+            return _fail(err, backups)
 
     if not mark_prepared(backup_root):
         return _fail("backup prepare record could not be persisted", backups)
 
-    # Apply for real.
+    # Rejects land under the backup root, where no other apply writes; ``--no-backup-if-mismatch`` drops ``.orig``.
+    reject_path = backup_root / f"{patch_stem}.rej"
+    apply_argv = ["patch", f"-p{detected_level}", f"--reject-file={reject_path}", "--no-backup-if-mismatch"]
     try:
         cp2 = subprocess.run(
-            ["patch", f"-p{detected_level}", "--reject-file=-", "-i", str(patch_input)],
+            [*apply_argv, "-i", str(patch_input)],
             capture_output=True,
             text=True,
             timeout=120,
@@ -401,17 +351,9 @@ def _apply_patch_no_git(
             stdin=subprocess.DEVNULL,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        err_msg = f"patch apply failed: {exc}"
-        feedback = ApplyFeedback(
-            patch=str(patch_path),
-            channel="nogit",
-            tried_levels=tried_levels,
-            stderr=err_msg,
-        )
-        return False, err_msg, backups, feedback
+        return _fail(f"patch apply failed: {exc}", backups)
     if cp2.returncode != 0:
-        # Collect any .rej files left next to the target files.
-        rejected_hunks = _collect_rej_files(framework_root, patch_path)
+        rejected_hunks = _rejected_hunks(reject_path)
         apply_stderr = cp2.stderr.strip() or cp2.stdout.strip()
         source_ctx = read_patch_source_context(patch_text, framework_root, radius=50)
         feedback = ApplyFeedback(
@@ -426,33 +368,10 @@ def _apply_patch_no_git(
     return True, "", backups, None
 
 
-def _collect_rej_files(framework_root: Path, patch_path: Path) -> str:
-    """Collect ``.rej`` reject files left by a failed ``patch`` apply."""
-    import time
-
-    cutoff = time.time() - 60.0
-    parts: list[str] = []
-    try:
-        for rej in sorted(framework_root.rglob("*.rej")):
-            try:
-                if rej.stat().st_mtime >= cutoff:
-                    content = rej.read_text(encoding="utf-8", errors="replace").strip()
-                    if content:
-                        parts.append(f"# {rej.relative_to(framework_root)}\n{content}")
-                    rej.unlink(missing_ok=True)
-            except OSError:
-                # Best-effort scan: skip unreadable/racing .rej files.
-                continue
-    except Exception:
-        log.debug("_collect_rej_files: scan failed for %s", patch_path, exc_info=True)
-    return "\n\n".join(parts)
-
-
 __all__ = [
     "_P_LEVELS",
     "_PATCH_DEV_NULL",
     "_apply_patch_no_git",
-    "_collect_rej_files",
     "_is_git_tree",
     "_is_within",
     "_sanitize_git_index_lines",

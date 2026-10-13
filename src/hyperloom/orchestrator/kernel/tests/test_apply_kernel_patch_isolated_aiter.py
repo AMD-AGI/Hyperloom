@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common.unified_diff import PatchOp, PatchTarget
 from hyperloom.orchestrator.kernel import apply_kernel_patch as akp
 
 
@@ -368,15 +369,7 @@ def test_apply_snapshot_keeps_legacy_optional_deploy_roots(
     (snapshot / "kernel.py").write_text("VALUE = 2\n", encoding="utf-8")
 
     result = akp.apply_snapshot(
-        descriptors=[
-            {
-                "op": "write",
-                "path": "kernel.py",
-                "mode": "",
-                "binary": False,
-                "is_new": False,
-            }
-        ],
+        descriptors=[PatchTarget(PatchOp.WRITE, "kernel.py")],
         snapshot_dir=snapshot,
         repo_root=repo_root,
         backup_dir=tmp_path / "backups",
