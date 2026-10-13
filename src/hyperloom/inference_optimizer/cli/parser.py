@@ -13,6 +13,7 @@ from typing import NoReturn
 
 from .. import framework_registry
 from .backends import CRITIC_PROTOCOL_CHOICES
+from hyperloom.common import predictor_config
 from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.common.llm_config import is_anthropic_only, is_openai_only, provider_model_defaults
 
@@ -898,7 +899,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--primatune-mode",
         dest="primatune_mode",
         type=str,
-        choices=("off", "shadow", "active"),
+        choices=predictor_config.MODES,
         default=None,
         help="'shadow' (the default once an endpoint is set) asks and logs, queueing nothing; "
         "'active' queues the answer for benchmarking; 'off' disables. "
