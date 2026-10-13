@@ -413,6 +413,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # Baseline AgentX perf snapshot: the slow-tail e2e_norm_intvty_p90 objective plus total_throughput and the
     # reported axes the summary renders.
     baseline_perf: dict[str, Any] = field(default_factory=dict)
+    # Run directory the anchor's axes were measured in; the per-request exports under it back the reported interval.
+    baseline_workspace: str = ""
     baseline_accuracy: float = 0.0
     # Standalone baseline-arm roofline ceiling computed right after baseline lands; backs up snapshot ceiling so the
     # frontend has data even when the roofline (profile + trace_analyze) step fails.

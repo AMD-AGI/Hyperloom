@@ -1948,6 +1948,8 @@ class WritebackCollaborator(CoordinatorCollaborator):
 
             self.shared_state.baseline_benchmark_script = str(task_params.get("benchmark_script") or "").strip()
             self.shared_state.baseline_perf = perf_snapshot_from_mapping(result) or {}
+            # Kept beside the snapshot so a later comparison can reach the requests this anchor was a percentile of.
+            self.shared_state.baseline_workspace = str(result.get("workspace") or "").strip()
             acc = result.get("accuracy")
             if isinstance(acc, (int, float)):
                 self.shared_state.baseline_accuracy = float(acc)
