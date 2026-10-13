@@ -64,8 +64,6 @@ def _base_argv(ws: Path, trace_input: str, extra=None):
         "MI300X",
         "--model-name",
         "utest-llm",
-        "--top-k",
-        "8",
     ]
     return argv + (extra or [])
 
@@ -279,8 +277,6 @@ def test_xdit_emits_diffusion_roofline(tmp_path, capsys, monkeypatch):
         "MI300X",
         "--model-name",
         "utest-dit",
-        "--top-k",
-        "8",
         "--num-denoise-steps",
         "20",
     ]
@@ -296,8 +292,7 @@ def test_xdit_emits_diffusion_roofline(tmp_path, capsys, monkeypatch):
 
 
 def test_bypass_cli_accepts_forwarded_diffusion_flags():
-    # The bypass parser must accept --model-path/--precision (and the diffusion-ceiling siblings) or strict parse_args
-    # exits 2.
+    # The bypass parser must accept --model-path/--precision or strict parse_args exits 2.
     args = bta._build_arg_parser().parse_args(
         [
             "--trace-input",
@@ -308,18 +303,10 @@ def test_bypass_cli_accepts_forwarded_diffusion_flags():
             "/models/flux",
             "--precision",
             "fp8",
-            "--height",
-            "1024",
-            "--width",
-            "1024",
-            "--cfg-batch",
-            "2",
         ]
     )
     assert args.model_path == "/models/flux"
     assert args.precision == "fp8"
-    assert args.height == 1024 and args.width == 1024
-    assert args.cfg_batch == 2
 
 
 def test_non_xdit_omits_diffusion_roofline(tmp_path, capsys, monkeypatch):
@@ -531,8 +518,6 @@ def test_xdit_steady_anchored_is_not_estimated(tmp_path, capsys, monkeypatch):
         "MI300X",
         "--model-name",
         "FLUX.1-dev",
-        "--top-k",
-        "8",
     ]
     _, result, _ = _run(argv, capsys)
     assert result["aggregation_scope"] == "steady_state"
@@ -565,8 +550,6 @@ def test_xdit_full_trace_fallback_is_estimated(tmp_path, capsys, monkeypatch):
         "MI300X",
         "--model-name",
         "FLUX.1-dev",
-        "--top-k",
-        "8",
     ]
     _, result, _ = _run(argv, capsys)
     assert result["aggregation_scope"] == "full_trace"

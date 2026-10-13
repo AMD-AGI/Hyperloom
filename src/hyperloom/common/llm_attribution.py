@@ -362,8 +362,8 @@ def inject_env(
         return
     inherited = _inherited_context(env, configured)
     if env is configuration:
-        # Injecting into this process's own environment -- as forge_fusion does, so the CLI it spawns later inherits
-        # the tag -- leaves that tag in place for the life of the process.
+        # Injecting into the environment the configuration is read from -- as forge_fusion does for the author
+        # environment its CLI keeps for a whole run -- leaves that tag in place for that environment's life.
         inherited = {name: value for name, value in inherited.items() if name not in _AMBIENT_FIELDS}
     headers = call_headers(
         component=component,

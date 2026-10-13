@@ -1621,8 +1621,7 @@ def _check_tracelens_cli() -> dict[str, Any]:
     print(
         f"ERROR: TraceLens CLI(s) not on PATH: {missing}. The pod-local "
         f"/opt/venv/bin/TraceLens_* console_scripts are installed by "
-        f"src/hyperloom/inference_optimizer/assets/install_kernel_tools.sh (chained from "
-        f"src/hyperloom/inference_optimizer/assets/install.sh) and do NOT persist "
+        f"src/hyperloom/inference_optimizer/assets/install.sh and do NOT persist "
         f"across pod restarts. SKILL IR-2 requires running install.sh "
         f"before every launch (carve-out applies only to --resume-from in "
         f"the same shell that earlier ran install.sh). Re-run:\n"
