@@ -5,7 +5,13 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
+from typing import Any
+
+_DEV_NULL = "/dev/null"
+_OLD_FILE = "--- "
+_NEW_FILE = "+++ "
 
 
 @dataclass
@@ -36,7 +42,7 @@ def parse_unified_diff(patch_text: str) -> list[FileChange]:
             continue
         if current is None:
             # Tolerate a diff with no leading "diff --git".
-            if raw.startswith(("--- ", "+++ ")):
+            if raw.startswith((_OLD_FILE, _NEW_FILE)):
                 current = FileChange(path="")
                 changes.append(current)
             else:
@@ -47,16 +53,16 @@ def parse_unified_diff(patch_text: str) -> list[FileChange]:
         if raw.startswith("deleted file mode"):
             current.is_deleted = True
             continue
-        if raw.startswith("+++ "):
+        if raw.startswith(_NEW_FILE):
             new_path = strip_diff_path(raw[4:])
-            if new_path == "/dev/null":
+            if new_path == _DEV_NULL:
                 current.is_deleted = True
             else:
                 current.path = new_path
             continue
-        if raw.startswith("--- "):
+        if raw.startswith(_OLD_FILE):
             old_path = strip_diff_path(raw[4:])
-            if old_path and old_path != "/dev/null" and not current.path:
+            if old_path and old_path != _DEV_NULL and not current.path:
                 current.path = old_path
             continue
         if raw.startswith("@@"):
@@ -68,7 +74,7 @@ def parse_unified_diff(patch_text: str) -> list[FileChange]:
         elif raw.startswith(" "):
             current.context.append(raw[1:])
     # Drop empty/placeholder sections.
-    return [c for c in changes if c.path and c.path != "/dev/null"]
+    return [c for c in changes if c.path and c.path != _DEV_NULL]
 
 
 def touched_paths(patch_text: str) -> list[str]:
@@ -79,7 +85,7 @@ def touched_paths(patch_text: str) -> list[str]:
 def strip_diff_path(token: str) -> str:
     """Normalize a diff path token (strip ``a/``/``b/`` prefix + tab suffix)."""
     token = token.strip().split("\t", 1)[0].strip()
-    if token in ("/dev/null", ""):
+    if token in (_DEV_NULL, ""):
         return token
     if token.startswith(("a/", "b/")):
         return token[2:]
@@ -94,4 +100,104 @@ def strip_path_components(path: str, level: int) -> str:
     return "/".join(parts[level:]) if len(parts) > level else parts[-1]
 
 
-__all__ = ["FileChange", "parse_unified_diff", "strip_diff_path", "strip_path_components", "touched_paths"]
+def _unquote_git_path(raw: str) -> str:
+    """Decode a C-quoted git header path (``"b/\\303\\251.py"``), so later ``..``/absolute checks see the real path."""
+    if len(raw) >= 2 and raw[0] == '"' and raw[-1] == '"':
+        try:
+            return raw[1:-1].encode("latin-1", "backslashreplace").decode("unicode_escape")
+        except (UnicodeDecodeError, ValueError):
+            return raw[1:-1]
+    return raw
+
+
+def _header_path(block: str, marker: str) -> str:
+    """The path following ``marker`` on its own line, unquoted and without a trailing timestamp."""
+    found = re.search(rf"(?m)^{re.escape(marker)}(.+)$", block)
+    return _unquote_git_path(found.group(1).split("\t", 1)[0].strip()) if found else ""
+
+
+def _git_header_paths(block: str) -> tuple[str, str]:
+    """The ``a/``/``b/`` pair from a ``diff --git`` line, empty when the section has none."""
+    found = re.search(r"(?m)^diff --git (a/.+?) (b/.+)$", block)
+    return (_unquote_git_path(found.group(1)), _unquote_git_path(found.group(2).strip())) if found else ("", "")
+
+
+def _section_descriptors(block: str) -> list[dict[str, Any]]:
+    """Descriptors for one diff section, covering the whole git header vocabulary."""
+    binary = bool(re.search(r"(?m)^GIT binary patch\b", block))
+    new_file_m = re.search(r"(?m)^new file mode (\d+)$", block)
+    mode_m = new_file_m or re.search(r"(?m)^new mode (\d+)$", block)
+    mode = mode_m.group(1)[-4:] if mode_m else ""
+    old_path, new_path = _git_header_paths(block)
+
+    if re.search(r"(?m)^rename to ", block) and old_path and new_path:
+        return [
+            {"op": "delete", "path": old_path, "mode": "", "binary": False, "is_new": False},
+            {"op": "write", "path": new_path, "mode": mode, "binary": binary, "is_new": True},
+        ]
+    if re.search(r"(?m)^copy to ", block) and new_path:
+        return [{"op": "write", "path": new_path, "mode": mode, "binary": binary, "is_new": True}]
+
+    minus = _header_path(block, _OLD_FILE)
+    plus = _header_path(block, _NEW_FILE)
+    if plus == _DEV_NULL or re.search(r"(?m)^deleted file mode", block):
+        if not minus:
+            raise ValueError(f"deletion section missing source path:\n{block[:200]}")
+        return [{"op": "delete", "path": minus, "mode": "", "binary": binary, "is_new": False}]
+
+    # Header-only sections (pure chmod) carry no ``+++`` line and name their path on the ``diff --git`` line.
+    target = plus or new_path
+    if not target:
+        raise ValueError(f"cannot determine target path for section:\n{block[:200]}")
+    return [
+        {
+            "op": "write",
+            "path": target,
+            "mode": mode,
+            "binary": binary,
+            "is_new": minus == _DEV_NULL or bool(new_file_m),
+        }
+    ]
+
+
+def parse_patch_manifest(patch_text: str) -> list[dict[str, Any]]:
+    """Read a unified diff as a manifest of intended filesystem changes, never as an instruction to replay.
+
+    Yields one descriptor per affected path, carrying ``op`` (``"write"`` or ``"delete"``), ``path`` (the header
+    path, still ``a/``/``b/``-prefixed — strip it with :func:`strip_diff_path` or :func:`strip_path_components`),
+    ``mode`` (octal string or ``""``), ``binary`` and ``is_new``. ``is_new`` marks a path the patch creates, so a
+    caller staging a base must leave it absent. A rename yields a ``delete`` of the source and a ``write`` of the
+    destination.
+
+    Raises:
+        ValueError: The patch is empty or unparseable, or a section's disposition cannot be determined.
+    """
+    if not patch_text or not patch_text.strip():
+        raise ValueError("empty patch: nothing to apply")
+
+    if re.search(r"(?m)^diff --git ", patch_text):
+        blocks = [b for b in re.split(r"(?m)^(?=diff --git )", patch_text) if b.strip()]
+    else:
+        blocks = [b for b in re.split(rf"(?m)^(?={re.escape(_OLD_FILE)})", patch_text) if b.strip()]
+    if not blocks:
+        raise ValueError("patch contains no file sections")
+
+    return [descriptor for block in blocks for descriptor in _section_descriptors(block)]
+
+
+def repo_relative_manifest(patch_text: str) -> list[dict[str, Any]]:
+    """:func:`parse_patch_manifest` for a caller that works in repo-relative paths rather than at a strip level."""
+    return [
+        {**descriptor, "path": strip_diff_path(descriptor["path"])} for descriptor in parse_patch_manifest(patch_text)
+    ]
+
+
+__all__ = [
+    "FileChange",
+    "parse_patch_manifest",
+    "repo_relative_manifest",
+    "parse_unified_diff",
+    "strip_diff_path",
+    "strip_path_components",
+    "touched_paths",
+]

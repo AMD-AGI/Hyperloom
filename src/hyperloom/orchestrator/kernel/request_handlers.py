@@ -36,6 +36,7 @@ from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env import env_bool, forge_explicitly_enabled, is_truthy
 from hyperloom.common.gpu_identity import is_gfx_arch
 from hyperloom.common.io import append_jsonl
+from hyperloom.common.unified_diff import repo_relative_manifest
 from ..actions.executors._kernel_agent_tool import (
     HandlerResult,
     _maybe_apply_kernel_patch,
@@ -271,9 +272,8 @@ def _preapplied_snapshot_payload(payload: dict) -> dict:
     repo_root = Path(str(payload.get("repo") or payload.get("kernel_repo") or ""))
     if not repo_root.is_dir():
         raise RuntimeError(f"pre-applied patch needs its repo root, got {repo_root!s:.200}")
-    descriptors = apply_kernel_patch.parse_patch_manifest(patch_path.read_text(encoding="utf-8", errors="replace"))
     snapshot = patch_path.parent / "preapplied_snapshot"
-    for descriptor in descriptors:
+    for descriptor in repo_relative_manifest(patch_path.read_text(encoding="utf-8", errors="replace")):
         if descriptor.get("op") != "write":
             continue
         relative = str(descriptor.get("path") or "")

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from hyperloom.common.git_safety import safe_directory_args
+from hyperloom.common.unified_diff import repo_relative_manifest
 from hyperloom.inference_optimizer.trace.task_progress import heartbeat_while_output_flows
 from hyperloom.orchestrator.kernel import apply_kernel_patch
 
@@ -71,9 +72,7 @@ def _final_content_snapshot(
     if not (patch_path.endswith(".patch") and repo_root):
         return snapshot_dir
     try:
-        descriptors = apply_kernel_patch.parse_patch_manifest(
-            Path(patch_path).read_text(encoding="utf-8", errors="replace")
-        )
+        descriptors = repo_relative_manifest(Path(patch_path).read_text(encoding="utf-8", errors="replace"))
         writes = [str(d.get("path") or "") for d in descriptors if d.get("op") == "write"]
     except Exception:  # noqa: BLE001 — an unreadable patch is apply's error to report.
         return snapshot_dir
@@ -172,27 +171,21 @@ def materialize_unified_patch_snapshot(
         raise FileNotFoundError(f"kernel repo does not exist: {root}")
 
     patch_text = patch.read_text(encoding="utf-8", errors="replace")
-    descriptors = apply_kernel_patch.parse_patch_manifest(patch_text)
+    descriptors = repo_relative_manifest(patch_text)
     if not descriptors:
         raise ValueError(f"patch has no file operations: {patch}")
 
-    # Paths the patch CREATES: these must be produced by ``git apply``, never
-    # pre-seeded with a base, or apply fails "already exists". Everything else
-    # is a modify whose base we must supply. ``is_new`` comes from
-    # ``parse_patch_manifest`` (single source of truth for both the path
-    # normalization and the create/modify disposition), which avoids a second,
-    # drift-prone parse of the raw patch text.
-    _new_file_paths = {
-        str(desc.get("path") or "") for desc in descriptors if desc.get("op") == "write" and desc.get("is_new")
-    }
+    # A path the patch CREATES must be produced by ``git apply``, never pre-seeded, or apply fails "already
+    # exists"; everything else is a modify whose base this snapshot has to supply.
+    targets = [(desc, Path(str(desc.get("path") or ""))) for desc in descriptors]
+    new_file_paths = {rel.as_posix() for desc, rel in targets if desc.get("op") == "write" and desc.get("is_new")}
 
     snap = Path(snapshot_dir) if snapshot_dir is not None else patch.parent / "fusion_snapshot"
     if snap.exists():
         shutil.rmtree(snap)
     snap.mkdir(parents=True, exist_ok=True)
 
-    for desc in descriptors:
-        rel = Path(str(desc.get("path") or ""))
+    for _desc, rel in targets:
         if not rel.parts or rel.is_absolute() or ".." in rel.parts:
             raise ValueError(f"unsafe patch path: {rel}")
         dst = snap / rel
@@ -204,7 +197,7 @@ def materialize_unified_patch_snapshot(
         if base.returncode == 0:
             dst.parent.mkdir(parents=True, exist_ok=True)
             dst.write_bytes(base.stdout)
-        elif rel.as_posix() not in _new_file_paths:
+        elif rel.as_posix() not in new_file_paths:
             # ``git show HEAD:`` failed and this is a MODIFY (not a create):
             # non-git repo_root (e.g. vLLM/sglang under site-packages/
             # dist-packages) or an untracked-but-present file. Fall back to the
@@ -254,9 +247,9 @@ def materialize_unified_patch_snapshot(
         msg = (proc.stderr or proc.stdout or "").strip()
         raise RuntimeError(f"could not materialize patch snapshot: {msg[:500]}")
 
-    for desc in descriptors:
-        if desc.get("op") == "write" and not (snap / str(desc["path"])).is_file():
-            raise RuntimeError(f"snapshot missing final content for {desc['path']}")
+    for desc, rel in targets:
+        if desc.get("op") == "write" and not (snap / rel).is_file():
+            raise RuntimeError(f"snapshot missing final content for {rel.as_posix()}")
     return str(snap)
 
 
