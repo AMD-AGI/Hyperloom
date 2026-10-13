@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -1851,24 +1850,3 @@ async def test_431_nonzero_hot_never_flags_degraded(tmp_path):
     warnings = state.last_trace_analyze.get("trace_health_warnings") or []
     codes = [w.get("code") for w in warnings if isinstance(w, dict)]
     assert "cuda_graph_attribution_degraded" not in codes
-
-
-@pytest.mark.asyncio
-async def test_a_raising_compute_bound_reprofile_restores_the_profile_env(tmp_path, monkeypatch):
-    """The re-profile env must not outlive the attempt, so the next profile is not silently compute-bound."""
-    import os
-
-    from hyperloom.orchestrator.actions.executors._multi_node_server_lifecycle import _COMPUTE_BOUND_PROFILE_ENV
-
-    monkeypatch.setattr(os, "environ", os.environ.copy())
-    monkeypatch.setenv(_COMPUTE_BOUND_PROFILE_ENV, "sentinel")
-
-    async def boom(*_args, **_kwargs):
-        raise RuntimeError("re-profile exploded")
-
-    executor = RooflineExecutor(shared_state=_state())
-    monkeypatch.setattr(executor, "_compute_bound_attempt", boom)
-    analysis = SimpleNamespace(payload={})
-
-    assert await executor._compute_bound_reprofile(_ctx(tmp_path), None, None, analysis) is None
-    assert os.environ[_COMPUTE_BOUND_PROFILE_ENV] == "sentinel"

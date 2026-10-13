@@ -851,7 +851,7 @@ def _build_kv_recorder(server_log_path: str | None, env: dict[str, str] | None) 
 
 
 class _RecorderFanout:
-    """Drives several round recorders from the watchdog's single ``note_phase`` / ``tick`` / ``close`` calls.
+    """Drives this round's recorders from the watchdog's single ``note_phase`` / ``tick`` / ``close`` calls.
 
     Each call is isolated: one recorder raising must not starve the others of their phase marks or their ``close``.
     """

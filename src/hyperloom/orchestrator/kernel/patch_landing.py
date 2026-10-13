@@ -30,9 +30,8 @@ VERDICT_STATUSES = frozenset({"integrated", "rejected"})
 TERMINAL_STATUSES = VERDICT_STATUSES | {"dispatch_failed"}
 
 #: Stack labels whose KEEP overwrote a whole kernel source file, so a queued
-#: patch on that file can no longer be measured on its own. Every reader of the
-#: same-source exclusion draws from here: writeback labels a lane's KEEP by its
-#: own name, and a label missing from this set silently re-drains a spent patch.
+#: patch on that file can no longer be measured on its own. Writeback labels a
+#: lane's KEEP by its own name, so a label missing here re-drains a spent patch.
 INTEGRATING_STACK_ACTIONS = frozenset({"integrate", "fusion"})
 
 
@@ -68,8 +67,8 @@ def record_matches_task(
 class IntegratedStack:
     """The optimization_stack rows whose KEEP already landed a whole kernel source file."""
 
-    entries: tuple[Mapping[str, Any], ...]
-    source_files: frozenset[str]
+    _entries: tuple[Mapping[str, Any], ...]
+    _source_files: frozenset[str]
 
     @classmethod
     def of(cls, optimization_stack: Iterable[Any] | None) -> IntegratedStack:
@@ -89,7 +88,7 @@ class IntegratedStack:
         task_group_aliases: set[str] | None = None,
     ) -> bool:
         """Whether a landed row already retired this task, by identity or by owning its source file."""
-        if source_file and source_file in self.source_files:
+        if source_file and source_file in self._source_files:
             return True
         return any(
             record_matches_task(
@@ -100,7 +99,7 @@ class IntegratedStack:
                 task_group_aliases=task_group_aliases,
             )
             for kernel_id in kernel_ids
-            for entry in self.entries
+            for entry in self._entries
         )
 
 

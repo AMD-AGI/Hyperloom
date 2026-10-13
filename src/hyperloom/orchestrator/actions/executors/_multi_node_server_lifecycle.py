@@ -29,7 +29,7 @@ from ._multi_node_env import _read_state, is_multi_node
 # dp-size from prefill+decode+shared server args, so the profiled server runs single-rank full-batch (compute-bound).
 _COMPUTE_BOUND_PROFILE_ENV = "HYPERLOOM_MN_PROFILE_COMPUTE_BOUND"
 
-# Control variables the SSH-launched server reads out of this process' environment for the duration of one restart.
+# Control variables the multi-node launcher reads out of this process' environment for one restart.
 _PROFILE_TRACE_DIR_ENV = "HYPERLOOM_MN_PROFILE_TRACE_DIR"
 _EXTRA_FWD_ENV = "HYPERLOOM_MN_EXTRA_FWD_ENV"
 _UNSET_FWD_ENV = "HYPERLOOM_MN_UNSET_FWD_ENV"

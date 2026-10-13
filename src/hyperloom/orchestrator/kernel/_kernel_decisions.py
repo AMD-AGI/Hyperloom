@@ -354,8 +354,6 @@ def pending_kernel_integration_records(state) -> list[dict[str, Any]]:
         task_group_key = str(record.get("task_group_key") or "")
         task_group_aliases = {str(alias) for alias in (record.get("legacy_task_group_keys") or []) if str(alias)}
         kernel_id = str(record.get("kernel_id") or "")
-        # One spelling on both sides: ``IntegratedStack`` reads a path the same way, so reading only
-        # ``source_file`` here would let a same-source sibling slip past the exclusion.
         source_file = record_source_path(record)
         artifact_path = str(record.get("artifact_path") or "")
         stable_entry = state.kernel_opt_task_attempts.get(str(record.get("task_key") or "")) or {}
