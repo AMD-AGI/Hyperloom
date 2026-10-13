@@ -49,6 +49,9 @@ log = _logging.getLogger(__name__)
 _LOCAL_EXPLORE_MAX_ATTEMPTS: int = 3
 # Unified authored-lane max attempts (apply-failure retries + Critic reauthor).
 _AUTHORED_LANE_MAX_ATTEMPTS: int = 3
+# Share of changed lines a proposed patch repeats from an already-measured one before the review is told. Set where
+# two ports of one upstream change land and a follow-up to a measured patch does not; it informs, never refuses.
+_PATCH_OVERLAP_MIN_RATIO: float = 0.5
 
 
 def _framework_config_levers_from_done(
@@ -678,8 +681,36 @@ class FrameworkPhase(CoordinatorCollaborator):
         """Record an authored patch's settled outcome, then re-arm or drain the authored lane."""
         if (task.params or {}).get("framework_agent_authoring"):
             self._record_framework_agent_authored_outcome(task=task, result=result, adopted=verdict is Verdict.ADOPTED)
+        self._record_measured_patch_set(task, verdict)
         await self._maybe_rearm_authored_lane(result.result)
         await self._drain_apply_fail_retry_pending()
+
+    def _record_measured_patch_set(self, task: "Task", verdict: Verdict) -> None:
+        """Note the lines this round's patch changed, so a later proposal can be told it repeats them."""
+        from ..framework.patch_overlap import patch_set_identity
+
+        params = task.params or {}
+        files, line_keys = patch_set_identity(params.get("patches"))
+        if not line_keys:
+            return
+        self.shared_state.record_measured_patch_set(
+            task_id=str(task.task_id or ""),
+            patch_name=str(params.get("patch_name") or ""),
+            files=files,
+            line_keys=line_keys,
+            outcome=verdict.name.lower(),
+        )
+
+    def _measured_patch_overlaps(self, patch_paths: Any) -> list[dict[str, Any]]:
+        """Measured rounds whose patch changed much the same lines as *patch_paths*."""
+        from ..framework.patch_overlap import overlapping_measured, patch_set_identity
+
+        _files, line_keys = patch_set_identity(patch_paths)
+        return overlapping_measured(
+            line_keys,
+            self.shared_state.measured_patch_sets,
+            min_ratio=_PATCH_OVERLAP_MIN_RATIO,
+        )
 
     def record_unpromoted_candidate(self, task: "Task", result_payload: dict[str, Any]) -> None:
         """Stamp ``no_result_failed`` for an upstream-PR candidate task that settled without a promotable result."""
@@ -2940,6 +2971,9 @@ class FrameworkPhase(CoordinatorCollaborator):
             "predicted_gain_pct": 0.0,
             "params": integrate_params,
         }
+        overlaps = self._measured_patch_overlaps(patches)
+        if overlaps:
+            propose_payload["overlaps_measured"] = overlaps
         pending = await record_proposal(
             self._coord,
             from_agent="coordinator",
@@ -2955,6 +2989,7 @@ class FrameworkPhase(CoordinatorCollaborator):
                 "specialist_task_id": sid,
                 "proposal_msg_id": pending.proposal_msg_id,
                 "patch_name": patch_name,
+                "overlaps_measured": overlaps,
                 "patches": [str(x) for x in patches][:8],
                 # Artifact-only deliverables: record their install targets.
                 "artifacts_written": [
