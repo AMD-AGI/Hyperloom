@@ -16,7 +16,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.roofline_event import (
     ANALYSIS_ATTEMPT_INITIAL,
     ANALYSIS_ATTEMPT_N26_RETRY,
     PRODUCER,
-    PROFILE_ATTEMPT_AFTER_ZERO_OPS,
+    PROFILE_ATTEMPT_COMPUTE_BOUND,
     PROFILE_ATTEMPT_INITIAL,
     _summarize_trace_files,
     make_roofline_recorder,
@@ -368,7 +368,7 @@ def test_a_successful_attempt_records_the_patchers_that_worked(tmp_path: Path) -
     assert detail["failed_patchers"] == []
 
 
-def test_profile_retries_collapse_into_one_action(tmp_path: Path) -> None:
+def test_profile_runs_collapse_into_one_action(tmp_path: Path) -> None:
     recorder = _recorder(reason="kernel_followup")
     recorder.begin(max_profile_attempts=3)
     recorder.end_profile_run(
@@ -379,7 +379,7 @@ def test_profile_retries_collapse_into_one_action(tmp_path: Path) -> None:
         failure={"stage": "profile_zero_ops", "error_class": "zero_ops", "message": "metadata-only trace"},
     )
     recorder.end_profile_run(
-        run_index=recorder.begin_profile_run(attempt_reason=PROFILE_ATTEMPT_AFTER_ZERO_OPS),
+        run_index=recorder.begin_profile_run(attempt_reason=PROFILE_ATTEMPT_COMPUTE_BOUND),
         status="succeeded",
         disable_cuda_graph=True,
         profile_result=_profile_result(),
@@ -399,7 +399,7 @@ def test_profile_retries_collapse_into_one_action(tmp_path: Path) -> None:
     assert profile["attempt_count"] == 2
     assert [row["attempt_reason"] for row in profile["runs"]] == [
         PROFILE_ATTEMPT_INITIAL,
-        PROFILE_ATTEMPT_AFTER_ZERO_OPS,
+        PROFILE_ATTEMPT_COMPUTE_BOUND,
     ]
     assert [row["effective"] for row in profile["runs"]] == [False, True]
     assert profile["effective_run_index"] == 2
@@ -912,7 +912,7 @@ def test_validate_lands_per_profile_attempt(tmp_path: Path) -> None:
         failure={"stage": "profile_zero_ops", "error_class": "zero_ops", "message": "no ops"},
     )
     recorder.end_profile_run(
-        run_index=recorder.begin_profile_run(attempt_reason=PROFILE_ATTEMPT_AFTER_ZERO_OPS),
+        run_index=recorder.begin_profile_run(attempt_reason=PROFILE_ATTEMPT_COMPUTE_BOUND),
         status="succeeded",
         disable_cuda_graph=False,
         profile_result=_profile_result(

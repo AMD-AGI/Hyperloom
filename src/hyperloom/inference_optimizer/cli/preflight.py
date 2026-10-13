@@ -51,6 +51,7 @@ from hyperloom.common.provenance import (
     detect_gfx_arch,
 )
 from hyperloom.common.timeutil import now_iso
+from hyperloom.common.visible_devices import hip_mask_within_rocr
 
 from .credentials import (
     _is_stale_proxy_url,
@@ -1440,10 +1441,9 @@ def _ensure_lm_eval_dep(
 
 def _normalize_hip_visible_devices() -> None:
     """Re-index HIP within the device view selected by ROCR."""
-    visible = [part for part in os.environ.get("ROCR_VISIBLE_DEVICES", "").split(",") if part.strip()]
-    if not visible:
+    value = hip_mask_within_rocr(os.environ)
+    if value is None:
         return
-    value = ",".join(str(index) for index in range(len(visible)))
     previous = os.environ.get("HIP_VISIBLE_DEVICES")
     if previous == value:
         return
@@ -1621,8 +1621,7 @@ def _check_tracelens_cli() -> dict[str, Any]:
     print(
         f"ERROR: TraceLens CLI(s) not on PATH: {missing}. The pod-local "
         f"/opt/venv/bin/TraceLens_* console_scripts are installed by "
-        f"src/hyperloom/inference_optimizer/assets/install_kernel_tools.sh (chained from "
-        f"src/hyperloom/inference_optimizer/assets/install.sh) and do NOT persist "
+        f"src/hyperloom/inference_optimizer/assets/install.sh and do NOT persist "
         f"across pod restarts. SKILL IR-2 requires running install.sh "
         f"before every launch (carve-out applies only to --resume-from in "
         f"the same shell that earlier ran install.sh). Re-run:\n"

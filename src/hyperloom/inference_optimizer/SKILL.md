@@ -105,7 +105,7 @@ host make "latest" pick the wrong run.
 Inputs that stay outside `$USER_DATA_PATH` by design (read-only sources
 or warm-start caches): **TraceLens** — `$TRACELENS_ROOT` (default
 `${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/TraceLens`; when unset,
-`src/hyperloom/inference_optimizer/assets/install_kernel_tools.sh` clones
+`src/hyperloom/inference_optimizer/assets/install.sh` clones
 [AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens) there and pins
 it to a fixed SHA. A pre-existing checkout you maintain is only used as
 an explicit operator override — export `TRACELENS_ROOT=<path>` to opt
@@ -504,10 +504,8 @@ bash "$INSTALL_SH"
 
 `src/hyperloom/inference_optimizer/assets/install.sh` is the only install entrypoint for
 full inference optimization. It installs the optimizer / Magpie / InferenceX
-first, then chains to `src/hyperloom/inference_optimizer/assets/install_kernel_tools.sh` for the kernel
-optimization environment. `src/hyperloom/inference_optimizer/assets/install_kernel_tools.sh` remains valid for
-standalone kernel-agent debugging, but should not be the main entrypoint for a
-full inference optimizer session.
+first, then the kernel optimization environment from the steps in
+`src/hyperloom/inference_optimizer/assets/install_kernel_tools.sh`.
 
 The install phase always initializes the full Hyperloom runtime. Even if the
 user later passes `--no-kernel` at runtime, the installer still prepares
@@ -524,7 +522,7 @@ remember). Direct steps in `src/hyperloom/inference_optimizer/assets/install.sh`
 | `INFERENCEX_PATH` resolution (honours a pre-existing `$INFERENCEX_PATH`, else clones `$INFERENCEX_REPO` pinned to `$INFERENCEX_REF` into `$INFERENCEX_DEFAULT_DIR` = `${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/InferenceX@<sha>`, reusing an existing checkout there on re-runs) | `ensure_inferencex` |
 | `INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS` appended to `kernel-agent.env.sh` | `_probe_framework_source_roots` |
 
-Chained from `src/hyperloom/inference_optimizer/assets/install_kernel_tools.sh` (single chain at the end
+Kernel-agent steps in `src/hyperloom/inference_optimizer/assets/install_kernel_tools.sh` (run at the end
 of `src/hyperloom/inference_optimizer/assets/install.sh`):
 
 | Component | Provided by |
@@ -549,10 +547,11 @@ launching; do not ask the user for these values again.
 
 Each optimize launch starts the service when nothing serves that URL, in the
 same environment as the optimizer (inside the container in docker mode). Its
-data and `service.log` live under `$USER_DATA_PATH/experience-kb`, and it keeps
-running after the run for the next one. When it cannot be started, the launch
-logs a warning and continues: reads return nothing and writes wait in
-`$USER_DATA_PATH/experience-kb/spool` until the service serves again, so they
+data and `service.log` live under its data home, `$HYPERLOOM_KB_HOME` when set,
+otherwise `$USER_DATA_PATH/experience-kb`, and it keeps running after the run
+for the next one. When it cannot be started, the launch logs a warning and
+continues: reads return nothing and writes wait in `spool/` under that data home
+until the service serves again, so they
 survive a removed container. A non-loopback `HYPERLOOM_KB_URL` names a
 service this workspace does not run; Hyperloom connects to it without starting
 anything. Without `HYPERLOOM_KB_URL`, Hyperloom runs without Experience KB reads

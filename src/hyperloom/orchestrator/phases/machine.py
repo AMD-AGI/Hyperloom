@@ -227,43 +227,7 @@ class MachinePhase(CoordinatorCollaborator):
             return
         target, reason, evidence = next_phase
         prior = state.phase
-        barrier_reason = f"phase_transition:{str(prior or '').strip().upper()}->{target}"
-        # The next phase starts on quiet GPUs: every running action is stopped, and the transition waits until the
-        # registry confirms none is left running and every finished one is booked in this phase. Queued work the next
-        # phase does not admit is dropped here too.
-        cancelled = await self.tasks.cancel_queued(
-            allowed_kinds=_phase_state.PHASE_ALLOWED_ACTIONS.get(target, frozenset()),
-            reason=barrier_reason,
-        )
-        stopped = await dispatcher.cancel_inflight_actions(reason=barrier_reason)
-        if cancelled or stopped:
-            log.info(
-                "Coordinator.phase: %s (reason=%s) cancelled %d queued and stopped %d running task(s)",
-                barrier_reason,
-                reason,
-                len(cancelled),
-                len(stopped),
-            )
-            await self.bus.record_observation(
-                "coordinator",
-                "observation",
-                {
-                    "kind": "tasks_cancelled_on_phase_transition",
-                    "prior_phase": str(prior or ""),
-                    "target_phase": target,
-                    "reason": reason,
-                    "cancelled_task_ids": cancelled,
-                    "stopped_task_ids": stopped,
-                },
-            )
-        running = await self.tasks.running()
-        if running or dispatcher.has_unbooked_completions():
-            log.info(
-                "phase_machine: holding %s (reason=%s) until %d running task(s) stop and are booked",
-                barrier_reason,
-                reason,
-                len(running),
-            )
+        if not await self._drain_for_transition(prior=prior, target=target, reason=reason, evidence=evidence):
             return
         dispatcher.admission_frozen = False
         # Consume escalate hint after a hint-driven transition.
@@ -383,6 +347,55 @@ class MachinePhase(CoordinatorCollaborator):
             )
         if save_error is not None:
             raise save_error
+
+    async def _drain_for_transition(self, *, prior: str, target: str, reason: str, evidence: Any) -> bool:
+        """Clear the way to ``target`` and return whether the transition may commit on this tick.
+
+        The next phase starts on quiet GPUs: nothing new is admitted, queued work the next phase does not admit is
+        dropped, and the transition waits until every running action has finished and is booked in this phase.
+        Running work is cancelled only when the transition is terminal (``evidence["terminal"]``): the run is
+        already over, so there is no measurement left worth settling. Otherwise a phase budget only stops new work,
+        and cancelling the last action in flight would throw away the measurement it was about to settle; session
+        exhaustion and shutdown still cancel it through the dispatcher.
+        """
+        dispatcher = self._coord.dispatcher
+        barrier_reason = f"phase_transition:{str(prior or '').strip().upper()}->{target}"
+        cancelled = await self.tasks.cancel_queued(
+            allowed_kinds=_phase_state.PHASE_ALLOWED_ACTIONS.get(target, frozenset()),
+            reason=barrier_reason,
+        )
+        terminal = isinstance(evidence, dict) and bool(evidence.get("terminal"))
+        stopped = await dispatcher.cancel_inflight_actions(reason=barrier_reason) if terminal else []
+        if cancelled or stopped:
+            log.info(
+                "Coordinator.phase: %s (reason=%s) cancelled %d queued and stopped %d running task(s)",
+                barrier_reason,
+                reason,
+                len(cancelled),
+                len(stopped),
+            )
+            await self.bus.record_observation(
+                "coordinator",
+                "observation",
+                {
+                    "kind": "tasks_cancelled_on_phase_transition",
+                    "prior_phase": str(prior or ""),
+                    "target_phase": target,
+                    "reason": reason,
+                    "cancelled_task_ids": cancelled,
+                    "stopped_task_ids": stopped,
+                },
+            )
+        running = await self.tasks.running()
+        if running or dispatcher.has_unbooked_completions():
+            log.info(
+                "phase_machine: holding %s (reason=%s) until %d running task(s) finish and are booked",
+                barrier_reason,
+                reason,
+                len(running),
+            )
+            return False
+        return True
 
     async def _on_phase_entered(
         self,

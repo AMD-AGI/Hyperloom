@@ -89,10 +89,17 @@ filter, not the set the LLM can propose. The LLM-proposable set is
 refreshes and close sequencing may be enqueued internally even when the LLM
 is not allowed to propose them.
 
-Every phase transition is a GPU barrier: the Coordinator stops every running
-action and drops queued work the next phase does not support, and commits the
-transition only once no task is left running. Each phase therefore starts on
-quiet GPUs, and its entry hook runs on the transition itself.
+Every phase transition is a GPU barrier: the Coordinator stops admitting new
+work, drops queued work the next phase does not support, and commits the
+transition only once the actions already running have finished and been
+booked. A phase budget never cancels running work -- the last action in
+flight, such as a GEAK rebench, completes and settles its result. Running
+work is cancelled only when the run is already over: a terminal transition to
+CLOSE (a recorded stop reason such as an unhealthy backend, a failed baseline,
+convergence or `skip_to_close`), an exhausted session budget, a shutdown or an
+operator interrupt. Each
+phase therefore starts on quiet GPUs, and its entry hook runs on the
+transition itself.
 
 ## PRELUDE
 
@@ -179,9 +186,12 @@ authoring specialist's prompt. The rungs, in increasing complexity:
    there. A kept runtime is re-provisioned for every later round, whatever
    that round's failure.
 4. **Rung 4 — source localization.** Localize a merged-PR or vendored
-   closure into the source tree the server imports. A change that touches
-   compiled or build-backend files cannot be satisfied by a plain source
-   edit, so it defers to Rung 5.
+   closure into the source tree the server imports. Only the files under the
+   framework's package are localized. A change that touches compiled or
+   build-backend files cannot be satisfied by a plain source edit, and one
+   that is oversize or does not apply to the tree is not backported either;
+   in each case the round runs on its own patches, and a compiled gap is
+   left to Rung 5.
 5. **Rung 5 — off-loop compiled build.** Perform a compiled-component build
    (AITER kernels, sgl-kernel, or vLLM-from-source). Builds run *off* the
    coordinator tick loop on a dedicated single-slot build lane: each build

@@ -46,6 +46,7 @@ from ..actions.executors.explore import STACK_REVALIDATE_SOURCE, is_stack_revali
 from hyperloom.inference_optimizer.grid_server_args import strip_benchmark_harness_flags
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 from ..actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
+from ..actions.executors._ray_serving import RAY_INFEASIBLE_MARKER
 from hyperloom.inference_optimizer.breakdown.stop_reasons import (
     AGENTX_PREFLIGHT_STOP_REASON,
     PATCH_RECOVERY_INCOMPLETE_STOP_REASON,
@@ -113,9 +114,20 @@ _BASELINE_MAX_TOTAL_FAILURES: int = 3
 _DEFAULT_RESUME_DRIFT_FLOOR_PCT: float = 95.0
 
 
-def _extract_enablement_launch_log(result_payload: dict[str, Any] | None) -> str:
-    """Extract launch/traceback text from a failed baseline result payload."""
-    if not isinstance(result_payload, dict):
+def _is_ray_cluster_infeasible(result_payload: Mapping[str, Any]) -> bool:
+    """Whether a baseline failed because the Ray cluster can never place its round."""
+    return RAY_INFEASIBLE_MARKER in str(result_payload.get("error") or "")
+
+
+def _authorable_launch_log(result_payload: dict[str, Any] | None, *, err_class: str) -> str:
+    """The failed boot's text the next enablement round authors against, or ``""``.
+
+    A failure that never reached a framework error is no wall: as
+    integrate_patch's "before" boot it passes any patch that starts the server.
+    """
+    if not isinstance(result_payload, dict) or _is_ray_cluster_infeasible(result_payload):
+        return ""
+    if err_class in ("fast_exit_arg_error", AGENTX_PREFLIGHT_ERROR_CLASS) or stopped_by_the_run_class(err_class):
         return ""
     parts: list[str] = []
     for key in ("error", "stderr", "log_tail", "log_excerpt", "traceback", "reason"):
@@ -987,8 +999,9 @@ class WritebackCollaborator(CoordinatorCollaborator):
         evidence = str(result_payload.get(BASELINE_EVAL_EVIDENCE_KEY) or "")
         if evidence:
             state.enablement.baseline_eval_evidence = evidence[:4000]
-            state.enablement.launch_log = evidence
-        state.enablement.launch_observation_path = str(result_payload.get("boot_observation_path") or "")
+            state.enablement.record_launch_observation(
+                log=evidence, observation_path=str(result_payload.get("boot_observation_path") or "")
+            )
         self._record_enablement_eval_trigger()
 
     def _record_enablement_eval_trigger(self) -> None:
@@ -1075,10 +1088,10 @@ class WritebackCollaborator(CoordinatorCollaborator):
             error_class="" if stopped_by_the_run else str(err_class or ""),
             reason="stopped by the run" if stopped_by_the_run else "revalidation baseline failed",
         )
-        launch_log = _extract_enablement_launch_log(result_payload)
+        launch_log = _authorable_launch_log(result_payload, err_class=str(err_class or ""))
         if launch_log:
-            state.enablement.launch_log = launch_log
-            state.enablement.launch_observation_path = str(result_payload.get("boot_observation_path") or "")
+            observed = str(result_payload.get("boot_observation_path") or "")
+            state.enablement.record_launch_observation(log=launch_log, observation_path=observed)
         log.warning(
             "enablement revalidation task %s %s (error_class=%s); pending=%s rearm=%s",
             task.task_id,
@@ -1087,6 +1100,56 @@ class WritebackCollaborator(CoordinatorCollaborator):
             bool(state.enablement.validation_pending),
             not bool(state.stop_reason),
         )
+
+    def _generic_baseline_failure_stops(
+        self,
+        task: Task,
+        err_class: str,
+        result_payload: Mapping[str, Any],
+        *,
+        retries_suppressed: bool,
+    ) -> bool:
+        """Count a baseline failure of no specially handled class; whether it ends the run.
+
+        Args:
+            task: The failed baseline task.
+            err_class: The failure's ``error_class``.
+            result_payload: The failed result.
+            retries_suppressed: A pending eval or an open enablement lane owns the
+                retries, so the streak alone does not stop the run.
+
+        Returns:
+            ``True`` when the run should stop as ``baseline_failed``.
+        """
+        # A process that exited with the same output as last time (modulo numbers)
+        # will do so again: stop at two instead of spending a third attempt. The
+        # executor signs only ``subprocess_nonzero``, from the process's whole
+        # output rather than the 2000-character ``error`` tail; other classes carry
+        # a fixed sentence that two unrelated failures share.
+        signature = str(result_payload.get("output_signature") or "") if err_class == "subprocess_nonzero" else ""
+        repeated = bool(
+            signature
+            and self.shared_state.baseline_failure_streak >= 1
+            and signature == self.shared_state.baseline_last_failure_signature
+        )
+        self.shared_state.baseline_failure_streak += 1
+        self.shared_state.baseline_last_failure_signature = signature
+        streak = self.shared_state.baseline_failure_streak
+        if _is_ray_cluster_infeasible(result_payload):
+            # The Ray cluster cannot place the round, and the runtime has already
+            # repaired what it safely could (a lone local head without
+            # serving_slot). A retry meets the same cluster and no framework patch
+            # changes it, so stop on the first one, like the AgentX preflight.
+            # Waiting for a second would not be bounded: with no launch log to
+            # author against, the enablement lane this failure opens never
+            # schedules another baseline.
+            log.error(
+                "baseline %s failed because the Ray cluster cannot place it; stopping the run: %s",
+                task.task_id,
+                result_payload.get("error") or err_class,
+            )
+            return True
+        return not retries_suppressed and (streak >= 3 or (streak >= 2 and repeated))
 
     async def handle_unpromotable_result(
         self,
@@ -1237,8 +1300,12 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 # ``baseline_arg_error_streak`` is deliberately left alone: a boot
                 # that failed some other way is no evidence the arguments were
                 # fixed.
-                self.shared_state.baseline_failure_streak += 1
-                if self.shared_state.baseline_failure_streak >= 3 and not eval_pending_suppress and not in_enablement:
+                if self._generic_baseline_failure_stops(
+                    task,
+                    err_class,
+                    result_payload,
+                    retries_suppressed=bool(eval_pending_suppress or in_enablement),
+                ):
                     self.shared_state.set_stop_reason("baseline_failed")
             # Combined backstop: count ALL baseline failures so mixed
             # error_classes that split the per-class streaks still fast-fail.
@@ -1260,27 +1327,21 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     "disable-cuda-graph fallback for the next baseline retry",
                     task.task_id,
                 )
-            # Stash the launch/traceback text for the FRAMEWORK pump. Excluded:
-            # fast arg errors, and an AgentX preflight abort -- the pump treats a
-            # non-blank log as "there is something here to author against", and
-            # for a missing pinned dependency there is not.
-            if err_class not in ("fast_exit_arg_error", AGENTX_PREFLIGHT_ERROR_CLASS):
-                launch_log = _extract_enablement_launch_log(result_payload)
-                if launch_log:
-                    self.shared_state.enablement.launch_log = launch_log
-                    self.shared_state.enablement.launch_observation_path = str(
-                        result_payload.get("boot_observation_path") or ""
+            # Stash the launch/traceback text for the FRAMEWORK pump.
+            launch_log = _authorable_launch_log(result_payload, err_class=err_class)
+            if launch_log:
+                self.shared_state.enablement.record_launch_observation(
+                    log=launch_log, observation_path=str(result_payload.get("boot_observation_path") or "")
+                )
+                # Only the first trigger is kept, so a serial enablement does not
+                # rewrite the reason the lane opened with the gap it is now on.
+                if not str(self.shared_state.enablement.origin or ""):
+                    enablement_event.record_trigger(
+                        origin=enablement_event.ORIGIN_BOOT,
+                        mode=str(self.shared_state.enablement_mode or ""),
+                        kind=str(err_class or ""),
+                        evidence=launch_log,
                     )
-                    # Only the first trigger is kept, so a serial enablement does
-                    # not rewrite the reason the lane opened with the gap it is
-                    # now on.
-                    if not str(self.shared_state.enablement.origin or ""):
-                        enablement_event.record_trigger(
-                            origin=enablement_event.ORIGIN_BOOT,
-                            mode=str(self.shared_state.enablement_mode or ""),
-                            kind=str(err_class or ""),
-                            evidence=launch_log,
-                        )
             baseline_event_payload = {
                 "kind": "baseline_not_promoted",
                 "task_id": task.task_id,
