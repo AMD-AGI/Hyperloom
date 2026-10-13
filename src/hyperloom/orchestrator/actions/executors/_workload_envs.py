@@ -20,6 +20,8 @@ the end of :func:`materialize_config_with_envs`; nothing may write it after.
 
 from __future__ import annotations
 
+from hyperloom.common.env import prepend_path
+
 import json
 import logging
 import math
@@ -58,7 +60,7 @@ from hyperloom.inference_optimizer.session.paths import asset_root
 from hyperloom.inference_optimizer.framework_paths import ENV_FLYDSL_EXTRA_SOURCE_DIRS
 from hyperloom.inference_optimizer.framework_paths import GENERIC_FRAMEWORK_ROOT_ENV
 from hyperloom.inference_optimizer.framework_paths import flydsl_extra_source_dirs
-from ._benchmark_interpreter import _resolve_probe_python
+from hyperloom.inference_optimizer.benchmark_interpreter import resolve_probe_python
 from hyperloom.inference_optimizer.grid_server_args import (
     compact_json_server_args,
     dedup_vllm_server_args,
@@ -157,7 +159,7 @@ def _atom_tracelens_caps() -> _AtomTracelensCaps:
     """
     try:
         proc = subprocess.run(
-            [_resolve_probe_python("atom"), "-c", _ATOM_CAPS_PROBE],
+            [resolve_probe_python("atom"), "-c", _ATOM_CAPS_PROBE],
             capture_output=True,
             text=True,
             timeout=10,
@@ -1064,20 +1066,6 @@ def _resolve_framework_repo_path(
         if value:
             return value
     return ""
-
-
-def prepend_launch_path(envs: dict[str, Any], var: str, *entries: str) -> None:
-    """Put ``entries`` first on the path-list env ``var`` the materialized config hands the server launch.
-
-    Magpie and the bypass launcher start the server with ``os.environ`` overlaid by ``benchmark.envs``, so a config
-    value replaces the inherited one. A config without the key therefore builds on the inherited value, or
-    prepending would drop the operator's and the image's entries (import paths, ``PATH``, ``/opt/rocm/lib``); a
-    config with the key stays authoritative. An entry already on the path moves to the front, and empty parts are
-    dropped.
-    """
-    base = envs[var] if var in envs else os.environ.get(var)
-    parts = [*entries, *str(base or "").strip().split(os.pathsep)]
-    envs[var] = os.pathsep.join(dict.fromkeys(part for part in parts if part))
 
 
 #: Source-root envs Hyperloom writes into a vLLM launch; vLLM reports them as unknown.
@@ -2370,7 +2358,7 @@ def materialize_config_with_envs(
                 extra_body.setdefault("detailed_annotations", True)
                 _tool_dir = kernel_shape_tool_dir()
                 if _shape_disc and _tool_dir is not None:
-                    prepend_launch_path(envs, "PYTHONPATH", str(_tool_dir))
+                    prepend_path(envs, "PYTHONPATH", str(_tool_dir))
                     envs["TRACELENS_SHAPE_DISCOVERY"] = "1"
                 else:
                     envs["TRACELENS_SHAPE_DISCOVERY"] = "0"
@@ -2451,7 +2439,7 @@ def materialize_config_with_envs(
     if reference_controls.get("overlay_pythonpath"):
         from hyperloom.common.overlay import validate_overlay_pythonpath
 
-        prepend_launch_path(envs, "PYTHONPATH", validate_overlay_pythonpath(reference_controls["overlay_pythonpath"]))
+        prepend_path(envs, "PYTHONPATH", validate_overlay_pythonpath(reference_controls["overlay_pythonpath"]))
     recipe_overwritten = launcher_overwritten_envs(bench)
     if server_args:
         # Merge into (not overwrite) the framework env so the profile path's

@@ -207,7 +207,7 @@ def _infer_model_class_from_config(model_path: str) -> str:
 
 if TYPE_CHECKING:
     from hyperloom.inference_optimizer.experience_kb import ExperienceKBIntegration
-    from .proposals import PendingProposal
+    from ..state.proposal import PendingProposal
 
 
 @dataclass

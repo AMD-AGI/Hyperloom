@@ -539,7 +539,7 @@ def test_profile_atom_injects_tracelens_knobs_when_probe_hits(monkeypatch, tmp_p
 
 def test_atom_tracelens_caps_parses_and_fail_soft(monkeypatch):
     we._atom_tracelens_caps.cache_clear()
-    monkeypatch.setattr(we, "_resolve_probe_python", lambda fw: "python3")
+    monkeypatch.setattr(we, "resolve_probe_python", lambda fw: "python3")
     monkeypatch.setattr(
         we.subprocess,
         "run",

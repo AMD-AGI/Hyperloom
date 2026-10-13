@@ -10,10 +10,10 @@ def magpie_health_code(*, native_agentx: bool) -> str:
     """Keep generic imports compatible; audit native AgentX's execution contract."""
     if not native_agentx:
         return "import Magpie\n"
-    from .agentx.native import _MAGPIE_SOURCE_IDENTITY_CODE
+    from .agentx.magpie_source_identity import MAGPIE_SOURCE_IDENTITY_CODE
 
     return (
-        _MAGPIE_SOURCE_IDENTITY_CODE
+        MAGPIE_SOURCE_IDENTITY_CODE
         + """
 import inspect
 import re

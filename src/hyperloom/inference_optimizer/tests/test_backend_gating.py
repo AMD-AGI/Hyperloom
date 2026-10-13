@@ -50,7 +50,7 @@ def test_preflight_resolves_interpreter_via_backend_not_magpie():
     assert "shutil.which" not in ray_src
     # Magpie interpreter is no longer resolved unconditionally in _preflight; it comes through
     # resolve_benchmark_interpreter for the Magpie backend.
-    assert "_resolve_magpie_python" not in src
+    assert "resolve_magpie_python" not in src
 
 
 def test_install_sh_gates_magpie_calls():

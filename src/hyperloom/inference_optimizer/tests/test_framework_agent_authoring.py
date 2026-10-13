@@ -150,7 +150,7 @@ def _pump_then_materialize(stub: Coordinator) -> None:
 
 
 def _materialize(stub: Coordinator, *, audit_step: str = "") -> None:
-    from hyperloom.orchestrator.loop.proposals import PendingProposal
+    from hyperloom.orchestrator.state.proposal import PendingProposal
 
     pending = PendingProposal(
         proposal_msg_id="m-fpr",

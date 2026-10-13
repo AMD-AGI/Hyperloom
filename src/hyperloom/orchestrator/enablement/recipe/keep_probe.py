@@ -174,7 +174,7 @@ def probe_environment_closure(
 
 def _keep_probe_env(override: Mapping[str, Any] | None) -> dict[str, str]:
     """Return the inherited environment with the graded override applied."""
-    from ...actions.executors._grid_runner import apply_runtime_override
+    from hyperloom.inference_optimizer.runtime_override import apply_runtime_override
 
     env = dict(os.environ)
     if override:
@@ -239,7 +239,7 @@ def probe_keep_environment(
     some runtime was provisioned is absent for exactly the topology whose
     replay most needs it. The composed launch environment is what both the
     interpreter resolution and the probe itself run under. That fallback is
-    ``_resolve_probe_python``, the
+    ``resolve_probe_python``, the
     same resolver the accuracy probes use, and not the benchmark backend's
     own interpreter -- on a split-venv host Magpie runs from one venv while
     the server it launches runs from another, and recording Magpie's
@@ -259,7 +259,7 @@ def probe_keep_environment(
     the build attempt this round's probe was opened for when no provisioning
     stage ran; their versions are the probe's observation either way.
     """
-    from ...actions.executors._benchmark_interpreter import _resolve_probe_python
+    from hyperloom.inference_optimizer.benchmark_interpreter import resolve_probe_python
     from ...actions.executors.benchmark_backend import resolve_backend_name, resolve_benchmark_interpreter
 
     override: dict[str, Any] = {}
@@ -273,7 +273,7 @@ def probe_keep_environment(
     if backend == "bypass":
         fallback = resolve_benchmark_interpreter()
     else:
-        fallback = _resolve_probe_python(framework, env=graded_env)
+        fallback = resolve_probe_python(framework, env=graded_env)
     interpreter = resolve_keep_interpreter(
         override,
         backend_name=backend,

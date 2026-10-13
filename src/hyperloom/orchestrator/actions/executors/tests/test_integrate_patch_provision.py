@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from hyperloom.inference_optimizer.runtime_override import apply_runtime_override
+
 import types
 from pathlib import Path
 
@@ -16,7 +18,6 @@ from hyperloom.orchestrator.actions.executors import integrate_patch as ip
 from hyperloom.orchestrator.actions.executors._grid_runner import (
     GridVariant,
     _build_variant_yaml,
-    apply_runtime_override,
 )
 from hyperloom.orchestrator.enablement.runtime.stack_actions import (
     EnablementStackAction,

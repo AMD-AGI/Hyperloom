@@ -1210,10 +1210,10 @@ async def run_conc_sweep(
     if optimized is None:
         return _declined(recorder, "no_optimization_to_compare")
     if optimized.overlay:
-        from ..actions.executors._grid_runner import _is_safe_path_entry
+        from hyperloom.inference_optimizer.runtime_override import is_safe_path_entry
         from ..kernel.geak_config import _geak_overlay_is_loadable
 
-        if not _is_safe_path_entry(optimized.overlay) or not _geak_overlay_is_loadable(optimized.overlay):
+        if not is_safe_path_entry(optimized.overlay) or not _geak_overlay_is_loadable(optimized.overlay):
             return _declined(recorder, "optimized_overlay_unavailable", final_overlay=optimized.overlay)
     if not concs:
         return _declined(recorder, "empty_conc_list")

@@ -15,7 +15,7 @@ from typing import Any
 import yaml
 
 from hyperloom.common.coerce import to_str_list
-from hyperloom.common.env_safety import BLOCKED_CHILD_ENV_NAMES, _ENV_KEY_RE
+from hyperloom.common.env_safety import BLOCKED_CHILD_ENV_NAMES, valid_env_key
 from hyperloom.inference_optimizer.agentx.identity import has_launch_contract
 from ._native_args import compose_native_args
 from ._native_source import source_file_hashes, verify_native_source_imports
@@ -77,7 +77,7 @@ def _runtime_candidate(benchmark: Mapping[str, Any], override: Mapping[str, Any]
     unknown = set(override).difference(_RUNTIME_KEYS)
     if unknown:
         raise ValueError(f"Unsupported native runtime_override fields: {sorted(unknown)}")
-    from ._grid_runner import _RUNTIME_ENV_RESERVED, apply_runtime_override
+    from hyperloom.inference_optimizer.runtime_override import RUNTIME_ENV_RESERVED, apply_runtime_override
 
     runtime_env = override.get("runtime_env") or {}
     if not isinstance(runtime_env, Mapping):
@@ -85,8 +85,8 @@ def _runtime_candidate(benchmark: Mapping[str, Any], override: Mapping[str, Any]
     for name in runtime_env:
         if (
             _fixed_env(str(name))
-            or str(name) in BLOCKED_CHILD_ENV_NAMES | _RUNTIME_ENV_RESERVED
-            or not _ENV_KEY_RE.fullmatch(str(name))
+            or str(name) in BLOCKED_CHILD_ENV_NAMES | RUNTIME_ENV_RESERVED
+            or not valid_env_key(name)
         ):
             raise ValueError(f"Native runtime cannot override protected environment: {name}")
     for key in (
@@ -179,7 +179,7 @@ def apply_native_candidate(
     fixed = benchmark.get("envs") or {}
     removed_env = to_str_list(existing.get("unset_env"))
     for name in to_str_list(unset_envs):
-        if _fixed_env(name) or name in BLOCKED_CHILD_ENV_NAMES or not _ENV_KEY_RE.fullmatch(name):
+        if _fixed_env(name) or name in BLOCKED_CHILD_ENV_NAMES or not valid_env_key(name):
             raise ValueError(f"Native candidate cannot unset protected environment: {name}")
         env.pop(name, None)
         if name not in removed_env:
@@ -190,7 +190,7 @@ def apply_native_candidate(
             if name in fixed and str(fixed[name]) == value:
                 continue
             raise ValueError(f"Native candidate cannot change canonical workload environment: {name}")
-        if name in BLOCKED_CHILD_ENV_NAMES or not _ENV_KEY_RE.fullmatch(name):
+        if name in BLOCKED_CHILD_ENV_NAMES or not valid_env_key(name):
             raise ValueError(f"Native candidate environment is not allowed: {name}")
         env[name] = value
         if name in removed_env:

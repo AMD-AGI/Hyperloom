@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from hyperloom.inference_optimizer.runtime_override import apply_runtime_override
+
 import asyncio
 import json
 import logging
@@ -21,9 +23,7 @@ import yaml
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env import env_flag, is_truthy
 from hyperloom.common.env_safety import (
-    BLOCKED_CHILD_ENV_NAMES,
     BLOCKED_EXTERNAL_ENV_NAMES,
-    _ENV_KEY_RE,
     is_python_package_root,
     redact_secret_values,
     scrub_benchmark_process_env,
@@ -38,9 +38,8 @@ from ..stop_attribution import (
     StoppedByTheRun,
 )
 from ._benchmark_runtime import apply_runtime_benchmark_overrides as apply_runtime_benchmark_overrides
-from ._benchmark_interpreter import (
-    _resolve_magpie_python as _resolve_magpie_python,
-    _resolve_probe_python as _resolve_probe_python,
+from hyperloom.inference_optimizer.benchmark_interpreter import (
+    resolve_probe_python as resolve_probe_python,
 )
 from ._accuracy_gate import materialized_run_eval_disabled
 from ._recipe_script import launcher_overwritten_envs
@@ -239,7 +238,7 @@ def _probe_vllm_aiter_shared_expert_unsupported() -> str | None:
         return cached  # type: ignore[return-value]
     try:
         proc = subprocess.run(
-            [_resolve_probe_python(), "-c", _AITER_SHARED_EXPERT_PROBE_SCRIPT],
+            [resolve_probe_python(), "-c", _AITER_SHARED_EXPERT_PROBE_SCRIPT],
             capture_output=True,
             text=True,
             timeout=30,
@@ -311,83 +310,6 @@ def sanitize_result_dir(value: Any) -> str | None:
             "metacharacters; pass an absolute or workspace-relative path"
         )
     return text
-
-
-def _is_safe_path_entry(entry: str) -> bool:
-    """A single path entry is safe iff it has no ``:``, no ``..``, no control chars."""
-    return (
-        bool(entry)
-        and ":" not in entry
-        and ".." not in Path(entry).parts
-        and not any(c in entry for c in ("\n", "\r", "\x00"))
-    )
-
-
-# Reserved keys carried by dedicated override fields; never accepted via runtime_env.
-_RUNTIME_ENV_RESERVED: frozenset[str] = frozenset({"PATH", "PYTHONPATH", "LD_LIBRARY_PATH"})
-
-
-def apply_runtime_override(envs: dict[str, str], override: dict[str, Any]) -> None:
-    """Inject an attempt runtime override into the materialized YAML envs dict."""
-    if not override:
-        return
-    from ._workload_envs import prepend_launch_path
-
-    path_prefix = str(override.get("path_prefix") or "").strip()
-    if path_prefix:
-        prepend_launch_path(envs, "PATH", path_prefix)
-    entrypoint_bin = str(override.get("entrypoint_bin_dir") or "").strip()
-    if entrypoint_bin:
-        if _is_safe_path_entry(entrypoint_bin):
-            prepend_launch_path(envs, "PATH", entrypoint_bin)
-        else:
-            log.warning("apply_runtime_override: dropping unsafe entrypoint_bin_dir %r", entrypoint_bin)
-    pp_prefix = str(override.get("pythonpath_prefix") or "").strip()
-    if pp_prefix:
-        if _is_safe_path_entry(pp_prefix):
-            prepend_launch_path(envs, "PYTHONPATH", pp_prefix)
-        else:
-            log.warning("apply_runtime_override: dropping unsafe pythonpath_prefix %r", pp_prefix)
-    # Multi-entry prefixes: prepend in order so the first entry wins, ahead of any single-dir pythonpath_prefix and
-    # the inherited value.
-    for entry in reversed(_coerce_prefix_list(override.get("pythonpath_prefixes"))):
-        if _is_safe_path_entry(entry):
-            prepend_launch_path(envs, "PYTHONPATH", entry)
-        else:
-            log.warning("apply_runtime_override: dropping unsafe pythonpath entry %r", entry)
-    # Native loader path: prepend attempt entries while preserving any inherited entries (e.g. /opt/rocm/lib).
-    for entry in reversed(_coerce_prefix_list(override.get("ld_library_path_prefix"))):
-        if _is_safe_path_entry(entry):
-            prepend_launch_path(envs, "LD_LIBRARY_PATH", entry)
-        else:
-            log.warning("apply_runtime_override: dropping unsafe ld_library_path entry %r", entry)
-    _runtime_env = override.get("runtime_env")
-    if isinstance(_runtime_env, dict):
-        for raw_k, raw_v in _runtime_env.items():
-            key = str(raw_k)
-            if not _ENV_KEY_RE.match(key) or key in BLOCKED_CHILD_ENV_NAMES or key in _RUNTIME_ENV_RESERVED:
-                log.warning("apply_runtime_override: dropping unsafe runtime_env key %r", key)
-                continue
-            envs[key] = str(raw_v)
-    for key in ("framework_bin", "framework_python", "framework_venv_root"):
-        val = str(override.get(key) or "").strip()
-        if val:
-            envs[f"HYPERLOOM_{key.upper()}"] = val
-    # runtime_python_exe takes priority over framework_python as the launch interpreter.
-    rpe = str(override.get("runtime_python_exe") or "").strip()
-    if rpe:
-        envs["HYPERLOOM_FRAMEWORK_PYTHON"] = rpe
-
-
-def _coerce_prefix_list(value: Any) -> list[str]:
-    """Normalize a runtime-prefix field (list/tuple/str) to a list of entries."""
-    if value is None:
-        return []
-    if isinstance(value, str):
-        return [value.strip()] if value.strip() else []
-    if isinstance(value, (list, tuple)):
-        return [str(v).strip() for v in value if str(v).strip()]
-    return []
 
 
 def _build_variant_yaml(
@@ -589,7 +511,7 @@ def _build_variant_yaml(
             envs.pop(str(k), None)
         for k, v in variant.extra_envs.items():
             envs[str(k)] = str(v)
-        from ._workload_envs import pin_mlperf_round_concurrency, prepend_launch_path
+        from ._workload_envs import pin_mlperf_round_concurrency, prepend_path
 
         pin_mlperf_round_concurrency(envs)
         # The recipe re-exports these unconditionally, so a value carried here is
@@ -611,7 +533,7 @@ def _build_variant_yaml(
                 and Path(_overlay).is_dir()
             )
             if _overlay_ok:
-                prepend_launch_path(envs, "PYTHONPATH", _overlay)
+                prepend_path(envs, "PYTHONPATH", _overlay)
             else:
                 log.warning(
                     "grid: dropping unsafe overlay_pythonpath %r (not a single "
@@ -2454,8 +2376,7 @@ __all__ = [
     "session_grid_bounds",
     "stopped_by_the_run",
     # Re-exported from the sibling modules to keep the namespace intact.
-    "_resolve_magpie_python",
-    "_resolve_probe_python",
+    "resolve_probe_python",
     "coerce_extra_envs",
     "compact_json_server_args",
     "_SPACE_VALUE_FLAGS",

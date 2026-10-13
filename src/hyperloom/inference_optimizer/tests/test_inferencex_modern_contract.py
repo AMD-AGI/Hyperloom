@@ -9,8 +9,8 @@ import subprocess
 
 import pytest
 
-from hyperloom.inference_optimizer.tests import test_inferencex_anchor_contract as contract
 from hyperloom.orchestrator.actions.executors import _inferencex_patcher as patcher
+from hyperloom.orchestrator.actions.executors import inferencex_anchor_contract as contract
 
 
 _PROFILE_CLIENT = """def profile_request():

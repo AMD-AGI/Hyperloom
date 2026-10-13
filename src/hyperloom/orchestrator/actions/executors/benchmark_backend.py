@@ -38,9 +38,9 @@ class MagpieBackend:
 
     def resolve_interpreter(self) -> str:
         """Return the Magpie-importable interpreter for the Magpie backend."""
-        from ._benchmark_interpreter import _resolve_magpie_python
+        from hyperloom.inference_optimizer.benchmark_interpreter import resolve_magpie_python
 
-        return _resolve_magpie_python()
+        return resolve_magpie_python()
 
     def lifecycle_eligibility(self, bench: dict) -> dict | None:
         """Return None to use the default (Magpie script-based) eligibility."""

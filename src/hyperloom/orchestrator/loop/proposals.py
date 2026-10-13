@@ -6,7 +6,7 @@
 from __future__ import annotations
 import hashlib
 import json
-from dataclasses import dataclass
+from ..state.proposal import PendingProposal
 from typing import TYPE_CHECKING, Any, Mapping
 from hyperloom.common.framework_arm import is_upstream_pr_prescreen
 from hyperloom.orchestrator.lever import LEVER_CONFIG
@@ -25,19 +25,6 @@ import logging as _logging
 log = _logging.getLogger(__name__)
 
 _MAX_IDEMPOTENCY_ATTEMPTS: int = 6
-
-
-@dataclass
-class PendingProposal:
-    """A propose_action intent waiting for Critic Review."""
-
-    proposal_msg_id: str
-    from_agent: str
-    action_name: str
-    predicted_gain_pct: float
-    payload: dict[str, Any]
-    #: The task this proposal materialized into, once the Critic approved it.
-    task_id: str | None = None
 
 
 async def record_proposal(

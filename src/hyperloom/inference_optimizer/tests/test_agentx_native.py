@@ -11,6 +11,8 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
+from hyperloom.inference_optimizer.agentx.magpie_source_identity import MAGPIE_SOURCE_IDENTITY_CODE
+
 import pytest
 import yaml
 
@@ -43,7 +45,7 @@ def _magpie_identity_namespace(
     distribution_root: Path | None = None,
 ) -> dict[str, object]:
     namespace: dict[str, object] = {}
-    exec(native_agentx._MAGPIE_SOURCE_IDENTITY_CODE, namespace)
+    exec(MAGPIE_SOURCE_IDENTITY_CODE, namespace)
 
     def _distribution(name: str):
         if name != "magpie-eval":
@@ -315,7 +317,7 @@ def test_magpie_pinned_published_tree_hash_matches_independent_wheel_audit():
 def test_resolver_and_preflight_health_share_magpie_identity_guard():
     from hyperloom.inference_optimizer.magpie_health import magpie_health_code
 
-    guard = native_agentx._MAGPIE_SOURCE_IDENTITY_CODE
+    guard = MAGPIE_SOURCE_IDENTITY_CODE
     assert native_agentx._RESOLVER_CODE.startswith(guard)
     assert magpie_health_code(native_agentx=True).startswith(guard)
 
@@ -640,7 +642,7 @@ def test_native_execution_identity_binds_and_rejects_runners_yaml(
 
 @pytest.mark.parametrize("layout", [".", "inferencex-e2e"])
 def test_recipe_resolution_uses_benchmark_interpreter_and_persists_project_root(tmp_path, monkeypatch, layout):
-    from hyperloom.orchestrator.actions.executors import benchmark_backend
+    from hyperloom.inference_optimizer import benchmark_interpreter
 
     project = tmp_path / layout
     (project / "benchmarks").mkdir(parents=True)
@@ -648,8 +650,8 @@ def test_recipe_resolution_uses_benchmark_interpreter_and_persists_project_root(
     (project / "benchmarks/benchmark_lib.sh").write_text("#!/bin/bash\n")
     seen = {}
     monkeypatch.setattr(
-        benchmark_backend,
-        "resolve_benchmark_interpreter",
+        benchmark_interpreter,
+        "resolve_magpie_python",
         lambda: "/opt/benchmark/bin/python",
     )
 

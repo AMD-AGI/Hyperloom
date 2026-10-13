@@ -2498,7 +2498,7 @@ class BenchmarkRunExecutor:
             try:
                 import yaml as _yaml
 
-                from ._grid_runner import apply_runtime_override
+                from hyperloom.inference_optimizer.runtime_override import apply_runtime_override
 
                 _cfg_data = _yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
                 _cfg_bench = _cfg_data.setdefault("benchmark", {})

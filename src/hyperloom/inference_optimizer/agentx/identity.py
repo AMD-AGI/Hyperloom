@@ -140,12 +140,12 @@ def _validate_managed_receipt(
         return ["server_launch_profile_workspace_missing"]
     failure = "server_launch_profile_verification_failed" if profile else "server_launch_managed_verification_failed"
     from hyperloom.common.env_safety import scrub_benchmark_process_env
-    from hyperloom.orchestrator.actions.executors.benchmark_backend import resolve_benchmark_interpreter
+    from hyperloom.inference_optimizer.benchmark_interpreter import resolve_magpie_python
 
-    from .native import _MAGPIE_SOURCE_IDENTITY_CODE
+    from .magpie_source_identity import MAGPIE_SOURCE_IDENTITY_CODE
 
     code = (
-        _MAGPIE_SOURCE_IDENTITY_CODE
+        MAGPIE_SOURCE_IDENTITY_CODE
         + """
 import sys
 import Magpie
@@ -172,7 +172,7 @@ else:
 
     try:
         checked = subprocess.run(
-            [resolve_benchmark_interpreter(), "-c", code],
+            [resolve_magpie_python(), "-c", code],
             input=json.dumps(
                 {
                     "benchmark": dict(benchmark),

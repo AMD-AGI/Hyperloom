@@ -20,7 +20,7 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import create_in_cursor
 
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.loop.proposals import PendingProposal
+from hyperloom.orchestrator.state.proposal import PendingProposal
 from hyperloom.orchestrator.loop.writeback import _extract_enablement_launch_log
 from hyperloom.orchestrator.enablement.params import EnablementParams
 

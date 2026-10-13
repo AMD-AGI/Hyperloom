@@ -153,6 +153,17 @@ def forge_explicitly_enabled() -> bool:
     return env_str("KERNEL_OPT_BACKEND_ORDER").lower() == "forge"
 
 
+def prepend_path(envs: dict[str, str], var: str, *entries: str) -> None:
+    """Prepend unique path entries, preserving an explicit value or the inherited environment.
+
+    An explicitly empty value suppresses inheritance. Existing entries move to the front,
+    and empty path components are discarded.
+    """
+    base = envs[var] if var in envs else os.environ.get(var)
+    parts = [*entries, *str(base or "").strip().split(os.pathsep)]
+    envs[var] = os.pathsep.join(dict.fromkeys(part for part in parts if part))
+
+
 __all__ = [
     "EnvValueError",
     "is_truthy",
@@ -162,4 +173,5 @@ __all__ = [
     "env_float",
     "env_str",
     "forge_explicitly_enabled",
+    "prepend_path",
 ]

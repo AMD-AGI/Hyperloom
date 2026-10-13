@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from hyperloom.inference_optimizer.runtime_override import apply_runtime_override
+
 import os
 import yaml
 import pytest
@@ -14,7 +16,6 @@ from pathlib import Path
 from hyperloom.orchestrator.actions.executors._grid_runner import (
     GridVariant,
     _build_variant_yaml,
-    apply_runtime_override,
 )
 
 

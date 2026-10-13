@@ -39,11 +39,11 @@ def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
     # Stub the interpreter resolver to avoid a real Magpie import probe.
     monkeypatch.setenv("MAGPIE_PYTHON", "/usr/bin/python3")
-    from hyperloom.orchestrator.actions.executors import _benchmark_interpreter
+    from hyperloom.inference_optimizer import benchmark_interpreter
 
     monkeypatch.setattr(
-        _benchmark_interpreter,
-        "_resolve_magpie_python",
+        benchmark_interpreter,
+        "resolve_magpie_python",
         lambda: "/usr/bin/python3",
     )
     return make_session_dir()

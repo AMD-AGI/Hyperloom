@@ -13,7 +13,7 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
-from hyperloom.orchestrator.actions.executors import _benchmark_interpreter as bi
+from hyperloom.inference_optimizer import benchmark_interpreter as bi
 
 # Patch compatibility-filter helpers in the ``_grid_variant_filter`` sibling, where apply_compatibility_filter
 # resolves them (not via the re-export).
@@ -111,6 +111,7 @@ def test_capability_reason_falsey_flag_not_probed(monkeypatch) -> None:
 
 def test_probe_caches_ok_and_unsupported(monkeypatch) -> None:
     _clear_cap_cache()
+    monkeypatch.setattr(gr, "resolve_probe_python", lambda: "/serving/bin/python")
     calls = {"n": 0}
 
     class _Proc:
@@ -151,35 +152,35 @@ def test_probe_swallows_subprocess_error(monkeypatch) -> None:
     assert gr._probe_vllm_aiter_shared_expert_unsupported() is None
 
 
-# -- _resolve_probe_python / probe interpreter selection ------------------
-def test_resolve_probe_python_prefers_magpie_interpreter(monkeypatch) -> None:
+# -- resolve_probe_python / probe interpreter selection ------------------
+def testresolve_probe_python_prefers_magpie_interpreter(monkeypatch) -> None:
     # The harness interpreter is used directly; no vllm-exe resolution is tried.
-    monkeypatch.setattr(bi, "_resolve_magpie_python", lambda: "/srv/venv/bin/python")
+    monkeypatch.setattr(bi, "resolve_magpie_python", lambda: "/srv/venv/bin/python")
     monkeypatch.setattr(
         gr.shutil, "which", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("which() should not be called"))
     )
-    assert gr._resolve_probe_python() == "/srv/venv/bin/python"
+    assert gr.resolve_probe_python() == "/srv/venv/bin/python"
 
 
-def test_resolve_probe_python_falls_back_to_vllm_venv(monkeypatch) -> None:
+def testresolve_probe_python_falls_back_to_vllm_venv(monkeypatch) -> None:
     # magpie_python is the canonical default -> pin the venv that backs ``vllm serve``.
-    monkeypatch.setattr(bi, "_resolve_magpie_python", lambda: "/opt/venv/bin/python")
+    monkeypatch.setattr(bi, "resolve_magpie_python", lambda: "/opt/venv/bin/python")
     monkeypatch.setattr(gr.shutil, "which", lambda name: "/other/venv/bin/vllm" if name == "vllm" else None)
     monkeypatch.setattr(gr.os.path, "exists", lambda p: p == "/other/venv/bin/python")
-    assert gr._resolve_probe_python() == "/other/venv/bin/python"
+    assert gr.resolve_probe_python() == "/other/venv/bin/python"
 
 
-def test_resolve_probe_python_no_bare_python3_fallback(monkeypatch) -> None:
+def testresolve_probe_python_no_bare_python3_fallback(monkeypatch) -> None:
     # With no resolvable vllm exe, fall back to the canonical magpie default — never a bare "python3".
-    monkeypatch.setattr(bi, "_resolve_magpie_python", lambda: "/opt/venv/bin/python")
+    monkeypatch.setattr(bi, "resolve_magpie_python", lambda: "/opt/venv/bin/python")
     monkeypatch.setattr(gr.shutil, "which", lambda *_a, **_k: None)
-    assert gr._resolve_probe_python() == "/opt/venv/bin/python"
+    assert gr.resolve_probe_python() == "/opt/venv/bin/python"
 
 
 def test_probe_invokes_resolved_interpreter(monkeypatch) -> None:
     # The capability probe must run under the resolved interpreter, not "python3".
     _clear_cap_cache()
-    monkeypatch.setattr(gr, "_resolve_probe_python", lambda: "/srv/venv/bin/python")
+    monkeypatch.setattr(gr, "resolve_probe_python", lambda: "/srv/venv/bin/python")
     seen: dict = {}
 
     class _Proc:

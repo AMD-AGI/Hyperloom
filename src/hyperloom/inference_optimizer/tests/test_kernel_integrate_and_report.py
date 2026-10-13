@@ -46,11 +46,11 @@ def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     # Stub the interpreter resolver so the unit test never spawns a real probe.
     monkeypatch.setenv("MAGPIE_PYTHON", "/usr/bin/python3")
-    from hyperloom.orchestrator.actions.executors import _benchmark_interpreter
+    from hyperloom.inference_optimizer import benchmark_interpreter
 
     monkeypatch.setattr(
-        _benchmark_interpreter,
-        "_resolve_magpie_python",
+        benchmark_interpreter,
+        "resolve_magpie_python",
         lambda: "/usr/bin/python3",
     )
     return make_session_dir()

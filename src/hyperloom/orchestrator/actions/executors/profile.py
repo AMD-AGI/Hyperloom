@@ -1151,7 +1151,7 @@ class ProfileExecutor(BenchmarkRunExecutor):
         or ``""`` when the probe is not armed.
         """
         from . import _framework_rewrite_evidence as _evidence
-        from ._workload_envs import prepend_launch_path
+        from hyperloom.common.env import prepend_path
 
         asset_dir = _evidence.probe_asset_dir()
         if not asset_dir.is_dir():
@@ -1174,7 +1174,7 @@ class ProfileExecutor(BenchmarkRunExecutor):
             return ""
         # First on the path even when already present: Python imports only the first sitecustomize, and the
         # shim's chains to the next one.
-        prepend_launch_path(envs, "PYTHONPATH", str(asset_dir))
+        prepend_path(envs, "PYTHONPATH", str(asset_dir))
         for key, value in probe_env.items():
             envs[key] = value
         try:

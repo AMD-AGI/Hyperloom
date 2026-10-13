@@ -161,7 +161,7 @@ def _verify_artifacts(params: dict[str, Any]) -> None:
 
 
 async def _review(coord: Any, params: dict[str, Any]) -> dict[str, Any]:
-    from hyperloom.orchestrator.loop.proposals import PendingProposal
+    from hyperloom.orchestrator.state.proposal import PendingProposal
 
     digest = params["native_geak_artifact_digest"]
     saved = dict((coord.shared_state.geak_pending or {}).get("native_review") or {})

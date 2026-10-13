@@ -8,16 +8,15 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import subprocess
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from ._subprocess_kill import run_with_session_kill
-
 log = logging.getLogger(__name__)
 
 
-def _resolve_magpie_python(env: Mapping[str, str] | None = None) -> str:
+def resolve_magpie_python(env: Mapping[str, str] | None = None) -> str:
     """Resolve the Python interpreter for Magpie subprocesses.
 
     Args:
@@ -26,10 +25,6 @@ def _resolve_magpie_python(env: Mapping[str, str] | None = None) -> str:
             environment that launch ran under, because ``PATH`` decides which
             interpreter a bare name resolves to.
     """
-    # An ambient resolution keeps the exact call shape it always had -- no `path=`
-    # on `shutil.which`, no `env=` on the probe -- so that every existing caller
-    # and its test doubles are unaffected. Only an explicit environment routes
-    # through the overridden lookups.
     resolved_env = os.environ if env is None else env
     which_kwargs: dict[str, Any] = {} if env is None else {"path": resolved_env.get("PATH")}
     probe_env = None if env is None else dict(resolved_env)
@@ -38,17 +33,18 @@ def _resolve_magpie_python(env: Mapping[str, str] | None = None) -> str:
         """Whether an interpreter can import Magpie and its ``yaml`` dep."""
         try:
             # find_spec keeps expected missing-module probes out of the run log.
-            proc = run_with_session_kill(
+            proc = subprocess.run(
                 [
                     py,
                     "-c",
                     "import importlib.util as u, sys; sys.exit(0 if u.find_spec('Magpie') and u.find_spec('yaml') else 1)",
                 ],
+                capture_output=True,
                 timeout=10,
                 env=probe_env,
             )
             return getattr(proc, "returncode", 1) == 0
-        except Exception:  # noqa: BLE001 - probe subprocess; absence answers False
+        except (OSError, subprocess.TimeoutExpired):
             return False
 
     env_val = resolved_env.get("MAGPIE_PYTHON", "").strip()
@@ -75,7 +71,7 @@ def _resolve_magpie_python(env: Mapping[str, str] | None = None) -> str:
     return "python3"
 
 
-def _resolve_probe_python(framework: str = "vllm", *, env: Mapping[str, str] | None = None) -> str:
+def resolve_probe_python(framework: str = "vllm", *, env: Mapping[str, str] | None = None) -> str:
     """Resolve the interpreter a build-accuracy probe must use.
 
     Args:
@@ -93,7 +89,7 @@ def _resolve_probe_python(framework: str = "vllm", *, env: Mapping[str, str] | N
             venv_python = str(Path(venv_root) / "bin" / "python")
             if os.access(venv_python, os.X_OK):
                 return venv_python
-    magpie_python = _resolve_magpie_python() if env is None else _resolve_magpie_python(resolved_env)
+    magpie_python = resolve_magpie_python() if env is None else resolve_magpie_python(resolved_env)
     # On a single-venv host the harness already uses the serving interpreter.
     if magpie_python and magpie_python != "/opt/venv/bin/python":
         return magpie_python

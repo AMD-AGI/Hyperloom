@@ -90,7 +90,7 @@ from ..actions.executors._accuracy_gate import (
     accuracy_passed,
 )
 from ..knowledge.agent_kb import PatchKB
-from .proposals import PendingProposal
+from ..state.proposal import PendingProposal
 from ..measurement.integrate_performance import integrate_measurement_fields
 from ..measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX
 from ..collaborator import CoordinatorCollaborator
