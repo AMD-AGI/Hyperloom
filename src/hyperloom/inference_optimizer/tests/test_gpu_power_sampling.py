@@ -370,3 +370,55 @@ def test_a_geak_replay_that_raises_records_no_power(tmp_path):
     with pytest.raises(TimeoutError):
         _geak_sweep._run_with_power_sampling(_replay, tmp_path, {}, entry)
     assert entry == {"gpu_power_avg_w": None, "gpu_power_by_gpu_w": None}
+
+
+def _unlistable_logs() -> list[str]:
+    raise PermissionError("replay output is not readable")
+
+
+def test_an_unreadable_replay_log_is_warned_once_and_polling_continues(caplog):
+    from hyperloom.orchestrator.actions.executors._gpu_power import ServerLogPhaseDriver
+
+    driver = ServerLogPhaseDriver(_PhaseLog(), _unlistable_logs, scan=_subprocess_kill._scan_logs_increment)
+    with caplog.at_level("DEBUG", logger="hyperloom.orchestrator.actions.executors._gpu_power"):
+        driver._poll_logs()
+        driver._poll_logs()
+    levels = [record.levelname for record in caplog.records if "cannot read the replay" in record.getMessage()]
+    assert levels == ["WARNING", "DEBUG"]
+
+
+def test_a_phase_driver_bug_is_not_swallowed():
+    from hyperloom.orchestrator.actions.executors._gpu_power import ServerLogPhaseDriver
+
+    def _broken_scan(*args):
+        raise KeyError("scan bug")
+
+    driver = ServerLogPhaseDriver(_PhaseLog(), lambda: ["server.log"], scan=_broken_scan)
+    with pytest.raises(KeyError):
+        driver.stop()
+
+
+def test_the_replay_recorder_is_closed_even_when_the_driver_fails(tmp_path, monkeypatch):
+    from hyperloom.orchestrator.actions.executors import _geak_sweep
+
+    closed: list[bool] = []
+
+    class _Recorder:
+        def close(self):
+            closed.append(True)
+
+    class _FailingDriver:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+        def stop(self):
+            raise KeyError("driver bug")
+
+    monkeypatch.setattr(_geak_sweep, "build_gpu_power_recorder", lambda path, env: _Recorder())
+    monkeypatch.setattr(_geak_sweep, "ServerLogPhaseDriver", _FailingDriver)
+    with pytest.raises(KeyError):
+        _geak_sweep._run_sampled(lambda: None, tmp_path, {})
+    assert closed == [True]

@@ -135,8 +135,10 @@ def _run_sampled(
     try:
         return run()
     finally:
-        driver.stop()
-        recorder.close()
+        try:
+            driver.stop()
+        finally:
+            recorder.close()
 
 
 def _replay_serving_env(handoff: Mapping[str, Any], env_spec: Mapping[str, Any]) -> dict[str, str]:

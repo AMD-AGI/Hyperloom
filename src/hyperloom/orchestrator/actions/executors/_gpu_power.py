@@ -276,6 +276,7 @@ class ServerLogPhaseDriver:
         self._identities: dict[str, tuple[int, int]] = {}
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._read_failed = False
 
     def poll(self) -> None:
         """Read what every log appended since the last poll and move the recorder's phase on."""
@@ -294,12 +295,18 @@ class ServerLogPhaseDriver:
             if scan.saw_eval_start:
                 self._recorder.note_phase("eval", now)
 
+    def _poll_logs(self) -> None:
+        """:meth:`poll`, with a replay log that cannot be listed or read reported once at warning, then at debug."""
+        try:
+            self.poll()
+        except OSError as exc:
+            level = logging.DEBUG if self._read_failed else logging.WARNING
+            self._read_failed = True
+            log.log(level, "gpu_power: cannot read the replay's server logs, so its phase may not advance: %s", exc)
+
     def _loop(self) -> None:
         while not self._stop.is_set():
-            try:
-                self.poll()
-            except Exception:
-                log.debug("gpu_power: replay log poll failed", exc_info=True)
+            self._poll_logs()
             self._stop.wait(self._interval)
 
     def start(self) -> None:
@@ -312,10 +319,7 @@ class ServerLogPhaseDriver:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=self._interval + _QUERY_TIMEOUT_SEC)
-        try:
-            self.poll()
-        except Exception:
-            log.debug("gpu_power: final replay log poll failed", exc_info=True)
+        self._poll_logs()
 
 
 def build_gpu_power_recorder(server_log_path: str | None, env: dict[str, str] | None) -> GpuPowerRecorder | None:
