@@ -329,7 +329,7 @@ def infer_analysis_mode(framework: str, requested: str) -> str:
     requested = (requested or "").strip().lower()
     if requested and requested != "default":
         return requested
-    if (framework or "").strip().lower() in {"vllm", "sglang", "atom"}:
+    if (framework or "").strip().lower() in {"vllm", "sglang", "atom", "xdit"}:
         return "inference"
     return requested or "default"
 
