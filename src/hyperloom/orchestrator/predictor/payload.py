@@ -17,7 +17,7 @@ from typing import Any, Mapping
 
 from hyperloom.common.coerce import to_float
 from hyperloom.orchestrator.predictor import evidence
-from hyperloom.orchestrator.predictor.config import PHASE_LABEL
+from hyperloom.common.predictor_config import PHASE_LABEL
 from hyperloom.orchestrator.predictor.view import SessionView
 
 

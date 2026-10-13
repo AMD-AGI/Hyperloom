@@ -9,7 +9,7 @@ import argparse
 
 import pytest
 
-from hyperloom.orchestrator.predictor import config
+from hyperloom.common import predictor_config as config
 
 
 @pytest.fixture(autouse=True)

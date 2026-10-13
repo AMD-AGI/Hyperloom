@@ -1381,7 +1381,7 @@ def _export_predictor_settings(args: argparse.Namespace) -> None:
     still applies. Nothing is persisted: a ``--resume-from`` relaunch needs the
     flags again unless the shell carries the variables.
     """
-    from hyperloom.orchestrator.predictor import config as predictor_config
+    from hyperloom.common import predictor_config
 
     endpoint = str(getattr(args, "primatune_endpoint", "") or "").strip()
     if endpoint:
