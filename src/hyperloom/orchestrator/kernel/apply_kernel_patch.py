@@ -1764,6 +1764,18 @@ def _runtime_jit_invalidation_error(
     return ""
 
 
+def _remote_jit_invalidation_error(records_by_host: dict[str, list[dict[str, Any]]]) -> str:
+    """Name the pods whose apply records do not hold exactly one JIT backup, the one pod-side revert restores."""
+    if not records_by_host:
+        return "no pod reported an invalidation"
+    missed = sorted(
+        host
+        for host, records in records_by_host.items()
+        if sum((record.get("jit_backup") or {}).get("status") in {"ok", "clean"} for record in records) != 1
+    )
+    return f"pods {missed} did not invalidate it exactly once" if missed else ""
+
+
 def _rebuild_ok_to_proceed(result: dict[str, Any]) -> bool:
     """Return whether apply may proceed after this rebuild result."""
     return result.get("status") in {"ok", "deferred"}
@@ -2287,7 +2299,6 @@ def apply_kernel_patch(
             "backup_dir_on_pod": pod_backup_dir,
             "host_backup_map": backup_map,
             "records_by_host": records_by_host,
-            "per_node": mn_apply.get("per_node", []),
         }
         # Persist multinode info now so a later rebuild failure reverts pod-side patches too.
         manifest["multinode"] = multinode_info
@@ -2311,31 +2322,16 @@ def apply_kernel_patch(
     if strategy["compiled"] and not skip_rebuild:
         # Back up AITER build state and serving modules so the next import re-JITs.
         if _is_multi_node() and remote_jit_dir:
-            remote_records = list(multinode_info.get("per_node") or [])
-            invalid = [
-                record
-                for record in remote_records
-                if (record.get("jit_backup") or {}).get("status") not in {"ok", "clean"}
-            ]
-            if not remote_records or invalid:
-                revert = revert_kernel_patch(manifest_path)
-                return {
-                    "status": "failed",
-                    "error_class": "aiter_jit_invalidation_failed",
-                    "error": "one or more pods did not invalidate AITER JIT",
-                    "manifest_path": str(manifest_path),
-                    "revert": revert,
-                }
-            jit_build_backup = {
-                "status": "remote",
-                "per_node": [record.get("jit_backup") for record in remote_records],
-            }
+            # Each pod's record in manifest["multinode"] holds its JIT backup; revert and finalize read it there.
+            jit_build_backup = {"status": "remote"}
+            invalidation_error = _remote_jit_invalidation_error(multinode_info["records_by_host"])
         else:
             jit_build_backup = _invalidate_aiter_jit_build(
                 target,
                 backup_dir,
                 jit_build_dir=Path(strategy_jit_dir) if strategy_jit_dir else None,
             )
+            invalidation_error = _runtime_jit_invalidation_error(strategy, jit_build_backup)
         if jit_build_backup.get("status") in {"ok", "clean"}:
             # Persist the backup record before rebuild so a failure can still restore.
             manifest["jit_build_backup"] = jit_build_backup
@@ -2343,11 +2339,6 @@ def apply_kernel_patch(
                 json.dumps(manifest, indent=2, sort_keys=True) + "\n",
                 encoding="utf-8",
             )
-        invalidation_error = (
-            ""
-            if jit_build_backup.get("status") == "remote"
-            else _runtime_jit_invalidation_error(strategy, jit_build_backup)
-        )
         if jit_build_backup.get("status") == "failed" or invalidation_error:
             # Refuse to benchmark against an unknown/stale binary.
             revert = revert_kernel_patch(manifest_path)
@@ -2644,7 +2635,6 @@ def _apply_kernel_patch_snapshot(
     )
     if _is_multi_node():
         pod_backup_dir = os.environ.get("HYPERLOOM_MN_KERNEL_BACKUP_DIR", _MN_POD_BACKUP_DIR_DEFAULT)
-        per_node_all: list[dict[str, Any]] = []
         backup_map: dict[str, str] = {}
         records_by_host: dict[str, list[dict[str, Any]]] = {}
         try:
@@ -2658,9 +2648,7 @@ def _apply_kernel_patch_snapshot(
                         strategy_jit_dir if (p == jit_dispatch_target and strategy_jit_dir and not skip_rebuild) else ""
                     ),
                 )
-                new_records = list(mn_apply.get("per_node", []) or [])
-                per_node_all.extend(new_records)
-                for entry in new_records:
+                for entry in mn_apply.get("per_node", []) or []:
                     host = (entry.get("host") or "").strip()
                     bp = (entry.get("backup_path") or "").strip()
                     if host:
@@ -2673,7 +2661,6 @@ def _apply_kernel_patch_snapshot(
                     "backup_dir_on_pod": pod_backup_dir,
                     "host_backup_map": backup_map,
                     "records_by_host": records_by_host,
-                    "per_node": per_node_all,
                 }
                 # Persist after every file so a later dispatch failure can
                 # revert all already-patched files on every pod.
@@ -2696,7 +2683,6 @@ def _apply_kernel_patch_snapshot(
             "backup_dir_on_pod": pod_backup_dir,
             "host_backup_map": backup_map,
             "records_by_host": records_by_host,
-            "per_node": per_node_all,
         }
         manifest["multinode"] = multinode_info
         manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -2709,45 +2695,18 @@ def _apply_kernel_patch_snapshot(
     if compiled and not skip_rebuild:
         aiter_jit_target = jit_dispatch_target or target
         if _is_multi_node() and strategy_jit_dir:
-            records_by_host = dict(multinode_info.get("records_by_host") or {})
-            host_jit = {
-                host: [
-                    record.get("jit_backup")
-                    for record in records
-                    if (record.get("jit_backup") or {}).get("status") in {"ok", "clean"}
-                ]
-                for host, records in records_by_host.items()
-            }
-            if not host_jit or any(len(records) != 1 for records in host_jit.values()):
-                revert = revert_kernel_patch(manifest_path)
-                return {
-                    "status": "failed",
-                    "error_class": "aiter_jit_invalidation_failed",
-                    "error": "each pod must invalidate AITER JIT exactly once",
-                    "manifest_path": str(manifest_path),
-                    "revert": revert,
-                }
-            jit_build_backup = {
-                "status": "remote",
-                "per_host": host_jit,
-            }
+            jit_build_backup = {"status": "remote"}
+            invalidation_error = _remote_jit_invalidation_error(multinode_info["records_by_host"])
         else:
             jit_build_backup = _invalidate_aiter_jit_build(
                 aiter_jit_target,
                 backup_dir,
                 jit_build_dir=Path(strategy_jit_dir) if strategy_jit_dir else None,
             )
+            invalidation_error = _runtime_jit_invalidation_error(jit_strategy, jit_build_backup)
         if jit_build_backup.get("status") in {"ok", "clean"}:
             manifest["jit_build_backup"] = jit_build_backup
             manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        invalidation_error = (
-            ""
-            if jit_build_backup.get("status") == "remote"
-            else _runtime_jit_invalidation_error(
-                jit_strategy,
-                jit_build_backup,
-            )
-        )
         if jit_build_backup.get("status") == "failed" or invalidation_error:
             revert = revert_kernel_patch(manifest_path)
             detail = (
