@@ -1,0 +1,127 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""Closed vocabularies of the experiment notebook, and which role writes which part of it."""
+
+from __future__ import annotations
+
+from enum import Enum
+
+#: The branch the integrator owns; every other branch is a specialist's.
+INTEGRATION_BRANCH = "integration"
+
+
+class Role(str, Enum):
+    """Who a notebook handle acts as. Each state has one writer role; reads are open to all."""
+
+    TOOLBOX = "toolbox"
+    GATE = "gate"
+    INTEGRATOR = "integrator"
+    SCHEDULER = "scheduler"
+    SPECIALIST_RUNTIME = "specialist_runtime"
+    OBSERVER = "observer"
+
+
+class ClaimStatus(str, Enum):
+    """A claim is held until its test result arrives, its holder lets it go, or nobody renews it in time."""
+
+    HELD = "held"
+    COMPLETED = "completed"
+    RELEASED = "released"
+    EXPIRED = "expired"
+
+
+class DedupStatus(str, Enum):
+    """What the notebook knows about an intent on a state (a parent commit)."""
+
+    FREE = "free"
+    IN_PROGRESS = "in_progress"
+    TESTED = "tested"
+    SUSPECTED = "suspected"
+
+
+class Conclusion(str, Enum):
+    """What came of a tested candidate: the rule gate's action on a specialist branch, or the integrator's merge."""
+
+    COMMITTED = "committed"
+    COMMITTED_WITH_REPRO = "committed_with_repro"
+    SPLIT_REQUESTED = "split_requested"
+    SPLIT_PENDING = "split_pending"
+    SPLIT_COMMITTED = "split_committed"
+    RECORDED_ONLY = "recorded_only"
+    ACCURACY_FAILED = "accuracy_failed"
+    MERGED = "merged"
+    NOT_STACKABLE = "not_stackable"
+
+
+#: Conclusions that put a commit on a specialist branch.
+COMMITTING = frozenset({Conclusion.COMMITTED, Conclusion.COMMITTED_WITH_REPRO, Conclusion.SPLIT_COMMITTED})
+#: Conclusions only the integrator reaches, on the integration branch.
+INTEGRATION_CONCLUSIONS = frozenset({Conclusion.MERGED, Conclusion.NOT_STACKABLE})
+
+
+class LineageKind(str, Enum):
+    """Events that shape the branch tree; commits and merges come from judgements and merge attempts instead."""
+
+    ROOT = "root"
+    OPEN = "open"
+    SPLIT = "split"
+    STOP = "stop"
+
+
+#: The one role that records each lineage event.
+LINEAGE_WRITERS: dict[LineageKind, Role] = {
+    LineageKind.ROOT: Role.SCHEDULER,
+    LineageKind.OPEN: Role.SCHEDULER,
+    LineageKind.SPLIT: Role.GATE,
+    LineageKind.STOP: Role.SCHEDULER,
+}
+
+
+class CommitOrigin(str, Enum):
+    """How a commit came to exist."""
+
+    ROOT = "root"
+    COMMIT = "commit"
+    SPLIT = "split"
+    MERGE = "merge"
+
+
+class MergeOutcome(str, Enum):
+    """Where a merge attempt stands: tested and merged or not, untested because it conflicted, or still testing."""
+
+    MERGED = "merged"
+    NOT_STACKABLE = "not_stackable"
+    CONFLICT_SKIPPED = "conflict_skipped"
+    PENDING = "pending"
+
+
+class InboxKind(str, Enum):
+    """What an inbox item points at."""
+
+    RESULT = "result"
+    JUDGEMENT = "judgement"
+    TOOL_RESULT = "tool_result"
+    LINEAGE = "lineage"
+
+
+class QuarantineAction(str, Enum):
+    QUARANTINE = "quarantine"
+    LIFT = "lift"
+
+
+__all__ = [
+    "COMMITTING",
+    "INTEGRATION_BRANCH",
+    "INTEGRATION_CONCLUSIONS",
+    "LINEAGE_WRITERS",
+    "ClaimStatus",
+    "CommitOrigin",
+    "Conclusion",
+    "DedupStatus",
+    "InboxKind",
+    "LineageKind",
+    "MergeOutcome",
+    "QuarantineAction",
+    "Role",
+]
