@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import PurePosixPath
 
 # Enablement environment-setup replay: allowlist of install-only command shapes.
 # A specialist may run arbitrary Bash in its own sandboxed session, but the
@@ -34,21 +35,22 @@ SETUP_CMD_ALLOWLIST: tuple[str, ...] = (
     r"conda\s+install\b",
     r"mamba\s+install\b",
 )
-#: Directory prefixes whose basename may stand in for the whole path when the
-#: allowlist is matched. Absolute and system-owned on purpose: the replay runs
-#: the ORIGINAL command string, so anything a specialist can write to -- a
-#: relative ``./pip``, a path under its own workspace -- must not be able to
-#: borrow an allowlisted name. ``/opt/venv`` is the canonical ROCm stack this
-#: repository installs into; the rest are the standard system bindirs.
-#: ``..`` is excluded from the segment class on purpose. With a plain
-#: ``[A-Za-z0-9._-]+`` the traversal form ``/usr/bin/../../tmp/x/pip install foo``
-#: matches, normalises to an allowlisted ``pip install foo``, and then
-#: ``run_setup_commands`` executes the ORIGINAL string -- running /tmp/x/pip,
-#: which is exactly the workspace-owned binary the prefix list exists to keep out.
-_TRUSTED_BIN_PREFIX_RE = re.compile(
-    r"^(?:/opt/(?!\.\.?/)[A-Za-z0-9._-]+|/usr(?:/local)?|/bin|/sbin)"
-    r"(?:/(?!\.\.?(?:/|$))[A-Za-z0-9._-]+)*/"
-)
+
+
+def _installer_invocation(text: str) -> str | None:
+    """``text`` with the executable's directory dropped, or ``None`` for a relative one.
+
+    The allowlist decides which KIND of operation may replay, and that is what
+    the basename names. A relative path is refused because the replay runs the
+    original string from the session directory, where it resolves to a
+    different file than where the specialist authored it -- or to none.
+    """
+    head, *rest = text.split(None, 1)
+    if "/" not in head:
+        return text
+    if not head.startswith("/"):
+        return None
+    return " ".join([PurePosixPath(head).name, *rest])
 
 
 def is_allowlisted_setup_command(cmd: str) -> bool:
@@ -85,20 +87,7 @@ def is_allowlisted_setup_command(cmd: str) -> bool:
     # Strip a leading sudo and leading KEY=VALUE env assignments.
     text = re.sub(r"^\s*sudo\s+", "", text)
     text = re.sub(r"^(?:\s*[A-Za-z_][A-Za-z0-9_]*=[^\s]*\s+)+", "", text)
-    # Match on the executable's basename, but ONLY for an absolute path under a
-    # system prefix. The patterns below are anchored, so without any
-    # normalisation ``/opt/venv/bin/uv pip install X`` was REJECTED while
-    # ``uv pip install X`` -- the same operation -- was allowed. Measured: two
-    # sessions hit one missing dependency and got opposite outcomes, decided by
-    # nothing but how the specialist happened to spell the path.
-    #
-    # The allowlist is checked against this normalised text, but
-    # ``run_setup_commands`` executes the ORIGINAL string under ``shell=True``.
-    # So a blanket basename strip would let any binary in: ``./pip install foo``
-    # normalises to an allowlisted ``pip install foo`` while running a script
-    # the specialist just wrote into its own workspace. Restricting the strip to
-    # absolute system prefixes keeps "which KIND of operation may replay" intact
-    # -- the property the SETUP_CMD_ALLOWLIST comment promises -- while still treating a venv's own
-    # interpreter as the interpreter it is.
-    text = _TRUSTED_BIN_PREFIX_RE.sub("", text, count=1)
-    return any(re.match(pat, text) for pat in SETUP_CMD_ALLOWLIST)
+    invocation = _installer_invocation(text)
+    if invocation is None:
+        return False
+    return any(re.match(pat, invocation) for pat in SETUP_CMD_ALLOWLIST)

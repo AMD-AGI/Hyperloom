@@ -402,6 +402,20 @@ def test_the_setting_script_exports_the_accepted_launch(tmp_path):
     assert text.rstrip().endswith("vllm serve $MODEL --tp 4")
 
 
+def test_the_setting_script_serve_line_carries_no_repeated_flag(tmp_path):
+    """The published serve line is what an operator copies, and a server hard-errors on a repeated flag."""
+    en = EnablementRound()
+    en.record_accepted_config(
+        {"extra_server_args": "--reasoning-parser glm47 --reasoning-parser glm47"},
+        source="kept_bench",
+    )
+    rel = write_setting_script(tmp_path, en, "vllm", model="/models/M")
+
+    text = (tmp_path / rel).read_text(encoding="utf-8")
+
+    assert text.rstrip().endswith("vllm serve $MODEL --reasoning-parser glm47")
+
+
 def _attempt_runtime(tmp_path: Path, task_id: str) -> dict[str, str]:
     """An attempt runtime as a round provisions it, under its own attempt directory."""
     venv = tmp_path / "stacks" / "sglang" / task_id / "venv"
