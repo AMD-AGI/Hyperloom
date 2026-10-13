@@ -1205,10 +1205,20 @@ def _build_parser() -> argparse.ArgumentParser:
         "accept old results, rebuild reports or resume execution.",
     )
     rec.add_argument(
+        "--confirm-scope-gone",
+        metavar="OWNER_SCOPE",
+        help="Attest that the whole execution environment recorded as OWNER_SCOPE (a boot and PID namespace, "
+        "as printed by a blocked resume) no longer exists, e.g. its machine or container was lost. Cancels the "
+        "unfinished tasks recorded under it so they are redone rather than counted, releases their execution/GPU "
+        "ownership records and appends the confirmation to runtime/pod_history.jsonl. Refuses the current "
+        "environment's scope and refuses while another scope holds an unexpired lease. Requires POSIX session "
+        "locking and --confirmation-reason. Does not stop processes or resume execution.",
+    )
+    rec.add_argument(
         "--confirmation-reason",
         metavar="TEXT",
-        help="Required audit reason for --confirm-stopped. Both options must be provided together "
-        "and cannot be combined with --force.",
+        help="Required audit reason for --confirm-stopped or --confirm-scope-gone. Exactly one of those options "
+        "and this reason must be provided together, and they cannot be combined with --force.",
     )
 
     return p
