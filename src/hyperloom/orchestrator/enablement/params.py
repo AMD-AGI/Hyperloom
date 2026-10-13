@@ -13,7 +13,6 @@ from hyperloom.orchestrator.lever import LEVER_ENABLEMENT
 
 from ..bringup import recorded_verdict, session_root
 from ..collaborator import CoordinatorCollaborator
-from ..phases.machine_state import PHASE_ENABLEMENT
 
 import logging as _logging
 
@@ -170,34 +169,6 @@ def _round_carriers(state: Any, signature: Any) -> dict[str, Any]:
         # eval-origin trigger context (empty for boot-origin enablement).
         **_enablement_carrier_params(state),
     }
-
-
-def bind_integrate_to_lane(params: dict[str, Any], state: Any, *, session_dir: Path) -> None:
-    """Make an integrate_patch an enablement round exactly when the lane can take one as it starts to run.
-
-    Admission happens long before execution, so the lane may have moved on. A
-    closed lane (succeeded, or revalidating) strips the enablement context, and
-    the integrate is graded as any other. An untagged one executing in ENABLEMENT
-    gets the round's context; a tagged one already carries it.
-
-    Args:
-        params: The integrate_patch params; updated in place.
-        state: The shared state, which owns the lane and the phase.
-        session_dir: The session root, for the recorded boot verdict.
-    """
-    if not state.enablement.accepts_rounds:
-        for key in [k for k in params if k == "enablement" or k.startswith("enablement_")]:
-            del params[key]
-        return
-    if (state.phase or "").strip().upper() != PHASE_ENABLEMENT or params.get("enablement"):
-        return
-    verdict, _ = recorded_verdict(
-        state.enablement.launch_observation_path,
-        wrapper_text=state.enablement.launch_log or "",
-        session_dir=session_dir,
-    )
-    for key, value in _round_carriers(state, verdict.signature).items():
-        params.setdefault(key, value)
 
 
 class EnablementParams(CoordinatorCollaborator):

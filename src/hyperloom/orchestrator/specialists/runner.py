@@ -274,6 +274,20 @@ def _grounding_explicit_root(
     return Path(roots.pop()) if len(roots) == 1 else None
 
 
+def _resolve_claimed_patch(p: Any, bases: list[Path]) -> str | None:
+    """The first existing sandbox-internal file a claimed patch path names, absolute or under one of ``bases``."""
+    raw = Path(str(p))
+    candidates = [raw] if raw.is_absolute() else []
+    candidates += [base / raw for base in bases]
+    for c in candidates:
+        try:
+            if c.is_file() and _patch_path_within_bases(c, bases):
+                return str(c)
+        except OSError:
+            continue
+    return None
+
+
 def _patch_path_within_bases(path: Path, bases: list[Path]) -> bool:
     """True when ``path`` resolves inside one of the specialist sandbox bases.
 
@@ -1153,32 +1167,10 @@ class SpecialistRunner:
         if not isinstance(claimed, list):
             claimed = []
         search_bases = [b for b in (prep.worktree, workspace) if b is not None]
-
-        def _resolve_existing_patch(p: Any) -> str | None:
-            """Resolve a claimed patch path against known search bases.
-
-            Args:
-                p: Patch path (absolute or relative to a search base).
-
-            Returns:
-                The first existing sandbox-internal file path, or ``None``.
-            """
-            raw = Path(str(p))
-            candidates = [raw] if raw.is_absolute() else []
-            for base in search_bases:
-                candidates.append(base / raw)
-            for c in candidates:
-                try:
-                    if c.is_file() and _patch_path_within_bases(c, search_bases):
-                        return str(c)
-                except OSError:
-                    continue
-            return None
-
         validated: list[str] = []
         missing: list[str] = []
         for p in claimed:
-            resolved = _resolve_existing_patch(p)
+            resolved = _resolve_claimed_patch(p, search_bases)
             if resolved is not None:
                 validated.append(resolved)
             else:
@@ -1192,14 +1184,8 @@ class SpecialistRunner:
                     p,
                 )
                 continue
-            if p not in validated:
-                validated.append(p)
-        _seen: set[str] = set()
-        deduped: list[str] = []
-        for p in validated:
-            if p not in _seen:
-                _seen.add(p)
-                deduped.append(p)
+            validated.append(p)
+        deduped = list(dict.fromkeys(validated))
         if missing:
             # Record dangling patch claims for the session_breakdown audit.
             notes.append("patches_claimed_but_missing:" + ",".join(missing[:8]))

@@ -102,7 +102,7 @@ from ._nogit_patch import (
     _is_git_tree,
     _is_within,
 )
-from ...enablement.params import bind_integrate_to_lane
+from ...enablement.lane import bind_integrate_to_lane
 from ...enablement.recipe.credentials import detect_credential_channels
 from ...enablement.recipe.projections import project_launch_evidence
 from ._patch_snapshot import _git_commit_kept, _patch_touched_paths
@@ -1800,6 +1800,46 @@ def _enforce_critic_gate(
     return None
 
 
+def _uncommitted_revert(attempt: IntegrateAttempt, failure: str, what: str, **evidence: Any) -> dict[str, Any]:
+    """Revert accepted work that could not be committed, since the next revert to HEAD would erase it unseen."""
+    log.error("integrate_patch: %s could not be committed (%s); reverting", what, failure)
+    return {
+        "status": "reverted",
+        "error_class": "keep_commit_failed",
+        "error": failure,
+        "specialist_task_id": attempt.specialist_task_id,
+        "patches_applied": [],
+        "patches_reverted": [],
+        "artifacts_reverted": [],
+        "reason": f"{what} could not be committed: {failure}",
+        "workspace": str(attempt.output_root),
+        **evidence,
+    }
+
+
+def _inert_keep_reason(
+    delta_pct: float | None,
+    keep_threshold_pct: float,
+    patch_count: int,
+    switch_manifest: list[dict[str, Any]],
+    enablers: list[str],
+) -> str:
+    """Why a bundle was kept inert rather than kept or reverted."""
+    bits = [
+        f"bundle throughput delta {delta_pct:+.2f}% < keep_threshold {keep_threshold_pct:.2f}%"
+        if delta_pct is not None
+        else "bundle throughput not measurable",
+        f"code kept inert ({patch_count} patch(es), all switches default-off) and "
+        f"{len(switch_manifest)} lever(s) registered for per-lever exploration",
+    ]
+    if enablers:
+        bits.append(
+            f"{len(enablers)} declared enabler(s) ({', '.join(enablers)}) cannot pay standalone "
+            f"and are only measurable inside their bundle"
+        )
+    return "; ".join(bits)
+
+
 class IntegratePatchExecutor:
     """ActionRunner for the ``integrate_patch`` action (PR-A4)."""
 
@@ -1980,10 +2020,7 @@ class IntegratePatchExecutor:
         # Upstream-PR mode has no specialist to look up and no specialist
         # verdict to enforce: the Critic verdict on this proposal is the gate.
         if resolve_patch_source(params) == PATCH_SOURCE_UPSTREAM_PR:
-            early = self._stage_resolve_upstream_pr(attempt, params, shared_state)
-            if early is not None:
-                return early
-            return None
+            return self._stage_resolve_upstream_pr(attempt, params, shared_state)
 
         specialist_task_id = str(params.get("specialist_task_id") or "").strip()
         if not specialist_task_id:
@@ -3060,30 +3097,16 @@ class IntegratePatchExecutor:
         # Accepted: the boot either runs or reached a deeper wall. Both keep the
         # work in the tree and differ only in whether the lane is finished.
         commit_failure, _ = self._commit_accepted_work(
-            framework_root=framework_root,
-            applied=applied,
-            applied_artifacts=applied_artifacts,
-            message=f"hyperloom enablement {'advanced' if advanced else 'kept'} {specialist_task_id}",
+            attempt, f"hyperloom enablement {'advanced' if advanced else 'kept'} {specialist_task_id}"
         )
         if commit_failure:
-            log.error(
-                "integrate_patch: commit-on-accept failed (%s); reverting rather than "
-                "reporting progress the next round would erase",
+            return _uncommitted_revert(
+                attempt,
                 commit_failure,
+                "enablement progress",
+                enablement=True,
+                framework_root=str(framework_root or ""),
             )
-            return {
-                "status": "reverted",
-                "error_class": "keep_commit_failed",
-                "error": commit_failure,
-                "specialist_task_id": specialist_task_id,
-                "patches_applied": [],
-                "patches_reverted": [],
-                "artifacts_reverted": [],
-                "enablement": True,
-                "framework_root": str(framework_root or ""),
-                "reason": f"enablement progress could not be committed: {commit_failure}",
-                "workspace": str(output_root),
-            }
 
         if advanced:
             wall = after_loaded.observation.stage_failed if after_loaded.observation is not None else None
@@ -3436,14 +3459,8 @@ class IntegratePatchExecutor:
             ),
         }
 
-    def _commit_accepted_work(
-        self,
-        *,
-        framework_root: Path | None,
-        applied: list[Path],
-        applied_artifacts: list[dict[str, Any]],
-        message: str,
-    ) -> tuple[str, bool]:
+    @staticmethod
+    def _commit_accepted_work(attempt: IntegrateAttempt, message: str) -> tuple[str, bool]:
         """Commit this round's patch and artifact writes so they survive a later revert.
 
         A non-git root needs no commit: nothing there resets the tree between
@@ -3454,16 +3471,17 @@ class IntegratePatchExecutor:
             success. ``head_advanced`` is ``True`` only when a real commit
             landed, which is what makes ``HEAD^..HEAD`` this round's diff.
         """
+        framework_root = attempt.framework_root
         if framework_root is None or not _is_git_tree(framework_root):
             return "", False
         root_resolved = framework_root.resolve()
         try:
-            touched = _patch_touched_paths(framework_root, applied)
+            touched = _patch_touched_paths(framework_root, attempt.applied)
             # An artifact installed into a sibling root is not addressable by a
             # rel path under this one, so it belongs to no commit here.
             artifact_rels = [
                 str(a["rel_target"])
-                for a in applied_artifacts
+                for a in attempt.applied_artifacts
                 if a.get("rel_target") and Path(str(a["root"])).resolve() == root_resolved
             ]
             ok, note = _git_commit_kept(framework_root, message, list(dict.fromkeys(touched + artifact_rels)))
@@ -3813,32 +3831,18 @@ class IntegratePatchExecutor:
             config_fingerprint=cfg_fingerprint,
         )
         commit_failure, keep_committed = self._commit_accepted_work(
-            framework_root=framework_root,
-            applied=applied,
-            applied_artifacts=applied_artifacts,
-            message=f"hyperloom KEEP {specialist_task_id} ({delta_pct:+.2f}%)",
+            attempt, f"hyperloom KEEP {specialist_task_id} ({delta_pct:+.2f}%)"
         )
         if commit_failure:
-            log.error(
-                "integrate_patch: commit-on-KEEP failed (%s); reverting rather than "
-                "reporting a KEEP the next revert would silently remove",
+            return _uncommitted_revert(
+                attempt,
                 commit_failure,
+                "KEEP",
+                output_throughput=new_tput,
+                delta_pct=delta_pct,
+                measured_against=measured_against,
+                bench_result=bench_result,
             )
-            return {
-                "status": "reverted",
-                "error_class": "keep_commit_failed",
-                "error": commit_failure,
-                "specialist_task_id": specialist_task_id,
-                "patches_applied": [],
-                "patches_reverted": [],
-                "artifacts_reverted": [],
-                "output_throughput": new_tput,
-                "delta_pct": delta_pct,
-                "measured_against": measured_against,
-                "bench_result": bench_result,
-                "reason": f"KEEP could not be committed: {commit_failure}",
-                "workspace": str(output_root),
-            }
 
         source_snapshot_dir = ""
         source_manifest_path = ""
@@ -4022,18 +4026,11 @@ class IntegratePatchExecutor:
         if not bool(params.get("enable_switch_off_parity", True)):
             return {"ran": False, "ok": True, "reason": "switch-off parity check disabled"}
         if base_tput <= 0:
-            # Before anything has booted (ENABLEMENT) there is no base for the leg to
-            # land near, so the invariant cannot be tested. Keeping the code anyway
-            # would leave an unverified rewrite under every later boot attempt.
             return {
                 "ran": False,
                 "ok": False,
                 "inconclusive": True,
-                "reason": (
-                    "switch-off parity could not be measured: no positive base throughput "
-                    "to compare a parity leg against. Reverting because an unverified "
-                    "rewrite must not stay on disk"
-                ),
+                "reason": "switch-off parity could not be measured: no positive base throughput to compare against",
             }
         switch_names = [entry["switch"] for entry in switch_manifest]
         try:
@@ -4059,13 +4056,8 @@ class IntegratePatchExecutor:
         parity_tput = parity_bench.get("output_throughput")
         accuracy_pass = parity_evidence.get("accuracy_pass")
         if not isinstance(parity_tput, (int, float)) or parity_tput <= 0:
-            # No measurement is not evidence of a behavioural change. The patch is
-            # still reverted — leaving an unverified rewrite on disk would skew every
-            # later measurement — but the verdict must not claim the invariant was
-            # tested and broken. On a live session this exact branch discarded a
-            # +4.7% patch whose parity leg had in fact measured 0.5% from base, and
-            # recording that as a violation would have taught later sessions a lesson
-            # drawn from a filesystem race rather than from the code.
+            # No measurement is not evidence of a behavioural change: the patch is
+            # still reverted, but the verdict must not claim the invariant was broken.
             return {
                 "ran": True,
                 "ok": False,
@@ -4153,8 +4145,7 @@ class IntegratePatchExecutor:
                 manifest are kept.
             params: The task params.
             extra: The runner's extra context.
-            parity: The switch-off parity verdict, recorded on the result so the
-                inert KEEP carries its own evidence of being inert.
+            parity: The switch-off parity verdict, the inert KEEP's evidence of being inert.
             bench_result: The measured bench result (switches on).
             new_tput: Measured throughput with the switches on.
             delta_pct: Measured delta against ``base_tput``.
@@ -4168,45 +4159,17 @@ class IntegratePatchExecutor:
             The ``kept_inert`` result envelope.
         """
         switch_manifest = attempt.switch_manifest
-        commit_failure, _ = self._commit_accepted_work(
-            framework_root=attempt.framework_root,
-            applied=attempt.applied,
-            applied_artifacts=attempt.applied_artifacts,
-            message=f"hyperloom KEEP_INERT {attempt.specialist_task_id}",
-        )
+        commit_failure, _ = self._commit_accepted_work(attempt, f"hyperloom KEEP_INERT {attempt.specialist_task_id}")
         if commit_failure:
-            log.error(
-                "integrate_patch: commit-on-KEEP_INERT failed (%s); reverting rather than "
-                "leaving uncommitted code the next attempt would stash as user changes",
+            return _uncommitted_revert(
+                attempt,
                 commit_failure,
+                "KEEP_INERT",
+                output_throughput=new_tput,
+                delta_pct=delta_pct,
+                bench_result=bench_result,
             )
-            return {
-                "status": "reverted",
-                "error_class": "keep_commit_failed",
-                "error": commit_failure,
-                "specialist_task_id": attempt.specialist_task_id,
-                "patches_applied": [],
-                "patches_reverted": [],
-                "artifacts_reverted": [],
-                "output_throughput": new_tput,
-                "delta_pct": delta_pct,
-                "bench_result": bench_result,
-                "reason": f"KEEP_INERT could not be committed: {commit_failure}",
-                "workspace": str(attempt.output_root),
-            }
         enablers = [entry["switch"] for entry in switch_manifest if entry.get("enabler")]
-        reason_bits = [
-            f"bundle throughput delta {delta_pct:+.2f}% < keep_threshold {keep_threshold_pct:.2f}%"
-            if delta_pct is not None
-            else "bundle throughput not measurable",
-            f"code kept inert ({len(attempt.applied)} patch(es), all switches default-off) and "
-            f"{len(switch_manifest)} lever(s) registered for per-lever exploration",
-        ]
-        if enablers:
-            reason_bits.append(
-                f"{len(enablers)} declared enabler(s) ({', '.join(enablers)}) cannot pay standalone "
-                f"and are only measurable inside their bundle"
-            )
         await self._maybe_write_framework_kb_record(
             params=params,
             done_payload=attempt.done_payload,
@@ -4247,7 +4210,9 @@ class IntegratePatchExecutor:
             "base_tput": base_tput,
             "measured_against": _measured_against(params, base_tput=base_tput),
             "keep_threshold_pct": keep_threshold_pct,
-            "reason": "; ".join(reason_bits),
+            "reason": _inert_keep_reason(
+                delta_pct, keep_threshold_pct, len(attempt.applied), switch_manifest, enablers
+            ),
             "bench_result": bench_result,
             "workspace": str(attempt.output_root),
             "framework_root": str(attempt.framework_root or ""),

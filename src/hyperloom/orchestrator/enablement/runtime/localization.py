@@ -131,6 +131,21 @@ def _closure_bytes(diff_text: str) -> int:
     return len((diff_text or "").encode("utf-8", "replace"))
 
 
+def _classify_pr_diff(diff_text: str, scope: str) -> tuple[str, list[str], ClosureVerdict]:
+    """Classify a fetched PR diff over all its files, then keep the ones under ``scope``."""
+    paths = parse_diff_paths(diff_text)
+    verdict = classify_closure(paths)
+    if not verdict.is_localizable:
+        return diff_text, paths, verdict
+    diff_text = _scope_diff(diff_text, scope)
+    paths = parse_diff_paths(diff_text)
+    if not paths:
+        return "", [], ClosureVerdict(kind=EMPTY, reason=f"no file of the PR is under {scope!r}")
+    if _closure_bytes(diff_text) > _MAX_VENDOR_BYTES:
+        verdict = ClosureVerdict(kind=OVERSIZE, reason="PR diff exceeds byte cap")
+    return diff_text, paths, verdict
+
+
 def build_localization_diff(
     action: object,
     *,
@@ -157,17 +172,7 @@ def build_localization_diff(
         diff_text = fetch_pr_patches(slug, pr_number) or ""
         if not diff_text.strip():
             return "", [], ClosureVerdict(kind=EMPTY, reason="empty PR diff (fetch failed?)")
-        paths = parse_diff_paths(diff_text)
-        verdict = classify_closure(paths)
-        if not verdict.is_localizable:
-            return diff_text, paths, verdict
-        diff_text = _scope_diff(diff_text, scope)
-        paths = parse_diff_paths(diff_text)
-        if not paths:
-            return "", [], ClosureVerdict(kind=EMPTY, reason=f"no file of the PR is under {scope!r}")
-        if _closure_bytes(diff_text) > _MAX_VENDOR_BYTES:
-            verdict = ClosureVerdict(kind=OVERSIZE, reason="PR diff exceeds byte cap")
-        return diff_text, paths, verdict
+        return _classify_pr_diff(diff_text, scope)
 
     if kind == "vendor_files":
         ref = str(getattr(action, "ref", "") or "")

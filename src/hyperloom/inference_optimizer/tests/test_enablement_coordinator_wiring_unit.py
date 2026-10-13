@@ -25,7 +25,8 @@ from hyperloom.orchestrator.actions.stop_attribution import SESSION_TIME_EXHAUST
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.proposals import PendingProposal
 from hyperloom.orchestrator.loop.writeback import _authorable_launch_log
-from hyperloom.orchestrator.enablement.params import EnablementParams, bind_integrate_to_lane
+from hyperloom.orchestrator.enablement.lane import bind_integrate_to_lane
+from hyperloom.orchestrator.enablement.params import EnablementParams
 
 from .conftest import make_coordinator
 

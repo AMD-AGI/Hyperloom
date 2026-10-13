@@ -23,7 +23,7 @@ from ..collaborator import CoordinatorCollaborator
 from hyperloom.inference_optimizer.breakdown.round_archive import ROLE_LAUNCH_CONFIG, RoundArchive
 from ..phases.machine_state import ENABLEMENT_MAX_ATTEMPTS as _ENABLEMENT_MAX_ATTEMPTS, PHASE_ENABLEMENT
 from ..loop.offload import offload
-from .params import ENABLEMENT_PARAMS_BUDGET_SEC
+from .params import ENABLEMENT_PARAMS_BUDGET_SEC, _round_carriers
 from .artifacts import snapshot_round, write_setting_script
 from ..bringup import recorded_verdict, session_root
 from ..state.round_store import ADVANCED, BOOTED, FAILED, Round
@@ -41,6 +41,34 @@ log = _logging.getLogger(__name__)
 
 #: Shortest lease a renewal may stamp.
 _MIN_LEASE_SEC = 300.0
+
+
+def bind_integrate_to_lane(params: dict[str, Any], state: Any, *, session_dir: Path) -> None:
+    """Make an integrate_patch an enablement round exactly when the lane can take one as it starts to run.
+
+    Admission happens long before execution, so the lane may have moved on. A
+    closed lane (succeeded, or revalidating) strips the enablement context, and
+    the integrate is graded as any other. An untagged one executing in ENABLEMENT
+    gets the round's context; a tagged one already carries it.
+
+    Args:
+        params: The integrate_patch params; updated in place.
+        state: The shared state, which owns the lane and the phase.
+        session_dir: The session root, for the recorded boot verdict.
+    """
+    if not state.enablement.accepts_rounds:
+        for key in [k for k in params if k == "enablement" or k.startswith("enablement_")]:
+            del params[key]
+        return
+    if (state.phase or "").strip().upper() != PHASE_ENABLEMENT or params.get("enablement"):
+        return
+    verdict, _ = recorded_verdict(
+        state.enablement.launch_observation_path,
+        wrapper_text=state.enablement.launch_log or "",
+        session_dir=session_dir,
+    )
+    for key, value in _round_carriers(state, verdict.signature).items():
+        params.setdefault(key, value)
 
 
 class EnablementLane(CoordinatorCollaborator):
