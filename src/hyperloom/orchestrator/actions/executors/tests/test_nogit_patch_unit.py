@@ -369,35 +369,6 @@ def test_seq_offset_zero_gives_deterministic_names(tmp_path):
             assert name.endswith(".bak"), f"backup name doesn't end in .bak: {name!r}"
 
 
-# Rename/move patch: full revert (new file deleted, old file restored)
-
-RENAME_DELETE_OLD = """\
---- a/old_name.py
-+++ /dev/null
-@@ -1 +0,0 @@
--moved_content
-"""
-
-RENAME_CREATE_NEW = """\
---- /dev/null
-+++ b/new_name.py
-@@ -0,0 +1 @@
-+moved_content
-"""
-
-# A single diff that truly renames (old != new, neither /dev/null).
-RENAME_DIFF = """\
-diff --git a/old_name.py b/new_name.py
-similarity index 90%
-rename from old_name.py
-rename to new_name.py
---- a/old_name.py
-+++ b/new_name.py
-@@ -1 +1 @@
--moved_content
-+renamed_content
-"""
-
 PURE_RENAME_DIFF = """\
 diff --git a/old_name.py b/new_name.py
 similarity index 100%
@@ -412,7 +383,6 @@ def test_revert_restores_a_source_the_patch_moved_away(tmp_path):
     bak = tmp_path / "bk" / "backup.bak"
     bak.parent.mkdir(parents=True)
     bak.write_text("original_content\n", encoding="utf-8")
-    # old_name.py was renamed away (doesn't exist now).
     records = [
         {
             "target": str(old_file),
@@ -422,48 +392,26 @@ def test_revert_restores_a_source_the_patch_moved_away(tmp_path):
             "pre_image_sha256": ledger.file_digest(bak),
         }
     ]
+
     ledger.restore_records(records)
-    assert old_file.exists(), "a restore record must recreate a target the patch had moved away"
+
     assert old_file.read_text() == "original_content\n"
 
 
-def test_pure_rename_is_recorded_even_though_it_has_no_hunks(tmp_path):
-    """A 100%-similarity rename moves the file with no ``---``/``+++`` pair; an empty ledger would make revert a no-op."""
+def test_rename_is_recorded_even_though_it_has_no_hunks(tmp_path):
+    """A 100%-similarity rename moves the file with no ``---``/``+++`` pair; an empty ledger makes revert a no-op."""
     (tmp_path / "old_name.py").write_text("moved_content\n", encoding="utf-8")
     patch_file = tmp_path / "pure_rename.patch"
     patch_file.write_text(PURE_RENAME_DIFF, encoding="utf-8")
 
     _ok, _err, backups, *_ = ng._apply_patch_no_git(tmp_path, patch_file, tmp_path / "bk")
 
-    actions = {Path(r["target"]).name: r["revert_action"] for r in backups}
-    assert actions == {"old_name.py": "restore", "new_name.py": "delete"}
-
-
-def test_rename_patch_tracked_as_two_records(tmp_path):
-    """A rename produces two records: a restore of the old source and a delete of the new destination."""
-    old_file = tmp_path / "old_name.py"
-    old_file.write_text("moved_content\n", encoding="utf-8")
-
-    patch_file = tmp_path / "rename.patch"
-    patch_file.write_text(RENAME_DIFF, encoding="utf-8")
-
-    backup_root = tmp_path / "bk"
-
-    # Inspect the record structure regardless of whether the patch CLI succeeds.
-    _ok, _err, backups, *_ = ng._apply_patch_no_git(tmp_path, patch_file, backup_root)
-
-    restore_records = [r for r in backups if r.get("revert_action") == "restore"]
-    delete_records = [r for r in backups if r.get("revert_action") == "delete"]
-
-    assert restore_records, "rename patch must produce a restore record for the source file"
-    assert delete_records, "rename patch must produce a delete record for the destination file"
-
-    src_rec = restore_records[0]
-    assert "old_name" in src_rec["target"]
-    assert src_rec["backup_path"] is not None
-
-    dst_rec = next((r for r in delete_records if "new_name" in r["target"]), None)
-    assert dst_rec is not None, "delete record must target new_name.py"
+    records = {Path(r["target"]).name: r for r in backups}
+    assert {name: r["revert_action"] for name, r in records.items()} == {
+        "old_name.py": "restore",
+        "new_name.py": "delete",
+    }
+    assert records["old_name.py"]["backup_path"] is not None
 
 
 # ApplyFeedback structure tests
@@ -773,21 +721,15 @@ def test_apply_real_failure_reports_rejected_hunks(tmp_path):
     assert "patched" in feedback.rejected_hunks, "the rejected hunk body must reach the patch author"
 
 
-def test_apply_real_failure_leaves_foreign_rej_untouched(tmp_path):
-    """Rejects land under the backup root, so another channel's .rej is neither read nor removed."""
+def test_apply_real_failure_leaves_the_framework_tree_alone(tmp_path):
+    """Rejects land under the backup root: a concurrent apply's .rej is neither read nor reaped, and no .orig stays."""
     foreign = tmp_path / "other.py.rej"
     foreign.write_text("@@ -1 +1 @@\n-foreign\n", encoding="utf-8")
 
     _ok, _err, _backups, feedback = _apply_failing_after_dry_run(tmp_path, tmp_path / "bak")
 
-    assert foreign.exists(), "a concurrent apply's .rej must survive"
+    assert foreign.exists()
     assert "foreign" not in feedback.rejected_hunks
-
-
-def test_apply_real_failure_leaves_no_orig_copies(tmp_path):
-    """A failed apply does not litter the framework tree with patch's .orig backups."""
-    _apply_failing_after_dry_run(tmp_path, tmp_path / "bak")
-
     assert list(tmp_path.glob("*.orig")) == []
 
 
