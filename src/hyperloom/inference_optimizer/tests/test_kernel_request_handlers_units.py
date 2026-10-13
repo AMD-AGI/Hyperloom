@@ -219,6 +219,33 @@ class TestForgeGemmHelperCoverage:
         state.current_best = {"extra_server_args": "--quantization fp8", "extra_envs": {}}
         assert krh._resolve_forge_precision_and_quant(state, {}) == ("fp8", "auto")
 
+    _QUARK_MXFP4 = {
+        "quant_method": "quark",
+        "global_quant_config": {"weight": {"dtype": "fp4", "group_size": 32}},
+        "layer_quant_config": {"*self_attn*": {"weight": {"dtype": "fp8_e4m3", "group_size": 128}}},
+    }
+    _COMPRESSED_TENSORS_FP8 = {
+        "quant_method": "compressed-tensors",
+        "config_groups": {"group_0": {"targets": ["Linear"], "weights": {"num_bits": 8, "type": "float"}}},
+    }
+
+    @pytest.mark.parametrize(
+        ("quant_cfg", "session_precision"),
+        [(_QUARK_MXFP4, "fp4"), (_COMPRESSED_TENSORS_FP8, "fp8")],
+    )
+    def test_resolve_forge_precision_leaves_a_nested_format_to_forge(self, tmp_path, quant_cfg, session_precision):
+        # Handed on, the label would hold for every lane, and an fp8 one would also be pinned to per_token.
+        model = self._write_cfg(tmp_path / "m", {"hidden_size": 6144, "quantization_config": quant_cfg})
+        state = SharedState(precision=session_precision, model_path=model)
+        state.current_best = {"extra_server_args": "", "extra_envs": {}}
+        assert krh._resolve_forge_precision_and_quant(state, {}) == ("auto", "auto")
+
+    def test_resolve_forge_precision_keeps_an_operator_precision_the_checkpoint_does_not_nest(self, tmp_path):
+        model = self._write_cfg(tmp_path / "m", {"hidden_size": 6144, "quantization_config": self._QUARK_MXFP4})
+        state = SharedState(precision="bf16", model_path=model)
+        state.current_best = {"extra_server_args": "", "extra_envs": {}}
+        assert krh._resolve_forge_precision_and_quant(state, {}) == ("bf16", "auto")
+
     def test_resolve_aiter_root_from_editable_source_layout(self, tmp_path, monkeypatch):
         monkeypatch.delenv("AITER_ROOT_DIR", raising=False)
         root = tmp_path / "sgl-workspace" / "aiter"

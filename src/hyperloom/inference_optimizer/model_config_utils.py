@@ -12,7 +12,7 @@ import struct
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.checkpoint_quant import QUARK_LAYER_CONFIG_KEYS
+from hyperloom.common.checkpoint_quant import QUARK_LAYER_CONFIG_KEYS, checkpoint_format
 from hyperloom.common.coerce import to_int
 
 # Single source of truth for --model (path OR HF repo id) -> local dir.
@@ -392,10 +392,14 @@ def _derive_attention_type(cfg: dict) -> str:
 
 
 def _derive_quantization(cfg: dict) -> str:
-    """Return the weight quant method (e.g. ``fp8``) or '' when unquantized."""
+    """Return the checkpoint's weight format (e.g. ``fp8``, ``fp4``) or '' when unquantized.
+
+    Quark and compressed-tensors put their own name in ``quant_method`` and the format one level down, so a nested
+    format answers before the method does.
+    """
     qc = cfg.get("quantization_config")
     if isinstance(qc, dict):
-        return str(qc.get("quant_method") or "").strip()
+        return checkpoint_format(qc) or str(qc.get("quant_method") or "").strip()
     return ""
 
 

@@ -32,6 +32,7 @@ from hyperloom.orchestrator.trace_analysis._capture_shapes import (
     is_capture_fragment as _shared_is_capture_fragment,
 )
 from hyperloom.common import codex_session, llm_config
+from hyperloom.common.checkpoint_quant import checkpoint_format
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env import env_bool, forge_explicitly_enabled, is_truthy
 from hyperloom.common.gpu_identity import is_gfx_arch
@@ -1197,13 +1198,17 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
     if quantization_arg in ("fp4", "mxfp4"):
         return quantization_arg, "fp4"
 
-    # Fall back to session precision.
+    # Fall back to session precision. When that is just the format a Quark or compressed-tensors checkpoint nests, it
+    # is one label for layers the checkpoint can store differently (MXFP4 experts, fp8 attention), and forge can tell
+    # them apart only when it is left to route each lane itself.
     precision = _normalize_precision(state.precision)
+    quant_type = str(payload.get("quant_type") or "auto").strip()
+    model_path = str(payload.get("model_path") or getattr(state, "model_path", "") or "").strip()
+    if precision and precision == checkpoint_format((_read_model_config(model_path) or {}).get("quantization_config")):
+        return "auto", quant_type
     if not precision:
         precision = "bf16"
-    quant_type = str(payload.get("quant_type") or "auto").strip()
     if precision == "fp8" and quant_type.lower() == "auto":
-        model_path = str(payload.get("model_path") or getattr(state, "model_path", "") or "").strip()
         gpu_type = str(payload.get("gpu_type") or getattr(state, "gpu_type", "") or "").strip()
         quant_type = _resolve_fp8_quant_type(model_path, gpu_type, framework)
     return precision, quant_type
