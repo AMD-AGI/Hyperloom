@@ -146,7 +146,7 @@ cognitive-complexity src/hyperloom/orchestrator/knowledge/recipe_kb_t0.py::_find
 cognitive-complexity src/hyperloom/orchestrator/knowledge/recipe_kb_t0.py::run_t0_anchor 81
 cognitive-complexity src/hyperloom/orchestrator/knowledge/remote_recipe/__init__.py::RemoteWarmRecipeAdapter.search 49
 cognitive-complexity src/hyperloom/orchestrator/knowledge/remote_recipe/sanitize.py::_sanitize_value 31
-cognitive-complexity src/hyperloom/orchestrator/knowledge/remote_recipe/values.py::_adopt_replayed_prior 71
+cognitive-complexity src/hyperloom/orchestrator/knowledge/remote_recipe/values.py::_adopt_replayed_prior 70
 cognitive-complexity src/hyperloom/orchestrator/knowledge/remote_recipe/values.py::knowledge_to_warm_recipe 32
 cognitive-complexity src/hyperloom/orchestrator/knowledge/remote_recipe/values.py::merge_staged_sections 48
 cognitive-complexity src/hyperloom/orchestrator/loop/conversation.py::ConversationCollaborator.compose_prompt 64
@@ -478,7 +478,7 @@ duplicated-lines src/hyperloom/inference_optimizer/tests/test_claude_backend.py 
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_cli_bootstrap.py 382
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_cli_bootstrap_coverage_unit.py 380
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_close_phase_sequencer.py 42
-duplicated-lines src/hyperloom/inference_optimizer/tests/test_column_kb.py 105
+duplicated-lines src/hyperloom/inference_optimizer/tests/test_column_kb.py 68
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_common_utils.py 958
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_conc_sweep.py 44
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_coordinator_async_methods_coverage_unit.py 18
