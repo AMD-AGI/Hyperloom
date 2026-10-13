@@ -9,7 +9,7 @@ import types
 
 import pytest
 
-from kernelforge.loop import task_preparer
+from kernelforge.loop import task_preparer_prompts
 from kernelforge.mcp_server.tools.bench import (
     CaseCoverageError,
     EXPLORATORY_KIND,
@@ -735,7 +735,7 @@ def _reference_template_main(monkeypatch, argv: list[str]):
         monkeypatch.setitem(sys.modules, name, module)
 
     namespace: dict = {"__file__": "driver_template.py"}
-    exec(compile(task_preparer.REFERENCE_DRIVER_TEMPLATE, "driver_template.py", "exec"), namespace)
+    exec(compile(task_preparer_prompts.REFERENCE_DRIVER_TEMPLATE, "driver_template.py", "exec"), namespace)
     namespace["CASES"].update({"sq64": {"M": 8, "N": 8}, "sq7211": {"M": 8, "N": 9}})
     benched: list[str] = []
     namespace["_run_bench"] = lambda _d, case_id, *_a: benched.append(case_id)
