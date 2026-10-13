@@ -1395,6 +1395,18 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 )
             )
 
+    def _hold_current_best(self, task_kind: str, reason: str, detail: str) -> bool:
+        """Record and log a measured winner refused promotion; returns ``False``, the lift outcome.
+
+        Warning, not info: a refusal here is the whole measured round being
+        discarded, and the lane that measured it has already filed its KEEP
+        elsewhere, so a quiet log leaves the session reporting 0% for work it
+        did do.
+        """
+        log.warning("current_best held: %s winner %s (%s)", task_kind, reason, detail)
+        self.shared_state.record_unpromoted_keep(action=task_kind, reason=reason, detail=detail)
+        return False
+
     def lift_to_current_best(
         self,
         task_kind: str,
@@ -1451,39 +1463,24 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 # not apply. The output figure on a degraded pair is diagnostic
                 # only; promoting on it would record a throughput KEEP the
                 # session never asked for.
-                log.info(
-                    "current_best held: %s winner not comparable (%s)",
-                    task_kind,
-                    graded.degrade_reason,
-                )
-                return False
+                return self._hold_current_best(task_kind, "not_comparable", str(graded.degrade_reason))
             if graded.veto_reason:
-                log.warning(
-                    "current_best held: %s winner refused by %s (%s)", task_kind, graded.vetoed_by, graded.veto_reason
-                )
-                return False
+                return self._hold_current_best(task_kind, "latency_veto", str(graded.veto_reason))
             # A verified correctness fix was already bounded by the integrate gate.
             correctness_fix = bv.get("keep_reason") == KEEP_REASON_CORRECTNESS_FIX
             if graded.graded_on_intvty and graded.verdict != VERDICT_KEEP and not correctness_fix:
-                log.info(
-                    "current_best held: %s winner refused by %s, intvty %.1f->%.1f tput %.1f->%.1f",
+                return self._hold_current_best(
                     task_kind,
-                    graded.refused_by,
-                    graded.reference,
-                    graded.candidate,
-                    graded.tput_reference,
-                    graded.tput_candidate,
+                    "guard_refused",
+                    f"refused by {graded.refused_by}, intvty {graded.reference:.1f}->{graded.candidate:.1f} "
+                    f"tput {graded.tput_reference:.1f}->{graded.tput_candidate:.1f}",
                 )
-                return False
             if graded.reference > 0 and graded.candidate <= graded.reference and not correctness_fix:
-                log.info(
-                    "current_best held at %.1f %s: %s winner measured %.1f (no lift)",
-                    graded.reference,
-                    graded.objective,
+                return self._hold_current_best(
                     task_kind,
-                    graded.candidate,
+                    "no_lift",
+                    f"measured {graded.candidate:.1f} against {graded.reference:.1f} {graded.objective}",
                 )
-                return False
         previous = self.shared_state.current_best
         base_args = strip_benchmark_harness_flags(previous.get("extra_server_args"))
         # An authored-kernel overlay stays active until another KEEP replaces it.
