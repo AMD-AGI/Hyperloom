@@ -36,9 +36,7 @@ def _checkout_with_env(tmp_path: Path) -> Path:
     root = tmp_path / "checkout"
     root.mkdir()
     (root / ".env").write_text(
-        "HYPERLOOM_RUN_MODE=docker\n"
-        "USER_DATA_PATH=/previous-run/hyperloom\n"
-        "GEAK_ROOT=/previous-run/GEAK\n"
+        "HYPERLOOM_RUN_MODE=docker\nUSER_DATA_PATH=/previous-run/hyperloom\nGEAK_ROOT=/previous-run/GEAK\n"
     )
     return root
 

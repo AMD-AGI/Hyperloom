@@ -118,7 +118,9 @@ def test_run_dispatched_releases_gpu_lease_on_success(coord: Coordinator) -> Non
         kind = "explore"
         requires_lanes: list = []
 
-    async def _fake_run_task(task, *, prebound_lease=None, extra_context=None, release_resources=None, on_cleanup_confirmed=None):
+    async def _fake_run_task(
+        task, *, prebound_lease=None, extra_context=None, release_resources=None, on_cleanup_confirmed=None
+    ):
         await release_resources()
         return "RESULT"
 
@@ -150,7 +152,9 @@ def test_run_dispatched_releases_gpu_lease_on_exception(coord: Coordinator) -> N
         kind = "explore"
         requires_lanes: list = []
 
-    async def _boom(task, *, prebound_lease=None, extra_context=None, release_resources=None, on_cleanup_confirmed=None):
+    async def _boom(
+        task, *, prebound_lease=None, extra_context=None, release_resources=None, on_cleanup_confirmed=None
+    ):
         try:
             raise RuntimeError("subprocess crashed")
         finally:
@@ -185,7 +189,9 @@ def test_run_dispatched_no_gpu_lease_is_noop(coord: Coordinator) -> None:
         kind = "report"
         requires_lanes: list = []
 
-    async def _fake_run_task(task, *, prebound_lease=None, extra_context=None, release_resources=None, on_cleanup_confirmed=None):
+    async def _fake_run_task(
+        task, *, prebound_lease=None, extra_context=None, release_resources=None, on_cleanup_confirmed=None
+    ):
         await release_resources()
         return "CPU"
 

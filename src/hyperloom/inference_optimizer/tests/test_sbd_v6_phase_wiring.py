@@ -183,7 +183,9 @@ class _Sub:
         self.ran: list[str] = []
         self.executor_registry = {}
 
-    async def run_task(self, task, *, prebound_lease=None, extra_context=None, release_resources=None, on_cleanup_confirmed=None):
+    async def run_task(
+        self, task, *, prebound_lease=None, extra_context=None, release_resources=None, on_cleanup_confirmed=None
+    ):
         self.ran.append(str(task.kind))
         if release_resources is not None:
             await release_resources()
@@ -304,7 +306,9 @@ def test_a_dispatch_that_raised_is_still_on_the_timeline(tmp_path):
     machine_state.record_phase_transition(state, to_phase="KERNEL_AGENT", reason="start")
 
     class _Boom(_Sub):
-        async def run_task(self, task, *, prebound_lease=None, extra_context=None, release_resources=None, on_cleanup_confirmed=None):
+        async def run_task(
+            self, task, *, prebound_lease=None, extra_context=None, release_resources=None, on_cleanup_confirmed=None
+        ):
             try:
                 raise RuntimeError("executor died")
             finally:
