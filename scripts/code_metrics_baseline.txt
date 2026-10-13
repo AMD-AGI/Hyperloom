@@ -274,7 +274,6 @@ cognitive-complexity src/kernelforge/fusion/validate.py::serving_smoke_verdict 3
 cognitive-complexity src/kernelforge/fusion/validate.py::validate_recipe 33
 cognitive-complexity src/kernelforge/gemm_tune/cli.py::run 99
 cognitive-complexity src/kernelforge/gemm_tune/evidence.py::parse_log 76
-cognitive-complexity src/kernelforge/gemm_tune/router.py::_select_sglang_tuners 39
 cognitive-complexity src/kernelforge/gemm_tune/tier3/contract.py::validate_output_csv 44
 cognitive-complexity src/kernelforge/gemm_tune/tune_robustness.py::run_isolated 59
 cognitive-complexity src/kernelforge/gemm_tune/tuners/_aiter_dense_common.py::_augment_with_config_m_values 33
@@ -949,7 +948,6 @@ function-lines src/kernelforge/gemm_tune/cli.py::run 417
 function-lines src/kernelforge/gemm_tune/evidence.py::parse_log 193
 function-lines src/kernelforge/gemm_tune/model_analyzer.py::analyze_model 96
 function-lines src/kernelforge/gemm_tune/report.py::build_report 104
-function-lines src/kernelforge/gemm_tune/router.py::_select_sglang_tuners 129
 function-lines src/kernelforge/gemm_tune/tier3/contract.py::validate_output_csv 99
 function-lines src/kernelforge/gemm_tune/tier3/dispatch.py::_Bf16DenseAdapter._build 86
 function-lines src/kernelforge/gemm_tune/tier3/generate.py::generate_tuner 82
@@ -1050,10 +1048,10 @@ module-lines src/hyperloom/common/llm_config.py 1235
 module-lines src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py 2327
 module-lines src/hyperloom/inference_optimizer/breakdown/schema.py 2770
 module-lines src/hyperloom/inference_optimizer/cli/__init__.py 2569
-module-lines src/hyperloom/inference_optimizer/cli/model_gate.py 1823
+module-lines src/hyperloom/inference_optimizer/cli/model_gate.py 1821
 module-lines src/hyperloom/inference_optimizer/cli/preflight.py 2785
 module-lines src/hyperloom/inference_optimizer/multi_node/cli.py 1990
-module-lines src/hyperloom/inference_optimizer/roofline_ceiling.py 1488
+module-lines src/hyperloom/inference_optimizer/roofline_ceiling.py 1479
 module-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py 2258
 module-lines src/hyperloom/orchestrator/actions/executors/_kv_metrics.py 1615
 module-lines src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py 1242

@@ -12,6 +12,7 @@ import struct
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.checkpoint_quant import QUARK_LAYER_CONFIG_KEYS
 from hyperloom.common.coerce import to_int
 
 # Single source of truth for --model (path OR HF repo id) -> local dir.
@@ -33,9 +34,6 @@ _NATIVE_MOE_RUNNER_QUANT_METHODS = frozenset({"quark"})
 
 # MX group size, mirroring sglang's ``QuarkConfig._is_mx_fp4`` validation.
 _MX_FP4_GROUP_SIZE = 32
-
-# sglang resolves a layer's quant config from these, most specific first.
-_QUARK_LAYER_CONFIG_KEYS = ("layer_quant_config", "layer_type_quant_config")
 
 
 def _load_model_config_dict(model_path: str) -> dict | None:
@@ -140,7 +138,7 @@ def _model_moe_runner_requires_aiter(model_path: str) -> bool:
         if str(qc.get("quant_method") or "").strip().lower() not in _NATIVE_MOE_RUNNER_QUANT_METHODS:
             continue
         entries: list[Any] = [qc.get("global_quant_config")]
-        for key in _QUARK_LAYER_CONFIG_KEYS:
+        for key in QUARK_LAYER_CONFIG_KEYS:
             per_layer = qc.get(key)
             if isinstance(per_layer, dict):
                 entries.extend(per_layer.values())
