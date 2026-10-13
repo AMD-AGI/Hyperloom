@@ -24,7 +24,7 @@ from hyperloom.orchestrator.actions.executors import integrate_patch as ip
 from hyperloom.orchestrator.tests._helpers import integrate_extra, variant_result
 from hyperloom.orchestrator.actions.executors.integrate_patch import (
     IntegratePatchExecutor,
-    _git_checkout_clean,
+    _git_reset_clean,
     _detect_p_level,
     _read_done_payload,
 )
@@ -694,11 +694,11 @@ def test_find_framework_proposal():
     assert found["id"] == 1
 
 
-def test_git_checkout_clean(tmp_path):
+def test_git_reset_clean(tmp_path):
     repo = tmp_path / "repo"
     _init_git_repo(repo)
     (repo / "src.py").write_text("dirty\n", encoding="utf-8")
-    ok, _ = _git_checkout_clean(repo)
+    ok, _ = _git_reset_clean(repo, "HEAD")
     assert ok
     assert (repo / "src.py").read_text().endswith("return 1\n")
 
@@ -711,7 +711,7 @@ def test_detect_p_level_none_for_unmatched(tmp_path):
         "diff --git a/zzz.py b/zzz.py\n--- a/zzz.py\n+++ b/zzz.py\n@@ -1,1 +1,1 @@\n-X\n+Y\n",
         encoding="utf-8",
     )
-    assert _detect_p_level(repo, bad, three_way=False) is None
+    assert _detect_p_level(repo, bad) is None
 
 
 def test_read_done_payload_missing(tmp_path):

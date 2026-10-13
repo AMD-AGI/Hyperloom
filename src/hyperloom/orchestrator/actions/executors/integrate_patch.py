@@ -649,7 +649,6 @@ def _run_git_apply(
     patch_path: Path,
     *,
     p_level: int,
-    three_way: bool,
     check_only: bool,
 ) -> tuple[bool, str]:
     """Single ``git apply`` invocation at an explicit strip level.
@@ -658,15 +657,12 @@ def _run_git_apply(
         framework_root: The git checkout to apply into.
         patch_path: The patch file to apply.
         p_level: The ``-p<N>`` strip level.
-        three_way: Whether to pass ``-3`` for a three-way merge.
         check_only: Whether to pass ``--check`` (dry run, no mutation).
 
     Returns:
         A ``(ok, stderr)`` tuple; ``ok`` is True on a zero return code.
     """
     args = ["-C", str(framework_root), "apply", f"-p{p_level}"]
-    if three_way:
-        args.append("-3")
     if check_only:
         args.append("--check")
     args.append(str(patch_path))
@@ -761,31 +757,19 @@ def _preflight_missing_targets(
     return records
 
 
-def _detect_p_level(
-    framework_root: Path,
-    patch_path: Path,
-    *,
-    three_way: bool,
-) -> int | None:
+def _detect_p_level(framework_root: Path, patch_path: Path) -> int | None:
     """Return the first ``-p`` level whose ``--check`` applies cleanly.
 
     Args:
         framework_root: The git checkout to test against.
         patch_path: The patch file to probe.
-        three_way: Whether to probe with ``-3``.
 
     Returns:
         The first ``-p<N>`` level that applies cleanly, or ``None`` when none
         do.
     """
     for lvl in _P_LEVELS:
-        ok, _ = _run_git_apply(
-            framework_root,
-            patch_path,
-            p_level=lvl,
-            three_way=three_way,
-            check_only=True,
-        )
+        ok, _ = _run_git_apply(framework_root, patch_path, p_level=lvl, check_only=True)
         if ok:
             return lvl
     return None
@@ -795,42 +779,28 @@ def _git_apply(
     framework_root: Path,
     patch_path: Path,
     *,
-    three_way: bool = False,
     check_only: bool = False,
 ) -> tuple[bool, str]:
-    """Run ``git apply [-3] -p<auto> [--check] <patch>`` inside
+    """Run ``git apply -p<auto> [--check] <patch>`` inside
     ``framework_root``, auto-detecting the strip level. Returns
     ``(ok, stderr)``.
 
     Args:
         framework_root: The git checkout to apply into.
         patch_path: The patch file to apply.
-        three_way: Whether to pass ``-3`` for a three-way merge.
         check_only: Whether to only check (dry run) rather than mutate.
 
     Returns:
         A ``(ok, stderr)`` tuple; ``ok`` is True when the apply (or check)
         succeeds.
     """
-    lvl = _detect_p_level(framework_root, patch_path, three_way=three_way)
+    lvl = _detect_p_level(framework_root, patch_path)
     if lvl is None:
         # Surface a representative error at the git-native default level.
-        return _run_git_apply(
-            framework_root,
-            patch_path,
-            p_level=1,
-            three_way=three_way,
-            check_only=check_only,
-        )
+        return _run_git_apply(framework_root, patch_path, p_level=1, check_only=check_only)
     if check_only:
         return True, ""
-    return _run_git_apply(
-        framework_root,
-        patch_path,
-        p_level=lvl,
-        three_way=three_way,
-        check_only=False,
-    )
+    return _run_git_apply(framework_root, patch_path, p_level=lvl, check_only=False)
 
 
 def _git_reverse_applies_cleanly(framework_root: Path, patch_path: Path) -> bool:
@@ -864,20 +834,16 @@ def _git_reverse_applies_cleanly(framework_root: Path, patch_path: Path) -> bool
 def _git_apply_collect_feedback(
     framework_root: Path,
     patch_path: Path,
-    *,
-    three_way: bool = False,
 ) -> "tuple[bool, str, ApplyFeedback | None]":
     """Like :func:`_git_apply` but also returns an :class:`ApplyFeedback` on failure.
 
     On success returns ``(True, "", None)``.  On failure returns
     ``(False, stderr, ApplyFeedback)`` where *ApplyFeedback* carries the
-    combined stderr from both the initial and ``-3`` attempt, the list of
-    tried ``-p`` levels, and a source-context snippet.
+    stderr of every tried ``-p`` level and a source-context snippet.
 
     Args:
         framework_root: The git checkout to apply into.
         patch_path: The patch file to apply.
-        three_way: Whether to fall back to ``-3`` on first failure.
 
     Returns:
         ``(ok, err, feedback)`` — feedback is ``None`` on success.
@@ -888,17 +854,13 @@ def _git_apply_collect_feedback(
     tried_levels: list[int] = []
     level_stderrs: list[str] = []
     for lvl in _P_LEVELS:
-        ok_check, stderr_check = _run_git_apply(
-            framework_root, patch_path, p_level=lvl, three_way=three_way, check_only=True
-        )
+        ok_check, stderr_check = _run_git_apply(framework_root, patch_path, p_level=lvl, check_only=True)
         tried_levels.append(lvl)
         if stderr_check:
             level_stderrs.append(f"-p{lvl}: {stderr_check}")
         if ok_check:
             # Level works; now apply for real.
-            ok_apply, stderr_apply = _run_git_apply(
-                framework_root, patch_path, p_level=lvl, three_way=three_way, check_only=False
-            )
+            ok_apply, stderr_apply = _run_git_apply(framework_root, patch_path, p_level=lvl, check_only=False)
             if ok_apply:
                 return True, "", None
             feedback = build_apply_feedback(
@@ -910,38 +872,20 @@ def _git_apply_collect_feedback(
             )
             return False, stderr_apply, feedback
 
-    # All levels failed; retry with -3.
-    if not three_way:
-        ok3, err3, _ = _git_apply_collect_feedback(framework_root, patch_path, three_way=True)
-        if ok3:
-            return True, "", None
-        # Still nothing. Distinguish "does not apply" from "already applied":
-        # a specialist often writes both a superset patch and the subset it
-        # contains, so applying one leaves the other a satisfied no-op that
-        # ``git apply --check`` nonetheless rejects. A clean *reverse* check
-        # succeeds only when every hunk's post-state is already in the tree,
-        # which is exactly what a forward apply would have produced -- so treat
-        # it as success rather than failing the whole combo. Partial overlap
-        # fails the reverse check and stays a real failure.
-        if _git_reverse_applies_cleanly(framework_root, patch_path):
-            log.info(
-                "integrate_patch: %s is already fully applied (clean git apply -R --check); treating as a no-op",
-                patch_path.name,
-            )
-            return True, "", None
-        # Merge both sets of stderrs.
-        all_stderrs = "\n".join(level_stderrs)
-        if err3:
-            all_stderrs = all_stderrs + "\n-3 retry: " + err3 if all_stderrs else "-3 retry: " + err3
-        feedback = build_apply_feedback(
-            patch_path,
-            channel="git",
-            tried_levels=tried_levels,
-            stderr=all_stderrs,
-            framework_root=framework_root,
+    # Distinguish "does not apply" from "already applied": a specialist often
+    # writes both a superset patch and the subset it contains, so applying one
+    # leaves the other a satisfied no-op that ``git apply --check``
+    # nonetheless rejects. A clean *reverse* check succeeds only when every
+    # hunk's post-state is already in the tree, which is exactly what a forward
+    # apply would have produced -- so treat it as success rather than failing
+    # the whole combo. Partial overlap fails the reverse check and stays a real
+    # failure.
+    if _git_reverse_applies_cleanly(framework_root, patch_path):
+        log.info(
+            "integrate_patch: %s is already fully applied (clean git apply -R --check); treating as a no-op",
+            patch_path.name,
         )
-        return False, all_stderrs, feedback
-
+        return True, "", None
     all_stderrs = "\n".join(level_stderrs)
     feedback = build_apply_feedback(
         patch_path,
@@ -1213,23 +1157,28 @@ def _git_restore_stash_if_needed(
     return f"git stash pop {ref} rc={cp.returncode}: {detail}; user changes remain in git stash"
 
 
-def _git_checkout_clean(framework_root: Path, *, exclude: list[str] | None = None) -> tuple[bool, str]:
-    """Restore the working tree to HEAD and remove untracked candidate files.
+def _git_reset_clean(framework_root: Path, base: str, *, exclude: list[str] | None = None) -> tuple[bool, str]:
+    """Return the tree to ``base`` exactly: tracked, staged and untracked candidate files all go.
 
-    This is the REVERT: HEAD is the accepted stack because every KEEP is
-    committed, so what this discards is exactly the candidate. User changes must
-    already have been stashed before the candidate was applied.
+    This is the REVERT: ``base`` is the HEAD recorded before the candidate, which
+    is the accepted stack because every KEEP is committed. A hard reset also
+    drops what a failed apply left in the index, which a per-path checkout
+    cannot. User changes must already have been stashed before the candidate
+    was applied.
 
     Args:
-        framework_root (Path): Directory to run ``git checkout`` in.
+        framework_root: Directory to run ``git reset`` in.
+        base: The commit to restore.
+        exclude: Paths ``git clean`` must keep.
 
     Returns:
-        tuple[bool, str]: ``(ok, stderr)`` where ``ok`` is ``True`` on
-        return code 0.
+        ``(ok, stderr)`` where ``ok`` is ``True`` when both steps succeed.
     """
-    ok, err = _git_restore_to_head(framework_root)
-    if not ok:
-        return False, err
+    cp = _run_git_cp(["-C", str(framework_root), "reset", "--hard", base], timeout=60.0)
+    if cp is None:
+        return False, "git reset spawn failed"
+    if cp.returncode != 0:
+        return False, (cp.stderr or "").strip()
     exclusions = [arg for path in exclude or [] for arg in ("-e", path)]
     cp2 = _run_git_cp(["-C", str(framework_root), "clean", "-fd", *exclusions], timeout=60.0)
     if cp2 is None:
@@ -1329,7 +1278,7 @@ def restore_pending_integrate(pending: dict[str, Any], *, keep: bool = False) ->
                     exclusions = (
                         ["/" + workspace.relative_to(root).as_posix()] if workspace.is_relative_to(root) else []
                     )
-                    ok, error = _git_checkout_clean(root, exclude=exclusions)
+                    ok, error = _git_reset_clean(root, base, exclude=exclusions)
                     if not ok:
                         raise OSError(error)
                 else:
@@ -2847,7 +2796,7 @@ class IntegratePatchExecutor:
                 apply_errors.append({"patch": str(patch), "stderr": f"path escapes tree: {escaping!r}"})
                 break
             if git_head:
-                ok, err, fb = _git_apply_collect_feedback(framework_root, patch, three_way=False)
+                ok, err, fb = _git_apply_collect_feedback(framework_root, patch)
                 if not ok:
                     apply_errors.append({"patch": str(patch), "stderr": err})
                     if fb is not None:
@@ -4916,7 +4865,7 @@ __all__ = [
     "_detect_p_level",
     "_git_apply",
     "_git_apply_reverse",
-    "_git_checkout_clean",
+    "_git_reset_clean",
     "_run_git_apply",
     "_resolve_framework_root",
     "_resolve_patch_paths",
