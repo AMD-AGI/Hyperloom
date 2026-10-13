@@ -193,9 +193,21 @@ def make_agent_fn(
             f"{chr(10)}{chr(10)}{kernel_backend_context}"
         )
 
+    # Name the allowlist itself: the guard refuses any other new file and the whole session's work goes with it, so a
+    # rule that only points at "the allowlist" let sessions plan around a new file the campaign never admitted.
+    admitted_new_paths = [path for path in (commit_new_paths or []) if path]
+    if admitted_new_paths:
+        new_file_policy = (
+            "New files are admitted only where they match: " + ", ".join(f"`{path}`" for path in admitted_new_paths) + "."
+        )
+    else:
+        new_file_policy = (
+            "This campaign admits no new files: express every change as an edit to an existing tracked file (a "
+            "tuned configuration table goes into the code, not into a new file)."
+        )
     workspace_hygiene_rule = (
         "Do NOT create or leave new non-ignored files outside the campaign's "
-        "explicit --commit-new-path allowlist. Run "
+        f"explicit --commit-new-path allowlist. {new_file_policy} Run "
         "one-off checks inline; if a temporary file is unavoidable, place it "
         "under forge_experiments/ and remove it before ending the turn."
     )

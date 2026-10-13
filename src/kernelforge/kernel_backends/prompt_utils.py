@@ -22,8 +22,9 @@ them with the `Read` tool; what follows is the part you must not have to look up
   it never bounds WHAT YOU CHANGE.** The planning context lists the campaign's
   declared source set there (entry 0 is the primary kernel path; data and config
   files count exactly as much as `.py` sources); every other tracked,
-  non-protected implementation file is editable too, and you may add new files.
-  From a permitted file you can rebind a symbol in an installed package before
+  non-protected implementation file is editable too, and you may add new files
+  only where the campaign's new-file allowlist admits them (your task
+  instructions state it; with no allowlist, add none). From a permitted file you can rebind a symbol in an installed package before
   the framework consumes it; carry device-side source in through the framework's
   own hook (`import_source`, `pragma_import_c`, an intrinsic, inline asm) and
   call it on the extern-call path; change a module-level constant that another
