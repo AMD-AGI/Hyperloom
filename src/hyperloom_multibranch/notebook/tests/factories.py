@@ -45,6 +45,8 @@ def profile(**overrides: object) -> SessionProfile:
     fields: dict[str, object] = {
         "session_id": "sess-1",
         "model": "deepseek-ai/DeepSeek-R1",
+        "model_type": "deepseek_v3",
+        "architectures": ("DeepseekV3ForCausalLM",),
         "hardware": "MI355X",
         "framework": "vllm",
         "framework_version": "0.11.0",
