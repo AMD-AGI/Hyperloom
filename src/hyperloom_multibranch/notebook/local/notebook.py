@@ -1,0 +1,513 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""One participant's handle on a session's notebook directory, implementing every notebook protocol.
+
+The directory holds ``segments/`` (one append-only file per handle) and ``claims/`` (claim generations), and works the
+same on a local disk and on a shared NFS folder. A handle writes as one :class:`Writer`, and each write checks that the
+writer's role owns the state it writes: test requests and results the toolbox, specialist-branch judgements the rule
+gate, integration-branch judgements and merge attempts the integrator, branch starts and stops the scheduler, claims and
+branch logs the specialist runtime of that branch.
+"""
+
+from __future__ import annotations
+
+import threading
+import time
+from collections.abc import Callable
+from contextlib import suppress
+from dataclasses import replace
+from pathlib import Path
+
+from hyperloom_multibranch.notebook import codec
+from hyperloom_multibranch.notebook.interfaces import (
+    AlreadyTested,
+    BranchLogStore,
+    ClaimHeld,
+    ClaimLost,
+    ClaimService,
+    CommitQuery,
+    ConflictingWrite,
+    GateRecords,
+    Inbox,
+    JudgementSink,
+    LineageSink,
+    NodeHealth,
+    NotebookError,
+    NotRecorded,
+    ProgressQuery,
+    RecordSearch,
+    StartupBriefProvider,
+    TestRecordSink,
+    WriterNotAllowed,
+)
+from hyperloom_multibranch.notebook.local import feeds, views
+from hyperloom_multibranch.notebook.local.claims import LeaseStore, LeaseTaken, effective, is_live
+from hyperloom_multibranch.notebook.local.segments import (
+    Entry,
+    EntryKind,
+    SegmentReader,
+    SegmentWriter,
+    clip_summary,
+    make_writer_id,
+    require_token,
+)
+from hyperloom_multibranch.notebook.local.state import ClaimDecision, JudgementWrite, NotebookState
+from hyperloom_multibranch.notebook.peers import (
+    BranchLogEntry,
+    BranchLogType,
+    Intent,
+    Judgement,
+    TestRequest,
+    TestResult,
+)
+from hyperloom_multibranch.notebook.records import (
+    BaselineRecord,
+    BranchLogRecord,
+    BranchProgress,
+    Claim,
+    ClaimKey,
+    CommittedCommit,
+    DedupAnswer,
+    InboxPage,
+    LineageEvent,
+    LineageView,
+    MergeAttempt,
+    QuarantineEvent,
+    RecordedValue,
+    RegressionCase,
+    SearchHit,
+    StartupBrief,
+    TestRecord,
+    ToolResultPointer,
+    Writer,
+)
+from hyperloom_multibranch.notebook.vocab import (
+    COMMITTING,
+    INTEGRATION_BRANCH,
+    INTEGRATION_CONCLUSIONS,
+    LINEAGE_WRITERS,
+    ClaimStatus,
+    Conclusion,
+    DedupStatus,
+    LineageKind,
+    Role,
+)
+
+SEGMENTS_DIR = "segments"
+CLAIMS_DIR = "claims"
+#: The fields each lineage event must name.
+_LINEAGE_FIELDS: dict[LineageKind, tuple[str, ...]] = {
+    LineageKind.ROOT: ("commit_id",),
+    LineageKind.OPEN: ("from_commit",),
+    LineageKind.SPLIT: ("commit_id", "from_commit", "from_branch"),
+    LineageKind.STOP: (),
+}
+
+
+def _refusal(answer: DedupAnswer, reason: str) -> NotebookError | None:
+    if answer.status is DedupStatus.IN_PROGRESS:
+        return ClaimHeld(answer)
+    if answer.status is DedupStatus.TESTED or (answer.status is DedupStatus.SUSPECTED and not reason.strip()):
+        return AlreadyTested(answer)
+    return None
+
+
+def _released(claim: Claim, now: float) -> Claim:
+    if claim.status is not ClaimStatus.HELD:
+        raise ClaimLost(f"the claim on {claim.key.parent_commit} is {claim.status.value}")
+    return replace(claim, status=ClaimStatus.RELEASED, heartbeat_at=now)
+
+
+def _check_lineage(event: LineageEvent) -> None:
+    missing = [name for name in _LINEAGE_FIELDS[event.kind] if not getattr(event, name)]
+    if missing:
+        raise ValueError(f"a {event.kind.value} event needs {', '.join(missing)}")
+    if (event.kind is LineageKind.ROOT) != (event.branch == INTEGRATION_BRANCH):
+        raise ValueError(f"the root commit, and only it, starts the {INTEGRATION_BRANCH} branch")
+
+
+class LocalNotebook(
+    TestRecordSink,
+    NodeHealth,
+    JudgementSink,
+    GateRecords,
+    LineageSink,
+    ClaimService,
+    BranchLogStore,
+    Inbox,
+    ProgressQuery,
+    CommitQuery,
+    StartupBriefProvider,
+    RecordSearch,
+):
+    """A handle on the notebook in ``root``, writing as ``writer``; ``clock`` gives Unix seconds.
+
+    It is a :class:`~hyperloom_multibranch.notebook.interfaces.Notebook`: it implements each interface it lists.
+    """
+
+    def __init__(self, root: Path, writer: Writer, *, clock: Callable[[], float] = time.time) -> None:
+        require_token(writer.name, "writer name")
+        if writer.branch:
+            require_token(writer.branch, "branch")
+        elif writer.role is Role.SPECIALIST_RUNTIME:
+            raise ValueError("a specialist runtime writes for its branch; give its writer one")
+        self.root = Path(root)
+        self.writer = writer
+        self._clock = clock
+        self._segment = SegmentWriter(self.root / SEGMENTS_DIR, make_writer_id(writer.role, writer.name))
+        self._reader = SegmentReader(self.root / SEGMENTS_DIR)
+        self._leases = LeaseStore(self.root / CLAIMS_DIR)
+        self._lock = threading.Lock()
+        self._folded: NotebookState | None = None
+
+    # --- plumbing -------------------------------------------------------------------------------------------------
+
+    def _require(self, *roles: Role) -> None:
+        if self.writer.role not in roles:
+            owners = ", ".join(role.value for role in roles)
+            raise WriterNotAllowed(f"{self.writer.role.value} may not write this; it belongs to {owners}")
+
+    def _own_branch(self, branch: str) -> None:
+        if branch != self.writer.branch:
+            raise WriterNotAllowed(f"{self.writer.name} writes for {self.writer.branch or 'no branch'}, not {branch}")
+
+    def _state(self) -> NotebookState:
+        entries = self._reader.entries()
+        folded = self._folded
+        if folded is None or len(folded.entries) != len(entries):
+            folded = self._folded = NotebookState(entries)
+        return folded
+
+    def _append(self, kind: EntryKind, payload: object, *, branch: str, parent: str, summary: str) -> Entry:
+        detail = codec.encode(payload)
+        writer = self._segment.writer
+
+        def build(seq: int) -> Entry:
+            return Entry(
+                entry_id=f"{writer}:{seq}",
+                seq=seq,
+                at=self._clock(),
+                writer=writer,
+                role=self.writer.role,
+                actor=self.writer.name,
+                kind=kind,
+                branch=branch,
+                parent=parent,
+                summary=clip_summary(summary),
+                detail=detail,
+            )
+
+        with self._lock:
+            return self._segment.append(build)
+
+    def _check_holds(self, claim: Claim) -> None:
+        """Whether the caller may renew or release ``claim``: its branch's runtime, or the toolbox carrying its test."""
+
+        role = self.writer.role
+        ours = (
+            role is Role.SCHEDULER
+            or (role is Role.SPECIALIST_RUNTIME and claim.holder == self.writer.branch)
+            or (role is Role.TOOLBOX and claim.request_id is not None)
+        )
+        if claim.status is not ClaimStatus.HELD or not ours:
+            raise ClaimLost(f"the claim on {claim.key.parent_commit} is not {self.writer.name}'s to change")
+
+    # --- test records ---------------------------------------------------------------------------------------------
+
+    async def write_request(self, request: TestRequest) -> TestRecord:
+        self._require(Role.TOOLBOX)
+        require_token(request.request_id, "request_id")
+        existing = self._state().requests.get(request.request_id)
+        if existing is None:
+            summary = f"{request.kind.value} {request.request_id} on {request.branch} at {request.parent_commit}"
+            self._append(
+                EntryKind.REQUEST, request, branch=request.branch, parent=request.parent_commit, summary=summary
+            )
+        elif existing != request:
+            raise ConflictingWrite(f"request {request.request_id} was written with other content")
+        return self._state().record(request.request_id)
+
+    async def write_result(self, result: TestResult) -> TestRecord:
+        self._require(Role.TOOLBOX)
+        state = self._state()
+        request = state.record(result.request_id).request
+        existing = state.results.get(result.request_id)
+        if existing is None:
+            failure = f": {result.failure.value} {result.failure_reason}" if result.failure is not None else ""
+            summary = f"{result.validity.value} {result.request_id} on {request.branch}{failure}"
+            self._append(EntryKind.RESULT, result, branch=request.branch, parent=request.parent_commit, summary=summary)
+            self._complete_claim(request)
+        elif existing != result:
+            raise ConflictingWrite(f"the result of {result.request_id} was written with other content")
+        return self._state().record(result.request_id)
+
+    def _complete_claim(self, request: TestRequest) -> None:
+        now = self._clock()
+
+        def complete(claim: Claim) -> Claim:
+            ours = claim.holder == request.branch and claim.request_id in (None, request.request_id)
+            if claim.status is not ClaimStatus.HELD or not ours:
+                raise ClaimLost(f"the claim on {claim.key.parent_commit} is not the claim of {request.request_id}")
+            return replace(claim, status=ClaimStatus.COMPLETED, request_id=request.request_id, heartbeat_at=now)
+
+        with suppress(ClaimLost):
+            self._leases.change(ClaimKey(request.parent_commit, request.intent_fingerprint), complete)
+
+    async def notify_tool_result(self, pointer: ToolResultPointer) -> None:
+        self._require(Role.TOOLBOX)
+        summary = f"tool {pointer.job_id}: {pointer.summary}"
+        self._append(EntryKind.TOOL_RESULT, pointer, branch=pointer.branch, parent="", summary=summary)
+
+    # --- node health ----------------------------------------------------------------------------------------------
+
+    async def record_quarantine(self, event: QuarantineEvent) -> None:
+        self._require(Role.TOOLBOX)
+        gpus = f" GPUs {','.join(map(str, event.gpu_ids))}" if event.gpu_ids else ""
+        summary = f"{event.action.value} {event.node}{gpus}: {event.reason}"
+        self._append(EntryKind.QUARANTINE, event, branch="", parent="", summary=summary)
+
+    async def quarantined(self) -> tuple[QuarantineEvent, ...]:
+        return views.quarantined(self._state())
+
+    # --- judgements and gate records -------------------------------------------------------------------------------
+
+    async def write_judgement(
+        self, request_id: str, judgement: Judgement, conclusion: Conclusion, commit_id: str | None = None
+    ) -> TestRecord:
+        state = self._state()
+        request = state.record(request_id).request
+        integration = request.branch == INTEGRATION_BRANCH
+        self._require(Role.INTEGRATOR if integration else Role.GATE)
+        if (conclusion in INTEGRATION_CONCLUSIONS) != integration:
+            raise WriterNotAllowed(f"{conclusion.value} is no conclusion for a test on {request.branch}")
+        if request_id not in state.results:
+            raise NotRecorded(f"request {request_id} has no result to judge")
+        if (conclusion in COMMITTING or conclusion is Conclusion.MERGED) != (commit_id is not None):
+            raise ValueError(f"a {conclusion.value} judgement names a commit exactly when it makes one")
+        summary = f"{conclusion.value}: {judgement.verdict.value} {judgement.gain_pct:+.2f}% on {request_id}"
+        write = JudgementWrite(request_id, judgement, conclusion, commit_id)
+        self._append(EntryKind.JUDGEMENT, write, branch=request.branch, parent=request.parent_commit, summary=summary)
+        return self._state().record(request_id)
+
+    async def record_merge_attempt(self, attempt: MergeAttempt) -> None:
+        self._require(Role.INTEGRATOR)
+        if attempt.request_id is not None:
+            if self._state().record(attempt.request_id).request.branch != INTEGRATION_BRANCH:
+                raise ValueError(f"a merge is tested on the {INTEGRATION_BRANCH} branch; {attempt.request_id} is not")
+        elif not attempt.skipped_reason:
+            raise ValueError("a merge attempt without a test says why it was skipped")
+        tested = f"tested by {attempt.request_id}" if attempt.request_id else f"skipped: {attempt.skipped_reason}"
+        summary = f"merge {', '.join(attempt.source_commits)} onto {attempt.integration_head}, {tested}"
+        self._append(
+            EntryKind.MERGE_ATTEMPT,
+            attempt,
+            branch=INTEGRATION_BRANCH,
+            parent=attempt.integration_head,
+            summary=summary,
+        )
+
+    async def write_baseline(self, record: BaselineRecord) -> None:
+        self._require(Role.GATE)
+        values = ", ".join(f"{metric} {value:g}" for metric, value in sorted(record.values.items()))
+        summary = f"baseline of {record.root_commit}: {values}"
+        self._append(EntryKind.BASELINE, record, branch=INTEGRATION_BRANCH, parent=record.root_commit, summary=summary)
+
+    async def add_regression_case(self, case: RegressionCase) -> None:
+        self._require(Role.GATE)
+        self._state().record(case.request_id)
+        summary = f"regression case {case.case_ref} of fix {case.fix_commit}"
+        self._append(EntryKind.REGRESSION, case, branch="", parent=case.fix_commit, summary=summary)
+
+    async def record_lineage(self, event: LineageEvent) -> None:
+        self._require(LINEAGE_WRITERS[event.kind])
+        _check_lineage(event)
+        start = event.commit_id or event.from_commit
+        summary = f"{event.kind.value} {event.branch} at {start or 'its head'}: {event.reason}"
+        self._append(EntryKind.LINEAGE, event, branch=event.branch, parent=event.from_commit, summary=summary)
+
+    # --- claims ---------------------------------------------------------------------------------------------------
+
+    async def lookup(self, key: ClaimKey, action_fingerprint: str) -> DedupAnswer:
+        return self._answer(self._state(), key, action_fingerprint, self._clock())
+
+    def _answer(self, state: NotebookState, key: ClaimKey, action_fingerprint: str, now: float) -> DedupAnswer:
+        measured = [record for record in state.records() if record.result is not None]
+        here = [record for record in measured if record.request.parent_commit == key.parent_commit]
+        exact = tuple(record for record in here if record.request.action_fingerprint == action_fingerprint)
+        same_intent = tuple(record for record in here if record.request.intent_fingerprint == key.intent_fingerprint)
+        elsewhere = tuple(
+            record
+            for record in measured
+            if record.request.intent_fingerprint == key.intent_fingerprint
+            and record.request.parent_commit != key.parent_commit
+        )
+        live = sorted(
+            (
+                claim
+                for claim in self._leases.all_current()
+                if is_live(claim, now)
+                and claim.key.parent_commit == key.parent_commit
+                and (claim.key == key or claim.action_fingerprint == action_fingerprint)
+            ),
+            key=lambda claim: claim.key != key,
+        )
+        if exact:
+            return DedupAnswer(key, action_fingerprint, DedupStatus.TESTED, records=exact, elsewhere=elsewhere)
+        if live:
+            return DedupAnswer(key, action_fingerprint, DedupStatus.IN_PROGRESS, claim=live[0], elsewhere=elsewhere)
+        status = DedupStatus.SUSPECTED if same_intent else DedupStatus.FREE
+        return DedupAnswer(key, action_fingerprint, status, records=same_intent, elsewhere=elsewhere)
+
+    async def acquire(self, intent: Intent, action_fingerprint: str, *, ttl_seconds: float, reason: str = "") -> Claim:
+        self._require(Role.SPECIALIST_RUNTIME)
+        self._own_branch(intent.branch)
+        now = self._clock()
+        key = ClaimKey(intent.parent_commit, intent.fingerprint)
+        answer = self._answer(self._state(), key, action_fingerprint, now)
+        refusal = _refusal(answer, reason)
+        claim: Claim | None = None
+        if refusal is None:
+            wanted = Claim(
+                key,
+                intent.branch,
+                intent,
+                action_fingerprint,
+                ttl_seconds,
+                now,
+                now,
+                now + ttl_seconds,
+                ClaimStatus.HELD,
+            )
+            try:
+                claim = self._leases.acquire(wanted, now)
+            except LeaseTaken as taken:
+                answer = replace(answer, status=DedupStatus.IN_PROGRESS, claim=taken.claim)
+                refusal = ClaimHeld(answer)
+        matched = tuple(record.request_id for record in answer.records)
+        decision = ClaimDecision(intent, action_fingerprint, answer.status, claim is not None, reason, matched)
+        outcome = "claimed" if claim is not None else f"refused ({answer.status.value})"
+        summary = f"{outcome} {intent.target} / {intent.mechanism} on {intent.parent_commit}"
+        self._append(EntryKind.CLAIM, decision, branch=intent.branch, parent=intent.parent_commit, summary=summary)
+        if claim is None:
+            raise refusal or ClaimHeld(answer)
+        return claim
+
+    async def renew(self, key: ClaimKey, *, ttl_seconds: float) -> Claim:
+        self._require(Role.SPECIALIST_RUNTIME, Role.TOOLBOX)
+        now = self._clock()
+
+        def renewed(claim: Claim) -> Claim:
+            self._check_holds(claim)
+            return replace(claim, heartbeat_at=now, expires_at=now + ttl_seconds)
+
+        return effective(self._leases.change(key, renewed), now)
+
+    async def attach_request(self, key: ClaimKey, request_id: str, *, ttl_seconds: float) -> Claim:
+        self._require(Role.TOOLBOX)
+        request = self._state().record(request_id).request
+        if ClaimKey(request.parent_commit, request.intent_fingerprint) != key:
+            raise ConflictingWrite(f"request {request_id} measures another claim")
+        now = self._clock()
+
+        def attached(claim: Claim) -> Claim:
+            ours = claim.holder == request.branch and claim.request_id in (None, request_id)
+            if claim.status is not ClaimStatus.HELD or not ours:
+                raise ClaimLost(f"the claim on {key.parent_commit} is not the one {request_id} measures")
+            return replace(claim, request_id=request_id, heartbeat_at=now, expires_at=now + ttl_seconds)
+
+        return effective(self._leases.change(key, attached), now)
+
+    async def release(self, key: ClaimKey) -> Claim:
+        self._require(Role.SPECIALIST_RUNTIME, Role.TOOLBOX, Role.SCHEDULER)
+        now = self._clock()
+
+        def released(claim: Claim) -> Claim:
+            self._check_holds(claim)
+            return _released(claim, now)
+
+        return self._leases.change(key, released)
+
+    async def release_branch(self, branch: str) -> tuple[Claim, ...]:
+        self._require(Role.SCHEDULER)
+        now = self._clock()
+        released = []
+        for claim in self._leases.all_current():
+            if claim.holder == branch and claim.status is ClaimStatus.HELD:
+                with suppress(ClaimLost):
+                    released.append(self._leases.change(claim.key, lambda current: _released(current, now)))
+        return tuple(released)
+
+    # --- branch logs and inbox ------------------------------------------------------------------------------------
+
+    async def append_branch_log(self, entry: BranchLogEntry) -> BranchLogRecord:
+        self._require(Role.SPECIALIST_RUNTIME)
+        self._own_branch(entry.branch)
+        known = {record.entry_id for record in self._state().branch_logs.get(entry.branch, [])}
+        if entry.supersedes is not None and entry.supersedes not in known:
+            raise NotRecorded(f"branch {entry.branch} has no log entry {entry.supersedes}")
+        summary = f"{entry.kind.value}: {entry.content}"
+        written = self._append(EntryKind.BRANCH_LOG, entry, branch=entry.branch, parent="", summary=summary)
+        return BranchLogRecord(written.entry_id, written.at, entry)
+
+    async def branch_log(
+        self, branch: str, *, kinds: frozenset[BranchLogType] = frozenset(), after: str = ""
+    ) -> tuple[BranchLogRecord, ...]:
+        records = self._state().branch_logs.get(branch, [])
+        ids = [record.entry_id for record in records]
+        if after and after not in ids:
+            raise NotRecorded(f"branch {branch} has no log entry {after}")
+        start = ids.index(after) + 1 if after else 0
+        return tuple(record for record in records[start:] if not kinds or record.entry.kind in kinds)
+
+    async def current_plan(self, branch: str) -> BranchLogRecord | None:
+        records = self._state().branch_logs.get(branch, [])
+        superseded = {record.entry.supersedes for record in records if record.entry.supersedes}
+        plans = [r for r in records if r.entry.kind is BranchLogType.PLAN and r.entry_id not in superseded]
+        return plans[-1] if plans else None
+
+    async def poll(self, branch: str, cursor: str = "") -> InboxPage:
+        return feeds.poll(self._state(), branch, cursor)
+
+    # --- queries --------------------------------------------------------------------------------------------------
+
+    async def progress(self) -> tuple[BranchProgress, ...]:
+        state = self._state()
+        return views.progress(state, views.lineage_view(state))
+
+    async def lineage(self) -> LineageView:
+        return views.lineage_view(self._state())
+
+    async def committed(self) -> tuple[CommittedCommit, ...]:
+        state = self._state()
+        return views.committed(state, views.lineage_view(state))
+
+    async def recorded_value(self, commit_id: str) -> RecordedValue:
+        state = self._state()
+        return views.recorded_value(state, views.lineage_view(state), commit_id)
+
+    async def baseline(self) -> BaselineRecord:
+        baselines = self._state().baselines
+        if not baselines:
+            raise NotRecorded("the rule gate has not written a baseline yet")
+        return baselines[-1]
+
+    async def regression_cases_for(self, commit_id: str) -> tuple[RegressionCase, ...]:
+        state = self._state()
+        return views.regression_cases_for(state, views.lineage_view(state), commit_id)
+
+    async def startup_brief(self, start_commit: str) -> StartupBrief:
+        state = self._state()
+        return views.startup_brief(state, views.lineage_view(state), start_commit)
+
+    async def search(self, query: str, *, limit: int = 20) -> tuple[SearchHit, ...]:
+        return feeds.search(self._state(), query, limit)
+
+    async def record(self, request_id: str) -> TestRecord:
+        return self._state().record(request_id)
+
+    async def profiles(self, commit_id: str) -> tuple[TestRecord, ...]:
+        return feeds.profiles(self._state(), commit_id)
+
+
+__all__ = ["CLAIMS_DIR", "SEGMENTS_DIR", "LocalNotebook"]

@@ -1,0 +1,167 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""The notebook's entries folded into indexed state, oldest first; rebuilt whenever an entry is added."""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Callable
+from dataclasses import dataclass
+
+from hyperloom_multibranch.notebook import codec
+from hyperloom_multibranch.notebook.interfaces import UnknownRequest
+from hyperloom_multibranch.notebook.local.segments import Entry, EntryKind
+from hyperloom_multibranch.notebook.peers import (
+    BranchLogEntry,
+    Intent,
+    Judgement,
+    TestRequest,
+    TestResult,
+)
+from hyperloom_multibranch.notebook.records import (
+    BaselineRecord,
+    BranchLogRecord,
+    LineageEvent,
+    MergeAttempt,
+    QuarantineEvent,
+    RegressionCase,
+    TestRecord,
+    ToolResultPointer,
+)
+from hyperloom_multibranch.notebook.vocab import Conclusion, DedupStatus, LineageKind
+
+log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class JudgementWrite:
+    """A judgement as stored: the rule gate's or the integrator's, on one request."""
+
+    request_id: str
+    judgement: Judgement
+    conclusion: Conclusion
+    commit_id: str | None = None
+
+
+@dataclass(frozen=True)
+class ClaimDecision:
+    """What one claim attempt found and whether it got the claim: what Q6 counts wrong refusals from."""
+
+    intent: Intent
+    action_fingerprint: str
+    found: DedupStatus
+    acquired: bool
+    reason: str = ""
+    matched: tuple[str, ...] = ()
+
+
+#: The type each kind of entry stores in its detail.
+PAYLOADS: dict[EntryKind, type] = {
+    EntryKind.REQUEST: TestRequest,
+    EntryKind.RESULT: TestResult,
+    EntryKind.JUDGEMENT: JudgementWrite,
+    EntryKind.MERGE_ATTEMPT: MergeAttempt,
+    EntryKind.LINEAGE: LineageEvent,
+    EntryKind.BASELINE: BaselineRecord,
+    EntryKind.REGRESSION: RegressionCase,
+    EntryKind.QUARANTINE: QuarantineEvent,
+    EntryKind.BRANCH_LOG: BranchLogEntry,
+    EntryKind.TOOL_RESULT: ToolResultPointer,
+    EntryKind.CLAIM: ClaimDecision,
+}
+
+
+class NotebookState:
+    """Every readable entry, decoded and indexed by what the notebook's queries look things up by."""
+
+    def __init__(self, entries: list[Entry]) -> None:
+        self.entries = entries
+        self.decoded: list[tuple[Entry, object]] = []
+        self.requests: dict[str, TestRequest] = {}
+        self.results: dict[str, TestResult] = {}
+        self.judgements: dict[str, list[JudgementWrite]] = {}
+        self.commit_writes: dict[str, JudgementWrite] = {}
+        self.merge_attempts: list[MergeAttempt] = []
+        self.lineage: list[LineageEvent] = []
+        self.baselines: list[BaselineRecord] = []
+        self.regressions: list[RegressionCase] = []
+        self.quarantine: list[QuarantineEvent] = []
+        self.branch_logs: dict[str, list[BranchLogRecord]] = {}
+        self.intents: dict[str, Intent] = {}
+        handlers: dict[EntryKind, Callable[[Entry, object], None]] = {
+            EntryKind.REQUEST: self._request,
+            EntryKind.RESULT: self._result,
+            EntryKind.JUDGEMENT: self._judgement,
+            EntryKind.MERGE_ATTEMPT: lambda _entry, value: self.merge_attempts.append(value),
+            EntryKind.LINEAGE: lambda _entry, value: self.lineage.append(value),
+            EntryKind.BASELINE: lambda _entry, value: self.baselines.append(value),
+            EntryKind.REGRESSION: lambda _entry, value: self.regressions.append(value),
+            EntryKind.QUARANTINE: lambda _entry, value: self.quarantine.append(value),
+            EntryKind.BRANCH_LOG: self._branch_log,
+            EntryKind.TOOL_RESULT: lambda _entry, _value: None,
+            EntryKind.CLAIM: self._claim,
+        }
+        for entry in entries:
+            try:
+                value = codec.decode(PAYLOADS[entry.kind], entry.detail)
+            except (KeyError, TypeError, ValueError) as exc:
+                log.warning("notebook: skipping undecodable %s entry %s: %s", entry.kind.value, entry.entry_id, exc)
+                continue
+            handlers[entry.kind](entry, value)
+            self.decoded.append((entry, value))
+
+    def _request(self, _entry: Entry, request: TestRequest) -> None:
+        self.requests[request.request_id] = request
+
+    def _result(self, _entry: Entry, result: TestResult) -> None:
+        self.results[result.request_id] = result
+
+    def _judgement(self, _entry: Entry, write: JudgementWrite) -> None:
+        self.judgements.setdefault(write.request_id, []).append(write)
+        if write.commit_id is not None:
+            self.commit_writes.setdefault(write.commit_id, write)
+
+    def _branch_log(self, entry: Entry, log_entry: BranchLogEntry) -> None:
+        self.branch_logs.setdefault(log_entry.branch, []).append(BranchLogRecord(entry.entry_id, entry.at, log_entry))
+
+    def _claim(self, _entry: Entry, decision: ClaimDecision) -> None:
+        self.intents.setdefault(decision.intent.fingerprint, decision.intent)
+
+    def latest_judgement(self, request_id: str) -> JudgementWrite | None:
+        history = self.judgements.get(request_id)
+        return history[-1] if history else None
+
+    def record(self, request_id: str) -> TestRecord:
+        """The test record of ``request_id``; raises :class:`UnknownRequest` when no request has it."""
+
+        request = self.requests.get(request_id)
+        if request is None:
+            raise UnknownRequest(f"no test request {request_id}")
+        write = self.latest_judgement(request_id)
+        return TestRecord(
+            request=request,
+            result=self.results.get(request_id),
+            judgement=write.judgement if write is not None else None,
+            conclusion=write.conclusion if write is not None else None,
+            commit_id=write.commit_id if write is not None else None,
+        )
+
+    def records(self) -> list[TestRecord]:
+        """Every test record, in the order the requests were written."""
+
+        return [self.record(request_id) for request_id in self.requests]
+
+    def split_branches(self) -> dict[str, str]:
+        """The branch each split's fix commit opened."""
+
+        return {event.commit_id: event.branch for event in self.lineage if event.kind is LineageKind.SPLIT}
+
+    def merge_sources(self, request_id: str) -> tuple[str, ...]:
+        """The source commits of the merge attempt ``request_id`` tested."""
+
+        attempt = next((item for item in self.merge_attempts if item.request_id == request_id), None)
+        return attempt.source_commits if attempt is not None else ()
+
+
+__all__ = ["PAYLOADS", "ClaimDecision", "JudgementWrite", "NotebookState"]

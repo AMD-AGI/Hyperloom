@@ -165,8 +165,8 @@ class Verdict(str, Enum):
 class Judgement:
     """The rule gate's (or, for a merge, the integrator's) comparison with the parent commit's recorded value.
 
-    ``recorded_value`` is the candidate's value per metric anchored to the PRELUDE baseline: the mean of the test and
-    its confirming retest. It becomes the commit's recorded value when the candidate is committed.
+    ``recorded_value`` is the candidate's value per metric, in the units the PRELUDE baseline records: the mean of the
+    test and its confirming retest. It becomes the commit's recorded value when the candidate is committed.
     """
 
     verdict: Verdict
