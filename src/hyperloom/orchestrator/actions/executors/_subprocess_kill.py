@@ -876,18 +876,17 @@ class _RecorderFanout:
         self._each("close", aborted=aborted)
 
 
-def _build_round_recorders(server_log_path: str | None, env: dict[str, str] | None) -> Any:
-    """KV metrics and measured-phase GPU power for this round, behind one recorder surface; ``None`` when neither runs."""
+def _build_round_recorders(server_log_path: str | None, env: dict[str, str] | None) -> _RecorderFanout:
+    """KV metrics and measured-phase GPU power for this round, behind one recorder surface."""
     from ._gpu_power import build_gpu_power_recorder
 
-    recorders = [
-        recorder
-        for recorder in (_build_kv_recorder(server_log_path, env), build_gpu_power_recorder(server_log_path, env))
-        if recorder is not None
-    ]
-    if not recorders:
-        return None
-    return recorders[0] if len(recorders) == 1 else _RecorderFanout(recorders)
+    return _RecorderFanout(
+        [
+            recorder
+            for recorder in (_build_kv_recorder(server_log_path, env), build_gpu_power_recorder(server_log_path, env))
+            if recorder is not None
+        ]
+    )
 
 
 def _run_relative_path(workspace: Path) -> str:
@@ -945,7 +944,7 @@ def run_with_session_kill(
                     server_already_ready=server_already_ready,
                     session_deadline_sec=session_deadline_sec,
                     cancel_scope=cancel_scope,
-                    kv_recorder=_build_round_recorders(server_log_path, child_env),
+                    recorders=_build_round_recorders(server_log_path, child_env),
                 )
             except subprocess.TimeoutExpired as exc:
                 kill_my_spawned_server(proc)
@@ -1054,7 +1053,7 @@ def _communicate_with_watchdog(
     server_already_ready: bool = False,
     session_deadline_sec: float | None = None,
     cancel_scope: CancelScope | None = None,
-    kv_recorder: Any = None,
+    recorders: _RecorderFanout,
     started_at: float | None = None,
     scan_offsets: dict[str, int] | None = None,
 ) -> tuple[str | bytes, str | bytes]:
@@ -1072,8 +1071,8 @@ def _communicate_with_watchdog(
     ready_at: float | None = None
     last_activity_at: float | None = None
     completed = False
-    if kv_recorder is not None and server_already_ready:
-        kv_recorder.note_phase("measured", start)
+    if server_already_ready:
+        recorders.note_phase("measured", start)
     if server_log_path and server_already_ready:
         stamp_server_ready(server_log_path, 0.0)
     try:
@@ -1096,25 +1095,23 @@ def _communicate_with_watchdog(
                 if scan.saw_ready and ready_at is None:
                     ready_at = last_activity_at = now
                     stamp_server_ready(server_log_path, elapsed)
-                    if kv_recorder is not None:
-                        kv_recorder.note_phase("measured", now)
+                    recorders.note_phase("measured", now)
                 if scan.grew:
                     last_activity_at = now
-                if kv_recorder is not None:
-                    if scan.saw_warmup_begin:
-                        kv_recorder.note_phase("warmup", now)
-                    if scan.saw_measured_begin:
-                        kv_recorder.note_phase("measured", now)
-                    if scan.saw_eval_start:
-                        kv_recorder.note_phase("eval", now)
+                if scan.saw_warmup_begin:
+                    recorders.note_phase("warmup", now)
+                if scan.saw_measured_begin:
+                    recorders.note_phase("measured", now)
+                if scan.saw_eval_start:
+                    recorders.note_phase("eval", now)
                 if capture is not None and (scan.saw_progress or scan.child_spoke):
                     capture.note_output()
             if capture is not None and capture.last_activity_at is not None:
                 last_activity_at = max(last_activity_at or start, capture.last_activity_at)
             # This telemetry-only guess never arms the silence gate.
             warm_reuse_probe = server_log_path and not offsets and elapsed >= _WARM_REUSE_PROBE_AFTER_SEC
-            if kv_recorder is not None and (ready_at is not None or server_already_ready or warm_reuse_probe):
-                kv_recorder.tick(now)
+            if ready_at is not None or server_already_ready or warm_reuse_probe:
+                recorders.tick(now)
             silence_remaining = None
             if ready_at is not None and silence_timeout_sec is not None:
                 silence_remaining = silence_timeout_sec - (now - last_activity_at)
@@ -1138,8 +1135,7 @@ def _communicate_with_watchdog(
             except subprocess.TimeoutExpired:
                 continue
     finally:
-        if kv_recorder is not None:
-            kv_recorder.close(aborted=not completed)
+        recorders.close(aborted=not completed)
 
 
 __all__ = [
