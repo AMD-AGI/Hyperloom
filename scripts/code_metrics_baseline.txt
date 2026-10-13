@@ -112,8 +112,8 @@ cognitive-complexity src/hyperloom/orchestrator/kernel/_kernel_decisions.py::enq
 cognitive-complexity src/hyperloom/orchestrator/kernel/_kernel_decisions.py::pending_kernel_integration_records 54
 cognitive-complexity src/hyperloom/orchestrator/kernel/_kernel_decisions.py::record_kernel_integrate_result 59
 cognitive-complexity src/hyperloom/orchestrator/kernel/_kernel_decisions.py::untried_hot_reusable_kernels 130
-cognitive-complexity src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::_apply_kernel_patch_snapshot 126
-cognitive-complexity src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::apply_kernel_patch 73
+cognitive-complexity src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::_apply_kernel_patch_snapshot 111
+cognitive-complexity src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::apply_kernel_patch 59
 cognitive-complexity src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::apply_snapshot 63
 cognitive-complexity src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::finalize_kernel_patch 37
 cognitive-complexity src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::parse_patch_manifest 38
@@ -366,8 +366,8 @@ cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/report.py::_f
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/trace_analyze.py::_build_trace_analyze_cmd 24
 cyclomatic-complexity src/hyperloom/orchestrator/enablement/runtime/targeted_build.py::run_aiter_build 23
 cyclomatic-complexity src/hyperloom/orchestrator/kernel/_kernel_decisions.py::untried_hot_reusable_kernels 39
-cyclomatic-complexity src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::_apply_kernel_patch_snapshot 47
-cyclomatic-complexity src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::apply_kernel_patch 28
+cyclomatic-complexity src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::_apply_kernel_patch_snapshot 46
+cyclomatic-complexity src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::apply_kernel_patch 27
 cyclomatic-complexity src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::revert_kernel_patch 35
 cyclomatic-complexity src/hyperloom/orchestrator/kernel/attempt_summary.py::build_kernel_optimization_summary 23
 cyclomatic-complexity src/hyperloom/orchestrator/kernel/conc_sweep.py::_sweep_one_arm_single_server 34
@@ -727,11 +727,11 @@ function-lines src/hyperloom/orchestrator/kernel/_kernel_decisions.py::enqueue_n
 function-lines src/hyperloom/orchestrator/kernel/_kernel_decisions.py::pending_kernel_integration_records 87
 function-lines src/hyperloom/orchestrator/kernel/_kernel_decisions.py::record_kernel_integrate_result 171
 function-lines src/hyperloom/orchestrator/kernel/_kernel_decisions.py::untried_hot_reusable_kernels 162
-function-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::_apply_kernel_patch_snapshot 397
+function-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::_apply_kernel_patch_snapshot 370
 function-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::_detect_strategy 126
 function-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::_invalidate_aiter_cpp_itfs_cache 102
 function-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::_verify_rebuild_imports 81
-function-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::apply_kernel_patch 328
+function-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::apply_kernel_patch 308
 function-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::apply_snapshot 128
 function-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::finalize_kernel_patch 89
 function-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::parse_patch_manifest 93
@@ -1065,7 +1065,7 @@ module-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py 491
 module-lines src/hyperloom/orchestrator/actions/executors/profile.py 1590
 module-lines src/hyperloom/orchestrator/actions/executors/report.py 1399
 module-lines src/hyperloom/orchestrator/actions/executors/roofline.py 1397
-module-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py 2833
+module-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py 2798
 module-lines src/hyperloom/orchestrator/kernel/conc_sweep.py 1429
 module-lines src/hyperloom/orchestrator/kernel/request_handlers.py 5193
 module-lines src/hyperloom/orchestrator/knowledge/recipe_journal.py 1822

@@ -759,6 +759,7 @@ def test_installed_snapshot_can_span_aiter_and_vllm(
         assert len(records) == 2
         assert len({record["backup_path"] for record in records}) == 2
         assert sum((record.get("jit_backup") or {}).get("status") == "clean" for record in records) == 1
+        assert manifest["jit_build_backup"] == {"status": "remote"}
 
 
 @pytest.mark.parametrize("explicit_repo_root", (False, True))
@@ -1020,18 +1021,18 @@ def test_runtime_jit_rejects_unverified_cache_invalidation(
     assert target.read_text(encoding="utf-8") == original
 
 
-def test_multinode_runtime_jit_is_invalidated_on_every_pod(
+@pytest.mark.parametrize("pod_b_jit", ("clean", "skipped"))
+def test_multinode_runtime_jit_must_be_invalidated_on_every_pod(
     tmp_path,
     monkeypatch,
+    pod_b_jit,
 ):
     _venv_root, aiter_pkg = _make_isolated_aiter(tmp_path)
     site = aiter_pkg.parent
     monkeypatch.setattr(akp, "_is_multi_node", lambda: True)
     target = site / "aiter_meta" / "csrc" / "kernels" / "foo.cu"
-    target.write_text(
-        '#include <hip/hip_runtime.h>\nextern "C" void kernel() {}\n',
-        encoding="utf-8",
-    )
+    original = '#include <hip/hip_runtime.h>\nextern "C" void kernel() {}\n'
+    target.write_text(original, encoding="utf-8")
     patch = tmp_path / "v1_forge.cu"
     patch.write_text(
         '#include <hip/hip_runtime.h>\nextern "C" void kernel() { int x = 2; }\n',
@@ -1040,6 +1041,7 @@ def test_multinode_runtime_jit_is_invalidated_on_every_pod(
     local_stale = aiter_pkg / "jit" / "build" / "local.so"
     local_stale.write_text("local", encoding="utf-8")
     captured = {}
+    reverted = []
 
     def _fake_dispatch(**kwargs):
         captured.update(kwargs)
@@ -1051,15 +1053,20 @@ def test_multinode_runtime_jit_is_invalidated_on_every_pod(
                     "target_path": str(target),
                     "backup_path": f"/var/kernel_patch_backups/{host}.bak",
                     "jit_backup": {
-                        "status": "clean",
+                        "status": status,
                         "src": kwargs["jit_build_dir"],
                     },
                 }
-                for host in ("pod-a", "pod-b")
+                for host, status in (("pod-a", "clean"), ("pod-b", pod_b_jit))
             ],
         }
 
+    def _fake_revert(**kwargs):
+        reverted.append(kwargs)
+        return {"status": "ok"}
+
     monkeypatch.setattr(akp, "_dispatch_multinode_apply", _fake_dispatch)
+    monkeypatch.setattr(akp, "_dispatch_multinode_revert", _fake_revert)
 
     result = akp.apply_kernel_patch(
         patch_path=patch,
@@ -1068,11 +1075,19 @@ def test_multinode_runtime_jit_is_invalidated_on_every_pod(
         kernel_id="k-multinode",
     )
 
-    assert result["status"] == "ok", result
     assert captured["jit_build_dir"] == str(aiter_pkg / "jit" / "build")
-    assert result["jit_build_backup"]["status"] == "remote"
-    assert set(result["multinode"]["records_by_host"]) == {"pod-a", "pod-b"}
+    assert result["jit_build_backup"] == {"status": "remote"}
     assert local_stale.is_file()
+    if pod_b_jit == "clean":
+        assert result["status"] == "ok", result
+        assert set(result["multinode"]["records_by_host"]) == {"pod-a", "pod-b"}
+        assert not reverted
+    else:
+        assert result["status"] == "failed", result
+        assert result["error_class"] == "aiter_jit_invalidation_failed"
+        assert "['pod-b']" in result["error"]
+        assert set(reverted[0]["records_by_host"]) == {"pod-a", "pod-b"}
+        assert target.read_text(encoding="utf-8") == original
 
 
 def _make_importable_checkout(tmp_path, monkeypatch):
