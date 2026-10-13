@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Both installers resolve ``python3`` to the image's own Python, ahead of the system bins they prepend."""
+"""install.sh resolves ``python3`` to the image's own Python, and the kernel-agent steps to the one it selected."""
 
 from __future__ import annotations
 
@@ -9,13 +9,10 @@ import os
 import subprocess
 from pathlib import Path
 
-import pytest
 
-_SRC = Path(__file__).resolve().parents[2]
-_INSTALLERS = [
-    _SRC / "inference_optimizer" / "assets" / "install.sh",
-    _SRC / "inference_optimizer" / "assets" / "install_kernel_tools.sh",
-]
+_ASSETS = Path(__file__).resolve().parents[1] / "assets"
+_INSTALL_SH = _ASSETS / "install.sh"
+_KERNEL_TOOLS_SH = _ASSETS / "install_kernel_tools.sh"
 
 
 _PARENT_PYTHON_GUARD = 'if [ -n "${PYTHON:-}" ] && [ -x "$PYTHON" ]; then\n'
@@ -30,45 +27,46 @@ def _venv_loop(installer: Path) -> str:
     return text[start : text.index("\ndone\n", start) + len("\ndone\n")]
 
 
-def _python3_dir(installer: Path, tmp_path: Path, images: list[str], python: str | None = None) -> str:
+def _make_pythons(tmp_path: Path, images: list[str]) -> None:
     for image in images:
         bin_dir = tmp_path / image.lstrip("/")
         bin_dir.mkdir(parents=True, exist_ok=True)
         for name in ("python", "python3"):
             (bin_dir / name).write_text("#!/bin/sh\n", encoding="utf-8")
             (bin_dir / name).chmod(0o755)
-    loop = _venv_loop(installer).replace(" /opt/", f" {tmp_path}/opt/").replace(" /venv/", f" {tmp_path}/venv/")
+
+
+def _python3_dir(tmp_path: Path, images: list[str]) -> str:
+    _make_pythons(tmp_path, images)
+    loop = _venv_loop(_INSTALL_SH).replace(" /opt/", f" {tmp_path}/opt/").replace(" /venv/", f" {tmp_path}/venv/")
     env = {k: v for k, v in os.environ.items() if k not in {"VIRTUAL_ENV", "PYTHON"}}
     env["PATH"] = "/usr/bin:/bin"
-    if python is not None:
-        env["PYTHON"] = python
     script = f'{loop}p=$(command -v python3); printf %s "${{p%/*}}"'
     out = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
     return out.stdout
 
 
-@pytest.mark.parametrize("installer", _INSTALLERS, ids=["inference_optimizer", "kernel_agent"])
-def test_rocm10_image_python_is_put_first(installer: Path, tmp_path: Path) -> None:
-    assert _python3_dir(installer, tmp_path, ["/opt/python/bin"]) == f"{tmp_path}/opt/python/bin"
+def test_rocm10_image_python_is_put_first(tmp_path: Path) -> None:
+    assert _python3_dir(tmp_path, ["/opt/python/bin"]) == f"{tmp_path}/opt/python/bin"
 
 
-@pytest.mark.parametrize("installer", _INSTALLERS, ids=["inference_optimizer", "kernel_agent"])
-def test_opt_venv_still_wins_over_opt_python(installer: Path, tmp_path: Path) -> None:
+def test_opt_venv_still_wins_over_opt_python(tmp_path: Path) -> None:
     images = ["/opt/venv/bin", "/opt/python/bin"]
-    assert _python3_dir(installer, tmp_path, images) == f"{tmp_path}/opt/venv/bin"
+    assert _python3_dir(tmp_path, images) == f"{tmp_path}/opt/venv/bin"
 
 
-@pytest.mark.parametrize("installer", _INSTALLERS, ids=["inference_optimizer", "kernel_agent"])
-def test_no_image_python_leaves_path_unchanged(installer: Path, tmp_path: Path) -> None:
-    assert _python3_dir(installer, tmp_path, []) in {"/usr/bin", "/bin"}
+def test_no_image_python_leaves_path_unchanged(tmp_path: Path) -> None:
+    assert _python3_dir(tmp_path, []) in {"/usr/bin", "/bin"}
 
 
-def test_kernel_agent_keeps_the_parent_selected_python(tmp_path: Path) -> None:
-    images = ["/custom/venv/bin", "/opt/python/bin"]
-    python = f"{tmp_path}/custom/venv/bin/python3"
-    assert _python3_dir(_INSTALLERS[1], tmp_path, images, python) == f"{tmp_path}/custom/venv/bin"
-
-
-def test_kernel_agent_ignores_a_parent_python_that_is_not_executable(tmp_path: Path) -> None:
-    python = f"{tmp_path}/missing/bin/python3"
-    assert _python3_dir(_INSTALLERS[1], tmp_path, ["/opt/python/bin"], python) == f"{tmp_path}/opt/python/bin"
+def test_kernel_agent_steps_keep_the_python_install_sh_selected(tmp_path: Path) -> None:
+    _make_pythons(tmp_path, ["/custom/venv/bin", "/opt/python/bin"])
+    path_line = next(
+        line for line in _KERNEL_TOOLS_SH.read_text(encoding="utf-8").splitlines() if line.startswith("export PATH=")
+    )
+    env = {k: v for k, v in os.environ.items() if k != "VIRTUAL_ENV"}
+    env["PATH"] = f"{tmp_path}/opt/python/bin:/usr/bin:/bin"
+    env["PYTHON"] = f"{tmp_path}/custom/venv/bin/python3"
+    script = f'{path_line}\np=$(command -v python3); printf %s "${{p%/*}}"'
+    out = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
+    assert out.stdout == f"{tmp_path}/custom/venv/bin"

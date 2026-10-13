@@ -210,10 +210,10 @@ export REPO_ROOT="$(pwd -P)"    # workspace holding the hyperloom package
 # Pin the artifact root so the env file below has a known path. Left unset, the
 # CLI picks /workspace/hyperloom when writable and session/ under $PWD otherwise.
 export USER_DATA_PATH="${USER_DATA_PATH:-$REPO_ROOT/session}"
-bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install_kernel_tools.sh"
+bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install.sh"
 ```
 
-`install_kernel_tools.sh` is idempotent. It sets up TraceLens, GEAK, Ray, and writes the
+`install.sh` is idempotent. It sets up TraceLens, GEAK, Ray, and writes the
 env file. Optimizer preflight loads that file in process; do not source it over
 the launching shell's selections. Re-run installation after a venv rebuild or
 when the prepared runtime is no longer valid.
