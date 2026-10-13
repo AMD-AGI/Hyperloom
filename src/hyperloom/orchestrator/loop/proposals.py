@@ -18,7 +18,7 @@ from ..state.task_registry import TERMINAL_STATES
 from ..collaborator import CoordinatorCollaborator
 
 if TYPE_CHECKING:
-    from .coordinator import Coordinator
+    from .coordinator import Coordinator, CoordinatorState
 
 import logging as _logging
 
@@ -38,6 +38,15 @@ class PendingProposal:
     payload: dict[str, Any]
     #: The task this proposal materialized into, once the Critic approved it.
     task_id: str | None = None
+
+
+def integrate_review_in_flight(state: "CoordinatorState", specialist_task_id: str) -> bool:
+    """Whether a synthetic integrate_patch review for this specialist task awaits a ruling."""
+    return any(
+        proposal.action_name == "integrate_patch"
+        and (proposal.payload.get("params") or {}).get("specialist_task_id") == specialist_task_id
+        for proposal in state.pending_proposals.values()
+    )
 
 
 async def record_proposal(
