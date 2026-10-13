@@ -1976,15 +1976,9 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     def _locate_diffusion_roofline_sidecar(self, kernel_roofline_path: Any) -> Path | None:
         """Locate the ``diffusion_roofline.json`` sidecar for the latest trace run.
 
-        The sidecar is written at ``<session_dir>/kernel-agent/runs/<cycle>/<run_id>/diffusion_roofline.json``
-        (see ``tracelens_analysis.py``'s ``_is_scriptable_framework`` block), never directly under
-        ``session_dir`` itself. ``kernel_roofline_path`` is ``<session_dir>/reports/<filename>``
-        (``kernel_roofline_path_for_run``), so two ``.parent``s recovers ``session_dir`` correctly --
-        but a prior version of this method then checked for the sidecar *directly inside* that
-        directory instead of glob-searching the nested ``kernel-agent/runs/`` tree the same way the
-        ``self._session_dir`` branch below does. That candidate could never exist, so every lookup
-        silently fell through to the ``self._session_dir`` branch; both roots are searched the same
-        way here instead.
+        It lives at ``<session_dir>/kernel-agent/runs/<cycle>/<run_id>/diffusion_roofline.json``;
+        ``kernel_roofline_path`` is ``<session_dir>/reports/<filename>``, so two ``.parent``s
+        recovers ``session_dir``.
         """
         # Order matters when the two roots diverge (e.g. a resumed/forked session, or a stale
         # ``self._session_dir`` on a long-lived state object): the artifact-specific root derived

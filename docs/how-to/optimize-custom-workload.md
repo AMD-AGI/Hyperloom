@@ -100,33 +100,22 @@ injected into its environment. It must write an InferenceX-shaped report to
 ### Profiling: where to write the trace
 
 When a `profile` leg runs (roofline, or any round that needs a kernel breakdown),
-your entrypoint is invoked with `PROFILE=1` and a directory variable already
-pointed at a directory Hyperloom created for you:
-
-- `HYPERLOOM_PROFILE_TRACE_DIR` — read this one. It is framework-neutral: your
-  entrypoint need not be vLLM or SGLang to use it.
+your entrypoint is invoked with `PROFILE=1` and a directory variable
+`HYPERLOOM_PROFILE_TRACE_DIR` already pointed at a directory Hyperloom created.
+When `PROFILE=1`, your script must enable its profiler and write its trace into
+that directory.
 
 Two more variables are set to the same path for backward compatibility with
 existing scriptable scripts (xDiT) — `VLLM_TORCH_PROFILER_DIR` and
 `SGLANG_TORCH_PROFILER_DIR` — but a new entrypoint should prefer
 `HYPERLOOM_PROFILE_TRACE_DIR`; the vLLM/SGLang-named pair gives no indication
-that it applies to a `custom` script at all. When `PROFILE=1`, your script must
-enable whatever profiler it uses and write its trace into that directory.
+that it applies to a `custom` script at all.
 
 ```{important}
 If your entrypoint runs under its own environment-isolation wrapper (for
 example `env -i` to strip inherited `PYTHONPATH` or startup hooks), you must
-explicitly forward `HYPERLOOM_PROFILE_TRACE_DIR` (and the legacy pair, if
-anything in your stack still reads those) through it. A wrapper that is not
-updated when profiling support is added will silently drop them, and your
-trace will land wherever your script already writes to by default instead.
+explicitly forward `HYPERLOOM_PROFILE_TRACE_DIR` through it.
 ```
-
-Hyperloom does not search for your trace outside the directory it told you to
-use. If your script writes it elsewhere, every profile attempt in that leg
-exhausts its retries and fails with `no_trace_files` — the roofline/kernel
-breakdown for that leg is simply not produced. There is no silent fallback to
-diagnose around; a missing report means the directory was not honored.
 
 ## The quality gate is mandatory
 
