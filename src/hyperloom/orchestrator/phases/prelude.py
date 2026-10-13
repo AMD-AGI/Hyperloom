@@ -2247,7 +2247,7 @@ class PreludePhase(CoordinatorCollaborator):
             recorder.record_gate(
                 GATE_KEEP_THRESHOLD,
                 passed=reproduced,
-                reason=f"graded on {graded.objective}: {graded.verdict}",
+                reason=f"graded on {graded.objective}: {graded.refused_by or graded.verdict}",
                 observed=measured_gain,
                 threshold=keep_threshold,
             )
@@ -2463,7 +2463,9 @@ class PreludePhase(CoordinatorCollaborator):
             task,
             outcome,
             recorder,
-            reason=graded.veto_reason or f"measured {measured_gain:+.2f}% below keep threshold {keep_threshold:+.2f}%",
+            reason=graded.veto_reason
+            or graded.refused_by
+            or f"measured {measured_gain:+.2f}% below keep threshold {keep_threshold:+.2f}%",
         )
 
     def _reject_warm_replay_as_drift(

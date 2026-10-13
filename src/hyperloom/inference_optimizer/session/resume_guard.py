@@ -354,7 +354,7 @@ def _confirm_task_stopped_in_transaction(
     history = _confirmable_history(task)
     leases, gpu_leases = _target_leases(db, tables, task_id)
 
-    result = dict(status="nothing_to_confirm", task_id=task_id, released_leases=0, released_gpu_leases=0)
+    result = {"status": "nothing_to_confirm", "task_id": task_id, "released_leases": 0, "released_gpu_leases": 0}
     manual_index = _prior_confirmation_index(history)
     if manual_index is not None:
         _check_prior_confirmation_still_holds(

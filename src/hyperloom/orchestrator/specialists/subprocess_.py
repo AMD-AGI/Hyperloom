@@ -358,8 +358,7 @@ def _codex_mcp_config(
                 if (
                     key in _CODEX_MCP_RESERVED_ENV_NAMES
                     or key in protected_env_names
-                    or key.startswith(_CODEX_PROVIDER_ENV_PREFIX)
-                    or key.startswith(_CODEX_MCP_ENV_PREFIX)
+                    or key.startswith((_CODEX_PROVIDER_ENV_PREFIX, _CODEX_MCP_ENV_PREFIX))
                 ):
                     raise SpecialistAgentUnavailableError(
                         f"Codex MCP server {name!r} env key {key!r} is reserved "

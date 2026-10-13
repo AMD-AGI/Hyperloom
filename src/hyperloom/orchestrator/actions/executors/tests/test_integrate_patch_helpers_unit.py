@@ -264,7 +264,7 @@ def test_resolve_framework_root_ignores_a_repository_that_does_not_track_the_pac
 
 
 def test_resolve_framework_root_none(monkeypatch):
-    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [])
+    monkeypatch.setattr(ip, "resolve_kernel_search_roots", list)
     monkeypatch.setattr(ip, "resolve_session_framework_root", lambda: "")
     assert ip._resolve_framework_root(None) is None
 

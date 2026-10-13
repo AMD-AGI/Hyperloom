@@ -17,9 +17,7 @@ from hyperloom.orchestrator.phases import kernel as kernel_phase
 _TOOL_MODULES = (
     trace_analyze._TRACELENS_ANALYSIS_MODULE,
     trace_analyze._BYPASS_TRACE_ANALYSIS_MODULE,
-    request_handlers._FORGE_GEMM_TUNING_MODULE,
     request_handlers._GEMM_TUNING_MODULE,
-    request_handlers._FORGE_FUSION_MODULE,
     kernel_phase._GEAK_RUNNER_MODULE,
 )
 
