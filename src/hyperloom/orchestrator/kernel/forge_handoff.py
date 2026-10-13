@@ -20,6 +20,7 @@ from hyperloom.orchestrator.kernel.gemm_shape_coverage import parse_aiter_shape_
 from hyperloom.orchestrator.measurement.jit_variants import render_jit_variants, variant_counts
 from kernelforge.foldable_launches import foldable_launches, render_foldable_launches
 from kernelforge.graph_coverage import graph_coverage, render_graph_coverage
+from kernelforge.trace_events import resolve_capture
 from kernelforge.serving_windows import hot_kernels_by_class, render_hot_kernels_by_class
 from hyperloom.orchestrator.measurement.runtime_findings import (
     AITER_TUNED_MISS,
@@ -224,7 +225,7 @@ def build_trace_evidence_md(state: Any, *, session_dir: Path | None = None) -> s
     lines.extend(["```text", *_tuned_miss_lines(candidates_path, profiled), "```"])
     lines.extend(["", "## Recompiled Kernels", ""])
     lines.extend(_jit_variant_lines(session_dir))
-    capture = _resolve_capture(getattr(state, "last_profile_trace", ""))
+    capture = resolve_capture(getattr(state, "last_profile_trace", ""))
     lines.extend(["", "## Hot Kernels by Step Class", ""])
     lines.extend(_hot_kernel_lines(capture))
     lines.extend(["", "## Launch-Bound Kernels", ""])
@@ -244,17 +245,6 @@ def _foldable_lines(capture: str) -> list[str]:
     """Kernels costing a launch rather than their work, with the neighbour each could fold into."""
     rendered = render_foldable_launches(foldable_launches(capture))
     return rendered or ["- no launch-bound kernel crossed the reporting floor in any step class"]
-
-
-def _resolve_capture(trace: Any) -> str:
-    """The trace file to rank, from a path that may name the capture directory instead."""
-    path = Path(str(trace or "").strip() or ".")
-    if path.is_file():
-        return str(path)
-    if not path.is_dir():
-        return ""
-    captures = sorted(path.glob("*.trace.json*"), key=lambda p: p.stat().st_mtime)
-    return str(captures[-1]) if captures else ""
 
 
 def _hot_kernel_lines(capture: str) -> list[str]:
