@@ -45,8 +45,11 @@ class SessionView(Protocol):
     specialist_rounds: list[dict[str, Any]]
     predictor_asked_keys: list[str]
 
-    def record_specialist_round(self, entry: dict[str, Any]) -> dict[str, Any] | None: ...
+    def record_specialist_round(self, entry: dict[str, Any]) -> dict[str, Any] | None:
+        """Append one round to ``specialist_rounds``, stamping ``completed_at``; returns the stored row."""
 
-    def benched_fingerprints(self) -> set[str]: ...
+    def benched_fingerprints(self) -> set[str]:
+        """Content fingerprints of every variant an explore round has benched."""
 
-    def untested_proposal_rows(self) -> list[dict[str, Any]]: ...
+    def untested_proposal_rows(self) -> list[dict[str, Any]]:
+        """Executable proposals from this cycle that no explore round has benched, in queue order."""
