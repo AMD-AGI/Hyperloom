@@ -867,6 +867,29 @@ def _forge_fusion_timeout_sec(payload: dict, *, lane_budget_sec: int = 0) -> int
     return max(1, value)
 
 
+def _lane_underfunded(engine: str, lane: str, budget_sec: int) -> dict[str, Any]:
+    """Decline a lane whose share cannot pay for one target.
+
+    A lane that starts anyway is reaped part-way: it spends the budget, writes no artifact, and reports a failure
+    that reads like the work was impossible rather than unfunded. One GLM-5.3 session dispatched forge-fusion with
+    223 s left against a 31 MB trace and an LLM discovery pass, three minutes before it closed, and the run
+    directory holds only the input it was given.
+    """
+    return {
+        "status": "skipped",
+        "backend": "forge",
+        "engine": engine,
+        "error_class": "lane_underfunded",
+        "error": (
+            f"{lane} lane share of {budget_sec}s pays for no target; declining rather than starting work this "
+            "phase cannot finish (pass an explicit timeout to override)"
+        ),
+        "decision": "REVERT",
+        "kept": False,
+        "lane_budget_sec": budget_sec,
+    }
+
+
 def _positive_int(value: object) -> int:
     try:
         parsed = int(value)  # type: ignore[arg-type]
@@ -3309,6 +3332,10 @@ async def _run_forge_gemm_tuning(
         LANE_GEMM,
         gemm_target_costs_sec=tuple(cost for _, cost in gemm_targets),
     )
+    # A derived share too small for one tuner used to fall back to the module default here, which ran the lane past
+    # the phase that could not pay for it; only an operator timeout or a named tuner still overrides the decline.
+    if gemm_lane.is_underfunded and not (payload.get("timeout_sec") or str(payload.get("tuner") or "").strip()):
+        return _lane_underfunded("forge_gemm_tune", LANE_GEMM, gemm_lane.budget_sec)
     timeout = _gemm_tuning_timeout_sec(
         payload,
         lane_budget_sec=gemm_lane.budget_sec if gemm_lane.is_fundable else 0,
@@ -4014,6 +4041,9 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
     # The lane's share of the phase; a zero share means none could be derived, and
     # the module default is safer for an unattended lane than a one-second session.
     fusion_lane = _lane_budget(state, LANE_FUSION)
+    operator_timeout = bool(payload.get("timeout") or payload.get("timeout_sec"))
+    if fusion_lane.is_underfunded and not operator_timeout:
+        return _lane_underfunded("forge_fusion", LANE_FUSION, fusion_lane.budget_sec)
     timeout = _forge_fusion_timeout_sec(payload, lane_budget_sec=fusion_lane.budget_sec)
     try:
         requested_recipes = int(payload.get("max_recipes") or 0)
