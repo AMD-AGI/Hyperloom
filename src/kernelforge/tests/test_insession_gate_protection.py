@@ -69,6 +69,44 @@ def test_declared_source_hint_cannot_override_protection(tmp_path: Path):
     assert gate._is_protected(str(config))
 
 
+def test_a_kernel_colocated_with_its_tests_stays_editable(tmp_path: Path):
+    """A declared test_*.py target is the kernel; a sibling test file is still the harness."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    driver = workspace / "forge_driver.py"
+    driver.write_text("print('driver')\n")
+    target = workspace / "test_flashattention_fwd.py"
+    target.write_text(
+        "def flash_fwd_kernel():\n    return 1\n\n\ndef test_fwd():\n    assert flash_fwd_kernel() == 1\n"
+    )
+    sibling = workspace / "test_other.py"
+    sibling.write_text("assert True\n")
+    subprocess.run(["git", "init", "-q"], cwd=workspace, check=True, capture_output=True)
+    subprocess.run(["git", "add", "-A"], cwd=workspace, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "base"],
+        cwd=workspace,
+        check=True,
+        capture_output=True,
+    )
+    gate = InSessionGate(
+        driver_script=str(driver),
+        snr_threshold=30.0,
+        baseline_case_times={"case": 1.0},
+        best_mean_case_speedup=1.0,
+        kernel_file=str(target),
+        target_files=[str(target)],
+    )
+
+    assert not gate._is_protected(str(target))
+    assert gate._is_protected(str(sibling))
+    assert {path.name for path in gate._iter_snapshot_paths()} == {"forge_driver.py", "test_other.py"}
+    edit = {"tool_name": "Edit", "tool_input": {"file_path": str(target)}}
+    assert asyncio.run(gate._on_pre_edit(edit, None, None)) == {}
+    denied = asyncio.run(gate._on_pre_edit({**edit, "tool_input": {"file_path": str(sibling)}}, None, None))
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
 def test_non_target_implementation_edits_are_counted(tmp_path: Path):
     gate, workspace = _gate(tmp_path)
 
