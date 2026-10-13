@@ -22,6 +22,23 @@ import pytest
 from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
 
+@pytest.fixture(autouse=True, scope="module")
+def _ray_modules_restored():
+    """Put the real ``ray`` entries back in ``sys.modules`` when this module is done.
+
+    The stub below is installed with a bare assignment, not monkeypatch, because
+    it has to survive the ``exec`` of a bundled script. Left behind, it answers a
+    later test's ``from ray.exceptions import ...`` with "'ray' is not a package"
+    -- which test lands in the same shard is a sharding detail, so the leak shows
+    up as an unrelated test failing on some branches and not others.
+    """
+    saved = {name: module for name, module in sys.modules.items() if name == "ray" or name.startswith("ray.")}
+    yield
+    for name in [name for name in sys.modules if name == "ray" or name.startswith("ray.")]:
+        del sys.modules[name]
+    sys.modules.update(saved)
+
+
 def _install_min_ray_stub() -> None:
     """Minimal ``ray`` package graph so script modules can import."""
     if "ray" in sys.modules:
