@@ -30,7 +30,7 @@ from ..actions.executors._subprocess_kill import (
     STOP_GATE_POLL_SECONDS,
     TERM_GRACE_SECONDS,
 )
-from ..phases import machine_state as _phase_state
+from ..phases import dispatch_order, machine_state as _phase_state
 from ..bus.message_bus import Message
 from ..kernel.request_handlers import get_handler
 from ..policy.gate import (
@@ -545,14 +545,11 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         :meth:`reap_dispatched_task`. Applies the capacity /
         GPU-specialist-lease gating; each lease is bound to its task_id.
         Tasks already in ``_inflight_actions`` are skipped so a task is never
-        dispatched twice across pump calls. Queued tasks are visited
-        oldest-first, after the kinds the current phase dispatches first.
+        dispatched twice across pump calls.
         """
-        queued = await self.tasks.queued()
+        queued = dispatch_order.in_dispatch_order(await self.tasks.queued(), self.shared_state.phase)
         if not queued:
             return
-        phase = self.shared_state.phase
-        queued.sort(key=lambda task: not _phase_state.dispatch_first_in_phase(task.kind, phase))
         holders = await self.locks.lane_holders()
         capacities = await self.locks.lane_capacities()
         # Serving priority: pre-compute whether serving-priority is enabled

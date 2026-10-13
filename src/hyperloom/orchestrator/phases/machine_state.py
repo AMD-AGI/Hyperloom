@@ -149,20 +149,6 @@ def coordinator_reserved_in_phase(action_name: str, phase: str) -> bool:
     return (action_name or "").strip() in reserved
 
 
-# Kinds a phase dispatches ahead of the rest of its queue. In FRAMEWORK_AGENT a reviewed patch and a configuration
-# grid hold the same serving lanes for a whole round: a grid can be proposed again, but a patch still queued when the
-# phase exits is cancelled unmeasured.
-PHASE_DISPATCH_FIRST: dict[str, frozenset[str]] = {
-    PHASE_FRAMEWORK_AGENT: frozenset({"integrate_patch"}),
-}
-
-
-def dispatch_first_in_phase(action_name: str, phase: str) -> bool:
-    """Return True iff ``phase`` dispatches ``action_name`` ahead of its other queued work."""
-    first = PHASE_DISPATCH_FIRST.get((phase or "").strip().upper(), frozenset())
-    return (action_name or "").strip() in first
-
-
 def allowed_actions_for(phase: str) -> tuple[str, ...]:
     """Return the phase's LLM-proposable actions as a sorted tuple (deterministic)."""
     key = (phase or "").strip().upper()
