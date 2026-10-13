@@ -1110,28 +1110,23 @@ class RooflineExecutor:
 
         Fail-soft: whatever goes wrong, the original analysis stands.
         """
-        from ._multi_node_server_lifecycle import _COMPUTE_BOUND_PROFILE_ENV
+        from ._multi_node_server_lifecycle import _COMPUTE_BOUND_PROFILE_ENV, _scoped_env
 
         log.info(
             "roofline: host-bound trace (0 hot kernels + high GPU idle); "
             "attempting one compute-bound re-profile (DP-attention stripped)"
         )
-        previous = os.environ.get(_COMPUTE_BOUND_PROFILE_ENV)
-        os.environ[_COMPUTE_BOUND_PROFILE_ENV] = "1"
         adopted: _AnalysedProfile | None = None
         outcome = "re-profile produced no usable trace"
-        try:
-            adopted, outcome = await self._compute_bound_attempt(ctx, recorder, arm, analysis.payload)
-        except Exception as exc:  # noqa: BLE001 — fail-soft
-            outcome = f"re-profile raised: {exc!r}"
-            log.warning("roofline: compute-bound re-profile failed (%s); keeping original", exc)
-        finally:
-            if recorder is not None:
-                recorder.record_compute_bound_reprofile(attempted=True, adopted=adopted is not None, reason=outcome)
-            if previous is None:
-                os.environ.pop(_COMPUTE_BOUND_PROFILE_ENV, None)
-            else:
-                os.environ[_COMPUTE_BOUND_PROFILE_ENV] = previous
+        with _scoped_env({_COMPUTE_BOUND_PROFILE_ENV: "1"}):
+            try:
+                adopted, outcome = await self._compute_bound_attempt(ctx, recorder, arm, analysis.payload)
+            except Exception as exc:  # noqa: BLE001 — fail-soft
+                outcome = f"re-profile raised: {exc!r}"
+                log.warning("roofline: compute-bound re-profile failed (%s); keeping original", exc)
+            finally:
+                if recorder is not None:
+                    recorder.record_compute_bound_reprofile(attempted=True, adopted=adopted is not None, reason=outcome)
         return adopted
 
     async def _compute_bound_attempt(
