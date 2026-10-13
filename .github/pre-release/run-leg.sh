@@ -44,6 +44,10 @@
 #   that key on it),
 #   HYPERLOOM_KB_HOME (default: the leg workspace's experience-kb/, so legs sharing a
 #   session root do not contend for one Experience KB home, which serves one service),
+#   LEG_PATH_PREFIX (prepended to PATH before anything runs: the directories the
+#   image's own PATH puts first, e.g. its venv's bin, for a scheduler whose
+#   container env replaces the image's PATH; without them `python3` can be a system
+#   interpreter with no framework and the image's ROCm toolchain is not found),
 #   HF_TOKEN, ANTHROPIC_CUSTOM_HEADERS (a gateway that needs a header gets it from
 #   the caller; none is assumed), INFERENCE_OPTIMIZER_SESSION_LAYOUT,
 #   GEAK_CLAUDE_MODEL, FORGE_CLAUDE_MODEL, OPENAI_BASE_URL, OPENAI_API_KEY,
@@ -404,8 +408,10 @@ main() {
   SESSION_UUID="$(leg_session_uuid "$LEG" "$CI_VERSION")"
   trap scrub_dotenv EXIT
 
+  if [ -n "${LEG_PATH_PREFIX:-}" ]; then export PATH="${LEG_PATH_PREFIX}:${PATH}"; fi
   log "leg=$LEG scenario=$SCENARIO backend=$BACKEND forge=$FORGE hours=$HOURS model=$MODEL_PATH"
   log "workspace=$ROOT user_data_path=$USER_DATA_PATH claw_session=$([ -n "${CLAW_SESSION_ID:-}" ] && echo set || echo unset) hf_token=$([ -n "${HF_TOKEN:-}" ] && echo set || echo unset)"
+  log "python3=$(command -v python3 || echo none)$([ -n "${LEG_PATH_PREFIX:-}" ] && echo " path_prefix=$LEG_PATH_PREFIX")"
   log "setup_prompt=${SETUP_PROMPT#"$SRC_DIR"/} demo_prompt=${DEMO_PROMPT#"$SRC_DIR"/}"
 
   ensure_claude_cli

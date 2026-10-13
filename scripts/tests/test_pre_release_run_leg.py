@@ -14,6 +14,7 @@ import os
 import re
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -307,6 +308,24 @@ def test_the_demo_launches_with_the_interpreter_setup_installed_into(leg_env: di
     setup_turn, demo_turn = pythons.splitlines()
     assert setup_turn != f"{venv}/bin/python3"
     assert demo_turn == f"{venv}/bin/python3"
+
+
+def test_path_prefix_puts_the_images_interpreter_first_for_every_turn(leg_env: dict[str, str], tmp_path: Path) -> None:
+    # A scheduler that replaces the image's PATH leaves `python3` resolving to a system
+    # interpreter; the caller hands back the image's leading PATH entries.
+    image_bin = tmp_path / "image-venv/bin"
+    image_bin.mkdir(parents=True)
+    # The runner reads JSON with python3 itself, so the image's interpreter must work.
+    _exe(image_bin / "python3", f'#!/bin/sh\nexec {sys.executable} "$@"\n')
+    result = _run(["docker-atom-3h"], {**leg_env, "LEG_PATH_PREFIX": str(image_bin)})
+    assert result.returncode == 0, result.stdout + result.stderr
+    pythons = (Path(leg_env["LEG_WORK_DIR"]) / "attempt-1/docker-atom-3h/pythons.log").read_text(encoding="utf-8")
+    assert pythons.splitlines() == [f"{image_bin}/python3", f"{image_bin}/python3"]
+    assert f"python3={image_bin}/python3 path_prefix={image_bin}" in result.stdout
+    unset = _run(["docker-atom-3h"], {**leg_env, "CI_VERSION": "attempt-2"})
+    assert unset.returncode == 0, unset.stdout + unset.stderr
+    pythons = (Path(leg_env["LEG_WORK_DIR"]) / "attempt-2/docker-atom-3h/pythons.log").read_text(encoding="utf-8")
+    assert f"{image_bin}/python3" not in pythons
 
 
 def test_runner_success_set_matches_the_optimizer() -> None:
