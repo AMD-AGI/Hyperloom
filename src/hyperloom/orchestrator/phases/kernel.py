@@ -2413,7 +2413,7 @@ class KernelPhase(CoordinatorCollaborator):
                 stages_reached=result.get("stages_reached"),
                 search_termination=result.get("search_termination"),
             )
-        except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
+        except Exception:  # observability cannot change kernel behavior
             log.debug("kernel timeline: GEAK delegation record failed", exc_info=True)
 
     def _record_geak_kernel_journey(self, result: dict[str, Any]) -> None:
