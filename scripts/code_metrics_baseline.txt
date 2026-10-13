@@ -304,8 +304,8 @@ cognitive-complexity src/kernelforge/loop/runner.py::IterationLoop._plan_resume_
 cognitive-complexity src/kernelforge/loop/runner.py::IterationLoop._record_iteration_outcome 40
 cognitive-complexity src/kernelforge/loop/runner.py::IterationLoop._run_locked 500
 cognitive-complexity src/kernelforge/loop/runner.py::IterationLoop.run_one_iteration 39
-cognitive-complexity src/kernelforge/loop/task_preparer.py::_preflight_async 41
-cognitive-complexity src/kernelforge/loop/task_preparer.py::_read_graph_probe_shards 81
+cognitive-complexity src/kernelforge/loop/task_preflight.py::_preflight_async 41
+cognitive-complexity src/kernelforge/loop/task_preflight.py::_read_graph_probe_shards 81
 cognitive-complexity src/kernelforge/loop/task_preparer.py::prepare_task 166
 cognitive-complexity src/kernelforge/mcp_server/probe_stdio_server.py::probe_variant 34
 cognitive-complexity src/kernelforge/mcp_server/tools/bench.py::aggregate_benchmark_measurements 38
@@ -440,7 +440,7 @@ cyclomatic-complexity src/kernelforge/loop/knowledge_integration.py::kb_warmstar
 cyclomatic-complexity src/kernelforge/loop/lessons.py::scan_constant_values 27
 cyclomatic-complexity src/kernelforge/loop/runner.py::IterationLoop._plan_resume_recovery 23
 cyclomatic-complexity src/kernelforge/loop/runner.py::IterationLoop._run_locked 146
-cyclomatic-complexity src/kernelforge/loop/task_preparer.py::_read_graph_probe_shards 29
+cyclomatic-complexity src/kernelforge/loop/task_preflight.py::_read_graph_probe_shards 29
 cyclomatic-complexity src/kernelforge/loop/task_preparer.py::prepare_task 80
 cyclomatic-complexity src/kernelforge/orchestrator/agent.py::make_agent_fn 52
 cyclomatic-complexity src/kernelforge/orchestrator/agent.py::make_agent_fn.agent_fn 43
@@ -1012,9 +1012,9 @@ function-lines src/kernelforge/loop/runner.py::IterationLoop._record_lesson 125
 function-lines src/kernelforge/loop/runner.py::IterationLoop._resolve_keep_sigma 98
 function-lines src/kernelforge/loop/runner.py::IterationLoop._run_locked 1380
 function-lines src/kernelforge/loop/runner.py::IterationLoop.run_one_iteration 208
-function-lines src/kernelforge/loop/task_preparer.py::_count_graph_replays 85
-function-lines src/kernelforge/loop/task_preparer.py::_preflight_async 195
-function-lines src/kernelforge/loop/task_preparer.py::_read_graph_probe_shards 144
+function-lines src/kernelforge/loop/task_preflight.py::_count_graph_replays 85
+function-lines src/kernelforge/loop/task_preflight.py::_preflight_async 195
+function-lines src/kernelforge/loop/task_preflight.py::_read_graph_probe_shards 144
 function-lines src/kernelforge/loop/task_preparer.py::prepare_task 518
 function-lines src/kernelforge/loop/task_preparer.py::prepare_task._finish_success 130
 function-lines src/kernelforge/mcp_server/probe_stdio_server.py::probe_variant 247
@@ -1099,7 +1099,7 @@ module-lines src/kernelforge/gemm_tune/tuners/_aiter_dense_common.py 1399
 module-lines src/kernelforge/loop/insession_gate.py 1218
 module-lines src/kernelforge/loop/knowledge_integration.py 1457
 module-lines src/kernelforge/loop/runner.py 6051
-module-lines src/kernelforge/loop/task_preparer.py 2531
+module-lines src/kernelforge/loop/task_preparer.py 1299
 module-lines src/kernelforge/orchestrator/analysis.py 2105
 module-lines src/kernelforge/orchestrator/orchestration.py 1960
 nested-blocks src/hyperloom/inference_optimizer/assets/agentx/aiperf_phase_gate.py::_read_trace_metadata 6
