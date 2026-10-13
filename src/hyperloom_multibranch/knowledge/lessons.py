@@ -43,8 +43,12 @@ class Lesson:
     request_id: str
     direction: str
     parent_commit: str
-    text: str
+    outcome: str
     gain_pct: float | None = None
+
+    @property
+    def text(self) -> str:
+        return f"{self.direction} on {self.parent_commit}: {self.outcome}"
 
 
 @dataclass(frozen=True)
@@ -76,10 +80,9 @@ def lesson_of(record: TestRecord, snapshot: NotebookSnapshot) -> Lesson | None:
     """The lesson of one finished test; ``None`` while it is in flight or when it improved without a commit."""
 
     what = direction(record, snapshot)
-    parent = record.request.parent_commit
 
     def lesson(kind: LessonKind, outcome: str, gain_pct: float | None = None) -> Lesson:
-        return Lesson(kind, record.request_id, what, parent, f"{what} on {parent}: {outcome}", gain_pct)
+        return Lesson(kind, record.request_id, what, record.request.parent_commit, outcome, gain_pct)
 
     if record.result is not None and record.result.validity is Validity.CANDIDATE_FAILURE:
         return lesson(LessonKind.PITFALL, f"the candidate failed ({record.result.failure_reason or 'no reason'})")
