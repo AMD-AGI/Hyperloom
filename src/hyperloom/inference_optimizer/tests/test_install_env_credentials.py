@@ -7,11 +7,12 @@
 from __future__ import annotations
 
 import os
-import re
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+
+from ._kernel_tools_harness import sourceable_kernel_tools
 
 
 INSTALL_SCRIPT = Path(__file__).resolve().parents[1] / "assets" / "install_kernel_tools.sh"
@@ -43,21 +44,12 @@ def _controlled_env() -> dict[str, str]:
     return {k: v for k, v in os.environ.items() if k not in _CONTROLLED_ENV_NAMES}
 
 
-def _sourceable_installer(dest_dir: Path) -> Path:
-    """Write a copy of install.sh with the top-level ``main \"$@\"`` call removed."""
-    text = INSTALL_SCRIPT.read_text(encoding="utf-8")
-    patched = re.sub(r"(?m)^main \"\$@\"\s*$", "", text)
-    copy = dest_dir / "install_sourceable.sh"
-    copy.write_text(patched, encoding="utf-8")
-    return copy
-
-
 class KernelAgentEnvCredentialPrecedenceTest(unittest.TestCase):
     """``kernel-agent.env.sh`` must not outrank a rotated ``.env`` credential."""
 
     def _write_env_file(self, workdir: Path, repo_root: Path) -> Path:
         """Generate ``kernel-agent.env.sh`` with the install-time credentials."""
-        sourceable = _sourceable_installer(workdir)
+        sourceable = sourceable_kernel_tools(workdir)
         kernel_agent_env = workdir / "runtime" / "kernel-agent.env.sh"
         # GEAK_ROOT preset: an unset one makes the installer resolve GEAK_REF through ``git ls-remote``, which would
         # put this test on the network.

@@ -104,7 +104,7 @@ def test_span_records_failure_and_cancellation(tmp_path):
                 raise RuntimeError("boom")
         with pytest.raises(asyncio.CancelledError):
             with tt.trajectory_span(tt.EVENT_SESSION):
-                raise asyncio.CancelledError()
+                raise asyncio.CancelledError
     closed = [r for r in _rows(tmp_path) if r["status"] in tt.TERMINAL_STATUSES]
     assert [r["status"] for r in closed] == [tt.STATUS_FAILED, tt.STATUS_CANCELLED]
     assert closed[0]["attributes"] == {"error_type": "RuntimeError", "error_message": "boom"}

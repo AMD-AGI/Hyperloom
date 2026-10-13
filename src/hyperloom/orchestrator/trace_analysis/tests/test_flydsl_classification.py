@@ -341,7 +341,6 @@ class TestFlyDSLKernelParams(unittest.TestCase):
             framework="sglang",
             model_name="",
             analysis_mode="inference",
-            runtime_env="local",
             target_platform="mi355x",
         )
         flydsl_cand = {

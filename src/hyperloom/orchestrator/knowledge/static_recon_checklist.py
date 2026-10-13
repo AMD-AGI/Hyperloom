@@ -189,7 +189,7 @@ def _matches(entry_val: str, run_val: str) -> bool:
 def _gpu_family(gpu_type: str) -> str:
     """Map a GPU type label to a coarse family token used by ``applies_when``."""
     g = (gpu_type or "").strip().lower()
-    if g.startswith("mi") or g.startswith("gfx") or "rocm" in g or "amd" in g:
+    if g.startswith(("mi", "gfx")) or "rocm" in g or "amd" in g:
         return "rocm"
     return g
 

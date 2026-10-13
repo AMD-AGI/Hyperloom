@@ -257,13 +257,7 @@ def _blank_spans(text: str, spans: Sequence[tuple[int, int]]) -> str:
 def _is_disposable_redirect_target(raw: str) -> bool:
     """Whether a redirect destination is a scratch sink that no protected file can hide behind."""
     target = raw.strip().strip("'\"")
-    return (
-        not target
-        or target == "/dev/null"
-        or target.startswith("/tmp/")
-        or target.startswith("$tmp")
-        or target.startswith("${tmp")
-    )
+    return not target or target == "/dev/null" or target.startswith(("/tmp/", "$tmp", "${tmp"))
 
 
 # Max times the Stop hook will BLOCK a stop for an unrestored protected-harness change before it gives up, allows the

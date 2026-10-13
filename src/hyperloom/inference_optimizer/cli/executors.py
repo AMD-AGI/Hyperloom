@@ -115,7 +115,7 @@ def _build_specialist_executor(
         if not claude_bin:
             raise RuntimeError(
                 "specialists run on the claude CLI, but none was found in $HYPERLOOM_CLAUDE_CLI_PATH, "
-                "$GEAK_CLAUDE_BIN or on PATH. src/hyperloom/inference_optimizer/assets/install_kernel_tools.sh puts it on PATH."
+                "$GEAK_CLAUDE_BIN or on PATH. src/hyperloom/inference_optimizer/assets/install.sh puts it on PATH."
             )
 
     # Operator --specialist-mcp-config wins; else auto-generate one from the

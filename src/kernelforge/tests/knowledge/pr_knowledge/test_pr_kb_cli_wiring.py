@@ -161,7 +161,7 @@ def test_loop_appends_the_event_only_after_the_campaign_guard():
     """Append the event only after campaign initialization."""
     from kernelforge.loop.runner import IterationConfig, IterationLoop
 
-    assert "pr_kb_event" in {f for f in IterationConfig.__dataclass_fields__}
+    assert "pr_kb_event" in set(IterationConfig.__dataclass_fields__)
     assert "already contains a campaign" in inspect.getsource(IterationLoop._restore_or_begin_campaign)
     assert "pr_refs_refreshed" in inspect.getsource(IterationLoop._persist_pr_knowledge)
     source = inspect.getsource(IterationLoop._run_locked)

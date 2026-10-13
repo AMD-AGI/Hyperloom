@@ -142,7 +142,7 @@ def test_a_degraded_agentx_lift_is_refused(session_dir, monkeypatch):
 
 
 def test_an_agentx_lift_refuses_a_winner_missing_comparability_axes(session_dir, monkeypatch):
-    """Explore KEEP that omits duration/error_rate must not promote: rounds_are_comparable fails closed."""
+    """Explore KEEP that omits duration/error_rate must not promote: incomparability_reason fails closed."""
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     with session_scope(session_dir):
         coord = _coord(session_dir, baseline=1000.0, anchor=1000.0)

@@ -2346,7 +2346,7 @@ def test_close_neither_rebenches_nor_profiles_a_tree_it_refused_to_trust():
 
     async def _enqueue(**_kw):
         seen.append("enqueued")
-        return None
+        return
 
     phase = close_phase.ClosePhase.__new__(close_phase.ClosePhase)
     object.__setattr__(

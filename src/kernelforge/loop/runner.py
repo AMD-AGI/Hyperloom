@@ -4156,7 +4156,7 @@ class IterationLoop(AnalysisRuntimeMixin):
 
         duration = time.time() - iter_start
 
-        result = IterationResult(
+        return IterationResult(
             iteration=iteration,
             duration_sec=duration,
             validation_passed=True,
@@ -4171,8 +4171,6 @@ class IterationLoop(AnalysisRuntimeMixin):
             pmc_full=pmc_full,
             error_output=bench_error_output,
         )
-
-        return result
 
     def _update_search_policy(self, iteration: int) -> SearchPolicyDecision:
         """Derive and persist the search mode before planning an iteration."""
@@ -6117,7 +6115,7 @@ class IterationLoop(AnalysisRuntimeMixin):
         import functools
 
         global print
-        print = functools.partial(print, flush=True)
+        print = functools.partial(print, flush=True)  # noqa: A001 - deliberate flush-on-print rebind
 
         self.start_time = time.time()
         self.results = []

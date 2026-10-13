@@ -1,28 +1,13 @@
-#!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Run the forge GEMM tuner as a Hyperloom kernel-agent tool."""
+"""The ``kernelforge gemm-tune run`` command line for a Hyperloom GEMM tuning request."""
 
 from __future__ import annotations
 
-import argparse
-import json
 import os
-import subprocess
 import sys
-from pathlib import Path
 from typing import Any
-
-
-def _load_input_json(path: str) -> dict[str, Any]:
-    if not path:
-        return {}
-    p = Path(path)
-    data = json.loads(p.read_text(encoding="utf-8", errors="replace"))
-    if not isinstance(data, dict):
-        raise ValueError(f"--input-json must contain a JSON object: {p}")
-    return data
 
 
 def _add_opt(cmd: list[str], args: dict[str, Any], key: str, flag: str, *, required: bool = False) -> None:
@@ -34,7 +19,8 @@ def _add_opt(cmd: list[str], args: dict[str, Any], key: str, flag: str, *, requi
     cmd.extend([flag, str(val)])
 
 
-def _build_cmd(args: dict[str, Any]) -> list[str]:
+def build_command(args: dict[str, Any]) -> list[str]:
+    """Return the gemm-tune argv for ``args``; raises ``ValueError`` when a required field is missing."""
     cmd = [sys.executable, "-m", "kernelforge.cli", "gemm-tune", "run"]
     _add_opt(cmd, args, "model_path", "--model-path", required=True)
     _add_opt(cmd, args, "framework", "--framework", required=True)
@@ -85,41 +71,3 @@ def _add_kb_opts(cmd: list[str], args: dict[str, Any]) -> None:
     cur_lib = str(cur_lib).strip()
     if cur_lib:
         cmd.extend(["--kb-current-lib", cur_lib])
-
-
-def _parse_args(argv: list[str]) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Hyperloom wrapper for kernelforge gemm-tune")
-    p.add_argument("--input-json", required=True)
-    return p.parse_args(argv)
-
-
-def main(argv: list[str] | None = None) -> int:
-    try:
-        args = _parse_args(list(argv or sys.argv[1:]))
-        payload = _load_input_json(args.input_json)
-        cmd = _build_cmd(payload)
-    except Exception as exc:  # noqa: BLE001 - structured wrapper failure
-        print(
-            json.dumps(
-                {
-                    "status": "failed",
-                    "micro_decision": "failed",
-                    "error_class": exc.__class__.__name__,
-                    "error": repr(exc),
-                },
-                sort_keys=True,
-            ),
-            flush=True,
-        )
-        return 2
-
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.stdout:
-        sys.stdout.write(proc.stdout)
-    if proc.stderr:
-        sys.stderr.write(proc.stderr)
-    return int(proc.returncode)
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

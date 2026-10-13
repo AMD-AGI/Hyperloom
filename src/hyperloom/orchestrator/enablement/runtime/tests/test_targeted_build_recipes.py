@@ -249,7 +249,7 @@ def _make_rocm_run(
     return _run
 
 
-# AITER: success
+# AITER success
 
 
 def test_run_aiter_build_success_pinned_ref(monkeypatch, tmp_path):

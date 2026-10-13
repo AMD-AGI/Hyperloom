@@ -478,13 +478,12 @@ def _settle_moe_keys(moe: dict[str, Any]) -> None:
             **record,
             "tokens": sorted(record["tokens"]),
             "untuned_tokens": sorted(record["untuned_tokens"]),
-            "untuned_token_counts": {
-                key: count
-                for key, count in sorted(
+            "untuned_token_counts": dict(
+                sorted(
                     (record.get("untuned_token_counts") or {}).items(),
                     key=lambda kv: _as_int(kv[0]) or 0,
                 )
-            },
+            ),
         }
         for record in sorted(moe["keys"].values(), key=lambda r: (-r["miss_count"], -len(r["tokens"])))
     ]

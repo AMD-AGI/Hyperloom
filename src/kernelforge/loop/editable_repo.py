@@ -64,7 +64,7 @@ def _scan_editable_roots() -> tuple[str, ...]:
         for entry in entries:
             if not entry.startswith("__editable__"):
                 continue
-            if not (entry.endswith(".pth") or entry.endswith("_finder.py")):
+            if not (entry.endswith((".pth", "_finder.py"))):
                 continue
             roots |= _roots_declared_by(scan_dir, entry)
     return tuple(sorted(roots))

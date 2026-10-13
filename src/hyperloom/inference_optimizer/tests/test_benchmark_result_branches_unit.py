@@ -446,7 +446,7 @@ def test_harvest_mn_gpu_metrics_window_and_malformed_rows(monkeypatch, tmp_path)
     import hyperloom.orchestrator.actions.executors._multi_node_env as mn
 
     monkeypatch.setattr(mn, "is_multi_node", lambda: True)
-    monkeypatch.setattr(mn, "pd_topology_from_state", lambda: {})
+    monkeypatch.setattr(mn, "pd_topology_from_state", dict)
 
     shared = tmp_path / "server_logs"
     shared.mkdir()
@@ -470,7 +470,7 @@ def test_harvest_mn_gpu_metrics_report_not_dict(monkeypatch, tmp_path):
     import hyperloom.orchestrator.actions.executors._multi_node_env as mn
 
     monkeypatch.setattr(mn, "is_multi_node", lambda: True)
-    monkeypatch.setattr(mn, "pd_topology_from_state", lambda: {})
+    monkeypatch.setattr(mn, "pd_topology_from_state", dict)
 
     shared = tmp_path / "server_logs"
     shared.mkdir()

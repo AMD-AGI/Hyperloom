@@ -1,0 +1,372 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+#
+# Architecture contracts, checked by import-linter (`lint-imports`) in
+# lint.yml and in the pre-commit `import-linter` hook. See
+# docs/contributing/style-guide.md "Dependency direction" for the rules these
+# encode.
+#
+# Run locally (no install of the project needed):
+#     pip install "import-linter==2.15"
+#     PYTHONPATH=src lint-imports --no-cache
+#
+# Two contracts carry a baseline of existing violations as exact
+# `importer -> imported` lines under ignore_imports (hl-top-layers and
+# acyclic). Both set unmatched_ignore_imports_alerting = error, so the
+# baselines only shrink: an import that is removed must also be deleted from
+# its list here, or the check fails with "No matches for ignored import".
+# Never add a line to a baseline to get a new import through; fix the
+# direction instead (move the code down a layer, or invert the dependency).
+#
+# Tests are exempt from every contract (the tests globs below): they exercise
+# code across layers by design.
+#
+# Imports under `if TYPE_CHECKING:` are excluded: the contracts describe
+# runtime dependency direction. Imports inside functions ARE seen.
+
+[importlinter]
+root_packages =
+    hyperloom
+    kernelforge
+include_external_packages = False
+exclude_type_checking_imports = True
+
+
+[importlinter:contract:hl-top-layers]
+name = hyperloom top-level layers (cli > orchestrator > agents > inference_optimizer > common)
+type = layers
+layers =
+    hyperloom.cli
+    hyperloom.orchestrator
+    hyperloom.agents
+    hyperloom.inference_optimizer
+    hyperloom.common
+# Baseline: hyperloom.inference_optimizer.cli is an entry point that lives
+# inside the inference_optimizer layer, so its imports of orchestrator/agents
+# point upward. These are its exact current upward imports; the list may only
+# shrink (moving inference_optimizer.cli up to an entry package removes it).
+ignore_imports =
+    hyperloom.**.tests.** -> **
+    kernelforge.tests.** -> **
+    kernelforge.**.tests.** -> **
+    kernelforge.conftest -> **
+    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._aiter_jit
+    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._partition_shape
+    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._subprocess_kill
+    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._workload_envs
+    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors.benchmark_backend
+    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors.bypass_scriptable
+    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.bus.resource_lock
+    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.collaborator
+    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.loop.coordinator
+    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.phases.machine_state
+    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.prompts.prompt_builder
+    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.state.objective
+    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.state.shared_state
+    hyperloom.inference_optimizer.cli.backends -> hyperloom.orchestrator.roles
+    hyperloom.inference_optimizer.cli.backends -> hyperloom.orchestrator.roles.agent_role
+    hyperloom.inference_optimizer.cli.backends -> hyperloom.orchestrator.scoring.proposal_scorer
+    hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.actions.executors._workload_envs
+    hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.actions.executors.report
+    hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.kernel.conc_sweep
+    hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.phases.machine_state
+    hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.policy.gate
+    hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.prompts
+    hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.state.shared_state
+    hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.actions.executors
+    hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.actions.executors.integrate_patch
+    hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.actions.executors.profile
+    hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.actions.executors.roofline
+    hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.actions.executors.targeted_build_executor
+    hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.roles.claude
+    hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.specialists.domains
+    hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.specialists.mcp_config
+    hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.specialists.runner
+    hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.specialists.subprocess_
+    hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.config
+    hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.knowledge_plane
+    hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.pr_monitor
+    hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.recipe_kb
+    hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.recipe_kb_t0
+    hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.remote_recipe
+    hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.state.shared_state
+    hyperloom.inference_optimizer.cli.model_gate -> hyperloom.orchestrator.actions.executors.report
+    hyperloom.inference_optimizer.cli.model_gate -> hyperloom.orchestrator.state.shared_state
+    hyperloom.inference_optimizer.cli.multi_node -> hyperloom.orchestrator.actions.executors._multi_node_env
+    hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.phases.quantization_schemes
+    hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.policy.gate
+    hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.scoring.proposal_scorer
+    hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.specialists.domains
+    hyperloom.inference_optimizer.cli.preflight -> hyperloom.agents.framework.kb
+    hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._aiter_jit
+    hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._inferencex_patcher
+    hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._magpie_patcher
+    hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._multi_node_env
+    hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._subprocess_kill
+    hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors.benchmark_backend
+    hyperloom.inference_optimizer.cli.quantization -> hyperloom.orchestrator.phases.quantization_request_handlers
+    hyperloom.inference_optimizer.cli.quantization -> hyperloom.orchestrator.phases.quantization_schemes
+unmatched_ignore_imports_alerting = error
+
+
+[importlinter:contract:kf-only-common]
+name = kernelforge may depend on hyperloom.common only
+type = forbidden
+source_modules = kernelforge
+forbidden_modules =
+    hyperloom.cli
+    hyperloom.orchestrator
+    hyperloom.inference_optimizer
+    hyperloom.agents
+ignore_imports =
+    hyperloom.**.tests.** -> **
+    kernelforge.tests.** -> **
+    kernelforge.**.tests.** -> **
+    kernelforge.conftest -> **
+unmatched_ignore_imports_alerting = none
+
+
+[importlinter:contract:common-is-leaf]
+name = hyperloom.common imports nothing else from the project
+type = forbidden
+source_modules = hyperloom.common
+forbidden_modules =
+    hyperloom.cli
+    hyperloom.orchestrator
+    hyperloom.inference_optimizer
+    hyperloom.agents
+    kernelforge
+ignore_imports =
+    hyperloom.**.tests.** -> **
+    kernelforge.tests.** -> **
+    kernelforge.**.tests.** -> **
+    kernelforge.conftest -> **
+unmatched_ignore_imports_alerting = none
+
+
+[importlinter:contract:agents-independent]
+name = agent packages are independent
+type = independence
+# A new package under hyperloom/agents/ must be added here.
+modules =
+    hyperloom.agents.critic
+    hyperloom.agents.framework
+    hyperloom.agents.quantization
+ignore_imports =
+    hyperloom.**.tests.** -> **
+    kernelforge.tests.** -> **
+    kernelforge.**.tests.** -> **
+    kernelforge.conftest -> **
+unmatched_ignore_imports_alerting = none
+
+
+[importlinter:contract:kf-backends-independent]
+name = kernel backends are independent
+type = independence
+# A new package under kernelforge/kernel_backends/ must be added here.
+modules =
+    kernelforge.kernel_backends.aiter
+    kernelforge.kernel_backends.assembly
+    kernelforge.kernel_backends.ck
+    kernelforge.kernel_backends.flydsl
+    kernelforge.kernel_backends.fusion
+    kernelforge.kernel_backends.gluon
+    kernelforge.kernel_backends.hip
+    kernelforge.kernel_backends.hipblaslt
+    kernelforge.kernel_backends.triton
+ignore_imports =
+    hyperloom.**.tests.** -> **
+    kernelforge.tests.** -> **
+    kernelforge.**.tests.** -> **
+    kernelforge.conftest -> **
+unmatched_ignore_imports_alerting = none
+
+
+[importlinter:contract:kf-entry-protected]
+name = hyperloom.agents, inference_optimizer and common do not import kernelforge directly
+type = forbidden
+# kernelforge is reached from hyperloom only through hyperloom.cli and the
+# orchestrator (kernel, measurement, trace_analysis).
+source_modules =
+    hyperloom.agents
+    hyperloom.inference_optimizer
+    hyperloom.common
+forbidden_modules = kernelforge
+allow_indirect_imports = True
+ignore_imports =
+    hyperloom.**.tests.** -> **
+    kernelforge.tests.** -> **
+    kernelforge.**.tests.** -> **
+    kernelforge.conftest -> **
+unmatched_ignore_imports_alerting = none
+
+
+[importlinter:contract:acyclic]
+name = no cycles between sibling packages (baseline may only shrink)
+type = acyclic_siblings
+ancestors =
+    hyperloom
+    kernelforge
+# Baseline: the exact imports import-linter nominates as cycle breakers on
+# main today. Removing one of these imports means deleting its line here.
+ignore_imports =
+    hyperloom.**.tests.** -> **
+    kernelforge.tests.** -> **
+    kernelforge.**.tests.** -> **
+    kernelforge.conftest -> **
+    hyperloom.common.llm_config -> hyperloom.common.claude_oneshot
+    hyperloom.inference_optimizer.breakdown.critic_reviews -> hyperloom.inference_optimizer.breakdown.collectors._common
+    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._aiter_jit
+    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._partition_shape
+    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._subprocess_kill
+    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._workload_envs
+    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors.benchmark_backend
+    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors.bypass_scriptable
+    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.bus.resource_lock
+    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.collaborator
+    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.loop.coordinator
+    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.phases.machine_state
+    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.prompts.prompt_builder
+    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.state.objective
+    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.state.shared_state
+    hyperloom.inference_optimizer.cli.backends -> hyperloom.orchestrator.roles
+    hyperloom.inference_optimizer.cli.backends -> hyperloom.orchestrator.roles.agent_role
+    hyperloom.inference_optimizer.cli.backends -> hyperloom.orchestrator.scoring.proposal_scorer
+    hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.actions.executors._workload_envs
+    hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.actions.executors.report
+    hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.kernel.conc_sweep
+    hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.phases.machine_state
+    hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.policy.gate
+    hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.prompts
+    hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.state.shared_state
+    hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.actions.executors
+    hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.actions.executors.integrate_patch
+    hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.actions.executors.profile
+    hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.actions.executors.roofline
+    hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.actions.executors.targeted_build_executor
+    hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.roles.claude
+    hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.specialists.domains
+    hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.specialists.mcp_config
+    hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.specialists.runner
+    hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.specialists.subprocess_
+    hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.config
+    hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.knowledge_plane
+    hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.pr_monitor
+    hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.recipe_kb
+    hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.recipe_kb_t0
+    hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.remote_recipe
+    hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.state.shared_state
+    hyperloom.inference_optimizer.cli.model_gate -> hyperloom.orchestrator.actions.executors.report
+    hyperloom.inference_optimizer.cli.model_gate -> hyperloom.orchestrator.state.shared_state
+    hyperloom.inference_optimizer.cli.multi_node -> hyperloom.orchestrator.actions.executors._multi_node_env
+    hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.phases.quantization_schemes
+    hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.policy.gate
+    hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.scoring.proposal_scorer
+    hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.specialists.domains
+    hyperloom.inference_optimizer.cli.preflight -> hyperloom.agents.framework.kb
+    hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._aiter_jit
+    hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._inferencex_patcher
+    hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._magpie_patcher
+    hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._multi_node_env
+    hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._subprocess_kill
+    hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors.benchmark_backend
+    hyperloom.inference_optimizer.cli.quantization -> hyperloom.orchestrator.phases.quantization_request_handlers
+    hyperloom.inference_optimizer.cli.quantization -> hyperloom.orchestrator.phases.quantization_schemes
+    hyperloom.inference_optimizer.multi_node.commands.infera -> hyperloom.inference_optimizer.multi_node.cli
+    hyperloom.inference_optimizer.multi_node.state_paths -> hyperloom.inference_optimizer.multi_node._internal.log
+    hyperloom.inference_optimizer.session.manifest -> hyperloom.inference_optimizer.breakdown.recorder
+    hyperloom.inference_optimizer.session.manifest -> hyperloom.inference_optimizer.breakdown.workflow_contract
+    hyperloom.inference_optimizer.trace.decision_trace -> hyperloom.inference_optimizer.breakdown.collectors._common
+    hyperloom.inference_optimizer.trace.decision_trace -> hyperloom.inference_optimizer.breakdown.recorder.phase_event
+    hyperloom.inference_optimizer.trace.langfuse_emitter -> hyperloom.inference_optimizer.breakdown.recorder
+    hyperloom.inference_optimizer.trace.llm_trace -> hyperloom.inference_optimizer.trace.langfuse_emitter
+    hyperloom.orchestrator.actions.executors._geak_sweep -> hyperloom.orchestrator.kernel.geak_config
+    hyperloom.orchestrator.actions.executors._grid_runner -> hyperloom.orchestrator.phases.machine_state
+    hyperloom.orchestrator.actions.executors._kernel_agent_tool -> hyperloom.orchestrator.kernel.apply_kernel_patch
+    hyperloom.orchestrator.actions.executors.baseline -> hyperloom.orchestrator.loop.sub_agent_runner
+    hyperloom.orchestrator.actions.executors.baseline -> hyperloom.orchestrator.phases.machine_state
+    hyperloom.orchestrator.actions.executors.benchmark_backend -> hyperloom.orchestrator.actions.executors._multi_node_env
+    hyperloom.orchestrator.actions.executors.conc_sweep -> hyperloom.orchestrator.kernel.conc_sweep
+    hyperloom.orchestrator.actions.executors.report -> hyperloom.orchestrator.kernel.attempt_summary
+    hyperloom.orchestrator.actions.executors.report -> hyperloom.orchestrator.kernel.conc_sweep
+    hyperloom.orchestrator.actions.executors.report -> hyperloom.orchestrator.kernel.conc_sweep_plot
+    hyperloom.orchestrator.actions.executors.roofline -> hyperloom.orchestrator.loop.sub_agent_runner
+    hyperloom.orchestrator.actions.executors.roofline -> hyperloom.orchestrator.phases.machine_state
+    hyperloom.orchestrator.actions.executors.target_analysis -> hyperloom.orchestrator.loop.sub_agent_runner
+    hyperloom.orchestrator.actions.executors.targeted_build_executor -> hyperloom.orchestrator.loop.build_lifecycle
+    hyperloom.orchestrator.actions.executors.targeted_build_executor -> hyperloom.orchestrator.loop.sub_agent_runner
+    hyperloom.orchestrator.bringup.argv_preflight -> hyperloom.orchestrator.actions.executors._grid_runner
+    hyperloom.orchestrator.bus.resource_lock -> hyperloom.orchestrator.state.task_states
+    hyperloom.orchestrator.enablement.build -> hyperloom.orchestrator.actions.executors._multi_node_env
+    hyperloom.orchestrator.enablement.lane -> hyperloom.orchestrator.actions.executors._accuracy_gate
+    hyperloom.orchestrator.enablement.lane -> hyperloom.orchestrator.actions.executors._multi_node_env
+    hyperloom.orchestrator.enablement.lane -> hyperloom.orchestrator.loop.offload
+    hyperloom.orchestrator.enablement.lane -> hyperloom.orchestrator.phases.machine_state
+    hyperloom.orchestrator.enablement.params -> hyperloom.orchestrator.actions.executors._apply_feedback
+    hyperloom.orchestrator.enablement.recipe.keep_probe -> hyperloom.orchestrator.actions.executors._benchmark_interpreter
+    hyperloom.orchestrator.enablement.recipe.keep_probe -> hyperloom.orchestrator.actions.executors._grid_runner
+    hyperloom.orchestrator.enablement.recipe.keep_probe -> hyperloom.orchestrator.actions.executors._server_argv
+    hyperloom.orchestrator.enablement.recipe.keep_probe -> hyperloom.orchestrator.actions.executors.benchmark_backend
+    hyperloom.orchestrator.enablement.revalidation -> hyperloom.orchestrator.actions.executors._accuracy_gate
+    hyperloom.orchestrator.enablement.setup_script -> hyperloom.orchestrator.enablement.recipe.projections
+    hyperloom.orchestrator.gpu_lanes -> hyperloom.orchestrator.specialists.profile
+    hyperloom.orchestrator.kernel.request_handlers -> hyperloom.orchestrator.loop.sub_agent_runner
+    hyperloom.orchestrator.kernel.request_handlers -> hyperloom.orchestrator.phases.machine_state
+    hyperloom.orchestrator.knowledge.recipe_journal -> hyperloom.orchestrator.actions.executors._multi_node_env
+    hyperloom.orchestrator.knowledge.recipe_kb_t0 -> hyperloom.orchestrator.actions.executors._multi_node_env
+    hyperloom.orchestrator.knowledge.remote_recipe -> hyperloom.orchestrator.knowledge.agent_kb
+    hyperloom.orchestrator.knowledge.remote_recipe.values -> hyperloom.orchestrator.knowledge.agent_kb
+    hyperloom.orchestrator.measurement.integrate_performance -> hyperloom.orchestrator.state.shared_state
+    hyperloom.orchestrator.measurement.runtime_findings -> hyperloom.orchestrator.kernel.gemm_shape_coverage
+    hyperloom.orchestrator.phases.close -> hyperloom.orchestrator.loop.time_budget
+    hyperloom.orchestrator.phases.framework -> hyperloom.orchestrator.loop.proposals
+    hyperloom.orchestrator.phases.kernel_stack -> hyperloom.orchestrator.loop.sub_agent_runner
+    hyperloom.orchestrator.phases.macro_cycle -> hyperloom.orchestrator.loop.maintenance
+    hyperloom.orchestrator.phases.prelude -> hyperloom.orchestrator.loop.time_budget
+    hyperloom.orchestrator.prompts.prompt_builder -> hyperloom.orchestrator.phases.machine_state
+    hyperloom.orchestrator.prompts.specialist_prompt_builder -> hyperloom.orchestrator.actions.executors._multi_node_env
+    hyperloom.orchestrator.prompts.specialist_prompt_builder -> hyperloom.orchestrator.enablement.mandate
+    hyperloom.orchestrator.prompts.specialist_prompt_builder -> hyperloom.orchestrator.policy.gate
+    hyperloom.orchestrator.specialists.dispatch -> hyperloom.orchestrator.knowledge.static_recon_checklist
+    hyperloom.orchestrator.specialists.dispatch -> hyperloom.orchestrator.phases.machine_state
+    hyperloom.orchestrator.specialists.dispatch -> hyperloom.orchestrator.policy.gate
+    hyperloom.orchestrator.specialists.leaf -> hyperloom.orchestrator.prompts.specialist_prompt_builder
+    hyperloom.orchestrator.specialists.profile -> hyperloom.orchestrator.actions.executors._multi_node_env
+    hyperloom.orchestrator.specialists.rebench -> hyperloom.orchestrator.actions.executors._grid_runner
+    hyperloom.orchestrator.specialists.rebench -> hyperloom.orchestrator.actions.executors._workload_envs
+    hyperloom.orchestrator.specialists.runner -> hyperloom.orchestrator.loop.sub_agent_runner
+    hyperloom.orchestrator.specialists.runner -> hyperloom.orchestrator.prompts.specialist_prompt_builder
+    hyperloom.orchestrator.specialists.selfcheck -> hyperloom.orchestrator.enablement.runtime.build_utils
+    hyperloom.orchestrator.specialists.subprocess_ -> hyperloom.orchestrator.actions.cancel_channel
+    hyperloom.orchestrator.specialists.subprocess_ -> hyperloom.orchestrator.actions.executors._ray_serving
+    hyperloom.orchestrator.specialists.subprocess_ -> hyperloom.orchestrator.bringup.trees
+    hyperloom.orchestrator.specialists.subprocess_ -> hyperloom.orchestrator.loop.sub_agent_runner
+    hyperloom.orchestrator.state._shared_state.phase_state -> hyperloom.orchestrator.specialists.domains
+    hyperloom.orchestrator.state._shared_state.render -> hyperloom.orchestrator.actions.executors._proposal_identity
+    hyperloom.orchestrator.state.gaps -> hyperloom.orchestrator.specialists.domains
+    hyperloom.orchestrator.state.shared_state -> hyperloom.orchestrator.kernel._kernel_decisions
+    hyperloom.orchestrator.state.shared_state -> hyperloom.orchestrator.phases.machine_state
+    hyperloom.orchestrator.trace_analysis.tracelens_skill_runner -> hyperloom.orchestrator.roles.claude_requests
+    kernelforge.agent_backends.workspace_guard -> kernelforge.loop.new_path_allowlist
+    kernelforge.assembly.prepare -> kernelforge.loop.canonical_correctness
+    kernelforge.assembly.prepare -> kernelforge.loop.numerical
+    kernelforge.assembly.prepare -> kernelforge.loop.validation
+    kernelforge.fusion.campaign -> kernelforge.loop.scoring
+    kernelforge.fusion.loop -> kernelforge.loop.scoring
+    kernelforge.fusion.shadow_repo -> kernelforge.loop.path_ownership
+    kernelforge.fusion.validate -> kernelforge.loop.scoring
+    kernelforge.gemm_tune.dense_shapes -> kernelforge.gemm_tune.tuners._aiter_dense_common
+    kernelforge.kernel_backends.base -> kernelforge.loop.scoring
+    kernelforge.kernel_backends.fusion.prompts -> kernelforge.fusion.harness_contract
+    kernelforge.kernel_backends.fusion.prompts -> kernelforge.fusion.validate
+    kernelforge.knowledge.kb_store.recipe -> kernelforge.config
+    kernelforge.mcp_server.pr_stdio_server -> kernelforge.knowledge.pr_knowledge.client
+    kernelforge.mcp_server.pr_stdio_server -> kernelforge.knowledge.pr_knowledge.context
+    kernelforge.mcp_server.pr_stdio_server -> kernelforge.knowledge.pr_knowledge.search
+    kernelforge.mcp_server.tools._subprocess -> kernelforge.loop.aiter_cache
+    kernelforge.mcp_server.tools.test -> kernelforge.loop.scoring
+    kernelforge.orchestrator.agent -> kernelforge.loop.insession_gate
+    kernelforge.orchestrator.agent -> kernelforge.loop.lessons
+    kernelforge.orchestrator.agent -> kernelforge.loop.scoring
+    kernelforge.orchestrator.specialists -> kernelforge.loop.fanout
+unmatched_ignore_imports_alerting = error

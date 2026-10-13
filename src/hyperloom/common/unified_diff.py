@@ -36,7 +36,7 @@ def parse_unified_diff(patch_text: str) -> list[FileChange]:
             continue
         if current is None:
             # Tolerate a diff with no leading "diff --git".
-            if raw.startswith("--- ") or raw.startswith("+++ "):
+            if raw.startswith(("--- ", "+++ ")):
                 current = FileChange(path="")
                 changes.append(current)
             else:

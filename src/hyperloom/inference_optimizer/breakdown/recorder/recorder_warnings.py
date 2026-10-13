@@ -86,7 +86,7 @@ def note_failure(
     """
     trace_skip(reason=detail or "writer raised", section=section, producer=producer, error=error)
     if getattr(_parking, "active", False):
-        log.debug("recorder: a failure note for %s failed to park", section, exc_info=True)
+        log.debug("recorder: a failure note for %s failed to park", section, exc_info=error)
         return
     if not _first_time(section, type(error).__name__):
         return
