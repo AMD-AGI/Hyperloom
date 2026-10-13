@@ -29,10 +29,12 @@ interactive questions; use the values already in `.env` and the environment:
   export INFERENCE_OPTIMIZER_FORCE_PYTHON=1
   ```
 
-- **Framework:** ATOM, installed by setup. Run the setup backend exactly as:
+- **Framework:** ATOM, installed by setup. Run the setup backend exactly as (through
+  `-m hyperloom setup`: `-m hyperloom.inference_optimizer.setup` only imports
+  the module and exits 0 without running the installer):
 
   ```bash
-  "$PYTHON" -m hyperloom.inference_optimizer.setup -- \
+  "$PYTHON" -m hyperloom setup -- \
     --install-framework atom \
     --user-data-path "${USER_DATA_PATH:?USER_DATA_PATH missing}" --yes
   ```

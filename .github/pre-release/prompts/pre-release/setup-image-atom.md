@@ -31,13 +31,15 @@ interactive questions:
   ```
 
 - **Framework:** ATOM, already provided by this image. Run the read-only check
-  first, then the setup, exactly as:
+  first, then the setup, exactly as (through
+  `-m hyperloom setup`: `-m hyperloom.inference_optimizer.setup` only imports
+  the module and exits 0 without running the installer):
 
   ```bash
-  "$PYTHON" -m hyperloom.inference_optimizer.setup --check-only -- \
+  "$PYTHON" -m hyperloom setup --check-only -- \
     --install-framework none --frameworks atom --require-frameworks \
     --user-data-path "${USER_DATA_PATH:?USER_DATA_PATH missing}"
-  "$PYTHON" -m hyperloom.inference_optimizer.setup -- \
+  "$PYTHON" -m hyperloom setup -- \
     --install-framework none --frameworks atom --require-frameworks \
     --user-data-path "${USER_DATA_PATH:?USER_DATA_PATH missing}" --yes
   ```
