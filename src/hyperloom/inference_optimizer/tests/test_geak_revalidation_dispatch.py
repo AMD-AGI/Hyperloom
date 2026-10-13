@@ -1243,7 +1243,7 @@ async def test_a_cancelled_revalidation_is_recorded_before_it_propagates(coordin
     _arm_geak_win(st)
 
     async def _explore(_ctx):
-        raise FuturesCancelledError("phase_transition:KERNEL_AGENT->SWEEP")
+        raise FuturesCancelledError("session_time_exhausted")
 
     c.sub.register_executor("explore", _explore)
 
@@ -1252,6 +1252,72 @@ async def test_a_cancelled_revalidation_is_recorded_before_it_propagates(coordin
 
     assert st.geak_pending["status"] == "rebench_cancelled"
     assert st.current_best["action"] == "baseline"
+
+
+@pytest.mark.asyncio
+async def test_a_spent_kernel_budget_waits_for_the_rebench_and_keeps_the_win(coordinator, monkeypatch) -> None:
+    """A GEAK win measured at the end of KERNEL is settled, not dropped as ``rebench_cancelled``."""
+    c = coordinator
+    st = c.shared_state
+    _arm_geak_win(st)
+    now = datetime.now(timezone.utc)
+    st.phase = ps.PHASE_KERNEL_AGENT
+    st.start_ts = (now - timedelta(minutes=30)).isoformat()
+    st.max_minutes = 96 * 60
+    st.phase_budget_pct = dict(ps.DEFAULT_PHASE_BUDGET_PCT)
+    st.phase_started_ts = (now - timedelta(minutes=20)).isoformat()
+    st.phase_started_unix = (now - timedelta(minutes=20)).timestamp()
+
+    async def _noop(**_kwargs):
+        return None
+
+    monkeypatch.setattr(c.phase_machine, "_on_phase_entered", _noop)
+    measuring, release = asyncio.Event(), asyncio.Event()
+
+    async def _explore(ctx):
+        measuring.set()
+        await release.wait()
+        return {
+            "output_throughput": 120.0,
+            "best_variant": {"fingerprint": ctx.task.params["expected_cfg_hash"]},
+            "winners": [],
+        }
+
+    async def _kernel_agent(_ctx):
+        await c.phase_kernel._revalidate_geak_candidate(reason="geak_e2e_win")
+        return {"status": "ok", "route": "geak"}
+
+    c.sub.register_executor("explore", _explore)
+    c.sub.register_executor("kernel_agent", _kernel_agent)
+    lanes, _ttl = c.dispatcher.registry_lanes_ttl("kernel_agent")
+    task, _ = await c.tasks.create_or_return_existing(
+        kind="kernel_agent",
+        params={"from_phase": ps.PHASE_FRAMEWORK_AGENT},
+        idempotency_key="kernel_agent_c0",
+        requires_lanes=lanes,
+        lease_ttl_sec=3600,
+    )
+    await asyncio.wait_for(c.dispatcher.pump_dispatcher_once(), timeout=2.0)
+    await asyncio.wait_for(measuring.wait(), timeout=2.0)
+    spent = now - timedelta(hours=30)
+    st.phase_started_ts = spent.isoformat()
+    st.phase_started_unix = spent.timestamp()
+
+    await asyncio.wait_for(c.phase_machine.advance_phase_if_needed(), timeout=30.0)
+
+    assert st.phase == ps.PHASE_KERNEL_AGENT
+    assert st.geak_pending["status"] == "awaiting_rebench"
+
+    release.set()
+    entry = c.dispatcher._inflight_actions.get(task.task_id)
+    if entry is not None:
+        await asyncio.wait_for(entry.atask, timeout=5.0)
+    await asyncio.wait_for(c.phase_machine.advance_phase_if_needed(), timeout=30.0)
+
+    assert st.phase == ps.PHASE_SWEEP
+    assert st.current_best["action"] == "geak_e2e"
+    assert st.current_best["tput"] == pytest.approx(120.0)
+    assert st.geak_pending == {}
 
 
 @pytest.mark.asyncio

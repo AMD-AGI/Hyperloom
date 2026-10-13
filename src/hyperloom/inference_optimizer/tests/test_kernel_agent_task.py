@@ -343,14 +343,14 @@ def _listening_executor(started: asyncio.Event):
 
 
 @pytest.mark.asyncio
-async def test_a_spent_phase_budget_stops_the_kernel_agent_and_leaves_kernel(coord, monkeypatch):
-    """The transition barrier stops the running pipeline and frees its lanes before SWEEP starts."""
+async def test_a_spent_phase_budget_lets_the_running_kernel_agent_finish_before_leaving_kernel(coord, monkeypatch):
+    """The transition barrier waits for the running pipeline instead of throwing its work away."""
     c = coord
     _skip_phase_entry_effects(c, monkeypatch)
     st = c.shared_state
     _arm_kernel_phase(st)
-    started = asyncio.Event()
-    c.sub.register_executor("kernel_agent", _listening_executor(started))
+    release, started = asyncio.Event(), asyncio.Event()
+    c.sub.register_executor("kernel_agent", _blocking_executor(release, started))
     task = await _create_kernel_agent(c)
     await asyncio.wait_for(c.dispatcher.pump_dispatcher_once(), timeout=2.0)
     await asyncio.wait_for(started.wait(), timeout=2.0)
@@ -358,10 +358,36 @@ async def test_a_spent_phase_budget_stops_the_kernel_agent_and_leaves_kernel(coo
 
     await asyncio.wait_for(c.phase_machine.advance_phase_if_needed(), timeout=30.0)
 
+    assert st.phase == ps.PHASE_KERNEL_AGENT
+    assert (await c.tasks.get(task.task_id)).state == "running"
+    assert c.dispatcher.admission_frozen
+
+    release.set()
+    await _settle(c, task.task_id)
+    await asyncio.wait_for(c.phase_machine.advance_phase_if_needed(), timeout=30.0)
+
     assert st.phase == ps.PHASE_SWEEP
-    assert st.phase_history[-1]["reason"] in {"kernel_phase_budget_exhausted", "kernel_budget_cap"}
-    assert (await c.tasks.get(task.task_id)).state == "cancelled"
+    assert (await c.tasks.get(task.task_id)).state == "succeeded"
     assert not any((await c.locks.lane_holders()).values())
+
+
+@pytest.mark.asyncio
+async def test_a_spent_session_budget_still_stops_the_running_kernel_agent(coord):
+    """Only the phase boundary waits; once the session's own budget is gone the work is cancelled."""
+    c = coord
+    st = c.shared_state
+    _arm_kernel_phase(st)
+    started = asyncio.Event()
+    c.sub.register_executor("kernel_agent", _listening_executor(started))
+    task = await _create_kernel_agent(c)
+    await asyncio.wait_for(c.dispatcher.pump_dispatcher_once(), timeout=2.0)
+    await asyncio.wait_for(started.wait(), timeout=2.0)
+    st.max_minutes = 1
+
+    await asyncio.wait_for(c.dispatcher.pump_dispatcher_once(), timeout=30.0)
+    await _settle(c, task.task_id)
+
+    assert (await c.tasks.get(task.task_id)).state == "cancelled"
 
 
 @pytest.mark.asyncio

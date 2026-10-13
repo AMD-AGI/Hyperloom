@@ -89,10 +89,14 @@ filter, not the set the LLM can propose. The LLM-proposable set is
 refreshes and close sequencing may be enqueued internally even when the LLM
 is not allowed to propose them.
 
-Every phase transition is a GPU barrier: the Coordinator stops every running
-action and drops queued work the next phase does not support, and commits the
-transition only once no task is left running. Each phase therefore starts on
-quiet GPUs, and its entry hook runs on the transition itself.
+Every phase transition is a GPU barrier: the Coordinator stops admitting new
+work, drops queued work the next phase does not support, and commits the
+transition only once the actions already running have finished and been
+booked. A phase budget never cancels running work -- the last action in
+flight, such as a GEAK rebench, completes and settles its result; only an
+exhausted session budget, a shutdown or an operator interrupt cancels it. Each
+phase therefore starts on quiet GPUs, and its entry hook runs on the
+transition itself.
 
 ## PRELUDE
 
