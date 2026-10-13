@@ -119,9 +119,15 @@ def _is_ray_cluster_infeasible(result_payload: Mapping[str, Any]) -> bool:
     return RAY_INFEASIBLE_MARKER in str(result_payload.get("error") or "")
 
 
-def _extract_enablement_launch_log(result_payload: dict[str, Any] | None) -> str:
-    """Extract launch/traceback text from a failed baseline result payload."""
-    if not isinstance(result_payload, dict):
+def _authorable_launch_log(result_payload: dict[str, Any] | None, *, err_class: str) -> str:
+    """The failed boot's text the next enablement round authors against, or ``""``.
+
+    A failure that never reached a framework error is no wall: as
+    integrate_patch's "before" boot it passes any patch that starts the server.
+    """
+    if not isinstance(result_payload, dict) or _is_ray_cluster_infeasible(result_payload):
+        return ""
+    if err_class in ("fast_exit_arg_error", AGENTX_PREFLIGHT_ERROR_CLASS) or stopped_by_the_run_class(err_class):
         return ""
     parts: list[str] = []
     for key in ("error", "stderr", "log_tail", "log_excerpt", "traceback", "reason"):
@@ -993,8 +999,9 @@ class WritebackCollaborator(CoordinatorCollaborator):
         evidence = str(result_payload.get(BASELINE_EVAL_EVIDENCE_KEY) or "")
         if evidence:
             state.enablement.baseline_eval_evidence = evidence[:4000]
-            state.enablement.launch_log = evidence
-        state.enablement.launch_observation_path = str(result_payload.get("boot_observation_path") or "")
+            state.enablement.record_launch_observation(
+                log=evidence, observation_path=str(result_payload.get("boot_observation_path") or "")
+            )
         self._record_enablement_eval_trigger()
 
     def _record_enablement_eval_trigger(self) -> None:
@@ -1081,10 +1088,10 @@ class WritebackCollaborator(CoordinatorCollaborator):
             error_class="" if stopped_by_the_run else str(err_class or ""),
             reason="stopped by the run" if stopped_by_the_run else "revalidation baseline failed",
         )
-        launch_log = _extract_enablement_launch_log(result_payload)
+        launch_log = _authorable_launch_log(result_payload, err_class=str(err_class or ""))
         if launch_log:
-            state.enablement.launch_log = launch_log
-            state.enablement.launch_observation_path = str(result_payload.get("boot_observation_path") or "")
+            observed = str(result_payload.get("boot_observation_path") or "")
+            state.enablement.record_launch_observation(log=launch_log, observation_path=observed)
         log.warning(
             "enablement revalidation task %s %s (error_class=%s); pending=%s rearm=%s",
             task.task_id,
@@ -1320,29 +1327,21 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     "disable-cuda-graph fallback for the next baseline retry",
                     task.task_id,
                 )
-            # Stash the launch/traceback text for the FRAMEWORK pump. Excluded:
-            # fast arg errors, and an AgentX preflight abort -- the pump treats a
-            # non-blank log as "there is something here to author against", and
-            # for a missing pinned dependency there is not.
-            if err_class not in ("fast_exit_arg_error", AGENTX_PREFLIGHT_ERROR_CLASS) and not (
-                _is_ray_cluster_infeasible(result_payload)
-            ):
-                launch_log = _extract_enablement_launch_log(result_payload)
-                if launch_log:
-                    self.shared_state.enablement.launch_log = launch_log
-                    self.shared_state.enablement.launch_observation_path = str(
-                        result_payload.get("boot_observation_path") or ""
+            # Stash the launch/traceback text for the FRAMEWORK pump.
+            launch_log = _authorable_launch_log(result_payload, err_class=err_class)
+            if launch_log:
+                self.shared_state.enablement.record_launch_observation(
+                    log=launch_log, observation_path=str(result_payload.get("boot_observation_path") or "")
+                )
+                # Only the first trigger is kept, so a serial enablement does not
+                # rewrite the reason the lane opened with the gap it is now on.
+                if not str(self.shared_state.enablement.origin or ""):
+                    enablement_event.record_trigger(
+                        origin=enablement_event.ORIGIN_BOOT,
+                        mode=str(self.shared_state.enablement_mode or ""),
+                        kind=str(err_class or ""),
+                        evidence=launch_log,
                     )
-                    # Only the first trigger is kept, so a serial enablement does
-                    # not rewrite the reason the lane opened with the gap it is
-                    # now on.
-                    if not str(self.shared_state.enablement.origin or ""):
-                        enablement_event.record_trigger(
-                            origin=enablement_event.ORIGIN_BOOT,
-                            mode=str(self.shared_state.enablement_mode or ""),
-                            kind=str(err_class or ""),
-                            evidence=launch_log,
-                        )
             baseline_event_payload = {
                 "kind": "baseline_not_promoted",
                 "task_id": task.task_id,
