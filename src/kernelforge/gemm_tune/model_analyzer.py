@@ -110,8 +110,15 @@ def _declared_precision(decl: WeightDeclaration) -> str:
 
 
 def _most_declared(decls: list[WeightDeclaration]) -> str:
+    """The precision most of ``decls`` declare; a tie goes to the earliest declared."""
     counts = Counter(p for p in map(_declared_precision, decls) if p)
     return counts.most_common(1)[0][0] if counts else ""
+
+
+def _targets_routed_experts(decl: WeightDeclaration) -> bool:
+    # A Quark module-class entry names sglang's MoE layer class (FusedMoE, DeepEPMoE, ...), not the experts.
+    targets = decl.targets.lower()
+    return "expert" in targets or "moe" in targets
 
 
 def _nested_precisions(raw_config: dict[str, Any]) -> tuple[str, str]:
@@ -123,8 +130,8 @@ def _nested_precisions(raw_config: dict[str, Any]) -> tuple[str, str]:
     """
     whole, per_layer = weight_declarations(raw_config.get("quantization_config"))
     default = next((p for p in map(_declared_precision, whole) if p), "") or _most_declared(per_layer)
-    experts = [d for d in per_layer if "expert" in d.targets.lower()]
-    others = [d for d in per_layer if "expert" not in d.targets.lower()]
+    experts = [d for d in per_layer if _targets_routed_experts(d)]
+    others = [d for d in per_layer if not _targets_routed_experts(d)]
     return _most_declared(experts) or default, _most_declared(others) or default
 
 

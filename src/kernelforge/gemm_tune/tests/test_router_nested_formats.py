@@ -7,15 +7,14 @@ from kernelforge.gemm_tune.model_analyzer import ModelProfile
 from kernelforge.gemm_tune.router import select_tuners
 
 
-def _quark_moe_profile(layer_quant_config=None):
-    """A Quark MXFP4 MoE checkpoint, optionally overriding some layers' format, shaped like GLM-5.3-MXFP4."""
-    quant_cfg = {
-        "quant_method": "quark",
-        "global_quant_config": {"weight": {"dtype": "fp4", "group_size": 32}},
-        "exclude": ["lm_head"],
-    }
-    if layer_quant_config:
-        quant_cfg["layer_quant_config"] = layer_quant_config
+_MXFP4 = {"weight": {"dtype": "fp4", "group_size": 32}}
+
+
+def _quark_moe_profile(global_quant_config=_MXFP4, **layer_configs):
+    """A Quark MoE checkpoint shaped like GLM-5.3-MXFP4, optionally overriding some layers' format."""
+    quant_cfg = {"quant_method": "quark", "exclude": ["lm_head"], **layer_configs}
+    if global_quant_config:
+        quant_cfg["global_quant_config"] = global_quant_config
     return ModelProfile(
         model_path="/fake/GLM-5.3-MXFP4",
         is_moe=True,
@@ -58,7 +57,7 @@ def _running(specs):
 
 
 def test_mxfp4_experts_and_fp8_attention_each_get_their_tuner(tmp_path):
-    specs = _routed(_quark_moe_profile(_fp8_attention()), "quark", tmp_path)
+    specs = _routed(_quark_moe_profile(layer_quant_config=_fp8_attention()), "quark", tmp_path)
     running = _running(specs)
     assert "fmoe_ck" in running
     assert "a8w8_blockscale_bpreshuffle" in running
@@ -74,10 +73,21 @@ def test_the_toolkit_name_routes_like_the_format_it_wraps(tmp_path):
 
 
 def test_a_format_precision_is_trusted_over_the_nested_formats(tmp_path):
-    specs = _routed(_quark_moe_profile(_fp8_attention()), "mxfp4", tmp_path)
+    specs = _routed(_quark_moe_profile(layer_quant_config=_fp8_attention()), "mxfp4", tmp_path)
     running = _running(specs)
     assert {"fmoe_ck", "a4w4_blockscale"} <= running
     assert not any(name.startswith("a8w8") for name in running)
+
+
+def test_experts_declared_only_by_their_moe_module_class_get_the_moe_tuner(tmp_path):
+    profile = _quark_moe_profile(None, layer_type_quant_config={"FusedMoE": _MXFP4})
+    assert "fmoe_ck" in _running(_routed(profile, "quark", tmp_path))
+
+
+def test_a_moe_module_class_entry_overrides_the_whole_checkpoint_format_for_the_experts_only():
+    fp8 = {"weight": {"dtype": "fp8_e4m3", "qscheme": "per_tensor"}}
+    profile = _quark_moe_profile(fp8, layer_type_quant_config={"FusedMoE": _MXFP4})
+    assert (profile.expert_precision, profile.dense_precision) == ("fp4", "fp8")
 
 
 def test_compressed_tensors_fp8_reaches_the_moe_and_fp8_tuners(tmp_path):

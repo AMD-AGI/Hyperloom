@@ -4,8 +4,9 @@
 """Weight formats a quantization toolkit nests inside a checkpoint's ``quantization_config``.
 
 Quark and compressed-tensors put the toolkit's name in ``quant_method`` and the formats one level down: Quark on a
-whole-checkpoint ``global_quant_config`` that ``layer_quant_config`` overrides per layer pattern, compressed-tensors on
-``config_groups`` that each name the layers they target. Stdlib-only.
+whole-checkpoint ``global_quant_config`` that ``layer_quant_config`` overrides per layer pattern and
+``layer_type_quant_config`` per module class, compressed-tensors on ``config_groups`` that each name the layers they
+target. Stdlib-only.
 """
 
 from __future__ import annotations
@@ -13,12 +14,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+# sglang resolves a Quark layer's config from these, most specific first.
+QUARK_LAYER_CONFIG_KEYS = ("layer_quant_config", "layer_type_quant_config")
+
 
 @dataclass(frozen=True)
 class WeightDeclaration:
     """One nested weight spec and the layers it applies to."""
 
-    targets: str  # Layer pattern(s) the spec applies to; empty for a whole-checkpoint scope.
+    targets: str  # Layer pattern(s) or module class the spec applies to; empty for a whole-checkpoint scope.
     dtype: str  # Lower-cased ``dtype``/``type`` tag; empty when the spec names none.
     bits: float  # ``num_bits``/``bits``; 0.0 when absent or unusable.
 
@@ -38,16 +42,20 @@ def _declaration(targets: str, scope: Any) -> WeightDeclaration | None:
 
 
 def weight_declarations(quant_cfg: Any) -> tuple[list[WeightDeclaration], list[WeightDeclaration]]:
-    """``(whole-checkpoint, per-layer)`` weight declarations nested in ``quant_cfg``, empty when it nests none."""
+    """``(whole-checkpoint, per-layer)`` weight declarations nested in ``quant_cfg``, empty when it nests none.
+
+    Quark's per-layer declarations come in the order sglang resolves them, most specific first.
+    """
     if not isinstance(quant_cfg, dict):
         return [], []
     whole = [
         decl for decl in (_declaration("", quant_cfg.get("global_quant_config")), _declaration("", quant_cfg)) if decl
     ]
     per_layer: list[WeightDeclaration] = []
-    layer_cfg = quant_cfg.get("layer_quant_config")
-    if isinstance(layer_cfg, dict):
-        per_layer.extend(decl for pattern, scope in layer_cfg.items() if (decl := _declaration(str(pattern), scope)))
+    for key in QUARK_LAYER_CONFIG_KEYS:
+        layer_cfg = quant_cfg.get(key)
+        if isinstance(layer_cfg, dict):
+            per_layer.extend(decl for target, scope in layer_cfg.items() if (decl := _declaration(str(target), scope)))
     groups = quant_cfg.get("config_groups")
     if isinstance(groups, dict):
         for name, scope in groups.items():
