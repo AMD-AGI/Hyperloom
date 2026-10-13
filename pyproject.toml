@@ -395,9 +395,15 @@ omit = [
     # Byte-identical upstream KB Store SDK; validated by checksum contract tests.
     "src/kernelforge/knowledge/kb_store/remote_client.py",
     # CLI entry points (argument plumbing; exercised via the CLIs themselves).
-    "src/kernelforge/cli.py",
+    "src/kernelforge/cli/*",
     "src/kernelforge/gemm_tune/cli.py",
     "src/kernelforge/fusion/command.py",
+    # The forge-fuse stages command.py drives.
+    "src/kernelforge/fusion/agent_selection.py",
+    "src/kernelforge/fusion/compile_pass_claim.py",
+    "src/kernelforge/fusion/harness_authoring.py",
+    "src/kernelforge/fusion/serving_gate.py",
+    "src/kernelforge/fusion/source_snapshot.py",
     # GPU toolchain + profilers: shell out to rocprofv3 / rocprof-compute /
     # ninja / the build system and require real hardware.
     "src/kernelforge/mcp_server/tools/bench.py",

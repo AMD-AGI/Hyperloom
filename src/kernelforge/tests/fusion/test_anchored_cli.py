@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 from click.testing import CliRunner
 
+from kernelforge.fusion import agent_selection
 from kernelforge.fusion import command as cli_module
 from kernelforge.fusion.command import run as main
 from kernelforge.fusion.models import Diagnosis
@@ -245,7 +246,7 @@ def test_the_campaign_is_handed_a_concrete_agent_provider(tmp_path, monkeypatch)
     monkeypatch.setattr(
         cli_module, "resolve_framework_source_file", lambda *a, **k: (str(hz.source), "path convention")
     )
-    monkeypatch.setattr(cli_module, "_resolve_agent_choice", lambda backend, model: ("claude", "m"))
+    monkeypatch.setattr(agent_selection, "_resolve_agent_choice", lambda backend, model: ("claude", "m"))
     monkeypatch.setattr(cli_module, "_run_fusion_autoloop", spy)
     monkeypatch.setattr(cli_module, "build_recipes", lambda *a, **k: [_recipe(hz)])
 

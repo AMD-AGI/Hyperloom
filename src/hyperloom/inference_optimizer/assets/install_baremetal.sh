@@ -1324,13 +1324,15 @@ actual = "|".join((os.path.realpath(torch.__file__), torch.__version__, torch.ve
 if actual != sys.argv[1]:
     raise SystemExit(f"overlay torch differs from host torch: {actual} != {sys.argv[1]}")
 import vllm._rocm_C  # noqa: F401
+# The overlay inherits host site-packages, so `pip check` reports the host image's own conflicts; importing
+# what `vllm serve` imports is the check that matters.
+import vllm.entrypoints.openai.api_server  # noqa: F401
 from vllm.platforms import current_platform
 checker = getattr(current_platform, "is_rocm", None)
 if not ((callable(checker) and checker()) or "rocm" in repr(current_platform).lower()):
     raise SystemExit("vLLM source overlay did not select ROCm")
 torch.empty(1, device="cuda")
 PY
-  "$py" -m pip check
 }
 
 install_vllm_from_source() {

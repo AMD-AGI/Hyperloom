@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from ..predictor.view import SessionView
     from ..state.task_registry import Task
     from .machine import Transition
-from ..loop.proposals import PendingProposal, record_proposal
+from ..loop.proposals import PendingProposal, integrate_review_in_flight, record_proposal
 from hyperloom.inference_optimizer.grid_server_args import dedupe_extra_server_args
 from hyperloom.inference_optimizer.grid_server_args import (
     merge_server_args,
@@ -2914,13 +2914,8 @@ class FrameworkPhase(CoordinatorCollaborator):
         # Already ruled on by the Critic (e.g. after resume) — nothing to do.
         if self.shared_state.get_specialist_patch_verdict(sid):
             return
-        # A synthetic review for this specialist is already in flight.
-        for p in self.state.pending_proposals.values():
-            if getattr(p, "action_name", "") != "integrate_patch":
-                continue
-            pl = getattr(p, "payload", {}) or {}
-            if (pl.get("params") or {}).get("specialist_task_id") == sid:
-                return
+        if integrate_review_in_flight(self.state.pending_proposals, sid):
+            return
         proposals = done_payload.get("proposal_set") or []
         patch_name = ""
         if isinstance(proposals, list) and proposals:
@@ -3088,13 +3083,8 @@ class FrameworkPhase(CoordinatorCollaborator):
         # Already ruled on (e.g. after resume) — nothing to do.
         if self.shared_state.get_specialist_patch_verdict(sid):
             return
-        # A synthetic review for this specialist is already in flight.
-        for p in self.state.pending_proposals.values():
-            if getattr(p, "action_name", "") != "integrate_patch":
-                continue
-            pl = getattr(p, "payload", {}) or {}
-            if (pl.get("params") or {}).get("specialist_task_id") == sid:
-                return
+        if integrate_review_in_flight(self.state.pending_proposals, sid):
+            return
         proposals = done_payload.get("proposal_set") or []
         patch_name = ""
         if isinstance(proposals, list) and proposals and isinstance(proposals[0], dict):

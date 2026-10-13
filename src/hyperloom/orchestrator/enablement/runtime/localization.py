@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import difflib
+import re
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Callable
@@ -22,12 +23,11 @@ _BUILD_BACKEND_FILES: frozenset[str] = frozenset(
     {"CMakeLists.txt", "setup.py", "pyproject.toml", "setup.cfg", "meson.build", "Makefile"}
 )
 
-# Localization caps (safety + observability).
-_MAX_VENDOR_FILES = 64
 _MAX_VENDOR_BYTES = 5_000_000
 
 PYTHON_ONLY = "python_only"
 NEEDS_RUNG5 = "needs_rung5"
+OVERSIZE = "oversize"
 EMPTY = "empty"
 
 
@@ -70,11 +70,6 @@ def classify_closure(paths: list[str]) -> ClosureVerdict:
             ),
             compiled_paths=compiled,
         )
-    if len(clean) > _MAX_VENDOR_FILES:
-        return ClosureVerdict(
-            kind=NEEDS_RUNG5,
-            reason=f"closure of {len(clean)} files exceeds cap {_MAX_VENDOR_FILES}",
-        )
     return ClosureVerdict(kind=PYTHON_ONLY, reason=f"{len(clean)} python-only file(s)")
 
 
@@ -83,6 +78,20 @@ def parse_diff_paths(diff_text: str) -> list[str]:
     from hyperloom.common.unified_diff import parse_unified_diff
 
     return [c.path for c in parse_unified_diff(diff_text or "") if c.path and not c.is_deleted]
+
+
+def _scope_diff(diff_text: str, scope: str) -> str:
+    """Keep only the file sections of a git diff under ``scope``."""
+    sections = re.split(r"(?m)^(?=diff --git )", diff_text)
+    return "".join(
+        s for s in sections if s.startswith("diff --git ") and PurePosixPath(_section_path(s)).is_relative_to(scope)
+    )
+
+
+def _section_path(section: str) -> str:
+    """The post-image path in a ``diff --git a/<old> b/<new>`` header."""
+    header = section.split("\n", 1)[0]
+    return header.rsplit(" b/", 1)[-1].strip()
 
 
 def synthesize_vendor_diff(files: list[tuple[str, str, str]]) -> str:
@@ -122,14 +131,33 @@ def _closure_bytes(diff_text: str) -> int:
     return len((diff_text or "").encode("utf-8", "replace"))
 
 
+def _classify_pr_diff(diff_text: str, scope: str) -> tuple[str, list[str], ClosureVerdict]:
+    """Classify a fetched PR diff over all its files, then keep the ones under ``scope``."""
+    paths = parse_diff_paths(diff_text)
+    verdict = classify_closure(paths)
+    if not verdict.is_localizable:
+        return diff_text, paths, verdict
+    diff_text = _scope_diff(diff_text, scope)
+    paths = parse_diff_paths(diff_text)
+    if not paths:
+        return "", [], ClosureVerdict(kind=EMPTY, reason=f"no file of the PR is under {scope!r}")
+    if _closure_bytes(diff_text) > _MAX_VENDOR_BYTES:
+        verdict = ClosureVerdict(kind=OVERSIZE, reason="PR diff exceeds byte cap")
+    return diff_text, paths, verdict
+
+
 def build_localization_diff(
     action: object,
     *,
     fetch_pr_patches: Callable[[str, int], str],
     fetch_raw_file: Callable[[str, str, str], str],
-    framework_root: object = None,
+    scope: str,
 ) -> tuple[str, list[str], ClosureVerdict]:
     """Fetch/synthesize the localization diff and classify its closure.
+
+    A compiled or build file anywhere in a PR makes it a compiled gap; of the
+    rest, only the files under ``scope`` (the package the server imports) are
+    backported.
 
     Blocking (synchronous HTTP); call via ``asyncio.to_thread``.
     """
@@ -144,11 +172,7 @@ def build_localization_diff(
         diff_text = fetch_pr_patches(slug, pr_number) or ""
         if not diff_text.strip():
             return "", [], ClosureVerdict(kind=EMPTY, reason="empty PR diff (fetch failed?)")
-        paths = parse_diff_paths(diff_text)
-        verdict = classify_closure(paths)
-        if verdict.is_localizable and _closure_bytes(diff_text) > _MAX_VENDOR_BYTES:
-            verdict = ClosureVerdict(kind=NEEDS_RUNG5, reason="PR diff exceeds byte cap")
-        return diff_text, paths, verdict
+        return _classify_pr_diff(diff_text, scope)
 
     if kind == "vendor_files":
         ref = str(getattr(action, "ref", "") or "")
@@ -166,7 +190,7 @@ def build_localization_diff(
             triples.append((rel, "", new_text))
         diff_text = synthesize_vendor_diff(triples)
         if _closure_bytes(diff_text) > _MAX_VENDOR_BYTES:
-            return "", rels, ClosureVerdict(kind=NEEDS_RUNG5, reason="vendored bytes exceed cap")
+            return "", rels, ClosureVerdict(kind=OVERSIZE, reason="vendored bytes exceed cap")
         return diff_text, rels, verdict
 
     return "", [], ClosureVerdict(kind=EMPTY, reason=f"unsupported localization kind {kind!r}")
@@ -184,6 +208,7 @@ __all__ = [
     "ClosureVerdict",
     "EMPTY",
     "NEEDS_RUNG5",
+    "OVERSIZE",
     "PYTHON_ONLY",
     "build_localization_diff",
     "classify_closure",

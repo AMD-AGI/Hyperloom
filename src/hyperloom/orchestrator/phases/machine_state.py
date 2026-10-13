@@ -23,6 +23,7 @@ from hyperloom.inference_optimizer.breakdown.stop_reasons import is_valid_stop_r
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
 )
+from ..kernel.patch_landing import IntegratedStack
 from ..state.kernel_decision_settings import resolve_kernel_opt_max_failures
 from .session_contract import bound_session_declares
 from ..state.shared_state import (
@@ -893,16 +894,7 @@ def kernel_work_pending(state: Any) -> bool:
         return True
 
     rejected = {str(x) for x in (state.rejected_kernel_ids or [])}
-    integrated_entries: list[dict[str, Any]] = []
-    integrated_sources: set[str] = set()
-    for entry in state.optimization_stack or []:
-        if not isinstance(entry, dict):
-            continue
-        if str(entry.get("action") or "") == "integrate":
-            integrated_entries.append(entry)
-            source_file = str(entry.get("target_file") or entry.get("source_file") or "")
-            if source_file:
-                integrated_sources.add(source_file)
+    integrated = IntegratedStack.of(state.optimization_stack)
 
     attempts = state.kernel_opt_task_attempts or {}
     if not isinstance(attempts, dict):
@@ -913,23 +905,7 @@ def kernel_work_pending(state: Any) -> bool:
         kernel_id = str(attempt.get("current_kernel_id") or attempt.get("kernel_id") or ledger_id)
         source_file = str(attempt.get("last_source_file") or "")
         task_group_key = str(attempt.get("task_group_key") or "")
-        integrated = False
-        for integrated_entry in integrated_entries:
-            integrated_key = str(integrated_entry.get("task_group_key") or "")
-            if task_group_key and integrated_key:
-                integrated = task_group_key == integrated_key
-            else:
-                if str(integrated_entry.get("kernel_id") or "") != kernel_id:
-                    continue
-                integrated_source = str(
-                    integrated_entry.get("target_file") or integrated_entry.get("source_file") or ""
-                )
-                integrated = not source_file or not integrated_source or source_file == integrated_source
-            if integrated:
-                break
-        if integrated:
-            continue
-        if source_file and source_file in integrated_sources:
+        if integrated.covers(kernel_ids=(kernel_id,), task_group_key=task_group_key, source_file=source_file):
             continue
         decision = str(attempt.get("last_decision") or "").strip().upper()
         status = str(attempt.get("last_status") or "").strip().lower()

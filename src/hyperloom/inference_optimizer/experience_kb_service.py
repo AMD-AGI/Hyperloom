@@ -41,13 +41,17 @@ LOCAL_PORTS = range(20_000, 30_000)
 # batch to the global KB inside one request.
 REQUEST_TIMEOUT_SECONDS = 30.0
 SERVICE_DIR = "experience-kb"
+# Names the service's data home instead of $USER_DATA_PATH/experience-kb. One home serves one service at a time, so
+# runs on other hosts that share a session root each need their own.
+HOME_ENV = "HYPERLOOM_KB_HOME"
 AUTO_PUSH_ENV = "HYPERLOOM_KB_AUTO_PUSH"
 _PLACEHOLDER = "<PLEASE_FILL_IN>"
 _PLANNER_MODEL_KEYS = ("LOCAL_KB_PLANNER_MODEL", "CLAUDE_MODEL", "ANTHROPIC_MODEL")
 
 
 def service_home() -> Path:
-    return workspace_root() / SERVICE_DIR
+    named = (os.environ.get(HOME_ENV) or "").strip()
+    return Path(named).expanduser() if named else workspace_root() / SERVICE_DIR
 
 
 def spool_root() -> Path:
@@ -225,6 +229,7 @@ def main(argv: list[str] | None = None) -> int:
 
 __all__ = [
     "AUTO_PUSH_ENV",
+    "HOME_ENV",
     "LOCAL_PORTS",
     "SERVICE_DIR",
     "auto_push",

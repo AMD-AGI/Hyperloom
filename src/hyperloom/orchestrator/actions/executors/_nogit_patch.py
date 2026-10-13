@@ -309,10 +309,23 @@ def _apply_patch_no_git(
             "pre_image_sha256": _file_digest(abs_path),
         }, ""
 
+    def _record_restore(abs_path: Path, rel: Path) -> str:
+        """Back ``abs_path`` up to restore on revert, or record that revert deletes it when it does not exist."""
+        if not abs_path.exists():
+            return _record(
+                {
+                    "target": str(abs_path),
+                    "existed": False,
+                    "backup_path": None,
+                    "revert_action": "delete",
+                }
+            )
+        rec, err = _backup_existing(abs_path, rel, "restore")
+        return err or _record(rec)  # type: ignore[arg-type]
+
     for old_raw, new_raw in patch_file_targets(patch_text):
         is_create = old_raw == _PATCH_DEV_NULL or not old_raw
         is_delete = new_raw == _PATCH_DEV_NULL or not new_raw
-        is_rename = not is_create and not is_delete and old_raw != new_raw
 
         if is_create:
             # New file created by patch: track for deletion on revert.
@@ -334,100 +347,44 @@ def _apply_patch_no_git(
 
         elif is_delete:
             # Existing file deleted by patch: back it up to restore on revert.
-            if not old_raw or old_raw == _PATCH_DEV_NULL:
-                continue
             rel_old, abs_old, err = _resolve_target(old_raw)
             if err:
                 return _fail(err, backups)
-            if abs_old.exists():
-                rec, err = _backup_existing(abs_old, rel_old, "restore")  # type: ignore[arg-type]
-                if err:
-                    return _fail(err, backups)
-                err = _record(rec)  # type: ignore[arg-type]
-            else:
-                err = _record(
-                    {
-                        "target": str(abs_old),
-                        "existed": False,
-                        "backup_path": None,
-                        "revert_action": "delete",
-                    }
-                )
+            err = _record_restore(abs_old, rel_old)  # type: ignore[arg-type]
             if err:
                 return _fail(err, backups)
 
-        elif is_rename:
-            # Rename/move: back up old source (to restore on revert) and track new destination (to delete on revert).
+        else:
+            # Header tokens differ by their a/ b/ prefixes even for a modification; only stripped paths show a rename.
             rel_old, abs_old, err = _resolve_target(old_raw)
             if err:
                 return _fail(err, backups)
             rel_new, abs_new, err = _resolve_target(new_raw)
             if err:
                 return _fail(err, backups)
-            if rel_old == rel_new:
-                # Both header prefixes resolve to one file at this strip level,
-                # so this is a plain modification, not a rename.
+            # Rename/move: back up old source (to restore on revert) and track new destination (to delete on revert).
+            if rel_old != rel_new:
                 if abs_old.exists():  # type: ignore[union-attr]
-                    rec, err = _backup_existing(abs_old, rel_old, "restore")  # type: ignore[arg-type]
+                    rec, err = _backup_existing(abs_old, rel_old, "restore_old")  # type: ignore[arg-type]
                     if err:
                         return _fail(err, backups)
                     err = _record(rec)  # type: ignore[arg-type]
-                else:
-                    err = _record(
-                        {
-                            "target": str(abs_old),
-                            "existed": False,
-                            "backup_path": None,
-                            "revert_action": "delete",
-                        }
-                    )
-                if err:
-                    return _fail(err, backups)
-                continue
-            # Back up old source so it can be restored on revert.
-            if abs_old.exists():  # type: ignore[union-attr]
-                rec, err = _backup_existing(abs_old, rel_old, "restore_old")  # type: ignore[arg-type]
-                if err:
-                    return _fail(err, backups)
-                err = _record(rec)  # type: ignore[arg-type]
-                if err:
-                    return _fail(err, backups)
-            # Track new destination for deletion on revert.
-            err = _record(
-                {
-                    "target": str(abs_new),
-                    "existed": False,
-                    "backup_path": None,
-                    "revert_action": "delete",
-                }
-            )
-            if err:
-                return _fail(err, backups)
-
-        else:
-            # Modification: back up existing target to restore on revert.
-            target_raw = new_raw if (new_raw and new_raw != _PATCH_DEV_NULL) else old_raw
-            if not target_raw or target_raw == _PATCH_DEV_NULL:
-                continue
-            rel_t, abs_t, err = _resolve_target(target_raw)
-            if err:
-                return _fail(err, backups)
-            if abs_t.exists():  # type: ignore[union-attr]
-                rec, err = _backup_existing(abs_t, rel_t, "restore")  # type: ignore[arg-type]
-                if err:
-                    return _fail(err, backups)
-                err = _record(rec)  # type: ignore[arg-type]
-            else:
+                    if err:
+                        return _fail(err, backups)
                 err = _record(
                     {
-                        "target": str(abs_t),
+                        "target": str(abs_new),
                         "existed": False,
                         "backup_path": None,
                         "revert_action": "delete",
                     }
                 )
-            if err:
-                return _fail(err, backups)
+                if err:
+                    return _fail(err, backups)
+            else:
+                err = _record_restore(abs_old, rel_old)  # type: ignore[arg-type]
+                if err:
+                    return _fail(err, backups)
 
     if not mark_prepared(backup_root):
         return _fail("backup prepare record could not be persisted", backups)
