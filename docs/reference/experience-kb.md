@@ -259,8 +259,11 @@ Hyperloom asks for 40,000 characters, so the block an orchestration turn or a
 specialist prompt carries stays bounded whatever the records hold.
 
 Each item in `experiences`, and in `/v1/list`, is a summary:
-`experience_id`, `source_run_id`, `change_summary`, `decision`,
-`baseline_value`, and `outcome_value`; reads add `score` and `why_matched`.
+`experience_id`, `source_run_id`, `identity` (the Experience's condition
+map), `change_summary`, `decision`, `baseline_value`, and `outcome_value`;
+reads add `score` and `why_matched`. A reader that must know whether an
+Experience was measured under its own conditions compares `identity` with
+them instead of parsing `prompt_block`.
 
 ### `GET /v1/list` and `GET /v1/export`
 

@@ -267,6 +267,7 @@ def _summary(experience: Experience) -> dict[str, JsonValue]:
     return {
         "experience_id": experience.id,
         "source_run_id": experience.run_id,
+        "identity": dict(experience.identity),
         "change_summary": experience.change.summary if experience.change is not None else "",
         "decision": experience.outcome.decision if experience.outcome is not None else "",
         "baseline_value": experience.baseline_value,

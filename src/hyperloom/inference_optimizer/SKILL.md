@@ -620,7 +620,7 @@ characters; the rest of a read is left out, never cut. The injected agents
 cite the Experiences that shaped a proposal in its `experience_citations`,
 which reach the measured Experience's `provenance.extra`. `experiences` holds one
 summary per injected Experience, in `experience_ids` order: `experience_id`,
-`source_run_id`, `change_summary`, `decision`, `baseline_value`,
+`source_run_id`, `identity`, `change_summary`, `decision`, `baseline_value`,
 `outcome_value`, `score`, and `why_matched`. `read_optimizer_state.py` prints
 the latest orchestration and specialist entries with one line per injected
 Experience. When a poll shows a new entry, report each Experience's summary

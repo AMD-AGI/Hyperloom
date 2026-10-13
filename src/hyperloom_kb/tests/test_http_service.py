@@ -249,9 +249,11 @@ def test_write_is_immediately_readable_immutable_and_rendered_losslessly(
     assert read.experiences[0]["experience_id"] == experience.id
     assert read.experiences[0]["decision"] == "keep"
     assert read.experiences[0]["source_run_id"] == "run-1"
+    assert read.experiences[0]["identity"] == experience.identity
     assert read.experiences[0]["score"] > 0
     assert read.experiences[0]["why_matched"]
     assert [item["experience_id"] for item in page.items] == [experience.id]
+    assert page.items[0]["identity"] == experience.identity
     assert "score" not in page.items[0]
     assert health == {
         "status": "ok",
