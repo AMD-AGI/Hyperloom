@@ -18,6 +18,7 @@ from hyperloom.inference_optimizer.session.session_paths import forge_handoff_di
 from hyperloom.orchestrator.kernel.campaign_baseline import campaign_repositories
 from hyperloom.orchestrator.kernel.gemm_shape_coverage import parse_aiter_shape_lookups, traced_gemm_shapes
 from hyperloom.orchestrator.measurement.jit_variants import render_jit_variants, variant_counts
+from kernelforge.serving_windows import hot_kernels_by_class, render_hot_kernels_by_class
 from hyperloom.orchestrator.measurement.runtime_findings import (
     AITER_TUNED_MISS,
     load_runtime_findings,
@@ -221,7 +222,31 @@ def build_trace_evidence_md(state: Any, *, session_dir: Path | None = None) -> s
     lines.extend(["```text", *_tuned_miss_lines(candidates_path, profiled), "```"])
     lines.extend(["", "## Recompiled Kernels", ""])
     lines.extend(_jit_variant_lines(session_dir))
+    lines.extend(["", "## Hot Kernels by Step Class", ""])
+    lines.extend(_hot_kernel_lines(getattr(state, "last_profile_trace", "")))
     return "\n".join(lines) + "\n"
+
+
+def _resolve_capture(trace: Any) -> str:
+    """The trace file to rank, from a path that may name the capture directory instead."""
+    path = Path(str(trace or "").strip() or ".")
+    if path.is_file():
+        return str(path)
+    if not path.is_dir():
+        return ""
+    captures = sorted(path.glob("*.trace.json*"), key=lambda p: p.stat().st_mtime)
+    return str(captures[-1]) if captures else ""
+
+
+def _hot_kernel_lines(trace: Any) -> list[str]:
+    """Per-step-class kernel rankings read straight off the raw capture, without TraceLens."""
+    by_class = hot_kernels_by_class(_resolve_capture(trace))
+    if not by_class:
+        return [
+            "- the raw capture carries no `step[...]` annotations, so no step class could be ranked "
+            "(a capture taken outside the serving loop looks like this)"
+        ]
+    return render_hot_kernels_by_class(by_class)
 
 
 def _jit_variant_lines(session_dir: Path | None) -> list[str]:

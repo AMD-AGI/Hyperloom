@@ -20,6 +20,7 @@ from typing import Any, Callable, Optional, Sequence
 from kernelforge.agent_backends.base import AgentRunSpec, AgentToolPolicy, watchdog_timeout_sec
 from kernelforge.agent_backends.session_resume import is_api_failure
 from kernelforge.resources import resource_path
+from kernelforge.trace_events import load_trace_events
 
 from .diagnose import LAUNCH_BOUND_CATEGORIES, categories_in_text, categorize_kernel_name
 from .llm_failure import (
@@ -181,24 +182,10 @@ def hot_kernels_from_trace(
     return rows[:top_n]
 
 
-def _load_trace_events(trace_path: str | Path) -> list[dict[str, Any]]:
-    path = Path(trace_path)
-    try:
-        opener = gzip.open if path.suffix == ".gz" or path.name.endswith(".json.gz") else open
-        with opener(path, "rt", encoding="utf-8") as handle:
-            payload = json.load(handle)
-    except (OSError, ValueError):
-        return []
-    events = payload.get("traceEvents") if isinstance(payload, dict) else None
-    if not isinstance(events, list):
-        return []
-    return [event for event in events if isinstance(event, dict)]
-
-
 def kernel_names_from_trace(trace_path: str | Path, *, top_n: int = 40) -> list[str]:
     """Distinct kernel names ranked by total duration, compute kernels included."""
     totals: dict[str, float] = defaultdict(float)
-    for event in _load_trace_events(trace_path):
+    for event in load_trace_events(trace_path):
         if event.get("cat") != "kernel":
             continue
         try:
@@ -224,7 +211,7 @@ def stream_ordered_kernels(
     """
     streams: dict[tuple[Any, Any], list[dict[str, Any]]] = defaultdict(list)
     total_kernel_us = 0.0
-    for event in _load_trace_events(trace_path):
+    for event in load_trace_events(trace_path):
         if event.get("cat") != "kernel":
             continue
         try:
