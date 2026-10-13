@@ -1,0 +1,133 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""What a request pays per input token before the engine sees it."""
+
+from __future__ import annotations
+
+import json
+
+from hyperloom.orchestrator.actions.executors import report as rp
+from hyperloom.orchestrator.measurement import host_input_cost as hic
+
+
+def _workspace(tmp_path, pairs, *, name: str = "ws"):
+    """Write a per-request export holding ``(input tokens, ttft ms)`` for the scored phase."""
+    artifacts = tmp_path / name / "benchmark_1" / "aiperf_artifacts"
+    artifacts.mkdir(parents=True)
+    lines = [
+        json.dumps(
+            {
+                "metadata": {"benchmark_phase": "profiling"},
+                "metrics": {
+                    "input_sequence_length": {"value": isl},
+                    "time_to_first_token": {"value": ttft},
+                },
+            }
+        )
+        for isl, ttft in pairs
+    ]
+    (artifacts / "profile_export.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return tmp_path / name
+
+
+def _linear(n: int, *, ms_per_100k: float, base_ms: float = 200.0):
+    """Requests whose TTFT grows with input length at a known rate."""
+    return [(10_000 + i * 2_000, base_ms + (10_000 + i * 2_000) / 100_000 * ms_per_100k) for i in range(n)]
+
+
+def test_the_slope_is_reported_in_ms_per_100k_tokens(tmp_path):
+    ws = _workspace(tmp_path, _linear(200, ms_per_100k=200.0))
+
+    out = hic.input_cost(ws)
+
+    assert out is not None
+    assert abs(out["ms_per_100k_tokens"] - 200.0) < 1.0
+    assert out["requests"] == 200
+    assert out["low_isl"] < out["high_isl"]
+    assert out["flagged"] is True
+
+
+def test_a_front_end_that_costs_nothing_per_token_is_not_flagged(tmp_path):
+    ws = _workspace(tmp_path, _linear(200, ms_per_100k=5.0))
+
+    out = hic.input_cost(ws)
+
+    assert out["ms_per_100k_tokens"] < hic.FLAG_MS_PER_100K
+    assert out["flagged"] is False
+
+
+def test_a_queued_tail_does_not_move_the_slope(tmp_path):
+    """TTFT carries requests that waited; medians on each half are not moved by them."""
+    clean = _linear(200, ms_per_100k=50.0)
+    queued = [(isl, ttft * 40) for isl, ttft in clean[:20]]
+    ws = _workspace(tmp_path, clean + queued)
+
+    out = hic.input_cost(ws)
+
+    assert abs(out["ms_per_100k_tokens"] - 50.0) < 15.0
+
+
+def test_too_few_requests_carry_no_slope(tmp_path):
+    ws = _workspace(tmp_path, _linear(hic.MIN_REQUESTS - 1, ms_per_100k=200.0))
+
+    assert hic.input_cost(ws) is None
+
+
+def test_a_run_over_one_prompt_length_carries_no_slope(tmp_path):
+    ws = _workspace(tmp_path, [(100_000, 400.0 + i) for i in range(200)])
+
+    assert hic.input_cost(ws) is None
+
+
+def test_an_absent_run_reports_nothing(tmp_path):
+    assert hic.input_cost(tmp_path / "absent") is None
+    assert hic.input_cost(None) is None
+    assert hic.input_cost("") is None
+
+
+def test_the_report_says_where_a_large_cost_is_paid():
+    out = hic.input_cost
+    body = "\n".join(
+        rp.render_input_cost(
+            {
+                "ms_per_100k_tokens": 230.3,
+                "requests": 564,
+                "low_isl": 49092,
+                "low_ttft_ms": 289.7,
+                "high_isl": 213618,
+                "high_ttft_ms": 668.5,
+                "flagged": True,
+            }
+        )
+    )
+
+    assert out is not None
+    assert "+230.3 ms" in body and "564 requests" in body
+    assert "290 ms at 49k" in body and "668 ms at 213k" in body
+    assert "in front of the engine" in body
+
+
+def test_the_report_states_a_small_cost_without_warning():
+    body = "\n".join(
+        rp.render_input_cost(
+            {
+                "ms_per_100k_tokens": 7.2,
+                "requests": 500,
+                "low_isl": 50_000,
+                "low_ttft_ms": 200.0,
+                "high_isl": 200_000,
+                "high_ttft_ms": 210.8,
+                "flagged": False,
+            }
+        )
+    )
+
+    assert "+7.2 ms" in body
+    assert "⚠" not in body
+    assert "in front of the engine" not in body
+
+
+def test_nothing_renders_without_a_measurement():
+    assert rp.render_input_cost(None) == []
+    assert rp.render_input_cost({}) == []

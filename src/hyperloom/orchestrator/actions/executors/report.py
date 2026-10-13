@@ -16,6 +16,7 @@ from typing import Any
 
 from hyperloom.common import io as _common_io
 from hyperloom.common.platform_probe import platform_fingerprint
+from hyperloom.orchestrator.measurement.host_input_cost import input_cost, render_input_cost
 from hyperloom.orchestrator.measurement.intvty_samples import comparison_interval, comparison_regimes
 
 from ...bus.message_bus import MessageBus
@@ -375,6 +376,7 @@ def _format_composite_perf_section(summary: dict[str, Any]) -> list[str]:
         lines.append(f"- comparison gain     : `{gain_text}` (diagnostic; not a cumulative validation)")
         lines.extend(_format_comparison_interval(comparison.get("interval")))
         lines.extend(_format_comparison_regimes(comparison.get("regimes")))
+        lines.extend(render_input_cost(comparison.get("input_cost")))
         lines.append(f"- comparable          : `{str(comparison['comparable']).lower()}`")
         if comparison["degrade_reason"]:
             lines.append(f"- degrade reason      : `{comparison['degrade_reason']}`")
@@ -503,6 +505,10 @@ def _build_summary_dict(
             "regimes": comparison_regimes(
                 (state.current_best or {}).get("workspace"),
                 getattr(state, "baseline_workspace", ""),
+            ),
+            # Read off the current best's own requests: a front-end cost is a property of one run, not of a pair.
+            "input_cost": input_cost(
+                (state.current_best or {}).get("workspace") or getattr(state, "baseline_workspace", "")
             ),
             "comparable": graded.comparable,
             "degrade_reason": graded.degrade_reason,
