@@ -12,8 +12,8 @@ import sqlite3
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
 
+from hyperloom.common.owner_scope import local_owner_scope
 from hyperloom.common.timeutil import now_iso
 from hyperloom.orchestrator.state.task_states import TERMINAL_STATES
 
@@ -74,16 +74,6 @@ ROUND_LEASE_PID = 0
 
 #: Recorded in the lane row's ``action`` column.
 _ROUND_LEASE_ACTION = "bringup_round"
-
-
-def local_owner_scope() -> str:
-    """Identify this boot and PID namespace, or leave ownership unobservable."""
-    try:
-        boot = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
-        namespace = Path("/proc/self/ns/pid").stat().st_ino
-    except OSError:
-        return ""
-    return f"{boot}:{namespace}" if boot else ""
 
 
 def _lease_iso(unix_ts: float) -> str:

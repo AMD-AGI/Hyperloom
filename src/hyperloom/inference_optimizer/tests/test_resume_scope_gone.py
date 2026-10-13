@@ -271,13 +271,11 @@ def test_arguments_are_validated_before_the_lock(tmp_path, scope, reason):
 
 
 def _recover(tmp_path, monkeypatch, *argv):
-    from hyperloom.inference_optimizer.cli.parser import _build_parser
-    from hyperloom.inference_optimizer.cli.recover import _run_recover_session
-    from hyperloom.orchestrator.bus import resource_lock
+    from hyperloom.common import owner_scope
+    from hyperloom.inference_optimizer.cli import main
 
-    monkeypatch.setattr(resource_lock, "local_owner_scope", lambda: HERE)
-    args = _build_parser().parse_args(["recover", "--session-dir", str(tmp_path), *argv])
-    return _run_recover_session(args)
+    monkeypatch.setattr(owner_scope, "local_owner_scope", lambda: HERE)
+    return main(["recover", "--session-dir", str(tmp_path), *argv])
 
 
 def test_recover_cli_confirms_lost_scope_end_to_end(tmp_path, monkeypatch, capsys):

@@ -68,7 +68,7 @@ def _run_cleanup_confirmation(
         if scope is None:
             result = confirm_task_stopped(session_dir, task_id=task_id, reason=reason)
         else:
-            from hyperloom.orchestrator.bus.resource_lock import local_owner_scope
+            from hyperloom.common.owner_scope import local_owner_scope
 
             result = confirm_scope_gone(
                 session_dir, owner_scope=scope, reason=reason, current_scope=local_owner_scope()
