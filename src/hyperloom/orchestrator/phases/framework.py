@@ -2849,7 +2849,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         # Already ruled on by the Critic (e.g. after resume) — nothing to do.
         if self.shared_state.get_specialist_patch_verdict(sid):
             return
-        if integrate_review_in_flight(self.state, sid):
+        if integrate_review_in_flight(self.state.pending_proposals, sid):
             return
         proposals = done_payload.get("proposal_set") or []
         patch_name = ""
@@ -3018,7 +3018,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         # Already ruled on (e.g. after resume) — nothing to do.
         if self.shared_state.get_specialist_patch_verdict(sid):
             return
-        if integrate_review_in_flight(self.state, sid):
+        if integrate_review_in_flight(self.state.pending_proposals, sid):
             return
         proposals = done_payload.get("proposal_set") or []
         patch_name = ""
