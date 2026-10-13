@@ -201,7 +201,6 @@ def _validate(**overrides: Any) -> dict[str, Any]:
             "severity": "ok",
             "blocking_reasons": [],
             "warnings": [],
-            "recommended_splitter_mode": "decode_only",
             "measures": {"attributed_pct": 91.0, "graph_launch_coverage": 0.9},
             "thresholds_effective": {"graph_launch_coverage_max": 0.2},
         },

@@ -4643,11 +4643,11 @@ def main() -> int:
         choices=("mixed", "decode_only", "prefilldecode", "generic"),
         default=(os.environ.get("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "").strip() or "mixed"),
         help=(
-            "Which of TraceLens splitter's three steady-state chunks to "
-            "consume for the perf report. The splitter always produces all "
-            "three (mixed / decode_only / prefilldecode); this flag picks "
-            "ONE per TraceLens's design that the chunks are parallel "
-            "view-of-the-same-trace, not a fallback ladder. "
+            "Which steady-state chunk to consume for the perf report. "
+            "For LLM inference (vLLM/SGLang), the splitter produces three "
+            "phase-specific chunks (mixed / decode_only / prefilldecode); "
+            "for scriptable frameworks (xDiT/custom), 'generic' selects "
+            "a single steady_state chunk. "
             "Defaults to 'mixed' (representative DO:PD mix at ~max "
             "concurrency) which matches roofline-v2's default profiling "
             "intent. Switch to 'prefilldecode' when the workload is "

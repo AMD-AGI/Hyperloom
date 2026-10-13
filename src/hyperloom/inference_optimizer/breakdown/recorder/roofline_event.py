@@ -419,7 +419,6 @@ def _summarize_validate(profile_result: dict[str, Any]) -> dict[str, Any]:
         "blocking_reasons": [_clip(row) for row in _as_list(verdict.get("blocking_reasons"))],
         "warnings": [_clip(row) for row in _as_list(verdict.get("warnings"))],
         "severity": verdict.get("severity"),
-        "recommended_splitter_mode": verdict.get("recommended_splitter_mode"),
         "thresholds_effective": _as_dict(verdict.get("thresholds_effective")),
         "trace_quality": _summarize_trace_quality(validate),
         # Where the unbounded per-rank / per-candidate / per-chunk tables live.
