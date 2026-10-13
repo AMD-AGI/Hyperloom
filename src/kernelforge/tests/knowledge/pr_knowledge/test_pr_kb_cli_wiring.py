@@ -162,9 +162,11 @@ def test_loop_appends_the_event_only_after_the_campaign_guard(tmp_path):
     from kernelforge.loop.runner import IterationConfig, IterationLoop
 
     assert "pr_kb_event" in set(IterationConfig.__dataclass_fields__)
-    source = inspect.getsource(IterationLoop._run_locked)
-    guard = source.index("already contains a campaign")
-    append = source.index("pr_refs_refreshed")
+    assert "already contains a campaign" in inspect.getsource(IterationLoop._start_fresh_campaign)
+    assert "pr_refs_refreshed" in inspect.getsource(IterationLoop._publish_pr_kb_refresh)
+    source = inspect.getsource(IterationLoop._open_session)
+    guard = source.index("self._start_fresh_campaign(")
+    append = source.index("self._publish_pr_kb_refresh()")
     assert append > guard, "the event append must follow the fresh-campaign guard"
 
 
@@ -239,7 +241,7 @@ def test_the_event_append_cannot_abort_the_campaign():
     """A failed observability write may only print, never propagate."""
     from kernelforge.loop.runner import IterationLoop
 
-    source = inspect.getsource(IterationLoop._run_locked)
+    source = inspect.getsource(IterationLoop._publish_pr_kb_refresh)
     append = source.index("pr_refs_refreshed")
     handler = source.index("except (OSError, ValueError)", append)
     following = source.index("self.ic.pr_kb_event = {}", append)

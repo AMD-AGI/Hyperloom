@@ -5,7 +5,16 @@
 
 from __future__ import annotations
 
-from kernelforge.loop.run_state import RunState
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+from kernelforge.loop.run_state import MAX_PINNED_ITERATIONS, RunState
+
+if TYPE_CHECKING:
+    from kernelforge.loop.handoffs import HandoffStore
+    from kernelforge.loop.run_state import LoopStateStore
+    from kernelforge.loop.runner import IterationResult
+    from kernelforge.loop.search_policy import SearchPolicyDecision
 
 # Canonical on-disk locations, shown to the agent so it can Read detail on demand.
 _ARCHIVE_REL = "forge_experiments/candidates"
@@ -173,3 +182,127 @@ def render_long_horizon_header(
 
     # The fixed control state + retrieval map is the minimum useful view.
     return header
+
+
+# How many recent iteration outcomes the long-horizon prompt header is built from.
+LONG_HORIZON_OUTCOME_WINDOW = max(
+    MAX_PINNED_ITERATIONS,
+    MAX_RECENT_ATTEMPT_LINES,
+)
+
+
+def long_horizon_header(
+    state: RunState,
+    store: LoopStateStore,
+    handoff_store: HandoffStore | None = None,
+) -> str:
+    """The compact long-horizon header for the Implementer prompt, or \"\"."""
+    outcomes = store.recent_results(LONG_HORIZON_OUTCOME_WINDOW)
+    return render_long_horizon_header(
+        state,
+        outcomes,
+        include_handoffs=bool(handoff_store and handoff_store.latest()),
+    )
+
+
+def _compact_history_entry(r: IterationResult) -> str:
+    """One-line history entry for the agent prompt — keeps tokens bounded."""
+    rat = (r.agent_rationale or "").replace("\n", " ").strip()[:80]
+    if not r.validation_passed:
+        last = ""
+        if r.validation_summary:
+            lines = [ln for ln in r.validation_summary.splitlines() if ln.strip()]
+            if lines:
+                last = lines[-1][:60]
+        return f"iter {r.iteration} REVERT(validation) last='{last}' rat='{rat}'"
+    parts = [f"iter {r.iteration}", "KEEP" if r.kept else "REVERT(perf)"]
+    if r.mean_case_speedup is not None:
+        parts.append(f"mean_case_speedup={r.mean_case_speedup:.4f}x")
+    if r.wall_ms is not None:
+        parts.append(f"wall={r.wall_ms:.3f}ms")
+    if r.snr_db is not None:
+        parts.append(f"snr={r.snr_db:.1f}dB")
+    if r.vgpr:
+        parts.append(f"vgpr={r.vgpr}")
+    if r.pmc_diagnosis:
+        parts.append(f"pmc='{r.pmc_diagnosis[:40]}'")
+    if rat:
+        parts.append(f"rat='{rat}'")
+    return " ".join(parts)
+
+
+@dataclass(frozen=True)
+class ImplementerHistoryParts:
+    """The blocks of cross-iteration context one Implementer prompt is assembled from."""
+
+    long_horizon_header: str
+    digest: str
+    lessons: str
+    ledger: str
+    recent_results: tuple[IterationResult, ...]
+    analysis_evidence: str
+    case_config_coverage: str
+    ceiling_advisory: str
+    uncommittable_new_paths: str
+    search_policy: SearchPolicyDecision | None
+    supervisor_ruling: str
+    optimization_plan_path: str
+
+
+def compose_implementer_history(parts: ImplementerHistoryParts) -> str:
+    """Assemble the Implementer's history; each later block is placed above the ones before it."""
+    if parts.long_horizon_header:
+        history = "\n\n".join(p for p in (parts.lessons, parts.ledger) if p)
+    else:
+        history = "\n\n".join(p for p in (parts.digest, parts.lessons, parts.ledger) if p)
+    if not history:
+        history = "\n".join(_compact_history_entry(r) for r in parts.recent_results)
+    for block in (
+        parts.analysis_evidence,
+        parts.case_config_coverage,
+        parts.ceiling_advisory,
+        parts.uncommittable_new_paths,
+    ):
+        if block:
+            history = f"{block}\n\n{history}"
+    policy = parts.search_policy
+    if policy is not None:
+        policy_lines = [
+            "## Search Policy (deterministic outer-loop decision)",
+            f"Mode: {policy.mode}",
+            f"Objective: {policy.objective_kind}",
+            "Reasons: " + ", ".join(policy.reason_codes),
+        ]
+        policy_lines.append(f"Mode residence remaining after this iteration: {policy.residence_iterations_remaining}")
+        history = "\n".join(policy_lines) + "\n\n" + history
+    # The latest free-form Supervisor Ruling is durable across KEEP and resume.
+    if parts.supervisor_ruling:
+        history = (
+            "## Latest Supervisor Ruling\n"
+            "This review is the current planning authority. It "
+            "overrides subjective recommendations or conclusions in "
+            "historical lesson records, but never overrides objective "
+            "validation or measurement facts.\n\n"
+            f"{parts.supervisor_ruling}\n\n{history}"
+        )
+    # The long-horizon header goes at the very TOP, above the supervisor/analyst/pmc prepends, as the compact memory
+    # frame the implementer reads first.
+    if parts.long_horizon_header:
+        history = f"{parts.long_horizon_header}\n\n{history}"
+    if parts.optimization_plan_path:
+        ruling_instruction = (
+            "The plan was synthesized from current evidence and the "
+            "latest Supervisor Ruling. If any plan statement conflicts "
+            "with that ruling, follow the ruling. "
+            if parts.supervisor_ruling
+            else "The plan was synthesized from current evidence. "
+        )
+        history = (
+            "## Required optimization plan\n"
+            f"Read {parts.optimization_plan_path} and execute the integrated "
+            "plan it contains. "
+            f"{ruling_instruction}"
+            "Historical lesson records are evidence, not instructions.\n\n"
+            f"{history}"
+        )
+    return history

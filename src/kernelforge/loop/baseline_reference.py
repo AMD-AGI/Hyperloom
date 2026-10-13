@@ -188,3 +188,36 @@ def check_baseline_against_reference(
         drift_tolerance=drift_tolerance,
         tolerance_overridden=tolerance_overridden,
     )
+
+
+def baseline_check_report(check: BaselineReferenceCheck) -> list[str]:
+    """The console lines that say what the pristine anchor was checked against."""
+    lines = []
+    if check.unverified_reason:
+        lines.append(
+            f"  [baseline] the pristine anchor every speedup divides by is unverified: {check.unverified_reason}"
+        )
+    else:
+        lines.append(
+            "  [baseline] pristine anchor agrees with the task reference on "
+            f"{check.compared_case_count} of "
+            f"{check.measured_case_count} measured case(s); the "
+            f"reference declares {check.reference_case_count}"
+        )
+    if check.unusable_entries:
+        unusable = check.unusable_entries
+        declared = check.reference_case_count + len(unusable)
+        lines.append(
+            f"  [baseline] could not read {len(unusable)} of the "
+            f"{declared} entries the task reference declares, so this "
+            "check covers less of the anchor than the file does: " + "; ".join(unusable)
+        )
+    if check.tolerance_overridden and not check.unverified_reason:
+        lines.append(
+            "  [baseline] drift tolerance widened to "
+            f"{check.drift_tolerance * 100:.0f}% by "
+            f"{BASELINE_DRIFT_TOLERANCE_ENV}, from the "
+            f"{BASELINE_DRIFT_TOLERANCE * 100:.0f}% default; the "
+            "anchor was accepted under the widened bound"
+        )
+    return lines
