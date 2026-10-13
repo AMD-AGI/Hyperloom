@@ -4096,18 +4096,26 @@ class IntegratePatchExecutor:
 
         Returns:
             ``{"ran", "ok", "tput", "delta_pct", "band_pct", "accuracy_pass",
-            "reason"}``. ``ran`` is False when the check was skipped (disabled, or
-            no usable base to compare against), which is reported rather than
-            silently treated as a pass.
+            "reason"}``. ``ran`` is False when the check was skipped: disabled
+            passes and says so; no usable base to compare against is
+            inconclusive and reverts.
         """
         band_pct = float(params.get("switch_off_parity_band_pct", DEFAULT_SWITCH_OFF_PARITY_BAND_PCT))
         if not bool(params.get("enable_switch_off_parity", True)):
             return {"ran": False, "ok": True, "reason": "switch-off parity check disabled"}
         if base_tput <= 0:
+            # Before anything has booted (ENABLEMENT) there is no base for the leg to
+            # land near, so the invariant cannot be tested. Keeping the code anyway
+            # would leave an unverified rewrite under every later boot attempt.
             return {
                 "ran": False,
-                "ok": True,
-                "reason": "no positive base throughput to compare a parity leg against",
+                "ok": False,
+                "inconclusive": True,
+                "reason": (
+                    "switch-off parity could not be measured: no positive base throughput "
+                    "to compare a parity leg against. Reverting because an unverified "
+                    "rewrite must not stay on disk"
+                ),
             }
         switch_names = [entry["switch"] for entry in switch_manifest]
         try:
@@ -4216,7 +4224,8 @@ class IntegratePatchExecutor:
         and would discard any enabler whose whole purpose is to make another
         rewrite profitable rather than to be profitable itself.
 
-        So the code stays and the switches are registered as search levers, with
+        So the code stays, committed like any KEEP so the next attempt's revert to
+        HEAD keeps it, and the switches are registered as search levers, with
         ``extra_envs_applied`` deliberately empty so nothing enters the running
         configuration. The explore phase then turns them on one dependency-closed
         bundle at a time.
@@ -4241,6 +4250,32 @@ class IntegratePatchExecutor:
             The ``kept_inert`` result envelope.
         """
         switch_manifest = attempt.switch_manifest
+        commit_failure, _ = self._commit_accepted_work(
+            framework_root=attempt.framework_root,
+            applied=attempt.applied,
+            applied_artifacts=attempt.applied_artifacts,
+            message=f"hyperloom KEEP_INERT {attempt.specialist_task_id}",
+        )
+        if commit_failure:
+            log.error(
+                "integrate_patch: commit-on-KEEP_INERT failed (%s); reverting rather than "
+                "leaving uncommitted code the next attempt would stash as user changes",
+                commit_failure,
+            )
+            return {
+                "status": "reverted",
+                "error_class": "keep_commit_failed",
+                "error": commit_failure,
+                "specialist_task_id": attempt.specialist_task_id,
+                "patches_applied": [],
+                "patches_reverted": [],
+                "artifacts_reverted": [],
+                "output_throughput": new_tput,
+                "delta_pct": delta_pct,
+                "bench_result": bench_result,
+                "reason": f"KEEP_INERT could not be committed: {commit_failure}",
+                "workspace": str(attempt.output_root),
+            }
         enablers = [entry["switch"] for entry in switch_manifest if entry.get("enabler")]
         reason_bits = [
             f"bundle throughput delta {delta_pct:+.2f}% < keep_threshold {keep_threshold_pct:.2f}%"

@@ -670,6 +670,34 @@ async def test_an_unprofitable_bundle_is_kept_inert_with_levers_registered(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_an_inert_keep_is_committed_so_the_next_revert_keeps_it(tmp_path, monkeypatch):
+    """Revert is a reset to HEAD; uncommitted inert code would be stashed as user changes."""
+    import subprocess
+
+    result, repo, _, _ = await _run_rewrite_integrate(tmp_path, monkeypatch, delta_pct=0.2)
+    assert result["status"] == "kept_inert"
+    status = subprocess.run(["git", "-C", str(repo), "status", "--porcelain"], capture_output=True, text=True)
+    assert status.stdout.strip() == ""
+    head_src = subprocess.run(["git", "-C", str(repo), "show", "HEAD:src.py"], capture_output=True, text=True)
+    assert head_src.stdout.endswith("return 2\n")
+
+
+@pytest.mark.asyncio
+async def test_without_a_base_an_unprofitable_bundle_reverts_instead_of_keeping_inert(tmp_path, monkeypatch):
+    """Before anything boots there is no base, so inertness cannot be shown and the code must not stay."""
+    result, repo, _, legs = await _run_rewrite_integrate(
+        tmp_path,
+        monkeypatch,
+        delta_pct=0.2,
+        extra_params={"base_tput": 0.0},
+    )
+    assert result["status"] == "reverted"
+    assert result["error_class"] == "switch_off_parity_inconclusive"
+    assert not [leg for leg in legs if leg.get("unset_envs")]
+    assert (repo / "src.py").read_text().endswith("return 1\n")
+
+
+@pytest.mark.asyncio
 async def test_an_incorrect_switched_rewrite_is_kept_inert_and_flagged(tmp_path, monkeypatch):
     """A correctness failure on a bundle names the bundle, not a switch."""
     result, repo, _, _ = await _run_rewrite_integrate(
