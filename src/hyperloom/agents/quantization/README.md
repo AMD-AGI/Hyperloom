@@ -45,7 +45,7 @@ No human interaction at any point.
 ### CLI
 
 ```bash
-python -m hyperloom.agents.quantization.cli \
+python -m hyperloom quantize \
     --prompt "$PROMPT" \                       # natural-language request
     --workspace /scratch/run-1/wks \           # per-run scratch dir
     --quark-root /path/to/Quark \              # or $QUARK_ROOT
@@ -54,7 +54,7 @@ python -m hyperloom.agents.quantization.cli \
     --max-requantize-attempts 1                # Python-level retry cap
 ```
 
-The equivalent console script is `quantization-agent`.
+The equivalent console script is `hyperloom quantize`.
 
 Exit codes: `0` success/partial · `1` failed · `2` argparse error. An
 operator-rejected checkpoint is not a distinct code — it surfaces as `partial`

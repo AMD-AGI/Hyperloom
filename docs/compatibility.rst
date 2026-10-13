@@ -152,9 +152,9 @@ mirror, set the registry prefix accordingly.
 
    * - Image
      - GPU
-   * - ``lmsysorg/sglang-rocm:v0.5.20-rocm10-mi30x-20260920``
+   * - ``lmsysorg/sglang-rocm:v0.5.21-rocm10-mi30x-20261008``
      - MI300X / MI325X
-   * - ``lmsysorg/sglang-rocm:v0.5.20-rocm10-mi35x-20260920``
+   * - ``lmsysorg/sglang-rocm:v0.5.21-rocm10-mi35x-20261008``
      - MI355X
    * - ``rocm/vllm:rocm10.0.0_ubuntu24.04_py3.14_pytorch_2.12.0_vllm_0.27.0``
      - MI300X / MI325X / MI355X
@@ -202,7 +202,7 @@ with that Python, keep its executable first on ``PATH`` for Magpie's ``python3``
 launch, and use ``PYTHON`` with ``INFERENCE_OPTIMIZER_FORCE_PYTHON=1`` if pinning
 the interpreter. Keep any activated venv consistent; ``/opt/venv`` is not required.
 
-Run ``python -m hyperloom.inference_optimizer.setup --check-only --
+Run ``python -m hyperloom setup --check-only --
 --install-framework none --frameworks atom --require-frameworks`` with the
 selected interpreter first. Only after approval, repeat without ``--check-only``:
 ``none`` skips framework installation but can still write configuration and
@@ -231,8 +231,8 @@ end-to-end validation of every stack.
      - ROCm build matching the host ROCm
      - Preinstalled by the operator; not managed by Hyperloom.
    * - SGLang
-     - 0.5.20 (rocm10), pinned to commit ``94602c9c2b7c``
-     - Recommended ``docker`` stack uses the ``lmsysorg/sglang-rocm:v0.5.20-rocm10-*`` images above (ROCm 10.0 user space). ``SGLANG_REF`` is the ``v0.5.20`` release commit (peeled from the tag object). The pin sits at 0.5.20 because through 0.5.18 the HIP extra pinned ``compressed-tensors==0.15.0``, which caps torch below 2.11 and therefore cannot resolve at all against a ROCm 10 stack; 0.5.19 moved that dependency into ``runtime_common`` unpinned, leaving the installer's ROCm torch constraint as the version pip solves for. Bare-metal installs on ROCm 10 take the source-install path; on ROCm 7.2.x hosts, ``SGLANG_ROCM_EXTRA=rocm724`` still selects the AMD wheel index. Kernel-shape profiling for SGLang >= 0.5.18 uses TraceLens ``kernel_shape_tool`` rather than git-applying SGLang roofline patches.
+     - 0.5.21 (rocm10), pinned to commit ``e00930c54890``
+     - Recommended ``docker`` stack uses the ``lmsysorg/sglang-rocm:v0.5.21-rocm10-*`` images above (ROCm 10.0 user space). ``SGLANG_REF`` is the ``v0.5.21`` release commit (peeled from the tag object). Through 0.5.18 the HIP extra pinned ``compressed-tensors==0.15.0``, which caps torch below 2.11 and therefore cannot resolve at all against a ROCm 10 stack; 0.5.19 moved that dependency into ``runtime_common`` unpinned, leaving the installer's ROCm torch constraint as the version pip solves for. Bare-metal installs on ROCm 10 take the source-install path; on ROCm 7.2.x hosts, ``SGLANG_ROCM_EXTRA=rocm724`` still selects the AMD wheel index. Kernel-shape profiling for SGLang >= 0.5.18 uses TraceLens ``kernel_shape_tool`` rather than git-applying SGLang roofline patches.
    * - vLLM
      - v0.29.0 (rocm723) wheel on ROCm 7.2.x; v0.29.0 source build, pinned to commit ``98dff2a81d74``, on ROCm 10; isolated venv
      - On ROCm 7.2.x, installs ``vllm==0.29.0+rocm723`` from the wheels.vllm.ai pip index on Ubuntu 24.04+. vLLM's ROCm wheel pins its own torch, so it installs into a dedicated venv (``--framework-env isolated``, the default for vLLM) and never touches the host torch. On ROCm 10 (``torch.version.hip`` 7.15) no wheel is published, so the installer checks out ``VLLM_SOURCE_REF`` (the ``v0.29.0`` release commit) into ``VLLM_ROOT`` (default ``/opt/hyperloom/vllm``) and builds it into ``VLLM_VENV_ROOT`` as a system-site-packages venv over the host ROCm torch. The source route requires ``--framework-env isolated``, ``git``, ``gcc``/``g++`` >= 11.3, ``cmake`` >= 3.26.1, ``ninja``, ``hipcc`` and the ROCm devel headers, installs AITER into the same venv when it is not already importable, and writes ``VLLM_ROCM_USE_AITER=1`` to ``.env`` when ``aiter`` imports. ``VLLM_INSTALL_METHOD`` (``auto``, ``wheel``, ``source``) can only confirm the detected route; a ROCm stack other than 7.2.x or 10 is rejected.
@@ -243,7 +243,7 @@ against the host ROCm, matching the ROCm 10 user space of the ``rocm/vllm`` imag
 the ``docker`` route uses; the SGLang stack
 installs from the ROCm 7.2.4 AMD wheel index when a host stays on ROCm 7.2.x;
 the recommended SGLang ``docker`` stack uses the two
-``lmsysorg/sglang-rocm:v0.5.20-rocm10-*`` images (ROCm 10.0). ``docker`` mode is still
+``lmsysorg/sglang-rocm:v0.5.21-rocm10-*`` images (ROCm 10.0). ``docker`` mode is still
 the preferred route for a pre-validated stack, since the images also pin the
 surrounding torch, Triton, and AITER builds.
 

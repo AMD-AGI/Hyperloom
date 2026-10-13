@@ -53,24 +53,35 @@ class _ProgressHandler(BaseHTTPRequestHandler):
 
 
 @pytest.mark.parametrize(
-    "framework,body,expected",
+    "framework,body,vllm_args,expected",
     [
-        ("sglang", '{"num_steps":8}', True),
-        ("vllm", '{"num_steps":8}', False),
-        ("", '{"num_steps":8}', False),
-        ("sglang", '{"num_steps":true}', False),
-        ("sglang", '{"num_steps":8.0}', False),
-        ("sglang", '{"num_steps":"8"}', False),
-        ("sglang", '{"num_steps":0}', False),
-        ("sglang", '{"num_steps":-1}', False),
-        ("sglang", '{"num_steps":8,"other":NaN}', False),
-        ("sglang", "{}", False),
-        ("sglang", "[]", False),
-        ("sglang", "not JSON", False),
+        ("sglang", '{"num_steps":8}', "", True),
+        ("vllm", '{"num_steps":8}', "", False),
+        ("", '{"num_steps":8}', "", False),
+        ("sglang", '{"num_steps":true}', "", False),
+        ("sglang", '{"num_steps":8.0}', "", False),
+        ("sglang", '{"num_steps":"8"}', "", False),
+        ("sglang", '{"num_steps":0}', "", False),
+        ("sglang", '{"num_steps":-1}', "", False),
+        ("sglang", '{"num_steps":8,"other":NaN}', "", False),
+        ("sglang", "{}", "", False),
+        ("sglang", "[]", "", False),
+        ("sglang", "not JSON", "", False),
+        ("sglang", "{}", "--profiler-config.max_iterations 8", False),
+        ("vllm", "{}", "--profiler-config.max_iterations 8", True),
+        ("vllm", "", "--tp 4 --profiler-config.max_iterations=8 --profiler-config.profiler torch", True),
+        ("vllm", "{}", "--profiler-config.max_iterations 0", False),
+        ("vllm", "{}", "--profiler-config.max_iterations -1", False),
+        ("vllm", "{}", "--profiler-config.max_iterations 8.0", False),
+        ("vllm", "{}", "--profiler-config.max_iterations_extra 8", False),
+        ("vllm", "{}", "--profiler-config.max_iterations 8 --profiler-config.max_iterations 0", False),
+        ("vllm", "{}", "--profiler-config.max_iterations 0 --profiler-config.max_iterations=8", True),
+        ("vllm", "{}", "--profiler-config.delay_iterations 8", False),
+        ("atom", "{}", "--profiler-config.max_iterations 8", False),
     ],
 )
-def test_auto_bounded_requires_native_positive_integer_steps(framework, body, expected):
-    assert phase_gate.is_auto_bounded(framework, body) is expected
+def test_auto_bounded_requires_a_positive_server_side_step_bound(framework, body, vllm_args, expected):
+    assert phase_gate.is_auto_bounded(framework, body, vllm_args) is expected
 
 
 def _write_trace(path, *, rank=None, gpu=True):
@@ -1046,6 +1057,183 @@ def test_capture_stop_records_transient_api_errors(monkeypatch):
     assert result["stop_reason"] == "phase_complete"
     assert result["api_error_count"] == 1
     assert "IncompleteRead" in result["last_api_error"]
+
+
+_PHASE_RUNNING = {"start_ns": 1, "requests_end_ns": None}
+_PHASE_ENDED = {"start_ns": 1, "requests_end_ns": 5}
+
+
+def _fake_progress(monkeypatch, *, stats, alive=True, on_poll=None):
+    """Drive the phase probe without a server; ``stats`` may depend on the poll number."""
+    polls = []
+
+    def _phase_stats(*_args, **_kwargs):
+        polls.append(len(polls) + 1)
+        if on_poll is not None:
+            on_poll(len(polls))
+        value = stats(len(polls)) if callable(stats) else stats
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    monkeypatch.setattr(phase_gate, "phase_stats", _phase_stats)
+    monkeypatch.setattr(phase_gate, "process_alive", lambda _pid: alive)
+    return polls
+
+
+def _wait_bounded(tmp_path, snapshot, tp, *, deadline_seconds=60.0):
+    return phase_gate.wait_for_bounded_capture(
+        api_url="http://127.0.0.1:1",
+        phase="profiling",
+        pid=42,
+        trace_dirs=[str(tmp_path)],
+        snapshot=snapshot,
+        tp=tp,
+        poll_interval_seconds=0.01,
+        deadline_seconds=deadline_seconds,
+    )
+
+
+def test_bounded_capture_waits_for_late_ranks_without_a_wall_clock(tmp_path, monkeypatch):
+    snapshot = phase_gate.snapshot_traces([str(tmp_path)])
+
+    def write_late_ranks(poll):
+        if poll == 5:
+            _write_trace(tmp_path / "177-TP-0-DECODE.trace.json.gz")
+        if poll == 40:
+            _write_trace(tmp_path / "177-TP-1-DECODE.trace.json.gz")
+
+    polls = _fake_progress(monkeypatch, stats=_PHASE_RUNNING, on_poll=write_late_ranks)
+    result = _wait_bounded(tmp_path, snapshot, 2)
+    assert result["stop_reason"] == "traces_complete"
+    assert len(polls) > 40
+    assert "api_error_count" not in result
+
+
+@pytest.mark.parametrize("case", ["no_files", "stale", "partial_ranks", "truncated"])
+def test_bounded_capture_reports_phase_end_without_complete_traces(tmp_path, monkeypatch, case):
+    if case == "stale":
+        _write_trace(tmp_path / "177-TP-0-DECODE.trace.json.gz")
+        _write_trace(tmp_path / "177-TP-1-DECODE.trace.json.gz")
+    snapshot = phase_gate.snapshot_traces([str(tmp_path)])
+    if case in {"partial_ranks", "truncated"}:
+        _write_trace(tmp_path / "177-TP-0-DECODE.trace.json.gz")
+    if case == "truncated":
+        path = _write_trace(tmp_path / "177-TP-1-DECODE.trace.json.gz")
+        path.write_bytes(path.read_bytes()[:-8])
+    _fake_progress(monkeypatch, stats=lambda poll: _PHASE_ENDED if poll >= 3 else _PHASE_RUNNING)
+    assert _wait_bounded(tmp_path, snapshot, 2)["stop_reason"] == "phase_complete"
+
+
+@pytest.mark.parametrize("complete", [True, False])
+def test_bounded_capture_checks_traces_once_more_when_aiperf_exits(tmp_path, monkeypatch, complete):
+    snapshot = phase_gate.snapshot_traces([str(tmp_path)])
+    if complete:
+        _write_trace(tmp_path / "r0.trace.json.gz")
+    polls = _fake_progress(monkeypatch, stats=_PHASE_RUNNING, alive=False)
+    result = _wait_bounded(tmp_path, snapshot, 1)
+    assert result["stop_reason"] == ("traces_complete" if complete else "aiperf_exited")
+    assert not polls
+
+
+def test_bounded_capture_parses_traces_only_once_they_hold_still(tmp_path, monkeypatch, trace_metadata_reads):
+    snapshot = phase_gate.snapshot_traces([str(tmp_path)])
+    path = _write_trace(tmp_path / "r0.trace.json.gz")
+
+    def keep_writing(poll):
+        if poll < 6:
+            now_ns = time.time_ns() + poll * 1000
+            os.utime(path, ns=(now_ns, now_ns))
+
+    _fake_progress(monkeypatch, stats=_PHASE_RUNNING, on_poll=keep_writing)
+    assert _wait_bounded(tmp_path, snapshot, 1)["stop_reason"] == "traces_complete"
+    assert len(trace_metadata_reads) == 1
+
+
+@pytest.mark.parametrize("case", ["no_files", "partial_ranks"])
+def test_bounded_capture_gives_up_at_the_safety_deadline(tmp_path, monkeypatch, case):
+    snapshot = phase_gate.snapshot_traces([str(tmp_path)])
+    if case == "partial_ranks":
+        _write_trace(tmp_path / "177-TP-0-DECODE.trace.json.gz")
+    polls = _fake_progress(monkeypatch, stats=_PHASE_RUNNING)
+    result = _wait_bounded(tmp_path, snapshot, 2, deadline_seconds=0.2)
+    assert result["stop_reason"] == "safety_deadline"
+    assert result["elapsed_seconds"] >= 0.2
+    assert len(polls) > 1
+
+
+def test_bounded_capture_outcome_at_the_deadline_wins_over_the_deadline(tmp_path, monkeypatch):
+    snapshot = phase_gate.snapshot_traces([str(tmp_path)])
+    _fake_progress(monkeypatch, stats=_PHASE_ENDED)
+    assert _wait_bounded(tmp_path, snapshot, 1, deadline_seconds=0)["stop_reason"] == "phase_complete"
+    _write_trace(tmp_path / "r0.trace.json.gz")
+    _fake_progress(monkeypatch, stats=_PHASE_RUNNING, alive=False)
+    assert _wait_bounded(tmp_path, snapshot, 1, deadline_seconds=0)["stop_reason"] == "traces_complete"
+
+
+def test_bounded_capture_records_transient_api_errors(tmp_path, monkeypatch):
+    snapshot = phase_gate.snapshot_traces([str(tmp_path)])
+    errors = {1: phase_gate.http.client.IncompleteRead(b"partial"), 2: OSError("refused")}
+    _fake_progress(monkeypatch, stats=lambda poll: errors.get(poll, _PHASE_ENDED))
+    result = _wait_bounded(tmp_path, snapshot, 1)
+    assert result["stop_reason"] == "phase_complete"
+    assert result["api_error_count"] == 2
+    assert "refused" in result["last_api_error"]
+
+
+@pytest.mark.parametrize(
+    "case,stop_reason,rc",
+    [("complete", "traces_complete", 0), ("phase_ended", "phase_complete", 3), ("deadline", "safety_deadline", 4)],
+)
+def test_wait_bounded_capture_cli_exit_code_names_the_outcome(tmp_path, monkeypatch, capsys, case, stop_reason, rc):
+    snapshot = phase_gate.snapshot_traces([str(tmp_path)])
+    if case == "complete":
+        _write_trace(tmp_path / "r0.trace.json.gz")
+    _fake_progress(monkeypatch, stats=_PHASE_RUNNING if case == "deadline" else _PHASE_ENDED)
+    exit_code = phase_gate.main(
+        [
+            "wait-bounded-capture",
+            "--api-url",
+            "http://127.0.0.1:1",
+            "--pid",
+            "42",
+            "--trace-dir",
+            str(tmp_path),
+            "--snapshot",
+            json.dumps(snapshot),
+            "--tp",
+            "1",
+            "--poll-interval-seconds",
+            "0.01",
+            "--deadline-seconds",
+            "0.1",
+        ]
+    )
+    assert exit_code == rc
+    decision = json.loads(capsys.readouterr().out)
+    assert decision["stop_reason"] == stop_reason
+    assert decision["elapsed_seconds"] >= 0
+
+
+def test_wait_bounded_capture_cli_rejects_a_missing_snapshot(tmp_path, monkeypatch, capsys):
+    _fake_progress(monkeypatch, stats=_PHASE_ENDED)
+    rc = phase_gate.main(
+        [
+            "wait-bounded-capture",
+            "--api-url",
+            "http://127.0.0.1:1",
+            "--pid",
+            "42",
+            "--snapshot",
+            "",
+            "--tp",
+            "1",
+            "--deadline-seconds",
+            "1",
+        ]
+    )
+    assert rc == 1
+    assert "aiperf phase gate failed" in capsys.readouterr().err
 
 
 def test_write_capture_status_is_structured_and_atomic(tmp_path):

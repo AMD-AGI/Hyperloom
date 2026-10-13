@@ -115,7 +115,7 @@ the knowledge base are described further in
 | Understand the algorithm | [Optimization loop](https://github.com/AMD-AGI/Hyperloom/blob/main/docs/conceptual/optimization-loop.md) |
 
 ```bash
-python -m hyperloom.inference_optimizer.cli optimize
+python -m hyperloom optimize
 ```
 
 ## Documentation
@@ -145,8 +145,8 @@ feedback through the
 - Runtime package: `src/hyperloom/`
 - Contributor & AI authoring contract: [`AGENTS.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/AGENTS.md)
 - Main agent instructions: [`src/hyperloom/inference_optimizer/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/SKILL.md)
-- CLI entry point: `python -m hyperloom.inference_optimizer.cli optimize`
-- Operator tools: `python -m hyperloom.inference_optimizer.tools.*`
+- CLI entry point: `hyperloom <command>` (or `python -m hyperloom <command>`)
+- Operator tools: `python -m hyperloom session <breakdown|report|backfill|events|state>`
 - Compute-partition sweep: `python3 scripts/partition_mode_sweep.py` — sets each
   AMD partition mode (`SPX`/`DPX`/`QPX`/`CPX`) on one card in turn, runs the same
   benchmark on every partition that mode creates, sums the throughput and restores

@@ -35,8 +35,6 @@ from kernelforge.kernel_rewrite_controller.scheduler import dispatch_prepared_ta
 
 log = logging.getLogger(__name__)
 
-CONTROLLER_STATE_SCHEMA_VERSION = 1
-
 #: What the opportunity analysis's ledger row is filed against. It buys no
 #: operator, so it cannot borrow an operator id.
 ANALYSIS_LEDGER_ID = "opportunity-analysis"
@@ -96,7 +94,6 @@ class ControllerRunState:
     #: nothing still pays for the analysis, and filing it as a forge-loop would
     #: make the per-operator accounting above answer for spend no operator owns.
     analysis_llm_usage: tuple[dict[str, Any], ...] = ()
-    schema_version: int = CONTROLLER_STATE_SCHEMA_VERSION
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -392,7 +389,6 @@ def run_controller(
 
 
 __all__ = [
-    "CONTROLLER_STATE_SCHEMA_VERSION",
     "CONTROLLER_STATUS_COMPLETED",
     "CONTROLLER_STATUS_FAILED",
     "CONTROLLER_STATUS_NO_OPPORTUNITY",

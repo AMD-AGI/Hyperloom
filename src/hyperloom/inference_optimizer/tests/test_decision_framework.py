@@ -37,9 +37,6 @@ def _silent_backends() -> dict[str, object]:
 def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-    # Pin the kernel-agent root so request handlers resolve from disk.
-    kernel_agent_root = Path(__file__).resolve().parents[4] / "src" / "hyperloom" / "agents" / "kernel"
-    monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(kernel_agent_root))
     # Stub the interpreter resolver to avoid a real Magpie import probe.
     monkeypatch.setenv("MAGPIE_PYTHON", "/usr/bin/python3")
     from hyperloom.orchestrator.actions.executors import _benchmark_interpreter

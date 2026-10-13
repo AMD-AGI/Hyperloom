@@ -124,21 +124,19 @@ EMIT_INTENT_TOOL_INPUT_SCHEMA: dict[str, Any] = {
             ),
         },
     },
-    "anyOf": [
-        {"required": ["intent_type", "payload"]},
-        {"required": ["__unparsedToolInput"]},
-    ],
     "additionalProperties": False,
 }
 
-# The fallback branch lets the MCP handler acknowledge parser-generated wrappers instead of returning an error the
-# model cannot repair.
+# No top-level required or anyOf/oneOf/allOf: the MCP layer validates against this schema before the handler runs,
+# and Claude Code's __unparsedToolInput wrapper carries neither key; the Messages API rejects top-level combinators,
+# and Claude Code can drop such a tool without an error. validate_emit_intent_input enforces both keys instead.
 
 EMIT_INTENT_TOOL_DESCRIPTION = (
     "Emit ONE structured intent into the inference_optimizer system. This "
     "is the only way to communicate decisions, messages, or actions; "
     "free-text replies are ignored. Call once per intent — to emit several "
-    "intents in a single turn, call this tool multiple times."
+    "intents in a single turn, call this tool multiple times. Always pass "
+    "both intent_type and payload."
 )
 
 # Exception-only: Claude Code stores a tool JSON string the streaming parser did not promote to an object.

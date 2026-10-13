@@ -881,7 +881,7 @@ def _adopt_replayed_prior(
     if adopted_roots:
         node = _mapping(value.get(PATCH_SECTION))
         rows = [dict(row) for row in (node.get("provenance") or []) if isinstance(row, Mapping)]
-        row = next((r for r in rows if int(r.get("stack_index") or -1) == replay_index), None)
+        row = next((r for r in rows if r.get("stack_index") == replay_index), None)
         if row is None:
             row = {
                 "stack_index": replay_index,

@@ -10,8 +10,8 @@ import json
 import pytest
 from click.testing import CliRunner
 
-from kernelforge.fusion.command import main
-from kernelforge.fusion.vllm_passes import PassState
+from kernelforge.fusion.command import run as main
+from kernelforge.fusion.vllm_passes import PassState, TargetRuntime
 
 FLAG = "enable_qk_norm_rope_fusion"
 CONFIG_BODY = (
@@ -104,17 +104,17 @@ class Harness:
         )
 
     def install(self, monkeypatch):
-        import kernelforge.fusion.command as cli
+        import kernelforge.fusion.compile_pass_claim as compile_pass_claim
         import kernelforge.fusion.locate as locate
 
-        rt = cli.TargetRuntime(
+        rt = TargetRuntime(
             framework="vllm", python="/fake/python", launcher_exe="/fake/vllm", require_root=str(self.root)
         )
         monkeypatch.setattr(locate, "probe_pass_states", self.probe)
         monkeypatch.setattr(locate, "resolve_target_runtime", lambda *a, **k: rt)
-        monkeypatch.setattr(cli, "resolve_target_runtime", lambda *a, **k: rt)
-        monkeypatch.setattr(cli, "serving_smoke", self.serving)
-        monkeypatch.setattr(cli, "verify_pass_enabled", self.verify)
+        monkeypatch.setattr(compile_pass_claim, "resolve_target_runtime", lambda *a, **k: rt)
+        monkeypatch.setattr(compile_pass_claim, "serving_smoke", self.serving)
+        monkeypatch.setattr(compile_pass_claim, "verify_pass_enabled", self.verify)
         return self
 
     def make_mixed(self):
@@ -231,12 +231,12 @@ class TestRejectPaths:
         self._assert_rejected(hz, hz.run(), "baseline (pass disabled) arm failed")
 
     def test_exception_mid_run_still_restores(self, hz, monkeypatch):
-        import kernelforge.fusion.command as cli
+        import kernelforge.fusion.compile_pass_claim as compile_pass_claim
 
         def boom(*a, **k):
             raise RuntimeError("export exploded")
 
-        monkeypatch.setattr(cli, "export_artifacts", boom)
+        monkeypatch.setattr(compile_pass_claim, "export_artifacts", boom)
         res = hz.run()
         assert res.exit_code != 0
         hz.assert_config_restored()

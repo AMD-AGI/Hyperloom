@@ -27,7 +27,7 @@ def _interactive_value(raw: str) -> bool | None:
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Build the argument parser and parse the CLI arguments."""
     p = argparse.ArgumentParser(
-        prog="quantization_agent",
+        prog="hyperloom quantize",
         description="Drive the AMD Quark PTQ skill chain from a natural-language prompt.",
     )
     p.add_argument(
@@ -115,7 +115,3 @@ def main(argv: list[str] | None = None) -> int:
     """CLI entry point for the quantization agent."""
     args = _parse_args(argv)
     return asyncio.run(_run(args))
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

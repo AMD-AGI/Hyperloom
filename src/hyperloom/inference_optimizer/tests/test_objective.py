@@ -15,10 +15,8 @@ from hyperloom.orchestrator.roles import (
     ScriptedPlan,
 )
 from hyperloom.orchestrator.actions.executors import report_executor
-from hyperloom.orchestrator.loop.coordinator import (
-    Coordinator,
-    effective_closing_grace_sec,
-)
+from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.state.shared_state import effective_closing_grace_sec
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.state.objective import (
     ObjectiveError,

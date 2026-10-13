@@ -26,7 +26,6 @@ from ..model_config_utils import (
     _MAXPOS_CONFIG_KEYS,
     _MX_FP4_GROUP_SIZE,
     _NATIVE_MOE_RUNNER_QUANT_METHODS,
-    _QUARK_LAYER_CONFIG_KEYS,
     _config_architectures,
     _is_quark_mx_fp4_entry,
     _load_model_config_dict,
@@ -43,7 +42,6 @@ __all__ = [
     "_MAXPOS_CONFIG_KEYS",
     "_MX_FP4_GROUP_SIZE",
     "_NATIVE_MOE_RUNNER_QUANT_METHODS",
-    "_QUARK_LAYER_CONFIG_KEYS",
     "_config_architectures",
     "_is_quark_mx_fp4_entry",
     "_load_model_config_dict",
@@ -537,7 +535,7 @@ def _detect_mlx_quant_weights(model_path: str) -> str | None:
         ) or {}
     except (OSError, json.JSONDecodeError, ValueError):
         return None
-    if any(k.endswith(".biases") or k.endswith(".scales") for k in wm):
+    if any(k.endswith((".biases", ".scales")) for k in wm):
         return (
             "checkpoint ships MLX mx.quantize weights (per-tensor '.biases'/"
             "'.scales'); no vLLM/sglang loader handles this private format, so "
@@ -1235,7 +1233,7 @@ def _record_model_gate_warning(session_dir: Path, *, component: str, exc: BaseEx
     from ..session.sbd_v6 import record_write_warning
 
     if not record_write_warning(session_dir, component=component, exc=exc):
-        log.debug("failed to persist SBD V6 model-gate warning", exc_info=True)
+        log.debug("failed to persist SBD V6 model-gate warning", exc_info=exc)
 
 
 def _model_gate_status(

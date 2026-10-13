@@ -11,6 +11,7 @@ import importlib
 import json
 import logging
 import os
+import shutil
 import signal
 import uuid
 from dataclasses import dataclass, field
@@ -225,12 +226,30 @@ _EFFORT_ENV_ORCH: str = "INFERENCE_OPTIMIZER_CLAUDE_ORCHESTRATION_EFFORT"
 _EFFORT_ENV_KERNEL: str = "INFERENCE_OPTIMIZER_CLAUDE_KERNEL_EFFORT"
 _THINKING_ENV: str = "INFERENCE_OPTIMIZER_CLAUDE_THINKING"
 _CLI_PATH_ENV: str = "HYPERLOOM_CLAUDE_CLI_PATH"
+# The kernel-agent installer records the Claude CLI it resolved here (``kernel-agent.env.sh``).
+_INSTALLER_CLI_ENV: str = "GEAK_CLAUDE_BIN"
 
 # Per-role (env override, default effort) for :attr:`ClaudeBackend.effort_role`.
 _EFFORT_ROLES: dict[str, tuple[str, str]] = {
     "orchestration": (_EFFORT_ENV_ORCH, "medium"),
     "kernel": (_EFFORT_ENV_KERNEL, "low"),
 }
+
+
+def resolve_claude_executable() -> str:
+    """Resolve the Claude CLI Hyperloom's agents run, in-process and as subprocesses.
+
+    Order: ``$HYPERLOOM_CLAUDE_CLI_PATH`` (the operator pin), then the installer's record in ``$GEAK_CLAUDE_BIN``,
+    then ``claude`` on ``$PATH``. The installer may place the CLI outside ``$PATH`` (``~/.local/bin``).
+
+    Returns:
+        The resolved executable path, or ``""`` when none is executable.
+    """
+    for env_name in (_CLI_PATH_ENV, _INSTALLER_CLI_ENV):
+        candidate = os.environ.get(env_name, "").strip()
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return shutil.which("claude") or ""
 
 
 def _import_sdk() -> tuple[Any, Any, Any]:
@@ -261,9 +280,6 @@ class ClaudeBackend:
     raw_completion: bool = False
     # Role's allowed intent set for the output-format suffix. None = all IntentType values.
     allowed_intents: frozenset[IntentType] | None = None
-    # Attribution labels for the spend this backend's turns produce.
-    attribution_component: str = "orchestration"
-    attribution_operation: str = "orchestrate_turn"
     # Idle timeout for one ``run()`` call: max wall-clock gap allowed BETWEEN streamed SDK messages before the turn is
     # aborted.
     call_timeout_s: float = field(
@@ -299,6 +315,9 @@ class ClaudeBackend:
     _active_turn_diagnostic: dict[str, Any] | None = field(default=None, init=False)
     _last_turn_diagnostic: dict[str, Any] = field(default_factory=dict, init=False)
     _active_stderr: list[str] = field(default_factory=list, init=False)
+    # The CLI's own account from its latest init message: its version, the MCP tools it offered the model, and each
+    # MCP server's connection status.
+    _cli_init: dict[str, Any] = field(default_factory=dict, init=False)
     # SDK calls abandoned past their bound whose close is still running; held so the task is not collected mid-close.
     _abandoned_turns: set[asyncio.Task[Any]] = field(default_factory=set, init=False)
     # Stops of turns whose caller was cancelled: they outlive that caller, so they are held here until they finish.
@@ -534,20 +553,24 @@ class ClaudeBackend:
         return dict(self._last_turn_diagnostic)
 
     def get_mcp_setup_diagnostic(self) -> dict[str, Any]:
-        """Return the current MCP setup snapshot."""
+        """Return the current MCP setup snapshot: what Hyperloom configured and what the CLI offered the model."""
         schema = json.dumps(EMIT_INTENT_TOOL_INPUT_SCHEMA, sort_keys=True, separators=(",", ":"))
         diag = self.get_turn_diagnostic()
+        mcp_tools = self._cli_init.get("mcp_tools")
         return {
             "backend": type(self).__name__,
             "model": self.model,
             "sdk_name": getattr(self.sdk_module, "__name__", None),
             "sdk_version": getattr(self.sdk_module, "__version__", None),
-            "cli_version": os.environ.get("CLAUDE_CODE_VERSION") or None,
+            "cli_version": self._cli_init.get("cli_version"),
             "gateway_endpoint": self._gateway_endpoint_identifier(),
             "mcp_servers": diag.get("mcp_servers", []),
+            "mcp_server_status": self._cli_init.get("mcp_server_status"),
+            "mcp_tools": mcp_tools,
             "emit_intent": {
                 "qualified_name": EMIT_INTENT_TOOL_QUALIFIED,
                 "registered": bool(self.mcp_server_config is not None and self.mcp_tool_name),
+                "offered": None if mcp_tools is None else EMIT_INTENT_TOOL_QUALIFIED in mcp_tools,
                 "schema_sha256": hashlib.sha256(schema.encode("utf-8")).hexdigest(),
                 "setup_error": self._mcp_setup_error,
             },
@@ -569,7 +592,7 @@ class ClaudeBackend:
             "model": self.model,
             "sdk_name": getattr(self.sdk_module, "__name__", None),
             "sdk_version": getattr(self.sdk_module, "__version__", None),
-            "cli_version": os.environ.get("CLAUDE_CODE_VERSION") or None,
+            "cli_version": self._cli_init.get("cli_version"),
             "gateway_endpoint": self._gateway_endpoint_identifier(),
             "session_id_hash": None,
             "max_turns": None,
@@ -664,7 +687,7 @@ class ClaudeBackend:
         kwargs: dict[str, Any] = {"max_turns": max_turns, "include_partial_messages": True}
         if self.model:
             kwargs["model"] = self.model
-        cli_path = os.environ.get(_CLI_PATH_ENV, "").strip()
+        cli_path = resolve_claude_executable()
         if cli_path:
             kwargs["cli_path"] = cli_path
         if system_prompt:
@@ -712,8 +735,8 @@ class ClaudeBackend:
         kwargs.update(
             claude_sdk_env_options(
                 model=self.model,
-                component=self.attribution_component,
-                operation=self.attribution_operation,
+                component="orchestration",
+                operation="orchestrate_turn",
             )
         )
 
@@ -867,6 +890,8 @@ class ClaudeBackend:
                 # A stop whose cancellation was lost in the wait above (see ``_TurnStop``) is raised here.
                 turn_stop.raise_if_requested()
                 requests.observe(message)
+                if getattr(message, "subtype", None) == "init":
+                    self._record_cli_init(getattr(message, "data", None) or {})
                 if getattr(message, "subtype", None) == "api_retry":
                     # Each of these resets the idle timer above; only the turn's wall-clock bound ends a retry loop.
                     retry = getattr(message, "data", None) or {}
@@ -1009,6 +1034,30 @@ class ClaudeBackend:
             return None
         return validated[0] if validated else None
 
+    def _record_cli_init(self, data: dict[str, Any]) -> None:
+        """Keep what the CLI's init message says it offered the model; warn on the first one lacking emit_intent."""
+        tools = data.get("tools")
+        mcp_tools = sorted(tool for tool in tools if tool.startswith("mcp__")) if isinstance(tools, list) else None
+        if (
+            not self._cli_init
+            and self.mcp_server_config is not None
+            and mcp_tools is not None
+            and EMIT_INTENT_TOOL_QUALIFIED not in mcp_tools
+        ):
+            log.warning(
+                "Claude Code %s did not offer %s to the model; MCP tools offered: %s",
+                data.get("claude_code_version"),
+                EMIT_INTENT_TOOL_QUALIFIED,
+                mcp_tools,
+            )
+        self._cli_init = {
+            "cli_version": data.get("claude_code_version"),
+            "mcp_tools": mcp_tools,
+            "mcp_server_status": {server.get("name"): server.get("status") for server in data.get("mcp_servers") or []},
+        }
+        if self._active_turn_diagnostic is not None:
+            self._active_turn_diagnostic["cli_version"] = self._cli_init["cli_version"]
+
     def _record_message_diagnostic(self, message: Any) -> None:
         diag = self._active_turn_diagnostic
         if diag is None or type(message).__name__ == "StreamEvent":
@@ -1054,4 +1103,4 @@ class ClaudeBackend:
         return t if isinstance(t, str) else ""
 
 
-__all__ = ["ClaudeBackend"]
+__all__ = ["ClaudeBackend", "resolve_claude_executable"]

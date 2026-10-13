@@ -114,7 +114,7 @@ value.
      subdirectory under it.
    - If an existing `USER_DATA_PATH` is visible in the current shell or terminal context, offer that exact value as one option.
      Say that another workspace using the same value shares its Experience KB data home, which only one workspace's
-     service can serve.
+     service can serve, unless `HYPERLOOM_KB_HOME` gives each workspace its own.
    - Always offer a custom path option.
    - Do not auto-select; write `USER_DATA_PATH` only after the user explicitly chooses (they may accept the default).
 
@@ -320,7 +320,7 @@ For `none` with a preinstalled SGLang/vLLM stack:
 
 ```bash
 export REPO_ROOT="$(pwd -P)"
-PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework none --yes
+PYTHONPATH="$REPO_ROOT" python3 -m hyperloom setup -- --install-framework none --yes
 ```
 
 For **preinstalled ATOM**, activate its existing environment or keep the user's
@@ -335,7 +335,7 @@ Run the non-mutating verification from the selected workspace:
 ```bash
 export PYTHON="${PYTHON:-$(command -v python3)}"
 export INFERENCE_OPTIMIZER_FORCE_PYTHON=1
-"$PYTHON" -m hyperloom.inference_optimizer.setup --check-only -- \
+"$PYTHON" -m hyperloom setup --check-only -- \
   --install-framework none --frameworks atom --require-frameworks \
   --user-data-path "${USER_DATA_PATH:?USER_DATA_PATH missing}"
 ```
@@ -347,7 +347,7 @@ ROCm hotfixes. Do not repeat completed setup just for the handoff or overwrite
 the already selected `USER_DATA_PATH`.
 
 ```bash
-"$PYTHON" -m hyperloom.inference_optimizer.setup -- \
+"$PYTHON" -m hyperloom setup -- \
   --install-framework none --frameworks atom --require-frameworks \
   --user-data-path "${USER_DATA_PATH:?USER_DATA_PATH missing}" --yes
 ```
@@ -363,7 +363,7 @@ defaults to isolated, the flag below is explicit):
 
 ```bash
 export REPO_ROOT="$(pwd -P)"
-PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework vllm --framework-env isolated --yes
+PYTHONPATH="$REPO_ROOT" python3 -m hyperloom setup -- --install-framework vllm --framework-env isolated --yes
 ```
 
 Downgrade path only when the user explicitly chooses a pre-0.28 vLLM on a host
@@ -372,14 +372,14 @@ that failed the glibc check:
 ```bash
 export REPO_ROOT="$(pwd -P)"
 export VLLM_VERSION=0.27.1
-PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework vllm --framework-env isolated --yes
+PYTHONPATH="$REPO_ROOT" python3 -m hyperloom setup -- --install-framework vllm --framework-env isolated --yes
 ```
 
 For `sglang`:
 
 ```bash
 export REPO_ROOT="$(pwd -P)"
-PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework sglang --yes
+PYTHONPATH="$REPO_ROOT" python3 -m hyperloom setup -- --install-framework sglang --yes
 ```
 
 For `atom` (installs AITER, then ATOM at `ATOM_REF` as an editable checkout under
@@ -387,7 +387,7 @@ the dependency root, and verifies that `atom` and its server module import):
 
 ```bash
 export REPO_ROOT="$(pwd -P)"
-PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework atom --yes
+PYTHONPATH="$REPO_ROOT" python3 -m hyperloom setup -- --install-framework atom --yes
 ```
 
 `none` reuses a preinstalled framework; it does not remove it. If no serving
@@ -399,7 +399,7 @@ other existing remote/special workflows, not to bypass checks in this local ATOM
 
 ### `docker`
 
-Do **not** run `hyperloom.inference_optimizer.setup` on the host.
+Do **not** run `hyperloom setup` on the host.
 The example (workload) skill will start the container and run setup inside it.
 
 After writing `.env`, tell the user:
@@ -436,7 +436,8 @@ the demo skill runs setup inside the container. Read
 ## Experience KB service
 
 The workspace's Experience KB service runs wherever the optimizer runs. Its
-data and `service.log` live under `$USER_DATA_PATH/experience-kb`, and every
+data and `service.log` live under `$HYPERLOOM_KB_HOME` when set, otherwise
+`$USER_DATA_PATH/experience-kb`, and every
 optimize launch starts it again when nothing serves `HYPERLOOM_KB_URL`.
 
 In `docker` mode, skip this step: the service starts inside the container at

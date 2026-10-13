@@ -239,6 +239,19 @@ def _resolve_quant_type(
     return "none"
 
 
+def _routed_precisions(profile: ModelProfile, precision: str) -> tuple[str, str]:
+    """The precisions the MoE and the dense tuners route on, in that order.
+
+    An empty precision, or one that only names the checkpoint's quantization toolkit (Quark's ``quark``), says nothing
+    the router can route on, so the formats nested in the checkpoint stand in for it: one for the routed experts and
+    one for the other linear layers, which a Quark checkpoint can store differently (MXFP4 experts, fp8 attention).
+    Any other precision is the caller's statement of what runs, and holds for both.
+    """
+    if precision and precision != _normalize_precision(profile.quant_method):
+        return precision, precision
+    return profile.expert_precision or precision, profile.dense_precision or precision
+
+
 def select_tuners(
     profile: ModelProfile,
     *,
@@ -254,17 +267,25 @@ def select_tuners(
 ) -> list[TunerSpec]:
     """Select which tuner(s) to run based on model + framework + precision."""
     resolved_precision = _normalize_precision(precision)
-    resolved_qt = _resolve_quant_type(resolved_precision, quant_type, profile, kernel_signature_log)
     gfx_arch = _resolve_gfx_arch(gpu_type)
     tuners: list[TunerSpec] = []
 
     if framework in ("sglang", "vllm-aiter"):
+        moe_precision, dense_precision = _routed_precisions(profile, resolved_precision)
         tuners.extend(
-            _select_sglang_tuners(
+            _select_sglang_moe_tuners(
                 profile,
-                resolved_precision,
-                resolved_qt,
+                moe_precision,
+                _resolve_quant_type(moe_precision, quant_type, profile, kernel_signature_log),
                 kernel_signature_log,
+                gfx_arch,
+            )
+        )
+        tuners.extend(
+            _select_sglang_dense_tuners(
+                profile,
+                dense_precision,
+                _resolve_quant_type(dense_precision, quant_type, profile, kernel_signature_log),
                 has_untuned_csv,
                 has_shapes_json,
                 gfx_arch,
@@ -275,7 +296,7 @@ def select_tuners(
             _select_vllm_tuners(
                 profile,
                 resolved_precision,
-                resolved_qt,
+                _resolve_quant_type(resolved_precision, quant_type, profile, kernel_signature_log),
                 has_shapes_json,
                 has_tunableop_input,
             )
@@ -384,20 +405,17 @@ def _tuners_the_demand_says_are_needed(
     return added
 
 
-def _select_sglang_tuners(
+def _select_sglang_moe_tuners(
     profile: ModelProfile,
     precision: str,
     quant_type: str,
     kernel_signature_log: str | None,
-    has_untuned_csv: bool,
-    has_shapes_json: bool,
-    gfx_arch: str = "",
+    gfx_arch: str,
 ) -> list[TunerSpec]:
-    """Select tuners for sglang framework."""
+    """Select the MoE tuner for the sglang framework."""
     tuners: list[TunerSpec] = []
     fp4_unsupported = _fp4_unsupported_on(gfx_arch)
 
-    # --- MoE tuning ---
     if profile.is_moe:
         if quant_type == "per_token":
             # 1-stage ASM already optimal (validated in experiments)
@@ -446,9 +464,23 @@ def _select_sglang_tuners(
                     estimated_minutes=0,
                 )
             )
+    return tuners
 
-    # --- Dense GEMM tuning --- Dense fp8/fp4 tuners do not require an externally-recorded CSV: when none is
-    # supplied they derive GEMM shapes from the model config (same as the bf16 dense path).
+
+def _select_sglang_dense_tuners(
+    profile: ModelProfile,
+    precision: str,
+    quant_type: str,
+    has_untuned_csv: bool,
+    has_shapes_json: bool,
+    gfx_arch: str,
+) -> list[TunerSpec]:
+    """Select the dense GEMM tuners for the sglang framework."""
+    tuners: list[TunerSpec] = []
+    fp4_unsupported = _fp4_unsupported_on(gfx_arch)
+
+    # Dense fp8/fp4 tuners do not require an externally-recorded CSV: when none is supplied they derive GEMM shapes
+    # from the model config (same as the bf16 dense path).
     def _dense_spec(name: str) -> TunerSpec:
         if has_untuned_csv or has_shapes_json or _profile_can_derive_dense(profile):
             return TunerSpec(name, priority=20, estimated_minutes=20)

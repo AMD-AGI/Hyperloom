@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from hyperloom.inference_optimizer import framework_registry
 from hyperloom.inference_optimizer.framework_paths import (
     resolve_session_framework_root,
     resolved_within,
@@ -44,6 +45,7 @@ from ..specialists.domains import (
     SPECIALIST_MAX_TURNS_HARD_CAP,
     domain_for_tag,
     get_domain,
+    is_custom_specialist_dispatch,
     normalize_dispatch_tags,
 )
 from ..specialists.profile import (
@@ -896,8 +898,9 @@ class PolicyGate:
                 ``params`` (tags, scope, gap_canonical_id, max_turns, ...).
 
         Raises:
-            PolicyDenied: when the role may not dispatch, params are malformed,
-                the gap id is missing, or max_turns exceeds the hard cap. Tag /
+            PolicyDenied: when the role may not dispatch, params are malformed
+                or name an unregistered framework, the gap id is missing, or
+                max_turns exceeds the hard cap. Tag /
                 scope incoherence is logged rather than denied.
         """
         if role.name not in SPECIALIST_DISPATCH_SOURCE_ALLOWLIST:
@@ -914,6 +917,9 @@ class PolicyGate:
                 rule="specialist_dispatch_source",
                 hint="pass params={tags, gap_canonical_id, ...} per §3.5 §6",
             )
+        _validate_specialist_framework(params)
+        # Before the scope branches: a freeform dispatch naming the custom domain still runs as it.
+        self._validate_custom_specialist_configured(params)
 
         # scope='freeform' has no domain anchor: it skips the tag / gap
         # vocabulary checks and runs a lightweight mechanical sanity gate instead.
@@ -972,6 +978,24 @@ class PolicyGate:
         validate_specialist_max_turns_raw(max_turns_raw, where="params.max_turns")
 
         self._validate_specialist_gpu_request(params)
+
+    def _validate_custom_specialist_configured(self, params: dict[str, Any]) -> None:
+        """Deny a ``custom_specialist`` dispatch when the session defines none.
+
+        Raises:
+            PolicyDenied: When the dispatch names the custom domain or tag and
+                the session has no operator-defined prompt.
+        """
+        if not is_custom_specialist_dispatch(params):
+            return
+        ss = getattr(self, "shared_state", None)
+        if str(getattr(ss, "custom_specialist_prompt", "") or "").strip():
+            return
+        raise PolicyDenied(
+            "delegate{action='specialist'}: custom_specialist is not configured for this session",
+            rule="specialist_custom_not_configured",
+            hint="Pick a built-in domain; custom_specialist exists only when the operator defines it.",
+        )
 
     def _validate_specialist_gpu_request(self, params: dict[str, Any]) -> None:
         """Validate a specialist's optional GPU request.
@@ -1506,6 +1530,29 @@ class PolicyGate:
                     f"only cancels the queued backlog."
                 ),
             )
+
+
+def _validate_specialist_framework(params: dict[str, Any]) -> None:
+    """Refuse a specialist dispatch whose ``params.framework`` the registry does not know.
+
+    The specialist resolves the source tree it patches from that name, and a
+    dispatch that omits it inherits the session's.
+
+    Args:
+        params: The specialist dispatch ``params``.
+
+    Raises:
+        PolicyDenied: When ``params.framework`` is present and not registered.
+    """
+    if "framework" in params and not framework_registry.is_supported(params["framework"]):
+        raise PolicyDenied(
+            f"delegate{{action='specialist'}}: params.framework={params['framework']!r} is not a registered framework",
+            rule="specialist_framework_unregistered",
+            hint=(
+                "Omit params.framework to dispatch against the session's framework, "
+                f"or pass one of {list(framework_registry.names())!r}."
+            ),
+        )
 
 
 def validate_specialist_max_turns_raw(

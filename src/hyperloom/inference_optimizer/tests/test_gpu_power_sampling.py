@@ -208,4 +208,6 @@ def test_round_recorders_combine_kv_and_power(monkeypatch, tmp_path):
     combined.note_phase("measured", 0.0)
     assert kv.calls == power.calls == ["phase:measured"]
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors._gpu_power.build_gpu_power_recorder", lambda *a: None)
-    assert _subprocess_kill._build_round_recorders(str(tmp_path / "server.log"), {}) is kv
+    lone = _subprocess_kill._build_round_recorders(str(tmp_path / "server.log"), {})
+    lone.note_phase("measured", 0.0)
+    assert kv.calls == ["phase:measured", "phase:measured"]

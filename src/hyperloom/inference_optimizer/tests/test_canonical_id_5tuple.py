@@ -280,6 +280,24 @@ def test_detect_framework_version_reads_dunder_version(
     assert detected == "0.6.3+rocm"
 
 
+def test_detect_framework_version_reads_the_resolved_serving_interpreter(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """An isolated vLLM venv is not importable here; the KB key must not degrade to ``unknown_version``."""
+    site = tmp_path / "vllm-venv" / "lib" / "python3.12" / "site-packages"
+    info = site / "vllm-0.29.0+rocm100.dist-info"
+    info.mkdir(parents=True)
+    (info / "METADATA").write_text("Metadata-Version: 2.4\nName: vllm\nVersion: 0.29.0+rocm100\n")
+    bin_dir = tmp_path / "vllm-venv" / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "python").symlink_to(sys.executable)
+    monkeypatch.setenv("HYPERLOOM_RESOLVED_FRAMEWORK", "vllm")
+    monkeypatch.setenv("HYPERLOOM_RESOLVED_FRAMEWORK_PYTHON", str(bin_dir / "python"))
+    monkeypatch.setitem(sys.modules, "vllm", None)
+
+    assert detect_framework_version("vllm") == "0.29.0+rocm100"
+
+
 def test_detect_framework_version_falls_back_to_VERSION_constant(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

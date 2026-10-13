@@ -1,10 +1,9 @@
-#!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 """Print concise optimizer state and lifecycle status.
 
 Usage:
-    python src/hyperloom/inference_optimizer/tools/read_optimizer_state.py SESSION_DIR
+    hyperloom session state SESSION_DIR
 """
 
 from __future__ import annotations
@@ -39,9 +38,9 @@ def _format_lifecycle_event(event: dict[str, Any]) -> str:
     return line
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     """Print a concise optimizer state and recent lifecycle summary."""
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(prog="hyperloom session state", description=__doc__)
     parser.add_argument("session_dir", help="Optimizer session directory.")
     parser.add_argument(
         "--lifecycle-limit",
@@ -49,7 +48,7 @@ def main() -> int:
         default=12,
         help="Number of recent lifecycle events to print (default: 12).",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     session_dir = Path(args.session_dir)
     state_file = state_path(session_dir)
@@ -96,7 +95,3 @@ def main() -> int:
     for event in events[-limit:] if limit else []:
         print(_format_lifecycle_event(event))
     return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

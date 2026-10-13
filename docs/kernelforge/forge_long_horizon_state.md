@@ -38,24 +38,11 @@ forge_experiments/
   best/
 ```
 
-`run_state.json` uses schema v19. The loader validates the current field set
-strictly and migrates older checkpoints forward without discarding control
-state: v13 gains an empty Analysis refresh anchor, which causes one safe refresh
-instead of guessing which score historical profiling measured; v14 gains an
-empty Plan Critic ruling, which is what a campaign that never recorded a verdict
-actually knows; v15 gains an empty round cost history, which the round admission
-guard treats exactly as it treats a campaign's first round; v16's recorded
-rounds gain a zero measurement cost, which is read as no observation rather than
-as a free validate-and-benchmark cycle; v17 gains a campaign wall-clock for its
-cumulative planning to be a share of, seeded from what its rounds cost, since
-that is the longest span such a checkpoint can honestly claim to have run and it
-already covers the planning inside it; v18 gains a separate unresolved-stall
-counter, seeded from its no-improvement streak, which is a lower bound on the
-real stall because every past intervention had already reset that streak, and a
-lower bound is the fail-safe direction here. Other malformed, incomplete,
-unknown, or differently versioned checkpoints are rejected. The loader also rejects a
-campaign wall-clock shorter than the planning charged to it, so the share cannot
-exceed 100 by way of a hand-edited or future-written checkpoint.
+The loader accepts exactly the field set the current code writes: a checkpoint
+with a missing or unknown field, top-level or nested, is rejected rather than
+filled in. The loader also rejects a campaign wall-clock shorter than the
+planning charged to it, so the share cannot exceed 100 by way of a hand-edited
+checkpoint.
 
 The state contains:
 
@@ -111,8 +98,8 @@ iteration event that was durably appended before the corresponding state save.
 
 Resume is fail-closed. It requires:
 
-- A valid current or explicitly migratable `campaign_config.json` and
-  `run_state.json`.
+- A `campaign_config.json` and `run_state.json` written by the current code.
+  Files from a different field set are rejected, never migrated.
 - Matching task fingerprint, driver digest, Git branch, and canonical HEAD.
 - Complete pristine per-case baseline and current best score.
 - No unexplained tracked working-tree changes.
@@ -120,7 +107,8 @@ Resume is fail-closed. It requires:
 `pending_keep.json` is the crash journal for the narrow interval between
 canonical validation, Git commit, state publication, and archive publication.
 Resume reconciles this journal before admitting another Implementer session.
-The journal uses schema v2.
+A journal whose key set differs from the one the current code writes is
+rejected.
 
 Every process-local resume creates a new experiment segment while retaining the
 campaign identity and cumulative state.
@@ -152,7 +140,7 @@ Each iteration runs:
 7. Canonical validation, benchmark, and KEEP/REVERT.
 
 `optimization_plan.md` is the Implementer's planning source of truth for that
-iteration. Handoff schema v2 records its path together with the canonical
+iteration. The iteration handoff records its path together with the canonical
 verdict, the latest Supervisor Ruling path, and audit pointers. Handoffs do not
 restore control state. When Critic review runs, `draft_plan.md` and
 `critic_review.md` are immutable audit artifacts for that planning cycle.

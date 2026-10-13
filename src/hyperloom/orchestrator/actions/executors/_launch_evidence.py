@@ -14,10 +14,11 @@ from typing import Any
 import yaml
 
 from hyperloom.common.launch_log_evidence import (
+    engine_adjusted_settings_from_log,
     launch_argv_from_log,
     observed_model_binding_from_log,
-    observed_sglang_server_identity_from_log,
-    observed_vllm_server_identity_from_log,
+    observed_server_config_from_log,
+    observed_server_identity_from_log,
 )
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 
@@ -35,6 +36,10 @@ def _binding_from_vllm_identity(identity: dict[str, Any]) -> dict[str, Any]:
 
     Separate from the SGLang one because the field names differ; sharing a table
     would silently read ``{}`` for one of the two frameworks.
+
+    The record lists only non-default settings, so an absent width is vLLM's
+    default of 1 rather than unknown: ``--data-parallel-size 1`` never appears
+    in it, and reading that absence as unobserved fails every such launch.
     """
     model = str(identity.get("model") or "")
     if not model:
@@ -43,9 +48,9 @@ def _binding_from_vllm_identity(identity: dict[str, Any]) -> dict[str, Any]:
         "model_digest": _digest_operand(model),
         "tokenizer_digest": _digest_operand(str(identity.get("tokenizer") or "")),
         "served_model_digest": _digest_operand(str(identity.get("served_model_name") or "")),
-        "tp": str(identity.get("tensor_parallel_size") or ""),
-        "dp": str(identity.get("data_parallel_size") or ""),
-        "pp": str(identity.get("pipeline_parallel_size") or ""),
+        "tp": str(identity.get("tensor_parallel_size", 1)),
+        "dp": str(identity.get("data_parallel_size", 1)),
+        "pp": str(identity.get("pipeline_parallel_size", 1)),
     }
 
 
@@ -98,28 +103,32 @@ def build_launch_evidence(
 
     observed_flags = ""
     observed_server_identity: dict[str, Any] = {}
+    observed_server_config: dict[str, Any] = {}
+    engine_adjusted_settings: dict[str, dict[str, str]] = {}
     observed_model_binding: dict[str, Any] = {}
     if actual_server_log:
         try:
+            observed_server_config = observed_server_config_from_log(actual_server_log, resolved_framework)
+            engine_adjusted_settings = engine_adjusted_settings_from_log(actual_server_log, resolved_framework)
             observed_flags = launch_argv_from_log(actual_server_log, resolved_framework)
             # Read from the raw launch line, which still carries the operands
             # ``split_launch_flags`` strips: without it the evidence records only
             # the *requested* model and cannot detect a server that resolved a
             # different one.
             observed_model_binding = observed_model_binding_from_log(actual_server_log, resolved_framework)
-            if not observed_flags and resolved_framework == "sglang":
-                observed_server_identity = observed_sglang_server_identity_from_log(actual_server_log)
+            if not observed_flags:
+                # Neither engine echoes an argv line reliably -- vLLM never does,
+                # in no log, successful or failed -- so without the record every
+                # requested setting would be judged unconfirmed. The resolved
+                # settings the engine DOES print are the observed side.
+                observed_server_identity = observed_server_identity_from_log(actual_server_log, resolved_framework)
                 if not observed_model_binding:
-                    observed_model_binding = _binding_from_identity(observed_server_identity)
-            elif not observed_flags and resolved_framework == "vllm":
-                # vLLM prints no argv line at all -- not in any log, successful
-                # or failed -- so the argv reader above is empty for every vLLM
-                # session and every requested setting would be judged
-                # unconfirmed. The resolved argument dict it DOES print is the
-                # observed side.
-                observed_server_identity = observed_vllm_server_identity_from_log(actual_server_log)
-                if not observed_model_binding:
-                    observed_model_binding = _binding_from_vllm_identity(observed_server_identity)
+                    # The two engines name the model differently, so the binding
+                    # is read per engine even though the record is not.
+                    if resolved_framework == "vllm":
+                        observed_model_binding = _binding_from_vllm_identity(observed_server_identity)
+                    else:
+                        observed_model_binding = _binding_from_identity(observed_server_identity)
         except Exception:
             log.debug("launch evidence could not inspect server log %s", actual_server_log, exc_info=True)
 
@@ -138,6 +147,13 @@ def build_launch_evidence(
         "requested_server_env": requested_env,
         "actual_server_log_path": actual_server_log or "",
         "observed_server_launch_flags": observed_flags,
+        "observed_server_env": dict(requested_env),
+        # What the engine resolved, the only account of a launch neither engine
+        # echoes as argv. Complete for SGLang; non-defaults only for vLLM.
+        "observed_server_config": observed_server_config,
+        # Settings the engine rewrote after parsing them: the config above holds
+        # the resolved value, which is not what a flag would pass.
+        "engine_adjusted_settings": engine_adjusted_settings,
         "observed_server_identity": observed_server_identity,
         "observed_model_binding": observed_model_binding,
         "requested_model_digest": _digest_operand(

@@ -388,10 +388,11 @@ def test_kernel_holds_while_work_pending_untried_hot_kernel():
     assert compute_next_phase(state, kernel_enabled=True) is None
 
 
-def test_geak_terminal_exits_kernel_ignoring_per_kernel_pending_work():
+@pytest.mark.parametrize("status", ["no_gain", "timeout"])
+def test_geak_terminal_exits_kernel_ignoring_per_kernel_pending_work(status):
     state = _skip_to_sweep_state("KERNEL_AGENT")
     state.kernel_optimizer = "geak"
-    state.geak_result = {"status": "no_gain"}
+    state.geak_result = {"status": status}
     state.untried_hot_reusable_kernels = lambda: ["k017"]
 
     assert kernel_work_pending(state) is False
@@ -441,6 +442,26 @@ def test_kernel_exits_when_all_attempts_are_rejected_or_integrated():
     target, reason, _ = out
     assert target == PHASE_SWEEP
     assert reason == "kernel_no_more_leverage"
+
+
+def test_a_fusion_row_retires_its_attempt_like_an_integrate_row():
+    state = _skip_to_sweep_state("KERNEL_AGENT")
+    state.optimization_stack = [{"action": "fusion", "kernel_id": "k900", "target_file": "/repo/op.py"}]
+    state.kernel_opt_task_attempts = {
+        "k002": {"last_source_file": "/repo/op.py", "last_decision": "KEEP", "last_status": "ok"},
+    }
+
+    assert kernel_work_pending(state) is False
+
+
+def test_a_whitespace_padded_target_file_still_matches():
+    state = _skip_to_sweep_state("KERNEL_AGENT")
+    state.optimization_stack = [{"action": "integrate", "kernel_id": "k900", "target_file": "  /repo/op.py "}]
+    state.kernel_opt_task_attempts = {
+        "k002": {"last_source_file": "/repo/op.py", "last_decision": "KEEP", "last_status": "ok"},
+    }
+
+    assert kernel_work_pending(state) is False
 
 
 def test_apply_escalate_budget_bump_lifts_phase_within_cap():

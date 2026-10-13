@@ -42,6 +42,7 @@
     "stop_reasons": [
       "active_inferencex_checkout_missing",
       "agentx_client_unavailable",
+      "backend_unhealthy",
       "baseline_accuracy_failed",
       "baseline_arg_error",
       "baseline_failed",

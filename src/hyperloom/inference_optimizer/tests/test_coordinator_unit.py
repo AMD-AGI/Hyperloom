@@ -10,8 +10,6 @@ from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.orchestrator.loop.conversation import _first_present, _format_inbox_event
 from hyperloom.orchestrator.loop.intent_router import _lifecycle_paths
 from hyperloom.orchestrator.bus.message_bus import Message
-from hyperloom.orchestrator.policy.gate import SPECIALIST_FROM_AGENT_PREFIX
-from hyperloom.orchestrator.specialists.dispatch import SpecialistDispatchCollaborator
 from hyperloom.orchestrator.state.gaps import GapRefreshCollaborator
 
 
@@ -195,18 +193,6 @@ def test_gap_layer_for_action_follows_framework_kind():
     # Kernel and system rows are framework-independent.
     assert GapRefreshCollaborator._gap_layer_for_action("kernel_opt", "custom")[1] == "kernel_switch_specialist"
     assert GapRefreshCollaborator._gap_layer_for_action("baseline", "custom")[1] == "system_specialist"
-
-
-def test_task_id_from_specialist_source():
-    assert SpecialistDispatchCollaborator._task_id_from_specialist_source("") == ""
-    assert SpecialistDispatchCollaborator._task_id_from_specialist_source("orch") == ""
-    tid = "abc-123"
-    assert (
-        SpecialistDispatchCollaborator._task_id_from_specialist_source(
-            f"{SPECIALIST_FROM_AGENT_PREFIX}{tid}",
-        )
-        == tid
-    )
 
 
 def test_lanes_fit_headroom():

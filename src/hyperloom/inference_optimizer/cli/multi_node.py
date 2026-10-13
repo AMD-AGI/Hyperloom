@@ -211,7 +211,8 @@ def _replay_kernel_patches_for_multi_node(args: argparse.Namespace) -> None:
         cmd = [
             sys.executable,
             "-m",
-            "hyperloom.inference_optimizer.multi_node",
+            "hyperloom",
+            "multi-node",
             "apply-patch",
             "--patch-file",
             str(patch_path),

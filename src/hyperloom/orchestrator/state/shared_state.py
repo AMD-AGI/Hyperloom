@@ -46,7 +46,7 @@ resolve_hot_kernel_min_gpu_pct = _kernel_decision_settings.resolve_hot_kernel_mi
 resolve_kernel_opt_max_failures = _kernel_decision_settings.resolve_kernel_opt_max_failures
 
 # escalate_strategy_change hint vocabulary (closed enum; unknown hints ignored). ``skip_to_kernel`` is the
-# "exhausted the current lever" signal from EXPLORE or FRAMEWORK_AGENT; it advances to KERNEL.
+# "exhausted the current lever" signal from FRAMEWORK_AGENT; it advances to KERNEL.
 # KERNEL exits automatically when settled with no pending work — the LLM does not self-set a sweep hint.
 ESCALATE_HINT_SKIP_TO_KERNEL: str = "skip_to_kernel"
 ESCALATE_HINT_SKIP_TO_SWEEP: str = "skip_to_sweep"
@@ -126,11 +126,11 @@ def resolve_graded_comparison(
         VERDICT_REVERT,
         axis_of,
         holds_within_band,
+        incomparability_reason,
         latency_veto_reason,
         output_tput_of,
         perf_snapshot_from_mapping,
         resolve_grading_anchor_perf,
-        rounds_are_comparable,
         total_tput_of,
     )
     from hyperloom.inference_optimizer.grading import resolved_grading
@@ -154,24 +154,25 @@ def resolve_graded_comparison(
             gain = gain_pct(axis_of(cand_perf, GRADED_INTVTY_P50), axis_of(ref_perf, GRADED_INTVTY_P50))
             # The output guard reads the raw aggregate: the chip count divides both sides of the ratio, so the band
             # holds identically per GPU.
-            guards_hold = holds_within_band(
-                cand_perf, ref_perf, GRADED_INTVTY, noise_pct=noise_pct
-            ) and holds_within_band(cand_perf, ref_perf, GRADED_OUTPUT, noise_pct=noise_pct)
-            keep = (
-                gain is not None
-                and gain >= AGENTX_KEEP_P50_THRESHOLD_PCT
-                and guards_hold
-                and rounds_are_comparable(cand_perf, ref_perf)
+            gates = (
+                ("p50_gain_below_threshold", gain is not None and gain >= AGENTX_KEEP_P50_THRESHOLD_PCT),
+                ("p90_regressed", holds_within_band(cand_perf, ref_perf, GRADED_INTVTY, noise_pct=noise_pct)),
+                ("output_regressed", holds_within_band(cand_perf, ref_perf, GRADED_OUTPUT, noise_pct=noise_pct)),
             )
-            sla_veto = latency_veto_reason(observed_ms, budget_ms) if keep else ""
+            refused = [gate for gate, held in gates if not held]
+            incomparable = incomparability_reason(cand_perf, ref_perf)
+            if incomparable:
+                refused.append(incomparable)
+            sla_veto = "" if refused else latency_veto_reason(observed_ms, budget_ms)
             return GradedComparison(
                 objective=GRADED_INTVTY_P50,
                 candidate=axis_of(cand_perf, GRADED_INTVTY_P50),
                 reference=axis_of(ref_perf, GRADED_INTVTY_P50),
-                verdict=VERDICT_KEEP if keep and not sla_veto else VERDICT_REVERT,
+                verdict=VERDICT_REVERT if refused or sla_veto else VERDICT_KEEP,
                 tput_candidate=total_tput_of(cand_perf),
                 tput_reference=total_tput_of(ref_perf),
                 veto_reason=sla_veto,
+                refused_by=",".join(refused),
             )
         degrade_reason = reason or "candidate_axes_missing"
 
@@ -260,8 +261,6 @@ _INTEGRATE_FAULT_ERROR_CLASSES = frozenset(
         "rebaseline_exception",
         "cpp_itfs_rebuild_not_verified",
         "framework_script_mismatch",
-        # The recipe cannot carry the lever, so the patch was never benchmarked.
-        "recipe_lever_unavailable",
         "bench_exception",
         "subtask_exception",
         "handler_exception",
@@ -414,6 +413,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     baseline_roofline_ceiling: dict[str, Any] = field(default_factory=dict)
     baseline_failure_streak: int = 0
     baseline_arg_error_streak: int = 0
+    # Signature of the last failure counted in ``baseline_failure_streak``; two in a row that match end the run.
+    baseline_last_failure_signature: str = ""
     # Combined backstop counting ANY baseline failure regardless of error_class, catching mixed classes that never
     # trip a per-class streak (anti time-exhaustion).
     baseline_total_failures: int = 0
@@ -479,6 +480,11 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     reference_model: str = ""
     # Operator launch shape, persisted so a bare --resume serves the same contract.
     operator_server_args: str = ""
+    # Operator-defined specialist (``--custom-specialist-*``); empty prompt means not configured.
+    custom_specialist_prompt: str = ""
+    custom_specialist_description: str = ""
+    # Set once a custom_specialist task has started; drives the at-least-once dispatch.
+    custom_specialist_dispatched: bool = False
     # ``--extra-env NAME=VALUE`` pins.
     operator_extra_env: dict[str, str] = field(default_factory=dict)
     # Operator-supplied custom-workload paths.
@@ -554,6 +560,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # Operator's ``--closing-grace-sec``; ``None`` derives it from max_minutes.
     closing_grace_sec: float | None = None
     last_profile_trace: str = ""
+    # Launch evidence of the run that produced ``last_profile_trace``; its runtime findings share the trace's shapes.
+    last_profile_launch_evidence_path: str = ""
     # ``succeeded``/``failed`` for most recent profile; failed allows re-run even when last_profile_trace is non-empty.
     last_profile_status: str = ""
     # Workload context captured with ``last_profile_trace``; strict matching prevents consumers from reusing runtime
@@ -643,6 +651,9 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # Durable watermark from the last real conc_sweep measurement; survives the macro-cycle reloop clearing
     # ``last_conc_sweep`` so redundant closeout is skipped when no validated gain landed since the prior conc_sweep.
     last_conc_sweep_watermark: dict[str, Any] = field(default_factory=dict)
+    # Wall-clock instant (unix seconds) until which the ``conc_sweep`` SWEEP enqueued is entitled to run: its granted
+    # budget plus the lease grace. SWEEP's own budget exits defer to it while no result has landed; 0 means no grant.
+    conc_sweep_granted_until_unix: float = 0.0
     # Most recent per-kernel optimization record.
     last_kernel_opt: dict[str, Any] = field(default_factory=dict)
     # Most recent forge-fusion run result and its e2e integrate result; persisted so resume does not rerun a completed

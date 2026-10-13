@@ -38,8 +38,10 @@ from hyperloom.common.llm_config import (
     deepseek_compat_env,
     has_anthropic_credential,
     provider_model_defaults,
+    with_synthesized_anthropic_keys,
 )
 from hyperloom.common.fs_utils import is_network_fs
+from hyperloom.common.llm_headers import expand_env_refs
 from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.common.platform_probe import probe_cpu_platform
 from hyperloom.common.pr_monitor_urls import kb_store_url
@@ -49,6 +51,7 @@ from hyperloom.common.provenance import (
     detect_gfx_arch,
 )
 from hyperloom.common.timeutil import now_iso
+from hyperloom.common.visible_devices import hip_mask_within_rocr
 
 from .credentials import (
     _is_stale_proxy_url,
@@ -157,6 +160,34 @@ def _normalize_legacy_deepseek_env() -> dict[str, Any]:
         "skip_reason": skip_reason,
         "detail": {"keys_set": changed},
     }
+
+
+#: What a custom header may reference. Every child inherits the expanded header, so expanding any other name would
+#: hand a child the value of a secret its environment allowlist strips, such as ``${GITHUB_TOKEN}``.
+_HEADER_REF_ALLOWLIST = frozenset({"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY"})
+
+
+def _expand_custom_header_env_refs() -> None:
+    """Resolve the credential ``${VAR}`` references in the ``*_CUSTOM_HEADERS`` settings in place.
+
+    Child processes (specialists, the Critic, GEAK on Ray) forward these verbatim, and an agent CLI sends them
+    verbatim, so an unexpanded ``${ANTHROPIC_API_KEY}`` reaches the gateway as literal text and is rejected.
+    References resolve against the same view ``claude_sdk_env_options`` uses, so a key it would fill in from the
+    other Anthropic credential is not erased here. A reference outside ``_HEADER_REF_ALLOWLIST`` is left as
+    written, which is what children received before this expansion existed.
+    """
+    source = with_synthesized_anthropic_keys(os.environ)
+    for key in ("ANTHROPIC_CUSTOM_HEADERS", "OPENAI_CUSTOM_HEADERS"):
+        raw = os.environ.get(key)
+        if not raw or "${" not in raw:
+            continue
+        os.environ[key] = expand_env_refs(raw, source, only=_HEADER_REF_ALLOWLIST)
+        if "${" in os.environ[key]:
+            log.warning(
+                "%s references a variable outside %s; child processes receive that reference unexpanded",
+                key,
+                ", ".join(sorted(_HEADER_REF_ALLOWLIST)),
+            )
 
 
 def _restore_provider_only_mode(provider_mode: str, snapshot: dict[str, str | None]) -> None:
@@ -387,17 +418,9 @@ def _load_kernel_agent_env_fallback() -> dict[str, Any]:
         if user_data:
             candidate = str(Path(user_data).expanduser() / "runtime" / "kernel-agent.env.sh")
 
-    if os.environ.get("HYPERLOOM_KERNEL_AGENT_ROOT") and not candidate:
-        return {
-            "status": "already_present",
-            "skip_reason": None,
-            "detail": {"vars_loaded": 0, "env_file": None},
-        }
-
     if not candidate:
         print(
-            "Preflight: ERROR — neither $HYPERLOOM_KERNEL_AGENT_ROOT "
-            "nor $KERNEL_AGENT_ENV nor $USER_DATA_PATH is set. Cannot "
+            "Preflight: ERROR — neither $KERNEL_AGENT_ENV nor $USER_DATA_PATH is set. Cannot "
             "resolve kernel-agent.env.sh. Run "
             "src/hyperloom/inference_optimizer/assets/install.sh and export "
             "USER_DATA_PATH=/path/to/sessions first.",
@@ -412,10 +435,9 @@ def _load_kernel_agent_env_fallback() -> dict[str, Any]:
             f"(parent of <model>/<ts>/ per-session subdirs); runtime/ "
             f"is workspace-shared, not per-session. Either "
             f"(a) re-run src/hyperloom/inference_optimizer/assets/install.sh under "
-            f"USER_DATA_PATH={os.environ.get('USER_DATA_PATH', '?')}, "
-            f"(b) set $KERNEL_AGENT_ENV to point at an existing file, or "
-            f"(c) set $HYPERLOOM_KERNEL_AGENT_ROOT directly to skip this "
-            f"fallback entirely. Aborting now (was: silently warning and "
+            f"USER_DATA_PATH={os.environ.get('USER_DATA_PATH', '?')}, or "
+            f"(b) set $KERNEL_AGENT_ENV to point at an existing file. "
+            f"Aborting now (was: silently warning and "
             f"letting trace_analyze fail 10h in).",
             file=sys.stderr,
         )
@@ -440,22 +462,17 @@ def _load_kernel_agent_env_fallback() -> dict[str, Any]:
             f"Preflight: WARNING — ignoring unsupported kernel-agent env key {key} from {env_path}",
             file=sys.stderr,
         )
-    loaded = _load_missing_env_vars(file_vars)
-    corrected = _correct_kernel_agent_path_vars(file_vars, env_path)
-    if "HYPERLOOM_KERNEL_AGENT_ROOT" not in os.environ:
+    if not file_vars:
         print(
-            f"Preflight: ERROR — sourced {env_path} ({loaded} vars) but "
-            f"HYPERLOOM_KERNEL_AGENT_ROOT is still unset. The env file is "
-            f"malformed or stale. Re-run src/hyperloom/inference_optimizer/assets/"
-            f"install.sh to regenerate it.",
+            f"Preflight: ERROR — {env_path} sets no supported kernel-agent "
+            f"variables. The env file is malformed or stale. Re-run "
+            f"src/hyperloom/inference_optimizer/assets/install.sh to regenerate it.",
             file=sys.stderr,
         )
         sys.exit(2)
-    print(
-        f"Preflight: loaded {loaded} kernel-agent var(s) from "
-        f"{env_path} (env wins, HYPERLOOM_KERNEL_AGENT_ROOT="
-        f"{os.environ['HYPERLOOM_KERNEL_AGENT_ROOT']})"
-    )
+    loaded = _load_missing_env_vars(file_vars)
+    corrected = _correct_kernel_agent_path_vars(file_vars, env_path)
+    print(f"Preflight: loaded {loaded} kernel-agent var(s) from {env_path} (env wins)")
     return {
         "status": "applied" if loaded or corrected else "already_present",
         "skip_reason": None,
@@ -760,10 +777,7 @@ _SETUP_INSTALLABLE_FRAMEWORKS = frozenset({"sglang", "vllm", "atom"})
 def _setup_install_command(framework: str) -> str:
     """The documented setup invocation for ``framework``, verbatim in shape."""
     extra = " --framework-env isolated" if framework == "vllm" else ""
-    return (
-        'PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- '
-        f"--install-framework {framework}{extra} --yes"
-    )
+    return f'PYTHONPATH="$REPO_ROOT" python3 -m hyperloom setup -- --install-framework {framework}{extra} --yes'
 
 
 # Rootfs markers the runtimes drop: Docker writes the first, podman the second.
@@ -1427,10 +1441,9 @@ def _ensure_lm_eval_dep(
 
 def _normalize_hip_visible_devices() -> None:
     """Re-index HIP within the device view selected by ROCR."""
-    visible = [part for part in os.environ.get("ROCR_VISIBLE_DEVICES", "").split(",") if part.strip()]
-    if not visible:
+    value = hip_mask_within_rocr(os.environ)
+    if value is None:
         return
-    value = ",".join(str(index) for index in range(len(visible)))
     previous = os.environ.get("HIP_VISIBLE_DEVICES")
     if previous == value:
         return
@@ -1608,14 +1621,13 @@ def _check_tracelens_cli() -> dict[str, Any]:
     print(
         f"ERROR: TraceLens CLI(s) not on PATH: {missing}. The pod-local "
         f"/opt/venv/bin/TraceLens_* console_scripts are installed by "
-        f"src/hyperloom/agents/kernel/scripts/install.sh (chained from "
-        f"src/hyperloom/inference_optimizer/assets/install.sh) and do NOT persist "
+        f"src/hyperloom/inference_optimizer/assets/install.sh and do NOT persist "
         f"across pod restarts. SKILL IR-2 requires running install.sh "
         f"before every launch (carve-out applies only to --resume-from in "
         f"the same shell that earlier ran install.sh). Re-run:\n"
         f"  bash $REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh\n"
         f"  . {session_dir}/runtime/kernel-agent.env.sh\n"
-        f"then retry `python -m hyperloom.inference_optimizer.cli optimize`. Refusing to start.",
+        f"then retry `python -m hyperloom optimize`. Refusing to start.",
         file=sys.stderr,
     )
     raise SystemExit(2)
@@ -1641,6 +1653,27 @@ def _check_tracelens_root_exists() -> dict[str, Any]:
     sys.exit(2)
 
 
+_KERNEL_TUNING_CLIS: dict[str, str] = {
+    "hipblaslt-bench": "offline hipBLASLt GEMM solution tuning",
+    "ckProfiler": "the Composable Kernel GEMM/attention instance sweep",
+}
+
+
+def _check_kernel_tuning_clis() -> dict[str, Any]:
+    """WARN-only presence check for the GEMM tuning CLIs the kernel phase's backends call."""
+    missing = [name for name in _KERNEL_TUNING_CLIS if shutil.which(name) is None]
+    for name in missing:
+        print(
+            f"Preflight: WARNING — {name} not on PATH; {_KERNEL_TUNING_CLIS[name]} is unavailable to the kernel "
+            "phase. To use it, build it for this ROCm and put it on PATH."
+        )
+    return {
+        "status": "warned" if missing else "applied",
+        "skip_reason": None,
+        "detail": {"missing": missing},
+    }
+
+
 def _check_node_claude_cli() -> None:
     """WARN-only presence check for bundled agent CLIs (node/claude/codex)."""
     missing = [t for t in ("node", "claude", "codex") if shutil.which(t) is None]
@@ -1648,7 +1681,7 @@ def _check_node_claude_cli() -> None:
         print(
             f"Preflight: WARNING — CLI(s) not on PATH: {missing}. "
             f"ClaudeBackend / CodexBackend may fall back to direct HTTP. "
-            f"Run src/hyperloom/agents/kernel/scripts/install.sh to bring them in."
+            f"Run src/hyperloom/inference_optimizer/assets/install.sh to bring them in."
         )
 
 
@@ -1774,7 +1807,7 @@ def _print_recipe_kb_queue_status() -> dict[str, Any]:
     }
 
 
-_INFERENCEX_REPO_DEFAULT = "https://github.com/SemiAnalysisAI/InferenceX.git"
+INFERENCEX_REPO_DEFAULT = "https://github.com/SemiAnalysisAI/InferenceX.git"
 # MUST stay in lockstep with INFERENCEX_REF in assets/install.sh.
 _INFERENCEX_REF_DEFAULT = "3d5581562f643f9bdeb8410cd924e2c70906c966"
 
@@ -1898,7 +1931,7 @@ def _ensure_client_trust_compat(magpie_path: str) -> bool:
 
 def _clone_inferencex(dest: Path) -> str | None:
     """Clone InferenceX into ``dest`` (writable), pinned to INFERENCEX_REF."""
-    repo = os.environ.get("INFERENCEX_REPO") or _INFERENCEX_REPO_DEFAULT
+    repo = os.environ.get("INFERENCEX_REPO") or INFERENCEX_REPO_DEFAULT
     ref = os.environ.get("INFERENCEX_REF") or _INFERENCEX_REF_DEFAULT
     dest_str = str(dest)
     try:
@@ -2121,7 +2154,7 @@ def _persist_install_event(args: argparse.Namespace | None, session_dir: Path) -
         exc = RuntimeError("pending install event is unavailable")
         log.warning("failed to persist SBD V6 install event: %s", exc)
         if not record_write_warning(session_dir, component="install.event", exc=exc):
-            log.debug("failed to persist SBD V6 install-event write warning", exc_info=True)
+            log.debug("failed to persist SBD V6 install-event write warning", exc_info=exc)
 
 
 def _preflight(
@@ -2156,6 +2189,8 @@ def _preflight(
         category="normalize",
         action=_normalize_legacy_deepseek_env,
     )
+    # After the legacy normalization, which can create the credentials a header references.
+    _expand_custom_header_env_refs()
 
     # Fail fast on missing credentials after the fallback loaders.
     _run_install_step(
@@ -2573,6 +2608,21 @@ def _preflight(
     # install.sh before a missing CLI surfaces mid-run.
     no_kernel = getattr(args, "no_kernel", False) if args else False
     enable_roofline = getattr(args, "enable_roofline", True) if args else True
+    if no_kernel:
+        _record_install_step(
+            install_event,
+            step_id="check_kernel_tuning_clis",
+            category="check",
+            status="skipped",
+            skip_reason="no_kernel",
+        )
+    else:
+        _run_install_step(
+            install_event,
+            step_id="check_kernel_tuning_clis",
+            category="check",
+            action=_check_kernel_tuning_clis,
+        )
     if _tracelens_required_at_preflight(no_kernel, enable_roofline):
         _run_install_step(
             install_event,

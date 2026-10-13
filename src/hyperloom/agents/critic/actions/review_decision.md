@@ -7,7 +7,7 @@ Coordinator.
 ## Step 1 — Prepare
 
 ```bash
-python -m runtime.cli prepare-review \
+python -m hyperloom.agents.critic.runtime.cli prepare-review \
   --request "$CRITIC_WORKDIR/request.json" \
   --out "$CRITIC_WORKDIR/judge_bundle.json"
 ```
@@ -58,7 +58,7 @@ When `judge_bundle.required_context` is non-empty:
 ## Step 3 — Commit
 
 ```bash
-python -m runtime.cli commit-review \
+python -m hyperloom.agents.critic.runtime.cli commit-review \
   --request "$CRITIC_WORKDIR/request.json" \
   --review "$CRITIC_WORKDIR/review.json" \
   --out "$CRITIC_WORKDIR/emit.json"

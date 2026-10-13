@@ -123,7 +123,7 @@ In this scenario, `/hyperloom-setup` runs the packaged setup backend on the host
 
 ```bash
 export REPO_ROOT="$(pwd -P)"
-PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup
+PYTHONPATH="$REPO_ROOT" python3 -m hyperloom setup
 ```
 
 The backend runs `install_baremetal.sh` in five phases:

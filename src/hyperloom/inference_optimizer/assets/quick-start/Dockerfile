@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.4
-FROM lmsysorg/sglang-rocm:v0.5.20-rocm10-mi30x-20260920
+FROM lmsysorg/sglang-rocm:v0.5.21-rocm10-mi30x-20261008
 
 
 #install AMD self-signed certificate
@@ -24,7 +24,7 @@ RUN chmod +x /workspace/hyperloom/*.sh
 RUN cp /opt/Hyperloom/.env.template /opt/Hyperloom/.env
 
 RUN mkdir -p /workspace/hyperloom/logs && \
-SKIP_RAY_START=1 KERNEL_AGENT_SKIP_MODEL_LOAD=1 bash -o pipefail -c  "source /workspace/hyperloom/runtime/local-setup.env.sh && /opt/Hyperloom/src/hyperloom/inference_optimizer/assets/install.sh 2>&1 | tee /workspace/hyperloom/logs/pre-install.log"
+SKIP_RAY_START=1 bash -o pipefail -c  "source /workspace/hyperloom/runtime/local-setup.env.sh && /opt/Hyperloom/src/hyperloom/inference_optimizer/assets/install.sh 2>&1 | tee /workspace/hyperloom/logs/pre-install.log"
 
 WORKDIR /opt/Hyperloom
 ENTRYPOINT ["/workspace/hyperloom/setup_env.sh"]

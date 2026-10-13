@@ -469,18 +469,10 @@ class TestN24KernelAgentEnvHardFail:
     @pytest.fixture(autouse=True)
     def _isolate_env(self, monkeypatch):
         for var in (
-            "HYPERLOOM_KERNEL_AGENT_ROOT",
             "KERNEL_AGENT_ENV",
             "USER_DATA_PATH",
         ):
             monkeypatch.delenv(var, raising=False)
-
-    def test_noop_when_root_already_set(self, monkeypatch, capsys):
-        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", "/opt/kernel-agent")
-        cli_preflight._load_kernel_agent_env_fallback()
-        out = capsys.readouterr()
-        assert out.out == ""
-        assert out.err == ""
 
     def test_aborts_when_no_user_data_path(self, monkeypatch, capsys):
         with pytest.raises(SystemExit) as excinfo:
@@ -500,40 +492,40 @@ class TestN24KernelAgentEnvHardFail:
         assert "install.sh" in err
         assert str(tmp_path) in err
 
-    def test_aborts_when_env_file_does_not_define_root(
+    @pytest.mark.parametrize(
+        "contents",
+        ["# stale file\n", "# stale file\nexport SOMETHING_ELSE=1\n"],
+        ids=["comments-only", "only-unsupported"],
+    )
+    def test_aborts_when_env_file_sets_no_supported_vars(
         self,
         tmp_path,
         monkeypatch,
         capsys,
+        contents,
     ):
         runtime = tmp_path / "runtime"
         runtime.mkdir()
-        (runtime / "kernel-agent.env.sh").write_text(
-            "# stale file\nexport SOMETHING_ELSE=1\n",
-            encoding="utf-8",
-        )
+        (runtime / "kernel-agent.env.sh").write_text(contents, encoding="utf-8")
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
         with pytest.raises(SystemExit) as excinfo:
             cli_preflight._load_kernel_agent_env_fallback()
         assert excinfo.value.code == 2
         err = capsys.readouterr().err
-        assert "HYPERLOOM_KERNEL_AGENT_ROOT" in err
-        assert "stale" in err or "malformed" in err
+        assert "malformed or stale" in err
+        assert "install.sh" in err
 
     def test_sources_vars_on_success(self, tmp_path, monkeypatch, capsys):
         runtime = tmp_path / "runtime"
         runtime.mkdir()
         (runtime / "kernel-agent.env.sh").write_text(
-            "# valid env file\n"
-            "export HYPERLOOM_KERNEL_AGENT_ROOT=/opt/kernel-agent\n"
-            "export KERNEL_AGENT_LOG_LEVEL=INFO\n",
+            "# valid env file\nexport KERNEL_AGENT_LOG_LEVEL=INFO\n",
             encoding="utf-8",
         )
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
         cli_preflight._load_kernel_agent_env_fallback()
         import os as _os
 
-        assert _os.environ["HYPERLOOM_KERNEL_AGENT_ROOT"] == "/opt/kernel-agent"
         assert _os.environ["KERNEL_AGENT_LOG_LEVEL"] == "INFO"
         out = capsys.readouterr().out
         assert "loaded" in out
@@ -543,7 +535,7 @@ class TestN24KernelAgentEnvHardFail:
         runtime = tmp_path / "runtime"
         runtime.mkdir()
         (runtime / "kernel-agent.env.sh").write_text(
-            "export HYPERLOOM_KERNEL_AGENT_ROOT=/from/file\nexport KERNEL_AGENT_LOG_LEVEL=INFO\n",
+            "export KERNEL_AGENT_LOG_LEVEL=INFO\n",
             encoding="utf-8",
         )
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
@@ -551,7 +543,6 @@ class TestN24KernelAgentEnvHardFail:
         cli_preflight._load_kernel_agent_env_fallback()
         import os as _os
 
-        assert _os.environ["HYPERLOOM_KERNEL_AGENT_ROOT"] == "/from/file"
         assert _os.environ["KERNEL_AGENT_LOG_LEVEL"] == "DEBUG"
 
     def test_credential_fallback_block_parses_without_warnings(
@@ -564,7 +555,6 @@ class TestN24KernelAgentEnvHardFail:
         runtime = tmp_path / "runtime"
         runtime.mkdir()
         (runtime / "kernel-agent.env.sh").write_text(
-            "export HYPERLOOM_KERNEL_AGENT_ROOT=/opt/kernel-agent\n"
             'if [ -n "${ANTHROPIC_API_KEY:-}" ]; then\n'
             "  [ \"${ANTHROPIC_API_KEY}\" = 'ak-install-time' ] || \\\n"
             "    echo '[kernel-agent] ANTHROPIC_API_KEY differs' >&2\n"
@@ -595,15 +585,14 @@ class TestN24KernelAgentEnvHardFail:
     ):
         custom = tmp_path / "custom-loc.sh"
         custom.write_text(
-            "export HYPERLOOM_KERNEL_AGENT_ROOT=/from/custom\n",
+            "export KERNEL_AGENT_LOG_LEVEL=INFO\n",
             encoding="utf-8",
         )
         monkeypatch.setenv("KERNEL_AGENT_ENV", str(custom))
         monkeypatch.setenv("USER_DATA_PATH", "/nonexistent/should-not-be-used")
-        cli_preflight._load_kernel_agent_env_fallback()
-        import os as _os
+        outcome = cli_preflight._load_kernel_agent_env_fallback()
 
-        assert _os.environ["HYPERLOOM_KERNEL_AGENT_ROOT"] == "/from/custom"
+        assert outcome["detail"]["env_file"] == str(custom)
 
 
 # A stale/placeholder TRACELENS_ROOT is corrected from the installer-written env file; template placeholders are
@@ -615,7 +604,6 @@ class TestTracelensRootEnvCorrection:
 
         snapshot = dict(os.environ)
         for var in (
-            "HYPERLOOM_KERNEL_AGENT_ROOT",
             "KERNEL_AGENT_ENV",
             "USER_DATA_PATH",
             "TRACELENS_ROOT",
@@ -632,16 +620,15 @@ class TestTracelensRootEnvCorrection:
         runtime = tmp_path / "runtime"
         runtime.mkdir(exist_ok=True)
         (runtime / "kernel-agent.env.sh").write_text(
-            f"export HYPERLOOM_KERNEL_AGENT_ROOT=/opt/kernel-agent\nexport TRACELENS_ROOT='{tracelens_dir}'\n",
+            f"export TRACELENS_ROOT='{tracelens_dir}'\n",
             encoding="utf-8",
         )
 
     def test_corrects_invalid_inherited_root_from_env_file(self, tmp_path, monkeypatch, capsys):
-        """Root set + inherited TRACELENS_ROOT points nowhere → corrected from file."""
+        """An inherited TRACELENS_ROOT that points nowhere is corrected from the file."""
         good = tmp_path / "deps" / "TraceLens"
         good.mkdir(parents=True)
         self._write_env_file(tmp_path, good)
-        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", "/opt/kernel-agent")
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
         monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path / "ghost" / "TraceLens"))
 
@@ -660,7 +647,6 @@ class TestTracelensRootEnvCorrection:
         inherited = tmp_path / "inherited" / "TraceLens"
         inherited.mkdir(parents=True)
         self._write_env_file(tmp_path, file_dir)
-        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", "/opt/kernel-agent")
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
         monkeypatch.setenv("TRACELENS_ROOT", str(inherited))
 
@@ -684,10 +670,9 @@ class TestTracelensRootEnvCorrection:
             override.mkdir()
         selected = "" if override_kind == "empty" else str(override)
         (runtime / "kernel-agent.env.sh").write_text(
-            f"export HYPERLOOM_KERNEL_AGENT_ROOT=/opt/kernel-agent\nexport MAGPIE_PATH='{magpie_dir}'\n",
+            f"export MAGPIE_PATH='{magpie_dir}'\n",
             encoding="utf-8",
         )
-        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", "/opt/kernel-agent")
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
         monkeypatch.setenv("MAGPIE_PATH", selected)
 
@@ -698,9 +683,8 @@ class TestTracelensRootEnvCorrection:
         assert _os.environ["MAGPIE_PATH"] == selected
         assert "MAGPIE_PATH" not in outcome["detail"]["corrected_keys"]
 
-    @pytest.mark.parametrize("root_already_set", [False, True])
-    def test_runtime_magpie_gapfill_reaches_child_imports(self, tmp_path, monkeypatch, root_already_set):
-        """A reused kernel-agent root must not suppress the runtime's missing Magpie import root."""
+    def test_runtime_magpie_gapfill_reaches_child_imports(self, tmp_path, monkeypatch):
+        """The runtime file's Magpie import root reaches child processes."""
         import os
         import subprocess
         import sys
@@ -711,21 +695,16 @@ class TestTracelensRootEnvCorrection:
         (magpie_dir / "Magpie").mkdir(parents=True)
         (magpie_dir / "Magpie" / "__init__.py").write_text("RUNTIME_MARKER = 'installer-checkout'\n", encoding="utf-8")
         (runtime / "kernel-agent.env.sh").write_text(
-            f"export HYPERLOOM_KERNEL_AGENT_ROOT=/installed/kernel\nexport MAGPIE_PATH='{magpie_dir}'\n",
+            f"export MAGPIE_PATH='{magpie_dir}'\n",
             encoding="utf-8",
         )
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
         monkeypatch.setenv("PYTHONPATH", "")
-        if root_already_set:
-            monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", "/operator/kernel")
 
         outcome = cli_preflight._load_kernel_agent_env_fallback()
         cli_preflight._derive_runtime_paths()
 
         assert os.environ["MAGPIE_PATH"] == str(magpie_dir)
-        assert os.environ["HYPERLOOM_KERNEL_AGENT_ROOT"] == (
-            "/operator/kernel" if root_already_set else "/installed/kernel"
-        )
         assert "MAGPIE_PATH" not in outcome["detail"]["corrected_keys"]
         child = subprocess.run(
             [sys.executable, "-c", "import Magpie; print(Magpie.RUNTIME_MARKER)"],

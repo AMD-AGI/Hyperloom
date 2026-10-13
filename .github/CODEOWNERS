@@ -27,7 +27,6 @@
 
 # Package metadata and environment templates (root-level)
 /pyproject.toml                                                 @AMD-AGI/SaFE
-/setup.py                                                       @AMD-AGI/SaFE
 /.env.template                                                  @AMD-AGI/SaFE
 /*.py                                                           @AMD-AGI/SaFE
 /*.yaml                                                         @AMD-AGI/SaFE
@@ -37,16 +36,21 @@
 # Hyperloom Core
 /src/hyperloom/inference_optimizer/                             @AMD-AGI/SaFE
 /src/hyperloom/agents/critic/                                   @AMD-AGI/SaFE
-/src/hyperloom/agents/kernel/                                   @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/trace_analysis/                     @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/kernel/apply_kernel_patch.py        @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/kernel/gemm_tuning.py               @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/kernel/forge_gemm_tuning.py         @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/kernel/forge_fusion.py              @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/actions/executors/_ray_runtime.py   @AMD-AGI/SaFE
 
 # TraceLens Agent integration
-/src/hyperloom/agents/kernel/tools/tracelens_analysis.py        @tsrikris @devalshahamd @AMD-AGI/SaFE
-/src/hyperloom/agents/kernel/tools/tracelens_skill_runner.py    @tsrikris @devalshahamd @AMD-AGI/SaFE
-/src/hyperloom/agents/kernel/tools/_analysis_md.py              @tsrikris @devalshahamd @AMD-AGI/SaFE
-/src/hyperloom/agents/kernel/tools/_idle_gate.py                @tsrikris @devalshahamd @AMD-AGI/SaFE
-/src/hyperloom/agents/kernel/tools/tracelens_arch_benchmark.py  @devalshahamd @AMD-AGI/SaFE
-/src/hyperloom/inference_optimizer/tracelens_md.py              @tsrikris @devalshahamd @AMD-AGI/SaFE
-/docs/components/tracelens.md                                   @tsrikris @devalshahamd @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py        @tsrikris @devalshahamd @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py    @tsrikris @devalshahamd @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/trace_analysis/_analysis_md.py              @tsrikris @devalshahamd @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/trace_analysis/_idle_gate.py                @tsrikris @devalshahamd @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/trace_analysis/tracelens_arch_benchmark.py  @devalshahamd @AMD-AGI/SaFE
+/src/hyperloom/inference_optimizer/tracelens_md.py                      @tsrikris @devalshahamd @AMD-AGI/SaFE
+/docs/components/tracelens.md                                           @tsrikris @devalshahamd @AMD-AGI/SaFE
 
 # Magpie integration
 /src/hyperloom/orchestrator/actions/executors/profile.py           @devalshahamd @haofrank @AMD-AGI/SaFE
@@ -57,8 +61,8 @@
 # KERNEL opt (the kernel_optimization.py CLI wrapper was retired)
 /src/hyperloom/orchestrator/kernel/request_handlers.py          @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
 /src/hyperloom/orchestrator/phases/kernel.py                    @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
-/src/kernelforge/cli.py                                         @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
+/src/kernelforge/cli/                                           @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
 
 # GEAK integration
-/src/hyperloom/agents/kernel/tools/backends/geak_runner.py      @iraj465 @yueliu14 @chao-xu-spec @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/kernel/geak_runner.py               @iraj465 @yueliu14 @chao-xu-spec @AMD-AGI/SaFE
 /src/hyperloom/orchestrator/actions/executors/_geak_sweep.py    @iraj465 @yueliu14 @chao-xu-spec @AMD-AGI/SaFE

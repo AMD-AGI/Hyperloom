@@ -1,17 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the framework agent's shared library surface (repo_map, framework_registry)."""
+"""Tests for the framework agent's shared library surface (framework_registry)."""
 
 from __future__ import annotations
-
-from hyperloom.agents.framework import repo_map as _repo_map
-
-
-def test_repo_url_for_framework_known_and_unknown() -> None:
-    assert _repo_map.repo_url_for_framework("sglang").endswith("sglang.git")
-    assert _repo_map.repo_url_for_framework("xdit") == "https://github.com/xdit-project/xDiT.git"
-    assert _repo_map.repo_url_for_framework("nope") == ""
 
 
 def test_scriptable_framework_registry_specs() -> None:

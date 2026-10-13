@@ -30,6 +30,14 @@ MAINTENANCE_INTERVAL_SEC: int = 1800
 DEFAULT_CYCLE_HOURS: float = 24.0
 # Trailing window for the crash-rate emergency stop, in seconds.
 _CRASH_EMERGENCY_WINDOW_SEC: float = 24.0 * 3600.0
+# Retry delay for an agent whose LLM backend keeps failing, doubling from the base to the ceiling, in seconds. Ints, so
+# the doubling cannot overflow a float however long a streak runs.
+_BACKEND_RETRY_BASE_SEC: int = 2
+_BACKEND_RETRY_MAX_SEC: int = 300
+# How long one agent's backend may fail without a successful turn before the session stops, in seconds.
+_BACKEND_UNHEALTHY_STOP_SEC: float = 3600.0
+# How many turns in a row one agent may answer without an intent before the session stops.
+_NO_INTENT_STOP_TURNS: int = 50
 from ..phases import machine_state as _phase_state
 from hyperloom.inference_optimizer.session.paths import db_path_for
 from hyperloom.inference_optimizer.session.session_binding import bind_session
@@ -41,10 +49,7 @@ from ..bus.storage.connection import SqliteConnection, resolve_journal_mode
 from hyperloom.inference_optimizer.protocol.intent import NoIntentEmitted
 from ..bus.message_bus import MessageBus
 from ..state.objective import Objective, TimeOnlyObjective
-from ..policy.gate import (
-    PolicyGate,
-    SPECIALIST_FROM_AGENT_PREFIX,
-)
+from ..policy.gate import PolicyGate
 from ..state.round_store import RoundStore
 from ..bus.gpu_pool import (
     SpecialistGpuPool,
@@ -201,6 +206,7 @@ def _infer_model_class_from_config(model_path: str) -> str:
 
 
 if TYPE_CHECKING:
+    from hyperloom.inference_optimizer.experience_kb import ExperienceKBIntegration
     from .proposals import PendingProposal
 
 
@@ -237,9 +243,11 @@ class Coordinator:
         self.orch_prompt = OrchestrationPrompt(overrides={})
         # KnowledgePlane facade; pre-warms PR feed + advisory context.
         self.knowledge_plane: Any = knowledge_plane
-        from .writeback import WritebackCollaborator
+        from ..specialists.dispatch import SpecialistDispatchCollaborator
 
-        self._collaborator("_writeback", partial(WritebackCollaborator, proposal_scorer=proposal_scorer))
+        self._collaborator(
+            "_specialist_dispatch", partial(SpecialistDispatchCollaborator, proposal_scorer=proposal_scorer)
+        )
         self._model_class_override: str = (model_class or "").strip()
 
         # Validate every reactor has a backend wired.
@@ -337,17 +345,20 @@ class Coordinator:
             _cycle_hours = env_float("INFERENCE_OPTIMIZER_CYCLE_HOURS", default=DEFAULT_CYCLE_HOURS)
             self.shared_state.cycle_minutes = max(1.0, _cycle_hours * 60.0)
 
-        # Per-agent (seq, msg_id) of the last message its prompt rendered.
-        self._rendered_cursor: dict[str, tuple[int, str]] = {}
         self._prompt_snapshots = PromptSnapshotTracker()
 
         # Per-agent BackendError streak; crossing threshold records one backend_unhealthy, then re-arms.
-        self._backend_error_streak: dict[str, int] = {name: 0 for name in self.role_registry}
-        self._backend_error_alarm_armed: dict[str, bool] = {name: True for name in self.role_registry}
+        self._backend_error_streak: dict[str, int] = dict.fromkeys(self.role_registry, 0)
+        self._backend_error_alarm_armed: dict[str, bool] = dict.fromkeys(self.role_registry, True)
+        # Monotonic time each failing agent's streak began, and before which the tick loop does not call it again.
+        self._backend_error_since: dict[str, float] = {}
+        self._backend_retry_at: dict[str, float] = {}
         self._backend_error_streak_threshold: int = max(
             1,
             env_int("INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD", default=5),
         )
+        # Per-agent run of consecutive turns that emitted no intent; a turn with an intent ends it.
+        self._no_intent_streak: dict[str, int] = {}
 
         # Stable tick order from the live role_registry.
         _CANONICAL_ORDER = ("orchestration", "critic")
@@ -373,6 +384,15 @@ class Coordinator:
         """RecipeKB owned by the knowledge plane."""
         plane = self.knowledge_plane
         return plane.recipe_kb if plane is not None else None
+
+    @property
+    def experience_kb(self) -> ExperienceKBIntegration | None:
+        """The session's one Experience service integration, built on first use; None when reads are off."""
+        if "_experience_kb" not in self.__dict__:
+            from hyperloom.inference_optimizer.experience_kb import integration_for
+
+            self.__dict__["_experience_kb"] = integration_for(self.shared_state, self.session_dir)
+        return self.__dict__["_experience_kb"]
 
     @property
     def run_deadline(self) -> Deadline | None:
@@ -525,6 +545,9 @@ class Coordinator:
                 # its contents, so a snapshot taken here would be pre-replay.
                 proposals=lambda: self.state.pending_proposals,
                 session_dir=self.session_dir,
+                # The window a revalidation holds is closed by the writeback when
+                # its result is booked; this pass only closes one nobody will.
+                result_pending=lambda task_id: self.dispatcher.owes_result(task_id),
             )
             self.__dict__["_reconciler"] = r
         return r
@@ -552,6 +575,13 @@ class Coordinator:
         from .writeback import WritebackCollaborator
 
         return self._collaborator("_writeback", WritebackCollaborator)
+
+    @property
+    def recipe_journal(self):
+        """Optimization journal, Recipe KB facts and the final Recipe."""
+        from ..knowledge.recipe_journal import RecipeJournalCollaborator
+
+        return self._collaborator("_recipe_journal", RecipeJournalCollaborator)
 
     @property
     def maintenance(self):
@@ -681,7 +711,7 @@ class Coordinator:
             sid = (self.shared_state.recipe_kb_session_id or "").strip()
             if not sid:
                 return
-        self.writeback.ensure_recipe_finalized(source="t4_fallback")
+        self.recipe_journal.ensure_recipe_finalized(source="t4_fallback")
         try:
             self.shared_state.save(self.session_dir)
         except Exception:
@@ -706,11 +736,6 @@ class Coordinator:
                 self.phase_machine.advance_phase_if_needed,
                 stage="advance_phase_pre_reactor",
             )
-            if self.shared_state.pending_escalate_hint.strip():
-                await self.await_within_session_bound(
-                    self.phase_machine.advance_phase_if_needed,
-                    stage="advance_phase_hint",
-                )
         except Exception as exc:
             log.exception("phase advance before reactors failed")
             self.record_exception(stage="advance_phase_pre_reactor", exc=exc)
@@ -720,6 +745,8 @@ class Coordinator:
             for name in self._tick_roles:
                 if self.stop_requested():
                     break
+                if time.monotonic() < self._backend_retry_at.get(name, 0.0):
+                    continue
                 await self.await_within_session_bound(
                     lambda n=name: self.reactor_pass(n),
                     stage=f"reactor:{name}",
@@ -804,6 +831,15 @@ class Coordinator:
         if bound is None:
             return None
         return bound.remaining()
+
+    def _backend_retry_wait_sec(self) -> float:
+        """Seconds until the first reactor agent is due while every one is backing off, capped at the session bound."""
+        now = time.monotonic()
+        wait = min((self._backend_retry_at.get(name, 0.0) - now for name in self._tick_roles), default=0.0)
+        bound = self._seconds_until_session_bound()
+        if bound is not None:
+            wait = min(wait, bound)
+        return max(0.0, wait)
 
     def _stage_timeout_sec(self, stage: str) -> float | None:
         """Return the total wall-clock ceiling for an inline reactor turn."""
@@ -1061,9 +1097,10 @@ class Coordinator:
                         break
 
                 # Brief wait between ticks to avoid CPU spin while staying signal-responsive; 0.0 keeps tests fast.
-                if tick_interval_sec > 0:
+                wait_sec = tick_interval_sec if in_closing else max(tick_interval_sec, self._backend_retry_wait_sec())
+                if wait_sec > 0:
                     try:
-                        await asyncio.wait_for(self._stop.wait(), timeout=tick_interval_sec)
+                        await asyncio.wait_for(self._stop.wait(), timeout=wait_sec)
                         stop_reason = self._signal_stop_reason()
                         break
                     except asyncio.TimeoutError:
@@ -1173,26 +1210,22 @@ class Coordinator:
                     latency_ms=int((time.perf_counter() - _t0) * 1000),
                     call_id=call_id,
                 )
-            await self.writeback.record_observation(
+            await self.bus.record_observation(
                 "coordinator",
                 "observation",
                 {"kind": "backend_error", "agent": agent_name, "error": repr(exc)},
             )
             await self._track_backend_error_streak(agent_name, exc)
-            return
+            return None
         except NoIntentEmitted as exc:
             # No parseable intents; surface as observation so the next tick self-corrects.
-            await self.writeback.record_observation(
-                "coordinator",
-                "observation",
-                {"kind": "no_intent_emitted", "agent": agent_name, "error": str(exc)[:500]},
-            )
+            await self._record_no_intent_turn(agent_name, str(exc)[:500])
             await self.conversation.advance_rendered_cursor(agent_name)
-            return
+            return None
         except Exception as exc:
             # Catch-all so one agent's bad turn never stops the loop.
             log.exception("reactor pass for %s raised", agent_name)
-            await self.writeback.record_observation(
+            await self.bus.record_observation(
                 "coordinator",
                 "observation",
                 {"kind": "reactor_exception", "agent": agent_name, "error": format_exc_brief(exc, limit=500)},
@@ -1202,13 +1235,15 @@ class Coordinator:
                 agent=agent_name,
                 exc=exc,
             )
-            return
+            return None
         finally:
             self._trace_mcp_setup(agent_name=agent_name, backend=backend)
         # Reset the streak — a successful turn proves the backend is alive again.
         if self._backend_error_streak.get(agent_name):
             self._backend_error_streak[agent_name] = 0
             self._backend_error_alarm_armed[agent_name] = True
+            self._backend_error_since.pop(agent_name, None)
+            self._backend_retry_at.pop(agent_name, None)
         # Record this reactor turn's token spend on the unified ledger.
         latency_ms = int((time.perf_counter() - _t0) * 1000)
         self._trace_reactor_llm_call(agent_name, result, latency_ms=latency_ms)
@@ -1217,12 +1252,10 @@ class Coordinator:
         with trajectory_scope(call_id=call_id, parent_span_id=call_span.span_id):
             for intent in result.intents:
                 await self.router.handle_intent(agent_name, intent)
-        if not result.intents and not request:
-            await self.writeback.record_observation(
-                "coordinator",
-                "observation",
-                {"kind": "no_intent_emitted", "agent": agent_name, "error": "the turn emitted no intents"},
-            )
+        if result.intents:
+            self._no_intent_streak.pop(agent_name, None)
+        elif not request:
+            await self._record_no_intent_turn(agent_name, "the turn emitted no intents")
         await self.conversation.advance_rendered_cursor(agent_name)
         if agent_name == "orchestration":
             state = self.shared_state
@@ -1311,18 +1344,31 @@ class Coordinator:
                 exc_info=True,
             )
 
-    async def _track_backend_error_streak(
-        self,
-        agent_name: str,
-        exc: BackendError,
-    ) -> None:
-        """Increment the per-agent ``BackendError`` streak; emit one backend_unhealthy event on crossing the threshold (re-arms only after a successful turn)."""
+    async def _track_backend_error_streak(self, agent_name: str, exc: BackendError) -> None:
+        """Extend the per-agent ``BackendError`` streak and back the agent off.
+
+        A streak that has lasted ``_BACKEND_UNHEALTHY_STOP_SEC`` stops the session unless something else already has.
+        Crossing the threshold emits one backend_unhealthy event, which re-arms only after a successful turn.
+        """
+        from hyperloom.inference_optimizer.breakdown.stop_reasons import BACKEND_UNHEALTHY_STOP_REASON
+
+        now = time.monotonic()
         new_value = self._backend_error_streak.get(agent_name, 0) + 1
         self._backend_error_streak[agent_name] = new_value
+        log.warning("Coordinator: %s backend turn failed (%d in a row): %s", agent_name, new_value, exc)
+        failing_sec = now - self._backend_error_since.setdefault(agent_name, now)
+        self._backend_retry_at[agent_name] = now + min(
+            _BACKEND_RETRY_MAX_SEC, _BACKEND_RETRY_BASE_SEC * 2 ** (new_value - 1)
+        )
+        if failing_sec >= _BACKEND_UNHEALTHY_STOP_SEC and not self.shared_state.stop_reason:
+            log.error(
+                "Coordinator: the %s backend has failed for %.0fs without a successful turn", agent_name, failing_sec
+            )
+            self.shared_state.set_stop_reason(BACKEND_UNHEALTHY_STOP_REASON)
         threshold = self._backend_error_streak_threshold
         if new_value >= threshold and self._backend_error_alarm_armed.get(agent_name, True):
             self._backend_error_alarm_armed[agent_name] = False
-            await self.writeback.record_observation(
+            await self.bus.record_observation(
                 "coordinator",
                 "observation",
                 {
@@ -1341,12 +1387,43 @@ class Coordinator:
                 },
             )
 
+    async def _record_no_intent_turn(self, agent_name: str, error: str) -> None:
+        """Record a turn that emitted no intent and extend the agent's no-intent streak.
+
+        The ``_NO_INTENT_STOP_TURNS``-th such turn in a row records one high-severity no_intent_streak observation and
+        stops the session unless something else already has.
+        """
+        from hyperloom.inference_optimizer.breakdown.stop_reasons import BACKEND_UNHEALTHY_STOP_REASON
+
+        await self.bus.record_observation(
+            "coordinator",
+            "observation",
+            {"kind": "no_intent_emitted", "agent": agent_name, "error": error},
+        )
+        streak = self._no_intent_streak.get(agent_name, 0) + 1
+        self._no_intent_streak[agent_name] = streak
+        if streak != _NO_INTENT_STOP_TURNS:
+            return
+        log.error("Coordinator: the %s agent answered %d turns in a row without an intent", agent_name, streak)
+        await self.bus.record_observation(
+            "coordinator",
+            "observation",
+            {
+                "kind": "no_intent_streak",
+                "agent": agent_name,
+                "consecutive_turns": streak,
+                "severity": "high",
+                "hint": (
+                    "the agent keeps answering without calling emit_intent; for the orchestration agent, "
+                    "agents/orchestration/mcp_setup.json records whether Claude Code offered the tool"
+                ),
+            },
+        )
+        if not self.shared_state.stop_reason:
+            self.shared_state.set_stop_reason(BACKEND_UNHEALTHY_STOP_REASON)
+
 
 __all__ = [
     "Coordinator",
     "CoordinatorState",
-    "SharedState",
-    "effective_closing_grace_sec",
-    # Re-exported from policy.gate; referenced via ``coordinator.<name>`` in tests.
-    "SPECIALIST_FROM_AGENT_PREFIX",
 ]

@@ -5,11 +5,8 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
-import json
 import logging
 import math
-from pathlib import Path
 import time
 from typing import Any
 
@@ -26,7 +23,9 @@ from hyperloom.inference_optimizer.breakdown.stop_reasons import is_valid_stop_r
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
 )
+from ..kernel.patch_landing import IntegratedStack
 from ..state.kernel_decision_settings import resolve_kernel_opt_max_failures
+from .session_contract import bound_session_declares
 from ..state.shared_state import (
     ESCALATE_HINT_SKIP_TO_CLOSE,
     ESCALATE_HINT_SKIP_TO_KERNEL,
@@ -766,6 +765,7 @@ GEAK_TERMINAL_STATUSES = frozenset(
         "ok",
         "no_gain",
         "error",
+        "timeout",
         "failed",
         "skipped",
         "baseline_reproduction_failed",
@@ -894,16 +894,7 @@ def kernel_work_pending(state: Any) -> bool:
         return True
 
     rejected = {str(x) for x in (state.rejected_kernel_ids or [])}
-    integrated_entries: list[dict[str, Any]] = []
-    integrated_sources: set[str] = set()
-    for entry in state.optimization_stack or []:
-        if not isinstance(entry, dict):
-            continue
-        if str(entry.get("action") or "") == "integrate":
-            integrated_entries.append(entry)
-            source_file = str(entry.get("target_file") or entry.get("source_file") or "")
-            if source_file:
-                integrated_sources.add(source_file)
+    integrated = IntegratedStack.of(state.optimization_stack)
 
     attempts = state.kernel_opt_task_attempts or {}
     if not isinstance(attempts, dict):
@@ -914,23 +905,7 @@ def kernel_work_pending(state: Any) -> bool:
         kernel_id = str(attempt.get("current_kernel_id") or attempt.get("kernel_id") or ledger_id)
         source_file = str(attempt.get("last_source_file") or "")
         task_group_key = str(attempt.get("task_group_key") or "")
-        integrated = False
-        for integrated_entry in integrated_entries:
-            integrated_key = str(integrated_entry.get("task_group_key") or "")
-            if task_group_key and integrated_key:
-                integrated = task_group_key == integrated_key
-            else:
-                if str(integrated_entry.get("kernel_id") or "") != kernel_id:
-                    continue
-                integrated_source = str(
-                    integrated_entry.get("target_file") or integrated_entry.get("source_file") or ""
-                )
-                integrated = not source_file or not integrated_source or source_file == integrated_source
-            if integrated:
-                break
-        if integrated:
-            continue
-        if source_file and source_file in integrated_sources:
+        if integrated.covers(kernel_ids=(kernel_id,), task_group_key=task_group_key, source_file=source_file):
             continue
         decision = str(attempt.get("last_decision") or "").strip().upper()
         status = str(attempt.get("last_status") or "").strip().lower()
@@ -1206,56 +1181,15 @@ def _budget_predicate_inputs(
 ) -> dict[str, Any]:
     """Normalize the clocks compared by phase budget predicates."""
     remaining_sec = phase_budget_remaining_seconds(state, now_unix=now_unix)
-    return {
+    budget: dict[str, Any] = {
         "remaining_sec": remaining_sec,
-        "current_balance": remaining_sec,
         "cap_sec": phase_cap_seconds(state),
         "entry_elapsed_sec": phase_elapsed_seconds(state, now_unix=now_unix),
         "cumulative_elapsed_sec": phase_cumulative_seconds(state, now_unix=now_unix),
     }
-
-
-@lru_cache(maxsize=8)
-def _contract_admits_baseline_tput(session_dir: str) -> bool:
-    """Whether the session's workflow contract declares ``global.baseline_tput``.
-
-    A session keeps the contract identity its manifest was stamped with, so a
-    v1 session resumed on newer code still exports against the v1 schema, whose
-    ``workflow_global`` admits no additional property. The identity is read the
-    way the metadata recorder reads it: an unstamped manifest is v1. Cached per
-    session because the stamp never changes after the manifest is written.
-    """
-    from hyperloom.inference_optimizer.breakdown.workflow_contract import (
-        CURRENT_WORKFLOW_CONTRACT_VERSION,
-        WORKFLOW_CONTRACT_V1,
-        workflow_schema,
-    )
-    from hyperloom.inference_optimizer.session.session_paths import manifest_path
-
-    path = manifest_path(Path(session_dir))
-    if not path.exists():
-        version = CURRENT_WORKFLOW_CONTRACT_VERSION
-    else:
-        try:
-            manifest = json.loads(path.read_text(encoding="utf-8"))
-            version = str(manifest.get("workflow_contract_version") or WORKFLOW_CONTRACT_V1)
-        except (OSError, ValueError, AttributeError):
-            # Unreadable identity: leave the fact out. The close decision still
-            # reads the baseline from state, so only the frozen copy is lost.
-            return False
-    try:
-        properties = workflow_schema(version)["$defs"]["workflow_global"]["properties"]
-    except (KeyError, OSError):
-        return False
-    return "baseline_tput" in properties
-
-
-def _session_contract_admits_baseline_tput() -> bool:
-    from hyperloom.inference_optimizer.session.session_binding import bound_session_or_none
-
-    session = bound_session_or_none()
-    # Nothing bound means no recorded identity to honour: the current contract.
-    return session is None or _contract_admits_baseline_tput(str(session))
+    if bound_session_declares("phase_budget", "current_balance"):
+        budget["current_balance"] = remaining_sec
+    return budget
 
 
 def _base_workflow_predicate_inputs(
@@ -1283,7 +1217,7 @@ def _base_workflow_predicate_inputs(
             _cycle_reloop_min_remaining_sec(state) if hint == ESCALATE_HINT_SKIP_TO_CLOSE else 0.0
         ),
     }
-    if _session_contract_admits_baseline_tput():
+    if bound_session_declares("workflow_global", "baseline_tput"):
         global_inputs["baseline_tput"] = (
             (_number(state.baseline_tput) or 0.0) if hint == ESCALATE_HINT_SKIP_TO_CLOSE else None
         )
@@ -1316,6 +1250,8 @@ def _prelude_predicate_inputs(state: Any, *, now_unix: float) -> dict[str, Any]:
         "warm_replay_status": warm_status,
         "measure_round_dropped": bool(state.baseline_measure_round_dropped),
         "tput": _number(state.baseline_tput) or 0.0,
+        "initial_analysis_pending": bool((state.auto_roofline_pending_task_id or "").strip()),
+        "analysis_affordable_sec": prelude_affordable_seconds(state)[0],
         "session_usable_sec": session_usable_seconds(state),
         "phase_spent_sec": phase_cumulative_seconds(state, phase=PHASE_PRELUDE, now_unix=now_unix),
         "runtime_sec": _positive_number(state.baseline_runtime_sec),
@@ -1323,6 +1259,20 @@ def _prelude_predicate_inputs(state: Any, *, now_unix: float) -> dict[str, Any]:
         "warm_runtime_sec": _positive_number(state.baseline_warm_runtime_sec),
         "roofline_in_flight": bool((getattr(state, "auto_roofline_pending_task_id", None) or "").strip()),
     }
+
+
+def _rounds_since_phase_entry(state: Any) -> list[dict[str, Any]]:
+    """This cycle's specialist rounds booked since the current phase was entered.
+
+    PRELUDE shares macro-cycle 0 with FRAMEWORK_AGENT, and ``source_phase`` names a round's ownership lane rather
+    than the phase it ran in, so only the entry time separates this phase's rounds from earlier ones.
+    """
+    rows = _rows_for_current_cycle(state.specialist_rounds or [], state)
+    entered = _phase_started_unix(state)
+    # No entry time: keep every row of the cycle. With one: a row with no parseable completed_at is not counted.
+    if entered <= 0.0:
+        return rows
+    return [row for row in rows if (to_unix(row.get("completed_at")) or 0.0) >= entered]
 
 
 def _framework_predicate_inputs(
@@ -1337,7 +1287,7 @@ def _framework_predicate_inputs(
         if key not in {"config_arm_plateaued", "source_arm_plateaued", "switch_bottleneck"}
     }
     plateau["attempt_count"] = len(_rows_for_current_cycle(state.attempts or [], state))
-    plateau["specialist_round_count"] = len(_rows_for_current_cycle(state.specialist_rounds or [], state))
+    plateau["specialist_round_count"] = len(_rounds_since_phase_entry(state))
     return plateau, _budget_predicate_inputs(state, now_unix=now_unix)
 
 
@@ -1407,7 +1357,32 @@ def _sweep_predicate_inputs(
             "min_remaining_sec": _cycle_reloop_min_remaining_sec(state),
         },
     }
-    return result, _budget_predicate_inputs(state, now_unix=now_unix)
+    budget = _budget_predicate_inputs(state, now_unix=now_unix)
+    if not result["status"]:
+        _extend_budget_to_sweep_grant(budget, state, now_unix=now_unix)
+    return result, budget
+
+
+def _extend_budget_to_sweep_grant(budget: dict[str, Any], state: Any, *, now_unix: float) -> None:
+    """Widen SWEEP's budget to cover the conc_sweep it granted and is still waiting on.
+
+    SWEEP's only work is the sweep it enqueued on entry, whose budget is already clamped to the session clock. The
+    per-phase cap is a share of the whole session (5% of three hours is nine minutes) and would otherwise cancel that
+    sweep mid-ladder. The widened numbers are what the predicate compares, so a replay of the frozen inputs reaches
+    the same decision.
+    """
+    grant_left = (_number(state.conc_sweep_granted_until_unix) or 0.0) - float(now_unix)
+    if grant_left <= 0.0:
+        return
+    remaining = _number(budget.get("remaining_sec"))
+    if remaining is not None and remaining < grant_left:
+        budget["remaining_sec"] = grant_left
+        if "current_balance" in budget:
+            budget["current_balance"] = grant_left
+    cap = _number(budget.get("cap_sec"))
+    cumulative = _number(budget.get("cumulative_elapsed_sec")) or 0.0
+    if cap is not None and cap < cumulative + grant_left:
+        budget["cap_sec"] = cumulative + grant_left
 
 
 def workflow_predicate_inputs(
@@ -1436,7 +1411,11 @@ def workflow_predicate_inputs(
         inputs["baseline"] = _prelude_predicate_inputs(state, now_unix=frozen_now)
     elif current == PHASE_ENABLEMENT:
         enablement = state.enablement
-        inputs["baseline"] = {"tput": _number(state.baseline_tput) or 0.0}
+        inputs["baseline"] = {
+            "tput": _number(state.baseline_tput) or 0.0,
+            "initial_analysis_pending": bool((state.auto_roofline_pending_task_id or "").strip()),
+            "analysis_affordable_sec": prelude_affordable_seconds(state)[0],
+        }
         inputs["pending_work"] = {
             "validation_pending": bool(enablement.validation_pending),
             "enablement_in_flight": bool(enablement_in_flight),
@@ -1624,11 +1603,13 @@ def _sweep_exit(inputs: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
             if spent_without_pair or (no_pair and not evidence["sweep_skip_reason"]):
                 return "sweep_failed", evidence
         return "sweep_done", evidence
+    # Anything else -- nothing landed yet, or a sweep the orchestrator cancelled -- leaves the phase to its budget:
+    # a cancelled sweep was stopped by a session-wide stop that already decided the run is over.
     return _budget_exit(
         dict(inputs.get("budget") or {}),
         exhausted_reason="sweep_budget_exhausted",
         cap_reason="sweep_budget_cap",
-        evidence={},
+        evidence={"sweep_status": status} if status else {},
     )
 
 
@@ -1739,6 +1720,18 @@ def _skip_to_close_reason(
     return reason, evidence
 
 
+def _holds_for_initial_analysis(baseline: dict[str, Any]) -> bool:
+    """Whether the phase must stay open for an initial roofline it enqueued but has not booked yet.
+
+    Leaving now would hand that analysis to the next phase instead of seeding this one with it.
+    The hold is bounded by the optimization reserve, which it must never eat into.
+    """
+    if not bool(baseline.get("initial_analysis_pending")):
+        return False
+    affordable = _number(baseline.get("analysis_affordable_sec"))
+    return affordable is None or affordable > 0.0
+
+
 def replay_next_phase(
     inputs: dict[str, Any],
     *,
@@ -1822,6 +1815,8 @@ def replay_next_phase(
             and not bool(baseline.get("measure_round_dropped"))
             and (_number(baseline.get("tput")) or 0.0) > 0.0
         )
+        if normal and _holds_for_initial_analysis(baseline):
+            return None
         if normal:
             # Hold the transition while the PRELUDE initial roofline/profile is still
             # in-flight. Transitioning now would cancel the benchmark subprocess before
@@ -1857,6 +1852,10 @@ def replay_next_phase(
             and not bool(pending.get("validation_pending"))
             and not bool(pending.get("enablement_in_flight"))
         ):
+            if _holds_for_initial_analysis(baseline):
+                # A session whose first baseline failed promotes its first anchor here, and that is what
+                # enqueues the initial roofline, so this exit faces the same race PRELUDE does.
+                return None
             target = _post_prelude_target(optimize_enabled=optimize_enabled, kernel_enabled=kernel_enabled)
             evidence = {"baseline_tput": float(baseline["tput"])}
             if target != PHASE_FRAMEWORK_AGENT:

@@ -166,7 +166,7 @@ def _lane(session: Path, tasks: TaskRegistry, rounds: RoundStore, launch_log: st
         session_dir=str(session),
         run_deadline=None,
         warm_specialist_params=_noop,
-        record_observation=_noop,
+        bus=types.SimpleNamespace(record_observation=_noop),
         action_registry=ACTION_CATALOGUE,
         state=types.SimpleNamespace(pending_proposals={}),
         _read_enablement_source_context=lambda _sig: "",
@@ -443,9 +443,7 @@ async def _seed_failed_rounds(rounds: RoundStore, n: int) -> None:
         holder = f"holder-{i:03d}"
         now = float(i)
         await rounds.open(rid, holder_task_id=holder, lease_sec=3600.0, now_unix=now, request_id=rid)
-        await rounds.settle(
-            rid, holder_task_id=holder, fence=1, outcome=FAILED, now_unix=now + 1.0, request_id=f"settle-{rid}"
-        )
+        await rounds.settle(await rounds.get(rid), outcome=FAILED, now_unix=now + 1.0, request_id=f"settle-{rid}")
 
 
 @pytest.mark.asyncio

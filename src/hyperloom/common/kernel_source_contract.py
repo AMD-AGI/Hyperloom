@@ -16,8 +16,7 @@ from typing import Any
 #: unaffected).
 SOURCE_RESOLUTION_SCHEMA_VERSION = "1.1.0"
 
-#: Canonical artifact name, relative to the analysis run directory. Mirrored by
-#: ``tracelens_analysis._SOURCE_RESOLUTION_NAME`` for the standalone path.
+#: Canonical artifact name, relative to the analysis run directory.
 SOURCE_RESOLUTION_FILENAME = "kernel_source_resolution.json"
 
 #: How a location was decided, as emitted by TraceLens' ``resolve_kernel_source``.

@@ -19,7 +19,7 @@ from kernelforge.agent_backends.base import (
 )
 from kernelforge.agent_backends.claude import ClaudeBackend
 from kernelforge.agent_backends.codex import CodexBackend
-from kernelforge import cli
+from kernelforge.cli import lanes as cli_lanes
 from kernelforge.config import Config
 from kernelforge.loop import aiter_cache
 from kernelforge.loop.fanout import SERIALIZED_DRIVER_NAME
@@ -111,7 +111,7 @@ def _campaign(tmp_path: Path) -> tuple[Config, Path]:
 
 
 def _lane_factory(config: Config, workspace: Path, make_agent):
-    return cli._make_lane_agent_factory(
+    return cli_lanes._make_lane_agent_factory(
         make_agent=make_agent,
         config=config,
         workspace_dir=str(workspace),
@@ -211,7 +211,7 @@ async def test_a_lane_denied_its_own_cache_is_refused_rather_than_shared(tmp_pat
     config, workspace = _campaign(tmp_path)
     aiter_cache.configure_aiter_cache_isolation(tmp_path / "experiments")
     lane_dir = _lane_dir(tmp_path, "1")
-    lane_dir.with_name(lane_dir.name + cli._LANE_AITER_CACHE_SUFFIX).write_text("not a directory\n")
+    lane_dir.with_name(lane_dir.name + cli_lanes._LANE_AITER_CACHE_SUFFIX).write_text("not a directory\n")
 
     factory = _lane_factory(config, workspace, _implementer_through(_recording_claude_backend([])))
 

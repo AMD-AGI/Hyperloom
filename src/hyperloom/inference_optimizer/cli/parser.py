@@ -13,6 +13,7 @@ from typing import NoReturn
 
 from .. import framework_registry
 from .backends import CRITIC_PROTOCOL_CHOICES
+from .recover import add_cleanup_confirmation_arguments
 from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.common.llm_config import is_anthropic_only, is_openai_only, provider_model_defaults
 
@@ -139,8 +140,6 @@ def _default_claude_model_env() -> str:
     explicit = (os.environ.get("CLAUDE_MODEL") or "").strip()
     if explicit:
         return explicit
-    if os.environ.get("INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX") == "1":
-        return (os.environ.get("CODEX_MODEL") or "").strip() or DEFAULT_CODEX_MODEL
     gateway_model = provider_model_defaults().get("CLAUDE_MODEL", "")
     if gateway_model:
         return gateway_model
@@ -183,13 +182,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     p = RedactingArgumentParser(
-        prog="inference_optimizer",
+        prog="hyperloom",
         description="Inference Optimizer — multi-agent inference optimization (SGLang/vLLM/Atom/xDiT)",
     )
-    p.add_argument("--verbose", "-v", action="count", default=0, help="Verbose logging (-v INFO, -vv DEBUG)")
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--verbose", "-v", action="count", default=0, help="Verbose logging (-v INFO, -vv DEBUG)")
     sub = p.add_subparsers(dest="command", required=True)
 
-    opt = sub.add_parser("optimize", help="Drive a multi-agent optimization run on a model")
+    opt = sub.add_parser("optimize", parents=[common], help="Drive a multi-agent optimization run on a model")
     opt.add_argument(
         "--model",
         "-m",
@@ -204,8 +204,8 @@ def _build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         metavar="PROMPT",
-        help="Optional natural-language quantization request. When set, the "
-        "quantization-agent runs ONCE as a prelude before the "
+        help="Optional natural-language quantization request. When set, "
+        "`hyperloom quantize` runs ONCE as a prelude before the "
         "optimization loop: it drives AMD Quark PTQ from this prompt, "
         "then rewrites --model to the exported quantized model so the "
         "rest of the run optimizes the quantized model. Ignored on "
@@ -395,10 +395,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Expert-parallel size for MoE inference. 1 (default) keeps "
         "experts sharded by TP (legacy behaviour). >=2 enables true "
-        "expert parallelism: sglang adds `--expert-parallel-size N`, "
-        "vllm adds `--enable-expert-parallel`. Typical: EP=TP for "
-        "DSr1/DSv3 on multi-node. Default: 1. "
-        "EP > TP is rejected at server-restart time.",
+        "expert parallelism: sglang adds `--ep-size N`, vllm and atom "
+        "add `--enable-expert-parallel` (EP then spans all TP ranks). "
+        "Typical: EP=TP. Default: 1. On a single node an EP that does "
+        "not divide TP is dropped with a warning; on multi-node EP > TP "
+        "is rejected at server-restart time.",
     )
     opt.add_argument(
         "--pd-mode",
@@ -560,9 +561,10 @@ def _build_parser() -> argparse.ArgumentParser:
             "Framework version slug for the recipe-snapshot canonical id "
             "(scopes recipes to a specific framework release — sglang 0.4.5 "
             "and sglang 0.5.x have different scheduler defaults so they "
-            "deserve separate KB rows). When omitted, auto-detected via "
-            "importing the framework's top-level package and reading "
-            "``__version__`` (sglang/vllm/atom supported); auto-detect "
+            "deserve separate KB rows). When omitted, auto-detected from "
+            "the interpreter preflight resolved to serve the framework, "
+            "else by importing the framework's top-level package and "
+            "reading ``__version__`` (sglang/vllm/atom supported); auto-detect "
             "failure degrades to 'unknown_version'. Override with "
             "--framework-version=0.4.5 to pin a specific tag for the run."
         ),
@@ -712,11 +714,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-allow-mm-text-fallback to fail-fast on text-coercible "
         "models too. Default: enabled.",
     )
-    # Retired with the kernel LLM role; accepted as no-ops so a launcher or operator template that still passes them
-    # does not exit 2.
-    for _retired in ("--kernel-codex", "--kernel-claude"):
-        opt.add_argument(_retired, action="store_true", default=False, help=argparse.SUPPRESS)
-    opt.add_argument("--kernel-prompt", type=str, default=None, help=argparse.SUPPRESS)
     opt.add_argument(
         "--no-kernel",
         action="store_true",
@@ -825,6 +822,25 @@ def _build_parser() -> argparse.ArgumentParser:
         "--orch-prompt", type=str, default=None, help="Override Orchestration system prompt (file path or inline)"
     )
     opt.add_argument("--critic-prompt", type=str, default=None, help="Override Critic system prompt")
+    opt.add_argument(
+        "--custom-specialist-prompt-file",
+        dest="custom_specialist_prompt_file",
+        type=str,
+        default=None,
+        help="Register an operator-defined specialist type (custom_specialist) whose domain focus is this file's "
+        "text (max 16 KiB). Requires --custom-specialist-description. Orchestration may select it, and the "
+        "Coordinator dispatches it at least once in FRAMEWORK_AGENT. Persisted for --resume-from; passing it on a "
+        "resume replaces the stored definition. The text is written in clear to state.json and every task's "
+        "prompt.md: do not put credentials in it.",
+    )
+    opt.add_argument(
+        "--custom-specialist-description",
+        dest="custom_specialist_description",
+        type=str,
+        default=None,
+        help="One line (max 200 chars) telling Orchestration when to pick custom_specialist. Requires "
+        "--custom-specialist-prompt-file.",
+    )
     opt.add_argument(
         "--local-kb-root",
         dest="local_kb_root",
@@ -968,27 +984,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Hard cap on LLM turns per specialist task (KB_design "
         "§3.5 §6). On exhaustion the runner synthesises an empty "
         "specialist_done (Inv-5.3).",
-    )
-    opt.add_argument(
-        "--specialist-per-turn-max-seconds",
-        dest="specialist_per_turn_max_seconds",
-        type=float,
-        default=600.0,
-        help="Per-LLM-call timeout for an in-process specialist backend "
-        "(default 600s). It bounds one call, never the task: the task is "
-        "bounded by the absolute deadline the dispatcher hands down.",
-    )
-    # specialist dispatch shape
-    opt.add_argument(
-        "--specialist-dispatch-mode",
-        dest="specialist_dispatch_mode",
-        type=str,
-        choices=("subprocess", "inprocess"),
-        default="subprocess",
-        help="Specialist execution shape. 'subprocess' (default) spawns "
-        "a fresh selected-provider agent CLI per task. 'inprocess' uses "
-        "the matching Claude or Codex Agent SDK backend in the orchestrator "
-        "process.",
     )
     opt.add_argument(
         "--specialist-mcp-config",
@@ -1152,7 +1147,6 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     # phase budget percentages: each phase claims a fraction of the wall-clock budget (caps; may exit earlier).
     opt.add_argument(
-        "--max-minutes-prelude-pct",
         "--phase-budget-prelude-pct",
         dest="phase_budget_prelude_pct",
         type=float,
@@ -1161,20 +1155,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "On --resume-from, any --*-pct flag resets every phase share to its default plus the given overrides; with none, the prior budget is kept.",
     )
     opt.add_argument(
-        "--max-minutes-framework-pct",
         "--phase-budget-framework-pct",
-        # The EXPLORE spellings land on the same option: configuration search and source landing are two arms of one
-        # phase with one budget, so a separate share for either would be a number nothing reads.
-        "--max-minutes-explore-pct",
-        "--phase-budget-explore-pct",
         dest="phase_budget_framework_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for the OPTIMIZE (FRAMEWORK_AGENT) phase. Default: 0.38. "
+        help="Wall-clock budget cap for the OPTIMIZE (FRAMEWORK_AGENT) phase, which covers both configuration search "
+        "and source landing. Default: 0.38. "
         "On --resume-from, any --*-pct flag resets every phase share to its default plus the given overrides; with none, the prior budget is kept.",
     )
     opt.add_argument(
-        "--max-minutes-kernel-pct",
         "--phase-budget-kernel-pct",
         dest="phase_budget_kernel_pct",
         type=float,
@@ -1183,7 +1172,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "On --resume-from, any --*-pct flag resets every phase share to its default plus the given overrides; with none, the prior budget is kept.",
     )
     opt.add_argument(
-        "--max-minutes-sweep-pct",
         "--phase-budget-sweep-pct",
         dest="phase_budget_sweep_pct",
         type=float,
@@ -1192,7 +1180,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "On --resume-from, any --*-pct flag resets every phase share to its default plus the given overrides; with none, the prior budget is kept.",
     )
     opt.add_argument(
-        "--max-minutes-close-pct",
         "--phase-budget-close-pct",
         dest="phase_budget_close_pct",
         type=float,
@@ -1202,7 +1189,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     rec = sub.add_parser(
-        "recover-session",
+        "recover",
+        parents=[common],
         help="Rebuild + push the session_breakdown for a session that exited "
         "abnormally (crash / SIGKILL) so its breakdown lands on Langfuse.",
     )
@@ -1217,27 +1205,6 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Re-run even when the session already looks complete (close_sequence_done / breakdown already recorded).",
     )
-    rec.add_argument(
-        "--backfill-trace",
-        action="store_true",
-        help="Also replay reports/trace/llm_calls.jsonl as Langfuse "
-        "generations. Use ONLY when the live emitter never ran for this "
-        "session (e.g. it was disabled during the run); otherwise it "
-        "duplicates generations already pushed live.",
-    )
-    rec.add_argument(
-        "--confirm-stopped",
-        metavar="TASK_ID",
-        help="Attest that one task's complete process tree, remote workers and Ray actor have stopped, "
-        "then cancel unfinished work and release only its unattributed execution/GPU ownership records. Requires POSIX session locking "
-        "and --confirmation-reason; rejects recorded nonempty owner scopes. Does not stop processes, "
-        "accept old results, rebuild reports or resume execution.",
-    )
-    rec.add_argument(
-        "--confirmation-reason",
-        metavar="TEXT",
-        help="Required audit reason for --confirm-stopped. Both options must be provided together "
-        "and cannot be combined with --force or --backfill-trace.",
-    )
+    add_cleanup_confirmation_arguments(rec)
 
     return p

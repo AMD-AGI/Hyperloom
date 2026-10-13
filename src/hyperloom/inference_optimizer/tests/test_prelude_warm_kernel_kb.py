@@ -28,7 +28,6 @@ class _StubPrelude:
 
     _collect_warm_kernel_plan = PreludePhase._collect_warm_kernel_plan
     _parse_diff_target = staticmethod(PreludePhase._parse_diff_target)
-    _resolve_kernel_target_path = PreludePhase._resolve_kernel_target_path
     _warm_kernel_extra_envs = staticmethod(PreludePhase._warm_kernel_extra_envs)
     _snapshot_warm_kernel_target = PreludePhase._snapshot_warm_kernel_target
     _set_warm_kernel_outcome = PreludePhase._set_warm_kernel_outcome
@@ -153,26 +152,6 @@ def test_parse_diff_target_reads_plus_header(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     assert PreludePhase._parse_diff_target(str(patch)) == "pkg/foo.py"
-
-
-def test_resolve_target_from_diff_header_against_roots(monkeypatch, tmp_path: Path) -> None:
-    root = tmp_path / "site-packages"
-    live = root / "pkg" / "foo.py"
-    live.parent.mkdir(parents=True, exist_ok=True)
-    live.write_text("old", encoding="utf-8")
-    patch = tmp_path / "k.diff"
-    patch.write_text(
-        "diff --git a/pkg/foo.py b/pkg/foo.py\n--- a/pkg/foo.py\n+++ b/pkg/foo.py\n",
-        encoding="utf-8",
-    )
-
-    import hyperloom.inference_optimizer.framework_paths as paths
-
-    monkeypatch.setattr(paths, "resolve_session_framework_root", lambda: str(root))
-    stub = _StubPrelude(tmp_path)
-
-    resolved = stub._resolve_kernel_target_path({"patch_path": str(patch)})
-    assert resolved == str(live)
 
 
 def test_warm_kernel_envs_point_the_recorded_var_at_the_local_file() -> None:

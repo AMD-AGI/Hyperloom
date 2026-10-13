@@ -8,18 +8,15 @@ import click
 import pytest
 from click.testing import CliRunner
 
-import kernelforge.config as config_module
-from kernelforge.cli import (
-    LONG_HORIZON_THRESHOLD_HOURS,
-    MIN_MAX_HOURS,
-    _is_long_horizon,
+from kernelforge.cli import main
+from kernelforge.cli.options import MIN_MAX_HOURS, _validate_max_hours
+from kernelforge.cli.publication import (
     _initial_remote_publication_state,
     _record_remote_publication_result,
     _remote_publication_view,
     _warm_start_publication_covers,
-    _validate_max_hours,
-    main,
 )
+from kernelforge.cli.session_budget import LONG_HORIZON_THRESHOLD_HOURS, _is_long_horizon
 
 
 def test_validate_max_hours_rejects_below_minimum():
@@ -56,20 +53,6 @@ def test_long_horizon_requires_more_than_two_hours(
     expected,
 ):
     assert _is_long_horizon(max_hours) is expected
-
-
-def test_removed_max_turns_environment_variable_warns_and_is_ignored(
-    monkeypatch,
-    caplog,
-    request,
-):
-    monkeypatch.setenv("KERNEL_AGENTS_MAX_TURNS", "17")
-    config_module._warn_removed_max_turns_env.cache_clear()
-    request.addfinalizer(config_module._warn_removed_max_turns_env.cache_clear)
-    with caplog.at_level("WARNING", logger=config_module.log.name):
-        assert config_module.Config.from_env().max_turns == 500
-    assert config_module.Config.from_env(max_turns=321).max_turns == 321
-    assert caplog.text.count("KERNEL_AGENTS_MAX_TURNS is no longer supported") == 1
 
 
 def test_forge_loop_rejects_short_max_hours():

@@ -8,9 +8,12 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from hyperloom.common.checkpoint_quant import WeightDeclaration, weight_declarations
 
 log = logging.getLogger(__name__)
 
@@ -75,6 +78,61 @@ class ModelProfile:
     def keeps_dense_layers_at_model_dtype(self) -> bool:
         """Whether substantial dense GEMMs stay at model dtype after quantization."""
         return any(name.rsplit(".", 1)[-1].lower() != "lm_head" for name in self.unquantized_linear_modules)
+
+    @property
+    def expert_precision(self) -> str:
+        """Precision ``quantization_config`` nests for the routed experts, empty when it nests none."""
+        return _nested_precisions(self.raw_config)[0]
+
+    @property
+    def dense_precision(self) -> str:
+        """Precision ``quantization_config`` nests for the other linear layers, empty when it nests none."""
+        return _nested_precisions(self.raw_config)[1]
+
+
+# Nested weight-spec dtype tags, grouped under the router's precision vocabulary.
+_DTYPES_BY_PRECISION: dict[str, tuple[str, ...]] = {
+    "fp4": ("fp4", "mxfp4", "nvfp4"),
+    "fp8": ("fp8", "fp8_e4m3", "fp8_e5m2", "float8_e4m3fn", "float8_e5m2"),
+    "int8": ("int8",),
+    "int4": ("int4", "uint4"),
+}
+_PRECISION_BY_DTYPE = {dtype: precision for precision, dtypes in _DTYPES_BY_PRECISION.items() for dtype in dtypes}
+
+
+def _declared_precision(decl: WeightDeclaration) -> str:
+    if decl.dtype in _PRECISION_BY_DTYPE:
+        return _PRECISION_BY_DTYPE[decl.dtype]
+    # compressed-tensors spells a format as a numeric type plus a bit width.
+    if decl.dtype in ("float", "int") and decl.bits > 0:
+        return f"{'fp' if decl.dtype == 'float' else 'int'}{int(decl.bits)}"
+    return ""
+
+
+def _most_declared(decls: list[WeightDeclaration]) -> str:
+    """The precision most of ``decls`` declare; a tie goes to the earliest declared."""
+    counts = Counter(p for p in map(_declared_precision, decls) if p)
+    return counts.most_common(1)[0][0] if counts else ""
+
+
+def _targets_routed_experts(decl: WeightDeclaration) -> bool:
+    # A Quark module-class entry names sglang's MoE layer class (FusedMoE, DeepEPMoE, ...), not the experts.
+    targets = decl.targets.lower()
+    return "expert" in targets or "moe" in targets
+
+
+def _nested_precisions(raw_config: dict[str, Any]) -> tuple[str, str]:
+    """``(routed experts, other linear layers)`` precisions nested in the checkpoint's ``quantization_config``.
+
+    A per-layer declaration overrides the whole-checkpoint one for the layers it targets, so each side takes what is
+    declared for its own layers and otherwise the whole-checkpoint format -- which compressed-tensors states only
+    through its groups.
+    """
+    whole, per_layer = weight_declarations(raw_config.get("quantization_config"))
+    default = next((p for p in map(_declared_precision, whole) if p), "") or _most_declared(per_layer)
+    experts = [d for d in per_layer if _targets_routed_experts(d)]
+    others = [d for d in per_layer if not _targets_routed_experts(d)]
+    return _most_declared(experts) or default, _most_declared(others) or default
 
 
 def _resolve_llm_config(config: dict[str, Any]) -> dict[str, Any]:

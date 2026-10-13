@@ -50,7 +50,7 @@ class TestModelClassSearchToken:
         assert _model_class_to_search_token(raw) == expected
 
 
-# _extract_bottleneck_from_breakdown
+# _extract_bottleneck_from_breakdown tests
 
 
 class TestExtractBottleneck:

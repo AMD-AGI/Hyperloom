@@ -21,6 +21,7 @@ from kernelforge.agent_backends import (
 )
 from kernelforge.agent_backends.session_resume import run_session_with_api_resume
 from kernelforge.config import Config, resolve_agent_model
+from kernelforge.llm.workspace_policy import TOOL_OWNED_UNTRACKED_GLOBS
 from kernelforge.mcp_server.pr_stdio_server import TOOL_NAMES as PR_TOOL_NAMES
 from kernelforge.loop.scoring import (
     DEFAULT_SNR_THRESHOLD_DB,
@@ -38,19 +39,6 @@ _REPO_EXTRA_PROTECTED_GLOBS = [
     "*_ref.py",
     "*_reference.py",
     "conftest.py",
-]
-
-# Ignore only named tool outputs; undeclared files remain safety violations.
-# Exported so tests exercise the exact list used by agent sessions.
-TOOL_OWNED_UNTRACKED_GLOBS = [
-    # rocprof runs below the git root, so cover root and nested directories.
-    ".rocprofv3/*",
-    "*/.rocprofv3/*",
-    "*_results.db",
-    # AITER may create JIT shards during a turn; its configured root always ends
-    # in ``aiter_cache``, regardless of the experiments directory.
-    "aiter_cache/*",
-    "*/aiter_cache/*",
 ]
 
 # task_type values that mean "a full source tree, not a self-contained snippet".
@@ -94,7 +82,7 @@ def make_agent_fn(
     interposed_driver_path: str | None = None,
     snr_threshold: float = DEFAULT_SNR_THRESHOLD_DB,
     max_blocks: int = 10,
-    # One implementer session's wall-clock budget (see cli._forge_session_timeout_sec).
+    # One implementer session's wall-clock budget (see kernelforge.cli.session_budget._forge_session_timeout_sec).
     session_timeout_sec: int | None = None,
     validation_timeout_sec: int = 1800,
     bench_timeout_sec: int = 300,

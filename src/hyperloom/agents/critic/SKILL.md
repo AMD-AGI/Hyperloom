@@ -76,13 +76,6 @@ Use the contents of `emit.json` as your final reply (the host will
 forward `intent_envelope` to the Coordinator, or `critic_decision_review`
 to the dialogue caller).
 
-For session lifecycle:
-
-```bash
-python -m hyperloom.agents.critic.runtime.cli init-session  --request request.json
-python -m hyperloom.agents.critic.runtime.cli close-session --request request.json [--kb-draft draft.json]
-```
-
 For lower-level KB operations, see `actions/draft_kb.md` and
 `actions/review_patch.md`.
 

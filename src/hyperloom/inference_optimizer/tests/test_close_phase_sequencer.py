@@ -760,7 +760,7 @@ async def test_close_sequencer_surfaces_remote_finalize_failure(
 ):
     coord.shared_state.phase_history = [_close_phase_history_row()]
     monkeypatch.setattr(
-        coord.writeback,
+        coord.recipe_journal,
         "finalize_recipe_and_journal",
         lambda *, source: {
             "status": "error",
@@ -1253,7 +1253,7 @@ async def test_recipe_kb_t4_hook_still_runs_when_sequencer_not_done(tmp_path: Pa
         finalize_calls.append(source)
         return {"status": "written"}
 
-    coord.writeback.finalize_recipe_and_journal = _spy  # type: ignore[method-assign]
+    coord.recipe_journal.finalize_recipe_and_journal = _spy  # type: ignore[method-assign]
     await coord._recipe_kb_t4_hook()
     assert finalize_calls == ["t4_fallback"]
 
@@ -1289,7 +1289,7 @@ async def test_recipe_kb_t4_hook_remote_runs_without_recipe_kb_or_sid(
         finalize_calls.append(source)
         return {"status": "written"}
 
-    coord.writeback.finalize_recipe_and_journal = _finalize  # type: ignore[method-assign]
+    coord.recipe_journal.finalize_recipe_and_journal = _finalize  # type: ignore[method-assign]
     coord.shared_state.save = lambda path: save_calls.append(path)  # type: ignore[method-assign]
 
     await coord._recipe_kb_t4_hook()
@@ -1331,7 +1331,7 @@ async def test_recipe_kb_t4_hook_remote_skips_when_close_sequence_done(tmp_path:
         recipe_finalize_attempts += 1
         return {"status": "written"}
 
-    coord.writeback.finalize_recipe_and_journal = _finalize  # type: ignore[method-assign]
+    coord.recipe_journal.finalize_recipe_and_journal = _finalize  # type: ignore[method-assign]
 
     await coord._recipe_kb_t4_hook()
 
@@ -1370,7 +1370,7 @@ async def test_recipe_kb_t4_hook_retries_failed_finalize_after_close(
         finalize_calls.append(source)
         return {"status": "written"}
 
-    coord.writeback.finalize_recipe_and_journal = _finalize  # type: ignore[method-assign]
+    coord.recipe_journal.finalize_recipe_and_journal = _finalize  # type: ignore[method-assign]
 
     await coord._recipe_kb_t4_hook()
 
@@ -1407,7 +1407,7 @@ async def test_recipe_kb_t4_hook_local_skips_without_recipe_kb(tmp_path: Path):
         finalize_calls.append(source)
         return {"status": "written"}
 
-    coord.writeback.finalize_recipe_and_journal = _finalize  # type: ignore[method-assign]
+    coord.recipe_journal.finalize_recipe_and_journal = _finalize  # type: ignore[method-assign]
 
     await coord._recipe_kb_t4_hook()
 
@@ -1442,7 +1442,7 @@ async def test_recipe_kb_t4_hook_local_skips_without_recipe_kb_sid(tmp_path: Pat
         finalize_calls.append(source)
         return {"status": "written"}
 
-    coord.writeback.finalize_recipe_and_journal = _finalize  # type: ignore[method-assign]
+    coord.recipe_journal.finalize_recipe_and_journal = _finalize  # type: ignore[method-assign]
 
     await coord._recipe_kb_t4_hook()
 

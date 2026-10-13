@@ -72,6 +72,17 @@ def workflow_schema(version: str = CURRENT_WORKFLOW_CONTRACT_VERSION) -> dict[st
     return json.loads(resource.read_text(encoding="utf-8"))
 
 
+@lru_cache(maxsize=32)
+def contract_declares(version: str, definition: str, field: str) -> bool:
+    """Whether the version's schema declares ``field`` on ``$defs[definition]``."""
+    return field in workflow_schema(version)["$defs"][definition]["properties"]
+
+
+def manifest_contract_version(manifest: Mapping[str, Any]) -> str:
+    """Contract a session manifest is bound to; an unstamped manifest predates v2 and is v1."""
+    return str(manifest.get("workflow_contract_version") or WORKFLOW_CONTRACT_V1)
+
+
 def event_semantics(event_type: str, status: str, ext: Mapping[str, Any] | None) -> dict[str, Any]:
     """Project process and business semantics without inferring missing facts."""
     details = dict(ext or {})
@@ -104,7 +115,9 @@ __all__ = [
     "CURRENT_WORKFLOW_CONTRACT_VERSION",
     "WORKFLOW_CONTRACT_V1",
     "canonical_contract_bytes",
+    "contract_declares",
     "event_semantics",
+    "manifest_contract_version",
     "workflow_contract",
     "workflow_contract_digest",
     "workflow_metadata",

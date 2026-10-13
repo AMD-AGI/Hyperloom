@@ -1204,8 +1204,9 @@ def _cap_splitk_to_serve_safe(
     artifact_csv: Path,
     profile_csv: Path,
     max_splitk: int,
+    *,
+    forwarding_libtypes: frozenset[str],
     support_fn=None,
-    forwarding_libtypes: frozenset[str] | None = None,
 ) -> tuple[int, bool]:
     """Rewrite deployed rows whose splitK production cannot dispatch or forward.
 
@@ -1218,8 +1219,7 @@ def _cap_splitk_to_serve_safe(
 
     ``forwarding_libtypes`` is the set of libtypes whose wrapper forwards splitK
     for this op (see ``_SPLITK_FORWARDING_LIBTYPES``); a row on any other
-    libtype is capped at 0 regardless of dispatch support, and ``None`` disables
-    the check.
+    libtype is capped at 0 regardless of dispatch support.
     """
     try:
         with artifact_csv.open() as f:
@@ -1269,8 +1269,6 @@ def _cap_splitk_to_serve_safe(
     lti = _col.get("libtype")
 
     def _forwards(row: list[str]) -> bool:
-        if forwarding_libtypes is None:
-            return True
         if lti is None or lti >= len(row):
             # No libtype column to check against a contract that is keyed on it;
             # treat as non-forwarding, matching the fail-closed default.
@@ -1350,7 +1348,7 @@ def _cap_splitk_to_serve_safe(
             "with a splitK=0 candidate or dropped, because serving them would "
             "have run a config slower than the one benchmarked",
             dropped_unforwarded,
-            sorted(forwarding_libtypes or ()),
+            sorted(forwarding_libtypes),
         )
     return changed, has_splitk
 

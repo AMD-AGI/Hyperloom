@@ -23,8 +23,9 @@ from typing import Any, Callable
 
 from hyperloom.common.perf_metric import is_agentx_mode
 from hyperloom.common.prompt_safety import defang_prompt_structure
-from hyperloom.inference_optimizer.framework_paths import framework_import_name
+from hyperloom.inference_optimizer.framework_registry import python_package
 from .agentx_context import corpus_lines, grading_lines
+from ..measurement.runtime_findings import CORRECTNESS_FIX_MAX_DROP_PCT, CORRECTNESS_FIX_RULES
 
 from ..specialists.domains import (
     DEFAULT_SPECIALIST_MAX_TURNS,
@@ -821,6 +822,12 @@ def _focus_framework_rewrite_specialist(
     ]
 
 
+def _focus_custom_specialist(inp: SpecialistPromptInputs) -> list[str]:
+    """Render the operator-supplied focus verbatim; empty when not configured."""
+    text = inp.custom_specialist_prompt.strip()
+    return text.splitlines() if text else []
+
+
 _DOMAIN_FOCUS_TEMPLATES: dict[str, "Callable[[SpecialistPromptInputs], list[str]]"] = {
     "serving_specialist": _focus_serving_specialist,
     "framework_rewrite_specialist": _focus_framework_rewrite_specialist,
@@ -832,6 +839,7 @@ _DOMAIN_FOCUS_TEMPLATES: dict[str, "Callable[[SpecialistPromptInputs], list[str]
     "research_scout_specialist": _focus_research_scout_specialist,
     "static_recon_specialist": _focus_static_recon_specialist,
     "enablement_specialist": _focus_enablement_specialist,
+    "custom_specialist": _focus_custom_specialist,
 }
 
 
@@ -895,6 +903,8 @@ class SpecialistPromptInputs:
     # Roofline / TraceLens evidence from ``SharedState.last_trace_analyze``;
     # empty dict renders a placeholder.
     roofline_evidence: dict[str, Any] = field(default_factory=dict)
+    # Rendered runtime findings of the current best's server log; empty omits the section.
+    runtime_findings: str = ""
 
     # Recipe summary from the T0 warm-start recipe search
     # (``recipe_kb_t0._cascade_warm_start_search``)
@@ -973,8 +983,9 @@ class SpecialistPromptInputs:
     task_kind: str = ""
     prior_attempts: list[dict[str, Any]] = field(default_factory=list)
     pr_lead: dict[str, Any] = field(default_factory=dict)
-    # "A" = emit_intent, "B" = file write, "" = render both (render-script path).
-    exit_channel: str = ""
+
+    # Operator-defined specialist focus, rendered verbatim; empty when not configured.
+    custom_specialist_prompt: str = ""
 
 
 # Section 1 — Identity & autonomy
@@ -1060,12 +1071,13 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         if tag_domain is None or tag_domain.key in rendered_focus_keys:
             continue
         tag_focus = _DOMAIN_FOCUS_TEMPLATES.get(tag_domain.key)
-        if tag_focus is None:
+        tag_lines = tag_focus(inp) if tag_focus is not None else []
+        if not tag_lines:
             continue
         body.append("")
         body.append(f"### Domain focus — {tag_domain.key}")
         body.append("")
-        body.extend(tag_focus(inp))
+        body.extend(tag_lines)
         rendered_focus_keys.add(tag_domain.key)
     if inp.scope == "domains":
         body.extend(_cross_domain_block(inp))
@@ -1162,13 +1174,16 @@ def _cpu_selfcheck_block(inp: SpecialistPromptInputs) -> list[str]:
     """Optional ``selfcheck`` helper for a patch specialist with a worktree and no GPU."""
     if inp.allocated_gpu_ids or inp.mode != MODE_PATCH or not inp.worktree_package_dir:
         return []
+    package = python_package(inp.framework)
+    if package is None:
+        return []
     return [
         "",
         "Optional helper: ``selfcheck`` installs your worktree's package into a private venv,",
         "imports it, byte-compiles the files you changed and runs any pytest targets you pass:",
         "    python -m hyperloom.orchestrator.specialists.selfcheck \\",
         f"        --worktree {inp.workspace_path} --package-dir {inp.worktree_package_dir} "
-        f"--package {framework_import_name(inp.framework)} [--pytest <target>]",
+        f"--package {package} [--pytest <target>]",
         "  It prints a JSON result. A framework with compiled extensions (e.g. vLLM) rebuilds",
         "  them on install, which can take well over your wall budget.",
     ]
@@ -1664,6 +1679,22 @@ def _vendor_substitution_directive(hot_kernels: Any) -> list[str]:
     return rows
 
 
+def _section_runtime_findings(inp: SpecialistPromptInputs) -> list[str]:
+    """Render the scanned runtime findings; omitted when none were injected."""
+    if not inp.runtime_findings:
+        return []
+    return [
+        "## 4c. RUNTIME FINDINGS (current best server.log, already scanned)",
+        "",
+        "Do not re-read the server log for these. A disabled or falling-back hot "
+        "path is restored first; do not optimize the fallback implementation.",
+        "",
+        "```text",
+        inp.runtime_findings,
+        "```",
+    ]
+
+
 def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
     """Render the ROOFLINE EVIDENCE section from ``inp.roofline_evidence``;
     empty evidence renders a heading + ``(none)`` placeholder.
@@ -1697,6 +1728,7 @@ def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
             ("Compute %", "compute_pct"),
             ("Idle %", "idle_pct"),
             ("Exposed Comm %", "comm_pct"),
+            ("Exposed memcpy %", "memcpy_pct"),
             ("Top bottleneck", "top_bottleneck"),
         ):
             val = summary.get(key)
@@ -2115,27 +2147,13 @@ def _section_source_hint(inp: SpecialistPromptInputs) -> list[str]:
 def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
     """Render Section 8 (output protocol) of the specialist prompt."""
     workspace = inp.workspace_path or "<workspace>"
-    channel = (inp.exit_channel or "").upper().strip()
     authors_patches = _authors_patches(inp)
 
-    exit_lines: list[str] = []
-    if channel == "A" or channel == "":
-        exit_lines.extend(
-            [
-                "**Exit — ``emit_intent`` tool:** call ``emit_intent`` exactly once",
-                "with intent type ``specialist_done`` and the payload schema below.",
-            ]
-        )
-    if channel == "B" or channel == "":
-        if channel == "":
-            exit_lines.append("")
-        exit_lines.extend(
-            [
-                "**Exit — file write (subprocess runtime):** write the same payload to",
-                f"``{workspace}/specialist_done.json`` as your **absolute last action**.",
-                "The dispatcher polls for that file as the exit signal; stop after writing.",
-            ]
-        )
+    exit_lines = [
+        "**Exit — file write:** write the ``specialist_done`` payload (schema below) to",
+        f"``{workspace}/specialist_done.json`` as your **absolute last action**.",
+        "The dispatcher polls for that file as the exit signal; stop after writing.",
+    ]
 
     if authors_patches:
         patch_fields = [
@@ -2159,6 +2177,12 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
             "  runs the same E2E gate, and restores the backup on REVERT. A non-diff",
             "  tuned artifact is a FULL result — keep ``proposal_set`` non-empty or",
             "  list the artifact in ``artifacts_written``.",
+            "- ``resolves_finding`` (optional string ``rule_id:subject``): set it only",
+            f"  when the patch fixes a ``{'`` / ``'.join(sorted(CORRECTNESS_FIX_RULES))}`` entry from section 4c,",
+            "  copied verbatim. The gate then verifies the entry is gone from the new log and",
+            f"  accuracy passes, and may KEEP a drop of up to {CORRECTNESS_FIX_MAX_DROP_PCT:.0f}% on the graded axis",
+            "  (throughput, or p50 interactivity with the other interactivity guards still held)",
+            "  within the latency budget.",
         ]
         no_output = "  AND no ``patches_written``/``artifacts_written``; in that case"
     else:
@@ -2504,6 +2528,19 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
             _section_pr_feed(inp),
             _section_source_hint(inp),
         ]
+    elif inp.domain.key == "custom_specialist":
+        # The operator focus is the mandate; perf context is left to the operator text.
+        # Experience KB stays: the warmup records its block as shown to every FRAMEWORK_AGENT specialist.
+        user_sections = [
+            _section_mandate(inp),
+            _section_hardware(inp),
+            _section_pd_disaggregation(inp),
+            _section_execution_budget(inp),
+            _section_gap(inp),
+            _section_experience_kb(inp),
+        ]
+        if _authors_patches(inp):
+            user_sections.append(_section_source_hint(inp))
     else:
         user_sections = [
             _section_mandate(inp),
@@ -2514,6 +2551,7 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
             _section_kb_subgraph(inp),
             _section_roofline_evidence(inp),
             _section_experience_kb(inp),
+            _section_runtime_findings(inp),
             _section_recipe(inp),
             _section_lessons(inp),
             _section_pitfalls(inp),

@@ -393,11 +393,6 @@ class PreludePhase(CoordinatorCollaborator):
         targets = cls._parse_diff_targets(patch_path)
         return targets[0] if targets else ""
 
-    def _resolve_kernel_target_path(self, entry: dict[str, Any]) -> str:
-        """Locate the first Patch target under this Session's active root."""
-        targets = self._resolve_kernel_target_paths(entry)
-        return targets[0] if targets else ""
-
     def _resolve_kernel_target_paths(self, entry: dict[str, Any]) -> list[str]:
         """Resolve every declared Patch target under the Session active root."""
 
@@ -2252,7 +2247,7 @@ class PreludePhase(CoordinatorCollaborator):
             recorder.record_gate(
                 GATE_KEEP_THRESHOLD,
                 passed=reproduced,
-                reason=f"graded on {graded.objective}: {graded.verdict}",
+                reason=f"graded on {graded.objective}: {graded.refused_by or graded.verdict}",
                 observed=measured_gain,
                 threshold=keep_threshold,
             )
@@ -2446,7 +2441,7 @@ class PreludePhase(CoordinatorCollaborator):
             )
             # Journal warm-replay as a synthetic KEEP; no KB lesson.
             try:
-                journal = self._coord.writeback.ensure_journal()
+                journal = self._coord.recipe_journal.ensure_journal()
                 journal.append_entry(
                     JournalEntry(
                         phase=(state.phase or "PRELUDE").upper() or "PRELUDE",
@@ -2468,7 +2463,9 @@ class PreludePhase(CoordinatorCollaborator):
             task,
             outcome,
             recorder,
-            reason=graded.veto_reason or f"measured {measured_gain:+.2f}% below keep threshold {keep_threshold:+.2f}%",
+            reason=graded.veto_reason
+            or graded.refused_by
+            or f"measured {measured_gain:+.2f}% below keep threshold {keep_threshold:+.2f}%",
         )
 
     def _reject_warm_replay_as_drift(
