@@ -28,6 +28,17 @@ class CleanupConfirmationError(RuntimeError):
     """An operator confirmation cannot safely update the retained ownership ledger."""
 
 
+_CONFIRMED = "confirmed"
+
+
+def _tables(db: sqlite3.Connection) -> set[str]:
+    return {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+
+
+def _lease_columns(db: sqlite3.Connection) -> set[str]:
+    return {row[1] for row in db.execute("PRAGMA table_info(leases)")}
+
+
 def _label(value: object) -> str:
     text = "unknown" if value is None or value == "" else str(value)
     label = ascii(text[:80])
@@ -62,7 +73,7 @@ def _terminal_uncertainty(state: str, history_json: str) -> str:
 
 
 def _inspect(db: sqlite3.Connection, owner_scope: str) -> list[str]:
-    tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    tables = _tables(db)
     diagnostics: list[str] = []
     total = 0
 
@@ -75,7 +86,7 @@ def _inspect(db: sqlite3.Connection, owner_scope: str) -> list[str]:
     local_tasks: set[str] = set()
     round_leases: list[sqlite3.Row] = []
     if "leases" in tables:
-        columns = {row[1] for row in db.execute("PRAGMA table_info(leases)")}
+        columns = _lease_columns(db)
         query = (
             "SELECT lane, holder_id, task_id, pid, owner_scope FROM leases"
             if "owner_scope" in columns
@@ -141,7 +152,7 @@ def _inspect(db: sqlite3.Connection, owner_scope: str) -> list[str]:
 
 def _other_scopes(db: sqlite3.Connection, owner_scope: str) -> list[str]:
     """Name up to five recorded execution scopes other than ``owner_scope``, for a blocked resume."""
-    if "owner_scope" not in {row[1] for row in db.execute("PRAGMA table_info(leases)")}:
+    if "owner_scope" not in _lease_columns(db):
         return []
     rows = db.execute(
         "SELECT DISTINCT owner_scope FROM leases WHERE owner_scope NOT IN ('', ?) ORDER BY owner_scope LIMIT 5",
@@ -194,7 +205,7 @@ def _task_leases(db: sqlite3.Connection, tables: set[str], task_id: str, owner_s
     """
     if "leases" not in tables:
         return []
-    columns = {row[1] for row in db.execute("PRAGMA table_info(leases)")}
+    columns = _lease_columns(db)
     query = (
         "SELECT lane, holder_id, owner_scope FROM leases WHERE task_id=?"
         if "owner_scope" in columns
@@ -221,7 +232,7 @@ def _confirm_task_stopped_in_transaction(
     owner_scope: str = "",
 ) -> dict:
     """Update one task using the caller's existing IMMEDIATE transaction and Row factory."""
-    tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    tables = _tables(db)
     if "tasks" not in tables:
         raise CleanupConfirmationError("confirmation requires an existing tasks table")
     task = db.execute("SELECT state, history FROM tasks WHERE task_id=?", (task_id,)).fetchone()
@@ -324,7 +335,7 @@ def _confirm_task_stopped_in_transaction(
         db.execute("DELETE FROM leases WHERE task_id=? AND lane IS NOT 'bringup_round'", (task_id,))
     if gpu_leases:
         db.execute("DELETE FROM gpu_leases WHERE task_id=?", (task_id,))
-    result.update(status="confirmed", released_leases=len(leases), released_gpu_leases=len(gpu_leases))
+    result.update(status=_CONFIRMED, released_leases=len(leases), released_gpu_leases=len(gpu_leases))
     return result
 
 
@@ -352,8 +363,8 @@ def _confirm_scope_gone_in_transaction(
     Uses the caller's IMMEDIATE transaction. Refuses while any lease outside that
     scope is unexpired: another execution environment may still be writing.
     """
-    tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    columns = {row[1] for row in db.execute("PRAGMA table_info(leases)")} if "leases" in tables else set()
+    tables = _tables(db)
+    columns = _lease_columns(db) if "leases" in tables else set()
     if "owner_scope" not in columns:
         raise CleanupConfirmationError("the ownership ledger records no owner scopes; use --confirm-stopped")
     now = datetime.fromisoformat(confirmed_at)
@@ -380,10 +391,12 @@ def _confirm_scope_gone_in_transaction(
         )
         for task_id in sorted(target_tasks)
     ]
+    cancelled = [task["task_id"] for task in tasks if task["status"] == _CONFIRMED]
     return {
-        "status": "confirmed" if any(task["status"] == "confirmed" for task in tasks) else "nothing_to_confirm",
+        "status": _CONFIRMED if cancelled else "nothing_to_confirm",
         "owner_scope": owner_scope,
         "tasks": tasks,
+        "cancelled_tasks": cancelled,
         "released_leases": sum(task["released_leases"] for task in tasks),
         "released_gpu_leases": sum(task["released_gpu_leases"] for task in tasks),
     }
@@ -473,7 +486,7 @@ def confirm_scope_gone(session_dir: Path, *, owner_scope: str, reason: str, curr
         "operator": result["operator"],
         "confirmed_at": result["confirmed_at"],
         "confirmation_reason": reason,
-        "cancelled_tasks": [task["task_id"] for task in result["tasks"] if task["status"] == "confirmed"],
+        "cancelled_tasks": result["cancelled_tasks"],
         "released_leases": result["released_leases"],
         "released_gpu_leases": result["released_gpu_leases"],
     }

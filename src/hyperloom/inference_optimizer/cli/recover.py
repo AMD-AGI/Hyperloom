@@ -15,6 +15,34 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 
+def add_cleanup_confirmation_arguments(rec: argparse.ArgumentParser) -> None:
+    """Register the operator cleanup confirmations on the ``recover`` subcommand."""
+    rec.add_argument(
+        "--confirm-stopped",
+        metavar="TASK_ID",
+        help="Attest that one task's complete process tree, remote workers and Ray actor have stopped, "
+        "then cancel unfinished work and release only its unattributed execution/GPU ownership records. Requires POSIX session locking "
+        "and --confirmation-reason; rejects recorded nonempty owner scopes. Does not stop processes, "
+        "accept old results, rebuild reports or resume execution.",
+    )
+    rec.add_argument(
+        "--confirm-scope-gone",
+        metavar="OWNER_SCOPE",
+        help="Attest that the whole execution environment recorded as OWNER_SCOPE (a boot and PID namespace, "
+        "as printed by a blocked resume) no longer exists, e.g. its machine or container was lost. Cancels the "
+        "unfinished tasks recorded under it so they are redone rather than counted, releases their execution/GPU "
+        "ownership records and appends the confirmation to runtime/pod_history.jsonl. Refuses the current "
+        "environment's scope and refuses while another scope holds an unexpired lease. Requires POSIX session "
+        "locking and --confirmation-reason. Does not stop processes or resume execution.",
+    )
+    rec.add_argument(
+        "--confirmation-reason",
+        metavar="TEXT",
+        help="Required audit reason for --confirm-stopped or --confirm-scope-gone. Exactly one of those options "
+        "and this reason must be provided together, and they cannot be combined with --force.",
+    )
+
+
 def _session_recovery_status(session_dir: Path) -> dict[str, Any]:
     """Inspect on-disk artifacts to judge whether a session finished cleanly."""
 
@@ -82,7 +110,7 @@ def _run_cleanup_confirmation(
             f"released_leases={result['released_leases']} released_gpu_leases={result['released_gpu_leases']}"
         )
         return 0
-    cancelled = [task["task_id"] for task in result["tasks"] if task["status"] == "confirmed"]
+    cancelled = result["cancelled_tasks"]
     print(
         f"cleanup confirmation: owner_scope={ascii(scope[:80])} status={result['status']} "
         f"cancelled_tasks={len(cancelled)} released_leases={result['released_leases']} "

@@ -13,6 +13,7 @@ from typing import NoReturn
 
 from .. import framework_registry
 from .backends import CRITIC_PROTOCOL_CHOICES
+from .recover import add_cleanup_confirmation_arguments
 from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.common.llm_config import is_anthropic_only, is_openai_only, provider_model_defaults
 
@@ -1196,29 +1197,6 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Re-run even when the session already looks complete (close_sequence_done / breakdown already recorded).",
     )
-    rec.add_argument(
-        "--confirm-stopped",
-        metavar="TASK_ID",
-        help="Attest that one task's complete process tree, remote workers and Ray actor have stopped, "
-        "then cancel unfinished work and release only its unattributed execution/GPU ownership records. Requires POSIX session locking "
-        "and --confirmation-reason; rejects recorded nonempty owner scopes. Does not stop processes, "
-        "accept old results, rebuild reports or resume execution.",
-    )
-    rec.add_argument(
-        "--confirm-scope-gone",
-        metavar="OWNER_SCOPE",
-        help="Attest that the whole execution environment recorded as OWNER_SCOPE (a boot and PID namespace, "
-        "as printed by a blocked resume) no longer exists, e.g. its machine or container was lost. Cancels the "
-        "unfinished tasks recorded under it so they are redone rather than counted, releases their execution/GPU "
-        "ownership records and appends the confirmation to runtime/pod_history.jsonl. Refuses the current "
-        "environment's scope and refuses while another scope holds an unexpired lease. Requires POSIX session "
-        "locking and --confirmation-reason. Does not stop processes or resume execution.",
-    )
-    rec.add_argument(
-        "--confirmation-reason",
-        metavar="TEXT",
-        help="Required audit reason for --confirm-stopped or --confirm-scope-gone. Exactly one of those options "
-        "and this reason must be provided together, and they cannot be combined with --force.",
-    )
+    add_cleanup_confirmation_arguments(rec)
 
     return p
