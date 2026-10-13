@@ -309,7 +309,7 @@ def infer_analysis_mode(framework: str, requested: str) -> str:
     """Resolve the effective TraceLens analysis mode for a framework.
 
     An explicit non-default ``requested`` mode always wins. Otherwise inference
-    frameworks (vllm/sglang/atom) default to ``"inference"`` grouping because
+    frameworks (vllm/sglang/atom/xdit) default to ``"inference"`` grouping because
     their traces share the chrome-trace shape produced by the torch profiler;
     everything else falls back to the requested value or ``"default"``.
 
