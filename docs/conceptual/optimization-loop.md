@@ -127,6 +127,11 @@ accuracy-failure lane, `all` both. With `off`, a baseline that keeps failing
 terminates with `stop_reason='baseline_failed'` rather than opening an
 authoring loop.
 
+Every round belongs to the Coordinator's enablement lane: it dispatches the
+enablement specialist, submits that specialist's patch exactly as authored,
+and re-measures the baseline after a KEEP. The orchestration agent cannot
+propose `specialist`, `integrate_patch`, or `baseline` in this phase.
+
 A KEEP in ENABLEMENT is graded on runnability and the accuracy floor, not
 throughput. The phase exits normally when `baseline_tput > 0`, the
 revalidation window is closed, and all in-flight enablement work is drained.

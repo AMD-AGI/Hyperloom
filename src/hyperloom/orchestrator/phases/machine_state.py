@@ -79,8 +79,9 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
             "replay_warm_recipe",
         }
     ),
-    # ``baseline`` is carried so the Coordinator's revalidation survives the
-    # phase-transition sweep, but it is reserved: see PHASE_COORDINATOR_RESERVED.
+    # The enablement lane's round (specialist -> integrate_patch -> revalidation
+    # baseline) is carried so it survives the phase-transition sweep, but it is
+    # reserved: see PHASE_COORDINATOR_RESERVED.
     PHASE_ENABLEMENT: frozenset(
         {
             "target_analysis",
@@ -137,9 +138,12 @@ _NOT_LLM_PROPOSABLE: frozenset[str] = COORDINATOR_INTERNAL_ACTIONS
 
 # Actions a single phase reserves for the Coordinator. The global set above
 # cannot say this: ``baseline`` is what PRELUDE exists to propose, while
-# ENABLEMENT runs it only as the revalidation that closes a KEEP.
+# ENABLEMENT runs it only as the revalidation that closes a KEEP. ENABLEMENT
+# grades a patch on runnability, and only a round the lane opened is graded so:
+# an agent-dispatched specialist or integrate_patch is graded against a
+# baseline the phase does not have yet, so it can only be reverted.
 PHASE_COORDINATOR_RESERVED: dict[str, frozenset[str]] = {
-    PHASE_ENABLEMENT: frozenset({"baseline"}),
+    PHASE_ENABLEMENT: frozenset({"baseline", "specialist", "integrate_patch"}),
 }
 
 

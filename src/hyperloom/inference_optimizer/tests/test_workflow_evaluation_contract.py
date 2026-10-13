@@ -30,7 +30,7 @@ from hyperloom.inference_optimizer.breakdown.workflow_contract import (
     workflow_contract_digest,
     workflow_schema,
 )
-from hyperloom.inference_optimizer.session.manifest import write_manifest
+from hyperloom.inference_optimizer.session.manifest import build_manifest, write_manifest
 from hyperloom.inference_optimizer.session.session_binding import session_scope
 from hyperloom.orchestrator.phases.machine_state import (
     compute_next_phase,
@@ -195,18 +195,22 @@ def test_declared_consumer_paths_are_mechanically_covered(tmp_path):
     assert all(value is not None for value in values.values())
 
 
-@pytest.mark.parametrize("explicit", [False, True])
-def test_legacy_manifest_keeps_v1_identity_on_export(tmp_path, explicit: bool):
-    manifest = write_manifest(tmp_path, session_id="legacy-workflow")
+def _stamp_v1_session(session_dir, session_id: str, *, explicit: bool = False) -> None:
     legacy = {
         key: value
-        for key, value in manifest.items()
+        for key, value in build_manifest(session_dir, session_id=session_id).items()
         if key not in {"workflow_contract_version", "workflow_contract_digest"}
     }
     if explicit:
         legacy["workflow_contract_version"] = WORKFLOW_CONTRACT_V1
         legacy["workflow_contract_digest"] = workflow_contract_digest(WORKFLOW_CONTRACT_V1)
-    record_metadata_identity(tmp_path, legacy)
+    (session_dir / "manifest.json").write_text(json.dumps(legacy), encoding="utf-8")
+    record_metadata_identity(session_dir, legacy)
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_legacy_manifest_keeps_v1_identity_on_export(tmp_path, explicit: bool):
+    _stamp_v1_session(tmp_path, "legacy-workflow", explicit=explicit)
     workflow = build(tmp_path)["metadata"]["workflow"]
     assert workflow["workflow_contract_version"] == WORKFLOW_CONTRACT_V1
     assert workflow["contract_digest"] == workflow_contract_digest(WORKFLOW_CONTRACT_V1)
@@ -226,16 +230,11 @@ def test_legacy_manifest_keeps_v1_identity_on_export(tmp_path, explicit: bool):
 @pytest.mark.parametrize("legacy", [True, False], ids=["v1", "v2"])
 def test_skip_to_close_without_baseline_exports_under_session_contract(tmp_path, legacy: bool):
     """A v1 session resumed on this code still validates, and still closes as baseline_failed."""
-    manifest = write_manifest(tmp_path, session_id="skip-to-close-contract")
-    version = WORKFLOW_CONTRACT_V1 if legacy else manifest["workflow_contract_version"]
     if legacy:
-        manifest = {
-            key: value
-            for key, value in manifest.items()
-            if key not in {"workflow_contract_version", "workflow_contract_digest"}
-        }
-        (tmp_path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-        record_metadata_identity(tmp_path, manifest)
+        _stamp_v1_session(tmp_path, "skip-to-close-contract")
+        version = WORKFLOW_CONTRACT_V1
+    else:
+        version = write_manifest(tmp_path, session_id="skip-to-close-contract")["workflow_contract_version"]
     state = SharedState(session_id="skip-to-close-contract", phase="ENABLEMENT", baseline_tput=0.0)
     with session_scope(tmp_path):
         # Open the segment whose exit evidence carries the frozen inputs.

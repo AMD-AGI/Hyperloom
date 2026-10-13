@@ -191,8 +191,11 @@ Drive `baseline_tput > 0` so the Coordinator advances.
 <!-- phase: ENABLEMENT -->
 ### ENABLEMENT — phase goal
 
-The combo (model + backend) cannot run at all. Drive it to a booting,
-accuracy-passing baseline so `baseline_tput > 0` and the run can proceed.
+The combo (model + backend) cannot run at all. The Coordinator's enablement
+lane drives it to a booting, accuracy-passing baseline so `baseline_tput > 0`
+and the run can proceed: it dispatches the `enablement_specialist`, submits its
+patch as `integrate_patch`, and re-measures the baseline on a KEEP. You do not
+dispatch `specialist` or `integrate_patch` here.
 
 A **KEEP** in ENABLEMENT is graded on runnability and the accuracy floor, not
 throughput. A patch that boots the server and holds accuracy is a valid KEEP
