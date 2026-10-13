@@ -241,7 +241,10 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         return count
 
     def registry_lanes_ttl(self, kind: str) -> tuple[list[str], int]:
-        """Resolve ``(requires_lanes, lease_ttl_sec)`` from the action catalogue; lanes filtered to KNOWN_LANES.
+        """Resolve an action's lanes, filtered to KNOWN_LANES, and the lease it is granted.
+
+        The lease is the catalogue ``lease_ttl_sec`` floored by the cost this session admits the action at
+        (``time_budget.lease_ttl_sec``), so it can exceed the catalogue value once a baseline round is measured.
 
         Args:
             kind: The action name to resolve.
