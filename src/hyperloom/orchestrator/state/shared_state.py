@@ -514,6 +514,9 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # while promotion is decided here, so without this record a refusal is invisible: the report reads an empty stack
     # and prints 0% for a session that did measure a win.
     unpromoted_keeps: list[dict[str, Any]] = field(default_factory=list)
+    # Authored patches this session spent a benchmark round on, keyed by the lines they changed rather than by what
+    # they were named, so a later proposal can be told it repeats one. Newest last, capped.
+    measured_patch_sets: list[dict[str, Any]] = field(default_factory=list)
     # Index-aligned with ``optimization_stack``: per-entry incremental gain pct; missing => None.
     gain_per_stack_entry: list[float | None] = field(default_factory=list)
     # Total gain over ``baseline_tput``, stamped only from a measurement taken with the whole stack applied;
@@ -2554,6 +2557,33 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         self.unpromoted_keeps.append(
             {"action": action, "reason": reason, "detail": detail, "ts": now_iso()},
         )
+
+    def record_measured_patch_set(
+        self,
+        *,
+        task_id: str,
+        patch_name: str,
+        files: list[str],
+        line_keys: list[str],
+        outcome: str,
+    ) -> None:
+        """Record that a benchmark round was spent on the patch these lines describe."""
+        from ..framework.patch_overlap import MAX_MEASURED
+
+        if not line_keys:
+            return
+        self.measured_patch_sets.append(
+            {
+                "task_id": task_id,
+                "patch_name": patch_name,
+                "files": files,
+                "line_keys": line_keys,
+                "outcome": outcome,
+                "ts": now_iso(),
+            }
+        )
+        if len(self.measured_patch_sets) > MAX_MEASURED:
+            self.measured_patch_sets = self.measured_patch_sets[-MAX_MEASURED:]
 
 
 __all__ = ["SharedState", "timed_teardown_step"]
