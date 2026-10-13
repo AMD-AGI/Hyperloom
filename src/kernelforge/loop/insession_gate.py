@@ -565,6 +565,7 @@ class InSessionGate:
             workspace=self.workspace_root,
             exact_paths=self.protected_abs,
             extra_globs=self.protected_globs,
+            editable_paths=self.target_abs,
         )
 
     def _is_protected_dir_path(self, fp: str) -> bool:
@@ -589,6 +590,7 @@ class InSessionGate:
                 root,
                 exact_paths=self.protected_abs,
                 extra_globs=self.protected_globs,
+                editable_paths=self.target_abs,
             )
         )
 
