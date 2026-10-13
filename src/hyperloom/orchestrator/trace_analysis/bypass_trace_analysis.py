@@ -373,7 +373,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--trace-input", required=True)
     p.add_argument("--session-id", default="")
-    p.add_argument("--top-k", type=int, default=10)
     p.add_argument("--workspace-path", default=os.environ.get("USER_DATA_PATH", "/workspace/hyperloom"))
     p.add_argument("--model-name", default="")
     p.add_argument("--framework", default="")
@@ -399,15 +398,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=int(os.environ.get("HYPERLOOM_NUM_DENOISE_STEPS", "0") or 0),
     )
-    # Diffusion analytic-ceiling inputs shared with the TraceLens CLI surface; parsed but unused on this route.
+    # The handler forwards these to both trace tools; this route does not use them.
     p.add_argument("--model-path", default=os.environ.get("MODEL_PATH", ""))
     p.add_argument("--precision", default="")
-    p.add_argument("--height", type=int, default=0)
-    p.add_argument("--width", type=int, default=0)
-    p.add_argument("--cfg-batch", type=int, default=0)
     p.add_argument("--dry-run", action="store_true")
     return p
 
+
+#: Hot-kernel candidates kept in the bypass report.
+_TOP_K = 10
 
 #: ``--steady-state-mode`` values that mean "do NOT window" (analyze the full trace).
 _STEADY_OFF_VALUES = frozenset({"", "0", "false", "off", "no", "none"})
@@ -432,7 +431,7 @@ def main(argv: list[str] | None = None) -> int:
     bypass_dir.mkdir(parents=True, exist_ok=True)
 
     trace_health_warnings: list[dict[str, Any]] = []
-    top_k = args.top_k if args.top_k and args.top_k > 0 else 15
+    top_k = _TOP_K
 
     # Mirrors the ``run_meta`` block tracelens_analysis.py returns so the caller's SBD V6 roofline event carries one
     # shape for both tools.

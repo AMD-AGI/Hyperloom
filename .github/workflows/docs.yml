@@ -24,14 +24,12 @@ on:
       - "docs/**"
       - "src/**"
       - "examples/**"
-      - "scripts/check_cli_references.py"
       - ".github/workflows/docs.yml"
   pull_request:
     paths:
       - "docs/**"
       - "src/**"
       - "examples/**"
-      - "scripts/check_cli_references.py"
       - ".github/workflows/docs.yml"
   # Allow manual runs (e.g. to republish after changing Pages settings).
   workflow_dispatch:
@@ -62,9 +60,8 @@ jobs:
           # docs/requirements.txt cap is for local installs only.
           pip install -r docs/sphinx/requirements.txt
 
-      # Agent-facing docs are run verbatim by LLM agents; lint.yml skips markdown-only changes.
-      - name: Check CLI references in agent docs
-        run: python scripts/check_cli_references.py
+      # scripts/check_cli_references.py runs in pr-hygiene.yml, which has no
+      # paths filter and can therefore be a required check.
 
       - name: Build HTML
         run: |

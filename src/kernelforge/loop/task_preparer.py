@@ -1397,7 +1397,7 @@ def summarize_agent_progress(progress_log: list[str]) -> str:
         parts.append("backend does not support progress streaming")
     else:
         parts.append("no tool calls at all")
-    tail = [entry for entry in progress_log[-6:]]
+    tail = list(progress_log[-6:])
     if tail:
         parts.append("last steps:\n" + "\n".join(f"  {entry}" for entry in tail))
     return "; ".join(parts[:1]) + ("\n" + parts[1] if len(parts) > 1 else "")

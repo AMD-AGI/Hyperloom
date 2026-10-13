@@ -438,13 +438,12 @@ def parse_log(text: str, *, hit_logging: bool | None = None) -> dict[str, Any]:
                 **rec,
                 "tokens": sorted(rec["tokens"]),
                 "untuned_tokens": sorted(rec["untuned_tokens"]),
-                "untuned_token_counts": {
-                    k: v
-                    for k, v in sorted(
+                "untuned_token_counts": dict(
+                    sorted(
                         (rec.get("untuned_token_counts") or {}).items(),
                         key=lambda kv: _as_int(kv[0]) or 0,
                     )
-                },
+                ),
             }
             for rec in sorted(moe["keys"].values(), key=lambda r: (-r["miss_count"], -len(r["tokens"])))
         ]

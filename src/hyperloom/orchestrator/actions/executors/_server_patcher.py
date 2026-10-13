@@ -297,7 +297,7 @@ def kernel_shape_tool_dir(tracelens_root: Path | str | None = None) -> Path | No
 def _detect_installed_sglang_version() -> str | None:
     """Return the locally-installed SGLang version, or ``None`` if unimportable."""
     try:
-        import sglang  # type: ignore
+        import sglang  # type: ignore[import-not-found]
     except Exception:  # noqa: BLE001
         return None
     return (getattr(sglang, "__version__", "") or "").strip() or None
@@ -546,7 +546,7 @@ def _discover_vllm_install() -> tuple[str, Path] | None:
     version = ""
     install_root: Path | None = None
     try:
-        import vllm  # type: ignore
+        import vllm  # type: ignore[import-not-found]
 
         version = (getattr(vllm, "__version__", "") or "").strip()
         install_root = Path(vllm.__file__).resolve().parent.parent
@@ -647,7 +647,7 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
         return None
 
     try:
-        import sglang  # type: ignore
+        import sglang  # type: ignore[import-not-found]
     except Exception as e:  # noqa: BLE001
         log.warning("_server_patcher: sglang not importable (%s); skip patch", e)
         return None
@@ -770,7 +770,7 @@ def _discover_sglang_gc_plan(
         return None
 
     try:
-        import sglang  # type: ignore
+        import sglang  # type: ignore[import-not-found]
     except Exception as e:  # noqa: BLE001
         log.warning("_server_patcher: sglang not importable (%s); skip graph-capture patch", e)
         return None

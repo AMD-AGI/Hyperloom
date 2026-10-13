@@ -16,7 +16,7 @@ def _write_csvs(csv_dir: Path, *, with_timeline: bool = True) -> None:
     unified = csv_dir / dr.UNIFIED_CSV
     header = [dr.COL_NAME, dr.COL_CATEGORY, dr.COL_BOUND, dr.COL_OP_COUNT, dr.COL_ROOFLINE_TIME, dr.COL_KERNEL_TIME_SUM]
     rows = [
-        # ideal = roofline_time_first * op_count
+        # ideal is roofline_time_first * op_count
         ["aten::mm", "GEMM", "COMPUTE_BOUND", "10", "50", "1000"],  # ideal 500 / actual 1000
         ["sdpa", "SDPA_fwd", "COMPUTE_BOUND", "5", "40", "1000"],  # ideal 200 / actual 1000
         ["triton_fused", "triton", "", "2", "0", "500"],  # no perf model

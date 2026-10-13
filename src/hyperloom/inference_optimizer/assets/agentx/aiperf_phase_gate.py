@@ -37,8 +37,21 @@ def _reject_json_constant(value: str) -> Any:
     raise ValueError(f"invalid JSON constant: {value}")
 
 
-def is_auto_bounded(framework: str, body: str) -> bool:
-    """Only SGLang's forwarded positive integer num_steps implies auto-stop."""
+_VLLM_MAX_ITERATIONS = re.compile(r"--profiler-config\.max_iterations(?:=|\s+)(\S+)")
+
+
+def is_auto_bounded(framework: str, body: str, vllm_args: str) -> bool:
+    """Whether the server stops the capture itself after a configured number of steps.
+
+    SGLang reads a positive integer ``num_steps`` from the start_profile body; vLLM reads
+    ``--profiler-config.max_iterations`` from its serve line, last occurrence winning.
+    """
+    if framework == "vllm":
+        values = _VLLM_MAX_ITERATIONS.findall(vllm_args)
+        try:
+            return bool(values) and int(values[-1]) > 0
+        except ValueError:
+            return False
     try:
         payload = json.loads(body, parse_constant=_reject_json_constant)
     except ValueError:
@@ -491,6 +504,52 @@ def wait_for_phase(
         time.sleep(poll_interval_seconds)
 
 
+class _PhaseEndProbe:
+    """Poll whether AIPerf's measured phase is over, keeping progress-API errors as evidence."""
+
+    def __init__(self, *, api_url: str, phase: str, pid: int, poll_interval_seconds: float) -> None:
+        self.api_url = api_url
+        self.phase = phase
+        self.pid = pid
+        self.poll_interval_seconds = poll_interval_seconds
+        self.started = time.monotonic()
+        self.api_error_count = 0
+        self.last_api_error = ""
+
+    def poll(self) -> str | None:
+        """Return why the phase is over, or None while it is still running."""
+        if not process_alive(self.pid):
+            return "aiperf_exited"
+        try:
+            stats = phase_stats(self.api_url, self.phase, timeout_seconds=max(1.0, self.poll_interval_seconds))
+        except (
+            http.client.HTTPException,
+            OSError,
+            TimeoutError,
+            ValueError,
+            urllib.error.URLError,
+        ) as exc:
+            self.api_error_count += 1
+            self.last_api_error = f"{type(exc).__name__}: {exc}"
+            return None
+        if stats is not None and stats.get("requests_end_ns") is not None:
+            return "phase_complete"
+        return None
+
+    def elapsed(self) -> float:
+        return time.monotonic() - self.started
+
+    def decision(self, stop_reason: str) -> dict[str, Any]:
+        output: dict[str, Any] = {
+            "stop_reason": stop_reason,
+            "elapsed_seconds": round(self.elapsed(), 3),
+        }
+        if self.api_error_count:
+            output["api_error_count"] = self.api_error_count
+            output["last_api_error"] = self.last_api_error
+        return output
+
+
 def wait_for_capture_stop(
     *,
     api_url: str,
@@ -500,43 +559,49 @@ def wait_for_capture_stop(
     poll_interval_seconds: float,
 ) -> dict[str, Any]:
     """Wait until the phase ends or the wall-clock safety bound is reached."""
-    started = time.monotonic()
-    api_error_count = 0
-    last_api_error = ""
-
-    def result(stop_reason: str, elapsed: float) -> dict[str, Any]:
-        output: dict[str, Any] = {
-            "stop_reason": stop_reason,
-            "elapsed_seconds": round(elapsed, 3),
-        }
-        if api_error_count:
-            output["api_error_count"] = api_error_count
-            output["last_api_error"] = last_api_error
-        return output
-
+    probe = _PhaseEndProbe(api_url=api_url, phase=phase, pid=pid, poll_interval_seconds=poll_interval_seconds)
     while True:
-        elapsed = time.monotonic() - started
+        elapsed = probe.elapsed()
         if elapsed >= max_window_seconds:
-            return result("wall_clock_limit", elapsed)
-        if not process_alive(pid):
-            return result("aiperf_exited", elapsed)
-
-        try:
-            stats = phase_stats(api_url, phase, timeout_seconds=max(1.0, poll_interval_seconds))
-            if stats is not None:
-                if stats.get("requests_end_ns") is not None:
-                    return result("phase_complete", elapsed)
-        except (
-            http.client.HTTPException,
-            OSError,
-            TimeoutError,
-            ValueError,
-            urllib.error.URLError,
-        ) as exc:
-            api_error_count += 1
-            last_api_error = f"{type(exc).__name__}: {exc}"
-
+            return probe.decision("wall_clock_limit")
+        ended = probe.poll()
+        if ended:
+            return probe.decision(ended)
         time.sleep(min(poll_interval_seconds, max(0.0, max_window_seconds - elapsed)))
+
+
+def wait_for_bounded_capture(
+    *,
+    api_url: str,
+    phase: str,
+    pid: int,
+    trace_dirs: list[str],
+    snapshot: dict[str, Any],
+    tp: int,
+    poll_interval_seconds: float,
+    deadline_seconds: float,
+) -> dict[str, Any]:
+    """Wait until a server-bounded capture has written every rank, or the measured phase ends.
+
+    ``safety_deadline`` means neither happened within ``deadline_seconds``: the server
+    may not honour its own step bound, and the caller has to stop the profiler.
+    """
+    probe = _PhaseEndProbe(api_url=api_url, phase=phase, pid=pid, poll_interval_seconds=poll_interval_seconds)
+    cache: dict[str, Any] = {}
+    previous = None
+    while True:
+        ended = probe.poll()
+        files = current_traces(trace_dirs, snapshot)
+        # Parse a set only once it held still for a poll, or for the last time once the phase is over.
+        if (ended or files == previous) and traces_complete(trace_dirs, snapshot, tp, cache=cache):
+            return probe.decision("traces_complete")
+        if ended:
+            return probe.decision(ended)
+        remaining = deadline_seconds - probe.elapsed()
+        if remaining <= 0:
+            return probe.decision("safety_deadline")
+        previous = files
+        time.sleep(min(poll_interval_seconds, remaining))
 
 
 def write_capture_status(
@@ -582,14 +647,46 @@ def write_capture_status(
             os.unlink(temporary_path)
 
 
+# Every other stop reason means the measured phase ended first (exit 3).
+_BOUNDED_CAPTURE_EXIT_CODES = {"traces_complete": 0, "safety_deadline": 4}
+
+
+def _wait_bounded_capture_command(args: argparse.Namespace) -> int:
+    try:
+        decision = wait_for_bounded_capture(
+            api_url=args.api_url,
+            phase=args.phase,
+            pid=args.pid,
+            trace_dirs=args.trace_dir,
+            snapshot=json.loads(args.snapshot),
+            tp=args.tp,
+            poll_interval_seconds=args.poll_interval_seconds,
+            deadline_seconds=args.deadline_seconds,
+        )
+    except (OSError, ValueError) as exc:
+        print(f"aiperf phase gate failed: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(decision, sort_keys=True))
+    return _BOUNDED_CAPTURE_EXIT_CODES.get(decision["stop_reason"], 3)
+
+
+def _add_phase_arguments(parser: argparse.ArgumentParser, *, poll_interval_seconds: float) -> None:
+    parser.add_argument("--api-url", required=True)
+    parser.add_argument("--phase", default="profiling")
+    parser.add_argument("--pid", required=True, type=int)
+    parser.add_argument("--poll-interval-seconds", default=poll_interval_seconds, type=float)
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the command-line parser."""
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("pick-port", help="print an unused loopback TCP port")
-    auto_parser = subparsers.add_parser("is-auto-bounded", help="check the forwarded native capture bound")
+    auto_parser = subparsers.add_parser("is-auto-bounded", help="check for a server-side capture step bound")
     auto_parser.add_argument("--framework", required=True)
     auto_parser.add_argument("--body", required=True)
+    # Pass as --vllm-args=VALUE: the value itself starts with "--".
+    auto_parser.add_argument("--vllm-args", required=True)
     for command in ("snapshot-traces", "trace-stat", "traces-complete"):
         trace_parser = subparsers.add_parser(command)
         trace_parser.add_argument("--trace-dir", action="append", default=[])
@@ -601,21 +698,28 @@ def build_parser() -> argparse.ArgumentParser:
             trace_parser.add_argument("--timeout-seconds", type=float)
 
     wait_parser = subparsers.add_parser("wait-phase", help="wait for an AIPerf phase")
-    wait_parser.add_argument("--api-url", required=True)
-    wait_parser.add_argument("--phase", default="profiling")
-    wait_parser.add_argument("--pid", required=True, type=int)
+    _add_phase_arguments(wait_parser, poll_interval_seconds=1.0)
     wait_parser.add_argument("--timeout-seconds", required=True, type=float)
-    wait_parser.add_argument("--poll-interval-seconds", default=1.0, type=float)
 
     capture_parser = subparsers.add_parser(
         "wait-capture-stop",
         help="wait until capture coverage or a safety bound is reached",
     )
-    capture_parser.add_argument("--api-url", required=True)
-    capture_parser.add_argument("--phase", default="profiling")
-    capture_parser.add_argument("--pid", required=True, type=int)
+    _add_phase_arguments(capture_parser, poll_interval_seconds=0.2)
     capture_parser.add_argument("--max-window-seconds", required=True, type=float)
-    capture_parser.add_argument("--poll-interval-seconds", default=0.2, type=float)
+
+    bounded_parser = subparsers.add_parser(
+        "wait-bounded-capture",
+        help=(
+            "wait until a server-bounded capture wrote every rank (exit 0), the measured phase ended (exit 3) "
+            "or the safety deadline passed (exit 4)"
+        ),
+    )
+    _add_phase_arguments(bounded_parser, poll_interval_seconds=1.0)
+    bounded_parser.add_argument("--trace-dir", action="append", default=[])
+    bounded_parser.add_argument("--snapshot", required=True)
+    bounded_parser.add_argument("--tp", required=True, type=int)
+    bounded_parser.add_argument("--deadline-seconds", required=True, type=float)
 
     status_parser = subparsers.add_parser(
         "write-capture-status",
@@ -635,7 +739,9 @@ def main(argv: list[str] | None = None) -> int:
     """Run the requested phase-gate command."""
     args = build_parser().parse_args(argv)
     if args.command == "is-auto-bounded":
-        return 0 if is_auto_bounded(args.framework, args.body) else 1
+        return 0 if is_auto_bounded(args.framework, args.body, args.vllm_args) else 1
+    if args.command == "wait-bounded-capture":
+        return _wait_bounded_capture_command(args)
     if args.command in {"snapshot-traces", "trace-stat", "traces-complete"}:
         try:
             if args.command == "snapshot-traces":

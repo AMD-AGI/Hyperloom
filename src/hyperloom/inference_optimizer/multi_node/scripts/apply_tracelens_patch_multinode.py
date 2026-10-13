@@ -165,7 +165,7 @@ def _resolve_sglang_install(sglang_module_path: Path) -> tuple[Path, int] | None
         repo_root = pkg_dir.parent.parent
         if (repo_root / "python" / "sglang").is_dir():
             return repo_root, 1
-    # wheel: .../site-packages/sglang/...
+    # Wheel install, e.g. .../site-packages/sglang/...
     return pkg_dir, 3
 
 
@@ -224,7 +224,7 @@ def _apply_on_pod(
     }
     try:
         try:
-            import sglang  # type: ignore
+            import sglang  # type: ignore[import-not-found]
         except Exception as e:  # noqa: BLE001
             result["status"] = "failed"
             result["error"] = f"sglang not importable: {e}"

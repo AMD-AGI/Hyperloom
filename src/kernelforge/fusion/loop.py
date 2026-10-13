@@ -300,8 +300,7 @@ OnKeepFn = Callable[[Recipe, ValidationResult], Optional[RecipePatch]]
 def _outcome_label(vr: ValidationResult) -> str:
     """Compact, objective outcome tag for the ledger (ground truth)."""
     if not vr.correctness_passed:
-        head = (vr.note or "").split(":", 1)[0].strip() or "CORRECTNESS FAILED"
-        return head
+        return (vr.note or "").split(":", 1)[0].strip() or "CORRECTNESS FAILED"
     if vr.kept:
         return f"KEPT (speedup={vr.kernel_speedup}x)"
     if vr.kernel_speedup is None:

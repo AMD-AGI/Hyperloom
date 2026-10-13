@@ -38,7 +38,7 @@ def test_filter_supported_categories() -> None:
     assert rejected == ["bogus"]
 
 
-# importance_mapping
+# importance_mapping tests
 def test_importance_for_verdict() -> None:
     assert importance_for_verdict(verdict="advise") == 0.4
     assert importance_for_verdict(verdict="approve", confidence="high", has_measurement=True) == 0.7
