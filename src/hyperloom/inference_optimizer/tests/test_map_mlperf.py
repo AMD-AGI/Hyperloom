@@ -16,6 +16,13 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common.perf_metric import (
+    GRADED_AXIS_KEYS,
+    GRADED_INTVTY,
+    GRADED_INTVTY_P50,
+    GRADED_TOTAL,
+    perf_snapshot_from_mapping,
+)
 from hyperloom.inference_optimizer.agentx.deploy import deploy_agentx_assets
 from hyperloom.inference_optimizer.agentx.mapping import MlperfReportError, map_mlperf
 
@@ -68,10 +75,49 @@ def test_the_corpus_is_recorded():
     assert _map(corpus="agentic_combined_v6")["corpus_loader"] == "agentic_combined_v6"
 
 
-def test_no_interactivity_key_is_written():
-    """The harness has no per-request OSL/E2EL series; 1/TPOT is not that axis."""
+def test_interactivity_axes_invert_the_tpot_percentiles():
+    """Not aiperf's OSL/E2EL axis, but the only per-user rate this harness supports grading on.
+
+    ``events.jsonl`` carries reply text rather than per-token deltas, and ``output_sequence_lengths`` has a zero
+    median because a tool-call-only turn emits no text, so a P10 of OSL/E2EL is 0.0 and would be read as unmeasured.
+    """
     mapped = _map()
+    assert mapped["e2e_norm_intvty_p50"] == pytest.approx(1000.0 / 76.69808934675615)
+    assert mapped["e2e_norm_intvty_p90"] == pytest.approx(1000.0 / 1012.8065783333334)
+    # The slow tail must be the lower rate, the orientation the aiperf P10 carries.
+    assert mapped["e2e_norm_intvty_p90"] < mapped["e2e_norm_intvty_p50"]
+
+
+def test_the_mapped_result_resolves_as_a_grading_anchor():
+    """The axes grading needs, together: a missing one discards the whole anchor and degrades the session."""
+    snapshot = perf_snapshot_from_mapping(_map())
+    assert snapshot is not None
+    assert snapshot[GRADED_INTVTY] > 0
+    assert snapshot[GRADED_INTVTY_P50] > 0
+    assert snapshot[GRADED_TOTAL] > 0
+
+
+def test_a_tpot_series_with_no_samples_writes_no_interactivity_axis():
+    """Absent beats a measured zero: ``perf_snapshot_from_mapping`` reads 0.0 as unmeasured."""
+    report = _report()
+    report["tpot"] = {}
+    mapped = _map(report)
     assert not [key for key in mapped if key.startswith("e2e_norm_intvty")]
+    assert perf_snapshot_from_mapping(mapped) is None
+
+
+def test_end_to_end_latency_percentiles_are_recorded():
+    """Recorded, not graded: evidence for whether the TPOT tail or this one is the stabler axis."""
+    mapped = _map()
+    assert mapped["median_e2el_ms"] == pytest.approx(22622.874268)
+    assert mapped["p90_e2el_ms"] > mapped["median_e2el_ms"]
+    assert {"e2el_p50_ms", "e2el_p90_ms"} <= set(GRADED_AXIS_KEYS)
+
+
+def test_the_total_guard_carries_the_output_rate():
+    """The harness measures no input-token series, so grading's total guard is the output rate."""
+    mapped = _map()
+    assert mapped["total_token_throughput"] == mapped["output_throughput"]
 
 
 def test_inline_accuracy_and_unscored_turns():
