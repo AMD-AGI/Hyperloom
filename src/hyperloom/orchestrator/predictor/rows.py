@@ -125,16 +125,23 @@ def proposal_rows(prediction: Prediction, *, key: str, state: SessionView) -> li
     blocked = state.benched_fingerprints() | {row["fingerprint"] for row in state.untested_proposal_rows()}
     votes = _votes(prediction)
     samples = prediction.meta.get("samples")
-    candidates: list[tuple[frozenset[str], dict[str, Any]]] = []
+    proposals = []
+    tally: dict[str, int] = {}
     for index, action in enumerate(prediction.config_actions):
         envs = {str(k): str(v) for k, v in action.envs.items() if not str(k).upper().startswith(foreign)}
         flags, envs = _change(action.server_args, envs, base_args, base_envs)
         row: dict[str, Any] = {"name": f"primatune-{key}-{index}", "extra_args": _flags_text(flags), "extra_envs": envs}
         fingerprint = content_fingerprint(row)
+        # Proposals that differ only in how much of the champion they restate are one change, with all their votes.
+        sample_votes = votes.get(_sample_key(action.server_args, action.envs, action.source_change), 0)
+        tally[fingerprint] = tally.get(fingerprint, 0) + sample_votes
+        proposals.append((action, flags, envs, row, fingerprint))
+    candidates: list[tuple[frozenset[str], dict[str, Any]]] = []
+    for action, flags, envs, row, fingerprint in proposals:
         if not (flags or envs) or fingerprint in blocked:
             continue
         blocked.add(fingerprint)
-        row_votes = votes.get(_sample_key(action.server_args, action.envs, action.source_change), 0)
+        row_votes = tally[fingerprint]
         row.update(provenance=PROVENANCE, reason=_reason(action, flags, envs, row_votes, samples), votes=row_votes)
         if isinstance(samples, int):
             row["samples"] = samples

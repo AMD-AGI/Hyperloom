@@ -131,6 +131,26 @@ async def test_votes_rank_rows_a_knob_family_takes_one_slot_and_six_is_the_cap(s
     assert rows[0]["reason"] == "predictor: --block-size"
 
 
+async def test_proposals_that_restate_more_of_the_champion_vote_for_one_row(service):
+    state = _state()
+    fp8 = {"--kv-cache-dtype": "fp8"}
+    service.answer = _answer(
+        Action(server_args=fp8, rationale="Halves the bytes every decode step reads."),
+        Action(server_args={"--block-size": 32}),
+        Action(server_args={**fp8, "--max-num-seqs": 256}, envs={"VLLM_A": "1"}),
+        Action(server_args=fp8, envs={"VLLM_A": "1"}),
+        votes={0: 1, 1: 4, 2: 2, 3: 2},
+    )
+    await _ask_and_file(_pump(), state)
+
+    rows = _predictor_rounds(state)[0]["proposal_set"]
+    assert [(r["name"], r["extra_args"], r["votes"]) for r in rows] == [
+        ("primatune-c0-s0-r0-0", "--kv-cache-dtype fp8", 5),
+        ("primatune-c0-s0-r0-1", "--block-size 32", 4),
+    ]
+    assert rows[0]["reason"] == "PrimaTune 5/8: Halves the bytes every decode step reads."
+
+
 async def test_a_rationale_is_the_rows_reason_and_the_queue_shows_it_at_length(service):
     long_reason = "Attention is 38% of GPU time and every one of its rows is memory-bound at single-digit efficiency."
     specialist = {
