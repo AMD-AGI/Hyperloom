@@ -28,17 +28,19 @@
 root_packages =
     hyperloom
     kernelforge
+    hyperloom_multibranch
 include_external_packages = False
 exclude_type_checking_imports = True
 
 
 [importlinter:contract:hl-top-layers]
-name = hyperloom top-level layers (cli > orchestrator > agents > inference_optimizer > common)
+name = hyperloom top-level layers (cli > orchestrator > agents > contracts > inference_optimizer > common)
 type = layers
 layers =
     hyperloom.cli
     hyperloom.orchestrator
     hyperloom.agents
+    hyperloom.contracts
     hyperloom.inference_optimizer
     hyperloom.common
 # Baseline: hyperloom.inference_optimizer.cli is an entry point that lives
@@ -201,12 +203,45 @@ ignore_imports =
 unmatched_ignore_imports_alerting = none
 
 
+[importlinter:contract:multibranch-not-imported]
+name = hyperloom and kernelforge never import the multi-branch package
+type = forbidden
+source_modules =
+    hyperloom
+    kernelforge
+forbidden_modules = hyperloom_multibranch
+ignore_imports =
+    hyperloom.**.tests.** -> **
+    kernelforge.tests.** -> **
+    kernelforge.**.tests.** -> **
+    kernelforge.conftest -> **
+unmatched_ignore_imports_alerting = none
+
+
+[importlinter:contract:multibranch-no-old-flow]
+name = the multi-branch package stays off the single-lineage loop, phase machine, shared state and bus lanes
+type = forbidden
+source_modules = hyperloom_multibranch
+forbidden_modules =
+    hyperloom.orchestrator.loop
+    hyperloom.orchestrator.phases
+    hyperloom.orchestrator.state.shared_state
+    hyperloom.orchestrator.bus
+# Direct imports only: the package reuses public modules such as orchestrator.knowledge, whose own imports
+# reach the single-lineage state.
+allow_indirect_imports = True
+ignore_imports =
+    hyperloom_multibranch.**.tests.** -> **
+unmatched_ignore_imports_alerting = none
+
+
 [importlinter:contract:acyclic]
 name = no cycles between sibling packages (baseline may only shrink)
 type = acyclic_siblings
 ancestors =
     hyperloom
     kernelforge
+    hyperloom_multibranch
 # Baseline: the exact imports import-linter nominates as cycle breakers on
 # main today. Removing one of these imports means deleting its line here.
 ignore_imports =
