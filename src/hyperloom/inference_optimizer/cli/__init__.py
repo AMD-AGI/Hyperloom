@@ -1777,7 +1777,6 @@ class _SessionStart:
 
     session_dir: Path
     session_lock: object
-    state: object
     manifest: object
 
 
@@ -2169,7 +2168,7 @@ async def _resume_session(args: argparse.Namespace) -> _SessionStart:
     for line in _resume_budget_lines(state, extend_hours=extend_hours):
         print(line)
     # No resume backfill needed for roofline (roofline_snapshots restored by SharedState.from_dict).
-    return _SessionStart(session_dir=session_dir, session_lock=session_lock, state=state, manifest=manifest)
+    return _SessionStart(session_dir=session_dir, session_lock=session_lock, manifest=manifest)
 
 
 async def _seed_fresh_session(args: argparse.Namespace, *, nodes_resolved: int) -> _SessionStart:
@@ -2343,7 +2342,7 @@ async def _seed_fresh_session(args: argparse.Namespace, *, nodes_resolved: int) 
         print(f"ERROR: {_gpu_power_error}.", file=sys.stderr)
         sys.exit(2)
     _publish_gpu_power_settings(gpu_power)
-    state = _seed_shared_state(
+    _seed_shared_state(
         session_dir,
         args,
         session_id=manifest["session_id"],
@@ -2361,7 +2360,7 @@ async def _seed_fresh_session(args: argparse.Namespace, *, nodes_resolved: int) 
     if _preflight_context_window(args, session_dir):
         sys.exit(2)
     _finish_model_gate(args, session_dir)
-    return _SessionStart(session_dir=session_dir, session_lock=session_lock, state=state, manifest=manifest)
+    return _SessionStart(session_dir=session_dir, session_lock=session_lock, manifest=manifest)
 
 
 @dataclass(frozen=True)
@@ -2630,7 +2629,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     )
     session_dir = session.session_dir
     session_lock = session.session_lock
-    state = session.state
     manifest = session.manifest
 
     # Recipe KB T0 anchor (after seed/restore for recipe_canonical_id, before Coordinator); skipped when --degraded-kb.

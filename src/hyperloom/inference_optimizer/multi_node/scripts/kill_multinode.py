@@ -217,6 +217,7 @@ def _unlink_quietly(path: Path) -> None:
     try:
         path.unlink()
     except OSError:
+        # Already removed, or never written: either way there is nothing to clean up.
         pass
 
 
@@ -272,6 +273,7 @@ def _pre_kill_pgids(pid_files: list[Path]) -> set[int]:
         try:
             pgids.add(os.getpgid(pid))
         except OSError:
+            # The process is already gone, so it leads no group this kill has to spare.
             pass
     return pgids
 

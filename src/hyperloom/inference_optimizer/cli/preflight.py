@@ -2244,20 +2244,19 @@ def _ensure_magpie(
     try:
         if not magpie_active:
             print(f"Preflight: benchmark backend is {benchmark_backend!r}; skipping Magpie install/import")
-            check = None
         else:
             check = subprocess.run([magpie_python, "-c", "import Magpie"], capture_output=True)
-        if magpie_active and check is not None and check.returncode != 0:
-            magpie_repo = os.environ.get("MAGPIE_REPO", "https://github.com/AMD-AGI/Magpie.git")
-            magpie_ref = os.environ.get("MAGPIE_REF", "e6833b8183c6c41adf6038252337550876ca0433")
-            magpie_spec = os.environ.get("MAGPIE_PACKAGE_SPEC", f"magpie-eval @ git+{magpie_repo}@{magpie_ref}")
-            print(f"Preflight: Magpie not importable; installing {magpie_spec} ...")
-            subprocess.run(
-                [magpie_python, "-m", "pip", "install", "--quiet", *pip_extra, magpie_spec],
-                check=True,
-            )
-            magpie_installed = True
-            print("Preflight: Magpie installed OK")
+            if check.returncode != 0:
+                magpie_repo = os.environ.get("MAGPIE_REPO", "https://github.com/AMD-AGI/Magpie.git")
+                magpie_ref = os.environ.get("MAGPIE_REF", "e6833b8183c6c41adf6038252337550876ca0433")
+                magpie_spec = os.environ.get("MAGPIE_PACKAGE_SPEC", f"magpie-eval @ git+{magpie_repo}@{magpie_ref}")
+                print(f"Preflight: Magpie not importable; installing {magpie_spec} ...")
+                subprocess.run(
+                    [magpie_python, "-m", "pip", "install", "--quiet", *pip_extra, magpie_spec],
+                    check=True,
+                )
+                magpie_installed = True
+                print("Preflight: Magpie installed OK")
         if magpie_active and not os.environ.get("MAGPIE_PATH", "").strip():
             magpie_root = subprocess.run(
                 [
