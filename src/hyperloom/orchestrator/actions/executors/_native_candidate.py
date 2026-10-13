@@ -20,6 +20,9 @@ from hyperloom.inference_optimizer.agentx.identity import has_launch_contract
 from ._native_args import compose_native_args
 from ._native_source import source_file_hashes, verify_native_source_imports
 
+_ENCODING = "utf-8"
+
+
 _FIXED_ENVS = frozenset(
     {
         "MODEL",
@@ -245,7 +248,7 @@ def update_native_candidate_file(config_path: Path, **candidate: Any) -> None:
     """Attach post-apply source/runtime evidence to the YAML consumed by Magpie."""
     from hyperloom.inference_optimizer.agentx.native import resolve_native_recipe
 
-    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config = yaml.safe_load(config_path.read_text(encoding=_ENCODING))
     benchmark = config["benchmark"]
     apply_native_candidate(benchmark, **candidate)
     topology = (benchmark.get("workload_spec") or {}).get("resolved_topology") or {}
@@ -255,7 +258,7 @@ def update_native_candidate_file(config_path: Path, **candidate: Any) -> None:
         expected_gpu_count=int(os.environ.get("HYPERLOOM_AGENTX_GPU_COUNT") or topology.get("gpu_count") or 0),
     )
     verify_native_source_imports(benchmark)
-    config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_ENCODING)
 
 
 def record_launch_evidence(config_path: Path, measurement: Mapping[str, Any]) -> None:
@@ -267,9 +270,9 @@ def record_launch_evidence(config_path: Path, measurement: Mapping[str, Any]) ->
         "evidence_sha256"
     ):
         return
-    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config = yaml.safe_load(config_path.read_text(encoding=_ENCODING))
     benchmark = config["benchmark"]
     if not has_launch_contract(benchmark):
         return
     benchmark.setdefault("workload_spec", {})["server_launch"] = dict(evidence)
-    config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_ENCODING)

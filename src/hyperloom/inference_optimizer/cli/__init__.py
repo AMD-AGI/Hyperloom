@@ -95,6 +95,16 @@ from .recover import (
     _run_recover_session as _run_recover_session,
 )
 
+_CONC_ATTR = "conc"
+_ISL = "ISL"
+_OSL = "OSL"
+_CONC = "CONC"
+_SGLANG = "sglang"
+_TRUE_VALUE = "true"
+_YES_VALUE = "yes"
+_INFERENCEX_PATH = "INFERENCEX_PATH"
+_BENCHMARK_MODE = "benchmark_mode"
+
 
 __all__ = ["main"]
 from .. import framework_registry
@@ -1102,7 +1112,7 @@ def _preflight_native_agentx_backend(args: argparse.Namespace, framework: str, s
             file=sys.stderr,
         )
         raise SystemExit(2)
-    if os.environ.get("INFERENCE_OPTIMIZER_RAY_EXEC", "").strip().lower() in {"1", "true", "yes", "on"}:
+    if os.environ.get("INFERENCE_OPTIMIZER_RAY_EXEC", "").strip().lower() in {"1", _TRUE_VALUE, _YES_VALUE, "on"}:
         print(
             "ERROR: native Magpie AgentX v1 cannot run inside Hyperloom's Ray "
             "serving actor. Leave INFERENCE_OPTIMIZER_RAY_EXEC unset (native AgentX "
@@ -1117,7 +1127,7 @@ def _preflight_native_agentx_backend(args: argparse.Namespace, framework: str, s
             file=sys.stderr,
         )
         raise SystemExit(2)
-    if framework not in {"sglang", "vllm"}:
+    if framework not in {_SGLANG, "vllm"}:
         print(
             f"ERROR: native Magpie AgentX currently supports only SGLang or vLLM; got --framework {framework!r}.",
             file=sys.stderr,
@@ -1315,10 +1325,10 @@ def _configure_benchmark_config(args: argparse.Namespace) -> bool:
     # parallelism, while Hyperloom's --tp accounts for every physical rank
     # (TP x PP x PCP).
     projected = (
-        ("conc", "CONC"),
+        (_CONC_ATTR, _CONC),
         ("ep", "EP"),
-        ("isl", "ISL"),
-        ("osl", "OSL"),
+        ("isl", _ISL),
+        ("osl", _OSL),
         ("max_model_len", "MAX_MODEL_LEN"),
     )
     for attr, env_name in projected:
@@ -1327,7 +1337,7 @@ def _configure_benchmark_config(args: argparse.Namespace) -> bool:
             if value is not None:
                 setattr(args, attr, value)
     raw_agentx = benchmark.get("agentx")
-    if getattr(args, "conc", None) is None and isinstance(raw_agentx, Mapping):
+    if getattr(args, _CONC_ATTR, None) is None and isinstance(raw_agentx, Mapping):
         configured_conc = raw_agentx.get("concurrency")
         if configured_conc is not None:
             args.conc = int(configured_conc)
@@ -1340,7 +1350,7 @@ def _configure_benchmark_config(args: argparse.Namespace) -> bool:
 
     if native:
         raw_mode = os.environ.get("HYPERLOOM_AGENTX", "").strip().lower()
-        if raw_mode and raw_mode not in {"1", "true", "yes", "on", "enable", "enabled"}:
+        if raw_mode and raw_mode not in {"1", _TRUE_VALUE, _YES_VALUE, "on", "enable", "enabled"}:
             raise ValueError(
                 f"benchmark.agentx is enabled in {path}, but "
                 f"HYPERLOOM_AGENTX={raw_mode!r} explicitly disables the session"
@@ -1384,14 +1394,14 @@ def _configure_benchmark_config(args: argparse.Namespace) -> bool:
         for name, source_value in source_pins.items():
             if not source_value:
                 continue
-            if name == "INFERENCEX_PATH":
+            if name == _INFERENCEX_PATH:
                 source_path = Path(source_value).expanduser()
                 if not source_path.is_absolute():
                     source_path = path.parent / source_path
                 source_value = str(source_path.resolve())
             current = os.environ.get(name, "").strip()
             comparable_current = current
-            if current and name == "INFERENCEX_PATH":
+            if current and name == _INFERENCEX_PATH:
                 comparable_current = str(Path(current).expanduser().resolve())
             if comparable_current and comparable_current != source_value:
                 raise ValueError(f"{name}={current!r} conflicts with {source_value!r} in {path}")
@@ -1475,7 +1485,7 @@ def _finalize_benchmark_config(args: argparse.Namespace) -> bool:
     if canonical_script:
         preview_benchmark["benchmark_script"] = canonical_script
 
-    requested_conc = getattr(args, "conc", None)
+    requested_conc = getattr(args, _CONC_ATTR, None)
     raw_agentx = preview_benchmark.get("agentx")
     if requested_conc is None and isinstance(raw_agentx, Mapping):
         configured_conc = raw_agentx.get("concurrency")
@@ -1488,11 +1498,9 @@ def _finalize_benchmark_config(args: argparse.Namespace) -> bool:
                 raise ValueError(f"benchmark.agentx.concurrency in {path} must be a positive integer")
     if requested_conc is not None:
         preview_envs["CONC"] = int(requested_conc)
-    from hyperloom.orchestrator.actions.executors._workload_envs import (
-        _native_agentx_config,
-    )
+    from hyperloom.inference_optimizer.agentx.config import native_agentx_config
 
-    preview_benchmark["agentx"] = _native_agentx_config(
+    preview_benchmark["agentx"] = native_agentx_config(
         preview_envs,
         raw_agentx,
     )
@@ -1567,13 +1575,13 @@ def _finalize_benchmark_config(args: argparse.Namespace) -> bool:
 
 def _restore_agentx_env_from_state(state: Any) -> bool:
     """Re-export and normalize a persisted AgentX session mode."""
-    if str(getattr(state, "benchmark_mode", "") or "").strip().lower() != "agentx":
+    if str(getattr(state, _BENCHMARK_MODE, "") or "").strip().lower() != "agentx":
         return False
     raw = os.environ.get("HYPERLOOM_AGENTX", "").strip()
     if raw and raw.lower() not in {
         "1",
-        "true",
-        "yes",
+        _TRUE_VALUE,
+        _YES_VALUE,
         "on",
         "enable",
         "enabled",
@@ -1778,7 +1786,7 @@ def _restore_agentx_runtime_pins_from_state(
             else os.environ.get(name, "").strip()
         )
         comparable_current = current
-        if current and name == "INFERENCEX_PATH":
+        if current and name == _INFERENCEX_PATH:
             comparable_current = str(Path(current).expanduser().resolve())
         if comparable_current and (not saved or comparable_current != saved):
             expected = repr(saved) if saved else "unset"
@@ -1812,7 +1820,7 @@ def _enforce_agentx_resume_workload(
 
     if not native_agentx_session(state):
         return
-    for name in ("tp", "ep", "conc"):
+    for name in ("tp", "ep", _CONC_ATTR):
         saved = int(getattr(state, name, 0) or 0)
         if saved <= 0:
             raise ValueError(f"saved AgentX session is missing a positive {name} pin")
@@ -1999,7 +2007,7 @@ def _seed_env_from_resumed_state(state: Any, pins: dict[str, str]) -> None:
     silently re-measure the session at another shape. ``pins`` -- this resume's ``--extra-env``, or, when it
     passes none, the pins persisted from the launch -- is skipped, so changing the workload stays an explicit act.
     """
-    for name in ("ISL", "OSL", "CONC", "TP", "EP", "MAX_MODEL_LEN"):
+    for name in (_ISL, _OSL, _CONC, "TP", "EP", "MAX_MODEL_LEN"):
         recorded = getattr(state, name.lower(), 0)
         if recorded and name not in pins:
             os.environ[name] = str(recorded)
@@ -2019,7 +2027,7 @@ def _resolve_workload_knobs(
     int_knobs = (
         ("isl", DEFAULT_ISL),
         ("osl", DEFAULT_OSL),
-        ("conc", DEFAULT_CONC),
+        (_CONC_ATTR, DEFAULT_CONC),
         ("tp", DEFAULT_TP),
         ("ep", DEFAULT_EP),
     )
@@ -2068,7 +2076,7 @@ def _export_workload_envs_for_optimize(
 ) -> None:
     """Project resolved workload knobs (TP/CONC/EP) into env for downstream Magpie YAMLs."""
     os.environ["TP"] = str(max(1, int(tp_resolved or 1)))
-    os.environ["CONC"] = str(max(1, int(getattr(args, "conc", DEFAULT_CONC) or DEFAULT_CONC)))
+    os.environ["CONC"] = str(max(1, int(getattr(args, _CONC_ATTR, DEFAULT_CONC) or DEFAULT_CONC)))
     os.environ["EP"] = str(max(1, int(ep_resolved or 1)))
 
 
@@ -2871,7 +2879,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         if _restore_agentx_env_from_state(state):
             print("  re-exported HYPERLOOM_AGENTX: 1 (persisted session mode)")
         if (
-            str(getattr(state, "benchmark_mode", "") or "").strip().lower() == "agentx"
+            str(getattr(state, _BENCHMARK_MODE, "") or "").strip().lower() == "agentx"
             and not str(getattr(state, "baseline_config_path", "") or "").strip()
         ):
             source_config = str(getattr(state, "benchmark_source_config_path", "") or "").strip()
@@ -2990,9 +2998,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         for env_name, val in (
             ("TP", args.tp),
             ("EP", args.ep),
-            ("CONC", args.conc),
-            ("ISL", args.isl),
-            ("OSL", args.osl),
+            (_CONC, args.conc),
+            (_ISL, args.isl),
+            (_OSL, args.osl),
             ("MAX_MODEL_LEN", _resume_max_model_len),
         ):
             if val:
@@ -3022,7 +3030,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # Custom-workload paths: an explicit --framework-path / --benchmark-scripts-dir on this resume wins, else the
         # persisted value.
         _restore_operator_supplied_paths_from_state(args, state)
-        _apply_operator_supplied_paths(args, state.framework or "sglang")
+        _apply_operator_supplied_paths(args, state.framework or _SGLANG)
         _require_custom_entrypoint(
             state.framework,
             gpu_type=os.environ.get("GPU_TYPE") or state.gpu_type,
@@ -3424,7 +3432,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # Advisory multi-model specialist-proposal scorer, disabled by default (enable via --proposal-scoring).
         proposal_scorer=_build_proposal_scorer(args, session_dir),
     )
-    framework_for_prompt = os.environ.get("FRAMEWORK", "").strip().lower() or "sglang"
+    framework_for_prompt = os.environ.get("FRAMEWORK", "").strip().lower() or _SGLANG
     max_minutes_for_prompt = int(round(float(args.max_hours) * 60))
     _initial_macro_cycle = int(getattr(coordinator.shared_state, "macro_cycle", 0) or 0)
     _initial_directive = str(
@@ -3451,7 +3459,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             cycle_directive=_initial_directive,
             phase=_initial_phase,
             transport=_orch_transport,
-            benchmark_mode=str(getattr(coordinator.shared_state, "benchmark_mode", "") or ""),
+            benchmark_mode=str(getattr(coordinator.shared_state, _BENCHMARK_MODE, "") or ""),
             agentx_corpus_shape=coordinator.shared_state.agentx_corpus_shape,
             agentx_grading=coordinator.shared_state.grading,
             agentx_backend=coordinator.shared_state.agentx_backend,
@@ -3472,7 +3480,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             objective=objective,
             max_minutes=max_minutes_for_prompt,
             transport=_orch_transport,
-            benchmark_mode=str(getattr(coordinator.shared_state, "benchmark_mode", "") or ""),
+            benchmark_mode=str(getattr(coordinator.shared_state, _BENCHMARK_MODE, "") or ""),
             agentx_corpus_shape=coordinator.shared_state.agentx_corpus_shape,
             agentx_grading=coordinator.shared_state.grading,
             agentx_backend=coordinator.shared_state.agentx_backend,

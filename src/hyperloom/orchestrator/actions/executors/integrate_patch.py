@@ -138,6 +138,8 @@ from ._workload_envs import (
     materialize_config_with_envs,
 )
 
+_SKIPPED = "skipped"
+
 
 log = logging.getLogger(__name__)
 
@@ -1995,7 +1997,7 @@ class IntegratePatchExecutor:
 
         if is_multi_node():
             return {
-                "status": "skipped",
+                "status": _SKIPPED,
                 "skipped_reason": "multi_node_unsupported",
                 "specialist_task_id": str(params.get("specialist_task_id") or "").strip(),
                 "patches_applied": [],
@@ -2024,7 +2026,7 @@ class IntegratePatchExecutor:
             }
         if native_agentx_session(shared_state) and not native_agentx_optimization_session(shared_state):
             return {
-                "status": "skipped",
+                "status": _SKIPPED,
                 "error_class": "unsupported_upstream_launcher_hook",
                 "error": (
                     "Native AgentX cannot benchmark source or artifact mutations "
@@ -4754,7 +4756,7 @@ class IntegratePatchExecutor:
             rejected = (mn_dropped + pin_dropped + skip_dropped)[0]
             return (
                 {
-                    "status": "skipped",
+                    "status": _SKIPPED,
                     "error_class": "filtered_before_bench",
                     "error": str(rejected.get("reason") or rejected.get("source") or ""),
                     "workspace": "",

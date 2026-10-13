@@ -12,13 +12,17 @@ from typing import Any
 
 import yaml
 
+_COMPLETE = "complete"
+_ENCODING = "utf-8"
+_TORCH_TRACE = "torch_trace"
+
 
 def _capture_rounds(capture: Mapping[str, Any], workspace: Path, expected_ranks: int) -> list[dict[str, Any]]:
     capture_id = capture.get("capture_id")
     if not isinstance(capture_id, str) or not capture_id or Path(capture_id).name != capture_id:
         raise ValueError("AgentX profile capture has no valid capture_id")
-    root = (workspace / "torch_trace" / capture_id).resolve()
-    artifact = json.loads((root / "capture.json").read_text(encoding="utf-8"))
+    root = (workspace / _TORCH_TRACE / capture_id).resolve()
+    artifact = json.loads((root / "capture.json").read_text(encoding=_ENCODING))
     if artifact != capture:
         raise ValueError("AgentX profile report disagrees with its capture manifest")
     if type(capture.get("expected_ranks")) is not int or capture["expected_ranks"] != expected_ranks:
@@ -36,7 +40,7 @@ def _capture_rounds(capture: Mapping[str, Any], workspace: Path, expected_ranks:
 
 
 def _validated_round(row: Any, index: int, root: Path, capture: Mapping[str, Any]) -> dict[str, Any]:
-    if not isinstance(row, dict) or row.get("status") != "complete" or row.get("profile_index") != index:
+    if not isinstance(row, dict) or row.get("status") != _COMPLETE or row.get("profile_index") != index:
         raise ValueError("AgentX profile series contains an incomplete or misordered capture")
     for key in ("capture_id", "framework", "num_steps", "expected_ranks"):
         if type(row.get(key)) is not type(capture[key]) or row[key] != capture[key]:
@@ -95,14 +99,14 @@ def diagnostic_profile_result(
             profile_rounds=rounds,
             selected_profile_index=selected["profile_index"],
             trace_capture=capture,
-            trace_capture_status="complete",
+            trace_capture_status=_COMPLETE,
             trace_dir=selected["trace_dir"],
             trace_files=selected["trace_files"],
             rank_trace_paths=selected["rank_trace_files"],
             main_trace_path=main_trace,
             primary_rank=0,
             profile_trace_selection_reason="latest_complete_profile_rank_0",
-            trace_manifest_path=str(workspace / "torch_trace" / capture["capture_id"] / "capture.json"),
+            trace_manifest_path=str(workspace / _TORCH_TRACE / capture["capture_id"] / "capture.json"),
         )
     except (OSError, ValueError, TypeError, KeyError, yaml.YAMLError) as exc:
         result.update(error_class="invalid_profile_diagnostic", error=str(exc))
@@ -126,14 +130,14 @@ def _validate_diagnostic_report(
         raise ValueError("Magpie diagnostic report predates this run")
     metrics = report.get("agentx_metrics") or {}
     capture = metrics.get("profile_capture") or {}
-    if metrics.get("diagnostic_only") is not True or capture.get("status") != "complete":
+    if metrics.get("diagnostic_only") is not True or capture.get("status") != _COMPLETE:
         raise ValueError(f"Magpie diagnostic capture is incomplete: {capture.get('error') or capture.get('status')}")
-    benchmark = (yaml.safe_load(config_path.read_text(encoding="utf-8")) or {})["benchmark"]
+    benchmark = (yaml.safe_load(config_path.read_text(encoding=_ENCODING)) or {})["benchmark"]
     evidence = metrics.get("server_launch")
     errors = validate_server_launch(benchmark, evidence, workspace=workspace)
     if errors:
         raise ValueError("Magpie diagnostic launch is not verified: " + "; ".join(errors))
-    receipt = json.loads((workspace / "agentx_server_launch.json").read_text(encoding="utf-8"))
+    receipt = json.loads((workspace / "agentx_server_launch.json").read_text(encoding=_ENCODING))
     if receipt != evidence:
         raise ValueError("Magpie diagnostic report disagrees with its server launch receipt")
     return metrics, _bound_capture_rounds(capture, evidence, benchmark, workspace)
@@ -146,7 +150,7 @@ def _bound_capture_rounds(
     profiling = evidence.get("torch_profiler") or {}
     if not capture.get("capture_id") or capture["capture_id"] != profiling.get("capture_id"):
         raise ValueError("Magpie diagnostic capture ID disagrees with its server launch receipt")
-    directory = (workspace / "torch_trace" / capture["capture_id"]).resolve()
+    directory = (workspace / _TORCH_TRACE / capture["capture_id"]).resolve()
     if not profiling.get("trace_dir") or Path(profiling["trace_dir"]).resolve() != directory:
         raise ValueError("Magpie diagnostic capture directory disagrees with its server launch receipt")
     if capture.get("framework") != evidence.get("framework"):

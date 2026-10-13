@@ -16,6 +16,14 @@ from typing import Any, Mapping, MutableMapping
 from hyperloom.common.agentx_mode import native_agentx_enabled
 from .magpie_source_identity import MAGPIE_SOURCE_IDENTITY_CODE
 
+_ENCODING = "utf-8"
+_SGLANG_AGENTIC_SCRIPT = "srt_agentic.sh"
+_GIT = "git"
+_GIT_TIMEOUT_SEC = 30
+_GIT_HEAD = "HEAD"
+_COMMIT_SHA_PATTERN = "[0-9a-f]{40}"
+
+
 _AGENTIC_PREFIX = ("single_node", "agentic")
 _RESOLVER_SENTINEL = "HYPERLOOM_AGENTX_RECIPE="
 _NATIVE_CHECKOUT_PATH_RE = re.compile(r"^[A-Za-z0-9_@%+=:,./-]+$")
@@ -475,7 +483,7 @@ def native_launch_environment_identity(
         for name, value in effective.items()
         if name.upper() in _NATIVE_AMBIENT_CONTROL_NAMES or name.upper().startswith(_NATIVE_AMBIENT_CONTROL_PREFIXES)
     }
-    encoded = json.dumps(controls, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    encoded = json.dumps(controls, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode(_ENCODING)
     return {
         "names": sorted(controls),
         "sha256": hashlib.sha256(encoded).hexdigest(),
@@ -486,7 +494,7 @@ def validate_native_launcher_name(script_name: str) -> PurePosixPath:
     """Validate an explicit launcher relative to ``InferenceX/benchmarks``."""
     raw = str(script_name or "").strip()
     path = PurePosixPath(raw)
-    if raw == "srt_agentic.sh":
+    if raw == _SGLANG_AGENTIC_SCRIPT:
         return path
     if (
         not raw
@@ -519,7 +527,7 @@ def resolve_native_launcher(
     launcher = lexical_launcher.resolve()
     agentic_root = (
         benchmarks_root
-        if rel.as_posix() == "srt_agentic.sh"
+        if rel.as_posix() == _SGLANG_AGENTIC_SCRIPT
         else (benchmarks_root / "single_node" / "agentic").resolve()
     )
     try:
@@ -551,7 +559,7 @@ def _canonical_benchmark_sha256(benchmark: Mapping[str, Any]) -> str:
             separators=(",", ":"),
             ensure_ascii=True,
             allow_nan=False,
-        ).encode("utf-8")
+        ).encode(_ENCODING)
     except (TypeError, ValueError) as exc:
         raise ValueError("resolved native AgentX benchmark is not canonically serializable") from exc
     return hashlib.sha256(payload).hexdigest()
@@ -568,9 +576,9 @@ def _contains_symlink(root: Path, path: Path) -> bool:
 
 def _head_blob(root: Path, relative_path: str) -> bytes:
     completed = subprocess.run(
-        ["git", "-C", str(root), "show", f"HEAD:{relative_path}"],
+        [_GIT, "-C", str(root), "show", f"HEAD:{relative_path}"],
         capture_output=True,
-        timeout=30,
+        timeout=_GIT_TIMEOUT_SEC,
         check=False,
     )
     if completed.returncode != 0:
@@ -582,16 +590,16 @@ def _checkout_head(root: Path, *, label: str) -> str:
     """Return one exact git commit, or reject an unverifiable checkout."""
     try:
         completed = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            [_GIT, "-C", str(root), "rev-parse", _GIT_HEAD],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=_GIT_TIMEOUT_SEC,
             check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise ValueError(f"cannot read {label} git identity at {root}: {exc}") from exc
     head = (completed.stdout or "").strip().lower()
-    if completed.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}", head):
+    if completed.returncode != 0 or not re.fullmatch(_COMMIT_SHA_PATTERN, head):
         raise ValueError(f"native AgentX requires a readable {label} git checkout at {root}")
     return head
 
@@ -604,7 +612,7 @@ def _launcher_manifest(root: Path, head: str) -> dict[str, tuple[str, str]]:
         root, "configs/agentx-launchers.json"
     ):
         raise ValueError("Native AgentX launcher manifest changed from its pinned source")
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest = json.loads(manifest_path.read_text(encoding=_ENCODING))
     if not isinstance(manifest, dict) or manifest.get("version") != 1 or not isinstance(manifest.get("recipes"), dict):
         raise ValueError("Native AgentX launcher manifest has an unsupported schema")
     generic = manifest.get("generic", {})
@@ -629,7 +637,7 @@ def validate_native_recipe_launcher(
     root = validate_native_checkout_path(inferencex_path)
     head = _checkout_head(root, label="InferenceX")
     recipe_name = str(recipe or "").strip()
-    if benchmark_script == "srt_agentic.sh":
+    if benchmark_script == _SGLANG_AGENTIC_SCRIPT:
         launcher = resolve_native_launcher(inferencex_path=root, benchmark_script=benchmark_script)
         from .managed import head_blob
 
@@ -731,7 +739,7 @@ def native_execution_identity(
 
     head = _checkout_head(root, label="InferenceX")
     wanted = str(expected_ref or "").strip().lower()
-    if wanted and not re.fullmatch(r"[0-9a-f]{40}", wanted):
+    if wanted and not re.fullmatch(_COMMIT_SHA_PATTERN, wanted):
         raise ValueError(
             f"Native AgentX requires INFERENCEX_REF to be an immutable 40-character commit SHA; got {expected_ref!r}"
         )
@@ -782,7 +790,7 @@ def native_execution_identity(
     try:
         status_proc = subprocess.run(
             [
-                "git",
+                _GIT,
                 "-C",
                 str(root),
                 "status",
@@ -794,7 +802,7 @@ def native_execution_identity(
             ],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=_GIT_TIMEOUT_SEC,
             check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
@@ -823,10 +831,10 @@ def native_execution_identity(
             raise ValueError(f"native AgentX execution input differs from the pinned HEAD blob: {relative}")
 
     gitlink_proc = subprocess.run(
-        ["git", "-C", str(root), "ls-tree", "HEAD", "utils/aiperf"],
+        [_GIT, "-C", str(root), "ls-tree", _GIT_HEAD, "utils/aiperf"],
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=_GIT_TIMEOUT_SEC,
         check=False,
     )
     gitlink_fields = (gitlink_proc.stdout or "").strip().split()
@@ -834,7 +842,7 @@ def native_execution_identity(
         gitlink_proc.returncode != 0
         or len(gitlink_fields) < 3
         or gitlink_fields[0] != "160000"
-        or not re.fullmatch(r"[0-9a-f]{40}", gitlink_fields[2])
+        or not re.fullmatch(_COMMIT_SHA_PATTERN, gitlink_fields[2])
     ):
         raise ValueError("InferenceX utils/aiperf is not a pinned git submodule")
     aiperf_commit = gitlink_fields[2]
@@ -844,10 +852,10 @@ def native_execution_identity(
             "InferenceX utils/aiperf submodule is not initialized; run git submodule update --init -- utils/aiperf"
         )
     submodule_head = subprocess.run(
-        ["git", "-C", str(aiperf_root), "rev-parse", "HEAD"],
+        [_GIT, "-C", str(aiperf_root), "rev-parse", _GIT_HEAD],
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=_GIT_TIMEOUT_SEC,
         check=False,
     )
     actual_aiperf_commit = (submodule_head.stdout or "").strip().lower()
@@ -855,7 +863,7 @@ def native_execution_identity(
         raise ValueError(f"InferenceX utils/aiperf does not match its pinned gitlink {aiperf_commit}")
     submodule_status = subprocess.run(
         [
-            "git",
+            _GIT,
             "-C",
             str(aiperf_root),
             "status",
@@ -864,7 +872,7 @@ def native_execution_identity(
         ],
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=_GIT_TIMEOUT_SEC,
         check=False,
     )
     if submodule_status.returncode != 0 or (submodule_status.stdout or "").strip():
@@ -876,7 +884,7 @@ def native_execution_identity(
     if not re.fullmatch(r"[0-9a-f]{64}", magpie_fingerprint):
         raise ValueError("Magpie resolver did not provide a valid execution fingerprint")
     wanted_magpie = str(expected_magpie_ref or "").strip().lower()
-    if wanted_magpie and not re.fullmatch(r"[0-9a-f]{40}", wanted_magpie):
+    if wanted_magpie and not re.fullmatch(_COMMIT_SHA_PATTERN, wanted_magpie):
         raise ValueError(
             f"Native AgentX requires MAGPIE_REF to be an immutable 40-character commit SHA; got {expected_magpie_ref!r}"
         )
@@ -903,7 +911,7 @@ def native_execution_identity(
     # and warm-up controls).  It pins the executable sources without falsely
     # treating those deterministic additions as checkout drift.
     identity["static_execution_fingerprint"] = hashlib.sha256(
-        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode(_ENCODING)
     ).hexdigest()
     from .identity import has_launch_contract, native_workload_fingerprint
 
@@ -922,7 +930,7 @@ def native_execution_identity(
         launch_env=launch_env,
     )
     identity["execution_fingerprint"] = hashlib.sha256(
-        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode(_ENCODING)
     ).hexdigest()
     return identity
 

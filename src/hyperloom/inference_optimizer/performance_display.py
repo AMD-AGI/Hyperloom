@@ -13,6 +13,8 @@ from hyperloom.common.agentx_mode import native_agentx_session
 
 from . import framework_registry
 
+_AGGREGATE_THROUGHPUT_UNIT = "tok/s (aggregate)"
+
 
 def throughput_fields(
     value: float | None,
@@ -44,7 +46,7 @@ def throughput_fields(
     fields.update(
         throughput_tok_s=value,
         throughput_tok_s_per_gpu=(value / gpu_count if value is not None else None) if known_count else None,
-        throughput_unit="tok/s/GPU" if known_count else "tok/s (aggregate)",
+        throughput_unit="tok/s/GPU" if known_count else _AGGREGATE_THROUGHPUT_UNIT,
     )
     return fields
 
@@ -57,15 +59,15 @@ def recorded_throughput(measurement: Mapping[str, Any]) -> float | None:
 
 def recorded_metric_unit(framework: str | None, measurement: Mapping[str, Any]) -> str:
     """The primary display unit, including native totals without known topology."""
-    if measurement.get("throughput_unit") == "tok/s (aggregate)":
-        return "tok/s (aggregate)"
+    if measurement.get("throughput_unit") == _AGGREGATE_THROUGHPUT_UNIT:
+        return _AGGREGATE_THROUGHPUT_UNIT
     return framework_registry.primary_metric_unit(framework)
 
 
 def format_recorded_metric(framework: str | None, measurement: Mapping[str, Any], *, precision: int = 1) -> str:
     """Format display fields without dividing a per-GPU value a second time."""
     value = recorded_throughput(measurement)
-    if measurement.get("throughput_unit") == "tok/s (aggregate)":
+    if measurement.get("throughput_unit") == _AGGREGATE_THROUGHPUT_UNIT:
         number = "n/a" if value is None else f"{value:.{precision}f}"
         return f"{number} tok/s (aggregate)"
     return framework_registry.format_primary_metric(framework, value, precision=precision)

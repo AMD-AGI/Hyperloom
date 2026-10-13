@@ -13,17 +13,23 @@ from typing import Any
 
 import yaml
 
+_AGENTX_EPOCH = "agentx_epoch"
+
+
+_NATIVE_ENABLED_VALUES = frozenset({"1", "true", "yes", "enable", "enabled"})
+_SESSION_ENABLED_VALUES = _NATIVE_ENABLED_VALUES | {"on"}
+
 
 def native_agentx_enabled(value: Any) -> bool:
     """Return whether a serialized Magpie ``benchmark.agentx`` enables AgentX."""
     if isinstance(value, bool):
         return value
     if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "enable", "enabled"}
+        return value.strip().lower() in _NATIVE_ENABLED_VALUES
     if isinstance(value, dict):
         raw = value.get("enabled", True)
         if isinstance(raw, str):
-            return raw.strip().lower() in {"1", "true", "yes", "enable", "enabled"}
+            return raw.strip().lower() in _NATIVE_ENABLED_VALUES
         return bool(raw)
     return False
 
@@ -71,7 +77,7 @@ def native_agentx_session(state: Any = None, *, env: Mapping[str, str] | None = 
         mode = str(_read(state, "benchmark_mode", "") or "").strip().lower()
         if mode and mode != "agentx":
             return False
-        epoch = int(_read(state, "agentx_epoch", 0) or 0)
+        epoch = int(_read(state, _AGENTX_EPOCH, 0) or 0)
         if mode == "agentx" and epoch:
             return epoch >= 2
         backend = str(_read(state, "agentx_backend", "") or "").strip().lower()
@@ -86,9 +92,7 @@ def native_agentx_session(state: Any = None, *, env: Mapping[str, str] | None = 
     if str(source.get("HYPERLOOM_AGENTIC_BACKEND", "") or "").strip().lower() == "mlperf":
         return bool(path) and config_enables_native_agentx(path)
     enabled = str(source.get("HYPERLOOM_AGENTX", "") or "").strip().lower()
-    return enabled in {"1", "true", "yes", "on", "enable", "enabled"} or (
-        bool(path) and config_enables_native_agentx(path)
-    )
+    return enabled in _SESSION_ENABLED_VALUES or (bool(path) and config_enables_native_agentx(path))
 
 
 def native_agentx_optimization_session(state: Any = None, *, env: Mapping[str, str] | None = None) -> bool:
@@ -97,7 +101,7 @@ def native_agentx_optimization_session(state: Any = None, *, env: Mapping[str, s
     state = _session_state(state, source)
     if not native_agentx_session(state, env=source):
         return False
-    return state is None or int(_read(state, "agentx_epoch", 0) or 0) >= 3
+    return state is None or int(_read(state, _AGENTX_EPOCH, 0) or 0) >= 3
 
 
 def managed_native_agentx_session(state: Any = None, *, env: Mapping[str, str] | None = None) -> bool:
@@ -106,4 +110,4 @@ def managed_native_agentx_session(state: Any = None, *, env: Mapping[str, str] |
     state = _session_state(state, source)
     if not native_agentx_session(state, env=source):
         return False
-    return state is None or int(_read(state, "agentx_epoch", 0) or 0) >= 4
+    return state is None or int(_read(state, _AGENTX_EPOCH, 0) or 0) >= 4

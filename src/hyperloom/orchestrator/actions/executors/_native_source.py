@@ -15,6 +15,8 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+_UPSERT = "upsert"
+
 
 def source_file_hashes(paths: Sequence[str | Path]) -> dict[str, str]:
     """Bind applied source bytes, refusing missing targets instead of omitting them."""
@@ -43,7 +45,7 @@ def applied_source_evidence(
             operations[str((framework_root / relative).absolute())] = operation
     for artifact in artifacts:
         target = Path(str(artifact["root"])) / str(artifact["rel_target"])
-        operations[str(target.absolute())] = "upsert"
+        operations[str(target.absolute())] = _UPSERT
     if (patches or artifacts) and not operations:
         raise ValueError("Native source transaction did not identify any applied files")
     return _attest_source_operations(operations)
@@ -64,13 +66,13 @@ def _kernel_source_operations(applied: Mapping[str, Any]) -> dict[str, str]:
     backups = manifest.get("source_backups") or []
     if backups:
         return {
-            str(Path(row["path"]).absolute()): "delete" if row.get("disposition") == "deleted" else "upsert"
+            str(Path(row["path"]).absolute()): "delete" if row.get("disposition") == "deleted" else _UPSERT
             for row in backups
         }
     target = applied.get("target_file") or manifest.get("target_file")
     if not target:
         raise ValueError("Native kernel transaction did not record its deployed source paths")
-    return {str(Path(target).absolute()): "upsert"}
+    return {str(Path(target).absolute()): _UPSERT}
 
 
 def warm_source_evidence(params: Mapping[str, Any], output_dir: Path) -> dict[str, Any]:

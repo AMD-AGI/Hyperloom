@@ -505,7 +505,7 @@ duplicated-lines src/hyperloom/inference_optimizer/tests/test_grid_runner.py 131
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_grid_runner_kill_and_branches_unit.py 20
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_kernel_agent_task.py 26
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_kernel_idle_streak.py 26
-duplicated-lines src/hyperloom/inference_optimizer/tests/test_kernel_integrate_and_report.py 174
+duplicated-lines src/hyperloom/inference_optimizer/tests/test_kernel_integrate_and_report.py 134
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_kernel_request_handlers_units.py 92
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_kv_metrics_wiring.py 34
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_lifecycle_wiring.py 179
@@ -533,8 +533,8 @@ duplicated-lines src/hyperloom/inference_optimizer/tests/test_sweep_phase_auto.p
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_trace_edge_coverage.py 114
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_trace_utils.py 114
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_warm_replay.py 34
-duplicated-lines src/hyperloom/inference_optimizer/tests/test_workload_envs.py 402
-duplicated-lines src/hyperloom/inference_optimizer/tests/test_workload_envs_branches_unit.py 403
+duplicated-lines src/hyperloom/inference_optimizer/tests/test_workload_envs.py 372
+duplicated-lines src/hyperloom/inference_optimizer/tests/test_workload_envs_branches_unit.py 375
 duplicated-lines src/hyperloom/orchestrator/actions/executors/tests/test_baseline_eval_fallback.py 144
 duplicated-lines src/hyperloom/orchestrator/actions/executors/tests/test_integrate_patch_artifacts_unit.py 40
 duplicated-lines src/hyperloom/orchestrator/actions/executors/tests/test_integrate_patch_coverage_unit.py 80
@@ -593,7 +593,7 @@ function-lines src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event
 function-lines src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py::record_geak_attempts 102
 function-lines src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py::record_integrate_verdict 89
 function-lines src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/attribution.py::render 85
-function-lines src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/baseline.py::render 134
+function-lines src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/baseline.py::render 133
 function-lines src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/final.py::render 178
 function-lines src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/kernel_lifecycle.py::render 156
 function-lines src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/session.py::render 93
@@ -700,7 +700,7 @@ function-lines src/hyperloom/orchestrator/actions/executors/profile.py::_validat
 function-lines src/hyperloom/orchestrator/actions/executors/report.py::ReportExecutor.__call__ 97
 function-lines src/hyperloom/orchestrator/actions/executors/report.py::_build_summary_dict 86
 function-lines src/hyperloom/orchestrator/actions/executors/report.py::_format_external_baseline_section 82
-function-lines src/hyperloom/orchestrator/actions/executors/report.py::_format_md 150
+function-lines src/hyperloom/orchestrator/actions/executors/report.py::_format_md 147
 function-lines src/hyperloom/orchestrator/actions/executors/report.py::_format_roofline_comparison_section 102
 function-lines src/hyperloom/orchestrator/actions/executors/targeted_build_executor.py::TargetedBuildExecutor.__call__ 102
 function-lines src/hyperloom/orchestrator/actions/executors/trace_analyze.py::_build_trace_analyze_cmd 112
@@ -1063,7 +1063,7 @@ module-lines src/hyperloom/orchestrator/actions/executors/baseline.py 4270
 module-lines src/hyperloom/orchestrator/actions/executors/explore.py 1905
 module-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py 4915
 module-lines src/hyperloom/orchestrator/actions/executors/profile.py 1590
-module-lines src/hyperloom/orchestrator/actions/executors/report.py 1399
+module-lines src/hyperloom/orchestrator/actions/executors/report.py 1398
 module-lines src/hyperloom/orchestrator/actions/executors/roofline.py 1398
 module-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py 2833
 module-lines src/hyperloom/orchestrator/kernel/conc_sweep.py 1429

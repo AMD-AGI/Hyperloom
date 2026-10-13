@@ -20,6 +20,8 @@ from hyperloom.inference_optimizer.grid_server_args import merge_server_args, re
 
 from ._native_source import verify_native_source_imports
 
+_ENCODING = "utf-8"
+
 
 def managed_profile_benchmark(benchmark: Mapping[str, Any]) -> bool:
     """Identify a resolved Magpie-owned diagnostic configuration."""
@@ -62,7 +64,7 @@ def materialize_managed_profile(
         install_native_launch_snapshot(config["benchmark"], snapshot)
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / out_name
-    path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    path.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_ENCODING)
     update_native_candidate_file(path, **candidate)
     return path
 
@@ -76,7 +78,7 @@ def prepare_managed_profile(params: dict[str, Any], state: Any, output_dir: Path
     accepted = str(measurement.get("materialized_config") or getattr(state, "baseline_config_path", "") or "")
     if not accepted:
         raise ValueError("Native diagnostic profiling requires an accepted benchmark configuration")
-    config = yaml.safe_load(Path(accepted).read_text(encoding="utf-8"))
+    config = yaml.safe_load(Path(accepted).read_text(encoding=_ENCODING))
     benchmark = config["benchmark"]
     evidence = measurement.get("agentx_server_launch") or (benchmark.get("workload_spec") or {}).get("server_launch")
     errors = validate_server_launch(benchmark, evidence)
@@ -92,7 +94,7 @@ def prepare_managed_profile(params: dict[str, Any], state: Any, output_dir: Path
     settings: dict[str, Any] = {"enabled": True, "detailed_annotations": True}
     template = params.get("config_path")
     if template and Path(template).resolve() != Path(accepted).resolve():
-        template_benchmark = (yaml.safe_load(Path(template).read_text(encoding="utf-8")) or {}).get("benchmark") or {}
+        template_benchmark = (yaml.safe_load(Path(template).read_text(encoding=_ENCODING)) or {}).get("benchmark") or {}
         settings.update((template_benchmark.get("profiler") or {}).get("torch_profiler") or {})
     settings.update((params.get("profiler") or {}).get("torch_profiler") or {})
     settings.update(params.get("torch_profiler") or {})
@@ -123,7 +125,7 @@ def prepare_managed_profile(params: dict[str, Any], state: Any, output_dir: Path
     )
     output_dir.mkdir(parents=True, exist_ok=True)
     destination = output_dir / "managed_profile.source.yaml"
-    destination.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    destination.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_ENCODING)
     params["config_path"] = str(destination)
     params["native_launch_overrides"] = deepcopy(benchmark["agentx"]["launch_overrides"])
     params["baseline_double_run"] = False
@@ -140,7 +142,7 @@ def project_native_profile(params: dict[str, Any], state: Any) -> None:
     path = str(measurement.get("materialized_config") or getattr(state, "baseline_config_path", "") or "")
     if not path:
         raise ValueError("Native diagnostic profiling requires an accepted benchmark configuration")
-    benchmark = (yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}).get("benchmark") or {}
+    benchmark = (yaml.safe_load(Path(path).read_text(encoding=_ENCODING)) or {}).get("benchmark") or {}
     evidence = measurement.get("agentx_server_launch")
     if not isinstance(evidence, Mapping):
         evidence = (benchmark.get("workload_spec") or {}).get("server_launch")

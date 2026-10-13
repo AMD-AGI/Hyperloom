@@ -11,6 +11,10 @@ from typing import Any
 
 from hyperloom.common.env_safety import BLOCKED_CHILD_ENV_NAMES, valid_env_key
 
+_PATH = "PATH"
+_PYTHONPATH = "PYTHONPATH"
+
+
 log = logging.getLogger(__name__)
 
 
@@ -25,7 +29,7 @@ def is_safe_path_entry(entry: str) -> bool:
 
 
 # Reserved keys carried by dedicated override fields; never accepted via runtime_env.
-RUNTIME_ENV_RESERVED: frozenset[str] = frozenset({"PATH", "PYTHONPATH", "LD_LIBRARY_PATH"})
+RUNTIME_ENV_RESERVED: frozenset[str] = frozenset({_PATH, _PYTHONPATH, "LD_LIBRARY_PATH"})
 
 
 def apply_runtime_override(envs: dict[str, str], override: dict[str, Any]) -> None:
@@ -36,24 +40,24 @@ def apply_runtime_override(envs: dict[str, str], override: dict[str, Any]) -> No
 
     path_prefix = str(override.get("path_prefix") or "").strip()
     if path_prefix:
-        prepend_path(envs, "PATH", path_prefix)
+        prepend_path(envs, _PATH, path_prefix)
     entrypoint_bin = str(override.get("entrypoint_bin_dir") or "").strip()
     if entrypoint_bin:
         if is_safe_path_entry(entrypoint_bin):
-            prepend_path(envs, "PATH", entrypoint_bin)
+            prepend_path(envs, _PATH, entrypoint_bin)
         else:
             log.warning("apply_runtime_override: dropping unsafe entrypoint_bin_dir %r", entrypoint_bin)
     pp_prefix = str(override.get("pythonpath_prefix") or "").strip()
     if pp_prefix:
         if is_safe_path_entry(pp_prefix):
-            prepend_path(envs, "PYTHONPATH", pp_prefix)
+            prepend_path(envs, _PYTHONPATH, pp_prefix)
         else:
             log.warning("apply_runtime_override: dropping unsafe pythonpath_prefix %r", pp_prefix)
     # Multi-entry prefixes: prepend in order so the first entry wins, ahead of any single-dir pythonpath_prefix and
     # the inherited value.
     for entry in reversed(_coerce_prefix_list(override.get("pythonpath_prefixes"))):
         if is_safe_path_entry(entry):
-            prepend_path(envs, "PYTHONPATH", entry)
+            prepend_path(envs, _PYTHONPATH, entry)
         else:
             log.warning("apply_runtime_override: dropping unsafe pythonpath entry %r", entry)
     # Native loader path: prepend attempt entries while preserving any inherited entries (e.g. /opt/rocm/lib).

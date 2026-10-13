@@ -136,6 +136,13 @@ from ._grid_variant_filter import (
     apply_user_skip_list as apply_user_skip_list,
 )
 
+_RUNTIME_OVERRIDE = "runtime_override"
+_REMOVE_ARGS = "remove_args"
+_UNSET_ENVS = "unset_envs"
+_OVERLAY_PYTHONPATH = "overlay_pythonpath"
+_ARGS_MODE = "args_mode"
+_EXTRA_ENVS = "extra_envs"
+
 
 log = logging.getLogger(__name__)
 
@@ -269,7 +276,7 @@ def unsupported_capability_reason(variant: "GridVariant") -> str | None:
     fw = (os.environ.get("FRAMEWORK", "") or "sglang").strip().lower()
     if fw != "vllm":
         return None
-    envs = {str(k): str(v) for k, v in (getattr(variant, "extra_envs", None) or {}).items()}
+    envs = {str(k): str(v) for k, v in (getattr(variant, _EXTRA_ENVS, None) or {}).items()}
     val = envs.get("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS")
     if val is None or not is_truthy(val, default=True):
         return None
@@ -396,26 +403,26 @@ def _build_variant_yaml(
             unsupported.append("variant.extra_server_args")
         if str(base_args_mode or "append").strip().lower() == "replace":
             unsupported.append("base_args_mode=replace")
-        if str(getattr(variant, "args_mode", "append") or "append").strip().lower() == "replace":
+        if str(getattr(variant, _ARGS_MODE, "append") or "append").strip().lower() == "replace":
             unsupported.append("variant.args_mode=replace")
-        if to_str_list(base_remove_args) or to_str_list(getattr(variant, "remove_args", [])):
-            unsupported.append("remove_args")
-        if to_str_list(base_unset_envs) or to_str_list(getattr(variant, "unset_envs", [])):
-            unsupported.append("unset_envs")
+        if to_str_list(base_remove_args) or to_str_list(getattr(variant, _REMOVE_ARGS, [])):
+            unsupported.append(_REMOVE_ARGS)
+        if to_str_list(base_unset_envs) or to_str_list(getattr(variant, _UNSET_ENVS, [])):
+            unsupported.append(_UNSET_ENVS)
         unsupported_envs = sorted(
             {
                 str(key)
-                for mapping in (base_extra_envs or {}, getattr(variant, "extra_envs", {}) or {})
+                for mapping in (base_extra_envs or {}, getattr(variant, _EXTRA_ENVS, {}) or {})
                 for key in mapping
                 if str(key) != "CONC"
             }
         )
         if unsupported_envs:
             unsupported.append("extra_envs=" + ",".join(unsupported_envs))
-        if str(getattr(variant, "overlay_pythonpath", "") or "").strip():
-            unsupported.append("overlay_pythonpath")
-        if getattr(variant, "runtime_override", None):
-            unsupported.append("runtime_override")
+        if str(getattr(variant, _OVERLAY_PYTHONPATH, "") or "").strip():
+            unsupported.append(_OVERLAY_PYTHONPATH)
+        if getattr(variant, _RUNTIME_OVERRIDE, None):
+            unsupported.append(_RUNTIME_OVERRIDE)
         if unsupported and not native_optimizer:
             raise ValueError(
                 "Native AgentX cannot apply Hyperloom grid candidates with "
@@ -442,11 +449,11 @@ def _build_variant_yaml(
             bench,
             extra_server_args=variant.extra_server_args,
             extra_envs=variant.extra_envs,
-            remove_args=getattr(variant, "remove_args", []),
-            unset_envs=getattr(variant, "unset_envs", []),
-            args_mode=getattr(variant, "args_mode", "append"),
-            runtime_override=getattr(variant, "runtime_override", None),
-            overlay_pythonpath=str(getattr(variant, "overlay_pythonpath", "") or ""),
+            remove_args=getattr(variant, _REMOVE_ARGS, []),
+            unset_envs=getattr(variant, _UNSET_ENVS, []),
+            args_mode=getattr(variant, _ARGS_MODE, "append"),
+            runtime_override=getattr(variant, _RUNTIME_OVERRIDE, None),
+            overlay_pythonpath=str(getattr(variant, _OVERLAY_PYTHONPATH, "") or ""),
             source_files=getattr(variant, "native_source_files", None),
             absent_source_files=getattr(variant, "native_absent_source_files", ()),
         )
@@ -465,7 +472,7 @@ def _build_variant_yaml(
         extra_args_env = server_args_env_name(bench.get("framework"))
 
         replacing = str(base_args_mode).strip().lower() == "replace"
-        variant_remove = to_str_list(getattr(variant, "remove_args", []))
+        variant_remove = to_str_list(getattr(variant, _REMOVE_ARGS, []))
         # A replacing base drops the inherited string wholesale, so only the
         # variant's own removals still name flags that survive to be stripped.
         effective_remove = (
@@ -476,7 +483,7 @@ def _build_variant_yaml(
             base_extra_args=base_extra_args,
             variant_extra_args=variant.extra_server_args,
             remove_args=effective_remove,
-            args_mode=getattr(variant, "args_mode", "append"),
+            args_mode=getattr(variant, _ARGS_MODE, "append"),
         )
         # A grid variant never injects a MoE runner backend itself, but it does inherit one -- from the baseline recipe it
         # was seeded with, or from an explicitly authored variant.
@@ -503,7 +510,7 @@ def _build_variant_yaml(
             envs.pop(k, None)
         for k, v in (base_extra_envs or {}).items():
             envs[str(k)] = str(v)
-        for k in getattr(variant, "unset_envs", []) or []:
+        for k in getattr(variant, _UNSET_ENVS, []) or []:
             # Unsetting a pin retargets the benchmark rather than toggling a knob.
             if str(k).strip().upper() in BLOCKED_EXTERNAL_ENV_NAMES:
                 log.warning("grid: refusing to unset pinned env %s for variant %s", k, variant.name)
@@ -521,7 +528,7 @@ def _build_variant_yaml(
             envs.pop(k, None)
         # The three AgentX bounds took this rung's CONC through ``variant_conc`` above, not through this merge: raising
         # the client's grace alone would make the round wait inside a cap that did not move with it.
-        _overlay = str(getattr(variant, "overlay_pythonpath", "") or "").strip()
+        _overlay = str(getattr(variant, _OVERLAY_PYTHONPATH, "") or "").strip()
         if _overlay:
             # Structural containment on the overlay dir before it is prepended to PYTHONPATH: a legitimate authored-kernel
             # overlay is a single existing directory (never a ``:``-joined list, never a ``..`` traversal or control
@@ -543,7 +550,7 @@ def _build_variant_yaml(
 
         # Attempt runtime override: inject path_prefix/pythonpath_prefix/framework_bin etc. into benchmark.envs so the
         # server subprocess resolves the attempt runtime.
-        _rt_override = getattr(variant, "runtime_override", None) or {}
+        _rt_override = getattr(variant, _RUNTIME_OVERRIDE, None) or {}
         if _rt_override:
             apply_runtime_override(envs, _rt_override)
 
@@ -930,8 +937,8 @@ def _resolve_mn_effective_server_args(
                 inherited_args="" if str(base_args_mode).strip().lower() == "replace" else _fallback_inherited_args,
                 base_extra_args=base_extra_args,
                 variant_extra_args=variant.extra_server_args,
-                remove_args=getattr(variant, "remove_args", []),
-                args_mode=getattr(variant, "args_mode", "append"),
+                remove_args=getattr(variant, _REMOVE_ARGS, []),
+                args_mode=getattr(variant, _ARGS_MODE, "append"),
             )
         )
 
@@ -970,7 +977,7 @@ def stopped_by_the_run(returncode: int | None) -> StoppedByTheRun | None:
 
 def variant_conc(variant: Any) -> int | None:
     """The concurrency a variant will run at, or ``None`` when it names none."""
-    raw = (getattr(variant, "extra_envs", None) or {}).get("CONC")
+    raw = (getattr(variant, _EXTRA_ENVS, None) or {}).get("CONC")
     try:
         conc = int(raw)
     except (TypeError, ValueError):
@@ -1548,7 +1555,7 @@ async def run_grid(
 
         try:
             # PD knobs auto-resolved from $PD_* env; PD config stays constant across variants within one run.
-            _variant_unset = [str(k) for k in getattr(variant, "unset_envs", []) or [] if str(k).strip()]
+            _variant_unset = [str(k) for k in getattr(variant, _UNSET_ENVS, []) or [] if str(k).strip()]
             _restart_env = _mn_restart_env(_mn_ref_envs, variant, _variant_unset)
             await restart_server_for_round(
                 extra_server_args=_mn_effective_args,

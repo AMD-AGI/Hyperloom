@@ -38,6 +38,11 @@ from ..session.paths import _SESSION_SKELETON
 from .model_gate import _load_model_arch, _load_model_config_tags
 from ..model_config_utils import summarize_model_config
 
+_SYNTHETIC = "synthetic"
+_NATIVE = "native"
+_AIPERF = "aiperf"
+
+
 log = logging.getLogger(__name__)
 
 
@@ -62,6 +67,8 @@ def resolve_model_display_name(args: argparse.Namespace) -> str:
 # Bump when a change makes previously recorded AgentX measurements incomparable.
 AGENTX_MEASUREMENT_EPOCH = 4
 LEGACY_AGENTX_MEASUREMENT_EPOCH = 1
+_NATIVE_OPTIMIZATION_EPOCH = 3
+_RESEARCH_SCOUT_INTERVAL = 3
 
 
 def resolve_framework_version(args: argparse.Namespace) -> str:
@@ -119,9 +126,9 @@ def agentx_state_is_stale(state: Any) -> str:
     # that case the persisted session is authoritative; only an explicitly
     # supplied HYPERLOOM_AGENTX value is a request to switch modes.
     if raw_mode is None or not raw_mode.strip():
-        want_mode = had_mode or "synthetic"
+        want_mode = had_mode or _SYNTHETIC
     else:
-        want_mode = "agentx" if _agentx_enabled() else "synthetic"
+        want_mode = "agentx" if _agentx_enabled() else _SYNTHETIC
     if had_mode and had_mode != want_mode:
         return (
             f"session was measured in benchmark_mode={had_mode!r} but this run is "
@@ -133,7 +140,7 @@ def agentx_state_is_stale(state: Any) -> str:
 
         had_epoch = int(getattr(state, "agentx_epoch", 0) or 0)
         backend = str(getattr(state, "agentx_backend", "") or "").strip().lower()
-        expected_backends = {"native"} if native_agentx_session(state) else {"legacy", "aiperf", "mlperf"}
+        expected_backends = {_NATIVE} if native_agentx_session(state) else {"legacy", _AIPERF, "mlperf"}
         if backend and backend not in expected_backends:
             return f"session AgentX backend {backend!r} conflicts with its measurement epoch {had_epoch}"
         if had_epoch == LEGACY_AGENTX_MEASUREMENT_EPOCH:
@@ -142,7 +149,7 @@ def agentx_state_is_stale(state: Any) -> str:
             accepted = str(getattr(state, "baseline_config_path", "") or "").strip()
             if accepted and config_enables_native_agentx(accepted):
                 return "session epoch 1 conflicts with its accepted native AgentX baseline"
-        if had_epoch not in {LEGACY_AGENTX_MEASUREMENT_EPOCH, 2, 3, AGENTX_MEASUREMENT_EPOCH}:
+        if had_epoch not in {LEGACY_AGENTX_MEASUREMENT_EPOCH, 2, _NATIVE_OPTIMIZATION_EPOCH, AGENTX_MEASUREMENT_EPOCH}:
             return (
                 f"session carries unsupported AgentX epoch {had_epoch}; the recorded results describe "
                 "a different workload and cannot anchor or be compared against"
@@ -150,11 +157,11 @@ def agentx_state_is_stale(state: Any) -> str:
         from hyperloom.common.agentx_workload import agentic_backend
 
         # A bare resume keeps the recorded client, including the public MLPerf backend.
-        had_backend = ("native" if had_epoch >= 2 else "aiperf") if backend in {"", "legacy"} else backend
+        had_backend = (_NATIVE if had_epoch >= 2 else _AIPERF) if backend in {"", "legacy"} else backend
         explicit_backend = str(os.environ.get("HYPERLOOM_AGENTIC_BACKEND", "") or "").strip()
         want_backend = agentic_backend() if explicit_backend else had_backend
-        if had_backend == "native" and want_backend == "aiperf":
-            want_backend = "native"
+        if had_backend == _NATIVE and want_backend == _AIPERF:
+            want_backend = _NATIVE
         if had_backend != want_backend:
             return (
                 f"session was measured with agentic backend {had_backend!r} but this "
@@ -358,7 +365,7 @@ def _seed_shared_state(
     from hyperloom.common.agentx_mode import native_agentx_session
 
     native_agentx = native_agentx_session()
-    benchmark_mode = "agentx" if native_agentx or _agentx_enabled() else "synthetic"
+    benchmark_mode = "agentx" if native_agentx or _agentx_enabled() else _SYNTHETIC
     _agentx_runtime_pins: dict[str, str] = {}
     _benchmark_source_config_path = ""
     if native_agentx:
@@ -467,7 +474,9 @@ def _seed_shared_state(
         enablement_mode=str(getattr(args, "enablement", "all") or "all"),
         eval_disabled=bool(getattr(args, "no_eval", False)),
         research_scout_enabled=bool(getattr(args, "research_scout", True)),
-        research_scout_interval=max(1, int(getattr(args, "research_scout_interval", 3) or 3)),
+        research_scout_interval=max(
+            1, int(getattr(args, "research_scout_interval", _RESEARCH_SCOUT_INTERVAL) or _RESEARCH_SCOUT_INTERVAL)
+        ),
         static_recon_enabled=bool(getattr(args, "static_recon", True)),
         target_advisory_enabled=bool(getattr(args, "target_advisory", True)),
         recipe_sediment_enabled=bool(getattr(args, "recipe_sediment", True)),
@@ -477,7 +486,7 @@ def _seed_shared_state(
             else not is_agentx_mode(benchmark_mode)
         ),
         benchmark_mode=benchmark_mode,
-        agentx_backend=("native" if native_agentx else agentic_backend() if benchmark_mode == "agentx" else ""),
+        agentx_backend=(_NATIVE if native_agentx else agentic_backend() if benchmark_mode == "agentx" else ""),
         agentx_epoch=(
             AGENTX_MEASUREMENT_EPOCH
             if native_agentx

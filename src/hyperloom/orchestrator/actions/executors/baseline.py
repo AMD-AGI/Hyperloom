@@ -139,6 +139,10 @@ from .benchmark_result import (
 )
 from .benchmark_backend import build_benchmark_command
 
+_BASELINE = "baseline"
+_SKIPPED = "skipped"
+_APPEND = "append"
+
 
 log = logging.getLogger(__name__)
 
@@ -812,7 +816,7 @@ def _resolve_result_dir(output_dir: Path, override_result_dir: str | None) -> Pa
 
 def _should_establish_quality_ref(task_kind: str | None, params: dict[str, Any] | None = None) -> bool:
     """Only a genuine ``baseline`` task may establish/overwrite the quality reference."""
-    if str(task_kind or "") != "baseline":
+    if str(task_kind or "") != _BASELINE:
         return False
     return not (params or {}).get("quality_ref_exempt")
 
@@ -2385,22 +2389,22 @@ class BenchmarkRunExecutor:
         )
         if native_agentx and not native_optimizer and mutation_replay:
             return {
-                "status": "skipped",
+                "status": _SKIPPED,
                 "error_class": "unsupported_upstream_launcher_hook",
                 "error": (
                     "Native AgentX cannot replay source or kernel mutations until "
                     "the pinned InferenceX launcher exposes a fingerprinted "
                     "optimizer hook."
                 ),
-                "output_dir": str(self._resolve_workspace(ctx, "baseline")),
+                "output_dir": str(self._resolve_workspace(ctx, _BASELINE)),
             }
         profile_compat_error = self._agentx_profile_compatibility_error(live_shared_state) if native_agentx else ""
         if profile_compat_error:
             return {
-                "status": "skipped",
+                "status": _SKIPPED,
                 "error_class": "agentx_profile_topology_unsupported",
                 "error": profile_compat_error,
-                "output_dir": str(self._resolve_workspace(ctx, "baseline")),
+                "output_dir": str(self._resolve_workspace(ctx, _BASELINE)),
             }
         fw = str(params.get("framework") or "").strip() or os.environ.get("FRAMEWORK", "").strip()
         if not fw and self._eager_fallback_armed(live_shared_state):
@@ -2427,7 +2431,7 @@ class BenchmarkRunExecutor:
             # eager fallback accurately.
             params["extra_server_args"] = effective_extra_server_args
 
-        output_dir = self._resolve_workspace(ctx, "baseline")
+        output_dir = self._resolve_workspace(ctx, _BASELINE)
         output_dir.mkdir(parents=True, exist_ok=True)
 
         # Warm patches are prepared after config/runtime preflight, immediately before the single final benchmark.
@@ -2490,9 +2494,7 @@ class BenchmarkRunExecutor:
                 extra_envs=None if complete_native_snapshot is not None else base_extra_envs,
                 remove_args=None if complete_native_snapshot is not None else params.get("remove_args"),
                 unset_envs=None if complete_native_snapshot is not None else params.get("unset_envs"),
-                args_mode="append"
-                if complete_native_snapshot is not None
-                else str(params.get("args_mode") or "append"),
+                args_mode=_APPEND if complete_native_snapshot is not None else str(params.get("args_mode") or _APPEND),
                 model_path=resolved_model,
                 gpu_type=resolved_gpu,
                 benchmark_script=override_script,
@@ -2556,7 +2558,7 @@ class BenchmarkRunExecutor:
                 config_path=materialized_config_path,
                 framework=fw,
                 model_path=resolved_model,
-                args_mode=str(params.get("args_mode") or "append"),
+                args_mode=str(params.get("args_mode") or _APPEND),
             )
         effective_inferencex_path, checkout_error = await asyncio.to_thread(
             self._agentx_runtime_checkout,
@@ -3072,7 +3074,7 @@ class BenchmarkRunExecutor:
                         run_accuracy = performance.decision == "KEEP"
                         graded = performance.graded
                         skipped_accuracy = {
-                            "status": "skipped",
+                            "status": _SKIPPED,
                             "reason": (
                                 "intvty_regression"
                                 if graded.graded_on_intvty and graded.verdict == "REVERT"
@@ -3093,7 +3095,7 @@ class BenchmarkRunExecutor:
                             min_tput = 0.0
                         run_accuracy = float(_hot or 0.0) >= min_tput
                         skipped_accuracy = {
-                            "status": "skipped",
+                            "status": _SKIPPED,
                             "reason": "throughput_below_threshold",
                             "minimum_tput": min_tput,
                             "observed_tput": float(_hot or 0.0),

@@ -24,6 +24,24 @@ from hyperloom.common.jsonio import read_json
 
 from ._gpu_metrics import gpu_metrics_from_report, write_gpu_metrics
 
+_AGENTX = "agentx"
+_AGENTIC_CODING = "agentic-coding"
+_OUTPUT_TOKENS_PER_SECOND = "output_tokens_per_second"
+_TOTAL_TOKENS_PER_SECOND = "total_tokens_per_second"
+_DURATION_SECONDS = "duration_seconds"
+_PCP = "pcp"
+_PCP_SIZE_KEY = "pcp-size"
+_PCP_SIZE_ATTR = "pcp_size"
+_GPU_COUNT = "gpu_count"
+_TTFT = "ttft"
+_MEAN = "mean"
+_P50 = "p50"
+_P90 = "p90"
+_P95 = "p95"
+_TPOT = "tpot"
+_TOKENS_PER_SECOND = "tokens_per_second"
+
+
 log = logging.getLogger(__name__)
 
 
@@ -548,7 +566,7 @@ def _merge_raw_result(
         measurement["raw_result_path"] = str(source_path)
     # AgentX scenario verdict.
     if "submission_valid" in raw and "submission_valid" not in measurement:
-        measurement["scenario"] = "agentx"
+        measurement["scenario"] = _AGENTX
         measurement["submission_valid"] = raw.get("submission_valid")
         reasons = raw.get("submission_invalid_reasons") or []
         measurement["submission_invalid_reasons"] = (
@@ -619,9 +637,9 @@ def _native_agentx_explicit_topology_fields(value: Any) -> tuple[dict[str, int],
     aliases = {
         "tp": ("tp",),
         "pp": ("pp",),
-        "pcp": ("pcp_size", "pcp-size", "pcp"),
+        "pcp": (_PCP_SIZE_ATTR, _PCP_SIZE_KEY, _PCP),
         "ep": ("ep",),
-        "gpu_count": ("gpu_count",),
+        "gpu_count": (_GPU_COUNT,),
     }
     fields: dict[str, int] = {}
     for canonical, keys in aliases.items():
@@ -676,7 +694,7 @@ def _set_native_agentx_topology(
         return False
     existing_topology = measurement.get("agentx_gpu_topology")
     if isinstance(existing_topology, dict):
-        for dimension in ("tp", "pp", "pcp", "ep", "gpu_count"):
+        for dimension in ("tp", "pp", _PCP, "ep", _GPU_COUNT):
             if (
                 dimension in existing_topology
                 and dimension in topology
@@ -715,7 +733,7 @@ def _merge_native_agentx_report(
     if not isinstance(raw_throughput, dict):
         schema_errors.append("agentx_metrics.throughput_missing")
     else:
-        for key in ("output_tokens_per_second", "total_tokens_per_second", "duration_seconds"):
+        for key in (_OUTPUT_TOKENS_PER_SECOND, _TOTAL_TOKENS_PER_SECOND, _DURATION_SECONDS):
             if not positive_number(throughput.get(key)):
                 schema_errors.append(f"agentx_metrics.throughput.{key}_invalid")
     if not isinstance(raw_requests, dict):
@@ -765,7 +783,7 @@ def _merge_native_agentx_report(
             schema_errors.append("agentx_metrics.recipe_launch_fingerprint_mismatch")
     if str(metrics.get("mode") or "").strip().lower() not in {"canonical", "fast"}:
         schema_errors.append("agentx_metrics.mode_invalid")
-    if str(metrics.get("scenario_type") or "").strip().lower() != "agentic-coding":
+    if str(metrics.get("scenario_type") or "").strip().lower() != _AGENTIC_CODING:
         schema_errors.append("agentx_metrics.scenario_type_invalid")
     if metrics.get("recipe_fingerprint_valid") is not True:
         schema_errors.append("agentx_metrics.recipe_fingerprint_valid_invalid")
@@ -779,9 +797,9 @@ def _merge_native_agentx_report(
     native_throughput_fields = {
         "request_throughput": "request_throughput",
         "input_throughput": "input_tokens_per_second",
-        "output_throughput": "output_tokens_per_second",
-        "total_token_throughput": "total_tokens_per_second",
-        "duration_seconds": "duration_seconds",
+        "output_throughput": _OUTPUT_TOKENS_PER_SECOND,
+        "total_token_throughput": _TOTAL_TOKENS_PER_SECOND,
+        "duration_seconds": _DURATION_SECONDS,
     }
     for target, source in native_throughput_fields.items():
         value = to_float(throughput.get(source))
@@ -815,16 +833,16 @@ def _merge_native_agentx_report(
     measurement["ttft_p99_ms"] = None
     measurement["e2el_p99_ms"] = None
     for target, metric, stat_name in (
-        ("ttft_mean_ms", "ttft", "mean"),
-        ("ttft_p50_ms", "ttft", "p50"),
-        ("ttft_p90_ms", "ttft", "p90"),
-        ("ttft_p95_ms", "ttft", "p95"),
-        ("tpot_mean_ms", "tpot", "mean"),
-        ("tpot_p50_ms", "tpot", "p50"),
-        ("tpot_p90_ms", "tpot", "p90"),
-        ("tpot_p95_ms", "tpot", "p95"),
-        ("e2el_mean_ms", "e2el", "mean"),
-        ("e2el_p95_ms", "e2el", "p95"),
+        ("ttft_mean_ms", _TTFT, _MEAN),
+        ("ttft_p50_ms", _TTFT, _P50),
+        ("ttft_p90_ms", _TTFT, _P90),
+        ("ttft_p95_ms", _TTFT, _P95),
+        ("tpot_mean_ms", _TPOT, _MEAN),
+        ("tpot_p50_ms", _TPOT, _P50),
+        ("tpot_p90_ms", _TPOT, _P90),
+        ("tpot_p95_ms", _TPOT, _P95),
+        ("e2el_mean_ms", "e2el", _MEAN),
+        ("e2el_p95_ms", "e2el", _P95),
     ):
         value = latency_stat_ms(metric, stat_name)
         if value is not None:
@@ -939,7 +957,7 @@ def _native_distribution(value: Any) -> dict[str, int]:
     if not isinstance(value, dict):
         return {}
     out: dict[str, int] = {}
-    for source, target in (("mean", "avg"), ("p50", "p50"), ("p75", "p75"), ("p90", "p90"), ("p95", "p95")):
+    for source, target in ((_MEAN, "avg"), (_P50, _P50), ("p75", "p75"), (_P90, _P90), (_P95, _P95)):
         parsed = to_float(value.get(source))
         if parsed is not None and math.isfinite(parsed) and parsed >= 0:
             out[target] = int(round(parsed))
@@ -964,7 +982,9 @@ def _native_agentx_raw_matches_report(
         return False
 
     raw_fields, raw_fields_valid = _native_agentx_explicit_topology_fields(raw)
-    raw_has_topology_field = any(key in raw for key in ("tp", "pp", "pcp", "pcp_size", "pcp-size", "ep", "gpu_count"))
+    raw_has_topology_field = any(
+        key in raw for key in ("tp", "pp", _PCP, _PCP_SIZE_ATTR, _PCP_SIZE_KEY, "ep", _GPU_COUNT)
+    )
     if raw_has_topology_field and not raw_fields_valid:
         warnings.append(f"native_agentx_raw_topology_invalid:{source_path}")
         return False
@@ -978,7 +998,7 @@ def _native_agentx_raw_matches_report(
             return False
         expected_topology = measurement.get("agentx_gpu_topology")
         if isinstance(expected_topology, dict):
-            for dimension in ("tp", "pp", "pcp", "ep"):
+            for dimension in ("tp", "pp", _PCP, "ep"):
                 if (
                     dimension in expected_topology
                     and dimension in parsed_raw_topology
@@ -997,7 +1017,7 @@ def _native_agentx_raw_matches_report(
     expected_dimensions = (
         {
             dimension: value
-            for dimension in ("tp", "pp", "pcp")
+            for dimension in ("tp", "pp", _PCP)
             if (value := first_int(expected_topology.get(dimension))) is not None and value > 0
         }
         if isinstance(expected_topology, dict)
@@ -1015,7 +1035,7 @@ def _native_agentx_raw_matches_report(
         return False
 
     assert isinstance(expected_topology, dict)
-    for dimension in ("tp", "pp", "pcp"):
+    for dimension in ("tp", "pp", _PCP):
         if dimension in raw_fields and raw_fields[dimension] != expected_dimensions[dimension]:
             warnings.append(f"native_agentx_raw_topology_mismatch:{source_path}")
             return False
@@ -1046,7 +1066,7 @@ def _merge_native_agentx_raw(
     aggregate retains corpus distributions, cache telemetry, and PCP topology
     that Hyperloom needs for its prompts and per-GPU comparisons.
     """
-    if str(raw.get("scenario_type") or "").strip().lower() != "agentic-coding":
+    if str(raw.get("scenario_type") or "").strip().lower() != _AGENTIC_CODING:
         return False
     if not _native_agentx_raw_matches_report(measurement, raw, source_path=source_path):
         return False
@@ -1271,7 +1291,7 @@ def _validate_native_agentx_protocol(
         ("tp", "tp", "tp", "tp"),
         ("pp", "pp", "pp", "pp"),
         ("ep", "ep", "ep", "ep"),
-        ("pcp", "pcp-size", None, "pcp_size"),
+        (_PCP, _PCP_SIZE_KEY, None, _PCP_SIZE_ATTR),
     ):
         values = [resolved.get(config_key), raw.get(raw_key)]
         if report_key is not None:
@@ -1382,20 +1402,20 @@ def _validate_native_agentx_protocol(
         (
             "input_tokens_per_second",
             strict_number(report_throughput.get("input_tokens_per_second")),
-            nested_metric(raw_throughput, "input", "tokens_per_second"),
+            nested_metric(raw_throughput, "input", _TOKENS_PER_SECOND),
         ),
         (
-            "output_tokens_per_second",
+            _OUTPUT_TOKENS_PER_SECOND,
             strict_number(report_throughput.get("output_tokens_per_second")),
-            nested_metric(raw_throughput, "output", "tokens_per_second"),
+            nested_metric(raw_throughput, "output", _TOKENS_PER_SECOND),
         ),
         (
-            "total_tokens_per_second",
+            _TOTAL_TOKENS_PER_SECOND,
             strict_number(report_throughput.get("total_tokens_per_second")),
-            nested_metric(raw_throughput, "total", "tokens_per_second"),
+            nested_metric(raw_throughput, "total", _TOKENS_PER_SECOND),
         ),
         (
-            "duration_seconds",
+            _DURATION_SECONDS,
             strict_number(report_throughput.get("duration_seconds")),
             strict_number(raw_throughput.get("duration_seconds")),
         ),
@@ -1705,7 +1725,7 @@ def extract_benchmark_measurement(
         "raw_result_path": None,
         "nonfatal_warnings": [],
     }
-    if str(report.get("scenario") or "").strip().lower() == "agentx":
+    if str(report.get("scenario") or "").strip().lower() == _AGENTX:
         measurement["native_agentx_report"] = True
         measurement["native_agentx_schema_valid"] = False
     _merge_native_agentx_report(measurement, report)
@@ -1728,7 +1748,7 @@ def extract_benchmark_measurement(
             if not raw:
                 continue
             if measurement.get("native_agentx_report") is True:
-                if str(raw.get("scenario_type") or "").strip().lower() != "agentic-coding":
+                if str(raw.get("scenario_type") or "").strip().lower() != _AGENTIC_CODING:
                     continue
                 accepted = _merge_native_agentx_raw(measurement, raw, source_path=raw_path)
                 if accepted:
@@ -1778,7 +1798,7 @@ def extract_benchmark_measurement(
             if not raw:
                 continue
             native_report = measurement.get("native_agentx_report") is True
-            native_raw = str(raw.get("scenario_type") or "").strip().lower() == "agentic-coding"
+            native_raw = str(raw.get("scenario_type") or "").strip().lower() == _AGENTIC_CODING
             if native_report and not native_raw:
                 continue
             if native_report and not _native_agentx_raw_matches_report(
@@ -1903,7 +1923,7 @@ def is_valid_measurement(result: dict[str, Any] | None) -> bool:
     # A stray similarly named key on a synthetic result remains inert.
     from hyperloom.common.perf_metric import agentx_enabled
 
-    agentx_result = str(result.get("scenario") or "").strip().lower() == "agentx" or agentx_enabled()
+    agentx_result = str(result.get("scenario") or "").strip().lower() == _AGENTX or agentx_enabled()
     if result.get("native_agentx_report") is True and result.get("native_agentx_schema_valid") is not True:
         return False
     if result.get("native_agentx_report") is True:

@@ -17,6 +17,10 @@ import yaml
 
 from .identity import canonical_sha256, native_workload_fingerprint, verified_workload_fingerprint
 
+_GIT_REV_PARSE = "rev-parse"
+_GIT_HEAD = "HEAD"
+_COMMIT_SHA_PATTERN = "[0-9a-f]{40}"
+
 
 def project_root(path: str | Path) -> Path:
     """Accept a repository root or its packaged InferenceX project."""
@@ -92,7 +96,7 @@ def git_text(root: Path, *args: str) -> str:
 
 
 def head_blob(root: Path, relative: str) -> bytes:
-    prefix = git_text(root, "rev-parse", "--show-prefix")
+    prefix = git_text(root, _GIT_REV_PARSE, "--show-prefix")
     result = subprocess.run(
         ["git", "-C", str(root), "show", f"HEAD:{prefix}{relative}"], capture_output=True, timeout=30, check=False
     )
@@ -103,15 +107,15 @@ def head_blob(root: Path, relative: str) -> bytes:
 
 def aiperf_revision(root: Path) -> str:
     """Verify the harness gitlink inside either supported project layout."""
-    fields = git_text(root, "ls-tree", "HEAD", "utils/aiperf").split()
-    if len(fields) != 4 or fields[0] != "160000" or not re.fullmatch(r"[0-9a-f]{40}", fields[2]):
+    fields = git_text(root, "ls-tree", _GIT_HEAD, "utils/aiperf").split()
+    if len(fields) != 4 or fields[0] != "160000" or not re.fullmatch(_COMMIT_SHA_PATTERN, fields[2]):
         raise ValueError("InferenceX utils/aiperf is not a pinned git submodule")
     dependency = root / "utils/aiperf"
     if not (dependency / "pyproject.toml").is_file():
         raise ValueError("InferenceX utils/aiperf submodule is not initialized")
-    if Path(git_text(dependency, "rev-parse", "--show-toplevel")).resolve() != dependency.resolve():
+    if Path(git_text(dependency, _GIT_REV_PARSE, "--show-toplevel")).resolve() != dependency.resolve():
         raise ValueError("InferenceX utils/aiperf is not its own checkout")
-    if git_text(dependency, "rev-parse", "HEAD") != fields[2]:
+    if git_text(dependency, _GIT_REV_PARSE, _GIT_HEAD) != fields[2]:
         raise ValueError("InferenceX utils/aiperf does not match its pinned gitlink")
     if git_text(dependency, "status", "--porcelain=v1", "--untracked-files=all"):
         raise ValueError("InferenceX utils/aiperf submodule is not clean")
@@ -159,13 +163,13 @@ def execution_identity(
     spec = server_spec(benchmark)
     if spec is None or spec.get("version") != 1 or benchmark.get("benchmark_script") != "srt_agentic.sh":
         raise ValueError("Managed AgentX requires server-launch-spec v1 and srt_agentic.sh")
-    head = git_text(root, "rev-parse", "HEAD")
-    if not re.fullmatch(r"[0-9a-f]{40}", head) or spec.get("client_revision") != head:
+    head = git_text(root, _GIT_REV_PARSE, _GIT_HEAD)
+    if not re.fullmatch(_COMMIT_SHA_PATTERN, head) or spec.get("client_revision") != head:
         raise ValueError("Magpie server launch client revision does not match InferenceX HEAD")
     if expected_ref and expected_ref != head:
         raise ValueError(f"InferenceX HEAD {head} does not match the pinned ref {expected_ref}")
     magpie_commit = str(magpie.get("source_commit") or "")
-    if not re.fullmatch(r"[0-9a-f]{40}", magpie_commit) or not re.fullmatch(
+    if not re.fullmatch(_COMMIT_SHA_PATTERN, magpie_commit) or not re.fullmatch(
         r"[0-9a-f]{64}", str(magpie.get("fingerprint") or "")
     ):
         raise ValueError("Magpie resolver did not provide a valid execution identity")

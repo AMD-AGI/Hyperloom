@@ -45,6 +45,11 @@ from ._inferencex_patcher import (
 from ._xdit_patcher import verify_xdit_profiler_baked
 from .baseline import BenchmarkRunExecutor
 
+_GIT = "git"
+_GIT_REV_PARSE = "rev-parse"
+_GIT_TIMEOUT_SEC = 30
+_AGENTX_CHECKOUT_ERROR = "agentx_profile_checkout_unavailable"
+
 
 log = logging.getLogger(__name__)
 
@@ -913,13 +918,13 @@ class ProfileExecutor(BenchmarkRunExecutor):
         except (OSError, RuntimeError) as exc:
             return inferencex_path, {
                 "status": "failed",
-                "error_class": "agentx_profile_checkout_unavailable",
+                "error_class": _AGENTX_CHECKOUT_ERROR,
                 "error": f"cannot resolve pinned AgentX InferenceX checkout: {exc}",
             }
         if not source.is_dir():
             return inferencex_path, {
                 "status": "failed",
-                "error_class": "agentx_profile_checkout_unavailable",
+                "error_class": _AGENTX_CHECKOUT_ERROR,
                 "error": f"pinned AgentX InferenceX checkout is missing: {source}",
             }
 
@@ -942,13 +947,13 @@ class ProfileExecutor(BenchmarkRunExecutor):
             except (OSError, subprocess.TimeoutExpired) as exc:
                 return None, {
                     "status": "failed",
-                    "error_class": "agentx_profile_checkout_unavailable",
+                    "error_class": _AGENTX_CHECKOUT_ERROR,
                     "error": (f"cannot prepare isolated AgentX profile checkout: {type(exc).__name__}: {exc}"),
                 }
 
         head_proc, git_error = run_git(
-            ["git", "-C", str(source), "rev-parse", "HEAD"],
-            timeout=30,
+            [_GIT, "-C", str(source), _GIT_REV_PARSE, "HEAD"],
+            timeout=_GIT_TIMEOUT_SEC,
         )
         if git_error is not None:
             return inferencex_path, git_error
@@ -957,14 +962,14 @@ class ProfileExecutor(BenchmarkRunExecutor):
         if head_proc.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}", head):
             return inferencex_path, {
                 "status": "failed",
-                "error_class": "agentx_profile_checkout_unavailable",
+                "error_class": _AGENTX_CHECKOUT_ERROR,
                 "error": f"cannot verify pinned AgentX InferenceX checkout at {source}",
             }
         expected = os.environ.get("INFERENCEX_REF", "").strip().lower()
         if re.fullmatch(r"[0-9a-f]{7,40}", expected) and not (head.startswith(expected) or expected.startswith(head)):
             return inferencex_path, {
                 "status": "failed",
-                "error_class": "agentx_profile_checkout_unavailable",
+                "error_class": _AGENTX_CHECKOUT_ERROR,
                 "error": (f"InferenceX HEAD {head} does not match pinned ref {expected}"),
             }
 
@@ -973,7 +978,7 @@ class ProfileExecutor(BenchmarkRunExecutor):
         if isolated.is_symlink():
             return inferencex_path, {
                 "status": "failed",
-                "error_class": "agentx_profile_checkout_unavailable",
+                "error_class": _AGENTX_CHECKOUT_ERROR,
                 "error": (f"isolated InferenceX profile checkout must not be a symbolic link: {isolated}"),
             }
         try:
@@ -982,19 +987,19 @@ class ProfileExecutor(BenchmarkRunExecutor):
         except (OSError, RuntimeError, ValueError) as exc:
             return inferencex_path, {
                 "status": "failed",
-                "error_class": "agentx_profile_checkout_unavailable",
+                "error_class": _AGENTX_CHECKOUT_ERROR,
                 "error": (f"isolated InferenceX profile checkout escapes its output directory: {isolated} ({exc})"),
             }
         if isolated_resolved == source:
             return inferencex_path, {
                 "status": "failed",
-                "error_class": "agentx_profile_checkout_unavailable",
+                "error_class": _AGENTX_CHECKOUT_ERROR,
                 "error": (f"isolated InferenceX profile checkout resolves to the pinned native checkout: {source}"),
             }
         if not isolated.exists():
             clone, git_error = run_git(
                 [
-                    "git",
+                    _GIT,
                     "clone",
                     "--local",
                     "--no-hardlinks",
@@ -1012,11 +1017,11 @@ class ProfileExecutor(BenchmarkRunExecutor):
                 detail = (clone.stderr or clone.stdout or "").strip()
                 return inferencex_path, {
                     "status": "failed",
-                    "error_class": "agentx_profile_checkout_unavailable",
+                    "error_class": _AGENTX_CHECKOUT_ERROR,
                     "error": f"cannot clone isolated InferenceX profile tree: {detail}",
                 }
             checkout, git_error = run_git(
-                ["git", "-C", str(isolated_resolved), "checkout", "--detach", head],
+                [_GIT, "-C", str(isolated_resolved), "checkout", "--detach", head],
                 timeout=120,
             )
             if git_error is not None:
@@ -1026,12 +1031,12 @@ class ProfileExecutor(BenchmarkRunExecutor):
                 detail = (checkout.stderr or checkout.stdout or "").strip()
                 return inferencex_path, {
                     "status": "failed",
-                    "error_class": "agentx_profile_checkout_unavailable",
+                    "error_class": _AGENTX_CHECKOUT_ERROR,
                     "error": f"cannot checkout isolated InferenceX profile tree: {detail}",
                 }
         top_level, git_error = run_git(
-            ["git", "-C", str(isolated_resolved), "rev-parse", "--show-toplevel"],
-            timeout=30,
+            [_GIT, "-C", str(isolated_resolved), _GIT_REV_PARSE, "--show-toplevel"],
+            timeout=_GIT_TIMEOUT_SEC,
         )
         if git_error is not None:
             return inferencex_path, git_error
@@ -1043,15 +1048,15 @@ class ProfileExecutor(BenchmarkRunExecutor):
         if top_level.returncode != 0 or isolated_top != isolated_resolved:
             return inferencex_path, {
                 "status": "failed",
-                "error_class": "agentx_profile_checkout_unavailable",
+                "error_class": _AGENTX_CHECKOUT_ERROR,
                 "error": (
                     "isolated InferenceX profile checkout is not its own git "
                     f"worktree: path={isolated_resolved}, top={isolated_top}"
                 ),
             }
         isolated_head, git_error = run_git(
-            ["git", "-C", str(isolated_resolved), "rev-parse", "HEAD"],
-            timeout=30,
+            [_GIT, "-C", str(isolated_resolved), _GIT_REV_PARSE, "HEAD"],
+            timeout=_GIT_TIMEOUT_SEC,
         )
         if git_error is not None:
             return inferencex_path, git_error
@@ -1064,7 +1069,7 @@ class ProfileExecutor(BenchmarkRunExecutor):
         ):
             return inferencex_path, {
                 "status": "failed",
-                "error_class": "agentx_profile_checkout_unavailable",
+                "error_class": _AGENTX_CHECKOUT_ERROR,
                 "error": (
                     "isolated InferenceX profile checkout is incomplete or at "
                     f"the wrong revision: path={isolated_resolved}, head={isolated_sha or '<unreadable>'}, "
@@ -1073,14 +1078,14 @@ class ProfileExecutor(BenchmarkRunExecutor):
             }
         status, git_error = run_git(
             [
-                "git",
+                _GIT,
                 "-C",
                 str(isolated_resolved),
                 "status",
                 "--porcelain=v1",
                 "--untracked-files=all",
             ],
-            timeout=30,
+            timeout=_GIT_TIMEOUT_SEC,
         )
         if git_error is not None:
             return inferencex_path, git_error
@@ -1090,7 +1095,7 @@ class ProfileExecutor(BenchmarkRunExecutor):
             detail = dirty or (status.stderr or "").strip() or "git status failed"
             return inferencex_path, {
                 "status": "failed",
-                "error_class": "agentx_profile_checkout_unavailable",
+                "error_class": _AGENTX_CHECKOUT_ERROR,
                 "error": (
                     "isolated InferenceX profile checkout is not clean; refusing "
                     f"to reuse stale profiler patches: {detail}"
@@ -1112,7 +1117,7 @@ class ProfileExecutor(BenchmarkRunExecutor):
         except (OSError, ValueError, yaml.YAMLError) as exc:
             return inferencex_path, {
                 "status": "failed",
-                "error_class": "agentx_profile_checkout_unavailable",
+                "error_class": _AGENTX_CHECKOUT_ERROR,
                 "error": f"cannot bind profile config to isolated checkout: {exc}",
             }
         return str(isolated_resolved), None

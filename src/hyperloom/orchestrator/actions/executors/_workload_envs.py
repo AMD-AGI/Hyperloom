@@ -22,7 +22,6 @@ from __future__ import annotations
 
 from hyperloom.common.env import prepend_path
 
-import json
 import logging
 import math
 import os
@@ -35,7 +34,7 @@ from typing import Any, Mapping, NamedTuple
 
 import yaml
 
-from hyperloom.common.coerce import to_float, to_str_list
+from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env import env_bool, env_flag, is_truthy
 from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.common.perf_metric import (
@@ -85,6 +84,17 @@ from hyperloom.inference_optimizer.model_config_utils import (
     _model_is_gemma2,
     _sparse_kv_block_size,
 )
+
+_APPEND = "append"
+_AGENTX_FAILED_REQUEST_THRESHOLD = "AGENTX_FAILED_REQUEST_THRESHOLD"
+_AGENTX_WARMUP_REQUESTS_PER_LANE = "AGENTX_WARMUP_REQUESTS_PER_LANE"
+_WEKA_LOADER_OVERRIDE = "WEKA_LOADER_OVERRIDE"
+_TRUE_VALUE = "true"
+_HYPERLOOM_PROFILER_COMPAT = "hyperloom-profiler-compat"
+_CANONICAL = "canonical"
+_INVALID_AGENTX_CONCURRENCY = "AgentX concurrency must be a positive integer"
+_FAST = "fast"
+
 
 log = logging.getLogger(__name__)
 
@@ -257,7 +267,7 @@ def _is_agentx_client_key(key: str, env: "Mapping[str, str]") -> bool:
     """True for a knob :func:`apply_agentx_switch` forwards to the AgentX client."""
     from hyperloom.common.agentx_workload import BACKEND_ENV, is_mlperf_backend
 
-    if key.startswith("AGENTX_") or key in ("AIPERF_BIN", "WEKA_LOADER_OVERRIDE"):
+    if key.startswith("AGENTX_") or key in ("AIPERF_BIN", _WEKA_LOADER_OVERRIDE):
         return True
     return is_mlperf_backend(env) and (key.startswith(("MLPERF_", "AGENTIC_")) or key == BACKEND_ENV)
 
@@ -278,10 +288,10 @@ _AGENTX_IDENTITY_ENVS = frozenset(
         "AGENTX_CONFIG_FILE",
         "AGENTX_SELECTOR",
         "AGENTX_MODE",
-        "AGENTX_FAILED_REQUEST_THRESHOLD",
+        _AGENTX_FAILED_REQUEST_THRESHOLD,
         "AGENTX_DATASET",
-        "AGENTX_WARMUP_REQUESTS_PER_LANE",
-        "WEKA_LOADER_OVERRIDE",
+        _AGENTX_WARMUP_REQUESTS_PER_LANE,
+        _WEKA_LOADER_OVERRIDE,
     }
 )
 
@@ -449,7 +459,7 @@ def build_agentx_workload_spec(
             "metric_window_s": 0.0,
             "flow": mlperf_flow(envs),
             "port": int(envs.get("PORT") or MLPERF_PORT),
-            "failed_request_threshold": float(client_knob("AGENTX_FAILED_REQUEST_THRESHOLD", 0.10)),
+            "failed_request_threshold": float(client_knob(_AGENTX_FAILED_REQUEST_THRESHOLD, 0.10)),
             "isl_osl_placeholder": isl_osl_placeholder,
         }
 
@@ -487,12 +497,12 @@ def build_agentx_workload_spec(
         # Hyperloom's analyzer window is the canonical duration plus grace/drain.
         "metric_window_s": float(duration) + 40.0,
         "trajectory_start_ratio": [0.25, 0.75],
-        "warmup_requests_per_lane": int(client_knob("AGENTX_WARMUP_REQUESTS_PER_LANE", 10)),
+        "warmup_requests_per_lane": int(client_knob(_AGENTX_WARMUP_REQUESTS_PER_LANE, 10)),
         # Reads back the CONC-scaled value apply_agentx_switch wrote into envs,
         # never the operator's raw AGENTX_WARMUP_GRACE_PERIOD: the client is
         # bounded by the scaled number, so the handoff must publish that one.
         "warmup_grace_period_s": int(client_knob("AGENTX_WARMUP_GRACE_PERIOD", 1800)),
-        "failed_request_threshold": float(client_knob("AGENTX_FAILED_REQUEST_THRESHOLD", 0.10)),
+        "failed_request_threshold": float(client_knob(_AGENTX_FAILED_REQUEST_THRESHOLD, 0.10)),
         "isl_osl_placeholder": isl_osl_placeholder,
     }
 
@@ -500,7 +510,7 @@ def build_agentx_workload_spec(
 def _config_enabled(value: Any) -> bool:
     """Interpret one serialized Magpie ``enabled`` value."""
     if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on", "enable", "enabled"}
+        return value.strip().lower() in {"1", _TRUE_VALUE, "yes", "on", "enable", "enabled"}
     return bool(value)
 
 
@@ -521,7 +531,7 @@ def _agentx_profile_requested(bench: Mapping[str, Any]) -> bool:
     """
     raw_envs = bench.get("envs")
     envs = raw_envs if isinstance(raw_envs, Mapping) else {}
-    if str(envs.get("PROFILE") or "").strip().lower() in {"1", "true", "yes", "on"}:
+    if str(envs.get("PROFILE") or "").strip().lower() in {"1", _TRUE_VALUE, "yes", "on"}:
         return True
     raw_profiler = bench.get("profiler")
     profiler = raw_profiler if isinstance(raw_profiler, Mapping) else {}
@@ -533,96 +543,6 @@ def _agentx_profile_requested(bench: Mapping[str, Any]) -> bool:
     raw_gap = bench.get("gap_analysis")
     gap = raw_gap if isinstance(raw_gap, Mapping) else {}
     return _config_enabled(gap.get("enabled", False))
-
-
-def _agentx_setting(envs: Mapping[str, Any], name: str) -> str:
-    """Resolve one AgentX setting from persisted YAML, then the process."""
-    return str(envs.get(name) or os.environ.get(name) or "").strip()
-
-
-def _native_agentx_config(envs: Mapping[str, Any], existing: Any = None) -> str | dict[str, Any]:
-    """Build Magpie's native AgentX value without erasing YAML-native pins."""
-    existing_config = dict(existing) if isinstance(existing, Mapping) else {}
-    # Hyperloom changes CONC per baseline/grid/sweep round. Magpie gives an
-    # explicit agentx.concurrency precedence over benchmark.envs.CONC, so
-    # carrying a source-YAML value here would make every materialized rung run
-    # the same load while being labelled with a different concurrency.
-    existing_config.pop("concurrency", None)
-    # ``resolved`` describes the previous point.  Magpie will recompute it for
-    # this round after Hyperloom settles CONC; carrying it forward makes a
-    # topology-changing input look pre-resolved when it is not.
-    previous_resolved = existing_config.pop("resolved", None)
-    if not existing_config.get("selector") and isinstance(previous_resolved, Mapping):
-        # A previously unique point can become ambiguous when only CONC
-        # changes (for example GLM's TP4/HiCache and TP8/no-offload arms both
-        # contain CONC=2). Preserve the accepted arm, not its old concurrency,
-        # as an explicit Magpie selector before asking it to resolve the rung.
-        stable_selector_keys = (
-            "tp",
-            "pp",
-            "pcp-size",
-            "ep",
-            "dcp-size",
-            "dp-attn",
-            "spec-decoding",
-            "kv-offloading",
-            "kv-offload-backend",
-        )
-        derived_selector = {key: previous_resolved[key] for key in stable_selector_keys if key in previous_resolved}
-        if derived_selector:
-            existing_config["selector"] = derived_selector
-    mode = _agentx_setting(envs, "AGENTX_MODE").lower() or str(existing_config.get("mode") or "canonical").lower()
-    if mode not in {"canonical", "fast"}:
-        raise ValueError("AGENTX_MODE must be 'canonical' or 'fast'")
-    recipe = _agentx_setting(envs, "AGENTX_RECIPE") or str(existing_config.get("recipe") or "").strip()
-    config_file = _agentx_setting(envs, "AGENTX_CONFIG_FILE") or str(existing_config.get("config_file") or "").strip()
-    selector_raw = _agentx_setting(envs, "AGENTX_SELECTOR")
-    threshold_raw = _agentx_setting(envs, "AGENTX_FAILED_REQUEST_THRESHOLD")
-
-    existing_selector = existing_config.get("selector")
-    selector: dict[str, Any] = dict(existing_selector) if isinstance(existing_selector, Mapping) else {}
-    if selector_raw:
-        try:
-            parsed = json.loads(selector_raw)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"AGENTX_SELECTOR must be a JSON object: {exc}") from exc
-        if not isinstance(parsed, dict):
-            raise ValueError("AGENTX_SELECTOR must be a JSON object")
-        selector = parsed
-
-    if (
-        not existing_config
-        and mode == "canonical"
-        and not recipe
-        and not config_file
-        and not selector
-        and not threshold_raw
-    ):
-        # This is the public, zero-boilerplate Magpie switch the integration is
-        # designed around. Expand to an object only for an explicit override.
-        return "enable"
-
-    config: dict[str, Any] = {**existing_config, "enabled": True, "mode": mode}
-    if recipe:
-        config["recipe"] = recipe
-    if config_file:
-        config["config_file"] = config_file
-    if selector:
-        config["selector"] = selector
-    if threshold_raw:
-        try:
-            threshold = float(threshold_raw)
-        except ValueError as exc:
-            raise ValueError("AGENTX_FAILED_REQUEST_THRESHOLD must be a number between 0 and 1") from exc
-        if not 0.0 <= threshold <= 1.0:
-            raise ValueError("AGENTX_FAILED_REQUEST_THRESHOLD must be between 0 and 1")
-        config["failed_request_threshold"] = threshold
-    elif "failed_request_threshold" in config:
-        configured_threshold = to_float(config["failed_request_threshold"])
-        if configured_threshold is None or not 0.0 <= configured_threshold <= 1.0:
-            raise ValueError("benchmark.agentx.failed_request_threshold must be between 0 and 1")
-        config["failed_request_threshold"] = configured_threshold
-    return config
 
 
 def _native_agentx_local_model_path(model_ref: str) -> str:
@@ -642,7 +562,9 @@ def _native_agentx_local_model_path(model_ref: str) -> str:
 
 def _canonical_agentx_model(envs: Mapping[str, Any], model_path: str) -> str:
     """Resolve the canonical InferenceX model id separately from local weights."""
-    explicit = _agentx_setting(envs, "AGENTX_MODEL_ID")
+    from hyperloom.inference_optimizer.agentx.config import agentx_setting
+
+    explicit = agentx_setting(envs, "AGENTX_MODEL_ID")
     if explicit:
         return explicit
     candidate = str(model_path or "").strip()
@@ -694,7 +616,7 @@ def apply_agentx_switch(
     spec derives both from the environment as before.
     """
     workload = bench.get("workload_spec")
-    native_profile = isinstance(workload, Mapping) and workload.get("harness") == "hyperloom-profiler-compat"
+    native_profile = isinstance(workload, Mapping) and workload.get("harness") == _HYPERLOOM_PROFILER_COMPAT
     native_selected = (
         bool(native_agentx_mode) or _serialized_native_agentx_enabled(bench.get("agentx")) or native_profile
     )
@@ -730,13 +652,13 @@ def apply_agentx_switch(
     resolved_conc: int | None = None
     if conc not in (None, ""):
         if isinstance(conc, bool):
-            raise ValueError("AgentX concurrency must be a positive integer")
+            raise ValueError(_INVALID_AGENTX_CONCURRENCY)
         try:
             resolved_conc = int(conc)
         except (TypeError, ValueError) as exc:
-            raise ValueError("AgentX concurrency must be a positive integer") from exc
+            raise ValueError(_INVALID_AGENTX_CONCURRENCY) from exc
         if resolved_conc <= 0:
-            raise ValueError("AgentX concurrency must be a positive integer")
+            raise ValueError(_INVALID_AGENTX_CONCURRENCY)
         # This is the value the native launcher consumes. Publishing only the
         # workload_spec value would make the result metadata disagree with the
         # actual replay.
@@ -756,8 +678,8 @@ def apply_agentx_switch(
         )
     forbidden_native_corpus_envs = (
         "AGENTX_DATASET",
-        "AGENTX_WARMUP_REQUESTS_PER_LANE",
-        "WEKA_LOADER_OVERRIDE",
+        _AGENTX_WARMUP_REQUESTS_PER_LANE,
+        _WEKA_LOADER_OVERRIDE,
     )
     if native_selected and not profile_compat:
         overridden = [
@@ -775,7 +697,7 @@ def apply_agentx_switch(
     # changing InferenceX's recipe fingerprint.
     for key, value in _agentx_env.items():
         if (not native_selected or profile_compat) and (
-            key.startswith("AGENTX_") or key in ("AIPERF_BIN", "WEKA_LOADER_OVERRIDE")
+            key.startswith("AGENTX_") or key in ("AIPERF_BIN", _WEKA_LOADER_OVERRIDE)
         ):
             if native_selected and key in _AGENTX_IDENTITY_ENVS and str(envs.get(key) or "").strip():
                 continue
@@ -840,11 +762,12 @@ def apply_agentx_switch(
         envs["AGENTX_SERVER_SCRIPT"] = ""
         native = False
     else:
+        from hyperloom.inference_optimizer.agentx.config import agentx_setting, native_agentx_config
         from hyperloom.inference_optimizer.agentx.native import validate_native_launcher_name
 
-        script = _agentx_setting(envs, "AGENTX_SERVER_SCRIPT")
+        script = agentx_setting(envs, "AGENTX_SERVER_SCRIPT")
         validate_native_launcher_name(script)
-        agentx_config = _native_agentx_config(envs, bench.get("agentx"))
+        agentx_config = native_agentx_config(envs, bench.get("agentx"))
         bench["agentx"] = agentx_config
         bench["benchmark_script"] = script
         bench["model"] = canonical_model
@@ -896,15 +819,15 @@ def apply_agentx_switch(
         grading=grading,
     )
     if native_selected:
-        spec["harness"] = "magpie-native-agentx" if native else "hyperloom-profiler-compat"
+        spec["harness"] = "magpie-native-agentx" if native else _HYPERLOOM_PROFILER_COMPAT
     if native:
-        mode = str(bench["agentx"].get("mode") or "canonical") if isinstance(bench["agentx"], dict) else "canonical"
+        mode = str(bench["agentx"].get("mode") or _CANONICAL) if isinstance(bench["agentx"], dict) else _CANONICAL
         # InferenceX owns these values on the native path. Do not advertise
         # legacy AGENTX_DURATION/NUM_ENTRIES knobs that it does not consume.
-        spec["duration_s"] = 1200 if mode == "fast" else 3600
+        spec["duration_s"] = 1200 if mode == _FAST else 3600
         spec["geak_loop_duration_s"] = min(int(spec["duration_s"]), 900)
         spec["num_entries"] = 393
-        spec["warmup_requests_per_lane"] = 1 if mode == "fast" else 10
+        spec["warmup_requests_per_lane"] = 1 if mode == _FAST else 10
         if isinstance(workload, Mapping) and "profile_parent" in workload:
             spec["profile_parent"] = workload["profile_parent"]
     bench["workload_spec"] = spec
@@ -1634,7 +1557,7 @@ def materialize_config_with_envs(
     extra_envs: dict[str, Any] | None = None,
     remove_args: list[str] | tuple[str, ...] | set[str] | str | None = None,
     unset_envs: list[str] | tuple[str, ...] | set[str] | str | None = None,
-    args_mode: str = "append",
+    args_mode: str = _APPEND,
     model_path: str | None = None,
     gpu_type: str | None = None,
     inferencex_path: str | None = None,
@@ -1715,7 +1638,7 @@ def materialize_config_with_envs(
     """
     server_args = (extra_server_args or "").strip()
     operator_server_args = os.environ.get("INFERENCE_OPTIMIZER_SERVER_ARGS", "").strip()
-    replace_args = str(args_mode or "append").strip().lower() == "replace"
+    replace_args = str(args_mode or _APPEND).strip().lower() == "replace"
     if operator_server_args and not replace_args:
         server_args = merge_server_args(operator_server_args, server_args)
     with config_path.open(encoding="utf-8") as f:
@@ -1789,7 +1712,7 @@ def materialize_config_with_envs(
         isinstance(bench.get("workload_spec"), Mapping)
         and str(bench["workload_spec"].get("kind") or "").strip() == "agentx_trace_replay"
     )
-    native_profile_compat = agentx_workload and bench["workload_spec"].get("harness") == "hyperloom-profiler-compat"
+    native_profile_compat = agentx_workload and bench["workload_spec"].get("harness") == _HYPERLOOM_PROFILER_COMPAT
     # Fail fast on framework/script mismatch (e.g. vllm image + sglang script).
     # Only trip when the script carries a DIFFERENT known framework's prefix, so
     # custom/non-prefixed scripts are not falsely rejected.
@@ -1993,7 +1916,7 @@ def materialize_config_with_envs(
                 extra_envs=reference_envs,
                 remove_args=reference_controls.get("remove_args"),
                 unset_envs=reference_controls.get("unset_envs"),
-                args_mode=str(reference_controls.get("args_mode") or "append"),
+                args_mode=str(reference_controls.get("args_mode") or _APPEND),
                 overlay_pythonpath=str(reference_controls.get("overlay_pythonpath") or ""),
             )
             candidate_remove = to_str_list(remove_args)
@@ -2005,7 +1928,7 @@ def materialize_config_with_envs(
                 extra_envs=safe_extra_envs,
                 remove_args=candidate_remove,
                 unset_envs=unset_envs,
-                args_mode="replace" if replace_args else "append",
+                args_mode="replace" if replace_args else _APPEND,
             )
         elif unsupported:
             raise ValueError(
@@ -2685,7 +2608,7 @@ def materialize_config_with_envs(
     # block.
     if "RUN_EVAL" not in envs:
         env_run_eval = os.environ.get("RUN_EVAL")
-        envs["RUN_EVAL"] = env_run_eval if env_run_eval is not None else "true"
+        envs["RUN_EVAL"] = env_run_eval if env_run_eval is not None else _TRUE_VALUE
     # Persist eval task/limit into the YAML so they become part of the
     # fingerprint-able contract and bypass_runner reads them from a stable source.
     _eval_tasks_env = os.environ.get("MAGPIE_EVAL_TASKS", "").strip()

@@ -21,6 +21,9 @@ from hyperloom.common.env import env_flag, is_truthy
 from hyperloom.common.io import safe_mtime
 from hyperloom.common.perf_metric import is_agentx_mode
 
+_PERCENT_SCALE = 100.0
+
+
 log = logging.getLogger(__name__)
 
 ACCURACY_THRESHOLD = 0.05  # allowed deviation
@@ -385,13 +388,13 @@ def _parse_agentx_error_gate(
                     and math.isfinite(float(threshold))
                     and 0.0 <= float(threshold) <= 1.0
                 ):
-                    return 100.0 * float(native_rate), 100.0 * float(threshold)
+                    return _PERCENT_SCALE * float(native_rate), _PERCENT_SCALE * float(threshold)
                 log.warning(
                     "accuracy_gate: native AgentX report %s has an invalid request threshold: %r",
                     path,
                     threshold,
                 )
-                return 100.0 * float(native_rate), None
+                return _PERCENT_SCALE * float(native_rate), None
 
         accounting = data.get("request_accounting")
         if isinstance(accounting, dict):
@@ -416,7 +419,7 @@ def _parse_agentx_error_gate(
                 and errors + successful > 0
             ):
                 return (
-                    100.0 * float(errors) / float(errors + successful),
+                    _PERCENT_SCALE * float(errors) / float(errors + successful),
                     AGENTX_ERROR_RATE_THRESHOLD_PCT,
                 )
     return None, None

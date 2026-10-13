@@ -108,6 +108,9 @@ from ._workload_envs import (
     materialize_config_with_envs,
 )
 
+_OVERLAY_PYTHONPATH = "overlay_pythonpath"
+_ENCODING = "utf-8"
+
 
 log = logging.getLogger(__name__)
 
@@ -126,7 +129,7 @@ _CARRIED_VARIANT_ATTRS: tuple[str, ...] = (
     "provenance",
     "reasoning_origin",
     "scope",
-    "overlay_pythonpath",
+    _OVERLAY_PYTHONPATH,
     "accepted_kernels",
     "kb_evidence",
     "pr_evidence",
@@ -447,7 +450,7 @@ def _config_envs(config_path: Path) -> dict[str, str]:
     which holds the launch argv rather than an env value. Returns an empty dict
     when the file carries no ``benchmark.envs`` mapping.
     """
-    cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    cfg = yaml.safe_load(config_path.read_text(encoding=_ENCODING)) or {}
     bench = cfg.get("benchmark") if isinstance(cfg, Mapping) else None
     envs = bench.get("envs") if isinstance(bench, Mapping) else None
     if not isinstance(envs, Mapping):
@@ -848,7 +851,7 @@ class ExploreExecutor:
             baseline_warm_runtime_sec = 0.0
         # Resolve framework from materialized YAML (for the ledger + the atom seed-grid fallback below).
         try:
-            with config_path.open(encoding="utf-8") as _f:
+            with config_path.open(encoding=_ENCODING) as _f:
                 _cfg = yaml.safe_load(_f) or {}
             framework = str((_cfg.get("benchmark") or {}).get("framework") or "").lower()
             # Pull CONC so the seed grid's cudagraph-bracket variant brackets it.
@@ -982,14 +985,14 @@ class ExploreExecutor:
                 base_unset_envs=base_unset_envs,
                 base_args_mode=base_args_mode,
             )
-            if native_optimizer and (gv.runtime_override or getattr(gv, "overlay_pythonpath", "")):
+            if native_optimizer and (gv.runtime_override or getattr(gv, _OVERLAY_PYTHONPATH, "")):
                 from hyperloom.inference_optimizer.agentx.identity import canonical_sha256
 
                 fp = canonical_sha256(
                     {
                         "config": fp,
                         "runtime_override": gv.runtime_override,
-                        "overlay_pythonpath": getattr(gv, "overlay_pythonpath", ""),
+                        "overlay_pythonpath": getattr(gv, _OVERLAY_PYTHONPATH, ""),
                     }
                 )[:16]
             gv.canonical_fp = fp  # type: ignore[attr-defined]
@@ -1614,7 +1617,7 @@ class ExploreExecutor:
                             effective_control_fields["args_mode"] = "replace"
                         native_snapshot = None
                         if r.native_measurement.get("agentx_launch_contract") == 1:
-                            measured_config = yaml.safe_load(Path(r.materialized_config).read_text(encoding="utf-8"))
+                            measured_config = yaml.safe_load(Path(r.materialized_config).read_text(encoding=_ENCODING))
                             native_snapshot = measured_config["benchmark"]["agentx"]["launch_overrides"]
                             next_stack_args = next_effective_args = shlex.join(native_snapshot.get("append_args") or [])
                             next_envs = dict(native_snapshot.get("env") or {})

@@ -67,6 +67,12 @@ from ..session.paths import (
     workspace_root as _workspace_root_resolve,
 )
 
+_STATE_JSON = "state.json"
+_COMMIT_SHA_PATTERN = "[0-9a-fA-F]{40}"
+_GIT_DEPTH_FLAG = "--depth"
+_SUBMODULE = "submodule"
+
+
 log = logging.getLogger("hyperloom.inference_optimizer.cli")
 
 _PROVIDER_FALLBACK_KEYS: tuple[str, ...] = (
@@ -865,6 +871,10 @@ def _probe_failure_detail(exc: BaseException) -> str:
 # vLLM's platform import costs far more.
 _IMPORT_PROBE_TIMEOUT_SEC = 20
 _ROCM_PROBE_TIMEOUT_SEC = 30
+_GIT_PROBE_TIMEOUT_SEC = 30
+_GIT_FETCH_TIMEOUT_SEC = 600
+_GIT_LOCAL_TIMEOUT_SEC = 60
+_GIB_BYTES = 1024**3
 _VLLM_ROCM_PROBE_TIMEOUT_SEC = 120
 
 
@@ -1246,7 +1256,7 @@ def _resumed_session_state(args: argparse.Namespace | None) -> dict[str, Any] | 
     if not raw:
         return None
     try:
-        state = json.loads((Path(raw).expanduser() / "state.json").read_text(encoding="utf-8"))
+        state = json.loads((Path(raw).expanduser() / _STATE_JSON).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     return state if isinstance(state, dict) else None
@@ -1280,7 +1290,7 @@ def _refuse_resume_without_state(args: argparse.Namespace) -> None:
     if not raw:
         return
     session_dir = Path(raw).expanduser()
-    if not (session_dir / "manifest.json").is_file() or (session_dir / "state.json").exists():
+    if not (session_dir / "manifest.json").is_file() or (session_dir / _STATE_JSON).exists():
         return
     try:
         manifest = json.loads((session_dir / "manifest.json").read_text(encoding="utf-8"))
@@ -1533,9 +1543,9 @@ def _check_shm_disk() -> dict[str, Any]:
             "skip_reason": "shm_unavailable",
             "detail": {"shm_free_gib": None, "min_gib": 16},
         }
-    free_gb = usage.free / (1024**3)
+    free_gb = usage.free / _GIB_BYTES
     if usage.free < _DEV_SHM_MIN_FREE_BYTES:
-        total_gb = usage.total / (1024**3)
+        total_gb = usage.total / _GIB_BYTES
         print(
             f"Preflight: WARNING — /dev/shm has {free_gb:.1f} GiB free of "
             f"{total_gb:.1f} GiB total (< 16 GiB threshold). vLLM IPC + "
@@ -1823,7 +1833,7 @@ def _native_agentx_preflight_requested(
     resume_from = str(getattr(args, "resume_from", "") or "").strip()
     if not resume_from:
         return native_agentx_session()
-    state_path = Path(resume_from).expanduser() / "state.json"
+    state_path = Path(resume_from).expanduser() / _STATE_JSON
     try:
         state = json.loads(state_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, TypeError, ValueError):
@@ -1846,7 +1856,7 @@ def _inferencex_head_sha(path: Path | str) -> str:
             ["git", "-C", str(path), "rev-parse", "HEAD"],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=_GIT_PROBE_TIMEOUT_SEC,
         )
     except (OSError, subprocess.SubprocessError):
         return ""
@@ -1887,7 +1897,7 @@ def _inferencex_checkout_ok(
     if require_agentx_submodule:
         # Native AgentX executes upstream recipe code verbatim, so unlike the
         # legacy compatibility path it must fail closed on an unverifiable pin.
-        if not re.fullmatch(r"[0-9a-fA-F]{40}", ref or ""):
+        if not re.fullmatch(_COMMIT_SHA_PATTERN, ref or ""):
             return False
         head = _inferencex_head_sha(path)
         if not head or head.lower() != ref.lower():
@@ -1900,7 +1910,7 @@ def _inferencex_checkout_ok(
             ["git", "-C", str(root), "ls-tree", "HEAD", "utils/aiperf"],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=_GIT_PROBE_TIMEOUT_SEC,
             check=False,
         )
         fields = (gitlink.stdout or "").strip().split()
@@ -2013,11 +2023,11 @@ def _clone_inferencex(
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
         if re.fullmatch(r"[0-9a-fA-F]{7,40}", ref):
-            subprocess.run(["git", "init", "-q", dest_str], check=True, timeout=60)
+            subprocess.run(["git", "init", "-q", dest_str], check=True, timeout=_GIT_LOCAL_TIMEOUT_SEC)
             subprocess.run(
-                ["git", "-C", dest_str, "fetch", "-q", "--depth", "1", repo, ref],
+                ["git", "-C", dest_str, "fetch", "-q", _GIT_DEPTH_FLAG, "1", repo, ref],
                 check=True,
-                timeout=600,
+                timeout=_GIT_FETCH_TIMEOUT_SEC,
             )
             subprocess.run(
                 ["git", "-C", dest_str, "checkout", "-q", "FETCH_HEAD"],
@@ -2026,9 +2036,9 @@ def _clone_inferencex(
             )
         else:
             subprocess.run(
-                ["git", "clone", "-q", "--depth", "1", "--branch", ref, repo, dest_str],
+                ["git", "clone", "-q", _GIT_DEPTH_FLAG, "1", "--branch", ref, repo, dest_str],
                 check=True,
-                timeout=600,
+                timeout=_GIT_FETCH_TIMEOUT_SEC,
             )
         from ..agentx.managed import project_root
 
@@ -2036,9 +2046,9 @@ def _clone_inferencex(
         submodule = str((project / "utils/aiperf").relative_to(dest))
         if initialize_agentx_submodule:
             subprocess.run(
-                ["git", "-C", dest_str, "submodule", "sync", "--", submodule],
+                ["git", "-C", dest_str, _SUBMODULE, "sync", "--", submodule],
                 check=True,
-                timeout=60,
+                timeout=_GIT_LOCAL_TIMEOUT_SEC,
             )
             try:
                 subprocess.run(
@@ -2046,16 +2056,16 @@ def _clone_inferencex(
                         "git",
                         "-C",
                         dest_str,
-                        "submodule",
+                        _SUBMODULE,
                         "update",
                         "--init",
-                        "--depth",
+                        _GIT_DEPTH_FLAG,
                         "1",
                         "--",
                         submodule,
                     ],
                     check=True,
-                    timeout=600,
+                    timeout=_GIT_FETCH_TIMEOUT_SEC,
                 )
             except subprocess.CalledProcessError:
                 subprocess.run(
@@ -2063,14 +2073,14 @@ def _clone_inferencex(
                         "git",
                         "-C",
                         dest_str,
-                        "submodule",
+                        _SUBMODULE,
                         "update",
                         "--init",
                         "--",
                         submodule,
                     ],
                     check=True,
-                    timeout=600,
+                    timeout=_GIT_FETCH_TIMEOUT_SEC,
                 )
         # ref="" : the tree was just checked out at `ref` by construction, so re-deriving the pin here would only
         # re-read what we wrote.
@@ -2523,7 +2533,7 @@ def _preflight(
     magpie_spec: str | None = None
     magpie_ref = os.environ.get("MAGPIE_REF") or _MAGPIE_REF_DEFAULT
     os.environ["MAGPIE_REF"] = magpie_ref
-    if _native_agentx_preflight_active and not re.fullmatch(r"[0-9a-fA-F]{40}", magpie_ref):
+    if _native_agentx_preflight_active and not re.fullmatch(_COMMIT_SHA_PATTERN, magpie_ref):
         print(
             "Preflight: ERROR — native AgentX requires MAGPIE_REF to be one "
             f"immutable 40-character commit SHA; got {magpie_ref!r}.",
@@ -2630,7 +2640,7 @@ def _preflight(
     # Make the implicit default explicit for the native execution-identity
     # check and for child processes recorded in session provenance.
     os.environ["INFERENCEX_REF"] = _want_ref
-    if _native_agentx_preflight_active and not re.fullmatch(r"[0-9a-fA-F]{40}", _want_ref):
+    if _native_agentx_preflight_active and not re.fullmatch(_COMMIT_SHA_PATTERN, _want_ref):
         print(
             "Preflight: ERROR — native AgentX requires INFERENCEX_REF to be "
             f"one immutable 40-character commit SHA; got {_want_ref!r}.",

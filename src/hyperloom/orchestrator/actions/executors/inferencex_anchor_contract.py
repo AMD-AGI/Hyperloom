@@ -27,6 +27,9 @@ from ._inferencex_patcher import (
     count_anchor_hits,
 )
 
+_ENCODING = "utf-8"
+
+
 REFRESH_CMD = "python scripts/refresh_inferencex_anchor_contract.py"
 _FETCH_TIMEOUT_SEC = 30
 
@@ -63,7 +66,7 @@ def anchors_fingerprint() -> str:
     parts.extend(_magpie_pattern_parts())
     parts.append(json.dumps(_ANCHOR_ALTERNATIVES, sort_keys=True))
     parts.append(json.dumps([_BENCH_SERVING_REL_PARTS, EVAL_PROBE_TARGETS]))
-    return hashlib.sha256("\x1e".join(parts).encode("utf-8")).hexdigest()
+    return hashlib.sha256("\x1e".join(parts).encode(_ENCODING)).hexdigest()
 
 
 def github_slug(clone_url: str) -> str:
@@ -94,7 +97,7 @@ def fetch_pinned_file(rel_path: str, ref: str, checkout: Path | None = None) -> 
         return None
     if proc.returncode != 0:
         return None
-    return proc.stdout.decode("utf-8", errors="replace")
+    return proc.stdout.decode(_ENCODING, errors="replace")
 
 
 def upstream_candidates(paths: tuple[tuple[str, ...], ...]) -> list[str]:
@@ -119,7 +122,7 @@ def build_record(ref: str, checkout: Path | None = None) -> dict:
         hits = count_anchor_hits(text, anchor)
         if hits != 1:
             raise RuntimeError(f"{rel_path} at {ref}: anchor {name} matched {hits} sites, expected exactly one")
-        spec = files.setdefault(rel_path, {"sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(), "anchors": {}})
+        spec = files.setdefault(rel_path, {"sha256": hashlib.sha256(text.encode(_ENCODING)).hexdigest(), "anchors": {}})
         spec["anchors"][name] = hits
     probe_path, probe_text = _fetch_target(EVAL_PROBE_TARGETS, ref, checkout)
     magpie_path, magpie_text = _fetch_target((("benchmarks", "benchmark_lib.sh"),), ref, checkout)
@@ -130,7 +133,7 @@ def build_record(ref: str, checkout: Path | None = None) -> dict:
         "anchors_fingerprint": anchors_fingerprint(),
         "refresh_with": REFRESH_CMD,
         "files": files,
-        "probe_target": {"path": probe_path, "sha256": hashlib.sha256(probe_text.encode("utf-8")).hexdigest()},
+        "probe_target": {"path": probe_path, "sha256": hashlib.sha256(probe_text.encode(_ENCODING)).hexdigest()},
         "magpie_patch": {"path": magpie_path, "applies": True},
     }
 

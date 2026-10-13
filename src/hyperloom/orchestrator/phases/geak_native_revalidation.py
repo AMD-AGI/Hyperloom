@@ -22,6 +22,11 @@ from hyperloom.orchestrator.kernel.geak_config import (
 )
 from hyperloom.orchestrator.state.task_registry import Task
 
+_INTEGRATE_PATCH = "integrate_patch"
+_APPROVE = "approve"
+_ADVISE = "advise"
+
+
 ORIGIN = "geak_native_revalidation"
 
 
@@ -144,7 +149,7 @@ def record_review(coord: Any, pending: Any, *, verdict: str, reasoning: str) -> 
         return True
     saved.update(verdict=verdict, reasoning=reasoning)
     coord.shared_state.geak_pending = {**coord.shared_state.geak_pending, "native_review": saved}
-    if verdict in {"approve", "advise"}:
+    if verdict in {_APPROVE, _ADVISE}:
         coord.shared_state.record_specialist_patch_verdict(str(params["specialist_task_id"]), verdict)
     coord.shared_state.save(coord.session_dir)
     return True
@@ -165,12 +170,12 @@ async def _review(coord: Any, params: dict[str, Any]) -> dict[str, Any]:
 
     digest = params["native_geak_artifact_digest"]
     saved = dict((coord.shared_state.geak_pending or {}).get("native_review") or {})
-    if saved.get("artifact_digest") == digest and saved.get("verdict") in {"approve", "advise"}:
+    if saved.get("artifact_digest") == digest and saved.get("verdict") in {_APPROVE, _ADVISE}:
         return saved
     payload = {
         "action_name": "integrate",
         "predicted_gain_pct": 0.0,
-        "params": {**params, "covered_executor": "integrate_patch"},
+        "params": {**params, "covered_executor": _INTEGRATE_PATCH},
         "rationale": "Review GEAK source patches and their complete serving configuration before canonical native AgentX validation; GEAK proxy scores are not acceptance evidence.",
     }
     message = Message.new("coordinator", "*", "proposal", {**payload, "needs_review": True})
@@ -240,7 +245,7 @@ async def revalidate_source(coord: Any, params: dict[str, Any]) -> None:
     try:
         _verify_artifacts(params)
         review = await _review(coord, params)
-        if review.get("verdict") not in {"approve", "advise"}:
+        if review.get("verdict") not in {_APPROVE, _ADVISE}:
             _finish(
                 coord,
                 review,
@@ -254,7 +259,7 @@ async def revalidate_source(coord: Any, params: dict[str, Any]) -> None:
         return
     task = Task(
         task_id=review["task_id"],
-        kind="integrate_patch",
+        kind=_INTEGRATE_PATCH,
         state="running",
         params=params,
         idempotency_key=f"geak-source-{params['native_geak_artifact_digest']}",
@@ -278,8 +283,8 @@ async def revalidate_source(coord: Any, params: dict[str, Any]) -> None:
     result = await coord.sub.execute_covered(task)
     measurement = result.get("bench_result") or result
     stack_before = len(coord.shared_state.optimization_stack or [])
-    if coord.writeback.is_promotable_result("integrate_patch", result):
-        await coord.writeback.promote_to_shared_state("integrate_patch", result, task=task)
+    if coord.writeback.is_promotable_result(_INTEGRATE_PATCH, result):
+        await coord.writeback.promote_to_shared_state(_INTEGRATE_PATCH, result, task=task)
     else:
         await coord.writeback.handle_unpromotable_result(task, result)
     kept = result.get("status") == "kept" and len(coord.shared_state.optimization_stack or []) > stack_before
