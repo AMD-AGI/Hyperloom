@@ -875,6 +875,19 @@ def test_modification_existing_file_backed_up(tmp_path, monkeypatch):
     assert restore and restore[0]["backup_path"] is not None
 
 
+def test_unprefixed_modification_at_p0_records_one_restore(tmp_path, monkeypatch):
+    """Unprefixed headers, which only apply at -p0, back up their single target for restore."""
+    monkeypatch.setattr(ng.subprocess, "run", lambda cmd, *a, **k: _CP(0 if "-p0" in cmd else 1))
+    target = tmp_path / "target.py"
+    target.write_text("original\n", encoding="utf-8")
+    patch_file = tmp_path / "fix.patch"
+    patch_file.write_text(MODIFY_SAME_PATH_DIFF, encoding="utf-8")
+
+    ok, err, backups, *_ = ng._apply_patch_no_git(tmp_path, patch_file, tmp_path / "bak")
+    assert ok, err
+    assert [(r["target"], r["revert_action"]) for r in backups] == [(str(target.resolve()), "restore")]
+
+
 def test_modification_missing_file_records_delete(tmp_path, monkeypatch):
     """A modification hunk whose target is absent records a delete action."""
     monkeypatch.setattr(ng.subprocess, "run", _fake_ok_run)
