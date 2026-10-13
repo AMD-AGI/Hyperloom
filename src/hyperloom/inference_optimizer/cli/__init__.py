@@ -198,8 +198,8 @@ def _apply_operator_supplied_paths(args: Any, framework: str) -> None:
             os.environ["XDIT_MODEL_NAME"] = xdit_name
         else:
             fatal.append(
-                "--xdit-model-name is required for --framework xdit. "
-                "Pass the xDiT model registry name, e.g. 'FLUX.2-dev' or 'black-forest-labs/FLUX.2-dev'."
+                "--xdit-model-name is required for xDiT runs. "
+                "Pass the HuggingFace repo ID, e.g. 'black-forest-labs/FLUX.2-dev'."
             )
 
     if fatal:
