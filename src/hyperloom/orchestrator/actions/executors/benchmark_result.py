@@ -533,6 +533,16 @@ def _merge_raw_result(
             raw.get("mean_e2el_ms"),
             raw.get("mean_latency_ms"),
         )
+    if measurement.get("e2el_p50_ms") is None:
+        measurement["e2el_p50_ms"] = first_float(
+            raw.get("median_e2el_ms"),
+            raw.get("median_latency_ms"),
+        )
+    if measurement.get("e2el_p90_ms") is None:
+        measurement["e2el_p90_ms"] = first_float(
+            raw.get("p90_e2el_ms"),
+            raw.get("p90_latency_ms"),
+        )
     if measurement.get("e2el_p99_ms") is None:
         measurement["e2el_p99_ms"] = first_float(
             raw.get("p99_e2el_ms"),
