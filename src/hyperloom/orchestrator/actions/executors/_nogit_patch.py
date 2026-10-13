@@ -309,6 +309,20 @@ def _apply_patch_no_git(
             "pre_image_sha256": _file_digest(abs_path),
         }, ""
 
+    def _record_restore(abs_path: Path, rel: Path) -> str:
+        """Back ``abs_path`` up to restore on revert, or record that revert deletes it when it does not exist."""
+        if not abs_path.exists():
+            return _record(
+                {
+                    "target": str(abs_path),
+                    "existed": False,
+                    "backup_path": None,
+                    "revert_action": "delete",
+                }
+            )
+        rec, err = _backup_existing(abs_path, rel, "restore")
+        return err or _record(rec)  # type: ignore[arg-type]
+
     for old_raw, new_raw in patch_file_targets(patch_text):
         is_create = old_raw == _PATCH_DEV_NULL or not old_raw
         is_delete = new_raw == _PATCH_DEV_NULL or not new_raw
@@ -333,25 +347,10 @@ def _apply_patch_no_git(
 
         elif is_delete:
             # Existing file deleted by patch: back it up to restore on revert.
-            if not old_raw or old_raw == _PATCH_DEV_NULL:
-                continue
             rel_old, abs_old, err = _resolve_target(old_raw)
             if err:
                 return _fail(err, backups)
-            if abs_old.exists():
-                rec, err = _backup_existing(abs_old, rel_old, "restore")  # type: ignore[arg-type]
-                if err:
-                    return _fail(err, backups)
-                err = _record(rec)  # type: ignore[arg-type]
-            else:
-                err = _record(
-                    {
-                        "target": str(abs_old),
-                        "existed": False,
-                        "backup_path": None,
-                        "revert_action": "delete",
-                    }
-                )
+            err = _record_restore(abs_old, rel_old)  # type: ignore[arg-type]
             if err:
                 return _fail(err, backups)
 
@@ -383,20 +382,7 @@ def _apply_patch_no_git(
                 if err:
                     return _fail(err, backups)
             else:
-                if abs_old.exists():  # type: ignore[union-attr]
-                    rec, err = _backup_existing(abs_old, rel_old, "restore")  # type: ignore[arg-type]
-                    if err:
-                        return _fail(err, backups)
-                    err = _record(rec)  # type: ignore[arg-type]
-                else:
-                    err = _record(
-                        {
-                            "target": str(abs_old),
-                            "existed": False,
-                            "backup_path": None,
-                            "revert_action": "delete",
-                        }
-                    )
+                err = _record_restore(abs_old, rel_old)  # type: ignore[arg-type]
                 if err:
                     return _fail(err, backups)
 
