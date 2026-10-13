@@ -79,10 +79,10 @@ Either sub-step failing causes the whole `roofline` task to fail:
   `last_profile_trace` **is** updated (profile artifact is still
   valuable) but no `last_trace_analyze` cache.
 
-Profile startup retries use the existing bounded Roofline retry policy.
-TraceLens may also re-analyze the same trace once with an alternate
+The profile runs once; a failed profile is not re-run with the same
+configuration. TraceLens may re-analyze the same trace once with an alternate
 steady-state mode when its first selected chunk is missing, empty, or
-low-quality. If those bounded retries fail, the roofline fails and does not
+low-quality. If that re-analysis fails, the roofline fails and does not
 fall back to the raw, non-steady trace. A failed roofline does not block
 downstream dispatch; later Coordinator refresh conditions may enqueue a fresh
 analysis task.
