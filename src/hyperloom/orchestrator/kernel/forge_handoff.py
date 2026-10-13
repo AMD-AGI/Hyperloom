@@ -14,9 +14,10 @@ from hyperloom.common.env_safety import is_secret_shaped_env_name, redact_secret
 from hyperloom.common.io import WriteOptions, atomic_write_text
 from hyperloom.common.kernel_source_contract import SOURCE_RESOLUTION_FILENAME
 from hyperloom.inference_optimizer.roofline_snapshot import extract_workload_summary
-from hyperloom.inference_optimizer.session.session_paths import forge_handoff_dir
+from hyperloom.inference_optimizer.session.session_paths import forge_handoff_dir, jit_cache_dir
 from hyperloom.orchestrator.kernel.campaign_baseline import campaign_repositories
 from hyperloom.orchestrator.kernel.gemm_shape_coverage import parse_aiter_shape_lookups, traced_gemm_shapes
+from hyperloom.orchestrator.measurement.jit_variants import render_jit_variants, variant_counts
 from hyperloom.orchestrator.measurement.runtime_findings import (
     AITER_TUNED_MISS,
     load_runtime_findings,
@@ -178,8 +179,8 @@ def _evidence_line(label: str, value: Any) -> str:
     return f"- **{label}:** `{path_text}` ({status})"
 
 
-def build_trace_evidence_md(state: Any) -> str:
-    """Render absolute paths to existing trace and TraceLens artifacts."""
+def build_trace_evidence_md(state: Any, *, session_dir: Path | None = None) -> str:
+    """Render absolute paths to existing trace and TraceLens artifacts, and what the session recompiled."""
     analysis = getattr(state, "last_trace_analyze", None)
     analysis = analysis if isinstance(analysis, Mapping) else {}
     candidates_path = _absolute_path(analysis.get("candidates_path"))
@@ -218,7 +219,23 @@ def build_trace_evidence_md(state: Any) -> str:
     lines.extend(["", "## Hot GEMMs Missing Tuned Config", ""])
     profiled = {"launch_evidence_path": str(getattr(state, "last_profile_launch_evidence_path", "") or "")}
     lines.extend(["```text", *_tuned_miss_lines(candidates_path, profiled), "```"])
+    lines.extend(["", "## Recompiled Kernels", ""])
+    lines.extend(_jit_variant_lines(session_dir))
     return "\n".join(lines) + "\n"
+
+
+def _jit_variant_lines(session_dir: Path | None) -> list[str]:
+    """Kernels this session recompiled per call shape, which cost engine stalls no kernel rewrite can recover."""
+    rows = variant_counts(jit_cache_dir(session_dir)) if session_dir is not None else []
+    if not rows:
+        return ["- none above the reporting floor, or the session's JIT cache is not readable"]
+    return [
+        *render_jit_variants(rows),
+        "",
+        "Each first compile stalls the whole engine. A kernel whose variants differ in one constant is "
+        "specialising on a runtime quantity: making that argument runtime rather than `constexpr` removes the "
+        "recompiles without touching what the kernel computes.",
+    ]
 
 
 def _exposed_memcpy_line(analysis_md_path: Any) -> str:
@@ -275,7 +292,7 @@ def write_forge_handoff(
     documents = {
         WORKLOAD_FILENAME: build_workload_md(state),
         SERVING_CONTEXT_FILENAME: build_serving_context_md(state, env_spec, baselines),
-        TRACE_EVIDENCE_FILENAME: build_trace_evidence_md(state),
+        TRACE_EVIDENCE_FILENAME: build_trace_evidence_md(state, session_dir=Path(session_dir)),
     }
     for filename, text in documents.items():
         atomic_write_text(
