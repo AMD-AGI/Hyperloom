@@ -1320,6 +1320,22 @@ def test_a_lane_candidate_that_edits_the_driver_never_reaches_the_tree(
     assert "rejected" in output and "driver.py" in output
 
 
+def test_a_lane_candidate_may_edit_a_declared_target_named_like_a_test(tmp_path, monkeypatch):
+    """A kernel that shares a test_*.py with its tests is still the candidate's to change."""
+    loop, workspace = _reduction_loop(tmp_path, monkeypatch)
+    for name in ("test_flash.py", "test_other.py"):
+        (workspace / name).write_text("def flash():\n    return 1\n")
+    subprocess.run(["git", "add", "-A"], cwd=workspace, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-q", "-m", "colocated tests"], cwd=workspace, check=True, capture_output=True)
+    loop.ic.source_files = [str(workspace / "test_flash.py")]
+
+    declared = _diff_of(workspace, lambda: (workspace / "test_flash.py").write_text("def flash():\n    return 2\n"))
+    sibling = _diff_of(workspace, lambda: (workspace / "test_other.py").write_text("def flash():\n    return 2\n"))
+
+    assert loop._lane_rejection(declared) == ""
+    assert "test_other.py" in loop._lane_rejection(sibling)
+
+
 def test_a_lane_candidate_that_renames_the_driver_away_is_rejected(
     tmp_path,
     monkeypatch,
