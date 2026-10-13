@@ -76,10 +76,12 @@ async def _run(
     disable_cuda_graph: str | None = None,
     profile_params: list[dict[str, Any]] | None = None,
     analysis_payloads: list[dict[str, Any]] | None = None,
+    state: SharedState | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Run one roofline action against scripted sub-steps; return its result and its recorded action.
 
-    ``profile_params`` and ``analysis_payloads``, when given, collect what each sub-step was called with.
+    ``profile_params`` and ``analysis_payloads``, when given, collect what each sub-step was called with; ``state``,
+    when given, is the shared state the action runs against.
     """
     profiles, analyses = list(profiles), list(analyses)
 
@@ -107,8 +109,9 @@ async def _run(
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors.profile.profile_executor", fake_profile)
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors.trace_analyze.trace_analyze_handler", fake_ta)
     monkeypatch.setattr(roofline_mod, "is_multi_node", lambda: multi_node)
-    state = SharedState()
-    state.baseline_tput = 100.0
+    if state is None:
+        state = SharedState()
+        state.baseline_tput = 100.0
     result = await RooflineExecutor(shared_state=state)(_ctx(tmp_path))
     assert profiles == [] and analyses == [], "every scripted sub-step result must be consumed"
     event = next(e for e in read_timeline_events(tmp_path) if e.get("type") == "roofline")
@@ -347,12 +350,14 @@ async def test_an_analysis_that_reports_failure_ends_the_action_on_its_result(tm
 async def test_an_adopted_compute_bound_reprofile_is_the_effective_run_of_both_halves(tmp_path, monkeypatch):
     md = tmp_path / "analysis.md"
     md.write_text("# Executive Summary\n", encoding="utf-8")
+    state = SharedState()
     result, action = await _run(
         tmp_path,
         monkeypatch,
-        [_profile_ok(), _profile_ok(CB_TRACE)],
+        [_profile_ok(), _profile_ok(CB_TRACE, launch_evidence_path="/tmp/rows/cb_launch.json")],
         [_ta_ok(md, host_bound=True), _ta_ok(md, hot=3)],
         multi_node=True,
+        state=state,
     )
 
     assert _rows(action, "profile") == [
@@ -371,6 +376,9 @@ async def test_an_adopted_compute_bound_reprofile_is_the_effective_run_of_both_h
         "reason": "adopted: surfaced 3 hot kernel(s)",
     }
     assert result["last_profile_trace"] == CB_TRACE
+    assert state.last_profile_trace == state.last_trace_analyze["trace_input"] == CB_TRACE
+    assert state.last_profile_launch_evidence_path == "/tmp/rows/cb_launch.json"
+    assert state.last_profile_status == "succeeded"
 
 
 @pytest.mark.asyncio
@@ -438,12 +446,14 @@ async def test_a_compute_bound_reprofile_that_fails_still_rows_its_attempts(
 ):
     md = tmp_path / "analysis.md"
     md.write_text("# Executive Summary\n", encoding="utf-8")
+    state = SharedState()
     result, action = await _run(
         tmp_path,
         monkeypatch,
         [_profile_ok(), *profiles],
         [_ta_ok(md, host_bound=True), *analyses],
         multi_node=True,
+        state=state,
     )
 
     assert _rows(action, "profile") == [
@@ -457,6 +467,7 @@ async def test_a_compute_bound_reprofile_that_fails_still_rows_its_attempts(
     assert action["analysis"]["compute_bound_reprofile"] == {"attempted": True, "adopted": False, "reason": reason}
     assert result["status"] == "succeeded"
     assert result["last_profile_trace"] == TRACE
+    assert state.last_profile_trace == state.last_trace_analyze["trace_input"] == TRACE
 
 
 @pytest.mark.asyncio

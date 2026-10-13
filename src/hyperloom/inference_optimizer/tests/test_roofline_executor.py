@@ -120,6 +120,7 @@ async def test_happy_path_promotes_profile_and_caches_trace_analyze(tmp_path):
     assert state.last_profile_status == "succeeded"
     assert state.last_profile_args == "--mem-fraction-static=0.92"
     assert state.last_profile_workload == state.profile_workload_context(ctx.task.params)
+    assert state.last_trace_analyze["trace_input"] == state.last_profile_trace
     assert state.last_trace_analyze["steady_state_trace"] == ("/tmp/mixed_steady_state.trace.json.gz")
     assert result["steady_state_trace"] == "/tmp/mixed_steady_state.trace.json.gz"
     cached = state.last_trace_analyze
@@ -610,25 +611,91 @@ async def test_profile_returns_non_dict(tmp_path):
     assert "non-dict" in result["error"]
 
 
-@pytest.mark.asyncio
-async def test_trace_analyze_failed_keeps_profile_promote(tmp_path):
-    """trace_analyze failure keeps last_profile_trace but leaves last_trace_analyze empty."""
-    state = _state()
-    ctx = _ctx(tmp_path)
-    ta_failed = {"status": "failed", "error": "tracelens crashed"}
+_NO_STEADY_STATE = {
+    "status": "failed",
+    "error_class": "trace_split_no_steady_state",
+    "error": "no steady-state window in the trace",
+}
 
-    p1, p2 = _patch_subs(_profile_success("/tmp/new.gz"), ta_failed)
-    executor = RooflineExecutor(shared_state=state)
+
+def _seed_profile_record(state: SharedState) -> None:
+    """Leave the record of an earlier roofline whose trace was analysed."""
+    state.last_profile_trace = "/prev/trace.gz"
+    state.last_profile_launch_evidence_path = "/prev/launch_evidence.json"
+    state.last_profile_status = "succeeded"
+    state.record_profile_workload({"base_extra_args": "--prev"}, arm="baseline")
+    state.last_trace_analyze = {"trace_input": "/prev/trace.gz", "analysis_md_text": "prev", "roofline_snapshot_id": 3}
+
+
+def _profile_record(state: SharedState) -> dict:
+    return {
+        "trace": state.last_profile_trace,
+        "launch_evidence": state.last_profile_launch_evidence_path,
+        "status": state.last_profile_status,
+        "workload": dict(state.last_profile_workload),
+        "workload_action": state.last_profile_workload_action,
+        "args": state.last_profile_args,
+        "analysis": dict(state.last_trace_analyze),
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "ta_result",
+    [
+        pytest.param(_NO_STEADY_STATE, id="reported-failure"),
+        pytest.param(ValueError("tracelens crashed"), id="raised"),
+        pytest.param(42, id="non-dict"),
+    ],
+)
+async def test_a_failed_analysis_leaves_the_previous_profile_record_intact(tmp_path, ta_result):
+    """The profile record pairs a trace with its analysis, so a trace whose analysis failed never enters it.
+
+    Recording it as succeeded beside an empty analysis reads as a roofline stuck in trace_analyze, and hands
+    forge-fusion and the kernel freshness checks a trace nothing could analyse.
+    """
+    state = _state()
+    _seed_profile_record(state)
+    previous = _profile_record(state)
+    profile = _profile_success("/tmp/new.gz")
+    profile["launch_evidence_path"] = "/tmp/new_launch_evidence.json"
+
+    p1, p2 = _patch_subs(profile, ta_result)
     with p1, p2:
-        result = await executor(ctx)
+        result = await RooflineExecutor(shared_state=state)(_ctx(tmp_path))
 
     assert result["status"] == "failed"
     assert result["error_class"] == "trace_analyze_failed"
     assert result["phase"] == "trace_analyze"
+    assert _profile_record(state) == previous
 
-    assert state.last_profile_trace == "/tmp/new.gz"
-    assert state.last_profile_status == "succeeded"
-    assert state.last_trace_analyze == {}
+
+@pytest.mark.asyncio
+async def test_a_failed_analysis_still_records_what_the_profile_itself_showed(tmp_path):
+    """The stack verdict, the Kineto backend and the host-side rewrite evidence do not depend on the analysis.
+
+    The verdict in particular is what stops futile re-enqueues, and a zero-kernel trace is exactly the one whose
+    analysis fails.
+    """
+    state = _state()
+    trace = _trace_reporting_backend(tmp_path / "r.trace.json.gz", '  "rocprofiler-sdk_version": 1.3,\n')
+    profile = _profile_success(trace)
+    profile["trace_validate"] = {"verdict": {"measures": {"kernel_count": 0}}}
+    profile["trace_health"] = {"zero_ops": False}
+    profile["framework_rewrite_evidence"] = str(tmp_path / "framework_rewrite_evidence.json")
+    profile["framework_rewrite_evidence_status"] = "ok"
+
+    p1, p2 = _patch_subs(profile, _NO_STEADY_STATE)
+    with p1, p2:
+        result = await RooflineExecutor(shared_state=state)(_ctx(tmp_path))
+
+    assert result["status"] == "failed"
+    assert state.gpu_trace_unsupported_reason.endswith("(Kineto backend: rocprofiler-sdk 1.3)")
+    assert state.stack_fingerprint_meta["kineto_backend"] == "rocprofiler-sdk 1.3"
+    assert state.last_framework_rewrite_evidence == str(tmp_path / "framework_rewrite_evidence.json")
+    assert state.last_framework_rewrite_evidence_status == "ok"
+    assert state.last_profile_trace == ""
+    assert state.last_profile_status == ""
 
 
 @pytest.mark.asyncio
@@ -642,7 +709,7 @@ async def test_trace_analyze_raises_exception(tmp_path):
     assert result["status"] == "failed"
     assert result["error_class"] == "trace_analyze_failed"
     assert "bad payload" in result["error"]
-    assert state.last_profile_trace == "/tmp/t.gz"
+    assert state.last_profile_trace == ""
 
 
 @pytest.mark.asyncio

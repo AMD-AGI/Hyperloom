@@ -32,7 +32,6 @@ def _write_roofline_report(
                 "trace_input_type": "capture_dir",
                 "analysis_md_path": analysis_md_path,
                 "kernel_candidates_path": kernel_candidates_path,
-                "roofline_json_path": "",
                 "kernels": kernels if kernels is not None else [],
             }
         ),

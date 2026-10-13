@@ -287,16 +287,18 @@ async def test_unpromotable_baseline_mixed_classes_stop_after_three_total(
             idempotency_key="bl-mixed",
         )
 
-    subproc = {"status": "failed", "error_class": "subprocess_nonzero", "error": "boom"}
+    # Two different outputs: the identical-failure rule must not be what stops the third call.
+    subproc_a = _nonzero_result("RuntimeError: HIP out of memory")
+    subproc_b = _nonzero_result("ConnectionError: port refused")
     argerr = {"status": "failed", "error_class": "fast_exit_arg_error", "error": "bad arg"}
 
-    await coord.writeback.handle_unpromotable_result(_task(), subproc)
+    await coord.writeback.handle_unpromotable_result(_task(), subproc_a)
     await coord.writeback.handle_unpromotable_result(_task(), argerr)
     assert coord.shared_state.stop_reason not in (
         "baseline_failed",
         "baseline_arg_error",
     )
-    await coord.writeback.handle_unpromotable_result(_task(), subproc)
+    await coord.writeback.handle_unpromotable_result(_task(), subproc_b)
     assert coord.shared_state.baseline_failure_streak == 2
     assert coord.shared_state.baseline_total_failures == 3
     assert coord.shared_state.stop_reason == "baseline_failed"
@@ -1038,3 +1040,220 @@ def test_record_fact_per_variant_keep_revert_skip(coord: Coordinator) -> None:
     by_name = {entry.variant_name: entry.outcome for entry in coord.recipe_journal.ensure_journal().entries}
     # An executor KEEP whose lift did not land adopted nothing.
     assert by_name == {"v1": "KEEP", "v2": "REVERT", "v3": "no_promote"}
+
+
+def _nonzero_result(output: str) -> dict:
+    """A ``subprocess_nonzero`` baseline result shaped the way the baseline executor builds one."""
+    from hyperloom.orchestrator.actions.executors.baseline import nonzero_output_signature
+
+    return {
+        "status": "failed",
+        "error_class": "subprocess_nonzero",
+        "error": output[-2000:],
+        "output_signature": nonzero_output_signature("subprocess_nonzero", "", output),
+    }
+
+
+def _baseline_task(task_id: str) -> Task:
+    return Task(
+        task_id=task_id,
+        kind="baseline",
+        state="running",
+        params={"config_path": "baseline.yaml"},
+        idempotency_key=task_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_unpromotable_baseline_same_failure_twice_stops_at_two(coord: Coordinator) -> None:
+    """Two subprocess_nonzero baselines that printed the same thing (modulo numbers) end the run at two."""
+    first = _nonzero_result("RuntimeError: worker 1234 died at t=17")
+    second = _nonzero_result("RuntimeError: worker 98 died at t=4")
+
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-same-1"), first)
+    assert coord.shared_state.stop_reason != "baseline_failed"
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-same-2"), second)
+    assert coord.shared_state.baseline_failure_streak == 2
+    assert coord.shared_state.stop_reason == "baseline_failed"
+
+
+@pytest.mark.asyncio
+async def test_unpromotable_baseline_different_failures_keep_three_strikes(coord: Coordinator) -> None:
+    """Two different failures are not evidence of a third: the three-strike budget still applies."""
+    a = _nonzero_result("RuntimeError: HIP out of memory")
+    b = _nonzero_result("ConnectionError: port refused")
+
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-diff-1"), a)
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-diff-2"), b)
+    assert coord.shared_state.baseline_failure_streak == 2
+    assert coord.shared_state.stop_reason != "baseline_failed"
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-diff-3"), a)
+    assert coord.shared_state.stop_reason == "baseline_failed"
+
+
+@pytest.mark.asyncio
+async def test_unpromotable_baseline_repeat_of_another_class_keeps_three_strikes(coord: Coordinator) -> None:
+    """Only subprocess_nonzero carries the process's own output; a fixed sentence repeating proves nothing."""
+    result = {"status": "failed", "error_class": "no_report", "error": "benchmark_report.json missing under /x"}
+
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-nr-1"), result)
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-nr-2"), result)
+    assert coord.shared_state.baseline_failure_streak == 2
+    assert coord.shared_state.stop_reason != "baseline_failed"
+
+
+@pytest.mark.asyncio
+async def test_unpromotable_baseline_infeasible_ray_cluster_stops_on_the_first(coord: Coordinator) -> None:
+    """A Ray cluster that cannot place the round fails the same way every time, and no patch changes that."""
+    from hyperloom.orchestrator.actions.executors._ray_serving import RAY_INFEASIBLE_MARKER
+
+    result = {
+        "status": "failed",
+        "error_class": "subprocess_nonzero",
+        "error": f"ray_ensure_error: {RAY_INFEASIBLE_MARKER}: existing Ray head has no serving_slot resource",
+    }
+
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-ray-1"), result)
+
+    assert coord.shared_state.stop_reason == "baseline_failed"
+    # Not handed to the enablement lane as something to author a patch against.
+    assert not (coord.shared_state.enablement.launch_log or "").strip()
+
+
+@pytest.mark.asyncio
+async def test_unpromotable_baseline_infeasible_ray_cluster_stops_in_enablement_too(coord: Coordinator) -> None:
+    from hyperloom.orchestrator.actions.executors._ray_serving import RAY_INFEASIBLE_MARKER
+    from hyperloom.orchestrator.phases.machine_state import PHASE_ENABLEMENT
+
+    coord.shared_state.phase = PHASE_ENABLEMENT
+    result = {
+        "status": "failed",
+        "error_class": "subprocess_nonzero",
+        "error": f"ray_ensure_error: {RAY_INFEASIBLE_MARKER}: cluster has 0.0 GPU(s), 1 requested",
+    }
+
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-ray-en"), result)
+
+    assert coord.shared_state.stop_reason == "baseline_failed"
+
+
+@pytest.mark.asyncio
+async def test_unpromotable_baseline_same_failure_in_enablement_does_not_stop_early(coord: Coordinator) -> None:
+    """An ordinary repeated boot failure is enablement's input; the early stop does not pre-empt the lane."""
+    from hyperloom.orchestrator.phases.machine_state import PHASE_ENABLEMENT
+
+    coord.shared_state.phase = PHASE_ENABLEMENT
+    result = _nonzero_result("ImportError: no module named foo")
+
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-en-1"), result)
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-en-2"), result)
+    assert coord.shared_state.stop_reason != "baseline_failed"
+
+
+_SHARED_TAIL = (
+    "Traceback (most recent call last):\n"
+    + "  File engine.py, in run_engine_core\n    engine.step()\n" * 60
+    + "RuntimeError: engine core died unexpectedly\n"
+)
+
+
+async def _executor_nonzero_result(
+    tmp_path, monkeypatch, name: str, stderr: str, *, workspace: bool, stdout: str = ""
+) -> dict:
+    """Run one baseline round through the executor's real result builder, with only Magpie's process faked."""
+    import types
+
+    from hyperloom.orchestrator.actions.executors import baseline as bl
+    from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
+
+    session = tmp_path / "session"
+    session.mkdir(exist_ok=True)
+    out = tmp_path / name
+    out.mkdir()
+    run_workspace = out / "benchmark_vllm_1" if workspace else None
+    if run_workspace is not None:
+        run_workspace.mkdir()
+    monkeypatch.setattr(bl, "harvest_leaked_artifacts", lambda *a, **k: [])
+    monkeypatch.setattr(bl, "snapshot_workspaces", lambda *a, **k: set())
+    monkeypatch.setattr(bl, "select_run_workspace", lambda *a, **k: run_workspace)
+    monkeypatch.setattr(
+        bl, "run_with_session_kill", lambda cmd, **kw: types.SimpleNamespace(returncode=1, stdout=stdout, stderr=stderr)
+    )
+    cfg = session / "bench.yaml"
+    cfg.write_text("benchmark:\n  framework: vllm\n  model: /tmp/m\n", encoding="utf-8")
+    ex = bl.BaselineExecutor(session_dir=session, magpie_python="/usr/bin/python3")
+    return await ex._run_single_benchmark(
+        config_path=cfg,
+        output_dir=out,
+        timeout_sec=30,
+        override_result_dir=None,
+        resolved_model="/tmp/m",
+        materialized_config_path=cfg,
+        inferencex_path="",
+        effective_extra_server_args="",
+        params={"framework": "vllm"},
+        ctx=RunnerContext(task=_baseline_task(name), lease=None, extra={}),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("workspace", [False, True], ids=["no_workspace", "workspace_without_report"])
+async def test_baseline_executor_signs_the_whole_output_not_the_error_tail(
+    coord: Coordinator, tmp_path, monkeypatch, workspace: bool
+) -> None:
+    """Two causes that end in the same 2000+ characters share an ``error`` but not a signature, so they keep three strikes."""
+    oom = await _executor_nonzero_result(
+        tmp_path, monkeypatch, "oom", "HIP out of memory on device 3\n" + _SHARED_TAIL, workspace=workspace
+    )
+    nccl = await _executor_nonzero_result(
+        tmp_path, monkeypatch, "nccl", "NCCL watchdog timeout after 600s\n" + _SHARED_TAIL, workspace=workspace
+    )
+
+    assert oom["error_class"] == nccl["error_class"] == "subprocess_nonzero"
+    # The executor's own ``error`` is the 2000-character tail, identical for both causes.
+    assert oom["error"] == nccl["error"]
+    assert oom["output_signature"] and nccl["output_signature"]
+    assert oom["output_signature"] != nccl["output_signature"]
+
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-tail-1"), oom)
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-tail-2"), nccl)
+    assert coord.shared_state.baseline_failure_streak == 2
+    assert coord.shared_state.stop_reason != "baseline_failed"
+
+
+@pytest.mark.asyncio
+async def test_baseline_executor_same_output_modulo_numbers_stops_at_two(
+    coord: Coordinator, tmp_path, monkeypatch
+) -> None:
+    first = await _executor_nonzero_result(
+        tmp_path, monkeypatch, "r1", "worker pid 4121 died at 0x7f3a2c\n" + _SHARED_TAIL, workspace=False
+    )
+    second = await _executor_nonzero_result(
+        tmp_path, monkeypatch, "r2", "worker pid 977 died at 0x7f99e0\n" + _SHARED_TAIL, workspace=False
+    )
+
+    assert first["output_signature"] == second["output_signature"] != ""
+
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-same-1"), first)
+    assert coord.shared_state.stop_reason != "baseline_failed"
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-same-2"), second)
+    assert coord.shared_state.stop_reason == "baseline_failed"
+
+
+@pytest.mark.asyncio
+async def test_baseline_executor_signs_stdout_as_well_as_stderr(coord: Coordinator, tmp_path, monkeypatch) -> None:
+    """The same generic stderr over different causes on stdout is two failures, not one."""
+    stderr = "RuntimeError: engine died\n"
+    oom = await _executor_nonzero_result(
+        tmp_path, monkeypatch, "oom", stderr, stdout="HIP out of memory on device 3\n", workspace=False
+    )
+    nccl = await _executor_nonzero_result(
+        tmp_path, monkeypatch, "nccl", stderr, stdout="NCCL watchdog timeout after 600s\n", workspace=False
+    )
+
+    assert oom["error"] == nccl["error"]
+    assert oom["output_signature"] != nccl["output_signature"]
+
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-out-1"), oom)
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-out-2"), nccl)
+    assert coord.shared_state.stop_reason != "baseline_failed"

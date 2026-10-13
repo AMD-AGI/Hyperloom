@@ -451,6 +451,14 @@ class _AnalysisOutcome:
 
 
 @dataclass(frozen=True)
+class _AnalysedProfile:
+    """A profile and the successful analysis of its trace: shared state only ever records the two together."""
+
+    profile: _ProfileOutcome
+    analysis: _AnalysisOutcome
+
+
+@dataclass(frozen=True)
 class _ProfileArm:
     """The configuration every profile attempt of one action runs under.
 
@@ -901,18 +909,17 @@ class RooflineExecutor:
         profiled = await self._profile_until_usable(ctx, recorder, arm)
         if not isinstance(profiled, _ProfileOutcome):
             return profiled
+        self._record_profile_findings(profiled)
         payload = _analysis_payload(ctx.task.params or {}, trace_path=profiled.trace_path, framework=arm.framework)
-        self._promote_profile(ctx, profiled, roofline_arm=payload["roofline_arm"])
 
         analysis = await self._analyze(ctx, recorder, payload)
         if not isinstance(analysis, _AnalysisOutcome):
             return analysis
         attribution_degraded = _flag_attribution_degraded(analysis.result, profiled.result)
+        analysed = _AnalysedProfile(profiled, analysis)
         if _wants_compute_bound_reprofile(analysis.result):
-            analysis = await self._compute_bound_reprofile(ctx, recorder, arm, analysis) or analysis
-        return self._conclude(
-            ctx, recorder, profiled, analysis, attribution_degraded=attribution_degraded, started=started
-        )
+            analysed = await self._compute_bound_reprofile(ctx, recorder, arm, analysis) or analysed
+        return self._conclude(ctx, recorder, analysed, attribution_degraded=attribution_degraded, started=started)
 
     async def _profile_until_usable(
         self, ctx: RunnerContext, recorder: Any, arm: _ProfileArm
@@ -944,15 +951,11 @@ class RooflineExecutor:
             return captured
         return _fail(recorder, unusable.stage, unusable.message, returned)
 
-    def _promote_profile(self, ctx: RunnerContext, profiled: _ProfileOutcome, *, roofline_arm: str) -> None:
-        """Promote the adopted profile onto shared state: its trace, workload, Kineto backend and rewrite evidence."""
+    def _record_profile_findings(self, profiled: _ProfileOutcome) -> None:
+        """Record what the profile shows regardless of its analysis: Kineto backend, stack verdict, rewrite evidence."""
         from ._framework_rewrite_evidence import promote_evidence_path
 
         state = self.shared_state
-        state.last_profile_trace = str(profiled.trace_path)
-        state.last_profile_launch_evidence_path = str(profiled.result.get("launch_evidence_path") or "")
-        state.last_profile_status = "succeeded"
-        state.record_profile_workload(profiled.params or ctx.task.params or {}, arm=roofline_arm)
         backend = detect_kineto_backend(profiled.trace_path)
         if backend:
             fingerprint = dict(state.stack_fingerprint_meta or {})
@@ -993,10 +996,7 @@ class RooflineExecutor:
             hint = _extract_steady_state_retry_mode(analysis.result)
             if hint is not None:
                 analysis = await self._n26_retry(ctx, recorder, payload, *hint)
-        if not isinstance(analysis, _AnalysisOutcome):
-            return analysis
-        if analysis.result.get("status") != "ok":
-            self.shared_state.last_trace_analyze = {}
+        if isinstance(analysis, _AnalysisOutcome) and analysis.result.get("status") != "ok":
             error = str(analysis.result.get("error") or "trace_analyze sub-step failed")
             return _fail(recorder, "trace_analyze", error, analysis.result)
         return analysis
@@ -1098,8 +1098,6 @@ class RooflineExecutor:
                 return _AnalysisOutcome(payload=payload, result=result, run_index=run_index)
             error_class = "bad_return"
             message = f"trace_analyze_handler returned non-dict{context}: {type(result).__name__}"
-        # Clear the cache so the prompt shows no snapshot rather than advice tied to the previous trace.
-        self.shared_state.last_trace_analyze = {}
         log.error("roofline: %s", message)
         failure = {"stage": "trace_analyze", "error_class": error_class, "message": message}
         _end_analysis_run(recorder, run_index, payload, status="failed", failure=failure)
@@ -1107,8 +1105,8 @@ class RooflineExecutor:
 
     async def _compute_bound_reprofile(
         self, ctx: RunnerContext, recorder: Any, arm: _ProfileArm, analysis: _AnalysisOutcome
-    ) -> _AnalysisOutcome | None:
-        """Re-profile a host-bound trace once with DP attention stripped; return the analysis to adopt, or ``None``.
+    ) -> _AnalysedProfile | None:
+        """Re-profile a host-bound trace once with DP attention stripped; return the pair to adopt, or ``None``.
 
         Fail-soft: whatever goes wrong, the original analysis stands.
         """
@@ -1120,7 +1118,7 @@ class RooflineExecutor:
         )
         previous = os.environ.get(_COMPUTE_BOUND_PROFILE_ENV)
         os.environ[_COMPUTE_BOUND_PROFILE_ENV] = "1"
-        adopted: _AnalysisOutcome | None = None
+        adopted: _AnalysedProfile | None = None
         outcome = "re-profile produced no usable trace"
         try:
             adopted, outcome = await self._compute_bound_attempt(ctx, recorder, arm, analysis.payload)
@@ -1138,8 +1136,8 @@ class RooflineExecutor:
 
     async def _compute_bound_attempt(
         self, ctx: RunnerContext, recorder: Any, arm: _ProfileArm, payload: dict[str, Any]
-    ) -> tuple[_AnalysisOutcome | None, str]:
-        """Profile and analyse once under the compute-bound override; return the analysis to adopt and why."""
+    ) -> tuple[_AnalysedProfile | None, str]:
+        """Profile and analyse once under the compute-bound override; return the pair to adopt and why."""
         session_dir = self._resolve_session_dir(ctx)
         cb_ctx = self._wrap_profile_ctx(ctx, disable_cuda_graph=arm.disable_cuda_graph, framework=arm.framework)
         profile_run, cb_profile = await _compute_bound_profile(recorder, session_dir, arm, cb_ctx)
@@ -1163,27 +1161,28 @@ class RooflineExecutor:
             len(cb_hot),
         )
         params = dict(cb_ctx.task.params or {})
-        self.shared_state.last_profile_trace = cb_trace
-        self.shared_state.last_profile_launch_evidence_path = str(cb_profile.get("launch_evidence_path") or "")
-        self.shared_state.record_profile_workload(params, arm=payload["roofline_arm"])
         if recorder is not None:
             recorder.adopt_profile_run(run_index=profile_run, profile_result=cb_profile, params=params)
-        return analysis, f"adopted: surfaced {len(cb_hot)} hot kernel(s)"
+        profile = _ProfileOutcome(result=cb_profile, trace_path=cb_trace, warning=None, params=params)
+        return _AnalysedProfile(profile, analysis), f"adopted: surfaced {len(cb_hot)} hot kernel(s)"
 
     def _conclude(
         self,
         ctx: RunnerContext,
         recorder: Any,
-        profiled: _ProfileOutcome,
-        analysis: _AnalysisOutcome,
+        analysed: _AnalysedProfile,
         *,
         attribution_degraded: bool,
         started: float,
     ) -> dict[str, Any]:
-        """Cache the analysis the action concluded from, close the event as succeeded and build the result."""
+        """Record the pair the action concluded from, close the event as succeeded and build the result."""
+        profile, analysis = analysed.profile, analysed.analysis
         trace_path = str(analysis.payload["trace_input"])
         hot = _hot_kernels(analysis.result)
-        # Cache via the C1 recorder (bumps roofline_snapshot_id by one, writes analysis_md_text / analysis_md_path).
+        self.shared_state.last_profile_trace = trace_path
+        self.shared_state.last_profile_launch_evidence_path = str(profile.result.get("launch_evidence_path") or "")
+        self.shared_state.last_profile_status = "succeeded"
+        self.shared_state.record_profile_workload(profile.params, arm=analysis.payload["roofline_arm"])
         self.shared_state.record_trace_analyze(analysis.payload, analysis.result)
         cached = self.shared_state.last_trace_analyze or {}
         if recorder is not None:
@@ -1208,14 +1207,14 @@ class RooflineExecutor:
             "steady_state_trace": cached.get("steady_state_trace", ""),
             "analysis_md_path": cached.get("analysis_md_path", ""),
             "kernel_roofline_path": cached.get("kernel_roofline_path", ""),
-            "profile_workspace": profiled.result.get("workspace"),
+            "profile_workspace": profile.result.get("workspace"),
             # True when trace_analyze produced 0 hot kernels because cuda-graph folding stripped per-kernel
             # attribution.
             "kernel_attribution_degraded": attribution_degraded,
         }
-        if profiled.warning is not None:
+        if profile.warning is not None:
             result["profile_recovered"] = True
-            result["profile_warning"] = profiled.warning
+            result["profile_warning"] = profile.warning
         if recorder is not None:
             snapshots = self.shared_state.roofline_snapshots
             recorder.finish_succeeded(

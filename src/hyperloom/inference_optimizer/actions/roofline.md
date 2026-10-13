@@ -76,8 +76,9 @@ Either sub-step failing causes the whole `roofline` task to fail:
   `error_class=profile_failed`; no `last_profile_trace` update.
 * `trace_analyze` failure (after profile succeeded) →
   `roofline.status=failed` with `error_class=trace_analyze_failed`;
-  `last_profile_trace` **is** updated (profile artifact is still
-  valuable) but no `last_trace_analyze` cache.
+  `last_profile_trace` and `last_trace_analyze` keep the previous
+  successful pair, because a trace is recorded only together with its
+  analysis.
 
 The profile runs once; a failed profile is not re-run with the same
 configuration. TraceLens may re-analyze the same trace once with an alternate
