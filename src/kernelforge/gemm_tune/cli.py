@@ -289,6 +289,12 @@ def _exit_failed(output_dir: Path, *, error: str, error_class: str) -> NoReturn:
     raise SystemExit(2)
 
 
+# Named once because both commands declare them and the path check names them back.
+OPT_UNTUNED_CSV = "--untuned-csv"
+OPT_SHAPES_MANIFEST = "--shapes-manifest"
+OPT_DEMAND = "--demand"
+
+
 def _existing_file_or_blank(value: str, option: str) -> str:
     """A path option's value, or blank when it does not name an existing file."""
     if value and not _safe_is_file(value):
@@ -490,7 +496,7 @@ def gemm_tune():
     type=int,
     help="Run at most this many of the routed tuners, in priority order. 0 means uncapped.",
 )
-@click.option("--untuned-csv", default="", help="Input untuned CSV for dense aiter tuners")
+@click.option(OPT_UNTUNED_CSV, default="", help="Input untuned CSV for dense aiter tuners")
 @click.option(
     "--moe-untuned-csv",
     default="",
@@ -498,12 +504,12 @@ def gemm_tune():
 )
 @click.option("--shapes-json", default="", help="Input shapes JSON from TraceLens/Hyperloom")
 @click.option(
-    "--shapes-manifest",
+    OPT_SHAPES_MANIFEST,
     default="",
     help="Weighted TraceShapeManifest JSON (Hyperloom WP-1); preferred dense-shape source when set",
 )
 @click.option(
-    "--demand",
+    OPT_DEMAND,
     "demand_json",
     default="",
     help="demand.json from a serving log (kernelforge gemm-tune evidence); the highest-priority shape source",
@@ -565,10 +571,10 @@ def run(
 
     # Defensive input normalization: callers sometimes pass inline JSON content instead of a file path.
     shapes_json = _normalize_inline_shapes_json(shapes_json, output_path)
-    untuned_csv = _existing_file_or_blank(untuned_csv, "--untuned-csv")
+    untuned_csv = _existing_file_or_blank(untuned_csv, OPT_UNTUNED_CSV)
     moe_untuned_csv = _existing_file_or_blank(moe_untuned_csv, "--moe-untuned-csv")
-    shapes_manifest = _existing_file_or_blank(shapes_manifest, "--shapes-manifest")
-    demand_json = _existing_file_or_blank(demand_json, "--demand")
+    shapes_manifest = _existing_file_or_blank(shapes_manifest, OPT_SHAPES_MANIFEST)
+    demand_json = _existing_file_or_blank(demand_json, OPT_DEMAND)
 
     # The serving log is already handed to us for MoE stage detection, and it is the same log the demand parser reads.
     if not demand_json and kernel_signature_log and _safe_is_file(kernel_signature_log):
@@ -829,10 +835,10 @@ def evidence(logs: tuple[str, ...], out: str, verbose: bool):
 @click.option("--quant-type", default="auto")
 @click.option("--gpu-type", default="auto", help="GPU type: auto (detect via rocminfo), mi300x, mi355x, gfx942, ...")
 @click.option("--kernel-signature-log", default="")
-@click.option("--untuned-csv", default="")
+@click.option(OPT_UNTUNED_CSV, default="")
 @click.option("--shapes-json", default="")
-@click.option("--shapes-manifest", default="", help="Weighted TraceShapeManifest JSON (Hyperloom WP-1)")
-@click.option("--demand", "demand_json", default="", help="demand.json from `evidence`")
+@click.option(OPT_SHAPES_MANIFEST, default="", help="Weighted TraceShapeManifest JSON (Hyperloom WP-1)")
+@click.option(OPT_DEMAND, "demand_json", default="", help="demand.json from `evidence`")
 @click.option("--tunableop-input", default="")
 def plan(
     model_path: str,
