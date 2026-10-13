@@ -2966,6 +2966,8 @@ async def test_a_source_patch_over_the_power_budget_is_reverted(
     monkeypatch.setattr(ip_mod, "materialize_config_with_envs", lambda *_args, **_kwargs: config_path)
     monkeypatch.setattr(_ray_serving, "maybe_serving_lease", lambda **_kwargs: None)
     state = SimpleNamespace(
+        phase="FRAMEWORK_AGENT",
+        enablement=EnablementRound(),
         framework="custom",
         benchmark_mode="synthetic",
         power_budget_w=700.0,
