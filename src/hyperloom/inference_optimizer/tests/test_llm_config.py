@@ -973,6 +973,61 @@ async def test_aanthropic_messages_raises_on_non_dict_body():
         await aanthropic_messages(client, model="claude")
 
 
+class _FakeClosingTransport(_FakeAnthropicTransport):
+    def __enter__(self) -> Any:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+
+class _FakeAsyncClosingTransport(_FakeAsyncAnthropicTransport):
+    async def __aenter__(self) -> Any:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        return None
+
+
+def _record_anthropic_client_timeouts(monkeypatch: pytest.MonkeyPatch) -> list[object]:
+    seen: list[object] = []
+
+    def builder(transport: type[_FakeAnthropicTransport]) -> Any:
+        def build(*, env: Any = None, timeout: object | None = None) -> Any:
+            seen.append(timeout)
+            return transport(_FakeAnthropicResponse(body=_MESSAGE_BODY))
+
+        return build
+
+    monkeypatch.setattr(llm_config, "get_anthropic_client", builder(_FakeClosingTransport))
+    monkeypatch.setattr(llm_config, "get_async_anthropic_client", builder(_FakeAsyncClosingTransport))
+    return seen
+
+
+def test_a_one_shot_http_completion_waits_the_callers_timeout_s(monkeypatch):
+    seen = _record_anthropic_client_timeouts(monkeypatch)
+    llm_config.anthropic_completion(model="m", messages=[], max_tokens=16, env={_ANTHROPIC_KEY: "k"}, timeout_s=60.0)
+    assert seen == [60.0]
+
+
+@pytest.mark.asyncio
+async def test_an_async_one_shot_http_completion_waits_the_callers_timeout_s(monkeypatch):
+    seen = _record_anthropic_client_timeouts(monkeypatch)
+    await llm_config.aanthropic_completion(
+        model="m", messages=[], max_tokens=16, env={_ANTHROPIC_KEY: "k"}, timeout_s=60.0
+    )
+    assert seen == [60.0]
+
+
+def test_an_explicit_http_timeout_outranks_timeout_s(monkeypatch):
+    seen = _record_anthropic_client_timeouts(monkeypatch)
+    sentinel = object()
+    llm_config.anthropic_completion(
+        model="m", messages=[], max_tokens=16, env={_ANTHROPIC_KEY: "k"}, timeout=sentinel, timeout_s=60.0
+    )
+    assert seen == [sentinel]
+
+
 def test_anthropic_version_is_defined_once_in_llm_config():
     """The header value must live here alone; four modules used to hardcode it."""
     source = Path(llm_config.__file__).read_text(encoding="utf-8")

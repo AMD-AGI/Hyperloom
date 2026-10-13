@@ -9,6 +9,7 @@ import math
 import os
 import signal
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -70,8 +71,37 @@ _SERVING_ACTOR_CONCURRENCY: int = 2
 _VISIBLE_DEVICE_ENV_KEYS: tuple[str, ...] = COUNTING_VISIBLE_DEVICE_VARS
 
 
+#: Leads every :exc:`RayInfeasibleError` message, so a caller that only sees the
+#: failure as text (a baseline round's stderr tail) can tell that retrying the
+#: same round against the same cluster cannot succeed.
+RAY_INFEASIBLE_MARKER: str = "ray_cluster_infeasible"
+
+
 class RayInfeasibleError(RuntimeError):
     """Raised when the cluster can never satisfy the requested resources."""
+
+
+class RayMissingServingSlotError(RayInfeasibleError):
+    """The connected head does not declare the ``serving_slot`` resource."""
+
+
+#: Held by every lease while it connects, checks feasibility and creates its actor,
+#: and by the missing-``serving_slot`` repair for its whole stop/start/reconnect.
+#: Leases start from pool threads; without it a lease could create its actor on
+#: the head the repair is about to stop, after the repair found the head idle.
+_CLUSTER_STARTUP_LOCK = threading.RLock()
+
+#: Leases in this process that have submitted an actor, under the lock above. Actor
+#: creation is asynchronous, so a submitted actor can be absent from the GCS actor
+#: table and hold nothing yet; the repair refuses while this is non-zero instead of
+#: trusting the cluster's own view to have caught up.
+_LEASE_ACTORS_SUBMITTED = 0
+
+
+def _note_lease_actor_submitted() -> None:
+    """Record that a lease submitted an actor; called with ``_CLUSTER_STARTUP_LOCK`` held."""
+    global _LEASE_ACTORS_SUBMITTED
+    _LEASE_ACTORS_SUBMITTED += 1
 
 
 def _assert_cluster_feasible(*, num_gpus: float, serving_slot: bool) -> None:
@@ -79,16 +109,54 @@ def _assert_cluster_feasible(*, num_gpus: float, serving_slot: bool) -> None:
     import ray
 
     totals = ray.cluster_resources()
+    # The slot first: a head started by hand without it often advertises too few GPUs as well, and the repair
+    # (a fresh head) fixes both, so it must not be hidden behind the GPU error.
+    if serving_slot and "serving_slot" not in totals:
+        raise RayMissingServingSlotError(
+            f"{RAY_INFEASIBLE_MARKER}: existing Ray head has no serving_slot resource; "
+            "restart with --resources='{\"serving_slot\":1}' or set INFERENCE_OPTIMIZER_RAY_EXEC=0"
+        )
     cluster_gpus = float(totals.get("GPU", 0))
     if cluster_gpus < num_gpus:
         raise RayInfeasibleError(
-            f"cluster has {cluster_gpus} GPU(s), {num_gpus} requested; set INFERENCE_OPTIMIZER_RAY_EXEC=0 or add GPUs"
+            f"{RAY_INFEASIBLE_MARKER}: cluster has {cluster_gpus} GPU(s), {num_gpus} requested; "
+            "set INFERENCE_OPTIMIZER_RAY_EXEC=0 or add GPUs"
         )
-    if serving_slot and "serving_slot" not in totals:
-        raise RayInfeasibleError(
-            "existing Ray head has no serving_slot resource; "
-            "restart with --resources='{\"serving_slot\":1}' or set INFERENCE_OPTIMIZER_RAY_EXEC=0"
-        )
+
+
+def _ensure_cluster_feasible(*, num_gpus: float, serving_slot: bool, log_path: Any = None) -> None:
+    """Like :func:`_assert_cluster_feasible`, but repair a lone local head that lacks ``serving_slot``.
+
+    A head that predates this process (one an agent started by hand, say) is reused
+    by ``ensure_ray_cluster`` as long as it answers ``ray status``. When it lacks
+    ``serving_slot`` and is safe to replace, it is restarted with the resource, the
+    way the installer does; any other cluster keeps the error, because stopping it
+    would take down work this process does not own.
+    """
+    try:
+        _assert_cluster_feasible(num_gpus=num_gpus, serving_slot=serving_slot)
+        return
+    except RayMissingServingSlotError as exc:
+        missing = exc
+    from ._ray_backend import get_ray_backend
+    from ._ray_runtime import local_head_restartable
+
+    with _CLUSTER_STARTUP_LOCK:
+        try:
+            # Another lease may have repaired the head while this one waited.
+            _assert_cluster_feasible(num_gpus=num_gpus, serving_slot=serving_slot)
+            return
+        except RayMissingServingSlotError:
+            pass
+        if _LEASE_ACTORS_SUBMITTED:
+            restartable, why = False, f"this process has submitted {_LEASE_ACTORS_SUBMITTED} lease actor(s) to it"
+        else:
+            restartable, why = local_head_restartable()
+        if not restartable:
+            raise RayMissingServingSlotError(f"{missing}; not restarting it automatically: {why}") from missing
+        log.warning("Ray head has no serving_slot resource; restarting the local head with it")
+        get_ray_backend().restart_local_head(log_path=log_path)
+    _assert_cluster_feasible(num_gpus=num_gpus, serving_slot=serving_slot)
 
 
 def _round_wait_timeout_sec(timeout: int | float | None) -> float:
@@ -464,9 +532,13 @@ class ServingLease:
             return
         from ._ray_backend import get_ray_backend
 
-        get_ray_backend().ensure(log_path=self._ensure_log_path)
-        _assert_cluster_feasible(num_gpus=self._num_gpus, serving_slot=self._serving_slot)
-        self._actor = make_serving_actor(self._num_gpus, serving_slot=self._serving_slot)
+        with _CLUSTER_STARTUP_LOCK:
+            get_ray_backend().ensure(log_path=self._ensure_log_path)
+            _ensure_cluster_feasible(
+                num_gpus=self._num_gpus, serving_slot=self._serving_slot, log_path=self._ensure_log_path
+            )
+            self._actor = make_serving_actor(self._num_gpus, serving_slot=self._serving_slot)
+            _note_lease_actor_submitted()
 
     def run_session_kill(
         self,
@@ -886,9 +958,13 @@ class GpuSpecialistLease:
         """Create the actor and SUBMIT the subprocess launch without blocking."""
         from ._ray_backend import get_ray_backend
 
-        get_ray_backend().ensure(log_path=self._ensure_log_path)
-        _assert_cluster_feasible(num_gpus=self._num_gpus, serving_slot=self._serving_slot)
-        self._actor = make_gpu_specialist_actor(self._num_gpus, serving_slot=self._serving_slot)
+        with _CLUSTER_STARTUP_LOCK:
+            get_ray_backend().ensure(log_path=self._ensure_log_path)
+            _ensure_cluster_feasible(
+                num_gpus=self._num_gpus, serving_slot=self._serving_slot, log_path=self._ensure_log_path
+            )
+            self._actor = make_gpu_specialist_actor(self._num_gpus, serving_slot=self._serving_slot)
+            _note_lease_actor_submitted()
         self._start_ref = self._actor.start.remote(
             cmd,
             env=env,
@@ -994,7 +1070,9 @@ def maybe_gpu_specialist_lease(
 __all__ = [
     "GpuSpecialistLease",
     "ManagedServerProcess",
+    "RAY_INFEASIBLE_MARKER",
     "RayInfeasibleError",
+    "RayMissingServingSlotError",
     "ServingLease",
     "make_gpu_specialist_actor",
     "make_serving_actor",

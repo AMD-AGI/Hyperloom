@@ -134,13 +134,26 @@ class RayExecutionBackend:
             quiet_ray_init,
         )
 
-        resolved = num_gpus
-        if resolved is None:
-            env_n = os.environ.get("INFERENCE_OPTIMIZER_RAY_NUM_GPUS", "").strip()
-            resolved = int(env_n) if env_n.isdigit() else None
+        resolved = _resolve_head_num_gpus(num_gpus)
         ensure_ray_cluster(num_gpus=resolved, log_path=log_path)
         quiet_ray_init(num_gpus=resolved, log_path=log_path)
         self._ensured = True
+
+    def restart_local_head(self, log_path: Path | None = None) -> None:
+        """Replace the local head with one that declares ``serving_slot`` and reconnect to it."""
+        from ._ray_runtime import restart_local_head_with_serving_slot
+
+        self._ensured = False
+        restart_local_head_with_serving_slot(num_gpus=_resolve_head_num_gpus(None), log_path=log_path)
+        self._ensured = True
+
+
+def _resolve_head_num_gpus(num_gpus: int | None) -> int | None:
+    """Return the ``--num-gpus`` for a head this process starts: the argument, else the env override."""
+    if num_gpus is not None:
+        return num_gpus
+    env_n = os.environ.get("INFERENCE_OPTIMIZER_RAY_NUM_GPUS", "").strip()
+    return int(env_n) if env_n.isdigit() else None
 
 
 def resolve_shared_artifact_root(session_dir: Path | str) -> Path:

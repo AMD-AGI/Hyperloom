@@ -646,7 +646,6 @@ def test_write_reports_enriches_candidates_with_runtime_metadata(tmp_path):
         framework="sglang",
         target_platform="MI300X",
         analysis_mode="inference",
-        runtime_env="local",
         dry_run=False,
     )
 
@@ -671,7 +670,6 @@ def test_write_reports_enriches_candidates_with_runtime_metadata(tmp_path):
     assert enriched["env_vars"] == {}
     assert enriched["kernel_params"] == {}
     assert enriched["runtime_flags"]["analysis_mode"] == "inference"
-    assert enriched["runtime_flags"]["runtime_env"] == "local"
     assert enriched["runtime_flags"]["target_platform"] == "MI300X"
     assert enriched["runtime_flags"]["is_multigpu"] is False
     assert enriched["runtime_flags"]["num_gpus_recommended"] == 1
@@ -783,7 +781,6 @@ def test_write_reports_enriches_head_size_from_model_config(tmp_path):
         framework="sglang",
         target_platform="MI300X",
         analysis_mode="inference",
-        runtime_env="local",
         dry_run=False,
     )
 
@@ -810,7 +807,6 @@ def _make_write_reports_args(trace_path):
         framework="sglang",
         target_platform="MI300X",
         analysis_mode="inference",
-        runtime_env="local",
         dry_run=False,
     )
 

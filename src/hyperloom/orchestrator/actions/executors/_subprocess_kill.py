@@ -309,6 +309,12 @@ def resolve_benchmark_timeouts(env: Mapping[str, str] | None = None) -> tuple[fl
     )
 
 
+def sync_agentx_phase_wait(envs: dict[str, Any], timeout_sec: float) -> None:
+    """Move an exported ``AGENTX_PHASE_WAIT_TIMEOUT_S`` to the cap; the client accepts only an unsigned integer."""
+    if "AGENTX_PHASE_WAIT_TIMEOUT_S" in envs:
+        envs["AGENTX_PHASE_WAIT_TIMEOUT_S"] = str(math.ceil(timeout_sec))
+
+
 class _StreamCapture:
     """Capture pipe bytes promptly, decoding text incrementally for capture and mirroring."""
 
@@ -1158,4 +1164,5 @@ __all__ = [
     "session_deadline_to_remaining_sec",
     "session_remaining_to_deadline_sec",
     "stamp_server_ready",
+    "sync_agentx_phase_wait",
 ]
