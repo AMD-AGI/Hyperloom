@@ -1,0 +1,179 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""Gaps shaped like a cause, derived from what a run was measured doing."""
+
+from __future__ import annotations
+
+import json
+
+from hyperloom.inference_optimizer.session.session_paths import jit_cache_dir
+from hyperloom.orchestrator.state import run_evidence_gaps as reg
+
+
+def _jit_leak(session_dir, kernel: str, count: int) -> None:
+    cache = jit_cache_dir(session_dir) / "sglang_cache_dir"
+    for i in range(count):
+        entry = cache / f"H{i:032d}"
+        entry.mkdir(parents=True)
+        (entry / f"{kernel}.json").write_text(
+            json.dumps({"name": f"{kernel}_BLOCK_M_64_GRID_MN_{i * 7 + 1}"}), encoding="utf-8"
+        )
+
+
+def _trace(tmp_path, events, *, name: str = "t.json"):
+    path = tmp_path / name
+    path.write_text(json.dumps({"traceEvents": events}), encoding="utf-8")
+    return path
+
+
+def _step(name: str, ts: float, dur: float) -> dict:
+    return {"cat": "gpu_user_annotation", "name": name, "ts": ts, "dur": dur, "pid": 2}
+
+
+def _kernel(name: str, ts: float, dur: float, correlation: int) -> dict:
+    return {"cat": "kernel", "name": name, "ts": ts, "dur": dur, "pid": 2, "args": {"correlation": correlation}}
+
+
+def _launch(correlation: int) -> dict:
+    return {
+        "cat": "cuda_runtime",
+        "name": "hipLaunchKernel",
+        "ts": 0.0,
+        "dur": 1.0,
+        "args": {"correlation": correlation},
+    }
+
+
+def _requests(tmp_path, *, ms_per_100k: float, name: str = "ws"):
+    artifacts = tmp_path / name / "b1" / "aiperf_artifacts"
+    artifacts.mkdir(parents=True)
+    lines = [
+        json.dumps(
+            {
+                "metadata": {"benchmark_phase": "profiling"},
+                "metrics": {
+                    "input_sequence_length": {"value": isl},
+                    "time_to_first_token": {"value": 200.0 + isl / 100_000 * ms_per_100k},
+                },
+            }
+        )
+        for isl in range(10_000, 10_000 + 200 * 2_000, 2_000)
+    ]
+    (artifacts / "profile_export.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return tmp_path / name
+
+
+def test_a_recompiled_kernel_becomes_a_gap_naming_the_constant(tmp_path):
+    _jit_leak(tmp_path, "_fused_fp8_bmm_rope", 40)
+
+    (gap,) = reg.run_evidence_gaps(session_dir=tmp_path, trace_path="", workspace="")
+
+    assert gap["layer"] == "run_evidence"
+    assert gap["provenance"] == "recompile"
+    assert gap["severity"] == "high"
+    assert gap["domain_hint"] == "kernel"
+    assert "_GRID_MN_" in gap["symptom"] and "40 variants" in gap["symptom"]
+    assert "runtime rather than constexpr" in gap["symptom"]
+
+
+def test_an_eager_step_class_becomes_a_gap_that_says_what_to_establish(tmp_path):
+    events = [
+        _step("step[EXTEND bs=1 toks=900]", 0.0, 100.0),
+        *[_kernel(f"e{i}", 1.0 + i, 5.0, i) for i in range(10)],
+        *[_launch(i) for i in range(10)],
+    ]
+
+    (gap,) = reg.run_evidence_gaps(session_dir=tmp_path, trace_path=_trace(tmp_path, events), workspace="")
+
+    assert gap["provenance"] == "ungraphed_step"
+    assert gap["domain_hint"] == "framework"
+    assert "EXTEND bs=1 runs 100%" in gap["symptom"]
+    assert "the two have different" in gap["symptom"]
+
+
+def test_a_foldable_launch_names_the_neighbour_to_fold_into(tmp_path):
+    events = [_step("step[VERIFY bs=3]", 0.0, 2000.0)]
+    ts = 1.0
+    for i in range(60):
+        events.append(_kernel("split_k", ts, 14.0, 900 + i))
+        events.append(_kernel("reduce", ts + 14.0, 5.0, 1900 + i))
+        ts += 30.0
+
+    gaps = reg.run_evidence_gaps(session_dir=tmp_path, trace_path=_trace(tmp_path, events), workspace="")
+
+    (gap,) = [g for g in gaps if g["provenance"] == "foldable_launch"]
+    assert "reduce runs 60 times per step" in gap["symptom"]
+    assert "always beside split_k (100%)" in gap["symptom"]
+    assert gap["severity"] == "medium"
+
+
+def test_a_cheap_launch_is_not_worth_a_gap(tmp_path):
+    """Below the per-step cost floor, folding it away does not pay for the round that would do it."""
+    events = [_step("step[VERIFY bs=3]", 0.0, 2000.0)]
+    ts = 1.0
+    for i in range(10):
+        events.append(_kernel("split_k", ts, 14.0, 900 + i))
+        events.append(_kernel("reduce", ts + 14.0, 1.0, 1900 + i))
+        ts += 30.0
+
+    gaps = reg.run_evidence_gaps(session_dir=tmp_path, trace_path=_trace(tmp_path, events), workspace="")
+
+    assert [g for g in gaps if g["provenance"] == "foldable_launch"] == []
+
+
+def test_a_front_end_cost_becomes_a_gap(tmp_path):
+    gaps = reg.run_evidence_gaps(session_dir=tmp_path, trace_path="", workspace=_requests(tmp_path, ms_per_100k=200.0))
+
+    (gap,) = gaps
+    assert gap["provenance"] == "front_end_input_cost"
+    assert gap["domain_hint"] == "framework"
+    assert "per 100k input tokens" in gap["symptom"]
+    assert "in front of it" in gap["symptom"]
+
+
+def test_a_front_end_that_costs_nothing_raises_nothing(tmp_path):
+    assert (
+        reg.run_evidence_gaps(session_dir=tmp_path, trace_path="", workspace=_requests(tmp_path, ms_per_100k=2.0)) == []
+    )
+
+
+def test_one_census_cannot_bury_the_others(tmp_path):
+    events = [_step("step[VERIFY bs=3]", 0.0, 100_000.0)]
+    ts = 1.0
+    for i in range(40):
+        events.append(_kernel(f"glue_{i}", ts, 5.0, 900 + i))
+        ts += 20.0
+    # Each distinct glue kernel has one neighbour, so every one of them qualifies.
+    gaps = reg.run_evidence_gaps(session_dir=tmp_path, trace_path=_trace(tmp_path, events), workspace="")
+
+    assert len([g for g in gaps if g["provenance"] == "foldable_launch"]) <= 3
+
+
+def test_the_same_evidence_upserts_rather_than_multiplying(tmp_path):
+    _jit_leak(tmp_path, "_fused_fp8_bmm_rope", 40)
+
+    first = reg.run_evidence_gaps(session_dir=tmp_path, trace_path="", workspace="")
+    second = reg.run_evidence_gaps(session_dir=tmp_path, trace_path="", workspace="")
+
+    assert [g["canonical_id"] for g in first] == [g["canonical_id"] for g in second]
+
+
+def test_a_run_with_no_evidence_raises_no_gaps(tmp_path):
+    assert reg.run_evidence_gaps(session_dir=tmp_path, trace_path="", workspace="") == []
+    assert reg.run_evidence_gaps(session_dir=tmp_path, trace_path=tmp_path / "absent", workspace="") == []
+
+
+def test_a_capture_directory_resolves_to_its_newest_file(tmp_path):
+    captures = tmp_path / "torch_trace"
+    captures.mkdir()
+    events = [
+        _step("step[EXTEND bs=1 toks=900]", 0.0, 100.0),
+        *[_kernel(f"e{i}", 1.0 + i, 5.0, i) for i in range(10)],
+        *[_launch(i) for i in range(10)],
+    ]
+    _trace(captures, events, name="rank0.trace.json")
+
+    gaps = reg.run_evidence_gaps(session_dir=tmp_path, trace_path=captures, workspace="")
+
+    assert [g["provenance"] for g in gaps] == ["ungraphed_step"]

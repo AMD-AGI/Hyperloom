@@ -35,9 +35,25 @@ def load_trace_events(trace_path: str | Path) -> list[dict[str, Any]]:
     return [event for event in events if isinstance(event, dict)]
 
 
+def resolve_capture(trace: Any) -> str:
+    """The capture file to read, from a path that may name the directory a round's ranks were written to.
+
+    A profile records one file per rank, and what a session stores is sometimes the file and sometimes the
+    directory; the newest capture in a directory is that round's own.
+    """
+    path = Path(str(trace or "").strip() or ".")
+    if path.is_file():
+        return str(path)
+    if not path.is_dir():
+        return ""
+    captures = sorted(path.glob("*.trace.json*"), key=lambda p: p.stat().st_mtime)
+    return str(captures[-1]) if captures else ""
+
+
 __all__ = [
     "CPU_ANNOTATION_CAT",
     "GPU_ANNOTATION_CAT",
     "KERNEL_CAT",
     "load_trace_events",
+    "resolve_capture",
 ]
