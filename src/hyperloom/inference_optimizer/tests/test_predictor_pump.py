@@ -15,6 +15,7 @@ import pytest
 
 from hyperloom.orchestrator.predictor import pump as pump_mod
 from hyperloom.orchestrator.predictor.client import Action, Prediction
+from hyperloom.orchestrator.predictor.prompt import queue_block
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 
@@ -146,7 +147,8 @@ async def test_a_rationale_is_the_rows_reason_and_the_queue_shows_it_at_length(s
 
     (row,) = _predictor_rounds(state)[0]["proposal_set"]
     assert row["reason"] == f"PrimaTune 4/8: {rationale}"
-    predictor_line, specialist_line = state.to_untested_proposals_summary().splitlines()[-2:]
+    predictor_line = queue_block(state).splitlines()[-1]
+    specialist_line = state.to_untested_proposals_summary(skip_provenance="primatune").splitlines()[-1]
     assert predictor_line.endswith(f"why=PrimaTune 4/8: {rationale}")
     assert specialist_line.endswith(f"why={long_reason[:80].rstrip()}")
 
@@ -159,8 +161,8 @@ async def test_the_queue_offers_predictor_rows_to_orchestrations_own_grid(servic
     service.answer = _answer(Action(server_args={"--kv-cache-dtype": "fp8"}), votes={0: 1})
     await _ask_and_file(_pump(), state)
 
-    header = " ".join(state.to_untested_proposals_summary().split())
-    assert "Predictor rows are the exception" in header
+    header = " ".join(queue_block(state).split())
+    assert "These rows are the exception" in header
     assert "into your next `explore` grid verbatim" in header and "`provenance: primatune`" in header
     assert "grid verbatim" not in specialists_only
 
@@ -173,7 +175,7 @@ async def test_the_predictor_block_states_the_accuracy_gate_a_keep_passes(servic
     service.answer = _answer(Action(server_args={"--kv-cache-dtype": "fp8"}), votes={0: 1})
     await _ask_and_file(_pump(), state)
 
-    header = " ".join(state.to_untested_proposals_summary().split())
+    header = " ".join(queue_block(state).split())
     assert ("a KEEP needs accuracy no more than 0.05 below the baseline's 0.938" in header) is stated
 
 
@@ -185,7 +187,7 @@ async def test_a_predictor_row_already_in_a_grid_is_named_not_offered_again(serv
     await _ask_and_file(_pump(), state)
     held, offered = state.untested_proposal_rows()
 
-    lines = state.to_untested_proposals_summary(in_grids={held["fingerprint"]}).splitlines()
+    lines = queue_block(state, in_grids={held["fingerprint"]}).splitlines()
     assert [line.split()[1] for line in lines if line.startswith("• ")] == [offered["name"]]
     assert (
         lines[-1]
@@ -372,7 +374,7 @@ async def test_an_answer_that_arrives_in_the_next_cycle_stays_out_of_its_queue(s
 
     (round_,) = _predictor_rounds(state)
     assert round_["cycle"] == 0
-    assert state.untested_proposal_rows() == [] and state.to_untested_proposals_summary() == ""
+    assert state.untested_proposal_rows() == [] and queue_block(state) == ""
 
 
 async def test_a_source_change_is_filed_as_a_mandate_on_its_round(service):

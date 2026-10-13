@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Collection
 from datetime import datetime
 from pathlib import PurePosixPath
 from typing import Any
@@ -55,9 +54,6 @@ def render_model_arch_compact(arch: dict | None) -> str:
 # Width budget for artifact anchors; sized so a full uuid4 fid still fits ws=.
 _VARIANT_ANCHOR_MAX_CHARS = 100
 
-# Width budget for a predictor row's ``why=``: the vote share and the 600-character rationale a row keeps.
-_PREDICTOR_WHY_CHARS = 640
-
 # Numeric fields a ``trace_health_warnings[]`` entry may carry, as ``(key, label, suffix)`` in render order.
 _WARNING_EXTRA_FIELDS: tuple[tuple[str, str, str], ...] = (
     ("idle_pct", "idle", "%"),
@@ -74,6 +70,30 @@ def _as_float(value: Any) -> float:
         return float(value or 0.0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def untested_proposal_line(row: dict[str, Any], *, why_chars: int | None = 80) -> str:
+    """Render one ``untested_proposal_rows`` row, marking each field it carries.
+
+    ``why_chars`` bounds the reason; ``None`` shows a reason its producer has already bounded in full.
+    """
+    parts = [f"• {row['name']} [{row['domain']}·{row['severity'] or 'sev?'}]"]
+    if row["atomic"]:
+        parts.append("ATOMIC")
+    if row["extra_args"]:
+        parts.append(f"+args={row['extra_args']}")
+    if row["extra_envs"]:
+        parts.append("+envs=" + ",".join(f"{k}={v}" for k, v in sorted(row["extra_envs"].items())))
+    if row["remove_args"]:
+        parts.append("-args=" + " ".join(row["remove_args"]))
+    if row["unset_envs"]:
+        parts.append("-envs=" + ",".join(row["unset_envs"]))
+    if row["args_mode"] == "replace":
+        parts.append("mode=replace")
+    reason = row["reason"].replace("\n", " ").strip()[:why_chars].rstrip()
+    if reason:
+        parts.append(f"why={reason}")
+    return _flatten_for_prompt(" ".join(parts))
 
 
 class _RenderMixin:
@@ -407,108 +427,27 @@ class _RenderMixin:
         ranked.sort(key=lambda r: (-r[0], -r[1], -r[2]))
         return [row for _, _, _, row in ranked]
 
-    @staticmethod
-    def _untested_proposal_line(row: dict[str, Any]) -> str:
-        """Render one queue row, marking each field it carries."""
-        parts = [f"• {row['name']} [{row['domain']}·{row['severity'] or 'sev?'}]"]
-        if row["atomic"]:
-            parts.append("ATOMIC")
-        if row["extra_args"]:
-            parts.append(f"+args={row['extra_args']}")
-        if row["extra_envs"]:
-            parts.append("+envs=" + ",".join(f"{k}={v}" for k, v in sorted(row["extra_envs"].items())))
-        if row["remove_args"]:
-            parts.append("-args=" + " ".join(row["remove_args"]))
-        if row["unset_envs"]:
-            parts.append("-envs=" + ",".join(row["unset_envs"]))
-        if row["args_mode"] == "replace":
-            parts.append("mode=replace")
-        # A specialist's findings reach orchestration in their own section; a predictor row's reason is all it sends.
-        limit = _PREDICTOR_WHY_CHARS if row["provenance"] == "primatune" else 80
-        reason = row["reason"].replace("\n", " ").strip()[:limit].rstrip()
-        if reason:
-            parts.append(f"why={reason}")
-        return _flatten_for_prompt(" ".join(parts))
+    def to_untested_proposals_summary(self, *, max_entries: int = 12, skip_provenance: str = "") -> str:
+        """Render the specialist proposals still waiting for a benchmark slot.
 
-    def _accuracy_gate_note(self) -> list[str]:
-        """The accuracy gate every explore KEEP passes, as header lines; none while the session measures no accuracy."""
-        from ...actions.executors._accuracy_gate import ACCURACY_THRESHOLD
-
-        baseline = float(self.baseline_accuracy or 0.0)
-        if self.eval_disabled or baseline <= 0:
-            return []
-        return [
-            f"Every variant runs the accuracy eval, and a KEEP needs accuracy no more than {ACCURACY_THRESHOLD:g} below",
-            f"the baseline's {baseline:.3f}, so a row that changes numerics cannot keep on throughput alone.",
+        Args:
+            max_entries: Rows rendered in full; the rest are counted.
+            skip_provenance: Leave out the rows a producer with its own section renders.
+        """
+        rows = [
+            row for row in self.untested_proposal_rows() if not skip_provenance or row["provenance"] != skip_provenance
         ]
-
-    def _untested_header(self, rows: list[dict[str, Any]]) -> list[str]:
-        """The queue's header: the predictor's while it offers a predictor row, the specialists' otherwise."""
-        if any(row["provenance"] == "primatune" for row in rows):
-            return [
-                "Executable proposals from this cycle that no explore round has benched.",
-                "Ranked predictor rows first, then by gap severity, then most recent. The Coordinator benches the",
-                "head of this queue only while no explore is queued or running, which rarely happens while your",
-                "grids hold the lane. Predictor rows are the exception to dispatching only variants not listed",
-                "here: put the ones worth a slot into your next `explore` grid verbatim, keeping each row's name,",
-                "fields and `provenance: primatune`. The predictor is re-asked only when the stack moves, so a",
-                "predictor row you pass over now is very likely never measured; if you skip one, say why.",
-                *self._accuracy_gate_note(),
-                "",
-            ]
-        return [
+        if not rows:
+            return ""
+        out = [
             "Executable specialist proposals from this cycle that no explore round has benched.",
             "Ranked by gap severity, then most recent. The Coordinator benches the head of this",
             "queue whenever no explore is queued or running; dispatch `explore` only for variants not listed here.",
             "",
         ]
-
-    def to_untested_proposals_summary(self, *, max_entries: int = 12, in_grids: Collection[str] = frozenset()) -> str:
-        """Render the proposals still waiting for a benchmark slot, and any open predictor mandate.
-
-        Args:
-            max_entries: Rows rendered in full; the rest are counted.
-            in_grids: Content fingerprints of the variants in queued or running explore grids. A predictor
-                row among them is named rather than offered, since orchestration copies offered rows.
-        """
-        from ...predictor.mandate import open_mandate
-
-        rows = self.untested_proposal_rows()
-        held = {
-            row["fingerprint"] for row in rows if row["provenance"] == "primatune" and row["fingerprint"] in in_grids
-        }
-        waiting = [row["name"] for row in rows if row["fingerprint"] in held]
-        rows = [row for row in rows if row["fingerprint"] not in held]
-        mandate = open_mandate(self)
-        if not rows and not mandate and not waiting:
-            return ""
-        out: list[str] = []
-        if rows:
-            out = self._untested_header(rows)
-            out.extend(self._untested_proposal_line(row) for row in rows[:max_entries])
-            if len(rows) > max_entries:
-                out.append(f"(+{len(rows) - max_entries} more not shown)")
-        if waiting:
-            if out:
-                out.append("")
-            out.append(
-                _flatten_for_prompt(
-                    "Predictor rows already in a queued or running explore grid, not to be copied again: "
-                    + ", ".join(waiting)
-                )
-            )
-        if mandate:
-            if out:
-                out.append("")
-            out.extend(
-                [
-                    "Predictor source-change mandate (prose, not a variant). To act on it, dispatch",
-                    "`delegate{action_name='specialist', params={scope:'freeform', mode:'patch', "
-                    f"primatune_mandate_id:'{mandate['mandate_id']}', task_description:'<one line>'}}}}`.",
-                    "The Coordinator substitutes the mandate's own text for task_description; carry the id verbatim.",
-                    _flatten_for_prompt(f"• {mandate['mandate_id']} why={mandate['mandate'][:160]}"),
-                ]
-            )
+        out.extend(untested_proposal_line(row) for row in rows[:max_entries])
+        if len(rows) > max_entries:
+            out.append(f"(+{len(rows) - max_entries} more not shown)")
         return "\n".join(out)
 
     def to_proposal_scores_summary(self, *, max_rounds: int = 2) -> str:

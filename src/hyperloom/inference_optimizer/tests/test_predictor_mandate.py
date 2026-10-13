@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from hyperloom.orchestrator.predictor.mandate import mark_mandate_consumed
+from hyperloom.orchestrator.predictor.prompt import queue_block
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 MANDATE_ID = "primatune-patch-c0-s0-r0"
@@ -33,7 +34,7 @@ def _state_with_mandate(*, cycle: int = 0) -> SharedState:
 
 
 def test_the_queue_block_offers_the_mandate_with_its_dispatch():
-    summary = _state_with_mandate().to_untested_proposals_summary()
+    summary = queue_block(_state_with_mandate())
     assert f"primatune_mandate_id:'{MANDATE_ID}'" in summary
     assert "Fuse rmsnorm into the QKV GEMM" in summary
 
@@ -41,7 +42,7 @@ def test_the_queue_block_offers_the_mandate_with_its_dispatch():
 def test_a_mandate_from_an_earlier_cycle_is_not_offered():
     state = _state_with_mandate(cycle=0)
     state.macro_cycle = 1
-    assert state.to_untested_proposals_summary() == ""
+    assert queue_block(state) == ""
 
 
 def test_the_router_dispatches_the_predictors_own_text_and_attribution():
@@ -104,7 +105,7 @@ async def test_a_mandate_delegate_queues_the_patch_specialist_and_withdraws_the_
     assert task.params["task_description"] == "Fuse rmsnorm into the QKV GEMM in tuned_gemm.py"
     assert (task.params["provenance"], task.params["scope"], task.params["mode"]) == ("primatune", "freeform", "patch")
     assert coordinator.shared_state.specialist_rounds[0]["mandate_consumed_by"] == task.task_id
-    assert coordinator.shared_state.to_untested_proposals_summary() == ""
+    assert queue_block(coordinator.shared_state) == ""
 
 
 async def test_a_delegate_citing_no_known_mandate_is_refused_rather_than_run_on_its_placeholder(coordinator):
@@ -121,7 +122,7 @@ def test_a_consumed_mandate_is_withdrawn_and_keeps_its_first_consumer():
     assert mark_mandate_consumed(state, MANDATE_ID, "task-1")
     assert mark_mandate_consumed(state, MANDATE_ID, "task-2")
     assert state.specialist_rounds[0]["mandate_consumed_by"] == "task-1"
-    assert state.to_untested_proposals_summary() == ""
+    assert queue_block(state) == ""
     assert not mark_mandate_consumed(state, "nope", "task-3")
 
 

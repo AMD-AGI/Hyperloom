@@ -508,9 +508,15 @@ class ConversationCollaborator(CoordinatorCollaborator):
             if denial_summary:
                 sections.append(denial_summary)
             if (self.shared_state.phase or "").strip().upper() == _phase_state.PHASE_FRAMEWORK_AGENT:
-                untested_block = self.shared_state.to_untested_proposals_summary(
-                    in_grids=await self._explore_grid_fingerprints()
+                from ..predictor.prompt import queue_block
+                from ..predictor.rows import PROVENANCE
+
+                # The predictor's rows lead the queue, so its block comes first, under the same section.
+                blocks = (
+                    queue_block(self.shared_state, in_grids=await self._explore_grid_fingerprints()),
+                    self.shared_state.to_untested_proposals_summary(skip_provenance=PROVENANCE),
                 )
+                untested_block = "\n\n".join(block for block in blocks if block)
                 if untested_block:
                     sections.append("=== Untested proposals (current cycle) ===")
                     sections.append(untested_block)
