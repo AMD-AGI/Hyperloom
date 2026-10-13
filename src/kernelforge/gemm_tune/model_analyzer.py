@@ -90,20 +90,14 @@ class ModelProfile:
         return _nested_precisions(self.raw_config)[1]
 
 
-# Nested weight-spec dtype tags, in the router's precision vocabulary.
-_PRECISION_BY_DTYPE: dict[str, str] = {
-    "fp4": "fp4",
-    "mxfp4": "fp4",
-    "nvfp4": "fp4",
-    "fp8": "fp8",
-    "fp8_e4m3": "fp8",
-    "fp8_e5m2": "fp8",
-    "float8_e4m3fn": "fp8",
-    "float8_e5m2": "fp8",
-    "int8": "int8",
-    "int4": "int4",
-    "uint4": "int4",
+# Nested weight-spec dtype tags, grouped under the router's precision vocabulary.
+_DTYPES_BY_PRECISION: dict[str, tuple[str, ...]] = {
+    "fp4": ("fp4", "mxfp4", "nvfp4"),
+    "fp8": ("fp8", "fp8_e4m3", "fp8_e5m2", "float8_e4m3fn", "float8_e5m2"),
+    "int8": ("int8",),
+    "int4": ("int4", "uint4"),
 }
+_PRECISION_BY_DTYPE = {dtype: precision for precision, dtypes in _DTYPES_BY_PRECISION.items() for dtype in dtypes}
 
 
 def _declared_precision(decl: WeightDeclaration) -> str:
