@@ -9,12 +9,12 @@ import pytest
 from click.testing import CliRunner
 
 from hyperloom.common.env import EnvValueError
-from kernelforge.cli import (
+from kernelforge.cli import forge_loop
+from kernelforge.cli.pr_references import (
     _collect_pr_references,
     _git_remote_url,
     _pr_kb_enabled,
     _pr_refs_event_fields,
-    forge_loop,
 )
 
 

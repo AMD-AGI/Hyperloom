@@ -464,6 +464,9 @@ async def test_a_snapshot_that_raised_leaves_the_row_silent(_bound_session, monk
     )
     lane = _lane(_bound_session)
     lane.shared_state.enablement.last_specialist_task_id = "spec-1"
+    await lane.rounds.open(
+        "enablement-spec-1", holder_task_id="spec-1", lease_sec=3600.0, now_unix=0.0, request_id="seed-spec-1"
+    )
 
     await lane.maybe_rearm_enablement({"enablement": True, "status": "reverted", "specialist_task_id": "spec-1"})
 

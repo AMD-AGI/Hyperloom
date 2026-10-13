@@ -30,7 +30,7 @@ from ..actions.executors._subprocess_kill import (
     STOP_GATE_POLL_SECONDS,
     TERM_GRACE_SECONDS,
 )
-from ..phases import machine_state as _phase_state
+from ..phases import dispatch_order, machine_state as _phase_state
 from ..bus.message_bus import Message
 from ..kernel.request_handlers import get_handler
 from ..policy.gate import (
@@ -52,6 +52,7 @@ from .time_budget import (
     TIME_BUDGET_EXEMPT_ACTIONS,
     action_fits_time_budget,
     expected_action_cost_minutes,
+    lease_ttl_sec,
     measured_baseline_runtime_sec,
 )
 
@@ -240,7 +241,10 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         return count
 
     def registry_lanes_ttl(self, kind: str) -> tuple[list[str], int]:
-        """Resolve ``(requires_lanes, lease_ttl_sec)`` from the action catalogue; lanes filtered to KNOWN_LANES.
+        """Resolve an action's lanes, filtered to KNOWN_LANES, and the lease it is granted.
+
+        The lease is the catalogue ``lease_ttl_sec`` floored by the cost this session admits the action at
+        (``time_budget.lease_ttl_sec``), so it can exceed the catalogue value once a baseline round is measured.
 
         Args:
             kind: The action name to resolve.
@@ -253,7 +257,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         if meta is None:
             return [], 0
         lanes = [lane for lane in meta.requires_lanes if lane in KNOWN_LANES]
-        return lanes, meta.lease_ttl_sec
+        return lanes, lease_ttl_sec(meta, measured_baseline_sec=measured_baseline_runtime_sec(self.shared_state))
 
     def cycle_idem_suffix(self) -> str:
         """Idempotency-key suffix scoping a per-cycle internal singleton to the
@@ -547,7 +551,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         Tasks already in ``_inflight_actions`` are skipped so a task is never
         dispatched twice across pump calls.
         """
-        queued = await self.tasks.queued()
+        queued = dispatch_order.in_dispatch_order(await self.tasks.queued(), self.shared_state.phase)
         if not queued:
             return
         holders = await self.locks.lane_holders()

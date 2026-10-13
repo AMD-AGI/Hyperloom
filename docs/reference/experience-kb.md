@@ -31,7 +31,8 @@ Experiences from other logs in [Experience collection](experience-kb-collect.md)
 | `HYPERLOOM_GLOBAL_KB_URL` | the user | The global KB to push to and pull from. Optional. |
 | `HYPERLOOM_GLOBAL_KB_TOKEN` | the user | The global KB's access token. Required with `HYPERLOOM_GLOBAL_KB_URL`. |
 | `HYPERLOOM_KB_AUTO_PUSH` | the user | `1` pushes after every run's Experiences are written locally. Default off. |
-| `USER_DATA_PATH` | `hyperloom-setup` | The local service keeps its data under `$USER_DATA_PATH/experience-kb`. |
+| `USER_DATA_PATH` | `hyperloom-setup` | The local service keeps its data under `$USER_DATA_PATH/experience-kb` unless `HYPERLOOM_KB_HOME` is set. |
+| `HYPERLOOM_KB_HOME` | the user | The local service's data home instead of `$USER_DATA_PATH/experience-kb`. One home serves one service at a time, so runs on different hosts that share a `USER_DATA_PATH` each set their own. Optional. |
 | `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_MODEL` | `hyperloom-setup` | The gateway and model the service plans reads with; `LOCAL_KB_PLANNER_MODEL` overrides the model. Without a gateway the service still accepts writes and reads report `unavailable`. |
 
 All of these live in the workspace `.env`. The service reads them when it
@@ -62,6 +63,7 @@ launch, so the service runs wherever the optimizer runs and outlives each run.
 It looks at what answers on `HYPERLOOM_KB_URL`:
 
 - nothing: it starts `python -m hyperloom_kb` over `$USER_DATA_PATH/experience-kb`
+  (or `$HYPERLOOM_KB_HOME`)
   and waits for it to serve;
 - a service that answers with this workspace's token and data home, the
   packaged declaration, and the settings in `.env`: it reuses it;
@@ -75,7 +77,8 @@ It looks at what answers on `HYPERLOOM_KB_URL`:
 A data home has one service. A service holds `service.lock` in its home while
 it serves, and one started on a home another service holds exits, naming that
 service's pid and port; `ensure` reports that line. Two workspaces therefore
-need their own `USER_DATA_PATH`, or the second gets no service of its own.
+need their own data home, through their own `USER_DATA_PATH` or their own
+`HYPERLOOM_KB_HOME`, or the second gets no service of its own.
 
 Only an optimize launch and `ensure` restart a service. `push` and `pull`,
 including the automatic push at the end of a run, use the service as it runs
@@ -99,7 +102,7 @@ coordinator's event loop, and once one write spools, the rest of that
 collection spools without waiting on the service. Requests to a loopback service never go through an
 `HTTP_PROXY` or `HTTPS_PROXY` from the environment.
 
-`$USER_DATA_PATH/experience-kb` holds:
+`$USER_DATA_PATH/experience-kb` (or `$HYPERLOOM_KB_HOME`) holds:
 
 | Path | Content |
 |---|---|
@@ -302,7 +305,8 @@ settings the service started with.
 - `publish()` raises `RemoteClientError` for permanent rejections (400, 409,
   413, 414, 415, 422).
   Any other failure spools the write, with its declaration, and returns
-  `status="spooled"`; Hyperloom's spool is `$USER_DATA_PATH/experience-kb/spool`.
+  `status="spooled"`; Hyperloom's spool is `spool/` under `$HYPERLOOM_KB_HOME`
+  when set, otherwise under `$USER_DATA_PATH/experience-kb`.
   After that, the client spools every later `publish()` without a request until
   `flush_spool()` delivers one.
 - `flush_spool()` replays spooled writes and stops at the first retryable

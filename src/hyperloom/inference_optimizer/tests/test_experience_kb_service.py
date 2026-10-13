@@ -45,6 +45,18 @@ def test_init_env_points_a_new_workspace_at_the_local_service(tmp_path: Path, ca
     assert values["HYPERLOOM_KB_TOKEN"] not in output
 
 
+def test_service_home_defaults_under_the_session_root_and_can_be_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "shared-root"))
+    monkeypatch.delenv(experience_kb_service.HOME_ENV, raising=False)
+    assert experience_kb_service.service_home() == tmp_path / "shared-root" / "experience-kb"
+    # Runs on other hosts that share the session root each name their own home.
+    monkeypatch.setenv(experience_kb_service.HOME_ENV, str(tmp_path / "leg-a" / "experience-kb"))
+    assert experience_kb_service.service_home() == tmp_path / "leg-a" / "experience-kb"
+    assert experience_kb_service.spool_root() == tmp_path / "leg-a" / "experience-kb" / "spool"
+
+
 def test_each_workspace_gets_its_own_local_port_and_keeps_it(tmp_path: Path) -> None:
     first, second = tmp_path / "alice" / "workspace", tmp_path / "bob" / "workspace"
     urls = {}
@@ -296,7 +308,7 @@ def test_skills_describe_the_service_by_the_commands_and_variables_it_reads() ->
     optimizer = (_PACKAGE / "inference_optimizer/SKILL.md").read_text(encoding="utf-8")
     global_kb = (_PACKAGE / "skills/hyperloom-global-kb/SKILL.md").read_text(encoding="utf-8")
 
-    for name in ("HYPERLOOM_KB_URL", "HYPERLOOM_KB_TOKEN"):
+    for name in ("HYPERLOOM_KB_URL", "HYPERLOOM_KB_TOKEN", experience_kb_service.HOME_ENV):
         assert name in setup
         assert name in optimizer
     # Every workspace gets its local service: setup generates its .env entries and starts it; nobody opts out.

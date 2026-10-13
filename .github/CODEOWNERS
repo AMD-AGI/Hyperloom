@@ -61,7 +61,7 @@
 # KERNEL opt (the kernel_optimization.py CLI wrapper was retired)
 /src/hyperloom/orchestrator/kernel/request_handlers.py          @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
 /src/hyperloom/orchestrator/phases/kernel.py                    @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
-/src/kernelforge/cli.py                                         @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
+/src/kernelforge/cli/                                           @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
 
 # GEAK integration
 /src/hyperloom/orchestrator/kernel/geak_runner.py               @iraj465 @yueliu14 @chao-xu-spec @AMD-AGI/SaFE

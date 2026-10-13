@@ -51,6 +51,7 @@ from hyperloom.common.provenance import (
     detect_gfx_arch,
 )
 from hyperloom.common.timeutil import now_iso
+from hyperloom.common.visible_devices import hip_mask_within_rocr
 
 from .credentials import (
     _is_stale_proxy_url,
@@ -1440,10 +1441,9 @@ def _ensure_lm_eval_dep(
 
 def _normalize_hip_visible_devices() -> None:
     """Re-index HIP within the device view selected by ROCR."""
-    visible = [part for part in os.environ.get("ROCR_VISIBLE_DEVICES", "").split(",") if part.strip()]
-    if not visible:
+    value = hip_mask_within_rocr(os.environ)
+    if value is None:
         return
-    value = ",".join(str(index) for index in range(len(visible)))
     previous = os.environ.get("HIP_VISIBLE_DEVICES")
     if previous == value:
         return
