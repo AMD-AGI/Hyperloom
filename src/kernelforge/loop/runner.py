@@ -5321,7 +5321,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 f"  [REVERT] mean case speedup={speedup_txt} not better than "
                 f"best={best_txt}; raw mean={raw_wall_txt} ({elapsed:.0f}s)"
             )
-        elif result.kept:
+        else:
             # Defer SIGTERM/SIGINT across the durable best-commit publication (main #hardening) so a kill
             # mid-checkpoint cannot leave the pending-keep/run-state half-written.
             with _defer_termination_signals(bool(attempt_diff)):
@@ -5380,8 +5380,6 @@ class IterationLoop(AnalysisRuntimeMixin):
                     f"— NEW BEST{improvement}; raw mean={raw_wall_txt}"
                     f"{snr_str} ({elapsed:.0f}s)"
                 )
-        else:
-            print(f"  [SKIP]   wall_ms={result.wall_ms} ({elapsed:.0f}s)")
         return pending_keep, keep_checkpoint_finalized, commit_hash
 
     async def _close_iteration(
