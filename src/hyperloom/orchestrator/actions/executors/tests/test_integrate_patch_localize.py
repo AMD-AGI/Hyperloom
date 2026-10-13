@@ -201,7 +201,13 @@ def _repo_with_model(tmp_path):
     root = tmp_path / "tree"
     (root / "vllm" / "model").mkdir(parents=True)
     (root / "vllm" / "model" / "deepseek_v4.py").write_text("old\n")
-    for cmd in (["init", "-q"], ["add", "-A"], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base"]):
+    for cmd in (
+        ["init", "-q"],
+        ["config", "user.name", "t"],
+        ["config", "user.email", "t@t"],
+        ["add", "-A"],
+        ["commit", "-qm", "base"],
+    ):
         subprocess.run(["git", "-C", str(root), *cmd], check=True)
     return root
 
@@ -232,7 +238,7 @@ def test_a_localization_that_applies_goes_ahead_of_the_rounds_patches(tmp_path):
 def test_a_localization_that_does_not_apply_is_dropped_and_the_rounds_patches_stand(tmp_path):
     root = _repo_with_model(tmp_path)
     (root / "vllm" / "model" / "deepseek_v4.py").write_text("drifted\n")
-    subprocess.run(["git", "-C", str(root), "commit", "-qam", "drift", "--author=t <t@t>"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-qam", "drift"], check=True)
     attempt = _attempt()
     _localized(attempt, tmp_path, _PY_DIFF)
     own = tmp_path / "round.patch"
