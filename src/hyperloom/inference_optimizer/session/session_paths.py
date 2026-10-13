@@ -123,6 +123,11 @@ def breakdown_parts_dir(session_dir: Path) -> Path:
     return Path(session_dir) / "runtime" / "breakdown" / "parts"
 
 
+def jit_cache_dir(session_dir: Path) -> Path:
+    """``<sd>/runtime/jit-cache/`` — session-scoped JIT / code-object caches shared by every run."""
+    return Path(session_dir) / "runtime" / "jit-cache"
+
+
 # Reports / logs
 def reports_dir(session_dir: Path) -> Path:
     """Compute ``<sd>/reports/``, the host dir for generated report files."""
