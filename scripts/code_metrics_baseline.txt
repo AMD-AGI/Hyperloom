@@ -259,7 +259,6 @@ cognitive-complexity src/kernelforge/cli.py::forge_loop 266
 cognitive-complexity src/kernelforge/fusion/author.py::_AuthorWorkspaceGuard.__init__ 37
 cognitive-complexity src/kernelforge/fusion/author.py::_AuthorWorkspaceGuard.enforce 39
 cognitive-complexity src/kernelforge/fusion/author.py::_run_registered_author_once 49
-cognitive-complexity src/kernelforge/fusion/command.py::_finish_author_harness 32
 cognitive-complexity src/kernelforge/fusion/command.py::_run_fusion_autoloop 45
 cognitive-complexity src/kernelforge/fusion/command.py::run 110
 cognitive-complexity src/kernelforge/fusion/diagnose.py::load_op_bytes_from_kineto_trace 33
@@ -268,6 +267,7 @@ cognitive-complexity src/kernelforge/fusion/discover.py::existing_operator_hints
 cognitive-complexity src/kernelforge/fusion/discover.py::ordered_fusion_boundaries_from_trace 38
 cognitive-complexity src/kernelforge/fusion/discover.py::parse_discovered_recipes 90
 cognitive-complexity src/kernelforge/fusion/discover.py::registered_agent_llm_fn 46
+cognitive-complexity src/kernelforge/fusion/harness_authoring.py::_finish_author_harness 32
 cognitive-complexity src/kernelforge/fusion/locate.py::build_recipes 32
 cognitive-complexity src/kernelforge/fusion/loop.py::run_fusion_loop 33
 cognitive-complexity src/kernelforge/fusion/validate.py::serving_smoke_verdict 32
@@ -930,18 +930,18 @@ function-lines src/kernelforge/fusion/author.py::build_multi_author_prompt 85
 function-lines src/kernelforge/fusion/campaign.py::build_campaign_program_md 155
 function-lines src/kernelforge/fusion/campaign.py::build_forge_loop_command 83
 function-lines src/kernelforge/fusion/campaign.py::run_recipe_campaign 120
-function-lines src/kernelforge/fusion/command.py::_author_baseline_harness 97
-function-lines src/kernelforge/fusion/command.py::_run_compile_pass 102
 function-lines src/kernelforge/fusion/command.py::_run_fusion_autoloop 147
 function-lines src/kernelforge/fusion/command.py::_run_multi_patch_nomination 125
-function-lines src/kernelforge/fusion/command.py::_run_serving_smoke 84
 function-lines src/kernelforge/fusion/command.py::run 527
+function-lines src/kernelforge/fusion/compile_pass_claim.py::_run_compile_pass 102
 function-lines src/kernelforge/fusion/discover.py::build_discovery_prompt 87
 function-lines src/kernelforge/fusion/discover.py::parse_discovered_recipes 201
 function-lines src/kernelforge/fusion/discover.py::registered_agent_llm_fn._fn 98
+function-lines src/kernelforge/fusion/harness_authoring.py::_author_baseline_harness 97
 function-lines src/kernelforge/fusion/harness_contract.py::harness_contract 107
 function-lines src/kernelforge/fusion/locate.py::build_recipes 104
 function-lines src/kernelforge/fusion/loop.py::run_fusion_loop 112
+function-lines src/kernelforge/fusion/serving_gate.py::_run_serving_smoke 84
 function-lines src/kernelforge/fusion/shadow_repo.py::ensure_git_workspace 87
 function-lines src/kernelforge/fusion/validate.py::serving_smoke_verdict 236
 function-lines src/kernelforge/fusion/validate.py::validate_recipe 158
@@ -1091,7 +1091,7 @@ module-lines src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py
 module-lines src/hyperloom_kb/knowledge_read.py 1201
 module-lines src/kernelforge/cli.py 2640
 module-lines src/kernelforge/fusion/author.py 1390
-module-lines src/kernelforge/fusion/command.py 2582
+module-lines src/kernelforge/fusion/command.py 1584
 module-lines src/kernelforge/fusion/discover.py 1552
 module-lines src/kernelforge/fusion/validate.py 1525
 module-lines src/kernelforge/gemm_tune/tuners/_aiter_dense_common.py 1399
