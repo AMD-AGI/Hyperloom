@@ -1152,10 +1152,27 @@ class KernelPhase(CoordinatorCollaborator):
         phase_rem = _phase_state.phase_budget_remaining_seconds(self.shared_state)
         if phase_rem is not None:
             kill_budget = min(kill_budget, float(phase_rem))
+        # A GEAK result reaches the headline only through this session's own re-measurement of it, which runs in this
+        # phase after GEAK returns. Which results skip it is known only then, so every hand-off leaves room for it.
+        rebench_sec = self._geak_rebench_reserve_sec()
+        log.info("GEAK: holding back %.0fs of the KERNEL budget to re-measure GEAK's result", rebench_sec)
+        kill_budget -= rebench_sec
         # The runner self-stops ``margin`` before the hard subprocess kill, which reserves the closing-grace window.
         kill_timeout = int(max(0.0, kill_budget))
         runner_timeout = int(max(0.0, kill_budget - margin))
         return runner_timeout, kill_timeout, True
+
+    def _geak_rebench_reserve_sec(self) -> float:
+        """What re-measuring a GEAK result costs: one more round of the baseline's measurement."""
+        state = self.shared_state
+        measured = _phase_state.one_more_measurement_sec(state) or _phase_state.measured_seconds(
+            state, "baseline_runtime_sec"
+        )
+        if measured is not None:
+            return measured
+        from ..actions.executors._subprocess_kill import resolve_benchmark_timeouts
+
+        return resolve_benchmark_timeouts()[1]
 
     def _kernel_rewrite_controller_timeouts(self) -> tuple[int, int]:
         """Return the Controller soft budget and Hyperloom hard timeout."""
