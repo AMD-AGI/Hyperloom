@@ -10,9 +10,9 @@ from :mod:`~hyperloom.orchestrator.predictor.sidecars`. Each block is returned
 complete or not at all: the predictor renders an absent block as a missing
 paragraph, and was never trained on a half-filled one.
 
-The headings come from the report's renderer,
-``hyperloom.orchestrator.trace_analysis._analysis_md``. Summary rows are matched
-by label and P-item cells by position; a test pins both to the renderer.
+The headings, the summary rows' labels and the P-item column header are the
+renderer's own constants, from ``hyperloom.orchestrator.trace_analysis._analysis_md``:
+a summary row is matched by its label and a P-item cell by its column's name.
 """
 
 from __future__ import annotations
@@ -20,9 +20,22 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from hyperloom.orchestrator.trace_analysis._analysis_md import DASH, EXEC_SUMMARY_HEADING, SYSTEM_SIGNALS_HEADING
+from hyperloom.orchestrator.trace_analysis._analysis_md import (
+    ATTRIBUTION_LABEL,
+    DASH,
+    EXEC_SUMMARY_HEADING,
+    EXPOSED_COMM_LABEL,
+    GPU_BUSY_LABEL,
+    GPU_IDLE_LABEL,
+    P_ITEM_COLUMNS,
+    SYSTEM_SIGNALS_HEADING,
+    TOP_BOTTLENECK_LABEL,
+    TOTAL_GPU_TIME_LABEL,
+)
 
-_P_ITEM_CELLS = 11
+_P_ITEM_HEADER = [cell.strip() for cell in P_ITEM_COLUMNS.strip().strip("|").split("|")]
+_P_ITEM_CELLS = len(_P_ITEM_HEADER)
+_P_ITEM_COLUMN = {name: index for index, name in enumerate(_P_ITEM_HEADER)}
 
 _ROW_RE = re.compile(r"^\|\s*(?P<label>[^|]+?)\s*\|\s*(?P<value>[^|]*?)\s*\|", re.MULTILINE)
 _P_ITEM_HEADING_RE = re.compile(r"^###\s+P\d+:\s*(?P<category>.+?)\s+kernels\s*$", re.MULTILINE)
@@ -69,10 +82,10 @@ def parse_window(text: str) -> dict[str, Any] | None:
     summary = _section_rows(text, EXEC_SUMMARY_HEADING)
     signals = _section_rows(text, SYSTEM_SIGNALS_HEADING)
     block = {
-        "total_gpu_time_ms": _number(summary.get("Total GPU Time")),
-        "gpu_busy_pct": _number(summary.get("GPU Busy %")),
-        "gpu_idle_pct": _number(summary.get("GPU Idle %")),
-        "exposed_comm_pct": _number(signals.get("Exposed communication")),
+        "total_gpu_time_ms": _number(summary.get(TOTAL_GPU_TIME_LABEL)),
+        "gpu_busy_pct": _number(summary.get(GPU_BUSY_LABEL)),
+        "gpu_idle_pct": _number(summary.get(GPU_IDLE_LABEL)),
+        "exposed_comm_pct": _number(signals.get(EXPOSED_COMM_LABEL)),
     }
     return None if any(value is None for value in block.values()) else block
 
@@ -89,16 +102,16 @@ def _p_item_groups(text: str) -> list[tuple[str | None, list[dict[str, Any]]]]:
             cells = [c.strip() for c in line.strip("|").split("|")]
             if not line.startswith("|") or len(cells) != _P_ITEM_CELLS:
                 continue
-            if cells[0].lower() == "operation" or set(cells[0]) <= {"-", ":"}:
+            if cells == _P_ITEM_HEADER or set(cells[0]) <= {"-", ":"}:
                 continue
-            count = _number(cells[4])
+            count = _number(cells[_P_ITEM_COLUMN["Count"]])
             rows.append(
                 {
-                    "name": _cell(cells[0]),
-                    "time_us": _number(cells[1]),
-                    "gpu_pct": _number(cells[2]),
+                    "name": _cell(cells[_P_ITEM_COLUMN["Operation"]]),
+                    "time_us": _number(cells[_P_ITEM_COLUMN["Time (us)"]]),
+                    "gpu_pct": _number(cells[_P_ITEM_COLUMN["GPU%"]]),
                     "call_count": None if count is None else int(count),
-                    "args": _cell(cells[8]),
+                    "args": _cell(cells[_P_ITEM_COLUMN["Args"]]),
                 }
             )
         groups.append((_cell(heading.group("category")), rows))
@@ -121,8 +134,8 @@ def parse_operators(text: str) -> dict[str, Any] | None:
         return None
     summary = _section_rows(text, EXEC_SUMMARY_HEADING)
     return {
-        "top_bottleneck_category": _cell(summary.get("Top Bottleneck Category")),
-        "attribution_pct": _number(summary.get("Op-attribution Coverage")),
+        "top_bottleneck_category": _cell(summary.get(TOP_BOTTLENECK_LABEL)),
+        "attribution_pct": _number(summary.get(ATTRIBUTION_LABEL)),
         "category_pct": category_pct,
         "top3_cumulative_pct": round(sum(sorted(category_pct.values(), reverse=True)[:3]), 2),
     }

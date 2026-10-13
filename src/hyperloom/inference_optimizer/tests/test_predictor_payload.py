@@ -5,13 +5,11 @@
 
 from __future__ import annotations
 
-import inspect
 import json
 from datetime import datetime, timezone
 from pathlib import Path
 
 from hyperloom.orchestrator.phases.framework import predictor_budget
-from hyperloom.orchestrator.predictor import evidence
 from hyperloom.orchestrator.predictor.payload import build_request as _build_request
 from hyperloom.orchestrator.predictor.sidecars import load_sidecars
 from hyperloom.orchestrator.predictor.source_sites import load_source_sites
@@ -251,13 +249,3 @@ def test_missing_or_malformed_sidecars_add_nothing(tmp_path):
 
 def test_no_profile_sends_only_the_flag():
     assert build_request(SharedState(), session_id="")["evidence"] == {"profile_available": False}
-
-
-def test_the_parser_reads_the_renderer_layout():
-    columns = [cell.strip() for cell in _analysis_md.P_ITEM_COLUMNS.strip().strip("|").split("|")]
-    assert len(columns) == evidence._P_ITEM_CELLS
-    assert [columns[i] for i in (0, 1, 2, 4, 8)] == ["Operation", "Time (us)", "GPU%", "Count", "Args"]
-    source = inspect.getsource(_analysis_md)
-    for label in ("Total GPU Time", "GPU Busy %", "GPU Idle %", "Top Bottleneck Category", "Op-attribution Coverage",
-                  "Exposed communication"):  # fmt: skip
-        assert f"| {label} |" in source
