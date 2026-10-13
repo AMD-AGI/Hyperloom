@@ -10,6 +10,7 @@ import subprocess
 from pathlib import Path
 
 from hyperloom.orchestrator.actions.executors._patch_source_pr import (
+    PrMaterialization,
     _fetch_diff_to_path,
     _materialize_pr_diff_from_head,
     materialize_candidate_patches,
@@ -92,8 +93,8 @@ def test_materialize_pr_diff_from_head_extracts_net_diff(tmp_path: Path):
     head_sha = _init_repo_with_pr_branch(repo, pr_ref="pr-head")
     dest = tmp_path / "out" / "pr.patch"
     cand = {"repo": "x/y", "pr_number": 7, "ref": "pr-head", "head_sha": head_sha}
-    ok, err = _materialize_pr_diff_from_head(repo, cand, dest, timeout_sec=60.0)
-    assert ok, err
+    out = _materialize_pr_diff_from_head(repo, cand, dest, timeout_sec=60.0)
+    assert out.failure is None, out.failure
     text = dest.read_text()
     assert "src.py" in text
     assert "return 2" in text
@@ -105,9 +106,94 @@ def test_materialize_pr_diff_empty_when_no_ref(tmp_path: Path):
     repo = tmp_path / "framework"
     _init_repo_with_pr_branch(repo)
     dest = tmp_path / "pr.patch"
-    ok, err = _materialize_pr_diff_from_head(repo, {"repo": "x/y"}, dest, timeout_sec=30.0)
-    assert not ok
-    assert "cannot resolve PR head" in err or "head" in err.lower()
+    out = _materialize_pr_diff_from_head(repo, {"repo": "x/y"}, dest, timeout_sec=30.0)
+    assert out.failure is not None
+    assert "cannot resolve PR head" in out.failure["error"]
+
+
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, env=_git_env())
+
+
+def _merge_pr_head(repo: Path, *, revert: bool) -> None:
+    """Merge ``pr-head`` into ``main`` with a merge commit, and optionally revert that merge."""
+    (repo / "other.py").write_text("x = 1\n", encoding="utf-8")
+    _git(repo, "add", "other.py")
+    _git(repo, "commit", "-qm", "unrelated")
+    _git(repo, "merge", "-q", "--no-ff", "-m", "merge pr", "pr-head")
+    if revert:
+        _git(repo, "revert", "--no-edit", "-m", "1", "HEAD")
+
+
+def _materialize_head(repo: Path, tmp_path: Path, head_sha: str, **extra: object) -> PrMaterialization:
+    return materialize_candidate_patches(
+        candidate={"repo": "x/y", "ref": "pr-head", "head_sha": head_sha, "prefer_checkout": True, **extra},
+        params={},
+        framework_root=repo,
+        output_root=tmp_path / "out",
+        slug="s",
+        diff_fetch_timeout_sec=30.0,
+    )
+
+
+def test_materialize_reports_a_merged_pr_head_as_already_present(tmp_path: Path):
+    """The tree has the head's copy of every file the PR changes: nothing to apply, nothing failed."""
+    repo = tmp_path / "framework"
+    head_sha = _init_repo_with_pr_branch(repo)
+    _merge_pr_head(repo, revert=False)
+
+    out = _materialize_head(repo, tmp_path, head_sha, changed_files=["src.py"])
+
+    assert out.failure is None
+    assert out.patches == []
+    assert out.already_present == [{"diff_range": f"{head_sha}..{head_sha}", "check": "pr_head_files_in_tree"}]
+
+
+def test_materialize_does_not_report_a_reverted_pr_head_as_already_present(tmp_path: Path):
+    """A reverted merge leaves the head in the history but not its change in the tree."""
+    repo = tmp_path / "framework"
+    head_sha = _init_repo_with_pr_branch(repo)
+    _merge_pr_head(repo, revert=True)
+
+    out = _materialize_head(repo, tmp_path, head_sha, changed_files=["src.py"])
+
+    assert out.already_present == []
+    assert out.failure is not None and out.failure["status"] == "fetch_failed"
+    assert "empty diff" in out.failure["error"]
+
+
+def test_materialize_needs_changed_files_that_exist_at_the_head(tmp_path: Path):
+    """A path that names nothing at the head would compare equal in any tree, so it proves nothing."""
+    repo = tmp_path / "framework"
+    head_sha = _init_repo_with_pr_branch(repo)
+    _merge_pr_head(repo, revert=False)
+
+    out = _materialize_head(repo, tmp_path, head_sha, changed_files=["python/src.py"])
+
+    assert out.already_present == []
+    assert out.failure is not None
+
+
+def test_materialize_falls_back_to_the_diff_url_when_the_head_diff_is_empty(tmp_path: Path, monkeypatch):
+    """With a diff_url the fetched diff goes to the apply, whose reverse check tells merged from reverted."""
+    repo = tmp_path / "framework"
+    head_sha = _init_repo_with_pr_branch(repo)
+    _merge_pr_head(repo, revert=False)
+
+    def fetch(_url, dest, *, timeout_sec):
+        dest.write_text(_VALID_PATCH, encoding="utf-8")
+        return True, ""
+
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._patch_source_pr._fetch_diff_to_path", fetch)
+
+    out = _materialize_head(
+        repo, tmp_path, head_sha, changed_files=["src.py"], diff_url="https://example.invalid/pr.diff"
+    )
+
+    assert out.already_present == []
+    assert out.failure is None
+    assert out.mode == "diff_url_fallback"
+    assert out.patches == [(tmp_path / "out" / "s.patch").resolve()]
 
 
 def test_materialize_explicit_patches_are_used_verbatim(tmp_path: Path):

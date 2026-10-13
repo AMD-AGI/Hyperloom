@@ -121,13 +121,23 @@ def test_collect_framework_agent_candidate_priors(coord: Coordinator) -> None:
         {"candidate_id": "c1", "status": "kept", "gain_pct": 3.2},
         {"candidate_id": "c2", "status": "in_flight"},  # non-terminal -> excluded
         {"candidate_id": "c3", "status": "critic_denied", "rationale": "off the bottleneck"},
+        {"candidate_id": "c4", "status": "already_present"},
     ]
     priors = coord.phase_framework._collect_framework_agent_candidate_priors()
     statuses = {o["status"] for o in priors["recent_outcomes"]}
-    assert statuses == {"kept", "critic_denied"}
+    assert statuses == {"kept", "critic_denied", "already_present"}
     # The denial reason has to reach the Critic, or the priors carry the verdict without the argument behind it.
     denied = next(o for o in priors["recent_outcomes"] if o["status"] == "critic_denied")
     assert denied["rationale"] == "off the bottleneck"
+
+
+def test_an_already_present_candidate_counts_as_tested() -> None:
+    """It reached the apply stage, so the phase summary does not read it as a discovery that found nothing."""
+    from hyperloom.orchestrator.framework.artifacts import summarize_candidate_outcomes
+
+    summary = summarize_candidate_outcomes([{"candidate_id": "c1", "status": "already_present", "kept": False}])
+    assert summary["tested"] == 1
+    assert summary["outcome_class"] == "tested_no_keep"
 
 
 # _match_framework_agent_candidate
@@ -221,51 +231,51 @@ def _scripted_run_git(diff_text: str = "diff --git a b\n+x\n", fetch_ok: bool = 
 def test_materialize_pr_diff_success(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(fpr_mod, "_run_git", _scripted_run_git())
     dest = tmp_path / "out" / "cand.patch"
-    ok, err = fpr_mod._materialize_pr_diff_from_head(tmp_path / "root", {"pr_number": 1015}, dest, timeout_sec=30.0)
-    assert ok is True and err == ""
+    out = fpr_mod._materialize_pr_diff_from_head(tmp_path / "root", {"pr_number": 1015}, dest, timeout_sec=30.0)
+    assert out.failure is None and out.patches == [dest.resolve()]
     assert dest.read_text().startswith("diff --git")
 
 
 def test_materialize_pr_diff_fetch_fails(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(fpr_mod, "_run_git", _scripted_run_git(fetch_ok=False))
-    ok, err = fpr_mod._materialize_pr_diff_from_head(
+    out = fpr_mod._materialize_pr_diff_from_head(
         tmp_path / "root", {"ref": "refs/pull/1/head"}, tmp_path / "c.patch", timeout_sec=30.0
     )
-    assert ok is False and "git fetch" in err
+    assert out.failure is not None and "git fetch" in out.failure["error"]
 
 
 def test_materialize_pr_diff_empty_diff(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(fpr_mod, "_run_git", _scripted_run_git(diff_text="   \n"))
-    ok, err = fpr_mod._materialize_pr_diff_from_head(
+    out = fpr_mod._materialize_pr_diff_from_head(
         tmp_path / "root", {"head_sha": "deadbeef"}, tmp_path / "c.patch", timeout_sec=30.0
     )
-    assert ok is False and "empty diff" in err
+    assert out.failure is not None and "empty diff" in out.failure["error"]
 
 
 def test_materialize_pr_diff_no_head_resolvable(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(fpr_mod, "_run_git", _scripted_run_git())
-    ok, err = fpr_mod._materialize_pr_diff_from_head(tmp_path / "root", {}, tmp_path / "c.patch", timeout_sec=30.0)
-    assert ok is False and "cannot resolve PR head" in err
+    out = fpr_mod._materialize_pr_diff_from_head(tmp_path / "root", {}, tmp_path / "c.patch", timeout_sec=30.0)
+    assert out.failure is not None and "cannot resolve PR head" in out.failure["error"]
 
 
 def test_materialize_pr_diff_checks_out_nothing(monkeypatch, tmp_path) -> None:
     """Both ends of the diff range are shas, so no tree has to be materialized."""
     seen: list[str] = []
     monkeypatch.setattr(fpr_mod, "_run_git", _scripted_run_git(seen=seen))
-    ok, _err = fpr_mod._materialize_pr_diff_from_head(
+    out = fpr_mod._materialize_pr_diff_from_head(
         tmp_path / "root", {"head_sha": "deadbeef"}, tmp_path / "c.patch", timeout_sec=30.0
     )
-    assert ok is True
+    assert out.failure is None
     assert "worktree" not in seen
 
 
 def test_materialize_pr_diff_ignores_an_unusable_pr_number(monkeypatch, tmp_path) -> None:
     """The row reaches us from the KB and from LLM-authored proposals alike."""
     monkeypatch.setattr(fpr_mod, "_run_git", _scripted_run_git())
-    ok, err = fpr_mod._materialize_pr_diff_from_head(
+    out = fpr_mod._materialize_pr_diff_from_head(
         tmp_path / "root", {"pr_number": "not-a-number"}, tmp_path / "c.patch", timeout_sec=30.0
     )
-    assert ok is False and "cannot resolve PR head" in err
+    assert out.failure is not None and "cannot resolve PR head" in out.failure["error"]
 
 
 # Dispatch pause on a spent phase budget
@@ -540,7 +550,7 @@ def test_record_authoring_empty_guards(coord: Coordinator) -> None:
     assert not (coord.shared_state.framework_agent_phase_progress or [])
 
 
-def test_record_authoring_empty_already_present(coord: Coordinator) -> None:
+def test_record_authoring_empty_stamps_author_empty_once(coord: Coordinator) -> None:
     _enter_fpr(coord)
     task = types.SimpleNamespace(
         task_id="spec-2",
@@ -548,48 +558,19 @@ def test_record_authoring_empty_already_present(coord: Coordinator) -> None:
             "framework_agent_authoring": True,
             "framework_agent_candidate_id": "cand-2",
             "framework_batch_id": "b1",
-            "framework_audit": {"semantic_status": "already_equivalent"},
         },
     )
     coord.phase_framework._record_framework_agent_authoring_empty_outcome(
-        task=task, done_payload={"payload": {"patches_written": [], "summary": "already there"}}
+        task=task, done_payload={"payload": {"patches_written": [], "summary": "nothing to write"}}
     )
     row = coord.shared_state.framework_agent_phase_progress[-1]
     assert row["candidate_id"] == "cand-2"
-    assert row["status"] == "already_present"
+    assert row["status"] == "author_empty"
     # Idempotent: a second call does not append a duplicate.
     coord.phase_framework._record_framework_agent_authoring_empty_outcome(
         task=task, done_payload={"payload": {"patches_written": [], "summary": "again"}}
     )
     assert sum(1 for p in coord.shared_state.framework_agent_phase_progress if p["candidate_id"] == "cand-2") == 1
-
-
-def test_record_authoring_empty_status_variants(coord: Coordinator) -> None:
-    _enter_fpr(coord)
-    coord.shared_state.framework_agent_phase_progress = []
-    # not_present -> not_applicable.
-    coord.phase_framework._record_framework_agent_authoring_empty_outcome(
-        task=types.SimpleNamespace(
-            task_id="s-a",
-            params={
-                "framework_agent_authoring": True,
-                "framework_agent_candidate_id": "na-1",
-                "framework_audit": {"semantic_status": "not_present"},
-            },
-        ),
-        done_payload={"patches_written": [], "summary": "missing"},
-    )
-    # no audit -> author_empty.
-    coord.phase_framework._record_framework_agent_authoring_empty_outcome(
-        task=types.SimpleNamespace(
-            task_id="s-b",
-            params={"framework_agent_authoring": True, "framework_agent_candidate_id": "ae-1"},
-        ),
-        done_payload={"patches_written": []},
-    )
-    statuses = {p["candidate_id"]: p["status"] for p in coord.shared_state.framework_agent_phase_progress}
-    assert statuses["na-1"] == "not_applicable"
-    assert statuses["ae-1"] == "author_empty"
 
 
 # Lenient ranker: an "applicable: false" reply never vetoes the phase

@@ -444,8 +444,14 @@ with that off too, the source arm reports itself dry.
 
 Every diff lands through `integrate_patch`, with `patch_source` naming where
 it came from. KEEP commits to the live tree so the next candidate stacks on
-top; REVERT does `git reset --hard`. Resume skips completed candidates by
-idempotency key.
+top; REVERT does `git reset --hard`. A candidate the tree already holds is not
+benchmarked: when every patch in the set reverse-applies cleanly and the round
+changes nothing else, it ends `already_present`, with that evidence on the
+result and an `already_present` row in the framework KB. An upstream PR whose
+head is already in the live history ends the same way only when the tree still
+has the head's copy of every file the PR changes; with a `diff_url`, the
+fetched diff's reverse check decides instead, so a reverted PR is benchmarked.
+Resume skips completed candidates by idempotency key.
 
 The phase exits when both arms are dry, when its budget is spent, or at the
 absolute per-phase cap.

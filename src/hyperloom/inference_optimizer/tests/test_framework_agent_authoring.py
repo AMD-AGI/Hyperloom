@@ -654,7 +654,6 @@ def test_empty_outcome_fires_when_patch_dropped_by_vetting(tmp_path: Path):
             "framework_agent_authoring": True,
             "framework_agent_candidate_id": cand,
             "framework_batch_id": "b1",
-            "framework_audit": {"semantic_status": "not_present"},
         },
     )
     done_payload = {
@@ -671,7 +670,7 @@ def test_empty_outcome_fires_when_patch_dropped_by_vetting(tmp_path: Path):
     rows = stub.shared_state.framework_agent_phase_progress
     assert len(rows) == 1
     assert rows[0]["candidate_id"] == cand
-    assert rows[0]["status"] == "not_applicable"
+    assert rows[0]["status"] == "author_empty"
     assert rows[0]["kept"] is False
 
 
@@ -773,7 +772,6 @@ def test_empty_outcome_skips_when_config_levers_present(tmp_path: Path):
             "framework_agent_authoring": True,
             "framework_agent_candidate_id": "https://github.com/ROCm/vllm/pull/1014",
             "framework_batch_id": "b1",
-            "framework_audit": {"semantic_status": "not_present"},
         },
     )
     done_payload = {
@@ -818,7 +816,6 @@ def test_empty_outcome_skips_when_artifacts_written_routable(tmp_path: Path):
             "framework_agent_authoring": True,
             "framework_agent_candidate_id": "https://github.com/ROCm/aiter/pull/4130",
             "framework_batch_id": "b1",
-            "framework_audit": {"semantic_status": "not_present"},
         },
     )
     done_payload = {
@@ -853,7 +850,6 @@ def test_empty_outcome_stamps_when_artifacts_source_missing(tmp_path: Path):
             "framework_agent_authoring": True,
             "framework_agent_candidate_id": "https://github.com/ROCm/aiter/pull/9999",
             "framework_batch_id": "b1",
-            "framework_audit": {"semantic_status": "not_present"},
         },
     )
     done_payload = {
@@ -875,7 +871,7 @@ def test_empty_outcome_stamps_when_artifacts_source_missing(tmp_path: Path):
     )
     rows = stub.shared_state.framework_agent_phase_progress
     assert len(rows) == 1
-    assert rows[0]["status"] == "not_applicable"
+    assert rows[0]["status"] == "author_empty"
     assert rows[0]["kept"] is False
 
 
@@ -898,7 +894,6 @@ def test_empty_outcome_stamps_when_artifacts_source_outside_sandbox(tmp_path: Pa
             "framework_agent_authoring": True,
             "framework_agent_candidate_id": "https://github.com/ROCm/aiter/pull/8888",
             "framework_batch_id": "b1",
-            "framework_audit": {"semantic_status": "not_present"},
         },
     )
     done_payload = {
@@ -919,7 +914,7 @@ def test_empty_outcome_stamps_when_artifacts_source_outside_sandbox(tmp_path: Pa
     )
     rows = stub.shared_state.framework_agent_phase_progress
     assert len(rows) == 1
-    assert rows[0]["status"] == "not_applicable"
+    assert rows[0]["status"] == "author_empty"
     assert rows[0]["kept"] is False
 
 

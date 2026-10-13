@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 
 from hyperloom.common.url_safety import require_http_url
 
+from ._apply_feedback import PresenceCheck
 from ._git import _git_head_sha, _run_git
 
 log = logging.getLogger(__name__)
@@ -23,6 +24,9 @@ log = logging.getLogger(__name__)
 DEFAULT_DIFF_FETCH_TIMEOUT_SEC: float = 30.0
 #: Cap on a downloaded unified-diff body (bytes). Larger payloads are refused.
 DEFAULT_DIFF_MAX_BYTES: int = 32 * 1024 * 1024
+#: Timeout for a local git query against the live tree (merge base, tree listing, file comparison).
+_GIT_QUERY_TIMEOUT_SEC: float = 60.0
+_CHECKOUT_HEAD: str = "checkout_head"
 
 
 def _pr_number_of(candidate: dict[str, Any]) -> int:
@@ -136,7 +140,7 @@ def _materialize_pr_diff_from_head(
     dest: Path,
     *,
     timeout_sec: float,
-) -> tuple[bool, str]:
+) -> PrMaterialization:
     """checkout-head (diff source) mode."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     root = str(framework_root)
@@ -159,7 +163,7 @@ def _materialize_pr_diff_from_head(
             timeout=timeout_sec,
         )
         if not ok:
-            return False, f"git fetch {fetch_ref!r} failed: {err}"
+            return _checkout_head_failed(_CHECKOUT_HEAD, f"git fetch {fetch_ref!r} failed: {err}")
         if not head_sha:
             # FETCH_HEAD now points at the fetched head.
             ok2, out2, err2 = _run_git(
@@ -167,46 +171,106 @@ def _materialize_pr_diff_from_head(
                 timeout=30.0,
             )
             if not ok2 or not out2.strip():
-                return False, f"could not resolve FETCH_HEAD: {err2}"
+                return _checkout_head_failed(_CHECKOUT_HEAD, f"could not resolve FETCH_HEAD: {err2}")
             head_sha = out2.strip()
     if not head_sha:
-        return False, ("checkout-head: no head_sha / ref / pr_number on candidate; cannot resolve PR head")
+        return _checkout_head_failed(
+            _CHECKOUT_HEAD, "checkout-head: no head_sha / ref / pr_number on candidate; cannot resolve PR head"
+        )
 
     # Diff against the merge-base so applying introduces only the PR's own commits, not the full divergence from the
     # live HEAD.
     live_head = _git_head_sha(framework_root)
     merge_base = ""
     if live_head:
-        ok_mb, mb_out, _mb_e = _run_git(["-C", root, "merge-base", live_head, head_sha], timeout=60.0)
+        ok_mb, mb_out, _mb_e = _run_git(["-C", root, "merge-base", live_head, head_sha], timeout=_GIT_QUERY_TIMEOUT_SEC)
         if ok_mb and mb_out.strip():
             merge_base = mb_out.strip()
     diff_range = f"{merge_base}..{head_sha}" if merge_base else head_sha
     ok_d, diff_out, err_d = _run_git(["-C", root, "diff", "--binary", diff_range], timeout=timeout_sec)
     if not ok_d:
-        return False, f"git diff {diff_range!r} failed: {err_d}"
+        return _checkout_head_failed(_CHECKOUT_HEAD, f"git diff {diff_range!r} failed: {err_d}")
     if not diff_out.strip():
-        return False, (
-            f"checkout-head produced an empty diff for range {diff_range!r} (PR head already merged into live tree?)"
-        )
+        return _empty_head_diff(framework_root, candidate, head_sha, diff_range)
     try:
         dest.write_text(diff_out, encoding="utf-8")
     except OSError as exc:
-        return False, f"could not write diff to {dest}: {exc!r}"
-    return True, ""
+        return _checkout_head_failed(_CHECKOUT_HEAD, f"could not write diff to {dest}: {exc!r}")
+    return PrMaterialization(patches=[dest.resolve()], mode=_CHECKOUT_HEAD)
 
 
 @dataclass
 class PrMaterialization:
     """What an upstream-PR candidate resolved to on disk."""
 
-    #: The patch files to apply; empty when :attr:`failure` is set.
+    #: The patch files to apply; empty when :attr:`failure` or :attr:`already_present` is set.
     patches: list[Path] = field(default_factory=list)
     #: Which source produced them: ``explicit`` / ``checkout_head`` /
     #: ``diff_url_fallback`` / ``diff_url``.
     mode: str = ""
-    #: A terminal result dict when nothing applyable could be produced. The
+    #: A terminal result dict when no patch to apply could be produced. The
     #: caller returns it as-is rather than benching an unpatched tree.
     failure: dict[str, Any] | None = None
+    #: Evidence that the live tree already holds every change the candidate
+    #: makes, so there is nothing to apply.
+    already_present: list[dict[str, str]] = field(default_factory=list)
+
+
+def _checkout_head_failed(mode: str, err: str) -> PrMaterialization:
+    """The terminal result of a checkout-head extraction that produced no diff to apply."""
+    return PrMaterialization(
+        mode=mode,
+        failure={
+            "status": "fetch_failed",
+            "error_class": "checkout_head_failed",
+            "error": err,
+            "reason": f"checkout-head diff extraction failed: {err}",
+        },
+    )
+
+
+def _empty_head_diff(
+    framework_root: Path, candidate: dict[str, Any], head_sha: str, diff_range: str
+) -> PrMaterialization:
+    """Map a PR head that diffs empty against the live tree's merge base.
+
+    That shows only that the head is in the live history, which stays true
+    after a revert. A candidate with a ``diff_url`` therefore falls back to it,
+    and the apply's reverse check decides. Without one, the tree holds the PR
+    only when it still has the head's copy of every file the PR changes.
+    """
+    has_diff_url = bool(str(candidate.get("diff_url") or "").strip())
+    if has_diff_url or not _tree_has_head_files(framework_root, head_sha, candidate.get("changed_files")):
+        return _checkout_head_failed(
+            _CHECKOUT_HEAD,
+            f"checkout-head produced an empty diff for range {diff_range!r} (PR head already merged into live tree?)",
+        )
+    log.info("upstream_pr: %s diffs empty and the tree has the head's files; the PR is already in it", diff_range)
+    return PrMaterialization(
+        mode=_CHECKOUT_HEAD,
+        already_present=[{"diff_range": diff_range, "check": PresenceCheck.PR_HEAD_FILES.value}],
+    )
+
+
+def _tree_has_head_files(framework_root: Path, head_sha: str, changed_files: Any) -> bool:
+    """True when the working tree matches ``head_sha`` on every path in ``changed_files``.
+
+    Every path must exist at the head, so one that names nothing in either tree
+    cannot pass as unchanged.
+    """
+    files = {str(f).strip() for f in changed_files if str(f).strip()} if isinstance(changed_files, list) else set()
+    if not files:
+        return False
+    root = str(framework_root)
+    ok_ls, listed, _err = _run_git(
+        ["-C", root, "ls-tree", "-z", "--name-only", head_sha, "--", *files], timeout=_GIT_QUERY_TIMEOUT_SEC
+    )
+    if not ok_ls or set(filter(None, listed.split("\0"))) != files:
+        return False
+    ok_diff, _out, _err = _run_git(
+        ["-C", root, "diff", "--quiet", head_sha, "--", *files], timeout=_GIT_QUERY_TIMEOUT_SEC
+    )
+    return ok_diff
 
 
 def materialize_candidate_patches(
@@ -248,7 +312,7 @@ def materialize_candidate_patches(
         or str(candidate.get("ref") or "").strip()
         or bool(_pr_number_of(candidate))
     )
-    explicit_checkout = apply_mode in {"checkout_head", "checkout-head", "checkout"} or prefer_checkout
+    explicit_checkout = apply_mode in {_CHECKOUT_HEAD, "checkout-head", "checkout"} or prefer_checkout
     use_checkout_head = explicit_checkout or (not diff_url and has_checkout_ref)
     # Same-repo guard: checkout-head fetches from the live origin, so a cross-repo candidate would fetch the wrong
     # ref.
@@ -269,29 +333,15 @@ def materialize_candidate_patches(
 
     dest = output_root / f"{slug}.patch"
     if use_checkout_head:
-        mode = "checkout_head"
-        ok, err = _materialize_pr_diff_from_head(
-            framework_root,
-            candidate,
-            dest,
-            timeout_sec=diff_fetch_timeout_sec * 4.0,
-        )
-        if not ok and diff_url:
-            # A worktree/fetch hiccup must not strand an applyable candidate.
-            log.warning("upstream_pr: checkout-head failed (%s); falling back to diff_url", err)
-            mode = "diff_url_fallback"
-            ok, err = _fetch_diff_to_path(diff_url, dest, timeout_sec=diff_fetch_timeout_sec)
+        head = _materialize_pr_diff_from_head(framework_root, candidate, dest, timeout_sec=diff_fetch_timeout_sec * 4.0)
+        if head.failure is None or not diff_url:
+            return head
+        # A worktree/fetch hiccup must not strand a candidate that would apply.
+        log.warning("upstream_pr: checkout-head failed (%s); falling back to diff_url", head.failure["error"])
+        ok, err = _fetch_diff_to_path(diff_url, dest, timeout_sec=diff_fetch_timeout_sec)
         if not ok:
-            return PrMaterialization(
-                mode=mode,
-                failure={
-                    "status": "fetch_failed",
-                    "error_class": "checkout_head_failed",
-                    "error": err,
-                    "reason": f"checkout-head diff extraction failed: {err}",
-                },
-            )
-        return PrMaterialization(patches=[dest.resolve()], mode=mode)
+            return _checkout_head_failed("diff_url_fallback", err)
+        return PrMaterialization(patches=[dest.resolve()], mode="diff_url_fallback")
 
     ok, err = _fetch_diff_to_path(diff_url, dest, timeout_sec=diff_fetch_timeout_sec)
     if not ok:

@@ -10,7 +10,9 @@ from typing import Any
 
 # Per-candidate terminal statuses that mean the candidate reached the apply/bench stage (as opposed to being filtered
 # before any source change).
-_TESTED_STATUSES: frozenset[str] = frozenset({"kept", "reverted", "applied_no_bench", "apply_failed"})
+_TESTED_STATUSES: frozenset[str] = frozenset(
+    {"kept", "reverted", "applied_no_bench", "apply_failed", "already_present"}
+)
 
 
 def candidate_key(row: dict[str, Any] | None) -> str:

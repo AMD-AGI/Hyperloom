@@ -41,8 +41,6 @@ from hyperloom.inference_optimizer.framework_paths import (
     resolve_session_framework_root,
 )
 from ...specialists.patch_safety import (
-    is_unified_diff,
-    patch_escapes_tree,
     patch_targets_missing,
     resolve_patch_apply_root,
 )
@@ -88,7 +86,6 @@ from ._accuracy_gate import (
     parse_eval_results,
     read_eval_probe,
 )
-from ._apply_feedback import ApplyFeedback, build_apply_feedback
 from ._git import _git_head_sha, _run_git_cp
 from ._integrate_attempt import IntegrateAttempt
 from ._setup_replay import replay_setup_commands
@@ -100,11 +97,11 @@ from ._patch_source_pr import (
 )
 from ._nogit_patch import (
     _P_LEVELS,
-    _apply_patch_no_git,
     _is_git_tree,
     _is_within,
 )
 from ...enablement.lane import bind_integrate_to_lane
+from ._patch_set_apply import _run_git_apply, apply_patch_set
 from ...enablement.recipe.credentials import detect_credential_channels
 from ...enablement.recipe.projections import project_launch_evidence
 from ._patch_snapshot import _git_commit_kept, _patch_touched_paths
@@ -646,34 +643,6 @@ def _resolve_framework_root(
     return tree.root if tree is not None else None
 
 
-def _run_git_apply(
-    framework_root: Path,
-    patch_path: Path,
-    *,
-    p_level: int,
-    check_only: bool,
-) -> tuple[bool, str]:
-    """Single ``git apply`` invocation at an explicit strip level.
-
-    Args:
-        framework_root: The git checkout to apply into.
-        patch_path: The patch file to apply.
-        p_level: The ``-p<N>`` strip level.
-        check_only: Whether to pass ``--check`` (dry run, no mutation).
-
-    Returns:
-        A ``(ok, stderr)`` tuple; ``ok`` is True on a zero return code.
-    """
-    args = ["-C", str(framework_root), "apply", f"-p{p_level}"]
-    if check_only:
-        args.append("--check")
-    args.append(str(patch_path))
-    cp = _run_git_cp(args, timeout=120.0)
-    if cp is None:
-        return False, "git apply spawn failed"
-    return cp.returncode == 0, cp.stderr.strip()
-
-
 def _derive_lane(params: dict[str, Any]) -> str:
     """Derive the retry lane name from integrate_patch params.
 
@@ -803,94 +772,6 @@ def _git_apply(
     if check_only:
         return True, ""
     return _run_git_apply(framework_root, patch_path, p_level=lvl, check_only=False)
-
-
-def _git_reverse_applies_cleanly(framework_root: Path, patch_path: Path) -> bool:
-    """True when ``patch_path`` is already fully applied in ``framework_root``.
-
-    The git-channel twin of
-    :func:`._nogit_patch._reverse_applies_cleanly`. ``git apply -R --check``
-    succeeds only when every hunk's *post*-state is already present, i.e. the
-    tree already equals what a forward apply would produce. Read-only:
-    ``--check`` never mutates the tree.
-
-    Args:
-        framework_root: The git checkout the patch targets.
-        patch_path: The patch file to probe.
-
-    Returns:
-        ``True`` when some strip level reverse-checks cleanly.
-    """
-    from ._nogit_patch import _P_LEVELS
-
-    for lvl in _P_LEVELS:
-        cp = _run_git_cp(
-            ["-C", str(framework_root), "apply", "-R", f"-p{lvl}", "--check", str(patch_path)],
-            timeout=120.0,
-        )
-        if cp is not None and cp.returncode == 0:
-            return True
-    return False
-
-
-def _git_apply_collect_feedback(
-    framework_root: Path,
-    patch_path: Path,
-) -> "tuple[bool, str, ApplyFeedback | None]":
-    """Like :func:`_git_apply` but also returns an :class:`ApplyFeedback` on failure.
-
-    On success returns ``(True, "", None)``.  On failure returns
-    ``(False, stderr, ApplyFeedback)`` where *ApplyFeedback* carries the
-    stderr of every tried ``-p`` level and a source-context snippet.
-
-    Args:
-        framework_root: The git checkout to apply into.
-        patch_path: The patch file to apply.
-
-    Returns:
-        ``(ok, err, feedback)`` — feedback is ``None`` on success.
-    """
-    from ._nogit_patch import _P_LEVELS
-
-    # Collect per-level check stderr for the feedback record.
-    tried_levels: list[int] = []
-    level_stderrs: list[str] = []
-    for lvl in _P_LEVELS:
-        ok_check, stderr_check = _run_git_apply(framework_root, patch_path, p_level=lvl, check_only=True)
-        tried_levels.append(lvl)
-        if stderr_check:
-            level_stderrs.append(f"-p{lvl}: {stderr_check}")
-        if ok_check:
-            # Level works; now apply for real.
-            ok_apply, stderr_apply = _run_git_apply(framework_root, patch_path, p_level=lvl, check_only=False)
-            if ok_apply:
-                return True, "", None
-            feedback = build_apply_feedback(
-                patch_path,
-                channel="git",
-                tried_levels=tried_levels,
-                stderr=stderr_apply,
-                framework_root=framework_root,
-            )
-            return False, stderr_apply, feedback
-
-    # A subset of a patch already applied is a no-op that ``--check`` still
-    # rejects; a clean reverse check proves every hunk is in the tree.
-    if _git_reverse_applies_cleanly(framework_root, patch_path):
-        log.info(
-            "integrate_patch: %s is already fully applied (clean git apply -R --check); treating as a no-op",
-            patch_path.name,
-        )
-        return True, "", None
-    all_stderrs = "\n".join(level_stderrs)
-    feedback = build_apply_feedback(
-        patch_path,
-        channel="git",
-        tried_levels=tried_levels,
-        stderr=all_stderrs,
-        framework_root=framework_root,
-    )
-    return False, all_stderrs, feedback
 
 
 def _git_apply_reverse(
@@ -2022,7 +1903,7 @@ class IntegratePatchExecutor:
         # Upstream-PR mode has no specialist to look up and no specialist
         # verdict to enforce: the Critic verdict on this proposal is the gate.
         if resolve_patch_source(params) == PATCH_SOURCE_UPSTREAM_PR:
-            return self._stage_resolve_upstream_pr(attempt, params, shared_state)
+            return await self._stage_resolve_upstream_pr(attempt, params, extra)
 
         specialist_task_id = str(params.get("specialist_task_id") or "").strip()
         if not specialist_task_id:
@@ -2072,11 +1953,11 @@ class IntegratePatchExecutor:
         attempt.done_payload = done_payload
         return None
 
-    def _stage_resolve_upstream_pr(
+    async def _stage_resolve_upstream_pr(
         self,
         attempt: IntegrateAttempt,
         params: dict[str, Any],
-        shared_state: Any,
+        extra: dict[str, Any],
     ) -> dict[str, Any] | None:
         """Resolve an upstream-PR candidate into patches on the task's own scratch.
 
@@ -2087,12 +1968,13 @@ class IntegratePatchExecutor:
         Args:
             attempt: The integration attempt receiving the resolved inputs.
             params: Task params, mutated with the resolved patch paths.
-            shared_state: SharedState, or ``None``.
+            extra: The runner ``extra`` mapping, carrying SharedState when there is one.
 
         Returns:
             A terminal result when the candidate has no permissive Critic
-            verdict or could not be materialised, else ``None``.
+            verdict, could not be materialised or is already in the tree, else ``None``.
         """
+        shared_state = extra.get("shared_state") or extra.get("state")
         candidate = params.get("candidate") or {}
         if not isinstance(candidate, dict) or not candidate:
             return {
@@ -2116,8 +1998,7 @@ class IntegratePatchExecutor:
         if critic_reject is not None:
             return critic_reject
 
-        task_id = attempt.task_id
-        scratch = runs_dir(self.session_dir, "integrate_patch", task_id)
+        scratch = runs_dir(self.session_dir, "integrate_patch", attempt.task_id)
         scratch.mkdir(parents=True, exist_ok=True)
         framework_root = _resolve_framework_root(str(params.get("framework_source_root") or "").strip() or None)
         if framework_root is None:
@@ -2129,6 +2010,29 @@ class IntegratePatchExecutor:
                 "patches_reverted": [],
             }
 
+        attempt.specialist_task_id = attempt.task_id
+        attempt.shared_state = shared_state
+        attempt.specialist_workspace = scratch
+        return await self._materialize_upstream_pr(
+            attempt, params, extra, framework_root=framework_root, scratch=scratch
+        )
+
+    async def _materialize_upstream_pr(
+        self,
+        attempt: IntegrateAttempt,
+        params: dict[str, Any],
+        extra: dict[str, Any],
+        *,
+        framework_root: Path,
+        scratch: Path,
+    ) -> dict[str, Any] | None:
+        """Fetch the candidate's diff into ``params['patches']``, or end the attempt when there is none to apply.
+
+        Returns:
+            A terminal result when no diff could be fetched or the tree already
+            holds the candidate, else ``None``.
+        """
+        candidate = params["candidate"]
         materialized = materialize_candidate_patches(
             candidate=candidate,
             params=params,
@@ -2137,6 +2041,8 @@ class IntegratePatchExecutor:
             slug=_candidate_slug(candidate),
             diff_fetch_timeout_sec=DEFAULT_DIFF_FETCH_TIMEOUT_SEC,
         )
+        if materialized.already_present:
+            return await self._end_already_present(attempt, params, extra, materialized.already_present)
         if materialized.failure is not None:
             return {
                 **materialized.failure,
@@ -2148,10 +2054,6 @@ class IntegratePatchExecutor:
             }
         params["patches"] = [str(p) for p in materialized.patches]
         params["patch_source_mode"] = materialized.mode
-
-        attempt.specialist_task_id = task_id
-        attempt.shared_state = shared_state
-        attempt.specialist_workspace = scratch
         return None
 
     async def _stage_provision_attempt_runtime(
@@ -2514,14 +2416,10 @@ class IntegratePatchExecutor:
         # A runtime this round acquired changes what the next boot executes; a
         # re-provisioned kept one is the stack the last KEEP was already graded on.
         acquired_runtime = bool(attempt.attempt_venv_root) and not attempt.shared_state.enablement.kept_stack_action
-        if (
-            not patch_paths
-            and not proposal_extra_args
-            and not proposal_extra_envs
-            and not artifact_specs
-            and not _setup_ran
-            and not acquired_runtime
-        ):
+        changes_beyond_patches = bool(
+            proposal_extra_args or proposal_extra_envs or artifact_specs or _setup_ran or acquired_runtime
+        )
+        if not patch_paths and not changes_beyond_patches:
             # Launch-only mode: skip the no-patches early-return and fall through to bench.
             if params.get("enablement_launch_only"):
                 output_root = runs_dir(self.session_dir, "integrate_patch", specialist_task_id)
@@ -2736,7 +2634,6 @@ class IntegratePatchExecutor:
         recovery["phase"] = "ready"
         if shared_state is not None:
             shared_state.save(self.session_dir)
-        nogit_patch_backups: list[dict[str, Any]] = []
 
         # An artifact preimage has to describe the tree as this attempt found
         # it, so it is taken before the patches run: a patch that creates the
@@ -2771,52 +2668,12 @@ class IntegratePatchExecutor:
             if shared_state is not None:
                 shared_state.save(self.session_dir)
 
-        applied: list[Path] = []
         applied_artifacts: list[dict[str, Any]] = []
-        apply_errors: list[dict[str, str]] = []
-        apply_feedbacks: list[ApplyFeedback] = []
-        # ``applied`` is published by identity and appended to in place.
-        attempt.applied = applied
         attempt.applied_artifacts = applied_artifacts
-        for patch in patch_paths:
-            # ``vet_patches`` runs at authoring time inside the specialist
-            # runner, so a patch from anywhere else -- ``params.patches``, and
-            # every remotely-fetched ``upstream_pr`` diff -- arrives unvetted.
-            try:
-                patch_text = patch.read_text(encoding="utf-8", errors="replace")
-            except OSError as exc:
-                apply_errors.append({"patch": str(patch), "stderr": f"unreadable: {exc!r}"})
-                break
-            if not is_unified_diff(patch_text):
-                apply_errors.append({"patch": str(patch), "stderr": "not a unified diff"})
-                break
-            escaping = patch_escapes_tree(patch_text)
-            if escaping is not None:
-                apply_errors.append({"patch": str(patch), "stderr": f"path escapes tree: {escaping!r}"})
-                break
-            if git_head:
-                ok, err, fb = _git_apply_collect_feedback(framework_root, patch)
-                if not ok:
-                    apply_errors.append({"patch": str(patch), "stderr": err})
-                    if fb is not None:
-                        apply_feedbacks.append(fb)
-                    break
-            else:
-                ok, err, backups, fb = _apply_patch_no_git(
-                    framework_root,
-                    patch,
-                    recovery_root / "patch_backups",
-                    seq_offset=len(nogit_patch_backups),
-                )
-                nogit_patch_backups.extend(backups)
-                if not ok:
-                    apply_errors.append({"patch": str(patch), "stderr": err})
-                    if fb is not None:
-                        apply_feedbacks.append(fb)
-                    break
-            applied.append(patch)
-
-        if apply_errors:
+        patch_set = apply_patch_set(
+            attempt, patch_paths, git_tree=bool(git_head), backup_root=recovery_root / "patch_backups"
+        )
+        if patch_set.errors:
             await self._maybe_write_framework_kb_record(
                 params=params,
                 done_payload=done_payload,
@@ -2828,18 +2685,20 @@ class IntegratePatchExecutor:
             base_result: dict[str, Any] = {
                 "status": "apply_failed",
                 "error_class": "git_apply_failed",
-                "error": apply_errors,
+                "error": patch_set.errors,
                 "specialist_task_id": specialist_task_id,
                 "patches_applied": [],
                 "patches_reverted": [],
                 "workspace": str(output_root),
                 "lane": lane,
-                "retry_feedback": [fb.to_dict() for fb in apply_feedbacks],
+                "retry_feedback": [fb.to_dict() for fb in patch_set.feedbacks],
                 "prior_patches": [str(p) for p in patch_paths],
             }
             if bool(params.get("enablement")):
                 base_result["enablement"] = True
             return base_result
+        if patch_set.changed_nothing and not changes_beyond_patches:
+            return await self._end_already_present(attempt, params, extra, patch_set.already_present)
 
         if artifact_specs:
             applied_artifacts, artifact_apply_errors = self._apply_artifacts(
@@ -2874,7 +2733,7 @@ class IntegratePatchExecutor:
             return {
                 "status": "applied_no_bench",
                 "specialist_task_id": specialist_task_id,
-                "patches_applied": [str(p) for p in applied],
+                "patches_applied": [str(p) for p in attempt.applied],
                 "patches_reverted": [],
                 "artifacts_applied": applied_artifacts,
                 "extra_server_args_applied": extra_server_args_applied,
@@ -2889,6 +2748,47 @@ class IntegratePatchExecutor:
         attempt.extra_server_args_applied = extra_server_args_applied
         attempt.dropped_env_overrides = dropped_env_overrides
         return None
+
+    async def _end_already_present(
+        self,
+        attempt: IntegrateAttempt,
+        params: dict[str, Any],
+        extra: dict[str, Any],
+        evidence: list[dict[str, str]],
+    ) -> dict[str, Any]:
+        """End an attempt whose every change the tree already holds: there is nothing to benchmark.
+
+        Args:
+            attempt: The attempt; it applied nothing, so it reports nothing reverted.
+            params: Task params, read for the KB record and the enablement lane.
+            extra: The runner ``extra`` mapping, read for the KB record.
+            evidence: What showed each change to be present, and how.
+
+        Returns:
+            The ``already_present`` result.
+        """
+        from ...knowledge import kb_writeback as _kb
+
+        log.info("integrate_patch: the framework tree already holds this candidate; not benchmarking: %s", evidence)
+        attempt.applied.clear()
+        await self._maybe_write_framework_kb_record(
+            params=params,
+            done_payload=attempt.done_payload,
+            outcome=_kb.OUTCOME_ALREADY_PRESENT,
+            tps_delta_pct=0.0,
+            extra=extra,
+        )
+        result: dict[str, Any] = {
+            "status": "already_present",
+            "specialist_task_id": attempt.specialist_task_id,
+            "already_present": evidence,
+            "patches_applied": [],
+            "patches_reverted": [],
+            "reason": "the framework tree already holds every change in this candidate, so there is nothing to measure",
+        }
+        if params.get("enablement"):
+            result["enablement"] = True
+        return result
 
     async def _stage_gate(
         self,
@@ -4319,8 +4219,7 @@ class IntegratePatchExecutor:
         proposal = self._find_framework_proposal(done_payload)
         if proposal is None:
             # The upstream-PR lane carries the PR identity on the candidate
-            # rather than in a specialist's ``fa_*`` markers. Discovery dedups
-            # on this ledger, so a lane that writes none is re-benched forever.
+            # rather than in a specialist's ``fa_*`` markers.
             proposal = self._upstream_pr_kb_proposal(params or {})
             if proposal is None:
                 return
