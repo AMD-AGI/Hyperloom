@@ -444,6 +444,46 @@ def test_kernel_exits_when_all_attempts_are_rejected_or_integrated():
     assert reason == "kernel_no_more_leverage"
 
 
+def test_an_integrate_row_retires_its_attempt_by_group_key():
+    state = _skip_to_sweep_state("KERNEL_AGENT")
+    state.optimization_stack = [{"action": "integrate", "kernel_id": "k900", "task_group_key": "g1"}]
+    state.kernel_opt_task_attempts = {
+        "k002": {"task_group_key": "g1", "last_decision": "KEEP", "last_status": "ok"},
+    }
+
+    assert kernel_work_pending(state) is False
+
+
+def test_an_integrate_row_retires_a_same_source_sibling():
+    state = _skip_to_sweep_state("KERNEL_AGENT")
+    state.optimization_stack = [{"action": "integrate", "kernel_id": "k900", "target_file": "/repo/op.py"}]
+    state.kernel_opt_task_attempts = {
+        "k002": {"last_source_file": "/repo/op.py", "last_decision": "KEEP", "last_status": "ok"},
+    }
+
+    assert kernel_work_pending(state) is False
+
+
+def test_a_fusion_keep_does_not_retire_its_attempt():
+    state = _skip_to_sweep_state("KERNEL_AGENT")
+    state.optimization_stack = [{"action": "fusion", "kernel_id": "k900", "target_file": "/repo/op.py"}]
+    state.kernel_opt_task_attempts = {
+        "k002": {"last_source_file": "/repo/op.py", "last_decision": "KEEP", "last_status": "ok"},
+    }
+
+    assert kernel_work_pending(state) is True
+
+
+def test_a_whitespace_padded_target_file_does_not_match():
+    state = _skip_to_sweep_state("KERNEL_AGENT")
+    state.optimization_stack = [{"action": "integrate", "kernel_id": "k900", "target_file": "  /repo/op.py "}]
+    state.kernel_opt_task_attempts = {
+        "k002": {"last_source_file": "/repo/op.py", "last_decision": "KEEP", "last_status": "ok"},
+    }
+
+    assert kernel_work_pending(state) is True
+
+
 def test_apply_escalate_budget_bump_lifts_phase_within_cap():
     out = apply_escalate_budget_bump(
         {"FRAMEWORK_AGENT": 0.60},
