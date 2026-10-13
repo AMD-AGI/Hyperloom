@@ -1519,6 +1519,36 @@ async def test_a_stopped_baseline_round_does_not_clear_a_real_failure_streak(ses
         await c.stop()
 
 
+@pytest.mark.asyncio
+async def test_a_stopped_baseline_round_keeps_the_real_boot_failure_as_enablement_evidence(session_dir):
+    """The boot that failed stays the lane's "before"; a round the run cancelled observed nothing."""
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        await c.writeback.handle_unpromotable_result(
+            _mk_task("baseline", "t-real"),
+            {
+                "status": "failed",
+                "error_class": "subprocess_nonzero",
+                "error": "NameError: name 'deep_gemm' is not defined",
+                "boot_observation_path": "/obs/real.json",
+            },
+        )
+        await c.writeback.handle_unpromotable_result(
+            _mk_task("baseline", "t-cancelled"),
+            {
+                "status": "failed",
+                "error_class": "orchestrator_cancelled",
+                "error": "the orchestrator cancelled this action while this round was running",
+                "boot_observation_path": "/obs/cancelled.json",
+            },
+        )
+        assert c.shared_state.enablement.launch_observation_path == "/obs/real.json"
+        assert "deep_gemm" in c.shared_state.enablement.launch_log
+    finally:
+        await c.stop()
+
+
 def _eval_failed_result() -> dict:
     return {
         "status": "failed",

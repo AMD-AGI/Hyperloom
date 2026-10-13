@@ -36,7 +36,7 @@ class IntegrateAttempt:
     extra_envs_applied: dict[str, str] = field(default_factory=dict)
     extra_server_args_applied: str = ""
     dropped_env_overrides: list[str] = field(default_factory=list)
-    setup_result: dict[str, Any] = field(default_factory=dict)
+    setup_commands_applied: list[str] = field(default_factory=list)
     switch_manifest: list[dict[str, Any]] = field(default_factory=list)
     pending: dict[str, Any] = field(default_factory=dict)
 

@@ -366,11 +366,11 @@ class _DrainingProfiler:
 
 
 @pytest.mark.asyncio
-async def test_instrumentation_is_drained_per_attempt(tmp_path):
-    """Each attempt carries its own report, including the attempt that raised and left no result dict."""
+async def test_instrumentation_is_drained_for_a_profile_that_raised(tmp_path):
+    """A profile that raised and left no result dict still carries its own report."""
     md = tmp_path / "analysis.md"
     md.write_text("# Executive Summary\n", encoding="utf-8")
-    profiler = _DrainingProfiler([RuntimeError("boot"), _profile_success()])
+    profiler = _DrainingProfiler([RuntimeError("boot")])
 
     async def fake_ta(payload, *, session_dir):
         return _ta_ok(md)
@@ -382,10 +382,8 @@ async def test_instrumentation_is_drained_per_attempt(tmp_path):
         await RooflineExecutor(shared_state=_state())(_ctx(tmp_path))
 
     runs = _recorded_action(tmp_path)["profile"]["runs"]
-    assert [run["instrumentation"] for run in runs] == [
-        {"check_id": "instrumentation_preflight", "call": 1},
-        {"check_id": "instrumentation_preflight", "call": 2},
-    ]
+    assert [run["instrumentation"] for run in runs] == [{"check_id": "instrumentation_preflight", "call": 1}]
+    assert profiler.calls == 1
 
 
 @pytest.mark.asyncio

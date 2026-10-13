@@ -762,10 +762,10 @@ class KernelPhase(CoordinatorCollaborator):
             route_reason=f"kernel_optimizer={str(state.kernel_optimizer or '')}",
             from_phase=tr.from_phase,
         )
-        lanes, catalogue_ttl = self._coord.dispatcher.registry_lanes_ttl("kernel_agent")
+        lanes, lease_ttl = self._coord.dispatcher.registry_lanes_ttl("kernel_agent")
         # Leases do not expire on their TTL, so it only records how long the holder expects to keep the lanes.
         remaining = _phase_state.phase_budget_remaining_seconds(state)
-        ttl = int(remaining) if remaining is not None and remaining > 0 else catalogue_ttl
+        ttl = int(remaining) if remaining is not None and remaining > 0 else lease_ttl
         # A resumed session re-enters the phase whose earlier task already settled, so only a live row is reused.
         base_key = f"kernel_agent_c{int(state.macro_cycle or 0)}"
         attempt = 0
