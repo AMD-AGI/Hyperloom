@@ -5,126 +5,104 @@
 
 import pytest
 
-from hyperloom.common.unified_diff import parse_patch_manifest
+from hyperloom.common.unified_diff import PatchOp, PatchTarget, parse_patch_manifest
 
-
-def test_modification_is_one_write_against_the_prefixed_destination():
-    patch = "diff --git a/pkg/mod.py b/pkg/mod.py\n--- a/pkg/mod.py\n+++ b/pkg/mod.py\n@@ -1 +1 @@\n-a\n+b\n"
-
-    assert parse_patch_manifest(patch) == [
-        {"op": "write", "path": "b/pkg/mod.py", "mode": "", "binary": False, "is_new": False}
-    ]
+WRITE = PatchOp.WRITE
+DELETE = PatchOp.DELETE
 
 
 @pytest.mark.parametrize(
-    "header",
+    ("patch", "expected"),
     [
-        "new file mode 100644\n--- /dev/null\n+++ b/new.py\n",
-        "--- /dev/null\n+++ b/new.py\n",
+        pytest.param(
+            "diff --git a/mod.py b/mod.py\n--- a/mod.py\n+++ b/mod.py\n@@ -1 +1 @@\n-a\n+b\n",
+            [PatchTarget(WRITE, "b/mod.py")],
+            id="modify",
+        ),
+        pytest.param(
+            "diff --git a/new.py b/new.py\nnew file mode 100644\n--- /dev/null\n+++ b/new.py\n@@ -0,0 +1 @@\n+x\n",
+            [PatchTarget(WRITE, "b/new.py", mode="0644", is_new=True)],
+            id="create-new-file-mode",
+        ),
+        pytest.param(
+            "diff --git a/new.py b/new.py\n--- /dev/null\n+++ b/new.py\n@@ -0,0 +1 @@\n+x\n",
+            [PatchTarget(WRITE, "b/new.py", is_new=True)],
+            id="create-dev-null-source",
+        ),
+        pytest.param(
+            "diff --git a/gone.py b/gone.py\ndeleted file mode 100644\n--- a/gone.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n",
+            [PatchTarget(DELETE, "a/gone.py")],
+            id="delete-deleted-file-mode",
+        ),
+        pytest.param(
+            "diff --git a/gone.py b/gone.py\n--- a/gone.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n",
+            [PatchTarget(DELETE, "a/gone.py")],
+            id="delete-dev-null-destination",
+        ),
+        pytest.param(
+            "diff --git a/old.py b/new.py\nsimilarity index 100%\nrename from old.py\nrename to new.py\n",
+            [PatchTarget(DELETE, "a/old.py"), PatchTarget(WRITE, "b/new.py", is_new=True)],
+            id="rename",
+        ),
+        pytest.param(
+            "diff --git a/old.py b/new.py\nsimilarity index 80%\nrename from old.py\nrename to new.py\n"
+            "--- a/old.py\n+++ b/new.py\n@@ -1 +1 @@\n-a\n+b\n",
+            [PatchTarget(DELETE, "a/old.py"), PatchTarget(WRITE, "b/new.py", is_new=True)],
+            id="rename-with-edits",
+        ),
+        pytest.param(
+            "diff --git a/src.py b/dup.py\nsimilarity index 100%\ncopy from src.py\ncopy to dup.py\n",
+            [PatchTarget(WRITE, "b/dup.py", is_new=True)],
+            id="copy",
+        ),
+        pytest.param(
+            "diff --git a/run.sh b/run.sh\nold mode 100644\nnew mode 100755\n",
+            [PatchTarget(WRITE, "b/run.sh", mode="0755")],
+            id="chmod-only",
+        ),
+        pytest.param(
+            "diff --git a/img.png b/img.png\nnew file mode 100644\nGIT binary patch\nliteral 4\n",
+            [PatchTarget(WRITE, "b/img.png", mode="0644", is_new=True)],
+            id="binary",
+        ),
+        pytest.param(
+            'diff --git "a/my dir/f.py" "b/my dir/f.py"\n--- /dev/null\n+++ "b/my dir/f.py"\n@@ -0,0 +1 @@\n+x\n',
+            [PatchTarget(WRITE, "b/my dir/f.py", is_new=True)],
+            id="quoted-path",
+        ),
+        pytest.param(
+            "--- target.py\n+++ target.py\n@@ -1 +1 @@\n-a\n+b\n",
+            [PatchTarget(WRITE, "target.py")],
+            id="no-git-header",
+        ),
     ],
-    ids=["new-file-mode", "dev-null-source"],
 )
-def test_creation_is_flagged_is_new(header):
-    """``is_new`` is what keeps a caller from pre-seeding a base under a path the patch creates."""
-    descriptors = parse_patch_manifest(f"diff --git a/new.py b/new.py\n{header}@@ -0,0 +1 @@\n+x\n")
-
-    assert [(d["op"], d["path"], d["is_new"]) for d in descriptors] == [("write", "b/new.py", True)]
+def test_header_vocabulary_maps_to_targets(patch, expected):
+    """A rename is two targets; ``is_new`` keeps a caller from pre-seeding a base under a path the patch creates."""
+    assert parse_patch_manifest(patch) == expected
 
 
-@pytest.mark.parametrize(
-    "header",
-    [
-        "deleted file mode 100644\n--- a/gone.py\n+++ /dev/null\n",
-        "--- a/gone.py\n+++ /dev/null\n",
-    ],
-    ids=["deleted-file-mode", "dev-null-destination"],
-)
-def test_deletion_is_recorded_against_the_source_path(header):
-    descriptors = parse_patch_manifest(f"diff --git a/gone.py b/gone.py\n{header}@@ -1 +0,0 @@\n-x\n")
-
-    assert descriptors == [{"op": "delete", "path": "a/gone.py", "mode": "", "binary": False, "is_new": False}]
-
-
-def test_rename_yields_a_delete_of_the_source_and_a_create_of_the_destination():
-    patch = "diff --git a/old.py b/new.py\nsimilarity index 100%\nrename from old.py\nrename to new.py\n"
-
-    assert parse_patch_manifest(patch) == [
-        {"op": "delete", "path": "a/old.py", "mode": "", "binary": False, "is_new": False},
-        {"op": "write", "path": "b/new.py", "mode": "", "binary": False, "is_new": True},
-    ]
-
-
-def test_rename_with_edits_still_names_the_destination_from_the_git_header():
-    """The ``+++`` line of a rename-with-edits names the destination; both paths stay prefixed."""
-    patch = (
-        "diff --git a/old.py b/new.py\nsimilarity index 80%\nrename from old.py\nrename to new.py\n"
-        "--- a/old.py\n+++ b/new.py\n@@ -1 +1 @@\n-a\n+b\n"
-    )
-
-    assert [(d["op"], d["path"]) for d in parse_patch_manifest(patch)] == [
-        ("delete", "a/old.py"),
-        ("write", "b/new.py"),
-    ]
-
-
-def test_copy_creates_the_destination_only():
-    patch = "diff --git a/src.py b/dup.py\nsimilarity index 100%\ncopy from src.py\ncopy to dup.py\n"
-
-    assert parse_patch_manifest(patch) == [
-        {"op": "write", "path": "b/dup.py", "mode": "", "binary": False, "is_new": True}
-    ]
-
-
-def test_chmod_only_section_takes_its_path_from_the_diff_line():
-    """A mode change carries no ``---``/``+++`` pair, so the ``diff --git`` line is the only path source."""
-    patch = "diff --git a/run.sh b/run.sh\nold mode 100644\nnew mode 100755\n"
-
-    assert parse_patch_manifest(patch) == [
-        {"op": "write", "path": "b/run.sh", "mode": "0755", "binary": False, "is_new": False}
-    ]
-
-
-def test_binary_section_is_flagged_so_content_is_sourced_from_a_snapshot():
-    patch = "diff --git a/img.png b/img.png\nnew file mode 100644\nGIT binary patch\nliteral 4\n"
-
-    assert parse_patch_manifest(patch) == [
-        {"op": "write", "path": "b/img.png", "mode": "0644", "binary": True, "is_new": True}
-    ]
-
-
-def test_quoted_path_is_unquoted_before_any_containment_check():
-    """Git C-quotes paths with special characters; leaving them quoted makes a ``..`` check read the wrong string."""
-    patch = 'diff --git "a/my dir/f.py" "b/my dir/f.py"\n--- /dev/null\n+++ "b/my dir/f.py"\n@@ -0,0 +1 @@\n+x\n'
-
-    assert parse_patch_manifest(patch) == [
-        {"op": "write", "path": "b/my dir/f.py", "mode": "", "binary": False, "is_new": True}
-    ]
-
-
-def test_prefixless_diff_is_parsed_without_a_git_header():
-    patch = "--- target.py\n+++ target.py\n@@ -1 +1 @@\n-a\n+b\n"
-
-    assert [(d["op"], d["path"]) for d in parse_patch_manifest(patch)] == [("write", "target.py")]
-
-
-def test_multiple_sections_are_returned_in_diff_order():
+def test_sections_are_returned_in_diff_order():
     patch = (
         "diff --git a/one.py b/one.py\n--- a/one.py\n+++ b/one.py\n@@ -1 +1 @@\n-a\n+b\n"
         "diff --git a/two.py b/two.py\n--- a/two.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-a\n"
     )
 
-    assert [(d["op"], d["path"]) for d in parse_patch_manifest(patch)] == [
-        ("write", "b/one.py"),
-        ("delete", "a/two.py"),
+    assert parse_patch_manifest(patch) == [
+        PatchTarget(WRITE, "b/one.py"),
+        PatchTarget(DELETE, "a/two.py"),
     ]
 
 
-@pytest.mark.parametrize("patch", ["", "   \n"], ids=["empty", "blank"])
-def test_empty_patch_is_rejected(patch):
-    with pytest.raises(ValueError, match="empty patch"):
+@pytest.mark.parametrize(
+    ("patch", "message"),
+    [
+        pytest.param("   \n", "empty patch", id="blank"),
+        pytest.param("--- \n@@ -1 +1 @@\n-a\n+b\n", "cannot determine target path", id="no-target"),
+        pytest.param("--- /dev/null\n+++ /dev/null\n@@ -0,0 +0,0 @@\n", "missing source path", id="dev-null-both"),
+    ],
+)
+def test_unusable_patch_is_rejected(patch, message):
+    """A section naming no real path cannot be applied or reverted, so it raises rather than resolving to nothing."""
+    with pytest.raises(ValueError, match=message):
         parse_patch_manifest(patch)
-
-
-def test_section_without_a_determinable_target_is_rejected():
-    with pytest.raises(ValueError, match="cannot determine target path"):
-        parse_patch_manifest("--- \n@@ -1 +1 @@\n-a\n+b\n")

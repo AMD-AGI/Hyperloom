@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from hyperloom.common.unified_diff import parse_patch_manifest
+from hyperloom.common.unified_diff import PatchOp, PatchTarget, parse_patch_manifest
 from kernelforge.fusion.emit import _export_nongit, _unified_file_diff
 
 
@@ -67,6 +67,6 @@ def test_nongit_export_is_read_back_as_one_create_plus_one_edit(tmp_path):
 
     descriptors = parse_patch_manifest(Path(arts.patch).read_text(encoding="utf-8"))
     assert descriptors == [
-        {"op": "write", "path": "b/model.py", "mode": "", "binary": False, "is_new": False},
-        {"op": "write", "path": "b/model_fused.py", "mode": "0644", "binary": False, "is_new": True},
+        PatchTarget(PatchOp.WRITE, "b/model.py"),
+        PatchTarget(PatchOp.WRITE, "b/model_fused.py", mode="0644", is_new=True),
     ]

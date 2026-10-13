@@ -18,12 +18,13 @@ import subprocess
 import sys
 import tempfile
 import time
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Iterable
 
 from hyperloom.common import aiter_jit_cache
 from hyperloom.common.timeutil import now_iso
-from hyperloom.common.unified_diff import repo_relative_manifest
+from hyperloom.common.unified_diff import PatchOp, PatchTarget, repo_relative_manifest
 from hyperloom.inference_optimizer.framework_paths import resolve_flydsl_source_roots
 
 log = logging.getLogger(__name__)
@@ -537,7 +538,7 @@ def _within_root(path: Path, root: Path) -> bool:
 
 def apply_snapshot(
     *,
-    descriptors: list[dict[str, Any]],
+    descriptors: list[PatchTarget],
     snapshot_dir: str | Path,
     repo_root: str | Path,
     backup_dir: str | Path,
@@ -554,8 +555,8 @@ def apply_snapshot(
     applied. There is no fuzzy fallback.
 
     Args:
-        descriptors (list[dict[str, Any]]): Output of
-            :func:`parse_patch_manifest`.
+        descriptors (list[PatchTarget]): Output of
+            :func:`repo_relative_manifest`.
         snapshot_dir (str | Path): Directory holding byte-exact final contents
             for every ``write`` path (mirrored at the same relative path).
         repo_root (str | Path): Framework repo root the targets live under.
@@ -577,22 +578,22 @@ def apply_snapshot(
     backups: list[dict[str, Any]] = []
 
     # Pre-flight: validate everything before touching the live tree.
-    staged: list[tuple[dict[str, Any], Path, Path | None]] = []
+    staged: list[tuple[PatchTarget, Path, Path | None]] = []
     try:
         for desc in descriptors:
             dest = _contained_dest(
                 root,
-                desc["path"],
+                desc.path,
                 deploy_roots=allowed_roots,
             )
             src: Path | None = None
-            if desc["op"] == "write":
-                src = snap / desc["path"]
+            if desc.op is PatchOp.WRITE:
+                src = snap / desc.path
                 if not src.is_symlink() and not src.exists():
                     return {
                         "status": "failed",
-                        "error": f"snapshot missing content for {desc['path']}",
-                        "path": desc["path"],
+                        "error": f"snapshot missing content for {desc.path}",
+                        "path": desc.path,
                     }
                 if src.is_symlink():
                     link_target = os.readlink(src)
@@ -604,9 +605,9 @@ def apply_snapshot(
                             "status": "failed",
                             "error": (
                                 "snapshot symlink target is outside authorized "
-                                f"deploy roots: {desc['path']} -> {link_target}"
+                                f"deploy roots: {desc.path} -> {link_target}"
                             ),
-                            "path": desc["path"],
+                            "path": desc.path,
                         }
             staged.append((desc, dest, src))
     except ValueError as exc:
@@ -630,8 +631,8 @@ def apply_snapshot(
         try:
             existed = dest.exists() or dest.is_symlink()
             # Back up before mutating (disposition drives revert).
-            if desc["op"] == "delete" or existed:
-                disposition = "deleted" if desc["op"] == "delete" else "modified"
+            if desc.op is PatchOp.DELETE or existed:
+                disposition = "deleted" if desc.op is PatchOp.DELETE else "modified"
                 bp = None
                 if existed:
                     bdst = Path(backup_dir) / "source" / f"{_path_hash(dest)}_{dest.name}"
@@ -642,13 +643,13 @@ def apply_snapshot(
             else:
                 backups.append({"path": str(dest), "backup_path": None, "disposition": "added"})
 
-            if desc["op"] == "delete":
+            if desc.op is PatchOp.DELETE:
                 dest.unlink(missing_ok=True)
             else:
                 # Re-validate containment right before the write (close TOCTOU window).
                 _contained_dest(
                     root,
-                    desc["path"],
+                    desc.path,
                     deploy_roots=allowed_roots,
                 )
                 dest.parent.mkdir(parents=True, exist_ok=True)
@@ -659,9 +660,9 @@ def apply_snapshot(
                     dest.symlink_to(link_target)
                 else:
                     shutil.copy2(src, dest, follow_symlinks=False)
-                    if desc.get("mode"):
+                    if desc.mode:
                         try:
-                            dest.chmod(int(desc["mode"], 8))
+                            dest.chmod(int(desc.mode, 8))
                         except (ValueError, OSError):
                             # Restoring mode bits is best-effort.
                             pass
@@ -670,8 +671,8 @@ def apply_snapshot(
             _restore_all()
             return {
                 "status": "failed",
-                "error": f"apply failed at {desc['path']}: {exc}; repo restored",
-                "path": desc["path"],
+                "error": f"apply failed at {desc.path}: {exc}; repo restored",
+                "path": desc.path,
             }
 
     return {"status": "ok", "source_backups": backups, "touched": touched}
@@ -2334,8 +2335,6 @@ def _apply_kernel_patch_snapshot(
         descriptors = repo_relative_manifest(patch.read_text(encoding="utf-8", errors="replace"))
     except ValueError as exc:
         return {"status": "failed", "error": f"unparseable patch: {exc}"}
-    if not descriptors:
-        return {"status": "failed", "error": "patch has no file operations"}
 
     try:
         primary_strategy = _detect_strategy(target)
@@ -2372,10 +2371,10 @@ def _apply_kernel_patch_snapshot(
     write_paths: list[Path] = []
     for desc in descriptors:
         try:
-            dest = _contained_dest(repo_root, desc["path"], deploy_roots=deploy_roots)
+            dest = _contained_dest(repo_root, desc.path, deploy_roots=deploy_roots)
         except ValueError as exc:
-            return {"status": "failed", "error": str(exc), "path": desc["path"]}
-        if desc["op"] == "write":
+            return {"status": "failed", "error": str(exc), "path": desc.path}
+        if desc.op is PatchOp.WRITE:
             write_paths.append(dest)
 
     rebuild_strategies = _multi_root_strategies(write_paths)
@@ -2411,7 +2410,7 @@ def _apply_kernel_patch_snapshot(
         "patch_path": str(patch),
         "target_file": str(target),
         "mode": "snapshot",
-        "descriptors": descriptors,
+        "descriptors": [asdict(desc) for desc in descriptors],
         "artifacts": artifacts,
         "strategy": {
             "compiled": compiled,
@@ -2459,32 +2458,32 @@ def _apply_kernel_patch_snapshot(
     for desc in descriptors:
         dest = _contained_dest(
             repo_root,
-            desc["path"],
+            desc.path,
             deploy_roots=deploy_roots,
         )
-        if desc["op"] == "delete":
+        if desc.op is PatchOp.DELETE:
             if dest.exists():
                 revert_kernel_patch(manifest_path)
                 return {
                     "status": "failed",
-                    "error": f"post-verify: {desc['path']} not deleted",
+                    "error": f"post-verify: {desc.path} not deleted",
                     "manifest_path": str(manifest_path),
                 }
             continue
-        src = snap / desc["path"]
+        src = snap / desc.path
         if src.is_symlink():
             if not dest.is_symlink() or os.readlink(dest) != os.readlink(src):
                 revert_kernel_patch(manifest_path)
                 return {
                     "status": "failed",
-                    "error": f"post-verify symlink mismatch: {desc['path']}",
+                    "error": f"post-verify symlink mismatch: {desc.path}",
                     "manifest_path": str(manifest_path),
                 }
         elif dest.read_bytes() != src.read_bytes():
             revert_kernel_patch(manifest_path)
             return {
                 "status": "failed",
-                "error": f"post-verify content mismatch: {desc['path']}",
+                "error": f"post-verify content mismatch: {desc.path}",
                 "manifest_path": str(manifest_path),
             }
 

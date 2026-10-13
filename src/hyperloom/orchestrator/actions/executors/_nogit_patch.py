@@ -321,10 +321,10 @@ def _apply_patch_no_git(
         return _fail(f"unparseable patch: {exc}", backups)
 
     for entry in manifest:
-        rel, abs_path, err = _resolve_target(entry["path"])
+        rel, abs_path, err = _resolve_target(entry.path)
         if err:
             return _fail(err, backups)
-        if (entry["op"] == "write" and entry["is_new"]) or not abs_path.exists():
+        if entry.is_new or not abs_path.exists():
             record = {"target": str(abs_path), "existed": False, "backup_path": None, "revert_action": "delete"}
         else:
             record, err = _backup_existing(abs_path, rel)
