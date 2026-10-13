@@ -304,6 +304,11 @@ class EnablementRound:
             {record["path"]: record["base_sha"] for record in self.roots if record["base_sha"]},
         )
 
+    def stack_files(self) -> set[str]:
+        """Every file the accepted stack still reads: its patches and the sources of its artifacts."""
+        sources = (str(a["source"]) for a in self.kept_artifacts if a.get("source"))
+        return {*(str(p) for p in self.kept_patches), *sources}
+
     def accepted_stack(self, applied: Iterable[Any]) -> list[str]:
         """Every kept patch, then this round's ``applied``: the order the stack was built and is replayed in."""
         return [*self.kept_patches, *(str(p) for p in applied)]

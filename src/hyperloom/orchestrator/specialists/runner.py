@@ -1148,7 +1148,8 @@ class SpecialistRunner:
             done_payload["summary"] = "specialist emitted done without summary"[:480]
         # Reconcile self-reported ``patches_written`` against the filesystem:
         # keep only claimed paths that exist on disk, then union with the scan.
-        claimed = done_payload.get("patches_written") or []
+        # A harvested diff is the whole round, so a claim only restates it.
+        claimed = [] if patch_roots else done_payload.get("patches_written") or []
         if not isinstance(claimed, list):
             claimed = []
         search_bases = [b for b in (prep.worktree, workspace) if b is not None]

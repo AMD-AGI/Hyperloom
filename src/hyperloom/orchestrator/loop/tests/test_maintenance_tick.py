@@ -22,6 +22,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 from hyperloom.orchestrator.loop.maintenance import (
     MaintenanceCollaborator,
     run_lease_and_db_reclaim,
@@ -171,6 +172,7 @@ def _coordinator(session_dir: Path, **kw):
         gpu_specialist_pool=_Pool(),
         tasks=_Tasks(),
         db=object(),
+        shared_state=SimpleNamespace(enablement=EnablementRound()),
     )
 
 
@@ -253,6 +255,29 @@ class TestTheDiskTrimOnlyFiresWhenItHasTo:
 
         assert c._maybe_prune_runs_for_disk()["runs_pruned"] == 0
         assert (runs / "only_task").is_dir()
+
+    def test_a_workspace_the_enablement_stack_replays_from_survives_the_trim(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ):
+        _fake_usage(monkeypatch, free_gb=1.0, used_frac=0.99)
+        runs = tmp_path / "runs" / "specialist"
+        for i in range(4):
+            (runs / f"task{i}").mkdir(parents=True)
+        patch = runs / "task0" / "worktree" / "patches" / "_worktree_diff.patch"
+        patch.parent.mkdir(parents=True)
+        patch.write_text("diff\n")
+        source = runs / "task1" / "fix.py"
+        source.write_text("x = 1\n")
+        c = _maintenance(tmp_path, keep=1)
+        c.shared_state.enablement.kept_patches = [str(patch)]
+        c.shared_state.enablement.kept_artifacts = [{"target": "fix.py", "source": str(source)}]
+
+        got = c._maybe_prune_runs_for_disk()
+
+        survivors = {p.name for p in runs.iterdir()}
+        assert {"task0", "task1"} <= survivors
+        assert got["runs_pruned"] == 4 - len(survivors) >= 1
+        assert patch.is_file() and source.is_file()
 
     def test_a_session_with_no_runs_tree_yet_reports_the_usage_only(self, tmp_path, monkeypatch: pytest.MonkeyPatch):
         _fake_usage(monkeypatch, free_gb=1.0, used_frac=0.99)
