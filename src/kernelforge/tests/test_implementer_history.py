@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from kernelforge.loop.prompt_view import ImplementerHistoryParts, compose_implementer_history
-from kernelforge.loop.runner import IterationResult
+from kernelforge.loop.iteration_result import IterationResult
 from kernelforge.loop.search_policy import OBJECTIVE_IMMEDIATE_CANONICAL_GAIN, SEARCH_MODE_EXPLOIT, SearchPolicyDecision
 
 _EMPTY = ImplementerHistoryParts(

@@ -12,6 +12,7 @@ import tempfile
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 from kernelforge.llm.git import git, git_async
 
 from kernelforge.llm.process_reaping import (
@@ -347,3 +348,10 @@ async def run_lanes(
         )
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+class HeldRound(NamedTuple):
+    """What a fan-out round hands the iteration that has to finish without it."""
+
+    plan_path: Path | None
+    error: str

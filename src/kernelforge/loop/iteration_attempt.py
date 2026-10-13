@@ -12,7 +12,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from kernelforge.loop.device_hazard import DeviceHazard
     from kernelforge.loop.merge_candidates import MergeCandidate
-    from kernelforge.loop.runner import HeldRound, IterationResult
+    from kernelforge.loop.fanout import HeldRound
+    from kernelforge.loop.iteration_result import IterationResult
 
 
 @dataclass(frozen=True)

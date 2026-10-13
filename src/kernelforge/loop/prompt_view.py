@@ -13,7 +13,7 @@ from kernelforge.loop.run_state import MAX_PINNED_ITERATIONS, RunState
 if TYPE_CHECKING:
     from kernelforge.loop.handoffs import HandoffStore
     from kernelforge.loop.run_state import LoopStateStore
-    from kernelforge.loop.runner import IterationResult
+    from kernelforge.loop.iteration_result import IterationResult
     from kernelforge.loop.search_policy import SearchPolicyDecision
 
 # Canonical on-disk locations, shown to the agent so it can Read detail on demand.

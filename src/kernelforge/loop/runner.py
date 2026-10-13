@@ -52,6 +52,7 @@ from kernelforge.loop.lessons import (
 )
 from kernelforge.loop.archive import CandidateArchive, CandidateRecord
 from kernelforge.loop.handoffs import HandoffStore, IterationHandoff
+from kernelforge.loop.iteration_result import IterationResult
 from kernelforge.loop.iteration_attempt import IterationAttempt, IterationFlow, LoopServices, append_session_finding
 from kernelforge.loop.jit_rebuild import (
     force_jit_rebuild,
@@ -137,7 +138,7 @@ from kernelforge.loop.scoring import (
 )
 from kernelforge.loop.baseline_reference import baseline_check_report, check_baseline_against_reference
 from kernelforge.loop.device_hazard import DeviceHazard, DeviceHazardLog
-from kernelforge.loop.fanout import LanePlan, LaneResult, run_lanes
+from kernelforge.loop.fanout import HeldRound, LanePlan, LaneResult, run_lanes
 from kernelforge.loop.merge_candidates import (
     MERGE_ATTEMPT_STALL_THRESHOLD,
     MERGE_PRECEDENCE_STREAK_LIMIT,
@@ -530,54 +531,6 @@ class CaseConfigCoverage(NamedTuple):
     # Covered cases no KEEP ever tested the dispersion of, because no KEEP that moved them carried its independent
     # measurements.
     floor_only: tuple[str, ...] = ()
-
-
-class HeldRound(NamedTuple):
-    """What a fan-out round hands the iteration that has to finish without it."""
-
-    plan_path: Path | None
-    error: str
-
-
-@dataclass
-class IterationResult:
-    """Result of a single iteration."""
-
-    iteration: int
-    duration_sec: float
-    validation_passed: bool
-    validation_summary: str
-    validation_outcome: str = ""
-    wall_ms: float | None = None
-    mean_case_speedup: float | None = None
-    snr_db: float | None = None
-    pmc_diagnosis: str = ""
-    vgpr: int | None = None
-    kept: bool = False  # True if change was kept, False if reverted
-    commit_hash: str = ""
-    agent_rationale: str = ""
-    # Real error tail from the first failing validation stage (for the ledger); populated on validation failure so
-    # gate-off runs still record true errors.
-    error_output: str = ""
-    # True when the iteration raised an unexpected exception (build/validate/bench crash) rather than merely failing
-    # validation.
-    crashed: bool = False
-    # Full measurement detail for the candidate archive (not just the scalars above).
-    bench_detail: dict = field(default_factory=dict)
-    pmc_full: str = ""
-    # Structured profile metadata (backend, bottleneck, target kernels, roofline dtype/AI/HBM+compute pct, SoL
-    # metrics) for the candidate archive's meta.json, so the supervisor / next agent can consume it without parsing
-    # prose.
-    profile_meta: dict = field(default_factory=dict)
-    # Why the agent session ended this iteration (from the in-session gate / SDK): converged / block_budget_exhausted
-    # / block_cap / turn_cap / gate_error / agent_stopped / sdk_*. "" when no agent ran.
-    session_end_reason: str = ""
-    turns: int | None = None
-    # Independent of session termination: a candidate that changed protected measurement state is rejected before any
-    # canonical driver is executed.
-    integrity_violation: bool = False
-    # Why the workspace could not be cleared of leftover processes.
-    workspace_contention: str = ""
 
 
 @dataclass(frozen=True)
