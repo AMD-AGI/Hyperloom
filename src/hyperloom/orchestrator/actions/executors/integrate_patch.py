@@ -2556,7 +2556,7 @@ class IntegratePatchExecutor:
                 ),
             }
 
-        _setup_ran = bool(attempt.setup_result.get("applied"))
+        _setup_ran = bool(attempt.setup_commands_applied)
         # A runtime this round acquired changes what the next boot executes; a
         # re-provisioned kept one is the stack the last KEEP was already graded on.
         acquired_runtime = bool(attempt.attempt_venv_root) and not attempt.shared_state.enablement.kept_stack_action
@@ -2588,7 +2588,7 @@ class IntegratePatchExecutor:
                     "allowlisted setup commands were supplied / discoverable for "
                     "this specialist task"
                 ),
-                "setup_commands_applied": attempt.setup_result["applied"],
+                "setup_commands_applied": attempt.setup_commands_applied,
             }
             if params.get("enablement"):
                 _no_patches["enablement"] = True
@@ -3074,7 +3074,6 @@ class IntegratePatchExecutor:
         applied_artifacts = attempt.applied_artifacts
         extra_envs_applied = attempt.extra_envs_applied
         extra_server_args_applied = attempt.extra_server_args_applied
-        setup_result = attempt.setup_result
         stack_action = attempt.stack_action
         provision_result = attempt.provision_result
 
@@ -3133,7 +3132,7 @@ class IntegratePatchExecutor:
                 "runnable": False,
                 "correctness_verified": correctness_ok is True,
                 "reason": f"enablement not runnable: {run_reason}",
-                "setup_commands_applied": setup_result["applied"],
+                "setup_commands_applied": attempt.setup_commands_applied,
                 "bench_result": bench_result,
                 "workspace": str(output_root),
                 **bringup_evidence,
@@ -3207,7 +3206,7 @@ class IntegratePatchExecutor:
                     f"enablement progressed: {run_reason}; boot advanced "
                     f"to a new gap ({wall.name if wall is not None else 'no wall recorded'})"
                 ),
-                "setup_commands_applied": setup_result["applied"],
+                "setup_commands_applied": attempt.setup_commands_applied,
                 "after_signature": after_signature.to_dict() if after_signature is not None else {},
                 "enablement_launch_log": str(bench_result.get("error") or ""),
                 # The wall this round advanced to, for the next round's
@@ -3245,7 +3244,7 @@ class IntegratePatchExecutor:
             "correctness_verified": correctness_ok is True,
             "provisional": provisional,
             "reason": reason,
-            "setup_commands_applied": setup_result["applied"],
+            "setup_commands_applied": attempt.setup_commands_applied,
             "bench_result": bench_result,
             "workspace": str(output_root),
             **bringup_evidence,

@@ -40,11 +40,10 @@ SETUP_CMD_ALLOWLIST: tuple[str, ...] = (
 def _installer_invocation(text: str) -> str | None:
     """``text`` with the executable's directory dropped, or ``None`` for a relative one.
 
-    The allowlist decides which KIND of operation may replay, which is what the
-    executable's basename names; its directory says only where the binary came
-    from. A relative one is refused because the replay runs the original string
-    from the session directory, not from wherever the specialist authored it, so
-    the same spelling resolves to a different file -- or to none.
+    The allowlist decides which KIND of operation may replay, and that is what
+    the basename names. A relative path is refused because the replay runs the
+    original string from the session directory, where it resolves to a
+    different file than where the specialist authored it -- or to none.
     """
     head, *rest = text.split(None, 1)
     if "/" not in head:

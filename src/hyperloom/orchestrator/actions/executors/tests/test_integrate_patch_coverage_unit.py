@@ -188,7 +188,7 @@ async def test_forged_task_rejected_before_any_side_effect(tmp_path, monkeypatch
 
     def _spy_setup(*args, **kwargs):
         called["setup"] = True
-        return {"applied": [], "failed": [], "executions": []}
+        return []
 
     monkeypatch.setattr(_setup_replay, "run_setup_commands", _spy_setup)
 

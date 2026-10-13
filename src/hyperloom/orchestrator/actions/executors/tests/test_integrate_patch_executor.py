@@ -1567,7 +1567,7 @@ async def test_enablement_replays_setup_commands_before_boot(tmp_path: Path, mon
 
     def _spy_run_setup(commands, *, cwd, log_dir, **_ledger_kwargs):
         replayed["commands"] = list(commands)
-        return {"applied": [cmd for cmd, _source in commands], "skipped": [], "failed": [], "executions": []}
+        return [cmd for cmd, _source in commands]
 
     monkeypatch.setattr(sr_mod, "run_setup_commands", _spy_run_setup)
 
@@ -1666,10 +1666,8 @@ async def _round_exiting_after_setup(tmp_path: Path, monkeypatch, *, arrange, pa
             outcome="applied",
             env={},
         )
-        # Production persists each row through this callback as its command
-        # finishes, so a double that only returns it does not stand in for it.
         on_execution(row)
-        return {"applied": [cmd], "skipped": [], "failed": [], "executions": [row]}
+        return [cmd]
 
     monkeypatch.setattr(sr_mod, "run_setup_commands", _installed)
     arrange(ip_mod, monkeypatch)
@@ -1802,7 +1800,7 @@ async def test_base_sha_is_captured_before_the_setup_commands_run(tmp_path: Path
         # What an install into the framework checkout does to its HEAD.
         (repo / "installed.py").write_text("x = 1\n", encoding="utf-8")
         git_commit_all(repo, "install")
-        return {"applied": [cmd for cmd, _source in commands], "skipped": [], "failed": [], "executions": []}
+        return [cmd for cmd, _source in commands]
 
     monkeypatch.setattr(sr_mod, "run_setup_commands", _installing_commits)
     monkeypatch.setattr(ip_mod, "resolve_session_framework_root", lambda: str(repo))
@@ -1862,7 +1860,7 @@ async def test_base_sha_of_an_explicit_root_predates_the_setup_commands(tmp_path
     def _installing_commits(commands, *, cwd, log_dir, round_task_id, seq_start, on_execution):
         (explicit_root / "installed.py").write_text("x = 1\n", encoding="utf-8")
         git_commit_all(explicit_root, "install")
-        return {"applied": [cmd for cmd, _source in commands], "skipped": [], "failed": [], "executions": []}
+        return [cmd for cmd, _source in commands]
 
     monkeypatch.setattr(sr_mod, "run_setup_commands", _installing_commits)
     monkeypatch.setattr(ip_mod, "resolve_session_framework_root", lambda: str(session_root))
@@ -1941,7 +1939,7 @@ async def test_setup_replay_runs_off_the_event_loop_thread(tmp_path: Path, monke
 
     def _spy_run_setup(commands, *, cwd, log_dir, round_task_id, seq_start, on_execution):
         seen["ident"] = threading.get_ident()
-        return {"applied": [], "skipped": [], "failed": []}
+        return []
 
     monkeypatch.setattr(sr_mod, "run_setup_commands", _spy_run_setup)
 
@@ -2841,7 +2839,7 @@ async def test_the_closure_baseline_is_read_before_the_first_setup_command(tmp_p
 
     def _installed(commands, **_kwargs):
         events.append("setup")
-        return {"applied": [cmd for cmd, _source in commands], "skipped": [], "failed": [], "executions": []}
+        return [cmd for cmd, _source in commands]
 
     monkeypatch.setattr(keep_probe, "probe_keep_environment", _probe)
     monkeypatch.setattr(sr_mod, "run_setup_commands", _installed)

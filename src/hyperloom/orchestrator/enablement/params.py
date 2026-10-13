@@ -105,9 +105,8 @@ def _build_failure_note(enablement: Any) -> str:
 def _mandate_notes(enablement: Any, *, attempt: int) -> str:
     """The per-dispatch dynamic context the static playbook section cannot provide.
 
-    Ordered most-corrective first: what the prior round got structurally wrong
-    leads and what it banked trails, so a stalled round that also banked
-    progress does not read as "all good so far, go deeper".
+    Ordered most-corrective first, so a stalled round that also banked progress
+    does not read as "all good so far, go deeper".
     """
     grounding_drops = [str(d) for d in (enablement.last_grounding_drop_reason or [])]
     setup_refusals = [str(c) for c in (enablement.last_setup_refusals or [])]

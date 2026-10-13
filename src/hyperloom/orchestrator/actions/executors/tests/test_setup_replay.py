@@ -29,7 +29,7 @@ def _proposed(*commands: str) -> list[tuple[str, str]]:
     return [(cmd, "proposed") for cmd in commands]
 
 
-def _run(commands: list[tuple[str, str]], tmp_path: Path, **overrides: Any) -> dict[str, Any]:
+def _run(commands: list[tuple[str, str]], tmp_path: Path, **overrides: Any) -> list[str]:
     kwargs: dict[str, Any] = {
         "cwd": tmp_path,
         "log_dir": tmp_path / "logs",
@@ -100,8 +100,7 @@ def test_run_setup_commands_stops_between_commands_on_cancel(tmp_path: Path, mon
     with use_cancel_scope(scope):
         out = _run(_proposed("pip install -U transformers", "pip install -U torch"), tmp_path)
     assert ran == ["pip install -U transformers"]
-    assert out["applied"] == ["pip install -U transformers"]
-    assert out["failed"] == []
+    assert out == ["pip install -U transformers"]
 
 
 def test_run_setup_commands_records_one_row_per_attempted_command(tmp_path: Path, monkeypatch):
@@ -127,12 +126,11 @@ def test_run_setup_commands_records_one_row_per_attempted_command(tmp_path: Path
         on_execution=persisted.append,
     )
 
-    rows = out["executions"]
-    assert persisted == rows
-    assert [row["outcome"] for row in rows] == ["applied", "failed"]
-    assert [row["seq"] for row in rows] == [5, 6]
-    assert [row["source"] for row in rows] == ["inherited", "proposed"]
-    assert {row["round_task_id"] for row in rows} == {"r1"}
+    assert out == ["pip install good"]
+    assert [row["outcome"] for row in persisted] == ["applied", "failed"]
+    assert [row["seq"] for row in persisted] == [5, 6]
+    assert [row["source"] for row in persisted] == ["inherited", "proposed"]
+    assert {row["round_task_id"] for row in persisted} == {"r1"}
 
 
 def test_a_refused_command_never_carries_its_credentialed_url():
@@ -167,11 +165,12 @@ def test_applied_commands_stay_runnable_but_their_ledger_row_is_redacted(tmp_pat
     """
     cmd = "pip install --extra-index-url http://pkgs.internal/simple foo ghp_notarealtoken"
     _succeed(monkeypatch)
+    persisted: list[dict[str, Any]] = []
 
-    out = _run(_proposed(cmd), tmp_path)
+    out = _run(_proposed(cmd), tmp_path, on_execution=persisted.append)
 
-    assert out["applied"] == [cmd]
-    assert "ghp_notarealtoken" not in out["executions"][0]["cmd_sanitized"]
+    assert out == [cmd]
+    assert "ghp_notarealtoken" not in persisted[0]["cmd_sanitized"]
 
 
 def test_a_log_write_failure_is_reported_and_does_not_fail_the_install(tmp_path, monkeypatch, caplog):
@@ -182,7 +181,7 @@ def test_a_log_write_failure_is_reported_and_does_not_fail_the_install(tmp_path,
     with caplog.at_level(logging.WARNING, logger=_setup_replay.__name__):
         out = _run(_proposed("pip install foo"), tmp_path, log_dir=blocked / "logs")
 
-    assert out["applied"] == ["pip install foo"]
+    assert out == ["pip install foo"]
     assert "enablement setup output not written" in caplog.text
 
 

@@ -9,8 +9,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ._setup_replay import empty_replay_outcome
-
 if TYPE_CHECKING:
     from ...enablement.runtime.stack_actions import EnablementStackAction, ProvisionResult
     from ...state.shared_state import SharedState
@@ -38,7 +36,7 @@ class IntegrateAttempt:
     extra_envs_applied: dict[str, str] = field(default_factory=dict)
     extra_server_args_applied: str = ""
     dropped_env_overrides: list[str] = field(default_factory=list)
-    setup_result: dict[str, Any] = field(default_factory=empty_replay_outcome)
+    setup_commands_applied: list[str] = field(default_factory=list)
     switch_manifest: list[dict[str, Any]] = field(default_factory=list)
     pending: dict[str, Any] = field(default_factory=dict)
 

@@ -30,11 +30,11 @@ SETUP_CMD_TIMEOUT_SEC = 1800  # 30 min per install command
 
 
 def refused_setup_commands(commands: list[tuple[str, str]]) -> list[str]:
-    """The sanitized commands the install-only allowlist refuses, in replay order.
+    """The commands the install-only allowlist refuses, in replay order.
 
-    A refused command is LLM-written text that can hold a bearer token or a
-    credentialed URL, and this list travels into the result payload, the journal
-    and the next round's mandate, so it is only ever carried sanitized.
+    Sanitized because a refused command is LLM-written text that can hold a
+    bearer token, and this list reaches the result payload, the journal and the
+    next round's mandate.
     """
     return [
         sanitize_command_text(cmd, clip=CMD_SANITIZED_CHARS)
@@ -108,7 +108,7 @@ def run_setup_commands(
     round_task_id: str,
     seq_start: int,
     on_execution: Callable[[dict[str, Any]], None],
-) -> dict[str, Any]:
+) -> list[str]:
     """Replay enablement setup commands (installs) before boot.
 
     Blocking (serial ``subprocess.run``, 1800s cap); call via ``asyncio.to_thread``.
@@ -132,35 +132,35 @@ def run_setup_commands(
         on_execution: Persists one ledger row as its command finishes.
 
     Returns:
-        dict[str, Any]: ``{"applied", "failed", "executions"}`` where ``applied``
-        are the commands that ran (rc==0) and ``executions`` one ledger row per
-        ATTEMPTED command.
+        list[str]: The commands that ran with rc==0, in replay order. Every
+        ATTEMPTED command reaches ``on_execution`` as a ledger row, which is
+        where a failed one is recorded.
     """
     applied: list[str] = []
-    failed: list[str] = []
-    executions: list[dict[str, Any]] = []
+    recorded = 0
     log_path = log_dir / "enablement_setup.log"
     env = dict(os.environ)
     env.setdefault("DEBIAN_FRONTEND", "noninteractive")
     env.setdefault("PIP_DISABLE_PIP_VERSION_CHECK", "1")
 
     def _record(cmd: str, index: int, source: str, outcome: str) -> None:
-        row = build_execution_row(
-            seq=seq_start + len(executions) + 1,
-            round_task_id=round_task_id,
-            cmd_index=index,
-            cmd=cmd,
-            source=source,
-            outcome=outcome,
-            env=env,
-        )
-        executions.append(row)
-        # Persisted HERE, not after the await returns. Cancelling the await
+        nonlocal recorded
+        recorded += 1
+        # Persisted HERE, not after the await returns: cancelling the await
         # unwinds the caller while this thread and its in-flight subprocess
-        # carry on, so a row handed back through the return value is lost
-        # for a command that actually ran -- and the ledger is what says a
-        # round installed into the shared venv at all.
-        on_execution(row)
+        # carry on, and the ledger is what says a round installed into the
+        # shared venv at all.
+        on_execution(
+            build_execution_row(
+                seq=seq_start + recorded,
+                round_task_id=round_task_id,
+                cmd_index=index,
+                cmd=cmd,
+                source=source,
+                outcome=outcome,
+                env=env,
+            )
+        )
 
     with cancel_scope_listener():
         for cmd_index, (cmd, source) in enumerate(commands):
@@ -174,14 +174,8 @@ def run_setup_commands(
                 applied.append(cmd)
                 _record(cmd, cmd_index, source, "applied")
             else:
-                failed.append(cmd)
                 _record(cmd, cmd_index, source, "failed")
-    return {"applied": applied, "failed": failed, "executions": executions}
-
-
-def empty_replay_outcome() -> dict[str, Any]:
-    """The outcome of a round that replayed nothing."""
-    return {"applied": [], "failed": [], "executions": []}
+    return applied
 
 
 def _append_setup_execution(shared_state: Any, row: dict[str, Any], *, session_dir: Path) -> None:
@@ -200,13 +194,12 @@ async def replay_setup_commands(
     params: dict[str, Any],
     session_dir: Path,
 ) -> dict[str, Any] | None:
-    """Replay this round's setup commands, recording the outcome on ``attempt``.
+    """Replay this round's setup commands, recording on ``attempt`` the ones that ran.
 
     Returns an ``apply_failed`` result when any command is not package/tool
-    installation, in which case none of them ran: the replay is what makes the
-    proposal's environment real, so a partial one would boot an environment the
-    round never proposed and grade the patches against it. ``None`` means the
-    round is clear to apply its patches.
+    installation, in which case none of them ran: a partial replay would boot an
+    environment the round never proposed and grade its patches against it.
+    ``None`` means the round is clear to apply its patches.
     """
     commands = resolve_setup_commands(params=params, done_payload=attempt.done_payload)
     refused = refused_setup_commands(commands)
@@ -228,7 +221,7 @@ async def replay_setup_commands(
         }
     if commands:
         shared_state = attempt.shared_state
-        attempt.setup_result = await asyncio.to_thread(
+        attempt.setup_commands_applied = await asyncio.to_thread(
             run_setup_commands,
             commands,
             cwd=session_dir,
@@ -237,9 +230,4 @@ async def replay_setup_commands(
             seq_start=shared_state.enablement.last_execution_seq(),
             on_execution=lambda row: _append_setup_execution(shared_state, row, session_dir=session_dir),
         )
-        # Each row is already durable: the callback appends it inside the worker
-        # as its command finishes. Several integrate exits return after setup has
-        # mutated the shared venv, and one carries no enablement flag at all, so
-        # the rearm that would have recorded them never runs -- and a cancelled
-        # await never returns this payload in the first place.
     return None

@@ -192,24 +192,21 @@ class EnablementRound:
         return True
 
     def record_accepted_config(self, config: Mapping[str, Any], *, source: str) -> None:
-        """Record the configuration the accepted launch runs with, and the branch that produced it.
+        """Record the configuration the accepted launch runs with, and what produced it.
 
-        ``extra_server_args`` is deduped here rather than at each writer: a
-        repeated flag is what the server hard-errors on, and this config is
-        published verbatim into the setting script an operator runs.
+        ``extra_server_args`` is deduped here rather than at each writer: the
+        server hard-errors on a repeated flag.
         """
         cfg = dict(config)
-        args = str(cfg.get("extra_server_args") or "")
-        if args:
-            cfg["extra_server_args"] = dedupe_extra_server_args(args)
+        if cfg.get("extra_server_args"):
+            cfg["extra_server_args"] = dedupe_extra_server_args(str(cfg["extra_server_args"]))
         self.accepted_config = cfg
         self.accepted_config_source = source
 
     def record_round_defects(self, result: Mapping[str, Any]) -> None:
         """Record the structural defects of the round just settled, for the next mandate.
 
-        Written from every round, including a clean one, so no defect outlives
-        the round that produced it.
+        Written from a clean round too, so no defect outlives its own round.
         """
         self.last_grounding_drop_reason = [str(d) for d in (result.get("patches_dropped_by_grounding") or [])[:8]]
         self.last_apply_feedback = [fb for fb in (result.get("retry_feedback") or [])[:5] if isinstance(fb, dict)]
@@ -219,10 +216,9 @@ class EnablementRound:
     def record_launch_observation(self, *, log: str, observation_path: str) -> None:
         """Record the boot the next enablement round authors against.
 
-        The text and the observation it was captured from are written together
-        because integrate_patch grades a round by comparing this observation
-        with the one its own boot produces; a path left over from an earlier
-        boot would compare the new round against someone else's wall.
+        Text and path are written together because integrate_patch grades a
+        round against this observation; a path left from an earlier boot would
+        grade it against someone else's wall.
         """
         self.launch_log = log
         self.launch_observation_path = observation_path
