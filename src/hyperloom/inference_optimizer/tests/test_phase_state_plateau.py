@@ -448,18 +448,37 @@ def test_apply_escalate_budget_bump_lifts_phase_within_cap():
     out = apply_escalate_budget_bump(
         {"FRAMEWORK_AGENT": 0.60},
         phase="FRAMEWORK_AGENT",
+        configured_budget_pct={"FRAMEWORK_AGENT": 0.60},
     )
     assert out["FRAMEWORK_AGENT"] == pytest.approx(
         0.60 + ESCALATE_HINT_BUDGET_BUMP_DELTA,
     )
 
 
-def test_apply_escalate_budget_bump_clamps_to_cap():
+@pytest.mark.parametrize("configured", [0.04, 0.38, 0.86])
+def test_repeated_hints_stop_the_cap_above_the_configured_share(configured):
+    # Every hint reads the ceiling off the configured share, so the hints before it do not move it.
+    out = {"FRAMEWORK_AGENT": configured}
+    for _ in range(30):
+        out = apply_escalate_budget_bump(
+            out, phase="FRAMEWORK_AGENT", configured_budget_pct={"FRAMEWORK_AGENT": configured}
+        )
+    assert out["FRAMEWORK_AGENT"] == pytest.approx(configured + ESCALATE_HINT_BUDGET_BUMP_CAP)
+
+
+def test_apply_escalate_budget_bump_never_raises_past_the_whole_session():
     out = apply_escalate_budget_bump(
-        {"FRAMEWORK_AGENT": 0.95},
-        phase="FRAMEWORK_AGENT",
+        {"KERNEL_AGENT": 0.97}, phase="KERNEL_AGENT", configured_budget_pct={"KERNEL_AGENT": 0.97}
     )
-    assert out["FRAMEWORK_AGENT"] == ESCALATE_HINT_BUDGET_BUMP_CAP
+    assert out["KERNEL_AGENT"] == 1.0
+
+
+@pytest.mark.parametrize(("phase", "share"), [("KERNEL_AGENT", 0.86), ("FRAMEWORK_AGENT", 0.95)])
+def test_apply_escalate_budget_bump_never_shortens_a_phase(phase, share):
+    # A share already past its ceiling, as an older build's hints could leave it, stays; lowering it would end the
+    # phase early.
+    out = apply_escalate_budget_bump({phase: share}, phase=phase, configured_budget_pct={phase: 0.04})
+    assert out[phase] == share
 
 
 def test_apply_escalate_budget_bump_ignores_unknown_phase():

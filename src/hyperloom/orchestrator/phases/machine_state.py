@@ -343,26 +343,32 @@ def kernel_inline_step_running(state: Any, *, now_unix: float | None = None) -> 
     return 0.0 <= (now - seen) <= KERNEL_INLINE_STEP_STALE_SECONDS
 
 
-# ``extend_*_budget`` hints raise a phase budget by DELTA up to CAP.
+# ``extend_*_budget`` hints raise a phase budget by DELTA, to at most CAP above the share the operator configured. An
+# agent can send one every tick, so CAP is the real bound on how far hints stretch a phase.
 ESCALATE_HINT_BUDGET_BUMP_DELTA: float = 0.05  # +5 percentage points per hint
-ESCALATE_HINT_BUDGET_BUMP_CAP: float = 0.80  # absolute ceiling
+ESCALATE_HINT_BUDGET_BUMP_CAP: float = 0.10  # at most 10 points above the configured share
 
 
 def apply_escalate_budget_bump(
     current_budget_pct: dict[str, float] | None,
     *,
     phase: str,
+    configured_budget_pct: dict[str, float] | None = None,
     delta: float = ESCALATE_HINT_BUDGET_BUMP_DELTA,
     cap: float = ESCALATE_HINT_BUDGET_BUMP_CAP,
 ) -> dict[str, float]:
-    """Return a budget map with ``phase`` raised by ``delta`` (capped at 80%)."""
+    """Return a budget map with ``phase`` raised by ``delta``, to at most ``cap`` above its configured share.
+
+    The ceiling is read off ``configured_budget_pct`` (the defaults when empty), not the current share, so repeated
+    hints stop at the same place. A hint never lowers a share, nor raises one past the whole session.
+    """
     phase_key = (phase or "").strip().upper()
     if phase_key not in PHASE_NAMES:
         return dict(current_budget_pct or {})
     out = normalize_budget_pct(current_budget_pct)
-    new_val = float(out.get(phase_key, 0.0)) + float(delta or 0.0)
-    new_val = min(float(cap), max(0.0, new_val))
-    out[phase_key] = new_val
+    current = float(out.get(phase_key, 0.0))
+    ceiling = min(1.0, float(normalize_budget_pct(configured_budget_pct).get(phase_key, 0.0)) + float(cap))
+    out[phase_key] = max(current, min(ceiling, max(0.0, current + float(delta or 0.0))))
     return out
 
 
