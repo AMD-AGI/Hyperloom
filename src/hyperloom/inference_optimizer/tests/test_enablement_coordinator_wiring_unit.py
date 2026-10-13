@@ -19,9 +19,12 @@ from hyperloom.orchestrator.state._shared_state.enablement_round import Enableme
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import create_in_cursor
 
+from hyperloom.orchestrator.actions.executors._ray_serving import RAY_INFEASIBLE_MARKER
+from hyperloom.orchestrator.actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
+from hyperloom.orchestrator.actions.stop_attribution import SESSION_TIME_EXHAUSTED_CLASS
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.proposals import PendingProposal
-from hyperloom.orchestrator.loop.writeback import _extract_enablement_launch_log
+from hyperloom.orchestrator.loop.writeback import _authorable_launch_log
 from hyperloom.orchestrator.enablement.params import EnablementParams
 
 from .conftest import make_coordinator
@@ -33,26 +36,44 @@ _MISSING_ARCH_LOG = (
 )
 
 
-# ---- _extract_enablement_launch_log (pure) ----
+# ---- _authorable_launch_log (pure) ----
 
 
 def test_extract_launch_log_joins_error_fields():
     payload = {"error": "boom", "stderr": "trace here", "status": "failed"}
-    out = _extract_enablement_launch_log(payload)
+    out = _authorable_launch_log(payload, err_class="subprocess_nonzero")
     assert "boom" in out
     assert "trace here" in out
 
 
 def test_extract_launch_log_handles_list_fields():
     payload = {"log_tail": ["line1", "", "line2"]}
-    out = _extract_enablement_launch_log(payload)
+    out = _authorable_launch_log(payload, err_class="")
     assert "line1" in out and "line2" in out
 
 
 def test_extract_launch_log_empty_on_none_or_blank():
-    assert _extract_enablement_launch_log(None) == ""
-    assert _extract_enablement_launch_log({}) == ""
-    assert _extract_enablement_launch_log({"error": "   "}) == ""
+    assert _authorable_launch_log(None, err_class="") == ""
+    assert _authorable_launch_log({}, err_class="") == ""
+    assert _authorable_launch_log({"error": "   "}, err_class="") == ""
+
+
+@pytest.mark.parametrize(
+    "payload, err_class",
+    [
+        ({"error": "bad --flag"}, "fast_exit_arg_error"),
+        ({"error": "pinned dependency missing"}, AGENTX_PREFLIGHT_ERROR_CLASS),
+        ({"error": f"{RAY_INFEASIBLE_MARKER}: cluster has 0 GPU(s), 8 requested"}, "subprocess_nonzero"),
+        ({"error": "budget reached"}, SESSION_TIME_EXHAUSTED_CLASS),
+    ],
+)
+def test_a_boot_that_never_reached_a_framework_failure_is_not_authorable(payload, err_class):
+    """Each of these would otherwise become integrate_patch's "before" wall.
+
+    The wall grades the next round's patch, and one any server start clears
+    passes a patch that enabled nothing.
+    """
+    assert _authorable_launch_log(payload, err_class=err_class) == ""
 
 
 # ---- build_enablement_specialist_params (uses build_mandate) ----

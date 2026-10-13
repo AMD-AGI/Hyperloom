@@ -119,9 +119,15 @@ def _is_ray_cluster_infeasible(result_payload: Mapping[str, Any]) -> bool:
     return RAY_INFEASIBLE_MARKER in str(result_payload.get("error") or "")
 
 
-def _extract_enablement_launch_log(result_payload: dict[str, Any] | None) -> str:
-    """Extract launch/traceback text from a failed baseline result payload."""
-    if not isinstance(result_payload, dict):
+def _authorable_launch_log(result_payload: dict[str, Any] | None, *, err_class: str) -> str:
+    """The failed boot's text the next enablement round authors against, or ``""``.
+
+    A failure that never reached a framework error is no wall: as
+    integrate_patch's "before" boot it passes any patch that starts the server.
+    """
+    if not isinstance(result_payload, dict) or _is_ray_cluster_infeasible(result_payload):
+        return ""
+    if err_class in ("fast_exit_arg_error", AGENTX_PREFLIGHT_ERROR_CLASS) or stopped_by_the_run_class(err_class):
         return ""
     parts: list[str] = []
     for key in ("error", "stderr", "log_tail", "log_excerpt", "traceback", "reason"):
@@ -1082,8 +1088,8 @@ class WritebackCollaborator(CoordinatorCollaborator):
             error_class="" if stopped_by_the_run else str(err_class or ""),
             reason="stopped by the run" if stopped_by_the_run else "revalidation baseline failed",
         )
-        launch_log = _extract_enablement_launch_log(result_payload)
-        if launch_log and not stopped_by_the_run:
+        launch_log = _authorable_launch_log(result_payload, err_class=str(err_class or ""))
+        if launch_log:
             observed = str(result_payload.get("boot_observation_path") or "")
             state.enablement.record_launch_observation(log=launch_log, observation_path=observed)
         log.warning(
@@ -1321,15 +1327,9 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     "disable-cuda-graph fallback for the next baseline retry",
                     task.task_id,
                 )
-            # Stash the launch/traceback text for the FRAMEWORK pump. A boot that
-            # never reached a framework failure is excluded: as integrate_patch's
-            # "before" wall it passes any patch that boots at all.
-            launch_log = _extract_enablement_launch_log(result_payload)
-            authorable = err_class not in (
-                "fast_exit_arg_error",
-                AGENTX_PREFLIGHT_ERROR_CLASS,
-            ) and not _is_ray_cluster_infeasible(result_payload)
-            if launch_log and authorable and not stopped_by_the_run:
+            # Stash the launch/traceback text for the FRAMEWORK pump.
+            launch_log = _authorable_launch_log(result_payload, err_class=err_class)
+            if launch_log:
                 self.shared_state.enablement.record_launch_observation(
                     log=launch_log, observation_path=str(result_payload.get("boot_observation_path") or "")
                 )
