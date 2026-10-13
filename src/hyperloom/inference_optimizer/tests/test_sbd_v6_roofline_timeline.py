@@ -802,7 +802,6 @@ def _certificate(*, density: dict[str, Any], verdict: dict[str, Any], rank_count
             {
                 "rank": 0,
                 "density": density,
-                "split_forecast": {"viable_modes": ["mixed"], "viable_consumer_modes": ["mixed"]},
             }
         ],
         "verdict": {"thresholds_effective": {"graph_launch_coverage_max": 0.5}, **verdict},
