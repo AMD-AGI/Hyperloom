@@ -14,6 +14,7 @@ from copy import deepcopy
 import pytest
 import yaml
 
+from hyperloom.inference_optimizer import benchmark_interpreter
 from hyperloom.inference_optimizer.agentx import identity, managed, native
 from hyperloom.inference_optimizer.agentx.identity import canonical_sha256, validate_server_launch
 from hyperloom.inference_optimizer.cli import preflight
@@ -241,7 +242,10 @@ def test_managed_replace_profiler_argv_uses_audited_magpie_contract(tmp_path, mo
     evidence["evidence_sha256"] = canonical_sha256({k: v for k, v in evidence.items() if k != "evidence_sha256"})
     calls = []
 
+    monkeypatch.setattr(benchmark_interpreter, "resolve_magpie_python", lambda: "/magpie/bin/python")
+
     def verify(command, **kwargs):
+        assert command[0] == "/magpie/bin/python"
         payload = json.loads(kwargs["input"])
         assert payload["profile"] is True
         assert payload["workspace"] == str(tmp_path)
@@ -265,7 +269,10 @@ def test_managed_accepted_launch_uses_magpie_argv_validation_without_workspace(t
     evidence.update(owner="magpie", recipe_source_files={}, server_spec_sha256=canonical_sha256(spec))
     evidence["evidence_sha256"] = canonical_sha256({k: v for k, v in evidence.items() if k != "evidence_sha256"})
 
+    monkeypatch.setattr(benchmark_interpreter, "resolve_magpie_python", lambda: "/magpie/bin/python")
+
     def verify(command, **kwargs):
+        assert command[0] == "/magpie/bin/python"
         payload = json.loads(kwargs["input"])
         assert payload["profile"] is False
         assert 'apply_launch_args(evidence["base_argv"]' in command[-1]
