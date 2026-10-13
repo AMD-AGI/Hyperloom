@@ -10,7 +10,7 @@ import logging
 import os
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Callable
 
 from hyperloom.common.failure_signature import (
@@ -193,6 +193,8 @@ class BaseAdapter:
     """Base enablement adapter."""
 
     framework: str = ""
+    # Where the framework's importable package sits in its upstream repo; a localized diff keeps only files under it.
+    package_path: str = ""
 
     def __init__(self, run: RunFn = _default_run) -> None:
         """Store the injectable subprocess shim (default: real subprocess)."""
@@ -252,8 +254,15 @@ class BaseAdapter:
         )
 
     def source_import_root(self, framework_root: str) -> str:
-        """Return the import root relative to a source snapshot's ``files/`` dir."""
-        return ""
+        """Return the import root relative to a source snapshot's ``files/`` dir.
+
+        The directory above the package when the checkout holds it, so a
+        ``python/sglang`` layout gives ``python`` and a top-level package none.
+        """
+        if not framework_root or not self.package_path or not (Path(framework_root) / self.package_path).is_dir():
+            return ""
+        parent = PurePosixPath(self.package_path).parent.as_posix()
+        return "" if parent == "." else parent
 
 
 def _pr_number_from_ref(candidate_ref: str) -> int:
@@ -317,6 +326,7 @@ class VllmRocmAdapter(_VenvProvisionMixin):
     """vLLM ROCm adapter: wheel install from a host-allowlisted ROCm index only."""
 
     framework = "vllm"
+    package_path = "vllm"
 
     def build_stack_action(
         self,
@@ -418,13 +428,7 @@ class SglangAdapter(_VenvProvisionMixin):
     """SGLang adapter: editable checkout at a ref, or wheel install."""
 
     framework = "sglang"
-
-    def source_import_root(self, framework_root: str) -> str:
-        """Return ``"python"`` for a sglang checkout (``python/sglang/...``), else ``""``."""
-        if not framework_root:
-            return ""
-        root = Path(framework_root)
-        return "python" if (root / "python" / "sglang").is_dir() else ""
+    package_path = "python/sglang"
 
     def build_stack_action(
         self,
@@ -544,6 +548,7 @@ class AtomAdapter(BaseAdapter):
     """Atom adapter: no runtime acquisition, but Python localization."""
 
     framework = "atom"
+    package_path = "atom"
 
     def supports(self, gap: CapabilityGap) -> bool:
         """Localize any code gap; the backport is applied via no-git."""

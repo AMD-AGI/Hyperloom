@@ -1850,12 +1850,7 @@ class IntegratePatchExecutor:
         if provision_early is not None:
             return provision_early
 
-        # Localize a merged-PR / vendored closure into the source tree. Fetch
-        # happens post-Critic; a compiled/build closure defers to a clean
-        # revert. Localized patches are prepended in _stage_apply.
-        localize_early = await self._stage_localize_source(attempt, params, attempt.specialist_task_id)
-        if localize_early is not None:
-            return self._finish_attempt(attempt, localize_early)
+        await self._stage_localize_source(attempt, params)
 
         # The apply and the gate both mutate the framework tree behind the
         # operator's auto-stash, and both cross awaits while it is on the stack --
@@ -2252,27 +2247,18 @@ class IntegratePatchExecutor:
         except Exception:
             log.debug("integrate_patch: attempt-dir GC failed for %s", attempt_dir, exc_info=True)
 
-    async def _stage_localize_source(
-        self,
-        attempt: IntegrateAttempt,
-        params: dict[str, Any],
-        specialist_task_id: str,
-    ) -> dict[str, Any] | None:
-        """Fetch/synthesize a localization diff and stage it for _stage_apply (Rung 4).
+    async def _stage_localize_source(self, attempt: IntegrateAttempt, params: dict[str, Any]) -> None:
+        """Fetch a localization diff and record it on ``attempt`` for ``_stage_apply`` (Rung 4).
 
-        No-op when the round's gap needs no code acquisition, no bridging
-        candidate in the framework's own repo was discovered, or the framework
-        adapter cannot localize.
-        Fetches the merged-PR / vendored diff (post-Critic), rejects a
-        compiled / build-backend closure to a clean revert, and writes the diff
-        to a patch file recorded on ``attempt.localization_patches`` which
-        ``_stage_apply`` prepends to the patch set. Returns an early-exit
-        ``reverted`` dict on any gate/fetch failure (no tree mutation yet), or
-        ``None`` to continue.
+        Does nothing when the round's gap needs no code acquisition, no
+        bridging candidate in the framework's own repo was discovered, or the
+        adapter cannot localize. A change that cannot be localized (compiled,
+        oversize, outside the package, or not fetched) is skipped and the
+        round runs on its own patches.
         """
         gap = _enablement_gap(params)
         if gap is None:
-            return None
+            return
 
         from hyperloom.inference_optimizer import framework_registry
 
@@ -2281,54 +2267,34 @@ class IntegratePatchExecutor:
 
         refs = attempt.shared_state.enablement.candidate_refs
         if not refs:
-            return None
+            return
         framework = str(getattr(attempt.shared_state, "framework", "") or "").strip().lower()
         repo_url = framework_registry.repo_url(framework)
         if not repo_url:
-            return None
+            return
         ref = _first_ref_in_repo(refs, repo_url)
         if not ref:
-            return None
+            return
 
-        action = get_adapter(framework).build_localization_action(gap, candidate_ref=ref, repo_url=repo_url)
+        adapter = get_adapter(framework)
+        action = adapter.build_localization_action(gap, candidate_ref=ref, repo_url=repo_url)
         if action is None:
-            return None
+            return
 
         from hyperloom.agents.framework.sources import github as _gh
 
-        def _base_reverted(error_class: str, reason: str) -> dict[str, Any]:
-            return {
-                "status": "reverted",
-                "error_class": error_class,
-                "error": reason,
-                "specialist_task_id": specialist_task_id,
-                "patches_applied": [],
-                "patches_reverted": [],
-                "enablement": True,
-                "reason": reason,
-            }
-
-        try:
-            diff_text, touched_paths, verdict = await asyncio.to_thread(
-                build_localization_diff,
-                action,
-                fetch_pr_patches=lambda slug, num: _gh.pr_patches(slug, num),
-                fetch_raw_file=lambda slug, ref, path: _gh.fetch_raw_file(slug, ref, path),
-            )
-        except Exception as exc:
-            log.exception("integrate_patch: localization fetch raised")
-            return _base_reverted("localization_fetch_failed", f"localization fetch raised: {exc!r}")
-
+        diff_text, touched_paths, verdict = await asyncio.to_thread(
+            build_localization_diff,
+            action,
+            fetch_pr_patches=lambda slug, num: _gh.pr_patches(slug, num),
+            fetch_raw_file=lambda slug, ref, path: _gh.fetch_raw_file(slug, ref, path),
+            scope=adapter.package_path,
+        )
         if not verdict.is_localizable:
-            error_class = (
-                "localization_rung5_deferred" if verdict.kind == "needs_rung5" else "localization_fetch_failed"
-            )
-            return _base_reverted(error_class, f"localization not applicable: {verdict.reason}")
-        if not diff_text.strip():
-            return _base_reverted("localization_fetch_failed", "localization produced an empty diff")
+            log.info("integrate_patch: localization of %s skipped: %s", ref, verdict.reason)
+            return
 
-        loc_dir = runs_dir(self.session_dir, "integrate_patch", attempt.task_id)
-        loc_dir = loc_dir / "localization"
+        loc_dir = runs_dir(self.session_dir, "integrate_patch", attempt.task_id) / "localization"
         loc_dir.mkdir(parents=True, exist_ok=True)
         gap_slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", action.gap_id or "localization")
         patch_path = loc_dir / f"{gap_slug}.patch"
@@ -2343,7 +2309,24 @@ class IntegratePatchExecutor:
             len(touched_paths),
             action.kind,
         )
-        return None
+
+    @staticmethod
+    def _admit_localization(attempt: IntegrateAttempt, framework_root: Path, patch_paths: list[Path]) -> list[Path]:
+        """Put the localization ahead of the round's patches when it applies to the stashed tree, else drop it.
+
+        Only the check against the tree the round will run on can tell, so a
+        localization that does not apply costs the round nothing but itself.
+        The recorded patch set is what recovery sweeps, so it follows.
+        """
+        patch_paths = list(patch_paths)
+        loc = [p for p in attempt.localization_patches if p.is_file() and p not in patch_paths]
+        if loc and all(_detect_p_level(framework_root, p) is not None for p in loc):
+            log.info("integrate_patch: localization %s applies, placing it ahead of the round's patches", loc)
+            patch_paths = loc + patch_paths
+            attempt.pending["patches"] = [str(p) for p in patch_paths]
+        else:
+            attempt.drop_localization()
+        return patch_paths
 
     async def _record_closure_baseline(self, attempt: IntegrateAttempt, params: dict[str, Any]) -> None:
         """Observe the environment before the enablement's first setup command, through the KEEP's interpreter.
@@ -2406,15 +2389,6 @@ class IntegratePatchExecutor:
             explicit_patches=(list(explicit_patches) if isinstance(explicit_patches, list) else None),
             done_payload=done_payload,
         )
-        # Prepend localized closure patches (applied first, before this round's
-        # patch) so the enablement composes on top of the localization.
-        localization_patches = attempt.localization_patches
-        if localization_patches:
-            seen_loc = {str(p) for p in patch_paths}
-            prefix_loc = [p for p in localization_patches if p.is_file() and str(p) not in seen_loc]
-            if prefix_loc:
-                log.info("integrate_patch: prepending %d localization patch(es)", len(prefix_loc))
-                patch_paths = prefix_loc + list(patch_paths)
         config_changes = dict(params.get("config_changes") or {})
         if not config_changes and done_payload:
             cc = done_payload.get("config_changes")
@@ -2734,6 +2708,7 @@ class IntegratePatchExecutor:
             if cp is None or cp.returncode != 0:
                 raise OSError("cannot persist the exact pre-candidate stash identity")
             recovery["stash_oid"] = cp.stdout.strip()
+        patch_paths = self._admit_localization(attempt, framework_root, patch_paths)
         recovery["phase"] = "ready"
         if shared_state is not None:
             shared_state.save(self.session_dir)
