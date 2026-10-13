@@ -2299,7 +2299,6 @@ def apply_kernel_patch(
             "backup_dir_on_pod": pod_backup_dir,
             "host_backup_map": backup_map,
             "records_by_host": records_by_host,
-            "per_node": mn_apply.get("per_node", []),
         }
         # Persist multinode info now so a later rebuild failure reverts pod-side patches too.
         manifest["multinode"] = multinode_info
@@ -2636,7 +2635,6 @@ def _apply_kernel_patch_snapshot(
     )
     if _is_multi_node():
         pod_backup_dir = os.environ.get("HYPERLOOM_MN_KERNEL_BACKUP_DIR", _MN_POD_BACKUP_DIR_DEFAULT)
-        per_node_all: list[dict[str, Any]] = []
         backup_map: dict[str, str] = {}
         records_by_host: dict[str, list[dict[str, Any]]] = {}
         try:
@@ -2650,9 +2648,7 @@ def _apply_kernel_patch_snapshot(
                         strategy_jit_dir if (p == jit_dispatch_target and strategy_jit_dir and not skip_rebuild) else ""
                     ),
                 )
-                new_records = list(mn_apply.get("per_node", []) or [])
-                per_node_all.extend(new_records)
-                for entry in new_records:
+                for entry in mn_apply.get("per_node", []) or []:
                     host = (entry.get("host") or "").strip()
                     bp = (entry.get("backup_path") or "").strip()
                     if host:
@@ -2665,7 +2661,6 @@ def _apply_kernel_patch_snapshot(
                     "backup_dir_on_pod": pod_backup_dir,
                     "host_backup_map": backup_map,
                     "records_by_host": records_by_host,
-                    "per_node": per_node_all,
                 }
                 # Persist after every file so a later dispatch failure can
                 # revert all already-patched files on every pod.
@@ -2688,7 +2683,6 @@ def _apply_kernel_patch_snapshot(
             "backup_dir_on_pod": pod_backup_dir,
             "host_backup_map": backup_map,
             "records_by_host": records_by_host,
-            "per_node": per_node_all,
         }
         manifest["multinode"] = multinode_info
         manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")

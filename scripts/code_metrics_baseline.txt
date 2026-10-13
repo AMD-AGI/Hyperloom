@@ -722,11 +722,11 @@ function-lines src/hyperloom/orchestrator/kernel/_kernel_decisions.py::_queue_ke
 function-lines src/hyperloom/orchestrator/kernel/_kernel_decisions.py::enqueue_nominated_patch 105
 function-lines src/hyperloom/orchestrator/kernel/_kernel_decisions.py::record_kernel_integrate_result 171
 function-lines src/hyperloom/orchestrator/kernel/_kernel_decisions.py::untried_hot_reusable_kernels 150
-function-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::_apply_kernel_patch_snapshot 370
+function-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::_apply_kernel_patch_snapshot 365
 function-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::_detect_strategy 126
 function-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::_invalidate_aiter_cpp_itfs_cache 102
 function-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::_verify_rebuild_imports 81
-function-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::apply_kernel_patch 308
+function-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::apply_kernel_patch 307
 function-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::apply_snapshot 128
 function-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::finalize_kernel_patch 89
 function-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::parse_patch_manifest 93
@@ -1059,7 +1059,7 @@ module-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py 488
 module-lines src/hyperloom/orchestrator/actions/executors/profile.py 1590
 module-lines src/hyperloom/orchestrator/actions/executors/report.py 1399
 module-lines src/hyperloom/orchestrator/actions/executors/roofline.py 1303
-module-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py 2798
+module-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py 2792
 module-lines src/hyperloom/orchestrator/kernel/conc_sweep.py 1429
 module-lines src/hyperloom/orchestrator/kernel/request_handlers.py 5193
 module-lines src/hyperloom/orchestrator/knowledge/recipe_journal.py 1822
