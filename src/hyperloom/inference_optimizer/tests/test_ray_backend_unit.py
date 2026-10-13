@@ -19,6 +19,7 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.actions.executors import _ray_backend as rb
+from hyperloom.orchestrator.actions.executors import _ray_runtime as rr
 from hyperloom.orchestrator.actions.executors import _ray_serving as rs
 from hyperloom.orchestrator.actions.executors._ray_serving import (
     ManagedServerProcess,
@@ -1934,12 +1935,15 @@ def test_serving_lease_infeasible_no_slot_degrades(monkeypatch: pytest.MonkeyPat
     fake = _InfeasibleFakeRay(gpus=8.0, has_serving_slot=False)
     monkeypatch.setitem(sys.modules, "ray", fake)
     monkeypatch.setattr(rb, "get_ray_backend", lambda: _StubBackendP2())
+    monkeypatch.setattr(rs, "_LEASE_ACTORS_SUBMITTED", 0)
+    monkeypatch.setattr(rr, "local_head_restartable", lambda: (False, "not a lone local head"))
 
     lease = rs.ServingLease(num_gpus=1, serving_slot=True)
     rc, _out, err = lease.run_session_kill(["echo", "hi"], timeout=5)
     assert rc == 1
     assert "ray_ensure_error" in err
     assert "serving_slot" in err
+    assert "not a lone local head" in err
 
 
 def test_serving_lease_infeasible_no_gpu_degrades(monkeypatch: pytest.MonkeyPatch):

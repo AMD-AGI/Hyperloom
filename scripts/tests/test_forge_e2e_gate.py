@@ -30,7 +30,7 @@ gate = _load_gate()
 
 def test_vendored_forge_changes_trigger() -> None:
     for path in (
-        "src/kernelforge/cli.py",
+        "src/kernelforge/cli/forge_loop_command.py",
         "src/kernelforge/loop/runner.py",
         "src/kernelforge/examples/triton-softmax-forge-loop/driver.py",
         "pyproject.toml",
