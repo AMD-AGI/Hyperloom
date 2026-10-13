@@ -19,12 +19,14 @@ from hyperloom_multibranch.notebook.peers import TestKind
 from hyperloom_multibranch.notebook.records import (
     BranchNode,
     BranchProgress,
+    Claim,
     CommitNode,
     CommittedCommit,
     LineageEvent,
     LineageView,
     MergeAttempt,
     MergeState,
+    NotebookSnapshot,
     QuarantineEvent,
     RecordedValue,
     RegressionCase,
@@ -49,9 +51,11 @@ class _BranchDraft:
     branch: str
     origin: LineageKind
     start_commit: str
+    opened_at: float
     from_branch: str = ""
     head: str = ""
     stop_reason: str | None = None
+    stopped_at: float | None = None
 
     def node(self) -> BranchNode:
         return BranchNode(
@@ -61,6 +65,8 @@ class _BranchDraft:
             head_commit=self.head or self.start_commit,
             from_branch=self.from_branch,
             stop_reason=self.stop_reason,
+            opened_at=self.opened_at,
+            stopped_at=self.stopped_at,
         )
 
 
@@ -70,33 +76,38 @@ def lineage_view(state: NotebookState) -> LineageView:
     splits = state.split_branches()
     branches: dict[str, _BranchDraft] = {}
     commits: dict[str, CommitNode] = {}
-    for _entry, value in state.decoded:
+    for entry, value in state.decoded:
         if isinstance(value, LineageEvent):
-            _apply_event(branches, commits, value)
+            _apply_event(branches, commits, value, entry.at)
             continue
-        node = _commit_node(state, value, splits) if isinstance(value, JudgementWrite) else None
+        node = _commit_node(state, value, splits, entry.at) if isinstance(value, JudgementWrite) else None
         if node is not None and node.commit_id not in commits:
             commits[node.commit_id] = node
-            branches.setdefault(node.branch, _BranchDraft(node.branch, LineageKind.OPEN, node.parent_commit))
-            branches[node.branch].head = node.commit_id
+            implicit = _BranchDraft(node.branch, LineageKind.OPEN, node.parent_commit, opened_at=entry.at)
+            branches.setdefault(node.branch, implicit).head = node.commit_id
     return LineageView(tuple(commits.values()), tuple(draft.node() for draft in branches.values()))
 
 
-def _apply_event(branches: dict[str, _BranchDraft], commits: dict[str, CommitNode], event: LineageEvent) -> None:
+def _apply_event(
+    branches: dict[str, _BranchDraft], commits: dict[str, CommitNode], event: LineageEvent, at: float
+) -> None:
     draft = branches.get(event.branch)
     if event.kind is LineageKind.ROOT:
-        commits.setdefault(event.commit_id, CommitNode(event.commit_id, "", event.branch, CommitOrigin.ROOT))
-        branches[event.branch] = _BranchDraft(event.branch, LineageKind.ROOT, event.commit_id, head=event.commit_id)
+        commits.setdefault(event.commit_id, CommitNode(event.commit_id, "", event.branch, CommitOrigin.ROOT, at=at))
+        branches[event.branch] = _BranchDraft(event.branch, LineageKind.ROOT, event.commit_id, at, head=event.commit_id)
     elif event.kind is LineageKind.STOP:
         if draft is not None:
-            draft.stop_reason = event.reason
+            draft.stop_reason, draft.stopped_at = event.reason, at
     elif draft is None:
-        branches[event.branch] = _BranchDraft(event.branch, event.kind, event.from_commit, event.from_branch)
+        branches[event.branch] = _BranchDraft(event.branch, event.kind, event.from_commit, at, event.from_branch)
     else:
         draft.origin, draft.start_commit, draft.from_branch = event.kind, event.from_commit, event.from_branch
+        draft.opened_at = min(draft.opened_at, at)
 
 
-def _commit_node(state: NotebookState, write: JudgementWrite, splits: Mapping[str, str]) -> CommitNode | None:
+def _commit_node(
+    state: NotebookState, write: JudgementWrite, splits: Mapping[str, str], at: float
+) -> CommitNode | None:
     """The commit a judgement made; a judgement names a commit exactly when its conclusion makes one."""
 
     request = state.requests.get(write.request_id)
@@ -105,12 +116,20 @@ def _commit_node(state: NotebookState, write: JudgementWrite, splits: Mapping[st
     if write.conclusion is Conclusion.MERGED:
         sources = state.merge_sources(write.request_id)
         return CommitNode(
-            write.commit_id, request.parent_commit, INTEGRATION_BRANCH, CommitOrigin.MERGE, write.request_id, sources
+            write.commit_id,
+            request.parent_commit,
+            INTEGRATION_BRANCH,
+            CommitOrigin.MERGE,
+            write.request_id,
+            sources,
+            at,
         )
     if write.conclusion is Conclusion.SPLIT_COMMITTED:
         branch = splits.get(write.commit_id, request.branch)
-        return CommitNode(write.commit_id, request.parent_commit, branch, CommitOrigin.SPLIT, write.request_id)
-    return CommitNode(write.commit_id, request.parent_commit, request.branch, CommitOrigin.COMMIT, write.request_id)
+        return CommitNode(write.commit_id, request.parent_commit, branch, CommitOrigin.SPLIT, write.request_id, at=at)
+    return CommitNode(
+        write.commit_id, request.parent_commit, request.branch, CommitOrigin.COMMIT, write.request_id, at=at
+    )
 
 
 def merge_state(state: NotebookState, attempt: MergeAttempt) -> MergeState:
@@ -250,6 +269,27 @@ def quarantined(state: NotebookState) -> tuple[QuarantineEvent, ...]:
     return tuple(current.values())
 
 
+def snapshot(state: NotebookState, claims: tuple[Claim, ...], taken_at: float) -> NotebookSnapshot:
+    """Every view at once; ``claims`` are the claims in force as their holders see them at ``taken_at``."""
+
+    view = lineage_view(state)
+    return NotebookSnapshot(
+        taken_at=taken_at,
+        profile=state.profiles[-1] if state.profiles else None,
+        fingerprints=tuple(state.fingerprints),
+        records=tuple(state.records()),
+        lineage=view,
+        progress=progress(state, view),
+        committed=committed(state, view),
+        claims=claims,
+        intents=dict(state.intents),
+        baselines=tuple(state.baselines),
+        regressions=tuple(state.regressions),
+        quarantined=quarantined(state),
+        branch_logs={branch: tuple(records) for branch, records in state.branch_logs.items()},
+    )
+
+
 __all__ = [
     "committed",
     "lineage_view",
@@ -258,5 +298,6 @@ __all__ = [
     "quarantined",
     "recorded_value",
     "regression_cases_for",
+    "snapshot",
     "startup_brief",
 ]

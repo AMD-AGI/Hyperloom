@@ -48,6 +48,8 @@ class EntryKind(str, Enum):
     BRANCH_LOG = "branch_log"
     TOOL_RESULT = "tool_result"
     CLAIM = "claim"
+    SESSION_PROFILE = "session_profile"
+    MANIFEST = "manifest"
 
 
 def require_token(value: str, name: str) -> str:

@@ -23,9 +23,11 @@ from hyperloom_multibranch.notebook.records import (
     BaselineRecord,
     BranchLogRecord,
     LineageEvent,
+    ManifestFingerprint,
     MergeAttempt,
     QuarantineEvent,
     RegressionCase,
+    SessionProfile,
     TestRecord,
     ToolResultPointer,
 )
@@ -69,6 +71,8 @@ PAYLOADS: dict[EntryKind, type] = {
     EntryKind.BRANCH_LOG: BranchLogEntry,
     EntryKind.TOOL_RESULT: ToolResultPointer,
     EntryKind.CLAIM: ClaimDecision,
+    EntryKind.SESSION_PROFILE: SessionProfile,
+    EntryKind.MANIFEST: ManifestFingerprint,
 }
 
 
@@ -89,10 +93,17 @@ class NotebookState:
         self.quarantine: list[QuarantineEvent] = []
         self.branch_logs: dict[str, list[BranchLogRecord]] = {}
         self.intents: dict[str, Intent] = {}
+        self.profiles: list[SessionProfile] = []
+        self.fingerprints: list[ManifestFingerprint] = []
+        self.requested_at: dict[str, float] = {}
+        self.measured_at: dict[str, float] = {}
+        self.judged_at: dict[str, float] = {}
         handlers: dict[EntryKind, Callable[[Entry, object], None]] = {
             EntryKind.REQUEST: self._request,
             EntryKind.RESULT: self._result,
             EntryKind.JUDGEMENT: self._judgement,
+            EntryKind.SESSION_PROFILE: lambda _entry, value: self.profiles.append(value),
+            EntryKind.MANIFEST: lambda _entry, value: self.fingerprints.append(value),
             EntryKind.MERGE_ATTEMPT: lambda _entry, value: self.merge_attempts.append(value),
             EntryKind.LINEAGE: lambda _entry, value: self.lineage.append(value),
             EntryKind.BASELINE: lambda _entry, value: self.baselines.append(value),
@@ -111,14 +122,17 @@ class NotebookState:
             handlers[entry.kind](entry, value)
             self.decoded.append((entry, value))
 
-    def _request(self, _entry: Entry, request: TestRequest) -> None:
+    def _request(self, entry: Entry, request: TestRequest) -> None:
         self.requests[request.request_id] = request
+        self.requested_at.setdefault(request.request_id, entry.at)
 
-    def _result(self, _entry: Entry, result: TestResult) -> None:
+    def _result(self, entry: Entry, result: TestResult) -> None:
         self.results[result.request_id] = result
+        self.measured_at.setdefault(result.request_id, entry.at)
 
-    def _judgement(self, _entry: Entry, write: JudgementWrite) -> None:
+    def _judgement(self, entry: Entry, write: JudgementWrite) -> None:
         self.judgements.setdefault(write.request_id, []).append(write)
+        self.judged_at[write.request_id] = entry.at
         if write.commit_id is not None:
             self.commit_writes.setdefault(write.commit_id, write)
 
@@ -145,6 +159,9 @@ class NotebookState:
             judgement=write.judgement if write is not None else None,
             conclusion=write.conclusion if write is not None else None,
             commit_id=write.commit_id if write is not None else None,
+            requested_at=self.requested_at[request_id],
+            measured_at=self.measured_at.get(request_id),
+            judged_at=self.judged_at.get(request_id),
         )
 
     def records(self) -> list[TestRecord]:

@@ -85,6 +85,9 @@ class TestRecord:
     judgement: Judgement | None = None
     conclusion: Conclusion | None = None
     commit_id: str | None = None
+    requested_at: float = 0.0
+    measured_at: float | None = None
+    judged_at: float | None = None
 
     @property
     def request_id(self) -> str:
@@ -232,6 +235,7 @@ class CommitNode:
     origin: CommitOrigin
     request_id: str | None = None
     merged_from: tuple[str, ...] = ()
+    at: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -242,6 +246,8 @@ class BranchNode:
     head_commit: str
     from_branch: str = ""
     stop_reason: str | None = None
+    opened_at: float = 0.0
+    stopped_at: float | None = None
 
 
 @dataclass(frozen=True)
@@ -336,6 +342,73 @@ class SearchHit:
     summary: str
 
 
+@dataclass(frozen=True)
+class SessionProfile:
+    """What a session optimizes: its serving identity and workload, as PRELUDE fixed them.
+
+    The serving identity is the seven dimensions of a Recipe KB canonical id. A workload without ``isl`` and ``osl`` is
+    an AgentX trace replay. ``roofline_ceiling`` is the bound PRELUDE's roofline analysis puts on each metric.
+    """
+
+    session_id: str
+    model: str
+    hardware: str
+    framework: str
+    framework_version: str
+    precision: str
+    tp: int
+    conc: int
+    model_type: str = ""
+    architectures: tuple[str, ...] = ()
+    isl: int | None = None
+    osl: int | None = None
+    kernel_optimizer: str = ""
+    roofline_ceiling: Mapping[str, float] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ManifestFingerprint:
+    """The versions one activity ran with: measurement sockets, specialist prompts and scheduling policies."""
+
+    activity: str
+    sockets: Mapping[str, str] = field(default_factory=dict)
+    prompt_versions: Mapping[str, str] = field(default_factory=dict)
+    policy_versions: Mapping[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class NotebookSnapshot:
+    """Everything the notebook held at ``taken_at``, read at once: what the RSI, the dashboard and the exports use."""
+
+    taken_at: float
+    profile: SessionProfile | None
+    fingerprints: tuple[ManifestFingerprint, ...]
+    records: tuple[TestRecord, ...]
+    lineage: LineageView
+    progress: tuple[BranchProgress, ...]
+    committed: tuple[CommittedCommit, ...]
+    claims: tuple[Claim, ...]
+    intents: Mapping[str, Intent]
+    baselines: tuple[BaselineRecord, ...]
+    regressions: tuple[RegressionCase, ...]
+    quarantined: tuple[QuarantineEvent, ...]
+    branch_logs: Mapping[str, tuple[BranchLogRecord, ...]]
+
+    @property
+    def baseline(self) -> BaselineRecord | None:
+        return self.baselines[-1] if self.baselines else None
+
+    def value_of(self, commit_id: str) -> Mapping[str, float]:
+        """The recorded value of a commit: the baseline for the root, else the judgement that made the commit."""
+
+        node = self.lineage.commit(commit_id)
+        if node is not None and node.origin is CommitOrigin.ROOT:
+            baseline = next((row for row in reversed(self.baselines) if row.root_commit == commit_id), None)
+            return baseline.values if baseline is not None else {}
+        made = next((record for record in self.records if record.commit_id == commit_id), None)
+        return made.judgement.recorded_value if made is not None and made.judgement is not None else {}
+
+
 __all__ = [
     "CLAIM_TOKEN_LENGTH",
     "BaselineRecord",
@@ -352,12 +425,15 @@ __all__ = [
     "InboxPage",
     "LineageEvent",
     "LineageView",
+    "ManifestFingerprint",
     "MergeAttempt",
     "MergeState",
+    "NotebookSnapshot",
     "QuarantineEvent",
     "RecordedValue",
     "RegressionCase",
     "SearchHit",
+    "SessionProfile",
     "StartupBrief",
     "TestRecord",
     "ToolResultPointer",

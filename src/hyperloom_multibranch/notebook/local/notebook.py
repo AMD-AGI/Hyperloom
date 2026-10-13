@@ -37,6 +37,8 @@ from hyperloom_multibranch.notebook.interfaces import (
     NotRecorded,
     ProgressQuery,
     RecordSearch,
+    SessionRecords,
+    SnapshotQuery,
     StartupBriefProvider,
     TestRecordSink,
     WriterNotAllowed,
@@ -72,11 +74,14 @@ from hyperloom_multibranch.notebook.records import (
     InboxPage,
     LineageEvent,
     LineageView,
+    ManifestFingerprint,
     MergeAttempt,
+    NotebookSnapshot,
     QuarantineEvent,
     RecordedValue,
     RegressionCase,
     SearchHit,
+    SessionProfile,
     StartupBrief,
     TestRecord,
     ToolResultPointer,
@@ -140,6 +145,8 @@ class LocalNotebook(
     CommitQuery,
     StartupBriefProvider,
     RecordSearch,
+    SessionRecords,
+    SnapshotQuery,
 ):
     """A handle on the notebook in ``root``, writing as ``writer``; ``clock`` gives Unix seconds.
 
@@ -508,6 +515,34 @@ class LocalNotebook(
 
     async def profiles(self, commit_id: str) -> tuple[TestRecord, ...]:
         return feeds.profiles(self._state(), commit_id)
+
+    # --- session records and snapshots ----------------------------------------------------------------------------
+
+    async def write_session_profile(self, profile: SessionProfile) -> None:
+        self._require(Role.SCHEDULER)
+        require_token(profile.session_id, "session_id")
+        summary = f"session {profile.session_id}: {profile.model} on {profile.hardware}, TP {profile.tp}"
+        self._append(EntryKind.SESSION_PROFILE, profile, branch="", parent="", summary=summary)
+
+    async def session_profile(self) -> SessionProfile:
+        profiles = self._state().profiles
+        if not profiles:
+            raise NotRecorded("PRELUDE has not written the session profile yet")
+        return profiles[-1]
+
+    async def write_manifest_fingerprint(self, fingerprint: ManifestFingerprint) -> None:
+        self._require(Role.SCHEDULER)
+        parts = (len(fingerprint.sockets), len(fingerprint.prompt_versions), len(fingerprint.policy_versions))
+        summary = f"manifest of {fingerprint.activity}: {parts[0]} sockets, {parts[1]} prompts, {parts[2]} policies"
+        self._append(EntryKind.MANIFEST, fingerprint, branch="", parent="", summary=summary)
+
+    async def manifest_fingerprints(self) -> tuple[ManifestFingerprint, ...]:
+        return tuple(self._state().fingerprints)
+
+    async def snapshot(self) -> NotebookSnapshot:
+        now = self._clock()
+        claims = tuple(effective(claim, now) for claim in self._leases.all_current())
+        return views.snapshot(self._state(), claims, now)
 
 
 __all__ = ["CLAIMS_DIR", "SEGMENTS_DIR", "LocalNotebook"]

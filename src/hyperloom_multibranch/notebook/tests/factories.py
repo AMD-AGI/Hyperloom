@@ -8,6 +8,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
+from hyperloom_multibranch.notebook.records import SessionProfile
 from hyperloom_multibranch.notebook.peers import (
     Intent,
     IntentLayer,
@@ -37,6 +38,25 @@ class FakeClock:
 
     def advance(self, seconds: float) -> None:
         self.now += seconds
+
+
+def profile(**overrides: object) -> SessionProfile:
+    fields: dict[str, object] = {
+        "session_id": "sess-1",
+        "model": "deepseek-ai/DeepSeek-R1",
+        "hardware": "MI355X",
+        "framework": "vllm",
+        "framework_version": "0.11.0",
+        "precision": "fp8",
+        "tp": 8,
+        "conc": 64,
+        "isl": 1024,
+        "osl": 1024,
+        "kernel_optimizer": "forge",
+        "roofline_ceiling": {"output_tps": 1500.0},
+    }
+    fields.update(overrides)
+    return SessionProfile(**fields)
 
 
 def intent(

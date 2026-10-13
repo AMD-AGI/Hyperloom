@@ -34,11 +34,14 @@ from hyperloom_multibranch.notebook.records import (
     InboxPage,
     LineageEvent,
     LineageView,
+    ManifestFingerprint,
     MergeAttempt,
+    NotebookSnapshot,
     QuarantineEvent,
     RecordedValue,
     RegressionCase,
     SearchHit,
+    SessionProfile,
     StartupBrief,
     TestRecord,
     ToolResultPointer,
@@ -197,6 +200,25 @@ class StartupBriefProvider(Protocol):
     async def startup_brief(self, start_commit: str) -> StartupBrief: ...
 
 
+class SessionRecords(Protocol):
+    """What the session is and what it ran with; the scheduler writes both, the profile once at PRELUDE."""
+
+    async def write_session_profile(self, profile: SessionProfile) -> None: ...
+
+    async def session_profile(self) -> SessionProfile:
+        """The latest profile; raises :class:`NotRecorded` before PRELUDE wrote one."""
+
+    async def write_manifest_fingerprint(self, fingerprint: ManifestFingerprint) -> None: ...
+
+    async def manifest_fingerprints(self) -> tuple[ManifestFingerprint, ...]: ...
+
+
+class SnapshotQuery(Protocol):
+    """Everything at once, for the notebook owner's own consumers: the RSI, the dashboard and the exports."""
+
+    async def snapshot(self) -> NotebookSnapshot: ...
+
+
 class RecordSearch(Protocol):
     """Record lookups a specialist makes through the tool layer."""
 
@@ -222,6 +244,8 @@ class Notebook(
     CommitQuery,
     StartupBriefProvider,
     RecordSearch,
+    SessionRecords,
+    SnapshotQuery,
     Protocol,
 ):
     """Every interface at once: what one notebook handle offers."""
@@ -245,6 +269,8 @@ __all__ = [
     "NotebookError",
     "ProgressQuery",
     "RecordSearch",
+    "SessionRecords",
+    "SnapshotQuery",
     "StartupBriefProvider",
     "TestRecordSink",
     "UnknownRequest",

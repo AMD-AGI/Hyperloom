@@ -52,7 +52,7 @@ async def _tested(open_as: Open, request_id: str, branch: str = "s1", parent: st
 def test_the_local_notebook_implements_every_interface_method() -> None:
     names = [name for name, member in inspect.getmembers(interfaces.Notebook) if inspect.iscoroutinefunction(member)]
 
-    assert len(names) == 30
+    assert len(names) == 35
     assert all(getattr(LocalNotebook, name) is not getattr(interfaces.Notebook, name) for name in names)
 
 
