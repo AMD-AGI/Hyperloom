@@ -24,9 +24,9 @@ from hyperloom.orchestrator.bus.storage.schema import ensure_schema
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="Confirmation requires a real POSIX flock")
 
-LOST = "f8dad909-cb87-4f75-830a-3080649f0f69:4026552227"
-HERE = "aecbc5d7-91cf-4f35-9810-370090b5d084:4026552243"
-OTHER = "c0e93f64-ebe7-4bd1-b11f-2238ee6a7893:4026552241"
+LOST = "0a0a0a0a-1111-4111-8111-000000000001:4026531001"
+HERE = "0b0b0b0b-2222-4222-8222-000000000002:4026531002"
+OTHER = "0c0c0c0c-3333-4333-8333-000000000003:4026531003"
 REASON = "machine of the previous execution environment was lost"
 PAST = "2026-10-12T19:58:19.558779+00:00"
 FUTURE = "2999-01-01T00:00:00.000000+00:00"

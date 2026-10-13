@@ -73,7 +73,6 @@ def _inspect(db: sqlite3.Connection, owner_scope: str) -> list[str]:
             diagnostics.append(f"task={_label(task)} lane={_label(lane)} holder={_label(holder)}: {reason}")
 
     local_tasks: set[str] = set()
-    foreign_scopes: set[str] = set()
     round_leases: list[sqlite3.Row] = []
     if "leases" in tables:
         columns = {row[1] for row in db.execute("PRAGMA table_info(leases)")}
@@ -93,8 +92,6 @@ def _inspect(db: sqlite3.Connection, owner_scope: str) -> list[str]:
             if owner_scope and row["owner_scope"] == owner_scope and pid > 0:
                 local_tasks.add(row["task_id"])
                 continue
-            if row["owner_scope"]:
-                foreign_scopes.add(row["owner_scope"])
             blocked(row["task_id"], row["lane"], row["holder_id"], "execution owner scope or PID is unobservable")
 
     if "gpu_leases" in tables:
@@ -139,10 +136,19 @@ def _inspect(db: sqlite3.Connection, owner_scope: str) -> list[str]:
 
     if total > len(diagnostics):
         diagnostics.append(f"{total - len(diagnostics)} additional ownership records omitted")
-    if foreign_scopes:
-        named = sorted(foreign_scopes)
-        diagnostics.append("other owner scopes: " + " ".join(_label(scope) for scope in named[:5]))
     return diagnostics
+
+
+def _other_scopes(db: sqlite3.Connection, owner_scope: str) -> list[str]:
+    """Name up to five recorded execution scopes other than ``owner_scope``, for a blocked resume."""
+    if "owner_scope" not in {row[1] for row in db.execute("PRAGMA table_info(leases)")}:
+        return []
+    rows = db.execute(
+        "SELECT DISTINCT owner_scope FROM leases WHERE owner_scope NOT IN ('', ?) ORDER BY owner_scope LIMIT 5",
+        (owner_scope,),
+    )
+    scopes = [_label(row[0]) for row in rows]
+    return ["other owner scopes: " + " ".join(scopes)] if scopes else []
 
 
 def ensure_resume_safe(session_dir: Path, *, owner_scope: str) -> None:
@@ -159,6 +165,8 @@ def ensure_resume_safe(session_dir: Path, *, owner_scope: str) -> None:
             db.row_factory = sqlite3.Row
             db.execute("BEGIN")
             diagnostics = _inspect(db, owner_scope)
+            if diagnostics:
+                diagnostics += _other_scopes(db, owner_scope)
     except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
         raise ResumeBlocked(
             "cannot inspect persisted execution ownership read-only; resume is blocked. "
@@ -178,6 +186,31 @@ def ensure_resume_safe(session_dir: Path, *, owner_scope: str) -> None:
         )
 
 
+def _task_leases(db: sqlite3.Connection, tables: set[str], task_id: str, owner_scope: str) -> list[dict]:
+    """Return the execution leases a confirmation releases; every one must carry ``owner_scope``.
+
+    The empty scope is the legacy unattributed ownership confirmed task by task. A
+    bring-up round's lane never records a scope and stays with the round reconciler.
+    """
+    if "leases" not in tables:
+        return []
+    columns = {row[1] for row in db.execute("PRAGMA table_info(leases)")}
+    query = (
+        "SELECT lane, holder_id, owner_scope FROM leases WHERE task_id=?"
+        if "owner_scope" in columns
+        else "SELECT lane, holder_id, '' AS owner_scope FROM leases WHERE task_id=?"
+    )
+    rows = list(db.execute(query, (task_id,)))
+    scoped = [row for row in rows if not owner_scope or row["lane"] != "bringup_round"]
+    if any(row["owner_scope"] != owner_scope for row in scoped):
+        raise CleanupConfirmationError(
+            "confirmation is limited to strictly empty owner scope on every target lease"
+            if not owner_scope
+            else f"task={_label(task_id)} holds a lease outside the confirmed owner scope"
+        )
+    return [{"lane": row["lane"], "holder_id": row["holder_id"]} for row in rows if row["lane"] != "bringup_round"]
+
+
 def _confirm_task_stopped_in_transaction(
     db: sqlite3.Connection,
     *,
@@ -187,11 +220,7 @@ def _confirm_task_stopped_in_transaction(
     confirmed_at: str,
     owner_scope: str = "",
 ) -> dict:
-    """Update one task using the caller's existing IMMEDIATE transaction and Row factory.
-
-    Every lease of the task must carry ``owner_scope``; the empty default is the
-    legacy unattributed ownership an operator confirms task by task.
-    """
+    """Update one task using the caller's existing IMMEDIATE transaction and Row factory."""
     tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     if "tasks" not in tables:
         raise CleanupConfirmationError("confirmation requires an existing tasks table")
@@ -209,26 +238,7 @@ def _confirm_task_stopped_in_transaction(
     if not isinstance(history, list):
         raise CleanupConfirmationError("task history must be a list")
 
-    leases = []
-    if "leases" in tables:
-        columns = {row[1] for row in db.execute("PRAGMA table_info(leases)")}
-        query = (
-            "SELECT lane, holder_id, owner_scope FROM leases WHERE task_id=?"
-            if "owner_scope" in columns
-            else "SELECT lane, holder_id, '' AS owner_scope FROM leases WHERE task_id=?"
-        )
-        rows = list(db.execute(query, (task_id,)))
-        # A bring-up round's lane never records a scope; the round reconciler owns it, not the execution.
-        scoped = [row for row in rows if not owner_scope or row["lane"] != "bringup_round"]
-        if any(row["owner_scope"] != owner_scope for row in scoped):
-            raise CleanupConfirmationError(
-                "confirmation is limited to strictly empty owner scope on every target lease"
-                if not owner_scope
-                else f"task={_label(task_id)} holds a lease outside the confirmed owner scope"
-            )
-        leases = [
-            {"lane": row["lane"], "holder_id": row["holder_id"]} for row in rows if row["lane"] != "bringup_round"
-        ]
+    leases = _task_leases(db, tables, task_id, owner_scope)
     gpu_leases = []
     if "gpu_leases" in tables:
         gpu_leases = [
