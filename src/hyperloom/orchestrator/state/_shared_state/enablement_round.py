@@ -92,7 +92,6 @@ class EnablementRound:
     active_runtime: dict = field(default_factory=dict)
     attempt_runtimes: list = field(default_factory=list)
     kept_stack_action: dict = field(default_factory=dict)
-    localization_manifest: list = field(default_factory=list)
     # Off-loop targeted-build state.
     build_manifest: list = field(default_factory=list)
     last_build_failure: dict = field(default_factory=dict)

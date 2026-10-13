@@ -25,9 +25,6 @@ class IntegrateAttempt:
     done_payload: dict[str, Any] | None = field(default_factory=dict)
     provision_result: ProvisionResult | None = None
     stack_action: EnablementStackAction | None = None
-    localization_action: EnablementStackAction | None = None
-    localization_patches: list[Path] = field(default_factory=list)
-    localization_touched: list[str] = field(default_factory=list)
     base_sha_by_root: dict[str, str] = field(default_factory=dict)
     output_root: Path | None = None
     framework_root: Path | None = None

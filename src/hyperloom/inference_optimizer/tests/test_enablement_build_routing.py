@@ -713,7 +713,6 @@ def _make_params_fake(**kw):
             kept_patches=[],
             kept_stack_action={},
             setup_commands=[],
-            localization_manifest=[],
             last_build_failure=kw.get("enablement_last_build_failure", {}),
         ),
     )

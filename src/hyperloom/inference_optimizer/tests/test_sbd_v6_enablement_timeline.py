@@ -281,7 +281,6 @@ def test_a_round_records_the_products_it_contributed(_bound_session):
                 "acquisition_method": "wheel",
             },
             enablement_active_runtime={"venv_root": "/venv/a", "installed_versions": {"sglang": "0.4.2"}},
-            enablement_localization_manifest={"files": 3},
         ),
         stall_streak=0,
         succeeded=True,
@@ -291,7 +290,6 @@ def test_a_round_records_the_products_it_contributed(_bound_session):
     assert row["patches_applied"] == ["/s/patches/moe.diff"]
     assert row["stack_action"]["capability"] == "fused_moe"
     assert row["runtime"]["venv_root"] == "/venv/a"
-    assert row["localization_manifest"] == {"files": 3}
     assert row["effective_config"]["extra_server_args"] == "--tp 8"
     # The backup bookkeeping made the install reversible; it is not a fact about the repair.
     assert row["artifacts_applied"] == [

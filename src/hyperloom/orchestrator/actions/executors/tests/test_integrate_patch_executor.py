@@ -601,10 +601,9 @@ async def test_same_executor_new_attempt_precedes_second_resolve_early_return(tm
     assert first["status"] == "no_patches"
 
     def forbidden(*_args, **_kwargs):
-        pytest.fail("a rejected attempt reached provisioning or localization")
+        pytest.fail("a rejected attempt reached provisioning")
 
     monkeypatch.setattr(executor, "_stage_provision_attempt_runtime", forbidden)
-    monkeypatch.setattr(executor, "_stage_localize_source", forbidden)
     state.record_specialist_patch_verdict("spec-first", "reject")
     monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: early_exit == "multi_node")
     second_ctx = _make_ctx("second", {} if early_exit == "missing_param" else {"specialist_task_id": "spec-first"})

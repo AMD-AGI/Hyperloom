@@ -322,7 +322,6 @@ def record_round(
         "effective_config": _config_row(res.get("enablement_effective_config")),
         "stack_action": _stack_action_row(res.get("enablement_kept_stack_action")),
         "runtime": _runtime_row(res.get("enablement_active_runtime")),
-        "localization_manifest": _as_dict(res.get("enablement_localization_manifest")) or None,
         # The next round's gap, on the round that revealed it.
         "next_launch_log_excerpt": _tail(res.get("enablement_launch_log")),
     }

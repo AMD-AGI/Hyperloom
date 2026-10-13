@@ -223,53 +223,9 @@ class BaseAdapter:
         """Validate the provisioned runtime carries the expected capability."""
         return result.ok
 
-    def build_localization_action(
-        self,
-        gap: CapabilityGap,
-        *,
-        candidate_ref: str,
-        repo_url: str,
-    ) -> EnablementStackAction | None:
-        """Build a pr_backport localization from a merged-PR ref (origin-allowlisted), or None."""
-        if not self.supports(gap):
-            return None
-        pr_number = _pr_number_from_ref(candidate_ref)
-        if pr_number <= 0:
-            return None
-        origin_allow = _allowlist(_ORIGIN_ALLOWLIST_ENV)
-        if origin_allow and not _is_allowlisted(repo_url, origin_allow):
-            log.warning("%s: repo_url %r not in origin allowlist", type(self).__name__, repo_url)
-            return None
-        return EnablementStackAction(
-            kind="pr_backport",
-            framework=self.framework,
-            gap_id=f"gap.enablement.{gap.kind}",
-            capability=gap.kind,
-            reason=f"{self.framework} PR backport #{pr_number} for {gap.kind}",
-            acquisition_method="none",
-            repo_url=repo_url,
-            pr_number=pr_number,
-        )
-
     def source_import_root(self, framework_root: str) -> str:
         """Return the import root relative to a source snapshot's ``files/`` dir."""
         return ""
-
-
-def _pr_number_from_ref(candidate_ref: str) -> int:
-    """Parse a PR number from a ``"PR:1234"`` ref or a PR html_url; 0 if absent."""
-    ref = str(candidate_ref or "").strip()
-    if not ref:
-        return 0
-    if ref.upper().startswith("PR:"):
-        tail = ref.split(":", 1)[1].strip()
-        return int(tail) if tail.isdigit() else 0
-    # .../pull/1234 (optionally with a trailing segment).
-    parts = [p for p in ref.rstrip("/").split("/") if p]
-    for i, seg in enumerate(parts):
-        if seg == "pull" and i + 1 < len(parts) and parts[i + 1].isdigit():
-            return int(parts[i + 1])
-    return int(parts[-1]) if parts and parts[-1].isdigit() else 0
 
 
 class NullAdapter(BaseAdapter):
@@ -541,17 +497,13 @@ class SglangAdapter(_VenvProvisionMixin):
 
 
 class AtomAdapter(BaseAdapter):
-    """Atom adapter: no runtime acquisition, but Python localization."""
+    """Atom adapter: no runtime acquisition."""
 
     framework = "atom"
 
-    def supports(self, gap: CapabilityGap) -> bool:
-        """Localize any code gap; the backport is applied via no-git."""
-        return True
-
 
 class XditAdapter(BaseAdapter):
-    """xDiT adapter: unsupported for runtime acquisition and localization here."""
+    """xDiT adapter: unsupported for runtime acquisition."""
 
     framework = "xdit"
 

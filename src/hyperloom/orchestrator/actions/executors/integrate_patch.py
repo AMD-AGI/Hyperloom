@@ -12,7 +12,6 @@ import json
 import logging
 import math
 import os
-import re
 import shlex
 import shutil
 import subprocess
@@ -20,7 +19,6 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import Mapping
-from collections.abc import Iterable
 from typing import Any
 
 from hyperloom.common.coerce import to_str_list
@@ -53,7 +51,6 @@ from ...state.shared_state import (
 )
 from hyperloom.orchestrator.lever import LEVER_UPSTREAM_PR
 from hyperloom.common.failure_signature import CapabilityGap, FailureSignature
-from hyperloom.common.github_urls import repo_slug
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.perf_metric import (
     GRADED_INTVTY,
@@ -209,29 +206,6 @@ def _enablement_gap(params: dict[str, Any]) -> CapabilityGap | None:
         return None
     gap = CapabilityGap.from_signature(FailureSignature.from_dict(raw))
     return gap if gap.requires_code_acquisition else None
-
-
-def _first_ref_in_repo(refs: Iterable[Any], repo_url: str) -> str:
-    """The best-ranked candidate ref that points at ``repo_url``.
-
-    Discovery ranks bridge-repo PRs (aiter, HIP, ROCm) alongside the
-    framework's own, and a diff is only applicable to the tree it was cut from.
-    A bare ``"PR:1234"`` names no repo and is the framework's by construction.
-    """
-    try:
-        want = repo_slug(repo_url)
-    except ValueError:
-        return ""
-    for raw in refs:
-        ref = str(raw).strip()
-        if not ref:
-            continue
-        try:
-            if repo_slug(ref) == want:
-                return ref
-        except ValueError:
-            return ref
-    return ""
 
 
 def _established_enablement_config(params: dict[str, Any], shared_state: Any) -> tuple[str, dict[str, str]]:
@@ -1900,13 +1874,6 @@ class IntegratePatchExecutor:
         if provision_early is not None:
             return provision_early
 
-        # Localize a merged-PR / vendored closure into the source tree. Fetch
-        # happens post-Critic; a compiled/build closure defers to a clean
-        # revert. Localized patches are prepended in _stage_apply.
-        localize_early = await self._stage_localize_source(attempt, params, attempt.specialist_task_id)
-        if localize_early is not None:
-            return self._finish_attempt(attempt, localize_early)
-
         # The apply and the gate both mutate the framework tree behind the
         # operator's auto-stash, and both cross awaits while it is on the stack --
         # the apply stage writes a KB record on each of its failure verdicts. So
@@ -2300,99 +2267,6 @@ class IntegratePatchExecutor:
         except Exception:
             log.debug("integrate_patch: attempt-dir GC failed for %s", attempt_dir, exc_info=True)
 
-    async def _stage_localize_source(
-        self,
-        attempt: IntegrateAttempt,
-        params: dict[str, Any],
-        specialist_task_id: str,
-    ) -> dict[str, Any] | None:
-        """Fetch/synthesize a localization diff and stage it for _stage_apply (Rung 4).
-
-        No-op when the round's gap needs no code acquisition, no bridging
-        candidate in the framework's own repo was discovered, or the framework
-        adapter cannot localize.
-        Fetches the merged-PR / vendored diff (post-Critic), rejects a
-        compiled / build-backend closure to a clean revert, and writes the diff
-        to a patch file recorded on ``attempt.localization_patches`` which
-        ``_stage_apply`` prepends to the patch set. Returns an early-exit
-        ``reverted`` dict on any gate/fetch failure (no tree mutation yet), or
-        ``None`` to continue.
-        """
-        gap = _enablement_gap(params)
-        if gap is None:
-            return None
-
-        from hyperloom.inference_optimizer import framework_registry
-
-        from ...enablement.runtime.adapters import get_adapter
-        from ...enablement.runtime.localization import build_localization_diff
-
-        refs = attempt.shared_state.enablement.candidate_refs
-        if not refs:
-            return None
-        framework = str(getattr(attempt.shared_state, "framework", "") or "").strip().lower()
-        repo_url = framework_registry.repo_url(framework)
-        if not repo_url:
-            return None
-        ref = _first_ref_in_repo(refs, repo_url)
-        if not ref:
-            return None
-
-        action = get_adapter(framework).build_localization_action(gap, candidate_ref=ref, repo_url=repo_url)
-        if action is None:
-            return None
-
-        from hyperloom.agents.framework.sources import github as _gh
-
-        def _base_reverted(error_class: str, reason: str) -> dict[str, Any]:
-            return {
-                "status": "reverted",
-                "error_class": error_class,
-                "error": reason,
-                "specialist_task_id": specialist_task_id,
-                "patches_applied": [],
-                "patches_reverted": [],
-                "enablement": True,
-                "reason": reason,
-            }
-
-        try:
-            diff_text, touched_paths, verdict = await asyncio.to_thread(
-                build_localization_diff,
-                action,
-                fetch_pr_patches=lambda slug, num: _gh.pr_patches(slug, num),
-                fetch_raw_file=lambda slug, ref, path: _gh.fetch_raw_file(slug, ref, path),
-            )
-        except Exception as exc:
-            log.exception("integrate_patch: localization fetch raised")
-            return _base_reverted("localization_fetch_failed", f"localization fetch raised: {exc!r}")
-
-        if not verdict.is_localizable:
-            error_class = (
-                "localization_rung5_deferred" if verdict.kind == "needs_rung5" else "localization_fetch_failed"
-            )
-            return _base_reverted(error_class, f"localization not applicable: {verdict.reason}")
-        if not diff_text.strip():
-            return _base_reverted("localization_fetch_failed", "localization produced an empty diff")
-
-        loc_dir = runs_dir(self.session_dir, "integrate_patch", attempt.task_id)
-        loc_dir = loc_dir / "localization"
-        loc_dir.mkdir(parents=True, exist_ok=True)
-        gap_slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", action.gap_id or "localization")
-        patch_path = loc_dir / f"{gap_slug}.patch"
-        patch_path.write_text(diff_text, encoding="utf-8")
-
-        attempt.localization_patches = [patch_path]
-        attempt.localization_action = action
-        attempt.localization_touched = list(touched_paths)
-        log.info(
-            "integrate_patch: localization staged %s (%d file(s), kind=%s)",
-            patch_path,
-            len(touched_paths),
-            action.kind,
-        )
-        return None
-
     async def _record_closure_baseline(self, attempt: IntegrateAttempt, params: dict[str, Any]) -> None:
         """Observe the environment before the enablement's first setup command, through the KEEP's interpreter.
 
@@ -2454,15 +2328,6 @@ class IntegratePatchExecutor:
             explicit_patches=(list(explicit_patches) if isinstance(explicit_patches, list) else None),
             done_payload=done_payload,
         )
-        # Prepend localized closure patches (applied first, before this round's
-        # patch) so the enablement composes on top of the localization.
-        localization_patches = attempt.localization_patches
-        if localization_patches:
-            seen_loc = {str(p) for p in patch_paths}
-            prefix_loc = [p for p in localization_patches if p.is_file() and str(p) not in seen_loc]
-            if prefix_loc:
-                log.info("integrate_patch: prepending %d localization patch(es)", len(prefix_loc))
-                patch_paths = prefix_loc + list(patch_paths)
         config_changes = dict(params.get("config_changes") or {})
         if not config_changes and done_payload:
             cc = done_payload.get("config_changes")
@@ -3274,16 +3139,6 @@ class IntegratePatchExecutor:
             }
             kept_result["enablement_active_runtime"] = provision_result.runtime.to_state()
             kept_result["installed_versions"] = dict(getattr(provision_result, "installed_versions", {}) or {})
-        # Snapshot a manifest of the localized closure that survives rearm, so
-        # the closure is recorded and not re-fetched.
-        manifest = await asyncio.to_thread(
-            self._finalize_localization_keep,
-            attempt,
-            framework_root=framework_root,
-            specialist_task_id=specialist_task_id,
-        )
-        if manifest:
-            kept_result["enablement_localization_manifest"] = manifest
         try:
             kept_result.update(
                 self._enablement_keep_records(
@@ -3554,45 +3409,6 @@ class IntegratePatchExecutor:
         if not ok:
             return note or "git commit failed", False
         return "", note == ""
-
-    def _finalize_localization_keep(
-        self,
-        attempt: IntegrateAttempt,
-        *,
-        framework_root: Path | None,
-        specialist_task_id: str,
-    ) -> dict[str, Any]:
-        """Record a localization manifest via :func:`snapshot_source_layer`.
-
-        Blocking (filesystem copies); call via ``asyncio.to_thread``. Returns the
-        manifest dict, empty when no localization ran.
-        """
-        touched = attempt.localization_touched
-        if not touched or framework_root is None:
-            return {}
-        action = attempt.localization_action
-        try:
-            from ...source_snapshot import snapshot_source_layer
-
-            base_sha = _git_head_sha(framework_root)
-            dest = self.session_dir / "optimization_stack" / "localization" / (specialist_task_id or "keep")
-            snap = snapshot_source_layer(
-                framework_root=framework_root,
-                base_sha=base_sha,
-                rel_paths=touched,
-                dest_dir=dest,
-                provenance="localization",
-                extra={
-                    "specialist_task_id": specialist_task_id,
-                    "kind": str(getattr(action, "kind", "") or ""),
-                    "repo_url": str(getattr(action, "repo_url", "") or ""),
-                    "pr_number": int(getattr(action, "pr_number", 0) or 0),
-                },
-            )
-            return dict(snap) if snap else {}
-        except Exception:
-            log.exception("integrate_patch: localization snapshot failed")
-            return {}
 
     async def _gate_perf(
         self,
