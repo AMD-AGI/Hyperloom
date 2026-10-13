@@ -122,6 +122,13 @@ _CANCEL_NOTICE_SEC: float = STOP_GATE_POLL_SECONDS
 _SELF_SETTLING_KINDS: frozenset[str] = frozenset({"targeted_build", "kernel_agent"})
 
 
+#: Kinds served ahead of FIFO order. A reviewed patch holds a worktree and
+#: cannot be re-proposed, while a configuration grid can be; on one serving
+#: lane with hour-long AgentX rounds, FIFO let grids queued earlier hold the
+#: lane until the phase ended and the patches were cancelled unmeasured.
+_DISPATCH_FIRST_KINDS: frozenset[str] = frozenset({"integrate_patch"})
+
+
 class _InflightAction(NamedTuple):
     """A running action's handle: what it is, its task, and how to ask it to stop."""
 
@@ -550,6 +557,8 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         queued = await self.tasks.queued()
         if not queued:
             return
+        # Stable, so FIFO still orders within each group.
+        queued.sort(key=lambda t: t.kind not in _DISPATCH_FIRST_KINDS)
         holders = await self.locks.lane_holders()
         capacities = await self.locks.lane_capacities()
         # Serving priority: pre-compute whether serving-priority is enabled
