@@ -16,7 +16,7 @@ from typing import Any
 
 from hyperloom.common import io as _common_io
 from hyperloom.common.platform_probe import platform_fingerprint
-from hyperloom.orchestrator.measurement.intvty_samples import comparison_interval
+from hyperloom.orchestrator.measurement.intvty_samples import comparison_interval, comparison_regimes
 
 from ...bus.message_bus import MessageBus
 from ...bus.storage.connection import SqliteConnection
@@ -374,6 +374,7 @@ def _format_composite_perf_section(summary: dict[str, Any]) -> list[str]:
         gain_text = f"{gain:+.2f}%" if gain is not None else "unavailable"
         lines.append(f"- comparison gain     : `{gain_text}` (diagnostic; not a cumulative validation)")
         lines.extend(_format_comparison_interval(comparison.get("interval")))
+        lines.extend(_format_comparison_regimes(comparison.get("regimes")))
         lines.append(f"- comparable          : `{str(comparison['comparable']).lower()}`")
         if comparison["degrade_reason"]:
             lines.append(f"- degrade reason      : `{comparison['degrade_reason']}`")
@@ -498,6 +499,10 @@ def _build_summary_dict(
                 (state.current_best or {}).get("workspace"),
                 getattr(state, "baseline_workspace", ""),
                 graded.objective,
+            ),
+            "regimes": comparison_regimes(
+                (state.current_best or {}).get("workspace"),
+                getattr(state, "baseline_workspace", ""),
             ),
             "comparable": graded.comparable,
             "degrade_reason": graded.degrade_reason,
@@ -787,6 +792,29 @@ def _format_comparison_interval(interval: Any) -> list[str]:
         f"({interval.get('confidence', 0.95):.0%}, n={interval['n_candidate']} vs {interval['n_reference']} "
         f"requests){note}",
         "  *Request sampling only; run-to-run spread on this workload is larger and is not in this interval.*",
+    ]
+
+
+def _format_comparison_regimes(regimes: Any) -> list[str]:
+    """Render how stalled each side of a comparison was, and say when the pair spans two host states."""
+    if not isinstance(regimes, dict):
+        return []
+    ratio = regimes.get("inflation_ratio")
+    if ratio is None:
+        return []
+
+    def _inflation(side: str) -> str:
+        fingerprint = regimes.get(side) or {}
+        return f"{fingerprint.get('ttft_inflation', float('nan')):.2f}"
+
+    flag = (
+        " ⚠ the two runs were in different host states; the gain above is not a like-for-like comparison"
+        if regimes.get("cross_regime")
+        else ""
+    )
+    return [
+        f"- stall inflation    : candidate `{_inflation('candidate')}` vs reference `{_inflation('reference')}` "
+        f"(TTFT mean/median, ratio `{ratio:.2f}`){flag}"
     ]
 
 
