@@ -444,6 +444,26 @@ def test_kernel_exits_when_all_attempts_are_rejected_or_integrated():
     assert reason == "kernel_no_more_leverage"
 
 
+def test_a_fusion_row_retires_its_attempt_like_an_integrate_row():
+    state = _skip_to_sweep_state("KERNEL_AGENT")
+    state.optimization_stack = [{"action": "fusion", "kernel_id": "k900", "target_file": "/repo/op.py"}]
+    state.kernel_opt_task_attempts = {
+        "k002": {"last_source_file": "/repo/op.py", "last_decision": "KEEP", "last_status": "ok"},
+    }
+
+    assert kernel_work_pending(state) is False
+
+
+def test_a_whitespace_padded_target_file_still_matches():
+    state = _skip_to_sweep_state("KERNEL_AGENT")
+    state.optimization_stack = [{"action": "integrate", "kernel_id": "k900", "target_file": "  /repo/op.py "}]
+    state.kernel_opt_task_attempts = {
+        "k002": {"last_source_file": "/repo/op.py", "last_decision": "KEEP", "last_status": "ok"},
+    }
+
+    assert kernel_work_pending(state) is False
+
+
 def test_apply_escalate_budget_bump_lifts_phase_within_cap():
     out = apply_escalate_budget_bump(
         {"FRAMEWORK_AGENT": 0.60},

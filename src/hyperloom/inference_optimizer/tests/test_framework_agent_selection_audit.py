@@ -358,6 +358,39 @@ async def test_autosubmit_config_idempotent_on_existing_verdict(coord: Coordinat
     assert not coord.state.pending_proposals
 
 
+@pytest.mark.asyncio
+async def test_autosubmit_config_returns_when_review_in_flight(coord: Coordinator) -> None:
+    from hyperloom.orchestrator.loop.proposals import PendingProposal
+
+    coord.state.pending_proposals["existing"] = PendingProposal(
+        proposal_msg_id="existing",
+        from_agent="coordinator",
+        action_name="integrate_patch",
+        predicted_gain_pct=0.0,
+        payload={"params": {"specialist_task_id": "spec-1"}},
+    )
+    done = {"proposal_set": [{"name": "n", "extra_envs": {"X": "1"}}]}
+    await coord.phase_framework.maybe_autosubmit_framework_config(task=_authoring_task(), done_payload=done)
+    assert len(coord.state.pending_proposals) == 1
+
+
+@pytest.mark.asyncio
+async def test_autosubmit_config_proceeds_for_a_different_specialist(coord: Coordinator) -> None:
+    """The scan keys on the specialist task id, so another specialist's review does not block this one."""
+    from hyperloom.orchestrator.loop.proposals import PendingProposal
+
+    coord.state.pending_proposals["existing"] = PendingProposal(
+        proposal_msg_id="existing",
+        from_agent="coordinator",
+        action_name="integrate_patch",
+        predicted_gain_pct=0.0,
+        payload={"params": {"specialist_task_id": "spec-other"}},
+    )
+    done = {"proposal_set": [{"name": "n", "extra_envs": {"X": "1"}}]}
+    await coord.phase_framework.maybe_autosubmit_framework_config(task=_authoring_task(), done_payload=done)
+    assert len(coord.state.pending_proposals) == 2
+
+
 def _enablement_authoring_task(task_id: str = "spec-enable-1") -> types.SimpleNamespace:
     return types.SimpleNamespace(
         task_id=task_id,
