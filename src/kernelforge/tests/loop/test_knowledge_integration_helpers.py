@@ -351,6 +351,24 @@ def test_write_experience_to_kb_does_not_synthesize_speedup(monkeypatch, tmp_pat
     assert captured["outcome"].mean_case_speedup is None
 
 
+def test_a_kb_patch_may_apply_to_a_declared_kernel_named_like_a_test(tmp_path):
+    # ROCmBench colocates a kernel with its tests in one test_*.py; declaring that file must not hide it from
+    # warm-start, while an undeclared test file and the driver stay out of reach.
+    repo = _init_repo(tmp_path)
+    for name in ("test_impl.py", "test_other.py", "driver.py"):
+        (repo / name).write_text("x = 1\n")
+    _run(["git", "add", "."], repo)
+    _run(["git", "commit", "-m", "colocated tests"], repo)
+    allowed = integ._editable_workspace_paths(str(repo), "test_impl.py", None, "driver.py")
+
+    def patch(path: str) -> str:
+        return f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-x = 1\n+x = 2\n"
+
+    assert integ._safe_apply_depth(patch("test_impl.py"), allowed) == 1
+    assert integ._safe_apply_depth(patch("test_other.py"), allowed) is None
+    assert integ._safe_apply_depth(patch("driver.py"), allowed) is None
+
+
 def test_kb_warmstart_swallows_reader_error(monkeypatch, tmp_path):
     repo = _init_repo(tmp_path)
 

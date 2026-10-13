@@ -609,6 +609,7 @@ class InSessionGate:
             workspace=self.workspace_root,
             exact_paths=self.protected_abs,
             extra_globs=self.protected_globs,
+            editable_paths=self.target_abs,
         )
 
     def _iter_snapshot_paths(self) -> list[Path]:
@@ -620,6 +621,7 @@ class InSessionGate:
                 root,
                 exact_paths=self.protected_abs,
                 extra_globs=self.protected_globs,
+                editable_paths=self.target_abs,
             )
         )
 

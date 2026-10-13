@@ -219,6 +219,7 @@ class LaneRuntimeMixin:
                 workspace=self.ic.workspace_dir,
                 # The campaign driver carries no protected name of its own.
                 exact_paths=(self.ic.driver_script,),
+                editable_paths=self._target_source_files(),
             )
         )
         if protected:
