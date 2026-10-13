@@ -256,7 +256,7 @@ cognitive-complexity src/kernelforge/agent_backends/codex.py::_normalize_sdk_res
 cognitive-complexity src/kernelforge/agent_backends/workspace_guard.py::WorkspaceGuard.prepare 39
 cognitive-complexity src/kernelforge/assembly/capture.py::bind_compile 60
 cognitive-complexity src/kernelforge/assembly/prepare.py::prepare_assembly 39
-cognitive-complexity src/kernelforge/cli.py::forge_loop 266
+cognitive-complexity src/kernelforge/cli/forge_loop_command.py::forge_loop 266
 cognitive-complexity src/kernelforge/fusion/author.py::_AuthorWorkspaceGuard.__init__ 37
 cognitive-complexity src/kernelforge/fusion/author.py::_AuthorWorkspaceGuard.enforce 39
 cognitive-complexity src/kernelforge/fusion/author.py::_run_registered_author_once 49
@@ -422,7 +422,7 @@ cyclomatic-complexity src/hyperloom/orchestrator/trace_analysis/tracelens_analys
 cyclomatic-complexity src/kernelforge/agent_backends/claude.py::ClaudeBackend._provider_options 21
 cyclomatic-complexity src/kernelforge/agent_backends/claude.py::ClaudeBackend._query_once 30
 cyclomatic-complexity src/kernelforge/assembly/prepare.py::prepare_assembly 21
-cyclomatic-complexity src/kernelforge/cli.py::forge_loop 98
+cyclomatic-complexity src/kernelforge/cli/forge_loop_command.py::forge_loop 98
 cyclomatic-complexity src/kernelforge/fusion/author.py::_run_registered_author_once 25
 cyclomatic-complexity src/kernelforge/fusion/command.py::_run_fusion_autoloop 25
 cyclomatic-complexity src/kernelforge/fusion/command.py::run 39
@@ -920,9 +920,9 @@ function-lines src/kernelforge/agent_backends/codex.py::CodexBackend.probe 83
 function-lines src/kernelforge/agent_backends/codex.py::_normalize_sdk_result 89
 function-lines src/kernelforge/agent_backends/session_resume.py::run_session_with_api_resume 103
 function-lines src/kernelforge/assembly/prepare.py::prepare_assembly 134
-function-lines src/kernelforge/cli.py::forge_loop 973
-function-lines src/kernelforge/cli.py::forge_loop._build_result 100
-function-lines src/kernelforge/cli.py::forge_rewrite 102
+function-lines src/kernelforge/cli/forge_loop_command.py::forge_loop 973
+function-lines src/kernelforge/cli/forge_loop_command.py::forge_loop._build_result 100
+function-lines src/kernelforge/cli/forge_rewrite_command.py::forge_rewrite 102
 function-lines src/kernelforge/fusion/author.py::_AuthorWorkspaceGuard.__init__ 118
 function-lines src/kernelforge/fusion/author.py::_AuthorWorkspaceGuard.enforce 92
 function-lines src/kernelforge/fusion/author.py::_run_registered_author_once 208
@@ -1090,7 +1090,6 @@ module-lines src/hyperloom/orchestrator/trace_analysis/_bypass_report.py 1231
 module-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py 6121
 module-lines src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py 1505
 module-lines src/hyperloom_kb/knowledge_read.py 1201
-module-lines src/kernelforge/cli.py 2640
 module-lines src/kernelforge/fusion/author.py 1390
 module-lines src/kernelforge/fusion/command.py 2582
 module-lines src/kernelforge/fusion/discover.py 1552
