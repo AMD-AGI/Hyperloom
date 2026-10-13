@@ -60,7 +60,12 @@ def _head(snapshot: NotebookSnapshot, branch: str) -> str:
 def failure_set(snapshot: NotebookSnapshot, branch: str) -> tuple[FailedTest, ...]:
     """Every failed test no commit redeemed, tiered by how close the state it was tried on is to ``branch``'s head."""
 
-    head = _head(snapshot, branch)
+    return failures_at(snapshot, _head(snapshot, branch))
+
+
+def failures_at(snapshot: NotebookSnapshot, head: str) -> tuple[FailedTest, ...]:
+    """Every failed test no commit redeemed, tiered by how close the state it was tried on is to ``head``."""
+
     ancestry = set(snapshot.lineage.ancestry(head)) if head else set()
     redeemed = {
         (record.request.parent_commit, record.request.intent_fingerprint)
@@ -218,6 +223,7 @@ __all__ = [
     "HypothesisRow",
     "direction_occupancy",
     "failure_set",
+    "failures_at",
     "hypothesis_ledger",
     "repeated_failures",
 ]

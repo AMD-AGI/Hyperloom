@@ -60,10 +60,13 @@ class RecalledExperience:
             return None
         return (self.outcome_value / self.baseline_value - 1.0) * 100.0
 
-    def render(self) -> str:
+    def describe(self) -> str:
         gain = "n/a" if self.gain_pct is None else f"{self.gain_pct:+.2f}%"
         where = f" ({', '.join(self.differing)} differ)" if self.differing else ""
-        return f"- {self.change_summary}: {self.decision} {gain}{where} [{self.experience_id}]"
+        return f"{self.change_summary}: {self.decision} {gain}{where} [{self.experience_id}]"
+
+    def render(self) -> str:
+        return f"- {self.describe()}"
 
 
 @dataclass(frozen=True)

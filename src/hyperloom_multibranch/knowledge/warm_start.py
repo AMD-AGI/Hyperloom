@@ -76,11 +76,14 @@ class WarmLead:
     what_failed: tuple[str, ...] = ()
     differing: Mapping[str, tuple[str, str]] = field(default_factory=dict)
 
-    def render(self) -> str:
+    def describe(self) -> str:
         gain = "n/a" if self.gain_pct is None else f"{self.gain_pct:+.2f}%"
         where = "".join(f", {key} {theirs} (here {ours})" for key, (theirs, ours) in self.differing.items())
         args = f" `{self.server_args}`" if self.server_args else ""
-        return f"- {self.canonical_id}{where}: {gain}{args} [{self.session_id}]"
+        return f"{self.canonical_id}{where}: {gain}{args} [{self.session_id}]"
+
+    def render(self) -> str:
+        return f"- {self.describe()}"
 
 
 def identity_labels(profile: SessionProfile) -> dict[str, str]:
