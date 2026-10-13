@@ -227,6 +227,9 @@ class OrchestrationContext:
     cases: tuple[CaseEvidence, ...]
     # Every file the campaign declared as its own source set, in campaign order (entry 0 is the primary kernel path).
     editable_sources: tuple[str, ...] = ()
+    # The campaign's --commit-new-path patterns. The workspace guard refuses every other new file, so a plan built on a
+    # new file outside them loses its round; empty means no new file at all.
+    new_file_allowlist: tuple[str, ...] = ()
     knowledge_index: str = ""
     supervisor_guidance: str = ""
     search_mode: str = "EXPLOIT"
@@ -260,6 +263,8 @@ class OrchestrationContext:
             _text(source, f"context.editable_sources[{index}]")
         if len(set(self.editable_sources)) != len(self.editable_sources):
             raise ValueError("context.editable_sources must not contain duplicates")
+        for index, pattern in enumerate(self.new_file_allowlist):
+            _text(pattern, f"context.new_file_allowlist[{index}]")
         _text(self.knowledge_index, "context.knowledge_index", allow_empty=True)
         _text(
             self.supervisor_guidance,
@@ -363,6 +368,17 @@ class OrchestrationContext:
             "program_context": self.program_context,
             "source_map_path": self.source_map_path,
             "editable_sources": list(self.editable_sources),
+            "new_files": {
+                "allowlist": list(self.new_file_allowlist),
+                "policy": (
+                    "New files are admitted only where they match the allowlist; any other new file is refused and "
+                    "the session's work is discarded."
+                    if self.new_file_allowlist
+                    else "No new files are admitted: plan every change as an edit to an existing tracked file (a "
+                    "tuned configuration table goes into the code, not into a new file). A plan that creates a "
+                    "file is refused and loses its round."
+                ),
+            },
             "knowledge_index": self.knowledge_index,
             "supervisor_guidance": self.supervisor_guidance,
             "last_plan_critic": {
