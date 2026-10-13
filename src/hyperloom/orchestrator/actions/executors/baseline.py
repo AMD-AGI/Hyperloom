@@ -64,6 +64,7 @@ from ._aiter_jit import (
     COLD_START_KERNEL_THRESHOLD,
     is_aiter_jit_registry_mismatch,
 )
+from ._jit_cache_env import apply_session_jit_cache, benchmark_framework
 from ._launch_evidence import build_launch_evidence, persist_launch_evidence
 
 # The grid module is the namespace the helpers both benching arms share ended up in: how a sentinel returncode reads
@@ -3408,6 +3409,11 @@ class BenchmarkRunExecutor:
             output_dir=output_dir,
         )
         env = scrub_benchmark_process_env(os.environ.copy())
+        apply_session_jit_cache(
+            env,
+            framework=benchmark_framework(config_path),
+            session_dir=self.session_dir,
+        )
         # Put the venv first in PATH so the benchmark script's `python3` resolves to one with torch+rocm (defense in
         # depth vs Magpie YAML).
         env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"

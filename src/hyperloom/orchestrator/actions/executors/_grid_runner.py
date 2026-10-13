@@ -72,6 +72,7 @@ from ._inferencex_patcher import (
     ensure_eval_unbound_outputs_patched,
     eval_probe_targets_exist,
 )
+from ._jit_cache_env import apply_session_jit_cache, benchmark_framework
 from ._launch_evidence import build_launch_evidence, persist_launch_evidence
 from ...measurement.runtime_findings import persist_runtime_findings, scan_server_log
 from ._server_argv import seal_server_argv
@@ -634,6 +635,11 @@ def _run_magpie(
     sync_benchmark_timeout(config_path, timeout_sec)
     server_log_path = _benchmark_server_log(config_path, output_dir)
     env = scrub_benchmark_process_env(os.environ.copy())
+    apply_session_jit_cache(
+        env,
+        framework=benchmark_framework(config_path),
+        session_dir=_resolve_session_dir(),
+    )
     env["PYTHONUNBUFFERED"] = "1"
     from ._workload_envs import resolve_reference_launch
 
