@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import gzip
+import hashlib
 import json
 import logging
 import os
@@ -185,6 +186,8 @@ _MOE_SCHEME_CONTEXT_MARKERS = (
 
 # Fast-exit arg errors (vLLM/sglang exits in <30s on bad CLI args) should not consume the slow-baseline retry budget.
 FAST_EXIT_THRESHOLD_SEC = 30.0
+# The error class of a subprocess that exited nonzero for no recognised cause.
+_SUBPROCESS_NONZERO = "subprocess_nonzero"
 _ARG_ERROR_PATTERNS = (
     "unrecognized arguments",
     "invalid choice",
@@ -730,12 +733,45 @@ def _classify_subprocess_error(
     if any(m in tail for m in _KV_CACHE_OOM_MARKERS):
         return "kv_cache_oom"
     if elapsed_sec >= FAST_EXIT_THRESHOLD_SEC:
-        return "subprocess_nonzero"
+        return _SUBPROCESS_NONZERO
     if any(p.lower() in tail for p in _ARG_ERROR_PATTERNS):
         return "fast_exit_arg_error"
     if "valueerror:" in tail and any(p in tail for p in _ARG_ERROR_CONTEXT_PATTERNS):
         return "fast_exit_arg_error"
-    return "subprocess_nonzero"
+    return _SUBPROCESS_NONZERO
+
+
+_SIGNATURE_VOLATILE_RE = re.compile(r"0x[0-9a-f]+|[0-9a-f]{8,}|\d+")
+
+
+def nonzero_output_signature(err_class: str, proc_stdout: str | None, proc_stderr: str | None) -> str:
+    """Identify a ``subprocess_nonzero`` failure by the process's whole output, ignoring numbers.
+
+    The result's ``error`` is only the last 2000 characters of one stream, and two
+    different causes (a HIP OOM, an NCCL timeout) can end in the same engine-death
+    traceback that long, or differ only in the stream ``error`` leaves out, so the
+    signature is taken from both full, redacted streams instead. Numbers (pids,
+    ports, timestamps, durations) and hex ids differ between two attempts that failed
+    for the same reason, so they are folded away.
+
+    Args:
+        err_class: The class the failure was given; only ``subprocess_nonzero`` gets a
+            signature, because other classes carry a fixed sentence that unrelated
+            failures share.
+        proc_stdout: The process's whole stdout.
+        proc_stderr: The process's whole stderr.
+
+    Returns:
+        ``"<class>|<sha256>"``, or ``""`` when there is no signature (another class, or
+        no output: two failures that said nothing are not known to be the same failure).
+    """
+    if err_class != _SUBPROCESS_NONZERO:
+        return ""
+    text = redact_secret_values(f"{proc_stderr or ''}\n{proc_stdout or ''}").strip().lower()
+    if not text:
+        return ""
+    text = " ".join(_SIGNATURE_VOLATILE_RE.sub("#", text).split())
+    return f"{err_class}|{hashlib.sha256(text.encode('utf-8')).hexdigest()}"
 
 
 # Cold-start settings and probes live in ``_aiter_jit`` and are re-exported above for callers/tests that import them
@@ -3780,6 +3816,7 @@ class BenchmarkRunExecutor:
                     "returncode": proc_returncode,
                     "subprocess_runtime_sec": round(subprocess_runtime_sec, 2),
                     "error": tail,
+                    "output_signature": nonzero_output_signature(err_class, proc_stdout, proc_stderr),
                     **failure_extras,
                 }
             return {
@@ -3837,6 +3874,7 @@ class BenchmarkRunExecutor:
                 "error_class": error_class,
                 "returncode": proc_returncode,
                 "error": error,
+                "output_signature": nonzero_output_signature(error_class, proc_stdout, proc_stderr),
                 "output_dir": str(output_dir),
                 "workspace": str(workspace),
                 "report_path": str(report_path) if report_path.exists() else None,
