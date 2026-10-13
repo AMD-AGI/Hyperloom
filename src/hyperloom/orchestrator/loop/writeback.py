@@ -4567,7 +4567,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             A summary dict describing whether validation succeeded.
         """
         from hyperloom.common.perf_metric import is_agentx_mode
-        from ..actions.executors._workload_envs import agentx_enabled
+        from ..actions.executors._workload_envs import agentx_enabled, geak_metric_axis
 
         mode = str(self.shared_state.benchmark_mode or "").strip()
         agentx = is_agentx_mode(mode) if mode else agentx_enabled()
@@ -4643,6 +4643,8 @@ class WritebackCollaborator(CoordinatorCollaborator):
             # Single-point validated replay pins the headline protocol (num_prompts
             # etc.) so it is protocol-identical to the reported result.
             pin_num_prompts=True,
+            # The axis the handoff sent GEAK, so the replay measures what GEAK accepted on.
+            metric_axis=geak_metric_axis(benchmark_mode=mode, grading=self.shared_state.grading or None),
         )
         measurement = res.get("promotion_measurement")
         measurement = measurement if isinstance(measurement, Mapping) else {}
