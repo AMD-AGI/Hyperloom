@@ -387,16 +387,27 @@ RENAME_CREATE_NEW = """\
 
 # A single diff that truly renames (old != new, neither /dev/null).
 RENAME_DIFF = """\
+diff --git a/old_name.py b/new_name.py
+similarity index 90%
+rename from old_name.py
+rename to new_name.py
 --- a/old_name.py
 +++ b/new_name.py
 @@ -1 +1 @@
 -moved_content
-+moved_content
++renamed_content
+"""
+
+PURE_RENAME_DIFF = """\
+diff --git a/old_name.py b/new_name.py
+similarity index 100%
+rename from old_name.py
+rename to new_name.py
 """
 
 
-def test_revert_action_restore_old_puts_back_source(tmp_path):
-    """A record with revert_action='restore_old' restores the old file from backup."""
+def test_revert_restores_a_source_the_patch_moved_away(tmp_path):
+    """A rename source is gone from the tree at revert time, so its record must recreate it from the backup."""
     old_file = tmp_path / "old_name.py"
     bak = tmp_path / "bk" / "backup.bak"
     bak.parent.mkdir(parents=True)
@@ -407,19 +418,29 @@ def test_revert_action_restore_old_puts_back_source(tmp_path):
             "target": str(old_file),
             "existed": True,
             "backup_path": str(bak),
-            "revert_action": "restore_old",
+            "revert_action": "restore",
             "pre_image_sha256": ledger.file_digest(bak),
         }
     ]
     ledger.restore_records(records)
-    assert old_file.exists(), "revert_action='restore_old' must recreate the old file"
+    assert old_file.exists(), "a restore record must recreate a target the patch had moved away"
     assert old_file.read_text() == "original_content\n"
 
 
+def test_pure_rename_is_recorded_even_though_it_has_no_hunks(tmp_path):
+    """A 100%-similarity rename moves the file with no ``---``/``+++`` pair; an empty ledger would make revert a no-op."""
+    (tmp_path / "old_name.py").write_text("moved_content\n", encoding="utf-8")
+    patch_file = tmp_path / "pure_rename.patch"
+    patch_file.write_text(PURE_RENAME_DIFF, encoding="utf-8")
+
+    _ok, _err, backups, *_ = ng._apply_patch_no_git(tmp_path, patch_file, tmp_path / "bk")
+
+    actions = {Path(r["target"]).name: r["revert_action"] for r in backups}
+    assert actions == {"old_name.py": "restore", "new_name.py": "delete"}
+
+
 def test_rename_patch_tracked_as_two_records(tmp_path):
-    """A rename hunk (old != new, neither /dev/null) produces two backup records: one for the old source (restore_old)
-    and one for the new destination (delete).
-    """
+    """A rename produces two records: a restore of the old source and a delete of the new destination."""
     old_file = tmp_path / "old_name.py"
     old_file.write_text("moved_content\n", encoding="utf-8")
 
@@ -431,13 +452,13 @@ def test_rename_patch_tracked_as_two_records(tmp_path):
     # Inspect the record structure regardless of whether the patch CLI succeeds.
     _ok, _err, backups, *_ = ng._apply_patch_no_git(tmp_path, patch_file, backup_root)
 
-    restore_old_records = [r for r in backups if r.get("revert_action") == "restore_old"]
+    restore_records = [r for r in backups if r.get("revert_action") == "restore"]
     delete_records = [r for r in backups if r.get("revert_action") == "delete"]
 
-    assert restore_old_records, "rename patch must produce a restore_old record for the source file"
+    assert restore_records, "rename patch must produce a restore record for the source file"
     assert delete_records, "rename patch must produce a delete record for the destination file"
 
-    src_rec = restore_old_records[0]
+    src_rec = restore_records[0]
     assert "old_name" in src_rec["target"]
     assert src_rec["backup_path"] is not None
 
@@ -960,16 +981,16 @@ def test_patch_file_unreadable_after_dry_run(tmp_path, monkeypatch):
 # Escape / continue edge branches in the create / delete / rename arms
 
 
-def test_create_devnull_both_sides_skipped(tmp_path, monkeypatch):
-    """A degenerate /dev/null -> /dev/null header is skipped (create continue)."""
+def test_devnull_both_sides_is_rejected(tmp_path, monkeypatch):
+    """A header naming no real path cannot be reverted, so it is refused rather than applied unrecorded."""
     monkeypatch.setattr(ng.subprocess, "run", _fake_ok_run)
     patch_file = tmp_path / "noop.patch"
-    patch_file.write_text(
-        "--- /dev/null\n+++ /dev/null\n@@ -0,0 +0,0 @@\n",
-        encoding="utf-8",
-    )
+    patch_file.write_text("--- /dev/null\n+++ /dev/null\n@@ -0,0 +0,0 @@\n", encoding="utf-8")
+
     ok, err, backups, *_ = ng._apply_patch_no_git(tmp_path, patch_file, tmp_path / "bak")
-    assert ok is True
+
+    assert ok is False
+    assert "unparseable patch" in err
     assert backups == []
 
 

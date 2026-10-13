@@ -11,13 +11,12 @@ import shutil
 import subprocess
 
 from hyperloom.common.git_safety import safe_directory_args
-from hyperloom.common.unified_diff import strip_path_components
+from hyperloom.common.unified_diff import parse_patch_manifest, strip_path_components
 from pathlib import Path
 from typing import Any
 
 from ...delivery.ledger import append_record, mark_prepared
 from ...delivery import file_digest as _file_digest
-from ...specialists.patch_safety import patch_file_targets
 
 log = logging.getLogger(__name__)
 
@@ -298,7 +297,7 @@ def _apply_patch_no_git(
         backups.append(record)
         return ""
 
-    def _backup_existing(abs_path: Path, rel: Path, action: str) -> tuple[dict[str, Any] | None, str]:
+    def _backup_existing(abs_path: Path, rel: Path) -> tuple[dict[str, Any] | None, str]:
         """Copy ``abs_path`` to a uniquely named backup and return the record."""
         seq = seq_offset + len(backups)
         bak = backup_root / _bak_name(patch_stem, rel, seq)
@@ -311,87 +310,29 @@ def _apply_patch_no_git(
             "target": str(abs_path),
             "existed": True,
             "backup_path": str(bak),
-            "revert_action": action,
+            "revert_action": "restore",
             "mode": mode,
             "pre_image_sha256": _file_digest(abs_path),
         }, ""
 
-    def _record_restore(abs_path: Path, rel: Path) -> str:
-        """Back ``abs_path`` up to restore on revert, or record that revert deletes it when it does not exist."""
-        if not abs_path.exists():
-            return _record(
-                {
-                    "target": str(abs_path),
-                    "existed": False,
-                    "backup_path": None,
-                    "revert_action": "delete",
-                }
-            )
-        rec, err = _backup_existing(abs_path, rel, "restore")
-        return err or _record(rec)  # type: ignore[arg-type]
+    try:
+        manifest = parse_patch_manifest(patch_text)
+    except ValueError as exc:
+        return _fail(f"unparseable patch: {exc}", backups)
 
-    for old_raw, new_raw in patch_file_targets(patch_text):
-        is_create = old_raw == _PATCH_DEV_NULL or not old_raw
-        is_delete = new_raw == _PATCH_DEV_NULL or not new_raw
-
-        if is_create:
-            # New file created by patch: track for deletion on revert.
-            if not new_raw or new_raw == _PATCH_DEV_NULL:
-                continue
-            rel_new, abs_new, err = _resolve_target(new_raw)
-            if err:
-                return _fail(err, backups)
-            err = _record(
-                {
-                    "target": str(abs_new),
-                    "existed": False,
-                    "backup_path": None,
-                    "revert_action": "delete",
-                }
-            )
-            if err:
-                return _fail(err, backups)
-
-        elif is_delete:
-            # Existing file deleted by patch: back it up to restore on revert.
-            rel_old, abs_old, err = _resolve_target(old_raw)
-            if err:
-                return _fail(err, backups)
-            err = _record_restore(abs_old, rel_old)  # type: ignore[arg-type]
-            if err:
-                return _fail(err, backups)
-
+    for entry in manifest:
+        rel, abs_path, err = _resolve_target(entry["path"])
+        if err:
+            return _fail(err, backups)
+        if (entry["op"] == "write" and entry["is_new"]) or not abs_path.exists():
+            record = {"target": str(abs_path), "existed": False, "backup_path": None, "revert_action": "delete"}
         else:
-            # Header tokens differ by their a/ b/ prefixes even for a modification; only stripped paths show a rename.
-            rel_old, abs_old, err = _resolve_target(old_raw)
+            record, err = _backup_existing(abs_path, rel)
             if err:
                 return _fail(err, backups)
-            rel_new, abs_new, err = _resolve_target(new_raw)
-            if err:
-                return _fail(err, backups)
-            # Rename/move: back up old source (to restore on revert) and track new destination (to delete on revert).
-            if rel_old != rel_new:
-                if abs_old.exists():  # type: ignore[union-attr]
-                    rec, err = _backup_existing(abs_old, rel_old, "restore_old")  # type: ignore[arg-type]
-                    if err:
-                        return _fail(err, backups)
-                    err = _record(rec)  # type: ignore[arg-type]
-                    if err:
-                        return _fail(err, backups)
-                err = _record(
-                    {
-                        "target": str(abs_new),
-                        "existed": False,
-                        "backup_path": None,
-                        "revert_action": "delete",
-                    }
-                )
-                if err:
-                    return _fail(err, backups)
-            else:
-                err = _record_restore(abs_old, rel_old)  # type: ignore[arg-type]
-                if err:
-                    return _fail(err, backups)
+        err = _record(record)
+        if err:
+            return _fail(err, backups)
 
     if not mark_prepared(backup_root):
         return _fail("backup prepare record could not be persisted", backups)

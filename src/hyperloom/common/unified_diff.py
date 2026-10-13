@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 _DEV_NULL = "/dev/null"
+_OP_WRITE = "write"
+_OP_DELETE = "delete"
 _OLD_FILE = "--- "
 _NEW_FILE = "+++ "
 
@@ -132,18 +134,18 @@ def _section_descriptors(block: str) -> list[dict[str, Any]]:
 
     if re.search(r"(?m)^rename to ", block) and old_path and new_path:
         return [
-            {"op": "delete", "path": old_path, "mode": "", "binary": False, "is_new": False},
-            {"op": "write", "path": new_path, "mode": mode, "binary": binary, "is_new": True},
+            {"op": _OP_DELETE, "path": old_path, "mode": "", "binary": False, "is_new": False},
+            {"op": _OP_WRITE, "path": new_path, "mode": mode, "binary": binary, "is_new": True},
         ]
     if re.search(r"(?m)^copy to ", block) and new_path:
-        return [{"op": "write", "path": new_path, "mode": mode, "binary": binary, "is_new": True}]
+        return [{"op": _OP_WRITE, "path": new_path, "mode": mode, "binary": binary, "is_new": True}]
 
     minus = _header_path(block, _OLD_FILE)
     plus = _header_path(block, _NEW_FILE)
     if plus == _DEV_NULL or re.search(r"(?m)^deleted file mode", block):
-        if not minus:
+        if not minus or minus == _DEV_NULL:
             raise ValueError(f"deletion section missing source path:\n{block[:200]}")
-        return [{"op": "delete", "path": minus, "mode": "", "binary": binary, "is_new": False}]
+        return [{"op": _OP_DELETE, "path": minus, "mode": "", "binary": binary, "is_new": False}]
 
     # Header-only sections (pure chmod) carry no ``+++`` line and name their path on the ``diff --git`` line.
     target = plus or new_path
@@ -151,7 +153,7 @@ def _section_descriptors(block: str) -> list[dict[str, Any]]:
         raise ValueError(f"cannot determine target path for section:\n{block[:200]}")
     return [
         {
-            "op": "write",
+            "op": _OP_WRITE,
             "path": target,
             "mode": mode,
             "binary": binary,
