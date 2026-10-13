@@ -382,7 +382,9 @@ class _RenderMixin:
         """Executable proposals from this cycle that no explore round has benched.
 
         Ordered by round ``priority`` (predictor rounds set one, specialist rounds
-        do not), then gap severity, then most recent.
+        do not), then gap severity, then most recent. A row's ``provenance`` is its
+        round's, ``specialist:<domain>`` unless the round's recorder set one; a
+        proposal cannot choose it, since a specialist writes its own proposals.
         """
         from hyperloom.common.coerce import to_int
 
@@ -404,6 +406,7 @@ class _RenderMixin:
             severity = severity_of.get(str(entry.get("gap_canonical_id") or ""), "")
             priority = to_int(entry.get("priority"), default=0)
             task_id = str(entry.get("task_id") or "")[:8]
+            provenance = str(entry.get("provenance") or f"specialist:{domain}")
             for index, proposal in enumerate(entry.get("proposal_set") or []):
                 if not isinstance(proposal, dict):
                     continue
@@ -418,7 +421,7 @@ class _RenderMixin:
                 row["domain"] = domain
                 row["severity"] = severity
                 row["fingerprint"] = fingerprint
-                row["provenance"] = str(proposal.get("provenance") or f"specialist:{domain}")
+                row["provenance"] = provenance
                 # Already checked against the read this round's dispatch was shown, which travels with them.
                 row["experience_citations"] = list(proposal.get("experience_citations") or [])
                 row["kb_read_id"] = str(entry.get("kb_read_id") or "")

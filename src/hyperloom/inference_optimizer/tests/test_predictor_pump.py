@@ -72,9 +72,32 @@ def _predictor_rounds(state: SharedState) -> list[dict[str, Any]]:
     return [r for r in state.specialist_rounds if r.get("domain") == "primatune"]
 
 
-async def test_an_active_answer_is_queued_ahead_of_specialists_and_benched_as_primatune(service):
+async def _auto_bench_grid(state: SharedState) -> list[dict[str, Any]]:
+    """The grid FRAMEWORK's auto-bench builds from the head of the queue."""
     from hyperloom.orchestrator.phases.framework import FrameworkPhase
 
+    created: list[dict[str, Any]] = []
+
+    async def _none():
+        return []
+
+    async def _create(**kwargs):
+        created.append(kwargs)
+        return SimpleNamespace(task_id="t1"), False
+
+    tasks = SimpleNamespace(queued=_none, running=_none, create_or_return_existing=_create)
+    dispatcher = SimpleNamespace(
+        admission_frozen=False,
+        dispatch_paused_for_phase_budget=lambda: False,
+        registry_lanes_ttl=lambda kind: (["benchmark_lane"], 1800),
+    )
+    coord = SimpleNamespace(shared_state=state, tasks=tasks, dispatcher=dispatcher)
+    coord.phase_framework = FrameworkPhase(coord)
+    await coord.phase_framework._maybe_bench_untested_proposals()
+    return created[0]["params"]["grid"]
+
+
+async def test_an_active_answer_is_queued_ahead_of_specialists_and_benched_as_primatune(service):
     specialist = {"task_id": "s1", "domain": "serving_specialist", "gap_canonical_id": "g1", "cycle": 0,
                   "proposal_set": [{"name": "spec", "extra_args": "--enable-chunked-prefill"}]}  # fmt: skip
     state = _state(specialist_rounds=[specialist], gaps=[{"canonical_id": "g1", "severity": "high"}])
@@ -89,28 +112,28 @@ async def test_an_active_answer_is_queued_ahead_of_specialists_and_benched_as_pr
     assert [(r["extra_args"], r["extra_envs"]) for r in round_["proposal_set"]] == [("--kv-cache-dtype fp8", {})]
     assert state.predictor_asked_keys == ["c0-s0-r0"]
     assert [r["provenance"] for r in state.untested_proposal_rows()] == ["primatune", "specialist:serving"]
+    assert [v["provenance"] for v in await _auto_bench_grid(state)] == ["primatune", "specialist:serving"]
 
-    tasks = SimpleNamespace(created=[])
 
-    async def _none():
-        return []
+async def test_a_specialist_proposal_cannot_choose_its_provenance(service):
+    claimed = [
+        {"name": "as-primatune", "extra_args": "--max-num-seqs 512", "provenance": "primatune"},
+        {"name": "as-replay", "extra_args": "--block-size 32", "provenance": "geak_revalidate"},
+    ]
+    specialist = {"task_id": "s1", "domain": "serving_specialist", "cycle": 0, "proposal_set": claimed}
+    state = _state(specialist_rounds=[specialist])
+    service.answer = _answer(Action(server_args={"--kv-cache-dtype": "fp8"}), votes={0: 1})
+    await _ask_and_file(_pump(), state)
 
-    async def _create(**kwargs):
-        tasks.created.append(kwargs)
-        return SimpleNamespace(task_id="t1"), False
-
-    tasks.queued = tasks.running = _none
-    tasks.create_or_return_existing = _create
-    dispatcher = SimpleNamespace(
-        admission_frozen=False,
-        dispatch_paused_for_phase_budget=lambda: False,
-        registry_lanes_ttl=lambda kind: (["benchmark_lane"], 1800),
-    )
-    coord = SimpleNamespace(shared_state=state, tasks=tasks, dispatcher=dispatcher)
-    coord.phase_framework = FrameworkPhase(coord)
-    await coord.phase_framework._maybe_bench_untested_proposals()
-    grid = tasks.created[0]["params"]["grid"]
-    assert [v["provenance"] for v in grid] == ["primatune", "specialist:serving"]
+    labels = {row["name"]: row["provenance"] for row in state.untested_proposal_rows()}
+    assert labels == {
+        "primatune-c0-s0-r0-0": "primatune",
+        "as-primatune": "specialist:serving",
+        "as-replay": "specialist:serving",
+    }
+    assert [v["provenance"] for v in await _auto_bench_grid(state)] == ["primatune"] + ["specialist:serving"] * 2
+    offered = queue_block(state)
+    assert "primatune-c0-s0-r0-0" in offered and "as-primatune" not in offered
 
 
 async def test_votes_rank_rows_a_knob_family_takes_one_slot_and_six_is_the_cap(service):

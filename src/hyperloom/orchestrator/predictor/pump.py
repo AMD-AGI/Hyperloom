@@ -32,7 +32,7 @@ from hyperloom.common import predictor_config
 from hyperloom.orchestrator.predictor.client import Prediction, predict
 from hyperloom.orchestrator.predictor.mandate import patch_mandate
 from hyperloom.orchestrator.predictor.payload import build_request
-from hyperloom.orchestrator.predictor.rows import QUEUE_DOMAIN, QUEUE_PRIORITY, proposal_rows
+from hyperloom.orchestrator.predictor.rows import PROVENANCE, QUEUE_DOMAIN, QUEUE_PRIORITY, proposal_rows
 from hyperloom.orchestrator.predictor.sidecars import load_sidecars
 from hyperloom.orchestrator.predictor.source_sites import load_source_sites
 from hyperloom.orchestrator.predictor.view import SessionView
@@ -209,6 +209,7 @@ class PredictorPump:
                 "round_id": key,
                 "cycle": self._cycle,
                 "domain": QUEUE_DOMAIN,
+                "provenance": PROVENANCE,
                 "priority": QUEUE_PRIORITY,
                 "asked_at": self._asked_at,
                 "proposal_set": rows,
