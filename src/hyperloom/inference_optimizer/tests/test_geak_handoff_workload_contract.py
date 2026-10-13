@@ -13,6 +13,7 @@ from unittest.mock import Mock
 import pytest
 import yaml
 
+from hyperloom.orchestrator.actions.executors._server_lifecycle import GpuHandoff
 from hyperloom.orchestrator.actions.executors._workload_envs import geak_acceptance
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -151,6 +152,40 @@ async def _handoff(coord: Coordinator, monkeypatch: pytest.MonkeyPatch) -> dict:
     return json.loads((coord.session_dir / "geak" / "handoff.json").read_text(encoding="utf-8"))
 
 
+_GPUS_FREE = GpuHandoff(reaped=[], busy=[], holders=[], unverified="")
+
+
+def _gpus_at_handoff(
+    monkeypatch: pytest.MonkeyPatch, answer: GpuHandoff | Exception
+) -> list[tuple[Path, list[int] | None]]:
+    """Answer the hand-off's GPU check with ``answer``; return the (session dir, cards) it was asked about."""
+    asked: list[tuple[Path, list[int] | None]] = []
+
+    def _check(session_dir: Path, cards: list[int] | None, *, timeout_sec: float) -> GpuHandoff:
+        asked.append((Path(session_dir), cards))
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._server_lifecycle.free_gpus_for_handoff", _check)
+    return asked
+
+
+def _launch_mock_runner(coord: Coordinator, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[dict]:
+    """Let the phase reach the runner launch; return the env of each launch."""
+    coord.phase_kernel._geak_timeouts = lambda: (60, 90, False)
+    launches: list[dict] = []
+
+    def _start_runner(_cmd, *, env, **_kwargs):
+        launches.append(dict(env))
+        process = Mock(returncode=0)
+        process.communicate.return_value = ("", "")
+        return process
+
+    monkeypatch.setattr("hyperloom.orchestrator.phases.kernel.subprocess.Popen", _start_runner)
+    return launches
+
+
 @pytest.mark.parametrize("framework", ["sglang", "vllm"])
 @pytest.mark.asyncio
 async def test_agentx_handoff_keeps_supported_schema_and_frozen_launch_controls(
@@ -220,20 +255,13 @@ async def test_agentx_geak_metric_aligned_result_is_only_a_proposal_proxy(
     # Seed a DIFFERENT axis so the assertion below proves the handoff overrides the
     # inherited env rather than happening to agree with it.
     monkeypatch.setenv("E2E_METRIC", "total")
-    coord.phase_kernel._geak_timeouts = lambda: (60, 90, False)
-    captured_env = {}
-
-    def _start_runner(_cmd, *, env, **_kwargs):
-        captured_env.update(env)
-        process = Mock(returncode=0)
-        process.communicate.return_value = ("", "")
-        return process
-
-    monkeypatch.setattr("hyperloom.orchestrator.phases.kernel.subprocess.Popen", _start_runner)
+    launches = _launch_mock_runner(coord, monkeypatch, tmp_path)
+    _gpus_at_handoff(monkeypatch, _GPUS_FREE)
     with caplog.at_level("INFO", logger="hyperloom.orchestrator.phases.kernel"):
         await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
+    [captured_env] = launches
     assert (handoff["e2e_metric"], captured_env["E2E_METRIC"]) == (expected_metric, expected_metric)
     assert handoff["workload_spec"]["metric_basis"] == _BASIS_OF[expected_metric]
     # The nested rule survives the recipe round trip, so GEAK grades on the bar the rebench keeps on.
@@ -246,6 +274,61 @@ async def test_agentx_geak_metric_aligned_result_is_only_a_proposal_proxy(
     assert coord.shared_state.benchmark_mode == "agentx"
     assert coord.shared_state.current_best["tput"] == 140.0
     assert coord.shared_state.geak_result["error_class"] == "no_result_json"
+
+
+@pytest.mark.asyncio
+async def test_gpus_a_leftover_server_still_holds_are_not_handed_to_geak(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    coord = _coord(tmp_path)
+    launches = _launch_mock_runner(coord, monkeypatch, tmp_path)
+    holder = "pgid=274559 python3 -m sglang.launch_server"
+    asked = _gpus_at_handoff(
+        monkeypatch,
+        GpuHandoff(reaped=[274559], busy=[(6, 281000.0, 288000.0)], holders=[holder], unverified=""),
+    )
+
+    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
+
+    # The recipe pins ROCR_VISIBLE_DEVICES=6,7, so GEAK's logical 0,1 are physical cards 6 and 7.
+    assert asked == [(tmp_path, [6, 7])]
+    assert launches == []
+    result = coord.shared_state.geak_result
+    assert (result["status"], result["error_class"]) == ("error", "gpus_busy_at_handoff")
+    assert "GPU6 281000/288000 MiB" in result["error"]
+    assert holder in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_gpus_that_cannot_be_checked_are_still_handed_to_geak(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    coord = _coord(tmp_path)
+    launches = _launch_mock_runner(coord, monkeypatch, tmp_path)
+    _gpus_at_handoff(
+        monkeypatch, GpuHandoff(reaped=[], busy=[], holders=[], unverified="rocm-smi could not report VRAM")
+    )
+
+    with caplog.at_level("WARNING", logger="hyperloom.orchestrator.phases.kernel"):
+        await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
+
+    assert len(launches) == 1
+    assert coord.shared_state.geak_result["error_class"] == "no_result_json"
+    assert "cannot confirm GPUs [6, 7] are free" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_defect_in_the_gpu_check_raises_instead_of_handing_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    coord = _coord(tmp_path)
+    launches = _launch_mock_runner(coord, monkeypatch, tmp_path)
+    _gpus_at_handoff(monkeypatch, TypeError("defect"))
+
+    with pytest.raises(TypeError, match="defect"):
+        await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
+
+    assert launches == []
 
 
 @pytest.mark.parametrize(

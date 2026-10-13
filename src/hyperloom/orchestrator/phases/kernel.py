@@ -64,6 +64,7 @@ from ..actions.executors._gpu_pin import (
     resolve_gpu_pin,
     _resolve_handoff_gpu_ids,
     _resolve_handoff_gpu_ids_space,
+    _resolve_handoff_physical_gpus,
     _resolve_handoff_tp,
     _resolve_serving_fidelity,
 )
@@ -80,6 +81,9 @@ log = _logging.getLogger(__name__)
 _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT: float = 3.0
 
 _GEAK_RUNNER_MODULE = "hyperloom.orchestrator.kernel.geak_runner"
+
+# How long the GEAK handoff waits for the servers it stopped to release their VRAM.
+_GEAK_GPU_FREE_WAIT_SEC: float = 120.0
 
 ROOFLINE_WATERMARK_RATIO: float = 1.10  # 10% step over last roofline
 
@@ -1178,14 +1182,44 @@ class KernelPhase(CoordinatorCollaborator):
         hard_timeout = int(min(candidates)) if candidates else 90 * 60
         return max(0, hard_timeout - 30), max(0, hard_timeout)
 
-    async def _run_geak_kernel_phase(self, *, from_phase: str) -> None:
-        """Delegate the KERNEL_AGENT phase to GEAK (one whole-pipeline e2e run)."""
-        state = self.shared_state
+    async def _free_gpus_for_geak(self, cards: list[int] | None) -> str | None:
+        """Stop what this session left on GEAK's GPUs, then wait for them to drain; return why they did not, if so.
+
+        The ``kernel_agent`` task holds every serving lane by now, but a lane only records that the round holding it
+        ended, not that the server the round booted went with it.
+        """
+        from ..actions.executors._server_lifecycle import free_gpus_for_handoff
+
+        gpus = await asyncio.to_thread(
+            free_gpus_for_handoff, self.session_dir, cards, timeout_sec=_GEAK_GPU_FREE_WAIT_SEC
+        )
+        if gpus.reaped:
+            log.warning(
+                "geak handoff: stopped %d server(s) this session left running: pids=%s", len(gpus.reaped), gpus.reaped
+            )
+        if gpus.unverified:
+            log.warning("geak handoff: cannot confirm GPUs %s are free (%s); delegating anyway", cards, gpus.unverified)
+        if not gpus.busy:
+            return None
+        busy = ", ".join(f"GPU{card} {used:.0f}/{total:.0f} MiB" for card, used, total in gpus.busy)
+        error = f"GPUs still hold VRAM after this session's leftover servers were stopped: {busy}"
+        if gpus.holders:
+            error += f"; serving processes still up: {'; '.join(gpus.holders)}"
+        log.error("geak handoff: %s; not delegating", error)
+        return error
+
+    def _session_is_agentx(self) -> bool:
+        """Whether this session measures the AgentX workload."""
         from hyperloom.common.perf_metric import is_agentx_mode
         from ..actions.executors._workload_envs import agentx_enabled
 
-        benchmark_mode = str(state.benchmark_mode or "").strip()
-        agentx = is_agentx_mode(benchmark_mode) if benchmark_mode else agentx_enabled()
+        benchmark_mode = str(self.shared_state.benchmark_mode or "").strip()
+        return is_agentx_mode(benchmark_mode) if benchmark_mode else agentx_enabled()
+
+    async def _run_geak_kernel_phase(self, *, from_phase: str) -> None:
+        """Delegate the KERNEL_AGENT phase to GEAK (one whole-pipeline e2e run)."""
+        state = self.shared_state
+        agentx = self._session_is_agentx()
 
         def _finish_skip(
             result: dict[str, Any],
@@ -1510,8 +1544,14 @@ class KernelPhase(CoordinatorCollaborator):
             )
             if not _promote_recovered_result(recovered, recovered_from="existing_result_json"):
                 return
-            if recovered.get("status") == "ok":
-                await self._revalidate_geak_candidate(reason="geak_e2e_win_recovered")
+            await self._revalidate_geak_candidate(reason="geak_e2e_win_recovered")
+            return
+
+        still_busy = await self._free_gpus_for_geak(
+            _resolve_handoff_physical_gpus(gpu_ids=_gpu_ids, gpu_ids_space=_gpu_ids_space, gpu_pin=gpu_pin)
+        )
+        if still_busy:
+            _finish_skip({"status": "error", "error_class": "gpus_busy_at_handoff", "error": still_busy})
             return
 
         # Budget-aware timeouts: shrink to the remaining run deadline and always reserve the closing-grace window.
