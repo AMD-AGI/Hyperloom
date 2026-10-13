@@ -276,3 +276,66 @@ def test_gc_fan_out_waits_for_a_profiling_round(monkeypatch, tmp_path):
 
 def test_roofline_fan_out_still_runs_on_every_restart(monkeypatch, tmp_path):
     assert _fan_out_calls(monkeypatch, tmp_path, patch_set="roofline", torch_profiler_dir="") == ["roofline"]
+
+
+def _restart_with_env(monkeypatch, tmp_path: Path, *, resolve_patch_set):
+    """Drive ``restart_server_for_round`` with the fan-out's patch-set resolution under test control."""
+    from hyperloom.inference_optimizer.multi_node import cli
+    from hyperloom.inference_optimizer.multi_node._internal import external_state
+    from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as lifecycle
+    from hyperloom.orchestrator.actions.executors import _server_patcher
+
+    monkeypatch.setattr(os, "environ", os.environ.copy())
+    monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path))
+    monkeypatch.setattr(lifecycle, "is_multi_node", lambda: True)
+    monkeypatch.setattr(external_state, "external_service_url", lambda: "")
+    monkeypatch.setattr(_server_patcher, "resolve_sglang_patch_set", resolve_patch_set)
+    monkeypatch.setattr(cli, "cmd_apply_tracelens_patch", lambda ns: 0)
+    monkeypatch.setattr(cli, "cmd_restart_server", lambda ns: 0)
+    monkeypatch.setattr(cli, "_resolve_poll_timeout_s", lambda: 1)
+    for waiter in ("_wait_for_workers_ready_async", "_wait_for_server_health_async"):
+        monkeypatch.setattr(lifecycle, waiter, _noop_wait)
+    monkeypatch.setattr(lifecycle, "_wait_for_published_service_ready_async", _noop_wait)
+    return lifecycle
+
+
+async def _noop_wait(**_kwargs) -> None:
+    return None
+
+
+def test_a_failed_restart_restores_the_round_env(monkeypatch, tmp_path):
+    """Everything after the mutation can raise; the next round's launcher must not inherit this round's forwarding."""
+
+    def _boom() -> str:
+        raise RuntimeError("patch set unresolved")
+
+    lifecycle = _restart_with_env(monkeypatch, tmp_path, resolve_patch_set=_boom)
+    with pytest.raises(RuntimeError):
+        asyncio.run(
+            lifecycle.restart_server_for_round(
+                framework="sglang",
+                model_path="/m",
+                tp=8,
+                ep=1,
+                torch_profiler_dir=str(tmp_path / "trace"),
+                extra_env={"HYPERLOOM_TEST_FWD": "1"},
+                unset_env=["HYPERLOOM_TEST_DROP"],
+            )
+        )
+    for name in ("HYPERLOOM_MN_PROFILE_TRACE_DIR", "HYPERLOOM_MN_EXTRA_FWD_ENV", "HYPERLOOM_MN_UNSET_FWD_ENV"):
+        assert name not in os.environ
+
+
+def test_a_preset_forwarding_var_is_restored_after_a_normal_run(monkeypatch, tmp_path):
+    lifecycle = _restart_with_env(monkeypatch, tmp_path, resolve_patch_set=lambda: "roofline")
+    monkeypatch.setenv("HYPERLOOM_MN_EXTRA_FWD_ENV", "sentinel")
+    asyncio.run(
+        lifecycle.restart_server_for_round(
+            framework="sglang",
+            model_path="/m",
+            tp=8,
+            ep=1,
+            extra_env={"HYPERLOOM_TEST_FWD": "1"},
+        )
+    )
+    assert os.environ["HYPERLOOM_MN_EXTRA_FWD_ENV"] == "sentinel"
