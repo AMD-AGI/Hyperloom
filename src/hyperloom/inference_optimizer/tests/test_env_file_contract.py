@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The dotenv opt-out contract on each surface that still has one.
+"""HYPERLOOM_ENV_FILE must mean the same thing on every surface that still has one.
 
 A checkout is shared across runs while USER_DATA_PATH, HYPERLOOM_RUNTIME_DIR and
 the ``*_ROOT`` paths are per-run. Each surface that reads configuration used to
@@ -12,14 +12,16 @@ others importing a previous run's values. These tests pin the contract:
     <path>       -> that file
     "" | none    -> no file; the caller's environment is the configuration
 
-The installer's shell-side variable is ``RUNTIME_ENV_FILE``; the Python CLI
-(``preflight``) reads ``HYPERLOOM_ENV_FILE``. These are two different names for
-two different surfaces, not a shared contract -- each is pinned separately below.
+Both the top installer (now via the ``runtime_env.sh`` asset it sources) and the
+Python CLI (``preflight``) read ``HYPERLOOM_ENV_FILE`` directly. ``RUNTIME_ENV_FILE``
+is a same-named-looking but unrelated *internal* variable ``runtime_env.sh`` resolves
+``HYPERLOOM_ENV_FILE`` into for its own use -- not a second operator-facing contract.
 """
 
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -50,10 +52,24 @@ def _extract(path: Path, marker: str) -> str:
     raise AssertionError(f"marker {marker!r} not found in {path}")
 
 
-def _run(script: str, env: dict[str, str], probe: str) -> str:
-    body = f"set -uo pipefail\n{script}\n{probe}\n"
+def _run_top_installer(tmp_path: Path, env: dict[str, str], probe: str) -> str:
+    """Run the extracted ``load_dotenv_no_clobber`` snippet as a real file.
+
+    The real function now lives in ``runtime_env.sh``, sourced by ``install.sh`` via a path
+    derived from ``BASH_SOURCE[0]``. A ``bash -c`` string has no real file for that to resolve
+    against, so the source silently fails and -- because the extracted snippet carries
+    install.sh's own ``set -euo pipefail`` -- aborts the whole script before the probe ever runs
+    (every call then reports the empty string, regardless of what it should have resolved).
+    Materializing the snippet next to a copy of ``runtime_env.sh`` gives it a real path to
+    resolve the source line against.
+    """
+    workdir = tmp_path / "installer_snippet"
+    workdir.mkdir()
+    shutil.copy(TOP_INSTALL.parent / "runtime_env.sh", workdir / "runtime_env.sh")
+    script_path = workdir / "install.sh"
+    script_path.write_text(f"{_extract(TOP_INSTALL, 'load_dotenv_no_clobber')}\n{probe}\n")
     out = subprocess.run(
-        ["bash", "-c", body],
+        ["bash", str(script_path)],
         env={"PATH": os.environ["PATH"], **env},
         capture_output=True,
         text=True,
@@ -64,21 +80,19 @@ def _run(script: str, env: dict[str, str], probe: str) -> str:
 @pytest.mark.parametrize("opt_out", ["none", "NONE", ""])
 def test_top_installer_opt_out_keeps_caller_paths(tmp_path, opt_out):
     root = _checkout_with_env(tmp_path)
-    script = _extract(TOP_INSTALL, "load_dotenv_no_clobber")
     env = {
         "REPO_ROOT": str(root),
         "USER_DATA_PATH": "/this-run/hyperloom",
-        "RUNTIME_ENV_FILE": opt_out,
+        "HYPERLOOM_ENV_FILE": opt_out,
     }
-    assert _run(script, env, 'echo "$USER_DATA_PATH"') == "/this-run/hyperloom"
+    assert _run_top_installer(tmp_path, env, 'echo "$USER_DATA_PATH"') == "/this-run/hyperloom"
 
 
 def test_top_installer_default_still_reads_the_checkout(tmp_path):
     """The default must not change: only an explicit opt-out disables import."""
     root = _checkout_with_env(tmp_path)
-    script = _extract(TOP_INSTALL, "load_dotenv_no_clobber")
     env = {"REPO_ROOT": str(root), "USER_DATA_PATH": "/this-run/hyperloom"}
-    assert _run(script, env, 'echo "$USER_DATA_PATH"') == "/previous-run/hyperloom"
+    assert _run_top_installer(tmp_path, env, 'echo "$USER_DATA_PATH"') == "/previous-run/hyperloom"
 
 
 @pytest.mark.parametrize("opt_out", ["none", "NONE", "", "  none  "])
