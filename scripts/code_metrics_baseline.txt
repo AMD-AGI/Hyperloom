@@ -187,7 +187,7 @@ cognitive-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._v
 cognitive-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase.promote_geak_from_candidate 57
 cognitive-complexity src/hyperloom/orchestrator/phases/kernel_stack.py::KernelStackPhase._run_kernel_stack_validation_e2e 62
 cognitive-complexity src/hyperloom/orchestrator/phases/kernel_stack.py::KernelStackPhase.drain_pending_keep_integrates 32
-cognitive-complexity src/hyperloom/orchestrator/phases/machine_state.py::kernel_work_pending 70
+cognitive-complexity src/hyperloom/orchestrator/phases/machine_state.py::kernel_work_pending 38
 cognitive-complexity src/hyperloom/orchestrator/phases/machine_state.py::replay_next_phase 83
 cognitive-complexity src/hyperloom/orchestrator/phases/macro_cycle.py::MacroCycleCollaborator.plan_cycle_focus 41
 cognitive-complexity src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._collect_warm_kernel_plan 42
@@ -400,7 +400,6 @@ cyclomatic-complexity src/hyperloom/orchestrator/phases/framework.py::FrameworkP
 cyclomatic-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._merge_gemm_candidate_with_runtime 42
 cyclomatic-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._run_geak_kernel_phase 49
 cyclomatic-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._validate_gemm_tuning_e2e 36
-cyclomatic-complexity src/hyperloom/orchestrator/phases/machine_state.py::kernel_work_pending 26
 cyclomatic-complexity src/hyperloom/orchestrator/phases/machine_state.py::replay_next_phase 30
 cyclomatic-complexity src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._prepare_warm_kernel_kb 33
 cyclomatic-complexity src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._settle_warm_replay 43
@@ -1075,7 +1074,7 @@ module-lines src/hyperloom/orchestrator/loop/intent_router.py 1548
 module-lines src/hyperloom/orchestrator/loop/writeback.py 4748
 module-lines src/hyperloom/orchestrator/phases/framework.py 3148
 module-lines src/hyperloom/orchestrator/phases/kernel.py 4227
-module-lines src/hyperloom/orchestrator/phases/machine_state.py 2275
+module-lines src/hyperloom/orchestrator/phases/machine_state.py 2265
 module-lines src/hyperloom/orchestrator/phases/prelude.py 2640
 module-lines src/hyperloom/orchestrator/policy/gate.py 1626
 module-lines src/hyperloom/orchestrator/prompts/prompt_builder.py 1205

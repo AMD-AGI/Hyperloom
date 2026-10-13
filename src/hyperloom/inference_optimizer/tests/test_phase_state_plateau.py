@@ -464,24 +464,24 @@ def test_an_integrate_row_retires_a_same_source_sibling():
     assert kernel_work_pending(state) is False
 
 
-def test_a_fusion_keep_does_not_retire_its_attempt():
+def test_a_fusion_row_retires_its_attempt_like_an_integrate_row():
     state = _skip_to_sweep_state("KERNEL_AGENT")
     state.optimization_stack = [{"action": "fusion", "kernel_id": "k900", "target_file": "/repo/op.py"}]
     state.kernel_opt_task_attempts = {
         "k002": {"last_source_file": "/repo/op.py", "last_decision": "KEEP", "last_status": "ok"},
     }
 
-    assert kernel_work_pending(state) is True
+    assert kernel_work_pending(state) is False
 
 
-def test_a_whitespace_padded_target_file_does_not_match():
+def test_a_whitespace_padded_target_file_still_matches():
     state = _skip_to_sweep_state("KERNEL_AGENT")
     state.optimization_stack = [{"action": "integrate", "kernel_id": "k900", "target_file": "  /repo/op.py "}]
     state.kernel_opt_task_attempts = {
         "k002": {"last_source_file": "/repo/op.py", "last_decision": "KEEP", "last_status": "ok"},
     }
 
-    assert kernel_work_pending(state) is True
+    assert kernel_work_pending(state) is False
 
 
 def test_apply_escalate_budget_bump_lifts_phase_within_cap():
