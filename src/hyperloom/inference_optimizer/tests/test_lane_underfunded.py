@@ -29,10 +29,11 @@ def test_the_decline_names_the_share_it_refused_on():
 
 
 def test_both_forge_lanes_use_the_same_decline():
+    """Each names the engine its own handler reports on every other path, so the rows attribute alike."""
     fusion = _lane_underfunded("forge_fusion", lb.LANE_FUSION, 10)
-    gemm = _lane_underfunded("forge_gemm_tune", lb.LANE_GEMM, 10)
+    gemm = _lane_underfunded("forge", lb.LANE_GEMM, 10)
 
-    assert fusion["engine"] == "forge_fusion" and gemm["engine"] == "forge_gemm_tune"
+    assert fusion["engine"] == "forge_fusion" and gemm["engine"] == "forge"
     assert fusion["backend"] == gemm["backend"] == "forge"
     assert fusion["error_class"] == gemm["error_class"] == "lane_underfunded"
 

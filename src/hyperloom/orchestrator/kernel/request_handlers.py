@@ -3335,7 +3335,7 @@ async def _run_forge_gemm_tuning(
     # A derived share too small for one tuner used to fall back to the module default here, which ran the lane past
     # the phase that could not pay for it; only an operator timeout or a named tuner still overrides the decline.
     if gemm_lane.is_underfunded and not (payload.get("timeout_sec") or str(payload.get("tuner") or "").strip()):
-        return _lane_underfunded("forge_gemm_tune", LANE_GEMM, gemm_lane.budget_sec)
+        return _lane_underfunded("forge", LANE_GEMM, gemm_lane.budget_sec)
     timeout = _gemm_tuning_timeout_sec(
         payload,
         lane_budget_sec=gemm_lane.budget_sec if gemm_lane.is_fundable else 0,
