@@ -1776,11 +1776,11 @@ class _SessionStart:
     """The session this run operates on, however it was opened."""
 
     session_dir: Path
-    session_lock: object
-    manifest: object
+    session_lock: SessionLock
+    manifest: dict[str, Any]
 
 
-def _restore_platform_state(args: argparse.Namespace, state, session_lock) -> None:
+def _restore_platform_state(args: argparse.Namespace, state: SharedState, session_lock: SessionLock) -> None:
     """Re-assert the partition shape, the power settings and the topology this session was measured under.
 
     Each resumes on the same restore / apply / persist path: an omitted flag
@@ -1891,7 +1891,6 @@ def _reexport_session_environment(
     manifest: dict,
     resume_server_args: str,
     resume_extra_env: dict,
-    session_lock,
 ) -> None:
     """Put the session's recorded environment back, so a fresh shell resumes what was measured.
 
@@ -1996,8 +1995,6 @@ def _reexport_session_environment(
         gpu_type=os.environ.get("GPU_TYPE") or state.gpu_type,
     )
     _persist_operator_supplied_paths(state)
-    _restore_platform_state(args, state, session_lock)
-    _restore_phase_toggles(args, state, session_dir)
 
 
 async def _resume_session(args: argparse.Namespace) -> _SessionStart:
@@ -2109,8 +2106,10 @@ async def _resume_session(args: argparse.Namespace) -> _SessionStart:
         manifest=manifest,
         resume_server_args=_resume_server_args,
         resume_extra_env=_resume_extra_env,
-        session_lock=session_lock,
     )
+    # After the re-export, not before: both read the GPU_TYPE and the framework it put back.
+    _restore_platform_state(args, state, session_lock)
+    _restore_phase_toggles(args, state, session_dir)
 
     prior_crash = state.crash_count
 
@@ -2363,21 +2362,15 @@ async def _seed_fresh_session(args: argparse.Namespace, *, nodes_resolved: int) 
     return _SessionStart(session_dir=session_dir, session_lock=session_lock, manifest=manifest)
 
 
-@dataclass(frozen=True)
-class _RunTopology:
-    """The shape this run measures on, settled before anything derives from it.
+def _resolve_run_topology(args: argparse.Namespace) -> int:
+    """Settle this run's launch shape, and return the node count the caller gates on.
 
-    The gates, the projection and ``_preflight`` all read these, so they are
-    resolved once and exported for the subprocess executors that inherit them.
-    A resume runs its own ladder against the session's recorded values and
-    skips the projection.
+    Everything else it settles -- the operator's pins, TP/EP, ISL/OSL/CONC, the
+    PD split, ``SKIP_VARIANTS`` -- leaves through ``os.environ``, which is how
+    the subprocess executors that inherit it read these. Only the node count has
+    a caller in this process, so only it is returned. A resume runs its own
+    ladder against the session's recorded values and skips the projection.
     """
-
-    nodes: int
-
-
-def _resolve_run_topology(args: argparse.Namespace) -> _RunTopology:
-    """Settle and export the run's topology knobs: nodes, TP/EP, GPUs per node and the PD split."""
     # Surface --nodes (CLI flag wins) before _preflight runs.
     nodes_resolved = max(1, int(args.nodes))
     # The operator's pins have to be in the environment before the ladder below reads them.
@@ -2459,7 +2452,7 @@ def _resolve_run_topology(args: argparse.Namespace) -> _RunTopology:
             v = (getattr(args, cli_attr, "") or "").strip()
             if v:
                 os.environ[env_key] = v
-    return _RunTopology(nodes=nodes_resolved)
+    return nodes_resolved
 
 
 @dataclass(frozen=True)
@@ -2469,7 +2462,7 @@ class _AgentLineup:
     no_kernel: bool
     no_framework_agent: bool
     critic_choice: str
-    critic_agent_root: str
+    critic_agent_root: Path | None
     critic_kb_mode: str
 
 
@@ -2566,7 +2559,7 @@ def _resolve_agent_lineup(args: argparse.Namespace) -> _AgentLineup:
 
 async def _run_optimize(args: argparse.Namespace) -> int:
     """Run the ``optimize`` subcommand end to end."""
-    nodes_resolved = _resolve_run_topology(args).nodes
+    nodes_resolved = _resolve_run_topology(args)
 
     # Stale aiter JIT lock sweep: killed runs leave locks that block subsequent starts (locks <5min preserved).
     aiter_sweep = clean_stale_aiter_locks()
