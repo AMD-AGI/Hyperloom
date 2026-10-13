@@ -18,9 +18,8 @@ log = _logging.getLogger(__name__)
 
 
 #: Slack added to a conc_sweep lease on top of the task's own budget, covering
-#: server teardown and the report flush that happen after the last variant. The
-#: lease must outlive the work or the TTL watchdog fails a task that is still
-#: making progress.
+#: server teardown and the report flush that happen after the last variant, so
+#: the lease and the phase's grant to the sweep outlive the work.
 _CONC_SWEEP_LEASE_GRACE_SEC = 600
 
 
