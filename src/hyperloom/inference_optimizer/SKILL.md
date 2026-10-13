@@ -404,9 +404,9 @@ brief:
   verbatim, keeping each row's name, fields and `provenance: primatune`; a row
   that a queued or running grid already holds is listed by name only. A source
   change arrives as a mandate: dispatch
-  `delegate{action_name='specialist', params={scope:'freeform', mode:'patch', primatune_mandate_id:'<id>'}}`
+  `delegate{action_name='specialist', params={scope:'freeform', mode:'patch', primatune_mandate_id:'<id>', task_description:'<one line>'}}`
   with the id copied verbatim, and the Coordinator substitutes the mandate's own
-  text for `task_description`. A `primatune_mandate_id` no predictor round
+  text for the one-line `task_description`. A `primatune_mandate_id` no predictor round
   carries is denied (`unknown_primatune_mandate`) rather than dispatched.
 - **Plateau**: both arms' signals are computed every tick and rendered in the
   orchestration prompt. One arm dry is advisory — the phase stays open on the
