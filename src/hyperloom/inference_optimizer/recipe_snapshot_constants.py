@@ -225,7 +225,7 @@ def canonical_labels(
     }
 
 
-# framework_name slug -> python package whose __version__ is authoritative.
+# framework_name slug -> python package whose __version__ answers when the serving interpreter does not.
 _FRAMEWORK_VERSION_MODULES: Final[dict[str, str]] = {
     "sglang": "sglang",
     "vllm": "vllm",
@@ -234,7 +234,11 @@ _FRAMEWORK_VERSION_MODULES: Final[dict[str, str]] = {
 
 
 def detect_framework_version(framework_name: str) -> str:
-    """Best-effort installed version of ``framework_name`` via importing its top-level package and reading ``__version__``."""
+    """Best-effort installed version of ``framework_name``.
+
+    Read from the interpreter preflight resolved to serve it, else by importing its top-level package and reading
+    ``__version__``.
+    """
     fw_slug = _slug(framework_name, "")
     if not fw_slug:
         return DEFAULT_FRAMEWORK_VERSION_SLUG
