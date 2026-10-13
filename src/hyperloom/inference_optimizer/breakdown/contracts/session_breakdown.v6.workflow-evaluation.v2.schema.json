@@ -1467,6 +1467,9 @@
             "number",
             "null"
           ]
+        },
+        "roofline_in_flight": {
+          "type": "boolean"
         }
       },
       "additionalProperties": false

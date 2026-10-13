@@ -356,14 +356,17 @@ class TestLaunchValidation:
 
         monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "magpie")
         for framework in ("sglang", "vllm", "xdit"):
-            _apply_operator_supplied_paths(self._args(), framework)
+            args = self._args()
+            if framework == "xdit":
+                args.xdit_model_name = "FLUX.2-dev"
+            _apply_operator_supplied_paths(args, framework)
 
     def test_a_shipped_framework_needs_neither_flag(self, monkeypatch):
         from hyperloom.inference_optimizer.cli import _apply_operator_supplied_paths
 
         monkeypatch.setenv("FRAMEWORK_REPO_PATH", "")
         monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", "")
-        _apply_operator_supplied_paths(self._args(), "xdit")
+        _apply_operator_supplied_paths(self._args(xdit_model_name="FLUX.2-dev"), "xdit")
 
     def test_an_exported_env_outranks_the_flag(self, monkeypatch, tmp_path):
         """Matches every other path override in the loop."""

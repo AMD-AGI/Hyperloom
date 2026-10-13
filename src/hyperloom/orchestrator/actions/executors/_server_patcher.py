@@ -1316,6 +1316,5 @@ def _git(git: str, args: Sequence[str], cwd: Path) -> bool:
 __all__ = [
     "ensure_vllm_patched_for_tracelens",
     "ensure_sglang_patched_for_tracelens",
-    "ensure_sglang_patched_for_ck_blockscale",
     "ensure_xdit_patched_for_tracelens",
 ]
