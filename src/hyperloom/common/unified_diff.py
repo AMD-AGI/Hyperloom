@@ -135,10 +135,23 @@ def _header_path(block: str, marker: str) -> str:
     return _unquote_git_path(found.group(1).split("\t", 1)[0].strip()) if found else ""
 
 
-def _git_header_paths(block: str) -> tuple[str, str]:
-    """The ``a/``/``b/`` pair from a ``diff --git`` line, empty when the section has none."""
-    found = re.search(r"(?m)^diff --git (a/.+?) (b/.+)$", block)
-    return (_unquote_git_path(found.group(1)), _unquote_git_path(found.group(2).strip())) if found else ("", "")
+def _moved_header_paths(block: str, verb: str) -> tuple[str, str]:
+    """The ``diff --git`` token pair of a ``rename``/``copy`` section, located by its own from/to names.
+
+    The header prefix is whatever the producer's gitconfig chose (``a/``/``b/``, none, ``c/``/``w/``),
+    so the names come from the ``<verb> from``/``<verb> to`` lines and the header supplies the prefix
+    each one carries.
+    """
+    destination = re.search(rf"(?m)^{verb} to (.+)$", block)
+    header = re.search(r"(?m)^diff --git (.+)$", block)
+    if not destination or not header:
+        return "", ""
+    line = header.group(1)
+    at = line.rfind(destination.group(1).strip().strip('"'))
+    cut = line.rfind(" ", 0, at) if at > 0 else -1
+    if cut <= 0:
+        return "", ""
+    return _unquote_git_path(line[:cut]), _unquote_git_path(line[cut + 1 :])
 
 
 def _section_targets(block: str) -> list[PatchTarget]:
@@ -146,15 +159,16 @@ def _section_targets(block: str) -> list[PatchTarget]:
     new_file_m = re.search(r"(?m)^new file mode (\d+)$", block)
     mode_m = new_file_m or re.search(r"(?m)^new mode (\d+)$", block)
     mode = mode_m.group(1)[-4:] if mode_m else ""
-    old_path, new_path = _git_header_paths(block)
 
-    if re.search(r"(?m)^rename to ", block) and old_path and new_path:
+    old_path, new_path = _moved_header_paths(block, "rename")
+    if old_path and new_path:
         return [
             PatchTarget(PatchOp.DELETE, old_path),
             PatchTarget(PatchOp.WRITE, new_path, mode=mode, is_new=True),
         ]
-    if re.search(r"(?m)^copy to ", block) and new_path:
-        return [PatchTarget(PatchOp.WRITE, new_path, mode=mode, is_new=True)]
+    copied = _moved_header_paths(block, "copy")[1]
+    if copied:
+        return [PatchTarget(PatchOp.WRITE, copied, mode=mode, is_new=True)]
 
     minus = _header_path(block, _OLD_FILE)
     plus = _header_path(block, _NEW_FILE)
@@ -164,7 +178,8 @@ def _section_targets(block: str) -> list[PatchTarget]:
         return [PatchTarget(PatchOp.DELETE, minus)]
 
     # Header-only sections (pure chmod) carry no ``+++`` line and name their path on the ``diff --git`` line.
-    target = plus or new_path
+    header = re.search(r"(?m)^diff --git a/.+? (b/.+)$", block)
+    target = plus or (_unquote_git_path(header.group(1).strip()) if header else "")
     if not target:
         raise ValueError(f"cannot determine target path for section:\n{block[:200]}")
     return [

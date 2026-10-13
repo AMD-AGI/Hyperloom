@@ -51,6 +51,11 @@ DELETE = PatchOp.DELETE
             id="rename-with-edits",
         ),
         pytest.param(
+            "diff --git old.py new.py\nsimilarity index 100%\nrename from old.py\nrename to new.py\n",
+            [PatchTarget(DELETE, "old.py"), PatchTarget(WRITE, "new.py", is_new=True)],
+            id="rename-without-a-b-prefix",
+        ),
+        pytest.param(
             "diff --git a/src.py b/dup.py\nsimilarity index 100%\ncopy from src.py\ncopy to dup.py\n",
             [PatchTarget(WRITE, "b/dup.py", is_new=True)],
             id="copy",

@@ -377,8 +377,12 @@ rename to new_name.py
 """
 
 
-def test_revert_restores_a_source_the_patch_moved_away(tmp_path):
-    """A rename source is gone from the tree at revert time, so its record must recreate it from the backup."""
+@pytest.mark.parametrize("revert_action", ("restore", "restore_old"))
+def test_revert_restores_a_source_the_patch_moved_away(tmp_path, revert_action):
+    """A rename source is gone from the tree at revert time, so its record must recreate it from the backup.
+
+    ``restore_old`` is the label an older build wrote; its ledger has to survive a resume on this one.
+    """
     old_file = tmp_path / "old_name.py"
     bak = tmp_path / "bk" / "backup.bak"
     bak.parent.mkdir(parents=True)
@@ -388,13 +392,14 @@ def test_revert_restores_a_source_the_patch_moved_away(tmp_path):
             "target": str(old_file),
             "existed": True,
             "backup_path": str(bak),
-            "revert_action": "restore",
+            "revert_action": revert_action,
             "pre_image_sha256": ledger.file_digest(bak),
         }
     ]
 
-    ledger.restore_records(records)
+    _reverted, errors = ledger.restore_records(records)
 
+    assert errors == []
     assert old_file.read_text() == "original_content\n"
 
 
