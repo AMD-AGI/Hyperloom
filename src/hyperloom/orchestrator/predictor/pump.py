@@ -72,8 +72,6 @@ def _skip_reason(state: SessionView, conf: predictor_config.PredictorConfig) -> 
     """Why not to ask at this step, before the phase clock is read; ``None`` to go on."""
     if not conf.enabled:
         return "disabled"
-    if state.framework_agent_phase_done:
-        return "FRAMEWORK_AGENT is done"
     if str(state.framework or "").strip().lower() not in predictor_config.SUPPORTED_FRAMEWORKS:
         return f"no flag catalogue for framework {state.framework!r}"
     if decision_point_key(state) in state.predictor_asked_keys:

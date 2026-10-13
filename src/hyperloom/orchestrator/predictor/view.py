@@ -20,7 +20,6 @@ class SessionView(Protocol):
     macro_cycle: int
     framework: str
     framework_version: str
-    framework_agent_phase_done: bool
     model_name: str
     model_class: str
     model_info: dict

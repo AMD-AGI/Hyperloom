@@ -334,7 +334,6 @@ async def test_shadow_logs_queues_nothing_and_does_not_ask_again(service, monkey
     [
         {"env": None},
         {"framework": "atom"},
-        {"framework_agent_phase_done": True},
         {"predictor_asked_keys": ["c0-s0-r0"]},
         {"phase_budget_pct": {"FRAMEWORK_AGENT": 0.0}},
     ],
@@ -348,6 +347,14 @@ async def test_nothing_is_asked_without_an_endpoint_or_an_open_framework_phase(s
     await _ask_and_file(_pump(), state)
     assert service.requests == [] and state.specialist_rounds == []
     assert state.predictor_asked_keys == asked_before
+
+
+async def test_the_predictor_is_still_asked_once_the_source_arm_runs_dry(service):
+    """The flag marks the source arm exhausted; FRAMEWORK stays open on the config arm the predictor feeds."""
+    state = _state(framework_agent_phase_done=True)
+    service.answer = _answer(Action(server_args={"--kv-cache-dtype": "fp8"}), votes={0: 1})
+    await _ask_and_file(_pump(), state)
+    assert len(service.requests) == 1 and len(_predictor_rounds(state)) == 1
 
 
 async def test_one_request_in_flight_and_a_keep_opens_a_new_decision_point(service):
