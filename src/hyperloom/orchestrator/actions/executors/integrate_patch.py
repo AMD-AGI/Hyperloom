@@ -60,10 +60,10 @@ from hyperloom.common.perf_metric import (
     GRADED_OUTPUT,
     VERDICT_KEEP,
     holds_within_band,
+    incomparability_reason,
     latency_veto_reason,
     perf_snapshot_from_mapping,
     resolve_grading_anchor_perf,
-    rounds_are_comparable,
 )
 from hyperloom.inference_optimizer.grading import resolved_grading
 from hyperloom.orchestrator.measurement.runtime_findings import (
@@ -90,7 +90,7 @@ from ._accuracy_gate import (
 from ._apply_feedback import ApplyFeedback, build_apply_feedback
 from ._git import _git_head_sha, _run_git_cp
 from ._integrate_attempt import IntegrateAttempt
-from ._setup_replay import resolve_setup_commands, run_setup_commands, setup_report_fields
+from ._setup_replay import replay_setup_commands
 from ._patch_source_pr import (
     DEFAULT_DIFF_FETCH_TIMEOUT_SEC,
     _candidate_slug,
@@ -463,16 +463,6 @@ def _persist_base_sha_for_root(
         # The value is on the in-memory state either way, and the rearm saves
         # again; a failed write must not stop the round.
         log.debug("integrate_patch: save after base-sha record failed", exc_info=True)
-
-
-def _append_setup_execution(shared_state: Any, row: dict[str, Any], *, session_dir: Path) -> None:
-    """Append one execution row to the durable, append-only ledger."""
-    shared_state.enablement.append_setup_execution(row)
-    try:
-        shared_state.save(session_dir)
-    except OSError:
-        # The rows are on the in-memory state either way, and the rearm saves again.
-        log.debug("integrate_patch: save after setup ledger append failed", exc_info=True)
 
 
 def resolved_explicit_root(explicit: str) -> Path | None:
@@ -1793,8 +1783,9 @@ def _intvty_guard_refusals(shared_state: Any, bench_result: dict[str, Any]) -> l
         for key in (GRADED_INTVTY, GRADED_OUTPUT)
         if not holds_within_band(cand_perf, ref_perf, key, noise_pct=noise_pct)
     ]
-    if not rounds_are_comparable(cand_perf, ref_perf):
-        refusals.append("rounds are not comparable")
+    incomparable = incomparability_reason(cand_perf, ref_perf)
+    if incomparable:
+        refusals.append(f"rounds are not comparable ({incomparable})")
     return refusals
 
 
@@ -2450,25 +2441,10 @@ class IntegratePatchExecutor:
             _note_pre_mutation_head(attempt, candidate, enablement=is_enablement, session_dir=self.session_dir)
         if is_enablement and not shared_state.enablement.environment_closure_baseline:
             await self._record_closure_baseline(attempt, params)
-        setup_result: dict[str, Any] = {"applied": [], "skipped": [], "failed": [], "executions": []}
-        if bool(params.get("enablement")):
-            setup_cmds = resolve_setup_commands(params=params, done_payload=done_payload)
-            if setup_cmds:
-                setup_result = await asyncio.to_thread(
-                    run_setup_commands,
-                    setup_cmds,
-                    cwd=self.session_dir,
-                    log_dir=runs_dir(self.session_dir, "integrate_patch", attempt.task_id),
-                    round_task_id=specialist_task_id,
-                    seq_start=shared_state.enablement.last_execution_seq(),
-                    on_execution=lambda row: _append_setup_execution(shared_state, row, session_dir=self.session_dir),
-                )
-                # Each row is already durable: it is appended by the callback
-                # above, inside the worker, as its command finishes. Several
-                # exits below return after setup has mutated the shared venv,
-                # and one carries no enablement flag at all, so the rearm that
-                # would have recorded them never runs -- and a cancelled await
-                # never returns this payload in the first place.
+        if is_enablement:
+            refusal = await replay_setup_commands(attempt, params=params, session_dir=self.session_dir)
+            if refusal is not None:
+                return refusal
 
         specialist_workspace = attempt.specialist_workspace
         assert specialist_workspace is not None
@@ -2580,7 +2556,7 @@ class IntegratePatchExecutor:
                 ),
             }
 
-        _setup_ran = bool(setup_result.get("applied"))
+        _setup_ran = bool(attempt.setup_commands_applied)
         # A runtime this round acquired changes what the next boot executes; a
         # re-provisioned kept one is the stack the last KEEP was already graded on.
         acquired_runtime = bool(attempt.attempt_venv_root) and not attempt.shared_state.enablement.kept_stack_action
@@ -2599,7 +2575,6 @@ class IntegratePatchExecutor:
                 attempt.output_root = output_root
                 attempt.extra_envs_applied = dict(inherited_envs)
                 attempt.extra_server_args_applied = inherited_args
-                attempt.setup_result = setup_result
                 return None
             _no_patches: dict[str, Any] = {
                 "status": "no_patches",
@@ -2608,12 +2583,12 @@ class IntegratePatchExecutor:
                 "patches_reverted": [],
                 "artifacts_applied": [],
                 "artifact_errors": artifact_resolve_errors,
-                **setup_report_fields(
+                "reason": (
                     "neither patches, config_changes, installable artifacts, nor "
                     "allowlisted setup commands were supplied / discoverable for "
-                    "this specialist task",
-                    setup_result,
+                    "this specialist task"
                 ),
+                "setup_commands_applied": attempt.setup_commands_applied,
             }
             if params.get("enablement"):
                 _no_patches["enablement"] = True
@@ -2964,7 +2939,6 @@ class IntegratePatchExecutor:
         attempt.extra_envs_applied = extra_envs_applied
         attempt.extra_server_args_applied = extra_server_args_applied
         attempt.dropped_env_overrides = dropped_env_overrides
-        attempt.setup_result = setup_result
         return None
 
     async def _stage_gate(
@@ -3102,7 +3076,6 @@ class IntegratePatchExecutor:
         applied_artifacts = attempt.applied_artifacts
         extra_envs_applied = attempt.extra_envs_applied
         extra_server_args_applied = attempt.extra_server_args_applied
-        setup_result = attempt.setup_result
         stack_action = attempt.stack_action
         provision_result = attempt.provision_result
 
@@ -3160,11 +3133,8 @@ class IntegratePatchExecutor:
                 "enablement": True,
                 "runnable": False,
                 "correctness_verified": correctness_ok is True,
-                # The round ran and the boot still did not come up. When the
-                # specialist's own setup commands were dropped on the way in,
-                # that is the likeliest reason -- and the one the next round
-                # needs, since re-authoring the same proposal cannot help.
-                **setup_report_fields(f"enablement not runnable: {run_reason}", setup_result),
+                "reason": f"enablement not runnable: {run_reason}",
+                "setup_commands_applied": attempt.setup_commands_applied,
                 "bench_result": bench_result,
                 "workspace": str(output_root),
                 **bringup_evidence,
@@ -3234,11 +3204,11 @@ class IntegratePatchExecutor:
                 "advanced": True,
                 "runnable": False,
                 "correctness_verified": False,
-                **setup_report_fields(
+                "reason": (
                     f"enablement progressed: {run_reason}; boot advanced "
-                    f"to a new gap ({wall.name if wall is not None else 'no wall recorded'})",
-                    setup_result,
+                    f"to a new gap ({wall.name if wall is not None else 'no wall recorded'})"
                 ),
+                "setup_commands_applied": attempt.setup_commands_applied,
                 "after_signature": after_signature.to_dict() if after_signature is not None else {},
                 "enablement_launch_log": str(bench_result.get("error") or ""),
                 # The wall this round advanced to, for the next round's
@@ -3275,7 +3245,8 @@ class IntegratePatchExecutor:
             "runnable": True,
             "correctness_verified": correctness_ok is True,
             "provisional": provisional,
-            **setup_report_fields(reason, setup_result),
+            "reason": reason,
+            "setup_commands_applied": attempt.setup_commands_applied,
             "bench_result": bench_result,
             "workspace": str(output_root),
             **bringup_evidence,
@@ -3968,8 +3939,8 @@ class IntegratePatchExecutor:
             if framework_root is not None:
                 source_base_sha = _git_head_sha(framework_root)
                 upserted_patch, deleted_patch = _patch_touched_paths_split(framework_root, applied)
-                declared_ops = {r: "upsert" for r in upserted_patch}
-                declared_ops.update({r: "delete" for r in deleted_patch})
+                declared_ops = dict.fromkeys(upserted_patch, "upsert")
+                declared_ops.update(dict.fromkeys(deleted_patch, "delete"))
                 rel_paths = upserted_patch + deleted_patch
                 # An artifact installed into a sibling tree is not addressable by
                 # a rel path under this root, so it belongs to no snapshot here.

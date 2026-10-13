@@ -988,7 +988,14 @@ defaults to `trajectories × 26 s × 2 + 1800 s` (26 s per trajectory measured o
 below the stock 7800 s: about 9600 s for smoke and 33,700 s for `full`.
 
 AgentX profiling starts when AIPerf reports its measured phase.
-`AGENTX_PROFILE_WINDOW_S` controls the capture window and defaults to 20 seconds; phase waiting is bounded by the
+A capture the server bounds itself (SGLang `num_steps` in the `/start_profile` body, vLLM
+`--profiler-config.max_iterations` above 0) ends when every rank trace is complete, without a `/stop_profile`
+call; if the measured phase ends first, the capture is recorded as failed (`bounded_capture_incomplete`, or
+`trace_files_missing` when no fresh trace file exists). If neither happens within
+`AGENTX_TRACE_FIRST_FILE_TIMEOUT_S` (default 900 s) of `/start_profile`, the client posts `/stop_profile` once,
+waits for the flush within `AGENTX_TRACE_FLUSH_TIMEOUT_S`, and judges the capture by the traces alone; the decision
+records `stop_reason: safety_deadline` and whether the stop was accepted. `AGENTX_PROFILE_WINDOW_S` applies only to captures without
+such a bound: it sets the window before `/stop_profile` and defaults to 20 seconds. Phase waiting is bounded by the
 materialized benchmark timeout. Capture lifecycle status is
 written to a per-invocation `capture-status.json`; the adjacent
 `trace-manifest.json` records the selected primary and per-rank traces.

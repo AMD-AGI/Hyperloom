@@ -46,7 +46,7 @@ from ..actions.executors._kernel_agent_tool import (
 )
 from ..actions.executors.trace_analyze import trace_analyze_handler
 from ..actions.stop_attribution import stopped_by_the_run_class
-from . import apply_kernel_patch
+from . import apply_kernel_patch, forge_fusion, forge_gemm_tuning
 from .gemm_shape_coverage import canonical_dtype, traced_gemm_shapes
 from .lane_budget import (
     LANE_FUSION,
@@ -246,7 +246,6 @@ _DEFAULT_KERNEL_PHASE_BACKEND_ORDER = ("geak",)
 # for large models with many GEMM shapes. Independent of the session --max-hours
 # budget; override via HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC (or payload timeout_sec).
 _DEFAULT_GEMM_TUNING_TIMEOUT_SEC = 5 * 60 * 60
-_FORGE_FUSION_WRAPPER_TIMEOUT_GRACE_SEC = 30
 
 
 def _preapplied_snapshot_payload(payload: dict) -> dict:
@@ -866,11 +865,6 @@ def _forge_fusion_timeout_sec(payload: dict, *, lane_budget_sec: int = 0) -> int
     except (OverflowError, TypeError, ValueError):
         value = lane_budget_sec if lane_budget_sec > 0 else 7200
     return max(1, value)
-
-
-def _forge_fusion_wrapper_timeout_sec(timeout_sec: int) -> int:
-    """Give the wrapper time to reap its child tree and emit the timeout sentinel."""
-    return max(1, int(timeout_sec)) + _FORGE_FUSION_WRAPPER_TIMEOUT_GRACE_SEC
 
 
 def _positive_int(value: object) -> int:
@@ -1919,7 +1913,7 @@ def _normalize_tokens(value: Any) -> str:
         text = str(value).strip().strip("[](){}")
         if not text:
             return ""
-        items = [p for p in text.split(",")]
+        items = list(text.split(","))
     out: list[str] = []
     for it in items:
         s = str(it).strip().strip("'\"")
@@ -2696,7 +2690,7 @@ def _resolve_shape_capture_port(value: Any) -> int:
 def _is_tunableop_untuned_row(line: str) -> bool:
     """Recognize a native PyTorch TunableOp offline-input row."""
     stripped = line.strip()
-    if not stripped or stripped.startswith("#") or stripped.startswith("Validator"):
+    if not stripped or stripped.startswith(("#", "Validator")):
         return False
     fields = [field.strip() for field in stripped.split(",")]
     if len(fields) < 2 or "TunableOp" not in fields[0] or not fields[1]:
@@ -3002,7 +2996,32 @@ async def _capture_vllm_tunableop_shapes(
     }
 
 
-_FORGE_GEMM_TUNING_MODULE = "hyperloom.orchestrator.kernel.forge_gemm_tuning"
+async def _invoke_forge_gemm_tune(input_payload: dict[str, Any], timeout: int) -> dict[str, Any]:
+    """Run ``kernelforge gemm-tune`` for ``input_payload`` and return its result, or a failed result."""
+    try:
+        cmd = forge_gemm_tuning.build_command(input_payload)
+    except ValueError as exc:
+        return {
+            "status": "failed",
+            "micro_decision": "failed",
+            "error_class": exc.__class__.__name__,
+            "error": repr(exc),
+        }
+    aiter_root = _resolve_aiter_root_for_forge()
+    if aiter_root:
+        cmd = ["env", f"AITER_ROOT_DIR={aiter_root}", *cmd]
+    try:
+        rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout, label="forge_gemm_tuning")
+    except subprocess.TimeoutExpired as exc:
+        # Reaped by the process-group kill in _run_subprocess; shape a failed result.
+        cmd_repr = " ".join(str(c) for c in (getattr(exc, "cmd", None) or cmd))
+        return {
+            "status": "failed",
+            "error_class": "subprocess_timeout",
+            "error": f"TimeoutExpired after {timeout}s: {cmd_repr[:1500]}",
+        }
+    result = _parse_forge_gemm_sentinel(stdout)
+    return result if result is not None else _shape_tool_result(rc, stdout, stderr)
 
 
 async def _run_forge_gemm_tuning(
@@ -3348,32 +3367,7 @@ async def _run_forge_gemm_tuning(
         # Exhaustive search when budget allows (>= 24h) and mp >= 4.
         "thorough": bool(session_max_min >= 1440 and mp >= 4),
     }
-    input_json = workspace / "forge_gemm_tuning_input.json"
-    input_json.write_text(json.dumps(input_payload, indent=2, sort_keys=True), encoding="utf-8")
-    cmd = [
-        sys.executable,
-        "-m",
-        _FORGE_GEMM_TUNING_MODULE,
-        "--input-json",
-        str(input_json),
-    ]
-    aiter_root = _resolve_aiter_root_for_forge()
-    if aiter_root:
-        cmd = ["env", f"AITER_ROOT_DIR={aiter_root}", *cmd]
-
-    try:
-        rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout)
-        result = _parse_forge_gemm_sentinel(stdout)
-        if result is None:
-            result = _shape_tool_result(rc, stdout, stderr)
-    except subprocess.TimeoutExpired as exc:
-        # Reaped by the process-group kill in _run_subprocess; shape a failed result.
-        cmd_repr = " ".join(str(c) for c in (getattr(exc, "cmd", None) or cmd))
-        result = {
-            "status": "failed",
-            "error_class": "subprocess_timeout",
-            "error": f"TimeoutExpired after {timeout}s: {cmd_repr[:1500]}",
-        }
+    result = await _invoke_forge_gemm_tune(input_payload, timeout)
 
     result.setdefault("backend", "forge")
     # Tag the tuning engine so the breakdown attributes this run to forge.
@@ -3761,9 +3755,6 @@ async def run_gemm_tuning_handler(
 
 
 # forge-fusion (autonomous kernel fusion)
-_FORGE_FUSION_RESULT_RE = re.compile(r"FORGE_FUSION_RESULT_BEGIN\s*\n(.*?)\nFORGE_FUSION_RESULT_END", re.DOTALL)
-
-
 def _forge_fusion_available() -> bool:
     """Check that KernelForge's fusion pipeline is importable.
 
@@ -3776,17 +3767,6 @@ def _forge_fusion_available() -> bool:
         return importlib.util.find_spec("kernelforge.fusion") is not None
     except (ModuleNotFoundError, ValueError):
         return False
-
-
-def _parse_forge_fusion_sentinel(stdout: str) -> dict[str, Any] | None:
-    """Parse the FORGE_FUSION_RESULT_BEGIN/END sentinel block from stdout."""
-    m = _FORGE_FUSION_RESULT_RE.search(stdout)
-    if not m:
-        return None
-    try:
-        return json.loads(m.group(1))
-    except (json.JSONDecodeError, ValueError):
-        return None
 
 
 def _resolve_fusion_decode_trace(state) -> str:
@@ -3931,15 +3911,12 @@ def _resolve_forge_fusion_sandbox_mode(
     )
 
 
-_FORGE_FUSION_MODULE = "hyperloom.orchestrator.kernel.forge_fusion"
-
-
 async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResult:
     """Autonomous kernel fusion via the forge-fusion CLI.
 
-    Builds an input-json with one provider-compatible agent backend, model, and
-    validated sandbox policy, shells out to the ``forge_fusion`` wrapper module, and
-    parses the result sentinel. A KEPT fusion carries a source patch + env flags
+    Resolves one provider-compatible agent backend, model, and validated sandbox
+    policy, then runs forge-fuse through :func:`forge_fusion.run_forge_fusion`,
+    which returns the fusion contract result. A KEPT fusion carries a source patch + env flags
     and ``requires_e2e_validation`` so the integrate gate confirms the
     end-to-end gain. Reuses the PRELUDE decode trace (no re-profiling).
     """
@@ -4069,39 +4046,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
         "verbose": bool(payload.get("verbose", False)),
         **_fusion_session_serve_args(state, payload, framework=framework, model_path=model_path),
     }
-    input_json = workspace / "forge_fusion_input.json"
-    input_json.write_text(json.dumps(input_payload, indent=2, sort_keys=True), encoding="utf-8")
-
-    cmd = [sys.executable, "-m", _FORGE_FUSION_MODULE, "--input-json", str(input_json)]
-
-    wrapper_timeout = _forge_fusion_wrapper_timeout_sec(timeout)
-    try:
-        rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=wrapper_timeout)
-        result = _parse_forge_fusion_sentinel(stdout)
-        if result is None:
-            result = _shape_tool_result(rc, stdout, stderr)
-    except subprocess.TimeoutExpired as exc:
-        from .forge_fusion import salvage_forge_fusion_from_workspace
-
-        cmd_repr = " ".join(str(c) for c in (getattr(exc, "cmd", None) or cmd))
-        timeout_error = f"TimeoutExpired after {wrapper_timeout}s: {cmd_repr[:1500]}"
-        salvaged = salvage_forge_fusion_from_workspace(str(workspace))
-        if salvaged:
-            result = {
-                **salvaged,
-                "error_class": "subprocess_timeout",
-                "error": timeout_error,
-            }
-        else:
-            result = {
-                "status": "failed",
-                "backend": "forge",
-                "engine": "forge_fusion",
-                "error_class": "subprocess_timeout",
-                "error": timeout_error,
-                "decision": "REVERT",
-                "kept": False,
-            }
+    result = await forge_fusion.run_forge_fusion(input_payload)
 
     result.setdefault("backend", "forge")
     result.setdefault("engine", "forge_fusion")

@@ -241,7 +241,7 @@ class TestMigrationCannotStopTheRun:
         kb.migrate_legacy_partition_once()
 
         workspace = tmp_path / "workspace"
-        assert not [p for p in workspace.glob("*.migrating*")]
+        assert not list(workspace.glob("*.migrating*"))
         kb_root = kb.mutable_kb_root()
         assert not kb_root.is_dir() or not any(kb_root.iterdir())
 

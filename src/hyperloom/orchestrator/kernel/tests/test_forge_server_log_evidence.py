@@ -227,9 +227,9 @@ class TestTheWrapperForwardsTheNewInputs:
             "precision": "bf16",
             "output_dir": "/o",
         }
-        assert flag not in mod._build_cmd(base)
+        assert flag not in mod.build_command(base)
 
-        cmd = mod._build_cmd({**base, key: "/tmp/x.json"})
+        cmd = mod.build_command({**base, key: "/tmp/x.json"})
         assert cmd[cmd.index(flag) + 1] == "/tmp/x.json"
 
 

@@ -2,11 +2,10 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for the forge_gemm_tuning kernel-agent wrapper."""
+"""Unit tests for the forge gemm-tune command builder."""
 
 from __future__ import annotations
 
-import json
 
 from hyperloom.orchestrator.kernel import forge_gemm_tuning
 from hyperloom.orchestrator.kernel import request_handlers as krh
@@ -43,7 +42,7 @@ def _payload() -> dict:
 
 
 def test_build_cmd_maps_all_options():
-    cmd = forge_gemm_tuning._build_cmd(_payload())
+    cmd = forge_gemm_tuning.build_command(_payload())
 
     assert cmd[:5] == [forge_gemm_tuning.sys.executable, "-m", "kernelforge.cli", "gemm-tune", "run"]
     assert cmd[cmd.index("--model-path") + 1] == "/models/qwen"
@@ -67,7 +66,7 @@ def test_build_cmd_maps_all_options():
 def test_preflight_and_inner_cli_use_the_same_interpreter():
     """The readiness probe must describe the command the wrapper will run."""
     probe = krh._forge_gemm_tune_probe_cmd()
-    inner = forge_gemm_tuning._build_cmd(_payload())
+    inner = forge_gemm_tuning.build_command(_payload())
 
     assert probe[:4] == inner[:4]
     assert probe[0] == forge_gemm_tuning.sys.executable
@@ -75,7 +74,7 @@ def test_preflight_and_inner_cli_use_the_same_interpreter():
 
 def test_build_cmd_forwards_the_moe_untuned_csv():
     """The runtime-derived MoE key reaches forge only through this option."""
-    cmd = forge_gemm_tuning._build_cmd(_payload())
+    cmd = forge_gemm_tuning.build_command(_payload())
 
     assert cmd[cmd.index("--moe-untuned-csv") + 1] == "/tmp/untuned_fmoe_from_runtime.csv"
 
@@ -85,12 +84,12 @@ def test_build_cmd_omits_the_moe_untuned_csv_when_absent():
     payload = _payload()
     payload.pop("moe_untuned_csv")
 
-    assert "--moe-untuned-csv" not in forge_gemm_tuning._build_cmd(payload)
+    assert "--moe-untuned-csv" not in forge_gemm_tuning.build_command(payload)
 
 
 def test_build_cmd_asserts_every_option_it_can_emit():
     """Meta-guard: an option added to _build_cmd must be asserted in this file."""
-    emitted = {tok for tok in forge_gemm_tuning._build_cmd(_payload()) if tok.startswith("--")}
+    emitted = {tok for tok in forge_gemm_tuning.build_command(_payload()) if tok.startswith("--")}
     declared = {
         "--model-path",
         "--framework",
@@ -137,7 +136,7 @@ def test_build_cmd_forwards_provenance_but_no_knowledge_base_options(monkeypatch
     monkeypatch.setenv("FORGE_GEMM_TUNE_KB_ACCEPT_CANDIDATE", "1")
     monkeypatch.setenv("FORGE_GEMM_TUNE_KB_STRICT_LIB", "1")
 
-    cmd = forge_gemm_tuning._build_cmd(payload)
+    cmd = forge_gemm_tuning.build_command(payload)
 
     for retired in ("--kb-read", "--kb-accept-candidate", "--kb-strict-lib"):
         assert retired not in cmd
@@ -150,59 +149,8 @@ def test_build_cmd_requires_mandatory_fields():
     payload.pop("model_path")
 
     try:
-        forge_gemm_tuning._build_cmd(payload)
+        forge_gemm_tuning.build_command(payload)
     except ValueError as exc:
         assert "model_path is required" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected ValueError")
-
-
-def test_load_input_json_rejects_non_object(tmp_path):
-    p = tmp_path / "bad.json"
-    p.write_text("[]", encoding="utf-8")
-
-    try:
-        forge_gemm_tuning._load_input_json(str(p))
-    except ValueError as exc:
-        assert "must contain a JSON object" in str(exc)
-    else:  # pragma: no cover
-        raise AssertionError("expected ValueError")
-
-
-def test_main_runs_subprocess_and_relays_output(tmp_path, monkeypatch, capsys):
-    p = tmp_path / "input.json"
-    p.write_text(json.dumps(_payload()), encoding="utf-8")
-    captured: dict[str, object] = {}
-
-    class Proc:
-        returncode = 0
-        stdout = "OUT\n"
-        stderr = "ERR\n"
-
-    def fake_run(cmd, capture_output, text):
-        captured["cmd"] = cmd
-        captured["capture_output"] = capture_output
-        captured["text"] = text
-        return Proc()
-
-    monkeypatch.setattr(forge_gemm_tuning.subprocess, "run", fake_run)
-
-    rc = forge_gemm_tuning.main(["--input-json", str(p)])
-
-    out = capsys.readouterr()
-    assert rc == 0
-    assert out.out == "OUT\n"
-    assert out.err == "ERR\n"
-    assert captured["capture_output"] is True
-    assert captured["text"] is True
-    assert "--model-path" in captured["cmd"]
-
-
-def test_main_reports_structured_input_error(capsys):
-    rc = forge_gemm_tuning.main(["--input-json", "/does/not/exist.json"])
-
-    out = capsys.readouterr()
-    assert rc == 2
-    payload = json.loads(out.out)
-    assert payload["status"] == "failed"
-    assert payload["micro_decision"] == "failed"

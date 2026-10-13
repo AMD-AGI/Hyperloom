@@ -52,6 +52,7 @@ from .time_budget import (
     TIME_BUDGET_EXEMPT_ACTIONS,
     action_fits_time_budget,
     expected_action_cost_minutes,
+    lease_ttl_sec,
     measured_baseline_runtime_sec,
 )
 
@@ -146,6 +147,11 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         # Entries remove themselves in :meth:`run_task_registered`.
         self._inflight_actions: dict[str, _InflightAction] = {}
         self._executions: set[asyncio.Task[Any]] = set()
+        # The shielded execution behind each dispatched task, ``task_id -> execution``.
+        # The registered handle can finish early (a cancelled caller stops waiting)
+        # while the execution still writes the terminal row and queues the result;
+        # :meth:`owes_result` asks this one. Entries remove themselves when done.
+        self._execution_of: dict[str, asyncio.Task[Any]] = {}
         # Poll cadence of the waits on running dispatched work (closing grace, close steps).
         self.poll_sec = 10.0
         # Finished executions awaiting bookkeeping; drained only by the pump so
@@ -190,6 +196,41 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         """Whether a finished execution still awaits its bookkeeping."""
         return bool(self._completion_queue)
 
+    def _forget_execution(self, task_id: str) -> Callable[[asyncio.Task[Any]], None]:
+        """Done callback dropping ``task_id``'s execution, unless a newer one replaced it."""
+
+        def _forget(execution: asyncio.Task[Any]) -> None:
+            if self._execution_of.get(task_id) is execution:
+                del self._execution_of[task_id]
+
+        return _forget
+
+    def owes_result(self, task_id: str) -> bool:
+        """Whether ``task_id``'s result has yet to be booked by the pump.
+
+        A dispatched task's row goes terminal inside its execution, but its
+        result is only routed -- ``delegated_result``, promotion, the
+        enablement revalidation verdict -- when a later pump drains the
+        completion. Between the two, the row reads as finished while nothing
+        has acted on what it returned.
+
+        Args:
+            task_id: The task to ask about.
+
+        Returns:
+            bool: True while the execution is still running -- however early
+            its caller stopped waiting -- or its completion waits in the
+            queue. An execution that ended by raising queues nothing, so it
+            owes nothing.
+        """
+        tid = str(task_id or "")
+        if not tid:
+            return False
+        execution = self._execution_of.get(tid)
+        if execution is not None and not execution.done():
+            return True
+        return any(str(getattr(task, "task_id", "") or "") == tid for task, _result in self._completion_queue)
+
     async def _drain_completions(self) -> int:
         """Book every queued completion in order; returns how many were booked."""
         count = 0
@@ -200,7 +241,10 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         return count
 
     def registry_lanes_ttl(self, kind: str) -> tuple[list[str], int]:
-        """Resolve ``(requires_lanes, lease_ttl_sec)`` from the action catalogue; lanes filtered to KNOWN_LANES.
+        """Resolve an action's lanes, filtered to KNOWN_LANES, and the lease it is granted.
+
+        The lease is the catalogue ``lease_ttl_sec`` floored by the cost this session admits the action at
+        (``time_budget.lease_ttl_sec``), so it can exceed the catalogue value once a baseline round is measured.
 
         Args:
             kind: The action name to resolve.
@@ -213,7 +257,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         if meta is None:
             return [], 0
         lanes = [lane for lane in meta.requires_lanes if lane in KNOWN_LANES]
-        return lanes, meta.lease_ttl_sec
+        return lanes, lease_ttl_sec(meta, measured_baseline_sec=measured_baseline_runtime_sec(self.shared_state))
 
     def cycle_idem_suffix(self) -> str:
         """Idempotency-key suffix scoping a per-cycle internal singleton to the
@@ -882,7 +926,9 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         ):
             execution = asyncio.create_task(execute_and_complete())
         self._executions.add(execution)
+        self._execution_of[task.task_id] = execution
         execution.add_done_callback(self._report_spawned_failure(task))
+        execution.add_done_callback(self._forget_execution(task.task_id))
         try:
             return await asyncio.shield(execution)
         except asyncio.CancelledError:

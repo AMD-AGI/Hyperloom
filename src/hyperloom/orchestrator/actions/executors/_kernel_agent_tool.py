@@ -14,7 +14,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from hyperloom.common.git_safety import safe_directory_args
 from hyperloom.inference_optimizer.trace.task_progress import heartbeat_while_output_flows
@@ -327,12 +327,16 @@ async def _run_subprocess(
     cmd: list[str],
     *,
     timeout_sec: int,
+    env: Mapping[str, str] | None = None,
+    label: str = "",
 ) -> tuple[int, str, str]:
     """Run a bounded subprocess without blocking the reactor.
 
     Args:
         cmd: The command and arguments to run.
         timeout_sec: Per-run timeout in seconds.
+        env: Base environment for the child; this process's environment when omitted.
+        label: Name the liveness heartbeat reports; derived from ``cmd`` when empty.
 
     Returns:
         A tuple of ``(returncode, stdout, stderr)``.
@@ -344,6 +348,8 @@ async def _run_subprocess(
         or timeout_sec <= 0
     ):
         raise ValueError("timeout_sec must be finite and positive")
+
+    base_env = dict(env) if env is not None else None
 
     def _run(on_output: Callable[[], None]) -> tuple[int, str, str]:
         """Run the command synchronously in a worker thread.
@@ -363,7 +369,7 @@ async def _run_subprocess(
         Raises:
             subprocess.TimeoutExpired: When the command exceeds ``timeout_sec``.
         """
-        env = os.environ.copy()
+        child_env = dict(base_env) if base_env is not None else os.environ.copy()
         from ._multi_node_env import (
             is_multi_node,
             ray_gcs_address_from_state,
@@ -377,26 +383,26 @@ async def _run_subprocess(
             # the RAY_ADDRESS path below is unchanged for those.
             ssh_env = infera_ssh_env_from_state()
             if ssh_env:
-                env.update(ssh_env)
+                child_env.update(ssh_env)
             addr = "" if ssh_env else ray_gcs_address_from_state()
             if addr:
-                env.setdefault("RAY_ADDRESS", addr)
-        env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
+                child_env.setdefault("RAY_ADDRESS", addr)
+        child_env["PATH"] = f"/opt/venv/bin:{child_env.get('PATH', '')}"
         # The heartbeat around this call is only as honest as the child's
         # flushing: block-buffered on a pipe, it looks dead between flushes.
         # ``setdefault`` so an operator who set this deliberately still wins.
-        env.setdefault("PYTHONUNBUFFERED", "1")
+        child_env.setdefault("PYTHONUNBUFFERED", "1")
         # ``run_with_session_kill`` reaps the whole descendant tree on every exit path.
         cp = run_with_session_kill(
             cmd,
-            env=env,
+            env=child_env,
             timeout=timeout_sec,
             text=True,
             on_output=on_output,
         )
         return cp.returncode, cp.stdout or "", cp.stderr or ""
 
-    async with heartbeat_while_output_flows(unit="kernel_tool", label=_tool_label(cmd)) as activity:
+    async with heartbeat_while_output_flows(unit="kernel_tool", label=label or _tool_label(cmd)) as activity:
         return await asyncio.to_thread(_run, activity.note)
 
 

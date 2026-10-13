@@ -30,7 +30,7 @@ from .steps import command_digest
 #: packages cannot crowd out its neighbours.
 CMD_SANITIZED_CHARS = 160
 
-OUTCOMES: tuple[str, ...] = ("applied", "failed", "skipped")
+OUTCOMES: tuple[str, ...] = ("applied", "failed")
 
 
 def build_execution_row(

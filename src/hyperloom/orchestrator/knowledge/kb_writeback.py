@@ -143,8 +143,7 @@ async def write_framework_record(
         source_framework=source_framework,
         target_framework=target_framework,
     )
-    path = await asyncio.to_thread(_append_record_sync, record)
-    return path
+    return await asyncio.to_thread(_append_record_sync, record)
 
 
 __all__ = [

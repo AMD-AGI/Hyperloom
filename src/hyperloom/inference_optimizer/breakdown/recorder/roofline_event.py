@@ -84,15 +84,9 @@ _MAX_ROOFLINE_KERNELS = 512
 # individual times round to nothing.
 _MAX_PERFMODEL_OPS = 64
 
-# Every profile run row names why it ran, so a multi-attempt roofline can be read
-# without re-deriving the retry reason from log text.
+# Every profile run row names why it ran, so the initial profile and a compute-bound
+# re-profile can be told apart without log text.
 PROFILE_ATTEMPT_INITIAL = "initial"
-PROFILE_ATTEMPT_AFTER_EXCEPTION = "retry_after_exception"
-PROFILE_ATTEMPT_AFTER_BAD_RETURN = "retry_after_bad_return"
-PROFILE_ATTEMPT_AFTER_FAILURE = "retry_after_failure"
-PROFILE_ATTEMPT_AFTER_NO_TRACE = "retry_after_no_trace"
-PROFILE_ATTEMPT_AFTER_CAPTURE_ONLY = "retry_after_capture_only"
-PROFILE_ATTEMPT_AFTER_ZERO_OPS = "retry_after_zero_ops"
 PROFILE_ATTEMPT_COMPUTE_BOUND = "compute_bound_reprofile"
 
 ANALYSIS_ATTEMPT_INITIAL = "initial"
@@ -115,12 +109,6 @@ __all__ = [
     "EVENT_KIND",
     "EVENT_TYPE",
     "PRODUCER",
-    "PROFILE_ATTEMPT_AFTER_BAD_RETURN",
-    "PROFILE_ATTEMPT_AFTER_CAPTURE_ONLY",
-    "PROFILE_ATTEMPT_AFTER_EXCEPTION",
-    "PROFILE_ATTEMPT_AFTER_FAILURE",
-    "PROFILE_ATTEMPT_AFTER_NO_TRACE",
-    "PROFILE_ATTEMPT_AFTER_ZERO_OPS",
     "PROFILE_ATTEMPT_COMPUTE_BOUND",
     "PROFILE_ATTEMPT_INITIAL",
     "SECTION_ACTION",
@@ -524,7 +512,7 @@ class RooflineEventRecorder:
     # ---- lifecycle -------------------------------------------------------
 
     def begin(self, *, max_profile_attempts: int) -> None:
-        """Record the retry budget and, when this action owns the event, open it."""
+        """Record the profile budget and, when this action owns the event, open it."""
         self._record_action({"max_profile_attempts": int(max_profile_attempts)})
         if not self._owns_event:
             return

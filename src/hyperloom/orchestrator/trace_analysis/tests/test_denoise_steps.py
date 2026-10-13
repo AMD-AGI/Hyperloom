@@ -79,8 +79,6 @@ class TestCallSiteBinding:
                 "MI300X",
                 "--model-name",
                 "m",
-                "--top-k",
-                "4",
                 "--num-denoise-steps",
                 "9",
             ]
@@ -116,7 +114,6 @@ class TestCallSiteBinding:
             framework="xdit",
             target_platform="MI300X",
             analysis_mode="inference",
-            runtime_env="local",
             dry_run=False,
             num_denoise_steps=9,
         )
