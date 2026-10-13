@@ -114,7 +114,7 @@ value.
      subdirectory under it.
    - If an existing `USER_DATA_PATH` is visible in the current shell or terminal context, offer that exact value as one option.
      Say that another workspace using the same value shares its Experience KB data home, which only one workspace's
-     service can serve.
+     service can serve, unless `HYPERLOOM_KB_HOME` gives each workspace its own.
    - Always offer a custom path option.
    - Do not auto-select; write `USER_DATA_PATH` only after the user explicitly chooses (they may accept the default).
 
@@ -436,7 +436,8 @@ the demo skill runs setup inside the container. Read
 ## Experience KB service
 
 The workspace's Experience KB service runs wherever the optimizer runs. Its
-data and `service.log` live under `$USER_DATA_PATH/experience-kb`, and every
+data and `service.log` live under `$HYPERLOOM_KB_HOME` when set, otherwise
+`$USER_DATA_PATH/experience-kb`, and every
 optimize launch starts it again when nothing serves `HYPERLOOM_KB_URL`.
 
 In `docker` mode, skip this step: the service starts inside the container at
