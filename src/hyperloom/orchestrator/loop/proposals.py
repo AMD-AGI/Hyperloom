@@ -40,6 +40,15 @@ class PendingProposal:
     task_id: str | None = None
 
 
+def integrate_review_in_flight(pending_proposals: Mapping[str, PendingProposal], specialist_task_id: str) -> bool:
+    """Whether a synthetic integrate_patch review for this specialist task awaits a ruling."""
+    return any(
+        proposal.action_name == "integrate_patch"
+        and (proposal.payload.get("params") or {}).get("specialist_task_id") == specialist_task_id
+        for proposal in pending_proposals.values()
+    )
+
+
 async def record_proposal(
     coord: "Coordinator",
     *,
