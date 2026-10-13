@@ -687,7 +687,7 @@ function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._switch_off_parity 132
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::restore_pending_integrate 110
 function-lines src/hyperloom/orchestrator/actions/executors/profile.py::ProfileExecutor.__call__ 493
-function-lines src/hyperloom/orchestrator/actions/executors/profile.py::ProfileExecutor._after_materialize_config 93
+function-lines src/hyperloom/orchestrator/actions/executors/profile.py::ProfileExecutor._after_materialize_config 88
 function-lines src/hyperloom/orchestrator/actions/executors/profile.py::_validate_trace_structure 337
 function-lines src/hyperloom/orchestrator/actions/executors/report.py::ReportExecutor.__call__ 97
 function-lines src/hyperloom/orchestrator/actions/executors/report.py::_build_summary_dict 86
@@ -1051,7 +1051,7 @@ module-lines src/hyperloom/orchestrator/actions/executors/_workload_envs.py 2261
 module-lines src/hyperloom/orchestrator/actions/executors/baseline.py 4253
 module-lines src/hyperloom/orchestrator/actions/executors/explore.py 1905
 module-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py 4804
-module-lines src/hyperloom/orchestrator/actions/executors/profile.py 1590
+module-lines src/hyperloom/orchestrator/actions/executors/profile.py 1584
 module-lines src/hyperloom/orchestrator/actions/executors/report.py 1399
 module-lines src/hyperloom/orchestrator/actions/executors/roofline.py 1303
 module-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py 2659
