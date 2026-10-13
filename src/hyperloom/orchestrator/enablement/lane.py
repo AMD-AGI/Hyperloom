@@ -63,9 +63,7 @@ class EnablementLane(CoordinatorCollaborator):
         state = self.shared_state
         if not self.enablement_admitted():
             return ""
-        if state.enablement.succeeded:
-            return ""
-        if state.enablement.validation_pending:
+        if not state.enablement.accepts_rounds:
             return ""
         round_row = await self.rounds.held()
         if round_row is not None:

@@ -102,6 +102,7 @@ from ._nogit_patch import (
     _is_git_tree,
     _is_within,
 )
+from ...enablement.params import bind_integrate_to_lane
 from ...enablement.recipe.credentials import detect_credential_channels
 from ...enablement.recipe.projections import project_launch_evidence
 from ._patch_snapshot import _git_commit_kept, _patch_touched_paths
@@ -2011,6 +2012,8 @@ class IntegratePatchExecutor:
                 "error_class": "integrate_restore_incomplete",
                 "error": "previous integration still requires recovery",
             }
+        if shared_state is not None:
+            bind_integrate_to_lane(params, shared_state, session_dir=Path(self.session_dir))
         if shared_state is not None and not params.get("accuracy_baseline"):
             _base_acc = getattr(shared_state, "baseline_accuracy", 0.0)
             if isinstance(_base_acc, (int, float)) and _base_acc > 0:

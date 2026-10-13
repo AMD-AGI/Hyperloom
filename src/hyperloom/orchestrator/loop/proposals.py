@@ -443,7 +443,6 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         # ``source_phase`` is stamped where the specialist is created and carried from there; a
         # second derivation here would be a second decision, and could write an empty owner.
         params.setdefault("keep_threshold_pct", _phase_state.resolve_keep_threshold(self.shared_state))
-        self._coord.enablement_params.stamp_phase_integrate(params)
         # Seed the patched-eval server with the same base args/config every other eval server uses, else it
         # launches on bare framework defaults and crashes at startup regardless of the patch.
         inject_stack_base_params(params, self.shared_state, anchor=True)

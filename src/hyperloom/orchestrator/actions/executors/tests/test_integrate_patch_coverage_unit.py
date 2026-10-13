@@ -32,6 +32,7 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
     FrameworkScriptMismatchError,
 )
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
+from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 from hyperloom.orchestrator.state.task_registry import Task
 
 
@@ -130,6 +131,9 @@ async def test_rejected_by_critic(tmp_path):
     _write_workspace(session, "spec")
 
     class _SS:
+        phase = "FRAMEWORK_AGENT"
+        enablement = EnablementRound()
+
         def get_specialist_patch_verdict(self, tid):
             return "reject"
 
@@ -157,6 +161,9 @@ async def test_forged_task_without_critic_verdict_is_rejected(tmp_path):
     _write_workspace(session, "spec")
 
     class _SS:
+        phase = "FRAMEWORK_AGENT"
+        enablement = EnablementRound()
+
         def get_specialist_patch_verdict(self, tid):
             return ""  # no verdict on record
 
@@ -193,6 +200,9 @@ async def test_forged_task_rejected_before_any_side_effect(tmp_path, monkeypatch
     monkeypatch.setattr(_setup_replay, "run_setup_commands", _spy_setup)
 
     class _SS:
+        phase = "FRAMEWORK_AGENT"
+        enablement = EnablementRound()
+
         def get_specialist_patch_verdict(self, tid):
             return ""  # no verdict -> must reject before setup
 
@@ -239,6 +249,9 @@ async def test_bench_is_bounded_by_the_session_budget(tmp_path, monkeypatch):
     _write_workspace(session, "spec")
 
     class _SS:
+        phase = "FRAMEWORK_AGENT"
+        enablement = EnablementRound()
+
         baseline_runtime_sec = 600.0
 
         def get_specialist_patch_verdict(self, tid):
@@ -1243,7 +1256,11 @@ async def test_cancel_preserves_cancellation_when_recovery_save_fails(tmp_path, 
     _init_git_repo(repo)
     _write_workspace(session, "spec")
     state = SimpleNamespace(
-        current_best={}, get_specialist_patch_verdict=lambda _sid: "approve", save=lambda _path: None
+        phase="FRAMEWORK_AGENT",
+        enablement=EnablementRound(),
+        current_best={},
+        get_specialist_patch_verdict=lambda _sid: "approve",
+        save=lambda _path: None,
     )
 
     def fail_save(_path):
@@ -1276,7 +1293,11 @@ async def test_apply_only_restores_user_stash_but_resume_refuses_unproven_user_m
     user = repo / "user.txt"
     user.write_text("USER")
     state = SimpleNamespace(
-        current_best={}, get_specialist_patch_verdict=lambda _sid: "approve", save=lambda _path: None
+        phase="FRAMEWORK_AGENT",
+        enablement=EnablementRound(),
+        current_best={},
+        get_specialist_patch_verdict=lambda _sid: "approve",
+        save=lambda _path: None,
     )
     result = await IntegratePatchExecutor(session_dir=session)(
         _make_ctx(

@@ -224,6 +224,11 @@ class EnablementRound:
         self.launch_observation_path = observation_path
 
     @property
+    def accepts_rounds(self) -> bool:
+        """Whether a result can still advance the lane: it has neither succeeded nor opened its revalidation."""
+        return not self.succeeded and not self.validation_pending
+
+    @property
     def accepted_extra_envs(self) -> dict[str, str]:
         """The env overrides every launch re-applies on top of the base config."""
         return dict((self.accepted_config or {}).get("extra_envs") or {})

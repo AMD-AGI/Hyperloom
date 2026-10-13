@@ -151,7 +151,7 @@ def _round_carriers(state: Any, signature: Any) -> dict[str, Any]:
     """What an integrate_patch needs to be graded as this enablement round.
 
     Shared by the lane's own specialist dispatch, whose integrate inherits it,
-    and by an integrate the round did not dispatch but that lands in its phase.
+    and by an integrate the round did not dispatch but that executes in its phase.
     """
     return {
         "enablement": True,
@@ -170,6 +170,34 @@ def _round_carriers(state: Any, signature: Any) -> dict[str, Any]:
         # eval-origin trigger context (empty for boot-origin enablement).
         **_enablement_carrier_params(state),
     }
+
+
+def bind_integrate_to_lane(params: dict[str, Any], state: Any, *, session_dir: Path | None) -> None:
+    """Make an integrate_patch an enablement round exactly when the lane can take one as it starts to run.
+
+    Admission happens long before execution, so the lane may have moved on. A
+    closed lane (succeeded, or revalidating) strips the enablement context, and
+    the integrate is graded as any other. An untagged one executing in ENABLEMENT
+    gets the round's context; a tagged one already carries it.
+
+    Args:
+        params: The integrate_patch params; updated in place.
+        state: The shared state, which owns the lane and the phase.
+        session_dir: The session root, for the recorded boot verdict.
+    """
+    if not state.enablement.accepts_rounds:
+        for key in [k for k in params if k == "enablement" or k.startswith("enablement_")]:
+            del params[key]
+        return
+    if (state.phase or "").strip().upper() != PHASE_ENABLEMENT or params.get("enablement"):
+        return
+    verdict, _ = recorded_verdict(
+        state.enablement.launch_observation_path,
+        wrapper_text=state.enablement.launch_log or "",
+        session_dir=session_dir,
+    )
+    for key, value in _round_carriers(state, verdict.signature).items():
+        params.setdefault(key, value)
 
 
 class EnablementParams(CoordinatorCollaborator):
@@ -289,29 +317,6 @@ class EnablementParams(CoordinatorCollaborator):
         if last_build_failure:
             params_out["enablement_last_build_failure"] = dict(last_build_failure)
         return params_out
-
-    def stamp_phase_integrate(self, params: dict[str, Any]) -> None:
-        """Make an integrate_patch approved during ENABLEMENT an enablement round.
-
-        The lane's own integrate inherits the round context from its specialist;
-        one the orchestration LLM proposed for a specialist of its own carries
-        none, and would be graded on a throughput this phase has not measured.
-
-        Args:
-            params: The integrate_patch params about to be materialised; updated
-                in place and left alone outside ENABLEMENT or when already
-                tagged.
-        """
-        state = self.shared_state
-        if (state.phase or "").strip().upper() != PHASE_ENABLEMENT or params.get("enablement"):
-            return
-        verdict, _ = recorded_verdict(
-            state.enablement.launch_observation_path,
-            wrapper_text=state.enablement.launch_log or "",
-            session_dir=session_root(self),
-        )
-        for key, value in _round_carriers(state, verdict.signature).items():
-            params.setdefault(key, value)
 
     def _read_enablement_source_context(self, signature: Any, *, window: int = 12) -> str:
         """Best-effort read a small source window near the offending site.
