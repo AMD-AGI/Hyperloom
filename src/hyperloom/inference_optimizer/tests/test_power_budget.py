@@ -12,6 +12,7 @@ import pytest
 from hyperloom.common.perf_metric import (
     VERDICT_KEEP,
     VERDICT_REVERT,
+    GradedComparison,
     constraint_veto_reason,
     power_veto_reason,
 )
@@ -89,6 +90,23 @@ class TestPredicate:
 class TestVerdict:
     def _state(self) -> SharedState:
         return SharedState(baseline_tput=1000.0, power_budget_w=1400.0)
+
+    @pytest.mark.parametrize(
+        ("veto_reason", "constraint"),
+        [
+            ("power_budget_exceeded", "power_budget"),
+            ("gpu_power_budget_exceeded", "power_budget"),
+            ("power_unmeasured", "power_budget"),
+            ("latency_budget_exceeded", "latency_budget"),
+            ("latency_unmeasured", "latency_budget"),
+            ("", ""),
+        ],
+    )
+    def test_a_veto_names_the_constraint_that_fired(self, veto_reason, constraint):
+        graded = GradedComparison(
+            objective="output", candidate=2.0, reference=1.0, verdict=VERDICT_REVERT, veto_reason=veto_reason
+        )
+        assert graded.vetoed_by == constraint
 
     def test_a_throughput_win_over_the_power_budget_reverts(self):
         graded = resolve_graded_comparison(

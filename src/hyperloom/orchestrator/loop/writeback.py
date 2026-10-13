@@ -1449,7 +1449,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 return False
             if graded.veto_reason:
                 log.warning(
-                    "current_best held: %s winner refused by the latency budget (%s)", task_kind, graded.veto_reason
+                    "current_best held: %s winner refused by %s (%s)", task_kind, graded.vetoed_by, graded.veto_reason
                 )
                 return False
             # A verified correctness fix was already bounded by the integrate gate.

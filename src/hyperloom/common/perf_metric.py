@@ -351,6 +351,12 @@ def latency_veto_reason(observed_ms: Any, budget_ms: float) -> str:
     return _ceiling_veto(observed_ms, budget_ms, exceeded="latency_budget_exceeded", unmeasured="latency_unmeasured")
 
 
+_POWER_UNMEASURED = "power_unmeasured"
+_POWER_BUDGET_EXCEEDED = "power_budget_exceeded"
+_GPU_POWER_BUDGET_EXCEEDED = "gpu_power_budget_exceeded"
+_POWER_VETO_REASONS = frozenset({_POWER_UNMEASURED, _POWER_BUDGET_EXCEEDED, _GPU_POWER_BUDGET_EXCEEDED})
+
+
 def power_veto_reason(
     by_gpu_w: Any,
     *,
@@ -370,16 +376,16 @@ def power_veto_reason(
     if total <= 0 and not limits:
         return ""
     if not isinstance(by_gpu_w, Mapping) or not by_gpu_w:
-        return "power_unmeasured"
+        return _POWER_UNMEASURED
     readings: dict[str, float] = {}
     for gpu, watts in by_gpu_w.items():
         if isinstance(watts, bool) or not isinstance(watts, (int, float)) or not isfinite(watts) or watts <= 0:
-            return "power_unmeasured"
+            return _POWER_UNMEASURED
         readings[str(gpu)] = float(watts)
     if any(gpu in readings and readings[gpu] > limit for gpu, limit in limits.items()):
-        return "gpu_power_budget_exceeded"
+        return _GPU_POWER_BUDGET_EXCEEDED
     if total > 0 and sum(readings.values()) > total:
-        return "power_budget_exceeded"
+        return _POWER_BUDGET_EXCEEDED
     return ""
 
 
@@ -436,6 +442,13 @@ class GradedComparison:
         verdict, so an axis-less measurement fails closed instead of scoring as an output win.
         """
         return not self.degrade_reason
+
+    @property
+    def vetoed_by(self) -> str:
+        """The session constraint behind ``veto_reason``: ``power_budget`` or ``latency_budget``; ``""`` when none."""
+        if not self.veto_reason:
+            return ""
+        return "power_budget" if self.veto_reason in _POWER_VETO_REASONS else "latency_budget"
 
     @property
     def graded_on_intvty(self) -> bool:

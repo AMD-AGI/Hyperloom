@@ -3275,6 +3275,9 @@ async def test_explore_grades_the_rounds_own_gpu_power_against_the_budget(
     assert tested["outcome"] == expected_outcome
     if expected_outcome == "REVERT":
         assert out["losers"][0]["reason"] == "power_budget_exceeded"
+        gates = {g["gate"]: g for g in tested["gates"]}
+        assert gates["power_budget"]["passed"] is False
+        assert "latency_budget" not in gates
         return
     assert out["winners"][0]["gpu_power_by_gpu_w"] == {"4": pytest.approx(power_w / 2), "5": pytest.approx(power_w / 2)}
     coord = Coordinator.__new__(Coordinator)

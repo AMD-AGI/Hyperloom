@@ -1418,7 +1418,7 @@ class ExploreExecutor:
                         decision_gates.append(
                             {
                                 "gate": (
-                                    "latency_budget"
+                                    graded.vetoed_by
                                     if graded.veto_reason
                                     else (
                                         "graded_axes"
