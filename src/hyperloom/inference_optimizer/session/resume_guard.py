@@ -25,6 +25,12 @@ class CleanupConfirmationError(RuntimeError):
     """An operator confirmation cannot safely update the retained ownership ledger."""
 
 
+# The states a task cannot leave. A confirmation acts on one of these, or on a
+# task still in flight -- never on anything else.
+TERMINAL_TASK_STATES = frozenset({"succeeded", "failed", "cancelled"})
+CONFIRMABLE_TASK_STATES = TERMINAL_TASK_STATES | {"queued", "running"}
+
+
 def _label(value: object) -> str:
     text = "unknown" if value is None or value == "" else str(value)
     label = ascii(text[:80])
@@ -32,7 +38,7 @@ def _label(value: object) -> str:
 
 
 def _terminal_uncertainty(state: str, history_json: str) -> str:
-    if state not in {"succeeded", "failed", "cancelled"}:
+    if state not in TERMINAL_TASK_STATES:
         return ""
     history = json.loads(history_json)
     if not isinstance(history, list):
@@ -217,7 +223,7 @@ def ensure_resume_safe(session_dir: Path, *, owner_scope: str) -> None:
 def _confirmable_history(task: sqlite3.Row) -> list:
     """The task's history, once its state and shape allow a confirmation at all."""
     state = task["state"]
-    if state not in {"succeeded", "failed", "cancelled", "queued", "running"}:
+    if state not in CONFIRMABLE_TASK_STATES:
         raise CleanupConfirmationError("task has an unsupported state")
     try:
         history = json.loads(task["history"])
@@ -350,7 +356,7 @@ def _confirm_task_stopped_in_transaction(
     if task is None:
         raise CleanupConfirmationError(f"task={_label(task_id)} does not exist")
     state = task["state"]
-    terminal = state in {"succeeded", "failed", "cancelled"}
+    terminal = state in TERMINAL_TASK_STATES
     history = _confirmable_history(task)
     leases, gpu_leases = _target_leases(db, tables, task_id)
 
