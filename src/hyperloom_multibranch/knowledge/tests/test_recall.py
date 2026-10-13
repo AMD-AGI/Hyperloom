@@ -5,51 +5,22 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import Any
-
 import pytest
-from hyperloom_kb import RemoteReadResult, RenderedRef
+from hyperloom_kb import RemoteReadResult
 
 from hyperloom_multibranch.knowledge.recall import DECISION, RecallTier, recall_experiences
+from hyperloom_multibranch.knowledge.tests.fakes import FakeExperienceReader, completed_read, experience_summary
 from hyperloom_multibranch.notebook.tests.factories import profile
 
 SAME = {"gpu": "mi355x", "framework": "vllm", "bottleneck": "attention", "isl": 1024, "osl": 1024}
 
 
-def _summary(experience_id: str, identity: Mapping[str, Any], decision: str = "keep") -> dict[str, Any]:
-    return {
-        "experience_id": experience_id,
-        "source_run_id": "run-old",
-        "identity": dict(identity),
-        "change_summary": "--kv-cache-dtype fp8",
-        "decision": decision,
-        "baseline_value": 1000.0,
-        "outcome_value": 1100.0,
-    }
-
-
-class FakeReader:
-    def __init__(self, result: RemoteReadResult) -> None:
-        self.result = result
-        self.calls: list[tuple[str, Mapping[str, Any], int | None]] = []
-
-    def read(self, decision: str, context: Mapping[str, Any], *, limit: int | None = None) -> RemoteReadResult:
-        self.calls.append((decision, context, limit))
-        return self.result
-
-
-def _completed(*experiences: dict[str, Any]) -> RemoteReadResult:
-    refs = tuple(RenderedRef(item["experience_id"], "representative") for item in experiences)
-    return RemoteReadResult("read-1", "completed", "=== block ===", refs, (), experiences)
-
-
 def test_an_experience_measured_under_every_queried_condition_is_a_prior_and_others_are_to_reverify() -> None:
-    reader = FakeReader(
-        _completed(
-            _summary("exp-same", SAME),
-            _summary("exp-other-gpu", {**SAME, "gpu": "mi300x", "isl": 2048}, decision="revert"),
-            _summary(
+    reader = FakeExperienceReader(
+        completed_read(
+            experience_summary("exp-same", SAME),
+            experience_summary("exp-other-gpu", {**SAME, "gpu": "mi300x", "isl": 2048}, decision="revert"),
+            experience_summary(
                 "exp-no-bottleneck",
                 {key: value for key, value in SAME.items() if key != "bottleneck"} | {"isl": 1024.0},
             ),
@@ -70,7 +41,7 @@ def test_an_experience_measured_under_every_queried_condition_is_a_prior_and_oth
 
 
 def test_the_read_carries_the_sessions_identity_workload_baseline_and_bottleneck() -> None:
-    reader = FakeReader(_completed())
+    reader = FakeExperienceReader(completed_read())
 
     recall_experiences(reader, profile(), 1000.0, bottleneck="attention", branch="s1", intent="fp8 kv cache", limit=5)
 
@@ -85,9 +56,12 @@ def test_the_read_carries_the_sessions_identity_workload_baseline_and_bottleneck
 def test_without_a_kb_or_with_a_failed_read_the_recall_says_so_and_still_renders() -> None:
     disabled = recall_experiences(None, profile(), None, bottleneck="attention")
     failed = recall_experiences(
-        FakeReader(RemoteReadResult("", "unavailable", "", (), ("planner_timeout",))), profile(), None, bottleneck="x"
+        FakeExperienceReader(RemoteReadResult("", "unavailable", "", (), ("planner_timeout",))),
+        profile(),
+        None,
+        bottleneck="x",
     )
-    nothing = recall_experiences(FakeReader(_completed()), profile(), None, bottleneck="x")
+    nothing = recall_experiences(FakeExperienceReader(completed_read()), profile(), None, bottleneck="x")
 
     assert disabled.render() == ["- unavailable (disabled)"]
     assert failed.render() == ["- unavailable (unavailable: planner_timeout)"]
@@ -95,8 +69,8 @@ def test_without_a_kb_or_with_a_failed_read_the_recall_says_so_and_still_renders
 
 
 def test_the_rendering_groups_the_tiers_and_names_what_differs() -> None:
-    no_values = {**_summary("exp-bare", {**SAME, "gpu": "mi300x"}), "baseline_value": None}
-    reader = FakeReader(_completed(_summary("exp-same", SAME), no_values))
+    no_values = {**experience_summary("exp-bare", {**SAME, "gpu": "mi300x"}), "baseline_value": None}
+    reader = FakeExperienceReader(completed_read(experience_summary("exp-same", SAME), no_values))
 
     lines = recall_experiences(reader, profile(hardware="mi355x"), 1000.0, bottleneck="attention").render()
 
