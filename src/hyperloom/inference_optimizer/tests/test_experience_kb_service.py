@@ -45,6 +45,18 @@ def test_init_env_points_a_new_workspace_at_the_local_service(tmp_path: Path, ca
     assert values["HYPERLOOM_KB_TOKEN"] not in output
 
 
+def test_service_home_defaults_under_the_session_root_and_can_be_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "shared-root"))
+    monkeypatch.delenv(experience_kb_service.HOME_ENV, raising=False)
+    assert experience_kb_service.service_home() == tmp_path / "shared-root" / "experience-kb"
+    # Runs on other hosts that share the session root each name their own home.
+    monkeypatch.setenv(experience_kb_service.HOME_ENV, str(tmp_path / "leg-a" / "experience-kb"))
+    assert experience_kb_service.service_home() == tmp_path / "leg-a" / "experience-kb"
+    assert experience_kb_service.spool_root() == tmp_path / "leg-a" / "experience-kb" / "spool"
+
+
 def test_each_workspace_gets_its_own_local_port_and_keeps_it(tmp_path: Path) -> None:
     first, second = tmp_path / "alice" / "workspace", tmp_path / "bob" / "workspace"
     urls = {}
