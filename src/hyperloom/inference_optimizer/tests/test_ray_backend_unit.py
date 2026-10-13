@@ -2045,17 +2045,20 @@ class _InfeasibleFakeRay:
         self.killed.append(actor)
 
 
-def test_serving_lease_infeasible_no_slot_degrades(monkeypatch: pytest.MonkeyPatch):
-    """No serving_slot in cluster -> run_session_kill returns rc!=0 with reason."""
+def test_serving_lease_missing_slot_on_explicit_cluster_degrades(monkeypatch: pytest.MonkeyPatch):
+    """An explicit cluster without serving_slot refuses the lease without a restart."""
     fake = _InfeasibleFakeRay(gpus=8.0, has_serving_slot=False)
     monkeypatch.setitem(sys.modules, "ray", fake)
     monkeypatch.setattr(rb, "get_ray_backend", lambda: _StubBackendP2())
+    monkeypatch.setattr(rs, "_LEASE_ACTORS_SUBMITTED", 0)
+    monkeypatch.setenv("RAY_ADDRESS", "ray://shared-cluster:10001")
 
     lease = rs.ServingLease(num_gpus=1, serving_slot=True)
     rc, _out, err = lease.run_session_kill(["echo", "hi"], timeout=5)
     assert rc == 1
     assert "ray_ensure_error" in err
     assert "serving_slot" in err
+    assert "explicit cluster" in err
 
 
 def test_serving_lease_infeasible_no_gpu_degrades(monkeypatch: pytest.MonkeyPatch):
