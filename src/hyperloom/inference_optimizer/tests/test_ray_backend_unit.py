@@ -73,7 +73,7 @@ def test_merge_worker_env_preserves_ray_visible_devices(monkeypatch: pytest.Monk
         }
     )
     assert merged["ROCR_VISIBLE_DEVICES"] == "2,3"
-    assert merged["HIP_VISIBLE_DEVICES"] == "2,3"
+    assert merged["HIP_VISIBLE_DEVICES"] == "0,1"
     assert merged["CUDA_VISIBLE_DEVICES"] == "2,3"
     assert merged["MY_FLAG"] == "1"
     assert "OPENAI_API_KEY" not in merged
@@ -1658,7 +1658,7 @@ def test_serving_actor_replace_env_removes_secrets_and_preserves_ray_devices(
     child_env = captured["env"]
     assert child_env["SAFE_FLAG"] == "1"
     assert child_env["ROCR_VISIBLE_DEVICES"] == "2,3"
-    assert child_env["HIP_VISIBLE_DEVICES"] == "4,5"
+    assert child_env["HIP_VISIBLE_DEVICES"] == "0,1"
     assert child_env["CUDA_VISIBLE_DEVICES"] == "6,7"
     assert "OPENAI_API_KEY" not in child_env
     assert "ACTOR_ONLY_SECRET" not in child_env

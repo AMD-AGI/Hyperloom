@@ -11,6 +11,7 @@ from pathlib import Path
 
 from hyperloom.common.env import env_flag
 from hyperloom.common.env_safety import scrub_benchmark_process_env
+from hyperloom.common.visible_devices import hip_mask_within_rocr
 
 log = logging.getLogger(__name__)
 
@@ -78,6 +79,14 @@ class SubprocessResult:
     stderr: str
 
 
+def align_hip_with_ray_rocr(env: dict[str, str]) -> dict[str, str]:
+    """Ray narrows only ``ROCR_VISIBLE_DEVICES`` per task; re-index HIP into that view, in place."""
+    hip = hip_mask_within_rocr(env)
+    if hip is not None:
+        env["HIP_VISIBLE_DEVICES"] = hip
+    return env
+
+
 def _merge_worker_env(caller_env: dict[str, str] | None) -> dict[str, str]:
     """Merge caller env over the worker's env, preserving Ray's visible devices."""
     merged = dict(os.environ)
@@ -85,7 +94,7 @@ def _merge_worker_env(caller_env: dict[str, str] | None) -> dict[str, str]:
         if key in _RAY_OWNED_VISIBLE_DEVICE_VARS:
             continue
         merged[key] = value
-    return scrub_benchmark_process_env(merged)
+    return scrub_benchmark_process_env(align_hip_with_ray_rocr(merged))
 
 
 def _run_subprocess_worker(

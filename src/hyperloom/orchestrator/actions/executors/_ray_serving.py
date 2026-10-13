@@ -376,6 +376,9 @@ def _serving_actor_body() -> Any:
                         child_env[key] = os.environ[key]
             else:
                 raise ValueError(f"unsupported env_mode {env_mode!r}; expected 'merge' or 'replace'")
+            from ._ray_backend import align_hip_with_ray_rocr
+
+            align_hip_with_ray_rocr(child_env)
             if scrub_benchmark_env:
                 scrub_benchmark_process_env(child_env)
             start_kwargs = {
