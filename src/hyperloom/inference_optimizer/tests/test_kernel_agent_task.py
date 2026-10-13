@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from hyperloom.inference_optimizer.breakdown.stop_reasons import BACKEND_UNHEALTHY_STOP_REASON
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     ACTION_CATALOGUE,
     COORDINATOR_INTERNAL_ACTIONS,
@@ -388,6 +389,30 @@ async def test_a_spent_session_budget_still_stops_the_running_kernel_agent(coord
     await _settle(c, task.task_id)
 
     assert (await c.tasks.get(task.task_id)).state == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_a_terminal_stop_cancels_the_running_kernel_agent_on_the_way_to_close(coord, monkeypatch):
+    """A run that is already over has nothing to settle; the barrier stops its work instead of waiting for it."""
+    c = coord
+    _skip_phase_entry_effects(c, monkeypatch)
+    st = c.shared_state
+    _arm_kernel_phase(st)
+    started = asyncio.Event()
+    c.sub.register_executor("kernel_agent", _listening_executor(started))
+    task = await _create_kernel_agent(c)
+    await asyncio.wait_for(c.dispatcher.pump_dispatcher_once(), timeout=2.0)
+    await asyncio.wait_for(started.wait(), timeout=2.0)
+    st.set_stop_reason(BACKEND_UNHEALTHY_STOP_REASON)
+
+    await asyncio.wait_for(c.phase_machine.advance_phase_if_needed(), timeout=30.0)
+    await _settle(c, task.task_id)
+    await asyncio.wait_for(c.phase_machine.advance_phase_if_needed(), timeout=30.0)
+
+    assert (await c.tasks.get(task.task_id)).state == "cancelled"
+    assert st.phase == ps.PHASE_CLOSE
+    assert st.phase_history[-1]["reason"] == BACKEND_UNHEALTHY_STOP_REASON
+    assert not any((await c.locks.lane_holders()).values())
 
 
 @pytest.mark.asyncio
