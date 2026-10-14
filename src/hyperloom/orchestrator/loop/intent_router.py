@@ -106,6 +106,9 @@ def _lifecycle_paths(payload: Any) -> dict[str, str]:
 
 log = __import__("logging").getLogger(__name__)
 
+#: Reply source marking an answer the Coordinator wrote itself, refusing a request before any handler ran.
+_AUTO_REJECT = "coordinator_auto_reject"
+
 
 def _relayed_specialist_citations(state: Any) -> dict[str, list[dict[str, str]]]:
     """This cycle's specialist proposal citations, keyed by the change each proposal asks for."""
@@ -1108,9 +1111,13 @@ class IntentRouter(CoordinatorCollaborator):
             cache_hit=cache_hit,
         )
 
-    async def _auto_reject(self, request_msg: Message, result: dict[str, Any]) -> None:
-        """Answer a request the Coordinator refuses before any handler runs, and record the failure."""
+    async def _reply(self, request_msg: Message, result: dict[str, Any], *, source: str) -> None:
+        """Answer a request on the bus with *result*, logging it for FAILURE RECOVERY when it failed.
+
+        The requester awaits ``<kind>_done``, so the reply kind is read back off the request rather than passed in.
+        """
         kind = str(request_msg.payload.get("kind") or "")
+        status = str(result.get("status", "ok"))
         await self.bus.append_and_seq(
             Message.new(
                 request_msg.to_agent,
@@ -1119,14 +1126,15 @@ class IntentRouter(CoordinatorCollaborator):
                 {
                     "in_reply_to": request_msg.msg_id,
                     "kind": f"{kind}_done",
-                    "status": "failed",
+                    "status": status,
                     "result": result,
-                    "source": "coordinator_auto_reject",
+                    "source": source,
                 },
                 in_reply_to=request_msg.msg_id,
             )
         )
-        self._record_request_failure(kind=kind, request_msg_id=request_msg.msg_id, result=result)
+        if status.lower() in ("failed", "error"):
+            self._record_request_failure(kind=kind, request_msg_id=request_msg.msg_id, result=result)
 
     async def _handle_request(self, source: str, intent: Intent) -> None:
         """Route a REQUEST intent to its programmatic handler."""
@@ -1147,18 +1155,19 @@ class IntentRouter(CoordinatorCollaborator):
 
         if target_agent == "kernel_agent":
             if not bool(self.shared_state.kernel_enabled):
-                await self._auto_reject(
+                await self._reply(
                     request_msg,
                     {
                         "status": "failed",
                         "error_class": "agent_disabled",
                         "error": "kernel_agent is disabled for this session (--no-kernel)",
                     },
+                    source=_AUTO_REJECT,
                 )
                 return
             handler = get_handler(kind)
             if handler is None:
-                await self._auto_reject(
+                await self._reply(
                     request_msg,
                     {
                         "status": "failed",
@@ -1166,6 +1175,7 @@ class IntentRouter(CoordinatorCollaborator):
                         "error": f"no programmatic handler for kind={kind!r}",
                         "valid_kinds": sorted(KERNEL_REQUEST_HANDLERS),
                     },
+                    source=_AUTO_REJECT,
                 )
                 return
             params = intent.payload.get("params") or {}
@@ -1229,20 +1239,10 @@ class IntentRouter(CoordinatorCollaborator):
                             ttl_sec=ttl or 60,
                         )
                         if handler_lease is None:
-                            await self.bus.append_and_seq(
-                                Message.new(
-                                    "kernel_agent",
-                                    source,
-                                    "response",
-                                    {
-                                        "in_reply_to": request_msg.msg_id,
-                                        "kind": f"{kind}_done",
-                                        "status": "deferred",
-                                        "result": {"status": "deferred", "reason": "lanes_busy", "lanes": lanes},
-                                        "source": "lanes_busy",
-                                    },
-                                    in_reply_to=request_msg.msg_id,
-                                )
+                            await self._reply(
+                                request_msg,
+                                {"status": "deferred", "reason": "lanes_busy", "lanes": lanes},
+                                source="lanes_busy",
                             )
                             return
 
@@ -1293,23 +1293,7 @@ class IntentRouter(CoordinatorCollaborator):
                         detail=_lc_detail,
                         duration_s=time.monotonic() - _lc_t0,
                     )
-            await self.bus.append_and_seq(
-                Message.new(
-                    "kernel_agent",
-                    source,
-                    "response",
-                    {
-                        "in_reply_to": request_msg.msg_id,
-                        "kind": f"{kind}_done",
-                        "status": result.get("status", "ok"),
-                        "result": result,
-                        "source": cache_hit_source or "programmatic_handler",
-                    },
-                    in_reply_to=request_msg.msg_id,
-                )
-            )
-            if str(result.get("status", "")).lower() in ("failed", "error"):
-                self._record_request_failure(kind=kind, request_msg_id=request_msg.msg_id, result=result)
+            await self._reply(request_msg, result, source=cache_hit_source or "programmatic_handler")
             # Cache trace_analyze output (successful runs only).
             if kind == "trace_analyze" and cache_hit_source is None and result.get("status") in ("ok", "succeeded"):
                 self.shared_state.record_trace_analyze(merged_payload, result)
@@ -1334,13 +1318,14 @@ class IntentRouter(CoordinatorCollaborator):
                     await self._coord.writeback.record_integrate_keep(result)
                 self.shared_state.save(self.session_dir)
         else:
-            await self._auto_reject(
+            await self._reply(
                 request_msg,
                 {
                     "status": "failed",
                     "error_class": "unknown_target_agent",
                     "error": f"no handler registered for target_agent={target_agent!r}",
                 },
+                source=_AUTO_REJECT,
             )
 
     async def _handle_extend_lease(self, source: str, intent: Intent) -> None:
