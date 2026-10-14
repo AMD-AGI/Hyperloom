@@ -20,6 +20,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import partial
 
+from hyperloom.common.model_paths import resolve_serving_model_path
 from hyperloom_multibranch.contracts.lifecycle import SpecialistLifecycle
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
@@ -70,11 +71,12 @@ class MeasurementHost:
 
 def workload_environment(workload: Workload) -> Mapping[str, str]:
     """The workload as the process environment carries it to the main flow's config renderer, which the toolbox
-    renders the canonical measurement and every test's points with; ``hyperloom optimize`` exports the same."""
+    renders the canonical measurement and every test's points with; ``hyperloom optimize`` exports the same, the
+    model resolved to the directory a server loads it from."""
 
     environment = {
         "FRAMEWORK": workload.framework,
-        "MODEL_PATH": workload.model,
+        "MODEL_PATH": resolve_serving_model_path(workload.model),
         "TP": str(workload.tp),
         "ISL": str(workload.isl),
         "OSL": str(workload.osl),

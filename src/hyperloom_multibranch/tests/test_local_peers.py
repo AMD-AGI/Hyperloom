@@ -39,7 +39,8 @@ WORKLOAD = Workload("/models/Llama-3-8B", "sglang", 2, 1024, 512, 16, "bf16")
 HOST = MeasurementHost((0, 1, 2, 3), "local", MB_FAKE_BASE_IMAGE_DIGEST, "a" * 40, "b" * 40)
 
 
-def test_the_workload_reaches_the_renderer_as_hyperloom_optimize_exports_it() -> None:
+def test_the_workload_reaches_the_renderer_as_hyperloom_optimize_exports_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("HL_MODEL_BASE", raising=False)
     assert workload_environment(WORKLOAD) == {
         "FRAMEWORK": "sglang",
         "MODEL_PATH": "/models/Llama-3-8B",
@@ -50,6 +51,15 @@ def test_the_workload_reaches_the_renderer_as_hyperloom_optimize_exports_it() ->
     }
     detected = Workload("/m", "vllm", 1, 1, 1, 1, "fp8", gpu_type="mi355x")
     assert workload_environment(detected)["GPU_TYPE"] == "mi355x"
+
+
+def test_the_model_is_exported_as_the_directory_a_server_loads_it_from(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "Llama-3-8B").mkdir()
+    monkeypatch.setenv("HL_MODEL_BASE", str(tmp_path))
+    hub_id = Workload("meta-llama/Llama-3-8B", "vllm", 1, 1, 1, 1, "fp8")
+    assert workload_environment(hub_id)["MODEL_PATH"] == str(tmp_path / "Llama-3-8B")
 
 
 def test_loading_the_peers_names_the_missing_specialist_runtime() -> None:
@@ -66,6 +76,7 @@ def test_the_placeholder_host_is_one_machine_on_the_root_recipes_image() -> None
 async def test_the_real_peers_live_inside_the_session_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.delenv("HL_MODEL_BASE", raising=False)
     for name in workload_environment(WORKLOAD):
         monkeypatch.setenv(name, "")
     monkeypatch.delenv("GPU_TYPE", raising=False)
