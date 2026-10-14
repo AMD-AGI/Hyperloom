@@ -25,6 +25,8 @@ from ..state.task_registry import TaskNotFound
 from ..state.shared_state import resolve_grading_anchor_tput, inject_stack_base_params
 
 if TYPE_CHECKING:
+    from ..predictor.pump import PhaseBudget
+    from ..predictor.view import SessionView
     from ..state.task_registry import Task
     from .machine import Transition
 from ..loop.proposals import PendingProposal, integrate_review_in_flight, record_proposal
@@ -227,6 +229,9 @@ def _forward_integrate_source(
     if domain:
         dst["domain"] = domain
         dst["provenance"] = f"specialist:{domain}"
+    elif src.get("provenance"):
+        # A domain-less dispatch such as a predictor mandate keeps the label it was dispatched under.
+        dst["provenance"] = str(src["provenance"])
     # ``framework`` is intentionally not forwarded: integrate_patch consumes
     # that parameter when selecting accuracy parsing/gating behavior, whereas
     # proposal ownership only needs the gap metadata below.
@@ -258,6 +263,24 @@ def _forward_integrate_source(
 def _recorder(coord: Any):
     """Return the framework recorder for this phase entry, or ``None`` outside an open entry."""
     return coord._framework_timeline_recorder
+
+
+def predictor_budget(state: SessionView) -> PhaseBudget:
+    """The FRAMEWORK clock a predictor request is conditioned on, read when the request goes out."""
+    from ..predictor.pump import PhaseBudget
+
+    limits: list[float] = []
+    remaining = _phase_state.phase_budget_remaining_seconds(state)
+    if remaining is not None:
+        limits.append(float(remaining))
+    cap = _phase_state.phase_cap_seconds(state)
+    if cap is not None:
+        limits.append(float(cap) - float(_phase_state.phase_cumulative_seconds(state)))
+    return PhaseBudget(
+        headroom_sec=min(limits) if limits else None,
+        elapsed_sec=_phase_state.phase_elapsed_seconds(state),
+        keep_threshold_pct=_phase_state.resolve_keep_threshold(state),
+    )
 
 
 def _record_run(coord: Any, task: Any, *, role: str, status: str, **fields: Any) -> None:
@@ -658,6 +681,8 @@ class FrameworkPhase(CoordinatorCollaborator):
 
     # Set for the span of one FRAMEWORK entry; ``None`` outside it and when the recorder is unbound.
     _framework_timeline_recorder: Any = None
+    # The PrimaTune predictor's in-flight request, created on first use (``predictor.pump.PredictorPump``).
+    _predictor: Any = None
     # Max tried-candidate rows fed into the ranker/discovery working memory.
     _FRAMEWORK_TRIED_MEMORY_CAP: int = 12
     # Tail of outcomes from the priors ledger to evaluate.
@@ -845,6 +870,42 @@ class FrameworkPhase(CoordinatorCollaborator):
         # and before the pump so the entry's first dispatch is inside the event.
         self._open_framework_timeline()
         await self._pump_framework_agent_phase()
+        # Before orchestration's first turn, so the first grid it composes can carry the answer; last, as on the
+        # tick, so a predictor fault reaches the transition's guard after the entry's own work has run.
+        await self._predictor_pump().settle(self.shared_state)
+
+    def _predictor_pump(self) -> Any:
+        from ..predictor.pump import PredictorPump
+
+        if self._predictor is None:
+            self._predictor = PredictorPump(budget=predictor_budget, on_filed=self._record_predictor_round)
+        return self._predictor
+
+    def _record_predictor_round(self, entry: dict[str, Any]) -> None:
+        """Record a filed predictor answer on this entry's event, as the config-arm run that produced it.
+
+        Keyed by the round id, since no task produced it; only an answer that
+        queued something is filed, so the run never reads as a failure.
+        """
+        from hyperloom.inference_optimizer.breakdown.recorder.framework_event import ROLE_CONFIG
+
+        rows = entry.get("proposal_set") or []
+        mandate = str(entry.get("mandate_id") or "")
+        _record_run(
+            self,
+            str(entry.get("round_id") or ""),
+            role=ROLE_CONFIG,
+            status="succeeded",
+            domain=str(entry.get("domain") or ""),
+            dispatched_at=str(entry.get("asked_at") or ""),
+            completed_at=str(entry.get("completed_at") or ""),
+            proposals_total=len(rows),
+            summary=f"{len(rows)} config row(s)" + (f", source-change mandate {mandate}" if mandate else ""),
+        )
+
+    async def _pump_predictor(self) -> None:
+        """Step the PrimaTune predictor; a no-op unless an endpoint is configured."""
+        await self._predictor_pump().step(self.shared_state)
 
     def _authoring_inflight_candidate_ids(self, queued: list[Any], running: list[Any]) -> set[str]:
         """Candidate ids with a live specialist / integrate_patch task or a review proposal awaiting its verdict."""
@@ -2254,6 +2315,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         exception, because a pump that raises on every tick otherwise leaves a
         phase that never dispatched anything closing clean.
         """
+        stage = "framework_pump"
         try:
             await self._pump_framework_agent_phase()
             await self._maybe_bench_untested_proposals()
@@ -2261,9 +2323,12 @@ class FrameworkPhase(CoordinatorCollaborator):
             await self._coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
             await self._coord.specialist_dispatch.maybe_ensure_custom_specialist()
             self._record_advisory_plateau()
+            # Last, as at entry, so a predictor fault is filed here after the phase's own work has run.
+            stage = "framework_predictor"
+            await self._pump_predictor()
         except Exception as exc:
-            log.exception("FRAMEWORK pump failed")
-            self._coord.record_exception(stage="framework_pump", exc=exc)
+            log.exception("FRAMEWORK pump failed at %s", stage)
+            self._coord.record_exception(stage=stage, exc=exc)
 
     def _record_framework_agent_authored_outcome(
         self,
@@ -2727,7 +2792,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         return out
 
     async def _maybe_bench_untested_proposals(self) -> None:
-        """Enqueue an explore grid from the highest-severity untested specialist proposals.
+        """Enqueue an explore grid from the head of the untested-proposal queue (see ``untested_proposal_rows``).
 
         Runs in FRAMEWORK_AGENT while no explore is queued or running. The
         idempotency key names the fingerprint set, so a grid that failed without
@@ -2754,7 +2819,7 @@ class FrameworkPhase(CoordinatorCollaborator):
                 "extra_args": row["extra_args"],
                 "extra_envs": dict(row["extra_envs"]),
                 **controls_of(row),
-                "provenance": f"specialist:{row['domain']}",
+                "provenance": row["provenance"],
                 # The proposing specialist's whole reasoning and checked citations reach the measured Experience.
                 "reasoning": row["reason"],
                 **({"experience_citations": row["experience_citations"]} if row["experience_citations"] else {}),

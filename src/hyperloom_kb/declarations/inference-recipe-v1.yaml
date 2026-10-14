@@ -1,111 +1,89 @@
-# Active declaration for newly collected inference optimization Experiences.
-# Historical aggregate Recipe columns remain source evidence only and do not
-# become one Experience per column.
-schema_version: 1
-
-identity:
-  - name: model
-    description: Model identifier from SBD V6 task configuration.
-    kind: string
-    required: true
-    sensitive: false
-  - name: gpu
-    description: GPU hardware model used for the measured attempt.
-    kind: string
-    required: true
-    sensitive: false
-  - name: framework
-    description: Serving framework name.
-    kind: string
-    required: true
-    sensitive: false
-  - name: model_type
-    description: Model configuration type.
-    kind: string
-    required: true
-    sensitive: false
-  - name: architecture
-    description: Model architecture class.
-    kind: string
-    required: true
-    sensitive: false
-  - name: framework_version
-    description: Serving framework version.
-    kind: version
-    required: true
-    sensitive: false
-  - name: precision
-    description: Numeric precision of the measured workload.
-    kind: string
-    required: true
-    sensitive: false
-  - name: tp
-    description: Tensor-parallel degree.
-    kind: number
-    required: false
-    sensitive: false
-  - name: ep
-    description: Expert-parallel degree when greater than one.
-    kind: number
-    required: false
-    sensitive: false
-  - name: conc
-    description: Request concurrency.
-    kind: number
-    required: false
-    sensitive: false
-  - name: isl
-    description: Input sequence length in tokens.
-    kind: number
-    required: false
-    sensitive: false
-  - name: osl
-    description: Output sequence length in tokens.
-    kind: number
-    required: false
-    sensitive: false
-  - name: max_model_len
-    description: Maximum model context configured for the server.
-    kind: number
-    required: false
-    sensitive: false
-  - name: compute_partition_mode
-    description: GPU compute-partition mode such as SPX or CPX.
-    kind: string
-    required: false
-    sensitive: false
-  - name: partitions
-    description: Compute partitions per GPU when the card is partitioned.
-    kind: number
-    required: false
-    sensitive: false
-baseline_identity:
-  - name: baseline_fingerprint
-    description: SHA-256 of the exact measured-against runtime configuration.
-    kind: string
-    required: true
-    sensitive: false
-
-change_identity:
-  - name: change_family
-    description: Framework config variant or source patch.
-    kind: string
-    required: true
-    sensitive: false
-  - name: change_fingerprint
-    description: SHA-256 of exact normalized config content or verified patch bytes.
-    kind: string
-    required: true
-    sensitive: false
+# Hyperloom's declaration for the Experiences its inference optimization runs record: one measured attempt of one
+# serving change on one workload. Each category's fields are Hyperloom's choice; the KB only gives them their kinds
+# and the roles its functions read.
+schema_version: 2
 
 objectives:
   - id: e2e_throughput@v1
-    direction: higher_is_better
-    description: End-to-end output throughput for the declared synthetic workload.
+    description: >-
+      Maximize the end-to-end output throughput of the declared synthetic workload, keeping only changes that pass
+      the accuracy gate when the workload requires one.
     unit: token/s
+    direction: higher_is_better
     failure_value: 0
 
-decisions:
-  - keep
-  - revert
-  - failed
+identity:
+  - {name: model, description: Model identifier from the task configuration., required: true}
+  - {name: gpu, description: GPU hardware model the attempt was measured on., required: true}
+  - {name: framework, description: Serving framework name., required: true}
+  - {name: model_type, description: Model configuration type., required: true}
+  - {name: architecture, description: Model architecture class., required: true}
+  - {name: framework_version, description: Serving framework version., kind: version, required: true}
+  - {name: precision, description: Numeric precision of the measured workload., required: true}
+  - {name: tp, description: Tensor-parallel degree., kind: number}
+  - {name: ep, description: Expert-parallel degree when greater than one., kind: number}
+  - {name: conc, description: Request concurrency., kind: number}
+  - {name: isl, description: Input sequence length in tokens., kind: number}
+  - {name: osl, description: Output sequence length in tokens., kind: number}
+  - {name: max_model_len, description: Maximum model context configured for the server., kind: number}
+  - {name: compute_partition_mode, description: GPU compute-partition mode such as SPX or CPX.}
+  - {name: partitions, description: Compute partitions per GPU when the card is partitioned., kind: number}
+
+baseline:
+  - name: baseline_fingerprint
+    description: SHA-256 of the exact runtime configuration the attempt was measured against.
+    required: true
+    group: true
+  - name: value
+    description: Output throughput of the baseline, measured in the same session as the change.
+    kind: number
+    required: true
+    role: measurement
+
+change:
+  - name: change_family
+    description: Whether the change is a serving configuration variant or a source patch.
+    required: true
+    group: true
+    search: 4
+    values: [config_variant, source_patch]
+  - name: change_fingerprint
+    description: SHA-256 of the normalized configuration or of the verified patch bytes.
+    required: true
+    group: true
+  - name: summary
+    description: What the change does, in one line.
+    required: true
+    role: summary
+    search: 4
+  - name: content
+    description: >-
+      The complete change: the configuration delta, or the source reference, target files, and patches, as
+      canonical JSON.
+    kind: text
+    required: true
+
+outcome:
+  - name: decision
+    description: Whether the change was kept, reverted, or failed.
+    required: true
+    role: decision
+    search: 0.5
+    values: [keep, revert, failed]
+  - name: value
+    description: Output throughput with the change applied.
+    kind: number
+    role: measurement
+  - name: constraints
+    description: Each gate the attempt was checked against, whether it passed, and the value observed.
+    kind: text
+    many: true
+  - name: error_class
+    description: What failed, for a failed attempt.
+    search: 0.5
+
+reflection:
+  - name: text
+    description: How the measured outcome reads.
+    kind: text
+    required: true

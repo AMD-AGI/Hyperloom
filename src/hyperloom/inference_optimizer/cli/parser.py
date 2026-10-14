@@ -7,12 +7,14 @@ from __future__ import annotations
 
 import argparse
 import os
-from math import isfinite
 from pathlib import Path
 from typing import NoReturn
 
 from .. import framework_registry
+from .constraint_args import add_constraint_arguments, positive_watts_arg
 from .backends import CRITIC_PROTOCOL_CHOICES
+from .recover import add_cleanup_confirmation_arguments
+from hyperloom.common import predictor_config
 from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.common.llm_config import is_anthropic_only, is_openai_only, provider_model_defaults
 
@@ -104,33 +106,6 @@ def _positive_int_arg(value: str) -> int:
         raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}") from exc
     if parsed <= 0:
         raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}")
-    return parsed
-
-
-def _positive_ms_arg(value: str) -> float:
-    """argparse type for a millisecond ceiling.
-
-    The gate this feeds fails closed, so its switch must not fail open: an
-    unusable value has to stop the launch rather than resolve to "no budget" and
-    leave the operator believing an SLA is enforced.
-    """
-    try:
-        parsed = float(str(value).strip())
-    except (TypeError, ValueError) as exc:
-        raise argparse.ArgumentTypeError(f"expected a positive number of milliseconds, got {value!r}") from exc
-    if not isfinite(parsed) or parsed <= 0:
-        raise argparse.ArgumentTypeError(f"expected a positive number of milliseconds, got {value!r}")
-    return parsed
-
-
-def _positive_watts_arg(value: str) -> float:
-    """argparse type for a power in watts; an unusable value stops the launch rather than skipping the check."""
-    try:
-        parsed = float(str(value).strip())
-    except (TypeError, ValueError) as exc:
-        raise argparse.ArgumentTypeError(f"expected a positive number of watts, got {value!r}") from exc
-    if not isfinite(parsed) or parsed <= 0:
-        raise argparse.ArgumentTypeError(f"expected a positive number of watts, got {value!r}")
     return parsed
 
 
@@ -553,9 +528,10 @@ def _build_parser() -> argparse.ArgumentParser:
             "Framework version slug for the recipe-snapshot canonical id "
             "(scopes recipes to a specific framework release — sglang 0.4.5 "
             "and sglang 0.5.x have different scheduler defaults so they "
-            "deserve separate KB rows). When omitted, auto-detected via "
-            "importing the framework's top-level package and reading "
-            "``__version__`` (sglang/vllm/atom supported); auto-detect "
+            "deserve separate KB rows). When omitted, auto-detected from "
+            "the interpreter preflight resolved to serve the framework, "
+            "else by importing the framework's top-level package and "
+            "reading ``__version__`` (sglang/vllm/atom supported); auto-detect "
             "failure degrades to 'unknown_version'. Override with "
             "--framework-version=0.4.5 to pin a specific tag for the run."
         ),
@@ -588,23 +564,10 @@ def _build_parser() -> argparse.ArgumentParser:
             "independently of --target-gain / --target-tput / --target-baseline-dir."
         ),
     )
-    # Outside the group as well, and for a stronger reason than --target-roofline: this is a constraint rather than
-    # an objective. It does not say when to stop, it says which winners are admissible, so it composes with whichever
-    # target is in use instead of competing with one.
-    opt.add_argument(
-        "--max-latency-ms",
-        type=_positive_ms_arg,
-        default=None,
-        help=(
-            "Scriptable frameworks (xdit, custom) only. Refuse any KEEP whose mean "
-            "end-to-end latency exceeds N ms. Off by default. A candidate that "
-            "reported no end-to-end latency is refused too, since an unmeasured "
-            "constraint is not a satisfied one."
-        ),
-    )
+    add_constraint_arguments(opt)
     opt.add_argument(
         "--gpu-power-cap-w",
-        type=_positive_watts_arg,
+        type=positive_watts_arg,
         default=None,
         help=(
             "Declare the power cap (W) the GPUs are already set to. An assertion, not a request: the optimizer "
@@ -882,6 +845,27 @@ def _build_parser() -> argparse.ArgumentParser:
         "match (conf 0.7) both fire, while a ``miss`` (conf 0.0) "
         "does not. Raise it above 0.7 to require an exact hit "
         "before spending a verify on the warm config.",
+    )
+    # PrimaTune predictor: off unless an endpoint is given, so a session that passes none behaves as before.
+    opt.add_argument(
+        "--primatune-endpoint",
+        dest="primatune_endpoint",
+        type=str,
+        default=None,
+        help="Base URL of a PrimaTune predictor service, asked once per FRAMEWORK_AGENT decision point. "
+        "Its proposals join the untested-proposal queue beside the specialists' and are graded by the "
+        "same KEEP threshold. Exported as $HYPERLOOM_PREDICTOR_ENDPOINT. "
+        "See docs/reference/primatune-predictor.md.",
+    )
+    opt.add_argument(
+        "--primatune-mode",
+        dest="primatune_mode",
+        type=str,
+        choices=predictor_config.MODES,
+        default=None,
+        help="'shadow' (the default once an endpoint is set) asks and logs, queueing nothing; "
+        "'active' queues the answer for benchmarking; 'off' disables. "
+        "Exported as $HYPERLOOM_PREDICTOR_MODE.",
     )
     # PR Monitor REST + MCP are co-hosted by KB Store and derived from $KB_STORE_URL.
     opt.add_argument(
@@ -1196,19 +1180,6 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Re-run even when the session already looks complete (close_sequence_done / breakdown already recorded).",
     )
-    rec.add_argument(
-        "--confirm-stopped",
-        metavar="TASK_ID",
-        help="Attest that one task's complete process tree, remote workers and Ray actor have stopped, "
-        "then cancel unfinished work and release only its unattributed execution/GPU ownership records. Requires POSIX session locking "
-        "and --confirmation-reason; rejects recorded nonempty owner scopes. Does not stop processes, "
-        "accept old results, rebuild reports or resume execution.",
-    )
-    rec.add_argument(
-        "--confirmation-reason",
-        metavar="TEXT",
-        help="Required audit reason for --confirm-stopped. Both options must be provided together "
-        "and cannot be combined with --force.",
-    )
+    add_cleanup_confirmation_arguments(rec)
 
     return p

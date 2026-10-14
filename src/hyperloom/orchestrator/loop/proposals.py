@@ -294,6 +294,17 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         ).hexdigest()[:16]
         return f"approved:{action_name}:{digest}"
 
+    def credit_predictor_proposals(self, params: dict) -> None:
+        """Credit the predictor for an orchestration grid's copies of its rows (see ``predictor.attribution``)."""
+        grid = params.get("grid")
+        if not isinstance(grid, list) or not grid:
+            return
+        from ..predictor.attribution import stamp_predictor_provenance
+
+        stamped = stamp_predictor_provenance(grid, self.shared_state.specialist_rounds or [])
+        if stamped:
+            log.info("explore grid: %d/%d variant(s) credited to the predictor", stamped, len(grid))
+
     def inject_explore_runtime_params(self, params: dict) -> None:
         """Inject explore-task operational knobs from SharedState into ``params`` (single source of truth for both propose/Critic and direct-delegate paths). setdefault preserves LLM overrides."""
         br = float(self.shared_state.baseline_runtime_sec or 0.0)
@@ -360,16 +371,10 @@ class ProposalsCollaborator(CoordinatorCollaborator):
                 params.setdefault("config_path", self.shared_state.baseline_config_path)
         if pending.action_name == "explore":
             self.inject_explore_runtime_params(params)
+            self.credit_predictor_proposals(params)
             inject_stack_base_params(params, self.shared_state, anchor=True)
         if pending.action_name == "integrate_patch":
-            # ``source_phase`` is stamped where the specialist is created and carried from there; a
-            # second derivation here would be a second decision, and could write an empty owner.
-            params.setdefault("keep_threshold_pct", _phase_state.resolve_keep_threshold(self.shared_state))
-            # Seed the patched-eval server with the same base args/config every other eval server uses, else it
-            # launches on bare framework defaults and crashes at startup regardless of the patch.
-            inject_stack_base_params(params, self.shared_state, anchor=True)
-            if self.shared_state.baseline_config_path:
-                params.setdefault("config_path", self.shared_state.baseline_config_path)
+            self._seed_integrate_patch_params(params)
         lanes, ttl = self._coord.dispatcher.registry_lanes_ttl(pending.action_name)
         # Content-addressed so a batch of proposals that would launch identical work collapses to one task; a
         # terminated twin still gets a fresh key so a legitimate retry after failure is never locked out.
@@ -444,6 +449,17 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         pending.task_id = task.task_id
         _record_proposal_materialized(pending.proposal_msg_id, task.task_id)
         _record_config_routed(self, pending, task_id=task.task_id)
+
+    def _seed_integrate_patch_params(self, params: dict[str, Any]) -> None:
+        """Default an approved integrate_patch's grading context and its patched-eval server."""
+        # ``source_phase`` is stamped where the specialist is created and carried from there; a
+        # second derivation here would be a second decision, and could write an empty owner.
+        params.setdefault("keep_threshold_pct", _phase_state.resolve_keep_threshold(self.shared_state))
+        # Seed the patched-eval server with the same base args/config every other eval server uses, else it
+        # launches on bare framework defaults and crashes at startup regardless of the patch.
+        inject_stack_base_params(params, self.shared_state, anchor=True)
+        if self.shared_state.baseline_config_path:
+            params.setdefault("config_path", self.shared_state.baseline_config_path)
 
     def _record_proposal_task_map(self, proposal_msg_id: str, task_id: str) -> None:
         """Append one ``{proposal_msg_id -> task_id}`` row to the trace map."""

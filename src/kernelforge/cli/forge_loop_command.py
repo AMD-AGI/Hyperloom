@@ -2115,7 +2115,6 @@ def forge_loop(
         remote_publication=remote_publication,
     )
     _build_result = reporter.build_result
-    _write_result_json = reporter.write_result_json
     _attempt_remote_publication = reporter.attempt_remote_publication
     _publish_remote_best = reporter.publish_remote_best
     _checkpoint_on_best_committed = reporter.checkpoint_on_best_committed

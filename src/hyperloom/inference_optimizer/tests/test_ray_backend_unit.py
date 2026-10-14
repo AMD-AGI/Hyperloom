@@ -9,6 +9,7 @@ import signal
 import subprocess
 import gc
 import sys
+import types
 import weakref
 import time
 from contextlib import suppress
@@ -73,7 +74,7 @@ def test_merge_worker_env_preserves_ray_visible_devices(monkeypatch: pytest.Monk
         }
     )
     assert merged["ROCR_VISIBLE_DEVICES"] == "2,3"
-    assert merged["HIP_VISIBLE_DEVICES"] == "2,3"
+    assert merged["HIP_VISIBLE_DEVICES"] == "0,1"
     assert merged["CUDA_VISIBLE_DEVICES"] == "2,3"
     assert merged["MY_FLAG"] == "1"
     assert "OPENAI_API_KEY" not in merged
@@ -1658,7 +1659,7 @@ def test_serving_actor_replace_env_removes_secrets_and_preserves_ray_devices(
     child_env = captured["env"]
     assert child_env["SAFE_FLAG"] == "1"
     assert child_env["ROCR_VISIBLE_DEVICES"] == "2,3"
-    assert child_env["HIP_VISIBLE_DEVICES"] == "4,5"
+    assert child_env["HIP_VISIBLE_DEVICES"] == "0,1"
     assert child_env["CUDA_VISIBLE_DEVICES"] == "6,7"
     assert "OPENAI_API_KEY" not in child_env
     assert "ACTOR_ONLY_SECRET" not in child_env
@@ -1930,10 +1931,27 @@ class _InfeasibleFakeRay:
         self.killed.append(actor)
 
 
+def _install_infeasible_ray(monkeypatch: pytest.MonkeyPatch, fake: "_InfeasibleFakeRay") -> None:
+    """Put the fake in ``sys.modules`` with its ``exceptions`` submodule beside it.
+
+    The code under test imports ``ray.exceptions`` by name, and the import
+    machinery can only answer that from ``sys.modules``: a plain object under
+    ``"ray"`` has no ``__path__`` to search. Registering it here rather than
+    inheriting whatever an earlier test left behind is what makes these three
+    deterministic under any shard order.
+    """
+    monkeypatch.setitem(sys.modules, "ray", fake)
+    exceptions = types.ModuleType("ray.exceptions")
+    exceptions.RayError = Exception
+    for name in ("RayTaskError", "RayActorError", "GetTimeoutError"):
+        setattr(exceptions, name, getattr(fake.exceptions, name))
+    monkeypatch.setitem(sys.modules, "ray.exceptions", exceptions)
+
+
 def test_serving_lease_infeasible_no_slot_degrades(monkeypatch: pytest.MonkeyPatch):
     """No serving_slot in cluster -> run_session_kill returns rc!=0 with reason."""
     fake = _InfeasibleFakeRay(gpus=8.0, has_serving_slot=False)
-    monkeypatch.setitem(sys.modules, "ray", fake)
+    _install_infeasible_ray(monkeypatch, fake)
     monkeypatch.setattr(rb, "get_ray_backend", lambda: _StubBackendP2())
     monkeypatch.setattr(rs, "_LEASE_ACTORS_SUBMITTED", 0)
     monkeypatch.setattr(rr, "local_head_restartable", lambda: (False, "not a lone local head"))
@@ -1949,7 +1967,7 @@ def test_serving_lease_infeasible_no_slot_degrades(monkeypatch: pytest.MonkeyPat
 def test_serving_lease_infeasible_no_gpu_degrades(monkeypatch: pytest.MonkeyPatch):
     """Cluster GPU count < requested -> run_session_kill returns rc!=0."""
     fake = _InfeasibleFakeRay(gpus=2.0, has_serving_slot=True)
-    monkeypatch.setitem(sys.modules, "ray", fake)
+    _install_infeasible_ray(monkeypatch, fake)
     monkeypatch.setattr(rb, "get_ray_backend", lambda: _StubBackendP2())
 
     lease = rs.ServingLease(num_gpus=8, serving_slot=False)
@@ -1962,7 +1980,7 @@ def test_serving_lease_infeasible_no_gpu_degrades(monkeypatch: pytest.MonkeyPatc
 def test_gpu_specialist_lease_infeasible_raises(monkeypatch: pytest.MonkeyPatch):
     """Infeasible cluster -> GpuSpecialistLease.start_async raises RayInfeasibleError."""
     fake = _InfeasibleFakeRay(gpus=0.0, has_serving_slot=False)
-    monkeypatch.setitem(sys.modules, "ray", fake)
+    _install_infeasible_ray(monkeypatch, fake)
     monkeypatch.setattr(rb, "get_ray_backend", lambda: _StubBackendP2())
 
     lease = rs.GpuSpecialistLease(num_gpus=4)

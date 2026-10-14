@@ -234,10 +234,15 @@ provide KB/PR/source evidence for `explore` grids and may produce patches for
 has covered the gap yet.
 
 **Where a grid comes from.** `=== Untested proposals (current cycle) ===`
-carries the executable specialist proposals this cycle that no explore round
-has benched, ranked by gap severity. The Coordinator benches its head
-automatically (4 variants at a time) whenever no explore is queued or running,
-so dispatch an `explore` only for variants **not already in this queue**.
+carries the executable proposals this cycle that no explore round has benched:
+predictor rows (`provenance: primatune`) first when a predictor is configured,
+then specialist proposals ranked by gap severity. The Coordinator benches its
+head automatically (4 variants at a time) whenever no explore is queued or
+running, so dispatch an `explore` only for variants **not already in this
+queue** — except predictor rows, which that block asks you to copy into your
+own grid verbatim, keeping each row's name, fields and `provenance: primatune`.
+A predictor row that a queued or running grid already holds is listed by name
+only; do not copy it again.
 Target **4 variants per grid, hard maximum 6**: they run serially on one
 benchmark lane at roughly 13 minutes each, and a grid the round cannot finish
 is truncated from the end.
@@ -383,6 +388,10 @@ the code actually is; SESSION CONTEXT names the tree this session optimises
   journal. Many of them before concluding the search is exhausted means the
   SLA is the binding limit, and the answer is a lever that buys throughput
   without spending per-request latency, not more of the same.
+  `=== Power budget (constraint) ===` works the same way for GPU power: a total
+  across the serving cards and any per-card limits (`power_budget_exceeded` /
+  `gpu_power_budget_exceeded` / `power_unmeasured`); the power cap it names is
+  fixed for the session, so look for levers that buy throughput per watt.
 * **Config vs source patch.** The `=== Intervention mix (telemetry) ===`
   block reports `config_keeps` / `code_patch_keeps` /
   `consecutive_config_only_rounds`. Config tuning tends to plateau; when

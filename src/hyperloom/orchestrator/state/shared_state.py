@@ -126,8 +126,8 @@ def resolve_graded_comparison(
         VERDICT_REVERT,
         axis_of,
         holds_within_band,
+        constraint_veto_reason,
         incomparability_reason,
-        latency_veto_reason,
         output_tput_of,
         perf_snapshot_from_mapping,
         resolve_grading_anchor_perf,
@@ -136,10 +136,8 @@ def resolve_graded_comparison(
     from hyperloom.inference_optimizer.grading import resolved_grading
 
     on_intvty, noise_pct = resolved_grading(state)
-    # The session's latency ceiling vetoes a candidate the gain gates would KEEP, on whichever axis graded it. A
-    # candidate that already lost carries no veto, so the ledger names the gate that actually refused it.
-    budget_ms = float(getattr(state, "latency_budget_ms", 0.0))
-    observed_ms = measurement.get("e2el_mean_ms") if isinstance(measurement, Mapping) else None
+    # The session's constraints (latency, power) veto a candidate the gain gates would KEEP, on whichever axis graded
+    # it. A candidate that already lost carries no veto, so the ledger names the gate that actually refused it.
     degrade_reason = ""
     if on_intvty:
         if anchor_perf is not None:
@@ -163,7 +161,7 @@ def resolve_graded_comparison(
             incomparable = incomparability_reason(cand_perf, ref_perf)
             if incomparable:
                 refused.append(incomparable)
-            sla_veto = "" if refused else latency_veto_reason(observed_ms, budget_ms)
+            sla_veto = "" if refused else constraint_veto_reason(measurement, state)
             return GradedComparison(
                 objective=GRADED_INTVTY_P50,
                 candidate=axis_of(cand_perf, GRADED_INTVTY_P50),
@@ -190,7 +188,7 @@ def resolve_graded_comparison(
         verdict = VERDICT_REVERT
     else:
         verdict = VERDICT_KEEP if gain is not None and gain >= keep_threshold_pct else VERDICT_REVERT
-    sla_veto = latency_veto_reason(observed_ms, budget_ms) if verdict == VERDICT_KEEP else ""
+    sla_veto = constraint_veto_reason(measurement, state) if verdict == VERDICT_KEEP else ""
     return GradedComparison(
         objective=GRADED_OUTPUT,
         candidate=candidate,
@@ -395,6 +393,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # Ceiling on mean end-to-end latency (ms) from ``--max-latency-ms``; 0.0 leaves KEEP behaviour unchanged. The
     # only copy of the budget: it is written once at launch and archived with the session, so a resume restores it.
     latency_budget_ms: float = 0.0
+    power_budget_w: float = 0.0  # --max-power-w: total W over the serving cards; 0.0 is off. Archived, like latency.
+    power_budget_per_gpu_w: dict[str, float] = field(default_factory=dict)  # --max-per-gpu-power-w {GPU id: W}
     # The GPU power settings the session is measured under: {"declared": {power_cap_w, perf_level}, "observed":
     # {gpu: {power_cap_w, perf_level}}}. Read at launch and asserted on resume; never set by the optimizer.
     gpu_power_settings: dict[str, Any] = field(default_factory=dict)
@@ -771,6 +771,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # Wall-clock budget share per phase: seeded once at phase init from CLI flags/defaults with disabled phases' shares
     # redistributed, raised by ``extend_*_budget`` hints, kept on resume unless a --*-pct flag is given.
     phase_budget_pct: dict[str, float] = field(default_factory=dict)
+    # ``phase_budget_pct`` as seeded, before any hint raised it: what the hints' ceiling is read off. Re-seeded with it.
+    configured_phase_budget_pct: dict[str, float] = field(default_factory=dict)
     # Cyclic phase machine macro-cycle counter (cycle 0 is the first pass; each SWEEP→FRAMEWORK_AGENT loopback
     # increments it).
     macro_cycle: int = 0
@@ -780,6 +782,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # no-gain cycle streak.
     gain_at_cycle_start: float = 0.0
     no_gain_cycle_streak: int = 0
+    # Decision points the PrimaTune predictor has been asked about (``predictor/pump.py``); each is asked once.
+    predictor_asked_keys: list[str] = field(default_factory=list)
     # Cyclic bottleneck re-direction: set when a cyclic config plateau winds the cycle down; the next macro-cycle's
     # prompt surfaces a redirect advisory off ``last_cycle_bottleneck``.
     pending_bottleneck_switch: bool = False
@@ -1456,14 +1460,16 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         return hint
 
     def bump_phase_budget(self, hint: str) -> None:
-        """Raise the phase share an ``extend_*_budget`` hint names."""
+        """Raise the phase share an ``extend_*_budget`` hint names, to at most a cap above its configured share."""
         from ..phases.machine_state import PHASE_FRAMEWORK_AGENT, PHASE_KERNEL_AGENT, apply_escalate_budget_bump
 
         phase = {
             ESCALATE_HINT_EXTEND_EXPLORE_BUDGET: PHASE_FRAMEWORK_AGENT,
             ESCALATE_HINT_EXTEND_KERNEL_BUDGET: PHASE_KERNEL_AGENT,
         }[hint]
-        self.phase_budget_pct = apply_escalate_budget_bump(self.phase_budget_pct, phase=phase)
+        self.phase_budget_pct = apply_escalate_budget_bump(
+            self.phase_budget_pct, phase=phase, configured_budget_pct=self.configured_phase_budget_pct
+        )
 
     def discard_pending_escalate_hint(self) -> str:
         """Pop the pending hint because an unrelated transition fired without acting on it; returns cleared hint."""
