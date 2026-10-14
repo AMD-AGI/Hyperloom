@@ -463,8 +463,8 @@ def _focus_candidate_discovery_specialist(inp: SpecialistPromptInputs) -> list[s
         "     when either is missing.",
         "",
         "**What to return**",
-        "- ``proposal_set`` entries carrying (repo, number, title, diff_url,",
-        "  head_sha, files touched, verdict, route, and the reason for each).",
+        "- ``proposal_set`` entries in the upstream-candidate schema of",
+        "  Section 8, one per candidate, each with its verdict and route.",
         "  Orchestration reads these and proposes ``integrate_patch`` for the",
         "  ones it wants benched; you do not apply or benchmark anything.",
         "",
@@ -2144,10 +2144,77 @@ def _section_source_hint(inp: SpecialistPromptInputs) -> list[str]:
 
 
 # Section 8 — Output protocol
+_EXPLORE_VARIANT_EXAMPLE: dict[str, Any] = {
+    "name": "<unique-in-round>",
+    "extra_args": "--example-flag value",
+    "extra_envs": {"EXAMPLE_ENV": "1"},
+    "remove_args": ["--harmful-base-flag"],
+    "unset_envs": ["HARMFUL_BASE_ENV"],
+    "args_mode": "append",
+    "reason": "why this might help the gap",
+    "atomic": False,
+    "kb_evidence": [],
+    "pr_evidence": [],
+    "source_evidence": [],
+    "experience_citations": [],
+}
+_EXPLORE_VARIANT_CONTRACT: tuple[str, ...] = (
+    (
+        "- ``proposal_set`` items reuse the explore variant schema: "
+        "``extra_args`` / ``extra_envs`` add or override knobs, "
+        "``remove_args`` removes inherited server flags before appending, "
+        "``unset_envs`` removes inherited env vars before applying "
+        "``extra_envs``, and ``args_mode='replace'`` runs without "
+        "inherited server args. Use removal fields when a user/base "
+        "knob may be harmful; do not simulate deletion by adding an "
+        "unrelated flag."
+    ),
+    (
+        "- ``atomic`` (bool, default false): set ``true`` when this "
+        "proposal's ``extra_args`` / ``extra_envs`` are a **coupled set "
+        "that only works together** and MUST be benched as one variant "
+        "(e.g. enabling MTP/speculative decoding REQUIRES a paired "
+        "``--gpu-memory-utilization`` reduction so the draft model has "
+        "headroom — split them and each half OOMs or shows no gain). "
+        "Orchestration is instructed to dispatch an ``atomic`` proposal "
+        "verbatim, without splitting, dropping, or re-deriving its flags. "
+        "Put every co-required flag in THIS one entry; do not scatter a "
+        "coupling across several proposals."
+    ),
+)
+# The keys FrameworkPhase._candidates_from_discovery_proposals reads.
+_UPSTREAM_CANDIDATE_EXAMPLE: dict[str, Any] = {
+    "pr_url": "https://github.com/<owner>/<repo>/pull/<number>",
+    "head_sha": "<PR head commit>",
+    "repo": "<owner>/<repo>",
+    "pr_number": 0,
+    "title": "<PR title>",
+    "diff_url": "<unified diff URL>",
+    "framework": "<framework the PR targets>",
+    "changed_files": [],
+    "verdict": "worth_a_bench",
+    "route": "author_via_specialist",
+    "reason": "why this candidate addresses the gap",
+}
+_UPSTREAM_CANDIDATE_CONTRACT: tuple[str, ...] = (
+    (
+        "- ``proposal_set`` items are upstream candidates, not explore "
+        "variants: an item with neither ``pr_url`` nor ``head_sha`` is "
+        "dropped. ``verdict`` is ``already_present``, ``not_applicable`` or "
+        "``worth_a_bench``; ``route`` is ``direct_framework`` or "
+        "``author_via_specialist``."
+    ),
+)
+
+
 def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
     """Render Section 8 (output protocol) of the specialist prompt."""
     workspace = inp.workspace_path or "<workspace>"
     authors_patches = _authors_patches(inp)
+    if inp.domain.key == "candidate_discovery_specialist":
+        proposal_example, proposal_contract = _UPSTREAM_CANDIDATE_EXAMPLE, _UPSTREAM_CANDIDATE_CONTRACT
+    else:
+        proposal_example, proposal_contract = _EXPLORE_VARIANT_EXAMPLE, _EXPLORE_VARIANT_CONTRACT
 
     exit_lines = [
         "**Exit — file write:** write the ``specialist_done`` payload (schema below) to",
@@ -2232,22 +2299,7 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
                 "payload": {
                     "gap_canonical_id": inp.gap_canonical_id or "<echo from dispatch>",
                     "domain": inp.domain.key,
-                    "proposal_set": [
-                        {
-                            "name": "<unique-in-round>",
-                            "extra_args": "--example-flag value",
-                            "extra_envs": {"EXAMPLE_ENV": "1"},
-                            "remove_args": ["--harmful-base-flag"],
-                            "unset_envs": ["HARMFUL_BASE_ENV"],
-                            "args_mode": "append",
-                            "reason": "why this might help the gap",
-                            "atomic": False,
-                            "kb_evidence": [],
-                            "pr_evidence": [],
-                            "source_evidence": [],
-                            "experience_citations": [],
-                        }
-                    ],
+                    "proposal_set": [proposal_example],
                     **({"patches_written": [], "experience_citations": []} if authors_patches else {}),
                     "summary": "≤ 500 char overview of what you tried this round",
                     "confidence": 0.6,
@@ -2262,28 +2314,7 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
         "",
         "Field contract:",
         "",
-        (
-            "- ``proposal_set`` items reuse the explore variant schema: "
-            "``extra_args`` / ``extra_envs`` add or override knobs, "
-            "``remove_args`` removes inherited server flags before appending, "
-            "``unset_envs`` removes inherited env vars before applying "
-            "``extra_envs``, and ``args_mode='replace'`` runs without "
-            "inherited server args. Use removal fields when a user/base "
-            "knob may be harmful; do not simulate deletion by adding an "
-            "unrelated flag."
-        ),
-        (
-            "- ``atomic`` (bool, default false): set ``true`` when this "
-            "proposal's ``extra_args`` / ``extra_envs`` are a **coupled set "
-            "that only works together** and MUST be benched as one variant "
-            "(e.g. enabling MTP/speculative decoding REQUIRES a paired "
-            "``--gpu-memory-utilization`` reduction so the draft model has "
-            "headroom — split them and each half OOMs or shows no gain). "
-            "Orchestration is instructed to dispatch an ``atomic`` proposal "
-            "verbatim, without splitting, dropping, or re-deriving its flags. "
-            "Put every co-required flag in THIS one entry; do not scatter a "
-            "coupling across several proposals."
-        ),
+        *proposal_contract,
         (
             "- ``proposal_set``: **2 entries is the norm, 4 the hard cap.** You "
             "are a curator, not a brainstormer: rank by expected gain x "
