@@ -417,6 +417,89 @@ async def test_compose_prompt_kernel(coord: Coordinator) -> None:
     assert "SESSION_DIR=" in out_k
 
 
+#: ``(heading, owner, producer)`` for every advisory the orchestration prompt carries, in the order it carries
+#: them. A heading of ``None`` is a block the prompt emits without one. Section order is prompt content: the
+#: model reads these in this sequence, so a reordering is a change to what it was asked.
+_ORCHESTRATION_ADVISORIES = (
+    ("=== Warm start (Recipe KB T0) ===", "shared_state", "to_warm_start_summary"),
+    ("=== Current gaps ===", "shared_state", "to_gaps_summary"),
+    (None, "conversation", "_specialist_findings_block"),
+    ("=== External target gap (advisory) ===", "conversation", "target_gap_advisory_block"),
+    ("=== Specialist proposal scores (advisory) ===", "shared_state", "to_proposal_scores_summary"),
+    ("=== Priors-match (advisory ordering) ===", "conversation", "_priors_match_advisory_block"),
+    ("=== Intervention mix (telemetry) ===", "shared_state", "to_intervention_mix_summary"),
+    ("=== Plateau advisory ===", "conversation", "plateau_advisory_block"),
+    ("=== Bottleneck redirect (advisory) ===", "conversation", "_bottleneck_redirect_advisory_block"),
+    ("=== Acceptance threshold (advisory) ===", "conversation", "_acceptance_threshold_advisory_block"),
+    ("=== Discarded escalation hint (advisory) ===", "conversation", "_discarded_escalate_hint_advisory_block"),
+)
+
+
+def _stub_advisories(coord: Coordinator, monkeypatch) -> list[str]:
+    """Give every advisory a unique non-empty block; return the markers in prompt order."""
+    owners = {"shared_state": coord.shared_state, "conversation": coord.conversation}
+    markers = []
+    for _heading, owner, producer in _ORCHESTRATION_ADVISORIES:
+        marker = f"<{producer}>"
+        monkeypatch.setattr(owners[owner], producer, lambda marker=marker: marker)
+        markers.append(marker)
+    return markers
+
+
+@pytest.mark.asyncio
+async def test_compose_prompt_keeps_the_orchestration_advisory_order(coord: Coordinator, monkeypatch) -> None:
+    markers = _stub_advisories(coord, monkeypatch)
+
+    prompt = await coord.conversation.compose_prompt("orchestration")
+
+    for (heading, _owner, _producer), marker in zip(_ORCHESTRATION_ADVISORIES, markers):
+        assert (marker if heading is None else f"{heading}\n{marker}") in prompt
+    positions = [prompt.index(marker) for marker in markers]
+    assert positions == sorted(positions)
+
+
+@pytest.mark.asyncio
+async def test_compose_prompt_withholds_every_advisory_from_a_reviewer(coord: Coordinator, monkeypatch) -> None:
+    markers = _stub_advisories(coord, monkeypatch)
+
+    prompt = await coord.conversation.compose_prompt("critic")
+
+    assert [marker for marker in markers if marker in prompt] == []
+
+
+@pytest.mark.asyncio
+async def test_compose_prompt_drops_the_heading_of_an_advisory_that_produced_nothing(
+    coord: Coordinator,
+    monkeypatch,
+) -> None:
+    _stub_advisories(coord, monkeypatch)
+    monkeypatch.setattr(coord.conversation, "plateau_advisory_block", lambda: "")
+
+    prompt = await coord.conversation.compose_prompt("orchestration")
+
+    assert "=== Plateau advisory ===" not in prompt
+    # The trajectory digest is shown only on a plateau, so it goes with it.
+    assert "=== Trajectory review (advisory) ===" not in prompt
+    assert "=== Bottleneck redirect (advisory) ===" in prompt
+
+
+@pytest.mark.asyncio
+async def test_compose_prompt_puts_the_trajectory_review_under_the_plateau_advisory(
+    coord: Coordinator,
+    monkeypatch,
+) -> None:
+    from hyperloom.orchestrator.knowledge import trajectory_reviewer
+
+    _stub_advisories(coord, monkeypatch)
+    monkeypatch.setattr(trajectory_reviewer, "build_trajectory_digest", lambda *_a, **_k: "<trajectory>")
+
+    prompt = await coord.conversation.compose_prompt("orchestration")
+
+    assert (
+        "=== Plateau advisory ===\n<plateau_advisory_block>\n=== Trajectory review (advisory) ===\n<trajectory>"
+    ) in prompt
+
+
 # -- advisory blocks -------------------------------------------------------
 def test_advisory_blocks_disabled_return_empty(coord: Coordinator) -> None:
     coord.shared_state.target_advisory_enabled = False
