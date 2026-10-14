@@ -67,7 +67,7 @@ def test_completed_child_session_is_read(tmp_path: Path) -> None:
     assert [kept.patch_file for kept in artifacts.kept_patches] == [session / "enablement" / "1.patch"]
     assert artifacts.framework_root == tmp_path / "framework"
     assert artifacts.roofline_ceiling == {MB_FAKE_PRIMARY_METRIC: ROOFLINE_PEAK}
-    assert (artifacts.framework_version, artifacts.gpu_type) == ("0.4.1", "mi355x")
+    assert artifacts.framework_version == "0.4.1"
     assert artifacts.dropped == ("setup_commands",)
     assert artifacts.setup_script == session / "reports" / "enablement" / "enablement_setting.sh"
 

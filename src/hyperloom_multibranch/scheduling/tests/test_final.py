@@ -47,7 +47,7 @@ from hyperloom_multibranch.toolbox.fake_model import Fate
 
 METRIC = "output_throughput"
 CONC = 64
-WORKLOAD = Workload("org/model", "vllm", 8, 1024, 1024, CONC, "fp8")
+WORKLOAD = Workload("org/model", "vllm", 8, 1024, 1024, CONC, "fp8", "mi355x")
 START = 100.0
 INTEGRATION = FinalCandidate("integration", INTEGRATION_BRANCH, "i1", 1040.0)
 BRANCH = FinalCandidate("best_branch", "b02", "c7", 1060.0)

@@ -86,7 +86,6 @@ class PreludeArtifacts:
     base_sha_by_root: Mapping[str, str]
     framework_root: Path | None
     framework_version: str
-    gpu_type: str
     roofline_ceiling: Mapping[str, float]
     dropped: tuple[str, ...]
     setup_script: Path | None
@@ -130,7 +129,6 @@ def read_prelude(session_dir: Path) -> PreludeArtifacts:
         base_sha_by_root=_text_map(enablement.get("base_sha_by_root"), "enablement.base_sha_by_root"),
         framework_root=framework_root,
         framework_version=str(state.get("framework_version") or ""),
-        gpu_type=str(state.get("gpu_type") or ""),
         roofline_ceiling=_roofline_ceiling(state.get("roofline_snapshots"), state.get("baseline_roofline_ceiling")),
         dropped=_dropped(enablement, accepted),
         setup_script=session_dir / MB_SETUP_SCRIPT if (session_dir / MB_SETUP_SCRIPT).is_file() else None,

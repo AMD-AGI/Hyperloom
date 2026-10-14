@@ -17,6 +17,7 @@ import logging
 import sys
 from pathlib import Path
 
+from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.inference_optimizer.session.paths import workspace_root
 from hyperloom_multibranch.scheduling.budget import MB_DEFAULT_MAX_HOURS, MB_MIN_PRELUDE_HOURS
 from hyperloom_multibranch.scheduling.clock import Clock
@@ -45,7 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
     run = commands.add_parser("run", help="Run one session: PRELUDE, EXPLORE, FINAL and CLOSE.")
     run.add_argument("--model", required=True, help="Model path or id.")
     run.add_argument("--framework", required=True, help="Inference framework, e.g. vllm or sglang.")
-    run.add_argument("--gpu-type", default="", help="GPU type; detected by the baseline prelude when left out.")
+    run.add_argument("--gpu-type", required=True, choices=sorted(AMD_GPU_DISPATCH_IDENTITIES), help="GPU type.")
     for name in ("--tp", "--isl", "--osl", "--conc"):
         run.add_argument(name, type=int, required=True)
     run.add_argument("--precision", required=True)

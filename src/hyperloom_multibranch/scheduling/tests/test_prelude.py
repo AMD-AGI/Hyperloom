@@ -48,7 +48,16 @@ NOW = 1_000_000.0
 STUBBORN_CHILD = ("sh", "-c", "trap '' TERM; sleep 60")
 #: Clock seconds left before the hard stop when the stubborn child's PRELUDE is cancelled.
 NEAR_HARD_STOP_SECONDS = 0.4
-WORKLOAD = Workload(model="/models/Llama-3-8B", framework="sglang", tp=1, isl=1024, osl=1024, conc=16, precision="bf16")
+WORKLOAD = Workload(
+    model="/models/Llama-3-8B",
+    framework="sglang",
+    tp=1,
+    isl=1024,
+    osl=1024,
+    conc=16,
+    precision="bf16",
+    gpu_type="mi355x",
+)
 
 
 class StubbornRegistry(ProcessRegistry):
@@ -149,9 +158,7 @@ def test_child_command_uses_only_options_the_main_flow_declares(tmp_path: Path) 
     assert argv[argv.index("--enablement") + 1] == "launch"
     assert argv[argv.index("--max-hours") + 1] == "1.500000"
     assert argv[argv.index(LAUNCH_FLAG) + 1] == str(tmp_path / "launch.json")
-    assert "--gpu-type" not in argv
-    gpu = prelude_argv(Workload("m", "vllm", 8, 1, 1, 4, "fp8", gpu_type="mi355x"), 1.0, tmp_path / "l.json")
-    assert gpu[gpu.index("--gpu-type") + 1] == "mi355x"
+    assert argv[argv.index("--gpu-type") + 1] == "mi355x"
 
 
 async def test_finished_child_roots_the_session_before_any_baseline_test(tmp_path: Path) -> None:

@@ -80,11 +80,10 @@ class PreludeResult:
 def prelude_argv(workload: Workload, max_hours: float, launch_info: Path) -> tuple[str, ...]:
     """The child's command line: ``hyperloom optimize`` on the interpreter this package runs on."""
 
-    gpu = ("--gpu-type", workload.gpu_type) if workload.gpu_type else ()
     return (
         sys.executable,
         *HYPERLOOM_COMMAND,
-        *("--model", workload.model, "--framework", workload.framework, *gpu),
+        *("--model", workload.model, "--framework", workload.framework, "--gpu-type", workload.gpu_type),
         *("--tp", str(workload.tp), "--isl", str(workload.isl), "--osl", str(workload.osl)),
         *("--conc", str(workload.conc), "--precision", workload.precision),
         *PRELUDE_FLAGS,
@@ -229,7 +228,7 @@ def _session_profile(session_id: str, workload: Workload, artifacts: PreludeArti
     return SessionProfile(
         session_id=session_id,
         model=workload.model,
-        hardware=workload.gpu_type or artifacts.gpu_type,
+        hardware=workload.gpu_type,
         framework=workload.framework,
         framework_version=artifacts.framework_version,
         precision=workload.precision,

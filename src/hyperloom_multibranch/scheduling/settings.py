@@ -15,7 +15,7 @@ from hyperloom_multibranch.scheduling.roster import RosterCaps
 class Workload:
     """The fixed InferenceX workload, spelled as the single-lineage command line spells it.
 
-    ``gpu_type`` is empty when the main flow is left to detect it.
+    ``gpu_type`` is named, not detected: the toolbox writes it into every measurement spec, built before PRELUDE runs.
     """
 
     model: str
@@ -25,7 +25,7 @@ class Workload:
     osl: int
     conc: int
     precision: str
-    gpu_type: str = ""
+    gpu_type: str
 
     @property
     def model_basename(self) -> str:

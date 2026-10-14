@@ -69,7 +69,7 @@ from hyperloom_multibranch.scheduling.tests.child_sessions import child_with_pat
 
 START = 1_700_000_000.0
 CONC = 16
-WORKLOAD = Workload("/models/Llama-3-8B", "sglang", 1, 1024, 1024, CONC, "bf16")
+WORKLOAD = Workload("/models/Llama-3-8B", "sglang", 1, 1024, 1024, CONC, "bf16", "mi355x")
 SETTINGS = RunSettings(WORKLOAD, max_hours=0.5, caps=RosterCaps(3, 2, 8), judge_interval_seconds=600.0)
 STEP_SECONDS = 30.0
 CLAIM_TTL_SECONDS = 1e6

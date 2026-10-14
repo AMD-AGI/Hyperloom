@@ -77,15 +77,15 @@ def workload_environment(workload: Workload) -> Mapping[str, str]:
     renders the canonical measurement and every test's points with; ``hyperloom optimize`` exports the same, the
     model resolved to the directory a server loads it from."""
 
-    environment = {
+    return {
         "FRAMEWORK": workload.framework,
         "MODEL_PATH": resolve_serving_model_path(workload.model),
         "TP": str(workload.tp),
         "ISL": str(workload.isl),
         "OSL": str(workload.osl),
         "PRECISION": workload.precision,
+        "GPU_TYPE": workload.gpu_type,
     }
-    return {**environment, "GPU_TYPE": workload.gpu_type} if workload.gpu_type else environment
 
 
 def local_peers(host: MeasurementHost, lifecycles: LifecycleFactory, setup: PeerSetup) -> Peers:

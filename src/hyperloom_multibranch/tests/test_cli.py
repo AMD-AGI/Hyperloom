@@ -19,7 +19,7 @@ from hyperloom_multibranch.scheduling.settings import RunSettings, Workload
 
 WORKLOAD_ARGS = [
     "--model", "/models/Llama-3-8B", "--framework", "vllm", "--tp", "2", "--isl", "1024", "--osl", "512",
-    "--conc", "16", "--precision", "fp8",
+    "--conc", "16", "--precision", "fp8", "--gpu-type", "mi300x",
 ]  # fmt: skip
 
 
@@ -55,7 +55,7 @@ def test_help_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
 
 def test_run_defaults() -> None:
     assert _settings() == RunSettings(
-        Workload("/models/Llama-3-8B", "vllm", 2, 1024, 512, 16, "fp8"),
+        Workload("/models/Llama-3-8B", "vllm", 2, 1024, 512, 16, "fp8", "mi300x"),
         max_hours=MB_DEFAULT_MAX_HOURS,
         caps=RosterCaps(max_branches=4, max_k_per_branch=2, max_parallel_tests=4),
         judge_interval_seconds=600.0,
@@ -92,6 +92,8 @@ def test_parallel_tests_default_fills_the_machine() -> None:
         ["run", *WORKLOAD_ARGS, "--max-parallel-tests", "0"],
         ["run", *WORKLOAD_ARGS, "--judge-interval-sec", "0"],
         ["run", *WORKLOAD_ARGS, "--conc", "many"],
+        ["run", *WORKLOAD_ARGS[:-2]],
+        ["run", *WORKLOAD_ARGS, "--gpu-type", "h100"],
     ],
 )
 def test_usage_errors_exit_two(argv: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
