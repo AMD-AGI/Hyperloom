@@ -1949,9 +1949,10 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             lane: LanePlan,
             lane_dir: Path,
             serialized_driver: Path,
-        ) -> None:
+        ) -> str | None:
             # The session edits the lane's own copy, so it is handed that copy's kernel rather than the canonical one.
-            await agent_factory(str(lane_dir), str(serialized_driver))(
+            # Its return value is the Implementer's rationale, recorded with the iteration that measures the lane.
+            return await agent_factory(str(lane_dir), str(serialized_driver))(
                 str(lane_dir / kernel_relative),
                 _lane_prompt(lane.plan, serialized_driver=serialized_driver),
             )
@@ -4524,6 +4525,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                             "plan": lane.plan,
                             "diff": lane.diff,
                             "agent_profile_id": lane.agent_profile_id,
+                            "rationale": lane.rationale,
                         }
                         for lane in self._lane_queue
                     ]
@@ -4547,6 +4549,8 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                     plan=str(entry["plan"]),
                     diff=str(entry["diff"]),
                     agent_profile_id=str(entry.get("agent_profile_id") or ""),
+                    # A queue written before rationales were kept has none.
+                    rationale=str(entry.get("rationale") or ""),
                 )
                 for entry in record["candidates"]
             ]
@@ -5656,7 +5660,9 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         elif queued_lane is not None:
             unmeasured_result = None
             commit_hash = ""
-            rationale = f"lane {queued_lane.lane_id} of a fan-out round"
+            rationale = f"lane {queued_lane.lane_id} of a fan-out round" + (
+                f": {queued_lane.rationale}" if queued_lane.rationale else ""
+            )
             attempt_source = self._read_kernel_source()
             attempt_diff = self._working_tree_diff()
             reusable_benchmark = None
