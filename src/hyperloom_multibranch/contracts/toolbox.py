@@ -1,0 +1,135 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""The toolbox as the other multi-branch modules call it: submit a test, cancel it, read the queue.
+
+A module hands the toolbox a :class:`~hyperloom.contracts.measurement.TestRequest` and gets the ``request_id`` back
+once the toolbox accepted it. Acceptance is the toolbox's checks of design section 4.17 (the request validates, the
+parent recipe is read, the delta applies, the measurement surface matches), so a request that cannot be measured is
+refused here and never queues. The result does not come back through this interface: the toolbox writes it to the
+notebook, which pushes it to the submitting branch's inbox. The writer protocols it uses are the notebook's
+:class:`~hyperloom_multibranch.contracts.notebook.interfaces.TestRecordSink` (``write_request`` when it accepts,
+``write_result`` when the result is in, ``write_withdrawal`` when it takes a test back unmeasured) and
+:class:`~hyperloom_multibranch.contracts.notebook.interfaces.NodeHealth` (the quarantine list); both are re-exported
+so a toolbox is wired against one module.
+
+Like the notebook's interfaces, every method is a coroutine.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Protocol
+
+from hyperloom.contracts.measurement import PRIORITY_HIGHEST, PRIORITY_LOWEST, TestRequest
+from hyperloom_multibranch.contracts.notebook.interfaces import NodeHealth, TestRecordSink
+
+
+class ToolboxError(Exception):
+    """Base of every error the toolbox raises."""
+
+
+class RequestRejected(ToolboxError):
+    """The toolbox refused the request; it was not queued and nothing was written. ``reason`` says why.
+
+    ``code`` is a short stable name of the refused check, for a caller that reacts to one of them
+    (:data:`REJECTION_CODES`); ``reason`` is the text for a person or a log.
+    """
+
+    def __init__(self, reason: str, code: str = "invalid_request") -> None:
+        super().__init__(f"{code}: {reason}")
+        self.reason = reason
+        self.code = code
+
+
+class Backpressure(ToolboxError):
+    """The branch has too many tests queued; the request was not accepted and the caller submits it again later."""
+
+    def __init__(self, branch_id: str, queued: int, limit: int) -> None:
+        super().__init__(f"branch {branch_id!r} has {queued} tests queued, the limit is {limit}")
+        self.branch_id = branch_id
+        self.queued = queued
+        self.limit = limit
+
+
+class UnknownTestRequest(ToolboxError, LookupError):
+    """The toolbox accepted no request with this ``request_id``."""
+
+
+#: The checks acceptance can refuse on, as the ``code`` of :class:`RequestRejected`.
+REJECTION_CODES = (
+    "invalid_request",  # the request breaks the contract of 3.7
+    "unknown_parent",  # the parent commit is not in the experiment repository
+    "delta_not_applicable",  # the delta does not fit the parent recipe, or a patch does not apply
+    "base_image_mismatch",  # the recipe's base image is not the active framework image
+    "surface_mismatch",  # the measurement surface differs from the active canonical one
+    "unknown_retest",  # ``retest_of`` names no accepted request
+)
+
+
+class CancelOutcome(str, Enum):
+    WITHDRAWN = "withdrawn"  # queued or running and not finished: the toolbox wrote a withdrawal
+    FINISHED = "finished"  # the result was already written; nothing was changed
+
+
+@dataclass(frozen=True)
+class QueueState:
+    """What the scheduler and the dashboard read: queue lengths by priority, running tests by branch, cold start time.
+
+    ``queued_by_priority`` has a key for every priority of 0 to 4, ``running_by_branch`` only for branches with a test
+    running. ``queued_by_branch`` counts what each branch has waiting, the number the backpressure limit applies to.
+    ``cold_start_seconds`` is the recent sandbox cold start (``None`` before the first one).
+    """
+
+    queued_by_priority: Mapping[int, int] = field(default_factory=lambda: dict.fromkeys(_PRIORITIES, 0))
+    running_by_branch: Mapping[str, int] = field(default_factory=dict)
+    queued_by_branch: Mapping[str, int] = field(default_factory=dict)
+    cold_start_seconds: float | None = None
+
+    @property
+    def queued(self) -> int:
+        return sum(self.queued_by_priority.values())
+
+    @property
+    def running(self) -> int:
+        return sum(self.running_by_branch.values())
+
+
+_PRIORITIES = range(PRIORITY_HIGHEST, PRIORITY_LOWEST + 1)
+
+
+class Toolbox(Protocol):
+    """The toolbox's external interface; the real one and the fake implement it."""
+
+    async def submit_test(self, request: TestRequest) -> str:
+        """Accept ``request`` and return its ``request_id``; the result is written to the notebook later.
+
+        Acceptance is synchronous: when this returns, the request is in the toolbox's submit log and in the queue and
+        the notebook holds its request row. Raises :class:`RequestRejected` when a check of acceptance refuses it and
+        :class:`Backpressure` when the branch's queue is full (nothing is written in either case).
+        """
+
+    async def cancel(self, request_id: str) -> CancelOutcome:
+        """Take back a test that has not finished; the toolbox writes the withdrawal. Idempotent.
+
+        A finished test stays as it is (:attr:`CancelOutcome.FINISHED`); an unknown id raises
+        :class:`UnknownTestRequest`.
+        """
+
+    async def queue_state(self) -> QueueState: ...
+
+
+__all__ = [
+    "REJECTION_CODES",
+    "Backpressure",
+    "CancelOutcome",
+    "NodeHealth",
+    "QueueState",
+    "RequestRejected",
+    "TestRecordSink",
+    "Toolbox",
+    "ToolboxError",
+    "UnknownTestRequest",
+]
