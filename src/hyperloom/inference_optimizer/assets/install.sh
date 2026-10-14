@@ -174,12 +174,15 @@ EOF
 }
 
 MAGPIE_REPO="${MAGPIE_REPO:-https://github.com/AMD-AGI/Magpie.git}"
-# Pin Magpie to a release commit/tag instead of the default branch. Operators can
-# re-pin with MAGPIE_REF=<tag|sha>. Must stay at or above e6833b8183c6c41adf6038252337550876ca0433
-# (Magpie v0.2.0), which copies benchmark scripts via ``_copy_benchmark_script_atomic``.
+# Tracks the feat/physical-ai branch: it carries Strix Halo (radeon8060s)
+# fixes this physical-ai checkout depends on (vllm_radeon8060s.sh's existence,
+# its profiling-headroom memory-utilization default) beyond what's on main.
+# Operators can re-pin with MAGPIE_REF=<branch|tag|sha>; must stay at or above
+# e6833b8183c6c41adf6038252337550876ca0433 (Magpie v0.2.0), which copies
+# benchmark scripts via ``_copy_benchmark_script_atomic``.
 # ``ensure_magpie()`` skips pip when ``import Magpie`` already succeeds, so a pre-existing
 # tree on disk is NOT upgraded to this ref — only fresh installs and explicit reinstalls are.
-MAGPIE_REF="${MAGPIE_REF:-e6833b8183c6c41adf6038252337550876ca0433}"
+MAGPIE_REF="${MAGPIE_REF:-feat/physical-ai}"
 MAGPIE_PACKAGE_SPEC="${MAGPIE_PACKAGE_SPEC:-magpie-eval @ git+${MAGPIE_REPO}@${MAGPIE_REF}}"
 
 # aiperf (SemiAnalysis AgentX benchmark client) — pinned to an immutable commit

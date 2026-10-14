@@ -127,9 +127,12 @@ def test_io_install_magpie_reinstall_is_idempotent_guarded() -> None:
     assert "pip install" in body, "reinstall path must still exist for the miss case"
 
 
-def test_default_magpie_pin_is_v020_and_consistent() -> None:
+def test_default_magpie_pin_tracks_physical_ai_and_is_consistent() -> None:
     install_text = IO_INSTALL.read_text(encoding="utf-8")
     preflight_text = PREFLIGHT.read_text(encoding="utf-8")
 
-    assert f'MAGPIE_REF="${{MAGPIE_REF:-{MAGPIE_V020_COMMIT}}}"' in install_text
-    assert f'os.environ.get("MAGPIE_REF", "{MAGPIE_V020_COMMIT}")' in preflight_text
+    assert 'MAGPIE_REF="${MAGPIE_REF:-feat/physical-ai}"' in install_text
+    assert 'os.environ.get("MAGPIE_REF", "feat/physical-ai")' in preflight_text
+    # The floor install.sh documents (MAGPIE_REF must stay at or above this commit) is
+    # still named in its comment, even though the default itself now tracks a branch.
+    assert MAGPIE_V020_COMMIT in install_text
