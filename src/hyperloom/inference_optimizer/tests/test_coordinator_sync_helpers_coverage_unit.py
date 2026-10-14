@@ -500,6 +500,7 @@ def test_warm_recipe_proven_items(coord: Coordinator) -> None:
 
 
 def test_collect_workload_tags(coord: Coordinator, monkeypatch) -> None:
+    """The whole tag dict, because these keys are the warm-start reader's filter."""
     monkeypatch.delenv("EP", raising=False)
     monkeypatch.delenv("PP", raising=False)
     ss = coord.shared_state
@@ -508,13 +509,103 @@ def test_collect_workload_tags(coord: Coordinator, monkeypatch) -> None:
     ss.model_name = "Qwen3-32B"
     ss.precision = "fp8"
     ss.tp = 8
+    ss.ep = 4
     ss.conc = 64
+    ss.isl = 1024
+    ss.osl = 128
+    ss.max_model_len = 8192
+    ss.stack_fingerprint_meta = {
+        "sglang": "0.4.6",
+        "rocm": "6.3.1",
+        "aiter": "0.1.2",
+        "image_digest": "sha256:abc",
+    }
+    ss.baseline_workload_extra = {
+        "max_running_requests": 256,
+        "max_num_seqs": 128,
+        # A disabled toggle is a tag, not an absence.
+        "chunked_prefill_enabled": False,
+        "enable_torch_compile": True,
+        "quant_scheme": "  fp8_block  ",
+        "workload_mode": "serving",
+    }
+
+    assert coord.recipe_journal._collect_workload_tags() == {
+        "framework": "sglang",
+        "model_class": "moe",
+        "model_name": "Qwen3-32B",
+        "precision": "fp8",
+        "tp": 8,
+        "ep": 4,
+        "conc": 64,
+        "isl": 1024,
+        "osl": 128,
+        "max_model_len": 8192,
+        "framework_version": "0.4.6",
+        "rocm_version": "6.3.1",
+        "aiter_version": "0.1.2",
+        "image_digest": "sha256:abc",
+        "max_running_requests": 256,
+        "max_num_seqs": 128,
+        "chunked_prefill_enabled": False,
+        "enable_torch_compile": True,
+        "quant_scheme": "fp8_block",
+        "workload_mode": "serving",
+    }
+
+
+def test_workload_tags_read_ep_from_the_env_only_without_a_shared_state_value(coord: Coordinator, monkeypatch) -> None:
+    """``$EP`` is the legacy-SDK fallback; ``$PP`` is the only source there is for ``pp``."""
+    monkeypatch.setenv("EP", "2")
+    monkeypatch.setenv("PP", " 3 ")
+    ss = coord.shared_state
+    ss.ep = 8
+
     tags = coord.recipe_journal._collect_workload_tags()
-    assert tags["framework"] == "sglang"
-    assert tags["model_class"] == "moe"
-    assert tags["tp"] == 8
-    assert tags["conc"] == 64
-    assert tags["precision"] == "fp8"
+    assert tags["ep"] == 8
+    assert tags["pp"] == 3
+
+    ss.ep = 0
+    assert coord.recipe_journal._collect_workload_tags()["ep"] == 2
+
+
+def test_an_unparseable_or_non_positive_parallelism_env_is_not_tagged(coord: Coordinator, monkeypatch) -> None:
+    monkeypatch.setenv("EP", "two")
+    monkeypatch.setenv("PP", "0")
+
+    tags = coord.recipe_journal._collect_workload_tags()
+    assert "ep" not in tags
+    assert "pp" not in tags
+
+
+def test_workload_tags_survive_a_resumed_null_fingerprint_meta(coord: Coordinator, monkeypatch) -> None:
+    """``state.json`` is a system boundary: a null where a dict is declared must not raise here."""
+    monkeypatch.delenv("EP", raising=False)
+    monkeypatch.delenv("PP", raising=False)
+    ss = coord.shared_state
+    ss.framework = "vllm"
+    ss.model_class = ""
+    ss.stack_fingerprint_meta = None
+    ss.baseline_workload_extra = None
+
+    assert coord.recipe_journal._collect_workload_tags() == {"framework": "vllm"}
+
+
+def test_unknown_and_empty_fingerprint_entries_are_not_tagged(coord: Coordinator, monkeypatch) -> None:
+    monkeypatch.delenv("EP", raising=False)
+    monkeypatch.delenv("PP", raising=False)
+    ss = coord.shared_state
+    ss.framework = "vllm"
+    ss.model_class = ""
+    ss.stack_fingerprint_meta = {
+        "vllm": "unknown",
+        "rocm": "",
+        "aiter": "unknown",
+        "image_digest": "sha256:abc",
+    }
+
+    tags = coord.recipe_journal._collect_workload_tags()
+    assert tags == {"framework": "vllm", "image_digest": "sha256:abc"}
 
 
 def test_build_kernel_optimizations_from_state(coord: Coordinator) -> None:
