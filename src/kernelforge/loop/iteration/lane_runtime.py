@@ -142,9 +142,10 @@ class LaneRuntimeMixin:
             lane: LanePlan,
             lane_dir: Path,
             serialized_driver: Path,
-        ) -> None:
+        ) -> str | None:
             # The session edits the lane's own copy, so it is handed that copy's kernel rather than the canonical one.
-            await agent_factory(str(lane_dir), str(serialized_driver))(
+            # Its return value is the Implementer's rationale, recorded with the iteration that measures the lane.
+            return await agent_factory(str(lane_dir), str(serialized_driver))(
                 str(lane_dir / kernel_relative),
                 _lane_prompt(lane.plan, serialized_driver=serialized_driver),
             )
@@ -413,6 +414,7 @@ class LaneRuntimeMixin:
                             "plan": lane.plan,
                             "diff": lane.diff,
                             "agent_profile_id": lane.agent_profile_id,
+                            "rationale": lane.rationale,
                         }
                         for lane in self._lane_queue
                     ]
@@ -436,6 +438,8 @@ class LaneRuntimeMixin:
                     plan=str(entry["plan"]),
                     diff=str(entry["diff"]),
                     agent_profile_id=str(entry.get("agent_profile_id") or ""),
+                    # A queue written before rationales were kept has none.
+                    rationale=str(entry.get("rationale") or ""),
                 )
                 for entry in record["candidates"]
             ]

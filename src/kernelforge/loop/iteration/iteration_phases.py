@@ -138,7 +138,9 @@ class IterationPhasesMixin:
         elif queued_lane is not None:
             unmeasured_result = None
             commit_hash = ""
-            rationale = f"lane {queued_lane.lane_id} of a fan-out round"
+            rationale = f"lane {queued_lane.lane_id} of a fan-out round" + (
+                f": {queued_lane.rationale}" if queued_lane.rationale else ""
+            )
             attempt_source = self._read_kernel_source()
             attempt_diff = self._working_tree_diff()
             reusable_benchmark = None

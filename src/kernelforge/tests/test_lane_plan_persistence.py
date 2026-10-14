@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import time
 from pathlib import Path
@@ -561,6 +562,34 @@ def test_a_candidate_a_round_bought_outlives_the_process(tmp_path, monkeypatch):
         ("1", "widen the loads", "patch-1"),
         ("2", "stage LDS", "patch-2"),
     ]
+
+
+def test_a_queued_candidate_keeps_its_rationale_across_processes(tmp_path, monkeypatch):
+    """A resumed process measures the lane, so it must still know why the lane made its change."""
+    loop, workspace = _loop(tmp_path, monkeypatch)
+    loop._lane_queue = [
+        LaneResult(lane_id="1", plan="widen the loads", diff="patch-1", rationale="wider loads halve the LDS traffic")
+    ]
+    loop._persist_lane_queue()
+
+    later = _reopen(workspace, tmp_path, monkeypatch)
+    later._restore_lane_queue()
+
+    assert [(item.lane_id, item.rationale) for item in later._lane_queue] == [
+        ("1", "wider loads halve the LDS traffic")
+    ]
+
+
+def test_a_queue_written_before_rationales_were_kept_still_restores(tmp_path, monkeypatch):
+    loop, workspace = _loop(tmp_path, monkeypatch)
+    path = loop._lane_queue_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"candidates": [{"lane_id": "1", "plan": "widen", "diff": "patch-1"}]}))
+
+    later = _reopen(workspace, tmp_path, monkeypatch)
+    later._restore_lane_queue()
+
+    assert [(item.lane_id, item.diff, item.rationale) for item in later._lane_queue] == [("1", "patch-1", "")]
 
 
 def test_a_measured_candidate_is_not_left_for_the_next_process(tmp_path, monkeypatch):

@@ -211,6 +211,28 @@ async def test_one_failed_lane_does_not_cost_the_round(tmp_path):
     assert results[1].produced_candidate is True
 
 
+async def test_a_lane_keeps_the_rationale_its_session_returned(tmp_path):
+    """The iteration that measures a lane records why that lane's Implementer made its change."""
+    workspace = _workspace(tmp_path)
+
+    async def session(lane: LanePlan, lane_dir: Path, _driver: Path) -> str | None:
+        if lane.lane_id == "3":
+            raise RuntimeError("backend refused the session")
+        (lane_dir / "kernel.py").write_text(f"VALUE = {lane.lane_id}\n")
+        return "  wider loads halve the LDS traffic\n" if lane.lane_id == "1" else None
+
+    results = await run_lanes(
+        workspace_dir=str(workspace),
+        lanes=[LanePlan("1", "a"), LanePlan("2", "b"), LanePlan("3", "c")],
+        session=session,
+        parent_dir=str(tmp_path),
+        driver=DRIVER_NAME,
+    )
+
+    assert [item.rationale for item in results] == ["wider loads halve the LDS traffic", "", ""]
+    assert results[2].error.startswith("RuntimeError")
+
+
 async def test_a_lane_that_staged_its_edit_still_reports_a_candidate(tmp_path):
     """``git add`` is routine in a session, so a staged edit is still a candidate."""
     workspace = _workspace(tmp_path)

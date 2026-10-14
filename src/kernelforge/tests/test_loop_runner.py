@@ -855,6 +855,53 @@ def _fan_out_iteration(tmp_path, monkeypatch, rounds, **plan_kwargs):
     ]
 
 
+def test_the_iteration_that_measures_a_lane_records_that_lanes_rationale(tmp_path, monkeypatch):
+    loop, workspace = _make_loop(tmp_path, monkeypatch)
+    loop.ic = replace(loop.ic, lanes=2)
+    monkeypatch.setattr(
+        loop, "_run_orchestration", _counting_plan(loop, workspace, [], plans=("widen the loads", "stage LDS"))
+    )
+
+    def factory(lane_dir, _serialized_driver):
+        async def agent(_kernel_file, _prompt):
+            lane = Path(lane_dir).name
+            path = Path(lane_dir) / "kernel.py"
+            path.write_text(path.read_text().replace("return 1", f"return 1{lane}"))
+            return f"lane {lane} expects this to beat best"
+
+        return agent
+
+    async def measured(iteration, plan=""):
+        return IterationResult(
+            iteration=iteration,
+            duration_sec=0.01,
+            validation_passed=True,
+            validation_summary="passed",
+            wall_ms=1.0,
+            mean_case_speedup=1.0,
+            kept=False,
+            bench_detail={"case_times": {"case": 1.0}},
+        )
+
+    monkeypatch.setattr(loop, "run_one_iteration", measured)
+
+    asyncio.run(
+        loop.run(
+            runner_module.LoopAgents(
+                agent_fn=_no_change_agent,
+                agent_factory=factory,
+                orchestration_service=object(),
+                supervisor_fn=_unused_supervisor,
+            )
+        )
+    )
+
+    [event] = [e for e in LoopStateStore(str(workspace)).read_events() if e.get("type") == "iteration_result"]
+    assert event["rationale"] == "lane 1 of a fan-out round: lane 1 expects this to beat best"
+    # The sibling stays queued with its own rationale for the iteration that measures it.
+    assert [(item.lane_id, item.rationale) for item in loop._lane_queue] == [("2", "lane 2 expects this to beat best")]
+
+
 def test_a_planning_outage_is_not_paid_for_twice(tmp_path, monkeypatch):
     """Retrying an outage inside the iteration it stopped cannot clear it.
 
