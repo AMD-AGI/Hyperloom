@@ -191,7 +191,11 @@ incident response or launch validation:
   optimization loop:
   `python -m hyperloom recover --session-dir <SD>`.
   To keep optimizing instead, inspect the failed run and explicitly use
-  `optimize --resume-from <SD>`.
+  `optimize --resume-from <SD>`. When that resume is blocked by ownership a
+  lost pod or legacy task recorded, `recover --confirm-scope-gone OWNER_SCOPE`
+  or `recover --confirm-stopped TASK_ID`, each with `--confirmation-reason TEXT`,
+  records the cleanup confirmation instead of rebuilding artifacts; see
+  [Disaster recovery](operations.md#scenario-a-pod-was-oom-killed-mid-session).
 
 ---
 

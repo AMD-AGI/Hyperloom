@@ -1183,8 +1183,8 @@ def _build_parser() -> argparse.ArgumentParser:
     rec = sub.add_parser(
         "recover",
         parents=[common],
-        help="Rebuild + push the session_breakdown for a session that exited "
-        "abnormally (crash / SIGKILL) so its breakdown lands on Langfuse.",
+        help="Rebuild + push the session_breakdown to Langfuse for a session that exited abnormally (crash / SIGKILL); "
+        "or, with --confirm-scope-gone / --confirm-stopped, record the cleanup confirmation a blocked resume asks for.",
     )
     rec.add_argument(
         "--session-dir",
