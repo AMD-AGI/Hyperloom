@@ -398,6 +398,16 @@ brief:
   Coordinator requests one at most once per macro cycle in FRAMEWORK_AGENT,
   in research mode when source patches cannot be authored. Unset, Orchestration
   is not offered the domain and the policy gate denies it.
+- **PrimaTune predictor rows**: with `--primatune-endpoint` and
+  `--primatune-mode active`, the predictor's proposals lead the untested-proposal
+  block. Orchestration copies the ones worth a slot into its next `explore` grid
+  verbatim, keeping each row's name, fields and `provenance: primatune`; a row
+  that a queued or running grid already holds is listed by name only. A source
+  change arrives as a mandate: dispatch
+  `delegate{action_name='specialist', params={scope:'freeform', mode:'patch', primatune_mandate_id:'<id>', task_description:'<one line>'}}`
+  with the id copied verbatim, and the Coordinator substitutes the mandate's own
+  text for the one-line `task_description`. A `primatune_mandate_id` no predictor round
+  carries is denied (`unknown_primatune_mandate`) rather than dispatched.
 - **Plateau**: both arms' signals are computed every tick and rendered in the
   orchestration prompt. One arm dry is advisory — the phase stays open on the
   other lever. **Both arms dry advances the phase** via
@@ -753,6 +763,7 @@ and the operator's stated value is lost:
 | Quantization prelude | `--quantize` | Optional. Natural-language quantization request. Runs the quantization-agent once before the loop and rewrites `--model` to the quantized model. See Step 2b. Never runs on a resume. |
 | Env pins | `--extra-env NAME=VALUE` | Repeatable; forward **every** one verbatim as its own flag (do not drop any or fold into the `Environment:` block). The CLI persists them in `state.json` and serializes them into `$INFERENCE_OPTIMIZER_EXTRA_ENV`; a dropped pin is lost silently — e.g. a missing `SGLANG_USE_AITER=0` leaves the explore aiter-MoE filter blind. A `--resume-from` re-exports the persisted set, so re-pass them only to change the set. |
 | Operator-defined specialist | `--custom-specialist-prompt-file` + `--custom-specialist-description` | Only when the prompt asks for a specialist with its own focus. Write the operator's focus text verbatim to a file and pass its path (max 16 KiB); the description is one line (max 200 chars) telling Orchestration when to pick it. Pass both or neither. The CLI refuses them (exit 2) together with `--orch-prompt`, `--no-framework-agent`, `--research-lane-capacity 0` or `--reset-state`. Persisted in `state.json`; a `--resume-from` keeps the stored definition, so re-pass both only to replace it, or pass `--reset-state` alone to clear it. |
+| PrimaTune predictor | `--primatune-endpoint` + `--primatune-mode` | Only when the prompt names a PrimaTune service. `active` queues its proposals for benchmarking; `shadow`, the default with an endpoint, only logs them; `off` disables an endpoint the environment exports. Not persisted: a `--resume-from` relaunch needs the flags again unless the shell exports `HYPERLOOM_PREDICTOR_ENDPOINT` / `HYPERLOOM_PREDICTOR_MODE`. See `docs/reference/primatune-predictor.md`. |
 
 ### Step 2b — Optional quantization prelude (`--quantize`)
 

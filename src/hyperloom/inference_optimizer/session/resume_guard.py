@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import dataclass, field
 import sqlite3
 from collections.abc import Callable
 from contextlib import closing
@@ -73,82 +74,117 @@ def _terminal_uncertainty(state: str, history_json: str) -> str:
     return "no recorded terminal execution transition"
 
 
+@dataclass
+class _Diagnostics:
+    """The records that block a resume, capped at the first 20.
+
+    The cap is the concept: an operator needs to see what is holding the
+    session, not every row of it, and the tail is reported as a count.
+    """
+
+    lines: list[str] = field(default_factory=list)
+    total: int = 0
+
+    def blocked(self, task: object, lane: object, holder: object, reason: str) -> None:
+        self.total += 1
+        if len(self.lines) < 20:
+            self.lines.append(f"task={_label(task)} lane={_label(lane)} holder={_label(holder)}: {reason}")
+
+    def report(self) -> list[str]:
+        if self.total > len(self.lines):
+            self.lines.append(f"{self.total - len(self.lines)} additional ownership records omitted")
+        return self.lines
+
+
+def _scan_leases(db: sqlite3.Connection, owner_scope: str, found: _Diagnostics) -> tuple[set[str], list[sqlite3.Row]]:
+    """Judge the execution leases; return the locally owned tasks and the round leases.
+
+    A round lease is held by a bring-up round rather than an execution, so it
+    is judged later, against the rounds that are actually open.
+    """
+    columns = _lease_columns(db)
+    query = (
+        "SELECT lane, holder_id, task_id, pid, owner_scope FROM leases"
+        if "owner_scope" in columns
+        else "SELECT lane, holder_id, task_id, pid, '' AS owner_scope FROM leases"
+    )
+    local_tasks: set[str] = set()
+    round_leases: list[sqlite3.Row] = []
+    for row in db.execute(query):
+        if row["lane"] == "bringup_round":
+            round_leases.append(row)
+            continue
+        try:
+            pid = int(row["pid"] or 0)
+        except (TypeError, ValueError):
+            pid = 0
+        if same_environment(row["owner_scope"], owner_scope) and pid > 0:
+            local_tasks.add(row["task_id"])
+            continue
+        found.blocked(row["task_id"], row["lane"], row["holder_id"], "execution owner scope or PID is unobservable")
+    return local_tasks, round_leases
+
+
+def _scan_gpu_leases(db: sqlite3.Connection, found: _Diagnostics) -> None:
+    """A held GPU lease means a worker's exit was never proven."""
+    for row in db.execute("SELECT gpu_id, holder_id, task_id FROM gpu_leases"):
+        found.blocked(
+            row["task_id"],
+            "unknown",
+            row["holder_id"],
+            f"gpu_leases gpu_id={_label(row['gpu_id'])}: worker exit is unproven",
+        )
+
+
+def _scan_tasks(db: sqlite3.Connection, local_tasks: set[str]) -> tuple[dict, dict]:
+    """Every task record, and the ones whose running execution nothing here owns."""
+    tasks: dict = {}
+    uncertainties: dict = {}
+    for row in db.execute("SELECT task_id, state, requires_lanes, history FROM tasks"):
+        tasks[row["task_id"]] = row
+        if row["state"] == "running" and row["task_id"] not in local_tasks:
+            uncertainties[row["task_id"]] = "running execution has no observable local owner"
+    return tasks, uncertainties
+
+
+def _scan_open_rounds(db: sqlite3.Connection, tasks: dict, uncertainties: dict, found: _Diagnostics) -> dict:
+    """Judge each OPEN bring-up round against its holder; return round -> holder."""
+    open_rounds: dict = {}
+    for row in db.execute("SELECT round_id, holder_task_id FROM bringup_rounds WHERE state='open'"):
+        open_rounds[row["round_id"]] = row["holder_task_id"]
+        task_id = row["holder_task_id"]
+        if task_id not in tasks:
+            found.blocked(task_id, "bringup_round", row["round_id"], "OPEN round has no holder execution record")
+            continue
+        task = tasks[task_id]
+        reason = uncertainties.get(task_id) or _terminal_uncertainty(task["state"], task["history"])
+        if reason:
+            found.blocked(task_id, "bringup_round", row["round_id"], reason)
+    return open_rounds
+
+
 def _inspect(db: sqlite3.Connection, owner_scope: str) -> list[str]:
     tables = _tables(db)
-    diagnostics: list[str] = []
-    total = 0
-
-    def blocked(task: object, lane: object, holder: object, reason: str) -> None:
-        nonlocal total
-        total += 1
-        if len(diagnostics) < 20:
-            diagnostics.append(f"task={_label(task)} lane={_label(lane)} holder={_label(holder)}: {reason}")
-
+    found = _Diagnostics()
     local_tasks: set[str] = set()
     round_leases: list[sqlite3.Row] = []
     if "leases" in tables:
-        columns = _lease_columns(db)
-        query = (
-            "SELECT lane, holder_id, task_id, pid, owner_scope FROM leases"
-            if "owner_scope" in columns
-            else "SELECT lane, holder_id, task_id, pid, '' AS owner_scope FROM leases"
-        )
-        for row in db.execute(query):
-            if row["lane"] == "bringup_round":
-                round_leases.append(row)
-                continue
-            try:
-                pid = int(row["pid"] or 0)
-            except (TypeError, ValueError):
-                pid = 0
-            if same_environment(row["owner_scope"], owner_scope) and pid > 0:
-                local_tasks.add(row["task_id"])
-                continue
-            blocked(row["task_id"], row["lane"], row["holder_id"], "execution owner scope or PID is unobservable")
-
+        local_tasks, round_leases = _scan_leases(db, owner_scope, found)
     if "gpu_leases" in tables:
-        for row in db.execute("SELECT gpu_id, holder_id, task_id FROM gpu_leases"):
-            blocked(
-                row["task_id"],
-                "unknown",
-                row["holder_id"],
-                f"gpu_leases gpu_id={_label(row['gpu_id'])}: worker exit is unproven",
-            )
-
-    tasks = {}
-    uncertainties = {}
-    if "tasks" in tables:
-        for row in db.execute("SELECT task_id, state, requires_lanes, history FROM tasks"):
-            tasks[row["task_id"]] = row
-            if row["state"] == "running" and row["task_id"] not in local_tasks:
-                uncertainties[row["task_id"]] = "running execution has no observable local owner"
-
-    open_rounds = {}
-    if "bringup_rounds" in tables:
-        for row in db.execute("SELECT round_id, holder_task_id FROM bringup_rounds WHERE state='open'"):
-            open_rounds[row["round_id"]] = row["holder_task_id"]
-            task_id = row["holder_task_id"]
-            if task_id not in tasks:
-                blocked(task_id, "bringup_round", row["round_id"], "OPEN round has no holder execution record")
-            else:
-                task = tasks[task_id]
-                reason = uncertainties.get(task_id) or _terminal_uncertainty(task["state"], task["history"])
-                if reason:
-                    blocked(task_id, "bringup_round", row["round_id"], reason)
+        _scan_gpu_leases(db, found)
+    tasks, uncertainties = _scan_tasks(db, local_tasks) if "tasks" in tables else ({}, {})
+    open_rounds = _scan_open_rounds(db, tasks, uncertainties, found) if "bringup_rounds" in tables else {}
 
     for row in round_leases:
         if open_rounds.get(row["holder_id"]) != row["task_id"]:
-            blocked(row["task_id"], row["lane"], row["holder_id"], "round ownership has no matching OPEN round")
+            found.blocked(row["task_id"], row["lane"], row["holder_id"], "round ownership has no matching OPEN round")
 
     for task_id, reason in uncertainties.items():
         lanes = json.loads(tasks[task_id]["requires_lanes"])
         if not isinstance(lanes, list):
             lanes = []
-        blocked(task_id, ",".join(str(lane)[:80] for lane in lanes[:3]) or "unknown", "unknown", reason)
-
-    if total > len(diagnostics):
-        diagnostics.append(f"{total - len(diagnostics)} additional ownership records omitted")
-    return diagnostics
+        found.blocked(task_id, ",".join(str(lane)[:80] for lane in lanes[:3]) or "unknown", "unknown", reason)
+    return found.report()
 
 
 def _other_scopes(db: sqlite3.Connection, owner_scope: str) -> list[str]:
@@ -223,25 +259,16 @@ def _task_leases(db: sqlite3.Connection, tables: set[str], task_id: str, owner_s
     return [{"lane": row["lane"], "holder_id": row["holder_id"]} for row in rows if row["lane"] != "bringup_round"]
 
 
-def _confirm_task_stopped_in_transaction(
-    db: sqlite3.Connection,
-    *,
-    task_id: str,
-    reason: str,
-    operator: str,
-    confirmed_at: str,
-    owner_scope: str = "",
-) -> dict:
-    """Update one task using the caller's existing IMMEDIATE transaction and Row factory."""
-    tables = _tables(db)
-    if "tasks" not in tables:
-        raise CleanupConfirmationError("confirmation requires an existing tasks table")
-    task = db.execute("SELECT state, history FROM tasks WHERE task_id=?", (task_id,)).fetchone()
-    if task is None:
-        raise CleanupConfirmationError(f"task={_label(task_id)} does not exist")
+# The states a task cannot leave. A confirmation acts on one of these, or on a
+# task still in flight -- never on anything else.
+TERMINAL_TASK_STATES = frozenset({"succeeded", "failed", "cancelled"})
+IN_FLIGHT_TASK_STATES = frozenset({"queued", "running"})
+
+
+def _confirmable_history(task: sqlite3.Row) -> list:
+    """The task's history, once its state and shape allow a confirmation at all."""
     state = task["state"]
-    terminal = state in {"succeeded", "failed", "cancelled"}
-    if not terminal and state not in {"queued", "running"}:
+    if state not in TERMINAL_TASK_STATES | IN_FLIGHT_TASK_STATES:
         raise CleanupConfirmationError("task has an unsupported state")
     try:
         history = json.loads(task["history"])
@@ -249,16 +276,12 @@ def _confirm_task_stopped_in_transaction(
         raise CleanupConfirmationError("task history is unreadable") from exc
     if not isinstance(history, list):
         raise CleanupConfirmationError("task history must be a list")
+    return history
 
-    leases = _task_leases(db, tables, task_id, owner_scope)
-    gpu_leases = []
-    if "gpu_leases" in tables:
-        gpu_leases = [
-            dict(row) for row in db.execute("SELECT gpu_id, holder_id FROM gpu_leases WHERE task_id=?", (task_id,))
-        ]
 
-    result = {"status": "nothing_to_confirm", "task_id": task_id, "released_leases": 0, "released_gpu_leases": 0}
-    manual_index = next(
+def _prior_confirmation_index(history: list) -> int | None:
+    """Where an earlier operator confirmation sits in this history, if one does."""
+    return next(
         (
             index
             for index, entry in enumerate(history)
@@ -268,39 +291,70 @@ def _confirm_task_stopped_in_transaction(
         ),
         None,
     )
-    if manual_index is not None:
-        if not terminal or leases or gpu_leases:
-            raise CleanupConfirmationError("new execution or resources exist after the prior operator confirmation")
-        for index, entry in enumerate(history[manual_index:], start=manual_index):
-            if not isinstance(entry, dict):
-                continue
-            evidence = entry.get("evidence")
-            if isinstance(evidence, dict) and (
-                (index > manual_index and "outcome" in evidence)
-                or evidence.get("cleanup_confirmed") is False
-                or evidence.get("reason") == "cancelled_in_flight"
-                or ("lease_ttl_sec" in evidence and "dead_pid" not in evidence)
-            ):
-                raise CleanupConfirmationError("later evidence contradicts the prior operator confirmation")
-            transition = entry.get("to")
-            if transition is not None and not isinstance(transition, str):
-                raise CleanupConfirmationError("task history contains an invalid transition")
-            if transition in {"queued", "running"}:
-                raise CleanupConfirmationError("later execution contradicts the prior operator confirmation")
-        if _terminal_uncertainty(state, task["history"]):
-            raise CleanupConfirmationError("prior operator confirmation no longer establishes cleanup")
-        result["status"] = "already_confirmed"
-        return result
 
-    uncertain_round = False
-    if terminal and "bringup_rounds" in tables:
-        open_round = db.execute(
-            "SELECT 1 FROM bringup_rounds WHERE state='open' AND holder_task_id=? LIMIT 1", (task_id,)
-        ).fetchone()
-        uncertain_round = open_round is not None and bool(_terminal_uncertainty(state, task["history"]))
-    if state != "running" and not leases and not gpu_leases and not uncertain_round:
-        return result
 
+def _entry_contradicts_confirmation(entry: object, *, index: int, manual_index: int) -> str:
+    """Why this history entry outlives the prior confirmation, or \"\".
+
+    Anything recorded after the confirmation that reports an outcome, denies
+    cleanup, or moves the task back into flight means the confirmation no
+    longer describes the task.
+    """
+    if not isinstance(entry, dict):
+        return ""
+    evidence = entry.get("evidence")
+    if isinstance(evidence, dict) and (
+        (index > manual_index and "outcome" in evidence)
+        or evidence.get("cleanup_confirmed") is False
+        or evidence.get("reason") == "cancelled_in_flight"
+        or ("lease_ttl_sec" in evidence and "dead_pid" not in evidence)
+    ):
+        return "later evidence contradicts the prior operator confirmation"
+    transition = entry.get("to")
+    if transition is not None and not isinstance(transition, str):
+        return "task history contains an invalid transition"
+    if transition in IN_FLIGHT_TASK_STATES:
+        return "later execution contradicts the prior operator confirmation"
+    return ""
+
+
+def _check_prior_confirmation_still_holds(
+    task: sqlite3.Row, history: list, *, manual_index: int, terminal: bool, leases: list, gpu_leases: list
+) -> None:
+    """Refuse when anything since the prior confirmation outlived it."""
+    if not terminal or leases or gpu_leases:
+        raise CleanupConfirmationError("new execution or resources exist after the prior operator confirmation")
+    for index, entry in enumerate(history[manual_index:], start=manual_index):
+        complaint = _entry_contradicts_confirmation(entry, index=index, manual_index=manual_index)
+        if complaint:
+            raise CleanupConfirmationError(complaint)
+    if _terminal_uncertainty(task["state"], task["history"]):
+        raise CleanupConfirmationError("prior operator confirmation no longer establishes cleanup")
+
+
+def _round_is_uncertain(db: sqlite3.Connection, tables: set, task: sqlite3.Row, task_id: str, terminal: bool) -> bool:
+    """Whether a still-open bring-up round leaves this terminal task's cleanup unproven."""
+    if not terminal or "bringup_rounds" not in tables:
+        return False
+    open_round = db.execute(
+        "SELECT 1 FROM bringup_rounds WHERE state='open' AND holder_task_id=? LIMIT 1", (task_id,)
+    ).fetchone()
+    return open_round is not None and bool(_terminal_uncertainty(task["state"], task["history"]))
+
+
+def _confirmation_entry(
+    *,
+    task_id: str,
+    state: str,
+    terminal: bool,
+    reason: str,
+    operator: str,
+    confirmed_at: str,
+    owner_scope: str,
+    leases: list,
+    gpu_leases: list,
+) -> dict:
+    """The history entry this confirmation records, and the transition it carries."""
     evidence = {
         "reason": "operator_confirmed_stopped",
         "cleanup_confirmed": True,
@@ -320,7 +374,20 @@ def _confirm_task_stopped_in_transaction(
     entry = {"ts": confirmed_at, "evidence": evidence}
     if not terminal:
         entry.update({"from": state, "to": "cancelled"})
-    history.append(entry)
+    return entry
+
+
+def _write_confirmation(
+    db: sqlite3.Connection,
+    *,
+    task_id: str,
+    history: list,
+    terminal: bool,
+    confirmed_at: str,
+    leases: list,
+    gpu_leases: list,
+) -> None:
+    """Persist the confirmed history, the cancellation it implies, and release what it freed."""
     if terminal:
         db.execute("UPDATE tasks SET history=? WHERE task_id=?", (json.dumps(history), task_id))
     else:
@@ -336,6 +403,70 @@ def _confirm_task_stopped_in_transaction(
         db.execute("DELETE FROM leases WHERE task_id=? AND lane IS NOT 'bringup_round'", (task_id,))
     if gpu_leases:
         db.execute("DELETE FROM gpu_leases WHERE task_id=?", (task_id,))
+
+
+def _confirm_task_stopped_in_transaction(
+    db: sqlite3.Connection,
+    *,
+    task_id: str,
+    reason: str,
+    operator: str,
+    confirmed_at: str,
+    owner_scope: str = "",
+) -> dict:
+    """Update one task using the caller's existing IMMEDIATE transaction and Row factory."""
+    tables = _tables(db)
+    if "tasks" not in tables:
+        raise CleanupConfirmationError("confirmation requires an existing tasks table")
+    task = db.execute("SELECT state, history FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+    if task is None:
+        raise CleanupConfirmationError(f"task={_label(task_id)} does not exist")
+    state = task["state"]
+    terminal = state in TERMINAL_TASK_STATES
+    history = _confirmable_history(task)
+
+    leases = _task_leases(db, tables, task_id, owner_scope)
+    gpu_leases = []
+    if "gpu_leases" in tables:
+        gpu_leases = [
+            dict(row) for row in db.execute("SELECT gpu_id, holder_id FROM gpu_leases WHERE task_id=?", (task_id,))
+        ]
+
+    result = {"status": "nothing_to_confirm", "task_id": task_id, "released_leases": 0, "released_gpu_leases": 0}
+    manual_index = _prior_confirmation_index(history)
+    if manual_index is not None:
+        _check_prior_confirmation_still_holds(
+            task, history, manual_index=manual_index, terminal=terminal, leases=leases, gpu_leases=gpu_leases
+        )
+        result["status"] = "already_confirmed"
+        return result
+
+    uncertain_round = _round_is_uncertain(db, tables, task, task_id, terminal)
+    if state != "running" and not leases and not gpu_leases and not uncertain_round:
+        return result
+
+    history.append(
+        _confirmation_entry(
+            task_id=task_id,
+            state=state,
+            terminal=terminal,
+            reason=reason,
+            operator=operator,
+            confirmed_at=confirmed_at,
+            owner_scope=owner_scope,
+            leases=leases,
+            gpu_leases=gpu_leases,
+        )
+    )
+    _write_confirmation(
+        db,
+        task_id=task_id,
+        history=history,
+        terminal=terminal,
+        confirmed_at=confirmed_at,
+        leases=leases,
+        gpu_leases=gpu_leases,
+    )
     result.update(status=_CONFIRMED, released_leases=len(leases), released_gpu_leases=len(gpu_leases))
     return result
 

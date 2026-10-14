@@ -15,7 +15,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Collection, Final, Mapping
 
-from hyperloom.inference_optimizer.grid_server_args import compose_server_args, dedupe_extra_server_args
+from hyperloom.inference_optimizer.grid_server_args import (
+    compose_server_args,
+    dedupe_extra_server_args,
+    strip_benchmark_harness_flags,
+)
 from hyperloom.orchestrator.lever import (
     LEVER_CONFIG,
     LEVER_ENABLEMENT,
@@ -371,12 +375,15 @@ def _apply_recipe_delta(
     mode = str(delta.get("args_mode") or "append").strip().lower()
     if mode not in {"append", "replace"}:
         raise RemoteRecipeValidationError(f"unsupported recipe args_mode: {mode!r}")
-    args = compose_server_args(
-        inherited_args="",
-        base_extra_args=str(config.get("extra_server_args") or ""),
-        variant_extra_args=str(delta.get("extra_server_args") or ""),
-        remove_args=delta.get("remove_args"),
-        args_mode=mode,
+    # A persisted recipe never carries a harness flag; composition itself no longer strips them.
+    args = strip_benchmark_harness_flags(
+        compose_server_args(
+            inherited_args="",
+            base_extra_args=str(config.get("extra_server_args") or ""),
+            variant_extra_args=str(delta.get("extra_server_args") or ""),
+            remove_args=delta.get("remove_args"),
+            args_mode=mode,
+        )
     )
     envs = dict(_mapping(config.get("extra_envs")))
     for key in delta.get("unset_envs") or []:
