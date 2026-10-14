@@ -10,13 +10,28 @@ sandboxes would collide; this template names the sandbox's own directories expli
 
 from __future__ import annotations
 
+import os
 import sys
 from collections.abc import Mapping
 from typing import Final
 
+from hyperloom.common.env_safety import is_secret_shaped_env_name
 from hyperloom.sandbox.local import LocalTemplate
 
-__all__ = ["RUNNER_SCRIPT", "local_runner_command", "local_runner_template"]
+__all__ = [
+    "IMAGE_ENV_NAMES",
+    "IMAGE_ENV_PREFIXES",
+    "RUNNER_SCRIPT",
+    "image_env",
+    "local_runner_command",
+    "local_runner_template",
+]
+
+#: Variables a framework image sets for itself (kernel backends, allocator and compiler settings, library paths). A
+#: hosted sandbox gets them from the image and its template; the local sandbox starts from an emptied environment, so
+#: the local template carries them, and a test then runs with the settings it would have in the image.
+IMAGE_ENV_PREFIXES: Final = ("SGLANG_", "HIP_", "HSA_", "AITER_", "ROCM", "PYTORCH_", "TORCH", "TRITON_")
+IMAGE_ENV_NAMES: Final = frozenset({"LD_LIBRARY_PATH"})
 
 #: ``$0`` is the python interpreter (the first argument after the script), so the script itself holds no path.
 RUNNER_SCRIPT: Final = (
@@ -25,6 +40,19 @@ RUNNER_SCRIPT: Final = (
     ' --spec-wait-sec "$1"'
 )
 _DEFAULT_SPEC_WAIT_SEC = 600
+
+
+def image_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The image's own variables in ``environ`` (the application's, which shares the image): a named list, never all of it.
+
+    Credential-shaped names stay out even when a prefix matches.
+    """
+    source = os.environ if environ is None else environ
+    return {
+        name: value
+        for name, value in source.items()
+        if (name in IMAGE_ENV_NAMES or name.startswith(IMAGE_ENV_PREFIXES)) and not is_secret_shaped_env_name(name)
+    }
 
 
 def local_runner_command(
@@ -44,7 +72,11 @@ def local_runner_template(
     envs: Mapping[str, str] | None = None,
     spec_wait_sec: int = _DEFAULT_SPEC_WAIT_SEC,
 ) -> LocalTemplate:
-    """A sealed, signing ``measurement`` template for ``gpus`` cards whose startup command is the runner."""
+    """A sealed, signing ``measurement`` template for ``gpus`` cards whose startup command is the runner.
+
+    ``envs`` are the template's fixed variables; when omitted they are the image's variables of this process
+    (:func:`image_env`), the local stand-in for what a hosted image and template set.
+    """
     return LocalTemplate(
         name,
         "measurement",
@@ -52,5 +84,5 @@ def local_runner_template(
         gpus=gpus,
         sealed=True,
         signing=True,
-        envs=dict(envs or {}),
+        envs=image_env() if envs is None else dict(envs),
     )
