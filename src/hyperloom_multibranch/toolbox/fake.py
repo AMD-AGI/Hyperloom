@@ -1,146 +1,183 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A toolbox that measures nothing: the same interface as the real one, with configurable, seeded results.
+"""A toolbox that measures nothing: the real toolbox with a fake executor and seeded, configurable results.
 
-:class:`FakeToolbox` implements :class:`~hyperloom_multibranch.contracts.toolbox.Toolbox`. It accepts a request
-(rejection and backpressure as the real one raises them), queues it by priority under the per-branch K and the global
-limit, runs attempts with the retry rules of design section 4.5 and writes the request, the result, a withdrawal or a
-quarantine to the notebook it is given. The values come from :mod:`hyperloom_multibranch.toolbox.fake_model`.
+:class:`FakeToolbox` is a :class:`~hyperloom_multibranch.toolbox.toolbox.RealToolbox` whose executor is
+:class:`FakeExecutor`. Acceptance, the queue (priorities, per-branch K, global limit, backpressure), the retry rules of
+design 4.5, quarantine, the submit log and the notebook writes are the real toolbox's own code, so a test written
+against the fake exercises the semantics the hosted executor will have. Only one attempt is faked: the fate drawn for
+it, the node it lands on and the values it measures come from :mod:`hyperloom_multibranch.toolbox.fake_model`, seeded
+by ``FakeToolboxConfig.seed`` and by the request and attempt number, so a run does not depend on the order tests ran in.
 
-The queue (:class:`RunQueue`) and the retry rules (:meth:`FakeToolbox._attempt_loop`) are the parts the real toolbox
-replaces; both are reached only through ``FakeToolbox``'s own methods, so a replacement keeps the interface above.
-
-Attempts and reruns, as the real toolbox does them: an infrastructure failure retries on a fresh sandbox, away from the
-nodes already tried, up to ``max_infra_retries`` times, then the result is ``measurement_failed``; an unclear failure
-reruns once, a failing rerun is ``candidate_failed`` and a passing one is the result, the first attempt counting as
-that node's infrastructure failure; a candidate failure is final; a failure of the measurement itself is final and
-never the candidate's. All attempts share the ``request_id`` and the submitter gets one result.
+Time is virtual: each attempt takes ``attempt_seconds`` on a clock that only attempts advance, so results carry
+timestamps and GPU seconds and nothing sleeps.
 """
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
-import uuid
-from collections import deque
+import tempfile
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Protocol
 
-from hyperloom.contracts.measurement import (
-    Attempt,
-    Purpose,
-    TestKind,
-    TestRequest,
-    TestResult,
-    Validity,
-)
+from hyperloom.contracts.measurement import TestKind, TestRequest, TestResult, Validity
+from hyperloom.contracts.recipe import Recipe
+from hyperloom_multibranch.contracts.notebook.interfaces import ClaimService, RecordSearch
 from hyperloom_multibranch.contracts.notebook.records import QuarantineEvent, Withdrawal
-from hyperloom_multibranch.contracts.notebook.vocab import QuarantineAction
-from hyperloom_multibranch.contracts.toolbox import (
-    Backpressure,
-    CancelOutcome,
-    QueueState,
-    RequestRejected,
-    UnknownTestRequest,
-)
+from hyperloom_multibranch.contracts.toolbox import CancelOutcome, QueueState, RequestRejected
+from hyperloom_multibranch.toolbox.attempts import MeasurementRefused, TestJob
 from hyperloom_multibranch.toolbox.fake_model import (
     AttemptOutcome,
-    Fate,
     FakeMeasurer,
     FakeToolboxConfig,
+    Fate,
 )
-
-#: Used when a request leaves ``priority`` empty; ``baseline``, ``health`` and ``final`` have none in the design (the
-#: scheduler gives them), so the fake takes a middle one, the integration one for the two the run waits on.
-DEFAULT_PRIORITY = {
-    Purpose.CONFIRM: 0,
-    Purpose.REPRO: 1,
-    Purpose.INTEGRATION: 2,
-    Purpose.PROFILE: 3,
-    Purpose.EXPLORE: 4,
-    Purpose.ACCURACY: 4,
-    Purpose.BASELINE: 2,
-    Purpose.FINAL: 2,
-    Purpose.HEALTH: 4,
-}
-#: Purposes that do not take up one of their branch's K slots.
-OUTSIDE_K = frozenset({Purpose.CONFIRM, Purpose.REPRO})
-CANCELLED_REASON = "cancelled by the submitter"
+from hyperloom_multibranch.toolbox.queue import QueuePolicy
+from hyperloom_multibranch.toolbox.submission_log import SubmissionLog
+from hyperloom_multibranch.toolbox.toolbox import RealToolbox
 
 
 class ToolboxNotebook(Protocol):
-    """What the fake writes to: the notebook's toolbox-side writers (``TestRecordSink`` and ``NodeHealth``)."""
+    """What the fake writes to: the notebook's ``TestRecordSink`` and ``NodeHealth`` (a ``LocalNotebook`` is one)."""
 
-    async def write_request(self, request: TestRequest) -> object: ...
+    async def write_request(self, request: object) -> object: ...
 
-    async def write_result(self, result: TestResult) -> object: ...
+    async def write_result(self, result: object) -> object: ...
 
     async def write_withdrawal(self, withdrawal: Withdrawal) -> object: ...
 
     async def record_quarantine(self, event: QuarantineEvent) -> None: ...
 
-
-@dataclass(frozen=True)
-class QueuedTest:
-    request_id: str
-    request: TestRequest
-    priority: int
-    queued_at: float
+    async def quarantined(self) -> Sequence[QuarantineEvent]: ...
 
 
-class RunQueue:
-    """Priority queue, first in first out within a priority; knows nothing of K or parallelism."""
+class MemoryNotebook:
+    """The notebook the fake writes to when it is given none: it keeps what it is told, in order."""
 
     def __init__(self) -> None:
-        self._entries: dict[int, deque[QueuedTest]] = {}
+        self.log: list[tuple[str, object]] = []
 
-    def push(self, entry: QueuedTest) -> None:
-        self._entries.setdefault(entry.priority, deque()).append(entry)
+    async def write_request(self, request: object) -> None:
+        self.log.append(("request", request))
 
-    def remove(self, request_id: str) -> bool:
-        for entries in self._entries.values():
-            for entry in entries:
-                if entry.request_id == request_id:
-                    entries.remove(entry)
-                    return True
-        return False
+    async def write_result(self, result: object) -> None:
+        self.log.append(("result", result))
 
-    def pop(self, eligible: Callable[[QueuedTest], bool]) -> QueuedTest | None:
-        """The most urgent, oldest entry ``eligible`` accepts; the others keep their place."""
+    async def write_withdrawal(self, withdrawal: Withdrawal) -> None:
+        self.log.append(("withdrawal", withdrawal))
 
-        for priority in sorted(self._entries):
-            for entry in self._entries[priority]:
-                if eligible(entry):
-                    self._entries[priority].remove(entry)
-                    return entry
+    async def record_quarantine(self, event: QuarantineEvent) -> None:
+        self.log.append(("quarantine", event))
+
+    async def quarantined(self) -> list[QuarantineEvent]:
+        return []
+
+
+class _Repo:
+    """Every parent exists unless ``parent_exists`` says otherwise; its recipe is the empty one on the fake's image."""
+
+    def __init__(self, image: str, parent_exists: Callable[[str], bool] | None) -> None:
+        self._image, self._exists = image, parent_exists
+
+    async def read_recipe(self, commit: str) -> Recipe:
+        if self._exists is not None and not self._exists(commit):
+            raise KeyError(commit)
+        return Recipe(base_image_digest=self._image)
+
+
+class _NoPlanner:
+    """No environment to compile, no measurement points and no surface to check: every request plans to nothing."""
+
+    def plan(self, request: TestRequest, parent: Recipe) -> object:
         return None
 
-    def entries(self) -> tuple[QueuedTest, ...]:
-        return tuple(entry for priority in sorted(self._entries) for entry in self._entries[priority])
+
+class FakeExecutor:
+    """One attempt, faked: draws the fate, picks the node (away from ``avoid_nodes``, best effort) and measures.
+
+    A drawn measurement failure is a :class:`MeasurementRefused`, as the hosted executor raises it for a rejected spec
+    or a result that fails verification. ``gate`` holds attempts back until it is set (``autorun=False``).
+    """
+
+    def __init__(self, config: FakeToolboxConfig, *, autorun: bool = True) -> None:
+        self.config = config
+        self.now = config.start_time
+        self.gate = asyncio.Event()
+        if autorun:
+            self.gate.set()
+        self._measurer = FakeMeasurer(config)
+        self._scripts: list[tuple[Callable[[TestRequest], bool], list[Fate]]] = []
+        self._gpu_seconds: dict[str, float] = {}
+
+    def script(self, match: Callable[[TestRequest], bool], fates: Sequence[Fate]) -> None:
+        self._scripts.append((match, list(fates)))
+
+    def _forced(self, request: TestRequest, attempt: int) -> Fate | None:
+        for match, fates in self._scripts:
+            if match(request):
+                return fates[attempt] if attempt < len(fates) else None
+        return None
+
+    async def run(self, job: TestJob) -> TestResult:
+        await self.gate.wait()
+        if self.config.run_delay_s:
+            await asyncio.sleep(self.config.run_delay_s)
+        request, request_id, index = job.request, job.request.request_id or "", job.attempt - 1
+        outcome = self._measurer.run(
+            request,
+            request_id,
+            index,
+            avoid=frozenset(job.avoid_nodes),
+            unavailable=frozenset(),
+            forced=self._forced(request, index),
+        )
+        started, self.now = self.now, self.now + self.config.attempt_seconds
+        gpus = outcome.sandbox.gpu_count if outcome.sandbox is not None else 0
+        spent = self._gpu_seconds[request_id] = self._gpu_seconds.get(request_id, 0.0) + (self.now - started) * gpus
+        if outcome.fate is Fate.MEASUREMENT:
+            raise MeasurementRefused(outcome.failure_reason)
+        return self._result(request, outcome, started, spent)
+
+    def _result(self, request: TestRequest, outcome: AttemptOutcome, started: float, gpu_seconds: float) -> TestResult:
+        """The attempt as a result; the runner decides the request's final validity from the failure class."""
+
+        request_id, measured = request.request_id or "", outcome.fate is Fate.OK
+        validity = Validity.SUCCEEDED if measured else self._failed_validity(outcome)
+        digest = hashlib.sha256(f"{request_id}/{validity.value}".encode()).hexdigest()
+        return TestResult(
+            request_id=request_id,
+            validity=validity,
+            failure_class=outcome.failure_class,
+            failure_reason=outcome.failure_reason,
+            rounds=outcome.rounds,
+            accuracy=outcome.accuracy,
+            sandbox=outcome.sandbox,
+            manifest_sha256=digest if measured else None,
+            signing_key_fingerprint="fake-signing-key" if measured else None,
+            spec_fingerprint=digest[:16] if measured else None,
+            surface_sha256=digest if measured else None,
+            output_dir=f"tests/{request_id}",
+            started_at=started,
+            finished_at=self.now,
+            gpu_seconds=gpu_seconds,
+            profile_location=f"tests/{request_id}/profile" if measured and request.kind is TestKind.PROFILE else "",
+        )
+
+    @staticmethod
+    def _failed_validity(outcome: AttemptOutcome) -> Validity:
+        return Validity.MEASUREMENT_FAILED if outcome.fate is Fate.INFRA else Validity.CANDIDATE_FAILED
 
 
-@dataclass
-class _Running:
-    entry: QueuedTest
-    task: asyncio.Task[None] | None = None
-    withdrawn: bool = False
+class FakeToolbox(RealToolbox):
+    """The real toolbox over a :class:`FakeExecutor`.
 
-
-@dataclass
-class _Run:
-    """The attempts of one request so far."""
-
-    attempts: list[Attempt] = field(default_factory=list)
-    tried: set[str] = field(default_factory=set)
-    infra_failures: int = 0
-    unclear_node: str | None = None
-    last: AttemptOutcome | None = None
-
-
-class FakeToolbox:
-    """The toolbox without GPUs. ``autorun`` starts accepted tests at once; without it :meth:`drain` runs them."""
+    ``autorun=False`` holds every attempt until :meth:`drain`; tests that want queued tests use it with a small
+    ``max_parallel_tests``. Without a ``notebook`` the writes go to a :class:`MemoryNotebook`; without ``log_path`` the
+    submit log lives in a temporary directory that goes with the toolbox. The toolbox starts on first use.
+    """
 
     def __init__(
         self,
@@ -149,244 +186,120 @@ class FakeToolbox:
         notebook: ToolboxNotebook | None = None,
         autorun: bool = True,
         parent_exists: Callable[[str], bool] | None = None,
-        queue: RunQueue | None = None,
+        log_path: Path | None = None,
+        claims: ClaimService | None = None,
+        records: RecordSearch | None = None,
     ) -> None:
         self.config = config or FakeToolboxConfig()
-        self.requests: dict[str, TestRequest] = {}
-        self.results: dict[str, TestResult] = {}
-        self.withdrawn: dict[str, str] = {}
-        self.quarantined: set[str] = set()
-        self.now = self.config.start_time
-        self._notebook = notebook
-        self._autorun = autorun
-        self._parent_exists = parent_exists
-        self._queue = queue or RunQueue()
-        self._measurer = FakeMeasurer(self.config)
-        self._running: dict[str, _Running] = {}
-        self._k: dict[str, int] = {}
-        self._scripts: list[tuple[Callable[[TestRequest], bool], list[Fate]]] = []
+        self.executor = FakeExecutor(self.config, autorun=autorun)
+        self.notebook = notebook if notebook is not None else MemoryNotebook()
+        self._scratch = None if log_path else tempfile.TemporaryDirectory(prefix="fake-toolbox-")
+        path = log_path or Path(self._scratch.name) / "submissions.jsonl"  # type: ignore[union-attr]
         self._rejections: list[Callable[[TestRequest], RequestRejected | None]] = []
-        self._submitted = 0
+        self._started = False
+        super().__init__(
+            log=SubmissionLog(path, str(self.config.campaign_id)),
+            repo=_Repo(self.config.image_digest, parent_exists),
+            sink=self.notebook,  # type: ignore[arg-type]
+            health=self.notebook,  # type: ignore[arg-type]
+            executor=self.executor,
+            planner=_NoPlanner(),
+            active_image_digest=self.config.image_digest,
+            policy=self._policy(self.config.default_k),
+            claims=claims,
+            records=records,
+            max_infra_retries=self.config.max_infra_retries,
+            clock=lambda: self.executor.now,
+        )
 
-    # --- the interface ---------------------------------------------------------------------------------------------
+    def _policy(self, k: int) -> QueuePolicy:
+        return QueuePolicy(
+            per_branch_k=k,
+            global_concurrency=self.config.max_parallel_tests,
+            max_queued_per_branch=self.config.branch_queue_limit,
+        )
+
+    # --- what the toolbox knows, read from its log -------------------------------------------------------------------
+
+    @property
+    def now(self) -> float:
+        """The virtual clock."""
+
+        return self.executor.now
+
+    @property
+    def requests(self) -> dict[str, TestRequest]:
+        return {e.request_id: TestRequest.from_document(e.request) for e in self._log.entries() if not e.aborted}
+
+    @property
+    def results(self) -> dict[str, TestResult]:
+        """Every finished test's result, a ``measurement_failed`` one included (the notebook gets that as a withdrawal)."""
+
+        return {
+            e.request_id: TestResult.from_document(e.outcome["result"])
+            for e in self._log.entries()
+            if e.outcome is not None and "result" in e.outcome
+        }
+
+    @property
+    def withdrawn(self) -> dict[str, str]:
+        """Tests taken back unmeasured, with the reason."""
+
+        return {
+            e.request_id: str(e.outcome["withdrawal"])
+            for e in self._log.entries()
+            if e.outcome is not None and "withdrawal" in e.outcome and "result" not in e.outcome
+        }
+
+    # --- the interface, started on first use -------------------------------------------------------------------------
+
+    async def _ensure_started(self) -> None:
+        if not self._started:
+            self._started = True
+            await self.start()
 
     async def submit_test(self, request: TestRequest) -> str:
-        self._check_acceptable(request)
-        queued = sum(1 for entry in self._queue.entries() if entry.request.branch_id == request.branch_id)
-        if queued >= self.config.branch_queue_limit:
-            raise Backpressure(request.branch_id, queued, self.config.branch_queue_limit)
-        request_id = str(uuid.uuid5(self.config.campaign_id, f"{request.branch_id}/{self._submitted}"))
-        self._submitted += 1
-        accepted = request.accepted(request_id)
-        priority = request.priority if request.priority is not None else DEFAULT_PRIORITY[request.purpose]
-        if self._notebook is not None:
-            await self._notebook.write_request(accepted)
-        self.requests[request_id] = accepted
-        self._queue.push(QueuedTest(request_id, accepted, priority, self.now))
-        if self._autorun:
-            self._pump()
-        return request_id
+        await self._ensure_started()
+        for check in self._rejections:
+            rejection = check(request)
+            if rejection is not None:
+                raise rejection
+        return await super().submit_test(request)
 
     async def cancel(self, request_id: str) -> CancelOutcome:
-        if request_id not in self.requests:
-            raise UnknownTestRequest(request_id)
-        if request_id in self.results:
-            return CancelOutcome.FINISHED
-        if request_id in self.withdrawn:
-            return CancelOutcome.WITHDRAWN
-        running = self._running.get(request_id)
-        if running is None:
-            self._queue.remove(request_id)
-            await self._withdraw(request_id)
-        else:
-            running.withdrawn = True
-            self._running.pop(request_id, None)  # a task cancelled before its first step never reaches its cleanup
-            if running.task is not None:
-                running.task.cancel()
-            await self._withdraw(request_id)
-            if self._autorun:
-                self._pump()
-        return CancelOutcome.WITHDRAWN
+        await self._ensure_started()
+        return await super().cancel(request_id)
 
     async def queue_state(self) -> QueueState:
-        queued = self._queue.entries()
-        by_priority = dict.fromkeys(range(5), 0)
-        by_branch: dict[str, int] = {}
-        for entry in queued:
-            by_priority[entry.priority] += 1
-            by_branch[entry.request.branch_id] = by_branch.get(entry.request.branch_id, 0) + 1
-        running: dict[str, int] = {}
-        for item in self._running.values():
-            branch = item.entry.request.branch_id
-            running[branch] = running.get(branch, 0) + 1
-        return QueueState(by_priority, running, by_branch, self.config.attempt_seconds if self.results else None)
+        if self.results:
+            self.record_cold_start(self.config.attempt_seconds)
+        return await super().queue_state()
 
-    # --- controls for tests ----------------------------------------------------------------------------------------
+    async def drain(self) -> None:
+        """Release held attempts, run everything queued and wait for every running test."""
 
-    def set_k(self, branch_id: str, k: int) -> None:
+        await self._ensure_started()
+        self.executor.gate.set()
+        await super().drain()
+
+    # --- controls for tests ------------------------------------------------------------------------------------------
+
+    async def set_k(self, k: int) -> None:
+        """Tests a branch may run at once, for every branch (the real queue has one K, set through its policy)."""
+
         if k < 1:
             raise ValueError("a branch needs room for at least one test")
-        self._k[branch_id] = k
+        await self.set_policy(self._policy(k))
 
     def script(self, match: Callable[[TestRequest], bool], fates: Sequence[Fate]) -> None:
         """Force the fate of the attempts of the requests ``match`` accepts: ``fates[n]`` for attempt ``n``, then random."""
 
-        self._scripts.append((match, list(fates)))
+        self.executor.script(match, fates)
 
     def reject_if(self, check: Callable[[TestRequest], RequestRejected | None]) -> None:
         """Refuse requests at acceptance: ``check`` returns the rejection to raise, or ``None`` to accept."""
 
         self._rejections.append(check)
 
-    async def drain(self) -> None:
-        """Run everything queued and wait for every running test; returns when the toolbox is idle."""
 
-        while self._queue.entries() or self._running:
-            self._pump()
-            tasks = [item.task for item in self._running.values() if item.task is not None]
-            if not tasks:
-                raise RuntimeError("queued tests are not eligible and nothing is running")
-            await asyncio.wait(tasks)
-
-    # --- acceptance ------------------------------------------------------------------------------------------------
-
-    def _check_acceptable(self, request: TestRequest) -> None:
-        if self._parent_exists is not None and not self._parent_exists(request.parent_commit):
-            raise RequestRejected(f"parent commit {request.parent_commit!r} is not in the repository", "unknown_parent")
-        if request.retest_of is not None and request.retest_of not in self.requests:
-            raise RequestRejected(f"retest_of {request.retest_of!r} names no accepted request", "unknown_retest")
-        for check in self._rejections:
-            rejection = check(request)
-            if rejection is not None:
-                raise rejection
-
-    # --- running ---------------------------------------------------------------------------------------------------
-
-    def _eligible(self, entry: QueuedTest) -> bool:
-        if len(self._running) >= self.config.max_parallel_tests:
-            return False
-        if entry.request.purpose in OUTSIDE_K:
-            return True
-        branch = entry.request.branch_id
-        in_k = sum(
-            1
-            for item in self._running.values()
-            if item.entry.request.branch_id == branch and item.entry.request.purpose not in OUTSIDE_K
-        )
-        return in_k < self._k.get(branch, self.config.default_k)
-
-    def _pump(self) -> None:
-        while (entry := self._queue.pop(self._eligible)) is not None:
-            item = _Running(entry)
-            self._running[entry.request_id] = item
-            item.task = asyncio.ensure_future(self._run(item))
-
-    async def _run(self, item: _Running) -> None:
-        request_id = item.entry.request_id
-        try:
-            if self.config.run_delay_s:
-                await asyncio.sleep(self.config.run_delay_s)
-            result = await self._attempt_loop(item.entry)
-            if not item.withdrawn:
-                self.results[request_id] = result
-                if self._notebook is not None:
-                    await self._notebook.write_result(result)
-        except asyncio.CancelledError:
-            pass
-        finally:
-            self._running.pop(request_id, None)
-            if self._autorun:
-                self._pump()
-
-    async def _withdraw(self, request_id: str) -> None:
-        self.withdrawn[request_id] = CANCELLED_REASON
-        if self._notebook is not None:
-            await self._notebook.write_withdrawal(Withdrawal(request_id, CANCELLED_REASON))
-
-    def _forced(self, request: TestRequest, attempt: int) -> Fate | None:
-        for match, fates in self._scripts:
-            if match(request):
-                return fates[attempt] if attempt < len(fates) else None
-        return None
-
-    async def _attempt_loop(self, entry: QueuedTest) -> TestResult:
-        request, run = entry.request, _Run()
-        run.tried.update(request.avoid_nodes)
-        reran = False
-        while True:
-            outcome = self._measurer.run(
-                request,
-                entry.request_id,
-                len(run.attempts),
-                avoid=frozenset(run.tried),
-                unavailable=frozenset(self.quarantined),
-                forced=self._forced(request, len(run.attempts)),
-            )
-            await self._record_attempt(entry, run, outcome)
-            if outcome.fate is Fate.OK:
-                await self._quarantine_unclear(entry, run)
-                return self._result(entry, run, Validity.SUCCEEDED)
-            if outcome.fate is Fate.CANDIDATE or (outcome.fate is Fate.UNCLEAR and reran):
-                return self._result(entry, run, Validity.CANDIDATE_FAILED)
-            if outcome.fate is Fate.MEASUREMENT:
-                return self._result(entry, run, Validity.MEASUREMENT_FAILED)
-            if outcome.fate is Fate.UNCLEAR:
-                reran, run.unclear_node = True, outcome.sandbox.node_name if outcome.sandbox else None
-            elif run.infra_failures > self.config.max_infra_retries:
-                return self._result(entry, run, Validity.MEASUREMENT_FAILED)
-
-    async def _record_attempt(self, entry: QueuedTest, run: _Run, outcome: AttemptOutcome) -> None:
-        started, self.now = self.now, self.now + self.config.attempt_seconds
-        run.attempts.append(Attempt(outcome.sandbox, outcome.failure_class, outcome.failure_reason, started, self.now))
-        run.last = outcome
-        if outcome.sandbox is not None and outcome.sandbox.node_name is not None:
-            run.tried.add(outcome.sandbox.node_name)
-        if outcome.fate is Fate.INFRA:
-            run.infra_failures += 1
-            if outcome.sandbox is not None:
-                await self._quarantine(outcome.sandbox.node_name, "infra failure", entry.request_id)
-
-    async def _quarantine_unclear(self, entry: QueuedTest, run: _Run) -> None:
-        if run.unclear_node is not None:
-            await self._quarantine(run.unclear_node, "unclear failure that a rerun passed", entry.request_id)
-
-    async def _quarantine(self, node: str | None, reason: str, request_id: str) -> None:
-        if node is None or not self.config.quarantine_nodes or node in self.quarantined:
-            return
-        self.quarantined.add(node)
-        if self._notebook is not None:
-            await self._notebook.record_quarantine(
-                QuarantineEvent(node, QuarantineAction.QUARANTINE, reason, request_ids=(request_id,))
-            )
-
-    def _result(self, entry: QueuedTest, run: _Run, validity: Validity) -> TestResult:
-        last, request, request_id = run.last, entry.request, entry.request_id
-        assert last is not None
-        measured = validity is Validity.SUCCEEDED
-        digest = hashlib.sha256(f"{request_id}/{validity.value}".encode()).hexdigest()
-        gpu_seconds = sum(
-            (a.finished_at - a.started_at) * a.sandbox.gpu_count for a in run.attempts if a.sandbox is not None
-        )
-        return TestResult(
-            request_id=request_id,
-            validity=validity,
-            failure_class=None if measured else last.failure_class,
-            failure_reason=None if measured else last.failure_reason,
-            rounds=last.rounds,
-            accuracy=last.accuracy,
-            sandbox=last.sandbox,
-            attempts=tuple(run.attempts),
-            manifest_sha256=digest if measured else None,
-            signing_key_fingerprint="fake-signing-key" if measured else None,
-            spec_fingerprint=digest[:16] if measured else None,
-            surface_sha256=digest if measured else None,
-            output_dir=f"tests/{request_id}",
-            queued_at=entry.queued_at,
-            started_at=run.attempts[0].started_at,
-            finished_at=run.attempts[-1].finished_at,
-            gpu_seconds=gpu_seconds,
-            profile_location=f"tests/{request_id}/profile" if measured and request.kind is TestKind.PROFILE else "",
-        )
-
-
-__all__ = ["DEFAULT_PRIORITY", "FakeToolbox", "QueuedTest", "RunQueue", "ToolboxNotebook"]
+__all__ = ["FakeExecutor", "FakeToolbox", "MemoryNotebook", "ToolboxNotebook"]

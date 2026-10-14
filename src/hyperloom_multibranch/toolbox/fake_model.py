@@ -33,11 +33,15 @@ from hyperloom.contracts.measurement import (
     TestKind,
     TestRequest,
 )
+from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES
 
 #: z-score of the 90th percentile of a normal distribution.
 _Z90 = 1.2815515655446004
 
 DEFAULT_BASELINE: Mapping[str, float] = {"output_tps": 1000.0, "ttft_ms": 200.0, "tpot_ms": 20.0}
+#: Measure rounds per concurrency level, and the divisor that makes a round's noise a third of an attempt's.
+DEFAULT_MEASURE_ROUNDS = 3
+ROUND_NOISE_DIVISOR = 3
 DEFAULT_CAMPAIGN = uuid.UUID("00000000-0000-5000-8000-00000000f4ce")
 
 
@@ -126,7 +130,7 @@ class FakeToolboxConfig:
     image_digest: str = "sha256:" + "0" * 64
     baseline: Mapping[str, float] = field(default_factory=lambda: dict(DEFAULT_BASELINE))
     main_concurrency: tuple[int, ...] = (64,)
-    measure_rounds: int = 3
+    measure_rounds: int = DEFAULT_MEASURE_ROUNDS
     noise: NoiseModel = field(default_factory=NoiseModel)
     failures: FailureRatios = field(default_factory=FailureRatios)
     #: What a delta is worth, as a fraction (0.02 is two percent more throughput), by ``delta.fingerprint()``.
@@ -139,8 +143,7 @@ class FakeToolboxConfig:
     accuracy_score: float = 0.93
     #: Accuracy by delta fingerprint, for a test that should fall below the floor.
     accuracy_scores: Mapping[str, float] = field(default_factory=dict)
-    max_infra_retries: int = 3
-    quarantine_nodes: bool = True
+    max_infra_retries: int = DEFAULT_MAX_INFRA_RETRIES
     branch_queue_limit: int = 8
     default_k: int = 2
     max_parallel_tests: int = 4
@@ -259,7 +262,7 @@ class FakeMeasurer:
     ) -> RoundValue:
         """One round sits a little off the attempt's level: a third of the test noise, drawn per round."""
 
-        factor *= 1 + self.config.noise.test_noise(rng) / 3
+        factor *= 1 + self.config.noise.test_noise(rng) / ROUND_NOISE_DIVISOR
         metrics = {
             name: value * factor if name.endswith("_tps") else value / factor
             for name, value in self.config.baseline.items()
