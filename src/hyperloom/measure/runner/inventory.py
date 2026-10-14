@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 
 from hyperloom.measure import fsafe
-from hyperloom.measure.runner.farm import Farm
+from hyperloom.measure.farm import Farm
 from hyperloom.measure.manifest import RESERVED_NAMES, ManifestFile
 
 __all__ = ["FARM_INVENTORY_FILE", "OutputRejected", "farm_inventory", "inventory", "write_farm_inventory"]

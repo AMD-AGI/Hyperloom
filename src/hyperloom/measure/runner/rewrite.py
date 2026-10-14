@@ -10,8 +10,8 @@ from typing import Any
 
 import yaml
 
-from hyperloom.measure.runner.attachments import substitute
-from hyperloom.measure.runner.farm import Farm, prepend_pythonpath
+from hyperloom.measure.attachments import substitute
+from hyperloom.measure.farm import Farm, prepend_pythonpath
 from hyperloom.orchestrator.actions.executors import strip_visible_devices_from_config
 
 __all__ = ["rewrite_config"]

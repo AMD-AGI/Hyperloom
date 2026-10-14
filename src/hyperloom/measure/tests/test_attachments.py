@@ -9,7 +9,7 @@ import tarfile
 
 import pytest
 
-from hyperloom.measure.runner.attachments import AttachmentError, place_attachments, substitute
+from hyperloom.measure.attachments import AttachmentError, place_attachments, substitute
 from hyperloom.measure.spec import Attachment
 
 
