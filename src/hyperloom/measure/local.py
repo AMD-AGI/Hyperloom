@@ -15,12 +15,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
+import importlib
 import json
 import logging
 import os
 import shutil
 import socket as host
 import subprocess
+import sys
 import tempfile
 import threading
 from collections.abc import Iterator, Sequence
@@ -33,7 +36,10 @@ import yaml
 from hyperloom.common.env import is_truthy
 from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
 from hyperloom.contracts.measurement import SandboxFacts
+from hyperloom.measure.compile import CompiledEnvironment, LocalBlobStore
 from hyperloom.measure.socket import RoundOutcome, TestCall, TestOutcome
+from hyperloom.measure.spec import Attachment
+from hyperloom.measure.spec import EnvRoot as SpecEnvRoot
 from hyperloom.orchestrator.actions.executors import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
@@ -103,7 +109,7 @@ class LocalMeasurementBackend:
     def run_test(self, call: TestCall) -> TestOutcome:
         """Run ``call`` to the end and return its outcome; the inference server is reclaimed when this returns."""
         _validate(call)
-        with _PROCESS_LOCK, _test_environment(call) as unset_envs:
+        with _PROCESS_LOCK, _rebuilt_environment(call) as call, _test_environment(call) as unset_envs:
             run = _Run(call, unset_envs)
             with _watch_output(call):
                 asyncio.run(_sweep(run) if call.prep == "conc_sweep" else _single(run))
@@ -154,6 +160,64 @@ def _check_sweep_levels(points: Sequence[Path]) -> None:
     levels = _levels(points)
     if any(level <= 0 for level in levels) or len(set(levels)) != len(levels):
         raise TestCallRefused(f"every sweep point names its own CONC, got {levels}")
+
+
+# --- the rebuilt environment --------------------------------------------------------------------------------------
+
+
+@contextlib.contextmanager
+def _rebuilt_environment(call: TestCall) -> Iterator[TestCall]:
+    """The call to run: when its environment is a compiled one with changes, the points name a rebuilt framework.
+
+    The farm and the attachments are made the way the runner makes them, from the same blob store the compile wrote
+    to, so a patched test measures the rebuilt framework here as it does in a sandbox. A test on the image as it is
+    runs unchanged.
+    """
+    environment = call.environment
+    if not isinstance(environment, CompiledEnvironment) or environment.is_base:
+        yield call
+        return
+    work = Path(tempfile.mkdtemp(prefix="hl-farm-"))
+    try:
+        yield dataclasses.replace(call, points=_rebuilt_points(call, environment, work))
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def _runner_module(name: str) -> Any:
+    """``hyperloom.measure.runner.<name>``, by name: the runner imports this module, so importing it here is a cycle."""
+    return importlib.import_module(f"hyperloom.measure.runner.{name}")
+
+
+def _rebuilt_points(call: TestCall, environment: CompiledEnvironment, work: Path) -> tuple[Path, ...]:
+    store = LocalBlobStore(environment.blob_root)
+    attachments, farms = _runner_module("attachments"), _runner_module("farm")
+
+    def read_blob(address: str) -> bytes:
+        return store.get(address.removeprefix("sha256:"))
+
+    try:
+        placed = attachments.place_attachments(
+            [Attachment(a.id, a.kind, f"sha256:{a.sha256}", "0" * 64) for a in environment.attachments],
+            work / "attach",
+            read_blob,
+        )
+        python = str(_point_envs(call.points[0]).get("HYPERLOOM_FRAMEWORK_PYTHON") or sys.executable)
+        roots = [SpecEnvRoot.parse(root.to_document(), "environment.roots") for root in environment.roots]
+        farm = farms.build_farm(roots, work / "farm", python=python, read_blob=read_blob)
+        points = []
+        for index, point in enumerate(call.points):
+            config = yaml.safe_load(attachments.substitute(Path(point).read_text(encoding=_UTF8), placed)) or {}
+            envs = config.setdefault("benchmark", {}).setdefault("envs", {})
+            if farm is not None:
+                farms.prepend_pythonpath(envs, farm.site)
+                farms.verify_farm(farm, envs, python=python, cwd=work)
+            target = work / f"point_{index}.yaml"
+            target.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_UTF8)
+            points.append(target)
+    except (attachments.AttachmentError, farms.FarmError, OSError, ValueError) as exc:
+        raise TestCallRefused(f"the compiled environment cannot be rebuilt here: {exc}") from exc
+    return tuple(points)
 
 
 # --- the process environment --------------------------------------------------------------------------------------
@@ -389,6 +453,11 @@ def _read_tail(path: str | None) -> str:
         return ""
 
 
+def _image_digest(call: TestCall) -> str | None:
+    environment = call.environment
+    return getattr(environment, "image_digest", None) or getattr(environment, "base_image_digest", None)
+
+
 def _sandbox_facts(call: TestCall) -> SandboxFacts:
     """What this machine can state about itself without asking a device; the rest stays unset, not guessed."""
     node = os.environ.get("NODE_NAME") or host.gethostname()
@@ -400,7 +469,7 @@ def _sandbox_facts(call: TestCall) -> SandboxFacts:
         gpu_count=len(gpus),
         gpu_ids=gpus,
         same_node=True,
-        image_digest=call.environment.image_digest,
+        image_digest=_image_digest(call),
         backend="local",
     )
 

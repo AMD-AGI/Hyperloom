@@ -398,3 +398,105 @@ def test_a_cancel_during_the_boot_ends_the_sweep_without_stepping_down(grid, ser
 
     assert [c["grid"][0].name for c in grid.calls] == ["c8"]
     assert outcome.returncode == ORCHESTRATOR_CANCELLED_RETURNCODE
+
+
+# --- a compiled environment ---------------------------------------------------------------------------------------
+
+OLD_SOURCE = "def f():\n    return 1\n"
+NEW_SOURCE = "def f():\n    return 10\n"
+
+
+@pytest.fixture
+def installed_framework(tmp_path):
+    """A real interpreter with a framework 'sglang' installed in it, as the image has one."""
+    import subprocess
+    import sys
+
+    from hyperloom.measure.tests._recipes import write_tree
+
+    venv = tmp_path / "image-venv"
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(venv)], check=True, capture_output=True)
+    site = next((venv / "lib").glob("python*/site-packages"))
+    package = write_tree(site / "sglang", {"__init__.py": "", "srt/__init__.py": "", "srt/a.py": OLD_SOURCE})
+    return venv / "bin" / "python", package
+
+
+def _compile(tmp_path, installed_framework):
+    from hyperloom.contracts.recipe import RecipeDelta
+    from hyperloom.measure.compile import ComponentLayout, LocalBlobStore, PackageBase, compile_environment
+    from hyperloom.measure.tests._recipes import IMAGE, PREFIX, git_patch, put_patch, recipe_with
+
+    _, package = installed_framework
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    patch = git_patch(tmp_path / "pw", {f"{PREFIX}/srt/a.py": OLD_SOURCE}, {f"{PREFIX}/srt/a.py": NEW_SOURCE})
+    recipe = recipe_with((put_patch(blobs, "a.patch", patch),))
+    base = PackageBase("sglang", package, "sglang", "0.5.4")
+
+    def locate(layout: ComponentLayout) -> PackageBase:
+        return base
+
+    return compile_environment(recipe, RecipeDelta(), blobs=blobs, active_image_digest=IMAGE, locator=locate)
+
+
+def _point_with_python(tmp_path, python) -> Path:
+    path = tmp_path / "patched.yaml"
+    envs = {"TP": 1, "CONC": 4, "RUN_EVAL": "false", "HYPERLOOM_FRAMEWORK_PYTHON": str(python)}
+    path.write_text(yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": envs}}), encoding="utf-8")
+    return path
+
+
+def test_a_patched_test_measures_the_rebuilt_framework_that_the_compile_produced(
+    monkeypatch, tmp_path, installed_framework
+):
+    import subprocess
+
+    from hyperloom.measure.tests._recipes import IMAGE
+
+    python, package = installed_framework
+    compiled = _compile(tmp_path, installed_framework)
+    imported: dict[str, str] = {}
+
+    async def look(**kwargs):
+        envs = yaml.safe_load(Path(kwargs["base_yaml_path"]).read_text())["benchmark"]["envs"]
+        done = subprocess.run(
+            [str(python), "-c", "import sglang.srt.a as a; print(a.f())"],
+            capture_output=True,
+            text=True,
+            cwd=tmp_path,
+            env={"PYTHONPATH": envs["PYTHONPATH"], "PATH": ""},
+        )
+        imported.update(value=done.stdout.strip(), path=envs["PYTHONPATH"].split(":")[0])
+        return [VariantResult(name="test", extra_server_args="", extra_envs={}, status="succeeded", returncode=0)]
+
+    monkeypatch.setattr(local, "run_grid", look)
+
+    outcome = _run(_call(tmp_path, _point_with_python(tmp_path, python), environment=compiled))
+
+    assert imported["value"] == "10"  # the server's interpreter imported the patched file, not the image's
+    assert (package / "srt" / "a.py").read_text() == OLD_SOURCE  # and the image's was not written
+    assert not Path(imported["path"]).exists()  # the farm is removed when the test ends
+    assert outcome.sandbox.image_digest == IMAGE
+
+
+def test_a_test_on_the_image_as_it_is_runs_the_point_unchanged(grid, tmp_path, installed_framework):
+    from hyperloom.contracts.recipe import RecipeDelta
+    from hyperloom.measure.compile import LocalBlobStore, compile_environment
+    from hyperloom.measure.tests._recipes import IMAGE, recipe_with
+
+    compiled = compile_environment(
+        recipe_with(), RecipeDelta(), blobs=LocalBlobStore(tmp_path / "blobs"), active_image_digest=IMAGE
+    )
+    call = _call(tmp_path, environment=compiled)
+
+    _run(call)
+
+    assert compiled.is_base and grid.calls[0]["base_yaml_path"] == call.points[0]
+
+
+def test_an_environment_that_cannot_be_rebuilt_is_refused_with_the_reason(grid, tmp_path, installed_framework):
+    compiled = _compile(tmp_path, installed_framework)
+    point = _point_with_python(tmp_path, "/no/such/python")
+
+    with pytest.raises(TestCallRefused, match="cannot be rebuilt here"):
+        _run(_call(tmp_path, point, environment=compiled))
+    assert grid.calls == []
