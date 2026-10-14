@@ -108,6 +108,9 @@ class _FakeTasks:
     async def running(self):
         return []
 
+    async def cancel_if_queued(self, _task_id: str, *, kind: str, reason: str) -> bool:
+        return False
+
 
 def _rounds(session_dir: Path) -> RoundStore:
     """A real round ledger, which is what the lane now counts stalls from."""
