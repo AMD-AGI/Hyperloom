@@ -1493,10 +1493,16 @@ class KernelPhase(CoordinatorCollaborator):
         if env_spec:
             handoff["baseline_env_spec"] = env_spec
         if agentx:
-            # An agentic recipe owns the whole server lifecycle and has no Magpie
-            # server phase, so GEAK launches natively from baseline_env_spec.
-            handoff["bench_launcher"] = "native"
             log.info("GEAK results remain proposal proxies; canonical AgentX validation remains in Hyperloom.")
+            # Force native only when the recipe builtin could not be named. The
+            # AgentX client delegates its server phase to that builtin, so with it
+            # in hand (set as ``launch_server_script`` above) GEAK derives the
+            # Magpie launcher -- which writes a pid and recovers the non-flag
+            # presets -- instead of its adapter default; without it there is no
+            # Magpie server phase to launch. Flags/env stay aligned either way:
+            # baseline_env_spec still folds the recorded EXTRA_ATOM_ARGS.
+            if not launch_server_script:
+                handoff["bench_launcher"] = "native"
 
         out_dir = self.session_dir / "geak"
         out_dir.mkdir(parents=True, exist_ok=True)
