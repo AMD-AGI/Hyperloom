@@ -113,7 +113,7 @@ class Session:
         merger = LocalNotebook(layout.notebook, Writer(Role.INTEGRATOR, INTEGRATOR_WRITER), clock=clock.now)
         self._roster = Roster(settings.caps, layout.roster, clock)
         self._decisions = DecisionLog(layout.decisions, clock)
-        desk = ForkDesk(self._roster, self._decisions)
+        desk = ForkDesk(self._roster, self._notebook, self._decisions)
         merges = DecisionLog(layout.merges, clock)
         peers = peer_factory(layout, desk)
         self._toolbox = peers.toolbox

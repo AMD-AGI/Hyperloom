@@ -55,6 +55,12 @@ class BranchStop:
     reason: str
     at: float
 
+    @property
+    def summary(self) -> str:
+        """``cause: reason``, as the ``STOP`` lineage event and the judge's view state it."""
+
+        return f"{self.cause.value}: {self.reason}"
+
 
 @dataclass(frozen=True)
 class BranchEntry:
@@ -217,7 +223,7 @@ class Roster:
     def _live(self, branch: str) -> BranchEntry:
         entry = self._entries[branch]
         if entry.stop is not None:
-            raise BranchStopped(f"{branch} is stopped ({entry.stop.cause.value}: {entry.stop.reason})")
+            raise BranchStopped(f"{branch} is stopped ({entry.stop.summary})")
         return entry
 
     def _add(self, entry: BranchEntry) -> BranchEntry:

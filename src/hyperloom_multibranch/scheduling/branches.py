@@ -7,7 +7,8 @@ Stopping a branch withdraws everything of it: its specialist, its queued and run
 scheduler registered for it, and its claims; the notebook gets the ``STOP`` lineage. The commits it already made stay
 in the notebook, so the integrator may still merge them. The notebook records no ``STOP`` of the integration
 branch, which only the end of the session stops. The roster entry is stopped first, so a fork that commits
-its fix while the branch is being stopped is never started. A branch gets its quota before its specialist starts,
+its fix while the branch is being stopped is never started; when that fork's ``SPLIT`` comes after its ``STOP``, the
+fork desk records the ``STOP`` again. A branch gets its quota before its specialist starts,
 because the toolbox treats a branch without one as stopped.
 """
 
@@ -108,7 +109,7 @@ class BranchControl:
         withdrawn = await settled(self._toolbox.withdraw(branch))
         failures.append(await settled(self._processes.kill_branch(branch)))
         released = await settled(self._notebook.release_branch(branch))
-        reason = f"{stop.cause.value}: {stop.reason}"
+        reason = stop.summary
         if entry.kind is BranchKind.SPECIALIST:
             failures.append(
                 await settled(self._notebook.record_lineage(LineageEvent(LineageKind.STOP, branch, reason=reason)))

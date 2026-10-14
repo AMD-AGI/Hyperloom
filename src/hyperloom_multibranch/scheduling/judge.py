@@ -139,7 +139,7 @@ def _branch_row(entry: BranchEntry, progress: BranchProgress | None) -> dict[str
         "k": entry.k,
     }
     if entry.stop is not None:
-        row["stopped"] = f"{entry.stop.cause.value}: {entry.stop.reason}"
+        row["stopped"] = entry.stop.summary
     row.update(_progress_row(progress))
     return row
 

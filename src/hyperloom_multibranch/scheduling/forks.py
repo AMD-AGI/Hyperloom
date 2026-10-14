@@ -9,12 +9,19 @@ the gate cuts the branch and commits the fix. The gate then reports the fix comm
 :meth:`ForkDesk.drain` returns to the branch control, which starts the fork's specialist there. The desk needs no
 peer, so it is built before them and handed to the rule gate. A fork of a branch the roster does not hold, or of
 one already stopped, is refused whatever the policy says: stopping a branch withdraws everything of it.
+
+An admitted fork can be stopped before the gate records its ``SPLIT``; the notebook's lineage has no such branch yet
+and drops that ``STOP``. The desk therefore records the ``STOP`` again once the ``SPLIT`` is in, so a stopped fork
+never reads as running.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+from hyperloom_multibranch.contracts.notebook import Notebook
+from hyperloom_multibranch.contracts.notebook.records import LineageEvent
+from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
 from hyperloom_multibranch.contracts.scheduling import AdmissionStatus, ForkAdmission, ForkRequest
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
 from hyperloom_multibranch.scheduling.mb_fakes import mb_fake_refused_fork
@@ -37,10 +44,14 @@ def _parent_refusal(roster: Roster, from_branch: str) -> str:
 
 
 class ForkDesk:
-    """Implements :class:`~hyperloom_multibranch.contracts.scheduling.ForkAdmissionService` on the roster."""
+    """Implements :class:`~hyperloom_multibranch.contracts.scheduling.ForkAdmissionService` on the roster.
 
-    def __init__(self, roster: Roster, decisions: DecisionLog) -> None:
+    ``notebook`` is the scheduler's handle.
+    """
+
+    def __init__(self, roster: Roster, notebook: Notebook, decisions: DecisionLog) -> None:
         self._roster = roster
+        self._notebook = notebook
         self._decisions = decisions
         self._committed: list[CommittedFork] = []
 
@@ -76,7 +87,13 @@ class ForkDesk:
         return answer
 
     async def fork_committed(self, branch: str, fix_commit: str) -> None:
-        self._committed.append(CommittedFork(branch, fix_commit))
+        """Queue the fork to start, or, when it was stopped while admitted, record its ``STOP`` after the ``SPLIT``."""
+
+        stop = self._roster.entry(branch).stop
+        if stop is None:
+            self._committed.append(CommittedFork(branch, fix_commit))
+            return
+        await self._notebook.record_lineage(LineageEvent(LineageKind.STOP, branch, reason=stop.summary))
 
     def drain(self) -> tuple[CommittedFork, ...]:
         """The forks committed since the last call, oldest first; never waits."""
