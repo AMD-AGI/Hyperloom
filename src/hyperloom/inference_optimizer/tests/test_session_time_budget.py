@@ -792,16 +792,16 @@ class TestTheCooperativeStopWindowsCompose:
 
     def test_the_dispatcher_outlasts_the_slowest_honest_stop(self):
         # The Ray path is the long one: 8.5s for the round to stop itself, 0.25s for the answer to be seen, then up to
-        # 10s to release the lease it held.
-        assert _COOPERATIVE_CANCEL_GRACE_SEC >= 8.5 + 0.25 + 10.0
+        # 17s to release the lease it held.
+        assert _COOPERATIVE_CANCEL_GRACE_SEC >= 8.5 + 0.25 + 17.0
 
     def test_reaping_a_server_and_dropping_its_lease_are_both_paid(self):
         """The two release waits are a sequence, so the window has to cover both."""
-        assert _COOPERATIVE_CANCEL_GRACE_SEC >= 8.5 + 0.25 + 5.0 + 10.0
+        assert _COOPERATIVE_CANCEL_GRACE_SEC >= 8.5 + 0.25 + 5.0 + 17.0
 
     def test_the_window_is_exactly_the_terms_it_names(self):
         """An upper bound, so a term the unwind pays and the sum omits is a bug."""
-        assert _COOPERATIVE_CANCEL_GRACE_SEC == 8.5 + 0.25 + 5.0 + 10.0
+        assert _COOPERATIVE_CANCEL_GRACE_SEC == 8.5 + 0.25 + 5.0 + 17.0
 
     def test_a_cancelled_scope_is_visible_to_the_work_inside_it(self):
         """The unwind's steps read the scope, not a returncode."""
@@ -1128,6 +1128,7 @@ async def test_specialist_cleanup_ack_precedes_capacity_release(coord, confirmed
     from unittest.mock import AsyncMock
 
     from hyperloom.orchestrator.bus.gpu_pool import SpecialistGpuPool
+    from hyperloom.orchestrator.loop.dispatcher import _CLEANUP_MAX_ATTEMPTS
     from hyperloom.orchestrator.loop.sub_agent_runner import ExecutionCleanupUnconfirmed
 
     coord.gpu_specialist_pool = SpecialistGpuPool(coord.db, gpu_ids=[0])
@@ -1164,7 +1165,8 @@ async def test_specialist_cleanup_ack_precedes_capacity_release(coord, confirmed
         on_complete.assert_not_awaited()
         await coord.dispatcher.close_db_after_executions()
         assert await coord.db.fetchone("SELECT 1 FROM gpu_leases") is not None
-    assert events == (["close", "gpu_release"] if confirmed else ["close"])
+    # Retried up to ``dispatcher._CLEANUP_MAX_ATTEMPTS`` before giving up.
+    assert events == (["close", "gpu_release"] if confirmed else ["close"] * _CLEANUP_MAX_ATTEMPTS)
     holders = await coord.locks.lane_holders()
     assert bool(holders) is not confirmed
 

@@ -491,7 +491,7 @@ class TaskRegistry:
             if row is None:
                 raise TaskNotFound(task_id)
             history = json.loads(row["history"])
-            history.append({"ts": _now_iso(), "evidence": evidence})
+            history.append({"ts": now_iso(), "evidence": evidence})
             cur.execute("UPDATE tasks SET history=? WHERE task_id=?", (json.dumps(history), task_id))
 
     async def record_progress(

@@ -64,7 +64,7 @@ def test_integration_cannot_use_recorded_foreign_root(workload, tmp_path):
 
 
 def test_kernel_direct_write_is_refused(workload, tmp_path):
-    from hyperloom.agents.kernel.tools.apply_kernel_patch import apply_kernel_patch
+    from hyperloom.orchestrator.kernel.apply_kernel_patch import apply_kernel_patch
 
     _, hook, _, _ = workload
     before = hook.read_bytes()
@@ -104,7 +104,7 @@ def test_scope_refuses_symlink(workload, tmp_path):
 
 
 def test_specialist_inherits_scope_and_writable_cli_config(workload, monkeypatch):
-    from hyperloom.agents.kernel.tools.backends.ray_runtime import safe_runtime_env
+    from hyperloom.orchestrator.actions.executors._ray_runtime import safe_runtime_env
     from hyperloom.orchestrator.specialists.subprocess_ import _build_specialist_env
 
     _, _, _, state = workload

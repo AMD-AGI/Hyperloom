@@ -1573,7 +1573,9 @@
         "controller_status",
         "controller_patch_count",
         "controller_task_count",
-        "controller_reason"
+        "controller_reason",
+        "geak_status",
+        "geak_search_termination"
       ],
       "properties": {
         "kernel_work_pending": {
@@ -1601,6 +1603,15 @@
         },
         "controller_reason": {
           "type": "string"
+        },
+        "geak_status": {
+          "type": "string"
+        },
+        "geak_search_termination": {
+          "type": [
+            "object",
+            "null"
+          ]
         }
       },
       "additionalProperties": false

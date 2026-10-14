@@ -175,7 +175,7 @@ def test_cli_exposes_child_startup_failure(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("GEAK_E2E_RUNNER", str(runner))
     handoff = tmp_path / "input.json"
     handoff.write_text(json.dumps(_handoff()))
-    assert psr._main([str(handoff), str(tmp_path / "output"), "--timeout-s", "5"]) == 1
+    assert psr.main([str(handoff), str(tmp_path / "output"), "--timeout-s", "5"]) == 1
     output = capsys.readouterr()
     assert "absolute benchmark path rejected" in output.err
     assert "Traceback" in output.err
