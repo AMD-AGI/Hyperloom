@@ -73,8 +73,8 @@ def test_run_options_override_the_defaults() -> None:
     assert settings.judge_interval_seconds == 120.0
 
 
-def test_parallel_tests_default_is_at_least_one_for_a_wide_tp() -> None:
-    settings = cli.settings_from(cli.build_parser().parse_args(["run", *WORKLOAD_ARGS[:5], "16", *WORKLOAD_ARGS[6:]]))
+def test_parallel_tests_default_fills_the_machine() -> None:
+    settings = cli.settings_from(cli.build_parser().parse_args(["run", *WORKLOAD_ARGS[:5], "8", *WORKLOAD_ARGS[6:]]))
     assert settings.caps.max_parallel_tests == 1
 
 
@@ -84,6 +84,8 @@ def test_parallel_tests_default_is_at_least_one_for_a_wide_tp() -> None:
         [],
         ["run"],
         ["run", *WORKLOAD_ARGS, "--tp", "0"],
+        ["run", *WORKLOAD_ARGS, "--tp", "16"],
+        ["run", *WORKLOAD_ARGS, "--max-parallel-tests", "5"],
         ["run", *WORKLOAD_ARGS, "--max-hours", "-1"],
         ["run", *WORKLOAD_ARGS, "--max-hours", "0.01"],
         ["run", *WORKLOAD_ARGS, "--max-branches", "0"],

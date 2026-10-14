@@ -76,9 +76,14 @@ def settings_from(args: argparse.Namespace) -> RunSettings:
     errors = _positive(args, ("tp", "isl", "osl", "conc", "judge_interval_sec"))
     if args.max_hours < 0 or 0 < args.max_hours < MB_MIN_PRELUDE_HOURS:
         errors.append(f"--max-hours must be 0 (no limit) or at least {MB_MIN_PRELUDE_HOURS:.4f} (one minute)")
+    if args.tp > GPUS_PER_MACHINE:
+        errors.append(f"--tp must be at most {GPUS_PER_MACHINE}, the cards of the machine")
     if errors:
         raise ValueError("; ".join(errors))
-    parallel = max(GPUS_PER_MACHINE // args.tp, 1) if args.max_parallel_tests is None else args.max_parallel_tests
+    fitting = GPUS_PER_MACHINE // args.tp
+    parallel = fitting if args.max_parallel_tests is None else args.max_parallel_tests
+    if parallel > fitting:
+        raise ValueError(f"--max-parallel-tests must be at most {fitting} ({GPUS_PER_MACHINE} cards // TP)")
     workload = Workload(
         args.model, args.framework, args.tp, args.isl, args.osl, args.conc, args.precision, args.gpu_type
     )
