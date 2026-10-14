@@ -580,7 +580,6 @@ class _SweepRun:
         variant: GridVariant,
         *,
         serving_lease: Any,
-        base_extra_envs: dict[str, str] | None = None,
         server_lifecycle: dict[str, Any] | None = None,
         server_already_ready: bool = False,
         warmup_before_measure: bool | None = None,
@@ -600,7 +599,6 @@ class _SweepRun:
             gpu_type=self.gpu_type,
             benchmark_script=self.benchmark_script,
             server_lifecycle=server_lifecycle,
-            base_extra_envs=base_extra_envs,
             warmup_before_measure=warmup_before_measure,
             server_already_ready=server_already_ready,
             serving_lease=serving_lease,
@@ -828,7 +826,6 @@ async def _sweep_one_arm_single_server(run: _SweepRun, arm: _Arm) -> None:
             boot_results = await run.run_rung(
                 boot_variant,
                 serving_lease=arm_lease,
-                base_extra_envs={"MAGPIE_RUN_PHASE": "server"},
                 server_lifecycle=server_lifecycle_boot,
                 server_already_ready=False,
                 warmup_before_measure=False,

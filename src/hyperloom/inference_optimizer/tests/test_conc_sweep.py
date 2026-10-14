@@ -2280,7 +2280,8 @@ def test_single_server_boot_only_is_measured_by_reuse_round(
     ]
     boot, measured_boot = calls[0], calls[1]
     assert boot["server_already_ready"] is False
-    assert boot["base_extra_envs"] == {"MAGPIE_RUN_PHASE": "server"}
+    # Magpie keeps the boot round's envs as the server's identity and refuses a reuse round whose envs differ.
+    assert boot["base_extra_envs"] == measured_boot["base_extra_envs"]
     assert measured_boot["server_already_ready"] is True
     assert payload["summary"]["successful_pairs"] == 2
 
