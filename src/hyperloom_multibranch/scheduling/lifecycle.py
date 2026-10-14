@@ -19,11 +19,12 @@ import asyncio
 import contextlib
 import importlib.metadata
 import logging
+import os
 from dataclasses import dataclass, replace
-from pathlib import Path
 from typing import Any
 
 from hyperloom.common.io import atomic_write_json
+from hyperloom.common.provenance import detect_code_revision
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import ManifestFingerprint
@@ -39,7 +40,6 @@ from hyperloom_multibranch.scheduling.explore import Explorer, ExploreWindow, in
 from hyperloom_multibranch.scheduling.exports import ExportsFactory
 from hyperloom_multibranch.scheduling.final import FinalCandidates, FinalChoice, FinalSelector, choose_candidates
 from hyperloom_multibranch.scheduling.forks import ForkDesk
-from hyperloom_multibranch.scheduling.git import GitFailed, git_output
 from hyperloom_multibranch.scheduling.integrator import Integrator, LlmPatchResolver
 from hyperloom_multibranch.scheduling.judge import JUDGE_PROMPT_VERSION, Judge
 from hyperloom_multibranch.scheduling.layout import SessionLayout
@@ -327,7 +327,8 @@ class Session:
 
 @dataclass(frozen=True)
 class CodeVersion:
-    """The installed package version and the git commit of its source tree; empty where there is none."""
+    """The installed package version and the source revision :func:`detect_code_revision` reports: the source
+    tree's commit, else the revision baked into the image; empty where there is none."""
 
     package: str
     git_sha: str
@@ -340,11 +341,7 @@ def code_version() -> CodeVersion:
         package = importlib.metadata.version(MB_DISTRIBUTION)
     except importlib.metadata.PackageNotFoundError:
         package = ""
-    try:
-        sha = git_output(Path(__file__).parent, "rev-parse", "HEAD")
-    except GitFailed:
-        sha = ""
-    return CodeVersion(package, sha)
+    return CodeVersion(package, detect_code_revision(os.environ))
 
 
 __all__ = ["COMPLETED_REASONS", "CodeVersion", "Session", "SessionOutcome", "code_version"]
