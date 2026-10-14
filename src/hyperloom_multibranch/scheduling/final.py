@@ -201,13 +201,19 @@ class FinalSelector:
             return CandidateCheck(candidate, error=f"a validation test was withdrawn: {exc}")
 
     async def _check(self, candidate: FinalCandidate) -> CandidateCheck:
-        sweep, accuracy_passed, reproduced = await asyncio.gather(
-            self._toolbox.sweep(INTEGRATION_BRANCH, candidate.commit),
-            self._accuracy_passes(candidate.commit),
-            self._reproduces(candidate.commit),
-        )
+        """The three measurements run together; once one fails, the others are cancelled and their slots freed."""
+
+        sweep = asyncio.ensure_future(self._toolbox.sweep(INTEGRATION_BRANCH, candidate.commit))
+        accuracy = asyncio.ensure_future(self._accuracy_passes(candidate.commit))
+        repro = asyncio.ensure_future(self._reproduces(candidate.commit))
+        try:
+            await asyncio.gather(sweep, accuracy, repro)
+        finally:
+            for measurement in (sweep, accuracy, repro):
+                measurement.cancel()
+            await asyncio.gather(sweep, accuracy, repro, return_exceptions=True)
         check = CandidateCheck(
-            candidate, sweep, accuracy_passed, reproduced, mb_fake_regression_passes(candidate.commit)
+            candidate, sweep.result(), accuracy.result(), repro.result(), mb_fake_regression_passes(candidate.commit)
         )
         if self._workload.conc not in check.curve(self._metric):
             return replace(check, error=f"the sweep has no {self._metric} at the primary conc {self._workload.conc}")

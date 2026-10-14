@@ -200,3 +200,27 @@ async def test_a_candidate_unfinished_at_the_deadline_is_not_eligible(tmp_path: 
 
     assert choice.chosen is None
     assert "deadline" in choice.checks[0].error
+
+
+class CountingStalledToolbox(StalledToolbox):
+    """The stalled toolbox, counting the sweeps cancelled while they wait; a failure double, not a placeholder."""
+
+    cancelled_sweeps = 0
+
+    async def sweep(self, branch: str, commit: str) -> SweepResult:
+        try:
+            return await super().sweep(branch, commit)
+        except asyncio.CancelledError:
+            self.cancelled_sweeps += 1
+            raise
+
+
+async def test_a_withdrawn_test_cancels_the_candidates_other_measurements(tmp_path: Path) -> None:
+    bench = Bench(tmp_path, {})
+    toolbox = CountingStalledToolbox(bench.toolbox.notebook, withdrawing=frozenset({"i1"}))
+    bench.toolbox = bench.gate.toolbox = toolbox
+
+    choice = await bench.selector(tmp_path / "f.json").select(FinalCandidates(INTEGRATION, None), deadline=200.0)
+
+    assert "withdrawn" in choice.checks[0].error
+    assert toolbox.cancelled_sweeps == 1
