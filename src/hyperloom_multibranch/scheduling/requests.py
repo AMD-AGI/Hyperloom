@@ -12,6 +12,7 @@ the outcome from there.
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import RecipeDelta
@@ -108,6 +109,22 @@ class SessionTests:
             raise
 
 
+async def together(*measurements: asyncio.Future[Any]) -> None:
+    """Await every measurement; once one fails, the others are cancelled, which takes their tests back, and its error
+    is raised. Each is cancelled once, so the take-back is never cut short by a second cancel."""
+
+    try:
+        await asyncio.wait(measurements, return_when=asyncio.FIRST_EXCEPTION)
+    finally:
+        for measurement in measurements:
+            measurement.cancel()
+        await asyncio.gather(*measurements, return_exceptions=True)
+    failures = [measurement.exception() for measurement in measurements if not measurement.cancelled()]
+    failure = next((error for error in failures if error is not None), None)
+    if failure is not None:
+        raise failure
+
+
 __all__ = [
     "NO_DELTA",
     "RESUBMIT_SECONDS",
@@ -115,4 +132,5 @@ __all__ = [
     "SessionTests",
     "TestWithdrawn",
     "integration_test_request",
+    "together",
 ]

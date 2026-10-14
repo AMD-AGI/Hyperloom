@@ -40,7 +40,8 @@ from hyperloom_multibranch.scheduling.prelude_reader import (
     root_recipe,
 )
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, RegisteredProcess
-from hyperloom_multibranch.scheduling.requests import SessionTests, TestWithdrawn, integration_test_request
+from hyperloom_multibranch.contracts.toolbox import RequestRejected
+from hyperloom_multibranch.scheduling.requests import SessionTests, TestWithdrawn, integration_test_request, together
 from hyperloom_multibranch.scheduling.rule_judge import MB_FAKE_BASELINE_TESTS, MbFakeRuleJudge, NotMeasured
 from hyperloom_multibranch.scheduling.settings import Workload
 
@@ -197,12 +198,16 @@ class Prelude:
 
     async def measure_baseline(self, root: str) -> None:
         """Measure the baseline on ``root``, accuracy included, through the toolbox and anchor it; raises
-        :class:`PreludeFailed` when a baseline test is withdrawn or the baseline anchors nothing."""
+        :class:`PreludeFailed` when a baseline test is refused or withdrawn, or the baseline anchors nothing."""
 
         request = integration_test_request(TestKind.TEST, Purpose.BASELINE, root, accuracy=True)
+        runs = [asyncio.ensure_future(self._tests.run(request)) for _ in range(MB_FAKE_BASELINE_TESTS)]
         try:
-            records = await asyncio.gather(*(self._tests.run(request) for _ in range(MB_FAKE_BASELINE_TESTS)))
-            await self._judge.establish_baseline(root, tuple(records))
+            await together(*runs)
+            records = tuple(run.result() for run in runs)
+            await self._judge.establish_baseline(root, records)
+        except RequestRejected as exc:
+            raise PreludeFailed(f"the toolbox refused the baseline test: {exc}") from exc
         except TestWithdrawn as exc:
             raise PreludeFailed(f"a baseline test was withdrawn: {exc}") from exc
         except (NotMeasured, BaselineAccuracyError) as exc:

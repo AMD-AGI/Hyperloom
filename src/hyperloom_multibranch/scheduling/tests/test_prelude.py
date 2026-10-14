@@ -21,6 +21,7 @@ from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
+from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.scheduling.budget import HardStop, SessionBudget
@@ -236,6 +237,23 @@ async def test_withdrawn_baseline_test_fails_prelude(tmp_path: Path) -> None:
     prelude = _prelude(layout, _registry(layout, child_with_patch(tmp_path)), peers)
     with pytest.raises(PreludeFailed, match="withdrawn"):
         await _run(prelude, SessionBudget.from_hours(2.0, NOW))
+
+
+async def test_refused_baseline_test_fails_prelude_and_takes_the_accepted_ones_back(tmp_path: Path) -> None:
+    layout = _layout(tmp_path)
+    peers = _peers(layout)
+    peers.toolbox.executor.gate.clear()
+    accepted = iter(range(MB_FAKE_BASELINE_TESTS - 1))
+    refusal = RequestRejected("the base image moved", code="base_image_mismatch")
+    peers.toolbox.reject_if(lambda request: None if next(accepted, None) is not None else refusal)
+    prelude = _prelude(layout, _registry(layout, child_with_patch(tmp_path)), peers)
+
+    with pytest.raises(PreludeFailed, match="refused the baseline test: base_image_mismatch"):
+        await _run(prelude, SessionBudget.from_hours(2.0, NOW))
+
+    assert len(peers.toolbox.requests) == MB_FAKE_BASELINE_TESTS - 1
+    assert set(peers.toolbox.withdrawn) == set(peers.toolbox.requests)
+    assert peers.toolbox.results == {}
 
 
 async def test_exhausted_budget_starts_no_child(tmp_path: Path) -> None:

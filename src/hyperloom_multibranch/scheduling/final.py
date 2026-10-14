@@ -20,7 +20,6 @@ import statistics
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any
 
 from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
@@ -28,7 +27,7 @@ from hyperloom_multibranch.contracts.notebook.records import BranchProgress, Tes
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.mb_fakes import mb_fake_regression_passes
-from hyperloom_multibranch.scheduling.requests import SessionTests, TestWithdrawn, integration_test_request
+from hyperloom_multibranch.scheduling.requests import SessionTests, TestWithdrawn, integration_test_request, together
 from hyperloom_multibranch.scheduling.roster import BranchEntry, BranchKind
 from hyperloom_multibranch.scheduling.rule_judge import MbFakeRuleJudge, NotMeasured
 from hyperloom_multibranch.scheduling.settings import Workload
@@ -186,22 +185,6 @@ def pick_final(checks: tuple[CandidateCheck, ...], metric: str, conc: int) -> Fi
     return FinalChoice(chosen.candidate, marked, reason, metric, conc)
 
 
-async def _together(*measurements: asyncio.Future[Any]) -> None:
-    """Await every measurement; once one fails, the others are cancelled, which takes their tests back, and its error
-    is raised. Each is cancelled once, so the take-back is never cut short by a second cancel."""
-
-    try:
-        await asyncio.wait(measurements, return_when=asyncio.FIRST_EXCEPTION)
-    finally:
-        for measurement in measurements:
-            measurement.cancel()
-        await asyncio.gather(*measurements, return_exceptions=True)
-    failures = [measurement.exception() for measurement in measurements if not measurement.cancelled()]
-    failure = next((error for error in failures if error is not None), None)
-    if failure is not None:
-        raise failure
-
-
 class FinalSelector:
     """Validates the candidates through the toolbox and the rule."""
 
@@ -236,7 +219,7 @@ class FinalSelector:
         sweep = asyncio.ensure_future(self._sweep(candidate.commit))
         accuracy = asyncio.ensure_future(self._accuracy_passes(candidate.commit))
         repro = asyncio.ensure_future(self._reproduces(candidate.commit))
-        await _together(sweep, accuracy, repro)
+        await together(sweep, accuracy, repro)
         check = CandidateCheck(
             candidate, sweep.result(), accuracy.result(), repro.result(), mb_fake_regression_passes(candidate.commit)
         )
