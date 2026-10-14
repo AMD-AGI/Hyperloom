@@ -23,7 +23,7 @@ from pathlib import Path
 from hyperloom.common.proctree import running
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, LineageKind
-from hyperloom_multibranch.contracts.scheduling import AdmissionStatus, ForkAdmissionService, ForkRequest
+from hyperloom_multibranch.contracts.scheduling import AdmissionStatus, ForkRequest
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.tests.factories import delta, intent
 from hyperloom_multibranch.contracts.notebook.peers import Verdict
@@ -32,9 +32,10 @@ from hyperloom_multibranch.scheduling.exports import SessionExports
 from hyperloom_multibranch.scheduling.final import INTEGRATION_LABEL
 from hyperloom_multibranch.scheduling.integrator import merge_intent
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
+from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.lifecycle import CUT_SHORT, Session, SessionOutcome
 from hyperloom_multibranch.scheduling.llm import CompletionFailed
-from hyperloom_multibranch.scheduling.peers import Peers
+from hyperloom_multibranch.scheduling.peers import Peers, PeerSetup
 from hyperloom_multibranch.scheduling.roster import BranchStatus, RosterCaps, StopCause
 from hyperloom_multibranch.scheduling.settings import RunSettings, Workload
 from hyperloom_multibranch.scheduling.stops import STOP_OVERRAN, SessionStopReason
@@ -105,16 +106,24 @@ class Stage:
     toolbox: MbFakeToolbox = field(init=False)
     gate: MbFakeGate = field(init=False)
     repo: MbFakeRepo = field(init=False)
+    peer_processes: ProcessRegistry = field(init=False)
 
     def handle(self, role: Role, branch: str = "") -> LocalNotebook:
         return LocalNotebook(self.layout.notebook, Writer(role, branch or role.value, branch), clock=self.time.now)
 
-    def factory(self, layout: SessionLayout, desk: ForkAdmissionService) -> Peers:
+    def factory(self, setup: PeerSetup) -> Peers:
         toolbox = MbFakeToolbox(self.handle(Role.TOOLBOX), sweeps=SWEEPS, stuck=self.stuck)
-        gate = MbFakeGate(self.handle(Role.GATE), toolbox, desk, verdicts=MERGE_VERDICTS)
+        gate = MbFakeGate(self.handle(Role.GATE), toolbox, setup.desk, verdicts=MERGE_VERDICTS)
         repo = MbFakeRepo()
-        self.toolbox, self.gate, self.repo = toolbox, gate, repo
+        self.toolbox, self.gate, self.repo, self.peer_processes = toolbox, gate, repo, setup.processes
         return Peers(self.lifecycle, toolbox, gate, repo)
+
+    async def spawn_specialist_process(self, branch: str) -> None:
+        """A process of ``branch``'s specialist, started the way a lifecycle starts one: through the peer setup."""
+
+        log = self.layout.branch_dir(branch).with_suffix(".log")
+        held = await self.peer_processes.spawn(("sleep", "600"), branch=branch, log=log)
+        self.pids.append(held.record.pid)
 
     async def run(self) -> SessionOutcome:
         self.time.hold_threads()
@@ -155,10 +164,7 @@ def _scripts(stage: Stage) -> dict[str, SpecialistScript]:
         await gate.commit(branch, start, "c2", 1060.0)
         runtime = stage.handle(Role.SPECIALIST_RUNTIME, branch)
         await runtime.acquire(intent(branch, "c2"), delta().fingerprint(), ttl_seconds=CLAIM_TTL_SECONDS)
-        held = await stage.processes.spawn(
-            ("sleep", "600"), branch=branch, log=stage.layout.branch_dir(branch).with_suffix(".log")
-        )
-        stage.pids.append(held.record.pid)
+        await stage.spawn_specialist_process(branch)
         await asyncio.Event().wait()
 
     return {"b01": first, "b02": second}
@@ -274,10 +280,7 @@ def _signalling(stage: Stage) -> SpecialistScript:
 
     async def interrupted(branch: str, start: str) -> None:
         await stage.time.sleep(STEP_SECONDS)
-        held = await stage.processes.spawn(
-            ("sleep", "600"), branch=branch, log=stage.layout.branch_dir(branch).with_suffix(".log")
-        )
-        stage.pids.append(held.record.pid)
+        await stage.spawn_specialist_process(branch)
         os.kill(os.getpid(), signal.SIGTERM)
         await asyncio.Event().wait()
 

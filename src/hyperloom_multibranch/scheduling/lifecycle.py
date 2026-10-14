@@ -43,7 +43,7 @@ from hyperloom_multibranch.scheduling.judge import JUDGE_PROMPT_VERSION, Judge
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.llm import Completion
 from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_PRIMARY_METRIC
-from hyperloom_multibranch.scheduling.peers import PeerFactory
+from hyperloom_multibranch.scheduling.peers import PeerFactory, PeerSetup
 from hyperloom_multibranch.scheduling.prelude import Prelude, PreludeFailed, PreludeResult
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.roster import Roster
@@ -115,7 +115,7 @@ class Session:
         self._decisions = DecisionLog(layout.decisions, clock)
         desk = ForkDesk(self._roster, self._notebook, self._decisions)
         merges = DecisionLog(layout.merges, clock)
-        peers = peer_factory(layout, desk)
+        peers = peer_factory(PeerSetup(layout, desk, processes))
         self._toolbox = peers.toolbox
         self._branches = BranchControl(
             self._roster, self._notebook, peers.lifecycle, peers.toolbox, processes, self._decisions, clock

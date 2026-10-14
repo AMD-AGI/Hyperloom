@@ -99,7 +99,11 @@ class RepoMerge:
 
 
 class SpecialistLifecycle(Protocol):
-    """Long-running specialists, one per branch; the runtime restarts a crashed one on the same branch by itself."""
+    """Long-running specialists, one per branch; the runtime restarts a crashed one on the same branch by itself.
+
+    Every process it starts goes through the session's process registry it was built with, so the session stop kills
+    it even when :meth:`stop` hangs.
+    """
 
     async def start(self, branch: str, start_commit: str) -> None: ...
 
@@ -111,6 +115,8 @@ class SpecialistLifecycle(Protocol):
 
 
 class Toolbox(Protocol):
+    """Every process it starts goes through the session's process registry it was built with, as the lifecycle's do."""
+
     async def submit(self, request: TestRequest) -> str:
         """Queue ``request`` and return the request id its result carries."""
 

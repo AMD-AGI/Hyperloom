@@ -3,8 +3,9 @@
 
 """The peers a session runs on, and the placeholder that wires them until their owners' modules land.
 
-A :data:`PeerFactory` builds the specialist lifecycle, the toolbox, the rule gate and the experiment repository for
-one session directory; the rule gate is handed the scheduler's fork admission desk. No owner has delivered a real
+A :data:`PeerFactory` builds the specialist lifecycle, the toolbox, the rule gate and the experiment repository on a
+:class:`PeerSetup`: the session directory, the scheduler's fork admission desk for the rule gate, and the session's
+process registry. No owner has delivered a real
 implementation yet, so :func:`mb_fake_load_peers` refuses, and the command line fails before it creates anything.
 """
 
@@ -21,6 +22,7 @@ from hyperloom_multibranch.contracts.scheduling import (
     Toolbox,
 )
 from hyperloom_multibranch.scheduling.layout import SessionLayout
+from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 
 #: The modules a real session needs and that hold no implementation yet; emptied as each module lands, and deleted
 #: with :func:`mb_fake_load_peers` once the last one has.
@@ -40,7 +42,20 @@ class Peers:
     repo: ExperimentRepo
 
 
-PeerFactory = Callable[[SessionLayout, ForkAdmissionService], Peers]
+@dataclass(frozen=True)
+class PeerSetup:
+    """What one session's peers are built on.
+
+    The lifecycle and the toolbox start every process of theirs through ``processes``, so the session stop kills it
+    even when a peer's own stop hangs, and the session reports it when it outlives that kill.
+    """
+
+    layout: SessionLayout
+    desk: ForkAdmissionService
+    processes: ProcessRegistry
+
+
+PeerFactory = Callable[[PeerSetup], Peers]
 
 
 class PeersUnavailable(RuntimeError):
@@ -62,4 +77,11 @@ def mb_fake_load_peers() -> PeerFactory:
     raise PeersUnavailable(MB_FAKE_MISSING_PEER_MODULES)
 
 
-__all__ = ["MB_FAKE_MISSING_PEER_MODULES", "PeerFactory", "Peers", "PeersUnavailable", "mb_fake_load_peers"]
+__all__ = [
+    "MB_FAKE_MISSING_PEER_MODULES",
+    "PeerFactory",
+    "PeerSetup",
+    "Peers",
+    "PeersUnavailable",
+    "mb_fake_load_peers",
+]
