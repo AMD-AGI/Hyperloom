@@ -9,6 +9,7 @@ from __future__ import annotations
 from hyperloom.contracts.recipe import Recipe
 from hyperloom_multibranch.contracts.lifecycle import SpecialistLaunch
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
+from hyperloom_multibranch.contracts.repo import BranchMoved
 
 
 class InMemoryRepo:
@@ -39,11 +40,16 @@ class InMemoryRepo:
     async def head(self, branch: str) -> str:
         return self._heads[branch]
 
-    async def commit(self, branch: str, recipe: Recipe, message: str) -> str:
-        if branch not in self._heads:
-            raise KeyError(branch)
+    async def commit(self, branch: str, parent: str, recipe: Recipe, message: str) -> str:
+        if self._heads[branch] != parent:
+            raise BranchMoved(f"{branch} is at {self._heads[branch]}, not {parent}")
         self._heads[branch] = self._store(recipe, message)
         return self._heads[branch]
+
+    async def rewind(self, branch: str, commit: str, parent: str) -> None:
+        if self._heads[branch] != commit:
+            raise BranchMoved(f"{branch} is at {self._heads[branch]}, not {commit}")
+        self._heads[branch] = parent
 
 
 class RecordingLifecycle:
