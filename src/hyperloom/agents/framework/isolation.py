@@ -109,12 +109,12 @@ def prepare_repo_cache(repo_url: str, work_dir: Path) -> Path:
     return repo_dir
 
 
-def _worktree_ref(candidate: Candidate) -> str:
-    """Choose the ref to materialise in a detached worktree."""
-    if candidate.ref.startswith("PR:"):
-        number = candidate.ref.split(":", 1)[1]
+def checkout_ref(ref: str) -> str:
+    """Return the git ref a candidate ref checks out: ``PR:N`` is the PR's head, anything else is itself."""
+    if ref.startswith("PR:"):
+        number = ref.split(":", 1)[1]
         return f"refs/pull/{number}/head"
-    return candidate.ref
+    return ref
 
 
 def _fetch_candidate_ref(repo_dir: Path, candidate: Candidate) -> None:
@@ -182,7 +182,7 @@ def prepare_candidate_workspace(
             "add",
             "--detach",
             str(worktree_dir),
-            _worktree_ref(candidate),
+            checkout_ref(candidate.ref),
         ]
     )
     create_venv(venv_dir)
@@ -193,6 +193,7 @@ __all__ = [
     "DiskPreflightError",
     "PER_CANDIDATE_GB",
     "WorkspacePaths",
+    "checkout_ref",
     "create_venv",
     "disk_preflight",
     "prepare_candidate_workspace",

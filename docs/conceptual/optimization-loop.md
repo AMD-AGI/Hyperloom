@@ -181,15 +181,24 @@ authoring specialist's prompt. The rungs, in increasing complexity:
 2. **Rung 2 — in-tree source patch.** A unified diff against the source tree
    the server imports: register the arch, a small forward/config/tokenizer
    bridge, or backport a merged PR. Pure Python, no compile.
-3. **Rung 3 — attempt-scoped runtime.** Acquire a runtime (a published
-   wheel, an editable checkout at a ref, or a local source tree) into an
-   isolated per-attempt venv. That venv is activated only through the
+3. **Rung 3 — attempt-scoped runtime.** The specialist names the version
+   that carries the fix as a `needs_runtime` request in its
+   `specialist_done`: a framework ref (PR, tag, branch or sha) installed
+   editable, pip packages, or both. No operator setting or failure kind
+   gates it, and vLLM accepts packages only, since a vLLM checkout compiles
+   (Rung 5). `integrate_patch` installs the request into an isolated
+   per-attempt venv that sees the installed stack, with pip held to the
+   image's ROCm builds — torch, torchvision, torchaudio, triton and every
+   distribution whose version carries a ROCm label — so a request that needs
+   a different torch fails provision instead of pulling a CUDA build. That
+   venv is activated only through the
    per-variant YAML benchmark envs; the Coordinator never mutates its own
    process environment to point at an attempt runtime. While one is active,
    the source tree the server imports is that runtime's own — the editable
-   checkout, or the venv's site-packages — so Rung 2 and Rung 4 patches land
-   there. A kept runtime is re-provisioned for every later round, whatever
-   that round's failure.
+   checkout, or the venv's site-packages when the framework itself was
+   installed there — so Rung 2 and Rung 4 patches land there. A kept runtime
+   is re-provisioned for every later round, whatever that round's failure or
+   request.
 4. **Rung 4 — source localization.** Localize a merged-PR or vendored
    closure into the source tree the server imports. Only the files under the
    framework's package are localized. A change that touches compiled or

@@ -284,6 +284,12 @@ ENABLEMENT_SETUP_GUIDANCE: tuple[str, ...] = (
     "Replay validates every one against an install-only allowlist BEFORE "
     "running any of them, and a single command that is not an install fails "
     "the whole round — carry anything else in a patch instead.",
+    "Setup commands change the SHARED environment. Never install, upgrade or "
+    "reinstall torch / torchvision / torchaudio / triton / vllm / sgl-kernel / "
+    "amd-aiter there, and do not `-U` a package that depends on them: PyPI "
+    "serves CUDA builds of all of them, and replacing the image's ROCm build "
+    "breaks every later round. A different framework version belongs in a "
+    "``needs_runtime`` request instead.",
     "If NO environment setup is needed (a pure source fix), leave `setup_commands` empty.",
 )
 
@@ -349,6 +355,50 @@ ENABLEMENT_BUILD_REQUEST_GUIDANCE: tuple[str, ...] = (
     "return an empty ``proposal_set`` when you emit one.",
 )
 
+# Rung 3 contract: the specialist names the version that carries the fix, and
+# integrate_patch provisions it into a per-attempt venv pinned to the image's
+# ROCm stack. Nothing else selects or enables the runtime.
+ENABLEMENT_RUNTIME_REQUEST_GUIDANCE: tuple[str, ...] = (
+    "REQUESTING AN ATTEMPT RUNTIME. When the fix already exists in another "
+    "version — a newer framework release, an upstream PR, or a newer pure-Python "
+    "dependency such as transformers — find it yourself (WebSearch / "
+    "mcp__pr_monitor__* / the repo history) and emit a ``needs_runtime`` object "
+    "in your final ``specialist_done``. integrate_patch installs it into a fresh "
+    "venv layered over the installed stack and boots this round on it; the "
+    "shared environment is untouched. Nothing else enables it — no operator "
+    "setting, no failure-kind gate.",
+    "``needs_runtime`` schema: ``{ref, repo_url, packages, index_url, "
+    "capability, reason}``, with at least one of ``ref`` / ``packages``. ``ref`` "
+    "is framework source to check out and install editable: a GitHub PR URL, "
+    "``PR:1234``, a tag, a branch, or a FULL commit sha (a shallow fetch cannot "
+    "resolve a short one). ``repo_url`` defaults to the framework's upstream "
+    "repo. ``packages`` are pip requirement strings installed beside the "
+    'checkout, or alone without a ref (e.g. ``["transformers==4.57.1"]``) — pin '
+    "exact versions. ``index_url`` is an extra pip index. vLLM accepts "
+    "``packages`` only: a vLLM checkout compiles, so ask for it via "
+    "``needs_targeted_build``.",
+    "TORCH / ROCm RISK — check before you pick a version. The attempt venv pins "
+    "the image's ROCm builds: torch, torchvision, torchaudio, triton, and every "
+    "package whose version carries a ROCm label (``+rocm...``). A ref or package "
+    "that needs a different torch / triton fails provision with a pip conflict "
+    "instead of swapping the GPU stack. PyPI serves only CUDA builds of torch, "
+    "triton, sgl-kernel and vllm — never request those from PyPI.",
+    "Compiled ROCm packages WITHOUT a ROCm label — sglang-kernel (sgl-kernel) "
+    "and amd-aiter — are NOT pinned. A framework ref far ahead of the installed "
+    "one usually requires a newer sglang-kernel / aiter the image does not have: "
+    "the runtime installs, then fails at import or at its first kernel call. "
+    "Prefer the ref closest to the installed version that carries the fix (a "
+    "backport PR, or the release just after it), compare its dependency pins "
+    "(``python/pyproject.toml``) with the installed versions first, and request "
+    "a ``needs_targeted_build`` for a compiled piece it needs.",
+    "Patches you write in the same round apply to the provisioned checkout, not "
+    "the installed tree — author them against the ref you request. A runtime "
+    "the round KEEPs is re-provisioned for every later round and a new "
+    "``needs_runtime`` is then ignored, so request the version you want to "
+    "build on. ``needs_runtime`` is a real deliverable: the round boots on it "
+    "even with an empty ``proposal_set``.",
+)
+
 
 _LADDER_TWO_AXES: tuple[str, ...] = (
     "DIAGNOSE ONCE, THEN CLIMB ONLY AS FAR AS NEEDED. Enablement has two axes:",
@@ -375,9 +425,10 @@ _LADDER_RUNGS: tuple[str, ...] = (
     "Rung 2 - In-tree source patch: a unified diff against the INSTALLED source tree "
     "— register the arch, a small forward/config/tokenizer bridge, or backport a "
     "merged PR. Pure Python, no compile.",
-    "Rung 3 - Attempt-scoped runtime: the capability lives in a DIFFERENT version — "
-    "acquire a wheel / editable checkout / ref into an isolated per-attempt venv. No "
-    "compile, no shared-venv mutation (record it in setup_commands).",
+    "Rung 3 - Attempt-scoped runtime: the capability lives in a DIFFERENT version of "
+    "the framework or of a pure-Python dependency — request that ref / those "
+    "packages via needs_runtime (see below) and it is installed into an isolated "
+    "per-attempt venv. No compile, no shared-venv mutation.",
     "Rung 4 - Source localization: localize a merged-PR / vendored closure into the "
     "source root; changes touching compiled or build-backend files defer to Rung 5.",
     "Rung 5 - Off-loop compiled build: AITER / sgl-kernel / vLLM-from-source, built "
@@ -429,7 +480,7 @@ def build_enablement_ladder_book(signature: FailureSignature | None = None) -> s
 
     Prose only: the two axes (diagnose once / climb as needed), the Rung 0-5
     ladder, an advisory ``kind -> recommended entry rung`` table, and the folded
-    environment-setup / incremental-progress / targeted-build guidance. When a
+    environment-setup / incremental-progress / attempt-runtime / targeted-build guidance. When a
     ``signature`` is given, a one-line entry-rung hint is added; it never routes
     deterministically.
     """
@@ -454,6 +505,10 @@ def build_enablement_ladder_book(signature: FailureSignature | None = None) -> s
     lines.append("")
     lines.append("PROGRESS DELIVERABLE (serial enablement — advancing the boot one step counts):")
     for g in ENABLEMENT_PROGRESS_GUIDANCE:
+        lines.append(f"  - {g}")
+    lines.append("")
+    lines.append("ATTEMPT RUNTIME (request another framework / dependency version that already has the fix):")
+    for g in ENABLEMENT_RUNTIME_REQUEST_GUIDANCE:
         lines.append(f"  - {g}")
     lines.append("")
     lines.append("TARGETED BUILD (request a compiled / from-source component when a patch cannot deliver it):")
@@ -595,6 +650,7 @@ __all__ = [
     "ENABLEMENT_INTENT_TERMS",
     "ENABLEMENT_PATCH_INVARIANTS",
     "ENABLEMENT_PROGRESS_GUIDANCE",
+    "ENABLEMENT_RUNTIME_REQUEST_GUIDANCE",
     "ENABLEMENT_SETUP_GUIDANCE",
     "EnablementMandate",
     "EnablementSearchPlan",

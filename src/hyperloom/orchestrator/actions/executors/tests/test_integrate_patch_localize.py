@@ -72,6 +72,15 @@ _CUDA_DIFF = "diff --git a/csrc/attn.cu b/csrc/attn.cu\n--- a/csrc/attn.cu\n+++ 
     [
         pytest.param({}, id="not_an_enablement_round"),
         pytest.param({"enablement": True}, id="no_dispatched_verdict"),
+        pytest.param(
+            {
+                "enablement": True,
+                "enablement_failure_signature": classify_failure(
+                    "torch.OutOfMemoryError: HIP out of memory. Tried to allocate 2.00 GiB"
+                ).to_dict(),
+            },
+            id="resource_constraint",
+        ),
         pytest.param(_params(enablement_launch_only=True), id="launch_only_bench"),
     ],
 )
