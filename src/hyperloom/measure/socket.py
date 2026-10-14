@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-from hyperloom.contracts.measurement import FailureClass, SandboxFacts
+from hyperloom.contracts.measurement import AccuracyValue, FailureClass, SandboxFacts
 
 __all__ = [
     "EnvironmentRef",
@@ -130,12 +130,16 @@ class TestCall:
 
 @dataclass(frozen=True)
 class RoundOutcome:
-    """One round of a test; ``point`` indexes ``TestCall.points``."""
+    """One round of a test; ``point`` indexes ``TestCall.points``.
+
+    ``accuracy`` is set on an ``accuracy`` round only: the scores the evaluation wrote for the measured round.
+    """
 
     point: int
     phase: Phase
     output_dir: Path
     returncode: int
+    accuracy: tuple[AccuracyValue, ...] = ()
 
 
 @dataclass(frozen=True)

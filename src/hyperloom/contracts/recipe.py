@@ -237,14 +237,7 @@ class ComponentPatches:
 
 @dataclass(frozen=True)
 class KernelArtifact:
-    """A kernel artifact the recipe loads; ``target`` (the operator or shape it serves) is unique per kind.
-
-    ``metadata`` is a free JSON object; its ``load`` entry says how a test loads the artifact.
-    ``{"load": {"via": "env_file", "env": "<ENV_VAR_NAME>"}}`` attaches the file to the test and sets the variable to
-    its path in the sandbox; the toolbox refuses a ``via`` it does not know. ``metadata`` is part of the recipe
-    document, so the load method counts in ``Recipe.digest()`` and ``RecipeDelta.fingerprint()``: the same file loaded
-    another way is another artifact.
-    """
+    """A kernel artifact the recipe loads; ``target`` (the operator or shape it serves) is unique per kind."""
 
     kind: KernelKind
     target: str

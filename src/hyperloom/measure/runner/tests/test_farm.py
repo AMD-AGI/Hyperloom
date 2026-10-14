@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from hyperloom.measure.farm import FarmError, build_farm, prepend_pythonpath, verify_farm
+from hyperloom.measure.runner.farm import FarmError, build_farm, prepend_pythonpath, verify_farm
 from hyperloom.measure.spec import EnvEntry, EnvRoot
 
 INSTALLED = Path(yaml.__file__).parent

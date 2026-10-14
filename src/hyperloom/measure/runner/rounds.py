@@ -14,15 +14,18 @@ from pathlib import Path
 
 from hyperloom.measure.socket import TestOutcome
 
-__all__ = ["ROUNDS_FILE", "WARMUP_DIR", "rounds_document", "write_rounds"]
+__all__ = ["ACCURACY_PHASE", "ROUNDS_FILE", "WARMUP_DIR", "rounds_document", "write_rounds"]
 
 ROUNDS_FILE = "rounds.json"
+#: The phase of the round that evaluates accuracy; its entry also lists the scores, as ``AccuracyValue`` documents.
+ACCURACY_PHASE = "accuracy"
 #: The directory beside a measuring round's, where the old flow keeps the warm-up round it discarded.
 WARMUP_DIR = "warmup_round"
 
 
 def rounds_document(outcome: TestOutcome | None, files_dir: Path) -> list[dict[str, object]]:
-    """One entry per round that left its directory below ``files_dir``: point, phase, directory (relative), return code."""
+    """One entry per round that left its directory below ``files_dir``: point, phase, directory (relative), return code
+    and, for an accuracy round, the scores."""
     if outcome is None:
         return []
     root = Path(files_dir).resolve()
@@ -32,9 +35,15 @@ def rounds_document(outcome: TestOutcome | None, files_dir: Path) -> list[dict[s
             relative = Path(round_.output_dir).resolve().relative_to(root)
         except ValueError:
             continue  # a round that wrote elsewhere has nothing in the result to point at
-        entries.append(
-            {"point": round_.point, "phase": round_.phase, "dir": relative.as_posix(), "returncode": round_.returncode}
-        )
+        entry: dict[str, object] = {
+            "point": round_.point,
+            "phase": round_.phase,
+            "dir": relative.as_posix(),
+            "returncode": round_.returncode,
+        }
+        if round_.phase == ACCURACY_PHASE:
+            entry["accuracy"] = [value.to_document() for value in round_.accuracy]
+        entries.append(entry)
     return entries
 
 

@@ -64,7 +64,7 @@ def test_a_missing_directory_is_refused(tmp_path):
 def _farm(tmp_path, entries):
     import sys
 
-    from hyperloom.measure.farm import build_farm
+    from hyperloom.measure.runner.farm import build_farm
     from hyperloom.measure.spec import EnvRoot
 
     blobs = {"sha256:" + hashlib.sha256(d).hexdigest(): d for d in (b"x = 1\n",)}

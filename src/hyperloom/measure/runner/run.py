@@ -22,8 +22,8 @@ from hyperloom.measure.failures import Disposition, classify_test_failure
 from hyperloom.measure.local import LocalMeasurementBackend, TestCallRefused
 from hyperloom.measure.manifest import encode_manifest, RESULT_SCHEMA
 from hyperloom.measure.runner import hardware
-from hyperloom.measure.attachments import AttachmentError, place_attachments
-from hyperloom.measure.farm import Farm, FarmError, build_farm, verify_farm
+from hyperloom.measure.runner.attachments import AttachmentError, place_attachments
+from hyperloom.measure.runner.farm import Farm, FarmError, build_farm, verify_farm
 from hyperloom.measure.runner.inventory import OutputRejected, inventory, write_farm_inventory
 from hyperloom.measure.runner.platform_env import align_platform_env, take_topology
 from hyperloom.measure.runner.rewrite import rewrite_config

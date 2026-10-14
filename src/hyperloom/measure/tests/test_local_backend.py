@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import threading
@@ -14,6 +15,7 @@ from typing import Any
 import pytest
 import yaml
 
+from hyperloom.contracts.measurement import AccuracyValue
 from hyperloom.measure import local
 from hyperloom.measure.local import LocalMeasurementBackend, TestCallRefused
 from hyperloom.measure.socket import RoundPlan, SessionFacts, TestCall
@@ -154,6 +156,38 @@ def test_an_accuracy_test_reports_the_accuracy_round_with_the_eval_exit_code(gri
 
     assert [(r.phase, r.returncode) for r in outcome.rounds] == [("measure", 0), ("accuracy", 3)]
     assert outcome.returncode == 3
+
+
+def _lm_eval_results(directory: Path, score: float) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    document = {"results": {"gsm8k": {"exact_match,flexible-extract": score}}}
+    (directory / "results_2026-10-14T10-00-00.json").write_text(json.dumps(document), encoding="utf-8")
+
+
+def test_the_accuracy_round_carries_the_measured_rounds_scores_not_the_warmups(grid, tmp_path):
+    result = grid.result("test", nonfatal_warnings=["run_grid_warmup_discarded_first"])
+    workspace = Path(result.workspace)
+    _lm_eval_results(workspace / "eval_output", 0.64)
+    _lm_eval_results(workspace.parent / "warmup_round" / "bench" / "eval_output", 0.10)
+    grid.answers["test"] = result
+    point = _point(tmp_path, "acc", run_eval="true")
+
+    outcome = _run(_call(tmp_path, point, accuracy=True, kind="accuracy"))
+
+    by_phase = {r.phase: r.accuracy for r in outcome.rounds}
+    assert by_phase["accuracy"] == (AccuracyValue("gsm8k", "exact_match,flexible-extract", 0.64),)
+    assert by_phase["warmup"] == by_phase["measure"] == ()
+
+
+def test_an_accuracy_round_with_only_a_warmup_evaluation_carries_no_score(grid, tmp_path):
+    result = grid.result("test", nonfatal_warnings=["run_grid_warmup_discarded_first"])
+    _lm_eval_results(Path(result.workspace).parent / "warmup_round" / "eval_output", 0.10)
+    grid.answers["test"] = result
+    point = _point(tmp_path, "acc", run_eval="true")
+
+    outcome = _run(_call(tmp_path, point, accuracy=True, kind="accuracy"))
+
+    assert [r.accuracy for r in outcome.rounds if r.phase == "accuracy"] == [()]
 
 
 def test_a_test_that_did_not_ask_for_accuracy_reports_no_accuracy_round(grid, tmp_path):

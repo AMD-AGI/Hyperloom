@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from hyperloom.contracts.measurement import SandboxFacts
+from hyperloom.contracts.measurement import AccuracyValue, SandboxFacts
 from hyperloom.measure.runner.rounds import ROUNDS_FILE, WARMUP_DIR, rounds_document, write_rounds
 from hyperloom.measure.socket import RoundOutcome, TestOutcome
 
@@ -28,7 +28,7 @@ def test_each_round_is_listed_with_its_phase_and_a_directory_relative_to_the_fil
     assert rounds_document(outcome, files) == [
         {"point": 0, "phase": "warmup", "dir": f"variant_00_test/{WARMUP_DIR}", "returncode": 0},
         {"point": 0, "phase": "measure", "dir": "variant_00_test/benchmark_sglang_1", "returncode": 0},
-        {"point": 1, "phase": "accuracy", "dir": "variant_00_test/benchmark_sglang_1", "returncode": 3},
+        {"point": 1, "phase": "accuracy", "dir": "variant_00_test/benchmark_sglang_1", "returncode": 3, "accuracy": []},
     ]
 
 
@@ -45,3 +45,17 @@ def test_the_file_is_written_into_the_output_files(tmp_path: Path) -> None:
     assert json.loads((files / ROUNDS_FILE).read_text()) == [
         {"point": 0, "phase": "measure", "dir": "a", "returncode": 0}
     ]
+
+
+def test_an_accuracy_round_lists_its_scores_and_no_other_round_does(tmp_path: Path) -> None:
+    files = tmp_path / "files"
+    value = AccuracyValue("gsm8k", "exact_match,flexible-extract", 0.64)
+    outcome = _outcome(
+        RoundOutcome(0, "measure", files / "a", 0, (value,)),  # a score on a measuring round is not listed
+        RoundOutcome(0, "accuracy", files / "a", 0, (value,)),
+        RoundOutcome(1, "accuracy", files / "b", 0),
+    )
+    measure, scored, empty = rounds_document(outcome, files)
+    assert "accuracy" not in measure
+    assert scored["accuracy"] == [{"task": "gsm8k", "metric": "exact_match,flexible-extract", "score": 0.64}]
+    assert empty["accuracy"] == [], "a round that scored nothing says so: the reader must not guess"

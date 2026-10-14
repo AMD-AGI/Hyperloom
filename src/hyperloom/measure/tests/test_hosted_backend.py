@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.contracts.measurement import AccuracyValue
 from hyperloom.measure.hosted import STOPPED_RETURNCODE, HostedStartError
 from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT, STATE_SUBMITTED
 from hyperloom.measure.returncodes import (
@@ -613,3 +614,17 @@ def test_a_sandbox_gone_error_from_the_provider_surfaces_as_lost(rig, tmp_path) 
     outcome = r.backend.run_test(make_call(tmp_path))
     assert outcome.returncode == HOSTED_INFRA_FAILURE_RC and outcome.failure_reason == "runner_lost"
     assert isinstance(SandboxGone("x"), Exception)
+
+
+def test_the_scores_of_an_accuracy_round_reach_the_outcome_from_the_signed_rounds_file(rig, tmp_path) -> None:
+    r = rig()
+    _, outcome = _run(r, tmp_path, fake_accuracy="0.64")
+    assert [x.phase for x in outcome.rounds] == ["measure", "accuracy"]
+    assert outcome.rounds[0].accuracy == ()
+    assert outcome.rounds[1].accuracy == (AccuracyValue("gsm8k", "exact_match,flexible-extract", 0.64),)
+
+
+def test_an_accuracy_round_without_scores_reaches_the_outcome_without_scores(rig, tmp_path) -> None:
+    r = rig()
+    _, outcome = _run(r, tmp_path, fake_accuracy="null")
+    assert [(x.phase, x.accuracy) for x in outcome.rounds] == [("measure", ()), ("accuracy", ())]

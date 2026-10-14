@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import yaml
 
-from hyperloom.measure.farm import Farm
+from hyperloom.measure.runner.farm import Farm
 from hyperloom.measure.runner.rewrite import rewrite_config
 
 SHEET = """

@@ -12,7 +12,8 @@ measures nothing: what it writes is chosen by ``fake_mode`` and friends in the Y
 (a listed file changes after signing), ``wrong_key`` (signed with another key), ``other_sandbox``, ``other_request``,
 ``other_spec`` (the manifest names another sandbox, request or sheet), ``extra_file`` (a file the manifest does not
 list), ``no_manifest`` and ``hang`` (never finishes). ``fake_delay`` seconds pass before the work starts;
-``fake_throughput`` and ``fake_completed`` set the report.
+``fake_throughput`` and ``fake_completed`` set the report. ``fake_accuracy`` adds an accuracy round to the rounds file
+with that score (``none``: a round that holds no score).
 """
 
 from __future__ import annotations
@@ -87,7 +88,11 @@ def _write_files(out: Path, config: dict[str, Any], mode: str) -> dict[str, byte
     rounds = [{"point": 0, "phase": "measure", "dir": REPORT_PATH.rsplit("/", 1)[0], "returncode": 0}]
     if config.get("fake_inventory"):
         files["farm_inventory.json"] = json.dumps(config["fake_inventory"]).encode()
-    if config.get("fake_rounds"):
+    if "fake_accuracy" in config:
+        score = config["fake_accuracy"]
+        values = [] if score is None else [{"task": "gsm8k", "metric": "exact_match,flexible-extract", "score": score}]
+        rounds.append({**rounds[0], "phase": "accuracy", "accuracy": values})
+    if config.get("fake_rounds") or "fake_accuracy" in config:
         files["rounds.json"] = json.dumps(rounds).encode()
     for relative, data in files.items():
         _atomic(out / "files" / relative, data)

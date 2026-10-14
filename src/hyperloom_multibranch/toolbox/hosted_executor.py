@@ -31,6 +31,7 @@ from typing import Any
 import yaml
 
 from hyperloom.contracts.measurement import (
+    AccuracyValue,
     FailureClass,
     RoundValue,
     SandboxFacts,
@@ -57,6 +58,7 @@ _REPORT = "benchmark_report.json"
 _MANIFEST = "manifest.json"
 _UNFINISHED = (STATE_SUBMITTED, STATE_SENT)
 _SWEEP = "conc_sweep"
+_ACCURACY = "accuracy"
 
 
 class HostedExecutor:
@@ -124,7 +126,7 @@ class HostedExecutor:
             magpie_python=self._python,
             task_id=request.request_id or "",
             kind="test" if request.kind is TestKind.SWEEP else kind,  # type: ignore[arg-type]
-            prep=_SWEEP if request.kind is TestKind.SWEEP else "grid",
+            prep=_SWEEP if request.kind is TestKind.SWEEP or len(accepted.points) > 1 else "grid",
             accuracy=request.accuracy,
             meta=TestMeta(
                 purpose=request.purpose.value,
@@ -151,10 +153,12 @@ class HostedExecutor:
         if failure is None and not audit:
             raise MeasurementRefused("the result is not recorded as a verified bundle of this sandbox")
         finished = self._clock()
+        accuracy: tuple[AccuracyValue, ...] = ()
         if failure is None:
             rounds = _round_values(outcome.rounds, accepted.points)
             if not any(r.phase == "measure" for r in rounds):
                 raise MeasurementRefused("the verified result holds no readable measured round")
+            accuracy = _accuracy_values(outcome.rounds, wanted=request.accuracy)
         else:
             rounds = ()
         gpu_seconds = max(0.0, finished - started) * facts.gpu_count
@@ -164,6 +168,7 @@ class HostedExecutor:
             failure_class=failure,
             failure_reason=outcome.failure_reason if failure is not None else None,
             rounds=rounds,
+            accuracy=accuracy,
             sandbox=facts,
             output_dir=_relative(call.output_dir, self._session),
             started_at=started,
@@ -286,6 +291,22 @@ def _metrics_of(measurement: Mapping[str, Any]) -> dict[str, float]:
         for key, value in measurement.items()
         if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
     }
+
+
+def _accuracy_values(rounds: tuple[RoundOutcome, ...], *, wanted: bool) -> tuple[AccuracyValue, ...]:
+    """The scores of the accuracy rounds, in round order.
+
+    A request that asked for accuracy and got no round, or a round with no score, is not a result: a test that
+    "succeeds" without the number it was run for would be read as a pass of the accuracy gate.
+    """
+    evaluated = [r for r in rounds if r.phase == _ACCURACY]
+    if not wanted:
+        return ()
+    if not evaluated:
+        raise MeasurementRefused("the request asked for accuracy but the verified result has no accuracy round")
+    if any(not r.accuracy for r in evaluated):
+        raise MeasurementRefused("the verified result's accuracy round holds no accuracy score")
+    return tuple(value for r in evaluated for value in r.accuracy)
 
 
 def _round_values(rounds: tuple[RoundOutcome, ...], points: tuple[Path, ...]) -> tuple[RoundValue, ...]:

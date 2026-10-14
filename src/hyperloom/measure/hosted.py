@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from hyperloom.common.env import env_bool
-from hyperloom.contracts.measurement import FailureClass, SandboxFacts
+from hyperloom.contracts.measurement import AccuracyValue, FailureClass, SandboxFacts
 from hyperloom.measure import bundle as bundle_mod
 from hyperloom.measure.archive import ArchiveError, ResultArchive
 from hyperloom.measure.bundle import MaterializeError, RejectReason, ResultRejected, VerifiedBundle
@@ -731,7 +731,14 @@ def _rounds_of(verified: VerifiedBundle, output: Path) -> tuple[RoundOutcome, ..
     if ROUNDS_FILE in listed:
         document = json.loads(verified.read_file(ROUNDS_FILE).decode("utf-8"))
         return tuple(
-            RoundOutcome(int(r["point"]), r["phase"], output / r["dir"], int(r["returncode"])) for r in document
+            RoundOutcome(
+                int(r["point"]),
+                r["phase"],
+                output / r["dir"],
+                int(r["returncode"]),
+                tuple(AccuracyValue.from_document(v) for v in r.get("accuracy", ())),
+            )
+            for r in document
         )
     reports = sorted(
         path for path in listed if path.endswith("benchmark_report.json") and WARMUP_DIR not in Path(path).parts
