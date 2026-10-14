@@ -289,6 +289,30 @@ def test_pending_keep_publication_patch_is_cumulative(tmp_path, monkeypatch):
     }
 
 
+def test_iteration_result_event_records_the_agent_rationale(tmp_path, monkeypatch):
+    loop, _workspace = _make_loop(tmp_path, monkeypatch)
+    loop.run_state = RunState(campaign_id="campaign", session_index=1)
+    result = IterationResult(
+        iteration=3,
+        duration_sec=0.1,
+        validation_passed=True,
+        validation_summary="passed",
+        wall_ms=0.8,
+        mean_case_speedup=1.25,
+        kept=True,
+    )
+    result.agent_rationale = "Chose register tiling\nover split-K because " + "x" * 600
+    event = loop._iteration_result_event(result, plan="register tiling")
+    assert event["decision"] == "KEEP"
+    # The rationale is flattened to one line, truncated, and carried on the keep/revert event.
+    assert "\n" not in event["rationale"]
+    assert event["rationale"].startswith("Chose register tiling over split-K because ")
+    assert len(event["rationale"]) == 500
+
+    result.agent_rationale = ""
+    assert "rationale" not in loop._iteration_result_event(result, plan="register tiling")
+
+
 @pytest.mark.parametrize("assembly_source", ["s_endpgm\n", "s_endpgm\n\n", "s_endpgm"])
 def test_pending_keep_includes_new_assembly_in_recovery_and_publication(tmp_path, monkeypatch, assembly_source):
     loop, workspace = _make_loop(tmp_path, monkeypatch)

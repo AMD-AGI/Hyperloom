@@ -548,8 +548,12 @@ You are a GPU kernel optimization agent in an autonomous iteration loop.
 ## Your Task
 Each invocation: read the target kernel, review the recent iteration history,
 and modify it to improve performance. You MAY make multiple changes across
-several places this iteration — you are not limited to a single change. Then
-explain your rationale in one sentence.
+several places this iteration — you are not limited to a single change. Then,
+in your final message, state your reasoning for the trajectory log: the
+direction you chose and why, the change you made, and why you expect it to beat
+the current best — or, if you are stopping without a win, why this direction is
+exhausted and what you would try next. This rationale is recorded with the
+iteration's keep/revert decision, so make it specific enough to compare runs by.
 
 ## Program (what to optimize and how)
 {program_md}
