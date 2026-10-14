@@ -20,6 +20,7 @@ from pathlib import Path
 from hyperloom.inference_optimizer.session.paths import workspace_root
 from hyperloom_multibranch.scheduling.budget import MB_DEFAULT_MAX_HOURS, MB_MIN_PRELUDE_HOURS
 from hyperloom_multibranch.scheduling.clock import Clock
+from hyperloom_multibranch.scheduling.exports import exports_from_env
 from hyperloom_multibranch.scheduling.layout import create_session
 from hyperloom_multibranch.scheduling.lifecycle import Session
 from hyperloom_multibranch.scheduling.llm import anthropic_completion, default_model
@@ -92,10 +93,6 @@ def run_session(settings: RunSettings, peer_factory: PeerFactory) -> int:
     The model and the Recipe KB client are resolved first, so an environment that cannot provide them fails before
     any session directory exists.
     """
-
-    # The Recipe KB client loads hyperloom.orchestrator.specialists (remote_recipe.values imports orchestrator.lever),
-    # so it is imported once a session runs, not whenever this command or the session module is imported.
-    from hyperloom_multibranch.scheduling.exports import exports_from_env
 
     clock = Clock()
     model = default_model()

@@ -15,19 +15,16 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 from hyperloom.common.io import atomic_write_json, atomic_write_text
 from hyperloom.contracts.recipe import RecipeError
 from hyperloom_multibranch.contracts.notebook.interfaces import NotebookError
 from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.scheduling.clock import Clock
+from hyperloom_multibranch.scheduling.exports import CloseExports, SessionExports
 from hyperloom_multibranch.scheduling.final import FinalChoice
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.stops import SessionStopper, SessionStopReason, StopReport
-
-if TYPE_CHECKING:
-    from hyperloom_multibranch.scheduling.exports import CloseExports, SessionExports
 
 logger = logging.getLogger(__name__)
 

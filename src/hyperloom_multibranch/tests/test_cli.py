@@ -30,11 +30,14 @@ MAIN_FLOW_RUNTIME = (
     "hyperloom.orchestrator.state",
     "hyperloom.orchestrator.bus",
     "hyperloom.orchestrator.actions.executors",
-    "hyperloom.orchestrator.specialists",
+    "hyperloom.orchestrator.specialists.subprocess_",
+    "hyperloom.orchestrator.specialists.runner",
+    "hyperloom.orchestrator.kernel.patch_conflict_merge",
     "hyperloom.inference_optimizer.cli",
 )
 IMPORT_PROBE = (
-    "import sys, hyperloom_multibranch.cli, hyperloom_multibranch.scheduling.lifecycle; "
+    "import sys, hyperloom_multibranch.cli, hyperloom_multibranch.scheduling.lifecycle, "
+    "hyperloom_multibranch.scheduling.exports; "
     f"print([m for m in sys.modules if m.startswith({MAIN_FLOW_RUNTIME!r})])"
 )
 

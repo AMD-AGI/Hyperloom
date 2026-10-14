@@ -19,7 +19,7 @@ import importlib.metadata
 import logging
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from hyperloom.common.io import atomic_write_json
 from hyperloom_multibranch.contracts.notebook import Role, Writer
@@ -34,6 +34,7 @@ from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.close import CloseReport, Closer
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
 from hyperloom_multibranch.scheduling.explore import Explorer, ExploreWindow, integration_row
+from hyperloom_multibranch.scheduling.exports import ExportsFactory
 from hyperloom_multibranch.scheduling.final import FinalCandidates, FinalChoice, FinalSelector, choose_candidates
 from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.git import GitFailed, git_output
@@ -48,9 +49,6 @@ from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.roster import Roster
 from hyperloom_multibranch.scheduling.settings import RunSettings
 from hyperloom_multibranch.scheduling.stops import SessionStopper, SessionStopReason, StopReport, StopSignals
-
-if TYPE_CHECKING:
-    from hyperloom_multibranch.scheduling.exports import ExportsFactory
 
 logger = logging.getLogger(__name__)
 
