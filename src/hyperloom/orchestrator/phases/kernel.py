@@ -49,6 +49,7 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
     OUTCOME_KEEP,
     JournalEntry,
 )
+from ..state.analysis_failures import analysis_skip_reason, remembered_trace_failure
 from ..state.shared_state import resolve_graded_comparison
 from ..state.task_registry import TERMINAL_STATES, Task, TaskNotFound
 from ..bus.message_bus import Message
@@ -411,7 +412,7 @@ class KernelPhase(CoordinatorCollaborator):
                 ran=False,
                 task_kind=task_kind,
                 trigger=trigger,
-                skipped_reason=denied.rule if denied else "gpu_trace_unsupported",
+                skipped_reason=denied.rule if denied else analysis_skip_reason(self.shared_state),
                 idempotency_reason=idempotency_reason,
                 snapshot_id_before=snapshot_id_before,
             )
@@ -4270,9 +4271,15 @@ class KernelPhase(CoordinatorCollaborator):
         return True
 
     def cached_kernel_request(self, kind: str, payload: dict[str, Any]) -> dict[str, Any] | None:
-        """Return a cached programmatic_handler result if applicable (cache key last_trace_analyze)."""
+        """Return the result to serve without running the handler: the trace's last successful analysis
+        (``last_trace_analyze``), else a failure the same trace is known to reproduce; ``None`` to run it.
+        """
         if kind != "trace_analyze":
             return None
+        return self._cached_trace_analysis(payload) or remembered_trace_failure(self.shared_state, payload)
+
+    def _cached_trace_analysis(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        """The last successful analysis of ``payload``'s trace, when its candidates are still on disk."""
         cached = self.shared_state.last_trace_analyze or {}
         if not isinstance(cached, dict) or not cached:
             return None

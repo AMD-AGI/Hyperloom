@@ -22,7 +22,7 @@ from hyperloom.common.provenance import detect_kineto_backend
 from hyperloom.common.timeutil import now_iso
 from ...phases.machine_state import record_lifecycle_event
 from ...loop.sub_agent_runner import RunnerContext
-from ...state.analysis_failures import remember_roofline_failure
+from ...state.analysis_failures import remember_roofline_failure, remember_trace_failure
 from hyperloom.inference_optimizer.trace.task_progress import report_progress
 from ._multi_node_env import is_multi_node
 from ..stop_attribution import ORCHESTRATOR_CANCELLED_CLASS
@@ -917,6 +917,7 @@ class RooflineExecutor:
 
         analysis = await self._analyze(ctx, recorder, payload)
         if not isinstance(analysis, _AnalysisOutcome):
+            remember_trace_failure(self.shared_state, payload, analysis)
             return analysis
         attribution_degraded = _flag_attribution_degraded(analysis.result, profiled.result)
         analysed = _AnalysedProfile(profiled, analysis)
