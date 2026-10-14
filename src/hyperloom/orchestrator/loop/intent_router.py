@@ -18,6 +18,7 @@ from hyperloom.orchestrator.lever import (
     patch_lever_kind,
     patch_owner_phase,
 )
+from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.common.timeutil import parse_iso_unix_or_zero, format_exc_brief
 from .verdicts import (
@@ -86,6 +87,45 @@ def _is_specialist_wave(action_name: str, params: Mapping[str, Any]) -> bool:
     Each goes out through the normal SpecialistRunner + TaskRegistry + lease + reap path.
     """
     return action_name == "specialist" and isinstance(params.get("tasks"), list) and bool(params["tasks"])
+
+
+def _explore_grid_key(action_name: str, params: Mapping[str, Any], *, macro_cycle: int) -> str:
+    """Idempotency key naming the configurations an explore grid would measure, or ``""``.
+
+    An explore round costs a whole benchmark window, so two grids asking for the
+    same configurations are the same task however they were worded or whenever
+    they were proposed. Keying on the tick, or on a key the proposer chose, lets
+    the same grid queue once per round of proposing -- and a configuration the
+    stack already carries is only dropped downstream once something else made it
+    a no-op, which never happens on the path where the first measurement
+    refused it. The macro cycle stays in the key: a later cycle measures against
+    a different stack, so the same grid is a different question there.
+    """
+    grid = params.get("grid") if action_name == "explore" else None
+    if not isinstance(grid, list) or not grid:
+        return ""
+    prints: list[str] = []
+    for variant in grid:
+        if not isinstance(variant, Mapping):
+            return ""
+        prints.append(
+            canonical_fingerprint(
+                _args_text(variant.get("extra_args")),
+                dict(variant.get("extra_envs") or {}),
+                remove_args=variant.get("remove_args"),
+                unset_envs=variant.get("unset_envs"),
+                args_mode=str(variant.get("args_mode") or "append"),
+            )
+        )
+    digest = hashlib.sha1(",".join(sorted(prints)).encode(), usedforsecurity=False).hexdigest()[:12]
+    return f"explore-grid-c{macro_cycle}-{digest}"
+
+
+def _args_text(extra_args: Any) -> str:
+    """``extra_args`` as the flat string the fingerprint reads, from either shape a proposer may send."""
+    if isinstance(extra_args, (list, tuple)):
+        return " ".join(str(part) for part in extra_args)
+    return str(extra_args or "")
 
 
 def _relayed_specialist_citations(state: Any) -> dict[str, list[dict[str, str]]]:
@@ -1018,8 +1058,11 @@ class IntentRouter(CoordinatorCollaborator):
             return
         if not await self._prepare_specialist_dispatch(request, nested_idempotency_key):
             return
-        # Idempotency-key chain: top-level -> nested compat alias -> content-fingerprint auto-key.
-        raw_key = intent.payload.get("idempotency_key") or nested_idempotency_key
+        # Idempotency-key chain: grid content for explore -> top-level -> nested compat alias ->
+        # content-fingerprint auto-key.
+        raw_key = _explore_grid_key(action_name, params, macro_cycle=int(self.shared_state.macro_cycle or 0))
+        if not raw_key:
+            raw_key = intent.payload.get("idempotency_key") or nested_idempotency_key
         if not raw_key:
             content_fp = hashlib.sha1(
                 json.dumps(params, sort_keys=True, default=str).encode(),
