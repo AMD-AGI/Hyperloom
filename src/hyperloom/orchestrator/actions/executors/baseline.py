@@ -29,6 +29,7 @@ from typing import Any, BinaryIO, Iterable, Iterator, Mapping, Sequence
 
 import yaml
 
+from hyperloom.common.accuracy import finite_score
 from hyperloom.common.env import is_truthy
 from hyperloom.common.env_safety import redact_secret_values, scrub_benchmark_process_env
 from hyperloom.common.git_safety import safe_directory_args
@@ -2296,13 +2297,13 @@ class BenchmarkRunExecutor:
         if not runs_root.exists():
             return None
         try:
-            from ._accuracy_gate import _finite_score, parse_eval_results
+            from ._accuracy_gate import parse_eval_results
 
             eval_data = parse_eval_results(runs_root, framework=framework)
         except Exception:
             log.debug("baseline_executor: sibling-accuracy salvage scan failed", exc_info=True)
             return None
-        if _finite_score(eval_data.get("accuracy")) is None:
+        if finite_score(eval_data.get("accuracy")) is None:
             return None
         return eval_data
 
