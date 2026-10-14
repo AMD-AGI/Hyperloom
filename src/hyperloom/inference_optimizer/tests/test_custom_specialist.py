@@ -676,7 +676,8 @@ async def test_spawning_a_tag_only_custom_task_marks_it_dispatched(tmp_path):
     from hyperloom.orchestrator.roles.mock_backend import MockBackend, MockTurn, ScriptedPlan
 
     state = SharedState(session_id="custom-spawn")
-    state.max_minutes = 30
+    # Room for a patch specialist's 60-minute admission floor.
+    state.max_minutes = 120
     state.save(tmp_path)
     idle = ScriptedPlan(turns=[MockTurn(intents=[])])
     coord = Coordinator(
