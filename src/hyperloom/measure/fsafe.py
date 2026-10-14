@@ -18,9 +18,9 @@ from collections.abc import Iterator
 from pathlib import Path
 
 CHUNK = 1024 * 1024
-#: Modes of what this module creates, stated so the result never depends on the umask: owner writes, others read.
-FILE_MODE = 0o644
-DIR_MODE = 0o755
+#: Modes of what this module creates, stated so the result never depends on the umask: owner only.
+FILE_MODE = 0o600
+DIR_MODE = 0o700
 _RDONLY = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
 
 
@@ -62,25 +62,19 @@ def open_root(root: Path) -> int:
 
 def open_beneath(root_fd: int, rel: str) -> int:
     """Open the regular file ``rel`` below ``root_fd`` without following any symlink; the caller closes the result."""
-    parts = rel.split("/")
-    held: list[int] = []
+    *parents, name = rel.split("/")
+    directory = open_dir_beneath(root_fd, parents) if parents else None
     try:
-        current = root_fd
-        for part in parts[:-1]:
-            current = _open_step(part, _RDONLY | os.O_DIRECTORY, current, rel)
-            held.append(current)
-        fd = _open_step(parts[-1], _RDONLY | os.O_NONBLOCK, current, rel)
+        fd = _open_step(name, _RDONLY | os.O_NONBLOCK, root_fd if directory is None else directory, rel)
     finally:
-        for descriptor in held:
-            os.close(descriptor)
+        if directory is not None:
+            os.close(directory)
     try:
-        regular = stat.S_ISREG(os.fstat(fd).st_mode)
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise UnsafeEntry(rel, "not a regular file")
     except BaseException:
         os.close(fd)
         raise
-    if not regular:
-        os.close(fd)
-        raise UnsafeEntry(rel, "not a regular file")
     return fd
 
 

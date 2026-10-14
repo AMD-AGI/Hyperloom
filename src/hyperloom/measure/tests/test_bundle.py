@@ -395,5 +395,5 @@ def test_placed_files_and_directories_have_fixed_modes_whatever_the_umask(bundle
         materialize(verify_bundle(bundle.staging, **verify_args(bundle)), out)
     finally:
         os.umask(old)
-    assert (out / "server.log").stat().st_mode & 0o777 == 0o644
-    assert (out / "benchmark_sglang_20261005_101500").stat().st_mode & 0o777 == 0o755
+    assert (out / "server.log").stat().st_mode & 0o777 == 0o600
+    assert (out / "benchmark_sglang_20261005_101500").stat().st_mode & 0o777 == 0o700
