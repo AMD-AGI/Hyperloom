@@ -189,10 +189,8 @@ class SessionStopper:
     async def _stop_open(self, reason: SessionStopReason, kinds: frozenset[BranchKind]) -> list[BaseException]:
         stop = BranchStop(StopCause.SESSION_END, reason.value, self._clock.now())
         open_branches = [entry.branch for entry in self._roster.entries() if entry.stop is None and entry.kind in kinds]
-        outcomes = await asyncio.gather(
-            *(self._branches.stop_branch(branch, stop) for branch in open_branches), return_exceptions=True
-        )
-        return [outcome for outcome in outcomes if isinstance(outcome, BaseException)]
+        outcomes = await asyncio.gather(*(self._branches.stop_branch(branch, stop) for branch in open_branches))
+        return [failure for failures in outcomes for failure in failures]
 
 
 __all__ = ["STOP_OVERRAN", "STOP_SIGNALS", "SessionStopReason", "SessionStopper", "StopReport", "StopSignals"]

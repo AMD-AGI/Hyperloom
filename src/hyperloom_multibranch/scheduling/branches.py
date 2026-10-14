@@ -10,17 +10,20 @@ in the notebook, so the integrator may still merge them. The notebook records no
 branch, which only the end of the session stops. The roster entry is stopped first, so a fork that commits
 its fix while the branch is being stopped is never started; when that fork's ``SPLIT`` comes after its ``STOP``, the
 fork desk records the ``STOP`` again. A branch gets its quota before its specialist starts,
-because the toolbox treats a branch without one as stopped.
+because the toolbox treats a branch without one as stopped. A peer failure on one branch never ends the session: a
+specialist that does not start is stopped, and a failed step of a stop or of a new K is recorded in its decision.
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 
 from hyperloom_multibranch.contracts.notebook import Notebook
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent
 from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
 from hyperloom_multibranch.contracts.scheduling import SpecialistLifecycle, Toolbox
+from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.settle import settled
@@ -31,7 +34,10 @@ from hyperloom_multibranch.scheduling.roster import (
     BranchStatus,
     BranchStop,
     Roster,
+    StopCause,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class BranchControl:
@@ -45,6 +51,7 @@ class BranchControl:
         toolbox: Toolbox,
         processes: ProcessRegistry,
         decisions: DecisionLog,
+        clock: Clock,
     ) -> None:
         self._roster = roster
         self._notebook = notebook
@@ -52,6 +59,7 @@ class BranchControl:
         self._toolbox = toolbox
         self._processes = processes
         self._decisions = decisions
+        self._clock = clock
 
     async def open_branches(
         self, count: int, start_commit: str, k: int, origin: BranchOrigin
@@ -83,64 +91,88 @@ class BranchControl:
         return entry
 
     async def apply_k(self, orders: Mapping[str, int]) -> None:
-        """Give each live branch its new K, clamped by the roster; stopped branches are left alone."""
+        """Give each live branch its new K, clamped by the roster; stopped branches are left alone.
+
+        A specialist that does not take its new K keeps running; its ``SET_K`` decision names the failure.
+        """
 
         for branch, k in orders.items():
             if self._roster.entry(branch).stop is not None:
                 continue
             entry = self._roster.set_k(branch, k)
-            if entry.kind is BranchKind.SPECIALIST and entry.start_commit:
-                await self._lifecycle.set_k(branch, entry.k)
-            self._decisions.record(Decision(DecisionKind.SET_K, f"K {entry.k}", branch, {"asked": k}))
+            failure = await self._send_k(entry) if entry.kind is BranchKind.SPECIALIST and entry.start_commit else ""
+            detail = {"asked": k, "failure": failure}
+            self._decisions.record(Decision(DecisionKind.SET_K, f"K {entry.k}", branch, detail))
         await self.push_quota()
 
-    async def stop_branch(self, branch: str, stop: BranchStop) -> None:
-        """Withdraw everything of ``branch``; stopping it again does nothing.
+    async def stop_branch(self, branch: str, stop: BranchStop) -> tuple[BaseException, ...]:
+        """Withdraw everything of ``branch`` and return the steps that failed; stopping it again does nothing.
 
         Every step runs even when an earlier one fails, so the tests, processes and claims of the branch are always
-        withdrawn and the ``STOP`` recorded; the first failure is raised afterwards.
+        withdrawn and the ``STOP`` recorded; the ``STOP`` decision names each failure, and the caller decides what
+        one means to it.
         """
 
         entry = self._roster.entry(branch)
         if entry.stop is not None:
-            return
+            return ()
         self._roster.stop(branch, stop)
-        failures = [await settled(self._stop_admitted_forks(branch, stop))]
-        failures.append(await settled(self.push_quota()))
+        forks = await self._stop_admitted_forks(branch, stop)
+        steps = [await settled(self.push_quota())]
         if entry.kind is BranchKind.SPECIALIST and entry.start_commit:
-            failures.append(await settled(self._lifecycle.stop(branch)))
+            steps.append(await settled(self._lifecycle.stop(branch)))
         withdrawn = await settled(self._toolbox.withdraw(branch))
-        failures.append(await settled(self._processes.kill_branch(branch)))
+        steps.append(await settled(self._processes.kill_branch(branch)))
         released = await settled(self._notebook.release_branch(branch))
-        reason = stop.summary
         if entry.kind is BranchKind.SPECIALIST:
-            failures.append(
-                await settled(self._notebook.record_lineage(LineageEvent(LineageKind.STOP, branch, reason=reason)))
-            )
-        raised = [outcome for outcome in (*failures, withdrawn, released) if isinstance(outcome, BaseException)]
+            event = LineageEvent(LineageKind.STOP, branch, reason=stop.summary)
+            steps.append(await settled(self._notebook.record_lineage(event)))
+        raised = [outcome for outcome in (*steps, withdrawn, released) if isinstance(outcome, BaseException)]
         detail = {
             "withdrawn": [] if isinstance(withdrawn, BaseException) else list(withdrawn),
             "released_claims": 0 if isinstance(released, BaseException) else len(released),
-            "failures": [f"{type(error).__name__}: {error}" for error in raised],
+            "failures": [_failure_text(error) for error in raised],
         }
-        self._decisions.record(Decision(DecisionKind.STOP, reason, branch, detail))
-        if raised:
-            raise raised[0]
+        self._decisions.record(Decision(DecisionKind.STOP, stop.summary, branch, detail))
+        return (*raised, *forks)
 
-    async def _stop_admitted_forks(self, parent: str, stop: BranchStop) -> None:
+    async def _stop_admitted_forks(self, parent: str, stop: BranchStop) -> list[BaseException]:
         reason = f"parent {parent} stopped: {stop.reason}"
+        failures: list[BaseException] = []
         for entry in self._roster.entries():
             if entry.from_branch == parent and entry.status is BranchStatus.ADMITTED:
-                await self.stop_branch(entry.branch, BranchStop(stop.cause, reason, stop.at))
+                failures.extend(await self.stop_branch(entry.branch, BranchStop(stop.cause, reason, stop.at)))
+        return failures
 
     async def push_quota(self) -> None:
         await self._toolbox.apply_quota(self._roster.quota_policy())
 
     async def _start(self, entry: BranchEntry, start_commit: str, kind: DecisionKind) -> None:
-        await self._lifecycle.start(entry.branch, start_commit)
-        await self._lifecycle.set_k(entry.branch, entry.k)
-        detail = {"start_commit": start_commit, "k": entry.k, "from_branch": entry.from_branch}
+        """Start the branch's specialist; one that does not start is stopped, with the failure as the reason."""
+
+        started = await settled(self._lifecycle.start(entry.branch, start_commit))
+        if isinstance(started, BaseException):
+            logger.error("the specialist of %s did not start", entry.branch, exc_info=started)
+            stop = BranchStop(StopCause.START_FAILED, _failure_text(started), self._clock.now())
+            for failure in await self.stop_branch(entry.branch, stop):
+                logger.error("%s did not stop cleanly after its failed start", entry.branch, exc_info=failure)
+            return
+        failure = await self._send_k(entry)
+        detail = {"start_commit": start_commit, "k": entry.k, "from_branch": entry.from_branch, "failure": failure}
         self._decisions.record(Decision(kind, f"{entry.origin.value} branch started", entry.branch, detail))
+
+    async def _send_k(self, entry: BranchEntry) -> str:
+        """Hand the specialist its K; the failure's text, or ``""``."""
+
+        sent = await settled(self._lifecycle.set_k(entry.branch, entry.k))
+        if not isinstance(sent, BaseException):
+            return ""
+        logger.error("the specialist of %s did not take K %d", entry.branch, entry.k, exc_info=sent)
+        return _failure_text(sent)
+
+
+def _failure_text(error: BaseException) -> str:
+    return f"{type(error).__name__}: {error}"
 
 
 __all__ = ["BranchControl"]

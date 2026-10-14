@@ -61,7 +61,7 @@ class Stage:
         self.toolbox = MbFakeToolbox(self.notebook)
         self.lifecycle = lifecycle or MbFakeLifecycle()
         self.branches = BranchControl(
-            self.roster, self.notebook, self.lifecycle, self.toolbox, self.processes, decisions
+            self.roster, self.notebook, self.lifecycle, self.toolbox, self.processes, decisions, clock
         )
         self.stopper = SessionStopper(self.roster, self.branches, self.toolbox, self.processes, decisions, clock)
 
@@ -93,13 +93,20 @@ def _ended(reason: SessionStopReason) -> BranchStop:
     return BranchStop(StopCause.SESSION_END, reason.value, NOW)
 
 
+def _ended_with_b01(reason: SessionStopReason) -> BranchStop:
+    """How the admitted fork ``b03`` ends: its parent ``b01`` stops it, as the first of the branches stopped."""
+
+    return BranchStop(StopCause.SESSION_END, f"parent b01 stopped: {reason.value}", NOW)
+
+
 async def test_end_exploration_stops_open_specialists_and_keeps_integration(tmp_path: Path) -> None:
     session = await Stage(tmp_path).opened()
 
     await session.stopper.end_exploration(SessionStopReason.TIME_EXHAUSTED)
 
     ended = _ended(SessionStopReason.TIME_EXHAUSTED)
-    assert session.stops() == {INTEGRATION_BRANCH: None, "b01": ended, "b02": JUDGE_STOP, "b03": ended}
+    fork = _ended_with_b01(SessionStopReason.TIME_EXHAUSTED)
+    assert session.stops() == {INTEGRATION_BRANCH: None, "b01": ended, "b02": JUDGE_STOP, "b03": fork}
     assert session.lifecycle.stopped == ["b01"]
     assert session.toolbox.quotas[-1].k_of(INTEGRATION_BRANCH) == 1
     assert session.roster.free_slots() == 0
@@ -113,7 +120,8 @@ async def test_a_failed_branch_stop_does_not_hold_up_the_end_of_exploration(tmp_
     await session.stopper.end_exploration(SessionStopReason.GLOBAL_CONVERGED)
 
     ended = _ended(SessionStopReason.GLOBAL_CONVERGED)
-    assert (session.stops()["b01"], session.stops()["b03"]) == (ended, ended)
+    fork = _ended_with_b01(SessionStopReason.GLOBAL_CONVERGED)
+    assert (session.stops()["b01"], session.stops()["b03"]) == (ended, fork)
     assert sorted(session.toolbox.withdrawn) == ["b01", "b03"]
 
 
@@ -126,7 +134,8 @@ async def test_stop_everything_withdraws_first_stops_all_and_leaves_no_process(t
     assert session.toolbox.withdrawn[0] == ALL_BRANCHES
     assert sorted(session.toolbox.withdrawn[1:]) == sorted(("b01", "b03", INTEGRATION_BRANCH))
     ended = _ended(SessionStopReason.SIGNAL)
-    assert session.stops() == {INTEGRATION_BRANCH: ended, "b01": ended, "b02": JUDGE_STOP, "b03": ended}
+    fork = _ended_with_b01(SessionStopReason.SIGNAL)
+    assert session.stops() == {INTEGRATION_BRANCH: ended, "b01": ended, "b02": JUDGE_STOP, "b03": fork}
     assert not any(running(pid) for pid in pids)
     assert report.clean
     decision = json.loads(session.decisions_file.read_text(encoding="utf-8").splitlines()[-1])

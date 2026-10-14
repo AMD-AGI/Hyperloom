@@ -118,7 +118,7 @@ class Session:
         peers = peer_factory(layout, desk)
         self._toolbox = peers.toolbox
         self._branches = BranchControl(
-            self._roster, self._notebook, peers.lifecycle, peers.toolbox, processes, self._decisions
+            self._roster, self._notebook, peers.lifecycle, peers.toolbox, processes, self._decisions, clock
         )
         self._stopper = SessionStopper(self._roster, self._branches, peers.toolbox, processes, self._decisions, clock)
         progress = FrontierScoring(self._notebook, FrontierPolicy(metric=MB_FAKE_PRIMARY_METRIC))

@@ -43,10 +43,11 @@ class BranchStatus(str, Enum):
 
 
 class StopCause(str, Enum):
-    """Who stopped a branch: the judge, or the end of the session."""
+    """Why a branch stopped: the judge stopped it, the session ended, or its specialist did not start."""
 
     JUDGE = "judge"
     SESSION_END = "session_end"
+    START_FAILED = "start_failed"
 
 
 @dataclass(frozen=True)

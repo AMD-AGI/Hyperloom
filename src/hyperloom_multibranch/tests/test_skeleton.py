@@ -371,3 +371,16 @@ async def test_a_failed_opening_judge_call_opens_one_branch_at_k_one(tmp_path: P
     assert stage.lifecycle.k == {"b01": 1}
     failed = [row["reason"] for row in _decisions(stage) if row["kind"] == "judge_failed"]
     assert failed and set(failed) == {"kept the status quo"}
+
+
+async def test_a_judge_stop_the_runtime_refuses_does_not_end_the_session(tmp_path: Path) -> None:
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.lifecycle = MbFakeLifecycle(scripts=_scripts(stage), refusing=frozenset({"b02"}))
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error) == (SessionStopReason.TIME_EXHAUSTED, "")
+    assert outcome.final is not None and outcome.final.chosen is not None
+    [stop] = [row for row in _decisions(stage) if row["kind"] == "stop" and row["branch"] == "b02"]
+    assert stop["detail"]["failures"] == ["RuntimeError: the runtime refused to stop b02"]
+    assert stage.pids and not any(running(pid) for pid in stage.pids)

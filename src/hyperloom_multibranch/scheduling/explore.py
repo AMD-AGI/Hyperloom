@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -34,6 +35,8 @@ from hyperloom_multibranch.scheduling.mb_fakes import (
 )
 from hyperloom_multibranch.scheduling.roster import BranchOrigin, BranchStop, Roster, StopCause
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
+
+logger = logging.getLogger(__name__)
 
 #: How often the loop starts committed forks and checks the deadline; the judge runs on its own, longer interval.
 EXPLORE_TICK_SECONDS = 5.0
@@ -122,9 +125,8 @@ class Explorer:
             await self._branches.start_fork(fork.branch, fork.fix_commit)
 
     async def _consult_placeholders(self, root_commit: str) -> None:
-        now = self._clock.now()
         for branch in mb_fake_similar_branches(self._roster):
-            await self._branches.stop_branch(branch, BranchStop(StopCause.JUDGE, SIMILAR_BRANCH_REASON, now))
+            await self._stop(branch, SIMILAR_BRANCH_REASON)
         extra = min(mb_fake_branches_to_add(self._roster), self._roster.free_slots())
         if extra:
             await self._branches.open_branches(extra, root_commit, 1, BranchOrigin.REFILL)
@@ -170,12 +172,18 @@ class Explorer:
                 },
             )
         )
-        now = self._clock.now()
         for order in decision.stop:
-            await self._branches.stop_branch(order.branch, BranchStop(StopCause.JUDGE, order.reason, now))
+            await self._stop(order.branch, order.reason)
         if decision.k:
             await self._branches.apply_k({order.branch: order.k for order in decision.k})
         return bool(decision.session_stop)
+
+    async def _stop(self, branch: str, reason: str) -> None:
+        """A judge stop; a step that fails is logged and exploring goes on, as CLOSE kills what the stop left."""
+
+        stop = BranchStop(StopCause.JUDGE, reason, self._clock.now())
+        for failure in await self._branches.stop_branch(branch, stop):
+            logger.error("the judge's stop of %s did not finish cleanly", branch, exc_info=failure)
 
 
 __all__ = ["EXPLORE_TICK_SECONDS", "ExploreWindow", "Explorer", "integration_row"]

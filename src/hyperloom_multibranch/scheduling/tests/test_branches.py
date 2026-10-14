@@ -8,8 +8,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent
 from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
@@ -38,6 +36,18 @@ class QuotaCheckingLifecycle(MbFakeLifecycle):
         await super().start(branch, start_commit)
 
 
+class BrokenLifecycle(MbFakeLifecycle):
+    """A runtime that cannot start ``b01`` and cannot re-size any specialist; a failure double, not a placeholder."""
+
+    async def start(self, branch: str, start_commit: str) -> None:
+        if branch == "b01":
+            raise RuntimeError(f"no GPU left for {branch}")
+        await super().start(branch, start_commit)
+
+    async def set_k(self, branch: str, k: int) -> None:
+        raise RuntimeError(f"{branch} did not take K {k}")
+
+
 class Bench:
     def __init__(self, tmp_path: Path, refusing: frozenset[str] = frozenset()) -> None:
         self.notebook = LocalNotebook(tmp_path / "nb", Writer(Role.SCHEDULER, "scheduler"), clock=CLOCK.now)
@@ -51,6 +61,7 @@ class Bench:
             self.toolbox,
             ProcessRegistry(tmp_path / "MB-pids.jsonl", CLOCK),
             DecisionLog(tmp_path / "MB-decisions.jsonl", CLOCK),
+            CLOCK,
         )
 
     async def rooted(self) -> Bench:
@@ -84,12 +95,13 @@ async def test_a_fork_has_its_quota_before_its_specialist_starts(tmp_path: Path)
     assert bench.lifecycle.quota_at_start["b02"] == 2
 
 
-async def test_a_failing_specialist_stop_still_withdraws_and_records_the_branch(tmp_path: Path) -> None:
+async def test_a_failing_specialist_stop_is_returned_and_still_withdraws_and_records_the_branch(tmp_path: Path) -> None:
     bench = await Bench(tmp_path, refusing=frozenset({"b01"})).rooted()
     await bench.control.open_branches(1, ROOT_COMMIT, 1, BranchOrigin.FIRST_BATCH)
 
-    with pytest.raises(RuntimeError, match="refused to stop b01"):
-        await bench.control.stop_branch("b01", BranchStop(StopCause.JUDGE, "flat", NOW))
+    failures = await bench.control.stop_branch("b01", BranchStop(StopCause.JUDGE, "flat", NOW))
+
+    assert [str(failure) for failure in failures] == ["the runtime refused to stop b01"]
 
     assert bench.toolbox.withdrawn == ["b01"]
     assert bench.toolbox.quotas[-1].k_of("b01") is None
@@ -128,3 +140,33 @@ async def test_k_orders_skip_stopped_branches_and_clamp(tmp_path: Path) -> None:
 
     assert bench.lifecycle.k == {"b01": 2, "b02": 1}
     assert bench.toolbox.quotas[-1].k_of(INTEGRATION_BRANCH) == 2
+
+
+async def test_a_specialist_that_does_not_start_is_stopped_and_the_others_still_open(tmp_path: Path) -> None:
+    bench = await Bench(tmp_path).rooted()
+    bench.control = BranchControl(
+        bench.roster,
+        bench.notebook,
+        BrokenLifecycle(),
+        bench.toolbox,
+        ProcessRegistry(tmp_path / "MB-pids.jsonl", CLOCK),
+        DecisionLog(tmp_path / "MB-decisions.jsonl", CLOCK),
+        CLOCK,
+    )
+
+    opened = await bench.control.open_branches(2, ROOT_COMMIT, 1, BranchOrigin.FIRST_BATCH)
+    await bench.control.apply_k({"b02": 2})
+
+    assert [entry.branch for entry in opened] == ["b01", "b02"]
+    stop = bench.roster.entry("b01").stop
+    assert stop is not None and (stop.cause, stop.reason) == (
+        StopCause.START_FAILED,
+        "RuntimeError: no GPU left for b01",
+    )
+    assert bench.roster.entry("b02").stop is None and bench.roster.entry("b02").k == 2
+    stops = {branch.branch: branch.stop_reason for branch in (await bench.notebook.lineage()).branches}
+    assert stops["b01"] == "start_failed: RuntimeError: no GPU left for b01" and stops["b02"] is None
+    logged = [json.loads(line) for line in (tmp_path / "MB-decisions.jsonl").read_text().splitlines()]
+    assert [row["detail"]["failure"] for row in logged if row["kind"] == "set_k"] == [
+        "RuntimeError: b02 did not take K 2"
+    ]
