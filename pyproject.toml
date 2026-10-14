@@ -301,6 +301,9 @@ hyperloom_kb = [
     "declarations/*.yaml",
     "mappings/*.yaml",
 ]
+hyperloom_multibranch = [
+    "notebook/knowledge/mappings/*.yaml",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
