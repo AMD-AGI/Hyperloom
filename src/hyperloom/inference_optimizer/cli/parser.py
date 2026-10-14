@@ -149,6 +149,39 @@ def _default_gpu_specialist_capacity() -> int:
     return detect_gpu_count()
 
 
+def _add_custom_specialist_args(opt: argparse.ArgumentParser) -> None:
+    """The ``--custom-specialist-*`` flags of ``optimize``."""
+    opt.add_argument(
+        "--custom-specialist-prompt-file",
+        dest="custom_specialist_prompt_file",
+        type=str,
+        default=None,
+        help="Register an operator-defined specialist type (custom_specialist) whose domain focus is this file's "
+        "text (max 16 KiB). Requires --custom-specialist-description. The Coordinator alone dispatches it, once "
+        "per macro cycle in FRAMEWORK_AGENT, ahead of other queued work, and benches its proposals first; "
+        "Orchestration cannot. Persisted for --resume-from; passing it on a "
+        "resume replaces the stored definition. The text is written in clear to state.json and every task's "
+        "prompt.md: do not put credentials in it.",
+    )
+    opt.add_argument(
+        "--custom-specialist-description",
+        dest="custom_specialist_description",
+        type=str,
+        default=None,
+        help="One line (max 200 chars) describing custom_specialist in its own prompt. Requires "
+        "--custom-specialist-prompt-file.",
+    )
+    opt.add_argument(
+        "--custom-specialist-only",
+        dest="custom_specialist_only",
+        action="store_true",
+        default=False,
+        help="FRAMEWORK_AGENT runs only the custom specialist and the bench of its proposals and patches; no other "
+        "specialist, explore grid or patch runs there, and the phase moves on to SWEEP once that work is done. "
+        "Requires the --custom-specialist-* pair (or a stored definition on --resume-from). Persisted.",
+    )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Build the top-level CLI argument parser and subcommands."""
     from hyperloom.orchestrator.specialists.domains import (
@@ -776,35 +809,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--orch-prompt", type=str, default=None, help="Override Orchestration system prompt (file path or inline)"
     )
     opt.add_argument("--critic-prompt", type=str, default=None, help="Override Critic system prompt")
-    opt.add_argument(
-        "--custom-specialist-prompt-file",
-        dest="custom_specialist_prompt_file",
-        type=str,
-        default=None,
-        help="Register an operator-defined specialist type (custom_specialist) whose domain focus is this file's "
-        "text (max 16 KiB). Requires --custom-specialist-description. The Coordinator alone dispatches it, once "
-        "per macro cycle in FRAMEWORK_AGENT, ahead of other queued work, and benches its proposals first; "
-        "Orchestration cannot. Persisted for --resume-from; passing it on a "
-        "resume replaces the stored definition. The text is written in clear to state.json and every task's "
-        "prompt.md: do not put credentials in it.",
-    )
-    opt.add_argument(
-        "--custom-specialist-description",
-        dest="custom_specialist_description",
-        type=str,
-        default=None,
-        help="One line (max 200 chars) describing custom_specialist in its own prompt. Requires "
-        "--custom-specialist-prompt-file.",
-    )
-    opt.add_argument(
-        "--custom-specialist-only",
-        dest="custom_specialist_only",
-        action="store_true",
-        default=False,
-        help="FRAMEWORK_AGENT runs only the custom specialist and the bench of its proposals and patches; no other "
-        "specialist, explore grid or patch runs there, and the phase moves on to SWEEP once that work is done. "
-        "Requires the --custom-specialist-* pair (or a stored definition on --resume-from). Persisted.",
-    )
+    _add_custom_specialist_args(opt)
     opt.add_argument(
         "--local-kb-root",
         dest="local_kb_root",

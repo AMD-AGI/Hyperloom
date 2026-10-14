@@ -780,19 +780,18 @@ async def test_operator_work_pending(rounds, queued, expected):
 
 # FRAMEWORK exit waits for operator work
 @pytest.mark.parametrize(
-    ("next_phase", "pending", "held"),
+    ("next_phase", "held"),
     [
-        (("SWEEP", "no_kernel_skipped", {"passed_through_reason": "optimize_no_more_leverage"}), True, True),
-        (("KERNEL_AGENT", "optimize_no_more_leverage", {}), True, True),
-        (("SWEEP", "no_kernel_skipped", {"passed_through_reason": "optimize_no_more_leverage"}), False, False),
-        (("SWEEP", "no_kernel_skipped", {"passed_through_reason": "optimize_phase_budget_exhausted"}), True, False),
-        (("CLOSE", "time_exhausted", {"terminal": True}), True, False),
+        (("SWEEP", "no_kernel_skipped", {"passed_through_reason": "optimize_no_more_leverage"}), True),
+        (("KERNEL_AGENT", "optimize_no_more_leverage", {}), True),
+        (("SWEEP", "no_kernel_skipped", {"passed_through_reason": "optimize_phase_budget_exhausted"}), False),
+        (("CLOSE", "time_exhausted", {"terminal": True}), False),
     ],
 )
-def test_framework_exit_holds_for_operator_work_only_on_a_plateau(next_phase, pending, held):
-    from hyperloom.orchestrator.phases.machine import holds_framework_exit_for_operator_work
+def test_only_a_plateau_exit_from_framework_waits_for_operator_work(next_phase, held):
+    from hyperloom.orchestrator.phases.machine import is_leverage_exit
 
-    assert holds_framework_exit_for_operator_work(next_phase, operator_work_pending=pending) is held
+    assert is_leverage_exit(next_phase) is held
 
 
 # --custom-specialist-only
