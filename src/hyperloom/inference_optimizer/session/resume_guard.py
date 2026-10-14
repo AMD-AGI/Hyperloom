@@ -13,6 +13,7 @@ from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 
+from hyperloom.common.owner_scope import process_started_at, same_environment
 from hyperloom.common.timeutil import now_iso
 
 from . import lock as session_lock
@@ -100,7 +101,7 @@ def _inspect(db: sqlite3.Connection, owner_scope: str) -> list[str]:
                 pid = int(row["pid"] or 0)
             except (TypeError, ValueError):
                 pid = 0
-            if owner_scope and row["owner_scope"] == owner_scope and pid > 0:
+            if same_environment(row["owner_scope"], owner_scope) and pid > 0:
                 local_tasks.add(row["task_id"])
                 continue
             blocked(row["task_id"], row["lane"], row["holder_id"], "execution owner scope or PID is unobservable")
@@ -357,11 +358,15 @@ def _confirm_scope_gone_in_transaction(
     reason: str,
     operator: str,
     confirmed_at: str,
+    check_holders: bool = False,
 ) -> dict:
     """Cancel and release every execution recorded under one vanished owner scope.
 
     Uses the caller's IMMEDIATE transaction. Refuses while any lease outside that
-    scope is unexpired: another execution environment may still be writing.
+    scope is unexpired: another execution environment may still be writing. With
+    ``check_holders`` (an older two-part scope of this boot and PID namespace, which an
+    earlier container may have left), refuses while a holder process that started before
+    its lease still runs here.
     """
     tables = _tables(db)
     columns = _lease_columns(db) if "leases" in tables else set()
@@ -369,10 +374,15 @@ def _confirm_scope_gone_in_transaction(
         raise CleanupConfirmationError("the ownership ledger records no owner scopes; use --confirm-stopped")
     now = datetime.fromisoformat(confirmed_at)
     target_tasks: set[str] = set()
-    for row in db.execute("SELECT lane, holder_id, task_id, owner_scope, expires_at FROM leases"):
+    for row in db.execute("SELECT lane, holder_id, task_id, pid, owner_scope, acquired_at, expires_at FROM leases"):
         if row["lane"] == "bringup_round":
             continue
         if row["owner_scope"] == owner_scope:
+            if check_holders and _holder_runs_here(row["pid"], row["acquired_at"]):
+                raise CleanupConfirmationError(
+                    f"lane={_label(row['lane'])} holder={_label(row['holder_id'])} pid={_label(row['pid'])} still "
+                    "runs in this execution environment; the named owner scope is not gone"
+                )
             target_tasks.add(row["task_id"])
         elif _lease_is_live(row["expires_at"], now):
             raise CleanupConfirmationError(
@@ -400,6 +410,25 @@ def _confirm_scope_gone_in_transaction(
         "released_leases": sum(task["released_leases"] for task in tasks),
         "released_gpu_leases": sum(task["released_gpu_leases"] for task in tasks),
     }
+
+
+def _holder_runs_here(pid: object, acquired_at: object) -> bool:
+    """Whether the lease's recorded holder runs here: its PID is live and started no later
+    than the lease was taken. A later start is a reused PID; an unreadable record counts as
+    running."""
+    try:
+        holder = int(pid or 0)
+        taken = datetime.fromisoformat(str(acquired_at))
+    except (TypeError, ValueError):
+        return True
+    if holder <= 0:
+        return False
+    started = process_started_at(holder)
+    if started is None:
+        return False
+    if taken.tzinfo is None:
+        return True
+    return (started - taken).total_seconds() <= 1.0
 
 
 def _in_locked_ledger(session_dir: Path, update: Callable[[sqlite3.Connection, str, str], dict]) -> dict:
@@ -469,11 +498,17 @@ def confirm_scope_gone(session_dir: Path, *, owner_scope: str, reason: str, curr
         raise CleanupConfirmationError("the current execution scope is unobservable; cannot tell it from the named one")
     if owner_scope == current_scope:
         raise CleanupConfirmationError("the named owner scope is the current execution environment")
+    here = same_environment(owner_scope, current_scope)
     result = _in_locked_ledger(
         session_dir,
         lambda db, operator, confirmed_at: {
             **_confirm_scope_gone_in_transaction(
-                db, owner_scope=owner_scope, reason=reason, operator=operator, confirmed_at=confirmed_at
+                db,
+                owner_scope=owner_scope,
+                reason=reason,
+                operator=operator,
+                confirmed_at=confirmed_at,
+                check_holders=here,
             ),
             "operator": operator,
             "confirmed_at": confirmed_at,

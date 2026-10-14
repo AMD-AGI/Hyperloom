@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.common.owner_scope import local_owner_scope
+from hyperloom.common.owner_scope import local_owner_scope, process_started_at, same_environment
 
 BOOT = "c0e93f64-ebe7-4bd1-b11f-2238ee6a7893"
 
@@ -61,3 +61,29 @@ def test_the_real_proc_gives_three_parts() -> None:
         pytest.skip("no /proc here")
     boot, namespace, started = scope.split(":")
     assert boot and int(namespace) > 0 and int(started) >= 0
+
+
+@pytest.mark.parametrize(
+    ("recorded", "local", "same"),
+    [
+        ("b:1:100", "b:1:100", True),
+        ("b:1", "b:1:100", True),
+        ("b:1:99", "b:1:100", False),
+        ("b:2", "b:1:100", False),
+        ("c:1", "b:1:100", False),
+        ("", "b:1:100", False),
+        ("b:1", "", False),
+    ],
+)
+def test_same_environment(recorded: str, local: str, same: bool) -> None:
+    assert same_environment(recorded, local) is same
+
+
+def test_a_running_process_has_a_start_and_a_gone_one_none() -> None:
+    started = process_started_at(os.getpid())
+    if started is None:
+        pytest.skip("no /proc here")
+    from datetime import UTC, datetime
+
+    assert started <= datetime.now(UTC)
+    assert process_started_at(2**22 + 12345) is None

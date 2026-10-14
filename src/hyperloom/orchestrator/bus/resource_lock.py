@@ -13,7 +13,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from hyperloom.common.owner_scope import local_owner_scope
+from hyperloom.common.owner_scope import local_owner_scope, same_environment
 from hyperloom.common.timeutil import now_iso
 from hyperloom.orchestrator.state.task_states import TERMINAL_STATES
 
@@ -334,7 +334,7 @@ def _unverifiable_holders(cur: sqlite3.Cursor, *, scope: str) -> list[dict]:
             row["reason"] = UNVERIFIABLE_HOLDS_GPU
             stuck.append(row)
             continue
-        if not scope or row["owner_scope"] != scope:
+        if not same_environment(row["owner_scope"], scope):
             # Never probed, but for two different reasons that owe the operator
             # two different messages: with no local scope nothing here can be
             # judged at all, whereas a mismatching scope means the recorded id
@@ -601,8 +601,7 @@ class SqliteLeaseBackend:
     @classmethod
     def holder_is_dead(cls, row) -> bool:
         """Accept only an absent PID observed in its recorded local PID domain."""
-        scope = local_owner_scope()
-        if not scope or row["owner_scope"] != scope:
+        if not same_environment(row["owner_scope"], local_owner_scope()):
             return False
         try:
             pid = int(row["pid"] or 0)

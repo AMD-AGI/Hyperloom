@@ -6,6 +6,8 @@ namespace and container start."""
 
 from __future__ import annotations
 
+import os
+from datetime import UTC, datetime
 from pathlib import Path
 
 _PROC = Path("/proc")
@@ -36,3 +38,29 @@ def _start_ticks(stat: str) -> int:
     from its closing parenthesis.
     """
     return int(stat[stat.rindex(")") + 2 :].split()[19])
+
+
+def same_environment(recorded: str, local: str) -> bool:
+    """Whether a recorded scope names this environment: equal to ``local``, or the two-part
+    scope earlier versions recorded for this boot and PID namespace.
+
+    A two-part match cannot tell this container from an earlier one that repeated its
+    namespace inode; a caller that releases on it first checks the holder process.
+    """
+    if not recorded or not local:
+        return False
+    return recorded == local or (recorded.count(":") == 1 and local.rsplit(":", 1)[0] == recorded)
+
+
+def process_started_at(pid: int, proc: Path = _PROC) -> datetime | None:
+    """When ``pid`` started, or None when it is not running here or cannot be read."""
+    try:
+        ticks = _start_ticks((proc / str(pid) / "stat").read_text(encoding="ascii"))
+        booted = next(
+            int(line.split()[1])
+            for line in (proc / "stat").read_text(encoding="ascii").splitlines()
+            if line.startswith("btime ")
+        )
+    except (OSError, ValueError, IndexError, StopIteration):
+        return None
+    return datetime.fromtimestamp(booted + ticks / os.sysconf("SC_CLK_TCK"), UTC)
