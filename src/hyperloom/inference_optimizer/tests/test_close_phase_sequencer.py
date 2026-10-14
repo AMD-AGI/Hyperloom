@@ -1573,17 +1573,26 @@ async def test_close_roofline_timeout_does_not_terminalize_live_worker(roofline_
 
     c = roofline_coord
     monkeypatch.setattr(dispatcher_module, "_CANCEL_NOTICE_SEC", 0)
-    c.phase_close.CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC = 0.01
+    # 10ms raced the dispatch's own first scheduler turn under load, letting
+    # CLOSE's wait_for cancel it before it ever reached "running" at all.
+    c.phase_close.CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC = 0.2
+    started = asyncio.Event()
     finish = asyncio.Event()
 
     async def execute(_ctx):
+        started.set()
         await finish.wait()
         return {"status": "ok"}
 
     c.sub.register_executor("roofline", execute)
     task = await c.phase_prelude.enqueue_internal_analysis_task(reason="close_post_opt")
     try:
-        await c.phase_close._maybe_run_close_post_opt_roofline()
+        # The step under test races dispatch against CLOSE's own timeout; this
+        # test shouldn't also race it against scheduling. Waiting for the
+        # executor to actually start removes that second, incidental race.
+        close_call = asyncio.ensure_future(c.phase_close._maybe_run_close_post_opt_roofline())
+        await asyncio.wait_for(started.wait(), timeout=5)
+        await close_call
         assert (await c.tasks.get(task.task_id)).state == "running"
         assert await c.locks.lane_holders()
         assert c.dispatcher._executions
