@@ -736,6 +736,162 @@ async def test_resume_clears_a_restored_marker_whose_runner_never_finished(coord
 
 
 @pytest.fixture
+def lost_execution_integrate(coord: Coordinator, pending_candidate, tmp_path: Path, monkeypatch):
+    """An integrate whose execution environment died with the candidate applied over the operator's stash.
+
+    The executor runs for real up to the durable ``ready`` phase and is then
+    stopped dead: no restore, no result. The operator then confirms the task
+    stopped, recorded the way ``hyperloom recover`` records it. ``replace_tree`` stands in
+    for the new execution environment cloning the source again.
+    """
+    import shutil
+    import subprocess
+
+    from hyperloom.orchestrator.actions.executors import integrate_patch as ip
+    from hyperloom.orchestrator.state.shared_state import SharedState
+    from hyperloom.orchestrator.tests._helpers import init_git_repo
+
+    root = tmp_path / "candidate-framework"
+    monkeypatch.setattr(ip.IntegratePatchExecutor, "_finish_attempt", lambda _self, _attempt, result: result)
+
+    async def lose(*, owner_scope: str, replace_tree: bool, legacy: bool = False, phase: str = "ready"):
+        (root / "operator-notes.txt").write_text("uncommitted operator work\n", encoding="utf-8")
+        candidate = await pending_candidate(patches=True)
+        recovery = coord.shared_state.pending_integrate["recovery"]
+        assert recovery["phase"] == "ready" and recovery["stash_oid"], recovery
+        if legacy:
+            recovery.pop("tree_instance", None)
+            coord.shared_state.save(coord.session_dir)
+        else:
+            assert recovery["tree_instance"], recovery
+        recovery["phase"] = phase
+        coord.shared_state.save(coord.session_dir)
+        await coord.tasks.transition(candidate.task.task_id, "running")
+        # The evidence ``hyperloom recover`` records when an operator confirms the task (or its whole
+        # owner scope) stopped; older releases write the same shape without ``confirmed_scope_gone``.
+        evidence = {
+            "reason": "operator_confirmed_stopped",
+            "cleanup_confirmed": True,
+            "operator": "operator",
+            "confirmation_reason": "the node was lost",
+            "released_leases": [],
+            "released_gpu_leases": [],
+            **({"confirmed_scope_gone": owner_scope} if owner_scope else {}),
+            "outcome": {
+                "task_id": candidate.task.task_id,
+                "state": "cancelled",
+                "result": {},
+                "error": "Operator confirmed the entire task process tree and remote workers/Ray actors stopped.",
+                "error_class": "operator_confirmed_stopped",
+            },
+        }
+        await coord.tasks.transition(candidate.task.task_id, "cancelled", evidence=evidence)
+        if replace_tree:
+            shutil.rmtree(root)
+            init_git_repo(root, seed_file="cfg.json", seed_text="A\n")
+        else:
+            subprocess.run(["git", "-C", str(root), "stash", "drop"], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(root), "gc", "--prune=now"], check=True, capture_output=True)
+        coord.shared_state = SharedState.load_or_init(coord.session_dir)
+        coord.writeback._resumed_from["is_resume"] = True
+        return SimpleNamespace(root=root, task=candidate.task, stash_oid=recovery["stash_oid"])
+
+    return lose
+
+
+def _git_status(root: Path) -> str:
+    import subprocess
+
+    return subprocess.run(
+        ["git", "-C", str(root), "status", "--porcelain"], check=True, capture_output=True, text=True
+    ).stdout
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("legacy", "owner_scope"), [(False, "lost-container"), (True, "lost-container"), (True, "")])
+async def test_resume_discharges_an_integrate_whose_tree_went_with_its_execution(
+    coord, lost_execution_integrate, legacy, owner_scope
+):
+    """A task confirmed stopped and a re-cloned tree leave nothing to roll back, so resume proceeds.
+
+    The new checkout is not touched: the candidate and the operator's stash were
+    in the old one. A sentinel from before tree identities existed reaches the
+    same answer from the confirmation, the absent stash object and the absent
+    candidate, whether the confirmation named the whole scope or only the task.
+    """
+    lost = await lost_execution_integrate(owner_scope=owner_scope, replace_tree=True, legacy=legacy)
+
+    report = await coord.writeback._resume_consistency_pass()
+
+    assert coord.shared_state.pending_integrate == {}
+    assert not coord.shared_state.stop_reason
+    assert coord.shared_state.optimization_stack == []
+    fix = next(f for f in report["fixes"] if isinstance(f, dict) and f.get("kind") == "rolled_back_pending_integrate")
+    assert fix["task_id"] == lost.task.task_id
+    assert fix["tree_replaced"] is True
+    assert fix["unrestored_stash_oid"] == lost.stash_oid
+    assert fix["reversed"] == []
+    assert (lost.root / "cfg.json").read_text(encoding="utf-8") == "A\n"
+    assert _git_status(lost.root) == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["before_stash", "applied_with_restored_stash"])
+async def test_resume_discharges_a_replaced_tree_in_any_undischarged_phase(coord, lost_execution_integrate, phase):
+    """The phases the ordinary restore refuses outright still have nothing left to undo in a new checkout."""
+    lost = await lost_execution_integrate(owner_scope="lost-container", replace_tree=True, phase=phase)
+
+    report = await coord.writeback._resume_consistency_pass()
+
+    assert coord.shared_state.pending_integrate == {}
+    assert not coord.shared_state.stop_reason
+    assert any(f.get("kind") == "rolled_back_pending_integrate" and f["tree_replaced"] for f in report["fixes"])
+    assert _git_status(lost.root) == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("legacy", "owner_scope"), [(False, "lost-container"), (True, "lost-container"), (True, "")])
+async def test_resume_still_refuses_a_missing_stash_in_the_same_tree(
+    coord, lost_execution_integrate, legacy, owner_scope
+):
+    """A stash dropped and pruned from the tree the attempt mutated is not a replaced tree.
+
+    The candidate is still applied here and the operator's work cannot be
+    handed back, so resume refuses rather than drop either: the recorded tree
+    identity says it is the same checkout even though the whole environment was
+    confirmed gone, and for an older sentinel without one the candidate patch
+    still applied in this tree rules out the inference.
+    """
+    lost = await lost_execution_integrate(owner_scope=owner_scope, replace_tree=False, legacy=legacy)
+
+    with pytest.raises(RuntimeError, match="refusing resume before measurement"):
+        await coord.writeback._resume_consistency_pass()
+
+    assert coord.shared_state.pending_integrate["task_id"] == lost.task.task_id
+    assert coord.shared_state.stop_reason == PATCH_RECOVERY_INCOMPLETE_STOP_REASON
+    assert (lost.root / "cfg.json").read_text(encoding="utf-8") == "C\n"
+
+
+@pytest.mark.asyncio
+async def test_resume_still_refuses_an_edited_candidate_in_the_same_tree(coord, lost_execution_integrate):
+    """An older sentinel's candidate edited over by hand neither applies nor reverses, and is not a replaced tree.
+
+    The edit leaves the patch unable to reverse-apply, but the tree does not
+    hold the candidate's pre-image either, so the inference does not fire and
+    resume refuses with the operator's edit left in place.
+    """
+    lost = await lost_execution_integrate(owner_scope="", replace_tree=False, legacy=True)
+    (lost.root / "cfg.json").write_text("C-edited\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="refusing resume before measurement"):
+        await coord.writeback._resume_consistency_pass()
+
+    assert coord.shared_state.pending_integrate["task_id"] == lost.task.task_id
+    assert coord.shared_state.stop_reason == PATCH_RECOVERY_INCOMPLETE_STOP_REASON
+    assert (lost.root / "cfg.json").read_text(encoding="utf-8") == "C-edited\n"
+
+
+@pytest.fixture
 def ordinary_integrate_completion(coord: Coordinator, tmp_path: Path):
     """Seed the durable marker and backup a completed executor hands to writeback."""
     from copy import deepcopy
@@ -1003,7 +1159,7 @@ async def test_resume_consistency_rolls_back_pending_integrate(coord: Coordinato
     monkeypatch.setattr(
         coord.writeback,
         "_resume_rollback_pending_integrate",
-        lambda pending: {"reversed": list(pending["patches"]), "failed": []},
+        lambda pending, _gone_scope=None: {"reversed": list(pending["patches"]), "failed": []},
     )
 
     report = await coord.writeback._resume_consistency_pass()
@@ -1049,7 +1205,7 @@ async def test_resume_consistency_keeps_sentinel_when_event_scan_fails(
     monkeypatch.setattr(
         coord.writeback,
         "_resume_rollback_pending_integrate",
-        lambda pending: rolled_back.append(pending) or {"reversed": [], "failed": []},
+        lambda pending, _gone_scope=None: rolled_back.append(pending) or {"reversed": [], "failed": []},
     )
 
     with pytest.raises(RuntimeError, match="refusing resume before measurement"):

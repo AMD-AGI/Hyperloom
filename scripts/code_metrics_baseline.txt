@@ -586,7 +586,7 @@ function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._gate_perf 445
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._keep_inert_switches 111
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._maybe_write_framework_kb_record 114
-function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._stage_apply 513
+function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._stage_apply 509
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._stage_gate 84
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._stage_provision_attempt_runtime 105
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._stage_resolve 123
@@ -691,7 +691,7 @@ function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborat
 function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_integrate_patch 152
 function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_profile 98
 function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_roofline 89
-function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._recover_pending_integrate_from_task 91
+function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._recover_pending_integrate_from_task 84
 function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._replay_keep_from_result 90
 function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._resume_consistency_pass 129
 function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._resume_recover_orphaned_keeps 101
@@ -942,7 +942,7 @@ module-lines src/hyperloom/orchestrator/actions/executors/_multi_node_server_lif
 module-lines src/hyperloom/orchestrator/actions/executors/_workload_envs.py 2261
 module-lines src/hyperloom/orchestrator/actions/executors/baseline.py 4253
 module-lines src/hyperloom/orchestrator/actions/executors/explore.py 1905
-module-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py 4804
+module-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py 4799
 module-lines src/hyperloom/orchestrator/actions/executors/profile.py 1565
 module-lines src/hyperloom/orchestrator/actions/executors/report.py 1391
 module-lines src/hyperloom/orchestrator/actions/executors/roofline.py 1302

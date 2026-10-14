@@ -58,6 +58,7 @@ from ..framework.artifacts import candidate_key
 from ..state._shared_state.attempt_audit import _AUDIT_ACTIONS
 from ..state.shared_state import SharedState, resolve_graded_comparison, stack_base_params
 from ..bus.message_bus import Message
+from hyperloom.inference_optimizer.session.resume_guard import confirmed_stopped_scope
 from hyperloom.inference_optimizer.grid_server_args import (
     dedupe_extra_server_args,
     merge_cumulative_extra_server_args,
@@ -3817,7 +3818,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             return False
         return len(self.shared_state.optimization_stack or []) > before
 
-    def _resume_rollback_pending_integrate(self, pending: dict[str, Any]) -> dict[str, Any]:
+    def _resume_rollback_pending_integrate(self, pending: dict[str, Any], gone_scope: str | None) -> dict[str, Any]:
         """Restore a pending integration from its durable file and stash evidence.
 
         Incomplete evidence or an unverifiable restore remains pending; the
@@ -3825,12 +3826,16 @@ class WritebackCollaborator(CoordinatorCollaborator):
 
         Args:
             pending: The ``pending_integrate`` sentinel dict.
+            gone_scope: What an operator confirmed stopped with the task (``confirmed_stopped_scope``), if anything.
 
         Returns:
             A summary ``{"reversed": [...], "failed": [...]}``.
         """
         from ..actions.executors.integrate_patch import restore_pending_integrate
+        from ..actions.executors.source_tree_identity import settle_replaced_tree, tree_replaced
 
+        if tree_replaced(pending, gone_scope):
+            return settle_replaced_tree(pending)
         return restore_pending_integrate(pending)
 
     @staticmethod
@@ -3867,23 +3872,22 @@ class WritebackCollaborator(CoordinatorCollaborator):
     async def _recover_pending_integrate_from_task(
         self,
         pending: dict[str, Any],
-        task_id: str,
+        task: Task | None,
         report: dict[str, Any],
     ) -> bool:
         """Settle a mutated integrate window from durable records rather than the bus.
 
         Args:
             pending: The ``pending_integrate`` sentinel dict.
-            task_id: The sentinel's task id.
+            task: The sentinel's ``integrate_patch`` task row, if it still exists.
             report: The resume report dict to append fixes/warnings to.
 
         Returns:
             ``True`` when the sentinel was discharged or deliberately retained,
             ``False`` when the caller should roll the half-applied patch back.
         """
-        from ..state.task_registry import TaskNotFound
-
         state = self.shared_state
+        task_id = str(pending.get("task_id") or "")
         # Event retention can erase a KEEP. A promoted stack row is
         # independent positive evidence; a terminal/missing task without
         # its result is not evidence that a candidate was rejected.
@@ -3893,12 +3897,6 @@ class WritebackCollaborator(CoordinatorCollaborator):
             state.save(self.session_dir)
             report["fixes"].append({"kind": "retained_promoted_pending_integrate", "task_id": task_id})
             return True
-        try:
-            task = await self.tasks.get(task_id)
-        except TaskNotFound:
-            task = None
-        if task is not None and task.kind != "integrate_patch":
-            task = None
         recovery = pending.get("recovery")
         phase = str(recovery.get("phase") or "") if isinstance(recovery, dict) else ""
         outcome = _confirmed_task_outcome(task) if task is not None else None
@@ -3921,11 +3919,9 @@ class WritebackCollaborator(CoordinatorCollaborator):
             self._clear_pending_integrate(pending, gc_runtime=True)
             return True
         if phase == "restored" and outcome is not None:
-            # A confirmed outcome carrying no result: the attempt put the tree
-            # back and then died before recording what it decided. The verdict
-            # table needs a result to call that settled, but the phase already
-            # says the tree is clean. An unconfirmed or absent outcome is a
-            # different case and still falls through to the rollback below.
+            # A confirmed outcome carrying no result: the attempt put the tree back and then died before recording
+            # what it decided. The verdict table needs a result to call that settled, but the phase already says the
+            # tree is clean. An unconfirmed or absent outcome is a different case and still falls through below.
             report["fixes"].append({"kind": "settled_pending_integrate", "task_id": task_id, "phase": phase})
             self._clear_pending_integrate(pending, gc_runtime=True)
             return True
@@ -3944,6 +3940,8 @@ class WritebackCollaborator(CoordinatorCollaborator):
             # sentinel until someone edits state.json. An online restore that
             # failed lands here on a task the runner recorded as succeeded.
             return False
+        if confirmed_stopped_scope(task.history if task is not None else None) is not None:
+            return False  # confirmed stopped with no verdict: nothing will ever finish this window
         if task is None or task.state not in ("queued", "running", "failed"):
             report["warnings"].append({"kind": "pending_integrate_outcome_unknown", "task_id": task_id})
             return True
@@ -4010,16 +4008,18 @@ class WritebackCollaborator(CoordinatorCollaborator):
             )
             self._clear_pending_integrate(pending, gc_runtime=False)
             return
+        task = await self.tasks.find(task_id, kind="integrate_patch")
         if (pending.get("patches") or pending.get("artifacts")) and await self._recover_pending_integrate_from_task(
-            pending, task_id, report
+            pending, task, report
         ):
             return
-        summary = self._resume_rollback_pending_integrate(pending)
+        gone_scope = confirmed_stopped_scope(task.history if task is not None else None)
+        summary = self._resume_rollback_pending_integrate(pending, gone_scope)
         if summary.get("failed"):
             report["warnings"].append({"kind": "pending_integrate_rollback_failed", "task_id": task_id, **summary})
             state.save(self.session_dir)
             return
-        if summary.get("reversed") or summary.get("artifacts_reverted"):
+        if summary.get("reversed") or summary.get("artifacts_reverted") or summary.get("tree_replaced"):
             report["fixes"].append({"kind": "rolled_back_pending_integrate", "task_id": task_id, **summary})
         else:
             report["fixes"].append({"kind": "cleared_stale_pending_integrate", "task_id": task_id})
