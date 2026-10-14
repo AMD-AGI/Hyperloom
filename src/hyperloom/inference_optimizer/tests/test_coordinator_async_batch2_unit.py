@@ -2887,6 +2887,21 @@ async def test_optimization_rounds_inherit_nothing(coord: Coordinator) -> None:
 
 
 @pytest.mark.asyncio
+async def test_autosubmit_patch_survives_a_non_dict_first_proposal(coord: Coordinator) -> None:
+    """A malformed proposal entry costs the review its patch name, not the review itself."""
+    from hyperloom.orchestrator.state.task_registry import Task
+
+    sid = "spec-bare-proposal"
+    _make_real_patch(coord, sid)
+    task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv-bare")
+    await coord.phase_framework.maybe_autosubmit_specialist_patches(
+        task=task,
+        done_payload={"patches_written": ["kernel.py"], "proposal_set": ["fuse-moe"]},
+    )
+    assert _autosubmitted_integrate_params(coord)["patch_name"] == ""
+
+
+@pytest.mark.asyncio
 async def test_a_restored_tree_settles_even_when_the_task_carried_no_result(coord, pending_candidate):
     """An attempt that died after putting the tree back has nothing left to roll back.
 
