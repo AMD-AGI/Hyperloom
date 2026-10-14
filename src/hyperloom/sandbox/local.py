@@ -292,16 +292,16 @@ class LocalSandboxProvider:
         return sandbox
 
     def _hand_over(self, directory: Path, tpl: LocalTemplate) -> None:
-        """Give the sandbox's files to the account its processes run as (when one is configured)."""
+        """Give the sandbox's files to the account its processes run as (when one is configured).
+
+        ``private/`` stays with the provider; only a signing key is handed to the sealed account.
+        """
         user = self._users[tpl.sealed]
         if user is None:
             return
         directory.chmod(0o711)
         for path in (directory / "fs", *(directory / "fs").iterdir()):
             os.chown(path, *user)
-        # private/ stays with the provider, except that a sealed runner must read its own key.
-        if tpl.sealed:
-            os.chown(directory / "private", *user)
 
     def _abort_build(
         self, sandbox: LocalSandbox | None, directory: Path, cards: tuple[int, ...], sandbox_id: str

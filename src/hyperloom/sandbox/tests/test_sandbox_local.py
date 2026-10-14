@@ -455,7 +455,11 @@ def test_killing_right_after_create_leaves_no_runner_behind(make) -> None:
     for _ in range(5):
         marker = f"marker-{uuid.uuid4().hex}"
         code = f"import time  # {marker}\ntime.sleep(600)\n"
-        provider = make([_runner(code)])
+        # env -i drops the sandbox tag, so only the process tree can find the runner.
+        template = LocalTemplate(
+            "runner", "measurement", command=("/usr/bin/env", "-i", sys.executable, "-c", code), sealed=True
+        )
+        provider = make([template])
         sb = _create(provider, "runner", "measurement")
         sb.kill()  # the launcher may not have forked the runner yet
         assert _marked_pids(marker) == []
