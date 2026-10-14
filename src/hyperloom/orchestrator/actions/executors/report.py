@@ -25,6 +25,7 @@ from hyperloom.inference_optimizer.breakdown.stop_reasons import (
     PATCH_RECOVERY_INCOMPLETE_STOP_REASON,
 )
 from hyperloom.inference_optimizer.session.paths import db_path_for
+from ...measurement.baseline_budget import BASELINE_BUDGET_STOP_EXPLANATIONS
 from ...state.shared_state import SharedState
 
 
@@ -270,16 +271,7 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
         "an improvement over a baseline that was never the baseline, so the run stopped with the figure kept and "
         "marked. Resume with more budget to measure a comparable baseline."
     ),
-    "baseline_over_latency_budget": (
-        "The baseline's own mean end-to-end latency exceeded --max-latency-ms, or the baseline reported no "
-        "end-to-end latency at all, so the run stopped before optimizing. The budget refuses any KEEP over the "
-        "ceiling or without a measured latency, and the reference the run is measured against already fails it — no "
-        "candidate built on it could have been promoted, so continuing would have spent the whole time budget "
-        "refusing every winner in turn. If the baseline reported no latency, make the workload's entrypoint write "
-        "e2el_mean_ms; otherwise either the ceiling is lower than this workload's floor on this hardware, or the "
-        "baseline configuration itself is the thing to fix. Relaunch with a ceiling the baseline can meet, or "
-        "without one, to see what the search finds."
-    ),
+    **BASELINE_BUDGET_STOP_EXPLANATIONS,
     # Recipe KB knowledge-plane bootstrap failures.
     "warm_replay_rollback_failed": (
         "Warm replay rollback could not restore every Recipe/Kernel mutation; "

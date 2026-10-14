@@ -18,15 +18,31 @@ import shutil
 import subprocess  # nosec B404 - fixed read-only amd-smi invocations.
 from typing import Any, Callable, Mapping
 
+from hyperloom.common.env import env_flag
+
 __all__ = [
+    "GPU_POWER_SAMPLING_ENV",
     "GpuPowerSettingsError",
     "declared_setting_problems",
+    "gpu_power_sampling_unavailable",
     "normalize_perf_level",
     "read_gpu_power_settings",
     "visible_gpu_indices",
 ]
 
 _PERF_LEVEL_PREFIX = "AMDSMI_DEV_PERF_LEVEL_"
+
+#: Escape hatch for a host where running ``amd-smi`` every couple of seconds is not acceptable.
+GPU_POWER_SAMPLING_ENV = "HYPERLOOM_GPU_POWER_SAMPLING"
+
+
+def gpu_power_sampling_unavailable() -> str:
+    """Why no round on this host can be sampled, or ``""``."""
+    if not env_flag(GPU_POWER_SAMPLING_ENV, default=True):
+        return f"{GPU_POWER_SAMPLING_ENV}=0 turns the GPU power sampler off"
+    if shutil.which("amd-smi") is None:
+        return "amd-smi is not on PATH, so the GPU power sampler has nothing to read"
+    return ""
 
 
 class GpuPowerSettingsError(RuntimeError):

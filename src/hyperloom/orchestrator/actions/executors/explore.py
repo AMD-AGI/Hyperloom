@@ -29,6 +29,7 @@ from hyperloom.common.perf_metric import (
     GRADED_INTVTY_P50,
     GRADED_OUTPUT,
     VERDICT_REVERT,
+    constraint_fields,
     graded_axes_of,
     perf_snapshot_from_mapping,
     resolve_grading_anchor_perf,
@@ -1351,8 +1352,7 @@ class ExploreExecutor:
                         GRADED_INTVTY_P50: r.intvty_p50,
                         GRADED_DURATION: r.duration_seconds,
                         GRADED_ERROR_RATE: r.request_error_rate,
-                        # Graded against the session latency budget when one is set.
-                        "e2el_mean_ms": r.e2el_mean_ms,
+                        **constraint_fields(r),
                     }
                     stamp_output_per_gpu(variant_meas, getattr(ss, "tp", None))
                     graded = resolve_graded_comparison(
@@ -1418,7 +1418,7 @@ class ExploreExecutor:
                         decision_gates.append(
                             {
                                 "gate": (
-                                    "latency_budget"
+                                    graded.vetoed_by
                                     if graded.veto_reason
                                     else (
                                         "graded_axes"
@@ -1611,8 +1611,8 @@ class ExploreExecutor:
                             # The axes this KEEP was graded on travel with it: current_best becomes the next round's
                             # anchor, and an anchor without them degrades the session.
                             **graded_axes_of(variant_meas),
-                            # Promotion re-checks the latency budget against this row, not the round's measurement.
-                            "e2el_mean_ms": r.e2el_mean_ms,
+                            # Promotion re-checks the budgets against this row, not the round's measurement.
+                            **constraint_fields(r),
                             "single_workspace": r.workspace,
                             "launch_evidence": dict(r.launch_evidence or {}),
                             "launch_evidence_path": r.launch_evidence_path,
