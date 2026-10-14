@@ -438,8 +438,6 @@ def _build_trace_analyze_cmd(
     # Scriptable frameworks still forward denoise-step count for per-step
     # roofline timings. Priority: payload override > baseline workload metadata.
     if scriptable:
-        if not is_bypass:
-            cmd += ["--steady-state-mode", "generic"]
         num_denoise = payload.get("num_denoise_steps") or workload.get("num_inference_steps")
         if num_denoise not in (None, ""):
             try:
@@ -466,9 +464,15 @@ def _build_trace_analyze_cmd(
     )
     if capture_folder:
         cmd += ["--capture-folder", str(capture_folder)]
-    # Forward TraceLens splitter steady-state mode via payload or env.
-    steady_state_mode = payload.get("steady_state_mode") or os.environ.get("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "")
-    steady_state_mode = str(steady_state_mode).strip()
+    # Scriptable frameworks require the generic splitter; payload/env overrides
+    # only apply to serving frameworks, so the two paths can never emit the flag
+    # twice and leave argparse resolving a mode the splitter did not chunk for.
+    if scriptable and not is_bypass:
+        steady_state_mode = "generic"
+    else:
+        steady_state_mode = str(
+            payload.get("steady_state_mode") or os.environ.get("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "")
+        ).strip()
     if steady_state_mode:
         cmd += ["--steady-state-mode", steady_state_mode]
     # Post-kernel-opt roofline writes a separate report so it never overwrites

@@ -278,7 +278,7 @@ class TestSplitterE2E:
         )
         tl_root = Path(tla.__file__).resolve().parent.parent.parent.parent.parent
 
-        chunk, meta, warnings = tla._run_trace_split(
+        chunk, meta = tla._run_trace_split(
             args,
             trace_path,
             split_dir,
@@ -305,7 +305,7 @@ class TestSplitterE2E:
         )
         tl_root = Path(tla.__file__).resolve().parent.parent.parent.parent.parent
 
-        chunk, meta, warnings = tla._run_trace_split(
+        chunk, meta = tla._run_trace_split(
             args,
             trace_path,
             split_dir,
@@ -370,11 +370,20 @@ class TestBuildTraceAnalyzeCmd:
         assert "--skip-split" not in cmd
 
     def test_scriptable_gets_generic_mode(self):
-        cmd, _ = self._run(scriptable=True, framework="xdit")
+        cmd, mode = self._run(scriptable=True, framework="xdit")
         assert "--split-llm-inference" not in cmd
         assert "--skip-split" not in cmd
+        assert cmd.count("--steady-state-mode") == 1
         idx = cmd.index("--steady-state-mode")
         assert cmd[idx + 1] == "generic"
+        assert mode == "generic"
+
+    def test_scriptable_payload_override_cannot_shadow_generic(self):
+        cmd, mode = self._run(scriptable=True, framework="xdit", steady_state_mode="mixed")
+        assert cmd.count("--steady-state-mode") == 1
+        idx = cmd.index("--steady-state-mode")
+        assert cmd[idx + 1] == "generic"
+        assert mode == "generic"
 
     def test_serving_forwards_conc_osl_r(self):
         cmd, _ = self._run(

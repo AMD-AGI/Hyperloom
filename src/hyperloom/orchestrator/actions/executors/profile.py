@@ -314,16 +314,9 @@ def _certify_trace_dir(trace_dir: Path, framework: str) -> dict[str, Any]:
     """Run the capture-time self-certification probe over a profile trace."""
     from hyperloom.orchestrator.trace_analysis import trace_selfcert
 
-    # The workload parameters shape the split forecast, and reading them from the benchmark config keeps the
-    # certificate independent of any analysis having run -- the point of certifying at capture time.
-    params = trace_selfcert.read_workload_params(trace_dir)
     return trace_selfcert.certify_trace_dir(
         trace_dir,
-        framework=framework or str(params.get("framework") or ""),
-        num_steps=params.get("num_steps", trace_selfcert.DEFAULT_NUM_STEPS),
-        conc=params.get("conc"),
-        osl=params.get("osl"),
-        r=params.get("r", trace_selfcert.DEFAULT_R),
+        framework=framework or trace_selfcert.read_framework(trace_dir),
     )
 
 

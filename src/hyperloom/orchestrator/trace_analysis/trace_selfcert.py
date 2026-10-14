@@ -42,11 +42,6 @@ CHUNK_QUALITY_ALTERNATE_MARGIN = 0.10
 MIN_REPEATS_DEFAULT = 3
 MIN_REPEATS_XDIT = 2
 
-#: Splitter CLI defaults, overridden per-directory when the benchmark config
-#: says otherwise.
-DEFAULT_NUM_STEPS = 32
-DEFAULT_R = 1.0
-
 #: Iteration-root patterns, verbatim from ``split_trace.main``.
 #: The primary vLLM shape wins outright; the backup list (vLLM's older shapes and
 #: SGLang's per-step annotations) is consulted only when the primary matches
@@ -76,39 +71,22 @@ def _iso_now() -> str:
     return datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-#: Scalars pulled out of the benchmark ``config.yaml``. Matched line-anchored on
-#: purpose: the same key names also occur inside a quoted JSON blob elsewhere in
-#: the file with different values, and that blob must not win. Read by regex
-#: rather than a YAML parser to keep the certifier stdlib-only.
-_CONFIG_KEYS = {
-    "conc": (re.compile(r"^\s+CONC:\s*(\d+)\s*$", re.MULTILINE), int),
-    "osl": (re.compile(r"^\s+OSL:\s*([\d.]+)\s*$", re.MULTILINE), float),
-    "isl": (re.compile(r"^\s+ISL:\s*([\d.]+)\s*$", re.MULTILINE), float),
-    "r": (re.compile(r"^\s+RANDOM_RANGE_RATIO:\s*([\d.]+)\s*$", re.MULTILINE), float),
-    "num_steps": (re.compile(r"^\s+num_steps:\s*(\d+)\s*$", re.MULTILINE), int),
-    "framework": (re.compile(r"^framework:\s*(\S+)\s*$", re.MULTILINE), str),
-}
+#: The framework name in the benchmark ``config.yaml``. Matched line-anchored on
+#: purpose: the same key occurs inside a quoted JSON blob elsewhere in the file
+#: with a different value, and that blob must not win. Read by regex rather than a
+#: YAML parser to keep the certifier stdlib-only.
+_FRAMEWORK_RE = re.compile(r"^framework:\s*(\S+)\s*$", re.MULTILINE)
 
 
-def read_workload_params(trace_dir: str | Path) -> dict[str, Any]:
-    """Read CONC / OSL / R / num_steps / framework from the benchmark config."""
-    out: dict[str, Any] = {"source": None}
+def read_framework(trace_dir: str | Path) -> str:
+    """Read the framework name from the sibling benchmark ``config.yaml``."""
     config = Path(trace_dir).parent / "config.yaml"
-    if not config.is_file():
-        return out
     try:
         text = config.read_text(errors="replace")
     except OSError:
-        return out
-    out["source"] = str(config)
-    for key, (pattern, cast) in _CONFIG_KEYS.items():
-        m = pattern.search(text)
-        if m:
-            try:
-                out[key] = cast(m.group(1))
-            except ValueError:
-                pass
-    return out
+        return ""
+    m = _FRAMEWORK_RE.search(text)
+    return m.group(1) if m else ""
 
 
 def _ratio(num: float | None, den: float | None) -> float | None:
@@ -364,41 +342,6 @@ class StepPass:
                     "gpu_busy_us": round(_union_ms(intervals) * 1000.0, 3) if intervals else 0.0,
                 }
             )
-
-    def window_stats(self, lo_idx: int, hi_idx: int) -> dict[str, Any]:
-        """Aggregate a half-open step range the way the splitter's chunk would."""
-        window = self.steps[lo_idx:hi_idx]
-        empty = {
-            "num_gpu_events_pred": 0,
-            "gpu_busy_us_pred": 0.0,
-            "busy_ratio_pred": 0.0,
-            "gpu_extent_us": 0.0,
-            "host_span_us": 0.0,
-        }
-        if not window:
-            return empty
-        intervals: list[tuple[float, float]] = []
-        kernels = 0
-        for step in window:
-            lo = bisect_left(self.runtime_ts, step["ts"])
-            hi = bisect_right(self.runtime_ts, step["end"])
-            for corr in set(self.runtime_corr[lo:hi]):
-                for k_ts, k_end, _dur in self.kernel_by_corr.get(corr, ()):
-                    intervals.append((k_ts, k_end))
-                    kernels += 1
-        host_span = round(window[-1]["end"] - window[0]["ts"], 3)
-        if not intervals:
-            return {**empty, "host_span_us": host_span}
-        busy = _union_ms(intervals) * 1000.0
-        extent = max(iv[1] for iv in intervals) - min(iv[0] for iv in intervals)
-        return {
-            "num_gpu_events_pred": kernels,
-            "gpu_busy_us_pred": round(busy, 3),
-            "busy_ratio_pred": round(min(1.0, busy / extent), 6) if extent > 0 else 0.0,
-            "gpu_extent_us": round(extent, 3),
-            "host_span_us": host_span,
-        }
-
 
 def iter_details_from_name(name: str) -> dict[str, Any]:
     """Map an iteration-root annotation to the request counts the splitter derives."""
@@ -660,10 +603,6 @@ def certify_trace_dir(
     *,
     chunk_files: Iterable[str | Path] = (),
     framework: str = "",
-    num_steps: int = DEFAULT_NUM_STEPS,
-    conc: int | None = None,
-    osl: float | None = None,
-    r: float = DEFAULT_R,
 ) -> dict[str, Any]:
     """Produce the self-certification record for one capture directory."""
     tdir = Path(trace_dir)

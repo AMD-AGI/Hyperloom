@@ -4265,9 +4265,6 @@ def _collect_split_chunks(
     decode_chunks = _collect("decode_only_steady_state_*")
     prefill_chunks = _collect("prefilldecode_steady_state_*")
     generic_chunks = _collect("steady_state_*")
-    # Exclude LLM-inference chunks from the generic set
-    llm_set = {str(p) for p in mixed_chunks + decode_chunks + prefill_chunks}
-    generic_chunks = [p for p in generic_chunks if str(p) not in llm_set]
 
     split_meta = {
         "chunks_by_mode": {
@@ -4344,14 +4341,12 @@ def _validate_selected_chunk(
     mode: str,
     mode_to_chunks: "dict[str, tuple[str, list[Path]]]",
     health_warnings: "list[dict]",
-) -> "list[dict]":
+) -> None:
     """Run the low-quality busy-ratio gate on the selected chunk.
 
     Appends a structured warning dict to ``health_warnings`` before raising so
     the retry consumer in the roofline executor can find it even when the
     exception propagates past the caller.
-
-    Returns a list of health warning dicts (empty when the chunk passes).
     """
     low_quality_warning = _check_chunk_quality(
         split_dir=split_dir,
@@ -4367,7 +4362,6 @@ def _validate_selected_chunk(
             f"busy_ratio={low_quality_warning['busy_ratio'] * 100:.3f}%; "
             f"better alternates: {low_quality_warning['non_empty_modes']}"
         )
-    return []
 
 
 def _run_trace_split(
@@ -4377,7 +4371,7 @@ def _run_trace_split(
     tl_root: "Path",
     log_path: "Path",
     health_warnings: "list[dict]",
-) -> "tuple[Path, dict, list[dict]]":
+) -> "tuple[Path, dict]":
     """Run the TraceLens splitter and return the selected chunk.
 
     Builds the splitter command, runs it, collects chunks, and validates
@@ -4389,7 +4383,7 @@ def _run_trace_split(
     can include them in the result even on failure.
 
     Returns:
-        ``(selected_chunk, split_meta, health_warnings)``
+        ``(selected_chunk, split_meta)``
 
     Raises:
         RuntimeError: On splitter failure, no chunks, missing mode, or
@@ -4431,14 +4425,14 @@ def _run_trace_split(
         }
     )
 
-    warnings = _validate_selected_chunk(
+    _validate_selected_chunk(
         split_dir,
         selected_chunk,
         args.steady_state_mode,
         mode_to_chunks,
         health_warnings,
     )
-    return selected_chunk, split_meta, warnings
+    return selected_chunk, split_meta
 
 
 def _trajectory_scope(args: argparse.Namespace) -> contextlib.AbstractContextManager[Any]:
@@ -5053,7 +5047,7 @@ def main() -> int:
                     started_at=started_at,
                 )
                 split_dir = tracelens_dir / "trace_split"
-                cli_trace_path, split_meta, split_warnings = _run_trace_split(
+                cli_trace_path, split_meta = _run_trace_split(
                     args,
                     analysis_trace_path,
                     split_dir,
@@ -5080,7 +5074,6 @@ def main() -> int:
                     num_steps=split_meta.get("num_steps"),
                     chunks_extracted=split_meta["chunks_extracted"],
                 )
-                trace_health_warnings.extend(split_warnings)
                 _note_step(
                     "select_chunk",
                     category="select",
