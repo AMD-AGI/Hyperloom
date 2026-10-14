@@ -141,7 +141,7 @@ The following table describes the key lifecycle events for a Hyperloom session.
 | Session start   | API call / Job creation                            | Coordinator creates `$SESSION_DIR` and writes `manifest.json`, `state.json`. |
 | Heartbeat       | Every Coordinator tick (`--tick-interval-sec`, default `0` = no sleep) | Coordinator atomically rewrites `state.json` (temp `.state.json.*.tmp` + `os.replace`) inside `$SESSION_DIR`. |
 | Session end     | `target_reached` / `time_exhausted` / `global_converged` | Coordinator writes `session_breakdown.json`, exits 0. |
-| Crash recovery  | Pod OOM / preemption                               | Re-launch with `--resume-from "$SESSION_DIR"`; reads `manifest.json` + `state.json`. |
+| Crash recovery  | Pod OOM / preemption                               | Re-launch with `--resume-from "$SESSION_DIR"`; reads `manifest.json` + `state.json`. If the resume is refused because the lost pod's execution ownership cannot be established, confirm that pod is gone with `hyperloom recover --confirm-scope-gone` first ([Scenario A](#scenario-a-pod-was-oom-killed-mid-session)). |
 
 ---
 
@@ -211,7 +211,8 @@ Launchers can rely on these outputs of `hyperloom optimize`.
 | 3 | The session lock is held by another optimizer |
 | 4 | The `--quantize` prelude failed; the run refuses to optimize the unquantized model |
 
-`hyperloom recover` exits 0 on success, 1 when the breakdown rebuild fails and 2 on invalid arguments.
+`hyperloom recover` exits 0 on success (including a cleanup confirmation that found nothing to confirm), 1 when the breakdown
+rebuild fails, and 2 on invalid arguments or when a `--confirm-stopped` / `--confirm-scope-gone` confirmation is refused.
 
 **Launch line**
 
@@ -264,6 +265,51 @@ and inspect the failure before relaunching. SIGHUP follows normal terminal drain
 `--max-hours` is cooperative and cannot guarantee termination of a frozen
 Coordinator. Historical stop reasons remain readable but do not trigger a restart.
 
+**When the resume is refused.** A relaunch in a new pod (or a restarted
+container) is a different execution environment, so it cannot observe whether
+the tasks the lost pod was running have exited. The resume then exits 2 with
+`resume blocked: prior execution exit cannot be established in this
+environment`, lists the blocking tasks, and names the owner scopes recorded in
+the session on an `other owner scopes:` line. An owner scope identifies one
+execution environment: a boot, a PID namespace and a container start. Nothing is
+cleared, and the resume stays refused until the ownership is confirmed.
+
+Once you have verified that the environment named by an owner scope no longer
+exists (its pod, container or machine is gone, so nothing it started can still
+be running), record that once for the whole scope, then relaunch:
+
+```bash
+  python3 -m hyperloom recover --session-dir "$SESSION_DIR" \
+    --confirm-scope-gone "$OWNER_SCOPE" --confirmation-reason "pod OOM-killed; pod deleted"
+  python3 -m hyperloom optimize --resume-from "$SESSION_DIR"
+```
+
+Pass the scope exactly as printed, without the surrounding quotes. The
+confirmation cancels the unfinished tasks recorded under that scope, so the
+resumed run redoes them instead of counting their results; releases their
+execution and GPU ownership records; and appends the confirmation to
+`runtime/pod_history.jsonl`. It does not stop any process and does not resume
+the run. It is refused, with exit code 2 and nothing changed, when:
+
+* the named scope is the current environment's, or the current environment's
+  scope cannot be read;
+* an execution lease held by any other scope has not yet expired (another
+  environment may still be writing the session);
+* a task under the named scope also holds a lease recorded under a different
+  scope;
+* the scope is an older two-part one recorded for this same boot and PID
+  namespace and one of its recorded holder processes still runs here;
+* the session lock is held (an optimizer is still running on the session), or
+  POSIX session locking is unavailable;
+* the session's ownership records carry no owner scopes; use `--confirm-stopped`;
+* `--confirmation-reason` is missing or empty, or the option is combined with
+  `--confirm-stopped` or `--force`.
+
+Use `--confirm-stopped TASK_ID` instead only for ownership recorded without an
+owner scope (by earlier versions): it confirms one task at a time, after you
+have verified that task's whole process tree and any remote workers or Ray
+actors have stopped, and it refuses tasks recorded under a nonempty owner scope.
+
 To rebuild only the `session_breakdown` (and push it to Langfuse) for a run
 that exited abnormally — without re-running the optimization loop — use the
 dedicated subcommand instead of `--resume-from`:
@@ -275,7 +321,9 @@ dedicated subcommand instead of `--resume-from`:
 `--force` re-runs even when the session already looks complete. To replay
 `reports/trace/llm_calls.jsonl` as Langfuse generations (only when the live
 emitter never ran), use `hyperloom session backfill --session-dir "$SESSION_DIR"`.
-`--resume-from` = keep optimizing; `recover` = rebuild the breakdown artifact.
+`--resume-from` = keep optimizing; `recover` = rebuild the breakdown artifact,
+or, with `--confirm-scope-gone` / `--confirm-stopped`, record a cleanup
+confirmation that lets a refused resume proceed.
 
 ### Scenario B: PV lost or corrupted
 

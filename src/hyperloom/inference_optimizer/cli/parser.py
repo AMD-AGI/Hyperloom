@@ -1167,7 +1167,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "recover",
         parents=[common],
         help="Rebuild + push the session_breakdown for a session that exited "
-        "abnormally (crash / SIGKILL) so its breakdown lands on Langfuse.",
+        "abnormally (crash / SIGKILL) so its breakdown lands on Langfuse; or, with "
+        "--confirm-scope-gone / --confirm-stopped, record the cleanup confirmation "
+        "a refused --resume-from asks for.",
+        description="Without a confirmation option, rebuild and push the session_breakdown of a session that "
+        "exited abnormally. With --confirm-scope-gone OWNER_SCOPE (an execution environment that no longer exists) "
+        "or --confirm-stopped TASK_ID (one task recorded without an owner scope), plus --confirmation-reason, "
+        "instead record the cleanup confirmation a refused --resume-from asks for; nothing is rebuilt. "
+        "Exit codes: 0 success, 1 breakdown rebuild failed, 2 invalid arguments or a refused confirmation.",
     )
     rec.add_argument(
         "--session-dir",
