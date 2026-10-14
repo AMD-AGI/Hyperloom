@@ -13,7 +13,9 @@ runtime, which builds its rule gates on it.
 
 A repair names the branch that asks, through its intent, and inherits its K; one of a branch the roster does not hold,
 or of one already stopped, is refused, as stopping a branch withdraws everything of it, and an intent is repaired at
-most once per commit. A fork names no branch, so it starts at K 1 and is opened from no branch.
+most once per commit. :class:`~hyperloom_multibranch.contracts.fork.ForkRequest` does not name the branch that asks
+and the rule gate records no ``SPLIT`` for it, so a fork starts at K 1 and its ``OPEN`` names only the commit it starts
+at: the notebook shows it as a new branch, not as a fork of its parent, until the fork contract names that branch.
 """
 
 from __future__ import annotations
@@ -27,7 +29,7 @@ from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, D
 from hyperloom_multibranch.scheduling.mb_fakes import mb_fake_refused_fork
 from hyperloom_multibranch.scheduling.roster import BranchOrigin, Roster
 
-#: The K a fork starts with: the request names no branch to inherit one from.
+#: The K a fork starts with: the fork contract names no branch to inherit one from.
 FORK_K = 1
 DECISION_KINDS = {BranchOrigin.FORK: DecisionKind.FORK, BranchOrigin.REPAIR: DecisionKind.REPAIR}
 
