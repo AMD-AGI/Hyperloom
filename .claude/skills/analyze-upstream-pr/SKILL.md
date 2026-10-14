@@ -87,9 +87,8 @@ commit: <the revision of that tree the deployment runs, or ->
 patches: <the local patches applied on top of it, one path each, or ->
 ```
 
-A deployment line naming no model or flags cannot settle Step 3: ask rather than assume. G numbers
-are check-prior-art's [gotchas](../check-prior-art/references/gotchas.md); G4 covers a package
-installed without a checkout.
+A `deployment` naming no model or flags cannot settle Step 3: ask. G numbers are check-prior-art's
+[gotchas](../check-prior-art/references/gotchas.md); G4 covers a package with no checkout.
 
 ```bash
 HL_REPO=<owner/name> bash .claude/skills/review-pr/fetch.sh <N> "$WORK"
@@ -153,14 +152,13 @@ naming the changed kernel or function also counts, labeled `measured` with its s
 cites the condition that excludes the target: a platform or arch check, a quantization method the
 checkpoint does not select, a backend the flags do not choose.
 
-Find the site by walking the changed symbol's callers in the tree at `commit`, not at the PR's
-base: platform checks (`is_rocm`, `is_cuda`, `torch.version.hip`, `USE_ROCM`,
-`__HIP_PLATFORM_AMD__`), arch and capability checks (gfx names, `gcnArchName`, capability tuples),
-dtype dispatch, backend registries and priority lists, environment variables read at selection,
-shape-keyed tuning tables. The site can live in another repository than the PR, as when a
-framework picks a kernel library's op: cite it in the tree that holds it, at the version the
-deployment runs. A changed path the tree lacks at `commit` stays `UNKNOWN` until mapped (G7).
-With no tree, every line is `UNKNOWN` under
+Find the site by walking the changed symbol's callers in the tree at `commit`, not at the PR's base:
+platform checks (`is_rocm`, `is_cuda`, `torch.version.hip`, `USE_ROCM`, `__HIP_PLATFORM_AMD__`),
+arch and capability checks (gfx names, `gcnArchName`, capability tuples), dtype dispatch, backend
+registries and priority lists, environment variables read at selection, shape-keyed tuning tables.
+The site can live in another repository than the PR, as when a framework picks a kernel library's
+op: cite it in the tree that holds it, at the version the deployment runs. A changed path the tree
+lacks at `commit` stays `UNKNOWN` until mapped (G7). With no tree, every line is `UNKNOWN` under
 `SKIPPED: on-path -- no tree; whether the deployment runs this code is unchecked`.
 
 ## Step 4 — In-tree inclusion
@@ -207,8 +205,10 @@ One line per conflict into `$WORK/conflicts.txt`:
 100 files, and its `PARTIAL` lines name the PRs cut; an upstream repository has thousands open.
 Whether another PR does the same thing is check-prior-art's question: follow its Steps 0 to 6 in
 `$WORK/prior-art`, with Step 1's mechanism and `files.txt` as the planned paths; its path scan
-pages every open PR. Carry its `DUPLICATE` and `OVERLAPPING` classes here, and its `scan.txt` lines
-that are not `COMPLETE` to the report's coverage.
+pages every open PR. It finds this PR too, a match on every planned path, so before its Step 4
+run `bash .claude/skills/analyze-upstream-pr/drop_self.sh "$WORK/prior-art" <owner/name> <N>` and
+keep `<owner/name>#<N>` out of the shortlist and classes. Carry its `DUPLICATE` and `OVERLAPPING`
+classes here, and its `scan.txt` lines that are not `COMPLETE` to the report's coverage.
 
 **Local patches.** List each patch's paths with `git apply --numstat <patch>`; one also in
 `files.txt` is `OVERLAP`. Then, in a scratch worktree

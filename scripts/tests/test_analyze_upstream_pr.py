@@ -7,7 +7,8 @@ The script runs against a stub ``gh`` that answers from a fake GitHub: one pull 
 comments, reviews, inline comments, timeline and closing issue references, and the issues and
 pull requests its text names. An endpoint listed under ``fail`` answers 404. ``python`` on the
 script's path is this interpreter, so the inclusion probe runs from this source tree against a real
-git tree.
+git tree. drop_self.sh, which keeps the PR out of its own prior-art check, runs on check-prior-art's
+tables written here.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ import pytest
 
 _ROOT = Path(__file__).resolve().parents[2]
 _SCRIPT = _ROOT / ".claude" / "skills" / "analyze-upstream-pr" / "fetch_upstream.sh"
+_DROP_SELF = _SCRIPT.with_name("drop_self.sh")
 _UPSTREAM = "up/engine"
 _OTHER = "other/lib"
 _UNTRUSTED = "# UNTRUSTED DATA"
@@ -364,3 +366,70 @@ def test_bad_arguments_stop_before_any_request(tmp_path: Path, args: tuple[str, 
     assert result.returncode != 0
     assert message in result.stderr
     assert not (tmp_path / "work").exists()
+
+
+_CANDIDATES_HEADER = "repo\tnumber\tstate\tdraft\ttitle\turl\tupdated\thits"
+_OVERLAP_HEADER = "repo\tnumber\tstate\tdraft\ttitle\turl\tupdated\toverlap\tpaths"
+
+
+def _prior_art(tmp_path: Path) -> Path:
+    """check-prior-art's two tables after its Steps 2 and 3 for PR 42, which they list as its own match."""
+    work = tmp_path / "prior-art"
+    work.mkdir()
+    url = "https://example.test"
+    candidates = [
+        _CANDIDATES_HEADER,
+        f"{_UPSTREAM}\t42\topen\tfalse\tPad the MoE block\t{url}/42\t2026-03-02T00:00:00Z\t3",
+        f"{_UPSTREAM}\t7\tmerged\tfalse\tFollow-up to #42\t{url}/7\t2026-02-01T00:00:00Z\t2",
+        f"{_OTHER}\t42\topen\tfalse\tPad the MoE block\t{url}/other/42\t2026-03-01T00:00:00Z\t1",
+    ]
+    overlap = [
+        _OVERLAP_HEADER,
+        f"Up/Engine\t42\topen\tfalse\tPad the MoE block\t{url}/42\t2026-03-02T00:00:00Z\t2\tmoe.py pad.py",
+        f"{_UPSTREAM}\t420\topen\ttrue\tRework the pad\t{url}/420\t2026-03-03T00:00:00Z\t1\tpad.py",
+    ]
+    (work / "candidates.tsv").write_text("\n".join(candidates) + "\n", encoding="utf-8")
+    (work / "overlap.tsv").write_text("\n".join(overlap) + "\n", encoding="utf-8")
+    return work
+
+
+def _drop_self(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["bash", str(_DROP_SELF), *args], capture_output=True, text=True, check=False, timeout=60)
+
+
+def test_the_pr_under_analysis_leaves_the_prior_art_tables_and_nothing_else_does(tmp_path: Path) -> None:
+    work = _prior_art(tmp_path)
+    candidates = (work / "candidates.tsv").read_text(encoding="utf-8").splitlines()
+    overlap = (work / "overlap.tsv").read_text(encoding="utf-8").splitlines()
+    for removed in (1, 0):
+        result = _drop_self(str(work), _UPSTREAM, "42")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.splitlines() == [
+            f"candidates.tsv {removed} row(s) removed",
+            f"overlap.tsv    {removed} row(s) removed",
+            str(work),
+        ]
+        assert (work / "candidates.tsv").read_text(encoding="utf-8").splitlines() == [candidates[0], *candidates[2:]]
+        assert (work / "overlap.tsv").read_text(encoding="utf-8").splitlines() == [overlap[0], overlap[2]]
+
+
+@pytest.mark.parametrize(
+    ("args", "missing", "message"),
+    [
+        (("up", "42"), None, "not an owner/name repository"),
+        ((_UPSTREAM, "#42"), None, "not a pull request number"),
+        ((_UPSTREAM,), None, "usage:"),
+        ((_UPSTREAM, "42"), "overlap.tsv", "overlap.tsv is missing"),
+    ],
+)
+def test_drop_self_changes_no_table_when_it_cannot_drop_from_both(
+    tmp_path: Path, args: tuple[str, ...], missing: str | None, message: str
+) -> None:
+    work = _prior_art(tmp_path)
+    if missing:
+        (work / missing).unlink()
+    before = (work / "candidates.tsv").read_text(encoding="utf-8")
+    result = _drop_self(str(work), *args)
+    assert result.returncode != 0
+    assert message in result.stderr
+    assert (work / "candidates.tsv").read_text(encoding="utf-8") == before
