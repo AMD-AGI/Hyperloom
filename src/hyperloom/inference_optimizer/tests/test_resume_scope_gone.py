@@ -10,7 +10,7 @@ import os
 import sqlite3
 import sys
 from contextlib import closing
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 import pytest
 
@@ -344,7 +344,7 @@ def test_an_earlier_containers_two_part_scope_with_no_holder_here_is_confirmed(t
 
 def test_a_two_part_scope_whose_holder_runs_in_this_container_is_refused(tmp_path):
     """An optimizer of an earlier version still running here took the lease: not gone."""
-    started = datetime.now(UTC).isoformat()
+    started = datetime.now(timezone.utc).isoformat()
     path = _legacy_session(tmp_path, pid=os.getpid(), acquired=started)
     with pytest.raises(CleanupConfirmationError, match="still runs in this execution environment"):
         confirm_scope_gone(tmp_path, owner_scope=LEGACY, reason=REASON, current_scope=HERE_NOW)
@@ -362,5 +362,5 @@ def test_a_reused_pid_that_started_after_the_lease_is_not_its_holder(tmp_path):
 def test_resume_after_an_in_place_upgrade_still_sees_its_own_two_part_lease(tmp_path):
     """A session continued in the container that recorded the two-part scope: its rows are
     local, for the dead-holder reaper to judge, not a foreign scope that blocks."""
-    _legacy_session(tmp_path, pid=os.getpid(), acquired=datetime.now(UTC).isoformat())
+    _legacy_session(tmp_path, pid=os.getpid(), acquired=datetime.now(timezone.utc).isoformat())
     ensure_resume_safe(tmp_path, owner_scope=HERE_NOW)

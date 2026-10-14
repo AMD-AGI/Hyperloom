@@ -83,7 +83,7 @@ def test_a_running_process_has_a_start_and_a_gone_one_none() -> None:
     started = process_started_at(os.getpid())
     if started is None:
         pytest.skip("no /proc here")
-    from datetime import UTC, datetime
+    from datetime import datetime, timezone
 
-    assert started <= datetime.now(UTC)
+    assert started <= datetime.now(timezone.utc)
     assert process_started_at(2**22 + 12345) is None
