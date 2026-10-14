@@ -26,8 +26,6 @@ RECIPE_PARAM = "recipe_generation"
 
 _TRACE_SPLIT = "trace_split_no_steady_state"
 _ANALYSIS_TIMEOUT_CLASS = "subprocess_timeout"
-#: A profile with nothing to analyse: no trace path in a reported success, or no trace file written at all.
-_NO_TRACE_CLASSES = frozenset({"profile_no_trace", "no_trace_files"})
 _ERROR_EXCERPT_CHARS = 500
 
 
@@ -43,8 +41,6 @@ def recurring_failure_class(result: Mapping[str, Any]) -> str:
         return _TRACE_SPLIT
     if _ANALYSIS_TIMEOUT_CLASS in classes:
         return "analysis_timeout"
-    if classes & _NO_TRACE_CLASSES:
-        return "no_trace"
     return ""
 
 

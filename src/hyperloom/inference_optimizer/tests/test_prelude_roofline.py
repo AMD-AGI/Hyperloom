@@ -794,7 +794,6 @@ _TRANSIENT = {
 _DETERMINISTIC_FAILURES = {
     "trace_split_no_steady_state": (_PROFILED, _SPLIT_FAILED),
     "analysis_timeout": (_PROFILED, _ANALYSIS_TIMED_OUT),
-    "no_trace": (_NO_TRACE_FILES, _ANALYSED),
 }
 
 
@@ -869,12 +868,21 @@ async def test_a_keep_re_arms_the_roofline_that_failed(coord: Coordinator):
     assert task.params["base_extra_args"] == "--chunked-prefill-size 8192"
 
 
+@pytest.mark.parametrize(
+    ("profiled", "analysed"),
+    [(_PROFILED, _TRANSIENT), (_NO_TRACE_FILES, _ANALYSED)],
+    ids=["analysis-tool-error", "no-trace-files"],
+)
 @pytest.mark.asyncio
-async def test_a_transient_roofline_failure_keeps_the_streak_retry(coord: Coordinator):
-    """Only a failure that recurs on the same input is remembered; anything else retries within the existing cap."""
+async def test_a_transient_roofline_failure_keeps_the_streak_retry(coord: Coordinator, profiled: dict, analysed: dict):
+    """Only a failure that recurs on the same input is remembered; anything else retries within the existing cap.
+
+    A profile with no trace files is not proof of a recurring failure: a server that failed to boot reports the same
+    ``no_trace_files``.
+    """
     state = coord.shared_state
     state.current_best = {"action": "baseline", "tput": 100.0}
-    await _fail_prelude_roofline(coord, _PROFILED, _TRANSIENT)
+    await _fail_prelude_roofline(coord, profiled, analysed)
 
     assert await coord.phase_prelude.enqueue_internal_analysis_task(reason="cycle_start") is not None
     _past_the_watermark(state)
