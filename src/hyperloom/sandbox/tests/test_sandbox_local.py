@@ -461,7 +461,10 @@ def test_killing_right_after_create_leaves_no_runner_behind(make) -> None:
         )
         provider = make([template])
         sb = _create(provider, "runner", "measurement")
+        started = time.monotonic()
         sb.kill()  # the launcher may not have forked the runner yet
+        # A runner forked after the scan would sit out the whole SIGTERM grace (2s) unseen.
+        assert time.monotonic() - started < 1.8
         assert _marked_pids(marker) == []
 
 
