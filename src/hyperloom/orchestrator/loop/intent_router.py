@@ -1130,7 +1130,7 @@ class IntentRouter(CoordinatorCollaborator):
 
     async def _handle_request(self, source: str, intent: Intent) -> None:
         """Route a REQUEST intent to its programmatic handler."""
-        target_agent = intent.payload["target_agent"]
+        target_agent = str(intent.payload["target_agent"]).strip()
         kind = intent.payload["kind"]
         denied = self._coord.dispatcher.sequence_denial_for_request(target_agent, kind)
         if denied is not None:
