@@ -35,29 +35,27 @@ __all__ = ["SpecialistDispatchCollaborator"]
 
 _SOURCE_PATCH_FAMILY = "source_patch"
 
-#: ``(SharedState field, param key, conversion)`` for the values a specialist is warmed with when the session
-#: carries one. An empty value is not exported: its absence is how the specialist reads "this session has none".
+#: ``(SharedState field, param key, conversion)`` for the values a specialist is warmed with. The converted value
+#: decides: an empty string, an empty container and a zero are not exported, because an absent key is how the
+#: specialist reads "this session has none".
 _STATE_PARAMS: tuple[tuple[str, str, Callable[[Any], Any]], ...] = (
     ("warm_start_recipe", "warm_start_recipe", dict),
     ("warm_start_pitfalls", "warm_start_pitfalls", list),
     ("warm_start_lessons", "warm_start_lessons", list),
+    ("framework", "framework", str.strip),
+    ("tp", "tp", int),
     ("precision", "precision", str),
+    ("conc", "conc", int),
+    ("isl", "isl", int),
+    ("osl", "osl", int),
+    ("max_model_len", "max_model_len", int),
     # The mode selects the specialist's workload block; the corpus shape supplies its numbers.
     ("benchmark_mode", "benchmark_mode", str),
     ("agentx_corpus_shape", "agentx_corpus_shape", dict),
     ("grading", "agentx_grading", dict),
     ("agentx_backend", "agentx_backend", str),
+    ("baseline_tput", "baseline_tput", float),
     ("cumulative_gain_validated", "cumulative_gain_validated", float),
-)
-
-#: The same, for fields a specialist is told about only while they are above zero.
-_POSITIVE_NUMBER_PARAMS: tuple[tuple[str, Callable[[Any], Any]], ...] = (
-    ("tp", int),
-    ("conc", int),
-    ("isl", int),
-    ("osl", int),
-    ("max_model_len", int),
-    ("baseline_tput", float),
 )
 
 # Bounded transient-failure auto-retry for specialist dispatches (infra-only).
@@ -109,18 +107,10 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         params.setdefault("kb_subgraph", {})
 
         for attr, key, convert in _STATE_PARAMS:
-            value = getattr(state, attr, None)
+            value = convert(getattr(state, attr))
             if value:
-                params.setdefault(key, convert(value))
-        for attr, to_number in _POSITIVE_NUMBER_PARAMS:
-            number = to_number(getattr(state, attr, 0) or 0)
-            if number > 0:
-                params.setdefault(attr, number)
-        # runtime framework/version for version-mismatch annotation.
-        if "framework" not in params:
-            fw = str(getattr(state, "framework", "") or "").strip()
-            if fw:
-                params["framework"] = fw
+                params.setdefault(key, value)
+        # runtime framework version for version-mismatch annotation.
         if "framework_version" not in params:
             fp_meta = getattr(state, "stack_fingerprint_meta", None) or {}
             if isinstance(fp_meta, dict):
