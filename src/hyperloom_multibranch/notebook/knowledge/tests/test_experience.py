@@ -240,3 +240,19 @@ def test_the_experience_service_stores_each_experience_once_with_its_identity(
     identities = {item["experience"]["id"]: item["experience"]["identity"] for item in exported.items}
     assert identities[first.collected[0].experience_id]["bottleneck"] == "moe gemm"
     assert (tmp_path / "receipt.json").is_file()
+
+
+def test_a_blocked_gain_sent_for_repair_exports_the_accuracy_it_failed() -> None:
+    import dataclasses
+
+    from hyperloom_multibranch.contracts.notebook.peers import Verdict
+    from hyperloom_multibranch.contracts.notebook.records import TestRecord
+    from hyperloom_multibranch.contracts.notebook.vocab import Conclusion
+    from hyperloom_multibranch.notebook.knowledge import experience
+    from hyperloom_multibranch.notebook.tests.factories import intent, judgement, request, result
+
+    blocked = dataclasses.replace(judgement(5.0, ("r9", "r9b"), verdict=Verdict.BLOCKED), accuracy_ok=False)
+    measured = dataclasses.replace(result("r9"), accuracy={"gsm8k": 0.61})
+    record = TestRecord(request("r9", intent("s1", "c0")), measured, blocked, Conclusion.REPAIR_REQUESTED)
+
+    assert experience._accuracy(record) == {"required": True, "passed": False, "value": 0.61}

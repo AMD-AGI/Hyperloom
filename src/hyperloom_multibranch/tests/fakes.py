@@ -7,6 +7,7 @@ git or processes."""
 from __future__ import annotations
 
 from hyperloom.contracts.recipe import Recipe
+from hyperloom_multibranch.contracts.fork import Admission, ForkRequest, RepairRequest
 from hyperloom_multibranch.contracts.lifecycle import SpecialistLaunch
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import BranchMoved
@@ -50,6 +51,23 @@ class InMemoryRepo:
         if self._heads[branch] != commit:
             raise BranchMoved(f"{branch} is at {self._heads[branch]}, not {commit}")
         self._heads[branch] = parent
+
+
+class RecordingScheduler:
+    """Answers every branch request with ``admission`` and keeps what it was asked."""
+
+    def __init__(self, admission: Admission) -> None:
+        self.admission = admission
+        self.forks: list[ForkRequest] = []
+        self.repairs: list[RepairRequest] = []
+
+    async def request_fork(self, request: ForkRequest) -> Admission:
+        self.forks.append(request)
+        return self.admission
+
+    async def request_repair(self, request: RepairRequest) -> Admission:
+        self.repairs.append(request)
+        return self.admission
 
 
 class RecordingLifecycle:

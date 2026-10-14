@@ -48,6 +48,7 @@ class Conclusion(str, Enum):
     SPLIT_REQUESTED = "split_requested"
     SPLIT_PENDING = "split_pending"
     SPLIT_COMMITTED = "split_committed"
+    REPAIR_REQUESTED = "repair_requested"
     RECORDED_ONLY = "recorded_only"
     ACCURACY_FAILED = "accuracy_failed"
     MERGED = "merged"

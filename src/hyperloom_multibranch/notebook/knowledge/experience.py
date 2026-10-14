@@ -137,7 +137,8 @@ def _accuracy(record: TestRecord) -> dict[str, object] | None:
     accuracy = record.result.accuracy if record.result is not None else {}
     if not (record.request.accuracy_rounds or accuracy or record.conclusion is Conclusion.ACCURACY_FAILED):
         return None
-    passed = record.conclusion is not Conclusion.ACCURACY_FAILED
+    judged = record.judgement
+    passed = record.conclusion is not Conclusion.ACCURACY_FAILED and (judged is None or judged.accuracy_ok)
     return {"required": True, "passed": passed, "value": next(iter(accuracy.values()), None)}
 
 
