@@ -23,8 +23,8 @@ from hyperloom.measure.local import LocalMeasurementBackend, TestCallRefused
 from hyperloom.measure.manifest import encode_manifest, RESULT_SCHEMA
 from hyperloom.measure.runner import hardware
 from hyperloom.measure.runner.attachments import AttachmentError, place_attachments
-from hyperloom.measure.runner.farm import FarmError, build_farm, verify_farm
-from hyperloom.measure.runner.inventory import OutputRejected, inventory
+from hyperloom.measure.runner.farm import Farm, FarmError, build_farm, verify_farm
+from hyperloom.measure.runner.inventory import OutputRejected, inventory, write_farm_inventory
 from hyperloom.measure.runner.platform_env import align_platform_env, take_topology
 from hyperloom.measure.runner.rewrite import rewrite_config
 from hyperloom.measure.runner.service import Progress, RunnerFailure, wait_for_file, write_status
@@ -122,7 +122,7 @@ def _preflight(spec: MeasurementSpec, visible: list[int]):
     return facts
 
 
-def _prepare(ctx: _Context, spec: MeasurementSpec, visible: list[int]) -> tuple[list[Path], Path]:
+def _prepare(ctx: _Context, spec: MeasurementSpec, visible: list[int]) -> tuple[list[Path], Path, Farm | None]:
     """Tools, attachments, farm and the rewritten YAML; returns the point path and the InferenceX checkout."""
     try:
         inferencex = ensure_inferencex(spec.tools.inferencex, ctx.cache)
@@ -153,7 +153,7 @@ def _prepare(ctx: _Context, spec: MeasurementSpec, visible: list[int]) -> tuple[
                 verify_farm(farm, rewritten, python=python, cwd=ctx.work)
     except (AttachmentError, FarmError) as exc:
         raise RunnerFailure(_SPEC_REJECTED, str(exc)) from exc
-    return points, inferencex
+    return points, inferencex, farm
 
 
 def _call(ctx: _Context, spec: MeasurementSpec, points: list[Path], inferencex: Path, progress: Progress) -> TestCall:
@@ -267,7 +267,7 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
     before = hardware.ecc_counts(visible)
     changed = align_platform_env(ctx.environ, spec.platform_env)
     progress.phase("preparing")
-    points, inferencex = _prepare(ctx, spec, visible)
+    points, inferencex, farm = _prepare(ctx, spec, visible)
     call = _call(ctx, spec, points, inferencex, progress)
     progress.phase("running")
     started = time.time()
@@ -275,6 +275,7 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
     progress.phase("collecting")
     harvest_leaked_artifacts(ctx.files, subprocess_started_unix=started, leak_root=ctx.work)
     _check_node(before, hardware.ecc_counts(visible), visible, facts)
+    write_farm_inventory(ctx.files, farm)
     try:
         files = inventory(ctx.files, max_total_bytes=spec.outputs.max_total_bytes)
     except OutputRejected as exc:

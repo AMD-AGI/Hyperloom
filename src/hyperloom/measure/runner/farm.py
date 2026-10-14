@@ -42,6 +42,7 @@ class Farm:
 
     site: Path
     packages: tuple[str, ...]
+    roots: tuple[EnvRoot, ...] = ()
 
 
 def _locate(import_name: str, python: str, cwd: Path) -> Path:
@@ -112,13 +113,15 @@ def build_farm(
     """
     site = farm_dir / "site"
     built = []
+    rebuilt = []
     for root in roots:
         if root.kind != "package":
             raise FarmError(f"{root.id}: a runtime root is not supported by this runner yet")
         base = _locate(root.import_name, python, farm_dir.parent)
         _build_root(root, base, site / root.import_name, read_blob)
         built.append(root.import_name)
-    return Farm(site, tuple(built)) if built else None
+        rebuilt.append(root)
+    return Farm(site, tuple(built), tuple(rebuilt)) if built else None
 
 
 def prepend_pythonpath(envs: MutableMapping[str, Any], site: Path) -> None:

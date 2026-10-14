@@ -56,3 +56,61 @@ def test_a_missing_directory_is_refused(tmp_path):
         inventory(tmp_path / "nope", max_total_bytes=100)
 
     assert caught.value.error_class == "unsafe_output"
+
+
+# --- the farm inventory -------------------------------------------------------------------------------------------
+
+
+def _farm(tmp_path, entries):
+    import sys
+
+    from hyperloom.measure.runner.farm import build_farm
+    from hyperloom.measure.spec import EnvRoot
+
+    blobs = {"sha256:" + hashlib.sha256(d).hexdigest(): d for d in (b"x = 1\n",)}
+    root = EnvRoot("yaml", "package", "yaml", "PyYAML", "0", tuple(entries))
+    return build_farm([root], tmp_path / "farm", python=sys.executable, read_blob=blobs.__getitem__)
+
+
+def test_the_inventory_lists_each_upserted_files_hash_as_it_is_in_the_farm_and_the_deletes(tmp_path):
+    from hyperloom.measure.runner.inventory import farm_inventory
+    from hyperloom.measure.spec import EnvEntry
+
+    address = "sha256:" + hashlib.sha256(b"x = 1\n").hexdigest()
+    farm = _farm(tmp_path, [EnvEntry("pkg/new.py", "upsert", address, "0644"), EnvEntry("error.py", "delete")])
+
+    document = farm_inventory(farm)
+
+    assert document["roots"] == {
+        "yaml": {
+            "import_name": "yaml",
+            "upserts": {"pkg/new.py": hashlib.sha256(b"x = 1\n").hexdigest()},
+            "deletes": ["error.py"],
+        }
+    }
+
+
+def test_a_file_changed_in_the_farm_after_the_build_shows_its_new_hash(tmp_path):
+    from hyperloom.measure.runner.inventory import farm_inventory
+    from hyperloom.measure.spec import EnvEntry
+
+    address = "sha256:" + hashlib.sha256(b"x = 1\n").hexdigest()
+    farm = _farm(tmp_path, [EnvEntry("new.py", "upsert", address, "0644")])
+    (farm.site / "yaml" / "new.py").write_bytes(b"x = 2\n")
+
+    assert farm_inventory(farm)["roots"]["yaml"]["upserts"]["new.py"] == hashlib.sha256(b"x = 2\n").hexdigest()
+
+
+def test_without_a_farm_the_inventory_has_no_roots():
+    from hyperloom.measure.runner.inventory import farm_inventory
+
+    assert farm_inventory(None)["roots"] == {}
+
+
+def test_the_file_is_written_into_the_output_and_listed_by_the_inventory(tmp_path):
+    from hyperloom.measure.runner.inventory import FARM_INVENTORY_FILE, write_farm_inventory
+
+    write_farm_inventory(tmp_path / "files", None)
+
+    listed = inventory(tmp_path / "files", max_total_bytes=10_000)
+    assert [f.path for f in listed] == [FARM_INVENTORY_FILE]

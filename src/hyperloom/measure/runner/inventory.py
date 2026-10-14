@@ -5,13 +5,16 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 from pathlib import Path
 
 from hyperloom.measure import fsafe
+from hyperloom.measure.runner.farm import Farm
 from hyperloom.measure.manifest import RESERVED_NAMES, ManifestFile
 
-__all__ = ["OutputRejected", "inventory"]
+__all__ = ["FARM_INVENTORY_FILE", "OutputRejected", "farm_inventory", "inventory", "write_farm_inventory"]
 
 
 _UNSAFE = "unsafe_output"
@@ -56,3 +59,34 @@ def inventory(files_dir: Path, *, max_total_bytes: int) -> tuple[ManifestFile, .
     finally:
         os.close(root_fd)
     return tuple(entries)
+
+
+FARM_INVENTORY_FILE = "farm_inventory.json"
+_FARM_INVENTORY_SCHEMA = "hyperloom.farm-inventory/v1"
+
+
+def farm_inventory(farm: Farm | None) -> dict:
+    """What the farm rebuilt, by root id: the sha256 of each upserted file as it is on disk, and the deleted paths.
+
+    Paths are relative to the package root. The hashes are taken from the files in the farm, not from the sheet, so
+    they say what the server could import. Without a farm the roots are empty: the test had no patch.
+    """
+    roots = {}
+    for root in farm.roots if farm else ():
+        base = farm.site / root.import_name
+        roots[root.id] = {
+            "import_name": root.import_name,
+            "upserts": {
+                entry.path: hashlib.sha256((base / entry.path).read_bytes()).hexdigest()
+                for entry in root.entries
+                if entry.op == "upsert"
+            },
+            "deletes": sorted(entry.path for entry in root.entries if entry.op == "delete"),
+        }
+    return {"schema": _FARM_INVENTORY_SCHEMA, "roots": roots}
+
+
+def write_farm_inventory(files_dir: Path, farm: Farm | None) -> None:
+    """Write ``farm_inventory.json`` into the output files, so the manifest lists it and the signature covers it."""
+    files_dir.mkdir(parents=True, exist_ok=True)
+    (files_dir / FARM_INVENTORY_FILE).write_text(json.dumps(farm_inventory(farm), sort_keys=True), encoding="utf-8")
