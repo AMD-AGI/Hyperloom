@@ -308,6 +308,77 @@ class TestKeepGoingAsymmetry:
         assert "custom_mi355x.sh" in marker["error"]
 
 
+# aborting a variant mid-grid
+
+
+class TestVariantAbort:
+    """A variant that never reaches the benchmark still records a result, and ``keep_going_on_failure`` decides
+    whether the grid walks on from it.
+    """
+
+    def _run(self, *, keep_going, base, out, monkeypatch):
+        real_build = gr._build_variant_yaml
+
+        def _fail_on_second(base_yaml_path, base_extra_args, variant, **kwargs):
+            if variant.name == "c1":
+                raise RuntimeError("boom")
+            return real_build(base_yaml_path, base_extra_args, variant, **kwargs)
+
+        monkeypatch.setattr(gr, "_build_variant_yaml", _fail_on_second)
+
+        def _no_ws_rc0(cmd, *a, **k):
+            return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+        with patch(
+            "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+            side_effect=_no_ws_rc0,
+        ):
+            return asyncio.run(
+                run_grid(
+                    base_yaml_path=base,
+                    base_extra_args="",
+                    grid=[GridVariant(name="c0"), GridVariant(name="c1"), GridVariant(name="c2")],
+                    output_root=out,
+                    magpie_python=sys.executable,
+                    gpu_type="mi300x",
+                    keep_going_on_failure=keep_going,
+                )
+            )
+
+    def test_abort_at_a_later_variant_stops_the_grid(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
+        base = tmp_path / "base.yaml"
+        _write_base_yaml(base)
+
+        results = self._run(keep_going=False, base=base, out=tmp_path / "out", monkeypatch=monkeypatch)
+
+        assert [r.name for r in results] == ["c0", "c1"]
+        aborted = results[-1]
+        assert aborted.status == "failed"
+        assert aborted.error_class == "yaml_build_error"
+        assert "boom" in (aborted.error or "")
+        assert aborted.returncode is None
+        assert aborted.workspace is None
+        markers = [
+            json.loads(p.read_text(encoding="utf-8")) for p in sorted((tmp_path / "out").glob("*/abort_reason.json"))
+        ]
+        assert [m["error_class"] for m in markers] == ["no_benchmark_workspace", "yaml_build_error"]
+
+    def test_abort_at_a_later_variant_is_walked_past(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
+        base = tmp_path / "base.yaml"
+        _write_base_yaml(base)
+
+        results = self._run(keep_going=True, base=base, out=tmp_path / "out", monkeypatch=monkeypatch)
+
+        assert [r.name for r in results] == ["c0", "c1", "c2"]
+        assert [r.error_class for r in results] == [
+            "no_benchmark_workspace",
+            "yaml_build_error",
+            "no_benchmark_workspace",
+        ]
+
+
 # auto-warmup teardown timing
 
 
