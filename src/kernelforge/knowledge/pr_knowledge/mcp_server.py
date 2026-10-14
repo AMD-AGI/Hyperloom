@@ -108,7 +108,10 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "(included, not_included or unknown), the method that decided it "
             "and the evidence. Pass merge_commit_sha, the PR's merge or squash "
             "commit upstream, when you know it: without it, or when that commit "
-            "is not fetched into the tree, the answer is never not_included."
+            "is not fetched into the tree, the answer is never not_included. "
+            "A cherry-pick is found by its (#N) subject suffix or, with "
+            "merge_commit_sha, by patch-id, so a backport whose subject lost "
+            "the suffix and whose diff was edited can still read as not_included."
         ),
         "inputSchema": {
             "type": "object",

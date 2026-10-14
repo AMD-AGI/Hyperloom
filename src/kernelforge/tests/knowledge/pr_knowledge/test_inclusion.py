@@ -33,9 +33,9 @@ def _repo(tmp_path: Path) -> Path:
     return root
 
 
-def _commit(root: Path, subject: str, body: str = "") -> str:
-    """Commit one new file under ``subject`` and return the new sha."""
-    (root / f"{uuid.uuid4().hex}.txt").write_text(subject)
+def _commit(root: Path, subject: str, body: str = "", name: str | None = None) -> str:
+    """Write ``subject`` to file ``name`` (a new one by default), commit it under ``subject`` and return the new sha."""
+    (root / (name or f"{uuid.uuid4().hex}.txt")).write_text(subject)
     git("add", "-A", cwd=root)
     git("commit", "--quiet", "-m", subject, *(("-m", body) if body else ()), cwd=root)
     return _head(root)
@@ -61,6 +61,24 @@ def _fork_with_cherry_pick(root: Path, upstream_subject: str) -> str:
     return upstream
 
 
+def _fork_before_a_merged_pr(root: Path, *pr_subjects: str) -> tuple[str, list[str]]:
+    """Land a PR of ``pr_subjects`` upstream through a merge commit, then fork from before it.
+
+    Returns the merge commit and the PR's commits, oldest first.
+    """
+    base = _head(root)
+    trunk = git("symbolic-ref", "--short", "HEAD", cwd=root).stdout.strip()
+    git("checkout", "--quiet", "-b", "pr", cwd=root)
+    pr_commits = [_commit(root, subject) for subject in pr_subjects]
+    git("checkout", "--quiet", trunk, cwd=root)
+    _commit(root, "Other upstream work")
+    git("merge", "--quiet", "--no-ff", "-m", "Merge pull request #42 from contributor/epilogue", "pr", cwd=root)
+    merge = _head(root)
+    git("checkout", "--quiet", "-b", "fork", base, cwd=root)
+    _commit(root, "Fork-only work")
+    return merge, pr_commits
+
+
 def _probe(root: Path, number: int, merge_commit_sha: str | None = None, commit: str = "HEAD"):
     return probe_inclusion(tree=root, commit=commit, number=number, merge_commit_sha=merge_commit_sha)
 
@@ -77,15 +95,66 @@ def test_a_merge_commit_in_the_history_is_included(tmp_path):
     assert merge in verdict.evidence
 
 
-def test_a_present_merge_commit_off_the_history_without_a_subject_is_not_included(tmp_path):
+def test_a_present_merge_commit_off_the_history_without_a_subject_or_patch_is_not_included(tmp_path):
     root = _repo(tmp_path)
     merge = _fork_before(root, "Fuse the epilogue")
 
     verdict = _probe(root, 42, merge)
 
     assert verdict.inclusion is Inclusion.NOT_INCLUDED
-    assert verdict.method is InclusionMethod.MERGE_ANCESTRY
+    assert verdict.method is InclusionMethod.PATCH_ID
     assert "is not an ancestor" in verdict.evidence
+    assert "0 of the 1 commits" in verdict.evidence
+
+
+def test_a_cherry_pick_under_another_subject_is_included_by_patch_id(tmp_path):
+    root = _repo(tmp_path)
+    upstream = _fork_with_cherry_pick(root, "Fuse the epilogue (#42)")
+    git("commit", "--quiet", "--amend", "-m", "[ROCm] Port the epilogue fusion", cwd=root)
+
+    verdict = _probe(root, 42, upstream)
+
+    assert verdict.inclusion is Inclusion.INCLUDED
+    assert verdict.method is InclusionMethod.PATCH_ID
+    assert "1 of the 1 commits" in verdict.evidence
+
+
+@pytest.mark.parametrize(
+    ("picked", "merged", "expected"),
+    [
+        pytest.param([0, 1], None, Inclusion.INCLUDED, id="every-commit-cherry-picked"),
+        pytest.param([], 1, Inclusion.INCLUDED, id="pr-head-merged"),
+        pytest.param([0], None, Inclusion.UNKNOWN, id="one-commit-cherry-picked"),
+        pytest.param([], 0, Inclusion.UNKNOWN, id="first-commit-merged"),
+        pytest.param([], None, Inclusion.NOT_INCLUDED, id="absent"),
+    ],
+)
+def test_under_an_upstream_merge_commit_every_pr_commit_must_be_carried(tmp_path, picked, merged, expected):
+    """Each of the PR's commits counts as carried when the fork has it by sha or by patch-id."""
+    root = _repo(tmp_path)
+    merge, pr_commits = _fork_before_a_merged_pr(root, "Fuse the epilogue", "Tune the epilogue")
+    if merged is not None:
+        git("merge", "--quiet", "--no-ff", "-m", "Carry the epilogue work", pr_commits[merged], cwd=root)
+    for index in picked:
+        git("cherry-pick", pr_commits[index], cwd=root)
+
+    verdict = _probe(root, 42, merge)
+
+    assert verdict.inclusion is expected
+    assert verdict.method is (InclusionMethod.NONE if expected is Inclusion.UNKNOWN else InclusionMethod.PATCH_ID)
+    assert "of the 2 commits" in verdict.evidence
+
+
+def test_an_edited_backport_without_the_suffix_still_reads_as_not_included(tmp_path):
+    """The known limit: an edited diff has another patch-id, and no subject names the PR."""
+    root = _repo(tmp_path)
+    upstream = _fork_before(root, "Fuse the epilogue (#42)")
+    git("cherry-pick", "--no-commit", upstream, cwd=root)
+    (picked,) = git("diff", "--cached", "--name-only", cwd=root).stdout.split()
+    (root / picked).write_text("Fuse the epilogue, adapted to the fork")
+    git("commit", "--quiet", "--all", "-m", "[ROCm] Port the epilogue fusion", cwd=root)
+
+    assert _probe(root, 42, upstream).inclusion is Inclusion.NOT_INCLUDED
 
 
 @pytest.mark.parametrize(
@@ -190,11 +259,15 @@ def test_a_directory_outside_git_is_unknown(tmp_path):
     assert _probe(tmp_path, 42).inclusion is Inclusion.UNKNOWN
 
 
-def test_a_partial_clone_answers_from_the_objects_it_has_and_fetches_nothing(tmp_path):
-    upstream = _repo(tmp_path)
-    # Serve any sha, as a hosting service does, so a lazy fetch of the side commit would succeed.
+def _serving_any_sha(upstream: Path) -> None:
+    """Serve any sha to a filtered clone, as a hosting service does, so a lazy fetch would succeed."""
     for key in ("uploadpack.allowFilter", "uploadpack.allowAnySHA1InWant"):
         git("config", key, "true", cwd=upstream)
+
+
+def test_a_partial_clone_answers_from_the_objects_it_has_and_fetches_nothing(tmp_path):
+    upstream = _repo(tmp_path)
+    _serving_any_sha(upstream)
     trunk = git("symbolic-ref", "--short", "HEAD", cwd=upstream).stdout.strip()
     merge = _commit(upstream, "Fuse the epilogue")
     git("checkout", "--quiet", "-b", "side", cwd=upstream)
@@ -214,6 +287,27 @@ def test_a_partial_clone_answers_from_the_objects_it_has_and_fetches_nothing(tmp
     assert sorted(objects.rglob("*")) == stored
 
 
+def test_a_patch_id_that_needs_a_blob_a_partial_clone_lacks_is_unknown_and_fetches_nothing(tmp_path):
+    """Both sides add the same path, so only the blobs can tell the two patches apart."""
+    upstream = _repo(tmp_path)
+    _serving_any_sha(upstream)
+    base = _head(upstream)
+    merge = _commit(upstream, "Fuse the epilogue", name="epilogue.py")
+    git("checkout", "--quiet", "-b", "fork", base, cwd=upstream)
+    _commit(upstream, "Fork's own fusion", name="epilogue.py")
+    clone = tmp_path / "clone"
+    filtered = ("--quiet", "--filter=blob:none", "--no-single-branch", "--branch", "fork")
+    git("clone", *filtered, upstream.as_uri(), str(clone))
+    objects = clone / ".git" / "objects"
+    stored = sorted(objects.rglob("*"))
+
+    verdict = _probe(clone, 42, merge)
+
+    assert verdict.inclusion is Inclusion.UNKNOWN
+    assert "git rev-list --cherry failed" in verdict.evidence
+    assert sorted(objects.rglob("*")) == stored
+
+
 def _hangs(*args, **kwargs):
     raise subprocess.TimeoutExpired(list(args), kwargs["timeout"])
 
@@ -223,7 +317,7 @@ def _fails(*args, **kwargs):
 
 
 @pytest.mark.parametrize("failure", [_hangs, _fails], ids=["hangs", "fails"])
-@pytest.mark.parametrize("command", ["merge-base", "--is-shallow-repository", "log"])
+@pytest.mark.parametrize("command", ["merge-base", "--is-shallow-repository", "log", "--count", "--cherry"])
 def test_a_git_call_that_fails_or_hangs_is_unknown_not_absence(tmp_path, monkeypatch, command, failure):
     """Git proves absence here while every call answers, so only the failed call can make the verdict unknown."""
     root = _repo(tmp_path)
@@ -245,18 +339,19 @@ def cherry_picked(tmp_path) -> tuple[Path, str]:
 
 
 @pytest.mark.parametrize(
-    ("number", "with_merge_sha", "status", "expected"),
+    ("fork", "with_merge_sha", "status", "expected"),
     [
-        pytest.param(42, True, 0, Inclusion.INCLUDED, id="included"),
-        pytest.param(41, True, 4, Inclusion.NOT_INCLUDED, id="not-included"),
-        pytest.param(41, False, 3, Inclusion.UNKNOWN, id="unknown"),
+        pytest.param(_fork_with_cherry_pick, True, 0, Inclusion.INCLUDED, id="included"),
+        pytest.param(_fork_before, True, 4, Inclusion.NOT_INCLUDED, id="not-included"),
+        pytest.param(_fork_before, False, 3, Inclusion.UNKNOWN, id="unknown"),
     ],
 )
 def test_cli_prints_the_verdict_and_encodes_it_in_the_exit_status(
-    cherry_picked, capsys, number, with_merge_sha, status, expected
+    tmp_path, capsys, fork, with_merge_sha, status, expected
 ):
-    root, upstream = cherry_picked
-    argv = ["--tree", str(root), "--commit", "HEAD", "--pr", str(number)]
+    root = _repo(tmp_path)
+    upstream = fork(root, "Fuse the epilogue (#42)")
+    argv = ["--tree", str(root), "--commit", "HEAD", "--pr", "42"]
     if with_merge_sha:
         argv += ["--merge-commit-sha", upstream]
 
