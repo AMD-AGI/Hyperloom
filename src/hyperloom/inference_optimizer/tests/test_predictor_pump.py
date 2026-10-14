@@ -475,7 +475,11 @@ def _entering_phase(monkeypatch, state: SharedState) -> Any:
 
     monkeypatch.setattr(FrameworkPhase, "_pump_framework_agent_phase", _noop)
     monkeypatch.setattr(FrameworkPhase, "_open_framework_timeline", lambda self: None)
-    coord = SimpleNamespace(shared_state=state, phase_macro_cycle=SimpleNamespace(on_cycle_start_reprofile=_noop))
+    coord = SimpleNamespace(
+        shared_state=state,
+        phase_macro_cycle=SimpleNamespace(on_cycle_start_reprofile=_noop),
+        specialist_dispatch=SimpleNamespace(ensure_custom_specialist=_noop),
+    )
     return FrameworkPhase(coord)
 
 

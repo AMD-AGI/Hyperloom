@@ -851,8 +851,9 @@ class FrameworkPhase(ProposalBench):
         # Opened after the reprofile so the policy reads the settled anchor,
         # and before the pump so the entry's first dispatch is inside the event.
         self._open_framework_timeline()
+        # Queued before orchestration's first turn so the tick's dispatch reaches it ahead of what that turn delegates.
+        await self._coord.specialist_dispatch.ensure_custom_specialist()
         if self.shared_state.custom_specialist_only:
-            await self._coord.specialist_dispatch.ensure_custom_specialist()
             return
         await self._pump_framework_agent_phase()
         # Before orchestration's first turn, so the first grid it composes can carry the answer; last, as on the

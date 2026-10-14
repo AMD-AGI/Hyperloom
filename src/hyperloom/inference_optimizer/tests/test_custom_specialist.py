@@ -862,6 +862,16 @@ def test_only_mode_lets_the_custom_bench_row_through_the_dispatch_time_gate():
     _only_gate().validate_dispatched_task("explore", {"grid": [], "operator_priority": True})
 
 
+def _recorder(calls: list[str]):
+    def _rec(name: str):
+        async def _call(*args, **kwargs):
+            calls.append(name)
+
+        return _call
+
+    return _rec
+
+
 @pytest.mark.parametrize(
     ("only", "expected"),
     [
@@ -873,13 +883,7 @@ async def test_only_mode_tick_runs_the_custom_work_alone(monkeypatch, only, expe
     from hyperloom.orchestrator.phases.framework import FrameworkPhase
 
     calls: list[str] = []
-
-    def _rec(name: str):
-        async def _call(*args, **kwargs):
-            calls.append(name)
-
-        return _call
-
+    _rec = _recorder(calls)
     monkeypatch.setattr(FrameworkPhase, "_pump_framework_agent_phase", _rec("framework"))
     monkeypatch.setattr(FrameworkPhase, "_maybe_bench_untested_proposals", _rec("bench"))
     monkeypatch.setattr(FrameworkPhase, "_maybe_finish_custom_only_cycle", _rec("finish"))
@@ -896,6 +900,30 @@ async def test_only_mode_tick_runs_the_custom_work_alone(monkeypatch, only, expe
     )
 
     await FrameworkPhase(coord).pump()
+
+    assert calls == expected
+
+
+@pytest.mark.parametrize(
+    ("only", "expected"),
+    [(True, ["reprofile", "custom"]), (False, ["reprofile", "custom", "framework", "predictor"])],
+)
+async def test_framework_entry_enqueues_the_custom_specialist_before_any_other_work(monkeypatch, only, expected):
+    from hyperloom.orchestrator.phases.framework import FrameworkPhase
+
+    calls: list[str] = []
+    _rec = _recorder(calls)
+    monkeypatch.setattr(FrameworkPhase, "_open_framework_timeline", lambda self: None)
+    monkeypatch.setattr(FrameworkPhase, "_pump_framework_agent_phase", _rec("framework"))
+    monkeypatch.setattr(FrameworkPhase, "_predictor_pump", lambda self: SimpleNamespace(settle=_rec("predictor")))
+    state = SharedState(custom_specialist_prompt=_PROMPT, custom_specialist_only=only)
+    coord = SimpleNamespace(
+        shared_state=state,
+        phase_macro_cycle=SimpleNamespace(on_cycle_start_reprofile=_rec("reprofile")),
+        specialist_dispatch=SimpleNamespace(ensure_custom_specialist=_rec("custom")),
+    )
+
+    await FrameworkPhase(coord).on_enter_framework(SimpleNamespace(from_phase="PRELUDE"))
 
     assert calls == expected
 
