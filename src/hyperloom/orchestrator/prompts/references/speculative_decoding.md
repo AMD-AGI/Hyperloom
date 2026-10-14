@@ -72,6 +72,20 @@ Apply to any framework whose recipe touches the speculative-decoding knobs:
   well as model, so a method change invalidates the previously matched row.
 - **TensorRT-LLM / ATOM**: their respective draft-length equivalents.
 
+When the session's base launch **simulates acceptance** (`SGLANG_SIMULATE_ACC_LEN`
+is set, `--speculative-config` carries `rejection_sample_method: synthetic` or a
+`synthetic_acceptance_length`, or an acceptance-length flag such as ATOM's
+`--spec-decode-acceptance-length` is passed), the draft and its simulated
+acceptance are pinned: a candidate that changes the draft length, top-k, block
+size, method or draft model, or adds, changes or unsets any
+`SGLANG_SIMULATE_ACC_*` env or synthetic-acceptance value, or drops
+`--speculative-config` (a replacing argument string that omits it included), is
+refused before it is benchmarked with `error_class: speculative_decoding_pinned`.
+The lookup above then only confirms the base's own cell; spend variants on other
+knobs. A `--speculative-config` replaces the whole object, so a variant that
+changes a key that does not describe the draft (e.g. `attention_backend`) must
+restate the base's pinned keys unchanged.
+
 Before proposing or marking `KEEP` on any such variant, cross-check against the
 model's golden AL curve (if one exists per the lookup above):
 
