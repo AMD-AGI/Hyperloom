@@ -1128,6 +1128,7 @@ async def test_specialist_cleanup_ack_precedes_capacity_release(coord, confirmed
     from unittest.mock import AsyncMock
 
     from hyperloom.orchestrator.bus.gpu_pool import SpecialistGpuPool
+    from hyperloom.orchestrator.loop.dispatcher import _CLEANUP_MAX_ATTEMPTS
     from hyperloom.orchestrator.loop.sub_agent_runner import ExecutionCleanupUnconfirmed
 
     coord.gpu_specialist_pool = SpecialistGpuPool(coord.db, gpu_ids=[0])
@@ -1164,7 +1165,9 @@ async def test_specialist_cleanup_ack_precedes_capacity_release(coord, confirmed
         on_complete.assert_not_awaited()
         await coord.dispatcher.close_db_after_executions()
         assert await coord.db.fetchone("SELECT 1 FROM gpu_leases") is not None
-    assert events == (["close", "gpu_release"] if confirmed else ["close"])
+    # An unconfirmed close() is retried up to the bound (see
+    # ``dispatcher._CLEANUP_MAX_ATTEMPTS``) before the cleanup is given up on.
+    assert events == (["close", "gpu_release"] if confirmed else ["close"] * _CLEANUP_MAX_ATTEMPTS)
     holders = await coord.locks.lane_holders()
     assert bool(holders) is not confirmed
 

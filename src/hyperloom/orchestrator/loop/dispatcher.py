@@ -121,6 +121,10 @@ _CANCEL_NOTICE_SEC: float = STOP_GATE_POLL_SECONDS
 _SELF_SETTLING_KINDS: frozenset[str] = frozenset({"targeted_build", "kernel_agent"})
 
 _CLEANUP_RETRY_INTERVAL_SEC = 1.0
+#: A lease whose close() never confirms (dead actor, crashed subreaper) must
+#: not retry forever -- that hangs the dispatcher's cleanup path for good.
+#: Bounded retries still cover the transient case this loop exists for.
+_CLEANUP_MAX_ATTEMPTS = 5
 
 
 class _InflightAction(NamedTuple):
@@ -824,21 +828,30 @@ class DispatcherCollaborator(CoordinatorCollaborator):
 
         async def release_resources() -> bool:
             if gpu_specialist_lease is not None:
-                attempts = 0
-                while True:
+                confirmed = False
+                attempt = 0
+                for attempt in range(_CLEANUP_MAX_ATTEMPTS):
                     try:
                         if await asyncio.to_thread(gpu_specialist_lease.close) is True:
+                            confirmed = True
                             break
                     except OSError as exc:
                         log.warning("dispatcher: task=%s cleanup attempt failed: %s", task.task_id, exc)
-                    attempts += 1
-                    if attempts == 1:
+                    if attempt == 0:
                         log.warning(
                             "dispatcher: task=%s GPU cleanup unconfirmed; retaining capacity and retrying", task.task_id
                         )
-                    await asyncio.sleep(_CLEANUP_RETRY_INTERVAL_SEC)
-                if attempts:
-                    log.info("dispatcher: task=%s GPU cleanup confirmed after %d retries", task.task_id, attempts)
+                    if attempt < _CLEANUP_MAX_ATTEMPTS - 1:
+                        await asyncio.sleep(_CLEANUP_RETRY_INTERVAL_SEC)
+                if not confirmed:
+                    log.warning(
+                        "dispatcher: task=%s GPU cleanup still unconfirmed after %d attempts; giving up",
+                        task.task_id,
+                        _CLEANUP_MAX_ATTEMPTS,
+                    )
+                    return False
+                if attempt:
+                    log.info("dispatcher: task=%s GPU cleanup confirmed after %d retries", task.task_id, attempt)
             if gpu_lease is not None:
                 await self.gpu_specialist_pool.release(gpu_lease)
             return True
