@@ -24,7 +24,7 @@ from pathlib import Path
 
 from hyperloom.sandbox.gpu_pool import GpuPool
 from hyperloom.sandbox.identity import generate_signing_identity
-from hyperloom.sandbox.local_sandbox import LocalSandbox
+from hyperloom.sandbox.local_sandbox import WORK_DIR, LocalSandbox
 from hyperloom.sandbox.socket import (
     AVOID_NODES_KEY,
     IDEMPOTENCY_KEY,
@@ -263,7 +263,7 @@ class LocalSandboxProvider:
         with self._cond:
             self._cards[sandbox_id] = cards
         try:
-            for sub in ("fs/in", "fs/out", "fs/work"):
+            for sub in ("fs/in", "fs/out", f"fs/{WORK_DIR}"):
                 (directory / sub).mkdir(parents=True)
             (directory / "private").mkdir(mode=0o700)
             self._hand_over(directory, tpl)

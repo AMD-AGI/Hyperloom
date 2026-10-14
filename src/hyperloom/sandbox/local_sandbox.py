@@ -30,7 +30,10 @@ from hyperloom.sandbox.templates import RESERVED_ENV_NAMES, LocalTemplate
 
 log = logging.getLogger(__name__)
 
-__all__ = ["LocalSandbox"]
+__all__ = ["WORK_DIR", "LocalSandbox"]
+
+#: The working directory every sandbox starts in, under the root the file API shows (``/work``).
+WORK_DIR = "work"
 
 #: Parent environment names a sandbox process inherits; everything else (keys,
 #: tokens, job topology) is dropped.
@@ -84,7 +87,7 @@ class LocalSandbox:
 
     def _build_base_env(self, create_envs: Mapping[str, str], platform_envs: Mapping[str, str]) -> dict[str, str]:
         env = {k: os.environ[k] for k in _INHERITED_ENV if k in os.environ}
-        env["HOME"] = str(self.fs / "work")
+        env["HOME"] = str(self.fs / WORK_DIR)
         env.update(self.template.envs)
         env.update(create_envs)
         env.update(platform_envs)
@@ -157,7 +160,7 @@ class LocalSandbox:
     # -- files -------------------------------------------------------------
 
     def _virtual(self, path: str) -> str:
-        virt = posixpath.normpath(path if path.startswith("/") else f"/work/{path}")
+        virt = posixpath.normpath(path if path.startswith("/") else f"/{WORK_DIR}/{path}")
         return "/" + virt.lstrip("/")
 
     def _real(self, virt: str) -> Path:
@@ -297,7 +300,7 @@ class LocalSandbox:
         log_file = (self.private / "runner.log").open("ab")
         try:
             self.spawn(
-                list(self.template.command), env={}, cwd=self.fs / "work", stdout=log_file, stderr=subprocess.STDOUT
+                list(self.template.command), env={}, cwd=self.fs / WORK_DIR, stdout=log_file, stderr=subprocess.STDOUT
             )
         finally:
             log_file.close()
@@ -334,7 +337,7 @@ class LocalSandbox:
             SandboxUnavailable: When ``timeout_sec`` expires; the command's tree is killed.
         """
         extra = self._check_run_args(envs)
-        workdir = self._real(self._virtual(cwd)) if cwd else self.fs / "work"
+        workdir = self._real(self._virtual(cwd)) if cwd else self.fs / WORK_DIR
         argv = ["/bin/sh", "-c", cmd]
         if background:
             self._bg_count += 1
