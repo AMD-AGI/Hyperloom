@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 from . import geak_rebench as _geak_rebench
 from . import machine_state as _phase_state
+from .kernel_round_budget import controller_round_stop, integrate_within_phase, measurement_round_sec
 from hyperloom.common.env import env_bool, env_float, env_int
 from hyperloom.common.io import atomic_write_json
 from hyperloom.common.perf_metric import axis_of, graded_axes_of
@@ -59,6 +60,7 @@ from ..kernel.geak_config import (
     _accepted_config_as_variant,
     _accepted_config_controls,
 )
+from ..kernel.lane_budget import INSUFFICIENT_BUDGET
 from ..actions.executors._gpu_pin import (
     coerce_tp,
     resolve_gpu_pin,
@@ -400,15 +402,15 @@ class KernelPhase(CoordinatorCollaborator):
         idempotency_reason = f"kernel_entry_g{stack_len}_{profile_fingerprint}"
         task_kind = self._coord.phase_prelude.internal_analysis_kind()
         params = self._coord.phase_prelude.internal_analysis_params(
-            reason=idempotency_reason,
-            inline_event=recorder.event_id if recorder is not None else "",
+            reason=idempotency_reason, inline_event=recorder.event_id if recorder is not None else ""
         )
-        if params is None:
+        denied = self._coord.dispatcher.time_budget_denial_for_action(task_kind)
+        if params is None or denied is not None:
             _note_reprofile(
                 ran=False,
                 task_kind=task_kind,
                 trigger=trigger,
-                skipped_reason="gpu_trace_unsupported",
+                skipped_reason=denied.rule if denied else "gpu_trace_unsupported",
                 idempotency_reason=idempotency_reason,
                 snapshot_id_before=snapshot_id_before,
             )
@@ -526,7 +528,7 @@ class KernelPhase(CoordinatorCollaborator):
                 decision = "KEEP"
             elif status.startswith("reverted"):
                 decision = "REVERT"
-            elif status.startswith("skipped"):
+            elif status.startswith("skipped") or stopped_by_the_run_class(status):
                 decision = "SKIPPED"
             else:
                 decision = "FAILED"
@@ -1154,7 +1156,7 @@ class KernelPhase(CoordinatorCollaborator):
             kill_budget = min(kill_budget, float(phase_rem))
         # A GEAK result reaches the headline only through this session's own re-measurement of it, which runs in this
         # phase after GEAK returns. Which results skip it is known only then, so every hand-off leaves room for it.
-        rebench_sec = self._geak_rebench_reserve_sec()
+        rebench_sec = measurement_round_sec(self.shared_state)
         log.info("GEAK: holding back %.0fs of the KERNEL budget to re-measure GEAK's result", rebench_sec)
         kill_budget -= rebench_sec
         # The runner self-stops ``margin`` before the hard subprocess kill, which reserves the closing-grace window.
@@ -1162,41 +1164,20 @@ class KernelPhase(CoordinatorCollaborator):
         runner_timeout = int(max(0.0, kill_budget - margin))
         return runner_timeout, kill_timeout, True
 
-    def _geak_rebench_reserve_sec(self) -> float:
-        """What re-measuring a GEAK result costs: one more round of the baseline's measurement."""
-        state = self.shared_state
-        measured = _phase_state.one_more_measurement_sec(state) or _phase_state.measured_seconds(
-            state, "baseline_runtime_sec"
-        )
-        if measured is not None:
-            return measured
-        from ..actions.executors._subprocess_kill import resolve_benchmark_timeouts
-
-        return resolve_benchmark_timeouts()[1]
-
     def _kernel_rewrite_controller_timeouts(self) -> tuple[int, int]:
         """Return the Controller soft budget and Hyperloom hard timeout."""
         candidates: list[float] = []
         session_remaining = _phase_state.session_remaining_seconds(self.shared_state)
         if session_remaining is not None:
-            candidates.append(
-                max(
-                    0.0,
-                    float(session_remaining) - self.shared_state.closing_reserve_sec(),
-                )
-            )
+            candidates.append(max(0.0, float(session_remaining) - self.shared_state.closing_reserve_sec()))
         phase_remaining = _phase_state.phase_budget_remaining_seconds(self.shared_state)
         if phase_remaining is not None:
             candidates.append(max(0.0, float(phase_remaining)))
         phase_cap = _phase_state.phase_cap_seconds(self.shared_state)
         if phase_cap is not None:
-            candidates.append(
-                max(
-                    0.0,
-                    float(phase_cap) - _phase_state.phase_cumulative_seconds(self.shared_state),
-                )
-            )
-        hard_timeout = int(min(candidates)) if candidates else 90 * 60
+            candidates.append(max(0.0, float(phase_cap) - _phase_state.phase_cumulative_seconds(self.shared_state)))
+        # The phase still measures the Controller's patches E2E after the Controller exits.
+        hard_timeout = int(min(candidates) - measurement_round_sec(self.shared_state)) if candidates else 90 * 60
         return max(0, hard_timeout - 30), max(0, hard_timeout)
 
     async def _free_gpus_for_geak(self, cards: list[int] | None) -> str | None:
@@ -1584,7 +1565,7 @@ class KernelPhase(CoordinatorCollaborator):
             _finish_skip(
                 {
                     "status": "skipped",
-                    "error_class": "insufficient_budget",
+                    "error_class": INSUFFICIENT_BUDGET,
                     "error": (
                         f"only {runner_timeout}s of KERNEL budget remained "
                         f"(< min {min_run}s); skipped to protect the closing "
@@ -3180,6 +3161,9 @@ class KernelPhase(CoordinatorCollaborator):
 
     async def _handle_gemm_tuning_result(self, result: dict[str, Any]) -> None:
         """Record and post-process a run_gemm_tuning result from any entrypoint."""
+        if result.get("error_class") == INSUFFICIENT_BUDGET:
+            # Never started, so no attempt to record; a recorded ``skipped`` would latch GEMM off for later entries.
+            return
         self._sync_profile_state_after_gemm_roofline(result)
         self.shared_state.record_gemm_tuning(result)
         try:
@@ -3386,7 +3370,6 @@ class KernelPhase(CoordinatorCollaborator):
 
     async def _validate_gemm_tuning_e2e(self, result: dict[str, Any]) -> None:
         """Sequentially E2E-validate each tuning candidate's env independently."""
-        from ..kernel.request_handlers import integrate_handler
         from ..measurement.integrate_performance import integrate_measurement_fields
         from hyperloom.common.model_paths import resolve_session_model_path
 
@@ -3543,9 +3526,8 @@ class KernelPhase(CoordinatorCollaborator):
             for fault_attempt in range(1, _MAX_INTEGRATE_FAULT_ATTEMPTS + 1):
                 await asyncio.to_thread(prepare_serving_so_for_csvs, test_envs, backup_dir=jit_backup_dir)
                 try:
-                    integrate_result = await integrate_handler(
-                        integrate_payload,
-                        session_dir=self.session_dir,
+                    integrate_result = await integrate_within_phase(
+                        integrate_payload, state=self.shared_state, session_dir=self.session_dir
                     )
                 except Exception as exc:  # noqa: BLE001
                     if fault_attempt < _MAX_INTEGRATE_FAULT_ATTEMPTS:
@@ -3932,15 +3914,14 @@ class KernelPhase(CoordinatorCollaborator):
             log.exception("KERNEL entry: reclaiming the campaign repositories failed")
         if int(result.get("patch_count") or 0) > 0:
             try:
-                from ..kernel.controller_patch_integration import (
-                    integrate_controller_patches,
-                )
+                from ..kernel.controller_patch_integration import integrate_controller_patches
 
                 integration = await integrate_controller_patches(
                     patches_root=str(result.get("patches_root") or output_dir / "result" / "patches"),
                     session_dir=self.session_dir,
                     shared_state=self.shared_state,
                     record_keep=self._coord.writeback.record_integrate_keep,
+                    admit_round=lambda rounds_run: controller_round_stop(self.shared_state, rounds_run),
                 )
                 result["integration"] = integration.to_dict()
             except Exception as error:

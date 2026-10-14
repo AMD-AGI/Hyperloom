@@ -17,9 +17,14 @@ Orchestration emits a `request{target_agent: "kernel_agent", kind: "<kind>"}` in
 `IntentRouter._handle_request` (`orchestrator/loop/intent_router.py`) intercepts it
 before any agent backend runs:
 
-1. `sequence_denial_for_request` checks the baseline prerequisite — if
-   `baseline_tput == 0` and the kind is not `trace_analyze`, the request is
-   policy-denied immediately (no bus record).
+1. `admission_denial_for_request` checks the baseline prerequisite and the
+   time budget, and a request that fails either is policy-denied immediately
+   (no bus record): any registered kind but `trace_analyze` while
+   `baseline_tput == 0`, or an `integrate` / `apply_patch` whose expected
+   cost — the `integrate` action's estimate, or one measured baseline round
+   when longer — does not fit the time left in the session
+   (`rule=time_budget`) or, in FRAMEWORK_AGENT and KERNEL_AGENT, in the phase
+   (`rule=phase_time_budget`).
 2. Records the request on the message bus (`source: "orchestration"`).
 3. Checks `shared_state.kernel_enabled`; auto-rejects with `agent_disabled` when
    `False` (that is, `--no-kernel`).

@@ -32,6 +32,7 @@ from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     run_with_session_kill,
 )
 from hyperloom.orchestrator.bus.gpu_pool import GPU_LEASE_TTL_GRACE
+from hyperloom.orchestrator.loop import time_budget
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.dispatcher import (
     _CANCEL_NOTICE_SEC,
@@ -43,6 +44,7 @@ from hyperloom.orchestrator.loop.time_budget import (
     expected_action_cost_minutes,
     measured_baseline_runtime_sec,
 )
+from hyperloom.orchestrator.phases import machine_state
 from hyperloom.orchestrator.policy.gate import PolicyDenied
 from hyperloom.orchestrator.roles import Backend, MockBackend, ScriptedPlan
 from hyperloom.orchestrator.state.shared_state import SharedState, effective_closing_grace_sec
@@ -363,6 +365,48 @@ class TestAdmissionGateOrder:
     def test_an_action_clearing_both_gates_is_admitted(self, coord: Coordinator):
         _set_budget(coord, minutes=600)
         assert coord.dispatcher.admission_denial_for_action(_EXPENSIVE_ACTION) is None
+
+
+def _set_phase_budget(coord: Coordinator, monkeypatch, *, phase: str, minutes_left: float) -> None:
+    """Put the session in ``phase`` with ``minutes_left`` of that phase's own budget remaining."""
+    coord.shared_state.phase = phase
+    monkeypatch.setattr(machine_state, "phase_budget_remaining_seconds", lambda _state, **_kw: minutes_left * 60.0)
+
+
+class TestThePhaseBudgetGate:
+    """FRAMEWORK and KERNEL refuse work their own remaining budget cannot fit, however much the session has left."""
+
+    @pytest.mark.parametrize("phase", sorted(time_budget.PHASE_BUDGET_GATED_PHASES))
+    def test_an_action_too_big_for_the_phase_is_denied(self, coord: Coordinator, monkeypatch, phase: str):
+        _set_budget(coord, minutes=600)
+        _set_phase_budget(coord, monkeypatch, phase=phase, minutes_left=20)
+
+        denied = coord.dispatcher.admission_denial_for_action(_EXPENSIVE_ACTION)
+
+        assert isinstance(denied, PolicyDenied)
+        assert denied.rule == "phase_time_budget"
+        assert f"{_EXPENSIVE_COST_MIN:.0f} min" in str(denied)
+
+    def test_a_phase_without_a_search_budget_answers_only_to_the_session(self, coord: Coordinator, monkeypatch):
+        _set_budget(coord, minutes=600)
+        _set_phase_budget(coord, monkeypatch, phase="PRELUDE", minutes_left=1)
+        assert coord.dispatcher.admission_denial_for_action(_EXPENSIVE_ACTION) is None
+
+    @pytest.mark.asyncio
+    async def test_a_queued_task_the_phase_outlived_is_dropped_before_dispatch(self, coord: Coordinator, monkeypatch):
+        _set_budget(coord, minutes=600)
+        task, _ = await coord.tasks.create_or_return_existing(
+            kind=_EXPENSIVE_ACTION,
+            params={},
+            idempotency_key="q-phase-drained",
+        )
+        _set_phase_budget(coord, monkeypatch, phase="FRAMEWORK_AGENT", minutes_left=20)
+
+        await coord.dispatcher._spawn_fitting_queued()
+
+        dropped = await coord.tasks.get(task.task_id)
+        assert dropped.state == "cancelled"
+        assert dropped.history[-1]["evidence"]["reason"] == "phase_time_budget"
 
 
 def _delegate(action_name: str, key: str) -> Intent:
