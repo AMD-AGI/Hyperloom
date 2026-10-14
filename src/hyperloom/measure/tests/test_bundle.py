@@ -158,6 +158,11 @@ def test_a_symlinked_file_is_rejected_even_when_it_points_at_the_right_bytes(bun
     assert _reason(bundle.staging, bundle) is RejectReason.UNSAFE_PATH
 
 
+def test_a_planted_symlink_the_manifest_does_not_list_is_rejected_as_unsafe(bundle, tmp_path: Path) -> None:
+    os.symlink(tmp_path, bundle.staging / "planted")
+    assert _reason(bundle.staging, bundle) is RejectReason.UNSAFE_PATH
+
+
 def test_a_symlinked_directory_is_rejected(bundle, tmp_path: Path) -> None:
     moved = tmp_path / "moved"
     (bundle.staging / "benchmark_sglang_20261005_101500").rename(moved)
