@@ -16,6 +16,7 @@ from hyperloom_multibranch.contracts.notebook.peers import (
     Judgement,
     TestRequest,
     TestResult,
+    Validity,
     Verdict,
 )
 from hyperloom_multibranch.contracts.notebook.vocab import (
@@ -100,6 +101,12 @@ class TestRecord:
         """Requested, and neither measured nor withdrawn yet."""
 
         return self.result is None and self.withdrawn_at is None
+
+    @property
+    def measured(self) -> bool:
+        """Its result measured the candidate, a failure of the candidate included; a failed measurement did not."""
+
+        return self.result is not None and self.result.validity is not Validity.MEASUREMENT_FAILED
 
 
 @dataclass(frozen=True)

@@ -46,10 +46,10 @@ async def test_a_measured_test_is_written_to_the_notebook_as_a_result(tmp_path: 
     request_id = await rig.toolbox.submit_test(req())
     await rig.toolbox.drain()
     record = await _record(rig, request_id)
-    assert record.result is not None and record.result.validity.value == "success"
+    assert record.result is not None and record.result.validity.value == "succeeded"
     assert record.result.sandbox.node == "n1" and record.result.queued_at is not None
-    assert {(r.kind.value, r.metric) for r in record.result.rounds} == {("formal", "output_tps")}
-    assert dict(record.result.accuracy) == {"gsm8k/exact_match": 0.9}
+    assert {(r.phase, metric) for r in record.result.rounds for metric in r.metrics} == {("measure", "output_tps")}
+    assert [(a.task, a.metric, a.score) for a in record.result.accuracy] == [("gsm8k", "exact_match", 0.9)]
     assert rig.toolbox._log.get(request_id).settled  # type: ignore[union-attr]
 
 
@@ -164,7 +164,7 @@ async def test_an_unclear_failure_is_rerun_on_another_node_and_the_first_node_is
     request_id = await rig.toolbox.submit_test(req())
     await rig.toolbox.drain()
     record = await _record(rig, request_id)
-    assert record.result is not None and record.result.validity.value == "success"
+    assert record.result is not None and record.result.validity.value == "succeeded"
     assert [(a.node, a.failure and a.failure.value) for a in record.result.attempts] == [("n1", "infra"), ("n2", None)]
     assert executor.jobs[1].avoid_nodes == ("n1",) and executor.jobs[1].attempt == 2
     assert [event.node for event in await rig.notebook.quarantined()] == ["n1"]
@@ -180,7 +180,7 @@ async def test_an_unclear_failure_that_repeats_is_the_candidates_failure(tmp_pat
     record = await _record(rig, request_id)
     assert len(executor.jobs) == 2, "an unclear failure is rerun once, not more"
     assert record.result is not None
-    assert (record.result.validity.value, record.result.failure.value) == ("candidate_failure", "unclear")  # type: ignore[union-attr]
+    assert (record.result.validity.value, record.result.failure.value) == ("candidate_failed", "unclear")  # type: ignore[union-attr]
     assert await rig.notebook.quarantined() == ()
 
 

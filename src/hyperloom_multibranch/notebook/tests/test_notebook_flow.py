@@ -11,7 +11,8 @@ from dataclasses import dataclass
 import pytest
 
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, ClaimKey, Role
-from hyperloom_multibranch.contracts.notebook.peers import TestKind, Verdict
+from hyperloom.contracts.measurement import AttachmentRef
+from hyperloom_multibranch.contracts.notebook.peers import Purpose, TestKind, Verdict
 from hyperloom_multibranch.contracts.notebook.records import (
     BaselineRecord,
     LineageEvent,
@@ -213,7 +214,11 @@ async def test_a_correctness_fix_that_costs_performance_splits_and_its_case_guar
 ) -> None:
     fix = intent("s1", "c1", "fp8 overflow", "clamp scales")
     await _measure(session, session.s1, "r3", fix, delta("--kv-cache-dtype fp8"))
-    await session.toolbox.write_request(request("r4", fix, delta("--kv-cache-dtype fp8"), kind=TestKind.REPRO))
+    case = AttachmentRef("fp8_overflow.py", "file", "b" * 64)
+    repro = request(
+        "r4", fix, delta("--kv-cache-dtype fp8"), kind=TestKind.REPRO, purpose=Purpose.REPRO, attachments=(case,)
+    )
+    await session.toolbox.write_request(repro)
     slower = judgement(-2.0, ("r3",), verdict=Verdict.REGRESSED, fixes_correctness=True, foundation_fix=True)
     await session.gate.write_judgement("r3", slower, Conclusion.SPLIT_REQUESTED)
     split = LineageEvent(LineageKind.SPLIT, "s1-fix", commit_id="c2", from_commit="c1", from_branch="s1", reason="fix")

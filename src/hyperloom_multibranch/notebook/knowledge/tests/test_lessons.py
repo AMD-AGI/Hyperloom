@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import dataclasses
 
-from hyperloom_multibranch.contracts.notebook.peers import Verdict
+from hyperloom_multibranch.contracts.notebook.peers import Validity, Verdict
 from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot, TestRecord
 from hyperloom_multibranch.contracts.notebook.vocab import Conclusion
 from hyperloom_multibranch.notebook.knowledge.lessons import (
@@ -63,11 +63,13 @@ def test_the_session_lists_put_the_best_and_the_worst_first(snapshot: NotebookSn
     assert session_lessons(snapshot).gaps == ()
 
 
-def test_a_test_in_flight_or_improved_without_a_commit_teaches_nothing_yet(snapshot: NotebookSnapshot) -> None:
+def test_a_test_in_flight_unmeasured_or_improved_without_a_commit_teaches_nothing(snapshot: NotebookSnapshot) -> None:
     in_flight = TestRecord(request("r9", GEMM))
+    unmeasured = TestRecord(request("r9", GEMM), result("r9", validity=Validity.MEASUREMENT_FAILED))
     kept_aside = TestRecord(request("r9", GEMM), result("r9"), judgement(1.0, ("r9",)), Conclusion.RECORDED_ONLY)
 
     assert lesson_of(in_flight, snapshot) is None
+    assert lesson_of(unmeasured, snapshot) is None
     assert lesson_of(kept_aside, snapshot) is None
 
 
@@ -83,14 +85,14 @@ def test_an_unsettled_judgement_teaches_nothing_and_a_blocked_gain_is_a_pitfall(
     assert (blocked.kind, blocked.outcome) == (LessonKind.PITFALL, "+5.00% but held back by p90_regressed")
 
 
-def test_a_test_without_an_intent_is_named_by_its_kind(snapshot: NotebookSnapshot) -> None:
+def test_a_test_without_an_intent_is_named_by_its_purpose_and_kind(snapshot: NotebookSnapshot) -> None:
     unknown = dataclasses.replace(snapshot, intents={}, committed=())
     slower = judgement(-1.0, ("r9",), verdict=Verdict.REGRESSED)
     record = TestRecord(request("r9", GEMM), result("r9"), slower, Conclusion.RECORDED_ONLY)
 
     lesson = lesson_of(record, unknown)
 
-    assert lesson is not None and lesson.direction == "test r9"
+    assert lesson is not None and lesson.direction == "explore test r9"
 
 
 def test_lists_drop_repeats_clip_long_items_and_stop_at_the_cap() -> None:

@@ -72,7 +72,7 @@ def _in_flight(snapshot: NotebookSnapshot) -> dict[str, Any]:
                 "kind": record.request.kind.value,
                 "branch": record.request.branch,
                 "parent_commit": record.request.parent_commit,
-                "purpose": record.request.purpose,
+                "purpose": record.request.purpose.value,
                 "requested_at": _iso(record.requested_at),
                 "waiting_s": max(0.0, snapshot.taken_at - record.requested_at),
             }

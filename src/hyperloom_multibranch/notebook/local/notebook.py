@@ -51,6 +51,7 @@ from hyperloom_multibranch.contracts.notebook.peers import (
     Judgement,
     TestRequest,
     TestResult,
+    Validity,
 )
 from hyperloom_multibranch.contracts.notebook.records import (
     BaselineRecord,
@@ -261,6 +262,8 @@ class LocalNotebook(
 
     async def write_request(self, request: TestRequest) -> TestRecord:
         self._require(Role.TOOLBOX)
+        if request.request_id is None:
+            raise ValueError("the notebook stores accepted requests: the toolbox sets request_id when it accepts one")
         require_token(request.request_id, "request_id")
         existing = self._state().requests.get(request.request_id)
         if existing is None:
@@ -280,10 +283,11 @@ class LocalNotebook(
             raise ConflictingWrite(f"request {result.request_id} was withdrawn; it takes no result")
         existing = state.results.get(result.request_id)
         if existing is None:
-            failure = f": {result.failure.value} {result.failure_reason}" if result.failure is not None else ""
+            failure = f": {result.failure.value} {result.failure_reason or ''}" if result.failure is not None else ""
             summary = f"{result.validity.value} {result.request_id} on {request.branch}{failure}"
             self._append(EntryKind.RESULT, result, branch=request.branch, parent=request.parent_commit, summary=summary)
-            self._settle_claim(request, ClaimStatus.COMPLETED)
+            failed = result.validity is Validity.MEASUREMENT_FAILED
+            self._settle_claim(request, ClaimStatus.RELEASED if failed else ClaimStatus.COMPLETED)
         elif existing != result:
             raise ConflictingWrite(f"the result of {result.request_id} was written with other content")
         return self._state().record(result.request_id)
@@ -306,8 +310,10 @@ class LocalNotebook(
         return self._state().record(withdrawal.request_id)
 
     def _settle_claim(self, request: TestRequest, status: ClaimStatus) -> None:
-        """End the claim ``request`` measures: completed by its result, or released when it is withdrawn."""
+        """End the claim ``request`` measures: completed by its result, released when nothing was measured."""
 
+        if request.intent_fingerprint is None:
+            return
         now = self._clock()
 
         def settle(claim: Claim) -> Claim:
@@ -353,6 +359,8 @@ class LocalNotebook(
             raise WriterNotAllowed(f"{conclusion.value} is no conclusion for a test on {request.branch}")
         if request_id not in state.results:
             raise NotRecorded(f"request {request_id} has no result to judge")
+        if state.results[request_id].validity is Validity.MEASUREMENT_FAILED:
+            raise NotRecorded(f"the measurement of {request_id} failed; there is nothing to judge")
         if (conclusion in COMMITTING or conclusion is Conclusion.MERGED) != (commit_id is not None):
             raise ValueError(f"a {conclusion.value} judgement names a commit exactly when it makes one")
         _check_recipe_digest(state, commit_id, recipe_digest)
@@ -407,7 +415,9 @@ class LocalNotebook(
         return self._answer(self._state(), key, action_fingerprint, self._clock())
 
     def _answer(self, state: NotebookState, key: ClaimKey, action_fingerprint: str, now: float) -> DedupAnswer:
-        measured = [record for record in state.records() if record.result is not None]
+        measured = [
+            record for record in state.records() if record.measured and record.request.intent_fingerprint is not None
+        ]
         here = [record for record in measured if record.request.parent_commit == key.parent_commit]
         exact = tuple(record for record in here if record.request.action_fingerprint == action_fingerprint)
         same_intent = tuple(record for record in here if record.request.intent_fingerprint == key.intent_fingerprint)
@@ -481,6 +491,8 @@ class LocalNotebook(
     async def attach_request(self, key: ClaimKey, request_id: str, *, ttl_seconds: float) -> Claim:
         self._require(Role.TOOLBOX)
         request = self._state().record(request_id).request
+        if request.intent_fingerprint is None:
+            raise ConflictingWrite(f"request {request_id} names no intent, so it carries no claim")
         if ClaimKey(request.parent_commit, request.intent_fingerprint) != key:
             raise ConflictingWrite(f"request {request_id} measures another claim")
         now = self._clock()

@@ -27,6 +27,7 @@ from pathlib import Path
 
 from hyperloom.common.io import atomic_write_json
 from hyperloom.orchestrator.knowledge.remote_recipe.models import RemoteWriteResult
+from hyperloom_multibranch.contracts.notebook.peers import SandboxFacts
 from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot, TestRecord
 from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.notebook.knowledge.recipe_writeback import FinalRecipe
@@ -49,6 +50,14 @@ class MeasurementUsage:
     failed_attempts: int = 0
 
 
+def _environment(sandbox: SandboxFacts | None) -> tuple[str, str, str, str]:
+    """Node, GPU model, backend and image; all empty for a test that never reached a sandbox."""
+
+    if sandbox is None:
+        return ("", "", "", "")
+    return (sandbox.node_name or "", sandbox.gpu_model or "", sandbox.backend, sandbox.image_digest or "")
+
+
 def measurement_usage(records: Iterable[TestRecord]) -> tuple[MeasurementUsage, ...]:
     """Usage per measurement environment, sorted by node, GPU model, backend and image."""
 
@@ -56,8 +65,7 @@ def measurement_usage(records: Iterable[TestRecord]) -> tuple[MeasurementUsage, 
     for record in records:
         if record.result is None:
             continue
-        sandbox = record.result.sandbox
-        key = (sandbox.node, sandbox.gpu_model, sandbox.backend, sandbox.image_digest)
+        key = _environment(record.result.sandbox)
         row = usage.setdefault(key, MeasurementUsage(*key))
         row.tests += 1
         row.gpu_seconds += record.result.gpu_seconds

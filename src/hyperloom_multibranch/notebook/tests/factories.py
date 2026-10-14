@@ -8,11 +8,13 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
+from hyperloom.contracts.measurement import AttachmentRef
 from hyperloom_multibranch.contracts.notebook.peers import (
     FailureClass,
     Intent,
     IntentLayer,
     Judgement,
+    Purpose,
     SandboxFacts,
     TestKind,
     TestRequest,
@@ -82,22 +84,29 @@ def request(
     *,
     kind: TestKind = TestKind.TEST,
     branch: str = "",
+    purpose: Purpose = Purpose.EXPLORE,
+    attachments: tuple[AttachmentRef, ...] = (),
 ) -> TestRequest:
     return TestRequest(
-        request_id=request_id,
         kind=kind,
-        branch=branch or of.branch,
+        purpose=purpose,
+        branch_id=branch or of.branch,
         parent_commit=of.parent_commit,
-        intent_fingerprint=of.fingerprint,
         delta=change or delta(),
+        intent_fingerprint=of.fingerprint,
+        attachments=attachments,
+        request_id=request_id,
     )
+
+
+_FAILURE = {Validity.CANDIDATE_FAILED: FailureClass.CANDIDATE, Validity.MEASUREMENT_FAILED: FailureClass.INFRA}
 
 
 def result(
     request_id: str,
     *,
     gpu_seconds: float = 600.0,
-    validity: Validity = Validity.SUCCESS,
+    validity: Validity = Validity.SUCCEEDED,
     profile_location: str = "",
     failure_reason: str = "",
     node: str = "node-1",
@@ -105,10 +114,10 @@ def result(
     return TestResult(
         request_id=request_id,
         validity=validity,
-        sandbox=SandboxFacts(node=node, gpu_ids=(0, 1), backend="local"),
-        manifest_sha256="m" * 64,
-        failure=FailureClass.CANDIDATE if validity is Validity.CANDIDATE_FAILURE else None,
-        failure_reason=failure_reason,
+        failure_class=_FAILURE.get(validity),
+        failure_reason=failure_reason or None,
+        sandbox=SandboxFacts(sandbox_id=f"sandbox-{node}", node_name=node, gpu_ids=(0, 1), backend="local"),
+        manifest_sha256="a" * 64,
         gpu_seconds=gpu_seconds,
         profile_location=profile_location,
     )

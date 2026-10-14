@@ -87,7 +87,9 @@ def outcome(record: TestRecord) -> str:
         return f"withdrawn ({record.withdrawal_reason})"
     if record.result is None:
         return "in flight"
-    if record.result.validity is Validity.CANDIDATE_FAILURE:
+    if record.result.validity is Validity.MEASUREMENT_FAILED:
+        return f"not measured ({record.result.failure_reason or 'the measurement failed'})"
+    if record.result.validity is Validity.CANDIDATE_FAILED:
         return f"the candidate failed ({record.result.failure_reason or 'no reason given'})"
     judged = record.judgement
     if judged is None:
@@ -122,10 +124,11 @@ def render_claim(claim: Claim) -> str:
 
 def render_record(record: TestRecord) -> str:
     request, judged = record.request, record.judgement
-    found = [f"{record.request_id} [{request.kind.value}] on {request.branch} from {request.parent_commit}"]
-    found.append(f"outcome: {outcome(record)}")
-    if request.purpose:
-        found.append(f"purpose: {request.purpose}")
+    found = [
+        f"{record.request_id} [{request.kind.value}, {request.purpose.value}] on {request.branch} "
+        f"from {request.parent_commit}",
+        f"outcome: {outcome(record)}",
+    ]
     if judged is not None:
         found.append(f"threshold {judged.threshold_pct:.2f}%, pooled {', '.join(judged.request_ids)}")
     if record.result is not None and record.result.profile_location:

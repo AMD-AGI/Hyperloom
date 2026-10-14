@@ -129,12 +129,16 @@ def _parent_branch(node: BranchNode, view: LineageView) -> str:
     return node.from_branch or (start.branch if start is not None else "")
 
 
+def _backend(record: TestRecord) -> str:
+    sandbox = record.result.sandbox if record.result is not None else None
+    return (sandbox.backend if sandbox is not None else "") or "unknown"
+
+
 def _environment(snapshot: NotebookSnapshot) -> str:
     baseline = snapshot.baseline
-    measured = [record for record in snapshot.records if record.result is not None]
+    measured = [record for record in snapshot.records if record.measured]
     anchored = [record for record in measured if baseline is not None and record.request_id in baseline.request_ids]
-    backends = {record.result.sandbox.backend or "unknown" for record in anchored or measured if record.result}
-    return "+".join(sorted(backends))
+    return "+".join(sorted({_backend(record) for record in anchored or measured}))
 
 
 def tree_from_snapshot(

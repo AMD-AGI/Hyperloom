@@ -168,7 +168,7 @@ def test_toolbox_refusals_come_back_as_error_results_with_their_code(rig: Rig) -
 def test_test_result_returns_the_branchs_own_record(rig: Rig) -> None:
     body = json.loads(rig.ok(rig.token("s1"), "test_result", request_id="r1"))
     assert body["state"] == "measured"
-    assert body["result"]["request_id"] == "r1" and body["result"]["validity"] == "success"
+    assert body["result"]["request_id"] == "r1" and body["result"]["validity"] == "succeeded"
 
 
 def test_test_result_of_another_branch_is_forbidden(rig: Rig) -> None:

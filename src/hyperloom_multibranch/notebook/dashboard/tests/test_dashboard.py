@@ -31,11 +31,10 @@ HOSTILE = "<script>alert('x')</script>"
 
 @pytest.fixture
 def busy(snapshot: NotebookSnapshot) -> NotebookSnapshot:
-    """The scripted session plus a waiting test, a withdrawn one, a held claim, a split branch and a broken node."""
+    """The scripted session plus a waiting test, a withdrawn one, a held claim, a split branch, and a broken node
+    whose reason is markup."""
 
-    waiting = TestRecord(
-        dataclasses.replace(request("r9", GEMM_AGAIN), purpose=HOSTILE), requested_at=snapshot.taken_at - 30
-    )
+    waiting = TestRecord(request("r9", GEMM_AGAIN), requested_at=snapshot.taken_at - 30)
     at = snapshot.taken_at
     withdrawn = TestRecord(
         request("r10", GEMM_AGAIN), requested_at=at - 60, withdrawn_at=at - 10, withdrawal_reason="x"
@@ -43,7 +42,7 @@ def busy(snapshot: NotebookSnapshot) -> NotebookSnapshot:
     held = Claim(ClaimKey("c1", FP8_KV.fingerprint), "s1", FP8_KV, "a", 60.0, at, at, at + 45, ClaimStatus.HELD)
     split = BranchNode("s1-fix", LineageKind.SPLIT, "c1", "c1", from_branch="s1")
     lineage = dataclasses.replace(snapshot.lineage, branches=(*snapshot.lineage.branches, split))
-    broken = QuarantineEvent("node-3", QuarantineAction.QUARANTINE, "ECC errors", (0, 1))
+    broken = QuarantineEvent("node-3", QuarantineAction.QUARANTINE, HOSTILE, (0, 1))
     return dataclasses.replace(
         snapshot,
         records=(*snapshot.records, waiting, withdrawn),

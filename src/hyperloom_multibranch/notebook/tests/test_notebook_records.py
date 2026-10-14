@@ -12,9 +12,10 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.contracts.recipe import DIGEST_PREFIX
+from hyperloom.contracts.recipe import DIGEST_PREFIX, RecipeDelta
 from hyperloom_multibranch.contracts.notebook import (
     INTEGRATION_BRANCH,
+    ClaimKey,
     ConflictingWrite,
     NotRecorded,
     Role,
@@ -27,7 +28,10 @@ from hyperloom_multibranch.contracts.notebook.peers import (
     BranchLogEntry,
     BranchLogType,
     HypothesisStatus,
+    Purpose,
     TestKind,
+    TestRequest,
+    Validity,
     Verdict,
 )
 from hyperloom_multibranch.contracts.notebook.records import (
@@ -256,6 +260,52 @@ async def test_a_withdrawn_test_is_no_test_of_its_branch_and_no_direction_tried(
 
     assert row.tests == 1
     assert [item.request_id for item in brief.tried] == ["r1"]
+
+
+async def test_a_failed_measurement_keeps_its_cost_frees_its_claim_and_takes_no_judgement(open_as: Open) -> None:
+    runtime, toolbox = open_as(Role.SPECIALIST_RUNTIME, "s1"), open_as(Role.TOOLBOX)
+    wanted = intent("s1", "c0")
+    claim = await runtime.acquire(wanted, delta().fingerprint(), ttl_seconds=TTL)
+    await toolbox.write_request(request("r1", wanted))
+    await toolbox.attach_request(claim.key, "r1", ttl_seconds=TTL)
+    failed = result("r1", validity=Validity.MEASUREMENT_FAILED, failure_reason="no healthy node", gpu_seconds=90.0)
+
+    record = await toolbox.write_result(failed)
+
+    assert (record.in_flight, record.measured, record.result) == (False, False, failed)
+    assert (await runtime.lookup(claim.key, delta().fingerprint())).status is DedupStatus.FREE
+    with pytest.raises(NotRecorded, match="failed"):
+        await open_as(Role.GATE).write_judgement("r1", judgement(1.0, ("r1",)), Conclusion.RECORDED_ONLY)
+
+
+async def test_a_failed_measurement_costs_its_branch_but_is_no_direction_tried(open_as: Open) -> None:
+    scheduler, toolbox = open_as(Role.SCHEDULER), open_as(Role.TOOLBOX)
+    await scheduler.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0"))
+    await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, "s1", from_commit="c0"))
+    await _tested(open_as, "r1")
+    await toolbox.write_request(request("r2", intent("s1", "c0", target="kv cache")))
+    await toolbox.write_result(result("r2", validity=Validity.MEASUREMENT_FAILED, gpu_seconds=90.0))
+
+    (row,) = [row for row in await scheduler.progress() if row.branch == "s1"]
+    brief = await scheduler.startup_brief("c0")
+
+    assert (row.tests, row.gpu_seconds) == (2, 690.0)
+    assert [item.request_id for item in brief.tried] == ["r1"]
+
+
+async def test_a_request_without_an_intent_carries_no_claim_and_matches_no_lookup(open_as: Open) -> None:
+    runtime, toolbox = open_as(Role.SPECIALIST_RUNTIME, "s1"), open_as(Role.TOOLBOX)
+    baseline = TestRequest(TestKind.TEST, Purpose.BASELINE, INTEGRATION_BRANCH, "c0", request_id="r0")
+    await toolbox.write_request(baseline)
+    await toolbox.write_result(result("r0"))
+    key = ClaimKey("c0", intent("s1", "c0").fingerprint)
+
+    with pytest.raises(ConflictingWrite, match="no intent"):
+        await toolbox.attach_request(key, "r0", ttl_seconds=TTL)
+    with pytest.raises(ValueError, match="accepted"):
+        await toolbox.write_request(replace(baseline, request_id=None))
+    answer = await runtime.lookup(key, RecipeDelta().fingerprint())
+    assert (answer.status, (await toolbox.snapshot()).claims) == (DedupStatus.FREE, ())
 
 
 async def test_a_branch_log_is_its_runtimes_alone_and_its_current_plan_is_the_latest_unsuperseded(

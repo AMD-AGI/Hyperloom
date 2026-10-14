@@ -97,7 +97,7 @@ async def scripted_session(root: Path, clock: FakeClock) -> LocalNotebook:
     await w.measure("s2", "r2", SPLIT_KV, delta("--block-size 32"))
     regressed = judgement(-2.0, ("r2",), recorded={METRIC: 980.0}, verdict=Verdict.REGRESSED)
     await gate.write_judgement("r2", regressed, Conclusion.RECORDED_ONLY)
-    launch_failure = result("r3", validity=Validity.CANDIDATE_FAILURE, failure_reason="server exited during warmup")
+    launch_failure = result("r3", validity=Validity.CANDIDATE_FAILED, failure_reason="server exited during warmup")
     await w.measure("s2", "r3", CHUNKED_PREFILL, delta("--enable-chunked-prefill"), launch_failure)
     await w.measure("s2", "r5", FP8_KV, delta("--kv-cache-dtype fp8"))
     await gate.write_judgement("r5", judgement(6.0, ("r5",), recorded={METRIC: 1060.0}), Conclusion.ACCURACY_FAILED)

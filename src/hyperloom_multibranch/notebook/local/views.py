@@ -245,7 +245,7 @@ def startup_brief(state: NotebookState, view: LineageView, start_commit: str) ->
         if record.request.kind is TestKind.TEST
         and record.request.branch != INTEGRATION_BRANCH
         and record.request.parent_commit in ancestry
-        and record.withdrawn_at is None
+        and (record.in_flight or record.measured)
     )
     return StartupBrief(start_commit=start_commit, tried=tried)
 

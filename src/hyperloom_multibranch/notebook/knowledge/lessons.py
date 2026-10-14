@@ -62,7 +62,7 @@ class SessionLessons:
 
 
 def direction(record: TestRecord, snapshot: NotebookSnapshot) -> str:
-    """What a test tried: its intent's target and mechanism, the commits a merge stacks, or its request's purpose."""
+    """What a test tried: its intent's target and mechanism, the commits a merge stacks, or its purpose and kind."""
 
     found = snapshot.intents.get(record.request.intent_fingerprint)
     if found is not None:
@@ -74,7 +74,8 @@ def direction(record: TestRecord, snapshot: NotebookSnapshot) -> str:
     ]
     if merged:
         return f"merge of {', '.join(merged)}"
-    return record.request.purpose or f"{record.request.kind.value} {record.request_id}"
+    request = record.request
+    return f"{request.purpose.value} {request.kind.value} {record.request_id}"
 
 
 def lesson_of(record: TestRecord, snapshot: NotebookSnapshot) -> Lesson | None:
@@ -86,7 +87,7 @@ def lesson_of(record: TestRecord, snapshot: NotebookSnapshot) -> Lesson | None:
     def lesson(kind: LessonKind, outcome: str, gain_pct: float | None = None) -> Lesson:
         return Lesson(kind, record.request_id, what, record.request.parent_commit, outcome, gain_pct)
 
-    if record.result is not None and record.result.validity is Validity.CANDIDATE_FAILURE:
+    if record.result is not None and record.result.validity is Validity.CANDIDATE_FAILED:
         return lesson(LessonKind.PITFALL, f"the candidate failed ({record.result.failure_reason or 'no reason'})")
     judged = record.judgement
     if judged is None or record.conclusion is None:

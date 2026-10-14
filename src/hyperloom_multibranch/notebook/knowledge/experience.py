@@ -14,8 +14,8 @@ the packaged ``multibranch-notebook-v1`` mapping:
 * evidence: the request and the requests its judgement pooled. A test without evidence never reaches the KB: the
   mapping refuses a candidate without reasoning, a recorded parent value, or an outcome.
 
-The reasoning is the hypothesis or attempt the specialist logged citing the request, else the request's purpose; the
-reflection is the result it logged, else the hypothesis it settled. The measured-against state is the parent commit,
+The reasoning is the hypothesis or attempt the specialist logged citing the request; the reflection is the result it
+logged, else the hypothesis it settled. A test whose measurement failed taught nothing and is not published. The measured-against state is the parent commit,
 the experiment repository commit that pins the exact recipe.
 
 A judged record changes only while its split is pending, so pending splits wait; everything else is published once and
@@ -128,18 +128,18 @@ def _iso(at: float) -> str:
 
 
 def _decision(record: TestRecord) -> str:
-    if record.result is not None and record.result.validity is Validity.CANDIDATE_FAILURE:
+    if record.result is not None and record.result.validity is Validity.CANDIDATE_FAILED:
         return "failed"
     return "keep" if record.conclusion in COMMITTING else "revert"
 
 
 def _accuracy(record: TestRecord) -> dict[str, object] | None:
-    accuracy = record.result.accuracy if record.result is not None else {}
-    if not (record.request.accuracy_rounds or accuracy or record.conclusion is Conclusion.ACCURACY_FAILED):
+    scores = [value.score for value in record.result.accuracy] if record.result is not None else []
+    if not (record.request.accuracy or scores or record.conclusion is Conclusion.ACCURACY_FAILED):
         return None
     judged = record.judgement
     passed = record.conclusion is not Conclusion.ACCURACY_FAILED and (judged is None or judged.accuracy_ok)
-    return {"required": True, "passed": passed, "value": next(iter(accuracy.values()), None)}
+    return {"required": True, "passed": passed, "value": next(iter(scores), None)}
 
 
 def _measured(record: TestRecord, metric: str) -> dict[str, object]:
@@ -158,12 +158,12 @@ def _measured(record: TestRecord, metric: str) -> dict[str, object]:
 def candidate_row(
     record: TestRecord, snapshot: NotebookSnapshot, profile: SessionProfile, metric: str
 ) -> dict[str, object] | None:
-    """One export row; ``None`` for a merge, a test in flight, or a judgement waiting on its split."""
+    """One export row; ``None`` for a merge, a test in flight or not measured, or a judgement waiting on its split."""
 
     result = record.result
-    if record.request.branch == INTEGRATION_BRANCH or result is None:
+    if record.request.branch == INTEGRATION_BRANCH or result is None or not record.measured:
         return None
-    failed = result.validity is Validity.CANDIDATE_FAILURE
+    failed = result.validity is Validity.CANDIDATE_FAILED
     if not failed and (record.judgement is None or record.conclusion is None or record.conclusion in _PENDING):
         return None
     request = record.request
@@ -182,14 +182,14 @@ def candidate_row(
         },
         "direction": direction(record, snapshot),
         "change": change_document(request.delta),
-        "reasoning": reasoning or request.purpose,
+        "reasoning": reasoning,
         "learn": learn,
         "decision": _decision(record),
         "conclusion": record.conclusion.value if record.conclusion is not None else "",
         "baseline_value": snapshot.value_of(request.parent_commit).get(metric),
         **_measured(record, metric),
         "accuracy": _accuracy(record),
-        "error_class": result.failure_reason if failed else "",
+        "error_class": (result.failure_reason or "") if failed else "",
         "gpu_seconds": result.gpu_seconds,
     }
 

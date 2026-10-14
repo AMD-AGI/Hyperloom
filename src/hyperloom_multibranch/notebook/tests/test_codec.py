@@ -19,24 +19,26 @@ def _record() -> records.TestRecord:
         components=(ComponentChange("vllm", add_patches=(PatchRef("patch/vllm/0001.patch", "a" * 64),)),),
     )
     request = peers.TestRequest(
-        request_id="r1",
         kind=peers.TestKind.TEST,
-        branch="s1",
+        purpose=peers.Purpose.EXPLORE,
+        branch_id="s1",
         parent_commit="c0",
-        intent_fingerprint="i" * 64,
         delta=delta,
+        intent_fingerprint="i" * 64,
         avoid_nodes=("node-3",),
-        accuracy_rounds=True,
+        accuracy=True,
+        request_id="r1",
     )
+    lost = peers.SandboxFacts("sandbox-0", node_name="node-0", gpu_ids=(0, 1))
     result = peers.TestResult(
         request_id="r1",
-        validity=peers.Validity.SUCCESS,
-        sandbox=peers.SandboxFacts(node="node-1", gpu_ids=(0, 1), power_cap_watts=750.0, backend="local"),
-        manifest_sha256="m" * 64,
-        rounds=(peers.RoundValues(peers.RoundKind.FORMAL, "output_tps", (1010.5, 1003)),),
-        accuracy={"gsm8k": 0.91},
-        attempts=(peers.Attempt("node-0", (0, 1), peers.FailureClass.INFRA, 10.0, 20.0),),
-        gpu_seconds=1200,
+        validity=peers.Validity.SUCCEEDED,
+        rounds=(peers.RoundValue("measure", concurrency=64, metrics={"output_tps": 1010.5}),),
+        accuracy=(peers.AccuracyValue("gsm8k", "exact_match", 0.91),),
+        sandbox=peers.SandboxFacts("sandbox-1", node_name="node-1", gpu_ids=(0, 1), power_cap_w=750.0, backend="local"),
+        attempts=(peers.Attempt(lost, peers.FailureClass.INFRA, "node lost", 10.0, 20.0),),
+        manifest_sha256="a" * 64,
+        gpu_seconds=1200.0,
     )
     judgement = peers.Judgement(peers.Verdict.IMPROVED, 4.5, 1.1, ("r1", "r2"), {"output_tps": 1.045}, True)
     return records.TestRecord(request, result, judgement, Conclusion.COMMITTED, "c1")
@@ -49,15 +51,18 @@ def test_a_test_record_survives_json_with_its_recipe_delta_enums_and_mappings() 
 
     assert codec.decode(records.TestRecord, stored) == record
     assert stored["request"]["delta"]["config"]["extra_server_args"] == "--max-num-seqs 256"
-    assert stored["result"]["rounds"][0]["kind"] == "formal"
+    assert stored["result"]["rounds"][0]["phase"] == "measure"
 
 
 def test_numbers_come_back_as_the_type_their_field_declares() -> None:
-    result = codec.decode(records.TestRecord, json.loads(json.dumps(codec.encode(_record())))).result
+    intent = peers.Intent("s1", "c0", "moe gemm", "tuned kernel", peers.IntentLayer.KERNEL)
+    key = records.ClaimKey("c0", intent.fingerprint)
+    claim = records.Claim(key, "s1", intent, "a" * 64, 60, 1, 2, 62, ClaimStatus.HELD)
 
-    assert result is not None
-    assert result.rounds[0].values == (1010.5, 1003.0)
-    assert isinstance(result.gpu_seconds, float)
+    decoded = codec.decode(records.Claim, json.loads(json.dumps(codec.encode(claim))))
+
+    assert decoded == claim
+    assert all(isinstance(value, float) for value in (decoded.ttl_seconds, decoded.acquired_at, decoded.expires_at))
 
 
 def test_a_field_an_older_row_lacks_takes_its_default() -> None:

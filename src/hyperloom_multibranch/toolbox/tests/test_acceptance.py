@@ -79,5 +79,5 @@ async def test_a_valid_request_is_accepted_and_written_to_the_notebook(tmp_path:
         req(purpose=Purpose.CONFIRM, retest_of=await rig.toolbox.submit_test(req()))
     )
     row = rig.notebook._state().requests[request_id]
-    assert (row.request_id, row.branch, row.purpose, row.priority) == (request_id, "b1", "confirm", "0")
+    assert (row.request_id, row.branch, row.purpose, row.priority) == (request_id, "b1", "confirm", 0)
     assert row.retest_of is not None

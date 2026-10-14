@@ -456,16 +456,17 @@ async def test_the_fake_writes_requests_results_withdrawals_and_quarantine_into_
     await box.drain()
 
     record = await notebook.record(measured)
-    assert record.result is not None and record.result.validity.value == "success"
+    assert record.result is not None and record.result.validity.value == "succeeded"
     assert record.result.sandbox.node in box.config.nodes
-    by_row = {(r.kind.value, r.metric): r.values for r in record.result.rounds}
-    assert set(by_row) == {(kind, metric) for kind in ("warmup", "formal") for metric in box.config.baseline}
-    assert by_row[("formal", GRADED_OUTPUT)][0] == box.results[measured].rounds[1].metrics[GRADED_OUTPUT]
+    assert record.result.rounds == box.results[measured].rounds
+    assert {(r.phase, metric) for r in record.result.rounds for metric in r.metrics} == {
+        (phase, metric) for phase in ("warmup", "measure") for metric in box.config.baseline
+    }
     held = (await specialist.lookup(claim.key, action.fingerprint())).claim
     assert held is None or held.status is ClaimStatus.COMPLETED or held.request_id == measured
     retried = (await notebook.record(flaky)).result
     assert retried is not None and [a.failure.value if a.failure else None for a in retried.attempts] == ["infra", None]
     failed = (await notebook.record(broken)).result
-    assert failed is not None and failed.validity.value == "candidate_failure"
+    assert failed is not None and failed.validity.value == "candidate_failed"
     assert (await notebook.record(dropped)).withdrawn_at is not None
     assert {event.node for event in await notebook.quarantined()} == box.quarantined != set()

@@ -35,7 +35,7 @@ from hyperloom.contracts.recipe import (
     RecipeDelta,
 )
 from hyperloom_multibranch.contracts.notebook import NotRecorded
-from hyperloom_multibranch.contracts.notebook.peers import BranchLogEntry, BranchLogType
+from hyperloom_multibranch.contracts.notebook.peers import BranchLogEntry, BranchLogType, Validity
 from hyperloom_multibranch.contracts.notebook.records import BranchLogRecord, NotebookSnapshot
 from hyperloom_multibranch.contracts.notebook.vocab import Conclusion
 from hyperloom_multibranch.notebook.knowledge.experience import (
@@ -46,7 +46,7 @@ from hyperloom_multibranch.notebook.knowledge.experience import (
     export_document,
     publish_experiences,
 )
-from hyperloom_multibranch.notebook.tests.factories import profile
+from hyperloom_multibranch.notebook.tests.factories import profile, result
 from hyperloom_multibranch.notebook.tests.sessions import METRIC
 
 NO_REASONING = "decision reasoning is missing or non-specific"
@@ -189,6 +189,14 @@ def test_a_judgement_waiting_on_its_split_waits_to_be_published(snapshot: Notebo
     assert candidate_row(pending, snapshot, snapshot.profile, METRIC) is None
 
 
+def test_a_test_whose_measurement_failed_is_never_published(snapshot: NotebookSnapshot) -> None:
+    (record,) = [record for record in snapshot.records if record.request_id == "r1"]
+    unmeasured = dataclasses.replace(record, result=result("r1", validity=Validity.MEASUREMENT_FAILED))
+
+    assert snapshot.profile is not None
+    assert candidate_row(unmeasured, snapshot, snapshot.profile, METRIC) is None
+
+
 def test_without_a_profile_there_is_nothing_to_export_and_agentx_publishes_nothing(snapshot: NotebookSnapshot) -> None:
     agentx = publish_experiences(
         dataclasses.replace(snapshot, profile=profile(isl=None, osl=None)), METRIC, dry_run=True
@@ -245,14 +253,14 @@ def test_the_experience_service_stores_each_experience_once_with_its_identity(
 def test_a_blocked_gain_sent_for_repair_exports_the_accuracy_it_failed() -> None:
     import dataclasses
 
-    from hyperloom_multibranch.contracts.notebook.peers import Verdict
+    from hyperloom_multibranch.contracts.notebook.peers import AccuracyValue, Verdict
     from hyperloom_multibranch.contracts.notebook.records import TestRecord
     from hyperloom_multibranch.contracts.notebook.vocab import Conclusion
     from hyperloom_multibranch.notebook.knowledge import experience
     from hyperloom_multibranch.notebook.tests.factories import intent, judgement, request, result
 
     blocked = dataclasses.replace(judgement(5.0, ("r9", "r9b"), verdict=Verdict.BLOCKED), accuracy_ok=False)
-    measured = dataclasses.replace(result("r9"), accuracy={"gsm8k": 0.61})
+    measured = dataclasses.replace(result("r9"), accuracy=(AccuracyValue("gsm8k", "exact_match", 0.61),))
     record = TestRecord(request("r9", intent("s1", "c0")), measured, blocked, Conclusion.REPAIR_REQUESTED)
 
     assert experience._accuracy(record) == {"required": True, "passed": False, "value": 0.61}
