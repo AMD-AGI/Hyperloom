@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from hyperloom.contracts.recipe import LaunchConfig, Recipe
 from hyperloom.orchestrator.knowledge.remote_recipe.models import RemoteWriteResult
 from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot
 from hyperloom_multibranch.notebook.knowledge.breakdown import (
@@ -17,6 +18,9 @@ from hyperloom_multibranch.notebook.knowledge.breakdown import (
     build_breakdown,
     write_breakdown,
 )
+from hyperloom_multibranch.notebook.knowledge.recipe_writeback import FinalRecipe
+
+FINAL_RECIPE = Recipe("rocm/vllm@sha256:" + "a" * 64, LaunchConfig(server_args="--tensor-parallel-size 8"))
 
 
 def test_the_breakdown_lays_out_the_session_tree_tests_and_measurement(snapshot: NotebookSnapshot) -> None:
@@ -35,7 +39,21 @@ def test_the_breakdown_lays_out_the_session_tree_tests_and_measurement(snapshot:
         ("node-2", 1, 600.0),
     ]
     assert breakdown["close"]["kb_write_back"]["status"] == "written"
-    assert build_breakdown(snapshot)["close"] == {"kb_write_back": None}
+    assert build_breakdown(snapshot)["close"] == {"final": None, "selection": {}, "kb_write_back": None}
+
+
+def test_the_close_section_names_the_commit_final_selection_chose_and_how(snapshot: NotebookSnapshot) -> None:
+    final = FinalRecipe("i1", FINAL_RECIPE, Path("files"), "output_tps")
+    selection = {"candidates": ["i1", "c1"], "chosen": "i1", "reason": "the integration head held its gain"}
+
+    close = build_breakdown(snapshot, final=final, selection=selection)["close"]
+
+    assert close["final"] == {
+        "commit_id": "i1",
+        "recipe_digest": FINAL_RECIPE.digest(),
+        "recipe": FINAL_RECIPE.to_document(),
+    }
+    assert close["selection"] == selection
 
 
 def test_the_breakdown_is_written_as_sorted_indented_json(snapshot: NotebookSnapshot, tmp_path: Path) -> None:

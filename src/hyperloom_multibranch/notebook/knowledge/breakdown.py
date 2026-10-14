@@ -14,7 +14,8 @@ export has its own schema version and its own sections:
 * ``tests``: every test record: request, result with its attempts and GPU time, judgement, conclusion, commit, times.
 * ``measurement_sandboxes``: per node, GPU model, backend and image, the tests run there, their GPU time and failed
   attempts.
-* ``close``: the Recipe KB write-back, as the single-lineage export reports it.
+* ``close``: the commit final selection chose and its recipe, how the scheduler chose it, and the Recipe KB
+  write-back, as the single-lineage export reports it.
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ from hyperloom.common.io import atomic_write_json
 from hyperloom.orchestrator.knowledge.remote_recipe.models import RemoteWriteResult
 from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot, TestRecord
 from hyperloom_multibranch.notebook.codec import encode
+from hyperloom_multibranch.notebook.knowledge.recipe_writeback import FinalRecipe
 
 SCHEMA_VERSION = "multibranch-1"
 EXPORTER_VERSION = "hyperloom-multibranch-breakdown-1"
@@ -63,8 +65,24 @@ def measurement_usage(records: Iterable[TestRecord]) -> tuple[MeasurementUsage, 
     return tuple(usage[key] for key in sorted(usage))
 
 
-def build_breakdown(snapshot: NotebookSnapshot, *, kb_write_back: RemoteWriteResult | None = None) -> dict[str, object]:
-    """The breakdown document of ``snapshot``, stamped with the time the snapshot was taken."""
+def _final(final: FinalRecipe | None) -> dict[str, object] | None:
+    if final is None:
+        return None
+    return {"commit_id": final.commit_id, "recipe_digest": final.recipe.digest(), "recipe": final.recipe.to_document()}
+
+
+def build_breakdown(
+    snapshot: NotebookSnapshot,
+    *,
+    final: FinalRecipe | None = None,
+    selection: Mapping[str, object] | None = None,
+    kb_write_back: RemoteWriteResult | None = None,
+) -> dict[str, object]:
+    """The breakdown document of ``snapshot``, stamped with the time the snapshot was taken.
+
+    ``final`` is the commit final selection chose; ``selection`` is how the scheduler chose it, such as its candidates
+    and their measurements, as JSON-ready data.
+    """
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -80,7 +98,11 @@ def build_breakdown(snapshot: NotebookSnapshot, *, kb_write_back: RemoteWriteRes
         "committed": encode(snapshot.committed),
         "tests": encode(snapshot.records),
         "measurement_sandboxes": encode(measurement_usage(snapshot.records)),
-        "close": {"kb_write_back": encode(kb_write_back)},
+        "close": {
+            "final": _final(final),
+            "selection": dict(selection or {}),
+            "kb_write_back": encode(kb_write_back),
+        },
     }
 
 

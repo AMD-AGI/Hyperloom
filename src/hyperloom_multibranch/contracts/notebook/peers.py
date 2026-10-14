@@ -22,7 +22,7 @@ from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 
 
 class TestKind(str, Enum):
-    """The kind of test a request asks the toolbox for."""
+    """The kind of test a request asks the toolbox for; final selection sweeps each candidate over the workload."""
 
     __test__ = False
 
@@ -30,6 +30,7 @@ class TestKind(str, Enum):
     PROFILE = "profile"
     ACCURACY = "accuracy"
     REPRO = "repro"
+    SWEEP = "sweep"
 
 
 @dataclass(frozen=True)
