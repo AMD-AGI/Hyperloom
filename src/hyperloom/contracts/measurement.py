@@ -31,6 +31,10 @@ _SHA256 = re.compile(r"[0-9a-f]{64}")
 _E = TypeVar("_E", bound=Enum)
 
 
+_ACCURACY = "accuracy"
+_FAILURE_CLASS = "failure_class"
+
+
 class MeasurementError(ValueError):
     """A test request, a test result or one of their documents breaks the contract."""
 
@@ -42,7 +46,7 @@ class TestKind(str, Enum):
 
     TEST = "test"
     PROFILE = "profile"
-    ACCURACY = "accuracy"
+    ACCURACY = _ACCURACY
     REPRO = "repro"
     SWEEP = "sweep"
 
@@ -56,7 +60,7 @@ class Purpose(str, Enum):
     CONFIRM = "confirm"
     INTEGRATION = "integration"
     PROFILE = "profile"
-    ACCURACY = "accuracy"
+    ACCURACY = _ACCURACY
     REPRO = "repro"
     FINAL = "final"
 
@@ -301,7 +305,7 @@ class TestRequest:
             priority=f.get("priority"),
             retest_of=f.get("retest_of"),
             avoid_nodes=tuple(_items(f.get("avoid_nodes", ()), "avoid_nodes")),
-            accuracy=_bool(f.get("accuracy", False), "accuracy"),
+            accuracy=_bool(f.get("accuracy", False), _ACCURACY),
             concurrency=tuple(_items(f.get("concurrency", ()), "concurrency")),
             attachments=tuple(map(AttachmentRef.from_document, _items(f.get("attachments", ()), "attachments"))),
             request_id=f.get("request_id"),
@@ -453,7 +457,7 @@ class AccuracyValue:
 
 def _check_failure(failure_class: object, reason: object) -> None:
     if failure_class is not None:
-        _enum(FailureClass, failure_class, "failure_class")
+        _enum(FailureClass, failure_class, _FAILURE_CLASS)
     if reason is not None and not isinstance(reason, str):
         raise MeasurementError(f"failure_reason must be a string, got {reason!r}")
     if failure_class is None and reason:
@@ -504,7 +508,7 @@ class Attempt:
         failure = f.get("failure_class")
         return cls(
             sandbox=None if sandbox is None else SandboxFacts.from_document(sandbox),
-            failure_class=None if failure is None else _enum(FailureClass, failure, "failure_class"),
+            failure_class=None if failure is None else _enum(FailureClass, failure, _FAILURE_CLASS),
             failure_reason=f.get("failure_reason"),
             started_at=f.get("started_at"),
             finished_at=f.get("finished_at"),
@@ -605,10 +609,10 @@ class TestResult:
         return cls(
             request_id=f.get("request_id"),
             validity=_enum(Validity, f.get("validity"), "validity"),
-            failure_class=None if failure is None else _enum(FailureClass, failure, "failure_class"),
+            failure_class=None if failure is None else _enum(FailureClass, failure, _FAILURE_CLASS),
             failure_reason=f.get("failure_reason"),
             rounds=tuple(map(RoundValue.from_document, _items(f.get("rounds", ()), "rounds"))),
-            accuracy=tuple(map(AccuracyValue.from_document, _items(f.get("accuracy", ()), "accuracy"))),
+            accuracy=tuple(map(AccuracyValue.from_document, _items(f.get("accuracy", ()), _ACCURACY))),
             sandbox=None if sandbox is None else SandboxFacts.from_document(sandbox),
             attempts=tuple(map(Attempt.from_document, _items(f.get("attempts", ()), "attempts"))),
             manifest_sha256=f.get("manifest_sha256"),

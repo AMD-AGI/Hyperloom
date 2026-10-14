@@ -15,7 +15,8 @@ from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
 from hyperloom_multibranch.toolbox.tools.base import InvalidRequest, ToolRequest
 from hyperloom_multibranch.toolbox.tools.executor_tool import ExecutorFn, ExecutorTool
 
-ACCURACY_TOOL = "accuracy"
+_ACCURACY = "accuracy"
+ACCURACY_TOOL = _ACCURACY
 
 
 def _accuracy_executor(workdir: Path) -> ExecutorFn:
@@ -33,8 +34,8 @@ def accuracy_tool() -> AccuracyTool:
     ``accuracy``."""
     return AccuracyTool(
         ACCURACY_TOOL,
-        "accuracy",
+        _ACCURACY,
         _accuracy_executor,
         ok_text="accuracy evaluated",
-        summary_keys=("accuracy", "accuracy_pass"),
+        summary_keys=(_ACCURACY, "accuracy_pass"),
     )

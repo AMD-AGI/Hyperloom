@@ -23,6 +23,8 @@ from hyperloom.contracts.measurement import (
 )
 from hyperloom_multibranch.contracts.toolbox import Backpressure, QueueState
 
+_LOWEST_PRIORITY = 4
+
 #: Priority of a request that names none, by purpose (design 4.17). Baseline, health and final are the scheduler's to
 #: give through QueuePolicy.priority_override; until it does they take the fallbacks below.
 DEFAULT_PRIORITY: Mapping[Purpose, int] = {
@@ -31,10 +33,10 @@ DEFAULT_PRIORITY: Mapping[Purpose, int] = {
     Purpose.INTEGRATION: 2,
     Purpose.PROFILE: 3,
     Purpose.ACCURACY: 3,
-    Purpose.EXPLORE: 4,
+    Purpose.EXPLORE: _LOWEST_PRIORITY,
     Purpose.BASELINE: 2,
     Purpose.FINAL: 2,
-    Purpose.HEALTH: 4,
+    Purpose.HEALTH: _LOWEST_PRIORITY,
 }
 #: A queued test's slack, per K, before the branch's next submit is refused with backpressure.
 DEFAULT_QUEUE_FACTOR = 4
