@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -29,13 +30,13 @@ OK, NODE_FAULT, UNKNOWN, CANDIDATE = "ok", "node_fault", "fail_unknown", "fail_t
 class PointPlanner(FakePlanner):
     """Plans every request to one point file."""
 
-    def __init__(self, point: Path) -> None:
+    def __init__(self, point: Path, environment: object = None) -> None:
         super().__init__()
-        self.point = point
+        self.point, self.environment = point, environment
 
     def plan(self, request, parent) -> AcceptedMeasurement:  # type: ignore[no-untyped-def]
         super().plan(request, parent)
-        return AcceptedMeasurement(None, (self.point,))  # type: ignore[arg-type]
+        return AcceptedMeasurement(self.environment, (self.point,))  # type: ignore[arg-type]
 
 
 @dataclass
@@ -119,6 +120,38 @@ async def test_a_verified_measurement_is_a_succeeded_result_with_its_audit_data(
     assert len(result.attempts) == 1 and scripted.calls == 1
     notebook_record = await tb.notebook.record(request_id)
     assert notebook_record.result is not None and notebook_record.result.manifest_sha256 == result.manifest_sha256
+
+
+class _Overlay:
+    """A compiled environment as the sheet reads it: one root with one upserted file."""
+
+    attachments = ()
+
+    def to_document(self) -> dict[str, object]:
+        return {
+            "roots": [
+                {
+                    "id": "yaml",
+                    "kind": "package",
+                    "import_name": "yaml",
+                    "dist": {"name": "PyYAML", "version": "0"},
+                    "entries": [],
+                }
+            ],
+            "runtime": None,
+            "blob_root": "/blobs",
+        }
+
+
+async def test_the_compiled_environment_reaches_the_instruction_sheet(tmp_path: Path, rig) -> None:
+    r = rig()
+    point = point_yaml(tmp_path, "planned.yaml")
+    executor = HostedExecutor(r.backend, tmp_path / "session")
+    tb = build(tmp_path, executor=executor, planner=PointPlanner(point, _Overlay()), policy=POLICY)
+    request_id, result = await _run(tb)
+    assert result.validity is Validity.SUCCEEDED
+    sheet = json.loads(r.backend.journal.load_spec(request_id, 1))
+    assert [root["id"] for root in sheet["environment"]["roots"]] == ["yaml"]
 
 
 async def test_an_infrastructure_failure_retries_in_a_new_sandbox(tmp_path: Path, rig) -> None:

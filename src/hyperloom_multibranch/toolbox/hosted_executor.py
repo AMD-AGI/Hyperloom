@@ -117,6 +117,7 @@ class HostedExecutor:
         kind = request.kind.value
         return TestCall(
             points=accepted.points,
+            environment=accepted.environment,  # type: ignore[arg-type]  # the sheet reads its overlay
             output_dir=output_dir,
             timeout_sec=self._timeout,
             cwd=str(self._session),
