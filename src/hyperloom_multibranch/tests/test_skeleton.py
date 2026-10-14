@@ -106,6 +106,7 @@ class Stage:
     gate: MbFakeGate = field(init=False)
     repo: MbFakeRepo = field(init=False)
     setup: PeerSetup = field(init=False)
+    signalled_at: float = 0.0
 
     def handle(self, role: Role, branch: str = "") -> LocalNotebook:
         return LocalNotebook(self.layout.notebook, Writer(role, branch or role.value, branch), clock=self.time.now)
@@ -281,6 +282,7 @@ def _signalling(stage: Stage) -> SpecialistScript:
     async def interrupted(branch: str, start: str) -> None:
         await stage.time.sleep(STEP_SECONDS)
         await stage.spawn_specialist_process(branch)
+        stage.signalled_at = stage.time.now()
         os.kill(os.getpid(), signal.SIGTERM)
         await asyncio.Event().wait()
 
@@ -309,6 +311,19 @@ async def test_phases_that_cannot_unwind_after_a_signal_do_not_hold_close_up(tmp
     assert STOP_OVERRAN in outcome.close.stop.failures
     assert json.loads(stage.layout.report.read_text())["stop_reason"] == SessionStopReason.SIGNAL.value
     assert stage.time.now() < START + SETTINGS.max_hours * 3600
+    assert stage.pids and not any(running(pid) for pid in stage.pids)
+
+
+async def test_after_a_signal_the_session_ends_within_one_close_grace(tmp_path: Path) -> None:
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.stuck = frozenset({INTEGRATION_BRANCH})
+    stage.lifecycle = MbFakeLifecycle(scripts={"b01": _signalling(stage)}, hanging=frozenset({"b01", "b02"}))
+
+    outcome = await stage.run()
+
+    assert outcome.stop_reason is SessionStopReason.SIGNAL and outcome.close is not None
+    grace = SessionBudget.from_hours(SETTINGS.max_hours, START).close_grace_seconds
+    assert stage.signalled_at and stage.time.now() <= stage.signalled_at + grace
     assert stage.pids and not any(running(pid) for pid in stage.pids)
 
 

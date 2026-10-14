@@ -30,7 +30,7 @@ from hyperloom_multibranch.contracts.scheduling import (
     RuleGate,
     Toolbox,
 )
-from hyperloom_multibranch.scheduling.budget import BudgetExhausted, SessionBudget
+from hyperloom_multibranch.scheduling.budget import BudgetExhausted, HardStop, SessionBudget
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
 from hyperloom_multibranch.scheduling.layout import SessionLayout
@@ -119,13 +119,13 @@ class Prelude:
         self._decisions = decisions
         self._clock = clock
 
-    async def root(self, workload: Workload, budget: SessionBudget) -> PreludeResult:
+    async def root(self, workload: Workload, budget: SessionBudget, hard_stop: HardStop) -> PreludeResult:
         """Root the session on the main flow's result; raises :class:`PreludeFailed` when there is none.
 
         The baseline is measured afterwards, by :meth:`measure_baseline`, once the integration branch has its quota.
         """
 
-        child = await self._run_child(workload, budget)
+        child = await self._run_child(workload, budget, hard_stop)
         try:
             artifacts = _succeeded(await asyncio.to_thread(read_prelude, child))
             recipe = await self._root_recipe(artifacts, workload.framework)
@@ -153,7 +153,7 @@ class Prelude:
         )
         return PreludeResult(root, profile)
 
-    async def _run_child(self, workload: Workload, budget: SessionBudget) -> Path:
+    async def _run_child(self, workload: Workload, budget: SessionBudget, hard_stop: HardStop) -> Path:
         try:
             hours = budget.prelude_max_hours(self._clock.now())
         except BudgetExhausted as exc:
@@ -161,8 +161,7 @@ class Prelude:
         argv = prelude_argv(workload, hours, self._layout.prelude_launch)
         self._decisions.record(Decision(DecisionKind.PRELUDE, "child started", PRELUDE_BRANCH, {"argv": list(argv)}))
         exit_code = await self._wait(
-            await self._processes.spawn(argv, branch=PRELUDE_BRANCH, log=self._layout.prelude_log),
-            budget.hard_stop_at,
+            await self._processes.spawn(argv, branch=PRELUDE_BRANCH, log=self._layout.prelude_log), hard_stop
         )
         try:
             child = read_child_session(self._layout.prelude_launch)
@@ -176,13 +175,13 @@ class Prelude:
             raise PreludeFailed(f"the baseline prelude exited with {exit_code} before writing its launch info")
         return child
 
-    async def _wait(self, child: RegisteredProcess, hard_stop_at: float) -> int:
+    async def _wait(self, child: RegisteredProcess, hard_stop: HardStop) -> int:
         """The child's exit code; nothing it started is left once this returns or is cancelled."""
 
         try:
             exit_code = await child.process.wait()
         except asyncio.CancelledError:
-            grace = min(PRELUDE_TERMINATE_GRACE_SECONDS, (hard_stop_at - self._clock.now()) / 2)
+            grace = min(PRELUDE_TERMINATE_GRACE_SECONDS, (hard_stop.at - self._clock.now()) / 2)
             await self._processes.terminate(child, grace)
             await self._processes.kill_branch(PRELUDE_BRANCH)
             raise

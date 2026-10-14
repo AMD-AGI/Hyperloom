@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from hyperloom_multibranch.scheduling.clock import Clock
+
 # inference_optimizer/cli/parser.py DEFAULT_MAX_HOURS
 MB_DEFAULT_MAX_HOURS = 2.0
 # orchestrator/phases/machine_state.py DEFAULT_LONGRUN_MAX_MINUTES (14 days); a budget of 0 means unlimited
@@ -90,6 +92,32 @@ class SessionBudget:
         )
 
 
+class HardStop:
+    """When nothing of the session may run any longer: the budget's hard stop until :meth:`bring_forward` moves it.
+
+    A stop signal brings it forward to the CLOSE grace from that moment, once, so the unwinding of the phases, a
+    cancelled PRELUDE's child and CLOSE all share that one grace.
+    """
+
+    def __init__(self, budget: SessionBudget, clock: Clock) -> None:
+        self._grace = budget.close_grace_seconds
+        self._clock = clock
+        self._at = budget.hard_stop_at
+        self._brought_forward = False
+
+    @property
+    def at(self) -> float:
+        return self._at
+
+    def bring_forward(self) -> float:
+        """Move the hard stop to the CLOSE grace from now, unless it is sooner or was moved already; return it."""
+
+        if not self._brought_forward:
+            self._at = min(self._at, self._clock.now() + self._grace)
+            self._brought_forward = True
+        return self._at
+
+
 __all__ = [
     "MB_CLOSE_GRACE_CAP_SECONDS",
     "MB_CLOSE_GRACE_FRACTION",
@@ -100,6 +128,7 @@ __all__ = [
     "MB_MIN_PRELUDE_HOURS",
     "MB_UNLIMITED_HOURS",
     "BudgetExhausted",
+    "HardStop",
     "PhaseDeadlines",
     "SessionBudget",
 ]

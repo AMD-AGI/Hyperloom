@@ -20,7 +20,7 @@ import hyperloom
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.scheduling import PriorityClass
 from hyperloom_multibranch.notebook import LocalNotebook
-from hyperloom_multibranch.scheduling.budget import SessionBudget
+from hyperloom_multibranch.scheduling.budget import HardStop, SessionBudget
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import DecisionLog
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
@@ -97,7 +97,7 @@ def _prelude(
 async def _run(prelude: Prelude, budget: SessionBudget) -> PreludeResult:
     """Both PRELUDE steps, as the session runs them once the integration branch has its quota."""
 
-    result = await prelude.root(WORKLOAD, budget)
+    result = await prelude.root(WORKLOAD, budget, HardStop(budget, _clock()))
     await prelude.measure_baseline(result.root_commit)
     return result
 
@@ -147,7 +147,8 @@ async def test_finished_child_roots_the_session_before_any_baseline_test(tmp_pat
     child = child_with_patch(tmp_path)
     processes, peers = _registry(layout, child), _peers(layout)
 
-    result = await _prelude(layout, processes, peers).root(WORKLOAD, SessionBudget.from_hours(2.0, NOW))
+    budget = SessionBudget.from_hours(2.0, NOW)
+    result = await _prelude(layout, processes, peers).root(WORKLOAD, budget, HardStop(budget, _clock()))
 
     assert float(processes.argv[processes.argv.index("--max-hours") + 1]) == pytest.approx(2.0)
     assert result.root_commit == ROOT_COMMIT

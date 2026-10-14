@@ -24,8 +24,10 @@ from hyperloom_multibranch.scheduling.budget import (
     MB_FINAL_SHARE,
     MB_UNLIMITED_HOURS,
     BudgetExhausted,
+    HardStop,
     SessionBudget,
 )
+from hyperloom_multibranch.scheduling.clock import Clock
 
 _HOUR = 3600.0
 _SRC = Path(hyperloom.__file__).parent
@@ -95,3 +97,21 @@ def test_phases_after_the_deadline_all_collapse_onto_it() -> None:
 
     assert phases.explore_end == phases.final_end == budget.deadline
     assert budget.remaining(2 * _HOUR) == 0.0
+
+
+def test_the_hard_stop_is_brought_forward_to_one_close_grace_once() -> None:
+    budget = SessionBudget.from_hours(1.0, 0.0)
+    times = [600.0]
+    hard_stop = HardStop(budget, Clock(now=lambda: times[0]))
+    assert hard_stop.at == budget.hard_stop_at
+
+    assert hard_stop.bring_forward() == 600.0 + budget.close_grace_seconds
+    times[0] = 620.0
+    assert hard_stop.bring_forward() == hard_stop.at == 600.0 + budget.close_grace_seconds
+
+
+def test_the_hard_stop_is_never_brought_later() -> None:
+    budget = SessionBudget.from_hours(1.0, 0.0)
+    hard_stop = HardStop(budget, Clock(now=lambda: budget.deadline))
+
+    assert hard_stop.bring_forward() == budget.hard_stop_at

@@ -6,9 +6,10 @@
 PRELUDE gets the whole remaining budget; whatever it leaves is split into the EXPLORE, FINAL and CLOSE windows. The
 FINAL candidates are fixed while every branch still stands, then exploration ends and FINAL validates them. A
 failed PRELUDE, a stop signal, the session deadline or an unhandled error skip straight to CLOSE, which always runs
-and kills every process the session started. The deadline plus the CLOSE grace bounds CLOSE itself; after a stop
-signal the CLOSE grace bounds both the unwinding of the cancelled phases and CLOSE, and a second signal, whenever it
-arrives, cuts both short: every registered process is killed and the report written at once.
+and kills every process the session started. The deadline plus the CLOSE grace bounds CLOSE itself; a stop signal
+brings that hard stop forward to the CLOSE grace from the signal, once, and the unwinding of the cancelled phases
+and CLOSE share it. A second signal, whenever it arrives, cuts
+both short: every registered process is killed and the report written at once.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.notebook.rsi.frontier import FrontierPolicy, FrontierScoring
 from hyperloom_multibranch.scheduling.branches import BranchControl
-from hyperloom_multibranch.scheduling.budget import SessionBudget
+from hyperloom_multibranch.scheduling.budget import HardStop, SessionBudget
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.close import CloseReport, Closer
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
@@ -151,23 +152,23 @@ class Session:
         self._write_manifest(budget, await asyncio.to_thread(code_version))
         self._signals.install()
         try:
-            return await self._run_and_close(budget)
+            return await self._run_and_close(budget, HardStop(budget, self._clock))
         finally:
             self._signals.uninstall()
 
-    async def _run_and_close(self, budget: SessionBudget) -> SessionOutcome:
+    async def _run_and_close(self, budget: SessionBudget, hard_stop: HardStop) -> SessionOutcome:
         ending = SessionOutcome(SessionStopReason.ABORTED, None, None, "")
         try:
-            ending = await self._until_stopped(budget)
+            ending = await self._until_stopped(budget, hard_stop)
         except BaseException as exc:
             ending = replace(ending, error=f"{type(exc).__name__}: {exc}")
             raise
         finally:
-            ending = await self._close(ending, budget)
+            ending = await self._close(ending, hard_stop)
         return ending
 
-    async def _until_stopped(self, budget: SessionBudget) -> SessionOutcome:
-        phases = asyncio.ensure_future(self._phases(budget))
+    async def _until_stopped(self, budget: SessionBudget, hard_stop: HardStop) -> SessionOutcome:
+        phases = asyncio.ensure_future(self._phases(budget, hard_stop))
         signal = asyncio.ensure_future(self._signals.wait())
         deadline = asyncio.ensure_future(self._clock.sleep(budget.remaining(self._clock.now())))
         try:
@@ -179,11 +180,12 @@ class Session:
             return phases.result()
         if self._signals.received is not None:
             ending = SessionOutcome(SessionStopReason.SIGNAL, None, None, f"stopped by signal {self._signals.received}")
+            hard_stop.bring_forward()
         else:
             ending = SessionOutcome(
                 SessionStopReason.TIME_EXHAUSTED, None, None, "the session deadline passed before FINAL"
             )
-        await self._unwind(phases, self._close_by(ending, budget))
+        await self._unwind(phases, hard_stop.at)
         return ending
 
     async def _unwind(self, phases: asyncio.Future[SessionOutcome], until: float) -> None:
@@ -206,12 +208,12 @@ class Session:
         elif not phases.cancelled():
             phases.result()
 
-    async def _phases(self, budget: SessionBudget) -> SessionOutcome:
+    async def _phases(self, budget: SessionBudget, hard_stop: HardStop) -> SessionOutcome:
         caps = self._settings.caps
         await self._toolbox.apply_quota(QuotaPolicy(caps.max_parallel_tests, ()))
         self._phase("prelude")
         try:
-            prelude = await self._root_session(budget)
+            prelude = await self._root_session(budget, hard_stop)
         except PreludeFailed as exc:
             return SessionOutcome(SessionStopReason.PRELUDE_FAILED, None, None, str(exc))
         await self._notebook.write_manifest_fingerprint(
@@ -230,10 +232,10 @@ class Session:
         self._decisions.record(Decision(DecisionKind.FINAL, final.reason, detail={"chosen": encode(final.chosen)}))
         return SessionOutcome(reason, final, None, "")
 
-    async def _root_session(self, budget: SessionBudget) -> PreludeResult:
+    async def _root_session(self, budget: SessionBudget, hard_stop: HardStop) -> PreludeResult:
         """PRELUDE: the root commit, the integration branch with its quota, then the baseline measured on it."""
 
-        prelude = await self._prelude.root(self._settings.workload, budget)
+        prelude = await self._prelude.root(self._settings.workload, budget, hard_stop)
         self._roster.add_integration(prelude.root_commit, k=1)
         await self._branches.push_quota()
         await self._prelude.measure_baseline(prelude.root_commit)
@@ -248,10 +250,10 @@ class Session:
             self._roster.entries(), progress, integration.head_commit, integration.head_value, MB_FAKE_PRIMARY_METRIC
         )
 
-    async def _close(self, ending: SessionOutcome, budget: SessionBudget) -> SessionOutcome:
+    async def _close(self, ending: SessionOutcome, hard_stop: HardStop) -> SessionOutcome:
         self._phase("close", stop_reason=ending.stop_reason.value, error=ending.error)
         closing = asyncio.ensure_future(
-            self._closer.close(ending.stop_reason, ending.final, ending.error, self._close_by(ending, budget))
+            self._closer.close(ending.stop_reason, ending.final, ending.error, hard_stop.at)
         )
         cut = asyncio.ensure_future(self._signals.wait_second())
         try:
@@ -283,13 +285,6 @@ class Session:
         self._closer.write_report(report)
         logger.error("%s; every registered process was killed", CUT_SHORT)
         return replace(ending, close=report, error=error)
-
-    def _close_by(self, ending: SessionOutcome, budget: SessionBudget) -> float:
-        """The hard stop of CLOSE: after a stop signal the operator waits the CLOSE grace at most, not the budget."""
-
-        if ending.stop_reason is SessionStopReason.SIGNAL:
-            return min(budget.hard_stop_at, self._clock.now() + budget.close_grace_seconds)
-        return budget.hard_stop_at
 
     def _phase(self, name: str, **detail: object) -> None:
         self._decisions.record(Decision(DecisionKind.PHASE, name, detail=detail))
