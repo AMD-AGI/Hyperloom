@@ -454,8 +454,7 @@ def _discover_xdit_plan(arg: Path | str | None) -> _PatchPlan | None:
     version = _XDIT_SHA_TO_VERSION.get(sha)
     if version is None:
         log.warning(
-            "_server_patcher: xDiT SHA %s not in known image table; "
-            "capture-phase profiling will be unavailable",
+            "_server_patcher: xDiT SHA %s not in known image table; capture-phase profiling will be unavailable",
             sha[:12],
         )
         return None
