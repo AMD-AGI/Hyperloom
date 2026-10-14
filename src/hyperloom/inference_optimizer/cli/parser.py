@@ -13,7 +13,7 @@ from typing import NoReturn
 from .. import framework_registry
 from .constraint_args import add_constraint_arguments, positive_watts_arg
 from .backends import CRITIC_PROTOCOL_CHOICES
-from .recover import add_cleanup_confirmation_arguments
+from .recover import RECOVER_DESCRIPTION, RECOVER_HELP, add_cleanup_confirmation_arguments
 from hyperloom.common import predictor_config
 from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.common.llm_config import is_anthropic_only, is_openai_only, provider_model_defaults
@@ -1166,15 +1166,8 @@ def _build_parser() -> argparse.ArgumentParser:
     rec = sub.add_parser(
         "recover",
         parents=[common],
-        help="Rebuild + push the session_breakdown for a session that exited "
-        "abnormally (crash / SIGKILL) so its breakdown lands on Langfuse; or, with "
-        "--confirm-scope-gone / --confirm-stopped, record the cleanup confirmation "
-        "a refused --resume-from asks for.",
-        description="Without a confirmation option, rebuild and push the session_breakdown of a session that "
-        "exited abnormally. With --confirm-scope-gone OWNER_SCOPE (an execution environment that no longer exists) "
-        "or --confirm-stopped TASK_ID (one task recorded without an owner scope), plus --confirmation-reason, "
-        "instead record the cleanup confirmation a refused --resume-from asks for; nothing is rebuilt. "
-        "Exit codes: 0 success, 1 breakdown rebuild failed, 2 invalid arguments or a refused confirmation.",
+        help=RECOVER_HELP,
+        description=RECOVER_DESCRIPTION,
     )
     rec.add_argument(
         "--session-dir",
