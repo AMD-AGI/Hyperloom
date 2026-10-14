@@ -203,7 +203,7 @@ def _materialize_pr_diff_from_head(
 class PrMaterialization:
     """What an upstream-PR candidate resolved to on disk."""
 
-    #: The patch files to apply; empty when :attr:`failure` or :attr:`already_present` is set.
+    #: The patch files to apply; empty when :attr:`failure` is set.
     patches: list[Path] = field(default_factory=list)
     #: Which source produced them: ``explicit`` / ``checkout_head`` /
     #: ``diff_url_fallback`` / ``diff_url``.
@@ -212,7 +212,8 @@ class PrMaterialization:
     #: caller returns it as-is rather than benching an unpatched tree.
     failure: dict[str, Any] | None = None
     #: Evidence that the live tree already holds every change the candidate
-    #: makes, so there is nothing to apply.
+    #: makes. :attr:`failure` is set with it, for a round that changes more
+    #: than the candidate and so cannot end on this evidence.
     already_present: list[dict[str, str]] = field(default_factory=list)
 
 
@@ -237,19 +238,19 @@ def _empty_head_diff(
     That shows only that the head is in the live history, which stays true
     after a revert. A candidate with a ``diff_url`` therefore falls back to it,
     and the apply's reverse check decides. Without one, the tree holds the PR
-    only when it still has the head's copy of every file the PR changes.
+    only when it still has the head's copy of every file the PR changes, and
+    that evidence rides on the empty-diff failure rather than replacing it.
     """
+    empty = _checkout_head_failed(
+        _CHECKOUT_HEAD,
+        f"checkout-head produced an empty diff for range {diff_range!r} (PR head already merged into live tree?)",
+    )
     has_diff_url = bool(str(candidate.get("diff_url") or "").strip())
     if has_diff_url or not _tree_has_head_files(framework_root, head_sha, candidate.get("changed_files")):
-        return _checkout_head_failed(
-            _CHECKOUT_HEAD,
-            f"checkout-head produced an empty diff for range {diff_range!r} (PR head already merged into live tree?)",
-        )
+        return empty
     log.info("upstream_pr: %s diffs empty and the tree has the head's files; the PR is already in it", diff_range)
-    return PrMaterialization(
-        mode=_CHECKOUT_HEAD,
-        already_present=[{"diff_range": diff_range, "check": PresenceCheck.PR_HEAD_FILES.value}],
-    )
+    empty.already_present.append({"diff_range": diff_range, "check": PresenceCheck.PR_HEAD_FILES.value})
+    return empty
 
 
 def _tree_has_head_files(framework_root: Path, head_sha: str, changed_files: Any) -> bool:

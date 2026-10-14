@@ -137,14 +137,18 @@ def _materialize_head(repo: Path, tmp_path: Path, head_sha: str, **extra: object
 
 
 def test_materialize_reports_a_merged_pr_head_as_already_present(tmp_path: Path):
-    """The tree has the head's copy of every file the PR changes: nothing to apply, nothing failed."""
+    """The tree has the head's copy of every file the PR changes: nothing to apply, and evidence that it is in.
+
+    The empty-diff failure stays on the result for a round that changes more than the PR.
+    """
     repo = tmp_path / "framework"
     head_sha = _init_repo_with_pr_branch(repo)
     _merge_pr_head(repo, revert=False)
 
     out = _materialize_head(repo, tmp_path, head_sha, changed_files=["src.py"])
 
-    assert out.failure is None
+    assert out.failure is not None and out.failure["error_class"] == "checkout_head_failed"
+    assert "empty diff" in out.failure["error"]
     assert out.patches == []
     assert out.already_present == [{"diff_range": f"{head_sha}..{head_sha}", "check": "pr_head_files_in_tree"}]
 

@@ -1422,6 +1422,80 @@ def _resolve_artifact_specs(
     return specs, errors
 
 
+@dataclass(frozen=True)
+class _RoundProposal:
+    """What a round proposes besides its patches: launch config and installable artifacts."""
+
+    config_changes: dict[str, str]
+    extra_server_args: str
+    #: The proposed env that passed the safety filter, with the switch env on top.
+    extra_envs: dict[str, str]
+    dropped_env_overrides: list[str]
+    switch_manifest: list[dict[str, Any]]
+    switch_problems: list[str]
+    artifact_specs: list[_ArtifactSpec]
+    artifact_errors: list[dict[str, str]]
+
+    def changes_beyond_patches(self, *, setup: bool, runtime: bool) -> bool:
+        """Whether there is something to measure even when every patch is already in the tree.
+
+        ``setup`` and ``runtime`` say whether the round replays setup commands and boots a runtime it acquired.
+        """
+        return bool(self.extra_server_args or self.extra_envs or self.artifact_specs or setup or runtime)
+
+
+def _read_round_proposal(
+    params: dict[str, Any],
+    done_payload: dict[str, Any] | None,
+    *,
+    workspace: Path,
+    delivers_code: bool,
+) -> _RoundProposal:
+    """Read a round's proposal from its params, then its specialist's done payload; nothing is applied or logged.
+
+    An artifact source must resolve inside ``workspace``, and the framework-rewrite switches gate the code the
+    round carries, so they are discarded unless ``delivers_code``.
+    """
+    config_changes = dict(params.get("config_changes") or {})
+    if not config_changes and done_payload:
+        cc = done_payload.get("config_changes")
+        if isinstance(cc, dict):
+            config_changes = {str(k): str(v) for k, v in cc.items()}
+    extra_args = params.get("extra_server_args")
+    envs = dict(config_changes)
+    raw_extra_envs = params.get("extra_envs")
+    if isinstance(raw_extra_envs, dict):
+        envs.update({str(k): str(v) for k, v in raw_extra_envs.items()})
+    envs, dropped = filter_untrusted_env_mapping(envs, allow_predicate=is_allowed_variant_env_key)
+    switch_manifest, switch_problems = _parse_framework_switches(params=params, done_payload=done_payload)
+    if switch_manifest and not delivers_code:
+        # A manifest without a patch describes switches that gate code which
+        # was never delivered. Setting them would be a no-op, and registering
+        # them as levers would leave the ledger pointing at absent code.
+        switch_problems.append(
+            f"discarded {len(switch_manifest)} switch(es): the deliverable carries no patch, "
+            f"so there is no rewrite for them to gate"
+        )
+        switch_manifest = []
+    envs.update(_switch_manifest.switch_env(switch_manifest))
+    explicit_artifacts = params.get("artifacts")
+    artifact_specs, artifact_errors = _resolve_artifact_specs(
+        specialist_workspace=workspace,
+        explicit_artifacts=(list(explicit_artifacts) if isinstance(explicit_artifacts, list) else None),
+        done_payload=done_payload,
+    )
+    return _RoundProposal(
+        config_changes=config_changes,
+        extra_server_args=extra_args if isinstance(extra_args, str) and extra_args.strip() else "",
+        extra_envs=envs,
+        dropped_env_overrides=sorted(dropped),
+        switch_manifest=switch_manifest,
+        switch_problems=switch_problems,
+        artifact_specs=artifact_specs,
+        artifact_errors=artifact_errors,
+    )
+
+
 def _is_aiter_gemm_model_config(spec: _ArtifactSpec) -> bool:
     """Return whether an artifact is an AITER runtime GEMM model-config CSV."""
     if spec.source.suffix.lower() != ".csv":
@@ -2028,6 +2102,8 @@ class IntegratePatchExecutor:
     ) -> dict[str, Any] | None:
         """Fetch the candidate's diff into ``params['patches']``, or end the attempt when there is none to apply.
 
+        A tree that already holds the PR ends it only when the round changes nothing else, as in :meth:`_stage_apply`.
+
         Returns:
             A terminal result when no diff could be fetched or the tree already
             holds the candidate, else ``None``.
@@ -2042,7 +2118,12 @@ class IntegratePatchExecutor:
             diff_fetch_timeout_sec=DEFAULT_DIFF_FETCH_TIMEOUT_SEC,
         )
         if materialized.already_present:
-            return await self._end_already_present(attempt, params, extra, materialized.already_present)
+            proposal = _read_round_proposal(params, attempt.done_payload, workspace=scratch, delivers_code=True)
+            # Setup replay and runtime provisioning come after this point, and
+            # only in an enablement round, so such a round counts as doing both.
+            enablement = bool(params.get("enablement"))
+            if not proposal.changes_beyond_patches(setup=enablement, runtime=enablement):
+                return await self._end_already_present(attempt, params, extra, materialized.already_present)
         if materialized.failure is not None:
             return {
                 **materialized.failure,
@@ -2319,69 +2400,33 @@ class IntegratePatchExecutor:
             explicit_patches=(list(explicit_patches) if isinstance(explicit_patches, list) else None),
             done_payload=done_payload,
         )
-        config_changes = dict(params.get("config_changes") or {})
-        if not config_changes and done_payload:
-            cc = done_payload.get("config_changes")
-            if isinstance(cc, dict):
-                config_changes = {str(k): str(v) for k, v in cc.items()}
-        proposal_extra_args_raw = params.get("extra_server_args")
-        proposal_extra_args = (
-            proposal_extra_args_raw
-            if isinstance(proposal_extra_args_raw, str) and proposal_extra_args_raw.strip()
-            else ""
+        proposal = _read_round_proposal(
+            params, done_payload, workspace=specialist_workspace, delivers_code=bool(patch_paths)
         )
-        proposal_extra_envs = dict(config_changes)
-        raw_extra_envs = params.get("extra_envs")
-        if isinstance(raw_extra_envs, dict):
-            proposal_extra_envs.update({str(k): str(v) for k, v in raw_extra_envs.items()})
-        proposal_extra_envs, _dropped = filter_untrusted_env_mapping(
-            proposal_extra_envs,
-            allow_predicate=is_allowed_variant_env_key,
-        )
-        dropped_env_overrides = sorted(_dropped)
-        if dropped_env_overrides:
+        if proposal.dropped_env_overrides:
             log.warning(
                 "integrate_patch: dropping unsafe env override keys: %s",
-                ", ".join(dropped_env_overrides),
+                ", ".join(proposal.dropped_env_overrides),
             )
         # Framework-rewrite switches. Every rewrite in such a patch sits behind
         # a switch that defaults OFF, so the applied patch is inert and benching
-        # it as-is would measure the baseline. Turn the switches on for the
-        # measurement and carry the parsed manifest to the gate, which needs the
-        # dependency edges to decide between a throughput KEEP and an inert one.
-        switch_manifest, switch_problems = _parse_framework_switches(
-            params=params,
-            done_payload=done_payload,
-        )
-        if switch_manifest and not patch_paths:
-            # A manifest without a patch describes switches that gate code which
-            # was never delivered. Setting them would be a no-op, and registering
-            # them as levers would leave the ledger pointing at absent code.
-            switch_problems.append(
-                f"discarded {len(switch_manifest)} switch(es): the deliverable carries no patch, "
-                f"so there is no rewrite for them to gate"
-            )
-            switch_manifest = []
+        # it as-is would measure the baseline. The proposal turns the switches on
+        # for the measurement, and the parsed manifest goes to the gate, which needs
+        # the dependency edges to decide between a throughput KEEP and an inert one.
+        switch_manifest = proposal.switch_manifest
         if switch_manifest:
-            proposal_extra_envs.update(_switch_manifest.switch_env(switch_manifest))
             log.info(
                 "integrate_patch: benching with %d framework rewrite switch(es) on\n%s",
                 len(switch_manifest),
-                _switch_manifest.summarize(switch_manifest, switch_problems),
+                _switch_manifest.summarize(switch_manifest, proposal.switch_problems),
             )
-        elif switch_problems:
+        elif proposal.switch_problems:
             log.warning(
                 "integrate_patch: framework switch manifest unusable\n%s",
-                _switch_manifest.summarize(switch_manifest, switch_problems),
+                _switch_manifest.summarize(switch_manifest, proposal.switch_problems),
             )
         attempt.switch_manifest = switch_manifest
-
-        explicit_artifacts = params.get("artifacts")
-        artifact_specs, artifact_resolve_errors = _resolve_artifact_specs(
-            specialist_workspace=specialist_workspace,
-            explicit_artifacts=(list(explicit_artifacts) if isinstance(explicit_artifacts, list) else None),
-            done_payload=done_payload,
-        )
+        artifact_specs = proposal.artifact_specs
         target_gpu_type = str(
             getattr(shared_state, "gpu_type", "") or params.get("gpu_type") or params.get("target_platform") or ""
         ).strip()
@@ -2412,12 +2457,11 @@ class IntegratePatchExecutor:
                 ),
             }
 
-        _setup_ran = bool(attempt.setup_commands_applied)
         # A runtime this round acquired changes what the next boot executes; a
         # re-provisioned kept one is the stack the last KEEP was already graded on.
-        acquired_runtime = bool(attempt.attempt_venv_root) and not attempt.shared_state.enablement.kept_stack_action
-        changes_beyond_patches = bool(
-            proposal_extra_args or proposal_extra_envs or artifact_specs or _setup_ran or acquired_runtime
+        changes_beyond_patches = proposal.changes_beyond_patches(
+            setup=bool(attempt.setup_commands_applied),
+            runtime=bool(attempt.attempt_venv_root) and not attempt.shared_state.enablement.kept_stack_action,
         )
         if not patch_paths and not changes_beyond_patches:
             # Launch-only mode: skip the no-patches early-return and fall through to bench.
@@ -2434,7 +2478,7 @@ class IntegratePatchExecutor:
                 "patches_applied": [],
                 "patches_reverted": [],
                 "artifacts_applied": [],
-                "artifact_errors": artifact_resolve_errors,
+                "artifact_errors": proposal.artifact_errors,
                 "reason": (
                     "neither patches, config_changes, installable artifacts, nor "
                     "allowlisted setup commands were supplied / discoverable for "
@@ -2583,9 +2627,9 @@ class IntegratePatchExecutor:
             "task_id": attempt.task_id,
             "patches": [str(p) for p in patch_paths],
             "artifacts": [{"target": str(s.target), "rel_target": s.rel_target} for s in artifact_specs],
-            "config_changes": dict(config_changes),
-            "extra_server_args": proposal_extra_args,
-            "extra_envs": dict(proposal_extra_envs),
+            "config_changes": dict(proposal.config_changes),
+            "extra_server_args": proposal.extra_server_args,
+            "extra_envs": dict(proposal.extra_envs),
             "framework_source_root": str(framework_root or ""),
             "workspace": str(output_root),
             "attempt_venv_root": attempt.attempt_venv_root,
@@ -2657,7 +2701,7 @@ class IntegratePatchExecutor:
                 return {
                     "status": "apply_failed",
                     "error_class": "artifact_backup_failed",
-                    "error": artifact_resolve_errors + artifact_backup_errors,
+                    "error": proposal.artifact_errors + artifact_backup_errors,
                     "specialist_task_id": specialist_task_id,
                     "patches_applied": [],
                     "patches_reverted": [],
@@ -2721,7 +2765,7 @@ class IntegratePatchExecutor:
                 return {
                     "status": "apply_failed",
                     "error_class": "artifact_install_failed",
-                    "error": artifact_resolve_errors + artifact_apply_errors,
+                    "error": proposal.artifact_errors + artifact_apply_errors,
                     "specialist_task_id": specialist_task_id,
                     "patches_applied": [],
                     "patches_reverted": [],
@@ -2730,8 +2774,8 @@ class IntegratePatchExecutor:
                 }
 
         # Inherited first, this round last: inheriting is not pinning.
-        extra_server_args_applied = _merge_established_server_args(inherited_args, proposal_extra_args)
-        extra_envs_applied = {**inherited_envs, **proposal_extra_envs}
+        extra_server_args_applied = _merge_established_server_args(inherited_args, proposal.extra_server_args)
+        extra_envs_applied = {**inherited_envs, **proposal.extra_envs}
 
         if params.get("apply_only"):
             return {
@@ -2742,7 +2786,7 @@ class IntegratePatchExecutor:
                 "artifacts_applied": applied_artifacts,
                 "extra_server_args_applied": extra_server_args_applied,
                 "extra_envs_applied": extra_envs_applied,
-                "dropped_env_overrides": dropped_env_overrides,
+                "dropped_env_overrides": proposal.dropped_env_overrides,
                 "reason": "apply_only=True; benchmark skipped",
                 "workspace": str(output_root),
             }
@@ -2750,7 +2794,7 @@ class IntegratePatchExecutor:
         attempt.output_root = output_root
         attempt.extra_envs_applied = extra_envs_applied
         attempt.extra_server_args_applied = extra_server_args_applied
-        attempt.dropped_env_overrides = dropped_env_overrides
+        attempt.dropped_env_overrides = proposal.dropped_env_overrides
         return None
 
     async def _end_already_present(

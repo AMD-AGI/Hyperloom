@@ -517,6 +517,33 @@ async def test_executor_ends_a_merged_pr_head_as_already_present_without_a_fetch
     assert [(row["outcome"], row["pr_url"]) for row in rows] == [("already_present", _PR_URL)]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "change",
+    [
+        pytest.param({"extra_server_args": "--max-num-seqs 64"}, id="extra_server_args"),
+        pytest.param({"config_changes": {"VLLM_ROCM_USE_AITER": "1"}}, id="config_changes"),
+        pytest.param({"extra_envs": {"VLLM_ROCM_USE_AITER": "1"}}, id="extra_envs"),
+        pytest.param({"artifacts": [{"source": "tuned.json", "target": "mod/tuned.json"}]}, id="artifacts"),
+        pytest.param({"enablement": True, "enablement_setup_commands": ["pip install example-pkg==1.0"]}, id="setup"),
+    ],
+)
+async def test_executor_fails_a_merged_pr_head_whose_round_changes_more(tmp_path, executor_env, monkeypatch, change):
+    """A merged head ends the round only when nothing else would change; otherwise it is the checkout-head failure."""
+    executor, kb_root = executor_env
+    repo, head = _repo_with_merged_pr_head(tmp_path, revert=False)
+    _mkdir(runs_dir(executor.session_dir, "integrate_patch", "t-more")).joinpath("tuned.json").write_text("{}")
+    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(repo)])
+
+    result = await executor(_make_ctx("t-more", {**_pr_head_round(repo, head), **change}, _approved_state()))
+
+    assert result["status"] == "fetch_failed", result
+    assert result["error_class"] == "checkout_head_failed"
+    assert "empty diff" in result["error"]
+    assert "already_present" not in result
+    assert read_pr_ledger(kb_root=kb_root) == []
+
+
 def _serve_superset(monkeypatch) -> None:
     """Make every ``diff_url`` fetch return the PR's diff."""
     from hyperloom.orchestrator.actions.executors import _patch_source_pr
@@ -541,6 +568,25 @@ async def test_executor_ends_a_merged_pr_fetched_by_diff_url_as_already_present(
     assert result["status"] == "already_present"
     assert [row["check"] for row in result["already_present"]] == ["git_reverse_apply_check"]
     assert [row["outcome"] for row in read_pr_ledger(kb_root=kb_root)] == ["already_present"]
+
+
+@pytest.mark.asyncio
+async def test_executor_benchmarks_a_merged_pr_fetched_by_diff_url_that_changes_server_args(
+    tmp_path, executor_env, monkeypatch
+):
+    """The diff the tree already holds does not end a round whose server args still need measuring."""
+    _serve_superset(monkeypatch)
+    reached = _record_bench(monkeypatch)
+    executor, kb_root = executor_env
+    repo, head = _repo_with_merged_pr_head(tmp_path, revert=False)
+    params = _pr_head_round(repo, head, diff_url="https://example.invalid/pr.diff", prefer_checkout=True)
+    params["extra_server_args"] = "--max-num-seqs 64"
+
+    result = await executor(_make_ctx("t-merged-args", params, _approved_state()))
+
+    assert reached == ["t-merged-args"]
+    assert result["status"] != "already_present"
+    assert "already_present" not in [row["outcome"] for row in read_pr_ledger(kb_root=kb_root)]
 
 
 @pytest.mark.asyncio
