@@ -27,6 +27,7 @@ from hyperloom.measure.runner.farm import Farm, FarmError, build_farm, verify_fa
 from hyperloom.measure.runner.inventory import OutputRejected, inventory, write_farm_inventory
 from hyperloom.measure.runner.platform_env import align_platform_env, take_topology
 from hyperloom.measure.runner.rewrite import rewrite_config
+from hyperloom.measure.runner.rounds import write_rounds
 from hyperloom.measure.runner.service import Progress, RunnerFailure, wait_for_file, write_status
 from hyperloom.measure.runner.tools import ToolError, ensure_inferencex, ensure_magpie
 from hyperloom.measure.socket import RoundPlan, SessionFacts, TestCall
@@ -276,6 +277,7 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
     harvest_leaked_artifacts(ctx.files, subprocess_started_unix=started, leak_root=ctx.work)
     _check_node(before, hardware.ecc_counts(visible), visible, facts)
     write_farm_inventory(ctx.files, farm)
+    write_rounds(ctx.files, outcome)
     try:
         files = inventory(ctx.files, max_total_bytes=spec.outputs.max_total_bytes)
     except OutputRejected as exc:

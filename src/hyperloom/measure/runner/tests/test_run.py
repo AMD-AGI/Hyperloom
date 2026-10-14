@@ -140,7 +140,10 @@ def test_a_successful_test_leaves_a_signed_manifest_and_status_last(tmp_path, en
     assert signing.verify(raw, (out / "manifest.sig").read_text(), signing.public_key_pem(key))
     manifest = ResultManifest.from_bytes(raw)
     assert manifest.request_id == REQUEST_ID and manifest.outcome.returncode == 0
-    assert sorted(f.path for f in manifest.files) == ["farm_inventory.json", "server.log"]
+    assert sorted(f.path for f in manifest.files) == ["farm_inventory.json", "rounds.json", "server.log"]
+    assert json.loads((out / "files" / "rounds.json").read_text()) == [
+        {"point": 0, "phase": "measure", "dir": ".", "returncode": 0}
+    ]
     assert manifest.runner.sandbox_id == "sbx-1" and manifest.runner.node_name == "node-1"
     assert manifest.platform_env_changed == ("NCCL_IB_SL",)
     assert _status(tmp_path) == {"state": "succeeded", "error_class": None, "message": ""}
