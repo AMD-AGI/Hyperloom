@@ -362,6 +362,18 @@ operator can add one domain of their own, `custom_specialist`, whose focus is
 the text they supply at launch; until one has started, the Coordinator
 requests it at most once per macro cycle in this phase.
 
+With a [PrimaTune](../reference/primatune-predictor.md) endpoint configured,
+the phase also asks that predictor for a launch recipe once per decision point:
+the macro cycle, the stack depth, and the number of profiles taken. At entry it
+asks after the phase's own first dispatch and, in `active` mode, waits up to
+five minutes for the answer before Orchestration's first turn, so the first
+grid can carry it. Every tick then files an answer that has arrived and asks
+again once a KEEP or a new profile has moved the decision point. The answer
+joins the untested-proposal queue ahead of the specialists' rows and counts as
+the phase's work; a source change it proposes is offered as a mandate a patch
+specialist takes by id. `shadow` asks and only logs; without an endpoint, or in
+`off`, nothing is asked and nothing waits.
+
 The phase advances to KERNEL_AGENT only when **both** levers are dry
 (`optimize_no_more_leverage`). Either arm going quiet raises
 `switch_bottleneck` so the next macro-cycle steers off this bottleneck,

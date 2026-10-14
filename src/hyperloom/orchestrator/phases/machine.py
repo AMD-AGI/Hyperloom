@@ -209,11 +209,7 @@ class MachinePhase(CoordinatorCollaborator):
         kernel_facts = await self._coord.phase_kernel.exit_facts()
         optimize_enabled = self.optimize_enabled()
         in_enablement = str(state.phase or "").upper() == _phase_state.PHASE_ENABLEMENT
-        if str(state.phase or "").upper() == _phase_state.PHASE_PRELUDE or in_enablement:
-            # Both phases hold their exit for this marker. A cancelled analysis, or one that ended before a
-            # restart booked it, never reaches the writeback that clears it, so the hold would run to its
-            # allowance.
-            await self._coord.phase_kernel.release_finished_roofline_gate()
+        await self._release_holds_no_task_will_settle()
         enablement_in_flight = in_enablement and await self._coord.enablement_lane.enablement_in_flight()
         next_phase = _phase_state.compute_next_phase(
             state,
@@ -351,6 +347,19 @@ class MachinePhase(CoordinatorCollaborator):
             )
         if save_error is not None:
             raise save_error
+
+    async def _release_holds_no_task_will_settle(self) -> None:
+        """Settle what the current phase's exit is waiting on when the task that would have settled it is gone.
+
+        A task cancelled outside the run (``hyperloom recover``) or ended before a restart booked it never reaches
+        the writeback that settles the phase's hold, so the hold would run to its allowance.
+        """
+        phase = str(self.shared_state.phase or "").upper()
+        if phase in (_phase_state.PHASE_PRELUDE, _phase_state.PHASE_ENABLEMENT):
+            # Both phases hold their exit for this marker.
+            await self._coord.phase_kernel.release_finished_roofline_gate()
+        # SWEEP waits for its conc_sweep's outcome; checked on a resumed process's first decision only.
+        await self._coord.phase_sweep.resume_unsettled_sweep()
 
     async def _drain_for_transition(self, *, prior: str, target: str, reason: str, evidence: Any) -> bool:
         """Clear the way to ``target`` and return whether the transition may commit on this tick.

@@ -352,6 +352,63 @@ def _record_review_outcome(router: Any, pending: Any, **outcome: Any) -> None:
 class IntentRouter(CoordinatorCollaborator):
     """Validates and dispatches agent-emitted intents on behalf of a Coordinator."""
 
+    def _resolve_primatune_mandate(self, params: dict[str, Any]) -> PolicyDenied | None:
+        """Swap a queued predictor mandate in for the ``primatune_mandate_id`` that cites it.
+
+        Side-effecting: rewrites ``task_description`` and the scope, mode,
+        provenance and lever params in place. An id no round carries is refused
+        rather than dispatched: the task_description beside it is the
+        placeholder the prompt has orchestration write for the mandate's text.
+        """
+        from ..lever import LEVER_SOURCE_PATCH
+        from ..predictor.mandate import find_mandate
+        from ..predictor.rows import PROVENANCE
+
+        mandate_id = str(params.get("primatune_mandate_id") or "").strip()
+        if not mandate_id:
+            return None
+        mandate = find_mandate(self.shared_state, mandate_id)
+        if not mandate:
+            return PolicyDenied(
+                f"delegate{{action_name='specialist'}} cites primatune_mandate_id={mandate_id!r}, "
+                "which no predictor round carries",
+                rule="unknown_primatune_mandate",
+                hint=(
+                    "Copy the id verbatim from the predictor's source-change mandate line, or dispatch the "
+                    "specialist without primatune_mandate_id and with a task_description of its own."
+                ),
+            )
+        params.update(
+            task_description=mandate,
+            scope="freeform",
+            mode="patch",
+            provenance=PROVENANCE,
+            lever_kind=LEVER_SOURCE_PATCH,
+        )
+        # A domain would relabel the patch specialist:<domain> on its way to integrate_patch.
+        params.pop("domain", None)
+        params.pop("tags", None)
+        return None
+
+    async def _admit_specialist(self, source: str, intent: Intent, params: dict[str, Any]) -> bool:
+        """Resolve a cited predictor mandate and stamp ownership; ``False`` once the dispatch is refused."""
+        # Before the ownership stamp: a resolved mandate sets the lever the stamp would otherwise derive.
+        refused = self._resolve_primatune_mandate(params)
+        if refused is not None:
+            await self.record_policy_denied(source, intent, refused, action_name="specialist")
+            return False
+        # Capture proposal ownership at dispatch.
+        self._stamp_specialist_owner(params)
+        return True
+
+    def _consume_primatune_mandate(self, action_name: str, params: dict[str, Any], task_id: str) -> None:
+        """Mark the predictor mandate a specialist dispatch cites as consumed by ``task_id``."""
+        if action_name != "specialist":
+            return
+        from ..predictor.mandate import mark_mandate_consumed
+
+        mark_mandate_consumed(self.shared_state, params.get("primatune_mandate_id"), task_id)
+
     def _stamp_specialist_owner(self, params: dict[str, Any]) -> str:
         """Freeze patch ownership when a specialist task is created."""
         lever = patch_lever_kind(params)
@@ -844,9 +901,8 @@ class IntentRouter(CoordinatorCollaborator):
                     },
                 )
                 return
-        if action_name == "specialist":
-            # Capture proposal ownership at dispatch.
-            self._stamp_specialist_owner(params)
+        if action_name == "specialist" and not await self._admit_specialist(source, intent, params):
+            return
         # idempotency_key is top-level per schema; strip a nested compat alias.
         nested_idempotency_key = params.pop("idempotency_key", None)
         # Plumb baseline's materialized YAML into grid-style tasks (delegator may override).
@@ -857,6 +913,7 @@ class IntentRouter(CoordinatorCollaborator):
             inject_stack_base_params(params, self.shared_state, anchor=True)
         if action_name == "explore":
             self._coord.proposals.inject_explore_runtime_params(params)
+            self._coord.proposals.credit_predictor_proposals(params)
         # Wave sugar: a specialist delegate carrying params.tasks=[...] fans out into N standard freeform specialist
         # tasks, each dispatched through the normal SpecialistRunner + TaskRegistry + lease + reap path.
         if (
@@ -964,6 +1021,8 @@ class IntentRouter(CoordinatorCollaborator):
             )
             return
         self.shared_state.reset_policy_denial_streak(action_name)
+        # Only once a task exists, so a dispatch that bailed out above leaves the mandate on offer.
+        self._consume_primatune_mandate(action_name, params, task.task_id)
         from .proposals import record_config_proposal
 
         record_config_proposal(

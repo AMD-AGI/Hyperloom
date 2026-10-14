@@ -11,13 +11,14 @@ from typing import Any
 import pytest
 
 from hyperloom_kb import (
-    Change,
     CompleteExperienceRequired,
     Experience,
     ExperienceDeclaration,
     ExperienceService,
     ExperienceStatus,
     FieldDeclaration,
+    FieldKind,
+    FieldRole,
     ImmutableExperienceConflict,
     InMemoryExperienceStore,
     InMemorySchemaRegistry,
@@ -25,8 +26,6 @@ from hyperloom_kb import (
     LocalExperienceStore,
     LocalSchemaRegistry,
     ObjectiveDeclaration,
-    ObjectiveDirection,
-    Outcome,
     Provenance,
     StorageContractError,
     StoredExperience,
@@ -38,17 +37,18 @@ from hyperloom_kb import (
 
 def declaration(*, objective: str = "throughput@v1") -> ExperienceDeclaration:
     return ExperienceDeclaration(
+        objectives=(ObjectiveDeclaration(objective, "Maximize throughput."),),
         identity=(FieldDeclaration("model", "Model."),),
-        baseline_identity=(FieldDeclaration("config", "Baseline configuration."),),
-        change_identity=(FieldDeclaration("knob", "Changed knob."),),
-        objectives=(
-            ObjectiveDeclaration(
-                objective,
-                ObjectiveDirection.HIGHER_IS_BETTER,
-                "Throughput.",
-            ),
+        baseline=(FieldDeclaration("config", "Baseline configuration.", group=True),),
+        change=(
+            FieldDeclaration("knob", "Changed knob.", group=True),
+            FieldDeclaration("summary", "What changed.", role=FieldRole.SUMMARY),
         ),
-        decisions=("keep", "revert"),
+        outcome=(
+            FieldDeclaration("decision", "Decision.", role=FieldRole.DECISION, values=("keep", "revert")),
+            FieldDeclaration("value", "Throughput.", kind=FieldKind.NUMBER, role=FieldRole.MEASUREMENT),
+        ),
+        reflection=(FieldDeclaration("text", "Reflection.", kind=FieldKind.TEXT),),
     )
 
 
@@ -67,15 +67,14 @@ def complete_experience(
         completed_at=now,
         identity={"model": "qwen3"},
         objective="throughput@v1",
-        baseline_identity={"config": "default"},
-        baseline_value=1.0,
+        baseline={"config": "default"},
         provenance=Provenance("test", "1"),
         schema_ref=resolved_schema.schema_ref,
         status=ExperienceStatus.COMPLETE,
-        reasoning="Test one knob.",
-        change=Change({"knob": "page_size"}, "Use page size 64."),
-        outcome=Outcome("keep", 1.1),
-        reflection="Throughput improved.",
+        rationale={"reasoning": "Test one knob."},
+        change={"knob": "page_size", "summary": "Use page size 64."},
+        outcome={"decision": "keep", "value": 1.1},
+        reflection={"text": "Throughput improved."},
     )
 
 
@@ -137,7 +136,7 @@ def test_store_conformance_register_submit_replay_conflict_and_list(
     assert service.list_experiences(other_schema.schema_ref) == ()
 
     with pytest.raises(ImmutableExperienceConflict):
-        service.submit_complete(replace(experience, reflection="Different immutable content."))
+        service.submit_complete(replace(experience, reflection={"text": "Different immutable content."}))
 
 
 def test_store_conformance_rejects_unknown_schema_and_incomplete(
@@ -156,10 +155,10 @@ def test_store_conformance_rejects_unknown_schema_and_incomplete(
                 experience,
                 status=ExperienceStatus.IN_PROGRESS,
                 completed_at=None,
-                reasoning="",
-                change=None,
-                outcome=None,
-                reflection="",
+                rationale={},
+                change={},
+                outcome={},
+                reflection={},
             )
         )
 
@@ -214,7 +213,7 @@ def test_local_store_never_overwrites_conflicting_process_write(tmp_path: Path) 
     )
     service.register_schema(schema)
     first = complete_experience(schema)
-    conflicting = replace(first, reflection="Conflicting immutable content.")
+    conflicting = replace(first, reflection={"text": "Conflicting immutable content."})
     context = get_context("fork")
     queue = context.Queue()
     processes = [

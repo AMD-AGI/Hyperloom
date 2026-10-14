@@ -11,6 +11,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime, timezone
 from email.message import Message
 from pathlib import Path
@@ -19,16 +20,15 @@ from typing import Any
 import pytest
 
 from hyperloom_kb import (
-    Change,
     Experience,
     ExperienceDeclaration,
     ExperienceHTTPService,
     ExperienceStatus,
     FieldDeclaration,
+    FieldKind,
+    FieldRole,
     HTTPServiceConfig,
     ObjectiveDeclaration,
-    ObjectiveDirection,
-    Outcome,
     Provenance,
     RemoteClient,
     RemoteClientError,
@@ -36,8 +36,11 @@ from hyperloom_kb import (
     ServiceSettings,
     create_http_server,
     derive_experience_id,
+    file_ref,
     sync,
 )
+from hyperloom_kb.database import Database
+from hyperloom_kb.tests.conftest import fresh_database
 
 LOCAL_TOKEN = "local-token"
 GLOBAL_TOKEN = "global-token"
@@ -46,11 +49,19 @@ NOW = datetime(2026, 9, 29, tzinfo=timezone.utc)
 
 def _declaration(objective: str = "throughput@v1") -> ExperienceDeclaration:
     return ExperienceDeclaration(
+        objectives=(ObjectiveDeclaration(objective, "Maximize throughput."),),
         identity=(FieldDeclaration("model", "Model."),),
-        baseline_identity=(FieldDeclaration("config", "Baseline."),),
-        change_identity=(FieldDeclaration("knob", "Knob."),),
-        objectives=(ObjectiveDeclaration(objective, ObjectiveDirection.HIGHER_IS_BETTER, "Throughput."),),
-        decisions=("keep", "revert"),
+        baseline=(FieldDeclaration("config", "Baseline.", group=True),),
+        change=(
+            FieldDeclaration("knob", "Knob.", group=True),
+            FieldDeclaration("summary", "What changed.", role=FieldRole.SUMMARY),
+            FieldDeclaration("artifact", "A file the change produced.", kind=FieldKind.FILE),
+        ),
+        outcome=(
+            FieldDeclaration("decision", "Decision.", role=FieldRole.DECISION, values=("keep", "revert")),
+            FieldDeclaration("value", "Throughput.", kind=FieldKind.NUMBER, role=FieldRole.MEASUREMENT),
+        ),
+        reflection=(FieldDeclaration("text", "Reflection.", kind=FieldKind.TEXT),),
     )
 
 
@@ -63,15 +74,14 @@ def _experience(schema: ExperienceDeclaration, seq: int, *, run_id: str = "local
         completed_at=NOW,
         identity={"model": "qwen3"},
         objective=schema.objectives[0].id,
-        baseline_identity={"config": "default"},
-        baseline_value=100.0,
+        baseline={"config": "default"},
         provenance=Provenance("sync-test", "1"),
         schema_ref=schema.schema_ref,
         status=ExperienceStatus.COMPLETE,
-        reasoning=f"Try knob {seq}.",
-        change=Change({"knob": f"knob_{seq}"}, f"Set knob {seq}.", kind="config"),
-        outcome=Outcome("keep", 110.0 + seq),
-        reflection="Measured.",
+        rationale={"reasoning": f"Try knob {seq}."},
+        change={"knob": f"knob_{seq}", "summary": f"Set knob {seq}."},
+        outcome={"decision": "keep", "value": 110.0 + seq},
+        reflection={"text": "Measured."},
     )
 
 
@@ -80,10 +90,14 @@ def _service(
     schema: ExperienceDeclaration,
     token: str,
     global_url: str | None = None,
+    *,
+    database: Database | None = None,
     **client_options: Any,
 ) -> ExperienceHTTPService:
     global_kb = None if global_url is None else RemoteClient(RemoteConfig(global_url, GLOBAL_TOKEN), **client_options)
-    return ExperienceHTTPService(HTTPServiceConfig(home, token), schema, None, global_kb=global_kb)
+    return ExperienceHTTPService(
+        HTTPServiceConfig(home, token), schema, None, database=database or fresh_database(), global_kb=global_kb
+    )
 
 
 @contextmanager
@@ -134,18 +148,157 @@ def test_pull_stores_the_global_kb_records_and_never_pushes_them_back(tmp_path: 
             shared.write(_experience(schema, seq, run_id="teammate-run"))
         with _serving(_service(tmp_path / "local", schema, LOCAL_TOKEN, global_url)) as local_url:
             local = _client(local_url, LOCAL_TOKEN, tmp_path)
-            pulled = local.pull()
-            again = local.pull()
+            pulled = local.pull(schema.schema_ref)
+            again = local.pull(schema.schema_ref)
             local.write(_experience(schema, 0))
             pushed = local.push()
-            held = _ids(local)
+            listed = _ids(local)
+            readable = local.health()["experience_count"]
 
     assert (pulled["status"], pulled["created"], pulled["rejected"]) == ("completed", 3, [])
     assert (again["created"], again["unchanged"]) == (0, 0)
     assert (pushed["created"], pushed["skipped"]) == (1, 3)
-    assert held == {_experience(schema, 0).id} | {
-        _experience(schema, seq, run_id="teammate-run").id for seq in range(3)
-    }
+    # Reads see what was pulled; list and export name only what was written here.
+    assert readable == 4
+    assert listed == {_experience(schema, 0).id}
+
+
+def test_a_record_travels_with_its_files_from_one_workspace_through_the_global_kb_to_another(tmp_path: Path) -> None:
+    schema = _declaration()
+    artifact = tmp_path / "profile.json"
+    artifact.write_bytes(b'{"kernel": "paged_attention", "share": 0.41}\n')
+    ref = file_ref(artifact)
+    record = replace(_experience(schema, 0), change={**_experience(schema, 0).change, "artifact": ref})
+    with _serving(_service(tmp_path / "global", schema, GLOBAL_TOKEN)) as global_url:
+        with _serving(_service(tmp_path / "local", schema, LOCAL_TOKEN, global_url)) as local_url:
+            _client(local_url, LOCAL_TOKEN, tmp_path).write(record, files={ref.sha256: artifact})
+            pushed = _client(local_url, LOCAL_TOKEN, tmp_path).push()
+        on_global = _client(global_url, GLOBAL_TOKEN, tmp_path).missing_files((ref,))
+        teammate_app = _service(tmp_path / "teammate", schema, LOCAL_TOKEN, global_url)
+        with _serving(teammate_app) as teammate_url:
+            pulled = _client(teammate_url, LOCAL_TOKEN, tmp_path).pull(schema.schema_ref)
+
+    assert (pushed["created"], on_global) == (1, ())
+    assert (pulled["status"], pulled["created"]) == ("completed", 1)
+    assert teammate_app.held(record.id) == record
+    assert teammate_app.file_path(ref).read_bytes() == artifact.read_bytes()
+
+
+def test_a_pull_that_cannot_fetch_a_file_yet_stops_before_its_record_and_resumes_there(tmp_path: Path) -> None:
+    schema = _declaration()
+    artifact = tmp_path / "profile.json"
+    artifact.write_bytes(b"[0.41]\n")
+    ref = file_ref(artifact)
+    records = [_experience(schema, seq, run_id="teammate-run") for seq in range(3)]
+    records[1] = replace(records[1], change={**records[1].change, "artifact": ref})
+    failures = [urllib.error.URLError("global KB went away")]
+
+    def fails_the_first_download(request: urllib.request.Request, **options: Any) -> Any:
+        if request.get_method() == "GET" and "/v1/files/" in request.full_url and failures:
+            raise failures.pop()
+        return urllib.request.urlopen(request, **options)
+
+    with _serving(_service(tmp_path / "global", schema, GLOBAL_TOKEN)) as global_url:
+        shared = _client(global_url, GLOBAL_TOKEN, tmp_path)
+        for record in records:
+            shared.write(record, files={ref.sha256: artifact})
+        local_app = _service(tmp_path / "local", schema, LOCAL_TOKEN, global_url, opener=fails_the_first_download)
+        with _serving(local_app) as local_url:
+            local = _client(local_url, LOCAL_TOKEN, tmp_path)
+            interrupted = local.pull(schema.schema_ref)
+            resumed = local.pull(schema.schema_ref)
+            held = local.health()["experience_count"]
+
+    assert (interrupted["status"], interrupted["created"], interrupted["has_more"]) == ("incomplete", 1, True)
+    assert "URLError" in str(interrupted["error"])
+    assert (resumed["status"], resumed["created"], resumed["rejected"]) == ("completed", 2, [])
+    assert held == 3
+
+
+def test_a_pull_reading_again_from_the_start_resumes_there_when_it_cannot_fetch_a_file_yet(tmp_path: Path) -> None:
+    schema = _declaration()
+    artifact = tmp_path / "profile.json"
+    artifact.write_bytes(b"[0.41]\n")
+    ref = file_ref(artifact)
+    records = [_experience(schema, seq, run_id="teammate-run") for seq in range(3)]
+    records[0] = replace(records[0], change={**records[0].change, "artifact": ref})
+    failures: list[Exception] = []
+
+    def fails_while_asked(request: urllib.request.Request, **options: Any) -> Any:
+        if request.get_method() == "GET" and "/v1/files/" in request.full_url and failures:
+            raise failures.pop()
+        return urllib.request.urlopen(request, **options)
+
+    with _serving(_service(tmp_path / "global", schema, GLOBAL_TOKEN)) as global_url:
+        shared = _client(global_url, GLOBAL_TOKEN, tmp_path)
+        for record in records:
+            shared.write(record, files={ref.sha256: artifact})
+        shared.exclude(records[0].id, reason="under review")
+        local_app = _service(tmp_path / "local", schema, LOCAL_TOKEN, global_url, opener=fails_while_asked)
+        with _serving(local_app) as local_url:
+            local = _client(local_url, LOCAL_TOKEN, tmp_path)
+            first = local.pull(schema.schema_ref)
+            shared.include(records[0].id)
+            failures.append(urllib.error.URLError("global KB went away"))
+            interrupted = local.pull(schema.schema_ref)
+            resumed = local.pull(schema.schema_ref)
+            held = local.health()["experience_count"]
+
+    assert first["created"] == 2
+    assert (interrupted["status"], interrupted["created"], interrupted["has_more"]) == ("incomplete", 0, True)
+    # The Experience the global KB shows again sits before the cursor, so the pull resumes at the start it read from.
+    assert (resumed["status"], resumed["created"]) == ("completed", 1)
+    assert held == 3
+
+
+class _CutShort:
+    """A response whose body stops after ``left`` bytes, as one does when the connection drops mid-transfer."""
+
+    def __init__(self, response: Any, left: int) -> None:
+        self._response, self._left = response, left
+        self.headers = response.headers
+
+    def __enter__(self) -> _CutShort:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self._response.close()
+
+    def read(self, amount: int = -1) -> bytes:
+        chunk = self._response.read(min(amount, self._left) if amount >= 0 else self._left)
+        self._left -= len(chunk)
+        return chunk
+
+
+def test_a_pull_whose_file_download_is_cut_short_resumes_at_that_record(tmp_path: Path) -> None:
+    schema = _declaration()
+    artifact = tmp_path / "profile.bin"
+    artifact.write_bytes(bytes(range(256)) * 16)
+    ref = file_ref(artifact)
+    records = [_experience(schema, seq, run_id="teammate-run") for seq in range(3)]
+    records[1] = replace(records[1], change={**records[1].change, "artifact": ref})
+    cuts = [100]
+
+    def cuts_the_first_download(request: urllib.request.Request, **options: Any) -> Any:
+        response = urllib.request.urlopen(request, **options)
+        if request.get_method() == "GET" and "/v1/files/" in request.full_url and cuts:
+            return _CutShort(response, cuts.pop())
+        return response
+
+    with _serving(_service(tmp_path / "global", schema, GLOBAL_TOKEN)) as global_url:
+        shared = _client(global_url, GLOBAL_TOKEN, tmp_path)
+        for record in records:
+            shared.write(record, files={ref.sha256: artifact})
+        local_app = _service(tmp_path / "local", schema, LOCAL_TOKEN, global_url, opener=cuts_the_first_download)
+        with _serving(local_app) as local_url:
+            local = _client(local_url, LOCAL_TOKEN, tmp_path)
+            interrupted = local.pull(schema.schema_ref)
+            resumed = local.pull(schema.schema_ref)
+            held = local.health()["experience_count"]
+
+    assert (interrupted["status"], interrupted["created"], interrupted["rejected"]) == ("incomplete", 1, [])
+    assert (resumed["status"], resumed["created"]) == ("completed", 2)
+    assert held == 3
 
 
 def test_a_push_the_global_kb_drops_resumes_where_it_stopped(tmp_path: Path) -> None:
@@ -203,9 +356,10 @@ def test_a_record_a_proxy_refuses_as_too_large_never_holds_back_the_rest(tmp_pat
 
 
 def test_a_service_without_a_global_kb_refuses_to_sync(tmp_path: Path) -> None:
-    with _serving(_service(tmp_path / "local", _declaration(), LOCAL_TOKEN)) as local_url:
+    schema = _declaration()
+    with _serving(_service(tmp_path / "local", schema, LOCAL_TOKEN)) as local_url:
         local = _client(local_url, LOCAL_TOKEN, tmp_path)
-        for operation in (local.push, local.pull):
+        for operation in (local.push, lambda: local.pull(schema.schema_ref)):
             with pytest.raises(RemoteClientError, match="started without a global Experience KB") as refused:
                 operation()
             assert refused.value.retryable is False
@@ -224,7 +378,7 @@ def test_a_global_kb_keeps_every_user_schema_and_each_user_pulls_back_its_own(tm
         # A second workspace of alice's pulls alice's schema only.
         with _serving(_service(tmp_path / "alice-2", schemas["alice"], LOCAL_TOKEN, global_url)) as local_url:
             teammate = _client(local_url, LOCAL_TOKEN, tmp_path)
-            pulled = teammate.pull()
+            pulled = teammate.pull(schemas["alice"].schema_ref)
             held = teammate.health()["schemas"]
 
     assert set(shared["schemas"]) >= {schema.schema_ref for schema in schemas.values()}
@@ -240,23 +394,25 @@ def test_a_workspace_that_switched_schema_keeps_and_syncs_both(tmp_path: Path) -
         teammate.write(_experience(first, 0, run_id="teammate-first"), declaration=first)
         teammate.write(_experience(second, 0, run_id="teammate-second"), declaration=second)
 
-        with _serving(_service(tmp_path / "local", first, LOCAL_TOKEN, global_url)) as local_url:
+        database = fresh_database()
+        with _serving(_service(tmp_path / "local", first, LOCAL_TOKEN, global_url, database=database)) as local_url:
             _client(local_url, LOCAL_TOKEN, tmp_path).write(_experience(first, 1, run_id="run-1"), declaration=first)
         # The workspace now runs the second schema; its service restarts with it as the default.
-        with _serving(_service(tmp_path / "local", second, LOCAL_TOKEN, global_url)) as local_url:
+        with _serving(_service(tmp_path / "local", second, LOCAL_TOKEN, global_url, database=database)) as local_url:
             local = _client(local_url, LOCAL_TOKEN, tmp_path)
             local.write(_experience(second, 1, run_id="run-2"), declaration=second)
             pushed = local.push()
-            pulled = local.pull()
+            pulled = [local.pull(schema.schema_ref) for schema in (first, second)]
             first_ids = {
                 str(item["experience_id"]) for item in local.list_experiences(schema_ref=first.schema_ref).items
             }
             health = local.health()
 
-    assert (pushed["created"], pulled["created"]) == (2, 2)
+    assert pushed["created"] == 2
+    assert [report["created"] for report in pulled] == [1, 1]
     assert health["schema_ref"] == second.schema_ref
     assert health["schemas"] == {first.schema_ref: 2, second.schema_ref: 2}
-    assert first_ids == {_experience(first, 1, run_id="run-1").id, _experience(first, 0, run_id="teammate-first").id}
+    assert first_ids == {_experience(first, 1, run_id="run-1").id}
 
 
 def test_a_write_of_an_unregistered_schema_needs_its_declaration(tmp_path: Path) -> None:
