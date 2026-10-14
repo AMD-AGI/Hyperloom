@@ -44,6 +44,10 @@ TOOL_OWNED_UNTRACKED_GLOBS = (
     "*/aiter_cache/*",
 )
 
+FORGE_LOOP_OUTPUT_DIRNAME = "forge_experiments"
+
+_BOOKKEEPING_DIRNAMES = frozenset({".git", FORGE_LOOP_OUTPUT_DIRNAME})
+
 PROTECTED_DIRS = frozenset(
     {
         "benchmark",
@@ -131,7 +135,7 @@ def protected_path_inventory(
     ):
         # The repository's own bookkeeping is not part of the measurement surface, and it moves on its own: git
         # rewrites the index whenever a stat cache goes cold, which a build alone is enough to cause.
-        dirnames[:] = [name for name in dirnames if name != ".git"]
+        dirnames[:] = [name for name in dirnames if name not in _BOOKKEEPING_DIRNAMES]
         parent = Path(directory)
         entries = [*filenames]
         for dirname in dirnames:
