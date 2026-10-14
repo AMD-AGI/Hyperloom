@@ -38,6 +38,7 @@ __all__ = ["run"]
 _START_FAILED = "runner_start_failed"
 _SPEC_REJECTED = "spec_rejected"
 _FAILED = "failed"
+_FILES_DIR = "files"
 _KEY_ENV = "HYPERLOOM_SIGNING_KEY_FILE"
 _TIMED_OUT_RC = 124
 
@@ -53,7 +54,7 @@ class _Context:
 
     @property
     def files(self) -> Path:
-        return self.out_dir / "files"
+        return self.out_dir / _FILES_DIR
 
     def read_blob(self, address: str) -> bytes:
         name = address.removeprefix("sha256:")
