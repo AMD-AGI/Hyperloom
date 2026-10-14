@@ -389,14 +389,17 @@ ENABLEMENT_RUNTIME_REQUEST_GUIDANCE: tuple[str, ...] = (
     "the runtime installs, then fails at import or at its first kernel call. "
     "Prefer the ref closest to the installed version that carries the fix (a "
     "backport PR, or the release just after it), compare its dependency pins "
-    "(``python/pyproject.toml``) with the installed versions first, and request "
-    "a ``needs_targeted_build`` for a compiled piece it needs.",
+    "(``python/pyproject.toml``) with the installed versions first.",
+    "A round carries ``needs_runtime`` or ``needs_targeted_build``, not both: "
+    "a round that requests a build runs only the build, and its "
+    "``needs_runtime`` is ignored. Request the runtime and a compiled piece it "
+    "needs in separate rounds.",
     "Patches you write in the same round apply to the provisioned checkout, not "
     "the installed tree — author them against the ref you request. A runtime "
     "the round KEEPs is re-provisioned for every later round and a new "
     "``needs_runtime`` is then ignored, so request the version you want to "
-    "build on. ``needs_runtime`` is a real deliverable: the round boots on it "
-    "even with an empty ``proposal_set``.",
+    "build on. Without a ``needs_targeted_build``, ``needs_runtime`` is a real "
+    "deliverable: the round boots on it even with an empty ``proposal_set``.",
 )
 
 
