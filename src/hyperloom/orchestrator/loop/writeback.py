@@ -3894,7 +3894,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         task: Task | None,
         report: dict[str, Any],
     ) -> bool:
-        """Settle a mutated integrate window from durable records rather than the bus.
+        """Settle an integrate window from durable records rather than the bus.
 
         Args:
             pending: The ``pending_integrate`` sentinel dict.
@@ -3903,7 +3903,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
 
         Returns:
             ``True`` when the sentinel was discharged or deliberately retained,
-            ``False`` when the caller should roll the half-applied patch back.
+            ``False`` when the caller should roll the window back (a no-op when it changed nothing in the tree).
         """
         state = self.shared_state
         task_id = str(pending.get("task_id") or "")
@@ -3927,6 +3927,8 @@ class WritebackCollaborator(CoordinatorCollaborator):
             )
             self._clear_pending_integrate(pending, gc_runtime=False)
             return True
+        if not (pending.get("patches") or pending.get("artifacts")):
+            return False  # env/args only: short of a recorded KEEP there is nothing to hold, only to clear
         if verdict == "settled":
             report["fixes"].append(
                 {
@@ -3945,12 +3947,10 @@ class WritebackCollaborator(CoordinatorCollaborator):
             self._clear_pending_integrate(pending, gc_runtime=True)
             return True
         if phase == "accepted":
-            # A KEEP verdict left the candidate in the tree on purpose and
-            # popped the user's stash, so neither rollback nor clear is
-            # correct here. Hold the obligation: dropping it would strand
-            # unrecorded candidate code, and standing in a baseline number
-            # for the lost measurement would poison current_best and
-            # misattribute the candidate's gain on the next stack rebench.
+            # A KEEP verdict left the candidate in the tree on purpose and popped the user's stash, so neither rollback
+            # nor clear is correct here. Hold the obligation: dropping it would strand unrecorded candidate code, and
+            # standing in a baseline number for the lost measurement would poison current_best and misattribute the
+            # candidate's gain on the next stack rebench.
             report["warnings"].append({"kind": "pending_integrate_outcome_unknown", "task_id": task_id, "phase": phase})
             return True
         if verdict == "incomplete":
@@ -4028,9 +4028,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             self._clear_pending_integrate(pending, gc_runtime=False)
             return
         task = await self.tasks.find(task_id, kind="integrate_patch")
-        if (pending.get("patches") or pending.get("artifacts")) and await self._recover_pending_integrate_from_task(
-            pending, task, report
-        ):
+        if await self._recover_pending_integrate_from_task(pending, task, report):
             return
         gone_scope = confirmed_stopped_scope(task.history if task is not None else None)
         summary = self._resume_rollback_pending_integrate(pending, gone_scope)

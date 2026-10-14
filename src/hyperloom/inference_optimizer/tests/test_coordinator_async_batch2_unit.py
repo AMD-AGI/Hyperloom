@@ -1183,6 +1183,62 @@ async def test_resume_consistency_clears_stale_pending_integrate(coord: Coordina
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "phase", "replayed"),
+    [("kept", "accepted", True), ("reverted", "restored", False)],
+)
+async def test_resume_settles_an_env_only_integrate_from_its_task_row(
+    coord: Coordinator, tmp_path: Path, status: str, phase: str, replayed: bool
+) -> None:
+    """A window that changed only environment variables still owes its recorded verdict.
+
+    It has no patch or artifact to roll back, but a KEEP it recorded is a KEEP:
+    clearing the sentinel without reading the task row drops the candidate's
+    environment from the stack. A recorded revert still just clears.
+    """
+    coord.writeback._resumed_from["is_resume"] = True
+    task = await coord.tasks.create(kind="integrate_patch", params={}, idempotency_key="ti-env", task_id="ti-env")
+    await coord.tasks.transition(task.task_id, "running")
+    result = {
+        "kind": "integrate_patch",
+        "status": status,
+        "specialist_task_id": "env-only-candidate",
+        "output_throughput": 120.0,
+        "extra_envs_applied": {"ATTN_IMPL": "candidate"},
+        "extra_server_args_applied": "",
+    }
+    await coord.tasks.transition(
+        task.task_id,
+        "succeeded",
+        evidence={
+            "cleanup_confirmed": True,
+            "outcome": {"task_id": task.task_id, "state": "succeeded", "result": result},
+        },
+    )
+    coord.shared_state.baseline_tput = 100.0
+    coord.shared_state.pending_integrate = {
+        "task_id": task.task_id,
+        "patches": [],
+        "artifacts": [],
+        "config_changes": {},
+        "extra_envs": {"ATTN_IMPL": "candidate"},
+        "recovery": {"version": 1, "phase": phase, "root": str(tmp_path / "recover"), "stash_oid": ""},
+    }
+
+    report = await coord.writeback._resume_consistency_pass()
+
+    assert coord.shared_state.pending_integrate == {}
+    stack = coord.shared_state.optimization_stack or []
+    kinds = [f.get("kind") for f in report["fixes"] if isinstance(f, dict)]
+    if replayed:
+        assert [row.get("extra_envs") for row in stack] == [{"ATTN_IMPL": "candidate"}]
+        assert "replayed_pending_integrate" in kinds
+    else:
+        assert stack == []
+        assert "replayed_pending_integrate" not in kinds
+
+
+@pytest.mark.asyncio
 async def test_resume_consistency_keeps_sentinel_when_event_scan_fails(
     coord: Coordinator,
     monkeypatch: pytest.MonkeyPatch,
