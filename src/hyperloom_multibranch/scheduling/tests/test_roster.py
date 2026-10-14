@@ -11,9 +11,9 @@ from pathlib import Path
 import pytest
 
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
-from hyperloom_multibranch.contracts.scheduling import BranchQuota
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.roster import (
+    UNLISTED_BRANCH_K,
     BranchOrigin,
     BranchStatus,
     BranchStop,
@@ -124,10 +124,31 @@ def test_quota_covers_started_live_branches_with_integration(tmp_path: Path) -> 
     fork = roster.next_branch_id()
     roster.open(fork, origin=BranchOrigin.FORK, start_commit="", k=1, from_branch=running)
     policy = roster.quota_policy()
-    assert policy.max_parallel_tests == 8
-    assert policy.branches == (BranchQuota(INTEGRATION_BRANCH, 1), BranchQuota(running, 2))
+    assert policy.global_concurrency == 8
+    assert dict(policy.branch_k) == {INTEGRATION_BRANCH: 1, running: 2}
+    assert policy.k_for(stopped) == policy.k_for(fork) == UNLISTED_BRANCH_K
     assert roster.started(fork, "fix").status is BranchStatus.RUNNING
-    assert roster.quota_policy().k_of(fork) == 1
+    assert roster.quota_policy().k_for(fork) == 1
+
+
+def test_integration_takes_the_global_cap_while_no_specialist_runs(tmp_path: Path) -> None:
+    roster = _roster(tmp_path)
+    roster.add_integration(ROOT, k=1)
+    assert roster.quota_policy().k_for(INTEGRATION_BRANCH) == 8
+    branch = _open(roster)
+    assert roster.quota_policy().k_for(INTEGRATION_BRANCH) == 1
+    roster.stop(branch, _judge_stop())
+    assert roster.quota_policy().k_for(INTEGRATION_BRANCH) == 8
+
+
+def test_every_k_of_the_quota_is_at_least_one_and_under_the_caps(tmp_path: Path) -> None:
+    roster = _roster(tmp_path)
+    roster.add_integration(ROOT, k=0)
+    _open(roster, k=-4)
+    _open(roster, k=MAX_K + 5)
+    policy = roster.quota_policy()
+    assert policy.per_branch_k >= 1 and policy.global_concurrency >= 1
+    assert sorted(policy.branch_k.values()) == [1, 1, MAX_K]
 
 
 def test_snapshot_follows_every_change(tmp_path: Path) -> None:

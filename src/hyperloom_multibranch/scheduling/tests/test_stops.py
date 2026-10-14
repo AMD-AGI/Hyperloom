@@ -17,7 +17,7 @@ from hyperloom.common.proctree import descendants, running
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent
 from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
-from hyperloom_multibranch.contracts.scheduling.peers import QueueStatus
+from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.scheduling.branches import BranchControl
 from hyperloom_multibranch.scheduling.clock import Clock
@@ -33,11 +33,10 @@ from hyperloom_multibranch.scheduling.roster import (
 )
 from hyperloom_multibranch.scheduling.stops import STOP_OVERRAN, SessionStopper, SessionStopReason, StopSignals
 from hyperloom_multibranch.scheduling.tests.peer_fakes import (
-    ALL_BRANCHES,
     ROOT_COMMIT,
     TOOLBOX_DOWN,
+    DownToolbox,
     MbFakeLifecycle,
-    MbFakeToolbox,
 )
 
 NOW = 1_700_000_000.0
@@ -58,7 +57,9 @@ class Stage:
         self.decisions_file = tmp_path / "MB-decisions.jsonl"
         decisions = DecisionLog(self.decisions_file, clock)
         self.notebook = LocalNotebook(tmp_path / "notebook", Writer(Role.SCHEDULER, "scheduler"), clock=clock.now)
-        self.toolbox = MbFakeToolbox(self.notebook)
+        self.toolbox = DownToolbox(
+            LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"), clock=clock.now)
+        )
         self.lifecycle = lifecycle or MbFakeLifecycle()
         self.branches = BranchControl(
             self.roster, self.notebook, self.lifecycle, self.toolbox, self.processes, decisions, clock
@@ -72,7 +73,7 @@ class Stage:
         await self.branches.stop_branch("b02", JUDGE_STOP)
         self.roster.open("b03", origin=BranchOrigin.FORK, start_commit="", k=1, from_branch="b01")
         self.lifecycle.stopped.clear()
-        self.toolbox.withdrawn.clear()
+        self.toolbox.cancelled.clear()
         return self
 
     def stops(self) -> dict[str, BranchStop | None]:
@@ -108,7 +109,7 @@ async def test_end_exploration_stops_open_specialists_and_keeps_integration(tmp_
     fork = _ended_with_b01(SessionStopReason.TIME_EXHAUSTED)
     assert session.stops() == {INTEGRATION_BRANCH: None, "b01": ended, "b02": JUDGE_STOP, "b03": fork}
     assert session.lifecycle.stopped == ["b01"]
-    assert session.toolbox.quotas[-1].k_of(INTEGRATION_BRANCH) == 1
+    assert session.toolbox.policies[-1].k_for(INTEGRATION_BRANCH) == session.roster.caps.max_parallel_tests
     assert session.roster.free_slots() == 0
     with pytest.raises(RosterFull):
         session.roster.open("b04", origin=BranchOrigin.FORK, start_commit="", k=1)
@@ -122,17 +123,17 @@ async def test_a_failed_branch_stop_does_not_hold_up_the_end_of_exploration(tmp_
     ended = _ended(SessionStopReason.GLOBAL_CONVERGED)
     fork = _ended_with_b01(SessionStopReason.GLOBAL_CONVERGED)
     assert (session.stops()["b01"], session.stops()["b03"]) == (ended, fork)
-    assert sorted(session.toolbox.withdrawn) == ["b01", "b03"]
+    assert sorted(session.toolbox.cancelled) == ["b01", "b03"]
 
 
-async def test_stop_everything_withdraws_first_stops_all_and_leaves_no_process(tmp_path: Path) -> None:
+async def test_stop_everything_withdraws_every_branch_closes_the_toolbox_and_leaves_no_process(tmp_path: Path) -> None:
     session = await Stage(tmp_path).opened()
     pids = await session.spawn_trees(tmp_path, ("b01", INTEGRATION_BRANCH, "prelude"))
 
     report = await session.stopper.stop_everything(SessionStopReason.SIGNAL, HARD_STOP)
 
-    assert session.toolbox.withdrawn[0] == ALL_BRANCHES
-    assert sorted(session.toolbox.withdrawn[1:]) == sorted(("b01", "b03", INTEGRATION_BRANCH))
+    assert sorted(session.toolbox.cancelled) == sorted(("b01", "b03", INTEGRATION_BRANCH))
+    assert session.toolbox.closed == 1
     ended = _ended(SessionStopReason.SIGNAL)
     fork = _ended_with_b01(SessionStopReason.SIGNAL)
     assert session.stops() == {INTEGRATION_BRANCH: ended, "b01": ended, "b02": JUDGE_STOP, "b03": fork}
@@ -168,7 +169,7 @@ async def test_a_stop_that_overruns_the_hard_stop_is_cut_and_every_process_kille
 
 async def test_a_failing_toolbox_is_reported_and_every_branch_still_stopped(tmp_path: Path) -> None:
     session = await Stage(tmp_path).opened()
-    session.toolbox.broken = True
+    session.toolbox.down = True
 
     report = await session.stopper.stop_everything(SessionStopReason.SIGNAL, HARD_STOP)
 
@@ -178,12 +179,15 @@ async def test_a_failing_toolbox_is_reported_and_every_branch_still_stopped(tmp_
     assert sorted(session.lifecycle.stopped) == ["b01"]
 
 
-async def test_a_busy_toolbox_makes_the_report_unclean(tmp_path: Path) -> None:
+async def test_a_test_the_toolbox_still_holds_makes_the_report_unclean(tmp_path: Path) -> None:
     session = await Stage(tmp_path).opened()
-    session.toolbox.queue = QueueStatus(running={INTEGRATION_BRANCH: 1})
+    session.toolbox.executor.gate.clear()
+    session.roster.stop("b02", JUDGE_STOP)
+    await session.toolbox.submit_test(TestRequest(TestKind.TEST, Purpose.EXPLORE, "b02", ROOT_COMMIT))
 
     report = await session.stopper.stop_everything(SessionStopReason.GLOBAL_CONVERGED, HARD_STOP)
 
+    assert report.queue is not None and report.queue.running_by_branch == {"b02": 1}
     assert not report.clean
     assert report.leftovers == ()
 

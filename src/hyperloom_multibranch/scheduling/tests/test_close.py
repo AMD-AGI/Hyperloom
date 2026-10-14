@@ -18,7 +18,7 @@ from hyperloom.orchestrator.knowledge.remote_recipe import KBStoreError
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot
-from hyperloom_multibranch.contracts.scheduling import QueueStatus
+from hyperloom_multibranch.contracts.toolbox import QueueState
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.knowledge.recipe_writeback import FinalRecipe
 from hyperloom_multibranch.notebook.knowledge.tests.fakes import FakeRecipeStore
@@ -110,7 +110,7 @@ def _closer(
 
 
 def _clean() -> RecordingStopper:
-    return RecordingStopper(StopReport((), QueueStatus()))
+    return RecordingStopper(StopReport((), QueueState()))
 
 
 async def test_close_publishes_the_final_recipe_exports_and_stops_everything(
@@ -133,7 +133,7 @@ async def test_close_publishes_the_final_recipe_exports_and_stops_everything(
     files = report.exports.dashboard
     assert (files.json.parent, files.html.parent) == (layout.dashboard, layout.dashboard)
     dashboard = json.loads(files.json.read_text())
-    assert dashboard["queue"] == {"queued": {}, "running": {}}
+    assert dashboard["queue"]["running_by_branch"] == {} and dashboard["queue"]["queued_by_branch"] == {}
     assert any(row.get("frontier") for row in dashboard["branches"])
     written = json.loads(layout.report.read_text())
     assert (written["stop_reason"], written["stop"]["clean"]) == ("time_exhausted", True)
@@ -178,7 +178,7 @@ async def test_everything_is_stopped_before_the_exports_and_a_failed_export_is_r
     layout: SessionLayout, final: FinalRecipe
 ) -> None:
     events: list[str] = []
-    stopper = RecordingStopper(StopReport((), QueueStatus()), events)
+    stopper = RecordingStopper(StopReport((), QueueState()), events)
 
     report = await _closer(layout, BrokenNotebook(events), stopper, final, None).close(
         SessionStopReason.SIGNAL, None, "", HARD_STOP
@@ -205,7 +205,7 @@ async def test_exports_that_overrun_the_hard_stop_are_cut_and_the_report_still_w
 async def test_processes_and_tests_that_outlive_the_stop_are_reported(
     layout: SessionLayout, notebook: LocalNotebook, final: FinalRecipe
 ) -> None:
-    stopper = RecordingStopper(StopReport((LEFTOVER,), QueueStatus({}, {"b01": 1})))
+    stopper = RecordingStopper(StopReport((LEFTOVER,), QueueState(running_by_branch={"b01": 1})))
 
     report = await _closer(layout, notebook, stopper, final, None).close(SessionStopReason.SIGNAL, None, "", HARD_STOP)
 
@@ -213,5 +213,5 @@ async def test_processes_and_tests_that_outlive_the_stop_are_reported(
     written = json.loads(layout.report.read_text())
     assert written["stop"]["clean"] is False
     assert [row["pid"] for row in written["stop"]["leftovers"]] == [4242]
-    assert written["stop"]["queue"]["running"] == {"b01": 1}
+    assert written["stop"]["queue"]["running_by_branch"] == {"b01": 1}
     assert "processes left: [4242]" in layout.report_markdown.read_text()

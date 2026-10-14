@@ -6,8 +6,8 @@
 The child is ``hyperloom optimize`` with every optimization lever off, given the whole remaining session budget. Its
 session is read by :mod:`~hyperloom_multibranch.scheduling.prelude_reader` alone and folded into the root recipe,
 which the experiment repository stores as the root commit, and the session profile is written. The baseline the rule
-gate anchors every recorded value to is measured through the toolbox in a second step, once the caller has given the
-integration branch its quota: the toolbox treats a branch without one as stopped.
+gate anchors every recorded value to is measured through the toolbox in a second step, once the caller has put the
+integration branch on the roster and given the toolbox its K.
 """
 
 from __future__ import annotations
@@ -18,18 +18,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hyperloom.common.io import atomic_write_json
+from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom.contracts.recipe import PatchRef, Recipe
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Notebook
-from hyperloom_multibranch.contracts.notebook.peers import TestKind
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent, SessionProfile
 from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
-from hyperloom_multibranch.contracts.scheduling import (
-    ExperimentRepo,
-    PriorityClass,
-    RequestWithdrawn,
-    RuleGate,
-    Toolbox,
-)
+from hyperloom_multibranch.contracts.scheduling import ExperimentRepo, RuleGate
 from hyperloom_multibranch.scheduling.budget import BudgetExhausted, HardStop, SessionBudget
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
@@ -43,7 +37,7 @@ from hyperloom_multibranch.scheduling.prelude_reader import (
     root_recipe,
 )
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, RegisteredProcess
-from hyperloom_multibranch.scheduling.requests import integration_test_request
+from hyperloom_multibranch.scheduling.requests import SessionTests, TestWithdrawn, integration_test_request
 from hyperloom_multibranch.scheduling.settings import Workload
 
 #: The ``hyperloom`` console script, run as a module so the child runs on the same install as the scheduler.
@@ -64,8 +58,6 @@ PRELUDE_BRANCH = "prelude"
 #: A cancelled PRELUDE gives it at most this, and never more than half the time left before the hard stop, so CLOSE
 #: keeps the other half.
 PRELUDE_TERMINATE_GRACE_SECONDS = 120.0
-BASELINE_INTENT = "baseline"
-BASELINE_PURPOSE = "prelude baseline"
 
 
 class PreludeFailed(RuntimeError):
@@ -105,7 +97,7 @@ class Prelude:
         processes: ProcessRegistry,
         notebook: Notebook,
         repo: ExperimentRepo,
-        toolbox: Toolbox,
+        tests: SessionTests,
         gate: RuleGate,
         decisions: DecisionLog,
         clock: Clock,
@@ -114,7 +106,7 @@ class Prelude:
         self._processes = processes
         self._notebook = notebook
         self._repo = repo
-        self._toolbox = toolbox
+        self._tests = tests
         self._gate = gate
         self._decisions = decisions
         self._clock = clock
@@ -122,7 +114,7 @@ class Prelude:
     async def root(self, workload: Workload, budget: SessionBudget, hard_stop: HardStop) -> PreludeResult:
         """Root the session on the main flow's result; raises :class:`PreludeFailed` when there is none.
 
-        The baseline is measured afterwards, by :meth:`measure_baseline`, once the integration branch has its quota.
+        The baseline is measured afterwards, by :meth:`measure_baseline`, once the integration branch has its K.
         """
 
         child = await self._run_child(workload, budget, hard_stop)
@@ -203,17 +195,12 @@ class Prelude:
         baseline test is withdrawn."""
 
         count = await self._gate.baseline_test_count()
-        requests = [
-            integration_test_request(
-                TestKind.TEST, root, BASELINE_INTENT, BASELINE_PURPOSE, PriorityClass.SESSION_MEASUREMENT
-            )
-            for _ in range(count)
-        ]
-        request_ids = tuple([await self._toolbox.submit(request) for request in requests])
+        request = integration_test_request(TestKind.TEST, Purpose.BASELINE, root)
         try:
-            await asyncio.gather(*(self._toolbox.result(request_id) for request_id in request_ids))
-        except RequestWithdrawn as exc:
+            records = await asyncio.gather(*(self._tests.run(request) for _ in range(count)))
+        except TestWithdrawn as exc:
             raise PreludeFailed(f"a baseline test was withdrawn: {exc}") from exc
+        request_ids = tuple(record.request_id for record in records)
         await self._gate.establish_baseline(root, request_ids)
         self._decisions.record(
             Decision(

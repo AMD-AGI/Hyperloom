@@ -17,8 +17,9 @@ from pathlib import Path
 import pytest
 
 import hyperloom
+from hyperloom.contracts.measurement import Purpose, TestKind
+from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
-from hyperloom_multibranch.contracts.scheduling import PriorityClass
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.scheduling.budget import HardStop, SessionBudget
 from hyperloom_multibranch.scheduling.clock import Clock
@@ -27,6 +28,7 @@ from hyperloom_multibranch.scheduling.layout import SessionLayout, create_sessio
 from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_PRIMARY_METRIC
 from hyperloom_multibranch.scheduling.prelude import Prelude, PreludeFailed, PreludeResult, prelude_argv
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, RegisteredProcess
+from hyperloom_multibranch.scheduling.requests import SessionTests
 from hyperloom_multibranch.scheduling.settings import Workload
 from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     BASELINE_TESTS,
@@ -35,7 +37,7 @@ from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     MbFakeChildRegistry,
     MbFakeGate,
     MbFakeRepo,
-    MbFakeToolbox,
+    RecordingToolbox,
 )
 from hyperloom_multibranch.scheduling.tests.child_sessions import (
     PATCH_TEXT,
@@ -60,17 +62,26 @@ class StubbornRegistry(ProcessRegistry):
 
 @dataclass
 class PreludePeers:
-    """The repository, toolbox and rule gate stand-ins PRELUDE talks to, on the session's notebook."""
+    """The repository, toolbox and rule gate stand-ins PRELUDE talks to, on the session's notebook; ``tests`` waits
+    for the toolbox's outcomes without real sleeps."""
 
     repo: MbFakeRepo
-    toolbox: MbFakeToolbox
+    toolbox: RecordingToolbox
+    tests: SessionTests
     gate: MbFakeGate
 
 
-def _peers(layout: SessionLayout) -> PreludePeers:
-    toolbox = MbFakeToolbox(LocalNotebook(layout.notebook, Writer(Role.TOOLBOX, "toolbox"), clock=_clock().now))
-    gate = MbFakeGate(LocalNotebook(layout.notebook, Writer(Role.GATE, "gate"), clock=_clock().now), toolbox)
-    return PreludePeers(MbFakeRepo(), toolbox, gate)
+async def _instant(seconds: float) -> None:
+    await asyncio.sleep(0)
+
+
+def _peers(layout: SessionLayout, failing: frozenset[str] = frozenset()) -> PreludePeers:
+    toolbox = RecordingToolbox(
+        LocalNotebook(layout.notebook, Writer(Role.TOOLBOX, "toolbox"), clock=_clock().now), failing=failing
+    )
+    tests = SessionTests(toolbox, _notebook(layout), Clock(now=_clock().now, sleep=_instant))
+    gate = MbFakeGate(LocalNotebook(layout.notebook, Writer(Role.GATE, "gate"), clock=_clock().now), tests)
+    return PreludePeers(MbFakeRepo(), toolbox, tests, gate)
 
 
 def _clock(times: list[float] | None = None) -> Clock:
@@ -91,11 +102,11 @@ def _prelude(
 ) -> Prelude:
     clock = clock or _clock()
     decisions = DecisionLog(layout.decisions, clock)
-    return Prelude(layout, processes, _notebook(layout), peers.repo, peers.toolbox, peers.gate, decisions, clock)
+    return Prelude(layout, processes, _notebook(layout), peers.repo, peers.tests, peers.gate, decisions, clock)
 
 
 async def _run(prelude: Prelude, budget: SessionBudget) -> PreludeResult:
-    """Both PRELUDE steps, as the session runs them once the integration branch has its quota."""
+    """Both PRELUDE steps, as the session runs them once the integration branch has its K."""
 
     result = await prelude.root(WORKLOAD, budget, HardStop(budget, _clock()))
     await prelude.measure_baseline(result.root_commit)
@@ -164,7 +175,7 @@ async def test_finished_child_roots_the_session_before_any_baseline_test(tmp_pat
     assert profile == result.profile
     assert (profile.session_id, profile.hardware, profile.framework_version) == (layout.session_id, "mi355x", "0.4.1")
     assert dict(profile.roofline_ceiling) == {MB_FAKE_PRIMARY_METRIC: ROOFLINE_PEAK}
-    assert peers.toolbox.submitted == []
+    assert peers.toolbox.requests == {}
 
 
 async def test_baseline_is_measured_through_the_toolbox(tmp_path: Path) -> None:
@@ -174,13 +185,16 @@ async def test_baseline_is_measured_through_the_toolbox(tmp_path: Path) -> None:
 
     await _run(prelude, SessionBudget.from_hours(2.0, NOW))
 
-    assert len(peers.toolbox.submitted) == BASELINE_TESTS
+    requests = peers.toolbox.requests
+    assert len(requests) == BASELINE_TESTS
     [baseline] = peers.gate.established
     assert baseline.root_commit == ROOT_COMMIT
-    assert baseline.request_ids == tuple(request.request_id for request in peers.toolbox.submitted)
-    for request in peers.toolbox.submitted:
-        assert (request.branch, request.parent_commit) == (INTEGRATION_BRANCH, ROOT_COMMIT)
-        assert (request.intent_fingerprint, request.priority) == ("baseline", PriorityClass.SESSION_MEASUREMENT.value)
+    assert sorted(baseline.request_ids) == sorted(requests)
+    assert set(peers.toolbox.results) == set(requests)
+    for request in requests.values():
+        assert (request.branch_id, request.parent_commit) == (INTEGRATION_BRANCH, ROOT_COMMIT)
+        assert (request.kind, request.purpose, request.delta) == (TestKind.TEST, Purpose.BASELINE, RecipeDelta())
+        assert (request.intent_fingerprint, request.priority) == (None, None)
 
 
 async def test_child_failing_before_its_launch_info_fails_prelude(tmp_path: Path) -> None:
@@ -206,8 +220,7 @@ async def test_child_without_a_baseline_fails_prelude(tmp_path: Path) -> None:
 
 async def test_withdrawn_baseline_test_fails_prelude(tmp_path: Path) -> None:
     layout = _layout(tmp_path)
-    peers = _peers(layout)
-    peers.toolbox.withdrawing = frozenset({ROOT_COMMIT})
+    peers = _peers(layout, failing=frozenset({ROOT_COMMIT}))
     prelude = _prelude(layout, _registry(layout, child_with_patch(tmp_path)), peers)
     with pytest.raises(PreludeFailed, match="withdrawn"):
         await _run(prelude, SessionBudget.from_hours(2.0, NOW))

@@ -3,15 +3,15 @@
 
 """Opening, re-sizing and stopping branches: the roster, the specialists, the toolbox quota and the notebook in step.
 
-Stopping a branch withdraws everything of it: its specialist, its queued and running tests, the processes the
-scheduler registered for it, its claims, and the forks of it that are admitted but not started yet, as the fork desk
-admits no fork of a stopped branch; the notebook gets the ``STOP`` lineage. The commits it already made stay
-in the notebook, so the integrator may still merge them. The notebook records no ``STOP`` of the integration
+Stopping a branch withdraws everything of it: its specialist, its queued and running tests and tool jobs, the
+processes the scheduler registered for it, its claims, and the forks of it that are admitted but not started yet, as
+the fork desk admits no fork of a stopped branch; the notebook gets the ``STOP`` lineage. The commits it already made
+stay in the notebook, so the integrator may still merge them. The notebook records no ``STOP`` of the integration
 branch, which only the end of the session stops. The roster entry is stopped first, so a fork that commits
 its fix while the branch is being stopped is never started; when that fork's ``SPLIT`` comes after its ``STOP``, the
-fork desk records the ``STOP`` again. A branch gets its quota before its specialist starts,
-because the toolbox treats a branch without one as stopped. A peer failure on one branch never ends the session: a
-specialist that does not start is stopped, and a failed step of a stop or of a new K is recorded in its decision.
+fork desk records the ``STOP`` again. The toolbox gets a branch's K before its specialist starts, so the first tests
+it submits already queue by it. A peer failure on one branch never ends the session: a specialist that does not start
+is stopped, and a failed step of a stop or of a new K is recorded in its decision.
 """
 
 from __future__ import annotations
@@ -22,9 +22,10 @@ from collections.abc import Mapping
 from hyperloom_multibranch.contracts.notebook import Notebook
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent
 from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
-from hyperloom_multibranch.contracts.scheduling import SpecialistLifecycle, Toolbox
+from hyperloom_multibranch.contracts.scheduling import SpecialistLifecycle
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
+from hyperloom_multibranch.scheduling.peers import SessionToolbox
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.settle import settled
 from hyperloom_multibranch.scheduling.roster import (
@@ -48,7 +49,7 @@ class BranchControl:
         roster: Roster,
         notebook: Notebook,
         lifecycle: SpecialistLifecycle,
-        toolbox: Toolbox,
+        toolbox: SessionToolbox,
         processes: ProcessRegistry,
         decisions: DecisionLog,
         clock: Clock,
@@ -122,7 +123,7 @@ class BranchControl:
         steps = [await settled(self.push_quota())]
         if entry.kind is BranchKind.SPECIALIST and entry.start_commit:
             steps.append(await settled(self._lifecycle.stop(branch)))
-        withdrawn = await settled(self._toolbox.withdraw(branch))
+        withdrawn = await settled(self._toolbox.cancel_branch(branch, stop.summary))
         steps.append(await settled(self._processes.kill_branch(branch)))
         released = await settled(self._notebook.release_branch(branch))
         if entry.kind is BranchKind.SPECIALIST and entry.start_commit:
@@ -130,7 +131,7 @@ class BranchControl:
             steps.append(await settled(self._notebook.record_lineage(event)))
         raised = [outcome for outcome in (*steps, withdrawn, released) if isinstance(outcome, BaseException)]
         detail = {
-            "withdrawn": [] if isinstance(withdrawn, BaseException) else list(withdrawn),
+            "withdrawn": 0 if isinstance(withdrawn, BaseException) else withdrawn,
             "released_claims": 0 if isinstance(released, BaseException) else len(released),
             "failures": [_failure_text(error) for error in raised],
         }
@@ -146,7 +147,7 @@ class BranchControl:
         return failures
 
     async def push_quota(self) -> None:
-        await self._toolbox.apply_quota(self._roster.quota_policy())
+        await self._toolbox.set_policy(self._roster.quota_policy())
 
     async def _start(self, entry: BranchEntry, start_commit: str, kind: DecisionKind) -> None:
         """Start the branch's specialist; one that does not start is stopped, with the failure as the reason."""

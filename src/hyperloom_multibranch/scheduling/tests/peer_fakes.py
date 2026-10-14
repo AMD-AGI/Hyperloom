@@ -1,13 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""In-memory stand-ins for the peers a session runs on, and a virtual clock, for the scheduling tests.
+"""In-memory stand-ins for the peers a session runs on, the toolbox's own fake, and a virtual clock, for the tests.
 
 Each ``MbFake`` class stands in for another owner's module until it lands, one per peer: the specialist lifecycle
-(``hyperloom_multibranch.specialist``), the toolbox (``.toolbox``), the rule gate (``.rulegate``) and the experiment
-repository (``.repo``), plus the main-flow child of PRELUDE. Every scheduling test uses these, scripted through their
-fields, and subclasses them only for a failure double; they are replaced by the real modules once those land. The
-toolbox writes every request and its result to the notebook at once; the rule gate judges from scripted values.
+(``hyperloom_multibranch.specialist``), the rule gate (``.rulegate``) and the experiment repository (``.repo``), plus
+the main-flow child of PRELUDE. Every scheduling test uses these, scripted through their fields, and subclasses them
+only for a failure double; they are replaced by the real modules once those land. The toolbox is the toolbox
+module's :class:`~hyperloom_multibranch.toolbox.fake.FakeToolbox`, noise-free and noting what the scheduler asked of
+it; the rule gate judges from scripted values.
 """
 
 from __future__ import annotations
@@ -24,17 +25,10 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import ConfigDelta, LaunchConfig, PatchRef, Recipe, RecipeDelta, RecipeError
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Notebook
-from hyperloom_multibranch.contracts.notebook.peers import (
-    Judgement,
-    SandboxFacts,
-    TestKind,
-    TestRequest,
-    TestResult,
-    Validity,
-    Verdict,
-)
+from hyperloom_multibranch.contracts.notebook.peers import Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook.records import BaselineRecord, LineageEvent
 from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, LineageKind
 from hyperloom_multibranch.contracts.scheduling import (
@@ -42,23 +36,21 @@ from hyperloom_multibranch.contracts.scheduling import (
     ForkAdmission,
     ForkAdmissionService,
     ForkRequest,
-    OperatingPoint,
-    QueueStatus,
-    QuotaPolicy,
     RepoMerge,
-    RequestWithdrawn,
-    SweepResult,
 )
+from hyperloom_multibranch.contracts.toolbox import CancelOutcome, QueueState
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_PRIMARY_METRIC
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, RegisteredProcess
+from hyperloom_multibranch.scheduling.requests import SessionTests
+from hyperloom_multibranch.toolbox.fake import FakeToolbox, ToolboxNotebook
+from hyperloom_multibranch.toolbox.fake_model import DEFAULT_BASELINE, FakeToolboxConfig, Fate, NoiseModel
+from hyperloom_multibranch.toolbox.queue import QueuePolicy
 
 LAUNCH_FLAG = "--launch-info-file"
 ROOT_COMMIT = "c0"
 BASELINE_TESTS = 3
-BASELINE_VALUE = 1000.0
-#: What the toolbox stand-in records for a withdrawal of every branch.
-ALL_BRANCHES = "*"
+BASELINE_VALUE = DEFAULT_BASELINE[MB_FAKE_PRIMARY_METRIC]
 TOOLBOX_DOWN = "toolbox service down"
 #: Loop turns and real seconds the virtual clock lets pass before it decides the loop is quiet and jumps.
 SETTLE_YIELDS = 20
@@ -259,79 +251,97 @@ class MbFakeLifecycle:
         self.k[branch] = k
 
 
-@dataclass
-class MbFakeToolbox:
-    """Stands in for the toolbox: every test is written to the notebook with its result at once.
+#: How a test of a commit fares: its primary-metric value per conc (the main operating point under conc 0).
+Curves = Mapping[str, Mapping[int, float]]
+MAIN_POINT = 0
 
-    Once a quota policy was applied, a test of a branch without quota is refused as withdrawn, the way the toolbox
-    treats a stopped branch. ``sweeps`` gives a commit's primary-metric value per conc; a commit without one sweeps
-    no point. The results of tests whose parent commit is in ``withdrawing`` are withdrawn, and withdrawing a branch in
-    ``stuck`` never returns. While ``broken`` every call fails as a toolbox whose service is down. Deleted once ``hyperloom_multibranch.toolbox`` ships a real
-    toolbox and these tests run on it.
+
+def curve_effect(curves: Curves) -> Callable[[TestRequest], float]:
+    """The fake toolbox's effect of a test: its parent commit's value at the test's conc, else the baseline."""
+
+    def effect(request: TestRequest) -> float:
+        conc = request.concurrency[0] if request.concurrency else MAIN_POINT
+        return curves.get(request.parent_commit, {}).get(conc, BASELINE_VALUE) / BASELINE_VALUE - 1.0
+
+    return effect
+
+
+class RecordingToolbox(FakeToolbox):
+    """The toolbox module's fake, without noise, noting every queue policy, branch cancel and close it was given.
+
+    ``curves`` sets what a commit measures; a test whose parent commit is in ``failing`` fails its measurement, which
+    the toolbox writes to the notebook as a withdrawal. Not a placeholder: the fake is the toolbox owner's own.
     """
 
-    notebook: Notebook
-    sweeps: Mapping[str, Mapping[int, float]] = field(default_factory=dict)
-    withdrawing: frozenset[str] = frozenset()
-    queue: QueueStatus = field(default_factory=QueueStatus)
-    broken: bool = False
-    stuck: frozenset[str] = frozenset()
-    submitted: list[TestRequest] = field(default_factory=list)
-    results: dict[str, TestResult] = field(default_factory=dict)
-    quotas: list[QuotaPolicy] = field(default_factory=list)
-    withdrawn: list[str] = field(default_factory=list)
-    swept: list[tuple[str, str]] = field(default_factory=list)
+    def __init__(self, notebook: ToolboxNotebook, curves: Curves | None = None, failing: frozenset[str] = frozenset()):
+        quiet = NoiseModel(node_bias_median=0.0, node_bias_p90=0.0, test_noise_sigma=0.0)
+        super().__init__(FakeToolboxConfig(noise=quiet, effect_fn=curve_effect(curves or {})), notebook=notebook)
+        self.policies: list[QueuePolicy] = []
+        self.cancelled: list[str] = []
+        self.closed = 0
+        self.script(lambda request: request.parent_commit in failing, [Fate.MEASUREMENT])
 
-    async def submit(self, request: TestRequest) -> str:
-        self._serving()
-        if self.quotas and self.quotas[-1].k_of(request.branch) is None:
-            raise RequestWithdrawn(f"{request.request_id}: {request.branch} has no quota")
-        made = TestResult(request.request_id, Validity.SUCCESS, SandboxFacts("node-0"), "m" * 64, gpu_seconds=60.0)
-        await self.notebook.write_request(request)
-        await self.notebook.write_result(made)
-        self.submitted.append(request)
-        self.results[request.request_id] = made
-        return request.request_id
+    async def set_policy(self, policy: QueuePolicy) -> None:
+        self.policies.append(policy)
+        await super().set_policy(policy)
 
-    async def result(self, request_id: str) -> TestResult:
-        self._serving()
-        if self.request(request_id).parent_commit in self.withdrawing:
-            raise RequestWithdrawn(request_id)
-        return self.results[request_id]
+    async def cancel_branch(self, branch_id: str, reason: str = "branch stopped") -> int:
+        self.cancelled.append(branch_id)
+        return await super().cancel_branch(branch_id, reason)
 
-    async def sweep(self, branch: str, commit: str) -> SweepResult:
-        self._serving()
-        self.swept.append((branch, commit))
-        curve = self.sweeps.get(commit, {})
-        points = tuple(OperatingPoint(conc, {MB_FAKE_PRIMARY_METRIC: value}) for conc, value in curve.items())
-        return SweepResult(commit, points, ())
+    async def close(self) -> None:
+        self.closed += 1
+        await super().close()
 
-    async def withdraw(self, branch: str) -> tuple[str, ...]:
-        self._serving()
-        self.withdrawn.append(branch)
-        if branch in self.stuck:
-            await asyncio.Event().wait()
-        return ()
 
-    async def withdraw_all(self) -> tuple[str, ...]:
-        self._serving()
-        self.withdrawn.append(ALL_BRANCHES)
-        return ()
+class DownToolbox(RecordingToolbox):
+    """A toolbox whose service fails every call while ``down``; a failure double, not a placeholder."""
 
-    async def queue_status(self) -> QueueStatus:
-        self._serving()
-        return self.queue
-
-    async def apply_quota(self, policy: QuotaPolicy) -> None:
-        self._serving()
-        self.quotas.append(policy)
-
-    def request(self, request_id: str) -> TestRequest:
-        return next(test for test in self.submitted if test.request_id == request_id)
+    down = False
 
     def _serving(self) -> None:
-        if self.broken:
+        if self.down:
             raise ConnectionError(TOOLBOX_DOWN)
+
+    async def submit_test(self, request: TestRequest) -> str:
+        self._serving()
+        return await super().submit_test(request)
+
+    async def cancel(self, request_id: str) -> CancelOutcome:
+        self._serving()
+        return await super().cancel(request_id)
+
+    async def queue_state(self) -> QueueState:
+        self._serving()
+        return await super().queue_state()
+
+    async def set_policy(self, policy: QueuePolicy) -> None:
+        self._serving()
+        await super().set_policy(policy)
+
+    async def cancel_branch(self, branch_id: str, reason: str = "branch stopped") -> int:
+        self._serving()
+        return await super().cancel_branch(branch_id, reason)
+
+    async def close(self) -> None:
+        self._serving()
+        await super().close()
+
+
+class StuckToolbox(RecordingToolbox):
+    """A toolbox that never finishes closing, nor cancelling a branch in ``stuck``; a failure double, not a
+    placeholder."""
+
+    stuck: frozenset[str] = frozenset()
+
+    async def cancel_branch(self, branch_id: str, reason: str = "branch stopped") -> int:
+        if branch_id in self.stuck:
+            self.cancelled.append(branch_id)
+            await asyncio.Event().wait()
+        return await super().cancel_branch(branch_id, reason)
+
+    async def close(self) -> None:
+        await asyncio.Event().wait()
 
 
 def judged(verdict: Verdict, gain_pct: float, request_id: str, value: float) -> Judgement:
@@ -342,14 +352,14 @@ def judged(verdict: Verdict, gain_pct: float, request_id: str, value: float) -> 
 class MbFakeGate:
     """Stands in for the rule gate: scripted judgements, and commits and forks made for a scripted specialist.
 
-    ``compare`` waits for the test's result, then answers ``verdicts`` by the test's intent fingerprint, else
-    ``default``; a test whose parent commit is in ``regressed`` regressed. No judgement is given before
-    ``held_until`` tests are being compared at once. Accuracy fails for a parent commit in ``inaccurate``. Deleted
-    once ``hyperloom_multibranch.rulegate`` ships a real rule gate and these tests run on it.
+    ``compare`` answers ``verdicts`` by the fingerprint of the test's delta, else ``default``; a test whose parent
+    commit is in ``regressed`` regressed. No judgement is given before ``held_until`` tests are being compared at once.
+    Accuracy fails for a parent commit in ``inaccurate``. The scripted specialist's candidates are measured through
+    ``tests``. Deleted once ``hyperloom_multibranch.rulegate`` ships a real rule gate and these tests run on it.
     """
 
     notebook: Notebook
-    toolbox: MbFakeToolbox
+    tests: SessionTests
     desk: ForkAdmissionService | None = None
     verdicts: Mapping[str, Judgement] = field(default_factory=dict)
     default: Judgement = field(default_factory=lambda: judged(Verdict.FLAT, 0.0, "", BASELINE_VALUE))
@@ -379,15 +389,14 @@ class MbFakeGate:
         if self._in_flight >= self.held_until:
             self._all_in.set()
         await self._all_in.wait()
-        await self.toolbox.result(request_id)
-        test = self.toolbox.request(request_id)
-        made = self.verdicts.get(test.intent_fingerprint, self.default)
+        test = (await self.notebook.record(request_id)).request
+        made = self.verdicts.get(test.delta.fingerprint(), self.default)
         if test.parent_commit in self.regressed:
             made = replace(made, verdict=Verdict.REGRESSED)
         return replace(made, request_ids=(request_id,))
 
     async def accuracy_passes(self, request_id: str) -> bool:
-        return self.toolbox.request(request_id).parent_commit not in self.inaccurate
+        return (await self.notebook.record(request_id)).request.parent_commit not in self.inaccurate
 
     async def commit(self, branch: str, parent: str, commit_id: str, value: float) -> None:
         """A specialist's candidate on ``branch`` measured, confirmed and committed as ``commit_id``."""
@@ -420,8 +429,16 @@ class MbFakeGate:
 
     async def _measure(self, branch: str, parent: str, commit_id: str) -> str:
         change = RecipeDelta(config=ConfigDelta(server_args=f"--candidate {commit_id}"))
-        test = TestRequest(f"r-{commit_id}", TestKind.TEST, branch, parent, f"intent:{commit_id}", change)
-        return await self.toolbox.submit(test)
+        test = TestRequest(
+            kind=TestKind.TEST, purpose=Purpose.EXPLORE, branch_id=branch, parent_commit=parent, delta=change
+        )
+        return (await self.tests.run(test)).request_id
+
+
+def merged_delta(candidate: str) -> RecipeDelta:
+    """The change :class:`MbFakeRepo` merges ``candidate`` with when ``merges`` scripts none."""
+
+    return RecipeDelta(config=ConfigDelta(server_args=f"--merged {candidate}"))
 
 
 @dataclass
@@ -460,8 +477,7 @@ class MbFakeRepo:
     async def merge(self, candidate: str, onto: str) -> RepoMerge:
         if candidate in self.invalid_merges:
             raise RecipeError(f"the merge of {candidate} pins two refs of one component")
-        clean = RepoMerge("", RecipeDelta(config=ConfigDelta(server_args=f"--merged {candidate}")))
-        return replace(self.merges.get(candidate, clean), onto=onto)
+        return replace(self.merges.get(candidate, RepoMerge("", merged_delta(candidate))), onto=onto)
 
     async def patch_text(self, commit: str, path: str) -> str:
         return self.patches.get((commit, path), "")
@@ -511,21 +527,26 @@ class ScriptedCompletion:
 
 
 __all__ = [
-    "ALL_BRANCHES",
     "BASELINE_TESTS",
     "BASELINE_VALUE",
     "CHILD_SCRIPT",
     "LAUNCH_FLAG",
+    "MAIN_POINT",
     "ROOT_COMMIT",
     "TOOLBOX_DOWN",
+    "Curves",
+    "DownToolbox",
     "MbFakeChildRegistry",
     "MbFakeGate",
     "MbFakeHeldRegistry",
     "MbFakeLifecycle",
     "MbFakeRepo",
-    "MbFakeToolbox",
+    "RecordingToolbox",
     "ScriptedCompletion",
     "SpecialistScript",
+    "StuckToolbox",
     "VirtualClock",
+    "curve_effect",
     "judged",
+    "merged_delta",
 ]

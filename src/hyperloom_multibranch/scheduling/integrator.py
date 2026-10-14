@@ -7,7 +7,8 @@ Candidates are the notebook's committed specialist commits, in the order it give
 by their own gain), whatever became of the branch that made them. Each is tried once per integration head. A round
 tests up to the integration branch's K candidates at once on the same head; the first of them, in that order, that
 improves it is merged, and every other improvement is superseded: it gets no judgement and is tried again on the new
-head. A merge whose recipe the recipe contract refuses is skipped and recorded like an unresolved conflict.
+head. A merge whose recipe the recipe contract refuses, or whose test the toolbox refuses, is skipped and recorded
+like an unresolved conflict.
 
 The experiment repository does the merge. Its rule for a configuration conflict is that the candidate's value wins,
 and it replays the head's patches when the candidate moves a component to another upstream ref; the integrator
@@ -23,28 +24,21 @@ import logging
 from dataclasses import dataclass, replace
 
 from hyperloom.common.jsonio import extract_last_json_with_key
+from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom.contracts.recipe import ComponentChange, PatchRef, Recipe, RecipeDelta, RecipeError, ValueChange
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Notebook
-from hyperloom_multibranch.contracts.notebook.peers import Judgement, TestKind, Verdict
+from hyperloom_multibranch.contracts.notebook.peers import Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook.records import CommittedCommit, MergeAttempt
 from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, MergeOutcome
-from hyperloom_multibranch.contracts.scheduling import (
-    ExperimentRepo,
-    PatchConflict,
-    PriorityClass,
-    RepoMerge,
-    RequestWithdrawn,
-    RuleGate,
-    Toolbox,
-)
+from hyperloom_multibranch.contracts.scheduling import ExperimentRepo, PatchConflict, RepoMerge, RuleGate
+from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
 from hyperloom_multibranch.scheduling.llm import Completion, CompletionFailed
 from hyperloom_multibranch.scheduling.mb_fakes import mb_fake_regression_passes
-from hyperloom_multibranch.scheduling.requests import integration_test_request
+from hyperloom_multibranch.scheduling.requests import SessionTests, TestWithdrawn, integration_test_request
 
 logger = logging.getLogger(__name__)
 
-MERGE_PURPOSE = "integration merge"
 SUPERSEDED = "superseded: another candidate of the round was merged onto this head first"
 #: The JSON key the resolver's reply carries the rewritten patch under; ``null`` means it cannot be combined.
 PATCH_KEY = "patch"
@@ -55,12 +49,6 @@ RESOLVER_SYSTEM_PROMPT = (
     f'Answer with one JSON object {{"{PATCH_KEY}": "<the rewritten patch as a unified diff>"}}, or '
     f'{{"{PATCH_KEY}": null}} when the two changes cannot be combined.'
 )
-
-
-def merge_intent(candidate: str) -> str:
-    """The intent fingerprint of the merge test of ``candidate``."""
-
-    return f"merge:{candidate}"
 
 
 @dataclass(frozen=True)
@@ -170,22 +158,22 @@ class _TestedMerge:
 class Integrator:
     """Merges committed specialist commits onto the integration branch; the caller runs one round at a time.
 
-    A caller that cancels a round then awaits :meth:`abandon`, which leaves the repository and the notebook agreeing
-    on the integration head and no merge test behind.
+    A cancelled round takes its merge tests back; a caller that cancels one then awaits :meth:`abandon`, which leaves
+    the repository and the notebook agreeing on the integration head.
     """
 
     def __init__(
         self,
         notebook: Notebook,
         repo: ExperimentRepo,
-        toolbox: Toolbox,
+        tests: SessionTests,
         gate: RuleGate,
         resolver: LlmPatchResolver,
         decisions: DecisionLog,
     ) -> None:
         self._notebook = notebook
         self._repo = repo
-        self._toolbox = toolbox
+        self._tests = tests
         self._gate = gate
         self._resolver = resolver
         self._decisions = decisions
@@ -218,19 +206,21 @@ class Integrator:
         if delta is None:
             conflicts = ", ".join(f"{c.component} {c.path}" for c in merge.patch_conflicts)
             return await self._skip(candidate, head, f"unresolved patch conflict: {conflicts}")
-        request = integration_test_request(
-            TestKind.TEST, head, merge_intent(candidate), MERGE_PURPOSE, PriorityClass.INTEGRATION_MERGE, delta
-        )
-        request_id = await self._toolbox.submit(request)
+        request = integration_test_request(TestKind.TEST, Purpose.INTEGRATION, head, delta)
+        withdrawn: TestWithdrawn | None = None
+        try:
+            request_id = (await self._tests.run(request)).request_id
+        except RequestRejected as exc:
+            return await self._skip(candidate, head, f"the toolbox refused the merge test: {exc}")
+        except TestWithdrawn as exc:
+            request_id, withdrawn = exc.request_id, exc
         await self._notebook.record_merge_attempt(MergeAttempt((candidate,), head, request_id))
         tested = MergeReport(
             candidate, head, MergeOutcome.PENDING, "", request_id, config_conflicts=merge.config_conflicts
         )
-        try:
-            judgement = await self._gate.compare(request_id)
-        except RequestWithdrawn:
+        if withdrawn is not None:
             return replace(tested, reason="the merge test was withdrawn")
-        return _TestedMerge(tested, delta, judgement)
+        return _TestedMerge(tested, delta, await self._gate.compare(request_id))
 
     async def _skip(self, candidate: str, head: str, reason: str) -> MergeReport:
         await self._notebook.record_merge_attempt(MergeAttempt((candidate,), head, skipped_reason=reason))
@@ -260,11 +250,10 @@ class Integrator:
         return merged
 
     async def abandon(self) -> None:
-        """After the round was cancelled: finish recording a merge already committed, withdraw the merge tests."""
+        """After the round was cancelled: finish recording a merge already committed."""
 
         if self._recording is not None:
             await self._recording
-        await self._toolbox.withdraw(INTEGRATION_BRANCH)
 
 
 def _decision(report: MergeReport) -> Decision:
@@ -281,4 +270,4 @@ def _decision(report: MergeReport) -> Decision:
     return Decision(DecisionKind.MERGE, report.reason, INTEGRATION_BRANCH, detail)
 
 
-__all__ = ["MERGE_PURPOSE", "Integrator", "LlmPatchResolver", "MergeReport", "merge_intent", "not_stackable_reason"]
+__all__ = ["Integrator", "LlmPatchResolver", "MergeReport", "not_stackable_reason"]

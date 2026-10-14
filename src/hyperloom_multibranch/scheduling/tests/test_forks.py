@@ -51,7 +51,7 @@ async def test_an_accepted_fork_is_admitted_with_its_parent_k_until_its_fix_comm
         "b01",
         2,
     )
-    assert roster.quota_policy().k_of("b02") is None
+    assert "b02" not in roster.quota_policy().branch_k
     assert desk.drain() == ()
     await desk.fork_committed("b02", "f1")
     assert desk.drain() == (CommittedFork("b02", "f1"),)

@@ -10,7 +10,7 @@ from dataclasses import replace
 import pytest
 
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
-from hyperloom_multibranch.contracts.scheduling import QueueStatus
+from hyperloom_multibranch.contracts.toolbox import QueueState
 from hyperloom_multibranch.scheduling.close import CloseReport
 from hyperloom_multibranch.scheduling.final import FinalCandidate, FinalChoice
 from hyperloom_multibranch.scheduling.lifecycle import SessionOutcome
@@ -18,7 +18,7 @@ from hyperloom_multibranch.scheduling.processes import ProcessRecord
 from hyperloom_multibranch.scheduling.stops import SessionStopReason, StopReport
 
 CHOSEN = FinalChoice(FinalCandidate("integration", INTEGRATION_BRANCH, "i1", 1041.0), (), "the higher value")
-CLEAN = StopReport((), QueueStatus())
+CLEAN = StopReport((), QueueState())
 LEFTOVER = ProcessRecord(4242, 4242, 0.0, "b01", ("sleep", "600"), "scope")
 
 
@@ -35,8 +35,8 @@ def test_a_session_that_ran_its_course_and_stopped_clean_exits_zero(reason: Sess
 @pytest.mark.parametrize(
     "outcome",
     [
-        _outcome(SessionStopReason.TIME_EXHAUSTED, CHOSEN, StopReport((LEFTOVER,), QueueStatus())),
-        _outcome(SessionStopReason.TIME_EXHAUSTED, CHOSEN, StopReport((), QueueStatus(running={"b01": 1}))),
+        _outcome(SessionStopReason.TIME_EXHAUSTED, CHOSEN, StopReport((LEFTOVER,), QueueState())),
+        _outcome(SessionStopReason.TIME_EXHAUSTED, CHOSEN, StopReport((), QueueState(running_by_branch={"b01": 1}))),
         _outcome(SessionStopReason.TIME_EXHAUSTED, CHOSEN, StopReport((), None)),
         _outcome(SessionStopReason.TIME_EXHAUSTED, None, CLEAN, "the session deadline passed before FINAL"),
         _outcome(SessionStopReason.TIME_EXHAUSTED, None, CLEAN),

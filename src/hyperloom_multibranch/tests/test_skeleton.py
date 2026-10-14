@@ -33,11 +33,11 @@ from hyperloom_multibranch.contracts.notebook.peers import Verdict
 from hyperloom_multibranch.scheduling.budget import SessionBudget
 from hyperloom_multibranch.scheduling.exports import SessionExports
 from hyperloom_multibranch.scheduling.final import INTEGRATION_LABEL
-from hyperloom_multibranch.scheduling.integrator import merge_intent
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
 from hyperloom_multibranch.scheduling.lifecycle import CUT_SHORT, Session, SessionOutcome
 from hyperloom_multibranch.scheduling.llm import CompletionFailed
 from hyperloom_multibranch.scheduling.peers import Peers, PeerSetup
+from hyperloom_multibranch.scheduling.requests import SessionTests
 from hyperloom_multibranch.scheduling.roster import BranchStatus, RosterCaps, StopCause
 from hyperloom_multibranch.scheduling.settings import RunSettings, Workload
 from hyperloom_multibranch.scheduling.stops import STOP_OVERRAN, SessionStopReason
@@ -47,11 +47,13 @@ from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     MbFakeHeldRegistry,
     MbFakeLifecycle,
     MbFakeRepo,
-    MbFakeToolbox,
+    RecordingToolbox,
     ScriptedCompletion,
     SpecialistScript,
+    StuckToolbox,
     VirtualClock,
     judged,
+    merged_delta,
 )
 from hyperloom_multibranch.scheduling.tests.child_sessions import child_with_patch
 
@@ -63,7 +65,7 @@ STEP_SECONDS = 30.0
 CLAIM_TTL_SECONDS = 1e6
 STOP_REASON = "no gain left"
 CONVERGED_REASON = "every branch is flat"
-SWEEPS = {
+CURVES = {
     ROOT_COMMIT: {CONC: 1000.0, 32: 1400.0},
     "i1": {CONC: 1040.0, 32: 1500.0},
     "c2": {CONC: 1065.0, 32: 1300.0},
@@ -74,7 +76,7 @@ def _reply(document: dict[str, object]) -> str:
     return json.dumps(document)
 
 
-MERGE_VERDICTS = {merge_intent("c1"): judged(Verdict.IMPROVED, 4.0, "", 1040.0)}
+MERGE_VERDICTS = {merged_delta("c1").fingerprint(): judged(Verdict.IMPROVED, 4.0, "", 1040.0)}
 OPENING = _reply({"open": 2, "open_k": 9, "branches": [{"branch": INTEGRATION_BRANCH, "k": 2}], "stop": []})
 STEER = _reply({"open": 0, "branches": [{"branch": "b01", "k": 7}], "stop": [{"branch": "b02", "reason": STOP_REASON}]})
 
@@ -87,20 +89,16 @@ class InsistingLifecycle(MbFakeLifecycle):
         await asyncio.Event().wait()
 
 
-class StuckToolbox(MbFakeToolbox):
-    """A toolbox whose withdrawal of every test never returns; a failure double, not a placeholder."""
-
-    async def withdraw_all(self) -> tuple[str, ...]:
-        await asyncio.Event().wait()
-        raise AssertionError("unreachable")
-
-
 class SignallingToolbox(StuckToolbox):
-    """The stuck toolbox, signalling the scheduler once as it starts to withdraw; a failure double."""
+    """The stuck toolbox, signalling the scheduler once as the session stop starts to withdraw the integration
+    branch's tests; a failure double, not a placeholder."""
 
-    async def withdraw_all(self) -> tuple[str, ...]:
-        os.kill(os.getpid(), signal.SIGTERM)
-        return await super().withdraw_all()
+    stuck = frozenset({INTEGRATION_BRANCH})
+
+    async def cancel_branch(self, branch_id: str, reason: str = "branch stopped") -> int:
+        if branch_id in self.stuck:
+            os.kill(os.getpid(), signal.SIGTERM)
+        return await super().cancel_branch(branch_id, reason)
 
 
 class BrokenRepo(MbFakeRepo):
@@ -128,9 +126,9 @@ class Stage:
     judge: ScriptedCompletion
     pids: list[int]
     stuck: frozenset[str] = frozenset()
-    toolbox_type: type[MbFakeToolbox] = MbFakeToolbox
+    toolbox_type: type[RecordingToolbox] = RecordingToolbox
     repo_type: type[MbFakeRepo] = MbFakeRepo
-    toolbox: MbFakeToolbox = field(init=False)
+    toolbox: RecordingToolbox = field(init=False)
     gate: MbFakeGate = field(init=False)
     repo: MbFakeRepo = field(init=False)
     setup: PeerSetup = field(init=False)
@@ -140,8 +138,12 @@ class Stage:
         return LocalNotebook(self.layout.notebook, Writer(role, branch or role.value, branch), clock=self.time.now)
 
     def factory(self, setup: PeerSetup) -> Peers:
-        toolbox = self.toolbox_type(self.handle(Role.TOOLBOX), sweeps=SWEEPS, stuck=self.stuck)
-        gate = MbFakeGate(self.handle(Role.GATE), toolbox, setup.desk, verdicts=MERGE_VERDICTS)
+        toolbox = self.toolbox_type(self.handle(Role.TOOLBOX), CURVES)
+        if isinstance(toolbox, StuckToolbox) and self.stuck:
+            toolbox.stuck = self.stuck
+        gate_notebook = self.handle(Role.GATE)
+        tests = SessionTests(toolbox, gate_notebook, self.time.clock)
+        gate = MbFakeGate(gate_notebook, tests, setup.desk, verdicts=MERGE_VERDICTS)
         repo = self.repo_type()
         self.toolbox, self.gate, self.repo, self.setup = toolbox, gate, repo, setup
         return Peers(self.lifecycle, toolbox, gate, repo)
@@ -222,17 +224,20 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
     assert branches["b03"].origin is LineageKind.SPLIT and branches["b03"].from_branch == "b01"
 
     assert stage.lifecycle.k["b01"] == 2
-    assert (
-        max(quota.k for policy in stage.toolbox.quotas for quota in policy.branches) == SETTINGS.caps.max_k_per_branch
-    )
-    quota = stage.toolbox.quotas[-2]
-    assert quota.k_of(INTEGRATION_BRANCH) == 2 and quota.k_of("b02") is None
+    specialist_ks = [
+        k for policy in stage.toolbox.policies for b, k in policy.branch_k.items() if b != INTEGRATION_BRANCH
+    ]
+    assert max(specialist_ks) == SETTINGS.caps.max_k_per_branch
+    steering = [policy for policy in stage.toolbox.policies if "b01" in policy.branch_k]
+    assert steering[-1].k_for(INTEGRATION_BRANCH) == 2 and "b02" not in steering[-1].branch_k
+    assert stage.toolbox.policies[-2].k_for(INTEGRATION_BRANCH) == SETTINGS.caps.max_parallel_tests
 
     roster = json.loads(stage.layout.roster.read_text())
     b02 = next(entry for entry in roster["entries"] if entry["branch"] == "b02")
     assert b02["stop"] == {"cause": StopCause.JUDGE.value, "reason": STOP_REASON, "at": b02["stop"]["at"]}
     assert branches["b02"].stop_reason == f"judge: {STOP_REASON}"
-    assert "b02" in stage.lifecycle.stopped and "b02" in stage.toolbox.withdrawn
+    assert "b02" in stage.lifecycle.stopped and "b02" in stage.toolbox.cancelled
+    assert stage.toolbox.closed == 1 and stage.toolbox.results
     assert not any(running(pid) for pid in stage.pids)
     claims = (await observer.snapshot()).claims
     assert [claim.status for claim in claims if claim.holder == "b02"] == [ClaimStatus.RELEASED]
@@ -295,7 +300,8 @@ async def test_a_stop_signal_skips_to_close_and_stops_every_branch(tmp_path: Pat
     assert outcome.stop_reason is SessionStopReason.SIGNAL and outcome.exit_code == 1
     assert outcome.final is None and outcome.close is not None
     assert sorted(stage.lifecycle.stopped) == ["b01", "b02"]
-    assert stage.toolbox.withdrawn[:2] == [INTEGRATION_BRANCH, "*"]
+    assert sorted(stage.toolbox.cancelled) == sorted(("b01", "b02", INTEGRATION_BRANCH))
+    assert stage.toolbox.closed == 1
     late = await stage.gate.desk.admit(ForkRequest("b01", ROOT_COMMIT, "fix after the stop"))
     assert late.status is AdmissionStatus.REJECTED
     roster = json.loads(stage.layout.roster.read_text())
@@ -328,9 +334,9 @@ async def test_close_after_a_signal_waits_the_close_grace_not_the_budget(tmp_pat
     assert stage.pids and not any(running(pid) for pid in stage.pids)
 
 
-async def test_phases_that_cannot_unwind_after_a_signal_do_not_hold_close_up(tmp_path: Path) -> None:
+async def test_a_toolbox_that_cannot_stop_after_a_signal_does_not_hold_close_up(tmp_path: Path) -> None:
     stage = _stage(tmp_path, child=child_with_patch(tmp_path))
-    stage.stuck = frozenset({INTEGRATION_BRANCH})
+    stage.toolbox_type, stage.stuck = StuckToolbox, frozenset({INTEGRATION_BRANCH})
     stage.lifecycle.scripts = {"b01": _signalling(stage)}
 
     outcome = await stage.run()
@@ -344,7 +350,7 @@ async def test_phases_that_cannot_unwind_after_a_signal_do_not_hold_close_up(tmp
 
 async def test_after_a_signal_the_session_ends_within_one_close_grace(tmp_path: Path) -> None:
     stage = _stage(tmp_path, child=child_with_patch(tmp_path))
-    stage.stuck = frozenset({INTEGRATION_BRANCH})
+    stage.toolbox_type, stage.stuck = StuckToolbox, frozenset({INTEGRATION_BRANCH})
     stage.lifecycle = MbFakeLifecycle(scripts={"b01": _signalling(stage)}, hanging=frozenset({"b01", "b02"}))
 
     outcome = await stage.run()

@@ -5,8 +5,8 @@
 
 Provisional, as :mod:`hyperloom_multibranch.contracts.notebook.peers` is: each protocol and object here gives way to
 its owner's once that is merged, and lists only what the scheduling side calls or reads. The specialist lifecycle,
-the rule gate and the experiment repository belong to the specialist-evolution module; the toolbox to the toolbox
-module. Every method is a coroutine.
+the rule gate and the experiment repository belong to the specialist-evolution module. The toolbox is the toolbox
+module's own :mod:`hyperloom_multibranch.contracts.toolbox`. Every method is a coroutine.
 
 The integrator tests a merge before it writes it: :meth:`ExperimentRepo.merge` proposes the change, the merge test
 runs from the integration head with that change, and only an improvement is written with
@@ -15,18 +15,16 @@ runs from the integration head with that change, and only an improvement is writ
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
 from hyperloom.contracts.recipe import PatchRef, Recipe, RecipeDelta, ValueChange
-from hyperloom_multibranch.contracts.notebook.peers import Judgement, TestRequest, TestResult
+from hyperloom_multibranch.contracts.notebook.peers import Judgement
 from hyperloom_multibranch.contracts.notebook.records import BaselineRecord
-from hyperloom_multibranch.contracts.scheduling.quota import QuotaPolicy
 
 # MB_FAKE_PROVISIONAL_PORTS: every protocol and object in this module is provisional and gives way to its owner's
-# type (hyperloom_multibranch.specialist, .toolbox, .rulegate, .repo) once that is merged.
+# type (hyperloom_multibranch.specialist, .rulegate, .repo) once that is merged.
 
 
 @dataclass(frozen=True)
@@ -36,37 +34,6 @@ class ForkRequest:
     from_branch: str
     parent_commit: str
     reason: str
-
-
-class RequestWithdrawn(Exception):
-    """The test was withdrawn before it produced a result."""
-
-
-@dataclass(frozen=True)
-class QueueStatus:
-    """Queued tests per ``PriorityClass`` value and running tests per branch."""
-
-    queued: Mapping[str, int] = field(default_factory=dict)
-    running: Mapping[str, int] = field(default_factory=dict)
-
-    @property
-    def idle(self) -> bool:
-        return not any(self.queued.values()) and not any(self.running.values())
-
-
-@dataclass(frozen=True)
-class OperatingPoint:
-    """One arm of a concurrency sweep: the recorded-value metrics measured at ``conc``."""
-
-    conc: int
-    values: Mapping[str, float]
-
-
-@dataclass(frozen=True)
-class SweepResult:
-    commit: str
-    points: tuple[OperatingPoint, ...]
-    request_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -114,31 +81,6 @@ class SpecialistLifecycle(Protocol):
         """How many tests the branch's specialist may have running at once."""
 
 
-class Toolbox(Protocol):
-    """Measures every test and sweep on the session's workload it was built with: the model, framework, tp, isl,
-    osl, conc and precision the operator gave. Every process it starts goes through the session's process registry it
-    was built with, as the lifecycle's do."""
-
-    async def submit(self, request: TestRequest) -> str:
-        """Queue ``request`` and return the request id its result carries."""
-
-    async def result(self, request_id: str) -> TestResult:
-        """Wait for the final result; raises :class:`RequestWithdrawn` when the test was withdrawn."""
-
-    async def sweep(self, branch: str, commit: str) -> SweepResult:
-        """Measure ``commit`` across the concurrency sweep around the workload's conc."""
-
-    async def withdraw(self, branch: str) -> tuple[str, ...]:
-        """Withdraw every queued and running test of ``branch``; returns their request ids."""
-
-    async def withdraw_all(self) -> tuple[str, ...]: ...
-
-    async def queue_status(self) -> QueueStatus: ...
-
-    async def apply_quota(self, policy: QuotaPolicy) -> None:
-        """Queue from now on by ``policy``; it replaces the previous one."""
-
-
 class RuleGate(Protocol):
     """The rule gate as the scheduling side uses it; fork requests reach the scheduler's admission by awaiting it."""
 
@@ -149,7 +91,7 @@ class RuleGate(Protocol):
         """Compute the baseline and thresholds from the measured tests and record them in the notebook."""
 
     async def compare(self, request_id: str) -> Judgement:
-        """Judge a test against its parent commit's recorded value as a specialist candidate is judged.
+        """Judge a settled test against its parent commit's recorded value as a specialist candidate is judged.
 
         Runs the confirming retest and the accuracy rounds a commit needs, and returns the final judgement.
         """
@@ -185,13 +127,8 @@ class ExperimentRepo(Protocol):
 __all__ = [
     "ExperimentRepo",
     "ForkRequest",
-    "OperatingPoint",
     "PatchConflict",
-    "QueueStatus",
     "RepoMerge",
-    "RequestWithdrawn",
     "RuleGate",
     "SpecialistLifecycle",
-    "SweepResult",
-    "Toolbox",
 ]

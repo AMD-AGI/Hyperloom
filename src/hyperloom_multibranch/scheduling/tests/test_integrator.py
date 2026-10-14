@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The integrator against the local notebook, on the peer stand-ins for the repository, toolbox and rule gate.
+"""The integrator against the local notebook and the toolbox's fake, on the stand-ins for the repository and rule gate.
 
 The notebook holds the root ``c0`` and two commits of ``s1``: ``c1`` (+4%) and ``c2`` (+2%), so ``c1`` is tried first.
 """
@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom.contracts.recipe import (
     ComponentChange,
     ComponentPatches,
@@ -26,26 +27,31 @@ from hyperloom.contracts.recipe import (
     ValueChange,
 )
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
-from hyperloom_multibranch.contracts.notebook.peers import Judgement, TestKind, Verdict
+from hyperloom_multibranch.contracts.notebook.peers import Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent
 from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, LineageKind, MergeOutcome
-from hyperloom_multibranch.contracts.scheduling import PatchConflict, PriorityClass, RepoMerge
+from hyperloom_multibranch.contracts.scheduling import PatchConflict, RepoMerge
+from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.tests.factories import FakeClock, delta, intent, judgement, request, result
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import DecisionKind, DecisionLog
 from hyperloom_multibranch.scheduling.integrator import (
-    MERGE_PURPOSE,
     RESOLVER_SYSTEM_PROMPT,
     SUPERSEDED,
     Integrator,
     LlmPatchResolver,
     MergeReport,
-    merge_intent,
 )
 from hyperloom_multibranch.scheduling.llm import CompletionFailed
 from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_BASE_IMAGE_DIGEST
-from hyperloom_multibranch.scheduling.tests.peer_fakes import MbFakeGate, MbFakeRepo, MbFakeToolbox, ScriptedCompletion
+from hyperloom_multibranch.scheduling.requests import SessionTests
+from hyperloom_multibranch.scheduling.tests.peer_fakes import (
+    MbFakeGate,
+    MbFakeRepo,
+    RecordingToolbox,
+    ScriptedCompletion,
+)
 
 COMPONENT = "vllm"
 UPSTREAM_REF = "a" * 40
@@ -53,6 +59,7 @@ HEAD_PATCH = "patch/vllm/0001-head.patch"
 CANDIDATE_PATCH = "patch/vllm/0002-candidate.patch"
 RESOLVED_TEXT = "--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-old\n+resolved\n"
 GAINS = {"c1": 4.0, "c2": 2.0}
+MERGED_ARGS = {"c1": "--max-num-seqs 256", "c2": "--max-num-seqs 128"}
 #: More merge tests than any round compares at once, so the gate stand-in never answers.
 HELD_FOREVER = 99
 
@@ -67,6 +74,16 @@ def clean_merge(server_args: str) -> RepoMerge:
     return RepoMerge("", delta(server_args))
 
 
+def merge_test_of(candidate: str) -> str:
+    """The fingerprint of the change the merge test of ``candidate`` measures, which the gate stand-in judges by."""
+
+    return delta(MERGED_ARGS[candidate]).fingerprint()
+
+
+async def _instant(seconds: float) -> None:
+    await asyncio.sleep(0)
+
+
 def improved() -> Judgement:
     return judgement(3.0, (), recorded={"output_throughput": 1030.0})
 
@@ -76,7 +93,7 @@ class Bench:
     root: Path
     clock: FakeClock
     repo: MbFakeRepo
-    toolbox: MbFakeToolbox
+    toolbox: RecordingToolbox
     gate: MbFakeGate
     completion: ScriptedCompletion
     integrator: Integrator
@@ -115,23 +132,29 @@ async def _commit_specialist_work(bench: Bench) -> None:
 
 @pytest.fixture
 async def bench(tmp_path: Path) -> Bench:
+    return await _bench(tmp_path)
+
+
+async def _bench(tmp_path: Path, failing: frozenset[str] = frozenset()) -> Bench:
     clock = FakeClock()
     root = tmp_path / "notebook"
     repo = MbFakeRepo(
         recipes={"c0": recipe(patches=(HEAD_PATCH,)), "c1": recipe("--max-num-seqs 256", (CANDIDATE_PATCH,))},
         integration_head="c0",
-        merges={"c1": clean_merge("--max-num-seqs 256"), "c2": clean_merge("--max-num-seqs 128")},
+        merges={candidate: clean_merge(args) for candidate, args in MERGED_ARGS.items()},
         patches={("c0", HEAD_PATCH): "head patch text", ("c1", CANDIDATE_PATCH): "candidate patch text"},
     )
     repo.recipes["c2"] = recipe("--max-num-seqs 128")
-    toolbox = MbFakeToolbox(LocalNotebook(root, Writer(Role.TOOLBOX, "toolbox"), clock=clock))
-    gate = MbFakeGate(LocalNotebook(root, Writer(Role.GATE, "gate"), clock=clock), toolbox, default=improved())
+    toolbox = RecordingToolbox(LocalNotebook(root, Writer(Role.TOOLBOX, "toolbox"), clock=clock), failing=failing)
+    merger = LocalNotebook(root, Writer(Role.INTEGRATOR, "integrator"), clock=clock)
+    tests = SessionTests(toolbox, merger, Clock(now=clock, sleep=_instant))
+    gate = MbFakeGate(LocalNotebook(root, Writer(Role.GATE, "gate"), clock=clock), tests, default=improved())
     completion = ScriptedCompletion()
     decisions = tmp_path / "MB-decisions.jsonl"
     integrator = Integrator(
-        LocalNotebook(root, Writer(Role.INTEGRATOR, "integrator"), clock=clock),
+        merger,
         repo,
-        toolbox,
+        tests,
         gate,
         LlmPatchResolver(completion, repo),
         DecisionLog(decisions, Clock(now=clock)),
@@ -149,12 +172,16 @@ async def test_an_improving_merge_is_tested_from_the_head_then_written(bench: Be
 
     assert report is not None and report.outcome is MergeOutcome.MERGED
     assert (report.candidate, report.onto, report.merged_commit) == ("c1", "c0", "i1")
-    [test] = bench.toolbox.submitted
-    assert (test.kind, test.branch, test.parent_commit) == (TestKind.TEST, INTEGRATION_BRANCH, "c0")
-    assert (test.intent_fingerprint, test.purpose) == (merge_intent("c1"), MERGE_PURPOSE)
-    assert test.priority == PriorityClass.INTEGRATION_MERGE.value
+    [test] = bench.toolbox.requests.values()
+    assert (test.kind, test.branch_id, test.parent_commit) == (TestKind.TEST, INTEGRATION_BRANCH, "c0")
+    assert (test.purpose, test.delta, test.intent_fingerprint, test.priority) == (
+        Purpose.INTEGRATION,
+        delta(MERGED_ARGS["c1"]),
+        None,
+        None,
+    )
     assert bench.repo.integrated == [("c0", delta("--max-num-seqs 256"), ("c1",))]
-    record = await bench.handle(Role.OBSERVER).record(test.request_id)
+    record = await bench.handle(Role.OBSERVER).record(str(test.request_id))
     assert (record.conclusion, record.commit_id) == (Conclusion.MERGED, "i1")
     lineage = await bench.handle(Role.OBSERVER).lineage()
     assert lineage.commit("i1").recipe_digest == bench.repo.recipes["i1"].digest()
@@ -173,7 +200,7 @@ async def test_an_improving_merge_is_tested_from_the_head_then_written(bench: Be
     ids=["flat", "regressed", "inaccurate"],
 )
 async def test_a_merge_that_does_not_improve_is_not_stackable(bench: Bench, outcome: Judgement) -> None:
-    bench.gate.verdicts = {merge_intent("c1"): outcome}
+    bench.gate.verdicts = {merge_test_of("c1"): outcome}
 
     report = await _one(bench)
 
@@ -185,7 +212,7 @@ async def test_a_merge_that_does_not_improve_is_not_stackable(bench: Bench, outc
 
 
 async def test_each_commit_is_tried_once_per_integration_head(bench: Bench) -> None:
-    bench.gate.verdicts = {merge_intent("c1"): replace(improved(), verdict=Verdict.FLAT)}
+    bench.gate.verdicts = {merge_test_of("c1"): replace(improved(), verdict=Verdict.FLAT)}
 
     tried = [await _one(bench) for _ in range(4)]
 
@@ -226,16 +253,14 @@ async def test_commits_of_a_stopped_branch_stay_eligible(bench: Bench) -> None:
 
 async def test_a_resolved_patch_conflict_is_added_to_the_merged_change(bench: Bench) -> None:
     conflict = PatchConflict(COMPONENT, CANDIDATE_PATCH, "hunk 1 FAILED")
-    bench.repo.merges = {**bench.repo.merges, "c1": replace(bench.repo.merges["c1"], patch_conflicts=(conflict,))}
+    merge = replace(bench.repo.merges["c1"], onto="c0", patch_conflicts=(conflict,))
     bench.completion.fallback = "```json\n" + json.dumps({"patch": RESOLVED_TEXT}) + "\n```"
 
-    report = await _one(bench)
+    resolved = await LlmPatchResolver(bench.completion, bench.repo).resolve("c1", merge)
 
-    assert report is not None and report.outcome is MergeOutcome.MERGED
     [(stored, text)] = bench.repo.stored
     assert text == RESOLVED_TEXT
-    [test] = bench.toolbox.submitted
-    assert test.delta == replace(
+    assert resolved == replace(
         delta("--max-num-seqs 256"), components=(ComponentChange(COMPONENT, add_patches=(stored,)),)
     )
     [(system, prompt)] = bench.completion.calls
@@ -246,14 +271,13 @@ async def test_a_resolved_patch_conflict_is_added_to_the_merged_change(bench: Be
 async def test_a_conflict_on_a_component_the_delta_changes_extends_that_change(bench: Bench) -> None:
     moved = ComponentChange(COMPONENT, upstream_ref="b" * 40)
     conflict = PatchConflict(COMPONENT, HEAD_PATCH, "does not apply on the new ref")
-    bench.repo.merges = {"c1": RepoMerge("", RecipeDelta(components=(moved,)), patch_conflicts=(conflict,))}
+    merge = RepoMerge("c0", RecipeDelta(components=(moved,)), patch_conflicts=(conflict,))
     bench.completion.fallback = json.dumps({"patch": RESOLVED_TEXT})
 
-    await _one(bench)
+    resolved = await LlmPatchResolver(bench.completion, bench.repo).resolve("c1", merge)
 
     [(stored, _)] = bench.repo.stored
-    [test] = bench.toolbox.submitted
-    assert test.delta == RecipeDelta(components=(replace(moved, add_patches=(stored,)),))
+    assert resolved == RecipeDelta(components=(replace(moved, add_patches=(stored,)),))
     assert "head patch text" in bench.completion.calls[0][1]
 
 
@@ -275,7 +299,7 @@ async def test_an_unresolved_patch_conflict_is_skipped_and_recorded(bench: Bench
     assert report is not None and report.outcome is MergeOutcome.CONFLICT_SKIPPED
     assert CANDIDATE_PATCH in report.reason and report.request_id is None
     assert await bench.outcome("c1") is MergeOutcome.CONFLICT_SKIPPED
-    assert [test.intent_fingerprint for test in bench.toolbox.submitted] == []
+    assert bench.toolbox.requests == {}
     following = await _one(bench)
     assert following is not None and following.candidate == "c2"
 
@@ -293,8 +317,22 @@ async def test_a_merge_the_recipe_contract_refuses_is_skipped_and_the_round_goes
     assert await bench.outcome("c1") is MergeOutcome.CONFLICT_SKIPPED
 
 
-async def test_a_withdrawn_merge_test_writes_nothing_to_the_integration_branch(bench: Bench) -> None:
-    bench.toolbox.withdrawing = frozenset({"c0"})
+async def test_a_merge_test_the_toolbox_refuses_is_skipped_and_the_round_goes_on(bench: Bench) -> None:
+    refusal = RequestRejected("a patch does not apply", "delta_not_applicable")
+    bench.toolbox.reject_if(lambda test: refusal if test.delta == delta(MERGED_ARGS["c1"]) else None)
+
+    reports = await bench.integrator.integrate_next(2)
+
+    assert [(r.candidate, r.outcome) for r in reports] == [
+        ("c1", MergeOutcome.CONFLICT_SKIPPED),
+        ("c2", MergeOutcome.MERGED),
+    ]
+    assert "delta_not_applicable" in reports[0].reason and reports[0].request_id is None
+    assert await bench.outcome("c1") is MergeOutcome.CONFLICT_SKIPPED
+
+
+async def test_a_withdrawn_merge_test_writes_nothing_to_the_integration_branch(tmp_path: Path) -> None:
+    bench = await _bench(tmp_path, failing=frozenset({"c0"}))
 
     report = await _one(bench)
 
@@ -318,6 +356,21 @@ async def _cancel(task: asyncio.Task[object]) -> None:
 
 
 async def test_a_merge_cancelled_during_its_test_is_abandoned_and_its_test_withdrawn(bench: Bench) -> None:
+    bench.toolbox.executor.gate.clear()
+    merging = asyncio.ensure_future(bench.integrator.integrate_next(1))
+    while not bench.toolbox.requests:
+        await asyncio.sleep(0)
+
+    await _cancel(merging)
+    await bench.integrator.abandon()
+
+    [request_id] = bench.toolbox.requests
+    assert bench.toolbox.withdrawn.keys() == {request_id}
+    assert (await bench.handle(Role.OBSERVER).record(request_id)).withdrawn_at is not None
+    assert bench.repo.integrated == []
+
+
+async def test_a_merge_cancelled_while_judged_is_abandoned_without_a_merge(bench: Bench) -> None:
     bench.gate.held_until = HELD_FOREVER
     merging = asyncio.ensure_future(bench.integrator.integrate_next(1))
     await bench.gate.comparing.wait()
@@ -325,8 +378,7 @@ async def test_a_merge_cancelled_during_its_test_is_abandoned_and_its_test_withd
     await _cancel(merging)
     await bench.integrator.abandon()
 
-    assert bench.toolbox.withdrawn == [INTEGRATION_BRANCH]
-    assert bench.repo.integrated == []
+    assert bench.repo.integrated == [] and bench.toolbox.withdrawn == {}
 
 
 async def test_a_merge_cancelled_while_committing_is_still_recorded(bench: Bench) -> None:
@@ -339,7 +391,7 @@ async def test_a_merge_cancelled_while_committing_is_still_recorded(bench: Bench
     bench.repo.commit_released.set()
     await abandoning
 
-    [test] = bench.toolbox.submitted
-    record = await bench.handle(Role.OBSERVER).record(test.request_id)
+    [request_id] = bench.toolbox.requests
+    record = await bench.handle(Role.OBSERVER).record(request_id)
     assert (record.conclusion, record.commit_id) == (Conclusion.MERGED, bench.repo.integration_head)
-    assert bench.toolbox.withdrawn == [INTEGRATION_BRANCH]
+    assert bench.toolbox.withdrawn == {}

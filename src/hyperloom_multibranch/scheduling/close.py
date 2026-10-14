@@ -125,7 +125,7 @@ def _stop_lines(stop: StopReport) -> list[str]:
         f"Stopped clean: {stop.clean}; processes left: {[record.pid for record in stop.leftovers]}",
         "Queue after the stop: unknown"
         if queue is None
-        else f"Queue after the stop: queued {dict(queue.queued)}, running {dict(queue.running)}",
+        else f"Queue after the stop: queued {dict(queue.queued_by_branch)}, running {dict(queue.running_by_branch)}",
         *(f"Stop failure: {failure}" for failure in stop.failures),
     ]
 

@@ -1,44 +1,116 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The tests the scheduling side itself issues: all of them run on the integration branch.
+"""The tests the scheduling side itself issues, all on the integration branch, and waiting for their outcome.
 
 PRELUDE's baseline, the integrator's merge tests and FINAL's validation differ only in what they measure, from which
-commit, and at which priority; this module builds each one the same way.
+commit and why; :func:`integration_test_request` builds each one the same way. The toolbox hands no result back: it
+writes the result, or the withdrawal of a test it will not measure, to the notebook, so :class:`SessionTests` reads
+the outcome from there.
 """
 
 from __future__ import annotations
 
-import uuid
+import asyncio
 
+from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
-from hyperloom_multibranch.contracts.notebook.peers import TestKind, TestRequest
-from hyperloom_multibranch.contracts.scheduling import PriorityClass
+from hyperloom_multibranch.contracts.notebook.interfaces import RecordSearch
+from hyperloom_multibranch.contracts.notebook.records import TestRecord
+from hyperloom_multibranch.contracts.toolbox import Backpressure, Toolbox
+from hyperloom_multibranch.scheduling.clock import Clock
 
 NO_DELTA = RecipeDelta()
+#: Clock seconds between two reads of a test's notebook record while it is in flight; a test takes minutes.
+SETTLE_POLL_SECONDS = 5.0
+#: Clock seconds before a request the toolbox refused with backpressure is submitted again.
+RESUBMIT_SECONDS = 30.0
+
+
+class TestWithdrawn(Exception):
+    """The toolbox took the test back without measuring it; ``reason`` is the notebook's withdrawal reason."""
+
+    __test__ = False
+
+    def __init__(self, request_id: str, reason: str) -> None:
+        super().__init__(f"{request_id} was withdrawn: {reason}")
+        self.request_id = request_id
+        self.reason = reason
 
 
 def integration_test_request(
     kind: TestKind,
+    purpose: Purpose,
     parent_commit: str,
-    intent: str,
-    purpose: str,
-    priority: PriorityClass,
     delta: RecipeDelta = NO_DELTA,
+    *,
+    concurrency: tuple[int, ...] = (),
 ) -> TestRequest:
-    """A fresh request on the integration branch measuring ``delta`` from ``parent_commit``."""
+    """A request on the integration branch measuring ``delta`` from ``parent_commit``.
+
+    It names no intent: the session's own tests claim nothing, and the toolbox refuses a request whose intent has no
+    claim behind it.
+    """
 
     return TestRequest(
-        request_id=uuid.uuid4().hex,
         kind=kind,
-        branch=INTEGRATION_BRANCH,
-        parent_commit=parent_commit,
-        intent_fingerprint=intent,
-        delta=delta,
         purpose=purpose,
-        priority=priority.value,
+        branch_id=INTEGRATION_BRANCH,
+        parent_commit=parent_commit,
+        delta=delta,
+        accuracy=kind is TestKind.ACCURACY,
+        concurrency=concurrency,
     )
 
 
-__all__ = ["NO_DELTA", "integration_test_request"]
+class SessionTests:
+    """Submits the session's own tests to ``toolbox`` and waits for their outcome in ``notebook``."""
+
+    def __init__(self, toolbox: Toolbox, notebook: RecordSearch, clock: Clock) -> None:
+        self._toolbox = toolbox
+        self._notebook = notebook
+        self._clock = clock
+
+    async def submit(self, request: TestRequest) -> str:
+        """The accepted request's id; a branch queue that is full is waited out, a refusal raises."""
+
+        while True:
+            try:
+                return await self._toolbox.submit_test(request)
+            except Backpressure:
+                await self._clock.sleep(RESUBMIT_SECONDS)
+
+    async def settled(self, request_id: str) -> TestRecord:
+        """The record once the test has a result; raises :class:`TestWithdrawn` when it was withdrawn instead."""
+
+        while True:
+            record = await self._notebook.record(request_id)
+            if record.withdrawn_at is not None:
+                raise TestWithdrawn(request_id, record.withdrawal_reason)
+            if record.result is not None:
+                return record
+            await self._clock.sleep(SETTLE_POLL_SECONDS)
+
+    async def run(self, request: TestRequest) -> TestRecord:
+        """Submit ``request`` and wait for its settled record; a caller that stops waiting takes the test back.
+
+        The take-back is shielded, so a second cancel of the caller does not cut the withdrawal short.
+        """
+
+        request_id = await self.submit(request)
+        try:
+            return await self.settled(request_id)
+        except asyncio.CancelledError:
+            await asyncio.shield(self._toolbox.cancel(request_id))
+            raise
+
+
+__all__ = [
+    "NO_DELTA",
+    "RESUBMIT_SECONDS",
+    "SETTLE_POLL_SECONDS",
+    "SessionTests",
+    "TestWithdrawn",
+    "integration_test_request",
+]

@@ -17,22 +17,22 @@ from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import DecisionLog
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.roster import BranchOrigin, BranchStop, Roster, RosterCaps, StopCause
-from hyperloom_multibranch.scheduling.tests.peer_fakes import ROOT_COMMIT, MbFakeLifecycle, MbFakeToolbox
+from hyperloom_multibranch.scheduling.tests.peer_fakes import ROOT_COMMIT, MbFakeLifecycle, RecordingToolbox
 
 NOW = 1_700_000_000.0
 CLOCK = Clock(now=lambda: NOW)
 
 
 class QuotaCheckingLifecycle(MbFakeLifecycle):
-    """The lifecycle stand-in, noting the K the toolbox's quota held for a branch when it started."""
+    """The lifecycle stand-in, noting the K the toolbox's policy gave a branch of its own when it started."""
 
-    def __init__(self, toolbox: MbFakeToolbox, refusing: frozenset[str]) -> None:
+    def __init__(self, toolbox: RecordingToolbox, refusing: frozenset[str]) -> None:
         super().__init__(refusing=refusing)
         self.toolbox = toolbox
         self.quota_at_start: dict[str, int | None] = {}
 
     async def start(self, branch: str, start_commit: str) -> None:
-        self.quota_at_start[branch] = self.toolbox.quotas[-1].k_of(branch) if self.toolbox.quotas else None
+        self.quota_at_start[branch] = self.toolbox.policies[-1].branch_k.get(branch) if self.toolbox.policies else None
         await super().start(branch, start_commit)
 
 
@@ -52,7 +52,9 @@ class Bench:
     def __init__(self, tmp_path: Path, refusing: frozenset[str] = frozenset()) -> None:
         self.notebook = LocalNotebook(tmp_path / "nb", Writer(Role.SCHEDULER, "scheduler"), clock=CLOCK.now)
         self.roster = Roster(RosterCaps(3, 2, 8), tmp_path / "MB-roster.json", CLOCK)
-        self.toolbox = MbFakeToolbox(self.notebook)
+        self.toolbox = RecordingToolbox(
+            LocalNotebook(tmp_path / "nb", Writer(Role.TOOLBOX, "toolbox"), clock=CLOCK.now)
+        )
         self.lifecycle = QuotaCheckingLifecycle(self.toolbox, refusing)
         self.control = BranchControl(
             self.roster,
@@ -80,8 +82,7 @@ async def test_the_opening_batch_is_recorded_started_and_given_quota(tmp_path: P
     assert bench.lifecycle.k == {"b01": 2, "b02": 2}
     view = await bench.notebook.lineage()
     assert {branch.branch: branch.start_commit for branch in view.branches}["b02"] == ROOT_COMMIT
-    quota = bench.toolbox.quotas[-1]
-    assert (quota.k_of(INTEGRATION_BRANCH), quota.k_of("b01"), quota.k_of("b02")) == (1, 2, 2)
+    assert dict(bench.toolbox.policies[-1].branch_k) == {INTEGRATION_BRANCH: 1, "b01": 2, "b02": 2}
     assert bench.lifecycle.quota_at_start == {"b01": 2, "b02": 2}
 
 
@@ -103,8 +104,8 @@ async def test_a_failing_specialist_stop_is_returned_and_still_withdraws_and_rec
 
     assert [str(failure) for failure in failures] == ["the runtime refused to stop b01"]
 
-    assert bench.toolbox.withdrawn == ["b01"]
-    assert bench.toolbox.quotas[-1].k_of("b01") is None
+    assert bench.toolbox.cancelled == ["b01"]
+    assert "b01" not in bench.toolbox.policies[-1].branch_k
     stops = {branch.branch: branch.stop_reason for branch in (await bench.notebook.lineage()).branches}
     assert stops["b01"] == "judge: flat"
     logged = json.loads((tmp_path / "MB-decisions.jsonl").read_text().splitlines()[-1])
@@ -121,14 +122,14 @@ async def test_stopping_a_branch_withdraws_it_once_and_its_admitted_fork_never_s
     await bench.control.stop_branch("b01", BranchStop(StopCause.SESSION_END, "time_exhausted", NOW))
 
     assert bench.lifecycle.stopped == ["b01"]
-    assert bench.toolbox.withdrawn == ["b02", "b01"]
+    assert bench.toolbox.cancelled == ["b02", "b01"]
     assert bench.roster.entry("b01").stop == stop
     assert bench.roster.entry("b02").stop == BranchStop(StopCause.JUDGE, "parent b01 stopped: flat", NOW)
     assert await bench.control.start_fork("b02", "f1") is None
     assert "b02" not in bench.lifecycle.started
     stops = {branch.branch: branch.stop_reason for branch in (await bench.notebook.lineage()).branches}
     assert stops["b01"] == "judge: flat"
-    assert bench.toolbox.quotas[-1].k_of("b01") is None
+    assert "b01" not in bench.toolbox.policies[-1].branch_k
 
 
 async def test_k_orders_skip_stopped_branches_and_clamp(tmp_path: Path) -> None:
@@ -139,7 +140,7 @@ async def test_k_orders_skip_stopped_branches_and_clamp(tmp_path: Path) -> None:
     await bench.control.apply_k({"b01": 9, "b02": 2, INTEGRATION_BRANCH: 2})
 
     assert bench.lifecycle.k == {"b01": 2, "b02": 1}
-    assert bench.toolbox.quotas[-1].k_of(INTEGRATION_BRANCH) == 2
+    assert bench.toolbox.policies[-1].k_for(INTEGRATION_BRANCH) == 2
 
 
 async def test_a_specialist_that_does_not_start_is_stopped_and_the_others_still_open(tmp_path: Path) -> None:

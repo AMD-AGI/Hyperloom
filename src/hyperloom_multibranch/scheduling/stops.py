@@ -4,8 +4,8 @@
 """Why a session stops, the operator's stop signals, and the two session-wide stops.
 
 Ending exploration stops every specialist branch and keeps the integration branch for FINAL; a branch stop that fails
-there is logged, not raised. Stopping everything
-withdraws every test, stops every branch including integration, and kills every process the scheduler started, then
+there is logged, not raised. Stopping everything stops every branch including integration, which withdraws every
+test, closes the toolbox, which releases the sandboxes it holds, and kills every process the scheduler started, then
 reports what is still alive; it is bounded by the hard stop, and the kill runs whether or not the rest finished. Both
 close the roster first, so no fork is admitted and no branch opened afterwards.
 The main flow's signal drain lives in its loop package, which this package does not import.
@@ -16,13 +16,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 
-from hyperloom_multibranch.contracts.scheduling.peers import QueueStatus, Toolbox
+from hyperloom_multibranch.contracts.toolbox import QueueState
 from hyperloom_multibranch.scheduling.branches import BranchControl
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
+from hyperloom_multibranch.scheduling.peers import SessionToolbox
 from hyperloom_multibranch.scheduling.processes import ProcessRecord, ProcessRegistry
 from hyperloom_multibranch.scheduling.roster import BranchKind, BranchStop, Roster, StopCause
 from hyperloom_multibranch.scheduling.settle import settled
@@ -97,17 +98,19 @@ class StopSignals:
 class StopReport:
     """What outlived a session stop: registered processes still running and tests the toolbox still holds.
 
-    ``queue`` is ``None`` when the toolbox did not report it before the hard stop; ``failures`` are the withdrawal
-    and branch stops that raised and a stop that overran the hard stop.
+    ``queue`` is what the toolbox held once every branch was stopped, ``None`` when it did not report it before the
+    hard stop; ``failures`` are the branch stops and the toolbox close that raised and a stop that overran the hard
+    stop.
     """
 
     leftovers: tuple[ProcessRecord, ...]
-    queue: QueueStatus | None
+    queue: QueueState | None
     failures: tuple[str, ...] = ()
 
     @property
     def clean(self) -> bool:
-        return not self.leftovers and not self.failures and self.queue is not None and self.queue.idle
+        idle = self.queue is not None and self.queue.queued == 0 and self.queue.running == 0
+        return not self.leftovers and not self.failures and idle
 
 
 class SessionStopper:
@@ -115,7 +118,7 @@ class SessionStopper:
         self,
         roster: Roster,
         branches: BranchControl,
-        toolbox: Toolbox,
+        toolbox: SessionToolbox,
         processes: ProcessRegistry,
         decisions: DecisionLog,
         clock: Clock,
@@ -139,21 +142,23 @@ class SessionStopper:
             logger.error("a specialist branch did not stop cleanly at the end of EXPLORE", exc_info=failure)
 
     async def stop_everything(self, reason: SessionStopReason, hard_stop_at: float) -> StopReport:
-        """Close the roster, withdraw every test, stop every branch, kill every registered process, and report.
+        """Close the roster, stop every branch, read the queue, close the toolbox, kill every registered process, and
+        report.
 
-        Branches stop concurrently, and a failed withdrawal or branch stop is reported, not raised, so every other
-        branch is still stopped. Withdrawing and stopping get
-        until ``hard_stop_at`` (clock seconds); every registered process is killed afterwards whatever became of them.
+        Branches stop concurrently, each withdrawing its tests, and a failed branch stop is reported, not raised, so
+        every other branch is still stopped and the toolbox still closed, which releases the sandboxes it holds. All of
+        that gets until ``hard_stop_at`` (clock seconds); every registered process is killed afterwards whatever became
+        of it.
         """
 
         self._roster.close()
         try:
-            failures = await self._clock.wait_for(self._halt(reason), hard_stop_at - self._clock.now())
+            halted = await self._clock.wait_for(self._halt(reason), hard_stop_at - self._clock.now())
         except asyncio.TimeoutError:
-            failures = (STOP_OVERRAN,)
+            halted = StopReport((), None, (STOP_OVERRAN,))
         finally:
             await self._processes.kill_all()
-        report = StopReport(await self._processes.leftovers(), await self._queue_until(hard_stop_at), failures)
+        report = replace(halted, leftovers=await self._processes.leftovers())
         self._decisions.record(
             Decision(
                 DecisionKind.SESSION_STOP,
@@ -167,24 +172,20 @@ class SessionStopper:
         )
         return report
 
-    async def _halt(self, reason: SessionStopReason) -> tuple[str, ...]:
-        withdrawn = await settled(self._toolbox.withdraw_all())
-        failures = await self._stop_open(reason, frozenset(BranchKind))
-        if isinstance(withdrawn, BaseException):
-            failures.insert(0, withdrawn)
-        for failure in failures:
-            logger.error("a step of the session stop failed", exc_info=failure)
-        return tuple(f"{type(failure).__name__}: {failure}" for failure in failures)
+    async def _halt(self, reason: SessionStopReason) -> StopReport:
+        """What the stop leaves before the kill; the queue is read before the toolbox closes and forgets it."""
 
-    async def _queue_until(self, hard_stop_at: float) -> QueueStatus | None:
-        try:
-            status = await self._clock.wait_for(settled(self._toolbox.queue_status()), hard_stop_at - self._clock.now())
-        except asyncio.TimeoutError:
-            return None
+        failures = await self._stop_open(reason, frozenset(BranchKind))
+        status = await settled(self._toolbox.queue_state())
+        closed = await settled(self._toolbox.close())
         if isinstance(status, BaseException):
             logger.error("the toolbox did not report its queue after the stop", exc_info=status)
-            return None
-        return status
+        if isinstance(closed, BaseException):
+            failures.append(closed)
+        for failure in failures:
+            logger.error("a step of the session stop failed", exc_info=failure)
+        queue = None if isinstance(status, BaseException) else status
+        return StopReport((), queue, tuple(f"{type(failure).__name__}: {failure}" for failure in failures))
 
     async def _stop_open(self, reason: SessionStopReason, kinds: frozenset[BranchKind]) -> list[BaseException]:
         stop = BranchStop(StopCause.SESSION_END, reason.value, self._clock.now())

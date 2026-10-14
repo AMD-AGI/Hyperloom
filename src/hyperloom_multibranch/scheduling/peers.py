@@ -5,22 +5,24 @@
 
 A :data:`PeerFactory` builds the specialist lifecycle, the toolbox, the rule gate and the experiment repository on a
 :class:`PeerSetup`: the session directory, the workload the session optimizes, the scheduler's fork admission desk for
-the rule gate, and the session's process registry. No owner has delivered a real
-implementation yet, so :func:`mb_fake_load_peers` refuses, and the command line fails before it creates anything.
+the rule gate, and the session's process registry. Some peers have no real implementation yet, so
+:func:`mb_fake_load_peers` refuses, and the command line fails before it creates anything.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Protocol
 
 from hyperloom_multibranch.contracts.scheduling import (
     ExperimentRepo,
     ForkAdmissionService,
     RuleGate,
     SpecialistLifecycle,
-    Toolbox,
 )
+from hyperloom_multibranch.contracts.toolbox import Toolbox
+from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.settings import Workload
@@ -29,16 +31,29 @@ from hyperloom_multibranch.scheduling.settings import Workload
 #: with :func:`mb_fake_load_peers` once the last one has.
 MB_FAKE_MISSING_PEER_MODULES: tuple[str, ...] = (
     "hyperloom_multibranch.specialist",
-    "hyperloom_multibranch.toolbox",
     "hyperloom_multibranch.rulegate",
     "hyperloom_multibranch.repo",
 )
 
 
+class SessionToolbox(Toolbox, Protocol):
+    """The toolbox as the session drives it: the contract's interface, and what only the toolbox's own implementation
+    offers on top of it, which the scheduler needs to set every branch's K and to stop a branch or the session."""
+
+    async def set_policy(self, policy: QueuePolicy) -> None:
+        """Queue from now on by ``policy``; it replaces the previous one."""
+
+    async def cancel_branch(self, branch_id: str, reason: str) -> int:
+        """Withdraw every queued and running test and tool job of ``branch_id``; returns how many."""
+
+    async def close(self) -> None:
+        """Stop serving and release every sandbox and backend the toolbox holds."""
+
+
 @dataclass(frozen=True)
 class Peers:
     lifecycle: SpecialistLifecycle
-    toolbox: Toolbox
+    toolbox: SessionToolbox
     gate: RuleGate
     repo: ExperimentRepo
 
@@ -48,9 +63,9 @@ class PeerSetup:
     """What one session's peers are built on.
 
     ``workload`` is the measurement surface: the toolbox measures every test and sweep of the session on it, so a
-    test request carries no operating point of its own. The lifecycle and the toolbox start every process of theirs
-    through ``processes``, so the session stop kills it even when a peer's own stop hangs, and the session reports it
-    when it outlives that kill.
+    test request carries no operating point of its own. The lifecycle starts every process of its own through
+    ``processes``, so the session stop kills it even when a peer's own stop hangs, and the session reports it when it
+    outlives that kill. The toolbox's sandboxes are its own: the session stop releases them by closing the toolbox.
     """
 
     layout: SessionLayout
@@ -87,5 +102,6 @@ __all__ = [
     "PeerSetup",
     "Peers",
     "PeersUnavailable",
+    "SessionToolbox",
     "mb_fake_load_peers",
 ]

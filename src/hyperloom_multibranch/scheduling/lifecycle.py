@@ -26,7 +26,6 @@ from typing import Any
 from hyperloom.common.io import atomic_write_json
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import ManifestFingerprint
-from hyperloom_multibranch.contracts.scheduling import QUOTA_POLICY_VERSION, QuotaPolicy
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.notebook.rsi.frontier import FrontierPolicy, FrontierScoring
@@ -48,7 +47,8 @@ from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_PRIMARY_METRIC
 from hyperloom_multibranch.scheduling.peers import PeerFactory, PeerSetup
 from hyperloom_multibranch.scheduling.prelude import Prelude, PreludeFailed, PreludeResult
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
-from hyperloom_multibranch.scheduling.roster import Roster
+from hyperloom_multibranch.scheduling.requests import SessionTests
+from hyperloom_multibranch.scheduling.roster import QUOTA_POLICY_VERSION, Roster
 from hyperloom_multibranch.scheduling.settings import RunSettings
 from hyperloom_multibranch.scheduling.stops import SessionStopper, SessionStopReason, StopReport, StopSignals
 
@@ -118,7 +118,7 @@ class Session:
         desk = ForkDesk(self._roster, self._notebook, self._decisions)
         merges = DecisionLog(layout.merges, clock)
         peers = peer_factory(PeerSetup(layout, settings.workload, desk, processes))
-        self._toolbox = peers.toolbox
+        tests = SessionTests(peers.toolbox, self._notebook, clock)
         self._branches = BranchControl(
             self._roster, self._notebook, peers.lifecycle, peers.toolbox, processes, self._decisions, clock
         )
@@ -126,21 +126,21 @@ class Session:
         progress = FrontierScoring(self._notebook, FrontierPolicy(metric=MB_FAKE_PRIMARY_METRIC))
         resolver = LlmPatchResolver(resolver_completion, peers.repo)
         self._prelude = Prelude(
-            layout, processes, self._notebook, peers.repo, peers.toolbox, peers.gate, self._decisions, clock
+            layout, processes, self._notebook, peers.repo, tests, peers.gate, self._decisions, clock
         )
         self._explorer = Explorer(
             self._roster,
             self._branches,
             desk,
             Judge(judge_completion, layout.judge, clock),
-            Integrator(merger, peers.repo, peers.toolbox, peers.gate, resolver, merges),
+            Integrator(merger, peers.repo, tests, peers.gate, resolver, merges),
             progress,
             self._decisions,
             settings.judge_interval_seconds,
             clock,
         )
         self._selector = FinalSelector(
-            peers.toolbox, peers.gate, settings.workload, MB_FAKE_PRIMARY_METRIC, layout.final_record, clock
+            tests, peers.gate, settings.workload, MB_FAKE_PRIMARY_METRIC, layout.final_record, clock
         )
         closing = exports(layout, self._notebook, peers.repo, progress, MB_FAKE_PRIMARY_METRIC)
         self._closer = Closer(layout, self._stopper, closing, clock)
@@ -210,8 +210,7 @@ class Session:
             phases.result()
 
     async def _phases(self, budget: SessionBudget, hard_stop: HardStop) -> SessionOutcome:
-        caps = self._settings.caps
-        await self._toolbox.apply_quota(QuotaPolicy(caps.max_parallel_tests, ()))
+        await self._branches.push_quota()
         self._phase("prelude")
         try:
             prelude = await self._root_session(budget, hard_stop)
@@ -234,7 +233,7 @@ class Session:
         return SessionOutcome(reason, final, None, "")
 
     async def _root_session(self, budget: SessionBudget, hard_stop: HardStop) -> PreludeResult:
-        """PRELUDE: the root commit, the integration branch with its quota, then the baseline measured on it."""
+        """PRELUDE: the root commit, the integration branch with its K, then the baseline measured on it."""
 
         prelude = await self._prelude.root(self._settings.workload, budget, hard_stop)
         self._roster.add_integration(prelude.root_commit, k=1)

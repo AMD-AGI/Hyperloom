@@ -22,7 +22,8 @@ from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeCl
 from hyperloom.orchestrator.knowledge.remote_recipe.models import RemoteRecipeValidationError, RemoteWriteResult
 from hyperloom_multibranch.contracts.notebook.interfaces import Notebook, ProgressQuery
 from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot
-from hyperloom_multibranch.contracts.scheduling import ExperimentRepo, QueueStatus
+from hyperloom_multibranch.contracts.scheduling import ExperimentRepo
+from hyperloom_multibranch.contracts.toolbox import QueueState
 from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.notebook.dashboard import DashboardFiles, build_dashboard, write_dashboard
 from hyperloom_multibranch.notebook.knowledge.breakdown import build_breakdown, write_breakdown
@@ -68,7 +69,7 @@ class SessionExports:
         self._progress = progress
         self._metric = metric
 
-    async def export(self, final: FinalChoice | None, queue: QueueStatus | None) -> CloseExports:
+    async def export(self, final: FinalChoice | None, queue: QueueState | None) -> CloseExports:
         """Write the exports; ``queue`` is what the toolbox reported after the stop."""
 
         snapshot = await self._notebook.snapshot()

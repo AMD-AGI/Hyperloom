@@ -9,14 +9,10 @@ import asyncio
 import json
 from pathlib import Path
 
+from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
-from hyperloom_multibranch.notebook import LocalNotebook
-from hyperloom_multibranch.contracts.notebook.peers import (
-    TestKind,
-)
 from hyperloom_multibranch.contracts.notebook.records import BranchProgress
-from hyperloom_multibranch.contracts.scheduling import OperatingPoint, PriorityClass, SweepResult
-from hyperloom_multibranch.scheduling.clock import Clock
+from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.scheduling.final import (
     CandidateCheck,
     FinalCandidate,
@@ -24,15 +20,18 @@ from hyperloom_multibranch.scheduling.final import (
     FinalSelector,
     choose_candidates,
     pick_final,
+    sweep_concs,
 )
 from hyperloom_multibranch.scheduling.roster import BranchEntry, BranchKind, BranchOrigin, BranchStop, StopCause
 from hyperloom_multibranch.scheduling.settings import Workload
-from hyperloom_multibranch.scheduling.tests.peer_fakes import MbFakeGate, MbFakeToolbox
+from hyperloom_multibranch.scheduling.requests import SessionTests
+from hyperloom_multibranch.scheduling.tests.peer_fakes import Curves, MbFakeGate, RecordingToolbox, VirtualClock
+from hyperloom_multibranch.toolbox.fake_model import Fate
 
 METRIC = "output_throughput"
 CONC = 64
 WORKLOAD = Workload("org/model", "vllm", 8, 1024, 1024, CONC, "fp8")
-CLOCK = Clock(now=lambda: 100.0)
+START = 100.0
 INTEGRATION = FinalCandidate("integration", INTEGRATION_BRANCH, "i1", 1040.0)
 BRANCH = FinalCandidate("best_branch", "b02", "c7", 1060.0)
 
@@ -74,12 +73,8 @@ def test_without_a_committed_branch_only_the_integration_head_is_a_candidate() -
     assert candidates.each == (FinalCandidate("integration", INTEGRATION_BRANCH, "i1", None),)
 
 
-def _sweep(commit: str, curve: dict[int, float]) -> SweepResult:
-    return SweepResult(commit, tuple(OperatingPoint(conc, {METRIC: value}) for conc, value in curve.items()), ())
-
-
 def _check(candidate: FinalCandidate, curve: dict[int, float], accuracy_passed: bool = True) -> CandidateCheck:
-    return CandidateCheck(candidate, _sweep(candidate.commit, curve), accuracy_passed, True, True)
+    return CandidateCheck(candidate, curve, accuracy_passed, True, True)
 
 
 def test_the_higher_primary_point_wins() -> None:
@@ -123,21 +118,38 @@ def test_an_ineligible_candidate_is_never_chosen_and_vetoes_nothing() -> None:
     assert pick_final(checks[1:], METRIC, CONC).chosen is None
 
 
-class Bench:
-    """The toolbox and rule gate stand-ins FINAL validates on: sweeps from ``curves``, regressions and withdrawals by
-    commit."""
+def test_the_sweep_brackets_the_primary_conc() -> None:
+    assert sweep_concs(CONC) == (32, CONC, 128)
+    assert sweep_concs(1) == (1, 2)
 
-    def __init__(
-        self, tmp_path: Path, curves: dict[str, dict[int, float]], regressed: frozenset[str] = frozenset()
-    ) -> None:
+
+class Bench:
+    """The toolbox's fake and the rule gate stand-in FINAL validates on, on a virtual clock: each commit measures its
+    value in ``curves`` at a conc, regressions are by commit."""
+
+    def __init__(self, tmp_path: Path, curves: Curves, regressed: frozenset[str] = frozenset()) -> None:
+        self.time = VirtualClock(START)
         notebook = tmp_path / "notebook"
-        self.toolbox = MbFakeToolbox(LocalNotebook(notebook, Writer(Role.TOOLBOX, "toolbox"), clock=CLOCK.now), curves)
+        self.toolbox = RecordingToolbox(
+            LocalNotebook(notebook, Writer(Role.TOOLBOX, "toolbox"), clock=self.time.now), curves
+        )
+        scheduler = LocalNotebook(notebook, Writer(Role.SCHEDULER, "scheduler"), clock=self.time.now)
+        self.tests = SessionTests(self.toolbox, scheduler, self.time.clock)
         self.gate = MbFakeGate(
-            LocalNotebook(notebook, Writer(Role.GATE, "gate"), clock=CLOCK.now), self.toolbox, regressed=regressed
+            LocalNotebook(notebook, Writer(Role.GATE, "gate"), clock=self.time.now), self.tests, regressed=regressed
         )
 
     def selector(self, record: Path) -> FinalSelector:
-        return FinalSelector(self.toolbox, self.gate, WORKLOAD, METRIC, record, CLOCK)
+        return FinalSelector(self.tests, self.gate, WORKLOAD, METRIC, record, self.time.clock)
+
+    def fail(self, commit: str, fate: Fate, conc: int | None = None) -> None:
+        """Every test of ``commit`` (at ``conc`` when given) ends in ``fate``."""
+
+        def matches(request: object) -> bool:
+            at = getattr(request, "concurrency", ())
+            return getattr(request, "parent_commit", "") == commit and (conc is None or at == (conc,))
+
+        self.toolbox.script(matches, [fate] * 4)
 
 
 async def test_each_candidate_is_swept_accuracy_checked_and_reproduced_as_a_session_measurement(
@@ -148,21 +160,29 @@ async def test_each_candidate_is_swept_accuracy_checked_and_reproduced_as_a_sess
     )
     record = tmp_path / "MB-final.json"
 
-    choice = await bench.selector(record).select(FinalCandidates(INTEGRATION, BRANCH), deadline=200.0)
+    choice = await bench.selector(record).select(FinalCandidates(INTEGRATION, BRANCH), deadline=START + 3600.0)
 
     assert choice.chosen == INTEGRATION
     assert [check.reproduced for check in choice.checks] == [True, False]
-    assert sorted(bench.toolbox.swept) == [(INTEGRATION_BRANCH, "c7"), (INTEGRATION_BRANCH, "i1")]
-    requests = sorted(bench.toolbox.submitted, key=lambda request: (request.parent_commit, request.kind.value))
-    assert [(request.parent_commit, request.kind) for request in requests] == [
-        ("c7", TestKind.ACCURACY),
-        ("c7", TestKind.TEST),
-        ("i1", TestKind.ACCURACY),
-        ("i1", TestKind.TEST),
+    assert dict(choice.checks[0].curve) == {32: 900.0, CONC: 1040.0, 128: 1000.0}
+    requests = sorted(
+        bench.toolbox.requests.values(),
+        key=lambda request: (request.parent_commit, request.kind.value, request.concurrency),
+    )
+    assert [(request.parent_commit, request.kind, request.concurrency) for request in requests] == [
+        (commit, kind, concurrency)
+        for commit in ("c7", "i1")
+        for kind, concurrency in (
+            (TestKind.ACCURACY, ()),
+            (TestKind.TEST, ()),
+            (TestKind.TEST, (32,)),
+            (TestKind.TEST, (CONC,)),
+            (TestKind.TEST, (128,)),
+        )
     ]
-    assert {request.priority for request in requests} == {PriorityClass.SESSION_MEASUREMENT.value}
-    assert {request.branch for request in requests} == {INTEGRATION_BRANCH}
-    assert {request.intent_fingerprint for request in requests} == {"final:accuracy", "final:repro"}
+    assert {(request.branch_id, request.purpose) for request in requests} == {(INTEGRATION_BRANCH, Purpose.FINAL)}
+    assert {(request.intent_fingerprint, request.priority) for request in requests} == {(None, None)}
+    assert all(request.accuracy == (request.kind is TestKind.ACCURACY) for request in requests)
     written = json.loads(record.read_text())
     assert written["choice"]["chosen"]["commit"] == "i1"
     assert (written["primary_conc"], written["metric"]) == (CONC, METRIC)
@@ -170,57 +190,46 @@ async def test_each_candidate_is_swept_accuracy_checked_and_reproduced_as_a_sess
 
 async def test_a_withdrawn_test_a_missing_primary_point_or_a_failed_accuracy_disqualifies(tmp_path: Path) -> None:
     bench = Bench(tmp_path, {"i1": {32: 900.0}, "c7": {CONC: 1060.0}})
-    bench.toolbox.withdrawing = frozenset({"c7"})
+    bench.fail("c7", Fate.MEASUREMENT)
+    bench.fail("i1", Fate.CANDIDATE, CONC)
 
-    choice = await bench.selector(tmp_path / "f.json").select(FinalCandidates(INTEGRATION, BRANCH), 200.0)
+    choice = await bench.selector(tmp_path / "f.json").select(FinalCandidates(INTEGRATION, BRANCH), START + 3600.0)
 
     assert choice.chosen is None
     assert "no output_throughput at the primary conc" in choice.checks[0].error
     assert "withdrawn" in choice.checks[1].error
 
+    bench = Bench(tmp_path / "again", {"i1": {CONC: 1040.0}})
     bench.gate.inaccurate = frozenset({"i1"})
-    bench.toolbox.sweeps = {"i1": {CONC: 1040.0}}
-    alone = await bench.selector(tmp_path / "g.json").select(FinalCandidates(INTEGRATION, None), 200.0)
+    alone = await bench.selector(tmp_path / "g.json").select(FinalCandidates(INTEGRATION, None), START + 3600.0)
     assert alone.chosen is None and not alone.checks[0].accuracy_passed
 
 
-class StalledToolbox(MbFakeToolbox):
-    """A toolbox whose sweep never finishes; a failure double, not a placeholder."""
-
-    async def sweep(self, branch: str, commit: str) -> SweepResult:
-        await asyncio.Event().wait()
-        raise AssertionError("unreachable")
-
-
-async def test_a_candidate_unfinished_at_the_deadline_is_not_eligible(tmp_path: Path) -> None:
+async def test_a_candidate_unfinished_at_the_deadline_is_not_eligible_and_its_tests_are_taken_back(
+    tmp_path: Path,
+) -> None:
     bench = Bench(tmp_path, {})
-    bench.toolbox = bench.gate.toolbox = StalledToolbox(bench.toolbox.notebook)
+    bench.toolbox.executor.gate.clear()
 
-    choice = await bench.selector(tmp_path / "f.json").select(FinalCandidates(INTEGRATION, None), deadline=100.0)
+    choice = await bench.selector(tmp_path / "f.json").select(FinalCandidates(INTEGRATION, None), START + 600.0)
 
     assert choice.chosen is None
     assert "deadline" in choice.checks[0].error
-
-
-class CountingStalledToolbox(StalledToolbox):
-    """The stalled toolbox, counting the sweeps cancelled while they wait; a failure double, not a placeholder."""
-
-    cancelled_sweeps = 0
-
-    async def sweep(self, branch: str, commit: str) -> SweepResult:
-        try:
-            return await super().sweep(branch, commit)
-        except asyncio.CancelledError:
-            self.cancelled_sweeps += 1
-            raise
+    assert bench.toolbox.withdrawn.keys() == bench.toolbox.requests.keys() and bench.toolbox.requests
 
 
 async def test_a_withdrawn_test_cancels_the_candidates_other_measurements(tmp_path: Path) -> None:
     bench = Bench(tmp_path, {})
-    toolbox = CountingStalledToolbox(bench.toolbox.notebook, withdrawing=frozenset({"i1"}))
-    bench.toolbox = bench.gate.toolbox = toolbox
+    bench.toolbox.executor.gate.clear()
+    selecting = asyncio.ensure_future(
+        bench.selector(tmp_path / "f.json").select(FinalCandidates(INTEGRATION, None), START + 3600.0)
+    )
+    while len(bench.toolbox.requests) < len(sweep_concs(CONC)) + 2:
+        await asyncio.sleep(0)
+    [accuracy] = [rid for rid, request in bench.toolbox.requests.items() if request.kind is TestKind.ACCURACY]
 
-    choice = await bench.selector(tmp_path / "f.json").select(FinalCandidates(INTEGRATION, None), deadline=200.0)
+    await bench.toolbox.cancel(accuracy)
+    choice = await selecting
 
     assert "withdrawn" in choice.checks[0].error
-    assert toolbox.cancelled_sweeps == 1
+    assert bench.toolbox.withdrawn.keys() == bench.toolbox.requests.keys()
