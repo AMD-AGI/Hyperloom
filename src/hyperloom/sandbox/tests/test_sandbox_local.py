@@ -509,3 +509,29 @@ def test_idempotency_key_is_released_when_create_fails_unexpectedly(make) -> Non
     with pytest.raises(ValueError, match="timeout_sec must be positive"):
         provider.create("dev", role="dev", timeout_sec=0, metadata=meta)
     assert _create(provider, "dev", "dev", metadata=meta, wait_sec=1).info().template == "dev"
+
+
+def test_node_name_prefers_node_name_env_then_hostname(monkeypatch) -> None:
+    import socket
+
+    from hyperloom.sandbox.node import node_name
+
+    monkeypatch.setenv("NODE_NAME", "k8s-node-7")
+    assert node_name() == "k8s-node-7"
+    monkeypatch.setenv("NODE_NAME", "")
+    assert node_name() == socket.gethostname()
+    monkeypatch.delenv("NODE_NAME")
+    assert node_name() == socket.gethostname()
+
+
+def test_provider_reports_the_shared_node_name(monkeypatch) -> None:
+    monkeypatch.setenv("NODE_NAME", "k8s-node-7")
+    with LocalSandboxProvider([LocalTemplate("dev", "dev")]) as provider:
+        info = _create(provider, "dev", "dev").info()
+        assert info.metadata["claw.io/node-name"] == "k8s-node-7"
+        assert _create(provider, "dev", "dev").run("echo $NODE_NAME").stdout == "k8s-node-7\n"
+    monkeypatch.delenv("NODE_NAME")
+    import socket
+
+    with LocalSandboxProvider([LocalTemplate("dev", "dev")]) as provider:
+        assert _create(provider, "dev", "dev").info().metadata["claw.io/node-name"] == socket.gethostname()

@@ -20,7 +20,6 @@ import json
 import logging
 import os
 import shutil
-import socket as host
 import subprocess
 import sys
 import tempfile
@@ -39,6 +38,7 @@ from hyperloom.measure.attachments import AttachmentError, place_attachments, su
 from hyperloom.measure.accuracy import read_accuracy
 from hyperloom.measure.compile import CompiledEnvironment, LocalBlobStore
 from hyperloom.measure.farm import FarmError, build_farm, prepend_pythonpath, verify_farm
+from hyperloom.sandbox.node import node_name
 from hyperloom.measure.socket import RoundOutcome, TestCall, TestOutcome
 from hyperloom.measure.spec import Attachment
 from hyperloom.measure.spec import EnvRoot as SpecEnvRoot
@@ -456,7 +456,7 @@ def _image_digest(call: TestCall) -> str | None:
 
 def _sandbox_facts(call: TestCall) -> SandboxFacts:
     """What this machine can state about itself without asking a device; the rest stays unset, not guessed."""
-    node = os.environ.get("NODE_NAME") or host.gethostname()
+    node = node_name()
     visible = os.environ.get("ROCR_VISIBLE_DEVICES", "")
     gpus = tuple(int(part) for part in visible.split(",") if part.strip().isdigit())
     return SandboxFacts(

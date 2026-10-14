@@ -14,7 +14,6 @@ from __future__ import annotations
 import logging
 import shutil
 import os
-import socket as _net
 import sys
 import tempfile
 import threading
@@ -24,6 +23,7 @@ from pathlib import Path
 
 from hyperloom.sandbox.gpu_pool import GpuPool
 from hyperloom.sandbox.identity import generate_signing_identity
+from hyperloom.sandbox.node import node_name
 from hyperloom.sandbox.local_sandbox import WORK_DIR, LocalSandbox
 from hyperloom.sandbox.socket import (
     AVOID_NODES_KEY,
@@ -55,7 +55,7 @@ class LocalSandboxProvider:
         gpus: The card pool, for example ``range(8)``; leased per template.
         base_dir: Where sandbox directories live; a temporary directory that
             :meth:`close` removes when omitted.
-        hostname: The node name to report; this machine's hostname by default.
+        hostname: The node name to report; ``NODE_NAME`` or this machine's hostname by default (:func:`~hyperloom.sandbox.node.node_name`).
         launcher_python: The python3 that runs each process's launcher; it must
             be executable by ``sealed_user`` / ``unsealed_user`` when those are set.
         sealed_user: Optional ``(uid, gid)`` that sealed sandboxes' processes run as.
@@ -91,7 +91,7 @@ class LocalSandboxProvider:
             raise ValueError("running sandbox processes as another account needs root")
         self._launcher_python = launcher_python
         self.pool = GpuPool(gpus)
-        self.hostname = hostname or _net.gethostname()
+        self.hostname = hostname or node_name()
         self._owns_base = base_dir is None
         self._base = Path(tempfile.mkdtemp(prefix="hl-sandbox-")) if base_dir is None else base_dir
         self._base.mkdir(parents=True, exist_ok=True)
