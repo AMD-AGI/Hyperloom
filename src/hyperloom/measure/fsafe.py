@@ -18,6 +18,9 @@ from collections.abc import Iterator
 from pathlib import Path
 
 CHUNK = 1024 * 1024
+#: Modes of what this module creates, stated so the result never depends on the umask: owner writes, others read.
+FILE_MODE = 0o644
+DIR_MODE = 0o755
 _RDONLY = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
 
 
@@ -70,7 +73,12 @@ def open_beneath(root_fd: int, rel: str) -> int:
     finally:
         for descriptor in held:
             os.close(descriptor)
-    if not stat.S_ISREG(os.fstat(fd).st_mode):
+    try:
+        regular = stat.S_ISREG(os.fstat(fd).st_mode)
+    except BaseException:
+        os.close(fd)
+        raise
+    if not regular:
         os.close(fd)
         raise UnsafeEntry(rel, "not a regular file")
     return fd
@@ -94,7 +102,7 @@ def open_dir_beneath(root_fd: int, parts: list[str], *, created: list[str] | Non
             except MissingEntry:
                 if created is None:
                     raise
-                os.mkdir(part, 0o777, dir_fd=current)
+                os.mkdir(part, DIR_MODE, dir_fd=current)
                 created.append(rel)
                 child = _open_step(part, _RDONLY | os.O_DIRECTORY, current, rel)
             os.close(current)
@@ -107,7 +115,7 @@ def open_dir_beneath(root_fd: int, parts: list[str], *, created: list[str] | Non
 
 def create_exclusive(dir_fd: int, name: str) -> int:
     """Create a new file ``name`` in ``dir_fd`` for writing; never follows a symlink, never replaces anything."""
-    return os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o666, dir_fd=dir_fd)
+    return os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, FILE_MODE, dir_fd=dir_fd)
 
 
 def exists_beneath(root_fd: int, rel: str) -> bool:

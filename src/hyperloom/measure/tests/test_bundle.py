@@ -386,3 +386,14 @@ def test_a_record_for_a_bundle_whose_file_changed_fails_the_recheck(bundle) -> N
 
 def test_the_spec_fingerprint_constant_is_the_one_the_fixture_uses() -> None:
     assert len(SPEC_FINGERPRINT) == 16
+
+
+def test_placed_files_and_directories_have_fixed_modes_whatever_the_umask(bundle, tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    old = os.umask(0)
+    try:
+        materialize(verify_bundle(bundle.staging, **verify_args(bundle)), out)
+    finally:
+        os.umask(old)
+    assert (out / "server.log").stat().st_mode & 0o777 == 0o644
+    assert (out / "benchmark_sglang_20261005_101500").stat().st_mode & 0o777 == 0o755

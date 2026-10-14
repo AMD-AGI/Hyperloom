@@ -11,6 +11,7 @@ refusals, and a bool is never accepted where a number is expected.
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import PurePosixPath
@@ -109,7 +110,7 @@ class Reader:
             return None
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise DocumentError(f"{self.at(key)}: expected a number")
-        if value != value or value in (float("inf"), float("-inf")):
+        if not math.isfinite(value):
             raise DocumentError(f"{self.at(key)}: must be finite")
         if minimum is not None and value < minimum:
             raise DocumentError(f"{self.at(key)}: must be at least {minimum}")
