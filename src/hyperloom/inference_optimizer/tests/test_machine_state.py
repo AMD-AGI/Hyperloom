@@ -39,16 +39,6 @@ def test_normalize_budget_pct_defaults_and_filters() -> None:
     assert out[ps.PHASE_SWEEP] == ps.DEFAULT_PHASE_BUDGET_PCT[ps.PHASE_SWEEP]
 
 
-def test_apply_escalate_budget_bump() -> None:
-    phase = ps.PHASE_FRAMEWORK_AGENT
-    base = {phase: 0.3}
-    assert ps.apply_escalate_budget_bump(base, phase="nope") == base
-    out = ps.apply_escalate_budget_bump({phase: 0.3}, phase=phase, delta=0.1, cap=0.8)
-    assert out[phase] == pytest.approx(0.4)
-    capped = ps.apply_escalate_budget_bump({phase: 0.75}, phase=phase, configured_budget_pct=base, delta=0.5, cap=0.5)
-    assert capped[phase] == pytest.approx(0.8)
-
-
 def test_now_unix_injected() -> None:
     state = SharedState()
     state._now_unix = lambda: 1234.0  # type: ignore[attr-defined]

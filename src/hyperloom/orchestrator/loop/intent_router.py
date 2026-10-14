@@ -41,8 +41,6 @@ from ..policy.gate import (
 )
 from ..specialists.wall_budget import grant_wall_budget_extension
 from ..state.shared_state import (
-    ESCALATE_HINT_EXTEND_EXPLORE_BUDGET,
-    ESCALATE_HINT_EXTEND_KERNEL_BUDGET,
     ESCALATE_HINT_SKIP_TO_KERNEL,
     inject_stack_base_params,
     is_valid_escalate_hint,
@@ -1469,10 +1467,6 @@ class IntentRouter(CoordinatorCollaborator):
         )
         hint = str(payload.get("next_action_hint") or "").strip()
         if not hint or not is_valid_escalate_hint(hint):
-            return
-        if hint in (ESCALATE_HINT_EXTEND_EXPLORE_BUDGET, ESCALATE_HINT_EXTEND_KERNEL_BUDGET):
-            self.shared_state.bump_phase_budget(hint)
-            self.shared_state.save(self.session_dir)
             return
         from ..phases.machine_state import PHASE_FRAMEWORK_AGENT
 
