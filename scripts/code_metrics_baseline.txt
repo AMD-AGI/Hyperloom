@@ -871,7 +871,7 @@ function-lines src/hyperloom/orchestrator/trace_analysis/_nccl_summary_candidate
 function-lines src/hyperloom/orchestrator/trace_analysis/_trace_shape_manifest.py::build_shape_manifest 81
 function-lines src/hyperloom/orchestrator/trace_analysis/bypass_trace_analysis.py::main 488
 function-lines src/hyperloom/orchestrator/trace_analysis/trace_selfcert.py::build_verdict 104
-function-lines src/hyperloom/orchestrator/trace_analysis/trace_selfcert.py::certify_trace_dir 189
+function-lines src/hyperloom/orchestrator/trace_analysis/trace_selfcert.py::certify_trace_dir 185
 function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::_check_chunk_quality 96
 function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::_enrich_kernel_contract 91
 function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::_finalize_candidates 129
@@ -880,7 +880,7 @@ function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::
 function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::classify_patchability 97
 function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::enrich_candidates_with_runtime_metadata 82
 function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::find_benchmark_files 90
-function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::main 970
+function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::main 969
 function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::write_reports 203
 function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_arch_benchmark.py::populate_gpu_arch_json 94
 function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py::_run_tracelens_skill_codex 82
@@ -1041,7 +1041,7 @@ module-lines src/hyperloom/orchestrator/actions/executors/_workload_envs.py 2261
 module-lines src/hyperloom/orchestrator/actions/executors/baseline.py 4253
 module-lines src/hyperloom/orchestrator/actions/executors/explore.py 1905
 module-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py 4804
-module-lines src/hyperloom/orchestrator/actions/executors/profile.py 1572
+module-lines src/hyperloom/orchestrator/actions/executors/profile.py 1565
 module-lines src/hyperloom/orchestrator/actions/executors/report.py 1399
 module-lines src/hyperloom/orchestrator/actions/executors/roofline.py 1302
 module-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py 2659
@@ -1066,7 +1066,7 @@ module-lines src/hyperloom/orchestrator/specialists/runner.py 1533
 module-lines src/hyperloom/orchestrator/specialists/subprocess_.py 1795
 module-lines src/hyperloom/orchestrator/state/shared_state.py 2689
 module-lines src/hyperloom/orchestrator/trace_analysis/_bypass_report.py 1231
-module-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py 5464
+module-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py 5458
 module-lines src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py 1505
 module-lines src/hyperloom_kb/knowledge_read.py 1201
 module-lines src/kernelforge/fusion/author.py 1390
