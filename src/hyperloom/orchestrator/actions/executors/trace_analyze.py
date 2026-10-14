@@ -420,10 +420,6 @@ def _build_trace_analyze_cmd(
         if val:
             cmd += [flag, str(val)]
 
-    # Model identity informs source resolution for every framework, not only the
-    # diffusion roofline. Keep the standard payload > state > environment
-    # precedence so ordinary sglang/vLLM production requests carry config.json
-    # selectors into the bounded model context.
     model_path = str(
         payload.get("model_path") or getattr(state, "model_path", "") or os.environ.get("MODEL_PATH") or ""
     ).strip()
@@ -435,8 +431,6 @@ def _build_trace_analyze_cmd(
     if precision:
         cmd += ["--precision", precision]
 
-    # Scriptable frameworks still forward denoise-step count for per-step
-    # roofline timings. Priority: payload override > baseline workload metadata.
     if scriptable:
         num_denoise = payload.get("num_denoise_steps") or workload.get("num_inference_steps")
         if num_denoise not in (None, ""):
@@ -446,7 +440,6 @@ def _build_trace_analyze_cmd(
             except (TypeError, ValueError):
                 pass
 
-    # LLM inference-specific splitter flags (serving frameworks only; bypass has no splitter).
     if not scriptable and not is_bypass:
         cmd += ["--split-llm-inference"]
         split_conc = payload.get("split_conc") or workload.get("conc")
@@ -464,9 +457,6 @@ def _build_trace_analyze_cmd(
     )
     if capture_folder:
         cmd += ["--capture-folder", str(capture_folder)]
-    # Scriptable frameworks require the generic splitter; payload/env overrides
-    # only apply to serving frameworks, so the two paths can never emit the flag
-    # twice and leave argparse resolving a mode the splitter did not chunk for.
     if scriptable and not is_bypass:
         steady_state_mode = "generic"
     else:
@@ -475,8 +465,6 @@ def _build_trace_analyze_cmd(
         ).strip()
     if steady_state_mode:
         cmd += ["--steady-state-mode", steady_state_mode]
-    # Post-kernel-opt roofline writes a separate report so it never overwrites
-    # the baseline kernel_roofline.json.
     roofline_output_name = str(payload.get("roofline_output_name") or "").strip()
     if roofline_output_name:
         cmd += ["--roofline-output-name", roofline_output_name]

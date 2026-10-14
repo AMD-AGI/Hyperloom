@@ -688,7 +688,7 @@ function-lines src/hyperloom/orchestrator/actions/executors/report.py::_format_e
 function-lines src/hyperloom/orchestrator/actions/executors/report.py::_format_md 150
 function-lines src/hyperloom/orchestrator/actions/executors/report.py::_format_roofline_comparison_section 102
 function-lines src/hyperloom/orchestrator/actions/executors/targeted_build_executor.py::TargetedBuildExecutor.__call__ 102
-function-lines src/hyperloom/orchestrator/actions/executors/trace_analyze.py::_build_trace_analyze_cmd 112
+function-lines src/hyperloom/orchestrator/actions/executors/trace_analyze.py::_build_trace_analyze_cmd 104
 function-lines src/hyperloom/orchestrator/actions/executors/trace_analyze.py::trace_analyze_handler 232
 function-lines src/hyperloom/orchestrator/bringup/argv_preflight.py::check_server_argv 124
 function-lines src/hyperloom/orchestrator/bringup/ladder.py::classify 105

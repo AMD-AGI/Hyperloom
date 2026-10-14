@@ -421,22 +421,30 @@ def _check_chunk_quality(
                 continue
         return None
 
-    def _read_busy_ratio(row: "dict[str, str] | None") -> float:
-        """Read ``busy_ratio`` directly from the splitter CSV row.
+    def _read_busy_ratio(row: "dict[str, str] | None") -> "float | None":
+        """Read ``busy_ratio`` from the splitter CSV row.
 
-        Args:
-            row (dict[str, str] | None): A splitter CSV row, or ``None``.
-
-        Returns:
-            float: The busy ratio clamped to ``[0, 1]``, or ``0.0`` when the
-                row is ``None``.
+        Returns the ratio clamped to ``[0, 1]``, falling back to
+        ``gpu_busy_duration / gpu_duration`` when the ``busy_ratio``
+        column is absent (older splitter).  Returns ``None`` when the
+        row is ``None`` or neither field is available.
         """
         if row is None:
-            return 0.0
+            return None
+        raw = row.get("busy_ratio", "")
+        if raw not in (None, ""):
+            try:
+                return max(0.0, min(1.0, float(raw)))
+            except (TypeError, ValueError):
+                pass
         try:
-            return max(0.0, min(1.0, float(row.get("busy_ratio", 0.0))))
-        except (TypeError, ValueError):
-            return 0.0
+            dur = float(row.get("gpu_duration") or "0")
+            busy = float(row.get("gpu_busy_duration") or "0")
+            if dur > 0:
+                return max(0.0, min(1.0, busy / dur))
+        except (TypeError, ValueError, ZeroDivisionError):
+            pass
+        return None
 
     def _num_gpu_events(row: "dict[str, str] | None") -> int:
         """Read ``num_gpu_events`` from the splitter CSV row for observability.
@@ -458,6 +466,8 @@ def _check_chunk_quality(
     if selected_row is None:
         return None
     sel_ratio = _read_busy_ratio(selected_row)
+    if sel_ratio is None:
+        return None
     threshold = _resolve_min_busy_ratio()
     if sel_ratio >= threshold:
         return None
@@ -469,6 +479,8 @@ def _check_chunk_quality(
             continue
         other_row = _row_for(chunks[0])
         oth_ratio = _read_busy_ratio(other_row)
+        if oth_ratio is None:
+            continue
         if oth_ratio >= threshold and (oth_ratio - sel_ratio) >= _CHUNK_QUALITY_ALTERNATE_MARGIN:
             alternates.append((other_mode, oth_ratio))
     sel_events = _num_gpu_events(selected_row)
@@ -4246,14 +4258,7 @@ def _collect_split_chunks(
     analysis_trace_path: "Path",
     health_warnings: "list[dict]",
 ) -> "tuple[Path, dict, dict]":
-    """Collect splitter output chunks and select the requested mode.
-
-    Appends a structured warning dict to ``health_warnings`` before raising so
-    the retry consumer in the roofline executor can find it even when the
-    exception propagates past the caller.
-
-    Returns ``(selected_chunk, split_meta, mode_to_chunks)``.
-    """
+    """Collect splitter output chunks and select the requested mode."""
 
     def _collect(pattern: str) -> "list[Path]":
         out: list[Path] = []
@@ -4284,11 +4289,7 @@ def _collect_split_chunks(
                 "trace_input": str(analysis_trace_path),
                 "split_dir": str(split_dir),
                 "chunks_by_mode": split_meta["chunks_by_mode"],
-                "message": (
-                    "TraceLens splitter produced no steady-state chunks; refusing "
-                    "to analyze the raw trace because that can report misleading "
-                    "high idle and suppress valid kernel opportunities."
-                ),
+                "message": "TraceLens splitter produced no steady-state chunks; refusing to analyze the raw trace.",
             }
         )
         raise RuntimeError(
