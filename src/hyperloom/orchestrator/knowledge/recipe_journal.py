@@ -843,16 +843,11 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         """
         ss = self.shared_state
         out: dict[str, Any] = {}
-        framework = str(ss.framework or "").strip()
-        if framework:
-            out["framework"] = framework
-        model_class = str(ss.model_class or "").strip()
-        if model_class:
-            out["model_class"] = model_class
         # model_family is not part of the seven-dimension Recipe identity.
-        model_name = str(ss.model_name or "").strip()
-        if model_name:
-            out["model_name"] = model_name
+        for attr in ("framework", "model_class", "model_name"):
+            text = str(getattr(ss, attr, "") or "").strip()
+            if text:
+                out[attr] = text
         precision = getattr(ss, "precision", None)
         if precision not in (None, "", 0):
             out["precision"] = precision
@@ -861,7 +856,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         fp_meta = ss.stack_fingerprint_meta or {}
         if isinstance(fp_meta, dict):
             # framework_version is whichever of sglang/vllm is active.
-            fw_lc = framework.lower()
+            fw_lc = out.get("framework", "").lower()
             if fw_lc in ("sglang", "vllm"):
                 version = str(fp_meta.get(fw_lc) or "").strip()
                 if version and version != "unknown":

@@ -1358,6 +1358,35 @@ def test_config_only_failure_retries_fresh_and_releases_setup_lock(
     assert len(captured["loops"]) == 1
 
 
+def test_a_valid_profile_timeout_env_reaches_the_analysis_service(tmp_path, monkeypatch):
+    """FORGE_PROFILE_TIMEOUT_SEC is the Analysis workflow deadline, not just a validated string.
+
+    Resume tooling sets it to shorten that workflow; a value that validates but
+    never reaches ``make_analysis_agent_service`` leaves the run on
+    ``--profile-timeout-sec`` while reporting nothing.
+    """
+    captured = _install_cli_fakes(monkeypatch, tmp_path)
+    workspace, kernel, driver = _initialize_workspace(tmp_path)
+    monkeypatch.setenv("FORGE_PROFILE_TIMEOUT_SEC", "1234")
+
+    result = CliRunner().invoke(main, _fresh_command(workspace, kernel, driver))
+
+    assert result.exit_code == 0, result.output
+    assert captured["analysis_service_kwargs"]["timeout_sec"] == 1234
+
+
+def test_no_profile_timeout_env_leaves_the_option_default(tmp_path, monkeypatch):
+    """Unset means ``--profile-timeout-sec`` decides, as the help says."""
+    captured = _install_cli_fakes(monkeypatch, tmp_path)
+    workspace, kernel, driver = _initialize_workspace(tmp_path)
+    monkeypatch.delenv("FORGE_PROFILE_TIMEOUT_SEC", raising=False)
+
+    result = CliRunner().invoke(main, _fresh_command(workspace, kernel, driver) + ["--profile-timeout-sec", "999"])
+
+    assert result.exit_code == 0, result.output
+    assert captured["analysis_service_kwargs"]["timeout_sec"] == 999
+
+
 def test_config_only_retry_rejects_mismatching_inputs(tmp_path, monkeypatch):
     _install_cli_fakes(monkeypatch, tmp_path)
     workspace, kernel, driver = _initialize_workspace(tmp_path)

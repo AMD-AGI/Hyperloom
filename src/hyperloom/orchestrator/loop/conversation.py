@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 from ..bus.gpu_pool import gpus_by_task_sync
 from ..phases import machine_state as _phase_state
 from ..policy.projection import resource_pools_summary
@@ -212,6 +212,42 @@ def _format_inbox_event(m: "Message", *, max_variant_rows: int = 3) -> str:
         return f"{head} payload={_defang_alert_payload(payload)}"
 
     return f"{head} payload={payload}"
+
+
+#: A prompt section: the heading it goes under, or ``None`` for a block that carries its own, and what renders it.
+_AdvisoryRow = tuple[str | None, Callable[["ConversationCollaborator"], str]]
+
+#: The orchestration advisories that precede the plateau pair. Row order is the order the model reads the
+#: sections in, so it is content.
+_ADVISORY_BLOCKS: tuple[_AdvisoryRow, ...] = (
+    ("=== Warm start (Recipe KB T0) ===", lambda c: c.shared_state.to_warm_start_summary()),
+    ("=== Current gaps ===", lambda c: c.shared_state.to_gaps_summary()),
+    (None, lambda c: c._specialist_findings_block()),
+    ("=== External target gap (advisory) ===", lambda c: c.target_gap_advisory_block()),
+    ("=== Specialist proposal scores (advisory) ===", lambda c: c.shared_state.to_proposal_scores_summary()),
+    ("=== Priors-match (advisory ordering) ===", lambda c: c._priors_match_advisory_block()),
+    ("=== Intervention mix (telemetry) ===", lambda c: c.shared_state.to_intervention_mix_summary()),
+)
+
+#: The orchestration advisories that follow the plateau pair; see :data:`_ADVISORY_BLOCKS`.
+_POST_PLATEAU_ADVISORY_BLOCKS: tuple[_AdvisoryRow, ...] = (
+    ("=== Bottleneck redirect (advisory) ===", lambda c: c._bottleneck_redirect_advisory_block()),
+    ("=== Acceptance threshold (advisory) ===", lambda c: c._acceptance_threshold_advisory_block()),
+    ("=== Discarded escalation hint (advisory) ===", lambda c: c._discarded_escalate_hint_advisory_block()),
+)
+
+
+def _advisory_sections(owner: "ConversationCollaborator", blocks: tuple[_AdvisoryRow, ...]) -> list[str]:
+    """Render the advisories that produced something, each under its heading."""
+    sections: list[str] = []
+    for heading, produce in blocks:
+        block = produce(owner)
+        if not block:
+            continue
+        if heading:
+            sections.append(heading)
+        sections.append(block)
+    return sections
 
 
 class ConversationCollaborator(CoordinatorCollaborator):
@@ -521,47 +557,13 @@ class ConversationCollaborator(CoordinatorCollaborator):
                 if kb_block:
                     sections.append(kb_block)
 
-        # Recipe KB T0 warm-start snapshot + structured gaps[] ledger.
-        if agent_name == "orchestration":
-            warm_block = self.shared_state.to_warm_start_summary()
-            if warm_block:
-                sections.append("=== Warm start (Recipe KB T0) ===")
-                sections.append(warm_block)
-            gaps_block = self.shared_state.to_gaps_summary()
-            if gaps_block:
-                sections.append("=== Current gaps ===")
-                sections.append(gaps_block)
-            research_block = self._specialist_findings_block()
-            if research_block:
-                sections.append(research_block)
-            gap_block = self.target_gap_advisory_block()
-            if gap_block:
-                sections.append("=== External target gap (advisory) ===")
-                sections.append(gap_block)
-            # Advisory multi-model proposal scores (ProposalScorer); not a ranking directive.
-            scores_block = self.shared_state.to_proposal_scores_summary()
-            if scores_block:
-                sections.append("=== Specialist proposal scores (advisory) ===")
-                sections.append(scores_block)
-            # Priors-match: recently proposed variants aligning with research hints/external gap (advisory only).
-            priors_block = self._priors_match_advisory_block()
-            if priors_block:
-                sections.append("=== Priors-match (advisory ordering) ===")
-                sections.append(priors_block)
-
-            # Surface the intervention-mix ledger (config vs code_patch counts) as neutral telemetry.
-            mix_block = self.shared_state.to_intervention_mix_summary()
-            if mix_block:
-                sections.append("=== Intervention mix (telemetry) ===")
-                sections.append(mix_block)
+            sections.extend(_advisory_sections(self, _ADVISORY_BLOCKS))
 
             plateau_block = self.plateau_advisory_block()
             if plateau_block:
                 sections.append("=== Plateau advisory ===")
                 sections.append(plateau_block)
-
-            # On a plateau, surface candidate directions (advisory).
-            if plateau_block:
+                # Candidate directions are worth the digest's cost only once the session has stopped gaining.
                 try:
                     from ..knowledge import trajectory_reviewer as _trajectory_reviewer
 
@@ -576,22 +578,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
                     sections.append("=== Trajectory review (advisory) ===")
                     sections.append(trajectory_block)
 
-            # Cyclic bottleneck-redirect advisory (next-cycle re-targeting).
-            redirect_block = self._bottleneck_redirect_advisory_block()
-            if redirect_block:
-                sections.append("=== Bottleneck redirect (advisory) ===")
-                sections.append(redirect_block)
-
-            # Decaying acceptance bar + prior variants now re-testable under it.
-            accept_block = self._acceptance_threshold_advisory_block()
-            if accept_block:
-                sections.append("=== Acceptance threshold (advisory) ===")
-                sections.append(accept_block)
-
-            discarded_escalate_block = self._discarded_escalate_hint_advisory_block()
-            if discarded_escalate_block:
-                sections.append("=== Discarded escalation hint (advisory) ===")
-                sections.append(discarded_escalate_block)
+            sections.extend(_advisory_sections(self, _POST_PLATEAU_ADVISORY_BLOCKS))
 
         # NOTE: there is deliberately no "=== Specialist health ===" block.
 

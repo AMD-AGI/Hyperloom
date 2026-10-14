@@ -2161,33 +2161,31 @@ class IntegratePatchExecutor:
     ) -> dict[str, Any] | None:
         """Provision the attempt-scoped runtime this round boots on (Rung 3).
 
-        The runtime the last kept round promoted is re-provisioned whatever this
-        round's gap, since the rest of the stack was proven on it. With none
-        kept, the framework adapter builds a fresh candidate, which only a gap
-        calling for code yields; no-op otherwise. Runs a disk preflight,
-        delegates provision+probe to the framework adapter (off the event loop;
-        an in-flight pip install is not killed if the await is cancelled), and on
-        success stores the resolved runtime on the attempt for the gate to
-        activate via the YAML-layer ``runtime_override``. Returns an early-exit
-        ``reverted`` dict on any provision failure (no patch side effects yet),
-        or ``None`` to continue.
+        The runtime the last kept round promoted is re-provisioned whatever this round asks for, since the rest
+        of the stack was proven on it. With none kept, the framework adapter builds the runtime the specialist
+        requested (``needs_runtime`` in its done payload); no-op when it requested none. Runs a disk preflight,
+        delegates provision+probe to the framework adapter (off the event loop; an in-flight pip install is not
+        killed if the await is cancelled), and on success stores the resolved runtime on the attempt for the gate
+        to activate via the YAML-layer ``runtime_override``. Returns an early-exit ``reverted`` dict on any
+        provision failure (no patch side effects yet), or ``None`` to continue.
         """
         if not _acquiring_round(params):
             return None
 
         from ...enablement.runtime.adapters import get_adapter
-        from ...enablement.runtime.stack_actions import EnablementStackAction
+        from ...enablement.runtime.stack_actions import EnablementStackAction, RuntimeRequest
 
+        request = RuntimeRequest.from_payload(_done_field(attempt.done_payload, "needs_runtime"))
         kept = attempt.shared_state.enablement.kept_stack_action
         if kept:
             action = EnablementStackAction.from_state(kept)
+            if request is not None:
+                log.info("integrate_patch: needs_runtime ignored; the kept %s runtime stays", action.framework)
         else:
-            gap = _enablement_gap(params)
-            if gap is None:
+            if request is None:
                 return None
             framework = str(getattr(attempt.shared_state, "framework", "") or "").strip().lower()
-            gpu_type = str(getattr(attempt.shared_state, "gpu_type", "") or "").strip().lower()
-            action = get_adapter(framework).build_stack_action(gap, gpu_type=gpu_type)
+            action = get_adapter(framework).build_stack_action(request)
             if action is None:
                 return None
 

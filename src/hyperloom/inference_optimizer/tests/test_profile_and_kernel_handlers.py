@@ -4081,6 +4081,44 @@ async def test_coordinator_request_kernel_disabled_auto_rejected(session_dir):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("payload", "kernel_enabled", "error_class"),
+    [
+        ({"target_agent": "kernel_agent", "kind": "trace_analyze"}, False, "agent_disabled"),
+        ({"target_agent": "kernel_agent", "kind": "invent_brand_new_kind"}, True, "unknown_kernel_kind"),
+    ],
+)
+async def test_coordinator_auto_reject_answers_in_one_envelope(
+    session_dir,
+    payload,
+    kernel_enabled,
+    error_class,
+):
+    """Every refusal the coordinator makes before a handler runs answers the requester the same way."""
+    c = Coordinator(session_dir, backends=_backends_silent())
+    try:
+        c.shared_state.kernel_enabled = kernel_enabled
+        await c.router.handle_intent("orchestration", Intent(type=IntentType.REQUEST, payload=dict(payload)))
+
+        requests = await c.bus.tail(topic="request", to_agent=payload["target_agent"])
+        responses = await c.bus.tail(topic="response", to_agent="orchestration")
+        assert requests, "the request must be recorded on the bus before it is refused"
+        assert responses, "a refusal must answer the request"
+        reply = responses[0]
+        assert reply.from_agent == payload["target_agent"]
+        assert reply.in_reply_to == requests[-1].msg_id
+        assert reply.payload["in_reply_to"] == requests[-1].msg_id
+        assert reply.payload["kind"] == f"{payload['kind']}_done"
+        assert reply.payload["status"] == "failed"
+        assert reply.payload["source"] == "coordinator_auto_reject"
+        assert reply.payload["result"]["status"] == "failed"
+        assert reply.payload["result"]["error_class"] == error_class
+        assert c.shared_state.last_action_failures[-1]["error_class"] == error_class
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
 async def test_coordinator_request_handler_exception_recorded(session_dir):
     """Handler crashes → RESPONSE.status='failed' + error_class set."""
     c = Coordinator(session_dir, backends=_backends_silent())

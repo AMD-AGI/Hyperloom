@@ -1,19 +1,47 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for hyperloom.agents.framework.isolation (disk preflight)."""
+"""Tests for hyperloom.agents.framework.isolation (disk preflight, attempt venvs)."""
 
 from __future__ import annotations
 
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 from hyperloom.agents.framework.isolation import (
     DiskPreflightError,
+    create_venv,
     disk_preflight,
 )
+
+
+def _venv_python(venv: Path, code: str) -> str:
+    return subprocess.run(
+        [str(venv / "bin" / "python"), "-c", code], capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+def test_a_venv_sees_the_packages_of_the_interpreter_that_created_it(tmp_path: Path) -> None:
+    """Created from a venv, ``--system-site-packages`` alone would hide its packages, ROCm torch included."""
+    venv = tmp_path / "venv"
+    create_venv(venv)
+    assert _venv_python(venv, "import yaml; print(yaml.__file__)") == __import__("yaml").__file__
+
+
+def test_a_package_installed_into_the_venv_shadows_the_interpreters_copy(tmp_path: Path) -> None:
+    """An editable install lands as a ``.pth`` too; it must still win over the inherited site directories."""
+    venv = tmp_path / "venv"
+    create_venv(venv)
+    src = tmp_path / "src" / "yaml"
+    src.mkdir(parents=True)
+    (src / "__init__.py").write_text("ORIGIN = 'attempt'\n", encoding="utf-8")
+    purelib = venv / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
+    (purelib / "__editable__.yaml-0.0.pth").write_text(f"{src.parent}\n", encoding="utf-8")
+    assert _venv_python(venv, "import yaml; print(yaml.ORIGIN)") == "attempt"
 
 
 def test_disk_preflight_passes_when_enough_free(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

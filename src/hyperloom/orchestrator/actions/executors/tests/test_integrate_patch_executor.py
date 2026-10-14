@@ -499,7 +499,11 @@ async def test_same_executor_second_early_return_does_not_reuse_runtime(tmp_path
     )
 
     session = tmp_path / "session"
-    _write_specialist_workspace(session, "spec-first", done_payload_override={"patches_written": []})
+    _write_specialist_workspace(
+        session,
+        "spec-first",
+        done_payload_override={"patches_written": [], "needs_runtime": {"packages": ["transformers==4.57.1"]}},
+    )
     _write_specialist_workspace(session, "spec-second", done_payload_override={"patches_written": []})
     runtime = FrameworkRuntime(venv_root=str(tmp_path / "first-runtime" / "venv"))
     provisioned = []
@@ -517,7 +521,7 @@ async def test_same_executor_second_early_return_does_not_reuse_runtime(tmp_path
         adapters,
         "get_adapter",
         lambda _framework: SimpleNamespace(
-            build_stack_action=lambda _gap, **_kw: EnablementStackAction(
+            build_stack_action=lambda _request: EnablementStackAction(
                 kind="runtime_candidate",
                 framework="vllm",
                 gap_id="gap.enablement.missing_model_arch",
