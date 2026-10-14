@@ -33,7 +33,7 @@ from hyperloom.measure.surface import (
     extract_surface,
     point_values,
 )
-from hyperloom.orchestrator.actions.executors._workload_envs import (
+from hyperloom.orchestrator.actions.executors import (
     default_baseline_config,
     materialize_config_with_envs,
 )

@@ -16,6 +16,7 @@ from .conc_sweep import ConcSweepExecutor, conc_sweep_executor
 from .report import ReportExecutor, report_executor
 from .session_breakdown import SessionBreakdownExecutor, session_breakdown_executor
 from .target_analysis import TargetAnalysisExecutor
+from ._workload_envs import default_baseline_config, materialize_config_with_envs
 
 __all__ = [
     "BaselineExecutor",
@@ -27,7 +28,9 @@ __all__ = [
     "TargetAnalysisExecutor",
     "baseline_executor",
     "conc_sweep_executor",
+    "default_baseline_config",
     "explore_executor",
+    "materialize_config_with_envs",
     "report_executor",
     "session_breakdown_executor",
 ]
