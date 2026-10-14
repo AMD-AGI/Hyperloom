@@ -255,4 +255,3 @@ def test_jsonable_turns_contract_objects_into_json_data() -> None:
         "queued_by_branch": {},
         "cold_start_seconds": None,
     }
-
