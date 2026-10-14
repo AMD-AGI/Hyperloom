@@ -126,21 +126,12 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
 
         # Hardware + workload hints from SharedState; else dataclass defaults win.
         params.setdefault("gpu_type", state.gpu_type or "")
-        # Active server framework name.
-        if getattr(state, "framework", "") or "":
-            params.setdefault("framework", str(state.framework))
-        if int(getattr(state, "tp", 0) or 0) > 0:
-            params.setdefault("tp", int(state.tp))
         if getattr(state, "precision", "") or "":
             params.setdefault("precision", str(state.precision))
-        if int(getattr(state, "conc", 0) or 0) > 0:
-            params.setdefault("conc", int(state.conc))
-        if int(getattr(state, "isl", 0) or 0) > 0:
-            params.setdefault("isl", int(state.isl))
-        if int(getattr(state, "osl", 0) or 0) > 0:
-            params.setdefault("osl", int(state.osl))
-        if int(getattr(state, "max_model_len", 0) or 0) > 0:
-            params.setdefault("max_model_len", int(state.max_model_len))
+        for knob in ("tp", "conc", "isl", "osl", "max_model_len"):
+            value = int(getattr(state, knob, 0) or 0)
+            if value > 0:
+                params.setdefault(knob, value)
         # The mode selects the specialist's workload block; the corpus shape
         # supplies its numbers.
         if getattr(state, "benchmark_mode", "") or "":
