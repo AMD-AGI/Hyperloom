@@ -1090,6 +1090,68 @@ async def test_warm_specialist_params_fills_defaults(coord: Coordinator) -> None
     assert "kb_subgraph" in params
 
 
+#: ``(state field, param key, value to set, value expected on the params)`` for every field whose value
+#: SharedState hands a specialist. ``grading`` is the one whose key is not its own name.
+_STATE_EXPORTS = (
+    ("warm_start_recipe", "warm_start_recipe", {"backend": "aiter"}, {"backend": "aiter"}),
+    ("warm_start_pitfalls", "warm_start_pitfalls", ["oom"], ["oom"]),
+    ("warm_start_lessons", "warm_start_lessons", ["raise tp"], ["raise tp"]),
+    ("framework", "framework", "  sglang  ", "sglang"),
+    ("tp", "tp", 8, 8),
+    ("precision", "precision", "fp8", "fp8"),
+    ("conc", "conc", 64, 64),
+    ("isl", "isl", 1024, 1024),
+    ("osl", "osl", 128, 128),
+    ("max_model_len", "max_model_len", 8192, 8192),
+    ("benchmark_mode", "benchmark_mode", "agentx", "agentx"),
+    ("agentx_corpus_shape", "agentx_corpus_shape", {"isl": 1024}, {"isl": 1024}),
+    ("grading", "agentx_grading", {"objective": "intvty_p90"}, {"objective": "intvty_p90"}),
+    ("agentx_backend", "agentx_backend", "vllm", "vllm"),
+    ("baseline_tput", "baseline_tput", 900.0, 900.0),
+    ("cumulative_gain_validated", "cumulative_gain_validated", -3.5, -3.5),
+)
+
+
+@pytest.mark.asyncio
+async def test_warm_specialist_params_exports_every_state_field_it_carries(coord: Coordinator) -> None:
+    for field, _key, value, _expected in _STATE_EXPORTS:
+        setattr(coord.shared_state, field, value)
+    params: dict = {"domain": "kernel_agent"}
+
+    await coord.specialist_dispatch.warm_specialist_params(params)
+
+    assert {key: params.get(key) for _f, key, _v, _e in _STATE_EXPORTS} == {
+        key: expected for _f, key, _v, expected in _STATE_EXPORTS
+    }
+
+
+@pytest.mark.asyncio
+async def test_warm_specialist_params_omits_a_field_state_left_empty(coord: Coordinator) -> None:
+    """An absent key is how a specialist is told the session has no value, so an empty one must not be exported."""
+    params: dict = {"domain": "kernel_agent"}
+
+    await coord.specialist_dispatch.warm_specialist_params(params)
+
+    assert [key for _f, key, _v, _e in _STATE_EXPORTS if key in params] == []
+    # Both of these are written whatever the state holds.
+    assert params["gpu_type"] == ""
+    assert "keep_threshold_pct" in params
+
+
+@pytest.mark.asyncio
+async def test_warm_specialist_params_never_overwrites_a_key_the_caller_set(coord: Coordinator) -> None:
+    for field, _key, value, _expected in _STATE_EXPORTS:
+        setattr(coord.shared_state, field, value)
+    params: dict = {"domain": "kernel_agent"}
+    params.update({key: "caller" for _f, key, _v, _e in _STATE_EXPORTS})
+
+    await coord.specialist_dispatch.warm_specialist_params(params)
+
+    assert {key: params[key] for _f, key, _v, _e in _STATE_EXPORTS} == {
+        key: "caller" for _f, key, _v, _e in _STATE_EXPORTS
+    }
+
+
 # -- finalize_recipe_and_journal ------------------------------------
 def test_recipe_kb_finalize_recipe_and_journal_no_kb(coord: Coordinator) -> None:
     coord.shared_state.current_best = {"tput": 950.0}
