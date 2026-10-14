@@ -68,7 +68,7 @@ SPECIALIST_AUTO_RETRY_MAX: int = 2
 FORCE_STALLED_SPECIALIST_ROUNDS: int = 8
 FORCE_STALLED_KEEP_ROUNDS: int = 12
 
-# Gap id for the guaranteed custom dispatch when the ledger has no gap yet.
+# Gap id for the custom dispatch when the ledger has no gap yet.
 CUSTOM_SESSION_GAP_ID: str = "gap.custom.session"
 
 
@@ -79,8 +79,6 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         super().__init__(coordinator)
         # Advisory only: scores proposals, never gates them.
         self._proposal_scorer = proposal_scorer
-        # Macro-cycle suffix of the last custom-specialist guarantee attempt, admitted or denied.
-        self._custom_guarantee_cycle: str | None = None
 
     async def warm_specialist_params(self, params: dict[str, Any]) -> None:
         """Fill specialist task params with KnowledgePlane data before enqueue (mutates in place); missing fields stay empty.
@@ -654,36 +652,28 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             return
         return
 
-    async def maybe_ensure_custom_specialist(self) -> None:
-        """Dispatch the operator-defined specialist when no custom task has started this session.
+    async def ensure_custom_specialist(self) -> None:
+        """Dispatch the operator-defined specialist once per macro cycle in FRAMEWORK_AGENT.
 
-        At most one attempt per macro cycle, counting attempts the router
-        denies before creating a task; a custom task already queued or running
-        is left alone. Falls back to research mode when source patches cannot
-        be authored, so the guarantee does not stall on a deterministic denial.
+        Coordinator-owned: it bypasses the policy gate, which denies every custom delegate from Orchestration.
         """
         state = self.shared_state
-        if str(getattr(state, "phase", "") or "").upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
+        prompt = str(state.custom_specialist_prompt or "").strip()
+        if not prompt or str(getattr(state, "phase", "") or "").upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
             return
-        if not str(state.custom_specialist_prompt or "").strip() or state.custom_specialist_dispatched:
-            return
-        from .domains import CUSTOM_SPECIALIST_KEY, is_custom_specialist_dispatch
+        from .domains import CUSTOM_SPECIALIST_KEY, custom_specialist_key
         from .profile import MODE_RESEARCH
-        from ..state._shared_state.phase_state import gap_actionability_key
 
-        for t in (*await self.tasks.queued(), *await self.tasks.running()):
-            if t.kind == "specialist" and is_custom_specialist_dispatch(t.params or {}):
-                return
-        cycle = self._coord.dispatcher.cycle_idem_suffix()
-        if self._custom_guarantee_cycle == cycle:
+        key = custom_specialist_key(int(state.macro_cycle or 0), prompt)
+        if await self.tasks.find_by_idempotency_key(key) is not None:
             return
-        self._custom_guarantee_cycle = cycle
+        from ..state._shared_state.phase_state import gap_actionability_key
 
         params: dict[str, Any] = {
             "domain": CUSTOM_SPECIALIST_KEY,
             "scope": "domain",
             "source": "coordinator_internal",
-            "reason": "custom_specialist_guarantee",
+            "reason": "custom_specialist",
         }
         gaps = [g for g in state.gaps if isinstance(g, dict) and str(g.get("canonical_id") or "").strip()]
         if gaps:
@@ -707,19 +697,16 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             await self.bus.record_observation(
                 "coordinator",
                 "observation",
-                {"kind": "custom_specialist_guarantee_research_only", "reason": research_reason},
+                {"kind": "custom_specialist_research_only", "reason": research_reason},
             )
         intent = Intent(
             type=IntentType.DELEGATE,
-            payload={
-                "action_name": "specialist",
-                "params": params,
-                "idempotency_key": f"custom-guarantee{cycle}",
-            },
+            payload={"action_name": "specialist", "params": params, "idempotency_key": key},
         )
-        await self._coord.router.handle_intent("orchestration", intent)
+        await self._coord.router.handle_delegate("orchestration", intent)
         log.info(
-            "custom specialist guarantee: requested gap=%s mode=%s",
+            "custom specialist: requested key=%s gap=%s mode=%s",
+            key,
             params["gap_canonical_id"],
             params.get("mode") or "default",
         )

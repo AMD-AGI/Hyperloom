@@ -343,7 +343,6 @@ def _build_orchestration_prompt(
     agentx_corpus_shape: Mapping[str, Any] | None = None,
     agentx_grading: Mapping[str, Any] | None = None,
     agentx_backend: str = "",
-    custom_specialist_description: str = "",
 ) -> str:
     """Compose the Orchestration system prompt from typed inputs (``--orch-prompt`` overrides)."""
     registry = action_registry or ACTION_CATALOGUE
@@ -367,7 +366,6 @@ def _build_orchestration_prompt(
         agentx_corpus_shape=agentx_corpus_shape,
         agentx_grading=agentx_grading,
         agentx_backend=agentx_backend,
-        custom_specialist_description=custom_specialist_description,
         rules_fragment_path=_orchestration_rules_fragment_path(),
         framework_source_roots=resolve_kernel_search_roots(),
         session_framework_tree=resolve_framework_tree(framework),
@@ -1014,18 +1012,12 @@ def _load_custom_specialist_args(args: argparse.Namespace) -> None:
 
 
 def _apply_custom_specialist_resume(args: argparse.Namespace, state: SharedState) -> None:
-    """Flags passed on a resume replace the stored custom specialist; otherwise the stored one stays.
-
-    A changed definition is guaranteed its own first run.
-    """
+    """Flags passed on a resume replace the stored custom specialist; otherwise the stored one stays."""
+    if getattr(args, "custom_specialist_only", False):
+        state.custom_specialist_only = True
     prompt = getattr(args, "custom_specialist_prompt", "")
     if not prompt:
         return
-    if (prompt, args.custom_specialist_description) != (
-        state.custom_specialist_prompt,
-        state.custom_specialist_description,
-    ):
-        state.custom_specialist_dispatched = False
     state.custom_specialist_prompt = prompt
     state.custom_specialist_description = args.custom_specialist_description
     print(f"  re-exported custom specialist: {state.custom_specialist_description}")
@@ -1036,9 +1028,11 @@ def _custom_specialist_conflict(args: argparse.Namespace, state: SharedState) ->
     # --reset-state wipes the stored definition, so only a definition passed on this launch counts.
     stored = "" if getattr(args, "reset_state", False) else state.custom_specialist_prompt
     if not (getattr(args, "custom_specialist_prompt", "") or stored):
+        if getattr(args, "custom_specialist_only", False):
+            return (
+                "--custom-specialist-only requires --custom-specialist-prompt-file and --custom-specialist-description"
+            )
         return ""
-    if args.orch_prompt:
-        return "--orch-prompt replaces the Orchestration prompt, so custom_specialist would never be offered"
     if bool(getattr(args, "no_framework_agent", False)) or not state.framework_agent_phase_enabled:
         return "the FRAMEWORK_AGENT phase is disabled, so custom_specialist cannot be guaranteed to run"
     if int(getattr(args, "research_lane_capacity", 1) or 0) <= 0:
@@ -2742,7 +2736,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             agentx_corpus_shape=coordinator.shared_state.agentx_corpus_shape,
             agentx_grading=coordinator.shared_state.grading,
             agentx_backend=coordinator.shared_state.agentx_backend,
-            custom_specialist_description=coordinator.shared_state.custom_specialist_description,
         ),
         "critic": args.critic_prompt or _load_critic_prompt(),
     }
@@ -2763,7 +2756,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             agentx_corpus_shape=coordinator.shared_state.agentx_corpus_shape,
             agentx_grading=coordinator.shared_state.grading,
             agentx_backend=coordinator.shared_state.agentx_backend,
-            custom_specialist_description=coordinator.shared_state.custom_specialist_description,
         ),
     )
     # Build specialist executor only when research_lane capacity > 0 (0 degrades to LLM-direct grid).

@@ -453,7 +453,7 @@ async def test_the_framework_tick_steps_the_predictor(service, monkeypatch):
         shared_state=state,
         phase_internal=SimpleNamespace(maybe_enqueue_explore_research_scout=_noop),
         specialist_dispatch=SimpleNamespace(
-            maybe_force_stalled_domain_specialist=_noop, maybe_ensure_custom_specialist=_noop
+            maybe_force_stalled_domain_specialist=_noop, ensure_custom_specialist=_noop
         ),
         record_exception=lambda **kwargs: pytest.fail(f"the tick raised: {kwargs}"),
     )

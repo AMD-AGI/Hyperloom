@@ -24,6 +24,19 @@ _BUDGET_EXIT_STOP_REASONS = {
     "sweep_budget_cap": "time_exhausted",
 }
 
+# The FRAMEWORK_AGENT exit reason for a plateau or an LLM hint; budget and terminal exits never wait.
+_LEVERAGE_EXIT_REASON = "optimize_no_more_leverage"
+
+
+def holds_framework_exit_for_operator_work(
+    next_phase: tuple[str, str, dict[str, Any]], *, operator_work_pending: bool
+) -> bool:
+    """Whether a FRAMEWORK_AGENT exit waits for the operator-defined specialist's pending work."""
+    if not operator_work_pending:
+        return False
+    _target, reason, evidence = next_phase
+    return _LEVERAGE_EXIT_REASON in (reason, str((evidence or {}).get("passed_through_reason") or ""))
+
 
 @dataclass(frozen=True)
 class Transition:
@@ -215,6 +228,15 @@ class MachinePhase(CoordinatorCollaborator):
             enablement_in_flight=enablement_in_flight,
             kernel_work_in_flight=kernel_facts.agent_in_flight,
         )
+        if (
+            next_phase is not None
+            and str(state.phase or "").upper() == _phase_state.PHASE_FRAMEWORK_AGENT
+            and holds_framework_exit_for_operator_work(
+                next_phase, operator_work_pending=await self._coord.phase_framework.operator_work_pending()
+            )
+        ):
+            log.info("phase_machine: holding %s exit (reason=%s) for operator work", state.phase, next_phase[1])
+            next_phase = None
         await self._coord.phase_internal.maybe_enqueue_trajectory_reviewer()
         dispatcher = self._coord.dispatcher
         # Admission stays frozen for as long as a transition is pending.

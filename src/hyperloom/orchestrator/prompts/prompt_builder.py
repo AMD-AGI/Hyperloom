@@ -417,17 +417,14 @@ def _format_gain_pair(meta: ActionMetadata) -> str:
     return f"{lo:.0f}-{hi:.0f}%"
 
 
-def _llm_selectable_domains(*, custom_specialist: bool = False) -> str:
+def _llm_selectable_domains() -> str:
     """The domains Orchestration may name, pipe-separated, from the registry."""
-    from ..specialists.domains import CUSTOM_SPECIALIST_KEY, SPECIALIST_DOMAINS
+    from ..specialists.domains import SPECIALIST_DOMAINS
 
-    keys = [d.key for d in SPECIALIST_DOMAINS if d.llm_selectable]
-    if custom_specialist:
-        keys.append(CUSTOM_SPECIALIST_KEY)
-    return "|".join(keys)
+    return "|".join(d.key for d in SPECIALIST_DOMAINS if d.llm_selectable)
 
 
-def _format_emit_hint(meta: ActionMetadata, *, custom_specialist_description: str = "") -> str:
+def _format_emit_hint(meta: ActionMetadata) -> str:
     """Build the per-action ``EMIT:`` hint showing the correct transport.
 
     Kernel-owned actions render a ``REQUEST{...}`` template; ``specialist`` /
@@ -437,8 +434,6 @@ def _format_emit_hint(meta: ActionMetadata, *, custom_specialist_description: st
 
     Args:
         meta (ActionMetadata): The action to build an emit hint for.
-        custom_specialist_description (str): Non-empty when the session
-            defines ``custom_specialist``; adds it to the domain list.
 
     Returns:
         str: The emit-hint string for the catalogue entry.
@@ -457,7 +452,7 @@ def _format_emit_hint(meta: ActionMetadata, *, custom_specialist_description: st
     if meta.name == "specialist":
         return (
             "delegate{action_name='specialist', params={"
-            f"domain=<one of {_llm_selectable_domains(custom_specialist=bool(custom_specialist_description))}>, "
+            f"domain=<one of {_llm_selectable_domains()}>, "
             "gap_canonical_id=<stable gap id>, "
             "gap_symptom?=<str>, gap_layer?=<str>, "
             "gap_evidence?={profile_trace:..., ...}, "
@@ -516,11 +511,7 @@ def _format_grid_injection_hint(name: str) -> str | None:
     return None
 
 
-def _section_action_catalogue(
-    actions: list[ActionMetadata],
-    *,
-    custom_specialist_description: str = "",
-) -> list[str]:
+def _section_action_catalogue(actions: list[ActionMetadata]) -> list[str]:
     """Build the ACTIONS YOU MAY USE catalogue section, grouped by phase.
 
     Every enabled action keeps its description, cost/gain/risk line and payload
@@ -529,8 +520,6 @@ def _section_action_catalogue(
 
     Args:
         actions (list[ActionMetadata]): The actions enabled for this run.
-        custom_specialist_description (str): The operator's one-line
-            description of ``custom_specialist``; empty when not defined.
 
     Returns:
         list[str]: Markdown lines for the action catalogue.
@@ -562,11 +551,7 @@ def _section_action_catalogue(
                 f"crash_risk={meta.crash_risk:.2f}  "
                 f"family={meta.family}"
             )
-            lines.append(
-                f"    EMIT: {_format_emit_hint(meta, custom_specialist_description=custom_specialist_description)}"
-            )
-            if name == "specialist" and custom_specialist_description:
-                lines.append(f"    OPERATOR-DEFINED DOMAIN: custom_specialist — {custom_specialist_description}")
+            lines.append(f"    EMIT: {_format_emit_hint(meta)}")
             grid_hint = _format_grid_injection_hint(name)
             if grid_hint:
                 lines.append(f"    {grid_hint}")
@@ -1064,7 +1049,6 @@ def build_orchestration_prompt(
     agentx_corpus_shape: Mapping[str, Any] | None = None,
     agentx_grading: Mapping[str, Any] | None = None,
     agentx_backend: str = "",
-    custom_specialist_description: str = "",
 ) -> str:
     """Compose the Orchestration system prompt (deterministic for given inputs).
 
@@ -1104,8 +1088,6 @@ def build_orchestration_prompt(
             to the session-context section.
         references_dir: directory of on-demand reference documents; defaults
             to ``asset_prompt_references_dir()`` when ``None``.
-        custom_specialist_description: the operator's one-line description of
-            ``custom_specialist``; empty leaves the domain out of the prompt.
 
     Returns:
         The composed Orchestration system prompt text.
@@ -1158,7 +1140,7 @@ def build_orchestration_prompt(
             kernel_enabled=kernel_enabled,
             framework_agent_phase_enabled=framework_agent_phase_enabled,
         ),
-        _section_action_catalogue(actions, custom_specialist_description=custom_specialist_description),
+        _section_action_catalogue(actions),
         _section_decision_framework(kernel_enabled=kernel_enabled, phase=phase_norm, transport=transport),
         _section_cycle_directive(
             macro_cycle=macro_cycle, cycle_directive=cycle_directive, cycle_strategy=cycle_strategy

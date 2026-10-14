@@ -472,8 +472,14 @@ class PolicyGate:
         action_name = str(payload.get("action_name", "")).strip()
         if not action_name:
             raise PolicyDenied("delegate intent missing action_name", rule="payload")
+        if check_source:
+            self._validate_custom_specialist_only(action_name)
         # ``specialist`` bypasses the catalogue; ``_validate_specialist_dispatch`` owns its contract.
         if action_name == SPECIALIST_ACTION_NAME:
+            params = payload.get("params")
+            # Ingress only: the Coordinator's own custom task row is replayed here at dispatch.
+            if check_source and isinstance(params, dict):
+                _deny_custom_specialist(params)
             self._validate_specialist_dispatch(role, payload)
             return
         # ``integrate_patch`` requires a non-reject Critic verdict.
@@ -491,6 +497,21 @@ class PolicyGate:
             role.name,
             action_name,
             intent_kind="delegate",
+        )
+
+    def _validate_custom_specialist_only(self, action_name: str) -> None:
+        """Refuse Orchestration's FRAMEWORK_AGENT search under ``--custom-specialist-only``; the Coordinator runs it."""
+        from ..phases.machine_state import PHASE_FRAMEWORK_AGENT
+
+        ss = getattr(self, "shared_state", None)
+        if not bool(getattr(ss, "custom_specialist_only", False)) or action_name not in _CUSTOM_ONLY_DENIED_ACTIONS:
+            return
+        if str(getattr(ss, "phase", "") or "").strip().upper() != PHASE_FRAMEWORK_AGENT:
+            return
+        raise PolicyDenied(
+            f"{action_name!r}: --custom-specialist-only runs FRAMEWORK_AGENT on the custom specialist alone",
+            rule="custom_specialist_only",
+            hint="Wait for the phase to move on; the Coordinator dispatches and benches the custom specialist itself.",
         )
 
     def _validate_propose_action(self, role: "AgentRole", payload: dict[str, Any]) -> None:
@@ -516,6 +537,7 @@ class PolicyGate:
         action_name = str(payload.get("action_name", "")).strip()
         if not action_name:
             raise PolicyDenied("propose_action missing action_name", rule="payload")
+        self._validate_custom_specialist_only(action_name)
         self._validate_coordinator_managed_action(action_name, intent_kind="propose_action")
         self._validate_baseline_not_mid_round(action_name)
         self._validate_gemm_tuning_action(action_name, intent_kind="propose_action")
@@ -918,8 +940,6 @@ class PolicyGate:
                 hint="pass params={tags, gap_canonical_id, ...} per §3.5 §6",
             )
         _validate_specialist_framework(params)
-        # Before the scope branches: a freeform dispatch naming the custom domain still runs as it.
-        self._validate_custom_specialist_configured(params)
 
         # scope='freeform' has no domain anchor: it skips the tag / gap
         # vocabulary checks and runs a lightweight mechanical sanity gate instead.
@@ -978,24 +998,6 @@ class PolicyGate:
         validate_specialist_max_turns_raw(max_turns_raw, where="params.max_turns")
 
         self._validate_specialist_gpu_request(params)
-
-    def _validate_custom_specialist_configured(self, params: dict[str, Any]) -> None:
-        """Deny a ``custom_specialist`` dispatch when the session defines none.
-
-        Raises:
-            PolicyDenied: When the dispatch names the custom domain or tag and
-                the session has no operator-defined prompt.
-        """
-        if not is_custom_specialist_dispatch(params):
-            return
-        ss = getattr(self, "shared_state", None)
-        if str(getattr(ss, "custom_specialist_prompt", "") or "").strip():
-            return
-        raise PolicyDenied(
-            "delegate{action='specialist'}: custom_specialist is not configured for this session",
-            rule="specialist_custom_not_configured",
-            hint="Pick a built-in domain; custom_specialist exists only when the operator defines it.",
-        )
 
     def _validate_specialist_gpu_request(self, params: dict[str, Any]) -> None:
         """Validate a specialist's optional GPU request.
@@ -1552,6 +1554,19 @@ def _validate_specialist_framework(params: dict[str, Any]) -> None:
                 "Omit params.framework to dispatch against the session's framework, "
                 f"or pass one of {list(framework_registry.names())!r}."
             ),
+        )
+
+
+_CUSTOM_ONLY_DENIED_ACTIONS: frozenset[str] = frozenset({"specialist", "explore", "integrate_patch"})
+
+
+def _deny_custom_specialist(params: dict[str, Any]) -> None:
+    """Refuse a delegate naming ``custom_specialist`` as domain or tag; the Coordinator alone dispatches it."""
+    if is_custom_specialist_dispatch(params):
+        raise PolicyDenied(
+            "delegate{action='specialist'}: custom_specialist is dispatched by the Coordinator, not delegated",
+            rule="specialist_custom_coordinator_owned",
+            hint="Pick a built-in domain; the operator-defined specialist runs once per macro cycle on its own.",
         )
 
 

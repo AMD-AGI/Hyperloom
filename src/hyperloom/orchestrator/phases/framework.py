@@ -36,7 +36,9 @@ from hyperloom.inference_optimizer.grid_server_args import (
     tokenize_server_args_preserving_json,
 )
 from ..actions.executors.integrate_patch import PATCH_SOURCE_UPSTREAM_PR
+from ..specialists.domains import CUSTOM_SPECIALIST_KEY
 from ..specialists.profile import is_authoring_specialist
+from .dispatch_order import is_operator_work
 from hyperloom.common.framework_arm import LOCAL_EXPLORE_CANDIDATE_PREFIX
 from hyperloom.orchestrator.lever import (
     LEVER_SOURCE_PATCH,
@@ -51,6 +53,8 @@ log = _logging.getLogger(__name__)
 _LOCAL_EXPLORE_MAX_ATTEMPTS: int = 3
 # Unified authored-lane max attempts (apply-failure retries + Critic reauthor).
 _AUTHORED_LANE_MAX_ATTEMPTS: int = 3
+# ``untested_proposal_rows`` names a round's domain without the ``_specialist`` suffix.
+_CUSTOM_PROPOSAL_DOMAIN: str = CUSTOM_SPECIALIST_KEY.removesuffix("_specialist")
 
 
 def _framework_config_levers_from_done(
@@ -869,6 +873,9 @@ class FrameworkPhase(CoordinatorCollaborator):
         # Opened after the reprofile so the policy reads the settled anchor,
         # and before the pump so the entry's first dispatch is inside the event.
         self._open_framework_timeline()
+        if self.shared_state.custom_specialist_only:
+            await self._coord.specialist_dispatch.ensure_custom_specialist()
+            return
         await self._pump_framework_agent_phase()
         # Before orchestration's first turn, so the first grid it composes can carry the answer; last, as on the
         # tick, so a predictor fault reaches the transition's guard after the entry's own work has run.
@@ -2317,11 +2324,16 @@ class FrameworkPhase(CoordinatorCollaborator):
         """
         stage = "framework_pump"
         try:
+            if self.shared_state.custom_specialist_only:
+                await self._coord.specialist_dispatch.ensure_custom_specialist()
+                await self._maybe_bench_untested_proposals()
+                await self._maybe_finish_custom_only_cycle()
+                return
             await self._pump_framework_agent_phase()
             await self._maybe_bench_untested_proposals()
             await self._coord.phase_internal.maybe_enqueue_explore_research_scout()
             await self._coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
-            await self._coord.specialist_dispatch.maybe_ensure_custom_specialist()
+            await self._coord.specialist_dispatch.ensure_custom_specialist()
             self._record_advisory_plateau()
             # Last, as at entry, so a predictor fault is filed here after the phase's own work has run.
             stage = "framework_predictor"
@@ -2791,28 +2803,79 @@ class FrameworkPhase(CoordinatorCollaborator):
             out.append(cand)
         return out
 
-    async def _maybe_bench_untested_proposals(self) -> None:
-        """Enqueue an explore grid from the head of the untested-proposal queue (see ``untested_proposal_rows``).
+    def _custom_proposal_rows(self) -> list[dict[str, Any]]:
+        """Untested proposals of the operator-defined specialist, capped at one grid."""
+        rows = [r for r in self.shared_state.untested_proposal_rows() if r["domain"] == _CUSTOM_PROPOSAL_DOMAIN]
+        return rows[: self._AUTO_EXPLORE_GRID_CAP]
 
-        Runs in FRAMEWORK_AGENT while no explore is queued or running. The
-        idempotency key names the fingerprint set, so a grid that failed without
-        recording any variant is not re-enqueued until the queue head changes.
-        """
-        from ..actions.executors._proposal_identity import controls_of
+    def _bench_key(self, rows: list[dict[str, Any]], *, operator_priority: bool) -> str:
+        """Idempotency key naming the fingerprint set, so a grid that recorded nothing is not re-enqueued."""
+        fp_hash = sha1(",".join(sorted(row["fingerprint"] for row in rows)).encode(), usedforsecurity=False)
+        prefix = "auto-explore-custom" if operator_priority else "auto-explore"
+        return f"{prefix}-c{int(self.shared_state.macro_cycle or 0)}-{fp_hash.hexdigest()[:12]}"
+
+    async def operator_work_pending(self) -> bool:
+        """Whether the operator-defined specialist or the bench of its proposals has not run yet."""
+        if any(is_operator_work(t.kind, t.params) for t in (*await self.tasks.queued(), *await self.tasks.running())):
+            return True
+        custom = self._custom_proposal_rows()
+        if not custom:
+            return False
+        return await self.tasks.find_by_idempotency_key(self._bench_key(custom, operator_priority=True)) is None
+
+    async def _maybe_finish_custom_only_cycle(self) -> None:
+        """Under ``--custom-specialist-only``, hint ``skip_to_sweep`` once this cycle's custom work has all run."""
+        from ..specialists.domains import custom_specialist_key
+        from ..state.shared_state import ESCALATE_HINT_SKIP_TO_SWEEP
+        from ..state.task_registry import TERMINAL_STATES
 
         state = self.shared_state
-        if (
-            state.phase or ""
-        ).strip().upper() != _phase_state.PHASE_FRAMEWORK_AGENT or state.framework_agent_phase_done:
+        key = custom_specialist_key(int(state.macro_cycle or 0), str(state.custom_specialist_prompt or "").strip())
+        custom = await self.tasks.find_by_idempotency_key(key)
+        if custom is None or custom.state not in TERMINAL_STATES:
+            return
+        # A succeeded task's round, which carries its proposals, may not be booked yet.
+        if custom.state == "succeeded" and not any(
+            isinstance(r, dict) and r.get("task_id") == custom.task_id for r in state.specialist_rounds or []
+        ):
+            return
+        if await self.operator_work_pending():
+            return
+        if any(t.kind == "integrate_patch" for t in (*await self.tasks.queued(), *await self.tasks.running())):
+            return
+        if any(p.action_name == "integrate_patch" for p in self.state.pending_proposals.values()):
+            return
+        if state.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP):
+            log.info("custom-specialist-only: cycle %s done; leaving FRAMEWORK_AGENT", state.macro_cycle)
+
+    async def _maybe_bench_untested_proposals(self) -> None:
+        """Enqueue explore grids from the untested-proposal queue (see ``untested_proposal_rows``).
+
+        Custom-specialist proposals get their own grid whatever else is queued; the rest wait for no explore and an
+        open framework candidate track.
+        """
+        state = self.shared_state
+        if (state.phase or "").strip().upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
             return
         dispatcher = self._coord.dispatcher
         if dispatcher.admission_frozen or dispatcher.dispatch_paused_for_phase_budget():
             return
-        if any(t.kind == "explore" for t in (*await self.tasks.queued(), *await self.tasks.running())):
+        explores = [t for t in (*await self.tasks.queued(), *await self.tasks.running()) if t.kind == "explore"]
+        custom = self._custom_proposal_rows()
+        if custom and not any(is_operator_work(t.kind, t.params) for t in explores):
+            if await self._enqueue_bench_grid(custom, operator_priority=True):
+                return
+        if state.custom_specialist_only or state.framework_agent_phase_done or explores:
             return
-        rows = state.untested_proposal_rows()[: self._AUTO_EXPLORE_GRID_CAP]
-        if not rows:
-            return
+        rows = [r for r in state.untested_proposal_rows() if r["domain"] != _CUSTOM_PROPOSAL_DOMAIN]
+        if rows:
+            await self._enqueue_bench_grid(rows[: self._AUTO_EXPLORE_GRID_CAP], operator_priority=False)
+
+    async def _enqueue_bench_grid(self, rows: list[dict[str, Any]], *, operator_priority: bool) -> bool:
+        """Enqueue one explore grid benching ``rows``; returns whether a new task was created."""
+        from ..actions.executors._proposal_identity import controls_of
+
+        state = self.shared_state
         grid = [
             {
                 "name": row["name"],
@@ -2826,7 +2889,6 @@ class FrameworkPhase(CoordinatorCollaborator):
             }
             for row in rows
         ]
-        fp_hash = sha1(",".join(sorted(row["fingerprint"] for row in rows)).encode(), usedforsecurity=False)
         # The grid's attempts join their proposal row through this id, as a proposed or delegated grid's do.
         proposal_id = uuid.uuid4().hex
         params: dict[str, Any] = {
@@ -2835,6 +2897,8 @@ class FrameworkPhase(CoordinatorCollaborator):
             "grid": grid,
             "proposal_msg_id": proposal_id,
         }
+        if operator_priority:
+            params["operator_priority"] = True
         if state.baseline_config_path:
             params["config_path"] = state.baseline_config_path
         inject_stack_base_params(params, state, anchor=True)
@@ -2847,19 +2911,25 @@ class FrameworkPhase(CoordinatorCollaborator):
         etask, was_existing = await self.tasks.create_or_return_existing(
             kind="explore",
             params=params,
-            idempotency_key=f"auto-explore-c{int(state.macro_cycle or 0)}-{fp_hash.hexdigest()[:12]}",
+            idempotency_key=self._bench_key(rows, operator_priority=operator_priority),
             requires_lanes=lanes,
             lease_ttl_sec=ttl,
             dispatch_class="coordinator",
         )
         if was_existing:
-            return
-        log.info("auto_bench: enqueued explore task_id=%s (variants=%d)", etask.task_id, len(grid))
+            return False
+        log.info(
+            "auto_bench: enqueued explore task_id=%s (variants=%d operator_priority=%s)",
+            etask.task_id,
+            len(grid),
+            operator_priority,
+        )
         from ..loop.proposals import record_config_proposal
 
         record_config_proposal(
             self._coord, proposal_id, "explore", {"params": params, **_kb_exposure_of(rows)}, outcome="auto_bench"
         )
+        return True
 
     async def maybe_autosubmit_specialist_patches(
         self,
