@@ -7,7 +7,7 @@
 # export derives the decision, the values, the consequence interval and the identity; this mapping projects them. A
 # config change is fingerprinted exactly as hyperloom-sbd-v6 does, so the same change measured by either flow lands
 # in the same Repeat Group.
-format: hyperloom-kb.collect.v1
+format: hyperloom-kb.collect.v2
 description: multi-branch notebook test records
 declaration: inference-recipe-v1
 producer:
@@ -71,6 +71,10 @@ let:
     then:
       - {object: {name: accuracy, passed: $candidate.accuracy.passed, value: $candidate.accuracy.value}}
     else: []
+  constraint_lines:
+    each: $constraints
+    as: row
+    value: "{$row.name}: passed={$row.passed}, observed={$row.value}"
   outcome_facts:
     object:
       decision: $decision
@@ -117,13 +121,14 @@ experience:
   completed_at: $candidate.completed_at
   identity: $candidate.identity
   objective: e2e_throughput@v1
-  baseline_value: $baseline_value
-  baseline_identity:
-    object:
-      baseline_fingerprint: {sha256: {text: $candidate.parent_state}}
-  preconditions:
-    - "measured_baseline_tput={$baseline_value}"
-    - "parent_commit={$candidate.parent_commit}"
+  baseline:
+    baseline_fingerprint: {sha256: {text: $candidate.parent_state}}
+    value: $baseline_value
+  rationale:
+    preconditions:
+      - "measured_baseline_tput={$baseline_value}"
+      - "parent_commit={$candidate.parent_commit}"
+    reasoning: $reasoning
   provenance:
     source_ref: "multibranch:{$run_id}:{$request_id}"
     extra:
@@ -138,30 +143,24 @@ experience:
         interval: $candidate.interval
         gpu_seconds: {number: $candidate.gpu_seconds}
         reflection_source: {if: {present: $learn}, then: specialist_branch_log, else: deterministic_outcome_summary}
-  reasoning: $reasoning
   change:
-    identity:
-      object:
-        change_family: $change_family
-        change_fingerprint:
-          if: {eq: [$change_family, config_variant]}
-          then: {sha256: $change_content}
-          else: $patch_fingerprint
+    change_family: $change_family
+    change_fingerprint:
+      if: {eq: [$change_family, config_variant]}
+      then: {sha256: $change_content}
+      else: $patch_fingerprint
     summary: {first: [{text: $candidate.change.summary}, multi-branch candidate]}
-    kind: $change_family
     content: $change_content
-    resource_refs:
-      if: {eq: [$change_family, source_patch]}
-      then: {each: $patches, as: patch, value: $patch.path}
   outcome:
     decision: $decision
     value: $outcome_value
-    constraints: $constraints
+    constraints: $constraint_lines
     error_class:
       if: {eq: [$decision, failed]}
       then: {token: {first: [$candidate.error_class, failed]}}
       else: ""
   reflection:
-    if: {present: $learn}
-    then: "{$learn} (measured {$candidate.interval_text})"
-    else: "Recorded outcome: {$outcome_facts}"
+    text:
+      if: {present: $learn}
+      then: "{$learn} (measured {$candidate.interval_text})"
+      else: "Recorded outcome: {$outcome_facts}"

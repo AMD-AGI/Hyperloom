@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 from hyperloom_kb import (
+    Experience,
     ExperienceHTTPService,
     HTTPServiceConfig,
     LLMQueryPlanner,
@@ -23,6 +24,7 @@ from hyperloom_kb import (
     create_http_server,
 )
 from hyperloom_kb.collect import collect, load_mapping
+from hyperloom_kb.database import open_database
 
 from hyperloom.contracts.recipe import (
     ComponentChange,
@@ -59,6 +61,10 @@ def _rows(snapshot: NotebookSnapshot) -> dict[str, dict[str, Any]]:
 
 def _collected(snapshot: NotebookSnapshot) -> dict[str, Any]:
     return {item.unit_id: item.experience for item in publish_experiences(snapshot, METRIC, dry_run=True).collected}
+
+
+def _change_group(experience: Experience) -> dict[str, Any]:
+    return {name: experience.change.get(name) for name in ("change_family", "change_fingerprint")}
 
 
 def test_every_finished_specialist_test_is_one_row_with_its_derived_decision(snapshot: NotebookSnapshot) -> None:
@@ -98,12 +104,13 @@ def test_the_rows_with_reasoning_become_experiences_and_the_rest_say_why_not(sna
         "r5": NO_REASONING,
     }
     kept = collected["r1"]
-    assert (kept.outcome.decision, kept.baseline_value, kept.outcome.value) == ("keep", 1000.0, 1040.0)
+    assert (kept.outcome["decision"], kept.baseline["value"], kept.outcome["value"]) == ("keep", 1000.0, 1040.0)
+    assert kept.rationale["reasoning"] == "the MoE GEMM is bound by memory bandwidth"
     assert kept.provenance.producer == "hyperloom-multibranch"
     assert kept.provenance.source_ref == "multibranch:sess-1:r1"
     assert kept.provenance.extra["tests"] == ["r1"]
-    assert kept.reflection.startswith("confirmed: the MoE GEMM is bound by memory bandwidth (measured +4.00%")
-    assert collected["r2"].outcome.decision == "revert"
+    assert kept.reflection["text"].startswith("confirmed: the MoE GEMM is bound by memory bandwidth (measured +4.00%")
+    assert collected["r2"].outcome["decision"] == "revert"
 
 
 def test_a_candidate_that_broke_the_server_is_a_failed_experience(snapshot: NotebookSnapshot) -> None:
@@ -112,9 +119,9 @@ def test_a_candidate_that_broke_the_server_is_a_failed_experience(snapshot: Note
 
     failed = _collected(dataclasses.replace(snapshot, branch_logs=logs))["r3"]
 
-    assert (failed.outcome.decision, failed.outcome.value) == ("failed", None)
-    assert failed.outcome.error_class == "server_exited_during_warmup"
-    assert failed.baseline_value == 1000.0
+    assert (failed.outcome["decision"], failed.outcome.get("value")) == ("failed", None)
+    assert failed.outcome["error_class"] == "server_exited_during_warmup"
+    assert failed.baseline["value"] == 1000.0
 
 
 def test_publishing_again_yields_the_same_experiences(snapshot: NotebookSnapshot) -> None:
@@ -153,7 +160,7 @@ def test_a_config_change_gets_the_same_fingerprint_from_either_flow(snapshot: No
     (from_sbd,) = collect("hyperloom-sbd-v6", sbd, dry_run=True).collected
     ours = _collected(snapshot)["r1"]
 
-    assert ours.change.identity == from_sbd.experience.change.identity
+    assert _change_group(ours) == _change_group(from_sbd.experience)
     assert ours.schema_ref == from_sbd.experience.schema_ref
 
 
@@ -206,8 +213,11 @@ def test_the_experience_service_stores_each_experience_once_with_its_identity(
 ) -> None:
     declaration = load_mapping(MAPPING_PATH).declaration
     planner = LLMQueryPlanner(_UnusedPlanner(), PlannerConfiguration.create("unused-planner"))
+    home = tmp_path / "service"
     server = create_http_server(
-        ExperienceHTTPService(HTTPServiceConfig(tmp_path / "service", TOKEN), declaration, planner), "127.0.0.1", 0
+        ExperienceHTTPService(HTTPServiceConfig(home, TOKEN), declaration, planner, database=open_database(home)),
+        "127.0.0.1",
+        0,
     )
     thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05})
     thread.start()
