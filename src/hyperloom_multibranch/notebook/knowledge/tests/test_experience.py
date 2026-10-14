@@ -218,6 +218,7 @@ def test_the_experience_service_stores_each_experience_once_with_its_identity(
         first = publish_experiences(snapshot, METRIC, kb=kb, receipt=tmp_path / "receipt.json")
         again = publish_experiences(snapshot, METRIC, kb=kb)
         listed = client.list_experiences()
+        exported = client.export_page()
     finally:
         server.shutdown()
         server.server_close()
@@ -225,6 +226,7 @@ def test_the_experience_service_stores_each_experience_once_with_its_identity(
 
     assert [row.status for row in first.collected] == ["created", "created"]
     assert [row.status for row in again.collected] == ["unchanged", "unchanged"]
-    identities = {item["experience_id"]: item["identity"] for item in listed.items}
+    assert {item["experience_id"] for item in listed.items} == {row.experience_id for row in first.collected}
+    identities = {item["experience"]["id"]: item["experience"]["identity"] for item in exported.items}
     assert identities[first.collected[0].experience_id]["bottleneck"] == "moe gemm"
     assert (tmp_path / "receipt.json").is_file()

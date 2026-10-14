@@ -8,7 +8,8 @@ baseline, observations), so one planner serves both flows. A recalled Experience
 session queried with is a prior; one measured under another condition is only a lead to re-verify, and the briefing
 names the conditions that differ. The mapping refuses Experiences without evidence, so nothing recalled lacks one.
 
-Sorting reads each summary's ``identity``, which the Experience KB's read summaries carry.
+Sorting reads each summary's ``identity``. A summary without one matches no condition, so its Experience is one to
+re-verify, never a prior.
 """
 
 from __future__ import annotations

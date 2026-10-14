@@ -44,6 +44,15 @@ def test_an_experience_measured_under_every_queried_condition_is_a_prior_and_oth
     assert [item.experience_id for item in recall.of(RecallTier.PRIOR)] == ["exp-same"]
 
 
+def test_a_summary_without_an_identity_is_one_to_reverify_never_a_prior() -> None:
+    bare = {key: value for key, value in experience_summary("exp-bare", SAME).items() if key != "identity"}
+    reader = FakeExperienceReader(completed_read(bare))
+
+    (item,) = recall_experiences(reader, profile(), 1000.0, bottleneck="attention").experiences
+
+    assert (item.tier, item.differing) == (RecallTier.REVERIFY, ("gpu", "framework", "bottleneck", "isl", "osl"))
+
+
 def test_the_read_carries_the_sessions_identity_workload_baseline_and_bottleneck() -> None:
     reader = FakeExperienceReader(completed_read())
 
