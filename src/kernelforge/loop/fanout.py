@@ -49,6 +49,9 @@ class LaneResult:
     plan: str
     diff: str = ""
     error: str = ""
+    # The lane Implementer's own end-of-session rationale, recorded with the iteration that measures this candidate;
+    # empty when the session returned none or failed.
+    rationale: str = ""
     # What this lane's teardown found, carried structured rather than folded
     # into ``error``. The two say different things to different readers: the
     # error is why THIS lane produced nothing, which costs the round one
@@ -272,7 +275,7 @@ async def run_lanes(
     *,
     workspace_dir: str,
     lanes: Sequence[LanePlan],
-    session: Callable[[LanePlan, Path, Path], Awaitable[None]],
+    session: Callable[[LanePlan, Path, Path], Awaitable[str | None]],
     parent_dir: str,
     driver: str,
 ) -> list[LaneResult]:
@@ -310,7 +313,7 @@ async def run_lanes(
             reaped: ReapReport | None = None
             try:
                 try:
-                    await session(lane, lane_dir, serialized_driver)
+                    rationale = await session(lane, lane_dir, serialized_driver)
                 finally:
                     reaped = await _reap_lane_processes(lane_dir)
                 # Outside the guard above on purpose: a lane whose session already failed has to report why it failed,
@@ -335,6 +338,7 @@ async def run_lanes(
                 plan=lane.plan,
                 diff=diff,
                 reaped=reaped,
+                rationale=str(rationale or "").strip(),
             )
 
         return list(
