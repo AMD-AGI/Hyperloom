@@ -24,16 +24,17 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 from . import geak_rebench as _geak_rebench
 from . import machine_state as _phase_state
+from .kernel_round_budget import controller_round_stop, integrate_within_phase, measurement_round_sec
 from hyperloom.common.env import env_bool, env_float, env_int
 from hyperloom.common.io import atomic_write_json
-from hyperloom.common.perf_metric import graded_axes_of
+from hyperloom.common.perf_metric import axis_of, graded_axes_of
 from hyperloom.orchestrator.lever import (
     LEVER_CONFIG,
     LEVER_KERNEL,
 )
 from hyperloom.inference_optimizer.breakdown.recorder import tool_versions
 from ..actions.executors._recipe_script import resolve_launch_server_script
-from ..actions.executors._workload_envs import geak_metric_axis
+from ..actions.executors._workload_envs import GEAK_METRIC_OUTPUT, geak_metric_axis
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
     ROUTE_FORGE,
     ROUTE_GEAK,
@@ -59,11 +60,13 @@ from ..kernel.geak_config import (
     _accepted_config_as_variant,
     _accepted_config_controls,
 )
+from ..kernel.lane_budget import INSUFFICIENT_BUDGET
 from ..actions.executors._gpu_pin import (
     coerce_tp,
     resolve_gpu_pin,
     _resolve_handoff_gpu_ids,
     _resolve_handoff_gpu_ids_space,
+    _resolve_handoff_physical_gpus,
     _resolve_handoff_tp,
     _resolve_serving_fidelity,
 )
@@ -80,6 +83,9 @@ log = _logging.getLogger(__name__)
 _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT: float = 3.0
 
 _GEAK_RUNNER_MODULE = "hyperloom.orchestrator.kernel.geak_runner"
+
+# How long the GEAK handoff waits for the servers it stopped to release their VRAM.
+_GEAK_GPU_FREE_WAIT_SEC: float = 120.0
 
 ROOFLINE_WATERMARK_RATIO: float = 1.10  # 10% step over last roofline
 
@@ -396,15 +402,15 @@ class KernelPhase(CoordinatorCollaborator):
         idempotency_reason = f"kernel_entry_g{stack_len}_{profile_fingerprint}"
         task_kind = self._coord.phase_prelude.internal_analysis_kind()
         params = self._coord.phase_prelude.internal_analysis_params(
-            reason=idempotency_reason,
-            inline_event=recorder.event_id if recorder is not None else "",
+            reason=idempotency_reason, inline_event=recorder.event_id if recorder is not None else ""
         )
-        if params is None:
+        denied = self._coord.dispatcher.time_budget_denial_for_action(task_kind)
+        if params is None or denied is not None:
             _note_reprofile(
                 ran=False,
                 task_kind=task_kind,
                 trigger=trigger,
-                skipped_reason="gpu_trace_unsupported",
+                skipped_reason=denied.rule if denied else "gpu_trace_unsupported",
                 idempotency_reason=idempotency_reason,
                 snapshot_id_before=snapshot_id_before,
             )
@@ -522,7 +528,7 @@ class KernelPhase(CoordinatorCollaborator):
                 decision = "KEEP"
             elif status.startswith("reverted"):
                 decision = "REVERT"
-            elif status.startswith("skipped"):
+            elif status.startswith("skipped") or stopped_by_the_run_class(status):
                 decision = "SKIPPED"
             else:
                 decision = "FAILED"
@@ -1148,6 +1154,11 @@ class KernelPhase(CoordinatorCollaborator):
         phase_rem = _phase_state.phase_budget_remaining_seconds(self.shared_state)
         if phase_rem is not None:
             kill_budget = min(kill_budget, float(phase_rem))
+        # A GEAK result reaches the headline only through this session's own re-measurement of it, which runs in this
+        # phase after GEAK returns. Which results skip it is known only then, so every hand-off leaves room for it.
+        rebench_sec = measurement_round_sec(self.shared_state)
+        log.info("GEAK: holding back %.0fs of the KERNEL budget to re-measure GEAK's result", rebench_sec)
+        kill_budget -= rebench_sec
         # The runner self-stops ``margin`` before the hard subprocess kill, which reserves the closing-grace window.
         kill_timeout = int(max(0.0, kill_budget))
         runner_timeout = int(max(0.0, kill_budget - margin))
@@ -1158,34 +1169,55 @@ class KernelPhase(CoordinatorCollaborator):
         candidates: list[float] = []
         session_remaining = _phase_state.session_remaining_seconds(self.shared_state)
         if session_remaining is not None:
-            candidates.append(
-                max(
-                    0.0,
-                    float(session_remaining) - self.shared_state.closing_reserve_sec(),
-                )
-            )
+            candidates.append(max(0.0, float(session_remaining) - self.shared_state.closing_reserve_sec()))
         phase_remaining = _phase_state.phase_budget_remaining_seconds(self.shared_state)
         if phase_remaining is not None:
             candidates.append(max(0.0, float(phase_remaining)))
         phase_cap = _phase_state.phase_cap_seconds(self.shared_state)
         if phase_cap is not None:
-            candidates.append(
-                max(
-                    0.0,
-                    float(phase_cap) - _phase_state.phase_cumulative_seconds(self.shared_state),
-                )
-            )
-        hard_timeout = int(min(candidates)) if candidates else 90 * 60
+            candidates.append(max(0.0, float(phase_cap) - _phase_state.phase_cumulative_seconds(self.shared_state)))
+        # The phase still measures the Controller's patches E2E after the Controller exits.
+        hard_timeout = int(min(candidates) - measurement_round_sec(self.shared_state)) if candidates else 90 * 60
         return max(0, hard_timeout - 30), max(0, hard_timeout)
+
+    async def _free_gpus_for_geak(self, cards: list[int] | None) -> str | None:
+        """Stop what this session left on GEAK's GPUs, then wait for them to drain; return why they did not, if so.
+
+        The ``kernel_agent`` task holds every serving lane by now, but a lane only records that the round holding it
+        ended, not that the server the round booted went with it.
+        """
+        from ..actions.executors._server_lifecycle import free_gpus_for_handoff
+
+        gpus = await asyncio.to_thread(
+            free_gpus_for_handoff, self.session_dir, cards, timeout_sec=_GEAK_GPU_FREE_WAIT_SEC
+        )
+        if gpus.reaped:
+            log.warning(
+                "geak handoff: stopped %d server(s) this session left running: pids=%s", len(gpus.reaped), gpus.reaped
+            )
+        if gpus.unverified:
+            log.warning("geak handoff: cannot confirm GPUs %s are free (%s); delegating anyway", cards, gpus.unverified)
+        if not gpus.busy:
+            return None
+        busy = ", ".join(f"GPU{card} {used:.0f}/{total:.0f} MiB" for card, used, total in gpus.busy)
+        error = f"GPUs still hold VRAM after this session's leftover servers were stopped: {busy}"
+        if gpus.holders:
+            error += f"; serving processes still up: {'; '.join(gpus.holders)}"
+        log.error("geak handoff: %s; not delegating", error)
+        return error
+
+    def _session_is_agentx(self) -> bool:
+        """Whether this session measures the AgentX workload."""
+        from hyperloom.common.perf_metric import is_agentx_mode
+        from ..actions.executors._workload_envs import agentx_enabled
+
+        benchmark_mode = str(self.shared_state.benchmark_mode or "").strip()
+        return is_agentx_mode(benchmark_mode) if benchmark_mode else agentx_enabled()
 
     async def _run_geak_kernel_phase(self, *, from_phase: str) -> None:
         """Delegate the KERNEL_AGENT phase to GEAK (one whole-pipeline e2e run)."""
         state = self.shared_state
-        from hyperloom.common.perf_metric import is_agentx_mode
-        from ..actions.executors._workload_envs import agentx_enabled
-
-        benchmark_mode = str(state.benchmark_mode or "").strip()
-        agentx = is_agentx_mode(benchmark_mode) if benchmark_mode else agentx_enabled()
+        agentx = self._session_is_agentx()
 
         def _finish_skip(
             result: dict[str, Any],
@@ -1510,8 +1542,14 @@ class KernelPhase(CoordinatorCollaborator):
             )
             if not _promote_recovered_result(recovered, recovered_from="existing_result_json"):
                 return
-            if recovered.get("status") == "ok":
-                await self._revalidate_geak_candidate(reason="geak_e2e_win_recovered")
+            await self._revalidate_geak_candidate(reason="geak_e2e_win_recovered")
+            return
+
+        still_busy = await self._free_gpus_for_geak(
+            _resolve_handoff_physical_gpus(gpu_ids=_gpu_ids, gpu_ids_space=_gpu_ids_space, gpu_pin=gpu_pin)
+        )
+        if still_busy:
+            _finish_skip({"status": "error", "error_class": "gpus_busy_at_handoff", "error": still_busy})
             return
 
         # Budget-aware timeouts: shrink to the remaining run deadline and always reserve the closing-grace window.
@@ -1527,7 +1565,7 @@ class KernelPhase(CoordinatorCollaborator):
             _finish_skip(
                 {
                     "status": "skipped",
-                    "error_class": "insufficient_budget",
+                    "error_class": INSUFFICIENT_BUDGET,
                     "error": (
                         f"only {runner_timeout}s of KERNEL budget remained "
                         f"(< min {min_run}s); skipped to protect the closing "
@@ -1561,12 +1599,8 @@ class KernelPhase(CoordinatorCollaborator):
         # to flush result.json), then SIGKILL, instead of orphaning run_e2e + its servers.
         term_grace = env_int("GEAK_TERM_GRACE_S", default=180)
 
-        # GEAK measures whatever axis Hyperloom grades on. An agentic replay is
-        # graded on total token throughput, so leaving this pinned to output aims
-        # GEAK's search at a number the session does not score -- on the AgentX
-        # corpus the two run ~140x apart, and a kernel that helps the decode-side
-        # output figure need not help the prefill-dominated total by the same
-        # margin. Synthetic runs resolve to "output" and are unaffected.
+        # GEAK must search and gate on the axis this session keeps candidates on: a kernel accepted on another
+        # axis need not move that one. geak_metric_axis owns the mapping and its rationale.
         _geak_e2e_metric, _ = geak_metric_axis(
             benchmark_mode=str(state.benchmark_mode or ""),
             grading=state.grading or None,
@@ -1870,7 +1904,15 @@ class KernelPhase(CoordinatorCollaborator):
         new_tput = float(result.get("final_throughput_tok_s") or 0.0)
         if new_tput <= 0:
             return True
-        base = float(self.shared_state.baseline_tput or 0.0)
+        # ``new_tput`` is read on whatever axis GEAK measured, so the reference must be too. The interactivity
+        # bases are spelled as this session's snapshot keys, so ``baseline_perf`` holds their reference directly;
+        # an axis it does not hold reads 0.0 and leaves the gain unset. A result with no basis predates the field
+        # and was measured on output.
+        basis = str(result.get("metric_basis") or GEAK_METRIC_OUTPUT[1])
+        if basis == GEAK_METRIC_OUTPUT[1]:
+            base = float(self.shared_state.baseline_tput or 0.0)
+        else:
+            base = axis_of(self.shared_state.baseline_perf, basis)
         # ``base`` is OUR measurement and ``new_tput`` is GEAK's, so this
         # percentage is defined only when both were measured on the same
         # workload. GEAK states that verdict in
@@ -3119,6 +3161,9 @@ class KernelPhase(CoordinatorCollaborator):
 
     async def _handle_gemm_tuning_result(self, result: dict[str, Any]) -> None:
         """Record and post-process a run_gemm_tuning result from any entrypoint."""
+        if result.get("error_class") == INSUFFICIENT_BUDGET:
+            # Never started, so no attempt to record; a recorded ``skipped`` would latch GEMM off for later entries.
+            return
         self._sync_profile_state_after_gemm_roofline(result)
         self.shared_state.record_gemm_tuning(result)
         try:
@@ -3325,7 +3370,6 @@ class KernelPhase(CoordinatorCollaborator):
 
     async def _validate_gemm_tuning_e2e(self, result: dict[str, Any]) -> None:
         """Sequentially E2E-validate each tuning candidate's env independently."""
-        from ..kernel.request_handlers import integrate_handler
         from ..measurement.integrate_performance import integrate_measurement_fields
         from hyperloom.common.model_paths import resolve_session_model_path
 
@@ -3482,9 +3526,8 @@ class KernelPhase(CoordinatorCollaborator):
             for fault_attempt in range(1, _MAX_INTEGRATE_FAULT_ATTEMPTS + 1):
                 await asyncio.to_thread(prepare_serving_so_for_csvs, test_envs, backup_dir=jit_backup_dir)
                 try:
-                    integrate_result = await integrate_handler(
-                        integrate_payload,
-                        session_dir=self.session_dir,
+                    integrate_result = await integrate_within_phase(
+                        integrate_payload, state=self.shared_state, session_dir=self.session_dir
                     )
                 except Exception as exc:  # noqa: BLE001
                     if fault_attempt < _MAX_INTEGRATE_FAULT_ATTEMPTS:
@@ -3871,15 +3914,14 @@ class KernelPhase(CoordinatorCollaborator):
             log.exception("KERNEL entry: reclaiming the campaign repositories failed")
         if int(result.get("patch_count") or 0) > 0:
             try:
-                from ..kernel.controller_patch_integration import (
-                    integrate_controller_patches,
-                )
+                from ..kernel.controller_patch_integration import integrate_controller_patches
 
                 integration = await integrate_controller_patches(
                     patches_root=str(result.get("patches_root") or output_dir / "result" / "patches"),
                     session_dir=self.session_dir,
                     shared_state=self.shared_state,
                     record_keep=self._coord.writeback.record_integrate_keep,
+                    admit_round=lambda rounds_run: controller_round_stop(self.shared_state, rounds_run),
                 )
                 result["integration"] = integration.to_dict()
             except Exception as error:

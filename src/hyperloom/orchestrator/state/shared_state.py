@@ -51,15 +51,11 @@ resolve_kernel_opt_max_failures = _kernel_decision_settings.resolve_kernel_opt_m
 ESCALATE_HINT_SKIP_TO_KERNEL: str = "skip_to_kernel"
 ESCALATE_HINT_SKIP_TO_SWEEP: str = "skip_to_sweep"
 ESCALATE_HINT_SKIP_TO_CLOSE: str = "skip_to_close"
-ESCALATE_HINT_EXTEND_EXPLORE_BUDGET: str = "extend_explore_budget"
-ESCALATE_HINT_EXTEND_KERNEL_BUDGET: str = "extend_kernel_budget"
 ESCALATE_HINT_VOCAB: frozenset[str] = frozenset(
     {
         ESCALATE_HINT_SKIP_TO_KERNEL,
         ESCALATE_HINT_SKIP_TO_SWEEP,
         ESCALATE_HINT_SKIP_TO_CLOSE,
-        ESCALATE_HINT_EXTEND_EXPLORE_BUDGET,
-        ESCALATE_HINT_EXTEND_KERNEL_BUDGET,
     }
 )
 
@@ -769,7 +765,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # consumer, domain, gap_canonical_id, read_id, experience_ids, experiences, prompt_block}. Coordinator-only writer.
     experience_kb_injections: list[dict[str, Any]] = field(default_factory=list)
     # Wall-clock budget share per phase: seeded once at phase init from CLI flags/defaults with disabled phases' shares
-    # redistributed, raised by ``extend_*_budget`` hints, kept on resume unless a --*-pct flag is given.
+    # redistributed, kept on resume unless a --*-pct flag is given.
     phase_budget_pct: dict[str, float] = field(default_factory=dict)
     # Cyclic phase machine macro-cycle counter (cycle 0 is the first pass; each SWEEP→FRAMEWORK_AGENT loopback
     # increments it).
@@ -780,6 +776,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # no-gain cycle streak.
     gain_at_cycle_start: float = 0.0
     no_gain_cycle_streak: int = 0
+    # Decision points the PrimaTune predictor has been asked about (``predictor/pump.py``); each is asked once.
+    predictor_asked_keys: list[str] = field(default_factory=list)
     # Cyclic bottleneck re-direction: set when a cyclic config plateau winds the cycle down; the next macro-cycle's
     # prompt surfaces a redirect advisory off ``last_cycle_bottleneck``.
     pending_bottleneck_switch: bool = False
@@ -1454,16 +1452,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             return ""
         self.pending_escalate_hint = ""
         return hint
-
-    def bump_phase_budget(self, hint: str) -> None:
-        """Raise the phase share an ``extend_*_budget`` hint names."""
-        from ..phases.machine_state import PHASE_FRAMEWORK_AGENT, PHASE_KERNEL_AGENT, apply_escalate_budget_bump
-
-        phase = {
-            ESCALATE_HINT_EXTEND_EXPLORE_BUDGET: PHASE_FRAMEWORK_AGENT,
-            ESCALATE_HINT_EXTEND_KERNEL_BUDGET: PHASE_KERNEL_AGENT,
-        }[hint]
-        self.phase_budget_pct = apply_escalate_budget_bump(self.phase_budget_pct, phase=phase)
 
     def discard_pending_escalate_hint(self) -> str:
         """Pop the pending hint because an unrelated transition fired without acting on it; returns cleared hint."""

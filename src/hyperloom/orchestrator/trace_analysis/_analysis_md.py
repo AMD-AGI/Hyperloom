@@ -14,6 +14,14 @@ EXEC_SUMMARY_HEADING = "## Executive Summary"
 SYSTEM_SIGNALS_HEADING = "## System-Level Signals"
 TOP_HOT_KERNELS_HEADING = "## Top Hot Kernels"
 
+#: Row labels of the Executive Summary and System-Level Signals tables, which readers look up by name.
+TOTAL_GPU_TIME_LABEL = "Total GPU Time"
+GPU_BUSY_LABEL = "GPU Busy %"
+GPU_IDLE_LABEL = "GPU Idle %"
+TOP_BOTTLENECK_LABEL = "Top Bottleneck Category"
+ATTRIBUTION_LABEL = "Op-attribution Coverage"
+EXPOSED_COMM_LABEL = "Exposed communication"
+
 #: Column header row for the shared Top Hot Kernels table.
 TOP_HOT_KERNELS_COLUMNS = "| Rank | Operation | Time (us) | GPU% | Eff% | AI | Bound | Category | Source File |"
 _TOP_HOT_KERNELS_SEP = "|------|-----------|-----------|------|------|----|-------|----------|-------------|"
@@ -87,14 +95,14 @@ def render_report(
     lines.append("|--------|-------|")
     total_ms = exec_summary.get("total_gpu_time_ms")
     memcpy_ms = exec_summary.get("gpu_memcpy_ms")
-    lines.append(f"| Total GPU Time | {_num(total_ms, nd=3)} ms |")
-    lines.append(f"| GPU Busy % | {_pct(exec_summary.get('gpu_busy_pct'))} |")
-    lines.append(f"| GPU Idle % | {_pct(exec_summary.get('gpu_idle_pct'))} |")
+    lines.append(f"| {TOTAL_GPU_TIME_LABEL} | {_num(total_ms, nd=3)} ms |")
+    lines.append(f"| {GPU_BUSY_LABEL} | {_pct(exec_summary.get('gpu_busy_pct'))} |")
+    lines.append(f"| {GPU_IDLE_LABEL} | {_pct(exec_summary.get('gpu_idle_pct'))} |")
     lines.append(f"| GPU MemCpy | {_num(memcpy_ms, nd=3)} ms |")
     lines.append(
-        f"| Top Bottleneck Category | {_text(canonical_category(exec_summary.get('top_bottleneck_category')))} |"
+        f"| {TOP_BOTTLENECK_LABEL} | {_text(canonical_category(exec_summary.get('top_bottleneck_category')))} |"
     )
-    lines.append(f"| Op-attribution Coverage | {_pct(exec_summary.get('attribution_pct'))} |")
+    lines.append(f"| {ATTRIBUTION_LABEL} | {_pct(exec_summary.get('attribution_pct'))} |")
     lines.append("")
 
     # System-Level Signals.
@@ -112,7 +120,7 @@ def render_report(
     else:
         note = "-"
     lines.append(f"| GPU idle | {_pct(idle_share)} | {note} |")
-    lines.append(f"| Exposed communication | {_pct(system_signals.get('exposed_comm_pct'))} | - |")
+    lines.append(f"| {EXPOSED_COMM_LABEL} | {_pct(system_signals.get('exposed_comm_pct'))} | - |")
     lines.append(f"| Exposed memcpy (device copy) | {_pct(system_signals.get('exposed_memcpy_pct'))} | - |")
     lines.append("")
 

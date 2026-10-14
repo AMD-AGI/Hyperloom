@@ -14,6 +14,7 @@ from .. import framework_registry
 from .constraint_args import add_constraint_arguments, positive_watts_arg
 from .backends import CRITIC_PROTOCOL_CHOICES
 from .recover import add_cleanup_confirmation_arguments
+from hyperloom.common import predictor_config
 from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.common.llm_config import is_anthropic_only, is_openai_only, provider_model_defaults
 
@@ -844,6 +845,27 @@ def _build_parser() -> argparse.ArgumentParser:
         "match (conf 0.7) both fire, while a ``miss`` (conf 0.0) "
         "does not. Raise it above 0.7 to require an exact hit "
         "before spending a verify on the warm config.",
+    )
+    # PrimaTune predictor: off unless an endpoint is given, so a session that passes none behaves as before.
+    opt.add_argument(
+        "--primatune-endpoint",
+        dest="primatune_endpoint",
+        type=str,
+        default=None,
+        help="Base URL of a PrimaTune predictor service, asked once per FRAMEWORK_AGENT decision point. "
+        "Its proposals join the untested-proposal queue beside the specialists' and are graded by the "
+        "same KEEP threshold. Exported as $HYPERLOOM_PREDICTOR_ENDPOINT. "
+        "See docs/reference/primatune-predictor.md.",
+    )
+    opt.add_argument(
+        "--primatune-mode",
+        dest="primatune_mode",
+        type=str,
+        choices=predictor_config.MODES,
+        default=None,
+        help="'shadow' (the default once an endpoint is set) asks and logs, queueing nothing; "
+        "'active' queues the answer for benchmarking; 'off' disables. "
+        "Exported as $HYPERLOOM_PREDICTOR_MODE.",
     )
     # PR Monitor REST + MCP are co-hosted by KB Store and derived from $KB_STORE_URL.
     opt.add_argument(

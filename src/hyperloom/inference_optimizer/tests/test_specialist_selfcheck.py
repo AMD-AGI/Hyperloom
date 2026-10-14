@@ -29,7 +29,9 @@ def commands(monkeypatch) -> SimpleNamespace:
     """Record every command, faking the venv, constraints, git diff and a configurable pip result."""
     recorder = SimpleNamespace(calls=[], pip_fails=False)
     monkeypatch.setattr(selfcheck, "create_venv", lambda venv: (venv / "bin").mkdir(parents=True))
-    monkeypatch.setattr(selfcheck, "write_rocm_torch_constraints", lambda python, path: Path(path).write_text(""))
+    monkeypatch.setattr(
+        selfcheck, "write_rocm_constraints", lambda python, path, *, replacing: Path(path).write_text(replacing)
+    )
 
     def _run(argv, **_kwargs):
         recorder.calls.append(list(argv))

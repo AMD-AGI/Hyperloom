@@ -589,18 +589,6 @@ class WeightedQueryPlan:
         )
 
 
-def _declared_fields(declaration: ExperienceDeclaration) -> set[str]:
-    return {
-        "schema_ref",
-        "objective",
-        "status",
-        "outcome.decision",
-        *{f"identity.{item.name}" for item in declaration.identity},
-        *{f"baseline_identity.{item.name}" for item in declaration.baseline_identity},
-        *{f"change.identity.{item.name}" for item in declaration.change_identity},
-    }
-
-
 def _validate_query_plan(
     plan: WeightedQueryPlan,
     request: ReadRequest,
@@ -609,7 +597,7 @@ def _validate_query_plan(
     """Validate one Planner result against its request and exact Schema."""
     if plan.schema_ref != declaration.schema_ref:
         raise QueryPlanValidationError("QueryPlan schema differs from declaration")
-    declared = _declared_fields(declaration)
+    declared = declaration.lookup_fields()
     for signal in plan.signals:
         source_value = _source_value(request, signal.source_path)
         if signal.is_structured and signal.field not in declared:
@@ -672,7 +660,7 @@ class LLMQueryPlanner:
         payload = _canonical(
             {
                 "request": request.to_dict(),
-                "allowed_structured_fields": sorted(_declared_fields(declaration)),
+                "allowed_structured_fields": sorted(declaration.lookup_fields()),
             }
         )
         if len(payload) > self.configuration.max_input_chars:

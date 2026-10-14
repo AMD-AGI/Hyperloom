@@ -12,12 +12,20 @@ from typing import Any, NamedTuple
 
 _TIMEOUT_SEC = 20.0
 
+#: Share of a card's VRAM above which something is resident on it.
+VRAM_BUSY_FRACTION = 0.01
+
 
 class GpuVram(NamedTuple):
     """Per-GPU VRAM usage in MiB."""
 
     used_mib: float
     total_mib: float
+
+
+def vram_busy(gpu: GpuVram) -> bool:
+    """Whether something holds VRAM on ``gpu``."""
+    return gpu.used_mib > gpu.total_mib * VRAM_BUSY_FRACTION
 
 
 def gpu_vram_usage() -> list[GpuVram] | None:
@@ -68,4 +76,4 @@ def gpu_vram_usage() -> list[GpuVram] | None:
     return result or None
 
 
-__all__ = ["GpuVram", "gpu_vram_usage"]
+__all__ = ["VRAM_BUSY_FRACTION", "GpuVram", "gpu_vram_usage", "vram_busy"]

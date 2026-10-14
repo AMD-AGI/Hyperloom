@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -28,7 +29,6 @@ from hyperloom_kb import (
     LocalService,
     LocalServiceError,
     ObjectiveDeclaration,
-    ObjectiveDirection,
     RemoteClient,
     RemoteClientError,
     RemoteConfig,
@@ -38,6 +38,10 @@ from hyperloom_kb import (
     is_loopback,
     load_declaration,
 )
+from hyperloom_kb import local_service
+from hyperloom_kb.database import SQLITE_FILE
+from hyperloom_kb.http_service import code_digest
+from hyperloom_kb.tests.conftest import fresh_database
 
 TOKEN = "local-service-token"
 
@@ -67,7 +71,9 @@ def _env_without_planner_gateway(tmp_path: Path) -> dict[str, str]:
 
 @contextmanager
 def _serving(tmp_path: Path, declaration: ExperienceDeclaration, token: str) -> Iterator[int]:
-    app = ExperienceHTTPService(HTTPServiceConfig(tmp_path / "other-service", token), declaration, None)
+    app = ExperienceHTTPService(
+        HTTPServiceConfig(tmp_path / "other-service", token), declaration, None, database=fresh_database()
+    )
     server = create_http_server(app, "127.0.0.1", 0)
     thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05})
     thread.start()
@@ -98,6 +104,27 @@ def test_a_missing_service_is_started_once_and_then_reused(tmp_path: Path) -> No
         started.process.wait(timeout=10)
 
 
+def test_a_log_past_its_size_is_kept_once_and_the_next_service_starts_a_new_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(local_service, "LOG_ROTATE_BYTES", 64)
+    home = tmp_path / "home"
+    home.mkdir()
+    old = "an earlier service's log line\n" * 4
+    (home / "service.log").write_text(old, encoding="utf-8")
+    started = ensure_local_service(_config(_free_port(), tmp_path), home, env=_env_without_planner_gateway(tmp_path))
+    assert started.process is not None
+    try:
+        kept = (home / "service.log.1").read_text(encoding="utf-8")
+        current = (home / "service.log").read_text(encoding="utf-8")
+    finally:
+        started.process.terminate()
+        started.process.wait(timeout=10)
+
+    assert kept == old
+    assert "an earlier service" not in current and '"event": "listening"' in current
+
+
 def test_a_listener_with_another_token_is_refused_without_starting_a_service(tmp_path: Path) -> None:
     home = tmp_path / "home"
     with _serving(tmp_path, load_declaration(PACKAGED_DECLARATION), "another-workspace") as port:
@@ -108,11 +135,10 @@ def test_a_listener_with_another_token_is_refused_without_starting_a_service(tmp
 
 def _other_declaration() -> ExperienceDeclaration:
     return ExperienceDeclaration(
+        objectives=(ObjectiveDeclaration("throughput@v1", "T."),),
         identity=(FieldDeclaration("model", "Model."),),
-        baseline_identity=(FieldDeclaration("config", "Config."),),
-        change_identity=(FieldDeclaration("knob", "Knob."),),
-        objectives=(ObjectiveDeclaration("throughput@v1", ObjectiveDirection.HIGHER_IS_BETTER, "T."),),
-        decisions=("keep", "revert", "failed"),
+        baseline=(FieldDeclaration("config", "Config.", group=True),),
+        change=(FieldDeclaration("knob", "Knob.", group=True),),
     )
 
 
@@ -186,6 +212,64 @@ def test_a_service_started_with_other_settings_is_restarted_with_the_launch_sett
         _stop(second)
 
 
+# A stale service that, like a real one, closes its port on SIGTERM and only then lets go of its home: here it holds
+# the home's lock for 3 s more, as a real one does while it drains and stops its database.
+_SLOW_TO_RELEASE = """
+import fcntl, json, os, signal, sys, threading, time
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+home, port = sys.argv[1], int(sys.argv[2])
+os.makedirs(home, exist_ok=True)
+lock = open(os.path.join(home, "service.lock"), "a+")
+fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+
+
+class Health(BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = json.dumps({"status": "ok", "pid": os.getpid(), "home": home, "schema_ref": "stale"}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+server = HTTPServer(("127.0.0.1", port), Health)
+stopping = threading.Event()
+signal.signal(signal.SIGTERM, lambda *_: stopping.set())
+threading.Thread(target=lambda: (stopping.wait(), server.shutdown()), daemon=True).start()
+server.serve_forever()
+server.server_close()
+time.sleep(3)
+"""
+
+
+def test_a_restart_waits_until_the_stopped_service_lets_go_of_the_home(tmp_path: Path) -> None:
+    port = _free_port()
+    config = _config(port, tmp_path)
+    home = tmp_path / "home"
+    script = tmp_path / "slow_to_release.py"
+    script.write_text(_SLOW_TO_RELEASE, encoding="utf-8")
+    old = subprocess.Popen([sys.executable, str(script), str(home), str(port)])
+    restarted = LocalService({})
+    try:
+        while not _reachable(port):
+            assert old.poll() is None
+        restarted = ensure_local_service(config, home, env=_env_without_planner_gateway(tmp_path))
+
+        assert old.wait(timeout=10) == 0
+        assert restarted.restarted and restarted.process is not None
+        assert restarted.health["pid"] == restarted.process.pid
+    finally:
+        if old.poll() is None:
+            old.kill()
+            old.wait(timeout=10)
+        _stop(restarted)
+
+
 def test_the_same_settings_spelled_differently_reuse_the_running_service(tmp_path: Path) -> None:
     config = _config(_free_port(), tmp_path)
     gateway = {"ANTHROPIC_BASE_URL": "https://gateway.example", "ANTHROPIC_API_KEY": "key", "CLAUDE_MODEL": "m"}
@@ -225,6 +309,42 @@ def test_a_service_serving_an_older_declaration_is_restarted_with_the_packaged_o
         _stop(current)
 
 
+def test_a_service_started_from_other_code_is_restarted_by_a_launch_and_kept_by_a_side_command(
+    tmp_path: Path,
+) -> None:
+    older_code = tmp_path / "older"
+    shutil.copytree(
+        Path(__file__).resolve().parents[1],
+        older_code / "hyperloom_kb",
+        ignore=shutil.ignore_patterns("tests", "__pycache__"),
+    )
+    with (older_code / "hyperloom_kb" / "remote.py").open("a", encoding="utf-8") as source:
+        source.write("\n# as released before an upgrade\n")
+    port = _free_port()
+    env = _env_without_planner_gateway(tmp_path)
+    older = subprocess.Popen(
+        [sys.executable, "-m", "hyperloom_kb", "--home", str(tmp_path / "home"), "--port", str(port)],
+        env={**env, "HYPERLOOM_KB_TOKEN": TOKEN, "PYTHONPATH": str(older_code)},
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    current = LocalService({})
+    try:
+        while not _reachable(port):
+            assert older.poll() is None
+        kept = ensure_local_service(_config(port, tmp_path), tmp_path / "home", env=env, restart=False)
+        assert (kept.stale, older.poll()) == ("it runs other Experience KB code than this client", None)
+
+        current = ensure_local_service(_config(port, tmp_path), tmp_path / "home", env=env)
+
+        assert older.wait(timeout=10) is not None
+        assert current.restarted and current.health["code_digest"] == code_digest()
+    finally:
+        older.kill()
+        older.wait(timeout=10)
+        _stop(current)
+
+
 def test_a_data_home_another_service_serves_is_never_served_twice(tmp_path: Path) -> None:
     home = tmp_path / "shared-home"
     env = _env_without_planner_gateway(tmp_path)
@@ -245,12 +365,12 @@ def test_a_data_home_another_service_serves_is_never_served_twice(tmp_path: Path
 
 def test_a_service_that_cannot_start_is_reported_with_its_log(tmp_path: Path) -> None:
     home = tmp_path / "home"
-    (home / "kb.sqlite3").mkdir(parents=True)
+    (home / SQLITE_FILE).mkdir(parents=True)
 
     with pytest.raises(LocalServiceError, match="exited with status"):
         ensure_local_service(_config(_free_port(), tmp_path), home, env=_env_without_planner_gateway(tmp_path))
 
-    assert "Traceback" in (home / "service.log").read_text(encoding="utf-8")
+    assert "cannot open the Experience KB database" in (home / "service.log").read_text(encoding="utf-8")
 
 
 def test_a_home_that_cannot_hold_the_service_is_a_local_service_error(tmp_path: Path) -> None:

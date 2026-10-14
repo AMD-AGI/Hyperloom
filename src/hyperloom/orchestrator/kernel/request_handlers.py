@@ -50,8 +50,10 @@ from ..actions.stop_attribution import stopped_by_the_run_class
 from . import apply_kernel_patch, forge_fusion, forge_gemm_tuning
 from .gemm_shape_coverage import canonical_dtype, traced_gemm_shapes
 from .lane_budget import (
+    INSUFFICIENT_BUDGET,
     LANE_FUSION,
     LANE_GEMM,
+    LaneAllocation,
     allocate as _allocate_lane_budgets,
     gemm_per_tuner_timeout_sec,
 )
@@ -243,9 +245,9 @@ def _reusable_source_roots() -> tuple[str, ...]:
 # whole-pipeline GEAK delegate (``geak``); per-kernel selection is opt-in via
 # KERNEL_OPT_BACKEND_ORDER=forge.
 _DEFAULT_KERNEL_PHASE_BACKEND_ORDER = ("geak",)
-# Outer subprocess cap for the whole GEMM-tuning run (all shapes/tuners); sized
-# for large models with many GEMM shapes. Independent of the session --max-hours
-# budget; override via HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC (or payload timeout_sec).
+# Outer subprocess cap for the whole GEMM-tuning run (all shapes/tuners) when there is
+# no lane share to take, as in an unbounded session; sized for large models with many
+# GEMM shapes. Override via HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC (or payload timeout_sec).
 _DEFAULT_GEMM_TUNING_TIMEOUT_SEC = 5 * 60 * 60
 
 
@@ -705,12 +707,7 @@ def _normalize_precision(value: Any) -> str:
     return str(value or "").strip().lower()
 
 
-def _lane_budget(
-    state: Any,
-    lane: str,
-    *,
-    gemm_target_costs_sec: tuple[int, ...] = (),
-):
+def _lane_budget(state: Any, lane: str, *, gemm_target_costs_sec: tuple[int, ...] = ()) -> LaneAllocation | None:
     """Derive one lane's share of the phase's remaining time.
 
     Wraps :func:`lane_budget.allocate`, which divides the remaining time between
@@ -725,12 +722,23 @@ def _lane_budget(
             only the gemm lane's target ceiling consumes them.
 
     Returns:
-        That lane's ``LaneAllocation``. An unbounded session yields a zero budget
-        and thus ``max_targets == 0`` (``is_fundable`` False), which the caller
+        That lane's ``LaneAllocation``, or ``None`` when the session is bounded and
+        the share cannot fund one target, so the lane must not start. An unbounded
+        session yields a zero budget and ``max_targets == 0``, which the caller
         reads as "no allocation to make".
     """
     remaining = _lane_remaining_minutes(state)
-    return _allocate_lane_budgets(remaining, gemm_target_costs_sec=gemm_target_costs_sec)[lane]
+    allocation = _allocate_lane_budgets(remaining, gemm_target_costs_sec=gemm_target_costs_sec)[lane]
+    if remaining is not None and not allocation.is_fundable:
+        return None
+    return allocation
+
+
+def _unfunded_lane_skip(lane: str) -> HandlerResult:
+    """What a forge lane returns instead of starting when the phase cannot fund it: a skip, not a verdict."""
+    reason = f"what is left of the KERNEL phase time budget cannot fund one {lane} target"
+    log.info("forge %s lane skipped: %s", lane, reason)
+    return {"status": "skipped", "error_class": INSUFFICIENT_BUDGET, "skip_reason": reason, "backend": "forge"}
 
 
 def _lane_remaining_minutes(state: Any) -> float | None:
@@ -768,9 +776,9 @@ def _gemm_tuning_timeout_sec(payload: dict, *, lane_budget_sec: int = 0) -> int:
 
     Args:
         payload (dict): Request payload that may carry ``timeout_sec``.
-        lane_budget_sec (int): The gemm lane's share of the phase. ``0`` means no
-            allocation could be derived, which keeps the module default rather
-            than collapsing an unattended lane to a zero-second timeout.
+        lane_budget_sec (int): The gemm lane's share of the phase. ``0`` means there
+            is no share to take, as in an unbounded session, and keeps the module
+            default rather than collapsing an unattended lane to a zero-second timeout.
 
     Returns:
         int: The resolved timeout in seconds (>= 60).
@@ -840,14 +848,20 @@ def _gemm_router_targets(
     return tuple((str(spec.name), max(0, int(spec.estimated_minutes * 60))) for spec in specs if spec.should_run)
 
 
+async def _priced_gemm_lane(state: Any, **router_inputs: Any) -> LaneAllocation | None:
+    """The gemm lane's share, priced on the router's own per-tuner estimates for ``_gemm_router_targets`` inputs."""
+    targets = await asyncio.to_thread(_gemm_router_targets, **router_inputs)
+    return _lane_budget(state, LANE_GEMM, gemm_target_costs_sec=tuple(cost for _, cost in targets))
+
+
 def _forge_fusion_timeout_sec(payload: dict, *, lane_budget_sec: int = 0) -> int:
     """Resolve the forge-fusion subprocess timeout in seconds.
 
     Args:
         payload (dict): Request payload that may carry ``timeout``/``timeout_sec``.
-        lane_budget_sec (int): The fusion lane's share of the phase. ``0`` means no
-            allocation could be derived, which keeps the module default rather
-            than collapsing an unattended lane to a one-second timeout.
+        lane_budget_sec (int): The fusion lane's share of the phase. ``0`` means there
+            is no share to take, as in an unbounded session, and keeps the module
+            default rather than collapsing an unattended lane to a one-second timeout.
 
     Returns:
         int: The resolved timeout in seconds (>= 1).
@@ -3233,7 +3247,25 @@ async def _run_forge_gemm_tuning(
         )
         and not block_fp8_profile_capture
     )
+    priced_gemm_lane = functools.partial(
+        _priced_gemm_lane,
+        state,
+        model_path=resolved_model_path,
+        framework=forge_framework,
+        precision=precision,
+        quant_type=quant_type,
+        gpu_type=gpu_type,
+        kernel_signature_log=kernel_sig_log,
+    )
     if block_fp8_profile_capture or tunableop_capture:
+        # A capture costs a full extra server boot, wasted on a lane the phase cannot fund once it has the shapes.
+        lane_after_capture = await priced_gemm_lane(
+            has_untuned_csv=tunableop_capture and bool(untuned_csv),
+            has_shapes_json=block_fp8_profile_capture,
+            has_tunableop_input=tunableop_capture,
+        )
+        if lane_after_capture is None:
+            return _unfunded_lane_skip(LANE_GEMM)
         capture_payload = dict(payload)
         if block_fp8_profile_capture:
             capture_payload["_shape_capture_mode"] = "block_fp8_profile"
@@ -3290,33 +3322,15 @@ async def _run_forge_gemm_tuning(
     if demand_json and not _path_is_existing_file(demand_json):
         demand_json = ""
 
-    # The lane's share, priced on the router's own per-tuner estimates. A share
-    # funding none of them degrades to the module default, not to a doomed run.
-    gemm_targets = await asyncio.to_thread(
-        _gemm_router_targets,
-        model_path=resolved_model_path,
-        framework=forge_framework,
-        precision=precision,
-        quant_type=quant_type,
-        gpu_type=gpu_type,
-        kernel_signature_log=kernel_sig_log,
+    gemm_lane = await priced_gemm_lane(
         has_untuned_csv=bool(untuned_csv),
         has_shapes_json=bool(shapes_json or shapes_manifest or demand_json),
         has_tunableop_input=bool(tunableop_input),
     )
-    gemm_lane = _lane_budget(
-        state,
-        LANE_GEMM,
-        gemm_target_costs_sec=tuple(cost for _, cost in gemm_targets),
-    )
-    timeout = _gemm_tuning_timeout_sec(
-        payload,
-        lane_budget_sec=gemm_lane.budget_sec if gemm_lane.is_fundable else 0,
-    )
-    try:
-        requested_tuners = int(payload.get("max_tuners") or 0)
-    except (TypeError, ValueError):
-        requested_tuners = 0
+    if gemm_lane is None:
+        return _unfunded_lane_skip(LANE_GEMM)
+    timeout = _gemm_tuning_timeout_sec(payload, lane_budget_sec=gemm_lane.budget_sec)
+    requested_tuners = _positive_int(payload.get("max_tuners"))
     # An explicit payload value stays an operator/test escape hatch; a named
     # ``tuner`` already narrows the set to one, so no ceiling is needed then.
     if str(payload.get("tuner") or "").strip():
@@ -3643,12 +3657,9 @@ async def _run_geak_gemm_tuning(
     if baseline_tput is None:
         baseline_tput = state.baseline_tput
 
-    from hyperloom.orchestrator.actions.executors._workload_envs import geak_metric_axis
+    from hyperloom.orchestrator.actions.executors._workload_envs import GEAK_METRIC_OUTPUT
 
-    _geak_e2e_metric, _ = geak_metric_axis(
-        benchmark_mode=str(getattr(state, "benchmark_mode", "") or ""),
-        grading=getattr(state, "grading", None),
-    )
+    _geak_e2e_metric, _ = GEAK_METRIC_OUTPUT
 
     input_json = workspace / "gemm_tuning_input.json"
     input_payload = {
@@ -3663,10 +3674,9 @@ async def _run_geak_gemm_tuning(
         "isl": isl,
         "osl": osl,
         "baseline_tput": float(baseline_tput or 0.0),
-        # Same axis Hyperloom grades this session on; ``baseline_tput`` above is
-        # read on that axis too, so a pinned "output" here would price every
-        # tuned GEMM against a reference measured differently. Synthetic runs
-        # resolve to "output" and are unaffected.
+        # Output on every session, interactivity-graded ones included: ``baseline_tput``
+        # above is output throughput, and the fixed ISL/OSL benchmark written above is
+        # not an AgentX replay, so it has no interactivity median for GEAK to tune on.
         "env": {"E2E_METRIC": _geak_e2e_metric},
     }
     if geak_config:
@@ -4011,14 +4021,11 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
             "kept": False,
         }
     max_turns = int(payload.get("max_turns") or os.environ.get("FORGE_FUSION_MAX_TURNS") or 100)
-    # The lane's share of the phase; a zero share means none could be derived, and
-    # the module default is safer for an unattended lane than a one-second session.
     fusion_lane = _lane_budget(state, LANE_FUSION)
+    if fusion_lane is None:
+        return {**_unfunded_lane_skip(LANE_FUSION), "engine": "forge_fusion"}
     timeout = _forge_fusion_timeout_sec(payload, lane_budget_sec=fusion_lane.budget_sec)
-    try:
-        requested_recipes = int(payload.get("max_recipes") or 0)
-    except (TypeError, ValueError):
-        requested_recipes = 0
+    requested_recipes = _positive_int(payload.get("max_recipes"))
     # An explicit payload value stays an operator/test escape hatch.
     fusion_recipe_ceiling = requested_recipes if requested_recipes > 0 else fusion_lane.max_targets
 

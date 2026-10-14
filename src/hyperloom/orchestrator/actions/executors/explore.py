@@ -10,7 +10,6 @@ import logging
 import os
 import shlex
 import tempfile
-import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -53,10 +52,9 @@ from ...state.shared_state import (
     stack_base_params,
 )
 from ..stop_attribution import (
-    SESSION_TIME_EXHAUSTED_CLASS,
-    STOPPED_BY_THE_RUN,
     StoppedByTheRun,
     stopped_by_the_run_class,
+    variant_budget_stop,
 )
 from ._accuracy_gate import (
     accuracy_passed,
@@ -1153,13 +1151,13 @@ class ExploreExecutor:
                     from ._subprocess_kill import resolve_benchmark_timeouts
 
                     fit_required_sec = resolve_benchmark_timeouts()[1]
-                if session_deadline_sec is not None and (session_deadline_sec - time.monotonic()) < fit_required_sec:
-                    run_stop = STOPPED_BY_THE_RUN[SESSION_TIME_EXHAUSTED_CLASS]
+                run_stop = variant_budget_stop(session_deadline_sec, extra.get("phase_deadline"), fit_required_sec)
+                if run_stop is not None:
                     run_stop_detail = run_stop.never_started
                     session_budget_untested = len(runnable) - idx
                     log.warning(
-                        "explore: session budget cannot fit another variant "
-                        "(needs %.0fs); stopping after %d/%d variant(s)",
+                        "explore: cannot fit another variant (%s, needs %.0fs); stopping after %d/%d variant(s)",
+                        run_stop.error_class,
                         fit_required_sec,
                         idx,
                         len(runnable),
