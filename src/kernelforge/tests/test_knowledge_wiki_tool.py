@@ -99,31 +99,46 @@ def _call(srv: server.KnowledgeWikiServer, name: str, arguments: dict) -> dict:
 def test_tool_definitions_match_the_declared_names():
     assert [d["name"] for d in server.TOOL_DEFINITIONS] == list(server.TOOL_NAMES)
     assert all(d["description"].strip() and d["inputSchema"]["type"] == "object" for d in server.TOOL_DEFINITIONS)
+    # Every tool, guide included, requires a reason so the call log can be read as a trajectory.
+    for definition in server.TOOL_DEFINITIONS:
+        schema = definition["inputSchema"]
+        assert "reason" in schema["properties"] and "reason" in schema["required"]
 
 
 def test_search_runs_the_wiki_script_and_logs_the_role_and_returned_pages(wiki, log):
-    reply = _call(_server(wiki, log), "search", {"query": "--help fp8", "tag": "fp8", "limit": 3})
+    reply = _call(
+        _server(wiki, log),
+        "search",
+        {"query": "--help fp8", "tag": "fp8", "limit": 3, "reason": "picking the fp8 MFMA direction"},
+    )
 
     assert reply["isError"] is False
     assert "technique-mfma-pipelining" in reply["content"][0]["text"]
-    # Agent text follows "--", so a leading dash stays a query word.
+    # Agent text follows "--", so a leading dash stays a query word; the reason never reaches the script.
     assert _argv(wiki) == [["--tag", "fp8", "--limit", "3", "--", "--help fp8"]]
     [record] = _log(log)
     assert record["role"] == "specialist memory"
     assert record["command"] == "search"
-    assert record["args"] == {"query": "--help fp8", "tag": "fp8", "limit": 3}
+    assert record["reason"] == "picking the fp8 MFMA direction"
+    assert record["args"] == {
+        "query": "--help fp8",
+        "tag": "fp8",
+        "limit": 3,
+        "reason": "picking the fp8 MFMA direction",
+    }
     assert record["exit_code"] == 0
     assert record["results"] == ["technique-mfma-pipelining", "pr-aiter-12"]
 
 
 def test_page_and_grep_pass_their_arguments_through(wiki, log):
     srv = _server(wiki, log)
-    page = _call(srv, "page", {"page_id": "kernel-gemm-dense-matmul"})
-    grep = _call(srv, "grep", {"pattern": "global_load_lds", "only": "sources"})
+    page = _call(srv, "page", {"page_id": "kernel-gemm-dense-matmul", "reason": "reuse the dense GEMM tiling"})
+    grep = _call(srv, "grep", {"pattern": "global_load_lds", "only": "sources", "reason": "check direct-to-LDS loads"})
 
     assert page["isError"] is False and grep["isError"] is False
     assert _argv(wiki) == [["--", "kernel-gemm-dense-matmul"], ["--only", "sources", "--", "global_load_lds"]]
     assert [r["results"] for r in _log(log)] == [["kernel-gemm-dense-matmul"], ["sources/docs/doc-llvm-amdgpu.md"]]
+    assert [r["reason"] for r in _log(log)] == ["reuse the dense GEMM tiling", "check direct-to-LDS loads"]
 
 
 @pytest.mark.parametrize(
@@ -142,16 +157,23 @@ def test_returned_pages_are_read_from_both_wiki_output_formats(name, output, exp
 @pytest.mark.parametrize(
     ("name", "arguments"),
     [
-        ("search", {}),
-        ("search", {"query": "   "}),
-        ("search", {"query": "two\nlines"}),
-        ("search", {"query": "x", "limit": 0}),
-        ("search", {"query": "x", "limit": True}),
-        ("search", {"query": "x", "tag": "two words"}),
-        ("search", {"query": "x", "architecture": "--all"}),
-        ("page", {}),
-        ("grep", {"pattern": "x", "only": "all"}),
-        ("nonexistent", {}),
+        ("search", {"reason": "r"}),
+        ("search", {"query": "   ", "reason": "r"}),
+        ("search", {"query": "two\nlines", "reason": "r"}),
+        ("search", {"query": "x", "limit": 0, "reason": "r"}),
+        ("search", {"query": "x", "limit": True, "reason": "r"}),
+        ("search", {"query": "x", "tag": "two words", "reason": "r"}),
+        ("search", {"query": "x", "architecture": "--all", "reason": "r"}),
+        ("page", {"reason": "r"}),
+        ("grep", {"pattern": "x", "only": "all", "reason": "r"}),
+        ("nonexistent", {"reason": "r"}),
+        # A call that omits or malforms its reason is refused before anything runs, on every tool.
+        ("search", {"query": "x"}),
+        ("page", {"page_id": "p"}),
+        ("grep", {"pattern": "x"}),
+        ("guide", {}),
+        ("search", {"query": "x", "reason": "   "}),
+        ("search", {"query": "x", "reason": "two\nlines"}),
     ],
 )
 def test_invalid_calls_are_refused_before_anything_runs(wiki, log, name, arguments):
@@ -161,7 +183,7 @@ def test_invalid_calls_are_refused_before_anything_runs(wiki, log, name, argumen
 
 
 def test_a_failed_lookup_is_an_error_that_carries_the_scripts_message(wiki, log):
-    reply = _call(_server(wiki, log), "page", {"page_id": "missing"})
+    reply = _call(_server(wiki, log), "page", {"page_id": "missing", "reason": "look for a prior attempt"})
 
     assert reply["isError"] is True
     assert "no such page: missing" in reply["content"][0]["text"]
@@ -173,8 +195,8 @@ def test_guide_returns_the_wikis_own_usage_guide(tmp_path, log):
     with_guide = make_wiki(tmp_path / "with")
     without = make_wiki(tmp_path / "without", guide=None)
 
-    present = _call(_server(with_guide, log), "guide", {})
-    absent = _call(_server(without, log), "guide", {})
+    present = _call(_server(with_guide, log), "guide", {"reason": "learn how to cite pages"})
+    absent = _call(_server(without, log), "guide", {"reason": "learn how to cite pages"})
 
     assert present["isError"] is False and "Search first" in present["content"][0]["text"]
     assert absent["isError"] is True and "no usage guide" in absent["content"][0]["text"]
@@ -183,7 +205,7 @@ def test_guide_returns_the_wikis_own_usage_guide(tmp_path, log):
 
 def test_an_unusable_checkout_answers_every_call_with_an_error(tmp_path, log):
     srv = _server(tmp_path / "not-a-wiki", log)
-    reply = _call(srv, "search", {"query": "mfma"})
+    reply = _call(srv, "search", {"query": "mfma", "reason": "start the search"})
 
     assert reply["isError"] is True and "not a knowledge base checkout" in reply["content"][0]["text"]
     assert _log(log)[0]["exit_code"] == 2
@@ -191,7 +213,7 @@ def test_an_unusable_checkout_answers_every_call_with_an_error(tmp_path, log):
 
 def test_long_output_is_cut_and_says_so(wiki, log, monkeypatch):
     monkeypatch.setattr(server, "MAX_OUTPUT_CHARS", 40)
-    reply = _call(_server(wiki, log), "grep", {"pattern": "x"})
+    reply = _call(_server(wiki, log), "grep", {"pattern": "x", "reason": "scan for a token"})
 
     assert "output truncated to 40 of" in reply["content"][0]["text"]
     assert _log(log)[0]["truncated"] is True
@@ -206,7 +228,7 @@ def test_the_session_server_entry_starts_and_serves_a_real_stdio_session(wiki, l
             "jsonrpc": "2.0",
             "id": 3,
             "method": "tools/call",
-            "params": {"name": "search", "arguments": {"query": "mfma"}},
+            "params": {"name": "search", "arguments": {"query": "mfma", "reason": "start the search"}},
         },
     ]
     # Only the entry's own environment, as an MCP client that forwards nothing else would start it.
