@@ -451,7 +451,10 @@ async def test_the_framework_tick_steps_the_predictor(service, monkeypatch):
     service.answer = _answer(Action(server_args={"--kv-cache-dtype": "fp8"}))
     coord = SimpleNamespace(
         shared_state=state,
-        phase_internal=SimpleNamespace(maybe_enqueue_explore_research_scout=_noop),
+        phase_internal=SimpleNamespace(
+            maybe_enqueue_explore_research_scout=_noop,
+            maybe_enqueue_config_plateau_static_recon=_noop,
+        ),
         specialist_dispatch=SimpleNamespace(
             maybe_force_stalled_domain_specialist=_noop, maybe_ensure_custom_specialist=_noop
         ),
