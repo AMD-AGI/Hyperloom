@@ -593,6 +593,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # Why this stack can never record GPU kernels; set once from a parsed trace with host ops and no kernels, so the
     # Coordinator stops auto-enqueueing analysis that cannot succeed. Empty means GPU tracing is still presumed usable.
     gpu_trace_unsupported_reason: str = ""
+    # Analysis failures that recur on the same input, keyed by that input; ``analysis_failures`` owns the schema.
+    analysis_failures: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     # Feature toggles (mirrored from ``cli.py`` flags at session start).
     framework_agent_phase_enabled: bool = True
