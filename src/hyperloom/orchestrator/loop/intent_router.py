@@ -39,6 +39,7 @@ from ..policy.gate import (
     PRUNE_BRANCH_SCOPE_QUEUED,
     SPECIALIST_FROM_AGENT_PREFIX,
 )
+from ..specialists.wall_budget import grant_wall_budget_extension
 from ..state.shared_state import (
     ESCALATE_HINT_EXTEND_EXPLORE_BUDGET,
     ESCALATE_HINT_EXTEND_KERNEL_BUDGET,
@@ -560,7 +561,7 @@ class IntentRouter(CoordinatorCollaborator):
                     ),
                 },
             )
-        denied = self._coord.dispatcher.admission_denial_for_action(action_name)
+        denied = self._coord.dispatcher.admission_denial_for_action(action_name, params=intent.payload.get("params"))
         if denied is not None:
             await self.record_policy_denied(source, intent, denied)
             return
@@ -874,7 +875,7 @@ class IntentRouter(CoordinatorCollaborator):
                     ),
                 },
             )
-        denied = self._coord.dispatcher.admission_denial_for_action(action_name)
+        denied = self._coord.dispatcher.admission_denial_for_action(action_name, params=intent.payload.get("params"))
         if denied is not None:
             await self.record_policy_denied(
                 source,
@@ -1112,7 +1113,7 @@ class IntentRouter(CoordinatorCollaborator):
         """Route a REQUEST intent to its programmatic handler."""
         target_agent = intent.payload["target_agent"]
         kind = intent.payload["kind"]
-        denied = self._coord.dispatcher.sequence_denial_for_request(target_agent, kind)
+        denied = self._coord.dispatcher.admission_denial_for_request(target_agent, kind)
         if denied is not None:
             await self.record_policy_denied(source, intent, denied)
             return
@@ -1398,13 +1399,11 @@ class IntentRouter(CoordinatorCollaborator):
             log.exception("extend_lease: GPU lease refresh failed for task=%s", task_id)
             gpus = 0
             gpu_error = repr(exc)[:200]
-        # Push the live subprocess's hard wall-clock kill deadline out too, so the extension actually buys the
-        # specialist more time to run.
+        # Move the live subprocess's kill instant too, within the room its dispatch left before the phase end.
         wall_budget_error = ""
+        granted_sec = 0.0
         try:
-            from ..specialists.subprocess_ import grant_wall_budget_extension
-
-            grant_wall_budget_extension(task_id, extra_sec)
+            granted_sec = grant_wall_budget_extension(task_id, extra_sec)
         except Exception as exc:
             log.exception("extend_lease: wall-budget extension failed for task=%s", task_id)
             wall_budget_error = repr(exc)[:200]
@@ -1422,6 +1421,7 @@ class IntentRouter(CoordinatorCollaborator):
                 "lease_expires_in_sec": remaining_sec,
                 "lanes": lanes,
                 "gpu_rows": gpus,
+                "wall_budget_extension_sec": granted_sec,
                 **({"gpu_refresh_error": gpu_error} if gpu_error else {}),
                 **({"wall_budget_extension_error": wall_budget_error} if wall_budget_error else {}),
                 "reason": str(intent.payload.get("reason") or "")[:200],

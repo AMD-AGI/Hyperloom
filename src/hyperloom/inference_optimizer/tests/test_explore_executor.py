@@ -2203,6 +2203,81 @@ async def test_explore_skips_a_variant_the_budget_cannot_fit(
     assert res.result["explore_search_update"]["tested"] == {}
 
 
+async def _explore_under_phase_budget(sub_agent_runner, tmp_path, *, phase_left_sec: list[float], variants: int):
+    """Run a cold explore of ``variants`` 20s variants while the phase reads ``phase_left_sec`` before each one."""
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    sub.shared_state = state
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    started: list[int] = []
+
+    def _fake_run(cmd, *args, **kwargs):
+        if "--output-dir" not in cmd:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+        started.append(int(kwargs["timeout"]))
+        _fake_workspace(Path(cmd[cmd.index("--output-dir") + 1]), tput=840.0)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    grid = [
+        {"name": f"v{i}", "extra_args": f"--max-num-seqs {64 << i}", "extra_envs": {}, "provenance": "default_grid"}
+        for i in range(variants)
+    ]
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "explore-phase"),
+            "base_tput": 800.0,
+            "grid": grid,
+            "baseline_runtime_sec": 20.0,
+        },
+        idempotency_key=f"ex-phase-{variants}",
+    )
+    remaining = iter(phase_left_sec)
+    phase_deadline = SimpleNamespace(remaining=lambda: next(remaining))
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task, extra_context={"phase_deadline": phase_deadline})
+    return res.result, started
+
+
+@pytest.mark.asyncio
+async def test_explore_finishes_the_variant_in_flight_and_starts_none_the_phase_cannot_fit(
+    sub_agent_runner,
+    tmp_path,
+    monkeypatch,
+):
+    """The phase budget is judged before a variant starts, never against the one being measured."""
+    _force_cold_decision(monkeypatch)
+    result, started = await _explore_under_phase_budget(
+        sub_agent_runner, tmp_path, phase_left_sec=[25.0, 10.0], variants=2
+    )
+
+    assert len(started) == 1
+    assert result["status"] == "succeeded"
+    assert result["session_budget_untested"] == 1
+
+
+@pytest.mark.asyncio
+async def test_explore_that_the_phase_cannot_fit_is_attributed_to_the_phase(
+    sub_agent_runner,
+    tmp_path,
+    monkeypatch,
+):
+    """A round the phase budget left unmeasured must not read as variants failing, nor as the session running out."""
+    _force_cold_decision(monkeypatch)
+    result, started = await _explore_under_phase_budget(sub_agent_runner, tmp_path, phase_left_sec=[10.0], variants=1)
+
+    assert started == []
+    assert result["error_class"] == "phase_time_exhausted"
+    assert result["losers"] == []
+
+
 @pytest.mark.asyncio
 async def test_explore_leaves_a_variant_the_run_reaped_out_of_the_ledger(
     sub_agent_runner,

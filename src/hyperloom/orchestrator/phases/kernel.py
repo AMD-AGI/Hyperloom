@@ -59,6 +59,7 @@ from ..kernel.geak_config import (
     _accepted_config_as_variant,
     _accepted_config_controls,
 )
+from ..kernel.lane_budget import INSUFFICIENT_BUDGET
 from ..actions.executors._gpu_pin import (
     coerce_tp,
     resolve_gpu_pin,
@@ -1154,7 +1155,7 @@ class KernelPhase(CoordinatorCollaborator):
             kill_budget = min(kill_budget, float(phase_rem))
         # A GEAK result reaches the headline only through this session's own re-measurement of it, which runs in this
         # phase after GEAK returns. Which results skip it is known only then, so every hand-off leaves room for it.
-        rebench_sec = self._geak_rebench_reserve_sec()
+        rebench_sec = self._measurement_round_sec()
         log.info("GEAK: holding back %.0fs of the KERNEL budget to re-measure GEAK's result", rebench_sec)
         kill_budget -= rebench_sec
         # The runner self-stops ``margin`` before the hard subprocess kill, which reserves the closing-grace window.
@@ -1162,8 +1163,8 @@ class KernelPhase(CoordinatorCollaborator):
         runner_timeout = int(max(0.0, kill_budget - margin))
         return runner_timeout, kill_timeout, True
 
-    def _geak_rebench_reserve_sec(self) -> float:
-        """What re-measuring a GEAK result costs: one more round of the baseline's measurement."""
+    def _measurement_round_sec(self) -> float:
+        """What measuring one more result in this phase costs: one more round of the baseline's measurement."""
         state = self.shared_state
         measured = _phase_state.one_more_measurement_sec(state) or _phase_state.measured_seconds(
             state, "baseline_runtime_sec"
@@ -1179,24 +1180,15 @@ class KernelPhase(CoordinatorCollaborator):
         candidates: list[float] = []
         session_remaining = _phase_state.session_remaining_seconds(self.shared_state)
         if session_remaining is not None:
-            candidates.append(
-                max(
-                    0.0,
-                    float(session_remaining) - self.shared_state.closing_reserve_sec(),
-                )
-            )
+            candidates.append(max(0.0, float(session_remaining) - self.shared_state.closing_reserve_sec()))
         phase_remaining = _phase_state.phase_budget_remaining_seconds(self.shared_state)
         if phase_remaining is not None:
             candidates.append(max(0.0, float(phase_remaining)))
         phase_cap = _phase_state.phase_cap_seconds(self.shared_state)
         if phase_cap is not None:
-            candidates.append(
-                max(
-                    0.0,
-                    float(phase_cap) - _phase_state.phase_cumulative_seconds(self.shared_state),
-                )
-            )
-        hard_timeout = int(min(candidates)) if candidates else 90 * 60
+            candidates.append(max(0.0, float(phase_cap) - _phase_state.phase_cumulative_seconds(self.shared_state)))
+        # The phase still measures the Controller's patches E2E after the Controller exits.
+        hard_timeout = int(min(candidates) - self._measurement_round_sec()) if candidates else 90 * 60
         return max(0, hard_timeout - 30), max(0, hard_timeout)
 
     async def _free_gpus_for_geak(self, cards: list[int] | None) -> str | None:
@@ -1584,7 +1576,7 @@ class KernelPhase(CoordinatorCollaborator):
             _finish_skip(
                 {
                     "status": "skipped",
-                    "error_class": "insufficient_budget",
+                    "error_class": INSUFFICIENT_BUDGET,
                     "error": (
                         f"only {runner_timeout}s of KERNEL budget remained "
                         f"(< min {min_run}s); skipped to protect the closing "
@@ -3180,6 +3172,9 @@ class KernelPhase(CoordinatorCollaborator):
 
     async def _handle_gemm_tuning_result(self, result: dict[str, Any]) -> None:
         """Record and post-process a run_gemm_tuning result from any entrypoint."""
+        if result.get("error_class") == INSUFFICIENT_BUDGET:
+            # Never started, so no attempt to record; a recorded ``skipped`` would latch GEMM off for later entries.
+            return
         self._sync_profile_state_after_gemm_roofline(result)
         self.shared_state.record_gemm_tuning(result)
         try:
