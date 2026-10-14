@@ -1,57 +1,59 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""In-memory stand-ins for the peers a session runs on, the toolbox's own fake, and a virtual clock, for the tests.
+"""Stand-ins for the peers a session runs on, the toolbox's own fake, and a virtual clock, for the tests.
 
-Each ``MbFake`` class stands in for another owner's module until it lands, one per peer: the specialist lifecycle
-(``hyperloom_multibranch.specialist``), the rule gate (``.rulegate``) and the experiment repository (``.repo``), plus
-the main-flow child of PRELUDE. Every scheduling test uses these, scripted through their fields, and subclasses them
-only for a failure double; they are replaced by the real modules once those land. The toolbox is the toolbox
-module's :class:`~hyperloom_multibranch.toolbox.fake.FakeToolbox`, noise-free and noting what the scheduler asked of
-it; the rule gate judges from scripted values.
+Each ``MbFake`` class stands in for another owner's module until it lands: the specialist lifecycle and a
+specialist's candidate loop (``hyperloom_multibranch.specialist``), plus the main-flow child of PRELUDE. Every
+scheduling test uses these, scripted through their fields, and subclasses them only for a failure double; they are
+replaced by the real modules once those land. The toolbox is the toolbox module's
+:class:`~hyperloom_multibranch.toolbox.fake.FakeToolbox`, noise-free and noting what the scheduler asked of it; what a
+test measures follows from the recipe it measures (:func:`recipe_effect`). The experiment repository and the rule gate
+are their owners' own.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
-import hashlib
 import heapq
 import itertools
-import shutil
+import json
+import os
+import subprocess
 import sys
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
-from hyperloom.contracts.recipe import ConfigDelta, LaunchConfig, PatchRef, Recipe, RecipeDelta, RecipeError
-from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Notebook
-from hyperloom_multibranch.contracts.notebook.peers import Judgement, Verdict
-from hyperloom_multibranch.contracts.notebook.records import BaselineRecord, LineageEvent
-from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, LineageKind
-from hyperloom_multibranch.contracts.scheduling import (
-    AdmissionStatus,
-    ForkAdmission,
-    ForkAdmissionService,
-    ForkRequest,
-    RepoMerge,
-)
+from hyperloom.contracts.recipe import ConfigDelta, Recipe, RecipeDelta, apply
+from hyperloom_multibranch.contracts.fork import Admission
+from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
+from hyperloom_multibranch.contracts.lifecycle import SpecialistLaunch
+from hyperloom_multibranch.contracts.notebook import peers as notebook_peers
+from hyperloom_multibranch.contracts.notebook.interfaces import RecordSearch
+from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import CancelOutcome, QueueState
+from hyperloom_multibranch.repo.git_repo import RECIPE_FILE, GitExperimentRepo
+from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.scheduling.clock import Clock
-from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_PRIMARY_METRIC
+from hyperloom_multibranch.scheduling.peers import RootWriter, git_root_writer
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, RegisteredProcess
-from hyperloom_multibranch.scheduling.requests import SessionTests
+from hyperloom_multibranch.scheduling.requests import SessionTests, integration_test_request
+from hyperloom_multibranch.scheduling.rule_judge import MB_FAKE_BASELINE_TESTS, MbFakeRuleJudge
 from hyperloom_multibranch.toolbox.fake import FakeToolbox, ToolboxNotebook
-from hyperloom_multibranch.toolbox.fake_model import DEFAULT_BASELINE, FakeToolboxConfig, Fate, NoiseModel
+from hyperloom_multibranch.toolbox.fake_model import DEFAULT_BASELINE, FakeToolboxConfig, NoiseModel
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 
 LAUNCH_FLAG = "--launch-info-file"
-ROOT_COMMIT = "c0"
-BASELINE_TESTS = 3
-BASELINE_VALUE = DEFAULT_BASELINE[MB_FAKE_PRIMARY_METRIC]
+BASELINE_VALUE = DEFAULT_BASELINE[GRADED_OUTPUT]
 TOOLBOX_DOWN = "toolbox service down"
+#: The server argument a scripted change carries its tag in; :func:`recipe_effect` reads a recipe's tags from it.
+TAG_FLAG = "--mb-tag-"
+REPRO_CASE = "repro/case.py"
 #: Loop turns and real seconds the virtual clock lets pass before it decides the loop is quiet and jumps.
 SETTLE_YIELDS = 20
 SETTLE_REAL_SECONDS = 0.0005
@@ -159,6 +161,47 @@ class VirtualClock:
                 wake.set_result(None)
 
 
+class HeldGitRepo(GitExperimentRepo):
+    """The git experiment repository on a :class:`VirtualClock`: every call holds the clock while git runs, which the
+    event loop cannot see through. Not a placeholder: the repository is its owner's own."""
+
+    def __init__(self, path: Path, time: VirtualClock) -> None:
+        super().__init__(path)
+        self.time = time
+
+    async def read_recipe(self, commit: str) -> Recipe:
+        async with self.time.held():
+            return await super().read_recipe(commit)
+
+    async def create_branch(self, branch: str, at_commit: str) -> None:
+        async with self.time.held():
+            await super().create_branch(branch, at_commit)
+
+    async def head(self, branch: str) -> str:
+        async with self.time.held():
+            return await super().head(branch)
+
+    async def commit(self, branch: str, parent: str, recipe: Recipe, message: str) -> str:
+        async with self.time.held():
+            return await super().commit(branch, parent, recipe, message)
+
+    async def rewind(self, branch: str, commit: str, parent: str) -> None:
+        async with self.time.held():
+            await super().rewind(branch, commit, parent)
+
+
+def held_root_writer(path: Path, time: VirtualClock) -> RootWriter:
+    """:func:`~hyperloom_multibranch.scheduling.peers.git_root_writer` holding ``time`` while git runs."""
+
+    write_root = git_root_writer(path)
+
+    async def held(baseline: Recipe) -> str:
+        async with time.held():
+            return await write_root(baseline)
+
+    return held
+
+
 class MbFakeChildRegistry(ProcessRegistry):
     """Runs a short script in place of the main-flow child of PRELUDE; every other process is spawned as asked.
 
@@ -226,14 +269,18 @@ class MbFakeLifecycle:
     refusing: frozenset[str] = frozenset()
     hanging: frozenset[str] = frozenset()
     started: dict[str, str] = field(default_factory=dict)
+    briefs: dict[str, str | None] = field(default_factory=dict)
     k: dict[str, int] = field(default_factory=dict)
     stopped: list[str] = field(default_factory=list)
     tasks: dict[str, asyncio.Future[None]] = field(default_factory=dict)
 
-    async def start(self, branch: str, start_commit: str) -> None:
-        self.started[branch] = start_commit
-        if branch in self.scripts:
-            self.tasks[branch] = asyncio.ensure_future(self.scripts[branch](branch, start_commit))
+    async def start(self, launch: SpecialistLaunch) -> None:
+        self.started[launch.branch] = launch.start_commit
+        self.briefs[launch.branch] = launch.brief
+        self.k[launch.branch] = launch.k
+        if launch.branch in self.scripts:
+            script = self.scripts[launch.branch](launch.branch, launch.start_commit)
+            self.tasks[launch.branch] = asyncio.ensure_future(script)
 
     async def stop(self, branch: str) -> None:
         self.stopped.append(branch)
@@ -251,17 +298,42 @@ class MbFakeLifecycle:
         self.k[branch] = k
 
 
-#: How a test of a commit fares: its primary-metric value per conc (the main operating point under conc 0).
-Curves = Mapping[str, Mapping[int, float]]
+#: What a recipe measures, by the tags its server arguments carry: its primary-metric value per conc, the main
+#: operating point under :data:`MAIN_POINT`; a recipe or conc not named measures :data:`BASELINE_VALUE`.
+Curves = Mapping[frozenset[str], Mapping[int, float]]
 MAIN_POINT = 0
 
 
-def curve_effect(curves: Curves) -> Callable[[TestRequest], float]:
-    """The fake toolbox's effect of a test: its parent commit's value at the test's conc, else the baseline."""
+def tagged(*tags: str) -> RecipeDelta:
+    """A change that carries ``tags`` and nothing else that matters."""
+
+    return RecipeDelta(config=ConfigDelta(server_args=" ".join(f"{TAG_FLAG}{tag}" for tag in tags)))
+
+
+def recipe_tags(recipe: Recipe) -> frozenset[str]:
+    return frozenset(arg[len(TAG_FLAG) :] for arg in recipe.launch.server_args.split() if arg.startswith(TAG_FLAG))
+
+
+def _committed_recipe(repo: Path, commit: str) -> Recipe:
+    env = {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
+    shown = subprocess.run(
+        ("git", f"--git-dir={repo}", "show", f"{commit}:{RECIPE_FILE}"),
+        capture_output=True,
+        text=True,
+        check=True,
+        env=env,
+    )
+    return Recipe.from_document(json.loads(shown.stdout))
+
+
+def recipe_effect(repo: Path, curves: Curves) -> Callable[[TestRequest], float]:
+    """The fake toolbox's effect of a test: what ``curves`` gives the tags of the recipe it measures, its parent
+    commit's recipe in the git repository at ``repo`` with its change applied."""
 
     def effect(request: TestRequest) -> float:
+        tags = recipe_tags(apply(_committed_recipe(repo, request.parent_commit), request.delta))
         conc = request.concurrency[0] if request.concurrency else MAIN_POINT
-        return curves.get(request.parent_commit, {}).get(conc, BASELINE_VALUE) / BASELINE_VALUE - 1.0
+        return curves.get(tags, {}).get(conc, BASELINE_VALUE) / BASELINE_VALUE - 1.0
 
     return effect
 
@@ -269,17 +341,22 @@ def curve_effect(curves: Curves) -> Callable[[TestRequest], float]:
 class RecordingToolbox(FakeToolbox):
     """The toolbox module's fake, without noise, noting every queue policy, branch cancel and close it was given.
 
-    ``curves`` sets what a commit measures; a test whose parent commit is in ``failing`` fails its measurement, which
-    the toolbox writes to the notebook as a withdrawal. Not a placeholder: the fake is the toolbox owner's own.
+    ``effect`` sets what a test measures (see :func:`recipe_effect`); without one every test measures the baseline.
+    ``accuracy`` is the accuracy score of a change by its fingerprint. Not a placeholder: the fake is the toolbox owner's own.
     """
 
-    def __init__(self, notebook: ToolboxNotebook, curves: Curves | None = None, failing: frozenset[str] = frozenset()):
+    def __init__(
+        self,
+        notebook: ToolboxNotebook,
+        effect: Callable[[TestRequest], float] | None = None,
+        accuracy: Mapping[str, float] | None = None,
+    ):
         quiet = NoiseModel(node_bias_median=0.0, node_bias_p90=0.0, test_noise_sigma=0.0)
-        super().__init__(FakeToolboxConfig(noise=quiet, effect_fn=curve_effect(curves or {})), notebook=notebook)
+        config = FakeToolboxConfig(noise=quiet, effect_fn=effect, accuracy_scores=dict(accuracy or {}))
+        super().__init__(config, notebook=notebook)
         self.policies: list[QueuePolicy] = []
         self.cancelled: list[str] = []
         self.closed = 0
-        self.script(lambda request: request.parent_commit in failing, [Fate.MEASUREMENT])
 
     async def set_policy(self, policy: QueuePolicy) -> None:
         self.policies.append(policy)
@@ -344,167 +421,52 @@ class StuckToolbox(RecordingToolbox):
         await asyncio.Event().wait()
 
 
+async def measure_baseline(judge: MbFakeRuleJudge, tests: SessionTests, root: str) -> None:
+    """Measure the baseline on ``root`` as PRELUDE does and anchor the session to it."""
+
+    request = integration_test_request(TestKind.TEST, Purpose.BASELINE, root, accuracy=True)
+    records = [await tests.run(request) for _ in range(MB_FAKE_BASELINE_TESTS)]
+    await judge.establish_baseline(root, tuple(records))
+
+
 def judged(verdict: Verdict, gain_pct: float, request_id: str, value: float) -> Judgement:
-    return Judgement(verdict, gain_pct, 1.0, (request_id,), {MB_FAKE_PRIMARY_METRIC: value}, accuracy_ok=True)
+    return Judgement(verdict, gain_pct, 1.0, (request_id,), {GRADED_OUTPUT: value}, accuracy_ok=True)
 
 
 @dataclass
-class MbFakeGate:
-    """Stands in for the rule gate: scripted judgements, and commits and forks made for a scripted specialist.
+class MbFakeSpecialist:
+    """Stands in for a specialist's candidate loop: measures a scripted change on its branch through the toolbox and
+    lands the judgement scripted for it through the rule gate, which commits, records or asks for a fork.
 
-    ``compare`` answers ``verdicts`` by the fingerprint of the test's delta, else ``default``; a test whose parent
-    commit is in ``regressed`` regressed. No judgement is given before ``held_until`` tests are being compared at once.
-    Accuracy fails for a parent commit in ``inaccurate``. The scripted specialist's candidates are measured through
-    ``tests``. Deleted once ``hyperloom_multibranch.rulegate`` ships a real rule gate and these tests run on it.
+    Deleted once ``hyperloom_multibranch.specialist`` ships a real specialist and the skeleton runs on it.
     """
 
-    notebook: Notebook
+    gate: RuleGate
     tests: SessionTests
-    desk: ForkAdmissionService | None = None
-    verdicts: Mapping[str, Judgement] = field(default_factory=dict)
-    default: Judgement = field(default_factory=lambda: judged(Verdict.FLAT, 0.0, "", BASELINE_VALUE))
-    regressed: frozenset[str] = frozenset()
-    inaccurate: frozenset[str] = frozenset()
-    held_until: int = 0
-    established: list[BaselineRecord] = field(default_factory=list)
-    forks: list[ForkAdmission] = field(default_factory=list)
-    comparing: asyncio.Event = field(default_factory=asyncio.Event)
-    _in_flight: int = 0
-    _all_in: asyncio.Event = field(default_factory=asyncio.Event)
+    notebook: RecordSearch
+    repo: ExperimentRepo
 
-    async def baseline_test_count(self) -> int:
-        return BASELINE_TESTS
-
-    async def establish_baseline(self, root_commit: str, request_ids: tuple[str, ...]) -> BaselineRecord:
-        record = BaselineRecord(
-            root_commit, {MB_FAKE_PRIMARY_METRIC: BASELINE_VALUE}, {MB_FAKE_PRIMARY_METRIC: 1.0}, {}, request_ids
-        )
-        await self.notebook.write_baseline(record)
-        self.established.append(record)
-        return record
-
-    async def compare(self, request_id: str) -> Judgement:
-        self.comparing.set()
-        self._in_flight += 1
-        if self._in_flight >= self.held_until:
-            self._all_in.set()
-        await self._all_in.wait()
-        test = (await self.notebook.record(request_id)).request
-        made = self.verdicts.get(test.delta.fingerprint(), self.default)
-        if test.parent_commit in self.regressed:
-            made = replace(made, verdict=Verdict.REGRESSED)
-        return replace(made, request_ids=(request_id,))
-
-    async def accuracy_passes(self, request_id: str) -> bool:
-        return (await self.notebook.record(request_id)).request.parent_commit not in self.inaccurate
-
-    async def commit(self, branch: str, parent: str, commit_id: str, value: float) -> None:
-        """A specialist's candidate on ``branch`` measured, confirmed and committed as ``commit_id``."""
-
-        request_id = await self._measure(branch, parent, commit_id)
-        gain = (value / BASELINE_VALUE - 1.0) * 100.0
-        await self.notebook.write_judgement(
-            request_id, judged(Verdict.IMPROVED, gain, request_id, value), Conclusion.COMMITTED, commit_id
-        )
-
-    async def fork(self, from_branch: str, parent: str, fix_commit: str) -> ForkAdmission:
-        """A correctness fix on ``from_branch`` that regresses there, asked onto a branch of its own."""
-
-        assert self.desk is not None
-        admission = await self.desk.admit(ForkRequest(from_branch, parent, f"fix {fix_commit} regresses"))
-        self.forks.append(admission)
-        if admission.status is not AdmissionStatus.ACCEPTED:
-            return admission
-        request_id = await self._measure(from_branch, parent, fix_commit)
-        slower = replace(judged(Verdict.REGRESSED, -2.0, request_id, 980.0), fixes_correctness=True)
-        await self.notebook.write_judgement(request_id, slower, Conclusion.SPLIT_REQUESTED)
-        await self.notebook.record_lineage(
-            LineageEvent(
-                LineageKind.SPLIT, admission.branch, commit_id=fix_commit, from_commit=parent, from_branch=from_branch
-            )
-        )
-        await self.notebook.write_judgement(request_id, slower, Conclusion.SPLIT_COMMITTED, fix_commit)
-        await self.desk.fork_committed(admission.branch, fix_commit)
-        return admission
-
-    async def _measure(self, branch: str, parent: str, commit_id: str) -> str:
-        change = RecipeDelta(config=ConfigDelta(server_args=f"--candidate {commit_id}"))
+    async def measure(self, branch: str, change: RecipeDelta) -> notebook_peers.TestRequest:
+        parent = await self.repo.head(branch)
         test = TestRequest(
             kind=TestKind.TEST, purpose=Purpose.EXPLORE, branch_id=branch, parent_commit=parent, delta=change
         )
-        return (await self.tests.run(test)).request_id
+        return (await self.tests.run(test)).request
 
+    async def commit(self, branch: str, change: RecipeDelta, value: float) -> str:
+        """``change`` on ``branch``, confirmed at ``value``; returns the commit it made."""
 
-def merged_delta(candidate: str) -> RecipeDelta:
-    """The change :class:`MbFakeRepo` merges ``candidate`` with when ``merges`` scripts none."""
+        measured = await self.measure(branch, change)
+        gain = (value / BASELINE_VALUE - 1.0) * 100.0
+        await self.gate.settle(measured, judged(Verdict.IMPROVED, gain, measured.request_id, value))
+        return await self.repo.head(branch)
 
-    return RecipeDelta(config=ConfigDelta(server_args=f"--merged {candidate}"))
+    async def fork(self, branch: str, fix: RecipeDelta, reason: str) -> Admission:
+        """A correctness fix on ``branch`` that regresses there, asked onto a branch of its own."""
 
-
-@dataclass
-class MbFakeRepo:
-    """Stands in for the experiment repository: merges are clean unless scripted in ``merges``.
-
-    A merge of a candidate in ``invalid_merges`` raises the recipe contract's error. ``patches`` holds the patch texts
-    by ``(commit, path)``; a checkout copies ``checkout_files`` when it is set. Deleted once
-    ``hyperloom_multibranch.repo`` ships a real repository and these tests run on it.
-    """
-
-    recipes: dict[str, Recipe] = field(default_factory=dict)
-    integration_head: str = ""
-    merges: Mapping[str, RepoMerge] = field(default_factory=dict)
-    invalid_merges: frozenset[str] = frozenset()
-    patches: Mapping[tuple[str, str], str] = field(default_factory=dict)
-    checkout_files: Path | None = None
-    stored: list[tuple[PatchRef, str]] = field(default_factory=list)
-    integrated: list[tuple[str, RecipeDelta, tuple[str, ...]]] = field(default_factory=list)
-    checkouts: list[str] = field(default_factory=list)
-    committing: asyncio.Event = field(default_factory=asyncio.Event)
-    commit_released: asyncio.Event | None = None
-
-    async def init_root(self, recipe: Recipe) -> str:
-        self.recipes[ROOT_COMMIT] = recipe
-        self.integration_head = ROOT_COMMIT
-        return ROOT_COMMIT
-
-    async def recipe_at(self, commit: str) -> Recipe:
-        return self.recipes.get(commit, self.recipes[ROOT_COMMIT])
-
-    async def head(self, branch: str) -> str:
-        assert branch == INTEGRATION_BRANCH
-        return self.integration_head
-
-    async def merge(self, candidate: str, onto: str) -> RepoMerge:
-        if candidate in self.invalid_merges:
-            raise RecipeError(f"the merge of {candidate} pins two refs of one component")
-        return replace(self.merges.get(candidate, RepoMerge("", merged_delta(candidate))), onto=onto)
-
-    async def patch_text(self, commit: str, path: str) -> str:
-        return self.patches.get((commit, path), "")
-
-    async def store_patch(self, component: str, text: str) -> PatchRef:
-        digest = hashlib.sha256(text.encode()).hexdigest()
-        ref = PatchRef(f"patch/{component}/{len(self.stored):04d}-{digest[:8]}.patch", digest)
-        self.stored.append((ref, text))
-        return ref
-
-    async def commit_integration(self, onto: str, delta: RecipeDelta, merged_from: tuple[str, ...]) -> str:
-        assert onto == self.integration_head
-        self.committing.set()
-        if self.commit_released is not None:
-            await self.commit_released.wait()
-        self.integrated.append((onto, delta, merged_from))
-        head = f"i{len(self.integrated)}"
-        base = await self.recipe_at(onto)
-        self.recipes[head] = replace(base, launch=LaunchConfig(server_args=f"--integrated {len(self.integrated)}"))
-        self.integration_head = head
-        return head
-
-    async def checkout(self, commit: str, destination: Path) -> None:
-        self.checkouts.append(commit)
-        destination.mkdir(parents=True, exist_ok=True)
-        if self.checkout_files is not None:
-            shutil.copytree(self.checkout_files, destination, dirs_exist_ok=True)
+        measured = await self.measure(branch, fix)
+        slower = replace(judged(Verdict.REGRESSED, -2.0, measured.request_id, 980.0), fixes_correctness=True)
+        return await self.gate.fork(measured, slower, REPRO_CASE, reason)
 
 
 @dataclass
@@ -527,26 +489,29 @@ class ScriptedCompletion:
 
 
 __all__ = [
-    "BASELINE_TESTS",
     "BASELINE_VALUE",
     "CHILD_SCRIPT",
     "LAUNCH_FLAG",
     "MAIN_POINT",
-    "ROOT_COMMIT",
+    "REPRO_CASE",
+    "TAG_FLAG",
     "TOOLBOX_DOWN",
     "Curves",
     "DownToolbox",
+    "HeldGitRepo",
     "MbFakeChildRegistry",
-    "MbFakeGate",
     "MbFakeHeldRegistry",
     "MbFakeLifecycle",
-    "MbFakeRepo",
+    "MbFakeSpecialist",
     "RecordingToolbox",
     "ScriptedCompletion",
     "SpecialistScript",
     "StuckToolbox",
     "VirtualClock",
-    "curve_effect",
+    "held_root_writer",
     "judged",
-    "merged_delta",
+    "measure_baseline",
+    "recipe_effect",
+    "recipe_tags",
+    "tagged",
 ]

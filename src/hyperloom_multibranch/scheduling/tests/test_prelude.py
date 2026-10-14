@@ -19,26 +19,24 @@ import pytest
 import hyperloom
 from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom.contracts.recipe import RecipeDelta
+from hyperloom.measure.compile import LocalBlobStore
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.scheduling.budget import HardStop, SessionBudget
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import DecisionLog
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
 from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_PRIMARY_METRIC
+from hyperloom_multibranch.scheduling.patches import PatchStore
+from hyperloom_multibranch.scheduling.peers import git_root_writer
 from hyperloom_multibranch.scheduling.prelude import Prelude, PreludeFailed, PreludeResult, prelude_argv
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, RegisteredProcess
 from hyperloom_multibranch.scheduling.requests import SessionTests
+from hyperloom_multibranch.scheduling.rule_judge import MB_FAKE_BASELINE_TESTS, MbFakeRuleJudge
 from hyperloom_multibranch.scheduling.settings import Workload
-from hyperloom_multibranch.scheduling.tests.peer_fakes import (
-    BASELINE_TESTS,
-    LAUNCH_FLAG,
-    ROOT_COMMIT,
-    MbFakeChildRegistry,
-    MbFakeGate,
-    MbFakeRepo,
-    RecordingToolbox,
-)
+from hyperloom_multibranch.scheduling.tests.peer_fakes import LAUNCH_FLAG, MbFakeChildRegistry, RecordingToolbox
+from hyperloom_multibranch.toolbox.fake_model import Fate
 from hyperloom_multibranch.scheduling.tests.child_sessions import (
     PATCH_TEXT,
     ROOFLINE_PEAK,
@@ -62,26 +60,26 @@ class StubbornRegistry(ProcessRegistry):
 
 @dataclass
 class PreludePeers:
-    """The repository, toolbox and rule gate stand-ins PRELUDE talks to, on the session's notebook; ``tests`` waits
+    """The repository, patch store, toolbox and rule PRELUDE works with, on the session's notebook; ``tests`` waits
     for the toolbox's outcomes without real sleeps."""
 
-    repo: MbFakeRepo
+    repo: GitExperimentRepo
+    patches: PatchStore
     toolbox: RecordingToolbox
     tests: SessionTests
-    gate: MbFakeGate
+    judge: MbFakeRuleJudge
 
 
 async def _instant(seconds: float) -> None:
     await asyncio.sleep(0)
 
 
-def _peers(layout: SessionLayout, failing: frozenset[str] = frozenset()) -> PreludePeers:
-    toolbox = RecordingToolbox(
-        LocalNotebook(layout.notebook, Writer(Role.TOOLBOX, "toolbox"), clock=_clock().now), failing=failing
-    )
+def _peers(layout: SessionLayout) -> PreludePeers:
+    toolbox = RecordingToolbox(LocalNotebook(layout.notebook, Writer(Role.TOOLBOX, "toolbox"), clock=_clock().now))
     tests = SessionTests(toolbox, _notebook(layout), Clock(now=_clock().now, sleep=_instant))
-    gate = MbFakeGate(LocalNotebook(layout.notebook, Writer(Role.GATE, "gate"), clock=_clock().now), tests)
-    return PreludePeers(MbFakeRepo(), toolbox, tests, gate)
+    judge = MbFakeRuleJudge(LocalNotebook(layout.notebook, Writer(Role.GATE, "gate"), clock=_clock().now), tests)
+    patches = PatchStore(LocalBlobStore(layout.blobs))
+    return PreludePeers(GitExperimentRepo(layout.repo), patches, toolbox, tests, judge)
 
 
 def _clock(times: list[float] | None = None) -> Clock:
@@ -102,7 +100,10 @@ def _prelude(
 ) -> Prelude:
     clock = clock or _clock()
     decisions = DecisionLog(layout.decisions, clock)
-    return Prelude(layout, processes, _notebook(layout), peers.repo, peers.tests, peers.gate, decisions, clock)
+    write_root = git_root_writer(layout.repo)
+    return Prelude(
+        layout, processes, _notebook(layout), write_root, peers.patches, peers.tests, peers.judge, decisions, clock
+    )
 
 
 async def _run(prelude: Prelude, budget: SessionBudget) -> PreludeResult:
@@ -162,13 +163,14 @@ async def test_finished_child_roots_the_session_before_any_baseline_test(tmp_pat
     result = await _prelude(layout, processes, peers).root(WORKLOAD, budget, HardStop(budget, _clock()))
 
     assert float(processes.argv[processes.argv.index("--max-hours") + 1]) == pytest.approx(2.0)
-    assert result.root_commit == ROOT_COMMIT
-    assert [text for _, text in peers.repo.stored] == [PATCH_TEXT]
-    recipe = peers.repo.recipes[ROOT_COMMIT]
+    assert result.root_commit == await peers.repo.head(INTEGRATION_BRANCH)
+    recipe = await peers.repo.read_recipe(result.root_commit)
+    [component] = recipe.components
+    assert [peers.patches.text(patch) for patch in component.patches] == [PATCH_TEXT]
     assert json.loads(layout.root_recipe.read_text()) == recipe.to_document()
     assert json.loads(layout.prelude_child.read_text())["session_dir"] == str(child)
     assert await processes.leftovers() == ()
-    root = (await _notebook(layout).lineage()).commit(ROOT_COMMIT)
+    root = (await _notebook(layout).lineage()).commit(result.root_commit)
     assert root is not None
     assert (root.branch, root.recipe_digest) == (INTEGRATION_BRANCH, recipe.digest())
     profile = await _notebook(layout).session_profile()
@@ -183,18 +185,20 @@ async def test_baseline_is_measured_through_the_toolbox(tmp_path: Path) -> None:
     peers = _peers(layout)
     prelude = _prelude(layout, _registry(layout, child_with_patch(tmp_path)), peers)
 
-    await _run(prelude, SessionBudget.from_hours(2.0, NOW))
+    result = await _run(prelude, SessionBudget.from_hours(2.0, NOW))
 
     requests = peers.toolbox.requests
-    assert len(requests) == BASELINE_TESTS
-    [baseline] = peers.gate.established
-    assert baseline.root_commit == ROOT_COMMIT
+    assert len(requests) == MB_FAKE_BASELINE_TESTS
+    baseline = await _notebook(layout).baseline()
+    assert baseline.root_commit == result.root_commit
     assert sorted(baseline.request_ids) == sorted(requests)
+    assert dict(baseline.values) == {MB_FAKE_PRIMARY_METRIC: pytest.approx(1000.0)}
+    assert dict(baseline.threshold_pct) == {MB_FAKE_PRIMARY_METRIC: 1.0}
     assert set(peers.toolbox.results) == set(requests)
     for request in requests.values():
-        assert (request.branch_id, request.parent_commit) == (INTEGRATION_BRANCH, ROOT_COMMIT)
+        assert (request.branch_id, request.parent_commit) == (INTEGRATION_BRANCH, result.root_commit)
         assert (request.kind, request.purpose, request.delta) == (TestKind.TEST, Purpose.BASELINE, RecipeDelta())
-        assert (request.intent_fingerprint, request.priority) == (None, None)
+        assert (request.accuracy, request.intent_fingerprint, request.priority) == (True, None, None)
 
 
 async def test_child_failing_before_its_launch_info_fails_prelude(tmp_path: Path) -> None:
@@ -203,7 +207,7 @@ async def test_child_failing_before_its_launch_info_fails_prelude(tmp_path: Path
     with pytest.raises(PreludeFailed, match="exited with 3"):
         await _run(_prelude(layout, _registry(layout, None, exit_code=3), peers), SessionBudget.from_hours(2.0, NOW))
     assert json.loads(layout.prelude_child.read_text())["session_dir"] is None
-    assert peers.repo.recipes == {}
+    assert not layout.repo.exists()
 
 
 async def test_child_without_a_baseline_fails_prelude(tmp_path: Path) -> None:
@@ -215,12 +219,13 @@ async def test_child_without_a_baseline_fails_prelude(tmp_path: Path) -> None:
     peers = _peers(layout)
     with pytest.raises(PreludeFailed, match="enablement_attempts_exhausted"):
         await _run(_prelude(layout, _registry(layout, child, exit_code=1), peers), SessionBudget.from_hours(2.0, NOW))
-    assert peers.repo.recipes == {}
+    assert not layout.repo.exists()
 
 
 async def test_withdrawn_baseline_test_fails_prelude(tmp_path: Path) -> None:
     layout = _layout(tmp_path)
-    peers = _peers(layout, failing=frozenset({ROOT_COMMIT}))
+    peers = _peers(layout)
+    peers.toolbox.script(lambda request: request.purpose is Purpose.BASELINE, [Fate.MEASUREMENT])
     prelude = _prelude(layout, _registry(layout, child_with_patch(tmp_path)), peers)
     with pytest.raises(PreludeFailed, match="withdrawn"):
         await _run(prelude, SessionBudget.from_hours(2.0, NOW))

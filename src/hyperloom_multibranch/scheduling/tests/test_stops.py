@@ -14,14 +14,17 @@ from pathlib import Path
 import pytest
 
 from hyperloom.common.proctree import descendants, running
+from hyperloom.contracts.recipe import Recipe
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent
 from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.scheduling.branches import BranchControl
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import DecisionLog
+from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_BASE_IMAGE_DIGEST
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.roster import (
     BranchOrigin,
@@ -32,12 +35,7 @@ from hyperloom_multibranch.scheduling.roster import (
     StopCause,
 )
 from hyperloom_multibranch.scheduling.stops import STOP_OVERRAN, SessionStopper, SessionStopReason, StopSignals
-from hyperloom_multibranch.scheduling.tests.peer_fakes import (
-    ROOT_COMMIT,
-    TOOLBOX_DOWN,
-    DownToolbox,
-    MbFakeLifecycle,
-)
+from hyperloom_multibranch.scheduling.tests.peer_fakes import TOOLBOX_DOWN, DownToolbox, MbFakeLifecycle
 
 NOW = 1_700_000_000.0
 HARD_STOP = NOW + 60.0
@@ -61,15 +59,20 @@ class Stage:
             LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"), clock=clock.now)
         )
         self.lifecycle = lifecycle or MbFakeLifecycle()
+        self.repo_path = tmp_path / "repo"
+        self.root = ""
+        repo = GitExperimentRepo(self.repo_path)
         self.branches = BranchControl(
-            self.roster, self.notebook, self.lifecycle, self.toolbox, self.processes, decisions, clock
+            self.roster, self.notebook, self.lifecycle, self.toolbox, repo, self.processes, decisions, clock
         )
         self.stopper = SessionStopper(self.roster, self.branches, self.toolbox, self.processes, decisions, clock)
 
     async def opened(self) -> Stage:
-        await self.notebook.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id=ROOT_COMMIT))
-        self.roster.add_integration(ROOT_COMMIT, k=1)
-        await self.branches.open_branches(2, ROOT_COMMIT, 1, BranchOrigin.FIRST_BATCH)
+        baseline = Recipe(MB_FAKE_BASE_IMAGE_DIGEST)
+        self.root = await (await GitExperimentRepo.create(self.repo_path, baseline)).head(INTEGRATION_BRANCH)
+        await self.notebook.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id=self.root))
+        self.roster.add_integration(self.root, k=1)
+        await self.branches.open_branches(2, self.root, 1, BranchOrigin.FIRST_BATCH)
         await self.branches.stop_branch("b02", JUDGE_STOP)
         self.roster.open("b03", origin=BranchOrigin.FORK, start_commit="", k=1, from_branch="b01")
         self.lifecycle.stopped.clear()
@@ -183,7 +186,7 @@ async def test_a_test_the_toolbox_still_holds_makes_the_report_unclean(tmp_path:
     session = await Stage(tmp_path).opened()
     session.toolbox.executor.gate.clear()
     session.roster.stop("b02", JUDGE_STOP)
-    await session.toolbox.submit_test(TestRequest(TestKind.TEST, Purpose.EXPLORE, "b02", ROOT_COMMIT))
+    await session.toolbox.submit_test(TestRequest(TestKind.TEST, Purpose.EXPLORE, "b02", session.root))
 
     report = await session.stopper.stop_everything(SessionStopReason.GLOBAL_CONVERGED, HARD_STOP)
 

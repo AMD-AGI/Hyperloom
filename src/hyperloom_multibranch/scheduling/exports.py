@@ -17,12 +17,13 @@ from functools import partial
 from pathlib import Path
 
 from hyperloom.contracts.recipe import RecipeError
+from hyperloom.measure.compile import BlobError
 from hyperloom.orchestrator.knowledge.remote_recipe import KBStoreError
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient
 from hyperloom.orchestrator.knowledge.remote_recipe.models import RemoteRecipeValidationError, RemoteWriteResult
 from hyperloom_multibranch.contracts.notebook.interfaces import Notebook, ProgressQuery
 from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot
-from hyperloom_multibranch.contracts.scheduling import ExperimentRepo
+from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import QueueState
 from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.notebook.dashboard import DashboardFiles, build_dashboard, write_dashboard
@@ -30,6 +31,7 @@ from hyperloom_multibranch.notebook.knowledge.breakdown import build_breakdown, 
 from hyperloom_multibranch.notebook.knowledge.recipe_writeback import SKIPPED, FinalRecipe, publish_final_recipe
 from hyperloom_multibranch.scheduling.final import FinalChoice
 from hyperloom_multibranch.scheduling.layout import SessionLayout
+from hyperloom_multibranch.scheduling.patches import PatchStore
 
 #: The single-lineage CLOSE's status when no Recipe KB is configured.
 KB_DISABLED = "disabled"
@@ -48,8 +50,8 @@ class CloseExports:
 class SessionExports:
     """Exports one stopped session into ``layout``; ``kb_client`` is ``None`` when no Recipe KB is configured.
 
-    ``notebook`` is the scheduler's handle, ``progress`` the frontier-scored progress and ``metric`` the
-    recorded-value metric.
+    ``notebook`` is the scheduler's handle, ``patches`` holds the files the chosen recipe names, ``progress`` is the
+    frontier-scored progress and ``metric`` the recorded-value metric.
     """
 
     def __init__(
@@ -57,6 +59,7 @@ class SessionExports:
         layout: SessionLayout,
         notebook: Notebook,
         repo: ExperimentRepo,
+        patches: PatchStore,
         progress: ProgressQuery,
         metric: str,
         *,
@@ -66,6 +69,7 @@ class SessionExports:
         self._kb_client = kb_client
         self._notebook = notebook
         self._repo = repo
+        self._patches = patches
         self._progress = progress
         self._metric = metric
 
@@ -85,16 +89,18 @@ class SessionExports:
         if chosen is None:
             return RemoteWriteResult(SKIPPED, "no final choice")
         destination = self._layout.final_checkout
-        await self._repo.checkout(chosen.commit, destination)
-        recipe = FinalRecipe(chosen.commit, await self._repo.recipe_at(chosen.commit), destination, self._metric)
+        recipe = await self._repo.read_recipe(chosen.commit)
+        final_recipe = FinalRecipe(chosen.commit, recipe, destination, self._metric)
         try:
-            return await asyncio.to_thread(publish_final_recipe, self._kb_client, snapshot, recipe)
-        except (RecipeError, RemoteRecipeValidationError, KBStoreError, OSError) as exc:
+            await asyncio.to_thread(self._patches.checkout, recipe, destination)
+            return await asyncio.to_thread(publish_final_recipe, self._kb_client, snapshot, final_recipe)
+        except (RecipeError, RemoteRecipeValidationError, KBStoreError, BlobError, OSError) as exc:
             return RemoteWriteResult(KB_FAILED, f"{type(exc).__name__}: {exc}")
 
 
-#: Builds a session's exports from the session's layout, scheduler notebook handle, repository, progress and metric.
-ExportsFactory = Callable[[SessionLayout, Notebook, ExperimentRepo, ProgressQuery, str], SessionExports]
+#: Builds a session's exports from the session's layout, scheduler notebook handle, repository, patch store, progress
+#: and metric.
+ExportsFactory = Callable[[SessionLayout, Notebook, ExperimentRepo, PatchStore, ProgressQuery, str], SessionExports]
 
 
 def exports_from_env() -> ExportsFactory:

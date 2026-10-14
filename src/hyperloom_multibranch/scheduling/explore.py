@@ -3,8 +3,8 @@
 
 """EXPLORE: open the opening batch, then let the judge steer the branches until the EXPLORE deadline or a soft stop.
 
-The loop wakes every :data:`EXPLORE_TICK_SECONDS`: it starts the forks the rule gate committed, consults the MB2
-placeholders, and every judge interval asks the judge and applies what it decided; a judge call that has not
+The loop wakes every :data:`EXPLORE_TICK_SECONDS`: it starts the forks and repairs the fork desk admitted, consults
+the MB2 placeholders, and every judge interval asks the judge and applies what it decided; a judge call that has not
 answered by the EXPLORE deadline counts as failed, so it never eats into FINAL. The integrator merges in a
 background task of its own, in rounds as wide as the integration branch's K. When EXPLORE ends that task is
 cancelled and the integrator abandons its round, so the integration head the FINAL candidates are read from no
@@ -38,7 +38,7 @@ from hyperloom_multibranch.scheduling.stops import SessionStopReason
 
 logger = logging.getLogger(__name__)
 
-#: How often the loop starts committed forks and checks the deadline; the judge runs on its own, longer interval.
+#: How often the loop starts admitted forks and repairs and checks the deadline; the judge runs on its own, longer interval.
 EXPLORE_TICK_SECONDS = 5.0
 SIMILAR_BRANCH_REASON = "duplicates another branch"
 
@@ -109,7 +109,7 @@ class Explorer:
         while (now := self._clock.now()) < window.explore_end:
             if merging.done():
                 merging.result()
-            await self._start_forks()
+            await self._start_admitted()
             await self._consult_placeholders(window.root_commit)
             if now >= next_judge:
                 next_judge = now + self._interval
@@ -125,9 +125,9 @@ class Explorer:
             if not await self._integrator.integrate_next(width):
                 await self._clock.sleep(EXPLORE_TICK_SECONDS)
 
-    async def _start_forks(self) -> None:
-        for fork in self._desk.drain():
-            await self._branches.start_fork(fork.branch, fork.fix_commit)
+    async def _start_admitted(self) -> None:
+        for admitted in self._desk.drain():
+            await self._branches.start_admitted(admitted)
 
     async def _consult_placeholders(self, root_commit: str) -> None:
         for branch in mb_fake_similar_branches(self._roster):

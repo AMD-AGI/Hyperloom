@@ -5,9 +5,9 @@
 
 The child is ``hyperloom optimize`` with every optimization lever off, given the whole remaining session budget. Its
 session is read by :mod:`~hyperloom_multibranch.scheduling.prelude_reader` alone and folded into the root recipe,
-which the experiment repository stores as the root commit, and the session profile is written. The baseline the rule
-gate anchors every recorded value to is measured through the toolbox in a second step, once the caller has put the
-integration branch on the roster and given the toolbox its K.
+whose kept patches go to the session's blob store and which the experiment repository stores as the root commit, and
+the session profile is written. The baseline every recorded value is anchored to is measured through the toolbox in a
+second step, once the caller has put the integration branch on the roster and given the toolbox its K.
 """
 
 from __future__ import annotations
@@ -20,14 +20,17 @@ from pathlib import Path
 from hyperloom.common.io import atomic_write_json
 from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom.contracts.recipe import PatchRef, Recipe
+from hyperloom.measure.compile import BlobError
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Notebook
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent, SessionProfile
 from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
-from hyperloom_multibranch.contracts.scheduling import ExperimentRepo, RuleGate
+from hyperloom_multibranch.rulegate.accuracy import BaselineAccuracyError
 from hyperloom_multibranch.scheduling.budget import BudgetExhausted, HardStop, SessionBudget
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
 from hyperloom_multibranch.scheduling.layout import SessionLayout
+from hyperloom_multibranch.scheduling.patches import PatchStore
+from hyperloom_multibranch.scheduling.peers import RootWriter
 from hyperloom_multibranch.scheduling.prelude_reader import (
     PreludeArtifacts,
     PreludeReadError,
@@ -38,6 +41,7 @@ from hyperloom_multibranch.scheduling.prelude_reader import (
 )
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, RegisteredProcess
 from hyperloom_multibranch.scheduling.requests import SessionTests, TestWithdrawn, integration_test_request
+from hyperloom_multibranch.scheduling.rule_judge import MB_FAKE_BASELINE_TESTS, MbFakeRuleJudge, NotMeasured
 from hyperloom_multibranch.scheduling.settings import Workload
 
 #: The ``hyperloom`` console script, run as a module so the child runs on the same install as the scheduler.
@@ -96,18 +100,20 @@ class Prelude:
         layout: SessionLayout,
         processes: ProcessRegistry,
         notebook: Notebook,
-        repo: ExperimentRepo,
+        write_root: RootWriter,
+        patches: PatchStore,
         tests: SessionTests,
-        gate: RuleGate,
+        judge: MbFakeRuleJudge,
         decisions: DecisionLog,
         clock: Clock,
     ) -> None:
         self._layout = layout
         self._processes = processes
         self._notebook = notebook
-        self._repo = repo
+        self._write_root = write_root
+        self._patches = patches
         self._tests = tests
-        self._gate = gate
+        self._judge = judge
         self._decisions = decisions
         self._clock = clock
 
@@ -121,10 +127,10 @@ class Prelude:
         try:
             artifacts = _succeeded(await asyncio.to_thread(read_prelude, child))
             recipe = await self._root_recipe(artifacts, workload.framework)
-        except (PreludeReadError, OSError) as exc:
+        except (PreludeReadError, OSError, BlobError) as exc:
             raise PreludeFailed(f"cannot root the session on the baseline prelude in {child}: {exc}") from exc
         atomic_write_json(self._layout.root_recipe, recipe.to_document())
-        root = await self._repo.init_root(recipe)
+        root = await self._write_root(recipe)
         await self._notebook.record_lineage(
             LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id=root, recipe_digest=recipe.digest())
         )
@@ -187,21 +193,22 @@ class Prelude:
         patches: list[PatchRef] = []
         for kept in artifacts.kept_patches:
             text = await asyncio.to_thread(kept.patch_file.read_text, encoding="utf-8")
-            patches.append(await self._repo.store_patch(framework, text))
+            patches.append(await asyncio.to_thread(self._patches.store, framework, text))
         return await asyncio.to_thread(root_recipe, artifacts, framework, pin, tuple(patches))
 
     async def measure_baseline(self, root: str) -> None:
-        """Measure the baseline on ``root`` through the toolbox and anchor it; raises :class:`PreludeFailed` when a
-        baseline test is withdrawn."""
+        """Measure the baseline on ``root``, accuracy included, through the toolbox and anchor it; raises
+        :class:`PreludeFailed` when a baseline test is withdrawn or the baseline anchors nothing."""
 
-        count = await self._gate.baseline_test_count()
-        request = integration_test_request(TestKind.TEST, Purpose.BASELINE, root)
+        request = integration_test_request(TestKind.TEST, Purpose.BASELINE, root, accuracy=True)
         try:
-            records = await asyncio.gather(*(self._tests.run(request) for _ in range(count)))
+            records = await asyncio.gather(*(self._tests.run(request) for _ in range(MB_FAKE_BASELINE_TESTS)))
+            await self._judge.establish_baseline(root, tuple(records))
         except TestWithdrawn as exc:
             raise PreludeFailed(f"a baseline test was withdrawn: {exc}") from exc
+        except (NotMeasured, BaselineAccuracyError) as exc:
+            raise PreludeFailed(f"the baseline anchors nothing: {exc}") from exc
         request_ids = tuple(record.request_id for record in records)
-        await self._gate.establish_baseline(root, request_ids)
         self._decisions.record(
             Decision(
                 DecisionKind.PRELUDE, "baseline established", INTEGRATION_BRANCH, {"request_ids": list(request_ids)}

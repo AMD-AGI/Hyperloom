@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.contracts.recipe import Recipe
+from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.orchestrator.knowledge.remote_recipe import KBStoreError
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
@@ -33,7 +35,7 @@ from hyperloom_multibranch.scheduling.final import FinalCandidate, FinalChoice
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
 from hyperloom_multibranch.scheduling.processes import ProcessRecord
 from hyperloom_multibranch.scheduling.stops import SessionStopReason, StopReport
-from hyperloom_multibranch.scheduling.tests.peer_fakes import ROOT_COMMIT, MbFakeRepo
+from hyperloom_multibranch.scheduling.patches import PatchStore
 
 __all__ = ["final"]
 
@@ -42,7 +44,9 @@ CLOCK = Clock(now=lambda: NOW)
 HARD_STOP = NOW + 60.0
 #: Real seconds the clock in these tests lets the exports run before the hard stop passes.
 SHORT_GRACE = 0.3
-CHOICE = FinalChoice(FinalCandidate("integration", INTEGRATION_BRANCH, "i1", 1041.0), (), "the higher value")
+#: The commit the scripted session's integration head is at.
+CHOSEN = "i1"
+CHOICE = FinalChoice(FinalCandidate("integration", INTEGRATION_BRANCH, CHOSEN, 1041.0), (), "the higher value")
 LEFTOVER = ProcessRecord(4242, 4242, 0.0, "b01", ("sleep", "600"), "scope")
 
 
@@ -79,6 +83,17 @@ class StuckNotebook:
         raise AssertionError("unreachable")
 
 
+class ChosenRepo:
+    """The experiment repository as CLOSE reads it: the chosen commit's recipe; a test double, not a placeholder."""
+
+    def __init__(self, recipe: Recipe) -> None:
+        self.recipe = recipe
+
+    async def read_recipe(self, commit: str) -> Recipe:
+        assert commit == CHOSEN
+        return self.recipe
+
+
 class UnreachableStore(FakeRecipeStore):
     """A Recipe KB store that cannot be reached; a failure double, not a placeholder."""
 
@@ -103,9 +118,16 @@ def _closer(
     recipe: FinalRecipe,
     kb_client: RemoteRecipeClient | None,
 ) -> Closer:
+    """CLOSE with ``recipe`` committed as :data:`CHOSEN` and its files in the session's blob store."""
+
     progress = FrontierScoring(notebook, FrontierPolicy(metric=METRIC))  # type: ignore[arg-type]
-    repo = MbFakeRepo(recipes={ROOT_COMMIT: recipe.recipe}, checkout_files=recipe.files_root)
-    exports = SessionExports(layout, notebook, repo, progress, METRIC, kb_client=kb_client)  # type: ignore[arg-type]
+    repo = ChosenRepo(recipe.recipe)
+    blobs = LocalBlobStore(layout.blobs)
+    for path in recipe.files_root.rglob("*"):
+        if path.is_file():
+            blobs.put(path.read_bytes())
+    patches = PatchStore(blobs)
+    exports = SessionExports(layout, notebook, repo, patches, progress, METRIC, kb_client=kb_client)  # type: ignore[arg-type]
     return Closer(layout, stopper, exports, CLOCK)  # type: ignore[arg-type]
 
 
@@ -137,7 +159,7 @@ async def test_close_publishes_the_final_recipe_exports_and_stops_everything(
     assert any(row.get("frontier") for row in dashboard["branches"])
     written = json.loads(layout.report.read_text())
     assert (written["stop_reason"], written["stop"]["clean"]) == ("time_exhausted", True)
-    assert written["final"]["chosen"]["commit"] == "i1"
+    assert written["final"]["chosen"]["commit"] == CHOSEN
     assert "Chosen: integration `i1`" in layout.report_markdown.read_text()
 
 

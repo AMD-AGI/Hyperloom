@@ -3,11 +3,12 @@
 
 """The end-to-end skeleton: one session driven in-process on peer stand-ins and a virtual clock.
 
-PRELUDE roots the session on a scripted child session; the judge opens two branches; ``b01`` commits and forks a fix
-onto ``b03`` (a second fork is refused at the cap); ``b02`` commits the best single-branch value, holds a claim and a
-process, and is stopped by the judge; the integrator merges ``c1`` and refuses ``c2``; FINAL weighs the judge-stopped
-``b02`` against the integration head and passes over it, because it degrades at another conc; CLOSE leaves nothing
-running.
+PRELUDE roots the session on a scripted child session in a git repository; the judge opens two branches; ``b01``
+commits ``c1`` through the rule gate and asks for a fork of a fix, which opens ``b03`` at ``c1`` (a second fork is
+refused at the cap); ``b02`` commits ``c2a`` and then ``c2``, the best single-branch value, holds a claim and a process,
+and is stopped by the judge; the integrator merges ``c1`` and refuses ``c2`` and ``c2a``; FINAL weighs the
+judge-stopped ``b02`` against the integration head and passes over it, because it degrades at another conc; CLOSE
+leaves nothing running.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import asyncio
 import json
 import os
 import signal
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -24,36 +26,39 @@ import pytest
 
 from hyperloom.common.proctree import running
 from hyperloom.contracts.recipe import Recipe
+from hyperloom_multibranch.contracts.fork import Admission, AdmissionStatus, ForkRequest
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, LineageKind
-from hyperloom_multibranch.contracts.scheduling import AdmissionStatus, ForkRequest
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.tests.factories import delta, intent
-from hyperloom_multibranch.contracts.notebook.peers import Verdict
+from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.scheduling.budget import SessionBudget
 from hyperloom_multibranch.scheduling.exports import SessionExports
 from hyperloom_multibranch.scheduling.final import INTEGRATION_LABEL
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
 from hyperloom_multibranch.scheduling.lifecycle import CUT_SHORT, Session, SessionOutcome
 from hyperloom_multibranch.scheduling.llm import CompletionFailed
-from hyperloom_multibranch.scheduling.peers import Peers, PeerSetup
+from hyperloom_multibranch.scheduling.peers import Peers, PeerSetup, RootWriter
 from hyperloom_multibranch.scheduling.requests import SessionTests
 from hyperloom_multibranch.scheduling.roster import BranchStatus, RosterCaps, StopCause
 from hyperloom_multibranch.scheduling.settings import RunSettings, Workload
 from hyperloom_multibranch.scheduling.stops import STOP_OVERRAN, SessionStopReason
 from hyperloom_multibranch.scheduling.tests.peer_fakes import (
-    ROOT_COMMIT,
-    MbFakeGate,
+    MAIN_POINT,
+    REPRO_CASE,
     MbFakeHeldRegistry,
     MbFakeLifecycle,
-    MbFakeRepo,
+    MbFakeSpecialist,
+    HeldGitRepo,
     RecordingToolbox,
     ScriptedCompletion,
     SpecialistScript,
     StuckToolbox,
     VirtualClock,
-    judged,
-    merged_delta,
+    held_root_writer,
+    recipe_effect,
+    recipe_tags,
+    tagged,
 )
 from hyperloom_multibranch.scheduling.tests.child_sessions import child_with_patch
 
@@ -65,18 +70,19 @@ STEP_SECONDS = 30.0
 CLAIM_TTL_SECONDS = 1e6
 STOP_REASON = "no gain left"
 CONVERGED_REASON = "every branch is flat"
+#: The root, ``c1`` alone (the integration head once merged) and ``b02``'s head; every other recipe measures 1000.
 CURVES = {
-    ROOT_COMMIT: {CONC: 1000.0, 32: 1400.0},
-    "i1": {CONC: 1040.0, 32: 1500.0},
-    "c2": {CONC: 1065.0, 32: 1300.0},
+    frozenset(): {MAIN_POINT: 1000.0, CONC: 1000.0, 32: 1400.0},
+    frozenset({"c1"}): {MAIN_POINT: 1040.0, CONC: 1040.0, 32: 1500.0},
+    frozenset({"c2a", "c2"}): {MAIN_POINT: 1065.0, CONC: 1065.0, 32: 1300.0},
 }
+FIX_REASON = "fix f1 regresses"
 
 
 def _reply(document: dict[str, object]) -> str:
     return json.dumps(document)
 
 
-MERGE_VERDICTS = {merged_delta("c1").fingerprint(): judged(Verdict.IMPROVED, 4.0, "", 1040.0)}
 OPENING = _reply({"open": 2, "open_k": 9, "branches": [{"branch": INTEGRATION_BRANCH, "k": 2}], "stop": []})
 STEER = _reply({"open": 0, "branches": [{"branch": "b01", "k": 7}], "stop": [{"branch": "b02", "reason": STOP_REASON}]})
 
@@ -101,11 +107,13 @@ class SignallingToolbox(StuckToolbox):
         return await super().cancel_branch(branch_id, reason)
 
 
-class BrokenRepo(MbFakeRepo):
+def no_object_store(path: Path, time: VirtualClock) -> RootWriter:
     """A repository that fails on the root commit with an error the session does not handle; a failure double."""
 
-    async def init_root(self, recipe: Recipe) -> str:
-        raise LookupError("no object store")
+    async def write_root(baseline: Recipe) -> str:
+        raise LookupError(f"no object store at {path}")
+
+    return write_root
 
 
 class SilentModel(ScriptedCompletion):
@@ -127,26 +135,31 @@ class Stage:
     pids: list[int]
     stuck: frozenset[str] = frozenset()
     toolbox_type: type[RecordingToolbox] = RecordingToolbox
-    repo_type: type[MbFakeRepo] = MbFakeRepo
+    root_writer: Callable[[Path, VirtualClock], RootWriter] = held_root_writer
     toolbox: RecordingToolbox = field(init=False)
-    gate: MbFakeGate = field(init=False)
-    repo: MbFakeRepo = field(init=False)
+    specialist: MbFakeSpecialist = field(init=False)
+    repo: HeldGitRepo = field(init=False)
     setup: PeerSetup = field(init=False)
+    forks: list[Admission] = field(default_factory=list)
     signalled_at: float = 0.0
 
     def handle(self, role: Role, branch: str = "") -> LocalNotebook:
         return LocalNotebook(self.layout.notebook, Writer(role, branch or role.value, branch), clock=self.time.now)
 
     def factory(self, setup: PeerSetup) -> Peers:
-        toolbox = self.toolbox_type(self.handle(Role.TOOLBOX), CURVES)
+        toolbox = self.toolbox_type(self.handle(Role.TOOLBOX), recipe_effect(setup.layout.repo, CURVES))
         if isinstance(toolbox, StuckToolbox) and self.stuck:
             toolbox.stuck = self.stuck
         gate_notebook = self.handle(Role.GATE)
+        repo = HeldGitRepo(setup.layout.repo, self.time)
+        gate = RuleGate(gate_notebook, repo, setup.desk)
         tests = SessionTests(toolbox, gate_notebook, self.time.clock)
-        gate = MbFakeGate(gate_notebook, tests, setup.desk, verdicts=MERGE_VERDICTS)
-        repo = self.repo_type()
-        self.toolbox, self.gate, self.repo, self.setup = toolbox, gate, repo, setup
-        return Peers(self.lifecycle, toolbox, gate, repo)
+        self.specialist = MbFakeSpecialist(gate, tests, gate_notebook, repo)
+        self.toolbox, self.repo, self.setup = toolbox, repo, setup
+        return Peers(self.lifecycle, toolbox, repo, self.root_writer(setup.layout.repo, self.time))
+
+    async def root(self) -> str:
+        return (await self.handle(Role.OBSERVER).baseline()).root_commit
 
     async def spawn_specialist_process(self, branch: str) -> None:
         """A process of ``branch``'s specialist, started the way a lifecycle starts one: through the peer setup."""
@@ -181,19 +194,20 @@ def _stage(tmp_path: Path, *, child: Path | None, exit_code: int = 0) -> Stage:
 
 def _scripts(stage: Stage) -> dict[str, SpecialistScript]:
     async def first(branch: str, start: str) -> None:
-        gate = stage.gate
+        specialist = stage.specialist
         await stage.time.sleep(STEP_SECONDS)
-        await gate.commit(branch, start, "c1", 1045.0)
+        await specialist.commit(branch, tagged("c1"), 1045.0)
         await stage.time.sleep(STEP_SECONDS)
-        await gate.fork(branch, "c1", "f1")
-        await gate.fork(branch, "c1", "f2")
+        stage.forks.append(await specialist.fork(branch, tagged("f1"), FIX_REASON))
+        stage.forks.append(await specialist.fork(branch, tagged("f2"), "fix f2 regresses"))
 
     async def second(branch: str, start: str) -> None:
-        gate = stage.gate
+        specialist = stage.specialist
         await stage.time.sleep(STEP_SECONDS)
-        await gate.commit(branch, start, "c2", 1060.0)
+        await specialist.commit(branch, tagged("c2a"), 1010.0)
+        head = await specialist.commit(branch, tagged("c2"), 1060.0)
         runtime = stage.handle(Role.SPECIALIST_RUNTIME, branch)
-        await runtime.acquire(intent(branch, "c2"), delta().fingerprint(), ttl_seconds=CLAIM_TTL_SECONDS)
+        await runtime.acquire(intent(branch, head), delta().fingerprint(), ttl_seconds=CLAIM_TTL_SECONDS)
         await stage.spawn_specialist_process(branch)
         await asyncio.Event().wait()
 
@@ -211,17 +225,15 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
     observer = stage.handle(Role.OBSERVER)
     lineage = await observer.lineage()
     branches = {branch.branch: branch for branch in lineage.branches}
-    assert lineage.commit(ROOT_COMMIT) is not None
-    assert (await observer.baseline()).root_commit == ROOT_COMMIT
+    root, c1, c2 = await stage.root(), await stage.repo.head("b01"), await stage.repo.head("b02")
+    assert lineage.commit(root) is not None and (await stage.repo.read_recipe(root)).components
     assert (await observer.session_profile()).session_id == stage.layout.session_id
     assert [fp.policy_versions["judge_prompt"] for fp in await observer.manifest_fingerprints()] == ["mb1-judge-1"]
 
-    assert stage.lifecycle.started == {"b01": ROOT_COMMIT, "b02": ROOT_COMMIT, "b03": "f1"}
-    assert [admission.status for admission in stage.gate.forks] == [
-        AdmissionStatus.ACCEPTED,
-        AdmissionStatus.REJECTED,
-    ]
-    assert branches["b03"].origin is LineageKind.SPLIT and branches["b03"].from_branch == "b01"
+    assert stage.lifecycle.started == {"b01": root, "b02": root, "b03": c1}
+    assert [admission.status for admission in stage.forks] == [AdmissionStatus.ACCEPTED, AdmissionStatus.REJECTED]
+    assert (branches["b03"].origin, branches["b03"].start_commit) == (LineageKind.OPEN, c1)
+    assert await stage.repo.head("b03") == c1 and FIX_REASON in str(stage.lifecycle.briefs["b03"])
 
     assert stage.lifecycle.k["b01"] == 2
     specialist_ks = [
@@ -243,15 +255,16 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
     assert [claim.status for claim in claims if claim.holder == "b02"] == [ClaimStatus.RELEASED]
 
     merged = {item.commit_id: item.last_merge.outcome.value for item in await observer.committed() if item.last_merge}
-    assert merged["c1"] == "merged" and merged["c2"] == "not_stackable"
-    assert stage.repo.integrated[0][2] == ("c1",)
+    assert merged[c1] == "merged" and merged[c2] == "not_stackable" and len(merged) == 3
+    head = await stage.repo.head(INTEGRATION_BRANCH)
+    assert recipe_tags(await stage.repo.read_recipe(head)) == {"c1"}
 
     assert outcome.final is not None and outcome.final.chosen is not None
-    assert outcome.final.chosen.label == INTEGRATION_LABEL and outcome.final.chosen.commit == "i1"
+    assert outcome.final.chosen.label == INTEGRATION_LABEL and outcome.final.chosen.commit == head
     single = next(check for check in outcome.final.checks if check.candidate.label != INTEGRATION_LABEL)
-    assert (single.candidate.branch, single.candidate.commit) == ("b02", "c2")
-    assert {check.candidate.commit for check in outcome.final.checks} == {"i1", "c2"}
-    assert json.loads(stage.layout.final_record.read_text())["choice"]["chosen"]["commit"] == "i1"
+    assert (single.candidate.branch, single.candidate.commit) == ("b02", c2)
+    assert {check.candidate.commit for check in outcome.final.checks} == {head, c2}
+    assert json.loads(stage.layout.final_record.read_text())["choice"]["chosen"]["commit"] == head
 
     assert all(entry["status"] == BranchStatus.STOPPED.value for entry in roster["entries"])
     assert outcome.close is not None and outcome.close.stop.clean and outcome.close.exports is not None
@@ -302,7 +315,7 @@ async def test_a_stop_signal_skips_to_close_and_stops_every_branch(tmp_path: Pat
     assert sorted(stage.lifecycle.stopped) == ["b01", "b02"]
     assert sorted(stage.toolbox.cancelled) == sorted(("b01", "b02", INTEGRATION_BRANCH))
     assert stage.toolbox.closed == 1
-    late = await stage.gate.desk.admit(ForkRequest("b01", ROOT_COMMIT, "fix after the stop"))
+    late = await stage.setup.desk.request_fork(ForkRequest(await stage.root(), tagged("late"), REPRO_CASE, "late fix"))
     assert late.status is AdmissionStatus.REJECTED
     roster = json.loads(stage.layout.roster.read_text())
     assert roster["closed"] and all(
@@ -406,9 +419,10 @@ async def test_a_judge_soft_stop_ends_explore_early_and_still_runs_final(tmp_pat
     explore_end = SessionBudget.from_hours(SETTINGS.max_hours, START).phases_after_prelude(START).explore_end
     [final_phase] = [row for row in _decisions(stage) if row["kind"] == "phase" and row["reason"] == "final"]
     assert float(str(final_phase["at"])) < explore_end
-    assert [row["commit"] for row in final_phase["detail"]["candidates"]] == [ROOT_COMMIT]
+    root = await stage.root()
+    assert [row["commit"] for row in final_phase["detail"]["candidates"]] == [root]
     assert outcome.final is not None and outcome.final.chosen is not None
-    assert outcome.final.chosen.commit == ROOT_COMMIT
+    assert outcome.final.chosen.commit == root
     assert sorted(stage.lifecycle.stopped) == ["b01", "b02"]
 
 
@@ -428,7 +442,7 @@ async def test_a_first_signal_during_close_cuts_it_short_after_one_close_grace(t
 
 async def test_an_unhandled_error_bounds_close_by_one_close_grace(tmp_path: Path) -> None:
     stage = _stage(tmp_path, child=child_with_patch(tmp_path))
-    stage.toolbox_type, stage.repo_type = StuckToolbox, BrokenRepo
+    stage.toolbox_type, stage.root_writer = StuckToolbox, no_object_store
 
     with pytest.raises(LookupError, match="no object store"):
         await stage.run()
@@ -457,7 +471,7 @@ async def test_a_failed_opening_judge_call_opens_one_branch_at_k_one(tmp_path: P
     outcome = await stage.run()
 
     assert (outcome.stop_reason, outcome.error) == (SessionStopReason.TIME_EXHAUSTED, "")
-    assert stage.lifecycle.started == {"b01": ROOT_COMMIT}
+    assert stage.lifecycle.started == {"b01": await stage.root()}
     assert stage.lifecycle.k == {"b01": 1}
     failed = [row["reason"] for row in _decisions(stage) if row["kind"] == "judge_failed"]
     assert failed and set(failed) == {"kept the status quo"}

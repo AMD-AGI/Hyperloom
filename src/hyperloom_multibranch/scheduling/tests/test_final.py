@@ -7,12 +7,18 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from pathlib import Path
 
-from hyperloom.contracts.measurement import Purpose, TestKind
+from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
+from hyperloom.contracts.recipe import Recipe
+from hyperloom_multibranch.contracts.fork import Admission, ForkRequest, RepairRequest
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
-from hyperloom_multibranch.contracts.notebook.records import BranchProgress
+from hyperloom_multibranch.contracts.notebook.records import BranchProgress, LineageEvent
+from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
 from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
+from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.scheduling.final import (
     CandidateCheck,
     FinalCandidate,
@@ -22,10 +28,21 @@ from hyperloom_multibranch.scheduling.final import (
     pick_final,
     sweep_concs,
 )
+from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_BASE_IMAGE_DIGEST
 from hyperloom_multibranch.scheduling.roster import BranchEntry, BranchKind, BranchOrigin, BranchStop, StopCause
 from hyperloom_multibranch.scheduling.settings import Workload
 from hyperloom_multibranch.scheduling.requests import SessionTests
-from hyperloom_multibranch.scheduling.tests.peer_fakes import Curves, MbFakeGate, RecordingToolbox, VirtualClock
+from hyperloom_multibranch.scheduling.rule_judge import MbFakeRuleJudge
+from hyperloom_multibranch.scheduling.tests.peer_fakes import (
+    MAIN_POINT,
+    Curves,
+    MbFakeSpecialist,
+    RecordingToolbox,
+    VirtualClock,
+    measure_baseline,
+    recipe_effect,
+    tagged,
+)
 from hyperloom_multibranch.toolbox.fake_model import Fate
 
 METRIC = "output_throughput"
@@ -124,54 +141,92 @@ def test_the_sweep_brackets_the_primary_conc() -> None:
 
 
 class Bench:
-    """The toolbox's fake and the rule gate stand-in FINAL validates on, on a virtual clock: each commit measures its
-    value in ``curves`` at a conc, regressions are by commit."""
+    """FINAL's toolbox fake, git repository and rule, on a virtual clock and an anchored notebook.
 
-    def __init__(self, tmp_path: Path, curves: Curves, regressed: frozenset[str] = frozenset()) -> None:
+    ``i1`` (recorded at 1040) is committed on ``b01`` and ``c7`` (recorded at 1060) on ``b02``; what a test of either
+    measures is its curve in ``curves``.
+    """
+
+    def __init__(self, tmp_path: Path) -> None:
+        self.tmp_path = tmp_path
         self.time = VirtualClock(START)
-        notebook = tmp_path / "notebook"
-        self.toolbox = RecordingToolbox(
-            LocalNotebook(notebook, Writer(Role.TOOLBOX, "toolbox"), clock=self.time.now), curves
-        )
-        scheduler = LocalNotebook(notebook, Writer(Role.SCHEDULER, "scheduler"), clock=self.time.now)
+        self.commits: dict[str, str] = {}
+
+    def handle(self, role: Role) -> LocalNotebook:
+        return LocalNotebook(self.tmp_path / "notebook", Writer(role, role.value), clock=self.time.now)
+
+    async def build(self, curves: Curves) -> Bench:
+        self.repo = await GitExperimentRepo.create(self.tmp_path / "repo", Recipe(MB_FAKE_BASE_IMAGE_DIGEST))
+        root = await self.repo.head(INTEGRATION_BRANCH)
+        scheduler = self.handle(Role.SCHEDULER)
+        await scheduler.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id=root))
+        self.toolbox = RecordingToolbox(self.handle(Role.TOOLBOX), recipe_effect(self.tmp_path / "repo", curves))
         self.tests = SessionTests(self.toolbox, scheduler, self.time.clock)
-        self.gate = MbFakeGate(
-            LocalNotebook(notebook, Writer(Role.GATE, "gate"), clock=self.time.now), self.tests, regressed=regressed
-        )
+        self.judge = MbFakeRuleJudge(self.handle(Role.GATE), self.tests)
+        await measure_baseline(self.judge, self.tests, root)
+        for branch, tag, value in (("b01", "i1", 1040.0), ("b02", "c7", 1060.0)):
+            await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, branch, from_commit=root, reason="first"))
+            await self.repo.create_branch(branch, root)
+            specialist = MbFakeSpecialist(
+                RuleGate(self.handle(Role.GATE), self.repo, _NoForks()), self.tests, scheduler, self.repo
+            )
+            self.commits[tag] = await specialist.commit(branch, tagged(tag), value)
+        return self
+
+    def candidates(self, both: bool = True) -> FinalCandidates:
+        integration = replace(INTEGRATION, commit=self.commits["i1"])
+        return FinalCandidates(integration, replace(BRANCH, commit=self.commits["c7"]) if both else None)
 
     def selector(self, record: Path) -> FinalSelector:
-        return FinalSelector(self.tests, self.gate, WORKLOAD, METRIC, record, self.time.clock)
+        return FinalSelector(self.tests, self.judge, WORKLOAD, METRIC, record, self.time.clock)
 
-    def fail(self, commit: str, fate: Fate, conc: int | None = None) -> None:
-        """Every test of ``commit`` (at ``conc`` when given) ends in ``fate``."""
+    def fail(self, tag: str, fate: Fate, conc: int | None = None, kind: TestKind | None = None) -> None:
+        """Every FINAL test of ``tag``'s commit (at ``conc``, of ``kind`` when given) ends in ``fate``."""
 
-        def matches(request: object) -> bool:
-            at = getattr(request, "concurrency", ())
-            return getattr(request, "parent_commit", "") == commit and (conc is None or at == (conc,))
+        commit = self.commits[tag]
+
+        def matches(request: TestRequest) -> bool:
+            at = conc is None or request.concurrency == (conc,)
+            return (
+                request.purpose is Purpose.FINAL
+                and request.parent_commit == commit
+                and at
+                and kind in (None, request.kind)
+            )
 
         self.toolbox.script(matches, [fate] * 4)
+
+    def final_tests(self) -> dict[str, TestRequest]:
+        return {rid: test for rid, test in self.toolbox.requests.items() if test.purpose is Purpose.FINAL}
+
+
+class _NoForks:
+    """Branch requests the scripted specialists here never make; a test double, not a placeholder."""
+
+    async def request_fork(self, request: ForkRequest) -> Admission:
+        raise AssertionError("no fork is asked for here")
+
+    async def request_repair(self, request: RepairRequest) -> Admission:
+        raise AssertionError("no repair is asked for here")
 
 
 async def test_each_candidate_is_swept_accuracy_checked_and_reproduced_as_a_session_measurement(
     tmp_path: Path,
 ) -> None:
-    bench = Bench(
-        tmp_path, {"i1": {32: 900.0, CONC: 1040.0}, "c7": {32: 890.0, CONC: 1060.0}}, regressed=frozenset({"c7"})
-    )
+    curves = {
+        frozenset({"i1"}): {MAIN_POINT: 1040.0, 32: 900.0, CONC: 1040.0},
+        frozenset({"c7"}): {MAIN_POINT: 1000.0, 32: 890.0, CONC: 1060.0},
+    }
+    bench = await Bench(tmp_path).build(curves)
     record = tmp_path / "MB-final.json"
 
-    choice = await bench.selector(record).select(FinalCandidates(INTEGRATION, BRANCH), deadline=START + 3600.0)
+    choice = await bench.selector(record).select(bench.candidates(), deadline=START + 3600.0)
 
-    assert choice.chosen == INTEGRATION
+    assert choice.chosen == bench.candidates().integration
     assert [check.reproduced for check in choice.checks] == [True, False]
     assert dict(choice.checks[0].curve) == {32: 900.0, CONC: 1040.0, 128: 1000.0}
-    requests = sorted(
-        bench.toolbox.requests.values(),
-        key=lambda request: (request.parent_commit, request.kind.value, request.concurrency),
-    )
-    assert [(request.parent_commit, request.kind, request.concurrency) for request in requests] == [
-        (commit, kind, concurrency)
-        for commit in ("c7", "i1")
+    expected = sorted(
+        (kind.value, concurrency)
         for kind, concurrency in (
             (TestKind.ACCURACY, ()),
             (TestKind.TEST, ()),
@@ -179,57 +234,62 @@ async def test_each_candidate_is_swept_accuracy_checked_and_reproduced_as_a_sess
             (TestKind.TEST, (CONC,)),
             (TestKind.TEST, (128,)),
         )
-    ]
-    assert {(request.branch_id, request.purpose) for request in requests} == {(INTEGRATION_BRANCH, Purpose.FINAL)}
-    assert {(request.intent_fingerprint, request.priority) for request in requests} == {(None, None)}
-    assert all(request.accuracy == (request.kind is TestKind.ACCURACY) for request in requests)
+    )
+    tests = bench.final_tests().values()
+    for commit in bench.commits.values():
+        mine = sorted((test.kind.value, test.concurrency) for test in tests if test.parent_commit == commit)
+        assert mine == expected
+    assert {(test.branch_id, test.intent_fingerprint, test.priority) for test in tests} == {
+        (INTEGRATION_BRANCH, None, None)
+    }
+    assert all(test.accuracy == (test.kind is TestKind.ACCURACY) for test in tests)
     written = json.loads(record.read_text())
-    assert written["choice"]["chosen"]["commit"] == "i1"
+    assert written["choice"]["chosen"]["commit"] == bench.commits["i1"]
     assert (written["primary_conc"], written["metric"]) == (CONC, METRIC)
 
 
 async def test_a_withdrawn_test_a_missing_primary_point_or_a_failed_accuracy_disqualifies(tmp_path: Path) -> None:
-    bench = Bench(tmp_path, {"i1": {32: 900.0}, "c7": {CONC: 1060.0}})
+    bench = await Bench(tmp_path).build({frozenset({"i1"}): {MAIN_POINT: 1040.0, 32: 900.0}})
     bench.fail("c7", Fate.MEASUREMENT)
     bench.fail("i1", Fate.CANDIDATE, CONC)
 
-    choice = await bench.selector(tmp_path / "f.json").select(FinalCandidates(INTEGRATION, BRANCH), START + 3600.0)
+    choice = await bench.selector(tmp_path / "f.json").select(bench.candidates(), START + 3600.0)
 
     assert choice.chosen is None
     assert "no output_throughput at the primary conc" in choice.checks[0].error
     assert "withdrawn" in choice.checks[1].error
 
-    bench = Bench(tmp_path / "again", {"i1": {CONC: 1040.0}})
-    bench.gate.inaccurate = frozenset({"i1"})
-    alone = await bench.selector(tmp_path / "g.json").select(FinalCandidates(INTEGRATION, None), START + 3600.0)
-    assert alone.chosen is None and not alone.checks[0].accuracy_passed
+    bench = await Bench(tmp_path / "again").build({frozenset({"i1"}): {MAIN_POINT: 1040.0, CONC: 1040.0}})
+    bench.fail("i1", Fate.CANDIDATE, kind=TestKind.ACCURACY)
+    alone = await bench.selector(tmp_path / "g.json").select(bench.candidates(both=False), START + 3600.0)
+    assert alone.chosen is None and not alone.checks[0].accuracy_passed and alone.checks[0].reproduced
 
 
 async def test_a_candidate_unfinished_at_the_deadline_is_not_eligible_and_its_tests_are_taken_back(
     tmp_path: Path,
 ) -> None:
-    bench = Bench(tmp_path, {})
+    bench = await Bench(tmp_path).build({})
     bench.toolbox.executor.gate.clear()
 
-    choice = await bench.selector(tmp_path / "f.json").select(FinalCandidates(INTEGRATION, None), START + 600.0)
+    choice = await bench.selector(tmp_path / "f.json").select(bench.candidates(both=False), START + 600.0)
 
     assert choice.chosen is None
     assert "deadline" in choice.checks[0].error
-    assert bench.toolbox.withdrawn.keys() == bench.toolbox.requests.keys() and bench.toolbox.requests
+    assert bench.toolbox.withdrawn.keys() == bench.final_tests().keys() and bench.final_tests()
 
 
 async def test_a_withdrawn_test_cancels_the_candidates_other_measurements(tmp_path: Path) -> None:
-    bench = Bench(tmp_path, {})
+    bench = await Bench(tmp_path).build({})
     bench.toolbox.executor.gate.clear()
     selecting = asyncio.ensure_future(
-        bench.selector(tmp_path / "f.json").select(FinalCandidates(INTEGRATION, None), START + 3600.0)
+        bench.selector(tmp_path / "f.json").select(bench.candidates(both=False), START + 3600.0)
     )
-    while len(bench.toolbox.requests) < len(sweep_concs(CONC)) + 2:
+    while len(bench.final_tests()) < len(sweep_concs(CONC)) + 2:
         await asyncio.sleep(0)
-    [accuracy] = [rid for rid, request in bench.toolbox.requests.items() if request.kind is TestKind.ACCURACY]
+    [accuracy] = [rid for rid, request in bench.final_tests().items() if request.kind is TestKind.ACCURACY]
 
     await bench.toolbox.cancel(accuracy)
     choice = await selecting
 
     assert "withdrawn" in choice.checks[0].error
-    assert bench.toolbox.withdrawn.keys() == bench.toolbox.requests.keys()
+    assert bench.toolbox.withdrawn.keys() == bench.final_tests().keys()

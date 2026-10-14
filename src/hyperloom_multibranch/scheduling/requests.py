@@ -45,9 +45,11 @@ def integration_test_request(
     parent_commit: str,
     delta: RecipeDelta = NO_DELTA,
     *,
+    accuracy: bool = False,
     concurrency: tuple[int, ...] = (),
 ) -> TestRequest:
-    """A request on the integration branch measuring ``delta`` from ``parent_commit``.
+    """A request on the integration branch measuring ``delta`` from ``parent_commit``, with accuracy rounds when
+    ``accuracy`` is set.
 
     It names no intent: the session's own tests claim nothing, and the toolbox refuses a request whose intent has no
     claim behind it.
@@ -59,7 +61,7 @@ def integration_test_request(
         branch_id=INTEGRATION_BRANCH,
         parent_commit=parent_commit,
         delta=delta,
-        accuracy=kind is TestKind.ACCURACY,
+        accuracy=accuracy,
         concurrency=concurrency,
     )
 

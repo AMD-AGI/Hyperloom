@@ -177,7 +177,7 @@ def root_recipe(
 ) -> Recipe:
     """The baseline as a recipe: the accepted launch config and ``framework`` pinned with the stored ``patches``.
 
-    ``patches`` are the kept patches as the experiment repository stored them, in the same order. Every kept patch
+    ``patches`` are the kept patches as the session's patch store stored them, in the same order. Every kept patch
     must apply to the framework's own git checkout: a patch on another tree, or on one that is not a git checkout
     (an installed package), has no component to belong to.
     """

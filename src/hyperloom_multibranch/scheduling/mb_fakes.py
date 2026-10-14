@@ -9,26 +9,28 @@ what is left to replace, and each docstring or comment names what it stands in f
 
 from __future__ import annotations
 
-from hyperloom_multibranch.contracts.scheduling import AdmissionStatus, ForkAdmission
+from hyperloom.common.perf_metric import GRADED_OUTPUT
+from hyperloom_multibranch.contracts.fork import Admission, AdmissionStatus
 from hyperloom_multibranch.scheduling.roster import Roster
 
 #: Stands in for the image digest of the root recipe. The main flow builds no image; replaced when enablement or
 #: hosted measurement produce one.
 MB_FAKE_BASE_IMAGE_DIGEST = "sha256:" + "0" * 64
 
-#: Stands in for the recorded-value metric name agreed with the rule gate owner. It feeds the frontier policy, final
-#: selection, the dashboard and the final recipe's metric; replaced by the rule gate's own name once it is fixed.
-MB_FAKE_PRIMARY_METRIC = "output_throughput"
+#: The metric the session's values are read in: the InferenceX rule's throughput. It feeds the frontier policy, final
+#: selection, the dashboard and the final recipe's metric. Stands in for the per-workload choice (AgentX judges P50
+#: interactivity); replaced once the workload names the benchmark it is judged on.
+MB_FAKE_PRIMARY_METRIC = GRADED_OUTPUT
 
 
-def mb_fake_refused_fork(refusal: str) -> ForkAdmission:
-    """The answer to a fork the roster cannot take now (``refusal`` says why): always a rejection.
+def mb_fake_refused_fork(refusal: str) -> Admission:
+    """The answer to a fork or repair the roster cannot take now (``refusal`` says why): always a rejection.
 
-    Stands in for the MB2 fork policy, which keeps such a fork pending and admits it when a slot frees up; replaced
-    when MB2 schedules that queue. A fork is never left pending here.
+    Stands in for the MB2 branch request policy, which keeps such a request pending and starts it first when a slot
+    frees up; replaced when MB2 schedules that queue. A request is never left pending here.
     """
 
-    return ForkAdmission(AdmissionStatus.REJECTED, refusal)
+    return Admission(AdmissionStatus.REJECTED, refusal)
 
 
 def mb_fake_branches_to_add(roster: Roster) -> int:

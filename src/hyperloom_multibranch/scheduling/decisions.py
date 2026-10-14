@@ -5,7 +5,7 @@
 way it did.
 
 The scheduler's log, ``MB-scheduling/MB-decisions.jsonl``, gets every phase change, branch opened, forked,
-re-sized or stopped, judge call, final choice and session stop. The integrator keeps its merges in a log of its own,
+repaired, re-sized or stopped, judge call, final choice and session stop. The integrator keeps its merges in a log of its own,
 ``MB-integration/MB-merges.jsonl``.
 """
 
@@ -26,6 +26,7 @@ class DecisionKind(str, Enum):
     PRELUDE = "prelude"
     OPEN = "open"
     FORK = "fork"
+    REPAIR = "repair"
     SET_K = "set_k"
     STOP = "stop"
     JUDGE = "judge"

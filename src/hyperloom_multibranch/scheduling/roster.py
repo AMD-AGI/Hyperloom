@@ -31,16 +31,17 @@ class BranchKind(str, Enum):
 
 class BranchOrigin(str, Enum):
     """Where a branch's start comes from: the root commit (integration), the opening batch, a later batch that refills
-    freed slots, or a rule-gate fork."""
+    freed slots, or a rule-gate request: a fork for a correctness fix or a repair of a blocked gain."""
 
     ROOT = "root"
     FIRST_BATCH = "first_batch"
     REFILL = "refill"
     FORK = "fork"
+    REPAIR = "repair"
 
 
 class BranchStatus(str, Enum):
-    """``ADMITTED`` is a fork the scheduler accepted whose fix commit the rule gate has not made yet."""
+    """``ADMITTED`` is a fork or repair the scheduler accepted whose specialist has not started yet."""
 
     ADMITTED = "admitted"
     RUNNING = "running"
@@ -70,7 +71,7 @@ class BranchStop:
 
 @dataclass(frozen=True)
 class BranchEntry:
-    """One branch of the roster; ``start_commit`` is empty while an admitted fork waits for its fix commit."""
+    """One branch of the roster; ``start_commit`` is empty while an admitted fork or repair waits to start."""
 
     branch: str
     kind: BranchKind

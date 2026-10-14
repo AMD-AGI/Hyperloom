@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from hyperloom_multibranch.contracts.scheduling import AdmissionStatus
+from hyperloom_multibranch.contracts.fork import Admission, AdmissionStatus
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.mb_fakes import (
     MB_FAKE_BASE_IMAGE_DIGEST,
@@ -25,8 +25,9 @@ def _roster(tmp_path: Path) -> Roster:
 
 
 def test_a_fork_the_roster_cannot_take_is_rejected_never_pending() -> None:
-    answer = mb_fake_refused_fork("the session is stopping")
-    assert (answer.status, answer.reason, answer.branch) == (AdmissionStatus.REJECTED, "the session is stopping", "")
+    assert mb_fake_refused_fork("the session is stopping") == Admission(
+        AdmissionStatus.REJECTED, "the session is stopping"
+    )
 
 
 def test_mb2_policies_are_inert(tmp_path: Path) -> None:

@@ -28,6 +28,7 @@ SCHEDULING_DIR = "MB-scheduling"
 PRELUDE_DIR = "MB-prelude"
 NOTEBOOK_DIR = "MB-notebook"
 REPO_DIR = "MB-repo"
+BLOBS_DIR = "MB-blobs"
 BRANCHES_DIR = "MB-branches"
 TOOLBOX_DIR = "MB-toolbox"
 INTEGRATION_DIR = "MB-integration"
@@ -55,7 +56,7 @@ SESSION_SUBDIRS: tuple[str, ...] = (
     SCHEDULING_DIR,
     PRELUDE_DIR,
     NOTEBOOK_DIR,
-    REPO_DIR,
+    BLOBS_DIR,
     BRANCHES_DIR,
     TOOLBOX_DIR,
     INTEGRATION_DIR,
@@ -94,7 +95,13 @@ class SessionLayout:
 
     @property
     def repo(self) -> Path:
+        """The experiment repository; PRELUDE creates it with the root commit."""
         return self.root / REPO_DIR
+
+    @property
+    def blobs(self) -> Path:
+        """The patch and kernel files the session's recipes name, by content."""
+        return self.root / BLOBS_DIR
 
     @property
     def branches(self) -> Path:
