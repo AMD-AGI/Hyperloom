@@ -6,8 +6,9 @@
 The rule gate module ships the rule as pure functions (:mod:`hyperloom_multibranch.rulegate.inferencex` and
 :mod:`~hyperloom_multibranch.rulegate.accuracy`) and the gate that lands a specialist's candidate; it has no service
 that judges a test the scheduler issued, runs the confirming retest, or establishes the PRELUDE baseline.
-:class:`MbFakeRuleJudge` does that until the rule gate module does. It judges on the InferenceX throughput alone:
-which metric a workload is judged on (InferenceX or AgentX) is not settled yet.
+:class:`MbFakeRuleJudge` does that until the rule gate module does. It judges on the session's one placeholder
+metric, :data:`~hyperloom_multibranch.scheduling.mb_fakes.MB_FAKE_PRIMARY_METRIC`, the InferenceX throughput, so its
+judgements and final selection read the same metric: which one a workload is judged on is not settled yet.
 
 The bar and the accuracy reference are derived from the notebook's baseline record each time, so the notebook stays
 the one owner of the baseline.
@@ -18,13 +19,13 @@ from __future__ import annotations
 import statistics
 from dataclasses import dataclass
 
-from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook import Notebook
 from hyperloom_multibranch.contracts.notebook.records import BaselineRecord, TestRecord
 from hyperloom_multibranch.rulegate.accuracy import baseline_accuracy, inferencex_accuracy_ok
 from hyperloom_multibranch.rulegate.inferencex import DispersionThreshold, compare, confirm
+from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_PRIMARY_METRIC
 from hyperloom_multibranch.scheduling.requests import SessionTests
 
 #: How many baseline tests PRELUDE measures; the rule gate needs at least ``rulegate.inferencex.MIN_BASELINES``, and
@@ -37,7 +38,7 @@ class NotMeasured(Exception):
 
     def __init__(self, record: TestRecord) -> None:
         validity = record.result.validity.value if record.result is not None else "no result"
-        super().__init__(f"{record.request_id} measured no {GRADED_OUTPUT} ({validity})")
+        super().__init__(f"{record.request_id} measured no {MB_FAKE_PRIMARY_METRIC} ({validity})")
         self.request_id = record.request_id
 
 
@@ -57,7 +58,7 @@ def accuracy_score(record: TestRecord) -> float | None:
 
 
 def _measured(record: TestRecord) -> float:
-    value = formal_mean(record, GRADED_OUTPUT)
+    value = formal_mean(record, MB_FAKE_PRIMARY_METRIC)
     if value is None:
         raise NotMeasured(record)
     return value
@@ -90,9 +91,9 @@ class MbFakeRuleJudge:
         reference = _reference(records)
         record = BaselineRecord(
             root_commit,
-            {GRADED_OUTPUT: statistics.fmean(reference.threshold.baselines)},
-            {GRADED_OUTPUT: reference.threshold.spread_pct},
-            {GRADED_OUTPUT: reference.threshold.threshold_pct},
+            {MB_FAKE_PRIMARY_METRIC: statistics.fmean(reference.threshold.baselines)},
+            {MB_FAKE_PRIMARY_METRIC: reference.threshold.spread_pct},
+            {MB_FAKE_PRIMARY_METRIC: reference.threshold.threshold_pct},
             tuple(record.request_id for record in records),
         )
         await self._notebook.write_baseline(record)
