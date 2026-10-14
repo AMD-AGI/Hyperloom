@@ -165,26 +165,48 @@ class MeasurementBackend(Protocol):
 #: The backend used until another is chosen, by import path: the local backend imports this module for its types.
 _DEFAULT_BACKEND = "hyperloom.measure.local:LocalMeasurementBackend"
 
-_lock = threading.Lock()
-_active: MeasurementBackend | None = None
+
+class _Registry:
+    """Holds the chosen backend; ``None`` means the default one."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._backend: MeasurementBackend | None = None
+
+    def set(self, backend: MeasurementBackend | None) -> None:
+        with self._lock:
+            self._backend = backend
+
+    def get(self) -> MeasurementBackend:
+        with self._lock:
+            if self._backend is not None:
+                return self._backend
+        module, _, attribute = _DEFAULT_BACKEND.partition(":")
+        return getattr(importlib.import_module(module), attribute)()
+
+
+_REGISTRY = _Registry()
 
 
 def set_active_backend(backend: MeasurementBackend | None) -> None:
     """Choose the backend ``run_test`` uses; ``None`` returns to the local one."""
-    global _active
-    with _lock:
-        _active = backend
+    _REGISTRY.set(backend)
 
 
 def active_backend() -> MeasurementBackend:
     """The chosen backend, or the local one when none was chosen."""
-    with _lock:
-        if _active is not None:
-            return _active
-    module, _, attribute = _DEFAULT_BACKEND.partition(":")
-    return getattr(importlib.import_module(module), attribute)()
+    return _REGISTRY.get()
 
 
 def run_test(call: TestCall) -> TestOutcome:
-    """Run one complete test through the active measurement backend."""
-    return active_backend().run_test(call)
+    """Run one complete test through the active measurement backend.
+
+    A call with no point or no task id is refused here, and a backend that returns anything but a ``TestOutcome`` is a
+    defect reported at the socket instead of surfacing later in a caller.
+    """
+    if not call.points or not call.task_id:
+        raise ValueError("a test call needs at least one measurement point and a task id")
+    outcome = _REGISTRY.get().run_test(call)
+    if not isinstance(outcome, TestOutcome):
+        raise TypeError(f"a measurement backend must return a TestOutcome, got {type(outcome).__name__}")
+    return outcome

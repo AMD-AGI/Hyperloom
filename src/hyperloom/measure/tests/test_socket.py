@@ -75,3 +75,28 @@ def test_a_call_defaults_to_a_single_point_test_with_no_accuracy(tmp_path):
     call = _call(tmp_path)
 
     assert (call.kind, call.prep, call.accuracy, call.rounds) == ("test", "grid", False, RoundPlan())
+
+
+def test_a_call_without_points_or_a_task_id_is_refused_before_any_backend_runs(tmp_path):
+    backend = _Backend()
+    set_active_backend(backend)
+    call = _call(tmp_path)
+
+    with pytest.raises(ValueError, match="at least one measurement point"):
+        run_test(TestCall(**{**call.__dict__, "points": ()}))
+    with pytest.raises(ValueError, match="task id"):
+        run_test(TestCall(**{**call.__dict__, "task_id": ""}))
+    assert backend.calls == []
+
+
+def test_a_backend_that_returns_something_else_is_a_reported_defect(tmp_path):
+    class Wrong:
+        name = "wrong"
+
+        def run_test(self, call):
+            return 0
+
+    set_active_backend(Wrong())
+
+    with pytest.raises(TypeError, match="must return a TestOutcome, got int"):
+        run_test(_call(tmp_path))
