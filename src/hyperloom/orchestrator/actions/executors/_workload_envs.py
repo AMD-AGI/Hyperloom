@@ -1549,19 +1549,21 @@ def materialize_config_with_envs(
     if is_profile and str(bench.get("framework") or "").lower() == "xdit":
         from ._server_patcher import ensure_xdit_patched_for_tracelens
 
-        xdit_patched = ensure_xdit_patched_for_tracelens()
+        xdit_patch_attempted = _tracelens_patch_enabled()
+        xdit_patched = xdit_patch_attempted and ensure_xdit_patched_for_tracelens()
         if xdit_patched:
             envs["EXTRA_XDIT_ARGS"] = "--profile_wait 1 --profile_capture_phase --profile_with_stack"
             envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "ok"
         else:
             envs["EXTRA_XDIT_ARGS"] = "--profile_wait 1"
-            envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "unavailable"
-            envs["HYPERLOOM_PROFILE_DEGRADED_REASON"] = _TRACELENS_PATCH_UNAVAILABLE
-            log.warning(
-                "TraceLens runtime patch unavailable for framework=xdit; "
-                "profile will omit capture-phase flags and roofline "
-                "analysis may be degraded.",
-            )
+            envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "not_attempted" if not xdit_patch_attempted else "unavailable"
+            if xdit_patch_attempted:
+                envs["HYPERLOOM_PROFILE_DEGRADED_REASON"] = _TRACELENS_PATCH_UNAVAILABLE
+                log.warning(
+                    "TraceLens runtime patch unavailable for framework=xdit; "
+                    "profile will omit capture-phase flags and roofline "
+                    "analysis may be degraded.",
+                )
     profile_num_prompts: int | None = None
     atom_caps: _AtomTracelensCaps | None = None
     # ``(sentinel, flag)`` pairs remembered so the re-assertion at the very end of

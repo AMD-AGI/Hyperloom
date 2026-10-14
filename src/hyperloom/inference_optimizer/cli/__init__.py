@@ -153,6 +153,10 @@ def _normalise_framework_name(value: str | None) -> str:
     return str(value or "").strip().lower().replace("_", "-")
 
 
+_XDIT_MODEL_NAME_ATTR = "xdit_model_name"
+_XDIT_MODEL_NAME_ENV = "XDIT_MODEL_NAME"
+
+
 def _apply_operator_supplied_paths(args: Any, framework: str) -> None:
     """Publish ``--framework-path`` / ``--benchmark-scripts-dir`` as env."""
     fatal: list[str] = []
@@ -194,10 +198,10 @@ def _apply_operator_supplied_paths(args: Any, framework: str) -> None:
             fatal.append(f"{flag} is required for --framework custom (or export {env_name})")
 
     if framework == "xdit":
-        xdit_name = str(getattr(args, "xdit_model_name", None) or "").strip()
-        already_xdit = os.environ.get("XDIT_MODEL_NAME", "").strip()
+        xdit_name = str(getattr(args, _XDIT_MODEL_NAME_ATTR, None) or "").strip()
+        already_xdit = os.environ.get(_XDIT_MODEL_NAME_ENV, "").strip()
         if xdit_name:
-            os.environ["XDIT_MODEL_NAME"] = xdit_name
+            os.environ[_XDIT_MODEL_NAME_ENV] = xdit_name
         elif not already_xdit:
             fatal.append(
                 "--xdit-model-name is required for xDiT runs. "
@@ -230,10 +234,10 @@ def _restore_operator_supplied_paths_from_state(args: Any, state: SharedState) -
         archived = str(getattr(state, "benchmark_backend", "") or "").strip()
         if archived:
             os.environ[BENCHMARK_BACKEND_ENV] = archived
-    if not str(getattr(args, "xdit_model_name", None) or "").strip():
-        archived = str(getattr(state, "xdit_model_name", "") or "").strip()
+    if not str(getattr(args, _XDIT_MODEL_NAME_ATTR, None) or "").strip():
+        archived = str(getattr(state, _XDIT_MODEL_NAME_ATTR, "") or "").strip()
         if archived:
-            os.environ["XDIT_MODEL_NAME"] = archived
+            os.environ[_XDIT_MODEL_NAME_ENV] = archived
 
 
 def _require_custom_entrypoint(framework: str, gpu_type: str | None = None) -> None:
@@ -282,7 +286,7 @@ def _persist_operator_supplied_paths(state: SharedState) -> None:
     state.framework_repo_path = os.environ.get("FRAMEWORK_REPO_PATH", "").strip()
     state.bypass_scripts_dir = os.environ.get("HYPERLOOM_BYPASS_SCRIPTS_DIR", "").strip()
     state.benchmark_backend = os.environ.get(BENCHMARK_BACKEND_ENV, "").strip().lower()
-    state.xdit_model_name = os.environ.get("XDIT_MODEL_NAME", "").strip()
+    state.xdit_model_name = os.environ.get(_XDIT_MODEL_NAME_ENV, "").strip()
 
 
 def _registered_framework_or_exit(requested: str, *, hint: str) -> str:

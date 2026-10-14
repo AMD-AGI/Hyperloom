@@ -796,3 +796,58 @@ def test_the_cli_and_the_orchestrator_read_one_set_of_workload_defaults():
     orchestrator_src = Path(we.__file__).read_text(encoding="utf-8")
     assert "inference_optimizer.cli import parser" not in orchestrator_src
     assert "inference_optimizer.cli.parser" not in orchestrator_src
+
+
+# --- xDiT profile materialization: patch gate, flags, and status envs ---
+
+
+def _xdit_profile_bench(tmp_path, monkeypatch, *, patch_ok):
+    from hyperloom.orchestrator.actions.executors import _server_patcher
+
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "1")
+    monkeypatch.setattr(_server_patcher, "ensure_xdit_patched_for_tracelens", lambda *a, **kw: patch_ok)
+    src = tmp_path / "cfg.yaml"
+    src.write_text(
+        yaml.safe_dump({"benchmark": {"framework": "xdit", "model": "/m", "envs": {"PROFILE": "1"}}}),
+        encoding="utf-8",
+    )
+    return _materialize(src, tmp_path / "out")
+
+
+def test_xdit_profile_patched_sets_capture_flags(monkeypatch, tmp_path):
+    bench = _xdit_profile_bench(tmp_path, monkeypatch, patch_ok=True)
+    args = bench["envs"]["EXTRA_XDIT_ARGS"]
+    assert "--profile_capture_phase" in args
+    assert "--profile_with_stack" in args
+    assert bench["envs"]["HYPERLOOM_TRACELENS_PATCH_STATUS"] == "ok"
+    assert "HYPERLOOM_PROFILE_DEGRADED_REASON" not in bench["envs"]
+
+
+def test_xdit_profile_unpatched_falls_back_to_safe_flags(monkeypatch, tmp_path):
+    bench = _xdit_profile_bench(tmp_path, monkeypatch, patch_ok=False)
+    args = bench["envs"]["EXTRA_XDIT_ARGS"]
+    assert "--profile_wait 1" in args
+    assert "--profile_capture_phase" not in args
+    assert bench["envs"]["HYPERLOOM_TRACELENS_PATCH_STATUS"] == "unavailable"
+    assert bench["envs"]["HYPERLOOM_PROFILE_DEGRADED_REASON"] == we._TRACELENS_PATCH_UNAVAILABLE
+
+
+def test_xdit_profile_kill_switch_skips_patcher(monkeypatch, tmp_path):
+    from hyperloom.orchestrator.actions.executors import _server_patcher
+
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "0")
+    called = []
+    monkeypatch.setattr(_server_patcher, "ensure_xdit_patched_for_tracelens", lambda *a, **kw: called.append(1) or True)
+    src = tmp_path / "cfg.yaml"
+    src.write_text(
+        yaml.safe_dump({"benchmark": {"framework": "xdit", "model": "/m", "envs": {"PROFILE": "1"}}}),
+        encoding="utf-8",
+    )
+    bench = _materialize(src, tmp_path / "out")
+    assert not called
+    assert "--profile_capture_phase" not in bench["envs"].get("EXTRA_XDIT_ARGS", "")
+    assert bench["envs"]["HYPERLOOM_TRACELENS_PATCH_STATUS"] == "not_attempted"

@@ -380,8 +380,9 @@ def ensure_xdit_patched_for_tracelens(
 
     xDiT is an editable install at ``/app/xDiT`` (no pip version);
     version detection matches ``git rev-parse HEAD`` against known
-    image SHAs.  Unknown SHAs try the newest available patch via
-    nearest-lower fallback.
+    image SHAs.  Unknown SHAs are skipped (no patch attempted).
+    The nearest-lower fallback applies only when a known version
+    has no exact patch file.
     """
     plan = _discover_xdit_plan(tracelens_root)
     if plan is None:
