@@ -318,6 +318,11 @@ def test_the_grants_heartbeat_sink_beats_during_a_blocking_call_over_http(rig: R
         server.stop()
 
 
+def _post_json(request: urllib.request.Request) -> Any:
+    with urllib.request.urlopen(request, timeout=10) as response:
+        return json.loads(response.read())
+
+
 async def test_toolbox_calls_run_on_the_loop_the_toolbox_was_registered_from() -> None:
     """The service answers on a loop of its own per request; a test the toolbox starts there would die with it."""
     home = asyncio.get_running_loop()
@@ -359,7 +364,7 @@ async def test_toolbox_calls_run_on_the_loop_the_toolbox_was_registered_from() -
                 "params": {"name": tool, "arguments": arguments},
             }
             request = urllib.request.Request(server.url, json.dumps(message).encode(), {"X-Hyperloom-Token": token})
-            reply = await asyncio.to_thread(lambda r=request: json.loads(urllib.request.urlopen(r, timeout=10).read()))
+            reply = await asyncio.to_thread(_post_json, request)
             assert reply["result"]["isError"] is False, reply
     finally:
         server.stop()
