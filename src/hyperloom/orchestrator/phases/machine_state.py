@@ -1603,7 +1603,7 @@ def _sweep_exit(inputs: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
                 return "sweep_failed", evidence
         return "sweep_done", evidence
     # Anything else -- nothing landed yet, or a sweep the orchestrator cancelled -- leaves the phase to its budget:
-    # a cancelled sweep was stopped by the transition that budget (or a session-wide stop) already decided on.
+    # a cancelled sweep was stopped by a session-wide stop that already decided the run is over.
     return _budget_exit(
         dict(inputs.get("budget") or {}),
         exhausted_reason="sweep_budget_exhausted",
@@ -1722,7 +1722,7 @@ def _skip_to_close_reason(
 def _holds_for_initial_analysis(baseline: dict[str, Any]) -> bool:
     """Whether the phase must stay open for an initial roofline it enqueued but has not booked yet.
 
-    The transition barrier stops every running action, so leaving now would kill that analysis.
+    Leaving now would hand that analysis to the next phase instead of seeding this one with it.
     The hold is bounded by the optimization reserve, which it must never eat into.
     """
     if not bool(baseline.get("initial_analysis_pending")):

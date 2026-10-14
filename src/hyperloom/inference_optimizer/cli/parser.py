@@ -7,11 +7,11 @@ from __future__ import annotations
 
 import argparse
 import os
-from math import isfinite
 from pathlib import Path
 from typing import NoReturn
 
 from .. import framework_registry
+from .constraint_args import add_constraint_arguments, positive_watts_arg
 from .backends import CRITIC_PROTOCOL_CHOICES
 from .recover import add_cleanup_confirmation_arguments
 from hyperloom.common import predictor_config
@@ -106,33 +106,6 @@ def _positive_int_arg(value: str) -> int:
         raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}") from exc
     if parsed <= 0:
         raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}")
-    return parsed
-
-
-def _positive_ms_arg(value: str) -> float:
-    """argparse type for a millisecond ceiling.
-
-    The gate this feeds fails closed, so its switch must not fail open: an
-    unusable value has to stop the launch rather than resolve to "no budget" and
-    leave the operator believing an SLA is enforced.
-    """
-    try:
-        parsed = float(str(value).strip())
-    except (TypeError, ValueError) as exc:
-        raise argparse.ArgumentTypeError(f"expected a positive number of milliseconds, got {value!r}") from exc
-    if not isfinite(parsed) or parsed <= 0:
-        raise argparse.ArgumentTypeError(f"expected a positive number of milliseconds, got {value!r}")
-    return parsed
-
-
-def _positive_watts_arg(value: str) -> float:
-    """argparse type for a power in watts; an unusable value stops the launch rather than skipping the check."""
-    try:
-        parsed = float(str(value).strip())
-    except (TypeError, ValueError) as exc:
-        raise argparse.ArgumentTypeError(f"expected a positive number of watts, got {value!r}") from exc
-    if not isfinite(parsed) or parsed <= 0:
-        raise argparse.ArgumentTypeError(f"expected a positive number of watts, got {value!r}")
     return parsed
 
 
@@ -591,23 +564,10 @@ def _build_parser() -> argparse.ArgumentParser:
             "independently of --target-gain / --target-tput / --target-baseline-dir."
         ),
     )
-    # Outside the group as well, and for a stronger reason than --target-roofline: this is a constraint rather than
-    # an objective. It does not say when to stop, it says which winners are admissible, so it composes with whichever
-    # target is in use instead of competing with one.
-    opt.add_argument(
-        "--max-latency-ms",
-        type=_positive_ms_arg,
-        default=None,
-        help=(
-            "Scriptable frameworks (xdit, custom) only. Refuse any KEEP whose mean "
-            "end-to-end latency exceeds N ms. Off by default. A candidate that "
-            "reported no end-to-end latency is refused too, since an unmeasured "
-            "constraint is not a satisfied one."
-        ),
-    )
+    add_constraint_arguments(opt)
     opt.add_argument(
         "--gpu-power-cap-w",
-        type=_positive_watts_arg,
+        type=positive_watts_arg,
         default=None,
         help=(
             "Declare the power cap (W) the GPUs are already set to. An assertion, not a request: the optimizer "

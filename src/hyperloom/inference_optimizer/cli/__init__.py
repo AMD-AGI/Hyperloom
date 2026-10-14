@@ -55,6 +55,8 @@ from ..model_config_utils import (
     summarize_model_config,
 )
 from .bootstrap import (
+    constraint_budget_resume_conflict,
+    resolve_launch_gpu_power,
     _begin_resume_leg,
     _resume_budget_lines,
     _print_final_summary,
@@ -63,7 +65,6 @@ from .bootstrap import (
     _seed_shared_state,
     _snapshot_system_prompts,
     agentx_state_is_stale,
-    latency_budget_resume_conflict,
     resolve_gpu_power_settings,
     latency_budget_scope_error,
     parse_operator_extra_env,
@@ -1975,7 +1976,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # Checked before any resume step persists state, so a refused resume leaves the session as it was.
         _resume_conflict = (
             latency_budget_scope_error(state.framework, getattr(args, "max_latency_ms", None))
-            or latency_budget_resume_conflict(state, getattr(args, "max_latency_ms", None))
+            or constraint_budget_resume_conflict(args, state)
             or _custom_specialist_conflict(args, state)
         )
         if _resume_conflict:
@@ -2395,14 +2396,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             model_path=str(args.model or os.environ.get("MODEL_PATH") or ""),
             precision=getattr(args, "precision", None),
         )
-        gpu_power, _gpu_power_error = resolve_gpu_power_settings(
-            power_cap_w=getattr(args, "gpu_power_cap_w", None),
-            perf_level=getattr(args, "gpu_perf_level", None),
-            nodes=nodes_resolved,
-        )
-        if _gpu_power_error:
-            print(f"ERROR: {_gpu_power_error}.", file=sys.stderr)
-            sys.exit(2)
+        gpu_power = resolve_launch_gpu_power(args, nodes=nodes_resolved)
         _publish_gpu_power_settings(gpu_power)
         state = _seed_shared_state(
             session_dir,

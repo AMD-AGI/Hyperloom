@@ -89,10 +89,17 @@ filter, not the set the LLM can propose. The LLM-proposable set is
 refreshes and close sequencing may be enqueued internally even when the LLM
 is not allowed to propose them.
 
-Every phase transition is a GPU barrier: the Coordinator stops every running
-action and drops queued work the next phase does not support, and commits the
-transition only once no task is left running. Each phase therefore starts on
-quiet GPUs, and its entry hook runs on the transition itself.
+Every phase transition is a GPU barrier: the Coordinator stops admitting new
+work, drops queued work the next phase does not support, and commits the
+transition only once the actions already running have finished and been
+booked. A phase budget never cancels running work -- the last action in
+flight, such as a GEAK rebench, completes and settles its result. Running
+work is cancelled only when the run is already over: a terminal transition to
+CLOSE (a recorded stop reason such as an unhealthy backend, a failed baseline,
+convergence or `skip_to_close`), an exhausted session budget, a shutdown or an
+operator interrupt. Each
+phase therefore starts on quiet GPUs, and its entry hook runs on the
+transition itself.
 
 ## PRELUDE
 
@@ -252,6 +259,54 @@ start (and to resume) if a card it uses is at a different value. The observed
 cap and perf level are recorded in the platform fingerprint whether or not
 they are asserted. Neither can be checked on a multi-node session, so asserting
 one there refuses.
+
+### Power budget (constraint on KEEP)
+
+Two budgets bound a round's GPU power, for the serving frameworks:
+
+- `--max-power-w N` caps the serving GPUs' total: the sum of each serving
+  card's mean power over the measured phase (for example 2800 W for four cards
+  budgeted at 700 W each).
+- `--max-per-gpu-power-w GPU_ID W`, repeated once per card, caps one card by
+  its physical `amd-smi` index. A serving card with no entry is bound only by
+  the total, and a listed card that did not serve a round is not judged on it.
+
+The session refuses to start (exit 2) if a listed GPU is not one it can use
+(its visible-device mask, or every card `amd-smi` reports when there is no
+mask), or if the per-GPU limits add up to more than `--max-power-w`. Either
+budget is refused, at launch and on resume, when no round could be measured: on
+a multi-node session (the sampler reads only its own host's cards), on a
+scriptable framework (`xdit`, `custom`: the sampler follows a server's measured
+phase, and a scriptable round runs no server), with
+`HYPERLOOM_GPU_POWER_SAMPLING=0`, or without `amd-smi` on `PATH`. Resuming with
+different values is refused.
+
+Both ride the same verdict as `--max-latency-ms`: a candidate that would
+otherwise KEEP is a REVERT with `veto_reason` `gpu_power_budget_exceeded` when a
+card is over its own limit, `power_budget_exceeded` when the total is over, or
+`power_unmeasured` when its round reported no per-GPU power (fail closed).
+Every KEEP decision point reads that verdict, so a lane reverts its own
+over-budget change; the correctness-fix route, which can KEEP a verified fix
+after that verdict reverted it, applies the same budgets itself. If the baseline itself breaks a budget, or reported no
+power, the run stops with `baseline_over_power_budget`. The reading is the
+measured-phase per-GPU figure described above, carried as `gpu_power_by_gpu_w`;
+only Hyperloom's own sampler reads every serving card, so a round it did not
+sample counts as unmeasured. So does a round in which a card that may be
+serving could not be read: one holding a model with no power reading (`N/A`, or
+a 0 W or negative socket power, which no working sensor reports), or one in
+scope (the visible-device mask, or every card `amd-smi` reported) whose VRAM was
+never read. Such cards are listed as `unread_gpus` in `gpu_power.json`, since a
+card missing from the readings would drop out of the total and escape its own
+limit. A GEAK replay boots its own server once per
+replica, so its phases are read from the server logs the replay writes, with
+the same markers, and each new log counts as a fresh boot.
+
+The budgets are on average draw at the deployed cap, the shape of a
+power-provisioned rack where cards keep their full cap for headroom: the total
+is the rack's share, and a per-GPU limit covers a card with less headroom, such
+as one in a hotter slot. To tune
+for a lower hardware cap instead, set that cap with `amd-smi set` and assert it
+with `--gpu-power-cap-w`; no ceiling is needed.
 
 ### Runnable gate (earned KEEP)
 

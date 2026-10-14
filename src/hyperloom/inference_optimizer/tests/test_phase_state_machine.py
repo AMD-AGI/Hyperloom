@@ -139,7 +139,7 @@ def test_prelude_blocked_while_warm_replay_in_flight():
 
 
 def test_prelude_waits_for_the_initial_analysis():
-    """The transition barrier stops running actions, so leaving early kills the roofline the baseline enqueued."""
+    """Leaving before the initial roofline is booked hands that analysis to the next phase instead of seeding this one."""
     state = SharedState(
         phase="PRELUDE",
         phase_budget_pct={},
