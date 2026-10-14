@@ -323,7 +323,8 @@ class MbFakeLifecycle:
 
 
 #: What a recipe measures, by the tags its server arguments carry: its primary-metric value per conc, the main
-#: operating point under :data:`MAIN_POINT`; a recipe or conc not named measures :data:`BASELINE_VALUE`.
+#: operating point under :data:`MAIN_POINT`; a recipe or conc not named measures :data:`BASELINE_VALUE`. The fake
+#: toolbox measures one value per request, so a test over several concs measures, at each, the value of its middle conc.
 Curves = Mapping[frozenset[str], Mapping[int, float]]
 MAIN_POINT = 0
 
@@ -356,7 +357,8 @@ def recipe_effect(repo: Path, curves: Curves) -> Callable[[TestRequest], float]:
 
     def effect(request: TestRequest) -> float:
         tags = recipe_tags(apply(_committed_recipe(repo, request.parent_commit), request.delta))
-        conc = request.concurrency[0] if request.concurrency else MAIN_POINT
+        concs = sorted(request.concurrency)
+        conc = concs[len(concs) // 2] if concs else MAIN_POINT
         return curves.get(tags, {}).get(conc, BASELINE_VALUE) / BASELINE_VALUE - 1.0
 
     return effect

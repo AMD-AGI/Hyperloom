@@ -9,11 +9,11 @@ import asyncio
 from dataclasses import replace
 from pathlib import Path
 
-from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
+from hyperloom.contracts.measurement import Purpose, RoundValue, TestKind, TestRequest, TestResult, Validity
 from hyperloom.contracts.recipe import Recipe
 from hyperloom_multibranch.contracts.fork import Admission, ForkRequest, RepairRequest
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
-from hyperloom_multibranch.contracts.notebook.records import BranchProgress, LineageEvent
+from hyperloom_multibranch.contracts.notebook.records import BranchProgress, LineageEvent, TestRecord
 from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
@@ -26,6 +26,7 @@ from hyperloom_multibranch.scheduling.final import (
     choose_candidates,
     pick_final,
     sweep_concs,
+    sweep_curve,
 )
 from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_BASE_IMAGE_DIGEST
 from hyperloom_multibranch.scheduling.roster import BranchEntry, BranchKind, BranchOrigin, BranchStop, StopCause
@@ -139,6 +140,22 @@ def test_the_sweep_brackets_the_primary_conc() -> None:
     assert sweep_concs(1) == (1, 2)
 
 
+def test_a_sweep_is_read_per_conc_from_its_measured_rounds() -> None:
+    rounds = (
+        RoundValue("warmup", 32, {METRIC: 1.0}),
+        RoundValue("measure", 32, {METRIC: 900.0}),
+        RoundValue("measure", 32, {METRIC: 910.0}),
+        RoundValue("measure", CONC, {METRIC: 1040.0}),
+        RoundValue("measure", 128, {"ttft": 3.0}),
+        RoundValue("measure", None, {METRIC: 5.0}),
+    )
+    request = TestRequest(TestKind.SWEEP, Purpose.FINAL, INTEGRATION_BRANCH, "i1", concurrency=(32, CONC, 128))
+    record = TestRecord(request, TestResult("r1", Validity.SUCCEEDED, rounds=rounds))
+
+    assert sweep_curve(record, METRIC) == {32: 905.0, CONC: 1040.0}
+    assert sweep_curve(TestRecord(request), METRIC) == {}
+
+
 class Bench:
     """FINAL's toolbox fake, git repository and rule, on a virtual clock and an anchored notebook.
 
@@ -179,19 +196,14 @@ class Bench:
     def selector(self) -> FinalSelector:
         return FinalSelector(self.tests, self.judge, WORKLOAD, METRIC, self.time.clock)
 
-    def fail(self, tag: str, fate: Fate, conc: int | None = None, kind: TestKind | None = None) -> None:
-        """Every FINAL test of ``tag``'s commit (at ``conc``, of ``kind`` when given) ends in ``fate``."""
+    def fail(self, tag: str, fate: Fate, kind: TestKind | None = None) -> None:
+        """Every FINAL test of ``tag``'s commit (of ``kind`` when given) ends in ``fate``."""
 
         commit = self.commits[tag]
 
         def matches(request: TestRequest) -> bool:
-            at = conc is None or request.concurrency == (conc,)
-            return (
-                request.purpose is Purpose.FINAL
-                and request.parent_commit == commit
-                and at
-                and kind in (None, request.kind)
-            )
+            final = request.purpose is Purpose.FINAL and request.parent_commit == commit
+            return final and kind in (None, request.kind)
 
         self.toolbox.script(matches, [fate] * 4)
 
@@ -213,23 +225,21 @@ async def test_each_candidate_is_swept_accuracy_checked_and_reproduced_as_a_sess
     tmp_path: Path,
 ) -> None:
     curves = {
-        frozenset({"i1"}): {MAIN_POINT: 1040.0, 32: 900.0, CONC: 1040.0},
-        frozenset({"c7"}): {MAIN_POINT: 1000.0, 32: 890.0, CONC: 1060.0},
+        frozenset({"i1"}): {MAIN_POINT: 1040.0, CONC: 1040.0},
+        frozenset({"c7"}): {MAIN_POINT: 1000.0, CONC: 1060.0},
     }
     bench = await Bench(tmp_path).build(curves)
     choice = await bench.selector().select(bench.candidates(), deadline=START + 3600.0)
 
     assert choice.chosen == bench.candidates().integration
     assert [check.reproduced for check in choice.checks] == [True, False]
-    assert dict(choice.checks[0].curve) == {32: 900.0, CONC: 1040.0, 128: 1000.0}
+    assert dict(choice.checks[0].curve) == {32: 1040.0, CONC: 1040.0, 128: 1040.0}
     expected = sorted(
         (kind.value, concurrency)
         for kind, concurrency in (
             (TestKind.ACCURACY, ()),
             (TestKind.TEST, ()),
-            (TestKind.TEST, (32,)),
-            (TestKind.TEST, (CONC,)),
-            (TestKind.TEST, (128,)),
+            (TestKind.SWEEP, sweep_concs(CONC)),
         )
     )
     tests = bench.final_tests().values()
@@ -244,9 +254,9 @@ async def test_each_candidate_is_swept_accuracy_checked_and_reproduced_as_a_sess
 
 
 async def test_a_withdrawn_test_a_missing_primary_point_or_a_failed_accuracy_disqualifies(tmp_path: Path) -> None:
-    bench = await Bench(tmp_path).build({frozenset({"i1"}): {MAIN_POINT: 1040.0, 32: 900.0}})
+    bench = await Bench(tmp_path).build({frozenset({"i1"}): {MAIN_POINT: 1040.0}})
     bench.fail("c7", Fate.MEASUREMENT)
-    bench.fail("i1", Fate.CANDIDATE, CONC)
+    bench.fail("i1", Fate.CANDIDATE, TestKind.SWEEP)
 
     choice = await bench.selector().select(bench.candidates(), START + 3600.0)
 
@@ -255,7 +265,7 @@ async def test_a_withdrawn_test_a_missing_primary_point_or_a_failed_accuracy_dis
     assert "withdrawn" in choice.checks[1].error
 
     bench = await Bench(tmp_path / "again").build({frozenset({"i1"}): {MAIN_POINT: 1040.0, CONC: 1040.0}})
-    bench.fail("i1", Fate.CANDIDATE, kind=TestKind.ACCURACY)
+    bench.fail("i1", Fate.CANDIDATE, TestKind.ACCURACY)
     alone = await bench.selector().select(bench.candidates(both=False), START + 3600.0)
     assert alone.chosen is None and not alone.checks[0].accuracy_passed and alone.checks[0].reproduced
 
@@ -277,7 +287,7 @@ async def test_a_withdrawn_test_cancels_the_candidates_other_measurements(tmp_pa
     bench = await Bench(tmp_path).build({})
     bench.toolbox.executor.gate.clear()
     selecting = asyncio.ensure_future(bench.selector().select(bench.candidates(both=False), START + 3600.0))
-    while len(bench.final_tests()) < len(sweep_concs(CONC)) + 2:
+    while len(bench.final_tests()) < 3:
         await asyncio.sleep(0)
     [accuracy] = [rid for rid, request in bench.final_tests().items() if request.kind is TestKind.ACCURACY]
 

@@ -4,9 +4,11 @@
 """FINAL: which commit the session hands on, the integration head or the best single branch's head.
 
 The candidates are the integration head and the specialist head with the highest recorded value, whatever stopped
-its branch. Each is validated through the toolbox as a session measurement: a concurrency sweep around the workload's
-conc (one test per conc, :data:`SWEEP_FACTORS`), an accuracy test held to the accuracy gate, and a cold-start
-reproduction judged by the rule against the commit's own recorded value. The primary operating point (the workload's conc) decides; a candidate
+its branch. Each is validated through the toolbox as a session measurement: one ``SWEEP`` test over the concs
+:data:`SWEEP_FACTORS` places around the workload's conc, read per conc from its rounds, an accuracy test held to the
+accuracy gate, and a cold-start reproduction judged by the rule against the commit's own recorded value. The toolbox
+measures a sweep over the concs its request names and the primary one alone when it names none, so FINAL names them.
+The primary operating point (the workload's conc) decides; a candidate
 whose other sweep points fall more than :data:`MB_SWEEP_DEGRADATION_PCT` below the other candidate's at the same conc
 is passed over while the other one does not degrade in turn.
 """
@@ -14,6 +16,8 @@ is passed over while the other one does not degrade in turn.
 from __future__ import annotations
 
 import asyncio
+import statistics
+from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -26,7 +30,7 @@ from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.mb_fakes import mb_fake_regression_passes
 from hyperloom_multibranch.scheduling.requests import SessionTests, TestWithdrawn, integration_test_request
 from hyperloom_multibranch.scheduling.roster import BranchEntry, BranchKind
-from hyperloom_multibranch.scheduling.rule_judge import MbFakeRuleJudge, NotMeasured, formal_mean
+from hyperloom_multibranch.scheduling.rule_judge import MbFakeRuleJudge, NotMeasured
 from hyperloom_multibranch.scheduling.settings import Workload
 
 #: How far below the other candidate a non-primary sweep point may fall before the candidate is passed over.
@@ -43,6 +47,16 @@ def sweep_concs(conc: int) -> tuple[int, ...]:
     """The concs FINAL sweeps around ``conc``, ascending."""
 
     return tuple(sorted({max(round(conc * factor), 1) for factor in SWEEP_FACTORS}))
+
+
+def sweep_curve(record: TestRecord, metric: str) -> dict[int, float]:
+    """The mean of ``metric`` over a sweep's measured rounds at each conc; a conc it measured nothing at is left out."""
+
+    values: defaultdict[int, list[float]] = defaultdict(list)
+    for row in record.result.rounds if record.result is not None else ():
+        if row.phase == "measure" and row.concurrency is not None and metric in row.metrics:
+            values[row.concurrency].append(row.metrics[metric])
+    return {conc: statistics.fmean(measured) for conc, measured in values.items()}
 
 
 @dataclass(frozen=True)
@@ -231,13 +245,8 @@ class FinalSelector:
         return check
 
     async def _sweep(self, commit: str) -> dict[int, float]:
-        points = {
-            conc: asyncio.ensure_future(self._measure(TestKind.TEST, commit, concurrency=(conc,)))
-            for conc in sweep_concs(self._workload.conc)
-        }
-        await _together(*points.values())
-        values = {conc: formal_mean(point.result(), self._metric) for conc, point in points.items()}
-        return {conc: value for conc, value in values.items() if value is not None}
+        swept = await self._measure(TestKind.SWEEP, commit, concurrency=sweep_concs(self._workload.conc))
+        return sweep_curve(swept, self._metric)
 
     async def _measure(self, kind: TestKind, commit: str, concurrency: tuple[int, ...] = ()) -> TestRecord:
         accuracy = kind is TestKind.ACCURACY
@@ -262,4 +271,5 @@ __all__ = [
     "choose_candidates",
     "pick_final",
     "sweep_concs",
+    "sweep_curve",
 ]

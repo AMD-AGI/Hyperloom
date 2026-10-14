@@ -7,8 +7,8 @@ PRELUDE roots the session on a scripted child session in a git repository; the j
 commits ``c1`` through the rule gate and asks for a fork of a fix, which opens ``b03`` at ``c1`` (a second fork is
 refused at the cap); ``b02`` commits ``c2a`` and then ``c2``, the best single-branch value, holds a claim and a process,
 and is stopped by the judge; the integrator merges ``c1`` and refuses ``c2`` and ``c2a``; FINAL weighs the
-judge-stopped ``b02`` against the integration head and passes over it, because it degrades at another conc; CLOSE
-leaves nothing running.
+judge-stopped ``b02`` against the integration head and passes over it, because its head does not reproduce its
+recorded value; CLOSE leaves nothing running.
 """
 
 from __future__ import annotations
@@ -75,11 +75,12 @@ STEP_SECONDS = 30.0
 CLAIM_TTL_SECONDS = 1e6
 STOP_REASON = "no gain left"
 CONVERGED_REASON = "every branch is flat"
-#: The root, ``c1`` alone (the integration head once merged) and ``b02``'s head; every other recipe measures 1000.
+#: The root, ``c1`` alone (the integration head once merged) and ``b02``'s head, which sweeps higher than the
+#: integration head but measures below its recorded 1060 when reproduced; every other recipe measures 1000.
 CURVES = {
-    frozenset(): {MAIN_POINT: 1000.0, CONC: 1000.0, 32: 1400.0},
-    frozenset({"c1"}): {MAIN_POINT: 1040.0, CONC: 1040.0, 32: 1500.0},
-    frozenset({"c2a", "c2"}): {MAIN_POINT: 1065.0, CONC: 1065.0, 32: 1300.0},
+    frozenset(): {MAIN_POINT: 1000.0, CONC: 1000.0},
+    frozenset({"c1"}): {MAIN_POINT: 1040.0, CONC: 1040.0},
+    frozenset({"c2a", "c2"}): {MAIN_POINT: 1000.0, CONC: 1065.0},
 }
 FIX_REASON = "fix f1 regresses"
 
@@ -270,6 +271,7 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
     assert outcome.final.chosen.label == INTEGRATION_LABEL and outcome.final.chosen.commit == head
     single = next(check for check in outcome.final.checks if check.candidate.label != INTEGRATION_LABEL)
     assert (single.candidate.branch, single.candidate.commit) == ("b02", c2)
+    assert single.curve[CONC] > outcome.final.checks[0].curve[CONC] and not single.reproduced
     assert {check.candidate.commit for check in outcome.final.checks} == {head, c2}
     breakdown = json.loads((stage.layout.reports / "session_breakdown.json").read_text())
     assert breakdown["close"]["final"]["commit_id"] == head
