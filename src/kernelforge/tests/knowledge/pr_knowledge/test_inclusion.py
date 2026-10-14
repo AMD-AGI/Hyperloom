@@ -33,9 +33,9 @@ def _repo(tmp_path: Path) -> Path:
     return root
 
 
-def _commit(root: Path, subject: str, body: str = "", name: str | None = None) -> str:
-    """Write ``subject`` to file ``name`` (a new one by default), commit it under ``subject`` and return the new sha."""
-    (root / (name or f"{uuid.uuid4().hex}.txt")).write_text(subject)
+def _commit(root: Path, subject: str, body: str = "", name: str | None = None, content: str | None = None) -> str:
+    """Write ``content`` (``subject`` by default) to file ``name`` (a new one by default), commit it and return the sha."""
+    (root / (name or f"{uuid.uuid4().hex}.txt")).write_text(subject if content is None else content)
     git("add", "-A", cwd=root)
     git("commit", "--quiet", "-m", subject, *(("-m", body) if body else ()), cwd=root)
     return _head(root)
@@ -178,6 +178,24 @@ def test_an_edited_backport_without_the_suffix_still_reads_as_not_included(tmp_p
     (root / picked).write_text("Fuse the epilogue, adapted to the fork")
     git("commit", "--quiet", "--all", "-m", "[ROCm] Port the epilogue fusion", cwd=root)
 
+    assert _probe(root, 42, upstream).inclusion is Inclusion.NOT_INCLUDED
+
+
+def test_a_clean_backport_next_to_a_fork_change_still_reads_as_not_included(tmp_path):
+    """The known limit: a patch-id hashes the context lines, and the fork changed one next to the hunk."""
+
+    def kernel(changed: dict[int, str]) -> str:
+        return "".join(changed.get(index, f"line {index}\n") for index in range(40))
+
+    root = _repo(tmp_path)
+    base = _commit(root, "Add the kernel", name="kernel.py", content=kernel({}))
+    upstream = _commit(root, "Fuse the epilogue (#42)", name="kernel.py", content=kernel({20: "fused\n"}))
+    git("checkout", "--quiet", "-b", "fork", base, cwd=root)
+    _commit(root, "Tune the kernel for ROCm", name="kernel.py", content=kernel({18: "rocm\n"}))
+    git("cherry-pick", upstream, cwd=root)
+    git("commit", "--quiet", "--amend", "-m", "[ROCm] Port the epilogue fusion", cwd=root)
+
+    assert (root / "kernel.py").read_text() == kernel({18: "rocm\n", 20: "fused\n"})
     assert _probe(root, 42, upstream).inclusion is Inclusion.NOT_INCLUDED
 
 
