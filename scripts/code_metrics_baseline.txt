@@ -739,7 +739,7 @@ function-lines src/hyperloom/orchestrator/loop/coordinator.py::_infer_model_clas
 function-lines src/hyperloom/orchestrator/loop/dispatcher.py::DispatcherCollaborator._spawn_fitting_queued 242
 function-lines src/hyperloom/orchestrator/loop/dispatcher.py::DispatcherCollaborator.reap_dispatched_task 157
 function-lines src/hyperloom/orchestrator/loop/dispatcher.py::DispatcherCollaborator.run_task_registered 109
-function-lines src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter._handle_request 253
+function-lines src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter._handle_request 214
 function-lines src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter._handle_single_verdict 111
 function-lines src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter.handle_delegate 179
 function-lines src/hyperloom/orchestrator/loop/proposals.py::ProposalsCollaborator.materialize_approved_proposal 124
