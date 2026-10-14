@@ -1592,7 +1592,7 @@ async def test_close_roofline_timeout_does_not_terminalize_live_worker(roofline_
         # executor to actually start removes that second, incidental race.
         close_call = asyncio.ensure_future(c.phase_close._maybe_run_close_post_opt_roofline())
         await asyncio.wait_for(started.wait(), timeout=5)
-        await close_call
+        await asyncio.wait_for(close_call, timeout=5)
         assert (await c.tasks.get(task.task_id)).state == "running"
         assert await c.locks.lane_holders()
         assert c.dispatcher._executions
