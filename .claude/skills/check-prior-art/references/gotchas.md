@@ -47,8 +47,10 @@ reports them) and pass that sha as `--commit`. A version without `+g<sha>` names
 
 A fork that cherry-picks an upstream PR, or squashes it into a merge of its own, never contains
 the upstream merge commit, so ancestry answers "no" while the change is there. The probe also reads
-`(#N)` subject suffixes, which is how most cherry-picks record their origin; a cherry-pick that
-rewrote its subject is invisible to both. Before reporting `not_included` for a fork, search its
+`(#N)` subject suffixes, which is how most cherry-picks record their origin, and compares
+patch-ids, which finds a cherry-pick with the same diff under any subject. A backport that was
+edited, had a conflict resolved, applied next to lines the fork changed, or was folded into a
+larger commit still reads as `not_included`. Before reporting `not_included` for a fork, search its
 log for the change itself: `git log -S<symbol>` for a function or constant the diff adds, and
 `git log --grep=<words from the title>`. An open upstream PR can be carried by a fork the same way,
 which is why Step 5 runs the probe on open DUPLICATEs when the tree is a fork. When the probe or
