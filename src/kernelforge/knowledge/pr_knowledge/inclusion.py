@@ -14,11 +14,11 @@ The evidence is read in this order:
    does not count.
 3. Otherwise the commits the merge commit brought in (a squash commit itself, or the PR's
    commits under a merge commit) are compared by patch-id with those reachable from
-   ``commit``, which finds a cherry-pick under any subject. All of them there, by sha or by
-   patch-id, is ``included``. None there is ``not_included`` when the merge brought in one
-   commit, and ``unknown`` when it brought in several, because a carry that folded them into
-   one commit (``git cherry-pick -m 1`` of the merge, or a squash) has a patch-id of its own.
-   Some there is ``unknown``.
+   ``commit``, which finds a cherry-pick with the same diff under any subject. All of them
+   there, by sha or by patch-id, is ``included``. None there is ``not_included`` when the
+   merge brought in one commit, and ``unknown`` when it brought in several, because a carry
+   that folded them into one commit (``git cherry-pick -m 1`` of the merge, or a squash) has
+   a patch-id of its own. Some there is ``unknown``.
 
 ``not_included`` therefore needs a definite not-ancestor answer from a complete (not
 shallow) history, no such subject, and a single commit brought in with no patch-id match.
@@ -28,10 +28,16 @@ fetched: a sha that a partial clone lacks counts as not fetched, and a patch-id 
 a blob it lacks is ``unknown``. ``included`` means the PR's change is in the history; a
 later revert is not looked for. A subject carries only the number, so a fork that numbers
 its own PRs into the same suffix can collide; the evidence names the matching commit and
-its subject so a caller can compare titles. A backport without the suffix whose diff
-was edited, or folded into a larger commit, has another patch-id and still reads as
-``not_included``. A rebase merge records only the PR's last commit, so that commit alone
-is compared.
+its subject so a caller can compare titles.
+
+A patch-id hashes the diff together with its context lines, ignoring only whitespace and
+line numbers, so it matches only a commit whose diff is otherwise identical to the commit
+the merge brought in. A backport without the suffix still reads as ``not_included`` when it
+was edited or had a conflict resolved, when it applied where the fork had changed lines
+next to a hunk, when it carries a squash-merged PR as the PR's own commits picked one by
+one, or when it is folded into a larger commit. A rebase merge records only the PR's last
+commit, so that commit alone is compared, and a fork that squashed the PR's commits into
+one also reads as ``not_included``.
 
 Command line::
 

@@ -110,8 +110,10 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "commit upstream, when you know it: without it, or when that commit "
             "is not fetched into the tree, the answer is never not_included. "
             "A cherry-pick is found by its (#N) subject suffix or, with "
-            "merge_commit_sha, by patch-id, so a backport whose subject lost "
-            "the suffix and whose diff was edited can still read as not_included."
+            "merge_commit_sha, by patch-id, which matches only an identical diff, "
+            "context lines included. So a backport with no (#N) suffix that was "
+            "edited, landed next to fork changes, or was split, squashed or "
+            "folded into a larger commit can still read as not_included."
         ),
         "inputSchema": {
             "type": "object",
