@@ -21,6 +21,19 @@ relative to the local value), ``throughput_diff_signed_pct`` (hosted minus local
 ``null`` locally), ``started_at`` and ``finished_at`` (ISO-8601 UTC, ``...Z``; the wall time around the side's run, set
 also when the side failed). Fields that are not known are ``null`` (``gpu_ids`` is then ``[]``). The last line is the
 summary (``"type": "summary"``).
+
+Repeats (additive; a checklist, or one item, may set ``"repeats": N``, default 1, and ``--repeats N`` overrides it). With
+``N > 1`` each test runs the local side and the hosted side N times each, local then hosted per repetition, every
+repetition a fresh server (hosted: a fresh sandbox). The side's ``output_throughput`` is then the mean of the N
+readings and the throughput difference is taken between the two means; the thresholds and the summary are unchanged.
+Completed-request and error-rate equality, the rebuilt-file comparison and the signature check apply to EVERY
+repetition: one failing repetition fails the test, its problem text ends in ``(rep K)`` (K from 1). A side that has any
+failed repetition has no throughput and the test is not compared. A test with ``N > 1`` has these extra fields and the
+existing ones above keep their meaning (the other side fields describe the first repetition, except ``started_at`` and
+``finished_at`` which span all of them); a test with ``N == 1`` has exactly the fields above and none of these:
+``repeats`` (N), ``repetitions`` (a list of N objects, each with ``local`` and ``hosted`` side objects, ``signature_verified``,
+``rebuilt_files_equal`` and ``problems`` of that repetition) and, on each side, ``readings`` (the N throughputs, ``null`` for
+a failed repetition) and ``cv_pct`` (sample standard deviation over mean, percent; ``null`` unless two readings exist).
 """
 
 from __future__ import annotations
@@ -66,6 +79,7 @@ REPORT_FILE = "consistency.jsonl"
 DEFAULT_REPORT_DIR = Path("reports/hosted")
 PASS, FAIL, NO_DATA = "PASS", "FAIL", "NO_DATA"
 _PERCENT = 100.0
+_MIN_FOR_CV = 2
 _UTF8 = "utf-8"
 LOCAL, HOSTED = "local", "hosted"
 
@@ -98,6 +112,7 @@ class ChecklistItem:
     id: str
     call: Callable[[Path, str], TestCall]
     patched_roots: Mapping[str, RootExpectation] = field(default_factory=dict)
+    repeats: int = 1
 
 
 @dataclass(frozen=True)
@@ -115,6 +130,14 @@ class Side:
     sandbox_id: str | None = None
     started_at: str | None = None
     finished_at: str | None = None
+    readings: tuple[float | None, ...] = ()
+
+    @property
+    def cv_pct(self) -> float | None:
+        values = [v for v in self.readings if v is not None]
+        if len(values) < _MIN_FOR_CV or statistics.fmean(values) == 0:
+            return None
+        return statistics.stdev(values) / abs(statistics.fmean(values)) * _PERCENT
 
     @property
     def usable(self) -> bool:
@@ -134,6 +157,7 @@ class ItemReport:
     rebuilt_files_equal: bool | None
     signature_verified: bool
     problems: tuple[str, ...]
+    repetitions: tuple[ItemReport, ...] = ()
 
     @property
     def throughput_diff_signed_pct(self) -> float | None:
@@ -148,7 +172,7 @@ class ItemReport:
         )
 
     def to_document(self) -> dict[str, Any]:
-        return {
+        document = {
             "type": "item",
             "id": self.id,
             "compared": self.compared,
@@ -162,10 +186,25 @@ class ItemReport:
             "signature_verified": self.signature_verified,
             "problems": list(self.problems),
         }
+        if self.repetitions:
+            document["repeats"] = len(self.repetitions)
+            document["repetitions"] = [
+                {
+                    LOCAL: _side_document(r.local),
+                    HOSTED: _side_document(r.hosted),
+                    "signature_verified": r.signature_verified,
+                    "rebuilt_files_equal": r.rebuilt_files_equal,
+                    "problems": list(r.problems),
+                }
+                for r in self.repetitions
+            ]
+        return document
 
 
 def _side_document(side: Side) -> dict[str, Any]:
+    extra = {"readings": list(side.readings), "cv_pct": side.cv_pct} if len(side.readings) > 1 else {}
     return {
+        **extra,
         "returncode": side.returncode,
         "output_throughput": side.throughput,
         "completed_requests": list(side.completed),
@@ -377,19 +416,29 @@ def _percent_diff(local: float, hosted: float) -> float | None:
 
 
 def check_item(item: ChecklistItem, root: Path, local: MeasurementBackend, hosted: Any) -> ItemReport:
-    """Run one test locally, then in a fresh sandbox, and compare."""
-    local_call = item.call(root / item.id / LOCAL, f"{item.id}-{LOCAL}")
-    hosted_id = f"{item.id}-{HOSTED}"
-    hosted_call = item.call(root / item.id / HOSTED, hosted_id)
-    local_side, _ = _run_side(local, local_call, root / item.id / LOCAL)
-    hosted_side, hosted_outcome = _run_side(hosted, hosted_call, root / item.id / HOSTED, hosted=True)
+    """Run one test locally, then in a fresh sandbox, and compare; with ``repeats > 1`` see ``_check_repeated``."""
+    if item.repeats <= 1:
+        return _check_once(item, root, local, hosted, None)
+    return _check_repeated(item, root, local, hosted)
+
+
+def _check_once(item: ChecklistItem, root: Path, local: MeasurementBackend, hosted: Any, rep: int | None) -> ItemReport:
+    """One local run and one hosted run (a fresh sandbox), compared; ``rep`` (from 1) names a repetition."""
+    tail = "" if rep is None else f"-rep{rep}"
+    parts = () if rep is None else (f"rep{rep}",)
+    local_dir, hosted_dir = root.joinpath(item.id, LOCAL, *parts), root.joinpath(item.id, HOSTED, *parts)
+    hosted_id = f"{item.id}-{HOSTED}{tail}"
+    local_call = item.call(local_dir, f"{item.id}-{LOCAL}{tail}")
+    hosted_call = item.call(hosted_dir, hosted_id)
+    local_side, _ = _run_side(local, local_call, local_dir)
+    hosted_side, hosted_outcome = _run_side(hosted, hosted_call, hosted_dir, hosted=True)
     verified = _signature_verified(hosted, hosted_id, hosted_outcome)
     problems = [
         f"{name}: {side.problem}" for name, side in ((LOCAL, local_side), (HOSTED, hosted_side)) if side.problem
     ]
     if not verified:
         problems.append("signature_not_verified")
-    files_equal, file_problems = _compare_files(item, root / item.id / HOSTED)
+    files_equal, file_problems = _compare_files(item, hosted_dir)
     problems.extend(file_problems if hosted_side.usable else [])
     diff = completed_equal = error_equal = None
     if local_side.usable and hosted_side.usable:
@@ -405,6 +454,50 @@ def check_item(item: ChecklistItem, root: Path, local: MeasurementBackend, hoste
     return ItemReport(
         item.id, local_side, hosted_side, diff, completed_equal, error_equal, files_equal, verified, tuple(problems)
     )
+
+
+def _check_repeated(item: ChecklistItem, root: Path, local: MeasurementBackend, hosted: Any) -> ItemReport:
+    """N repetitions, local then hosted each, so that drift hits both sides alike; the means are compared."""
+    reps = [_check_once(item, root, local, hosted, k) for k in range(1, item.repeats + 1)]
+    local_side, hosted_side = _mean_side(reps, LOCAL), _mean_side(reps, HOSTED)
+    problems = [f"{p} (rep {k})" for k, r in enumerate(reps, 1) for p in r.problems]
+    diff = completed_equal = error_equal = None
+    if local_side.usable and hosted_side.usable:
+        diff = _percent_diff(local_side.throughput, hosted_side.throughput)  # type: ignore[arg-type]
+        completed_equal = all(r.completed_equal is True for r in reps)
+        error_equal = all(r.error_rate_equal is True for r in reps)
+        if diff is None:
+            problems.append("not_comparable: the local throughput is zero")
+    files = [r.rebuilt_files_equal for r in reps]
+    files_equal = None if all(f is None for f in files) else all(f is not False for f in files)
+    verified = all(r.signature_verified for r in reps)
+    return ItemReport(
+        item.id,
+        local_side,
+        hosted_side,
+        diff,
+        completed_equal,
+        error_equal,
+        files_equal,
+        verified,
+        tuple(dict.fromkeys(problems)),
+        tuple(reps),
+    )
+
+
+def _mean_side(reps: Sequence[ItemReport], which: str) -> Side:
+    """The side of the whole test: the mean throughput when every repetition was usable, else a failed side."""
+    sides: list[Side] = [getattr(r, which) for r in reps]
+    readings = tuple(s.throughput if s.usable else None for s in sides)
+    failed = next(((k, s) for k, s in enumerate(sides, 1) if not s.usable), None)
+    first = sides[0]
+    base = dataclasses.replace(first, readings=readings, finished_at=sides[-1].finished_at)
+    if failed is not None:
+        k, side = failed
+        return dataclasses.replace(
+            base, returncode=side.returncode, throughput=None, problem=f"{side.problem} (rep {k})"
+        )
+    return dataclasses.replace(base, throughput=statistics.fmean(v for v in readings if v is not None))
 
 
 # -- the verdict ---------------------------------------------------------------------------------------------------
@@ -486,7 +579,14 @@ def load_checklist(path: Path) -> list[ChecklistItem]:
     entries = document.get("items") if isinstance(document, dict) else None
     if not isinstance(entries, list):
         raise ValueError(f"{path}: expected an object with an 'items' list")
-    return [_item_of(entry, index) for index, entry in enumerate(entries)]
+    default = _repeats_of(document.get("repeats", 1), "repeats")
+    return [_item_of(entry, index, default) for index, entry in enumerate(entries)]
+
+
+def _repeats_of(value: Any, where: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{where}: expected an integer >= 1")
+    return value
 
 
 def _patched_roots(value: Any, index: int) -> dict[str, RootExpectation]:
@@ -507,7 +607,7 @@ def _patched_roots(value: Any, index: int) -> dict[str, RootExpectation]:
     return roots
 
 
-def _item_of(entry: Any, index: int) -> ChecklistItem:
+def _item_of(entry: Any, index: int, default_repeats: int = 1) -> ChecklistItem:
     if not isinstance(entry, dict) or not entry.get("id") or not entry.get("points"):
         raise ValueError(f"items[{index}]: needs an 'id' and a non-empty 'points' list")
     unknown = set(entry) - {
@@ -520,6 +620,7 @@ def _item_of(entry: Any, index: int) -> ChecklistItem:
         "env_overrides",
         "patched_roots",
         "environment",
+        "repeats",
     }
     if unknown:
         raise ValueError(f"items[{index}]: unknown keys {sorted(unknown)}")
@@ -543,7 +644,8 @@ def _item_of(entry: Any, index: int) -> ChecklistItem:
             **extra,
         )
 
-    return ChecklistItem(str(entry["id"]), call, patched)
+    repeats = _repeats_of(entry.get("repeats", default_repeats), f"items[{index}].repeats")
+    return ChecklistItem(str(entry["id"]), call, patched, repeats)
 
 
 @dataclass(frozen=True)
@@ -612,6 +714,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--report-dir", type=Path, default=DEFAULT_REPORT_DIR)
     parser.add_argument("--median-pct", type=float, default=Criteria.median_pct)
+    parser.add_argument(
+        "--repeats", type=int, default=None, help="measurements per side per test (overrides the checklist)"
+    )
     parser.add_argument("--p90-pct", type=float, default=Criteria.p90_pct)
     args = parser.parse_args(argv)
     try:
@@ -619,6 +724,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (OSError, ValueError) as exc:
         print(f"checklist unusable: {exc}", file=sys.stderr)
         return 2
+    if args.repeats is not None:
+        if args.repeats < 1:
+            print("--repeats must be >= 1", file=sys.stderr)
+            return 2
+        items = [dataclasses.replace(item, repeats=args.repeats) for item in items]
     backends = build_backends(args.config)
     try:
         summary = run_checklist(

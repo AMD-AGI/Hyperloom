@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import sys
 from pathlib import Path
@@ -34,13 +35,17 @@ REPORT = "benchmark_local_20261014_000000"
 
 
 class FakeLocal:
-    """The local backend of the check: writes one report from the point's own ``local_*`` keys."""
+    """The local backend of the check: writes one report from the point's own ``local_*`` keys.
+
+    ``throughputs`` (when given) overrides the reported throughput call by call, in order.
+    """
 
     name = "fake-local"
 
-    def __init__(self) -> None:
+    def __init__(self, throughputs: list[float] | None = None) -> None:
         self.calls: list[str] = []
         self.raises: Exception | None = None
+        self.throughputs = list(throughputs or [])
 
     def run_test(self, call: TestCall) -> TestOutcome:
         self.calls.append(call.task_id)
@@ -48,6 +53,8 @@ class FakeLocal:
         sandbox = SandboxFacts(sandbox_id=f"local-{call.task_id}", backend="local")
         if config.get("local_fail"):
             return TestOutcome(1, "", "boom", (), sandbox, call.task_id, "candidate", "import_error")
+        if self.throughputs:
+            config["local_throughput"] = self.throughputs.pop(0)
         workspace = Path(call.output_dir) / REPORT
         workspace.mkdir(parents=True)
         report = {
@@ -280,6 +287,155 @@ def test_an_empty_checklist_is_no_data_not_a_pass(rig, tmp_path) -> None:
     summary, lines = _check(r, tmp_path, [])
     assert summary.verdict == "NO_DATA" and summary.items == 0
     assert lines == [summary.to_document()]
+
+
+# -- repeats --------------------------------------------------------------------------------------------------------
+
+
+def _repeated(item: ChecklistItem, repeats: int) -> ChecklistItem:
+    return dataclasses.replace(item, repeats=repeats)
+
+
+def _item_per_rep(tmp: Path, name: str, by_rep: dict[int, dict], patched=None, repeats: int = 3) -> ChecklistItem:
+    """An item whose repetition K (1-based) uses the point settings ``by_rep[K]`` (rep 0 key: the default)."""
+    points = {k: point_yaml(tmp, f"{name}-{k}.yaml", **by_rep.get(k, by_rep.get(0, {}))) for k in range(1, repeats + 1)}
+
+    def call(output_dir: Path, task_id: str) -> TestCall:
+        k = int(task_id.rsplit("-rep", 1)[-1])
+        return TestCall(
+            points=(points[k],),
+            output_dir=output_dir,
+            timeout_sec=60,
+            cwd=str(tmp),
+            magpie_python=sys.executable,
+            task_id=task_id,
+        )
+
+    return ChecklistItem(name, call, patched or {}, repeats)
+
+
+def test_one_repeat_is_exactly_the_current_row(rig, tmp_path) -> None:
+    r = rig()
+    item = _item(tmp_path, "t", fake_throughput=5000)
+    assert item.repeats == 1
+    _, lines = _check(r, tmp_path, [item])
+    assert set(lines[0]) == {
+        "type", "id", "compared", "local", "hosted", "throughput_diff_pct", "throughput_diff_signed_pct", "completed_equal",
+        "error_rate_equal", "rebuilt_files_equal", "signature_verified", "problems",
+    }  # fmt: skip
+    assert "readings" not in lines[0]["local"] and "cv_pct" not in lines[0]["hosted"]
+    assert Path(lines[0]["local"]["log_dir"]) == tmp_path / "reports" / "t" / "local"
+
+
+def test_three_repeats_average_each_side_and_keep_every_raw_reading(rig, tmp_path) -> None:
+    r = rig()
+    local = FakeLocal([4900.0, 5000.0, 5100.0])
+    item = _repeated(_item(tmp_path, "t", fake_throughput=5000), 3)
+    summary, lines = _check(r, tmp_path, [item], local=local)
+    row = lines[0]
+    assert summary.verdict == "PASS" and row["repeats"] == 3 and len(row["repetitions"]) == 3
+    assert row["local"]["output_throughput"] == pytest.approx(5000.0) and row["throughput_diff_pct"] == pytest.approx(0)
+    assert row["local"]["readings"] == [4900.0, 5000.0, 5100.0] and row["hosted"]["readings"] == [5000.0] * 3
+    assert row["local"]["cv_pct"] == pytest.approx(2.0) and row["hosted"]["cv_pct"] == pytest.approx(0.0)
+    assert [x["local"]["output_throughput"] for x in row["repetitions"]] == [4900.0, 5000.0, 5100.0]
+    assert len({x["hosted"]["sandbox_id"] for x in row["repetitions"]}) == 3, (
+        "every hosted repetition is a fresh sandbox"
+    )
+    assert row["problems"] == [] and row["signature_verified"] is True
+    assert set(row) >= {"compared", "throughput_diff_signed_pct", "completed_equal", "error_rate_equal"}
+
+
+def test_repetitions_alternate_local_and_hosted(rig, tmp_path) -> None:
+    r = rig()
+    order: list[str] = []
+
+    class Spy(FakeLocal):
+        def run_test(self, call):
+            order.append(f"local:{call.task_id}")
+            return super().run_test(call)
+
+    real = r.backend.run_test
+    r.backend.run_test = lambda call: (order.append(f"hosted:{call.task_id}"), real(call))[1]
+    _check(r, tmp_path, [_repeated(_item(tmp_path, "a"), 2)], local=Spy())
+    assert order == ["local:a-local-rep1", "hosted:a-hosted-rep1", "local:a-local-rep2", "hosted:a-hosted-rep2"]
+
+
+def test_the_mean_decides_the_threshold_not_one_noisy_reading(rig, tmp_path) -> None:
+    r = rig()
+    noisy = [4960.0, 5030.0, 5010.0]  # single readings 0.8% off, the mean 0.0% off
+    single = _check(r, tmp_path, [_item(tmp_path, "s", fake_throughput=5000)], local=FakeLocal(noisy[:1]))[0]
+    assert single.verdict == "FAIL"
+    summary, _ = _check(r, tmp_path, [_repeated(_item(tmp_path, "m", fake_throughput=5000), 3)], local=FakeLocal(noisy))
+    assert summary.verdict == "PASS"
+
+
+def test_a_repetition_whose_signature_fails_fails_the_item(rig, tmp_path) -> None:
+    r = rig()
+    item = _item_per_rep(tmp_path, "t", {0: {}, 2: {"fake_mode": "wrong_key"}})
+    summary, lines = _check(r, tmp_path, [item])
+    assert summary.verdict == "FAIL" and summary.signatures_all_verified is False
+    row = lines[0]
+    assert row["signature_verified"] is False and "signature_not_verified (rep 2)" in row["problems"]
+    assert [x["signature_verified"] for x in row["repetitions"]] == [True, False, True]
+    assert row["compared"] is False and row["hosted"]["output_throughput"] is None
+
+
+def test_a_repetition_whose_rebuilt_hash_differs_fails_the_item(rig, tmp_path) -> None:
+    r = rig()
+    good = _inventory({"sglang": _root({"srt/a.py": A})})
+    bad = _inventory({"sglang": _root({"srt/a.py": C})})
+    item = _item_per_rep(
+        tmp_path,
+        "t",
+        {0: {"fake_inventory": good}, 3: {"fake_inventory": bad}},
+        patched={"sglang": RootExpectation({"srt/a.py": A})},
+    )
+    summary, lines = _check(r, tmp_path, [item])
+    row = lines[0]
+    assert summary.verdict == "FAIL" and summary.rebuilt_files_all_equal is False
+    assert row["rebuilt_files_equal"] is False and "rebuilt_file_differs: sglang/srt/a.py (rep 3)" in row["problems"]
+    assert [x["rebuilt_files_equal"] for x in row["repetitions"]] == [True, True, False]
+    assert row["compared"] is True, "every repetition ran; the files are what differ"
+
+
+def test_a_repetition_with_a_different_completed_count_fails_even_when_the_means_agree(rig, tmp_path) -> None:
+    r = rig()
+    item = _item_per_rep(tmp_path, "t", {0: {"fake_completed": 64, "local_completed": 64}, 2: {"local_completed": 63}})
+    summary, lines = _check(r, tmp_path, [item])
+    row = lines[0]
+    assert summary.verdict == "FAIL" and summary.completed_all_equal is False
+    assert row["completed_equal"] is False and "completed_requests_differ (rep 2)" in row["problems"]
+
+
+def test_a_failed_repetition_leaves_the_side_without_a_throughput(rig, tmp_path) -> None:
+    r = rig()
+    item = _item_per_rep(tmp_path, "t", {0: {}, 2: {"local_fail": "true"}})
+    summary, lines = _check(r, tmp_path, [item])
+    row = lines[0]
+    assert summary.verdict == "FAIL" and row["compared"] is False and row["local"]["output_throughput"] is None
+    assert row["local"]["readings"][1] is None and row["local"]["problem"].endswith("(rep 2)")
+
+
+def test_repeats_come_from_the_checklist_per_item_and_the_command_line(tmp_path) -> None:
+    path = tmp_path / "c.json"
+    items = [{"id": "a", "points": ["p.yaml"]}, {"id": "b", "points": ["p.yaml"], "repeats": 2}]
+    path.write_text(json.dumps({"repeats": 5, "items": items}))
+    assert [i.repeats for i in load_checklist(path)] == [5, 2]
+    path.write_text(json.dumps({"items": items[:1]}))
+    assert load_checklist(path)[0].repeats == 1
+    for bad in (0, "3", 1.5, True):
+        path.write_text(json.dumps({"items": [{**items[0], "repeats": bad}]}))
+        with pytest.raises(ValueError, match="repeats: expected an integer >= 1"):
+            load_checklist(path)
+
+
+def test_the_entry_point_repeats_every_test_when_asked(tmp_path, capsys) -> None:
+    point = point_yaml(tmp_path, "p.yaml", fake_throughput=4000)
+    args = ["--checklist", str(_write_checklist(tmp_path, point)), "--config", str(_write_config(tmp_path))]
+    assert consistency.main([*args, "--report-dir", str(tmp_path / "reports"), "--repeats", "2"]) == 0
+    row = json.loads((tmp_path / "reports" / "consistency.jsonl").read_text().splitlines()[0])
+    assert row["repeats"] == 2
+    assert consistency.main([*args, "--repeats", "0"]) == 2
 
 
 # -- rebuilt files --------------------------------------------------------------------------------------------------
