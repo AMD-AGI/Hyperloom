@@ -38,7 +38,7 @@ def _record() -> records.TestRecord:
         attempts=(peers.Attempt("node-0", (0, 1), peers.FailureClass.INFRA, 10.0, 20.0),),
         gpu_seconds=1200,
     )
-    judgement = peers.Judgement(peers.Verdict.IMPROVED, 4.5, 1.1, True, ("r1", "r2"), {"output_tps": 1.045})
+    judgement = peers.Judgement(peers.Verdict.IMPROVED, 4.5, 1.1, ("r1", "r2"), {"output_tps": 1.045}, True)
     return records.TestRecord(request, result, judgement, Conclusion.COMMITTED, "c1")
 
 
@@ -68,7 +68,7 @@ def test_a_field_an_older_row_lacks_takes_its_default() -> None:
 
 
 def test_claims_and_lineage_views_round_trip() -> None:
-    intent = peers.Intent("s1", "c0", "moe gemm", "tuned kernel", peers.IntentLayer.KERNEL, "f" * 64)
+    intent = peers.Intent("s1", "c0", "moe gemm", "tuned kernel", peers.IntentLayer.KERNEL)
     claim = records.Claim(
         records.ClaimKey("c0", intent.fingerprint), "s1", intent, "a" * 64, 60.0, 1.0, 2.0, 62.0, ClaimStatus.HELD
     )

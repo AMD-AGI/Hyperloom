@@ -122,7 +122,8 @@ async def test_a_retest_appends_a_judgement_and_the_latest_one_is_in_force(open_
     await _tested(open_as, "r1b")
     gate = open_as(Role.GATE)
 
-    await gate.write_judgement("r1", replace(judgement(5.0, ("r1",)), confirmed=False), Conclusion.RECORDED_ONLY)
+    provisional = replace(judgement(5.0, ("r1",)), verdict=Verdict.NEEDS_CONFIRM)
+    await gate.write_judgement("r1", provisional, Conclusion.RECORDED_ONLY)
     record = await gate.write_judgement("r1", judgement(3.5, ("r1", "r1b")), Conclusion.COMMITTED, "c1")
 
     assert (record.conclusion, record.commit_id, record.judgement.request_ids) == (

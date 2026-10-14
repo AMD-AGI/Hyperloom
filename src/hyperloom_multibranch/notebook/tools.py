@@ -31,6 +31,7 @@ from hyperloom_multibranch.contracts.notebook.interfaces import (
     NotebookError,
     StartupBriefProvider,
 )
+from hyperloom_multibranch.contracts.intent import intent_fingerprint
 from hyperloom_multibranch.contracts.notebook.peers import (
     BranchLogEntry,
     BranchLogType,
@@ -38,7 +39,6 @@ from hyperloom_multibranch.contracts.notebook.peers import (
     Intent,
     IntentLayer,
     Validity,
-    placeholder_intent_fingerprint,
 )
 from hyperloom_multibranch.contracts.notebook.records import (
     BranchLogRecord,
@@ -160,7 +160,7 @@ def render_brief(brief: StartupBrief) -> str:
 
 def _key(arguments: Arguments) -> ClaimKey:
     layer = IntentLayer(arguments["layer"])
-    fingerprint = placeholder_intent_fingerprint(str(arguments["target"]), str(arguments["mechanism"]), layer)
+    fingerprint = intent_fingerprint(str(arguments["target"]), str(arguments["mechanism"]), layer)
     return ClaimKey(str(arguments["parent_commit"]), fingerprint)
 
 
@@ -183,9 +183,7 @@ class _SpecialistTools:
     async def claim(self, arguments: Arguments) -> str:
         key = _key(arguments)
         target, mechanism = str(arguments["target"]), str(arguments["mechanism"])
-        intent = Intent(
-            self.branch, key.parent_commit, target, mechanism, IntentLayer(arguments["layer"]), key.intent_fingerprint
-        )
+        intent = Intent(self.branch, key.parent_commit, target, mechanism, IntentLayer(arguments["layer"]))
         reason = str(arguments.get("reason") or "")
         held = await self.notebook.acquire(intent, _action(arguments), ttl_seconds=self.ttl_seconds, reason=reason)
         return render_claim(held)

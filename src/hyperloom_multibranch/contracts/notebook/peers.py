@@ -3,47 +3,22 @@
 
 """Stand-ins for the objects other multi-branch modules define, with only the fields the notebook reads.
 
-Each gives way to its owner's type once that is merged: the intent, the judgement and the branch log entry belong to
-the specialist-evolution module, the test request and result to the toolbox. Fields beyond those the multi-branch
-design lists (the judgement's recorded value and fix flags, a result's attempts, timing and measurement environment, a
-branch log entry's superseded entry and hypothesis status) are what the notebook asks of those owners.
+The test request and result give way to the toolbox's types once those are merged; fields beyond those the
+multi-branch design lists (a result's attempts, timing and measurement environment) are what the notebook asks of the
+toolbox. The intent, the judgement and the branch log entry are their owner's types, re-exported here for the
+notebook modules that still import them from this module.
 """
 
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 
 from hyperloom.contracts.recipe import RecipeDelta
-
-
-class IntentLayer(str, Enum):
-    """Which layer of the stack an intent changes."""
-
-    CONFIG = "config"
-    SOURCE = "source"
-    KERNEL = "kernel"
-
-
-@dataclass(frozen=True)
-class Intent:
-    """What a specialist means to do before it writes the change, on the state its branch head is at."""
-
-    branch: str
-    parent_commit: str
-    target: str
-    mechanism: str
-    layer: IntentLayer
-    fingerprint: str
-
-
-def placeholder_intent_fingerprint(target: str, mechanism: str, layer: IntentLayer) -> str:
-    """Until the intent's owner fixes the algorithm: the structured fields, case- and space-normalized, hashed."""
-
-    normalized = "\x1f".join(" ".join(part.lower().split()) for part in (target, mechanism, layer.value))
-    return hashlib.sha256(normalized.encode()).hexdigest()
+from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType, HypothesisStatus
+from hyperloom_multibranch.contracts.intent import Intent, IntentLayer
+from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 
 
 class TestKind(str, Enum):
@@ -155,55 +130,6 @@ class TestResult:
     profile_location: str = ""
 
 
-class Verdict(str, Enum):
-    IMPROVED = "improved"
-    FLAT = "flat"
-    REGRESSED = "regressed"
-
-
-@dataclass(frozen=True)
-class Judgement:
-    """The rule gate's (or, for a merge, the integrator's) comparison with the parent commit's recorded value.
-
-    ``recorded_value`` is the candidate's value per metric, in the units the PRELUDE baseline records: the mean of the
-    test and its confirming retest. It becomes the commit's recorded value when the candidate is committed.
-    """
-
-    verdict: Verdict
-    gain_pct: float
-    threshold_pct: float
-    confirmed: bool
-    request_ids: tuple[str, ...]
-    recorded_value: Mapping[str, float] = field(default_factory=dict)
-    fixes_correctness: bool = False
-    foundation_fix: bool = False
-
-
-class BranchLogType(str, Enum):
-    HYPOTHESIS = "hypothesis"
-    ATTEMPT = "attempt"
-    RESULT = "result"
-    PLAN = "plan"
-
-
-class HypothesisStatus(str, Enum):
-    OPEN = "open"
-    FALSIFIED = "falsified"
-    CONFIRMED = "confirmed"
-
-
-@dataclass(frozen=True)
-class BranchLogEntry:
-    """One entry of a specialist's long-term memory; ``supersedes`` names the entry it updates."""
-
-    branch: str
-    kind: BranchLogType
-    content: str
-    request_ids: tuple[str, ...] = ()
-    supersedes: str | None = None
-    hypothesis_status: HypothesisStatus | None = None
-
-
 __all__ = [
     "Attempt",
     "BranchLogEntry",
@@ -221,5 +147,4 @@ __all__ = [
     "TestResult",
     "Validity",
     "Verdict",
-    "placeholder_intent_fingerprint",
 ]

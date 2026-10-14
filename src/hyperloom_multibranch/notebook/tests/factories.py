@@ -19,7 +19,6 @@ from hyperloom_multibranch.contracts.notebook.peers import (
     TestResult,
     Validity,
     Verdict,
-    placeholder_intent_fingerprint,
 )
 from hyperloom_multibranch.contracts.notebook.records import SessionProfile
 
@@ -69,7 +68,7 @@ def intent(
     mechanism: str = "tuned kernel",
     layer: IntentLayer = IntentLayer.KERNEL,
 ) -> Intent:
-    return Intent(branch, parent, target, mechanism, layer, placeholder_intent_fingerprint(target, mechanism, layer))
+    return Intent(branch, parent, target, mechanism, layer)
 
 
 def delta(server_args: str = "--max-num-seqs 256") -> RecipeDelta:
@@ -128,9 +127,9 @@ def judgement(
         verdict=verdict,
         gain_pct=gain_pct,
         threshold_pct=1.0,
-        confirmed=True,
         request_ids=request_ids,
         recorded_value=dict(recorded or {"output_tps_pct": gain_pct}),
+        accuracy_ok=True,
         fixes_correctness=fixes_correctness,
         foundation_fix=foundation_fix,
     )
