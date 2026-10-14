@@ -50,13 +50,13 @@ def _unreadable_key_errors() -> tuple[type[Exception], ...]:
     return (ValueError, TypeError, UnsupportedAlgorithm)
 
 
-def generate_private_key() -> "Ed25519PrivateKey":
+def generate_private_key() -> Ed25519PrivateKey:
     """A fresh private key; for the platform's key issuing and for tests, never for the application's own use."""
     _, ed25519 = _crypto()
     return ed25519.Ed25519PrivateKey.generate()
 
 
-def private_key_pem(key: "Ed25519PrivateKey") -> bytes:
+def private_key_pem(key: Ed25519PrivateKey) -> bytes:
     """PKCS#8 PEM, the format the platform mounts into a sandbox."""
     serialization, _ = _crypto()
     return key.private_bytes(
@@ -66,7 +66,7 @@ def private_key_pem(key: "Ed25519PrivateKey") -> bytes:
     )
 
 
-def public_key_pem(key: "Ed25519PrivateKey") -> str:
+def public_key_pem(key: Ed25519PrivateKey) -> str:
     """SubjectPublicKeyInfo PEM, the format sandbox information carries."""
     serialization, _ = _crypto()
     return (
@@ -76,7 +76,7 @@ def public_key_pem(key: "Ed25519PrivateKey") -> str:
     )
 
 
-def load_private_key(path: Path) -> "Ed25519PrivateKey":
+def load_private_key(path: Path) -> Ed25519PrivateKey:
     """Load a PKCS#8 PEM Ed25519 private key."""
     serialization, ed25519 = _crypto()
     try:
@@ -112,7 +112,7 @@ def public_key_fingerprint(public_key_pem_text: str) -> str:
     return FINGERPRINT_PREFIX + hashlib.sha256(der).hexdigest()
 
 
-def sign(data: bytes, key: "Ed25519PrivateKey") -> str:
+def sign(data: bytes, key: Ed25519PrivateKey) -> str:
     """The base64 Ed25519 signature of exactly ``data``."""
     return base64.b64encode(key.sign(data)).decode(_ASCII)
 
