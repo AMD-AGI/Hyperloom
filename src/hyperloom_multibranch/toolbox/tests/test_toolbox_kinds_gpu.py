@@ -175,12 +175,13 @@ async def test_a_concurrency_sweep_is_one_server_and_one_round_per_level() -> No
         await toolbox.close()
 
 
-def _marker_patch(workdir: Path, marker: Path) -> bytes:
+def _marker_patch(workdir: Path, marker: Path) -> tuple[bytes, str]:
+    """The patch that makes ``launch_server.py`` log its own path, and the text of the patched file."""
     layout = COMPONENT_LAYOUTS["sglang"]
     original = (locate_installed_package(layout).path / TARGET).read_text()
     code = f"with open({str(marker)!r}, 'a', encoding='utf-8') as _hl_f:\n    _hl_f.write(__file__ + '\\n')\n"
     key = f"{layout.upstream_prefix}/{TARGET}"
-    return git_patch(workdir, {key: original}, {key: code + original})
+    return git_patch(workdir, {key: original}, {key: code + original}), code + original
 
 
 async def test_a_patched_recipe_goes_through_the_planner_and_is_measured_on_the_rebuilt_framework() -> None:
@@ -188,7 +189,8 @@ async def test_a_patched_recipe_goes_through_the_planner_and_is_measured_on_the_
     toolbox, notebook, blobs = _toolbox(root, "w13-patched")
     try:
         marker = root / "marker.txt"
-        patch = put_patch(blobs, "w13-marker.patch", _marker_patch(root / "patch-repo", marker))
+        diff, patched = _marker_patch(root / "patch-repo", marker)
+        patch = put_patch(blobs, "w13-marker.patch", diff)
         delta = RecipeDelta(components=(ComponentChange("sglang", add_patches=(patch,)),))
         request_id, result, landed = await _submit(toolbox, notebook, req(change=delta), root)
         inventory = json.loads(next(landed.rglob("farm_inventory.json")).read_text())
@@ -203,7 +205,9 @@ async def test_a_patched_recipe_goes_through_the_planner_and_is_measured_on_the_
         )
         (farm_file,) = imported
         assert "/farm/site/sglang/" + TARGET in farm_file
+        # the sandbox, and with it the rebuilt file, is gone by now: the signed inventory carries the file's hash
+        assert toolbox.backend.journal.latest(request_id).sandbox_id in farm_file
         (root_entry,) = inventory["roots"].values()
-        assert hashlib.sha256(Path(farm_file).read_bytes()).hexdigest() == root_entry["upserts"][TARGET]
+        assert root_entry["upserts"][TARGET] == hashlib.sha256(patched.encode()).hexdigest()
     finally:
         await toolbox.close()
