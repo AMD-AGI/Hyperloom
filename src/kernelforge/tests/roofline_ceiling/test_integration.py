@@ -14,6 +14,8 @@ import click
 import pytest
 
 from kernelforge import cli as cli_module
+from kernelforge.cli.forge_loop_command import _make_ceiling_estimator
+from kernelforge.cli.options import _validate_roofline_target
 from kernelforge.agent_backends.base import AgentProviderUnavailableError
 from kernelforge.roofline_ceiling.analyst import CeilingAnalysisError
 from kernelforge.roofline_ceiling.contract import load_report
@@ -24,7 +26,7 @@ from kernelforge.loop.runner import IterationConfig, IterationLoop
 
 
 def _report(cases=(("decode-t1", 12.8),)):
-    return load_report({"cases": {case_id: ideal for case_id, ideal in cases}})
+    return load_report({"cases": dict(cases)})
 
 
 def _publish(report, directory) -> Path:
@@ -289,17 +291,17 @@ def test_the_attainment_target_is_off_unless_an_operator_asks_for_it():
 
 def test_a_target_above_one_is_refused_because_attainment_cannot_exceed_the_ceiling():
     with pytest.raises(click.BadParameter, match="cannot exceed 1.0"):
-        cli_module._validate_roofline_target(86.0, True)
+        _validate_roofline_target(86.0, True)
 
 
 def test_a_target_without_a_ceiling_is_refused_rather_than_never_firing():
     with pytest.raises(click.BadParameter, match="pass --roofline-ceiling on"):
-        cli_module._validate_roofline_target(0.86, False)
+        _validate_roofline_target(0.86, False)
 
 
 def test_no_estimator_is_built_while_the_ceiling_is_off():
     assert (
-        cli_module._make_ceiling_estimator(
+        _make_ceiling_estimator(
             enabled=False,
             workspace_dir=".",
             driver_script="driver.py",
@@ -335,7 +337,7 @@ def test_the_estimator_calls_estimate_ceiling_with_arguments_it_accepts(monkeypa
     monkeypatch.setattr("kernelforge.roofline_ceiling.estimate.estimate_ceiling", _estimate)
     monkeypatch.setattr("kernelforge.roofline_ceiling.command.resolve_analyst_backend", _resolve)
 
-    estimator = cli_module._make_ceiling_estimator(
+    estimator = _make_ceiling_estimator(
         enabled=True,
         workspace_dir=".",
         driver_script="driver.py",
@@ -466,7 +468,7 @@ def test_a_ceiling_with_no_usable_case_logs_that_instead_of_a_figure(tmp_path):
 
 
 def test_the_progress_is_logged_with_each_iteration_header():
-    source = inspect.getsource(IterationLoop._run_locked)
+    source = inspect.getsource(IterationLoop._open_iteration)
     header_at = source.index('f"--- Iteration {iteration} "')
 
     assert header_at < source.index("self._render_roofline_progress()")

@@ -983,24 +983,8 @@ def test_confirmation_cli_real_legacy_ledger_then_normal_resume_admission(tmp_pa
     assert entry["evidence"]["operator"] == pwd.getpwuid(os.getuid()).pw_name
     assert datetime.fromisoformat(entry["ts"]).utcoffset() == timedelta(0)
 
-
-@pytest.mark.parametrize("scope", ["stopped-container", "wrong-container"])
-def test_explicit_scope_confirmation_requires_exact_match(tmp_path, scope):
-    from hyperloom.inference_optimizer.session.resume_guard import CleanupConfirmationError, confirm_task_stopped
-
-    path = _database(tmp_path)
-    _task(path)
-    _execute(path, "INSERT INTO leases VALUES ('benchmark_lane', 'owner', 'task-1', 1, 'stopped-container')")
-    _execute(path, "INSERT INTO gpu_leases VALUES (0, 'worker', 'task-1')")
-    before = path.read_bytes()
-    if scope == "wrong-container":
-        with pytest.raises(CleanupConfirmationError, match="scope"):
-            confirm_task_stopped(tmp_path, task_id="task-1", reason="Container removed", expected_owner_scope=scope)
-        assert path.read_bytes() == before
-        return
-    result = confirm_task_stopped(tmp_path, task_id="task-1", reason="Container removed", expected_owner_scope=scope)
-    assert result["released_leases"] == 1
-    assert result["released_gpu_leases"] == 1
-    evidence = json.loads(_rows(path, "tasks")[0]["history"])[-1]["evidence"]
-    assert evidence["confirmed_owner_scope"] == scope
-    ensure_resume_safe(tmp_path, owner_scope="new-container")
+# test_explicit_scope_confirmation_requires_exact_match removed: it exercised
+# confirm_task_stopped's old expected_owner_scope kwarg, which main's resume_guard
+# refactor replaced with a dedicated confirm_scope_gone() (confirm_task_stopped is
+# now legacy/empty-scope-only). The same exact-match-vs-wrong-scope behavior is
+# covered more thoroughly by test_resume_scope_gone.py against the current API.

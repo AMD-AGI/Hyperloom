@@ -36,9 +36,15 @@ class IntegrateAttempt:
     extra_envs_applied: dict[str, str] = field(default_factory=dict)
     extra_server_args_applied: str = ""
     dropped_env_overrides: list[str] = field(default_factory=list)
-    setup_result: dict[str, Any] = field(default_factory=dict)
+    setup_commands_applied: list[str] = field(default_factory=list)
     switch_manifest: list[dict[str, Any]] = field(default_factory=list)
     pending: dict[str, Any] = field(default_factory=dict)
+
+    def drop_localization(self) -> None:
+        """Forget the localization, so its manifest is not recorded for a change that was never applied."""
+        self.localization_action = None
+        self.localization_patches = []
+        self.localization_touched = []
 
     @property
     def attempt_venv_root(self) -> str:

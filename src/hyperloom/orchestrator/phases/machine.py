@@ -205,11 +205,7 @@ class MachinePhase(CoordinatorCollaborator):
         kernel_facts = await self._coord.phase_kernel.exit_facts()
         optimize_enabled = self.optimize_enabled()
         in_enablement = str(state.phase or "").upper() == _phase_state.PHASE_ENABLEMENT
-        if str(state.phase or "").upper() == _phase_state.PHASE_PRELUDE or in_enablement:
-            # Both phases hold their exit for this marker. A cancelled analysis, or one that ended before a
-            # restart booked it, never reaches the writeback that clears it, so the hold would run to its
-            # allowance.
-            await self._coord.phase_kernel.release_finished_roofline_gate()
+        await self._release_holds_no_task_will_settle()
         enablement_in_flight = in_enablement and await self._coord.enablement_lane.enablement_in_flight()
         next_phase = _phase_state.compute_next_phase(
             state,
@@ -227,43 +223,11 @@ class MachinePhase(CoordinatorCollaborator):
             return
         target, reason, evidence = next_phase
         prior = state.phase
-        barrier_reason = f"phase_transition:{str(prior or '').strip().upper()}->{target}"
-        # The next phase starts on quiet GPUs: every running action is stopped, and the transition waits until the
-        # registry confirms none is left running and every finished one is booked in this phase. Queued work the next
-        # phase does not admit is dropped here too.
-        cancelled = await self.tasks.cancel_queued(
-            allowed_kinds=_phase_state.PHASE_ALLOWED_ACTIONS.get(target, frozenset()),
-            reason=barrier_reason,
-        )
-        stopped = await dispatcher.cancel_inflight_actions(reason=barrier_reason)
-        if cancelled or stopped:
-            log.info(
-                "Coordinator.phase: %s cancelled %d queued and stopped %d running task(s)",
-                barrier_reason,
-                len(cancelled),
-                len(stopped),
-            )
-            await self.bus.record_observation(
-                "coordinator",
-                "observation",
-                {
-                    "kind": "tasks_cancelled_on_phase_transition",
-                    "prior_phase": str(prior or ""),
-                    "target_phase": target,
-                    "reason": reason,
-                    "cancelled_task_ids": cancelled,
-                    "stopped_task_ids": stopped,
-                },
-            )
-        running = await self.tasks.running()
-        if running or dispatcher.has_unbooked_completions():
-            log.info(
-                "phase_machine: holding %s until %d running task(s) stop and are booked", barrier_reason, len(running)
-            )
+        if not await self._drain_for_transition(prior=prior, target=target, reason=reason, evidence=evidence):
             return
         dispatcher.admission_frozen = False
         # Consume escalate hint after a hint-driven transition.
-        if isinstance(evidence, dict) and (evidence.get("evidence") == "llm_escalation" or "hint" in evidence):
+        if isinstance(evidence, dict) and "hint" in evidence:
             state.consume_pending_escalate_hint()
         elif (
             str(prior or "").strip().upper() == _phase_state.PHASE_SWEEP
@@ -271,10 +235,9 @@ class MachinePhase(CoordinatorCollaborator):
         ):
             # SWEEP already had an honest closeout, so skip_to_close was suppressed in _global_terminal.
             state.consume_pending_escalate_hint()
-        elif state.pending_escalate_hint and target != _phase_state.PHASE_FRAMEWORK_AGENT:
-            # FRAMEWORK_AGENT exit consumes ``skip_to_kernel``; a transition to any other phase leaves the hint
-            # unclaimable. A transition *into* FRAMEWORK_AGENT is the opposite case: discarding there would drop
-            # the hint on the doorstep of the rules that read it.
+        elif state.pending_escalate_hint:
+            # A hint speaks for the phase it was emitted in; carried across a transition it did not drive, it would
+            # act on a phase it was never about.
             discarded_hint = state.discard_pending_escalate_hint()
             log.info(
                 "phase_machine: discarded stale pending_escalate_hint=%r on unrelated transition %s -> %s (reason=%s)",
@@ -380,6 +343,68 @@ class MachinePhase(CoordinatorCollaborator):
             )
         if save_error is not None:
             raise save_error
+
+    async def _release_holds_no_task_will_settle(self) -> None:
+        """Settle what the current phase's exit is waiting on when the task that would have settled it is gone.
+
+        A task cancelled outside the run (``hyperloom recover``) or ended before a restart booked it never reaches
+        the writeback that settles the phase's hold, so the hold would run to its allowance.
+        """
+        phase = str(self.shared_state.phase or "").upper()
+        if phase in (_phase_state.PHASE_PRELUDE, _phase_state.PHASE_ENABLEMENT):
+            # Both phases hold their exit for this marker.
+            await self._coord.phase_kernel.release_finished_roofline_gate()
+        # SWEEP waits for its conc_sweep's outcome; checked on a resumed process's first decision only.
+        await self._coord.phase_sweep.resume_unsettled_sweep()
+
+    async def _drain_for_transition(self, *, prior: str, target: str, reason: str, evidence: Any) -> bool:
+        """Clear the way to ``target`` and return whether the transition may commit on this tick.
+
+        The next phase starts on quiet GPUs: nothing new is admitted, queued work the next phase does not admit is
+        dropped, and the transition waits until every running action has finished and is booked in this phase.
+        Running work is cancelled only when the transition is terminal (``evidence["terminal"]``): the run is
+        already over, so there is no measurement left worth settling. Otherwise a phase budget only stops new work,
+        and cancelling the last action in flight would throw away the measurement it was about to settle; session
+        exhaustion and shutdown still cancel it through the dispatcher.
+        """
+        dispatcher = self._coord.dispatcher
+        barrier_reason = f"phase_transition:{str(prior or '').strip().upper()}->{target}"
+        cancelled = await self.tasks.cancel_queued(
+            allowed_kinds=_phase_state.PHASE_ALLOWED_ACTIONS.get(target, frozenset()),
+            reason=barrier_reason,
+        )
+        terminal = isinstance(evidence, dict) and bool(evidence.get("terminal"))
+        stopped = await dispatcher.cancel_inflight_actions(reason=barrier_reason) if terminal else []
+        if cancelled or stopped:
+            log.info(
+                "Coordinator.phase: %s (reason=%s) cancelled %d queued and stopped %d running task(s)",
+                barrier_reason,
+                reason,
+                len(cancelled),
+                len(stopped),
+            )
+            await self.bus.record_observation(
+                "coordinator",
+                "observation",
+                {
+                    "kind": "tasks_cancelled_on_phase_transition",
+                    "prior_phase": str(prior or ""),
+                    "target_phase": target,
+                    "reason": reason,
+                    "cancelled_task_ids": cancelled,
+                    "stopped_task_ids": stopped,
+                },
+            )
+        running = await self.tasks.running()
+        if running or dispatcher.has_unbooked_completions():
+            log.info(
+                "phase_machine: holding %s (reason=%s) until %d running task(s) finish and are booked",
+                barrier_reason,
+                reason,
+                len(running),
+            )
+            return False
+        return True
 
     async def _on_phase_entered(
         self,

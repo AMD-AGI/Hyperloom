@@ -41,6 +41,9 @@ PR_QUERY_REPOS: tuple[str, ...] = (
 )
 
 
+CUSTOM_SPECIALIST_KEY: str = "custom_specialist"
+OPERATOR_DEFINED_LAYER: str = "operator-defined"
+
 # Canonical catalogue of knowledge-domain anchors.
 SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
     SpecialistDomain(
@@ -172,6 +175,14 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
             "frameworks) and kernel_switch_specialist (operator kernels)."
         ),
     ),
+    # Operator-defined type; description and focus come from the session config.
+    SpecialistDomain(
+        key=CUSTOM_SPECIALIST_KEY,
+        llm_selectable=False,
+        layer=OPERATOR_DEFINED_LAYER,
+        kb_anchor=CUSTOM_SPECIALIST_KEY,
+        description="Operator-defined specialist; description is supplied per session.",
+    ),
 )
 
 
@@ -186,6 +197,9 @@ def _derive_knowledge_domain_tags() -> tuple[str, ...]:
     """Collect the distinct knowledge-domain tags from the catalogue."""
     seen: dict[str, None] = {}
     for d in SPECIALIST_DOMAINS:
+        # Operator-defined domains are per session, so they get no round counters.
+        if d.layer == OPERATOR_DEFINED_LAYER:
+            continue
         anchor = d.kb_anchor.strip()
         if anchor:
             seen.setdefault(anchor, None)
@@ -258,6 +272,13 @@ def normalize_dispatch_tags(params: dict) -> list[str]:
     return list(dict.fromkeys(tags))
 
 
+def is_custom_specialist_dispatch(params: dict) -> bool:
+    """Whether a dispatch names ``custom_specialist`` as its domain or as a tag."""
+    if str(params.get("domain") or "").strip() == CUSTOM_SPECIALIST_KEY:
+        return True
+    return CUSTOM_SPECIALIST_KEY in normalize_dispatch_tags(params)
+
+
 def get_domain(key: str) -> SpecialistDomain | None:
     """Return the catalogue entry for ``key`` or None when unknown."""
     for d in SPECIALIST_DOMAINS:
@@ -296,6 +317,7 @@ SPECIALIST_MAX_TURNS_HARD_CAP: int = 1000
 
 
 __all__ = [
+    "CUSTOM_SPECIALIST_KEY",
     "DEFAULT_SPECIALIST_MAX_TURNS",
     "EXTRA_KNOWLEDGE_DOMAIN_TAGS",
     "FREEFORM_DOMAIN",
@@ -308,5 +330,6 @@ __all__ = [
     "SpecialistDomain",
     "domain_for_tag",
     "get_domain",
+    "is_custom_specialist_dispatch",
     "normalize_dispatch_tags",
 ]

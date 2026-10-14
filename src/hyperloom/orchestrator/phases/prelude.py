@@ -8,7 +8,7 @@ import logging as _logging
 from pathlib import Path
 from collections.abc import Mapping, Sequence
 from typing import Any
-from hyperloom.common.perf_metric import VERDICT_KEEP, graded_axes_of
+from hyperloom.common.perf_metric import VERDICT_KEEP, constraint_fields, graded_axes_of
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
     GATE_ACCURACY,
@@ -2240,14 +2240,14 @@ class PreludePhase(CoordinatorCollaborator):
         reproduced = graded.verdict == VERDICT_KEEP
         outcome["keep_threshold_pct"] = keep_threshold
         if graded.veto_reason:
-            # The grading applies the session's latency ceiling, so the drift branch below rolls the replay back
-            # rather than leaving a config the budget refused promoted on disk.
-            outcome["latency_veto"] = graded.veto_reason
+            # The grading applies the session's constraints (latency, power), so the drift branch below rolls the
+            # replay back rather than leaving a config a budget refused promoted on disk.
+            outcome["constraint_veto"] = graded.veto_reason
         if recorder is not None:
             recorder.record_gate(
                 GATE_KEEP_THRESHOLD,
                 passed=reproduced,
-                reason=f"graded on {graded.objective}: {graded.verdict}",
+                reason=f"graded on {graded.objective}: {graded.refused_by or graded.verdict}",
                 observed=measured_gain,
                 threshold=keep_threshold,
             )
@@ -2376,8 +2376,8 @@ class PreludePhase(CoordinatorCollaborator):
                 {
                     "name": "warm_replay",
                     **graded_axes_of(result),
-                    # The latency budget grades on this and fails closed without it.
-                    "e2el_mean_ms": result.get("e2el_mean_ms"),
+                    # The latency and power budgets grade on these and fail closed without them.
+                    **constraint_fields(result),
                     "candidate_extra_server_args": warm_args,
                     "candidate_extra_envs": warm_envs,
                     "recipe_delta": {
@@ -2463,7 +2463,9 @@ class PreludePhase(CoordinatorCollaborator):
             task,
             outcome,
             recorder,
-            reason=graded.veto_reason or f"measured {measured_gain:+.2f}% below keep threshold {keep_threshold:+.2f}%",
+            reason=graded.veto_reason
+            or graded.refused_by
+            or f"measured {measured_gain:+.2f}% below keep threshold {keep_threshold:+.2f}%",
         )
 
     def _reject_warm_replay_as_drift(
@@ -2618,10 +2620,7 @@ class PreludePhase(CoordinatorCollaborator):
                 {"reason": reason, "gpu_trace_unsupported_reason": unsupported},
             )
             return None
-        params: dict[str, Any] = {
-            "source": "coordinator_internal",
-            "reason": str(reason),
-        }
+        params: dict[str, Any] = {"source": "coordinator_internal", "reason": str(reason)}
         if inline_event:
             params[INLINE_EVENT_PARAM] = str(inline_event)
         if reason != "prelude_initial":
@@ -2629,6 +2628,7 @@ class PreludePhase(CoordinatorCollaborator):
         else:
             # PRELUDE roofline profiles the baseline arm: inject baseline's own server args (never current_best's) so
             # a later warm-replay can't swap in flags that skew the baseline ceiling.
+            params.update(self._coord.enablement_revalidation.baseline_launch_params())
             try:
                 from hyperloom.inference_optimizer.roofline_ceiling import read_baseline_server_args
 

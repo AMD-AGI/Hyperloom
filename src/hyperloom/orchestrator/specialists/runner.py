@@ -19,7 +19,7 @@ import json
 import logging
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -41,6 +41,7 @@ from hyperloom.inference_optimizer.trace.trajectory_trace import (
     trajectory_span,
 )
 from .domains import (
+    CUSTOM_SPECIALIST_KEY,
     DEFAULT_SPECIALIST_MAX_TURNS,
     FREEFORM_DOMAIN,
     SPECIALIST_DOMAIN_KEYS,
@@ -273,6 +274,20 @@ def _grounding_explicit_root(
     return Path(roots.pop()) if len(roots) == 1 else None
 
 
+def _resolve_claimed_patch(p: Any, bases: list[Path]) -> str | None:
+    """The first existing sandbox-internal file a claimed patch path names, absolute or under one of ``bases``."""
+    raw = Path(str(p))
+    candidates = [raw] if raw.is_absolute() else []
+    candidates += [base / raw for base in bases]
+    for c in candidates:
+        try:
+            if c.is_file() and _patch_path_within_bases(c, bases):
+                return str(c)
+        except OSError:
+            continue
+    return None
+
+
 def _patch_path_within_bases(path: Path, bases: list[Path]) -> bool:
     """True when ``path`` resolves inside one of the specialist sandbox bases.
 
@@ -316,11 +331,10 @@ def _safe_redact(s: str) -> str:
             ``[REDACTED]``.
     """
     out = redact_secret_values(s)
-    out = _SECRET_ASSIGNMENT_RE.sub(
+    return _SECRET_ASSIGNMENT_RE.sub(
         lambda m: f"{m.group('key')}{m.group('sep')}{m.group('quote')}[REDACTED]{m.group('quote')}",
         out,
     )
-    return out
 
 
 def _redact_transcript_value(value: Any) -> Any:
@@ -603,6 +617,13 @@ class SpecialistRunner:
         if domain.key not in SPECIALIST_DOMAIN_KEYS:
             notes.append(f"domain={domain.key!r} is outside the domain catalogue; using generic prompt template")
 
+        # The operator-defined specialist reads its description and focus from the session.
+        shared_state = ctx.extra.get("shared_state")
+        custom_specialist_prompt = str(getattr(shared_state, "custom_specialist_prompt", "") or "")
+        custom_specialist_description = str(getattr(shared_state, "custom_specialist_description", "") or "")
+        if domain.key == CUSTOM_SPECIALIST_KEY and custom_specialist_description:
+            domain = replace(domain, description=custom_specialist_description)
+
         # Worktree — created only under subprocess dispatch; surfaced via ``workspace_path``.
         worktree, worktree_source, worktree_err = await asyncio.to_thread(
             self._maybe_setup_worktree,
@@ -630,6 +651,7 @@ class SpecialistRunner:
                 experience_kb_block=str(params.get("experience_kb_block") or ""),
                 # Coordinator-populated roofline pre-fetch; empty when not warmed.
                 roofline_evidence=dict(params.get("roofline_evidence") or {}),
+                runtime_findings=str(params.get("runtime_findings") or ""),
                 sub_kind=str(params.get("sub_kind") or ""),
                 extra_focus_tags=_extra_focus_tags(params, domain),
                 warm_start_recipe=dict(params.get("warm_start_recipe") or {}),
@@ -703,6 +725,7 @@ class SpecialistRunner:
                 task_kind=str(params.get("task_kind") or ""),
                 prior_attempts=[e for e in (params.get("prior_attempts") or []) if isinstance(e, dict)],
                 pr_lead=dict(params.get("pr_lead") or {}),
+                custom_specialist_prompt=custom_specialist_prompt,
             )
 
         system_prompt, user_prompt = build_specialist_prompts(prompt_inputs)
@@ -1139,36 +1162,15 @@ class SpecialistRunner:
             done_payload["summary"] = "specialist emitted done without summary"[:480]
         # Reconcile self-reported ``patches_written`` against the filesystem:
         # keep only claimed paths that exist on disk, then union with the scan.
-        claimed = done_payload.get("patches_written") or []
+        # A harvested diff is the whole round, so a claim only restates it.
+        claimed = [] if patch_roots else done_payload.get("patches_written") or []
         if not isinstance(claimed, list):
             claimed = []
         search_bases = [b for b in (prep.worktree, workspace) if b is not None]
-
-        def _resolve_existing_patch(p: Any) -> str | None:
-            """Resolve a claimed patch path against known search bases.
-
-            Args:
-                p: Patch path (absolute or relative to a search base).
-
-            Returns:
-                The first existing sandbox-internal file path, or ``None``.
-            """
-            raw = Path(str(p))
-            candidates = [raw] if raw.is_absolute() else []
-            for base in search_bases:
-                candidates.append(base / raw)
-            for c in candidates:
-                try:
-                    if c.is_file() and _patch_path_within_bases(c, search_bases):
-                        return str(c)
-                except OSError:
-                    continue
-            return None
-
         validated: list[str] = []
         missing: list[str] = []
         for p in claimed:
-            resolved = _resolve_existing_patch(p)
+            resolved = _resolve_claimed_patch(p, search_bases)
             if resolved is not None:
                 validated.append(resolved)
             else:
@@ -1182,14 +1184,8 @@ class SpecialistRunner:
                     p,
                 )
                 continue
-            if p not in validated:
-                validated.append(p)
-        _seen: set[str] = set()
-        deduped: list[str] = []
-        for p in validated:
-            if p not in _seen:
-                _seen.add(p)
-                deduped.append(p)
+            validated.append(p)
+        deduped = list(dict.fromkeys(validated))
         if missing:
             # Record dangling patch claims for the session_breakdown audit.
             notes.append("patches_claimed_but_missing:" + ",".join(missing[:8]))

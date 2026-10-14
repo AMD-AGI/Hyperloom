@@ -584,8 +584,9 @@ def test_close_adopts_only_successfully_replayed_prior_overlays(tmp_path: Path) 
     bundle.validate()
 
 
-def test_close_carries_prior_apply_root_onto_adopted_overlay(tmp_path: Path) -> None:
-    """An adopted overlay keeps the checkout its prior record named."""
+@pytest.mark.parametrize("staged_base_sha", [None, "abc123"])
+def test_close_carries_prior_apply_root_onto_adopted_overlay(tmp_path: Path, staged_base_sha: str | None) -> None:
+    """An adopted overlay keeps the checkout its prior record named, on the replay's one provenance row."""
     old_ref = "patch/overlays/000004/00-upstream.patch"
     warm = tmp_path / "warm"
     old_patch = warm / "files" / old_ref
@@ -614,6 +615,8 @@ def test_close_carries_prior_apply_root_onto_adopted_overlay(tmp_path: Path) -> 
         encoding="utf-8",
     )
     sections = KnowledgeSections(tmp_path / "draft", warm_start_dir=warm)
+    if staged_base_sha is not None:
+        assert PatchKB(sections).stage_provenance(stack_index=0, base_sha=staged_base_sha)
     state = _state(
         [
             {
@@ -630,12 +633,10 @@ def test_close_carries_prior_apply_root_onto_adopted_overlay(tmp_path: Path) -> 
     adopted = "patch/overlays/000000/00-upstream.patch"
     patch = bundle.knowledge["value"]["patch"]
     assert patch["patches"] == [adopted]
-    roots = {
-        ref: root
-        for row in patch.get("provenance", [])
-        for ref, root in row.get("host_origin", {}).get("apply_roots", {}).items()
-    }
-    assert roots == {adopted: "/sgl-workspace/sglang"}
+    rows = [row for row in patch["provenance"] if row["stack_index"] == 0]
+    assert len(rows) == 1
+    assert rows[0]["host_origin"]["apply_roots"] == {adopted: "/sgl-workspace/sglang"}
+    assert rows[0]["base_sha"] == (staged_base_sha or "")
     bundle.validate()
 
 

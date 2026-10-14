@@ -398,8 +398,7 @@ class TestProbeSourceAgainstFakeVllm:
         proc = subprocess.run(
             [sys.executable, "-c", _PROBE_SRC, *flags], capture_output=True, text=True, env=env, timeout=120
         )
-        payload = json.loads(proc.stdout.split(_VLLM_PASS_PROBE_MARKER)[-1].strip())
-        return payload
+        return json.loads(proc.stdout.split(_VLLM_PASS_PROBE_MARKER)[-1].strip())
 
     def test_no_level_api_falls_back_to_the_pass_config_default(self, tmp_path):
         # CONFIRMED absent: the class default IS the effective value, so this is a sound fallback rather than an

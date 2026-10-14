@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+from ._kernel_tools_harness import sourceable_kernel_tools
+
 
 INSTALL_SH = Path(__file__).resolve().parents[1] / "assets" / "install_kernel_tools.sh"
 _BASE_PATH = os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
@@ -265,12 +267,7 @@ def _write_env_file(
     tmp_path: Path, *, path: str, prelude: str = "", home: Path | None = None
 ) -> subprocess.CompletedProcess[str]:
     """Source the installer's functions and run write_env_file()."""
-    sourceable = tmp_path / "install_sourceable.sh"
-    # Drop the trailing ``main "$@"`` dispatch so sourcing only defines functions.
-    sourceable.write_text(
-        re.sub(r'(?m)^main "\$@"\s*$', "", INSTALL_SH.read_text(encoding="utf-8")),
-        encoding="utf-8",
-    )
+    sourceable = sourceable_kernel_tools(tmp_path)
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
     runtime = tmp_path / "runtime"

@@ -48,6 +48,8 @@ _MODELS = [
     "/models/DSv4",
     "GLM-5.2",
     "glm52",
+    "/models/GLM-5.3-Quark-MXFP4-AttnFP8",
+    "glm-5.3",
     "MiniMax-M3",
     "minimax.m3",
     "/models/gpt-oss-120b",
@@ -124,6 +126,26 @@ def test_the_whitelist_still_names_the_families_it_is_meant_to():
     for family in AGENTX_FULL_CONTEXT_FAMILIES:
         assert _agentx_default_corpus(f"/models/{family}-instruct") == AGENTX_CORPUS_FULL
     assert _agentx_default_corpus("/models/gpt-oss-120b") == AGENTX_CORPUS_256K
+
+
+# Every agentic model upstream replays uncapped (InferenceX
+# ``infx/bench/agentic/traces.py`` ``UNCAPPED_FAMILIES``), by its served identity.
+_UPSTREAM_UNCAPPED_MODELS = [
+    "deepseek-ai/DeepSeek-V4-Pro",
+    "deepseek-ai/DeepSeek-V4.1-Flash",
+    "amd/GLM-5.2-MXFP4",
+    "zai-org/GLM-5.3",
+    "/models/GLM-5.3-Quark-MXFP4-AttnFP8",
+    "moonshotai/Kimi-K3",
+    "amd/MiniMax-M3-MXFP4",
+]
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash to run the client's own functions")
+def test_upstream_uncapped_families_replay_the_full_corpus():
+    expected = [AGENTX_CORPUS_FULL] * len(_UPSTREAM_UNCAPPED_MODELS)
+    assert _shell_defaults(_UPSTREAM_UNCAPPED_MODELS) == expected
+    assert [_agentx_default_corpus(m) for m in _UPSTREAM_UNCAPPED_MODELS] == expected
 
 
 def test_preflight_accepts_exactly_the_corpora_the_rules_can_produce():

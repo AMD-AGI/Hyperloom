@@ -33,9 +33,9 @@ AGENTX_PREFLIGHT_STOP_REASON: str = "agentx_client_unavailable"
 PATCH_RECOVERY_INCOMPLETE_STOP_REASON: str = "patch_recovery_incomplete"
 
 #: A reactor agent's LLM backend kept failing for an hour without one
-#: successful turn. Without the Orchestration agent nothing is decided, and
-#: without the critic every proposal times out denied, so the rest of the
-#: budget would buy nothing.
+#: successful turn, or kept answering without ever emitting an intent.
+#: Without the Orchestration agent nothing is decided, and without the critic
+#: every proposal times out denied, so the rest of the budget would buy nothing.
 BACKEND_UNHEALTHY_STOP_REASON: str = "backend_unhealthy"
 
 #: Terminals that mean the run optimized and closed normally.
@@ -96,6 +96,8 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         # The baseline is over ``--max-latency-ms``, or reported no end-to-end latency: every candidate is graded
         # against it, so there is no configuration the run could reach that would satisfy the constraint.
         "baseline_over_latency_budget",
+        # The same for ``--max-power-w``: the baseline's per-GPU mean power is over it, or was not reported.
+        "baseline_over_power_budget",
         "prelude_cold_anchor_low_budget",
         "time_exhausted_during_prelude",
         "warm_replay_rollback_failed",

@@ -10,6 +10,8 @@ import shlex
 import subprocess
 from pathlib import Path
 
+from ._kernel_tools_harness import sourceable_kernel_tools
+
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 INSTALL_SH = REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "assets" / "install_kernel_tools.sh"
@@ -62,16 +64,8 @@ def _checkout_state(checkout: Path) -> tuple[str, str, bytes | None, str]:
     )
 
 
-def _sourceable_installer(dest_dir: Path) -> Path:
-    text = INSTALL_SH.read_text(encoding="utf-8")
-    patched = re.sub(r'(?m)^main "\$@"\s*$', "", text)
-    copy = dest_dir / "install_sourceable.sh"
-    copy.write_text(patched, encoding="utf-8")
-    return copy
-
-
 def _run_installer_for_geak(tmp_path: Path, geak_root: Path, geak_repo: Path) -> subprocess.CompletedProcess[str]:
-    sourceable = _sourceable_installer(tmp_path)
+    sourceable = sourceable_kernel_tools(tmp_path)
     harness = tmp_path / "run-geak.sh"
     harness.write_text(
         f"""#!/usr/bin/env bash
@@ -282,7 +276,7 @@ def test_static_guards_pip_from_checkout() -> None:
 def test_claude_cli_is_on_path_before_geak_installs() -> None:
     """GEAK's bootstrap reuses the claude CLI on PATH, so it must exist before GEAK is installed."""
     text = INSTALL_SH.read_text(encoding="utf-8")
-    main = re.search(r"^main\(\) \{.*?^\}", text, re.S | re.M)
-    assert main, "could not locate main() in install.sh"
+    main = re.search(r"^install_kernel_tools\(\) \{.*?^\}", text, re.S | re.M)
+    assert main, "could not locate install_kernel_tools() in install_kernel_tools.sh"
     calls = re.findall(r"(?m)^\s*(ensure_claude_cli|ensure_geak)\s*$", main.group(0))
     assert calls == ["ensure_claude_cli", "ensure_geak"], calls

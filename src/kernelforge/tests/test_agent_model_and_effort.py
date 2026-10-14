@@ -62,7 +62,7 @@ def test_no_call_site_pins_a_reasoning_effort() -> None:
         "cli.py",
         "orchestrator/agent.py",
         "orchestrator/supervisor.py",
-        "fusion/command.py",
+        "fusion/agent_selection.py",
         "gemm_tune/tier3/generate.py",
         "roofline_ceiling/command.py",
     }
@@ -90,7 +90,7 @@ def test_every_runtime_is_built_where_the_switches_are_read() -> None:
                 found.append(str(path.relative_to(_SRC)))
     allowed = {
         "config.py",
-        "fusion/command.py",
+        "fusion/agent_selection.py",
         "gemm_tune/tier3/generate.py",
         "orchestrator/agent.py",
         "orchestrator/supervisor.py",

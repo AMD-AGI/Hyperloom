@@ -506,6 +506,8 @@ def _validation_from_timeline(timeline: list[dict[str, Any]], source_ids: list[s
         # ``current_best``: a revalidation moves the cumulative figure without re-promoting the recipe.
         "perf": _graded_axes(settled.get("perf")),
         "attributed_gain_pct": _optional_float(ledger.get("attributed_gain_pct")) or 0.0,
+        "attributed_gain_pct_excluding_fixes": _optional_float(ledger.get("attributed_gain_pct_excluding_fixes")),
+        "by_keep_reason": dict(_mapping(_mapping(ledger.get("adoptions")).get("by_keep_reason"))),
         "unattributed_gain_pct": _optional_float(ledger.get("unattributed_gain_pct")) or 0.0,
         "reconciliation_gap_pct": _optional_float(ledger.get("reconciliation_gap_pct")),
         "validated_total_gain_pct": _optional_float(ledger.get("validated_total_gain_pct")),

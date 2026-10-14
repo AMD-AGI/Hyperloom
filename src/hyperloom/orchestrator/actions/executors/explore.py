@@ -10,7 +10,6 @@ import logging
 import os
 import shlex
 import tempfile
-import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -29,6 +28,8 @@ from hyperloom.common.perf_metric import (
     GRADED_INTVTY_P50,
     GRADED_OUTPUT,
     VERDICT_REVERT,
+    constraint_fields,
+    graded_axes_of,
     perf_snapshot_from_mapping,
     resolve_grading_anchor_perf,
     stamp_output_per_gpu,
@@ -51,10 +52,9 @@ from ...state.shared_state import (
     stack_base_params,
 )
 from ..stop_attribution import (
-    SESSION_TIME_EXHAUSTED_CLASS,
-    STOPPED_BY_THE_RUN,
     StoppedByTheRun,
     stopped_by_the_run_class,
+    variant_budget_stop,
 )
 from ._accuracy_gate import (
     accuracy_passed,
@@ -1151,13 +1151,13 @@ class ExploreExecutor:
                     from ._subprocess_kill import resolve_benchmark_timeouts
 
                     fit_required_sec = resolve_benchmark_timeouts()[1]
-                if session_deadline_sec is not None and (session_deadline_sec - time.monotonic()) < fit_required_sec:
-                    run_stop = STOPPED_BY_THE_RUN[SESSION_TIME_EXHAUSTED_CLASS]
+                run_stop = variant_budget_stop(session_deadline_sec, extra.get("phase_deadline"), fit_required_sec)
+                if run_stop is not None:
                     run_stop_detail = run_stop.never_started
                     session_budget_untested = len(runnable) - idx
                     log.warning(
-                        "explore: session budget cannot fit another variant "
-                        "(needs %.0fs); stopping after %d/%d variant(s)",
+                        "explore: cannot fit another variant (%s, needs %.0fs); stopping after %d/%d variant(s)",
+                        run_stop.error_class,
                         fit_required_sec,
                         idx,
                         len(runnable),
@@ -1323,6 +1323,7 @@ class ExploreExecutor:
                         base_remove_args=list(stack_remove_args),
                         base_unset_envs=list(stack_unset_envs),
                         server_already_ready=use_warm_decision,
+                        ready_server_log=w.server_log_path if use_warm_decision else None,
                         serving_lease=variant_lease,
                         session_deadline_sec=session_deadline_sec,
                         variant_expected_sec=decision_expected_sec,
@@ -1349,8 +1350,7 @@ class ExploreExecutor:
                         GRADED_INTVTY_P50: r.intvty_p50,
                         GRADED_DURATION: r.duration_seconds,
                         GRADED_ERROR_RATE: r.request_error_rate,
-                        # Graded against the session latency budget when one is set.
-                        "e2el_mean_ms": r.e2el_mean_ms,
+                        **constraint_fields(r),
                     }
                     stamp_output_per_gpu(variant_meas, getattr(ss, "tp", None))
                     graded = resolve_graded_comparison(
@@ -1366,6 +1366,10 @@ class ExploreExecutor:
                         f"tput {graded.tput_reference:.1f}->{graded.tput_candidate:.1f}"
                     )
                     gain: float | None
+                    # The graded movement of a variant the verdict refused. ``gain`` stays None on a REVERT so no
+                    # consumer counts a refused variant's gain as a win, but the ledger row still has to say the
+                    # axis was measured: rendered with neither, a guard-refused variant reads as unmeasured.
+                    graded_gain: float | None = None
                     outcome = TS_FAILED
                     reason: str = ""
                     # Each gate's verdict as it rules, in the order it ruled.
@@ -1391,6 +1395,7 @@ class ExploreExecutor:
                         )
                     elif graded.verdict == VERDICT_REVERT:
                         gain = None
+                        graded_gain = gain_pct(graded.candidate, graded.reference) if graded.reference > 0 else None
                         outcome = "REVERT"
                         if graded.veto_reason:
                             # The variant is refused a round earlier than the
@@ -1399,7 +1404,7 @@ class ExploreExecutor:
                             # batch is graded against.
                             reason = graded.veto_reason
                         elif _graded_on_intvty:
-                            reason = f"median_or_guard_failed ({axes})"
+                            reason = f"{graded.refused_by} ({axes})"
                         else:
                             reason = "gain_below_threshold"
                     else:
@@ -1411,7 +1416,7 @@ class ExploreExecutor:
                         decision_gates.append(
                             {
                                 "gate": (
-                                    "latency_budget"
+                                    graded.vetoed_by
                                     if graded.veto_reason
                                     else (
                                         "graded_axes"
@@ -1493,12 +1498,13 @@ class ExploreExecutor:
                         "status": r.status,
                         "tput": decision_tput,
                         "decision_tput": decision_tput,
-                        "input_throughput": r.input_throughput,
-                        "total_throughput": r.total_token_throughput,
-                        "e2e_norm_intvty_p90": r.intvty_p90,
-                        "tpot_p90_ms": r.tpot_p90_ms,
+                        **graded_axes_of(variant_meas),
                         "gain_pct": gain,
+                        "graded_gain_pct": graded_gain,
                         "graded_objective": graded.objective,
+                        # Which gate refused the variant. The prompt ledger renders this row, and without the reason a
+                        # REVERT on the tail guard is indistinguishable from one the benchmark never measured.
+                        "reason": reason,
                         "base_tput": running_base_tput,
                         "round_id": round_id,
                         "ts": _now_iso(),
@@ -1602,12 +1608,9 @@ class ExploreExecutor:
                             "decision_tput": decision_tput,
                             # The axes this KEEP was graded on travel with it: current_best becomes the next round's
                             # anchor, and an anchor without them degrades the session.
-                            "input_throughput": r.input_throughput,
-                            "total_throughput": r.total_token_throughput,
-                            "e2e_norm_intvty_p90": r.intvty_p90,
-                            "tpot_p90_ms": r.tpot_p90_ms,
-                            # Promotion re-checks the latency budget against this row, not the round's measurement.
-                            "e2el_mean_ms": r.e2el_mean_ms,
+                            **graded_axes_of(variant_meas),
+                            # Promotion re-checks the budgets against this row, not the round's measurement.
+                            **constraint_fields(r),
                             "single_workspace": r.workspace,
                             "launch_evidence": dict(r.launch_evidence or {}),
                             "launch_evidence_path": r.launch_evidence_path,

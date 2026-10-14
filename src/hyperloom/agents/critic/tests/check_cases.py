@@ -198,6 +198,12 @@ def validate_outputs(cases: list[dict[str, Any]], outputs_path: Path) -> None:
 
 
 def assert_review_output(case_id: str, expected: dict[str, Any], output: dict[str, Any]) -> None:
+    assert_review_verdict(case_id, expected, output)
+    assert_review_evidence(case_id, expected, output)
+
+
+def assert_review_verdict(case_id: str, expected: dict[str, Any], output: dict[str, Any]) -> None:
+    """The verdict is well formed, is one the schema allows, and is the one the case expects."""
     if output.get("kind") != "review_verdict":
         fail(f"{case_id}: output.kind must be review_verdict")
     for key, typ in (
@@ -241,6 +247,9 @@ def assert_review_output(case_id: str, expected: dict[str, Any], output: dict[st
     if output["verdict"] in {"reject", "redirect"} and not output["kb_evidence"]:
         fail(f"{case_id}: reject/redirect must include kb_evidence")
 
+
+def assert_review_evidence(case_id: str, expected: dict[str, Any], output: dict[str, Any]) -> None:
+    """The evidence the verdict rests on is well formed and meets the case's thresholds."""
     for field in ("kb_evidence", "packet_evidence", "required_evidence", "notes"):
         for item in output[field]:
             if not isinstance(item, str):
@@ -296,6 +305,13 @@ def validate_risk(case_id: str, risk: Any) -> None:
 
 
 def assert_kb_output(case_id: str, expected: dict[str, Any], output: dict[str, Any]) -> None:
+    drafts, rejected = assert_kb_shape(case_id, output)
+    assert_kb_counts(case_id, expected, drafts, rejected)
+    assert_kb_quality(case_id, expected, drafts, rejected)
+
+
+def assert_kb_shape(case_id: str, output: dict[str, Any]) -> tuple[list[Any], list[Any]]:
+    """Every draft and rejection is well formed; return the two lists."""
     if output.get("kind") != "kb_draft":
         fail(f"{case_id}: output.kind must be kb_draft")
     require_type(case_id, output, "kb_drafts", list)
@@ -311,7 +327,11 @@ def assert_kb_output(case_id: str, expected: dict[str, Any], output: dict[str, A
     for note in output["notes"]:
         if not isinstance(note, str):
             fail(f"{case_id}: notes items must be strings")
+    return drafts, rejected
 
+
+def assert_kb_counts(case_id: str, expected: dict[str, Any], drafts: list[Any], rejected: list[Any]) -> None:
+    """As many drafts, rejections and categories as the case asks for."""
     if len(drafts) < int(expected.get("min_kb_drafts", 0)):
         fail(f"{case_id}: too few KB drafts")
     if "max_kb_drafts" in expected and len(drafts) > int(expected["max_kb_drafts"]):
@@ -334,6 +354,9 @@ def assert_kb_output(case_id: str, expected: dict[str, Any], output: dict[str, A
             if field not in draft:
                 fail(f"{case_id}: draft missing field {field}")
 
+
+def assert_kb_quality(case_id: str, expected: dict[str, Any], drafts: list[Any], rejected: list[Any]) -> None:
+    """The drafts carry the status, confidence and provenance the case demands."""
     status_any_of = set(as_list(expected.get("result_status_any_of")))
     if status_any_of:
         statuses = {draft.get("result", {}).get("status") for draft in drafts}

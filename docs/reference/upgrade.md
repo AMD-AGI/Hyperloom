@@ -100,15 +100,16 @@ only the optimizer-family commands moved under `hyperloom`):
 | Entry | Typical use |
 |---|---|
 | `kernelforge` / `python -m kernelforge.cli` | KernelForge campaigns (orchestrator dispatches `-m kernelforge.cli`) |
-| `hyperloom-kb-serve`, `hyperloom-kb-collect`, `python -m hyperloom_kb` | Global Experience KB service and collect CLI |
-| `python -m hyperloom.inference_optimizer.experience_kb_service {init-env,ensure,push,pull}` | Per-workspace Experience KB sidecar (setup skill, optimizer SKILL) |
+| `hyperloom-kb-serve`, `hyperloom-kb-collect`, `python -m hyperloom_kb` | Experience KB service and collect CLI |
+| `hyperloom-kb` / `python -m hyperloom_kb.cli` | Operate an Experience KB service: health, labels, restore, exclusions, list, export |
+| `python -m hyperloom.inference_optimizer.experience_kb_service {init-env,ensure,...}` | Per-workspace Experience KB sidecar, with every `hyperloom-kb` command (setup skill, optimizer SKILL) |
 | `python -m hyperloom.inference_optimizer.framework_deps` | Installer dependency probe (`install.sh`) |
 | `python -m hyperloom.agents.critic.runtime.cli {prepare-review,commit-review,replay-dead-letter}` | Critic backend subprocess (not operator-facing) |
 | Kernel agent tool modules (`tracelens_analysis`, `bypass_trace_analysis`, …) | Orchestrator subprocess scripts with their own `__main__` |
 | `multi_node/scripts/*.py` on remote pods | Payload scripts SSH'd by `hyperloom multi-node`, not local `-m` entry points |
 
 There is no `hyperloom kb` subcommand in 1.1.x; keep using
-`experience_kb_service` or the `hyperloom-kb-*` console scripts above.
+`experience_kb_service`, `hyperloom-kb`, or the `hyperloom-kb-*` console scripts above.
 
 ---
 
@@ -187,7 +188,7 @@ Earlier launchers might have waited for the Coordinator to emit a
 - python3 -m hyperloom.inference_optimizer.cli optimize ... # expects setup as first action
 + bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install.sh"
 + . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
-+ ray stop --force; ulimit -Sn "${RAY_MIN_NOFILE:-65536}" 2>/dev/null || true; ray start --head --num-gpus="$RAY_NUM_GPUS" --include-dashboard=false
++ ray stop --force; ulimit -Sn "${RAY_MIN_NOFILE:-65536}" 2>/dev/null || true; ray start --head --num-gpus="$RAY_NUM_GPUS" --include-dashboard=false --resources='{"serving_slot":1}'
 + python3 -m hyperloom optimize ...
 ```
 

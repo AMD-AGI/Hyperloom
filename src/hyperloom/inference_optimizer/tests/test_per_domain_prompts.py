@@ -143,6 +143,13 @@ def test_candidate_discovery_specialist_mentions_find_rank_judge():
         assert marker.lower() in text.lower(), f"missing {marker!r}"
 
 
+def test_candidate_discovery_specialist_schema_is_an_upstream_candidate():
+    """The FRAMEWORK funnel drops a discovery proposal that carries neither pr_url nor head_sha."""
+    text = _build("candidate_discovery_specialist")
+    assert '"pr_url"' in text and '"head_sha"' in text
+    assert '"extra_args"' not in text
+
+
 def test_static_recon_specialist_mentions_reconnaissance_and_bridge_candidates():
     """The static-recon focus must steer read-only source grep for disabled switches and a bridge_candidates output block."""
     text = _build("static_recon_specialist")

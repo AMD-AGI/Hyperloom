@@ -163,7 +163,7 @@ def combine_usage_totals(
     describe only part of the run, so the combination reports itself as ``partial`` rather than claiming the complete
     provider-priced answer a reader would otherwise bill against.
     """
-    combined: dict[str, Any] = {key: 0 for key in _TOKEN_KEYS}
+    combined: dict[str, Any] = dict.fromkeys(_TOKEN_KEYS, 0)
     combined["total_cost_usd"] = 0.0
     combined["calls"] = 0
     all_cost_available = True

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime, timezone
 
 from pathlib import Path
 from typing import Any
@@ -138,7 +139,7 @@ def test_prelude_blocked_while_warm_replay_in_flight():
 
 
 def test_prelude_waits_for_the_initial_analysis():
-    """The transition barrier stops running actions, so leaving early kills the roofline the baseline enqueued."""
+    """Leaving before the initial roofline is booked hands that analysis to the next phase instead of seeding this one."""
     state = SharedState(
         phase="PRELUDE",
         phase_budget_pct={},
@@ -431,25 +432,61 @@ def test_skip_to_kernel_requires_a_tested_round():
     assert out is None
 
 
-def test_skip_to_kernel_fires_once_a_round_ran():
+_ENTERED_UNIX = 1_000_000.0
+
+
+def _framework_state_with_rounds(rounds: list[dict[str, Any]]) -> SharedState:
+    """FRAMEWORK_AGENT entered at ``_ENTERED_UNIX`` in cycle 0, with a skip_to_kernel hint pending."""
     state = SharedState(
         phase=phase_state.PHASE_FRAMEWORK_AGENT,
-        phase_started_unix=1_000_000.0,
+        phase_started_unix=_ENTERED_UNIX,
         max_minutes=0,
         phase_budget_pct={},
         pending_escalate_hint="skip_to_kernel",
         explore_search={},
-        specialist_rounds=[{"proposals_total": 1, "proposals_kept": 0}],
+        specialist_rounds=rounds,
         macro_cycle=0,
         optimization_stack=[{"action": "explore"}],
         resumed_ts="",
     )
-    state._now_unix = lambda: 1_000_000.0
+    state._now_unix = lambda: _ENTERED_UNIX + 600.0
+    return state
+
+
+def _completed(offset_sec: float) -> str:
+    return datetime.fromtimestamp(_ENTERED_UNIX + offset_sec, timezone.utc).isoformat()
+
+
+@pytest.mark.parametrize("source_phase", ["FRAMEWORK_AGENT", "EXPLORE"])
+def test_skip_to_kernel_fires_once_a_round_ran(source_phase):
+    state = _framework_state_with_rounds(
+        [{"proposals_total": 1, "source_phase": source_phase, "cycle": 0, "completed_at": _completed(60.0)}]
+    )
     out = phase_state.compute_next_phase(state)
     assert out is not None
     _next, reason, evidence = out
     assert reason == "optimize_no_more_leverage"
     assert evidence.get("hint") == "skip_to_kernel"
+
+
+@pytest.mark.parametrize(
+    "round_row",
+    [
+        # PRELUDE's own scout, stamped with the phase it ran in.
+        {"domain": "research_scout_specialist", "source_phase": "PRELUDE"},
+        # A domain specialist delegated during PRELUDE: the router stamps the explore lane, not the live phase.
+        {"domain": "serving_specialist", "source_phase": "EXPLORE"},
+    ],
+)
+def test_skip_to_kernel_ignores_rounds_completed_before_phase_entry(round_row):
+    """PRELUDE shares macro-cycle 0 with FRAMEWORK_AGENT, so only the entry time separates its rounds."""
+    state = _framework_state_with_rounds([{**round_row, "cycle": 0, "completed_at": _completed(-60.0)}])
+    assert phase_state.compute_next_phase(state) is None
+
+
+def test_skip_to_kernel_ignores_a_round_with_no_completion_time():
+    state = _framework_state_with_rounds([{"domain": "serving_specialist", "source_phase": "EXPLORE", "cycle": 0}])
+    assert phase_state.compute_next_phase(state) is None
 
 
 def test_compute_next_phase_terminal_overrides_phase():
@@ -709,7 +746,6 @@ def test_a_session_recorded_at_an_unknown_phase_refuses_to_resume(coordinator_wi
 
 
 _NO_KERNEL_CYCLE_SEC = 600 * 60.0
-# Low enough that one extend hint stays under the bump cap after the KERNEL share is redistributed.
 _NO_KERNEL_CLI_BUDGET_PCT = {phase_state.PHASE_FRAMEWORK_AGENT: 0.2}
 
 
@@ -779,38 +815,6 @@ async def test_no_kernel_framework_share_is_the_same_for_machine_dispatch_and_pr
         framework_exit = c.shared_state.phase_history[-1]
         assert framework_exit["from_phase"] == phase_state.PHASE_FRAMEWORK_AGENT
         assert framework_exit["evidence"]["passed_through_reason"] == "optimize_phase_budget_exhausted"
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_extend_explore_budget_moves_the_share_every_reader_uses(no_kernel_coordinator):
-    from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_EXTEND_EXPLORE_BUDGET
-
-    c = no_kernel_coordinator
-    share = c.shared_state.phase_budget_pct[phase_state.PHASE_FRAMEWORK_AGENT]
-    bumped = share + phase_state.ESCALATE_HINT_BUDGET_BUMP_DELTA
-    try:
-        _enter_framework_for(c, _NO_KERNEL_CYCLE_SEC * (share + bumped) / 2)
-        assert c.dispatcher.dispatch_paused_for_phase_budget() is True
-        assert "remaining_sec=0" in await _phase_block(c)
-
-        await c.router._handle_escalate_strategy_change(
-            "orchestration",
-            Intent(
-                type=IntentType.ESCALATE_STRATEGY_CHANGE,
-                payload={"summary": "s", "next_action_hint": ESCALATE_HINT_EXTEND_EXPLORE_BUDGET},
-            ),
-        )
-
-        assert c.shared_state.phase_budget_pct[phase_state.PHASE_FRAMEWORK_AGENT] == pytest.approx(bumped)
-        assert SharedState.load_or_init(c.session_dir).phase_budget_pct == c.shared_state.phase_budget_pct
-        assert c.dispatcher.dispatch_paused_for_phase_budget() is False
-        block = await _phase_block(c)
-        assert f"pct={bumped:.2f}" in block
-        assert "remaining_sec=0 " not in block
-        await c.phase_machine.advance_phase_if_needed()
-        assert c.shared_state.phase == phase_state.PHASE_FRAMEWORK_AGENT
     finally:
         await c.stop()
 

@@ -672,11 +672,6 @@ def test_install_preflights_accept_dual_protocol_gateway(tmp_path: Path):
             # extracted slice.
             ["preflight_load_dotenv() { :; }", "normalize_legacy_deepseek_env() { :; }"],
         ),
-        (
-            "kernel",
-            Path(setup.__file__).resolve().parent / "assets" / "install_kernel_tools.sh",
-            [],
-        ),
     ]
     for name, script_path, stubs in script_paths:
         script_text = script_path.read_text(encoding="utf-8")
@@ -715,17 +710,12 @@ def test_install_preflights_accept_dual_protocol_gateway(tmp_path: Path):
 
 
 def test_install_preflights_reject_cross_provider_pairing(tmp_path: Path):
-    """Both installers reject a mispaired config at install time."""
+    """install.sh rejects a mispaired config at install time."""
     script_paths = [
         (
             "install",
             Path(setup.__file__).resolve().parent / "assets" / "install.sh",
             ["preflight_load_dotenv() { :; }"],
-        ),
-        (
-            "kernel",
-            Path(setup.__file__).resolve().parent / "assets" / "install_kernel_tools.sh",
-            [],
         ),
     ]
     for name, script_path, stubs in script_paths:
@@ -765,7 +755,7 @@ def test_install_preflights_reject_cross_provider_pairing(tmp_path: Path):
 
 
 def test_baremetal_setup_rejects_cross_provider_pairing(tmp_path: Path):
-    """install_baremetal.sh rejects a mispaired config during setup, like the CLI preflight and the other two installers."""
+    """install_baremetal.sh rejects a mispaired config during setup, like the CLI preflight and install.sh."""
     install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
     script_text = install_script.read_text(encoding="utf-8")
     start = script_text.index("read_dotenv_var() {")
@@ -818,11 +808,6 @@ def test_install_preflights_accept_oauth_only_credentials(tmp_path: Path):
             "install",
             Path(setup.__file__).resolve().parent / "assets" / "install.sh",
             ["preflight_load_dotenv() { :; }"],
-        ),
-        (
-            "kernel",
-            Path(setup.__file__).resolve().parent / "assets" / "install_kernel_tools.sh",
-            [],
         ),
     ]
     for name, script_path, stubs in script_paths:
@@ -910,11 +895,6 @@ def test_install_preflights_accept_oauth_alongside_bare_openai_key(tmp_path: Pat
             Path(setup.__file__).resolve().parent / "assets" / "install.sh",
             ["preflight_load_dotenv() { :; }"],
         ),
-        (
-            "kernel",
-            Path(setup.__file__).resolve().parent / "assets" / "install_kernel_tools.sh",
-            [],
-        ),
     ]
     for name, script_path, stubs in script_paths:
         script_text = script_path.read_text(encoding="utf-8")
@@ -957,11 +937,6 @@ def test_install_preflights_still_reject_gateway_url_with_bare_openai_key(tmp_pa
             "install",
             Path(setup.__file__).resolve().parent / "assets" / "install.sh",
             ["preflight_load_dotenv() { :; }"],
-        ),
-        (
-            "kernel",
-            Path(setup.__file__).resolve().parent / "assets" / "install_kernel_tools.sh",
-            [],
         ),
     ]
     for name, script_path, stubs in script_paths:

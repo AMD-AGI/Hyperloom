@@ -9,12 +9,13 @@ import asyncio
 import logging as _logging
 import os
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from hyperloom.common.env import env_flag
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
 from ..collaborator import CoordinatorCollaborator
+from ..measurement.runtime_findings import render_runtime_findings
 from ..phases import machine_state as _phase_state
 from ..policy.gate import (
     PolicyDenied,
@@ -34,6 +35,31 @@ __all__ = ["SpecialistDispatchCollaborator"]
 
 _SOURCE_PATCH_FAMILY = "source_patch"
 
+#: ``(SharedState field, param key, conversion)`` for the values a specialist is warmed with when the session
+#: carries one. An empty value is not exported: its absence is how the specialist reads "this session has none".
+_STATE_PARAMS: tuple[tuple[str, str, Callable[[Any], Any]], ...] = (
+    ("warm_start_recipe", "warm_start_recipe", dict),
+    ("warm_start_pitfalls", "warm_start_pitfalls", list),
+    ("warm_start_lessons", "warm_start_lessons", list),
+    ("precision", "precision", str),
+    # The mode selects the specialist's workload block; the corpus shape supplies its numbers.
+    ("benchmark_mode", "benchmark_mode", str),
+    ("agentx_corpus_shape", "agentx_corpus_shape", dict),
+    ("grading", "agentx_grading", dict),
+    ("agentx_backend", "agentx_backend", str),
+    ("cumulative_gain_validated", "cumulative_gain_validated", float),
+)
+
+#: The same, for fields a specialist is told about only while they are above zero.
+_POSITIVE_NUMBER_PARAMS: tuple[tuple[str, Callable[[Any], Any]], ...] = (
+    ("tp", int),
+    ("conc", int),
+    ("isl", int),
+    ("osl", int),
+    ("max_model_len", int),
+    ("baseline_tput", float),
+)
+
 # Bounded transient-failure auto-retry for specialist dispatches (infra-only).
 SPECIALIST_AUTO_RETRY_MAX: int = 2
 
@@ -41,6 +67,9 @@ SPECIALIST_AUTO_RETRY_MAX: int = 2
 # Coordinator force-dispatches one.
 FORCE_STALLED_SPECIALIST_ROUNDS: int = 8
 FORCE_STALLED_KEEP_ROUNDS: int = 12
+
+# Gap id for the guaranteed custom dispatch when the ledger has no gap yet.
+CUSTOM_SESSION_GAP_ID: str = "gap.custom.session"
 
 
 class SpecialistDispatchCollaborator(CoordinatorCollaborator):
@@ -50,6 +79,8 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         super().__init__(coordinator)
         # Advisory only: scores proposals, never gates them.
         self._proposal_scorer = proposal_scorer
+        # Macro-cycle suffix of the last custom-specialist guarantee attempt, admitted or denied.
+        self._custom_guarantee_cycle: str | None = None
 
     async def warm_specialist_params(self, params: dict[str, Any]) -> None:
         """Fill specialist task params with KnowledgePlane data before enqueue (mutates in place); missing fields stay empty.
@@ -77,13 +108,14 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
 
         params.setdefault("kb_subgraph", {})
 
-        # Warm-start recipe + pitfalls + lessons from T0 anchor.
-        if state.warm_start_recipe and "warm_start_recipe" not in params:
-            params["warm_start_recipe"] = dict(state.warm_start_recipe)
-        if state.warm_start_pitfalls and "warm_start_pitfalls" not in params:
-            params["warm_start_pitfalls"] = list(state.warm_start_pitfalls)
-        if state.warm_start_lessons and "warm_start_lessons" not in params:
-            params["warm_start_lessons"] = list(state.warm_start_lessons)
+        for attr, key, convert in _STATE_PARAMS:
+            value = getattr(state, attr, None)
+            if value:
+                params.setdefault(key, convert(value))
+        for attr, to_number in _POSITIVE_NUMBER_PARAMS:
+            number = to_number(getattr(state, attr, 0) or 0)
+            if number > 0:
+                params.setdefault(attr, number)
         # runtime framework/version for version-mismatch annotation.
         if "framework" not in params:
             fw = str(getattr(state, "framework", "") or "").strip()
@@ -120,31 +152,6 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
 
         # Hardware + workload hints from SharedState; else dataclass defaults win.
         params.setdefault("gpu_type", state.gpu_type or "")
-        # Active server framework name.
-        if getattr(state, "framework", "") or "":
-            params.setdefault("framework", str(state.framework))
-        if int(getattr(state, "tp", 0) or 0) > 0:
-            params.setdefault("tp", int(state.tp))
-        if getattr(state, "precision", "") or "":
-            params.setdefault("precision", str(state.precision))
-        if int(getattr(state, "conc", 0) or 0) > 0:
-            params.setdefault("conc", int(state.conc))
-        if int(getattr(state, "isl", 0) or 0) > 0:
-            params.setdefault("isl", int(state.isl))
-        if int(getattr(state, "osl", 0) or 0) > 0:
-            params.setdefault("osl", int(state.osl))
-        if int(getattr(state, "max_model_len", 0) or 0) > 0:
-            params.setdefault("max_model_len", int(state.max_model_len))
-        # The mode selects the specialist's workload block; the corpus shape
-        # supplies its numbers.
-        if getattr(state, "benchmark_mode", "") or "":
-            params.setdefault("benchmark_mode", str(state.benchmark_mode))
-        if getattr(state, "agentx_corpus_shape", None):
-            params.setdefault("agentx_corpus_shape", dict(state.agentx_corpus_shape))
-        if isinstance(getattr(state, "grading", None), dict) and state.grading:
-            params.setdefault("agentx_grading", dict(state.grading))
-        if getattr(state, "agentx_backend", ""):
-            params.setdefault("agentx_backend", str(state.agentx_backend))
 
         # Advisory model_arch profile via arch_notes carrier (prompt-context only).
         if "arch_notes" not in params:
@@ -212,19 +219,11 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                             "severity": str(gap.get("severity") or ""),
                         }
 
-        if "baseline_tput" not in params:
-            _bt = float(getattr(state, "baseline_tput", 0.0) or 0.0)
-            if _bt > 0:
-                params["baseline_tput"] = _bt
         if "current_tput" not in params:
             cb = getattr(state, "current_best", None)
             _ct = float((cb.get("tput") if isinstance(cb, dict) else 0) or 0.0)
             if _ct > 0:
                 params["current_tput"] = _ct
-        if "cumulative_gain_validated" not in params:
-            _cgv = float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0)
-            if _cgv != 0:
-                params["cumulative_gain_validated"] = _cgv
         if "keep_threshold_pct" not in params:
             params["keep_threshold_pct"] = _phase_state.resolve_keep_threshold(state)
         if "applied_stack" not in params:
@@ -265,6 +264,10 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 "executive_summary": executive_summary,
                 "hot_kernels_top15": hot_kernels,
             }
+
+        measurement = getattr(state, "current_best_measurement", None)
+        if measurement and "runtime_findings" not in params:
+            params["runtime_findings"] = await asyncio.to_thread(render_runtime_findings, measurement)
 
         await self._warm_experience_kb(params)
 
@@ -553,9 +556,9 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         """
         state = self.shared_state
         if str(getattr(state, "phase", "") or "").upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
-            return None
+            return
         if not bool(getattr(state, "force_stalled_specialist_enabled", True)):
-            return None
+            return
         spec_thr = max(1, int(getattr(state, "force_stalled_specialist_rounds", 0) or FORCE_STALLED_SPECIALIST_ROUNDS))
         keep_thr = max(1, int(getattr(state, "force_stalled_keep_rounds", 0) or FORCE_STALLED_KEEP_ROUNDS))
         stalled = state.stalled_domains(
@@ -563,7 +566,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             keep_threshold=keep_thr,
         )
         if not stalled:
-            return None
+            return
 
         from .domains import domain_for_tag
 
@@ -648,8 +651,78 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 keep_thr,
             )
             # One forced dispatch per tick.
-            return None
-        return None
+            return
+        return
+
+    async def maybe_ensure_custom_specialist(self) -> None:
+        """Dispatch the operator-defined specialist when no custom task has started this session.
+
+        At most one attempt per macro cycle, counting attempts the router
+        denies before creating a task; a custom task already queued or running
+        is left alone. Falls back to research mode when source patches cannot
+        be authored, so the guarantee does not stall on a deterministic denial.
+        """
+        state = self.shared_state
+        if str(getattr(state, "phase", "") or "").upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
+            return
+        if not str(state.custom_specialist_prompt or "").strip() or state.custom_specialist_dispatched:
+            return
+        from .domains import CUSTOM_SPECIALIST_KEY, is_custom_specialist_dispatch
+        from .profile import MODE_RESEARCH
+        from ..state._shared_state.phase_state import gap_actionability_key
+
+        for t in (*await self.tasks.queued(), *await self.tasks.running()):
+            if t.kind == "specialist" and is_custom_specialist_dispatch(t.params or {}):
+                return
+        cycle = self._coord.dispatcher.cycle_idem_suffix()
+        if self._custom_guarantee_cycle == cycle:
+            return
+        self._custom_guarantee_cycle = cycle
+
+        params: dict[str, Any] = {
+            "domain": CUSTOM_SPECIALIST_KEY,
+            "scope": "domain",
+            "source": "coordinator_internal",
+            "reason": "custom_specialist_guarantee",
+        }
+        gaps = [g for g in state.gaps if isinstance(g, dict) and str(g.get("canonical_id") or "").strip()]
+        if gaps:
+            params["gap_canonical_id"] = str(min(gaps, key=gap_actionability_key)["canonical_id"]).strip()
+        else:
+            params["gap_canonical_id"] = CUSTOM_SESSION_GAP_ID
+            params["gap_symptom"] = "No profiled gap; follow the operator-defined focus."
+            params["gap_layer"] = "operator-defined"
+        await self.warm_specialist_params(params)
+
+        research_reason = (
+            _SOURCE_PATCH_FAMILY + "_pruned"
+            if state.is_pruned(_SOURCE_PATCH_FAMILY)
+            else specialist_patch_preflight_error(
+                params,
+                framework_repo_path=str(getattr(state, "framework_repo_path", "") or ""),
+            )
+        )
+        if research_reason:
+            params["mode"] = MODE_RESEARCH
+            await self.bus.record_observation(
+                "coordinator",
+                "observation",
+                {"kind": "custom_specialist_guarantee_research_only", "reason": research_reason},
+            )
+        intent = Intent(
+            type=IntentType.DELEGATE,
+            payload={
+                "action_name": "specialist",
+                "params": params,
+                "idempotency_key": f"custom-guarantee{cycle}",
+            },
+        )
+        await self._coord.router.handle_intent("orchestration", intent)
+        log.info(
+            "custom specialist guarantee: requested gap=%s mode=%s",
+            params["gap_canonical_id"],
+            params.get("mode") or "default",
+        )
 
     def build_specialist_round_entry(
         self,

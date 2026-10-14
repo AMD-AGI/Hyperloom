@@ -20,6 +20,7 @@ from hyperloom.orchestrator.tests._helpers import (
     patch_integrate_patch_roots,
 )
 
+from hyperloom.orchestrator.actions.executors import _setup_replay as sr_mod
 from hyperloom.orchestrator.actions.executors._accuracy_gate import framework_run_eval_envs
 from hyperloom.orchestrator.actions.executors.integrate_patch import (
     IntegratePatchExecutor,
@@ -498,7 +499,11 @@ async def test_same_executor_second_early_return_does_not_reuse_runtime(tmp_path
     )
 
     session = tmp_path / "session"
-    _write_specialist_workspace(session, "spec-first", done_payload_override={"patches_written": []})
+    _write_specialist_workspace(
+        session,
+        "spec-first",
+        done_payload_override={"patches_written": [], "needs_runtime": {"packages": ["transformers==4.57.1"]}},
+    )
     _write_specialist_workspace(session, "spec-second", done_payload_override={"patches_written": []})
     runtime = FrameworkRuntime(venv_root=str(tmp_path / "first-runtime" / "venv"))
     provisioned = []
@@ -516,7 +521,7 @@ async def test_same_executor_second_early_return_does_not_reuse_runtime(tmp_path
         adapters,
         "get_adapter",
         lambda _framework: SimpleNamespace(
-            build_stack_action=lambda _gap, **_kw: EnablementStackAction(
+            build_stack_action=lambda _request: EnablementStackAction(
                 kind="runtime_candidate",
                 framework="vllm",
                 gap_id="gap.enablement.missing_model_arch",
@@ -528,10 +533,11 @@ async def test_same_executor_second_early_return_does_not_reuse_runtime(tmp_path
     )
     monkeypatch.setattr(ip, "_candidate_mutation_roots", lambda **_kwargs: [])
     monkeypatch.setattr(ip, "_resolve_framework_root", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(ip, "run_setup_commands", forbidden)
+    monkeypatch.setattr(sr_mod, "run_setup_commands", forbidden)
     executor = IntegratePatchExecutor(session_dir=session)
     monkeypatch.setattr(executor, "_bench_patch", forbidden)
     state = SimpleNamespace(
+        phase="FRAMEWORK_AGENT",
         current_best={},
         enablement=EnablementRound(),
         get_specialist_patch_verdict=lambda _subject: "approve",
@@ -886,6 +892,41 @@ async def test_executor_missing_specialist_workspace_fails_cleanly(tmp_path: Pat
     result = await executor(ctx)
     assert result["status"] == "failed"
     assert result["error_class"] == "missing_specialist"
+
+
+@pytest.mark.asyncio
+async def test_an_enablement_integrate_that_runs_after_the_lane_succeeded_is_graded_as_any_other(tmp_path: Path):
+    """The tag was stamped at admission; the executor grades by what the lane is when it runs."""
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    state = SharedState(phase="FRAMEWORK_AGENT", enablement=EnablementRound(succeeded=True))
+    ctx = _make_ctx(
+        "t-int-late",
+        {
+            "specialist_task_id": "nonexistent",
+            "enablement": True,
+            "enablement_before_observation_path": "/s/reports/bringup/round-old.json",
+        },
+    )
+    ctx.extra["shared_state"] = state
+    executor = IntegratePatchExecutor(session_dir=session_dir)
+    resolved: dict[str, Any] = {}
+    resolve = executor._stage_resolve
+
+    async def _spy(attempt, params, extra):
+        try:
+            return await resolve(attempt, params, extra)
+        finally:
+            resolved.update(params)
+
+    executor._stage_resolve = _spy
+
+    await executor(ctx)
+
+    assert "enablement" not in resolved
+    assert "enablement_before_observation_path" not in resolved
 
 
 @pytest.mark.asyncio
@@ -1554,7 +1595,6 @@ async def test_enablement_zero_patch_round_does_not_erase_prior_accepted_work(tm
 @pytest.mark.asyncio
 async def test_enablement_replays_setup_commands_before_boot(tmp_path: Path, monkeypatch):
     """Enablement integrate replays setup_commands and surfaces them in the result."""
-    from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
@@ -1567,9 +1607,9 @@ async def test_enablement_replays_setup_commands_before_boot(tmp_path: Path, mon
 
     def _spy_run_setup(commands, *, cwd, log_dir, **_ledger_kwargs):
         replayed["commands"] = list(commands)
-        return {"applied": [cmd for cmd, _source in commands], "skipped": [], "failed": [], "executions": []}
+        return [cmd for cmd, _source in commands]
 
-    monkeypatch.setattr(ip_mod, "run_setup_commands", _spy_run_setup)
+    monkeypatch.setattr(sr_mod, "run_setup_commands", _spy_run_setup)
 
     async def _fake_bench(**_kwargs):
         return {
@@ -1601,6 +1641,42 @@ async def test_enablement_replays_setup_commands_before_boot(tmp_path: Path, mon
     assert replayed["commands"] == [("pip install -U transformers", "inherited")]
 
 
+@pytest.mark.asyncio
+async def test_a_setup_command_that_is_not_an_install_fails_the_round_before_anything_runs(tmp_path: Path, monkeypatch):
+    """A refused command is a broken proposal, and the round is graded on the environment it proposed.
+
+    Replaying the rest would boot an environment no round asked for and grade
+    the patches against it, so nothing runs and no patch applies.
+    """
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    repo = tmp_path / "framework"
+    init_git_repo(repo)
+    _write_specialist_workspace(session_dir, "t-spec-refused", patch_contents=[_VALID_PATCH])
+    executor = IntegratePatchExecutor(session_dir=session_dir)
+
+    monkeypatch.setattr(
+        sr_mod,
+        "run_setup_commands",
+        lambda *a, **kw: pytest.fail("a refused proposal still reached the replay"),
+    )
+
+    params = {
+        "specialist_task_id": "t-spec-refused",
+        "framework_source_root": str(repo),
+        "enablement": True,
+        "enablement_setup_commands": ["pip install -U transformers", "ln -sf /a /b"],
+    }
+    result = await executor(_make_ctx("t-int-refused", params))
+
+    assert result["status"] == "apply_failed"
+    assert result["enablement"] is True
+    assert result["error_class"] == "setup_commands_refused"
+    assert result["setup_commands_refused"] == ["ln -sf /a /b"]
+    assert result["patches_applied"] == []
+
+
 async def _round_exiting_after_setup(tmp_path: Path, monkeypatch, *, arrange, patch_contents=None, ledger=None):
     """Drive one enablement round to an exit that reports no outcome lists.
 
@@ -1630,15 +1706,14 @@ async def _round_exiting_after_setup(tmp_path: Path, monkeypatch, *, arrange, pa
             outcome="applied",
             env={},
         )
-        # Production persists each row through this callback as its command
-        # finishes, so a double that only returns it does not stand in for it.
         on_execution(row)
-        return {"applied": [cmd], "skipped": [], "failed": [], "executions": [row]}
+        return [cmd]
 
-    monkeypatch.setattr(ip_mod, "run_setup_commands", _installed)
+    monkeypatch.setattr(sr_mod, "run_setup_commands", _installed)
     arrange(ip_mod, monkeypatch)
 
     shared_state = SimpleNamespace(
+        phase="FRAMEWORK_AGENT",
         enablement=EnablementRound(setup_executions=list(ledger or [])),
         save=lambda _dir: None,
         get_specialist_patch_verdict=lambda _subject: "approve",
@@ -1766,12 +1841,13 @@ async def test_base_sha_is_captured_before_the_setup_commands_run(tmp_path: Path
         # What an install into the framework checkout does to its HEAD.
         (repo / "installed.py").write_text("x = 1\n", encoding="utf-8")
         git_commit_all(repo, "install")
-        return {"applied": [cmd for cmd, _source in commands], "skipped": [], "failed": [], "executions": []}
+        return [cmd for cmd, _source in commands]
 
-    monkeypatch.setattr(ip_mod, "run_setup_commands", _installing_commits)
+    monkeypatch.setattr(sr_mod, "run_setup_commands", _installing_commits)
     monkeypatch.setattr(ip_mod, "resolve_session_framework_root", lambda: str(repo))
 
     shared_state = SimpleNamespace(
+        phase="FRAMEWORK_AGENT",
         enablement=EnablementRound(),
         save=lambda _dir: None,
         get_specialist_patch_verdict=lambda _subject: "approve",
@@ -1826,12 +1902,13 @@ async def test_base_sha_of_an_explicit_root_predates_the_setup_commands(tmp_path
     def _installing_commits(commands, *, cwd, log_dir, round_task_id, seq_start, on_execution):
         (explicit_root / "installed.py").write_text("x = 1\n", encoding="utf-8")
         git_commit_all(explicit_root, "install")
-        return {"applied": [cmd for cmd, _source in commands], "skipped": [], "failed": [], "executions": []}
+        return [cmd for cmd, _source in commands]
 
-    monkeypatch.setattr(ip_mod, "run_setup_commands", _installing_commits)
+    monkeypatch.setattr(sr_mod, "run_setup_commands", _installing_commits)
     monkeypatch.setattr(ip_mod, "resolve_session_framework_root", lambda: str(session_root))
 
     shared_state = SimpleNamespace(
+        phase="FRAMEWORK_AGENT",
         enablement=EnablementRound(),
         save=lambda _dir: None,
         get_specialist_patch_verdict=lambda _subject: "approve",
@@ -1905,9 +1982,9 @@ async def test_setup_replay_runs_off_the_event_loop_thread(tmp_path: Path, monke
 
     def _spy_run_setup(commands, *, cwd, log_dir, round_task_id, seq_start, on_execution):
         seen["ident"] = threading.get_ident()
-        return {"applied": [], "skipped": [], "failed": []}
+        return []
 
-    monkeypatch.setattr(ip_mod, "run_setup_commands", _spy_run_setup)
+    monkeypatch.setattr(sr_mod, "run_setup_commands", _spy_run_setup)
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
@@ -2278,6 +2355,8 @@ async def test_executor_grades_real_patch_bench(
     monkeypatch.setattr(ip_mod, "materialize_config_with_envs", lambda *_args, **_kwargs: config_path)
     monkeypatch.setattr(_ray_serving, "maybe_serving_lease", lambda **_kwargs: None)
     state = SimpleNamespace(
+        phase="FRAMEWORK_AGENT",
+        enablement=EnablementRound(),
         framework="vllm",
         benchmark_mode="synthetic" if grading_mode == "synthetic" else "agentx",
         current_best={
@@ -2381,6 +2460,8 @@ async def test_executor_rebinds_base_from_live_current_best(tmp_path: Path, monk
     monkeypatch.setattr(executor, "_maybe_write_framework_kb_record", _noop_kb)
 
     live_state = SimpleNamespace(
+        phase="FRAMEWORK_AGENT",
+        enablement=EnablementRound(),
         current_best={
             "tput": 4616.0,
             "extra_server_args": "--no-scheduler-reserve-full-isl",
@@ -2647,6 +2728,8 @@ async def test_mlperf_integrate_patch_is_gated_on_inline_accuracy(tmp_path: Path
     monkeypatch.setattr(ip_mod, "materialize_config_with_envs", lambda *_args, **_kwargs: config_path)
     monkeypatch.setattr(_ray_serving, "maybe_serving_lease", lambda **_kwargs: None)
     state = SimpleNamespace(
+        phase="FRAMEWORK_AGENT",
+        enablement=EnablementRound(),
         framework="sglang",
         benchmark_mode="agentx",
         agentx_backend="mlperf",
@@ -2756,6 +2839,8 @@ async def test_a_scriptable_source_patch_over_the_latency_budget_is_reverted(
     monkeypatch.setattr(ip_mod, "materialize_config_with_envs", lambda *_args, **_kwargs: config_path)
     monkeypatch.setattr(_ray_serving, "maybe_serving_lease", lambda **_kwargs: None)
     state = SimpleNamespace(
+        phase="FRAMEWORK_AGENT",
+        enablement=EnablementRound(),
         framework="custom",
         benchmark_mode="synthetic",
         latency_budget_ms=250.0,
@@ -2781,4 +2866,135 @@ async def test_a_scriptable_source_patch_over_the_latency_budget_is_reverted(
     assert result["status"] == expected_status
     if expected_status == "reverted":
         assert "latency_budget_exceeded" in result["reason"]
+    assert (repo / "src.py").read_text().endswith(f"return {expected_return}\n")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prior_ledger", [[], [{"seq": 1, "round_task_id": "t-earlier"}]])
+async def test_the_closure_baseline_is_read_before_the_first_setup_command(tmp_path: Path, monkeypatch, prior_ledger):
+    """The setup script checks what changed against this reading, so it must predate every install."""
+    from types import SimpleNamespace
+
+    from hyperloom.orchestrator.enablement.recipe import keep_probe
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    repo = tmp_path / "framework"
+    init_git_repo(repo)
+    _write_specialist_workspace(session_dir, "t-spec-base", patch_contents=[_BAD_PATCH])
+    events: list[str] = []
+
+    def _probe(*_args, **_kwargs):
+        events.append("probe")
+        return {"interpreter": "/usr/bin/python3", "distributions": {"transformers": "4.0"}}, {}
+
+    def _installed(commands, **_kwargs):
+        events.append("setup")
+        return [cmd for cmd, _source in commands]
+
+    monkeypatch.setattr(keep_probe, "probe_keep_environment", _probe)
+    monkeypatch.setattr(sr_mod, "run_setup_commands", _installed)
+    shared_state = SimpleNamespace(
+        phase="FRAMEWORK_AGENT",
+        enablement=EnablementRound(setup_executions=list(prior_ledger)),
+        save=lambda _dir: None,
+        get_specialist_patch_verdict=lambda _subject: "approve",
+    )
+    params = {
+        "specialist_task_id": "t-spec-base",
+        "framework_source_root": str(repo),
+        "enablement": True,
+        "enablement_setup_commands": ["pip install -U transformers"],
+    }
+    task = Task(
+        task_id="t-int-base",
+        kind="integrate_patch",
+        state="queued",
+        params=params,
+        idempotency_key="t-int-base",
+        requires_lanes=tuple(),
+    )
+    await IntegratePatchExecutor(session_dir=session_dir)(
+        RunnerContext(task=task, lease=None, extra={"shared_state": shared_state})
+    )
+
+    assert events[:2] == ["probe", "setup"]
+    baseline = shared_state.enablement.environment_closure_baseline
+    # A reading taken after an earlier round's install would name its versions as the start.
+    assert baseline == (
+        {} if prior_ledger else {"interpreter": "/usr/bin/python3", "distributions": {"transformers": "4.0"}}
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("power_w", "expected_status", "expected_return"),
+    [
+        pytest.param(812.0, "reverted", 1, id="over-power-budget-reverts-its-own-patch"),
+        pytest.param(650.0, "kept", 2, id="in-power-budget-keeps"),
+    ],
+)
+async def test_a_source_patch_over_the_power_budget_is_reverted(
+    tmp_path: Path, monkeypatch, power_w, expected_status, expected_return
+):
+    from types import SimpleNamespace
+
+    from hyperloom.orchestrator.actions.executors import _ray_serving
+    from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
+    from hyperloom.orchestrator.actions.executors._grid_runner import VariantResult
+
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    session_dir = tmp_path / "session"
+    repo = tmp_path / "framework"
+    init_git_repo(repo)
+    _write_specialist_workspace(session_dir, "t-spec-power", patch_contents=[_VALID_PATCH])
+    config_path = tmp_path / "baseline.yaml"
+    config_path.write_text("benchmark: {}\n", encoding="utf-8")
+    workspace = tmp_path / "grid" / "benchmark_test"
+    workspace.mkdir(parents=True)
+    measured = VariantResult(
+        name="patch-power",
+        extra_server_args="",
+        extra_envs={},
+        status="succeeded",
+        output_throughput=200.0,
+        gpu_power_by_gpu_w={"4": power_w},
+        workspace=str(workspace),
+    )
+
+    async def fake_run_grid(**_kwargs):
+        return [measured]
+
+    monkeypatch.setattr(ip_mod, "run_grid", fake_run_grid)
+    monkeypatch.setattr(ip_mod, "materialize_config_with_envs", lambda *_args, **_kwargs: config_path)
+    monkeypatch.setattr(_ray_serving, "maybe_serving_lease", lambda **_kwargs: None)
+    state = SimpleNamespace(
+        phase="FRAMEWORK_AGENT",
+        enablement=EnablementRound(),
+        framework="custom",
+        benchmark_mode="synthetic",
+        power_budget_w=700.0,
+        current_best={"tput": 100.0},
+        baseline_accuracy=0.0,
+        get_specialist_patch_verdict=lambda _sid: "approve",
+        save=lambda _path: None,
+    )
+    executor = IntegratePatchExecutor(session_dir=session_dir)
+    ctx = _make_ctx(
+        "t-int-power",
+        {
+            "specialist_task_id": "t-spec-power",
+            "framework_source_root": str(repo),
+            "framework": "custom",
+            "config_path": str(config_path),
+            "require_accuracy_for_keep": False,
+        },
+    )
+    ctx.extra["shared_state"] = state
+    result = await executor(ctx)
+
+    assert result["status"] == expected_status
+    if expected_status == "reverted":
+        assert "power_budget_exceeded" in result["reason"]
     assert (repo / "src.py").read_text().endswith(f"return {expected_return}\n")

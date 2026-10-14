@@ -147,6 +147,27 @@ def test_prelude_initial_roofline_uses_baseline_server_args(
     assert "fp8" not in task.params["base_extra_args"]
 
 
+def test_prelude_initial_roofline_boots_the_configuration_enablement_established(coord: Coordinator, tmp_path: Path):
+    """The baseline arm after a bring-up is the enablement-accepted launch; without it the server hits the old wall."""
+    launch_config = tmp_path / "launch_config.yaml"
+    coord.shared_state.enablement.accepted_config_path = str(launch_config)
+    coord.shared_state.enablement.record_accepted_config(
+        {
+            "extra_envs": {"SGLANG_DSA_KPOOL_HIP_RECENCY_FALLBACK": "1"},
+            "extra_server_args": "--dsa-decode-backend triton",
+        },
+        source="kept_bench",
+    )
+    coord.shared_state.current_best = {"extra_envs": {"SGLANG_LATER_KEEP": "1"}}
+
+    task = asyncio.run(coord.phase_prelude.enqueue_internal_analysis_task(reason="prelude_initial"))
+
+    assert task.params["config_path"] == str(launch_config)
+    assert task.params["extra_envs"] == {"SGLANG_DSA_KPOOL_HIP_RECENCY_FALLBACK": "1"}
+    assert task.params["extra_server_args"] == "--dsa-decode-backend triton"
+    assert "base_extra_envs" not in task.params
+
+
 @pytest.mark.asyncio
 async def test_prelude_initial_roofline_is_idempotent(coord: Coordinator):
     """A second call with the same reason returns the same task (no double-enqueue on resume)."""
@@ -633,6 +654,25 @@ async def test_kernel_entry_reprofile_runs_without_measured_trace(coord: Coordin
 
     assert len(coord.sub.tasks_run) == 1
     assert coord.shared_state.last_roofline_tput == 150.0
+
+
+@pytest.mark.asyncio
+async def test_kernel_entry_reprofile_the_phase_cannot_fit_does_not_start(coord: Coordinator, monkeypatch):
+    """A reprofile priced above what is left of the KERNEL budget is skipped; the phase keeps the trace it has."""
+    from hyperloom.orchestrator.phases import machine_state
+
+    state = coord.shared_state
+    state.phase = "KERNEL_AGENT"
+    state.baseline_runtime_sec = 600.0
+    monkeypatch.setattr(machine_state, "phase_budget_remaining_seconds", lambda _state, **_kw: 60.0)
+    state.roofline_snapshots = []
+    state.cumulative_gain_validated = 50.0
+    coord.sub = _StubSub(state, landed_tput=150.0)
+
+    await coord.phase_kernel._maybe_reprofile_for_kernel()
+
+    assert coord.sub.tasks_run == []
+    assert state.last_roofline_tput != 150.0
 
 
 @pytest.mark.asyncio

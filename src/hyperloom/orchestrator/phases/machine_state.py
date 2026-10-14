@@ -24,6 +24,7 @@ from hyperloom.inference_optimizer.geak_completion import search_termination
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
 )
+from ..kernel.patch_landing import IntegratedStack
 from ..state.kernel_decision_settings import resolve_kernel_opt_max_failures
 from .session_contract import bound_session_declares
 from ..state.shared_state import (
@@ -342,29 +343,6 @@ def kernel_inline_step_running(state: Any, *, now_unix: float | None = None) -> 
         return False
     now = float(now_unix if now_unix is not None else _now_unix(state))
     return 0.0 <= (now - seen) <= KERNEL_INLINE_STEP_STALE_SECONDS
-
-
-# ``extend_*_budget`` hints raise a phase budget by DELTA up to CAP.
-ESCALATE_HINT_BUDGET_BUMP_DELTA: float = 0.05  # +5 percentage points per hint
-ESCALATE_HINT_BUDGET_BUMP_CAP: float = 0.80  # absolute ceiling
-
-
-def apply_escalate_budget_bump(
-    current_budget_pct: dict[str, float] | None,
-    *,
-    phase: str,
-    delta: float = ESCALATE_HINT_BUDGET_BUMP_DELTA,
-    cap: float = ESCALATE_HINT_BUDGET_BUMP_CAP,
-) -> dict[str, float]:
-    """Return a budget map with ``phase`` raised by ``delta`` (capped at 80%)."""
-    phase_key = (phase or "").strip().upper()
-    if phase_key not in PHASE_NAMES:
-        return dict(current_budget_pct or {})
-    out = normalize_budget_pct(current_budget_pct)
-    new_val = float(out.get(phase_key, 0.0)) + float(delta or 0.0)
-    new_val = min(float(cap), max(0.0, new_val))
-    out[phase_key] = new_val
-    return out
 
 
 def normalize_budget_pct(
@@ -894,16 +872,7 @@ def kernel_work_pending(state: Any) -> bool:
         return True
 
     rejected = {str(x) for x in (state.rejected_kernel_ids or [])}
-    integrated_entries: list[dict[str, Any]] = []
-    integrated_sources: set[str] = set()
-    for entry in state.optimization_stack or []:
-        if not isinstance(entry, dict):
-            continue
-        if str(entry.get("action") or "") == "integrate":
-            integrated_entries.append(entry)
-            source_file = str(entry.get("target_file") or entry.get("source_file") or "")
-            if source_file:
-                integrated_sources.add(source_file)
+    integrated = IntegratedStack.of(state.optimization_stack)
 
     attempts = state.kernel_opt_task_attempts or {}
     if not isinstance(attempts, dict):
@@ -914,23 +883,7 @@ def kernel_work_pending(state: Any) -> bool:
         kernel_id = str(attempt.get("current_kernel_id") or attempt.get("kernel_id") or ledger_id)
         source_file = str(attempt.get("last_source_file") or "")
         task_group_key = str(attempt.get("task_group_key") or "")
-        integrated = False
-        for integrated_entry in integrated_entries:
-            integrated_key = str(integrated_entry.get("task_group_key") or "")
-            if task_group_key and integrated_key:
-                integrated = task_group_key == integrated_key
-            else:
-                if str(integrated_entry.get("kernel_id") or "") != kernel_id:
-                    continue
-                integrated_source = str(
-                    integrated_entry.get("target_file") or integrated_entry.get("source_file") or ""
-                )
-                integrated = not source_file or not integrated_source or source_file == integrated_source
-            if integrated:
-                break
-        if integrated:
-            continue
-        if source_file and source_file in integrated_sources:
+        if integrated.covers(kernel_ids=(kernel_id,), task_group_key=task_group_key, source_file=source_file):
             continue
         decision = str(attempt.get("last_decision") or "").strip().upper()
         status = str(attempt.get("last_status") or "").strip().lower()
@@ -1286,6 +1239,20 @@ def _prelude_predicate_inputs(state: Any, *, now_unix: float) -> dict[str, Any]:
     }
 
 
+def _rounds_since_phase_entry(state: Any) -> list[dict[str, Any]]:
+    """This cycle's specialist rounds booked since the current phase was entered.
+
+    PRELUDE shares macro-cycle 0 with FRAMEWORK_AGENT, and ``source_phase`` names a round's ownership lane rather
+    than the phase it ran in, so only the entry time separates this phase's rounds from earlier ones.
+    """
+    rows = _rows_for_current_cycle(state.specialist_rounds or [], state)
+    entered = _phase_started_unix(state)
+    # No entry time: keep every row of the cycle. With one: a row with no parseable completed_at is not counted.
+    if entered <= 0.0:
+        return rows
+    return [row for row in rows if (to_unix(row.get("completed_at")) or 0.0) >= entered]
+
+
 def _framework_predicate_inputs(
     state: Any,
     *,
@@ -1298,7 +1265,7 @@ def _framework_predicate_inputs(
         if key not in {"config_arm_plateaued", "source_arm_plateaued", "switch_bottleneck"}
     }
     plateau["attempt_count"] = len(_rows_for_current_cycle(state.attempts or [], state))
-    plateau["specialist_round_count"] = len(_rows_for_current_cycle(state.specialist_rounds or [], state))
+    plateau["specialist_round_count"] = len(_rounds_since_phase_entry(state))
     return plateau, _budget_predicate_inputs(state, now_unix=now_unix)
 
 
@@ -1376,7 +1343,32 @@ def _sweep_predicate_inputs(
             "min_remaining_sec": _cycle_reloop_min_remaining_sec(state),
         },
     }
-    return result, _budget_predicate_inputs(state, now_unix=now_unix)
+    budget = _budget_predicate_inputs(state, now_unix=now_unix)
+    if not result["status"]:
+        _extend_budget_to_sweep_grant(budget, state, now_unix=now_unix)
+    return result, budget
+
+
+def _extend_budget_to_sweep_grant(budget: dict[str, Any], state: Any, *, now_unix: float) -> None:
+    """Widen SWEEP's budget to cover the conc_sweep it granted and is still waiting on.
+
+    SWEEP's only work is the sweep it enqueued on entry, whose budget is already clamped to the session clock. The
+    per-phase cap is a share of the whole session (5% of three hours is nine minutes) and would otherwise cancel that
+    sweep mid-ladder. The widened numbers are what the predicate compares, so a replay of the frozen inputs reaches
+    the same decision.
+    """
+    grant_left = (_number(state.conc_sweep_granted_until_unix) or 0.0) - float(now_unix)
+    if grant_left <= 0.0:
+        return
+    remaining = _number(budget.get("remaining_sec"))
+    if remaining is not None and remaining < grant_left:
+        budget["remaining_sec"] = grant_left
+        if "current_balance" in budget:
+            budget["current_balance"] = grant_left
+    cap = _number(budget.get("cap_sec"))
+    cumulative = _number(budget.get("cumulative_elapsed_sec")) or 0.0
+    if cap is not None and cap < cumulative + grant_left:
+        budget["cap_sec"] = cumulative + grant_left
 
 
 def workflow_predicate_inputs(
@@ -1615,11 +1607,13 @@ def _sweep_exit(inputs: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
             if spent_without_pair or (no_pair and not evidence["sweep_skip_reason"]):
                 return "sweep_failed", evidence
         return "sweep_done", evidence
+    # Anything else -- nothing landed yet, or a sweep the orchestrator cancelled -- leaves the phase to its budget:
+    # a cancelled sweep was stopped by a session-wide stop that already decided the run is over.
     return _budget_exit(
         dict(inputs.get("budget") or {}),
         exhausted_reason="sweep_budget_exhausted",
         cap_reason="sweep_budget_cap",
-        evidence={},
+        evidence={"sweep_status": status} if status else {},
     )
 
 
@@ -1733,7 +1727,7 @@ def _skip_to_close_reason(
 def _holds_for_initial_analysis(baseline: dict[str, Any]) -> bool:
     """Whether the phase must stay open for an initial roofline it enqueued but has not booked yet.
 
-    The transition barrier stops every running action, so leaving now would kill that analysis.
+    Leaving now would hand that analysis to the next phase instead of seeding this one with it.
     The hold is bounded by the optimization reserve, which it must never eat into.
     """
     if not bool(baseline.get("initial_analysis_pending")):
@@ -2213,8 +2207,6 @@ __all__ = [
     "DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK",
     "DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT",
     "DEFAULT_PLATEAU_EXPLORE_LOOKBACK",
-    "ESCALATE_HINT_BUDGET_BUMP_CAP",
-    "ESCALATE_HINT_BUDGET_BUMP_DELTA",
     "LIFECYCLE_STATUS_END",
     "LIFECYCLE_STATUS_ENTER",
     "LIFECYCLE_STATUS_ERROR",
@@ -2241,7 +2233,6 @@ __all__ = [
     "is_long_run",
     "resolve_keep_threshold",
     "allowed_actions_for",
-    "apply_escalate_budget_bump",
     "bank_phase_segment",
     "compute_next_phase",
     "cycle_reloop_decision",

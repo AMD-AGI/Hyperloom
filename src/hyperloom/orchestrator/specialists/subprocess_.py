@@ -63,6 +63,7 @@ from hyperloom.common.proctree import collect_tree, kill_tree
 from ..actions.cancel_channel import cancel_scope_listener, current_cancel_scope
 from ..bringup.trees import head_commit
 from ..loop.sub_agent_runner import ExecutionCleanupUnconfirmed
+from .wall_budget import clear_wall_budget_extension, wall_budget_extension
 from hyperloom.inference_optimizer.trace.parse_usage import (
     parse_claude_stream_json_response,
     parse_claude_stream_json_tool_calls,
@@ -139,11 +140,11 @@ _SPECIALIST_ENV_ALLOWLIST: frozenset[str] = frozenset(
         "HYPERLOOM_BYPASS_SCRIPTS_DIR",
         "HTTPS_PROXY",
         "HTTP_PROXY",
+        "INFERENCEX_PATH",
         "LANG",
         "LC_ALL",
-        # The agent CLIs are Node processes, which read neither SSL_CERT_FILE nor
-        # REQUESTS_CA_BUNDLE; behind a TLS-intercepting gateway these are the only
-        # trust knobs that reach them.
+        # The agent CLIs are Node processes, which read neither SSL_CERT_FILE nor REQUESTS_CA_BUNDLE; behind a
+        # TLS-intercepting gateway these are the only trust knobs that reach them.
         "NODE_EXTRA_CA_CERTS",
         "NODE_TLS_REJECT_UNAUTHORIZED",
         "NO_PROXY",
@@ -359,8 +360,7 @@ def _codex_mcp_config(
                 if (
                     key in _CODEX_MCP_RESERVED_ENV_NAMES
                     or key in protected_env_names
-                    or key.startswith(_CODEX_PROVIDER_ENV_PREFIX)
-                    or key.startswith(_CODEX_MCP_ENV_PREFIX)
+                    or key.startswith((_CODEX_PROVIDER_ENV_PREFIX, _CODEX_MCP_ENV_PREFIX))
                 ):
                     raise SpecialistAgentUnavailableError(
                         f"Codex MCP server {name!r} env key {key!r} is reserved "
@@ -444,55 +444,6 @@ def _build_specialist_env() -> dict[str, str]:
 #: How long the reaper waits on a specialist nobody bounded, matching the
 #: largest deadline the dispatcher hands down.
 UNBOUNDED_REAP_CAP_SEC: float = 4 * 60 * 60.0
-
-
-# Live deadline extensions granted by ``extend_lease`` while a specialist is
-# already spawned, keyed by task_id. The reap loop re-reads this every poll so
-# an extension moves the kill instant of a run that is in flight; the dispatcher
-# clears the entry when the run finishes.
-_WALL_BUDGET_EXTENSIONS: dict[str, float] = {}
-
-
-def grant_wall_budget_extension(task_id: str, extra_sec: float) -> float:
-    """Add ``extra_sec`` to a live specialist's hard wall-clock deadline.
-
-    Safe to call for a task that is not running a subprocess (the entry is
-    simply never read and is cleared on the next dispatch of that task_id).
-
-    Args:
-        task_id: The specialist task whose deadline should move.
-        extra_sec: Seconds to add; non-positive values are a no-op.
-
-    Returns:
-        The task's cumulative granted extension in seconds.
-    """
-    key = str(task_id or "").strip()
-    if not key or extra_sec <= 0:
-        return _WALL_BUDGET_EXTENSIONS.get(key, 0.0)
-    total = _WALL_BUDGET_EXTENSIONS.get(key, 0.0) + float(extra_sec)
-    _WALL_BUDGET_EXTENSIONS[key] = total
-    return total
-
-
-def wall_budget_extension(task_id: str) -> float:
-    """Return the cumulative live extension granted to ``task_id`` (0 if none).
-
-    Args:
-        task_id: The specialist task to look up.
-
-    Returns:
-        Seconds of extension granted so far.
-    """
-    return _WALL_BUDGET_EXTENSIONS.get(str(task_id or "").strip(), 0.0)
-
-
-def clear_wall_budget_extension(task_id: str) -> None:
-    """Drop any recorded extension for ``task_id``.
-
-    Args:
-        task_id: The specialist task whose entry should be removed.
-    """
-    _WALL_BUDGET_EXTENSIONS.pop(str(task_id or "").strip(), None)
 
 
 # Configuration

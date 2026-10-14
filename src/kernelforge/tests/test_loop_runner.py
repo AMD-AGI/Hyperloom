@@ -2143,6 +2143,46 @@ def test_resume_replay_pins_sub_threshold_gains_but_not_regressions(
     assert planned.pinned_iterations == [1]
 
 
+def test_a_resume_without_a_pending_keep_replays_each_event_exactly_once(tmp_path, monkeypatch):
+    """Each contiguous non-KEEP record is applied once, so a resume cannot double-count an iteration.
+
+    The planner used to walk the forward window twice when no KEEP was pending;
+    the second walk could only ever re-apply what the first had, so it is the
+    count that pins the behaviour, not the number of walks.
+    """
+    loop, workspace = _make_loop(tmp_path, monkeypatch, resume=True)
+    store = LoopStateStore(str(workspace))
+    state = RunState(campaign_id="campaign", iteration=0, next_iteration=1, baseline_wall_ms=1.0)
+    store.save(state)
+    for iteration in (1, 2, 3):
+        store.append_event(
+            make_event(
+                "iteration_result",
+                iteration,
+                decision="REVERT_PERF",
+                plan=f"attempt {iteration}",
+                wall_ms=1.1,
+                best_after_ms=1.0,
+            )
+        )
+    loop.state_store = store
+    loop.run_state = state
+
+    applied: list[int] = []
+    original = loop._apply_replayed_non_keep
+
+    def _counting(planned, event):
+        applied.append(int(event["iter"]))
+        return original(planned, event)
+
+    monkeypatch.setattr(loop, "_apply_replayed_non_keep", _counting)
+    planned, _, _, _ = loop._plan_resume_recovery(state, None)
+
+    assert applied == [1, 2, 3]
+    assert planned.next_iteration == 4
+    assert planned.cumulative.iterations == 3
+
+
 def test_keep_expires_active_supervisor_ruling(tmp_path, monkeypatch):
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     loop.state_store = LoopStateStore(str(workspace))
@@ -3244,7 +3284,7 @@ def test_failed_initial_analysis_retries_next_planning_iteration(
             checkpoint_level="published",
             available_tier="profiled",
             upgrade_exhausted=False,
-            to_dict=lambda: {},
+            to_dict=dict,
         )
 
         def apply(self, context):
@@ -4354,7 +4394,7 @@ def test_analysis_service_rechecks_same_commit_for_partial_upgrade(
                 checkpoint_level="published",
                 available_tier="profiled",
                 upgrade_exhausted=False,
-                to_dict=lambda: {},
+                to_dict=dict,
             )
 
         def apply(self, context):
@@ -4419,7 +4459,7 @@ def test_keep_defers_incremental_analysis_until_next_request(
             (commit_root / "published.json").write_text(json.dumps({"generation_root": self.root.name}))
             self.outcome = SimpleNamespace(
                 checkpoint_level="published",
-                to_dict=lambda: {},
+                to_dict=dict,
             )
 
         def apply(self, context):
@@ -4545,7 +4585,7 @@ def test_small_keeps_reuse_analysis_until_cumulative_gain_reaches_threshold(
                 checkpoint_level="published",
                 available_tier="profiled",
                 upgrade_exhausted=False,
-                to_dict=lambda: {},
+                to_dict=dict,
             )
 
         def apply(self, context):
@@ -4830,7 +4870,7 @@ def test_partial_bundle_does_not_inherit_prior_commit_evidence_refs(
             checkpoint_level="published",
             available_tier="profiled",
             upgrade_exhausted=False,
-            to_dict=lambda: {},
+            to_dict=dict,
         )
 
         def apply(self, context):
@@ -4908,7 +4948,7 @@ def test_supervisor_refreshes_stale_analysis_once(tmp_path, monkeypatch):
             checkpoint_level="published",
             available_tier="profiled",
             upgrade_exhausted=False,
-            to_dict=lambda: {},
+            to_dict=dict,
         )
 
         def apply(self, context):
@@ -4969,7 +5009,7 @@ def test_loop_refreshes_stale_analysis_before_supervisor(
                 checkpoint_level="published",
                 available_tier="profiled",
                 upgrade_exhausted=False,
-                to_dict=lambda: {},
+                to_dict=dict,
             )
 
         def apply(self, context):
@@ -6264,7 +6304,7 @@ def test_keep_archive_failure_retains_pending_journal(
     def fail_record(_archive, _record):
         if failure_mode == "raise":
             raise OSError("simulated candidate archive failure")
-        return None
+        return
 
     monkeypatch.setattr(loop, "run_one_iteration", successful_iteration)
     monkeypatch.setattr(runner_module.CandidateArchive, "record", fail_record)

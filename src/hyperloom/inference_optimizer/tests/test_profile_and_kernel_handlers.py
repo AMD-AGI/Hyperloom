@@ -2649,7 +2649,7 @@ async def test_trace_analyze_handler_xdit_defaults_to_tracelens_agent(session_di
     fake_trace.mkdir()
     captured: dict = {}
 
-    async def fake_run_subprocess(cmd, *, timeout_sec):
+    async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
         captured["cmd"] = list(cmd)
         return 0, json.dumps({"status": "ok", "hot_kernels": []}), ""
 
@@ -2687,7 +2687,7 @@ async def test_trace_analyze_handler_xdit_state_overrides_stale_payload_framewor
     fake_trace.mkdir()
     captured: dict = {}
 
-    async def fake_run_subprocess(cmd, *, timeout_sec):
+    async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
         captured["cmd"] = list(cmd)
         return 0, json.dumps({"status": "ok", "hot_kernels": []}), ""
 
@@ -2729,7 +2729,7 @@ async def test_trace_analyze_handler_custom_state_overrides_stale_payload_framew
     fake_trace.mkdir()
     captured: dict = {}
 
-    async def fake_run_subprocess(cmd, *, timeout_sec):
+    async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
         captured["cmd"] = list(cmd)
         return 0, json.dumps({"status": "ok", "hot_kernels": []}), ""
 
@@ -2767,7 +2767,7 @@ async def test_trace_analyze_handler_payload_framework_overrides_serving_state(
     fake_trace.mkdir()
     captured: dict = {}
 
-    async def fake_run_subprocess(cmd, *, timeout_sec):
+    async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
         captured["cmd"] = list(cmd)
         return 0, json.dumps({"status": "ok", "hot_kernels": []}), ""
 
@@ -2797,7 +2797,7 @@ async def test_trace_analyze_handler_env_route_forces_bypass(session_dir, monkey
     fake_trace.mkdir()
     captured: dict = {}
 
-    async def fake_run_subprocess(cmd, *, timeout_sec):
+    async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
         captured["cmd"] = list(cmd)
         return 0, json.dumps({"status": "ok", "orchestrator_mode": "bypass", "hot_kernels": []}), ""
 
@@ -2827,7 +2827,7 @@ async def test_trace_analyze_handler_text_gen_defaults_to_tracelens_agent(sessio
     fake_trace.mkdir()
     captured: dict = {}
 
-    async def fake_run_subprocess(cmd, *, timeout_sec):
+    async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
         captured["cmd"] = list(cmd)
         return 0, json.dumps({"status": "ok", "hot_kernels": []}), ""
 
@@ -2872,7 +2872,7 @@ async def test_trace_analyze_handler_rejects_invalid_route_before_dispatch(
     def fail_resolve_tracelens_root():
         pytest.fail("invalid route must not resolve TraceLens")
 
-    async def fail_run_subprocess(cmd, *, timeout_sec):
+    async def fail_run_subprocess(cmd, *, timeout_sec, **_kwargs):
         pytest.fail("invalid route must not launch a subprocess")
 
     monkeypatch.setattr(ta, "_resolve_tracelens_root", fail_resolve_tracelens_root)
@@ -2906,7 +2906,7 @@ async def test_trace_analyze_handler_scriptable_converges_route_params(session_d
     fake_trace.mkdir()
     captured: dict = {}
 
-    async def fake_run_subprocess(cmd, *, timeout_sec):
+    async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
         captured["cmd"] = list(cmd)
         return 0, json.dumps({"status": "ok", "hot_kernels": []}), ""
 
@@ -2945,7 +2945,7 @@ async def test_trace_analyze_handler_records_bypass_discovery_success(
 
     captured: dict = {}
 
-    async def fake_run_subprocess(cmd, *, timeout_sec):
+    async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
         captured["cmd"] = list(cmd)
         payload = {
             "status": "ok",
@@ -2997,7 +2997,7 @@ async def test_trace_analyze_handler_omits_top_k_when_not_requested(
     fake_trace.mkdir()
     captured: dict = {}
 
-    async def fake_run_subprocess(cmd, *, timeout_sec):
+    async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
         captured["cmd"] = list(cmd)
         return 0, json.dumps({"status": "ok", "hot_kernels": []}), ""
 
@@ -3024,7 +3024,7 @@ async def test_trace_analyze_handler_does_not_forward_top_k(
     fake_trace.mkdir()
     captured: dict = {}
 
-    async def fake_run_subprocess(cmd, *, timeout_sec):
+    async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
         captured["cmd"] = list(cmd)
         return 0, json.dumps({"status": "ok", "hot_kernels": []}), ""
 
@@ -3053,7 +3053,7 @@ async def test_trace_analyze_handler_records_bypass_discovery_failed(
     fake_trace = session_dir / "fake_trace_dir"
     fake_trace.mkdir()
 
-    async def fake_run_subprocess(cmd, *, timeout_sec):
+    async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
         payload = {
             "status": "failed",
             "orchestrator_mode": "bypass",
@@ -3093,7 +3093,7 @@ async def test_trace_analyze_handler_records_bypass_discovery_high_idle_empty(
     fake_trace = session_dir / "fake_trace_dir"
     fake_trace.mkdir()
 
-    async def fake_run_subprocess(cmd, *, timeout_sec):
+    async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
         payload = {
             "status": "ok",
             "orchestrator_mode": "bypass",
@@ -3132,7 +3132,7 @@ async def test_trace_analyze_handler_agent_route_stays_tracelens(
     fake_trace = session_dir / "fake_trace_dir"
     fake_trace.mkdir()
 
-    async def fake_run_subprocess(cmd, *, timeout_sec):
+    async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
         payload = {
             "status": "ok",
             "orchestrator_mode": "claude_agent_sdk",
@@ -3162,7 +3162,7 @@ async def test_trace_analyze_handler_agent_route_stays_tracelens(
 async def test_trace_analyze_handler_surfaces_candidates_path(session_dir, monkeypatch):
     captured: dict = {}
 
-    async def fake_run_subprocess(cmd, *, timeout_sec):
+    async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
         captured["cmd"] = list(cmd)
         payload = {
             "status": "ok",
@@ -3207,7 +3207,7 @@ async def test_trace_analyze_handler_backfills_workload_context_from_state(
 
     captured: dict = {}
 
-    async def fake_run_subprocess(cmd, *, timeout_sec):
+    async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
         captured["cmd"] = list(cmd)
         return 0, json.dumps({"status": "ok"}), ""
 
@@ -3232,7 +3232,7 @@ async def test_trace_analyze_handler_surfaces_trace_report_path(
     """The handler must forward the TraceLens v0.3 analysis.md path."""
     captured: dict = {}
 
-    async def fake_run_subprocess(cmd, *, timeout_sec):
+    async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
         captured["cmd"] = list(cmd)
         payload = {
             "status": "ok",
@@ -3279,7 +3279,7 @@ async def test_trace_analyze_handler_persists_trace_report_to_candidates(
         encoding="utf-8",
     )
 
-    async def fake_run_subprocess(cmd, *, timeout_sec):
+    async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
         return (
             0,
             json.dumps(
@@ -3362,7 +3362,7 @@ benchmark:
         encoding="utf-8",
     )
 
-    async def fake_run_subprocess(cmd, *, timeout_sec):
+    async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
         return (
             0,
             json.dumps(
@@ -3446,7 +3446,7 @@ async def test_trace_analyze_handler_uses_artifact_trace_report_path(
 ):
     """TraceLens now surfaces the upstream analysis.md as trace_report_path."""
 
-    async def fake_run_subprocess(cmd, *, timeout_sec):
+    async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
         payload = {
             "status": "ok",
             "hot_kernels": [],
@@ -3481,7 +3481,7 @@ async def test_trace_analyze_handler_t4_keeps_tool_failure_failed(
 ):
     """When tracelens_analysis.py returns ``status=failed`` the handler keeps the failure status, clears stale candidates, and appends a diagnostic warning."""
 
-    async def fake_run_subprocess(cmd, *, timeout_sec):
+    async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
         payload = {
             "status": "failed",
             "tool": "tracelens_analysis",
@@ -3525,7 +3525,7 @@ async def test_trace_analyze_handler_t4_passes_through_idle_warning(
         "message": "GPU was idle 35.00% …",
     }
 
-    async def fake_run_subprocess(cmd, *, timeout_sec):
+    async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
         payload = {
             "status": "ok",
             "tool": "tracelens_analysis",
@@ -3551,7 +3551,7 @@ async def test_trace_analyze_handler_t4_defaults_warnings_to_empty_list(
 ):
     """With no ``trace_health_warnings`` (steady state), the handler still surfaces an empty list (no ``None`` guard needed downstream)."""
 
-    async def fake_run_subprocess(cmd, *, timeout_sec):
+    async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
         payload = {
             "status": "ok",
             "tool": "tracelens_analysis",
@@ -3854,7 +3854,7 @@ async def test_t5_handler_to_sharedstate_e2e_idle_warning_reaches_prompt(
     """End-to-end: T3 idle warning flows handler → SharedState.last_trace_analyze → Orchestration prompt line."""
     from hyperloom.orchestrator.state.shared_state import SharedState
 
-    async def fake_run_subprocess(cmd, *, timeout_sec):
+    async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
         payload = {
             "status": "ok",
             "tool": "tracelens_analysis",
@@ -3899,7 +3899,7 @@ async def test_t5_handler_to_sharedstate_e2e_failure_warning_reaches_prompt(
     """T4: a permanent TraceLens failure warning must reach the Orchestration prompt."""
     from hyperloom.orchestrator.state.shared_state import SharedState
 
-    async def fake_run_subprocess(cmd, *, timeout_sec):
+    async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
         payload = {
             "status": "failed",
             "tool": "tracelens_analysis",
@@ -3936,7 +3936,7 @@ async def test_trace_analyze_handler_t4_failure_appends_to_existing_warnings(
         "message": "high idle",
     }
 
-    async def fake_run_subprocess(cmd, *, timeout_sec):
+    async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
         payload = {
             "status": "failed",
             "tool": "tracelens_analysis",
@@ -4074,6 +4074,44 @@ async def test_coordinator_request_kernel_disabled_auto_rejected(session_dir):
         assert r.payload["status"] == "failed"
         assert r.payload["result"]["error_class"] == "agent_disabled"
         assert r.payload["source"] == "coordinator_auto_reject"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("payload", "kernel_enabled", "error_class"),
+    [
+        ({"target_agent": "kernel_agent", "kind": "trace_analyze"}, False, "agent_disabled"),
+        ({"target_agent": "kernel_agent", "kind": "invent_brand_new_kind"}, True, "unknown_kernel_kind"),
+    ],
+)
+async def test_coordinator_auto_reject_answers_in_one_envelope(
+    session_dir,
+    payload,
+    kernel_enabled,
+    error_class,
+):
+    """Every refusal the coordinator makes before a handler runs answers the requester the same way."""
+    c = Coordinator(session_dir, backends=_backends_silent())
+    try:
+        c.shared_state.kernel_enabled = kernel_enabled
+        await c.router.handle_intent("orchestration", Intent(type=IntentType.REQUEST, payload=dict(payload)))
+
+        requests = await c.bus.tail(topic="request", to_agent=payload["target_agent"])
+        responses = await c.bus.tail(topic="response", to_agent="orchestration")
+        assert requests, "the request must be recorded on the bus before it is refused"
+        assert responses, "a refusal must answer the request"
+        reply = responses[0]
+        assert reply.from_agent == payload["target_agent"]
+        assert reply.in_reply_to == requests[-1].msg_id
+        assert reply.payload["in_reply_to"] == requests[-1].msg_id
+        assert reply.payload["kind"] == f"{payload['kind']}_done"
+        assert reply.payload["status"] == "failed"
+        assert reply.payload["source"] == "coordinator_auto_reject"
+        assert reply.payload["result"]["status"] == "failed"
+        assert reply.payload["result"]["error_class"] == error_class
+        assert c.shared_state.last_action_failures[-1]["error_class"] == error_class
     finally:
         await c.stop()
 

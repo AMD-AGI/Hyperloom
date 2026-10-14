@@ -295,34 +295,6 @@ _SGLANG_OBSERVED_IDENTITY_FIELDS = frozenset(
 #: requested setting is judged unconfirmed for want of an observed side.
 _VLLM_NON_DEFAULT_ARGS_RE = re.compile(r"non[-_]default args:\s*\{", re.IGNORECASE)
 
-#: The vLLM spellings of the settings the decision compares. Names differ from
-#: SGLang's for the same knob, so the allowlist is per engine even though the
-#: reader is not.
-_VLLM_OBSERVED_IDENTITY_FIELDS: frozenset[str] = frozenset(
-    {
-        "model",
-        "tokenizer",
-        "served_model_name",
-        "tensor_parallel_size",
-        "pipeline_parallel_size",
-        "data_parallel_size",
-        "max_model_len",
-        "gpu_memory_utilization",
-        "quantization",
-        "dtype",
-        "kv_cache_dtype",
-        "block_size",
-        "max_num_seqs",
-        "max_num_batched_tokens",
-        "enable_chunked_prefill",
-        "enable_expert_parallel",
-        "enforce_eager",
-        "trust_remote_code",
-        "swap_space",
-        "cpu_offload_gb",
-    }
-)
-
 #: vLLM's flag names are the keys it reports, so nothing needs folding.
 _VLLM_FLAG_ALIASES: dict[str, str] = {}
 
@@ -339,8 +311,9 @@ class _LaunchRecord:
 
     #: Header the record follows. Matched outside quoted runs only.
     marker: re.Pattern[str]
-    #: Keys the identity read keeps; the config read keeps the whole record.
-    identity_fields: frozenset[str]
+    #: Keys the identity read keeps; ``None`` keeps the whole record, as the
+    #: config read always does.
+    identity_fields: frozenset[str] | None
     #: Launch-flag spellings folded to the names this engine reports.
     flag_aliases: Mapping[str, str]
     #: Whether an unreadable value in an allowlisted field voids the record.
@@ -359,7 +332,12 @@ _LAUNCH_RECORDS: dict[str, _LaunchRecord] = {
     ),
     "vllm": _LaunchRecord(
         marker=_VLLM_NON_DEFAULT_ARGS_RE,
-        identity_fields=_VLLM_OBSERVED_IDENTITY_FIELDS,
+        # vLLM's record lists only what the launch changed from the defaults,
+        # so every key in it is a setting someone asked for. An allowlist here
+        # dropped most of them -- ``compilation_config``, ``speculative_config``,
+        # the parsers, ``async_scheduling`` -- and every such requested flag was
+        # then judged unconfirmed however plainly the record showed it.
+        identity_fields=None,
         flag_aliases=_VLLM_FLAG_ALIASES,
         identity_rejects_unreadable_values=False,
     ),
@@ -444,6 +422,67 @@ def _balance_from(text: str, start: int) -> str:
                 expression = text[start : index + 1]
                 return f"_ServerArgs{expression}" if text[start] == "(" else expression
     return ""
+
+
+#: An object repr in a record: ``<CompilationMode.VLLM_COMPILE: 3>``. Python
+#: cannot parse it, and vLLM prints one inside ``compilation_config`` on every
+#: launch that sets it, so one such value made the whole record unreadable.
+_MAX_REPR_CHARS = 512
+
+
+def _quote_object_reprs(text: str) -> str:
+    """Rewrite each ``<...>`` repr outside a string literal as a string literal.
+
+    The repr text is kept verbatim, so the value still says what it was; it is
+    only made parseable. ``<`` cannot otherwise occur outside a string in a
+    dict of literals, so this rewrites nothing a literal parse could have read.
+    """
+    if "<" not in text:
+        return text
+    out: list[str] = []
+    quote = ""
+    escaped = False
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = ""
+            out.append(char)
+            index += 1
+            continue
+        if char in ("'", '"'):
+            quote = char
+        elif char == "<":
+            end = _repr_end(text, index)
+            if end > index:
+                out.append(repr(text[index : end + 1]))
+                index = end + 1
+                continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def _repr_end(text: str, start: int) -> int:
+    """Index of the ``>`` closing the repr opened at ``text[start]``, or -1."""
+    quote = ""
+    for index in range(start + 1, min(len(text), start + _MAX_REPR_CHARS)):
+        char = text[index]
+        if quote:
+            if char == quote:
+                quote = ""
+        elif char in ("'", '"'):
+            quote = char
+        elif char == "<":
+            return -1
+        elif char == ">":
+            return index
+    return -1
 
 
 def _safe_server_args_value(node: ast.AST) -> Any:
@@ -568,8 +607,13 @@ def observed_vllm_server_identity_from_log(path: str) -> dict[str, Any]:
     return observed_server_identity_from_log(path, "vllm")
 
 
-def _server_args_from_log(path: str, spec: _LaunchRecord, *, keep: frozenset[str] | None) -> dict[str, Any]:
-    """Parse a capped launch record, limited to ``keep`` when given."""
+def _read_launch_record(path: str, spec: _LaunchRecord) -> str:
+    """The launch record's payload, read under the line and character caps, or "".
+
+    The caps bound how much of a serving log is read for one record; crossing
+    either without finding a balanced payload is reported, because it is the one
+    case where "no record" might mean "not read far enough".
+    """
     chunks: list[str] = []
     remaining = _SERVER_ARGS_MAX_CHARS
     scanned_lines = 0
@@ -590,36 +634,56 @@ def _server_args_from_log(path: str, spec: _LaunchRecord, *, keep: frozenset[str
                 if remaining <= 0:
                     break
     except OSError:
-        return {}
-    text = "".join(chunks)
-    content = parsed or _balanced_record_payload(text, spec.marker)
-    if not content or len(content) > _SERVER_ARGS_MAX_CHARS:
-        if scanned_lines >= _SERVER_ARGS_MAX_LINES or remaining <= 0:
-            log.debug(
-                "launch record unavailable after scanning bounded log %s (lines=%d chars_remaining=%d)",
-                path,
-                scanned_lines,
-                remaining,
-            )
+        return ""
+    content = parsed or _balanced_record_payload("".join(chunks), spec.marker)
+    if content and len(content) <= _SERVER_ARGS_MAX_CHARS:
+        return content
+    if scanned_lines >= _SERVER_ARGS_MAX_LINES or remaining <= 0:
+        log.debug(
+            "launch record unavailable after scanning bounded log %s (lines=%d chars_remaining=%d)",
+            path,
+            scanned_lines,
+            remaining,
+        )
+    return ""
+
+
+def _record_fields(record: ast.expr) -> list[tuple[str, ast.expr]] | None:
+    """The ``name -> value`` pairs a launch record states, or None when it states none readably.
+
+    Both shapes the engines emit are accepted: a dict literal, and a call whose
+    keywords are the settings.
+    """
+    if isinstance(record, ast.Dict):
+        if len(record.keys) > _SERVER_ARGS_MAX_FIELDS:
+            return None
+        fields: list[tuple[str, ast.expr]] = []
+        for key, value in zip(record.keys, record.values):
+            if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
+                return None
+            fields.append((key.value, value))
+        return fields
+    if isinstance(record, ast.Call):
+        if len(record.keywords) > _SERVER_ARGS_MAX_FIELDS:
+            return None
+        if any(keyword.arg is None for keyword in record.keywords):
+            return None
+        return [(keyword.arg, keyword.value) for keyword in record.keywords]
+    return None
+
+
+def _server_args_from_log(path: str, spec: _LaunchRecord, *, keep: frozenset[str] | None) -> dict[str, Any]:
+    """Parse a capped launch record, limited to ``keep`` when given."""
+    content = _read_launch_record(path, spec)
+    if not content:
         return {}
     try:
-        record = ast.parse(content, mode="eval").body
-        fields: list[tuple[str, ast.expr]] = []
-        if isinstance(record, ast.Dict):
-            if len(record.keys) > _SERVER_ARGS_MAX_FIELDS:
-                return {}
-            for key, value in zip(record.keys, record.values):
-                if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
-                    return {}
-                fields.append((key.value, value))
-        elif isinstance(record, ast.Call):
-            if len(record.keywords) > _SERVER_ARGS_MAX_FIELDS:
-                return {}
-            for keyword in record.keywords:
-                if keyword.arg is None:
-                    return {}
-                fields.append((keyword.arg, keyword.value))
-        else:
+        # Only where a repr is expected: SGLang's record is all literals, and one
+        # that is not is still read as not the record we think it is.
+        if not spec.identity_rejects_unreadable_values:
+            content = _quote_object_reprs(content)
+        fields = _record_fields(ast.parse(content, mode="eval").body)
+        if fields is None:
             return {}
         values: dict[str, Any] = {}
         for name, value in fields:

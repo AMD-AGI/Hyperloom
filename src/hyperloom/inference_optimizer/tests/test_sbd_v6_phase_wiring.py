@@ -194,7 +194,7 @@ class _Sub:
 
 def _dispatcher(tmp_path: Path, state: SharedState, sub: _Sub) -> Any:
     """A DispatcherCollaborator with only what ``run_task_registered`` touches."""
-    dispatcher = DispatcherCollaborator(
+    return DispatcherCollaborator(
         types.SimpleNamespace(
             shared_state=state,
             sub=sub,
@@ -203,7 +203,6 @@ def _dispatcher(tmp_path: Path, state: SharedState, sub: _Sub) -> Any:
             gpu_specialist_pool=None,
         )
     )
-    return dispatcher
 
 
 def _task(kind: str, task_id: str, state: SharedState) -> Any:

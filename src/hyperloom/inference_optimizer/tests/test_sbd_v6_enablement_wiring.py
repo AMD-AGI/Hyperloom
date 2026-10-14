@@ -108,6 +108,9 @@ class _FakeTasks:
     async def running(self):
         return []
 
+    async def cancel_if_queued(self, _task_id: str, *, kind: str, reason: str) -> bool:
+        return False
+
 
 def _rounds(session_dir: Path) -> RoundStore:
     """A real round ledger, which is what the lane now counts stalls from."""
@@ -197,6 +200,7 @@ def _lane(session_dir: Path, **overrides: Any):
         setattr(fake, name, types.MethodType(getattr(EnablementLane, name), fake))
     for name in (
         "maybe_enqueue_enablement_baseline_revalidation",
+        "baseline_launch_params",
         "_open_revalidation_row",
         "open_row_past_spent_generations",
         "_open_round_past_spent_generations",
@@ -464,6 +468,9 @@ async def test_a_snapshot_that_raised_leaves_the_row_silent(_bound_session, monk
     )
     lane = _lane(_bound_session)
     lane.shared_state.enablement.last_specialist_task_id = "spec-1"
+    await lane.rounds.open(
+        "enablement-spec-1", holder_task_id="spec-1", lease_sec=3600.0, now_unix=0.0, request_id="seed-spec-1"
+    )
 
     await lane.maybe_rearm_enablement({"enablement": True, "status": "reverted", "specialist_task_id": "spec-1"})
 

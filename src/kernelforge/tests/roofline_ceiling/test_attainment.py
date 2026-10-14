@@ -11,7 +11,7 @@ from kernelforge.roofline_ceiling.contract import load_report
 
 
 def _report(cases):
-    return load_report({"cases": {case_id: ideal for case_id, ideal in cases}})
+    return load_report({"cases": dict(cases)})
 
 
 def test_attainment_is_the_ceiling_over_the_measured_latency():

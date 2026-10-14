@@ -262,9 +262,9 @@ publishing projections read, and it is grouped as:
   `e2e_norm_intvty_p90`, `output_tput_per_gpu`;
 * the comparability inputs a candidate/anchor pair is refused on —
   `duration_seconds`, `request_error_rate`. A pair is graded only when both
-  replayed a window of the same length and the candidate dropped no more
-  requests than its anchor, so a verdict published without them could not be
-  re-derived from the record;
+  replayed a window of the same length and the candidate's error rate exceeds
+  its anchor's by no more than `ERROR_RATE_SLACK_PCT` percentage points, so a
+  verdict published without them could not be re-derived from the record;
 * the latency detail — `ttft_p50_ms`, `ttft_p90_ms`, `tpot_p50_ms`,
   `tpot_p90_ms`;
 * reported for continuity and part of no verdict — `total_throughput`,

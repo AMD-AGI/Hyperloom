@@ -46,6 +46,7 @@ from ..actions.executors.explore import STACK_REVALIDATE_SOURCE, is_stack_revali
 from hyperloom.inference_optimizer.grid_server_args import strip_benchmark_harness_flags
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 from ..actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
+from ..actions.executors._ray_serving import RAY_INFEASIBLE_MARKER
 from hyperloom.inference_optimizer.breakdown.stop_reasons import (
     AGENTX_PREFLIGHT_STOP_REASON,
     PATCH_RECOVERY_INCOMPLETE_STOP_REASON,
@@ -92,6 +93,7 @@ from ..actions.executors._accuracy_gate import (
 from ..knowledge.agent_kb import PatchKB
 from .proposals import PendingProposal
 from ..measurement.integrate_performance import integrate_measurement_fields
+from ..measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX
 from ..collaborator import CoordinatorCollaborator
 
 if TYPE_CHECKING:
@@ -112,9 +114,20 @@ _BASELINE_MAX_TOTAL_FAILURES: int = 3
 _DEFAULT_RESUME_DRIFT_FLOOR_PCT: float = 95.0
 
 
-def _extract_enablement_launch_log(result_payload: dict[str, Any] | None) -> str:
-    """Extract launch/traceback text from a failed baseline result payload."""
-    if not isinstance(result_payload, dict):
+def _is_ray_cluster_infeasible(result_payload: Mapping[str, Any]) -> bool:
+    """Whether a baseline failed because the Ray cluster can never place its round."""
+    return RAY_INFEASIBLE_MARKER in str(result_payload.get("error") or "")
+
+
+def _authorable_launch_log(result_payload: dict[str, Any] | None, *, err_class: str) -> str:
+    """The failed boot's text the next enablement round authors against, or ``""``.
+
+    A failure that never reached a framework error is no wall: as
+    integrate_patch's "before" boot it passes any patch that starts the server.
+    """
+    if not isinstance(result_payload, dict) or _is_ray_cluster_infeasible(result_payload):
+        return ""
+    if err_class in ("fast_exit_arg_error", AGENTX_PREFLIGHT_ERROR_CLASS) or stopped_by_the_run_class(err_class):
         return ""
     parts: list[str] = []
     for key in ("error", "stderr", "log_tail", "log_excerpt", "traceback", "reason"):
@@ -986,8 +999,9 @@ class WritebackCollaborator(CoordinatorCollaborator):
         evidence = str(result_payload.get(BASELINE_EVAL_EVIDENCE_KEY) or "")
         if evidence:
             state.enablement.baseline_eval_evidence = evidence[:4000]
-            state.enablement.launch_log = evidence
-        state.enablement.launch_observation_path = str(result_payload.get("boot_observation_path") or "")
+            state.enablement.record_launch_observation(
+                log=evidence, observation_path=str(result_payload.get("boot_observation_path") or "")
+            )
         self._record_enablement_eval_trigger()
 
     def _record_enablement_eval_trigger(self) -> None:
@@ -1074,10 +1088,10 @@ class WritebackCollaborator(CoordinatorCollaborator):
             error_class="" if stopped_by_the_run else str(err_class or ""),
             reason="stopped by the run" if stopped_by_the_run else "revalidation baseline failed",
         )
-        launch_log = _extract_enablement_launch_log(result_payload)
+        launch_log = _authorable_launch_log(result_payload, err_class=str(err_class or ""))
         if launch_log:
-            state.enablement.launch_log = launch_log
-            state.enablement.launch_observation_path = str(result_payload.get("boot_observation_path") or "")
+            observed = str(result_payload.get("boot_observation_path") or "")
+            state.enablement.record_launch_observation(log=launch_log, observation_path=observed)
         log.warning(
             "enablement revalidation task %s %s (error_class=%s); pending=%s rearm=%s",
             task.task_id,
@@ -1086,6 +1100,56 @@ class WritebackCollaborator(CoordinatorCollaborator):
             bool(state.enablement.validation_pending),
             not bool(state.stop_reason),
         )
+
+    def _generic_baseline_failure_stops(
+        self,
+        task: Task,
+        err_class: str,
+        result_payload: Mapping[str, Any],
+        *,
+        retries_suppressed: bool,
+    ) -> bool:
+        """Count a baseline failure of no specially handled class; whether it ends the run.
+
+        Args:
+            task: The failed baseline task.
+            err_class: The failure's ``error_class``.
+            result_payload: The failed result.
+            retries_suppressed: A pending eval or an open enablement lane owns the
+                retries, so the streak alone does not stop the run.
+
+        Returns:
+            ``True`` when the run should stop as ``baseline_failed``.
+        """
+        # A process that exited with the same output as last time (modulo numbers)
+        # will do so again: stop at two instead of spending a third attempt. The
+        # executor signs only ``subprocess_nonzero``, from the process's whole
+        # output rather than the 2000-character ``error`` tail; other classes carry
+        # a fixed sentence that two unrelated failures share.
+        signature = str(result_payload.get("output_signature") or "") if err_class == "subprocess_nonzero" else ""
+        repeated = bool(
+            signature
+            and self.shared_state.baseline_failure_streak >= 1
+            and signature == self.shared_state.baseline_last_failure_signature
+        )
+        self.shared_state.baseline_failure_streak += 1
+        self.shared_state.baseline_last_failure_signature = signature
+        streak = self.shared_state.baseline_failure_streak
+        if _is_ray_cluster_infeasible(result_payload):
+            # The Ray cluster cannot place the round, and the runtime has already
+            # repaired what it safely could (a lone local head without
+            # serving_slot). A retry meets the same cluster and no framework patch
+            # changes it, so stop on the first one, like the AgentX preflight.
+            # Waiting for a second would not be bounded: with no launch log to
+            # author against, the enablement lane this failure opens never
+            # schedules another baseline.
+            log.error(
+                "baseline %s failed because the Ray cluster cannot place it; stopping the run: %s",
+                task.task_id,
+                result_payload.get("error") or err_class,
+            )
+            return True
+        return not retries_suppressed and (streak >= 3 or (streak >= 2 and repeated))
 
     async def handle_unpromotable_result(
         self,
@@ -1236,8 +1300,12 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 # ``baseline_arg_error_streak`` is deliberately left alone: a boot
                 # that failed some other way is no evidence the arguments were
                 # fixed.
-                self.shared_state.baseline_failure_streak += 1
-                if self.shared_state.baseline_failure_streak >= 3 and not eval_pending_suppress and not in_enablement:
+                if self._generic_baseline_failure_stops(
+                    task,
+                    err_class,
+                    result_payload,
+                    retries_suppressed=bool(eval_pending_suppress or in_enablement),
+                ):
                     self.shared_state.set_stop_reason("baseline_failed")
             # Combined backstop: count ALL baseline failures so mixed
             # error_classes that split the per-class streaks still fast-fail.
@@ -1259,27 +1327,21 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     "disable-cuda-graph fallback for the next baseline retry",
                     task.task_id,
                 )
-            # Stash the launch/traceback text for the FRAMEWORK pump. Excluded:
-            # fast arg errors, and an AgentX preflight abort -- the pump treats a
-            # non-blank log as "there is something here to author against", and
-            # for a missing pinned dependency there is not.
-            if err_class not in ("fast_exit_arg_error", AGENTX_PREFLIGHT_ERROR_CLASS):
-                launch_log = _extract_enablement_launch_log(result_payload)
-                if launch_log:
-                    self.shared_state.enablement.launch_log = launch_log
-                    self.shared_state.enablement.launch_observation_path = str(
-                        result_payload.get("boot_observation_path") or ""
+            # Stash the launch/traceback text for the FRAMEWORK pump.
+            launch_log = _authorable_launch_log(result_payload, err_class=err_class)
+            if launch_log:
+                self.shared_state.enablement.record_launch_observation(
+                    log=launch_log, observation_path=str(result_payload.get("boot_observation_path") or "")
+                )
+                # Only the first trigger is kept, so a serial enablement does not
+                # rewrite the reason the lane opened with the gap it is now on.
+                if not str(self.shared_state.enablement.origin or ""):
+                    enablement_event.record_trigger(
+                        origin=enablement_event.ORIGIN_BOOT,
+                        mode=str(self.shared_state.enablement_mode or ""),
+                        kind=str(err_class or ""),
+                        evidence=launch_log,
                     )
-                    # Only the first trigger is kept, so a serial enablement does
-                    # not rewrite the reason the lane opened with the gap it is
-                    # now on.
-                    if not str(self.shared_state.enablement.origin or ""):
-                        enablement_event.record_trigger(
-                            origin=enablement_event.ORIGIN_BOOT,
-                            mode=str(self.shared_state.enablement_mode or ""),
-                            kind=str(err_class or ""),
-                            evidence=launch_log,
-                        )
             baseline_event_payload = {
                 "kind": "baseline_not_promoted",
                 "task_id": task.task_id,
@@ -1363,7 +1425,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             ``True`` when the configuration was accepted, ``False`` when a
             performance winner was not comparable or did not beat the anchor.
         """
-        from hyperloom.common.perf_metric import VERDICT_KEEP, graded_axes_of
+        from hyperloom.common.perf_metric import VERDICT_KEEP, constraint_fields, graded_axes_of
 
         prebaseline_enablement = (
             task_kind == "integrate_patch"
@@ -1387,21 +1449,23 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 return False
             if graded.veto_reason:
                 log.warning(
-                    "current_best held: %s winner refused by the latency budget (%s)", task_kind, graded.veto_reason
+                    "current_best held: %s winner refused by %s (%s)", task_kind, graded.vetoed_by, graded.veto_reason
                 )
                 return False
-            if graded.graded_on_intvty and graded.verdict != VERDICT_KEEP:
+            # A verified correctness fix was already bounded by the integrate gate.
+            correctness_fix = bv.get("keep_reason") == KEEP_REASON_CORRECTNESS_FIX
+            if graded.graded_on_intvty and graded.verdict != VERDICT_KEEP and not correctness_fix:
                 log.info(
-                    "current_best held: %s winner %s intvty %.1f->%.1f tput %.1f->%.1f",
+                    "current_best held: %s winner refused by %s, intvty %.1f->%.1f tput %.1f->%.1f",
                     task_kind,
-                    graded.verdict,
+                    graded.refused_by,
                     graded.reference,
                     graded.candidate,
                     graded.tput_reference,
                     graded.tput_candidate,
                 )
                 return False
-            if graded.reference > 0 and graded.candidate <= graded.reference:
+            if graded.reference > 0 and graded.candidate <= graded.reference and not correctness_fix:
                 log.info(
                     "current_best held at %.1f %s: %s winner measured %.1f (no lift)",
                     graded.reference,
@@ -1591,7 +1655,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                         stack_entry["recipe_publishable"] = bool(bv.get("recipe_publishable"))
                     if "framework_agent_authoring" in bv:
                         stack_entry["framework_agent_authoring"] = bool(bv.get("framework_agent_authoring"))
-                    for _origin_key in ("domain", "gap_layer"):
+                    for _origin_key in ("domain", "gap_layer", "keep_reason", "resolves_finding"):
                         if bv.get(_origin_key):
                             stack_entry[_origin_key] = str(bv.get(_origin_key))
                 if _overlay:
@@ -1641,7 +1705,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             "final_overlay": _overlay,
             "optimization_stack": list(self.shared_state.optimization_stack),
             "ttft_mean_ms": bv.get("ttft_mean_ms") if isinstance(bv, dict) else None,
-            "e2el_mean_ms": bv.get("e2el_mean_ms") if isinstance(bv, dict) else None,
+            **constraint_fields(bv if isinstance(bv, dict) else {}),
             "tpot_mean_ms": bv.get("tpot_mean_ms") if isinstance(bv, dict) else None,
             "workspace": bv.get("workspace") if isinstance(bv, dict) else None,
         }
@@ -1762,7 +1826,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         outcome: _PromoteOutcome,
     ) -> None:
         """Promote a baseline result: anchor tput / accuracy / config and bootstrap PRELUDE."""
-        from hyperloom.common.perf_metric import stamp_output_per_gpu
+        from hyperloom.common.perf_metric import constraint_fields, stamp_output_per_gpu
 
         stamp_output_per_gpu(result, self.shared_state.tp)
         changed = False
@@ -1955,7 +2019,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     float(warmup_anchor) if isinstance(warmup_anchor, (int, float)) and warmup_anchor > 0 else None
                 ),
                 "ttft_mean_ms": result.get("ttft_mean_ms"),
-                "e2el_mean_ms": result.get("e2el_mean_ms"),
+                **constraint_fields(result),
                 "tpot_mean_ms": result.get("tpot_mean_ms"),
                 "input_throughput": result.get("input_throughput"),
                 "total_throughput": result.get("total_token_throughput"),
@@ -1991,29 +2055,10 @@ class WritebackCollaborator(CoordinatorCollaborator):
             # Reads the current_best just assigned, so it has to follow it.
             self._stamp_current_best_measurement(result)
             changed = True
-            # The reference the run is measured against is itself over the SLA, so
-            # nothing that follows can clear it. Stopping here costs one baseline;
-            # continuing spends the whole --max-hours refusing every candidate to
-            # learn something already knowable.
-            from hyperloom.common.perf_metric import latency_veto_reason
+            from hyperloom.orchestrator.measurement.baseline_budget import baseline_budget_stop_reason
 
-            baseline_veto = latency_veto_reason(
-                result.get("e2el_mean_ms"),
-                float(self.shared_state.latency_budget_ms),
-            )
-            if baseline_veto:
-                log.error(
-                    "baseline does not satisfy --max-latency-ms (%s): budget %.1f ms, baseline %s. "
-                    "No candidate can clear a ceiling the reference already breaks; stopping.",
-                    baseline_veto,
-                    float(self.shared_state.latency_budget_ms),
-                    (
-                        f"{float(result['e2el_mean_ms']):.1f} ms"
-                        if isinstance(result.get("e2el_mean_ms"), (int, float))
-                        else "reported no end-to-end latency"
-                    ),
-                )
-                self.shared_state.set_stop_reason("baseline_over_latency_budget")
+            if stop_reason := baseline_budget_stop_reason(self.shared_state, result):
+                self.shared_state.set_stop_reason(stop_reason)
         if anchor_accepted:
             audit_decision = "promoted"
             outcome.verdict = Verdict.ADOPTED
@@ -2183,11 +2228,13 @@ class WritebackCollaborator(CoordinatorCollaborator):
             self.shared_state.last_profile_workload = {}
             if not trace_path:
                 self.shared_state.last_profile_trace = ""
+                self.shared_state.last_profile_launch_evidence_path = ""
             self.shared_state.last_profile_args = ""
             self.shared_state.last_profile_workload_action = ""
             changed = True
         elif trace_path:
             self.shared_state.last_profile_trace = str(trace_path)
+            self.shared_state.last_profile_launch_evidence_path = str(result.get("launch_evidence_path") or "")
             self.shared_state.last_profile_status = "succeeded"
             # Record the server config in effect for this trace, tagged with the
             # arm it measured so a later same-arm check can trust it.
@@ -2798,29 +2845,28 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 outcome.verdict = Verdict.ADOPTED if promoted else Verdict.REFUSED
                 outcome.changed = True
                 return
-            else:
-                if measured_ok and self.shared_state.baseline_tput > 0 and not stale_measurement:
-                    self.validate(measured, result, source=STACK_REVALIDATE_SOURCE)
-                    cb_rec = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
-                    recorded = cb_rec.get("tput")
-                    floor = _DEFAULT_RESUME_DRIFT_FLOOR_PCT
-                    if (
-                        isinstance(recorded, (int, float))
-                        and recorded > 0
-                        and float(measured) < float(recorded) * floor / 100.0
-                    ):
-                        await self.bus.record_observation(
-                            "coordinator",
-                            "observation",
-                            {
-                                "kind": "current_best_drift",
-                                "severity": "high",
-                                "measured_tput": float(measured),
-                                "recorded_tput": float(recorded),
-                                "floor_pct": floor,
-                            },
-                        )
-                changed = True
+            if measured_ok and self.shared_state.baseline_tput > 0 and not stale_measurement:
+                self.validate(measured, result, source=STACK_REVALIDATE_SOURCE)
+                cb_rec = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
+                recorded = cb_rec.get("tput")
+                floor = _DEFAULT_RESUME_DRIFT_FLOOR_PCT
+                if (
+                    isinstance(recorded, (int, float))
+                    and recorded > 0
+                    and float(measured) < float(recorded) * floor / 100.0
+                ):
+                    await self.bus.record_observation(
+                        "coordinator",
+                        "observation",
+                        {
+                            "kind": "current_best_drift",
+                            "severity": "high",
+                            "measured_tput": float(measured),
+                            "recorded_tput": float(recorded),
+                            "floor_pct": floor,
+                        },
+                    )
+            changed = True
         # A revalidation task only CONFIRMS the existing stack/current_best; its
         # winner is not a new discovery. Skip the accept/lift path so a rebench
         # (e.g. geak_revalidate) never appends a duplicate optimization_stack
@@ -3016,6 +3062,10 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 lift["gap_layer"] = str(task_params.get("gap_layer"))
             if task_params.get("framework_agent_authoring"):
                 lift["framework_agent_authoring"] = True
+            if result.get("keep_reason") == KEEP_REASON_CORRECTNESS_FIX:
+                lift["keep_reason"] = KEEP_REASON_CORRECTNESS_FIX
+                lift["resolves_finding"] = str(result.get("resolves_finding") or "")
+                lift["attribution_eligible"] = False
             if enablement_landing:
                 lift["recipe_publishable"] = False
             if prebaseline_enablement:
@@ -3711,7 +3761,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             provenance = str(result.get("provenance") or "").strip()
             if domain and not provenance.startswith("specialist:"):
                 provenance = f"specialist:{domain}"
-            from hyperloom.common.perf_metric import graded_axes_of
+            from hyperloom.common.perf_metric import constraint_fields, graded_axes_of
 
             bv = {
                 "name": sid,
@@ -3726,10 +3776,10 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 },
                 "extra_envs": dict(result.get("extra_envs_applied") or {}),
                 "tput": float(tput),
-                **graded_axes_of(result.get("bench_result") or result),
-                # ``graded_axes_of`` carries the throughput axes only; the latency
-                # budget grades on this one and fails closed without it.
-                "e2el_mean_ms": (result.get("bench_result") or result).get("e2el_mean_ms"),
+                **graded_axes_of(bench := result.get("bench_result") or result),
+                # ``graded_axes_of`` carries the throughput axes only; the latency and
+                # power budgets grade on these and fail closed without them.
+                **constraint_fields(bench),
                 "workspace": result.get("workspace"),
                 "provenance": provenance or "integrate_patch",
                 "scope": "source_patch",
@@ -4497,7 +4547,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             A summary dict describing whether validation succeeded.
         """
         from hyperloom.common.perf_metric import is_agentx_mode
-        from ..actions.executors._workload_envs import agentx_enabled
+        from ..actions.executors._workload_envs import agentx_enabled, geak_metric_axis
 
         mode = str(self.shared_state.benchmark_mode or "").strip()
         agentx = is_agentx_mode(mode) if mode else agentx_enabled()
@@ -4573,6 +4623,8 @@ class WritebackCollaborator(CoordinatorCollaborator):
             # Single-point validated replay pins the headline protocol (num_prompts
             # etc.) so it is protocol-identical to the reported result.
             pin_num_prompts=True,
+            # The axis the handoff sent GEAK, so the replay measures what GEAK accepted on.
+            metric_axis=geak_metric_axis(benchmark_mode=mode, grading=self.shared_state.grading or None),
         )
         measurement = res.get("promotion_measurement")
         measurement = measurement if isinstance(measurement, Mapping) else {}

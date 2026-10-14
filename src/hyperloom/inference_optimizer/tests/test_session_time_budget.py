@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import sys
 import threading
 import time
@@ -30,6 +31,8 @@ from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     STOP_GATE_POLL_SECONDS,
     run_with_session_kill,
 )
+from hyperloom.orchestrator.bus.gpu_pool import GPU_LEASE_TTL_GRACE
+from hyperloom.orchestrator.loop import time_budget
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.dispatcher import (
     _CANCEL_NOTICE_SEC,
@@ -41,6 +44,7 @@ from hyperloom.orchestrator.loop.time_budget import (
     expected_action_cost_minutes,
     measured_baseline_runtime_sec,
 )
+from hyperloom.orchestrator.phases import machine_state
 from hyperloom.orchestrator.policy.gate import PolicyDenied
 from hyperloom.orchestrator.roles import Backend, MockBackend, ScriptedPlan
 from hyperloom.orchestrator.state.shared_state import SharedState, effective_closing_grace_sec
@@ -313,6 +317,37 @@ class TestTimeBudgetGate:
         assert coord.dispatcher.time_budget_denial_for_action(_EXPENSIVE_ACTION) is not None
 
 
+# A slow AgentX baseline round: longer than any single GPU action's catalogue lease.
+_SLOW_BASELINE_SEC = 9000.0
+
+
+class TestTheLeaseCoversTheExpectedCost:
+    """The lease orchestration reads must not run out on a healthy round the session has already priced."""
+
+    @pytest.mark.parametrize("kind", ["baseline", "roofline", "profile", "explore", "integrate_patch"])
+    def test_a_measured_round_outlasts_the_catalogue_lease(self, coord: Coordinator, kind: str):
+        coord.shared_state.baseline_runtime_sec = _SLOW_BASELINE_SEC
+
+        _lanes, ttl = coord.dispatcher.registry_lanes_ttl(kind)
+
+        assert ACTION_CATALOGUE[kind].lease_ttl_sec < _SLOW_BASELINE_SEC
+        assert ttl == math.ceil(_SLOW_BASELINE_SEC * (1.0 + GPU_LEASE_TTL_GRACE))
+
+    def test_the_catalogue_lease_stands_where_it_is_longer(self, coord: Coordinator):
+        coord.shared_state.baseline_runtime_sec = 10 * 60.0
+        for kind in ("explore", "conc_sweep", "kernel_agent"):
+            assert coord.dispatcher.registry_lanes_ttl(kind)[1] == ACTION_CATALOGUE[kind].lease_ttl_sec, kind
+
+    @pytest.mark.parametrize("kind", sorted(ACTION_CATALOGUE))
+    def test_a_session_with_no_baseline_yet_reads_the_catalogue_lease(self, coord: Coordinator, kind: str):
+        assert coord.dispatcher.registry_lanes_ttl(kind)[1] == ACTION_CATALOGUE[kind].lease_ttl_sec
+
+    @pytest.mark.parametrize("kind", ["report", "specialist", "target_analysis"])
+    def test_an_action_that_never_benches_keeps_its_catalogue_lease(self, coord: Coordinator, kind: str):
+        coord.shared_state.baseline_runtime_sec = _SLOW_BASELINE_SEC
+        assert coord.dispatcher.registry_lanes_ttl(kind)[1] == ACTION_CATALOGUE[kind].lease_ttl_sec
+
+
 class TestAdmissionGateOrder:
     """``admission_denial_for_action`` chains the gates; the first one wins."""
 
@@ -330,6 +365,48 @@ class TestAdmissionGateOrder:
     def test_an_action_clearing_both_gates_is_admitted(self, coord: Coordinator):
         _set_budget(coord, minutes=600)
         assert coord.dispatcher.admission_denial_for_action(_EXPENSIVE_ACTION) is None
+
+
+def _set_phase_budget(coord: Coordinator, monkeypatch, *, phase: str, minutes_left: float) -> None:
+    """Put the session in ``phase`` with ``minutes_left`` of that phase's own budget remaining."""
+    coord.shared_state.phase = phase
+    monkeypatch.setattr(machine_state, "phase_budget_remaining_seconds", lambda _state, **_kw: minutes_left * 60.0)
+
+
+class TestThePhaseBudgetGate:
+    """FRAMEWORK and KERNEL refuse work their own remaining budget cannot fit, however much the session has left."""
+
+    @pytest.mark.parametrize("phase", sorted(time_budget.PHASE_BUDGET_GATED_PHASES))
+    def test_an_action_too_big_for_the_phase_is_denied(self, coord: Coordinator, monkeypatch, phase: str):
+        _set_budget(coord, minutes=600)
+        _set_phase_budget(coord, monkeypatch, phase=phase, minutes_left=20)
+
+        denied = coord.dispatcher.admission_denial_for_action(_EXPENSIVE_ACTION)
+
+        assert isinstance(denied, PolicyDenied)
+        assert denied.rule == "phase_time_budget"
+        assert f"{_EXPENSIVE_COST_MIN:.0f} min" in str(denied)
+
+    def test_a_phase_without_a_search_budget_answers_only_to_the_session(self, coord: Coordinator, monkeypatch):
+        _set_budget(coord, minutes=600)
+        _set_phase_budget(coord, monkeypatch, phase="PRELUDE", minutes_left=1)
+        assert coord.dispatcher.admission_denial_for_action(_EXPENSIVE_ACTION) is None
+
+    @pytest.mark.asyncio
+    async def test_a_queued_task_the_phase_outlived_is_dropped_before_dispatch(self, coord: Coordinator, monkeypatch):
+        _set_budget(coord, minutes=600)
+        task, _ = await coord.tasks.create_or_return_existing(
+            kind=_EXPENSIVE_ACTION,
+            params={},
+            idempotency_key="q-phase-drained",
+        )
+        _set_phase_budget(coord, monkeypatch, phase="FRAMEWORK_AGENT", minutes_left=20)
+
+        await coord.dispatcher._spawn_fitting_queued()
+
+        dropped = await coord.tasks.get(task.task_id)
+        assert dropped.state == "cancelled"
+        assert dropped.history[-1]["evidence"]["reason"] == "phase_time_budget"
 
 
 def _delegate(action_name: str, key: str) -> Intent:

@@ -56,7 +56,6 @@ def _dispatcher(tmp_path):
         _stop=stop,
         stop_requested=stop.is_set,
         reconciler=SimpleNamespace(last_report=ReconcileReport()),
-        _BUDGET_GATED_DISPATCH_PHASES=frozenset(),
         writeback=writeback_ns,
         recipe_journal=SimpleNamespace(fact_write_hook=AsyncMock()),
         specialist_dispatch=SimpleNamespace(

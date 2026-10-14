@@ -6,7 +6,7 @@ import os
 import signal
 from types import SimpleNamespace
 
-from kernelforge.loop import task_preparer
+from kernelforge.loop import task_preflight
 
 
 def _proc(pid):
@@ -22,7 +22,7 @@ def test_none_pid_is_noop(monkeypatch):
     calls = []
     monkeypatch.setattr(os, "killpg", lambda *a: calls.append(a))
     proc, killed = _proc(None)
-    task_preparer._kill_process_group(proc)
+    task_preflight._kill_process_group(proc)
     assert calls == []
     assert killed["called"] is False
 
@@ -33,7 +33,7 @@ def test_happy_path_signals_pgid_once(monkeypatch):
     monkeypatch.setattr(os, "getpgid", lambda pid: pid)
     monkeypatch.setattr(os, "killpg", lambda pgid, sig: calls.append((pgid, sig)))
     proc, killed = _proc(123)
-    task_preparer._kill_process_group(proc)
+    task_preflight._kill_process_group(proc)
     assert calls == [(123, signal.SIGKILL)]
     assert killed["called"] is False
 
@@ -48,7 +48,7 @@ def test_never_calls_getpgid(monkeypatch):
     monkeypatch.setattr(os, "getpgid", forbidden)
     monkeypatch.setattr(os, "killpg", lambda pgid, sig: calls.append(pgid))
     proc, killed = _proc(123)
-    task_preparer._kill_process_group(proc)
+    task_preflight._kill_process_group(proc)
     assert calls == [123]
     assert killed["called"] is False
 
@@ -61,7 +61,7 @@ def test_killpg_processlookup_falls_back_to_proc_kill(monkeypatch):
 
     monkeypatch.setattr(os, "killpg", dead)
     proc, killed = _proc(555)
-    task_preparer._kill_process_group(proc)
+    task_preflight._kill_process_group(proc)
     assert killed["called"] is True
 
 
@@ -71,7 +71,7 @@ def test_killpg_generic_exception_falls_back_to_proc_kill(monkeypatch):
 
     monkeypatch.setattr(os, "killpg", broken)
     proc, killed = _proc(999)
-    task_preparer._kill_process_group(proc)
+    task_preflight._kill_process_group(proc)
     assert killed["called"] is True
 
 
@@ -81,5 +81,5 @@ def test_permission_error_continues_then_fallback(monkeypatch):
 
     monkeypatch.setattr(os, "killpg", denied)
     proc, killed = _proc(321)
-    task_preparer._kill_process_group(proc)
+    task_preflight._kill_process_group(proc)
     assert killed["called"] is True
