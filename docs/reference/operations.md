@@ -288,8 +288,10 @@ Pass the scope exactly as printed, without the surrounding quotes. The
 confirmation cancels the unfinished tasks recorded under that scope, so the
 resumed run redoes them instead of counting their results; releases their
 execution and GPU ownership records; and appends the confirmation to
-`runtime/pod_history.jsonl`. It does not stop any process and does not resume
-the run. It is refused, with exit code 2 and nothing changed, when:
+`runtime/pod_history.jsonl` (if that append fails, the confirmation still stands
+and a warning is printed). It does not stop any process and does not resume
+the run. When nothing is recorded under the named scope it changes no task or lease record (only the ledger entry is appended),
+reports `cancelled_tasks=0 released_leases=0` and exits 0; check those counts. It is refused, with exit code 2 and nothing changed, when:
 
 * the named scope is the current environment's, or the current environment's
   scope cannot be read;
@@ -301,14 +303,16 @@ the run. It is refused, with exit code 2 and nothing changed, when:
   namespace and one of its recorded holder processes still runs here;
 * the session lock is held (an optimizer is still running on the session), or
   POSIX session locking is unavailable;
-* the session's ownership records carry no owner scopes; use `--confirm-stopped`;
+* the session's ownership database predates owner scopes; use `--confirm-stopped`;
 * `--confirmation-reason` is missing or empty, or the option is combined with
   `--confirm-stopped` or `--force`.
 
-Use `--confirm-stopped TASK_ID` instead only for ownership recorded without an
-owner scope (by earlier versions): it confirms one task at a time, after you
-have verified that task's whole process tree and any remote workers or Ray
-actors have stopped, and it refuses tasks recorded under a nonempty owner scope.
+Use `--confirm-stopped TASK_ID` instead for ownership recorded without an owner
+scope (by earlier versions; such records name no scope, so the refusal lists no
+scope for them and `--confirm-scope-gone` releases nothing for them): it
+confirms one task at a time, after you have verified that task's whole process
+tree and any remote workers or Ray actors have stopped, and it refuses tasks
+recorded under a nonempty owner scope.
 
 To rebuild only the `session_breakdown` (and push it to Langfuse) for a run
 that exited abnormally — without re-running the optimization loop — use the
