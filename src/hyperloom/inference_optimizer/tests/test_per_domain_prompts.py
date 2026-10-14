@@ -8,6 +8,7 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.common.failure_signature import classify_failure
+from hyperloom.orchestrator.specialists.profile import MODE_RESEARCH
 from hyperloom.orchestrator.specialists.domains import (
     SPECIALIST_DOMAIN_KEYS,
     SPECIALIST_DOMAINS,
@@ -15,6 +16,7 @@ from hyperloom.orchestrator.specialists.domains import (
 )
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
     _DOMAIN_FOCUS_TEMPLATES,
+    _THROUGHPUT_AUTHORING_DOMAINS,
     SpecialistPromptInputs,
     build_specialist_prompts,
 )
@@ -72,13 +74,46 @@ def test_serving_specialist_has_source_patch_playbook():
     """The serving focus must guide authoring source patches and carry the framework safety priors (ALWAYS_ON / NEVER_TOUCH)."""
     text = _build("serving_specialist")
     for marker in (
-        "Source-patch playbook",
+        "Source-patch targets",
         "block_manager",
         "add_seq_group",
         "NEVER_TOUCH",
         "VLLM_ROCM_USE_AITER",
     ):
         assert marker.lower() in text.lower(), f"missing {marker!r}"
+
+
+@pytest.mark.parametrize("domain_key", sorted(_THROUGHPUT_AUTHORING_DOMAINS))
+def test_throughput_authoring_domains_carry_the_altitude_block(domain_key: str):
+    """Every domain whose gate is throughput is told where the durable wins are, not just which flags to permute."""
+    text = _build(domain_key)
+    for marker in (
+        "Altitude — where the durable wins are",
+        "un-bridged capability switch",
+        "A real bug",
+    ):
+        assert marker.lower() in text.lower(), f"missing {marker!r} for {domain_key}"
+
+
+def test_enablement_specialist_is_not_pushed_toward_source_work():
+    """Its ladder book says climb only as far as runnability needs; the altitude block argues the other way."""
+    assert "enablement_specialist" not in _THROUGHPUT_AUTHORING_DOMAINS
+    assert "Altitude —" not in _build("enablement_specialist")
+
+
+def test_research_mode_gets_no_altitude_block():
+    """A read-only dispatch has no worktree, so telling it to write a diff is dead text."""
+    domain = get_domain("serving_specialist")
+    assert domain is not None
+    inp = SpecialistPromptInputs(
+        task_id="task-research",
+        domain=domain,
+        max_turns=4,
+        gap_canonical_id="gap.serving.research",
+        mode=MODE_RESEARCH,
+    )
+    system, _ = build_specialist_prompts(inp)
+    assert "Altitude —" not in system
 
 
 def test_kernel_switch_specialist_mentions_aiter_and_attention_backends():

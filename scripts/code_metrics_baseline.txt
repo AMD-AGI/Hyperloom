@@ -799,9 +799,8 @@ function-lines src/hyperloom/orchestrator/prompts/prompt_builder.py::_section_de
 function-lines src/hyperloom/orchestrator/prompts/prompt_builder.py::build_orchestration_prompt 139
 function-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py::_focus_framework_rewrite_specialist 125
 function-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py::_focus_kernel_switch_specialist 81
-function-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py::_focus_serving_specialist 88
+function-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py::_focus_serving_specialist 83
 function-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py::_focus_static_recon_specialist 91
-function-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py::_section_identity 94
 function-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py::_section_mandate 92
 function-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py::_section_output_protocol 172
 function-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py::_section_roofline_evidence 119
