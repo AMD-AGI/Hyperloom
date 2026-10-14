@@ -431,14 +431,13 @@ def _build_variant_yaml(
     extra_args_env = server_args_env_name(bench.get("framework"))
 
     # A replacing base drops the inherited string wholesale, so its own removals have nothing left to strip.
-    inherited = "" if replacing else str(envs.get(extra_args_env, ""))
-    base_remove = [] if replacing else to_str_list(base_remove_args)
+    inherited, base_remove = ("", []) if replacing else (str(envs.get(extra_args_env, "")), base_remove_args)
     base_args = compose_server_args(inherited_args=inherited, base_extra_args=base_extra_args, remove_args=base_remove)
     combined = compose_server_args(
         inherited_args=inherited,
         base_extra_args=base_extra_args,
         variant_extra_args=variant.extra_server_args,
-        remove_args=base_remove + to_str_list(getattr(variant, "remove_args", [])),
+        remove_args=to_str_list(base_remove) + to_str_list(getattr(variant, "remove_args", [])),
         args_mode=getattr(variant, "args_mode", "append"),
     )
     # A grid variant never injects a MoE runner backend itself, but it does inherit one -- from the baseline recipe it

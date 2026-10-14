@@ -548,7 +548,7 @@ function-lines src/hyperloom/orchestrator/actions/executors/_framework_rewrite_e
 function-lines src/hyperloom/orchestrator/actions/executors/_framework_switch_manifest.py::parse_manifest 95
 function-lines src/hyperloom/orchestrator/actions/executors/_geak_sweep.py::sweep_via_geak 217
 function-lines src/hyperloom/orchestrator/actions/executors/_gpu_pin.py::resolve_gpu_pin 105
-function-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py::_build_variant_yaml 138
+function-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py::_build_variant_yaml 137
 function-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py::_run_magpie 125
 function-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py::run_grid 1040
 function-lines src/hyperloom/orchestrator/actions/executors/_kernel_agent_tool.py::materialize_unified_patch_snapshot 94
