@@ -1465,13 +1465,11 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     graded.candidate,
                 )
                 return False
-        previous = self.shared_state.current_best or {}
-        base_args = ""
-        if isinstance(previous, dict):
-            base_args = strip_benchmark_harness_flags(previous.get("extra_server_args"))
+        previous = self.shared_state.current_best
+        base_args = strip_benchmark_harness_flags(previous.get("extra_server_args"))
         # An authored-kernel overlay stays active until another KEEP replaces it.
         _overlay = str(bv.get("final_overlay") or "").strip()
-        if not _overlay and isinstance(previous, dict):
+        if not _overlay:
             _overlay = str(previous.get("final_overlay") or "").strip()
         candidate_args = strip_benchmark_harness_flags(
             bv.get("candidate_extra_server_args") or bv.get("extra_server_args")
@@ -1662,7 +1660,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
 
         # Merge envs: start from previous stack top envs so source-layer KEEPs
         # (extra_envs_applied={}) do not clear prior explore/env layers.
-        _prev_envs = dict((previous.get("extra_envs") or {}) if isinstance(previous, dict) else {})
+        _prev_envs = dict(previous.get("extra_envs") or {})
         _new_envs = dict(bv.get("extra_envs") or {})
         _merged_envs = dict(_prev_envs)
         for _key in to_str_list(bv.get("unset_envs")):
@@ -2516,7 +2514,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     rebench_measurement["output_throughput"] = measured
                 measured = output_tput_of(rebench_measurement)
                 got_hash = str(rebench_variant.get("fingerprint") or "")
-                cb_now = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
+                cb_now = self.shared_state.current_best
                 cb_tput = cb_now.get("tput")
                 baseline_grade = resolve_graded_comparison(
                     self.shared_state, rebench_measurement, against_baseline=True
@@ -2818,8 +2816,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 return
             if measured_ok and self.shared_state.baseline_tput > 0 and not stale_measurement:
                 self.validate(measured, result, source=STACK_REVALIDATE_SOURCE)
-                cb_rec = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
-                recorded = cb_rec.get("tput")
+                recorded = self.shared_state.current_best.get("tput")
                 floor = _DEFAULT_RESUME_DRIFT_FLOOR_PCT
                 if (
                     isinstance(recorded, (int, float))
@@ -3383,8 +3380,6 @@ class WritebackCollaborator(CoordinatorCollaborator):
     def _stamp_current_best_measurement(self, evidence: Mapping[str, Any] | None = None) -> None:
         """Attach the exact promoted config identity to ``current_best``."""
         cb = self.shared_state.current_best
-        if not isinstance(cb, dict):
-            return
         evidence = evidence if isinstance(evidence, Mapping) else {}
         launch_evidence = evidence.get("launch_evidence") or {}
         launch_evidence = dict(launch_evidence) if isinstance(launch_evidence, Mapping) else {}
@@ -3436,7 +3431,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         Returns:
             Server args, envs, removal/replacement controls, and ``final_overlay``.
         """
-        cb = self.shared_state.current_best if isinstance(self.shared_state.current_best, Mapping) else {}
+        cb = self.shared_state.current_best
         args = str(cb.get("extra_server_args") or "").strip()
         envs: dict[str, str] = {}
         raw_envs = cb.get("extra_envs")
@@ -3484,7 +3479,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         """
         from ..source_snapshot import source_layer_overlay_dir, source_layer_reproducible
 
-        cb = self.shared_state.current_best if isinstance(self.shared_state.current_best, Mapping) else {}
+        cb = self.shared_state.current_best
         materialized = self.current_best_launch_config()
         # current_best's embedded stack was promoted with its tput. Reading the
         # mutable global stack here could attach an unrelated source patch after
@@ -4365,8 +4360,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 "reason": "geak_overlay_unloadable" if overlay_requested else "geak_material_requires_harness",
                 "fallback": "geak_harness",
             }
-        cb_now = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
-        base_params = stack_base_params({**cb_now, **self.current_best_launch_config()})
+        base_params = stack_base_params({**self.shared_state.current_best, **self.current_best_launch_config()})
         base_params = {
             key: value
             for key, value in base_params.items()
@@ -4449,7 +4443,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         args = launch["extra_server_args"]
         envs = launch["extra_envs"]
         overlay = launch["final_overlay"]
-        cb_now = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
+        cb_now = self.shared_state.current_best
         cb_remove = cb_now.get("remove_args")
         cb_unset = cb_now.get("unset_envs")
         cb_replace = str(cb_now.get("args_mode") or "").strip().lower() == "replace"

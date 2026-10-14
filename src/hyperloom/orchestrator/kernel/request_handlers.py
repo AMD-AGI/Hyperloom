@@ -445,28 +445,27 @@ def _fill_integrate_defaults_from_state(
         if cfg:
             resolved["config_path"] = cfg
 
-    if not resolved.get("extra_server_args") and isinstance(current_best, dict):
+    if not resolved.get("extra_server_args"):
         cb_args = current_best.get("extra_server_args") or ""
         if cb_args:
             resolved["extra_server_args"] = cb_args
-    if isinstance(current_best, dict):
-        for key in ("remove_args", "unset_envs"):
-            resolved[key] = to_str_list(resolved.get(key, current_best.get(key)))
-        resolved.setdefault("args_mode", current_best.get("args_mode") or "append")
-        current_envs = current_best.get("extra_envs")
-        current_envs = dict(current_envs) if isinstance(current_envs, dict) else {}
+    for key in ("remove_args", "unset_envs"):
+        resolved[key] = to_str_list(resolved.get(key, current_best.get(key)))
+    resolved.setdefault("args_mode", current_best.get("args_mode") or "append")
+    current_envs = current_best.get("extra_envs")
+    current_envs = dict(current_envs) if isinstance(current_envs, dict) else {}
+    for key in resolved["unset_envs"]:
+        current_envs.pop(key, None)
+    requested_envs = resolved.get("extra_envs")
+    requested_envs = dict(requested_envs) if isinstance(requested_envs, dict) else {}
+    # A candidate can replace an inherited removal, not its own explicit unset.
+    if "unset_envs" not in payload:
+        resolved["unset_envs"] = [key for key in resolved["unset_envs"] if key not in requested_envs]
+    else:
         for key in resolved["unset_envs"]:
-            current_envs.pop(key, None)
-        requested_envs = resolved.get("extra_envs")
-        requested_envs = dict(requested_envs) if isinstance(requested_envs, dict) else {}
-        # A candidate can replace an inherited removal, not its own explicit unset.
-        if "unset_envs" not in payload:
-            resolved["unset_envs"] = [key for key in resolved["unset_envs"] if key not in requested_envs]
-        else:
-            for key in resolved["unset_envs"]:
-                requested_envs.pop(key, None)
-        if current_envs or requested_envs or "extra_envs" in resolved:
-            resolved["extra_envs"] = {**current_envs, **requested_envs}
+            requested_envs.pop(key, None)
+    if current_envs or requested_envs or "extra_envs" in resolved:
+        resolved["extra_envs"] = {**current_envs, **requested_envs}
 
     kernel_id = str(resolved.get("kernel_id") or "")
     if kernel_id:
@@ -1174,7 +1173,7 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
     # Resolve from actual server args (baseline yaml + current_best overlay).
     current_best = getattr(state, "current_best", None) or {}
     server_args = resolve_runtime_workload(state, arm="current_best").server_args
-    extra_envs = dict(current_best.get("extra_envs") or {}) if isinstance(current_best, dict) else {}
+    extra_envs = dict(current_best.get("extra_envs") or {})
     ref_envs = dict(getattr(state, "reference_envs", None) or {})
     per_token_signal = is_truthy(extra_envs.get("SGLANG_USE_AITER_FP8_PER_TOKEN")) or is_truthy(
         ref_envs.get("SGLANG_USE_AITER_FP8_PER_TOKEN")
@@ -1420,10 +1419,9 @@ def _resolve_forge_server_log(state, session_dir: Path) -> str:
         return None
 
     current_best = getattr(state, "current_best", None) or {}
-    if isinstance(current_best, dict):
-        found = _find_server_log_near(str(current_best.get("workspace") or "").strip())
-        if found:
-            return found
+    found = _find_server_log_near(str(current_best.get("workspace") or "").strip())
+    if found:
+        return found
 
     last_baseline = getattr(state, "last_baseline", None) or {}
     if isinstance(last_baseline, dict):
@@ -2765,8 +2763,7 @@ async def _capture_vllm_tunableop_shapes(
             "shape_capture_workspace": str(capture_dir),
         }
 
-    current_best = getattr(state, "current_best", None)
-    current_best = current_best if isinstance(current_best, dict) else {}
+    current_best = getattr(state, "current_best", None) or {}
     inherited_envs = dict(current_best.get("extra_envs") or {})
     inherited_envs.update(dict(payload.get("extra_envs") or {}))
     capture_envs = {
@@ -3810,11 +3807,9 @@ def _resolve_fusion_decode_trace(state) -> str:
 def _active_forge_fusion_env_flags(state: Any) -> dict[str, str]:
     """Return active env flags only when forge-fusion itself is current_best."""
     current_best = getattr(state, "current_best", None) or {}
-    if not isinstance(current_best, dict):
-        return {}
     if str(current_best.get("action") or "") != "fusion":
         return {}
-    envs = current_best.get("extra_envs") if isinstance(current_best, dict) else {}
+    envs = current_best.get("extra_envs")
     if not isinstance(envs, dict):
         return {}
     active: dict[str, str] = {}

@@ -1266,7 +1266,7 @@ async def run_conc_sweep(
         )
 
     if recorder is not None:
-        cb = state.current_best if isinstance(getattr(state, "current_best", None), dict) else {}
+        cb = state.current_best
         recorder.record_workload(
             session_id=getattr(state, "session_id", "") or session_dir.name,
             isl=isl,

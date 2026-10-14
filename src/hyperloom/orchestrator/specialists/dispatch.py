@@ -214,8 +214,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             if _bt > 0:
                 params["baseline_tput"] = _bt
         if "current_tput" not in params:
-            cb = getattr(state, "current_best", None)
-            _ct = float((cb.get("tput") if isinstance(cb, dict) else 0) or 0.0)
+            _ct = float((getattr(state, "current_best", None) or {}).get("tput") or 0.0)
             if _ct > 0:
                 params["current_tput"] = _ct
         if "cumulative_gain_validated" not in params:

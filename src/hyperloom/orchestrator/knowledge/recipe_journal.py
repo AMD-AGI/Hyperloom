@@ -1019,19 +1019,18 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             writes.
         """
         ss = self.shared_state
-        current_best = ss.current_best or {}
+        current_best = ss.current_best
         opt_stack = ss.optimization_stack or []
         gain_per_stack = ss.gain_per_stack_entry or []
         last_failures = ss.last_action_failures or []
         # RecipeKB best_config keys on the canonical extra_server_args field.
         best_config: dict[str, Any] = {}
-        if isinstance(current_best, dict):
-            cb_args = current_best.get("extra_server_args")
-            if cb_args:
-                best_config["extra_server_args"] = str(cb_args)
-            for key in ("extra_envs", "name", "tput", "accuracy"):
-                if key in current_best:
-                    best_config[key] = current_best[key]
+        cb_args = current_best.get("extra_server_args")
+        if cb_args:
+            best_config["extra_server_args"] = str(cb_args)
+        for key in ("extra_envs", "name", "tput", "accuracy"):
+            if key in current_best:
+                best_config[key] = current_best[key]
         # Prefer the last validated stack layer for launch args (current_best may carry a corrupted string).
         if opt_stack:
             last_entry = opt_stack[-1]
@@ -1086,7 +1085,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         # framework_version left unset here (manifest-derived); the T0 backfill writes it.
         return {
             "best_config": best_config,
-            "best_throughput": float(current_best.get("tput", 0.0)) if isinstance(current_best, dict) else 0.0,
+            "best_throughput": float(current_best.get("tput", 0.0)),
             "what_worked": what_worked,
             "what_failed": what_failed,
             "kernel_optimizations": kernel_optimizations,
@@ -1099,9 +1098,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                     "stack_len": validated_stack_len or len(opt_stack),
                     # arbor-shape provenance so the session row is self-describing (before/after tput + knobs).
                     "throughput_before": float(ss.baseline_tput or 0.0),
-                    "throughput_after": (
-                        float(current_best.get("tput", 0.0)) if isinstance(current_best, dict) else 0.0
-                    ),
+                    "throughput_after": float(current_best.get("tput", 0.0)),
                     "date": datetime.now(timezone.utc).isoformat(),
                     "actions_taken": [
                         nm
@@ -1249,8 +1246,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         recipe was scoped to. ``source`` is ``close`` or ``t4_fallback``.
         """
         state = self.shared_state
-        current_best = state.current_best or {}
-        tput = current_best.get("tput") if isinstance(current_best, dict) else None
+        tput = state.current_best.get("tput")
         validated_gain = state.cumulative_gain_validated
         result_type = str(outcome.get("result_type") or "")
         if result_type == _close_out.RESULT_UNVALIDATED_RECIPE:
@@ -1314,8 +1310,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             }
         journal = self.ensure_journal()
         ss = self.shared_state
-        cb = ss.current_best or {}
-        final_tput = float(cb.get("tput", 0.0)) if isinstance(cb, dict) else 0.0
+        final_tput = float(ss.current_best.get("tput", 0.0))
         total_gain = float(ss.cumulative_gain_validated or 0.0)
         journal.finalize(
             final_throughput=final_tput if final_tput > 0 else None,
@@ -1495,8 +1490,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             }
             # Overwrite best_config/best_throughput only on a real improvement: requires has_validated_win AND my_tput > live_tput.
             my_tput = float(attrs.get("best_throughput") or 0.0)
-            cb_now = ss.current_best or {}
-            cb_args_now = str(cb_now.get("extra_server_args") or "").strip() if isinstance(cb_now, dict) else ""
+            cb_args_now = str(ss.current_best.get("extra_server_args") or "").strip()
             validated_gain = float(ss.cumulative_gain_validated or 0.0)
             has_validated_win = bool((ss.optimization_stack or []) or validated_gain > 0.0 or cb_args_now)
             try:

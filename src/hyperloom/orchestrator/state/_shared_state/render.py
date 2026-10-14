@@ -202,7 +202,7 @@ class _RenderMixin:
 
     def _format_current_best_for_mission(self) -> str:
         """Render the ``current_best`` one-liner for the mission summary."""
-        if not isinstance(self.current_best, dict) or not self.current_best:
+        if not self.current_best:
             return "(none)"
         from hyperloom.inference_optimizer import framework_registry
 
