@@ -170,6 +170,7 @@ async def test_kernel_entry_auto_runs_gemm_tuning_for_fp8_sglang(
         c.shared_state.precision = "fp8"
         c.shared_state.framework = "sglang"
         c.shared_state.baseline_tput = 800.0
+        c.shared_state.baseline_runtime_sec = 600.0
         c.shared_state.last_profile_trace = "/tmp/profile.trace.json.gz"
         c.shared_state.last_trace_analyze = {
             "trace_input": "/tmp/profile.trace.json.gz",

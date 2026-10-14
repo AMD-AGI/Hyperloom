@@ -848,6 +848,12 @@ def _gemm_router_targets(
     return tuple((str(spec.name), max(0, int(spec.estimated_minutes * 60))) for spec in specs if spec.should_run)
 
 
+async def _priced_gemm_lane(state: Any, **router_inputs: Any) -> LaneAllocation | None:
+    """The gemm lane's share, priced on the router's own per-tuner estimates for ``_gemm_router_targets`` inputs."""
+    targets = await asyncio.to_thread(_gemm_router_targets, **router_inputs)
+    return _lane_budget(state, LANE_GEMM, gemm_target_costs_sec=tuple(cost for _, cost in targets))
+
+
 def _forge_fusion_timeout_sec(payload: dict, *, lane_budget_sec: int = 0) -> int:
     """Resolve the forge-fusion subprocess timeout in seconds.
 
@@ -3241,7 +3247,25 @@ async def _run_forge_gemm_tuning(
         )
         and not block_fp8_profile_capture
     )
+    priced_gemm_lane = functools.partial(
+        _priced_gemm_lane,
+        state,
+        model_path=resolved_model_path,
+        framework=forge_framework,
+        precision=precision,
+        quant_type=quant_type,
+        gpu_type=gpu_type,
+        kernel_signature_log=kernel_sig_log,
+    )
     if block_fp8_profile_capture or tunableop_capture:
+        # A capture costs a full extra server boot, wasted on a lane the phase cannot fund once it has the shapes.
+        lane_after_capture = await priced_gemm_lane(
+            has_untuned_csv=tunableop_capture and bool(untuned_csv),
+            has_shapes_json=block_fp8_profile_capture,
+            has_tunableop_input=tunableop_capture,
+        )
+        if lane_after_capture is None:
+            return _unfunded_lane_skip(LANE_GEMM)
         capture_payload = dict(payload)
         if block_fp8_profile_capture:
             capture_payload["_shape_capture_mode"] = "block_fp8_profile"
@@ -3298,20 +3322,11 @@ async def _run_forge_gemm_tuning(
     if demand_json and not _path_is_existing_file(demand_json):
         demand_json = ""
 
-    # The lane's share, priced on the router's own per-tuner estimates.
-    gemm_targets = await asyncio.to_thread(
-        _gemm_router_targets,
-        model_path=resolved_model_path,
-        framework=forge_framework,
-        precision=precision,
-        quant_type=quant_type,
-        gpu_type=gpu_type,
-        kernel_signature_log=kernel_sig_log,
+    gemm_lane = await priced_gemm_lane(
         has_untuned_csv=bool(untuned_csv),
         has_shapes_json=bool(shapes_json or shapes_manifest or demand_json),
         has_tunableop_input=bool(tunableop_input),
     )
-    gemm_lane = _lane_budget(state, LANE_GEMM, gemm_target_costs_sec=tuple(cost for _, cost in gemm_targets))
     if gemm_lane is None:
         return _unfunded_lane_skip(LANE_GEMM)
     timeout = _gemm_tuning_timeout_sec(payload, lane_budget_sec=gemm_lane.budget_sec)

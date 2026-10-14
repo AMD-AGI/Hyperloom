@@ -4868,3 +4868,35 @@ async def test_a_bounded_phase_that_cannot_fund_a_lane_skips_it_without_launchin
         assert "decision" not in result
     assert launched == []
     assert _FORGE_GEMM_PAYLOADS == []
+
+
+@pytest.mark.asyncio
+async def test_a_shape_capture_for_a_lane_the_phase_cannot_fund_never_starts(tmp_path, monkeypatch):
+    """The capture is priced on the input it would record, and a lane that input cannot fund boots no capture server."""
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text(
+        json.dumps({"architectures": ["Qwen3ForCausalLM"], "hidden_size": 5120, "intermediate_size": 17408})
+    )
+    SharedState(precision="fp8", framework="vllm", model_path=str(model), gpu_type="mi300x", tp=1, conc=64).save(
+        tmp_path
+    )
+    monkeypatch.setattr(SharedState, "remaining_minutes", lambda _self, **_kw: 4.0)
+    monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+    router_calls: list[dict] = []
+
+    def _router(**kwargs):
+        router_calls.append(kwargs)
+        return (("vllm_dense_tunableop", 600),)
+
+    async def _must_not_capture(**_kwargs):
+        raise AssertionError("a capture whose lane cannot be funded must not start")
+
+    monkeypatch.setattr(krh, "_gemm_router_targets", _router)
+    monkeypatch.setattr(krh, "_capture_vllm_tunableop_shapes", _must_not_capture)
+
+    result = await krh._run_forge_gemm_tuning({"task_id": "capture"}, session_dir=tmp_path)
+
+    assert (result["status"], result["error_class"]) == ("skipped", lane_budget.INSUFFICIENT_BUDGET)
+    assert [call["has_tunableop_input"] for call in router_calls] == [True]
+    assert _FORGE_GEMM_PAYLOADS == []

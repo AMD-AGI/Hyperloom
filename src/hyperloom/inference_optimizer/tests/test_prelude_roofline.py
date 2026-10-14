@@ -636,6 +636,25 @@ async def test_kernel_entry_reprofile_runs_without_measured_trace(coord: Coordin
 
 
 @pytest.mark.asyncio
+async def test_kernel_entry_reprofile_the_phase_cannot_fit_does_not_start(coord: Coordinator, monkeypatch):
+    """A reprofile priced above what is left of the KERNEL budget is skipped; the phase keeps the trace it has."""
+    from hyperloom.orchestrator.phases import machine_state
+
+    state = coord.shared_state
+    state.phase = "KERNEL_AGENT"
+    state.baseline_runtime_sec = 600.0
+    monkeypatch.setattr(machine_state, "phase_budget_remaining_seconds", lambda _state, **_kw: 60.0)
+    state.roofline_snapshots = []
+    state.cumulative_gain_validated = 50.0
+    coord.sub = _StubSub(state, landed_tput=150.0)
+
+    await coord.phase_kernel._maybe_reprofile_for_kernel()
+
+    assert coord.sub.tasks_run == []
+    assert state.last_roofline_tput != 150.0
+
+
+@pytest.mark.asyncio
 async def test_kernel_entry_reprofile_swallows_failure(coord: Coordinator):
     """A reprofile failure is best-effort: it never propagates and the anchor is left untouched."""
 
