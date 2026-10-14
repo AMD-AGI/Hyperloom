@@ -47,6 +47,14 @@ def test_the_file_is_written_into_the_output_files(tmp_path: Path) -> None:
     ]
 
 
+def test_an_accuracy_round_lists_the_version_of_a_score_that_has_one(tmp_path: Path) -> None:
+    files = tmp_path / "files"
+    value = AccuracyValue("gsm8k", "exact_match,flexible-extract", 0.64, "lm_eval=0.4.13;gsm8k=3")
+    document = rounds_document(_outcome(RoundOutcome(0, "accuracy", files / "a", 0, (value,))), files)
+    assert document[0]["accuracy"] == [{**value.to_document()}]
+    assert document[0]["accuracy"][0]["version"] == "lm_eval=0.4.13;gsm8k=3"
+
+
 def test_an_accuracy_round_lists_its_scores_and_no_other_round_does(tmp_path: Path) -> None:
     files = tmp_path / "files"
     value = AccuracyValue("gsm8k", "exact_match,flexible-extract", 0.64)

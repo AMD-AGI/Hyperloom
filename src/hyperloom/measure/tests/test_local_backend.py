@@ -179,6 +179,22 @@ def test_the_accuracy_round_carries_the_measured_rounds_scores_not_the_warmups(g
     assert by_phase["warmup"] == by_phase["measure"] == ()
 
 
+def test_the_accuracy_round_carries_the_version_lm_eval_reported(grid, tmp_path):
+    result = grid.result("test")
+    workspace = Path(result.workspace)
+    workspace.joinpath("eval_output").mkdir(parents=True, exist_ok=True)
+    document = {"results": {"gsm8k": {"exact_match,flexible-extract": 0.64}}, "versions": {"gsm8k": 3.0}}
+    document["lm_eval_version"] = "0.4.13"
+    (workspace / "eval_output" / "results_2026-10-14T10-00-00.json").write_text(json.dumps(document), encoding="utf-8")
+    grid.answers["test"] = result
+    point = _point(tmp_path, "acc", run_eval="true")
+
+    outcome = _run(_call(tmp_path, point, accuracy=True, kind="accuracy"))
+
+    (value,) = [r.accuracy for r in outcome.rounds if r.phase == "accuracy"][0]
+    assert value.version == "lm_eval=0.4.13;gsm8k=3"
+
+
 def test_an_accuracy_round_with_only_a_warmup_evaluation_carries_no_score(grid, tmp_path):
     result = grid.result("test", nonfatal_warnings=["run_grid_warmup_discarded_first"])
     _lm_eval_results(Path(result.workspace).parent / "warmup_round" / "eval_output", 0.10)

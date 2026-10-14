@@ -445,19 +445,28 @@ class AccuracyValue:
     task: str
     metric: str
     score: float
+    #: What the evaluator ran, e.g. ``lm_eval=0.4.13;gsm8k=3``; empty when it did not say.
+    version: str = ""
 
     def __post_init__(self) -> None:
         _text(self.task, "an accuracy task")
         _text(self.metric, "an accuracy metric")
         _number(self.score, "an accuracy score")
+        if not isinstance(self.version, str) or self.version != self.version.strip():
+            raise MeasurementError(
+                f"an accuracy version must be a string without surrounding whitespace, got {self.version!r}"
+            )
 
     def to_document(self) -> dict[str, object]:
-        return {"task": self.task, "metric": self.metric, "score": self.score}
+        document: dict[str, object] = {"task": self.task, "metric": self.metric, "score": self.score}
+        if self.version:
+            document["version"] = self.version
+        return document
 
     @classmethod
     def from_document(cls, document: object) -> AccuracyValue:
         f = _mapping(document, "an accuracy value")
-        return cls(task=f.get("task"), metric=f.get("metric"), score=f.get("score"))
+        return cls(task=f.get("task"), metric=f.get("metric"), score=f.get("score"), version=f.get("version", ""))
 
 
 def _check_failure(failure_class: object, reason: object) -> None:

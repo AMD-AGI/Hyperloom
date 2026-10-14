@@ -54,6 +54,14 @@ async def test_an_accuracy_test_carries_the_signed_score_into_the_notebook_resul
     assert [r.phase for r in result.rounds] == ["measure"], "the accuracy round is not a throughput round"
 
 
+async def test_the_score_version_reaches_the_result_and_the_notebook(tmp_path: Path, rig) -> None:
+    version = "lm_eval=0.4.13;gsm8k=3"
+    result, record = await _run_accuracy(tmp_path, rig, fake_accuracy="0.64", fake_accuracy_version=version)
+    assert [v.version for v in result.accuracy] == [version]
+    assert record.result is not None and [v.version for v in record.result.accuracy] == [version]
+    assert TestResult.from_document(result.to_document()).accuracy[0].version == version
+
+
 async def test_an_accuracy_test_whose_round_holds_no_score_is_not_a_result(tmp_path: Path, rig) -> None:
     point = point_yaml(tmp_path, "planned.yaml", fake_accuracy="null")
     executor = HostedExecutor(rig.backend, tmp_path / "session")

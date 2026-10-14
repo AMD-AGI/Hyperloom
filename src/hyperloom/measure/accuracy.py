@@ -23,6 +23,7 @@ DISCARDED_DIRS = frozenset({"warmup_round", "mn_warmup"})
 #: The lm-eval metric keys that are accuracy scores, in the order they are reported.
 RESULT_METRICS = ("exact_match,strict-match", "exact_match,flexible-extract", "exact_match,none", "acc,none")
 _RESULTS_GLOB = "results*.json"
+_HARNESS = "lm_eval"
 
 
 def _result_files(directory: Path) -> list[Path]:
@@ -32,6 +33,28 @@ def _result_files(directory: Path) -> list[Path]:
     except OSError:
         return []
     return sorted(p for p in found if DISCARDED_DIRS.isdisjoint(p.relative_to(root).parts))
+
+
+def _version_text(value: object) -> str:
+    """A version as lm-eval prints it: ``3.0`` is task version ``3``; anything unusable is empty."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return ""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value).strip()
+
+
+def _version(document: dict, task: str) -> str:
+    """``lm_eval=<harness version>;<task>=<task version>`` from what the results file says; empty when it says none."""
+    parts = []
+    harness = _version_text(document.get("lm_eval_version"))
+    if harness:
+        parts.append(f"{_HARNESS}={harness}")
+    versions = document.get("versions")
+    task_version = _version_text(versions.get(task)) if isinstance(versions, dict) else ""
+    if task_version:
+        parts.append(f"{task}={task_version}")
+    return ";".join(parts)
 
 
 def _values(document: object) -> tuple[AccuracyValue, ...]:
@@ -45,7 +68,7 @@ def _values(document: object) -> tuple[AccuracyValue, ...]:
         for key in RESULT_METRICS:
             score = metrics.get(key)
             if isinstance(score, (int, float)) and not isinstance(score, bool) and math.isfinite(score):
-                values.append(AccuracyValue(str(task), key, float(score)))
+                values.append(AccuracyValue(str(task), key, float(score), _version(document, str(task))))
     return tuple(values)
 
 

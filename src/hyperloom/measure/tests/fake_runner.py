@@ -91,6 +91,8 @@ def _write_files(out: Path, config: dict[str, Any], mode: str) -> dict[str, byte
     if "fake_accuracy" in config:
         score = config["fake_accuracy"]
         values = [] if score is None else [{"task": "gsm8k", "metric": "exact_match,flexible-extract", "score": score}]
+        if "fake_accuracy_version" in config:
+            values = [{**value, "version": config["fake_accuracy_version"]} for value in values]
         rounds.append({**rounds[0], "phase": "accuracy", "accuracy": values})
     if config.get("fake_rounds") or "fake_accuracy" in config:
         files["rounds.json"] = json.dumps(rounds).encode()

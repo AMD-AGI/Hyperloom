@@ -624,6 +624,14 @@ def test_the_scores_of_an_accuracy_round_reach_the_outcome_from_the_signed_round
     assert outcome.rounds[1].accuracy == (AccuracyValue("gsm8k", "exact_match,flexible-extract", 0.64),)
 
 
+def test_the_version_of_a_score_reaches_the_outcome_from_the_signed_rounds_file(rig, tmp_path) -> None:
+    r = rig()
+    _, outcome = _run(r, tmp_path, fake_accuracy="0.64", fake_accuracy_version="lm_eval=0.4.13;gsm8k=3")
+    assert outcome.rounds[1].accuracy == (
+        AccuracyValue("gsm8k", "exact_match,flexible-extract", 0.64, "lm_eval=0.4.13;gsm8k=3"),
+    )
+
+
 def test_an_accuracy_round_without_scores_reaches_the_outcome_without_scores(rig, tmp_path) -> None:
     r = rig()
     _, outcome = _run(r, tmp_path, fake_accuracy="null")

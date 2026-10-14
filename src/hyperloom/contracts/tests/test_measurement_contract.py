@@ -317,6 +317,27 @@ def test_round_and_accuracy_values_are_finite_numbers() -> None:
         RoundValue("measure", failed_requests=-1)
 
 
+def test_an_accuracy_value_round_trips_its_version_and_an_old_document_loads_without_one() -> None:
+    value = AccuracyValue("gsm8k", "em", 0.5, "lm_eval=0.4.13;gsm8k=3")
+    assert AccuracyValue.from_document(value.to_document()) == value
+    old = {"task": "gsm8k", "metric": "em", "score": 0.5}
+    assert AccuracyValue.from_document(old) == AccuracyValue("gsm8k", "em", 0.5, "")
+    assert AccuracyValue.from_document(old).to_document() == old, "an empty version is not written"
+    assert AccuracyValue.from_document({**old, "version": ""}).version == ""
+
+
+@pytest.mark.parametrize("bad", [" lm_eval=1", "lm_eval=1\n", 3, None, ["x"]])
+def test_an_accuracy_version_must_be_a_string_without_surrounding_whitespace(bad: object) -> None:
+    with pytest.raises(MeasurementError, match="accuracy version must be a string without surrounding whitespace"):
+        AccuracyValue.from_document({"task": "gsm8k", "metric": "em", "score": 0.5, "version": bad})
+
+
+def test_a_result_document_without_the_accuracy_version_still_loads() -> None:
+    document = _result().to_document()
+    document["accuracy"] = [{"task": "gsm8k", "metric": "em", "score": 0.5}]
+    assert TestResult.from_document(document).accuracy == (AccuracyValue("gsm8k", "em", 0.5),)
+
+
 def test_sandbox_facts_validate_and_flag_same_node() -> None:
     with pytest.raises(MeasurementError, match="gpu_count"):
         _sandbox(gpu_count=-1)
