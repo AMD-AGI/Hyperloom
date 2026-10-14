@@ -1578,12 +1578,15 @@ def materialize_config_with_envs(
         xdit_patched = xdit_patch_attempted and ensure_xdit_patched_for_tracelens()
         # Append to the config-declared runner args (``--model``, frame/step
         # counts) rather than replacing them, so the profile captures the same
-        # workload the baseline measured -- mirroring the vLLM path below.
-        profiler_args = (
-            "--profile_wait 1 --profile_capture_phase --profile_with_stack" if xdit_patched else "--profile_wait 1"
-        )
+        # workload the baseline measured. ``--profile_wait`` is the sentinel for
+        # an already-appended set, keeping re-materialization of a prior profile
+        # YAML idempotent -- the vLLM path below guards the same way.
         existing_xdit_args = str(envs.get("EXTRA_XDIT_ARGS", "")).strip()
-        envs["EXTRA_XDIT_ARGS"] = f"{existing_xdit_args} {profiler_args}".strip()
+        if "--profile_wait" not in existing_xdit_args:
+            profiler_args = (
+                "--profile_wait 1 --profile_capture_phase --profile_with_stack" if xdit_patched else "--profile_wait 1"
+            )
+            envs["EXTRA_XDIT_ARGS"] = f"{existing_xdit_args} {profiler_args}".strip()
         _record_tracelens_patch_status(
             envs,
             attempted=xdit_patch_attempted,

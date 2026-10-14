@@ -847,6 +847,16 @@ def test_xdit_profile_preserves_config_declared_workload_args(monkeypatch, tmp_p
     assert "--profile_capture_phase" in args
 
 
+def test_xdit_profile_append_is_idempotent_on_rematerialization(monkeypatch, tmp_path):
+    workload = "--model tencent/HunyuanVideo --num_frames 5 --num_inference_steps 4"
+    already_profiled = f"{workload} --profile_wait 1 --profile_capture_phase --profile_with_stack"
+    bench = _xdit_profile_bench(tmp_path, monkeypatch, patch_ok=True, workload_args=already_profiled)
+    args = bench["envs"]["EXTRA_XDIT_ARGS"]
+    assert args.count("--profile_wait") == 1
+    assert args.count("--profile_capture_phase") == 1
+    assert "--model tencent/HunyuanVideo" in args
+
+
 def test_xdit_profile_kill_switch_skips_patcher(monkeypatch, tmp_path):
     from hyperloom.orchestrator.actions.executors import _server_patcher
 
