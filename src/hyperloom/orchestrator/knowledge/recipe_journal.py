@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import logging as _logging
-import os
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Collection, Mapping
 
@@ -25,6 +24,7 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
     summarize_change,
 )
 from hyperloom.orchestrator.knowledge.recipe_kb import recipe_canonical_id
+from hyperloom.orchestrator.knowledge.workload_tags import workload_shape_tags
 from hyperloom.orchestrator.lever import lever_kind_for_task
 
 from ..collaborator import CoordinatorCollaborator
@@ -853,52 +853,27 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         model_name = str(ss.model_name or "").strip()
         if model_name:
             out["model_name"] = model_name
-        for src_attr, dst_key in (
-            ("precision", "precision"),
-            ("tp", "tp"),
-            ("ep", "ep"),
-            ("conc", "conc"),
-            ("isl", "isl"),
-            ("osl", "osl"),
-            ("max_model_len", "max_model_len"),
-        ):
-            v = getattr(ss, src_attr, None)
-            if v not in (None, "", 0):
-                out[dst_key] = v
-        # EP env fallback when SharedState.ep is unset (legacy SDK callers).
-        if "ep" not in out:
-            raw_ep = (os.environ.get("EP") or "").strip()
-            try:
-                n = int(raw_ep) if raw_ep else 0
-            except ValueError:
-                n = 0
-            if n > 0:
-                out["ep"] = n
-        # PP — no SharedState field (no CLI surface); env-only.
-        raw_pp = (os.environ.get("PP") or "").strip()
-        try:
-            pp_n = int(raw_pp) if raw_pp else 0
-        except ValueError:
-            pp_n = 0
-        if pp_n > 0:
-            out["pp"] = pp_n
+        precision = getattr(ss, "precision", None)
+        if precision not in (None, "", 0):
+            out["precision"] = precision
+        out.update(workload_shape_tags(ss))
         # runtime version tags from stack_fingerprint_meta (cli writes at boot, resume reads verbatim).
         fp_meta = ss.stack_fingerprint_meta or {}
         if isinstance(fp_meta, dict):
             # framework_version is whichever of sglang/vllm is active.
             fw_lc = framework.lower()
             if fw_lc in ("sglang", "vllm"):
-                v = str(fp_meta.get(fw_lc) or "").strip()
-                if v and v != "unknown":
-                    out["framework_version"] = v
+                version = str(fp_meta.get(fw_lc) or "").strip()
+                if version and version != "unknown":
+                    out["framework_version"] = version
             for src_key, dst_key in (
                 ("rocm", "rocm_version"),
                 ("aiter", "aiter_version"),
                 ("image_digest", "image_digest"),
             ):
-                v = str(fp_meta.get(src_key) or "").strip()
-                if v and v != "unknown":
-                    out[dst_key] = v
+                version = str(fp_meta.get(src_key) or "").strip()
+                if version and version != "unknown":
+                    out[dst_key] = version
         # per-baseline workload extras from materialized YAML; keep bool False (don't drop an "explicitly disabled" signal).
         wl_extra = ss.baseline_workload_extra or {}
         if isinstance(wl_extra, dict):
