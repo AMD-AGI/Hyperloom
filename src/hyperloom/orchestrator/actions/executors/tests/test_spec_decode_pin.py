@@ -142,13 +142,46 @@ def test_a_candidate_changing_the_pinned_draft_is_refused(base_args, base_envs, 
             {},
             id="kimi-block-verify",
         ),
-        pytest.param("--max-num-seqs 128", {}, _spec_config(), {}, id="no-speculative-decoding"),
+        pytest.param(
+            "--max-num-seqs 128",
+            {},
+            _spec_config(rejection_sample_method="block", synthetic_acceptance_length=None),
+            {},
+            id="no-speculative-decoding-adds-a-real-draft",
+        ),
     ],
 )
 def test_a_candidate_that_keeps_the_pinned_draft_or_has_nothing_pinned_is_allowed(
     base_args, base_envs, candidate_args, candidate_envs
 ):
     refuse_unpinned_speculative_change(base_args, base_envs, candidate_args, candidate_envs)
+
+
+@pytest.mark.parametrize(
+    ("base_args", "base_envs", "candidate_args", "candidate_envs"),
+    [
+        pytest.param("--max-num-seqs 128", {}, _spec_config(), {}, id="vllm-adds-a-synthetic-draft"),
+        pytest.param(
+            _spec_config(rejection_sample_method="block", synthetic_acceptance_length=None),
+            {},
+            _spec_config(),
+            {},
+            id="vllm-block-verify-to-synthetic",
+        ),
+        pytest.param(
+            SGLANG_EAGLE,
+            {"SGLANG_SIMULATE_ACC_TOKEN_MODE": "real-draft-token"},
+            SGLANG_EAGLE,
+            {"SGLANG_SIMULATE_ACC_TOKEN_MODE": "real-draft-token", "SGLANG_SIMULATE_ACC_LEN": "4.0"},
+            id="sglang-real-draft-to-simulated-length",
+        ),
+    ],
+)
+def test_a_candidate_may_not_start_simulating_acceptance_on_a_real_draft_base(
+    base_args, base_envs, candidate_args, candidate_envs
+):
+    with pytest.raises(SpeculativeDecodingPinnedError, match="switches to simulated acceptance"):
+        refuse_unpinned_speculative_change(base_args, base_envs, candidate_args, candidate_envs)
 
 
 def test_the_refusal_names_what_changed():
