@@ -28,6 +28,7 @@
 root_packages =
     hyperloom
     kernelforge
+    hyperloom_multibranch
 include_external_packages = False
 exclude_type_checking_imports = True
 
@@ -201,12 +202,29 @@ ignore_imports =
 unmatched_ignore_imports_alerting = none
 
 
+[importlinter:contract:mb-not-imported]
+name = hyperloom and kernelforge do not import hyperloom_multibranch
+type = forbidden
+# The multi-branch package builds on hyperloom as its toolbox; the dependency points one way.
+source_modules =
+    hyperloom
+    kernelforge
+forbidden_modules = hyperloom_multibranch
+ignore_imports =
+    hyperloom.**.tests.** -> **
+    kernelforge.tests.** -> **
+    kernelforge.**.tests.** -> **
+    kernelforge.conftest -> **
+unmatched_ignore_imports_alerting = none
+
+
 [importlinter:contract:acyclic]
 name = no cycles between sibling packages (baseline may only shrink)
 type = acyclic_siblings
 ancestors =
     hyperloom
     kernelforge
+    hyperloom_multibranch
 # Baseline: the exact imports import-linter nominates as cycle breakers on
 # main today. Removing one of these imports means deleting its line here.
 ignore_imports =
