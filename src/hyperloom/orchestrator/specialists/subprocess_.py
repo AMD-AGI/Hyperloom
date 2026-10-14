@@ -138,6 +138,8 @@ _SPECIALIST_ENV_ALLOWLIST: frozenset[str] = frozenset(
         "HOME",
         "HTTPS_PROXY",
         "HTTP_PROXY",
+        # Read by the research-scout prompt.
+        "INFERENCEX_PATH",
         "LANG",
         "LC_ALL",
         # The agent CLIs are Node processes, which read neither SSL_CERT_FILE nor
