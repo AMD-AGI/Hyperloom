@@ -530,6 +530,7 @@ def build_backends(config_path: Path) -> Backends:
         shared_roots=tuple(Path(p) for p in cfg.get("shared_roots", ())),
         model_dir=Path(cfg["model_dir"]) if cfg.get("model_dir") else None,
         blob_root=str(blobs_dir),
+        **({"benchmark_backend": cfg["benchmark_backend"]} if cfg.get("benchmark_backend") else {}),
     )
     hosted_config = HostedConfig(
         session_dir=session,

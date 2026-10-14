@@ -495,3 +495,12 @@ def test_the_entry_point_exits_non_zero_when_it_could_not_compare(tmp_path, caps
     assert _main(tmp_path, _write_checklist(tmp_path, point), config) == 1
     assert json.loads(capsys.readouterr().out)["verdict"] == "FAIL"
     assert consistency.main(["--checklist", str(tmp_path / "missing.json"), "--config", str(config)]) == 2
+
+
+@pytest.mark.parametrize(("extra", "expected"), [({}, "magpie"), ({"benchmark_backend": "bypass"}, "bypass")])
+def test_the_config_chooses_the_benchmark_backend_the_sheets_ask_for(tmp_path, extra, expected) -> None:
+    backends = consistency.build_backends(_write_config(tmp_path, **extra))
+    try:
+        assert backends.hosted._config.spec.benchmark_backend == expected
+    finally:
+        backends.close()
