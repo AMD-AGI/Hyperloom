@@ -290,8 +290,10 @@ resumed run redoes them instead of counting their results; releases their
 execution and GPU ownership records; and appends the confirmation to
 `runtime/pod_history.jsonl` (if that append fails, the confirmation still stands
 and a warning is printed). It does not stop any process and does not resume
-the run. When nothing is recorded under the named scope it changes no task or lease record (only the ledger entry is appended),
-reports `cancelled_tasks=0 released_leases=0` and exits 0; check those counts. It is refused, with exit code 2 and nothing changed, when:
+the run. When nothing is recorded under the named scope it changes no task or
+lease record, reports `cancelled_tasks=0 released_leases=0` and exits 0; check
+those counts. It is refused, with exit code 2 and no task or lease record
+changed, when:
 
 * the named scope is the current environment's, or the current environment's
   scope cannot be read;
