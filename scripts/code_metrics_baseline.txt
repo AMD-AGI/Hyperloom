@@ -117,7 +117,7 @@ cognitive-complexity src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::fi
 cognitive-complexity src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::revert_kernel_patch 83
 cognitive-complexity src/hyperloom/orchestrator/kernel/attempt_summary.py::_gemm_tuning_lane_totals 32
 cognitive-complexity src/hyperloom/orchestrator/kernel/attempt_summary.py::_render_attempted_row 33
-cognitive-complexity src/hyperloom/orchestrator/kernel/attempt_summary.py::build_kernel_optimization_summary 63
+cognitive-complexity src/hyperloom/orchestrator/kernel/attempt_summary.py::build_kernel_optimization_summary 59
 cognitive-complexity src/hyperloom/orchestrator/kernel/conc_sweep.py::_sweep_one_arm_single_server 71
 cognitive-complexity src/hyperloom/orchestrator/kernel/conc_sweep.py::run_conc_sweep 62
 cognitive-complexity src/hyperloom/orchestrator/kernel/controller_patch_integration.py::integrate_controller_patches 42
@@ -365,7 +365,7 @@ cyclomatic-complexity src/hyperloom/orchestrator/kernel/_kernel_decisions.py::un
 cyclomatic-complexity src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::_apply_kernel_patch_snapshot 45
 cyclomatic-complexity src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::apply_kernel_patch 27
 cyclomatic-complexity src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::revert_kernel_patch 35
-cyclomatic-complexity src/hyperloom/orchestrator/kernel/attempt_summary.py::build_kernel_optimization_summary 23
+cyclomatic-complexity src/hyperloom/orchestrator/kernel/attempt_summary.py::build_kernel_optimization_summary 21
 cyclomatic-complexity src/hyperloom/orchestrator/kernel/conc_sweep.py::_sweep_one_arm_single_server 34
 cyclomatic-complexity src/hyperloom/orchestrator/kernel/conc_sweep.py::run_conc_sweep 26
 cyclomatic-complexity src/hyperloom/orchestrator/kernel/request_handlers.py::_capture_vllm_tunableop_shapes 26
@@ -727,7 +727,7 @@ function-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::apply_sn
 function-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::finalize_kernel_patch 89
 function-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::revert_kernel_patch 190
 function-lines src/hyperloom/orchestrator/kernel/attempt_summary.py::_render_attempted_row 93
-function-lines src/hyperloom/orchestrator/kernel/attempt_summary.py::build_kernel_optimization_summary 202
+function-lines src/hyperloom/orchestrator/kernel/attempt_summary.py::build_kernel_optimization_summary 192
 function-lines src/hyperloom/orchestrator/kernel/conc_sweep.py::_build_roofline_ceiling 93
 function-lines src/hyperloom/orchestrator/kernel/conc_sweep.py::_sweep_one_arm_single_server 335
 function-lines src/hyperloom/orchestrator/kernel/conc_sweep.py::run_conc_sweep 243
