@@ -6,9 +6,7 @@ import pytest
 
 from hyperloom_kb import (
     PACKAGED_DECLARATION,
-    Change,
     NoOpExperienceKB,
-    Outcome,
     ReadStatus,
     RemoteClient,
     RemoteClientError,
@@ -26,20 +24,8 @@ def test_no_configuration_returns_true_noop() -> None:
 
     session = kb.begin(any_host_argument="is ignored")
     assert session.record is None
-    assert (
-        session.decide(
-            reasoning="ignored",
-            change=Change(identity={"knob": "x"}, summary="ignored"),
-        )
-        is None
-    )
-    assert (
-        session.complete(
-            outcome=Outcome(decision="failed", error_class="ignored"),
-            reflection="ignored",
-        )
-        is None
-    )
+    assert session.decide(change={"knob": "x"}, rationale={"reasoning": "ignored"}) is None
+    assert session.complete(outcome={"decision": "failed"}, reflection={"text": "ignored"}) is None
     assert session.publish() is None
     assert kb.read("Select the next action.", {}).status is ReadStatus.DISABLED
 

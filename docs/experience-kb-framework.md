@@ -19,7 +19,7 @@ session_breakdown.timeline[type=framework_agent].ext
   ├── proposals   reasoning, kb_read_id, rendered_refs
   └── attempts    measured_against, measurement, config_delta, gates, accuracy,
                   failure.attribution, reasoning, reasoning_origin,
-                  experience_citations,
+                  experience_citations, log_files,
                   patch_path, patches_applied, patches_reverted, patch_material
 ```
 
@@ -31,11 +31,17 @@ declared in `breakdown/schema.py` (`V6FrameworkAttempt`, `V6FrameworkProposal`).
 - **Failure attribution.** Unmeasured attempts are classified as
   `candidate_caused`, `environment`, `harness`, or `unknown`; only
   `candidate_caused` failures become Experiences.
+- **Raw logs.** An attempt that records `log_files`, a list of local file paths
+  for the logs that produced it, publishes each file on the Experience's
+  top-level `raw_logs` field; one that records none publishes without raw logs.
+  A directory path is not a file and is not uploaded.
 - **Patch material.** Source attempts record each session-local patch they
   applied or reverted as `{path, sha256, content}`, in the order `patch_path`,
   `patches_applied`, `patches_reverted`, whatever their size. A patch outside
   the session, not UTF-8, or carrying a credential is left out, and an attempt
   with no recorded patch is not published unless it changed configuration.
+  The published Experience carries the change inline as text, so an attempt
+  whose change content exceeds 32 KiB is recorded but not published.
 - **Configuration from a specialist.** A source attempt records the server args
   and environment variables its specialist delivered as its `config_delta`.
   One that delivered no patch is published as a `config_variant` Experience;
@@ -70,7 +76,9 @@ a single one fed the grid. Proposal citations do not yet reach an attempt from
 an upstream PR candidate. The
 Experience carries its citations in `provenance.extra.experience_citations`;
 how often a cited Experience worked out is not stored on any record but
-derived by the KB that holds both.
+derived by the KB that holds both. Citations, `kb_read_id`, and
+`rendered_refs` are record metadata: they are stored and synced with the
+Experience but never rendered into a prompt.
 
 ## Publication
 
@@ -102,9 +110,9 @@ KEEP/REVERT decisions answer another objective.
 ## Configuration
 
 Publications go to the workspace's local Experience KB service, which every
-optimize launch starts when it is not serving; its configuration, the global KB
-it can push to and pull from, and its HTTP API are in
-[Experience KB service](reference/experience-kb.md).
+optimize launch starts when it is not serving; while it cannot start,
+publications wait in the workspace's spool. Its configuration and its HTTP
+API are in [Experience KB service](reference/experience-kb.md).
 
 Publication is disabled only when `HYPERLOOM_KB_URL` is unset. An optimize
 launch warns and continues when the packaged mapping cannot load.
