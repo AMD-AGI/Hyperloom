@@ -112,6 +112,9 @@ ci = [
     # Cross-job sharding for the coverage matrix (``--splits``/``--group``).
     "pytest-split>=0.8",
     "tomli>=2.0.1; python_version < '3.11'",
+    # Per-test ceiling (``--timeout`` in ``pytest_ci_args``): without this, a
+    # single hung test blocks a shard job indefinitely with no diagnostics.
+    "pytest-timeout>=2.3",
 ]
 # Opt-in Langfuse trace sink (HYPERLOOM_LANGFUSE_ENABLE=1).
 trace = [
@@ -440,6 +443,10 @@ fail_under = 90
 pytest_ci_args = [
     "-m", "not critic_agent_e2e and not targeted_build_e2e",
     "--cov=.", "--cov-report=",
+    # Ceiling well above the slowest known-legitimate test (~53s recorded in
+    # CI); "thread" dumps every thread's stack on expiry instead of relying on
+    # a signal, which xdist workers do not reliably deliver.
+    "--timeout=300", "--timeout-method=thread",
 ]
 # In-runner pytest-xdist workers per shard job (``-n auto`` yields 1 on the
 # 2-vCPU GitHub runner, so pin it).
