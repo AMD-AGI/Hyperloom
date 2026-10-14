@@ -367,6 +367,15 @@ _TRACELENS_ANALYSIS_MODULE = "hyperloom.orchestrator.trace_analysis.tracelens_an
 _BYPASS_TRACE_ANALYSIS_MODULE = "hyperloom.orchestrator.trace_analysis.bypass_trace_analysis"
 
 
+def _optional_flags(*pairs: tuple[str, Any]) -> list[str]:
+    """The ``flag value`` argv tokens of every pair whose value is set, in order."""
+    tokens: list[str] = []
+    for flag, value in pairs:
+        if value:
+            tokens += [flag, str(value)]
+    return tokens
+
+
 def _build_trace_analyze_cmd(
     payload: dict,
     *,
@@ -411,14 +420,6 @@ def _build_trace_analyze_cmd(
             state_tp = 0
         if state_tp > 0:
             cmd += ["--tensor-parallel-size", str(state_tp)]
-    if model_name:
-        cmd += ["--model-name", str(model_name)]
-    if framework:
-        cmd += ["--framework", str(framework)]
-    if target_platform:
-        cmd += ["--target-platform", str(target_platform)]
-    if analysis_mode:
-        cmd += ["--analysis-mode", str(analysis_mode)]
 
     # Model identity informs source resolution for every framework, not only the
     # diffusion roofline. Keep the standard payload > state > environment
@@ -427,13 +428,17 @@ def _build_trace_analyze_cmd(
     model_path = str(
         payload.get("model_path") or getattr(state, "model_path", "") or os.environ.get("MODEL_PATH") or ""
     ).strip()
-    if model_path:
-        cmd += ["--model-path", model_path]
     precision = str(
         payload.get("precision") or getattr(state, "precision", "") or workload.get("precision") or ""
     ).strip()
-    if precision:
-        cmd += ["--precision", precision]
+    cmd += _optional_flags(
+        ("--model-name", model_name),
+        ("--framework", framework),
+        ("--target-platform", target_platform),
+        ("--analysis-mode", analysis_mode),
+        ("--model-path", model_path),
+        ("--precision", precision),
+    )
 
     if scriptable:
         # --skip-split is TraceLens-only; the bypass backend has its own windowing.
@@ -450,32 +455,30 @@ def _build_trace_analyze_cmd(
                 pass
     else:
         # Splitter workload hints. Priority: payload override > baseline metadata
-        # > drop the flag.
-        split_conc = payload.get("split_conc") or workload.get("conc")
-        if split_conc not in (None, ""):
-            cmd += ["--split-conc", str(split_conc).strip()]
-        split_osl = payload.get("split_osl") or workload.get("osl")
-        if split_osl not in (None, ""):
-            cmd += ["--split-osl", str(split_osl).strip()]
-        split_r = payload.get("split_r") or workload.get("random_range_ratio")
-        if split_r not in (None, ""):
-            cmd += ["--split-r", str(split_r).strip()]
+        # > drop the flag. A zero hint is a real workload value and is forwarded.
+        for flag, payload_key, workload_key in (
+            ("--split-conc", "split_conc", "conc"),
+            ("--split-osl", "split_osl", "osl"),
+            ("--split-r", "split_r", "random_range_ratio"),
+        ):
+            hint = payload.get(payload_key) or workload.get(workload_key)
+            if hint not in (None, ""):
+                cmd += [flag, str(hint).strip()]
 
     capture_folder = (
         payload.get("capture_folder") or payload.get("graph_capture_path") or payload.get("capture_folder_path")
     )
-    if capture_folder:
-        cmd += ["--capture-folder", str(capture_folder)]
     # Forward TraceLens splitter steady-state mode via payload or env.
     steady_state_mode = payload.get("steady_state_mode") or os.environ.get("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "")
     steady_state_mode = str(steady_state_mode).strip()
-    if steady_state_mode:
-        cmd += ["--steady-state-mode", steady_state_mode]
     # Post-kernel-opt roofline writes a separate report so it never overwrites
     # the baseline kernel_roofline.json.
     roofline_output_name = str(payload.get("roofline_output_name") or "").strip()
-    if roofline_output_name:
-        cmd += ["--roofline-output-name", roofline_output_name]
+    cmd += _optional_flags(
+        ("--capture-folder", capture_folder),
+        ("--steady-state-mode", steady_state_mode),
+        ("--roofline-output-name", roofline_output_name),
+    )
     if payload.get("dry_run"):
         cmd += ["--dry-run"]
     return cmd, steady_state_mode

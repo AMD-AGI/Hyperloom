@@ -96,7 +96,7 @@ cognitive-complexity src/hyperloom/orchestrator/actions/executors/integrate_patc
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/profile.py::ProfileExecutor.__call__ 235
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/profile.py::_validate_trace_structure 97
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/report.py::_format_md 48
-cognitive-complexity src/hyperloom/orchestrator/actions/executors/trace_analyze.py::_build_trace_analyze_cmd 45
+cognitive-complexity src/hyperloom/orchestrator/actions/executors/trace_analyze.py::_build_trace_analyze_cmd 33
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/trace_analyze.py::trace_analyze_handler 53
 cognitive-complexity src/hyperloom/orchestrator/delivery/ledger.py::restore_records 33
 cognitive-complexity src/hyperloom/orchestrator/enablement/artifacts.py::snapshot_round 38
@@ -356,7 +356,6 @@ cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/integrate_pat
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/profile.py::ProfileExecutor.__call__ 66
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/profile.py::_validate_trace_structure 28
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/report.py::_format_md 22
-cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/trace_analyze.py::_build_trace_analyze_cmd 24
 cyclomatic-complexity src/hyperloom/orchestrator/enablement/runtime/targeted_build.py::run_aiter_build 23
 cyclomatic-complexity src/hyperloom/orchestrator/kernel/_kernel_decisions.py::untried_hot_reusable_kernels 38
 cyclomatic-complexity src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::_apply_kernel_patch_snapshot 45
@@ -689,7 +688,7 @@ function-lines src/hyperloom/orchestrator/actions/executors/report.py::_format_e
 function-lines src/hyperloom/orchestrator/actions/executors/report.py::_format_md 150
 function-lines src/hyperloom/orchestrator/actions/executors/report.py::_format_roofline_comparison_section 102
 function-lines src/hyperloom/orchestrator/actions/executors/targeted_build_executor.py::TargetedBuildExecutor.__call__ 102
-function-lines src/hyperloom/orchestrator/actions/executors/trace_analyze.py::_build_trace_analyze_cmd 112
+function-lines src/hyperloom/orchestrator/actions/executors/trace_analyze.py::_build_trace_analyze_cmd 106
 function-lines src/hyperloom/orchestrator/actions/executors/trace_analyze.py::trace_analyze_handler 232
 function-lines src/hyperloom/orchestrator/bringup/argv_preflight.py::check_server_argv 124
 function-lines src/hyperloom/orchestrator/bringup/ladder.py::classify 105
