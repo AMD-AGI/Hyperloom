@@ -85,13 +85,14 @@ def build_scriptable_env(
         "RESULT_FILENAME": "inferencex_result",
         "RESULT_DIR": str(workspace),
     }
-    # Scriptable scripts (e.g. xDiT) gate tracing on PROFILE=1 and read the trace dir from
-    # VLLM/SGLANG_TORCH_PROFILER_DIR.
+    # Scriptable scripts gate tracing on PROFILE=1 and read the trace dir from HYPERLOOM_PROFILE_TRACE_DIR.
+    # xDiT's scripts read the legacy VLLM/SGLANG_TORCH_PROFILER_DIR pair (kept for backward compatibility).
     if profile:
         run_scoped["PROFILE"] = "1"
         if profile_dir:
             run_scoped["VLLM_TORCH_PROFILER_DIR"] = profile_dir
             run_scoped["SGLANG_TORCH_PROFILER_DIR"] = profile_dir
+            run_scoped["HYPERLOOM_PROFILE_TRACE_DIR"] = profile_dir
     return build_benchmark_env(defaults, bench.get("envs"), run_scoped)
 
 

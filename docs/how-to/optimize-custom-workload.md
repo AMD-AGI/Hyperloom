@@ -97,6 +97,26 @@ injected into its environment. It must write an InferenceX-shaped report to
 `output_throughput` is the objective and is maximized. Declare its unit in
 `throughput_unit`; `fps`, `img/s` and `tokens/s` are all fine.
 
+### Profiling: where to write the trace
+
+When a `profile` leg runs (roofline, or any round that needs a kernel breakdown),
+your entrypoint is invoked with `PROFILE=1` and a directory variable
+`HYPERLOOM_PROFILE_TRACE_DIR` already pointed at a directory Hyperloom created.
+When `PROFILE=1`, your script must enable its profiler and write its trace into
+that directory.
+
+Two more variables are set to the same path for backward compatibility with
+existing scriptable scripts (xDiT) — `VLLM_TORCH_PROFILER_DIR` and
+`SGLANG_TORCH_PROFILER_DIR` — but a new entrypoint should prefer
+`HYPERLOOM_PROFILE_TRACE_DIR`; the vLLM/SGLang-named pair gives no indication
+that it applies to a `custom` script at all.
+
+```{important}
+If your entrypoint runs under its own environment-isolation wrapper (for
+example `env -i` to strip inherited `PYTHONPATH` or startup hooks), you must
+explicitly forward `HYPERLOOM_PROFILE_TRACE_DIR` through it.
+```
+
 ## The quality gate is mandatory
 
 A scriptable workload has no server, and therefore no accuracy benchmark. The

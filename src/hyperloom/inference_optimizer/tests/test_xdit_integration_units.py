@@ -556,6 +556,59 @@ class TestScriptableLatencyRooflineSidecar:
         _e2e, ideal_ms = state._scriptable_latency_roofline("xdit", 0.740741, krp)
         assert ideal_ms == pytest.approx(500.0, abs=0.01)
 
+    def test_real_layout_resolves_without_session_dir(self, tmp_path):
+        """``kernel_roofline_path`` alone must resolve the sidecar under the REAL layout.
+
+        Unlike the fixture above (which nests ``reports/`` under the run dir, a layout
+        ``kernel_roofline_path_for_run`` never produces), this uses the actual production
+        layout: ``reports/`` is a session-level sibling of ``kernel-agent/``, and the
+        diffusion sidecar lives several directories below session_dir. ``self._session_dir``
+        is cleared so only the ``kernel_roofline_path``-derived root can find it -- the case
+        the previous ``cand.is_file()`` direct-child check could never satisfy.
+        """
+        state = self._make_state(tmp_path)
+        state._session_dir = None
+        run_dir = tmp_path / "kernel-agent" / "runs" / "20260929T090000Z" / "20260929T091500Z_tl-vjepa"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "diffusion_roofline.json").write_text(
+            json.dumps({"totals": {"sigma_ideal_roofline_us": 17300.0}}), encoding="utf-8"
+        )
+        krp = str(tmp_path / "reports" / "kernel_roofline.json")  # session_dir/reports/..., not nested under run_dir
+        _e2e, ideal_ms = state._scriptable_latency_roofline("custom", 0.740741, krp)
+        assert ideal_ms == pytest.approx(17.3, abs=0.01)
+
+    def test_kernel_roofline_path_root_takes_precedence_over_session_dir(self, tmp_path):
+        """When the two roots diverge, the call's own ``kernel_roofline_path`` root wins.
+
+        ``self._session_dir`` can be stale or simply refer to a different run than the one this
+        particular call's ``kernel_roofline_path`` is about (a resumed/forked session, or a
+        long-lived state object reused across runs). The original code always checked the
+        ``kernel_roofline_path``-derived root first; a prior version of this fix accidentally
+        inverted that by trying ``self._session_dir`` first instead, which would silently return a
+        stale/wrong-run sidecar whenever the two roots both have one. This pins the intended order.
+        """
+        state = self._make_state(tmp_path)  # _session_dir == tmp_path
+
+        # A DIFFERENT, unrelated session dir also has a sidecar -- this is the one self._session_dir
+        # points at, and must lose to the call-specific root below.
+        stale_run_dir = tmp_path / "kernel-agent" / "runs" / "stale" / "stale_tl-000"
+        stale_run_dir.mkdir(parents=True, exist_ok=True)
+        (stale_run_dir / "diffusion_roofline.json").write_text(
+            json.dumps({"totals": {"sigma_ideal_roofline_us": 999000.0}}), encoding="utf-8"
+        )
+
+        # The real session for THIS call's kernel_roofline_path.
+        real_session_dir = tmp_path / "other-session"
+        real_run_dir = real_session_dir / "kernel-agent" / "runs" / "real" / "real_tl-000"
+        real_run_dir.mkdir(parents=True, exist_ok=True)
+        (real_run_dir / "diffusion_roofline.json").write_text(
+            json.dumps({"totals": {"sigma_ideal_roofline_us": 17300.0}}), encoding="utf-8"
+        )
+        krp = str(real_session_dir / "reports" / "kernel_roofline.json")
+
+        _e2e, ideal_ms = state._scriptable_latency_roofline("xdit", 0.740741, krp)
+        assert ideal_ms == pytest.approx(17.3, abs=0.01)
+
 
 class TestHyperloomArchSpec:
     """TraceLens arch spec derived from hyperloom's HW_SPECS_ACHIEVABLE."""
