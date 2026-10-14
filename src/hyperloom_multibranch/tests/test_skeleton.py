@@ -264,7 +264,9 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
     single = next(check for check in outcome.final.checks if check.candidate.label != INTEGRATION_LABEL)
     assert (single.candidate.branch, single.candidate.commit) == ("b02", c2)
     assert {check.candidate.commit for check in outcome.final.checks} == {head, c2}
-    assert json.loads(stage.layout.final_record.read_text())["choice"]["chosen"]["commit"] == head
+    breakdown = json.loads((stage.layout.reports / "session_breakdown.json").read_text())
+    assert breakdown["close"]["final"]["commit_id"] == head
+    assert breakdown["close"]["selection"]["chosen"]["commit"] == head
 
     assert all(entry["status"] == BranchStatus.STOPPED.value for entry in roster["entries"])
     assert outcome.close is not None and outcome.close.stop.clean and outcome.close.exports is not None
@@ -276,7 +278,6 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
         stage.layout.judge,
         stage.layout.prelude_child,
         stage.layout.root_recipe,
-        stage.layout.final_record,
         stage.layout.report,
         stage.layout.reports / "session_breakdown.json",
         stage.layout.merges,

@@ -3,9 +3,9 @@
 
 """The CLOSE exports: the Recipe KB write-back of the final choice, the session breakdown and the dashboard.
 
-They read a notebook that no longer changes. The write-back goes first because the breakdown records its outcome;
-``session_breakdown.json`` lands in ``MB-reports/`` and the dashboard, with frontier-scored progress, in
-``MB-dashboard/``.
+They read a notebook that no longer changes. The write-back goes first because the breakdown records its outcome
+next to the chosen commit's recipe and how FINAL chose it; ``session_breakdown.json`` lands in ``MB-reports/`` and the
+dashboard, with frontier-scored progress, in ``MB-dashboard/``.
 """
 
 from __future__ import annotations
@@ -77,22 +77,30 @@ class SessionExports:
         """Write the exports; ``queue`` is what the toolbox reported after the stop."""
 
         snapshot = await self._notebook.snapshot()
-        kb_write_back = await self._publish(snapshot, final)
-        breakdown = write_breakdown(self._layout.reports, build_breakdown(snapshot, kb_write_back=kb_write_back))
+        chosen = await self._final_recipe(final)
+        kb_write_back = await self._publish(snapshot, chosen)
+        selection = encode(final) if final is not None else None
+        document = build_breakdown(snapshot, final=chosen, selection=selection, kb_write_back=kb_write_back)
+        breakdown = write_breakdown(self._layout.reports, document)
         dashboard = build_dashboard(snapshot, await self._progress.progress(), metric=self._metric, queue=encode(queue))
         return CloseExports(kb_write_back, breakdown, write_dashboard(self._layout.dashboard, dashboard))
 
-    async def _publish(self, snapshot: NotebookSnapshot, final: FinalChoice | None) -> RemoteWriteResult:
-        if self._kb_client is None:
-            return RemoteWriteResult(KB_DISABLED, "no Recipe KB client is configured")
+    async def _final_recipe(self, final: FinalChoice | None) -> FinalRecipe | None:
+        """The chosen commit's recipe, whose files the write-back checks out into the layout's final checkout."""
+
         chosen = final.chosen if final is not None else None
         if chosen is None:
-            return RemoteWriteResult(SKIPPED, "no final choice")
-        destination = self._layout.final_checkout
+            return None
         recipe = await self._repo.read_recipe(chosen.commit)
-        final_recipe = FinalRecipe(chosen.commit, recipe, destination, self._metric)
+        return FinalRecipe(chosen.commit, recipe, self._layout.final_checkout, self._metric)
+
+    async def _publish(self, snapshot: NotebookSnapshot, final_recipe: FinalRecipe | None) -> RemoteWriteResult:
+        if self._kb_client is None:
+            return RemoteWriteResult(KB_DISABLED, "no Recipe KB client is configured")
+        if final_recipe is None:
+            return RemoteWriteResult(SKIPPED, "no final choice")
         try:
-            await asyncio.to_thread(self._patches.checkout, recipe, destination)
+            await asyncio.to_thread(self._patches.checkout, final_recipe.recipe, final_recipe.files_root)
             return await asyncio.to_thread(publish_final_recipe, self._kb_client, snapshot, final_recipe)
         except (RecipeError, RemoteRecipeValidationError, KBStoreError, BlobError, OSError) as exc:
             return RemoteWriteResult(KB_FAILED, f"{type(exc).__name__}: {exc}")

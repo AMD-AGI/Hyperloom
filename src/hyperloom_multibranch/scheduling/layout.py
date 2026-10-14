@@ -46,7 +46,6 @@ PRELUDE_CHILD_FILE = "MB-prelude-child.json"
 ROOT_RECIPE_FILE = "MB-root-recipe.json"
 PRELUDE_LOG_FILE = "MB-prelude.log"
 MERGES_FILE = "MB-merges.jsonl"
-FINAL_FILE = "MB-final.json"
 FINAL_CHECKOUT_DIR = "MB-checkout"
 REPORT_FILE = "MB-report.json"
 REPORT_MARKDOWN_FILE = "MB-report.md"
@@ -169,10 +168,6 @@ class SessionLayout:
     def merges(self) -> Path:
         """One line per merge attempt: the candidate, the integration head, the outcome and overridden values."""
         return self.integration / MERGES_FILE
-
-    @property
-    def final_record(self) -> Path:
-        return self.final / FINAL_FILE
 
     @property
     def final_checkout(self) -> Path:

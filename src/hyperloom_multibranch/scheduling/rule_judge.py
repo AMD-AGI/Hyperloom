@@ -22,7 +22,6 @@ from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook import Notebook
-from hyperloom_multibranch.contracts.notebook.peers import RoundKind
 from hyperloom_multibranch.contracts.notebook.records import BaselineRecord, TestRecord
 from hyperloom_multibranch.rulegate.accuracy import baseline_accuracy, inferencex_accuracy_ok
 from hyperloom_multibranch.rulegate.inferencex import DispersionThreshold, compare, confirm
@@ -43,17 +42,17 @@ class NotMeasured(Exception):
 
 
 def formal_mean(record: TestRecord, metric: str) -> float | None:
-    """The mean of ``metric`` over the test's formal rounds; ``None`` when it measured none."""
+    """The mean of ``metric`` over the test's measured rounds; ``None`` when it measured none."""
 
     rounds = record.result.rounds if record.result is not None else ()
-    values = [value for row in rounds if row.kind is RoundKind.FORMAL and row.metric == metric for value in row.values]
+    values = [row.metrics[metric] for row in rounds if row.phase == "measure" and metric in row.metrics]
     return statistics.fmean(values) if values else None
 
 
 def accuracy_score(record: TestRecord) -> float | None:
     """The mean of the scores the test's accuracy rounds reported; ``None`` when they reported none."""
 
-    scores = list(record.result.accuracy.values()) if record.result is not None else []
+    scores = [value.score for value in record.result.accuracy] if record.result is not None else []
     return statistics.fmean(scores) if scores else None
 
 
@@ -139,7 +138,7 @@ class MbFakeRuleJudge:
     def _accurate(record: TestRecord, reference: _Reference) -> bool:
         """A test without accuracy rounds is held to no accuracy gate."""
 
-        if not record.request.accuracy_rounds:
+        if not record.request.accuracy:
             return True
         return inferencex_accuracy_ok(reference.accuracy, accuracy_score(record))
 
@@ -153,16 +152,17 @@ def _confirming(record: TestRecord) -> TestRequest:
     """The retest of ``record``'s test on another node; the toolbox runs it ahead of every other test."""
 
     tested = record.request
-    node = record.result.sandbox.node if record.result is not None else ""
+    sandbox = record.result.sandbox if record.result is not None else None
+    node = sandbox.node_name if sandbox is not None else None
     return TestRequest(
         kind=TestKind.TEST,
         purpose=Purpose.CONFIRM,
-        branch_id=tested.branch,
+        branch_id=tested.branch_id,
         parent_commit=tested.parent_commit,
         delta=tested.delta,
         retest_of=record.request_id,
         avoid_nodes=(node,) if node else (),
-        accuracy=tested.accuracy_rounds,
+        accuracy=tested.accuracy,
     )
 
 

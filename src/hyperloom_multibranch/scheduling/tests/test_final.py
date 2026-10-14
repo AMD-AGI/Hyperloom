@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -177,8 +176,8 @@ class Bench:
         integration = replace(INTEGRATION, commit=self.commits["i1"])
         return FinalCandidates(integration, replace(BRANCH, commit=self.commits["c7"]) if both else None)
 
-    def selector(self, record: Path) -> FinalSelector:
-        return FinalSelector(self.tests, self.judge, WORKLOAD, METRIC, record, self.time.clock)
+    def selector(self) -> FinalSelector:
+        return FinalSelector(self.tests, self.judge, WORKLOAD, METRIC, self.time.clock)
 
     def fail(self, tag: str, fate: Fate, conc: int | None = None, kind: TestKind | None = None) -> None:
         """Every FINAL test of ``tag``'s commit (at ``conc``, of ``kind`` when given) ends in ``fate``."""
@@ -218,9 +217,7 @@ async def test_each_candidate_is_swept_accuracy_checked_and_reproduced_as_a_sess
         frozenset({"c7"}): {MAIN_POINT: 1000.0, 32: 890.0, CONC: 1060.0},
     }
     bench = await Bench(tmp_path).build(curves)
-    record = tmp_path / "MB-final.json"
-
-    choice = await bench.selector(record).select(bench.candidates(), deadline=START + 3600.0)
+    choice = await bench.selector().select(bench.candidates(), deadline=START + 3600.0)
 
     assert choice.chosen == bench.candidates().integration
     assert [check.reproduced for check in choice.checks] == [True, False]
@@ -243,9 +240,7 @@ async def test_each_candidate_is_swept_accuracy_checked_and_reproduced_as_a_sess
         (INTEGRATION_BRANCH, None, None)
     }
     assert all(test.accuracy == (test.kind is TestKind.ACCURACY) for test in tests)
-    written = json.loads(record.read_text())
-    assert written["choice"]["chosen"]["commit"] == bench.commits["i1"]
-    assert (written["primary_conc"], written["metric"]) == (CONC, METRIC)
+    assert (choice.metric, choice.primary_conc) == (METRIC, CONC)
 
 
 async def test_a_withdrawn_test_a_missing_primary_point_or_a_failed_accuracy_disqualifies(tmp_path: Path) -> None:
@@ -253,7 +248,7 @@ async def test_a_withdrawn_test_a_missing_primary_point_or_a_failed_accuracy_dis
     bench.fail("c7", Fate.MEASUREMENT)
     bench.fail("i1", Fate.CANDIDATE, CONC)
 
-    choice = await bench.selector(tmp_path / "f.json").select(bench.candidates(), START + 3600.0)
+    choice = await bench.selector().select(bench.candidates(), START + 3600.0)
 
     assert choice.chosen is None
     assert "no output_throughput at the primary conc" in choice.checks[0].error
@@ -261,7 +256,7 @@ async def test_a_withdrawn_test_a_missing_primary_point_or_a_failed_accuracy_dis
 
     bench = await Bench(tmp_path / "again").build({frozenset({"i1"}): {MAIN_POINT: 1040.0, CONC: 1040.0}})
     bench.fail("i1", Fate.CANDIDATE, kind=TestKind.ACCURACY)
-    alone = await bench.selector(tmp_path / "g.json").select(bench.candidates(both=False), START + 3600.0)
+    alone = await bench.selector().select(bench.candidates(both=False), START + 3600.0)
     assert alone.chosen is None and not alone.checks[0].accuracy_passed and alone.checks[0].reproduced
 
 
@@ -271,7 +266,7 @@ async def test_a_candidate_unfinished_at_the_deadline_is_not_eligible_and_its_te
     bench = await Bench(tmp_path).build({})
     bench.toolbox.executor.gate.clear()
 
-    choice = await bench.selector(tmp_path / "f.json").select(bench.candidates(both=False), START + 600.0)
+    choice = await bench.selector().select(bench.candidates(both=False), START + 600.0)
 
     assert choice.chosen is None
     assert "deadline" in choice.checks[0].error
@@ -281,9 +276,7 @@ async def test_a_candidate_unfinished_at_the_deadline_is_not_eligible_and_its_te
 async def test_a_withdrawn_test_cancels_the_candidates_other_measurements(tmp_path: Path) -> None:
     bench = await Bench(tmp_path).build({})
     bench.toolbox.executor.gate.clear()
-    selecting = asyncio.ensure_future(
-        bench.selector(tmp_path / "f.json").select(bench.candidates(both=False), START + 3600.0)
-    )
+    selecting = asyncio.ensure_future(bench.selector().select(bench.candidates(both=False), START + 3600.0))
     while len(bench.final_tests()) < len(sweep_concs(CONC)) + 2:
         await asyncio.sleep(0)
     [accuracy] = [rid for rid, request in bench.final_tests().items() if request.kind is TestKind.ACCURACY]

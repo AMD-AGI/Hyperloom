@@ -46,7 +46,9 @@ HARD_STOP = NOW + 60.0
 SHORT_GRACE = 0.3
 #: The commit the scripted session's integration head is at.
 CHOSEN = "i1"
-CHOICE = FinalChoice(FinalCandidate("integration", INTEGRATION_BRANCH, CHOSEN, 1041.0), (), "the higher value")
+CHOICE = FinalChoice(
+    FinalCandidate("integration", INTEGRATION_BRANCH, CHOSEN, 1041.0), (), "the higher value", METRIC, 64
+)
 LEFTOVER = ProcessRecord(4242, 4242, 0.0, "b01", ("sleep", "600"), "scope")
 
 
@@ -152,6 +154,9 @@ async def test_close_publishes_the_final_recipe_exports_and_stops_everything(
     assert report.exports.breakdown == layout.reports / "session_breakdown.json"
     breakdown = json.loads(report.exports.breakdown.read_text())
     assert breakdown["close"]["kb_write_back"]["status"] == "written"
+    assert breakdown["close"]["final"]["commit_id"] == CHOSEN
+    assert breakdown["close"]["selection"]["chosen"]["commit"] == CHOSEN
+    assert (breakdown["close"]["selection"]["metric"], breakdown["close"]["selection"]["primary_conc"]) == (METRIC, 64)
     files = report.exports.dashboard
     assert (files.json.parent, files.html.parent) == (layout.dashboard, layout.dashboard)
     dashboard = json.loads(files.json.read_text())
@@ -169,17 +174,21 @@ async def test_without_a_kb_client_or_a_final_choice_the_write_back_is_recorded_
     disabled = await _closer(layout, notebook, _clean(), final, None).close(
         SessionStopReason.SIGNAL, CHOICE, "", HARD_STOP
     )
-    no_choice = FinalChoice(None, (), "no candidate passed the final validation")
+    assert disabled.exports is not None
+    assert json.loads(disabled.exports.breakdown.read_text())["close"]["final"]["commit_id"] == CHOSEN
+    no_choice = FinalChoice(None, (), "no candidate passed the final validation", METRIC, 64)
     skipped = await _closer(layout, notebook, _clean(), final, RemoteRecipeClient(FakeRecipeStore())).close(
         SessionStopReason.PRELUDE_FAILED, no_choice, "prelude failed", HARD_STOP
     )
 
-    assert disabled.exports is not None and disabled.exports.kb_write_back.status == "disabled"
+    assert disabled.exports.kb_write_back.status == "disabled"
     assert skipped.exports is not None
     assert (skipped.exports.kb_write_back.status, skipped.exports.kb_write_back.reason) == (
         "skipped",
         "no final choice",
     )
+    close = json.loads(skipped.exports.breakdown.read_text())["close"]
+    assert close["final"] is None and close["selection"]["chosen"] is None
     assert json.loads(layout.report.read_text())["error"] == "prelude failed"
 
 

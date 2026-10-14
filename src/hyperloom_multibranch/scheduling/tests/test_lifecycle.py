@@ -17,7 +17,9 @@ from hyperloom_multibranch.scheduling.lifecycle import SessionOutcome
 from hyperloom_multibranch.scheduling.processes import ProcessRecord
 from hyperloom_multibranch.scheduling.stops import SessionStopReason, StopReport
 
-CHOSEN = FinalChoice(FinalCandidate("integration", INTEGRATION_BRANCH, "i1", 1041.0), (), "the higher value")
+CHOSEN = FinalChoice(
+    FinalCandidate("integration", INTEGRATION_BRANCH, "i1", 1041.0), (), "the higher value", "output_throughput", 64
+)
 CLEAN = StopReport((), QueueState())
 LEFTOVER = ProcessRecord(4242, 4242, 0.0, "b01", ("sleep", "600"), "scope")
 

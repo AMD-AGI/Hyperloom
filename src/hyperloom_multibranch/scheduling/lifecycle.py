@@ -149,9 +149,7 @@ class Session:
             settings.judge_interval_seconds,
             clock,
         )
-        self._selector = FinalSelector(
-            tests, judge, settings.workload, MB_FAKE_PRIMARY_METRIC, layout.final_record, clock
-        )
+        self._selector = FinalSelector(tests, judge, settings.workload, MB_FAKE_PRIMARY_METRIC, clock)
         closing = exports(layout, self._notebook, peers.repo, patches, progress, MB_FAKE_PRIMARY_METRIC)
         self._closer = Closer(layout, self._stopper, closing, clock)
         self._signals = StopSignals()

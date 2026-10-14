@@ -16,15 +16,12 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from pathlib import Path
 from typing import Any
 
-from hyperloom.common.io import atomic_write_json
 from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import BranchProgress, TestRecord
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
-from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.mb_fakes import mb_fake_regression_passes
 from hyperloom_multibranch.scheduling.requests import SessionTests, TestWithdrawn, integration_test_request
@@ -123,9 +120,15 @@ class CandidateCheck:
 
 @dataclass(frozen=True)
 class FinalChoice:
+    """The pick among ``checks``, made on ``metric`` at ``primary_conc`` with sweep points held to
+    ``degradation_pct``; the session breakdown records it as how the final commit was chosen."""
+
     chosen: FinalCandidate | None
     checks: tuple[CandidateCheck, ...]
     reason: str
+    metric: str
+    primary_conc: int
+    degradation_pct: float = MB_SWEEP_DEGRADATION_PCT
 
 
 def _degraded(mine: Mapping[int, float], other: Mapping[int, float], primary_conc: int) -> set[int]:
@@ -154,7 +157,7 @@ def pick_final(checks: tuple[CandidateCheck, ...], metric: str, conc: int) -> Fi
     marked = _with_degradation(checks, conc)
     ranked = sorted((check for check in marked if check.eligible), key=lambda check: -check.curve[conc])
     if not ranked:
-        return FinalChoice(None, marked, "no candidate passed the final validation")
+        return FinalChoice(None, marked, "no candidate passed the final validation", metric, conc)
     chosen = next((check for check in ranked if not check.degraded_concs), ranked[0])
     if chosen is not ranked[0]:
         top = ranked[0]
@@ -166,7 +169,7 @@ def pick_final(checks: tuple[CandidateCheck, ...], metric: str, conc: int) -> Fi
         reason = f"every candidate degrades somewhere in the sweep; the higher {metric} at conc {conc} decides"
     else:
         reason = f"the higher {metric} at conc {conc}"
-    return FinalChoice(chosen.candidate, marked, reason)
+    return FinalChoice(chosen.candidate, marked, reason, metric, conc)
 
 
 async def _together(*measurements: asyncio.Future[Any]) -> None:
@@ -186,34 +189,22 @@ async def _together(*measurements: asyncio.Future[Any]) -> None:
 
 
 class FinalSelector:
-    """Validates the candidates through the toolbox and the rule and records the choice in ``record``."""
+    """Validates the candidates through the toolbox and the rule."""
 
     def __init__(
-        self, tests: SessionTests, judge: MbFakeRuleJudge, workload: Workload, metric: str, record: Path, clock: Clock
+        self, tests: SessionTests, judge: MbFakeRuleJudge, workload: Workload, metric: str, clock: Clock
     ) -> None:
         self._tests = tests
         self._judge = judge
         self._workload = workload
         self._metric = metric
-        self._record = record
         self._clock = clock
 
     async def select(self, candidates: FinalCandidates, deadline: float) -> FinalChoice:
         """Validate every candidate concurrently by ``deadline`` (clock seconds) and pick one."""
 
         checks = await asyncio.gather(*(self._bounded(candidate, deadline) for candidate in candidates.each))
-        choice = pick_final(tuple(checks), self._metric, self._workload.conc)
-        document = {
-            "at": self._clock.now(),
-            "deadline": deadline,
-            "metric": self._metric,
-            "primary_conc": self._workload.conc,
-            "degradation_pct": MB_SWEEP_DEGRADATION_PCT,
-            "candidates": encode(candidates.each),
-            "choice": encode(choice),
-        }
-        atomic_write_json(self._record, document, indent=2, sort_keys=True, make_parents=True)
-        return choice
+        return pick_final(tuple(checks), self._metric, self._workload.conc)
 
     async def _bounded(self, candidate: FinalCandidate, deadline: float) -> CandidateCheck:
         try:

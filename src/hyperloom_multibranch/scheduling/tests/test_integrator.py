@@ -242,6 +242,9 @@ async def test_an_improving_merge_is_tested_and_confirmed_from_the_head_then_wri
     assert (test.accuracy, test.intent_fingerprint, test.priority) == (True, None, None)
     [retest] = [test for test in bench.toolbox.requests.values() if test.purpose is Purpose.CONFIRM]
     assert retest.retest_of in bench.merge_tests() and retest.delta == bench.deltas["c1"]
+    first = (await bench.handle(Role.OBSERVER).record(str(retest.retest_of))).result
+    assert first is not None and first.sandbox is not None
+    assert retest.avoid_nodes == (first.sandbox.node_name,)
     merged = await bench.repo.read_recipe(head)
     assert merged == apply(await bench.repo.read_recipe(bench.root), bench.deltas["c1"])
     record = await bench.handle(Role.OBSERVER).record(str(report.request_id))
