@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 SIGNATURE_BYTES = 64
+_ASCII = "ascii"
 FINGERPRINT_PREFIX = "sha256:"
 _INSTALL_HINT = "Ed25519 signing needs the 'cryptography' package: install hyperloom[hosted] (or hyperloom[runner])"
 
@@ -71,7 +72,7 @@ def public_key_pem(key: "Ed25519PrivateKey") -> str:
     return (
         key.public_key()
         .public_bytes(encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.SubjectPublicKeyInfo)
-        .decode("ascii")
+        .decode(_ASCII)
     )
 
 
@@ -94,7 +95,7 @@ def load_private_key(path: Path) -> "Ed25519PrivateKey":
 def _load_public_key(public_key_pem_text: str) -> Any:
     serialization, ed25519 = _crypto()
     try:
-        key = serialization.load_pem_public_key(public_key_pem_text.encode("ascii"))
+        key = serialization.load_pem_public_key(public_key_pem_text.encode(_ASCII))
     except _unreadable_key_errors():
         raise SigningError("the public key is not a PEM SubjectPublicKeyInfo key") from None
     if not isinstance(key, ed25519.Ed25519PublicKey):
@@ -113,7 +114,7 @@ def public_key_fingerprint(public_key_pem_text: str) -> str:
 
 def sign(data: bytes, key: "Ed25519PrivateKey") -> str:
     """The base64 Ed25519 signature of exactly ``data``."""
-    return base64.b64encode(key.sign(data)).decode("ascii")
+    return base64.b64encode(key.sign(data)).decode(_ASCII)
 
 
 def verify(data: bytes, signature_b64: str, public_key_pem_text: str) -> bool:
@@ -124,7 +125,7 @@ def verify(data: bytes, signature_b64: str, public_key_pem_text: str) -> bool:
     """
     key = _load_public_key(public_key_pem_text)
     try:
-        signature = base64.b64decode(signature_b64.strip().encode("ascii"), validate=True)
+        signature = base64.b64decode(signature_b64.strip().encode(_ASCII), validate=True)
     except (binascii.Error, UnicodeEncodeError, ValueError):
         return False
     if len(signature) != SIGNATURE_BYTES:

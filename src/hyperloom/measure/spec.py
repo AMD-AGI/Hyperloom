@@ -32,8 +32,13 @@ from hyperloom.measure.docs import (
 )
 
 SPEC_SCHEMA = "hyperloom.measurement-spec/v1"
-KINDS = ("test", "profile", "accuracy", "repro")
-PURPOSES = ("baseline", "health", "explore", "confirm", "integration", "profile", "accuracy", "repro", "final")
+_KIND = "kind"
+_UPSERT = "upsert"
+_RUNTIME = "runtime"
+_ACCURACY = "accuracy"
+_RESULT_DIR = "result_dir"
+KINDS = ("test", "profile", _ACCURACY, "repro")
+PURPOSES = ("baseline", "health", "explore", "confirm", "integration", "profile", _ACCURACY, "repro", "final")
 DEFAULT_MAX_TOTAL_BYTES = 4 * 1024**3
 #: The platform variables a sheet may carry reference values for (4.8.1): RCCL and HSA variables SaFE adds to a Pod.
 PLATFORM_ENV_NAMES = (
@@ -46,7 +51,7 @@ PLATFORM_ENV_NAMES = (
     "NCCL_IB_SL",
 )
 #: Keys of the materialised YAML whose value is a location, replaced by a placeholder in the fingerprint.
-PATH_KEYS = ("pid_dir", "inferencex_path", "result_dir", "output_dir", "output_path", "log_dir")
+PATH_KEYS = ("pid_dir", "inferencex_path", _RESULT_DIR, "output_dir", "output_path", "log_dir")
 
 _ATTACHMENT_ID = r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}"
 _COMMIT = r"[0-9a-f]{40}(?:[0-9a-f]{24})?"
@@ -147,14 +152,14 @@ class Config:
         r = Reader(value, path)
         config = cls(yaml=r.text("yaml") or "", sha256=r.text("sha256", pattern=SHA256_RE) or "")
         r.done()
-        actual = hashlib.sha256(config.yaml.encode("utf-8")).hexdigest()
+        actual = hashlib.sha256(config.yaml.encode()).hexdigest()
         if actual != config.sha256:
             raise DocumentError(f"{path}.sha256: does not match the YAML text")
         return config
 
     @classmethod
     def of(cls, yaml_text: str) -> "Config":
-        return cls(yaml=yaml_text, sha256=hashlib.sha256(yaml_text.encode("utf-8")).hexdigest())
+        return cls(yaml=yaml_text, sha256=hashlib.sha256(yaml_text.encode()).hexdigest())
 
     def to_document(self) -> dict[str, Any]:
         return {"yaml": self.yaml, "sha256": self.sha256}
@@ -172,7 +177,7 @@ class Attachment:
         r = Reader(value, path)
         attachment = cls(
             id=r.text("id", pattern=_ID_RE) or "",
-            kind=r.choice("kind", ("file", "dir")) or "",
+            kind=r.choice(_KIND, ("file", "dir")) or "",
             blob=r.text("blob", pattern=PREFIXED_SHA256_RE) or "",
             manifest_sha256=r.text("manifest_sha256", pattern=SHA256_RE) or "",
         )
@@ -180,7 +185,7 @@ class Attachment:
         return attachment
 
     def to_document(self) -> dict[str, Any]:
-        return {"id": self.id, "kind": self.kind, "blob": self.blob, "manifest_sha256": self.manifest_sha256}
+        return {"id": self.id, _KIND: self.kind, "blob": self.blob, "manifest_sha256": self.manifest_sha256}
 
 
 @dataclass(frozen=True)
@@ -219,7 +224,7 @@ class EnvEntry:
     @classmethod
     def parse(cls, value: Any, path: str) -> "EnvEntry":
         r = Reader(value, path)
-        op = r.choice("op", ("upsert", "delete")) or ""
+        op = r.choice("op", (_UPSERT, "delete")) or ""
         entry = cls(
             path=relative_path(r.raw("path"), r.at("path")),
             op=op,
@@ -227,7 +232,7 @@ class EnvEntry:
             mode=r.text("mode", pattern=_MODE_RE, optional=True),
         )
         r.done()
-        if op == "upsert" and (entry.blob is None or entry.mode is None):
+        if op == _UPSERT and (entry.blob is None or entry.mode is None):
             raise DocumentError(f"{path}: an upsert names its blob and mode")
         if op == "delete" and (entry.blob is not None or entry.mode is not None):
             raise DocumentError(f"{path}: a delete carries neither blob nor mode")
@@ -235,7 +240,7 @@ class EnvEntry:
 
     def to_document(self) -> dict[str, Any]:
         document: dict[str, Any] = {"path": self.path, "op": self.op}
-        if self.op == "upsert":
+        if self.op == _UPSERT:
             document.update(blob=self.blob, mode=self.mode)
         return document
 
@@ -257,7 +262,7 @@ class EnvRoot:
         dist.done()
         root = cls(
             id=r.text("id", pattern=_ID_RE) or "",
-            kind=r.choice("kind", ("package", "runtime")) or "",
+            kind=r.choice(_KIND, ("package", _RUNTIME)) or "",
             import_name=r.text("import_name") or "",
             dist_name=dist_name,
             dist_version=dist_version,
@@ -272,7 +277,7 @@ class EnvRoot:
     def to_document(self) -> dict[str, Any]:
         return {
             "id": self.id,
-            "kind": self.kind,
+            _KIND: self.kind,
             "import_name": self.import_name,
             "dist": {"name": self.dist_name, "version": self.dist_version},
             "entries": [entry.to_document() for entry in self.entries],
@@ -306,24 +311,24 @@ class Environment:
     @classmethod
     def parse(cls, value: Any, path: str) -> "Environment":
         r = Reader(value, path)
-        runtime_raw = r.optional("runtime")
+        runtime_raw = r.optional(_RUNTIME)
         environment = cls(
             roots=r.sequence("roots", EnvRoot.parse),
-            runtime=None if runtime_raw is None else RuntimeSnapshot.parse(runtime_raw, r.at("runtime")),
+            runtime=None if runtime_raw is None else RuntimeSnapshot.parse(runtime_raw, r.at(_RUNTIME)),
             blob_root=r.text("blob_root") or "",
         )
         r.done()
         ids = [root.id for root in environment.roots]
         if len(set(ids)) != len(ids):
             raise DocumentError(f"{path}.roots: an id appears twice")
-        if environment.runtime is None and any(root.kind == "runtime" for root in environment.roots):
+        if environment.runtime is None and any(root.kind == _RUNTIME for root in environment.roots):
             raise DocumentError(f"{path}.runtime: a runtime root needs a runtime snapshot")
         return environment
 
     def to_document(self) -> dict[str, Any]:
         return {
             "roots": [root.to_document() for root in self.roots],
-            "runtime": None if self.runtime is None else self.runtime.to_document(),
+            _RUNTIME: None if self.runtime is None else self.runtime.to_document(),
             "blob_root": self.blob_root,
         }
 
@@ -350,7 +355,7 @@ class Procedure:
             benchmark_backend=r.choice("benchmark_backend", ("magpie", "bypass")) or "",
             warmup_rounds=warmup,
             measure_rounds=measure,
-            accuracy=r.boolean("accuracy"),
+            accuracy=r.boolean(_ACCURACY),
             timeout_sec=r.number("timeout_sec", minimum=1) or 1.0,
             silence_timeout_sec=r.number("silence_timeout_sec", minimum=1) or 1.0,
             deadline_unix=r.number("deadline_unix", minimum=0) or 0.0,
@@ -363,7 +368,7 @@ class Procedure:
             "prep": self.prep,
             "benchmark_backend": self.benchmark_backend,
             "rounds": {"warmup": self.warmup_rounds, "measure": self.measure_rounds},
-            "accuracy": self.accuracy,
+            _ACCURACY: self.accuracy,
             "timeout_sec": self.timeout_sec,
             "silence_timeout_sec": self.silence_timeout_sec,
             "deadline_unix": self.deadline_unix,
@@ -379,14 +384,14 @@ class Outputs:
     def parse(cls, value: Any, path: str) -> "Outputs":
         r = Reader(value, path)
         outputs = cls(
-            result_dir=relative_path(r.raw("result_dir"), r.at("result_dir")),
+            result_dir=relative_path(r.raw(_RESULT_DIR), r.at(_RESULT_DIR)),
             max_total_bytes=r.integer("max_total_bytes", minimum=1) or DEFAULT_MAX_TOTAL_BYTES,
         )
         r.done()
         return outputs
 
     def to_document(self) -> dict[str, Any]:
-        return {"result_dir": self.result_dir, "max_total_bytes": self.max_total_bytes}
+        return {_RESULT_DIR: self.result_dir, "max_total_bytes": self.max_total_bytes}
 
 
 def _model_hashes(value: Any, path: str) -> dict[str, str]:
@@ -442,7 +447,7 @@ class MeasurementSpec:
             raise DocumentError(f"spec.schema: expected {SPEC_SCHEMA}")
         spec = cls(
             request_id=r.text("request_id") or "",
-            kind=r.choice("kind", KINDS) or "",
+            kind=r.choice(_KIND, KINDS) or "",
             meta=r.section("meta", Meta.parse),
             hardware=r.section("hardware", Hardware.parse),
             image=r.section("image", ImageRef.parse),
@@ -461,7 +466,7 @@ class MeasurementSpec:
         ids = [attachment.id for attachment in spec.attachments]
         if len(set(ids)) != len(ids):
             raise DocumentError("spec.attachments: an id appears twice")
-        if spec.kind == "accuracy" and not spec.procedure.accuracy:
+        if spec.kind == _ACCURACY and not spec.procedure.accuracy:
             raise DocumentError("spec.procedure.accuracy: a kind 'accuracy' sheet asks for the accuracy evaluation")
         return spec
 
@@ -473,7 +478,7 @@ class MeasurementSpec:
         return {
             "schema": self.schema,
             "request_id": self.request_id,
-            "kind": self.kind,
+            _KIND: self.kind,
             "meta": self.meta.to_document(),
             "hardware": self.hardware.to_document(),
             "image": self.image.to_document(),
@@ -491,7 +496,7 @@ class MeasurementSpec:
 
     def to_bytes(self) -> bytes:
         """The exact bytes written to ``/in/spec.json``; :meth:`sha256` is the hash of these."""
-        return canonical_json(self.to_document()).encode("utf-8")
+        return canonical_json(self.to_document()).encode()
 
     def sha256(self) -> str:
         return hashlib.sha256(self.to_bytes()).hexdigest()
@@ -544,8 +549,8 @@ def canonical_for_fingerprint(spec: MeasurementSpec, *, session_dir: str | None 
         del document[key]
     del document["procedure"]["deadline_unix"]
     del document["environment"]["blob_root"]
-    if document["environment"]["runtime"] is not None:
-        del document["environment"]["runtime"]["snapshot"]
+    if document["environment"][_RUNTIME] is not None:
+        del document["environment"][_RUNTIME]["snapshot"]
     session = session_dir.rstrip("/") if session_dir else None
     document["config"] = {"yaml": _replace_session_dir(_load_yaml(spec.config.yaml), session)}
     document["process_env"] = _replace_session_dir(document["process_env"], session)
@@ -560,5 +565,5 @@ def fingerprint(spec: MeasurementSpec, *, hyperloom_version: str, session_dir: s
     if not hyperloom_version:
         raise DocumentError("the fingerprint needs the runner's Hyperloom version")
     canonical = canonical_json(canonical_for_fingerprint(spec, session_dir=session_dir))
-    digest = hashlib.sha256(canonical.encode("utf-8") + b"\n" + hyperloom_version.encode("utf-8"))
+    digest = hashlib.sha256(canonical.encode() + b"\n" + hyperloom_version.encode())
     return digest.hexdigest()[:_FINGERPRINT_LEN]
