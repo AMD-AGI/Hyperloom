@@ -1,0 +1,314 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""The executor that runs one attempt of a test through the hosted measurement implementation (design 3.7, 4.4, 4.5).
+
+``HostedExecutor.run`` turns the accepted request and what acceptance compiled into W6's ``TestCall``, runs it with
+``HostedMeasurementBackend.run_test`` (in a worker thread) and turns the ``TestOutcome`` back into the attempt's
+``TestResult``. It never retries: the same ``task_id`` again is the next attempt, with a fresh sandbox, and
+:class:`~.attempts.AttemptRunner` decides when to ask for it.
+
+A result is reported as succeeded only when the backend's journal says its bundle was verified, archived and was made by
+the sandbox the outcome names. An end that is not a measurement (a rejected sheet or result) is a
+:class:`~.attempts.MeasurementRefused`; a stop is a cancellation, so the test stays in the submit log and runs on the
+next start.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import math
+import subprocess
+import sys
+import time
+from collections.abc import Callable, Mapping
+from dataclasses import replace
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from hyperloom.contracts.measurement import (
+    FailureClass,
+    RoundValue,
+    SandboxFacts,
+    TestKind,
+    TestRequest,
+    TestResult,
+    Validity,
+)
+from hyperloom.measure.failures import Disposition, classify_test_failure
+from hyperloom.measure.hosted import HostedMeasurementBackend
+from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT, STATE_SUBMITTED, Record
+from hyperloom.measure.manifest import ResultManifest
+from hyperloom.measure.points import AcceptedMeasurement
+from hyperloom.measure.socket import RoundOutcome, TestCall, TestMeta, TestOutcome
+from hyperloom.orchestrator.actions.executors.benchmark_result import extract_benchmark_measurement
+from hyperloom_multibranch.toolbox.attempts import MeasurementRefused, TestJob
+
+__all__ = ["DEFAULT_TEST_TIMEOUT_SEC", "HostedExecutor", "OUTPUTS_DIR"]
+
+DEFAULT_TEST_TIMEOUT_SEC = 3600
+#: Where a test's landed files go, below the session directory: ``tests/<request_id>/attempt-<n>``.
+OUTPUTS_DIR = "tests"
+_REPORT = "benchmark_report.json"
+_MANIFEST = "manifest.json"
+_UNFINISHED = (STATE_SUBMITTED, STATE_SENT)
+_SWEEP = "conc_sweep"
+
+
+class HostedExecutor:
+    """Runs one attempt of a test through ``backend``.
+
+    Args:
+        backend: A started hosted backend; the executor never starts or closes it.
+        session_dir: The session directory; test output lands below ``<session_dir>/tests`` and a result's
+            ``output_dir`` is relative to it.
+        timeout_sec: The timeout of one attempt.
+        magpie_python: The interpreter the measurement runs with (``TestCall.magpie_python``).
+        clock: Wall-clock seconds, for the attempt's start and end.
+    """
+
+    def __init__(
+        self,
+        backend: HostedMeasurementBackend,
+        session_dir: Path,
+        *,
+        timeout_sec: int = DEFAULT_TEST_TIMEOUT_SEC,
+        magpie_python: str = sys.executable,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
+        self._backend = backend
+        self._session = Path(session_dir)
+        self._timeout = timeout_sec
+        self._python = magpie_python
+        self._clock = clock
+
+    async def run(self, job: TestJob) -> TestResult:
+        request = job.request
+        request_id = request.request_id or ""
+        accepted = job.environment
+        if not isinstance(accepted, AcceptedMeasurement):
+            raise MeasurementRefused(
+                f"the hosted executor needs the accepted measurement, got {type(accepted).__name__}"
+            )
+        call = self._call(job, accepted, self._output_dir(request_id))
+        started = self._clock()
+        try:
+            outcome = await asyncio.to_thread(self._backend.run_test, call)
+        except subprocess.TimeoutExpired:
+            return self._timed_out(request_id, started)
+        return self._result(request, accepted, call, outcome, started)
+
+    # -- the call --------------------------------------------------------------------------------------------------
+
+    def _output_dir(self, request_id: str) -> Path:
+        """Where this attempt lands: the directory of an unfinished attempt (a resume), else a new one."""
+        journal = self._backend.journal
+        previous = journal.latest(request_id)
+        if previous is not None and previous.state in _UNFINISHED and previous.output_dir:
+            return Path(previous.output_dir)
+        return self._session / OUTPUTS_DIR / request_id / f"attempt-{journal.next_attempt(request_id)}"
+
+    def _call(self, job: TestJob, accepted: AcceptedMeasurement, output_dir: Path) -> TestCall:
+        request = job.request
+        kind = request.kind.value
+        return TestCall(
+            points=accepted.points,
+            output_dir=output_dir,
+            timeout_sec=self._timeout,
+            cwd=str(self._session),
+            magpie_python=self._python,
+            task_id=request.request_id or "",
+            kind="test" if request.kind is TestKind.SWEEP else kind,  # type: ignore[arg-type]
+            prep=_SWEEP if request.kind is TestKind.SWEEP else "grid",
+            accuracy=request.accuracy,
+            meta=TestMeta(
+                purpose=request.purpose.value,
+                priority=job.priority,
+                branch_id=request.branch_id,
+                parent_commit=request.parent_commit,
+                retest_of=request.retest_of,
+            ),
+            avoid_nodes=tuple(job.avoid_nodes),
+        )
+
+    # -- the outcome -----------------------------------------------------------------------------------------------
+
+    def _result(
+        self, request: TestRequest, accepted: AcceptedMeasurement, call: TestCall, outcome: TestOutcome, started: float
+    ) -> TestResult:
+        request_id = request.request_id or ""
+        failure = _failure_class_of(outcome)
+        if failure is None:
+            _refuse_unless_measured(outcome)
+        facts = _facts_of(outcome)
+        record = self._record_of(request_id, outcome)
+        audit = self._audit(request_id, record, call) if record is not None else {}
+        if failure is None and not audit:
+            raise MeasurementRefused("the result is not recorded as a verified bundle of this sandbox")
+        finished = self._clock()
+        if failure is None:
+            rounds = _round_values(outcome.rounds, accepted.points)
+            if not any(r.phase == "measure" for r in rounds):
+                raise MeasurementRefused("the verified result holds no readable measured round")
+        else:
+            rounds = ()
+        gpu_seconds = max(0.0, finished - started) * facts.gpu_count
+        return TestResult(
+            request_id=request_id,
+            validity=_validity_of(failure),
+            failure_class=failure,
+            failure_reason=outcome.failure_reason if failure is not None else None,
+            rounds=rounds,
+            sandbox=facts,
+            output_dir=_relative(call.output_dir, self._session),
+            started_at=started,
+            finished_at=finished,
+            gpu_seconds=gpu_seconds,
+            **audit,
+        )
+
+    def _timed_out(self, request_id: str, started: float) -> TestResult:
+        """A timeout is an unclear failure (4.5): the sandbox is read from the journal, the node is not known."""
+        record = self._backend.journal.latest(request_id)
+        verdict = classify_test_failure(returncode=0, timed_out=True)
+        sandbox = record.sandbox_id if record is not None and record.sandbox_id else f"hosted-{request_id}"
+        return TestResult(
+            request_id=request_id,
+            validity=Validity.CANDIDATE_FAILED,
+            failure_class=verdict.failure_class,
+            failure_reason=verdict.failure_reason,
+            sandbox=SandboxFacts(sandbox_id=sandbox, backend=self._backend.name),
+            started_at=started,
+            finished_at=self._clock(),
+        )
+
+    def _record_of(self, request_id: str, outcome: TestOutcome) -> Record | None:
+        record = self._backend.journal.latest(request_id)
+        if record is None or record.state != STATE_FINISHED:
+            return None
+        return record if record.sandbox_id == outcome.sandbox.sandbox_id else None
+
+    def _audit(self, request_id: str, record: Record, call: TestCall) -> dict[str, Any]:
+        """What the journal says about a verified, archived bundle; empty when it does not say that."""
+        extra = record.extra
+        manifest_sha = extra.get("manifest_sha256")
+        if extra.get("verified") is not True or not manifest_sha or Path(record.output_dir) != Path(call.output_dir):
+            return {}
+        fields: dict[str, Any] = {
+            "manifest_sha256": manifest_sha,
+            "signing_key_fingerprint": extra.get("signing_key_fingerprint"),
+        }
+        manifest = _archived_manifest(str(extra.get("archive") or ""), manifest_sha)
+        if manifest is not None:
+            fields.update(spec_fingerprint=manifest.spec_fingerprint, surface_sha256=manifest.surface_sha256)
+        return fields
+
+
+# -- mapping helpers -----------------------------------------------------------------------------------------------
+
+
+def _failure_class_of(outcome: TestOutcome) -> FailureClass | None:
+    """The outcome's failure class, ``None`` for a success; an end that is neither raises."""
+    if outcome.failure_class is not None:
+        return FailureClass(getattr(outcome.failure_class, "value", outcome.failure_class))
+    return None
+
+
+def _refuse_unless_measured(outcome: TestOutcome) -> None:
+    """An outcome with no failure class is a success only at return code 0; any other end is not a measurement."""
+    if outcome.returncode == 0:
+        return
+    verdict = classify_test_failure(returncode=outcome.returncode)
+    if verdict.disposition is Disposition.STOPPED:
+        raise asyncio.CancelledError(verdict.failure_reason)  # the run is stopping: the test is picked up at restart
+    detail = (outcome.stderr or "").strip()[-300:]
+    raise MeasurementRefused(f"{verdict.failure_reason or 'unclassified end'}: {detail}".strip(": "))
+
+
+def _validity_of(failure: FailureClass | None) -> Validity:
+    if failure is None:
+        return Validity.SUCCEEDED
+    return Validity.MEASUREMENT_FAILED if failure is FailureClass.INFRA else Validity.CANDIDATE_FAILED
+
+
+def _facts_of(outcome: TestOutcome) -> SandboxFacts:
+    return replace(outcome.sandbox, backend=outcome.sandbox.backend or "hosted")
+
+
+def _relative(path: Path, session: Path) -> str:
+    try:
+        return Path(path).relative_to(session).as_posix()
+    except ValueError:
+        return ""
+
+
+def _archived_manifest(location: str, manifest_sha256: str) -> ResultManifest | None:
+    """The manifest in the archive, taken only when its bytes hash to the verified ``manifest_sha256``."""
+    if not location:
+        return None
+    try:
+        raw = (Path(location) / _MANIFEST).read_bytes()
+        if hashlib.sha256(raw).hexdigest() != manifest_sha256:
+            return None
+        return ResultManifest.from_bytes(raw)
+    except (OSError, ValueError):
+        return None
+
+
+def _concurrency_of(point: Path) -> int | None:
+    try:
+        document = yaml.safe_load(Path(point).read_text(encoding="utf-8")) or {}
+        value = int(str(document["benchmark"]["envs"]["CONC"]))
+    except (OSError, ValueError, KeyError, TypeError, yaml.YAMLError):
+        return None
+    return value if value >= 1 else None
+
+
+def _report_of(directory: Path) -> dict[str, Any] | None:
+    for path in sorted(Path(directory).rglob(_REPORT)) if Path(directory).is_dir() else []:
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(document, dict):
+            return document
+    return None
+
+
+def _metrics_of(measurement: Mapping[str, Any]) -> dict[str, float]:
+    return {
+        key: float(value)
+        for key, value in measurement.items()
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    }
+
+
+def _round_values(rounds: tuple[RoundOutcome, ...], points: tuple[Path, ...]) -> tuple[RoundValue, ...]:
+    """One value per warmup or measured round whose report is readable and valid; the metric names are the report's."""
+    values = []
+    for item in rounds:
+        if item.phase not in ("warmup", "measure"):
+            continue
+        report = _report_of(item.output_dir)
+        if report is None:
+            continue
+        measurement = extract_benchmark_measurement(report, workspace=Path(item.output_dir))
+        if not measurement.get("valid_measurement"):
+            continue
+        completed = measurement.get("completed_requests")
+        requested = measurement.get("requested_requests")
+        failed = requested - completed if isinstance(requested, int) and isinstance(completed, int) else None
+        values.append(
+            RoundValue(
+                item.phase,
+                _concurrency_of(points[item.point]) if item.point < len(points) else None,
+                _metrics_of(measurement),
+                completed_requests=completed if isinstance(completed, int) else None,
+                failed_requests=max(0, failed) if failed is not None else None,
+            )
+        )
+    return tuple(values)
