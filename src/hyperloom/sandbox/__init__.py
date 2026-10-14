@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""``hyperloom.sandbox`` -- the sandbox socket and its local implementation."""
+
+from __future__ import annotations
+
+from hyperloom.sandbox.socket import (
+    CommandResult,
+    Role,
+    Sandbox,
+    SandboxDenied,
+    SandboxError,
+    SandboxGone,
+    SandboxInfo,
+    SandboxProvider,
+    SandboxUnavailable,
+)
+
+__all__ = [
+    "CommandResult",
+    "Role",
+    "Sandbox",
+    "SandboxDenied",
+    "SandboxError",
+    "SandboxGone",
+    "SandboxInfo",
+    "SandboxProvider",
+    "SandboxUnavailable",
+]
