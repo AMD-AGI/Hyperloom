@@ -7,10 +7,10 @@ A roofline holds the benchmark, profile and server lanes for up to an hour. When
 reproduces, running it again on that input buys the same failure. Its input is the recipe it profiled, identified by
 ``working_recipe_generation`` (which every KEEP bumps) and stamped on the task when it is enqueued, so a KEEP re-arms
 it. Any other failure is transient and stays with ``roofline_failure_streak``. A trace analysis's input is the trace
-it read, and for a timeout also the budget it ran under, so a request granting a different budget runs.
+it read together with what the request asked of it (route, split, budget), so a request that differs in any of them runs.
 
 The records live in ``SharedState.analysis_failures``: ``"roofline:<recipe>"`` or ``"trace:<trace_input>"`` ->
-``{"failure", "error", "ts"}``, a trace record also carrying ``budget_minutes``.
+``{"failure", "error", "ts"}``, a trace record also carrying the ``request`` it failed under.
 """
 
 from __future__ import annotations
@@ -30,6 +30,25 @@ _TRACE_SPLIT = "trace_split_no_steady_state"
 _ANALYSIS_TIMEOUT_CLASS = "subprocess_timeout"
 _TIMEOUT_FAILURE = "analysis_timeout"
 _ERROR_EXCERPT_CHARS = 500
+#: Payload fields that decide what an analysis of a trace does; a request differing in any of them is a new input.
+_TRACE_REQUEST_FIELDS = (
+    "analysis_route",
+    "analysis_mode",
+    "framework",
+    "steady_state_mode",
+    "split_conc",
+    "split_osl",
+    "split_r",
+    "capture_folder",
+    "capture_folder_path",
+    "graph_capture_path",
+    "model_name",
+    "target_platform",
+    "precision",
+    "num_denoise_steps",
+)
+#: The analysis budget trace_analyze applies when a request names none.
+_DEFAULT_BUDGET_MINUTES = 60
 
 
 def recurring_failure_class(result: Mapping[str, Any]) -> str:
@@ -84,16 +103,14 @@ def remember_roofline_failure(state: Any, params: Mapping[str, Any], result: Map
 def remember_trace_failure(state: Any, payload: Mapping[str, Any], result: Mapping[str, Any]) -> str:
     """Remember a failed analysis of ``payload``'s trace that the same trace reproduces; return the failure's class."""
     trace = _trace_input(payload)
-    return _remember(state, f"trace:{trace}" if trace else "", result, budget_minutes=payload.get("budget_minutes"))
+    return _remember(state, f"trace:{trace}" if trace else "", result, request=_trace_request(payload))
 
 
 def remembered_trace_failure(state: Any, payload: Mapping[str, Any]) -> dict[str, Any] | None:
     """The failed result to serve for a trace analysis the same input already failed, or ``None`` to run it."""
     trace = _trace_input(payload)
     record = (state.analysis_failures or {}).get(f"trace:{trace}") if trace else None
-    if record is None:
-        return None
-    if record["failure"] == _TIMEOUT_FAILURE and record.get("budget_minutes") != payload.get("budget_minutes"):
+    if record is None or record.get("request") != _trace_request(payload):
         return None
     log.warning("trace_analyze on %s not re-run: it already failed with %s", trace, record["failure"])
     return {
@@ -116,6 +133,13 @@ def analysis_skip_reason(state: Any) -> str:
 
 def _trace_input(payload: Mapping[str, Any]) -> str:
     return str(payload.get("trace_input") or payload.get("trace_dir") or "")
+
+
+def _trace_request(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """What a trace analysis is asked to do besides which trace, with the budget it actually runs under."""
+    request = {key: payload[key] for key in _TRACE_REQUEST_FIELDS if payload.get(key) not in (None, "")}
+    request["budget_minutes"] = int(payload.get("budget_minutes") or _DEFAULT_BUDGET_MINUTES)
+    return request
 
 
 def _remember(state: Any, key: str, result: Mapping[str, Any], **extra: Any) -> str:
