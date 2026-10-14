@@ -137,8 +137,9 @@ async def test_a_restarted_runtime_keeps_its_claims_and_the_toolbox_carries_an_a
         await toolbox.renew(claim.key, ttl_seconds=TTL)
     restarted = await open_as(Role.SPECIALIST_RUNTIME, "s1").renew(claim.key, ttl_seconds=TTL)
     await toolbox.write_request(request("r1", target))
-    attached = await toolbox.attach_request(claim.key, "r1", ttl_seconds=10 * TTL)
-    carried = await toolbox.renew(claim.key, ttl_seconds=10 * TTL)
+    long_ttl = 10 * TTL
+    attached = await toolbox.attach_request(claim.key, "r1", ttl_seconds=long_ttl)
+    carried = await toolbox.renew(claim.key, ttl_seconds=long_ttl)
 
     assert restarted.holder == "s1"
     assert (attached.request_id, carried.request_id) == ("r1", "r1")
