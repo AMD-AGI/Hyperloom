@@ -5084,16 +5084,21 @@ class IterationLoop(AnalysisRuntimeMixin):
                 print(f"  [pr-kb] warning: event not recorded ({error})")
             self.ic.pr_kb_event = {}
 
-    def _stop_condition_met(self, iteration, hazard: DeviceHazard | None) -> bool:
-        """Record and announce why this campaign stops, if it does.
+    def _stop_condition_met(self, iteration) -> tuple[bool, DeviceHazard | None]:
+        """Whether this campaign stops, and the device standing when it does not.
 
         Every answer here is terminal for the run rather than for one iteration,
         so each sets ``termination_reason`` before saying so.
+
+        The device is probed last, after every answer that ends the run without
+        touching it. ``recheck`` is a write -- it clears the hazard file, or
+        counts one more blocked iteration into it -- so an iteration that was
+        going to stop anyway must not leave that mark for the next resume.
         """
         if self._is_gate_met():
             self.termination_reason = "gate_met"
             print(f"\nGATE MET at iteration {iteration}: raw wall target reached at {self.best_wall_ms:.6f} ms")
-            return True
+            return True, None
         if self._is_roofline_target_met():
             self.termination_reason = "roofline_target_met"
             standing = self._roofline_attainment()
@@ -5108,7 +5113,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                     f"  [roofline] {entry.case_id}: {entry.attainment * 100:.1f}% "
                     f"({entry.t_current_ms:.6g} ms vs ceiling {entry.t_ideal_ms:.6g} ms)"
                 )
-            return True
+            return True, None
         if self.run_state.orchestration_circuit_state == ORCHESTRATION_CIRCUIT_OPEN:
             self.termination_reason = "orchestration_failed"
             print(
@@ -5116,15 +5121,16 @@ class IterationLoop(AnalysisRuntimeMixin):
                 f"{self.run_state.orchestration_error_streak} "
                 "consecutive infrastructure errors"
             )
-            return True
+            return True, None
         if self._is_budget_exhausted():
             self.termination_reason = "budget_exhausted"
             print(f"\nBUDGET EXHAUSTED after {len(self.results)} iterations in this session")
-            return True
+            return True, None
         if self._is_force_stopped():
             self.termination_reason = "force_stop"
             print("\nFORCE STOP: .stop file detected — remove it and --resume to continue")
-            return True
+            return True, None
+        hazard: DeviceHazard | None = self.device_hazard.recheck(iteration)
         if hazard is not None and hazard.exhausted:
             self.termination_reason = "device_contended"
             print(
@@ -5134,8 +5140,8 @@ class IterationLoop(AnalysisRuntimeMixin):
                 f"rather than spending the budget on unmeasurable "
                 f"iterations. {hazard.describe()}"
             )
-            return True
-        return False
+            return True, hazard
+        return False, hazard
 
     def _stage_merge(self, *, iteration, hazard, fan_out_plan) -> tuple[tuple | None, str]:
         """Stack two rejected gains, and say which pair and what it staged.
@@ -6243,10 +6249,10 @@ class IterationLoop(AnalysisRuntimeMixin):
             if getattr(self, "archive", None) is not None:
                 digest = self.archive.render_digest()
 
-            # Ruled on once per iteration, here with the other conditions that decide whether this iteration may run
-            # at all.
-            hazard: DeviceHazard | None = self.device_hazard.recheck(iteration)
-            if self._stop_condition_met(iteration, hazard):
+            # Ruled on once per iteration, with the other conditions that decide whether this iteration may run at
+            # all -- and after them, so a run that was stopping anyway never touches the device.
+            stop, hazard = self._stop_condition_met(iteration)
+            if stop:
                 break
 
             # Price the round before anything is spent on it.

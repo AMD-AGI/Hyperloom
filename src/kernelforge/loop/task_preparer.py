@@ -726,10 +726,11 @@ async def prepare_task(
     scaffold_error = ""
     try:
         while attempts < PREPARE_MAX_ATTEMPTS:
-            attempt_timeout, starved = _attempt_budget(attempts, deadline_sec=deadline_sec, start=start)
-            if attempt_timeout <= 0:
-                starved_retry_sec = starved
+            budget = _attempt_budget(attempts, deadline_sec=deadline_sec, start=start)
+            if not budget.may_start:
+                starved_retry_sec = budget.starved_retry_sec
                 break
+            attempt_timeout = budget.timeout_sec
             attempts += 1
             # Each attempt authors against the reference bundle; the preceding attempt's verdict retired it (see
             # ``_PrepareScaffold.reset``).
@@ -940,13 +941,20 @@ def _driver_is_inside(workspace: Path, driver_input_path: Path, driver_path: Pat
 
 
 def _preparation_audit_dir(config: Config) -> tuple[Path | None, Path | None]:
-    """Where this preparation writes its experiments and its audit trail, as far as both can be resolved."""
+    """Where this preparation writes its experiments and its audit trail, as far as each resolves.
+
+    They are reported separately because they fail separately: a directory that
+    cannot be created costs the audit trail, while the experiments path it sits
+    under is still the one the external-artifact transaction has to exclude --
+    that tree changes while the agent runs, which is what the exclusion is for.
+    """
+    experiments_dir: Path | None = None
     try:
         experiments_dir = Path(config.experiments_dir)
         audit_dir = experiments_dir / "task_preparation"
         audit_dir.mkdir(parents=True, exist_ok=True)
     except (AttributeError, OSError, TypeError, ValueError):
-        return None, None
+        return experiments_dir, None
     return experiments_dir, audit_dir
 
 
@@ -1293,23 +1301,37 @@ def _preflight_deadline(deadline_sec: float, deadline_unix: float) -> float:
     return min(wall, deadline_unix) if deadline_unix > 0 else wall
 
 
-def _attempt_budget(attempts: int, *, deadline_sec: float, start: float) -> tuple[float, float]:
-    """The time the next attempt may spend, and the time left over when it must not start.
+@dataclass(frozen=True)
+class _AttemptBudget:
+    """Whether the next preparation attempt may start, and what it may spend.
 
-    A zero timeout says do not start one: either under ten seconds remain, or a
-    retry would get less than ``PREPARE_MIN_RETRY_SEC``, which is reported as a
-    starved retry rather than as a plain refusal. The last attempt may spend
-    everything but the salvage reserve; earlier ones are capped so a later one
-    still gets a turn.
+    A zero spend is not a refusal, which is why the two are separate fields: the
+    attempt still runs, ``_run_prepare_agent`` clamps the timeout to a second,
+    and the salvage preflight that follows the timeout is a real chance to pass.
+    Only running out of wall clock, or a retry that would get less than
+    ``PREPARE_MIN_RETRY_SEC``, stops the loop.
+    """
+
+    may_start: bool
+    timeout_sec: float = 0.0
+    starved_retry_sec: float = 0.0
+
+
+def _attempt_budget(attempts: int, *, deadline_sec: float, start: float) -> _AttemptBudget:
+    """What the next attempt may spend, and whether it may start at all.
+
+    The last attempt may spend everything but the salvage reserve; earlier ones
+    are capped so a later one still gets a turn.
     """
     remaining = deadline_sec - (time.monotonic() - start)
     if remaining <= 10:
-        return 0.0, 0.0
+        return _AttemptBudget(may_start=False)
     if attempts and remaining < PREPARE_MIN_RETRY_SEC:
-        return 0.0, remaining
+        return _AttemptBudget(may_start=False, starved_retry_sec=remaining)
     spendable = max(0.0, remaining - _SALVAGE_RESERVE_SEC)
     is_last_attempt = attempts + 1 >= PREPARE_MAX_ATTEMPTS
-    return (spendable if is_last_attempt else min(spendable, float(PER_ATTEMPT_CAP_SEC))), 0.0
+    timeout = spendable if is_last_attempt else min(spendable, float(PER_ATTEMPT_CAP_SEC))
+    return _AttemptBudget(may_start=True, timeout_sec=timeout)
 
 
 def _jit_timeout_hint(pf: PreflightResult) -> str:

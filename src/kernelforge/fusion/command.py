@@ -231,16 +231,16 @@ def _discover_anchored(
     )
     for text in anchor_report.warnings:
         log.warning("anchor: %s", text)
-    if dry_run:
-        # Resolution is the whole point of a dry run here: the operator has to see which launches were
-        # selected before an agent or a GPU is paid for.
-        log.info("dry run: anchor resolved to %s, skipping discovery", out / ANCHOR_REPORT_NAME)
-        return _Discovery([], anchor_report)
+    # Ahead of the dry-run exit: resolution is the whole point of a dry run here, so the operator sees which
+    # source the launches were selected against before an agent or a GPU is paid for.
     shapes = resolve_decode_shapes(model_path, decode_batch=decode_batch, attn_tp_size=attn_tp_size)
     source_file, _source_note = resolve_framework_source_file(
         model_path, framework, framework_root=framework_root, model_type=model_type
     )
     discovery_root = _discovery_root(source_file, framework_root)
+    if dry_run:
+        log.info("dry run: anchor resolved to %s, skipping discovery", out / ANCHOR_REPORT_NAME)
+        return _Discovery([], anchor_report)
     try:
         discovery_agent = agent_factory()
         recipes = discover_anchored_recipes(
