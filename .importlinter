@@ -218,6 +218,15 @@ ignore_imports =
 unmatched_ignore_imports_alerting = none
 
 
+[importlinter:contract:mb-layers]
+name = the multi-branch modules build on its contracts, never the reverse
+type = layers
+# Each module implements the protocols contracts declares for its peers, so the contracts sit below all of them.
+layers =
+    hyperloom_multibranch.cli : hyperloom_multibranch.scheduling : hyperloom_multibranch.specialist : hyperloom_multibranch.notebook : hyperloom_multibranch.rulegate : hyperloom_multibranch.repo : hyperloom_multibranch.toolbox
+    hyperloom_multibranch.contracts
+
+
 [importlinter:contract:acyclic]
 name = no cycles between sibling packages (baseline may only shrink)
 type = acyclic_siblings
