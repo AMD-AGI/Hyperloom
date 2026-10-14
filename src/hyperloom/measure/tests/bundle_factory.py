@@ -117,6 +117,18 @@ def flip_one_byte(path: Path, offset: int = 0) -> None:
     path.write_bytes(bytes(data))
 
 
+def point_yaml(*, conc: int, port: int = 8000) -> str:
+    return (
+        "benchmark:\n  model: m\n  envs:\n"
+        f'    CONC: "{conc}"\n    NUM_PROMPTS: "{conc * 10}"\n    RUN_EVAL: "false"\n'
+        f"server:\n  pid_dir: /shared/u1/sess-a/pids\n  port: {port}\ninferencex_path: /shared/u1/sess-a/ix\n"
+    )
+
+
+def point_document(yaml_text: str) -> dict[str, Any]:
+    return {"yaml": yaml_text, "sha256": hashlib.sha256(yaml_text.encode()).hexdigest()}
+
+
 def spec_document() -> dict[str, Any]:
     yaml_text = (
         "model: m\nserver:\n  pid_dir: /shared/u1/sess-a/pids\n  port: 8000\ninferencex_path: /shared/u1/sess-a/ix\n"
@@ -128,7 +140,7 @@ def spec_document() -> dict[str, Any]:
         "meta": {"purpose": "explore", "priority": 2, "branch_id": "b1", "parent_commit": "c0ffee", "retest_of": None},
         "hardware": {"gpu_type": "MI355X", "gpu_count": 1, "power_cap_w": 1400, "partition_mode": "SPX/NPS1"},
         "image": {"ref": "registry/fw:1", "digest": "sha256:" + "22" * 32},
-        "config": {"yaml": yaml_text, "sha256": hashlib.sha256(yaml_text.encode()).hexdigest()},
+        "config": [point_document(yaml_text)],
         "attachments": [{"id": "csv1", "kind": "file", "blob": "sha256:" + "33" * 32, "manifest_sha256": "44" * 32}],
         "process_env": {"AITER_LOG_LEVEL": "WARNING"},
         "platform_env": {"NCCL_IB_SL": "3"},

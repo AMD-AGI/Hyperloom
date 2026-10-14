@@ -11,11 +11,17 @@ from importlib import resources
 from typing import Any
 
 import pytest
-from hyperloom.measure.tests.bundle_factory import REQUEST_ID, spec_document, spec_json
+from hyperloom.measure.tests.bundle_factory import REQUEST_ID, point_document, point_yaml, spec_document, spec_json
 from jsonschema import Draft202012Validator
 
 from hyperloom.measure.docs import DocumentError
-from hyperloom.measure.spec import MeasurementSpec, canonical_for_fingerprint, fingerprint, spec_sha256
+from hyperloom.measure.spec import (
+    MeasurementSpec,
+    blob_input_path,
+    canonical_for_fingerprint,
+    fingerprint,
+    spec_sha256,
+)
 
 VERSION = "1.1.3+gtest"
 SCHEMA = json.loads(resources.files("hyperloom.contracts").joinpath("measurement_spec.v1.schema.json").read_text())
@@ -35,7 +41,7 @@ def _edit(change: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
 
 
 def _yaml(document: dict[str, Any], text: str) -> None:
-    document["config"] = {"yaml": text, "sha256": hashlib.sha256(text.encode()).hexdigest()}
+    document["config"] = [point_document(text)]
 
 
 def test_a_sheet_round_trips_through_bytes_and_keeps_its_hash() -> None:
@@ -92,7 +98,7 @@ def test_a_sheet_that_breaks_the_contract_is_refused_by_the_reader_and_by_the_sc
 
 
 def test_a_config_whose_hash_does_not_match_its_text_is_refused() -> None:
-    document = _edit(lambda d: d["config"].update(yaml=d["config"]["yaml"] + "# edited\n"))
+    document = _edit(lambda d: d["config"][0].update(yaml=d["config"][0]["yaml"] + "# edited\n"))
     with pytest.raises(DocumentError, match="does not match the YAML text"):
         MeasurementSpec.from_document(document)
 
@@ -130,7 +136,7 @@ def test_the_fingerprint_is_sixteen_hex_digits_and_stable() -> None:
         lambda d: d.update(request_id="a-completely-different-id"),
         lambda d: d["meta"].update(purpose="confirm", retest_of="r0", branch_id="b9", priority=0, parent_commit="zz"),
         lambda d: d["procedure"].update(deadline_unix=1.0),
-        lambda d: _yaml(d, d["config"]["yaml"].replace("/shared/u1/sess-a/pids", "/shared/u2/sess-b/pids")),
+        lambda d: _yaml(d, d["config"][0]["yaml"].replace("/shared/u1/sess-a/pids", "/shared/u2/sess-b/pids")),
         lambda d: d["environment"].update(blob_root="/shared/u2/other/blobs"),
         lambda d: d["environment"]["runtime"].update(snapshot="/shared/u2/other/rt"),
     ],
@@ -154,7 +160,7 @@ def test_the_fingerprint_ignores_what_is_not_measurement_content(change) -> None
         lambda d: d["environment"]["roots"][0]["entries"][0].update(blob="sha256:" + "88" * 32),
         lambda d: d["attachments"][0].update(manifest_sha256="aa" * 32),
         lambda d: d["model_hashes"].update({"config.json": "bb" * 32}),
-        lambda d: _yaml(d, d["config"]["yaml"].replace("port: 8000", "port: 8001")),
+        lambda d: _yaml(d, d["config"][0]["yaml"].replace("port: 8000", "port: 8001")),
     ],
     ids=[
         "gpu_count",
@@ -184,7 +190,7 @@ def test_the_runner_version_is_part_of_the_fingerprint() -> None:
 def test_session_directory_prefixes_are_replaced_so_two_sessions_agree() -> None:
     def with_session(root: str) -> dict[str, Any]:
         def change(d: dict[str, Any]) -> None:
-            _yaml(d, f"model: m\nextra_path: {root}/kernels\n")
+            _yaml(d, point_yaml(conc=4) + f"extra_path: {root}/kernels\n")
             d["process_env"]["PYTHONPATH"] = f"{root}/overlay:/opt/x"
 
         return _edit(change)
@@ -206,6 +212,48 @@ def test_a_yaml_that_does_not_parse_is_refused_when_fingerprinting() -> None:
     document = _edit(lambda d: _yaml(d, "a: [unclosed\n"))
     with pytest.raises(DocumentError, match="not valid YAML"):
         _fp(document)
+
+
+def _sweep(*points: str) -> dict[str, Any]:
+    def change(d: dict[str, Any]) -> None:
+        d["procedure"]["prep"] = "conc_sweep"
+        d["config"] = [point_document(text) for text in points]
+
+    return _edit(change)
+
+
+def test_a_conc_sweep_arm_carries_one_point_per_level_that_differ_only_in_the_level() -> None:
+    document = _sweep(point_yaml(conc=64), point_yaml(conc=32), point_yaml(conc=8))
+    spec = MeasurementSpec.from_document(document)
+    assert [p.yaml for p in spec.config] == [p["yaml"] for p in document["config"]]  # order is kept
+    assert list(VALIDATOR.iter_errors(document)) == []
+    assert _fp(document) != _fp(_sweep(point_yaml(conc=8), point_yaml(conc=32), point_yaml(conc=64)))
+
+
+@pytest.mark.parametrize(
+    ("document", "message", "schema_rejects"),
+    [
+        (lambda: _sweep(point_yaml(conc=4), point_yaml(conc=8, port=8001)), "more than the concurrency level", False),
+        (lambda: _sweep(point_yaml(conc=4), point_yaml(conc=4)), "appears twice", False),
+        (lambda: _sweep(), "at least one", True),
+        (lambda: _edit(lambda d: d["config"].append(point_document(point_yaml(conc=8)))), "exactly one", True),
+        (lambda: _edit(lambda d: d.update(config=[])), "exactly one", True),
+    ],
+    ids=["server args differ", "duplicate point", "no point", "grid with two points", "grid with none"],
+)
+def test_the_points_of_a_sheet_are_held_to_the_prep(document, message: str, schema_rejects: bool) -> None:
+    doc = document()
+    with pytest.raises(DocumentError, match=message):
+        MeasurementSpec.from_document(doc)
+    # Comparing YAML content is a rule only the reader states; counts the schema states as well.
+    assert (list(VALIDATOR.iter_errors(doc)) != []) == schema_rejects
+
+
+def test_a_blob_lives_at_in_blobs_under_its_bare_hex_hash() -> None:
+    assert blob_input_path("sha256:" + "ab" * 32) == "/in/blobs/" + "ab" * 32
+    for bad in ("ab" * 32, "sha256:xyz", "sha256:" + "AB" * 32, ""):
+        with pytest.raises(DocumentError, match="not a blob reference"):
+            blob_input_path(bad)
 
 
 def test_the_request_id_in_the_sheet_is_the_one_given() -> None:

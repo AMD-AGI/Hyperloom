@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from hyperloom.contracts.measurement import Purpose
+from hyperloom.measure.surface import POINT_ENV_KEYS, REQUEST_ENV_KEYS
 from hyperloom.measure.docs import (
     PREFIXED_SHA256_RE,
     SHA256_RE,
@@ -52,6 +53,9 @@ PLATFORM_ENV_NAMES = (
     "NCCL_IB_SL",
 )
 #: Keys of the materialised YAML whose value is a location, replaced by a placeholder in the fingerprint.
+#: ``benchmark.envs`` keys that differ from point to point of one arm: the request values and the counts that follow
+#: from the concurrency level.
+POINT_VALUE_KEYS = frozenset((*REQUEST_ENV_KEYS, *POINT_ENV_KEYS))
 PATH_KEYS = ("pid_dir", "inferencex_path", _RESULT_DIR, "output_dir", "output_path", "log_dir")
 
 _ATTACHMENT_ID = r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}"
@@ -395,6 +399,32 @@ class Outputs:
         return {_RESULT_DIR: self.result_dir, "max_total_bytes": self.max_total_bytes}
 
 
+def _check_points(points: tuple[Config, ...], prep: str) -> None:
+    """A grid test is one point; a conc_sweep arm is several that differ only in what the concurrency level decides."""
+    if prep == "grid" and len(points) != 1:
+        raise DocumentError("spec.config: a grid test has exactly one measurement point")
+    if not points:
+        raise DocumentError("spec.config: at least one measurement point is needed")
+    if len({point.sha256 for point in points}) != len(points):
+        raise DocumentError("spec.config: a measurement point appears twice")
+    if len(points) > 1:
+        rendered = [_without_point_values(_load_yaml(point.yaml)) for point in points]
+        if any(other != rendered[0] for other in rendered[1:]):
+            raise DocumentError("spec.config: the points of one arm differ in more than the concurrency level")
+
+
+def _without_point_values(config: Any) -> Any:
+    """The configuration with the values the concurrency level decides removed, as the points are compared."""
+    if not isinstance(config, Mapping):
+        return config
+    result = dict(config)
+    benchmark = result.get("benchmark")
+    if isinstance(benchmark, Mapping) and isinstance(benchmark.get("envs"), Mapping):
+        envs = {k: v for k, v in benchmark["envs"].items() if k not in POINT_VALUE_KEYS}
+        result["benchmark"] = {**benchmark, "envs": envs}
+    return result
+
+
 def _model_hashes(value: Any, path: str) -> dict[str, str]:
     hashes = string_map(value, path, key_check=relative_path)
     for key, digest in hashes.items():
@@ -429,7 +459,7 @@ class MeasurementSpec:
     meta: Meta
     hardware: Hardware
     image: ImageRef
-    config: Config
+    config: tuple[Config, ...]
     attachments: tuple[Attachment, ...]
     process_env: Mapping[str, str]
     platform_env: Mapping[str, str]
@@ -452,7 +482,7 @@ class MeasurementSpec:
             meta=r.section("meta", Meta.parse),
             hardware=r.section("hardware", Hardware.parse),
             image=r.section("image", ImageRef.parse),
-            config=r.section("config", Config.parse),
+            config=r.sequence("config", Config.parse),
             attachments=r.sequence("attachments", Attachment.parse),
             process_env=string_map(r.raw("process_env"), r.at("process_env")),
             platform_env=_platform_env(r.raw("platform_env"), r.at("platform_env")),
@@ -467,6 +497,7 @@ class MeasurementSpec:
         ids = [attachment.id for attachment in spec.attachments]
         if len(set(ids)) != len(ids):
             raise DocumentError("spec.attachments: an id appears twice")
+        _check_points(spec.config, spec.procedure.prep)
         if spec.kind == _ACCURACY and not spec.procedure.accuracy:
             raise DocumentError("spec.procedure.accuracy: a kind 'accuracy' sheet asks for the accuracy evaluation")
         return spec
@@ -483,7 +514,7 @@ class MeasurementSpec:
             "meta": self.meta.to_document(),
             "hardware": self.hardware.to_document(),
             "image": self.image.to_document(),
-            "config": self.config.to_document(),
+            "config": [point.to_document() for point in self.config],
             "attachments": [attachment.to_document() for attachment in self.attachments],
             "process_env": dict(self.process_env),
             "platform_env": dict(self.platform_env),
@@ -501,6 +532,17 @@ class MeasurementSpec:
 
     def sha256(self) -> str:
         return hashlib.sha256(self.to_bytes()).hexdigest()
+
+
+#: Where the caller writes every blob the sheet names, inside the sandbox: ``/in/blobs/<hex sha256>``.
+BLOBS_DIR = "/in/blobs"
+
+
+def blob_input_path(blob: str) -> str:
+    """The sandbox path of a blob named ``sha256:<hex>`` in the sheet; the runner checks the hash when it reads it."""
+    if not PREFIXED_SHA256_RE.fullmatch(blob):
+        raise DocumentError(f"not a blob reference: {blob!r}")
+    return f"{BLOBS_DIR}/{blob.removeprefix('sha256:')}"
 
 
 def spec_sha256(raw: bytes) -> str:
@@ -553,7 +595,7 @@ def canonical_for_fingerprint(spec: MeasurementSpec, *, session_dir: str | None 
     if document["environment"][_RUNTIME] is not None:
         del document["environment"][_RUNTIME]["snapshot"]
     session = session_dir.rstrip("/") if session_dir else None
-    document["config"] = {"yaml": _replace_session_dir(_load_yaml(spec.config.yaml), session)}
+    document["config"] = [{"yaml": _replace_session_dir(_load_yaml(p.yaml), session)} for p in spec.config]
     document["process_env"] = _replace_session_dir(document["process_env"], session)
     return document
 
