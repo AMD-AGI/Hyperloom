@@ -5,9 +5,8 @@
 
 Steps: the request validates (3.7, done by its constructor, plus the toolbox's own: no preset ``request_id``, a
 ``retest_of`` that names an accepted request); the parent recipe is read from the experiment repository; the delta
-applies and the environment compiles; the measurement surface matches the canonical one. Compile and surface come from
-hosted measurement (``hyperloom.measure.compile`` and ``surface``); they are reached through the two narrow seams below
-so the toolbox does not depend on them until they land.
+applies and the environment compiles; the measurement surface matches the canonical one. Compile, points and surface come from
+hosted measurement (``hyperloom.measure``) through the one :class:`MeasurementPlanner` seam.
 """
 
 from __future__ import annotations
@@ -17,27 +16,22 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from hyperloom.contracts.measurement import TestRequest
-from hyperloom.contracts.recipe import Recipe, RecipeDelta, RecipeError, apply
+from hyperloom.contracts.recipe import Recipe, RecipeError, apply
+from hyperloom.measure.compile import BaseImageMismatchError
+from hyperloom.measure.surface import SurfaceViolation
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 
 
-class SurfaceMismatch(Exception):
-    """The measurement surface of a request differs from the canonical one; ``str(error)`` names the field."""
+class MeasurementPlanner(Protocol):
+    """Compiles the test environment, generates the measurement points and checks the surface (acceptance steps 2 to 4).
 
+    Raises ``RecipeError`` when it cannot: a ``SurfaceViolation`` means the measurement surface differs, a
+    ``BaseImageMismatchError`` a recipe on another image, any other error a delta or patch that does not build.
+    The returned object is handed to the executor with every attempt.
+    """
 
-class EnvironmentCompiler(Protocol):
-    """Compiles the test environment from a recipe and a delta; raises ``RecipeError`` when it cannot (for example a
-    patch that does not apply on the parent). Writes the delta's new files to the blob store as a side effect."""
-
-    def compile(self, recipe: Recipe, delta: RecipeDelta) -> object: ...
-
-
-class SurfaceGuard(Protocol):
-    """Builds the measurement point of a request and compares its surface to the canonical one; raises
-    :class:`SurfaceMismatch` when they differ."""
-
-    def check(self, request: TestRequest, target: Recipe) -> None: ...
+    def plan(self, request: TestRequest, parent: Recipe) -> object: ...
 
 
 @dataclass(frozen=True)
@@ -51,15 +45,13 @@ class Acceptance:
     def __init__(
         self,
         repo: ExperimentRepo,
-        compiler: EnvironmentCompiler,
-        surface: SurfaceGuard,
+        planner: MeasurementPlanner,
         *,
         active_image_digest: str | None,
         is_accepted: Callable[[str], bool],
     ) -> None:
         self._repo = repo
-        self._compiler = compiler
-        self._surface = surface
+        self._planner = planner
         self._image = active_image_digest
         self._is_accepted = is_accepted
 
@@ -72,10 +64,8 @@ class Acceptance:
             raise RequestRejected(f"retest_of {request.retest_of!r} names no accepted request", "unknown_retest")
         recipe = await self._read_parent(request)
         self._check_image(recipe)
-        target = self._apply(recipe, request)
-        environment = self._compile(recipe, request)
-        self._check_surface(request, target)
-        return Prepared(environment)
+        self._check_delta(recipe, request)
+        return Prepared(self._plan(recipe, request))
 
     async def _read_parent(self, request: TestRequest) -> Recipe:
         try:
@@ -95,24 +85,22 @@ class Acceptance:
             )
 
     @staticmethod
-    def _apply(recipe: Recipe, request: TestRequest) -> Recipe:
+    def _check_delta(recipe: Recipe, request: TestRequest) -> None:
         try:
-            return apply(recipe, request.delta)
+            apply(recipe, request.delta)
         except RecipeError as error:
             raise RequestRejected(
                 f"the delta does not fit the parent recipe: {error}", "delta_not_applicable"
             ) from error
 
-    def _compile(self, recipe: Recipe, request: TestRequest) -> object:
+    def _plan(self, recipe: Recipe, request: TestRequest) -> object:
         try:
-            return self._compiler.compile(recipe, request.delta)
-        except RecipeError as error:
-            raise RequestRejected(f"the environment does not compile: {error}", "delta_not_applicable") from error
-
-    def _check_surface(self, request: TestRequest, target: Recipe) -> None:
-        try:
-            self._surface.check(request, target)
-        except SurfaceMismatch as error:
+            return self._planner.plan(request, recipe)
+        except SurfaceViolation as error:
             raise RequestRejected(
                 f"measurement surface differs from the canonical one: {error}", "surface_mismatch"
             ) from error
+        except BaseImageMismatchError as error:
+            raise RequestRejected(str(error), "base_image_mismatch") from error
+        except RecipeError as error:
+            raise RequestRejected(f"the environment does not compile: {error}", "delta_not_applicable") from error

@@ -21,10 +21,10 @@ from hyperloom.contracts.measurement import (
     TestResult,
     Validity,
 )
+from hyperloom.measure.surface import SurfaceViolation
 from hyperloom.contracts.recipe import ConfigDelta, Recipe, RecipeDelta, RecipeError
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.notebook import LocalNotebook
-from hyperloom_multibranch.toolbox.acceptance import SurfaceMismatch
 from hyperloom_multibranch.toolbox.attempts import MeasurementRefused, TestJob
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.submission_log import SubmissionLog
@@ -71,26 +71,21 @@ class FakeRepo:
         return self.recipes[commit]
 
 
-class FakeCompiler:
-    """Refuses the deltas that ask for ``--does-not-compile``, as a patch that does not apply would."""
+class FakePlanner:
+    """Refuses the deltas that ask for ``--does-not-compile``, as a patch that does not apply would, and a request
+    whose ``surface_error`` is set, as a changed workload would."""
 
     def __init__(self) -> None:
         self.calls: list[RecipeDelta] = []
-
-    def compile(self, recipe: Recipe, delta: RecipeDelta) -> object:
-        self.calls.append(delta)
-        if "--does-not-compile" in delta.config.server_args:
-            raise RecipeError("patch patch/vllm/0001 does not apply")
-        return {"env": recipe.digest()}
-
-
-class FakeSurface:
-    def __init__(self) -> None:
         self.mismatch: str | None = None
 
-    def check(self, request: TestRequest, target: Recipe) -> None:
+    def plan(self, request: TestRequest, parent: Recipe) -> object:
+        self.calls.append(request.delta)
+        if "--does-not-compile" in request.delta.config.server_args:
+            raise RecipeError("patch patch/vllm/0001 does not apply")
         if self.mismatch:
-            raise SurfaceMismatch(self.mismatch)
+            raise SurfaceViolation(self.mismatch)
+        return {"env": parent.digest()}
 
 
 def ok(job: TestJob, node: str = "n1", **fields: object) -> TestResult:
@@ -147,8 +142,7 @@ class ScriptedExecutor:
 class Rig:
     toolbox: RealToolbox
     executor: ScriptedExecutor
-    compiler: FakeCompiler
-    surface: FakeSurface
+    planner: FakePlanner
     repo: FakeRepo
     notebook: LocalNotebook
     root: Path
@@ -170,6 +164,8 @@ def build(
     with_claims: bool = True,
     clock: Callable[[], float] | None = None,
     wrap_sink: Callable[[LocalNotebook], object] | None = None,
+    planner: object | None = None,
+    tools: Callable[[LocalNotebook], object] | None = None,
 ) -> Rig:
     """A toolbox over a notebook directory and a submit log under ``tmp_path``; building again over the same
     ``tmp_path`` is a restart."""
@@ -179,22 +175,23 @@ def build(
     clock = clock or FakeClock()
     notebook = LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"), clock=clock)
     executor = executor or ScriptedExecutor()
-    compiler, surface, repo = FakeCompiler(), FakeSurface(), repo or FakeRepo()
+    fake, repo = FakePlanner(), repo or FakeRepo()
+    planner = planner or fake
     toolbox = RealToolbox(
         log=SubmissionLog(tmp_path / "toolbox" / "submissions.jsonl", "campaign-1"),
         repo=repo,
         sink=wrap_sink(notebook) if wrap_sink else notebook,  # type: ignore[arg-type]
         health=notebook,
         executor=executor,
-        compiler=compiler,
-        surface=surface,
+        planner=planner,
         active_image_digest=active_image,
         policy=policy,
         claims=notebook if with_claims else None,
         records=notebook,
+        tools=tools(notebook) if tools else None,  # type: ignore[arg-type]
         clock=clock,
     )
-    return Rig(toolbox, executor, compiler, surface, repo, notebook, tmp_path, clock)
+    return Rig(toolbox, executor, fake, repo, notebook, tmp_path, clock)
 
 
 async def settle() -> None:

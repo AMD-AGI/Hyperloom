@@ -35,12 +35,13 @@ from hyperloom_multibranch.contracts.toolbox import (
     TestRecordSink,
     UnknownTestRequest,
 )
-from hyperloom_multibranch.toolbox.acceptance import Acceptance, EnvironmentCompiler, SurfaceGuard
+from hyperloom_multibranch.toolbox.acceptance import Acceptance, MeasurementPlanner
 from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES, AttemptRunner, Executor, TestJob
 from hyperloom_multibranch.toolbox.notebook_records import notebook_request, notebook_result
 from hyperloom_multibranch.toolbox.quarantine import Quarantine
 from hyperloom_multibranch.toolbox.queue import QueuedTest, QueuePolicy, WorkQueue, sandbox_priority
 from hyperloom_multibranch.toolbox.submission_log import LogEntry, SubmissionLog
+from hyperloom_multibranch.toolbox.tools import JobStatus, ToolJobs, ToolRequest
 
 logger = logging.getLogger(__name__)
 
@@ -59,12 +60,12 @@ class RealToolbox:
         sink: TestRecordSink,
         health: NodeHealth,
         executor: Executor,
-        compiler: EnvironmentCompiler,
-        surface: SurfaceGuard,
+        planner: MeasurementPlanner,
         active_image_digest: str | None,
         policy: QueuePolicy | None = None,
         claims: ClaimService | None = None,
         records: RecordSearch | None = None,
+        tools: ToolJobs | None = None,
         max_infra_retries: int = DEFAULT_MAX_INFRA_RETRIES,
         claim_ttl_seconds: float = CLAIM_TTL_SECONDS,
         clock: Callable[[], float] = time.time,
@@ -73,7 +74,7 @@ class RealToolbox:
         self._queue = WorkQueue(policy or QueuePolicy())
         self._quarantine = Quarantine(health)
         self._acceptance = Acceptance(
-            repo, compiler, surface, active_image_digest=active_image_digest, is_accepted=self._is_accepted
+            repo, planner, active_image_digest=active_image_digest, is_accepted=self._is_accepted
         )
         self._runner = AttemptRunner(
             executor,
@@ -82,6 +83,8 @@ class RealToolbox:
             max_infra_retries=max_infra_retries,
         )
         self._ttl, self._clock = claim_ttl_seconds, clock
+        self._tools = tools
+        self._tool_jobs: dict[str, list[str]] = {}
         self._lock = asyncio.Lock()
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._renewer: asyncio.Task[None] | None = None
@@ -160,7 +163,26 @@ class RealToolbox:
         pending = [e for e in self._log.entries() if e.branch == branch_id and e.waiting]
         for entry in pending:
             await self._withdraw(entry, reason)
-        return len(pending)
+        cancelled = sum(self._tools.cancel(job) for job in self._tool_jobs.pop(branch_id, [])) if self._tools else 0
+        return len(pending) + cancelled
+
+    def submit_tool(self, request: ToolRequest) -> str:
+        """Start an asynchronous tool (profile, roofline, build, ...) for a branch; returns its job id at once.
+
+        Tool jobs are not tests: they take no slot of K and write no test record. Their result reaches the branch's
+        inbox through the notebook, and a stopped branch's running jobs are cancelled with :meth:`cancel_branch`.
+        """
+
+        if self._tools is None:
+            raise RequestRejected("this toolbox serves no asynchronous tools")
+        job_id = self._tools.submit(request)
+        self._tool_jobs.setdefault(request.branch, []).append(job_id)
+        return job_id
+
+    def tool_status(self, job_id: str) -> JobStatus:
+        if self._tools is None:
+            raise UnknownTestRequest(job_id)
+        return self._tools.status(job_id)
 
     def record_cold_start(self, seconds: float) -> None:
         self._queue.cold_start_seconds = seconds

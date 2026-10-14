@@ -26,19 +26,19 @@ async def _rejected(rig, request, code: str) -> None:
 async def test_a_compile_failure_is_refused_and_never_queues(tmp_path: Path) -> None:
     rig = build(tmp_path)
     await _rejected(rig, req(change=BAD_DELTA), "delta_not_applicable")
-    assert rig.compiler.calls == [BAD_DELTA]
+    assert rig.planner.calls == [BAD_DELTA]
 
 
 async def test_a_delta_that_does_not_fit_the_parent_recipe_is_refused_before_compiling(tmp_path: Path) -> None:
     rig = build(tmp_path)
     missing_component = RecipeDelta(components=(ComponentChange("sglang"),))
     await _rejected(rig, req(change=missing_component), "delta_not_applicable")
-    assert rig.compiler.calls == []
+    assert rig.planner.calls == []
 
 
 async def test_a_surface_mismatch_is_refused(tmp_path: Path) -> None:
     rig = build(tmp_path)
-    rig.surface.mismatch = "isl 2048 != 1024"
+    rig.planner.mismatch = "isl 2048 != 1024"
     with pytest.raises(RequestRejected, match="isl 2048") as refused:
         await rig.toolbox.submit_test(req())
     assert refused.value.code == "surface_mismatch"
