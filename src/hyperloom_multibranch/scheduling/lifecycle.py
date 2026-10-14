@@ -8,8 +8,9 @@ FINAL candidates are fixed while every branch still stands, then exploration end
 failed PRELUDE, a stop signal, the session deadline or an unhandled error skip straight to CLOSE, which always runs
 and kills every process the session started. The deadline plus the CLOSE grace bounds CLOSE itself; a stop signal
 brings that hard stop forward to the CLOSE grace from the signal, once, and the unwinding of the cancelled phases
-and CLOSE share it. A second signal, whenever it arrives, cuts
-both short: every registered process is killed and the report written at once.
+and CLOSE share it. An unhandled error brings it forward the same way when CLOSE starts, and so does a first signal
+that arrives during CLOSE; CLOSE is cut short if it still runs then. A second signal, whenever it arrives, cuts the
+unwinding and CLOSE short at once. A CLOSE cut short kills every registered process and writes the report.
 """
 
 from __future__ import annotations
@@ -60,7 +61,7 @@ POLICY_VERSIONS = {"quota": QUOTA_POLICY_VERSION, "judge_prompt": JUDGE_PROMPT_V
 COMPLETED_REASONS = frozenset({SessionStopReason.TIME_EXHAUSTED, SessionStopReason.GLOBAL_CONVERGED})
 #: The distribution this package ships in (pyproject.toml ``[project] name``).
 MB_DISTRIBUTION = "hyperloom-inference_optimizer"
-CUT_SHORT = "CLOSE was cut short by another stop signal"
+CUT_SHORT = "CLOSE was cut short after a stop signal"
 
 
 @dataclass(frozen=True)
@@ -252,10 +253,11 @@ class Session:
 
     async def _close(self, ending: SessionOutcome, hard_stop: HardStop) -> SessionOutcome:
         self._phase("close", stop_reason=ending.stop_reason.value, error=ending.error)
-        closing = asyncio.ensure_future(
-            self._closer.close(ending.stop_reason, ending.final, ending.error, hard_stop.at)
-        )
-        cut = asyncio.ensure_future(self._signals.wait_second())
+        if ending.stop_reason is SessionStopReason.ABORTED:
+            hard_stop.bring_forward()
+        close_by = hard_stop.at
+        closing = asyncio.ensure_future(self._closer.close(ending.stop_reason, ending.final, ending.error, close_by))
+        cut = asyncio.ensure_future(self._cut(hard_stop, close_by))
         try:
             await asyncio.wait({closing, cut}, return_when=asyncio.FIRST_COMPLETED)
         finally:
@@ -275,8 +277,20 @@ class Session:
             )
         return replace(ending, close=report)
 
+    async def _cut(self, hard_stop: HardStop, close_by: float) -> None:
+        """Return when CLOSE has to be cut short: at a second stop signal, or once the CLOSE grace has passed from a
+        first one that brings the hard stop before ``close_by``."""
+
+        await self._signals.wait()
+        until = hard_stop.bring_forward()
+        if until >= close_by:
+            await self._signals.wait_second()
+            return
+        with contextlib.suppress(asyncio.TimeoutError):
+            await self._clock.wait_for(self._signals.wait_second(), until - self._clock.now())
+
     async def _cut_short(self, ending: SessionOutcome) -> SessionOutcome:
-        """CLOSE abandoned for a second signal: kill every registered process and report what is still alive."""
+        """CLOSE abandoned after a stop signal: kill every registered process and report what is still alive."""
 
         await self._processes.kill_all()
         error = "; ".join(filter(None, (ending.error, CUT_SHORT)))

@@ -95,8 +95,8 @@ class SessionBudget:
 class HardStop:
     """When nothing of the session may run any longer: the budget's hard stop until :meth:`bring_forward` moves it.
 
-    A stop signal brings it forward to the CLOSE grace from that moment, once, so the unwinding of the phases, a
-    cancelled PRELUDE's child and CLOSE all share that one grace.
+    A stop signal or an unhandled error brings it forward to the CLOSE grace from that moment, once, so the unwinding
+    of the phases, a cancelled PRELUDE's child and CLOSE all share that one grace.
     """
 
     def __init__(self, budget: SessionBudget, clock: Clock) -> None:

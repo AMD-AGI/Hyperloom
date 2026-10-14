@@ -20,7 +20,10 @@ from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 
+import pytest
+
 from hyperloom.common.proctree import running
+from hyperloom.contracts.recipe import Recipe
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, LineageKind
 from hyperloom_multibranch.contracts.scheduling import AdmissionStatus, ForkRequest
@@ -84,6 +87,29 @@ class InsistingLifecycle(MbFakeLifecycle):
         await asyncio.Event().wait()
 
 
+class StuckToolbox(MbFakeToolbox):
+    """A toolbox whose withdrawal of every test never returns; a failure double, not a placeholder."""
+
+    async def withdraw_all(self) -> tuple[str, ...]:
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+
+class SignallingToolbox(StuckToolbox):
+    """The stuck toolbox, signalling the scheduler once as it starts to withdraw; a failure double."""
+
+    async def withdraw_all(self) -> tuple[str, ...]:
+        os.kill(os.getpid(), signal.SIGTERM)
+        return await super().withdraw_all()
+
+
+class BrokenRepo(MbFakeRepo):
+    """A repository that fails on the root commit with an error the session does not handle; a failure double."""
+
+    async def init_root(self, recipe: Recipe) -> str:
+        raise LookupError("no object store")
+
+
 class SilentModel(ScriptedCompletion):
     """A judge model that never answers; a failure double, not a placeholder."""
 
@@ -102,6 +128,8 @@ class Stage:
     judge: ScriptedCompletion
     pids: list[int]
     stuck: frozenset[str] = frozenset()
+    toolbox_type: type[MbFakeToolbox] = MbFakeToolbox
+    repo_type: type[MbFakeRepo] = MbFakeRepo
     toolbox: MbFakeToolbox = field(init=False)
     gate: MbFakeGate = field(init=False)
     repo: MbFakeRepo = field(init=False)
@@ -112,9 +140,9 @@ class Stage:
         return LocalNotebook(self.layout.notebook, Writer(role, branch or role.value, branch), clock=self.time.now)
 
     def factory(self, setup: PeerSetup) -> Peers:
-        toolbox = MbFakeToolbox(self.handle(Role.TOOLBOX), sweeps=SWEEPS, stuck=self.stuck)
+        toolbox = self.toolbox_type(self.handle(Role.TOOLBOX), sweeps=SWEEPS, stuck=self.stuck)
         gate = MbFakeGate(self.handle(Role.GATE), toolbox, setup.desk, verdicts=MERGE_VERDICTS)
-        repo = MbFakeRepo()
+        repo = self.repo_type()
         self.toolbox, self.gate, self.repo, self.setup = toolbox, gate, repo, setup
         return Peers(self.lifecycle, toolbox, gate, repo)
 
@@ -376,6 +404,34 @@ async def test_a_judge_soft_stop_ends_explore_early_and_still_runs_final(tmp_pat
     assert outcome.final is not None and outcome.final.chosen is not None
     assert outcome.final.chosen.commit == ROOT_COMMIT
     assert sorted(stage.lifecycle.stopped) == ["b01", "b02"]
+
+
+async def test_a_first_signal_during_close_cuts_it_short_after_one_close_grace(tmp_path: Path) -> None:
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.judge = ScriptedCompletion([OPENING, _reply({"open": 0, "stop_session": {"reason": CONVERGED_REASON}})])
+    stage.toolbox_type = SignallingToolbox
+
+    outcome = await stage.run()
+
+    assert outcome.stop_reason is SessionStopReason.GLOBAL_CONVERGED and outcome.final is not None
+    assert CUT_SHORT in outcome.error and outcome.close is not None and outcome.close.stop.failures == (CUT_SHORT,)
+    [close] = [row for row in _decisions(stage) if row["kind"] == "phase" and row["reason"] == "close"]
+    grace = SessionBudget.from_hours(SETTINGS.max_hours, START).close_grace_seconds
+    assert stage.time.now() <= float(str(close["at"])) + grace
+
+
+async def test_an_unhandled_error_bounds_close_by_one_close_grace(tmp_path: Path) -> None:
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.toolbox_type, stage.repo_type = StuckToolbox, BrokenRepo
+
+    with pytest.raises(LookupError, match="no object store"):
+        await stage.run()
+
+    report = json.loads(stage.layout.report.read_text())
+    assert report["stop_reason"] == SessionStopReason.ABORTED.value and STOP_OVERRAN in report["stop"]["failures"]
+    [close] = [row for row in _decisions(stage) if row["kind"] == "phase" and row["reason"] == "close"]
+    grace = SessionBudget.from_hours(SETTINGS.max_hours, START).close_grace_seconds
+    assert stage.time.now() <= float(str(close["at"])) + grace
 
 
 async def test_a_failed_opening_judge_call_opens_one_branch_at_k_one(tmp_path: Path) -> None:
