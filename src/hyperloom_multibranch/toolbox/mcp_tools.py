@@ -5,7 +5,8 @@
 
 :func:`register_specialist_tools` puts the specialist-scoped tools on a :class:`~hyperloom.hosted.mcp_server.McpServer`
 and :func:`grant_access` issues the token one specialist gets. Every handler takes the branch from the token and never
-from the arguments, so a specialist submits, reads, cancels, claims and logs for its own branch only:
+from the arguments, so a specialist submits, cancels, claims, logs and reads its test results for its own branch
+only; the notebook's search and record reads are shared across branches, as the notebook contract has them:
 
 * ``submit_test``, ``test_result``, ``cancel_test`` and ``queue_state`` go through the toolbox interface;
 * ``poll_inbox`` reads the branch's inbox;
