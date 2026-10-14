@@ -14,8 +14,9 @@ import yaml
 
 from hyperloom.measure import consistency
 from hyperloom.measure.consistency import (
-    FARM_INVENTORY_FILE,
     ChecklistItem,
+    FARM_INVENTORY_SCHEMA,
+    RootExpectation,
     Criteria,
     ItemReport,
     Side,
@@ -24,6 +25,7 @@ from hyperloom.measure.consistency import (
     run_checklist,
     summarize,
 )
+from hyperloom.measure.runner.inventory import FARM_INVENTORY_FILE, farm_inventory
 from hyperloom.measure.socket import RoundOutcome, TestCall, TestOutcome
 from hyperloom.measure.tests.hosted_fixtures import FAKE_RUNNER, Rig, make_rig, point_yaml
 from hyperloom.contracts.measurement import SandboxFacts
@@ -59,7 +61,7 @@ class FakeLocal:
         return TestOutcome(0, "", "", (RoundOutcome(0, "measure", workspace, 0),), sandbox, call.task_id)
 
 
-def _item(tmp: Path, name: str, patched: dict[str, str] | None = None, **fake) -> ChecklistItem:
+def _item(tmp: Path, name: str, patched: dict[str, RootExpectation] | None = None, **fake) -> ChecklistItem:
     point = point_yaml(tmp, f"{name}.yaml", **fake)
 
     def call(output_dir: Path, task_id: str) -> TestCall:
@@ -227,12 +229,50 @@ def test_an_empty_checklist_is_no_data_not_a_pass(rig, tmp_path) -> None:
 # -- rebuilt files --------------------------------------------------------------------------------------------------
 
 
-def test_rebuilt_file_hashes_that_match_the_local_compile_pass(rig, tmp_path) -> None:
+def _inventory(roots: dict[str, dict]) -> str:
+    """A farm inventory as the runner writes it, as the flow-style YAML value the fake runner copies into a file."""
+    return json.dumps({"schema": FARM_INVENTORY_SCHEMA, "roots": roots})
+
+
+def _root(upserts: dict[str, str], deletes: list[str] | None = None, import_name: str = "sglang") -> dict:
+    return {"import_name": import_name, "upserts": upserts, "deletes": deletes or []}
+
+
+A, B, C = "aa" * 32, "bb" * 32, "cc" * 32
+
+
+def test_the_schema_and_file_name_are_the_runners() -> None:
+    assert farm_inventory(None)["schema"] == FARM_INVENTORY_SCHEMA
+    assert FARM_INVENTORY_FILE == "farm_inventory.json"
+
+
+def test_rebuilt_files_that_match_the_local_compile_pass(rig, tmp_path) -> None:
     r = rig()
-    inventory = {"srt/a.py": "aa" * 32, "srt/b.py": "bb" * 32}
-    item = _item(tmp_path, "patched", patched=dict(inventory), fake_inventory=json.dumps(inventory))
+    expected = {"sglang": RootExpectation({"srt/a.py": A, "srt/b.py": B}, ("srt/old.py",))}
+    item = _item(
+        tmp_path,
+        "patched",
+        patched=expected,
+        fake_inventory=_inventory({"sglang": _root({"srt/a.py": A, "srt/b.py": B}, ["srt/old.py"])}),
+    )
     summary, lines = _check(r, tmp_path, [item])
     assert summary.verdict == "PASS" and lines[0]["rebuilt_files_equal"] is True
+
+
+def test_the_same_path_in_two_roots_is_compared_per_root(rig, tmp_path) -> None:
+    r = rig()
+    expected = {"sglang": RootExpectation({"utils.py": A}), "aiter": RootExpectation({"utils.py": B})}
+    inventory = {"sglang": _root({"utils.py": A}), "aiter": _root({"utils.py": B}, import_name="aiter")}
+    summary, lines = _check(
+        r, tmp_path, [_item(tmp_path, "two", patched=expected, fake_inventory=_inventory(inventory))]
+    )
+    assert summary.verdict == "PASS", lines[0]["problems"]
+    swapped = {"sglang": _root({"utils.py": B}), "aiter": _root({"utils.py": A}, import_name="aiter")}
+    summary, lines = _check(
+        r, tmp_path, [_item(tmp_path, "swap", patched=expected, fake_inventory=_inventory(swapped))]
+    )
+    assert summary.verdict == "FAIL"
+    assert "rebuilt_file_differs: sglang/utils.py" in lines[0]["problems"]
 
 
 def test_a_rebuilt_file_that_differs_fails_and_names_the_file(rig, tmp_path) -> None:
@@ -240,26 +280,70 @@ def test_a_rebuilt_file_that_differs_fails_and_names_the_file(rig, tmp_path) -> 
     item = _item(
         tmp_path,
         "patched",
-        patched={"srt/a.py": "aa" * 32},
-        fake_inventory=json.dumps({"srt/a.py": "cc" * 32}),
+        patched={"sglang": RootExpectation({"srt/a.py": A})},
+        fake_inventory=_inventory({"sglang": _root({"srt/a.py": C})}),
     )
     summary, lines = _check(r, tmp_path, [item])
     assert summary.verdict == "FAIL" and summary.rebuilt_files_all_equal is False
-    assert "rebuilt_file_differs: srt/a.py" in lines[0]["problems"]
+    assert "rebuilt_file_differs: sglang/srt/a.py" in lines[0]["problems"]
+    assert lines[0]["compared"] is True, "the two sides were compared, and they differ"
+
+
+@pytest.mark.parametrize(
+    ("reported", "problem"),
+    [
+        ({"sglang": _root({})}, "rebuilt_file_missing: sglang/srt/a.py"),
+        ({"sglang": _root({"srt/a.py": A, "srt/extra.py": B})}, "rebuilt_file_unexpected: sglang/srt/extra.py"),
+        ({"sglang": _root({"srt/a.py": A}, ["srt/gone.py"])}, "rebuilt_deletes_differ: sglang"),
+        ({"sglang": _root({"srt/a.py": A}), "aiter": _root({"x.py": B})}, "rebuilt_root_unexpected: aiter"),
+    ],
+)
+def test_any_difference_between_the_rebuilt_set_and_the_compiled_set_fails(rig, tmp_path, reported, problem) -> None:
+    r = rig()
+    item = _item(
+        tmp_path, "patched", patched={"sglang": RootExpectation({"srt/a.py": A})}, fake_inventory=_inventory(reported)
+    )
+    summary, lines = _check(r, tmp_path, [item])
+    assert summary.verdict == "FAIL" and problem in lines[0]["problems"]
 
 
 def test_a_patched_test_without_an_inventory_cannot_be_compared_and_fails(rig, tmp_path) -> None:
     r = rig()
-    summary, lines = _check(r, tmp_path, [_item(tmp_path, "patched", patched={"srt/a.py": "aa" * 32})])
-    assert summary.verdict == "FAIL" and lines[0]["compared"] is False
-    assert f"not_comparable: the runner listed no {FARM_INVENTORY_FILE}" in lines[0]["problems"]
-
-
-def test_a_patched_file_missing_from_the_inventory_cannot_be_compared(rig, tmp_path) -> None:
-    r = rig()
-    item = _item(tmp_path, "p", patched={"srt/a.py": "aa" * 32}, fake_inventory=json.dumps({"srt/other.py": "aa" * 32}))
+    item = _item(tmp_path, "patched", patched={"sglang": RootExpectation({"srt/a.py": A})})
     summary, lines = _check(r, tmp_path, [item])
     assert summary.verdict == "FAIL" and lines[0]["compared"] is False
+    assert f"not_comparable: the runner listed no usable {FARM_INVENTORY_FILE}" in lines[0]["problems"]
+
+
+def test_an_inventory_of_another_schema_is_not_read(rig, tmp_path) -> None:
+    r = rig()
+    flat = json.dumps({"srt/a.py": A})
+    item = _item(tmp_path, "patched", patched={"sglang": RootExpectation({"srt/a.py": A})}, fake_inventory=flat)
+    summary, lines = _check(r, tmp_path, [item])
+    assert summary.verdict == "FAIL" and lines[0]["compared"] is False
+
+
+def test_a_patched_root_the_runner_did_not_report_cannot_be_compared(rig, tmp_path) -> None:
+    r = rig()
+    item = _item(
+        tmp_path,
+        "p",
+        patched={"sglang": RootExpectation({"srt/a.py": A})},
+        fake_inventory=_inventory({"other": _root({"srt/a.py": A}, import_name="other")}),
+    )
+    summary, lines = _check(r, tmp_path, [item])
+    assert summary.verdict == "FAIL" and lines[0]["compared"] is False
+    assert "not_comparable: the runner did not report root sglang" in lines[0]["problems"]
+
+
+def test_an_unpatched_test_with_an_empty_inventory_is_fine_and_with_a_rebuilt_root_is_not(rig, tmp_path) -> None:
+    r = rig()
+    summary, lines = _check(r, tmp_path, [_item(tmp_path, "plain", fake_inventory=_inventory({}))])
+    assert summary.verdict == "PASS" and lines[0]["rebuilt_files_equal"] is None
+    summary, lines = _check(
+        r, tmp_path, [_item(tmp_path, "sneaky", fake_inventory=_inventory({"sglang": _root({"a.py": A})}))]
+    )
+    assert summary.verdict == "FAIL" and "rebuilt_root_unexpected: sglang" in lines[0]["problems"]
 
 
 # -- the arithmetic -------------------------------------------------------------------------------------------------
@@ -323,6 +407,13 @@ def test_the_checklist_file_is_checked_field_by_field(tmp_path) -> None:
     path.write_text(json.dumps({"items": [{"id": "a", "points": ["p.yaml"], "bogus": 1}]}))
     with pytest.raises(ValueError, match="unknown keys"):
         load_checklist(path)
+    path.write_text(json.dumps({"items": [{"id": "a", "points": ["p.yaml"], "patched_roots": {"s": {"upserts": []}}}]}))
+    with pytest.raises(ValueError, match="upserts: expected"):
+        load_checklist(path)
+    path.write_text(
+        json.dumps({"items": [{"id": "a", "points": ["p.yaml"], "patched_roots": {"s": {"upserts": {"x": A}}}}]})
+    )
+    assert load_checklist(path)[0].patched_roots == {"s": RootExpectation({"x": A})}
     path.write_text(json.dumps({"items": [{"id": "a"}]}))
     with pytest.raises(ValueError, match="non-empty 'points'"):
         load_checklist(path)

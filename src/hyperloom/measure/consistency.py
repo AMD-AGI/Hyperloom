@@ -30,6 +30,7 @@ from typing import Any
 
 from hyperloom.measure.hosted import HOSTED_DIR_NAME
 from hyperloom.measure.returncodes import HOSTED_RESULT_REJECTED_RC
+from hyperloom.measure.runner.inventory import FARM_INVENTORY_FILE
 from hyperloom.measure.socket import MeasurementBackend, RoundOutcome, TestCall, TestOutcome
 from hyperloom.orchestrator.actions.executors.benchmark_result import extract_benchmark_measurement
 
@@ -39,15 +40,16 @@ __all__ = [
     "ChecklistItem",
     "Side",
     "Summary",
-    "FARM_INVENTORY_FILE",
+    "FARM_INVENTORY_SCHEMA",
+    "RootExpectation",
     "load_checklist",
     "main",
     "run_checklist",
     "summarize",
 ]
 
-#: The file the runner lists in its result bundle with the hash of every file it rebuilt: ``{relative path: sha256}``.
-FARM_INVENTORY_FILE = "farm_inventory.json"
+#: The schema of the file the runner lists in its result bundle (``FARM_INVENTORY_FILE``) with what it rebuilt.
+FARM_INVENTORY_SCHEMA = "hyperloom.farm-inventory/v1"
 REPORT_NAME = "benchmark_report.json"
 REPORT_FILE = "consistency.jsonl"
 DEFAULT_REPORT_DIR = Path("reports/hosted")
@@ -66,16 +68,25 @@ class Criteria:
 
 
 @dataclass(frozen=True)
+class RootExpectation:
+    """What the local compile produced for one environment root: the sha256 of each upserted file (path relative to the
+    package root) and the deleted paths."""
+
+    upserts: Mapping[str, str] = field(default_factory=dict)
+    deletes: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class ChecklistItem:
     """One test of the checklist.
 
-    ``patched_files`` maps a file the recipe's patches change (path relative to its package root) to the sha256 the
-    local compile produced; an empty mapping means the test has no patch and the hashes are not compared.
+    ``patched_roots`` maps a root id to what the local compile made of it; an empty mapping means the test has no
+    patch, and then the runner must not have rebuilt anything either.
     """
 
     id: str
     call: Callable[[Path, str], TestCall]
-    patched_files: Mapping[str, str] = field(default_factory=dict)
+    patched_roots: Mapping[str, RootExpectation] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -211,26 +222,50 @@ def read_side(outcome: TestOutcome, log_dir: Path) -> Side:
     )
 
 
-def _rebuilt_hashes(hosted_dir: Path) -> dict[str, str] | None:
+def _farm_roots(hosted_dir: Path) -> dict[str, Any] | None:
+    """The ``roots`` of the runner's farm inventory, or ``None`` when there is no readable inventory of that schema."""
     try:
         document = json.loads((hosted_dir / FARM_INVENTORY_FILE).read_text(encoding=_UTF8))
     except (OSError, ValueError):
         return None
-    return {str(k): str(v) for k, v in document.items()} if isinstance(document, dict) else None
+    if not isinstance(document, dict) or document.get("schema") != FARM_INVENTORY_SCHEMA:
+        return None
+    roots = document.get("roots")
+    return roots if isinstance(roots, dict) else None
+
+
+def _root_problems(root_id: str, expected: RootExpectation, reported: Mapping[str, Any]) -> list[str]:
+    upserts = reported.get("upserts") if isinstance(reported.get("upserts"), dict) else {}
+    problems = []
+    for path in sorted(set(expected.upserts) | set(upserts)):
+        if path not in upserts:
+            problems.append(f"rebuilt_file_missing: {root_id}/{path}")
+        elif path not in expected.upserts:
+            problems.append(f"rebuilt_file_unexpected: {root_id}/{path}")
+        elif upserts[path] != expected.upserts[path]:
+            problems.append(f"rebuilt_file_differs: {root_id}/{path}")
+    deletes = reported.get("deletes") if isinstance(reported.get("deletes"), list) else []
+    if sorted(deletes) != sorted(expected.deletes):
+        problems.append(f"rebuilt_deletes_differ: {root_id}")
+    return problems
 
 
 def _compare_files(item: ChecklistItem, hosted_dir: Path) -> tuple[bool | None, list[str]]:
-    if not item.patched_files:
-        return None, []
-    rebuilt = _rebuilt_hashes(hosted_dir)
-    if rebuilt is None:
-        return False, [f"not_comparable: the runner listed no {FARM_INVENTORY_FILE}"]
+    """Compare the runner's rebuilt files with the local compile; ``(None, [])`` when neither side has a patch."""
+    roots = _farm_roots(hosted_dir)
+    if roots is None:
+        if not item.patched_roots:
+            return None, []
+        return False, [f"not_comparable: the runner listed no usable {FARM_INVENTORY_FILE}"]
     problems = []
-    for path, expected in sorted(item.patched_files.items()):
-        if path not in rebuilt:
-            problems.append(f"not_comparable: the runner did not report {path}")
-        elif rebuilt[path] != expected:
-            problems.append(f"rebuilt_file_differs: {path}")
+    for root_id, expected in sorted(item.patched_roots.items()):
+        if root_id not in roots or not isinstance(roots[root_id], dict):
+            problems.append(f"not_comparable: the runner did not report root {root_id}")
+        else:
+            problems.extend(_root_problems(root_id, expected, roots[root_id]))
+    problems.extend(f"rebuilt_root_unexpected: {root_id}" for root_id in sorted(set(roots) - set(item.patched_roots)))
+    if not item.patched_roots and not problems:
+        return None, []
     return not problems, problems
 
 
@@ -385,6 +420,24 @@ def load_checklist(path: Path) -> list[ChecklistItem]:
     return [_item_of(entry, index) for index, entry in enumerate(entries)]
 
 
+def _patched_roots(value: Any, index: int) -> dict[str, RootExpectation]:
+    where = f"items[{index}].patched_roots"
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"{where}: expected {{root id: {{upserts, deletes}}}}")
+    roots = {}
+    for root_id, body in value.items():
+        upserts = body.get("upserts", {}) if isinstance(body, dict) else None
+        deletes = body.get("deletes", []) if isinstance(body, dict) else None
+        if not isinstance(upserts, dict) or not all(isinstance(h, str) for h in upserts.values()):
+            raise ValueError(f"{where}.{root_id}.upserts: expected {{path: sha256}}")
+        if not isinstance(deletes, list) or not all(isinstance(p, str) for p in deletes):
+            raise ValueError(f"{where}.{root_id}.deletes: expected a list of paths")
+        roots[str(root_id)] = RootExpectation(dict(upserts), tuple(deletes))
+    return roots
+
+
 def _item_of(entry: Any, index: int) -> ChecklistItem:
     if not isinstance(entry, dict) or not entry.get("id") or not entry.get("points"):
         raise ValueError(f"items[{index}]: needs an 'id' and a non-empty 'points' list")
@@ -396,14 +449,12 @@ def _item_of(entry: Any, index: int) -> ChecklistItem:
         "prep",
         "accuracy",
         "env_overrides",
-        "patched_files",
+        "patched_roots",
         "environment",
     }
     if unknown:
         raise ValueError(f"items[{index}]: unknown keys {sorted(unknown)}")
-    patched = entry.get("patched_files") or {}
-    if not isinstance(patched, dict) or not all(isinstance(v, str) for v in patched.values()):
-        raise ValueError(f"items[{index}].patched_files: expected {{path: sha256}}")
+    patched = _patched_roots(entry.get("patched_roots"), index)
     points = tuple(Path(p) for p in entry["points"])
     environment = _factory(entry["environment"])() if entry.get("environment") else None
 
