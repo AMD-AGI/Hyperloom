@@ -16,6 +16,7 @@ from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import BranchMoved
 
 RECIPE_FILE = "recipe.json"
+_UPDATE_REF = "update-ref"
 _NO_COMMIT = "0" * 40
 # Plumbing on a local bare repository takes milliseconds; this only bounds a wedged filesystem.
 GIT_TIMEOUT_S = 60.0
@@ -64,7 +65,7 @@ class GitExperimentRepo:
         repo = cls(path)
         await repo._git("init", "--bare", "--quiet", f"--initial-branch={INTEGRATION_BRANCH}")
         root = await repo._write(baseline, (), "baseline")
-        await repo._git("update-ref", _ref(INTEGRATION_BRANCH), root, _NO_COMMIT)
+        await repo._git(_UPDATE_REF, _ref(INTEGRATION_BRANCH), root, _NO_COMMIT)
         return repo
 
     async def read_recipe(self, commit: str) -> Recipe:
@@ -73,7 +74,7 @@ class GitExperimentRepo:
 
     async def create_branch(self, branch: str, at_commit: str) -> None:
         resolved = await self._commit_of(at_commit)
-        created = await self._run("update-ref", _ref(branch), resolved, _NO_COMMIT)
+        created = await self._run(_UPDATE_REF, _ref(branch), resolved, _NO_COMMIT)
         if created.code == 0:
             return
         if await self._resolve(_ref(branch)) is not None:
@@ -91,7 +92,7 @@ class GitExperimentRepo:
         if current != parent:
             raise BranchMoved(f"{branch} is at {current}, not {parent}")
         made = await self._write(recipe, (parent,), message)
-        moved = await self._run("update-ref", _ref(branch), made, parent)
+        moved = await self._run(_UPDATE_REF, _ref(branch), made, parent)
         if moved.code == 0:
             return made
         if await self.head(branch) != parent:
@@ -99,7 +100,7 @@ class GitExperimentRepo:
         raise GitError(f"cannot move {branch} to {made}: {moved.err}")
 
     async def rewind(self, branch: str, commit: str, parent: str) -> None:
-        moved = await self._run("update-ref", _ref(branch), await self._commit_of(parent), commit)
+        moved = await self._run(_UPDATE_REF, _ref(branch), await self._commit_of(parent), commit)
         if moved.code != 0:
             raise BranchMoved(f"{branch} is no longer at {commit}: {moved.err}")
 
