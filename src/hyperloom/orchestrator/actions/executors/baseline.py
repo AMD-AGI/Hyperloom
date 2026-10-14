@@ -761,11 +761,6 @@ def nonzero_output_signature(err_class: str, proc_stdout: str | None, proc_stder
 # from this module.
 
 
-# Underscore-prefixed aliases re-exported for callers/tests; canonical names live in `_workload_envs`.
-_default_baseline_config = default_baseline_config
-_materialize_config_with_envs = materialize_config_with_envs
-
-
 def _set_materialized_run_eval(config_path: Path, *, enabled: bool) -> None:
     """Set the effective eval mode after lifecycle eligibility is known."""
     cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
@@ -3453,9 +3448,9 @@ class BenchmarkRunExecutor:
                 # Merge the reference base UNDER the per-task args (last-wins) so a multi-node per-round restart
                 # carries the same reference flags the single-node materialized YAML does.
                 from ._grid_runner import merge_server_args
-                from ._workload_envs import resolve_reference_base
+                from ._workload_envs import resolve_reference_launch
 
-                _mn_ref_args, _mn_ref_envs = resolve_reference_base()
+                _mn_ref_args, _mn_ref_envs, _ = resolve_reference_launch()
                 # Base on effective_extra_server_args (carries the one-shot cuda-graph eager-fallback flag when armed)
                 # so the MN per-round restart keeps that fallback too.
                 _mn_task_args = effective_extra_server_args
@@ -3987,7 +3982,7 @@ class BaselineExecutor(BenchmarkRunExecutor):
 
     def _resolve_default_config(self) -> Path:
         """Resolve the benchmark YAML the round runs when the task names none."""
-        return _default_baseline_config()
+        return default_baseline_config()
 
     @staticmethod
     def _client_script_from_config(config_path: Path) -> str | None:

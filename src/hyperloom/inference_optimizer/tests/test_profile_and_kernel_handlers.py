@@ -22,11 +22,13 @@ from hyperloom.orchestrator.kernel import request_handlers as krh
 
 from .conftest import seed_kernel_keep
 from hyperloom.orchestrator.actions.executors import trace_analyze as ta
+from hyperloom.orchestrator.actions.executors._workload_envs import (
+    default_baseline_config,
+    materialize_config_with_envs,
+)
 from hyperloom.orchestrator.actions.executors.baseline import (
     BaselineExecutor,
     BenchmarkRunExecutor,
-    _default_baseline_config,
-    _materialize_config_with_envs,
 )
 from hyperloom.orchestrator.actions.executors.profile import (
     ProfileExecutor,
@@ -156,7 +158,7 @@ def test_materialize_config_injects_model_path(tmp_path):
     """Default YAML's hardcoded Qwen3-8B must be overridden when caller passes ``model_path``."""
     import yaml
 
-    out = _materialize_config_with_envs(
+    out = materialize_config_with_envs(
         _PROFILE_SGLANG_CONFIG,
         tmp_path,
         model_path="/path/models/DeepSeek-R1-0528",
@@ -173,7 +175,7 @@ def test_materialize_config_leaves_model_alone_without_override(tmp_path, monkey
     # Clear ISL/OSL/MAX_MODEL_LEN env so they don't inject
     for k in ("ISL", "OSL", "MAX_MODEL_LEN", "PRECISION"):
         monkeypatch.delenv(k, raising=False)
-    out = _materialize_config_with_envs(_PROFILE_SGLANG_CONFIG, tmp_path)
+    out = materialize_config_with_envs(_PROFILE_SGLANG_CONFIG, tmp_path)
     with out.open() as f:
         rendered = yaml.safe_load(f)
     assert "Qwen" in rendered["benchmark"]["model"]
@@ -183,7 +185,7 @@ def test_materialize_config_injects_model_with_other_overrides(tmp_path):
     """model_path + extra_envs should both land in the materialized YAML."""
     import yaml
 
-    out = _materialize_config_with_envs(
+    out = materialize_config_with_envs(
         _PROFILE_SGLANG_CONFIG,
         tmp_path,
         extra_envs={"BENCH_FOO": "bar"},
@@ -199,7 +201,7 @@ def test_materialize_config_injects_runner_type(tmp_path):
     """gpu_type kwarg must land in benchmark.runner_type as-is."""
     import yaml
 
-    out = _materialize_config_with_envs(
+    out = materialize_config_with_envs(
         _PROFILE_SGLANG_CONFIG,
         tmp_path,
         gpu_type="mi355x",
@@ -227,7 +229,7 @@ def test_materialize_config_forces_generic_benchmark_script(tmp_path):
     )
     out_dir = tmp_path / "out"
     out_dir.mkdir()
-    out = _materialize_config_with_envs(
+    out = materialize_config_with_envs(
         src_yaml,
         out_dir,
         gpu_type="mi355x",
@@ -260,7 +262,7 @@ def test_materialize_config_forces_generic_when_source_yaml_has_no_script(
     )
     out_dir = tmp_path / "out"
     out_dir.mkdir()
-    out = _materialize_config_with_envs(
+    out = materialize_config_with_envs(
         src_yaml,
         out_dir,
         gpu_type="mi300x",
@@ -278,7 +280,7 @@ def test_materialize_config_tp_env_overrides_yaml_hardcode(tmp_path, monkeypatch
     monkeypatch.setenv("TP", "8")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
-    out = _materialize_config_with_envs(_PROFILE_SGLANG_CONFIG, tmp_path)
+    out = materialize_config_with_envs(_PROFILE_SGLANG_CONFIG, tmp_path)
     rendered = yaml.safe_load(out.read_text())
     envs = rendered["benchmark"]["envs"]
     assert envs["TP"] == 8, f"TP not overridden: {envs.get('TP')}"
@@ -289,7 +291,7 @@ def test_materialize_config_conc_env_overrides_yaml_hardcode(tmp_path, monkeypat
     import yaml
 
     monkeypatch.setenv("CONC", "64")
-    out = _materialize_config_with_envs(_PROFILE_SGLANG_CONFIG, tmp_path)
+    out = materialize_config_with_envs(_PROFILE_SGLANG_CONFIG, tmp_path)
     rendered = yaml.safe_load(out.read_text())
     envs = rendered["benchmark"]["envs"]
     assert envs["CONC"] == 64, f"CONC not overridden: {envs.get('CONC')}"
@@ -307,7 +309,7 @@ def test_materialize_config_rocr_visible_devices_auto_expands_when_tp_overridden
     monkeypatch.setenv("TP", "8")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
-    out = _materialize_config_with_envs(_PROFILE_SGLANG_CONFIG, tmp_path)
+    out = materialize_config_with_envs(_PROFILE_SGLANG_CONFIG, tmp_path)
     rendered = yaml.safe_load(out.read_text())
     envs = rendered["benchmark"]["envs"]
     assert envs["ROCR_VISIBLE_DEVICES"] == "0,1,2,3,4,5,6,7", (
@@ -324,7 +326,7 @@ def test_materialize_config_rocr_visible_devices_explicit_env_wins_when_enough(
 
     monkeypatch.setenv("TP", "4")
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
-    out = _materialize_config_with_envs(_PROFILE_SGLANG_CONFIG, tmp_path)
+    out = materialize_config_with_envs(_PROFILE_SGLANG_CONFIG, tmp_path)
     rendered = yaml.safe_load(out.read_text())
     envs = rendered["benchmark"]["envs"]
     assert envs["ROCR_VISIBLE_DEVICES"] == "4,5,6,7"
@@ -340,7 +342,7 @@ def test_materialize_config_rocr_visible_devices_expands_when_under_tp(
     monkeypatch.setenv("TP", "8")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
-    out = _materialize_config_with_envs(_PROFILE_SGLANG_CONFIG, tmp_path)
+    out = materialize_config_with_envs(_PROFILE_SGLANG_CONFIG, tmp_path)
     rendered = yaml.safe_load(out.read_text())
     envs = rendered["benchmark"]["envs"]
     assert envs["ROCR_VISIBLE_DEVICES"] == "0,1,2,3,4,5,6,7"
@@ -370,7 +372,7 @@ def test_materialize_config_rocr_unchanged_when_tp1(tmp_path, monkeypatch):
     )
     for k in ("TP", "ROCR_VISIBLE_DEVICES"):
         monkeypatch.delenv(k, raising=False)
-    out = _materialize_config_with_envs(src_yaml, tmp_path)
+    out = materialize_config_with_envs(src_yaml, tmp_path)
     rendered = yaml.safe_load(out.read_text())
     envs = rendered["benchmark"]["envs"]
     # yaml default is "1" — should be preserved as-is when TP not overridden upward
@@ -422,7 +424,7 @@ def test_materialize_profile_window_vllm_skill_formula_default_R(
 
     _clear_workload_env(monkeypatch)
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
-    out = _materialize_config_with_envs(src, tmp_path)
+    out = materialize_config_with_envs(src, tmp_path)
     rendered = yaml.safe_load(out.read_text())
     extra = rendered["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert "--profiler-config.delay_iterations 6080" in extra, extra
@@ -455,7 +457,7 @@ def test_materialize_profile_does_not_duplicate_an_explicit_profiler_flag(
             ),
         },
     )
-    out = _materialize_config_with_envs(src, tmp_path)
+    out = materialize_config_with_envs(src, tmp_path)
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert extra.count("--profiler-config.profiler") == 1, extra
     assert extra.count("--profiler-config.torch_profiler_dir") == 1, extra
@@ -472,7 +474,7 @@ def test_materialize_profile_window_vllm_skill_formula_explicit_R(
     _clear_workload_env(monkeypatch)
     monkeypatch.setenv("RANDOM_RANGE_RATIO", "0.5")
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
-    out = _materialize_config_with_envs(src, tmp_path)
+    out = materialize_config_with_envs(src, tmp_path)
     rendered = yaml.safe_load(out.read_text())
     envs = rendered["benchmark"]["envs"]
     # R=0.5: max capped at 128; delay = 1024 * 1.5 * 3 - 128/2 = 4608 - 64 = 4544.
@@ -507,7 +509,7 @@ def test_materialize_profile_bounds_survive_a_replacing_candidate(
     # Verbatim from the gemma-4-26B-A4B roofline that was OOM-killed, JSON flag included -- the restore has to survive
     # a string the arg merger refuses to tokenize.
     candidate = '--no-enable-prefix-caching --compilation-config {"cudagraph_capture_sizes":[17,34,1088]}'
-    out = _materialize_config_with_envs(
+    out = materialize_config_with_envs(
         src,
         tmp_path,
         extra_server_args=candidate,
@@ -536,7 +538,7 @@ def test_materialize_profile_bounds_survive_an_extra_envs_override(
     _clear_workload_env(monkeypatch)
     _mock_patchers(monkeypatch, vllm=True, sglang=False)
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
-    out = _materialize_config_with_envs(
+    out = materialize_config_with_envs(
         src,
         tmp_path,
         extra_envs={"EXTRA_VLLM_ARGS": "--quantization fp8"},
@@ -566,7 +568,7 @@ def test_materialize_profile_states_ignore_frontend_exactly_once(
             "EXTRA_VLLM_ARGS": "--profiler-config.ignore_frontend True",
         },
     )
-    out = _materialize_config_with_envs(src, tmp_path)
+    out = materialize_config_with_envs(src, tmp_path)
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert extra.count("--profiler-config.ignore_frontend True") == 1, extra
 
@@ -581,7 +583,7 @@ def test_materialize_profile_adds_ignore_frontend_when_yaml_omits_it(
     _clear_workload_env(monkeypatch)
     _mock_patchers(monkeypatch, vllm=False, sglang=False)
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
-    out = _materialize_config_with_envs(src, tmp_path)
+    out = materialize_config_with_envs(src, tmp_path)
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert "--profiler-config.ignore_frontend True" in extra, extra
 
@@ -605,7 +607,7 @@ def test_materialize_profile_cap_wins_over_a_max_iterations_pinned_in_the_yaml(
             "EXTRA_VLLM_ARGS": "--profiler-config.max_iterations 100000",
         },
     )
-    out = _materialize_config_with_envs(src, tmp_path)
+    out = materialize_config_with_envs(src, tmp_path)
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert "--profiler-config.max_iterations 128" in extra, extra
     # Last occurrence wins in vLLM's argparse, so the injected cap must come after.
@@ -631,7 +633,7 @@ def test_materialize_profile_capture_flag_wins_over_a_stale_yaml_value(
             "EXTRA_VLLM_ARGS": "--profiler-config.capture_torch_profiler False",
         },
     )
-    out = _materialize_config_with_envs(src, tmp_path)
+    out = materialize_config_with_envs(src, tmp_path)
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert "--profiler-config.capture_torch_profiler True" in extra, extra
     assert extra.rindex("capture_torch_profiler True") > extra.rindex("capture_torch_profiler False"), extra
@@ -658,7 +660,7 @@ def test_materialize_profile_annotation_flag_wins_over_a_stale_yaml_value(
             "EXTRA_VLLM_ARGS": "--profiler-config.detailed_trace_annotation False",
         },
     )
-    out = _materialize_config_with_envs(src, tmp_path)
+    out = materialize_config_with_envs(src, tmp_path)
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert "--profiler-config.detailed_trace_annotation True" in extra, extra
     assert extra.rindex("detailed_trace_annotation True") > extra.rindex("detailed_trace_annotation False"), extra
@@ -676,7 +678,7 @@ def test_materialize_profile_restore_rejects_a_zero_max_iterations(
     _mock_patchers(monkeypatch, vllm=True, sglang=False)
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
     caplog.set_level("WARNING")
-    out = _materialize_config_with_envs(
+    out = materialize_config_with_envs(
         src,
         tmp_path,
         extra_server_args="--profiler-config.max_iterations 0",
@@ -698,7 +700,7 @@ def test_materialize_profile_restore_rejects_a_max_iterations_above_the_cap(
     _clear_workload_env(monkeypatch)
     _mock_patchers(monkeypatch, vllm=True, sglang=False)
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
-    out = _materialize_config_with_envs(
+    out = materialize_config_with_envs(
         src,
         tmp_path,
         extra_server_args="--profiler-config.max_iterations 100000",
@@ -720,7 +722,7 @@ def test_materialize_profile_restore_rejects_ignore_frontend_false(
     _clear_workload_env(monkeypatch)
     _mock_patchers(monkeypatch, vllm=True, sglang=False)
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
-    out = _materialize_config_with_envs(
+    out = materialize_config_with_envs(
         src,
         tmp_path,
         extra_server_args="--profiler-config.ignore_frontend False",
@@ -743,7 +745,7 @@ def test_materialize_profile_disables_the_summary_table_even_when_a_candidate_re
     _clear_workload_env(monkeypatch)
     _mock_patchers(monkeypatch, vllm=True, sglang=False)
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
-    out = _materialize_config_with_envs(
+    out = materialize_config_with_envs(
         src,
         tmp_path,
         extra_server_args="--profiler-config.torch_profiler_dump_cuda_time_total True",
@@ -766,7 +768,7 @@ def test_materialize_profile_restore_accepts_a_bound_that_already_holds(
     _mock_patchers(monkeypatch, vllm=True, sglang=False)
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
     caplog.set_level("WARNING")
-    out = _materialize_config_with_envs(
+    out = materialize_config_with_envs(
         src,
         tmp_path,
         extra_envs={
@@ -800,7 +802,7 @@ def test_materialize_profile_bounds_outlive_remove_args(
     _mock_patchers(monkeypatch, vllm=True, sglang=False)
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
     caplog.set_level("WARNING")
-    out = _materialize_config_with_envs(
+    out = materialize_config_with_envs(
         src,
         tmp_path,
         extra_server_args="--no-enable-prefix-caching",
@@ -822,7 +824,7 @@ def test_materialize_profile_restores_max_iterations_even_when_delay_survives(
     _clear_workload_env(monkeypatch)
     _mock_patchers(monkeypatch, vllm=True, sglang=False)
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
-    out = _materialize_config_with_envs(
+    out = materialize_config_with_envs(
         src,
         tmp_path,
         extra_server_args="--profiler-config.delay_iterations 0",
@@ -847,7 +849,7 @@ def test_materialize_profile_restore_does_not_duplicate_surviving_flags(
     _clear_workload_env(monkeypatch)
     _mock_patchers(monkeypatch, vllm=True, sglang=False)
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
-    out = _materialize_config_with_envs(
+    out = materialize_config_with_envs(
         src,
         tmp_path,
         extra_envs={
@@ -869,7 +871,7 @@ def test_materialize_profile_window_sglang_skill_formula(
 
     _clear_workload_env(monkeypatch)
     src = _profile_yaml(tmp_path, "sglang", {"CONC": 32, "ISL": 256, "OSL": 1024})
-    out = _materialize_config_with_envs(src, tmp_path)
+    out = materialize_config_with_envs(src, tmp_path)
     rendered = yaml.safe_load(out.read_text())
     body = json.loads(rendered["benchmark"]["envs"]["PROFILE_EXTRA_BODY"])
     # max capped at 128; delay = 1024 * 2 * 3 - 128/2 = 6080.
@@ -889,7 +891,7 @@ def test_materialize_profile_agentx_clamp_warns_below_steady_floor(
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
     with caplog.at_level("WARNING"):
-        out = _materialize_config_with_envs(src, tmp_path)
+        out = materialize_config_with_envs(src, tmp_path)
     rendered = yaml.safe_load(out.read_text())
     extra = rendered["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert "--profiler-config.max_iterations 8" in extra, extra
@@ -909,7 +911,7 @@ def test_materialize_profile_agentx_clamp_warns_on_explicit_override(
     monkeypatch.setenv("HYPERLOOM_PROFILE_MAX_STEPS_CAP", "64")
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
     with caplog.at_level("WARNING"):
-        out = _materialize_config_with_envs(src, tmp_path)
+        out = materialize_config_with_envs(src, tmp_path)
     rendered = yaml.safe_load(out.read_text())
     extra = rendered["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert "--profiler-config.max_iterations 8" in extra, extra
@@ -929,7 +931,7 @@ def test_materialize_profile_max_iters_override_warns_it_undoes_the_agentx_bound
     monkeypatch.setenv("HYPERLOOM_PROFILE_MAX_ITERS", "128")
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
     with caplog.at_level("WARNING"):
-        out = _materialize_config_with_envs(src, tmp_path)
+        out = materialize_config_with_envs(src, tmp_path)
     rendered = yaml.safe_load(out.read_text())
     extra = rendered["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     # The override is still honored verbatim; this is a visibility fix only.
@@ -949,7 +951,7 @@ def test_materialize_profile_max_iters_override_is_quiet_without_agentx(
     monkeypatch.setenv("HYPERLOOM_PROFILE_MAX_ITERS", "128")
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
     with caplog.at_level("WARNING"):
-        _materialize_config_with_envs(src, tmp_path)
+        materialize_config_with_envs(src, tmp_path)
     assert not any("AgentX capture bound" in r.message for r in caplog.records)
 
 
@@ -963,7 +965,7 @@ def test_materialize_persists_inferencex_path_for_magpie(
     _clear_workload_env(monkeypatch)
     monkeypatch.setenv("INFERENCEX_PATH", "/path/InferenceX")
     src = _profile_yaml(tmp_path, "sglang", {"CONC": 32, "ISL": 256, "OSL": 1024})
-    out = _materialize_config_with_envs(src, tmp_path)
+    out = materialize_config_with_envs(src, tmp_path)
     rendered = yaml.safe_load(out.read_text())
     assert rendered["benchmark"]["inferencex_path"] == "/path/InferenceX"
 
@@ -977,7 +979,7 @@ def test_materialize_profile_window_clamps_to_skill_floor(
 
     _clear_workload_env(monkeypatch)
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 64, "ISL": 256, "OSL": 256})
-    out = _materialize_config_with_envs(src, tmp_path)
+    out = materialize_config_with_envs(src, tmp_path)
     rendered = yaml.safe_load(out.read_text())
     extra = rendered["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert "--profiler-config.max_iterations 128" in extra, extra
@@ -993,7 +995,7 @@ def test_materialize_profile_num_prompts_covers_steady_state_window(
 
     _clear_workload_env(monkeypatch)
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
-    out = _materialize_config_with_envs(src, tmp_path)
+    out = materialize_config_with_envs(src, tmp_path)
     envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
     # delay=6080, max=128 → required=6208; floor(6208*32/1024)=194; *2 = 388.
     assert envs["NUM_PROMPTS"] == 388, envs.get("NUM_PROMPTS")
@@ -1008,7 +1010,7 @@ def test_materialize_profile_num_prompts_floors_at_conc_for_tiny_osl(
 
     _clear_workload_env(monkeypatch)
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 64, "OSL": 64})
-    out = _materialize_config_with_envs(src, tmp_path)
+    out = materialize_config_with_envs(src, tmp_path)
     envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
     # max=128, delay=64*2*3-64=320, required=448; 448*32/64=224; *2=448.
     assert envs["NUM_PROMPTS"] == 448, envs.get("NUM_PROMPTS")
@@ -1028,7 +1030,7 @@ def test_materialize_profile_force_overrides_user_num_prompts(
         # Caller deliberately under-sizes to trip the regression.
         {"CONC": 32, "ISL": 256, "OSL": 1024, "NUM_PROMPTS": 32},
     )
-    out = _materialize_config_with_envs(src, tmp_path)
+    out = materialize_config_with_envs(src, tmp_path)
     envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
     # Hyperloom-computed 388 must win over the caller's 32.
     assert envs["NUM_PROMPTS"] == 388, envs.get("NUM_PROMPTS")
@@ -1055,7 +1057,7 @@ def test_materialize_non_profile_keeps_legacy_seq_cost_factor(
             }
         )
     )
-    out = _materialize_config_with_envs(src, tmp_path)
+    out = materialize_config_with_envs(src, tmp_path)
     envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
     # seq_cost=1280 → factor=5 → CONC*5 = 160 (legacy baseline path).
     assert envs["NUM_PROMPTS"] == 160, envs.get("NUM_PROMPTS")
@@ -1098,7 +1100,7 @@ def test_materialize_profile_vllm_injects_tracelens_flags_when_patched(
     _clear_workload_env(monkeypatch)
     counts = _mock_patchers(monkeypatch, vllm=True, sglang=False)
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
-    out = _materialize_config_with_envs(src, tmp_path)
+    out = materialize_config_with_envs(src, tmp_path)
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert "--profiler-config.delay_iterations 6080" in extra, extra
     assert "--profiler-config.max_iterations 128" in extra, extra
@@ -1120,7 +1122,7 @@ def test_materialize_profile_vllm_omits_tracelens_flags_when_patch_fails(
     _mock_patchers(monkeypatch, vllm=False, sglang=False)
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
     caplog.set_level("WARNING")
-    out = _materialize_config_with_envs(src, tmp_path)
+    out = materialize_config_with_envs(src, tmp_path)
     envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
     extra = envs["EXTRA_VLLM_ARGS"]
     assert "--profiler-config.delay_iterations 6080" in extra, extra
@@ -1143,7 +1145,7 @@ def test_tracelens_patch_status_separates_fine_from_never_tried(tmp_path, monkey
         else:
             monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", enable_patch)
         src = _profile_yaml(tmp_path, "sglang", {"CONC": 32, "ISL": 256, "OSL": 1024})
-        out = _materialize_config_with_envs(src, tmp_path)
+        out = materialize_config_with_envs(src, tmp_path)
         return yaml.safe_load(out.read_text())["benchmark"]["envs"]["HYPERLOOM_TRACELENS_PATCH_STATUS"]
 
     assert _status(sglang=True, enable_patch=None) == "ok"
@@ -1159,7 +1161,7 @@ def test_sitecustomize_profile_applies_gc_patch_without_touching_patch_status(tm
     counts = _mock_patchers(monkeypatch, vllm=False, sglang=True)
     monkeypatch.setenv("HYPERLOOM_SGLANG_SHAPE_MODE", "sitecustomize")
     src = _profile_yaml(tmp_path, "sglang", {"CONC": 32, "ISL": 256, "OSL": 1024})
-    out = _materialize_config_with_envs(src, tmp_path)
+    out = materialize_config_with_envs(src, tmp_path)
     envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
 
     assert counts == {"vllm": 0, "sglang": 1}, counts
@@ -1175,7 +1177,7 @@ def test_sitecustomize_profile_proceeds_when_gc_patch_is_unavailable(tmp_path, m
     monkeypatch.setenv("HYPERLOOM_SGLANG_SHAPE_MODE", "sitecustomize")
     src = _profile_yaml(tmp_path, "sglang", {"CONC": 32, "ISL": 256, "OSL": 1024})
     caplog.set_level("WARNING")
-    out = _materialize_config_with_envs(src, tmp_path)
+    out = materialize_config_with_envs(src, tmp_path)
     envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
 
     assert counts == {"vllm": 0, "sglang": 1}, counts
@@ -1197,7 +1199,7 @@ def test_sitecustomize_non_profile_round_does_not_patch_sglang(tmp_path, monkeyp
             {"benchmark": {"framework": "sglang", "model": "/m", "envs": {"CONC": 32, "ISL": 256, "OSL": 1024}}}
         )
     )
-    _materialize_config_with_envs(src, tmp_path)
+    materialize_config_with_envs(src, tmp_path)
 
     assert counts == {"vllm": 0, "sglang": 0}, counts
 
@@ -1217,7 +1219,7 @@ def test_instrumentation_preflight_names_the_checks_it_dooms(tmp_path, monkeypat
     _clear_workload_env(monkeypatch)
     _mock_patchers(monkeypatch, vllm=False, sglang=False)
     src = _profile_yaml(tmp_path, "sglang", {"CONC": 32, "ISL": 256, "OSL": 1024})
-    out = _materialize_config_with_envs(src, tmp_path)
+    out = materialize_config_with_envs(src, tmp_path)
     bench = yaml.safe_load(out.read_text())["benchmark"]
 
     row = _instrumentation_preflight_row(bench)
@@ -1246,7 +1248,7 @@ def test_instrumentation_preflight_passes_on_a_healthy_patch(tmp_path, monkeypat
     _clear_workload_env(monkeypatch)
     _mock_patchers(monkeypatch, vllm=False, sglang=True)
     src = _profile_yaml(tmp_path, "sglang", {"CONC": 32, "ISL": 256, "OSL": 1024})
-    out = _materialize_config_with_envs(src, tmp_path)
+    out = materialize_config_with_envs(src, tmp_path)
 
     row = _instrumentation_preflight_row(yaml.safe_load(out.read_text())["benchmark"])
 
@@ -1319,7 +1321,7 @@ def test_materialize_profile_sglang_injects_shape_discovery_when_patched(
     _clear_workload_env(monkeypatch)
     counts = _mock_patchers(monkeypatch, vllm=False, sglang=True)
     src = _profile_yaml(tmp_path, "sglang", {"CONC": 32, "ISL": 256, "OSL": 1024})
-    out = _materialize_config_with_envs(src, tmp_path)
+    out = materialize_config_with_envs(src, tmp_path)
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"].get(
         "EXTRA_SGLANG_ARGS",
         "",
@@ -1339,7 +1341,7 @@ def test_materialize_profile_sglang_omits_shape_discovery_when_patch_fails(
     _clear_workload_env(monkeypatch)
     _mock_patchers(monkeypatch, vllm=False, sglang=False)
     src = _profile_yaml(tmp_path, "sglang", {"CONC": 32, "ISL": 256, "OSL": 1024})
-    out = _materialize_config_with_envs(src, tmp_path)
+    out = materialize_config_with_envs(src, tmp_path)
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"].get(
         "EXTRA_SGLANG_ARGS",
         "",
@@ -1357,7 +1359,7 @@ def test_materialize_profile_sglang_drops_annotations_when_patch_fails(
     _clear_workload_env(monkeypatch)
     _mock_patchers(monkeypatch, vllm=False, sglang=False)
     src = _profile_yaml(tmp_path, "sglang", {"CONC": 32, "ISL": 256, "OSL": 1024})
-    out = _materialize_config_with_envs(src, tmp_path)
+    out = materialize_config_with_envs(src, tmp_path)
     envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
     assert envs["HYPERLOOM_PROFILE_DEGRADED_REASON"] == "tracelens_runtime_patch_unavailable"
     body = json.loads(envs["PROFILE_EXTRA_BODY"])
@@ -1375,7 +1377,7 @@ def test_materialize_profile_sglang_keeps_annotations_when_patch_succeeds(
     _clear_workload_env(monkeypatch)
     _mock_patchers(monkeypatch, vllm=False, sglang=True)
     src = _profile_yaml(tmp_path, "sglang", {"CONC": 32, "ISL": 256, "OSL": 1024})
-    out = _materialize_config_with_envs(src, tmp_path)
+    out = materialize_config_with_envs(src, tmp_path)
     envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
     assert "HYPERLOOM_PROFILE_DEGRADED_REASON" not in envs
     body = json.loads(envs["PROFILE_EXTRA_BODY"])
@@ -1394,7 +1396,7 @@ def test_materialize_profile_sglang_keeps_annotations_when_patch_not_attempted(
     monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "0")
     counts = _mock_patchers(monkeypatch, vllm=False, sglang=False)
     src = _profile_yaml(tmp_path, "sglang", {"CONC": 32, "ISL": 256, "OSL": 1024})
-    out = _materialize_config_with_envs(src, tmp_path)
+    out = materialize_config_with_envs(src, tmp_path)
     envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
     assert counts == {"vllm": 0, "sglang": 0}, counts
     assert "HYPERLOOM_PROFILE_DEGRADED_REASON" not in envs
@@ -1417,7 +1419,7 @@ def test_materialize_profile_sglang_drops_graph_capture_flag_when_eager(
         "sglang",
         {"CONC": 32, "ISL": 256, "OSL": 1024, "EXTRA_SGLANG_ARGS": "--enable-profile-cuda-graph"},
     )
-    out = _materialize_config_with_envs(src, tmp_path, extra_server_args="--disable-cuda-graph")
+    out = materialize_config_with_envs(src, tmp_path, extra_server_args="--disable-cuda-graph")
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"]
     assert "--disable-cuda-graph" in extra.split(), extra
     assert "--enable-profile-cuda-graph" not in extra.split(), extra
@@ -1437,7 +1439,7 @@ def test_materialize_profile_sglang_keeps_graph_capture_flag_without_eager(
         "sglang",
         {"CONC": 32, "ISL": 256, "OSL": 1024, "EXTRA_SGLANG_ARGS": "--enable-profile-cuda-graph"},
     )
-    out = _materialize_config_with_envs(src, tmp_path)
+    out = materialize_config_with_envs(src, tmp_path)
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"]
     assert "--enable-profile-cuda-graph" in extra.split(), extra
 
@@ -1453,7 +1455,7 @@ def test_materialize_profile_kill_switch_skips_patcher_entirely(
     monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "0")
     counts = _mock_patchers(monkeypatch, vllm=True, sglang=True)
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
-    out = _materialize_config_with_envs(src, tmp_path)
+    out = materialize_config_with_envs(src, tmp_path)
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     # Safe profiler flags still present.
     assert "--profiler-config.delay_iterations 6080" in extra, extra
@@ -1472,7 +1474,7 @@ def test_materialize_profile_kill_switch_default_is_on(
     monkeypatch.delenv("HYPERLOOM_ENABLE_PATCH", raising=False)
     counts = _mock_patchers(monkeypatch, vllm=True, sglang=False)
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
-    _materialize_config_with_envs(src, tmp_path)
+    materialize_config_with_envs(src, tmp_path)
     assert counts["vllm"] == 1, counts
 
 
@@ -1495,7 +1497,7 @@ def test_materialize_profile_sglang_does_not_duplicate_shape_discovery(
             "EXTRA_SGLANG_ARGS": ("--enable-profile-cuda-graph --enable-shape-discovery-for-cuda-graph-profile"),
         },
     )
-    out = _materialize_config_with_envs(src, tmp_path)
+    out = materialize_config_with_envs(src, tmp_path)
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"]
     assert extra.count("--enable-shape-discovery-for-cuda-graph-profile") == 1, extra
 
@@ -1546,7 +1548,7 @@ def test_materialize_profile_sglang_skips_shape_discovery_for_gemma2(
         str(model),
         {"CONC": 32, "ISL": 256, "OSL": 1024},
     )
-    out = _materialize_config_with_envs(src, tmp_path)
+    out = materialize_config_with_envs(src, tmp_path)
     envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
     assert "shape-discovery" not in envs.get("EXTRA_SGLANG_ARGS", ""), envs
     assert json.loads(envs["PROFILE_EXTRA_BODY"])["shape_discovery"] is False
@@ -1578,7 +1580,7 @@ def test_materialize_profile_sglang_keeps_shape_discovery_for_non_gemma2(
         str(model),
         {"CONC": 32, "ISL": 256, "OSL": 1024},
     )
-    out = _materialize_config_with_envs(src, tmp_path)
+    out = materialize_config_with_envs(src, tmp_path)
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"].get(
         "EXTRA_SGLANG_ARGS",
         "",
@@ -1604,7 +1606,7 @@ def test_materialize_profile_sglang_skips_shape_discovery_gemma2_by_path(
         model,
         {"CONC": 32, "ISL": 256, "OSL": 1024},
     )
-    out = _materialize_config_with_envs(src, tmp_path)
+    out = materialize_config_with_envs(src, tmp_path)
     envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
     assert "shape-discovery" not in envs.get("EXTRA_SGLANG_ARGS", ""), envs
     assert json.loads(envs["PROFILE_EXTRA_BODY"])["shape_discovery"] is False
@@ -1627,7 +1629,7 @@ def test_materialize_profile_sglang_no_config_non_gemma_keeps_shape_discovery(
         model,
         {"CONC": 32, "ISL": 256, "OSL": 1024},
     )
-    out = _materialize_config_with_envs(src, tmp_path)
+    out = materialize_config_with_envs(src, tmp_path)
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"].get(
         "EXTRA_SGLANG_ARGS",
         "",
@@ -1662,7 +1664,7 @@ def test_materialize_profile_sglang_skips_shape_discovery_nested_gemma2(
         str(model),
         {"CONC": 32, "ISL": 256, "OSL": 1024},
     )
-    out = _materialize_config_with_envs(src, tmp_path)
+    out = materialize_config_with_envs(src, tmp_path)
     envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
     assert "shape-discovery" not in envs.get("EXTRA_SGLANG_ARGS", ""), envs
     assert json.loads(envs["PROFILE_EXTRA_BODY"])["shape_discovery"] is False
@@ -1687,7 +1689,7 @@ def test_materialize_profile_sglang_residual_config_gemma2_path(
         str(model),
         {"CONC": 32, "ISL": 256, "OSL": 1024},
     )
-    out = _materialize_config_with_envs(src, tmp_path)
+    out = materialize_config_with_envs(src, tmp_path)
     envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
     assert "shape-discovery" not in envs.get("EXTRA_SGLANG_ARGS", ""), envs
     assert json.loads(envs["PROFILE_EXTRA_BODY"])["shape_discovery"] is False
@@ -1720,7 +1722,7 @@ def test_materialize_profile_sglang_force_overrides_gemma2_gate(
         str(model),
         {"CONC": 32, "ISL": 256, "OSL": 1024},
     )
-    out = _materialize_config_with_envs(src, tmp_path)
+    out = materialize_config_with_envs(src, tmp_path)
     envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
     assert "--enable-shape-discovery-for-cuda-graph-profile" in envs.get(
         "EXTRA_SGLANG_ARGS",
@@ -1811,8 +1813,8 @@ def test_materialize_config_atom_profile_skips_tracelens_flags(
 
     monkeypatch.setenv("FRAMEWORK", "atom")
     monkeypatch.setenv("PROFILE", "1")
-    src = _default_baseline_config()  # baseline_atom.yaml
-    out = _materialize_config_with_envs(src, tmp_path)
+    src = default_baseline_config()  # baseline_atom.yaml
+    out = materialize_config_with_envs(src, tmp_path)
     rendered = yaml.safe_load(out.read_text())
     envs = rendered["benchmark"]["envs"]
     extra = str(envs.get("EXTRA_ATOM_ARGS", ""))

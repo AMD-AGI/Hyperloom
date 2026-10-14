@@ -929,9 +929,9 @@ async def run_grid(
 
     _mn_ref_envs: dict[str, str] = {}
     if _mn_is_multi_node():
-        from ._workload_envs import resolve_reference_base
+        from ._workload_envs import resolve_reference_launch
 
-        _, _mn_ref_envs = resolve_reference_base()
+        _, _mn_ref_envs, _ = resolve_reference_launch()
 
     # Reported on entry, not on completion: ``_report_finished_variant`` only runs once a result has been appended, so
     # a first variant that hangs — or a branch that raises before reaching it — would emit nothing at all, which is
