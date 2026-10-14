@@ -16,6 +16,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -144,6 +145,8 @@ async def test_an_accuracy_test_puts_the_measured_score_in_the_notebook_result()
             result_files=sorted(str(p.relative_to(landed)) for p in landed.rglob("results*.json")),
         )
         assert result.accuracy, "an accuracy test with no accuracy value"
+        for value in result.accuracy:
+            assert re.fullmatch(r"lm_eval=\S+;\S+=\S+", value.version), f"version {value.version!r}"
         scores = {value.metric: value.score for value in result.accuracy}
         assert 0.0 < scores[FLEXIBLE] <= 1.0
         assert any(r["phase"] == "accuracy" and r["accuracy"] for r in rounds)
