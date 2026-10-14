@@ -202,7 +202,7 @@ def kernel(**metadata) -> KernelArtifact:
     return KernelArtifact(KernelKind.GEMM, "bf16", "kernel/gemm.csv", sha("table".encode()), metadata)
 
 
-LOAD = {"load": {"mode": "env_file", "env": "AITER_CONFIG_GEMM_BF16"}}
+LOAD = {"load": {"via": "env_file", "env": "AITER_CONFIG_GEMM_BF16"}}
 
 
 def test_gemm_table_is_attached_and_loaded_through_its_variable(blobs, base):
@@ -220,9 +220,9 @@ def test_gemm_table_is_attached_and_loaded_through_its_variable(blobs, base):
 @pytest.mark.parametrize(
     ("artifact", "message"),
     [
-        (kernel(), "metadata.load must be"),
-        (kernel(load={"mode": "dir"}), "metadata.load must be"),
-        (kernel(load={"mode": "env_file", "env": "not a name"}), "must name an environment variable"),
+        (kernel(), "metadata.load is missing"),
+        (kernel(load={"via": "dir"}), "unknown load via 'dir'"),
+        (kernel(load={"via": "env_file", "env": "not a name"}), "must name an environment variable"),
         (
             KernelArtifact(KernelKind.FUSION, "f", "kernel/f.py", sha(b"table"), LOAD),
             "no loading convention for fusion",

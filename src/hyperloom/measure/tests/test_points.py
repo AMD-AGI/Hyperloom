@@ -108,7 +108,7 @@ def test_kernel_table_reaches_the_yaml_as_an_attachment_placeholder(canonical, b
         "bf16",
         "kernel/g.csv",
         sha(b"table"),
-        {"load": {"mode": "env_file", "env": "AITER_CONFIG_GEMM_BF16"}},
+        {"load": {"via": "env_file", "env": "AITER_CONFIG_GEMM_BF16"}},
     )
     env = environment(blobs, tmp_path, delta=RecipeDelta(add_kernels=(artifact,)))
 

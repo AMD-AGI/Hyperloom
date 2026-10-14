@@ -49,10 +49,10 @@ from hyperloom.contracts.recipe import (
 )
 
 ATTACH_PLACEHOLDER = "${HL_ATTACH:%s}"
-#: ``KernelArtifact.metadata["load"]`` says how the service picks an artifact up. Only the form below is supported:
+#: ``KernelArtifact.metadata["load"] = {"via": ..., ...}`` says how the service picks an artifact up. Only one form is supported:
 #: the file is attached and the named environment variable points at it (gemm tuning tables).
 KERNEL_LOAD_KEY = "load"
-LOAD_MODE_ENV_FILE = "env_file"
+LOAD_VIA_ENV_FILE = "env_file"
 #: Kernel kinds whose artifacts are loaded as files through a variable; others have no loading convention yet.
 LOADABLE_KERNEL_KINDS = frozenset({KernelKind.GEMM})
 #: Directories an editable-installed source tree may live in and still count as part of the image.
@@ -440,10 +440,13 @@ def _load_env(artifact: KernelArtifact) -> str:
     load = artifact.metadata.get(KERNEL_LOAD_KEY)
     if artifact.kind not in LOADABLE_KERNEL_KINDS:
         raise KernelLoadError(f"{artifact.ref}: no loading convention for {artifact.kind.value} kernel artifacts yet")
-    if not isinstance(load, Mapping) or load.get("mode") != LOAD_MODE_ENV_FILE:
+    if not isinstance(load, Mapping):
         raise KernelLoadError(
-            f"{artifact.ref}: metadata.{KERNEL_LOAD_KEY} must be {{'mode': '{LOAD_MODE_ENV_FILE}', ...}}"
+            f"{artifact.ref}: metadata.{KERNEL_LOAD_KEY} is missing; say how it is loaded, "
+            f"e.g. {{'via': '{LOAD_VIA_ENV_FILE}', 'env': '<VARIABLE>'}}"
         )
+    if load.get("via") != LOAD_VIA_ENV_FILE:
+        raise KernelLoadError(f"{artifact.ref}: unknown load via {load.get('via')!r}; supported: {LOAD_VIA_ENV_FILE!r}")
     env_name = load.get("env")
     if not isinstance(env_name, str) or not _ENV_NAME.fullmatch(env_name):
         raise KernelLoadError(f"{artifact.ref}: metadata.{KERNEL_LOAD_KEY}.env must name an environment variable")
