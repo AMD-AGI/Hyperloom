@@ -249,7 +249,7 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
     assert b02["stop"] == {"cause": StopCause.JUDGE.value, "reason": STOP_REASON, "at": b02["stop"]["at"]}
     assert branches["b02"].stop_reason == f"judge: {STOP_REASON}"
     assert "b02" in stage.lifecycle.stopped and "b02" in stage.toolbox.cancelled
-    assert stage.toolbox.closed == 1 and stage.toolbox.results
+    assert stage.toolbox.serving and stage.toolbox.closed == 1 and stage.toolbox.results
     assert not any(running(pid) for pid in stage.pids)
     claims = (await observer.snapshot()).claims
     assert [claim.status for claim in claims if claim.holder == "b02"] == [ClaimStatus.RELEASED]

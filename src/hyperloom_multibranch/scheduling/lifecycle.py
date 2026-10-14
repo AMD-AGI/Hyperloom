@@ -127,6 +127,7 @@ class Session:
         blobs = LocalBlobStore(layout.blobs)
         patches = PatchStore(blobs)
         peers = peer_factory(PeerSetup(layout, settings.workload, desk, processes, blobs))
+        self._toolbox = peers.toolbox
         tests = SessionTests(peers.toolbox, self._notebook, clock)
         judge = MbFakeRuleJudge(rules, tests)
         self._branches = BranchControl(
@@ -218,6 +219,7 @@ class Session:
             phases.result()
 
     async def _phases(self, budget: SessionBudget, hard_stop: HardStop) -> SessionOutcome:
+        await self._toolbox.start()
         await self._branches.push_quota()
         self._phase("prelude")
         try:

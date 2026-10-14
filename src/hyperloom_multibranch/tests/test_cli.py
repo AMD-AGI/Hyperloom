@@ -13,7 +13,7 @@ import pytest
 
 from hyperloom_multibranch import cli
 from hyperloom_multibranch.scheduling.budget import MB_DEFAULT_MAX_HOURS
-from hyperloom_multibranch.scheduling.peers import MB_FAKE_MISSING_PEER_MODULES
+from hyperloom_multibranch.scheduling.local_peers import MB_FAKE_MISSING_PEER_MODULES
 from hyperloom_multibranch.scheduling.roster import RosterCaps
 from hyperloom_multibranch.scheduling.settings import RunSettings, Workload
 

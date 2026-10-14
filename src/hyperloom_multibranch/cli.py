@@ -24,7 +24,8 @@ from hyperloom_multibranch.scheduling.exports import exports_from_env
 from hyperloom_multibranch.scheduling.layout import create_session
 from hyperloom_multibranch.scheduling.lifecycle import Session
 from hyperloom_multibranch.scheduling.llm import anthropic_completion, default_model
-from hyperloom_multibranch.scheduling.peers import PeerFactory, PeersUnavailable, mb_fake_load_peers
+from hyperloom_multibranch.scheduling.local_peers import GPUS_PER_MACHINE, load_peers
+from hyperloom_multibranch.scheduling.peers import PeerFactory, PeersUnavailable
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.roster import RosterCaps
 from hyperloom_multibranch.scheduling.settings import RunSettings, Workload
@@ -35,8 +36,6 @@ EXIT_USAGE = 2
 DEFAULT_MAX_BRANCHES = 4
 DEFAULT_MAX_K_PER_BRANCH = 2
 DEFAULT_JUDGE_INTERVAL_SECONDS = 600.0
-#: MB1 runs on one 8-GPU machine; the default test parallelism is how many TP groups fit on it.
-GPUS_PER_MACHINE = 8
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
 
@@ -130,7 +129,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(str(exc))
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format=LOG_FORMAT)
     try:
-        peer_factory = mb_fake_load_peers()
+        peer_factory = load_peers()
     except PeersUnavailable as exc:
         print(f"{PROG}: cannot run a session, {exc}", file=sys.stderr)
         return EXIT_FAILED

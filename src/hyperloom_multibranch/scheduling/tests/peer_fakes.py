@@ -378,9 +378,16 @@ class RecordingToolbox(FakeToolbox):
         quiet = NoiseModel(node_bias_median=0.0, node_bias_p90=0.0, test_noise_sigma=0.0)
         config = FakeToolboxConfig(noise=quiet, effect_fn=effect, accuracy_scores=dict(accuracy or {}))
         super().__init__(config, notebook=notebook)
+        self.serving = False
         self.policies: list[QueuePolicy] = []
         self.cancelled: list[str] = []
         self.closed = 0
+
+    async def start(self) -> None:
+        """Starts once: the fake also starts itself on its first use, which may come after the session's start."""
+        if not self.serving:
+            self.serving = True
+            await super().start()
 
     async def set_policy(self, policy: QueuePolicy) -> None:
         self.policies.append(policy)

@@ -1,13 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The peers a session runs on, and the placeholder that wires them until their owners' modules land.
+"""The peers a session runs on and what they are built on.
 
 A :data:`PeerFactory` builds the specialist lifecycle, the toolbox and the experiment repository on a
 :class:`PeerSetup`: the session directory, the workload the session optimizes, the scheduler's answer to the rule
 gate's branch requests, the session's process registry and its blob store. The rule gate itself is no peer of the
-scheduler: the specialist runtime builds it on the branch requests. Some peers have no real implementation yet, so
-:func:`mb_fake_load_peers` refuses, and the command line fails before it creates anything.
+scheduler: the specialist runtime builds it on the branch requests.
 """
 
 from __future__ import annotations
@@ -30,10 +29,6 @@ from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.settings import Workload
 
-#: The modules a real session needs and that hold no implementation yet; emptied as each module lands, and deleted
-#: with :func:`mb_fake_load_peers` once the last one has.
-MB_FAKE_MISSING_PEER_MODULES: tuple[str, ...] = ("hyperloom_multibranch.specialist",)
-
 #: Writes the baseline recipe as the experiment repository's root commit, which starts the integration branch, and
 #: returns that commit. The repository contract has no such call: its git implementation is created with its root.
 RootWriter = Callable[[Recipe], Awaitable[str]]
@@ -41,7 +36,11 @@ RootWriter = Callable[[Recipe], Awaitable[str]]
 
 class SessionToolbox(Toolbox, Protocol):
     """The toolbox as the session drives it: the contract's interface, and what only the toolbox's own implementation
-    offers on top of it, which the scheduler needs to set every branch's K and to stop a branch or the session."""
+    offers on top of it, which the scheduler needs to start it, set every branch's K and stop a branch or the
+    session."""
+
+    async def start(self) -> None:
+        """Start serving: recover what an earlier run left unfinished and keep the claims of live tests."""
 
     async def set_policy(self, policy: QueuePolicy) -> None:
         """Queue from now on by ``policy``; it replaces the previous one."""
@@ -83,8 +82,8 @@ class PeerSetup:
     on. ``processes`` is the session's process registry: the session stop kills what is registered there even when a
     peer's own stop hangs, and reports what outlives that kill. The lifecycle contract does not require a lifecycle to
     register its processes there, so a specialist process it does not register is stopped only by the lifecycle's own
-    ``stop``. The toolbox's sandboxes are its own: the session stop releases them by closing the toolbox. ``blobs`` holds the patch and kernel files the recipes
-    name; the toolbox's environment compiler reads them from it.
+    ``stop``. The toolbox's sandboxes are its own: the session stop releases them by closing the toolbox. ``blobs``
+    holds the patch and kernel files the recipes name; the toolbox's environment compiler reads them from it.
     """
 
     layout: SessionLayout
@@ -105,18 +104,7 @@ class PeersUnavailable(RuntimeError):
         self.modules = modules
 
 
-def mb_fake_load_peers() -> PeerFactory:
-    """Always raises :class:`PeersUnavailable` naming :data:`MB_FAKE_MISSING_PEER_MODULES`.
-
-    Stands in for the loader of the session's peers; replaced by the real loader once the specialist runtime lands. It takes no argument so the command line can call it
-    before it creates the session directory.
-    """
-
-    raise PeersUnavailable(MB_FAKE_MISSING_PEER_MODULES)
-
-
 __all__ = [
-    "MB_FAKE_MISSING_PEER_MODULES",
     "PeerFactory",
     "PeerSetup",
     "Peers",
@@ -124,5 +112,4 @@ __all__ = [
     "RootWriter",
     "SessionToolbox",
     "git_root_writer",
-    "mb_fake_load_peers",
 ]
