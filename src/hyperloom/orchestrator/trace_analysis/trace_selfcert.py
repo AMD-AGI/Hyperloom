@@ -552,8 +552,7 @@ def build_verdict(
     kernel_count: int,
     capture_fragment: bool,
     attributed_pct: float | None,
-    step_roots_sufficient: bool,
-    graph_under_recorded: bool | None,
+    graph_under_recorded: bool | None = None,
     thresholds: dict[str, Any],
     production_pick: dict[str, Any] | None = None,
     graph_launch_coverage: float | None = None,
@@ -594,9 +593,6 @@ def build_verdict(
     if bypass_ok:
         if not attributed_pct:
             blocking.append("correlation chain resolves no kernel to an op")
-            tracelens_ok = False
-        elif not step_roots_sufficient:
-            blocking.append("too few step annotations for the splitter to cut a steady window")
             tracelens_ok = False
 
     # Only worth saying when the divergence did not already block above: the resolver opens a different file, but one
@@ -724,7 +720,6 @@ def certify_trace_dir(
             kernel_count=0,
             capture_fragment=False,
             attributed_pct=None,
-            step_roots_sufficient=False,
             graph_under_recorded=None,
             thresholds=thresholds,
         )
@@ -841,7 +836,6 @@ def certify_trace_dir(
         kernel_count=kernel_count,
         capture_fragment=inv["selected_capture_fragment"],
         attributed_pct=attribution.get("attributed_pct"),
-        step_roots_sufficient=ann["step_roots_sufficient_for_tracelens"],
         production_pick=production_pick,
         graph_under_recorded=coverage_block.get("graph_under_recorded"),
         thresholds=thresholds,

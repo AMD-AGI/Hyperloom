@@ -122,7 +122,6 @@ def _verdict(**overrides):
         "kernel_count": 12,
         "capture_fragment": False,
         "attributed_pct": 91.0,
-        "step_roots_sufficient": True,
         "graph_under_recorded": False,
         "thresholds": effective_thresholds(),
     }
