@@ -28,12 +28,13 @@ from hyperloom_multibranch.scheduling.local_peers import (
     workload_environment,
 )
 from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_BASE_IMAGE_DIGEST
-from hyperloom_multibranch.scheduling.peers import PeerSetup, PeersUnavailable, SessionToolbox
+from hyperloom_multibranch.scheduling.peers import PeerSetup, PeersUnavailable
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.settings import Workload
 from hyperloom_multibranch.tests.fakes import RecordingLifecycle, RecordingScheduler
 from hyperloom_multibranch.toolbox.local_hosted import LocalHostedToolbox
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
+from hyperloom_multibranch.toolbox.toolbox import RealToolbox
 
 WORKLOAD = Workload("/models/Llama-3-8B", "sglang", 2, 1024, 512, 16, "bf16")
 HOST = MeasurementHost((0, 1, 2, 3), "local", MB_FAKE_BASE_IMAGE_DIGEST, "a" * 40, "b" * 40)
@@ -85,9 +86,9 @@ async def test_the_real_peers_live_inside_the_session_directory(
     desk = RecordingScheduler(Admission(AdmissionStatus.REJECTED, "test"))
     setup = PeerSetup(layout, WORKLOAD, desk, ProcessRegistry(layout.pids, clock), LocalBlobStore(layout.blobs))
     lifecycle = RecordingLifecycle()
-    built: list[tuple[PeerSetup, ExperimentRepo, SessionToolbox]] = []
+    built: list[tuple[PeerSetup, ExperimentRepo, RealToolbox]] = []
 
-    def lifecycles(given: PeerSetup, repo: ExperimentRepo, toolbox: SessionToolbox) -> RecordingLifecycle:
+    def lifecycles(given: PeerSetup, repo: ExperimentRepo, toolbox: RealToolbox) -> RecordingLifecycle:
         built.append((given, repo, toolbox))
         return lifecycle
 

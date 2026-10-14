@@ -14,7 +14,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING
 
 from hyperloom.contracts.recipe import Recipe
 from hyperloom.measure.compile import BlobStore
@@ -22,34 +22,17 @@ from hyperloom_multibranch.contracts.fork import BranchRequests
 from hyperloom_multibranch.contracts.lifecycle import SpecialistLifecycle
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
-from hyperloom_multibranch.contracts.toolbox import Toolbox
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
-from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.settings import Workload
 
+if TYPE_CHECKING:
+    from hyperloom_multibranch.toolbox.toolbox import RealToolbox
+
 #: Writes the baseline recipe as the experiment repository's root commit, which starts the integration branch, and
 #: returns that commit. The repository contract has no such call: its git implementation is created with its root.
 RootWriter = Callable[[Recipe], Awaitable[str]]
-
-
-class SessionToolbox(Toolbox, Protocol):
-    """The toolbox as the session drives it: the contract's interface, and what only the toolbox's own implementation
-    offers on top of it, which the scheduler needs to start it, set every branch's K and stop a branch or the
-    session."""
-
-    async def start(self) -> None:
-        """Start serving: recover what an earlier run left unfinished and keep the claims of live tests."""
-
-    async def set_policy(self, policy: QueuePolicy) -> None:
-        """Queue from now on by ``policy``; it replaces the previous one."""
-
-    async def cancel_branch(self, branch_id: str, reason: str) -> int:
-        """Withdraw every queued and running test and tool job of ``branch_id``; returns how many."""
-
-    async def close(self) -> None:
-        """Stop serving and release every sandbox and backend the toolbox holds."""
 
 
 @dataclass(frozen=True)
@@ -57,7 +40,7 @@ class Peers:
     """``repo`` is read and written only once ``write_root`` has written the root commit, which PRELUDE does."""
 
     lifecycle: SpecialistLifecycle
-    toolbox: SessionToolbox
+    toolbox: RealToolbox
     repo: ExperimentRepo
     write_root: RootWriter
 
@@ -110,6 +93,5 @@ __all__ = [
     "Peers",
     "PeersUnavailable",
     "RootWriter",
-    "SessionToolbox",
     "git_root_writer",
 ]

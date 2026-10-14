@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
+from typing import TYPE_CHECKING
 
 from hyperloom_multibranch.contracts.lifecycle import SpecialistLaunch, SpecialistLifecycle
 from hyperloom_multibranch.contracts.notebook import Notebook
@@ -30,7 +31,6 @@ from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
 from hyperloom_multibranch.scheduling.forks import DECISION_KINDS, AdmittedBranch
-from hyperloom_multibranch.scheduling.peers import SessionToolbox
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.settle import settled
 from hyperloom_multibranch.scheduling.roster import (
@@ -43,6 +43,9 @@ from hyperloom_multibranch.scheduling.roster import (
     StopCause,
 )
 
+if TYPE_CHECKING:
+    from hyperloom_multibranch.toolbox.toolbox import RealToolbox
+
 logger = logging.getLogger(__name__)
 
 
@@ -54,7 +57,7 @@ class BranchControl:
         roster: Roster,
         notebook: Notebook,
         lifecycle: SpecialistLifecycle,
-        toolbox: SessionToolbox,
+        toolbox: RealToolbox,
         repo: ExperimentRepo,
         processes: ProcessRegistry,
         decisions: DecisionLog,

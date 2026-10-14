@@ -19,6 +19,7 @@ import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import partial
+from typing import TYPE_CHECKING
 
 from hyperloom.common.model_paths import resolve_serving_model_path
 from hyperloom_multibranch.contracts.lifecycle import SpecialistLifecycle
@@ -32,10 +33,12 @@ from hyperloom_multibranch.scheduling.peers import (
     Peers,
     PeerSetup,
     PeersUnavailable,
-    SessionToolbox,
     git_root_writer,
 )
 from hyperloom_multibranch.scheduling.settings import Workload
+
+if TYPE_CHECKING:
+    from hyperloom_multibranch.toolbox.toolbox import RealToolbox
 
 TOOLBOX_WRITER = "toolbox"
 CANONICAL_DIR = "canonical"
@@ -53,7 +56,7 @@ MB_FAKE_IMAGE_REF = "local"
 MB_FAKE_TOOL_COMMIT = "0" * 40
 
 #: Builds the specialist runtime's lifecycle on the peer setup, the repository and the toolbox the branches use.
-LifecycleFactory = Callable[[PeerSetup, ExperimentRepo, SessionToolbox], SpecialistLifecycle]
+LifecycleFactory = Callable[[PeerSetup, ExperimentRepo, "RealToolbox"], SpecialistLifecycle]
 
 
 @dataclass(frozen=True)

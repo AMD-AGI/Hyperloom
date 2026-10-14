@@ -18,15 +18,18 @@ import logging
 import signal
 from dataclasses import dataclass, replace
 from enum import Enum
+from typing import TYPE_CHECKING
 
 from hyperloom_multibranch.contracts.toolbox import QueueState
 from hyperloom_multibranch.scheduling.branches import BranchControl
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
-from hyperloom_multibranch.scheduling.peers import SessionToolbox
 from hyperloom_multibranch.scheduling.processes import ProcessRecord, ProcessRegistry
 from hyperloom_multibranch.scheduling.roster import BranchKind, BranchStop, Roster, StopCause
 from hyperloom_multibranch.scheduling.settle import settled
+
+if TYPE_CHECKING:
+    from hyperloom_multibranch.toolbox.toolbox import RealToolbox
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +121,7 @@ class SessionStopper:
         self,
         roster: Roster,
         branches: BranchControl,
-        toolbox: SessionToolbox,
+        toolbox: RealToolbox,
         processes: ProcessRegistry,
         decisions: DecisionLog,
         clock: Clock,
