@@ -321,7 +321,6 @@ cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_workload_env
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._run_once 56
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._run_single_benchmark 39
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/baseline.py::_apply_warm_patches 52
-cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/benchmark_result.py::_merge_raw_result 22
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/benchmark_result.py::harvest_mn_gpu_metrics 30
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/explore.py::ExploreExecutor.__call__ 76
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._gate_perf 29
