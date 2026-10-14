@@ -114,7 +114,7 @@ cognitive-complexity src/hyperloom/orchestrator/kernel/request_handlers.py::_cap
 cognitive-complexity src/hyperloom/orchestrator/kernel/request_handlers.py::_fill_integrate_defaults_from_state 102
 cognitive-complexity src/hyperloom/orchestrator/kernel/request_handlers.py::_resolve_forge_server_log 51
 cognitive-complexity src/hyperloom/orchestrator/kernel/request_handlers.py::_resolve_integrate_payload 83
-cognitive-complexity src/hyperloom/orchestrator/kernel/request_handlers.py::_run_forge_gemm_tuning 123
+cognitive-complexity src/hyperloom/orchestrator/kernel/request_handlers.py::_run_forge_gemm_tuning 124
 cognitive-complexity src/hyperloom/orchestrator/kernel/request_handlers.py::integrate_handler 110
 cognitive-complexity src/hyperloom/orchestrator/knowledge/recipe_journal.py::RecipeJournalCollaborator._build_kernel_optimizations_from_state 53
 cognitive-complexity src/hyperloom/orchestrator/knowledge/recipe_journal.py::RecipeJournalCollaborator._build_recipe_attrs_from_state 48
@@ -707,7 +707,7 @@ function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_grade_int
 function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_persist_forge_gemm_csv_durably 95
 function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_resolve_integrate_payload 140
 function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_run_forge_fusion 144
-function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_run_forge_gemm_tuning 458
+function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_run_forge_gemm_tuning 467
 function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_run_geak_gemm_tuning 124
 function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_run_integrate_rebaseline_with_lock_retry 111
 function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::integrate_handler 562
@@ -1018,7 +1018,7 @@ module-lines src/hyperloom/orchestrator/actions/executors/report.py 1391
 module-lines src/hyperloom/orchestrator/actions/executors/roofline.py 1303
 module-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py 2659
 module-lines src/hyperloom/orchestrator/kernel/conc_sweep.py 1429
-module-lines src/hyperloom/orchestrator/kernel/request_handlers.py 5185
+module-lines src/hyperloom/orchestrator/kernel/request_handlers.py 5189
 module-lines src/hyperloom/orchestrator/knowledge/recipe_journal.py 1822
 module-lines src/hyperloom/orchestrator/knowledge/recipe_kb_t0.py 1353
 module-lines src/hyperloom/orchestrator/knowledge/remote_recipe/values.py 1284
