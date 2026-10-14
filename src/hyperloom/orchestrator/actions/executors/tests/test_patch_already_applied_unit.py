@@ -16,7 +16,6 @@ from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from hyperloom.orchestrator.actions.executors import _patch_set_apply as psa
 from hyperloom.orchestrator.actions.executors import integrate_patch as ip
 from hyperloom.orchestrator.actions.executors._apply_feedback import PatchApplyResult, PresenceCheck
-from hyperloom.orchestrator.actions.executors._integrate_attempt import IntegrateAttempt
 from hyperloom.orchestrator.actions.executors._nogit_patch import (
     _apply_patch_no_git,
     _reverse_applies_cleanly,
@@ -235,14 +234,14 @@ def test_patch_set_with_one_subset_noop_still_changes_the_tree(tmp_path):
     _git_tree(src)
     sup = _patch(tmp_path, "superset.patch", _SUPERSET)
     sub = _patch(tmp_path, "subset.patch", _SUBSET)
-    attempt = IntegrateAttempt(task_id="t", framework_root=src)
+    applied: list[Path] = []
 
-    outcome = psa.apply_patch_set(attempt, [sup, sub], git_tree=True, backup_root=tmp_path / "bak")
+    outcome = psa.apply_patch_set(src, [sup, sub], git_tree=True, backup_root=tmp_path / "bak", applied=applied)
 
     assert outcome.errors == []
     assert outcome.changed_nothing is False
     assert outcome.already_present == [{"patch": str(sub), "check": "git_reverse_apply_check"}]
-    assert attempt.applied == [sup, sub]
+    assert applied == [sup, sub]
 
 
 _CHANNEL_CHECKS = [(True, PresenceCheck.GIT_REVERSE_APPLY), (False, PresenceCheck.PATCH_REVERSE_DRY_RUN)]
@@ -280,9 +279,7 @@ def test_patch_set_the_tree_already_holds_changes_nothing(tmp_path, git_tree, ch
     sup = _patch(tmp_path, "superset.patch", _SUPERSET)
     sub = _patch(tmp_path, "subset.patch", _SUBSET)
 
-    outcome = psa.apply_patch_set(
-        IntegrateAttempt(task_id="t", framework_root=src), [sup, sub], git_tree=git_tree, backup_root=tmp_path / "bak"
-    )
+    outcome = psa.apply_patch_set(src, [sup, sub], git_tree=git_tree, backup_root=tmp_path / "bak", applied=[])
 
     assert outcome.errors == []
     assert outcome.changed_nothing is True

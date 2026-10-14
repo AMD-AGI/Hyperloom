@@ -13,15 +13,12 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from ...specialists.patch_safety import is_unified_diff, patch_escapes_tree
 from ._apply_feedback import ApplyFeedback, PatchApplyResult, PresenceCheck, build_apply_feedback
 from ._git import _run_git_cp
 from ._nogit_patch import _P_LEVELS, _apply_patch_no_git, _reverse_probe_levels
-
-if TYPE_CHECKING:
-    from ._integrate_attempt import IntegrateAttempt
 
 log = logging.getLogger(__name__)
 
@@ -167,30 +164,30 @@ def _unvetted_reason(patch: Path) -> str:
 
 
 def apply_patch_set(
-    attempt: IntegrateAttempt,
+    framework_root: Path,
     patch_paths: list[Path],
     *,
     git_tree: bool,
     backup_root: Path,
+    applied: list[Path],
 ) -> PatchSetOutcome:
-    """Apply ``patch_paths`` in order into ``attempt.framework_root``, stopping at the first that fails.
+    """Apply ``patch_paths`` in order into ``framework_root``, stopping at the first that fails.
 
     A patch the tree already holds still counts as landed, so one subset patch
-    inside a larger set does not fail the set. Each landed patch is appended to
-    ``attempt.applied`` as it lands, so a stage that never returns still
-    reports what reached the tree.
+    inside a larger set does not fail the set.
 
     Args:
-        attempt: The attempt whose tree the set lands in.
+        framework_root: The tree the set lands in.
         patch_paths: The patches, in apply order.
         git_tree: Whether the tree is a git checkout, which goes back through
             its HEAD; any other tree goes through ``patch`` with backups.
         backup_root: Where the ``patch`` channel keeps its per-file backups.
+        applied: Receives each patch as it lands, so a caller whose stage
+            never returns still knows what reached the tree.
 
     Returns:
         What the set did to the tree.
     """
-    framework_root = attempt.framework_root
     outcome = PatchSetOutcome()
     backups: list[dict[str, Any]] = []
     for patch in patch_paths:
@@ -210,7 +207,7 @@ def apply_patch_set(
             break
         if result.present_by is not None:
             outcome.already_present.append({"patch": str(patch), "check": result.present_by.value})
-        attempt.applied.append(patch)
+        applied.append(patch)
     outcome.changed_nothing = (
         bool(patch_paths) and not outcome.errors and len(outcome.already_present) == len(patch_paths)
     )

@@ -2671,7 +2671,11 @@ class IntegratePatchExecutor:
         applied_artifacts: list[dict[str, Any]] = []
         attempt.applied_artifacts = applied_artifacts
         patch_set = apply_patch_set(
-            attempt, patch_paths, git_tree=bool(git_head), backup_root=recovery_root / "patch_backups"
+            framework_root,
+            patch_paths,
+            git_tree=bool(git_head),
+            backup_root=recovery_root / "patch_backups",
+            applied=attempt.applied,
         )
         if patch_set.errors:
             await self._maybe_write_framework_kb_record(
