@@ -18,6 +18,7 @@ from hyperloom.orchestrator.roles import (
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.state.objective import TargetGainObjective, TimeOnlyObjective
+from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import Task
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
@@ -472,11 +473,14 @@ async def test_escalate_invalid_hint_broadcasts_only(coord: Coordinator) -> None
     assert coord.shared_state.pending_escalate_hint != "bogus"
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
+_EXTEND_BUDGET_HINTS = pytest.mark.parametrize(
     ("hint", "phase"),
     [("extend_explore_budget", "FRAMEWORK_AGENT"), ("extend_kernel_budget", "KERNEL_AGENT")],
 )
+
+
+@pytest.mark.asyncio
+@_EXTEND_BUDGET_HINTS
 async def test_escalate_extend_budget_raises_the_phase_share(coord: Coordinator, hint: str, phase: str) -> None:
     from hyperloom.orchestrator.phases.machine_state import ESCALATE_HINT_BUDGET_BUMP_DELTA
 
@@ -487,6 +491,25 @@ async def test_escalate_extend_budget_raises_the_phase_share(coord: Coordinator,
     after = coord.shared_state.phase_budget_pct
     assert after[phase] == pytest.approx(before[phase] + ESCALATE_HINT_BUDGET_BUMP_DELTA)
     assert {k: v for k, v in after.items() if k != phase} == {k: v for k, v in before.items() if k != phase}
+    assert coord.shared_state.pending_escalate_hint == ""
+
+
+@pytest.mark.asyncio
+@_EXTEND_BUDGET_HINTS
+async def test_repeated_extend_hints_stop_the_cap_above_the_configured_share(
+    coord: Coordinator, hint: str, phase: str
+) -> None:
+    from hyperloom.orchestrator.phases.machine_state import ESCALATE_HINT_BUDGET_BUMP_CAP
+
+    configured = dict(coord.shared_state.configured_phase_budget_pct)
+
+    for _ in range(10):
+        await coord.router._handle_escalate_strategy_change("orchestration", _escalate(hint))
+
+    assert coord.shared_state.phase_budget_pct[phase] == pytest.approx(
+        configured[phase] + ESCALATE_HINT_BUDGET_BUMP_CAP
+    )
+    assert SharedState.load_or_init(coord.session_dir).configured_phase_budget_pct == configured
     assert coord.shared_state.pending_escalate_hint == ""
 
 

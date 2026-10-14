@@ -139,7 +139,7 @@ def test_prelude_blocked_while_warm_replay_in_flight():
 
 
 def test_prelude_waits_for_the_initial_analysis():
-    """The transition barrier stops running actions, so leaving early kills the roofline the baseline enqueued."""
+    """Leaving before the initial roofline is booked hands that analysis to the next phase instead of seeding this one."""
     state = SharedState(
         phase="PRELUDE",
         phase_budget_pct={},
@@ -731,6 +731,24 @@ def test_coordinator_init_writes_phase_prelude_for_fresh_session(coordinator_wit
     assert row["reason"] == "phase_entered"
     # A fresh session starts on the defaults rather than an empty split.
     assert c.shared_state.phase_budget_pct == dict(phase_state.DEFAULT_PHASE_BUDGET_PCT)
+
+
+def test_a_resume_keeps_the_configured_shares_extend_hints_are_capped_against(coordinator_with_mocks):
+    from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_EXTEND_EXPLORE_BUDGET
+
+    c = coordinator_with_mocks
+    configured = dict(c.shared_state.phase_budget_pct)
+    assert c.shared_state.configured_phase_budget_pct == configured
+    c.shared_state.bump_phase_budget(ESCALATE_HINT_EXTEND_EXPLORE_BUDGET)
+
+    c.phase_machine.ensure_phase_initialised(None)
+
+    assert c.shared_state.configured_phase_budget_pct == configured
+    assert c.shared_state.phase_budget_pct != configured
+    # A session recorded before the configured shares were takes the ones it resumes with.
+    c.shared_state.configured_phase_budget_pct = {}
+    c.phase_machine.ensure_phase_initialised(None)
+    assert c.shared_state.configured_phase_budget_pct == c.shared_state.phase_budget_pct
 
 
 def test_a_session_recorded_at_an_unknown_phase_refuses_to_resume(coordinator_with_mocks):
