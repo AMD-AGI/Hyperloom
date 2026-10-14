@@ -178,7 +178,7 @@ CLEANUP_TREE_PGID_KEY = "cleanup_tree_pgid"
 
 #: Why a retained row could not be verified. Logged verbatim to the operator,
 #: so each one reads as a cause rather than a code.
-UNVERIFIABLE_FOREIGN_SCOPE = "the row was acquired in another boot or PID namespace"
+UNVERIFIABLE_FOREIGN_SCOPE = "the row was acquired in another boot, PID namespace or container"
 #: The ordinary case: the holder ended without confirming its cleanup, so the
 #: release was skipped on purpose and its work may still be running. Nothing
 #: this process can observe settles it -- every cheaper proof tried during
@@ -197,7 +197,9 @@ UNVERIFIABLE_CONFIRMED_BUT_HELD = "the holder confirmed its cleanup yet its lane
 #: name its own ownership domain (an unreadable /proc), so nothing here may be
 #: judged at all. Labelling this "another namespace" would tell an operator to
 #: go look at a machine that is not involved.
-UNVERIFIABLE_NO_LOCAL_SCOPE = "this process cannot read its own boot/PID namespace, so no row here can be judged"
+UNVERIFIABLE_NO_LOCAL_SCOPE = (
+    "this process cannot read its own boot, PID namespace and container start, so no row here can be judged"
+)
 #: Retained by the gpu_leases exemption. Not a defect -- a lane records its
 #: coordinator, not the specialist's GPU worker -- but the operator still has to
 #: be told, because this is the very path that wedged 2026-09-21 and the
@@ -283,7 +285,7 @@ def _unverifiable_holders(cur: sqlite3.Cursor, *, scope: str) -> list[dict]:
 
     Args:
         cur: Cursor of the caller's transaction.
-        scope: The boot/PID namespace whose rows this process may judge; empty
+        scope: The boot, PID namespace and container whose rows this process may judge; empty
             when the kernel would not name one, in which case no row is ours.
 
     Returns:
