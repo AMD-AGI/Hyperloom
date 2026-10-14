@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Literal, Protocol
 
+from hyperloom.contracts.measurement import AttachmentRef
 from hyperloom.contracts.recipe import (
     DIGEST_PREFIX,
     ComponentPatches,
@@ -250,18 +251,10 @@ class EnvRoot:
         }
 
 
-@dataclass(frozen=True)
-class EnvAttachment:
-    """A file the service reads, content-addressed; the test YAML refers to it as ``${HL_ATTACH:<id>}``."""
+def attachment_placeholder(attachment: AttachmentRef) -> str:
+    """What the test YAML carries where the attachment's path would be; the runner substitutes the real path."""
 
-    id: str
-    kind: Literal["file"]
-    sha256: str
-    source_ref: str
-
-    @property
-    def placeholder(self) -> str:
-        return ATTACH_PLACEHOLDER % self.id
+    return ATTACH_PLACEHOLDER % attachment.id
 
 
 @dataclass(frozen=True)
@@ -277,7 +270,7 @@ class CompiledEnvironment:
     recipe: Recipe
     base_image_digest: str
     roots: tuple[EnvRoot, ...]
-    attachments: tuple[EnvAttachment, ...]
+    attachments: tuple[AttachmentRef, ...]
     envs: Mapping[str, str]
     blob_root: Path
 
@@ -427,19 +420,19 @@ def _decode(data: bytes, name: str) -> str:
 
 def kernel_attachments(
     kernels: tuple[KernelArtifact, ...], launch_envs: Mapping[str, str], blobs: BlobStore
-) -> tuple[tuple[EnvAttachment, ...], dict[str, str]]:
+) -> tuple[tuple[AttachmentRef, ...], dict[str, str]]:
     """Attach each kernel artifact and name the variable that points the service at it."""
 
-    attachments: dict[str, EnvAttachment] = {}
+    attachments: dict[str, AttachmentRef] = {}
     envs: dict[str, str] = {}
     for artifact in kernels:
         env_name = _load_env(artifact)
         if env_name in envs or env_name in launch_envs:
             raise KernelLoadError(f"{artifact.ref}: {env_name} is already set by another artifact or by the launch")
         blobs.get(artifact.sha256)
-        attachment = EnvAttachment(f"k-{artifact.sha256[:16]}", "file", artifact.sha256, artifact.ref)
+        attachment = AttachmentRef(f"k-{artifact.sha256[:16]}", "file", artifact.sha256)
         attachments.setdefault(attachment.id, attachment)
-        envs[env_name] = attachment.placeholder
+        envs[env_name] = attachment_placeholder(attachment)
     return tuple(attachments.values()), envs
 
 
@@ -521,7 +514,6 @@ __all__ = [
     "CompileError",
     "CompiledEnvironment",
     "ComponentLayout",
-    "EnvAttachment",
     "EnvEntry",
     "EnvRoot",
     "EnvironmentCompiler",
@@ -531,6 +523,7 @@ __all__ = [
     "PatchApplyError",
     "UnsupportedComponentError",
     "apply_patch_stack",
+    "attachment_placeholder",
     "check_base_image",
     "compile_environment",
     "kernel_attachments",

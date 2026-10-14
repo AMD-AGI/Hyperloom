@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.contracts.measurement import AttachmentRef
 from hyperloom.contracts.recipe import (
     ComponentChange,
     ConfigDelta,
@@ -211,7 +212,7 @@ def test_gemm_table_is_attached_and_loaded_through_its_variable(blobs, base):
     env = compile_with(recipe_with(), delta, blobs, base)
 
     (attachment,) = env.attachments
-    assert (attachment.kind, attachment.sha256) == ("file", sha(b"table"))
+    assert attachment == AttachmentRef(attachment.id, "file", sha(b"table"))
     assert env.envs == {"AITER_CONFIG_GEMM_BF16": "${HL_ATTACH:" + attachment.id + "}"}
     assert env.recipe.kernels == (kernel(**LOAD),)
 

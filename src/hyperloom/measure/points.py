@@ -21,9 +21,10 @@ from typing import Any
 
 import yaml
 
-from hyperloom.contracts.recipe import LaunchConfig, RecipeError
+from hyperloom.contracts.measurement import TestRequest
+from hyperloom.contracts.recipe import LaunchConfig, Recipe, RecipeError
 from hyperloom.inference_optimizer import framework_registry
-from hyperloom.measure.compile import CompiledEnvironment
+from hyperloom.measure.compile import CompiledEnvironment, EnvironmentCompiler
 from hyperloom.measure.surface import (
     MeasurementSurface,
     benchmark_envs,
@@ -144,4 +145,39 @@ def generate_points(
     return tuple(points)
 
 
-__all__ = ["CanonicalMeasurement", "PointError", "default_canonical", "generate_points"]
+@dataclass(frozen=True)
+class AcceptedMeasurement:
+    """What acceptance produces for a test request: its environment and the points it runs."""
+
+    environment: CompiledEnvironment
+    points: tuple[Path, ...]
+
+
+def accept_measurement(
+    request: TestRequest,
+    parent_recipe: Recipe,
+    compiler: EnvironmentCompiler,
+    canonical: CanonicalMeasurement,
+    out_dir: Path,
+) -> AcceptedMeasurement:
+    """Acceptance steps 2 to 4 (design 4.17): compile, generate the points, check the measurement surface.
+
+    ``parent_recipe`` is the recipe of ``request.parent_commit``. Any refusal is a
+    :class:`~hyperloom.contracts.recipe.RecipeError`, raised before the request is queued.
+    """
+
+    environment = compiler.compile(parent_recipe, request.delta)
+    points = generate_points(
+        environment, canonical, out_dir, concurrency=request.concurrency, accuracy=request.accuracy
+    )
+    return AcceptedMeasurement(environment, points)
+
+
+__all__ = [
+    "AcceptedMeasurement",
+    "CanonicalMeasurement",
+    "PointError",
+    "accept_measurement",
+    "default_canonical",
+    "generate_points",
+]

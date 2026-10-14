@@ -8,9 +8,16 @@ from pathlib import Path
 import pytest
 import yaml
 
+from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import ConfigDelta, KernelArtifact, KernelKind, RecipeDelta
-from hyperloom.measure.compile import LocalBlobStore, PackageBase, compile_environment
-from hyperloom.measure.points import PointError, default_canonical, generate_points
+from hyperloom.measure.compile import (
+    BaseImageMismatchError,
+    EnvironmentCompiler,
+    LocalBlobStore,
+    PackageBase,
+    compile_environment,
+)
+from hyperloom.measure.points import PointError, accept_measurement, default_canonical, generate_points
 from hyperloom.measure.surface import SurfaceViolation
 from hyperloom.measure.tests._recipes import IMAGE, recipe_with, sha
 from hyperloom.orchestrator.actions.executors._workload_envs import default_baseline_config
@@ -144,3 +151,29 @@ def test_a_launch_variable_the_renderer_drops_is_refused(canonical, blobs, tmp_p
 def test_concurrency_must_be_distinct_positive_integers(canonical, blobs, tmp_path, levels):
     with pytest.raises(PointError, match="distinct positive integers"):
         generate_points(environment(blobs, tmp_path), canonical, tmp_path / "points", concurrency=levels)
+
+
+def request_for(delta: RecipeDelta, **kwargs) -> TestRequest:
+    return TestRequest(
+        kind=TestKind.TEST, purpose=Purpose.EXPLORE, branch_id="b1", parent_commit="c" * 40, delta=delta, **kwargs
+    )
+
+
+def test_acceptance_compiles_and_generates_points_for_a_request(canonical, blobs, tmp_path):
+    compiler = EnvironmentCompiler(blobs, IMAGE, locator=lambda _l: PackageBase("sglang", tmp_path, None, None))
+    delta = RecipeDelta(config=ConfigDelta(server_args=SERVER_ARGS))
+    request = request_for(delta, concurrency=(16,), accuracy=True)
+
+    accepted = accept_measurement(request, recipe_with(), compiler, canonical, tmp_path / "points")
+
+    assert accepted.environment.recipe.launch.server_args == SERVER_ARGS
+    envs = load(accepted.points[0])["benchmark"]["envs"]
+    assert (envs["CONC"], envs["RUN_EVAL"]) == ("16", "true")
+
+
+def test_acceptance_refuses_a_request_on_another_image_before_generating_anything(canonical, blobs, tmp_path):
+    compiler = EnvironmentCompiler(blobs, "sha256:" + "e" * 64)
+
+    with pytest.raises(BaseImageMismatchError):
+        accept_measurement(request_for(RecipeDelta()), recipe_with(), compiler, canonical, tmp_path / "points")
+    assert not (tmp_path / "points").exists()
