@@ -37,7 +37,6 @@ from hyperloom_multibranch.contracts.toolbox import (
 )
 from hyperloom_multibranch.toolbox.acceptance import Acceptance, MeasurementPlanner
 from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES, AttemptRunner, Executor, TestJob
-from hyperloom_multibranch.toolbox.notebook_records import notebook_request, notebook_result
 from hyperloom_multibranch.toolbox.quarantine import Quarantine
 from hyperloom_multibranch.toolbox.queue import QueuedTest, QueuePolicy, WorkQueue, sandbox_priority
 from hyperloom_multibranch.toolbox.submission_log import LogEntry, SubmissionLog
@@ -240,7 +239,7 @@ class RealToolbox:
         """Write the request row and hand the claim to the test; undo the acceptance if either is refused."""
 
         try:
-            await self._sink.write_request(notebook_request(accepted, entry.priority))
+            await self._sink.write_request(replace(accepted, priority=entry.priority))
             if self._claims is not None and accepted.intent_fingerprint is not None:
                 await self._claims.attach_request(self._key(accepted), entry.request_id, ttl_seconds=self._ttl)
         except ClaimLost as error:
@@ -336,7 +335,7 @@ class RealToolbox:
                 if "withdrawal" in outcome:
                     await self._sink.write_withdrawal(Withdrawal(entry.request_id, str(outcome["withdrawal"])))
                 else:
-                    await self._sink.write_result(notebook_result(TestResult.from_document(outcome["result"])))
+                    await self._sink.write_result(TestResult.from_document(outcome["result"]))
             except ConflictingWrite:
                 break  # the notebook already holds another final state for this request; there is nothing to write
             except Exception:

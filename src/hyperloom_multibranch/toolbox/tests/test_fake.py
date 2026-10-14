@@ -32,7 +32,6 @@ from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.tests.factories import TTL, FakeClock, intent
 from hyperloom_multibranch.toolbox.fake import FakeToolbox
 from hyperloom_multibranch.toolbox.fake_model import Fate, FailureRatios, FakeToolboxConfig, NoiseModel
-from hyperloom_multibranch.toolbox.notebook_records import notebook_result
 
 DELTA = RecipeDelta(config=ConfigDelta(server_args="--max-num-seqs 256"))
 QUIET = NoiseModel(node_bias_median=0.0, node_bias_p90=0.0, test_noise_sigma=0.0)
@@ -232,7 +231,7 @@ async def test_a_quiet_success_is_complete_and_written_to_the_notebook() -> None
     box = _toolbox(notebook=book, noise=QUIET, default_effect=0.02)
     result = await _run_one(box)
     assert result.validity is Validity.SUCCEEDED and result.failure_class is None
-    assert book.of("result") == [notebook_result(result)]
+    assert book.of("result") == [result]
     assert result.sandbox is not None and result.sandbox.node_name in box.config.nodes
     assert len(result.attempts) == 1 and result.attempts[0].sandbox == result.sandbox
     assert [r.phase for r in result.rounds] == ["warmup", "measure", "measure", "measure"]
