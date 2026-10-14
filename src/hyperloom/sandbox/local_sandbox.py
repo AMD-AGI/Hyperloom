@@ -11,12 +11,13 @@ import posixpath
 import shutil
 import subprocess
 import threading
+import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import IO
 
-from hyperloom.common import proctree
-from hyperloom.sandbox.reaper import reap_sandbox_processes
+from hyperloom.sandbox.launcher import StatusPipe, launcher_argv
+from hyperloom.sandbox.reaper import kill_launchers, reap_sandbox_processes
 from hyperloom.sandbox.socket import (
     CommandResult,
     Role,
@@ -34,7 +35,7 @@ __all__ = ["LocalSandbox"]
 #: Parent environment names a sandbox process inherits; everything else (keys,
 #: tokens, job topology) is dropped.
 _INHERITED_ENV = ("PATH", "LANG", "LC_ALL", "PYTHONPATH", "VIRTUAL_ENV")
-_READER_JOIN_SEC = 5.0
+_READER_JOIN_SEC = 2.0
 _CHUNK = 1 << 20
 
 _Sink = IO[bytes] | int | None
@@ -60,6 +61,8 @@ class LocalSandbox:
         platform_envs: Mapping[str, str],
         timeout_sec: float,
         on_end: Callable[[LocalSandbox, bool], None],
+        launcher_python: str,
+        user: tuple[int, int] | None = None,
     ) -> None:
         self.sandbox_id = sandbox_id
         self.template = template
@@ -70,6 +73,8 @@ class LocalSandbox:
         self._metadata = dict(metadata)
         self._base_env = self._build_base_env(create_envs, platform_envs)
         self._on_end = on_end
+        self._launcher_python = launcher_python
+        self._user = user
         self._lock = threading.RLock()
         self._ended = False
         self._procs: list[subprocess.Popen[bytes]] = []
@@ -223,32 +228,72 @@ class LocalSandbox:
 
     # -- processes ---------------------------------------------------------
 
-    def spawn(
-        self, argv: list[str], *, env: Mapping[str, str], cwd: Path, stdout: _Sink, stderr: _Sink
-    ) -> subprocess.Popen[bytes]:
-        """Start a process as the leader of its own session and track it for reaping.
+    def _start(
+        self, argv: list[str], env: Mapping[str, str], cwd: Path, stdout: _Sink, stderr: _Sink
+    ) -> tuple[subprocess.Popen[bytes], int]:
+        """Start a process under a launcher, as the leader of its own session, and track it.
+
+        Args:
+            argv: The command line.
+            env: Extra environment on top of the sandbox's.
+            cwd: The working directory.
+            stdout: Where its stdout goes.
+            stderr: Where its stderr goes.
+
+        Returns:
+            tuple: The launcher process and the read end of its exit-code pipe.
 
         Raises:
             SandboxGone: When the sandbox ended before the process could start.
         """
-        with self._lock:
-            self._require_alive()
-            proc = subprocess.Popen(
-                argv,
-                env={**self._base_env, **env},
-                cwd=cwd,
-                stdin=subprocess.DEVNULL,
-                stdout=stdout,
-                stderr=stderr,
-                start_new_session=True,
-            )
-            self._procs.append(proc)
-            return proc
+        read_fd, write_fd = os.pipe()
+        try:
+            with self._lock:
+                self._require_alive()
+                extra: dict[str, object] = {}
+                if self._user is not None:
+                    extra = {"user": self._user[0], "group": self._user[1], "extra_groups": []}
+                proc = subprocess.Popen(
+                    launcher_argv(self._launcher_python, write_fd, argv),
+                    env={**self._base_env, **env},
+                    cwd=cwd,
+                    stdin=subprocess.DEVNULL,
+                    stdout=stdout,
+                    stderr=stderr,
+                    start_new_session=True,
+                    pass_fds=(write_fd,),
+                    **extra,
+                )
+                self._procs.append(proc)
+        except BaseException:
+            os.close(read_fd)
+            raise
+        finally:
+            os.close(write_fd)
+        return proc, read_fd
+
+    def spawn(
+        self, argv: list[str], *, env: Mapping[str, str], cwd: Path, stdout: _Sink, stderr: _Sink
+    ) -> subprocess.Popen[bytes]:
+        """Start a process nobody waits for (its exit code is dropped); it is reaped with the sandbox."""
+        proc, read_fd = self._start(argv, env, cwd, stdout, stderr)
+        os.close(read_fd)
+        return proc
+
+    def spawn_watched(
+        self, argv: list[str], *, env: Mapping[str, str], cwd: Path, stdout: _Sink, stderr: _Sink
+    ) -> tuple[subprocess.Popen[bytes], StatusPipe]:
+        """Start a process and also return the pipe that delivers its exit code."""
+        proc, read_fd = self._start(argv, env, cwd, stdout, stderr)
+        return proc, StatusPipe(read_fd)
 
     def start_template_command(self) -> None:
         """Launch the template's startup command, logging to the private directory."""
         if not self.template.command:
             return
+        # The launcher would hide a missing executable behind exit code 127; fail the create instead.
+        if shutil.which(self.template.command[0], path=self._base_env.get("PATH")) is None:
+            raise FileNotFoundError(f"startup command {self.template.command[0]!r} not found or not executable")
         log_file = (self.private / "runner.log").open("ab")
         try:
             self.spawn(
@@ -296,12 +341,13 @@ class LocalSandbox:
             with (self.private / f"background-{self._bg_count}.log").open("ab") as log_file:
                 self.spawn(argv, env=extra, cwd=workdir, stdout=log_file, stderr=subprocess.STDOUT)
             return CommandResult(0, "", "")
-        proc = self.spawn(argv, env=extra, cwd=workdir, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        return self._collect(proc, timeout_sec, on_stdout, on_stderr)
+        proc, status = self.spawn_watched(argv, env=extra, cwd=workdir, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return self._collect(proc, status, timeout_sec, on_stdout, on_stderr)
 
     def _collect(
         self,
         proc: subprocess.Popen[bytes],
+        status: StatusPipe,
         timeout_sec: float | None,
         on_stdout: Callable[[str], None] | None,
         on_stderr: Callable[[str], None] | None,
@@ -315,16 +361,18 @@ class LocalSandbox:
         for reader in readers:
             reader.start()
         try:
-            code = proc.wait(timeout=timeout_sec)
-        except subprocess.TimeoutExpired:
-            proctree.kill_tree(proctree.collect_tree([proc.pid]), grace_sec=1.0)
-            proctree.signal_group(proc.pid, 9, what="command timeout")
-            proc.wait()
+            code = status.wait_exit(proc, timeout_sec)
+        except TimeoutError:
+            status.close()
+            kill_launchers([proc], grace_sec=1.0)
             raise SandboxUnavailable(f"command timed out after {timeout_sec}s") from None
         finally:
+            join_by = time.monotonic() + _READER_JOIN_SEC
             for reader in readers:
-                reader.join(_READER_JOIN_SEC)
+                reader.join(max(0.0, join_by - time.monotonic()))
         self._require_alive()
+        if code is None:
+            raise SandboxUnavailable("the command's launcher died before reporting an exit code")
         return CommandResult(code, "".join(out), "".join(err))
 
 

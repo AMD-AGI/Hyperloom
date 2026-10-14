@@ -31,11 +31,12 @@ class SigningIdentity:
     public_key_pem: str
 
 
-def generate_signing_identity(directory: Path) -> SigningIdentity:
+def generate_signing_identity(directory: Path, owner: tuple[int, int] | None = None) -> SigningIdentity:
     """Generate a fresh key pair and write the private half to ``directory``.
 
     Args:
         directory: An existing directory owned by the caller; it is made 0700.
+        owner: A ``(uid, gid)`` to hand the directory and key file to (needs root).
 
     Returns:
         SigningIdentity: The key file path and the public key.
@@ -61,4 +62,7 @@ def generate_signing_identity(directory: Path) -> SigningIdentity:
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "wb") as handle:
         handle.write(private_pem)
+    if owner is not None:
+        os.chown(directory, *owner)
+        os.chown(path, *owner)
     return SigningIdentity(path, public_pem.decode("ascii"))

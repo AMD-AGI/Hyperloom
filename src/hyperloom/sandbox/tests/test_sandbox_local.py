@@ -406,14 +406,14 @@ def test_a_command_killed_mid_flight_reports_the_sandbox_gone(make) -> None:
         sb.run("sleep 300")
 
 
-def test_kill_reaps_a_daemon_that_outlived_its_parent_and_left_the_tree(make) -> None:
+def test_kill_reaps_an_env_stripped_daemon_that_outlived_its_parent_and_left_the_tree(make) -> None:
     provider = make([LocalTemplate("dev", "dev")])
     sb = _create(provider, "dev", "dev")
     sb.write_file(
         "/work/orphan.py",
         (
             "import subprocess,sys\n"
-            "d=subprocess.Popen([sys.executable,'-c','import time;time.sleep(600)'],start_new_session=True)\n"
+            "d=subprocess.Popen([sys.executable,'-c','import time;time.sleep(600)'],start_new_session=True,env={})\n"
             "open('orphan.pid','w').write(str(d.pid))\n"
         ).encode(),
     )
@@ -423,3 +423,82 @@ def test_kill_reaps_a_daemon_that_outlived_its_parent_and_left_the_tree(make) ->
     assert proctree.proc_identity(pid)[0] != os.getpid()
     sb.kill()
     _assert_all_gone([pid])
+
+
+def test_a_foreground_command_that_leaves_a_background_job_returns_and_the_job_is_reaped(make) -> None:
+    provider = make([LocalTemplate("dev", "dev")])
+    sb = _create(provider, "dev", "dev")
+    started = time.monotonic()
+    assert sb.run("sleep 300 & echo $! > pid").exit_code == 0
+    assert time.monotonic() - started < 10
+    pid = int(sb.read_file("/work/pid"))
+    assert proctree.running(pid)
+    sb.kill()
+    _assert_all_gone([pid])
+
+
+def _marked_pids(marker: str) -> list[int]:
+    found = []
+    for entry in Path("/proc").iterdir():
+        if entry.name.isdigit():
+            try:
+                if marker.encode() in (entry / "cmdline").read_bytes() and proctree.running(int(entry.name)):
+                    found.append(int(entry.name))
+            except OSError:
+                continue
+    return found
+
+
+def test_killing_right_after_create_leaves_no_runner_behind(make) -> None:
+    import uuid
+
+    for _ in range(5):
+        marker = f"marker-{uuid.uuid4().hex}"
+        code = f"import time  # {marker}\ntime.sleep(600)\n"
+        provider = make([_runner(code)])
+        sb = _create(provider, "runner", "measurement")
+        sb.kill()  # the launcher may not have forked the runner yet
+        assert _marked_pids(marker) == []
+
+
+_ROOT_ONLY = pytest.mark.skipif(os.geteuid() != 0, reason="separate accounts need root")
+_SYSTEM_PYTHON = "/usr/bin/python3"
+
+
+@_ROOT_ONLY
+@pytest.mark.skipif(not os.access(_SYSTEM_PYTHON, os.X_OK), reason="needs a python3 every account can run")
+def test_separate_accounts_keep_the_signing_key_from_other_sandboxes(make) -> None:
+    pytest.importorskip("cryptography")
+    runner_code = "head -c 10 $HYPERLOOM_SIGNING_KEY_FILE > $HYPERLOOM_SANDBOX_ROOT/out/keyhead; id -u > $HYPERLOOM_SANDBOX_ROOT/out/uid; sleep 600"
+    templates = [
+        LocalTemplate("runner", "measurement", command=("/bin/sh", "-c", runner_code), sealed=True, signing=True),
+        LocalTemplate("dev", "dev"),
+    ]
+    provider = make(templates, sealed_user=(60001, 60001), unsealed_user=(60002, 60002), launcher_python=_SYSTEM_PYTHON)
+    runner = _create(provider, "runner", "measurement")
+    assert _read_when_present(runner, "/out/keyhead") == b"-----BEGIN"  # the runner reads its own key
+    assert _read_when_present(runner, "/out/uid").strip() == b"60001"
+    key_file = next((provider._base / runner.sandbox_id / "private").glob("*.pem"))
+    assert stat.S_IMODE(key_file.stat().st_mode) == 0o600 and key_file.stat().st_uid == 60001
+
+    dev = _create(provider, "dev", "dev")
+    assert dev.run("id -u").stdout.strip() == "60002"
+    stolen = dev.run(f"cat {key_file}")
+    assert stolen.exit_code != 0 and "Permission denied" in stolen.stderr
+    assert dev.run(f"ls {key_file.parent}").exit_code != 0
+    runner.kill()
+    dev.kill()
+
+
+def test_separate_accounts_need_root(make, monkeypatch) -> None:
+    monkeypatch.setattr(os, "geteuid", lambda: 1000)
+    with pytest.raises(ValueError, match="needs root"):
+        LocalSandboxProvider([LocalTemplate("dev", "dev")], unsealed_user=(1, 1))
+
+
+def test_idempotency_key_is_released_when_create_fails_unexpectedly(make) -> None:
+    provider = make([LocalTemplate("dev", "dev")])
+    meta = {IDEMPOTENCY_KEY: "k"}
+    with pytest.raises(ValueError, match="timeout_sec must be positive"):
+        provider.create("dev", role="dev", timeout_sec=0, metadata=meta)
+    assert _create(provider, "dev", "dev", metadata=meta, wait_sec=1).info().template == "dev"

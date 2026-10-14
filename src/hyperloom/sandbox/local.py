@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import logging
 import shutil
+import os
 import socket as _net
+import sys
 import tempfile
 import threading
 import uuid
@@ -54,6 +56,16 @@ class LocalSandboxProvider:
         base_dir: Where sandbox directories live; a temporary directory that
             :meth:`close` removes when omitted.
         hostname: The node name to report; this machine's hostname by default.
+        launcher_python: The python3 that runs each process's launcher; it must
+            be executable by ``sealed_user`` / ``unsealed_user`` when those are set.
+        sealed_user: Optional ``(uid, gid)`` that sealed sandboxes' processes run as.
+        unsealed_user: Optional ``(uid, gid)`` that dev and sub-run sandboxes' processes run as.
+
+    Without ``sealed_user`` and ``unsealed_user`` every sandbox process runs as the
+    calling account, so one sandbox's processes can read another's files,
+    including its signing key: the sandboxes are separated by directory and by
+    process tree, not by account. Giving the two kinds different accounts (this
+    needs root) puts the signing key out of reach of every other process.
     """
 
     name = "local"
@@ -65,17 +77,26 @@ class LocalSandboxProvider:
         gpus: Iterable[int] = (),
         base_dir: Path | None = None,
         hostname: str | None = None,
+        launcher_python: str = sys.executable,
+        sealed_user: tuple[int, int] | None = None,
+        unsealed_user: tuple[int, int] | None = None,
     ) -> None:
         self._templates: dict[str, LocalTemplate] = {}
         for template in templates:
             if template.name in self._templates:
                 raise ValueError(f"duplicate template {template.name!r}")
             self._templates[template.name] = template
+        self._users = {True: sealed_user, False: unsealed_user}
+        if (sealed_user or unsealed_user) and os.geteuid() != 0:
+            raise ValueError("running sandbox processes as another account needs root")
+        self._launcher_python = launcher_python
         self.pool = GpuPool(gpus)
         self.hostname = hostname or _net.gethostname()
         self._owns_base = base_dir is None
         self._base = Path(tempfile.mkdtemp(prefix="hl-sandbox-")) if base_dir is None else base_dir
         self._base.mkdir(parents=True, exist_ok=True)
+        if sealed_user or unsealed_user:
+            self._base.chmod(0o711)  # other accounts must traverse it to reach their own directory
         self._cond = threading.Condition()
         self._live: dict[str, LocalSandbox] = {}
         self._by_key: dict[tuple[Role, str], LocalSandbox | SandboxError] = {}
@@ -115,6 +136,8 @@ class LocalSandboxProvider:
             SandboxUnavailable: No GPU cards within ``wait_sec``, or the original
                 failure of a repeated idempotency key.
         """
+        if timeout_sec <= 0:
+            raise ValueError("timeout_sec must be positive")
         tpl = self._check_create(template, role, metadata, envs)
         key = (role, metadata[IDEMPOTENCY_KEY]) if IDEMPOTENCY_KEY in metadata else None
         if key is not None:
@@ -125,7 +148,7 @@ class LocalSandboxProvider:
                 return earlier
         try:
             cards = self.pool.acquire(tpl.gpus, wait_sec)
-        except SandboxUnavailable:
+        except BaseException:
             # Capacity is transient: a retry with the same key may succeed.
             self._finish_key(key, None)
             raise
@@ -133,6 +156,9 @@ class LocalSandboxProvider:
             sandbox = self._build(tpl, role, timeout_sec, metadata, envs or {}, cards)
         except SandboxError as exc:
             self._finish_key(key, exc)
+            raise
+        except BaseException:
+            self._finish_key(key, None)
             raise
         self._finish_key(key, sandbox)
         return sandbox
@@ -240,6 +266,7 @@ class LocalSandboxProvider:
             for sub in ("fs/in", "fs/out", "fs/work"):
                 (directory / sub).mkdir(parents=True)
             (directory / "private").mkdir(mode=0o700)
+            self._hand_over(directory, tpl)
             meta, platform_envs = self._platform_view(tpl, sandbox_id, directory, cards, metadata)
             sandbox = LocalSandbox(
                 sandbox_id=sandbox_id,
@@ -251,6 +278,8 @@ class LocalSandboxProvider:
                 platform_envs=platform_envs,
                 timeout_sec=timeout_sec,
                 on_end=self._on_end,
+                launcher_python=self._launcher_python,
+                user=self._users[tpl.sealed],
             )
             with self._cond:
                 self._live[sandbox_id] = sandbox
@@ -261,6 +290,18 @@ class LocalSandboxProvider:
                 raise SandboxUnavailable(f"could not create sandbox from {tpl.name!r}: {exc}") from exc
             raise
         return sandbox
+
+    def _hand_over(self, directory: Path, tpl: LocalTemplate) -> None:
+        """Give the sandbox's files to the account its processes run as (when one is configured)."""
+        user = self._users[tpl.sealed]
+        if user is None:
+            return
+        directory.chmod(0o711)
+        for path in (directory / "fs", *(directory / "fs").iterdir()):
+            os.chown(path, *user)
+        # private/ stays with the provider, except that a sealed runner must read its own key.
+        if tpl.sealed:
+            os.chown(directory / "private", *user)
 
     def _abort_build(
         self, sandbox: LocalSandbox | None, directory: Path, cards: tuple[int, ...], sandbox_id: str
@@ -299,7 +340,7 @@ class LocalSandboxProvider:
         if tpl.gpus:
             envs["ROCR_VISIBLE_DEVICES"] = ",".join(str(c) for c in cards)
         if tpl.signing:
-            identity = generate_signing_identity(directory / "private")
+            identity = generate_signing_identity(directory / "private", self._users[True])
             meta[SIGNING_PUBLIC_KEY] = identity.public_key_pem
             envs["HYPERLOOM_SIGNING_KEY_FILE"] = str(identity.private_key_file)
         return meta, envs

@@ -9,13 +9,82 @@ import os
 import signal
 import subprocess
 import time
+from collections.abc import Iterable
 from pathlib import Path
 
 from hyperloom.common import proctree
 
-__all__ = ["reap_sandbox_processes", "sweep_tagged"]
+__all__ = ["kill_launchers", "reap_sandbox_processes", "sweep_tagged"]
 
-_SWEEP_WINDOW_SEC = 5.0
+_WINDOW_SEC = 5.0
+_POLL_SEC = 0.05
+
+
+def _live_descendants(root_pids: Iterable[int]) -> list[proctree.ProcessId]:
+    """Every running descendant of the launchers; zombies are already gone for our purposes."""
+    found: list[proctree.ProcessId] = []
+    for root in root_pids:
+        found.extend(d for d in proctree.descendants(root) if proctree.running(d[0]))
+    return found
+
+
+def _drain(root_pids: list[int], sig: int, window_sec: float) -> bool:
+    """Signal descendants of the launchers until none is left, or the window ends.
+
+    Each pass walks ``/proc`` again, so a process forked while we signal is
+    caught on the next pass. The launchers stay alive throughout and are
+    subreapers, so nothing can leave the tree by detaching.
+    """
+    deadline = time.monotonic() + window_sec
+    while True:
+        alive = _live_descendants(root_pids)
+        if not alive:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        proctree.signal_processes(alive, sig)
+        time.sleep(_POLL_SEC)
+
+
+def kill_launchers(procs: list[subprocess.Popen[bytes]], *, grace_sec: float = 2.0) -> bool:
+    """Reap everything that runs under the given launchers, then the launchers.
+
+    Order: freeze the launchers, SIGTERM the descendants and give them ``grace_sec``, SIGKILL what is
+    left until a fresh scan finds nothing, and only then kill the launchers.
+
+    Args:
+        procs: Launcher processes started by the sandbox.
+        grace_sec: How long descendants get to exit on SIGTERM.
+
+    Returns:
+        bool: True when no descendant is left running.
+    """
+    roots = [p.pid for p in procs]
+    for pid in roots:
+        # Freeze each launcher first so it cannot fork a command we have not seen yet.
+        # A stopped subreaper still receives orphans; it only stops reaping zombies.
+        try:
+            os.kill(pid, signal.SIGSTOP)
+        except ProcessLookupError:
+            continue
+    try:
+        # SIGTERM once, then wait the grace; the SIGKILL passes re-scan until empty.
+        proctree.signal_processes(_live_descendants(roots), signal.SIGTERM)
+        _drain(roots, 0, grace_sec)
+        clean = _drain(roots, signal.SIGKILL, _WINDOW_SEC)
+    except OSError:
+        clean = False  # /proc could not be listed; nothing can be confirmed
+    for proc in procs:
+        proctree.signal_group(proc.pid, signal.SIGKILL, what="sandbox launcher")
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        try:
+            proc.wait(timeout=_WINDOW_SEC)
+        except subprocess.TimeoutExpired:
+            clean = False
+    return clean
 
 
 def _tagged_pids(tag: bytes) -> list[int]:
@@ -34,19 +103,16 @@ def _tagged_pids(tag: bytes) -> list[int]:
 
 
 def sweep_tagged(sandbox_id: str) -> bool:
-    """SIGKILL every process that was started with this sandbox's id in its environment.
+    """SIGKILL every process started with this sandbox's id in its environment.
 
-    This catches processes that detached from the tree (a daemon that called
-    ``setsid`` and was re-parented to init), which tree enumeration cannot see.
-
-    Args:
-        sandbox_id: The id carried in ``E2B_SANDBOX_ID``; it is unique per sandbox.
+    A fallback for the case the launchers themselves were lost; it cannot see
+    a process that cleared its environment.
 
     Returns:
         bool: True when no tagged process is left within the window.
     """
     tag = f"E2B_SANDBOX_ID={sandbox_id}".encode()
-    deadline = time.monotonic() + _SWEEP_WINDOW_SEC
+    deadline = time.monotonic() + _WINDOW_SEC
     while True:
         pids = [pid for pid in _tagged_pids(tag) if proctree.running(pid)]
         if not pids:
@@ -58,41 +124,18 @@ def sweep_tagged(sandbox_id: str) -> bool:
                 os.kill(pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
                 continue
-        time.sleep(0.05)
+        time.sleep(_POLL_SEC)
 
 
-def reap_sandbox_processes(
-    roots: list[subprocess.Popen[str]] | list[subprocess.Popen[bytes]],
-    sandbox_id: str,
-    *,
-    grace_sec: float = 2.0,
-) -> bool:
-    """End the whole process tree of a sandbox and confirm nothing is left.
-
-    Order: SIGTERM then SIGKILL the enumerated trees (and their process
-    groups), then kill any remaining process tagged with the sandbox id.
+def reap_sandbox_processes(procs: list[subprocess.Popen[bytes]], sandbox_id: str) -> bool:
+    """End all processes of a sandbox and confirm nothing is left.
 
     Args:
-        roots: Every process the sandbox spawned directly.
+        procs: The sandbox's launcher processes.
         sandbox_id: The id the sandbox put in its processes' environment.
-        grace_sec: How long a tree gets to exit on SIGTERM.
 
     Returns:
         bool: True when no process of the sandbox is left running.
     """
-    try:
-        tree = proctree.collect_tree(p.pid for p in roots)
-        proctree.kill_tree(tree, grace_sec=grace_sec, confirm_sec=_SWEEP_WINDOW_SEC)
-    except OSError:
-        # /proc could not be listed; the group kill and the tag sweep below still run.
-        pass
-    for proc in roots:
-        # The root may be dead while members of its group live on.
-        proctree.signal_group(proc.pid, signal.SIGKILL, what="sandbox reap")
-    swept = sweep_tagged(sandbox_id)
-    for proc in roots:
-        try:
-            proc.wait(timeout=1)
-        except subprocess.TimeoutExpired:
-            return False
-    return swept
+    clean = kill_launchers(procs)
+    return sweep_tagged(sandbox_id) and clean
