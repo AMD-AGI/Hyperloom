@@ -1166,7 +1166,6 @@ class WritebackCollaborator(CoordinatorCollaborator):
         result_payload = dict(result or {})
         if task.kind == "conc_sweep" and not result_payload.get("status"):
             result_payload["status"] = "failed"
-        any_changed = False
         if task.kind == "explore" and bool((task.params or {}).get("geak_fallback")):
             geak_result = {
                 **(self.shared_state.geak_result or {}),
@@ -1182,7 +1181,6 @@ class WritebackCollaborator(CoordinatorCollaborator):
             )
             # The settled verdict and its diagnostics live on ``geak_result``; ``geak_pending`` only holds live work.
             self.shared_state.geak_pending = {}
-            any_changed = True
         # Per-action audit (failed attempt) for the in-scope kinds.
         if task.kind in _AUDIT_ACTIONS:
             audit_extras: dict[str, Any] = {}
@@ -1197,14 +1195,12 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 result=result_payload,
                 extras=audit_extras,
             )
-            any_changed = True
         # Global rolling failure log (every kind, including kernel_agent-owned).
         self.shared_state.record_action_failure(
             action=task.kind,
             task_id=task.task_id,
             result=result_payload,
         )
-        any_changed = True
         if task.kind == "conc_sweep":
             # No audit attempt here: ``record_action_attempt`` returns early for
             # any kind outside ``_AUDIT_ACTIONS``, which conc_sweep is not in.
@@ -1243,7 +1239,6 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     err_class=err_class,
                     stopped_by_the_run=stopped_by_the_run,
                 )
-                any_changed = True
             from ..actions.executors._accuracy_gate import eval_enablement_allowed
             from ..actions.executors._multi_node_env import is_multi_node
 
@@ -1352,13 +1347,11 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 "error_class": err_class,
                 "baseline_eval_failed": eval_failed,
             }
-            any_changed = True
         # Mirror the promote-path roofline failure handling: bump streak, clear gate, warn.
         if task.kind == "roofline":
             self.shared_state.roofline_failure_streak += 1
             if self.shared_state.auto_roofline_pending_task_id == task.task_id:
                 self.shared_state.auto_roofline_pending_task_id = ""
-            any_changed = True
             log.warning(
                 "Auto-roofline %s failed (reason=%s phase=%s "
                 "error_class=%s); continuing in degraded mode "
@@ -1372,9 +1365,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         elif task.kind == "profile" and self.shared_state.auto_roofline_pending_task_id == task.task_id:
             # With enable_roofline off the initial analysis is a profile; leaving its id set would hold PRELUDE.
             self.shared_state.auto_roofline_pending_task_id = ""
-            any_changed = True
-        if any_changed:
-            self.shared_state.save(self.session_dir)
+        self.shared_state.save(self.session_dir)
         if baseline_event_payload is not None:
             await self.bus.append_and_seq(
                 Message.new(
