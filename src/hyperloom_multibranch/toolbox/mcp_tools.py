@@ -4,7 +4,7 @@
 """What a specialist can call on the campaign's MCP service: tests, results, the queue, the notebook.
 
 :func:`register_specialist_tools` puts the specialist-scoped tools on a :class:`~hyperloom.hosted.mcp_server.McpServer`
-and :func:`grant_access` issues the token one specialist gets. Every handler takes the branch from the token and never
+and :class:`McpSpecialistTokens` issues and revokes the token each specialist gets. Every handler takes the branch from the token and never
 from the arguments, so a specialist submits, cancels, claims, logs and reads its test results for its own branch
 only; the notebook's search and record reads are shared across branches, as the notebook contract has them:
 
@@ -18,13 +18,13 @@ from __future__ import annotations
 
 import dataclasses
 import enum
+import threading
 from collections.abc import Callable, Mapping
 from typing import Any, cast
 
 from hyperloom.contracts.measurement import PRIORITY_HIGHEST, PRIORITY_LOWEST, Purpose, TestKind
 from hyperloom.contracts.measurement import TestRequest as MeasuredRequest
 from hyperloom.hosted.mcp_server import (
-    SPECIALIST_KIND,
     CallContext,
     InvalidParamsError,
     McpServer,
@@ -33,6 +33,8 @@ from hyperloom.hosted.mcp_server import (
 )
 from hyperloom_multibranch.contracts.notebook.interfaces import Notebook, NotebookError
 from hyperloom_multibranch.contracts.toolbox import (
+    SCOPE_SPECIALIST,
+    SpecialistGrant,
     Backpressure,
     RequestRejected,
     Toolbox,
@@ -41,7 +43,7 @@ from hyperloom_multibranch.contracts.toolbox import (
 from hyperloom_multibranch.notebook.tools import ERROR, notebook_tools
 
 SPECIALIST_TOKEN_ENV = "HYPERLOOM_SPECIALIST_MCP_TOKEN"
-_SPECIALIST_SCOPES = frozenset({SPECIALIST_KIND})
+_SPECIALIST_SCOPES = frozenset({SCOPE_SPECIALIST})
 _NO_ARGUMENTS: dict[str, Any] = {"type": "object", "properties": {}, "additionalProperties": False}
 _REQUEST_ID: dict[str, Any] = {
     "type": "object",
@@ -78,18 +80,33 @@ _POLL_INBOX: dict[str, Any] = {
 NotebookFor = Callable[[str], Notebook]
 
 
-@dataclasses.dataclass(frozen=True)
-class SpecialistAccess:
-    """What the AI socket hands a specialist's CLI: the service address and the token, which travels in ``token_env``."""
+class McpSpecialistTokens:
+    """:class:`~hyperloom_multibranch.contracts.toolbox.SpecialistTokens` on the campaign's MCP service.
 
-    url: str
-    token_env: str
-    token: str = dataclasses.field(repr=False)
+    One token per branch, kept in memory: asking again for a branch with a live token of the same scopes returns it,
+    so a restarted specialist keeps working with the token its environment already has.
+    """
 
+    def __init__(self, server: McpServer) -> None:
+        self._server = server
+        self._lock = threading.Lock()
+        self._live: dict[str, tuple[frozenset[str], SpecialistGrant]] = {}
 
-def grant_access(server: McpServer, *, specialist: str, branch: str) -> SpecialistAccess:
-    """The access of one specialist on ``branch``; :meth:`McpServer.revoke_specialist` takes it back when it ends."""
-    return SpecialistAccess(server.url, SPECIALIST_TOKEN_ENV, server.issue_token(specialist, branch))
+    def issue(self, branch: str, scopes: frozenset[str]) -> SpecialistGrant:
+        with self._lock:
+            held = self._live.get(branch)
+            if held is not None and held[0] == scopes:
+                return held[1]
+            self._server.revoke_specialist(branch)
+            token = self._server.issue_token(branch, branch, scopes)
+            grant = SpecialistGrant(self._server.url, SPECIALIST_TOKEN_ENV, token)
+            self._live[branch] = (scopes, grant)
+            return grant
+
+    def revoke(self, branch: str) -> None:
+        with self._lock:
+            self._live.pop(branch, None)
+            self._server.revoke_specialist(branch)
 
 
 def jsonable(value: Any) -> Any:
@@ -246,8 +263,7 @@ def register_specialist_tools(
 __all__ = [
     "SPECIALIST_TOKEN_ENV",
     "NotebookFor",
-    "SpecialistAccess",
-    "grant_access",
+    "McpSpecialistTokens",
     "jsonable",
     "register_specialist_tools",
 ]

@@ -100,6 +100,34 @@ class QueueState:
 _PRIORITIES = range(PRIORITY_HIGHEST, PRIORITY_LOWEST + 1)
 
 
+#: The scope names of MCP tokens and tools: the host (Claw's front end) and a specialist.
+SCOPE_HOST = "host"
+SCOPE_SPECIALIST = "specialist"
+
+
+@dataclass(frozen=True)
+class SpecialistGrant:
+    """What a specialist's CLI needs to reach the campaign's MCP service: the address, and the token with the name of
+    the environment variable it travels in (the token never goes into a configuration file)."""
+
+    url: str
+    token_env: str
+    token: str = field(repr=False)
+
+
+class SpecialistTokens(Protocol):
+    """Issues and takes back the MCP tokens of the branches' specialists; the specialist runtime calls it.
+
+    The token belongs to the branch: a second ``issue`` for a branch whose token is live with the same ``scopes``
+    returns the same grant, so a specialist restarted after it was lost keeps its token. ``revoke`` ends the branch's
+    token for good; after it, the next ``issue`` makes a new one. Neither is a coroutine: both are local and quick.
+    """
+
+    def issue(self, branch: str, scopes: frozenset[str]) -> SpecialistGrant: ...
+
+    def revoke(self, branch: str) -> None: ...
+
+
 class Toolbox(Protocol):
     """The toolbox's external interface; the real one and the fake implement it."""
 
@@ -122,12 +150,16 @@ class Toolbox(Protocol):
 
 
 __all__ = [
+    "SCOPE_HOST",
+    "SCOPE_SPECIALIST",
     "REJECTION_CODES",
     "Backpressure",
     "CancelOutcome",
     "NodeHealth",
     "QueueState",
     "RequestRejected",
+    "SpecialistGrant",
+    "SpecialistTokens",
     "TestRecordSink",
     "Toolbox",
     "ToolboxError",

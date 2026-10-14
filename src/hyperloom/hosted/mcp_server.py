@@ -24,6 +24,7 @@ written to a log or an error message.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import hmac
 import inspect
@@ -33,7 +34,7 @@ import os
 import secrets
 import threading
 import uuid
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -79,6 +80,7 @@ class McpPrincipal:
     subject: str = ""
     branch: str = ""
     campaign: str = ""
+    scopes: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -160,7 +162,15 @@ class _TokenRegistry:
 class McpServer:
     """One MCP service for one campaign."""
 
-    def __init__(self, config: McpServerConfig, *, campaign: str, server_name: str = "hyperloom") -> None:
+    def __init__(
+        self,
+        config: McpServerConfig,
+        *,
+        campaign: str,
+        server_name: str = "hyperloom",
+        on_call_heartbeat: Callable[[McpPrincipal], None] | None = None,
+        heartbeat_seconds: float = 60.0,
+    ) -> None:
         if len(config.host_token) < MIN_TOKEN_LENGTH:
             raise ValueError(f"the host token must be at least {MIN_TOKEN_LENGTH} characters")
         if not campaign:
@@ -170,6 +180,8 @@ class McpServer:
         self._server_name = server_name
         self._host_digest = _digest(config.host_token)
         self._tokens = _TokenRegistry()
+        self._on_call_heartbeat = on_call_heartbeat
+        self._heartbeat_seconds = heartbeat_seconds
         self._tools: dict[str, RegisteredTool] = {}
         self._httpd: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -193,11 +205,16 @@ class McpServer:
             raise ValueError(f"scopes must be a non-empty subset of {sorted(TOKEN_KINDS)}")
         self._tools[name] = RegisteredTool(name, description, dict(schema), handler, granted)
 
-    def issue_token(self, specialist: str, branch: str) -> str:
-        """A token for one specialist on one branch; it opens only ``specialist`` tools of this campaign."""
+    def issue_token(self, specialist: str, branch: str, scopes: Iterable[str] = (SPECIALIST_KIND,)) -> str:
+        """A token for one specialist on one branch, carrying ``scopes``; host scope is never issued."""
+        granted = frozenset(scopes)
         if not specialist or not branch:
             raise ValueError("a specialist token needs a specialist id and a branch")
-        principal = McpPrincipal(SPECIALIST_KIND, subject=specialist, branch=branch, campaign=self._campaign)
+        if not granted or not granted <= TOKEN_KINDS - {HOST_KIND}:
+            raise ValueError(f"issued scopes must be a non-empty subset of {sorted(TOKEN_KINDS - {HOST_KIND})}")
+        principal = McpPrincipal(
+            SPECIALIST_KIND, subject=specialist, branch=branch, campaign=self._campaign, scopes=granted
+        )
         return self._tokens.issue(principal)
 
     def revoke(self, token: str) -> bool:
@@ -213,7 +230,7 @@ class McpServer:
         if not token:
             return None
         if hmac.compare_digest(self._host_digest, _digest(token)):
-            return McpPrincipal(HOST_KIND, campaign=self._campaign)
+            return McpPrincipal(HOST_KIND, campaign=self._campaign, scopes=frozenset({HOST_KIND}))
         principal = self._tokens.resolve(token)
         if principal is None or principal.campaign != self._campaign:
             return None
@@ -232,7 +249,7 @@ class McpServer:
         return [
             {"name": tool.name, "description": tool.description, "inputSchema": dict(tool.schema)}
             for tool in self._tools.values()
-            if principal.kind in tool.scopes
+            if principal.scopes & tool.scopes
         ]
 
     async def _call_tool(
@@ -241,7 +258,7 @@ class McpServer:
         tool = self._tools.get(name)
         if tool is None:
             raise InvalidParamsError("unknown tool")
-        if principal.kind not in tool.scopes:
+        if not principal.scopes & tool.scopes:
             raise ToolForbidden("this token may not call this tool")
         problem = first_problem(arguments, tool.schema)
         if problem:
@@ -304,13 +321,38 @@ class McpServer:
             return [reply for reply in replies if reply is not None] or None
         return await self._answer(principal, presented, payload)
 
+    @contextlib.contextmanager
+    def _call_heartbeat(self, principal: McpPrincipal) -> Iterator[None]:
+        """While a request of a specialist token is being served, call the heartbeat hook every interval."""
+        hook = self._on_call_heartbeat
+        if hook is None or principal.kind == HOST_KIND:
+            yield
+            return
+        done = threading.Event()
+
+        def beat() -> None:
+            while not done.wait(self._heartbeat_seconds):
+                try:
+                    hook(principal)
+                except Exception as exc:  # noqa: BLE001 - a failing hook must not break the call
+                    logger.warning("call heartbeat hook failed: %s", type(exc).__name__)
+
+        thread = threading.Thread(target=beat, name="hyperloom-mcp-heartbeat", daemon=True)
+        thread.start()
+        try:
+            yield
+        finally:
+            done.set()
+            thread.join()
+
     def handle_post(self, principal: McpPrincipal, presented: str, body: bytes) -> tuple[HTTPStatus, Any, bool]:
         """Run one POST body: the HTTP status, the JSON reply (``None`` for no content) and whether it initialized."""
         try:
             payload = json.loads(body.decode())
         except (UnicodeDecodeError, json.JSONDecodeError):
             return HTTPStatus.BAD_REQUEST, _rpc_error(None, _ERR_PARSE, "Parse error"), False
-        reply = asyncio.run(self._answer_all(principal, presented, payload))
+        with self._call_heartbeat(principal):
+            reply = asyncio.run(self._answer_all(principal, presented, payload))
         if reply is None:
             return HTTPStatus.ACCEPTED, None, False
         initialized = _mentions_initialize(payload)
@@ -418,6 +460,8 @@ def _make_handler(server: McpServer) -> type[BaseHTTPRequestHandler]:
 
 
 __all__ = [
+    "HOST_KIND",
+    "SPECIALIST_KIND",
     "CallContext",
     "InvalidParamsError",
     "McpPrincipal",

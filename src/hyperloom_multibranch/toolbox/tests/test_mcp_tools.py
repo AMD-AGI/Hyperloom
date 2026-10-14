@@ -17,13 +17,19 @@ import pytest
 from hyperloom.contracts.measurement import TestRequest
 from hyperloom.hosted.mcp_server import McpServer, McpServerConfig
 from hyperloom_multibranch.contracts.notebook import Role, Writer
-from hyperloom_multibranch.contracts.toolbox import Backpressure, CancelOutcome, QueueState, RequestRejected
+from hyperloom_multibranch.contracts.toolbox import (
+    SCOPE_SPECIALIST,
+    Backpressure,
+    CancelOutcome,
+    QueueState,
+    RequestRejected,
+)
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.tests.factories import FakeClock
 from hyperloom_multibranch.notebook.tests.sessions import scripted_session
 from hyperloom_multibranch.toolbox.mcp_tools import (
     SPECIALIST_TOKEN_ENV,
-    grant_access,
+    McpSpecialistTokens,
     jsonable,
     register_specialist_tools,
 )
@@ -228,12 +234,10 @@ def test_notebook_errors_are_error_results(rig: Rig) -> None:
 
 
 def test_missing_wrong_and_revoked_tokens(rig: Rig) -> None:
-    access = grant_access(rig.server, specialist="spec-1", branch="s1")
-    assert rig.call(access.token, "queue_state")[0] == 200
+    grant = McpSpecialistTokens(rig.server).issue("s1", frozenset({SCOPE_SPECIALIST}))
+    assert rig.call(grant.token, "queue_state")[0] == 200
     assert rig.call(None, "queue_state")[0] == 401
     assert rig.call("wrong-token-0123456789", "queue_state")[0] == 401
-    rig.server.revoke_specialist("spec-1")
-    assert rig.call(access.token, "queue_state")[0] == 401
 
 
 def test_unknown_tool_over_http(rig: Rig) -> None:
@@ -241,10 +245,34 @@ def test_unknown_tool_over_http(rig: Rig) -> None:
     assert reply["error"] == {"code": -32602, "message": "unknown tool"}
 
 
-def test_grant_access_names_the_env_var_and_hides_the_token(rig: Rig) -> None:
-    access = grant_access(rig.server, specialist="spec-1", branch="s1")
-    assert access.url == rig.server.url and access.token_env == SPECIALIST_TOKEN_ENV
-    assert access.token not in repr(access)
+def test_tokens_are_per_branch_stable_across_issue_and_gone_after_revoke(rig: Rig) -> None:
+    tokens = McpSpecialistTokens(rig.server)
+    scopes = frozenset({SCOPE_SPECIALIST})
+    grant = tokens.issue("s1", scopes)
+    assert (grant.url, grant.token_env) == (rig.server.url, SPECIALIST_TOKEN_ENV)
+    assert grant.token not in repr(grant)
+    assert tokens.issue("s1", scopes) == grant  # a restarted specialist keeps its token
+    other = tokens.issue("s2", scopes)
+    assert other.token != grant.token
+    tokens.revoke("s1")
+    assert rig.call(grant.token, "queue_state")[0] == 401
+    assert rig.call(other.token, "queue_state")[0] == 200
+    fresh = tokens.issue("s1", scopes)
+    assert fresh.token != grant.token and rig.call(fresh.token, "queue_state")[0] == 200
+    tokens.revoke("s1")
+    tokens.revoke("s1")  # revoking twice is harmless
+
+
+def test_the_token_acts_for_the_branch_it_was_issued_for(rig: Rig) -> None:
+    grant = McpSpecialistTokens(rig.server).issue("s1", frozenset({SCOPE_SPECIALIST}))
+    rig.ok(grant.token, "submit_test", kind="test", purpose="explore", parent_commit="c1")
+    assert rig.toolbox.submitted[-1].branch_id == "s1"
+
+
+def test_a_token_cannot_be_issued_with_host_scope_or_no_scope(rig: Rig) -> None:
+    for scopes in (frozenset({"host"}), frozenset(), frozenset({"specialist", "host"}), frozenset({"admin"})):
+        with pytest.raises(ValueError, match="issued scopes"):
+            McpSpecialistTokens(rig.server).issue("s1", scopes)
 
 
 def test_jsonable_turns_contract_objects_into_json_data() -> None:

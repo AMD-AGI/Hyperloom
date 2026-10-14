@@ -8,6 +8,7 @@ from __future__ import annotations
 import http.client
 import json
 import logging
+import time
 from collections.abc import Iterator
 from typing import Any
 
@@ -304,3 +305,73 @@ def test_string_results_pass_through_and_tool_errors_are_error_results(server: M
         "content": [{"type": "text", "text": "refused: held by someone"}],
         "isError": True,
     }
+
+
+def _server_with_heartbeat(beats: list[tuple[str, str]], seconds: float = 0.1) -> McpServer:
+    server = McpServer(
+        McpServerConfig(host_token=HOST_TOKEN),
+        campaign="camp",
+        on_call_heartbeat=lambda principal: beats.append((principal.branch, principal.subject)),
+        heartbeat_seconds=seconds,
+    )
+
+    def slow(args: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
+        time.sleep(args.get("seconds", 0.0))
+        return {"ok": True}
+
+    schema = {"type": "object", "properties": {"seconds": {"type": "number"}}}
+    server.register("slow", schema=schema, handler=slow, scopes={"host", "specialist"})
+    return server
+
+
+def test_heartbeat_fires_during_a_blocking_call_and_stops_after_it() -> None:
+    beats: list[tuple[str, str]] = []
+    server = _server_with_heartbeat(beats)
+    server.start()
+    try:
+        token = server.issue_token("spec-1", "branch-7")
+        assert Client(server).call(token, "slow", {"seconds": 0.75})[0] == 200
+        during = len(beats)
+        assert during >= 4
+        assert set(beats) == {("branch-7", "spec-1")}
+        time.sleep(0.4)
+        assert len(beats) == during
+    finally:
+        server.stop()
+
+
+def test_no_heartbeat_for_a_fast_call_or_the_host_token() -> None:
+    beats: list[tuple[str, str]] = []
+    server = _server_with_heartbeat(beats)
+    server.start()
+    try:
+        assert Client(server).call(server.issue_token("s", "b"), "slow", {"seconds": 0.0})[0] == 200
+        assert Client(server).call(HOST_TOKEN, "slow", {"seconds": 0.5})[0] == 200
+        assert beats == []
+    finally:
+        server.stop()
+
+
+def test_a_failing_heartbeat_hook_does_not_break_the_call() -> None:
+    def broken(principal: Any) -> None:
+        raise RuntimeError("hook down")
+
+    server = McpServer(
+        McpServerConfig(host_token=HOST_TOKEN), campaign="camp", on_call_heartbeat=broken, heartbeat_seconds=0.05
+    )
+    server.register(
+        "slow", schema={"type": "object"}, handler=lambda a, c: time.sleep(0.3) or {"ok": 1}, scopes={"specialist"}
+    )
+    server.start()
+    try:
+        status, _, reply = Client(server).call(server.issue_token("s", "b"), "slow")
+        assert status == 200 and reply["result"]["isError"] is False
+    finally:
+        server.stop()
+
+
+def test_issued_scopes_decide_which_tools_open(server: McpServer) -> None:
+    with pytest.raises(ValueError, match="issued scopes"):
+        server.issue_token("s", "b", scopes=("host",))
+    with pytest.raises(ValueError, match="issued scopes"):
+        server.issue_token("s", "b", scopes=())
