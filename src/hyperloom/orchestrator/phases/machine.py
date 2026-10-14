@@ -65,8 +65,8 @@ class MachinePhase(CoordinatorCollaborator):
         """Set ``phase`` + persist ``phase_budget_pct`` once per session (idempotent).
 
         When *budget_pct* is given, or when state has no budget yet (fresh session),
-        the budget is redistributed and written; on resume without explicit overrides the
-        prior budget is kept.
+        the budget is redistributed and written, and recorded as the configured one; on
+        resume without explicit overrides the prior budget is kept.
         """
         state = self.shared_state
         if budget_pct or not state.phase_budget_pct:
@@ -75,6 +75,10 @@ class MachinePhase(CoordinatorCollaborator):
                 optimize_enabled=self.optimize_enabled(),
                 kernel_enabled=self.kernel_enabled(),
             )
+            state.configured_phase_budget_pct = dict(state.phase_budget_pct)
+        elif not state.configured_phase_budget_pct:
+            # Recorded before the configured shares were; the ones it resumes with are the closest record of them.
+            state.configured_phase_budget_pct = dict(state.phase_budget_pct)
         current = (state.phase or "").strip().upper()
         # Only an unset phase means fresh; an unknown one would otherwise re-run PRELUDE over the earlier build's
         # baseline and KEPT stack.

@@ -3643,12 +3643,9 @@ async def _run_geak_gemm_tuning(
     if baseline_tput is None:
         baseline_tput = state.baseline_tput
 
-    from hyperloom.orchestrator.actions.executors._workload_envs import geak_metric_axis
+    from hyperloom.orchestrator.actions.executors._workload_envs import GEAK_METRIC_OUTPUT
 
-    _geak_e2e_metric, _ = geak_metric_axis(
-        benchmark_mode=str(getattr(state, "benchmark_mode", "") or ""),
-        grading=getattr(state, "grading", None),
-    )
+    _geak_e2e_metric, _ = GEAK_METRIC_OUTPUT
 
     input_json = workspace / "gemm_tuning_input.json"
     input_payload = {
@@ -3663,10 +3660,9 @@ async def _run_geak_gemm_tuning(
         "isl": isl,
         "osl": osl,
         "baseline_tput": float(baseline_tput or 0.0),
-        # Same axis Hyperloom grades this session on; ``baseline_tput`` above is
-        # read on that axis too, so a pinned "output" here would price every
-        # tuned GEMM against a reference measured differently. Synthetic runs
-        # resolve to "output" and are unaffected.
+        # Output on every session, interactivity-graded ones included: ``baseline_tput``
+        # above is output throughput, and the fixed ISL/OSL benchmark written above is
+        # not an AgentX replay, so it has no interactivity median for GEAK to tune on.
         "env": {"E2E_METRIC": _geak_e2e_metric},
     }
     if geak_config:

@@ -2737,6 +2737,7 @@ class BenchmarkRunExecutor:
                 # reverting here handed prelude a clean tree and silently lost the replay.
                 if applied_patches and not isinstance(patch_application, dict):
                     _revert_legacy_warm_patch_trees(params)
+                _lifecycle.stop_agentx_servers(output_dir)
                 if bench_lease is not None:
                     bench_lease.close()
 
