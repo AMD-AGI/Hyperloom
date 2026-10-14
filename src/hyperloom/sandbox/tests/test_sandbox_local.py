@@ -404,3 +404,22 @@ def test_a_command_killed_mid_flight_reports_the_sandbox_gone(make) -> None:
     threading.Timer(0.5, sb.kill).start()
     with pytest.raises(SandboxGone):
         sb.run("sleep 300")
+
+
+def test_kill_reaps_a_daemon_that_outlived_its_parent_and_left_the_tree(make) -> None:
+    provider = make([LocalTemplate("dev", "dev")])
+    sb = _create(provider, "dev", "dev")
+    sb.write_file(
+        "/work/orphan.py",
+        (
+            "import subprocess,sys\n"
+            "d=subprocess.Popen([sys.executable,'-c','import time;time.sleep(600)'],start_new_session=True)\n"
+            "open('orphan.pid','w').write(str(d.pid))\n"
+        ).encode(),
+    )
+    sb.run(f"{sys.executable} orphan.py")  # the parent exits; the daemon is re-parented away
+    pid = int(sb.read_file("/work/orphan.pid"))
+    assert proctree.running(pid)
+    assert proctree.proc_identity(pid)[0] != os.getpid()
+    sb.kill()
+    _assert_all_gone([pid])
