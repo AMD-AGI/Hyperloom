@@ -46,7 +46,7 @@ MIN_REPEATS_XDIT = 2
 #: The primary vLLM shape wins outright; the backup list (vLLM's older shapes and
 #: SGLang's per-step annotations) is consulted only when the primary matches
 #: nothing. Reproducing that precedence matters -- a looser or differently
-#: ordered pattern set would forecast over steps the splitter never sees.
+#: ordered pattern set would count steps the splitter never sees.
 _PRIMARY_ROOT_PATTERNS = (
     re.compile(r"execute_\d+_context_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)_generation_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)"),
 )
@@ -61,10 +61,6 @@ _ROOFLINE_TASK_RE = re.compile(r"/runs/[a-z_]+/([0-9a-f]{32})/")
 _SPLIT_NAME_RE = re.compile(r"^(?P<mode>.+?)_steady_state_prefill_\d+_prefilldecode_\d+_decode_\d+_bs\d+_conc\d+_")
 
 _SCRIPTABLE_FRAMEWORKS = frozenset(("sglang", "vllm", "trtllm", "tensorrt_llm"))
-
-#: The splitter's internal mode names differ from the value a caller sets in
-#: ``INFERENCE_OPTIMIZER_STEADY_STATE_MODE``. Recommendations are reported in the
-#: caller's vocabulary so the certificate is directly actionable.
 
 
 def _iso_now() -> str:
@@ -252,7 +248,6 @@ class StepPass:
         self.kernel_by_corr: dict[Any, list[tuple[float, float, float]]] = {}
         self.cpu_op_total = 0
         self.cpu_op_with_meta = 0
-        self.gpu_intervals: list[tuple[float, float]] = []
 
     def scan(self, path: Path) -> list[str]:
         errors: list[str] = []
@@ -301,11 +296,6 @@ class StepPass:
                     dur = float(ev.get("dur") or 0.0)
                     corr = (ev.get("args") or {}).get("correlation")
                     self.kernel_by_corr.setdefault(corr, []).append((ts, ts + dur, dur))
-                    self.gpu_intervals.append((ts, ts + dur))
-                elif cat in ("gpu_memcpy", "gpu_memset"):
-                    ts = float(ev.get("ts") or 0.0)
-                    dur = float(ev.get("dur") or 0.0)
-                    self.gpu_intervals.append((ts, ts + dur))
         finally:
             fobj.close()
         runtime.sort(key=lambda x: x[0])

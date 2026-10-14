@@ -228,7 +228,7 @@ cognitive-complexity src/hyperloom/orchestrator/trace_analysis/_bypass_trace_rea
 cognitive-complexity src/hyperloom/orchestrator/trace_analysis/_task_group_contract.py::_moe_dimensions 34
 cognitive-complexity src/hyperloom/orchestrator/trace_analysis/bypass_trace_analysis.py::_discover_capture_shards 44
 cognitive-complexity src/hyperloom/orchestrator/trace_analysis/bypass_trace_analysis.py::main 72
-cognitive-complexity src/hyperloom/orchestrator/trace_analysis/trace_selfcert.py::StepPass.scan 62
+cognitive-complexity src/hyperloom/orchestrator/trace_analysis/trace_selfcert.py::StepPass.scan 59
 cognitive-complexity src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::_apply_vendor_operator_playbook_grouping 31
 cognitive-complexity src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::_check_chunk_quality 33
 cognitive-complexity src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::_enrich_kernel_contract 35
