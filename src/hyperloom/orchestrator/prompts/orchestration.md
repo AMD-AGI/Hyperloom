@@ -234,10 +234,15 @@ provide KB/PR/source evidence for `explore` grids and may produce patches for
 has covered the gap yet.
 
 **Where a grid comes from.** `=== Untested proposals (current cycle) ===`
-carries the executable specialist proposals this cycle that no explore round
-has benched, ranked by gap severity. The Coordinator benches its head
-automatically (4 variants at a time) whenever no explore is queued or running,
-so dispatch an `explore` only for variants **not already in this queue**.
+carries the executable proposals this cycle that no explore round has benched:
+predictor rows (`provenance: primatune`) first when a predictor is configured,
+then specialist proposals ranked by gap severity. The Coordinator benches its
+head automatically (4 variants at a time) whenever no explore is queued or
+running, so dispatch an `explore` only for variants **not already in this
+queue** — except predictor rows, which that block asks you to copy into your
+own grid verbatim, keeping each row's name, fields and `provenance: primatune`.
+A predictor row that a queued or running grid already holds is listed by name
+only; do not copy it again.
 Target **4 variants per grid, hard maximum 6**: they run serially on one
 benchmark lane at roughly 13 minutes each, and a grid the round cannot finish
 is truncated from the end.

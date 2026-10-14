@@ -1150,9 +1150,13 @@ rewrote the `record_kernel_discovery` call contract, so landing this one first w
 #1397's premise.
 **Not a finding when:** the overlapping files are only lockfiles or test
 fixtures, or the other PR is a draft the author has already stacked on this one.
-**Evidence:** `$WORK/openprs.txt` -- other open PRs and the files they share.
+**Evidence:** `$WORK/openprs.txt` -- other open PRs and the files they share. A `# PARTIAL:` line
+names what was never compared: the open PRs past the list limit, or a PR's files past its first
+100. Overlap there is unchecked, not absent: each such line goes into `verdicts.txt` and onto the
+card under SKILL.md's SKIPPED protocol, and a `FIRE` or `CLEAR` covers only the rows compared.
 **Report as:** `V4: #<N> touches <K> of the same files and <how the premises conflict> --
-land <which> first`
+land <which> first`; for each `# PARTIAL:` line, also `SKIPPED: V4 -- <that line, quoted>, overlap
+there unchecked`
 
 ### V5 -- CI must be green at the current head, proportional to the diff, and free of base conflicts
 

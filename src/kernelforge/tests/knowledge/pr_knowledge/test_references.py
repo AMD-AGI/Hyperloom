@@ -39,7 +39,7 @@ from kernelforge.knowledge.pr_knowledge.references import (
     write_index,
     write_provenance,
 )
-from kernelforge.knowledge.pr_knowledge.search import PRReference
+from kernelforge.knowledge.pr_knowledge.search import PRLifecycle, PRReference, PRState
 from kernelforge.knowledge.pr_knowledge.context import (
     PR_REPOS_EXPECTED,
     REASON_CONTRACT_ERROR,
@@ -53,7 +53,7 @@ def _ref(number: int = 1, **kwargs) -> PRReference:
         number=number,
         title=f"Optimize kernel {number}",
         hit_via=("file_path",),
-        is_merged=True,
+        lifecycle=PRLifecycle(state=PRState.MERGED),
         worth_trying=0.6,
         components=("fused_moe", "gemm2"),
         mechanisms=("vectorize",),
@@ -186,17 +186,31 @@ def test_impossibly_small_budget_yields_nothing():
 
 
 def test_entry_reports_state_score_source_and_size():
-    entry = render_entry(_ref(959, worth_trying=0.6, is_merged=True, n_files=3))
+    entry = render_entry(_ref(959, worth_trying=0.6, n_files=3))
 
-    assert "ROCm/FlyDSL#959" in entry
-    assert "merged" in entry
+    assert "ROCm/FlyDSL#959 (merged, " in entry
     assert "worth 0.60" in entry
     assert "via file_path" in entry
     assert "3 files" in entry
 
 
-def test_open_pr_is_labelled_open():
-    assert "open" in render_entry(_ref(is_merged=False))
+@pytest.mark.parametrize(
+    ("lifecycle", "label"),
+    [
+        pytest.param(PRLifecycle(state=PRState.OPEN), "(open, worth", id="open"),
+        pytest.param(PRLifecycle(state=PRState.OPEN, draft=True), "(open, draft, worth", id="open-draft"),
+        pytest.param(PRLifecycle(state=PRState.CLOSED, draft=False), "(closed, worth", id="closed-unmerged"),
+        pytest.param(PRLifecycle(state=PRState.MERGED), "(merged, worth", id="merged"),
+        pytest.param(PRLifecycle(), "(unknown, worth", id="unreported"),
+    ],
+)
+def test_entry_header_names_the_state_the_service_reported(lifecycle, label):
+    """A closed or unreported PR is never presented as open."""
+    header = render_entry(_ref(lifecycle=lifecycle)).splitlines()[0]
+
+    assert label in header
+    if lifecycle.state is not PRState.OPEN:
+        assert "open" not in header
 
 
 def test_unknown_score_is_labelled_not_rendered_as_none():
@@ -354,14 +368,21 @@ def test_naive_timestamp_is_treated_as_utc():
 
 def test_index_lists_every_surfaced_reference(tmp_path):
     snapshot = Snapshot()
-    merge_references(snapshot, [_ref(1), _ref(2, worth_trying=None, is_merged=False)])
+    merge_references(
+        snapshot,
+        [
+            _ref(1),
+            _ref(2, worth_trying=None, lifecycle=PRLifecycle(state=PRState.CLOSED)),
+            _ref(3, lifecycle=PRLifecycle()),
+        ],
+    )
 
     markdown = render_index(snapshot)
 
-    assert "ROCm/FlyDSL#1" in markdown
-    assert "ROCm/FlyDSL#2" in markdown
-    assert "unknown" in markdown
-    assert "entries: 2" in markdown
+    assert "| ROCm/FlyDSL#1 | 0.60 | merged |" in markdown
+    assert "| ROCm/FlyDSL#2 | unknown | closed |" in markdown
+    assert "| ROCm/FlyDSL#3 | 0.60 | unknown |" in markdown
+    assert "entries: 3" in markdown
 
 
 def test_index_is_written_next_to_the_snapshot(tmp_path):
@@ -551,6 +572,17 @@ def test_successful_lookup_renders_persists_and_indexes(tmp_path):
     assert "ROCm/aiter#1" in (directory / "index.md").read_text()
 
 
+def test_a_closed_unmerged_pr_reaches_the_prompt_and_index_as_closed(tmp_path):
+    payload = _pr_payload(1)
+    payload["summary"].update(state="closed", is_merged=False)
+    client = _StubClient(by_query={"moe": [1]}, prs={1: payload})
+
+    result = collect_references(workspace_dir=str(tmp_path), client=client, kernel_backend="aiter", operator_name="moe")
+
+    assert "- ROCm/aiter#1 (closed, worth 0.60" in result.prompt_context
+    assert "| ROCm/aiter#1 | 0.60 | closed |" in (refs_dir(str(tmp_path)) / "index.md").read_text()
+
+
 def test_deferred_persistence_leaves_the_workspace_untouched(tmp_path):
     """A caller with a guard ahead of it must be able to query read-only."""
     client = _StubClient(by_query={"moe": [1]}, prs={1: _pr_payload(1)})
@@ -723,8 +755,15 @@ def test_all_queries_cached_empty_still_renders_prior_references(tmp_path):
 
 def test_snapshot_entry_round_trips_every_rendered_field(tmp_path):
     """Re-rendering from disk must not lose the distill prose."""
+    lifecycle = PRLifecycle(
+        state=PRState.MERGED,
+        draft=False,
+        merged_at="2026-08-02T00:00:00Z",
+        base_ref="main",
+    )
     reference = _ref(
         7,
+        lifecycle=lifecycle,
         summary="detailed distill prose",
         risk_notes="watch occupancy",
         expected_gain="up",
@@ -736,10 +775,37 @@ def test_snapshot_entry_round_trips_every_rendered_field(tmp_path):
 
     restored = entry_to_reference(next(iter(load_snapshot(str(tmp_path)).entries.values())))
 
+    assert restored.lifecycle == lifecycle
     assert restored.summary == "detailed distill prose"
     assert restored.risk_notes == "watch occupancy"
     assert restored.expected_gain == "up"
     assert restored.mechanisms == ("vectorize", "prefetch")
+
+
+@pytest.mark.parametrize(
+    ("recorded", "state", "label"),
+    [
+        pytest.param({}, None, "unknown", id="no-state-recorded"),
+        pytest.param({"is_merged": True}, PRState.MERGED, "merged", id="older-entry-merged"),
+        pytest.param({"is_merged": False}, None, "unknown", id="older-entry-unmerged"),
+    ],
+)
+def test_a_cached_entry_without_state_keeps_only_an_unambiguous_merge(tmp_path, recorded, state, label):
+    """Older entries hold only ``is_merged``, and a cached head is never refetched to correct them."""
+    client = _StubClient(by_query={"moe": [1]}, prs={1: _pr_payload(1)})
+    collect_references(workspace_dir=str(tmp_path), client=client, kernel_backend="aiter", operator_name="moe")
+    snapshot = load_snapshot(str(tmp_path))
+    for entry in snapshot.entries.values():
+        for name in ("state", "draft", "merged_at", "base_ref"):
+            entry.pop(name)
+        entry.update(recorded)
+    save_snapshot(str(tmp_path), snapshot)
+
+    result = collect_references(workspace_dir=str(tmp_path), client=client, kernel_backend="aiter", operator_name="moe")
+
+    assert result.references[0].lifecycle == PRLifecycle(state=state)
+    assert f"- ROCm/aiter#1 ({label}, worth 0.60" in result.prompt_context
+    assert f"| ROCm/aiter#1 | 0.60 | {label} |" in (refs_dir(str(tmp_path)) / "index.md").read_text()
 
 
 def test_unusable_snapshot_entries_are_skipped_on_rebuild():

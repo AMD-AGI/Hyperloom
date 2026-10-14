@@ -1126,10 +1126,11 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         primary_metric: str = "",
         primary_value: float = 0.0,
         reason: str = "",
-        error_type: str = "",
+        error: Exception | None = None,
     ) -> None:
         """Append one best-effort, secret-free KB Store publish audit row."""
         try:
+            from .remote_recipe.audit import publish_error_fields
             from hyperloom.inference_optimizer.session.session_paths import (
                 recipe_snapshot_audit_jsonl,
             )
@@ -1170,8 +1171,8 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                 )
             if primary_metric == "optimized_throughput":
                 row["result"]["best_throughput"] = primary_value
-            if error_type:
-                row["error"] = {"type": error_type}
+            if error is not None:
+                row["error"] = publish_error_fields(error)
             append_jsonl(
                 recipe_snapshot_audit_jsonl(self.session_dir),
                 row,
@@ -1402,7 +1403,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                     status="error",
                     canonical_id=remote_cid,
                     session_id=remote_sid,
-                    error_type=type(exc).__name__,
+                    error=exc,
                 )
                 log.exception("Remote Recipe KB finalize failed (non-fatal)")
                 return {
@@ -1411,8 +1412,6 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                     "backend": "kb-store",
                     "canonical_id": remote_cid,
                     "session_id": remote_sid,
-                    # A validation error means the store rejected the bundle we
-                    # built; anything else failed on the way there.
                     "result_type": (
                         _close_out.RESULT_BUNDLE_BUILD_FAILED
                         if type(exc).__name__ == _REMOTE_VALIDATION_ERROR
