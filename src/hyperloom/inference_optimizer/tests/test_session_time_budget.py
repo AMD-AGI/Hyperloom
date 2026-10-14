@@ -379,6 +379,10 @@ class TestAdmissionGateOrder:
         assert proposing_coord.dispatcher.admission_denial_for_action(_PROPOSABLE_ACTION) is None
 
 
+def _catalogue_cost_min(action: str) -> float:
+    return expected_action_cost_minutes(ACTION_CATALOGUE[action])
+
+
 def _set_phase_budget(coord: Coordinator, monkeypatch, *, phase: str, minutes_left: float) -> None:
     """Put the session in ``phase`` with ``minutes_left`` of that phase's own budget remaining."""
     coord.shared_state.phase = phase
@@ -390,19 +394,21 @@ class TestThePhaseBudgetGate:
 
     @pytest.mark.parametrize("phase", sorted(time_budget.PHASE_BUDGET_GATED_PHASES))
     def test_an_action_too_big_for_the_phase_is_denied(self, coord: Coordinator, monkeypatch, phase: str):
+        # The costliest action the phase lets the orchestrator propose; every gated phase prices it above 5 minutes.
+        action = max(machine_state.allowed_actions_for(phase), key=_catalogue_cost_min)
         _set_budget(coord, minutes=600)
-        _set_phase_budget(coord, monkeypatch, phase=phase, minutes_left=20)
+        _set_phase_budget(coord, monkeypatch, phase=phase, minutes_left=5)
 
-        denied = coord.dispatcher.admission_denial_for_action(_EXPENSIVE_ACTION)
+        denied = coord.dispatcher.admission_denial_for_action(action)
 
         assert isinstance(denied, PolicyDenied)
         assert denied.rule == "phase_time_budget"
-        assert f"{_EXPENSIVE_COST_MIN:.0f} min" in str(denied)
+        assert f"{_catalogue_cost_min(action):.0f} min" in str(denied)
 
     def test_a_phase_without_a_search_budget_answers_only_to_the_session(self, coord: Coordinator, monkeypatch):
         _set_budget(coord, minutes=600)
         _set_phase_budget(coord, monkeypatch, phase="PRELUDE", minutes_left=1)
-        assert coord.dispatcher.admission_denial_for_action(_EXPENSIVE_ACTION) is None
+        assert coord.dispatcher.admission_denial_for_action(_BASELINE_ACTION) is None
 
     @pytest.mark.asyncio
     async def test_a_queued_task_the_phase_outlived_is_dropped_before_dispatch(self, coord: Coordinator, monkeypatch):
