@@ -92,8 +92,11 @@ INFERENCEX_PATH="${INFERENCEX_PATH:-}"
 # The internal extension is used ONLY when $TRACELENS_INTERNAL_ROOT is set
 # (env / .env); leave it unset for the base-only report. No separate toggle.
 TRACELENS_REPO="https://github.com/AMD-AGI/TraceLens.git"
-# TraceLens SHA.
-TRACELENS_REF="6489fbc288d3664857aa3204835a1297d6422c22"
+# Tracks the feat/physical-ai branch, pinned at the commit where Matthias's
+# Radeon 8060S (gfx1151) arch-spec fix landed (main subsumed it in more
+# complete form at 210a8f0d; physical-ai's branch now just points there too,
+# so there is nothing left on it main lacks).
+TRACELENS_REF="feat/physical-ai"
 # Operator override iff TRACELENS_ROOT points OUTSIDE the pod-local default.
 # The persistent kernel-agent env re-exports the resolved default path, so a
 # presence-only check (${VAR:+1}) would misclassify it as an override and skip
