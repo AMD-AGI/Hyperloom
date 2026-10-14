@@ -443,9 +443,8 @@ fail_under = 90
 pytest_ci_args = [
     "-m", "not critic_agent_e2e and not targeted_build_e2e",
     "--cov=.", "--cov-report=",
-    # Ceiling well above the slowest known-legitimate test (~53s recorded in
-    # CI); "thread" dumps every thread's stack on expiry instead of relying on
-    # a signal, which xdist workers do not reliably deliver.
+    # 300s is ~6x the slowest known-legitimate test; "thread" dumps every
+    # thread's stack on expiry (xdist workers don't reliably get the signal).
     "--timeout=300", "--timeout-method=thread",
 ]
 # In-runner pytest-xdist workers per shard job (``-n auto`` yields 1 on the

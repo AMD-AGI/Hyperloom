@@ -1165,8 +1165,7 @@ async def test_specialist_cleanup_ack_precedes_capacity_release(coord, confirmed
         on_complete.assert_not_awaited()
         await coord.dispatcher.close_db_after_executions()
         assert await coord.db.fetchone("SELECT 1 FROM gpu_leases") is not None
-    # An unconfirmed close() is retried up to the bound (see
-    # ``dispatcher._CLEANUP_MAX_ATTEMPTS``) before the cleanup is given up on.
+    # Retried up to ``dispatcher._CLEANUP_MAX_ATTEMPTS`` before giving up.
     assert events == (["close", "gpu_release"] if confirmed else ["close"] * _CLEANUP_MAX_ATTEMPTS)
     holders = await coord.locks.lane_holders()
     assert bool(holders) is not confirmed

@@ -232,9 +232,8 @@ async def test_worker_cleanup_precedes_lane_release(tmp_path, monkeypatch, confi
             with pytest.raises(ExecutionCleanupUnconfirmed, match=task.task_id):
                 await execution
         row = await sub.tasks.get(task.task_id)
-        # Unconfirmed cleanup deliberately withholds the terminal write (see
-        # TaskRegistry.append_completion_evidence) so a reaper can still find
-        # the row running; the outcome is persisted as evidence either way.
+        # Unconfirmed cleanup withholds the terminal write (see
+        # TaskRegistry.append_completion_evidence) so a reaper can still find it running.
         assert row.state == (("failed" if fails else "succeeded") if confirmed else "running")
         if fails:
             assert "executor failed" in row.history[-1]["evidence"]["error"]

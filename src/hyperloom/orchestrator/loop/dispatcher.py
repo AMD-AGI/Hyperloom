@@ -121,9 +121,8 @@ _CANCEL_NOTICE_SEC: float = STOP_GATE_POLL_SECONDS
 _SELF_SETTLING_KINDS: frozenset[str] = frozenset({"targeted_build", "kernel_agent"})
 
 _CLEANUP_RETRY_INTERVAL_SEC = 1.0
-#: A lease whose close() never confirms (dead actor, crashed subreaper) must
-#: not retry forever -- that hangs the dispatcher's cleanup path for good.
-#: Bounded retries still cover the transient case this loop exists for.
+#: A lease that never confirms close() (dead actor, crashed subreaper) must not
+#: retry forever; bounded retries still cover the transient case this loop exists for.
 _CLEANUP_MAX_ATTEMPTS = 5
 
 

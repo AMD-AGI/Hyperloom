@@ -12,10 +12,9 @@ others importing a previous run's values. These tests pin the contract:
     <path>       -> that file
     "" | none    -> no file; the caller's environment is the configuration
 
-Both the top installer (now via the ``runtime_env.sh`` asset it sources) and the
+Both the top installer (via the ``runtime_env.sh`` asset it now sources) and the
 Python CLI (``preflight``) read ``HYPERLOOM_ENV_FILE`` directly. ``RUNTIME_ENV_FILE``
-is a same-named-looking but unrelated *internal* variable ``runtime_env.sh`` resolves
-``HYPERLOOM_ENV_FILE`` into for its own use -- not a second operator-facing contract.
+is an unrelated internal variable it resolves into, not a second operator contract.
 """
 
 from __future__ import annotations
@@ -55,13 +54,10 @@ def _extract(path: Path, marker: str) -> str:
 def _run_top_installer(tmp_path: Path, env: dict[str, str], probe: str) -> str:
     """Run the extracted ``load_dotenv_no_clobber`` snippet as a real file.
 
-    The real function now lives in ``runtime_env.sh``, sourced by ``install.sh`` via a path
-    derived from ``BASH_SOURCE[0]``. A ``bash -c`` string has no real file for that to resolve
-    against, so the source silently fails and -- because the extracted snippet carries
-    install.sh's own ``set -euo pipefail`` -- aborts the whole script before the probe ever runs
-    (every call then reports the empty string, regardless of what it should have resolved).
-    Materializing the snippet next to a copy of ``runtime_env.sh`` gives it a real path to
-    resolve the source line against.
+    It now sources ``runtime_env.sh`` via ``BASH_SOURCE[0]``, which resolves to nothing
+    under ``bash -c``: the source fails, and the snippet's own ``set -euo pipefail``
+    aborts it silently (every probe then reports empty). Materializing it next to a
+    copy of ``runtime_env.sh`` gives the source line a real path to resolve.
     """
     workdir = tmp_path / "installer_snippet"
     workdir.mkdir()
