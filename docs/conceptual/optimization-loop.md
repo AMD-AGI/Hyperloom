@@ -523,8 +523,10 @@ The loop adapts through facts, not through retired score tables:
 - Critic verdicts gate risky patches and framework candidates.
 - PolicyGate blocks unsafe paths, invalid envelopes, and actions whose
   structural requirements are not met before they mutate runtime state.
-  Phase fit is guided by the prompt and enforced at the phase transition
-  by dropping incompatible queued tasks.
+  Phase fit is enforced at admission: a proposal or delegate whose action
+  the current phase does not offer is refused (`phase_incompatible`)
+  before a task exists, and the phase transition drops incompatible tasks
+  still queued from the previous phase.
 
 ## What is retired
 
