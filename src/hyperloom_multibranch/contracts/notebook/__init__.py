@@ -7,8 +7,8 @@
   the session profile and snapshot;
 * :mod:`.vocab`: its vocabulary: writer roles, claim and dedup states, conclusions, lineage kinds;
 * :mod:`.interfaces`: one protocol per interface of multi-branch design section 5.1, and the errors they raise;
-* :mod:`.peers`: stand-ins for objects other modules define (intents, test requests and results, judgements,
-  branch-log entries), with only the fields the notebook reads, until their own contracts land.
+* :mod:`.peers`: stand-ins for the toolbox's test requests and results, with only the fields the notebook reads, until
+  its contracts land; the intents, judgements and branch-log entries it re-exports are their owner's types.
 
 ``hyperloom_multibranch.notebook.LocalNotebook`` implements every protocol and is the fake the skeleton runs on.
 """

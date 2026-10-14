@@ -71,6 +71,18 @@ def test_a_test_in_flight_or_improved_without_a_commit_teaches_nothing_yet(snaps
     assert lesson_of(kept_aside, snapshot) is None
 
 
+def test_an_unsettled_judgement_teaches_nothing_and_a_blocked_gain_is_a_pitfall(snapshot: NotebookSnapshot) -> None:
+    def recorded(verdict: Verdict, refused_by: tuple[str, ...] = ()) -> TestRecord:
+        judged = dataclasses.replace(judgement(5.0, ("r9",), verdict=verdict), refused_by=refused_by)
+        return TestRecord(request("r9", GEMM), result("r9"), judged, Conclusion.RECORDED_ONLY)
+
+    assert lesson_of(recorded(Verdict.NEEDS_CONFIRM), snapshot) is None
+    assert lesson_of(recorded(Verdict.INCONCLUSIVE), snapshot) is None
+    blocked = lesson_of(recorded(Verdict.BLOCKED, ("p90_regressed",)), snapshot)
+    assert blocked is not None
+    assert (blocked.kind, blocked.outcome) == (LessonKind.PITFALL, "+5.00% but held back by p90_regressed")
+
+
 def test_a_test_without_an_intent_is_named_by_its_kind(snapshot: NotebookSnapshot) -> None:
     unknown = dataclasses.replace(snapshot, intents={}, committed=())
     slower = judgement(-1.0, ("r9",), verdict=Verdict.REGRESSED)

@@ -7,7 +7,7 @@ Each finished test yields at most one lesson:
 
 * ``worked``: a committed or merged improvement.
 * ``failed``: a regression or a flat result, which no one should repeat on the same state.
-* ``pitfall``: a candidate that failed to run, or ran faster but failed the accuracy check.
+* ``pitfall``: a candidate that failed to run, or ran faster but failed the accuracy check or was blocked.
 
 Hypotheses the specialists confirmed or falsified are the session's ``learned`` list; ``gaps`` say how far a recipe
 is from the roofline bound of each metric PRELUDE recorded one for.
@@ -27,6 +27,7 @@ MAX_ITEMS = 20
 MAX_ITEM_CHARS = 300
 _WORKED = COMMITTING | {Conclusion.MERGED}
 _SETTLED = frozenset({HypothesisStatus.CONFIRMED, HypothesisStatus.FALSIFIED})
+_NO_LESSON = frozenset({Verdict.IMPROVED, Verdict.NEEDS_CONFIRM, Verdict.INCONCLUSIVE})
 
 
 class LessonKind(str, Enum):
@@ -77,7 +78,8 @@ def direction(record: TestRecord, snapshot: NotebookSnapshot) -> str:
 
 
 def lesson_of(record: TestRecord, snapshot: NotebookSnapshot) -> Lesson | None:
-    """The lesson of one finished test; ``None`` while it is in flight or when it improved without a commit."""
+    """The lesson of one finished test; ``None`` while it is in flight or unsettled, or when it improved without a
+    commit."""
 
     what = direction(record, snapshot)
 
@@ -94,7 +96,10 @@ def lesson_of(record: TestRecord, snapshot: NotebookSnapshot) -> Lesson | None:
         return lesson(LessonKind.PITFALL, f"{gain} but failed the accuracy check", judged.gain_pct)
     if record.conclusion in _WORKED:
         return lesson(LessonKind.WORKED, f"{gain}, {record.conclusion.value} as {record.commit_id}", judged.gain_pct)
-    if judged.verdict is Verdict.IMPROVED:
+    if judged.verdict is Verdict.BLOCKED:
+        held_back_by = ", ".join(judged.refused_by) or "the accuracy check"
+        return lesson(LessonKind.PITFALL, f"{gain} but held back by {held_back_by}", judged.gain_pct)
+    if judged.verdict in _NO_LESSON:
         return None
     return lesson(LessonKind.FAILED, f"{judged.verdict.value} at {gain}", judged.gain_pct)
 
