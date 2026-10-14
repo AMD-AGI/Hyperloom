@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import secrets
 import sys
 import time
 from pathlib import Path
@@ -18,7 +19,7 @@ from hyperloom.orchestrator.specialists.agent_runner import (
     McpEndpoint,
 )
 
-TOKEN = "tok-SECRET-0123456789abcdef"
+TOKEN = "tok-" + secrets.token_hex(12)  # built at run time: no key-shaped literal in the repo
 TOKEN_ENV = "HYPERLOOM_SPECIALIST_MCP_TOKEN"
 
 

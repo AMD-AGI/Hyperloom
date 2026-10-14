@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import secrets
 import sys
 import time
 from pathlib import Path
@@ -40,7 +41,7 @@ pathlib.Path("specialist_done.json").write_text("{}")
 
 async def test_the_mcp_services_beat_keeps_a_session_in_a_call_from_being_judged_lost(tmp_path: Path) -> None:
     server = McpServer(
-        McpServerConfig(host_token="host-token-0123456789abcdef"), campaign="camp", heartbeat_seconds=0.1
+        McpServerConfig(host_token="host-" + secrets.token_hex(12)), campaign="camp", heartbeat_seconds=0.1
     )
     server.register(
         "block",

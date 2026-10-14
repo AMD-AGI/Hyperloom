@@ -18,6 +18,7 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom.common.deadline import Deadline
+from hyperloom.orchestrator.specialists import agent_runner
 from hyperloom.orchestrator.specialists import subprocess_ as ss
 from hyperloom.orchestrator.specialists.agent_runner import LOST_AFTER_SEC, AgentConfigError, McpEndpoint
 from hyperloom.orchestrator.specialists.tests._agent_fixtures import (
@@ -512,10 +513,10 @@ async def test_cancelling_the_supervising_task_kills_the_child(tmp_path: Path) -
 
 
 async def test_a_wall_budget_extension_left_by_an_earlier_run_does_not_move_the_new_deadline(tmp_path: Path) -> None:
-    from hyperloom.orchestrator.specialists.subprocess_ import grant_wall_budget_extension, wall_budget_extension
-
-    grant_wall_budget_extension("task-1", 3600.0)
+    # The registry the runner clears is the one its own imported function sees, whatever else rebound module names.
+    registry = agent_runner.clear_wall_budget_extension.__globals__["_WALL_BUDGET_EXTENSIONS"]
+    registry["task-1"] = 3600.0
     runner = make_runner(tmp_path / "session")
     handle = await runner.launch(make_spec(tmp_path / "w"))
-    assert wall_budget_extension("task-1") == 0.0
+    assert "task-1" not in registry
     await stop_and_collect(runner, handle)
