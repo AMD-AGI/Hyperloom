@@ -83,13 +83,18 @@ class Explorer:
         self._clock = clock
 
     async def run(self, window: ExploreWindow) -> SessionStopReason:
-        """Explore until the deadline or the judge's soft stop; the integrator is stopped before this returns."""
+        """Explore until the deadline or the judge's soft stop; the integrator is stopped before this returns.
+
+        Nothing is opened when the opening judge call asks for the soft stop or answers only once EXPLORE is over.
+        """
 
         opening = await self._ask(window, opening=True)
-        count, k = (opening.open_count, opening.open_k) if opening is not None else (1, 1)
-        await self._branches.open_branches(count, window.root_commit, k, BranchOrigin.FIRST_BATCH)
         if opening is not None and await self._apply(opening):
             return SessionStopReason.GLOBAL_CONVERGED
+        if self._clock.now() >= window.explore_end:
+            return SessionStopReason.TIME_EXHAUSTED
+        count, k = (opening.open_count, opening.open_k) if opening is not None else (1, 1)
+        await self._branches.open_branches(count, window.root_commit, k, BranchOrigin.FIRST_BATCH)
         merging = asyncio.ensure_future(self._merge_forever())
         try:
             return await self._steer(window, merging)

@@ -372,14 +372,14 @@ async def test_a_signal_during_a_hanging_close_cuts_it_short_and_leaves_no_proce
     assert await stage.processes.leftovers() == ()
 
 
-async def test_a_judge_that_never_answers_gives_up_at_the_explore_deadline(tmp_path: Path) -> None:
+async def test_a_judge_that_never_answers_gives_up_at_the_explore_deadline_and_opens_nothing(tmp_path: Path) -> None:
     stage = _stage(tmp_path, child=child_with_patch(tmp_path))
     stage.judge = SilentModel()
 
     outcome = await stage.run()
 
     assert (outcome.stop_reason, outcome.error) == (SessionStopReason.TIME_EXHAUSTED, "")
-    assert outcome.final is not None and stage.lifecycle.started == {"b01": ROOT_COMMIT}
+    assert outcome.final is not None and stage.lifecycle.started == {}
     decisions = [json.loads(line) for line in stage.layout.decisions.read_text().splitlines()]
     assert [row["reason"] for row in decisions if row["kind"] == "judge_failed"] == [
         "no answer by the EXPLORE deadline"
@@ -432,6 +432,16 @@ async def test_an_unhandled_error_bounds_close_by_one_close_grace(tmp_path: Path
     [close] = [row for row in _decisions(stage) if row["kind"] == "phase" and row["reason"] == "close"]
     grace = SessionBudget.from_hours(SETTINGS.max_hours, START).close_grace_seconds
     assert stage.time.now() <= float(str(close["at"])) + grace
+
+
+async def test_a_soft_stop_on_the_opening_call_opens_no_branch(tmp_path: Path) -> None:
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.judge = ScriptedCompletion([_reply({"open": 2, "stop_session": {"reason": CONVERGED_REASON}})])
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error) == (SessionStopReason.GLOBAL_CONVERGED, "")
+    assert stage.lifecycle.started == {} and outcome.final is not None
 
 
 async def test_a_failed_opening_judge_call_opens_one_branch_at_k_one(tmp_path: Path) -> None:
