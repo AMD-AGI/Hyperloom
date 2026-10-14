@@ -4,7 +4,8 @@
 """Whole-file writes for files every participant of a session reads.
 
 ``hyperloom.common.io`` writes owner-only files by design; the notebook may live on a shared folder that participants
-running as other users read, so its files are group and world readable. A reader never sees a partial file.
+running as other users read, so its files are group readable, and those users share the writer's group. A reader never
+sees a partial file.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ import tempfile
 from contextlib import suppress
 from pathlib import Path
 
-SHARED_FILE_MODE = 0o644
+SHARED_FILE_MODE = 0o640
 
 
 def encode_json(value: object) -> bytes:
