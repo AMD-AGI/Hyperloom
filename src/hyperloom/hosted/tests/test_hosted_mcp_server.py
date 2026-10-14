@@ -133,9 +133,9 @@ def test_revoked_token_is_refused_afterwards(server: McpServer) -> None:
     client = Client(server)
     token = server.issue_token("spec-1", "b")
     assert client.call(token, "whoami")[0] == 200
-    assert server.revoke(token) is True
+    assert server.revoke_specialist("spec-1") == 1
     assert client.call(token, "whoami")[0] == 401
-    assert server.revoke(token) is False
+    assert server.revoke_specialist("spec-1") == 0
 
 
 def test_revoke_specialist_kills_all_its_tokens_and_only_its_own(server: McpServer) -> None:
@@ -307,13 +307,8 @@ def test_string_results_pass_through_and_tool_errors_are_error_results(server: M
     }
 
 
-def _server_with_heartbeat(beats: list[tuple[str, str]], seconds: float = 0.1) -> McpServer:
-    server = McpServer(
-        McpServerConfig(host_token=HOST_TOKEN),
-        campaign="camp",
-        on_call_heartbeat=lambda principal: beats.append((principal.branch, principal.subject)),
-        heartbeat_seconds=seconds,
-    )
+def _server_with_beat(beats: list[str], seconds: float = 0.1) -> McpServer:
+    server = McpServer(McpServerConfig(host_token=HOST_TOKEN), campaign="camp", heartbeat_seconds=seconds)
 
     def slow(args: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
         time.sleep(args.get("seconds", 0.0))
@@ -324,44 +319,60 @@ def _server_with_heartbeat(beats: list[tuple[str, str]], seconds: float = 0.1) -
     return server
 
 
-def test_heartbeat_fires_during_a_blocking_call_and_stops_after_it() -> None:
-    beats: list[tuple[str, str]] = []
-    server = _server_with_heartbeat(beats)
+def test_beat_fires_during_a_blocking_call_and_stops_after_it() -> None:
+    beats: list[str] = []
+    server = _server_with_beat(beats)
     server.start()
     try:
         token = server.issue_token("spec-1", "branch-7")
+        server.attach_heartbeat("spec-1", lambda: beats.append("beat"))
         assert Client(server).call(token, "slow", {"seconds": 0.75})[0] == 200
         during = len(beats)
         assert during >= 4
-        assert set(beats) == {("branch-7", "spec-1")}
         time.sleep(0.4)
         assert len(beats) == during
     finally:
         server.stop()
 
 
-def test_no_heartbeat_for_a_fast_call_or_the_host_token() -> None:
-    beats: list[tuple[str, str]] = []
-    server = _server_with_heartbeat(beats)
+def test_beat_belongs_to_one_specialist_and_not_to_the_host() -> None:
+    beats: list[str] = []
+    server = _server_with_beat(beats)
     server.start()
     try:
-        assert Client(server).call(server.issue_token("s", "b"), "slow", {"seconds": 0.0})[0] == 200
+        server.attach_heartbeat("spec-1", lambda: beats.append("beat"))
+        other = server.issue_token("spec-2", "b")
+        assert Client(server).call(other, "slow", {"seconds": 0.5})[0] == 200
         assert Client(server).call(HOST_TOKEN, "slow", {"seconds": 0.5})[0] == 200
+        assert Client(server).call(server.issue_token("spec-1", "b"), "slow", {"seconds": 0.0})[0] == 200
         assert beats == []
     finally:
         server.stop()
 
 
-def test_a_failing_heartbeat_hook_does_not_break_the_call() -> None:
-    def broken(principal: Any) -> None:
-        raise RuntimeError("hook down")
+def test_revoking_the_specialist_drops_its_beat() -> None:
+    beats: list[str] = []
+    server = _server_with_beat(beats)
+    server.start()
+    try:
+        server.attach_heartbeat("spec-1", lambda: beats.append("beat"))
+        server.revoke_specialist("spec-1")
+        token = server.issue_token("spec-1", "b")
+        assert Client(server).call(token, "slow", {"seconds": 0.5})[0] == 200
+        assert beats == []
+    finally:
+        server.stop()
 
-    server = McpServer(
-        McpServerConfig(host_token=HOST_TOKEN), campaign="camp", on_call_heartbeat=broken, heartbeat_seconds=0.05
-    )
+
+def test_a_failing_beat_does_not_break_the_call() -> None:
+    def broken() -> None:
+        raise RuntimeError("beat down")
+
+    server = McpServer(McpServerConfig(host_token=HOST_TOKEN), campaign="camp", heartbeat_seconds=0.05)
     server.register(
         "slow", schema={"type": "object"}, handler=lambda a, c: time.sleep(0.3) or {"ok": 1}, scopes={"specialist"}
     )
+    server.attach_heartbeat("s", broken)
     server.start()
     try:
         status, _, reply = Client(server).call(server.issue_token("s", "b"), "slow")

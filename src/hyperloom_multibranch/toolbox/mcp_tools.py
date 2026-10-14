@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import dataclasses
 import enum
+import functools
 import threading
 from collections.abc import Callable, Mapping
 from typing import Any, cast
@@ -43,37 +44,43 @@ from hyperloom_multibranch.contracts.toolbox import (
 from hyperloom_multibranch.notebook.tools import ERROR, notebook_tools
 
 SPECIALIST_TOKEN_ENV = "HYPERLOOM_SPECIALIST_MCP_TOKEN"
+_OBJECT = "object"
+_STRING = "string"
+_NULL = "null"
+_ARRAY = "array"
+_INTEGER = "integer"
+_BOOLEAN = "boolean"
 _SPECIALIST_SCOPES = frozenset({SCOPE_SPECIALIST})
-_NO_ARGUMENTS: dict[str, Any] = {"type": "object", "properties": {}, "additionalProperties": False}
+_NO_ARGUMENTS: dict[str, Any] = {"type": _OBJECT, "properties": {}, "additionalProperties": False}
 _REQUEST_ID: dict[str, Any] = {
-    "type": "object",
-    "properties": {"request_id": {"type": "string", "minLength": 1}},
+    "type": _OBJECT,
+    "properties": {"request_id": {"type": _STRING, "minLength": 1}},
     "required": ["request_id"],
     "additionalProperties": False,
 }
 # The caller's branch is the token's; a request that names a branch or an id is refused by the schema.
 _SUBMIT_TEST: dict[str, Any] = {
-    "type": "object",
+    "type": _OBJECT,
     "properties": {
         "kind": {"enum": [kind.value for kind in TestKind]},
         "purpose": {"enum": [purpose.value for purpose in Purpose]},
-        "parent_commit": {"type": "string", "minLength": 1},
-        "delta": {"type": "object", "description": "The recipe delta document: config, components, kernels."},
-        "intent_fingerprint": {"type": ["string", "null"]},
-        "priority": {"type": ["integer", "null"], "minimum": PRIORITY_HIGHEST, "maximum": PRIORITY_LOWEST},
-        "retest_of": {"type": ["string", "null"]},
-        "avoid_nodes": {"type": "array", "items": {"type": "string"}},
-        "accuracy": {"type": "boolean"},
-        "concurrency": {"type": "array", "items": {"type": "integer", "minimum": 1}},
-        "attachments": {"type": "array", "items": {"type": "object"}},
-        "diff_ref": {"type": "string"},
+        "parent_commit": {"type": _STRING, "minLength": 1},
+        "delta": {"type": _OBJECT, "description": "The recipe delta document: config, components, kernels."},
+        "intent_fingerprint": {"type": [_STRING, _NULL]},
+        "priority": {"type": [_INTEGER, _NULL], "minimum": PRIORITY_HIGHEST, "maximum": PRIORITY_LOWEST},
+        "retest_of": {"type": [_STRING, _NULL]},
+        "avoid_nodes": {"type": _ARRAY, "items": {"type": _STRING}},
+        "accuracy": {"type": _BOOLEAN},
+        "concurrency": {"type": _ARRAY, "items": {"type": _INTEGER, "minimum": 1}},
+        "attachments": {"type": _ARRAY, "items": {"type": _OBJECT}},
+        "diff_ref": {"type": _STRING},
     },
     "required": ["kind", "purpose", "parent_commit"],
     "additionalProperties": False,
 }
 _POLL_INBOX: dict[str, Any] = {
-    "type": "object",
-    "properties": {"cursor": {"type": "string"}},
+    "type": _OBJECT,
+    "properties": {"cursor": {"type": _STRING}},
     "additionalProperties": False,
 }
 
@@ -99,7 +106,8 @@ class McpSpecialistTokens:
                 return held[1]
             self._server.revoke_specialist(branch)
             token = self._server.issue_token(branch, branch, scopes)
-            grant = SpecialistGrant(self._server.url, SPECIALIST_TOKEN_ENV, token)
+            sink = functools.partial(self._server.attach_heartbeat, branch)
+            grant = SpecialistGrant(self._server.url, SPECIALIST_TOKEN_ENV, token, sink)
             self._live[branch] = (scopes, grant)
             return grant
 

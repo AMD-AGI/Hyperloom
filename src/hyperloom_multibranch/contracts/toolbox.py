@@ -18,7 +18,7 @@ Like the notebook's interfaces, every method is a coroutine.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Protocol
@@ -113,6 +113,8 @@ class SpecialistGrant:
     url: str
     token_env: str
     token: str = field(repr=False)
+    #: Hands over a ``beat()`` the service calls every minute or so while a call of this token is in progress.
+    heartbeat_sink: Callable[[Callable[[], None]], None] = field(default=lambda beat: None, repr=False, compare=False)
 
 
 class SpecialistTokens(Protocol):

@@ -45,6 +45,7 @@ from kernelforge.mcp_server.stdio_transport import InvalidParamsError, dispatch_
 
 logger = logging.getLogger(__name__)
 
+JSONRPC_VERSION = "2.0"
 MCP_PATH = "/mcp"
 HOST_KIND = "host"
 SPECIALIST_KIND = "specialist"
@@ -146,11 +147,6 @@ class _TokenRegistry:
                 found = principal
         return found
 
-    def revoke_token(self, token: str) -> bool:
-        presented = _digest(token)
-        with self._lock:
-            return self._by_digest.pop(presented, None) is not None
-
     def revoke_where(self, predicate: Callable[[McpPrincipal], bool]) -> int:
         with self._lock:
             doomed = [key for key, principal in self._by_digest.items() if predicate(principal)]
@@ -168,7 +164,6 @@ class McpServer:
         *,
         campaign: str,
         server_name: str = "hyperloom",
-        on_call_heartbeat: Callable[[McpPrincipal], None] | None = None,
         heartbeat_seconds: float = 60.0,
     ) -> None:
         if len(config.host_token) < MIN_TOKEN_LENGTH:
@@ -180,7 +175,8 @@ class McpServer:
         self._server_name = server_name
         self._host_digest = _digest(config.host_token)
         self._tokens = _TokenRegistry()
-        self._on_call_heartbeat = on_call_heartbeat
+        self._beats: dict[str, Callable[[], None]] = {}
+        self._beats_lock = threading.Lock()
         self._heartbeat_seconds = heartbeat_seconds
         self._tools: dict[str, RegisteredTool] = {}
         self._httpd: ThreadingHTTPServer | None = None
@@ -217,11 +213,18 @@ class McpServer:
         )
         return self._tokens.issue(principal)
 
-    def revoke(self, token: str) -> bool:
-        return self._tokens.revoke_token(token)
+    def attach_heartbeat(self, specialist: str, beat: Callable[[], None]) -> None:
+        """Call ``beat()`` every heartbeat interval while a request of one of ``specialist``'s tokens is served.
+
+        One beat per specialist; attaching again replaces it, and :meth:`revoke_specialist` removes it.
+        """
+        with self._beats_lock:
+            self._beats[specialist] = beat
 
     def revoke_specialist(self, specialist: str) -> int:
-        """Revoke every token of ``specialist``; returns how many were live."""
+        """Revoke every token of ``specialist`` and drop its heartbeat; returns how many tokens were live."""
+        with self._beats_lock:
+            self._beats.pop(specialist, None)
         return self._tokens.revoke_where(lambda principal: principal.subject == specialist)
 
     # -- authentication ----------------------------------------------------------------------------------------
@@ -279,7 +282,7 @@ class McpServer:
 
     async def _answer(self, principal: McpPrincipal, presented: str, message: Any) -> dict[str, Any] | None:
         """One JSON-RPC response, or ``None`` for a notification."""
-        if not isinstance(message, dict) or message.get("jsonrpc") != "2.0" or "method" not in message:
+        if not isinstance(message, dict) or message.get("jsonrpc") != JSONRPC_VERSION or "method" not in message:
             return _rpc_error(
                 message.get("id") if isinstance(message, dict) else None, _ERR_INVALID_REQUEST, "Invalid Request"
             )
@@ -311,7 +314,7 @@ class McpServer:
         except Exception as exc:  # noqa: BLE001 - convert failures to JSON-RPC
             logger.warning("request failed: %s", type(exc).__name__)
             return _rpc_error(request_id, _ERR_INTERNAL, self.scrub(f"{type(exc).__name__}: {exc}", presented))
-        return {"jsonrpc": "2.0", "id": request_id, "result": result}
+        return {"jsonrpc": JSONRPC_VERSION, "id": request_id, "result": result}
 
     async def _answer_all(self, principal: McpPrincipal, presented: str, payload: Any) -> Any:
         if isinstance(payload, list):
@@ -323,9 +326,10 @@ class McpServer:
 
     @contextlib.contextmanager
     def _call_heartbeat(self, principal: McpPrincipal) -> Iterator[None]:
-        """While a request of a specialist token is being served, call the heartbeat hook every interval."""
-        hook = self._on_call_heartbeat
-        if hook is None or principal.kind == HOST_KIND:
+        """While a request of a specialist token is being served, call its beat every interval."""
+        with self._beats_lock:
+            hook = self._beats.get(principal.subject) if principal.kind != HOST_KIND else None
+        if hook is None:
             yield
             return
         done = threading.Event()
@@ -333,9 +337,9 @@ class McpServer:
         def beat() -> None:
             while not done.wait(self._heartbeat_seconds):
                 try:
-                    hook(principal)
-                except Exception as exc:  # noqa: BLE001 - a failing hook must not break the call
-                    logger.warning("call heartbeat hook failed: %s", type(exc).__name__)
+                    hook()
+                except Exception as exc:  # noqa: BLE001 - a failing beat must not break the call
+                    logger.warning("heartbeat beat failed: %s", type(exc).__name__)
 
         thread = threading.Thread(target=beat, name="hyperloom-mcp-heartbeat", daemon=True)
         thread.start()
@@ -394,7 +398,7 @@ def _tool_result(text: str, *, is_error: bool) -> dict[str, Any]:
 
 
 def _rpc_error(request_id: Any, code: int, message: str) -> dict[str, Any]:
-    return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
+    return {"jsonrpc": JSONRPC_VERSION, "id": request_id, "error": {"code": code, "message": message}}
 
 
 def _mentions_initialize(payload: Any) -> bool:
@@ -415,7 +419,7 @@ def _make_handler(server: McpServer) -> type[BaseHTTPRequestHandler]:
         server_version = "hyperloom-mcp"
 
         def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 - signature of the base class
-            logger.debug("%s %s", self.command, self.path.split("?", 1)[0])
+            logger.debug("MCP request handled")
 
         def _send(self, status: HTTPStatus, body: Any = None, headers: Mapping[str, str] | None = None) -> None:
             raw = b"" if body is None else json.dumps(body).encode()

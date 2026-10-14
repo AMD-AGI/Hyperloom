@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
@@ -283,3 +284,33 @@ def test_jsonable_turns_contract_objects_into_json_data() -> None:
         "queued_by_branch": {},
         "cold_start_seconds": None,
     }
+
+
+def test_the_grants_heartbeat_sink_beats_during_a_blocking_call_over_http(rig: Rig) -> None:
+    server = McpServer(McpServerConfig(host_token=HOST_TOKEN), campaign="camp", heartbeat_seconds=0.1)
+    server.register(
+        "block",
+        schema={"type": "object"},
+        handler=lambda arguments, ctx: time.sleep(0.65) or {"done": True},
+        scopes={SCOPE_SPECIALIST},
+    )
+    server.start()
+    try:
+        grant = McpSpecialistTokens(server).issue("s1", frozenset({SCOPE_SPECIALIST}))
+        beats: list[int] = []
+        grant.heartbeat_sink(lambda: beats.append(1))
+        request = urllib.request.Request(
+            server.url,
+            json.dumps(
+                {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "block", "arguments": {}}}
+            ).encode(),
+            {"X-Hyperloom-Token": grant.token},
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            assert response.status == 200
+        during = len(beats)
+        assert during >= 2
+        time.sleep(0.4)
+        assert len(beats) == during
+    finally:
+        server.stop()
