@@ -256,6 +256,8 @@ exclude = [
 hyperloom = [
     "orchestrator/prompts/*.md",
     "orchestrator/prompts/references/*.md",
+    # JSON Schemas of the hosted-measurement contracts (measurement spec and result manifest).
+    "contracts/*.schema.json",
 ]
 "hyperloom.inference_optimizer" = [
     "SKILL.md",
