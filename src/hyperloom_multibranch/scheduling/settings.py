@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""What one multi-branch run is given: the InferenceX workload, the wall-clock budget and the hard limits."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+
+from hyperloom_multibranch.scheduling.roster import RosterCaps
+
+
+@dataclass(frozen=True)
+class Workload:
+    """The fixed InferenceX workload, spelled as the single-lineage command line spells it.
+
+    ``gpu_type`` is empty when the main flow is left to detect it.
+    """
+
+    model: str
+    framework: str
+    tp: int
+    isl: int
+    osl: int
+    conc: int
+    precision: str
+    gpu_type: str = ""
+
+    @property
+    def model_basename(self) -> str:
+        return Path(self.model.rstrip("/")).name
+
+
+@dataclass(frozen=True)
+class RunSettings:
+    """``max_hours`` is the whole session's wall-clock budget, PRELUDE included."""
+
+    workload: Workload
+    max_hours: float
+    caps: RosterCaps
+    judge_interval_seconds: float
+
+
+__all__ = ["RunSettings", "Workload"]

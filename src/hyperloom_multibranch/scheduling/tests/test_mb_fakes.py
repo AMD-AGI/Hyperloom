@@ -1,0 +1,42 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""Contract of the MB1 stand-ins for MB2 policies: what the scheduler may rely on until they are replaced."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from hyperloom_multibranch.contracts.scheduling import AdmissionStatus
+from hyperloom_multibranch.scheduling.clock import Clock
+from hyperloom_multibranch.scheduling.mb_fakes import (
+    MB_FAKE_BASE_IMAGE_DIGEST,
+    mb_fake_branches_to_add,
+    mb_fake_refused_fork,
+    mb_fake_regression_passes,
+    mb_fake_similar_branches,
+)
+from hyperloom_multibranch.scheduling.roster import Roster, RosterCaps
+
+
+def _roster(tmp_path: Path) -> Roster:
+    caps = RosterCaps(max_branches=1, max_k_per_branch=2, max_parallel_tests=4)
+    return Roster(caps, tmp_path / "MB-roster.json", Clock(now=lambda: 0.0))
+
+
+def test_a_fork_the_roster_cannot_take_is_rejected_never_pending() -> None:
+    answer = mb_fake_refused_fork("the session is stopping")
+    assert (answer.status, answer.reason, answer.branch) == (AdmissionStatus.REJECTED, "the session is stopping", "")
+
+
+def test_mb2_policies_are_inert(tmp_path: Path) -> None:
+    roster = _roster(tmp_path)
+    assert mb_fake_branches_to_add(roster) == 0
+    assert mb_fake_similar_branches(roster) == ()
+    assert mb_fake_regression_passes("any-commit")
+
+
+def test_base_image_digest_has_the_digest_shape() -> None:
+    algorithm, _, digest = MB_FAKE_BASE_IMAGE_DIGEST.partition(":")
+    assert algorithm == "sha256"
+    assert len(digest) == 64
