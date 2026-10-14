@@ -45,6 +45,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
     StartupBrief,
     TestRecord,
     ToolResultPointer,
+    Withdrawal,
 )
 from hyperloom_multibranch.contracts.notebook.vocab import Conclusion
 
@@ -80,7 +81,8 @@ class UnknownRequest(NotebookError, LookupError):
 
 
 class ConflictingWrite(NotebookError):
-    """A request or result already written under this ``request_id`` says something else."""
+    """What the notebook already holds says something else: the request, result or withdrawal of this ``request_id``,
+    the recipe digest of this commit, or the start or stop of this branch."""
 
 
 class NotRecorded(NotebookError, LookupError):
@@ -88,12 +90,16 @@ class NotRecorded(NotebookError, LookupError):
 
 
 class TestRecordSink(Protocol):
-    """The toolbox: one row per test, written when it accepts the test and when the final result is in."""
+    """The toolbox: one row per test, written when it accepts the test and when the final result is in, or when it
+    takes the test back unmeasured."""
 
     async def write_request(self, request: TestRequest) -> TestRecord: ...
 
     async def write_result(self, result: TestResult) -> TestRecord:
-        """Store the final outcome; the claim the request measures is completed by it."""
+        """Store the final outcome; the claim the request measures is completed by it. A withdrawn test takes none."""
+
+    async def write_withdrawal(self, withdrawal: Withdrawal) -> TestRecord:
+        """Settle an unmeasured test and release the claim it carried; a measured test is not withdrawn."""
 
     async def notify_tool_result(self, pointer: ToolResultPointer) -> None:
         """Push a pointer to an asynchronous tool's result to the branch that asked for it."""
@@ -139,7 +145,13 @@ class GateRecords(Protocol):
 class LineageSink(Protocol):
     """Branch starts and stops (the scheduler) and splits (the rule gate)."""
 
-    async def record_lineage(self, event: LineageEvent) -> None: ...
+    async def record_lineage(self, event: LineageEvent) -> None:
+        """Start a branch once (``ROOT``, ``OPEN`` or ``SPLIT``) and stop it once; the same event again is a no-op.
+
+        A split starts its branch, so the branch takes no ``OPEN`` after it. Another start of a started branch, another
+        stop of a stopped one or a second root raises :class:`ConflictingWrite`; stopping a branch that never started
+        raises :class:`NotRecorded`.
+        """
 
 
 class ClaimService(Protocol):

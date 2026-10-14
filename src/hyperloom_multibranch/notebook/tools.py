@@ -83,6 +83,8 @@ def lines(items: Sequence[str]) -> list[str]:
 def outcome(record: TestRecord) -> str:
     """Where one test stands, in a few words."""
 
+    if record.withdrawn_at is not None:
+        return f"withdrawn ({record.withdrawal_reason})"
     if record.result is None:
         return "in flight"
     if record.result.validity is Validity.CANDIDATE_FAILURE:

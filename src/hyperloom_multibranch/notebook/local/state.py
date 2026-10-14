@@ -28,6 +28,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
     SessionProfile,
     TestRecord,
     ToolResultPointer,
+    Withdrawal,
 )
 from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, DedupStatus, LineageKind
 from hyperloom_multibranch.notebook import codec
@@ -63,6 +64,7 @@ class ClaimDecision:
 PAYLOADS: dict[EntryKind, type] = {
     EntryKind.REQUEST: TestRequest,
     EntryKind.RESULT: TestResult,
+    EntryKind.WITHDRAWAL: Withdrawal,
     EntryKind.JUDGEMENT: JudgementWrite,
     EntryKind.MERGE_ATTEMPT: MergeAttempt,
     EntryKind.LINEAGE: LineageEvent,
@@ -85,6 +87,7 @@ class NotebookState:
         self.decoded: list[tuple[Entry, object]] = []
         self.requests: dict[str, TestRequest] = {}
         self.results: dict[str, TestResult] = {}
+        self.withdrawals: dict[str, Withdrawal] = {}
         self.judgements: dict[str, list[JudgementWrite]] = {}
         self.commit_writes: dict[str, JudgementWrite] = {}
         self.merge_attempts: list[MergeAttempt] = []
@@ -98,10 +101,12 @@ class NotebookState:
         self.fingerprints: list[ManifestFingerprint] = []
         self.requested_at: dict[str, float] = {}
         self.measured_at: dict[str, float] = {}
+        self.withdrawn_at: dict[str, float] = {}
         self.judged_at: dict[str, float] = {}
         handlers: dict[EntryKind, Callable[[Entry, object], None]] = {
             EntryKind.REQUEST: self._request,
             EntryKind.RESULT: self._result,
+            EntryKind.WITHDRAWAL: self._withdrawal,
             EntryKind.JUDGEMENT: self._judgement,
             EntryKind.SESSION_PROFILE: lambda _entry, value: self.profiles.append(value),
             EntryKind.MANIFEST: lambda _entry, value: self.fingerprints.append(value),
@@ -131,6 +136,10 @@ class NotebookState:
         self.results[result.request_id] = result
         self.measured_at.setdefault(result.request_id, entry.at)
 
+    def _withdrawal(self, entry: Entry, withdrawal: Withdrawal) -> None:
+        self.withdrawals[withdrawal.request_id] = withdrawal
+        self.withdrawn_at.setdefault(withdrawal.request_id, entry.at)
+
     def _judgement(self, entry: Entry, write: JudgementWrite) -> None:
         self.judgements.setdefault(write.request_id, []).append(write)
         self.judged_at[write.request_id] = entry.at
@@ -154,6 +163,7 @@ class NotebookState:
         if request is None:
             raise UnknownRequest(f"no test request {request_id}")
         write = self.latest_judgement(request_id)
+        withdrawal = self.withdrawals.get(request_id)
         return TestRecord(
             request=request,
             result=self.results.get(request_id),
@@ -163,6 +173,8 @@ class NotebookState:
             requested_at=self.requested_at[request_id],
             measured_at=self.measured_at.get(request_id),
             judged_at=self.judged_at.get(request_id),
+            withdrawn_at=self.withdrawn_at.get(request_id),
+            withdrawal_reason=withdrawal.reason if withdrawal is not None else "",
         )
 
     def records(self) -> list[TestRecord]:

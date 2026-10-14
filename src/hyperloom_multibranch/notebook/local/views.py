@@ -202,7 +202,11 @@ def regression_cases_for(state: NotebookState, view: LineageView, commit_id: str
 def progress(state: NotebookState, view: LineageView) -> tuple[BranchProgress, ...]:
     found = []
     for branch in view.branches:
-        requests = [request for request in state.requests.values() if request.branch == branch.branch]
+        requests = [
+            request
+            for request in state.requests.values()
+            if request.branch == branch.branch and request.request_id not in state.withdrawals
+        ]
         results = [state.results[request.request_id] for request in requests if request.request_id in state.results]
         commits = [
             node for node in view.commits if node.branch == branch.branch and node.origin is not CommitOrigin.ROOT
@@ -241,6 +245,7 @@ def startup_brief(state: NotebookState, view: LineageView, start_commit: str) ->
         if record.request.kind is TestKind.TEST
         and record.request.branch != INTEGRATION_BRANCH
         and record.request.parent_commit in ancestry
+        and record.withdrawn_at is None
     )
     return StartupBrief(start_commit=start_commit, tried=tried)
 

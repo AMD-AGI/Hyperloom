@@ -39,6 +39,7 @@ class EntryKind(str, Enum):
 
     REQUEST = "request"
     RESULT = "result"
+    WITHDRAWAL = "withdrawal"
     JUDGEMENT = "judgement"
     MERGE_ATTEMPT = "merge_attempt"
     LINEAGE = "lineage"

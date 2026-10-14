@@ -36,16 +36,18 @@ from hyperloom_multibranch.contracts.notebook.records import (
     MergeAttempt,
     QuarantineEvent,
     ToolResultPointer,
+    Withdrawal,
 )
 from hyperloom_multibranch.contracts.notebook.vocab import (
     Conclusion,
+    DedupStatus,
     InboxKind,
     LineageKind,
     MergeOutcome,
     QuarantineAction,
 )
 from hyperloom_multibranch.notebook import LocalNotebook
-from hyperloom_multibranch.notebook.tests.factories import intent, judgement, request, result
+from hyperloom_multibranch.notebook.tests.factories import TTL, delta, intent, judgement, request, result
 
 Open = Callable[..., LocalNotebook]
 ROOT_RECIPE = DIGEST_PREFIX + "a" * 64
@@ -61,7 +63,7 @@ async def _tested(open_as: Open, request_id: str, branch: str = "s1", parent: st
 def test_the_local_notebook_implements_every_interface_method() -> None:
     names = [name for name, member in inspect.getmembers(interfaces.Notebook) if inspect.iscoroutinefunction(member)]
 
-    assert len(names) == 35
+    assert len(names) == 36
     assert all(getattr(LocalNotebook, name) is not getattr(interfaces.Notebook, name) for name in names)
 
 
@@ -180,6 +182,80 @@ async def test_a_commit_keeps_the_recipe_digest_it_was_recorded_with(open_as: Op
         await gate.write_judgement("r2", judgement(3.0, ("r2",)), Conclusion.COMMITTED, "c2", recipe_digest="sha256:c2")
     lineage = await gate.lineage()
     assert {node.commit_id: node.recipe_digest for node in lineage.commits} == {"c0": ROOT_RECIPE, "c1": CHILD_RECIPE}
+
+
+async def test_a_branch_starts_once_and_stops_once(open_as: Open) -> None:
+    scheduler, gate = open_as(Role.SCHEDULER), open_as(Role.GATE)
+    stopped = LineageEvent(LineageKind.STOP, "s1", reason="no progress")
+    for writer, event in (
+        (scheduler, LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0")),
+        (scheduler, LineageEvent(LineageKind.OPEN, "s1", from_commit="c0")),
+        (gate, LineageEvent(LineageKind.SPLIT, "s1-fix", commit_id="c2", from_commit="c1", from_branch="s1")),
+        (scheduler, stopped),
+    ):
+        await writer.record_lineage(event)
+        await writer.record_lineage(event)
+
+    with pytest.raises(ConflictingWrite):
+        await scheduler.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c9"))
+    with pytest.raises(ConflictingWrite):
+        await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, "s1-fix", from_commit="c2"))
+    with pytest.raises(ConflictingWrite):
+        await scheduler.record_lineage(replace(stopped, reason="session ended"))
+    with pytest.raises(NotRecorded):
+        await scheduler.record_lineage(LineageEvent(LineageKind.STOP, "s9", reason="session ended"))
+    await scheduler.record_lineage(LineageEvent(LineageKind.STOP, INTEGRATION_BRANCH, reason="session ended"))
+    branches = {node.branch: node for node in (await scheduler.lineage()).branches}
+    assert len(scheduler._state().lineage) == 5
+    assert (branches["s1-fix"].origin, branches["s1-fix"].from_branch) == (LineageKind.SPLIT, "s1")
+    assert (branches["s1"].stop_reason, branches[INTEGRATION_BRANCH].stop_reason) == ("no progress", "session ended")
+
+
+async def test_a_withdrawn_test_is_settled_unmeasured_and_frees_its_claim(open_as: Open) -> None:
+    runtime, toolbox = open_as(Role.SPECIALIST_RUNTIME, "s1"), open_as(Role.TOOLBOX)
+    wanted = intent("s1", "c0")
+    claim = await runtime.acquire(wanted, delta().fingerprint(), ttl_seconds=TTL)
+    await toolbox.write_request(request("r1", wanted))
+    await toolbox.attach_request(claim.key, "r1", ttl_seconds=TTL)
+
+    record = await toolbox.write_withdrawal(Withdrawal("r1", "branch s1 stopped"))
+
+    assert (record.in_flight, record.result, record.withdrawal_reason) == (False, None, "branch s1 stopped")
+    assert await toolbox.write_withdrawal(Withdrawal("r1", "branch s1 stopped")) == record
+    assert (await runtime.lookup(claim.key, delta().fingerprint())).status is DedupStatus.FREE
+
+
+async def test_only_an_unmeasured_test_is_withdrawn_and_then_it_takes_no_result(open_as: Open) -> None:
+    toolbox = open_as(Role.TOOLBOX)
+    await _tested(open_as, "r1")
+    await toolbox.write_request(request("r2", intent("s1", "c0")))
+    await toolbox.write_withdrawal(Withdrawal("r2", "session stopped"))
+
+    with pytest.raises(ConflictingWrite):
+        await toolbox.write_withdrawal(Withdrawal("r1", "session stopped"))
+    with pytest.raises(ConflictingWrite):
+        await toolbox.write_result(result("r2"))
+    with pytest.raises(ConflictingWrite):
+        await toolbox.write_withdrawal(Withdrawal("r2", "branch s1 stopped"))
+    with pytest.raises(UnknownRequest):
+        await toolbox.write_withdrawal(Withdrawal("r-missing", "session stopped"))
+    with pytest.raises(WriterNotAllowed):
+        await open_as(Role.SCHEDULER).write_withdrawal(Withdrawal("r2", "session stopped"))
+
+
+async def test_a_withdrawn_test_is_no_test_of_its_branch_and_no_direction_tried(open_as: Open) -> None:
+    scheduler, toolbox = open_as(Role.SCHEDULER), open_as(Role.TOOLBOX)
+    await scheduler.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0"))
+    await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, "s1", from_commit="c0"))
+    await _tested(open_as, "r1")
+    await toolbox.write_request(request("r2", intent("s1", "c0", target="kv cache")))
+    await toolbox.write_withdrawal(Withdrawal("r2", "branch s1 stopped"))
+
+    (row,) = [row for row in await scheduler.progress() if row.branch == "s1"]
+    brief = await scheduler.startup_brief("c0")
+
+    assert row.tests == 1
+    assert [item.request_id for item in brief.tried] == ["r1"]
 
 
 async def test_a_branch_log_is_its_runtimes_alone_and_its_current_plan_is_the_latest_unsuperseded(

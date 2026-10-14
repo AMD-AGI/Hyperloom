@@ -11,11 +11,11 @@ from pathlib import Path
 import pytest
 
 from hyperloom_multibranch.contracts.notebook import Role, Writer
-from hyperloom_multibranch.contracts.notebook.records import StartupBrief
+from hyperloom_multibranch.contracts.notebook.records import StartupBrief, TestRecord
 from hyperloom_multibranch.notebook import LocalNotebook
-from hyperloom_multibranch.notebook.tests.factories import FakeClock
+from hyperloom_multibranch.notebook.tests.factories import FakeClock, intent, request
 from hyperloom_multibranch.notebook.tests.sessions import scripted_session
-from hyperloom_multibranch.notebook.tools import ERROR, MAX_LINES, NotebookTool, lines, notebook_tools
+from hyperloom_multibranch.notebook.tools import ERROR, MAX_LINES, NotebookTool, lines, notebook_tools, outcome
 
 GEMM_ON_C0 = {"parent_commit": "c0", "target": "moe gemm", "mechanism": "tuned kernel", "layer": "kernel"}
 FLASH_ON_C1 = {"parent_commit": "c1", "target": "attention", "mechanism": "flash decode", "layer": "source"}
@@ -145,3 +145,9 @@ def test_long_lists_stop_at_the_cap_and_say_how_many_more() -> None:
 
     assert len(shown) == MAX_LINES + 1 and shown[-1] == "... 4 more"
     assert lines(["x" * 500])[0].endswith("...") and len(lines(["x" * 500])[0]) == 160
+
+
+def test_a_withdrawn_test_says_it_was_taken_back_and_why() -> None:
+    record = TestRecord(request("r1", intent("s1", "c0")), withdrawn_at=1.0, withdrawal_reason="branch s1 stopped")
+
+    assert outcome(record) == "withdrawn (branch s1 stopped)"

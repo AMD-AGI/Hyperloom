@@ -88,10 +88,26 @@ class TestRecord:
     requested_at: float = 0.0
     measured_at: float | None = None
     judged_at: float | None = None
+    withdrawn_at: float | None = None
+    withdrawal_reason: str = ""
 
     @property
     def request_id(self) -> str:
         return self.request.request_id
+
+    @property
+    def in_flight(self) -> bool:
+        """Requested, and neither measured nor withdrawn yet."""
+
+        return self.result is None and self.withdrawn_at is None
+
+
+@dataclass(frozen=True)
+class Withdrawal:
+    """The toolbox taking back a test it will not measure, such as the queued and running tests of a stopped branch."""
+
+    request_id: str
+    reason: str
 
 
 @dataclass(frozen=True)
@@ -214,7 +230,7 @@ class FrontierScore:
 
 @dataclass(frozen=True)
 class BranchProgress:
-    """One branch at a glance; ``frontier`` is filled from MB2 on."""
+    """One branch at a glance; ``frontier`` is filled by a scoring progress query, such as the RSI's frontier scoring."""
 
     branch: str
     running: bool
@@ -445,5 +461,6 @@ __all__ = [
     "TestRecord",
     "ToolResultPointer",
     "TriedDirection",
+    "Withdrawal",
     "Writer",
 ]

@@ -5,9 +5,9 @@
 
 The directory holds ``segments/`` (one append-only file per handle) and ``claims/`` (claim generations), and works the
 same on a local disk and on a shared NFS folder. A handle writes as one :class:`Writer`, and each write checks that the
-writer's role owns the state it writes: test requests and results the toolbox, specialist-branch judgements the rule
-gate, integration-branch judgements and merge attempts the integrator, branch starts and stops the scheduler, claims and
-branch logs the specialist runtime of that branch.
+writer's role owns the state it writes: test requests, results and withdrawals the toolbox, specialist-branch
+judgements the rule gate, integration-branch judgements and merge attempts the integrator, branch starts and stops the
+scheduler, claims and branch logs the specialist runtime of that branch.
 """
 
 from __future__ import annotations
@@ -74,6 +74,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
     StartupBrief,
     TestRecord,
     ToolResultPointer,
+    Withdrawal,
     Writer,
 )
 from hyperloom_multibranch.contracts.notebook.vocab import (
@@ -131,10 +132,27 @@ def _check_lineage(event: LineageEvent) -> None:
     missing = [name for name in _LINEAGE_FIELDS[event.kind] if not getattr(event, name)]
     if missing:
         raise ValueError(f"a {event.kind.value} event needs {', '.join(missing)}")
-    if (event.kind is LineageKind.ROOT) != (event.branch == INTEGRATION_BRANCH):
+    if event.kind is not LineageKind.STOP and (event.kind is LineageKind.ROOT) != (event.branch == INTEGRATION_BRANCH):
         raise ValueError(f"the root commit, and only it, starts the {INTEGRATION_BRANCH} branch")
     if event.recipe_digest is not None and event.kind is not LineageKind.ROOT:
         raise ValueError("only the root event names its commit's recipe digest; judgements name the others'")
+
+
+def _new_lineage(state: NotebookState, event: LineageEvent) -> bool:
+    """Whether ``event`` adds to the lineage; raises when its branch already started, already stopped or never began."""
+
+    recorded = [item for item in state.lineage if item.branch == event.branch]
+    if event in recorded:
+        return False
+    started = [item for item in recorded if item.kind is not LineageKind.STOP]
+    if event.kind is not LineageKind.STOP:
+        if started:
+            raise ConflictingWrite(f"branch {event.branch} already started with a {started[0].kind.value} event")
+    elif not started:
+        raise NotRecorded(f"branch {event.branch} never started")
+    elif any(item.kind is LineageKind.STOP for item in recorded):
+        raise ConflictingWrite(f"branch {event.branch} is already stopped")
+    return True
 
 
 def _check_recipe_digest(state: NotebookState, commit_id: str | None, digest: str | None) -> None:
@@ -258,27 +276,48 @@ class LocalNotebook(
         self._require(Role.TOOLBOX)
         state = self._state()
         request = state.record(result.request_id).request
+        if result.request_id in state.withdrawals:
+            raise ConflictingWrite(f"request {result.request_id} was withdrawn; it takes no result")
         existing = state.results.get(result.request_id)
         if existing is None:
             failure = f": {result.failure.value} {result.failure_reason}" if result.failure is not None else ""
             summary = f"{result.validity.value} {result.request_id} on {request.branch}{failure}"
             self._append(EntryKind.RESULT, result, branch=request.branch, parent=request.parent_commit, summary=summary)
-            self._complete_claim(request)
+            self._settle_claim(request, ClaimStatus.COMPLETED)
         elif existing != result:
             raise ConflictingWrite(f"the result of {result.request_id} was written with other content")
         return self._state().record(result.request_id)
 
-    def _complete_claim(self, request: TestRequest) -> None:
+    async def write_withdrawal(self, withdrawal: Withdrawal) -> TestRecord:
+        self._require(Role.TOOLBOX)
+        state = self._state()
+        request = state.record(withdrawal.request_id).request
+        if withdrawal.request_id in state.results:
+            raise ConflictingWrite(f"request {withdrawal.request_id} was measured; a measured test is not withdrawn")
+        existing = state.withdrawals.get(withdrawal.request_id)
+        if existing is None:
+            summary = f"withdrawn {withdrawal.request_id} on {request.branch}: {withdrawal.reason}"
+            self._append(
+                EntryKind.WITHDRAWAL, withdrawal, branch=request.branch, parent=request.parent_commit, summary=summary
+            )
+            self._settle_claim(request, ClaimStatus.RELEASED)
+        elif existing != withdrawal:
+            raise ConflictingWrite(f"request {withdrawal.request_id} was withdrawn for another reason")
+        return self._state().record(withdrawal.request_id)
+
+    def _settle_claim(self, request: TestRequest, status: ClaimStatus) -> None:
+        """End the claim ``request`` measures: completed by its result, or released when it is withdrawn."""
+
         now = self._clock()
 
-        def complete(claim: Claim) -> Claim:
+        def settle(claim: Claim) -> Claim:
             ours = claim.holder == request.branch and claim.request_id in (None, request.request_id)
             if claim.status is not ClaimStatus.HELD or not ours:
                 raise ClaimLost(f"the claim on {claim.key.parent_commit} is not the claim of {request.request_id}")
-            return replace(claim, status=ClaimStatus.COMPLETED, request_id=request.request_id, heartbeat_at=now)
+            return replace(claim, status=status, request_id=request.request_id, heartbeat_at=now)
 
         with suppress(ClaimLost):
-            self._leases.change(ClaimKey(request.parent_commit, request.intent_fingerprint), complete)
+            self._leases.change(ClaimKey(request.parent_commit, request.intent_fingerprint), settle)
 
     async def notify_tool_result(self, pointer: ToolResultPointer) -> None:
         self._require(Role.TOOLBOX)
@@ -354,7 +393,10 @@ class LocalNotebook(
     async def record_lineage(self, event: LineageEvent) -> None:
         self._require(LINEAGE_WRITERS[event.kind])
         _check_lineage(event)
-        _check_recipe_digest(self._state(), event.commit_id, event.recipe_digest)
+        state = self._state()
+        _check_recipe_digest(state, event.commit_id, event.recipe_digest)
+        if not _new_lineage(state, event):
+            return
         start = event.commit_id or event.from_commit
         summary = f"{event.kind.value} {event.branch} at {start or 'its head'}: {event.reason}"
         self._append(EntryKind.LINEAGE, event, branch=event.branch, parent=event.from_commit, summary=summary)

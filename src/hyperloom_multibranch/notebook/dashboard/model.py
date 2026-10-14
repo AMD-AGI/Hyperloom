@@ -5,8 +5,8 @@
 
 * ``branches``: each branch's progress, its head's gain over the baseline, and its frontier score when the progress
   rows carry one (pass :class:`FrontierScoring`'s rows to show them);
-* ``in_flight``: tests requested and not measured yet, and the claims held now. The toolbox's own queue, once it
-  reports one, is passed in as ``queue`` and shown as it is;
+* ``in_flight``: tests requested and neither measured nor withdrawn yet, and the claims held now. The toolbox's own
+  queue, once it reports one, is passed in as ``queue`` and shown as it is;
 * ``lineage`` and ``splits``: every commit, every branch, and the branches split off for a correctness fix;
 * ``sandboxes``: per measurement environment, the tests run there and their GPU time;
 * ``quarantined``: the nodes and GPU sets out of service.
@@ -64,7 +64,7 @@ def _branches(snapshot: NotebookSnapshot, rows: Sequence[BranchProgress], metric
 
 
 def _in_flight(snapshot: NotebookSnapshot) -> dict[str, Any]:
-    waiting = [record for record in snapshot.records if record.result is None]
+    waiting = [record for record in snapshot.records if record.in_flight]
     return {
         "tests": [
             {
