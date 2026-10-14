@@ -126,7 +126,7 @@ def test_a_cherry_pick_under_another_subject_is_included_by_patch_id(tmp_path):
         pytest.param([], 1, Inclusion.INCLUDED, id="pr-head-merged"),
         pytest.param([0], None, Inclusion.UNKNOWN, id="one-commit-cherry-picked"),
         pytest.param([], 0, Inclusion.UNKNOWN, id="first-commit-merged"),
-        pytest.param([], None, Inclusion.NOT_INCLUDED, id="absent"),
+        pytest.param([], None, Inclusion.UNKNOWN, id="none-carried"),
     ],
 )
 def test_under_an_upstream_merge_commit_every_pr_commit_must_be_carried(tmp_path, picked, merged, expected):
@@ -143,6 +143,30 @@ def test_under_an_upstream_merge_commit_every_pr_commit_must_be_carried(tmp_path
     assert verdict.inclusion is expected
     assert verdict.method is (InclusionMethod.NONE if expected is Inclusion.UNKNOWN else InclusionMethod.PATCH_ID)
     assert "of the 2 commits" in verdict.evidence
+
+
+@pytest.mark.parametrize(
+    ("pr_subjects", "expected", "evidence"),
+    [
+        pytest.param(("Fuse the epilogue",), Inclusion.INCLUDED, "1 of the 1 commits", id="one-commit-pr"),
+        pytest.param(
+            ("Fuse the epilogue", "Tune the epilogue"),
+            Inclusion.UNKNOWN,
+            "folded them into one commit",
+            id="two-commit-pr",
+        ),
+    ],
+)
+def test_a_merge_commit_cherry_picked_whole_matches_only_a_one_commit_pr(tmp_path, pr_subjects, expected, evidence):
+    """``git cherry-pick -m 1`` folds the PR into one commit, and its subject carries no ``(#N)`` suffix."""
+    root = _repo(tmp_path)
+    merge, _ = _fork_before_a_merged_pr(root, *pr_subjects)
+    git("cherry-pick", "-m", "1", merge, cwd=root)
+
+    verdict = _probe(root, 42, merge)
+
+    assert verdict.inclusion is expected
+    assert evidence in verdict.evidence
 
 
 def test_an_edited_backport_without_the_suffix_still_reads_as_not_included(tmp_path):
