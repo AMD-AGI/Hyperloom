@@ -1,0 +1,148 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""The experiment repository as a bare git repository, one per session; every commit holds one recipe document."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+from dataclasses import dataclass
+from pathlib import Path
+
+from hyperloom.contracts.recipe import Recipe
+from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
+from hyperloom_multibranch.contracts.repo import BranchMoved
+
+RECIPE_FILE = "recipe.json"
+_NO_COMMIT = "0" * 40
+# Plumbing on a local bare repository takes milliseconds; this only bounds a wedged filesystem.
+GIT_TIMEOUT_S = 60.0
+# Session commits carry this identity whoever runs the session, so the operator's git config never decides it.
+_IDENTITY = {
+    "GIT_AUTHOR_NAME": "hyperloom-multibranch",
+    "GIT_AUTHOR_EMAIL": "multibranch@hyperloom.invalid",
+    "GIT_COMMITTER_NAME": "hyperloom-multibranch",
+    "GIT_COMMITTER_EMAIL": "multibranch@hyperloom.invalid",
+}
+
+
+class GitError(RuntimeError):
+    """A git command failed for a reason the repository contract does not name."""
+
+
+@dataclass(frozen=True)
+class _Completed:
+    code: int | None
+    out: str
+    err: str
+
+
+def _ref(branch: str) -> str:
+    return f"refs/heads/{branch}"
+
+
+class GitExperimentRepo:
+    """Writes commits with plumbing and moves a branch by compare-and-swap on its ref.
+
+    No working tree or index is involved, so writers on different branches never contend, and two writers racing on one
+    branch leave exactly one commit on it.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self._path = path.resolve()
+        # An inherited GIT_* (GIT_DIR inside a hook or `git rebase --exec`) would aim every command at another
+        # repository, so none reaches git and GIT_DIR names this one.
+        inherited = {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
+        self._env = {**inherited, **_IDENTITY, "GIT_DIR": str(self._path)}
+
+    @classmethod
+    async def create(cls, path: Path, baseline: Recipe) -> GitExperimentRepo:
+        """A new repository at ``path`` whose root commit, the baseline, starts ``INTEGRATION_BRANCH``."""
+        await asyncio.to_thread(path.mkdir, parents=True)
+        repo = cls(path)
+        await repo._git("init", "--bare", "--quiet", f"--initial-branch={INTEGRATION_BRANCH}")
+        root = await repo._write(baseline, (), "baseline")
+        await repo._git("update-ref", _ref(INTEGRATION_BRANCH), root, _NO_COMMIT)
+        return repo
+
+    async def read_recipe(self, commit: str) -> Recipe:
+        resolved = await self._commit_of(commit)
+        return Recipe.from_document(json.loads(await self._git("show", f"{resolved}:{RECIPE_FILE}")))
+
+    async def create_branch(self, branch: str, at_commit: str) -> None:
+        resolved = await self._commit_of(at_commit)
+        created = await self._run("update-ref", _ref(branch), resolved, _NO_COMMIT)
+        if created.code == 0:
+            return
+        if await self._resolve(_ref(branch)) is not None:
+            raise ValueError(f"branch {branch!r} already exists")
+        raise GitError(f"cannot create branch {branch!r}: {created.err}")
+
+    async def head(self, branch: str) -> str:
+        found = await self._resolve(_ref(branch))
+        if found is None:
+            raise KeyError(branch)
+        return found
+
+    async def commit(self, branch: str, parent: str, recipe: Recipe, message: str) -> str:
+        current = await self.head(branch)
+        if current != parent:
+            raise BranchMoved(f"{branch} is at {current}, not {parent}")
+        made = await self._write(recipe, (parent,), message)
+        moved = await self._run("update-ref", _ref(branch), made, parent)
+        if moved.code == 0:
+            return made
+        if await self.head(branch) != parent:
+            raise BranchMoved(f"{branch} moved off {parent} while {made} was written")
+        raise GitError(f"cannot move {branch} to {made}: {moved.err}")
+
+    async def rewind(self, branch: str, commit: str, parent: str) -> None:
+        moved = await self._run("update-ref", _ref(branch), await self._commit_of(parent), commit)
+        if moved.code != 0:
+            raise BranchMoved(f"{branch} is no longer at {commit}: {moved.err}")
+
+    async def _write(self, recipe: Recipe, parents: tuple[str, ...], message: str) -> str:
+        document = json.dumps(recipe.to_document(), indent=2, sort_keys=True) + "\n"
+        blob = await self._git("hash-object", "-w", "--stdin", stdin=document.encode())
+        tree = await self._git("mktree", stdin=f"100644 blob {blob}\t{RECIPE_FILE}\n".encode())
+        parent_args = [arg for parent in parents for arg in ("-p", parent)]
+        return await self._git("commit-tree", "--no-gpg-sign", *parent_args, "-m", message, tree)
+
+    async def _commit_of(self, commit: str) -> str:
+        resolved = await self._resolve(f"{commit}^{{commit}}")
+        if resolved is None:
+            raise KeyError(commit)
+        return resolved
+
+    async def _resolve(self, name: str) -> str | None:
+        resolved = await self._run("rev-parse", "--verify", "--quiet", name)
+        return resolved.out if resolved.code == 0 else None
+
+    async def _git(self, *args: str, stdin: bytes | None = None) -> str:
+        completed = await self._run(*args, stdin=stdin)
+        if completed.code != 0:
+            raise GitError(f"git {args[0]} exited {completed.code}: {completed.err}")
+        return completed.out
+
+    async def _run(self, *args: str, stdin: bytes | None = None) -> _Completed:
+        process = await asyncio.create_subprocess_exec(
+            "git",
+            *args,
+            cwd=self._path,
+            env=self._env,
+            stdin=asyncio.subprocess.DEVNULL if stdin is None else asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            out, err = await asyncio.wait_for(process.communicate(stdin), GIT_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+            raise GitError(f"git {args[0]} did not finish in {GIT_TIMEOUT_S:g}s") from None
+        return _Completed(process.returncode, out.decode().strip(), err.decode(errors="replace").strip())
+
+
+__all__ = ["GIT_TIMEOUT_S", "RECIPE_FILE", "GitError", "GitExperimentRepo"]
