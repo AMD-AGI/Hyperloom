@@ -333,11 +333,11 @@ breakdown's `installed_versions` map (`source_pr_url`); see the
 
 ### Novelty and crash safety
 
-- **Novelty-ledger stall gate.** Repeated identical build attempts — same
-  component, ref, GPU arch, and build command — are treated as a stall and
-  revert. A novel attempt, or a time-based failure such as a timeout,
-  advances instead, so the loop keeps making forward progress rather than
-  looping on an identical failing build.
+- **A build answers no round.** A build runs beside the authoring round
+  that asked for it, and that round is settled by its own integrate. A
+  failed build boots nothing, so it settles no round and stacks nothing; its
+  failure reaches the next round's mandate. An identical build — same
+  component, ref, GPU arch, and build command — is never run twice.
 - **Crash / resume.** An in-flight build is tracked by a durable sentinel,
   so a crash or resume reclaims the running build or cleans up the orphaned
   one rather than leaking it.
