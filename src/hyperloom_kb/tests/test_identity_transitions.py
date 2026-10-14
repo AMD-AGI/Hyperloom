@@ -6,11 +6,9 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from hyperloom_kb import (
-    Change,
     Experience,
     ExperienceConflictError,
     ExperienceStatus,
-    Outcome,
     Provenance,
     SchemaValidationError,
     TransitionKind,
@@ -31,23 +29,18 @@ def beginning(*, seq: int = 0, supersedes: str = "") -> Experience:
         created_at=NOW + timedelta(minutes=seq),
         identity={"model": "qwen3-8b", "gpu": "mi355x"},
         objective="throughput@v1",
-        baseline_identity={"config": "default"},
-        baseline_value=2400,
+        baseline={"config": "default", "value": 2400},
         schema_ref=SCHEMA_REF,
         provenance=Provenance("hyperloom", "1.0.0"),
         supersedes=supersedes,
-        preconditions=("Baseline passed.",),
     )
 
 
 def decided() -> Experience:
     return replace(
         beginning(),
-        reasoning="Decode is memory bound.",
-        change=Change(
-            identity={"knob": "kv_cache_dtype"},
-            summary="Use fp8 KV cache.",
-        ),
+        rationale={"preconditions": ("Baseline passed.",), "reasoning": "Decode is memory bound."},
+        change={"knob": "kv_cache_dtype", "summary": "Use fp8 KV cache."},
     )
 
 
@@ -56,8 +49,8 @@ def completed() -> Experience:
         decided(),
         status=ExperienceStatus.COMPLETE,
         completed_at=NOW + timedelta(minutes=1),
-        outcome=Outcome(decision="keep", value=2600),
-        reflection="The measured result improved.",
+        outcome={"decision": "keep", "value": 2600},
+        reflection={"text": "The measured result improved."},
     )
 
 
@@ -116,28 +109,26 @@ def test_monotonic_begin_decide_complete_transitions() -> None:
 
 
 def test_begin_time_facts_cannot_change() -> None:
-    changed = replace(beginning(), identity={"model": "other", "gpu": "mi355x"})
-
-    with pytest.raises(ExperienceConflictError, match="identity"):
-        classify_transition(beginning(), changed)
+    for changed, field in (
+        (replace(beginning(), identity={"model": "other", "gpu": "mi355x"}), "identity"),
+        (replace(beginning(), baseline={"config": "tuned", "value": 2400}), "baseline"),
+    ):
+        with pytest.raises(ExperienceConflictError, match=field):
+            classify_transition(beginning(), changed)
 
 
 def test_decision_time_facts_cannot_change_during_completion() -> None:
     changed = replace(
-        decided(),
-        status=ExperienceStatus.COMPLETE,
-        completed_at=NOW + timedelta(minutes=1),
-        reasoning="A different rationale.",
-        outcome=Outcome(decision="keep", value=2600),
-        reflection="Improved.",
+        completed(),
+        rationale={"reasoning": "A different rationale."},
     )
 
-    with pytest.raises(ExperienceConflictError, match="reasoning"):
+    with pytest.raises(ExperienceConflictError, match="rationale"):
         classify_transition(decided(), changed)
 
 
 def test_complete_record_rejects_non_identical_replay() -> None:
-    mutated = replace(completed(), reflection="Edited after publication.")
+    mutated = replace(completed(), reflection={"text": "Edited after publication."})
 
     with pytest.raises(ExperienceConflictError, match="immutable"):
         classify_transition(completed(), mutated)

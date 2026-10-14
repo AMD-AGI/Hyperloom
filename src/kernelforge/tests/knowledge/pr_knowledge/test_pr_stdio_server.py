@@ -11,6 +11,7 @@ import sys
 
 import pytest
 
+from kernelforge.knowledge.pr_knowledge.search import PRLifecycle, PRReference, PRState, SearchOutcome
 from kernelforge.mcp_server import pr_stdio_server as server
 
 from kernelforge.conftest import SRC_ROOT
@@ -124,8 +125,6 @@ def test_find_references_without_a_query_does_not_call_the_service(monkeypatch):
 
 
 def test_find_references_returns_ranked_results(monkeypatch):
-    from kernelforge.knowledge.pr_knowledge.search import PRReference, SearchOutcome
-
     monkeypatch.setenv("PR_KB_REPO", "ROCm/FlyDSL")
     monkeypatch.setattr(server, "_client", object)
     monkeypatch.setattr(
@@ -137,7 +136,7 @@ def test_find_references_returns_ranked_results(monkeypatch):
                     repo="ROCm/FlyDSL",
                     number=959,
                     title="t",
-                    is_merged=True,
+                    lifecycle=PRLifecycle(state=PRState.MERGED),
                     worth_trying=0.6,
                     components=("moe",),
                     n_files=3,
@@ -155,6 +154,65 @@ def test_find_references_returns_ranked_results(monkeypatch):
     assert result["degraded_reason"] == "service_unreachable"
 
 
+_LIFECYCLE_CASES = [
+    pytest.param(
+        {"state": "open", "is_merged": False, "is_draft": True, "base_ref": "main", "pr_merged_at": None},
+        {"state": "open", "draft": True, "merged_at": None, "base_ref": "main"},
+        id="open",
+    ),
+    pytest.param(
+        {"state": "closed", "is_merged": False, "is_draft": False, "base_ref": "main", "pr_merged_at": None},
+        {"state": "closed", "draft": False, "merged_at": None, "base_ref": "main"},
+        id="closed-unmerged",
+    ),
+    pytest.param(
+        {
+            "state": "closed",
+            "is_merged": True,
+            "is_draft": False,
+            "base_ref": "main",
+            "pr_merged_at": "2026-08-02T00:00:00Z",
+        },
+        {
+            "state": "merged",
+            "draft": False,
+            "merged_at": "2026-08-02T00:00:00Z",
+            "base_ref": "main",
+        },
+        id="merged",
+    ),
+    pytest.param(
+        {"is_merged": False},
+        {"state": None, "draft": None, "merged_at": None, "base_ref": None},
+        id="fields-missing",
+    ),
+]
+_LIFECYCLE_KEYS = ("state", "draft", "merged_at", "base_ref")
+
+
+@pytest.mark.parametrize(("summary", "expected"), _LIFECYCLE_CASES)
+def test_find_references_reports_the_lifecycle_the_service_gave(monkeypatch, summary, expected):
+    monkeypatch.setenv("PR_KB_REPO", "ROCm/FlyDSL")
+    monkeypatch.setattr(server, "_client", object)
+    reference = PRReference(repo="ROCm/FlyDSL", number=1, lifecycle=PRLifecycle.from_summary(summary))
+    monkeypatch.setattr(server, "discover", lambda client, context, **kw: SearchOutcome(references=(reference,)))
+
+    row = _tool("pr_find_references", {"keywords": ["moe"]})["results"][0]
+
+    assert {key: row[key] for key in _LIFECYCLE_KEYS} == expected
+
+
+@pytest.mark.parametrize(("summary", "expected"), _LIFECYCLE_CASES)
+def test_get_reference_reports_the_lifecycle_the_service_gave(monkeypatch, summary, expected):
+    payload = {"summary": {"title": "T", **summary}, "files": []}
+    monkeypatch.setenv("PR_KB_REPO", "ROCm/aiter")
+    monkeypatch.setattr(server, "_client", type("_C", (), {"get_pr": lambda s, r, n: payload}))
+
+    result = _tool("pr_get_reference", {"number": 7})
+
+    assert {key: result[key] for key in _LIFECYCLE_KEYS} == expected
+
+
 def test_find_references_accepts_a_bare_string_keyword(monkeypatch):
     captured = {}
 
@@ -162,8 +220,6 @@ def test_find_references_accepts_a_bare_string_keyword(monkeypatch):
     monkeypatch.setattr(server, "_client", object)
 
     def fake_discover(client, context, **kwargs):
-        from kernelforge.knowledge.pr_knowledge.search import SearchOutcome
-
         captured["keywords"] = context.keywords
         return SearchOutcome()
 

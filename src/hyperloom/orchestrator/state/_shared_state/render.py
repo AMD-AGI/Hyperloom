@@ -72,6 +72,30 @@ def _as_float(value: Any) -> float:
         return 0.0
 
 
+def untested_proposal_line(row: dict[str, Any], *, why_chars: int | None = 80) -> str:
+    """Render one ``untested_proposal_rows`` row, marking each field it carries.
+
+    ``why_chars`` bounds the reason; ``None`` shows a reason its producer has already bounded in full.
+    """
+    parts = [f"• {row['name']} [{row['domain']}·{row['severity'] or 'sev?'}]"]
+    if row["atomic"]:
+        parts.append("ATOMIC")
+    if row["extra_args"]:
+        parts.append(f"+args={row['extra_args']}")
+    if row["extra_envs"]:
+        parts.append("+envs=" + ",".join(f"{k}={v}" for k, v in sorted(row["extra_envs"].items())))
+    if row["remove_args"]:
+        parts.append("-args=" + " ".join(row["remove_args"]))
+    if row["unset_envs"]:
+        parts.append("-envs=" + ",".join(row["unset_envs"]))
+    if row["args_mode"] == "replace":
+        parts.append("mode=replace")
+    reason = row["reason"].replace("\n", " ").strip()[:why_chars].rstrip()
+    if reason:
+        parts.append(f"why={reason}")
+    return _flatten_for_prompt(" ".join(parts))
+
+
 class _RenderMixin:
     def to_policy_denial_summary(self, *, top_k: int = 6) -> str:
         """Render the most recent PolicyGate denials for prompt injection.
@@ -378,31 +402,45 @@ class _RenderMixin:
             rows.append(f"  · (+{len(ordered) - max_entries} older gaps elided; see state.json `gaps[]`)")
         return "\n".join(rows)
 
+    def benched_fingerprints(self) -> set[str]:
+        """Content fingerprints of every variant an explore round has benched."""
+        from ...actions.executors._proposal_identity import content_fingerprint
+
+        return {
+            content_fingerprint(row)
+            for row in ((self.explore_search or {}).get("tested") or {}).values()
+            if isinstance(row, dict)
+        }
+
     def untested_proposal_rows(self) -> list[dict[str, Any]]:
-        """Executable proposals from this cycle that no explore round has benched, highest severity first."""
+        """Executable proposals from this cycle that no explore round has benched.
+
+        Ordered by round ``priority`` (predictor rounds set one, specialist rounds
+        do not), then gap severity, then most recent. A row's ``provenance`` is its
+        round's, ``specialist:<domain>`` unless the round's recorder set one; a
+        proposal cannot choose it, since a specialist writes its own proposals.
+        """
         from hyperloom.common.coerce import to_int
 
         from ...actions.executors._proposal_identity import content_fingerprint, is_executable, normalize_proposal
 
         cycle = to_int(self.macro_cycle, default=0)
-        benched = {
-            content_fingerprint(row)
-            for row in ((self.explore_search or {}).get("tested") or {}).values()
-            if isinstance(row, dict)
-        }
+        benched = self.benched_fingerprints()
         severity_of = {
             str(g.get("canonical_id") or ""): str(g.get("severity") or "").strip().lower()
             for g in (self.gaps or [])
             if isinstance(g, dict)
         }
-        ranked: list[tuple[int, int, dict[str, Any]]] = []
+        ranked: list[tuple[int, int, int, dict[str, Any]]] = []
         seen: set[str] = set()
         for order, entry in enumerate(self.specialist_rounds or []):
             if not isinstance(entry, dict) or to_int(entry.get("cycle"), default=0) != cycle:
                 continue
             domain = str(entry.get("domain") or "?").removesuffix("_specialist")
             severity = severity_of.get(str(entry.get("gap_canonical_id") or ""), "")
+            priority = to_int(entry.get("priority"), default=0)
             task_id = str(entry.get("task_id") or "")[:8]
+            provenance = str(entry.get("provenance") or f"specialist:{domain}")
             for index, proposal in enumerate(entry.get("proposal_set") or []):
                 if not isinstance(proposal, dict):
                     continue
@@ -417,38 +455,25 @@ class _RenderMixin:
                 row["domain"] = domain
                 row["severity"] = severity
                 row["fingerprint"] = fingerprint
+                row["provenance"] = provenance
                 # Already checked against the read this round's dispatch was shown, which travels with them.
                 row["experience_citations"] = list(proposal.get("experience_citations") or [])
                 row["kb_read_id"] = str(entry.get("kb_read_id") or "")
                 row["kb_rendered_refs"] = list(entry.get("kb_rendered_refs") or [])
-                ranked.append((GAP_SEVERITY_RANK.get(severity, 0), order, row))
-        ranked.sort(key=lambda r: (-r[0], -r[1]))
-        return [row for _, _, row in ranked]
+                ranked.append((priority, GAP_SEVERITY_RANK.get(severity, 0), order, row))
+        ranked.sort(key=lambda r: (-r[0], -r[1], -r[2]))
+        return [row for _, _, _, row in ranked]
 
-    @staticmethod
-    def _untested_proposal_line(row: dict[str, Any]) -> str:
-        """Render one queue row, marking each field it carries."""
-        parts = [f"• {row['name']} [{row['domain']}·{row['severity'] or 'sev?'}]"]
-        if row["atomic"]:
-            parts.append("ATOMIC")
-        if row["extra_args"]:
-            parts.append(f"+args={row['extra_args']}")
-        if row["extra_envs"]:
-            parts.append("+envs=" + ",".join(f"{k}={v}" for k, v in sorted(row["extra_envs"].items())))
-        if row["remove_args"]:
-            parts.append("-args=" + " ".join(row["remove_args"]))
-        if row["unset_envs"]:
-            parts.append("-envs=" + ",".join(row["unset_envs"]))
-        if row["args_mode"] == "replace":
-            parts.append("mode=replace")
-        reason = row["reason"].replace("\n", " ").strip()[:80].rstrip()
-        if reason:
-            parts.append(f"why={reason}")
-        return _flatten_for_prompt(" ".join(parts))
+    def to_untested_proposals_summary(self, *, max_entries: int = 12, skip_provenance: str = "") -> str:
+        """Render the specialist proposals still waiting for a benchmark slot.
 
-    def to_untested_proposals_summary(self, *, max_entries: int = 12) -> str:
-        """Render the specialist proposals still waiting for a benchmark slot."""
-        rows = self.untested_proposal_rows()
+        Args:
+            max_entries: Rows rendered in full; the rest are counted.
+            skip_provenance: Leave out the rows a producer with its own section renders.
+        """
+        rows = [
+            row for row in self.untested_proposal_rows() if not skip_provenance or row["provenance"] != skip_provenance
+        ]
         if not rows:
             return ""
         out = [
@@ -457,7 +482,7 @@ class _RenderMixin:
             "queue whenever no explore is queued or running; dispatch `explore` only for variants not listed here.",
             "",
         ]
-        out.extend(self._untested_proposal_line(row) for row in rows[:max_entries])
+        out.extend(untested_proposal_line(row) for row in rows[:max_entries])
         if len(rows) > max_entries:
             out.append(f"(+{len(rows) - max_entries} more not shown)")
         return "\n".join(out)
