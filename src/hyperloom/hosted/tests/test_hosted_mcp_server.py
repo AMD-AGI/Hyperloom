@@ -213,8 +213,14 @@ def test_malformed_bodies(server: McpServer) -> None:
 
 
 def test_oversized_body_is_413_before_it_is_read(server: McpServer) -> None:
-    status, _, _ = Client(server).send("POST", body=b"x" * ((1 << 20) + 1), headers={"X-Hyperloom-Token": HOST_TOKEN})
-    assert status == 413
+    connection = http.client.HTTPConnection("127.0.0.1", server.port, timeout=10)
+    connection.putrequest("POST", "/mcp")
+    connection.putheader("X-Hyperloom-Token", HOST_TOKEN)
+    connection.putheader("Content-Length", str((1 << 20) + 1))
+    connection.endheaders()
+    response = connection.getresponse()
+    connection.close()
+    assert response.status == 413
 
 
 def test_handler_receives_the_context_and_can_forbid(server: McpServer) -> None:
