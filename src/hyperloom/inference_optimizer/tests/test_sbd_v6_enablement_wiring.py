@@ -200,6 +200,7 @@ def _lane(session_dir: Path, **overrides: Any):
         setattr(fake, name, types.MethodType(getattr(EnablementLane, name), fake))
     for name in (
         "maybe_enqueue_enablement_baseline_revalidation",
+        "baseline_launch_params",
         "_open_revalidation_row",
         "open_row_past_spent_generations",
         "_open_round_past_spent_generations",

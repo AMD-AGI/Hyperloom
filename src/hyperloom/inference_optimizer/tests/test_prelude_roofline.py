@@ -147,6 +147,27 @@ def test_prelude_initial_roofline_uses_baseline_server_args(
     assert "fp8" not in task.params["base_extra_args"]
 
 
+def test_prelude_initial_roofline_boots_the_configuration_enablement_established(coord: Coordinator, tmp_path: Path):
+    """The baseline arm after a bring-up is the enablement-accepted launch; without it the server hits the old wall."""
+    launch_config = tmp_path / "launch_config.yaml"
+    coord.shared_state.enablement.accepted_config_path = str(launch_config)
+    coord.shared_state.enablement.record_accepted_config(
+        {
+            "extra_envs": {"SGLANG_DSA_KPOOL_HIP_RECENCY_FALLBACK": "1"},
+            "extra_server_args": "--dsa-decode-backend triton",
+        },
+        source="kept_bench",
+    )
+    coord.shared_state.current_best = {"extra_envs": {"SGLANG_LATER_KEEP": "1"}}
+
+    task = asyncio.run(coord.phase_prelude.enqueue_internal_analysis_task(reason="prelude_initial"))
+
+    assert task.params["config_path"] == str(launch_config)
+    assert task.params["extra_envs"] == {"SGLANG_DSA_KPOOL_HIP_RECENCY_FALLBACK": "1"}
+    assert task.params["extra_server_args"] == "--dsa-decode-backend triton"
+    assert "base_extra_envs" not in task.params
+
+
 @pytest.mark.asyncio
 async def test_prelude_initial_roofline_is_idempotent(coord: Coordinator):
     """A second call with the same reason returns the same task (no double-enqueue on resume)."""
