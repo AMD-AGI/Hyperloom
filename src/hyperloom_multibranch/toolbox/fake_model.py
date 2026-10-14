@@ -33,15 +33,58 @@ from hyperloom.contracts.measurement import (
     TestKind,
     TestRequest,
 )
+from hyperloom.common.perf_metric import (
+    GRADED_DURATION,
+    GRADED_ERROR_RATE,
+    GRADED_INTVTY,
+    GRADED_INTVTY_P50,
+    GRADED_OUTPUT,
+)
 from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES
 
 #: z-score of the 90th percentile of a normal distribution.
 _Z90 = 1.2815515655446004
 
-DEFAULT_BASELINE: Mapping[str, float] = {"output_tps": 1000.0, "ttft_ms": 200.0, "tpot_ms": 20.0}
+TTFT_P50 = "ttft_p50_ms"
+TPOT_P50 = "tpot_p50_ms"
+
+
+class Direction(str, Enum):
+    """How a metric moves when a candidate is faster: up (throughput), down (latency) or not at all."""
+
+    UP = "up"
+    DOWN = "down"
+    FIXED = "fixed"
+
+
+#: The keys are those of ``benchmark_report.json`` as ``hyperloom.common.perf_metric`` names them, kept as they are.
+#: The error rate is in percent, as there.
+DEFAULT_BASELINE: Mapping[str, float] = {
+    GRADED_OUTPUT: 1000.0,
+    GRADED_INTVTY_P50: 50.0,
+    GRADED_INTVTY: 40.0,
+    TTFT_P50: 200.0,
+    TPOT_P50: 20.0,
+    GRADED_DURATION: 600.0,
+    GRADED_ERROR_RATE: 0.0,
+}
+#: A faster candidate raises throughput and interactivity, lowers latency, and leaves the replay window and the error
+#: rate alone (the error rate is driven by ``FakeToolboxConfig.error_rates``, not by speed).
+DEFAULT_DIRECTIONS: Mapping[str, Direction] = {
+    GRADED_OUTPUT: Direction.UP,
+    GRADED_INTVTY_P50: Direction.UP,
+    GRADED_INTVTY: Direction.UP,
+    TTFT_P50: Direction.DOWN,
+    TPOT_P50: Direction.DOWN,
+    GRADED_DURATION: Direction.FIXED,
+    GRADED_ERROR_RATE: Direction.FIXED,
+}
 #: Measure rounds per concurrency level, and the divisor that makes a round's noise a third of an attempt's.
 DEFAULT_MEASURE_ROUNDS = 3
 ROUND_NOISE_DIVISOR = 3
+ROUND_REQUESTS = 1000
+#: A warmup round runs at this share of the measured level.
+WARMUP_FACTOR = 0.8
 DEFAULT_CAMPAIGN = uuid.UUID("00000000-0000-5000-8000-00000000f4ce")
 
 
@@ -129,6 +172,10 @@ class FakeToolboxConfig:
     gpu_count: int = 1
     image_digest: str = "sha256:" + "0" * 64
     baseline: Mapping[str, float] = field(default_factory=lambda: dict(DEFAULT_BASELINE))
+    #: How each baseline metric reacts to the speed of a candidate; a metric of ``baseline`` not named here is refused.
+    directions: Mapping[str, Direction] = field(default_factory=lambda: dict(DEFAULT_DIRECTIONS))
+    #: The error rate (percent) of a test by delta fingerprint, for a candidate that should trip the error-rate gate.
+    error_rates: Mapping[str, float] = field(default_factory=dict)
     main_concurrency: tuple[int, ...] = (64,)
     measure_rounds: int = DEFAULT_MEASURE_ROUNDS
     noise: NoiseModel = field(default_factory=NoiseModel)
@@ -160,11 +207,18 @@ class FakeToolboxConfig:
             raise ValueError("queue limit, default K and parallel tests must be at least 1")
         if not self.main_concurrency or any(value < 1 for value in self.main_concurrency):
             raise ValueError("the main operating point needs positive concurrency values")
+        if unnamed := sorted(set(self.baseline) - set(self.directions)):
+            raise ValueError(f"baseline metrics {unnamed} have no direction")
+        if any(not 0 <= rate <= 100 for rate in self.error_rates.values()):
+            raise ValueError("an error rate is a percentage between 0 and 100")
 
     def effect_of(self, request: TestRequest) -> float:
         if self.effect_fn is not None:
             return self.effect_fn(request)
         return self.effects.get(request.delta.fingerprint(), self.default_effect)
+
+    def error_rate_of(self, request: TestRequest) -> float:
+        return self.error_rates.get(request.delta.fingerprint(), self.baseline.get(GRADED_ERROR_RATE, 0.0))
 
 
 @dataclass(frozen=True)
@@ -252,22 +306,34 @@ class FakeMeasurer:
         if request.kind is TestKind.ACCURACY:
             return ()
         rounds: list[RoundValue] = []
+        error_rate = self.config.error_rate_of(request)
         for concurrency in request.concurrency or self.config.main_concurrency:
-            rounds.append(self._round("warmup", concurrency, factor * 0.8, rng))
-            rounds.extend(self._round("measure", concurrency, factor, rng) for _ in range(self.config.measure_rounds))
+            rounds.append(self._round("warmup", concurrency, factor * WARMUP_FACTOR, error_rate, rng))
+            rounds.extend(
+                self._round("measure", concurrency, factor, error_rate, rng) for _ in range(self.config.measure_rounds)
+            )
         return tuple(rounds)
 
     def _round(
-        self, phase: Literal["warmup", "measure"], concurrency: int, factor: float, rng: random.Random
+        self,
+        phase: Literal["warmup", "measure"],
+        concurrency: int,
+        factor: float,
+        error_rate: float,
+        rng: random.Random,
     ) -> RoundValue:
         """One round sits a little off the attempt's level: a third of the test noise, drawn per round."""
 
         factor *= 1 + self.config.noise.test_noise(rng) / ROUND_NOISE_DIVISOR
-        metrics = {
-            name: value * factor if name.endswith("_tps") else value / factor
-            for name, value in self.config.baseline.items()
-        }
-        return RoundValue(phase, concurrency, metrics, completed_requests=1000, failed_requests=0)
+        metrics = {name: self._metric(name, value, factor) for name, value in self.config.baseline.items()}
+        if GRADED_ERROR_RATE in metrics:
+            metrics[GRADED_ERROR_RATE] = error_rate
+        failed = round(ROUND_REQUESTS * error_rate / 100)
+        return RoundValue(phase, concurrency, metrics, completed_requests=ROUND_REQUESTS, failed_requests=failed)
+
+    def _metric(self, name: str, value: float, factor: float) -> float:
+        direction = self.config.directions[name]
+        return value * factor if direction is Direction.UP else value / factor if direction is Direction.DOWN else value
 
     def _accuracy(self, request: TestRequest, rng: random.Random) -> tuple[AccuracyValue, ...]:
         if not request.accuracy:

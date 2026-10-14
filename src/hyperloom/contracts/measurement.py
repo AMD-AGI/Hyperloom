@@ -396,7 +396,12 @@ class SandboxFacts:
 
 @dataclass(frozen=True)
 class RoundValue:
-    """One benchmark round: its phase, the concurrency it ran at and the metrics of ``benchmark_report.json``."""
+    """One benchmark round: its phase, the concurrency it ran at and the metrics of ``benchmark_report.json``.
+
+    ``metrics`` keeps the keys of ``benchmark_report.json`` exactly as the report has them (for example
+    ``output_throughput`` or ``e2e_norm_intvty_p90``), with no renaming or unit change, so a consumer reads them with
+    the names of ``hyperloom.common.perf_metric``.
+    """
 
     phase: Literal["warmup", "measure"]
     concurrency: int | None = None

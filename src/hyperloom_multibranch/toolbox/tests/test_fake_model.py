@@ -8,8 +8,21 @@ import statistics
 
 import pytest
 
+from hyperloom.common import perf_metric
+from hyperloom.common.perf_metric import (
+    GRADED_DURATION,
+    GRADED_ERROR_RATE,
+    GRADED_INTVTY,
+    GRADED_INTVTY_P50,
+    GRADED_OUTPUT,
+)
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
+from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
 from hyperloom_multibranch.toolbox.fake_model import (
+    DEFAULT_BASELINE,
+    TPOT_P50,
+    TTFT_P50,
+    Direction,
     Fate,
     FailureRatios,
     FakeMeasurer,
@@ -75,7 +88,7 @@ def test_failure_draws_follow_the_ratios() -> None:
 
 
 def _tps(outcome) -> list[float]:
-    return [r.metrics["output_tps"] for r in outcome.rounds if r.phase == "measure"]
+    return [r.metrics[GRADED_OUTPUT] for r in outcome.rounds if r.phase == "measure"]
 
 
 def test_values_without_noise_are_the_baseline_times_the_effect() -> None:
@@ -85,13 +98,11 @@ def test_values_without_noise_are_the_baseline_times_the_effect() -> None:
     outcome = FakeMeasurer(config).run(request, "r1", 0, avoid=frozenset(), unavailable=frozenset())
     assert _tps(outcome) == [pytest.approx(1050.0)] * 2
     warm = [r for r in outcome.rounds if r.phase == "warmup"]
-    assert warm[0].metrics["output_tps"] == pytest.approx(840.0)
-    assert outcome.rounds[1].metrics["ttft_ms"] == pytest.approx(200.0 / 1.05)
+    assert warm[0].metrics[GRADED_OUTPUT] == pytest.approx(840.0)
+    assert outcome.rounds[1].metrics[TTFT_P50] == pytest.approx(200.0 / 1.05)
 
 
 def test_effect_by_fingerprint_and_by_function() -> None:
-    from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
-
     delta = RecipeDelta(config=ConfigDelta(server_args="--max-num-seqs 8"))
     quiet = NoiseModel(node_bias_median=0.0, node_bias_p90=0.0, test_noise_sigma=0.0)
     keyed = FakeToolboxConfig(noise=quiet, effects={delta.fingerprint(): 0.1})
@@ -167,8 +178,67 @@ def test_concurrency_of_a_request_sets_the_rounds() -> None:
 
 @pytest.mark.parametrize(
     "overrides",
-    [{"nodes": ()}, {"measure_rounds": 0}, {"branch_queue_limit": 0}, {"main_concurrency": (0,)}, {"default_k": 0}],
+    [
+        {"nodes": ()},
+        {"measure_rounds": 0},
+        {"branch_queue_limit": 0},
+        {"main_concurrency": (0,)},
+        {"default_k": 0},
+        {"baseline": {"mystery": 1.0}},
+        {"error_rates": {"x": 101.0}},
+    ],
 )
 def test_config_refuses_nonsense(overrides: dict[str, object]) -> None:
     with pytest.raises(ValueError):
         FakeToolboxConfig(**overrides)
+
+
+def _measure(config: FakeToolboxConfig, request: TestRequest) -> dict[str, float]:
+    outcome = FakeMeasurer(config).run(request, "r", 0, avoid=frozenset(), unavailable=frozenset())
+    return dict(next(r for r in outcome.rounds if r.phase == "measure").metrics)
+
+
+def test_the_baseline_is_keyed_by_the_benchmark_report_names() -> None:
+    assert set(DEFAULT_BASELINE) == {
+        perf_metric.GRADED_OUTPUT,
+        perf_metric.GRADED_INTVTY_P50,
+        perf_metric.GRADED_INTVTY,
+        perf_metric.GRADED_DURATION,
+        perf_metric.GRADED_ERROR_RATE,
+        TTFT_P50,
+        TPOT_P50,
+    }
+    assert {TTFT_P50, TPOT_P50} <= set(perf_metric.GRADED_AXIS_KEYS)
+
+
+def test_a_faster_candidate_measures_more_throughput_and_interactivity_and_less_latency() -> None:
+    quiet = NoiseModel(node_bias_median=0.0, node_bias_p90=0.0, test_noise_sigma=0.0)
+    slow = _measure(FakeToolboxConfig(noise=quiet), _request())
+    fast = _measure(FakeToolboxConfig(noise=quiet, default_effect=0.1), _request())
+    for higher in (GRADED_OUTPUT, GRADED_INTVTY, GRADED_INTVTY_P50):
+        assert fast[higher] > slow[higher], higher
+    for lower in (TTFT_P50, TPOT_P50):
+        assert fast[lower] < slow[lower], lower
+    assert fast[GRADED_DURATION] == slow[GRADED_DURATION] == DEFAULT_BASELINE[GRADED_DURATION]
+    assert fast[GRADED_ERROR_RATE] == slow[GRADED_ERROR_RATE] == 0.0
+
+
+def test_a_metric_moves_as_its_declared_direction_says_not_as_its_name_says() -> None:
+    quiet = NoiseModel(node_bias_median=0.0, node_bias_p90=0.0, test_noise_sigma=0.0)
+    config = FakeToolboxConfig(
+        noise=quiet,
+        default_effect=0.25,
+        baseline={"custom_up": 100.0, "custom_down_tps": 100.0},
+        directions={"custom_up": Direction.UP, "custom_down_tps": Direction.DOWN},
+    )
+    assert _measure(config, _request()) == {"custom_up": pytest.approx(125.0), "custom_down_tps": pytest.approx(80.0)}
+
+
+def test_the_error_rate_follows_the_delta_and_fills_the_failed_requests() -> None:
+    delta = RecipeDelta(config=ConfigDelta(server_args="--flaky"))
+    config = FakeToolboxConfig(error_rates={delta.fingerprint(): 2.5})
+    flaky = FakeMeasurer(config).run(_request(delta=delta), "r", 0, avoid=frozenset(), unavailable=frozenset())
+    measured = [r for r in flaky.rounds if r.phase == "measure"]
+    assert {r.metrics[GRADED_ERROR_RATE] for r in measured} == {2.5}
+    assert {r.failed_requests for r in measured} == {25}
+    assert _measure(config, _request())[GRADED_ERROR_RATE] == 0.0

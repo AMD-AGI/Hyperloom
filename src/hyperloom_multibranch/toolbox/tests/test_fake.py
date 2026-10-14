@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.contracts.measurement import (
     FailureClass,
     Purpose,
@@ -235,7 +236,7 @@ async def test_a_quiet_success_is_complete_and_written_to_the_notebook() -> None
     assert result.sandbox is not None and result.sandbox.node_name in box.config.nodes
     assert len(result.attempts) == 1 and result.attempts[0].sandbox == result.sandbox
     assert [r.phase for r in result.rounds] == ["warmup", "measure", "measure", "measure"]
-    assert result.rounds[1].metrics["output_tps"] == pytest.approx(1020.0)
+    assert result.rounds[1].metrics[GRADED_OUTPUT] == pytest.approx(1020.0)
     assert result.manifest_sha256 and result.output_dir == f"tests/{result.request_id}"
     assert result.gpu_seconds == box.config.attempt_seconds * box.config.gpu_count
     assert result.finished_at - result.started_at == box.config.attempt_seconds
@@ -377,7 +378,7 @@ async def test_results_do_not_depend_on_run_order() -> None:
         box = FakeToolbox(config, autorun=False)
         ids = [await box.submit_test(_request(priority=p)) for p in priorities]
         await box.drain()
-        return {i: box.results[i].rounds[1].metrics["output_tps"] for i in ids}
+        return {i: box.results[i].rounds[1].metrics[GRADED_OUTPUT] for i in ids}
 
     assert await values([4, 3, 2]) == await values([2, 3, 4])
 
@@ -459,7 +460,7 @@ async def test_the_fake_writes_requests_results_withdrawals_and_quarantine_into_
     assert record.result.sandbox.node in box.config.nodes
     by_row = {(r.kind.value, r.metric): r.values for r in record.result.rounds}
     assert set(by_row) == {(kind, metric) for kind in ("warmup", "formal") for metric in box.config.baseline}
-    assert by_row[("formal", "output_tps")][0] == box.results[measured].rounds[1].metrics["output_tps"]
+    assert by_row[("formal", GRADED_OUTPUT)][0] == box.results[measured].rounds[1].metrics[GRADED_OUTPUT]
     held = (await specialist.lookup(claim.key, action.fingerprint())).claim
     assert held is None or held.status is ClaimStatus.COMPLETED or held.request_id == measured
     retried = (await notebook.record(flaky)).result
