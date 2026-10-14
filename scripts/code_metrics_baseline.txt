@@ -870,9 +870,9 @@ function-lines src/hyperloom/orchestrator/trace_analysis/_bypass_trace_reader.py
 function-lines src/hyperloom/orchestrator/trace_analysis/_nccl_summary_candidates.py::extract_collective_candidates 97
 function-lines src/hyperloom/orchestrator/trace_analysis/_trace_shape_manifest.py::build_shape_manifest 81
 function-lines src/hyperloom/orchestrator/trace_analysis/bypass_trace_analysis.py::main 488
-function-lines src/hyperloom/orchestrator/trace_analysis/trace_selfcert.py::build_verdict 108
-function-lines src/hyperloom/orchestrator/trace_analysis/trace_selfcert.py::certify_trace_dir 191
-function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::_check_chunk_quality 98
+function-lines src/hyperloom/orchestrator/trace_analysis/trace_selfcert.py::build_verdict 104
+function-lines src/hyperloom/orchestrator/trace_analysis/trace_selfcert.py::certify_trace_dir 189
+function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::_check_chunk_quality 96
 function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::_enrich_kernel_contract 91
 function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::_finalize_candidates 129
 function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::_inject_collective_candidates 150
