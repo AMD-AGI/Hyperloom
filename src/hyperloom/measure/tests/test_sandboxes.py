@@ -40,7 +40,7 @@ class _Provider:
         self.live: dict[str, _Sandbox] = {}
         self.calls: list[dict] = []
         self.peak = 0
-        self.fail_with: Exception | None = None
+        self.failures: list[Exception] = []
         self._lock = threading.Lock()
         self._count = 0
 
@@ -55,8 +55,8 @@ class _Provider:
                 "wait_sec": wait_sec,
             }
         )
-        if self.fail_with is not None:
-            raise self.fail_with
+        if self.failures:
+            raise self.failures[0]
         with self._lock:
             self._count += 1
             sandbox = _Sandbox(self, f"sbx-{self._count}", dict(metadata))
@@ -108,11 +108,11 @@ def test_no_more_tests_run_at_once_than_the_cap_allows() -> None:
 def test_a_failed_create_gives_the_slot_back() -> None:
     provider = _Provider()
     pool = _pool(provider, max_parallel_tests=1)
-    provider.fail_with = SandboxUnavailable("no capacity")
+    provider.failures = [SandboxUnavailable("no capacity")]
     with pytest.raises(SandboxUnavailable):
         _acquire(pool)
     assert pool.active == 0
-    provider.fail_with = None
+    provider.failures = []
     assert _acquire(pool).sandbox_id == "sbx-1"
 
 

@@ -91,7 +91,7 @@ class MeasurementJournal:
         """Add a line and force it to disk before returning."""
         line = (record.to_line() + "\n").encode("utf-8")
         with self._lock:
-            fd = os.open(self._path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+            fd = os.open(self._path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
             try:
                 os.write(fd, line)
                 os.fsync(fd)
