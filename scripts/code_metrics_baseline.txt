@@ -133,7 +133,7 @@ cognitive-complexity src/hyperloom/orchestrator/knowledge/remote_recipe/sanitize
 cognitive-complexity src/hyperloom/orchestrator/knowledge/remote_recipe/values.py::_adopt_replayed_prior 70
 cognitive-complexity src/hyperloom/orchestrator/knowledge/remote_recipe/values.py::knowledge_to_warm_recipe 32
 cognitive-complexity src/hyperloom/orchestrator/knowledge/remote_recipe/values.py::merge_staged_sections 48
-cognitive-complexity src/hyperloom/orchestrator/loop/conversation.py::ConversationCollaborator.compose_prompt 63
+cognitive-complexity src/hyperloom/orchestrator/loop/conversation.py::ConversationCollaborator.compose_prompt 44
 cognitive-complexity src/hyperloom/orchestrator/loop/conversation.py::_format_inbox_event 88
 cognitive-complexity src/hyperloom/orchestrator/loop/coordinator.py::Coordinator._run_ticks 59
 cognitive-complexity src/hyperloom/orchestrator/loop/coordinator.py::_infer_model_class_from_config 52
@@ -347,7 +347,6 @@ cyclomatic-complexity src/hyperloom/orchestrator/kernel/request_handlers.py::int
 cyclomatic-complexity src/hyperloom/orchestrator/knowledge/recipe_journal.py::RecipeJournalCollaborator.finalize_recipe_and_journal 21
 cyclomatic-complexity src/hyperloom/orchestrator/knowledge/recipe_kb_t0.py::run_t0_anchor 33
 cyclomatic-complexity src/hyperloom/orchestrator/knowledge/remote_recipe/values.py::_adopt_replayed_prior 28
-cyclomatic-complexity src/hyperloom/orchestrator/loop/conversation.py::ConversationCollaborator.compose_prompt 28
 cyclomatic-complexity src/hyperloom/orchestrator/loop/conversation.py::_format_inbox_event 30
 cyclomatic-complexity src/hyperloom/orchestrator/loop/coordinator.py::Coordinator._run_ticks 23
 cyclomatic-complexity src/hyperloom/orchestrator/loop/coordinator.py::_infer_model_class_from_config 21
@@ -727,7 +726,7 @@ function-lines src/hyperloom/orchestrator/knowledge/remote_recipe/client.py::Rem
 function-lines src/hyperloom/orchestrator/knowledge/remote_recipe/values.py::_adopt_replayed_prior 139
 function-lines src/hyperloom/orchestrator/knowledge/remote_recipe/values.py::build_kernel_rewrite_value 88
 function-lines src/hyperloom/orchestrator/knowledge/remote_recipe/values.py::build_remote_knowledge 107
-function-lines src/hyperloom/orchestrator/loop/conversation.py::ConversationCollaborator.compose_prompt 160
+function-lines src/hyperloom/orchestrator/loop/conversation.py::ConversationCollaborator.compose_prompt 119
 function-lines src/hyperloom/orchestrator/loop/conversation.py::_format_inbox_event 114
 function-lines src/hyperloom/orchestrator/loop/coordinator.py::Coordinator.__init__ 158
 function-lines src/hyperloom/orchestrator/loop/coordinator.py::Coordinator._reactor_turn 97
