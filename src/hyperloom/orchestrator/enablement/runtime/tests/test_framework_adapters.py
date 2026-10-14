@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -132,19 +131,6 @@ def test_vllm_refuses_a_checkout_because_it_compiles():
 # ROCm pins
 
 
-def test_rocm_pins_hold_torch_and_rocm_labelled_builds_but_free_the_replaced_framework(tmp_path, monkeypatch):
-    """Probed in a real interpreter: the first distribution of a name on sys.path is the one pinned."""
-    for name, version in (("torch", "2.0.0"), ("rocmlib", "1.0+rocm7.2"), ("plainlib", "1.0"), ("sglang", "9+rocm")):
-        info = tmp_path / f"{name}-{version}.dist-info"
-        info.mkdir()
-        (info / "METADATA").write_text(f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n", encoding="utf-8")
-    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
-    pins = ad._rocm_pins(sys.executable, replacing="sglang")
-    assert "torch==2.0.0" in pins
-    assert "rocmlib==1.0+rocm7.2" in pins
-    assert not any(p.startswith(("plainlib==", "sglang==")) for p in pins)
-
-
 def test_every_install_is_held_to_the_rocm_pins(tmp_path):
     run = _FakeRun(rules=[("sysconfig", 0, f"{tmp_path}\n", "")])
     action = SglangAdapter().build_stack_action(RuntimeRequest(packages=("transformers==4.57.1",)))
@@ -160,7 +146,7 @@ def test_an_interpreter_without_torch_fails_before_pip(tmp_path):
     action = SglangAdapter().build_stack_action(RuntimeRequest(packages=("x==1",)))
     result = SglangAdapter(run=run).provision(action, tmp_path / "attempt")
     assert result.ok is False
-    assert "no torch to pin" in result.error
+    assert "torch version" in result.error
     assert run.pip_calls() == []
 
 

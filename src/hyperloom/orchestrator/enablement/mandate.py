@@ -330,7 +330,7 @@ ENABLEMENT_PROGRESS_GUIDANCE: tuple[str, ...] = (
 # genuinely-new architecture dead-ends at the arch-registry alias.
 # This contract lets the specialist REQUEST an off-loop targeted build; the
 # Coordinator enqueues it on the isolated, ROCm-safe build lane (isolated venv +
-# pinned ROCm torch constraints), gated by the runnable-decision probe.
+# pinned ROCm constraints), gated by the runnable-decision probe.
 ENABLEMENT_BUILD_REQUEST_GUIDANCE: tuple[str, ...] = (
     "REQUESTING A COMPILED / FROM-SOURCE BUILD. If clearing this gap needs a "
     "*compiled* component (a new AITER FP4/MLA/NSA op, sgl-kernel) or a "
@@ -432,7 +432,7 @@ _LADDER_RUNGS: tuple[str, ...] = (
     "Rung 4 - Source localization: localize a merged-PR / vendored closure into the "
     "source root; changes touching compiled or build-backend files defer to Rung 5.",
     "Rung 5 - Off-loop compiled build: AITER / sgl-kernel / vLLM-from-source, built "
-    "in an isolated venv with pinned ROCm torch constraints on the off-loop build "
+    "in an isolated venv with the same ROCm pins as Rung 3 on the off-loop build "
     "lane. Request it via needs_targeted_build (see below); do not compile inline.",
 )
 

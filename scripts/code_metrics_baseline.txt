@@ -504,7 +504,7 @@ duplicated-lines src/hyperloom/orchestrator/actions/executors/tests/test_baselin
 duplicated-lines src/hyperloom/orchestrator/actions/executors/tests/test_integrate_patch_artifacts_unit.py 40
 duplicated-lines src/hyperloom/orchestrator/actions/executors/tests/test_integrate_patch_coverage_unit.py 80
 duplicated-lines src/hyperloom/orchestrator/actions/executors/tests/test_integrate_patch_helpers_unit.py 12
-duplicated-lines src/hyperloom/orchestrator/enablement/runtime/targeted_build.py 88
+duplicated-lines src/hyperloom/orchestrator/enablement/runtime/targeted_build.py 80
 duplicated-lines src/hyperloom/orchestrator/enablement/runtime/tests/test_targeted_build_recipes.py 34
 duplicated-lines src/hyperloom/orchestrator/kernel/tests/test_forge_server_log_evidence.py 48
 duplicated-lines src/hyperloom/orchestrator/knowledge/kb_writeback.py 40

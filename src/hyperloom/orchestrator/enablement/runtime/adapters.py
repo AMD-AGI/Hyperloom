@@ -18,6 +18,7 @@ from hyperloom.common.failure_signature import CapabilityGap
 from hyperloom.inference_optimizer import framework_registry
 
 from .build_actions import resolve_build_ref
+from .build_utils import ROCM_CONSTRAINTS_FILE, write_rocm_constraints
 from .stack_actions import EnablementStackAction, FrameworkRuntime, ProvisionResult, RuntimeRequest
 
 
@@ -160,33 +161,6 @@ def _installed_version(python_path: str, package: str, *, run: RunFn = _default_
     return _stdout([python_path, "-c", f"import importlib.metadata as m; print(m.version({package!r}))"], run=run)
 
 
-def _rocm_pins(python_path: str, *, replacing: str, run: RunFn = _default_run) -> list[str]:
-    """Return ``name==version`` pins on the ROCm stack ``python_path`` imports.
-
-    torch and its companions by name, and every other distribution whose
-    version carries a ROCm build label: PyPI serves no ROCm build of any of
-    them, so a resolver free to move one swaps the GPU stack. ``replacing`` is the
-    distribution the install is there to change. Distributions built for ROCm
-    without saying so in their version (amd-aiter, sglang-kernel) cannot be
-    told apart and stay unpinned.
-    """
-    probe = (
-        "import re,sys\n"
-        "import importlib.metadata as m\n"
-        "norm=lambda n: re.sub(r'[-_.]+','-',n).lower()\n"
-        "free=norm(sys.argv[1])\n"
-        "named={'torch','torchvision','torchaudio','triton'}\n"
-        "pins={}\n"
-        # Distributions come in sys.path order, so the first of a name is the one imported.
-        "for d in m.distributions():\n"
-        "    name=norm(d.metadata['Name'] or '')\n"
-        "    if name and name!=free and (name in named or 'rocm' in (d.version or '').lower()):\n"
-        "        pins.setdefault(name, d.version)\n"
-        "print('\\n'.join(f'{n}=={v}' for n,v in sorted(pins.items())))\n"
-    )
-    return _stdout([python_path, "-c", probe, replacing], run=run).splitlines()
-
-
 # Adapters
 class BaseAdapter:
     """Base enablement adapter."""
@@ -320,13 +294,15 @@ class _VenvProvisionMixin(BaseAdapter):
         bin_dir = venv_root / "bin"
         return bin_dir, bin_dir / "python"
 
-    def _write_rocm_pins(self, python_path: Path, attempt_dir: Path) -> Path:
+    def _write_rocm_constraints(self, python_path: Path, attempt_dir: Path) -> Path:
         """Write the pip constraints that hold the attempt's ROCm stack in place."""
-        pins = _rocm_pins(str(python_path), replacing=self.framework, run=self._run)
-        if not any(p.startswith("torch==") for p in pins):
-            raise RuntimeError("the attempt interpreter has no torch to pin")
-        constraints = attempt_dir / "rocm_pins.txt"
-        constraints.write_text("\n".join(pins) + "\n", encoding="utf-8")
+        constraints = attempt_dir / ROCM_CONSTRAINTS_FILE
+        write_rocm_constraints(
+            str(python_path),
+            constraints,
+            replacing=self.framework,
+            run=lambda argv, **_kwargs: self._run(argv, dict(os.environ), None),
+        )
         return constraints
 
     def _pip_install(
@@ -387,7 +363,7 @@ class VllmRocmAdapter(_VenvProvisionMixin):
         try:
             attempt_dir.mkdir(parents=True, exist_ok=True)
             bin_dir, python_path = self._create_venv(attempt_dir)
-            constraints = self._write_rocm_pins(python_path, attempt_dir)
+            constraints = self._write_rocm_constraints(python_path, attempt_dir)
         except Exception as exc:  # noqa: BLE001
             return ProvisionResult(ok=False, log_path=log_path, error=f"venv setup failed: {exc!r}")
 
@@ -457,7 +433,7 @@ class SglangAdapter(_VenvProvisionMixin):
         try:
             attempt_dir.mkdir(parents=True, exist_ok=True)
             bin_dir, python_path = self._create_venv(attempt_dir)
-            constraints = self._write_rocm_pins(python_path, attempt_dir)
+            constraints = self._write_rocm_constraints(python_path, attempt_dir)
         except Exception as exc:  # noqa: BLE001
             return ProvisionResult(ok=False, log_path=log_path, error=f"venv setup failed: {exc!r}")
 

@@ -210,7 +210,8 @@ authoring specialist's prompt. The rungs, in increasing complexity:
    (AITER kernels, sgl-kernel, or vLLM-from-source). Builds run *off* the
    coordinator tick loop on a dedicated single-slot build lane: each build
    is spawned detached and reaped across later ticks against a wall-clock
-   budget, so a long compile never blocks the loop. Auto-escalation into
+   budget, so a long compile never blocks the loop. A build installs under
+   the same ROCm pins as Rung 3, minus the component it builds. Auto-escalation into
    Rung 5 can be disabled with the `HYPERLOOM_ENABLEMENT_DISABLE_TARGETED_BUILD`
    environment variable (see
    [Targeted builds (Rung 5)](../reference/environment-variables.md#targeted-builds-rung-5)).
