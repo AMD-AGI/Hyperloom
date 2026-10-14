@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import threading
 import time
 from collections.abc import Callable
@@ -39,10 +40,21 @@ class RunnerFailure(Exception):
 
 
 def write_json_atomic(path: Path, document: dict[str, Any]) -> None:
-    """Write ``path`` so a reader sees the old file or the new one, never half of one."""
-    scratch = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    scratch.write_text(json.dumps(document, sort_keys=True), encoding="utf-8")
-    os.replace(scratch, path)
+    """Write ``path`` so a reader sees the old file or the new one, never half of one or none.
+
+    The content goes to a scratch file of its own in the same directory (two writers never share one), is flushed to
+    disk, and then replaces ``path`` in one step.
+    """
+    fd, scratch_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as scratch:
+            scratch.write(json.dumps(document, sort_keys=True))
+            scratch.flush()
+            os.fsync(scratch.fileno())
+        os.replace(scratch_name, path)
+    except BaseException:
+        Path(scratch_name).unlink(missing_ok=True)
+        raise
 
 
 def write_status(out_dir: Path, *, state: str, error_class: str | None = None, message: str = "") -> None:
