@@ -62,7 +62,9 @@ _STOP_RETURNCODES = {
 _BOOT_ONLY_NOTE = "server_lifecycle_boot_only"
 _OUTPUT_POLL_SEC = 5.0
 _LOG_TAIL_CHARS = 64 * 1024
-_SUPPORTED_KINDS = ("test", "accuracy")
+_ACCURACY = "accuracy"
+_UTF8 = "utf-8"
+_SUPPORTED_KINDS = ("test", _ACCURACY)
 
 #: The old flow reads the process environment, so two tests in one process would see each other's settings.
 _PROCESS_LOCK = threading.Lock()
@@ -113,7 +115,7 @@ class LocalMeasurementBackend:
 
 
 def _point_envs(point: Path) -> dict[str, Any]:
-    config = yaml.safe_load(Path(point).read_text(encoding="utf-8")) or {}
+    config = yaml.safe_load(Path(point).read_text(encoding=_UTF8)) or {}
     return dict((config.get("benchmark") or {}).get("envs") or {})
 
 
@@ -124,7 +126,7 @@ def _validate(call: TestCall) -> None:
         raise TestCallRefused("a test needs at least one measurement point")
     if call.prep == "grid" and len(call.points) != 1:
         raise TestCallRefused(f"a single-point test has exactly one point, got {len(call.points)}")
-    if call.kind == "accuracy" and not call.accuracy:
+    if call.kind == _ACCURACY and not call.accuracy:
         raise TestCallRefused("an accuracy test must ask for accuracy")
     _, dropped = filter_untrusted_env_mapping(call.env_overrides, allow_predicate=is_allowed_variant_env_key)
     if dropped:
@@ -358,7 +360,7 @@ def _eval_returncode(result: VariantResult) -> int:
     """The accuracy pass's own exit code when the round recorded one, else the round's."""
     marker = Path(result.workspace or "") / "eval_returncode"
     try:
-        return int(marker.read_text(encoding="utf-8").strip())
+        return int(marker.read_text(encoding=_UTF8).strip())
     except (OSError, ValueError):
         return _result_returncode(result)
 
@@ -371,7 +373,7 @@ def _rounds(run: _Run, point: int, result: VariantResult) -> list[RoundOutcome]:
     if result.note != _BOOT_ONLY_NOTE:
         rounds.append(RoundOutcome(point, "measure", workspace, _result_returncode(result)))
     if run.call.accuracy and not _is_failure(result):
-        rounds.append(RoundOutcome(point, "accuracy", workspace, _eval_returncode(result)))
+        rounds.append(RoundOutcome(point, _ACCURACY, workspace, _eval_returncode(result)))
     return rounds
 
 
@@ -382,7 +384,7 @@ def _read_tail(path: str | None) -> str:
         with open(path, "rb") as handle:
             handle.seek(0, os.SEEK_END)
             handle.seek(max(0, handle.tell() - _LOG_TAIL_CHARS))
-            return handle.read().decode("utf-8", errors="replace")
+            return handle.read().decode(_UTF8, errors="replace")
     except OSError:
         return ""
 
