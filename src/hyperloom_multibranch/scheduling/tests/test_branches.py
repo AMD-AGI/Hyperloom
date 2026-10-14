@@ -99,7 +99,7 @@ async def test_a_failing_specialist_stop_still_withdraws_and_records_the_branch(
     assert logged["detail"]["failures"] == ["RuntimeError: the runtime refused to stop b01"]
 
 
-async def test_stopping_a_branch_withdraws_it_once_and_its_fork_never_starts(tmp_path: Path) -> None:
+async def test_stopping_a_branch_withdraws_it_once_and_its_admitted_fork_never_starts(tmp_path: Path) -> None:
     bench = await Bench(tmp_path).rooted()
     await bench.control.open_branches(1, ROOT_COMMIT, 1, BranchOrigin.FIRST_BATCH)
     bench.roster.open("b02", origin=BranchOrigin.FORK, start_commit="", k=1, from_branch="b01")
@@ -107,11 +107,11 @@ async def test_stopping_a_branch_withdraws_it_once_and_its_fork_never_starts(tmp
 
     await bench.control.stop_branch("b01", stop)
     await bench.control.stop_branch("b01", BranchStop(StopCause.SESSION_END, "time_exhausted", NOW))
-    await bench.control.stop_branch("b02", stop)
 
     assert bench.lifecycle.stopped == ["b01"]
-    assert bench.toolbox.withdrawn == ["b01", "b02"]
+    assert bench.toolbox.withdrawn == ["b02", "b01"]
     assert bench.roster.entry("b01").stop == stop
+    assert bench.roster.entry("b02").stop == BranchStop(StopCause.JUDGE, "parent b01 stopped: flat", NOW)
     assert await bench.control.start_fork("b02", "f1") is None
     assert "b02" not in bench.lifecycle.started
     stops = {branch.branch: branch.stop_reason for branch in (await bench.notebook.lineage()).branches}

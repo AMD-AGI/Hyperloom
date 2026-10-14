@@ -4,7 +4,8 @@
 """Opening, re-sizing and stopping branches: the roster, the specialists, the toolbox quota and the notebook in step.
 
 Stopping a branch withdraws everything of it: its specialist, its queued and running tests, the processes the
-scheduler registered for it, and its claims; the notebook gets the ``STOP`` lineage. The commits it already made stay
+scheduler registered for it, its claims, and the forks of it that are admitted but not started yet, as the fork desk
+admits no fork of a stopped branch; the notebook gets the ``STOP`` lineage. The commits it already made stay
 in the notebook, so the integrator may still merge them. The notebook records no ``STOP`` of the integration
 branch, which only the end of the session stops. The roster entry is stopped first, so a fork that commits
 its fix while the branch is being stopped is never started; when that fork's ``SPLIT`` comes after its ``STOP``, the
@@ -27,6 +28,7 @@ from hyperloom_multibranch.scheduling.roster import (
     BranchEntry,
     BranchKind,
     BranchOrigin,
+    BranchStatus,
     BranchStop,
     Roster,
 )
@@ -103,7 +105,8 @@ class BranchControl:
         if entry.stop is not None:
             return
         self._roster.stop(branch, stop)
-        failures = [await settled(self.push_quota())]
+        failures = [await settled(self._stop_admitted_forks(branch, stop))]
+        failures.append(await settled(self.push_quota()))
         if entry.kind is BranchKind.SPECIALIST and entry.start_commit:
             failures.append(await settled(self._lifecycle.stop(branch)))
         withdrawn = await settled(self._toolbox.withdraw(branch))
@@ -123,6 +126,12 @@ class BranchControl:
         self._decisions.record(Decision(DecisionKind.STOP, reason, branch, detail))
         if raised:
             raise raised[0]
+
+    async def _stop_admitted_forks(self, parent: str, stop: BranchStop) -> None:
+        reason = f"parent {parent} stopped: {stop.reason}"
+        for entry in self._roster.entries():
+            if entry.from_branch == parent and entry.status is BranchStatus.ADMITTED:
+                await self.stop_branch(entry.branch, BranchStop(stop.cause, reason, stop.at))
 
     async def push_quota(self) -> None:
         await self._toolbox.apply_quota(self._roster.quota_policy())
