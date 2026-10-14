@@ -69,6 +69,47 @@ def test_declared_source_hint_cannot_override_protection(tmp_path: Path):
     assert gate._is_protected(str(config))
 
 
+def _gate_with_protected_config(tmp_path: Path):
+    """A gate whose driver and whose config.yaml are both protected."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    driver = workspace / "forge_driver.py"
+    config = workspace / "config.yaml"
+    driver.write_text("print('driver')\n")
+    config.write_text("task: protected\n")
+    return InSessionGate(
+        driver_script=str(driver),
+        snr_threshold=30.0,
+        baseline_case_times={"case": 1.0},
+        best_mean_case_speedup=1.0,
+        kernel_file=str(workspace / "kernel.py"),
+        target_files=[str(config)],
+    )
+
+
+@pytest.mark.parametrize(
+    ("command", "denied"),
+    [
+        ("rm $(python -c 'import os\nprint(1)') forge_driver.py", True),
+        ("xargs python -c 'a=1\nb=2' rm forge_driver.py", True),
+        ("python -c 'a\nb' \"x; cp y config.yaml\"", False),
+    ],
+    ids=["substitution", "wrapped", "quoted-shell-text"],
+)
+def test_a_multi_line_python_c_payload_does_not_split_the_command(tmp_path: Path, command: str, denied: bool):
+    """A ``python -c`` program is one quoted word, so its newlines are not the shell's.
+
+    Blanking the payload but keeping its newlines splits what follows across
+    lines, leaves each half with an unmatched quote, and so separates a write
+    verb from the protected path it names: the first two commands write the
+    driver and must be denied. The third is the other direction -- shell text
+    inside the quoted program belongs to the program, not to the command.
+    """
+    gate = _gate_with_protected_config(tmp_path)
+
+    assert bool(gate._bash_deny_reason(command)) is denied
+
+
 def test_non_target_implementation_edits_are_counted(tmp_path: Path):
     gate, workspace = _gate(tmp_path)
 

@@ -885,16 +885,21 @@ def _read_kb_warm_start(
     )
 
 
-def _session_timeout_override(env_timeout, session_timeout_sec: int) -> int:
-    """Honour an explicit per-session timeout from the environment, when it names a usable one."""
-    if env_timeout is not None and env_timeout.strip() != "":
-        try:
-            profile_timeout_sec = int(env_timeout)
-        except ValueError as error:
-            raise click.ClickException("FORGE_PROFILE_TIMEOUT_SEC must be an integer") from error
-        if profile_timeout_sec <= 0:
-            raise click.ClickException("FORGE_PROFILE_TIMEOUT_SEC must be positive")
-    return session_timeout_sec
+def _profile_timeout_override(env_timeout, profile_timeout_sec: int) -> int:
+    """The Analysis workflow deadline, overridden by the environment when it names a usable one.
+
+    This is the deadline resume tooling sets; ``--profile-timeout-sec`` is the
+    default when the environment is unset.
+    """
+    if env_timeout is None or env_timeout.strip() == "":
+        return profile_timeout_sec
+    try:
+        override = int(env_timeout)
+    except ValueError as error:
+        raise click.ClickException("FORGE_PROFILE_TIMEOUT_SEC must be an integer") from error
+    if override <= 0:
+        raise click.ClickException("FORGE_PROFILE_TIMEOUT_SEC must be positive")
+    return override
 
 
 @dataclass(frozen=True)
@@ -1638,7 +1643,7 @@ def forge_loop(
     # Resume tooling may override the complete Analysis workflow deadline via FORGE_PROFILE_TIMEOUT_SEC;
     # --profile-timeout-sec is the default when the env is unset.
     _env_timeout = os.environ.get("FORGE_PROFILE_TIMEOUT_SEC")
-    session_timeout_sec = _session_timeout_override(_env_timeout, session_timeout_sec)
+    profile_timeout_sec = _profile_timeout_override(_env_timeout, profile_timeout_sec)
 
     kernel = str((workspace / campaign.kernel_path).resolve())
     driver = str((workspace / campaign.driver_path).resolve())

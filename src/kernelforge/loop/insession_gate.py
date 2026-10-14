@@ -242,8 +242,13 @@ def _heredoc_payloads(command: str) -> list[tuple[str, int, int]]:
     return payloads
 
 
-def _blank_spans(text: str, spans: Sequence[tuple[int, int]]) -> str:
-    """Blank out spans, keeping newlines so the shell scans see the same command boundaries."""
+def _blank_heredocs(text: str, spans: Sequence[tuple[int, int]]) -> str:
+    """Blank heredoc bodies, keeping their newlines.
+
+    A heredoc body occupies whole lines of the command, so the newlines around
+    it are the command's own: dropping them would join the line before the
+    ``<<`` to the line after the terminator.
+    """
     if not spans:
         return text
     chars = list(text)
@@ -251,6 +256,22 @@ def _blank_spans(text: str, spans: Sequence[tuple[int, int]]) -> str:
         for index in range(start, end):
             if chars[index] != "\n":
                 chars[index] = " "
+    return "".join(chars)
+
+
+def _blank_quoted_payloads(text: str, spans: Sequence[tuple[int, int]]) -> str:
+    """Blank quoted payloads whole, newlines included.
+
+    A ``python -c`` program sits inside one quoted word, so its newlines belong
+    to the program, not to the shell. Keeping them would split the rest of the
+    command across lines and leave each half with an unmatched quote -- which is
+    how a write verb gets separated from the protected path it names.
+    """
+    if not spans:
+        return text
+    chars = list(text)
+    for start, end in spans:
+        chars[start:end] = " " * (end - start)
     return "".join(chars)
 
 
@@ -929,13 +950,16 @@ class InSessionGate:
         # Every inline Python payload is parsed on its own, then blanked out so the
         # textual scans below never read a quoted program as shell text.
         remainder = command
-        for find_payloads in (_heredoc_payloads, _python_command_payloads):
+        for find_payloads, blank in (
+            (_heredoc_payloads, _blank_heredocs),
+            (_python_command_payloads, _blank_quoted_payloads),
+        ):
             payloads = find_payloads(remainder)
             for source, _start, _end in payloads:
                 reason = self._python_write_deny_reason(source)
                 if reason:
                     return reason
-            remainder = _blank_spans(remainder, [(start, end) for _source, start, end in payloads])
+            remainder = blank(remainder, [(start, end) for _source, start, end in payloads])
         return (
             self._redirect_deny_reason(remainder)
             or self._write_verb_deny_reason(remainder)
