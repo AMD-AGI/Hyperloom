@@ -18,6 +18,14 @@ from hyperloom.measure.tests.hosted_fixtures import Rig, make_call, make_rig
 from hyperloom.sandbox.local import LocalTemplate
 
 REAL_RUNNER = (sys.executable, "-m", "hyperloom.measure.tests.real_runner_entry")
+#: The shipped command line, with the sandbox's own directories: the local sandbox maps nothing, it only sets the root.
+RUNNER_CLI = (
+    "/bin/sh",
+    "-c",
+    'exec "$0" -m hyperloom.measure.runner run --in "$HYPERLOOM_SANDBOX_ROOT/in" --out "$HYPERLOOM_SANDBOX_ROOT/out"'
+    ' --scratch "$HYPERLOOM_SANDBOX_ROOT/work/scratch" --spec-wait-sec 60',
+    sys.executable,
+)
 MARKER = b"MARKED = True\n"
 
 
@@ -57,14 +65,13 @@ class _Environment:
         return self._doc
 
 
-@pytest.fixture
-def real(tmp_path: Path):
+def _rigs(tmp_path: Path, command: tuple[str, ...]):
     repo = tmp_path / "inferencex"
     commit = _git_repo(repo)
     template = LocalTemplate(
         "runner-1",
         "measurement",
-        command=REAL_RUNNER,
+        command=command,
         gpus=1,
         sealed=True,
         signing=True,
@@ -86,6 +93,18 @@ def real(tmp_path: Path):
     for r in built:
         r.backend.close()
         r.provider.close()
+
+
+@pytest.fixture
+def real(tmp_path: Path):
+    """The shipped runner flow with the GPU measurement stubbed."""
+    yield from _rigs(tmp_path, REAL_RUNNER)
+
+
+@pytest.fixture
+def real_cli(tmp_path: Path):
+    """The shipped command line, exactly as a local runner template starts it."""
+    yield from _rigs(tmp_path, RUNNER_CLI)
 
 
 def _point(tmp: Path, **envs: str) -> Path:
@@ -114,7 +133,9 @@ def test_the_shipped_runner_flow_produces_a_result_the_backend_accepts(real, tmp
     seen = json.loads((call.output_dir / "point_seen.json").read_text())
     envs = seen["benchmark"]["envs"]
     assert envs["ROCR_VISIBLE_DEVICES"] == "0", "the rewritten point carries this sandbox's cards"
-    assert seen["benchmark"]["inferencex_path"].endswith("InferenceX-" + r.config.spec.inferencex_commit)
+    inferencex = seen["benchmark"]["inferencex_path"]
+    assert inferencex.endswith("InferenceX-" + r.config.spec.inferencex_commit)
+    assert inferencex.startswith(str(tmp_path / "sandboxes")), "the runner's scratch is the sandbox's own directory"
     assert [x.phase for x in outcome.rounds] == ["measure"]
     assert outcome.rounds[0].output_dir == call.output_dir / "benchmark_stub_20261014_000000"
     assert (outcome.sandbox.gpu_ids, outcome.sandbox.node_name) == ((0,), "node-a")
@@ -137,8 +158,9 @@ def test_a_rebuilt_framework_is_what_the_server_would_import(real, tmp_path) -> 
     assert pythonpath.split(":")[0].endswith("farm/site"), "the farm is first on the server's import path"
 
 
-def test_a_sheet_the_real_runner_refuses_is_a_refused_sheet_not_a_failed_candidate(real, tmp_path) -> None:
-    r = real(model_hashes={"config.json": "00" * 32})
+@pytest.mark.parametrize("fixture", ["real", "real_cli"])
+def test_a_sheet_the_real_runner_refuses_is_a_refused_sheet_not_a_failed_candidate(fixture, request, tmp_path) -> None:
+    r = request.getfixturevalue(fixture)(model_hashes={"config.json": "00" * 32})
     call = make_call(tmp_path, point=_point(tmp_path), timeout_sec=120)
     outcome = r.backend.run_test(call)
     assert outcome.returncode == HOSTED_SPEC_REJECTED_RC

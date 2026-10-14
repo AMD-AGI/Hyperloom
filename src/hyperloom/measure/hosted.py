@@ -34,7 +34,7 @@ from hyperloom.measure import bundle as bundle_mod
 from hyperloom.measure.archive import ArchiveError, ResultArchive
 from hyperloom.measure.bundle import MaterializeError, RejectReason, ResultRejected, VerifiedBundle
 from hyperloom.measure.failures import Disposition, FailureClassification, classify_test_failure
-from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SUBMITTED, MeasurementJournal, Record
+from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT, STATE_SUBMITTED, MeasurementJournal, Record
 from hyperloom.measure.hosted_spec import SpecContext, SpecRefused, build_spec, split_result_dir
 from hyperloom.measure.manifest import ResultManifest
 from hyperloom.measure.returncodes import (
@@ -248,7 +248,7 @@ class HostedMeasurementBackend:
         """
         journal = self.journal
         previous = journal.latest(call.task_id)
-        if previous is not None and previous.state == STATE_SUBMITTED:
+        if previous is not None and previous.state in (STATE_SUBMITTED, STATE_SENT):
             resumed = self._resume(call, previous)
             if resumed is not None:
                 return resumed
@@ -311,24 +311,21 @@ class HostedMeasurementBackend:
 
     def _submit(self, attempt: _Attempt) -> None:
         """Journal the sandbox, then write the sheet, then the READY marker (so the runner never reads half a sheet)."""
-        call, runner = attempt.call, attempt.runner
+        call = attempt.call
         self.journal.save_spec(attempt.request_id, attempt.number, attempt.spec_raw)
-        self.journal.append(
-            Record(
-                attempt.request_id,
-                attempt.number,
-                STATE_SUBMITTED,
-                runner.sandbox_id,
-                str(call.output_dir),
-                call.task_id,
-                {"submitted_unix": attempt.started_unix, "timeout_sec": call.timeout_sec},
-            )
+        self._append(
+            attempt, STATE_SUBMITTED, {"submitted_unix": attempt.started_unix, "timeout_sec": call.timeout_sec}
         )
-        handle = _handle(runner)
+        self._send(attempt)
+        self._emit("hyperloom.measurement_started", attempt, {})
+
+    def _send(self, attempt: _Attempt) -> None:
+        """Blobs, then the sheet, then the marker; every write replaces what is there, so sending again is safe."""
+        handle = _handle(attempt.runner)
         self._upload_blobs(handle, attempt.spec)
         handle.write_file(SPEC_PATH, attempt.spec_raw)
         handle.write_file(READY_PATH, b"")
-        self._emit("hyperloom.measurement_started", attempt, {})
+        self._append(attempt, STATE_SENT, {"submitted_unix": attempt.started_unix})
 
     def _upload_blobs(self, handle: Sandbox, spec: MeasurementSpec) -> None:
         """Every attachment and overlay file goes to ``/in/blobs/<sha256>`` before the sheet that refers to it."""
@@ -361,6 +358,8 @@ class HostedMeasurementBackend:
                 return _refusal(
                     call, HOSTED_RESULT_REJECTED_RC, "no_signing_key", "the platform reported no signing key"
                 )
+            if previous.state == STATE_SUBMITTED:
+                self._send(attempt)
             return self._finish(attempt)
         except SandboxError as exc:
             return self._lost(call, runner, f"{type(exc).__name__}: {exc}")
@@ -571,6 +570,19 @@ class HostedMeasurementBackend:
         return outcome
 
     # -- journal and events -------------------------------------------------------------------------------------
+
+    def _append(self, attempt: _Attempt, state: str, extra: Mapping[str, Any]) -> None:
+        self.journal.append(
+            Record(
+                attempt.request_id,
+                attempt.number,
+                state,
+                attempt.runner.sandbox_id,
+                str(attempt.call.output_dir),
+                attempt.call.task_id,
+                extra,
+            )
+        )
 
     def _finish_record(self, attempt: _Attempt, outcome: TestOutcome, extra: Mapping[str, Any]) -> None:
         failure_class = getattr(outcome.failure_class, "value", outcome.failure_class)

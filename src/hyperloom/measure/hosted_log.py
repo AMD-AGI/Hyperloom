@@ -3,11 +3,12 @@
 
 """The hosted backend's own journal of tests in flight: ``<session>/hosted/measurements.jsonl`` (design 4.4.4).
 
-A line is appended, and flushed to disk, before the backend depends on what it says: ``submitted`` before the sheet is
-written into the sandbox, ``finished`` once the outcome is decided. After a restart the newest line of a request tells
-whether a sandbox may still be measuring it (``submitted``: re-attach) or the attempt is over (``finished``: the next
-call is the next attempt). The sheet bytes of every attempt are kept beside the journal so a re-attached attempt is
-verified against exactly the sheet that was sent.
+A line is appended, and flushed to disk, before the backend depends on what it says: ``submitted`` before anything is
+written into the sandbox, ``sent`` once the sheet and the ``READY`` marker are in, ``finished`` once the outcome is
+decided. After a restart the newest line of a request tells whether a sandbox may still be measuring it (``sent``:
+re-attach and wait; ``submitted``: re-attach and send the sheet again, it may never have arrived) or the attempt is
+over (``finished``: the next call is the next attempt). The sheet bytes of every attempt are kept beside the journal
+so a re-attached attempt is verified against exactly the sheet that was sent.
 """
 
 from __future__ import annotations
@@ -21,11 +22,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-__all__ = ["JournalCorrupt", "MeasurementJournal", "Record", "STATE_FINISHED", "STATE_SUBMITTED"]
+__all__ = ["JournalCorrupt", "MeasurementJournal", "Record", "STATE_FINISHED", "STATE_SENT", "STATE_SUBMITTED"]
 
 STATE_SUBMITTED = "submitted"
+STATE_SENT = "sent"
 STATE_FINISHED = "finished"
-_STATES = (STATE_SUBMITTED, STATE_FINISHED)
+_STATES = (STATE_SUBMITTED, STATE_SENT, STATE_FINISHED)
 _SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 
 

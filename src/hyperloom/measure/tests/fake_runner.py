@@ -74,6 +74,7 @@ def _write_files(out: Path, config: dict[str, Any], mode: str) -> dict[str, byte
         "throughput": {
             "output_throughput": float(config.get("fake_throughput", 5000.0)),
             "completed_requests": int(config.get("fake_completed", 64)),
+            "num_prompts": int(config.get("fake_requested", 64)),
         },
     }
     files = {REPORT_PATH: json.dumps(report).encode(), "server.log": b"server up\nserver down\n"}

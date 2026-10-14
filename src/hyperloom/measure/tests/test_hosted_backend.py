@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.measure.hosted import STOPPED_RETURNCODE, HostedStartError
-from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SUBMITTED
+from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT, STATE_SUBMITTED
 from hyperloom.measure.returncodes import (
     HOSTED_INFRA_FAILURE_RC,
     HOSTED_RESULT_REJECTED_RC,
@@ -83,7 +83,7 @@ def test_the_journal_records_the_sandbox_before_the_sheet_and_the_end_after(rig,
     r = rig()
     _run(r, tmp_path)
     states = [(x.state, x.attempt) for x in r.backend.journal.records()]
-    assert states == [(STATE_SUBMITTED, 1), (STATE_FINISHED, 1)]
+    assert states == [(STATE_SUBMITTED, 1), (STATE_SENT, 1), (STATE_FINISHED, 1)]
     assert r.backend.journal.records()[0].sandbox_id.startswith("lsb-")
 
 
@@ -363,7 +363,7 @@ def test_a_restarted_application_reattaches_instead_of_measuring_twice(rig, tmp_
     call = make_call(tmp_path, point=point_yaml(tmp_path, fake_delay=0.5, fake_throughput=1234.0))
     _crash_mid_wait(r, call)
     submitted = r.backend.journal.latest("req-1")
-    assert submitted.state == STATE_SUBMITTED
+    assert submitted.state == STATE_SENT
     created: list[str] = []
     real_create = r.provider.create
     r.provider.create = lambda *a, **k: created.append("x") or real_create(*a, **k)
@@ -376,6 +376,30 @@ def test_a_restarted_application_reattaches_instead_of_measuring_twice(rig, tmp_
     assert json.loads(report.read_text())["throughput"]["output_throughput"] == 1234.0
 
 
+def test_a_restart_before_the_sheet_was_sent_sends_it_to_the_sandbox_that_waits(rig, tmp_path) -> None:
+    """The application died after journalling the sandbox and before ``READY`` was written: nothing would ever start."""
+    r = rig()
+    call = make_call(tmp_path, point=point_yaml(tmp_path, fake_throughput=777.0))
+    dying = r.another_backend()
+    dying._pool.release = lambda runner: None
+
+    def die(handle, spec):
+        raise _Crash
+
+    dying._upload_blobs = die
+    with pytest.raises(_Crash):
+        dying.run_test(call)
+    assert r.backend.journal.latest("req-1").state == STATE_SUBMITTED
+    created: list[str] = []
+    real_create = r.provider.create
+    r.provider.create = lambda *a, **k: created.append("x") or real_create(*a, **k)
+    resumed = r.another_backend().run_test(call)
+    assert resumed.returncode == 0 and created == [], "the waiting sandbox was used, not a second one"
+    assert [x.state for x in r.backend.journal.records()] == [STATE_SUBMITTED, STATE_SENT, STATE_FINISHED]
+    report = call.output_dir / "benchmark_fake_20261014_000000" / "benchmark_report.json"
+    assert json.loads(report.read_text())["throughput"]["output_throughput"] == 777.0
+
+
 def test_a_restart_after_the_sandbox_is_gone_measures_again_as_the_next_attempt(rig, tmp_path) -> None:
     r = rig()
     call = make_call(tmp_path, point=point_yaml(tmp_path, fake_delay=0.2))
@@ -386,8 +410,15 @@ def test_a_restart_after_the_sandbox_is_gone_measures_again_as_the_next_attempt(
     assert resumed.returncode == 0
     assert resumed.sandbox.sandbox_id != first.sandbox_id
     attempts = [(x.attempt, x.state) for x in r.backend.journal.records()]
-    assert attempts == [(1, STATE_SUBMITTED), (1, STATE_FINISHED), (2, STATE_SUBMITTED), (2, STATE_FINISHED)]
-    assert r.backend.journal.records()[1].extra["verdict"] == "runner_lost"
+    assert attempts == [
+        (1, STATE_SUBMITTED),
+        (1, STATE_SENT),
+        (1, STATE_FINISHED),
+        (2, STATE_SUBMITTED),
+        (2, STATE_SENT),
+        (2, STATE_FINISHED),
+    ]
+    assert r.backend.journal.records()[2].extra["verdict"] == "runner_lost"
     assert r.backend.journal.latest("req-1").sandbox_id == resumed.sandbox.sandbox_id
 
 

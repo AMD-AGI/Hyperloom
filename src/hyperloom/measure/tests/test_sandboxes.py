@@ -141,6 +141,30 @@ def test_waiting_for_a_slot_ends_when_the_run_stops_or_the_pool_closes() -> None
         _acquire(pool, "late")
 
 
+def test_a_sandbox_a_previous_process_left_running_keeps_its_slot_until_it_is_reattached_or_ends() -> None:
+    provider = _Provider()
+    survivor = provider.create("runner-1", role="measurement", timeout_sec=10, metadata={})
+    pool = _pool(provider, max_parallel_tests=1)
+    stop = threading.Event()
+    threading.Timer(0.3, stop.set).start()
+    with pytest.raises(PoolClosed):
+        _acquire(pool, "new", stop=stop)
+    assert len(provider.live) == 1, "no second sandbox was created next to the one still measuring"
+    again = pool.reattach(survivor.sandbox_id)
+    assert again.sandbox_id == survivor.sandbox_id and pool.active == 1
+    pool.release(again)
+    assert _acquire(pool, "new").sandbox_id != survivor.sandbox_id
+
+
+def test_a_slot_frees_when_the_sandbox_that_held_it_ends() -> None:
+    provider = _Provider()
+    survivor = provider.create("runner-1", role="measurement", timeout_sec=10, metadata={})
+    pool = _pool(provider, max_parallel_tests=1)
+    threading.Timer(0.3, survivor.kill).start()
+    runner = _acquire(pool, "new")
+    assert runner.sandbox_id != survivor.sandbox_id and len(provider.live) == 1
+
+
 def test_close_closes_every_measurement_sandbox_including_one_another_process_made() -> None:
     provider = _Provider()
     pool = _pool(provider)

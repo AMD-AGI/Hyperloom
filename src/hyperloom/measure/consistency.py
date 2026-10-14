@@ -194,6 +194,20 @@ def _report_of(round_: RoundOutcome) -> tuple[dict[str, Any] | None, Path]:
     return None, directory
 
 
+def _error_rate(measurement: Mapping[str, Any]) -> float | None:
+    """The fraction of requests that did not complete: the reported rate, else derived from the request counts.
+
+    ``None`` when neither is available; a missing rate on both sides would otherwise compare as "equal".
+    """
+    reported = measurement.get("request_error_rate")
+    if reported is not None:
+        return float(reported)
+    requested, completed = measurement.get("requested_requests"), measurement.get("completed_requests")
+    if not requested or completed is None:
+        return None
+    return max(0.0, round(1.0 - completed / requested, 12))
+
+
 def read_side(outcome: TestOutcome, log_dir: Path) -> Side:
     """Reduce an outcome to the compared values; anything missing is a problem, never a default."""
     log_dir_text = str(log_dir)
@@ -211,13 +225,15 @@ def read_side(outcome: TestOutcome, log_dir: Path) -> Side:
         measurement = extract_benchmark_measurement(report, workspace=workspace)
         if not measurement.get("valid_measurement") or measurement.get("output_throughput") is None:
             return Side(0, problem=f"invalid_measurement: {workspace.name}", log_dir=log_dir_text)
+        if _error_rate(measurement) is None:
+            return Side(0, problem=f"no_error_rate: {workspace.name}", log_dir=log_dir_text)
         values.append(measurement)
     throughputs = [float(v["output_throughput"]) for v in values]
     return Side(
         0,
         throughput=statistics.fmean(throughputs),
         completed=tuple(v.get("completed_requests") for v in values),
-        error_rate=tuple(v.get("request_error_rate") for v in values),
+        error_rate=tuple(_error_rate(v) for v in values),
         log_dir=log_dir_text,
     )
 

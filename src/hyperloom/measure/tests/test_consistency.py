@@ -55,6 +55,11 @@ class FakeLocal:
             "throughput": {
                 "output_throughput": float(config.get("local_throughput", config.get("fake_throughput", 5000.0))),
                 "completed_requests": int(config.get("local_completed", config.get("fake_completed", 64))),
+                **(
+                    {}
+                    if config.get("local_no_counts")
+                    else {"num_prompts": int(config.get("local_requested", config.get("fake_requested", 64)))}
+                ),
             },
         }
         (workspace / "benchmark_report.json").write_text(json.dumps(report))
@@ -160,6 +165,24 @@ def test_a_different_completed_request_count_fails_the_check(rig, tmp_path) -> N
     summary, lines = _check(r, tmp_path, [_item(tmp_path, "t", fake_completed=64, local_completed=63)])
     assert summary.verdict == "FAIL" and summary.completed_all_equal is False
     assert "completed_requests_differ" in lines[0]["problems"]
+
+
+def test_a_different_error_rate_fails_the_check(rig, tmp_path) -> None:
+    r = rig()
+    item = _item(tmp_path, "t", fake_requested=64, fake_completed=60, local_completed=60)
+    summary, lines = _check(r, tmp_path, [item])
+    assert summary.verdict == "PASS" and lines[0]["local"]["request_error_rate"] == [0.0625]
+    differing = _item(tmp_path, "u", fake_requested=64, fake_completed=60, local_completed=60, local_requested=60)
+    summary, lines = _check(r, tmp_path, [differing])
+    assert summary.verdict == "FAIL" and "error_rate_differs" in lines[0]["problems"]
+    assert lines[0]["completed_equal"] is True and lines[0]["error_rate_equal"] is False
+
+
+def test_a_side_whose_error_rate_cannot_be_determined_is_not_compared_and_never_passes(rig, tmp_path) -> None:
+    r = rig()
+    summary, lines = _check(r, tmp_path, [_item(tmp_path, "t", local_no_counts="true")])
+    assert summary.verdict == "FAIL" and lines[0]["compared"] is False
+    assert lines[0]["problems"][0].startswith("local: no_error_rate")
 
 
 def test_a_hosted_failure_is_one_failed_check_and_keeps_both_logs(rig, tmp_path) -> None:

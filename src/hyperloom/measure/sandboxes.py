@@ -192,7 +192,7 @@ class SandboxPool:
         Raises:
             SandboxGone: The sandbox no longer exists (the slot is given back).
         """
-        self._take_slot(stop)
+        self._take_slot(stop, reattaching=sandbox_id)
         try:
             sandbox = self._provider.connect(sandbox_id, role=MEASUREMENT_ROLE)
         except BaseException:
@@ -246,15 +246,30 @@ class SandboxPool:
                 metadata[key] = str(value)
         return metadata
 
-    def _take_slot(self, stop: threading.Event | None) -> None:
-        with self._cond:
-            while True:
+    def _take_slot(self, stop: threading.Event | None, reattaching: str | None = None) -> None:
+        """Wait until fewer than ``max_parallel_tests`` sandboxes are running, then take one of the slots.
+
+        Sandboxes this pool does not hold count too (a measurement a previous process of the run left behind keeps
+        its cards busy until it is re-attached or ends); ``reattaching`` is the one sandbox that is about to be held.
+        """
+        while True:
+            with self._cond:
                 if self._closed or (stop is not None and stop.is_set()):
                     raise PoolClosed("the sandbox pool is closed or the run is stopping")
-                if self._claims < self._max:
+            others = self._untracked(reattaching)
+            with self._cond:
+                if self._claims + others < self._max:
                     self._claims += 1
                     return
                 self._cond.wait(_SLOT_POLL_SEC)
+
+    def _untracked(self, reattaching: str | None) -> int:
+        """How many running ``measurement`` sandboxes this pool does not hold."""
+        running = {info.sandbox_id for info in self._provider.find({}, role=MEASUREMENT_ROLE)}
+        with self._cond:
+            running -= self._held
+        running.discard(reattaching or "")
+        return len(running)
 
     def _give_slot(self) -> None:
         with self._cond:
