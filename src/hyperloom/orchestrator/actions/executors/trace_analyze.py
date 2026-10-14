@@ -21,6 +21,7 @@ from ._kernel_agent_tool import (
     _shape_tool_result,
 )
 from .._recorder_trace import trace_recording_skipped
+from hyperloom.common.coerce import optional_positive_int
 from hyperloom.inference_optimizer.trace.trajectory_trace import inherited_scope_fields
 
 log = logging.getLogger(__name__)
@@ -414,12 +415,7 @@ def _build_trace_analyze_cmd(
             cmd += [f"--trajectory-{key.replace('_', '-')}", str(value)]
     elif str(getattr(state, "benchmark_mode", "") or "").strip().lower() == "agentx":
         cmd += ["--require-single-rank"]
-        try:
-            state_tp = int(getattr(state, "tp", 0) or 0)
-        except (TypeError, ValueError):
-            state_tp = 0
-        if state_tp > 0:
-            cmd += ["--tensor-parallel-size", str(state_tp)]
+        cmd += _optional_flags(("--tensor-parallel-size", optional_positive_int(getattr(state, "tp", None))))
 
     # Model identity informs source resolution for every framework, not only the
     # diffusion roofline. Keep the standard payload > state > environment
@@ -446,13 +442,8 @@ def _build_trace_analyze_cmd(
             cmd += ["--skip-split"]
         # Forward the denoise-step count for per-step roofline timings.
         # Priority: payload override > baseline workload metadata.
-        num_denoise = payload.get("num_denoise_steps") or workload.get("num_inference_steps")
-        if num_denoise not in (None, ""):
-            try:
-                if int(num_denoise) > 0:
-                    cmd += ["--num-denoise-steps", str(int(num_denoise))]
-            except (TypeError, ValueError):
-                pass
+        num_denoise = optional_positive_int(payload.get("num_denoise_steps") or workload.get("num_inference_steps"))
+        cmd += _optional_flags(("--num-denoise-steps", num_denoise))
     else:
         # Splitter workload hints. Priority: payload override > baseline metadata
         # > drop the flag. A zero hint is a real workload value and is forwarded.
