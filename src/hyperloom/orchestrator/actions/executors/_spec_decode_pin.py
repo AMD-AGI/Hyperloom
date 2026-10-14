@@ -31,6 +31,7 @@ _PINNED_FLAGS = frozenset(
 )
 _ACCEPTANCE_FLAG_PREFIXES = ("spec-decode-acceptance", "speculative-acceptance")
 _SPEC_CONFIG_FLAG = "speculative-config"
+_SPEC_CONFIG_KEY_PREFIX = f"{_SPEC_CONFIG_FLAG}."
 _PINNED_SPEC_CONFIG_KEYS = frozenset(
     {
         "method",
@@ -76,15 +77,33 @@ def _json_object(text: str) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _speculative_identity(server_args: str, envs: Mapping[str, Any]) -> dict[str, Any]:
-    """The pinned settings a launch carries, keyed by flag, ``--speculative-config`` key or env name."""
-    identity: dict[str, Any] = {str(k): str(v) for k, v in envs.items() if str(k).startswith(_ACCEPTANCE_ENV_PREFIX)}
+def _canonical(value: Any) -> str:
+    """``value`` as text, numbers spelled one way so ``3``, ``3.0`` and ``"3"`` (or ``3.61`` and ``3.610``) agree."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    return str(int(number)) if number.is_integer() else repr(number)
+
+
+def _speculative_identity(server_args: str, envs: Mapping[str, Any]) -> dict[str, str]:
+    """The pinned settings a launch carries, keyed by flag, ``--speculative-config`` key or env name.
+
+    vLLM also takes a ``--speculative-config.<key>`` per key, merged over the JSON object, so both spellings land in
+    the same keys.
+    """
+    identity = {str(k): _canonical(v) for k, v in envs.items() if str(k).startswith(_ACCEPTANCE_ENV_PREFIX)}
+    config: dict[str, Any] = {}
     for flag, value in _last_flag_values(server_args).items():
         if flag == _SPEC_CONFIG_FLAG:
-            config = _json_object(value)
-            identity.update({f"--{flag}.{key}": config[key] for key in _PINNED_SPEC_CONFIG_KEYS & config.keys()})
+            config = {**_json_object(value), **config}
+        elif flag.startswith(_SPEC_CONFIG_KEY_PREFIX):
+            config[flag.removeprefix(_SPEC_CONFIG_KEY_PREFIX).replace("-", "_")] = value
         elif flag in _PINNED_FLAGS or flag.startswith(_ACCEPTANCE_FLAG_PREFIXES):
-            identity[f"--{flag}"] = value
+            identity[f"--{flag}"] = _canonical(value)
+    identity.update(
+        {f"--{_SPEC_CONFIG_FLAG}.{key}": _canonical(config[key]) for key in _PINNED_SPEC_CONFIG_KEYS & config.keys()}
+    )
     return identity
 
 

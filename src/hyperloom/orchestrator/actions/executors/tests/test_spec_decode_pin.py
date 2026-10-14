@@ -96,6 +96,13 @@ ATOM_SYNTHETIC = "--method mtp --num-speculative-tokens 3 --spec-decode-acceptan
         pytest.param(
             ATOM_SYNTHETIC, {}, ATOM_SYNTHETIC + " --spec-decode-acceptance-length 3.0", {}, id="atom-acceptance-flag"
         ),
+        pytest.param(
+            VLLM_SYNTHETIC,
+            {},
+            VLLM_SYNTHETIC + " --speculative-config.num_speculative_tokens 5",
+            {},
+            id="vllm-dotted-key-over-the-json",
+        ),
     ],
 )
 def test_a_candidate_changing_the_pinned_draft_is_refused(base_args, base_envs, candidate_args, candidate_envs):
@@ -148,6 +155,21 @@ def test_a_candidate_changing_the_pinned_draft_is_refused(base_args, base_envs, 
             _spec_config(rejection_sample_method="block", synthetic_acceptance_length=None),
             {},
             id="no-speculative-decoding-adds-a-real-draft",
+        ),
+        pytest.param(
+            VLLM_SYNTHETIC,
+            {},
+            VLLM_SYNTHETIC + " --speculative-config.num_speculative_tokens 3"
+            " --speculative-config.synthetic_acceptance_length 2.780",
+            {},
+            id="vllm-dotted-keys-restating-the-json",
+        ),
+        pytest.param(
+            SGLANG_EAGLE,
+            SGLANG_SYNTHETIC_ENV,
+            SGLANG_EAGLE,
+            {"SGLANG_SIMULATE_ACC_LEN": "3.610"},
+            id="sglang-acc-len-spelled-differently",
         ),
     ],
 )

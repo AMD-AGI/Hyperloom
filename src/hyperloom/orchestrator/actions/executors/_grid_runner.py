@@ -474,7 +474,6 @@ def _build_variant_yaml(
         envs.pop(str(k), None)
     for k, v in variant.extra_envs.items():
         envs[str(k)] = str(v)
-    refuse_unpinned_speculative_change(base_args, base_envs, combined, envs)
     from ._workload_envs import pin_mlperf_round_concurrency, prepend_launch_path
 
     pin_mlperf_round_concurrency(envs)
@@ -510,6 +509,7 @@ def _build_variant_yaml(
     _rt_override = getattr(variant, "runtime_override", None) or {}
     if _rt_override:
         apply_runtime_override(envs, _rt_override)
+    refuse_unpinned_speculative_change(base_args, base_envs, combined, envs)
 
     # PATH guard: the xdit wrapper needs both `/venv/bin` (the `xdit` console script) and `/opt/rocm/bin` (`hipcc`);
     # force-prepend both so an LLM-supplied PATH can't drop one.
