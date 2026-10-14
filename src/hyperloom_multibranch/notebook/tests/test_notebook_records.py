@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.contracts.recipe import DIGEST_PREFIX
 from hyperloom_multibranch.contracts.notebook import (
     INTEGRATION_BRANCH,
     ConflictingWrite,
@@ -47,6 +48,8 @@ from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.tests.factories import intent, judgement, request, result
 
 Open = Callable[..., LocalNotebook]
+ROOT_RECIPE = DIGEST_PREFIX + "a" * 64
+CHILD_RECIPE = DIGEST_PREFIX + "b" * 64
 
 
 async def _tested(open_as: Open, request_id: str, branch: str = "s1", parent: str = "c0") -> None:
@@ -149,11 +152,33 @@ async def test_each_lineage_event_has_one_writer(open_as: Open, role: Role, even
         LineageEvent(LineageKind.OPEN, "s1"),
         LineageEvent(LineageKind.ROOT, "s1", commit_id="c0"),
         LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH),
+        LineageEvent(LineageKind.OPEN, "s1", from_commit="c0", recipe_digest=ROOT_RECIPE),
+        LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0", recipe_digest="sha256:c0"),
     ],
 )
 async def test_a_lineage_event_names_what_its_kind_needs(open_as: Open, event: LineageEvent) -> None:
     with pytest.raises(ValueError):
         await open_as(Role.SCHEDULER).record_lineage(event)
+
+
+async def test_a_commit_keeps_the_recipe_digest_it_was_recorded_with(open_as: Open) -> None:
+    scheduler, gate = open_as(Role.SCHEDULER), open_as(Role.GATE)
+    root = LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0", recipe_digest=ROOT_RECIPE)
+    await scheduler.record_lineage(root)
+    await _tested(open_as, "r1")
+    await _tested(open_as, "r2")
+    await gate.write_judgement("r1", judgement(3.0, ("r1",)), Conclusion.COMMITTED, "c1", recipe_digest=CHILD_RECIPE)
+
+    with pytest.raises(ConflictingWrite):
+        await gate.write_judgement("r1", judgement(3.0, ("r1",)), Conclusion.COMMITTED, "c1", recipe_digest=ROOT_RECIPE)
+    with pytest.raises(ConflictingWrite):
+        await scheduler.record_lineage(replace(root, recipe_digest=CHILD_RECIPE))
+    with pytest.raises(ValueError, match="names the recipe"):
+        await gate.write_judgement("r2", judgement(0.1, ("r2",)), Conclusion.RECORDED_ONLY, recipe_digest=ROOT_RECIPE)
+    with pytest.raises(ValueError, match="64 hex digits"):
+        await gate.write_judgement("r2", judgement(3.0, ("r2",)), Conclusion.COMMITTED, "c2", recipe_digest="sha256:c2")
+    lineage = await gate.lineage()
+    assert {node.commit_id: node.recipe_digest for node in lineage.commits} == {"c0": ROOT_RECIPE, "c1": CHILD_RECIPE}
 
 
 async def test_a_branch_log_is_its_runtimes_alone_and_its_current_plan_is_the_latest_unsuperseded(

@@ -140,10 +140,10 @@ def render_log(record: BranchLogRecord) -> str:
 def _tried(item: TriedDirection) -> str:
     where = f"- {item.target or UNKNOWN} / {item.mechanism or UNKNOWN} on {item.commit_id}"
     state = item.conclusion or item.verdict
-    if state is None:
-        return f"{where}: not judged"
     gain = f" {item.gain_pct:+.2f}%" if item.gain_pct is not None else ""
-    return f"{where}: {state.value}{gain}"
+    outcome = "not judged" if state is None else f"{state.value}{gain}"
+    change = f" ({item.change})" if item.change else ""
+    return f"{where}: {outcome}{change}"
 
 
 def render_brief(brief: StartupBrief) -> str:

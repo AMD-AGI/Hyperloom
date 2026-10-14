@@ -154,6 +154,10 @@ async def test_a_fill_specialist_is_briefed_on_everything_tried_on_the_states_it
         ("r1", "moe gemm", "tuned kernel", Conclusion.COMMITTED),
         ("r2", "attention", "split kv", Conclusion.RECORDED_ONLY),
     }
+    assert {item.request_id: item.change for item in brief.tried} == {
+        "r1": "add args --max-num-seqs 256",
+        "r2": "add args --block-size 32",
+    }
     assert (brief.leads, brief.lessons) == ((), ())
 
 

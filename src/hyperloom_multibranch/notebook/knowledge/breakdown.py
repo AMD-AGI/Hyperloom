@@ -8,7 +8,8 @@ export has its own schema version and its own sections:
 
 * ``metadata``: the session profile, and the manifest fingerprint of each activity.
 * ``baseline``: the root's recorded values, dispersion and thresholds.
-* ``lineage``: every commit and branch, with when each was made, opened or stopped.
+* ``lineage``: every commit and branch, with when each was made, opened or stopped, and a commit's recipe digest when
+  its writer named it.
 * ``branches`` and ``committed``: each branch's progress, and each commit with its gain and merge state.
 * ``tests``: every test record: request, result with its attempts and GPU time, judgement, conclusion, commit, times.
 * ``measurement_sandboxes``: per node, GPU model, backend and image, the tests run there, their GPU time and failed

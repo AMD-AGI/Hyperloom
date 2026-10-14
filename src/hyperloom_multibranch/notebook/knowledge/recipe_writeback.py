@@ -11,7 +11,8 @@ pins, so the KB stores exactly what was measured.
 
 InferenceX sessions compare ``optimized_throughput`` with the champion of their partition. An AgentX champion compares
 an interactivity gain graded on two axes the multi-branch gate does not record yet, so AgentX sessions are skipped,
-with that reason, until it does.
+with that reason, until it does. When the notebook recorded the final commit's recipe digest, a recipe with another
+digest is skipped too (``recipe_digest_mismatch``): CLOSE was handed some other commit's recipe.
 """
 
 from __future__ import annotations
@@ -157,6 +158,9 @@ def publish_final_recipe(
         return RemoteWriteResult(SKIPPED, "invalid_recipe_scope", session_id=profile.session_id)
     if scope.identity_scheme == AGENTX:
         return RemoteWriteResult(SKIPPED, "agentx_objective_not_recorded", canonical_id, profile.session_id)
+    commit = snapshot.lineage.commit(final.commit_id)
+    if commit is not None and commit.recipe_digest not in (None, final.recipe.digest()):
+        return RemoteWriteResult(SKIPPED, "recipe_digest_mismatch", canonical_id, profile.session_id)
     knowledge = knowledge_document(snapshot, profile, final, scope)
     with tempfile.TemporaryDirectory(prefix="hyperloom-multibranch-recipe-") as temporary:
         staging = Path(temporary)

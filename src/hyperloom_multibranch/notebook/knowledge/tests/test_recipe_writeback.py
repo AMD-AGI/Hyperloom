@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.contracts.recipe import (
+    DIGEST_PREFIX,
     ComponentPatches,
     KernelArtifact,
     KernelKind,
@@ -149,6 +150,28 @@ def test_a_session_the_kb_cannot_file_is_skipped_with_the_reason(
 
     assert (outcome.status, outcome.reason) == ("skipped", reason)
     assert store.scopes == []
+
+
+def _recorded_with(snapshot: NotebookSnapshot, commit_id: str, digest: str) -> NotebookSnapshot:
+    commits = tuple(
+        dataclasses.replace(node, recipe_digest=digest) if node.commit_id == commit_id else node
+        for node in snapshot.lineage.commits
+    )
+    return dataclasses.replace(snapshot, lineage=dataclasses.replace(snapshot.lineage, commits=commits))
+
+
+def test_a_recipe_other_than_the_one_the_notebook_recorded_is_not_written(
+    snapshot: NotebookSnapshot, final: FinalRecipe
+) -> None:
+    store = FakeRecipeStore(champion=_champion(1000.0))
+    other = _recorded_with(snapshot, "i1", DIGEST_PREFIX + "0" * 64)
+    same = _recorded_with(snapshot, "i1", final.recipe.digest())
+
+    refused = publish_final_recipe(RemoteRecipeClient(store), other, final)
+    written = publish_final_recipe(RemoteRecipeClient(store), same, final)
+
+    assert (refused.status, refused.reason) == ("skipped", "recipe_digest_mismatch")
+    assert written.status == "written"
 
 
 def test_the_identity_follows_the_profile_and_agentx_has_its_own_scheme() -> None:

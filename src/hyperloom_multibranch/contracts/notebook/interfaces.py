@@ -112,9 +112,18 @@ class JudgementSink(Protocol):
     """The rule gate for specialist branches and the integrator for the integration branch."""
 
     async def write_judgement(
-        self, request_id: str, judgement: Judgement, conclusion: Conclusion, commit_id: str | None = None
+        self,
+        request_id: str,
+        judgement: Judgement,
+        conclusion: Conclusion,
+        commit_id: str | None = None,
+        recipe_digest: str | None = None,
     ) -> TestRecord:
-        """Append a judgement; the latest one of a request is in force, earlier ones stay in the history."""
+        """Append a judgement; the latest one of a request is in force, earlier ones stay in the history.
+
+        A judgement that makes ``commit_id`` may name ``recipe_digest``, the ``Recipe.digest()`` of the recipe the
+        experiment repository stores for it; a commit keeps the digest it was first recorded with.
+        """
 
     async def record_merge_attempt(self, attempt: MergeAttempt) -> None: ...
 

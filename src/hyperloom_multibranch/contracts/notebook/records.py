@@ -124,7 +124,8 @@ class MergeAttempt:
 class LineageEvent:
     """A branch starting (``from_commit``), splitting off ``from_branch`` with fix ``commit_id``, or stopping.
 
-    ``ROOT`` records the baseline commit ``commit_id`` the integration branch starts from.
+    ``ROOT`` records the baseline commit ``commit_id`` the integration branch starts from, and may name the digest of
+    its recipe (``Recipe.digest()``); a judgement names the recipe digest of every other commit.
     """
 
     kind: LineageKind
@@ -133,6 +134,7 @@ class LineageEvent:
     from_commit: str = ""
     from_branch: str = ""
     reason: str = ""
+    recipe_digest: str | None = None
 
 
 @dataclass(frozen=True)
@@ -227,7 +229,10 @@ class BranchProgress:
 
 @dataclass(frozen=True)
 class CommitNode:
-    """A commit of the experiment repository; a merge also names the source commits it brought in."""
+    """A commit of the experiment repository; a merge also names the source commits it brought in.
+
+    ``recipe_digest`` is the digest of the recipe the repository stores for the commit, when its writer named it.
+    """
 
     commit_id: str
     parent_commit: str
@@ -236,6 +241,7 @@ class CommitNode:
     request_id: str | None = None
     merged_from: tuple[str, ...] = ()
     at: float = 0.0
+    recipe_digest: str | None = None
 
 
 @dataclass(frozen=True)
@@ -312,7 +318,7 @@ class RecordedValue:
 
 @dataclass(frozen=True)
 class TriedDirection:
-    """One test on a state a new specialist starts from or builds on."""
+    """One test on a state a new specialist starts from or builds on; ``change`` is its recipe delta in one line."""
 
     commit_id: str
     request_id: str
@@ -322,6 +328,7 @@ class TriedDirection:
     verdict: Verdict | None
     conclusion: Conclusion | None
     gain_pct: float | None
+    change: str = ""
 
 
 @dataclass(frozen=True)

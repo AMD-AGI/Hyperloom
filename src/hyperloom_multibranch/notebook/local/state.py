@@ -44,6 +44,7 @@ class JudgementWrite:
     judgement: Judgement
     conclusion: Conclusion
     commit_id: str | None = None
+    recipe_digest: str | None = None
 
 
 @dataclass(frozen=True)

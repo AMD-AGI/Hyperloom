@@ -41,6 +41,7 @@ from hyperloom_multibranch.contracts.notebook.vocab import (
     MergeOutcome,
     QuarantineAction,
 )
+from hyperloom_multibranch.notebook.changes import describe_change
 from hyperloom_multibranch.notebook.local.state import JudgementWrite, NotebookState
 
 _SPECIALIST_ORIGINS = frozenset({CommitOrigin.COMMIT, CommitOrigin.SPLIT})
@@ -93,7 +94,10 @@ def _apply_event(
 ) -> None:
     draft = branches.get(event.branch)
     if event.kind is LineageKind.ROOT:
-        commits.setdefault(event.commit_id, CommitNode(event.commit_id, "", event.branch, CommitOrigin.ROOT, at=at))
+        root = CommitNode(
+            event.commit_id, "", event.branch, CommitOrigin.ROOT, at=at, recipe_digest=event.recipe_digest
+        )
+        commits.setdefault(event.commit_id, root)
         branches[event.branch] = _BranchDraft(event.branch, LineageKind.ROOT, event.commit_id, at, head=event.commit_id)
     elif event.kind is LineageKind.STOP:
         if draft is not None:
@@ -115,20 +119,22 @@ def _commit_node(
         return None
     if write.conclusion is Conclusion.MERGED:
         sources = state.merge_sources(write.request_id)
-        return CommitNode(
-            write.commit_id,
-            request.parent_commit,
-            INTEGRATION_BRANCH,
-            CommitOrigin.MERGE,
-            write.request_id,
-            sources,
-            at,
-        )
-    if write.conclusion is Conclusion.SPLIT_COMMITTED:
-        branch = splits.get(write.commit_id, request.branch)
-        return CommitNode(write.commit_id, request.parent_commit, branch, CommitOrigin.SPLIT, write.request_id, at=at)
+        branch, origin = INTEGRATION_BRANCH, CommitOrigin.MERGE
+    elif write.conclusion is Conclusion.SPLIT_COMMITTED:
+        sources = ()
+        branch, origin = splits.get(write.commit_id, request.branch), CommitOrigin.SPLIT
+    else:
+        sources = ()
+        branch, origin = request.branch, CommitOrigin.COMMIT
     return CommitNode(
-        write.commit_id, request.parent_commit, request.branch, CommitOrigin.COMMIT, write.request_id, at=at
+        write.commit_id,
+        request.parent_commit,
+        branch,
+        origin,
+        write.request_id,
+        sources,
+        at,
+        recipe_digest=write.recipe_digest,
     )
 
 
@@ -251,6 +257,7 @@ def _tried(state: NotebookState, record: TestRecord) -> TriedDirection:
         verdict=judgement.verdict if judgement is not None else None,
         conclusion=record.conclusion,
         gain_pct=judgement.gain_pct if judgement is not None else None,
+        change=describe_change(record.request.delta),
     )
 
 

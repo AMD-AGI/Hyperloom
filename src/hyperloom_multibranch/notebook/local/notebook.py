@@ -12,6 +12,7 @@ branch logs the specialist runtime of that branch.
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 from collections.abc import Callable
@@ -19,6 +20,7 @@ from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
 
+from hyperloom.contracts.recipe import DIGEST_PREFIX
 from hyperloom_multibranch.contracts.notebook.interfaces import (
     AlreadyTested,
     BranchLogStore,
@@ -108,6 +110,7 @@ _LINEAGE_FIELDS: dict[LineageKind, tuple[str, ...]] = {
     LineageKind.SPLIT: ("commit_id", "from_commit", "from_branch"),
     LineageKind.STOP: (),
 }
+_RECIPE_DIGEST = re.compile(re.escape(DIGEST_PREFIX) + "[0-9a-f]{64}")
 
 
 def _refusal(answer: DedupAnswer, reason: str) -> NotebookError | None:
@@ -130,6 +133,22 @@ def _check_lineage(event: LineageEvent) -> None:
         raise ValueError(f"a {event.kind.value} event needs {', '.join(missing)}")
     if (event.kind is LineageKind.ROOT) != (event.branch == INTEGRATION_BRANCH):
         raise ValueError(f"the root commit, and only it, starts the {INTEGRATION_BRANCH} branch")
+    if event.recipe_digest is not None and event.kind is not LineageKind.ROOT:
+        raise ValueError("only the root event names its commit's recipe digest; judgements name the others'")
+
+
+def _check_recipe_digest(state: NotebookState, commit_id: str | None, digest: str | None) -> None:
+    """Refuse a malformed digest, one without a commit, or another digest than ``commit_id`` was recorded with."""
+
+    if digest is None:
+        return
+    if commit_id is None:
+        raise ValueError("a recipe digest names the recipe of the commit a write makes")
+    if not _RECIPE_DIGEST.fullmatch(digest):
+        raise ValueError(f"a recipe digest is {DIGEST_PREFIX} and 64 hex digits, got {digest!r}")
+    known = views.lineage_view(state).commit(commit_id)
+    if known is not None and known.recipe_digest not in (None, digest):
+        raise ConflictingWrite(f"commit {commit_id} was recorded with recipe {known.recipe_digest}")
 
 
 class LocalNotebook(
@@ -280,7 +299,12 @@ class LocalNotebook(
     # --- judgements and gate records -------------------------------------------------------------------------------
 
     async def write_judgement(
-        self, request_id: str, judgement: Judgement, conclusion: Conclusion, commit_id: str | None = None
+        self,
+        request_id: str,
+        judgement: Judgement,
+        conclusion: Conclusion,
+        commit_id: str | None = None,
+        recipe_digest: str | None = None,
     ) -> TestRecord:
         state = self._state()
         request = state.record(request_id).request
@@ -292,8 +316,9 @@ class LocalNotebook(
             raise NotRecorded(f"request {request_id} has no result to judge")
         if (conclusion in COMMITTING or conclusion is Conclusion.MERGED) != (commit_id is not None):
             raise ValueError(f"a {conclusion.value} judgement names a commit exactly when it makes one")
+        _check_recipe_digest(state, commit_id, recipe_digest)
         summary = f"{conclusion.value}: {judgement.verdict.value} {judgement.gain_pct:+.2f}% on {request_id}"
-        write = JudgementWrite(request_id, judgement, conclusion, commit_id)
+        write = JudgementWrite(request_id, judgement, conclusion, commit_id, recipe_digest)
         self._append(EntryKind.JUDGEMENT, write, branch=request.branch, parent=request.parent_commit, summary=summary)
         return self._state().record(request_id)
 
@@ -329,6 +354,7 @@ class LocalNotebook(
     async def record_lineage(self, event: LineageEvent) -> None:
         self._require(LINEAGE_WRITERS[event.kind])
         _check_lineage(event)
+        _check_recipe_digest(self._state(), event.commit_id, event.recipe_digest)
         start = event.commit_id or event.from_commit
         summary = f"{event.kind.value} {event.branch} at {start or 'its head'}: {event.reason}"
         self._append(EntryKind.LINEAGE, event, branch=event.branch, parent=event.from_commit, summary=summary)
