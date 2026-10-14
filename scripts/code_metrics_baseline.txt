@@ -803,7 +803,7 @@ function-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py::
 function-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py::_focus_static_recon_specialist 91
 function-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py::_section_identity 94
 function-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py::_section_mandate 92
-function-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py::_section_output_protocol 172
+function-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py::_section_output_protocol 140
 function-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py::_section_roofline_evidence 119
 function-lines src/hyperloom/orchestrator/roles/claude.py::ClaudeBackend._invoke_and_collect 141
 function-lines src/hyperloom/orchestrator/roles/claude.py::ClaudeBackend.run 145
@@ -1032,7 +1032,7 @@ module-lines src/hyperloom/orchestrator/phases/machine_state.py 2265
 module-lines src/hyperloom/orchestrator/phases/prelude.py 2640
 module-lines src/hyperloom/orchestrator/policy/gate.py 1626
 module-lines src/hyperloom/orchestrator/prompts/prompt_builder.py 1205
-module-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py 2573
+module-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py 2571
 module-lines src/hyperloom/orchestrator/roles/critic_agent.py 1299
 module-lines src/hyperloom/orchestrator/specialists/runner.py 1533
 module-lines src/hyperloom/orchestrator/specialists/subprocess_.py 1795
