@@ -335,7 +335,7 @@ class MbFakeToolbox:
 
 
 def judged(verdict: Verdict, gain_pct: float, request_id: str, value: float) -> Judgement:
-    return Judgement(verdict, gain_pct, 1.0, True, (request_id,), {MB_FAKE_PRIMARY_METRIC: value})
+    return Judgement(verdict, gain_pct, 1.0, (request_id,), {MB_FAKE_PRIMARY_METRIC: value}, accuracy_ok=True)
 
 
 @dataclass

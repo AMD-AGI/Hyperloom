@@ -109,7 +109,8 @@ class BranchControl:
         """Withdraw everything of ``branch`` and return the steps that failed; stopping it again does nothing.
 
         Every step runs even when an earlier one fails, so the tests, processes and claims of the branch are always
-        withdrawn and the ``STOP`` recorded; the ``STOP`` decision names each failure, and the caller decides what
+        withdrawn and, once the branch is in the lineage, its ``STOP`` recorded (an admitted fork's ``STOP`` waits for
+        its ``SPLIT``, see :class:`ForkDesk`); the ``STOP`` decision names each failure, and the caller decides what
         one means to it.
         """
 
@@ -124,7 +125,7 @@ class BranchControl:
         withdrawn = await settled(self._toolbox.withdraw(branch))
         steps.append(await settled(self._processes.kill_branch(branch)))
         released = await settled(self._notebook.release_branch(branch))
-        if entry.kind is BranchKind.SPECIALIST:
+        if entry.kind is BranchKind.SPECIALIST and entry.start_commit:
             event = LineageEvent(LineageKind.STOP, branch, reason=stop.summary)
             steps.append(await settled(self._notebook.record_lineage(event)))
         raised = [outcome for outcome in (*steps, withdrawn, released) if isinstance(outcome, BaseException)]

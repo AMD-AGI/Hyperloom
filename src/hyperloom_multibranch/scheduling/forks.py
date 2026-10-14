@@ -11,8 +11,8 @@ peer, so it is built before them and handed to the rule gate. A fork of a branch
 one already stopped, is refused whatever the policy says: stopping a branch withdraws everything of it.
 
 An admitted fork can be stopped before the gate records its ``SPLIT``; the notebook's lineage has no such branch yet
-and drops that ``STOP``. The desk therefore records the ``STOP`` again once the ``SPLIT`` is in, so a stopped fork
-never reads as running.
+and refuses its ``STOP``. The branch control therefore leaves the ``STOP`` to the desk, which records it once the
+``SPLIT`` is in, so a stopped fork never reads as running.
 """
 
 from __future__ import annotations

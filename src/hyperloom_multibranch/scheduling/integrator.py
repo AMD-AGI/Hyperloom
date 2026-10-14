@@ -151,8 +151,8 @@ def not_stackable_reason(candidate: str, judgement: Judgement) -> str:
 
     if judgement.verdict is not Verdict.IMPROVED:
         return f"{judgement.verdict.value} {judgement.gain_pct:+.2f}% on the integration head"
-    if not judgement.confirmed:
-        return f"improvement of {judgement.gain_pct:+.2f}% not confirmed by the retest"
+    if not judgement.accuracy_ok:
+        return f"improvement of {judgement.gain_pct:+.2f}% failed the accuracy gate"
     if not mb_fake_regression_passes(candidate):
         return "the regression set failed"
     return ""

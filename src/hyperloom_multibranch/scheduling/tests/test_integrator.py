@@ -168,9 +168,9 @@ async def test_an_improving_merge_is_tested_from_the_head_then_written(bench: Be
     [
         replace(improved(), verdict=Verdict.FLAT, gain_pct=0.2),
         replace(improved(), verdict=Verdict.REGRESSED, gain_pct=-3.0),
-        replace(improved(), confirmed=False),
+        replace(improved(), accuracy_ok=False),
     ],
-    ids=["flat", "regressed", "unconfirmed"],
+    ids=["flat", "regressed", "inaccurate"],
 )
 async def test_a_merge_that_does_not_improve_is_not_stackable(bench: Bench, outcome: Judgement) -> None:
     bench.gate.verdicts = {merge_intent("c1"): outcome}
