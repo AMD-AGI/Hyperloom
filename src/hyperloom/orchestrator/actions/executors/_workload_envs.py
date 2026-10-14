@@ -1075,6 +1075,31 @@ def _tracelens_patch_enabled() -> bool:
     return os.environ.get("HYPERLOOM_ENABLE_PATCH", "1").strip() != "0"
 
 
+def _record_tracelens_patch_status(
+    envs: dict[str, Any],
+    *,
+    attempted: bool,
+    patched: bool,
+    framework: str,
+    degraded_detail: str = "annotation-only flags",
+) -> None:
+    """Set ``HYPERLOOM_TRACELENS_PATCH_STATUS`` and warn on attempted-but-failed."""
+    if patched:
+        envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "ok"
+    elif attempted:
+        envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "unavailable"
+        envs["HYPERLOOM_PROFILE_DEGRADED_REASON"] = _TRACELENS_PATCH_UNAVAILABLE
+        log.warning(
+            "TraceLens runtime patch unavailable for framework=%s; "
+            "profile will omit %s and roofline "
+            "analysis may be degraded.",
+            framework or "<unset>",
+            degraded_detail,
+        )
+    else:
+        envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "not_attempted"
+
+
 def _coerce_workload_int_env(env_key: str, raw: str) -> int:
     """Coerce workload env values, accepting ``CONC`` comma ladders."""
     text = str(raw or "").strip()
@@ -1553,17 +1578,15 @@ def materialize_config_with_envs(
         xdit_patched = xdit_patch_attempted and ensure_xdit_patched_for_tracelens()
         if xdit_patched:
             envs["EXTRA_XDIT_ARGS"] = "--profile_wait 1 --profile_capture_phase --profile_with_stack"
-            envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "ok"
         else:
             envs["EXTRA_XDIT_ARGS"] = "--profile_wait 1"
-            envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "not_attempted" if not xdit_patch_attempted else "unavailable"
-            if xdit_patch_attempted:
-                envs["HYPERLOOM_PROFILE_DEGRADED_REASON"] = _TRACELENS_PATCH_UNAVAILABLE
-                log.warning(
-                    "TraceLens runtime patch unavailable for framework=xdit; "
-                    "profile will omit capture-phase flags and roofline "
-                    "analysis may be degraded.",
-                )
+        _record_tracelens_patch_status(
+            envs,
+            attempted=xdit_patch_attempted,
+            patched=xdit_patched,
+            framework="xdit",
+            degraded_detail="capture-phase flags",
+        )
     profile_num_prompts: int | None = None
     atom_caps: _AtomTracelensCaps | None = None
     # ``(sentinel, flag)`` pairs remembered so the re-assertion at the very end of
@@ -1664,23 +1687,11 @@ def materialize_config_with_envs(
         is_sglang = "sglang" in fw
         sglang_sitecustomize = is_sglang and resolve_sglang_shape_mode() == "sitecustomize"
         patch_attempted = _tracelens_patch_enabled() and not is_atom and not sglang_sitecustomize
-        # Written in every branch, not only the failing one: "patched fine" and "never tried because the image
-        # already carries it" call for different reactions when a trace later turns up without annotations.
-        envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "not_attempted"
         if patch_attempted:
             if "vllm" in fw:
                 tracelens_patch_ok = ensure_vllm_patched_for_tracelens()
             else:
                 tracelens_patch_ok = ensure_sglang_patched_for_tracelens()
-            envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "ok" if tracelens_patch_ok else "unavailable"
-            if not tracelens_patch_ok:
-                envs["HYPERLOOM_PROFILE_DEGRADED_REASON"] = _TRACELENS_PATCH_UNAVAILABLE
-                log.warning(
-                    "TraceLens runtime patch unavailable for framework=%s; "
-                    "profile will omit annotation-only flags and roofline "
-                    "analysis may be degraded.",
-                    fw or "<unset>",
-                )
         elif sglang_sitecustomize and _tracelens_patch_enabled():
             # Shapes come from kernel_shape_tool, but the per-batch-size capture trace still needs
             # sglang_gc_patch or it IndexErrors. Only profiling captures traces, so patch only here.
@@ -1692,6 +1703,7 @@ def materialize_config_with_envs(
                     "It needs TRACELENS_ROOT with an exact "
                     "examples/custom_workflows/inference_analysis/sglang_gc_patch/sglang_<X_Y_Z> dir."
                 )
+        _record_tracelens_patch_status(envs, attempted=patch_attempted, patched=tracelens_patch_ok, framework=fw)
         if is_atom:
             # ATOM has no delay/max-iteration window; extra prompts only grow
             # the HTTP-bracketed trace. Force NUM_PROMPTS=CONC.
