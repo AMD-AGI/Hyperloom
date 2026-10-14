@@ -1,0 +1,181 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""EXPLORE: open the opening batch, then let the judge steer the branches until the EXPLORE deadline or a soft stop.
+
+The loop wakes every :data:`EXPLORE_TICK_SECONDS`: it starts the forks the rule gate committed, consults the MB2
+placeholders, and every judge interval asks the judge and applies what it decided; a judge call that has not
+answered by the EXPLORE deadline counts as failed, so it never eats into FINAL. The integrator merges in a
+background task of its own, in rounds as wide as the integration branch's K. When EXPLORE ends that task is
+cancelled and the integrator abandons its round, so the integration head the FINAL candidates are read from no
+longer moves and no merge test competes with FINAL's measurements.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+from collections.abc import Mapping
+from dataclasses import dataclass
+
+from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
+from hyperloom_multibranch.contracts.notebook.interfaces import ProgressQuery
+from hyperloom_multibranch.contracts.notebook.records import BranchProgress
+from hyperloom_multibranch.scheduling.branches import BranchControl
+from hyperloom_multibranch.scheduling.clock import Clock
+from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
+from hyperloom_multibranch.scheduling.forks import ForkDesk
+from hyperloom_multibranch.scheduling.integrator import Integrator
+from hyperloom_multibranch.scheduling.judge import Judge, JudgeDecision, JudgeView
+from hyperloom_multibranch.scheduling.mb_fakes import (
+    MB_FAKE_PRIMARY_METRIC,
+    mb_fake_branches_to_add,
+    mb_fake_similar_branches,
+)
+from hyperloom_multibranch.scheduling.roster import BranchOrigin, BranchStop, Roster, StopCause
+from hyperloom_multibranch.scheduling.stops import SessionStopReason
+
+#: How often the loop starts committed forks and checks the deadline; the judge runs on its own, longer interval.
+EXPLORE_TICK_SECONDS = 5.0
+SIMILAR_BRANCH_REASON = "duplicates another branch"
+
+
+@dataclass(frozen=True)
+class ExploreWindow:
+    """The commit branches start from, the roofline ceiling, and the clock times EXPLORE and the budget end at."""
+
+    root_commit: str
+    roofline_ceiling: Mapping[str, float]
+    explore_end: float
+    session_deadline: float
+
+
+def integration_row(progress: tuple[BranchProgress, ...]) -> BranchProgress | None:
+    return next((row for row in progress if row.branch == INTEGRATION_BRANCH), None)
+
+
+class Explorer:
+    """Runs EXPLORE once; ``progress`` is the frontier-scored progress the judge reads."""
+
+    def __init__(
+        self,
+        roster: Roster,
+        branches: BranchControl,
+        desk: ForkDesk,
+        judge: Judge,
+        integrator: Integrator,
+        progress: ProgressQuery,
+        decisions: DecisionLog,
+        judge_interval_seconds: float,
+        clock: Clock,
+    ) -> None:
+        self._roster = roster
+        self._branches = branches
+        self._desk = desk
+        self._judge = judge
+        self._integrator = integrator
+        self._progress = progress
+        self._decisions = decisions
+        self._interval = judge_interval_seconds
+        self._clock = clock
+
+    async def run(self, window: ExploreWindow) -> SessionStopReason:
+        """Explore until the deadline or the judge's soft stop; the integrator is stopped before this returns."""
+
+        opening = await self._ask(window, opening=True)
+        count, k = (opening.open_count, opening.open_k) if opening is not None else (1, 1)
+        await self._branches.open_branches(count, window.root_commit, k, BranchOrigin.FIRST_BATCH)
+        if opening is not None and await self._apply(opening):
+            return SessionStopReason.GLOBAL_CONVERGED
+        merging = asyncio.ensure_future(self._merge_forever())
+        try:
+            return await self._steer(window, merging)
+        finally:
+            merging.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await merging
+            await self._integrator.abandon()
+
+    async def _steer(self, window: ExploreWindow, merging: asyncio.Future[None]) -> SessionStopReason:
+        next_judge = self._clock.now() + self._interval
+        while (now := self._clock.now()) < window.explore_end:
+            if merging.done():
+                merging.result()
+            await self._start_forks()
+            await self._consult_placeholders(window.root_commit)
+            if now >= next_judge:
+                next_judge = now + self._interval
+                decision = await self._ask(window, opening=False)
+                if decision is not None and await self._apply(decision):
+                    return SessionStopReason.GLOBAL_CONVERGED
+            await self._clock.sleep(min(EXPLORE_TICK_SECONDS, window.explore_end - now))
+        return SessionStopReason.TIME_EXHAUSTED
+
+    async def _merge_forever(self) -> None:
+        while True:
+            width = self._roster.entry(INTEGRATION_BRANCH).k
+            if not await self._integrator.integrate_next(width):
+                await self._clock.sleep(EXPLORE_TICK_SECONDS)
+
+    async def _start_forks(self) -> None:
+        for fork in self._desk.drain():
+            await self._branches.start_fork(fork.branch, fork.fix_commit)
+
+    async def _consult_placeholders(self, root_commit: str) -> None:
+        now = self._clock.now()
+        for branch in mb_fake_similar_branches(self._roster):
+            await self._branches.stop_branch(branch, BranchStop(StopCause.JUDGE, SIMILAR_BRANCH_REASON, now))
+        extra = min(mb_fake_branches_to_add(self._roster), self._roster.free_slots())
+        if extra:
+            await self._branches.open_branches(extra, root_commit, 1, BranchOrigin.REFILL)
+
+    async def _ask(self, window: ExploreWindow, *, opening: bool) -> JudgeDecision | None:
+        now = self._clock.now()
+        progress = await self._progress.progress()
+        integration = integration_row(progress)
+        view = JudgeView(
+            now=now,
+            explore_remaining_seconds=max(window.explore_end - now, 0.0),
+            session_remaining_seconds=max(window.session_deadline - now, 0.0),
+            caps=self._roster.caps,
+            roster=self._roster.entries(),
+            progress=progress,
+            integration_value=dict(integration.head_value) if integration is not None else {},
+            roofline_ceiling=window.roofline_ceiling,
+            metric=MB_FAKE_PRIMARY_METRIC,
+            opening=opening,
+            free_slots=self._roster.free_slots(),
+        )
+        try:
+            decision = await self._clock.wait_for(self._judge.decide(view), window.explore_end - now)
+        except asyncio.TimeoutError:
+            self._decisions.record(Decision(DecisionKind.JUDGE_FAILED, "no answer by the EXPLORE deadline"))
+            return None
+        if decision is None:
+            self._decisions.record(Decision(DecisionKind.JUDGE_FAILED, "kept the status quo"))
+        return decision
+
+    async def _apply(self, decision: JudgeDecision) -> bool:
+        """Apply the stop and K orders; True when the judge asked to stop the session."""
+
+        self._decisions.record(
+            Decision(
+                DecisionKind.JUDGE,
+                decision.session_stop or "applied",
+                detail={
+                    "open": decision.open_count,
+                    "open_k": decision.open_k,
+                    "k": {order.branch: order.k for order in decision.k},
+                    "stop": {order.branch: order.reason for order in decision.stop},
+                },
+            )
+        )
+        now = self._clock.now()
+        for order in decision.stop:
+            await self._branches.stop_branch(order.branch, BranchStop(StopCause.JUDGE, order.reason, now))
+        if decision.k:
+            await self._branches.apply_k({order.branch: order.k for order in decision.k})
+        return bool(decision.session_stop)
+
+
+__all__ = ["EXPLORE_TICK_SECONDS", "ExploreWindow", "Explorer", "integration_row"]
