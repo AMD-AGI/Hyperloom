@@ -230,9 +230,10 @@ def test_a_git_call_that_fails_or_hangs_is_unknown_not_absence(tmp_path, monkeyp
     merge = _fork_before(root, "Fuse the epilogue")
     assert _probe(root, 42, merge).inclusion is Inclusion.NOT_INCLUDED
 
-    monkeypatch.setattr(
-        inclusion, "git_bytes", lambda *args, **kwargs: (failure if command in args else git_bytes)(*args, **kwargs)
-    )
+    def git_failing_one_command(*args, **kwargs):
+        return (failure if command in args else git_bytes)(*args, **kwargs)
+
+    monkeypatch.setattr(inclusion, "git_bytes", git_failing_one_command)
 
     assert _probe(root, 42, merge).inclusion is Inclusion.UNKNOWN
 
