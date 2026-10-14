@@ -14,11 +14,41 @@ from hyperloom_multibranch.toolbox.tools.base import (
     ToolResultSink,
     UnknownTool,
 )
+from hyperloom_multibranch.toolbox.tools.accuracy import ACCURACY_TOOL, accuracy_tool
+from hyperloom_multibranch.toolbox.tools.build import BUILD_TOOL, build_tool
+from hyperloom_multibranch.toolbox.tools.kernel import (
+    FORGE_FUSION_TOOL,
+    KERNEL_TUNE_TOOL,
+    forge_fusion_tool,
+    kernel_tune_tool,
+)
 from hyperloom_multibranch.toolbox.tools.profile import PROFILE_TOOL, profile_tool
+from hyperloom_multibranch.toolbox.tools.roofline import ROOFLINE_TOOL, TRACELENS_TOOL, roofline_tool, tracelens_tool
 from hyperloom_multibranch.toolbox.tools.upstream_pr import UPSTREAM_PR_TOOL, UpstreamPrSearch
 
+
+def all_tools() -> tuple[AsyncTool, ...]:
+    """Every tool of this package, for the runner that serves them."""
+    return (
+        profile_tool(),
+        UpstreamPrSearch(),
+        roofline_tool(),
+        tracelens_tool(),
+        build_tool(),
+        accuracy_tool(),
+        kernel_tune_tool(),
+        forge_fusion_tool(),
+    )
+
+
 __all__ = [
+    "ACCURACY_TOOL",
+    "BUILD_TOOL",
+    "FORGE_FUSION_TOOL",
+    "KERNEL_TUNE_TOOL",
     "PROFILE_TOOL",
+    "ROOFLINE_TOOL",
+    "TRACELENS_TOOL",
     "UPSTREAM_PR_TOOL",
     "AsyncTool",
     "InvalidRequest",
@@ -30,5 +60,12 @@ __all__ = [
     "ToolResultSink",
     "UnknownTool",
     "UpstreamPrSearch",
+    "accuracy_tool",
+    "all_tools",
+    "build_tool",
+    "forge_fusion_tool",
+    "kernel_tune_tool",
     "profile_tool",
+    "roofline_tool",
+    "tracelens_tool",
 ]
