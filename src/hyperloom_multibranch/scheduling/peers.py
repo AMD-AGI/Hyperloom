@@ -4,8 +4,8 @@
 """The peers a session runs on, and the placeholder that wires them until their owners' modules land.
 
 A :data:`PeerFactory` builds the specialist lifecycle, the toolbox, the rule gate and the experiment repository on a
-:class:`PeerSetup`: the session directory, the scheduler's fork admission desk for the rule gate, and the session's
-process registry. No owner has delivered a real
+:class:`PeerSetup`: the session directory, the workload the session optimizes, the scheduler's fork admission desk for
+the rule gate, and the session's process registry. No owner has delivered a real
 implementation yet, so :func:`mb_fake_load_peers` refuses, and the command line fails before it creates anything.
 """
 
@@ -23,6 +23,7 @@ from hyperloom_multibranch.contracts.scheduling import (
 )
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
+from hyperloom_multibranch.scheduling.settings import Workload
 
 #: The modules a real session needs and that hold no implementation yet; emptied as each module lands, and deleted
 #: with :func:`mb_fake_load_peers` once the last one has.
@@ -46,11 +47,14 @@ class Peers:
 class PeerSetup:
     """What one session's peers are built on.
 
-    The lifecycle and the toolbox start every process of theirs through ``processes``, so the session stop kills it
-    even when a peer's own stop hangs, and the session reports it when it outlives that kill.
+    ``workload`` is the measurement surface: the toolbox measures every test and sweep of the session on it, so a
+    test request carries no operating point of its own. The lifecycle and the toolbox start every process of theirs
+    through ``processes``, so the session stop kills it even when a peer's own stop hangs, and the session reports it
+    when it outlives that kill.
     """
 
     layout: SessionLayout
+    workload: Workload
     desk: ForkAdmissionService
     processes: ProcessRegistry
 

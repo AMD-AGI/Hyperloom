@@ -115,7 +115,7 @@ class Session:
         self._decisions = DecisionLog(layout.decisions, clock)
         desk = ForkDesk(self._roster, self._notebook, self._decisions)
         merges = DecisionLog(layout.merges, clock)
-        peers = peer_factory(PeerSetup(layout, desk, processes))
+        peers = peer_factory(PeerSetup(layout, settings.workload, desk, processes))
         self._toolbox = peers.toolbox
         self._branches = BranchControl(
             self._roster, self._notebook, peers.lifecycle, peers.toolbox, processes, self._decisions, clock

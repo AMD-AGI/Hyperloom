@@ -32,7 +32,6 @@ from hyperloom_multibranch.scheduling.exports import SessionExports
 from hyperloom_multibranch.scheduling.final import INTEGRATION_LABEL
 from hyperloom_multibranch.scheduling.integrator import merge_intent
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
-from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.lifecycle import CUT_SHORT, Session, SessionOutcome
 from hyperloom_multibranch.scheduling.llm import CompletionFailed
 from hyperloom_multibranch.scheduling.peers import Peers, PeerSetup
@@ -106,7 +105,7 @@ class Stage:
     toolbox: MbFakeToolbox = field(init=False)
     gate: MbFakeGate = field(init=False)
     repo: MbFakeRepo = field(init=False)
-    peer_processes: ProcessRegistry = field(init=False)
+    setup: PeerSetup = field(init=False)
 
     def handle(self, role: Role, branch: str = "") -> LocalNotebook:
         return LocalNotebook(self.layout.notebook, Writer(role, branch or role.value, branch), clock=self.time.now)
@@ -115,14 +114,14 @@ class Stage:
         toolbox = MbFakeToolbox(self.handle(Role.TOOLBOX), sweeps=SWEEPS, stuck=self.stuck)
         gate = MbFakeGate(self.handle(Role.GATE), toolbox, setup.desk, verdicts=MERGE_VERDICTS)
         repo = MbFakeRepo()
-        self.toolbox, self.gate, self.repo, self.peer_processes = toolbox, gate, repo, setup.processes
+        self.toolbox, self.gate, self.repo, self.setup = toolbox, gate, repo, setup
         return Peers(self.lifecycle, toolbox, gate, repo)
 
     async def spawn_specialist_process(self, branch: str) -> None:
         """A process of ``branch``'s specialist, started the way a lifecycle starts one: through the peer setup."""
 
         log = self.layout.branch_dir(branch).with_suffix(".log")
-        held = await self.peer_processes.spawn(("sleep", "600"), branch=branch, log=log)
+        held = await self.setup.processes.spawn(("sleep", "600"), branch=branch, log=log)
         self.pids.append(held.record.pid)
 
     async def run(self) -> SessionOutcome:
@@ -177,6 +176,7 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
     outcome = await stage.run()
 
     assert (outcome.stop_reason, outcome.error, outcome.exit_code) == (SessionStopReason.TIME_EXHAUSTED, "", 0)
+    assert (stage.setup.workload, stage.setup.processes) == (WORKLOAD, stage.processes)
     observer = stage.handle(Role.OBSERVER)
     lineage = await observer.lineage()
     branches = {branch.branch: branch for branch in lineage.branches}

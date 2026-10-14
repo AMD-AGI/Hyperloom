@@ -115,7 +115,9 @@ class SpecialistLifecycle(Protocol):
 
 
 class Toolbox(Protocol):
-    """Every process it starts goes through the session's process registry it was built with, as the lifecycle's do."""
+    """Measures every test and sweep on the session's workload it was built with: the model, framework, tp, isl,
+    osl, conc and precision the operator gave. Every process it starts goes through the session's process registry it
+    was built with, as the lifecycle's do."""
 
     async def submit(self, request: TestRequest) -> str:
         """Queue ``request`` and return the request id its result carries."""
@@ -124,7 +126,7 @@ class Toolbox(Protocol):
         """Wait for the final result; raises :class:`RequestWithdrawn` when the test was withdrawn."""
 
     async def sweep(self, branch: str, commit: str) -> SweepResult:
-        """Measure ``commit`` across the activity's concurrency sweep."""
+        """Measure ``commit`` across the concurrency sweep around the workload's conc."""
 
     async def withdraw(self, branch: str) -> tuple[str, ...]:
         """Withdraw every queued and running test of ``branch``; returns their request ids."""
