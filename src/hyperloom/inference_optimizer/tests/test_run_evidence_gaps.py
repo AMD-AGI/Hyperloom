@@ -9,40 +9,21 @@ import json
 
 from hyperloom.inference_optimizer.session.session_paths import jit_cache_dir
 from hyperloom.orchestrator.state import run_evidence_gaps as reg
+from kernelforge.tests.trace_fixtures import eager_step, kernel, step, write_trace
 
 
-def _jit_leak(session_dir, kernel: str, count: int) -> None:
+def _jit_leak(session_dir, kernel_name: str, count: int) -> None:
     cache = jit_cache_dir(session_dir) / "sglang_cache_dir"
     for i in range(count):
         entry = cache / f"H{i:032d}"
         entry.mkdir(parents=True)
-        (entry / f"{kernel}.json").write_text(
-            json.dumps({"name": f"{kernel}_BLOCK_M_64_GRID_MN_{i * 7 + 1}"}), encoding="utf-8"
+        (entry / f"{kernel_name}.json").write_text(
+            json.dumps({"name": f"{kernel_name}_BLOCK_M_64_GRID_MN_{i * 7 + 1}"}), encoding="utf-8"
         )
 
 
 def _trace(tmp_path, events, *, name: str = "t.json"):
-    path = tmp_path / name
-    path.write_text(json.dumps({"traceEvents": events}), encoding="utf-8")
-    return path
-
-
-def _step(name: str, ts: float, dur: float) -> dict:
-    return {"cat": "gpu_user_annotation", "name": name, "ts": ts, "dur": dur, "pid": 2}
-
-
-def _kernel(name: str, ts: float, dur: float, correlation: int) -> dict:
-    return {"cat": "kernel", "name": name, "ts": ts, "dur": dur, "pid": 2, "args": {"correlation": correlation}}
-
-
-def _launch(correlation: int) -> dict:
-    return {
-        "cat": "cuda_runtime",
-        "name": "hipLaunchKernel",
-        "ts": 0.0,
-        "dur": 1.0,
-        "args": {"correlation": correlation},
-    }
+    return write_trace(tmp_path / name, events)
 
 
 def _requests(tmp_path, *, ms_per_100k: float, name: str = "ws"):
@@ -78,11 +59,7 @@ def test_a_recompiled_kernel_becomes_a_gap_naming_the_constant(tmp_path):
 
 
 def test_an_eager_step_class_becomes_a_gap_that_says_what_to_establish(tmp_path):
-    events = [
-        _step("step[EXTEND bs=1 toks=900]", 0.0, 100.0),
-        *[_kernel(f"e{i}", 1.0 + i, 5.0, i) for i in range(10)],
-        *[_launch(i) for i in range(10)],
-    ]
+    events = eager_step("step[EXTEND bs=1 toks=900]", start=0.0, count=10)
 
     (gap,) = reg.run_evidence_gaps(session_dir=tmp_path, trace_path=_trace(tmp_path, events), workspace="")
 
@@ -93,11 +70,11 @@ def test_an_eager_step_class_becomes_a_gap_that_says_what_to_establish(tmp_path)
 
 
 def test_a_foldable_launch_names_the_neighbour_to_fold_into(tmp_path):
-    events = [_step("step[VERIFY bs=3]", 0.0, 2000.0)]
+    events = [step("step[VERIFY bs=3]", 0.0, 2000.0)]
     ts = 1.0
     for i in range(60):
-        events.append(_kernel("split_k", ts, 14.0, 900 + i))
-        events.append(_kernel("reduce", ts + 14.0, 5.0, 1900 + i))
+        events.append(kernel("split_k", ts, 14.0, correlation=900 + i))
+        events.append(kernel("reduce", ts + 14.0, 5.0, correlation=1900 + i))
         ts += 30.0
 
     gaps = reg.run_evidence_gaps(session_dir=tmp_path, trace_path=_trace(tmp_path, events), workspace="")
@@ -110,11 +87,11 @@ def test_a_foldable_launch_names_the_neighbour_to_fold_into(tmp_path):
 
 def test_a_cheap_launch_is_not_worth_a_gap(tmp_path):
     """Below the per-step cost floor, folding it away does not pay for the round that would do it."""
-    events = [_step("step[VERIFY bs=3]", 0.0, 2000.0)]
+    events = [step("step[VERIFY bs=3]", 0.0, 2000.0)]
     ts = 1.0
     for i in range(10):
-        events.append(_kernel("split_k", ts, 14.0, 900 + i))
-        events.append(_kernel("reduce", ts + 14.0, 1.0, 1900 + i))
+        events.append(kernel("split_k", ts, 14.0, correlation=900 + i))
+        events.append(kernel("reduce", ts + 14.0, 1.0, correlation=1900 + i))
         ts += 30.0
 
     gaps = reg.run_evidence_gaps(session_dir=tmp_path, trace_path=_trace(tmp_path, events), workspace="")
@@ -139,10 +116,10 @@ def test_a_front_end_that_costs_nothing_raises_nothing(tmp_path):
 
 
 def test_one_census_cannot_bury_the_others(tmp_path):
-    events = [_step("step[VERIFY bs=3]", 0.0, 100_000.0)]
+    events = [step("step[VERIFY bs=3]", 0.0, 100_000.0)]
     ts = 1.0
     for i in range(40):
-        events.append(_kernel(f"glue_{i}", ts, 5.0, 900 + i))
+        events.append(kernel(f"glue_{i}", ts, 5.0, correlation=900 + i))
         ts += 20.0
     # Each distinct glue kernel has one neighbour, so every one of them qualifies.
     gaps = reg.run_evidence_gaps(session_dir=tmp_path, trace_path=_trace(tmp_path, events), workspace="")
@@ -167,12 +144,7 @@ def test_a_run_with_no_evidence_raises_no_gaps(tmp_path):
 def test_a_capture_directory_resolves_to_its_newest_file(tmp_path):
     captures = tmp_path / "torch_trace"
     captures.mkdir()
-    events = [
-        _step("step[EXTEND bs=1 toks=900]", 0.0, 100.0),
-        *[_kernel(f"e{i}", 1.0 + i, 5.0, i) for i in range(10)],
-        *[_launch(i) for i in range(10)],
-    ]
-    _trace(captures, events, name="rank0.trace.json")
+    _trace(captures, eager_step("step[EXTEND bs=1 toks=900]", start=0.0, count=10), name="rank0.trace.json")
 
     gaps = reg.run_evidence_gaps(session_dir=tmp_path, trace_path=captures, workspace="")
 
