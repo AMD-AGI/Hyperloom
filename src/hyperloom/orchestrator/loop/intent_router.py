@@ -1108,6 +1108,26 @@ class IntentRouter(CoordinatorCollaborator):
             cache_hit=cache_hit,
         )
 
+    async def _auto_reject(self, request_msg: Message, result: dict[str, Any]) -> None:
+        """Answer a request the Coordinator refuses before any handler runs, and record the failure."""
+        kind = str(request_msg.payload.get("kind") or "")
+        await self.bus.append_and_seq(
+            Message.new(
+                request_msg.to_agent,
+                request_msg.from_agent,
+                "response",
+                {
+                    "in_reply_to": request_msg.msg_id,
+                    "kind": f"{kind}_done",
+                    "status": "failed",
+                    "result": result,
+                    "source": "coordinator_auto_reject",
+                },
+                in_reply_to=request_msg.msg_id,
+            )
+        )
+        self._record_request_failure(kind=kind, request_msg_id=request_msg.msg_id, result=result)
+
     async def _handle_request(self, source: str, intent: Intent) -> None:
         """Route a REQUEST intent to its programmatic handler."""
         target_agent = intent.payload["target_agent"]
@@ -1127,52 +1147,26 @@ class IntentRouter(CoordinatorCollaborator):
 
         if target_agent == "kernel_agent":
             if not bool(self.shared_state.kernel_enabled):
-                _fail_result = {
-                    "status": "failed",
-                    "error_class": "agent_disabled",
-                    "error": "kernel_agent is disabled for this session (--no-kernel)",
-                }
-                await self.bus.append_and_seq(
-                    Message.new(
-                        target_agent,
-                        source,
-                        "response",
-                        {
-                            "in_reply_to": request_msg.msg_id,
-                            "kind": f"{kind}_done",
-                            "status": "failed",
-                            "result": _fail_result,
-                            "source": "coordinator_auto_reject",
-                        },
-                        in_reply_to=request_msg.msg_id,
-                    )
+                await self._auto_reject(
+                    request_msg,
+                    {
+                        "status": "failed",
+                        "error_class": "agent_disabled",
+                        "error": "kernel_agent is disabled for this session (--no-kernel)",
+                    },
                 )
-                self._record_request_failure(kind=kind, request_msg_id=request_msg.msg_id, result=_fail_result)
                 return
             handler = get_handler(kind)
             if handler is None:
-                _fail_result = {
-                    "status": "failed",
-                    "error_class": "unknown_kernel_kind",
-                    "error": f"no programmatic handler for kind={kind!r}",
-                    "valid_kinds": sorted(KERNEL_REQUEST_HANDLERS),
-                }
-                await self.bus.append_and_seq(
-                    Message.new(
-                        target_agent,
-                        source,
-                        "response",
-                        {
-                            "in_reply_to": request_msg.msg_id,
-                            "kind": f"{kind}_done",
-                            "status": "failed",
-                            "result": _fail_result,
-                            "source": "coordinator_auto_reject",
-                        },
-                        in_reply_to=request_msg.msg_id,
-                    )
+                await self._auto_reject(
+                    request_msg,
+                    {
+                        "status": "failed",
+                        "error_class": "unknown_kernel_kind",
+                        "error": f"no programmatic handler for kind={kind!r}",
+                        "valid_kinds": sorted(KERNEL_REQUEST_HANDLERS),
+                    },
                 )
-                self._record_request_failure(kind=kind, request_msg_id=request_msg.msg_id, result=_fail_result)
                 return
             params = intent.payload.get("params") or {}
             merged_payload = {**intent.payload, **params}
@@ -1340,27 +1334,14 @@ class IntentRouter(CoordinatorCollaborator):
                     await self._coord.writeback.record_integrate_keep(result)
                 self.shared_state.save(self.session_dir)
         else:
-            _fail_result = {
-                "status": "failed",
-                "error_class": "unknown_target_agent",
-                "error": f"no handler registered for target_agent={target_agent!r}",
-            }
-            await self.bus.append_and_seq(
-                Message.new(
-                    target_agent,
-                    source,
-                    "response",
-                    {
-                        "in_reply_to": request_msg.msg_id,
-                        "kind": f"{kind}_done",
-                        "status": "failed",
-                        "result": _fail_result,
-                        "source": "coordinator_auto_reject",
-                    },
-                    in_reply_to=request_msg.msg_id,
-                )
+            await self._auto_reject(
+                request_msg,
+                {
+                    "status": "failed",
+                    "error_class": "unknown_target_agent",
+                    "error": f"no handler registered for target_agent={target_agent!r}",
+                },
             )
-            self._record_request_failure(kind=kind, request_msg_id=request_msg.msg_id, result=_fail_result)
 
     async def _handle_extend_lease(self, source: str, intent: Intent) -> None:
         """Grant a running task more lease time."""

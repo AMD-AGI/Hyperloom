@@ -9,6 +9,7 @@ import json
 import os
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -758,3 +759,155 @@ def test_unverified_submission_rejected_without_hatch(monkeypatch):
         )
         is False
     )
+
+
+# Raw InferenceX -> measurement field mapping
+
+
+def _full_inferencex_payload() -> dict[str, Any]:
+    """A raw InferenceX result carrying every key the raw merge reads, each with a distinct value."""
+    return {
+        "output_throughput": 1761.6,
+        "request_throughput": 17.6,
+        "total_token_throughput": 3522.2,
+        "completed_requests": 640,
+        "duration_seconds": 120.5,
+        "mean_ttft_ms": 31.1,
+        "p99_ttft_ms": 32.2,
+        "mean_tpot_ms": 33.3,
+        "input_throughput": 34.4,
+        "p90_tpot_ms": 35.5,
+        "median_ttft_ms": 36.6,
+        "p90_ttft_ms": 37.7,
+        "median_tpot_ms": 38.8,
+        "e2e_norm_intvty_p90": 39.9,
+        "e2e_norm_intvty_p50": 40.1,
+        "request_error_rate": 0.25,
+        "mean_e2el_ms": 42.2,
+        "p99_e2el_ms": 43.3,
+        "num_prompts": 700,
+    }
+
+
+def _write_raw(path: Path, payload: dict[str, Any]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def test_raw_inferencex_keys_map_onto_their_measurement_fields(tmp_path):
+    """Every raw key lands on the measurement field named for it; distinct values catch a transposed pair."""
+    workspace = tmp_path / "ws"
+    raw_path = _write_raw(workspace / "result.json", _full_inferencex_payload())
+
+    measurement = extract_benchmark_measurement(None, workspace=workspace)
+
+    assert measurement["output_throughput"] == pytest.approx(1761.6)
+    assert measurement["request_throughput"] == pytest.approx(17.6)
+    assert measurement["total_token_throughput"] == pytest.approx(3522.2)
+    assert measurement["completed_requests"] == 640
+    assert measurement["duration_seconds"] == pytest.approx(120.5)
+    assert measurement["ttft_mean_ms"] == pytest.approx(31.1)
+    assert measurement["ttft_p99_ms"] == pytest.approx(32.2)
+    assert measurement["tpot_mean_ms"] == pytest.approx(33.3)
+    assert measurement["input_throughput"] == pytest.approx(34.4)
+    assert measurement["tpot_p90_ms"] == pytest.approx(35.5)
+    assert measurement["ttft_p50_ms"] == pytest.approx(36.6)
+    assert measurement["ttft_p90_ms"] == pytest.approx(37.7)
+    assert measurement["tpot_p50_ms"] == pytest.approx(38.8)
+    assert measurement["e2e_norm_intvty_p90"] == pytest.approx(39.9)
+    assert measurement["e2e_norm_intvty_p50"] == pytest.approx(40.1)
+    assert measurement["request_error_rate"] == pytest.approx(0.25)
+    assert measurement["e2el_mean_ms"] == pytest.approx(42.2)
+    assert measurement["e2el_p99_ms"] == pytest.approx(43.3)
+    assert measurement["requested_requests"] == 700
+    assert measurement["raw_result_path"] == str(raw_path)
+
+
+def test_raw_inferencex_falls_back_to_the_legacy_spellings(tmp_path):
+    """``mean_latency_ms`` / ``p99_latency_ms`` / ``completed`` / ``duration`` answer when the preferred key is absent."""
+    payload = _full_inferencex_payload()
+    for preferred in ("mean_e2el_ms", "p99_e2el_ms", "completed_requests", "duration_seconds"):
+        del payload[preferred]
+    payload.update(
+        {
+            "mean_latency_ms": 51.5,
+            "p99_latency_ms": 52.5,
+            "completed": 53,
+            "duration": 54.5,
+        }
+    )
+    workspace = tmp_path / "ws"
+    _write_raw(workspace / "result.json", payload)
+
+    measurement = extract_benchmark_measurement(None, workspace=workspace)
+
+    assert measurement["e2el_mean_ms"] == pytest.approx(51.5)
+    assert measurement["e2el_p99_ms"] == pytest.approx(52.5)
+    assert measurement["completed_requests"] == 53
+    assert measurement["duration_seconds"] == pytest.approx(54.5)
+
+
+def test_raw_inferencex_preferred_latency_keys_win_over_the_legacy_ones(tmp_path):
+    """With both spellings present the ``e2el`` pair answers, not the ``latency`` pair."""
+    payload = _full_inferencex_payload()
+    payload.update({"mean_latency_ms": 51.5, "p99_latency_ms": 52.5})
+    workspace = tmp_path / "ws"
+    _write_raw(workspace / "result.json", payload)
+
+    measurement = extract_benchmark_measurement(None, workspace=workspace)
+
+    assert measurement["e2el_mean_ms"] == pytest.approx(42.2)
+    assert measurement["e2el_p99_ms"] == pytest.approx(43.3)
+
+
+def test_submission_verdict_is_carried_with_its_reasons(tmp_path):
+    payload = _full_inferencex_payload()
+    payload["submission_valid"] = True
+    payload["submission_invalid_reasons"] = ["too_short", 7]
+    workspace = tmp_path / "ws"
+    _write_raw(workspace / "result.json", payload)
+
+    measurement = extract_benchmark_measurement(None, workspace=workspace)
+
+    assert measurement["submission_valid"] is True
+    assert measurement["submission_invalid_reasons"] == ["too_short", "7"]
+
+
+def test_a_scalar_submission_reason_becomes_a_one_element_list(tmp_path):
+    payload = _full_inferencex_payload()
+    payload["submission_valid"] = False
+    payload["submission_invalid_reasons"] = "scenario_mismatch"
+    workspace = tmp_path / "ws"
+    _write_raw(workspace / "result.json", payload)
+
+    measurement = extract_benchmark_measurement(None, workspace=workspace)
+
+    assert measurement["submission_valid"] is False
+    assert measurement["submission_invalid_reasons"] == ["scenario_mismatch"]
+
+
+def test_a_candidate_without_a_throughput_never_claims_the_raw_result_path(tmp_path):
+    """The filter runs before the merge, so an unparseable candidate contributes nothing at all."""
+    workspace = tmp_path / "ws"
+    _write_raw(workspace / "a_result.json", {"mean_ttft_ms": 99.0})
+    winner = _write_raw(workspace / "b_result.json", _full_inferencex_payload())
+
+    measurement = extract_benchmark_measurement(None, workspace=workspace)
+
+    assert measurement["raw_result_path"] == str(winner)
+    assert measurement["ttft_mean_ms"] == pytest.approx(31.1)
+
+
+def test_the_first_candidate_that_parses_a_throughput_owns_the_fields_it_filled(tmp_path):
+    """A filled field is never overwritten by a later candidate, and the path names the one that filled it first."""
+    workspace = tmp_path / "ws"
+    first = _write_raw(workspace / "a_result.json", {"output_throughput": 0.0, "mean_ttft_ms": 11.0})
+    _write_raw(workspace / "b_result.json", _full_inferencex_payload())
+
+    measurement = extract_benchmark_measurement(None, workspace=workspace)
+
+    assert measurement["raw_result_path"] == str(first)
+    assert measurement["output_throughput"] == pytest.approx(0.0)
+    assert measurement["ttft_mean_ms"] == pytest.approx(11.0)
+    assert measurement["request_throughput"] == pytest.approx(17.6)
