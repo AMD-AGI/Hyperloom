@@ -188,3 +188,9 @@ def test_parse_gpu_type_prefers_specific_tag():
     # MI325X is not shadowed by the MI300X substring rule.
     assert gpu_probe._parse_gpu_type("AMD Instinct MI325X") == "mi325x"
     assert gpu_probe._parse_gpu_type("nothing here") is None
+
+
+def test_parse_gpu_type_preserves_exact_r9700_for_topology_validation():
+    assert gpu_probe._parse_gpu_type("AMD Radeon AI PRO R9700") == "r9700"
+    assert gpu_probe._parse_gpu_type("AMD Radeon AI PRO R9700S") is None
+    assert gpu_probe._parse_gpu_type("gfx1201") is None

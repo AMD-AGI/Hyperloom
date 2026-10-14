@@ -54,6 +54,7 @@ from hyperloom.inference_optimizer.session.paths import asset_root, make_session
 from hyperloom.orchestrator.bus.storage import SqliteConnection
 
 _PROFILE_SGLANG_CONFIG = asset_root() / "assets" / "configs" / "profile_sglang.yaml"
+_PROFILE_VLLM_CONFIG = asset_root() / "assets" / "configs" / "profile_vllm.yaml"
 
 
 # fixtures
@@ -207,6 +208,21 @@ def test_materialize_config_injects_runner_type(tmp_path):
     with out.open() as f:
         rendered = yaml.safe_load(f)
     assert rendered["benchmark"]["runner_type"] == "mi355x"
+
+
+def test_r9700_baseline_and_profile_use_vllm_gfx12_runner(tmp_path, monkeypatch):
+    import yaml
+
+    monkeypatch.setenv("FRAMEWORK", "vllm")
+    for config_path in (_default_baseline_config(), _PROFILE_VLLM_CONFIG):
+        out = _materialize_config_with_envs(
+            config_path,
+            tmp_path / config_path.stem,
+            gpu_type="r9700",
+        )
+        rendered = yaml.safe_load(out.read_text())["benchmark"]
+        assert rendered["runner_type"] == "gfx12"
+        assert rendered["benchmark_script"] == "vllm_gfx12.sh"
 
 
 def test_materialize_config_forces_generic_benchmark_script(tmp_path):

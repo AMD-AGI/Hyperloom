@@ -42,6 +42,9 @@ def _repo_matches_targeted_build_component(repo_url: str, component: str) -> boo
 #: row never does, and must not answer for a build nobody has routed.
 _ROUTING_FIELDS: tuple[str, ...] = ("routed", "probe_task_id")
 
+#: Boards whose targeted-build (compiled / AITER) path has not been validated.
+_TARGETED_BUILD_UNVALIDATED_GPU_TYPES: frozenset[str] = frozenset({"r9700"})
+
 
 class EnablementBuild(CoordinatorCollaborator):
     """Escalates to a compiled build and routes the result back into the lane."""
@@ -81,6 +84,8 @@ class EnablementBuild(CoordinatorCollaborator):
             signature = verdict.signature
             framework = (getattr(state, "framework", "") or "").strip().lower()
             gpu_type = (getattr(state, "gpu_type", "") or "").strip().lower()
+            if gpu_type in _TARGETED_BUILD_UNVALIDATED_GPU_TYPES:
+                return
 
             # Two escalation triggers: 1.
             is_compiled_gap = is_targeted_build_candidate(signature, launch_log)
@@ -242,6 +247,9 @@ class EnablementBuild(CoordinatorCollaborator):
                 component = "vllm_source"
             framework = (getattr(state, "framework", "") or "").strip().lower() or "vllm"
             gpu_type = (getattr(state, "gpu_type", "") or "").strip().lower()
+            if gpu_type in _TARGETED_BUILD_UNVALIDATED_GPU_TYPES:
+                _consume_marker()
+                return
             repo_url = str(req.get("repo_url") or "").strip()
             ref = str(req.get("ref") or "").strip()
             source_pr_url = ""

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import re
 
 from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 
@@ -24,9 +25,20 @@ _GFX_TO_RUNNER: dict[str, str] = {
     "gfx950": "mi355x",
 }
 
+_RUNNER_SUPPORTED_FRAMEWORKS = {"gfx12": frozenset({"vllm"})}
+
 #: Re-exported from ``hyperloom.common`` so provenance and this module cannot
 #: disagree about which arch a board dispatches to.
 _AMD_GPU_DISPATCH_IDENTITIES = AMD_GPU_DISPATCH_IDENTITIES
+
+
+def _product_tag_matches(tag: str, text: str) -> bool:
+    """Match R9700 exactly while preserving legacy MI product matching."""
+    tag = str(tag or "").strip().upper()
+    text = str(text or "").upper()
+    if tag == "R9700":
+        return re.search(r"(?<![A-Z0-9])R9700(?![A-Z0-9])", text) is not None
+    return tag in text
 
 
 def _gpu_runner_type(gpu_type: str) -> str:
@@ -34,7 +46,22 @@ def _gpu_runner_type(gpu_type: str) -> str:
     normalized = str(gpu_type or "").strip().lower()
     if normalized in ("mi325x", "mi308x"):
         return "mi300x"
+    if normalized == "r9700":
+        return "gfx12"
     return normalized
+
+
+def _runner_framework_error(gpu_type: str, framework: str) -> str | None:
+    """Return why a constrained runner/framework pair is unavailable."""
+    runner = _gpu_runner_type(gpu_type)
+    framework = str(framework or "").strip().lower()
+    supported = _RUNNER_SUPPORTED_FRAMEWORKS.get(runner)
+    if not framework or not supported or framework in supported:
+        return None
+    return (
+        f"Magpie runner {runner!r} is currently validated only for "
+        f"{', '.join(sorted(supported))}; framework {framework!r} has no validated {runner} runner"
+    )
 
 
 def _resolve_gpu_type(
@@ -55,7 +82,7 @@ def _resolve_gpu_type(
 
 
 def _autodetect_gpu_type() -> str | None:
-    """Return mi300x|mi308x|mi325x|mi355x or None if undetectable."""
+    """Return a canonical supported board name, or ``None`` if undetectable."""
     import subprocess
 
     try:
@@ -66,7 +93,7 @@ def _autodetect_gpu_type() -> str | None:
             timeout=5,
         ).stdout.upper()
         for tag in _PRODUCT_TAGS:
-            if tag in out:
+            if _product_tag_matches(tag, out):
                 return tag.lower()
     except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError, OSError):
         # rocm-smi missing / slow / not permitted; fall through to the torch gcnArchName probe below (autodetect is

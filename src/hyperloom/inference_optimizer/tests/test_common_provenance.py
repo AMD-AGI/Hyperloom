@@ -48,6 +48,16 @@ def test_env_only_mapping():
     assert p["isl"] == 1024 and p["osl"] == 1024 and p["max_model_len"] == 2048
 
 
+def test_target_product_wins_over_runner_in_provenance():
+    p = build_provenance(
+        args=None,
+        env={"TARGET_GPU_TYPE": "r9700", "GPU_TYPE": "gfx12"},
+        probe=False,
+    )
+    assert p["gpu_type"] == "r9700"
+    assert p["gfx_arch"] == "gfx1201"
+
+
 def test_args_override_env():
     env = {"FRAMEWORK": "sglang", "GPU_TYPE": "MI300X", "TP": "8", "ISL": "512"}
     args = _ns(
