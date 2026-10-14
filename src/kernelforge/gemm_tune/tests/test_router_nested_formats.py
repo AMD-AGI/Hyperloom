@@ -39,10 +39,14 @@ def _fp8_attention():
     }
 
 
-_FP8_PER_TOKEN_MOE_DISPATCH = (
-    "[aiter] [fused_moe] using 2stage default for ('gfx950', 256, 64, 6144, 2048, 256, 8, <ActivationType.Silu: 0>, "
-    "'torch.bfloat16', 'torch.float8_e4m3fn', 'torch.float8_e4m3fn', 'QuantType.per_Token', True, False)"
-)
+def _fp8_moe_dispatch(quant_type):
+    return (
+        "[aiter] [fused_moe] using 2stage default for ('gfx950', 256, 64, 6144, 2048, 256, 8, <ActivationType.Silu: 0>, "
+        f"'torch.bfloat16', 'torch.float8_e4m3fn', 'torch.float8_e4m3fn', 'QuantType.{quant_type}', True, False)"
+    )
+
+
+_FP8_PER_TOKEN_MOE_DISPATCH = _fp8_moe_dispatch("per_Token")
 
 
 def _routed(profile, precision, tmp_path, quant_type="auto", log_line="gemm_a8w8_blockscale_bpreshuffle"):
@@ -95,6 +99,11 @@ def test_the_logged_moe_dispatch_outranks_the_declared_expert_format(tmp_path):
 
 def test_a_format_precision_is_trusted_over_the_logged_moe_dispatch(tmp_path):
     specs = _routed(_quark_moe_profile(), "mxfp4", tmp_path, log_line=_FP8_PER_TOKEN_MOE_DISPATCH)
+    assert "fmoe_ck" in _running(specs)
+
+
+def test_a_logged_quant_type_no_moe_tuner_handles_leaves_the_declared_format_to_decide(tmp_path):
+    specs = _routed(_quark_moe_profile(), "quark", tmp_path, log_line=_fp8_moe_dispatch("per_128x128"))
     assert "fmoe_ck" in _running(specs)
 
 

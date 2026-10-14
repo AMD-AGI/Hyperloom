@@ -202,6 +202,9 @@ _PRECISION_BY_AITER_DTYPE: dict[str, str] = {
     "torch.bfloat16": "bf16",
     "torch.float16": "fp16",
 }
+# The aiter QuantType members, lower-cased, that _normalize_quant_type maps onto a MoE tuner arm. Like an unlisted
+# dtype, any other member is no evidence.
+_MOE_AITER_QUANT_TYPES = frozenset({"no", "per_tensor", "per_token", "per_1x32", "per_1x128"})
 
 
 def _logged_moe_format(kernel_signature_log: str | None) -> tuple[str, str] | None:
@@ -211,10 +214,13 @@ def _logged_moe_format(kernel_signature_log: str | None) -> tuple[str, str] | No
     from .evidence import moe_dispatch_keys, parse_log_file
 
     keys = moe_dispatch_keys(parse_log_file(kernel_signature_log))
-    precision = _PRECISION_BY_AITER_DTYPE.get(keys[0]["q_dtype_w"]) if keys else None
-    if precision is None:
+    if not keys:
         return None
-    return precision, _normalize_quant_type(keys[0]["q_type"].rpartition(".")[2])
+    precision = _PRECISION_BY_AITER_DTYPE.get(keys[0]["q_dtype_w"])
+    quant_type = keys[0]["q_type"].rpartition(".")[2].lower()
+    if precision is None or quant_type not in _MOE_AITER_QUANT_TYPES:
+        return None
+    return precision, _normalize_quant_type(quant_type)
 
 
 def _profile_can_derive_dense(profile: ModelProfile) -> bool:
