@@ -443,7 +443,9 @@ def _check_chunk_quality(
             if dur > 0:
                 return max(0.0, min(1.0, busy / dur))
         except (TypeError, ValueError, ZeroDivisionError):
-            pass
+            # Best-effort parsing: if fallback fields are missing/invalid,
+            # treat busy ratio as unavailable for this row.
+            return None
         return None
 
     def _num_gpu_events(row: "dict[str, str] | None") -> int:
