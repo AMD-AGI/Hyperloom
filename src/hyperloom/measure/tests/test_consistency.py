@@ -112,13 +112,46 @@ def test_identical_measurements_pass_and_every_item_leaves_a_complete_record(rig
     assert [x["type"] for x in lines] == ["item", "item", "summary"]
     item = lines[0]
     assert set(item) == {
-        "type", "id", "compared", "local", "hosted", "throughput_diff_pct", "completed_equal",
+        "type", "id", "compared", "local", "hosted", "throughput_diff_pct", "throughput_diff_signed_pct", "completed_equal",
         "error_rate_equal", "rebuilt_files_equal", "signature_verified", "problems",
     }  # fmt: skip
     assert item["local"]["output_throughput"] == item["hosted"]["output_throughput"] == 5000.0
     assert item["local"]["completed_requests"] == item["hosted"]["completed_requests"] == [64]
     assert item["signature_verified"] is True and item["rebuilt_files_equal"] is None and item["problems"] == []
     assert lines[-1]["verdict"] == "PASS"
+
+
+def test_each_side_records_where_and_when_it_ran_and_the_signed_difference(rig, tmp_path) -> None:
+    from datetime import datetime as _dt
+
+    def datetime_of(text: str):
+        return _dt.fromisoformat(text.replace("Z", "+00:00"))
+
+    r = rig()
+    items = [
+        _item(tmp_path, "slower", fake_throughput=4950, local_throughput=5000),
+        _item(tmp_path, "faster", fake_throughput=5050, local_throughput=5000),
+    ]
+    _, lines = _check(r, tmp_path, items)
+    slower, faster = lines[0], lines[1]
+    assert slower["throughput_diff_signed_pct"] == pytest.approx(-1.0)
+    assert faster["throughput_diff_signed_pct"] == pytest.approx(1.0)
+    assert slower["throughput_diff_pct"] == pytest.approx(1.0), "the absolute field is unchanged"
+    hosted, local = slower["hosted"], slower["local"]
+    assert hosted["node_name"] == "node-a" and hosted["sandbox_id"].startswith("lsb-") and hosted["gpu_ids"]
+    assert local["sandbox_id"] is None and local["gpu_ids"] == [] and local["node_name"] is None
+    for side in (local, hosted):
+        start, end = (datetime_of(side[k]) for k in ("started_at", "finished_at"))
+        assert start <= end
+    assert datetime_of(local["finished_at"]) <= datetime_of(hosted["started_at"]), "the sides ran one after the other"
+
+
+def test_a_failed_side_still_carries_its_time_and_its_node(rig, tmp_path) -> None:
+    r = rig()
+    _, lines = _check(r, tmp_path, [_item(tmp_path, "t", fake_mode="node_fault")])
+    hosted = lines[0]["hosted"]
+    assert hosted["started_at"] and hosted["finished_at"] and hosted["node_name"] == "node-a"
+    assert lines[0]["throughput_diff_signed_pct"] is None
 
 
 def test_the_two_sides_run_one_after_the_other_never_together(rig, tmp_path) -> None:

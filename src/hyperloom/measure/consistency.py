@@ -12,11 +12,22 @@ Every test is one line of ``consistency.jsonl``; the last line is the summary ag
 The verdict is ``PASS`` only when every test was compared and every criterion holds. A test that could not be compared
 (either side failed, a report is missing, the rebuilt-file hashes were not available) counts against the verdict, and a
 checklist with no test is ``NO_DATA``: nothing is ever reported as consistent because nothing was looked at.
+
+``consistency.jsonl`` schema. An item line (``"type": "item"``) has ``id``, ``compared``, ``throughput_diff_pct`` (absolute,
+relative to the local value), ``throughput_diff_signed_pct`` (hosted minus local, signed, same base), ``completed_equal``,
+``error_rate_equal``, ``rebuilt_files_equal``, ``signature_verified``, ``problems`` and one object per side under
+``local`` and ``hosted``. A side has ``returncode``, ``output_throughput``, ``completed_requests``, ``request_error_rate``,
+``problem``, ``log_dir`` and where and when it ran: ``node_name``, ``gpu_ids`` (list), ``sandbox_id`` (hosted side only,
+``null`` locally), ``started_at`` and ``finished_at`` (ISO-8601 UTC, ``...Z``; the wall time around the side's run, set
+also when the side failed). Fields that are not known are ``null`` (``gpu_ids`` is then ``[]``). The last line is the
+summary (``"type": "summary"``).
 """
 
 from __future__ import annotations
 
 import argparse
+import dataclasses
+import datetime
 import importlib
 import json
 import math
@@ -99,6 +110,11 @@ class Side:
     error_rate: tuple[float | None, ...] = ()
     problem: str | None = None
     log_dir: str | None = None
+    node_name: str | None = None
+    gpu_ids: tuple[int, ...] = ()
+    sandbox_id: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
 
     @property
     def usable(self) -> bool:
@@ -120,6 +136,12 @@ class ItemReport:
     problems: tuple[str, ...]
 
     @property
+    def throughput_diff_signed_pct(self) -> float | None:
+        if not (self.local.usable and self.hosted.usable):
+            return None
+        return _signed_percent_diff(self.local.throughput, self.hosted.throughput)  # type: ignore[arg-type]
+
+    @property
     def compared(self) -> bool:
         return (
             self.local.usable and self.hosted.usable and not any(p.startswith("not_comparable") for p in self.problems)
@@ -133,6 +155,7 @@ class ItemReport:
             LOCAL: _side_document(self.local),
             HOSTED: _side_document(self.hosted),
             "throughput_diff_pct": self.throughput_diff_pct,
+            "throughput_diff_signed_pct": self.throughput_diff_signed_pct,
             "completed_equal": self.completed_equal,
             "error_rate_equal": self.error_rate_equal,
             "rebuilt_files_equal": self.rebuilt_files_equal,
@@ -149,6 +172,11 @@ def _side_document(side: Side) -> dict[str, Any]:
         "request_error_rate": list(side.error_rate),
         "problem": side.problem,
         "log_dir": side.log_dir,
+        "node_name": side.node_name,
+        "gpu_ids": list(side.gpu_ids),
+        "sandbox_id": side.sandbox_id,
+        "started_at": side.started_at,
+        "finished_at": side.finished_at,
     }
 
 
@@ -288,26 +316,44 @@ def _compare_files(item: ChecklistItem, hosted_dir: Path) -> tuple[bool | None, 
 # -- one test, both ways -------------------------------------------------------------------------------------------
 
 
-def _run_side(backend: MeasurementBackend, call: TestCall, log_dir: Path) -> tuple[Side, TestOutcome | None]:
+def _utc_now() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _run_side(
+    backend: MeasurementBackend, call: TestCall, log_dir: Path, *, hosted: bool = False
+) -> tuple[Side, TestOutcome | None]:
     log_dir.mkdir(parents=True, exist_ok=True)
+    started = _utc_now()
+    outcome: TestOutcome | None = None
     try:
         outcome = backend.run_test(call)
+        side = read_side(outcome, log_dir)
+        _write_outcome(log_dir, outcome)
     except subprocess.TimeoutExpired as exc:
-        return Side(None, problem=f"timeout: {exc.timeout}s", log_dir=str(log_dir)), None
+        side = Side(None, problem=f"timeout: {exc.timeout}s", log_dir=str(log_dir))
     except Exception as exc:  # noqa: BLE001 - one broken side must not stop the checklist; it is recorded
-        return Side(None, problem=f"raised: {type(exc).__name__}: {exc}", log_dir=str(log_dir)), None
-    (log_dir / "outcome.json").write_text(
-        json.dumps(
-            {
-                "returncode": outcome.returncode,
-                "stdout": outcome.stdout,
-                "stderr": outcome.stderr,
-                "reason": outcome.failure_reason,
-            }
-        ),
-        encoding=_UTF8,
+        side = Side(None, problem=f"raised: {type(exc).__name__}: {exc}", log_dir=str(log_dir))
+    facts = outcome.sandbox if outcome is not None else None
+    placed = dataclasses.replace(
+        side,
+        node_name=facts.node_name if facts else None,
+        gpu_ids=tuple(facts.gpu_ids) if facts else (),
+        sandbox_id=facts.sandbox_id if facts and hosted else None,
+        started_at=started,
+        finished_at=_utc_now(),
     )
-    return read_side(outcome, log_dir), outcome
+    return placed, outcome
+
+
+def _write_outcome(log_dir: Path, outcome: TestOutcome) -> None:
+    document = {
+        "returncode": outcome.returncode,
+        "stdout": outcome.stdout,
+        "stderr": outcome.stderr,
+        "reason": outcome.failure_reason,
+    }
+    (log_dir / "outcome.json").write_text(json.dumps(document), encoding=_UTF8)
 
 
 def _signature_verified(hosted: Any, request_id: str, outcome: TestOutcome | None) -> bool:
@@ -315,6 +361,13 @@ def _signature_verified(hosted: Any, request_id: str, outcome: TestOutcome | Non
         return False
     record = hosted.journal.latest(request_id)
     return bool(record is not None and record.state == "finished" and record.extra.get("verified") is True)
+
+
+def _signed_percent_diff(local: float, hosted: float) -> float | None:
+    """Hosted minus local, in percent of the local value (``None`` when the local value is zero)."""
+    if local == 0:
+        return None
+    return (hosted - local) / abs(local) * _PERCENT
 
 
 def _percent_diff(local: float, hosted: float) -> float | None:
@@ -329,7 +382,7 @@ def check_item(item: ChecklistItem, root: Path, local: MeasurementBackend, hoste
     hosted_id = f"{item.id}-{HOSTED}"
     hosted_call = item.call(root / item.id / HOSTED, hosted_id)
     local_side, _ = _run_side(local, local_call, root / item.id / LOCAL)
-    hosted_side, hosted_outcome = _run_side(hosted, hosted_call, root / item.id / HOSTED)
+    hosted_side, hosted_outcome = _run_side(hosted, hosted_call, root / item.id / HOSTED, hosted=True)
     verified = _signature_verified(hosted, hosted_id, hosted_outcome)
     problems = [
         f"{name}: {side.problem}" for name, side in ((LOCAL, local_side), (HOSTED, hosted_side)) if side.problem
