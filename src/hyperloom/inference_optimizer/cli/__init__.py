@@ -200,9 +200,9 @@ def _apply_operator_supplied_paths(args: Any, framework: str) -> None:
     if framework == "xdit":
         xdit_name = str(getattr(args, _XDIT_MODEL_NAME_ATTR, None) or "").strip()
         already_xdit = os.environ.get(_XDIT_MODEL_NAME_ENV, "").strip()
-        if xdit_name:
+        if xdit_name and not already_xdit:
             os.environ[_XDIT_MODEL_NAME_ENV] = xdit_name
-        elif not already_xdit:
+        elif not xdit_name and not already_xdit:
             fatal.append(
                 "--xdit-model-name is required for xDiT runs. "
                 "Pass the HuggingFace repo ID, e.g. 'black-forest-labs/FLUX.2-dev'."

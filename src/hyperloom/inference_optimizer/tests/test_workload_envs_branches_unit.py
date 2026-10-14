@@ -801,16 +801,19 @@ def test_the_cli_and_the_orchestrator_read_one_set_of_workload_defaults():
 # --- xDiT profile materialization: patch gate, flags, and status envs ---
 
 
-def _xdit_profile_bench(tmp_path, monkeypatch, *, patch_ok):
+def _xdit_profile_bench(tmp_path, monkeypatch, *, patch_ok, workload_args=None):
     from hyperloom.orchestrator.actions.executors import _server_patcher
 
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "1")
     monkeypatch.setattr(_server_patcher, "ensure_xdit_patched_for_tracelens", lambda *a, **kw: patch_ok)
+    envs = {"PROFILE": "1"}
+    if workload_args is not None:
+        envs["EXTRA_XDIT_ARGS"] = workload_args
     src = tmp_path / "cfg.yaml"
     src.write_text(
-        yaml.safe_dump({"benchmark": {"framework": "xdit", "model": "/m", "envs": {"PROFILE": "1"}}}),
+        yaml.safe_dump({"benchmark": {"framework": "xdit", "model": "/m", "envs": envs}}),
         encoding="utf-8",
     )
     return _materialize(src, tmp_path / "out")
@@ -832,6 +835,16 @@ def test_xdit_profile_unpatched_falls_back_to_safe_flags(monkeypatch, tmp_path):
     assert "--profile_capture_phase" not in args
     assert bench["envs"]["HYPERLOOM_TRACELENS_PATCH_STATUS"] == "unavailable"
     assert bench["envs"]["HYPERLOOM_PROFILE_DEGRADED_REASON"] == we._TRACELENS_PATCH_UNAVAILABLE
+
+
+def test_xdit_profile_preserves_config_declared_workload_args(monkeypatch, tmp_path):
+    workload = "--model tencent/HunyuanVideo --num_frames 5 --num_inference_steps 4"
+    bench = _xdit_profile_bench(tmp_path, monkeypatch, patch_ok=True, workload_args=workload)
+    args = bench["envs"]["EXTRA_XDIT_ARGS"]
+    assert "--model tencent/HunyuanVideo" in args
+    assert "--num_frames 5" in args
+    assert "--num_inference_steps 4" in args
+    assert "--profile_capture_phase" in args
 
 
 def test_xdit_profile_kill_switch_skips_patcher(monkeypatch, tmp_path):

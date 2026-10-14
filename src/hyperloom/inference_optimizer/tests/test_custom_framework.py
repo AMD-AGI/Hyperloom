@@ -401,6 +401,14 @@ class TestLaunchValidation:
         _apply_operator_supplied_paths(args, "custom")
         assert os.environ["FRAMEWORK_REPO_PATH"] == "/already/exported"
 
+    def test_an_exported_xdit_model_name_outranks_the_flag(self, monkeypatch):
+        """XDIT_MODEL_NAME follows the same env-wins rule as the path overrides."""
+        from hyperloom.inference_optimizer.cli import _apply_operator_supplied_paths
+
+        monkeypatch.setenv("XDIT_MODEL_NAME", "black-forest-labs/FLUX.2-dev")
+        _apply_operator_supplied_paths(self._args(xdit_model_name="stale/override"), "xdit")
+        assert os.environ["XDIT_MODEL_NAME"] == "black-forest-labs/FLUX.2-dev"
+
 
 class TestEntrypointFailFast:
     def _args(self, **kw):

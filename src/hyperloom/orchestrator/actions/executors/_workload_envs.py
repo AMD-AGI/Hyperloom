@@ -1576,10 +1576,14 @@ def materialize_config_with_envs(
 
         xdit_patch_attempted = _tracelens_patch_enabled()
         xdit_patched = xdit_patch_attempted and ensure_xdit_patched_for_tracelens()
-        if xdit_patched:
-            envs["EXTRA_XDIT_ARGS"] = "--profile_wait 1 --profile_capture_phase --profile_with_stack"
-        else:
-            envs["EXTRA_XDIT_ARGS"] = "--profile_wait 1"
+        # Append to the config-declared runner args (``--model``, frame/step
+        # counts) rather than replacing them, so the profile captures the same
+        # workload the baseline measured -- mirroring the vLLM path below.
+        profiler_args = (
+            "--profile_wait 1 --profile_capture_phase --profile_with_stack" if xdit_patched else "--profile_wait 1"
+        )
+        existing_xdit_args = str(envs.get("EXTRA_XDIT_ARGS", "")).strip()
+        envs["EXTRA_XDIT_ARGS"] = f"{existing_xdit_args} {profiler_args}".strip()
         _record_tracelens_patch_status(
             envs,
             attempted=xdit_patch_attempted,
