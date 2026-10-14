@@ -92,6 +92,7 @@ from ._apply_feedback import ApplyFeedback, build_apply_feedback
 from ._git import _git_head_sha, _run_git_cp
 from ._integrate_attempt import IntegrateAttempt
 from ._setup_replay import replay_setup_commands
+from .source_tree_identity import new_recovery_record
 from ._patch_source_pr import (
     DEFAULT_DIFF_FETCH_TIMEOUT_SEC,
     _candidate_slug,
@@ -2674,13 +2675,7 @@ class IntegratePatchExecutor:
         recovery_parent = runs_dir(self.session_dir, "integrate_patch", attempt.task_id)
         recovery_parent.mkdir(parents=True, exist_ok=True)
         recovery_root = Path(tempfile.mkdtemp(prefix="recovery-", dir=recovery_parent)).resolve()
-        recovery: dict[str, Any] = {
-            "version": 1,
-            "phase": "before_stash",
-            "git_head": git_head,
-            "stash_oid": "",
-            "root": str(recovery_root),
-        }
+        recovery = new_recovery_record(framework_root, git_head=git_head, recovery_root=recovery_root)
         # Write pending_integrate sentinel before any framework tree mutation.
         # The Coordinator clears this after promoting the final result.
         # shared_state.save() is called here (executor owns the sentinel write;
