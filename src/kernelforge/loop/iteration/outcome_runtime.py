@@ -267,6 +267,9 @@ class OutcomeMixin:
             "iteration_result",
             result.iteration,
             decision=resolved_decision,
+            # The agent's own reason for this candidate and decision, for trajectory comparison; absent when no
+            # agent ran (baseline) or it returned nothing.
+            rationale=(result.agent_rationale or "").replace("\n", " ").strip()[:500] or None,
             plan=(plan or "").strip()[:120] or None,
             # The mode this iteration actually ran under, which is the direction identity the empty-diff streak is
             # counted against.
