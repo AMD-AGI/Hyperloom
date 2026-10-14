@@ -202,7 +202,9 @@ async def test_agentx_handoff_keeps_supported_schema_and_frozen_launch_controls(
 
     assert handoff["schema_version"] == 3
     assert handoff["bench_client"] == "auto"
-    assert handoff["bench_launcher"] == "native"
+    # The builtin is resolvable (asserted next), so GEAK derives the Magpie
+    # launcher from launch_server_script and Hyperloom leaves bench_launcher unset.
+    assert "bench_launcher" not in handoff
     assert not {"bench_client_config", "benchmark_mode", "workload_identity"} & handoff.keys()
     assert handoff["launch_server_script"] == str(tmp_path / "InferenceX" / "benchmarks" / f"{framework}_mi355x.sh")
     recipe = yaml.safe_load(Path(coord.shared_state.baseline_config_path).read_text(encoding="utf-8"))
@@ -282,6 +284,25 @@ async def test_agentx_handoff_forwards_the_recipe_measured_server_launch(
     }
     assert handoff["accepted_env"] == "ACCEPTED_SETTING=1"
     assert handoff["mem_fraction"] == 0.95
+    # Builtin resolvable here too, so the launcher is derived, not frozen native.
+    assert "bench_launcher" not in handoff
+
+
+@pytest.mark.asyncio
+async def test_agentx_handoff_freezes_native_when_no_builtin_is_resolvable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # With the AgentX client in benchmark_script and no resolvable server builtin
+    # on disk, GEAK has no Magpie server phase to launch: handing it the client
+    # would boot/replay/teardown and return no pid. Hyperloom therefore omits
+    # launch_server_script and freezes the launcher to native, so GEAK boots from
+    # baseline_env_spec instead.
+    coord = _coord(tmp_path, framework="atom")
+    (tmp_path / "InferenceX" / "benchmarks" / "atom_mi355x.sh").unlink()
+
+    handoff = await _handoff(coord, monkeypatch)
+
+    assert "launch_server_script" not in handoff
     assert handoff["bench_launcher"] == "native"
 
 

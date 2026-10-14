@@ -1493,10 +1493,20 @@ class KernelPhase(CoordinatorCollaborator):
         if env_spec:
             handoff["baseline_env_spec"] = env_spec
         if agentx:
-            # An agentic recipe owns the whole server lifecycle and has no Magpie
-            # server phase, so GEAK launches natively from baseline_env_spec.
-            handoff["bench_launcher"] = "native"
             log.info("GEAK results remain proposal proxies; canonical AgentX validation remains in Hyperloom.")
+            # The AgentX client (aiperf_client.sh) is not a server-only script: run
+            # under MAGPIE_RUN_PHASE=server it boots, replays, then tears the server
+            # down, returning no pid. So force native ONLY when we could not name
+            # the builtin the client delegates to. When we DID resolve it above,
+            # hand GEAK that builtin (set as ``launch_server_script``) and let GEAK
+            # pick the launcher from it: the builtin is a real Magpie server phase
+            # (writes a pid) and carries the non-flag presets -- platform kernel
+            # preset, --trust-remote-code, gpu-mem-util default -- that the
+            # accepted-flags handoff cannot recover. baseline_env_spec still folds
+            # the recorded EXTRA_ATOM_ARGS, so block-size / MTP / spec-decode stay
+            # aligned on either launcher.
+            if not launch_server_script:
+                handoff["bench_launcher"] = "native"
 
         out_dir = self.session_dir / "geak"
         out_dir.mkdir(parents=True, exist_ok=True)
