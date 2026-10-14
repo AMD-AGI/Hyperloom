@@ -22,11 +22,11 @@ import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 from hyperloom.measure import fsafe
 from hyperloom.measure.docs import DocumentError, parse_json_object
-from hyperloom.measure.manifest import RESERVED_NAMES, RESULT_SCHEMA, ResultManifest, manifest_sha256
+from hyperloom.measure.manifest import RESERVED_NAMES, RESULT_SCHEMA, ManifestFile, ResultManifest, manifest_sha256
 from hyperloom.measure.signing import SigningError, public_key_fingerprint, verify
 
 MANIFEST_NAME, SIGNATURE_NAME = RESERVED_NAMES
@@ -49,6 +49,7 @@ class RejectReason(str, Enum):
     MANIFEST_INVALID = "manifest_invalid"
     REQUEST_ID_MISMATCH = "request_id_mismatch"
     SPEC_FINGERPRINT_MISMATCH = "spec_fingerprint_mismatch"
+    SPEC_HASH_MISMATCH = "spec_hash_mismatch"
     SANDBOX_MISMATCH = "sandbox_mismatch"
     TOO_LARGE = "too_large"
     FILE_MISSING = "file_missing"
@@ -103,6 +104,7 @@ def verify_bundle(
     public_key_pem: str,
     request_id: str,
     spec_fingerprint: str,
+    spec_sha256: str | None,
     sandbox_id: str,
     max_total_bytes: int | None = None,
 ) -> VerifiedBundle:
@@ -110,7 +112,8 @@ def verify_bundle(
 
     ``public_key_pem`` must come from the sandbox information the platform reported, never from the bundle.
     ``sandbox_id`` is the sandbox the bundle was read from: a bundle signed by the right key but made in another
-    sandbox is a replay and is refused.
+    sandbox is a replay and is refused. ``spec_sha256`` is the hash of the exact bytes written to ``/in/spec.json``;
+    ``None`` skips that comparison and is for a caller that only holds the fingerprint (a record book entry).
     """
     root_fd = _open_staging(Path(staging_dir))
     try:
@@ -118,7 +121,7 @@ def verify_bundle(
         signature = _read_small(root_fd, SIGNATURE_NAME, MAX_SIGNATURE_BYTES, RejectReason.SIGNATURE_MISSING)
         fingerprint = _check_signature(manifest_raw, signature, public_key_pem)
         manifest, document = _parse_manifest(manifest_raw)
-        _check_identity(manifest, fingerprint, request_id, spec_fingerprint, sandbox_id)
+        _check_identity(manifest, fingerprint, request_id, spec_fingerprint, spec_sha256, sandbox_id)
         if max_total_bytes is not None and manifest.total_size() > max_total_bytes:
             raise ResultRejected(RejectReason.TOO_LARGE, f"{manifest.total_size()} > {max_total_bytes}")
         _check_files(root_fd, manifest)
@@ -143,6 +146,7 @@ def reverify_record(
     sandbox_id: str,
     manifest_sha256_expected: str,
     signing_key_fingerprint: str,
+    spec_sha256: str | None = None,
 ) -> VerifiedBundle:
     """Check a record book entry against its archived bundle before a decision rests on it (L26).
 
@@ -154,6 +158,7 @@ def reverify_record(
         public_key_pem=public_key_pem,
         request_id=request_id,
         spec_fingerprint=spec_fingerprint,
+        spec_sha256=spec_sha256,
         sandbox_id=sandbox_id,
     )
     if bundle.manifest_sha256 != manifest_sha256_expected:
@@ -214,7 +219,12 @@ def _parse_manifest(manifest_raw: bytes) -> tuple[ResultManifest, dict[str, Any]
 
 
 def _check_identity(
-    manifest: ResultManifest, fingerprint: str, request_id: str, spec_fingerprint: str, sandbox_id: str
+    manifest: ResultManifest,
+    fingerprint: str,
+    request_id: str,
+    spec_fingerprint: str,
+    spec_sha256: str | None,
+    sandbox_id: str,
 ) -> None:
     if manifest.runner.signing_key_fingerprint != fingerprint:
         raise ResultRejected(RejectReason.KEY_FINGERPRINT_MISMATCH, "the manifest names another signing key")
@@ -222,6 +232,8 @@ def _check_identity(
         raise ResultRejected(RejectReason.REQUEST_ID_MISMATCH, "the manifest is for another request")
     if manifest.spec_fingerprint != spec_fingerprint:
         raise ResultRejected(RejectReason.SPEC_FINGERPRINT_MISMATCH, "the manifest measured another spec")
+    if spec_sha256 is not None and manifest.spec_sha256 != spec_sha256:
+        raise ResultRejected(RejectReason.SPEC_HASH_MISMATCH, "the manifest measured other spec bytes")
     if manifest.runner.sandbox_id != sandbox_id:
         raise ResultRejected(RejectReason.SANDBOX_MISMATCH, "the manifest was made in another sandbox")
 
@@ -279,85 +291,150 @@ def materialize(bundle: VerifiedBundle, output_dir: Path) -> None:
 
     Each file is re-read from the staging directory through the manifest's size and hash while it is copied to a
     hidden directory inside ``output_dir``; only when every file has passed are they linked into place. A name that
-    already exists, or a byte that changed since :func:`verify_bundle`, leaves ``output_dir`` as it was.
+    already exists, a symlink anywhere on a destination path, or a byte that changed since :func:`verify_bundle`
+    leaves ``output_dir`` as it was. Every destination is reached through directory descriptors opened without
+    following symlinks, so a link planted in ``output_dir`` cannot redirect a write outside it.
     """
     if bundle._seal is not _SEAL:
         raise ResultRejected(RejectReason.NOT_VERIFIED, "the bundle was not produced by verify_bundle")
     output = Path(output_dir)
-    files = bundle.result.files
-    for entry in files:
-        if os.path.lexists(output / entry.path):
-            raise MaterializeError(f"{entry.path} already exists in the output directory")
     output.mkdir(parents=True, exist_ok=True)
-    scratch = output / f".hl-materialize-{uuid.uuid4().hex}"
-    scratch.mkdir(mode=0o700)
-    placed: list[Path] = []
-    created_dirs: list[Path] = []
+    out_fd = os.open(output, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    scratch_name = f".hl-materialize-{uuid.uuid4().hex}"
     try:
-        _stage_files(bundle, scratch)
-        for entry in files:
-            _place(scratch / entry.path, output / entry.path, placed, created_dirs)
-    except BaseException:
-        for path in reversed(placed):
-            path.unlink(missing_ok=True)
-        for directory in reversed(created_dirs):
-            _remove_if_empty(directory)
-        raise
+        _refuse_existing(out_fd, bundle.result.files)
+        os.mkdir(scratch_name, 0o700, dir_fd=out_fd)
+        try:
+            scratch_fd = os.open(
+                scratch_name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=out_fd
+            )
+            try:
+                _stage_files(bundle, scratch_fd)
+                _place_all(bundle.result.files, scratch_fd, out_fd)
+            finally:
+                os.close(scratch_fd)
+        finally:
+            shutil.rmtree(output / scratch_name, ignore_errors=True)
     finally:
-        shutil.rmtree(scratch, ignore_errors=True)
+        os.close(out_fd)
 
 
-def _stage_files(bundle: VerifiedBundle, scratch: Path) -> None:
+def _refuse_existing(out_fd: int, files: tuple[ManifestFile, ...]) -> None:
+    for entry in files:
+        try:
+            taken = fsafe.exists_beneath(out_fd, entry.path)
+        except fsafe.UnsafeEntry:
+            raise MaterializeError(f"{entry.path} lies behind a symlink in the output directory") from None
+        if taken:
+            raise MaterializeError(f"{entry.path} already exists in the output directory")
+
+
+def _stage_files(bundle: VerifiedBundle, scratch_fd: int) -> None:
     root_fd = _open_staging(bundle.staging_dir)
     try:
         for entry in bundle.result.files:
-            target = scratch / entry.path
-            target.parent.mkdir(parents=True, exist_ok=True)
-            _copy_checked(root_fd, entry.path, target, entry.size, entry.sha256)
+            *parents, name = entry.path.split("/")
+            parent = fsafe.open_dir_beneath(scratch_fd, parents, created=[])
+            try:
+                _copy_checked(root_fd, entry, parent, name)
+            finally:
+                os.close(parent)
     finally:
         os.close(root_fd)
 
 
-def _copy_checked(root_fd: int, relative: str, target: Path, size: int, sha256: str) -> None:
+def _copy_checked(root_fd: int, entry: ManifestFile, parent: int, name: str) -> None:
     digest, total = hashlib.sha256(), 0
-    source = _open_listed(root_fd, relative)
+    source = _open_listed(root_fd, entry.path)
     try:
-        with open(target, "xb") as out:
+        target = fsafe.create_exclusive(parent, name)
+        try:
             for chunk in fsafe.stream(source):
                 digest.update(chunk)
                 total += len(chunk)
-                out.write(chunk)
+                os.write(target, chunk)
+        finally:
+            os.close(target)
     finally:
         os.close(source)
-    _compare(relative, total, digest.hexdigest(), size, sha256)
+    _compare(entry.path, total, digest.hexdigest(), entry.size, entry.sha256)
 
 
-def _place(source: Path, destination: Path, placed: list[Path], created_dirs: list[Path]) -> None:
-    missing = [p for p in reversed(destination.parents) if not p.exists()]
-    for directory in missing:
-        directory.mkdir()
-        created_dirs.append(directory)
+def _place_all(files: tuple[ManifestFile, ...], scratch_fd: int, out_fd: int) -> None:
+    placed: list[str] = []
+    created: list[str] = []
     try:
-        os.link(source, destination)
+        for entry in files:
+            _place(entry.path, scratch_fd, out_fd, created)
+            placed.append(entry.path)
+    except BaseException:
+        _roll_back(out_fd, placed, created)
+        raise
+
+
+def _place(rel: str, scratch_fd: int, out_fd: int, created: list[str]) -> None:
+    *parents, name = rel.split("/")
+    source_parent = fsafe.open_dir_beneath(scratch_fd, parents)
+    try:
+        try:
+            destination = fsafe.open_dir_beneath(out_fd, parents, created=created)
+        except fsafe.UnsafeEntry:
+            raise MaterializeError(f"{rel} lies behind a symlink in the output directory") from None
+        try:
+            _link_or_copy(source_parent, destination, name)
+        finally:
+            os.close(destination)
+    finally:
+        os.close(source_parent)
+
+
+def _link_or_copy(source_parent: int, destination: int, name: str) -> None:
+    try:
+        os.link(name, name, src_dir_fd=source_parent, dst_dir_fd=destination, follow_symlinks=False)
+        return
     except FileExistsError:
-        raise MaterializeError(f"{destination.name} appeared in the output directory during placement") from None
+        raise MaterializeError(f"{name} appeared in the output directory during placement") from None
     except OSError as exc:
         if exc.errno not in (errno.EPERM, errno.EXDEV, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EMLINK):
             raise
-        _copy_exclusive(source, destination)
-    placed.append(destination)
+    _copy_exclusive(source_parent, destination, name)
 
 
-def _copy_exclusive(source: Path, destination: Path) -> None:
+def _copy_exclusive(source_parent: int, destination: int, name: str) -> None:
+    source = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=source_parent)
     try:
-        with open(source, "rb") as src, open(destination, "xb") as out:
-            shutil.copyfileobj(src, out)
-    except FileExistsError:
-        raise MaterializeError(f"{destination.name} appeared in the output directory during placement") from None
+        try:
+            target = fsafe.create_exclusive(destination, name)
+        except FileExistsError:
+            raise MaterializeError(f"{name} appeared in the output directory during placement") from None
+        try:
+            for chunk in fsafe.stream(source):
+                os.write(target, chunk)
+        except BaseException:
+            os.unlink(name, dir_fd=destination)
+            raise
+        finally:
+            os.close(target)
+    finally:
+        os.close(source)
 
 
-def _remove_if_empty(directory: Path) -> None:
-    try:
-        directory.rmdir()
-    except OSError:
-        pass
+def _roll_back(out_fd: int, placed: list[str], created: list[str]) -> None:
+    """Undo a partial placement; each step is best effort so one failure cannot hide the original error."""
+    _remove_each(out_fd, reversed(placed), os.unlink)
+    _remove_each(out_fd, reversed(created), os.rmdir)
+
+
+def _remove_each(out_fd: int, rels: Iterable[str], remove: Callable[..., None]) -> None:
+    for rel in rels:
+        *parents, name = rel.split("/")
+        try:
+            parent = fsafe.open_dir_beneath(out_fd, parents)
+        except (fsafe.MissingEntry, fsafe.UnsafeEntry):
+            continue
+        try:
+            remove(name, dir_fd=parent)
+        except OSError:
+            pass
+        finally:
+            os.close(parent)

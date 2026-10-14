@@ -17,6 +17,7 @@ from hyperloom.measure.manifest import RESULT_SCHEMA, encode_manifest
 
 REQUEST_ID = "6c0e0000-0000-5000-8000-000000000001"
 SPEC_FINGERPRINT = "a1b2c3d4e5f60718"
+SPEC_SHA256 = "ab" * 32
 SANDBOX_ID = "sbx_01JTEST"
 DEFAULT_FILES = {
     "benchmark_sglang_20261005_101500/benchmark_report.json": b'{"output_throughput": 5123.4}\n',
@@ -44,7 +45,7 @@ def manifest_document(files: dict[str, bytes], public_pem: str, **overrides: Any
         "schema": RESULT_SCHEMA,
         "request_id": REQUEST_ID,
         "spec_fingerprint": SPEC_FINGERPRINT,
-        "spec_sha256": "ab" * 32,
+        "spec_sha256": SPEC_SHA256,
         "surface_sha256": "cd" * 32,
         "runner": {
             "sandbox_id": SANDBOX_ID,
@@ -105,6 +106,7 @@ def verify_args(bundle: Bundle) -> dict[str, Any]:
         "public_key_pem": bundle.public_pem,
         "request_id": REQUEST_ID,
         "spec_fingerprint": SPEC_FINGERPRINT,
+        "spec_sha256": SPEC_SHA256,
         "sandbox_id": SANDBOX_ID,
     }
 

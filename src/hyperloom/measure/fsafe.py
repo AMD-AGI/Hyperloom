@@ -76,6 +76,56 @@ def open_beneath(root_fd: int, rel: str) -> int:
     return fd
 
 
+def open_dir_beneath(root_fd: int, parts: list[str], *, created: list[str] | None = None) -> int:
+    """Open the directory ``parts`` below ``root_fd``, creating missing ones when ``created`` is given.
+
+    A symlink (or a file) in any component raises :class:`UnsafeEntry`; a missing one raises :class:`MissingEntry`
+    unless ``created`` is given, in which case the directory is made and its relative path appended to ``created``.
+    The caller closes the result.
+    """
+    current = os.dup(root_fd)
+    shown: list[str] = []
+    try:
+        for part in parts:
+            shown.append(part)
+            rel = "/".join(shown)
+            try:
+                child = _open_step(part, _RDONLY | os.O_DIRECTORY, current, rel)
+            except MissingEntry:
+                if created is None:
+                    raise
+                os.mkdir(part, 0o777, dir_fd=current)
+                created.append(rel)
+                child = _open_step(part, _RDONLY | os.O_DIRECTORY, current, rel)
+            os.close(current)
+            current = child
+    except BaseException:
+        os.close(current)
+        raise
+    return current
+
+
+def create_exclusive(dir_fd: int, name: str) -> int:
+    """Create a new file ``name`` in ``dir_fd`` for writing; never follows a symlink, never replaces anything."""
+    return os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o666, dir_fd=dir_fd)
+
+
+def exists_beneath(root_fd: int, rel: str) -> bool:
+    """Whether ``rel`` exists below ``root_fd`` (a dangling symlink counts); a symlinked parent raises."""
+    *parents, name = rel.split("/")
+    try:
+        parent = open_dir_beneath(root_fd, parents)
+    except MissingEntry:
+        return False
+    try:
+        os.stat(name, dir_fd=parent, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    finally:
+        os.close(parent)
+    return True
+
+
 def stream(fd: int) -> Iterator[bytes]:
     """The remaining bytes of ``fd`` in chunks."""
     while chunk := os.read(fd, CHUNK):

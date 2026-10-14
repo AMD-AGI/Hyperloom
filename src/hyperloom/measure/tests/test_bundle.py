@@ -118,6 +118,13 @@ def test_a_bundle_for_another_request_spec_or_sandbox_is_rejected(bundle) -> Non
     assert _reason(bundle.staging, bundle, sandbox_id="sbx_other") is RejectReason.SANDBOX_MISMATCH
 
 
+def test_a_manifest_that_measured_other_spec_bytes_is_rejected_unless_the_caller_has_only_the_fingerprint(
+    bundle,
+) -> None:
+    assert _reason(bundle.staging, bundle, spec_sha256="ff" * 32) is RejectReason.SPEC_HASH_MISMATCH
+    verify_bundle(bundle.staging, **(verify_args(bundle) | {"spec_sha256": None}))
+
+
 def test_a_result_larger_than_the_allowed_total_is_rejected(bundle) -> None:
     total = sum(len(data) for data in DEFAULT_FILES.values())
     verify_bundle(bundle.staging, **verify_args(bundle), max_total_bytes=total)
@@ -214,6 +221,66 @@ def test_materialize_never_overwrites_and_leaves_the_output_directory_as_it_was(
         materialize(verified, out)
     assert sorted(p.name for p in out.iterdir()) == ["server.log"]
     assert (out / "server.log").read_text() == "mine"
+
+
+def _outside(tmp_path: Path) -> Path:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    return outside
+
+
+def test_a_symlinked_directory_in_the_output_is_not_followed_and_nothing_is_written_through_it(
+    bundle, tmp_path: Path
+) -> None:
+    out, outside = tmp_path / "out", _outside(tmp_path)
+    out.mkdir()
+    os.symlink(outside, out / "benchmark_sglang_20261005_101500")
+    with pytest.raises(MaterializeError, match="symlink"):
+        materialize(verify_bundle(bundle.staging, **verify_args(bundle)), out)
+    assert list(outside.iterdir()) == []
+    assert not (out / "server.log").exists()
+
+
+def test_a_symlink_planted_after_the_precheck_is_not_followed(bundle, tmp_path: Path, monkeypatch) -> None:
+    out, outside = tmp_path / "out", _outside(tmp_path)
+    out.mkdir()
+    verified = verify_bundle(bundle.staging, **verify_args(bundle))
+    real_place = bundle_mod._place
+    calls = []
+
+    def plant_before_first_file(rel, scratch_fd, out_fd, created):
+        calls.append(rel)
+        if len(calls) == 1:
+            os.symlink(outside, out / "benchmark_sglang_20261005_101500")
+        return real_place(rel, scratch_fd, out_fd, created)
+
+    monkeypatch.setattr(bundle_mod, "_place", plant_before_first_file)
+    with pytest.raises(MaterializeError, match="symlink"):
+        materialize(verified, out)
+    assert list(outside.iterdir()) == []
+    assert [p.name for p in out.iterdir()] == ["benchmark_sglang_20261005_101500"]  # only the planted link remains
+
+
+def test_a_copy_that_fails_without_hard_links_leaves_no_partial_file(bundle, tmp_path: Path, monkeypatch) -> None:
+    import errno
+
+    def no_link(src, dst, **kwargs):
+        raise OSError(errno.EPERM, "no hard links here")
+
+    real_write, writes = os.write, []
+
+    def failing_write(fd, data):
+        writes.append(fd)
+        if len(writes) == 3:  # two staged files first, then the first placed copy
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real_write(fd, data)
+
+    monkeypatch.setattr(bundle_mod.os, "link", no_link)
+    monkeypatch.setattr(bundle_mod.os, "write", failing_write)
+    out = tmp_path / "out"
+    with pytest.raises(OSError, match="No space"):
+        materialize(verify_bundle(bundle.staging, **verify_args(bundle)), out)
+    assert [p for p in out.rglob("*") if p.is_file()] == []
 
 
 def test_a_dangling_symlink_at_the_destination_counts_as_existing(bundle, tmp_path: Path) -> None:
