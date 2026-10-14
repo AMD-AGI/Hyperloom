@@ -343,6 +343,7 @@ class StepPass:
                 }
             )
 
+
 def iter_details_from_name(name: str) -> dict[str, Any]:
     """Map an iteration-root annotation to the request counts the splitter derives."""
     m = _SGLANG_STEP_RE.match(name)
