@@ -898,11 +898,9 @@ function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.
 function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py::build_orchestrator_prompt 84
 function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py::run_tracelens_skill 175
 function-lines src/hyperloom_kb/collect/engine.py::collect 86
-function-lines src/hyperloom_kb/http_service.py::ExperienceHTTPService.read 117
+function-lines src/hyperloom_kb/http_service.py::ExperienceHTTPService.read 107
 function-lines src/hyperloom_kb/knowledge_read.py::QueryExecutor.execute 111
 function-lines src/hyperloom_kb/retrieval_policy.py::RetrievalRunner.execute 95
-function-lines src/hyperloom_kb/schema.py::Experience.__post_init__ 99
-function-lines src/hyperloom_kb/schema.py::Experience.from_dict 116
 function-lines src/kernelforge/agent_backends/claude.py::ClaudeBackend._provider_options 103
 function-lines src/kernelforge/agent_backends/claude.py::ClaudeBackend._query_once 168
 function-lines src/kernelforge/agent_backends/codex.py::CodexBackend._execute 105
@@ -1078,7 +1076,6 @@ module-lines src/hyperloom/orchestrator/state/shared_state.py 2689
 module-lines src/hyperloom/orchestrator/trace_analysis/_bypass_report.py 1231
 module-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py 6121
 module-lines src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py 1505
-module-lines src/hyperloom_kb/knowledge_read.py 1201
 module-lines src/kernelforge/fusion/author.py 1390
 module-lines src/kernelforge/fusion/command.py 1584
 module-lines src/kernelforge/fusion/discover.py 1552
