@@ -9,7 +9,7 @@ import asyncio
 import logging as _logging
 import os
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from hyperloom.common.env import env_flag
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
@@ -34,6 +34,31 @@ log = _logging.getLogger(__name__)
 __all__ = ["SpecialistDispatchCollaborator"]
 
 _SOURCE_PATCH_FAMILY = "source_patch"
+
+#: ``(SharedState field, param key, conversion)`` for the values a specialist is warmed with when the session
+#: carries one. An empty value is not exported: its absence is how the specialist reads "this session has none".
+_STATE_PARAMS: tuple[tuple[str, str, Callable[[Any], Any]], ...] = (
+    ("warm_start_recipe", "warm_start_recipe", dict),
+    ("warm_start_pitfalls", "warm_start_pitfalls", list),
+    ("warm_start_lessons", "warm_start_lessons", list),
+    ("precision", "precision", str),
+    # The mode selects the specialist's workload block; the corpus shape supplies its numbers.
+    ("benchmark_mode", "benchmark_mode", str),
+    ("agentx_corpus_shape", "agentx_corpus_shape", dict),
+    ("grading", "agentx_grading", dict),
+    ("agentx_backend", "agentx_backend", str),
+    ("cumulative_gain_validated", "cumulative_gain_validated", float),
+)
+
+#: The same, for fields a specialist is told about only while they are above zero.
+_POSITIVE_NUMBER_PARAMS: tuple[tuple[str, Callable[[Any], Any]], ...] = (
+    ("tp", int),
+    ("conc", int),
+    ("isl", int),
+    ("osl", int),
+    ("max_model_len", int),
+    ("baseline_tput", float),
+)
 
 # Bounded transient-failure auto-retry for specialist dispatches (infra-only).
 SPECIALIST_AUTO_RETRY_MAX: int = 2
@@ -83,13 +108,14 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
 
         params.setdefault("kb_subgraph", {})
 
-        # Warm-start recipe + pitfalls + lessons from T0 anchor.
-        if state.warm_start_recipe and "warm_start_recipe" not in params:
-            params["warm_start_recipe"] = dict(state.warm_start_recipe)
-        if state.warm_start_pitfalls and "warm_start_pitfalls" not in params:
-            params["warm_start_pitfalls"] = list(state.warm_start_pitfalls)
-        if state.warm_start_lessons and "warm_start_lessons" not in params:
-            params["warm_start_lessons"] = list(state.warm_start_lessons)
+        for attr, key, convert in _STATE_PARAMS:
+            value = getattr(state, attr, None)
+            if value:
+                params.setdefault(key, convert(value))
+        for attr, to_number in _POSITIVE_NUMBER_PARAMS:
+            number = to_number(getattr(state, attr, 0) or 0)
+            if number > 0:
+                params.setdefault(attr, number)
         # runtime framework/version for version-mismatch annotation.
         if "framework" not in params:
             fw = str(getattr(state, "framework", "") or "").strip()
@@ -126,22 +152,6 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
 
         # Hardware + workload hints from SharedState; else dataclass defaults win.
         params.setdefault("gpu_type", state.gpu_type or "")
-        if getattr(state, "precision", "") or "":
-            params.setdefault("precision", str(state.precision))
-        for knob in ("tp", "conc", "isl", "osl", "max_model_len"):
-            value = int(getattr(state, knob, 0) or 0)
-            if value > 0:
-                params.setdefault(knob, value)
-        # The mode selects the specialist's workload block; the corpus shape
-        # supplies its numbers.
-        if getattr(state, "benchmark_mode", "") or "":
-            params.setdefault("benchmark_mode", str(state.benchmark_mode))
-        if getattr(state, "agentx_corpus_shape", None):
-            params.setdefault("agentx_corpus_shape", dict(state.agentx_corpus_shape))
-        if isinstance(getattr(state, "grading", None), dict) and state.grading:
-            params.setdefault("agentx_grading", dict(state.grading))
-        if getattr(state, "agentx_backend", ""):
-            params.setdefault("agentx_backend", str(state.agentx_backend))
 
         # Advisory model_arch profile via arch_notes carrier (prompt-context only).
         if "arch_notes" not in params:
@@ -209,19 +219,11 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                             "severity": str(gap.get("severity") or ""),
                         }
 
-        if "baseline_tput" not in params:
-            _bt = float(getattr(state, "baseline_tput", 0.0) or 0.0)
-            if _bt > 0:
-                params["baseline_tput"] = _bt
         if "current_tput" not in params:
             cb = getattr(state, "current_best", None)
             _ct = float((cb.get("tput") if isinstance(cb, dict) else 0) or 0.0)
             if _ct > 0:
                 params["current_tput"] = _ct
-        if "cumulative_gain_validated" not in params:
-            _cgv = float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0)
-            if _cgv != 0:
-                params["cumulative_gain_validated"] = _cgv
         if "keep_threshold_pct" not in params:
             params["keep_threshold_pct"] = _phase_state.resolve_keep_threshold(state)
         if "applied_stack" not in params:

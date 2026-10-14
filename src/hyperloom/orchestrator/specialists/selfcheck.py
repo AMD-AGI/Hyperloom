@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.agents.framework.isolation import create_venv
-from hyperloom.orchestrator.enablement.runtime.build_utils import write_rocm_torch_constraints
+from hyperloom.orchestrator.enablement.runtime.build_utils import ROCM_CONSTRAINTS_FILE, write_rocm_constraints
 
 _OUTPUT_TAIL_CHARS = 2000
 
@@ -53,8 +53,8 @@ def run_selfcheck(*, worktree: Path, package_dir: str, package: str, pytest_targ
     python = venv_dir / "bin" / "python"
     if not python.is_file():
         create_venv(venv_dir)
-    constraints = venv_dir / "torch_constraints.txt"
-    write_rocm_torch_constraints(str(python), str(constraints))
+    constraints = venv_dir / ROCM_CONSTRAINTS_FILE
+    write_rocm_constraints(str(python), str(constraints), replacing=package)
 
     install = [str(python), "-m", "pip", "install", "--no-deps", "--no-build-isolation"]
     install += ["--constraint", str(constraints), "-e", str(project_dir(worktree, package_dir))]

@@ -406,6 +406,10 @@ class EnablementLane(CoordinatorCollaborator):
     async def settle_enablement_round(self, outcome: str, *, reason: str = "") -> None:
         """End the open round, if one is still open.
 
+        A specialist that holds the round and has not started is cancelled: its
+        mandate names a wall this settle has closed, and the next round is
+        dispatched against the current one.
+
         Args:
             outcome: What the round leaves behind; see the round store's
                 outcomes.
@@ -421,6 +425,9 @@ class EnablementLane(CoordinatorCollaborator):
             request_id=f"settle:{round_row.round_id}:{round_row.fence}",
             evidence={"reason": reason} if reason else {},
         )
+        holder = round_row.holder_task_id
+        if await self.tasks.cancel_if_queued(holder, kind="specialist", reason="enablement_round_settled"):
+            log.info("ENABLEMENT: cancelled specialist %s; its round was settled before it started", holder)
 
     async def close_lane_event(self, *, outcome: str, reason: str) -> None:
         """Close the enablement lane's event on the terminal it just reached.
