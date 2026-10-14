@@ -235,7 +235,7 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
     assert (branches["b03"].origin, branches["b03"].start_commit) == (LineageKind.OPEN, c1)
     assert await stage.repo.head("b03") == c1 and FIX_REASON in str(stage.lifecycle.briefs["b03"])
 
-    assert stage.lifecycle.k["b01"] == 2
+    assert stage.lifecycle.last_k["b01"] == 2 and stage.lifecycle.running == {}
     specialist_ks = [
         k for policy in stage.toolbox.policies for b, k in policy.branch_k.items() if b != INTEGRATION_BRANCH
     ]
@@ -473,7 +473,7 @@ async def test_a_failed_opening_judge_call_opens_one_branch_at_k_one(tmp_path: P
 
     assert (outcome.stop_reason, outcome.error) == (SessionStopReason.TIME_EXHAUSTED, "")
     assert stage.lifecycle.started == {"b01": await stage.root()}
-    assert stage.lifecycle.k == {"b01": 1}
+    assert stage.lifecycle.last_k == {"b01": 1}
     failed = [row["reason"] for row in _decisions(stage) if row["kind"] == "judge_failed"]
     assert failed and set(failed) == {"kept the status quo"}
 

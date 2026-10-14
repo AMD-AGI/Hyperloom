@@ -6,15 +6,15 @@ notebook in step.
 
 Opening a branch records its ``OPEN`` lineage, cuts it in the experiment repository at its start commit and starts its
 specialist there with its K; a fork or repair the fork desk admitted is opened the same way once it is drained, its
-specialist briefed with the change it builds on. Stopping a branch withdraws everything of it: its specialist, its
-queued and running tests and tool jobs, the processes the scheduler registered for it, its claims, and the forks and
-repairs of it that are admitted but not started yet, as the fork desk admits nothing for a stopped branch; the notebook
-gets the ``STOP`` lineage of a branch it has the ``OPEN`` of. The commits it already made stay in the notebook, so the
-integrator may still merge them. The notebook records no ``STOP`` of the integration branch, which only the end of the
-session stops. The roster entry is stopped first, so an admitted branch drained while its parent is being stopped is
-never started. The toolbox gets a branch's K before its specialist starts, so the first tests it submits already queue
-by it. A peer failure on one branch never ends the session: a specialist that does not start is stopped, and a failed
-step of a stop or of a new K is recorded in its decision.
+specialist briefed with the change it builds on. Stopping a branch withdraws everything of it: its specialist unless it
+never started, its queued and running tests and tool jobs, the processes the scheduler registered for it, its claims,
+and the forks and repairs of it that are admitted but not started yet, as the fork desk admits nothing for a stopped
+branch; the notebook gets the ``STOP`` lineage of a branch it has the ``OPEN`` of. The commits it already made stay in
+the notebook, so the integrator may still merge them. The scheduler records no ``STOP`` of the integration branch,
+which only the end of the session stops. The roster entry is stopped first, so an admitted branch drained while its
+parent is being stopped is never started. The toolbox gets a branch's K before its specialist starts, so the first
+tests it submits already queue by it. A peer failure on one branch never ends the session: a branch whose specialist
+does not start is withdrawn like a stopped one, and a failed step of a stop or of a new K is recorded in its decision.
 """
 
 from __future__ import annotations
@@ -127,7 +127,7 @@ class BranchControl:
         self._roster.stop(branch, stop)
         forks = await self._stop_admitted_forks(branch, stop)
         steps = [await settled(self.push_quota())]
-        if entry.kind is BranchKind.SPECIALIST and entry.start_commit:
+        if entry.kind is BranchKind.SPECIALIST and entry.start_commit and stop.cause is not StopCause.START_FAILED:
             steps.append(await settled(self._lifecycle.stop(branch)))
         withdrawn = await settled(self._toolbox.cancel_branch(branch, stop.summary))
         steps.append(await settled(self._processes.kill_branch(branch)))

@@ -3,10 +3,10 @@
 
 """Stand-ins for the peers a session runs on, the toolbox's own fake, and a virtual clock, for the tests.
 
-Each ``MbFake`` class stands in for another owner's module until it lands: the specialist lifecycle and a
-specialist's candidate loop (``hyperloom_multibranch.specialist``), plus the main-flow child of PRELUDE. Every
-scheduling test uses these, scripted through their fields, and subclasses them only for a failure double; they are
-replaced by the real modules once those land. The toolbox is the toolbox module's
+Each ``MbFake`` class stands in for another owner's module until it lands: the specialist runtime
+(``hyperloom_multibranch.specialist``) as its lifecycle and a specialist's candidate loop, plus the main-flow child of
+PRELUDE. Every scheduling test uses these, scripted through their fields, and subclasses them only for a failure
+double; they are replaced by the real modules once those land. The toolbox is the toolbox module's
 :class:`~hyperloom_multibranch.toolbox.fake.FakeToolbox`, noise-free and noting what the scheduler asked of it; what a
 test measures follows from the recipe it measures (:func:`recipe_effect`). The experiment repository and the rule gate
 are their owners' own.
@@ -257,30 +257,49 @@ class MbFakeHeldRegistry(MbFakeChildRegistry):
             self._time.release()
 
 
-@dataclass
 class MbFakeLifecycle:
-    """Stands in for the specialist lifecycle: a started branch runs its scripted specialist as a task.
+    """Stands in for the specialist runtime's lifecycle: runs each started branch's scripted specialist as a task, and
+    holds the scheduler to the lifecycle contract, raising on a second start of a branch and on a stop or a K of a
+    branch it does not run.
 
-    Stopping a branch in ``refusing`` raises, and stopping one in ``hanging`` never returns. Deleted once
-    ``hyperloom_multibranch.specialist`` ships a real lifecycle and these tests run on it.
+    ``running`` and ``k`` are the branches running now and their K; ``launches`` and ``last_k`` keep every launch and
+    the last K each branch was given after it stopped; ``stopped`` lists every stop asked for. Stopping a branch in
+    ``refusing`` raises, and stopping one in ``hanging`` never returns. Deleted once ``hyperloom_multibranch.specialist``
+    ships a real lifecycle and these tests run on it.
     """
 
-    scripts: Mapping[str, SpecialistScript] = field(default_factory=dict)
-    refusing: frozenset[str] = frozenset()
-    hanging: frozenset[str] = frozenset()
-    started: dict[str, str] = field(default_factory=dict)
-    briefs: dict[str, str | None] = field(default_factory=dict)
-    k: dict[str, int] = field(default_factory=dict)
-    stopped: list[str] = field(default_factory=list)
-    tasks: dict[str, asyncio.Future[None]] = field(default_factory=dict)
+    def __init__(
+        self,
+        scripts: Mapping[str, SpecialistScript] | None = None,
+        refusing: frozenset[str] = frozenset(),
+        hanging: frozenset[str] = frozenset(),
+    ) -> None:
+        self.scripts = dict(scripts or {})
+        self.refusing = refusing
+        self.hanging = hanging
+        self.running: dict[str, SpecialistLaunch] = {}
+        self.k: dict[str, int] = {}
+        self.launches: dict[str, SpecialistLaunch] = {}
+        self.last_k: dict[str, int] = {}
+        self.stopped: list[str] = []
+        self._tasks: dict[str, asyncio.Future[None]] = {}
+
+    @property
+    def started(self) -> dict[str, str]:
+        return {branch: launch.start_commit for branch, launch in self.launches.items()}
+
+    @property
+    def briefs(self) -> dict[str, str | None]:
+        return {branch: launch.brief for branch, launch in self.launches.items()}
 
     async def start(self, launch: SpecialistLaunch) -> None:
-        self.started[launch.branch] = launch.start_commit
-        self.briefs[launch.branch] = launch.brief
-        self.k[launch.branch] = launch.k
+        if launch.branch in self.running:
+            raise ValueError(f"branch {launch.branch!r} already has a specialist")
+        self.running[launch.branch] = self.launches[launch.branch] = launch
+        self.k[launch.branch] = self.last_k[launch.branch] = launch.k
         if launch.branch in self.scripts:
             script = self.scripts[launch.branch](launch.branch, launch.start_commit)
-            self.tasks[launch.branch] = asyncio.ensure_future(script)
+            self._tasks[launch.branch] = asyncio.ensure_future(script)
 
     async def stop(self, branch: str) -> None:
         self.stopped.append(branch)
@@ -288,14 +307,19 @@ class MbFakeLifecycle:
             raise RuntimeError(f"the runtime refused to stop {branch}")
         if branch in self.hanging:
             await asyncio.Event().wait()
-        task = self.tasks.pop(branch, None)
+        del self.running[branch], self.k[branch]
+        task = self._tasks.pop(branch, None)
         if task is not None:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
 
     async def set_k(self, branch: str, k: int) -> None:
-        self.k[branch] = k
+        if branch not in self.running:
+            raise KeyError(branch)
+        if k < 1:
+            raise ValueError("stop the branch instead of giving it no room")
+        self.k[branch] = self.last_k[branch] = k
 
 
 #: What a recipe measures, by the tags its server arguments carry: its primary-metric value per conc, the main

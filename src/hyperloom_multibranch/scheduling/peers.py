@@ -80,9 +80,10 @@ class PeerSetup:
 
     ``workload`` is the measurement surface: the toolbox measures every test and sweep of the session on it, so a
     test request carries no operating point of its own. ``desk`` is what the specialist runtime builds its rule gates
-    on. The lifecycle starts every process of its own through ``processes``, so the session stop kills it even when a
-    peer's own stop hangs, and the session reports it when it outlives that kill. The toolbox's sandboxes are its own:
-    the session stop releases them by closing the toolbox. ``blobs`` holds the patch and kernel files the recipes
+    on. ``processes`` is the session's process registry: the session stop kills what is registered there even when a
+    peer's own stop hangs, and reports what outlives that kill. The lifecycle contract does not require a lifecycle to
+    register its processes there, so a specialist process it does not register is stopped only by the lifecycle's own
+    ``stop``. The toolbox's sandboxes are its own: the session stop releases them by closing the toolbox. ``blobs`` holds the patch and kernel files the recipes
     name; the toolbox's environment compiler reads them from it.
     """
 

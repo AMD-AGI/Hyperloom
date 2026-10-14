@@ -160,16 +160,19 @@ async def test_k_orders_skip_stopped_branches_and_clamp(tmp_path: Path) -> None:
 
     await bench.control.apply_k({"b01": 9, "b02": 2, INTEGRATION_BRANCH: 2})
 
-    assert bench.lifecycle.k == {"b01": 2, "b02": 1}
+    assert bench.lifecycle.k == {"b01": 2} and bench.lifecycle.last_k == {"b01": 2, "b02": 1}
     assert bench.toolbox.policies[-1].k_for(INTEGRATION_BRANCH) == 2
 
 
-async def test_a_specialist_that_does_not_start_is_stopped_and_the_others_still_open(tmp_path: Path) -> None:
+async def test_a_specialist_that_does_not_start_is_withdrawn_without_a_stop_and_the_others_still_open(
+    tmp_path: Path,
+) -> None:
     bench = await Bench(tmp_path).rooted()
+    lifecycle = BrokenLifecycle()
     bench.control = BranchControl(
         bench.roster,
         bench.notebook,
-        BrokenLifecycle(),
+        lifecycle,
         bench.toolbox,
         bench.repo,
         ProcessRegistry(tmp_path / "MB-pids.jsonl", CLOCK),
@@ -181,6 +184,7 @@ async def test_a_specialist_that_does_not_start_is_stopped_and_the_others_still_
     await bench.control.apply_k({"b02": 2})
 
     assert [entry.branch for entry in opened] == ["b01", "b02"]
+    assert lifecycle.stopped == [] and lifecycle.running.keys() == {"b02"}
     stop = bench.roster.entry("b01").stop
     assert stop is not None and (stop.cause, stop.reason) == (
         StopCause.START_FAILED,
