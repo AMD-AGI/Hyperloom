@@ -368,7 +368,8 @@ def local_head_restartable() -> Tuple[bool, str]:
     if is_multi_node():
         return False, "this is a multi-node run"
     import ray
-    from ray.exceptions import RayError
+
+    RayError = getattr(getattr(ray, "exceptions", None), "RayError", RuntimeError)
 
     try:
         # Every node record, dead ones included: a multi-node cluster whose worker is down is still multi-node.

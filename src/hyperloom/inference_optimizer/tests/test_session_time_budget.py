@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import sys
 import threading
 import time
@@ -30,6 +31,7 @@ from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     STOP_GATE_POLL_SECONDS,
     run_with_session_kill,
 )
+from hyperloom.orchestrator.bus.gpu_pool import GPU_LEASE_TTL_GRACE
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.dispatcher import (
     _CANCEL_NOTICE_SEC,
@@ -311,6 +313,37 @@ class TestTimeBudgetGate:
         assert coord.dispatcher.time_budget_denial_for_action(_EXPENSIVE_ACTION) is None
         _set_budget(coord, minutes=120, elapsed_min=105.0)
         assert coord.dispatcher.time_budget_denial_for_action(_EXPENSIVE_ACTION) is not None
+
+
+# A slow AgentX baseline round: longer than any single GPU action's catalogue lease.
+_SLOW_BASELINE_SEC = 9000.0
+
+
+class TestTheLeaseCoversTheExpectedCost:
+    """The lease orchestration reads must not run out on a healthy round the session has already priced."""
+
+    @pytest.mark.parametrize("kind", ["baseline", "roofline", "profile", "explore", "integrate_patch"])
+    def test_a_measured_round_outlasts_the_catalogue_lease(self, coord: Coordinator, kind: str):
+        coord.shared_state.baseline_runtime_sec = _SLOW_BASELINE_SEC
+
+        _lanes, ttl = coord.dispatcher.registry_lanes_ttl(kind)
+
+        assert ACTION_CATALOGUE[kind].lease_ttl_sec < _SLOW_BASELINE_SEC
+        assert ttl == math.ceil(_SLOW_BASELINE_SEC * (1.0 + GPU_LEASE_TTL_GRACE))
+
+    def test_the_catalogue_lease_stands_where_it_is_longer(self, coord: Coordinator):
+        coord.shared_state.baseline_runtime_sec = 10 * 60.0
+        for kind in ("explore", "conc_sweep", "kernel_agent"):
+            assert coord.dispatcher.registry_lanes_ttl(kind)[1] == ACTION_CATALOGUE[kind].lease_ttl_sec, kind
+
+    @pytest.mark.parametrize("kind", sorted(ACTION_CATALOGUE))
+    def test_a_session_with_no_baseline_yet_reads_the_catalogue_lease(self, coord: Coordinator, kind: str):
+        assert coord.dispatcher.registry_lanes_ttl(kind)[1] == ACTION_CATALOGUE[kind].lease_ttl_sec
+
+    @pytest.mark.parametrize("kind", ["report", "specialist", "target_analysis"])
+    def test_an_action_that_never_benches_keeps_its_catalogue_lease(self, coord: Coordinator, kind: str):
+        coord.shared_state.baseline_runtime_sec = _SLOW_BASELINE_SEC
+        assert coord.dispatcher.registry_lanes_ttl(kind)[1] == ACTION_CATALOGUE[kind].lease_ttl_sec
 
 
 class TestAdmissionGateOrder:

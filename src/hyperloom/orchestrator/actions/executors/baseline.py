@@ -487,23 +487,6 @@ def _is_cuda_graph_capture_failure(*texts: str) -> bool:
     return bool(_classify_cuda_graph_capture_failure(*texts)[0])
 
 
-# Startup-time "the GPUs are already occupied" refusals.
-_GPU_PREOCCUPIED_MARKERS: tuple[str, ...] = (
-    # vLLM: "Free memory on device cuda:0 (84.11/287.98 GiB) on startup is less than desired GPU memory utilization
-    # (0.95, 273.59 GiB).
-    "on startup is less than desired gpu memory utilization",
-    "reduce gpu memory used by other processes",
-    # sglang says "Not enough memory. Please try to increase --mem-fraction-static."
-    "not enough memory. please try to increase --mem-fraction-static",
-)
-
-
-def _is_insufficient_gpu_memory(*texts: str) -> bool:
-    """True when a server refused to boot because VRAM was already occupied."""
-    blob = "\n".join(t for t in texts if t).lower()
-    return any(m in blob for m in _GPU_PREOCCUPIED_MARKERS)
-
-
 # Disable cuda-graph capture per framework: sglang uses --disable-cuda-graph, vllm and atom use --enforce-eager.
 _DISABLE_CUDA_GRAPH_FLAGS = {
     "sglang": "--disable-cuda-graph",
@@ -2755,6 +2738,7 @@ class BenchmarkRunExecutor:
                 # reverting here handed prelude a clean tree and silently lost the replay.
                 if applied_patches and not isinstance(patch_application, dict):
                     _revert_legacy_warm_patch_trees(params)
+                _lifecycle.stop_agentx_servers(output_dir)
                 if bench_lease is not None:
                     bench_lease.close()
 

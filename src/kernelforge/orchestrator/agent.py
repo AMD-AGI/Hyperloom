@@ -82,7 +82,7 @@ def make_agent_fn(
     interposed_driver_path: str | None = None,
     snr_threshold: float = DEFAULT_SNR_THRESHOLD_DB,
     max_blocks: int = 10,
-    # One implementer session's wall-clock budget (see cli._forge_session_timeout_sec).
+    # One implementer session's wall-clock budget (see kernelforge.cli.session_budget._forge_session_timeout_sec).
     session_timeout_sec: int | None = None,
     validation_timeout_sec: int = 1800,
     bench_timeout_sec: int = 300,

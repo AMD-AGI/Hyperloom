@@ -107,15 +107,11 @@ def test_empty_ledger_and_no_commands_raises_nothing_for_setup():
 
 
 def test_only_applied_executions_project_a_step():
-    rows = [
-        _row("pip install a", seq=1),
-        _row("pip install b", seq=2, outcome="failed"),
-        _row("pip install c", seq=3, outcome="skipped"),
-    ]
-    state = {"setup_commands": ["pip install a", "pip install b", "pip install c"], "setup_executions": rows}
+    rows = [_row("pip install a", seq=1), _row("pip install b", seq=2, outcome="failed")]
+    state = {"setup_commands": ["pip install a", "pip install b"], "setup_executions": rows}
     steps = build_recipe_steps(state, attempt_summary=_build_attempt_summary)
     assert [s["cmd"] for s in steps] == ["pip install a"]
-    assert len(state["setup_executions"]) == 3
+    assert len(state["setup_executions"]) == 2
 
 
 def test_command_reapplied_by_the_accepted_round_is_present_at_final_launch():
@@ -237,11 +233,6 @@ def test_a_failed_non_python_installer_scopes_nothing_of_its_own():
     assert "setup_effect_outside_verified_launch" in codes
 
 
-def test_a_skipped_non_python_installer_scopes_nothing():
-    rows = _accepted([_row("apt-get install -y libfoo", seq=1, outcome="skipped", task="kept")], task="kept")
-    assert "closure_scope_incomplete" not in _codes(_decide({"setup_executions": rows}))
-
-
 @pytest.mark.parametrize(
     "cmd",
     [
@@ -254,7 +245,7 @@ def test_credentialed_command_is_sanitized_without_losing_its_digest(cmd):
     """Sanitization is of the recorded text only: the digest that counts
     occurrences is over the verbatim string, so the three spellings the
     allowlist admits equally still collapse onto one command."""
-    rows = [_row(cmd, seq=i, outcome=outcome) for i, outcome in enumerate(("applied", "failed", "skipped"), start=1)]
+    rows = [_row(cmd, seq=i, outcome=outcome) for i, outcome in enumerate(("applied", "failed"), start=1)]
     for row in rows:
         assert "user:token" not in row["cmd_sanitized"] and "host" not in row["cmd_sanitized"]
         assert row["cmd_digest"] == command_digest(cmd)

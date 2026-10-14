@@ -414,8 +414,7 @@ async def test_kept_stack_action_survives_rearm(monkeypatch):
         """An empty ledger, which the rearm reads to stamp the round's row."""
         return 0
 
-    coord.settle_enablement_round = _no_round
-    coord.rounds = types.SimpleNamespace(consecutive_stalled=_no_stalls)
+    coord.rounds = types.SimpleNamespace(consecutive_stalled=_no_stalls, held=_no_round)
 
     action_state = _candidate()
     runtime_state = FrameworkRuntime(bin_path="/a/bin", venv_root="/a").to_state()

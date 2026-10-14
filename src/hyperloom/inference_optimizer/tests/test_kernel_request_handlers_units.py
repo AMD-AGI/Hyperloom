@@ -3793,6 +3793,41 @@ class TestRunGemmTuningHandler:
 
         assert result["status"] == "ok"
 
+    @pytest.mark.parametrize(
+        ("benchmark_mode", "grading"),
+        [("agentx", {"objective": "e2e_norm_intvty_p50"}), ("", {})],
+        ids=["agentx_intvty", "fixed_isl_osl"],
+    )
+    def test_tunes_on_output_whatever_the_session_is_graded_on(self, tmp_path, monkeypatch, benchmark_mode, grading):
+        monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
+        SharedState(
+            precision="fp8",
+            framework="sglang",
+            model_path="/models/qwen-fp8",
+            gpu_type="mi355x",
+            tp=1,
+            conc=64,
+            isl=1024,
+            osl=1024,
+            baseline_tput=4479.0,
+            benchmark_mode=benchmark_mode,
+            grading=grading,
+        ).save(tmp_path)
+        captured: dict[str, object] = {}
+
+        async def fake_run(cmd: list[str], *, timeout_sec: int, **_kwargs):
+            captured["cmd"] = cmd
+            captured["input"] = json.loads(Path(cmd[cmd.index("--input-json") + 1]).read_text())
+            return 0, json.dumps({"status": "ok", "decision": "KEEP", "best_speedup": 1.1}), ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", fake_run)
+
+        asyncio.run(krh._run_geak_gemm_tuning({"dry_run": True, "task_id": "t1"}, session_dir=tmp_path))
+
+        assert "E2E_METRIC=output" in captured["cmd"]  # type: ignore[operator]
+        assert captured["input"]["env"] == {"E2E_METRIC": "output"}  # type: ignore[index]
+        assert captured["input"]["baseline_tput"] == 4479.0  # type: ignore[index]
+
     def test_geak_without_config_does_not_fall_back_to_forge(self, tmp_path, monkeypatch):
         monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
         monkeypatch.delenv("GEAK_CONFIG", raising=False)

@@ -369,80 +369,54 @@ def test_seq_offset_zero_gives_deterministic_names(tmp_path):
             assert name.endswith(".bak"), f"backup name doesn't end in .bak: {name!r}"
 
 
-# Rename/move patch: full revert (new file deleted, old file restored)
-
-RENAME_DELETE_OLD = """\
---- a/old_name.py
-+++ /dev/null
-@@ -1 +0,0 @@
--moved_content
-"""
-
-RENAME_CREATE_NEW = """\
---- /dev/null
-+++ b/new_name.py
-@@ -0,0 +1 @@
-+moved_content
-"""
-
-# A single diff that truly renames (old != new, neither /dev/null).
-RENAME_DIFF = """\
---- a/old_name.py
-+++ b/new_name.py
-@@ -1 +1 @@
--moved_content
-+moved_content
+PURE_RENAME_DIFF = """\
+diff --git a/old_name.py b/new_name.py
+similarity index 100%
+rename from old_name.py
+rename to new_name.py
 """
 
 
-def test_revert_action_restore_old_puts_back_source(tmp_path):
-    """A record with revert_action='restore_old' restores the old file from backup."""
+@pytest.mark.parametrize("revert_action", ("restore", "restore_old"))
+def test_revert_restores_a_source_the_patch_moved_away(tmp_path, revert_action):
+    """A rename source is gone from the tree at revert time, so its record must recreate it from the backup.
+
+    ``restore_old`` is the label an older build wrote; its ledger has to survive a resume on this one.
+    """
     old_file = tmp_path / "old_name.py"
     bak = tmp_path / "bk" / "backup.bak"
     bak.parent.mkdir(parents=True)
     bak.write_text("original_content\n", encoding="utf-8")
-    # old_name.py was renamed away (doesn't exist now).
     records = [
         {
             "target": str(old_file),
             "existed": True,
             "backup_path": str(bak),
-            "revert_action": "restore_old",
+            "revert_action": revert_action,
             "pre_image_sha256": ledger.file_digest(bak),
         }
     ]
-    ledger.restore_records(records)
-    assert old_file.exists(), "revert_action='restore_old' must recreate the old file"
+
+    _reverted, errors = ledger.restore_records(records)
+
+    assert errors == []
     assert old_file.read_text() == "original_content\n"
 
 
-def test_rename_patch_tracked_as_two_records(tmp_path):
-    """A rename hunk (old != new, neither /dev/null) produces two backup records: one for the old source (restore_old)
-    and one for the new destination (delete).
-    """
-    old_file = tmp_path / "old_name.py"
-    old_file.write_text("moved_content\n", encoding="utf-8")
+def test_rename_is_recorded_even_though_it_has_no_hunks(tmp_path):
+    """A 100%-similarity rename moves the file with no ``---``/``+++`` pair; an empty ledger makes revert a no-op."""
+    (tmp_path / "old_name.py").write_text("moved_content\n", encoding="utf-8")
+    patch_file = tmp_path / "pure_rename.patch"
+    patch_file.write_text(PURE_RENAME_DIFF, encoding="utf-8")
 
-    patch_file = tmp_path / "rename.patch"
-    patch_file.write_text(RENAME_DIFF, encoding="utf-8")
+    _ok, _err, backups, *_ = ng._apply_patch_no_git(tmp_path, patch_file, tmp_path / "bk")
 
-    backup_root = tmp_path / "bk"
-
-    # Inspect the record structure regardless of whether the patch CLI succeeds.
-    _ok, _err, backups, *_ = ng._apply_patch_no_git(tmp_path, patch_file, backup_root)
-
-    restore_old_records = [r for r in backups if r.get("revert_action") == "restore_old"]
-    delete_records = [r for r in backups if r.get("revert_action") == "delete"]
-
-    assert restore_old_records, "rename patch must produce a restore_old record for the source file"
-    assert delete_records, "rename patch must produce a delete record for the destination file"
-
-    src_rec = restore_old_records[0]
-    assert "old_name" in src_rec["target"]
-    assert src_rec["backup_path"] is not None
-
-    dst_rec = next((r for r in delete_records if "new_name" in r["target"]), None)
-    assert dst_rec is not None, "delete record must target new_name.py"
+    records = {Path(r["target"]).name: r for r in backups}
+    assert {name: r["revert_action"] for name, r in records.items()} == {
+        "old_name.py": "restore",
+        "new_name.py": "delete",
+    }
+    assert records["old_name.py"]["backup_path"] is not None
 
 
 # ApplyFeedback structure tests
@@ -710,12 +684,11 @@ def test_apply_backup_failure_returns_error(tmp_path, monkeypatch):
     assert "backup of" in err
 
 
-# _apply_patch_no_git — real apply failure collects .rej hunks
+# _apply_patch_no_git — real apply failure reports the rejected hunks
 
 
-def test_apply_real_failure_collects_rej(tmp_path):
-    """When dry-run passes for a level but the real apply fails, we surface a nogit ApplyFeedback (with any .rej content) rather than raising."""
-
+def _apply_failing_after_dry_run(tmp_path, backup_root):
+    """Let the dry-run pass, then move the target out from under the real apply so it rejects."""
     target = tmp_path / "target.py"
     target.write_text("original\n", encoding="utf-8")
     patch_file = tmp_path / "fix.patch"
@@ -725,24 +698,44 @@ def test_apply_real_failure_collects_rej(tmp_path):
     call_state = {"n": 0}
 
     def _run(cmd, *a, **k):
-        # Let dry-run pass through; force the real apply to fail.
-        is_dry = any("--dry-run" in str(c) for c in cmd)
-        if is_dry:
-            return real_run(cmd, *a, **k)
+        if any("--dry-run" in str(c) for c in cmd):
+            cp = real_run(cmd, *a, **k)
+            if cp.returncode == 0:
+                target.write_text("unrelated\n", encoding="utf-8")
+            return cp
         call_state["n"] += 1
-        return _CP(1, "", "Hunk #1 FAILED at 1.")
+        return real_run(cmd, *a, **k)
 
     import unittest.mock as um
 
     with um.patch.object(ng.subprocess, "run", _run):
-        ok, err, backups, feedback = ng._apply_patch_no_git(tmp_path, patch_file, tmp_path / "bak")
+        result = ng._apply_patch_no_git(tmp_path, patch_file, backup_root)
 
     if call_state["n"] == 0:
         pytest.skip("dry-run never succeeded on this patch CLI")
+    return result
+
+
+def test_apply_real_failure_reports_rejected_hunks(tmp_path):
+    """A failed real apply carries the rejected hunk body, not just the CLI's one-line summary."""
+    ok, _err, _backups, feedback = _apply_failing_after_dry_run(tmp_path, tmp_path / "bak")
+
     assert ok is False
     assert isinstance(feedback, af.ApplyFeedback)
     assert feedback.channel == "nogit"
-    assert "FAILED" in feedback.stderr
+    assert "patched" in feedback.rejected_hunks, "the rejected hunk body must reach the patch author"
+
+
+def test_apply_real_failure_leaves_the_framework_tree_alone(tmp_path):
+    """Rejects land under the backup root: a concurrent apply's .rej is neither read nor reaped, and no .orig stays."""
+    foreign = tmp_path / "other.py.rej"
+    foreign.write_text("@@ -1 +1 @@\n-foreign\n", encoding="utf-8")
+
+    _ok, _err, _backups, feedback = _apply_failing_after_dry_run(tmp_path, tmp_path / "bak")
+
+    assert foreign.exists()
+    assert "foreign" not in feedback.rejected_hunks
+    assert list(tmp_path.glob("*.orig")) == []
 
 
 def test_apply_real_apply_cli_vanishes(tmp_path):
@@ -771,38 +764,6 @@ def test_apply_real_apply_cli_vanishes(tmp_path):
         pytest.skip("dry-run failed; cannot reach real-apply branch")
     assert isinstance(feedback, af.ApplyFeedback)
     assert "patch apply failed" in err
-
-
-# _collect_rej_files
-
-
-def test_collect_rej_files_reads_and_removes(tmp_path):
-    """A recent .rej file is read into the summary and then removed."""
-    rej = tmp_path / "foo.py.rej"
-    rej.write_text("@@ -1 +1 @@\n-old\n+new\n", encoding="utf-8")
-
-    out = ng._collect_rej_files(tmp_path, tmp_path / "some.patch")
-    assert "foo.py.rej" in out
-    assert "@@ -1 +1 @@" in out
-    assert not rej.exists(), ".rej file must be cleaned up after collection"
-
-
-def test_collect_rej_files_skips_stale(tmp_path):
-    """A .rej file older than the 60s cutoff is ignored (and left in place)."""
-    import os
-    import time
-
-    rej = tmp_path / "old.py.rej"
-    rej.write_text("stale hunk\n", encoding="utf-8")
-    old = time.time() - 3600
-    os.utime(rej, (old, old))
-
-    out = ng._collect_rej_files(tmp_path, tmp_path / "some.patch")
-    assert out == ""
-
-
-def test_collect_rej_files_no_rej_returns_empty(tmp_path):
-    assert ng._collect_rej_files(tmp_path, tmp_path / "some.patch") == ""
 
 
 # ledger.restore_records — a failed restore is reported, never raised
@@ -873,6 +834,19 @@ def test_modification_existing_file_backed_up(tmp_path, monkeypatch):
     assert feedback is None
     restore = [r for r in backups if r.get("revert_action") == "restore"]
     assert restore and restore[0]["backup_path"] is not None
+
+
+def test_unprefixed_modification_at_p0_records_one_restore(tmp_path, monkeypatch):
+    """Unprefixed headers, which only apply at -p0, back up their single target for restore."""
+    monkeypatch.setattr(ng.subprocess, "run", lambda cmd, *a, **k: _CP(0 if "-p0" in cmd else 1))
+    target = tmp_path / "target.py"
+    target.write_text("original\n", encoding="utf-8")
+    patch_file = tmp_path / "fix.patch"
+    patch_file.write_text(MODIFY_SAME_PATH_DIFF, encoding="utf-8")
+
+    ok, err, backups, *_ = ng._apply_patch_no_git(tmp_path, patch_file, tmp_path / "bak")
+    assert ok, err
+    assert [(r["target"], r["revert_action"]) for r in backups] == [(str(target.resolve()), "restore")]
 
 
 def test_modification_missing_file_records_delete(tmp_path, monkeypatch):
@@ -951,45 +925,19 @@ def test_patch_file_unreadable_after_dry_run(tmp_path, monkeypatch):
     assert "cannot read patch file" in err
 
 
-def test_collect_rej_files_scan_exception_is_swallowed(tmp_path, monkeypatch):
-    """An exception during the rglob scan is logged and yields ''."""
-
-    def _boom(*a, **k):
-        raise RuntimeError("fs blew up")
-
-    monkeypatch.setattr(ng.Path, "rglob", _boom)
-    assert ng._collect_rej_files(tmp_path, tmp_path / "p.patch") == ""
-
-
-def test_collect_rej_files_stat_oserror_skips(tmp_path, monkeypatch):
-    """An OSError while stat-ing a .rej file is skipped (continue branch)."""
-    rej = tmp_path / "foo.py.rej"
-    rej.write_text("@@ hunk @@\n", encoding="utf-8")
-
-    real_stat = Path.stat
-
-    def _stat(self, *a, **k):
-        if self.name.endswith(".rej"):
-            raise OSError("stat denied")
-        return real_stat(self, *a, **k)
-
-    monkeypatch.setattr(Path, "stat", _stat)
-    assert ng._collect_rej_files(tmp_path, tmp_path / "p.patch") == ""
-
-
 # Escape / continue edge branches in the create / delete / rename arms
 
 
-def test_create_devnull_both_sides_skipped(tmp_path, monkeypatch):
-    """A degenerate /dev/null -> /dev/null header is skipped (create continue)."""
+def test_devnull_both_sides_is_rejected(tmp_path, monkeypatch):
+    """A header naming no real path cannot be reverted, so it is refused rather than applied unrecorded."""
     monkeypatch.setattr(ng.subprocess, "run", _fake_ok_run)
     patch_file = tmp_path / "noop.patch"
-    patch_file.write_text(
-        "--- /dev/null\n+++ /dev/null\n@@ -0,0 +0,0 @@\n",
-        encoding="utf-8",
-    )
+    patch_file.write_text("--- /dev/null\n+++ /dev/null\n@@ -0,0 +0,0 @@\n", encoding="utf-8")
+
     ok, err, backups, *_ = ng._apply_patch_no_git(tmp_path, patch_file, tmp_path / "bak")
-    assert ok is True
+
+    assert ok is False
+    assert "unparseable patch" in err
     assert backups == []
 
 

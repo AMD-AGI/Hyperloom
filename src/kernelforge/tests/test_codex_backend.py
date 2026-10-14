@@ -45,7 +45,7 @@ from kernelforge.agent_backends.codex import (
     resolve_codex_reasoning_effort,
 )
 from kernelforge.config import Config
-from kernelforge.cli import _agent_runtime_overrides
+from kernelforge.cli.options import _agent_runtime_overrides
 from kernelforge.orchestrator import agent as agent_module
 from kernelforge.tracker.usage import UsageAccumulator
 

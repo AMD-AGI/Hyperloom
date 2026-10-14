@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A reviewed patch is measured before configuration grids that queued ahead of it on the same lanes."""
+"""FRAMEWORK_AGENT measures a reviewed patch before grids queued ahead of it on the same lanes; other phases keep FIFO."""
 
 from __future__ import annotations
 
@@ -13,14 +13,14 @@ from ._dispatch_helpers import pump_until_settled
 _SERVING_LANES = ["server_lifecycle", "benchmark_lane"]
 
 
-def _build_coord(tmp_path: Path):
+def _build_coord(tmp_path: Path, phase: str):
     from hyperloom.orchestrator.loop.coordinator import Coordinator
     from hyperloom.orchestrator.roles.agent_role import default_role_registry
     from hyperloom.orchestrator.roles.mock_backend import MockBackend, MockTurn, ScriptedPlan
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     state = SharedState(session_id="lane-priority")
-    state.phase = "FRAMEWORK_AGENT"
+    state.phase = phase
     state.save(tmp_path)
     idle = ScriptedPlan(turns=[MockTurn(intents=[])])
     return Coordinator(
@@ -32,8 +32,6 @@ def _build_coord(tmp_path: Path):
 
 
 class _Recorder:
-    """Executor stub that records the order its kinds were dispatched in."""
-
     def __init__(self, order: list[str]):
         self.order = order
 
@@ -43,21 +41,8 @@ class _Recorder:
         return {"status": "ok"}
 
 
-async def test_approved_patch_is_dispatched_before_earlier_queued_explore(tmp_path):
-    coord = _build_coord(tmp_path)
-    order: list[str] = []
-    recorder = _Recorder(order)
-    coord.sub.register_executor("explore", recorder)
-    coord.sub.register_executor("integrate_patch", recorder)
+async def _queue_approved_patch(coord) -> None:
     coord.shared_state.record_specialist_patch_verdict("spec-1", "approve")
-
-    for i in range(2):
-        await coord.tasks.create_or_return_existing(
-            kind="explore",
-            params={"grid": [{"name": f"v{i}", "extra_server_args": "--stream-interval 4"}]},
-            idempotency_key=f"explore-{i}",
-            requires_lanes=list(_SERVING_LANES),
-        )
     await coord.tasks.create_or_return_existing(
         kind="integrate_patch",
         params={"specialist_task_id": "spec-1", "patches": ["p.patch"]},
@@ -65,6 +50,41 @@ async def test_approved_patch_is_dispatched_before_earlier_queued_explore(tmp_pa
         requires_lanes=["workspace_mutation", *_SERVING_LANES],
     )
 
+
+async def test_framework_agent_dispatches_approved_patch_before_earlier_queued_explore(tmp_path):
+    coord = _build_coord(tmp_path, "FRAMEWORK_AGENT")
+    order: list[str] = []
+    recorder = _Recorder(order)
+    coord.sub.register_executor("explore", recorder)
+    coord.sub.register_executor("integrate_patch", recorder)
+    for i in range(2):
+        await coord.tasks.create_or_return_existing(
+            kind="explore",
+            params={"grid": [{"name": f"v{i}", "extra_server_args": "--stream-interval 4"}]},
+            idempotency_key=f"explore-{i}",
+            requires_lanes=list(_SERVING_LANES),
+        )
+    await _queue_approved_patch(coord)
+
     await pump_until_settled(coord.dispatcher)
 
     assert order == ["integrate_patch", "explore", "explore"]
+
+
+async def test_enablement_keeps_fifo_so_a_patch_waits_for_the_queued_revalidation(tmp_path):
+    coord = _build_coord(tmp_path, "ENABLEMENT")
+    order: list[str] = []
+    recorder = _Recorder(order)
+    coord.sub.register_executor("baseline", recorder)
+    coord.sub.register_executor("integrate_patch", recorder)
+    await coord.tasks.create_or_return_existing(
+        kind="baseline",
+        params={},
+        idempotency_key="enablement_revalidation:gen0",
+        requires_lanes=list(_SERVING_LANES),
+    )
+    await _queue_approved_patch(coord)
+
+    await pump_until_settled(coord.dispatcher)
+
+    assert order == ["baseline", "integrate_patch"]

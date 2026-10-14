@@ -4,6 +4,7 @@
 """Periodic Coordinator maintenance: lease reaping, DB retention, disk trim."""
 
 from __future__ import annotations
+from pathlib import Path
 from typing import Any
 from ..state.shared_state import SharedState
 from ..collaborator import CoordinatorCollaborator
@@ -67,7 +68,7 @@ class MaintenanceCollaborator(CoordinatorCollaborator):
     """Handles session maintenance: disk cleanup, task reclaim, and health checks."""
 
     # Advisory disk guard: when the session partition runs low, LRU-trim per-task runs/ workspaces; durable state is
-    # never touched.
+    # never touched, and neither is a workspace holding a file the enablement stack still replays.
     _DISK_FREE_MIN_GB: float = 20.0
     _DISK_USED_MAX_FRAC: float = 0.85
     _DISK_RUNS_KEEP_PER_ACTION: int = 50
@@ -122,6 +123,7 @@ class MaintenanceCollaborator(CoordinatorCollaborator):
         runs_root = _runs_root(self.session_dir)
         if not runs_root.is_dir():
             return summary
+        stack_files = {Path(f).resolve() for f in self.shared_state.enablement.stack_files()}
         removed = 0
         for action_dir in runs_root.iterdir():
             if not action_dir.is_dir():
@@ -131,6 +133,9 @@ class MaintenanceCollaborator(CoordinatorCollaborator):
                 continue
             task_dirs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
             for stale in task_dirs[self._DISK_RUNS_KEEP_PER_ACTION :]:
+                resolved = stale.resolve()
+                if any(f.is_relative_to(resolved) for f in stack_files):
+                    continue
                 try:
                     shutil.rmtree(stale, ignore_errors=True)
                     removed += 1

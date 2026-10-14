@@ -23,12 +23,8 @@ import types
 
 import pytest
 
-from kernelforge.loop import task_preparer
-from kernelforge.loop.task_preparer import (
-    PROBE_DISTRIBUTED_VIOLATION,
-    PROBE_FAILED,
-    _read_graph_probe_shards,
-)
+from kernelforge.loop import task_preflight
+from kernelforge.loop.task_preflight import PROBE_DISTRIBUTED_VIOLATION, PROBE_FAILED, _read_graph_probe_shards
 
 
 def _shard(tmp_path, name: str, payload: dict | str) -> None:
@@ -155,9 +151,9 @@ def test_the_probe_tells_the_driver_and_itself_the_same_rank_count(monkeypatch):
         captured.update(kwargs.get("env") or {})
         raise RuntimeError("stop before running")
 
-    monkeypatch.setattr(task_preparer.asyncio, "create_subprocess_exec", _fake_create)
+    monkeypatch.setattr(task_preflight.asyncio, "create_subprocess_exec", _fake_create)
 
-    task_preparer.asyncio.run(task_preparer._count_graph_replays("driver.py", 1, 1, timeout_sec=5, require_ranks=4))
+    task_preflight.asyncio.run(task_preflight._count_graph_replays("driver.py", 1, 1, timeout_sec=5, require_ranks=4))
 
     assert captured["FORGE_NPROC_PER_NODE"] == "4"
     assert captured["GRAPH_PROBE_EXPECT_RANKS"] == "4"
@@ -176,11 +172,11 @@ def test_a_single_rank_probe_declares_no_rank_count(monkeypatch):
         captured.update(kwargs.get("env") or {})
         raise RuntimeError("stop before running")
 
-    monkeypatch.setattr(task_preparer.asyncio, "create_subprocess_exec", _fake_create)
+    monkeypatch.setattr(task_preflight.asyncio, "create_subprocess_exec", _fake_create)
     monkeypatch.delenv("FORGE_NPROC_PER_NODE", raising=False)
     monkeypatch.delenv("GRAPH_PROBE_EXPECT_RANKS", raising=False)
 
-    task_preparer.asyncio.run(task_preparer._count_graph_replays("driver.py", 1, 1, timeout_sec=5))
+    task_preflight.asyncio.run(task_preflight._count_graph_replays("driver.py", 1, 1, timeout_sec=5))
 
     assert "GRAPH_PROBE_EXPECT_RANKS" not in captured
     assert "FORGE_NPROC_PER_NODE" not in captured
@@ -207,7 +203,7 @@ def test_the_probe_survives_a_torch_that_carries_no_cuda(tmp_path, monkeypatch, 
     monkeypatch.setenv("GRAPH_PROBE_OUT", str(tmp_path / "probe"))
     namespace: dict = {}
 
-    exec(compile(task_preparer._GRAPH_PROBE_SITECUSTOMIZE, "sitecustomize.py", "exec"), namespace)
+    exec(compile(task_preflight._GRAPH_PROBE_SITECUSTOMIZE, "sitecustomize.py", "exec"), namespace)
 
     assert namespace["_graph_ready"] is False
     # The hook stays installed and must swallow the same shape on every import.
@@ -223,7 +219,7 @@ def test_the_probe_reports_where_a_rank_measured(tmp_path, monkeypatch, probe_ru
     namespace: dict = {}
     monkeypatch.setenv("GRAPH_PROBE_EXPECT_RANKS", "4")
     monkeypatch.setenv("GRAPH_PROBE_OUT", str(tmp_path / "probe"))
-    exec(compile(task_preparer._GRAPH_PROBE_SITECUSTOMIZE, "sitecustomize.py", "exec"), namespace)
+    exec(compile(task_preflight._GRAPH_PROBE_SITECUSTOMIZE, "sitecustomize.py", "exec"), namespace)
 
     assert namespace["_harness_measured"]() is False
 
@@ -281,7 +277,7 @@ def test_lazy_probe_imports_are_bounded_and_restore_the_hook(tmp_path):
         """
     )
     result = subprocess.run(
-        [sys.executable, "-c", script, task_preparer._GRAPH_PROBE_SITECUSTOMIZE],
+        [sys.executable, "-c", script, task_preflight._GRAPH_PROBE_SITECUSTOMIZE],
         cwd=tmp_path,
         capture_output=True,
         text=True,

@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.perf_metric import constraint_fields
 from ..actions.executors._grid_runner import GridVariant, run_grid
 from ..actions.executors._workload_envs import (
     default_baseline_config,
@@ -123,8 +124,8 @@ async def run_specialist_rebench(
         # ``itl_ms`` for the collectors.
         "ttft_ms": rb.ttft_mean_ms,
         "itl_ms": rb.tpot_mean_ms,
-        # Canonical name: the latency budget fails closed, so a lane that does not carry this refuses every KEEP.
-        "e2el_mean_ms": rb.e2el_mean_ms,
+        # The session's constraints fail closed, so a lane that drops these refuses every KEEP.
+        **constraint_fields(rb),
         "workspace": str(getattr(rb, "workspace", "") or ""),
         "port": resolved_port,
         "gpu_ids": gpu_ids,

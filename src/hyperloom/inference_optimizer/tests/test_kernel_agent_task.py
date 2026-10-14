@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from hyperloom.inference_optimizer.breakdown.stop_reasons import BACKEND_UNHEALTHY_STOP_REASON
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     ACTION_CATALOGUE,
     COORDINATOR_INTERNAL_ACTIONS,
@@ -356,8 +357,56 @@ def _listening_executor(started: asyncio.Event):
 
 
 @pytest.mark.asyncio
-async def test_a_spent_phase_budget_stops_the_kernel_agent_and_leaves_kernel(coord, monkeypatch):
-    """The transition barrier stops the running pipeline and frees its lanes before SWEEP starts."""
+async def test_a_spent_phase_budget_lets_the_running_kernel_agent_finish_before_leaving_kernel(coord, monkeypatch):
+    """The transition barrier waits for the running pipeline instead of throwing its work away."""
+    c = coord
+    _skip_phase_entry_effects(c, monkeypatch)
+    st = c.shared_state
+    _arm_kernel_phase(st)
+    release, started = asyncio.Event(), asyncio.Event()
+    c.sub.register_executor("kernel_agent", _blocking_executor(release, started))
+    task = await _create_kernel_agent(c)
+    await asyncio.wait_for(c.dispatcher.pump_dispatcher_once(), timeout=2.0)
+    await asyncio.wait_for(started.wait(), timeout=2.0)
+    _spend_the_phase_budget(st)
+
+    await asyncio.wait_for(c.phase_machine.advance_phase_if_needed(), timeout=30.0)
+
+    assert st.phase == ps.PHASE_KERNEL_AGENT
+    assert (await c.tasks.get(task.task_id)).state == "running"
+    assert c.dispatcher.admission_frozen
+
+    release.set()
+    await _settle(c, task.task_id)
+    await asyncio.wait_for(c.phase_machine.advance_phase_if_needed(), timeout=30.0)
+
+    assert st.phase == ps.PHASE_SWEEP
+    assert (await c.tasks.get(task.task_id)).state == "succeeded"
+    assert not any((await c.locks.lane_holders()).values())
+
+
+@pytest.mark.asyncio
+async def test_a_spent_session_budget_still_stops_the_running_kernel_agent(coord):
+    """Only the phase boundary waits; once the session's own budget is gone the work is cancelled."""
+    c = coord
+    st = c.shared_state
+    _arm_kernel_phase(st)
+    started = asyncio.Event()
+    c.sub.register_executor("kernel_agent", _listening_executor(started))
+    task = await _create_kernel_agent(c)
+    await asyncio.wait_for(c.dispatcher.pump_dispatcher_once(), timeout=2.0)
+    await asyncio.wait_for(started.wait(), timeout=2.0)
+    st.max_minutes = 1
+
+    await asyncio.wait_for(c.dispatcher.pump_dispatcher_once(), timeout=30.0)
+    await _settle(c, task.task_id)
+
+    assert (await c.tasks.get(task.task_id)).state == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_a_terminal_stop_cancels_the_running_kernel_agent_on_the_way_to_close(coord, monkeypatch):
+    """A run that is already over has nothing to settle; the barrier stops its work instead of waiting for it."""
     c = coord
     _skip_phase_entry_effects(c, monkeypatch)
     st = c.shared_state
@@ -367,13 +416,15 @@ async def test_a_spent_phase_budget_stops_the_kernel_agent_and_leaves_kernel(coo
     task = await _create_kernel_agent(c)
     await asyncio.wait_for(c.dispatcher.pump_dispatcher_once(), timeout=2.0)
     await asyncio.wait_for(started.wait(), timeout=2.0)
-    _spend_the_phase_budget(st)
+    st.set_stop_reason(BACKEND_UNHEALTHY_STOP_REASON)
 
     await asyncio.wait_for(c.phase_machine.advance_phase_if_needed(), timeout=30.0)
+    await _settle(c, task.task_id)
+    await asyncio.wait_for(c.phase_machine.advance_phase_if_needed(), timeout=30.0)
 
-    assert st.phase == ps.PHASE_SWEEP
-    assert st.phase_history[-1]["reason"] in {"kernel_phase_budget_exhausted", "kernel_budget_cap"}
     assert (await c.tasks.get(task.task_id)).state == "cancelled"
+    assert st.phase == ps.PHASE_CLOSE
+    assert st.phase_history[-1]["reason"] == BACKEND_UNHEALTHY_STOP_REASON
     assert not any((await c.locks.lane_holders()).values())
 
 

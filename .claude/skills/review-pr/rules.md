@@ -235,7 +235,7 @@ file-shaped row would miss.
 ### X5 -- A new operator knob must land in the reference docs, the env template, the prompts and the launcher argv
 
 **Severity:** blocking
-**Fires when:** an added line matches `os\.environ(\.get)?[\[\(]\s*['"][A-Z][A-Z0-9_]{2,}` or `add_argument\(\s*['"]--` for a name absent from the base tree, or `files.txt` touches `src/hyperloom/inference_optimizer/cli/**` or `src/kernelforge/cli.py`.
+**Fires when:** an added line matches `os\.environ(\.get)?[\[\(]\s*['"][A-Z][A-Z0-9_]{2,}` or `add_argument\(\s*['"]--` for a name absent from the base tree, or `files.txt` touches `src/hyperloom/inference_optimizer/cli/**` or `src/kernelforge/cli/**`.
 **The rule:** Nothing enforces the sync between `os.environ` keys and `docs/reference/environment-variables.md` / `.env.template`, so the reviewer is the gate. Each new env var or flag is one of two kinds and the PR must say which: operator-facing config, documented with its unset default, or internal subprocess handoff, deliberately undocumented. An added or renamed flag must also reach the launcher that assembles the argv, the SKILL.md and examples that tell the agent to use it, and the how-to docs. Whether the knob should exist at all is `AGENTS.md`'s question, not this rule's.
 **Seen in:** PR #1472 -- `docs/reference/environment-variables.md`, touched by the same PR, still said `OPENAI_BASE_URL` was required together with `OPENAI_API_KEY`.
 **Not a finding when:** the variable is only written by a parent process and read by its own child (pure subprocess handoff) and the PR says so, or the flag is already present in the base tree and only its default moved.

@@ -603,20 +603,26 @@ def _tag_latency_origins(
             origins[field] = label
 
 
-def _round_gpu_power_w(
+def _round_gpu_power(
     report: dict[str, Any], workspace: Path | None, subprocess_started_unix: float | None
-) -> float | None:
-    """Per-GPU mean power over the round's measured phase.
+) -> dict[str, Any]:
+    """The round's measured-phase power: ``gpu_power_avg_w`` (mean per serving card) and ``gpu_power_by_gpu_w``.
 
     Hyperloom's own ``gpu_power.json`` wins whenever this round wrote one, including one with no reading: that round
     was sampled and measured nothing, and substituting the report's figure would replace "unmeasured" with a number
     from a different window. The report's ``gpu_monitor`` block -- one card, whole-process window on a single node --
-    is the fallback for rounds no recorder ran on.
+    is the fallback for the mean on rounds no recorder ran on; it reads one card, so such a round has no per-card
+    figure and any per-card or total budget treats it as unmeasured.
     """
-    from ._gpu_power import read_measured_gpu_power
+    from ._gpu_power import read_measured_gpu_power, read_measured_gpu_power_by_gpu
 
     found, watts = read_measured_gpu_power(workspace, subprocess_started_unix=subprocess_started_unix)
-    return watts if found else gpu_metrics_from_report(report).get("avg_power_w")
+    return {
+        "gpu_power_avg_w": watts if found else gpu_metrics_from_report(report).get("avg_power_w"),
+        "gpu_power_by_gpu_w": read_measured_gpu_power_by_gpu(
+            workspace, subprocess_started_unix=subprocess_started_unix
+        )[1],
+    }
 
 
 def extract_benchmark_measurement(
@@ -680,7 +686,7 @@ def extract_benchmark_measurement(
         "tpot_mean_ms": to_float(tpot.get("mean_ms")),
         "e2el_mean_ms": to_float(e2el.get("mean_ms")),
         "e2el_p99_ms": to_float(e2el.get("p99_ms")),
-        "gpu_power_avg_w": _round_gpu_power_w(report, workspace, subprocess_started_unix),
+        **_round_gpu_power(report, workspace, subprocess_started_unix),
         "raw_result_path": None,
         "nonfatal_warnings": [],
     }

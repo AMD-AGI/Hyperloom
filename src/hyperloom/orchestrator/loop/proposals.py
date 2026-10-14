@@ -40,6 +40,15 @@ class PendingProposal:
     task_id: str | None = None
 
 
+def integrate_review_in_flight(pending_proposals: Mapping[str, PendingProposal], specialist_task_id: str) -> bool:
+    """Whether a synthetic integrate_patch review for this specialist task awaits a ruling."""
+    return any(
+        proposal.action_name == "integrate_patch"
+        and (proposal.payload.get("params") or {}).get("specialist_task_id") == specialist_task_id
+        for proposal in pending_proposals.values()
+    )
+
+
 async def record_proposal(
     coord: "Coordinator",
     *,
@@ -353,14 +362,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
             self.inject_explore_runtime_params(params)
             inject_stack_base_params(params, self.shared_state, anchor=True)
         if pending.action_name == "integrate_patch":
-            # ``source_phase`` is stamped where the specialist is created and carried from there; a
-            # second derivation here would be a second decision, and could write an empty owner.
-            params.setdefault("keep_threshold_pct", _phase_state.resolve_keep_threshold(self.shared_state))
-            # Seed the patched-eval server with the same base args/config every other eval server uses, else it
-            # launches on bare framework defaults and crashes at startup regardless of the patch.
-            inject_stack_base_params(params, self.shared_state, anchor=True)
-            if self.shared_state.baseline_config_path:
-                params.setdefault("config_path", self.shared_state.baseline_config_path)
+            self._seed_integrate_patch_params(params)
         lanes, ttl = self._coord.dispatcher.registry_lanes_ttl(pending.action_name)
         # Content-addressed so a batch of proposals that would launch identical work collapses to one task; a
         # terminated twin still gets a fresh key so a legitimate retry after failure is never locked out.
@@ -435,6 +437,17 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         pending.task_id = task.task_id
         _record_proposal_materialized(pending.proposal_msg_id, task.task_id)
         _record_config_routed(self, pending, task_id=task.task_id)
+
+    def _seed_integrate_patch_params(self, params: dict[str, Any]) -> None:
+        """Default an approved integrate_patch's grading context and its patched-eval server."""
+        # ``source_phase`` is stamped where the specialist is created and carried from there; a
+        # second derivation here would be a second decision, and could write an empty owner.
+        params.setdefault("keep_threshold_pct", _phase_state.resolve_keep_threshold(self.shared_state))
+        # Seed the patched-eval server with the same base args/config every other eval server uses, else it
+        # launches on bare framework defaults and crashes at startup regardless of the patch.
+        inject_stack_base_params(params, self.shared_state, anchor=True)
+        if self.shared_state.baseline_config_path:
+            params.setdefault("config_path", self.shared_state.baseline_config_path)
 
     def _record_proposal_task_map(self, proposal_msg_id: str, task_id: str) -> None:
         """Append one ``{proposal_msg_id -> task_id}`` row to the trace map."""
