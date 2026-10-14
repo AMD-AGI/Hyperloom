@@ -117,6 +117,7 @@ from ._inferencex_patcher import (
     failed_patch_anchors_in,
 )
 from ._git import _git_head_sha
+from ._agentx_prefix_cache import refuse_cacheless_agentx_baseline
 from ._magpie_patcher import ensure_client_tokenizer_hook, ensure_eval_concurrency_compat
 from ._patch_snapshot import (
     _create_patch_snapshot,
@@ -4209,6 +4210,8 @@ class BaselineExecutor(BenchmarkRunExecutor):
         )
         try:
             result = await self._run_retrying(ctx, recorder=recorder)
+            if _should_establish_quality_ref(getattr(ctx.task, "kind", ""), params):
+                await asyncio.to_thread(refuse_cacheless_agentx_baseline, ctx, result)
         except BaseException as exc:
             if recorder is not None:
                 recorder.finish_crashed(exc)

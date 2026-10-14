@@ -986,6 +986,13 @@ failure routes PRELUDE into the ENABLEMENT phase, which authors patches until
 the combo boots. With `--enablement off`, three consecutive failures stop the
 run with `stop_reason='baseline_failed'`.
 
+An AgentX baseline whose replay has a theoretical prefix hit of 50% or more
+but whose server ran with `disable_radix_cache=True`, or whose prefill batches
+never reused a cached token, fails with `error_class=agentx_baseline_prefix_cache_off`
+and stops the run with `stop_reason='baseline_failed'` on the first occurrence,
+whichever launcher started the server. Do not propose `--disable-radix-cache`
+for an AgentX baseline.
+
 Operator server flags have one supported CLI entry point:
 `optimize --server-args "<framework serve flags>"`. The CLI exports this as
 `INFERENCE_OPTIMIZER_SERVER_ARGS`, and YAML materialization routes it into
