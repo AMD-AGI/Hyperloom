@@ -39,8 +39,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-import jsonschema
-
+from hyperloom.hosted.schema_check import first_problem
 from kernelforge.mcp_server.stdio_transport import InvalidParamsError, dispatch_envelope
 
 logger = logging.getLogger(__name__)
@@ -192,7 +191,6 @@ class McpServer:
             raise ValueError(f"tool name empty or already registered: {name!r}")
         if not granted or not granted <= TOKEN_KINDS:
             raise ValueError(f"scopes must be a non-empty subset of {sorted(TOKEN_KINDS)}")
-        jsonschema.Draft202012Validator.check_schema(dict(schema))
         self._tools[name] = RegisteredTool(name, description, dict(schema), handler, granted)
 
     def issue_token(self, specialist: str, branch: str) -> str:
@@ -245,9 +243,9 @@ class McpServer:
             raise InvalidParamsError("unknown tool")
         if principal.kind not in tool.scopes:
             raise ToolForbidden("this token may not call this tool")
-        errors = sorted(jsonschema.Draft202012Validator(dict(tool.schema)).iter_errors(arguments), key=str)
-        if errors:
-            raise InvalidParamsError(self.scrub(f"invalid arguments: {errors[0].message}", presented))
+        problem = first_problem(arguments, tool.schema)
+        if problem:
+            raise InvalidParamsError(self.scrub(f"invalid arguments: {problem}", presented))
         try:
             outcome = tool.handler(arguments, CallContext(principal, name))
             if inspect.isawaitable(outcome):
