@@ -350,6 +350,16 @@ def _drop_oldest_progress_notes(history: list[Any], keep: int) -> list[Any]:
     return kept
 
 
+def _cancel_queued_row(cur: Any, task_id: str, history_json: str, *, now: str, reason: str) -> None:
+    """Move one queued row to ``cancelled`` inside the caller's transaction."""
+    history = json.loads(history_json)
+    history.append({"from": "queued", "to": "cancelled", "ts": now, "evidence": {"reason": reason}})
+    cur.execute(
+        "UPDATE tasks SET state='cancelled', history=?, updated_at=? WHERE task_id=?",
+        (json.dumps(history), now, task_id),
+    )
+
+
 class TaskRegistry:
     """State machine + persistence layer for delegated tasks."""
 
@@ -643,24 +653,23 @@ class TaskRegistry:
             for task_id, kind, history_json in rows:
                 if str(task_id or "").strip() in spared:
                     continue
-                history = json.loads(history_json)
-                history.append(
-                    {
-                        "from": "queued",
-                        "to": "cancelled",
-                        "ts": now,
-                        "evidence": {"reason": reason},
-                    }
-                )
-                cur.execute(
-                    "UPDATE tasks SET state='cancelled', history=?, updated_at=? WHERE task_id=?",
-                    (json.dumps(history), now, task_id),
-                )
+                _cancel_queued_row(cur, task_id, history_json, now=now, reason=reason)
                 cancelled.append(task_id)
                 kinds[task_id] = kind
         for task_id in cancelled:
             _record_task_state(task_id, kinds[task_id], "cancelled", reason=reason)
         return cancelled
+
+    async def cancel_if_queued(self, task_id: str, *, kind: str, reason: str) -> bool:
+        """Cancel ``task_id`` if it is a ``kind`` row that has not started; returns whether it was cancelled."""
+        async with self.db.transaction() as cur:
+            cur.execute("SELECT history FROM tasks WHERE task_id=? AND kind=? AND state='queued'", (task_id, kind))
+            row = cur.fetchone()
+            if row is None:
+                return False
+            _cancel_queued_row(cur, task_id, row["history"], now=now_iso(), reason=reason)
+        _record_task_state(task_id, kind, "cancelled", reason=reason)
+        return True
 
     async def cancel_queued(
         self,
@@ -679,19 +688,7 @@ class TaskRegistry:
             for task_id, kind, history_json in rows:
                 if str(kind or "").strip() in allowed:
                     continue
-                history = json.loads(history_json)
-                history.append(
-                    {
-                        "from": "queued",
-                        "to": "cancelled",
-                        "ts": now,
-                        "evidence": {"reason": reason},
-                    }
-                )
-                cur.execute(
-                    "UPDATE tasks SET state='cancelled', history=?, updated_at=? WHERE task_id=?",
-                    (json.dumps(history), now, task_id),
-                )
+                _cancel_queued_row(cur, task_id, history_json, now=now, reason=reason)
                 cancelled.append(task_id)
                 kinds[task_id] = kind
         for task_id in cancelled:

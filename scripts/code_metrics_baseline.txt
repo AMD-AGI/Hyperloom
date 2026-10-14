@@ -504,7 +504,7 @@ duplicated-lines src/hyperloom/orchestrator/actions/executors/tests/test_baselin
 duplicated-lines src/hyperloom/orchestrator/actions/executors/tests/test_integrate_patch_artifacts_unit.py 40
 duplicated-lines src/hyperloom/orchestrator/actions/executors/tests/test_integrate_patch_coverage_unit.py 80
 duplicated-lines src/hyperloom/orchestrator/actions/executors/tests/test_integrate_patch_helpers_unit.py 12
-duplicated-lines src/hyperloom/orchestrator/enablement/runtime/targeted_build.py 88
+duplicated-lines src/hyperloom/orchestrator/enablement/runtime/targeted_build.py 80
 duplicated-lines src/hyperloom/orchestrator/enablement/runtime/tests/test_targeted_build_recipes.py 34
 duplicated-lines src/hyperloom/orchestrator/kernel/tests/test_forge_server_log_evidence.py 48
 duplicated-lines src/hyperloom/orchestrator/knowledge/kb_writeback.py 40
@@ -645,7 +645,7 @@ function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._maybe_write_framework_kb_record 114
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._stage_apply 513
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._stage_gate 84
-function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._stage_provision_attempt_runtime 107
+function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._stage_provision_attempt_runtime 105
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._stage_resolve 123
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._stage_resolve_upstream_pr 81
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._switch_off_parity 132
@@ -673,7 +673,7 @@ function-lines src/hyperloom/orchestrator/enablement/lane.py::EnablementLane.may
 function-lines src/hyperloom/orchestrator/enablement/params.py::EnablementParams._derive_checkpoint_weight_facts 117
 function-lines src/hyperloom/orchestrator/enablement/params.py::EnablementParams._discover_enablement_candidate_refs 87
 function-lines src/hyperloom/orchestrator/enablement/params.py::EnablementParams.build_enablement_specialist_params 114
-function-lines src/hyperloom/orchestrator/enablement/recipe/section.py::_collect_landed_stack 96
+function-lines src/hyperloom/orchestrator/enablement/recipe/section.py::_collect_landed_stack 95
 function-lines src/hyperloom/orchestrator/enablement/recipe/sufficiency.py::_patch_step_reasons 92
 function-lines src/hyperloom/orchestrator/enablement/runtime/targeted_build.py::run_aiter_build 218
 function-lines src/hyperloom/orchestrator/enablement/runtime/targeted_build.py::run_sgl_kernel_build 172
@@ -803,7 +803,7 @@ function-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py::
 function-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py::_focus_static_recon_specialist 91
 function-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py::_section_identity 94
 function-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py::_section_mandate 92
-function-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py::_section_output_protocol 172
+function-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py::_section_output_protocol 140
 function-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py::_section_roofline_evidence 119
 function-lines src/hyperloom/orchestrator/roles/claude.py::ClaudeBackend._invoke_and_collect 141
 function-lines src/hyperloom/orchestrator/roles/claude.py::ClaudeBackend.run 145
@@ -1032,7 +1032,7 @@ module-lines src/hyperloom/orchestrator/phases/machine_state.py 2265
 module-lines src/hyperloom/orchestrator/phases/prelude.py 2640
 module-lines src/hyperloom/orchestrator/policy/gate.py 1626
 module-lines src/hyperloom/orchestrator/prompts/prompt_builder.py 1205
-module-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py 2573
+module-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py 2571
 module-lines src/hyperloom/orchestrator/roles/critic_agent.py 1299
 module-lines src/hyperloom/orchestrator/specialists/runner.py 1533
 module-lines src/hyperloom/orchestrator/specialists/subprocess_.py 1795

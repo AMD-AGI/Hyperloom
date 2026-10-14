@@ -2615,10 +2615,7 @@ class PreludePhase(CoordinatorCollaborator):
                 {"reason": reason, "gpu_trace_unsupported_reason": unsupported},
             )
             return None
-        params: dict[str, Any] = {
-            "source": "coordinator_internal",
-            "reason": str(reason),
-        }
+        params: dict[str, Any] = {"source": "coordinator_internal", "reason": str(reason)}
         if inline_event:
             params[INLINE_EVENT_PARAM] = str(inline_event)
         if reason != "prelude_initial":
@@ -2626,6 +2623,7 @@ class PreludePhase(CoordinatorCollaborator):
         else:
             # PRELUDE roofline profiles the baseline arm: inject baseline's own server args (never current_best's) so
             # a later warm-replay can't swap in flags that skew the baseline ceiling.
+            params.update(self._coord.enablement_revalidation.baseline_launch_params())
             try:
                 from hyperloom.inference_optimizer.roofline_ceiling import read_baseline_server_args
 
