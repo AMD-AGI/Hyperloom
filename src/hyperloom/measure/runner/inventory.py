@@ -14,6 +14,9 @@ from hyperloom.measure.manifest import RESERVED_NAMES, ManifestFile
 __all__ = ["OutputRejected", "inventory"]
 
 
+_UNSAFE = "unsafe_output"
+
+
 class OutputRejected(Exception):
     """The output cannot be listed: it holds a link or special file, or it is larger than the sheet allows."""
 
@@ -32,13 +35,13 @@ def inventory(files_dir: Path, *, max_total_bytes: int) -> tuple[ManifestFile, .
     try:
         root_fd = fsafe.open_root(files_dir)
     except (fsafe.UnsafeEntry, fsafe.MissingEntry) as exc:
-        raise OutputRejected("unsafe_output", f"the output directory is not usable: {exc}") from exc
+        raise OutputRejected(_UNSAFE, f"the output directory is not usable: {exc}") from exc
     entries: list[ManifestFile] = []
     total = 0
     try:
         for relative in fsafe.walk_regular_files(root_fd):
             if relative in RESERVED_NAMES:
-                raise OutputRejected("unsafe_output", f"{relative} is a name the bundle owns")
+                raise OutputRejected(_UNSAFE, f"{relative} is a name the bundle owns")
             fd = fsafe.open_beneath(root_fd, relative)
             try:
                 sha256, size = fsafe.sha256_and_size(fd)
@@ -49,7 +52,7 @@ def inventory(files_dir: Path, *, max_total_bytes: int) -> tuple[ManifestFile, .
                 raise OutputRejected("output_too_large", f"the output exceeds {max_total_bytes} bytes")
             entries.append(ManifestFile(relative, size, sha256))
     except fsafe.UnsafeEntry as exc:
-        raise OutputRejected("unsafe_output", str(exc)) from exc
+        raise OutputRejected(_UNSAFE, str(exc)) from exc
     finally:
         os.close(root_fd)
     return tuple(entries)

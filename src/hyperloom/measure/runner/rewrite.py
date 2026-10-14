@@ -17,11 +17,14 @@ from hyperloom.orchestrator.actions.executors import strip_visible_devices_from_
 __all__ = ["rewrite_config"]
 
 
+_UTF8 = "utf-8"
+
+
 def _without_device_masks(cfg: dict[str, Any], scratch: Path) -> dict[str, Any]:
     """The config minus its ``*_VISIBLE_DEVICES`` variables, by the function the old flow strips with."""
-    scratch.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+    scratch.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding=_UTF8)
     stripped = strip_visible_devices_from_config(scratch)
-    result = yaml.safe_load(stripped.read_text(encoding="utf-8")) or {}
+    result = yaml.safe_load(stripped.read_text(encoding=_UTF8)) or {}
     if stripped != scratch:
         stripped.unlink()
     scratch.unlink()
@@ -55,5 +58,5 @@ def rewrite_config(
     bench["inferencex_path"] = str(inferencex_path)
     if farm is not None:
         prepend_pythonpath(envs, farm.site)
-    out_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    out_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_UTF8)
     return out_path

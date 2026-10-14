@@ -20,6 +20,7 @@ from hyperloom.common.rocm_smi import gpu_vram_usage, vram_busy
 
 __all__ = ["GpuFacts", "EccCounts", "busy_gpus", "check_hardware", "ecc_counts", "read_gpu_facts"]
 
+_JSON = "--json"
 _TIMEOUT_SEC = 30.0
 Runner = Callable[[Sequence[str]], str | None]
 
@@ -69,11 +70,11 @@ def _watts(limit: Any) -> float | None:
 
 def read_gpu_facts(visible: Sequence[int], run: Runner = run_amd_smi) -> list[GpuFacts] | None:
     """Model, power cap and partition mode of each visible GPU, or ``None`` when ``amd-smi`` cannot say."""
-    static = _gpu_data(["static", "--json"], run)
+    static = _gpu_data(["static", _JSON], run)
     if static is None:
         return None
     partitions = {
-        item.get("gpu"): item.get("partition") for item in _gpu_data(["static", "--partition", "--json"], run) or []
+        item.get("gpu"): item.get("partition") for item in _gpu_data(["static", "--partition", _JSON], run) or []
     }
     facts = []
     for item in static:
@@ -90,7 +91,7 @@ def read_gpu_facts(visible: Sequence[int], run: Runner = run_amd_smi) -> list[Gp
 
 def ecc_counts(visible: Sequence[int], run: Runner = run_amd_smi) -> dict[int, EccCounts] | None:
     """Accumulated correctable and uncorrectable ECC counts per visible GPU, or ``None`` when they cannot be read."""
-    data = _gpu_data(["metric", "--ecc", "--json"], run)
+    data = _gpu_data(["metric", "--ecc", _JSON], run)
     if data is None:
         return None
     counts: dict[int, EccCounts] = {}

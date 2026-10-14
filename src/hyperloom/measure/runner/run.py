@@ -35,6 +35,9 @@ from hyperloom.orchestrator.actions.executors import harvest_leaked_artifacts
 
 __all__ = ["run"]
 
+_START_FAILED = "runner_start_failed"
+_SPEC_REJECTED = "spec_rejected"
+_FAILED = "failed"
 _KEY_ENV = "HYPERLOOM_SIGNING_KEY_FILE"
 _TIMED_OUT_RC = 124
 
@@ -77,18 +80,18 @@ def _visible(environ: MutableMapping[str, str]) -> list[int]:
 def _load_key(environ: MutableMapping[str, str]):
     path = environ.pop(_KEY_ENV, "")
     if not path:
-        raise RunnerFailure("runner_start_failed", f"{_KEY_ENV} is not set")
+        raise RunnerFailure(_START_FAILED, f"{_KEY_ENV} is not set")
     try:
         return signing.load_private_key(Path(path))
     except (signing.SigningError, OSError) as exc:
-        raise RunnerFailure("runner_start_failed", f"signing key unusable: {exc}") from exc
+        raise RunnerFailure(_START_FAILED, f"signing key unusable: {exc}") from exc
 
 
 def _parse(raw: bytes) -> MeasurementSpec:
     try:
         return MeasurementSpec.from_bytes(raw)
     except DocumentError as exc:
-        raise RunnerFailure("spec_rejected", str(exc)) from exc
+        raise RunnerFailure(_SPEC_REJECTED, str(exc)) from exc
 
 
 def _check_model(yaml_text: str, hashes: dict[str, str]) -> None:
@@ -97,9 +100,9 @@ def _check_model(yaml_text: str, hashes: dict[str, str]) -> None:
         try:
             actual = hashlib.sha256((Path(str(model)) / relative).read_bytes()).hexdigest()
         except OSError as exc:
-            raise RunnerFailure("spec_rejected", f"model file {relative} unreadable: {exc}") from exc
+            raise RunnerFailure(_SPEC_REJECTED, f"model file {relative} unreadable: {exc}") from exc
         if actual != wanted:
-            raise RunnerFailure("spec_rejected", f"model file {relative} differs from the recorded hash")
+            raise RunnerFailure(_SPEC_REJECTED, f"model file {relative} differs from the recorded hash")
 
 
 def _preflight(spec: MeasurementSpec, visible: list[int]):
@@ -125,7 +128,7 @@ def _prepare(ctx: _Context, spec: MeasurementSpec, visible: list[int]) -> tuple[
         if spec.procedure.benchmark_backend == "magpie":
             ctx.environ["MAGPIE_PATH"] = str(ensure_magpie(spec.tools.magpie, ctx.cache))
     except ToolError as exc:
-        raise RunnerFailure("runner_start_failed", str(exc)) from exc
+        raise RunnerFailure(_START_FAILED, str(exc)) from exc
     try:
         placed = place_attachments(spec.attachments, ctx.work / "attach", ctx.read_blob)
         envs = (yaml.safe_load(spec.config[0].yaml).get("benchmark") or {}).get("envs") or {}
@@ -148,7 +151,7 @@ def _prepare(ctx: _Context, spec: MeasurementSpec, visible: list[int]) -> tuple[
                 rewritten = yaml.safe_load(point.read_text())["benchmark"]["envs"]
                 verify_farm(farm, rewritten, python=python, cwd=ctx.work)
     except (AttachmentError, FarmError) as exc:
-        raise RunnerFailure("spec_rejected", str(exc)) from exc
+        raise RunnerFailure(_SPEC_REJECTED, str(exc)) from exc
     return points, inferencex
 
 
@@ -158,7 +161,7 @@ def _call(ctx: _Context, spec: MeasurementSpec, points: list[Path], inferencex: 
     try:
         rounds = RoundPlan(warmup_rounds=p.warmup_rounds, measure_rounds=p.measure_rounds)
     except ValueError as exc:
-        raise RunnerFailure("spec_rejected", str(exc)) from exc
+        raise RunnerFailure(_SPEC_REJECTED, str(exc)) from exc
     ctx.environ["HYPERLOOM_BENCHMARK_BACKEND"] = p.benchmark_backend
     ctx.files.mkdir(parents=True, exist_ok=True)
     return TestCall(
@@ -188,7 +191,7 @@ def _execute(call: TestCall):
     except subprocess.TimeoutExpired:
         return None, True
     except TestCallRefused as exc:
-        raise RunnerFailure("spec_rejected", str(exc)) from exc
+        raise RunnerFailure(_SPEC_REJECTED, str(exc)) from exc
 
 
 def _outcome_document(outcome, timed_out: bool) -> dict:
@@ -307,14 +310,14 @@ def run(
             take_topology(environ)
             progress.phase("waiting_spec")
             if not wait_for_file(in_dir / "READY", spec_wait_sec):
-                write_status(out_dir, state="failed", error_class="no_spec", message="no instruction sheet arrived")
+                write_status(out_dir, state=_FAILED, error_class="no_spec", message="no instruction sheet arrived")
                 return 0
             _run_sheet(ctx, in_dir / "spec.json", key, progress)
         except RunnerFailure as failure:
-            write_status(out_dir, state="failed", error_class=failure.error_class, message=str(failure))
+            write_status(out_dir, state=_FAILED, error_class=failure.error_class, message=str(failure))
             return failure.exit_code
         except Exception as exc:  # noqa: BLE001 - the application reads status.json, not a traceback
-            write_status(out_dir, state="failed", error_class="runner_error", message=f"{type(exc).__name__}: {exc}")
+            write_status(out_dir, state=_FAILED, error_class="runner_error", message=f"{type(exc).__name__}: {exc}")
             return 1
         write_status(out_dir, state="succeeded")
     return 0
