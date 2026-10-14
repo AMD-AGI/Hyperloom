@@ -15,19 +15,23 @@ The evidence is read in this order:
 3. Otherwise the commits the merge commit brought in (a squash commit itself, or the PR's
    commits under a merge commit) are compared by patch-id with those reachable from
    ``commit``, which finds a cherry-pick under any subject. All of them there, by sha or by
-   patch-id, is ``included``; none is ``not_included``; some is ``unknown``.
+   patch-id, is ``included``. None there is ``not_included`` when the merge brought in one
+   commit, and ``unknown`` when it brought in several, because a carry that folded them into
+   one commit (``git cherry-pick -m 1`` of the merge, or a squash) has a patch-id of its own.
+   Some there is ``unknown``.
 
 ``not_included`` therefore needs a definite not-ancestor answer from a complete (not
-shallow) history, no such subject and no patch-id match. Every other outcome is
-``unknown``, with the reason in the evidence, so a merge sha that was not supplied or is
-not fetched, or a shallow clone, never reads as absence. Nothing is fetched: a sha that a
-partial clone lacks counts as not fetched, and a patch-id that needs a blob it lacks is
-``unknown``. ``included`` means the PR's change is in the history; a later revert is not
-looked for. A subject carries only the number, so a fork that numbers its own PRs into
-the same suffix can collide; the evidence names the matching commit and its subject so a
-caller can compare titles. A backport without the suffix whose diff was edited, or
-folded into a larger commit, has another patch-id and still reads as ``not_included``.
-A rebase merge records only the PR's last commit, so that commit alone is compared.
+shallow) history, no such subject, and a single commit brought in with no patch-id match.
+Every other outcome is ``unknown``, with the reason in the evidence, so a merge sha that
+was not supplied or is not fetched, or a shallow clone, never reads as absence. Nothing is
+fetched: a sha that a partial clone lacks counts as not fetched, and a patch-id that needs
+a blob it lacks is ``unknown``. ``included`` means the PR's change is in the history; a
+later revert is not looked for. A subject carries only the number, so a fork that numbers
+its own PRs into the same suffix can collide; the evidence names the matching commit and
+its subject so a caller can compare titles. A backport without the suffix whose diff
+was edited, or folded into a larger commit, has another patch-id and still reads as
+``not_included``. A rebase merge records only the PR's last commit, so that commit alone
+is compared.
 
 Command line::
 
@@ -243,8 +247,13 @@ def _patch_equivalence(tree: Path, head: str, merge: str) -> InclusionVerdict:
     tally = f"{total - absent} of the {total} commits merge commit {merge} brought in are in {head} by sha or patch-id"
     if absent == 0:
         return InclusionVerdict(Inclusion.INCLUDED, InclusionMethod.PATCH_ID, tally)
-    if absent == total:
+    if total == 1:
         return InclusionVerdict(Inclusion.NOT_INCLUDED, InclusionMethod.PATCH_ID, tally)
+    if absent == total:
+        return InclusionVerdict.unknown(
+            f"{tally}; a carry that folded them into one commit, such as git cherry-pick -m 1 or a squash, "
+            "has another patch-id"
+        )
     return InclusionVerdict.unknown(tally)
 
 
