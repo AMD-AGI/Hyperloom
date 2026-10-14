@@ -784,7 +784,7 @@ function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._run_ker
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._validate_gemm_tuning_e2e 427
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase.promote_geak_from_candidate 165
 function-lines src/hyperloom/orchestrator/phases/kernel_stack.py::KernelStackPhase._run_kernel_stack_validation_e2e 220
-function-lines src/hyperloom/orchestrator/phases/machine.py::MachinePhase.advance_phase_if_needed 156
+function-lines src/hyperloom/orchestrator/phases/machine.py::MachinePhase.advance_phase_if_needed 152
 function-lines src/hyperloom/orchestrator/phases/machine_state.py::record_phase_transition 93
 function-lines src/hyperloom/orchestrator/phases/machine_state.py::replay_next_phase 167
 function-lines src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._judge_warm_replay_accuracy 123
