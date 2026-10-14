@@ -103,9 +103,14 @@ hosted = [
     "boto3>=1.28",
 ]
 # The measurement runner inside a sealed sandbox: it reads the YAML config and signs its result manifest.
+#
+# ``lm_eval[api]`` is the accuracy pass's client, pinned to the ref ``inference_optimizer/cli/preflight.py`` installs
+# (``_LM_EVAL_PINNED_REF``), by archive so that no git binary is needed. ``tenacity`` is what its ``api`` models import.
 runner = [
     "PyYAML>=6.0",
     "cryptography>=42",
+    "lm_eval[api] @ https://github.com/EleutherAI/lm-evaluation-harness/archive/ddd67220430a2470529f25fd5c05a576ca1057a0.tar.gz",
+    "tenacity",
 ]
 test = [
     "hyperloom-inference_optimizer[runtime]",
