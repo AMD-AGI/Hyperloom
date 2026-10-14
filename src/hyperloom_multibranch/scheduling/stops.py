@@ -5,9 +5,10 @@
 
 Ending exploration stops every specialist branch and keeps the integration branch for FINAL; a branch stop that fails
 there is logged, not raised. Stopping everything stops every branch including integration, which withdraws every
-test, closes the toolbox, which releases the sandboxes it holds, and kills every process the scheduler started, then
-reports what is still alive; it is bounded by the hard stop, and the kill runs whether or not the rest finished. Both
-close the roster first, so no fork is admitted and no branch opened afterwards.
+test, then releases what the session holds: it closes the toolbox, which releases the sandboxes it holds, and kills
+every process the scheduler started, then reports what is still alive. The branch stops get until
+:data:`TOOLBOX_CLOSE_SECONDS` before the hard stop, and the release runs whether or not they finished, the toolbox
+close bounded by those seconds. Both close the roster first, so no fork is admitted and no branch opened afterwards.
 The main flow's signal drain lives in its loop package, which this package does not import.
 """
 
@@ -35,6 +36,10 @@ logger = logging.getLogger(__name__)
 
 STOP_SIGNALS: tuple[signal.Signals, ...] = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 STOP_OVERRAN = "the stop overran the hard stop"
+TOOLBOX_CLOSE_OVERRAN = "the toolbox did not close in time"
+#: Clock seconds the toolbox gets to close; its close cancels its own work and releases its backend and sandboxes, so
+#: it is quick even while a specialist hangs.
+TOOLBOX_CLOSE_SECONDS = 10.0
 
 
 class SessionStopReason(str, Enum):
@@ -101,9 +106,9 @@ class StopSignals:
 class StopReport:
     """What outlived a session stop: registered processes still running and tests the toolbox still holds.
 
-    ``queue`` is what the toolbox held once every branch was stopped, ``None`` when it did not report it before the
-    hard stop; ``failures`` are the branch stops and the toolbox close that raised and a stop that overran the hard
-    stop.
+    ``queue`` is what the toolbox held once every branch was stopped, ``None`` when it did not report it in time;
+    ``failures`` are the branch stops that failed, branch stops that overran their time, and a toolbox close that
+    raised or overran its own.
     """
 
     leftovers: tuple[ProcessRecord, ...]
@@ -145,23 +150,21 @@ class SessionStopper:
             logger.error("a specialist branch did not stop cleanly at the end of EXPLORE", exc_info=failure)
 
     async def stop_everything(self, reason: SessionStopReason, hard_stop_at: float) -> StopReport:
-        """Close the roster, stop every branch, read the queue, close the toolbox, kill every registered process, and
-        report.
+        """Close the roster, stop every branch, read the queue, :meth:`release` what the session holds, and report.
 
         Branches stop concurrently, each withdrawing its tests, and a failed branch stop is reported, not raised, so
-        every other branch is still stopped and the toolbox still closed, which releases the sandboxes it holds. All of
-        that gets until ``hard_stop_at`` (clock seconds); every registered process is killed afterwards whatever became
-        of it.
+        every other branch is still stopped. That gets until :data:`TOOLBOX_CLOSE_SECONDS` before ``hard_stop_at``
+        (clock seconds); the release runs afterwards whatever became of it.
         """
 
         self._roster.close()
         try:
-            halted = await self._clock.wait_for(self._halt(reason), hard_stop_at - self._clock.now())
+            halting = hard_stop_at - TOOLBOX_CLOSE_SECONDS - self._clock.now()
+            halted = await self._clock.wait_for(self._halt(reason), halting)
         except asyncio.TimeoutError:
             halted = StopReport((), None, (STOP_OVERRAN,))
-        finally:
-            await self._processes.kill_all()
-        report = replace(halted, leftovers=await self._processes.leftovers())
+        released = await self.release()
+        report = replace(halted, leftovers=await self._processes.leftovers(), failures=(*halted.failures, *released))
         self._decisions.record(
             Decision(
                 DecisionKind.SESSION_STOP,
@@ -175,16 +178,31 @@ class SessionStopper:
         )
         return report
 
+    async def release(self) -> tuple[str, ...]:
+        """Close the toolbox, giving it :data:`TOOLBOX_CLOSE_SECONDS`, then kill every registered process; returns the
+        close's failure, if it had one.
+
+        A CLOSE cut short releases through here too, so the sandboxes and the processes go whatever else did not
+        finish.
+        """
+
+        closed = await settled(self._clock.wait_for(self._toolbox.close(), TOOLBOX_CLOSE_SECONDS))
+        await self._processes.kill_all()
+        if isinstance(closed, asyncio.TimeoutError):
+            logger.error(TOOLBOX_CLOSE_OVERRAN)
+            return (TOOLBOX_CLOSE_OVERRAN,)
+        if isinstance(closed, BaseException):
+            logger.error("the toolbox did not close", exc_info=closed)
+            return (f"{type(closed).__name__}: {closed}",)
+        return ()
+
     async def _halt(self, reason: SessionStopReason) -> StopReport:
-        """What the stop leaves before the kill; the queue is read before the toolbox closes and forgets it."""
+        """What the branch stops leave; the queue is read before the toolbox closes and forgets it."""
 
         failures = await self._stop_open(reason, frozenset(BranchKind))
         status = await settled(self._toolbox.queue_state())
-        closed = await settled(self._toolbox.close())
         if isinstance(status, BaseException):
             logger.error("the toolbox did not report its queue after the stop", exc_info=status)
-        if isinstance(closed, BaseException):
-            failures.append(closed)
         for failure in failures:
             logger.error("a step of the session stop failed", exc_info=failure)
         queue = None if isinstance(status, BaseException) else status
@@ -197,4 +215,13 @@ class SessionStopper:
         return [failure for failures in outcomes for failure in failures]
 
 
-__all__ = ["STOP_OVERRAN", "STOP_SIGNALS", "SessionStopReason", "SessionStopper", "StopReport", "StopSignals"]
+__all__ = [
+    "STOP_OVERRAN",
+    "STOP_SIGNALS",
+    "TOOLBOX_CLOSE_OVERRAN",
+    "TOOLBOX_CLOSE_SECONDS",
+    "SessionStopReason",
+    "SessionStopper",
+    "StopReport",
+    "StopSignals",
+]

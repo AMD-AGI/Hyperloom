@@ -42,7 +42,12 @@ from hyperloom_multibranch.scheduling.peers import Peers, PeerSetup, RootWriter
 from hyperloom_multibranch.scheduling.requests import SessionTests
 from hyperloom_multibranch.scheduling.roster import BranchStatus, RosterCaps, StopCause
 from hyperloom_multibranch.scheduling.settings import RunSettings, Workload
-from hyperloom_multibranch.scheduling.stops import STOP_OVERRAN, SessionStopReason
+from hyperloom_multibranch.scheduling.stops import (
+    STOP_OVERRAN,
+    TOOLBOX_CLOSE_OVERRAN,
+    TOOLBOX_CLOSE_SECONDS,
+    SessionStopReason,
+)
 from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     MAIN_POINT,
     REPRO_CASE,
@@ -248,6 +253,8 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
     b02 = next(entry for entry in roster["entries"] if entry["branch"] == "b02")
     assert b02["stop"] == {"cause": StopCause.JUDGE.value, "reason": STOP_REASON, "at": b02["stop"]["at"]}
     assert branches["b02"].stop_reason == f"judge: {STOP_REASON}"
+    assert branches[INTEGRATION_BRANCH].stopped_at is not None
+    assert branches[INTEGRATION_BRANCH].stop_reason == f"session_end: {SessionStopReason.TIME_EXHAUSTED.value}"
     assert "b02" in stage.lifecycle.stopped and "b02" in stage.toolbox.cancelled
     assert stage.toolbox.serving and stage.toolbox.closed == 1 and stage.toolbox.results
     assert not any(running(pid) for pid in stage.pids)
@@ -344,6 +351,7 @@ async def test_close_after_a_signal_waits_the_close_grace_not_the_budget(tmp_pat
     outcome = await stage.run()
 
     assert outcome.close is not None and STOP_OVERRAN in outcome.close.stop.failures
+    assert stage.toolbox.closed == 1
     assert stage.time.now() < START + SETTINGS.max_hours * 3600
     assert stage.pids and not any(running(pid) for pid in stage.pids)
 
@@ -390,6 +398,7 @@ async def test_a_signal_during_a_hanging_close_cuts_it_short_and_leaves_no_proce
     assert (written["stop_reason"], written["stop"]["failures"]) == ("signal", [CUT_SHORT])
     assert stage.pids and not any(running(pid) for pid in stage.pids)
     assert await stage.processes.leftovers() == ()
+    assert stage.toolbox.closed == 1
 
 
 async def test_a_judge_that_never_answers_gives_up_at_the_explore_deadline_and_opens_nothing(tmp_path: Path) -> None:
@@ -427,6 +436,32 @@ async def test_a_judge_soft_stop_ends_explore_early_and_still_runs_final(tmp_pat
     assert sorted(stage.lifecycle.stopped) == ["b01", "b02"]
 
 
+async def test_a_specialist_that_never_stops_at_the_end_of_explore_does_not_hold_final_up(tmp_path: Path) -> None:
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.judge = ScriptedCompletion([OPENING, _reply({"open": 0, "stop_session": {"reason": CONVERGED_REASON}})])
+    stage.lifecycle = MbFakeLifecycle(hanging=frozenset({"b01"}))
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error) == (SessionStopReason.GLOBAL_CONVERGED, "")
+    assert outcome.final is not None and outcome.final.chosen is not None
+    [stop] = [row for row in _decisions(stage) if row["kind"] == "stop" and row["branch"] == "b01"]
+    assert [failure.split(":")[0] for failure in stop["detail"]["failures"]] == ["TimeoutError"]
+
+
+async def test_a_judge_stop_that_never_returns_does_not_freeze_explore(tmp_path: Path) -> None:
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.lifecycle = MbFakeLifecycle(scripts=_scripts(stage), hanging=frozenset({"b02"}))
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error) == (SessionStopReason.TIME_EXHAUSTED, "")
+    assert outcome.final is not None and outcome.final.chosen is not None
+    [stop] = [row for row in _decisions(stage) if row["kind"] == "stop" and row["branch"] == "b02"]
+    assert stop["reason"] == f"judge: {STOP_REASON}" and "b02" in stage.toolbox.cancelled
+    assert len(stage.judge.calls) > 2
+
+
 async def test_a_first_signal_during_close_cuts_it_short_after_one_close_grace(tmp_path: Path) -> None:
     stage = _stage(tmp_path, child=child_with_patch(tmp_path))
     stage.judge = ScriptedCompletion([OPENING, _reply({"open": 0, "stop_session": {"reason": CONVERGED_REASON}})])
@@ -435,10 +470,11 @@ async def test_a_first_signal_during_close_cuts_it_short_after_one_close_grace(t
     outcome = await stage.run()
 
     assert outcome.stop_reason is SessionStopReason.GLOBAL_CONVERGED and outcome.final is not None
-    assert CUT_SHORT in outcome.error and outcome.close is not None and outcome.close.stop.failures == (CUT_SHORT,)
+    assert CUT_SHORT in outcome.error and outcome.close is not None
+    assert outcome.close.stop.failures == (CUT_SHORT, TOOLBOX_CLOSE_OVERRAN)
     [close] = [row for row in _decisions(stage) if row["kind"] == "phase" and row["reason"] == "close"]
     grace = SessionBudget.from_hours(SETTINGS.max_hours, START).close_grace_seconds
-    assert stage.time.now() <= float(str(close["at"])) + grace
+    assert stage.time.now() <= float(str(close["at"])) + grace + TOOLBOX_CLOSE_SECONDS
 
 
 async def test_an_unhandled_error_bounds_close_by_one_close_grace(tmp_path: Path) -> None:
@@ -449,7 +485,8 @@ async def test_an_unhandled_error_bounds_close_by_one_close_grace(tmp_path: Path
         await stage.run()
 
     report = json.loads(stage.layout.report.read_text())
-    assert report["stop_reason"] == SessionStopReason.ABORTED.value and STOP_OVERRAN in report["stop"]["failures"]
+    assert report["stop_reason"] == SessionStopReason.ABORTED.value
+    assert report["stop"]["failures"] == [TOOLBOX_CLOSE_OVERRAN]
     [close] = [row for row in _decisions(stage) if row["kind"] == "phase" and row["reason"] == "close"]
     grace = SessionBudget.from_hours(SETTINGS.max_hours, START).close_grace_seconds
     assert stage.time.now() <= float(str(close["at"])) + grace

@@ -10,7 +10,8 @@ and kills every process the session started. The deadline plus the CLOSE grace b
 brings that hard stop forward to the CLOSE grace from the signal, once, and the unwinding of the cancelled phases
 and CLOSE share it. An unhandled error brings it forward the same way when CLOSE starts, and so does a first signal
 that arrives during CLOSE; CLOSE is cut short if it still runs then. A second signal, whenever it arrives, cuts the
-unwinding and CLOSE short at once. A CLOSE cut short kills every registered process and writes the report.
+unwinding and CLOSE short at once. A CLOSE cut short releases what the session holds, closing the toolbox within
+its own short bound and killing every registered process, and writes the report.
 """
 
 from __future__ import annotations
@@ -299,14 +300,15 @@ class Session:
             await self._clock.wait_for(self._signals.wait_second(), until - self._clock.now())
 
     async def _cut_short(self, ending: SessionOutcome) -> SessionOutcome:
-        """CLOSE abandoned after a stop signal: kill every registered process and report what is still alive."""
+        """CLOSE abandoned after a stop signal: release the toolbox and every registered process, and report what is
+        still alive."""
 
-        await self._processes.kill_all()
+        released = await self._stopper.release()
         error = "; ".join(filter(None, (ending.error, CUT_SHORT)))
-        stop = StopReport(await self._processes.leftovers(), None, (CUT_SHORT,))
+        stop = StopReport(await self._processes.leftovers(), None, (CUT_SHORT, *released))
         report = CloseReport(ending.stop_reason, ending.final, None, stop, error)
         self._closer.write_report(report)
-        logger.error("%s; every registered process was killed", CUT_SHORT)
+        logger.error("%s; the toolbox was released and every registered process killed", CUT_SHORT)
         return replace(ending, close=report, error=error)
 
     def _phase(self, name: str, **detail: object) -> None:

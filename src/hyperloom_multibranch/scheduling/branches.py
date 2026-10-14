@@ -9,9 +9,10 @@ specialist there with its K; a fork or repair the fork desk admitted is opened t
 specialist briefed with the change it builds on. Stopping a branch withdraws everything of it: its specialist unless it
 never started, its queued and running tests and tool jobs, the processes the scheduler registered for it, its claims,
 and the forks and repairs of it that are admitted but not started yet, as the fork desk admits nothing for a stopped
-branch; the notebook gets the ``STOP`` lineage of a branch it has the ``OPEN`` of. The commits it already made stay in
-the notebook, so the integrator may still merge them. The scheduler records no ``STOP`` of the integration branch,
-which only the end of the session stops. The roster entry is stopped first, so an admitted branch drained while its
+branch; the notebook gets the ``STOP`` lineage of a branch that started, the integration branch included, which only the end
+of the session stops. A specialist gets :data:`SPECIALIST_STOP_SECONDS` to stop; one that overruns them is recorded as
+a failed step, and the rest of the stop still runs. The commits it already made stay in the notebook, so the
+integrator may still merge them. The roster entry is stopped first, so an admitted branch drained while its
 parent is being stopped is never started. The toolbox gets a branch's K before its specialist starts, so the first
 tests it submits already queue by it. A peer failure on one branch never ends the session: a branch whose specialist
 does not start is withdrawn like a stopped one, and a failed step of a stop or of a new K is recorded in its decision.
@@ -47,6 +48,9 @@ if TYPE_CHECKING:
     from hyperloom_multibranch.toolbox.toolbox import RealToolbox
 
 logger = logging.getLogger(__name__)
+
+#: Clock seconds a specialist gets to stop before its stop counts as failed; CLOSE kills what it leaves behind.
+SPECIALIST_STOP_SECONDS = 60.0
 
 
 class BranchControl:
@@ -131,11 +135,11 @@ class BranchControl:
         forks = await self._stop_admitted_forks(branch, stop)
         steps = [await settled(self.push_quota())]
         if entry.kind is BranchKind.SPECIALIST and entry.start_commit and stop.cause is not StopCause.START_FAILED:
-            steps.append(await settled(self._lifecycle.stop(branch)))
+            steps.append(await settled(self._clock.wait_for(self._lifecycle.stop(branch), SPECIALIST_STOP_SECONDS)))
         withdrawn = await settled(self._toolbox.cancel_branch(branch, stop.summary))
         steps.append(await settled(self._processes.kill_branch(branch)))
         released = await settled(self._notebook.release_branch(branch))
-        if entry.kind is BranchKind.SPECIALIST and entry.start_commit:
+        if entry.start_commit:
             event = LineageEvent(LineageKind.STOP, branch, reason=stop.summary)
             steps.append(await settled(self._notebook.record_lineage(event)))
         raised = [outcome for outcome in (*steps, withdrawn, released) if isinstance(outcome, BaseException)]
@@ -191,4 +195,4 @@ def _failure_text(error: BaseException) -> str:
     return f"{type(error).__name__}: {error}"
 
 
-__all__ = ["BranchControl"]
+__all__ = ["SPECIALIST_STOP_SECONDS", "BranchControl"]
