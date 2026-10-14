@@ -150,3 +150,19 @@ def test_a_torn_last_line_is_ignored_and_an_aborted_number_is_not_reused(tmp_pat
     assert reread.get(entry.request_id).aborted  # type: ignore[union-attr]
     assert reread.request_id("b", 1) == entry.request_id
     assert SubmissionLog(tmp_path / "other.jsonl", "c2").request_id("b", 1) != entry.request_id
+
+
+async def test_nothing_is_dispatched_after_close(tmp_path: Path) -> None:
+    executor = ScriptedExecutor()
+    executor.gate = asyncio.Event()
+    rig = build(tmp_path, executor=executor, policy=K1)
+    first = await rig.toolbox.submit_test(req(server_args="--a"))
+    await rig.toolbox.submit_test(req(server_args="--b"))
+    await settle()
+    assert executor.started == [first]
+    await rig.toolbox.close()
+    await settle()
+    assert executor.started == [first], "closing cancelled the running test; its slot must not start the queued one"
+    await rig.toolbox.submit_test(req(server_args="--c"))
+    await settle()
+    assert executor.started == [first], "a closed toolbox accepts into its log but dispatches nothing"

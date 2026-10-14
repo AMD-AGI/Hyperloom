@@ -84,6 +84,7 @@ class RealToolbox:
         )
         self._ttl, self._clock = claim_ttl_seconds, clock
         self._tools = tools
+        self._closed = False
         self._tool_jobs: dict[str, list[str]] = {}
         self._lock = asyncio.Lock()
         self._tasks: dict[str, asyncio.Task[None]] = {}
@@ -101,6 +102,7 @@ class RealToolbox:
     async def close(self) -> None:
         """Stop without withdrawing anything: running tests are picked up from the log by the next start."""
 
+        self._closed = True
         tasks = [*self._tasks.values(), *([self._renewer] if self._renewer else [])]
         for task in tasks:
             task.cancel()
@@ -274,6 +276,8 @@ class RealToolbox:
     # --- running -------------------------------------------------------------------------------------------------
 
     def _pump(self) -> None:
+        if self._closed:
+            return
         while (item := self._queue.take()) is not None:
             self._tasks[item.request_id] = asyncio.create_task(self._run(item))
 

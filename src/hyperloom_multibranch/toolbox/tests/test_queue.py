@@ -136,3 +136,27 @@ def test_a_policy_outside_the_contract_is_refused() -> None:
         QueuePolicy(per_branch_k=0)
     with pytest.raises(ValueError, match="outside"):
         QueuePolicy(priority_override={"explore": 7})
+
+
+def test_k_is_a_default_with_per_branch_overrides() -> None:
+    policy = QueuePolicy(per_branch_k=2, branch_k={"slow": 1, "wide": 5})
+    assert [policy.k_for(b) for b in ("other", "slow", "wide")] == [2, 1, 5]
+    draft = QueuePolicy(per_branch_k={"*": 3, "slow": 1})
+    assert (draft.per_branch_k, draft.k_for("slow"), draft.k_for("x")) == (3, 1, 3)
+    assert QueuePolicy(per_branch_k={"a": 4}).k_for("b") == 2, "a mapping without a default keeps the default of 2"
+    with pytest.raises(ValueError, match="at least 1"):
+        QueuePolicy(branch_k={"a": 0})
+
+
+def test_the_queue_applies_each_branchs_own_k_and_backpressure_limit() -> None:
+    queue = _queue(per_branch_k=1, branch_k={"wide": 2}, global_concurrency=9)
+    for name in ("a", "b", "c"):
+        queue.push(_item(name, "wide"))
+        queue.push(_item(f"n{name}", "narrow"))
+    while queue.take() is not None:
+        pass
+    running = {"wide": 0, "narrow": 0}
+    for item in queue.items():
+        running[item.branch] += item.state.value == "running"
+    assert running == {"wide": 2, "narrow": 1}
+    assert queue.policy.queue_limit_for("wide") == 8 and queue.policy.queue_limit_for("narrow") == 4

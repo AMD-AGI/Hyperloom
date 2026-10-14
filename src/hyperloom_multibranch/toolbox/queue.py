@@ -40,24 +40,36 @@ DEFAULT_PRIORITY: Mapping[Purpose, int] = {
 }
 #: A queued test's slack, per K, before the branch's next submit is refused with backpressure.
 DEFAULT_QUEUE_FACTOR = 4
+DEFAULT_K = 2
+DEFAULT_K_KEY = "*"
 
 
 @dataclass(frozen=True)
 class QueuePolicy:
     """What the scheduler sets: tests a branch runs at once, tests in flight overall, a priority per purpose.
 
+    ``per_branch_k`` is the default K, an int; ``branch_k`` overrides it per branch. A mapping given as
+    ``per_branch_k`` is the board draft's form: its ``"*"`` entry is the default, the rest are overrides.
+
     priority_override maps a purpose's value to a priority and applies to requests that name none.
     max_queued_per_branch is the backpressure limit; None means DEFAULT_QUEUE_FACTOR times K.
     """
 
-    per_branch_k: int = 2
+    per_branch_k: int | Mapping[str, int] = 2
     global_concurrency: int = 8
     priority_override: Mapping[str, int] = field(default_factory=dict)
     max_queued_per_branch: int | None = None
+    branch_k: Mapping[str, int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if self.per_branch_k < 1 or self.global_concurrency < 1:
-            raise ValueError("per_branch_k and global_concurrency must be at least 1")
+        if isinstance(self.per_branch_k, Mapping):
+            # The board draft: a K per branch, the default under ``DEFAULT_K_KEY``.
+            overrides = {k: v for k, v in self.per_branch_k.items() if k != DEFAULT_K_KEY}
+            default = self.per_branch_k.get(DEFAULT_K_KEY, DEFAULT_K)
+            object.__setattr__(self, "per_branch_k", default)
+            object.__setattr__(self, "branch_k", {**overrides, **self.branch_k})
+        if self.per_branch_k < 1 or self.global_concurrency < 1 or any(k < 1 for k in self.branch_k.values()):
+            raise ValueError("every K and global_concurrency must be at least 1")
         for purpose, priority in self.priority_override.items():
             Purpose(purpose)
             if not PRIORITY_HIGHEST <= priority <= PRIORITY_LOWEST:
@@ -65,11 +77,15 @@ class QueuePolicy:
                     f"priority {priority} for {purpose!r} is outside {PRIORITY_HIGHEST}..{PRIORITY_LOWEST}"
                 )
 
-    @property
-    def queue_limit(self) -> int:
+    def k_for(self, branch: str) -> int:
+        """The K of ``branch``: its override, else the default."""
+
+        return self.branch_k.get(branch, self.per_branch_k)  # type: ignore[arg-type]
+
+    def queue_limit_for(self, branch: str) -> int:
         if self.max_queued_per_branch is not None:
             return self.max_queued_per_branch
-        return DEFAULT_QUEUE_FACTOR * self.per_branch_k
+        return DEFAULT_QUEUE_FACTOR * self.k_for(branch)
 
     def priority_of(self, request: TestRequest) -> int:
         if request.priority is not None:
@@ -145,7 +161,7 @@ class WorkQueue:
     def check_backpressure(self, request: TestRequest) -> None:
         if exempt_from_k(request):
             return
-        queued, limit = self.queued_counted(request.branch_id), self.policy.queue_limit
+        queued, limit = self.queued_counted(request.branch_id), self.policy.queue_limit_for(request.branch_id)
         if queued >= limit:
             raise Backpressure(request.branch_id, queued, limit)
 
@@ -172,7 +188,7 @@ class WorkQueue:
             item
             for item in self._items.values()
             if item.state is State.QUEUED
-            and (exempt_from_k(item.request) or self._running_counted(item.branch) < self.policy.per_branch_k)
+            and (exempt_from_k(item.request) or self._running_counted(item.branch) < self.policy.k_for(item.branch))
         ]
         if not ready:
             return None
