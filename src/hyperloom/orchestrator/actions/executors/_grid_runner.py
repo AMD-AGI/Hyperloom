@@ -20,6 +20,7 @@ import yaml
 
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env import env_flag, is_truthy
+from hyperloom.common.perf_metric import constraint_fields
 from hyperloom.common.env_safety import (
     BLOCKED_CHILD_ENV_NAMES,
     BLOCKED_EXTERNAL_ENV_NAMES,
@@ -1988,7 +1989,7 @@ async def run_grid(
                 completed_requests=measurement.get("completed_requests"),
                 duration_seconds=measurement.get("duration_seconds"),
                 ttft_mean_ms=measurement.get("ttft_mean_ms"),
-                e2el_mean_ms=measurement.get("e2el_mean_ms"),
+                **constraint_fields(measurement),
                 tpot_mean_ms=measurement.get("tpot_mean_ms"),
                 input_throughput=measurement.get("input_throughput"),
                 tpot_p90_ms=measurement.get("tpot_p90_ms"),

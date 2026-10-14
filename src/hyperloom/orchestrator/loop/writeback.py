@@ -1425,7 +1425,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             ``True`` when the configuration was accepted, ``False`` when a
             performance winner was not comparable or did not beat the anchor.
         """
-        from hyperloom.common.perf_metric import VERDICT_KEEP, graded_axes_of
+        from hyperloom.common.perf_metric import VERDICT_KEEP, constraint_fields, graded_axes_of
 
         prebaseline_enablement = (
             task_kind == "integrate_patch"
@@ -1449,7 +1449,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 return False
             if graded.veto_reason:
                 log.warning(
-                    "current_best held: %s winner refused by the latency budget (%s)", task_kind, graded.veto_reason
+                    "current_best held: %s winner refused by %s (%s)", task_kind, graded.vetoed_by, graded.veto_reason
                 )
                 return False
             # A verified correctness fix was already bounded by the integrate gate.
@@ -1705,7 +1705,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             "final_overlay": _overlay,
             "optimization_stack": list(self.shared_state.optimization_stack),
             "ttft_mean_ms": bv.get("ttft_mean_ms") if isinstance(bv, dict) else None,
-            "e2el_mean_ms": bv.get("e2el_mean_ms") if isinstance(bv, dict) else None,
+            **constraint_fields(bv if isinstance(bv, dict) else {}),
             "tpot_mean_ms": bv.get("tpot_mean_ms") if isinstance(bv, dict) else None,
             "workspace": bv.get("workspace") if isinstance(bv, dict) else None,
         }
@@ -1826,7 +1826,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         outcome: _PromoteOutcome,
     ) -> None:
         """Promote a baseline result: anchor tput / accuracy / config and bootstrap PRELUDE."""
-        from hyperloom.common.perf_metric import stamp_output_per_gpu
+        from hyperloom.common.perf_metric import constraint_fields, stamp_output_per_gpu
 
         stamp_output_per_gpu(result, self.shared_state.tp)
         changed = False
@@ -2019,7 +2019,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     float(warmup_anchor) if isinstance(warmup_anchor, (int, float)) and warmup_anchor > 0 else None
                 ),
                 "ttft_mean_ms": result.get("ttft_mean_ms"),
-                "e2el_mean_ms": result.get("e2el_mean_ms"),
+                **constraint_fields(result),
                 "tpot_mean_ms": result.get("tpot_mean_ms"),
                 "input_throughput": result.get("input_throughput"),
                 "total_throughput": result.get("total_token_throughput"),
@@ -2055,29 +2055,10 @@ class WritebackCollaborator(CoordinatorCollaborator):
             # Reads the current_best just assigned, so it has to follow it.
             self._stamp_current_best_measurement(result)
             changed = True
-            # The reference the run is measured against is itself over the SLA, so
-            # nothing that follows can clear it. Stopping here costs one baseline;
-            # continuing spends the whole --max-hours refusing every candidate to
-            # learn something already knowable.
-            from hyperloom.common.perf_metric import latency_veto_reason
+            from hyperloom.orchestrator.measurement.baseline_budget import baseline_budget_stop_reason
 
-            baseline_veto = latency_veto_reason(
-                result.get("e2el_mean_ms"),
-                float(self.shared_state.latency_budget_ms),
-            )
-            if baseline_veto:
-                log.error(
-                    "baseline does not satisfy --max-latency-ms (%s): budget %.1f ms, baseline %s. "
-                    "No candidate can clear a ceiling the reference already breaks; stopping.",
-                    baseline_veto,
-                    float(self.shared_state.latency_budget_ms),
-                    (
-                        f"{float(result['e2el_mean_ms']):.1f} ms"
-                        if isinstance(result.get("e2el_mean_ms"), (int, float))
-                        else "reported no end-to-end latency"
-                    ),
-                )
-                self.shared_state.set_stop_reason("baseline_over_latency_budget")
+            if stop_reason := baseline_budget_stop_reason(self.shared_state, result):
+                self.shared_state.set_stop_reason(stop_reason)
         if anchor_accepted:
             audit_decision = "promoted"
             outcome.verdict = Verdict.ADOPTED
@@ -3780,7 +3761,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             provenance = str(result.get("provenance") or "").strip()
             if domain and not provenance.startswith("specialist:"):
                 provenance = f"specialist:{domain}"
-            from hyperloom.common.perf_metric import graded_axes_of
+            from hyperloom.common.perf_metric import constraint_fields, graded_axes_of
 
             bv = {
                 "name": sid,
@@ -3795,10 +3776,10 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 },
                 "extra_envs": dict(result.get("extra_envs_applied") or {}),
                 "tput": float(tput),
-                **graded_axes_of(result.get("bench_result") or result),
-                # ``graded_axes_of`` carries the throughput axes only; the latency
-                # budget grades on this one and fails closed without it.
-                "e2el_mean_ms": (result.get("bench_result") or result).get("e2el_mean_ms"),
+                **graded_axes_of(bench := result.get("bench_result") or result),
+                # ``graded_axes_of`` carries the throughput axes only; the latency and
+                # power budgets grade on these and fail closed without them.
+                **constraint_fields(bench),
                 "workspace": result.get("workspace"),
                 "provenance": provenance or "integrate_patch",
                 "scope": "source_patch",
