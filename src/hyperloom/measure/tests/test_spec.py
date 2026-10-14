@@ -11,7 +11,7 @@ from importlib import resources
 from typing import Any
 
 import pytest
-from bundle_factory import REQUEST_ID, spec_document, spec_json
+from hyperloom.measure.tests.bundle_factory import REQUEST_ID, spec_document, spec_json
 from jsonschema import Draft202012Validator
 
 from hyperloom.measure.docs import DocumentError

@@ -19,6 +19,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from hyperloom.contracts.measurement import Purpose
 from hyperloom.measure.docs import (
     PREFIXED_SHA256_RE,
     SHA256_RE,
@@ -38,7 +39,7 @@ _RUNTIME = "runtime"
 _ACCURACY = "accuracy"
 _RESULT_DIR = "result_dir"
 KINDS = ("test", "profile", _ACCURACY, "repro")
-PURPOSES = ("baseline", "health", "explore", "confirm", "integration", "profile", _ACCURACY, "repro", "final")
+PURPOSES = tuple(purpose.value for purpose in Purpose)
 DEFAULT_MAX_TOTAL_BYTES = 4 * 1024**3
 #: The platform variables a sheet may carry reference values for (4.8.1): RCCL and HSA variables SaFE adds to a Pod.
 PLATFORM_ENV_NAMES = (

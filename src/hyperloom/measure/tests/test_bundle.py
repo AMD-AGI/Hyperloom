@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 
 import pytest
-from bundle_factory import (
+from hyperloom.measure.tests.bundle_factory import (
     DEFAULT_FILES,
     REQUEST_ID,
     SANDBOX_ID,

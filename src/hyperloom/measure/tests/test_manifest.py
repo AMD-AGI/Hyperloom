@@ -10,7 +10,7 @@ from importlib import resources
 from typing import Any
 
 import pytest
-from bundle_factory import DEFAULT_FILES, manifest_document
+from hyperloom.measure.tests.bundle_factory import DEFAULT_FILES, manifest_document
 from jsonschema import Draft202012Validator
 
 from hyperloom.measure import signing

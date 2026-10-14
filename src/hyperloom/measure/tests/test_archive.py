@@ -8,7 +8,7 @@ import threading
 from pathlib import Path
 
 import pytest
-from bundle_factory import REQUEST_ID, flip_one_byte, make_bundle, verify_args
+from hyperloom.measure.tests.bundle_factory import REQUEST_ID, flip_one_byte, make_bundle, verify_args
 
 from hyperloom.measure import archive as archive_mod
 from hyperloom.measure.archive import ARCHIVE_FAILED, ArchiveError, DirResultArchive

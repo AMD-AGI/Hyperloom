@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from hyperloom.common.failure_signature import classify_failure
+from hyperloom.contracts.measurement import FailureClass
 from hyperloom.measure.returncodes import (
     HOSTED_INFRA_FAILURE_RC,
     HOSTED_RESULT_REJECTED_RC,
@@ -80,14 +81,6 @@ _STOPPED_RETURNCODES = {
     _SESSION_TIME_EXHAUSTED_RC: "session_time_exhausted",
     _ORCHESTRATOR_CANCELLED_RC: "orchestrator_cancelled",
 }
-
-
-class FailureClass(str, Enum):
-    """The three classes of a failed test (4.5); the values are the ones the manifest and ``TestOutcome`` carry."""
-
-    INFRA = "infra"
-    UNCLEAR = "unclear"
-    CANDIDATE = "candidate"
 
 
 class Disposition(str, Enum):
