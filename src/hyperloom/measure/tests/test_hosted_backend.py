@@ -94,6 +94,13 @@ def test_rounds_come_from_the_runners_rounds_file_when_it_lists_one(rig, tmp_pat
     assert outcome.rounds[0].output_dir.name == "benchmark_fake_20261014_000000"
 
 
+def test_without_a_rounds_file_a_report_in_the_warmup_directory_is_not_a_measuring_round(rig, tmp_path) -> None:
+    r = rig()
+    _, outcome = _run(r, tmp_path, fake_warmup="true")
+    assert [(x.phase, x.output_dir.name) for x in outcome.rounds] == [("measure", "benchmark_fake_20261014_000000")]
+    assert "warmup_round" not in outcome.rounds[0].output_dir.parts
+
+
 def test_the_runner_reports_progress_and_on_output_is_called(rig, tmp_path) -> None:
     r = rig()
     heard: list[int] = []

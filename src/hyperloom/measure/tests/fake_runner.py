@@ -78,6 +78,8 @@ def _write_files(out: Path, config: dict[str, Any], mode: str) -> dict[str, byte
         },
     }
     files = {REPORT_PATH: json.dumps(report).encode(), "server.log": b"server up\nserver down\n"}
+    if config.get("fake_warmup"):
+        files["warmup_round/benchmark_fake_20261014_000000/benchmark_report.json"] = files[REPORT_PATH]
     if mode == "fail_test":
         files["server.log"] = b"ModuleNotFoundError: No module named 'sglang_kernel'\n"
     if mode == "fail_unknown":

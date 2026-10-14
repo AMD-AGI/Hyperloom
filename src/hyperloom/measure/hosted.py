@@ -37,6 +37,7 @@ from hyperloom.measure.failures import Disposition, FailureClassification, class
 from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT, STATE_SUBMITTED, MeasurementJournal, Record
 from hyperloom.measure.hosted_spec import SpecContext, SpecRefused, build_spec, split_result_dir
 from hyperloom.measure.manifest import ResultManifest
+from hyperloom.measure.runner.rounds import ROUNDS_FILE, WARMUP_DIR
 from hyperloom.measure.returncodes import (
     HOSTED_INFRA_FAILURE_RC,
     HOSTED_RESULT_REJECTED_RC,
@@ -83,7 +84,6 @@ BACKEND_NAME = "hosted"
 READY_PATH, SPEC_PATH = "/in/READY", "/in/spec.json"
 STATUS_PATH, PROGRESS_PATH = "/out/status.json", "/out/progress.json"
 MANIFEST_PATH, SIGNATURE_PATH, FILES_ROOT = "/out/manifest.json", "/out/manifest.sig", "/out/files"
-ROUNDS_FILE = "rounds.json"
 _LOSS_POLLS = 3
 _LOG_SUFFIX = ".log"
 
@@ -722,7 +722,10 @@ def _failure_of(out: Any) -> FailureClassification:
 
 
 def _rounds_of(verified: VerifiedBundle, output: Path) -> tuple[RoundOutcome, ...]:
-    """The rounds of a landed result: from ``rounds.json`` when the runner listed it, else from the report layout."""
+    """The rounds of a landed result: from ``rounds.json`` when the runner listed it, else from the report layout.
+
+    The layout alone only says which reports there are; a report in the warm-up directory is not a measuring round.
+    """
     listed = {entry.path for entry in verified.result.files}
     returncode = verified.result.outcome.returncode
     if ROUNDS_FILE in listed:
@@ -730,7 +733,9 @@ def _rounds_of(verified: VerifiedBundle, output: Path) -> tuple[RoundOutcome, ..
         return tuple(
             RoundOutcome(int(r["point"]), r["phase"], output / r["dir"], int(r["returncode"])) for r in document
         )
-    reports = sorted(path for path in listed if path.endswith("benchmark_report.json"))
+    reports = sorted(
+        path for path in listed if path.endswith("benchmark_report.json") and WARMUP_DIR not in Path(path).parts
+    )
     return tuple(RoundOutcome(0, "measure", output / Path(path).parent, returncode) for path in reports)
 
 
