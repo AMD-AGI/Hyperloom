@@ -1344,11 +1344,7 @@ class Coordinator:
                 exc_info=True,
             )
 
-    async def _track_backend_error_streak(
-        self,
-        agent_name: str,
-        exc: BackendError,
-    ) -> None:
+    async def _track_backend_error_streak(self, agent_name: str, exc: BackendError) -> None:
         """Extend the per-agent ``BackendError`` streak and back the agent off.
 
         A streak that has lasted ``_BACKEND_UNHEALTHY_STOP_SEC`` stops the session unless something else already has.
@@ -1359,6 +1355,7 @@ class Coordinator:
         now = time.monotonic()
         new_value = self._backend_error_streak.get(agent_name, 0) + 1
         self._backend_error_streak[agent_name] = new_value
+        log.warning("Coordinator: %s backend turn failed (%d in a row): %s", agent_name, new_value, exc)
         failing_sec = now - self._backend_error_since.setdefault(agent_name, now)
         self._backend_retry_at[agent_name] = now + min(
             _BACKEND_RETRY_MAX_SEC, _BACKEND_RETRY_BASE_SEC * 2 ** (new_value - 1)

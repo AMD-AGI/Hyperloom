@@ -20,6 +20,7 @@ import yaml
 
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env import env_flag, is_truthy
+from hyperloom.common.perf_metric import constraint_fields
 from hyperloom.common.env_safety import (
     BLOCKED_CHILD_ENV_NAMES,
     BLOCKED_EXTERNAL_ENV_NAMES,
@@ -974,8 +975,12 @@ async def run_grid(
         returncode: int | None,
         started_unix: float,
         server_log: Path,
+        server_survivors: list[int],
     ) -> bool:
-        """Record a round the run stopped and say whether the grid is over."""
+        """Record a round the run stopped and say whether the grid is over.
+
+        ``server_survivors`` are the servers the variant booted that outlived its teardown.
+        """
         if returncode == SESSION_TIME_EXHAUSTED_RETURNCODE:
             stopped = deadline_stop
         runtime_sec = round(max(0.0, time.time() - started_unix), 2)
@@ -988,11 +993,14 @@ async def run_grid(
             runtime_sec,
             stopped.interrupted,
         )
+        teardown = "tree reaped"
+        if server_survivors:
+            teardown += f", but server pid(s) {', '.join(map(str, server_survivors))} survived SIGKILL"
         _write_variant_abort_marker(
             slot,
             variant_name=variant.name,
             error_class=stopped.error_class,
-            error_summary=f"{stopped.interrupted}; tree reaped",
+            error_summary=f"{stopped.interrupted}; {teardown}",
             extra_args=variant.extra_server_args,
         )
         results.append(
@@ -1007,6 +1015,7 @@ async def run_grid(
                 error_class=stopped.error_class,
                 server_log_path=_measurement_server_log_path(server_log, slot=slot),
                 note=variant.note,
+                nonfatal_warnings=[f"server_survived_teardown:{pid}" for pid in server_survivors],
             )
         )
         if stopped.ends_the_batch:
@@ -1295,7 +1304,7 @@ async def run_grid(
 
             warmup_stopped = stopped_by_the_run(warmup_rc)
             if warmup_stopped is not None:
-                _teardown_variant_server(slot, lifecycle)
+                warmup_survivors = _teardown_variant_server(slot, lifecycle)
                 grid_is_over = _record_round_stop(
                     warmup_stopped,
                     idx=i,
@@ -1305,6 +1314,7 @@ async def run_grid(
                     returncode=warmup_rc,
                     started_unix=warmup_started_unix,
                     server_log=warmup_server_log,
+                    server_survivors=warmup_survivors,
                 )
                 await _report_finished_variant(i)
                 if grid_is_over:
@@ -1502,6 +1512,7 @@ async def run_grid(
             )
             _mn_warm_stopped = stopped_by_the_run(_mn_warm_rc)
             if _mn_warm_stopped is not None:
+                _mn_warm_survivors = _teardown_variant_server(slot, lifecycle if auto_warmup else None)
                 grid_is_over = _record_round_stop(
                     _mn_warm_stopped,
                     idx=i,
@@ -1511,6 +1522,7 @@ async def run_grid(
                     returncode=_mn_warm_rc,
                     started_unix=_mn_warm_started_unix,
                     server_log=_mn_warm_slot / "server.log",
+                    server_survivors=_mn_warm_survivors,
                 )
                 await _report_finished_variant(i)
                 if grid_is_over:
@@ -1580,8 +1592,7 @@ async def run_grid(
                 break
             continue
         finally:
-            if auto_warmup:
-                _teardown_variant_server(slot, lifecycle)
+            round_survivors = _teardown_variant_server(slot, lifecycle if auto_warmup else None)
 
         # Eval bounds could not be installed for a variant that runs eval, so nothing launched.
         if rc == EVAL_PROBE_UNPATCHABLE_RETURNCODE:
@@ -1730,6 +1741,7 @@ async def run_grid(
                 returncode=rc,
                 started_unix=variant_started_unix,
                 server_log=server_log,
+                server_survivors=round_survivors,
             )
             await _report_finished_variant(i)
             if grid_is_over:
@@ -1988,7 +2000,7 @@ async def run_grid(
                 completed_requests=measurement.get("completed_requests"),
                 duration_seconds=measurement.get("duration_seconds"),
                 ttft_mean_ms=measurement.get("ttft_mean_ms"),
-                e2el_mean_ms=measurement.get("e2el_mean_ms"),
+                **constraint_fields(measurement),
                 tpot_mean_ms=measurement.get("tpot_mean_ms"),
                 input_throughput=measurement.get("input_throughput"),
                 tpot_p90_ms=measurement.get("tpot_p90_ms"),
@@ -2027,15 +2039,20 @@ async def run_grid(
     return results
 
 
-def _teardown_variant_server(slot: Path, lifecycle: dict[str, Any]) -> None:
-    """Stop the server this variant booted for its own rounds."""
-    from ._server_lifecycle import teardown_lifecycle_server
+def _teardown_variant_server(slot: Path, lifecycle: dict[str, Any] | None) -> list[int]:
+    """Stop every server this variant booted for its own rounds; return the pids still alive after SIGKILL.
 
-    teardown_lifecycle_server(
-        pid_dir=slot,
-        framework=str(lifecycle.get("framework") or ""),
-        port=int(lifecycle.get("port") or 0),
-    )
+    ``lifecycle`` names the persistent server the rounds shared, ``None`` when they shared none.
+    """
+    from ._server_lifecycle import stop_agentx_servers, teardown_lifecycle_server
+
+    if lifecycle is not None:
+        teardown_lifecycle_server(
+            pid_dir=slot,
+            framework=str(lifecycle.get("framework") or ""),
+            port=int(lifecycle.get("port") or 0),
+        )
+    return stop_agentx_servers(slot)
 
 
 def _not_run_skip_result(variant: GridVariant, stopped: StoppedByTheRun) -> VariantResult:

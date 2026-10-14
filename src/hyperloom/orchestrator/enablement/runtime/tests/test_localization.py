@@ -47,9 +47,9 @@ def test_closure_compiled_or_build_defers_rung5(path):
     assert path in v.compiled_paths or "cap" in v.reason
 
 
-def test_closure_file_cap_defers_rung5():
-    v = loc.classify_closure([f"vllm/m{i}.py" for i in range(65)])
-    assert v.kind == loc.NEEDS_RUNG5
+def test_a_large_python_closure_is_localizable():
+    v = loc.classify_closure([f"vllm/m{i}.py" for i in range(200)])
+    assert v.kind == loc.PYTHON_ONLY
 
 
 # synthesize_vendor_diff + parse_diff_paths
@@ -92,7 +92,7 @@ def _pr_action() -> EnablementStackAction:
 def test_build_pr_backport_python_only():
     diff = "diff --git a/vllm/model.py b/vllm/model.py\n--- a/vllm/model.py\n+++ b/vllm/model.py\n@@ -1 +1 @@\n-a\n+b\n"
     dt, paths, verdict = loc.build_localization_diff(
-        _pr_action(), fetch_pr_patches=lambda s, n: diff, fetch_raw_file=lambda *a: ""
+        _pr_action(), fetch_pr_patches=lambda s, n: diff, fetch_raw_file=lambda *a: "", scope="vllm"
     )
     assert verdict.kind == loc.PYTHON_ONLY
     assert paths == ["vllm/model.py"]
@@ -102,15 +102,33 @@ def test_build_pr_backport_python_only():
 def test_build_pr_backport_compiled_rung5():
     diff = "diff --git a/csrc/k.cu b/csrc/k.cu\n--- a/csrc/k.cu\n+++ b/csrc/k.cu\n@@ -1 +1 @@\n-a\n+b\n"
     dt, _, verdict = loc.build_localization_diff(
-        _pr_action(), fetch_pr_patches=lambda s, n: diff, fetch_raw_file=lambda *a: ""
+        _pr_action(), fetch_pr_patches=lambda s, n: diff, fetch_raw_file=lambda *a: "", scope="vllm"
     )
     assert verdict.kind == loc.NEEDS_RUNG5
     assert dt == diff  # returned for observability but not localizable
 
 
+def test_build_pr_backport_with_nothing_in_the_package_is_empty():
+    tests = "diff --git a/tests/t.py b/tests/t.py\n--- a/tests/t.py\n+++ b/tests/t.py\n@@ -1 +1 @@\n-a\n+b\n"
+    _, _, verdict = loc.build_localization_diff(
+        _pr_action(), fetch_pr_patches=lambda s, n: tests, fetch_raw_file=lambda *a: "", scope="vllm"
+    )
+    assert verdict.kind == loc.EMPTY
+
+
+def test_build_pr_backport_oversize(monkeypatch):
+    monkeypatch.setattr(loc, "_MAX_VENDOR_BYTES", 10)
+    pkg = "diff --git a/vllm/model.py b/vllm/model.py\n--- a/vllm/model.py\n+++ b/vllm/model.py\n@@ -1 +1 @@\n-a\n+b\n"
+    _, _, verdict = loc.build_localization_diff(
+        _pr_action(), fetch_pr_patches=lambda s, n: pkg, fetch_raw_file=lambda *a: "", scope="vllm"
+    )
+    assert verdict.kind == loc.OVERSIZE
+    assert not verdict.is_localizable
+
+
 def test_build_pr_backport_fetch_failed_empty():
     _, _, verdict = loc.build_localization_diff(
-        _pr_action(), fetch_pr_patches=lambda s, n: "", fetch_raw_file=lambda *a: ""
+        _pr_action(), fetch_pr_patches=lambda s, n: "", fetch_raw_file=lambda *a: "", scope="vllm"
     )
     assert verdict.kind == loc.EMPTY
 
@@ -128,7 +146,7 @@ def test_build_vendor_files_synthesizes():
         }
     )
     dt, paths, verdict = loc.build_localization_diff(
-        action, fetch_pr_patches=lambda *a: "", fetch_raw_file=lambda s, r, p: "print(1)\n"
+        action, fetch_pr_patches=lambda *a: "", fetch_raw_file=lambda s, r, p: "print(1)\n", scope="vllm"
     )
     assert verdict.kind == loc.PYTHON_ONLY
     assert "diff --git a/vllm/new.py b/vllm/new.py" in dt
@@ -151,6 +169,21 @@ def test_synthesized_add_applies_to_git_tree(tmp_path):
 
 
 # adapter localization hooks
+
+
+@pytest.mark.parametrize(
+    ("framework", "layout", "import_root"),
+    [
+        ("sglang", "python/sglang", "python"),
+        ("vllm", "vllm", ""),
+        ("atom", "atom", ""),
+    ],
+)
+def test_the_import_root_is_the_directory_above_the_package(tmp_path, framework, layout, import_root):
+    adapter = get_adapter(framework)
+    assert adapter.source_import_root(str(tmp_path)) == ""
+    (tmp_path / layout).mkdir(parents=True)
+    assert adapter.source_import_root(str(tmp_path)) == import_root
 
 
 def test_vllm_localization_action(monkeypatch):

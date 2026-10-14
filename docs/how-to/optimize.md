@@ -69,7 +69,7 @@ from `ISL+OSL`.
 
 See [`src/hyperloom/inference_optimizer/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/SKILL.md)
 for the full prompt field reference (every field maps to a CLI flag defined in
-`cli/parser.py`).
+`cli/parser.py`, or in `cli/constraint_args.py` for the latency and power budgets).
 
 ## Monitor the run
 

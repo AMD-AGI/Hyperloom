@@ -547,10 +547,11 @@ launching; do not ask the user for these values again.
 
 Each optimize launch starts the service when nothing serves that URL, in the
 same environment as the optimizer (inside the container in docker mode). Its
-data and `service.log` live under `$USER_DATA_PATH/experience-kb`, and it keeps
-running after the run for the next one. When it cannot be started, the launch
-logs a warning and continues: reads return nothing and writes wait in
-`$USER_DATA_PATH/experience-kb/spool` until the service serves again, so they
+data and `service.log` live under its data home, `$HYPERLOOM_KB_HOME` when set,
+otherwise `$USER_DATA_PATH/experience-kb`, and it keeps running after the run
+for the next one. When it cannot be started, the launch logs a warning and
+continues: reads return nothing and writes wait in `spool/` under that data home
+until the service serves again, so they
 survive a removed container. A non-loopback `HYPERLOOM_KB_URL` names a
 service this workspace does not run; Hyperloom connects to it without starting
 anything. Without `HYPERLOOM_KB_URL`, Hyperloom runs without Experience KB reads
@@ -748,6 +749,8 @@ and the operator's stated value is lost:
 | Precision | `--precision` | Match the checkpoint (`bf16` default / `fp8` / ...). Keep consistent with `--quantize`. |
 | Budget | `--max-hours` | Pass the prompt's time budget. Default `2.0`. |
 | Latency SLA | `--max-latency-ms` | **Scriptable frameworks only** (`xdit`, `custom`); refused for serving, where AgentX already grades interactivity. Pass any stated ceiling on per-request latency ("must stay under 250 ms", "interactive workload"). A **constraint, not a target**: it composes with `--target-*` rather than competing, and refuses any KEEP whose mean end-to-end latency exceeds it — including one that reported no latency at all. Off when omitted, which does not lose a preference but does remove the SLA from the search. |
+| Power ceiling | `--max-power-w` | Pass any stated total power budget for the serving GPUs ("the four cards together stay under 2800 W"). A constraint like `--max-latency-ms`, for the serving frameworks (refused on `xdit` / `custom`): refuses any KEEP whose serving GPUs' summed mean power exceeds it, including one that reported no per-GPU power. |
+| Per-GPU power limit | `--max-per-gpu-power-w GPU_ID W` | Pass any stated limit for a specific card ("GPU 4 under 700 W"), once per card. GPU_ID is the physical amd-smi index. A serving card with no entry is bound only by `--max-power-w`; the limits must add up to no more than it. |
 | GPU power settings | `--gpu-power-cap-w` / `--gpu-perf-level` | Assertions, not requests. Only when the prompt says the cards were set to a cap or perf level; Hyperloom never changes them. The session refuses to start if a card differs. |
 | Max model len | `--max-model-len` | Optional; auto-derived from ISL+OSL+headroom when omitted. |
 | External reference GPU | `--compare-against-gpu` | `target_analysis` writes `target_analysis/target_baseline.json` for query/status metadata and `competitor_target.json` for both advisory and final-report comparisons. Without a target GPU it writes `reason="no_target_gpu_configured"` and clears the competitor target. AgentX reads accepted `current_best.total_throughput / state.tp` and `current_best.e2e_norm_intvty_p90` at `state.conc`; it does not reread raw results or recipes. Missing targets or axes remain unavailable. This is a cross-system advisory, not proof of identical measurement estimators or deployment, and never changes Objective or KEEP/REVERT. |

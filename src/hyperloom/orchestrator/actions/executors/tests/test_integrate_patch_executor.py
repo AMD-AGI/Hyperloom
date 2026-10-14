@@ -533,6 +533,7 @@ async def test_same_executor_second_early_return_does_not_reuse_runtime(tmp_path
     executor = IntegratePatchExecutor(session_dir=session)
     monkeypatch.setattr(executor, "_bench_patch", forbidden)
     state = SimpleNamespace(
+        phase="FRAMEWORK_AGENT",
         current_best={},
         enablement=EnablementRound(),
         get_specialist_patch_verdict=lambda _subject: "approve",
@@ -887,6 +888,41 @@ async def test_executor_missing_specialist_workspace_fails_cleanly(tmp_path: Pat
     result = await executor(ctx)
     assert result["status"] == "failed"
     assert result["error_class"] == "missing_specialist"
+
+
+@pytest.mark.asyncio
+async def test_an_enablement_integrate_that_runs_after_the_lane_succeeded_is_graded_as_any_other(tmp_path: Path):
+    """The tag was stamped at admission; the executor grades by what the lane is when it runs."""
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    state = SharedState(phase="FRAMEWORK_AGENT", enablement=EnablementRound(succeeded=True))
+    ctx = _make_ctx(
+        "t-int-late",
+        {
+            "specialist_task_id": "nonexistent",
+            "enablement": True,
+            "enablement_before_observation_path": "/s/reports/bringup/round-old.json",
+        },
+    )
+    ctx.extra["shared_state"] = state
+    executor = IntegratePatchExecutor(session_dir=session_dir)
+    resolved: dict[str, Any] = {}
+    resolve = executor._stage_resolve
+
+    async def _spy(attempt, params, extra):
+        try:
+            return await resolve(attempt, params, extra)
+        finally:
+            resolved.update(params)
+
+    executor._stage_resolve = _spy
+
+    await executor(ctx)
+
+    assert "enablement" not in resolved
+    assert "enablement_before_observation_path" not in resolved
 
 
 @pytest.mark.asyncio
@@ -1673,6 +1709,7 @@ async def _round_exiting_after_setup(tmp_path: Path, monkeypatch, *, arrange, pa
     arrange(ip_mod, monkeypatch)
 
     shared_state = SimpleNamespace(
+        phase="FRAMEWORK_AGENT",
         enablement=EnablementRound(setup_executions=list(ledger or [])),
         save=lambda _dir: None,
         get_specialist_patch_verdict=lambda _subject: "approve",
@@ -1806,6 +1843,7 @@ async def test_base_sha_is_captured_before_the_setup_commands_run(tmp_path: Path
     monkeypatch.setattr(ip_mod, "resolve_session_framework_root", lambda: str(repo))
 
     shared_state = SimpleNamespace(
+        phase="FRAMEWORK_AGENT",
         enablement=EnablementRound(),
         save=lambda _dir: None,
         get_specialist_patch_verdict=lambda _subject: "approve",
@@ -1866,6 +1904,7 @@ async def test_base_sha_of_an_explicit_root_predates_the_setup_commands(tmp_path
     monkeypatch.setattr(ip_mod, "resolve_session_framework_root", lambda: str(session_root))
 
     shared_state = SimpleNamespace(
+        phase="FRAMEWORK_AGENT",
         enablement=EnablementRound(),
         save=lambda _dir: None,
         get_specialist_patch_verdict=lambda _subject: "approve",
@@ -2312,6 +2351,8 @@ async def test_executor_grades_real_patch_bench(
     monkeypatch.setattr(ip_mod, "materialize_config_with_envs", lambda *_args, **_kwargs: config_path)
     monkeypatch.setattr(_ray_serving, "maybe_serving_lease", lambda **_kwargs: None)
     state = SimpleNamespace(
+        phase="FRAMEWORK_AGENT",
+        enablement=EnablementRound(),
         framework="vllm",
         benchmark_mode="synthetic" if grading_mode == "synthetic" else "agentx",
         current_best={
@@ -2415,6 +2456,8 @@ async def test_executor_rebinds_base_from_live_current_best(tmp_path: Path, monk
     monkeypatch.setattr(executor, "_maybe_write_framework_kb_record", _noop_kb)
 
     live_state = SimpleNamespace(
+        phase="FRAMEWORK_AGENT",
+        enablement=EnablementRound(),
         current_best={
             "tput": 4616.0,
             "extra_server_args": "--no-scheduler-reserve-full-isl",
@@ -2681,6 +2724,8 @@ async def test_mlperf_integrate_patch_is_gated_on_inline_accuracy(tmp_path: Path
     monkeypatch.setattr(ip_mod, "materialize_config_with_envs", lambda *_args, **_kwargs: config_path)
     monkeypatch.setattr(_ray_serving, "maybe_serving_lease", lambda **_kwargs: None)
     state = SimpleNamespace(
+        phase="FRAMEWORK_AGENT",
+        enablement=EnablementRound(),
         framework="sglang",
         benchmark_mode="agentx",
         agentx_backend="mlperf",
@@ -2790,6 +2835,8 @@ async def test_a_scriptable_source_patch_over_the_latency_budget_is_reverted(
     monkeypatch.setattr(ip_mod, "materialize_config_with_envs", lambda *_args, **_kwargs: config_path)
     monkeypatch.setattr(_ray_serving, "maybe_serving_lease", lambda **_kwargs: None)
     state = SimpleNamespace(
+        phase="FRAMEWORK_AGENT",
+        enablement=EnablementRound(),
         framework="custom",
         benchmark_mode="synthetic",
         latency_budget_ms=250.0,
@@ -2844,6 +2891,7 @@ async def test_the_closure_baseline_is_read_before_the_first_setup_command(tmp_p
     monkeypatch.setattr(keep_probe, "probe_keep_environment", _probe)
     monkeypatch.setattr(sr_mod, "run_setup_commands", _installed)
     shared_state = SimpleNamespace(
+        phase="FRAMEWORK_AGENT",
         enablement=EnablementRound(setup_executions=list(prior_ledger)),
         save=lambda _dir: None,
         get_specialist_patch_verdict=lambda _subject: "approve",
@@ -2872,3 +2920,77 @@ async def test_the_closure_baseline_is_read_before_the_first_setup_command(tmp_p
     assert baseline == (
         {} if prior_ledger else {"interpreter": "/usr/bin/python3", "distributions": {"transformers": "4.0"}}
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("power_w", "expected_status", "expected_return"),
+    [
+        pytest.param(812.0, "reverted", 1, id="over-power-budget-reverts-its-own-patch"),
+        pytest.param(650.0, "kept", 2, id="in-power-budget-keeps"),
+    ],
+)
+async def test_a_source_patch_over_the_power_budget_is_reverted(
+    tmp_path: Path, monkeypatch, power_w, expected_status, expected_return
+):
+    from types import SimpleNamespace
+
+    from hyperloom.orchestrator.actions.executors import _ray_serving
+    from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
+    from hyperloom.orchestrator.actions.executors._grid_runner import VariantResult
+
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    session_dir = tmp_path / "session"
+    repo = tmp_path / "framework"
+    init_git_repo(repo)
+    _write_specialist_workspace(session_dir, "t-spec-power", patch_contents=[_VALID_PATCH])
+    config_path = tmp_path / "baseline.yaml"
+    config_path.write_text("benchmark: {}\n", encoding="utf-8")
+    workspace = tmp_path / "grid" / "benchmark_test"
+    workspace.mkdir(parents=True)
+    measured = VariantResult(
+        name="patch-power",
+        extra_server_args="",
+        extra_envs={},
+        status="succeeded",
+        output_throughput=200.0,
+        gpu_power_by_gpu_w={"4": power_w},
+        workspace=str(workspace),
+    )
+
+    async def fake_run_grid(**_kwargs):
+        return [measured]
+
+    monkeypatch.setattr(ip_mod, "run_grid", fake_run_grid)
+    monkeypatch.setattr(ip_mod, "materialize_config_with_envs", lambda *_args, **_kwargs: config_path)
+    monkeypatch.setattr(_ray_serving, "maybe_serving_lease", lambda **_kwargs: None)
+    state = SimpleNamespace(
+        phase="FRAMEWORK_AGENT",
+        enablement=EnablementRound(),
+        framework="custom",
+        benchmark_mode="synthetic",
+        power_budget_w=700.0,
+        current_best={"tput": 100.0},
+        baseline_accuracy=0.0,
+        get_specialist_patch_verdict=lambda _sid: "approve",
+        save=lambda _path: None,
+    )
+    executor = IntegratePatchExecutor(session_dir=session_dir)
+    ctx = _make_ctx(
+        "t-int-power",
+        {
+            "specialist_task_id": "t-spec-power",
+            "framework_source_root": str(repo),
+            "framework": "custom",
+            "config_path": str(config_path),
+            "require_accuracy_for_keep": False,
+        },
+    )
+    ctx.extra["shared_state"] = state
+    result = await executor(ctx)
+
+    assert result["status"] == expected_status
+    if expected_status == "reverted":
+        assert "power_budget_exceeded" in result["reason"]
+    assert (repo / "src.py").read_text().endswith(f"return {expected_return}\n")
