@@ -137,3 +137,25 @@ def test_a_classification_cannot_be_built_incoherent() -> None:
         FailureClassification(Disposition.STOPPED)
     with pytest.raises(ValueError, match="no failure reason"):
         FailureClassification(Disposition.SUCCEEDED, failure_reason="x")
+
+
+BIND_LOG = (
+    "INFO launching server\n"
+    "ERROR:    [Errno 98] error while attempting to bind on address ('0.0.0.0', 39211): address already in use\n"
+)
+
+
+def test_a_port_taken_between_choosing_and_binding_is_an_infrastructure_failure() -> None:
+    verdict = _classify(returncode=1, logs=[BIND_LOG])
+    assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.INFRA, "port_in_use")
+
+
+def test_either_phrase_of_the_bind_failure_is_enough_and_it_beats_a_candidate_signature() -> None:
+    assert _classify(returncode=1, logs=["OSError: Address Already In Use"]).failure_class is FailureClass.INFRA
+    assert _classify(returncode=1, logs=["OSError: [Errno 98]"]).failure_class is FailureClass.INFRA
+    both = _classify(returncode=1, logs=[IMPORT_ERROR_LOG + BIND_LOG])
+    assert both.failure_class is FailureClass.INFRA
+
+
+def test_a_successful_exit_is_not_changed_by_a_bind_message_in_its_log() -> None:
+    assert _classify(returncode=0, logs=[BIND_LOG]).disposition is Disposition.SUCCEEDED
