@@ -16,11 +16,13 @@ only; the notebook's search and record reads are shared across branches, as the 
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import dataclasses
 import enum
 import functools
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, cast
 
 from hyperloom.contracts.measurement import PRIORITY_HIGHEST, PRIORITY_LOWEST, Purpose, TestKind
@@ -130,6 +132,18 @@ def jsonable(value: Any) -> Any:
     return value
 
 
+async def _on(home: asyncio.AbstractEventLoop | None, call: Awaitable[Any]) -> Any:
+    """Await a toolbox call on the loop the toolbox lives on.
+
+    The service answers every request on a loop of its own that ends with the request. The toolbox starts its tests as
+    tasks of the loop it was started on, so a call made on the request's loop would leave the test running on a loop
+    that is about to stop: it would be cancelled the moment the reply went out.
+    """
+    if home is None or asyncio.get_running_loop() is home:
+        return await call
+    return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(call, home))  # type: ignore[arg-type]
+
+
 async def _own_record(notebooks: NotebookFor, ctx: CallContext, request_id: str) -> Any:
     """The notebook's record of ``request_id``, when the caller's branch asked for it."""
     try:
@@ -141,14 +155,16 @@ async def _own_record(notebooks: NotebookFor, ctx: CallContext, request_id: str)
     return record
 
 
-def _submit_test(toolbox: Toolbox) -> Callable[[dict[str, Any], CallContext], Any]:
+def _submit_test(
+    toolbox: Toolbox, home: asyncio.AbstractEventLoop | None
+) -> Callable[[dict[str, Any], CallContext], Any]:
     async def handle(arguments: dict[str, Any], ctx: CallContext) -> dict[str, str]:
         try:
             request = MeasuredRequest.from_document({**arguments, "branch_id": ctx.principal.branch})
         except ValueError as exc:  # MeasurementError and RecipeError both are
             raise InvalidParamsError(str(exc)) from exc
         try:
-            return {"request_id": await toolbox.submit_test(request)}
+            return {"request_id": await _on(home, toolbox.submit_test(request))}
         except RequestRejected as exc:
             raise ToolError(f"rejected ({exc.code}): {exc.reason}") from exc
         except Backpressure as exc:
@@ -176,20 +192,24 @@ def _test_result(notebooks: NotebookFor) -> Callable[[dict[str, Any], CallContex
     return handle
 
 
-def _cancel_test(toolbox: Toolbox, notebooks: NotebookFor) -> Callable[[dict[str, Any], CallContext], Any]:
+def _cancel_test(
+    toolbox: Toolbox, notebooks: NotebookFor, home: asyncio.AbstractEventLoop | None
+) -> Callable[[dict[str, Any], CallContext], Any]:
     async def handle(arguments: dict[str, Any], ctx: CallContext) -> dict[str, str]:
         await _own_record(notebooks, ctx, arguments["request_id"])
         try:
-            return {"outcome": (await toolbox.cancel(arguments["request_id"])).value}
+            return {"outcome": (await _on(home, toolbox.cancel(arguments["request_id"]))).value}
         except ToolboxError as exc:
             raise ToolError(f"{type(exc).__name__}: {exc}") from exc
 
     return handle
 
 
-def _queue_state(toolbox: Toolbox) -> Callable[[dict[str, Any], CallContext], Any]:
+def _queue_state(
+    toolbox: Toolbox, home: asyncio.AbstractEventLoop | None
+) -> Callable[[dict[str, Any], CallContext], Any]:
     async def handle(arguments: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
-        state = await toolbox.queue_state()
+        state = await _on(home, toolbox.queue_state())
         return {**jsonable(state), "queued": state.queued, "running": state.running}
 
     return handle
@@ -218,15 +238,28 @@ def _notebook_handler(
 
 
 def register_specialist_tools(
-    server: McpServer, *, toolbox: Toolbox, notebooks: NotebookFor, claim_ttl_seconds: float = 600.0
+    server: McpServer,
+    *,
+    toolbox: Toolbox,
+    notebooks: NotebookFor,
+    claim_ttl_seconds: float = 600.0,
+    toolbox_loop: asyncio.AbstractEventLoop | None = None,
 ) -> None:
-    """Register every specialist tool; ``notebooks(branch)`` is the notebook handle that writes as that branch."""
+    """Register every specialist tool; ``notebooks(branch)`` is the notebook handle that writes as that branch.
+
+    ``toolbox_loop`` is the loop the toolbox was started on; every call to the toolbox is made on it. When omitted it is
+    the running loop of the caller, so registering from the coroutine that started the toolbox is enough; without a
+    running loop the toolbox is called on the loop of each request, which suits a toolbox that keeps no tasks.
+    """
+    if toolbox_loop is None:
+        with contextlib.suppress(RuntimeError):
+            toolbox_loop = asyncio.get_running_loop()
     own = {"scopes": _SPECIALIST_SCOPES}
     server.register(
         "submit_test",
         description="Submit a test of a recipe change for this branch; returns the request id once accepted.",
         schema=_SUBMIT_TEST,
-        handler=_submit_test(toolbox),
+        handler=_submit_test(toolbox, toolbox_loop),
         **own,
     )
     server.register(
@@ -240,14 +273,14 @@ def register_specialist_tools(
         "cancel_test",
         description="Take back a test of this branch that has not finished.",
         schema=_REQUEST_ID,
-        handler=_cancel_test(toolbox, notebooks),
+        handler=_cancel_test(toolbox, notebooks, toolbox_loop),
         **own,
     )
     server.register(
         "queue_state",
         description="Queue lengths by priority, running tests by branch, and the sandbox cold start time.",
         schema=_NO_ARGUMENTS,
-        handler=_queue_state(toolbox),
+        handler=_queue_state(toolbox, toolbox_loop),
         **own,
     )
     server.register(

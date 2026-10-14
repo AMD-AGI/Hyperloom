@@ -5,12 +5,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -314,3 +316,51 @@ def test_the_grants_heartbeat_sink_beats_during_a_blocking_call_over_http(rig: R
         assert len(beats) == during
     finally:
         server.stop()
+
+
+async def test_toolbox_calls_run_on_the_loop_the_toolbox_was_registered_from() -> None:
+    """The service answers on a loop of its own per request; a test the toolbox starts there would die with it."""
+    home = asyncio.get_running_loop()
+    seen: list[asyncio.AbstractEventLoop] = []
+
+    class LoopRecordingToolbox(FakeToolbox):
+        async def submit_test(self, request: TestRequest) -> str:
+            seen.append(asyncio.get_running_loop())
+            return await super().submit_test(request)
+
+        async def cancel(self, request_id: str) -> CancelOutcome:
+            seen.append(asyncio.get_running_loop())
+            return await super().cancel(request_id)
+
+        async def queue_state(self) -> QueueState:
+            seen.append(asyncio.get_running_loop())
+            return await super().queue_state()
+
+    server = McpServer(McpServerConfig(host_token=HOST_TOKEN), campaign="camp")
+    toolbox = LoopRecordingToolbox()
+
+    class Notebooks:
+        async def record(self, request_id: str) -> object:
+            return SimpleNamespace(request=SimpleNamespace(branch="s1"))
+
+    register_specialist_tools(server, toolbox=toolbox, notebooks=lambda branch: Notebooks())  # type: ignore[arg-type,return-value]
+    server.start()
+    try:
+        token = server.issue_token("specialist-s1", "s1")
+        for tool, arguments in [
+            ("submit_test", {"kind": "test", "purpose": "explore", "parent_commit": "c1"}),
+            ("cancel_test", {"request_id": "r1"}),
+            ("queue_state", {}),
+        ]:
+            message = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": tool, "arguments": arguments},
+            }
+            request = urllib.request.Request(server.url, json.dumps(message).encode(), {"X-Hyperloom-Token": token})
+            reply = await asyncio.to_thread(lambda r=request: json.loads(urllib.request.urlopen(r, timeout=10).read()))
+            assert reply["result"]["isError"] is False, reply
+    finally:
+        server.stop()
+    assert seen == [home, home, home]
