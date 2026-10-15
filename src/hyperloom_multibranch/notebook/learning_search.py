@@ -89,13 +89,6 @@ def render_session_learning(record: LearningRecord, snapshot: NotebookSnapshot) 
     return f"- [{learning.branch}, {learning.kind.value}{about}] {learning.content}{evidence} [{record.entry_id}]"
 
 
-def session_lines(snapshot: NotebookSnapshot, query: str, *, limit: int) -> list[str]:
-    """This session's matches under their heading; empty when none matched."""
-
-    found = [render_session_learning(record, snapshot) for record in session_matches(snapshot, query, limit=limit)]
-    return [SESSION_HEADING, *found] if found else []
-
-
 def fit_lines(lines: Sequence[str], max_chars: int) -> list[str]:
     """Whole lines, in order, within ``max_chars``; a line that does not fit is left out and the next ones tried."""
 
@@ -111,7 +104,10 @@ class SessionLearnings:
     """The finder without a knowledge base: this session's learnings only."""
 
     async def lines(self, snapshot: NotebookSnapshot, query: str, *, limit: int) -> list[str]:
-        return session_lines(snapshot, query, limit=limit)
+        """This session's matches under their heading; empty when none matched."""
+
+        found = [render_session_learning(record, snapshot) for record in session_matches(snapshot, query, limit=limit)]
+        return [SESSION_HEADING, *found] if found else []
 
 
 __all__ = [
@@ -122,7 +118,6 @@ __all__ = [
     "fit_lines",
     "outcome_of",
     "render_session_learning",
-    "session_lines",
     "session_matches",
     "words",
 ]

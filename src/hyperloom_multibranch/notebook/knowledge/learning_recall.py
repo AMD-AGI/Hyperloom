@@ -26,7 +26,7 @@ from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot, S
 from hyperloom_multibranch.notebook.knowledge.experience import experience_identity
 from hyperloom_multibranch.notebook.knowledge.learnings import MAPPING_PATH
 from hyperloom_multibranch.notebook.knowledge.recall import WORKLOAD_KEYS, ExperienceReader, IdentityIndex, classify
-from hyperloom_multibranch.notebook.learning_search import session_lines, words
+from hyperloom_multibranch.notebook.learning_search import SessionLearnings, words
 
 LEARNING_DECISION = "Choose the next step of one branch of a multi-branch LLM inference optimization session."
 LEARNING_OBJECTIVE = "specialist_learning@v1"
@@ -156,7 +156,8 @@ class LearningRecall:
             before = [item.render() for item in found.items]
             if not found.available:
                 before = [f"- unavailable ({'; '.join(found.warnings) or found.status})"]
-        return [*session_lines(snapshot, query, limit=limit), *([PAST_HEADING, *before] if before else [])]
+        here = await SessionLearnings().lines(snapshot, query, limit=limit)
+        return [*here, *([PAST_HEADING, *before] if before else [])]
 
 
 __all__ = [
