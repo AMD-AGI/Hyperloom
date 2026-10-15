@@ -91,6 +91,20 @@ def test_repro_by_kind_or_purpose_is_exempt_and_explore_is_not() -> None:
     assert not exempt_from_k(req())
 
 
+def test_session_measurements_are_exempt_and_integration_and_profile_tests_are_not() -> None:
+    for purpose in (Purpose.BASELINE, Purpose.HEALTH, Purpose.FINAL):
+        assert exempt_from_k(req(purpose=purpose)), purpose
+    for purpose in (Purpose.INTEGRATION, Purpose.PROFILE, Purpose.ACCURACY, Purpose.EXPLORE):
+        assert not exempt_from_k(req(purpose=purpose)), purpose
+
+
+def test_several_baseline_tests_of_one_branch_run_at_once_under_a_k_of_one() -> None:
+    queue = _queue(per_branch_k=1, global_concurrency=9)
+    for name in "abc":
+        queue.push(_item(name, purpose=Purpose.BASELINE))
+    assert sorted(queue.take().request_id for _ in range(3)) == ["a", "b", "c"]  # type: ignore[union-attr]
+
+
 def _attachment():
     from hyperloom.contracts.measurement import AttachmentRef
 

@@ -3,9 +3,9 @@
 
 """The toolbox's queue: five priorities, a per-branch K, a global limit and backpressure (design 4.17).
 
-The queue is plain in-memory state with no I/O, so the fake executor and the real one share it. Confirm-retests and
-reproduction checks do not count against their branch's K (otherwise K exploration tests would starve the retest that
-decides them), but they do count against the global limit.
+The queue is plain in-memory state with no I/O, so the fake executor and the real one share it. Confirm-retests,
+reproduction checks and session measurements do not count against their branch's K (otherwise K exploration tests
+would starve the retest that decides them), but they do count against the global limit.
 """
 
 from __future__ import annotations
@@ -106,10 +106,16 @@ def sandbox_priority(priority: int) -> int:
     return {0: 0, 1: 0, 2: 1, 3: 1, 4: 2}[priority]
 
 
-def exempt_from_k(request: TestRequest) -> bool:
-    """Confirm-retests and reproduction checks do not count against their branch's K."""
+#: Purposes that never take a slot of their branch's K: confirm-retests and reproduction checks (the retest that
+#: decides a result must not wait behind K exploration tests) and the session measurements (baseline, health check and
+#: final validation), which run while no specialist branch does.
+EXEMPT_PURPOSES = frozenset({Purpose.CONFIRM, Purpose.REPRO, Purpose.BASELINE, Purpose.HEALTH, Purpose.FINAL})
 
-    return request.purpose in (Purpose.CONFIRM, Purpose.REPRO) or request.kind is TestKind.REPRO
+
+def exempt_from_k(request: TestRequest) -> bool:
+    """Whether the request takes no slot of its branch's K (it still counts against the global limit)."""
+
+    return request.purpose in EXEMPT_PURPOSES or request.kind is TestKind.REPRO
 
 
 class State(str, Enum):
