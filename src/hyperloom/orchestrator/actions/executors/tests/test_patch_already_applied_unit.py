@@ -474,60 +474,11 @@ def _pr_head_round(repo: Path, head: str, **candidate_extra: object) -> dict:
             "repo": "example-org/example-framework",
             "ref": "pr-head",
             "head_sha": head,
-            "changed_files": ["mod/alpha.py", "mod/beta.py"],
             **candidate_extra,
         },
         "framework_agent_candidate_id": _PR_URL,
         "framework_source_root": str(repo),
     }
-
-
-@pytest.mark.asyncio
-async def test_executor_ends_a_merged_pr_head_as_already_present_without_a_fetch(tmp_path, executor_env, monkeypatch):
-    """The head is merged and the tree has its copy of every file the PR changes: no fetch, no apply, no benchmark."""
-    from hyperloom.orchestrator.actions.executors import _patch_source_pr
-
-    def no_fetch(*_args, **_kwargs):
-        pytest.fail("a PR the live tree already holds needs no diff")
-
-    monkeypatch.setattr(_patch_source_pr, "_fetch_diff_to_path", no_fetch)
-    executor, kb_root = executor_env
-    repo, head = _repo_with_merged_pr_head(tmp_path, revert=False)
-
-    result = await executor(_make_ctx("t-merged", _pr_head_round(repo, head), _approved_state()))
-
-    assert result["status"] == "already_present"
-    assert result["specialist_task_id"] == "t-merged"
-    assert result["already_present"] == [{"diff_range": f"{head}..{head}", "check": "pr_head_files_in_tree"}]
-    rows = read_pr_ledger(kb_root=kb_root)
-    assert [(row["outcome"], row["pr_url"]) for row in rows] == [("already_present", _PR_URL)]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "change",
-    [
-        pytest.param({"extra_server_args": "--max-num-seqs 64"}, id="extra_server_args"),
-        pytest.param({"config_changes": {"VLLM_ROCM_USE_AITER": "1"}}, id="config_changes"),
-        pytest.param({"extra_envs": {"VLLM_ROCM_USE_AITER": "1"}}, id="extra_envs"),
-        pytest.param({"artifacts": [{"source": "tuned.json", "target": "mod/tuned.json"}]}, id="artifacts"),
-        pytest.param({"enablement": True, "enablement_setup_commands": ["pip install example-pkg==1.0"]}, id="setup"),
-    ],
-)
-async def test_executor_fails_a_merged_pr_head_whose_round_changes_more(tmp_path, executor_env, monkeypatch, change):
-    """A merged head ends the round only when nothing else would change; otherwise it is the checkout-head failure."""
-    executor, kb_root = executor_env
-    repo, head = _repo_with_merged_pr_head(tmp_path, revert=False)
-    _mkdir(runs_dir(executor.session_dir, "integrate_patch", "t-more")).joinpath("tuned.json").write_text("{}")
-    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(repo)])
-
-    result = await executor(_make_ctx("t-more", {**_pr_head_round(repo, head), **change}, _approved_state()))
-
-    assert result["status"] == "fetch_failed", result
-    assert result["error_class"] == "checkout_head_failed"
-    assert "empty diff" in result["error"]
-    assert "already_present" not in result
-    assert read_pr_ledger(kb_root=kb_root) == []
 
 
 def _serve_superset(monkeypatch) -> None:

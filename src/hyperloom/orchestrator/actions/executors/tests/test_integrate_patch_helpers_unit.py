@@ -796,8 +796,7 @@ def test_enforce_critic_gate_handles_state_without_verdict_method():
     assert out["status"] == "rejected_by_critic"
 
 
-@pytest.mark.asyncio
-async def test_upstream_pr_lane_refuses_an_unreviewed_candidate(tmp_path: Path) -> None:
+def test_upstream_pr_lane_refuses_an_unreviewed_candidate(tmp_path: Path) -> None:
     """The lane fetches a diff from a remote and applies it to the live tree."""
     ex = ip.IntegratePatchExecutor(session_dir=tmp_path)
     attempt = ip.IntegrateAttempt(task_id="t-cand")
@@ -806,7 +805,7 @@ async def test_upstream_pr_lane_refuses_an_unreviewed_candidate(tmp_path: Path) 
         "framework_agent_candidate_id": "vllm-project/vllm#1015",
     }
 
-    out = await ex._stage_resolve_upstream_pr(attempt, params, {"shared_state": _Verdict("reject")})
+    out = ex._stage_resolve_upstream_pr(attempt, params, _Verdict("reject"))
 
     assert out is not None
     assert out["status"] == "rejected_by_critic"

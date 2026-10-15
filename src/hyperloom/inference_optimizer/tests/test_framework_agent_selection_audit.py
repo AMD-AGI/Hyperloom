@@ -231,51 +231,51 @@ def _scripted_run_git(diff_text: str = "diff --git a b\n+x\n", fetch_ok: bool = 
 def test_materialize_pr_diff_success(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(fpr_mod, "_run_git", _scripted_run_git())
     dest = tmp_path / "out" / "cand.patch"
-    out = fpr_mod._materialize_pr_diff_from_head(tmp_path / "root", {"pr_number": 1015}, dest, timeout_sec=30.0)
-    assert out.failure is None and out.patches == [dest.resolve()]
+    ok, err = fpr_mod._materialize_pr_diff_from_head(tmp_path / "root", {"pr_number": 1015}, dest, timeout_sec=30.0)
+    assert ok is True and err == ""
     assert dest.read_text().startswith("diff --git")
 
 
 def test_materialize_pr_diff_fetch_fails(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(fpr_mod, "_run_git", _scripted_run_git(fetch_ok=False))
-    out = fpr_mod._materialize_pr_diff_from_head(
+    ok, err = fpr_mod._materialize_pr_diff_from_head(
         tmp_path / "root", {"ref": "refs/pull/1/head"}, tmp_path / "c.patch", timeout_sec=30.0
     )
-    assert out.failure is not None and "git fetch" in out.failure["error"]
+    assert ok is False and "git fetch" in err
 
 
 def test_materialize_pr_diff_empty_diff(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(fpr_mod, "_run_git", _scripted_run_git(diff_text="   \n"))
-    out = fpr_mod._materialize_pr_diff_from_head(
+    ok, err = fpr_mod._materialize_pr_diff_from_head(
         tmp_path / "root", {"head_sha": "deadbeef"}, tmp_path / "c.patch", timeout_sec=30.0
     )
-    assert out.failure is not None and "empty diff" in out.failure["error"]
+    assert ok is False and "empty diff" in err
 
 
 def test_materialize_pr_diff_no_head_resolvable(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(fpr_mod, "_run_git", _scripted_run_git())
-    out = fpr_mod._materialize_pr_diff_from_head(tmp_path / "root", {}, tmp_path / "c.patch", timeout_sec=30.0)
-    assert out.failure is not None and "cannot resolve PR head" in out.failure["error"]
+    ok, err = fpr_mod._materialize_pr_diff_from_head(tmp_path / "root", {}, tmp_path / "c.patch", timeout_sec=30.0)
+    assert ok is False and "cannot resolve PR head" in err
 
 
 def test_materialize_pr_diff_checks_out_nothing(monkeypatch, tmp_path) -> None:
     """Both ends of the diff range are shas, so no tree has to be materialized."""
     seen: list[str] = []
     monkeypatch.setattr(fpr_mod, "_run_git", _scripted_run_git(seen=seen))
-    out = fpr_mod._materialize_pr_diff_from_head(
+    ok, _err = fpr_mod._materialize_pr_diff_from_head(
         tmp_path / "root", {"head_sha": "deadbeef"}, tmp_path / "c.patch", timeout_sec=30.0
     )
-    assert out.failure is None
+    assert ok is True
     assert "worktree" not in seen
 
 
 def test_materialize_pr_diff_ignores_an_unusable_pr_number(monkeypatch, tmp_path) -> None:
     """The row reaches us from the KB and from LLM-authored proposals alike."""
     monkeypatch.setattr(fpr_mod, "_run_git", _scripted_run_git())
-    out = fpr_mod._materialize_pr_diff_from_head(
+    ok, err = fpr_mod._materialize_pr_diff_from_head(
         tmp_path / "root", {"pr_number": "not-a-number"}, tmp_path / "c.patch", timeout_sec=30.0
     )
-    assert out.failure is not None and "cannot resolve PR head" in out.failure["error"]
+    assert ok is False and "cannot resolve PR head" in err
 
 
 # Dispatch pause on a spent phase budget

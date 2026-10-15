@@ -23,8 +23,6 @@ class PresenceCheck(Enum):
     GIT_REVERSE_APPLY = "git_reverse_apply_check"
     #: ``patch -R --fuzz=0 --dry-run`` passes with no offset: the same proof without git.
     PATCH_REVERSE_DRY_RUN = "patch_reverse_dry_run"
-    #: The PR head is in the live history, and the tree still has the head's copy of every file the PR changes.
-    PR_HEAD_FILES = "pr_head_files_in_tree"
 
 
 @dataclass
