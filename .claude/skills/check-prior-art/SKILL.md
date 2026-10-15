@@ -1,6 +1,6 @@
 ---
 name: check-prior-art
-description: "Check whether a planned optimization already exists upstream before building it. Invoke with a one-sentence mechanism, the files, symbols or kernels it touches (or a local diff), the upstream repositories to search, and optionally a local tree and commit. Searches open and merged pull requests by keyword, scans open pull requests for the planned paths, deep-reads and classifies the top candidates, checks each duplicate against the tree with the inclusion probe and the tree's log, refutes every match, and writes one verdict with its evidence and search coverage. Reads GitHub, never writes to it."
+description: "Check whether a planned optimization already exists upstream before building it. Invoke with a one-sentence mechanism, the files, symbols or kernels it touches (or a local diff), the upstream repositories to search, and optionally a local tree and commit. Searches open and merged pull requests by keyword, scans every open pull request for the planned paths, deep-reads and classifies the top candidates, checks each duplicate against the tree with the inclusion probe and the tree's log, refutes every match, and writes one verdict with its evidence and search coverage. Reads GitHub, never writes to it."
 ---
 
 <!--
@@ -12,49 +12,32 @@ SPDX-License-Identifier: MIT
 
 Written for an agent to execute top to bottom. Every step writes an artifact into `$WORK`; a step
 that leaves nothing behind is one the check can skip without the skip being visible. The scripts
-take `$WORK` as their first argument and print where they wrote last.
+take `$WORK` as their first argument and print where they wrote last. The skill reads GitHub and
+never posts to it: no comment, review, issue, label or reaction.
 
 ## Output contract
 
-`$WORK/report.md` has four parts, nothing else.
+`$WORK/report.md` has four parts, in the shape Step 7 gives, and nothing else.
 
-**1. Verdict**, one word from the classes and inclusion answers Step 6 left, then its qualifier
-when one applies: the reader acts on the whole line. The first verdict that applies wins:
+**1. Verdict**: the first line of this table that applies; the reader acts on the whole line.
 
-| Verdict | When | Qualifier |
+| Verdict | When | Next step |
 |---|---|---|
-| `EXISTS-MERGED` | a DUPLICATE is merged | `-- in your tree` when Step 5 or 6 found it there, otherwise `-- inclusion unchecked` |
-| `EXISTS-OPEN` | a DUPLICATE is open or draft | as for `EXISTS-MERGED` |
-| `PARTIAL-OVERLAP` | no DUPLICATE is left; an OVERLAPPING PR is | `-- incomplete, see Coverage` when, after the reruns of Steps 2 and 3, a `queries.tsv` row is not `OK`, a `scan.txt` line (per-PR ones too) is not `COMPLETE`, `shortlist.txt` has a `# cut:` line, or a step wrote `SKIPPED:` |
-| `NOT-FOUND` | neither is left | as for `PARTIAL-OVERLAP` |
+| `EXISTS-MERGED -- in your tree` | a DUPLICATE is merged, and Step 5 or 6 found it in your tree | drop the plan: your baseline already runs it. If you expected a gain from it, find why the baseline does not show one (G6) |
+| `EXISTS-MERGED -- inclusion unchecked` | a DUPLICATE is merged, and nothing found it in your tree: local git can show that a PR is in a tree, never that it is absent | take the upstream commit (move the tree past its merge commit, or cherry-pick it) and measure that instead of writing it again; a cherry-pick that comes out empty was already there |
+| `EXISTS-OPEN -- in your tree` | a DUPLICATE is open or draft, and Step 5 or 6 found it in your tree | as for `EXISTS-MERGED -- in your tree`, and carry results to that PR |
+| `EXISTS-OPEN -- inclusion unchecked` | a DUPLICATE is open or draft, and nothing found it in your tree | apply the open PR's diff to your tree and measure it, and carry results or review to that PR rather than opening a second one; a diff that applies only in reverse was already there |
+| `PARTIAL-OVERLAP` | no DUPLICATE is left; an OVERLAPPING PR is | build on or next to the overlapping PR: name it and the shared files in your PR description (G8), and expect a conflict on those files |
+| `NOT-FOUND` | neither is left | proceed, and quote Coverage where the target repo's contributor guide asks for a duplicate-work statement (G8) |
 
-Local git can show that a PR is in a tree, never that it is absent, so every DUPLICATE that
-nothing found in your tree is `-- inclusion unchecked`, and so is every one when no tree was given.
+`PARTIAL-OVERLAP` and `NOT-FOUND` add `-- incomplete, see Coverage` when, after the reruns of
+Steps 2 and 3, a `queries.tsv` row is not `OK`, a `scan.txt` line is not `COMPLETE`,
+`shortlist.txt` has a `# cut:` line, or a step wrote `SKIPPED:`.
 
-**2. Evidence**: a table with one row per PR in `classes.txt`, the UNRELATED ones included, whose
-`why` names the mechanism, file or symbol in its diff that decided the class.
-
-**3. Coverage**: a verdict is a claim about what was searched; this part says what that was.
-- the status counts from `queries.tsv`, with every non-`OK` query quoted;
-- every line of `scan.txt` that is not `COMPLETE` (per-PR lines may be one line listing their numbers);
-- `read N of M` from `shortlist.txt`, and the PRs its `# cut:` lines name;
-- every `SKIPPED:` line;
-- what no check searches: closed-unmerged PRs (only `xrefs.tsv` reaches them), issues and RFCs,
-  repositories outside `repos.txt`, and a planned path that does not exist upstream, which matches
-  nothing while `scan.txt` still says `COMPLETE` (G7).
-
-**4. Next step**, from the verdict:
-
-| Verdict | Next step |
-|---|---|
-| `EXISTS-MERGED -- in your tree`, `EXISTS-OPEN -- in your tree` | drop the plan: your baseline already runs it. If you expected a gain from it, find why the baseline does not show one (G6); for an open PR, carry results to it |
-| `EXISTS-MERGED -- inclusion unchecked` | take the upstream commit (move the tree past its merge commit, or cherry-pick it) and measure that, instead of writing it again; a cherry-pick that comes out empty was already there |
-| `EXISTS-OPEN -- inclusion unchecked` | apply the open PR's diff to your tree and measure it, and carry results or review to that PR rather than opening a second one; a diff that applies only in reverse was already there |
-| `PARTIAL-OVERLAP` | build on or next to the overlapping PR: name it and the shared files in your PR description (G8), and expect a conflict on those files |
-| `NOT-FOUND` | proceed, and quote the coverage part where the target repo's contributor guide asks for a duplicate-work statement (G8) |
-
-This skill never posts to GitHub: no comment, review, issue, label or reaction. The report is for
-whoever plans the change.
+**2. Evidence**: one row per PR in `classes.txt`, the UNRELATED ones included, whose `why` names
+what in the PR decided its class. **3. Coverage**: what was searched and what no check searches,
+so that "nothing found" never reads as "not searched". **4. Next step**: the verdict's, naming the
+PR it acts on.
 
 ## Untrusted input
 
@@ -114,9 +97,9 @@ bash .claude/skills/check-prior-art/search.sh "$WORK"
 | `queries.tsv` | one row per query as it is answered: `status listed total query note`. `OK`, `TRUNCATED` (more matched than one page lists), `INCOMPLETE` (GitHub timed out searching) or `FAILED` (with gh's error) |
 | `candidates.tsv` | written at the end: one row per PR any query found, `repo number state draft title url updated hits` |
 
-The script keeps under the search API's 30 queries a minute itself. A `TRUNCATED` query was too broad: replace it
-in `terms.txt` with narrower lines and rerun. With a `FAILED` query, or a run that ended before
-`candidates.tsv`, rerun the script once; a query still `FAILED` goes on the report as
+The script keeps under the search API's 30 queries a minute. A `TRUNCATED` query was too broad:
+replace it in `terms.txt` with narrower lines and rerun. With a `FAILED` query, or a run that ended
+before `candidates.tsv`, rerun once; a query still `FAILED` goes on the report as
 `SKIPPED: search -- <query>: <error>`.
 
 ## Step 3 — Open PRs on the planned paths
@@ -133,8 +116,7 @@ bash .claude/skills/check-prior-art/overlap.sh "$WORK" > "$WORK/overlap.log" 2>&
 A large repository takes minutes and several can outlast a ten-minute command timeout: run it in
 the background and wait for it to exit. Rerun once when a repository line says the scan stopped;
 a repository with no line did not finish, which Step 7 checks. An empty `overlap.tsv` means "no
-open PR touches these paths" only where `scan.txt` says `COMPLETE`; every other line reaches the
-report.
+open PR touches these paths" only where `scan.txt` says `COMPLETE`.
 
 Merged work on the same paths: with an upstream clone, write
 `git log --oneline <commit>..<upstream default branch> -- <paths>` into `$WORK/pathlog.txt`; its
@@ -154,14 +136,14 @@ bash .claude/skills/check-prior-art/read.sh "$WORK" <owner/name> <N>
 
 It writes `prs/<owner>/<name>/<N>/`: `pr.json` (`state` `OPEN`, `CLOSED` or `MERGED`, `isDraft`,
 `mergeCommit`, `body`, `comments`, `reviews`), `files.txt` (every changed path), `diff.txt` and
-`xrefs.tsv` (the PRs that link to this one). A diff GitHub will not send is a `SKIPPED: diff` line
-saying how many changed paths `files.txt` still lists. Read the diff, not the title (G1, G2). One line per PR into `$WORK/classes.txt`:
+`xrefs.tsv` (the PRs that link to this one). A diff that cannot be read, such as one GitHub
+refuses past 300 files, is a `SKIPPED: diff` line saying how many changed paths `files.txt` lists.
+Read the diff, not the title (G1, G2). One line per PR into `$WORK/classes.txt`, its class the
+first row of this table that applies:
 
 ```
 <owner/name#N> SUPERSEDED|DUPLICATE|OVERLAPPING|UNRELATED -- <what in the PR decides it>
 ```
-
-The class is the first row that applies:
 
 | class | the PR |
 |---|---|
@@ -181,12 +163,12 @@ out=$(python -m kernelforge.knowledge.pr_knowledge.inclusion --tree "$TREE" --co
 printf '%s#%s exit=%s %s\n' <owner/name> <N> "$status" "$out" >> "$WORK/inclusion.txt"
 ```
 
-`mergeCommit` is null until the PR merges, so an open PR is probed by its subject alone. Exit 0
-is `included`, 3 `unknown`, 2 a usage error, 1 a crash and no answer; `unknown` means nothing in local git showed the PR, never that
-it is absent. PR numbers are per repository, so the tree must be the PR's repository or a fork of it
-(G1); a `subject` answer whose commit subject is not the PR's title is a collision, so `unknown`.
-With no tree, or a probe that cannot run, write `SKIPPED: inclusion -- <why>` into `inclusion.txt`.
-Gotchas G3, G4 and G5 apply.
+`mergeCommit` is null until the PR merges, so an open PR is probed by its subject alone. Exit 0 is
+`included`, 3 `unknown`, 2 a usage error, 1 a crash and no answer; `unknown` means nothing in local
+git showed the PR, never that it is absent. PR numbers are per repository, so the tree must be the
+PR's repository or a fork of it (G1); a `subject` answer whose commit subject is not the PR's title
+is a collision, so `unknown`. With no tree, or a probe that cannot run, write
+`SKIPPED: inclusion -- <why>` into `inclusion.txt`. Gotchas G3, G4 and G5 apply.
 
 ## Step 6 — Refutation
 
@@ -223,32 +205,32 @@ both ways: each row has its block's outcome class, and every refuted PR has a ro
 ```
 ## Prior art: <mechanism>
 
-Verdict: <WORD> <qualifiers, if any>
+Verdict: <the verdict line, and -- incomplete, see Coverage when it applies>
 
 | PR | state | class | inclusion | why |
 |---|---|---|---|---|
 | ... |
 
-Coverage: <N> queries in <repos> (<counts by status>); path scan: <scan.txt summary>;
-read <N> of <M> shortlisted (cut: <owner/name#N, ...>)
+Coverage: <N> queries in <repos> (<counts by status>; every non-OK query quoted)
+Path scan: <COMPLETE repositories>; <every other scan.txt line, per-PR ones on one line>
+Read <N> of <M> shortlisted; cut: <the PRs of every # cut: line>
 <every SKIPPED: line, one per line>
-Not searched: closed-unmerged PRs, issues and RFCs, repositories outside repos.txt, planned paths absent upstream
+Not searched: closed-unmerged PRs (only xrefs.tsv reaches them), issues and RFCs, repositories
+outside repos.txt, and planned paths absent upstream, which match nothing while the scan says
+COMPLETE (G7)
 
-Next step: <from the table above, naming the PR it acts on>
+Next step: <the verdict's, naming the PR it acts on>
 
 Searched: <terms.txt lines> | Paths: <paths.txt lines> | Tree: <tree>@<commit> | Date: <UTC date>
 ```
 
-### SKIPPED protocol
-
-When a step cannot run — no network, no GraphQL access, no tree, a diff GitHub will not render —
-write `SKIPPED: <step> -- <why, and what is therefore unchecked>` into that step's artifact and
-carry the same line into the report. A `SKIPPED` artifact means that axis was **not checked**;
-silence there never reads as "none", and the verdict's qualifiers say what it weakens.
+When a step cannot run — no network, no GraphQL access, no tree — write
+`SKIPPED: <step> -- <why, and what is therefore unchecked>` into that step's artifact and carry it
+into the report. A `SKIPPED` artifact means that axis was **not checked**, never "none".
 
 ## Budget
 
 This file is budgeted at 240 lines and holds only what every check needs: traps that apply to some
 checks go in `references/gotchas.md`, named at the step that needs them, and collection goes in a
-script. Raising the budget makes this file less likely to be read in full — do it in a commit that
+script. Raising the budget makes this file less likely to be read in full; do it in a commit that
 says why.

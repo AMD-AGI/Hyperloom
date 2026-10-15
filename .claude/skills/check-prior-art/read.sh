@@ -5,11 +5,9 @@
 # Step 4 of the check-prior-art skill: collect one candidate pull request for a deep read.
 #
 # usage: read.sh WORK OWNER/NAME NUMBER
-# Writes WORK/prs/OWNER/NAME/NUMBER/: pr.json (state, draft, merge commit, body, comments and
-# reviews), files.txt (every changed path), diff.txt and xrefs.tsv (the pull requests that link
-# to this one), and prints that directory last. A diff that cannot be read becomes a SKIPPED
-# line in diff.txt, saying how many of the changed paths files.txt lists; any other part that
-# cannot be collected exits non-zero.
+# Writes WORK/prs/OWNER/NAME/NUMBER/ as Step 4 of SKILL.md describes, and prints that directory
+# last. A diff that cannot be read becomes a SKIPPED line in diff.txt; any other part that cannot
+# be collected exits non-zero.
 
 set -euo pipefail
 

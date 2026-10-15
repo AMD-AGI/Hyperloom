@@ -6,12 +6,9 @@
 # for each search phrase.
 #
 # usage: search.sh WORK
-# Reads WORK/repos.txt (owner/name per line) and WORK/terms.txt (one GitHub search phrase per
-# line). Appends to WORK/queries.tsv, as each query is answered, how many results it listed out
-# of how many matched, or that it failed and why; a failed query does not stop the rest, so
-# coverage is read from queries.tsv, never from how short the result is. At the end, writes
-# WORK/candidates.tsv: one row per pull request any query found, with the number of queries
-# that found it.
+# Reads WORK/repos.txt and WORK/terms.txt, and writes WORK/queries.tsv and WORK/candidates.tsv as
+# Step 2 of SKILL.md describes. Every query gets a row, a failed one too, so coverage is read from
+# queries.tsv, never from how short candidates.tsv is.
 
 set -euo pipefail
 
