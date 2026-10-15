@@ -5,8 +5,9 @@
 
 Ending exploration stops every specialist branch and keeps the integration branch for FINAL; a branch stop that fails
 there is logged, not raised. Stopping everything stops every branch including integration, which withdraws every
-test, then releases what the session holds: it closes the toolbox, which releases the sandboxes it holds, and kills
-every process the scheduler started, then reports what is still alive. The toolbox close gets
+test, then releases what the session holds: it stops the MCP service the specialists reach their tools on, closes the
+toolbox, which releases the sandboxes it holds, and kills every process the scheduler started, then reports what is
+still alive. The toolbox close gets
 :data:`TOOLBOX_CLOSE_SECONDS`, or half the time left before the hard stop when that is less, the branch stops the rest,
 and the release runs whether or not they finished. Both close the roster first, so no fork is admitted and no branch
 opened afterwards.
@@ -31,6 +32,7 @@ from hyperloom_multibranch.scheduling.roster import BranchKind, BranchStop, Rost
 from hyperloom_multibranch.scheduling.settle import failure_text, settled
 
 if TYPE_CHECKING:
+    from hyperloom.hosted.mcp_server import McpServer
     from hyperloom_multibranch.toolbox.toolbox import RealToolbox
 
 logger = logging.getLogger(__name__)
@@ -128,6 +130,7 @@ class SessionStopper:
         roster: Roster,
         branches: BranchControl,
         toolbox: RealToolbox,
+        mcp: McpServer,
         processes: ProcessRegistry,
         decisions: DecisionLog,
         clock: Clock,
@@ -135,6 +138,7 @@ class SessionStopper:
         self._roster = roster
         self._branches = branches
         self._toolbox = toolbox
+        self._mcp = mcp
         self._processes = processes
         self._decisions = decisions
         self._clock = clock
@@ -181,13 +185,14 @@ class SessionStopper:
         return report
 
     async def release(self, closing: float) -> tuple[str, ...]:
-        """Close the toolbox, giving it ``closing`` clock seconds, then kill every registered process; returns the
-        close's failure, if it had one.
+        """Stop the MCP service, close the toolbox, giving it ``closing`` clock seconds, then kill every registered
+        process; returns the close's failure, if it had one.
 
         A CLOSE cut short releases through here too, so the sandboxes and the processes go whatever else did not
         finish.
         """
 
+        await asyncio.to_thread(self._mcp.stop)
         closed = await settled(self._clock.wait_for(self._toolbox.close(), closing))
         await self._processes.kill_all()
         if isinstance(closed, asyncio.TimeoutError):

@@ -145,9 +145,14 @@ def run_session(settings: RunSettings, peer_factory: PeerFactory) -> int:
     """Create the session directory, print it on one stdout line, run the session and return its exit code.
 
     The model and the Recipe KB client are resolved first, so an environment that cannot provide them fails before
-    any session directory exists.
+    any session directory exists. The session and its peers are built on the event loop they run on, which the
+    specialist tools of the MCP service hand every toolbox call to.
     """
 
+    return asyncio.run(_run_session(settings, peer_factory))
+
+
+async def _run_session(settings: RunSettings, peer_factory: PeerFactory) -> int:
     clock = Clock()
     model = default_model()
     judge = anthropic_completion(model, component=PROG, operation="judge")
@@ -166,7 +171,7 @@ def run_session(settings: RunSettings, peer_factory: PeerFactory) -> int:
         exports=exports,
         clock=clock,
     )
-    return asyncio.run(session.run()).exit_code
+    return (await session.run()).exit_code
 
 
 def _file_handler(path: Path) -> logging.Handler:

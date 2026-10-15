@@ -2,11 +2,13 @@
 # SPDX-License-Identifier: MIT
 
 """The real peers of a session on one machine: the git experiment repository, the local hosted toolbox, the rule
-gate's session service and the specialist runtime on them.
+gate's session service, the specialist runtime on them and the MCP service that serves the specialists their tools.
 
 :func:`local_peers` builds them inside the session directory: the repository at ``MB-repo``, the toolbox's
-sandboxes, archive, submit log and measurement points under ``MB-toolbox``, and the patch and kernel files its
-environment compiler reads, like the repository, from the session's blob store at ``MB-blobs``. The gate's session
+sandboxes, archive, submit log, measurement points and measurement config under ``MB-toolbox``, and the patch and
+kernel files its environment compiler reads, like the repository, from the session's blob store at ``MB-blobs``. The
+MCP service listens on loopback for the whole session and hands every toolbox call to the loop the peers were built
+on; its learnings tool recalls past sessions' from the Experience KB the environment names. The gate's session
 service and the specialist runtime judge on one InferenceX rule at the workload's conc; the runtime settles through a
 rule gate that asks the scheduler's fork desk for branches. The runtime's specialist sessions come from
 a :data:`SpecialistSessions`; no session backed by a model exists yet, so :func:`load_peers` refuses and the command
@@ -18,16 +20,20 @@ use them: importing this module, the command line or the session loads none of t
 
 from __future__ import annotations
 
+import asyncio
 import os
+import secrets
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING
 
+from hyperloom.common.io import atomic_write_json
 from hyperloom.common.model_paths import resolve_serving_model_path
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.rules import InferenceXRule
@@ -38,12 +44,15 @@ from hyperloom_multibranch.scheduling.settings import Workload
 from hyperloom_multibranch.specialist.runtime import SessionFactory, SpecialistRuntime
 
 if TYPE_CHECKING:
+    from hyperloom.measure.points import CanonicalMeasurement
     from hyperloom_multibranch.toolbox.toolbox import RealToolbox
 
 TOOLBOX_WRITER = "toolbox"
 GATE_WRITER = "rule-gate"
 CANONICAL_DIR = "canonical"
 POINTS_DIR = "points"
+#: A claim's lease on the specialist tools: the runtime renews it every 10 minutes (board #26).
+CLAIM_TTL_SECONDS = 1800.0
 
 #: What a real session needs and has no implementation of yet: the specialist runtime has only the scripted session.
 #: Deleted with :func:`mb_fake_specialist_sessions` once the model-backed session factory lands.
@@ -89,22 +98,47 @@ def workload_environment(workload: Workload) -> Mapping[str, str]:
     }
 
 
+def measurement_config(workload: Workload, host: MeasurementHost, canonical: CanonicalMeasurement) -> dict[str, object]:
+    """The toolbox's measurement config document (board #8): the base image every recipe must carry, and the workload,
+    canonical surface, image and tool commits every test is measured on."""
+
+    return {
+        "base_image_digest": host.image_digest,
+        "config": {
+            "workload": encode(workload),
+            "primary_concurrency": canonical.primary_concurrency,
+            "surface": dict(canonical.surface.fields),
+            "surface_sha256": canonical.surface.sha256,
+            "image_ref": host.image_ref,
+            "magpie_commit": host.magpie_commit,
+            "inferencex_commit": host.inferencex_commit,
+            "cards": list(host.cards),
+        },
+    }
+
+
 def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: PeerSetup) -> Peers:
     """The session's peers on this machine; exports :func:`workload_environment` into this process.
 
-    The toolbox is built, not started: the session starts it, and its close releases the backend and the sandboxes.
+    Called on the event loop the session runs on. The toolbox is built, not started: the session starts it, and its
+    close releases the backend and the sandboxes. The MCP service is started; the session stop stops it.
     """
 
+    from hyperloom.hosted.mcp_server import McpServer, McpServerConfig
     from hyperloom.measure.compile import EnvironmentCompiler
     from hyperloom.measure.hosted_spec import SpecContext
     from hyperloom.measure.points import default_canonical
+    from hyperloom_multibranch.notebook.knowledge.learning_recall import LearningRecall
+    from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG, RetrievalLog
     from hyperloom_multibranch.toolbox.local_hosted import build_local_toolbox
+    from hyperloom_multibranch.toolbox.mcp_tools import register_specialist_tools
     from hyperloom_multibranch.toolbox.planner import HostedPlanner
 
     layout, workload = setup.layout, setup.workload
     os.environ.update(workload_environment(workload))
     repo = GitExperimentRepo(layout.repo, setup.blobs)
     canonical = default_canonical(layout.toolbox / CANONICAL_DIR, primary_concurrency=workload.conc)
+    atomic_write_json(layout.measurement_config, measurement_config(workload, host, canonical), indent=2)
     compiler = EnvironmentCompiler(setup.blobs, host.image_digest)
     spec = SpecContext(
         image_ref=host.image_ref,
@@ -135,7 +169,17 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     runtime = SpecialistRuntime(
         runtime_notebook, RuleGate(gate_notebook, repo, setup.desk), toolbox, rule, sessions(setup, repo, toolbox)
     )
-    return Peers(runtime, toolbox, repo, GateService(gate_notebook, toolbox, rule))
+    mcp = McpServer(McpServerConfig(host_token=secrets.token_hex(32)), campaign=layout.session_id)
+    register_specialist_tools(
+        mcp,
+        toolbox=toolbox,
+        notebooks=runtime_notebook,
+        claim_ttl_seconds=CLAIM_TTL_SECONDS,
+        toolbox_loop=asyncio.get_running_loop(),
+        learnings=LearningRecall.from_env(log=RetrievalLog(layout.reports / LEARNINGS_LOG)),
+    )
+    mcp.start()
+    return Peers(runtime, toolbox, repo, GateService(gate_notebook, toolbox, rule), mcp)
 
 
 def mb_fake_measurement_host() -> MeasurementHost:
@@ -182,6 +226,7 @@ def load_peers() -> PeerFactory:
 
 
 __all__ = [
+    "CLAIM_TTL_SECONDS",
     "GATE_WRITER",
     "MB_FAKE_MISSING_SESSION_FACTORY",
     "MeasurementHost",
@@ -190,6 +235,7 @@ __all__ = [
     "local_peers",
     "machine_parallel_tests",
     "mb_fake_measurement_host",
+    "measurement_config",
     "mb_fake_specialist_sessions",
     "workload_environment",
 ]

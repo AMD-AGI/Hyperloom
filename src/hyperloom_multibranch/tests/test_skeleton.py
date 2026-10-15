@@ -29,6 +29,7 @@ import pytest
 from hyperloom.common.proctree import running
 from hyperloom.contracts.measurement import Purpose, TestRequest
 from hyperloom.contracts.recipe import Recipe, RecipeDelta, apply
+from hyperloom.hosted.mcp_server import MIN_TOKEN_LENGTH, McpServer, McpServerConfig
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission, ForkRequest
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, LineageKind
@@ -208,7 +209,8 @@ class Stage:
         )
         runtime.refusing = self.refusing
         self.toolbox, self.repo, self.setup = toolbox, repo, setup
-        return Peers(runtime, toolbox, repo, session_gate(self.handle(Role.GATE), toolbox))
+        mcp = McpServer(McpServerConfig(host_token="t" * MIN_TOKEN_LENGTH), campaign=setup.layout.session_id)
+        return Peers(runtime, toolbox, repo, session_gate(self.handle(Role.GATE), toolbox), mcp)
 
     async def root(self) -> str:
         return (await self.handle(Role.OBSERVER).baseline()).root_commit

@@ -3,8 +3,8 @@
 
 """The peers a session runs on and what they are built on.
 
-A :data:`PeerFactory` builds the specialist lifecycle, the toolbox, the experiment repository and the rule gate's
-session service on a :class:`PeerSetup`: the session directory, the workload the session optimizes, the scheduler's
+A :data:`PeerFactory` builds the specialist lifecycle, the toolbox, the experiment repository, the rule gate's
+session service and the session's MCP service on a :class:`PeerSetup`: the session directory, the workload the session optimizes, the scheduler's
 answer to the rule gate's branch requests, the session's process registry and its blob store. The specialist runtime
 builds its own rule gates on the branch requests; the session gate judges the tests the scheduler submits itself.
 """
@@ -25,17 +25,22 @@ from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.settings import Workload
 
 if TYPE_CHECKING:
+    from hyperloom.hosted.mcp_server import McpServer
     from hyperloom_multibranch.toolbox.toolbox import RealToolbox
 
 
 @dataclass(frozen=True)
 class Peers:
-    """``repo`` holds nothing until PRELUDE roots it with ``init_root``; ``gate`` writes the baseline PRELUDE measures."""
+    """``repo`` holds nothing until PRELUDE roots it with ``init_root``; ``gate`` writes the baseline PRELUDE measures.
+
+    ``mcp`` serves the specialist tools; the session stop stops it.
+    """
 
     lifecycle: SpecialistLifecycle
     toolbox: RealToolbox
     repo: ExperimentRepo
     gate: SessionGate
+    mcp: McpServer
 
 
 @dataclass(frozen=True)

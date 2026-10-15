@@ -132,7 +132,9 @@ class Session:
         self._branches = BranchControl(
             self._roster, self._notebook, peers.lifecycle, peers.toolbox, peers.repo, processes, self._decisions, clock
         )
-        self._stopper = SessionStopper(self._roster, self._branches, peers.toolbox, processes, self._decisions, clock)
+        self._stopper = SessionStopper(
+            self._roster, self._branches, peers.toolbox, peers.mcp, processes, self._decisions, clock
+        )
         progress = session_frontier(
             self._notebook, MB_FAKE_PRIMARY_METRIC, budget_seconds=budget, log_path=layout.reports / FRONTIER_LOG
         )

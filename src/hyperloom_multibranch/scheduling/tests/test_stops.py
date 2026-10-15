@@ -16,6 +16,7 @@ import pytest
 from hyperloom.common.proctree import descendants, running
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import Recipe
+from hyperloom.hosted.mcp_server import MIN_TOKEN_LENGTH, McpServer, McpServerConfig
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent
@@ -97,7 +98,10 @@ class Stage:
         self.branches = BranchControl(
             self.roster, self.notebook, self.runtime, self.toolbox, self.repo, self.processes, decisions, clock
         )
-        self.stopper = SessionStopper(self.roster, self.branches, self.toolbox, self.processes, decisions, clock)
+        self.mcp = McpServer(McpServerConfig(host_token="t" * MIN_TOKEN_LENGTH), campaign="stops")
+        self.stopper = SessionStopper(
+            self.roster, self.branches, self.toolbox, self.mcp, self.processes, decisions, clock
+        )
 
     async def opened(self) -> Stage:
         baseline = Recipe(MB_FAKE_BASE_IMAGE_DIGEST)
@@ -165,8 +169,12 @@ async def test_a_failed_branch_stop_does_not_hold_up_the_end_of_exploration(tmp_
 async def test_stop_everything_withdraws_every_branch_closes_the_toolbox_and_leaves_no_process(tmp_path: Path) -> None:
     session = await Stage(tmp_path).opened()
     pids = await session.spawn_trees(tmp_path, ("b01", INTEGRATION_BRANCH, "prelude"))
+    session.mcp.start()
 
     report = await session.stopper.stop_everything(SessionStopReason.SIGNAL, HARD_STOP)
+
+    with pytest.raises(RuntimeError, match="not running"):
+        session.mcp.url
 
     assert session.toolbox.withdrawals == [SessionStopReason.SIGNAL.value]
     assert set(session.toolbox.cancelled) == {"b01", "b03", INTEGRATION_BRANCH}
