@@ -111,12 +111,13 @@ bash .claude/skills/check-prior-art/search.sh "$WORK"
 
 | file | what it is for |
 |---|---|
-| `queries.tsv` | every query: `status listed total query note`. `OK`, `TRUNCATED` (more matched than one page lists), `INCOMPLETE` (GitHub timed out searching), `FAILED` (with gh's error), `PENDING` (the run ended first) |
-| `candidates.tsv` | one row per PR any query found: `repo number state draft title url updated hits` |
+| `queries.tsv` | one row per query as it is answered: `status listed total query note`. `OK`, `TRUNCATED` (more matched than one page lists), `INCOMPLETE` (GitHub timed out searching) or `FAILED` (with gh's error) |
+| `candidates.tsv` | written at the end: one row per PR any query found, `repo number state draft title url updated hits` |
 
 The script waits out the search rate limit itself. A `TRUNCATED` query was too broad: replace it
-in `terms.txt` with narrower lines and rerun. With a `FAILED` or `PENDING` query, rerun the script
-once; one still `FAILED` goes on the report as `SKIPPED: search -- <query>: <error>`.
+in `terms.txt` with narrower lines and rerun. With a `FAILED` query, or a run that ended before
+`candidates.tsv`, rerun the script once; a query still `FAILED` goes on the report as
+`SKIPPED: search -- <query>: <error>`.
 
 ## Step 3 — Open PRs on the planned paths
 
@@ -126,14 +127,14 @@ bash .claude/skills/check-prior-art/overlap.sh "$WORK" > "$WORK/overlap.log" 2>&
 
 | file | what it is for |
 |---|---|
-| `overlap.tsv` | one row per open PR changing a planned path: the candidate columns plus `overlap paths`; a PR that renames a planned file away shows it as `old->new` |
-| `scan.txt` | one line per repository, `COMPLETE`, `PARTIAL` (the newest PRs only, or a scan that stopped or did not finish) or `SKIPPED` (no planned path there); then a `PARTIAL` line per PR whose overlap could not be decided |
+| `overlap.tsv` | one row per open PR changing a planned path: `repo number state draft title url updated overlap paths`, where `overlap` counts the planned paths it changes and `paths` names them; a PR that renames a planned file away shows it as `old->new` |
+| `scan.txt` | a `PARTIAL` line per PR whose overlap could not be decided, and, when a repository's scan ends, one line for it: `COMPLETE`, `PARTIAL` (the newest PRs only, or a page that failed) or `SKIPPED` (no planned path there) |
 
 A large repository takes minutes and several can outlast a ten-minute command timeout: run it in
-the background and wait for it to exit. `scan.txt` names every repository from the start, so a
-killed run still shows how far it got; rerun once when a repository line says the scan stopped or
-did not finish. An empty `overlap.tsv` means "no open PR touches these paths" only where
-`scan.txt` says `COMPLETE`; every other line reaches the report.
+the background and wait for it to exit. Rerun once when a repository line says the scan stopped;
+a repository with no line did not finish, which Step 7 checks. An empty `overlap.tsv` means "no
+open PR touches these paths" only where `scan.txt` says `COMPLETE`; every other line reaches the
+report.
 
 Merged work on the same paths: with an upstream clone, write
 `git log --oneline <commit>..<upstream default branch> -- <paths>` into `$WORK/pathlog.txt`; its

@@ -7,12 +7,11 @@
 # usage: overlap.sh WORK
 # Reads WORK/repos.txt and WORK/paths.txt (owner/name, a tab, then a path in that repository;
 # a path ending in / covers every file under it). Writes WORK/overlap.tsv, one row per open
-# pull request that changes a planned path, and WORK/scan.txt: one line per repository saying
-# whether every open pull request was compared (COMPLETE), which were not (PARTIAL), or why
-# none were (SKIPPED), then a PARTIAL line per pull request whose overlap could not be
-# decided. scan.txt names every repository from the start and is rewritten as the scan goes,
-# so a run that is killed still says how far it got. An empty overlap.tsv means "no overlap"
-# only where scan.txt says COMPLETE.
+# pull request that changes a planned path, and WORK/scan.txt: a PARTIAL line per pull request
+# whose overlap could not be decided, and, when a repository's scan ends, one line saying
+# whether every open pull request there was compared (COMPLETE), which were not (PARTIAL), or
+# why none were (SKIPPED). An empty overlap.tsv means "no overlap" only where scan.txt says
+# COMPLETE.
 
 set -euo pipefail
 
@@ -63,26 +62,7 @@ JQ_DEFS='
 raw=$(mktemp -d)
 trap 'rm -rf "$raw"' EXIT
 printf 'repo\tnumber\tstate\tdraft\ttitle\turl\tupdated\toverlap\tpaths\n' > "$WORK/overlap.tsv"
-: > "$raw/cuts"
-
-WANT=()
-LINE=()
-for i in "${!REPOS[@]}"; do
-  WANT[i]=$(entries "$WORK/paths.txt" | awk -F'\t' -v repo="${REPOS[i]}" '$1 == repo { print $2 }' \
-    | jq -Rsc 'split("\n") | map(select(length > 0))')
-  if [ "${WANT[i]}" = '[]' ]; then
-    LINE[i]="SKIPPED: ${REPOS[i]}: no planned path in paths.txt, so its open PRs were not compared"
-  else
-    LINE[i]="PARTIAL: ${REPOS[i]}: not scanned -- the run ended before it compared any open PR here"
-  fi
-done
-
-write_scan() {
-  {
-    printf '%s\n' "${LINE[@]}"
-    cat "$raw/cuts"
-  } | replace_file "$WORK/scan.txt"
-}
+: > "$WORK/scan.txt"
 
 # Appends the page's PRs that list a planned path to overlap.tsv, and writes to undecided the
 # ones GraphQL cannot settle: a file list cut at 100, or a renamed file, listed by its new
@@ -106,10 +86,10 @@ compare_page() {
 # runs to 3000 files. A PR that list cannot settle gets a PARTIAL line of its own.
 relist() {
   local repo="$1" want="$2" number="$3"
-  if ! gh api --paginate "repos/$repo/pulls/$number/files?per_page=100" < /dev/null \
+  if ! gh api --paginate "repos/$repo/pulls/$number/files?per_page=100" \
     > "$raw/files.json" 2> "$raw/error"; then
     printf 'PARTIAL: %s#%s: its full file list could not be read, so its overlap was not decided -- %s\n' \
-      "$repo" "$number" "$(head -1 "$raw/error")" >> "$raw/cuts"
+      "$repo" "$number" "$(head -1 "$raw/error")" >> "$WORK/scan.txt"
     return
   fi
   jq -r --arg repo "$repo" --argjson want "$want" --argjson number "$number" \
@@ -121,14 +101,15 @@ relist() {
                    elif (.filename | planned($want)) then .filename else empty end] as $hit
     | if ($hit | length > 0) then row($repo; $hit) | "row\t\(.)"
       elif ($listed | length) < .changedFiles
-      then "cut\tPARTIAL: \($repo)#\(.number) changes \(.changedFiles) files, only its first \($listed | length) were compared"
+      then "cut\tPARTIAL: \($repo)#\(.number): changes \(.changedFiles) files, only its first \($listed | length) were compared"
       else empty end' "$raw/page.json" > "$raw/relisted"
   awk 'sub(/^row\t/, "")' "$raw/relisted" >> "$WORK/overlap.tsv"
-  awk 'sub(/^cut\t/, "")' "$raw/relisted" >> "$raw/cuts"
+  awk 'sub(/^cut\t/, "")' "$raw/relisted" >> "$WORK/scan.txt"
 }
 
+# Pages through a repository's open PRs and prints the repository's scan.txt line.
 scan_repo() {
-  local i="$1" repo="${REPOS[$1]}" want="${WANT[$1]}" cursor="" total="" compared=0 page=0 more=true
+  local repo="$1" want="$2" cursor="" total="" compared=0 page=0 more=true
   local args open listed number undecided
   while [ "$more" = true ] && [ "$page" -lt "$MAX_PAGES" ]; do
     page=$((page + 1))
@@ -136,8 +117,8 @@ scan_repo() {
     if [ -n "$cursor" ]; then
       args+=(-f cursor="$cursor")
     fi
-    if ! gh api graphql "${args[@]}" < /dev/null > "$raw/page.json" 2> "$raw/error"; then
-      LINE[i]="PARTIAL: $repo: the scan stopped after $compared of ${total:-an unknown number of} open PRs -- $(head -1 "$raw/error")"
+    if ! gh api graphql "${args[@]}" > "$raw/page.json" 2> "$raw/error"; then
+      echo "PARTIAL: $repo: the scan stopped after $compared of ${total:-an unknown number of} open PRs -- $(head -1 "$raw/error")"
       return
     fi
     compare_page "$repo" "$want"
@@ -149,21 +130,21 @@ scan_repo() {
       | "\(.totalCount) \(.nodes | length) \(.pageInfo.hasNextPage) \(.pageInfo.endCursor // "")"' "$raw/page.json")
     total=${total:-$open}
     compared=$((compared + listed))
-    LINE[i]="PARTIAL: $repo: the scan did not finish -- $compared of $total open PRs were compared"
-    write_scan
   done
   if [ "$more" = true ]; then
-    LINE[i]="PARTIAL: $repo: only the newest $compared of $total open PRs were compared"
+    echo "PARTIAL: $repo: only the newest $compared of $total open PRs were compared"
   else
-    LINE[i]="COMPLETE: $repo: all $compared open PRs were compared against $(jq length <<< "$want") planned path(s)"
+    echo "COMPLETE: $repo: all $compared open PRs were compared against $(jq length <<< "$want") planned path(s)"
   fi
 }
 
-write_scan
-for i in "${!REPOS[@]}"; do
-  if [ "${WANT[i]}" != '[]' ]; then
-    scan_repo "$i"
-    write_scan
+for repo in "${REPOS[@]}"; do
+  want=$(entries "$WORK/paths.txt" | awk -F'\t' -v repo="$repo" '$1 == repo { print $2 }' \
+    | jq -Rsc 'split("\n") | map(select(length > 0))')
+  if [ "$want" = '[]' ]; then
+    echo "SKIPPED: $repo: no planned path in paths.txt, so its open PRs were not compared" >> "$WORK/scan.txt"
+  else
+    scan_repo "$repo" "$want" >> "$WORK/scan.txt"
   fi
 done
 

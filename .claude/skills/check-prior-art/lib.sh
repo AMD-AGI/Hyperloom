@@ -25,10 +25,3 @@ entries() {
 check_repo() {
   [[ "$1" =~ ^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$ ]] || die "not an owner/name repository: $1"
 }
-
-# Replaces the file $1 with standard input in one rename, so a run killed midway never
-# leaves it half written.
-replace_file() {
-  cat > "$1.tmp"
-  mv -f "$1.tmp" "$1"
-}
