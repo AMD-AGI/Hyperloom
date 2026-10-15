@@ -903,6 +903,27 @@ async def test_an_advance_the_lane_did_not_dispatch_is_stacked_and_ends_the_roun
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("holder_state", "after"), [("queued", "cancelled"), ("running", "running")])
+async def test_an_advance_that_ends_the_round_retires_a_holder_that_never_started(tmp_path, holder_state, after):
+    """A queued holder would author against a wall the boot is past; a running one is left to report."""
+    fake = _enqueue_self(tmp_path)
+    await _hold_round(fake, "spec-lane", holder_state=holder_state)
+
+    await fake.enablement_lane.maybe_rearm_enablement(
+        {
+            "enablement": True,
+            "status": "advanced",
+            "advanced": True,
+            "specialist_task_id": "spec-llm",
+            "enablement_launch_log": "RuntimeError: a deeper gap",
+        }
+    )
+
+    assert (await fake.rounds.get("enablement-spec-lane")).outcome == "advanced"
+    assert (await fake.tasks.get("spec-lane")).state == after
+
+
+@pytest.mark.asyncio
 async def test_a_late_failure_from_an_ended_round_does_not_charge_the_next_one(tmp_path):
     fake = _enqueue_self(tmp_path)
     await _hold_round(fake, "spec-old")

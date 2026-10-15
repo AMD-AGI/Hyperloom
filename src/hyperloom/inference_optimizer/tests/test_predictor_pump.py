@@ -456,7 +456,7 @@ async def test_the_framework_tick_steps_the_predictor(service, monkeypatch):
             maybe_enqueue_config_plateau_static_recon=_noop,
         ),
         specialist_dispatch=SimpleNamespace(
-            maybe_force_stalled_domain_specialist=_noop, maybe_ensure_custom_specialist=_noop
+            maybe_force_stalled_domain_specialist=_noop, ensure_custom_specialist=_noop
         ),
         record_exception=lambda **kwargs: pytest.fail(f"the tick raised: {kwargs}"),
     )
@@ -478,7 +478,11 @@ def _entering_phase(monkeypatch, state: SharedState) -> Any:
 
     monkeypatch.setattr(FrameworkPhase, "_pump_framework_agent_phase", _noop)
     monkeypatch.setattr(FrameworkPhase, "_open_framework_timeline", lambda self: None)
-    coord = SimpleNamespace(shared_state=state, phase_macro_cycle=SimpleNamespace(on_cycle_start_reprofile=_noop))
+    coord = SimpleNamespace(
+        shared_state=state,
+        phase_macro_cycle=SimpleNamespace(on_cycle_start_reprofile=_noop),
+        specialist_dispatch=SimpleNamespace(ensure_custom_specialist=_noop),
+    )
     return FrameworkPhase(coord)
 
 

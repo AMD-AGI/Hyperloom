@@ -92,6 +92,7 @@ from ._apply_feedback import ApplyFeedback, build_apply_feedback
 from ._git import _git_head_sha, _run_git_cp
 from ._integrate_attempt import IntegrateAttempt
 from ._setup_replay import replay_setup_commands
+from .source_tree_identity import new_recovery_record
 from ._patch_source_pr import (
     DEFAULT_DIFF_FETCH_TIMEOUT_SEC,
     _candidate_slug,
@@ -2161,33 +2162,31 @@ class IntegratePatchExecutor:
     ) -> dict[str, Any] | None:
         """Provision the attempt-scoped runtime this round boots on (Rung 3).
 
-        The runtime the last kept round promoted is re-provisioned whatever this
-        round's gap, since the rest of the stack was proven on it. With none
-        kept, the framework adapter builds a fresh candidate, which only a gap
-        calling for code yields; no-op otherwise. Runs a disk preflight,
-        delegates provision+probe to the framework adapter (off the event loop;
-        an in-flight pip install is not killed if the await is cancelled), and on
-        success stores the resolved runtime on the attempt for the gate to
-        activate via the YAML-layer ``runtime_override``. Returns an early-exit
-        ``reverted`` dict on any provision failure (no patch side effects yet),
-        or ``None`` to continue.
+        The runtime the last kept round promoted is re-provisioned whatever this round asks for, since the rest
+        of the stack was proven on it. With none kept, the framework adapter builds the runtime the specialist
+        requested (``needs_runtime`` in its done payload); no-op when it requested none. Runs a disk preflight,
+        delegates provision+probe to the framework adapter (off the event loop; an in-flight pip install is not
+        killed if the await is cancelled), and on success stores the resolved runtime on the attempt for the gate
+        to activate via the YAML-layer ``runtime_override``. Returns an early-exit ``reverted`` dict on any
+        provision failure (no patch side effects yet), or ``None`` to continue.
         """
         if not _acquiring_round(params):
             return None
 
         from ...enablement.runtime.adapters import get_adapter
-        from ...enablement.runtime.stack_actions import EnablementStackAction
+        from ...enablement.runtime.stack_actions import EnablementStackAction, RuntimeRequest
 
+        request = RuntimeRequest.from_payload(_done_field(attempt.done_payload, "needs_runtime"))
         kept = attempt.shared_state.enablement.kept_stack_action
         if kept:
             action = EnablementStackAction.from_state(kept)
+            if request is not None:
+                log.info("integrate_patch: needs_runtime ignored; the kept %s runtime stays", action.framework)
         else:
-            gap = _enablement_gap(params)
-            if gap is None:
+            if request is None:
                 return None
             framework = str(getattr(attempt.shared_state, "framework", "") or "").strip().lower()
-            gpu_type = str(getattr(attempt.shared_state, "gpu_type", "") or "").strip().lower()
-            action = get_adapter(framework).build_stack_action(gap, gpu_type=gpu_type)
+            action = get_adapter(framework).build_stack_action(request)
             if action is None:
                 return None
 
@@ -2676,13 +2675,7 @@ class IntegratePatchExecutor:
         recovery_parent = runs_dir(self.session_dir, "integrate_patch", attempt.task_id)
         recovery_parent.mkdir(parents=True, exist_ok=True)
         recovery_root = Path(tempfile.mkdtemp(prefix="recovery-", dir=recovery_parent)).resolve()
-        recovery: dict[str, Any] = {
-            "version": 1,
-            "phase": "before_stash",
-            "git_head": git_head,
-            "stash_oid": "",
-            "root": str(recovery_root),
-        }
+        recovery = new_recovery_record(framework_root, git_head=git_head, recovery_root=recovery_root)
         # Write pending_integrate sentinel before any framework tree mutation.
         # The Coordinator clears this after promoting the final result.
         # shared_state.save() is called here (executor owns the sentinel write;

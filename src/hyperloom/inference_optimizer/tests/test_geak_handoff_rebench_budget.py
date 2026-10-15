@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A GEAK run hands back with enough of the KERNEL phase left to re-measure its result."""
+"""KERNEL work hands back with enough of the phase left to measure its result: GEAK and the rewrite Controller."""
 
 from __future__ import annotations
 
@@ -66,3 +66,21 @@ def test_geak_gets_no_time_when_the_measurement_alone_overruns_the_phase(coordin
 
     # Zero falls under GEAK_MIN_RUN_S, so the hand-off is skipped rather than started without room to judge it.
     assert (runner, kill, budget_known) == (0, 0, True)
+
+
+@pytest.mark.parametrize(
+    ("phase_left", "hard_expected"),
+    [(PHASE_LEFT, int(PHASE_LEFT - (BOOT + BENCH))), (BOOT + BENCH - 1.0, 0)],
+    ids=["funded", "measurement_alone_overruns"],
+)
+def test_the_rewrite_controller_returns_with_one_measurement_left_in_the_phase(
+    coordinator, monkeypatch, phase_left, hard_expected
+):
+    monkeypatch.setattr(ps, "phase_budget_remaining_seconds", lambda _state, **_kw: phase_left)
+    monkeypatch.setattr(ps, "session_remaining_seconds", lambda _state, **_kw: SESSION_LEFT)
+    monkeypatch.setattr(ps, "phase_cap_seconds", lambda _state: None)
+
+    soft, hard = coordinator.phase_kernel._kernel_rewrite_controller_timeouts()
+
+    # Zero takes the no_result branch: the Controller is not started without room to integrate its patches.
+    assert (soft, hard) == (max(0, hard_expected - 30), hard_expected)

@@ -143,6 +143,34 @@ def test_summary_quantization(tmp_path: Path) -> None:
     assert out["quantization"] == "fp8"
 
 
+@pytest.mark.parametrize(
+    ("quant_cfg", "expected"),
+    [
+        (
+            {
+                "quant_method": "quark",
+                "global_quant_config": {"weight": {"dtype": "fp4", "group_size": 32}},
+                "layer_quant_config": {"*self_attn*": {"weight": {"dtype": "fp8_e4m3"}}},
+            },
+            "fp4",
+        ),
+        (
+            {
+                "quant_method": "compressed-tensors",
+                "config_groups": {"group_0": {"targets": ["Linear"], "weights": {"num_bits": 8, "type": "float"}}},
+            },
+            "fp8",
+        ),
+    ],
+)
+def test_summary_quantization_is_the_format_a_toolkit_nests(tmp_path: Path, quant_cfg: dict, expected: str) -> None:
+    m = _write_config(
+        tmp_path / "m",
+        {"num_attention_heads": 32, "num_key_value_heads": 8, "quantization_config": quant_cfg},
+    )
+    assert summarize_model_config(str(m))["quantization"] == expected
+
+
 def test_summary_nested_text_config(tmp_path: Path) -> None:
     m = _write_config(
         tmp_path / "m",

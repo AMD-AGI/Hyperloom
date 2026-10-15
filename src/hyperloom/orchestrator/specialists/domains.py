@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from hashlib import sha1
 
 
 @dataclass(frozen=True)
@@ -280,6 +281,12 @@ def is_custom_specialist_dispatch(params: dict) -> bool:
     return CUSTOM_SPECIALIST_KEY in normalize_dispatch_tags(params)
 
 
+def custom_specialist_key(macro_cycle: int, prompt: str) -> str:
+    """Idempotency key of the one custom-specialist dispatch a macro cycle gets for this definition."""
+    digest = sha1(prompt.encode(), usedforsecurity=False).hexdigest()[:8]
+    return f"custom-c{int(macro_cycle)}-{digest}"
+
+
 def get_domain(key: str) -> SpecialistDomain | None:
     """Return the catalogue entry for ``key`` or None when unknown."""
     for d in SPECIALIST_DOMAINS:
@@ -329,6 +336,7 @@ __all__ = [
     "SPECIALIST_DOMAIN_KEYS",
     "SPECIALIST_MAX_TURNS_HARD_CAP",
     "SpecialistDomain",
+    "custom_specialist_key",
     "domain_for_tag",
     "get_domain",
     "is_custom_specialist_dispatch",

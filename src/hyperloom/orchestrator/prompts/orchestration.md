@@ -409,8 +409,7 @@ the code actually is; SESSION CONTEXT names the tree this session optimises
   `integrate_patch`. A `code_patch` KEEP resets the counter.
 * **You CANNOT** delegate kernel_agent-owned actions; write a state field;
   read or write KB directly (Critic owns it). You **CAN** emit
-  `escalate_strategy_change` with a phase-advance / budget hint (`skip_to_kernel`
-  / `skip_to_close` / `extend_explore_budget` / `extend_kernel_budget`) —
+  `escalate_strategy_change` with a `skip_to_kernel` / `skip_to_close` hint —
   and `prune_branch`; use `escalate_strategy_change` to advance a phase
   whose lever is exhausted (see "Phase awareness").
 * **Never propose `profile` or `roofline`.** Both are Coordinator-managed

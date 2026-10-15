@@ -2668,7 +2668,7 @@ async def test_trace_analyze_handler_xdit_defaults_to_tracelens_agent(session_di
     cmd = captured["cmd"]
     assert cmd[:3] == ["/task/deps/venv/bin/python", "-m", ta._TRACELENS_ANALYSIS_MODULE]
     assert "--tracelens-root" in cmd
-    assert "--skip-split" in cmd
+    assert "--steady-state-mode" in cmd and cmd[cmd.index("--steady-state-mode") + 1] == "generic"
 
 
 @pytest.mark.asyncio
@@ -2705,7 +2705,7 @@ async def test_trace_analyze_handler_xdit_state_overrides_stale_payload_framewor
     assert res["status"] == "ok"
     cmd = captured["cmd"]
     assert "--framework" in cmd and cmd[cmd.index("--framework") + 1] == "xdit"
-    assert "--skip-split" in cmd
+    assert "--steady-state-mode" in cmd and cmd[cmd.index("--steady-state-mode") + 1] == "generic"
     assert "--analysis-mode" not in cmd
     warnings = res["trace_health_warnings"]
     assert warnings[0]["code"] == "stale_framework_overridden"
@@ -2747,7 +2747,7 @@ async def test_trace_analyze_handler_custom_state_overrides_stale_payload_framew
     assert res["status"] == "ok"
     cmd = captured["cmd"]
     assert "--framework" in cmd and cmd[cmd.index("--framework") + 1] == "custom"
-    assert "--skip-split" in cmd
+    assert "--steady-state-mode" in cmd and cmd[cmd.index("--steady-state-mode") + 1] == "generic"
     assert res["trace_health_warnings"][0]["code"] == "stale_framework_overridden"
 
 
@@ -2898,7 +2898,7 @@ async def test_trace_analyze_handler_rejects_invalid_route_before_dispatch(
 
 @pytest.mark.asyncio
 async def test_trace_analyze_handler_scriptable_converges_route_params(session_dir, monkeypatch):
-    """Scriptable (xDiT) params converge by route: --skip-split is TraceLens-only (must NOT reach bypass, which would crash argparse -> degraded), while --num-denoise-steps is forwarded to BOTH routes (bypass consumes it)."""
+    """Scriptable (xDiT) params converge by route: --steady-state-mode generic is TraceLens-only, while --num-denoise-steps is forwarded to BOTH routes (bypass consumes it)."""
     monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
     monkeypatch.setattr(ta, "_resolve_tracelens_root", lambda: session_dir)
     monkeypatch.setattr(ta, "_tracelens_root_error", lambda root: None)
@@ -2928,7 +2928,7 @@ async def test_trace_analyze_handler_scriptable_converges_route_params(session_d
     await ta.trace_analyze_handler({**base, "analysis_route": "agent"}, session_dir=session_dir)
     cmd = captured["cmd"]
     assert cmd[1:3] == ["-m", ta._TRACELENS_ANALYSIS_MODULE]
-    assert "--skip-split" in cmd
+    assert "--steady-state-mode" in cmd and cmd[cmd.index("--steady-state-mode") + 1] == "generic"
     assert "--num-denoise-steps" in cmd
 
 
@@ -4074,6 +4074,44 @@ async def test_coordinator_request_kernel_disabled_auto_rejected(session_dir):
         assert r.payload["status"] == "failed"
         assert r.payload["result"]["error_class"] == "agent_disabled"
         assert r.payload["source"] == "coordinator_auto_reject"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("payload", "kernel_enabled", "error_class"),
+    [
+        ({"target_agent": "kernel_agent", "kind": "trace_analyze"}, False, "agent_disabled"),
+        ({"target_agent": "kernel_agent", "kind": "invent_brand_new_kind"}, True, "unknown_kernel_kind"),
+    ],
+)
+async def test_coordinator_auto_reject_answers_in_one_envelope(
+    session_dir,
+    payload,
+    kernel_enabled,
+    error_class,
+):
+    """Every refusal the coordinator makes before a handler runs answers the requester the same way."""
+    c = Coordinator(session_dir, backends=_backends_silent())
+    try:
+        c.shared_state.kernel_enabled = kernel_enabled
+        await c.router.handle_intent("orchestration", Intent(type=IntentType.REQUEST, payload=dict(payload)))
+
+        requests = await c.bus.tail(topic="request", to_agent=payload["target_agent"])
+        responses = await c.bus.tail(topic="response", to_agent="orchestration")
+        assert requests, "the request must be recorded on the bus before it is refused"
+        assert responses, "a refusal must answer the request"
+        reply = responses[0]
+        assert reply.from_agent == payload["target_agent"]
+        assert reply.in_reply_to == requests[-1].msg_id
+        assert reply.payload["in_reply_to"] == requests[-1].msg_id
+        assert reply.payload["kind"] == f"{payload['kind']}_done"
+        assert reply.payload["status"] == "failed"
+        assert reply.payload["source"] == "coordinator_auto_reject"
+        assert reply.payload["result"]["status"] == "failed"
+        assert reply.payload["result"]["error_class"] == error_class
+        assert c.shared_state.last_action_failures[-1]["error_class"] == error_class
     finally:
         await c.stop()
 

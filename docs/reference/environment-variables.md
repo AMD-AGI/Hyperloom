@@ -133,9 +133,14 @@ when `--gpu-type` is omitted.
 - **Operator-defined specialist:** `--custom-specialist-prompt-file` (focus
   text, max 16 KiB) and `--custom-specialist-description` (one line, max 200
   chars), passed together; unset means no `custom_specialist`. Refused with
-  `--orch-prompt`, `--no-framework-agent`, `--research-lane-capacity 0` or
-  `--reset-state`. Persisted in `state.json`; re-pass both on `--resume-from`
-  only to replace the definition, or pass `--reset-state` alone to clear it.
+  `--no-framework-agent`, `--research-lane-capacity 0` or `--reset-state`.
+  `HYPERLOOM_CUSTOM_SPECIALIST_ONLY=1` (settable by `export` or `--extra-env`;
+  needs the pair; any other value than a boolean exits 2) makes FRAMEWORK_AGENT run only that specialist and the
+  bench of its proposals and patches, then move on to KERNEL_AGENT when
+  enabled, else SWEEP. All three are persisted in `state.json`; the env on a
+  `--resume-from` turns only mode on, never off. Re-pass both flags on
+  `--resume-from` only to replace the definition, or pass `--reset-state`
+  alone to clear it.
 
 Run `hyperloom optimize --help` for the exhaustive flag list.
 
@@ -678,17 +683,6 @@ optional; defaults are safe for standard single-node deployments.
 | `PYTORCH_ROCM_ARCH` | Detected | Explicit GPU target architecture (e.g. `gfx942`, `gfx950`) injected into each compile.  Set automatically from the session `--gpu-type`; operator-override applies to bare-metal installs outside the session.  **Compile target only — it does not participate in architecture detection.**  It names the archs a wheel is *built* for, not the installed device, so provenance ignores it entirely and resolves `gfx_arch` from `HYPERLOOM_GFX_ARCH`, then `--gpu-type`, then `rocminfo`. |
 | `MAX_JOBS` | `8` | Parallelism cap for cmake/hipcc compile steps inside a targeted build.  Reduce on memory-constrained nodes (`MAX_JOBS=4` for a 64 GB compile node).  The default `8` is conservative enough for MI300X/MI355X nodes with 512 GB+. |
 | `HYPERLOOM_`<br>`FRAMEWORK_PYTHON` | Unset | Explicit interpreter that launches the server for a from-source build (the venv Python the artifact was compiled against).  Set automatically from `FrameworkRuntime.runtime_python_exe` through `apply_runtime_override` into the per-variant YAML `benchmark.envs`.  Both backends export that mapping to the server env; the bypass backend additionally uses this value as the `python -m` interpreter.  Operators normally do not set this by hand. |
-| `HYPERLOOM_`<br>`VLLM_ROCM_`<br>`INDEX_URL` | Unset | ROCm pip index URL used as the default vLLM adapter wheel index; also seeds the index allowlist. |
-| `HYPERLOOM_`<br>`ENABLEMENT_`<br>`INDEX_ALLOWLIST` | Unset | Comma-separated allowlist of pip index URL prefixes; a candidate wheel index must match one of these prefixes or provisioning is refused (supply-chain safety). |
-| `HYPERLOOM_`<br>`ENABLEMENT_`<br>`ORIGIN_ALLOWLIST` | Unset | Comma-separated allowlist of git origin URL prefixes; a candidate repo origin must match one of these prefixes or provisioning is refused (supply-chain safety). |
-| `HYPERLOOM_`<br>`SGLANG_REPO_URL` | Unset | Override the SGLang source repo URL for the sgl-kernel / SGLang-from-source enablement build. |
-| `HYPERLOOM_`<br>`SGLANG_REF` | Unset | Pin the SGLang source ref (tag/branch/sha) for the enablement build. |
-| `HYPERLOOM_`<br>`SGLANG_INDEX_URL` | Unset | SGLang wheel index URL for the enablement build. |
-
-> **Supply-chain security:** `HYPERLOOM_ENABLEMENT_INDEX_ALLOWLIST` and
-> `HYPERLOOM_ENABLEMENT_ORIGIN_ALLOWLIST` are security controls.  When set, only
-> pip index / git origin URLs matching one of the listed prefixes are accepted
-> for runtime provisioning; any non-matching candidate is refused.
 
 ---
 

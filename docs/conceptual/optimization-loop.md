@@ -140,6 +140,11 @@ revalidation window is closed, and all in-flight enablement work is drained.
 It exits terminally on `server_argv_invalid`, `environment_fault`, or
 `enablement_attempts_exhausted` (eight consecutive failed rounds).
 
+A KEEP or an advance ends the held round whoever authored it, since the wall
+that round was aimed at is behind the boot. A specialist still queued under that
+round is cancelled rather than left to author against the old wall; one already
+running reports normally.
+
 ### Enablement escalation ladder
 
 Enablement admission is controlled by `--enablement {off,launch,eval,all}`,
@@ -176,15 +181,24 @@ authoring specialist's prompt. The rungs, in increasing complexity:
 2. **Rung 2 — in-tree source patch.** A unified diff against the source tree
    the server imports: register the arch, a small forward/config/tokenizer
    bridge, or backport a merged PR. Pure Python, no compile.
-3. **Rung 3 — attempt-scoped runtime.** Acquire a runtime (a published
-   wheel, an editable checkout at a ref, or a local source tree) into an
-   isolated per-attempt venv. That venv is activated only through the
+3. **Rung 3 — attempt-scoped runtime.** The specialist names the version
+   that carries the fix as a `needs_runtime` request in its
+   `specialist_done`: a framework ref (PR, tag, branch or sha) installed
+   editable, pip packages, or both. No operator setting or failure kind
+   gates it, and vLLM accepts packages only, since a vLLM checkout compiles
+   (Rung 5). `integrate_patch` installs the request into an isolated
+   per-attempt venv that sees the installed stack, with pip held to the
+   image's ROCm builds — torch, torchvision, torchaudio, triton and every
+   distribution whose version carries a ROCm label — so a request that needs
+   a different torch fails provision instead of pulling a CUDA build. That
+   venv is activated only through the
    per-variant YAML benchmark envs; the Coordinator never mutates its own
    process environment to point at an attempt runtime. While one is active,
    the source tree the server imports is that runtime's own — the editable
-   checkout, or the venv's site-packages — so Rung 2 and Rung 4 patches land
-   there. A kept runtime is re-provisioned for every later round, whatever
-   that round's failure.
+   checkout, or the venv's site-packages when the framework itself was
+   installed there — so Rung 2 and Rung 4 patches land there. A kept runtime
+   is re-provisioned for every later round, whatever that round's failure or
+   request.
 4. **Rung 4 — source localization.** Localize a merged-PR or vendored
    closure into the source tree the server imports. Only the files under the
    framework's package are localized. A change that touches compiled or
@@ -196,7 +210,8 @@ authoring specialist's prompt. The rungs, in increasing complexity:
    (AITER kernels, sgl-kernel, or vLLM-from-source). Builds run *off* the
    coordinator tick loop on a dedicated single-slot build lane: each build
    is spawned detached and reaped across later ticks against a wall-clock
-   budget, so a long compile never blocks the loop. Auto-escalation into
+   budget, so a long compile never blocks the loop. A build installs under
+   the same ROCm pins as Rung 3, minus the component it builds. Auto-escalation into
    Rung 5 can be disabled with the `HYPERLOOM_ENABLEMENT_DISABLE_TARGETED_BUILD`
    environment variable (see
    [Targeted builds (Rung 5)](../reference/environment-variables.md#targeted-builds-rung-5)).
@@ -333,11 +348,11 @@ breakdown's `installed_versions` map (`source_pr_url`); see the
 
 ### Novelty and crash safety
 
-- **Novelty-ledger stall gate.** Repeated identical build attempts — same
-  component, ref, GPU arch, and build command — are treated as a stall and
-  revert. A novel attempt, or a time-based failure such as a timeout,
-  advances instead, so the loop keeps making forward progress rather than
-  looping on an identical failing build.
+- **A build answers no round.** A build runs beside the authoring round
+  that asked for it, and that round is settled by its own integrate. A
+  failed build boots nothing, so it settles no round and stacks nothing; its
+  failure reaches the next round's mandate. An identical build — same
+  component, ref, GPU arch, and build command — is never run twice.
 - **Crash / resume.** An in-flight build is tracked by a durable sentinel,
   so a crash or resume reclaims the running build or cleans up the orphaned
   one rather than leaking it.
@@ -359,8 +374,10 @@ One phase, two levers worked in parallel:
 `specialist` serves both levers — investigation, patch authoring, and
 candidate discovery are all dispatches of the one specialist action. An
 operator can add one domain of their own, `custom_specialist`, whose focus is
-the text they supply at launch; until one has started, the Coordinator
-requests it at most once per macro cycle in this phase.
+the text they supply at launch. The Coordinator alone dispatches it, once per
+macro cycle on entering this phase; it and the grid benching its proposals run
+ahead of all other queued work, and a plateau exit waits for both within the
+phase budget.
 
 With a [PrimaTune](../reference/primatune-predictor.md) endpoint configured,
 the phase also asks that predictor for a launch recipe once per decision point:
@@ -508,8 +525,16 @@ The loop adapts through facts, not through retired score tables:
 - Critic verdicts gate risky patches and framework candidates.
 - PolicyGate blocks unsafe paths, invalid envelopes, and actions whose
   structural requirements are not met before they mutate runtime state.
-  Phase fit is guided by the prompt and enforced at the phase transition
-  by dropping incompatible queued tasks.
+  Phase fit is enforced at admission: a proposal or delegate whose action
+  the current phase does not offer is refused (`phase_incompatible`)
+  before a task exists, and the phase transition drops incompatible tasks
+  still queued from the previous phase.
+- The baseline anchor every gain is measured against moves only to a
+  higher re-baseline (or a hot pass correcting a cold anchor), and only
+  until a cumulative gain has been validated
+  against it; after that a re-baseline is recorded (`anchor_held`) but the
+  anchor stays, except for an ENABLEMENT revalidation, whose patch changed
+  what the anchor measures.
 
 ## What is retired
 
