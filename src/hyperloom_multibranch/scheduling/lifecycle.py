@@ -138,7 +138,7 @@ class Session:
         progress = FrontierScoring(self._notebook, FrontierPolicy(metric=MB_FAKE_PRIMARY_METRIC))
         resolver = LlmPatchResolver(resolver_completion, patches)
         self._prelude = Prelude(
-            layout, processes, self._notebook, peers.write_root, patches, tests, judge, self._decisions, clock
+            layout, processes, self._notebook, peers.write_root, patches, judge, self._decisions, clock
         )
         self._explorer = Explorer(
             self._roster,

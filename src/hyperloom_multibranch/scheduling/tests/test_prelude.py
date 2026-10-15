@@ -11,16 +11,17 @@ import re
 import sys
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
 
 import hyperloom
-from hyperloom.contracts.measurement import Purpose, TestKind
+from hyperloom.contracts.measurement import Purpose, RoundValue, TestKind, TestRequest, TestResult, Validity
 from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
+from hyperloom_multibranch.contracts.notebook.records import TestRecord
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
@@ -68,6 +69,19 @@ class StubbornRegistry(ProcessRegistry):
         return await super().spawn(STUBBORN_CHILD, branch=branch, log=log)
 
 
+class ZeroThroughputTests:
+    """Settles every test as measuring an output throughput of zero; a failure double, not a placeholder."""
+
+    def __init__(self) -> None:
+        self.settled = 0
+
+    async def run(self, request: TestRequest) -> TestRecord:
+        self.settled += 1
+        accepted = request.accepted(f"zero-{self.settled}")
+        measured = RoundValue("measure", None, {MB_FAKE_PRIMARY_METRIC: 0.0})
+        return TestRecord(accepted, TestResult(accepted.request_id, Validity.SUCCEEDED, rounds=(measured,)))
+
+
 @dataclass
 class PreludePeers:
     """The repository, patch store, toolbox and rule PRELUDE works with, on the session's notebook; ``tests`` waits
@@ -111,9 +125,7 @@ def _prelude(
     clock = clock or _clock()
     decisions = DecisionLog(layout.decisions, clock)
     write_root = git_root_writer(layout.repo)
-    return Prelude(
-        layout, processes, _notebook(layout), write_root, peers.patches, peers.tests, peers.judge, decisions, clock
-    )
+    return Prelude(layout, processes, _notebook(layout), write_root, peers.patches, peers.judge, decisions, clock)
 
 
 async def _run(prelude: Prelude, budget: SessionBudget) -> PreludeResult:
@@ -237,6 +249,18 @@ async def test_withdrawn_baseline_test_fails_prelude(tmp_path: Path) -> None:
     prelude = _prelude(layout, _registry(layout, child_with_patch(tmp_path)), peers)
     with pytest.raises(PreludeFailed, match="withdrawn"):
         await _run(prelude, SessionBudget.from_hours(2.0, NOW))
+
+
+async def test_a_baseline_measuring_zero_throughput_fails_prelude(tmp_path: Path) -> None:
+    layout = _layout(tmp_path)
+    peers = _peers(layout)
+    gate = LocalNotebook(layout.notebook, Writer(Role.GATE, "gate"), clock=_clock().now)
+    tests = ZeroThroughputTests()
+    peers = replace(peers, judge=MbFakeRuleJudge(gate, tests))  # type: ignore[arg-type]
+    prelude = _prelude(layout, _registry(layout, child_with_patch(tmp_path)), peers)
+    with pytest.raises(PreludeFailed, match="the baseline anchors nothing"):
+        await _run(prelude, SessionBudget.from_hours(2.0, NOW))
+    assert tests.settled == MB_FAKE_BASELINE_TESTS
 
 
 async def test_refused_baseline_test_fails_prelude_and_takes_the_accepted_ones_back(tmp_path: Path) -> None:

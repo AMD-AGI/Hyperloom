@@ -57,7 +57,6 @@ from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     Curves,
     RecordingToolbox,
     ScriptedCompletion,
-    measure_baseline,
     recipe_effect,
 )
 from hyperloom_multibranch.toolbox.fake_model import Fate
@@ -210,7 +209,7 @@ async def _bench(
     merger = LocalNotebook(notebook, Writer(Role.INTEGRATOR, "integrator"), clock=clock)
     tests = SessionTests(toolbox, merger, Clock(now=clock, sleep=_instant))
     judge = MbFakeRuleJudge(LocalNotebook(notebook, Writer(Role.GATE, "gate"), clock=clock), tests)
-    await measure_baseline(judge, tests, root)
+    await judge.establish_baseline(root)
     completion = ScriptedCompletion()
     decisions = tmp_path / "MB-decisions.jsonl"
     resolver = LlmPatchResolver(completion, patches)

@@ -18,7 +18,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hyperloom.common.io import atomic_write_json
-from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom.contracts.recipe import PatchRef, Recipe
 from hyperloom.measure.compile import BlobError
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Notebook
@@ -41,8 +40,8 @@ from hyperloom_multibranch.scheduling.prelude_reader import (
 )
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, RegisteredProcess
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
-from hyperloom_multibranch.scheduling.requests import SessionTests, TestWithdrawn, integration_test_request, together
-from hyperloom_multibranch.scheduling.rule_judge import MB_FAKE_BASELINE_TESTS, MbFakeRuleJudge, NotMeasured
+from hyperloom_multibranch.scheduling.requests import TestWithdrawn
+from hyperloom_multibranch.scheduling.rule_judge import MbFakeRuleJudge, NotMeasured
 from hyperloom_multibranch.scheduling.settings import Workload
 
 #: The ``hyperloom`` console script, run as a module so the child runs on the same install as the scheduler.
@@ -102,7 +101,6 @@ class Prelude:
         notebook: Notebook,
         write_root: RootWriter,
         patches: PatchStore,
-        tests: SessionTests,
         judge: MbFakeRuleJudge,
         decisions: DecisionLog,
         clock: Clock,
@@ -112,7 +110,6 @@ class Prelude:
         self._notebook = notebook
         self._write_root = write_root
         self._patches = patches
-        self._tests = tests
         self._judge = judge
         self._decisions = decisions
         self._clock = clock
@@ -200,22 +197,20 @@ class Prelude:
         """Measure the baseline on ``root``, accuracy included, through the toolbox and anchor it; raises
         :class:`PreludeFailed` when a baseline test is refused or withdrawn, or the baseline anchors nothing."""
 
-        request = integration_test_request(TestKind.TEST, Purpose.BASELINE, root, accuracy=True)
-        runs = [asyncio.ensure_future(self._tests.run(request)) for _ in range(MB_FAKE_BASELINE_TESTS)]
         try:
-            await together(*runs)
-            records = tuple(run.result() for run in runs)
-            await self._judge.establish_baseline(root, records)
+            baseline = await self._judge.establish_baseline(root)
         except RequestRejected as exc:
             raise PreludeFailed(f"the toolbox refused the baseline test: {exc}") from exc
         except TestWithdrawn as exc:
             raise PreludeFailed(f"a baseline test was withdrawn: {exc}") from exc
         except (NotMeasured, BaselineAccuracyError) as exc:
             raise PreludeFailed(f"the baseline anchors nothing: {exc}") from exc
-        request_ids = tuple(record.request_id for record in records)
         self._decisions.record(
             Decision(
-                DecisionKind.PRELUDE, "baseline established", INTEGRATION_BRANCH, {"request_ids": list(request_ids)}
+                DecisionKind.PRELUDE,
+                "baseline established",
+                INTEGRATION_BRANCH,
+                {"request_ids": list(baseline.request_ids)},
             )
         )
 

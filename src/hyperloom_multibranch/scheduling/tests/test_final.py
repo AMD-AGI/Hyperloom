@@ -39,7 +39,6 @@ from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     MbFakeSpecialist,
     RecordingToolbox,
     VirtualClock,
-    measure_baseline,
     recipe_effect,
     tagged,
 )
@@ -179,7 +178,7 @@ class Bench:
         self.toolbox = RecordingToolbox(self.handle(Role.TOOLBOX), recipe_effect(self.tmp_path / "repo", curves))
         self.tests = SessionTests(self.toolbox, scheduler, self.time.clock)
         self.judge = MbFakeRuleJudge(self.handle(Role.GATE), self.tests)
-        await measure_baseline(self.judge, self.tests, root)
+        await self.judge.establish_baseline(root)
         for branch, tag, value in (("b01", "i1", 1040.0), ("b02", "c7", 1060.0)):
             await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, branch, from_commit=root, reason="first"))
             await self.repo.create_branch(branch, root)

@@ -33,7 +33,6 @@ from hyperloom.contracts.recipe import ConfigDelta, Recipe, RecipeDelta, apply
 from hyperloom_multibranch.contracts.fork import Admission
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.lifecycle import SpecialistLaunch
-from hyperloom_multibranch.contracts.notebook import peers as notebook_peers
 from hyperloom_multibranch.contracts.notebook.interfaces import RecordSearch
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import CancelOutcome, QueueState
@@ -42,8 +41,7 @@ from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.peers import RootWriter, git_root_writer
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, RegisteredProcess
-from hyperloom_multibranch.scheduling.requests import SessionTests, integration_test_request
-from hyperloom_multibranch.scheduling.rule_judge import MB_FAKE_BASELINE_TESTS, MbFakeRuleJudge
+from hyperloom_multibranch.scheduling.requests import SessionTests
 from hyperloom_multibranch.toolbox.fake import FakeToolbox, ToolboxNotebook
 from hyperloom_multibranch.toolbox.fake_model import DEFAULT_BASELINE, FakeToolboxConfig, NoiseModel
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
@@ -454,14 +452,6 @@ class StuckToolbox(RecordingToolbox):
         await asyncio.Event().wait()
 
 
-async def measure_baseline(judge: MbFakeRuleJudge, tests: SessionTests, root: str) -> None:
-    """Measure the baseline on ``root`` as PRELUDE does and anchor the session to it."""
-
-    request = integration_test_request(TestKind.TEST, Purpose.BASELINE, root, accuracy=True)
-    records = [await tests.run(request) for _ in range(MB_FAKE_BASELINE_TESTS)]
-    await judge.establish_baseline(root, tuple(records))
-
-
 def judged(verdict: Verdict, gain_pct: float, request_id: str, value: float) -> Judgement:
     return Judgement(verdict, gain_pct, 1.0, (request_id,), {GRADED_OUTPUT: value}, accuracy_ok=True)
 
@@ -479,7 +469,7 @@ class MbFakeSpecialist:
     notebook: RecordSearch
     repo: ExperimentRepo
 
-    async def measure(self, branch: str, change: RecipeDelta) -> notebook_peers.TestRequest:
+    async def measure(self, branch: str, change: RecipeDelta) -> TestRequest:
         parent = await self.repo.head(branch)
         test = TestRequest(
             kind=TestKind.TEST, purpose=Purpose.EXPLORE, branch_id=branch, parent_commit=parent, delta=change
@@ -543,7 +533,6 @@ __all__ = [
     "VirtualClock",
     "held_root_writer",
     "judged",
-    "measure_baseline",
     "recipe_effect",
     "recipe_tags",
     "tagged",

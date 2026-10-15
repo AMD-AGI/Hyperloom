@@ -16,17 +16,19 @@ the one owner of the baseline.
 
 from __future__ import annotations
 
+import asyncio
+import math
 import statistics
 from dataclasses import dataclass
 
-from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
+from hyperloom.contracts.measurement import Purpose, RoundValue, TestKind, TestRequest
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook import Notebook
 from hyperloom_multibranch.contracts.notebook.records import BaselineRecord, TestRecord
 from hyperloom_multibranch.rulegate.accuracy import baseline_accuracy, inferencex_accuracy_ok
 from hyperloom_multibranch.rulegate.inferencex import DispersionThreshold, compare, confirm
 from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_PRIMARY_METRIC
-from hyperloom_multibranch.scheduling.requests import SessionTests
+from hyperloom_multibranch.scheduling.requests import SessionTests, integration_test_request, together
 
 #: How many baseline tests PRELUDE measures; the rule gate needs at least ``rulegate.inferencex.MIN_BASELINES``, and
 #: its noise simulation assumes three. Replaced by the rule gate's own count once it offers one.
@@ -34,7 +36,8 @@ MB_FAKE_BASELINE_TESTS = 3
 
 
 class NotMeasured(Exception):
-    """A settled test reported no value to judge: the candidate failed to serve, or the test measured nothing."""
+    """A settled test reported no value to judge: the candidate failed to serve, or the test measured nothing, zero or
+    a value that is not finite."""
 
     def __init__(self, record: TestRecord) -> None:
         validity = record.result.validity.value if record.result is not None else "no result"
@@ -42,11 +45,17 @@ class NotMeasured(Exception):
         self.request_id = record.request_id
 
 
+def measured_rounds(record: TestRecord, metric: str) -> tuple[RoundValue, ...]:
+    """The test's rounds that count as its measurement of ``metric``: the measure rounds that report it."""
+
+    rounds = record.result.rounds if record.result is not None else ()
+    return tuple(row for row in rounds if row.phase == "measure" and metric in row.metrics)
+
+
 def formal_mean(record: TestRecord, metric: str) -> float | None:
     """The mean of ``metric`` over the test's measured rounds; ``None`` when it measured none."""
 
-    rounds = record.result.rounds if record.result is not None else ()
-    values = [row.metrics[metric] for row in rounds if row.phase == "measure" and metric in row.metrics]
+    values = [row.metrics[metric] for row in measured_rounds(record, metric)]
     return statistics.fmean(values) if values else None
 
 
@@ -59,7 +68,7 @@ def accuracy_score(record: TestRecord) -> float | None:
 
 def _measured(record: TestRecord) -> float:
     value = formal_mean(record, MB_FAKE_PRIMARY_METRIC)
-    if value is None:
+    if value is None or not (math.isfinite(value) and value > 0):
         raise NotMeasured(record)
     return value
 
@@ -81,13 +90,19 @@ class MbFakeRuleJudge:
         self._notebook = notebook
         self._tests = tests
 
-    async def establish_baseline(self, root_commit: str, records: tuple[TestRecord, ...]) -> BaselineRecord:
-        """Anchor the session to the baseline ``records`` measured on ``root_commit`` and write it to the notebook.
+    async def establish_baseline(self, root_commit: str) -> BaselineRecord:
+        """Measure :data:`MB_FAKE_BASELINE_TESTS` baseline tests on ``root_commit``, accuracy included, together,
+        anchor the session to them and write the baseline to the notebook.
 
-        Raises :class:`NotMeasured`, ``ValueError`` from the threshold, or
+        Once one test fails the others are taken back and its error raised: ``RequestRejected`` or
+        :class:`~hyperloom_multibranch.scheduling.requests.TestWithdrawn`. Raises :class:`NotMeasured` or
         :class:`~hyperloom_multibranch.rulegate.accuracy.BaselineAccuracyError` when the baseline cannot anchor anything.
         """
 
+        request = integration_test_request(TestKind.TEST, Purpose.BASELINE, root_commit, accuracy=True)
+        runs = [asyncio.ensure_future(self._tests.run(request)) for _ in range(MB_FAKE_BASELINE_TESTS)]
+        await together(*runs)
+        records = tuple(run.result() for run in runs)
         reference = _reference(records)
         record = BaselineRecord(
             root_commit,
@@ -167,4 +182,11 @@ def _confirming(record: TestRecord) -> TestRequest:
     )
 
 
-__all__ = ["MB_FAKE_BASELINE_TESTS", "MbFakeRuleJudge", "NotMeasured", "accuracy_score", "formal_mean"]
+__all__ = [
+    "MB_FAKE_BASELINE_TESTS",
+    "MbFakeRuleJudge",
+    "NotMeasured",
+    "accuracy_score",
+    "formal_mean",
+    "measured_rounds",
+]

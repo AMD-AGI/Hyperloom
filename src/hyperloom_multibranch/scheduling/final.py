@@ -29,7 +29,7 @@ from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.mb_fakes import mb_fake_regression_passes
 from hyperloom_multibranch.scheduling.requests import SessionTests, TestWithdrawn, integration_test_request, together
 from hyperloom_multibranch.scheduling.roster import BranchEntry, BranchKind
-from hyperloom_multibranch.scheduling.rule_judge import MbFakeRuleJudge, NotMeasured
+from hyperloom_multibranch.scheduling.rule_judge import MbFakeRuleJudge, NotMeasured, measured_rounds
 from hyperloom_multibranch.scheduling.settings import Workload
 
 #: How far below the other candidate a non-primary sweep point may fall before the candidate is passed over.
@@ -52,8 +52,8 @@ def sweep_curve(record: TestRecord, metric: str) -> dict[int, float]:
     """The mean of ``metric`` over a sweep's measured rounds at each conc; a conc it measured nothing at is left out."""
 
     values: defaultdict[int, list[float]] = defaultdict(list)
-    for row in record.result.rounds if record.result is not None else ():
-        if row.phase == "measure" and row.concurrency is not None and metric in row.metrics:
+    for row in measured_rounds(record, metric):
+        if row.concurrency is not None:
             values[row.concurrency].append(row.metrics[metric])
     return {conc: statistics.fmean(measured) for conc, measured in values.items()}
 
