@@ -142,8 +142,8 @@ def time_budget_denial(action: str, expected_cost_minutes: float, shared_state: 
             _cost_exceeds(action, expected_cost_minutes, session_sec, "the session budget"),
             rule="time_budget",
             hint=(
-                "the wall-clock budget cannot fit this action; delegate `report` "
-                "to close the session, or pick an action that fits the time left"
+                "the wall-clock budget cannot fit this action; pick an action that fits "
+                "the time left, the Coordinator closes the session once none does"
             ),
         )
     phase_sec = gated_phase_remaining_sec(shared_state)

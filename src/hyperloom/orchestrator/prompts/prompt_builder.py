@@ -219,7 +219,7 @@ def _section_phase_semantics(
         "",
         "The Coordinator runs the optimization as a linear pipeline.",
         "Each tick it injects a `=== Phase ===` block with the current",
-        "phase. Per-phase proposable action sets (informational):",
+        "phase. Per-phase proposable action sets (enforced at admission):",
         "",
     ]
     if disabled_suffix:
@@ -559,6 +559,15 @@ def _section_action_catalogue(actions: list[ActionMetadata]) -> list[str]:
     return lines
 
 
+def _stop_report_step(phase_key: str) -> str:
+    """The Stop step's ``report`` instruction: admission refuses ``report`` in a phase that does not offer it."""
+    from ..phases.machine_state import allowed_actions_for
+
+    if not phase_key or "report" in allowed_actions_for(phase_key):
+        return "propose `report` once (if not already done)"
+    return "do not propose `report` (only CLOSE allows it, and the Coordinator routes the run there)"
+
+
 def _section_decision_framework(*, kernel_enabled: bool, phase: str = "", transport: str = "") -> list[str]:
     """Build the DECISION FRAMEWORK section lines.
 
@@ -597,7 +606,7 @@ def _section_decision_framework(*, kernel_enabled: bool, phase: str = "", transp
         "sequence. Read the dynamic SharedState section and decide:",
         "",
         "1. **Stop**: if `stop_reason` is set OR `cumulative_gain_validated >= target_gain_pct`,",
-        "   propose `report` once (if not already done) then send an observation 'goal-reached'.",
+        f"   {_stop_report_step(phase_key)} then send an observation 'goal-reached'.",
         *measure_lines,
         "3. **Stack-aware grids**: route every grid attempt through",
         "   ``delegate{action_name='explore', params={grid: [...] }}``;",

@@ -145,7 +145,7 @@ cognitive-complexity src/hyperloom/orchestrator/loop/intent_router.py::IntentRou
 cognitive-complexity src/hyperloom/orchestrator/loop/sub_agent_runner.py::SubAgentRunner.run_task 52
 cognitive-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._drain_agent_keep_outbox 34
 cognitive-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._keep_patch_sources 42
-cognitive-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_baseline 100
+cognitive-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_baseline 97
 cognitive-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_explore 237
 cognitive-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_integrate_patch 63
 cognitive-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._replay_keep_from_result 40
@@ -686,7 +686,7 @@ function-lines src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter._h
 function-lines src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter.handle_delegate 179
 function-lines src/hyperloom/orchestrator/loop/proposals.py::ProposalsCollaborator.materialize_approved_proposal 124
 function-lines src/hyperloom/orchestrator/loop/sub_agent_runner.py::SubAgentRunner.run_task 177
-function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_baseline 301
+function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_baseline 279
 function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_explore 493
 function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_integrate_patch 152
 function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_profile 98
@@ -958,7 +958,7 @@ module-lines src/hyperloom/orchestrator/loop/intent_router.py 1548
 module-lines src/hyperloom/orchestrator/loop/writeback.py 4748
 module-lines src/hyperloom/orchestrator/phases/framework.py 3139
 module-lines src/hyperloom/orchestrator/phases/kernel.py 4227
-module-lines src/hyperloom/orchestrator/phases/machine_state.py 2239
+module-lines src/hyperloom/orchestrator/phases/machine_state.py 2232
 module-lines src/hyperloom/orchestrator/phases/prelude.py 2640
 module-lines src/hyperloom/orchestrator/policy/gate.py 1608
 module-lines src/hyperloom/orchestrator/prompts/prompt_builder.py 1205
