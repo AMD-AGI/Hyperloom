@@ -4,7 +4,7 @@
 """Frontier scoring, a prototype: how much one more unit of budget is expected to gain on each specialist branch.
 
 :class:`FrontierScoring` is a ``ProgressQuery`` over the notebook's: the same rows, each running specialist branch's
-``frontier`` filled with ``FrontierScore(expected_gain_pct, components)``. The components:
+``frontier`` filled with ``FrontierScore(expected_gain_pct, components, basis)``. The components:
 
 * ``trend_pct``: the cumulative gain the branch reached over the last window, in points over the baseline;
 * ``tests`` and ``gpu_hours``: what the branch has spent;
@@ -14,8 +14,9 @@
 * ``observing``: 1 while a kernel-layer direction the branch tested lately may still be paying off.
 
 The expected gain is the prior where there is one, else the trend; a branch under observation keeps at least
-``observation_floor_pct``; the headroom caps it, and it is never negative. The formula is a prototype: what the score
-means is the scheduler's call (gongzheng's), and it stays here until then.
+``observation_floor_pct``; the headroom caps it, and it is never negative. ``basis`` names which of them the score
+rests on. The formula is a prototype: what the score means is the scheduler's call (gongzheng's), and it stays here
+until then.
 """
 
 from __future__ import annotations
@@ -31,7 +32,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
     LineageView,
     NotebookSnapshot,
 )
-from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus
+from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, FrontierBasis
 from hyperloom_multibranch.notebook.rsi.archive import (
     SearchTree,
     TreeBranch,
@@ -45,6 +46,8 @@ WINDOW_SECONDS = 1800.0
 OBSERVATION_SECONDS = 3600.0
 OBSERVATION_FLOOR_PCT = 0.5
 MIN_EFFECTIVE_SESSIONS = 1.5
+#: The session length the default window and observation suit; a shorter session scales both down in proportion.
+REFERENCE_BUDGET_SECONDS = 4 * 3600.0
 
 
 @dataclass(frozen=True)
@@ -56,6 +59,18 @@ class FrontierPolicy:
     observation_seconds: float = OBSERVATION_SECONDS
     observation_floor_pct: float = OBSERVATION_FLOOR_PCT
     min_effective_sessions: float = MIN_EFFECTIVE_SESSIONS
+
+    @classmethod
+    def for_budget(cls, metric: str, budget_seconds: float) -> FrontierPolicy:
+        """The policy of a session that may run ``budget_seconds``: the defaults, shrunk with a shorter session.
+
+        A two-hour session looks back 15 minutes for its trend and observes a kernel direction for 30.
+        """
+
+        if budget_seconds <= 0:
+            raise ValueError(f"a session budget must be positive, got {budget_seconds}")
+        scale = min(1.0, budget_seconds / REFERENCE_BUDGET_SECONDS)
+        return cls(metric, window_seconds=WINDOW_SECONDS * scale, observation_seconds=OBSERVATION_SECONDS * scale)
 
 
 @dataclass(frozen=True)
@@ -120,19 +135,20 @@ def score_branch(
         "gpu_hours": branch.gpu_seconds / 3600.0,
         "observing": float(_observing(snapshot, row.branch, snapshot.taken_at - policy.observation_seconds)),
     }
-    expected = trend
+    expected, basis = trend, FrontierBasis.TREND
     prior = remaining_prior(history, tree.task, len(branch.test_times))
     if prior is not None and prior.effective_sessions >= policy.min_effective_sessions:
         components.update(prior_remaining_pct=prior.remaining_pct, prior_effective_sessions=prior.effective_sessions)
-        expected = prior.remaining_pct
-    if components["observing"]:
-        expected = max(expected, policy.observation_floor_pct)
+        expected, basis = prior.remaining_pct, FrontierBasis.PRIOR
+    if components["observing"] and expected < policy.observation_floor_pct:
+        expected, basis = policy.observation_floor_pct, FrontierBasis.OBSERVING
     ceiling = snapshot.profile.roofline_ceiling.get(policy.metric) if snapshot.profile is not None else None
     head = row.head_value.get(policy.metric)
     if ceiling and head:
         components["headroom_pct"] = max(0.0, (ceiling / head - 1.0) * 100.0)
-        expected = min(expected, components["headroom_pct"])
-    return FrontierScore(expected_gain_pct=max(0.0, expected), components=components)
+        if components["headroom_pct"] < expected:
+            expected, basis = components["headroom_pct"], FrontierBasis.HEADROOM
+    return FrontierScore(expected_gain_pct=max(0.0, expected), components=components, basis=basis)
 
 
 def score_progress(
@@ -171,6 +187,7 @@ __all__ = [
     "MIN_EFFECTIVE_SESSIONS",
     "OBSERVATION_FLOOR_PCT",
     "OBSERVATION_SECONDS",
+    "REFERENCE_BUDGET_SECONDS",
     "WINDOW_SECONDS",
     "FrontierPolicy",
     "FrontierScoring",

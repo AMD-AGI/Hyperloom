@@ -24,6 +24,7 @@ from hyperloom_multibranch.contracts.notebook.vocab import (
     CommitOrigin,
     Conclusion,
     DedupStatus,
+    FrontierBasis,
     InboxKind,
     LineageKind,
     MergeOutcome,
@@ -229,10 +230,11 @@ class BranchLogRecord:
 
 @dataclass(frozen=True)
 class FrontierScore:
-    """Expected gain over the PRELUDE baseline from one more unit of budget, and the parts it is made of."""
+    """Expected gain over the PRELUDE baseline from one more unit of budget, its parts, and what it rests on."""
 
     expected_gain_pct: float
     components: Mapping[str, float] = field(default_factory=dict)
+    basis: FrontierBasis | None = None
 
 
 @dataclass(frozen=True)

@@ -111,6 +111,21 @@ class QuarantineAction(str, Enum):
     LIFT = "lift"
 
 
+class FrontierBasis(str, Enum):
+    """What a frontier score rests on, so its reader knows how far to trust it.
+
+    ``trend`` is the branch's own recent gain; ``prior`` what similar archived branches still gained; ``observing`` the
+    floor of a branch whose kernel-layer direction may still pay off; ``new`` the floor of a branch too young to have a
+    trend; ``headroom`` the roofline bound that capped any of them.
+    """
+
+    TREND = "trend"
+    PRIOR = "prior"
+    OBSERVING = "observing"
+    NEW = "new"
+    HEADROOM = "headroom"
+
+
 __all__ = [
     "COMMITTING",
     "INTEGRATION_BRANCH",
@@ -120,6 +135,7 @@ __all__ = [
     "CommitOrigin",
     "Conclusion",
     "DedupStatus",
+    "FrontierBasis",
     "InboxKind",
     "LineageKind",
     "MergeOutcome",
