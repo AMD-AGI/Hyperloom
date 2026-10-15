@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from hyperloom_multibranch.contracts.notebook import NotRecorded
+from hyperloom_multibranch.contracts.notebook.peers import SandboxFacts
 from hyperloom_multibranch.contracts.notebook.records import BranchNode, LineageView, NotebookSnapshot, TestRecord
 from hyperloom_multibranch.contracts.notebook.vocab import CommitOrigin, LineageKind
 from hyperloom_multibranch.notebook.codec import decode, encode
@@ -33,6 +34,7 @@ log = logging.getLogger(__name__)
 TREE_FORMAT = "multibranch.search-tree.v1"
 SOURCE_NOTEBOOK = "multibranch-notebook"
 ARCHIVE_ENV = "HYPERLOOM_RSI_ARCHIVE"
+SINGLE_HOST = "local"
 _FILE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}")
 
 
@@ -76,7 +78,8 @@ class MeasurementNoise:
     """How noisy the session measured its throughput, and where.
 
     ``dispersion_pct`` is the baseline's dispersion over ``samples`` measurements; ``noise_band_pct`` the band the
-    session graded under, when it recorded one; ``environment`` the measurement backends it used.
+    session graded under, when it recorded one; ``environment`` where it measured: :data:`SINGLE_HOST` when every
+    baseline measurement ran on one node, whatever its backend, else the backends it used, joined by ``+``.
     """
 
     dispersion_pct: float | None = None
@@ -129,8 +132,12 @@ def _parent_branch(node: BranchNode, view: LineageView) -> str:
     return node.from_branch or (start.branch if start is not None else "")
 
 
+def _sandbox(record: TestRecord) -> SandboxFacts | None:
+    return record.result.sandbox if record.result is not None else None
+
+
 def _backend(record: TestRecord) -> str:
-    sandbox = record.result.sandbox if record.result is not None else None
+    sandbox = _sandbox(record)
     return (sandbox.backend if sandbox is not None else "") or "unknown"
 
 
@@ -138,7 +145,12 @@ def _environment(snapshot: NotebookSnapshot) -> str:
     baseline = snapshot.baseline
     measured = [record for record in snapshot.records if record.measured]
     anchored = [record for record in measured if baseline is not None and record.request_id in baseline.request_ids]
-    return "+".join(sorted({_backend(record) for record in anchored or measured}))
+    sampled = anchored or measured
+    # A hosted backend run on one machine (MB1) still measured on a single host.
+    nodes = {sandbox.node_name for sandbox in map(_sandbox, sampled) if sandbox is not None and sandbox.node_name}
+    if len(nodes) == 1:
+        return SINGLE_HOST
+    return "+".join(sorted({_backend(record) for record in sampled}))
 
 
 def tree_from_snapshot(
@@ -251,6 +263,7 @@ class TreeArchive:
 
 __all__ = [
     "ARCHIVE_ENV",
+    "SINGLE_HOST",
     "SOURCE_NOTEBOOK",
     "TREE_FORMAT",
     "MeasurementNoise",

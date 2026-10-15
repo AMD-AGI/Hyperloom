@@ -4,9 +4,10 @@
 """The dispersion to expect before PRELUDE measures its own (Q1): what past sessions on the same task measured.
 
 The archive holds, per past session, its baseline's dispersion over its measurements and the environment it measured
-in: multi-branch sessions record the rule gate's baseline dispersion and their sandbox backends; single-lineage
-sessions (backfilled) the dispersion of their baseline measurements, the noise band they graded under (empty on
-sessions seeded before it was recorded), and one host. A session matches when it ran the same model, TP and GPU.
+in: multi-branch sessions record the rule gate's baseline dispersion and where they measured (one host, or the
+sandbox backends they used); single-lineage sessions (backfilled) the dispersion of their baseline measurements, the
+noise band they graded under (empty on sessions seeded before it was recorded), and one host. A session matches when
+it ran the same model, TP and GPU.
 
 * Sessions that measured in the requested environment give the prior: the median of their dispersions.
 * Single-host measurements are only a floor for hosted measurement: they raise any value below them.
@@ -22,11 +23,10 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
 
-from hyperloom_multibranch.notebook.rsi.archive import SearchTree
+from hyperloom_multibranch.notebook.rsi.archive import SINGLE_HOST, SearchTree
 
 GLOBAL_MEDIAN_PCT = 0.38
 GLOBAL_P90_PCT = 3.30
-SINGLE_HOST = "local"
 HOSTED = "hosted"
 ANY_ENVIRONMENT = "any"
 

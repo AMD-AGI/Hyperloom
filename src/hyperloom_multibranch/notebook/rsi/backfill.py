@@ -26,12 +26,18 @@ from hyperloom.common.timeutil import parse_iso_unix_or_zero
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.vocab import CommitOrigin, LineageKind
 from hyperloom_multibranch.notebook.knowledge.breakdown import FILENAME as BREAKDOWN_FILENAME
-from hyperloom_multibranch.notebook.rsi.archive import MeasurementNoise, SearchTree, TreeArchive, TreeBranch, TreeCommit
+from hyperloom_multibranch.notebook.rsi.archive import (
+    SINGLE_HOST,
+    MeasurementNoise,
+    SearchTree,
+    TreeArchive,
+    TreeBranch,
+    TreeCommit,
+)
 from hyperloom_multibranch.notebook.rsi.similarity import LABEL_WEIGHTS, SIZE_WEIGHTS, TaskConditions
 
 SOURCE = "hyperloom-journal"
 WORK_BRANCH = "s1"
-SINGLE_HOST = "local"
 JOURNAL_PATH = Path("reports") / "optimization_journal.json"
 MANIFEST = "manifest.json"
 # The journal's own vocabulary: an adopted change, and the rows that anchor the baseline rather than improve it.

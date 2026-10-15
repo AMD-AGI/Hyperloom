@@ -12,10 +12,11 @@ from pathlib import Path
 import pytest
 
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, NotRecorded
-from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot
+from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot, TestRecord
 from hyperloom_multibranch.contracts.notebook.vocab import CommitOrigin, LineageKind
 from hyperloom_multibranch.notebook.rsi.archive import (
     ARCHIVE_ENV,
+    SINGLE_HOST,
     TreeArchive,
     similar_trees,
     tree_document,
@@ -48,6 +49,22 @@ def test_the_tree_holds_each_branch_with_its_commits_tests_cost_and_times(snapsh
     assert (
         searched.budget_seconds > 0 and tree_from_snapshot(snapshot, METRIC, budget_seconds=60.0).budget_seconds == 60.0
     )
+
+
+@pytest.mark.parametrize(("merge_node", "environment"), [("node-1", SINGLE_HOST), ("node-2", "hosted")])
+def test_hosted_measurement_on_one_node_is_a_single_host(
+    snapshot: NotebookSnapshot, merge_node: str, environment: str
+) -> None:
+    def hosted(record: TestRecord) -> TestRecord:
+        if record.result is None or record.result.sandbox is None:
+            return record
+        node = merge_node if record.request_id == "m1" else "node-1"
+        moved = dataclasses.replace(record.result.sandbox, node_name=node, backend="hosted")
+        return dataclasses.replace(record, result=dataclasses.replace(record.result, sandbox=moved))
+
+    measured = dataclasses.replace(snapshot, records=tuple(map(hosted, snapshot.records)))
+
+    assert tree_from_snapshot(measured, METRIC).noise.environment == environment
 
 
 def test_a_tree_needs_the_profile_the_baseline_and_a_baselined_metric(snapshot: NotebookSnapshot) -> None:
