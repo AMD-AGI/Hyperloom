@@ -118,10 +118,11 @@ the background and wait for it to exit. Rerun once when a repository line says t
 a repository with no line did not finish, which Step 7 checks. An empty `overlap.tsv` means "no
 open PR touches these paths" only where `scan.txt` says `COMPLETE`.
 
-Merged work on the same paths: with an upstream clone, write
-`git log --oneline <commit>..<upstream default branch> -- <paths>` into `$WORK/pathlog.txt`; its
-`(#N)` suffixes are merged PRs your commit lacks, and join the shortlist below. Without a clone,
-it holds `SKIPPED: pathlog -- no upstream clone`.
+Merged work on the same paths: with an upstream clone, write `git log --oneline --first-parent
+<commit>..<upstream default branch> -- <paths>` into `$WORK/pathlog.txt`. Each `(#N)` suffix and
+`Merge pull request #N from` subject in it is a merged PR your commit lacks, and joins the
+shortlist below; without `--first-parent`, a merge commit gives way to the PR's own commits, which
+name no PR. Without a clone, it holds `SKIPPED: pathlog -- no upstream clone`.
 
 ## Step 4 — Deep read and classify
 
