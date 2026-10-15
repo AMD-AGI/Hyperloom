@@ -53,6 +53,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, Protocol, Sequence, runtime_checkable
 
+from hyperloom.common.amd_smi import gpu_vram_usage
+
 from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
 
 from .models import Recipe, ValidationResult
@@ -502,20 +504,23 @@ def _installed_package_dir(pkg: str) -> str:
     return str(Path(spec.origin).parent)
 
 
-def _free_vram_fraction(gpu: str, *, _run=None) -> Optional[float]:
-    """Fraction of the target GPU's memory that is free, or None if unknown."""
-    run = _run or (lambda cmd: subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60))
-    try:
-        out = run("rocm-smi --showmemuse").stdout
-    except (OSError, subprocess.SubprocessError):
-        return None
-    used = re.findall(r"\(VRAM%\):\s*(\d+)", out)
-    if not used:
+def _free_vram_fraction(gpu: str, *, _usage=None) -> Optional[float]:
+    """Fraction of the target GPU's memory that is free, or None if unknown.
+
+    amd-smi has no ``VRAM%`` field the way ``rocm-smi --showmemuse`` did; the ratio is computed here from
+    :func:`~hyperloom.common.amd_smi.gpu_vram_usage`'s ``used_mib``/``total_mib`` instead.
+    """
+    read = _usage or gpu_vram_usage
+    rows = read()
+    if not rows:
         return None
     idx = 0
     with contextlib.suppress(ValueError):
-        idx = min(int(gpu), len(used) - 1)
-    return 1.0 - int(used[idx]) / 100.0
+        idx = min(int(gpu), len(rows) - 1)
+    row = rows[idx]
+    if row.total_mib <= 0:
+        return None
+    return 1.0 - row.used_mib / row.total_mib
 
 
 def gpu_is_free_enough(gpu: str, *, need: float = 0.5, _probe=None) -> tuple[bool, str]:
@@ -529,7 +534,7 @@ def gpu_is_free_enough(gpu: str, *, need: float = 0.5, _probe=None) -> tuple[boo
     about the machine.
 
     An unreadable card is not treated as busy: the probe is advisory, and a
-    false alarm here would block runs on any host without ``rocm-smi``.
+    false alarm here would block runs on any host without ``amd-smi``.
     """
     probe = _probe or _free_vram_fraction
     free = probe(gpu)
