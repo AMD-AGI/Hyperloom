@@ -619,6 +619,8 @@ GROUND_PATH_ESCAPE = "path_escape"  # patch path escapes the tree
 GROUND_MISSING_TARGET = "missing_target"  # modify/delete target absent from base
 GROUND_AMBIGUOUS_ROOT = "ambiguous_root"  # patch targets match more than one disjoint tree
 GROUND_UNCHECKED = "unchecked"  # no base available / git unavailable
+#: git's exit code for a fatal error about the repository rather than the input.
+_GIT_FATAL_RC = 128
 
 
 @dataclass(frozen=True)
@@ -711,6 +713,13 @@ def ground_patch_text(
         return PatchGroundingResult(GROUND_UNCHECKED, f"git unavailable: {exc!r}")
     if proc.returncode == 0:
         return PatchGroundingResult(GROUND_APPLIES)
+    if proc.returncode == _GIT_FATAL_RC:
+        # git read the patch and rejected it (1), or never got as far as the
+        # patch because the repository itself was unusable (128): a worktree
+        # whose parent checkout is gone, a tree another uid owns. Only the
+        # first is a verdict about the patch, and calling the second one
+        # labels every patch in the set stale on evidence about the machine.
+        return PatchGroundingResult(GROUND_UNCHECKED, (proc.stderr or "").strip()[:240])
     return PatchGroundingResult(
         GROUND_STALE,
         (proc.stderr or "").strip()[:240],
