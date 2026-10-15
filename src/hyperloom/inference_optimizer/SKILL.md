@@ -868,8 +868,11 @@ signals. There is no automatic supervision or restart. After inspecting the
 failure and confirming that the old process is gone, explicitly resume the same
 session with `--resume-from "$SESSION_DIR"` when appropriate. Historical stop
 reasons remain readable; they are not instructions to restart automatically.
-`recover` remains an offline artifact-reconstruction tool, not a runtime
-recovery action.
+`recover` is an offline tool, not a runtime recovery action: it reconstructs
+artifacts, or records the cleanup confirmation a refused resume asks for:
+`--confirm-scope-gone` when the lost pod's owner scope must be confirmed gone,
+`--confirm-stopped` only for a task whose ownership was recorded without a
+scope; see Scenario A in `docs/reference/operations.md`.
 
 If the CLI exits with `Claude SDK exit code 1` or `Primus.00009 token not present`,
 the gateway rejected the request. Check that `OPENAI_BASE_URL` / `OPENAI_API_KEY`
