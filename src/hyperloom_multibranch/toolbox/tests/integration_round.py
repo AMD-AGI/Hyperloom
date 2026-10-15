@@ -25,9 +25,15 @@ from hyperloom_multibranch.contracts.intent import IntentLayer, intent_fingerpri
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook.records import TestRecord
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, Conclusion
-from hyperloom_multibranch.rulegate.accuracy import baseline_accuracy, inferencex_accuracy_ok
+from hyperloom_multibranch.rulegate.accuracy import baseline_accuracy
 from hyperloom_multibranch.rulegate.decision import Action
-from hyperloom_multibranch.rulegate.inferencex import DispersionThreshold, compare, confirm
+from hyperloom_multibranch.rulegate.inferencex import (
+    DispersionThreshold,
+    InferenceXBaseline,
+    InferenceXReading,
+    compare,
+    confirm,
+)
 from hyperloom_multibranch.toolbox.tests.integration_rig import Specialist, Stack
 
 FLEXIBLE = "exact_match,flexible-extract"
@@ -79,6 +85,10 @@ def accuracy_score(result: TestResult) -> float:
     return next(v.score for v in values if v.metric == FLEXIBLE)
 
 
+def reading(result: TestResult) -> InferenceXReading:
+    return InferenceXReading(throughput(result), accuracy_score(result))
+
+
 async def wait_until(check: Callable[[], Awaitable[Any]], what: str, timeout: float = _TOOL_WAIT_SEC) -> Any:
     deadline = asyncio.get_running_loop().time() + timeout
     while True:
@@ -106,6 +116,7 @@ async def submit(sp: Specialist, parent: str, probe: Probe, **fields: Any) -> st
         "parent_commit": parent,
         "delta": probe.delta.to_document(),
         "intent_fingerprint": probe.fingerprint,
+        "accuracy": True,
         **fields,
     }
     return str(json.loads(await sp.call("submit_test", **arguments))["request_id"])
@@ -179,10 +190,10 @@ async def land(stack: Stack, record: TestRecord, judgement: Judgement, outcome: 
     return action
 
 
-def decided(threshold: DispersionThreshold, parent: dict[str, float], record: TestRecord) -> Judgement:
-    """First measurement against the baseline record; the accuracy round rides on the retest (6.1 step 7)."""
+def decided(baseline: InferenceXBaseline, parent: dict[str, float], record: TestRecord) -> Judgement:
+    """First measurement against the baseline record, with its own accuracy round (6.1 step 7)."""
     assert record.result is not None
-    return compare(throughput(record.result), True, parent, threshold, record.request_id)
+    return compare(reading(record.result), baseline, parent, record.request_id)
 
 
 @dataclass(frozen=True)
@@ -235,8 +246,9 @@ async def run_round(stack: Stack, probes: RoundProbes) -> Outcome:
 
     base_results, base_ids = await baselines(stack)
     values = [throughput(r) for r in base_results]
-    threshold, parent = DispersionThreshold(tuple(values)), {GRADED_OUTPUT: fmean(values)}
-    base_accuracy = baseline_accuracy([accuracy_score(r) for r in base_results])
+    bar_pct = DispersionThreshold(tuple(values)).threshold_pct
+    baseline = InferenceXBaseline(bar_pct, baseline_accuracy([accuracy_score(r) for r in base_results]))
+    parent = {GRADED_OUTPUT: fmean(values)}
     out.baseline = tuple(values)
 
     # Two branches measure at once on a full pool; the rest of what they and s3 submit has to wait.
@@ -247,7 +259,7 @@ async def run_round(stack: Stack, probes: RoundProbes) -> Outcome:
     out.first, out.cancelled = {"s1": t1, "s2": t2}, (queued, *never)
     first = {"s1": await measured(s1, t1), "s2": await measured(s2, t2)}
     records = {b: await stack.gate_notebook.record(rid) for b, rid in out.first.items()}
-    firsts = {b: decided(threshold, parent, records[b]) for b in records}
+    firsts = {b: decided(baseline, parent, records[b]) for b in records}
 
     # s1 tries a second change and asks for the retest of its first at once: with K = 1 the retest must not wait for it.
     out.explore2 = await submit(s1, base, probes.explore2)
@@ -263,7 +275,7 @@ async def run_round(stack: Stack, probes: RoundProbes) -> Outcome:
 
     await wait_until(k_exempt_seen, "the retest running beside the explore test of the same branch")
     retests = {b: await measured(sp, out.retest[b]) for b, (sp, _) in asks.items()}
-    await settle_round(stack, out, (records, firsts, first, retests), (threshold, parent, base_accuracy))
+    await settle_round(stack, out, (records, firsts, first, retests), (baseline, parent))
     out.request_ids = [*base_ids, t1, t2, out.explore2, *out.retest.values()]
     await check_audit(stack, out, [*base_results, *first.values(), *retests.values()])
     await check_specialist_view(stack, s1, s2, out, probes)
@@ -274,11 +286,11 @@ async def settle_round(
     stack: Stack,
     out: Outcome,
     measurements: tuple[Any, ...],
-    baseline: tuple[DispersionThreshold, dict[str, float], float],
+    judged_against: tuple[InferenceXBaseline, dict[str, float]],
 ) -> None:
     """Judge every candidate with the rule gate's comparison and land it through the rule gate (6.1 step 7)."""
     records, firsts, _, retests = measurements
-    threshold, parent, base_accuracy = baseline
+    baseline, parent = judged_against
     for branch, first in firsts.items():
         out.judgements[f"{branch}-first"] = first
         if first.verdict is not Verdict.NEEDS_CONFIRM:
@@ -286,14 +298,12 @@ async def settle_round(
             continue
         assert await land(stack, records[branch], first, out, branch) is Action.RETEST
         assert (await stack.gate_notebook.record(records[branch].request_id)).judgement is None
-        retested = retests[branch]
-        ok = inferencex_accuracy_ok(base_accuracy, accuracy_score(retested))
-        final = confirm(first, throughput(retested), ok, parent, threshold, out.retest[branch])
+        final = confirm(first, reading(retests[branch]), baseline, parent, out.retest[branch])
         await land(stack, records[branch], final, out, branch)
     explore = Specialist(stack, "s1")
     await measured(explore, out.explore2)
     record = await stack.gate_notebook.record(out.explore2)
-    await land(stack, record, decided(threshold, parent, record), out, "s1")
+    await land(stack, record, decided(baseline, parent, record), out, "s1")
 
 
 async def check_audit(stack: Stack, out: Outcome, results: list[TestResult]) -> None:

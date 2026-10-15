@@ -9,6 +9,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 
+#: The ``recorded_value`` key of an InferenceX measurement's eval score, kept beside its throughput.
+ACCURACY_SCORE = "accuracy_score"
+
 
 class Verdict(str, Enum):
     """``NEEDS_CONFIRM`` is the only provisional verdict: a retest on another sandbox settles it.
@@ -32,8 +35,9 @@ class Judgement:
 
     ``recorded_value`` is the candidate's value per metric, in the units the PRELUDE baseline records: the mean of both
     measurements once retested, otherwise the single one; it becomes the commit's recorded value when the candidate is
-    committed. ``accuracy_ok`` holds only when every measurement behind the judgement passed the accuracy gate, and
-    ``refused_by`` names the performance gates that kept it from ``IMPROVED``.
+    committed. On InferenceX it holds the eval score under ``ACCURACY_SCORE`` too, on AgentX the request error rate.
+    ``accuracy_ok`` holds only when every measurement behind the judgement passed the accuracy gate, and ``refused_by``
+    names the performance gates that kept it from ``IMPROVED``.
     """
 
     verdict: Verdict
@@ -47,4 +51,4 @@ class Judgement:
     foundation_fix: bool = False
 
 
-__all__ = ["Judgement", "Verdict"]
+__all__ = ["ACCURACY_SCORE", "Judgement", "Verdict"]
