@@ -101,11 +101,25 @@ def _wait_ports_free(ports: list[int], timeout_s: float) -> list[int]:
         time.sleep(1.0)
 
 
+# MiB per unit amd-smi may label a memory size with. Its "MB" is mebibytes (an MI355X with 288 GiB reports 294912 of
+# them), so the binary divisor is the right one.
+_MIB_PER_UNIT = {"B": 1.0 / 1024**2, "KB": 1.0 / 1024, "MB": 1.0, "MIB": 1.0, "GB": 1024.0, "GIB": 1024.0}
+
+
 def _gpu_vram_used_mb() -> list[float] | None:
-    """Return per-GPU used VRAM (MiB) via rocm-smi, or None if unavailable."""
+    """Return per-GPU used VRAM (MiB) via amd-smi, or None if unavailable.
+
+    Deliberately a stdlib-only copy of ``hyperloom.common.amd_smi.gpu_vram_usage`` rather than a call to it: this
+    module is cloudpickled onto every Ray node by ``_kill_remote``, and a ``hyperloom`` import here would make the
+    teardown require the package on pods that only carry the serving image. ``test_multi_node_scripts.py`` pins the
+    two readers to the same amd-smi payload so the copy cannot drift.
+
+    Returns:
+        list[float] | None: Used VRAM per card in MiB, or None when amd-smi is absent or unreadable.
+    """
     try:
         proc = subprocess.run(
-            ["rocm-smi", "--showmeminfo", "vram", "--json"],
+            ["amd-smi", "metric", "--mem-usage", "--json"],
             capture_output=True,
             text=True,
             timeout=20,
@@ -118,17 +132,20 @@ def _gpu_vram_used_mb() -> list[float] | None:
         data = json.loads(proc.stdout)
     except (json.JSONDecodeError, ValueError):
         return None
+    rows = data.get("gpu_data") if isinstance(data, dict) else data
     used: list[float] = []
-    for fields in data.values():
-        if not isinstance(fields, dict):
+    for row in rows or []:
+        # Exact key: the neighbouring used_visible_vram and used_gtt are different quantities, and on an APU GTT is
+        # 24x VRAM, so a substring match would report a plausible number that is wrong.
+        block = row.get("mem_usage", {}).get("used_vram") if isinstance(row, dict) else None
+        if isinstance(block, dict):
+            value, unit = block.get("value"), str(block.get("unit") or "MB").strip().upper()
+        else:
+            value, unit = block, "MB"
+        scale = _MIB_PER_UNIT.get(unit)
+        if scale is None or isinstance(value, bool) or not isinstance(value, (int, float)):
             continue
-        for key, val in fields.items():
-            kl = key.lower()
-            if "vram" in kl and "used" in kl:
-                try:
-                    used.append(float(val) / (1024.0 * 1024.0))
-                except (TypeError, ValueError):
-                    pass
+        used.append(float(value) * scale)
     return used or None
 
 
@@ -154,12 +171,30 @@ def _gpu_total_used_mb() -> float | None:
 
 
 def _gpu_used_mb_for_pgids(pgids: set[int]) -> float | None:
-    """Return VRAM (MiB) held by processes in ``pgids`` per rocm-smi --showpids."""
+    """Return VRAM (MiB) held by processes in ``pgids`` per amd-smi process --json.
+
+    Deliberately a stdlib-only, vendored parser rather than a call into
+    ``hyperloom.common.amd_smi``, for the same cloudpickle reason documented on
+    ``_gpu_vram_used_mb`` above: this module is scheduled onto every Ray node by
+    ``_kill_remote``, and a ``hyperloom`` import here would make teardown require the
+    package on pods that only carry the serving image.
+
+    Unlike ``_gpu_vram_used_mb``, there is no shared per-process reader in
+    ``hyperloom.common.amd_smi`` to assert parity against -- that module reads only
+    the aggregate ``metric --mem-usage``, never ``process --json`` -- so this is
+    covered by its own unit tests against captured amd-smi payload shapes instead of
+    a parity test.
+
+    Returns:
+        float | None: VRAM (MiB) held by processes whose process group is in
+        ``pgids``, or None when amd-smi is absent or unreadable. 0.0 when amd-smi
+        reports no matching process (including "no running processes" on every GPU).
+    """
     if not pgids:
         return 0.0
     try:
         proc = subprocess.run(
-            ["rocm-smi", "--showpids", "--json"],
+            ["amd-smi", "process", "--json"],
             capture_output=True,
             text=True,
             timeout=20,
@@ -172,30 +207,39 @@ def _gpu_used_mb_for_pgids(pgids: set[int]) -> float | None:
         data = json.loads(proc.stdout)
     except (json.JSONDecodeError, ValueError):
         return None
-    total_b = 0.0
-    # --showpids --json shape: {"system": {"PID<pid>": "name, #gpus, vram_b, ..."}}.
-    for fields in data.values():
-        if not isinstance(fields, dict):
+    rows = data.get("gpu_data") if isinstance(data, dict) else data
+    total_mib = 0.0
+    for row in rows or []:
+        if not isinstance(row, dict):
             continue
-        for key, val in fields.items():
-            if not key.startswith("PID"):
+        for entry in row.get("process_list") or []:
+            if not isinstance(entry, dict):
+                continue
+            info = entry.get("process_info")
+            # A string here is "No running processes detected" (or "N/A" when a filter matched nothing) -- either
+            # way, no pid to attribute VRAM to.
+            if not isinstance(info, dict):
                 continue
             try:
-                pid = int(key[3:])
-            except ValueError:
+                pid = int(info.get("pid"))
+            except (TypeError, ValueError):
                 continue
             try:
                 if os.getpgid(pid) not in pgids:
                     continue
             except OSError:
                 continue
-            parts = [x.strip() for x in str(val).split(",")]
-            if len(parts) >= 3:
-                try:
-                    total_b += float(parts[2])
-                except (TypeError, ValueError):
-                    pass
-    return total_b / (1024.0 * 1024.0)
+            memory_usage = info.get("memory_usage")
+            block = memory_usage.get("vram_mem") if isinstance(memory_usage, dict) else None
+            if isinstance(block, dict):
+                value, unit = block.get("value"), str(block.get("unit") or "B").strip().upper()
+            else:
+                value, unit = block, "B"
+            scale = _MIB_PER_UNIT.get(unit)
+            if scale is None or isinstance(value, bool) or not isinstance(value, (int, float)):
+                continue
+            total_mib += float(value) * scale
+    return total_mib
 
 
 def _wait_gpu_reclaimed(target_used_mb: float, slack_mb: float, timeout_s: float) -> float | None:
