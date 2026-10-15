@@ -28,7 +28,7 @@ def _silent_coordinator(session_dir) -> Coordinator:
 
 def _delegate(
     *,
-    action: str = "long_running",
+    action: str = "target_analysis",  # proposable in the default PRELUDE phase
     params: dict | None = None,
     key: str | None = "dup-key-1",
 ) -> Intent:
@@ -49,7 +49,7 @@ async def test_delegate_terminal_collision_appends_retry_suffix(session_dir):
     c = _silent_coordinator(session_dir)
     try:
         first, _ = await c.tasks.create_or_return_existing(
-            kind="long_running",
+            kind="target_analysis",
             params={"x": 1},
             idempotency_key="dup-key-1",
             dispatch_class="llm",
@@ -70,7 +70,7 @@ async def test_delegate_running_collision_denies_without_new_task(session_dir):
     c = _silent_coordinator(session_dir)
     try:
         await c.tasks.create_or_return_existing(
-            kind="long_running",
+            kind="target_analysis",
             params={"x": 1},
             idempotency_key="dup-key-run",
             dispatch_class="llm",
@@ -96,6 +96,7 @@ async def test_delegate_source_patch_without_git_root_prunes_without_retry(sessi
     try:
         c.shared_state.framework = "sglang"
         c.shared_state.framework_repo_path = ""
+        c.shared_state.phase = "FRAMEWORK_AGENT"
         await c.router.handle_delegate(
             "orchestration",
             _delegate(
@@ -126,7 +127,7 @@ async def test_delegate_fallback_key_uses_tick_and_content_fingerprint(session_d
         assert len(queued) == 1
         key = queued[0].idempotency_key
         assert re.match(
-            r"^orchestration:long_running:t42:[0-9a-f]{10}$",
+            r"^orchestration:target_analysis:t42:[0-9a-f]{10}$",
             key,
         )
     finally:
@@ -271,11 +272,11 @@ async def test_successful_delegate_resets_policy_denial_streak(session_dir):
             "orchestration",
             intent,
             pd,
-            action_name="long_running",
+            action_name="target_analysis",
         )
-        assert c.shared_state.policy_denial_streak.get("long_running:duplicate_idempotency_key") == 1
+        assert c.shared_state.policy_denial_streak.get("target_analysis:duplicate_idempotency_key") == 1
         await c.router.handle_delegate("orchestration", _delegate(key="fresh-key"))
-        assert not any(k.startswith("long_running:") for k in c.shared_state.policy_denial_streak)
+        assert not any(k.startswith("target_analysis:") for k in c.shared_state.policy_denial_streak)
     finally:
         await c.stop()
 

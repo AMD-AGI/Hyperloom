@@ -45,6 +45,7 @@ from ..state.shared_state import (
     inject_stack_base_params,
     is_valid_escalate_hint,
 )
+from ..state.analysis_failures import remember_trace_failure
 from ..state.experience_citations import merge_citations, normalize_citations, shown_ids
 from ..state.task_registry import IllegalTransition, TaskNotFound
 from hyperloom.inference_optimizer.trace.trajectory_trace import (
@@ -1077,6 +1078,13 @@ class IntentRouter(CoordinatorCollaborator):
         self.shared_state.record_action_failure(action=kind, task_id=request_msg_id, result=result)
         self.shared_state.save(self.session_dir)
 
+    def _record_trace_analyze_outcome(self, payload: dict[str, Any], result: dict[str, Any]) -> None:
+        """Cache a successful analysis of a trace, or remember a failure the same trace reproduces."""
+        if result.get("status") in ("ok", "succeeded"):
+            self.shared_state.record_trace_analyze(payload, result)
+        else:
+            remember_trace_failure(self.shared_state, payload, result)
+
     def _record_trace_analyze_on_timeline(
         self,
         *,
@@ -1309,9 +1317,9 @@ class IntentRouter(CoordinatorCollaborator):
             )
             if str(result.get("status", "")).lower() in ("failed", "error"):
                 self._record_request_failure(kind=kind, request_msg_id=request_msg.msg_id, result=result)
-            # Cache trace_analyze output (successful runs only).
-            if kind == "trace_analyze" and cache_hit_source is None and result.get("status") in ("ok", "succeeded"):
-                self.shared_state.record_trace_analyze(merged_payload, result)
+            # Cache a successful trace_analyze, or remember a failure the same trace reproduces.
+            if kind == "trace_analyze" and cache_hit_source is None:
+                self._record_trace_analyze_outcome(merged_payload, result)
                 self.shared_state.save(self.session_dir)
             if kind == "trace_analyze":
                 self._record_trace_analyze_on_timeline(

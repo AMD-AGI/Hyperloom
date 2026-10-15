@@ -25,6 +25,7 @@ def _build_coord(tmp_path: Path, *, gpu_capacity: int) -> Coordinator:
 
     state = SharedState(session_id="ws2-lane")
     state.gpu_specialist_capacity = gpu_capacity
+    state.phase = "FRAMEWORK_AGENT"  # where the orchestrator may delegate a specialist
     state.save(tmp_path)
 
     idle = ScriptedPlan(turns=[MockTurn(intents=[])])

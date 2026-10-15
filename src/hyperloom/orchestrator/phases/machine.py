@@ -24,6 +24,15 @@ _BUDGET_EXIT_STOP_REASONS = {
     "sweep_budget_cap": "time_exhausted",
 }
 
+# The FRAMEWORK_AGENT exit reason for a plateau or an LLM hint; budget and terminal exits never wait.
+_LEVERAGE_EXIT_REASON = "optimize_no_more_leverage"
+
+
+def is_leverage_exit(next_phase: tuple[str, str, dict[str, Any]]) -> bool:
+    """Whether a FRAMEWORK_AGENT transition is the plateau or LLM-hint exit, the one operator work may hold."""
+    _target, reason, evidence = next_phase
+    return _LEVERAGE_EXIT_REASON in (reason, str((evidence or {}).get("passed_through_reason") or ""))
+
 
 @dataclass(frozen=True)
 class Transition:
@@ -191,6 +200,26 @@ class MachinePhase(CoordinatorCollaborator):
         if not state.stop_reason:
             state.set_stop_reason(_BUDGET_EXIT_STOP_REASONS.get(reason, reason), strict=True)
 
+    async def _next_phase(
+        self, *, optimize_enabled: bool, enablement_in_flight: bool, kernel_work_in_flight: bool
+    ) -> tuple[str, str, dict[str, Any]] | None:
+        """The transition the predicates ask for, held while the operator-defined specialist's work is pending."""
+        state = self.shared_state
+        next_phase = _phase_state.compute_next_phase(
+            state,
+            kernel_enabled=self.kernel_enabled(),
+            optimize_enabled=optimize_enabled,
+            enablement_enabled=self._coord.enablement_lane.enablement_admitted(),
+            enablement_in_flight=enablement_in_flight,
+            kernel_work_in_flight=kernel_work_in_flight,
+        )
+        if next_phase is None or str(state.phase or "").upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
+            return next_phase
+        if not is_leverage_exit(next_phase) or not await self._coord.phase_framework.operator_work_pending():
+            return next_phase
+        log.info("phase_machine: holding %s exit (reason=%s) for operator work", state.phase, next_phase[1])
+        return None
+
     async def advance_phase_if_needed(self) -> None:
         """Scan exit conditions and transition phase at most once per tick."""
         state = self.shared_state
@@ -207,11 +236,8 @@ class MachinePhase(CoordinatorCollaborator):
         in_enablement = str(state.phase or "").upper() == _phase_state.PHASE_ENABLEMENT
         await self._release_holds_no_task_will_settle()
         enablement_in_flight = in_enablement and await self._coord.enablement_lane.enablement_in_flight()
-        next_phase = _phase_state.compute_next_phase(
-            state,
-            kernel_enabled=self.kernel_enabled(),
+        next_phase = await self._next_phase(
             optimize_enabled=optimize_enabled,
-            enablement_enabled=self._coord.enablement_lane.enablement_admitted(),
             enablement_in_flight=enablement_in_flight,
             kernel_work_in_flight=kernel_facts.agent_in_flight,
         )

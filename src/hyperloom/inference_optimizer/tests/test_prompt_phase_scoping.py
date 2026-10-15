@@ -154,6 +154,19 @@ def test_baseline_recovery_detail_only_in_prelude(registry):
         assert BASELINE_FINGERPRINT in failure_ref.read_text(encoding="utf-8")
 
 
+def test_the_stop_step_asks_for_report_only_where_the_phase_admits_it(registry):
+    """Outside CLOSE a proposed ``report`` is refused at admission, so the prompt must not ask for one."""
+    for phase in _ps.PHASE_NAMES:
+        asks = "propose `report` once" in _build(registry, phase)
+        assert asks == ("report" in _ps.allowed_actions_for(phase)), phase
+
+
+def test_the_report_catalogue_entry_names_the_only_phase_that_admits_it(registry):
+    """The catalogue entry renders in every phase, so it must not invite a ``report`` the phase refuses."""
+    assert [phase for phase in _ps.PHASE_NAMES if "report" in _ps.allowed_actions_for(phase)] == [_ps.PHASE_CLOSE]
+    assert "only in CLOSE" in registry["report"].description
+
+
 def test_specialist_dispatch_prose_only_in_explore(registry):
     """How to shape a dispatch matters only where the LLM can emit one."""
     for phase in _ps.PHASE_NAMES:
