@@ -41,9 +41,12 @@ from hyperloom.orchestrator.actions.executors.explore import (
     plan_round,
 )
 from hyperloom.orchestrator.actions.executors.launch_change import (
+    BaseLaunch,
     LaunchChange,
+    evidence_launch,
     launch_change,
-    stack_launch_evidence,
+    recorded_launch,
+    round_base,
 )
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.common.env import is_truthy
@@ -199,9 +202,9 @@ def _variant(args: str = _RESTATES_ARGV, **fields: object) -> GridVariant:
     return GridVariant(_CANDIDATE, extra_server_args=args, **fields)
 
 
-def _change(variant: GridVariant, stack_launch: object) -> LaunchChange:
+def _change(variant: GridVariant, stack_launch: dict) -> LaunchChange:
     return launch_change(
-        stack_launch,
+        evidence_launch(stack_launch),
         "sglang",
         extra_args=variant.extra_server_args,
         extra_envs=variant.extra_envs,
@@ -304,14 +307,36 @@ def test_a_stack_revalidation_runs_although_it_restates_the_stack():
     revalidation.provenance = STACK_REVALIDATE_SOURCE  # type: ignore[attr-defined]
     runnable, skipped = plan_round(
         [revalidation],
-        stack_launch=_stack_launch(),
+        recorded=evidence_launch(_stack_launch()),
         framework="sglang",
+        config_envs={**_RECIPE_ENV, **_BASE_ARGS_ENV},
+        base_extra_args="",
+        base_extra_envs={},
         base_remove_args=[],
         base_unset_envs=[],
         base_args_mode="append",
     )
     assert [gv.name for gv in runnable] == [_CANDIDATE]
     assert skipped == []
+
+
+def _round_base(**fields: object) -> BaseLaunch:
+    inputs = {
+        "config_envs": {**_RECIPE_ENV, **_BASE_ARGS_ENV},
+        "extra_args": "",
+        "extra_envs": {},
+        "remove_args": [],
+        "unset_envs": [],
+        "args_mode": "append",
+        **fields,
+    }
+    return round_base(evidence_launch(_stack_launch()), "sglang", **inputs)
+
+
+def test_the_engine_record_describes_a_round_base_only_when_it_launches_the_recorded_args():
+    """The engine was observed running the recorded launch, not a round base that adds to it."""
+    assert _round_base().resolved == _stack_config()
+    assert _round_base(extra_args="--chunked-prefill-size 8192").resolved == {}
 
 
 def test_variants_with_one_effect_share_a_change_key():
@@ -347,9 +372,9 @@ def test_the_engines_own_record_is_what_the_change_is_judged_on(tmp_path):
     # chaojhou 4: last_baseline is an attempt entry that never carries launch_evidence,
     # so a stack with no current best has no launch to judge against.
     no_current_best = SimpleNamespace(current_best_measurement={}, last_baseline={"launch_evidence": evidence})
-    assert stack_launch_evidence(no_current_best) == {}
+    assert recorded_launch(no_current_best) == BaseLaunch(inherited_args="")
 
-    stack = stack_launch_evidence(SimpleNamespace(current_best_measurement={"launch_evidence": evidence}))
+    stack = evidence
     assert _change(_variant(_RESTATES_ARGV), stack) == _NO_CHANGE
     # A different value is a change, and so is a setting the engine never reported:
     # absence from the record is unknown, not equal.
@@ -580,20 +605,18 @@ async def test_explore_executor_keeps_and_reverts_per_variant(sub_agent_runner, 
     assert rejected_provenance == {"llm_direct"}
 
 
-@pytest.mark.asyncio
-async def test_explore_benches_only_what_changes_the_running_launch(sub_agent_runner, tmp_path):
-    """A row restating the stack's flags is not benched, and two rows with one effect are benched once."""
+async def _bench_round(
+    sub_agent_runner, tmp_path, *, base_args: str, recorded: dict, grid: list[dict], **params: object
+) -> tuple[list[str], dict]:
+    """Run one explore round on a base config passing ``base_args``; return the benched slots and the result."""
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
     _write_baseline_yaml(base)
+    cfg = yaml.safe_load(base.read_text(encoding="utf-8"))
+    cfg["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"] = base_args
+    base.write_text(yaml.safe_dump(cfg), encoding="utf-8")
     state = SharedState()
-    state.current_best_measurement = {
-        "launch_evidence": {
-            "framework": "sglang",
-            "requested_server_args": "--mem-fraction-static 0.9 --max-running-requests 512",
-            "requested_server_env": {},
-        }
-    }
+    state.current_best_measurement = {"launch_evidence": {"requested_server_env": {}, **recorded}}
     sub.shared_state = state
     benched: list[str] = []
 
@@ -603,16 +626,16 @@ async def test_explore_benches_only_what_changes_the_running_launch(sub_agent_ru
         _fake_workspace(slot, tput=800.0)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    grid = [
-        {"name": "restates-requests", "extra_args": "--max-running-requests 512"},
-        {"name": "chunk", "extra_args": "--chunked-prefill-size 4096"},
-        {"name": "restates-mem", "extra_args": "--mem-fraction-static 0.9"},
-        {"name": "chunk-restating-mem", "extra_args": "--mem-fraction-static 0.9 --chunked-prefill-size 4096"},
-    ]
     task = await tr.create(
         kind="explore",
-        params={"config_path": str(base), "output_dir": str(tmp_path / "out"), "base_tput": 800.0, "grid": grid},
-        idempotency_key="ex-restates",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "out"),
+            "base_tput": 800.0,
+            "grid": grid,
+            **params,
+        },
+        idempotency_key="ex-round",
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
@@ -620,14 +643,53 @@ async def test_explore_benches_only_what_changes_the_running_launch(sub_agent_ru
         side_effect=_fake_run,
     ):
         res = await sub.run_task(task)
-
     assert res.state == "succeeded"
-    assert sorted(set(benched)) == ["variant_00_chunk"]
-    assert [(row["name"], row["reason"]) for row in res.result["skipped_dup"]] == [
+    return sorted(set(benched)), res.result
+
+
+@pytest.mark.asyncio
+async def test_explore_benches_only_what_changes_the_running_launch(sub_agent_runner, tmp_path):
+    """A row restating the stack's flags is not benched, and two rows with one effect are benched once."""
+    stack_args = "--mem-fraction-static 0.9 --max-running-requests 512"
+    benched, result = await _bench_round(
+        sub_agent_runner,
+        tmp_path,
+        base_args=stack_args,
+        recorded={"requested_server_args": stack_args},
+        grid=[
+            {"name": "restates-requests", "extra_args": "--max-running-requests 512"},
+            {"name": "chunk", "extra_args": "--chunked-prefill-size 4096"},
+            {"name": "restates-mem", "extra_args": "--mem-fraction-static 0.9"},
+            {"name": "chunk-restating-mem", "extra_args": "--mem-fraction-static 0.9 --chunked-prefill-size 4096"},
+        ],
+    )
+    assert benched == ["variant_00_chunk"]
+    assert [(row["name"], row["reason"]) for row in result["skipped_dup"]] == [
         ("restates-requests", "baseline_noop"),
         ("restates-mem", "baseline_noop"),
         ("chunk-restating-mem", "round_dup"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_explore_judges_rows_on_the_round_base_not_the_current_best(sub_agent_runner, tmp_path):
+    """A round composing onto its own base_extra_args launches rows the current best's record would merge."""
+    benched, result = await _bench_round(
+        sub_agent_runner,
+        tmp_path,
+        base_args="",
+        recorded={
+            "requested_server_args": "--mem-fraction-static 0.9",
+            "observed_server_config": {"mem_fraction_static": 0.9},
+        },
+        grid=[
+            {"name": "lpm", "extra_args": "--schedule-policy lpm"},
+            {"name": "lpm-plus-mem", "extra_args": "--schedule-policy lpm --mem-fraction-static 0.9"},
+        ],
+        base_extra_args="--chunked-prefill-size 8192",
+    )
+    assert benched == ["variant_00_lpm", "variant_00_lpm-plus-mem"]
+    assert result["skipped_dup"] == []
 
 
 @pytest.mark.asyncio

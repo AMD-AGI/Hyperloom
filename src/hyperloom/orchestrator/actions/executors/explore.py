@@ -66,7 +66,7 @@ from ._grid_base import (
     TS_SKIPPED_DEDUP,
 )
 from .benchmark_result import double_run_requested
-from .launch_change import launch_change, stack_launch_evidence
+from .launch_change import BaseLaunch, launch_change, recorded_launch, round_base
 from ._grid_runner import (
     DEFAULT_KEEP_THRESHOLD_PCT,
     _MN_BACKENDS_PRIORITY,
@@ -419,17 +419,30 @@ def _remeasures_on_purpose(variant: GridVariant) -> bool:
 def plan_round(
     grid: list[GridVariant],
     *,
-    stack_launch: Mapping[str, Any],
+    recorded: BaseLaunch,
     framework: str,
+    config_envs: Mapping[str, Any],
+    base_extra_args: str,
+    base_extra_envs: Mapping[str, Any],
     base_remove_args: list[str],
     base_unset_envs: list[str],
     base_args_mode: str,
 ) -> tuple[list[GridVariant], list[dict[str, Any]]]:
     """The variants to bench, plus a skip row for each that changes nothing or repeats another's change.
 
-    A variant is judged by what it changes about the launch the stack is running, so a restatement of the
-    stack is not benched and variants that differ only in restated flags are benched once.
+    A variant is judged by what it changes about the base this round composes it onto, so a restatement of
+    that base is not benched and variants that differ only in restated flags are benched once.
     """
+    base = round_base(
+        recorded,
+        framework,
+        config_envs=config_envs,
+        extra_args=base_extra_args,
+        extra_envs=base_extra_envs,
+        remove_args=base_remove_args,
+        unset_envs=base_unset_envs,
+        args_mode=base_args_mode,
+    )
     runnable: dict[str, GridVariant] = {}
     skipped: list[dict[str, Any]] = []
     for gv in grid:
@@ -444,7 +457,7 @@ def plan_round(
         gv.canonical_fp = fp  # type: ignore[attr-defined]
         row = {"name": gv.name, "fingerprint": fp}
         change = launch_change(
-            stack_launch,
+            base,
             framework,
             extra_args=gv.extra_server_args,
             extra_envs=gv.extra_envs,
@@ -754,8 +767,11 @@ class ExploreExecutor:
 
         runnable, skipped_dup = plan_round(
             grid,
-            stack_launch=stack_launch_evidence(ss),
+            recorded=recorded_launch(ss),
             framework=framework,
+            config_envs=_yaml_envs,
+            base_extra_args=base_extra_args,
+            base_extra_envs=base_extra_envs,
             base_remove_args=base_remove_args,
             base_unset_envs=base_unset_envs,
             base_args_mode=base_args_mode,
