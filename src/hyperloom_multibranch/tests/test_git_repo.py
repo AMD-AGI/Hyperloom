@@ -101,6 +101,15 @@ async def test_the_repo_refuses_unknown_commits_and_branches(repo):
         await repo.create_branch("s1", root)
 
 
+async def test_only_a_full_commit_id_names_a_commit(repo):
+    root = await repo.head(INTEGRATION_BRANCH)
+    for name in (INTEGRATION_BRANCH, root[:7], f"{root}~0"):
+        with pytest.raises(KeyError):
+            await repo.read_recipe(name)
+        with pytest.raises(KeyError):
+            await repo.create_branch("s1", name)
+
+
 async def test_an_inherited_git_dir_never_redirects_the_session_repository(tmp_path, monkeypatch):
     decoy = await GitExperimentRepo.create(tmp_path / "decoy.git", BASELINE)
     decoy_root = await decoy.head(INTEGRATION_BRANCH)

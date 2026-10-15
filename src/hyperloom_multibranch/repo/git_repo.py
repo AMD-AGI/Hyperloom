@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,6 +19,8 @@ from hyperloom_multibranch.contracts.repo import BranchMoved
 RECIPE_FILE = "recipe.json"
 _UPDATE_REF = "update-ref"
 _NO_COMMIT = "0" * 40
+# The notebook knows a state only by its full commit id; git would also resolve a branch name or a short id.
+_COMMIT_ID = re.compile(r"[0-9a-f]{40}")
 # Plumbing on a local bare repository takes milliseconds; this only bounds a wedged filesystem.
 GIT_TIMEOUT_S = 60.0
 # Session commits carry this identity whoever runs the session, so the operator's git config never decides it.
@@ -112,7 +115,7 @@ class GitExperimentRepo:
         return await self._git("commit-tree", "--no-gpg-sign", *parent_args, "-m", message, tree)
 
     async def _commit_of(self, commit: str) -> str:
-        resolved = await self._resolve(f"{commit}^{{commit}}")
+        resolved = await self._resolve(f"{commit}^{{commit}}") if _COMMIT_ID.fullmatch(commit) else None
         if resolved is None:
             raise KeyError(commit)
         return resolved
