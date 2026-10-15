@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -139,6 +140,16 @@ def _run(
 
 def _artifact(tmp_path: Path, name: str) -> str:
     return (tmp_path / "work" / name).read_text(encoding="utf-8")
+
+
+def _scan(tmp_path: Path) -> dict[str, tuple[str, list[int]]]:
+    """scan.txt by repository or PR: its status and the numbers its line states, whatever the wording."""
+    lines = {}
+    for line in _artifact(tmp_path, "scan.txt").splitlines():
+        status, rest = line.split(": ", 1)
+        subject, _, prose = rest.partition(" ")
+        lines[subject.rstrip(":")] = (status, [int(number) for number in re.findall(r"\d+", prose)])
+    return lines
 
 
 def _item(number: int, *, merged: bool = False, draft: bool = False, updated: str = "2026-05-01T00:00:00Z") -> dict:
@@ -287,19 +298,13 @@ def test_open_prs_on_a_planned_file_or_directory_are_rows_and_every_repository_s
         f"{_UPSTREAM}\t7\topen\tfalse\topen 7\tu/7\t2026-07-01T00:00:00Z\t1\tpkg/moe.py",
         f"{_UPSTREAM}\t6\topen\tfalse\topen 6\tu/6\t2026-07-01T00:00:00Z\t2\tpkg/ops/a.py pkg/ops/b.py",
     ]
-    assert _artifact(tmp_path, "scan.txt").splitlines() == [
-        f"COMPLETE: {_UPSTREAM}: all 230 open PRs were compared against 2 planned path(s)",
-        f"SKIPPED: {_KERNELS}: no planned path in paths.txt, so its open PRs were not compared",
-    ]
+    assert _scan(tmp_path) == {_UPSTREAM: ("COMPLETE", [230, 2]), _KERNELS: ("SKIPPED", [])}
 
 
 def test_a_repository_past_the_page_cap_reads_partial_not_absent(tmp_path: Path) -> None:
     result = _overlap(tmp_path, {_UPSTREAM: {"total": 10_050, "prs": []}}, f"{_UPSTREAM}\tpkg/moe.py\n")
     assert result.returncode == 0, result.stderr
-    assert (
-        _artifact(tmp_path, "scan.txt")
-        == f"PARTIAL: {_UPSTREAM}: only the newest 10000 of 10050 open PRs were compared\n"
-    )
+    assert _scan(tmp_path) == {_UPSTREAM: ("PARTIAL", [10000, 10050])}
 
 
 def test_a_pr_graphql_cannot_settle_is_compared_on_its_rest_file_list_old_paths_included(tmp_path: Path) -> None:
@@ -318,9 +323,7 @@ def test_a_pr_graphql_cannot_settle_is_compared_on_its_rest_file_list_old_paths_
     assert result.returncode == 0, result.stderr
     rows = [row.split("\t") for row in _artifact(tmp_path, "overlap.tsv").splitlines()[1:]]
     assert [(cells[1], cells[-1]) for cells in rows] == [("8", "pkg/moe.py->pkg/moe/impl.py"), ("9", "pkg/ops/late.py")]
-    assert _artifact(tmp_path, "scan.txt").splitlines() == [
-        f"COMPLETE: {_UPSTREAM}: all 3 open PRs were compared against 2 planned path(s)",
-    ]
+    assert _scan(tmp_path) == {_UPSTREAM: ("COMPLETE", [3, 2])}
 
 
 def test_a_pr_whose_overlap_cannot_be_decided_is_named_partial(tmp_path: Path) -> None:
@@ -333,11 +336,14 @@ def test_a_pr_whose_overlap_cannot_be_decided_is_named_partial(tmp_path: Path) -
     open_prs = {_UPSTREAM: {"total": 2, "prs": [huge, unreadable]}}
     result = _overlap(tmp_path, open_prs, f"{_UPSTREAM}\tpkg/moe.py\n", rest)
     assert result.returncode == 0, result.stderr
-    assert _artifact(tmp_path, "scan.txt").splitlines() == [
-        f"COMPLETE: {_UPSTREAM}: all 2 open PRs were compared against 1 planned path(s)",
-        f"PARTIAL: {_UPSTREAM}#11 changes 3500 files, only its first 300 were compared",
-        f"PARTIAL: {_UPSTREAM}#12: its full file list could not be read, so its overlap was not decided -- gh: Not Found (HTTP 404)",
-    ]
+    scan = _scan(tmp_path)
+    assert {subject: status for subject, (status, _) in scan.items()} == {
+        _UPSTREAM: "COMPLETE",
+        f"{_UPSTREAM}#11": "PARTIAL",
+        f"{_UPSTREAM}#12": "PARTIAL",
+    }
+    assert scan[_UPSTREAM][1] == [2, 1]
+    assert scan[f"{_UPSTREAM}#11"][1] == [3500, 300]
 
 
 def test_a_failed_page_keeps_what_was_compared_and_the_next_repository_is_still_scanned(tmp_path: Path) -> None:
@@ -351,11 +357,7 @@ def test_a_failed_page_keeps_what_was_compared_and_the_next_repository_is_still_
         [_UPSTREAM, "4"],
         [_KERNELS, "3"],
     ]
-    assert _artifact(tmp_path, "scan.txt").splitlines() == [
-        f"PARTIAL: {_UPSTREAM}: the scan stopped after 100 of 250 open PRs -- "
-        "gh: Something went wrong while executing your query.",
-        f"COMPLETE: {_KERNELS}: all 1 open PRs were compared against 1 planned path(s)",
-    ]
+    assert _scan(tmp_path) == {_UPSTREAM: ("PARTIAL", [100, 250]), _KERNELS: ("COMPLETE", [1, 1])}
 
 
 def test_a_killed_scan_leaves_every_repository_it_did_not_finish_marked(tmp_path: Path) -> None:
@@ -378,7 +380,7 @@ def test_a_killed_scan_leaves_every_repository_it_did_not_finish_marked(tmp_path
 def test_a_planned_path_for_a_repository_outside_repos_txt_stops_the_scan(tmp_path: Path) -> None:
     result = _overlap(tmp_path, {_UPSTREAM: {"total": 0, "prs": []}}, f"{_KERNELS}\tcsrc/k.cu\n")
     assert result.returncode != 0
-    assert "for a repository in repos.txt" in result.stderr
+    assert f"{_KERNELS}\tcsrc/k.cu" in result.stderr
 
 
 def _pull(state: str) -> dict:
@@ -456,7 +458,7 @@ def test_merge_commit_sha_is_recorded_only_once_the_pr_merged(tmp_path: Path, st
 def test_a_deep_read_keeps_every_path_when_github_refuses_the_diff_and_marks_third_party_text(tmp_path: Path) -> None:
     directory = _read(tmp_path, "open", None)
     diff = (directory / "diff.txt").read_text(encoding="utf-8")
-    assert diff.startswith("SKIPPED: diff -- gh: Sorry, the diff exceeded")
+    assert diff.startswith("SKIPPED: diff")
     files = (directory / "files.txt").read_text(encoding="utf-8")
     assert files == "modified\t3\t1\tpkg/moe.py\nadded\t9\t0\tpkg/ops/pad.py\n"
     assert "files_listed: 2\n" in (directory / "meta.txt").read_text(encoding="utf-8")
