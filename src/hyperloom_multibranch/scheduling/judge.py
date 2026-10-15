@@ -24,7 +24,7 @@ from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.llm import Completion, CompletionFailed
 from hyperloom_multibranch.scheduling.roster import BranchEntry, BranchKind, RosterCaps
 
-JUDGE_PROMPT_VERSION = "mb1-judge-2"
+JUDGE_PROMPT_VERSION = "mb1-judge-3"
 
 _KEY_OPEN = "open"
 _KEY_OPEN_K = "open_k"
@@ -41,6 +41,9 @@ how many branches to open (only when the view says opening is true), each branch
 included), which specialist branches to stop and why, and whether the whole session should stop early.
 Spend the budget where the expected gain is highest: a branch whose frontier expected_gain_pct is low and that is not
 observing a slow-paying direction is a candidate to stop or to lower K; keep K where the gain is high.
+A branch's basis says what its expected gain rests on: its own trend, a prior from similar past sessions, the floor
+of a direction still being observed, the floor of a branch too new to have a trend, or the roofline headroom that
+capped it; trust a measured trend over a floor.
 Stop the session only when no branch is expected to gain anything worth the remaining time.
 Answer with exactly ONE JSON object and nothing after it."""
 
@@ -127,6 +130,8 @@ def _progress_row(progress: BranchProgress | None) -> dict[str, object]:
     if progress.frontier is not None:
         row["expected_gain_pct"] = progress.frontier.expected_gain_pct
         row["components"] = dict(progress.frontier.components)
+        if progress.frontier.basis is not None:
+            row["basis"] = progress.frontier.basis.value
     return row
 
 

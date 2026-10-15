@@ -42,6 +42,7 @@ from hyperloom_multibranch.notebook.tests.factories import delta, intent
 from hyperloom_multibranch.scheduling.budget import SessionBudget
 from hyperloom_multibranch.scheduling.exports import SessionExports
 from hyperloom_multibranch.scheduling.final import INTEGRATION_LABEL
+from hyperloom_multibranch.scheduling.judge import JUDGE_PROMPT_VERSION
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
 from hyperloom_multibranch.scheduling.lifecycle import CUT_SHORT, Session, SessionOutcome
 from hyperloom_multibranch.scheduling.llm import CompletionFailed
@@ -310,7 +311,7 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
     assert lineage.commit(root) is not None and (await stage.repo.read_recipe(root)).components
     assert (await observer.session_profile()).session_id == stage.layout.session_id
     [fingerprint] = await observer.manifest_fingerprints()
-    assert fingerprint.policy_versions["judge_prompt"] == "mb1-judge-2"
+    assert fingerprint.policy_versions["judge_prompt"] == JUDGE_PROMPT_VERSION
     assert dict(fingerprint.sockets) == socket_versions()
 
     fix = await stage.repo.head("b03")

@@ -6,12 +6,14 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import BranchProgress, FrontierScore
+from hyperloom_multibranch.contracts.notebook.vocab import FrontierBasis
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.judge import (
     JUDGE_SYSTEM_PROMPT,
@@ -111,6 +113,20 @@ def test_prompt_shows_frontier_roster_caps_budget_and_headroom() -> None:
     assert state["session_remaining_seconds"] == 4000
     assert state["integration"]["headroom_pct"] == 75.0
     assert '"stop_session"' in prompt and "ONE JSON object" in JUDGE_SYSTEM_PROMPT
+
+
+def test_a_branch_row_names_what_its_expected_gain_rests_on() -> None:
+    view = _view()
+    [progress] = view.progress
+    scored = replace(progress, frontier=replace(progress.frontier, basis=FrontierBasis.NEW))
+
+    def b01_row(rendered: JudgeView) -> dict[str, object]:
+        prompt = render_prompt(rendered)
+        state = json.loads(prompt[prompt.index("{") : prompt.index("\n\nReply with")])
+        return next(row for row in state["branches"] if row["branch"] == "b01")
+
+    assert b01_row(replace(view, progress=(scored,)))["basis"] == "new"
+    assert "basis" not in b01_row(view)
 
 
 def test_prompt_carries_the_archive_digest_only_when_there_is_one() -> None:
