@@ -21,7 +21,7 @@ from hyperloom.contracts.measurement import (
     TestKind,
     TestRequest,
 )
-from hyperloom_multibranch.contracts.toolbox import Backpressure, QueueState
+from hyperloom_multibranch.contracts.toolbox import Backpressure, QueueState, RequestRejected
 
 _LOWEST_PRIORITY = 4
 
@@ -42,6 +42,7 @@ DEFAULT_PRIORITY: Mapping[Purpose, int] = {
 DEFAULT_QUEUE_FACTOR = 4
 DEFAULT_K = 2
 DEFAULT_K_KEY = "*"
+BRANCH_STOPPED = "branch_stopped"
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,10 @@ class QueuePolicy:
 
     priority_override maps a purpose's value to a priority and applies to requests that name none.
     max_queued_per_branch is the backpressure limit; None means DEFAULT_QUEUE_FACTOR times K.
+
+    ``listed_branches_only`` makes ``branch_k`` the list of branches that may submit at all: a request of a branch
+    not in it is refused as ``branch_stopped`` (the scheduler gives every running branch a K and takes it away when it
+    stops the branch). The default False keeps ``per_branch_k`` as the K of every branch not listed.
     """
 
     per_branch_k: int | Mapping[str, int] = 2
@@ -60,6 +65,7 @@ class QueuePolicy:
     priority_override: Mapping[str, int] = field(default_factory=dict)
     max_queued_per_branch: int | None = None
     branch_k: Mapping[str, int] = field(default_factory=dict)
+    listed_branches_only: bool = False
 
     def __post_init__(self) -> None:
         if isinstance(self.per_branch_k, Mapping):
@@ -157,6 +163,10 @@ class WorkQueue:
             for item in self._items.values()
             if item.state is State.QUEUED and item.branch == branch and not exempt_from_k(item.request)
         )
+
+    def check_branch_listed(self, request: TestRequest) -> None:
+        if self.policy.listed_branches_only and request.branch_id not in self.policy.branch_k:
+            raise RequestRejected(f"branch {request.branch_id!r} has no quota", code=BRANCH_STOPPED)
 
     def check_backpressure(self, request: TestRequest) -> None:
         if exempt_from_k(request):

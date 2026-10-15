@@ -7,6 +7,7 @@ import pytest
 
 from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom_multibranch.contracts.toolbox import Backpressure
+from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.toolbox.queue import QueuedTest, QueuePolicy, WorkQueue, exempt_from_k, sandbox_priority
 from hyperloom_multibranch.toolbox.tests.helpers import req
 
@@ -160,3 +161,15 @@ def test_the_queue_applies_each_branchs_own_k_and_backpressure_limit() -> None:
         running[item.branch] += item.state.value == "running"
     assert running == {"wide": 2, "narrow": 1}
     assert queue.policy.queue_limit_for("wide") == 8 and queue.policy.queue_limit_for("narrow") == 4
+
+
+def test_a_listed_only_policy_refuses_a_branch_that_has_no_quota() -> None:
+    queue = _queue(branch_k={"b1": 2}, listed_branches_only=True)
+    queue.check_branch_listed(req("b1"))
+    with pytest.raises(RequestRejected) as refused:
+        queue.check_branch_listed(req("b2"))
+    assert refused.value.code == "branch_stopped"
+
+
+def test_without_the_listed_only_flag_an_unlisted_branch_runs_at_the_default_k() -> None:
+    _queue(branch_k={"b1": 2}).check_branch_listed(req("b2"))

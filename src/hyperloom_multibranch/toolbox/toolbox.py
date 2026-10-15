@@ -138,6 +138,7 @@ class RealToolbox:
         async with self._lock:
             request = self._acceptance.with_required_accuracy(request)
             prepared = await self._acceptance.prepare(request)
+            self._queue.check_branch_listed(request)
             self._queue.check_backpressure(request)
             priority = self._queue.policy.priority_of(request)
             sequence = self._log.next_sequence(request.branch_id)
