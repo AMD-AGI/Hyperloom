@@ -5,13 +5,8 @@
 # Step 3 of the check-prior-art skill: find the open pull requests that touch a planned path.
 #
 # usage: overlap.sh WORK
-# Reads WORK/repos.txt and WORK/paths.txt (owner/name, a tab, then a path in that repository;
-# a path ending in / covers every file under it). Writes WORK/overlap.tsv, one row per open
-# pull request that changes a planned path, and WORK/scan.txt: a PARTIAL line per pull request
-# whose overlap could not be decided, and, when a repository's scan ends, one line saying
-# whether every open pull request there was compared (COMPLETE), which were not (PARTIAL), or
-# why none were (SKIPPED). An empty overlap.tsv means "no overlap" only where scan.txt says
-# COMPLETE.
+# Reads WORK/repos.txt and WORK/paths.txt, and writes WORK/overlap.tsv and WORK/scan.txt as Step 3
+# of SKILL.md describes. An empty overlap.tsv means "no overlap" only where scan.txt says COMPLETE.
 
 set -euo pipefail
 
