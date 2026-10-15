@@ -2,12 +2,13 @@
 # SPDX-License-Identifier: MIT
 
 import asyncio
+from dataclasses import replace
 
 import pytest
 
 from hyperloom.common.accuracy import ACCURACY_METRICS
 from hyperloom.common.perf_metric import GRADED_OUTPUT
-from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest, Validity
+from hyperloom.contracts.measurement import AttachmentRef, Purpose, TestKind, TestRequest, Validity
 from hyperloom.contracts.recipe import LaunchConfig, Recipe, RecipeDelta
 from hyperloom_multibranch.contracts.fork import Admission, AdmissionStatus
 from hyperloom_multibranch.contracts.judgement import ACCURACY_SCORE, Verdict
@@ -127,6 +128,15 @@ async def test_a_gain_is_retested_on_another_node_and_lands_on_its_branch(sessio
     assert (await session.runtime.record(retest.request_id)).result.sandbox.node_name != first_node
 
 
+async def test_the_retest_carries_the_files_the_candidate_was_measured_with(session):
+    attached = (AttachmentRef("tuned-moe-config", "file", "a" * 64),)
+    await session.toolbox.submit_test(replace(_request(BRANCH, Purpose.EXPLORE, FAST), attachments=attached))
+    await session.step()
+
+    (retest,) = session.retests()
+    assert retest.attachments == attached
+
+
 async def test_a_flat_candidate_is_recorded_without_a_retest(session):
     first = await session.explore(FLAT)
     await session.step()
@@ -211,10 +221,16 @@ async def test_a_candidate_on_a_commit_the_notebook_does_not_know_does_not_stop_
     assert f"{stray} cannot be judged" in notice
 
 
-async def test_a_retest_of_another_change_does_not_settle_the_candidate(session):
+@pytest.mark.parametrize(
+    ("change", "attached"),
+    [(FAST_TOO, ()), (FAST, (AttachmentRef("other", "file", "b" * 64),))],
+    ids=["another change", "other files"],
+)
+async def test_a_retest_of_another_candidate_does_not_settle_it(session, change, attached):
     first = await session.explore(FAST)
     await session.toolbox.drain()
-    stray = await session.toolbox.submit_test(_request(BRANCH, Purpose.CONFIRM, FAST_TOO, retest_of=first))
+    other = replace(_request(BRANCH, Purpose.CONFIRM, change, retest_of=first), attachments=attached)
+    stray = await session.toolbox.submit_test(other)
     await session.step()
     await session.step()
 

@@ -63,14 +63,12 @@ class AgentXRule:
 
 
 def repeats(retest: TestRecord, first: TestRecord, rule: Rule) -> bool:
-    """Only a retest of the same change on the same parent, with the eval round the rule reads, settles a gain."""
-    asked, wanted = retest.request, first.request
-    same = (asked.parent_commit, asked.delta) == (wanted.parent_commit, wanted.delta)
-    return same and asked.accuracy == rule.accuracy_round
+    """Only a retest of the same change and files on the same parent, with the rule's eval round, settles a gain."""
+    return _candidate(retest.request) == _candidate(first.request) and retest.request.accuracy == rule.accuracy_round
 
 
 def retest_request(first: TestRecord, rule: Rule) -> TestRequest:
-    """The confirming retest of ``first``: the same change on the same parent, off the node that measured it first."""
+    """The confirming retest of ``first``: the same change and files on the same parent, off the node that measured it."""
     sandbox = _result(first).sandbox
     node = sandbox.node_name if sandbox is not None else None
     return TestRequest(
@@ -83,7 +81,12 @@ def retest_request(first: TestRecord, rule: Rule) -> TestRequest:
         avoid_nodes=(node,) if node else (),
         accuracy=rule.accuracy_round,
         concurrency=first.request.concurrency,
+        attachments=first.request.attachments,
     )
+
+
+def _candidate(request: TestRequest) -> tuple[object, ...]:
+    return request.parent_commit, request.delta, request.attachments
 
 
 def _result(record: TestRecord) -> TestResult:
