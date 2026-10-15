@@ -22,6 +22,7 @@ from hyperloom.common.provenance import detect_kineto_backend
 from hyperloom.common.timeutil import now_iso
 from ...phases.machine_state import record_lifecycle_event
 from ...loop.sub_agent_runner import RunnerContext
+from ...state.analysis_failures import remember_roofline_failure
 from hyperloom.inference_optimizer.trace.task_progress import report_progress
 from ._multi_node_env import is_multi_node
 from ..stop_attribution import ORCHESTRATOR_CANCELLED_CLASS
@@ -869,11 +870,13 @@ class RooflineExecutor:
             owns_event=not str(params.get(INLINE_EVENT_PARAM) or ""),
         )
         try:
-            return await self._execute(ctx, recorder=recorder)
+            result = await self._execute(ctx, recorder=recorder)
         except BaseException as exc:
             if recorder is not None:
                 recorder.finish_crashed(exc)
             raise
+        remember_roofline_failure(self.shared_state, params, result)
+        return result
 
     def _resolve_sink(self, ctx: RunnerContext) -> Any:
         """Decide which event this run's rows belong to."""
