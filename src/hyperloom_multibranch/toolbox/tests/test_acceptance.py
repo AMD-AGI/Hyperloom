@@ -83,7 +83,7 @@ async def test_a_valid_request_is_accepted_and_written_to_the_notebook(tmp_path:
     assert row.retest_of is not None
 
 
-# --- an InferenceX campaign runs explore and confirm with accuracy (board topic 14) -------------------------------
+# --- an InferenceX campaign runs the purposes the rule gate reads with accuracy (board topic 14) -------------------------------
 
 
 async def _accepted_accuracy(rig, request) -> tuple[bool, bool]:
@@ -107,10 +107,24 @@ async def test_an_inferencex_confirm_is_accepted_with_accuracy(tmp_path: Path) -
     assert await _accepted_accuracy(rig, req(purpose=Purpose.CONFIRM, retest_of=first)) == (True, True)
 
 
-async def test_an_inferencex_baseline_and_final_keep_the_flag_off(tmp_path: Path) -> None:
+@pytest.mark.parametrize("purpose", [Purpose.BASELINE, Purpose.INTEGRATION, Purpose.FINAL])
+async def test_an_inferencex_gate_read_purpose_is_accepted_with_accuracy(tmp_path: Path, purpose: Purpose) -> None:
     rig = build(tmp_path)
-    assert await _accepted_accuracy(rig, req(purpose=Purpose.BASELINE)) == (False, False)
-    assert await _accepted_accuracy(rig, req(purpose=Purpose.FINAL)) == (False, False)
+    assert await _accepted_accuracy(rig, req(purpose=purpose)) == (True, True)
+
+
+@pytest.mark.parametrize("purpose", [Purpose.HEALTH, Purpose.REPRO, Purpose.PROFILE])
+async def test_an_inferencex_purpose_the_gate_does_not_read_keeps_the_flag_off(
+    tmp_path: Path, purpose: Purpose
+) -> None:
+    rig = build(tmp_path)
+    assert await _accepted_accuracy(rig, req(purpose=purpose)) == (False, False)
+
+
+@pytest.mark.parametrize("purpose", [Purpose.BASELINE, Purpose.INTEGRATION, Purpose.FINAL])
+async def test_an_agentx_gate_read_purpose_is_left_as_submitted(tmp_path: Path, purpose: Purpose) -> None:
+    rig = build(tmp_path, workload_kind=WorkloadKind.AGENTX)
+    assert await _accepted_accuracy(rig, req(purpose=purpose)) == (False, False)
 
 
 async def test_an_agentx_explore_is_left_as_submitted(tmp_path: Path) -> None:

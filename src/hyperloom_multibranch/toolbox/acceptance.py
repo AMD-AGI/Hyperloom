@@ -23,7 +23,9 @@ from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import RequestRejected, WorkloadKind
 
 
-_ACCURACY_PURPOSES = (Purpose.EXPLORE, Purpose.CONFIRM)
+# Every purpose whose result the InferenceX rule gate reads an eval score from: explore and confirm are compared,
+# integration and final are checked (accuracy_passes), baseline sets the accuracy bar (write_inferencex_baseline).
+_ACCURACY_PURPOSES = (Purpose.BASELINE, Purpose.EXPLORE, Purpose.CONFIRM, Purpose.INTEGRATION, Purpose.FINAL)
 
 
 class MeasurementPlanner(Protocol):
@@ -61,7 +63,8 @@ class Acceptance:
         self._workload = workload_kind
 
     def with_required_accuracy(self, request: TestRequest) -> TestRequest:
-        """The request an InferenceX campaign runs: ``explore`` and ``confirm`` tests always carry accuracy.
+        """The request an InferenceX campaign runs: ``baseline``, ``explore``, ``confirm``, ``integration`` and
+        ``final`` tests always carry accuracy.
 
         The rule gate refuses to judge an InferenceX result that has no score, so acceptance sets the flag (the
         accepted request records it) rather than refusing. AgentX campaigns and every other purpose are unchanged.
