@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The scheduler's own processes: recorded in ``MB-pids.jsonl`` and killed with everything they started."""
+"""The session's processes, started or adopted: recorded in ``MB-pids.jsonl`` and killed with everything they started."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import asyncio
 import json
 import os
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -127,3 +128,35 @@ async def test_terminate_kills_a_descendant_that_leads_its_own_session(
     await registry.terminate(proc, grace_seconds=5.0)
 
     assert not running(server)
+
+
+async def test_an_adopted_process_is_recorded_and_killed_with_its_branch(
+    registry: ProcessRegistry, tmp_path: Path
+) -> None:
+    agent = subprocess.Popen(CHILD_WITH_GRANDCHILD, start_new_session=True)
+    try:
+        grandchildren = await _wait_for_descendants(agent.pid, 2)
+        record = registry.adopt(agent.pid, branch="b01", argv=CHILD_WITH_GRANDCHILD)
+
+        row = json.loads((tmp_path / "MB-pids.jsonl").read_text(encoding="utf-8").strip())
+        assert row["pid"] == row["pgid"] == record.pid == agent.pid and row["branch"] == "b01"
+        assert [leftover.pid for leftover in await registry.leftovers()] == [agent.pid]
+        assert await registry.kill_branch("b01")
+        assert not any(running(pid) for pid in (agent.pid, *grandchildren))
+        assert await registry.leftovers() == ()
+    finally:
+        agent.kill()
+        agent.wait()
+
+
+async def test_a_process_that_leads_no_group_of_its_own_is_not_adopted(registry: ProcessRegistry) -> None:
+    shared = subprocess.Popen(LONG_SLEEP)
+    try:
+        with pytest.raises(ValueError, match="does not lead its own process group"):
+            registry.adopt(shared.pid, branch="b01", argv=LONG_SLEEP)
+    finally:
+        shared.kill()
+        shared.wait()
+    with pytest.raises(ValueError, match="is not running"):
+        registry.adopt(shared.pid, branch="b01", argv=LONG_SLEEP)
+    assert await registry.leftovers() == ()
