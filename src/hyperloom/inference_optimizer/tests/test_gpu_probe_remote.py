@@ -44,7 +44,7 @@ class _FakeRayClient:
 
 
 def test_rayjob_probe_parses_product_name(monkeypatch):
-    # rocm-smi on the Ray head reports MI325X -> resolved to mi325x.
+    # amd-smi on the Ray head reports MI325X -> resolved to mi325x.
     monkeypatch.setattr(
         gpu_probe,
         "build_external_state_from_env",
@@ -60,7 +60,7 @@ def test_rayjob_probe_parses_product_name(monkeypatch):
 
 
 def test_infera_probe_parses_product_name(monkeypatch):
-    # SSH into the first GPU pod; rocm-smi output resolves to mi325x.
+    # SSH into the first GPU pod; amd-smi output resolves to mi325x.
     monkeypatch.setattr(
         gpu_probe,
         "build_external_state_from_env",
@@ -131,13 +131,13 @@ def test_infera_probe_removes_its_scratch_known_hosts(monkeypatch, tmp_path, ssh
 
 
 def test_infera_probe_parses_output_despite_a_nonzero_exit(monkeypatch, tmp_path):
-    """_PROBE_CMD's `||` fallback can print a usable name and still exit non-zero."""
+    """The probe can print a usable name before a non-zero exit."""
     _track_scratch_dirs(monkeypatch, tmp_path)
     monkeypatch.setattr(
         gpu_probe.ssh_client,
         "ssh_run",
         lambda _host, command, **_kw: subprocess.CompletedProcess(
-            args=[command], returncode=1, stdout="gfx942", stderr="rocm-smi: not found"
+            args=[command], returncode=1, stdout="gfx942", stderr="amd-smi: failed"
         ),
     )
 
@@ -183,8 +183,10 @@ def test_no_handoff_returns_none(monkeypatch):
 
 
 def test_parse_gpu_type_prefers_specific_tag():
-    # gcnArchName fallback resolves gfx942 -> mi300x runner.
+    # amd-smi target_graphics_version resolves gfx942 -> mi300x runner.
     assert gpu_probe._parse_gpu_type("gfx942:sramecc+:xnack-") == "mi300x"
+    # amd-smi market_name contains spaces; product tags do not.
+    assert gpu_probe._parse_gpu_type("AMD Radeon 8060S Graphics") == "radeon8060s"
     # MI325X is not shadowed by the MI300X substring rule.
     assert gpu_probe._parse_gpu_type("AMD Instinct MI325X") == "mi325x"
     assert gpu_probe._parse_gpu_type("nothing here") is None
