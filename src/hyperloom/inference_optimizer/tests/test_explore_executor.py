@@ -681,6 +681,222 @@ async def test_explore_executor_keeps_and_reverts_per_variant(sub_agent_runner, 
     assert rejected_provenance == {"llm_direct"}
 
 
+async def _explore_on_an_observed_fp8_stack(sub_agent_runner, tmp_path, monkeypatch, grid, tputs):
+    """Run one explore round whose stack was observed launching with ``--kv-cache-dtype fp8``."""
+    sub, tr, _ = sub_agent_runner
+    _force_cold_decision(monkeypatch)
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors.explore.observed_launch_from_state",
+        lambda _state: ({"kv_cache_dtype": "fp8", "max_running_requests": 512}, {}),
+    )
+    launched: list[str] = []
+
+    def _fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        name = next(n for n in tputs if n in slot.parent.name + "/" + slot.name)
+        launched.append(name)
+        _fake_workspace(slot, tput=tputs[name])
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={"config_path": str(base), "output_dir": str(tmp_path / "out"), "base_tput": 800.0, "grid": grid},
+        idempotency_key="ex-noop-stack",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+    return res.result, launched
+
+
+@pytest.mark.asyncio
+async def test_a_variant_that_was_the_stack_runs_once_a_keep_has_moved_the_stack(
+    sub_agent_runner, tmp_path, monkeypatch
+):
+    """``--kv-cache-dtype fp8`` restates the round's opening stack, but not the stack after ``auto`` KEEPs."""
+    grid = [
+        {"name": "v_auto", "extra_args": "--kv-cache-dtype auto", "extra_envs": {}},
+        {"name": "v_fp8", "extra_args": "--kv-cache-dtype fp8", "extra_envs": {}},
+    ]
+    out, launched = await _explore_on_an_observed_fp8_stack(
+        sub_agent_runner, tmp_path, monkeypatch, grid, {"v_auto": 840.0, "v_fp8": 900.0}
+    )
+
+    assert launched == ["v_auto", "v_fp8"]
+    outcomes = {row["name"]: row["outcome"] for row in out["explore_search_update"]["tested"].values()}
+    assert outcomes == {"v_auto": "KEEP", "v_fp8": "KEEP"}
+    assert not [sd for sd in out["skipped_dup"] if sd.get("reason") == "baseline_noop"]
+
+
+@pytest.mark.asyncio
+async def test_a_variant_that_is_the_stack_is_skipped_while_the_stack_has_not_moved(
+    sub_agent_runner, tmp_path, monkeypatch
+):
+    """Before any KEEP, and after a REVERT, the observed launch still describes the stack."""
+    grid = [
+        {"name": "v_noop_first", "extra_args": "--max-running-requests 512", "extra_envs": {}},
+        {"name": "v_revert", "extra_args": "--revert-flag", "extra_envs": {}},
+        {"name": "v_noop_after", "extra_args": "--kv-cache-dtype fp8", "extra_envs": {}},
+    ]
+    out, launched = await _explore_on_an_observed_fp8_stack(
+        sub_agent_runner, tmp_path, monkeypatch, grid, {"v_noop_first": 900.0, "v_revert": 800.4, "v_noop_after": 900.0}
+    )
+
+    assert launched == ["v_revert"]
+    noop = {sd["name"] for sd in out["skipped_dup"] if sd.get("reason") == "baseline_noop"}
+    assert noop == {"v_noop_first", "v_noop_after"}
+    assert {row["name"] for row in out["explore_search_update"]["tested"].values()} == {"v_revert"}
+
+
+@pytest.mark.asyncio
+async def test_a_restatement_dropped_up_front_does_not_claim_a_later_identical_variant(
+    sub_agent_runner, tmp_path, monkeypatch
+):
+    """``fp8`` then ``auto`` then ``fp8``: the first ``fp8`` can only meet the opening stack; the last meets ``auto``."""
+    grid = [
+        {"name": "v_fp8_first", "extra_args": "--kv-cache-dtype fp8", "extra_envs": {}},
+        {"name": "v_auto", "extra_args": "--kv-cache-dtype auto", "extra_envs": {}},
+        {"name": "v_fp8_later", "extra_args": "--kv-cache-dtype fp8", "extra_envs": {}},
+    ]
+    out, launched = await _explore_on_an_observed_fp8_stack(
+        sub_agent_runner, tmp_path, monkeypatch, grid, {"v_fp8_first": 900.0, "v_auto": 840.0, "v_fp8_later": 900.0}
+    )
+
+    assert launched == ["v_auto", "v_fp8_later"]
+    assert {sd["name"] for sd in out["skipped_dup"] if sd.get("reason") == "baseline_noop"} == {"v_fp8_first"}
+    assert not [sd for sd in out["skipped_dup"] if sd.get("reason") == "round_dup"]
+
+
+@pytest.mark.asyncio
+async def test_a_restatement_skipped_on_the_unmoved_stack_does_not_claim_a_later_identical_one(
+    sub_agent_runner, tmp_path, monkeypatch
+):
+    """The first ``fp8`` meets the stack after a REVERT and is skipped; the second meets it after ``auto`` KEEPs."""
+    grid = [
+        {"name": "v_x_revert", "extra_args": "--revert-flag", "extra_envs": {}},
+        {"name": "v_fp8_a", "extra_args": "--kv-cache-dtype fp8", "extra_envs": {}},
+        {"name": "v_auto_keep", "extra_args": "--kv-cache-dtype auto", "extra_envs": {}},
+        {"name": "v_fp8_b", "extra_args": "--kv-cache-dtype fp8", "extra_envs": {}},
+    ]
+    out, launched = await _explore_on_an_observed_fp8_stack(
+        sub_agent_runner,
+        tmp_path,
+        monkeypatch,
+        grid,
+        {"v_x_revert": 800.4, "v_fp8_a": 900.0, "v_auto_keep": 840.0, "v_fp8_b": 900.0},
+    )
+
+    assert launched == ["v_x_revert", "v_auto_keep", "v_fp8_b"]
+    assert {sd["name"] for sd in out["skipped_dup"] if sd.get("reason") == "baseline_noop"} == {"v_fp8_a"}
+    assert not [sd for sd in out["skipped_dup"] if sd.get("reason") == "round_dup"]
+
+
+@pytest.mark.asyncio
+async def test_a_restatement_that_repeats_a_launch_of_this_round_is_a_round_dup(
+    sub_agent_runner, tmp_path, monkeypatch
+):
+    """On a moved stack a restatement runs once; the same launch later in the round is the usual in-round duplicate."""
+    grid = [
+        {"name": "v_auto", "extra_args": "--kv-cache-dtype auto", "extra_envs": {}},
+        {"name": "v_fp8_a", "extra_args": "--kv-cache-dtype fp8", "extra_envs": {}},
+        {"name": "v_fp8_b", "extra_args": "--kv-cache-dtype fp8", "extra_envs": {}},
+    ]
+    out, launched = await _explore_on_an_observed_fp8_stack(
+        sub_agent_runner, tmp_path, monkeypatch, grid, {"v_auto": 840.0, "v_fp8_a": 900.0, "v_fp8_b": 900.0}
+    )
+
+    assert launched == ["v_auto", "v_fp8_a"]
+    assert [sd["name"] for sd in out["skipped_dup"] if sd.get("reason") == "round_dup"] == ["v_fp8_b"]
+
+
+@pytest.mark.asyncio
+async def test_a_restatement_on_a_moved_stack_gives_way_to_another_variant_with_its_launch(
+    sub_agent_runner, tmp_path, monkeypatch
+):
+    """The revalidation launches the same fingerprint later in the round, so the restatement does not launch it twice."""
+    grid = [
+        {"name": "v_auto", "extra_args": "--kv-cache-dtype auto", "extra_envs": {}},
+        {"name": "v_restate", "extra_args": "--kv-cache-dtype fp8", "extra_envs": {}},
+        {
+            "name": "v_reval",
+            "extra_args": "--kv-cache-dtype fp8",
+            "extra_envs": {},
+            "provenance": "resume_stack_revalidate",
+        },
+    ]
+    out, launched = await _explore_on_an_observed_fp8_stack(
+        sub_agent_runner, tmp_path, monkeypatch, grid, {"v_auto": 840.0, "v_restate": 900.0, "v_reval": 900.0}
+    )
+
+    assert launched == ["v_auto", "v_reval"]
+    assert [sd["name"] for sd in out["skipped_dup"] if sd.get("reason") == "round_dup"] == ["v_restate"]
+
+
+@pytest.mark.asyncio
+async def test_a_revalidation_of_the_stack_runs_even_behind_a_restatement_of_it(
+    sub_agent_runner, tmp_path, monkeypatch
+):
+    """A revalidation is exempt from the filter, so a restatement of the same launch ahead of it must not take its slot."""
+    grid = [
+        {"name": "v_auto", "extra_args": "--kv-cache-dtype auto", "extra_envs": {}},
+        {"name": "v_restate", "extra_args": "--kv-cache-dtype fp8", "extra_envs": {}},
+        {
+            "name": "v_reval",
+            "extra_args": "--kv-cache-dtype fp8",
+            "extra_envs": {},
+            "provenance": "resume_stack_revalidate",
+        },
+    ]
+    out, launched = await _explore_on_an_observed_fp8_stack(
+        sub_agent_runner, tmp_path, monkeypatch, grid, {"v_auto": 800.4, "v_restate": 900.0, "v_reval": 900.0}
+    )
+
+    assert launched == ["v_auto", "v_reval"]
+    assert {sd["name"] for sd in out["skipped_dup"] if sd.get("reason") == "baseline_noop"} == {"v_restate"}
+
+
+@pytest.mark.asyncio
+async def test_a_restatement_left_leading_by_the_skip_list_is_dropped_before_the_round(
+    sub_agent_runner, tmp_path, monkeypatch
+):
+    """The operator skip list removes ``auto``, so nothing ahead of ``fp8`` can move the stack any more."""
+    monkeypatch.setenv("SKIP_VARIANTS", "v_auto")
+    grid = [
+        {"name": "v_auto", "extra_args": "--kv-cache-dtype auto", "extra_envs": {}},
+        {"name": "v_fp8", "extra_args": "--kv-cache-dtype fp8", "extra_envs": {}},
+    ]
+    out, launched = await _explore_on_an_observed_fp8_stack(
+        sub_agent_runner, tmp_path, monkeypatch, grid, {"v_auto": 840.0, "v_fp8": 900.0}
+    )
+
+    assert launched == []
+    assert out["explore_grid_exhausted"] is True
+    assert {sd["name"] for sd in out["skipped_dup"] if sd.get("reason") == "baseline_noop"} == {"v_fp8"}
+
+
+@pytest.mark.asyncio
+async def test_a_grid_that_only_restates_the_stack_is_exhausted_before_the_round(
+    sub_agent_runner, tmp_path, monkeypatch
+):
+    """With nothing ahead of them that could KEEP, every restatement is dropped before a round is planned."""
+    grid = [
+        {"name": "v_noop_a", "extra_args": "--max-running-requests 512", "extra_envs": {}},
+        {"name": "v_noop_b", "extra_args": "--kv-cache-dtype fp8", "extra_envs": {}},
+    ]
+    out, launched = await _explore_on_an_observed_fp8_stack(
+        sub_agent_runner, tmp_path, monkeypatch, grid, {"v_noop_a": 900.0, "v_noop_b": 900.0}
+    )
+
+    assert launched == []
+    assert out["explore_grid_exhausted"] is True
+    assert {sd["name"] for sd in out["skipped_dup"] if sd.get("reason") == "baseline_noop"} == {"v_noop_a", "v_noop_b"}
+
+
 @pytest.mark.asyncio
 async def test_actual_explore_axis_rejection_cannot_be_revived_by_geak_fallback(
     sub_agent_runner, tmp_path, monkeypatch
