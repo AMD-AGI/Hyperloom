@@ -26,6 +26,14 @@ from kernelforge.foldable_launches import foldable_launches
 from kernelforge.graph_coverage import graph_coverage
 from kernelforge.trace_events import resolve_capture
 
+#: The specialist domains these censuses hand their findings to. A gap names a
+#: domain the dispatcher knows, or nothing claims it.
+KERNEL_DOMAIN: str = "kernel_switch_specialist"
+SERVING_DOMAIN: str = "serving_specialist"
+
+#: The lane each domain's work belongs to, which is what a phase reads to decide it has something to do.
+_LANE_OF_DOMAIN: dict[str, str] = {KERNEL_DOMAIN: "kernel_agent", SERVING_DOMAIN: "framework"}
+
 #: Gaps one census may raise, so one pathological run cannot bury every other signal.
 _PER_CENSUS_CAP: int = 3
 
@@ -34,11 +42,17 @@ _FOLD_MIN_MS_PER_STEP: float = 0.2
 
 
 def _gap(kind: str, key: str, symptom: str, *, severity: str, domain_hint: str) -> dict[str, Any]:
-    """One cause-shaped gap row, keyed so repeated refreshes upsert rather than multiply."""
+    """One cause-shaped gap row, keyed so repeated refreshes upsert rather than multiply.
+
+    ``layer`` names the lane that can act, which is what the phase prompts read
+    when they ask whether a lane has anything to do; a census that measured
+    kernel work has to say ``kernel_agent`` there or the phase sees no lever and
+    closes. Where the evidence came from stays on ``source`` / ``provenance``.
+    """
     return {
         "canonical_id": f"gap.run_evidence.{kind}.{sha1(key.encode()).hexdigest()[:16]}",
         "symptom": symptom,
-        "layer": "run_evidence",
+        "layer": _LANE_OF_DOMAIN[domain_hint],
         "severity": severity,
         "domain_hint": domain_hint,
         "source": "run_evidence",
@@ -63,7 +77,7 @@ def _recompile_gaps(session_dir: Any) -> list[dict[str, Any]]:
                 "Making that argument runtime rather than constexpr removes the recompiles without changing what "
                 "the kernel computes.",
                 severity="high",
-                domain_hint="kernel",
+                domain_hint=KERNEL_DOMAIN,
             )
         )
         if len(out) >= _PER_CENSUS_CAP:
@@ -88,7 +102,7 @@ def _foldable_gaps(trace_path: Any) -> list[dict[str, Any]]:
                     f"{neighbour['name']} ({neighbour['share']:.0%}). Folding it into that neighbour removes a "
                     "launch per call without changing what is computed.",
                     severity="medium",
-                    domain_hint="kernel",
+                    domain_hint=KERNEL_DOMAIN,
                 )
             )
             if len(out) >= _PER_CENSUS_CAP:
@@ -112,7 +126,7 @@ def _graph_gaps(trace_path: Any) -> list[dict[str, Any]]:
                 "platform or whether the module carries nothing for the capture to walk; the two have different "
                 "fixes.",
                 severity="high",
-                domain_hint="framework",
+                domain_hint=SERVING_DOMAIN,
             )
         )
         if len(out) >= _PER_CENSUS_CAP:
@@ -135,7 +149,7 @@ def _input_cost_gaps(workspace: Any) -> list[dict[str, Any]]:
             "the cost is in front of it: rendering the template, tokenising the whole prompt again, pickling it "
             "to the scheduler.",
             severity="high",
-            domain_hint="framework",
+            domain_hint=SERVING_DOMAIN,
         )
     ]
 
