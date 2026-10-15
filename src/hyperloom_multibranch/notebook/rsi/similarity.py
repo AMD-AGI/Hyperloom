@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from hyperloom_multibranch.contracts.notebook.records import SessionProfile
 from hyperloom_multibranch.notebook.knowledge.experience import experience_identity
 
+#: The weight of a condition that changes little on its own: a framework release, expert parallelism.
+MINOR_WEIGHT = 0.5
 LABEL_WEIGHTS = {
     "gpu": 3.0,
     "framework": 2.0,
@@ -24,9 +26,9 @@ LABEL_WEIGHTS = {
     "model_type": 1.0,
     "precision": 1.0,
     "model": 1.0,
-    "framework_version": 0.5,
+    "framework_version": MINOR_WEIGHT,
 }
-SIZE_WEIGHTS = {"tp": 1.0, "conc": 1.0, "isl": 1.0, "osl": 1.0, "ep": 0.5}
+SIZE_WEIGHTS = {"tp": 1.0, "conc": 1.0, "isl": 1.0, "osl": 1.0, "ep": MINOR_WEIGHT}
 PROFILE_WEIGHT = 2.0
 #: Below this, a past session shares too little with this one to teach it anything: one matching GPU is not enough.
 MIN_SIMILARITY = 0.5

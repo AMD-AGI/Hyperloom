@@ -39,6 +39,7 @@ from hyperloom_multibranch.notebook.rsi.archive import (
 from hyperloom_multibranch.notebook.rsi.similarity import MIN_SIMILARITY, TaskConditions
 
 PACE_FRACTIONS = (0.25, 0.5, 0.75)
+MEDIAN, P90 = 0.5, 0.9
 NO_COMMIT_AFTER = (4, 8)
 MIN_SESSIONS = 1.5
 MAX_CHARS = 1500
@@ -158,7 +159,7 @@ def _pace(similar: Sequence[WeightedTree]) -> dict[float, float]:
             for item in similar
             if item.tree.final_gain_pct > 0 and item.tree.budget_seconds > 0
         ]
-        share = _quantile(shares, 0.5)
+        share = _quantile(shares, MEDIAN)
         if share is not None:
             pace[fraction] = share
     return pace
@@ -190,7 +191,7 @@ def _branch_history(similar: Sequence[WeightedTree]) -> BranchHistory | None:
         sessions=len(multi),
         mean_opened=sum(count * weight for count, weight in opened) / total,
         committed_share=sum(share * weight for share, weight in committed) / total,
-        median_first_commit_test=_quantile(first_tests, 0.5),
+        median_first_commit_test=_quantile(first_tests, MEDIAN),
         late_commits={n: (later, of) for n, (later, of) in late.items() if of},
         stop_reasons=tuple(reasons.most_common(TOP_STOP_REASONS)),
     )
@@ -249,7 +250,7 @@ def history_digest(
             for item in similar
             if item.tree.budget_seconds > 0
         ]
-        typical = _quantile(then, 0.5)
+        typical = _quantile(then, MEDIAN)
         if typical is not None:
             standing = Standing(now_fraction, current_gain_pct, typical)
     multi_branch = sum(1 for item in similar if item.tree.source == SOURCE_NOTEBOOK)
@@ -261,8 +262,8 @@ def history_digest(
         multi_branch=multi_branch,
         backfilled=len(similar) - multi_branch,
         pace=_pace(similar),
-        median_final_gain_pct=_quantile(finals, 0.5),
-        p90_final_gain_pct=_quantile(finals, 0.9),
+        median_final_gain_pct=_quantile(finals, MEDIAN),
+        p90_final_gain_pct=_quantile(finals, P90),
         branches=_branch_history(similar),
         directions=_directions(similar),
         standing=standing,
@@ -295,19 +296,8 @@ def _share(value: float) -> str:
     return f"{value * 100:.0f}%"
 
 
-def _lines(digest: HistoryDigest) -> list[str]:
-    if digest.note:
-        return [f"History: {digest.note}"]
-    if not digest.enough:
-        return [
-            f"History: too thin to go by ({_count(digest.sessions, 'similar session')}, worth "
-            f"{digest.effective_sessions:.1f}; {MIN_SESSIONS} needed)."
-        ]
-    lines = [
-        f"History: {_count(digest.sessions, 'similar session')} (worth {digest.effective_sessions:.1f}, similarity "
-        f"up to {digest.top_similarities[0]:.2f}): {digest.multi_branch} multi-branch, {digest.backfilled} "
-        "backfilled single-lineage."
-    ]
+def _outcome_lines(digest: HistoryDigest) -> list[str]:
+    lines = []
     if digest.median_final_gain_pct is not None and digest.p90_final_gain_pct is not None:
         lines.append(
             f"Final gain over baseline: median {_pct(digest.median_final_gain_pct)}, "
@@ -324,32 +314,56 @@ def _lines(digest: HistoryDigest) -> list[str]:
             f"This session: {_pct(standing.gain_pct)} at {_share(standing.fraction)} of its budget; the median "
             f"similar session had {_pct(standing.typical_gain_pct)} by then ({side} it by {abs(gap):.1f} points)."
         )
-    branches = digest.branches
-    if branches is not None:
-        first = (
-            f" the first commit came at test {branches.median_first_commit_test:.0f} (median)."
-            if branches.median_first_commit_test is not None
-            else " none committed."
-        )
-        lines.append(
-            f"Branches, from {_count(branches.sessions, 'multi-branch session')}: {branches.mean_opened:.1f} opened "
-            f"on average; {_share(branches.committed_share)} of them committed at least once;{first}"
-        )
-        for n, (later, of) in branches.late_commits.items():
-            lines.append(f"Branches without a commit after {n} tests: {later} of {of} committed later.")
-        if branches.stop_reasons:
-            reasons = ", ".join(f"{reason} ({count})" for reason, count in branches.stop_reasons)
-            lines.append(f"Stopped for: {reasons}.")
-    if digest.directions:
-        lines.append("Directions tried, most commits first:")
-        for direction in digest.directions:
-            layer = f" [{direction.layer.value}]" if direction.layer is not None else ""
-            best = f", best {_pct(direction.best_gain_pct)}" if direction.best_gain_pct is not None else ""
-            lines.append(
-                f"- {direction.target} / {direction.mechanism}{layer}: {_count(direction.sessions, 'session')}, "
-                f"{_count(direction.tests, 'test')}, {_count(direction.commits, 'commit')}{best}"
-            )
     return lines
+
+
+def _branch_lines(branches: BranchHistory | None) -> list[str]:
+    if branches is None:
+        return []
+    first = (
+        f" the first commit came at test {branches.median_first_commit_test:.0f} (median)."
+        if branches.median_first_commit_test is not None
+        else " none committed."
+    )
+    lines = [
+        f"Branches, from {_count(branches.sessions, 'multi-branch session')}: {branches.mean_opened:.1f} opened "
+        f"on average; {_share(branches.committed_share)} of them committed at least once;{first}",
+        *(
+            f"Branches without a commit after {n} tests: {later} of {of} committed later."
+            for n, (later, of) in branches.late_commits.items()
+        ),
+    ]
+    if branches.stop_reasons:
+        lines.append(f"Stopped for: {', '.join(f'{reason} ({count})' for reason, count in branches.stop_reasons)}.")
+    return lines
+
+
+def _direction_line(direction: DirectionHistory) -> str:
+    layer = f" [{direction.layer.value}]" if direction.layer is not None else ""
+    best = f", best {_pct(direction.best_gain_pct)}" if direction.best_gain_pct is not None else ""
+    return (
+        f"- {direction.target} / {direction.mechanism}{layer}: {_count(direction.sessions, 'session')}, "
+        f"{_count(direction.tests, 'test')}, {_count(direction.commits, 'commit')}{best}"
+    )
+
+
+def _lines(digest: HistoryDigest) -> list[str]:
+    if digest.note:
+        return [f"History: {digest.note}"]
+    if not digest.enough:
+        return [
+            f"History: too thin to go by ({_count(digest.sessions, 'similar session')}, worth "
+            f"{digest.effective_sessions:.1f}; {MIN_SESSIONS} needed)."
+        ]
+    head = (
+        f"History: {_count(digest.sessions, 'similar session')} (worth {digest.effective_sessions:.1f}, similarity "
+        f"up to {digest.top_similarities[0]:.2f}): {digest.multi_branch} multi-branch, {digest.backfilled} "
+        "backfilled single-lineage."
+    )
+    directions = (
+        ["Directions tried, most commits first:", *map(_direction_line, digest.directions)] if digest.directions else []
+    )
+    return [head, *_outcome_lines(digest), *_branch_lines(digest.branches), *directions]
 
 
 __all__ = [

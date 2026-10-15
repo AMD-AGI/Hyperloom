@@ -56,13 +56,14 @@ from hyperloom_multibranch.notebook.rsi.similarity import MIN_SIMILARITY, TaskCo
 log = logging.getLogger(__name__)
 
 FRONTIER_LOG_FORMAT = "multibranch.frontier-log.v1"
-WINDOW_SECONDS = 1800.0
-OBSERVATION_SECONDS = 3600.0
+HOUR = 3600.0
+WINDOW_SECONDS = HOUR / 2
+OBSERVATION_SECONDS = HOUR
 OBSERVATION_FLOOR_PCT = 0.5
 NEW_BRANCH_FLOOR_PCT = OBSERVATION_FLOOR_PCT
 MIN_EFFECTIVE_SESSIONS = 1.5
 #: The session length the default window and observation suit; a shorter session scales both down in proportion.
-REFERENCE_BUDGET_SECONDS = 4 * 3600.0
+REFERENCE_BUDGET_SECONDS = 4 * HOUR
 
 
 @dataclass(frozen=True)
@@ -148,7 +149,7 @@ def score_branch(
     components = {
         "trend_pct": trend,
         "tests": float(len(branch.test_times)),
-        "gpu_hours": branch.gpu_seconds / 3600.0,
+        "gpu_hours": branch.gpu_seconds / HOUR,
         "observing": float(_observing(snapshot, row.branch, snapshot.taken_at - policy.observation_seconds)),
     }
     expected, basis = trend, FrontierBasis.TREND
