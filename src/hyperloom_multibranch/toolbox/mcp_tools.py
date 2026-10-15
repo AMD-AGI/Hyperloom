@@ -86,6 +86,13 @@ _POLL_INBOX: dict[str, Any] = {
     "additionalProperties": False,
 }
 
+# The specialist runtime submits the confirm retest of a measured win itself, through the toolbox interface.
+_CONFIRM_REFUSED_CODE = "confirm_not_for_specialists"
+_CONFIRM_REFUSED_REASON = (
+    "a specialist does not submit purpose=confirm: the runtime retests a measured win itself, "
+    "and a confirm of your own would be measured and never used; submit purpose=explore instead"
+)
+
 NotebookFor = Callable[[str], Notebook]
 
 
@@ -163,6 +170,8 @@ def _submit_test(
             request = MeasuredRequest.from_document({**arguments, "branch_id": ctx.principal.branch})
         except ValueError as exc:  # MeasurementError and RecipeError both are
             raise InvalidParamsError(str(exc)) from exc
+        if request.purpose is Purpose.CONFIRM:
+            raise ToolError(f"rejected ({_CONFIRM_REFUSED_CODE}): {_CONFIRM_REFUSED_REASON}")
         try:
             return {"request_id": await _on(home, toolbox.submit_test(request))}
         except RequestRejected as exc:

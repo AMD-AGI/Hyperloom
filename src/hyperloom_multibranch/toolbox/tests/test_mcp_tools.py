@@ -158,6 +158,16 @@ def test_submit_test_reports_a_contract_violation_as_invalid_params(rig: Rig) ->
     assert rig.toolbox.submitted == []
 
 
+def test_a_specialist_cannot_submit_a_confirm_retest_but_can_explore(rig: Rig) -> None:
+    token = rig.token("s1")
+    confirm = {"kind": "test", "purpose": "confirm", "parent_commit": "c1", "retest_of": "req-0"}
+    text = rig.failed(token, "submit_test", **confirm)
+    assert text.startswith("rejected (confirm_not_for_specialists):") and "purpose=explore" in text
+    assert rig.toolbox.submitted == []
+    rig.ok(token, "submit_test", kind="test", purpose="explore", parent_commit="c1")
+    assert [request.purpose.value for request in rig.toolbox.submitted] == ["explore"]
+
+
 def test_toolbox_refusals_come_back_as_error_results_with_their_code(rig: Rig) -> None:
     token = rig.token("s1")
     args = {"kind": "test", "purpose": "explore", "parent_commit": "c1"}

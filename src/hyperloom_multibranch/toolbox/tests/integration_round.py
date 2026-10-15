@@ -197,17 +197,21 @@ class RoundProbes:
     never: tuple[Probe, Probe]
 
 
-async def retest(sp: Specialist, parent: str, probe: Probe, first_id: str) -> str:
-    """A confirm-retest of ``first_id``: same change, with the accuracy round; it holds no claim of its own."""
+async def retest(stack: Stack, sp: Specialist, parent: str, probe: Probe, first_id: str) -> str:
+    """A confirm-retest of ``first_id``: same change, with the accuracy round; it holds no claim of its own.
+
+    The specialist runtime submits it through the toolbox interface: the MCP service refuses a specialist's confirm.
+    """
     arguments = {
         "kind": "test",
         "purpose": "confirm",
+        "branch_id": sp.branch,
         "parent_commit": parent,
         "delta": probe.delta.to_document(),
         "retest_of": first_id,
         "accuracy": True,
     }
-    return str(json.loads(await sp.call("submit_test", **arguments))["request_id"])
+    return await stack.toolbox.submit_test(TestRequest.from_document(arguments))
 
 
 async def cancel_what_waits(stack: Stack, s2: Specialist, s3: Specialist, queued: str, never: list[str]) -> None:
@@ -250,7 +254,7 @@ async def run_round(stack: Stack, probes: RoundProbes) -> Outcome:
     asks = {"s1": (s1, probes.patch)} | (
         {"s2": (s2, probes.config)} if firsts["s2"].verdict is Verdict.NEEDS_CONFIRM else {}
     )
-    out.retest = {b: await retest(sp, base, probe, out.first[b]) for b, (sp, probe) in asks.items()}
+    out.retest = {b: await retest(stack, sp, base, probe, out.first[b]) for b, (sp, probe) in asks.items()}
 
     async def k_exempt_seen() -> bool:
         state = json.loads(await s1.call("queue_state"))
