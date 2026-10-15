@@ -182,7 +182,14 @@ def test_a_candidate_that_keeps_the_pinned_draft_or_has_nothing_pinned_is_allowe
 @pytest.mark.parametrize(
     ("base_args", "base_envs", "candidate_args", "candidate_envs"),
     [
-        pytest.param("--max-num-seqs 128", {}, _spec_config(), {}, id="vllm-adds-a-synthetic-draft"),
+        pytest.param("--max-num-seqs 128", {}, _spec_config(), {}, id="vllm-enables-a-synthetic-draft"),
+        pytest.param(
+            "--max-num-seqs 128",
+            {},
+            "--max-num-seqs 128 --speculative-algorithm EAGLE --speculative-num-steps 3",
+            {"SGLANG_SIMULATE_ACC_LEN": "2.78"},
+            id="sglang-enables-a-simulated-draft",
+        ),
         pytest.param(
             _spec_config(rejection_sample_method="block", synthetic_acceptance_length=None),
             {},
@@ -199,11 +206,9 @@ def test_a_candidate_that_keeps_the_pinned_draft_or_has_nothing_pinned_is_allowe
         ),
     ],
 )
-def test_a_candidate_may_not_start_simulating_acceptance_on_a_real_draft_base(
-    base_args, base_envs, candidate_args, candidate_envs
-):
-    with pytest.raises(SpeculativeDecodingPinnedError, match="switches to simulated acceptance"):
-        refuse_unpinned_speculative_change(base_args, base_envs, candidate_args, candidate_envs)
+def test_a_base_that_does_not_simulate_acceptance_pins_nothing(base_args, base_envs, candidate_args, candidate_envs):
+    """No simulated length is carried over, so none can go stale; the golden value is the agent's to look up."""
+    refuse_unpinned_speculative_change(base_args, base_envs, candidate_args, candidate_envs)
 
 
 def test_the_refusal_names_what_changed():

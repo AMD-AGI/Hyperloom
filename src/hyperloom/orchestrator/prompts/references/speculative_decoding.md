@@ -29,12 +29,14 @@ Concretely:
 - Do **not** invent, round, or adjust an AL / `SGLANG_SIMULATE_ACC_LEN` /
   `synthetic_acceptance_length` value to taste. If synthetic acceptance is used,
   its value **must** be the golden AL looked up for the exact gamma/draft length
-  of the variant.
+  of the launch it is set on.
 - Do **not** treat a higher AL as a knob to push for more throughput; AL is
   determined by the golden curve, and forcing it above golden invalidates the
   result.
-- If the variant changes a draft-length / gamma / method knob, the AL reference
-  **changes with it** and must be re-looked-up from the golden YAML — it is
+- Whether a variant may change a draft-length / gamma / method knob depends on
+  the base launch (see *Pinned when the base simulates acceptance* below). When
+  it may — the base does not simulate acceptance — and the variant uses synthetic
+  acceptance, its AL is looked up for the variant's own draft length; it is
   never carried over or hand-set.
 
 ## Do NOT guess the golden-AL filename from the model name
@@ -72,7 +74,8 @@ Apply to any framework whose recipe touches the speculative-decoding knobs:
   well as model, so a method change invalidates the previously matched row.
 - **TensorRT-LLM / ATOM**: their respective draft-length equivalents.
 
-When the session's base launch **simulates acceptance** (`SGLANG_SIMULATE_ACC_LEN`
+**Pinned when the base simulates acceptance.** When the session's base launch
+**simulates acceptance** (`SGLANG_SIMULATE_ACC_LEN`
 is set, `--speculative-config` carries `rejection_sample_method: synthetic` or a
 `synthetic_acceptance_length`, or an acceptance-length flag such as ATOM's
 `--spec-decode-acceptance-length` is passed), the draft and its simulated
@@ -84,7 +87,15 @@ refused before it is benchmarked with `error_class: speculative_decoding_pinned`
 The lookup above then only confirms the base's own cell; spend variants on other
 knobs. A `--speculative-config` replaces the whole object, so a variant that
 changes a key that does not describe the draft (e.g. `attention_backend`) must
-restate the base's pinned keys unchanged.
+restate the base's pinned keys unchanged, or set that key alone with vLLM's
+per-key form `--speculative-config.<key> <value>`, which merges over the object.
+
+A base that does **not** simulate acceptance — it verifies a real draft (GLM's
+`SGLANG_SIMULATE_ACC_TOKEN_MODE=real-draft-token`, Kimi's
+`rejection_sample_method: block`) or runs no speculative decoding at all — pins
+nothing: a variant may change the draft, or enable speculative decoding with
+synthetic acceptance, as long as its AL is the golden value for its own draft
+length per the rules above.
 
 Before proposing or marking `KEEP` on any such variant, cross-check against the
 model's golden AL curve (if one exists per the lookup above):

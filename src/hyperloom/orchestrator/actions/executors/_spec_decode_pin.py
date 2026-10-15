@@ -125,22 +125,16 @@ def refuse_unpinned_speculative_change(
     """Refuse a candidate that changes the draft or the acceptance simulation of a base launch that simulates it.
 
     Both launches are judged as composed, so adding, changing, removing or unsetting a pinned setting, and a
-    replacing argument string that drops one, all count as a change. A base that verifies its draft for real leaves
-    the draft open, but a candidate may not start simulating acceptance on it: a simulated length is not measured.
+    replacing argument string that drops one, all count as a change. A base that does not simulate acceptance carries
+    no simulated length a new draft could go stale against, so it pins nothing.
 
     Raises:
-        SpeculativeDecodingPinnedError: When the base simulates acceptance and the candidate's pinned settings differ,
-            or the base does not and the candidate does.
+        SpeculativeDecodingPinnedError: When the base simulates acceptance and the candidate's pinned settings differ.
     """
     base = _speculative_identity(base_args, base_envs)
-    candidate = _speculative_identity(candidate_args, candidate_envs)
     if not _simulates_acceptance(base):
-        if _simulates_acceptance(candidate):
-            raise SpeculativeDecodingPinnedError(
-                f"{SPECULATIVE_DECODING_PINNED}: the base launch verifies its draft for real, and this candidate "
-                "switches to simulated acceptance, whose length is set rather than measured. Keep real verification."
-            )
         return
+    candidate = _speculative_identity(candidate_args, candidate_envs)
     changed = sorted(key for key in base.keys() | candidate.keys() if base.get(key) != candidate.get(key))
     if changed:
         changes = ", ".join(f"{key} ({base.get(key)!r} -> {candidate.get(key)!r})" for key in changed)
