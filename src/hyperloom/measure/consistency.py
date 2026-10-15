@@ -429,6 +429,8 @@ def check_item(item: ChecklistItem, root: Path, local: MeasurementBackend, hoste
 
 def check_repetition(item: ChecklistItem, root: Path, local: MeasurementBackend, hosted: Any, rep: int) -> ItemReport:
     """One repetition of one test (``rep`` from 1): a local run and a hosted run, compared; the unit of a resumed check."""
+    if rep < 1:
+        raise ValueError(f"a repetition is counted from 1, got {rep}")
     return _check_once(item, root, local, hosted, rep)
 
 

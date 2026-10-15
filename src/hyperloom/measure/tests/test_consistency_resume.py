@@ -336,3 +336,8 @@ def test_the_entry_point_stops_with_12_and_measures_nothing_while_another_run_ho
     argv = ["--checklist", str(checklist), "--config", str(config), "--resume", str(rig.jsonl), "--lock-wait-sec", "0"]
     assert resume.main(argv) == resume.LOCKED_RC
     assert "another run" in capsys.readouterr().err and rig.lines() == []
+
+
+def test_a_repetition_is_counted_from_one() -> None:
+    with pytest.raises(ValueError, match="counted from 1"):
+        consistency.check_repetition(_items("t")[0], Path("."), FakeBackend(), FakeBackend(), 0)
