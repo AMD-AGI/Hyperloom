@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A precision that only names the quantization toolkit routes on the formats the checkpoint nests."""
+"""A precision that only names the quantization toolkit routes on what the serving log and the checkpoint say runs."""
 
 from kernelforge.gemm_tune.model_analyzer import ModelProfile
 from kernelforge.gemm_tune.router import select_tuners
@@ -39,9 +39,19 @@ def _fp8_attention():
     }
 
 
-def _routed(profile, precision, tmp_path, quant_type="auto"):
+def _fp8_moe_dispatch(quant_type):
+    return (
+        "[aiter] [fused_moe] using 2stage default for ('gfx950', 256, 64, 6144, 2048, 256, 8, <ActivationType.Silu: 0>, "
+        f"'torch.bfloat16', 'torch.float8_e4m3fn', 'torch.float8_e4m3fn', 'QuantType.{quant_type}', True, False)"
+    )
+
+
+_FP8_PER_TOKEN_MOE_DISPATCH = _fp8_moe_dispatch("per_Token")
+
+
+def _routed(profile, precision, tmp_path, quant_type="auto", log_line="gemm_a8w8_blockscale_bpreshuffle"):
     log = tmp_path / "kernels.log"
-    log.write_text("gemm_a8w8_blockscale_bpreshuffle\n")
+    log.write_text(log_line + "\n")
     return select_tuners(
         profile,
         framework="sglang",
@@ -77,6 +87,24 @@ def test_a_format_precision_is_trusted_over_the_nested_formats(tmp_path):
     running = _running(specs)
     assert {"fmoe_ck", "a4w4_blockscale"} <= running
     assert not any(name.startswith("a8w8") for name in running)
+
+
+def test_the_logged_moe_dispatch_outranks_the_declared_expert_format(tmp_path):
+    specs = _routed(_quark_moe_profile(), "quark", tmp_path, log_line=_FP8_PER_TOKEN_MOE_DISPATCH)
+    (moe,) = [s for s in specs if s.name == "fmoe_ck"]
+    assert moe.skip_reason and "per_Token" in moe.skip_reason
+    # The dense lane is not what that line describes, so it keeps the checkpoint's format.
+    assert "a4w4_blockscale" in _running(specs)
+
+
+def test_a_format_precision_is_trusted_over_the_logged_moe_dispatch(tmp_path):
+    specs = _routed(_quark_moe_profile(), "mxfp4", tmp_path, log_line=_FP8_PER_TOKEN_MOE_DISPATCH)
+    assert "fmoe_ck" in _running(specs)
+
+
+def test_a_logged_quant_type_no_moe_tuner_handles_leaves_the_declared_format_to_decide(tmp_path):
+    specs = _routed(_quark_moe_profile(), "quark", tmp_path, log_line=_fp8_moe_dispatch("per_128x128"))
+    assert "fmoe_ck" in _running(specs)
 
 
 def test_experts_declared_only_by_their_moe_module_class_get_the_moe_tuner(tmp_path):
