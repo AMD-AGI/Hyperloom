@@ -608,6 +608,7 @@ def extract_benchmark_measurement(
     *,
     workspace: Path | None = None,
     subprocess_started_unix: float | None = None,
+    config_path: Path | None = None,
 ) -> dict[str, Any]:
     """Extract a normalized measurement from Magpie and InferenceX outputs.
 
@@ -628,6 +629,12 @@ def extract_benchmark_measurement(
         provenance labels).
     """
     report = report or {}
+    from .magpie_agentx_result import agentx_measurement
+
+    from .magpie_agentx import native_config
+
+    if report.get("scenario") == "agentx" or (config_path is not None and native_config(config_path)):
+        return agentx_measurement(report)
     throughput = report.get("throughput") or {}
     latency = report.get("latency") or {}
     ttft = latency.get("ttft") or {}
@@ -677,16 +684,7 @@ def extract_benchmark_measurement(
         before=dict.fromkeys(_LATENCY_FIELDS),
     )
 
-    if workspace is not None:
-        for raw_path in _candidate_raw_jsons(workspace):
-            raw = read_json(raw_path, default=None, require_dict=True)
-            if not raw or to_float(raw.get("output_throughput")) is None:
-                continue
-            before = _latency_snapshot(measurement)
-            _merge_raw_result(measurement, raw, source_path=raw_path)
-            _tag_latency_origins(measurement, origins, label=LATENCY_FROM_RAW, before=before)
-            if is_valid_measurement(measurement):
-                break
+    _merge_workspace_measurements(measurement, origins, workspace)
 
     warnings = measurement["nonfatal_warnings"]
     if report and report.get("success") is not True:
@@ -791,20 +789,8 @@ def is_valid_measurement(result: dict[str, Any] | None) -> bool:
     output_tput = to_float(result.get("output_throughput"))
     if output_tput is None or output_tput <= 0:
         return False
-    # Gated on BOTH the mode and the key's presence, and each half earns its keep.
-    from ._workload_envs import agentx_enabled
-
-    if agentx_enabled() and "submission_valid" in result:
-        verdict = result.get("submission_valid")
-        if verdict is False:
-            return False
-        if verdict is None:
-            # The verdict is unknown: no --scenario was requested or the aiperf build predates the field. map_aiperf
-            # writes the key unconditionally, so None arrives as a present key.
-            from hyperloom.common.env import env_bool
-
-            if not env_bool("HYPERLOOM_ALLOW_UNVERIFIED_SUBMISSION"):
-                return False
+    if result.get("benchmark_backend") == "magpie_agentx":
+        return result.get("benchmark_valid") is True and result.get("diagnostic_only") is False
     if _is_scriptable_measurement(result):
         # A scriptable run whose image-quality gate failed is not selectable, regardless of throughput.
         from ._accuracy_gate import quality_gate_passed
@@ -962,3 +948,17 @@ __all__ = [
     "served_complete_protocol",
     "_materialize_rescue_into_workspace",
 ]
+
+
+def _merge_workspace_measurements(measurement: dict[str, Any], origins: dict[str, str], workspace: Path | None) -> None:
+    """Fill synthetic report gaps from the current workspace's raw measurements."""
+    if workspace is not None:
+        for raw_path in _candidate_raw_jsons(workspace):
+            raw = read_json(raw_path, default=None, require_dict=True)
+            if not raw or to_float(raw.get("output_throughput")) is None:
+                continue
+            before = _latency_snapshot(measurement)
+            _merge_raw_result(measurement, raw, source_path=raw_path)
+            _tag_latency_origins(measurement, origins, label=LATENCY_FROM_RAW, before=before)
+            if is_valid_measurement(measurement):
+                break

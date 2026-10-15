@@ -208,8 +208,7 @@ _MARKER_CONTEXT_LINES: int = 2
 # generation progress (hung engine / detokenizer wedge).
 DETOKENIZER_STALL_RETURNCODE: int = -911
 
-# Sentinel ``returncode`` returned by the _run_magpie AgentX hook when the execution-boundary preflight fails (aiperf
-# missing or not weka-trace capable) before any benchmark launches.
+# Sentinel returned when the delegated MLPerf client fails its execution preflight.
 AGENTX_PREFLIGHT_RETURNCODE: int = -912
 
 #: The ``error_class`` that sentinel must carry, wherever it is classified. Named
@@ -217,11 +216,7 @@ AGENTX_PREFLIGHT_RETURNCODE: int = -912
 #: runner, the baseline executor and the writeback stop-reason gate -- and a
 #: string literal repeated across them can drift into a class nobody handles.
 #:
-#: It marks an ENVIRONMENT failure, not a framework one: the AgentX client is
-#: missing or is not the pinned build, and the runtime repair
-#: (``agentx.repair``) could not supply it. Nothing downstream can author its way
-#: out of that, so the writeback gate stops the run and names the fix for an
-#: operator rather than opening an enablement round.
+#: A missing MLPerf dependency stops the run instead of opening a framework enablement round.
 AGENTX_PREFLIGHT_ERROR_CLASS: str = "agentx_preflight"
 
 # -913 is ``_ray_serving._RAY_ACTOR_DIED_RC``.

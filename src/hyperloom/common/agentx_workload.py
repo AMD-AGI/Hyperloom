@@ -14,9 +14,8 @@ import os
 from pathlib import Path
 from typing import Mapping
 
-AIPERF_CLIENT_SCRIPT = "aiperf_client.sh"
 MLPERF_CLIENT_SCRIPT = "mlperf_agentic_client.sh"
-AGENTX_CLIENT_SCRIPTS = frozenset({AIPERF_CLIENT_SCRIPT, MLPERF_CLIENT_SCRIPT})
+AGENTX_CLIENT_SCRIPTS = frozenset({MLPERF_CLIENT_SCRIPT})
 
 # Both client scripts write the pid of the server they boot here, under their RESULT_DIR. The server is setsid'd and
 # re-parented away from the client, so reaping the round's process tree never reaches it.
@@ -49,9 +48,9 @@ MLPERF_TIMEOUT_SAFETY_FACTOR = 2.0
 
 
 def agentic_backend(env: Mapping[str, str] | None = None) -> str:
-    """Return ``mlperf`` or ``aiperf`` from ``HYPERLOOM_AGENTIC_BACKEND``."""
+    """Return ``mlperf`` or ``magpie`` from ``HYPERLOOM_AGENTIC_BACKEND``."""
     runtime = os.environ if env is None else env
-    return "mlperf" if str(runtime.get(BACKEND_ENV) or "").strip().lower() == "mlperf" else "aiperf"
+    return "mlperf" if str(runtime.get(BACKEND_ENV) or "").strip().lower() == "mlperf" else "magpie"
 
 
 def is_mlperf_backend(env: Mapping[str, str] | None = None) -> bool:
@@ -60,7 +59,9 @@ def is_mlperf_backend(env: Mapping[str, str] | None = None) -> bool:
 
 def agentx_client_script(env: Mapping[str, str] | None = None) -> str:
     """The Magpie ``benchmark_script`` this AgentX backend pins."""
-    return MLPERF_CLIENT_SCRIPT if is_mlperf_backend(env) else AIPERF_CLIENT_SCRIPT
+    if not is_mlperf_backend(env):
+        raise ValueError("AgentX serving and replay are managed by Magpie; no Hyperloom client script exists")
+    return MLPERF_CLIENT_SCRIPT
 
 
 def is_agentx_client_script(name: str | None) -> bool:

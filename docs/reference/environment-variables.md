@@ -898,7 +898,7 @@ output tokens per request, so output-only grading optimises about 1% of the
 token budget, and a variant can lift decode tok/s while degrading user-perceived
 latency with no visible cost.
 
-`HYPERLOOM_AGENTX=1` adopts the 2-D grading shape InferenceX uses. Upstream
+A Magpie AgentX YAML passed with `--benchmark-config` adopts the 2-D grading shape InferenceX uses. Upstream
 sweeps a concurrency ladder, keeps TTFT / ITL / TPOT percentiles separately, and
 publishes a **Pareto frontier** with E2E normalised interactivity as the x-axis
 and token throughput per chip as the y-axis. It never collapses the axes into one
@@ -933,16 +933,15 @@ TTFT is included in E2EL, unlike per-user `1/ITL`; on a ~114k-prompt replay TTFT
 is most of what a user waits for so grading on `1/ITL` would miss it.
 
 Default-on for AgentX runs, explicit opt-in via `HYPERLOOM_PERF_METRIC=intvty_v1`
-otherwise. Either AgentX signal turns it on: the ambient `HYPERLOOM_AGENTX=1`, or
+otherwise. Either AgentX signal turns it on: the bound Magpie YAML, or
 `benchmark_mode=agentx` stamped at seed — so a round in a subprocess that never
 inherited the env var still grades on the agentic axis. Serving frameworks only;
 scriptable frameworks (xDiT, custom) keep output-throughput grading.
 
 | Variable                       | Default                       | Description                                                                                                                                                                                       |
 |--------------------------------|-------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `HYPERLOOM_PERF_METRIC`        | `intvty_v1` under `HYPERLOOM_AGENTX=1`, else output tput | `intvty_v1` grades E2E normalised interactivity P50 (median) as the primary objective, with the P90 slow tail and output throughput each held as a guard. Reported in the final summary as `grading mode`. |
+| `HYPERLOOM_PERF_METRIC`        | `intvty_v1` for Magpie AgentX, else output tput | `intvty_v1` grades E2E normalised interactivity P50 (median) as the primary objective, with the P90 slow tail and output throughput each held as a guard. Reported in the final summary as `grading mode`. |
 | `HYPERLOOM_PERF_NOISE_PCT`     | `5.0`                         | Noise band in percent applied to the guards. A candidate whose slow tail or output throughput sits within this band of the anchor is not considered worse on that axis; the median has its own fixed bar and is not subject to the band. The default is the top of the 1–5% run-to-run noise upstream records for this workload. An unparseable value raises `EnvValueError` naming the variable, rather than grading against a band nobody chose. |
-| `HYPERLOOM_ALLOW_UNVERIFIED_SUBMISSION` | Unset (fail closed) | Truthy accepts a measurement whose submission verdict is absent or undetermined (`submission_valid=None`). A measurement the scenario explicitly judged invalid (`submission_valid=False`) is always rejected regardless of this flag. Applies to every measurement the run accepts (baseline, explore, kernel, sweep), not only the baseline — an unverified measurement makes every gain derived from it unverifiable. |
 | `INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC` | `7200` | Initial server-boot budget written by the persistent-server lifecycle configuration helper. Actual benchmark launches synchronize this field to `INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC`; this variable is not an additional benchmark deadline or a way to extend one. Non-benchmark lifecycle callers that do not perform that synchronization retain their own boot budget. |
 
 ### MLPerf agentic backend
@@ -974,7 +973,7 @@ answering, checks that the listener belongs to the server it booted, and checks
 
 | Variable | Default | Description |
 |---|---|---|
-| `HYPERLOOM_AGENTIC_BACKEND` | `aiperf` | `mlperf` selects the MLPerf agentic client. Any other value is aiperf. Settable by `export` or `--extra-env`; both reach every reader. |
+| `HYPERLOOM_AGENTIC_BACKEND` | — | `mlperf` selects the separate MLPerf client together with `HYPERLOOM_AGENTX=1`. Native AgentX is selected by the Magpie YAML. |
 | `MLPERF_ENDPOINTS_DIR` | `/opt/mlperf-endpoints` | Checkout of `mlcommons/endpoints` holding `utility/run_agentic.sh`. Checked at preflight. |
 | `AGENTIC_DATASET_PATH` | — (required) | Path to `agentic_combined_v6.jsonl`. Checked at preflight; its stem is recorded as the corpus. |
 | `MLPERF_TOKENIZER_DIR` | — (required) | Kimi-K3 fast-tokenizer directory the harness counts tokens with. Checked at preflight. |
@@ -988,21 +987,13 @@ defaults to `trajectories × 26 s × 2 + 1800 s` (26 s per trajectory measured o
 8×MI355X at concurrency 16, doubled for a cold first round, plus boot), and never
 below the stock 7800 s: about 9600 s for smoke and 33,700 s for `full`.
 
-AgentX profiling starts when AIPerf reports its measured phase.
-A capture the server bounds itself (SGLang `num_steps` in the `/start_profile` body, vLLM
-`--profiler-config.max_iterations` above 0) ends when every rank trace is complete, without a `/stop_profile`
-call; if the measured phase ends first, the capture is recorded as failed (`bounded_capture_incomplete`, or
-`trace_files_missing` when no fresh trace file exists). If neither happens within
-`AGENTX_TRACE_FIRST_FILE_TIMEOUT_S` (default 900 s) of `/start_profile`, the client posts `/stop_profile` once,
-waits for the flush within `AGENTX_TRACE_FLUSH_TIMEOUT_S`, and judges the capture by the traces alone; the decision
-records `stop_reason: safety_deadline` and whether the stop was accepted. `AGENTX_PROFILE_WINDOW_S` applies only to captures without
-such a bound: it sets the window before `/stop_profile` and defaults to 20 seconds. Phase waiting is bounded by the
-materialized benchmark timeout. Capture lifecycle status is
-written to a per-invocation `capture-status.json`; the adjacent
-`trace-manifest.json` records the selected primary and per-rank traces.
-Benchmark measurement success and trace-capture success are reported
-independently. AgentX multi-node profiling is currently rejected because its
-legacy fixed-delay capture is not aligned with the AIPerf phase signal.
+Native AgentX profiling is configured in the Magpie YAML's
+`benchmark.profiler.torch_profiler` mapping: `num_steps`, `num_profiles`,
+`interval_seconds` (default 200), `start_seconds`, and `detailed_annotations`.
+Magpie starts after the replay reaches measurement and owns the capture/flush
+lifecycle. Each time window remains a separate trace input to TraceLens.
+Profile reports are diagnostic only and cannot supply KEEP evidence.
+See [Optimize an AgentX workload](../how-to/optimize.md#optimize-an-agentx-workload).
 
 ---
 

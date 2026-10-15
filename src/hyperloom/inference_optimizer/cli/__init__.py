@@ -1057,7 +1057,7 @@ def _apply_agentx_budget_profile(args: argparse.Namespace) -> None:
     # is a deliberate choice even when it equals the default, and gets no note.
     if getattr(args, "max_hours", None) is None:
         print(
-            f"NOTE: HYPERLOOM_AGENTX is on and --max-hours is at its default of {DEFAULT_MAX_HOURS}. "
+            f"NOTE: AgentX replay is configured and --max-hours is at its default of {DEFAULT_MAX_HOURS}. "
             "One AgentX round (corpus load + warmup + drain + measurement window) "
             "typically exceeds that on its own; pass an explicit --max-hours sized "
             "to the number of candidates you intend to measure.",
@@ -1065,35 +1065,8 @@ def _apply_agentx_budget_profile(args: argparse.Namespace) -> None:
         )
 
 
-# Largest input+output a single request reaches in the 256k-capped weka corpus, measured over all 30,141 requests of
-# semianalysis_cc_traces_weka_062126_256k (max input alone is 255,808).
-AGENTX_CAPPED_CORPUS_PEAK_TOKENS = 255_999
-
-
-def _warn_if_context_too_small_for_corpus(resolved: int, source: str) -> None:
-    """Say up front when the served window cannot hold the replay corpus."""
-    if not _agentx_enabled() or resolved >= AGENTX_CAPPED_CORPUS_PEAK_TOKENS:
-        return
-    print(
-        f"WARNING: HYPERLOOM_AGENTX is on but the served context window "
-        f"({resolved}, from {source}) is below the replay corpus peak "
-        f"({AGENTX_CAPPED_CORPUS_PEAK_TOKENS} input+output tokens). Requests that "
-        f"do not fit will be refused by the server; the run is expected to come "
-        f"back non-submittable, and a model this size is not comparable on the "
-        f"AgentX board.",
-        file=sys.stderr,
-    )
-
-
 def _resolve_run_max_model_len(args: argparse.Namespace) -> tuple[int, str]:
-    """Resolve run-wide MAX_MODEL_LEN with explicit operator values winning."""
-    resolved = _resolve_run_max_model_len_inner(args)
-    _warn_if_context_too_small_for_corpus(*resolved)
-    return resolved
-
-
-def _resolve_run_max_model_len_inner(args: argparse.Namespace) -> tuple[int, str]:
-    """Resolution proper; the corpus-fit warning is applied by the caller."""
+    """Resolve planning context; native AgentX serving context remains in its YAML."""
     if getattr(args, "max_model_len", None):
         return int(args.max_model_len), "--max-model-len"
     max_model_len_env = os.environ.get("MAX_MODEL_LEN", "").strip()
@@ -1115,10 +1088,8 @@ def _resolve_run_max_model_len_inner(args: argparse.Namespace) -> tuple[int, str
             return int(native), "agentx-native-context"
         # Model not on disk yet (uncached HF id).
         print(
-            "WARNING: HYPERLOOM_AGENTX is on but the model's native context could "
-            "not be read (weights not on disk yet), so MAX_MODEL_LEN falls back "
-            "to the synthetic ISL+OSL derivation and the server will be booted at "
-            "that width. Pre-fetch the weights, or pass --max-model-len.",
+            "NOTE: Model context is unavailable locally; using a planning estimate. "
+            "Magpie resolves the AgentX serving context from its workload configuration.",
             file=sys.stderr,
         )
     return (
@@ -2221,21 +2192,7 @@ async def _seed_fresh_session(args: argparse.Namespace, *, nodes_resolved: int) 
     if _fw_version_for_env:
         os.environ["FRAMEWORK_VERSION"] = _fw_version_for_env
     if _agentx_enabled():
-        from hyperloom.inference_optimizer.agentx.mapping import (
-            CANONICAL_ISL,
-            CANONICAL_OSL,
-            CANONICAL_PREFIX_CACHE_HIT,
-        )
-
-        print(
-            f"Workload        : AgentX corpus replay "
-            f"(ISL avg={CANONICAL_ISL['avg']} p50={CANONICAL_ISL['p50']} p90={CANONICAL_ISL['p90']}, "
-            f"OSL avg={CANONICAL_OSL['avg']} p50={CANONICAL_OSL['p50']}, "
-            f"prefix_cache~{CANONICAL_PREFIX_CACHE_HIT:.0%}) "
-            f"MAX_MODEL_LEN={max_model_len} ({max_model_len_source}) "
-            f"PRECISION={args.precision} "
-            f"FRAMEWORK_VERSION={_fw_version_for_env or '<unset>'}"
-        )
+        print(f"Workload        : AgentX replay, CONC={args.conc}; corpus and model context resolved by Magpie")
     else:
         print(
             f"Workload        : ISL={args.isl} OSL={args.osl} "
@@ -2288,6 +2245,9 @@ async def _seed_fresh_session(args: argparse.Namespace, *, nodes_resolved: int) 
     )
     gpu_power = resolve_launch_gpu_power(args, nodes=nodes_resolved)
     _publish_gpu_power_settings(gpu_power)
+    from .benchmark_config import bind_benchmark
+
+    bind_benchmark(session_dir)
     _seed_shared_state(
         session_dir,
         args,
@@ -2839,9 +2799,12 @@ def main(argv: list[str] | None = None) -> int:
             v = getattr(args, attr)
             if v and Path(v).exists():
                 setattr(args, attr, Path(v).read_text(encoding="utf-8"))
+        from .benchmark_config import configure_benchmark
+
         try:
+            configure_benchmark(args)
             _load_custom_specialist_args(args)
-        except ValueError as exc:
+        except (ValueError, OSError) as exc:
             parser.error(str(exc))
         return asyncio.run(_run_optimize(args))
     if args.command == "recover":

@@ -55,16 +55,16 @@ Requirements:
 | Field | Meaning | How to choose |
 |-------|---------|---------------|
 | `TP` | Tensor-parallel size — number of GPUs the model is sharded across | Must match the number of GPUs in your server node (for example, `8` for a single 8-GPU MI300X node) |
-| `CONC` | Concurrent requests — baseline benchmark concurrency (`--conc`, default `64`) | Set to your target concurrency. The SWEEP phase separately measures a ladder around it: `256,128,64,32,16,8,4,2` for a synthetic workload, `1,4,8,10,14,20,28` under `HYPERLOOM_AGENTX`, where it runs only with `--enable-conc-sweep`. Override the ladder with `--conc-sweep-concs`. |
+| `CONC` | Concurrent requests — baseline benchmark concurrency (`--conc`, default `64`) | Set to your target concurrency. The SWEEP phase separately measures a ladder around it: `256,128,64,32,16,8,4,2` for a synthetic workload. Native Magpie AgentX uses one fixed YAML concurrency per session. Override the ladder with `--conc-sweep-concs`. |
 | `ISL` | Input sequence length — tokens in each request's prompt | Match your production workload; `1024` is a common starting point |
 | `OSL` | Output sequence length — tokens generated per response | Match your production workload; `1024` is a common starting point |
 
 ```{note}
 `ISL` / `OSL` describe the synthetic request shape. Under the opt-in agentic
-trace-replay mode (`HYPERLOOM_AGENTX=1`) request lengths come from the recorded
+Magpie AgentX trace-replay mode (`--benchmark-config agentx.yaml`) request lengths come from the recorded
 trace corpus instead, so these two values do not affect what is measured — the
-server's context window is sized from the model's own configuration rather than
-from `ISL+OSL`.
+server's context window comes from Magpie's resolved recipe or custom-model
+configuration.
 ```
 
 See [`src/hyperloom/inference_optimizer/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/SKILL.md)
@@ -120,3 +120,41 @@ pipeline, or downstream integration on top of this file — see
 ## Troubleshooting
 
 If a run fails on first launch, see [Troubleshooting Hyperloom](../reference/troubleshooting.md).
+
+## Optimize an AgentX workload
+
+Use a Magpie YAML as the workload definition. Hyperloom runs **single-node** SGLang
+or vLLM and invokes Magpie in local mode, so start it inside the serving image
+named in the YAML. Model, image, precision, TP/EP and concurrency come from that
+file; specify positive `envs.TP` and `envs.CONC` so Hyperloom can reserve resources.
+Start with `src/hyperloom/inference_optimizer/assets/configs/agentx_sglang.yaml`:
+
+```bash
+hyperloom optimize --benchmark-config /workspace/agentx.yaml --max-hours 12
+```
+
+Magpie resolves the pinned InferenceX recipe and owns server startup, replay,
+profiling and cleanup. If the model has no registered recipe, Magpie's custom-model
+resolver uses the explicit YAML fields. Set `envs.MODEL_PATH` to the local checkpoint
+containing `config.json`, while keeping the canonical model identifier in `model`.
+The model must support the replay's context length and protocol; custom resolution
+does not make an arbitrary small-context model a valid canonical AgentX target.
+
+Hyperloom changes serving arguments and environment through
+`agentx.launch_overrides`, applies reviewed source/kernel patches, and compares
+Magpie's public report. Missing, invalid, non-publishable, or diagnostic reports
+cannot supply KEEP evidence. Baseline and candidate must have the same workload
+identity. GEAK's search measurements are provisional until the candidate passes
+the same canonical Magpie workload and Hyperloom's KEEP gate.
+
+The profile phase enables `profiler.torch_profiler` on a separate copy of the YAML.
+Set capture steps, count, interval and annotation options there, leaving `enabled`
+false in the benchmark input. Magpie owns capture timing; Hyperloom selects a
+primary rank and passes each capture window separately to TraceLens. Profiled
+measurements never replace the unprofiled performance baseline.
+
+The session archives its input as `benchmark.yaml`; resume reuses that file.
+Changing the workload requires a new session. The old `HYPERLOOM_AGENTX=1` AIPerf
+entrypoint and its session history are not migrated. Do not combine this entrypoint
+with CLI ISL/OSL, concurrency sweeps, quantization or benchmark-script overrides.
+The independent MLPerf agentic backend keeps its existing entrypoint.

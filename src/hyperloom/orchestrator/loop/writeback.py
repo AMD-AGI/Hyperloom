@@ -69,7 +69,7 @@ from ..kernel.geak_config import (
     _geak_accepted_kernel_specs,
     _geak_has_accepted_kernel,
     _geak_overlay_digest,
-    _geak_overlay_is_loadable,
+    geak_overlay_is_loadable,
     _geak_result_has_material,
     _geak_revalidation_decision,
     geak_spec_name,
@@ -1276,22 +1276,10 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 if self.shared_state.baseline_arg_error_streak >= 2:
                     self.shared_state.set_stop_reason("baseline_arg_error")
             elif err_class == AGENTX_PREFLIGHT_ERROR_CLASS:
-                # AgentX declares aiperf for itself, this repository owns its
-                # install, and the runtime already tried it (agentx.repair) --
-                # so reaching here means the environment cannot supply a
-                # dependency no amount of authoring can invent. Stop on the
-                # FIRST occurrence and name the fix.
-                #
-                # Measured: routed as an ordinary launch failure, this opened an
-                # enablement round instead. The specialist could not tell a
-                # supply gap from a framework bug, re-derived the install from
-                # scratch, had its commands rejected by the setup allowlist, and
-                # the PolicyGate's enablement_round_in_flight rule then blocked
-                # the baseline for the rest of the run -- 24h of budget spent
-                # retrying a problem one operator action fixes.
+                # The delegated client must pass its environment preflight before framework optimization.
                 log.error(
-                    "baseline %s failed the AgentX preflight and the automatic install did not "
-                    "resolve it; stopping the run. This is an environment gap, not something a "
+                    "baseline %s failed the agentic client preflight; setup must "
+                    "resolve it before resuming. This is an environment gap, not something a "
                     "framework patch can close: %s",
                     task.task_id,
                     result_payload.get("error") or err_class,
@@ -2626,13 +2614,13 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 if expected_overlay:
                     expected_digest = str((task.params or {}).get("expected_overlay_digest") or "")
                     got_digest = _geak_overlay_digest(expected_overlay)
-                    overlay_loaded = _geak_overlay_is_loadable(expected_overlay) and (got_digest == expected_digest)
+                    overlay_loaded = geak_overlay_is_loadable(expected_overlay) and (got_digest == expected_digest)
                     if not overlay_loaded and decision == "validated":
                         log.warning(
                             "geak 2b: overlay %r did not survive the run "
                             "(loadable=%r digest expected=%r got=%r) -> 2a fallback",
                             expected_overlay,
-                            _geak_overlay_is_loadable(expected_overlay),
+                            geak_overlay_is_loadable(expected_overlay),
                             expected_digest,
                             got_digest,
                         )
@@ -4343,24 +4331,16 @@ class WritebackCollaborator(CoordinatorCollaborator):
             log.exception("Coordinator: orphaned KEEP resume recovery failed")
 
     def geak_rebench_params(self, *, reason: str) -> dict[str, Any]:
-        """Build the explore params that re-measure ``geak_result`` on the orchestrator harness (GEAK 2b).
+        """Build canonical revalidation params, or explain why a product cannot be deployed.
 
-        Args:
-            reason: Human-readable reason stamped on the params.
-
-        Returns:
-            The single-variant explore params, tagged ``geak_fallback``, or a
-            ``{"skipped": True, "reason": ...}`` summary; the summary carries
-            ``"fallback": "geak_harness"`` when only GEAK's own harness can
-            deploy the candidate.
+        Native source products use reviewed integration; configuration and overlay
+        products use the existing explore executor. ``reason`` is recorded in the task.
         """
         benchmark_script = self.shared_state.accepted_baseline_script()
         recipe_generation = int(self.shared_state.working_recipe_generation or 0)
         ps = self.shared_state.geak_result if isinstance(self.shared_state.geak_result, dict) else {}
         ps_cfg = ps.get("accepted_config") or {}
         ps_overlay = _normalize_geak_overlay_dir(str(ps.get("final_overlay") or "").strip())
-        # ``no_gain`` is a verdict on GEAK's headline basis, not on its kernels: an accepted, positive-delta kernel is
-        # revalidated too, so the kernel gets an orchestrator-measured number.
         ps_admissible = str(ps.get("status") or "") == "ok" or _geak_has_accepted_kernel(ps)
         try:
             ps_controls = _accepted_config_controls(
@@ -4389,10 +4369,22 @@ class WritebackCollaborator(CoordinatorCollaborator):
 
         from ..actions.executors._proposal_identity import effective_fingerprint
 
-        # An overlay that cannot load installs nothing, so the measured delta would belong to the flags alone; drop it
-        # before the run so the row cannot be read as a kernel win.
+        from ..phases.geak_native_revalidation import source_rebench_params
+
+        source_params = source_rebench_params(
+            self._coord,
+            reason=reason,
+            result=ps,
+            flags=ps_flags,
+            envs=dict(ps_envs),
+            controls=ps_controls,
+            overlay=ps_overlay,
+        )
+        if source_params is not None:
+            return source_params
+
         overlay_requested = bool(ps_overlay)
-        if ps_overlay and not _geak_overlay_is_loadable(ps_overlay):
+        if ps_overlay and not geak_overlay_is_loadable(ps_overlay):
             log.warning(
                 "geak 2b: overlay %r is not loadable (no sitecustomize.py); "
                 "revalidating the config WITHOUT the authored kernel",
@@ -4402,7 +4394,6 @@ class WritebackCollaborator(CoordinatorCollaborator):
         if not (ps_flags or ps_envs or ps_controls or ps_overlay):
             if not ps_has_material:
                 return {"skipped": True, "reason": "geak_no_material"}
-            # A dead overlay or a source-patch-only result cannot be represented by this grid.
             return {
                 "skipped": True,
                 "reason": "geak_overlay_unloadable" if overlay_requested else "geak_material_requires_harness",
@@ -4427,8 +4418,6 @@ class WritebackCollaborator(CoordinatorCollaborator):
             base_unset_envs=base_params.get("base_unset_envs"),
             base_args_mode=base_params.get("base_args_mode"),
         )
-        # ``expected_cfg_hash`` cannot see the overlay, so its digest travels beside it and both are re-checked after
-        # the run: a dropped or altered overlay then reads as inconclusive rather than as a validated kernel win.
         expected_overlay_digest = _geak_overlay_digest(ps_overlay)
         ps_kernels = [geak_spec_name(k) for k in _geak_accepted_kernel_specs(ps)]
         params_ps: dict[str, Any] = {
@@ -4447,12 +4436,10 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     **ps_controls,
                     "overlay_pythonpath": ps_overlay,
                     "provenance": "geak_revalidate",
-                    # Only an overlay actually being loaded carries kernels.
                     "accepted_kernels": ps_kernels if ps_overlay else [],
                     "note": "same-harness config-identity revalidation of the geak e2e win",
                 }
             ],
-            # The rebench reproduces the whole stack, so its gain is cumulative-vs-baseline.
             "base_tput": float(self.shared_state.baseline_tput or 0.0),
             **base_params,
         }
@@ -4588,7 +4575,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         # one holding no ``sitecustomize.py``. Only 9 can install a kernel. A
         # non-empty string is therefore not evidence the kernel ran, and using
         # it as evidence would stamp 55 flag-only measurements as kernel wins.
-        # Same check 2b runs; see ``_geak_overlay_is_loadable``.
+        # Same check 2b runs; see ``geak_overlay_is_loadable``.
         ps_overlay_2a = _normalize_geak_overlay_dir(str(ps.get("final_overlay") or "").strip())
         overlay_digest_before = _geak_overlay_digest(ps_overlay_2a) if ps_overlay_2a else ""
         am = ps.get("alignment_metrics") or {}
@@ -4680,7 +4667,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             # The replay proves the config engaged. It does not prove the
             # overlay did: the overlay has to still be loadable, and still be
             # the same overlay, at the moment the replay ran.
-            overlay_loaded_2a = bool(ps_overlay_2a) and _geak_overlay_is_loadable(ps_overlay_2a)
+            overlay_loaded_2a = bool(ps_overlay_2a) and geak_overlay_is_loadable(ps_overlay_2a)
             if overlay_loaded_2a and overlay_digest_before:
                 overlay_loaded_2a = _geak_overlay_digest(ps_overlay_2a) == overlay_digest_before
             if ps_overlay_2a and not overlay_loaded_2a:
@@ -4689,7 +4676,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     "(loadable=%r digest before=%r after=%r) -> gain credited "
                     "to config, not to a kernel",
                     ps_overlay_2a,
-                    _geak_overlay_is_loadable(ps_overlay_2a),
+                    geak_overlay_is_loadable(ps_overlay_2a),
                     overlay_digest_before,
                     _geak_overlay_digest(ps_overlay_2a),
                 )

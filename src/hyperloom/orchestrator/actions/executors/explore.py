@@ -4,7 +4,7 @@
 """ExploreExecutor."""
 
 from __future__ import annotations
-
+from hyperloom.orchestrator.actions.executors._workload_envs import materialize_benchmark_config
 import functools
 import logging
 import os
@@ -103,7 +103,6 @@ from ._server_lifecycle import (
 from ._workload_envs import (
     FrameworkScriptMismatchError,
     default_baseline_config,
-    materialize_config_with_envs,
 )
 
 
@@ -747,7 +746,7 @@ class ExploreExecutor:
                 "error": str(exc),
             }
         try:
-            config_path = materialize_config_with_envs(
+            config_path = materialize_benchmark_config(
                 config_path,
                 output_root,
                 model_path=resolved_model or None,

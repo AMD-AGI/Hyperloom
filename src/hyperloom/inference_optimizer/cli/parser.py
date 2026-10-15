@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from .benchmark_config import add_benchmark_argument
+
 import argparse
 import os
 from pathlib import Path
@@ -186,7 +188,6 @@ def _build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--verbose", "-v", action="count", default=0, help="Verbose logging (-v INFO, -vv DEBUG)")
     sub = p.add_subparsers(dest="command", required=True)
-
     opt = sub.add_parser("optimize", parents=[common], help="Drive a multi-agent optimization run on a model")
     opt.add_argument(
         "--model",
@@ -300,6 +301,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--framework custom; for the built-in frameworks it overrides the "
         "checkout they would otherwise clone.",
     )
+    add_benchmark_argument(opt)
     opt.add_argument(
         "--benchmark-scripts-dir",
         default=None,

@@ -2120,7 +2120,7 @@ async def test_bench_patch_holds_and_closes_serving_lease(tmp_path: Path):
     lease = MagicMock()
     with (
         patch.object(ip_mod, "run_grid", new=fake_run_grid),
-        patch.object(ip_mod, "materialize_config_with_envs", return_value=config_path),
+        patch.object(ip_mod, "materialize_benchmark_config", return_value=config_path),
         patch.object(_ray_serving, "maybe_serving_lease", return_value=lease),
     ):
         await executor._bench_patch(
@@ -2163,7 +2163,7 @@ async def test_bench_patch_routes_variant_args_and_envs_separately(tmp_path: Pat
 
     with (
         patch.object(ip_mod, "run_grid", new=fake_run_grid),
-        patch.object(ip_mod, "materialize_config_with_envs", return_value=config_path),
+        patch.object(ip_mod, "materialize_benchmark_config", return_value=config_path),
         patch.object(_ray_serving, "maybe_serving_lease", return_value=None),
     ):
         await executor._bench_patch(
@@ -2232,7 +2232,7 @@ async def test_bench_patch_preserves_measurement_and_protocol(tmp_path: Path, mo
         return [measured]
 
     monkeypatch.setattr(ip_mod, "run_grid", fake_run_grid)
-    monkeypatch.setattr(ip_mod, "materialize_config_with_envs", lambda *_args, **_kwargs: config_path)
+    monkeypatch.setattr(ip_mod, "materialize_benchmark_config", lambda *_args, **_kwargs: config_path)
     monkeypatch.setattr(_ray_serving, "maybe_serving_lease", lambda **_kwargs: None)
     executor = IntegratePatchExecutor(session_dir=tmp_path)
     bench, gate = await executor._bench_patch(
@@ -2352,7 +2352,7 @@ async def test_executor_grades_real_patch_bench(
         return [measured]
 
     monkeypatch.setattr(ip_mod, "run_grid", fake_run_grid)
-    monkeypatch.setattr(ip_mod, "materialize_config_with_envs", lambda *_args, **_kwargs: config_path)
+    monkeypatch.setattr(ip_mod, "materialize_benchmark_config", lambda *_args, **_kwargs: config_path)
     monkeypatch.setattr(_ray_serving, "maybe_serving_lease", lambda **_kwargs: None)
     state = SimpleNamespace(
         phase="FRAMEWORK_AGENT",
@@ -2491,7 +2491,7 @@ async def test_executor_rebinds_base_from_live_current_best(tmp_path: Path, monk
     )
     ctx = RunnerContext(task=task, lease=None, extra={"shared_state": live_state})
 
-    with patch.object(ip_mod, "materialize_config_with_envs", return_value=tmp_path / "cfg.yaml"):
+    with patch.object(ip_mod, "materialize_benchmark_config", return_value=tmp_path / "cfg.yaml"):
         (tmp_path / "cfg.yaml").write_text("benchmark: {}\n", encoding="utf-8")
         result = await executor(ctx)
 
@@ -2565,7 +2565,7 @@ async def test_bench_patch_captures_effective_config(
 
     with (
         patch.object(ip_mod, "run_grid", new=fake_run_grid),
-        patch.object(ip_mod, "materialize_config_with_envs", return_value=config_path),
+        patch.object(ip_mod, "materialize_benchmark_config", return_value=config_path),
     ):
         bench, _ = await executor._bench_patch(
             params=task_params,
@@ -2725,7 +2725,7 @@ async def test_mlperf_integrate_patch_is_gated_on_inline_accuracy(tmp_path: Path
         return [measured]
 
     monkeypatch.setattr(ip_mod, "run_grid", fake_run_grid)
-    monkeypatch.setattr(ip_mod, "materialize_config_with_envs", lambda *_args, **_kwargs: config_path)
+    monkeypatch.setattr(ip_mod, "materialize_benchmark_config", lambda *_args, **_kwargs: config_path)
     monkeypatch.setattr(_ray_serving, "maybe_serving_lease", lambda **_kwargs: None)
     state = SimpleNamespace(
         phase="FRAMEWORK_AGENT",
@@ -2836,7 +2836,7 @@ async def test_a_scriptable_source_patch_over_the_latency_budget_is_reverted(
         return [measured]
 
     monkeypatch.setattr(ip_mod, "run_grid", fake_run_grid)
-    monkeypatch.setattr(ip_mod, "materialize_config_with_envs", lambda *_args, **_kwargs: config_path)
+    monkeypatch.setattr(ip_mod, "materialize_benchmark_config", lambda *_args, **_kwargs: config_path)
     monkeypatch.setattr(_ray_serving, "maybe_serving_lease", lambda **_kwargs: None)
     state = SimpleNamespace(
         phase="FRAMEWORK_AGENT",
@@ -2967,7 +2967,7 @@ async def test_a_source_patch_over_the_power_budget_is_reverted(
         return [measured]
 
     monkeypatch.setattr(ip_mod, "run_grid", fake_run_grid)
-    monkeypatch.setattr(ip_mod, "materialize_config_with_envs", lambda *_args, **_kwargs: config_path)
+    monkeypatch.setattr(ip_mod, "materialize_benchmark_config", lambda *_args, **_kwargs: config_path)
     monkeypatch.setattr(_ray_serving, "maybe_serving_lease", lambda **_kwargs: None)
     state = SimpleNamespace(
         phase="FRAMEWORK_AGENT",
