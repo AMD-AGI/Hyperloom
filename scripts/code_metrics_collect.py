@@ -67,13 +67,6 @@ METRICS = {
     )
 }
 
-#: Metrics this copy of the gate can measure but whose threshold may still be absent
-#: from ``pyproject.toml``: a new dimension lands in two steps (style guide § *Size and
-#: complexity*), because the base branch's copy judges the commit that adds the key.
-#: A pending metric is measured only once its threshold is there, and the name leaves
-#: this tuple in the same commit as the key.
-PENDING = (FUNCTION_ARGS,)
-
 #: Ruff rule -> (metric, the ruff setting that carries its threshold).
 RUFF_RULES = {
     "C901": ("cyclomatic-complexity", "lint.mccabe.max-complexity"),

@@ -79,6 +79,7 @@ Two layers. The **gate** is the `code-metrics` CI job (`scripts/code_metrics.py`
 | Cognitive complexity | > 30 | Twice SonarSource's S3776 default of 15, the same step as the ceiling; it weights nesting, so past 30 a function has to be re-read rather than read | complexipy |
 | Function length | > 80 lines | A function past one screen; counted as below, `def` line through the last line | the script |
 | Nested block depth | > 5 | pylint `R1702` default: past five levels the innermost line depends on six conditions at once | ruff `PLR1702` |
+| Parameter count | > 5 | pylint `R0913` default: past five, the call site stops reading as a sentence and the values travel together anyway — pass the object they come from, or name them in a dataclass (A8). `self`/`cls` and `*args`/`**kwargs` do not count; keyword-only parameters do | ruff `PLR0913` |
 | Module length | > 1200 lines (over 800 is a report-only warning) | Half again the 800-line review trigger; at that size a module almost always holds more than one job | the script |
 | Duplicated code | any clone of >= 100 tokens and >= 10 lines | SonarSource CPD defaults | jscpd |
 | Dead code | any finding at >= 80% confidence | vulture's recommended CI setting | vulture |

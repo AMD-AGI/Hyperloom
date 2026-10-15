@@ -85,7 +85,6 @@ import code_metrics_design as design
 from code_metrics_collect import (
     METRICS,
     MODULE,
-    PENDING,
     Finding,
     Key,
     ToolError,
@@ -176,11 +175,8 @@ def parse_config(text: str) -> Config | None:
     if table is None:
         return None
     thresholds = dict(table["thresholds"])
-    required = set(METRICS) - set(PENDING)
-    if not required <= set(thresholds) <= set(METRICS):
-        raise ToolError(
-            f"thresholds must name {sorted(required)} and may add {sorted(PENDING)}, got {sorted(thresholds)}"
-        )
+    if set(thresholds) != set(METRICS):
+        raise ToolError(f"thresholds must name exactly {sorted(METRICS)}, got {sorted(thresholds)}")
     baseline, contracts = _file_path(table, "baseline"), _file_path(table, "import-contracts")
     return Config(
         baseline=baseline,
