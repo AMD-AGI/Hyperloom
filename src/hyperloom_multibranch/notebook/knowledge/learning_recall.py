@@ -8,7 +8,8 @@
 session's conditions. Each past learning says whether it was learnt under every one of them (model, GPU, framework,
 TP, concurrency, sequence lengths) and whether tests backed it. Each query is read once a session, since a read plans
 with an LLM; until some session has published learnings the service does not know the schema, and the read says it is
-unavailable.
+unavailable. Given a ``RetrievalLog``, each retrieval is one line of it, this session's and past sessions' learnings
+together.
 """
 
 from __future__ import annotations
@@ -16,17 +17,25 @@ from __future__ import annotations
 import asyncio
 import threading
 from collections import OrderedDict
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from hyperloom_kb import ReadStatus, RemoteExperienceKB
 from hyperloom_kb.collect import load_mapping
-from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot, SessionProfile
+from hyperloom_multibranch.contracts.notebook.records import LearningRecord, NotebookSnapshot, SessionProfile
 from hyperloom_multibranch.notebook.knowledge.experience import experience_identity
 from hyperloom_multibranch.notebook.knowledge.learnings import MAPPING_PATH
 from hyperloom_multibranch.notebook.knowledge.recall import WORKLOAD_KEYS, ExperienceReader, IdentityIndex, classify
-from hyperloom_multibranch.notebook.learning_search import SessionLearnings, words
+from hyperloom_multibranch.notebook.learning_search import (
+    SESSION_HEADING,
+    RetrievalLog,
+    RetrievalSource,
+    SessionLearnings,
+    render_session_learning,
+    session_matches,
+    words,
+)
 
 LEARNING_DECISION = "Choose the next step of one branch of a multi-branch LLM inference optimization session."
 LEARNING_OBJECTIVE = "specialist_learning@v1"
@@ -114,24 +123,57 @@ def read_past_learnings(
     )
 
 
-class LearningRecall:
+class LearningRecall(SessionLearnings):
     """One session's retrieval over the learnings, shared by every branch's tools and briefs.
 
     ``reader`` reads the learning schema of the Experience KB, ``None`` without one; ``identities`` looks up the
-    conditions the read summaries leave out, by default on ``reader``'s service. Each query is read once.
+    conditions the read summaries leave out, by default on ``reader``'s service. Each query is read once. ``log`` keeps
+    what each retrieval showed, this session's and past sessions' learnings on one line.
     """
 
-    def __init__(self, reader: ExperienceReader | None = None, *, identities: IdentityIndex | None = None) -> None:
+    def __init__(
+        self,
+        reader: ExperienceReader | None = None,
+        *,
+        identities: IdentityIndex | None = None,
+        log: RetrievalLog | None = None,
+    ) -> None:
+        super().__init__(log)
         self._reader = reader
         self._identities = identities if identities is not None else IdentityIndex.of(reader)
         self._read: OrderedDict[tuple[str, int], PastLearnings] = OrderedDict()
         self._lock = threading.Lock()
 
     @classmethod
-    def from_env(cls, env: Mapping[str, str] | None = None) -> LearningRecall:
+    def from_env(cls, env: Mapping[str, str] | None = None, *, log: RetrievalLog | None = None) -> LearningRecall:
         """The recall on the Experience KB ``HYPERLOOM_KB_URL`` names; this session's learnings only without one."""
 
-        return cls(RemoteExperienceKB.from_env(load_mapping(MAPPING_PATH).declaration, env))
+        return cls(RemoteExperienceKB.from_env(load_mapping(MAPPING_PATH).declaration, env), log=log)
+
+    def record(
+        self,
+        snapshot: NotebookSnapshot,
+        *,
+        branch: str,
+        source: RetrievalSource,
+        query: str,
+        here: Sequence[LearningRecord],
+        past: PastLearnings | None,
+    ) -> None:
+        """Log one retrieval: this session's learnings ``here`` and the read of past sessions'; nothing without a log."""
+
+        if self.log is None:
+            return
+        found = past.items if past is not None else ()
+        self.log.record(
+            snapshot,
+            branch=branch,
+            source=source,
+            query=query,
+            here=here,
+            past=[item.experience_id for item in found],
+            past_status=past.status if past is not None else "",
+        )
 
     def past(self, profile: SessionProfile, query: str, *, limit: int) -> PastLearnings:
         key = (" ".join(sorted(words(query))), limit)
@@ -147,17 +189,25 @@ class LearningRecall:
                     self._read.popitem(last=False)
         return found
 
-    async def lines(self, snapshot: NotebookSnapshot, query: str, *, limit: int) -> list[str]:
+    async def lines(self, snapshot: NotebookSnapshot, query: str, *, limit: int, branch: str = "") -> list[str]:
         """This session's matches, then past sessions', each under its heading; empty when nothing matched."""
 
-        before: list[str] = []
+        here = session_matches(snapshot, query, limit=limit)
+        past = None
         if snapshot.profile is not None and self._reader is not None:
-            found = await asyncio.to_thread(self.past, snapshot.profile, query, limit=limit)
-            before = [item.render() for item in found.items]
-            if not found.available:
-                before = [f"- unavailable ({'; '.join(found.warnings) or found.status})"]
-        here = await SessionLearnings().lines(snapshot, query, limit=limit)
-        return [*here, *([PAST_HEADING, *before] if before else [])]
+            past = await asyncio.to_thread(self.past, snapshot.profile, query, limit=limit)
+        self.record(snapshot, branch=branch, source=RetrievalSource.TOOL, query=query, here=here, past=past)
+        rendered = [render_session_learning(record, snapshot) for record in here]
+        before = _rendered_past(past)
+        return [*([SESSION_HEADING, *rendered] if rendered else []), *([PAST_HEADING, *before] if before else [])]
+
+
+def _rendered_past(past: PastLearnings | None) -> list[str]:
+    if past is None:
+        return []
+    if not past.available:
+        return [f"- unavailable ({'; '.join(past.warnings) or past.status})"]
+    return [item.render() for item in past.items]
 
 
 __all__ = [

@@ -6,8 +6,10 @@
 from __future__ import annotations
 
 import dataclasses
+import json
+from pathlib import Path
 
-from hyperloom_kb import RemoteReadResult
+from hyperloom_kb import ReadStatus, RemoteReadResult
 
 from hyperloom_multibranch.contracts.notebook.records import Learning, LearningRecord, NotebookSnapshot
 from hyperloom_multibranch.contracts.notebook.vocab import LearningKind
@@ -18,6 +20,7 @@ from hyperloom_multibranch.notebook.knowledge.learning_recall import (
 )
 from hyperloom_multibranch.notebook.knowledge.recall import IdentityIndex
 from hyperloom_multibranch.notebook.knowledge.tests.fakes import FakeExperienceReader, FakeExport, completed_read
+from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG, RetrievalLog
 from hyperloom_multibranch.notebook.tests.factories import profile
 
 SAME = {
@@ -81,15 +84,15 @@ def test_without_the_identity_in_the_summary_the_export_supplies_it() -> None:
     assert item.differing == ()
 
 
+def _learnt(snapshot: NotebookSnapshot) -> NotebookSnapshot:
+    smaller = Learning("s1", LearningKind.INSIGHT, "a smaller kv cache block helps decode")
+    return dataclasses.replace(snapshot, learnings=(LearningRecord("s1:1", 1.0, smaller),))
+
+
 async def test_this_sessions_learnings_come_first_and_each_query_is_read_once(snapshot: NotebookSnapshot) -> None:
     reader = FakeExperienceReader(completed_read(_past("exp-same", SAME)))
     recall = LearningRecall(reader)
-    learnt = dataclasses.replace(
-        snapshot,
-        learnings=(
-            LearningRecord("s1:1", 1.0, Learning("s1", LearningKind.INSIGHT, "a smaller kv cache block helps decode")),
-        ),
-    )
+    learnt = _learnt(snapshot)
 
     first = await recall.lines(learnt, "kv cache block", limit=5)
     again = await recall.lines(learnt, "block cache kv", limit=5)
@@ -113,3 +116,20 @@ async def test_an_unavailable_kb_says_so_and_is_read_again_next_time(snapshot: N
     assert lines == ["Past sessions' learnings:", "- unavailable (unregistered schema)"]
     assert len(reader.calls) == 2
     assert await LearningRecall().lines(snapshot, "kv cache", limit=5) == []
+
+
+async def test_one_retrieval_logs_this_sessions_and_past_sessions_learnings_on_one_line(
+    snapshot: NotebookSnapshot, tmp_path: Path
+) -> None:
+    path = tmp_path / LEARNINGS_LOG
+    reader = FakeExperienceReader(completed_read(_past("exp-same", SAME)))
+    recall = LearningRecall(reader, log=RetrievalLog(path))
+
+    await recall.lines(_learnt(snapshot), "kv cache block", limit=5, branch="s2")
+    await LearningRecall(log=RetrievalLog(path)).lines(snapshot, "kv cache", limit=5, branch="s3")
+    logged = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+    assert [(line["branch"], line["source"], line["here"], line["past"], line["past_status"]) for line in logged] == [
+        ("s2", "tool", ["s1:1"], ["exp-same"], ReadStatus.COMPLETED.value),
+        ("s3", "tool", [], [], ""),
+    ]

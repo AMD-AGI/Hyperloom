@@ -7,27 +7,91 @@ A query matches a learning no later one superseded by the words they share, a wo
 about counting double; among equals the newer comes first. :class:`LearningFinder` is what the tools ask for
 learnings: :class:`SessionLearnings` answers from this session alone, and the knowledge package's
 ``LearningRecall`` adds past sessions' from the Experience KB.
+
+Given a :class:`RetrievalLog`, a finder appends one :data:`LEARNINGS_LOG_FORMAT` line per retrieval: when, to which
+branch, through what (the learnings tool, a granted claim, a startup brief), for what query, and what came back. Set
+beside what each branch did next, the log is how retrieval gets evaluated.
 """
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Sequence
+from dataclasses import dataclass
+from enum import Enum
+from pathlib import Path
 from typing import Protocol
 
+from hyperloom.common.io import append_jsonl
 from hyperloom_multibranch.contracts.notebook.peers import Validity
 from hyperloom_multibranch.contracts.notebook.records import LearningRecord, NotebookSnapshot, TestRecord
+
+log = logging.getLogger(__name__)
 
 _WORD = re.compile(r"[a-z0-9][a-z0-9._+-]*")
 _STOPWORDS = frozenset(
     {"a", "an", "and", "at", "by", "for", "in", "is", "it", "no", "not", "of", "on", "or", "the", "this", "to", "with"}
 )
 SESSION_HEADING = "This session's learnings:"
+LEARNINGS_LOG_FORMAT = "multibranch.learnings-log.v1"
+#: The retrieval log's usual name in the session's reports folder.
+LEARNINGS_LOG = "learnings.jsonl"
+
+
+class RetrievalSource(str, Enum):
+    """How a branch came to be shown learnings: it asked, its claim was granted, or its startup brief listed them."""
+
+    TOOL = "tool"
+    CLAIM = "claim"
+    BRIEF = "brief"
+
+
+@dataclass(frozen=True)
+class RetrievalLog:
+    """The session's log of the learnings shown to its branches; a failed append is logged and holds up nobody.
+
+    A line names this session's learnings by entry id, past sessions' by Experience id, and the past read's status
+    (empty when nothing read past sessions).
+    """
+
+    path: Path
+
+    def record(
+        self,
+        snapshot: NotebookSnapshot,
+        *,
+        branch: str,
+        source: RetrievalSource,
+        query: str,
+        here: Sequence[LearningRecord],
+        past: Sequence[str] = (),
+        past_status: str = "",
+    ) -> None:
+        line = {
+            "format": LEARNINGS_LOG_FORMAT,
+            "at": snapshot.taken_at,
+            "branch": branch,
+            "source": source.value,
+            "query": query,
+            "here": [record.entry_id for record in here],
+            "past": list(past),
+            "past_status": past_status,
+        }
+        try:
+            append_jsonl(self.path, line, make_parents=True, sort_keys=True)
+        except OSError as exc:
+            log.warning("could not append the learnings retrieval to %s: %s", self.path, exc)
 
 
 class LearningFinder(Protocol):
-    async def lines(self, snapshot: NotebookSnapshot, query: str, *, limit: int) -> list[str]:
-        """The learnings that bear on ``query``, as headed lines; empty when none does."""
+    def here(
+        self, snapshot: NotebookSnapshot, query: str, *, limit: int, branch: str, source: RetrievalSource
+    ) -> tuple[LearningRecord, ...]:
+        """This session's learnings that bear on ``query``, best first, without waiting on any knowledge base."""
+
+    async def lines(self, snapshot: NotebookSnapshot, query: str, *, limit: int, branch: str = "") -> list[str]:
+        """The learnings that bear on ``query`` for ``branch``, as headed lines; empty when none does."""
 
 
 def current_learnings(snapshot: NotebookSnapshot) -> tuple[LearningRecord, ...]:
@@ -101,18 +165,36 @@ def fit_lines(lines: Sequence[str], max_chars: int) -> list[str]:
 
 
 class SessionLearnings:
-    """The finder without a knowledge base: this session's learnings only."""
+    """The finder without a knowledge base: this session's learnings only; ``log`` keeps what each retrieval showed."""
 
-    async def lines(self, snapshot: NotebookSnapshot, query: str, *, limit: int) -> list[str]:
+    def __init__(self, log: RetrievalLog | None = None) -> None:
+        self.log = log
+
+    def here(
+        self, snapshot: NotebookSnapshot, query: str, *, limit: int, branch: str, source: RetrievalSource
+    ) -> tuple[LearningRecord, ...]:
+        """This session's matches, best first, logged as one retrieval by ``branch`` through ``source``."""
+
+        found = session_matches(snapshot, query, limit=limit)
+        if self.log is not None:
+            self.log.record(snapshot, branch=branch, source=source, query=query, here=found)
+        return found
+
+    async def lines(self, snapshot: NotebookSnapshot, query: str, *, limit: int, branch: str = "") -> list[str]:
         """This session's matches under their heading; empty when none matched."""
 
-        found = [render_session_learning(record, snapshot) for record in session_matches(snapshot, query, limit=limit)]
-        return [SESSION_HEADING, *found] if found else []
+        found = self.here(snapshot, query, limit=limit, branch=branch, source=RetrievalSource.TOOL)
+        rendered = [render_session_learning(record, snapshot) for record in found]
+        return [SESSION_HEADING, *rendered] if rendered else []
 
 
 __all__ = [
+    "LEARNINGS_LOG",
+    "LEARNINGS_LOG_FORMAT",
     "SESSION_HEADING",
     "LearningFinder",
+    "RetrievalLog",
+    "RetrievalSource",
     "SessionLearnings",
     "current_learnings",
     "fit_lines",

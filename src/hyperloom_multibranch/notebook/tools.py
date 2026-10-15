@@ -54,10 +54,10 @@ from hyperloom_multibranch.contracts.notebook.records import (
 from hyperloom_multibranch.contracts.notebook.vocab import LearningKind
 from hyperloom_multibranch.notebook.learning_search import (
     LearningFinder,
+    RetrievalSource,
     SessionLearnings,
     fit_lines,
     render_session_learning,
-    session_matches,
 )
 from hyperloom_multibranch.notebook.local.notebook import LEARNING_MAX_CHARS, LEARNING_MIN_CHARS
 
@@ -205,7 +205,9 @@ class _SpecialistTools:
         reason = str(arguments.get("reason") or "")
         held = await self.notebook.acquire(intent, _action(arguments), ttl_seconds=self.ttl_seconds, reason=reason)
         snapshot = await self.notebook.snapshot()
-        related = session_matches(snapshot, f"{target} {mechanism}", limit=CLAIM_LEARNINGS)
+        related = self.finder.here(
+            snapshot, f"{target} {mechanism}", limit=CLAIM_LEARNINGS, branch=self.branch, source=RetrievalSource.CLAIM
+        )
         if not related:
             return render_claim(held)
         learnt = [render_session_learning(record, snapshot) for record in related]
@@ -258,7 +260,8 @@ class _SpecialistTools:
 
     async def learnings(self, arguments: Arguments) -> str:
         limit = min(int(arguments.get("limit") or MAX_LINES), MAX_LINES)
-        found = await self.finder.lines(await self.notebook.snapshot(), str(arguments["query"]), limit=limit)
+        snapshot = await self.notebook.snapshot()
+        found = await self.finder.lines(snapshot, str(arguments["query"]), limit=limit, branch=self.branch)
         return "\n".join(fit_lines(found, MAX_REPLY_CHARS)) or "nothing matched"
 
     async def brief(self, arguments: Arguments) -> str:

@@ -36,7 +36,7 @@ from hyperloom_multibranch.notebook.knowledge.recall import (
     recall_experiences,
 )
 from hyperloom_multibranch.notebook.knowledge.warm_start import WarmLead
-from hyperloom_multibranch.notebook.learning_search import render_session_learning, session_matches
+from hyperloom_multibranch.notebook.learning_search import RetrievalSource, render_session_learning, session_matches
 from hyperloom_multibranch.notebook.rsi.analysis import FailureTier, failures_at, repeated_failures
 
 DEFAULT_MAX_CHARS = 4000
@@ -125,11 +125,20 @@ class CrossSessionBriefing(StartupBriefProvider):
             identities=self.identities,
         )
 
-    async def _past_learnings(self, snapshot: NotebookSnapshot) -> list[str]:
-        if self.learnings is None or snapshot.profile is None:
-            return []
-        found = await asyncio.to_thread(self.learnings.past, snapshot.profile, self.focus, limit=LEARNINGS)
-        return [f"learnt before: {item.render()[2:]}" for item in found.items]
+    async def _learnt(self, snapshot: NotebookSnapshot) -> tuple[list[str], list[str]]:
+        """This session's learnings about ``focus`` and past sessions', as lessons; the recall logs what it showed."""
+
+        here = session_matches(snapshot, self.focus, limit=LEARNINGS)
+        past = None
+        if self.learnings is not None and snapshot.profile is not None:
+            past = await asyncio.to_thread(self.learnings.past, snapshot.profile, self.focus, limit=LEARNINGS)
+        if self.learnings is not None:
+            self.learnings.record(
+                snapshot, branch=self.branch, source=RetrievalSource.BRIEF, query=self.focus, here=here, past=past
+            )
+        learnt_here = [f"learnt here: {render_session_learning(record, snapshot)[2:]}" for record in here]
+        learnt_before = [f"learnt before: {item.render()[2:]}" for item in (past.items if past is not None else ())]
+        return learnt_here, learnt_before
 
     async def startup_brief(self, start_commit: str) -> StartupBrief:
         tried = await self.notebook.startup_brief(start_commit)
@@ -140,11 +149,7 @@ class CrossSessionBriefing(StartupBriefProvider):
             for direction, count in repeated_failures(on_line)
         ]
         recalled = _recalled(await self._recall(snapshot))
-        learnt_here = [
-            f"learnt here: {render_session_learning(record, snapshot)[2:]}"
-            for record in session_matches(snapshot, self.focus, limit=LEARNINGS)
-        ]
-        learnt_before = await self._past_learnings(snapshot)
+        learnt_here, learnt_before = await self._learnt(snapshot)
         kb_lessons = [
             f"{lead.canonical_id}: {text}" for lead in self.warm for text in (*lead.pitfalls, *lead.what_failed)
         ]

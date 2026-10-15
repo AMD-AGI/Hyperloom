@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 from pathlib import Path
 
 from hyperloom_kb import RemoteReadResult
@@ -31,6 +32,7 @@ from hyperloom_multibranch.notebook.knowledge.tests.fakes import (
     experience_summary,
 )
 from hyperloom_multibranch.notebook.knowledge.warm_start import WarmLead
+from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG, RetrievalLog
 from hyperloom_multibranch.notebook.rsi.briefing import CrossSessionBriefing
 from hyperloom_multibranch.notebook.tests.factories import FakeClock, judgement, profile, request, result
 from hyperloom_multibranch.notebook.tests.sessions import METRIC, SPLIT_KV, scripted_session
@@ -176,10 +178,16 @@ async def test_the_lessons_hold_what_this_session_and_past_sessions_learnt_about
         "change_summary": "attention split kv pays only past conc 128",
         "decision": "measured",
     }
-    recall = LearningRecall(FakeExperienceReader(completed_read(past)))
+    log = tmp_path / LEARNINGS_LOG
+    recall = LearningRecall(FakeExperienceReader(completed_read(past)), log=RetrievalLog(log))
 
-    brief = await CrossSessionBriefing(notebook, focus="attention split kv", learnings=recall).startup_brief("c0")
+    briefing = CrossSessionBriefing(notebook, focus="attention split kv", branch="s3", learnings=recall)
+    brief = await briefing.startup_brief("c0")
     alone = await CrossSessionBriefing(notebook, focus="attention split kv").startup_brief("c0")
+    (logged,) = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+
+    assert (logged["branch"], logged["source"], logged["query"]) == ("s3", "brief", "attention split kv")
+    assert (logged["here"], logged["past"]) == ([learnt.entry_id], ["exp-past"])
 
     assert (
         f"learnt here: [s2, pitfall] split kv regresses when attention is not the bottleneck "

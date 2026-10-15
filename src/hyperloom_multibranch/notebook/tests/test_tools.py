@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.notebook.peers import Validity
 from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot, StartupBrief, TestRecord
 from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG, RetrievalLog, SessionLearnings
 from hyperloom_multibranch.notebook.tests.factories import FakeClock, intent, request, result
 from hyperloom_multibranch.notebook.tests.sessions import scripted_session
 from hyperloom_multibranch.notebook.tools import ERROR, MAX_LINES, NotebookTool, lines, notebook_tools, outcome
@@ -170,21 +172,43 @@ async def test_a_granted_claim_lists_this_sessions_learnings_about_its_direction
 
 async def test_the_learnings_tool_finds_this_sessions_and_what_its_finder_adds(tools_of: Tools) -> None:
     class _Past:
-        async def lines(self, snapshot: NotebookSnapshot, query: str, *, limit: int) -> list[str]:
+        def __init__(self) -> None:
+            self.asked: list[str] = []
+
+        async def lines(self, snapshot: NotebookSnapshot, query: str, *, limit: int, branch: str = "") -> list[str]:
+            self.asked.append(branch)
             return ["Past sessions' learnings:", f"- [sess-0, same conditions, measured] {query} paid off [exp-1]"]
 
     s1 = tools_of("s1")
     await _call(s1, "learn", kind="insight", content="attention dominates decode at conc 64 on this model")
+    finder = _Past()
 
     found = (await _call(s1, "learnings", query="attention decode")).splitlines()
     none = await _call(s1, "learnings", query="speculative draft tokens")
-    past = await _call(tools_of("s1", learnings=_Past()), "learnings", query="fp8 kv cache")
+    past = await _call(tools_of("s1", learnings=finder), "learnings", query="fp8 kv cache")
 
     assert found[0] == "This session's learnings:" and "attention dominates decode at conc 64" in found[1]
     assert none == "nothing matched"
     assert past.splitlines() == [
         "Past sessions' learnings:",
         "- [sess-0, same conditions, measured] fp8 kv cache paid off [exp-1]",
+    ]
+    assert finder.asked == ["s1"]
+
+
+async def test_a_claim_and_the_learnings_tool_log_what_they_showed_the_branch(tools_of: Tools, tmp_path: Path) -> None:
+    path = tmp_path / "reports" / LEARNINGS_LOG
+    s1 = tools_of("s1", learnings=SessionLearnings(RetrievalLog(path)))
+    pitfall = "flash decode stalls unless the block size is 16"
+    await _call(tools_of("s2"), "learn", kind="pitfall", content=pitfall, target="flash decode", mechanism="block size")
+
+    await _call(s1, "claim", **FLASH_ON_C1)
+    await _call(s1, "learnings", query="block size")
+    logged = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+    assert [(line["branch"], line["source"], line["query"], len(line["here"])) for line in logged] == [
+        ("s1", "claim", "attention flash decode", 1),
+        ("s1", "tool", "block size", 1),
     ]
 
 
