@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import statistics
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -142,33 +143,65 @@ def test_a_pair_that_ran_on_another_node_than_the_driver_is_not_a_unit_either(ri
     assert rig.lines("unit") == [] and len(rig.lines("attempt_failed")) == 1
 
 
-def _unit_line(item: str, rep: int, node: str, *, diff: float = 0.1, hosted_node: str | None = None) -> dict:
-    side = {"returncode": 0, "output_throughput": 5000.0, "problem": None}
+def _unit_line(
+    item: str,
+    rep: int,
+    node: str,
+    *,
+    local: float = 5000.0,
+    hosted: float = 5000.0,
+    hosted_node: str | None = None,
+    completed_equal: bool = True,
+) -> dict:
+    side = {"returncode": 0, "problem": None}
     return {
         "type": "unit", "id": item, "rep": rep, "node_name": node, "run_id": f"r-{node}", "compared": True,
-        "local": {**side, "node_name": node}, "hosted": {**side, "node_name": hosted_node or node},
-        "throughput_diff_pct": diff, "completed_equal": True, "error_rate_equal": True, "rebuilt_files_equal": None,
-        "signature_verified": True, "problems": [],
+        "local": {**side, "output_throughput": local, "node_name": node},
+        "hosted": {**side, "output_throughput": hosted, "node_name": hosted_node or node},
+        "throughput_diff_pct": abs(hosted - local) / local * 100, "completed_equal": completed_equal,
+        "error_rate_equal": True, "rebuilt_files_equal": None, "signature_verified": True, "problems": [],
     }  # fmt: skip
 
 
-def test_the_summary_is_over_all_complete_lines_and_counts_the_distinct_nodes(tmp_path: Path) -> None:
+def test_the_summary_compares_each_tests_means_over_units_from_several_nodes(tmp_path: Path) -> None:
     units = resume.plan_units(_items("t", repeats=3))
-    lines = [_unit_line("t", 1, "n1", diff=0.2), _unit_line("t", 2, "n2", diff=0.4), _unit_line("t", 3, "n1", diff=0.6)]
+    lines = [
+        _unit_line("t", 1, "n1", hosted=5010.0),
+        _unit_line("t", 2, "n2", hosted=4990.0),
+        _unit_line("t", 3, "n1", hosted=5005.0),
+    ]
     summary = resume.resume_summary(units, lines)
-    assert (summary["verdict"], summary["units_complete"], summary["nodes"], summary["node_names"]) == (
-        "PASS",
-        3,
-        2,
-        ["n1", "n2"],
-    )
-    assert summary["median_diff_pct"] == pytest.approx(0.4)
-    assert resume.resume_summary(units, lines[:2])["verdict"] == "INCOMPLETE", "no verdict on part of the units"
+    assert (summary["verdict"], summary["items"], summary["units_complete"]) == ("PASS", 1, 3)
+    assert (summary["nodes"], summary["node_names"]) == (2, ["n1", "n2"])
+    assert summary["median_diff_pct"] == pytest.approx(5 / 3 / 5000 * 100), "the mean of 5010, 4990, 5005 vs 5000"
+
+
+def test_units_that_fail_one_by_one_pass_on_the_test_means_as_consistency_repeats_judges_them(tmp_path: Path) -> None:
+    units = resume.plan_units(_items("a", "b", repeats=2))
+    lines = [
+        _unit_line("a", 1, "n1", hosted=5050.0),
+        _unit_line("a", 2, "n2", hosted=4950.0),
+        _unit_line("b", 1, "n1", hosted=5040.0),
+        _unit_line("b", 2, "n2", hosted=4970.0),
+    ]
+    assert statistics.median(line["throughput_diff_pct"] for line in lines) == pytest.approx(0.9), "unit by unit: FAIL"
+    summary = resume.resume_summary(units, lines)
+    assert summary["verdict"] == "PASS", summary["failures"]
+    assert (summary["median_diff_pct"], summary["p90_diff_pct"]) == (pytest.approx(0.05), pytest.approx(0.1))
+    missing = resume.resume_summary(units, lines[:3])
+    assert missing["verdict"] == "INCOMPLETE" and missing["failures"][0] == "missing units: 1 of 4"
+
+
+def test_a_unit_whose_completed_requests_differ_fails_the_test_even_when_the_means_agree(tmp_path: Path) -> None:
+    units = resume.plan_units(_items("t", repeats=2))
+    lines = [_unit_line("t", 1, "n1"), _unit_line("t", 2, "n1", completed_equal=False)]
+    summary = resume.resume_summary(units, lines)
+    assert summary["verdict"] == "FAIL" and summary["completed_all_equal"] is False
 
 
 def test_a_threshold_failure_over_the_lines_is_a_fail_not_a_pass(tmp_path: Path) -> None:
     units = resume.plan_units(_items("t", repeats=2))
-    lines = [_unit_line("t", 1, "n1", diff=0.9), _unit_line("t", 2, "n2", diff=0.8)]
+    lines = [_unit_line("t", 1, "n1", hosted=5045.0), _unit_line("t", 2, "n2", hosted=5040.0)]
     summary = resume.resume_summary(units, lines)
     assert summary["verdict"] == "FAIL" and any("median" in f for f in summary["failures"])
 
@@ -181,7 +214,7 @@ def test_a_line_that_pairs_two_nodes_is_not_counted_in_the_summary(tmp_path: Pat
 
 def test_the_first_line_of_a_unit_wins_when_two_runs_both_wrote_it(tmp_path: Path) -> None:
     units = resume.plan_units(_items("t", repeats=1))
-    lines = [_unit_line("t", 1, "n1", diff=0.1), _unit_line("t", 1, "n2", diff=5.0)]
+    lines = [_unit_line("t", 1, "n1", hosted=5005.0), _unit_line("t", 1, "n2", hosted=5250.0)]
     summary = resume.resume_summary(units, lines)
     assert summary["units_complete"] == 1 and summary["nodes"] == 1 and summary["verdict"] == "PASS"
 

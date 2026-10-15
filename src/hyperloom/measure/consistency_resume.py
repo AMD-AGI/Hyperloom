@@ -19,7 +19,8 @@ Lines (all carry ``node_name``, ``run_id`` and ``pod``):
   The unit is tried again; after ``max_attempts`` infrastructure failures it is recorded as a ``unit`` that did not
   compare, which counts against the verdict. A cross-node pair is never recorded as a unit.
 
-The summary (``FILE`` plus ``.summary.json``, and printed) is computed over all ``unit`` lines. It adds ``units_expected``,
+The summary (``FILE`` plus ``.summary.json``, and printed) is computed over all ``unit`` lines the way ``consistency
+--repeats N`` computes it: per test, each side's mean over its repetitions, one difference per test. It adds ``units_expected``,
 ``units_complete``, ``nodes`` (the number of distinct nodes that contributed) and ``node_names``. While a unit is missing
 the verdict is ``INCOMPLETE``: no threshold verdict is given on part of the units.
 
@@ -52,6 +53,7 @@ from hyperloom.measure.consistency import (
     Criteria,
     ItemReport,
     Side,
+    aggregate_repetitions,
     build_backends,
     build_parser,
     check_repetition,
@@ -266,7 +268,7 @@ def _side_of(document: Mapping[str, Any]) -> Side:
 
 def _report_of(document: Mapping[str, Any]) -> ItemReport:
     return ItemReport(
-        f"{document['id']}#rep{document['rep']}",
+        str(document["id"]),
         _side_of(document[LOCAL]),
         _side_of(document[HOSTED]),
         document.get("throughput_diff_pct"),
@@ -278,14 +280,36 @@ def _report_of(document: Mapping[str, Any]) -> ItemReport:
     )
 
 
+def _test_reports(units: Sequence[Unit], present: Sequence[Mapping[str, Any]]) -> list[ItemReport]:
+    """One report per test, as ``consistency --repeats N`` makes it: the unit itself for a test of one repetition, else
+    the means of its repetitions compared (``aggregate_repetitions``)."""
+    repeats = {unit.item.id: unit.item.repeats for unit in units}
+    by_test: dict[str, dict[int, ItemReport]] = {}
+    for document in present:
+        by_test.setdefault(str(document["id"]), {})[int(document["rep"])] = _report_of(document)
+    reports = []
+    for test_id, reps in sorted(by_test.items()):
+        if repeats.get(test_id, 1) <= 1:
+            reports.extend(reps.values())
+        else:
+            reports.append(aggregate_repetitions(test_id, reps))
+    return reports
+
+
 def resume_summary(
     units: Sequence[Unit], lines: Sequence[Mapping[str, Any]], criteria: Criteria = Criteria()
 ) -> dict[str, Any]:
-    """The summary document over all complete units of ``lines``; ``INCOMPLETE`` while a planned unit is missing."""
+    """The summary document over all complete units of ``lines``; ``INCOMPLETE`` while a planned unit is missing.
+
+    It means what the summary of ``consistency --repeats N`` means: each test's local and hosted readings are averaged
+    over its repetitions and the thresholds judge one difference per test. Every unit was measured on one node, so a
+    test's repetitions may come from several; ``nodes`` says how many contributed. Completed requests, rebuilt files and
+    signatures are still checked for every unit.
+    """
     done = complete_units(lines)
     wanted = {unit.key for unit in units}
     present = [done[key] for key in sorted(done) if key in wanted]
-    summary = summarize([_report_of(d) for d in present], criteria).to_document()
+    summary = summarize(_test_reports(units, present), criteria).to_document()
     names = sorted({name for d in present for name in _nodes_of(d)})
     missing = sorted(wanted - set(done))
     if missing:

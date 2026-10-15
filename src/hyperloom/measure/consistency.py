@@ -64,6 +64,7 @@ __all__ = [
     "ChecklistItem",
     "Side",
     "Summary",
+    "aggregate_repetitions",
     "FARM_INVENTORY_SCHEMA",
     "Backends",
     "build_backends",
@@ -470,21 +471,31 @@ def _check_once(item: ChecklistItem, root: Path, local: MeasurementBackend, host
 
 def _check_repeated(item: ChecklistItem, root: Path, local: MeasurementBackend, hosted: Any) -> ItemReport:
     """N repetitions, local then hosted each, so that drift hits both sides alike; the means are compared."""
-    reps = [_check_once(item, root, local, hosted, k) for k in range(1, item.repeats + 1)]
-    local_side, hosted_side = _mean_side(reps, LOCAL), _mean_side(reps, HOSTED)
-    problems = [f"{p} (rep {k})" for k, r in enumerate(reps, 1) for p in r.problems]
+    reps = {k: _check_once(item, root, local, hosted, k) for k in range(1, item.repeats + 1)}
+    return aggregate_repetitions(item.id, reps)
+
+
+def aggregate_repetitions(item_id: str, reps: Mapping[int, ItemReport]) -> ItemReport:
+    """One test's report from its repetitions (keyed by repetition number, from 1): each side's mean is compared.
+
+    Completed-request and error-rate equality, the rebuilt-file comparison and the signature check must hold for every
+    repetition; a side with a failed repetition has no throughput, so the test is not compared.
+    """
+    numbered = sorted(reps.items())
+    local_side, hosted_side = _mean_side(numbered, LOCAL), _mean_side(numbered, HOSTED)
+    problems = [f"{p} (rep {k})" for k, r in numbered for p in r.problems]
     diff = completed_equal = error_equal = None
     if local_side.usable and hosted_side.usable:
         diff = _percent_diff(local_side.throughput, hosted_side.throughput)  # type: ignore[arg-type]
-        completed_equal = all(r.completed_equal is True for r in reps)
-        error_equal = all(r.error_rate_equal is True for r in reps)
+        completed_equal = all(r.completed_equal is True for _, r in numbered)
+        error_equal = all(r.error_rate_equal is True for _, r in numbered)
         if diff is None:
             problems.append("not_comparable: the local throughput is zero")
-    files = [r.rebuilt_files_equal for r in reps]
+    files = [r.rebuilt_files_equal for _, r in numbered]
     files_equal = None if all(f is None for f in files) else all(f is not False for f in files)
-    verified = all(r.signature_verified for r in reps)
+    verified = all(r.signature_verified for _, r in numbered)
     return ItemReport(
-        item.id,
+        item_id,
         local_side,
         hosted_side,
         diff,
@@ -493,17 +504,17 @@ def _check_repeated(item: ChecklistItem, root: Path, local: MeasurementBackend, 
         files_equal,
         verified,
         tuple(dict.fromkeys(problems)),
-        tuple(reps),
+        tuple(r for _, r in numbered),
     )
 
 
-def _mean_side(reps: Sequence[ItemReport], which: str) -> Side:
+def _mean_side(numbered: Sequence[tuple[int, ItemReport]], which: str) -> Side:
     """The side of the whole test: the mean throughput when every repetition was usable, else a failed side."""
-    sides: list[Side] = [getattr(r, which) for r in reps]
-    readings = tuple(s.throughput if s.usable else None for s in sides)
-    failed = next(((k, s) for k, s in enumerate(sides, 1) if not s.usable), None)
-    first = sides[0]
-    base = dataclasses.replace(first, readings=readings, finished_at=sides[-1].finished_at)
+    sides: list[tuple[int, Side]] = [(k, getattr(r, which)) for k, r in numbered]
+    readings = tuple(s.throughput if s.usable else None for _, s in sides)
+    failed = next(((k, s) for k, s in sides if not s.usable), None)
+    first = sides[0][1]
+    base = dataclasses.replace(first, readings=readings, finished_at=sides[-1][1].finished_at)
     if failed is not None:
         k, side = failed
         return dataclasses.replace(
