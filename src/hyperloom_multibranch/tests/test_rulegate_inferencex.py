@@ -42,11 +42,6 @@ def test_the_bar_is_twice_the_baseline_spread_above_a_floor(baselines, spread, b
     assert threshold.threshold_pct == pytest.approx(bar)
 
 
-def test_spot_checked_baselines_refine_the_spread():
-    assert DispersionThreshold((1000.0, 1020.0, 990.0)).threshold_pct == pytest.approx(3.045, abs=1e-3)
-    assert NORMAL.with_baseline(1000.0).spread_pct == pytest.approx(math.sqrt(2 / 3))
-
-
 @pytest.mark.parametrize("baselines", [(1000.0,), (1000.0, 0.0), (1000.0, math.nan)])
 def test_the_spread_refuses_too_few_or_unusable_baselines(baselines):
     with pytest.raises(ValueError):
@@ -103,17 +98,6 @@ def test_a_retest_settles_the_gain_and_the_accuracy_gate(first_ok, retest, retes
         ACCURACY_SCORE: pytest.approx((SCORES[first_ok] + SCORES[retest_ok]) / 2),
     }
     assert judgement.request_ids == ("r1", "r2")
-
-
-def test_both_measurements_are_held_to_the_bar_as_it_stands_at_the_retest():
-    first = compare(_reading(1030.0), BASELINE, PARENT, "r1")
-    raised = NORMAL.with_baseline(1040.0)
-    assert raised.threshold_pct == pytest.approx(4.278, abs=1e-3)
-
-    judgement = confirm(first, _reading(1050.0), InferenceXBaseline(raised.threshold_pct, 0.90), PARENT, "r2")
-
-    assert judgement.verdict is Verdict.FLAT
-    assert judgement.refused_by == (GAIN_NOT_CONFIRMED,)
 
 
 def test_only_a_provisional_judgement_is_retested():

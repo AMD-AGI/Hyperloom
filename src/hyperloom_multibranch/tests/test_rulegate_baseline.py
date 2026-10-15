@@ -23,12 +23,10 @@ from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.tests.factories import delta, result
 from hyperloom_multibranch.rulegate.accuracy import BaselineAccuracyError
 from hyperloom_multibranch.rulegate.baseline import (
-    add_inferencex_spot_check,
     read_inferencex_baseline,
     write_agentx_baseline,
     write_inferencex_baseline,
 )
-from hyperloom_multibranch.rulegate.inferencex import DispersionThreshold
 from hyperloom_multibranch.rulegate.readings import UnreadableResult
 
 ROOT = "c0"
@@ -90,18 +88,6 @@ async def test_the_prelude_baselines_become_the_record_the_gate_judges_by(sessio
     assert baseline.accuracy == pytest.approx(0.90)
 
 
-async def test_a_spot_check_joins_the_baselines_and_moves_the_bar(session):
-    await _prelude(session)
-
-    record = await add_inferencex_spot_check(session.gate, await session.inferencex("spot", 1040.0), CONC)
-
-    assert record.request_ids == ("b0", "b1", "b2", "spot")
-    assert record.values[GRADED_OUTPUT] == pytest.approx(1010.0)
-    raised = DispersionThreshold((1000.0, 1010.0, 990.0, 1040.0)).threshold_pct
-    assert record.threshold_pct == {GRADED_OUTPUT: pytest.approx(raised)}
-    assert (await read_inferencex_baseline(session.gate)).bar_pct == pytest.approx(raised)
-
-
 @pytest.mark.parametrize(
     ("throughputs", "scores", "error"),
     [((1000.0,), (0.90,), ValueError), ((1000.0, 1010.0), (0.45, 0.46), BaselineAccuracyError)],
@@ -114,12 +100,12 @@ async def test_prelude_fails_on_too_few_baselines_or_an_eval_score_below_the_flo
 
 @pytest.mark.parametrize(
     "fields",
-    [{"purpose": Purpose.EXPLORE, "change": delta()}, {"parent": "c1"}],
-    ids=["a-candidate", "another-commit"],
+    [{"purpose": Purpose.EXPLORE, "change": delta()}, {"purpose": Purpose.HEALTH}, {"parent": "c1"}],
+    ids=["a-candidate", "a-spot-check", "another-commit"],
 )
-async def test_only_a_measurement_of_the_root_is_a_baseline(session, fields):
+async def test_only_a_prelude_baseline_of_the_root_is_a_baseline(session, fields):
     baselines = [await session.inferencex("b0", 1000.0), await session.inferencex("b1", 1010.0, **fields)]
-    with pytest.raises(ValueError, match="is not a baseline or health test of the root"):
+    with pytest.raises(ValueError, match="is not a baseline test of the root"):
         await write_inferencex_baseline(session.gate, ROOT, baselines, CONC)
 
 

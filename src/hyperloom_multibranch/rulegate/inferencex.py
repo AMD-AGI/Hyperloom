@@ -8,7 +8,7 @@ from __future__ import annotations
 import math
 import statistics
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 from hyperloom.common.accuracy import finite_score
 from hyperloom.common.gain_math import gain_pct
@@ -44,11 +44,7 @@ def _gain(throughput: float, parent: Mapping[str, float]) -> float:
 
 @dataclass(frozen=True)
 class DispersionThreshold:
-    """The bar, from the PRELUDE baselines and the baselines spot-checked since.
-
-    Confirm-retest pairs stay out: only a first measurement that cleared the bar is retested, so a pair overstates the
-    spread and would push the bar up as the session runs.
-    """
+    """The bar, from the spread of the PRELUDE baselines; it holds for the whole session."""
 
     baselines: tuple[float, ...]
 
@@ -57,9 +53,6 @@ class DispersionThreshold:
             raise ValueError(f"the spread needs at least {MIN_BASELINES} baselines, got {len(self.baselines)}")
         for value in self.baselines:
             _checked(value)
-
-    def with_baseline(self, value: float) -> DispersionThreshold:
-        return replace(self, baselines=(*self.baselines, value))
 
     @property
     def spread_pct(self) -> float:
@@ -126,8 +119,7 @@ def confirm(
     eval scores included.
 
     A gain both measurements cleared is improved when both passed the accuracy gate, blocked when both failed it and
-    inconclusive when they split. Both are held to the bar as it stands now, which spot-checked baselines may have moved
-    since the first measurement.
+    inconclusive when they split.
     """
     if first.verdict is not Verdict.NEEDS_CONFIRM:
         raise ValueError(f"only a provisional judgement is retested, not a {first.verdict.value} one")
