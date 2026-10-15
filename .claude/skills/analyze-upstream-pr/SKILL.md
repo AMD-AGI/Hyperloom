@@ -1,6 +1,6 @@
 ---
 name: analyze-upstream-pr
-description: "Analyze whether an upstream pull request applies to an AMD/ROCm deployment. Invoke with the PR's repository and number, the target GPU architecture, dtypes and deployment, and optionally a local tree, its commit and the local patches on top of it. Collects the PR with check-prior-art's read.sh, states its mechanism and the operating point it was validated at, finds the selection site that decides whether the deployment runs the changed code, checks the tree with the inclusion probe, predicts the effect, checks conflicts and risks, refutes every claim once, and writes one recommendation with its evidence. Reads GitHub, never writes to it, and never runs a benchmark."
+description: "Analyze whether an upstream pull request applies to an AMD/ROCm deployment. Invoke with the PR's repository and number, the target GPU architecture, dtypes and deployment, and optionally a local tree, its commit and the local patches on top of it. Collects the PR with check-prior-art's read.sh, states its mechanism and the operating point it was validated at, finds the selection site that decides whether the deployment runs the changed code, checks the tree with the inclusion probe, runs check-prior-art for other PRs that carry the change, predicts the effect, checks conflicts and risks, refutes every claim once, and writes one recommendation with its evidence. Reads GitHub, never writes to it, and never runs a benchmark."
 ---
 
 <!--
@@ -19,40 +19,30 @@ check-prior-art's [gotchas](../check-prior-art/references/gotchas.md).
 
 `$WORK/report.md` has five parts, nothing else.
 
-**1. Recommendation**, one word, then its qualifier when one applies. The first row that applies
-wins, and the last row takes every case the others leave:
+**1. Recommendation**: the first row of this table that applies; the last takes every case the
+others leave. The reader acts on the whole row.
 
-| Recommendation | When | Qualifier |
+| Recommendation | When | Next step |
 |---|---|---|
-| `NOT-APPLICABLE` | a merged revert of the PR survived Step 9 | `-- reverted by <ref>`, adding `, relanded in <ref>` for a merged reland |
-| `NOT-APPLICABLE` | every Step 3 line is `OFF-PATH`; Step 4 found the PR in the tree; or the PR closed unmerged and Step 1 found an open or merged successor | `-- already in tree`, `-- superseded by <ref>` |
-| `NEEDS-MEASUREMENT` | a Step 3 line the effect rests on stayed `UNKNOWN`, or a `blocking` risk survived Step 9 that only a run on the target can settle | `-- see measure.md` |
-| `WAIT-FOR-MERGE` | the PR is open and a surviving risk is one upstream review is settling: changes requested, a design question open in the comments, a check failing at the head, a competing open PR | `-- <that risk>` |
-| `ADOPT-NOW` | merged, no merged revert, `ON-PATH`, not in the tree, no `blocking` risk survived | `-- inclusion unchecked` when Step 4 is `unknown` or `SKIPPED` |
-| `CARRY-AS-PATCH` | open, or closed unmerged with no open or merged successor; no merged revert; `ON-PATH`; no `blocking` risk survived | `-- conflicts with <patch>` when Step 6 found one |
-| `NOT-APPLICABLE` | no row above applies, as when a `blocking` risk survived Step 9 that the code at `tree@commit` or upstream's history settles | `-- <lens>: <its condition>` |
+| `NOT-APPLICABLE -- reverted by <ref>` | a merged revert of the PR survived Step 9; add `, relanded in <ref>` for a merged reland | do not take it; analyze the reland, if any. When Step 4 found the PR and not its revert, the tree carries a change upstream backed out: analyze the revert next |
+| `NOT-APPLICABLE -- already in tree` | Step 4 found the PR, or Step 6's verdict is `EXISTS-MERGED -- in your tree` or `EXISTS-OPEN -- in your tree` (then `-- already in tree via <ref>`) | nothing to take: name the commit that carries the change |
+| `NOT-APPLICABLE -- merged as <ref>` | the PR is not merged, and Step 6's verdict is `EXISTS-MERGED -- inclusion unchecked` | analyze `<ref>` instead |
+| `NOT-APPLICABLE -- superseded by <ref>` | the PR is not merged, and Step 1 found an open or merged successor, or the PR closed unmerged and Step 6's verdict is `EXISTS-OPEN -- inclusion unchecked` | analyze `<ref>` instead |
+| `NOT-APPLICABLE -- off path: <condition>` | every Step 3 line is `OFF-PATH` | nothing to take: name the condition that excludes the target |
+| `NEEDS-MEASUREMENT` | a Step 3 line the effect rests on stayed `UNKNOWN`, or a `blocking` risk survived Step 9 that only a run on the target can settle | hand `measure.md` to the user, then rerun Steps 9 and 10 with their results |
+| `WAIT-FOR-MERGE -- <risk>` | the PR is open and a surviving risk is one upstream is settling: changes requested, a design question open in the comments, a check failing at the head, or a competing open PR (Step 6's `EXISTS-OPEN -- inclusion unchecked`) | rerun when the PR, or the competing one, merges or changes its head |
+| `ADOPT-NOW` | merged, `ON-PATH`, no `blocking` risk survived; add `-- inclusion unchecked` when Step 4 is `unknown` or `SKIPPED` | move the tree past the merge commit, or cherry-pick it; confirm the effect with `measure.md` |
+| `CARRY-AS-PATCH` | open, or closed unmerged with no successor; `ON-PATH`; no `blocking` risk survived; add `-- conflicts with <patch>` from Step 6 | apply `diff.txt` as a local patch named with the PR and its head sha, so the rebase that brings the merge drops it |
+| `NOT-APPLICABLE -- <lens>: <condition>` | no row above applies, as when a `blocking` risk survived Step 9 that the code at `tree@commit` or upstream's history settles | name the risk and what would settle it |
 
-**2. What it does**: Step 1's two sentences.
-
-**3. Evidence**: one row per claim the recommendation rests on (on-path, inclusion, effect, each
-surviving risk and conflict), with its label and the `path:line` or artifact line behind it.
-Labels: `verified` (code read, condition named), `quoted` (an author's or reviewer's words, with
-the artifact line), `predicted` (reasoned from the diff), `measured` (a run the user made on the
-target, with its source), `inferred` (not confirmed; never the only support for a recommendation).
-
-**4. Coverage**: every `SKIPPED:` line, the prior-art scan's lines that are not `COMPLETE`, and the
-Step 2 dimensions `NOT STATED`.
-
-**5. Next step**, from the recommendation:
-
-| Recommendation | Next step |
-|---|---|
-| `NOT-APPLICABLE -- reverted by` | do not take it: name the revert's merge commit and any reland to analyze instead. When Step 4 found the PR in the tree and not its revert, say the tree carries a change upstream backed out, and analyze the revert next |
-| `NOT-APPLICABLE` | nothing to take: name the condition that excludes the target, the commit that carries the change, the successor to analyze instead, or the `blocking` risk and what settles it |
-| `NEEDS-MEASUREMENT` | hand `measure.md` to the user, then rerun Steps 9 and 10 with their results |
-| `WAIT-FOR-MERGE` | rerun this analysis when the PR merges or its head changes; name the risk to watch |
-| `ADOPT-NOW` | move the tree past the merge commit or cherry-pick it, then confirm the effect with `measure.md` |
-| `CARRY-AS-PATCH` | apply `diff.txt` as a local patch named with the PR and its head sha, so the rebase that brings the merge drops it |
+**2. What it does**: Step 1's two sentences. **3. Evidence**: one row per claim the
+recommendation rests on (on-path, inclusion, other PRs, effect, each surviving risk and conflict),
+with its label and the `path:line` or artifact line behind it. Labels: `verified` (code read,
+condition named), `quoted` (an author's or reviewer's words, with the artifact line), `predicted`
+(reasoned from the diff), `measured` (a run the user made on the target, with its source),
+`inferred` (not confirmed; never the only support for a recommendation). **4. Coverage**: every
+`SKIPPED:` line, check-prior-art's Coverage when its verdict says `-- incomplete`, and the Step 2
+dimensions `NOT STATED`. **5. Next step**: the row's, naming the commit, patch or plan it acts on.
 
 This skill never posts to GitHub: no comment, review, label or reaction. It never starts a server,
 a benchmark or a GPU job: Step 8 writes a plan, and only the user runs it.
@@ -179,22 +169,18 @@ operating point: it reaches the report as `quoted`, never as the effect on the t
 `OFF-PATH` Step 3 makes the direction `none`. Name each `GAP` that could flip the sign: a win at
 the author's batch size can be a loss at yours.
 
-## Step 6 — Conflicts
+## Step 6 — Other PRs and conflicts
 
-One line per conflict into `$WORK/conflicts.txt`:
+**Other PRs.** Run check-prior-art through its verdict, its Steps 0 to 7, in `$WORK/prior-art`:
+Step 1's mechanism, this skill's `tree` and `commit`, the PR's repository and any other where the
+change could land, and the changed non-test paths of `files.txt` as the planned paths. Keep
+`<owner/name>#<N>` out of its shortlist and classes: its search and path scan find this PR too.
+Write its verdict line into `$WORK/conflicts.txt` as `prior-art <verdict> -- <ref>`, and one
+`<ref> OVERLAP -- <the shared paths>` line per OVERLAPPING PR.
 
-```
-<owner/name#M|local:<patch>> OVERLAP|DUPLICATE|CONFLICT|CLEAR -- <shared paths, the class and why, or the failing hunk>
-```
-
-**Open PRs.** Whether another PR does the same thing is check-prior-art's question: follow its
-Steps 0 to 6 in `$WORK/prior-art`, with Step 1's mechanism and `files.txt` as the planned paths.
-Keep `<owner/name>#<N>` out of its shortlist and classes: its search and path scan find this PR
-too. Carry its `DUPLICATE` and `OVERLAPPING` classes here, and its `scan.txt` lines that are not
-`COMPLETE` to the report's coverage.
-
-**Local patches.** List each patch's paths with `git apply --numstat <patch>`; one also in
-`files.txt` is `OVERLAP`. Then, in a scratch worktree
+**Local patches.** One `local:<patch> OVERLAP|CONFLICT|CLEAR -- <the shared paths or the failing
+hunk>` line each in `conflicts.txt`. List each patch's paths with `git apply --numstat <patch>`;
+one also in `files.txt` is `OVERLAP`. Then, in a scratch worktree
 (`git -C "$TREE" worktree add --detach "$WORK/scratch" "$COMMIT"`), run
 `git apply --check "$PR/diff.txt"` before and after applying the local patches. A failure only
 after them is `CONFLICT`, with the first failing hunk; one before them is drift between the PR's
@@ -222,11 +208,12 @@ in their environment, never this skill. Otherwise write `SKIPPED: empirical trac
 ## Step 9 — Refutation
 
 Try to kill each claim once before it reaches the report: every `RISK` line, every `ON-PATH` and
-`OFF-PATH` line, each `GAP`, an `unknown` inclusion answer, Step 5's direction, each `DUPLICATE` or
-`CONFLICT`, and each merged revert. One block each in `$WORK/refutations.txt`:
+`OFF-PATH` line, each `GAP`, an `unknown` inclusion answer, Step 5's direction, Step 6's
+check-prior-art verdict and each `CONFLICT`, and each merged revert. One block each in
+`$WORK/refutations.txt`:
 
 ```
-FINDING: <L<n>|on-path:<path>|gap:<dimension>|inclusion|effect|conflict:<ref>|revert:<ref>>
+FINDING: <L<n>|on-path:<path>|gap:<dimension>|inclusion|effect|prior-art|conflict:<ref>|revert:<ref>>
 ATTEMPT: <what you opened or ran to kill it -- must name a file, symbol, condition or command>
 OUTCOME: SURVIVES|DROPPED -- <what that showed>
 ```
@@ -235,8 +222,8 @@ Attack in this order: is the claim anchored in the diff at the head, or only in 
 cited `path:line` say that at `tree@commit`; is the condition reachable with the target's arch and
 flags; did a later comment, commit or `xrefs.tsv` row settle it. Attack an `unknown` inclusion in
 the tree's history, as check-prior-art's Step 6 does. A dropped claim gets `-- dropped, see
-refutations.txt` on its artifact line. With nothing to refute, write
-`FINDING: none -- <reason>`; an empty file reads as a skipped step.
+refutations.txt` on its artifact line. With nothing to refute, write `FINDING: none -- <reason>`;
+an empty file reads as a skipped step.
 
 ## Step 10 — Report
 
@@ -246,7 +233,7 @@ block, and each surviving `RISK blocking` has a row. Then write `$WORK/report.md
 ```
 ## <owner/name>#<N> -- <title>
 
-Recommendation: <WORD> <qualifier, if any>
+Recommendation: <the row's recommendation, with its qualifiers>
 
 What it does: <mechanism.txt>
 
@@ -255,19 +242,16 @@ Validated at: <operating_point.txt in one line> | Target: <arch, dtype, deployme
 | claim | label | evidence |
 |---|---|---|
 
-Coverage: <every SKIPPED line; the prior-art scan's lines that are not COMPLETE; the NOT STATED dimensions>
+Coverage: <every SKIPPED line; check-prior-art's incomplete Coverage; the NOT STATED dimensions>
 
-Next step: <from the table above, naming the commit, patch or plan it acts on>
+Next step: <the row's, naming the commit, patch or plan it acts on>
 
 Head: <checks.json headRefOid> | Base: <baseRefName> | Tree: <tree>@<commit> | Date: <UTC date>
 ```
 
-### SKIPPED protocol
-
 When a step cannot run (no tree, no network, a diff GitHub will not render), write
-`SKIPPED: <step> -- <why, and what is therefore unchecked>` into that step's artifact and carry the
-same line into the report. A `SKIPPED` artifact means that axis was **not checked**; silence there
-never reads as clear, and the recommendation's qualifier says what it weakens.
+`SKIPPED: <step> -- <why, and what is therefore unchecked>` into its artifact and carry the line
+into the report. A `SKIPPED` artifact means that axis was **not checked**, never "clear".
 
 ## Budget
 
