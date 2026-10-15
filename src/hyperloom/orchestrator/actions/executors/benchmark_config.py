@@ -10,6 +10,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from ._accuracy_gate import materialized_run_eval_disabled
+
 
 @dataclass(frozen=True)
 class PreparationFailure:
@@ -21,7 +23,6 @@ class PreparationFailure:
 
 def prepare_benchmark_runtime(config_path: Path, env: dict[str, str]) -> PreparationFailure | None:
     """Prepare synthetic or MLPerf dependencies; native AgentX is owned by Magpie."""
-    from ._accuracy_gate import materialized_run_eval_disabled
     from ._subprocess_kill import AGENTX_PREFLIGHT_RETURNCODE, EVAL_PROBE_UNPATCHABLE_RETURNCODE
     from ._inferencex_patcher import (
         ensure_benchmark_lib_eval_start_patched,

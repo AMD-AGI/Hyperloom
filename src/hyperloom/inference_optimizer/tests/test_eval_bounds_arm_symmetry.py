@@ -296,7 +296,7 @@ def test_the_shared_reader_lives_in_a_module_every_arm_can_import():
     }
     assert siblings == set(), f"_accuracy_gate must stay a leaf, but it imports {sorted(siblings)}"
 
-    from hyperloom.orchestrator.actions.executors import _grid_runner, baseline
+    from hyperloom.orchestrator.actions.executors import benchmark_config, baseline
 
-    for arm in (_grid_runner, baseline):
+    for arm in (benchmark_config, baseline):
         assert arm.materialized_run_eval_disabled is materialized_run_eval_disabled, arm.__name__

@@ -340,7 +340,7 @@ def parse_quality_gate(workspace: Path | str) -> dict[str, Any]:
 def _latest_agentx_result(workspace: Path | str) -> dict[str, Any] | None:
     """The newest ``inferencex_result.json`` under *workspace*, or None."""
     from hyperloom.common.benchmark_config import configured_benchmark, is_magpie_agentx
-    from .magpie_agentx_result import read_agentx_report
+    from hyperloom.inference_optimizer.agentx.report import read_agentx_report
 
     native = read_agentx_report(Path(workspace))
     if native is not None:

@@ -629,7 +629,7 @@ def extract_benchmark_measurement(
         provenance labels).
     """
     report = report or {}
-    from .magpie_agentx_result import agentx_measurement
+    from hyperloom.inference_optimizer.agentx.report import agentx_measurement
 
     from .magpie_agentx import native_config
 

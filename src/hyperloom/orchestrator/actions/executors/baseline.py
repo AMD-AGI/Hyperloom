@@ -551,7 +551,7 @@ def _attach_baseline_launch_evidence(
     from ._grid_runner import _measurement_server_log_path
 
     if result.get("benchmark_backend") == "magpie_agentx":
-        from .magpie_agentx_result import native_launch_evidence
+        from hyperloom.inference_optimizer.agentx.report import native_launch_evidence
 
         evidence = native_launch_evidence(result, config_path)
         result["launch_evidence"] = evidence

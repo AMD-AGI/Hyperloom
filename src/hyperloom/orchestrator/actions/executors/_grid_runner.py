@@ -2010,7 +2010,7 @@ def _attach_grid_launch_evidence(
         if not actual_log and ready_server_log:
             actual_log = _existing_log_path(Path(ready_server_log))
         result.server_log_path = actual_log
-        from .magpie_agentx_result import agentx_measurement, native_launch_evidence
+        from hyperloom.inference_optimizer.agentx.report import agentx_measurement, native_launch_evidence
 
         if result.benchmark_backend == "magpie_agentx" and workspace is not None:
             measurement = agentx_measurement(_parse_report(workspace) or {})
