@@ -377,6 +377,34 @@ def test_forge_loop_gpu_type_override_reaches_config(tmp_path, monkeypatch):
     assert CampaignConfigStore(str(workspace)).load().gpu_type == "mi300x"
 
 
+def test_the_speedup_target_reaches_the_loop_config(tmp_path, monkeypatch):
+    captured = _install_cli_fakes(monkeypatch, tmp_path)
+
+    result, _workspace = _invoke_forge_loop(tmp_path, ["--target-mean-case-speedup", "3.15"])
+
+    assert result.exit_code == 0, result.output
+    assert captured["loops"][-1].ic.target_mean_case_speedup == 3.15
+
+
+def test_the_speedup_target_is_off_unless_an_operator_sets_it(tmp_path, monkeypatch):
+    captured = _install_cli_fakes(monkeypatch, tmp_path)
+
+    result, _workspace = _invoke_forge_loop(tmp_path, [])
+
+    assert result.exit_code == 0, result.output
+    assert captured["loops"][-1].ic.target_mean_case_speedup == 0.0
+
+
+def test_a_speedup_target_the_baseline_already_meets_is_refused(tmp_path, monkeypatch):
+    captured = _install_cli_fakes(monkeypatch, tmp_path)
+
+    result, _workspace = _invoke_forge_loop(tmp_path, ["--target-mean-case-speedup", "1.0"])
+
+    assert result.exit_code != 0
+    assert "already met by the baseline" in result.output
+    assert captured["loops"] == []
+
+
 def test_forge_loop_defaults_gpu_type(tmp_path, monkeypatch):
     captured = _install_cli_fakes(monkeypatch, tmp_path)
 

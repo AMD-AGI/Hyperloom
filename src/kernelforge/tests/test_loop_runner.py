@@ -8465,3 +8465,49 @@ def test_a_keep_that_cannot_be_committed_is_reverted_as_a_crash(tmp_path, monkey
     assert result.validation_summary == f"COMMIT FAILED: {failure}"
     assert (workspace / "kernel.py").read_text() == "def kernel():\n    return 1\n"
     assert not (workspace / "forge_experiments" / "pending_keep.json").exists()
+
+
+def _resumed_at_best(tmp_path, monkeypatch, *, mean_case_speedup, target):
+    """A resumed campaign whose recorded best sits at HEAD, with one round of budget left."""
+    loop, workspace = _make_loop(tmp_path, monkeypatch, resume=True)
+    loop.ic = replace(loop.ic, target_mean_case_speedup=target)
+    subprocess.run(["git", "checkout", "-b", "test-loop"], cwd=workspace, check=True, capture_output=True)
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=workspace, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    LoopStateStore(str(workspace)).save(
+        RunState(
+            campaign_id="campaign",
+            baseline_case_times={"case": 1.0},
+            best_case_times={"case": 1.0 / mean_case_speedup},
+            head_commit=head,
+            best=BestRecord(iteration=3, wall_ms=0.31, mean_case_speedup=mean_case_speedup, commit_hash=head),
+        )
+    )
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
+    return loop, workspace
+
+
+def test_a_best_at_the_speedup_target_ends_the_campaign_before_another_round(tmp_path, monkeypatch):
+    loop, workspace = _resumed_at_best(tmp_path, monkeypatch, mean_case_speedup=3.2, target=3.15)
+
+    store = LoopStateStore(str(workspace))
+    ended = [event for event in store.read_events() if event.get("type") == "run_terminated"]
+    assert loop.results == []
+    assert loop.termination_reason == "speedup_target_met"
+    assert store.load().termination_reason == "speedup_target_met"
+    assert ended[-1]["reason"] == "speedup_target_met"
+
+
+def test_a_best_short_of_the_speedup_target_keeps_buying_rounds(tmp_path, monkeypatch):
+    loop, _ = _resumed_at_best(tmp_path, monkeypatch, mean_case_speedup=3.2, target=3.3)
+
+    assert len(loop.results) == 1
+    assert loop.termination_reason != "speedup_target_met"
+
+
+def test_without_a_speedup_target_any_best_keeps_buying_rounds(tmp_path, monkeypatch):
+    loop, _ = _resumed_at_best(tmp_path, monkeypatch, mean_case_speedup=50.0, target=0.0)
+
+    assert len(loop.results) == 1
+    assert loop.termination_reason != "speedup_target_met"

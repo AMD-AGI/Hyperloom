@@ -535,6 +535,9 @@ class IterationConfig:
     # nothing left worth buying and stops. Zero disables the gate, which is the default: a ceiling is an estimate
     # with no framework-side check on its arithmetic, so stopping on one is something an operator opts into.
     roofline_target: float = 0.0
+    # Mean per-case speedup over the baseline (the KEEP objective) at which the campaign stops, however much budget
+    # remains. Zero disables the gate, which is the default.
+    target_mean_case_speedup: float = 0.0
 
     def __post_init__(self) -> None:
         # Validated here rather than at the CLI boundary alone, so a pattern can never reach the commit/delete sites
@@ -3372,6 +3375,15 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             return False
         return standing.mean >= target
 
+    def _is_speedup_target_met(self) -> bool:
+        """Whether the incumbent's mean per-case speedup has reached the target the operator set.
+
+        Like the roofline target, this decides only whether to buy another round; KEEP stays a measurement against
+        the incumbent.
+        """
+        target = float(self.ic.target_mean_case_speedup or 0.0)
+        return target > 0 and self.best_mean_case_speedup is not None and self.best_mean_case_speedup >= target
+
     def _render_roofline_progress(self) -> str:
         """One log line with the incumbent's mean attainment, or ``""`` when the campaign has no ceiling.
 
@@ -5228,6 +5240,14 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                     f"  [roofline] {entry.case_id}: {entry.attainment * 100:.1f}% "
                     f"({entry.t_current_ms:.6g} ms vs ceiling {entry.t_ideal_ms:.6g} ms)"
                 )
+            return True, None
+        if self._is_speedup_target_met():
+            self.termination_reason = "speedup_target_met"
+            print(
+                f"\nSPEEDUP TARGET MET at iteration {iteration}: mean case speedup "
+                f"{self.best_mean_case_speedup:.6f}x, at or above the "
+                f"{float(self.ic.target_mean_case_speedup):.6f}x target"
+            )
             return True, None
         if self.run_state.orchestration_circuit_state == ORCHESTRATION_CIRCUIT_OPEN:
             self.termination_reason = "orchestration_failed"

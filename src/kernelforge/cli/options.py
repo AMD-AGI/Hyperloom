@@ -118,6 +118,24 @@ def _validate_roofline_target(target: float, ceiling_enabled: bool) -> float:
     return value
 
 
+def _validate_speedup_target(target: float) -> float:
+    """Check the speedup target is one the baseline has not already met.
+
+    The baseline's mean case speedup is one by definition, so a target at or
+    below one would end every campaign before its first round. It is refused
+    rather than run.
+    """
+    value = float(target or 0.0)
+    if value <= 0:
+        return 0.0
+    if value <= 1.0:
+        raise click.BadParameter(
+            f"--target-mean-case-speedup {value} is already met by the baseline; give a speedup above 1.0",
+            param_hint="--target-mean-case-speedup",
+        )
+    return value
+
+
 def _validate_agent_provider(ctx, param, value):
     """Validate a dynamic built-in or entry-point provider name."""
     if value is None:

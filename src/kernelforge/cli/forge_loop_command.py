@@ -31,6 +31,7 @@ from kernelforge.cli.options import (
     _validate_max_hours,
     _validate_optional_agent_provider,
     _validate_roofline_target,
+    _validate_speedup_target,
 )
 from kernelforge.option_groups import option_group
 from kernelforge.cli.pr_references import (
@@ -1127,6 +1128,7 @@ class ForgeLoopRequest:
     loop_shape: LoopShape
     roofline_ceiling: CeilingSwitch
     roofline_target: float
+    target_mean_case_speedup: float
     prepare_task: bool
     identity: TaskIdentity
     knowledge: KnowledgeOptions
@@ -1347,6 +1349,15 @@ class ForgeLoopRequest:
         "Requires a ceiling. Zero (default) disables the gate: a ceiling is an "
         "estimate whose arithmetic nothing checks, so stopping on one is opt-in. "
         "It never affects KEEP, which stays a measurement.",
+    ),
+    click.option(
+        "--target-mean-case-speedup",
+        default=0.0,
+        type=float,
+        help="Stop the campaign once the incumbent's mean per-case speedup over the "
+        "baseline (the objective a KEEP is judged by) reaches this value, e.g. 3.15, "
+        "however much of the time budget remains. Zero (default) disables the gate; "
+        "a value at or below 1.0 is refused. It never affects KEEP.",
     ),
     click.option(
         "--prepare-task/--no-prepare-task",
@@ -1715,6 +1726,7 @@ def forge_loop(request: ForgeLoopRequest):
         commit_new_paths=commit_new_paths,
         # The attainment of the per-shape ceiling that ends the run; the ceiling itself is estimated inside the loop.
         roofline_target=_validate_roofline_target(request.roofline_target, request.roofline_ceiling.enabled),
+        target_mean_case_speedup=_validate_speedup_target(request.target_mean_case_speedup),
     )
     baseline_json = request.baseline_json
     if baseline_json:
