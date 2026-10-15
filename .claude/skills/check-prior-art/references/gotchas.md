@@ -15,7 +15,13 @@ numbers both from one counter per repository. A "fixes #N" link usually names th
 closes, not another PR; open it before following it as a successor. The counter is also per
 repository, so `#N` in one repository and `#N` in another, a fork included, are unrelated. The
 inclusion probe matches the PR number in commit subjects, so run it only against a tree of the PR's
-own repository or a fork that carries it, and compare the matched subject with the PR's title.
+own repository or a fork that carries it, and check that the commit its evidence names is the PR.
+GitHub writes a squash merge as the PR's title and `(#N)`, and a merge commit as
+`Merge pull request #N from <branch>` with the title as the first line of its body
+(`git -C "$TREE" log -1 --format=%b <sha>`); a cherry-pick keeps either message. A squash of a
+single commit keeps that commit's subject instead, so a `(#N)` subject with another title is still
+the PR when `git -C "$TREE" show --name-only --format= <sha>` lists the paths in its `files.txt`.
+Any other mismatch is a fork's own PR: a collision, so `unknown`.
 
 ## G2 — A duplicate may fix a different failure mode
 
