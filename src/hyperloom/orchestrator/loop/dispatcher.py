@@ -1427,7 +1427,14 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             meta, measured_baseline_sec=measured_baseline_runtime_sec(self.shared_state)
         )
 
-    def admission_denial_for_action(
+    async def queued_cost_minutes(self) -> float:
+        """Minutes of work the queue has already committed this phase to."""
+        total = 0.0
+        for task in await self.tasks.queued():
+            total += self.expected_cost_minutes_for(str(getattr(task, "kind", "") or ""))
+        return total
+
+    async def admission_denial_for_action(
         self,
         action_name: str,
         *,
@@ -1438,6 +1445,13 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         The single entry point the intent handlers share, so a new gate
         reaches all paths at once.
 
+        The time gate is charged the queue's own minutes as well as this
+        action's. Priced on its own against the phase clock, every round in an
+        oversubscribed queue still fits: two observed FRAMEWORK_AGENT phases
+        admitted thirteen and fourteen explore rounds, measured two and one,
+        and cancelled the rest when the phase ended. Each had been reasoned
+        about, reviewed and recorded before it was dropped.
+
         Args:
             action_name: The proposed/delegated action name.
             params: The proposal's parameters, which price a specialist.
@@ -1445,11 +1459,19 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         Returns:
             The first :class:`PolicyDenied` that fires, else ``None``.
         """
-        return (
-            self._phase_denial_for_action(action_name)
-            or self._sequence_denial_for_action(action_name)
-            or specialist_in_flight_denial(action_name, params, self.tasks, self.shared_state.find_gap)
-            or self.time_budget_denial_for_action(action_name, params=params)
+        denied = self._phase_denial_for_action(action_name)
+        if denied is not None:
+            return denied
+        denied = self._sequence_denial_for_action(action_name)
+        if denied is not None:
+            return denied
+        denied = specialist_in_flight_denial(action_name, params, self.tasks, self.shared_state.find_gap)
+        if denied is not None:
+            return denied
+        return self.time_budget_denial_for_action(
+            action_name,
+            params=params,
+            already_committed_minutes=await self.queued_cost_minutes(),
         )
 
     async def _cancel_queued_task_over_budget(self, task: Task) -> bool:

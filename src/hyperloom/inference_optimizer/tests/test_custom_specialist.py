@@ -551,7 +551,10 @@ async def test_dispatch_falls_back_to_research_when_patches_are_impossible(custo
 
 async def test_dispatch_enqueues_one_task_per_cycle_through_the_real_router(tmp_path):
     state = SharedState(custom_specialist_prompt=_PROMPT, custom_specialist_description=_DESCRIPTION)
-    state.max_minutes = 30
+    # Enough budget for both rounds: admission charges the queue's committed
+    # minutes as well as the new round's, and what this pins is the one-per-cycle
+    # key, not what the phase can afford.
+    state.max_minutes = 600
     state.framework = "sglang"
     coord = _coordinator(tmp_path, state)
     dispatch = coord.specialist_dispatch

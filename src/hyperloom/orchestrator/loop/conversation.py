@@ -525,7 +525,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
         actions = _phase_state.allowed_actions_for(phase)
         if not actions:
             return ""
-        committed_min = await self._queued_cost_minutes()
+        committed_min = await dispatcher.queued_cost_minutes()
         rows: list[str] = []
         for action in actions:
             denial = dispatcher.time_budget_denial_for_action(
@@ -535,17 +535,6 @@ class ConversationCollaborator(CoordinatorCollaborator):
             rows.append(action if denial is None else f"{action}(unaffordable)")
         queued_note = f" (queue already holds ~{committed_min:.0f} min)" if committed_min > 0 else ""
         return f"=== Affordable now{queued_note} ===\n" + ", ".join(rows)
-
-    async def _queued_cost_minutes(self) -> float:
-        """Minutes of work the queue has already committed this phase to."""
-        dispatcher = getattr(self._coord, "dispatcher", None)
-        tasks = getattr(dispatcher, "tasks", None)
-        if tasks is None:
-            return 0.0
-        total = 0.0
-        for task in await tasks.queued():
-            total += dispatcher.expected_cost_minutes_for(str(getattr(task, "kind", "") or ""))
-        return total
 
     async def compose_prompt(self, agent_name: str) -> str:
         """Compose the prompt for *agent_name*: session context + inbox tail (with canonical msg_id per inbox row)."""
