@@ -134,8 +134,8 @@ when `--gpu-type` is omitted.
   text, max 16 KiB) and `--custom-specialist-description` (one line, max 200
   chars), passed together; unset means no `custom_specialist`. Refused with
   `--no-framework-agent`, `--research-lane-capacity 0` or `--reset-state`.
-  `HYPERLOOM_CUSTOM_SPECIALIST_ONLY=1` (needs the pair; any other value than a
-  boolean exits 2) makes FRAMEWORK_AGENT run only that specialist and the
+  `HYPERLOOM_CUSTOM_SPECIALIST_ONLY=1` (settable by `export` or `--extra-env`;
+  needs the pair; any other value than a boolean exits 2) makes FRAMEWORK_AGENT run only that specialist and the
   bench of its proposals and patches, then move on to KERNEL_AGENT when
   enabled, else SWEEP. All three are persisted in `state.json`; the env on a
   `--resume-from` turns only mode on, never off. Re-pass both flags on

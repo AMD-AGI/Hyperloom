@@ -21,6 +21,7 @@ from hyperloom.inference_optimizer.cli import (
     _build_orchestration_prompt,
     _custom_specialist_conflict,
     _load_custom_specialist_args,
+    main,
 )
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
@@ -402,31 +403,6 @@ def test_reset_state_conflicts_with_a_definition_passed_on_this_launch(stored):
 def test_conflicts_are_ignored_when_no_custom_specialist_is_configured():
     args = _ns(orch_prompt="x", no_framework_agent=True, research_lane_capacity=0, reset_state=True)
     assert _custom_specialist_conflict(args, SharedState()) == ""
-
-
-def test_fresh_launch_conflict_exits_before_the_session_starts(tmp_path, monkeypatch):
-    import hyperloom.inference_optimizer.cli as cli
-
-    run_optimize = AsyncMock(return_value=0)
-    monkeypatch.setattr(cli, "_run_optimize", run_optimize)
-    prompt_file = tmp_path / "p.md"
-    prompt_file.write_text(_PROMPT, encoding="utf-8")
-
-    with pytest.raises(SystemExit) as exc:
-        cli.main(
-            [
-                "optimize",
-                "--custom-specialist-prompt-file",
-                str(prompt_file),
-                "--custom-specialist-description",
-                _DESCRIPTION,
-                "--research-lane-capacity",
-                "0",
-            ]
-        )
-
-    assert exc.value.code == 2
-    run_optimize.assert_not_awaited()
 
 
 def test_custom_specialist_fields_roundtrip_and_default_on_old_state():
@@ -845,53 +821,73 @@ async def test_framework_holds_a_leverage_exit_for_queued_custom_work_but_not_a_
 
 
 # HYPERLOOM_CUSTOM_SPECIALIST_ONLY
-@pytest.mark.parametrize(("value", "expected"), [(None, False), ("1", True), ("0", False)])
-def test_only_mode_is_read_from_the_environment(monkeypatch, value, expected):
-    if value is None:
-        monkeypatch.delenv("HYPERLOOM_CUSTOM_SPECIALIST_ONLY", raising=False)
-    else:
-        monkeypatch.setenv("HYPERLOOM_CUSTOM_SPECIALIST_ONLY", value)
-    args = _ns()
+@pytest.fixture
+def launch(tmp_path, monkeypatch):
+    """Run ``main(["optimize", ...])`` up to ``_preflight``; return its exit code and the only mode it settled."""
+    import os
 
-    _load_custom_specialist_args(args)
+    reached: list[bool] = []
 
-    assert args.custom_specialist_only is expected
+    def _preflight(args):
+        reached.append(args.custom_specialist_only)
+        raise SystemExit(99)
 
+    monkeypatch.setattr("hyperloom.inference_optimizer.cli._preflight", _preflight)
+    prompt_file = tmp_path / "p.md"
+    prompt_file.write_text(_PROMPT, encoding="utf-8")
+    pair = ["--custom-specialist-prompt-file", str(prompt_file), "--custom-specialist-description", _DESCRIPTION]
+    saved = dict(os.environ)
+    os.environ.pop("HYPERLOOM_CUSTOM_SPECIALIST_ONLY", None)
 
-def test_an_unreadable_only_mode_value_is_refused(monkeypatch):
-    monkeypatch.setenv("HYPERLOOM_CUSTOM_SPECIALIST_ONLY", "maybe")
-    with pytest.raises(ValueError, match="HYPERLOOM_CUSTOM_SPECIALIST_ONLY='maybe' is not a boolean"):
-        _load_custom_specialist_args(_ns())
+    def _run(*argv: str, with_pair: bool = True) -> tuple[int, list[bool]]:
+        with pytest.raises(SystemExit) as exc:
+            main(["optimize", *(pair if with_pair else []), *argv])
+        return exc.value.code, reached
+
+    yield _run
+    os.environ.clear()
+    os.environ.update(saved)
 
 
 @pytest.mark.parametrize(
-    ("argv", "env", "message"),
+    ("argv", "exported", "expected"),
     [
-        (["--custom-specialist-only"], None, "unrecognized arguments: --custom-specialist-only"),
+        (["--extra-env", "HYPERLOOM_CUSTOM_SPECIALIST_ONLY=1"], None, (99, [True])),
+        (["--extra-env", "HYPERLOOM_CUSTOM_SPECIALIST_ONLY=0"], "1", (99, [False])),
+        ([], "1", (99, [True])),
+        ([], None, (99, [False])),
+    ],
+)
+def test_only_mode_reaches_the_launch_by_export_or_by_extra_env_pin(launch, argv, exported, expected):
+    import os
+
+    if exported is not None:
+        os.environ["HYPERLOOM_CUSTOM_SPECIALIST_ONLY"] = exported
+
+    assert launch(*argv) == expected
+
+
+@pytest.mark.parametrize(
+    ("argv", "with_pair", "message"),
+    [
+        (["--custom-specialist-only"], True, "unrecognized arguments: --custom-specialist-only"),
         (
-            [],
-            "1",
+            ["--extra-env", "HYPERLOOM_CUSTOM_SPECIALIST_ONLY=1"],
+            False,
             "HYPERLOOM_CUSTOM_SPECIALIST_ONLY requires --custom-specialist-prompt-file and "
             "--custom-specialist-description",
         ),
+        (
+            ["--extra-env", "HYPERLOOM_CUSTOM_SPECIALIST_ONLY=maybe"],
+            True,
+            "HYPERLOOM_CUSTOM_SPECIALIST_ONLY='maybe' is not a boolean",
+        ),
+        (["--research-lane-capacity", "0"], True, "--research-lane-capacity 0 builds no specialist executor"),
     ],
 )
-def test_only_mode_is_no_cli_flag_and_needs_a_custom_specialist_at_launch(monkeypatch, capsys, argv, env, message):
-    import hyperloom.inference_optimizer.cli as cli
-
-    run_optimize = AsyncMock(return_value=0)
-    monkeypatch.setattr(cli, "_run_optimize", run_optimize)
-    if env is None:
-        monkeypatch.delenv("HYPERLOOM_CUSTOM_SPECIALIST_ONLY", raising=False)
-    else:
-        monkeypatch.setenv("HYPERLOOM_CUSTOM_SPECIALIST_ONLY", env)
-
-    with pytest.raises(SystemExit) as exc:
-        cli.main(["optimize", *argv])
-
-    assert exc.value.code == 2
+def test_a_bad_custom_specialist_launch_exits_before_preflight(launch, capsys, argv, with_pair, message):
+    assert launch(*argv, with_pair=with_pair) == (2, [])
     assert message in capsys.readouterr().err
-    run_optimize.assert_not_awaited()
 
 
 @pytest.mark.parametrize(

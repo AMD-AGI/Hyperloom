@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common import llm_config
-from hyperloom.common.env import env_bool
+from hyperloom.common.env import EnvValueError, env_bool
 from hyperloom.common.llm_config import CLAUDE_OAUTH_TOKEN_ENV
 from hyperloom.common.llm_headers import parse_custom_headers
 from .executors import (
@@ -130,6 +130,12 @@ from hyperloom.common.workload_defaults import (
     DEFAULT_TP,
     DEFAULT_EP,
     DEFAULT_PRECISION,
+)
+from .custom_specialist import (
+    CUSTOM_SPECIALIST_ONLY_ENV,
+    _apply_custom_specialist_resume as _apply_custom_specialist_resume,
+    _custom_specialist_conflict as _custom_specialist_conflict,
+    _load_custom_specialist_args as _load_custom_specialist_args,
 )
 from .parser import (
     DEFAULT_MAX_HOURS,
@@ -973,77 +979,6 @@ def _resolve_critic_choice(args: argparse.Namespace) -> str:
         args=args,
     )
     return chosen
-
-
-_CUSTOM_SPECIALIST_PROMPT_MAX_BYTES = 16 * 1024
-_CUSTOM_SPECIALIST_DESCRIPTION_MAX_CHARS = 200
-# FRAMEWORK_AGENT runs the custom specialist and the bench of its output alone; persisted like the pair.
-CUSTOM_SPECIALIST_ONLY_ENV = "HYPERLOOM_CUSTOM_SPECIALIST_ONLY"
-
-
-def _load_custom_specialist_args(args: argparse.Namespace) -> None:
-    """Validate the ``--custom-specialist-*`` pair, set ``args.custom_specialist_prompt``, and read only mode.
-
-    Raises:
-        ValueError: When only one flag is given, either value is unusable, or the only-mode env is not a boolean.
-    """
-    args.custom_specialist_only = env_bool(CUSTOM_SPECIALIST_ONLY_ENV)
-    path = getattr(args, "custom_specialist_prompt_file", None)
-    description = getattr(args, "custom_specialist_description", None)
-    args.custom_specialist_prompt = ""
-    if path is None and description is None:
-        return
-    if path is None or description is None:
-        raise ValueError("--custom-specialist-prompt-file and --custom-specialist-description must be passed together")
-    try:
-        text = Path(path).expanduser().read_text(encoding="utf-8").strip()
-    except (OSError, UnicodeDecodeError) as exc:
-        raise ValueError(f"--custom-specialist-prompt-file: cannot read {path}: {exc}") from exc
-    if not text:
-        raise ValueError(f"--custom-specialist-prompt-file: {path} is empty")
-    if len(text.encode("utf-8")) > _CUSTOM_SPECIALIST_PROMPT_MAX_BYTES:
-        raise ValueError(f"--custom-specialist-prompt-file: {path} exceeds {_CUSTOM_SPECIALIST_PROMPT_MAX_BYTES} bytes")
-    description = description.strip()
-    if not description or "\n" in description or "\r" in description:
-        raise ValueError("--custom-specialist-description must be a single non-empty line")
-    if len(description) > _CUSTOM_SPECIALIST_DESCRIPTION_MAX_CHARS:
-        raise ValueError(
-            f"--custom-specialist-description exceeds {_CUSTOM_SPECIALIST_DESCRIPTION_MAX_CHARS} characters"
-        )
-    args.custom_specialist_prompt = text
-    args.custom_specialist_description = description
-
-
-def _apply_custom_specialist_resume(args: argparse.Namespace, state: SharedState) -> None:
-    """Flags passed on a resume replace the stored custom specialist; otherwise the stored one stays.
-
-    The only-mode env turns only mode on and never off.
-    """
-    if getattr(args, "custom_specialist_only", False):
-        state.custom_specialist_only = True
-    prompt = getattr(args, "custom_specialist_prompt", "")
-    if not prompt:
-        return
-    state.custom_specialist_prompt = prompt
-    state.custom_specialist_description = args.custom_specialist_description
-    print(f"  re-exported custom specialist: {state.custom_specialist_description}")
-
-
-def _custom_specialist_conflict(args: argparse.Namespace, state: SharedState) -> str:
-    """Return why a custom specialist from this launch or the stored state cannot run, or ``""``."""
-    # --reset-state wipes the stored definition, so only a definition passed on this launch counts.
-    stored = "" if getattr(args, "reset_state", False) else state.custom_specialist_prompt
-    if not (getattr(args, "custom_specialist_prompt", "") or stored):
-        if getattr(args, "custom_specialist_only", False):
-            return f"{CUSTOM_SPECIALIST_ONLY_ENV} requires --custom-specialist-prompt-file and --custom-specialist-description"
-        return ""
-    if bool(getattr(args, "no_framework_agent", False)) or not state.framework_agent_phase_enabled:
-        return "the FRAMEWORK_AGENT phase is disabled, so custom_specialist cannot be guaranteed to run"
-    if int(getattr(args, "research_lane_capacity", 1) or 0) <= 0:
-        return "--research-lane-capacity 0 builds no specialist executor"
-    if getattr(args, "reset_state", False):
-        return "--reset-state wipes the custom specialist definition; reset first, then launch with the flags"
-    return ""
 
 
 def _reset_state_file(session_dir: Path, *, framework: str) -> None:
@@ -2570,9 +2505,26 @@ def _resolve_agent_lineup(args: argparse.Namespace) -> _AgentLineup:
     )
 
 
+def _settle_custom_specialist_only(args: argparse.Namespace) -> None:
+    """Read only mode once the operator's pins are in the environment, and refuse a fresh launch's custom conflicts.
+
+    A resume checks its conflicts against the stored state once that is loaded.
+    """
+    try:
+        args.custom_specialist_only = env_bool(CUSTOM_SPECIALIST_ONLY_ENV)
+    except EnvValueError as exc:
+        print(f"ERROR: {exc}.", file=sys.stderr)
+        raise SystemExit(2) from exc
+    conflict = "" if args.resume_from else _custom_specialist_conflict(args, SharedState())
+    if conflict:
+        print(f"ERROR: {conflict}.", file=sys.stderr)
+        raise SystemExit(2)
+
+
 async def _run_optimize(args: argparse.Namespace) -> int:
     """Run the ``optimize`` subcommand end to end."""
     nodes_resolved = _resolve_run_topology(args)
+    _settle_custom_specialist_only(args)
 
     # Stale aiter JIT lock sweep: killed runs leave locks that block subsequent starts (locks <5min preserved).
     aiter_sweep = clean_stale_aiter_locks()
@@ -2891,11 +2843,6 @@ def main(argv: list[str] | None = None) -> int:
             _load_custom_specialist_args(args)
         except ValueError as exc:
             parser.error(str(exc))
-        # A fresh session's conflicts depend on flags only; a resume checks them against its stored state.
-        if not args.resume_from:
-            custom_conflict = _custom_specialist_conflict(args, SharedState())
-            if custom_conflict:
-                parser.error(custom_conflict)
         return asyncio.run(_run_optimize(args))
     if args.command == "recover":
         return _run_recover_session(args)
