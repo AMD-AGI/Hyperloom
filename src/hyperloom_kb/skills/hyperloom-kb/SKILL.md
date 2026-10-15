@@ -1,6 +1,6 @@
 ---
 name: hyperloom-kb
-description: Operates an Experience KB service with the hyperloom-kb CLI. Checks its health, labels its state, restores a label to roll back, excludes or includes an Experience with a reason, and lists or exports what was written to it. Use when asked to label, roll back, restore, exclude, include, list, or export Experiences, or to embed these commands in another tool.
+description: Operates an Experience KB service with the hyperloom-kb CLI. Checks its health, looks at a schema or one Experience, labels its state, restores a label to roll back, excludes or includes an Experience with a reason, and lists or exports what was written to it. Use when asked to label, roll back, restore, exclude, include, list, export, or look up Experiences, or to embed these commands in another tool. For Distills, use the hyperloom-kb-distill skill.
 ---
 
 # Operate an Experience KB
@@ -41,8 +41,9 @@ service's default schema, the `schema_ref` in `health`.
 ## Health and metrics
 
 `hyperloom-kb health` reports the KB's identity and what its reads see per
-schema. Three endpoints answer without a token, for an orchestrator, a
-metrics scraper, or a quick look:
+schema, and under `distills` how many Distills each schema has and how many
+needed attention at their last check. Three endpoints answer without a
+token, for an orchestrator, a metrics scraper, or a quick look:
 
 ```bash
 curl -s "$HYPERLOOM_KB_URL/readyz"    # ready, and which check failed when not
@@ -97,6 +98,20 @@ they cover every schema. Each call returns one page: repeat with
 `--after <next_cursor>` while `has_more` is true. `list` returns summaries;
 `export` returns complete records and, with `--schema`, that schema's
 declaration.
+
+## Look at a schema or one Experience
+
+```bash
+hyperloom-kb schema show [--schema REF]   # declaration, the paths a scope may name, roles, counts
+hyperloom-kb experience get EXPERIENCE_ID # one Experience in full, whether reads see it, its files' paths
+```
+
+## Distills
+
+`hyperloom-kb distill ...` explores Experiences and writes, reads, maintains,
+and syncs the Distills drawn from them; the `hyperloom-kb-distill` skill
+describes each step. A label and a restore carry a schema's Distills with its
+Experiences.
 
 ## Embed the commands in another tool
 

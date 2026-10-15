@@ -24,6 +24,7 @@ from http import HTTPStatus
 from pathlib import Path
 from typing import Any, BinaryIO, TypeAlias, TypeVar, cast
 
+from hyperloom_kb.distill.model import DistillEntry, FormDeclaration
 from hyperloom_kb.files import file_ref
 from hyperloom_kb.identity import derive_experience_id
 from hyperloom_kb.observability import REQUEST_ID_HEADER, client_headers
@@ -309,15 +310,17 @@ class RemoteClient:
     def send_files(self, experience: Experience, files: LocalFiles) -> None:
         """Send each file ``experience`` names that the service does not hold, from where ``files`` says it is."""
 
-        refs = {ref.sha256: ref for ref in experience.files()}
-        for sha256 in self.missing_files(tuple(refs.values())):
+        self._send_refs(f"Experience {experience.id}", experience.files(), files)
+
+    def _send_refs(self, owner: str, refs: Sequence[FileRef], files: LocalFiles) -> None:
+        by_digest = {ref.sha256: ref for ref in refs}
+        for sha256 in self.missing_files(tuple(by_digest.values())):
             path = files.get(sha256)
             if path is None:
                 raise RemoteClientError(
-                    f"Experience {experience.id} names file {sha256}, which neither the service nor this client has",
-                    retryable=False,
+                    f"{owner} names file {sha256}, which neither the service nor this client has", retryable=False
                 )
-            self.put_file(refs[sha256], path)
+            self.put_file(by_digest[sha256], path)
 
     def health(self) -> dict[str, JsonValue]:
         return self._request(_GET, "/health")
@@ -610,6 +613,108 @@ class RemoteClient:
 
         return self._request(_GET, f"/v1/exclusions{self._schema_query(schema_ref)}")
 
+    def schema(self, schema_ref: str) -> dict[str, JsonValue]:
+        """A schema's declaration, the paths a scope or a grouping may name, its roles, and what it holds."""
+
+        return self._request(_GET, f"/v1/schemas/{urllib.parse.quote(schema_ref, safe='')}")
+
+    def experience(self, experience_id: str) -> dict[str, JsonValue]:
+        """One held Experience in full, whether reads see it, and where the service's host holds its files."""
+
+        return self._request(_GET, f"/v1/experiences/{urllib.parse.quote(experience_id, safe='')}")
+
+    def explore(
+        self,
+        schema_ref: str,
+        *,
+        scope: Mapping[str, JsonValue] | None = None,
+        group_by: Sequence[str] = (),
+        member_limit: int | None = None,
+    ) -> dict[str, JsonValue]:
+        """The group ``scope`` selects among a schema's visible Experiences, and its cross table over ``group_by``."""
+
+        body: dict[str, JsonValue] = {"schema_ref": schema_ref, "scope": dict(scope or {}), "group_by": list(group_by)}
+        if member_limit is not None:
+            body["member_limit"] = member_limit
+        return self._request(_POST, "/v1/distill/explore", body)
+
+    def distill_forms(self, schema_ref: str) -> dict[str, JsonValue]:
+        return self._request(_GET, f"/v1/distill/forms{self._schema_query(schema_ref)}")
+
+    def register_distill_form(self, schema_ref: str, form: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+        return self._request(_PUT, "/v1/distill/forms", {"schema_ref": schema_ref, "form": dict(form)})
+
+    def preview_distill(self, draft: Mapping[str, JsonValue], *, entry_id: str | None = None) -> dict[str, JsonValue]:
+        """What creating ``draft``, or with ``entry_id`` updating that Distill to it, would store; nothing is stored."""
+
+        body: dict[str, JsonValue] = {"draft": dict(draft)}
+        if entry_id is not None:
+            body["entry_id"] = entry_id
+        return self._request(_POST, "/v1/distill/preview", body)
+
+    def create_distill(self, draft: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+        return self._request(_POST, "/v1/distill/entries", {"draft": dict(draft)})
+
+    def update_distill(self, entry_id: str, draft: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+        """Add a version to ``entry_id`` holding ``draft`` in full, its evidence drawn again from the KB as it is."""
+
+        path = f"/v1/distill/entries/{urllib.parse.quote(entry_id, safe='')}"
+        return self._request(_PUT, path, {"draft": dict(draft)})
+
+    def put_distill_version(
+        self,
+        entry: DistillEntry,
+        form: FormDeclaration,
+        *,
+        declaration: ExperienceDeclaration | None = None,
+        files: LocalFiles | None = None,
+    ) -> dict[str, JsonValue]:
+        """Store a version as ``entry`` holds it, as a sync does; each file its claim names that the service lacks is
+        sent first, from where ``files`` says it is."""
+
+        self._send_refs(f"Distill {entry.id}", entry.files(), files or {})
+        body: dict[str, JsonValue] = {"entry": entry.to_dict(), "form": form.to_dict()}
+        if declaration is not None:
+            body["declaration"] = declaration.to_dict()
+        path = f"/v1/distill/entries/{urllib.parse.quote(entry.id, safe='')}/versions/{entry.version}"
+        return self._request(_PUT, path, body)
+
+    def distill(
+        self,
+        entry_id: str,
+        *,
+        version: int | None = None,
+        follow_evidence: bool = False,
+        after: int = 0,
+        limit: int | None = None,
+        representatives: int | None = None,
+    ) -> dict[str, JsonValue]:
+        """One version of a Distill, the one it shows unless ``version``, with up to ``representatives`` members that
+        represent it; ``follow_evidence`` adds a page of its members."""
+
+        values: dict[str, str | int] = {}
+        if version is not None:
+            values["version"] = version
+        if representatives is not None:
+            values["representatives"] = representatives
+        if follow_evidence:
+            values.update(follow_evidence="true", after=after)
+            if limit is not None:
+                values["limit"] = limit
+        query = f"?{urllib.parse.urlencode(values)}" if values else ""
+        return self._request(_GET, f"/v1/distill/entries/{urllib.parse.quote(entry_id, safe='')}{query}")
+
+    def list_distills(self, schema_ref: str, *, include_deleted: bool = False) -> dict[str, JsonValue]:
+        """A schema's Distills, each with its ``evidence_status`` and ``current`` counts beside its snapshot's."""
+
+        values = {"schema_ref": schema_ref, **({"include_deleted": "true"} if include_deleted else {})}
+        return self._request(_GET, f"/v1/distill/entries?{urllib.parse.urlencode(values)}")
+
+    def distill_changes(self, *, schema_ref: str | None = None) -> dict[str, JsonValue]:
+        """The visible Distills, of one schema or of all, whose evidence moved in a way their author should look at."""
+
+        return self._request(_GET, f"/v1/distill/changes{self._schema_query(schema_ref)}")
+
     def push(self) -> dict[str, JsonValue]:
         """Ask this service to send every Experience written here and not yet pushed to its global KB."""
 
@@ -632,17 +737,22 @@ class RemoteClient:
     def _sync(self, path: str, body: dict[str, JsonValue]) -> dict[str, JsonValue]:
         # Each request handles one bounded batch, so no single request outlives the client timeout.
         totals = dict.fromkeys(_SYNC_COUNTS, 0)
+        distills: dict[str, int] = {}
         rejected: list[JsonValue] = []
         saved: JsonValue = None
         while True:
             report = self._request(_POST, path, body)
             for key in _SYNC_COUNTS:
                 totals[key] += _int(report.get(key, 0), key)
+            batch_distills = report.get("distills")
+            if isinstance(batch_distills, dict):
+                for key, count in batch_distills.items():
+                    distills[key] = distills.get(key, 0) + _int(count, f"distills.{key}")
             batch_rejected = report.get("rejected")
             rejected.extend(batch_rejected if isinstance(batch_rejected, list) else ())
             saved = saved or report.get("saved")
             if report.get("status") != "completed" or report.get("has_more") is not True:
-                result = {**report, **totals, "rejected": rejected}
+                result = {**report, **totals, "distills": distills, "rejected": rejected}
                 if "saved" in report:
                     result["saved"] = saved
                 return result

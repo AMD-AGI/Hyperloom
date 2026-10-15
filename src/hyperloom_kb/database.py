@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 #: The SQLite file a service without a PostgreSQL server keeps under its home.
 # Not main's kb.sqlite3, whose tables of the same names hold another shape: a home from main keeps that file unread.
 SQLITE_FILE = "database.sqlite3"
@@ -183,6 +183,76 @@ CREATE TABLE sync_pulled_states (
 )
 """
 
+# Distills. A version's record is its file; its row holds what a listing shows of it without reading the file,
+# derived from that record when the version is stored and never changed after.
+_DDL_V2 = """
+CREATE TABLE distill_forms (
+    kb_id TEXT NOT NULL,
+    schema_ref TEXT NOT NULL,
+    form_ref TEXT NOT NULL,
+    name TEXT NOT NULL,
+    declaration TEXT NOT NULL,
+    registered_at TEXT NOT NULL,
+    PRIMARY KEY (kb_id, schema_ref, form_ref),
+    FOREIGN KEY (kb_id, schema_ref) REFERENCES schemas
+);
+CREATE TABLE distill_entries (
+    kb_id TEXT NOT NULL,
+    entry_id TEXT NOT NULL,
+    schema_ref TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (kb_id, entry_id),
+    FOREIGN KEY (kb_id, schema_ref) REFERENCES schemas
+);
+CREATE INDEX distill_entries_by_schema ON distill_entries (kb_id, schema_ref);
+CREATE TABLE distill_versions (
+    kb_id TEXT NOT NULL,
+    entry_id TEXT NOT NULL,
+    version BIGINT NOT NULL,
+    schema_ref TEXT NOT NULL,
+    form_ref TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    bytes BIGINT NOT NULL,
+    stored_at TEXT NOT NULL,
+    form_name TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    tags TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    claim TEXT NOT NULL,
+    supports BIGINT NOT NULL,
+    contradicts BIGINT NOT NULL,
+    irrelevant BIGINT NOT NULL,
+    runs BIGINT NOT NULL,
+    representatives TEXT NOT NULL,
+    PRIMARY KEY (kb_id, entry_id, version),
+    FOREIGN KEY (kb_id, entry_id) REFERENCES distill_entries,
+    FOREIGN KEY (kb_id, schema_ref, form_ref) REFERENCES distill_forms
+);
+CREATE TABLE distill_current (
+    kb_id TEXT NOT NULL,
+    entry_id TEXT NOT NULL,
+    version BIGINT NOT NULL,
+    PRIMARY KEY (kb_id, entry_id),
+    FOREIGN KEY (kb_id, entry_id, version) REFERENCES distill_versions
+);
+CREATE TABLE label_distill_versions (
+    kb_id TEXT NOT NULL,
+    label_id TEXT NOT NULL,
+    entry_id TEXT NOT NULL,
+    version BIGINT NOT NULL,
+    PRIMARY KEY (kb_id, label_id, entry_id)
+);
+CREATE TABLE sync_distills_on_global (
+    kb_id TEXT NOT NULL,
+    global_url TEXT NOT NULL,
+    schema_ref TEXT NOT NULL,
+    entry_id TEXT NOT NULL,
+    version BIGINT NOT NULL,
+    PRIMARY KEY (kb_id, global_url, entry_id, version)
+);
+ALTER TABLE writes ADD COLUMN record_kind TEXT NOT NULL DEFAULT 'experience'
+"""
+
 
 class DatabaseError(RuntimeError):
     """Raised when the database cannot serve this service, such as one holding several KBs it cannot choose from."""
@@ -266,11 +336,14 @@ class Database(ABC):
                 raise DatabaseError(
                     f"the database is at schema version {applied}, newer than this code's {SCHEMA_VERSION}"
                 )
-            if applied < 1:
-                for statement in _DDL_V1.format(serial_key=self.serial_key).split(";"):
-                    if statement.strip():
-                        connection.execute(statement)
-                connection.execute("INSERT INTO kb_migrations(version, applied_at) VALUES (1, %s)", (utc_now(),))
+            for version, ddl in ((1, _DDL_V1.format(serial_key=self.serial_key)), (2, _DDL_V2)):
+                if applied < version:
+                    for statement in ddl.split(";"):
+                        if statement.strip():
+                            connection.execute(statement)
+                    connection.execute(
+                        "INSERT INTO kb_migrations(version, applied_at) VALUES (%s, %s)", (version, utc_now())
+                    )
 
     def resolve_kb(self) -> str:
         """The KB this database serves: its one KB, or a new one."""
@@ -474,6 +547,28 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def record_write(
+    connection: Connection,
+    kb_id: str,
+    *,
+    record_id: str,
+    schema_ref: str,
+    result: str,
+    source: WriteSource,
+    record_kind: str = "experience",
+) -> None:
+    """Record one write of an Experience or a Distill version: what it was, its result, and who sent it."""
+
+    connection.execute(
+        """
+        INSERT INTO writes(kb_id, experience_id, schema_ref, result, source_kb_id, source_name, request_id,
+            received_at, record_kind)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        (kb_id, record_id, schema_ref, result, source.kb_id, source.name, source.request_id, utc_now(), record_kind),
+    )
+
+
 __all__ = [
     "SCHEMA_VERSION",
     "SQLITE_FILE",
@@ -485,5 +580,6 @@ __all__ = [
     "SqliteDatabase",
     "WriteSource",
     "open_database",
+    "record_write",
     "utc_now",
 ]

@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Which stored Experiences a KB's reads see, and the labels that name those states so they can be restored.
+"""Which stored Experiences and Distills a KB shows, and the labels that name those states so they can be restored.
 
-A schema's state is its members, the stored Experiences in it, and its exclusions; reads see the members that are
-not excluded. Only what a restore set outside the state is recorded, so a KB with no record holds every stored
-Experience in its state and excludes none. Every method runs in the caller's transaction, so a caller that holds a
+A schema's state is its members, the stored Experiences in it, its Distills with the version each shows, and its
+exclusions; reads see the members that are not excluded. A Distill is deleted by excluding it, under its entry id.
+Only what a restore set outside the state is recorded, so a KB with no record holds every stored Experience and
+Distill in its state and excludes none. Every method runs in the caller's transaction, so a caller that holds a
 schema's lock changes its state atomically.
 """
 
@@ -14,7 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -28,11 +29,13 @@ _AUTOMATIC_NAMES = {LABEL_BEFORE_RESTORE: "before restore", LABEL_BEFORE_PULL: "
 
 
 class UnknownStateItem(LookupError):
-    """Raised for a label or an Experience this KB does not hold."""
+    """Raised for a label, an Experience, or a Distill this KB does not hold."""
 
 
-def _digest(members: Collection[str], excluded: Collection[str]) -> str:
-    encoded = json.dumps({"members": sorted(members), "excluded": sorted(excluded)}, separators=(",", ":"))
+def _digest(members: Collection[str], excluded: Collection[str], versions: Mapping[str, int] | None = None) -> str:
+    # A Distill joins the members as "<entry id>@<version>", so a state holding none digests as it did before Distills.
+    listed = [*members, *(f"{entry_id}@{version}" for entry_id, version in (versions or {}).items())]
+    encoded = json.dumps({"members": sorted(listed), "excluded": sorted(excluded)}, separators=(",", ":"))
     return hashlib.sha256(encoded.encode()).hexdigest()
 
 
@@ -47,6 +50,7 @@ class Label:
     created_at: str
     member_count: int
     excluded_count: int
+    distill_count: int = 0
 
     def to_dict(self) -> dict[str, JsonValue]:
         return {
@@ -57,6 +61,7 @@ class Label:
             "created_at": self.created_at,
             "member_count": self.member_count,
             "excluded_count": self.excluded_count,
+            "distill_count": self.distill_count,
         }
 
 
@@ -89,6 +94,50 @@ class LocalState:
 
     def visible(self, connection: Connection, schema_ref: str) -> frozenset[str]:
         return self.members(connection, schema_ref) - self.excluded(connection, schema_ref)
+
+    def entries(self, connection: Connection, schema_ref: str) -> frozenset[str]:
+        """Every Distill of ``schema_ref`` the KB stores."""
+
+        rows = connection.execute(
+            "SELECT entry_id FROM distill_entries WHERE kb_id = %s AND schema_ref = %s", (self.kb_id, schema_ref)
+        )
+        return frozenset(str(row["entry_id"]) for row in rows)
+
+    def entry_members(self, connection: Connection, schema_ref: str) -> frozenset[str]:
+        return self.entries(connection, schema_ref) - self._outside(connection, schema_ref)
+
+    def visible_entries(self, connection: Connection, schema_ref: str) -> frozenset[str]:
+        return self.entry_members(connection, schema_ref) - self.excluded(connection, schema_ref)
+
+    def current_versions(self, connection: Connection, schema_ref: str) -> dict[str, int]:
+        """The version each Distill of ``schema_ref`` shows, outside ones included."""
+
+        rows = connection.execute(
+            """
+            SELECT distill_current.entry_id, distill_current.version FROM distill_current
+            JOIN distill_entries USING (kb_id, entry_id)
+            WHERE distill_current.kb_id = %s AND distill_entries.schema_ref = %s
+            """,
+            (self.kb_id, schema_ref),
+        )
+        return {str(row["entry_id"]): int(row["version"]) for row in rows}
+
+    def set_current(self, connection: Connection, entry_id: str, version: int) -> None:
+        connection.execute(
+            """
+            INSERT INTO distill_current(kb_id, entry_id, version) VALUES (%s, %s, %s)
+            ON CONFLICT (kb_id, entry_id) DO UPDATE SET version = excluded.version
+            """,
+            (self.kb_id, entry_id, version),
+        )
+
+    def _member_versions(self, connection: Connection, schema_ref: str) -> dict[str, int]:
+        members = self.entry_members(connection, schema_ref)
+        return {
+            entry_id: version
+            for entry_id, version in self.current_versions(connection, schema_ref).items()
+            if entry_id in members
+        }
 
     def exclude(self, connection: Connection, schema_ref: str, experience_id: str, reason: str) -> None:
         at = utc_now()
@@ -136,9 +185,13 @@ class LocalState:
         )
 
     def hidden_digest(self, connection: Connection, schema_ref: str) -> str:
-        """Changes whenever an exclusion or a restore changes which stored Experiences reads do not see."""
+        """Changes whenever an exclusion or a restore changes which stored Experiences reads do not see.
 
-        return _digest(self._outside(connection, schema_ref), self.excluded(connection, schema_ref))
+        Distills are left out: deleting or restoring one changes no Experience a pull of the schema brings.
+        """
+
+        stored = self.stored(connection, schema_ref)
+        return _digest(self._outside(connection, schema_ref) & stored, self.excluded(connection, schema_ref) & stored)
 
     def _log(
         self, connection: Connection, schema_ref: str, experience_id: str, action: str, reason: str, at: str
@@ -175,6 +228,7 @@ class LocalState:
         """The label the state was last saved as or restored to, and whether it changed since."""
 
         members, excluded = self.members(connection, schema_ref), self.excluded(connection, schema_ref)
+        versions = self._member_versions(connection, schema_ref)
         row = connection.execute(
             """
             SELECT labels.* FROM current_labels JOIN labels USING (kb_id, label_id)
@@ -183,13 +237,14 @@ class LocalState:
             (self.kb_id, schema_ref),
         ).fetchone()
         if row is None:
-            return None, bool(members or excluded)
-        return self._label(connection, row), row["digest"] != _digest(members, excluded)
+            return None, bool(members or excluded or versions)
+        return self._label(connection, row), row["digest"] != _digest(members, excluded, versions)
 
     def label(self, connection: Connection, schema_ref: str, *, name: str = "", reason: str = LABEL_MANUAL) -> Label:
         """Save the current state of ``schema_ref`` under a new label, which becomes its current label."""
 
         members, excluded = self.members(connection, schema_ref), self.excluded(connection, schema_ref)
+        versions = self._member_versions(connection, schema_ref)
         label_id = f"label-{uuid.uuid4().hex}"
         created_at = utc_now()
         if not name and reason in _AUTOMATIC_NAMES:
@@ -199,11 +254,15 @@ class LocalState:
             INSERT INTO labels(kb_id, label_id, schema_ref, name, reason, created_at, digest)
             VALUES (%s, %s, %s, %s, %s, %s, %s)
             """,
-            (self.kb_id, label_id, schema_ref, name, reason, created_at, _digest(members, excluded)),
+            (self.kb_id, label_id, schema_ref, name, reason, created_at, _digest(members, excluded, versions)),
         )
         connection.executemany(
             "INSERT INTO label_members(kb_id, label_id, experience_id) VALUES (%s, %s, %s)",
             [(self.kb_id, label_id, experience_id) for experience_id in sorted(members)],
+        )
+        connection.executemany(
+            "INSERT INTO label_distill_versions(kb_id, label_id, entry_id, version) VALUES (%s, %s, %s, %s)",
+            [(self.kb_id, label_id, entry_id, version) for entry_id, version in sorted(versions.items())],
         )
         connection.execute(
             """
@@ -248,6 +307,7 @@ class LocalState:
             created_at=str(row["created_at"]),
             member_count=count("label_members"),
             excluded_count=count("label_exclusions"),
+            distill_count=count("label_distill_versions"),
         )
 
     def get_label(self, connection: Connection, label_id: str) -> Label:
@@ -267,12 +327,13 @@ class LocalState:
 
     def delete_label(self, connection: Connection, label_id: str) -> None:
         self.get_label(connection, label_id)
-        for table in ("label_members", "label_exclusions", "current_labels", "labels"):
+        for table in ("label_members", "label_exclusions", "label_distill_versions", "current_labels", "labels"):
             connection.execute(f"DELETE FROM {table} WHERE kb_id = %s AND label_id = %s", (self.kb_id, label_id))
 
     def restore(self, connection: Connection, label: Label) -> Label | None:
         """Make ``label``'s state the current one, first labelling a current state no label holds.
 
+        Each Distill the label holds shows the version it showed then; one written since leaves the state.
         Returns the label the replaced state was saved under, when it had to be saved.
         """
 
@@ -280,14 +341,23 @@ class LocalState:
         members = self._ids(
             connection, "SELECT experience_id FROM label_members WHERE kb_id = %s AND label_id = %s", label.label_id
         )
+        versions = {
+            str(row["entry_id"]): int(row["version"])
+            for row in connection.execute(
+                "SELECT entry_id, version FROM label_distill_versions WHERE kb_id = %s AND label_id = %s",
+                (self.kb_id, label.label_id),
+            )
+        }
         connection.execute("DELETE FROM outside WHERE kb_id = %s AND schema_ref = %s", (self.kb_id, label.schema_ref))
+        set_outside = (self.stored(connection, label.schema_ref) - members) | (
+            self.entries(connection, label.schema_ref) - set(versions)
+        )
         connection.executemany(
             "INSERT INTO outside(kb_id, schema_ref, experience_id) VALUES (%s, %s, %s)",
-            [
-                (self.kb_id, label.schema_ref, experience_id)
-                for experience_id in sorted(self.stored(connection, label.schema_ref) - members)
-            ],
+            [(self.kb_id, label.schema_ref, item_id) for item_id in sorted(set_outside)],
         )
+        for entry_id, version in versions.items():
+            self.set_current(connection, entry_id, version)
         connection.execute(
             "DELETE FROM exclusions WHERE kb_id = %s AND schema_ref = %s", (self.kb_id, label.schema_ref)
         )

@@ -177,11 +177,13 @@ def test_a_tool_embeds_every_command_with_its_own_schema_and_its_own_versions(tm
 
     assert set(commands.choices) == {
         *("health", "push", "pull", "rebind", "labels", "label", "restore", "exclude", "include", "exclusions"),
-        *("list", "export"),
+        *("list", "export", "schema", "experience", "distill"),
     }
     assert parser.parse_args(["push"]).own and not hasattr(parser.parse_args(["push"]), "run")
     for name in ("pull", "labels", "label", "exclusions", "list", "export"):
         assert parser.parse_args([name]).schema_ref == SCHEMA.schema_ref
+    for argv in (["schema", "show"], ["distill", "list"], ["distill", "changes"], ["distill", "sync", "--dir", "d"]):
+        assert parser.parse_args(argv).schema_ref == SCHEMA.schema_ref
     with _serving(tmp_path / "kb") as client:
         client.write(_experience(0), declaration=SCHEMA)
         status = run_command(client, parser.parse_args(["export"]))
@@ -196,18 +198,34 @@ def test_a_tool_embeds_every_command_with_its_own_schema_and_its_own_versions(tm
         main(["pull"])
 
 
-def test_the_skill_describes_every_command_by_how_it_is_run() -> None:
-    skill = (Path(__file__).resolve().parents[1] / "skills/hyperloom-kb/SKILL.md").read_text(encoding="utf-8")
+def _subcommands(parser: argparse.ArgumentParser) -> list[str]:
+    groups = [action for action in parser._actions if isinstance(action, argparse._SubParsersAction)]
+    return [name for group in groups for name in group.choices]
+
+
+def test_the_skills_describe_every_command_by_how_it_is_run() -> None:
+    skills = Path(__file__).resolve().parents[1] / "skills"
+    skill = (skills / "hyperloom-kb/SKILL.md").read_text(encoding="utf-8")
+    distill_skill = (skills / "hyperloom-kb-distill/SKILL.md").read_text(encoding="utf-8")
     commands = argparse.ArgumentParser().add_subparsers(dest="command")
     add_commands(commands)
 
     # The docs name a global KB only by its settings, so the skill leaves out the commands that need one.
     needs_a_global_kb = {"push", "pull", "rebind"}
-    assert [
-        name for name in commands.choices if name not in needs_a_global_kb and f"hyperloom-kb {name}" not in skill
-    ] == []
+    named = [
+        f"hyperloom-kb {name} {sub}".strip()
+        for name, parser in commands.choices.items()
+        if name not in needs_a_global_kb
+        for sub in _subcommands(parser) or [""]
+    ]
+
+    def described(command: str) -> bool:
+        return command in (distill_skill if command.startswith("hyperloom-kb distill ") else skill)
+
+    assert [command for command in named if not described(command)] == []
     for text in ("HYPERLOOM_KB_URL", "HYPERLOOM_KB_TOKEN", "python3 -m hyperloom_kb.cli", "add_commands"):
         assert text in skill
+    assert "hyperloom-kb-distill" in skill
 
 
 def test_without_a_service_to_talk_to_it_exits_2(monkeypatch, capsys) -> None:
