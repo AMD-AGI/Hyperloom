@@ -27,6 +27,7 @@ from kernelforge.cli.options import (
     _validate_max_hours,
     _validate_optional_agent_provider,
     _validate_roofline_target,
+    _validate_speedup_target,
 )
 from kernelforge.cli.pr_references import (
     PR_KB_BUDGET_SEC,
@@ -363,6 +364,15 @@ def _load_external_baseline(path: str) -> tuple[float, dict[str, float]]:
     "It never affects KEEP, which stays a measurement.",
 )
 @click.option(
+    "--target-mean-case-speedup",
+    default=0.0,
+    type=float,
+    help="Stop the campaign once the incumbent's mean per-case speedup over the "
+    "baseline (the objective a KEEP is judged by) reaches this value, e.g. 3.15, "
+    "however much of the time budget remains. Zero (default) disables the gate; "
+    "a value at or below 1.0 is refused. It never affects KEEP.",
+)
+@click.option(
     "--prepare-task/--no-prepare-task",
     default=True,
     help="Pre-loop task preparation (default on, fresh campaigns only). "
@@ -532,6 +542,7 @@ def forge_loop(
     profiling,
     roofline_ceiling,
     roofline_target,
+    target_mean_case_speedup,
     prepare_task,
     task_type,
     source_files,
@@ -794,6 +805,7 @@ def forge_loop(
         commit_new_paths=commit_new_paths,
         # The attainment of the per-shape ceiling that ends the run; the ceiling itself is estimated inside the loop.
         roofline_target=_validate_roofline_target(roofline_target, roofline_ceiling == CEILING_ON),
+        target_mean_case_speedup=_validate_speedup_target(target_mean_case_speedup),
     )
     if baseline_json:
         # The anchor every speedup divides by, and the wall time published beside it, both come from the caller's
