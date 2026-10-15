@@ -69,6 +69,11 @@ REAL_2STAGE_WITH_KERNEL_NAMES = (
     "('gfx950', 256, 8192, 7168, 512, 384, 6, 'ActivationType.Silu', 'torch.bfloat16', "
     "'torch.float8_e4m3fn', 'torch.float4_e2m1fn_x2', 'QuantType.per_1x32', True, False)"
 )
+REAL_UNQUOTED_ACTIVATION = (
+    "[aiter] [fused_moe] using 2stage default for ('gfx950', 256, 128, 6144, 2048, 65, 9, "
+    "<ActivationType.Silu: 0>, 'torch.bfloat16', 'torch.float4_e2m1fn_x2', "
+    "'torch.float4_e2m1fn_x2', 'QuantType.per_1x32', True, False)"
+)
 
 
 class TestAiterServingEvidence:
@@ -150,7 +155,7 @@ class TestCkMoeTunerSupport:
 
 
 class TestDispatchKeyExtraction:
-    """The regex must match every wording aiter actually emits."""
+    """The parser must read every wording aiter actually emits."""
 
     def test_matches_the_plain_default_wording(self, tmp_path):
         keys = krh._aiter_fused_moe_dispatch_keys(_log(tmp_path, REAL_2STAGE_DEFAULT))
@@ -172,6 +177,13 @@ class TestDispatchKeyExtraction:
         assert len(keys) == 1
         assert keys[0]["model_dim"] == "7168"
         assert keys[0]["expert"] == "384"
+
+    def test_matches_the_unquoted_activation_repr(self, tmp_path):
+        keys = krh._aiter_fused_moe_dispatch_keys(_log(tmp_path, REAL_UNQUOTED_ACTIVATION))
+        assert len(keys) == 1
+        assert keys[0]["act_type"] == "ActivationType.Silu"
+        assert keys[0]["expert"] == "65"
+        assert keys[0]["q_dtype_a"] == "torch.float4_e2m1fn_x2"
 
     def test_dedupes_on_everything_but_the_token_count(self, tmp_path):
         a = REAL_2STAGE_DEFAULT

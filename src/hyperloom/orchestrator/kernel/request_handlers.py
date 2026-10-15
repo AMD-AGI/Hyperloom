@@ -32,6 +32,7 @@ from hyperloom.orchestrator.trace_analysis._capture_shapes import (
     is_capture_fragment as _shared_is_capture_fragment,
 )
 from hyperloom.common import codex_session, llm_config
+from hyperloom.common.checkpoint_quant import checkpoint_format
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env import env_bool, forge_explicitly_enabled, is_truthy
 from hyperloom.common.gpu_identity import is_gfx_arch
@@ -1211,13 +1212,17 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
     if quantization_arg in ("fp4", "mxfp4"):
         return quantization_arg, "fp4"
 
-    # Fall back to session precision.
+    # Fall back to session precision. When that is just the format a Quark or compressed-tensors checkpoint nests, it
+    # is one label for layers the checkpoint can store differently (MXFP4 experts, fp8 attention), and forge can tell
+    # them apart only when it is left to route each lane itself.
     precision = _normalize_precision(state.precision)
+    quant_type = str(payload.get("quant_type") or "auto").strip()
+    model_path = str(payload.get("model_path") or getattr(state, "model_path", "") or "").strip()
+    if precision and precision == checkpoint_format((_read_model_config(model_path) or {}).get("quantization_config")):
+        return "auto", quant_type
     if not precision:
         precision = "bf16"
-    quant_type = str(payload.get("quant_type") or "auto").strip()
     if precision == "fp8" and quant_type.lower() == "auto":
-        model_path = str(payload.get("model_path") or getattr(state, "model_path", "") or "").strip()
         gpu_type = str(payload.get("gpu_type") or getattr(state, "gpu_type", "") or "").strip()
         quant_type = _resolve_fp8_quant_type(model_path, gpu_type, framework)
     return precision, quant_type
@@ -2087,49 +2092,12 @@ _AITER_SERVING_MARKERS = {
     "fused_moe": ("[aiter] [fused_moe]", "Mxfp4 MoE backend"),
 }
 
-#: aiter logs every fused-MoE problem it dispatches as a 14-field tuple. The
-#: wording before it varies -- measured across 2948 real lines there are three
-#: forms, and one of them interposes its own parenthesised kernel names:
-#:
-#:   [fused_moe] using 2stage default for ('gfx950', 256, 256, 4096, ...)
-#:   [fused_moe] no tuned FlyDSL config for ('gfx950', 256, 256, 4096, ...)
-#:   [fused_moe] using 2stage (kernelName1='...', kernelName2='...') for ('gfx950', ...)
-#:
-#: so the tuple is anchored on `` for (`` rather than on the wording. The field
-#: order matches aiter's untuned CSV columns after dropping gfx and cu_num, which
-#: the runtime supplies itself.
-_AITER_FUSED_MOE_TUPLE_RE = re.compile(
-    r"\[fused_moe\].*? for \("
-    r"'(?P<gfx>[^']*)', "
-    r"(?P<cu_num>\d+), (?P<token>\d+), (?P<model_dim>\d+), (?P<inter_dim>\d+), "
-    r"(?P<expert>\d+), (?P<topk>\d+), "
-    r"'(?P<act_type>[^']*)', '(?P<dtype>[^']*)', "
-    r"'(?P<q_dtype_a>[^']*)', '(?P<q_dtype_w>[^']*)', '(?P<q_type>[^']*)', "
-    r"(?P<use_g1u1>True|False), (?P<doweight_stage1>True|False)\)"
-)
-
 #: Which dtypes fall in each of aiter's width buckets. Mirrors ``bit16_list`` /
 #: ``bit8_list`` / ``bit4_list`` in
 #: ``csrc/ck_gemm_moe_2stages_codegen/gemm_moe_ck2stages_common.py``.
 _AITER_BIT16_DTYPES = frozenset({"bfloat16", "float16"})
 _AITER_BIT8_DTYPES = frozenset({"float8_e4m3fn", "float8_e4m3fnuz", "int8"})
 _AITER_BIT4_DTYPES = frozenset({"float4_e2m1fn_x2", "uint32", "int4"})
-
-#: The fields that identify one MoE problem, ignoring the token count (which the
-#: tuner sweeps) and cu_num/gfx (which the runtime supplies).
-_FMOE_SHAPE_FIELDS = (
-    "model_dim",
-    "inter_dim",
-    "expert",
-    "topk",
-    "act_type",
-    "dtype",
-    "q_dtype_a",
-    "q_dtype_w",
-    "q_type",
-    "use_g1u1",
-    "doweight_stage1",
-)
 
 
 def _aiter_moe_dtype_pair_supported(q_dtype_a: str, q_dtype_w: str) -> bool:
@@ -2153,29 +2121,21 @@ def _aiter_moe_dtype_pair_supported(q_dtype_a: str, q_dtype_w: str) -> bool:
     return act in _AITER_BIT4_DTYPES and weight in _AITER_BIT4_DTYPES
 
 
-def _aiter_fused_moe_dispatch_keys(server_log: str) -> list[dict[str, str]]:
+def _aiter_fused_moe_dispatch_keys(server_log: str) -> list[dict[str, Any]]:
     """Return the distinct MoE problems a server log shows aiter dispatching.
 
-    Deduplicated on everything but the token count, preserving first-seen order.
-    One model routinely yields several problems -- the same checkpoint dispatches
-    both a BF16-activation and an FP8-activation variant, and the EP path appends
-    a masked fake-expert slot so ``expert``/``topk`` arrive one higher than the
+    Deduplicated on everything but the token count, most-missed first. One model
+    routinely yields several problems -- the same checkpoint dispatches both a
+    BF16-activation and an FP8-activation variant, and the EP path appends a
+    masked fake-expert slot so ``expert``/``topk`` arrive one higher than the
     model config states. Neither is derivable from the config, which is why the
     log is the authoritative source for what to tune.
     """
     if not server_log:
         return []
-    try:
-        text = Path(server_log).read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return []
-    seen: dict[tuple[str, ...], dict[str, str]] = {}
-    for match in _AITER_FUSED_MOE_TUPLE_RE.finditer(text):
-        fields = match.groupdict()
-        identity = tuple(fields[name] for name in _FMOE_SHAPE_FIELDS)
-        if identity not in seen:
-            seen[identity] = fields
-    return list(seen.values())
+    from kernelforge.gemm_tune.evidence import moe_dispatch_keys, parse_log_file
+
+    return moe_dispatch_keys(parse_log_file(server_log))
 
 
 def _aiter_ck_moe_tuner_supports(server_log: str) -> bool:
@@ -2200,11 +2160,6 @@ def _aiter_ck_moe_tuner_supports(server_log: str) -> bool:
         return True
     return any(_aiter_moe_dtype_pair_supported(key["q_dtype_a"], key["q_dtype_w"]) for key in keys)
 
-
-#: Header aiter's MoE tuner expects for its untuned input CSV.
-_FMOE_UNTUNED_CSV_HEADER = (
-    "token,model_dim,inter_dim,expert,topk,act_type,dtype,q_dtype_a,q_dtype_w,q_type,use_g1u1,doweight_stage1"
-)
 
 #: forge wordings that carry nothing deployable, each distinct from an honest
 #: ``no_improvement``. ``build_report`` checks ``has_candidate`` first, so a run
@@ -2265,6 +2220,8 @@ def _write_fmoe_untuned_csv_from_log(
     Problems whose dtype pair aiter's codegen rejects are dropped rather than
     passed through, because one unsupported row aborts the whole tuner run.
     """
+    from kernelforge.gemm_tune.evidence import MOE_SHAPE_FIELDS, moe_untuned_csv_text
+
     report: dict[str, Any] = {
         "observed": 0,
         "tunable": 0,
@@ -2276,12 +2233,12 @@ def _write_fmoe_untuned_csv_from_log(
     if not keys:
         return "", report
 
-    tunable: list[dict[str, str]] = []
+    tunable: list[dict[str, Any]] = []
     for key in keys:
         pair = (key["q_dtype_a"], key["q_dtype_w"])
         if _aiter_moe_dtype_pair_supported(*pair):
             tunable.append(key)
-            report["keys"].append({name: key[name] for name in _FMOE_SHAPE_FIELDS})
+            report["keys"].append({name: key[name] for name in MOE_SHAPE_FIELDS})
         else:
             combo = f"{pair[0]}/{pair[1]}"
             if combo not in report["dropped_unsupported"]:
@@ -2291,16 +2248,8 @@ def _write_fmoe_untuned_csv_from_log(
         return "", report
 
     token_list = _fmoe_token_list(tokens)
-    lines = [_FMOE_UNTUNED_CSV_HEADER]
-    for key in tunable:
-        for token in token_list:
-            lines.append(
-                f"{token},{key['model_dim']},{key['inter_dim']},"
-                f"{key['expert']},{key['topk']},{key['act_type']},{key['dtype']},"
-                f"{key['q_dtype_a']},{key['q_dtype_w']},{key['q_type']},"
-                f"{1 if key['use_g1u1'] == 'True' else 0},"
-                f"{1 if key['doweight_stage1'] == 'True' else 0}"
-            )
+    rendered = [moe_untuned_csv_text(key, tokens=token_list).splitlines() for key in tunable]
+    lines = rendered[0][:1] + [row for key_lines in rendered for row in key_lines[1:]]
 
     csv_path = workspace / "untuned_fmoe_from_runtime.csv"
     try:
