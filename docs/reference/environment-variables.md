@@ -136,7 +136,7 @@ when `--gpu-type` is omitted.
   `--no-framework-agent`, `--research-lane-capacity 0` or `--reset-state`.
   `--custom-specialist-only` (needs the pair) makes FRAMEWORK_AGENT run only
   that specialist and the bench of its proposals and patches, then move on to
-  SWEEP. Persisted in `state.json`; re-pass both on `--resume-from`
+  KERNEL_AGENT when enabled, else SWEEP. Persisted in `state.json`; re-pass both on `--resume-from`
   only to replace the definition, or pass `--reset-state` alone to clear it.
 
 Run `hyperloom optimize --help` for the exhaustive flag list.

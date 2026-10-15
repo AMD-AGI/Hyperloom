@@ -176,9 +176,9 @@ def _add_custom_specialist_args(opt: argparse.ArgumentParser) -> None:
         dest="custom_specialist_only",
         action="store_true",
         default=False,
-        help="FRAMEWORK_AGENT runs only the custom specialist and the bench of its proposals and patches; no other "
-        "specialist, explore grid or patch runs there, and the phase moves on to SWEEP once that work is done. "
-        "Requires the --custom-specialist-* pair (or a stored definition on --resume-from). Persisted.",
+        help="FRAMEWORK_AGENT runs only the custom specialist and the bench of its proposals and patches, then hands "
+        "over to the next phase (KERNEL_AGENT when enabled, else SWEEP); other phases run as usual. Requires the "
+        "--custom-specialist-* pair (or a stored definition on --resume-from). Persisted.",
     )
 
 

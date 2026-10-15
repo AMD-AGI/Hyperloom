@@ -404,7 +404,9 @@ brief:
   specialists, grids and patches would be denied), the custom task may run to
   the phase end with no lease extension, the Coordinator's own discovery, scout, stalled-
   domain force, predictor and general bench are skipped, and the phase hints
-  `skip_to_sweep` once the custom task, its grid and its patch reviews are done.
+  `skip_to_sweep` once the custom task (or its refused admission), its grid and
+  its patch reviews are done; the exit goes to KERNEL_AGENT when that phase is
+  enabled, else SWEEP, and later phases run as usual.
 - **PrimaTune predictor rows**: with `--primatune-endpoint` and
   `--primatune-mode active`, the predictor's proposals lead the untested-proposal
   block. Orchestration copies the ones worth a slot into its next `explore` grid
