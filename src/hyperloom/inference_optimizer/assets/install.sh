@@ -806,7 +806,12 @@ try:
     out["torch_version"] = torch.__version__
     out["hip"] = getattr(torch.version, "hip", None)
     out["cuda_str"] = getattr(torch.version, "cuda", None)
-except Exception as exc:
+except BaseException as exc:
+    # Not ``Exception``: a module ``import torch`` pulls in can call
+    # ``sys.exit`` rather than raise, and amd_smi does exactly that when its
+    # shared object is not on the loader path. Caught as ``Exception`` the
+    # SystemExit escaped, the verdict line below never ran, and the gate read
+    # the resulting silence as a CUDA build.
     out["rc"] = 2
     out["error"] = type(exc).__name__ + ": " + str(exc)[:200]
 print(json.dumps(out))
@@ -824,7 +829,18 @@ PY
     warn "torch probe produced no output (PYTHON=${PYTHON})"
     return 0
   fi
-  local rc; rc="$("$PYTHON" -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('rc',0))" "$probe" 2>/dev/null || echo 0)"
+  # The verdict is the probe's last line: a module that prints before dying puts
+  # its noise on the same stream, and read whole, that noise parsed as nothing
+  # and every field below defaulted to empty.
+  local probe_json; probe_json="$(printf '%s\n' "$probe" | tail -1)"
+  local rc; rc="$("$PYTHON" -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('rc',0))" "$probe_json" 2>/dev/null || echo unreadable)"
+  if [ "$rc" = "unreadable" ]; then
+    # Undetermined is not the same as CUDA-built, and saying the latter sent an
+    # operator to replace a torch that was already the right one.
+    warn "torch probe did not return readable JSON (PYTHON=${PYTHON}); leaving the torch/GPU match undetermined"
+    warn "last probe line: ${probe_json}"
+    return 0
+  fi
   if [ "$rc" = "2" ]; then
     warn "torch is NOT importable from PYTHON=${PYTHON}"
     warn "this pod has ROCm GPUs (rocm-smi works) -- letting pip install proceed"
@@ -840,8 +856,8 @@ PY
     warn "INFERENCE_OPTIMIZER_SKIP_TORCH_GATE=1 set; continuing despite missing torch"
     return 0
   fi
-  local hip; hip="$("$PYTHON" -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('hip') or '')" "$probe" 2>/dev/null || echo "")"
-  local tv;  tv="$("$PYTHON"  -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('torch_version') or '')" "$probe" 2>/dev/null || echo "")"
+  local hip; hip="$("$PYTHON" -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('hip') or '')" "$probe_json" 2>/dev/null || echo "")"
+  local tv;  tv="$("$PYTHON"  -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('torch_version') or '')" "$probe_json" 2>/dev/null || echo "")"
   if [ -z "$hip" ]; then
     warn "torch=${tv} in PYTHON=${PYTHON} is NOT a ROCm build (torch.version.hip is None)"
     warn "but this pod reports ROCm GPUs via rocm-smi. RAG-index / baseline / kernel"
