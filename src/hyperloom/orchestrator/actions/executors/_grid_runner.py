@@ -75,7 +75,6 @@ from ._inferencex_patcher import (
     eval_probe_targets_exist,
 )
 from ._jit_cache_env import apply_session_jit_cache, benchmark_framework
-from ._magpie_patcher import ensure_agentic_prefix_cache
 from ._launch_evidence import build_launch_evidence, persist_launch_evidence
 from ...measurement.runtime_findings import persist_runtime_findings, scan_server_log
 from ._server_argv import seal_server_argv
@@ -671,9 +670,6 @@ def _run_magpie(
     # The generation bounds + pathology probe are asserted whether or not ``$INFERENCEX_PATH`` is set: unset falls
     # back to the same env discovery the baseline arm uses ($MAGPIE_PATH/InferenceX).
     probe_root = Path(inferencex_path) if inferencex_path else None
-    # Every Magpie invocation passes here, and the copy of the generic scripts that runs is rewritten at session
-    # start, so this is where an agentic replay can be sure its prefix cache survived the script's own defaults.
-    ensure_agentic_prefix_cache(magpie_dir or None, probe_root)
     # Best-effort, unlike the probe below: a missing guard only costs the reason a failed round reports.
     ensure_eval_unbound_outputs_patched(probe_root)
     if not ensure_eval_probe_patched(probe_root) and not materialized_run_eval_disabled(config_path):

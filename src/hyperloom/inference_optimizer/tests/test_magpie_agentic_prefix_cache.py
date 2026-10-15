@@ -109,3 +109,40 @@ def test_a_tree_with_no_generic_script_has_nothing_to_patch(tmp_path):
     (tmp_path / "benchmarks").mkdir()
 
     assert mp.ensure_agentic_prefix_cache(None, tmp_path) is True
+
+
+def test_preparing_an_agentx_run_keeps_its_prefix_cache(tmp_path, monkeypatch):
+    """Baseline and profile shell out without the grid runner, so the patch has to live where both arrive.
+
+    Called from the grid runner alone it never reached a baseline --- the very
+    measurement every later round is compared against --- and a GLM-5.3 run
+    served its replay with the cache off while reporting the patch applied.
+    """
+    from hyperloom.orchestrator.actions.executors import _workload_envs as we
+
+    _runners(tmp_path)
+    # Stop the AgentX asset deployment this function also drives; the scripts are what this pins.
+    monkeypatch.setattr(we, "agentx_enabled", lambda *_a, **_k: True)
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setattr(
+        "hyperloom.inference_optimizer.agentx.runtime.maybe_prepare_agentx",
+        lambda **_kwargs: None,
+    )
+
+    we.prepare_agentx_runtime(env={}, inferencex_path=str(tmp_path), active=True)
+
+    for name in mp._AGENTIC_RADIX_SCRIPTS:
+        assert mp._AGENTIC_RADIX_SENTINEL in (tmp_path / "benchmarks" / name).read_text(encoding="utf-8")
+
+
+def test_a_non_agentx_run_keeps_the_harness_defaults(tmp_path, monkeypatch):
+    """A fixed-sequence throughput sweep wants the cache off; only an agentic replay does not."""
+    from hyperloom.orchestrator.actions.executors import _workload_envs as we
+
+    _runners(tmp_path)
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+
+    we.prepare_agentx_runtime(env={}, inferencex_path=str(tmp_path), active=False)
+
+    body = (tmp_path / "benchmarks" / "sglang_mi355x.sh").read_text(encoding="utf-8")
+    assert mp._AGENTIC_RADIX_SENTINEL not in body
