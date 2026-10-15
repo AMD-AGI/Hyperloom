@@ -159,6 +159,26 @@ def test_a_run_with_no_evidence_raises_no_gaps(tmp_path):
     assert reg.run_evidence_gaps(session_dir=tmp_path, trace_path=tmp_path / "absent", workspace="") == []
 
 
+def test_one_unreadable_artifact_does_not_cost_the_other_censuses(tmp_path, monkeypatch):
+    """The caller catches OSError around the whole call, so a raising census would silence all four."""
+    events = eager_step("step[EXTEND bs=1 toks=900]", start=0.0, count=10)
+
+    def _denied(*_args, **_kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(reg, "variant_counts", _denied)
+
+    gaps = reg.run_evidence_gaps(
+        session_dir=tmp_path,
+        trace_path=_trace(tmp_path, events),
+        workspace=_requests(tmp_path, ms_per_100k=200.0),
+    )
+
+    provenances = {g["provenance"] for g in gaps}
+    assert "recompile" not in provenances
+    assert {"ungraphed_step", "front_end_input_cost"} <= provenances
+
+
 def test_a_capture_directory_resolves_to_its_newest_file(tmp_path):
     captures = tmp_path / "torch_trace"
     captures.mkdir()
