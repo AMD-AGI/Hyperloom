@@ -65,6 +65,20 @@ from kernelforge.loop.search_policy import (
     SearchPolicyDecision,
     SearchPolicyEngine,
 )
+from kernelforge.loop.wiki_guidance import (
+    DEFAULT_GUIDED_BUDGET_FRACTION,
+    MAX_PLAYBOOK_ATTEMPTS,
+    PHASE_FREE,
+    PHASE_GUIDED,
+    REASON_PLAYBOOK_UNAVAILABLE,
+    GuidanceState,
+    WikiGuidanceStore,
+    decide_phase,
+    parse_playbook,
+    record_outcome,
+    render_for_implementer,
+    render_for_planning,
+)
 from kernelforge.loop.round_budget import (
     admit_dispatch,
     admit_round,
@@ -96,6 +110,7 @@ from kernelforge.loop.run_state import (
 )
 from kernelforge.orchestrator.orchestration import (
     OrchestrationInfrastructureError,
+    OrchestrationOutputError,
 )
 from kernelforge.orchestrator.supervisor import (
     clear_latest_supervisor_ruling,
@@ -517,11 +532,18 @@ class IterationConfig:
     # Mean per-case speedup over the baseline (the KEEP objective) at which the campaign stops, however much budget
     # remains. Zero disables the gate, which is the default.
     target_mean_case_speedup: float = 0.0
+    # Plan from a knowledge base playbook (``loop.wiki_guidance``) until it is spent, the search policy reports a
+    # stall, or ``guided_budget_fraction`` of the time budget is used; then plan freely. Needs the knowledge base
+    # (``Config.knowledge_wiki_root``) and is off by default.
+    wiki_guided: bool = False
+    guided_budget_fraction: float = DEFAULT_GUIDED_BUDGET_FRACTION
 
     def __post_init__(self) -> None:
         # Validated here rather than at the CLI boundary alone, so a pattern can never reach the commit/delete sites
         # unvalidated -- including via ``dataclasses.replace``.
         self.commit_new_paths = normalize_commit_new_paths(self.commit_new_paths)
+        if not 0.0 < float(self.guided_budget_fraction) <= 1.0:
+            raise ValueError(f"guided_budget_fraction must be in (0, 1], got {self.guided_budget_fraction!r}")
 
 
 class CaseConfigCoverage(NamedTuple):
@@ -680,6 +702,19 @@ class IterationLoop(AnalysisRuntimeMixin):
         self.search_policy_engine = SearchPolicyEngine()
         self._search_policy_decision: SearchPolicyDecision | None = None
         self._reported_window_gain_faults: set[str] = set()
+        # Knowledge-base-guided planning; None leaves every planning path as it was. A fresh campaign starts GUIDED
+        # whatever an earlier campaign left in the workspace, and a resumed one continues the phase it recorded.
+        self.wiki_guidance_store: WikiGuidanceStore | None = (
+            WikiGuidanceStore(self.ic.workspace_dir) if self.ic.wiki_guided else None
+        )
+        self.wiki_guidance: GuidanceState | None = None
+        if self.wiki_guidance_store is not None:
+            self.wiki_guidance = self.wiki_guidance_store.load() if resume else GuidanceState()
+            if not resume:
+                # Written now, so a resume after an early crash cannot pick up an earlier campaign's file.
+                self._save_wiki_guidance()
+        # The plan the current iteration measures, read when its outcome credits the playbook ledger.
+        self._iteration_plan_text = ""
         self.handoff_store: HandoffStore | None = None
         # A committed KEEP recovered during synchronous resume preflight waits here until the async run can restore
         # its post-KEEP profile/archive.
@@ -2217,6 +2252,11 @@ class IterationLoop(AnalysisRuntimeMixin):
                     checkpoint_metadata=pending,
                 )
             )
+            guidance = self.wiki_guidance
+            if guidance is not None and guidance.inflight_iteration == result.iteration:
+                # The process that measured this KEEP died before crediting it; the plan it measured is on record.
+                self._iteration_plan_text = guidance.inflight_plan
+                self._record_wiki_guidance_outcome(result.iteration, "KEEP")
         self.state_store.save(self.run_state)
         persisted = self.state_store.load()
         if persisted.to_dict() != self.run_state.to_dict():
@@ -3590,6 +3630,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                     bench_detail=result.bench_detail,
                     incumbent_case_times=self._scored_incumbent_case_times(),
                 )
+                self._record_wiki_guidance_outcome(result.iteration, decision_label)
             self.state_store.save(self.run_state)
 
             if require_durable:
@@ -3664,6 +3705,8 @@ class IterationLoop(AnalysisRuntimeMixin):
             best_after_mean_case_speedup=(result.mean_case_speedup if result.kept else self.best_mean_case_speedup),
             is_new_best=result.kept,
             diversification_cycle_completed=(self.run_state.diversification_cycle_completed),
+            # The planning phase of a --wiki-guided campaign; absent otherwise.
+            guidance_phase=(self.wiki_guidance.phase if self.wiki_guidance is not None else None),
         )
 
     def _record_iteration_handoff(
@@ -4189,7 +4232,181 @@ class IterationLoop(AnalysisRuntimeMixin):
             print(f"  [search-policy] diminishing-returns trigger unavailable: {fault}")
         if decision.mode != previous_mode or decision.reason_codes != previous_reasons:
             print(f"  [search-policy] {decision.mode}: " + ", ".join(decision.reason_codes))
+        self._update_wiki_guidance_phase(iteration, decision)
         return decision
+
+    def _save_wiki_guidance(self) -> None:
+        """Persist the guidance state; a failure degrades persistence and never the iteration."""
+        if self.wiki_guidance_store is None or self.wiki_guidance is None:
+            return
+        try:
+            self.wiki_guidance_store.save(self.wiki_guidance)
+        except OSError as error:
+            self.persistence_degraded = True
+            self.persistence_errors.append(f"persist wiki guidance: {error}")
+            self.persistence_errors = self.persistence_errors[-10:]
+            log.warning("wiki guidance state not durable: %s", error)
+
+    def _append_wiki_event(self, event: dict) -> None:
+        try:
+            self.state_store.append_event(event)
+        except Exception:
+            log.debug("wiki guidance event append failed", exc_info=True)
+
+    def _budget_used_fraction(self) -> float:
+        """The share of the time budget spent so far, by the clock ``_time_remaining`` reads."""
+        total = float(self.ic.max_time_hours) * 3600.0
+        if total <= 0:
+            return 0.0
+        return min(1.0, max(0.0, 1.0 - self._time_remaining() / total))
+
+    def _enter_wiki_guidance_phase(self, iteration: int, phase: str, reasons: Sequence[str]) -> None:
+        state = self.wiki_guidance
+        if state is None:
+            return
+        state.phase = phase
+        state.reason_codes = list(reasons)
+        state.phase_changed_at_iteration = iteration
+        self._save_wiki_guidance()
+        self._append_wiki_event(
+            make_event(
+                "wiki_guidance_phase",
+                iteration,
+                phase=phase,
+                reason_codes=list(reasons),
+                items=state.status_counts() or None,
+                budget_used_fraction=round(self._budget_used_fraction(), 4),
+            )
+        )
+        print(f"  [wiki-guided] {phase}: " + ", ".join(reasons))
+
+    def _update_wiki_guidance_phase(self, iteration: int, decision: SearchPolicyDecision) -> None:
+        """Leave GUIDED once the playbook is spent, the search stalls, or the guided budget is used."""
+        state = self.wiki_guidance
+        if state is None:
+            return
+        change = decide_phase(
+            state,
+            search_reasons=decision.reason_codes,
+            budget_used_fraction=self._budget_used_fraction(),
+            budget_fraction=self.ic.guided_budget_fraction,
+        )
+        if change is not None:
+            self._enter_wiki_guidance_phase(iteration, *change)
+
+    async def _ensure_wiki_playbook(self, iteration: int, orchestration_service, context) -> None:
+        """Build the playbook on the first GUIDED round that has none; once settled, never again."""
+        state = self.wiki_guidance
+        if state is None or state.phase != PHASE_GUIDED or state.playbook_settled:
+            return
+        builder = getattr(orchestration_service, "build_wiki_playbook", None)
+        state.playbook_attempts += 1
+        error = ""
+        playbook = None
+        if builder is None:
+            error = "the orchestration service cannot build a playbook"
+            state.playbook_settled = True
+        else:
+            print("  [wiki-guided] building the playbook from the knowledge base...")
+            try:
+                text = await builder(context, usage=self._usage)
+            except OrchestrationInfrastructureError as outage:
+                # The backend refused, not the answer: the next round asks again, up to the attempt limit.
+                error = f"{type(outage).__name__}: {outage}"
+                state.playbook_settled = state.playbook_attempts >= MAX_PLAYBOOK_ATTEMPTS
+            except (OrchestrationOutputError, ValueError) as failure:
+                # The backend answered and the answer is unusable; asking again would buy the same answer.
+                error = f"{type(failure).__name__}: {failure}"
+                state.playbook_settled = True
+            else:
+                if self.wiki_guidance_store is not None:
+                    try:
+                        self.wiki_guidance_store.save_response(text)
+                    except OSError:
+                        log.debug("wiki playbook response not saved", exc_info=True)
+                playbook, notes = parse_playbook(text)
+                state.playbook_settled = True
+                if playbook is None:
+                    error = "; ".join(notes)
+                elif notes:
+                    print("  [wiki-guided] playbook notes: " + "; ".join(notes))
+            finally:
+                self._checkpoint_llm_usage()
+        if playbook is not None:
+            state.adopt(playbook)
+            self._save_wiki_guidance()
+            self._append_wiki_event(
+                make_event(
+                    "wiki_playbook_built",
+                    iteration,
+                    items=list(playbook.item_ids()),
+                    groups=[group.group_id for group in playbook.groups],
+                    attempt=state.playbook_attempts,
+                )
+            )
+            print(
+                f"  [wiki-guided] playbook: {len(playbook.items)} item(s) in "
+                f"{len(playbook.groups)} group(s); planning GUIDED"
+            )
+            return
+        state.playbook_error = error
+        self._save_wiki_guidance()
+        self._append_wiki_event(
+            make_event(
+                "wiki_playbook_unavailable",
+                iteration,
+                error=error[:500],
+                attempt=state.playbook_attempts,
+                settled=state.playbook_settled,
+            )
+        )
+        print(f"  [wiki-guided] playbook unavailable ({error})")
+        if state.playbook_settled:
+            self._enter_wiki_guidance_phase(iteration, PHASE_FREE, (REASON_PLAYBOOK_UNAVAILABLE,))
+
+    def _with_wiki_guidance(self, context):
+        """Attach the playbook and its ledger to a planning context, when there is one."""
+        if self.wiki_guidance is None:
+            return context
+        guidance = render_for_planning(self.wiki_guidance)
+        if guidance is None:
+            return context
+        return replace(context, wiki_guidance=guidance)
+
+    def _note_iteration_plan(self, iteration: int, text: str) -> None:
+        """Remember the plan this iteration measures, durably when a playbook will be credited from it."""
+        self._iteration_plan_text = text or ""
+        state = self.wiki_guidance
+        if state is None or state.playbook is None:
+            return
+        state.inflight_iteration = iteration
+        state.inflight_plan = self._iteration_plan_text
+        self._save_wiki_guidance()
+
+    def _record_wiki_guidance_outcome(self, iteration: int, decision: str) -> None:
+        """Credit the measured plan's playbook citations; never fails the iteration."""
+        state = self.wiki_guidance
+        if state is None or state.playbook is None:
+            return
+        try:
+            changed = record_outcome(state, iteration=iteration, plan_text=self._iteration_plan_text, decision=decision)
+            self._save_wiki_guidance()
+            if changed:
+                self._append_wiki_event(
+                    make_event(
+                        "wiki_playbook_ledger",
+                        iteration,
+                        decision=decision,
+                        items={item_id: state.ledger[item_id].status for item_id in changed},
+                        counts=state.status_counts(),
+                    )
+                )
+                print(
+                    "  [wiki-guided] ledger: "
+                    + ", ".join(f"{item_id} {state.ledger[item_id].status}" for item_id in changed)
+                )
+        except Exception:
+            log.warning("wiki playbook ledger update failed for iteration %s", iteration, exc_info=True)
 
     async def _plan_round(
         self,
@@ -4224,6 +4441,9 @@ class IterationLoop(AnalysisRuntimeMixin):
                 else self._build_orchestration_context()
             )
         )
+        # Inside the round's planning clock, so building the playbook is charged to the round that needed it.
+        await self._ensure_wiki_playbook(iteration, orchestration_service, context)
+        context = self._with_wiki_guidance(context)
         try:
             result = await orchestration_service.run(
                 context,
@@ -5143,6 +5363,7 @@ class IterationLoop(AnalysisRuntimeMixin):
 
             # Durable per-iteration marker (facts only; detail lives in files).
             self.run_state.iteration = iteration
+            self._iteration_plan_text = ""
             self.state_store.append_event(
                 make_event(
                     "iteration_started",
@@ -5237,6 +5458,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 attempt_diff = self._working_tree_diff()
                 reusable_benchmark = None
                 session_sink["plan"] = queued_lane.plan
+                self._note_iteration_plan(iteration, queued_lane.plan)
                 print(f"  [lane {queued_lane.lane_id}] measuring queued candidate")
             elif merge_diff and merge_pair is not None:
                 unmeasured_result = None
@@ -5306,6 +5528,10 @@ class IterationLoop(AnalysisRuntimeMixin):
                             on_iteration(result)
                         continue
                     optimization_plan_path = str(plan_path)
+                    try:
+                        self._note_iteration_plan(iteration, Path(plan_path).read_text(encoding="utf-8"))
+                    except OSError:
+                        self._note_iteration_plan(iteration, "")
                     optimization_plan_executable = (
                         self._last_orchestration_plan_executable
                         if self._last_orchestration_plan_executable is not None
@@ -5391,6 +5617,9 @@ class IterationLoop(AnalysisRuntimeMixin):
                         f"Mode residence remaining after this iteration: {policy.residence_iterations_remaining}"
                     )
                     history = "\n".join(policy_lines) + "\n\n" + history
+                guidance_note = render_for_implementer(self.wiki_guidance) if self.wiki_guidance is not None else ""
+                if guidance_note:
+                    history = f"{guidance_note}\n\n{history}"
                 # The latest free-form Supervisor Ruling is durable across KEEP and resume.
                 if self._supervisor_ruling:
                     history = (

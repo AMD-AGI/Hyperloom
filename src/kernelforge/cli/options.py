@@ -73,6 +73,26 @@ def _validate_roofline_target(target: float, ceiling_enabled: bool) -> float:
     return value
 
 
+def _validate_wiki_guided(enabled: bool, budget_fraction: float, knowledge_wiki_root: str) -> tuple[bool, float]:
+    """Check guided planning has a knowledge base to build its playbook from, and a sane budget share.
+
+    Without a knowledge base there is nothing to build a playbook from, so the flag would plan exactly as without
+    it while the operator believes otherwise; it is refused rather than run.
+    """
+    fraction = float(budget_fraction)
+    if not 0.0 < fraction <= 1.0:
+        raise click.BadParameter(
+            f"--guided-budget-fraction {fraction} is not a share of the budget; give a value in (0, 1]",
+            param_hint="--guided-budget-fraction",
+        )
+    if enabled and not str(knowledge_wiki_root or "").strip():
+        raise click.BadParameter(
+            "--wiki-guided needs a knowledge base to build its playbook from; set FORGE_KNOWLEDGE_WIKI_ROOT",
+            param_hint="--wiki-guided",
+        )
+    return bool(enabled), fraction
+
+
 def _validate_speedup_target(target: float) -> float:
     """Check the speedup target is one the baseline has not already met.
 

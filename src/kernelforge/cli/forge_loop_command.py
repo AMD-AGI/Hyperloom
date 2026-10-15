@@ -28,6 +28,7 @@ from kernelforge.cli.options import (
     _validate_optional_agent_provider,
     _validate_roofline_target,
     _validate_speedup_target,
+    _validate_wiki_guided,
 )
 from kernelforge.cli.pr_references import (
     PR_KB_BUDGET_SEC,
@@ -61,6 +62,7 @@ from kernelforge.loop.recovery import (
     rollback_unpublished_warm_start,
 )
 from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.loop.wiki_guidance import DEFAULT_GUIDED_BUDGET_FRACTION
 
 
 # A high runaway backstop, not a time bound.
@@ -373,6 +375,21 @@ def _load_external_baseline(path: str) -> tuple[float, dict[str, float]]:
     "a value at or below 1.0 is refused. It never affects KEEP.",
 )
 @click.option(
+    "--wiki-guided/--no-wiki-guided",
+    default=False,
+    help="Plan from a knowledge base playbook first. The first planning round builds a playbook of techniques "
+    "for this kernel from the knowledge base, and every planner follows it (GUIDED) until it is spent, the "
+    "search policy reports a stall, or --guided-budget-fraction of the time budget is used; planning is free "
+    "(FREE) from then on. Needs a knowledge base (FORGE_KNOWLEDGE_WIKI_ROOT). Off by default.",
+)
+@click.option(
+    "--guided-budget-fraction",
+    default=DEFAULT_GUIDED_BUDGET_FRACTION,
+    type=float,
+    show_default=True,
+    help="The largest share of the time budget a --wiki-guided campaign plans from the playbook.",
+)
+@click.option(
     "--prepare-task/--no-prepare-task",
     default=True,
     help="Pre-loop task preparation (default on, fresh campaigns only). "
@@ -543,6 +560,8 @@ def forge_loop(
     roofline_ceiling,
     roofline_target,
     target_mean_case_speedup,
+    wiki_guided,
+    guided_budget_fraction,
     prepare_task,
     task_type,
     source_files,
@@ -775,6 +794,9 @@ def forge_loop(
     from kernelforge.tracker import ExperimentTracker, UsageAccumulator, UsageLedgerFile
     from kernelforge.orchestrator.agent import make_agent_fn
 
+    wiki_guided, guided_budget_fraction = _validate_wiki_guided(
+        wiki_guided, guided_budget_fraction, config.knowledge_wiki_root
+    )
     iter_config = IterationConfig(
         kernel_file=kernel,
         driver_script=driver,
@@ -806,6 +828,8 @@ def forge_loop(
         # The attainment of the per-shape ceiling that ends the run; the ceiling itself is estimated inside the loop.
         roofline_target=_validate_roofline_target(roofline_target, roofline_ceiling == CEILING_ON),
         target_mean_case_speedup=_validate_speedup_target(target_mean_case_speedup),
+        wiki_guided=wiki_guided,
+        guided_budget_fraction=guided_budget_fraction,
     )
     if baseline_json:
         # The anchor every speedup divides by, and the wall time published beside it, both come from the caller's
@@ -1377,6 +1401,11 @@ def forge_loop(
     knowledge_wiki = KnowledgeWikiTool.from_config(config)
     if knowledge_wiki is not None:
         print(f"  Knowledge base: {knowledge_wiki.root} (calls logged to {knowledge_wiki.log_path})")
+    if iter_config.wiki_guided:
+        print(
+            "  Wiki-guided planning: on (GUIDED until the playbook is spent, the search stalls or "
+            f"{iter_config.guided_budget_fraction:.0%} of the budget is used; then FREE)"
+        )
 
     from kernelforge.orchestrator.orchestration import (
         default_specialist_definitions,
