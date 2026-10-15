@@ -3,11 +3,11 @@
 
 """The check-prior-art scripts record what they searched, so a short result never reads as "none".
 
-Each script runs against a stub ``gh`` that answers from a fake GitHub: search results keyed by
-the exact query, with the rate-limit headers each answer sets; open pull requests that GraphQL
-pages by cursor the way the real API does (synthetic ones fill a repository up to its open total);
-and per-PR detail for the deep read and for pull requests the open scan lists again. An answer can
-fail. A stub ``sleep`` records how long the script asked to wait.
+Each script runs against a stub ``gh`` that answers from a fake GitHub, and applies ``--jq`` with
+the real ``jq`` as gh does: search results keyed by the exact query; open pull requests that
+GraphQL pages by cursor the way the real API does (synthetic ones fill a repository up to its open
+total); and per-PR detail for the deep read and for pull requests the open scan lists again. An
+answer can fail. A stub ``sleep`` returns at once.
 """
 
 from __future__ import annotations
@@ -29,19 +29,20 @@ _KERNELS = "up/kernels"
 _UNTRUSTED = "# UNTRUSTED DATA"
 
 _STUB_GH = """#!{python} -S
-import json, os, re, sys, time
+import json, os, re, subprocess, sys
 
 world = json.load(open(os.environ["GH_STUB_WORLD"], encoding="utf-8"))
 args = sys.argv[2:]
-fields, accept, positional = {}, "", []
+fields, accept, jq, positional = {}, "", None, []
 while args:
     flag = args.pop(0)
     if flag == "-f":
         key, _, value = args.pop(0).partition("=")
         fields[key] = value
-    elif flag in ("-X", "-H"):
+    elif flag in ("-X", "-H", "--jq"):
         value = args.pop(0)
         accept = value if flag == "-H" else accept
+        jq = value if flag == "--jq" else jq
     elif not flag.startswith("-"):
         positional.append(flag)
 endpoint = positional[0].split("?")[0]
@@ -52,15 +53,19 @@ def fail(message):
     sys.exit(1)
 
 
+def answer(payload):
+    text = json.dumps(payload)
+    if jq is not None:
+        text = subprocess.run(["jq", "-r", jq], input=text, capture_output=True, text=True, check=True).stdout
+    sys.stdout.write(text)
+
+
 if endpoint == "search/issues":
-    answer = world["search"].get(fields["q"], {"total_count": 0, "incomplete_results": False, "items": []})
-    reset = int(time.time()) + answer.get("reset_in", 60)
-    sys.stdout.write("HTTP/2.0 200 OK\\nX-Ratelimit-Remaining: %d\\r\\n" % answer.get("remaining", 29))
-    sys.stdout.write("X-Ratelimit-Reset: %d\\r\\n\\r\\n" % reset)
-    if "error" in answer:
-        sys.stdout.write(json.dumps({"message": answer["error"]}))
-        fail("gh: " + answer["error"])
-    sys.stdout.write(json.dumps(answer))
+    hits = world["search"].get(fields["q"], {"total_count": 0, "incomplete_results": False, "items": []})
+    if "error" in hits:
+        sys.stdout.write(json.dumps({"message": hits["error"]}))
+        fail("gh: " + hits["error"])
+    answer(hits)
 elif endpoint == "graphql":
     repo = world["open"][fields["owner"] + "/" + fields["name"]]
     start = int(fields.get("cursor", "0"))
@@ -92,7 +97,6 @@ else:
 """
 
 _STUB_SLEEP = """#!/bin/sh
-printf '%s\\n' "$1" >> "$SLEEP_LOG"
 """
 
 pytestmark = pytest.mark.skipif(shutil.which("jq") is None, reason="the check-prior-art scripts need jq")
@@ -117,7 +121,6 @@ def _run(
         **os.environ,
         "PATH": f"{stub_dir}{os.pathsep}{os.environ['PATH']}",
         "GH_STUB_WORLD": str(tmp_path / "world.json"),
-        "SLEEP_LOG": str(tmp_path / "sleeps.txt"),
     }
     return subprocess.run(
         ["bash", str(_SKILL / script), str(work), *args],
@@ -208,23 +211,6 @@ def test_every_query_is_recorded_with_what_it_covered_and_a_failure_does_not_sto
         f"FAILED\t-\t-\t{_query('open', 'moe', _KERNELS)}\tgh: Validation Failed (HTTP 422)",
         f"OK\t1\t1\t{_query('merged', 'moe', _KERNELS)}\t",
     ]
-
-
-def test_a_search_that_spent_the_rate_limit_waits_for_its_reset_even_when_it_failed(tmp_path: Path) -> None:
-    world = {
-        "search": {
-            _query("open", "moe"): {**_hits(_item(1)), "remaining": 0, "reset_in": 5},
-            _query("merged", "moe"): {"error": "API rate limit exceeded (HTTP 403)", "remaining": 0, "reset_in": 50},
-            _query("open", "moe", _KERNELS): _hits(_item(2)),
-        }
-    }
-    result = _run(tmp_path, "search.sh", world, {"repos.txt": f"{_UPSTREAM}\n{_KERNELS}\n", "terms.txt": "moe\n"})
-    assert result.returncode == 0, result.stderr
-    waits = [int(line) for line in (tmp_path / "sleeps.txt").read_text(encoding="utf-8").split()]
-    assert len(waits) == 2
-    # The script reads the clock after the stub stamped the reset, so a loaded host only shortens a wait.
-    assert 2 <= waits[0] <= 6
-    assert 47 <= waits[1] <= 51
 
 
 @pytest.mark.parametrize(

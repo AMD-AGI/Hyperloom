@@ -25,3 +25,7 @@ entries() {
 check_repo() {
   [[ "$1" =~ ^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$ ]] || die "not an owner/name repository: $1"
 }
+
+# A pull request's state as the issues API reports it, where a merged PR is "closed".
+# shellcheck disable=SC2034  # read by the scripts that source this file
+PR_STATE_JQ='def pr_state: if .pull_request.merged_at then "merged" else .state end; '

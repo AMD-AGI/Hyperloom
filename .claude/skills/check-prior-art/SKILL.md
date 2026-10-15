@@ -114,7 +114,7 @@ bash .claude/skills/check-prior-art/search.sh "$WORK"
 | `queries.tsv` | one row per query as it is answered: `status listed total query note`. `OK`, `TRUNCATED` (more matched than one page lists), `INCOMPLETE` (GitHub timed out searching) or `FAILED` (with gh's error) |
 | `candidates.tsv` | written at the end: one row per PR any query found, `repo number state draft title url updated hits` |
 
-The script waits out the search rate limit itself. A `TRUNCATED` query was too broad: replace it
+The script keeps under the search API's 30 queries a minute itself. A `TRUNCATED` query was too broad: replace it
 in `terms.txt` with narrower lines and rerun. With a `FAILED` query, or a run that ended before
 `candidates.tsv`, rerun the script once; a query still `FAILED` goes on the report as
 `SKIPPED: search -- <query>: <error>`.

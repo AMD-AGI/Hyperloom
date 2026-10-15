@@ -20,7 +20,7 @@ set -euo pipefail
 
 [ "$#" -eq 1 ] || die "usage: search.sh WORK"
 WORK="$1"
-require_tools gh jq
+require_tools gh
 mapfile -t REPOS < <(entries "$WORK/repos.txt")
 mapfile -t TERMS < <(entries "$WORK/terms.txt")
 [ "${#REPOS[@]}" -gt 0 ] || die "$WORK/repos.txt names no repository"
@@ -29,59 +29,30 @@ for repo in "${REPOS[@]}"; do
   check_repo "$repo"
 done
 
-# One page, the API's largest: a query that matches more is too broad to read, and its
-# TRUNCATED row says so rather than spending the search quota on later pages.
-PER_PAGE=100
+# One page of 100, the API's largest: a query that matches more is too broad to read, and its
+# TRUNCATED row says so. The first line out is the query's status, then one line per PR.
+# shellcheck disable=SC2016  # $n is a jq variable, not a shell one
+JQ="$PR_STATE_JQ"'(.items | length) as $n
+  | ([if .incomplete_results then "INCOMPLETE" elif $n < .total_count then "TRUNCATED" else "OK" end,
+      $n, .total_count] | @tsv),
+    (.items[] | [.number, pr_state, .draft, .title, .html_url, .updated_at] | @tsv)'
 
 raw=$(mktemp -d)
 trap 'rm -rf "$raw"' EXIT
 : > "$raw/rows.tsv"
 printf 'status\tlisted\ttotal\tquery\tnote\n' > "$WORK/queries.tsv"
-
-# The search API allows a few dozen queries a minute. GET /rate_limit can lag behind the
-# search resource, so the last response's own headers decide whether the next query waits.
-wait_for_quota() {
-  local remaining reset pause
-  remaining=$(awk -F': ' 'tolower($1) == "x-ratelimit-remaining" { print $2 + 0 }' "$raw/headers")
-  reset=$(awk -F': ' 'tolower($1) == "x-ratelimit-reset" { print $2 + 0 }' "$raw/headers")
-  if [ "${remaining:-1}" -lt 1 ] && [ -n "$reset" ]; then
-    pause=$((reset - $(date +%s) + 1))
-    if [ "$pause" -gt 0 ]; then
-      sleep "$pause"
-    fi
-  fi
-}
-
-# gh -i prints the status line and headers, a blank line, then the body.
-search() {
-  local status=0
-  gh api -i -X GET search/issues -f q="$1" -f per_page="$PER_PAGE" \
-    > "$raw/response" 2> "$raw/error" || status=$?
-  : > "$raw/headers"
-  : > "$raw/page.json"
-  tr -d '\r' < "$raw/response" | awk -v headers="$raw/headers" -v body="$raw/page.json" '
-    in_body { print > body; next }
-    /^$/ { in_body = 1; next }
-    { print > headers }'
-  return "$status"
-}
-
 for repo in "${REPOS[@]}"; do
   for state in open merged; do
     for terms in "${TERMS[@]}"; do
       query="repo:$repo is:pr is:$state $terms"
-      if search "$query"; then
-        jq -r --arg repo "$repo" '.items[]
-          | [$repo, .number, (if .pull_request.merged_at then "merged" else .state end), .draft,
-             .title, .html_url, .updated_at] | @tsv' "$raw/page.json" >> "$raw/rows.tsv"
-        jq -r --arg query "$query" '
-          [(if .incomplete_results then "INCOMPLETE"
-            elif (.items | length) < .total_count then "TRUNCATED" else "OK" end),
-           (.items | length), .total_count, $query, ""] | @tsv' "$raw/page.json" >> "$WORK/queries.tsv"
+      if gh api -X GET search/issues -f q="$query" -f per_page=100 --jq "$JQ" > "$raw/page" 2> "$raw/error"; then
+        printf '%s\t%s\t\n' "$(head -1 "$raw/page")" "$query" >> "$WORK/queries.tsv"
+        awk -v repo="$repo" 'NR > 1 { print repo "\t" $0 }' "$raw/page" >> "$raw/rows.tsv"
       else
         printf 'FAILED\t-\t-\t%s\t%s\n' "$query" "$(head -1 "$raw/error")" >> "$WORK/queries.tsv"
       fi
-      wait_for_quota
+      # The search API allows an authenticated user 30 queries a minute.
+      sleep 2
     done
   done
 done
