@@ -10,6 +10,8 @@ import re
 from pathlib import Path
 from typing import Any, Mapping
 
+from hyperloom.common.perf_metric import agentx_active
+
 log = logging.getLogger(__name__)
 
 #: The ``error_class`` of a baseline refused for running its replay with the prefix cache off.
@@ -80,11 +82,10 @@ def refuse_cacheless_agentx_baseline(ctx: Any, result: dict[str, Any]) -> None:
     candidate validated through a ``baseline``-kind task (``quality_ref_exempt``) is measured as it ran. It stops on the
     first one rather than retrying, because the next attempt would launch the same server.
     """
-    # Function-local: a module-level import puts this module, which ``baseline`` imports, in an import cycle.
-    from ._workload_envs import agentx_active
-
     shared_state = (getattr(ctx, "extra", None) or {}).get("shared_state")
-    if result.get("status") != "succeeded" or not agentx_active(shared_state):
+    if result.get("status") != "succeeded" or not agentx_active(
+        benchmark_mode=getattr(shared_state, "benchmark_mode", "")
+    ):
         return
     evidence = prefix_cache_off_evidence(result)
     if not evidence:
