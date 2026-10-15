@@ -34,7 +34,6 @@ _ERROR_EXCERPT_CHARS = 500
 _TRACE_REQUEST_FIELDS = (
     "analysis_route",
     "analysis_mode",
-    "framework",
     "steady_state_mode",
     "split_conc",
     "split_osl",
@@ -103,14 +102,14 @@ def remember_roofline_failure(state: Any, params: Mapping[str, Any], result: Map
 def remember_trace_failure(state: Any, payload: Mapping[str, Any], result: Mapping[str, Any]) -> str:
     """Remember a failed analysis of ``payload``'s trace that the same trace reproduces; return the failure's class."""
     trace = _trace_input(payload)
-    return _remember(state, f"trace:{trace}" if trace else "", result, request=_trace_request(payload))
+    return _remember(state, f"trace:{trace}" if trace else "", result, request=_trace_request(state, payload))
 
 
 def remembered_trace_failure(state: Any, payload: Mapping[str, Any]) -> dict[str, Any] | None:
     """The failed result to serve for a trace analysis the same input already failed, or ``None`` to run it."""
     trace = _trace_input(payload)
     record = (state.analysis_failures or {}).get(f"trace:{trace}") if trace else None
-    if record is None or record.get("request") != _trace_request(payload):
+    if record is None or record.get("request") != _trace_request(state, payload):
         return None
     log.warning("trace_analyze on %s not re-run: it already failed with %s", trace, record["failure"])
     return {
@@ -135,9 +134,14 @@ def _trace_input(payload: Mapping[str, Any]) -> str:
     return str(payload.get("trace_input") or payload.get("trace_dir") or "")
 
 
-def _trace_request(payload: Mapping[str, Any]) -> dict[str, Any]:
-    """What a trace analysis is asked to do besides which trace, with the budget it actually runs under."""
+def _trace_request(state: Any, payload: Mapping[str, Any]) -> dict[str, Any]:
+    """What a trace analysis is asked to do besides which trace, with the framework and budget it actually runs under.
+
+    trace_analyze falls back to the session's framework when a request names none (a kernel agent's usually does not,
+    the roofline's always does), so both resolve it the same way here.
+    """
     request = {key: payload[key] for key in _TRACE_REQUEST_FIELDS if payload.get(key) not in (None, "")}
+    request["framework"] = str(payload.get("framework") or state.framework or "")
     request["budget_minutes"] = int(payload.get("budget_minutes") or _DEFAULT_BUDGET_MINUTES)
     return request
 

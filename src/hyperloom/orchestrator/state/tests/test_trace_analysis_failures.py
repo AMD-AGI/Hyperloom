@@ -73,6 +73,20 @@ def test_a_request_that_asks_for_a_different_analysis_of_the_same_trace_runs(cha
     assert remembered_trace_failure(state, {"trace_input": TRACE, "analysis_route": "agent", **changed}) is None
 
 
+def test_a_failure_the_roofline_recorded_is_served_to_a_kernel_agent_request_for_its_trace():
+    """The roofline names its framework and a kernel agent's request does not; trace_analyze runs both under the
+    session's framework, so they are the same analysis."""
+    from hyperloom.orchestrator.actions.executors.roofline import _analysis_payload
+
+    state = _state()
+    state.framework = "sglang"
+    roofline_payload = _analysis_payload({"reason": "cycle_start"}, trace_path=TRACE, framework="sglang")
+    remember_trace_failure(state, roofline_payload, TIMEOUT_FAILURE)
+
+    assert remembered_trace_failure(state, {"trace_input": TRACE, "top_k": 10}) is not None
+    assert remembered_trace_failure(state, {"trace_input": TRACE, "framework": "vllm"}) is None
+
+
 @pytest.mark.parametrize(
     "result",
     [
