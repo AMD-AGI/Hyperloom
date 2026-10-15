@@ -20,6 +20,7 @@ from hyperloom.contracts.recipe import (
     PatchRef,
     Recipe,
     RecipeError,
+    with_unexpressed,
 )
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient
@@ -203,6 +204,18 @@ def test_a_recipe_other_than_the_one_the_notebook_recorded_is_not_written(
 
     assert (refused.status, refused.reason) == ("skipped", "recipe_digest_mismatch")
     assert written.status == "written"
+
+
+def test_a_recipe_that_leaves_part_of_the_measured_environment_out_is_not_written(
+    snapshot: NotebookSnapshot, final: FinalRecipe
+) -> None:
+    store = FakeRecipeStore(champion=_champion(1000.0))
+    incomplete = dataclasses.replace(final, recipe=with_unexpressed(final.recipe, ["patch:site-packages/vllm/x.py"]))
+
+    outcome = publish_final_recipe(RemoteRecipeClient(store), snapshot, incomplete)
+
+    assert (outcome.status, outcome.reason) == ("skipped", "incomplete_recipe")
+    assert (store.uploads, store.knowledge, store.promoted) == ({}, None, None)
 
 
 def test_the_identity_follows_the_profile_and_agentx_has_its_own_scheme() -> None:

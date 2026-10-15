@@ -23,6 +23,7 @@ from hyperloom.contracts.recipe import (
     RecipeError,
     apply,
     diff,
+    with_unexpressed,
 )
 
 IMAGE = "rocm/vllm@sha256:" + "c" * 64
@@ -266,3 +267,50 @@ def test_identical_recipes_differ_in_nothing_and_a_new_base_image_is_a_differenc
     assert diff(recipe, recipe).patch_overlap == 1.0
     assert diff(recipe, _recipe(runtime_snapshot=None)).base_image_changed
     assert diff(_recipe(components=()), _recipe(components=())).patch_overlap == 1.0
+
+
+def test_a_recipe_that_names_nothing_unexpressed_keeps_its_document_and_digest() -> None:
+    recipe = _recipe()
+
+    assert recipe.complete
+    assert "unexpressed" not in recipe.to_document()
+    assert Recipe.from_document({**recipe.to_document(), "unexpressed": []}).digest() == recipe.digest()
+
+
+def test_what_a_recipe_leaves_out_travels_in_its_document_digest_and_every_change_made_to_it() -> None:
+    recipe = with_unexpressed(_recipe(), ["setup_commands", "patch:site-packages/vllm/x.py", "setup_commands"])
+    changed = apply(recipe, RecipeDelta(config=ConfigDelta(server_args="--max-num-seqs 256")))
+
+    assert not recipe.complete
+    assert recipe.unexpressed == ("patch:site-packages/vllm/x.py", "setup_commands")
+    assert Recipe.from_document(recipe.to_document()) == recipe
+    assert recipe.digest() != _recipe().digest()
+    assert changed.unexpressed == recipe.unexpressed
+
+
+def test_a_merge_keeps_what_either_side_left_out_and_diff_names_the_difference() -> None:
+    ours = with_unexpressed(_recipe(), ["args_mode"])
+    theirs = with_unexpressed(_recipe(), ["unset_envs:HIP_FORCE"])
+
+    merged = with_unexpressed(ours, theirs.unexpressed)
+    changes = diff(_recipe(), merged)
+
+    assert merged.unexpressed == ("args_mode", "unset_envs:HIP_FORCE")
+    assert changes.unexpressed_only_in_second == {"args_mode", "unset_envs:HIP_FORCE"}
+    assert not changes.unexpressed_only_in_first and not changes.is_empty
+
+
+@pytest.mark.parametrize(
+    ("entries", "message"),
+    [
+        (("pip_install",), "kind one of"),
+        (("patch: spaced",), "kind one of"),
+        (("setup_commands", "setup_commands"), "duplicate unexpressed"),
+        (("setup_commands", "args_mode"), "sorted"),
+    ],
+)
+def test_an_unexpressed_entry_of_no_known_kind_or_out_of_order_is_refused(
+    entries: tuple[str, ...], message: str
+) -> None:
+    with pytest.raises(RecipeError, match=message):
+        _recipe(unexpressed=entries)

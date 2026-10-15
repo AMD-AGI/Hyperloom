@@ -13,6 +13,8 @@ Recipe KB columns, so a final recipe is written back without translation:
 
 ``base_image_digest`` names the image everything starts from. ``runtime_snapshot``, when set, names the image the
 enablement flow built on it, with its setup commands and component builds done, so a recipe never replays them.
+``unexpressed`` names what the measured environment had that the recipe cannot say (a kept patch outside a component
+checkout, setup commands, ...); a recipe that names anything there does not rebuild what was measured.
 
 The configuration part of a delta has the ``recipe_delta`` shape the single-lineage flow publishes, and :func:`apply`
 composes server arguments with the same functions that flow launches with.
@@ -48,6 +50,20 @@ _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 #: Framework arguments travel in the server arguments; the launcher derives these variables from them.
 _FRAMEWORK_ARGS_ENV = re.compile(r"EXTRA_\w*_ARGS")
 _FLAG = "--"
+#: What a recipe may name as left out of it; an entry is ``<kind>`` or ``<kind>:<detail>``.
+UNEXPRESSED_KINDS = frozenset(
+    {
+        "patch",
+        "setup_commands",
+        "kept_artifacts",
+        "active_runtime",
+        "environment_closure",
+        "remove_args",
+        "unset_envs",
+        "args_mode",
+    }
+)
+_UNEXPRESSED = re.compile(r"(?P<kind>[a-z_]+)(?::\S+)?")
 
 
 class RecipeError(ValueError):
@@ -139,6 +155,19 @@ def _unique(values: Sequence[object], what: str) -> None:
     duplicates = sorted({str(value) for value in values if values.count(value) > 1})
     if duplicates:
         raise RecipeError(f"duplicate {what}: {', '.join(duplicates)}")
+
+
+def _unexpressed(entries: tuple[str, ...]) -> None:
+    for entry in entries:
+        match = _UNEXPRESSED.fullmatch(entry) if isinstance(entry, str) else None
+        if match is None or match["kind"] not in UNEXPRESSED_KINDS:
+            raise RecipeError(
+                f"an unexpressed entry is <kind> or <kind>:<detail>, kind one of "
+                f"{sorted(UNEXPRESSED_KINDS)}, got {entry!r}"
+            )
+    _unique(entries, "unexpressed entries")
+    if list(entries) != sorted(entries):
+        raise RecipeError(f"unexpressed entries must be sorted, got {list(entries)}")
 
 
 def _canonical(document: Mapping[str, object]) -> str:
@@ -301,6 +330,7 @@ class Recipe:
     kernels: tuple[KernelArtifact, ...] = ()
     runtime_snapshot: str | None = None
     schema_version: int = RECIPE_SCHEMA_VERSION
+    unexpressed: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _matching(_IMAGE, self.base_image_digest, "the base image digest")
@@ -311,12 +341,19 @@ class Recipe:
         _unique([component.component for component in self.components], "component names")
         _unique([artifact.slot for artifact in self.kernels], "kernel targets")
         _unique([artifact.ref for artifact in self.kernels], "kernel artifacts")
+        _unexpressed(self.unexpressed)
+
+    @property
+    def complete(self) -> bool:
+        """Whether the recipe rebuilds everything that was measured: it names nothing as unexpressed."""
+
+        return not self.unexpressed
 
     def component(self, name: str) -> ComponentPatches | None:
         return next((component for component in self.components if component.component == name), None)
 
     def to_document(self) -> dict[str, object]:
-        return {
+        document: dict[str, object] = {
             "schema_version": self.schema_version,
             "base_image_digest": self.base_image_digest,
             "runtime_snapshot": self.runtime_snapshot,
@@ -324,6 +361,9 @@ class Recipe:
             "components": [component.to_document() for component in self.components],
             "kernels": [artifact.to_document() for artifact in self.kernels],
         }
+        if self.unexpressed:
+            document["unexpressed"] = list(self.unexpressed)
+        return document
 
     @classmethod
     def from_document(cls, document: object) -> Recipe:
@@ -335,10 +375,17 @@ class Recipe:
             launch=LaunchConfig.from_document(fields.get("launch", {})),
             components=tuple(map(ComponentPatches.from_document, _items(fields.get("components", ()), "components"))),
             kernels=tuple(map(KernelArtifact.from_document, _items(fields.get("kernels", ()), "kernels"))),
+            unexpressed=_strings(fields.get("unexpressed", ()), "unexpressed"),
         )
 
     def digest(self) -> str:
         return _digest(self.to_document())
+
+
+def with_unexpressed(recipe: Recipe, entries: Iterable[str]) -> Recipe:
+    """``recipe`` that also names ``entries`` as unexpressed; a merge passes the other side's entries."""
+
+    return replace(recipe, unexpressed=tuple(sorted({*recipe.unexpressed, *entries})))
 
 
 # --- changes -----------------------------------------------------------------------------------------------------
@@ -581,6 +628,8 @@ class RecipeDiff:
     kernels_only_in_first: frozenset[str]
     kernels_only_in_second: frozenset[str]
     base_image_changed: bool
+    unexpressed_only_in_first: frozenset[str] = frozenset()
+    unexpressed_only_in_second: frozenset[str] = frozenset()
 
     @property
     def config_conflicts(self) -> tuple[ValueChange, ...]:
@@ -604,6 +653,8 @@ class RecipeDiff:
             or self.kernels_only_in_first
             or self.kernels_only_in_second
             or self.base_image_changed
+            or self.unexpressed_only_in_first
+            or self.unexpressed_only_in_second
         )
 
 
@@ -624,6 +675,8 @@ def diff(first: Recipe, second: Recipe) -> RecipeDiff:
         kernels_only_in_second=frozenset(second_kernels - first_kernels),
         base_image_changed=(first.base_image_digest, first.runtime_snapshot)
         != (second.base_image_digest, second.runtime_snapshot),
+        unexpressed_only_in_first=frozenset(first.unexpressed) - frozenset(second.unexpressed),
+        unexpressed_only_in_second=frozenset(second.unexpressed) - frozenset(first.unexpressed),
     )
 
 
@@ -670,6 +723,7 @@ __all__ = [
     "KERNEL_ROOT",
     "PATCH_ROOT",
     "RECIPE_SCHEMA_VERSION",
+    "UNEXPRESSED_KINDS",
     "ArgsMode",
     "ComponentChange",
     "ComponentPatches",
@@ -686,4 +740,5 @@ __all__ = [
     "ValueChange",
     "apply",
     "diff",
+    "with_unexpressed",
 ]
