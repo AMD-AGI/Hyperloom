@@ -14,14 +14,16 @@ import json
 import math
 from pathlib import Path
 
+from hyperloom.common.accuracy import ACCURACY_METRICS
 from hyperloom.contracts.measurement import AccuracyValue
 
 __all__ = ["DISCARDED_DIRS", "RESULT_METRICS", "read_accuracy"]
 
 #: Directories of rounds the old flow discards; nothing below them is a result.
 DISCARDED_DIRS = frozenset({"warmup_round", "mn_warmup"})
-#: The lm-eval metric keys that are accuracy scores, in the order they are reported.
-RESULT_METRICS = ("exact_match,strict-match", "exact_match,flexible-extract", "exact_match,none", "acc,none")
+#: The lm-eval metric keys that are accuracy scores, in the order they are reported; the same tuple the rule gate and
+#: the old flow pick a score from, so the toolbox never reports a metric they would not read.
+RESULT_METRICS = ACCURACY_METRICS
 _RESULTS_GLOB = "results*.json"
 _HARNESS = "lm_eval"
 
