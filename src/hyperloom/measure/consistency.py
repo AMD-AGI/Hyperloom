@@ -65,6 +65,11 @@ __all__ = [
     "Side",
     "Summary",
     "FARM_INVENTORY_SCHEMA",
+    "Backends",
+    "build_backends",
+    "build_parser",
+    "check_repetition",
+    "items_from_arguments",
     "RootExpectation",
     "load_checklist",
     "main",
@@ -422,6 +427,11 @@ def check_item(item: ChecklistItem, root: Path, local: MeasurementBackend, hoste
     return _check_repeated(item, root, local, hosted)
 
 
+def check_repetition(item: ChecklistItem, root: Path, local: MeasurementBackend, hosted: Any, rep: int) -> ItemReport:
+    """One repetition of one test (``rep`` from 1): a local run and a hosted run, compared; the unit of a resumed check."""
+    return _check_once(item, root, local, hosted, rep)
+
+
 def _check_once(item: ChecklistItem, root: Path, local: MeasurementBackend, hosted: Any, rep: int | None) -> ItemReport:
     """One local run and one hosted run (a fresh sandbox), compared; ``rep`` (from 1) names a repetition."""
     tail = "" if rep is None else f"-rep{rep}"
@@ -708,8 +718,8 @@ def build_backends(config_path: Path) -> Backends:
     return Backends(local_cls(), hosted, close)
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="python -m hyperloom.measure.consistency", description=__doc__)
+def build_parser(prog: str = "python -m hyperloom.measure.consistency") -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog=prog, description=__doc__)
     parser.add_argument("--checklist", type=Path, required=True)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--report-dir", type=Path, default=DEFAULT_REPORT_DIR)
@@ -718,17 +728,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--repeats", type=int, default=None, help="measurements per side per test (overrides the checklist)"
     )
     parser.add_argument("--p90-pct", type=float, default=Criteria.p90_pct)
-    args = parser.parse_args(argv)
+    return parser
+
+
+def items_from_arguments(args: argparse.Namespace) -> list[ChecklistItem] | None:
+    """The checklist of the command line with ``--repeats`` applied; ``None`` (after a message) when it is unusable."""
     try:
         items = load_checklist(args.checklist)
     except (OSError, ValueError) as exc:
         print(f"checklist unusable: {exc}", file=sys.stderr)
-        return 2
+        return None
     if args.repeats is not None:
         if args.repeats < 1:
             print("--repeats must be >= 1", file=sys.stderr)
-            return 2
+            return None
         items = [dataclasses.replace(item, repeats=args.repeats) for item in items]
+    return items
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    items = items_from_arguments(args)
+    if items is None:
+        return 2
     backends = build_backends(args.config)
     try:
         summary = run_checklist(
