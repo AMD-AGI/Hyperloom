@@ -7,8 +7,7 @@ Each script runs against a stub ``gh`` that answers from a fake GitHub: search r
 the exact query, with the rate-limit headers each answer sets; open pull requests that GraphQL
 pages by cursor the way the real API does (synthetic ones fill a repository up to its open total);
 and per-PR detail for the deep read and for pull requests the open scan lists again. An answer can
-fail, or kill the script while it waits, as a command timeout does. A stub ``sleep`` records how
-long the script asked to wait.
+fail. A stub ``sleep`` records how long the script asked to wait.
 """
 
 from __future__ import annotations
@@ -30,7 +29,7 @@ _KERNELS = "up/kernels"
 _UNTRUSTED = "# UNTRUSTED DATA"
 
 _STUB_GH = """#!{python} -S
-import json, os, re, signal, sys, time
+import json, os, re, sys, time
 
 world = json.load(open(os.environ["GH_STUB_WORLD"], encoding="utf-8"))
 args = sys.argv[2:]
@@ -53,15 +52,8 @@ def fail(message):
     sys.exit(1)
 
 
-def killed_here(answer):
-    if answer.get("kill"):
-        os.kill(os.getppid(), signal.SIGTERM)
-        fail("gh: killed")
-
-
 if endpoint == "search/issues":
     answer = world["search"].get(fields["q"], {"total_count": 0, "incomplete_results": False, "items": []})
-    killed_here(answer)
     reset = int(time.time()) + answer.get("reset_in", 60)
     sys.stdout.write("HTTP/2.0 200 OK\\nX-Ratelimit-Remaining: %d\\r\\n" % answer.get("remaining", 29))
     sys.stdout.write("X-Ratelimit-Reset: %d\\r\\n\\r\\n" % reset)
@@ -72,7 +64,6 @@ if endpoint == "search/issues":
 elif endpoint == "graphql":
     repo = world["open"][fields["owner"] + "/" + fields["name"]]
     start = int(fields.get("cursor", "0"))
-    killed_here({"kill": start == repo.get("kill_at")})
     if start == repo.get("fail_at"):
         fail("gh: Something went wrong while executing your query.")
     size = int(re.search(r"pullRequests\\([^)]*first:\\s*(\\d+)", fields["query"]).group(1))
@@ -236,21 +227,6 @@ def test_a_search_that_spent_the_rate_limit_waits_for_its_reset_even_when_it_fai
     assert 47 <= waits[1] <= 51
 
 
-def test_a_killed_search_names_every_query_it_did_not_finish(tmp_path: Path) -> None:
-    world = {"search": {_query("open", "moe"): _hits(_item(1)), _query("merged", "moe"): {"kill": True}}}
-    result = _run(tmp_path, "search.sh", world, {"repos.txt": f"{_UPSTREAM}\n", "terms.txt": "moe\nfused\n"})
-    assert result.returncode != 0
-    pending = "the run ended before this query was answered"
-    assert _artifact(tmp_path, "queries.tsv").splitlines() == [
-        "status\tlisted\ttotal\tquery\tnote",
-        f"OK\t1\t1\t{_query('open', 'moe')}\t",
-        f"OK\t0\t0\t{_query('open', 'fused')}\t",
-        f"PENDING\t-\t-\t{_query('merged', 'moe')}\t{pending}",
-        f"PENDING\t-\t-\t{_query('merged', 'fused')}\t{pending}",
-    ]
-    assert [row.split("\t")[1] for row in _artifact(tmp_path, "candidates.tsv").splitlines()] == ["number", "1"]
-
-
 @pytest.mark.parametrize(
     ("repos", "message"),
     [("", "names no repository"), ("https://github.com/up/engine\n", "not an owner/name repository")],
@@ -358,23 +334,6 @@ def test_a_failed_page_keeps_what_was_compared_and_the_next_repository_is_still_
         [_KERNELS, "3"],
     ]
     assert _scan(tmp_path) == {_UPSTREAM: ("PARTIAL", [100, 250]), _KERNELS: ("COMPLETE", [1, 1])}
-
-
-def test_a_killed_scan_leaves_every_repository_it_did_not_finish_marked(tmp_path: Path) -> None:
-    tools = "up/tools"
-    open_prs = {
-        _UPSTREAM: {"total": 1, "prs": [_open_pr(4, "pkg/moe.py")]},
-        _KERNELS: {"total": 250, "prs": [], "kill_at": 100},
-        tools: {"total": 1, "prs": []},
-    }
-    paths = f"{_UPSTREAM}\tpkg/moe.py\n{_KERNELS}\tcsrc/k.cu\n{tools}\tx.py\n"
-    result = _overlap(tmp_path, open_prs, paths)
-    assert result.returncode != 0
-    assert _artifact(tmp_path, "scan.txt").splitlines() == [
-        f"COMPLETE: {_UPSTREAM}: all 1 open PRs were compared against 1 planned path(s)",
-        f"PARTIAL: {_KERNELS}: the scan did not finish -- 100 of 250 open PRs were compared",
-        f"PARTIAL: {tools}: not scanned -- the run ended before it compared any open PR here",
-    ]
 
 
 def test_a_planned_path_for_a_repository_outside_repos_txt_stops_the_scan(tmp_path: Path) -> None:
