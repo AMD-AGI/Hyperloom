@@ -110,6 +110,7 @@ _MIN_KERNEL_ENGAGED_GAIN_PCT: float = 2.0
 
 # Combined baseline-failure backstop: fast-fail after this many TOTAL baseline failures.
 _BASELINE_MAX_TOTAL_FAILURES: int = 3
+_BASELINE_FAILED_STOP_REASON = "baseline_failed"
 #: Baseline failures a retry cannot change, each mapped to the stop reason it ends the run with on its FIRST
 #: occurrence, with no streak.
 _STOPS_ON_FIRST_OCCURRENCE: dict[str, str] = {
@@ -117,7 +118,7 @@ _STOPS_ON_FIRST_OCCURRENCE: dict[str, str] = {
     ARGV_INVALID: ARGV_INVALID,
     # The server booted and measured a cold cache. The next attempt launches the same server and no framework patch
     # changes the operator's flag; ``_authorable_launch_log`` keeps it out of enablement.
-    PREFIX_CACHE_OFF_ERROR_CLASS: "baseline_failed",
+    PREFIX_CACHE_OFF_ERROR_CLASS: _BASELINE_FAILED_STOP_REASON,
 }
 # Default resume-drift floor (%): a re-measured current_best below this fraction of its recorded tput is flagged as
 # drift.
@@ -1329,7 +1330,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     result_payload,
                     retries_suppressed=bool(eval_pending_suppress or in_enablement),
                 ):
-                    self.shared_state.set_stop_reason("baseline_failed")
+                    self.shared_state.set_stop_reason(_BASELINE_FAILED_STOP_REASON)
             # Combined backstop: count ALL baseline failures so mixed
             # error_classes that split the per-class streaks still fast-fail.
             if not stopped_by_the_run:
@@ -1340,7 +1341,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 and not eval_pending_suppress
                 and not in_enablement
             ):
-                self.shared_state.set_stop_reason("baseline_failed")
+                self.shared_state.set_stop_reason(_BASELINE_FAILED_STOP_REASON)
             # One-shot eager fallback: a (non-OOM) cuda-graph capture failure is
             # often recoverable by disabling cuda-graph capture.
             if err_class == "cuda_graph_capture_failed" and not self.shared_state.baseline_eager_fallback:
