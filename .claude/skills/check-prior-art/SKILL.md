@@ -191,12 +191,12 @@ does it fix the same failure mode (G2); does it cover your operating point (G6);
 it still meets: `SURVIVES` when that is the class attacked, `DOWNGRADED <class>` when it is another,
 `DROPPED` when only `UNRELATED` is left.
 
-Attack an inclusion answer in the tree's own history (G5): `git -C "$TREE" log --oneline
--S<symbol> "$COMMIT"` for a function or constant the diff adds, and `--grep=<title words>`. A hit
-whose diff is the PR's change is a carry the probe could not match, `DROPPED` with inclusion
-`included` at that commit; with no hit it `SURVIVES` as `unknown`. A `SKIPPED: inclusion` line has
-no tree to search and stands. With nothing to refute, write `FINDING: none -- <reason>`; an empty
-file reads as a skipped step.
+Attack an inclusion answer in the tree's own history (G5): `git -C "$TREE" log --oneline -S<symbol>
+"$COMMIT"` for a function or constant the diff adds, and `--grep=<title words>`. A hit whose diff is
+the PR's change is a carry the probe could not match, `DROPPED` with inclusion `included` at that
+commit; with no hit it `SURVIVES` as `unknown`. A `SKIPPED: inclusion` line with no tree or commit
+stands (G4); a probe that could not run on one is attacked like `unknown`. With nothing to refute,
+write `FINDING: none -- <reason>`; an empty file reads as a skipped step.
 
 ## Step 7 — Report
 
